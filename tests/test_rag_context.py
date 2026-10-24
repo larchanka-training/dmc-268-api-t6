@@ -384,6 +384,7 @@ class Repository:
     read: list[str] = field(default_factory=list)
     base: dict[str, str | None] = field(default_factory=dict)
     base_unavailable: bool = False
+    head_complete: bool = True
     trees: list[str] = field(default_factory=list)
 
     def sha(self, path: str) -> str:
@@ -399,7 +400,8 @@ class Repository:
     async def tree(self, revision: str) -> RevisionTree:
         self.trees.append(revision)
         if revision == _HEAD:
-            return RevisionTree(revision, {path: self.sha(path) for path in self.files}, True)
+            head = {path: self.sha(path) for path in self.files}
+            return RevisionTree(revision, head, self.head_complete)
         assert revision == _BASE
         if self.base_unavailable:
             raise ConnectionError("provider unavailable")
@@ -416,6 +418,8 @@ class Repository:
         base = self._base_files()
         path = next(item for item in base if self.base_sha(item) == blob_sha)
         self.read.append(f"{path}@base")
+        if path in self.failing:
+            raise ConnectionError("provider unavailable")
         return base[path].encode()
 
 
@@ -541,9 +545,10 @@ def _select(
     shown: frozenset[str] = frozenset(),
     denied: Callable[[str], bool] = lambda path: False,
     store: BlobStore | None = None,
+    reader: CachedBlobSource | None = None,
 ) -> RagCandidates:
     """Select on what L4 leaves behind: the head tree and the texts and facts of the PR
-    files it loaded, which are no RAG read."""
+    files it loaded, which are no RAG read; ``reader`` is the run's blob reader."""
     blobs = store or BlobStore()
 
     async def run() -> RagCandidates:
@@ -563,7 +568,8 @@ def _select(
         go_mod = repository.files.get("go.mod")
         selector = ReverseEdgeSelector(
             retriever=graph,
-            blobs=CachedBlobSource(
+            blobs=reader
+            or CachedBlobSource(
                 repository_id=diff_map.repository_id,
                 source=repository,
                 cache=SharedBlobCache(blobs),
@@ -1367,8 +1373,8 @@ def test_an_importer_the_pr_fixes_is_no_candidate() -> None:
     assert (result.places, result.omissions, result.found) == ((), (), 0)
 
 
-def test_an_import_that_still_resolves_at_head_is_no_broken_reference() -> None:
-    # The PR turns the module into a package: the same specifier still binds `load`.
+def _package_move() -> tuple[Repository, DiffMap]:
+    """A PR that turns the module ``pkg/store.py`` into the package ``pkg/store``."""
     repository = Repository(
         {"pkg/store/__init__.py": _PY_BASE_STORE, "pkg/view.py": _PY_VIEW},
         base={"pkg/store.py": _PY_BASE_STORE, "pkg/store/__init__.py": None},
@@ -1380,12 +1386,130 @@ def test_an_import_that_still_resolves_at_head_is_no_broken_reference() -> None:
         _deletion(repository),
         _vcs_file(repository, "pkg/store/__init__.py", added, additions=6, status="added"),
     )
+    return repository, diff_map
+
+
+def test_an_import_that_still_resolves_at_head_is_no_broken_reference() -> None:
+    # The same specifier still binds `load`, now from the package.
+    repository, diff_map = _package_move()
 
     result = _select(repository, diff_map, _load_hints("pkg/view.py"))
 
     assert result.places == ()
     assert result.omissions == (RagOmission("rag_edge_unconfirmed", "pkg/view.py"),)
     assert (result.found, result.confirmed) == (1, 0)
+
+
+def test_a_head_module_that_cannot_be_read_is_no_evidence_of_a_broken_reference() -> None:
+    # The package lies under an ignored path: at head the import cannot be looked into,
+    # which shows nothing about this PR.
+    repository, diff_map = _package_move()
+
+    result = _select(
+        repository,
+        diff_map,
+        _load_hints("pkg/view.py"),
+        denied=lambda path: path.startswith("pkg/store/"),
+    )
+
+    assert result.places == ()
+    assert result.omissions == (RagOmission("rag_edge_unconfirmed", "pkg/view.py"),)
+    assert (result.found, result.confirmed) == (1, 0)
+
+
+@pytest.mark.parametrize(
+    ("case", "view", "broken"),
+    [
+        # The module is gone: an incomplete listing cannot show its absence, neither for
+        # a relative nor for an absolute import.
+        ("deleted_file", _PY_VIEW, False),
+        (
+            "deleted_file",
+            "from pkg.store import load\n\n\ndef show(key):\n    return load(key)\n",
+            False,
+        ),
+        # The module is there without the name: that needs no complete listing.
+        ("renamed_symbol", _PY_VIEW, True),
+    ],
+)
+def test_on_an_incomplete_head_tree_only_a_module_without_the_name_shows_a_break(
+    case: str, view: str, broken: bool
+) -> None:
+    repository, diff_map = _removal(case)
+    repository.files["pkg/view.py"] = view
+    repository.head_complete = False
+
+    result = _select(repository, diff_map, _load_hints("pkg/view.py"))
+
+    assert [place.source.reason for place in result.places] == (
+        ["rag_broken_reference"] if broken else []
+    )
+    assert dict(result.dropped) == ({} if broken else {"rag_edge_unconfirmed": 1})
+
+
+@pytest.mark.parametrize("reason", ["source_read_failed", "rag_limit"])
+def test_a_removed_module_whose_base_cannot_be_read_is_counted_with_its_path(
+    reason: str,
+) -> None:
+    fillers = {f"pkg/filler_{number:02d}.py": "" for number in range(20)}
+    repository = Repository(
+        {"pkg/view.py": _PY_VIEW, **fillers}, base={"pkg/store.py": _PY_BASE_STORE}
+    )
+    store = BlobStore()
+    reader = CachedBlobSource(
+        repository_id=_REPOSITORY,
+        source=repository,
+        cache=SharedBlobCache(store),
+        uow_factory=lambda: BlobCacheUow(store),
+    )
+    if reason == "source_read_failed":
+        repository.failing = frozenset({"pkg/store.py"})
+    else:
+        # The run's reader spent its reads already, as on an earlier attempt.
+
+        async def spend() -> None:
+            for path in fillers:
+                await reader.text(repository.sha(path))
+
+        asyncio.run(spend())
+    graph = _load_hints("pkg/view.py")
+
+    result = _select(repository, _diff_map(_deletion(repository)), graph, reader=reader)
+
+    # Its exports are unknown, so none is asked; the file is counted, never lost.
+    assert graph.reads == [(_REPOSITORY, ())]
+    assert result.omissions == (RagOmission(reason, "pkg/store.py"),)
+    assert (result.found, dict(result.dropped)) == (1, {reason: 1})
+
+
+def test_base_extractions_take_at_most_ten_reads_and_leave_the_rest_to_candidates() -> None:
+    kept = "def keep():\n    return 0\n"
+    removing = [f"pkg/mod_{number:02d}.py" for number in range(12)]
+    callers = [f"pkg/user_{number}.py" for number in range(9)]
+    repository = Repository(
+        {
+            "pkg/store.py": _PY_STORE,
+            **{path: kept for path in removing},
+            **{path: _PY_USER for path in callers},
+        },
+        base={path: kept + "\n\ndef gone():\n    return 1\n" for path in removing},
+    )
+    patch = "@@ -1,6 +1,2 @@\n def keep():\n     return 0\n-\n-\n-def gone():\n-    return 1"
+    diff_map = _diff_map(
+        _vcs_file(repository, "pkg/store.py", _PY_STORE_PATCH),
+        *(_vcs_file(repository, path, patch, additions=0, deletions=4) for path in removing),
+    )
+
+    result = _select(repository, diff_map, _store_hints(*callers))
+
+    # Twelve base reads would leave eight, too few for the nine callers of `save`.
+    assert len([item for item in repository.read if item.endswith("@base")]) == 10
+    assert [place.source.path for place in result.places] == callers
+    assert result.omissions == (
+        RagOmission("rag_limit", "pkg/mod_10.py"),
+        RagOmission("rag_limit", "pkg/mod_11.py"),
+    )
+    assert (result.found, result.confirmed, dict(result.dropped)) == (11, 9, {"rag_limit": 2})
 
 
 @pytest.mark.parametrize(
