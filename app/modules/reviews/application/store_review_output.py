@@ -19,12 +19,15 @@ from app.modules.reviews.application.findings_post_processor import (
 from app.modules.reviews.application.queue_messages import ReviewPublishPointer, ReviewPublishQueue
 from app.modules.reviews.application.review_output import (
     ReviewOutputRepository,
+    VerifiedReviewOutput,
     _as_json_object,
+    coerce_dropped_findings,
     parse_review_output,
 )
 from app.modules.reviews.application.run_failures import LEASE
 from app.modules.reviews.application.verdict import (
     HashedFinding,
+    SeverityThresholdValue,
     findings_hash,
     review_event,
     severity_counts,
@@ -105,7 +108,32 @@ class StoreReviewOutput:
         self,
         run_id: UUID,
         raw_output: Mapping[str, object] | str | bytes,
+        *,
+        dropped_findings: object = None,
+        severity_threshold: SeverityThresholdValue | None = None,
     ) -> bool:
+        effective_dropped_input = (
+            dropped_findings
+            if dropped_findings is not None
+            else (
+                raw_output.dropped_findings
+                if isinstance(raw_output, VerifiedReviewOutput)
+                else None
+            )
+        )
+        effective_threshold = (
+            severity_threshold
+            if severity_threshold is not None
+            else (
+                raw_output.severity_threshold
+                if isinstance(raw_output, VerifiedReviewOutput)
+                else None
+            )
+        )
+        effective_v2_rules = (
+            raw_output.allowed_v2_rules if isinstance(raw_output, VerifiedReviewOutput) else None
+        )
+        pre_dropped = coerce_dropped_findings(run_id, effective_dropped_input)
         parsed = parse_review_output(raw_output)
         answer = _as_json_object(raw_output)
         started_at = self._now()
@@ -114,14 +142,22 @@ class StoreReviewOutput:
             context = await uow.reviews.get_post_processing_input(run_id)
         if context is None:
             return False
+        threshold_to_use = (
+            effective_threshold if effective_threshold is not None else context.severity_threshold
+        )
+        v2_rules_to_use = (
+            effective_v2_rules if effective_v2_rules is not None else context.allowed_v2_rules
+        )
         processor = FindingsPostProcessor.from_default_patterns()
         processed = processor.process(
             parsed,
             hunk_lines=context.hunk_lines,
             rule_names=context.rule_names,
             repository_max_inline=context.repository_max_inline,
-            severity_threshold=context.severity_threshold,
-            allowed_v2_rules=context.allowed_v2_rules,
+            severity_threshold=threshold_to_use,
+            allowed_v2_rules=v2_rules_to_use,
+            pre_dropped=pre_dropped,
+            apply_severity_threshold=effective_threshold is None,
         )
         findings = hashed_findings(processed)
         severities = [item.severity for item in findings]
@@ -147,7 +183,7 @@ class StoreReviewOutput:
                 postprocess_request={
                     "min_confidence": processor.patterns.min_confidence,
                     "max_inline": context.repository_max_inline,
-                    "severity_threshold": context.severity_threshold,
+                    "severity_threshold": threshold_to_use,
                 },
                 postprocess_response={
                     "inline": len(processed.inline),

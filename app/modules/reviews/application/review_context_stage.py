@@ -30,6 +30,7 @@ from app.modules.reviews.application.policy_errors import PolicyError
 from app.modules.reviews.application.policy_snapshot import PolicySnapshot
 from app.modules.reviews.application.prepare_policy_snapshot import PreparePolicySnapshot
 from app.modules.reviews.application.process_run import RunVcsInput, RunVcsRepository
+from app.modules.reviews.application.prompt_budget import validate_execution_profile_versions
 from app.modules.reviews.application.review_context import (
     BuildReviewContext,
     ContextStatus,
@@ -214,6 +215,12 @@ class ReviewContextStage:
         self._denied_paths: frozenset[str] = frozenset()
         self._snapshot: PolicySnapshot | None = None
         self._matcher: IgnoreMatcher | None = None
+        self._diff_old_sha: str | None = None
+
+    @property
+    def diff_old_sha(self) -> str | None:
+        """The old-side diff revision (merge base) established for the current attempt."""
+        return self._diff_old_sha
 
     @property
     def policy_key(self) -> str | None:
@@ -263,6 +270,7 @@ class ReviewContextStage:
         request = {"policy_base_sha": run.base_sha}
         async with traced_step(self._trace, run_id, "policy.load", request) as step:
             self._snapshot = await self._prepare_policy.execute(run_id)
+            validate_execution_profile_versions(self._snapshot.execution_profile)
             step.response = policy_summary(self._snapshot)
         # The snapshot keeps validated masks; the matcher is rebuilt from them.
         self._matcher = IgnoreMatcher(
@@ -279,6 +287,7 @@ class ReviewContextStage:
         force and the review continues with the diff.
         """
         self._denied_paths = frozenset()
+        self._diff_old_sha = None
         if self._snapshot is None or self._matcher is None:
             await self.begin(run_id)
         snapshot, matcher = self._snapshot, self._matcher
@@ -315,6 +324,7 @@ class ReviewContextStage:
             repository_id=run.repository_id,
             diff_old_sha=diff_old_sha,
         )
+        self._diff_old_sha = diff_map.diff_old_sha
         ignore = apply_ignore(matcher, diff_map, builtin_excluded=self._builtin_excluded)
         # A file the service stored as binary or generated is an exclusion for every
         # consumer, also when an allowed file imports it: its names join the deny-set.

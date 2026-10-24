@@ -135,7 +135,8 @@ class GitHubRunSource:
 
     async def get_pull_request_meta(self, run_id: UUID) -> PullRequestMeta | None:
         run = await self._input()
-        meta = (await self._vcs.get_pull_request(run.locator, checkpoint=self._checkpoint)).meta
+        pull_request = await self._vcs.get_pull_request(run.locator, checkpoint=self._checkpoint)
+        meta = pull_request.meta
         try:
             prefix = await self._vcs.get_commit_messages(run.locator, checkpoint=self._checkpoint)
         except httpx.HTTPError as exc:

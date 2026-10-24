@@ -1,4 +1,4 @@
-"""The Reflection Pass verifier engine (Issue #120).
+"""The Reflection Pass verifier engine (CONTEXT_AND_VERIFICATION_SPEC §7).
 
 Performs a mandatory secondary LLM verification pass over candidate review findings
 prior to publication, as specified in CONTEXT_AND_VERIFICATION_SPEC.md §7.
@@ -6,11 +6,11 @@ prior to publication, as specified in CONTEXT_AND_VERIFICATION_SPEC.md §7.
 
 from __future__ import annotations
 
+import asyncio
 import json
-import re
 import uuid
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from hashlib import sha256
 from importlib.resources import files
 from typing import Annotated, Any, Literal, Protocol
@@ -25,11 +25,20 @@ from app.modules.reviews.application.policy_snapshot import (
     ManifestBlock,
 )
 from app.modules.reviews.application.prompt_budget import (
-    EstimatedTokenCounter,
+    TokenCounter,
+    _priority,
+    send_budget_for,
+    token_counter_for,
+    validate_execution_profile_versions,
+    verify_provenance_pre_send_guard,
 )
 from app.modules.reviews.application.prompt_builder import (
+    ChangedFile,
     PromptBuilder,
     ReviewContext,
+    ReviewRule,
+    file_block_id,
+    get_rule_check_ids,
 )
 from app.modules.reviews.application.review_output import (
     EvidenceRef,
@@ -121,16 +130,210 @@ class VerifierModel(Protocol):
     ) -> Mapping[str, Any] | str | bytes: ...
 
 
+def _fit_changed_files_for_verifier(
+    files: tuple[ChangedFile, ...],
+    rules: tuple[ReviewRule, ...],
+    max_tokens: int,
+    counter: TokenCounter,
+    candidates: tuple[CandidateFindingItem, ...] = (),
+) -> tuple[ChangedFile, ...]:
+    builder = PromptBuilder()
+    rendered = builder._render_changed_files(files, include_block_id=True)
+    if counter.count(f"<code_context>\n{rendered}\n</code_context>") <= max_tokens:
+        return files
+
+    protected_lines: dict[str, set[int]] = {}
+    for cand in candidates:
+        s = protected_lines.setdefault(cand.finding.path, set())
+        s.add(cand.finding.line)
+        if cand.finding.start_line is not None:
+            for line_num in range(cand.finding.start_line, cand.finding.line + 1):
+                s.add(line_num)
+        for ref in cand.finding.evidence_refs:
+            for f in files:
+                if file_block_id(f.path) == ref.block_id:
+                    ref_set = protected_lines.setdefault(f.path, set())
+                    for line_num in range(ref.start_line, ref.end_line + 1):
+                        ref_set.add(line_num)
+
+    order = sorted(
+        range(len(files)),
+        key=lambda idx: (
+            bool(protected_lines.get(files[idx].path)),
+            _priority(files[idx], rules),
+            files[idx].path,
+        ),
+        reverse=True,
+    )
+    kept: dict[int, ChangedFile] = {}
+
+    def fits(extra: dict[int, ChangedFile]) -> bool:
+        chosen = {**kept, **extra}
+        candidate_files = tuple(chosen[i] for i in sorted(chosen))
+        candidate_rendered = builder._render_changed_files(candidate_files, include_block_id=True)
+        return counter.count(f"<code_context>\n{candidate_rendered}\n</code_context>") <= max_tokens
+
+    for index in order:
+        file = files[index]
+        if fits({index: file}):
+            kept[index] = file
+            continue
+        lines = file.lines
+        total_lines = file.total_lines or len(file.lines)
+        file_protected = protected_lines.get(file.path, set())
+        protected_indices = [i for i, line in enumerate(lines) if line.number in file_protected]
+        unprotected_indices = [
+            i for i, line in enumerate(lines) if line.number not in file_protected
+        ]
+
+        best: ChangedFile | None = None
+        if protected_indices:
+            protected_only = ChangedFile(
+                file.path,
+                file.status,
+                tuple(lines[i] for i in protected_indices),
+                total_lines=total_lines,
+            )
+            if fits({index: protected_only}):
+                best = protected_only
+                low = 1
+                high = len(unprotected_indices)
+                while low <= high:
+                    mid = (low + high) // 2
+                    chosen_indices = sorted(protected_indices + unprotected_indices[:mid])
+                    cand_file = ChangedFile(
+                        file.path,
+                        file.status,
+                        tuple(lines[i] for i in chosen_indices),
+                        total_lines=total_lines,
+                    )
+                    if fits({index: cand_file}):
+                        best = cand_file
+                        low = mid + 1
+                    else:
+                        high = mid - 1
+            else:
+                low = 1
+                high = len(protected_indices)
+                while low <= high:
+                    mid = (low + high) // 2
+                    cand_file = ChangedFile(
+                        file.path,
+                        file.status,
+                        tuple(lines[i] for i in protected_indices[:mid]),
+                        total_lines=total_lines,
+                    )
+                    if fits({index: cand_file}):
+                        best = cand_file
+                        low = mid + 1
+                    else:
+                        high = mid - 1
+        else:
+            low = 1
+            high = len(lines)
+            while low <= high:
+                mid = (low + high) // 2
+                prefix_file = ChangedFile(
+                    file.path,
+                    file.status,
+                    lines[:mid],
+                    total_lines=total_lines,
+                )
+                if fits({index: prefix_file}):
+                    best = prefix_file
+                    low = mid + 1
+                else:
+                    high = mid - 1
+        if best is not None and best.lines:
+            kept[index] = best
+
+    return tuple(kept[i] for i in sorted(kept))
+
+
+def verify_verifier_mandatory_budget(
+    context: ReviewContext,
+    counter: TokenCounter | None = None,
+    *,
+    max_send_budget: int | None = None,
+) -> None:
+    """Ensure verifier mandatory blocks (system, rules, agents, defaults, conventions) fit budget.
+
+    CVS §4.1 :493-495: "Обязательные system/defaults/policy должны вмещаться также в verifier
+    и разрешённый fallback; иначе явная policy_prompt_budget_exceeded до первого вызова."
+    """
+    if context.policy_snapshot is None:
+        return
+    profile = context.policy_snapshot.execution_profile
+    validate_execution_profile_versions(profile)
+    budget = send_budget_for(profile, stage="verification", model_max_prompt_tokens=max_send_budget)
+
+    builder = PromptBuilder()
+    mandatory_blocks: list[str] = []
+    rules_part = builder._render_policy_rules(context.policy_snapshot)
+    agents_part = builder._render_policy_agents(context.policy_snapshot)
+    mandatory_blocks.extend([rules_part, agents_part])
+    if context.rules:
+        mandatory_blocks.append(
+            builder._render_service_defaults(
+                context.rules,
+                defaults_checksum=context.policy_snapshot.defaults_checksum,
+            )
+        )
+    if context.conventions and (
+        context.conventions.key_patterns or context.conventions.recommendations
+    ):
+        mandatory_blocks.append(builder._render_conventions(context.conventions))
+
+    bindings = context.policy_snapshot.prompt_bindings
+    version = bindings.verifier_version or "v2"
+    filename = f"review.verifier.{version}.md"
+    try:
+        raw = files("review.prompts").joinpath(filename).read_text(encoding="utf-8")
+        if raw.startswith("---"):
+            parts = raw.split("---", 2)
+            system_prompt = parts[2].strip() if len(parts) >= 3 else raw
+        else:
+            system_prompt = raw
+    except (FileNotFoundError, ModuleNotFoundError, OSError) as exc:
+        raise PolicyError(
+            PolicyErrorCode.SNAPSHOT_INTEGRITY_ERROR,
+            f"Unable to read verifier prompt resource '{filename}': {exc}",
+        ) from exc
+
+    if counter is None:
+        counter_version = profile.counter_version
+        counter = token_counter_for(counter_version)
+
+    mandatory_text = system_prompt + "\n".join(mandatory_blocks)
+    mandatory_tokens = counter.count(mandatory_text)
+
+    if mandatory_tokens > budget:
+        raise PolicyError(
+            PolicyErrorCode.PROMPT_BUDGET_EXCEEDED,
+            f"Verifier mandatory prompt is {mandatory_tokens} tokens, limit is {budget}",
+            limit=budget,
+            actual=mandatory_tokens,
+        )
+
+
 class VerifierPromptBuilder:
     """Constructs the prompt and CallManifest for the Reflection Pass verifier."""
 
-    def __init__(self, system_prompt: str | None = None) -> None:
+    def __init__(self, system_prompt: str | None = None, *, verifier_version: str = "v2") -> None:
+        self._verifier_version = verifier_version
         if system_prompt is not None:
             self._system_prompt = system_prompt
             self._raw_prompt = system_prompt
         else:
-            prompt_file = files("review.prompts").joinpath("review.verifier.v1.md")
-            raw = prompt_file.read_text(encoding="utf-8")
+            filename = f"review.verifier.{verifier_version}.md"
+            try:
+                prompt_file = files("review.prompts").joinpath(filename)
+                raw = prompt_file.read_text(encoding="utf-8")
+            except (FileNotFoundError, ModuleNotFoundError, OSError) as exc:
+                raise PolicyError(
+                    PolicyErrorCode.SNAPSHOT_INTEGRITY_ERROR,
+                    f"Unable to read verifier prompt resource '{filename}': {exc}",
+                ) from exc
             self._raw_prompt = raw
             if raw.startswith("---"):
                 parts = raw.split("---", 2)
@@ -149,7 +352,26 @@ class VerifierPromptBuilder:
 
         # Check prompt checksum if snapshot binds verifier prompt
         if context.policy_snapshot is not None:
-            expected_checksum = context.policy_snapshot.prompt_bindings.verifier_checksum
+            bindings = context.policy_snapshot.prompt_bindings
+            if bindings.verifier_version and bindings.verifier_version != self._verifier_version:
+                filename = f"review.verifier.{bindings.verifier_version}.md"
+                try:
+                    v_file = files("review.prompts").joinpath(filename)
+                    raw = v_file.read_text(encoding="utf-8")
+                except (FileNotFoundError, ModuleNotFoundError, OSError) as exc:
+                    raise PolicyError(
+                        PolicyErrorCode.SNAPSHOT_INTEGRITY_ERROR,
+                        f"Unable to read verifier prompt resource '{filename}': {exc}",
+                    ) from exc
+                self._verifier_version = bindings.verifier_version
+                self._raw_prompt = raw
+                if raw.startswith("---"):
+                    parts = raw.split("---", 2)
+                    self._system_prompt = parts[2].strip() if len(parts) >= 3 else raw
+                else:
+                    self._system_prompt = raw
+
+            expected_checksum = bindings.verifier_checksum
             actual_checksum = sha256(self._raw_prompt.encode("utf-8")).hexdigest()
             if not expected_checksum or actual_checksum != expected_checksum:
                 raise PolicyError(
@@ -159,21 +381,35 @@ class VerifierPromptBuilder:
                 )
 
         builder = PromptBuilder()
-        prompt_builder_manifest = builder.build_manifest(context, call_id=call_id, stage="verifier")
-
-        user_blocks: list[str] = []
+        counter_version = (
+            context.policy_snapshot.execution_profile.counter_version
+            if context.policy_snapshot is not None
+            else None
+        )
+        counter = token_counter_for(counter_version)
 
         # 1. Policy documents and service defaults
+        mandatory_blocks: list[str] = []
         if context.policy_snapshot is not None:
+            validate_execution_profile_versions(context.policy_snapshot.execution_profile)
             rules_part = builder._render_policy_rules(context.policy_snapshot)
             agents_part = builder._render_policy_agents(context.policy_snapshot)
-            user_blocks.extend([rules_part, agents_part])
+            mandatory_blocks.extend([rules_part, agents_part])
             if context.rules:
-                user_blocks.append(builder._render_service_defaults(context.rules))
+                mandatory_blocks.append(
+                    builder._render_service_defaults(
+                        context.rules,
+                        defaults_checksum=context.policy_snapshot.defaults_checksum,
+                    )
+                )
 
-        # 2. Code context (diff) with explicit block_id
-        code_context = builder._render_changed_files(context.changed_files, include_block_id=True)
-        user_blocks.append(f"<code_context>\n{code_context}\n</code_context>")
+        # 2. Low-trust conventions (CVS §7.1 :782)
+        conventions_rendered: str | None = None
+        if context.conventions and (
+            context.conventions.key_patterns or context.conventions.recommendations
+        ):
+            conventions_rendered = builder._render_conventions(context.conventions)
+            mandatory_blocks.append(conventions_rendered)
 
         # 3. Candidate findings
         cand_xml_list: list[str] = []
@@ -190,6 +426,15 @@ class VerifierPromptBuilder:
                 if f.rule_name is not None
                 else ""
             )
+            evidence_tag = ""
+            if f.evidence_refs:
+                refs_xml = "\n".join(
+                    f'  <ref block_id="{_attribute(ref.block_id)}" '
+                    f'start_line="{ref.start_line}" end_line="{ref.end_line}" />'
+                    for ref in f.evidence_refs
+                )
+                evidence_tag = f"<evidence_refs>\n{refs_xml}\n</evidence_refs>\n"
+
             start_attr = f'start_line="{f.start_line}" ' if f.start_line is not None else ""
             category_attr = f'category="{_attribute(f.category)}" '
             cand_xml_list.append(
@@ -203,6 +448,7 @@ class VerifierPromptBuilder:
                 f"<body>{_text(f.body)}</body>\n"
                 f"{sugg_tag}"
                 f"{rule_tag}"
+                f"{evidence_tag}"
                 f"</candidate>"
             )
             start_l = f.start_line or f.line
@@ -210,7 +456,7 @@ class VerifierPromptBuilder:
                 ManifestBlock(
                     block_id=cand.candidate_id,
                     source_role=SourceRole.CANDIDATE,
-                    source_kind="candidate_finding",
+                    source_kind="candidate_findings",
                     path=f.path,
                     start_line=start_l,
                     end_line=f.line,
@@ -224,19 +470,79 @@ class VerifierPromptBuilder:
             + "\n".join(cand_xml_list)
             + "\n</candidate_findings>"
         )
-        user_blocks.append(candidates_xml)
+        mandatory_blocks.append(candidates_xml)
+
+        # Context fitting per CVS §7.1 (:782): reserve room for IDs, candidates, and policy docs
+        mandatory_text = self._system_prompt + "\n".join(mandatory_blocks)
+        mandatory_tokens = counter.count(mandatory_text)
+
+        fitted_files = context.changed_files
+        if context.policy_snapshot is not None:
+            max_send_budget = send_budget_for(
+                context.policy_snapshot.execution_profile, stage="verification"
+            )
+            if mandatory_tokens > max_send_budget:
+                raise RunFailure(
+                    "verification_context_overflow",
+                    f"Verifier mandatory prompt is {mandatory_tokens} tokens, "
+                    f"limit is {max_send_budget}",
+                )
+            code_budget = max_send_budget - mandatory_tokens
+            if code_budget <= 0:
+                raise RunFailure(
+                    "verification_context_overflow",
+                    f"Verifier prompt is {mandatory_tokens} tokens, limit is {max_send_budget}",
+                )
+            fitted_files = _fit_changed_files_for_verifier(
+                context.changed_files,
+                context.rules,
+                code_budget,
+                counter,
+                candidates=candidates,
+            )
+
+        # 4. Code context (diff) with explicit block_id
+        code_context = builder._render_changed_files(fitted_files, include_block_id=True)
+        user_blocks = [
+            *mandatory_blocks[:-1],
+            f"<code_context>\n{code_context}\n</code_context>",
+            candidates_xml,
+        ]
 
         user_message = "\n".join(user_blocks)
         prompt = VerifierPrompt(system=self._system_prompt, user=user_message)
 
-        all_blocks = prompt_builder_manifest.blocks + tuple(candidate_blocks)
+        fitted_context = replace(context, changed_files=fitted_files)
+        prompt_builder_manifest = builder.build_manifest(
+            fitted_context, call_id=call_id, stage="verification"
+        )
+        conventions_blocks: list[ManifestBlock] = []
+        if conventions_rendered is not None:
+            conv_lines = len(conventions_rendered.splitlines()) or 1
+            conventions_blocks.append(
+                ManifestBlock(
+                    block_id="repo-conventions",
+                    source_role=SourceRole.CONVENTIONS,
+                    source_kind="generated_conventions",
+                    start_line=1,
+                    end_line=conv_lines,
+                    shown_line_count=conv_lines,
+                    shown_ranges=((1, conv_lines),),
+                )
+            )
+        all_blocks = (
+            prompt_builder_manifest.blocks + tuple(conventions_blocks) + tuple(candidate_blocks)
+        )
         verifier_manifest = CallManifest(
             call_id=call_id,
             run_id=prompt_builder_manifest.run_id,
-            stage="verifier",
+            stage="verification",
+            recovery_kind="none",
             blocks=all_blocks,
         )
         return prompt, verifier_manifest
+
+    # Pre-send guard on verifier prompt tokens is performed in ReflectionPass.verify.
 
 
 class ReflectionPass:
@@ -260,20 +566,26 @@ class ReflectionPass:
         if not candidates:
             return ()
 
-        prompt, manifest = self._prompt_builder.build_verifier_prompt(
-            candidates=candidates, context=context
+        prompt, manifest = await asyncio.to_thread(
+            self._prompt_builder.build_verifier_prompt,
+            candidates=candidates,
+            context=context,
         )
 
         # Pre-send guard on verifier prompt tokens
         if context.policy_snapshot is not None:
-            counter = EstimatedTokenCounter()
+            profile = context.policy_snapshot.execution_profile
+            counter = token_counter_for(profile.counter_version)
             total_tokens = counter.count(prompt.system) + counter.count(prompt.user)
-            max_input = context.policy_snapshot.execution_profile.max_input_tokens
-            if total_tokens > max_input:
+            max_send_budget = send_budget_for(profile, stage="verification")
+            if total_tokens > max_send_budget:
                 raise RunFailure(
                     "verification_context_overflow",
-                    f"Verifier prompt is {total_tokens} tokens, limit is {max_input}",
+                    f"Verifier prompt is {total_tokens} tokens, limit is {max_send_budget}",
                 )
+            verify_provenance_pre_send_guard(
+                manifest, context=context, snapshot=context.policy_snapshot
+            )
 
         try:
             raw_output = await self._model.verify(
@@ -333,20 +645,25 @@ class ReflectionPass:
                 f"expected {len(candidates)}"
             )
 
-        # Build check lines mapping for service defaults: (rule_id/slug, check_id) -> line_number
-        service_defaults_check_lines: dict[tuple[str, str], int] = {}
-        all_check_lines: dict[str, set[int]] = {}
+        # Build check lines mapping for service defaults:
+        # shown stable check_id -> line_number
+        service_defaults_check_lines: dict[str, int] = {}
         line_offset = 1
         if context.rules:
+            defaults_checksum = (
+                context.policy_snapshot.defaults_checksum
+                if context.policy_snapshot is not None
+                else None
+            )
             for r in context.rules:
-                r_slug = re.sub(r"[^a-zA-Z0-9_\-]+", "-", r.name).strip("-")
-                for idx in range(1, len(r.checks) + 1):
-                    c_id = str(idx)
-                    service_defaults_check_lines[(r.name, c_id)] = line_offset
-                    if r_slug:
-                        service_defaults_check_lines.setdefault((r_slug.lower(), c_id), line_offset)
-                        service_defaults_check_lines[(r_slug, c_id)] = line_offset
-                    all_check_lines.setdefault(c_id, set()).add(line_offset)
+                check_ids = get_rule_check_ids(r, defaults_checksum=defaults_checksum)
+                for c_id in check_ids:
+                    if c_id in service_defaults_check_lines:
+                        raise PolicyError(
+                            PolicyErrorCode.SNAPSHOT_INTEGRITY_ERROR,
+                            f"Duplicate service defaults check ID {c_id!r}",
+                        )
+                    service_defaults_check_lines[c_id] = line_offset
                     line_offset += 1
 
         # Validate evidence and requirement references against manifest
@@ -363,16 +680,32 @@ class ReflectionPass:
                         f"Decision {cand_id_clean} evidence_ref {block_id_clean} "
                         "not found in manifest"
                     )
-                if block.source_role not in {"diff", "source_excerpt", "ast_excerpt"}:
+                if block.source_role not in {
+                    "diff",
+                    "source_excerpt",
+                    "ast_excerpt",
+                    "retrieved_excerpt",
+                }:
                     raise VerificationInvalidOutputError(
                         f"Decision {cand_id_clean} evidence_ref {block_id_clean} "
                         f"has non-code role '{block.source_role}'"
                     )
-                if block.source_role == "diff" and block.path != cand.finding.path:
-                    raise VerificationInvalidOutputError(
-                        f"Decision {cand_id_clean} evidence_ref {block_id_clean} "
-                        f"path '{block.path}' does not match candidate path '{cand.finding.path}'"
-                    )
+                if block.revision is not None and context.pr_meta is not None:
+                    if block.side == "LEFT":
+                        expected_rev = context.pr_meta.diff_old_sha
+                        if not expected_rev or block.revision != expected_rev:
+                            raise VerificationInvalidOutputError(
+                                f"Decision {cand_id_clean} evidence_ref {block_id_clean} "
+                                f"LEFT revision '{block.revision}' does not match "
+                                f"PR diff_old_sha '{expected_rev}'"
+                            )
+                    else:
+                        expected_rev = context.pr_meta.head_sha
+                        if expected_rev is not None and block.revision != expected_rev:
+                            raise VerificationInvalidOutputError(
+                                f"Decision {cand_id_clean} evidence_ref {block_id_clean} "
+                                f"revision '{block.revision}' does not match PR revision"
+                            )
                 if not manifest.is_range_shown(ref.block_id, ref.start_line, ref.end_line):
                     raise VerificationInvalidOutputError(
                         f"Decision {cand_id_clean} evidence_ref {block_id_clean}:"
@@ -411,8 +744,10 @@ class ReflectionPass:
                         "service-defaults:"
                     ):
                         rule_id = cand.finding.rule_name.removeprefix("service-defaults:")
-                        expected_line = service_defaults_check_lines.get(
-                            (rule_id, req_ref.check_id)
+                        expected_line = (
+                            service_defaults_check_lines.get(rule_id)
+                            if req_ref.check_id == rule_id
+                            else None
                         )
                         if expected_line is None:
                             raise VerificationInvalidOutputError(
@@ -426,20 +761,17 @@ class ReflectionPass:
                                 f"'{req_check_id_clean}' line {expected_line}"
                             )
                     else:
-                        matching_lines = all_check_lines.get(req_ref.check_id)
-                        if not matching_lines:
+                        expected_line = service_defaults_check_lines.get(req_ref.check_id)
+                        if expected_line is None:
                             raise VerificationInvalidOutputError(
                                 f"Decision {cand_id_clean} check_id '{req_check_id_clean}' "
                                 "does not match any service defaults rule"
                             )
-                        if not any(
-                            req_ref.start_line <= line <= req_ref.end_line
-                            for line in matching_lines
-                        ):
+                        if not (req_ref.start_line <= expected_line <= req_ref.end_line):
                             raise VerificationInvalidOutputError(
                                 f"Decision {cand_id_clean} requirement_ref range "
                                 f"{req_ref.start_line}-{req_ref.end_line} does not cover check "
-                                f"'{req_check_id_clean}'"
+                                f"'{req_check_id_clean}' line {expected_line}"
                             )
                 else:
                     if req_ref.check_id is not None:

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass
 from importlib.resources import files
 from typing import Literal
@@ -11,6 +12,7 @@ from typing import Literal
 from app.modules.reviews.application.review_output import (
     _SERVICE_DEFAULTS_ID_RE,
     ReviewFinding,
+    ReviewFindingV2,
     ReviewOutput,
     finding_order_key,
     render_review_body,
@@ -23,7 +25,22 @@ from app.modules.reviews.application.verdict import (
     verdict,
 )
 
-DropReason = Literal["lint_pattern", "duplicate", "severity_threshold", "unknown_path"]
+DropReason = (
+    Literal[
+        "lint_pattern",
+        "duplicate",
+        "severity_threshold",
+        "unknown_path",
+        "line_absent",
+        "anchor_not_visible",
+        "evidence_not_shown",
+        "evidence_source_disallowed",
+        "revision_mismatch",
+        "insufficient_context",
+        "contradicted",
+    ]
+    | str
+)
 Bucket = Literal["inline", "body_only", "dropped"]
 
 _ATTRIBUTION_PREFIX = "According to custom instructions in '"
@@ -55,7 +72,7 @@ class LintFilterPatterns:
 class ProcessedFinding:
     """One model finding and its exactly-one publication bucket."""
 
-    finding: ReviewFinding
+    finding: ReviewFinding | ReviewFindingV2
     position: int
     bucket: Bucket
     drop_reason: DropReason | None = None
@@ -101,6 +118,8 @@ class FindingsPostProcessor:
         repository_max_inline: int | None = None,
         severity_threshold: SeverityThresholdValue = "all",
         allowed_v2_rules: frozenset[str] | None = None,
+        pre_dropped: Sequence[ProcessedFinding] = (),
+        apply_severity_threshold: bool = True,
     ) -> ProcessedReviewOutput:
         """Classify every finding once in the documented stage order.
 
@@ -117,14 +136,15 @@ class FindingsPostProcessor:
             ProcessedFinding(item, position, "inline")
             for position, item in enumerate(output.findings)
         ]
-        dropped: list[ProcessedFinding] = []
+        dropped: list[ProcessedFinding] = list(pre_dropped)
 
         candidates, lint_dropped = self._drop_lint_patterns(candidates)
         dropped.extend(lint_dropped)
         candidates, duplicate_dropped = self._deduplicate(candidates)
         dropped.extend(duplicate_dropped)
-        candidates, below_threshold = self._drop_below_threshold(candidates, severity_threshold)
-        dropped.extend(below_threshold)
+        if apply_severity_threshold:
+            candidates, below_threshold = self._drop_below_threshold(candidates, severity_threshold)
+            dropped.extend(below_threshold)
 
         prepared: list[ProcessedFinding] = []
         for item in candidates:
@@ -165,6 +185,9 @@ class FindingsPostProcessor:
         inline = [item for item in inline if item.bucket == "inline"]
         body_only.extend(moved_to_body)
         dropped.sort(key=lambda item: item.position)
+        total_below_threshold = sum(
+            1 for item in dropped if item.drop_reason == "severity_threshold"
+        )
         return ProcessedReviewOutput(
             inline=tuple(inline),
             body_only=tuple(body_only),
@@ -175,7 +198,7 @@ class FindingsPostProcessor:
                 tuple(body_only),
                 hunk_lines,
                 severity_threshold,
-                len(below_threshold),
+                total_below_threshold,
             ),
         )
 

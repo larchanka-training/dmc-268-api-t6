@@ -2,7 +2,7 @@
 
 Shape of RULES_FORMAT_SPEC §7.1 and §7.4. This module is the contract only: loading,
 validation and storage arrive with the loader. ``PromptBindings`` and
-``ExecutionProfile`` are the part of the contract defined by the LLM pipeline (#120);
+``ExecutionProfile`` are defined by the LLM pipeline and verification spec;
 they live here so that the snapshot has one description.
 """
 
@@ -24,7 +24,8 @@ AGENTS_DOCUMENT_PATH = "AGENTS.md"
 
 _EMPTY_SHA256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
 
-type StageName = Literal["conventions", "review", "verifier", "repair", "fallback"]
+type StageName = Literal["conventions", "review", "verification"]
+type RecoveryKind = Literal["none", "retry", "repair", "fallback"]
 
 
 class DocumentPresence(StrEnum):
@@ -79,16 +80,19 @@ def make_policy_document_present(
     blob_oid: str = "d" * 40,
 ) -> PolicyDocument:
     """Create a present PolicyDocument with auto-calculated checksums and counts."""
-    digest = sha256(text.encode("utf-8")).hexdigest()
-    line_count = text.count("\n") + (1 if text and not text.endswith("\n") else 0)
+    raw_bytes = text.encode("utf-8")
+    raw_digest = sha256(raw_bytes).hexdigest()
+    normalized = text.replace("\r\n", "\n").replace("\r", "\n")
+    text_digest = sha256(normalized.encode("utf-8")).hexdigest()
+    line_count = normalized.count("\n") + (1 if normalized and not normalized.endswith("\n") else 0)
     return PolicyDocument(
         path=path,
         presence=DocumentPresence.PRESENT,
         blob_oid=blob_oid,
-        raw_sha256=digest,
-        text_sha256=digest,
-        text=text,
-        byte_count=len(text.encode("utf-8")),
+        raw_sha256=raw_digest,
+        text_sha256=text_digest,
+        text=normalized,
+        byte_count=len(raw_bytes),
         line_count=line_count,
     )
 
@@ -138,7 +142,7 @@ class PromptBindings:
     conventions_key: str = "review.conventions"
     conventions_version: str = "v2"
     verifier_key: str = "review.verifier"
-    verifier_version: str = "v1"
+    verifier_version: str = "v2"
     review_system_id: UUID | None = None
     conventions_id: UUID | None = None
     verifier_id: UUID | None = None
@@ -225,6 +229,7 @@ PINNED_PROMPT_CHECKSUMS: dict[str, str] = {
     "review.system:v2": "9177e358c23d1a7cd8987cbf667cf8b705c2afb27eaf8b2237480e4531431d75",
     "review.conventions:v2": "225a8f7d56835cf1307ddb25feac602c3d10e03c34ee51afc90a1f99af101454",
     "review.verifier:v1": "e00128b211ca64c9a2dd2bb902ade9abf4a29f30c7ec9066501dc7694ddc5940",
+    "review.verifier:v2": "1f676b4fea8477d77b83a106a6c62e78f67d19f71937d4a02093d11a9d276088",
 }
 
 _DEFAULT_REVIEW_SYSTEM_ID = UUID("00000000-0000-0000-0000-000000000001")
@@ -239,7 +244,7 @@ def make_complete_prompt_bindings(
     verifier_id: UUID = _DEFAULT_VERIFIER_ID,
     review_system_checksum: str = PINNED_PROMPT_CHECKSUMS["review.system:v2"],
     conventions_checksum: str = PINNED_PROMPT_CHECKSUMS["review.conventions:v2"],
-    verifier_checksum: str = PINNED_PROMPT_CHECKSUMS["review.verifier:v1"],
+    verifier_checksum: str = PINNED_PROMPT_CHECKSUMS["review.verifier:v2"],
 ) -> PromptBindings:
     """Create complete PromptBindings with pinned IDs and checksums."""
     return PromptBindings(
@@ -261,7 +266,7 @@ def make_complete_execution_profile(
     primary_provider_route: str = "primary",
     fallback_provider_route: str | None = None,
     tokenizer_version: str = "tokenizer/v1",
-    counter_version: str = "counter/v1",
+    counter_version: str = "counter/v2",
     temperature: str = "0.0",
     response_schema_version: str = "review-output/v2",
     recovery_profile_version: str = "recovery/v1",
@@ -348,6 +353,7 @@ class ManifestBlock:
     source_kind: str
     path: str | None = None
     revision: str | None = None
+    side: Literal["LEFT", "RIGHT"] | None = None
     content_sha256: str | None = None
     start_line: int | None = None
     end_line: int | None = None
@@ -365,6 +371,7 @@ class CallManifest:
     call_id: UUID
     stage: StageName
     blocks: tuple[ManifestBlock, ...]
+    recovery_kind: RecoveryKind = "none"
     run_id: UUID | None = None
 
     def get_block(self, block_id: str) -> ManifestBlock | None:

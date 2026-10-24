@@ -18,8 +18,10 @@ from app.modules.reviews.application.policy_snapshot import (
     make_policy_document_present,
 )
 from app.modules.reviews.application.prompt_builder import (
+    DEFAULT_BACKEND_V1_CHECKSUM,
     ChangedFile,
     DiffLine,
+    PromptBuilder,
     PullRequestMeta,
     RepoConventions,
     ReviewContext,
@@ -71,7 +73,7 @@ def make_snapshot() -> PolicySnapshot:
         builtin_exclusions_version="builtin-exclusions/v1",
         priority_matcher_version="priority-matcher/v1",
         service_defaults_rule_version_id=uuid.uuid4(),
-        defaults_checksum="defaults_0",
+        defaults_checksum=DEFAULT_BACKEND_V1_CHECKSUM,
         prompt_bindings=make_complete_prompt_bindings(),
         execution_profile=make_complete_execution_profile(),
         policy_digest="digest_123",
@@ -205,9 +207,14 @@ def test_verifier_prompt_builder_renders_candidates_and_policy() -> None:
     assert "<repository_rules" in prompt.user
     assert "<code_context>" in prompt.user
     assert manifest.call_id == call_id
-    assert manifest.stage == "verifier"
+    assert manifest.stage == "verification"
     assert manifest.get_block("policy-rules") is not None
-    assert manifest.get_block(file_block_id("app/query.py")) is not None
+    diff_block = manifest.get_block(file_block_id("app/query.py"))
+    assert diff_block is not None
+    assert diff_block.source_kind == "source_code"
+    cand_block = manifest.get_block("cand-1")
+    assert cand_block is not None
+    assert cand_block.source_kind == "candidate_findings"
 
 
 @pytest.mark.anyio
@@ -438,8 +445,8 @@ async def test_reflection_pass_rejects_duplicate_candidate_decisions() -> None:
 
 
 @pytest.mark.anyio
-async def test_reflection_pass_rejects_evidence_with_mismatched_path() -> None:
-    cand1 = make_candidate("c-1", path="app/query.py")
+async def test_reflection_pass_allows_evidence_from_other_diff_file() -> None:
+    cand1 = make_candidate("c-1", path="app/query.py", rule_name=None)
     other_block_id = file_block_id("app/other.py")
 
     fake_response = {
@@ -462,7 +469,9 @@ async def test_reflection_pass_rejects_evidence_with_mismatched_path() -> None:
         rules=(),
         agents_md=None,
         conventions=RepoConventions((), ()),
-        pr_meta=PullRequestMeta("T", None, "u", "b", "main", (), 2, 2, 0, False, False),
+        pr_meta=PullRequestMeta(
+            "T", None, "u", "b", "main", (), 2, 2, 0, False, False, head_sha="head_123"
+        ),
         changed_files=(
             ChangedFile("app/query.py", "modified", (DiffLine(10, "added", "x = 1"),)),
             ChangedFile("app/other.py", "modified", (DiffLine(5, "added", "y = 2"),)),
@@ -471,20 +480,32 @@ async def test_reflection_pass_rejects_evidence_with_mismatched_path() -> None:
         policy_snapshot=snapshot,
     )
 
-    with pytest.raises(VerificationInvalidOutputError, match="does not match candidate path"):
-        await verifier.verify(candidates=(cand1,), context=context)
+    decisions = await verifier.verify(candidates=(cand1,), context=context)
+    assert len(decisions) == 1
+    assert decisions[0].status == "supported"
+    assert decisions[0].evidence_refs[0].block_id == other_block_id
 
 
 @pytest.mark.anyio
 async def test_reflection_pass_validates_service_defaults_check_id() -> None:
     from app.modules.reviews.application.prompt_builder import ReviewRule
 
-    cand1 = make_candidate("c-1", path="app/query.py", rule_name="service-defaults:rule-1")
+    cand1 = make_candidate("c-1", path="app/query.py", rule_name="service-defaults:N1")
     query_block_id = file_block_id("app/query.py")
 
     rules = (
-        ReviewRule(name="rule-1", include=(), exclude=(), checks=("Check 1",)),
-        ReviewRule(name="rule-2", include=(), exclude=(), checks=("Check 2",)),
+        ReviewRule(
+            name="Naming Consistency",
+            include=(),
+            exclude=(),
+            checks=("Check 1", "Check 2", "Check 3", "Check 4"),
+        ),
+        ReviewRule(
+            name="Error Handling Standards",
+            include=(),
+            exclude=(),
+            checks=("Err 1", "Err 2", "Err 3", "Err 4"),
+        ),
     )
     snapshot = make_snapshot()
     context = ReviewContext(
@@ -519,12 +540,11 @@ async def test_reflection_pass_validates_service_defaults_check_id() -> None:
     }
     verifier_bad = ReflectionPass(FakeVerifierModel(bad_id_response))
     with pytest.raises(
-        VerificationInvalidOutputError, match="does not match service defaults rule 'rule-1'"
+        VerificationInvalidOutputError, match="does not match service defaults rule 'N1'"
     ):
         await verifier_bad.verify(candidates=(cand1,), context=context)
 
-    # 2. check_id exists in rules ("2" in rule-2), but candidate rule_id is "rule-1"
-    # which has only check "1"
+    # 2. check_id exists in rules ("E1" in Error Handling), but candidate rule_id is "N1"
     mismatched_id_response = {
         "decisions": [
             {
@@ -535,9 +555,9 @@ async def test_reflection_pass_validates_service_defaults_check_id() -> None:
                 "requirement_refs": [
                     {
                         "block_id": "service-defaults",
-                        "start_line": 1,
-                        "end_line": 1,
-                        "check_id": "2",
+                        "start_line": 5,
+                        "end_line": 5,
+                        "check_id": "E1",
                     }
                 ],
             }
@@ -545,13 +565,13 @@ async def test_reflection_pass_validates_service_defaults_check_id() -> None:
     }
     verifier_mismatch = ReflectionPass(FakeVerifierModel(mismatched_id_response))
     with pytest.raises(
-        VerificationInvalidOutputError, match="does not match service defaults rule 'rule-1'"
+        VerificationInvalidOutputError, match="does not match service defaults rule 'N1'"
     ):
         await verifier_mismatch.verify(candidates=(cand1,), context=context)
 
-    # 3. Line offset mismatch: candidate is rule-2, check is "1" (line 2),
-    # but range 1-1 covers line 1 (rule-1)
-    cand2 = make_candidate("c-2", path="app/query.py", rule_name="service-defaults:rule-2")
+    # 3. Line offset mismatch: candidate is E1 (line 5),
+    # but range 1-1 covers line 1 (N1)
+    cand2 = make_candidate("c-2", path="app/query.py", rule_name="service-defaults:E1")
     mismatched_line_response = {
         "decisions": [
             {
@@ -564,17 +584,17 @@ async def test_reflection_pass_validates_service_defaults_check_id() -> None:
                         "block_id": "service-defaults",
                         "start_line": 1,
                         "end_line": 1,
-                        "check_id": "1",
+                        "check_id": "E1",
                     }
                 ],
             }
         ]
     }
     verifier_line_mismatch = ReflectionPass(FakeVerifierModel(mismatched_line_response))
-    with pytest.raises(VerificationInvalidOutputError, match="does not cover check '1' line 2"):
+    with pytest.raises(VerificationInvalidOutputError, match="does not cover check 'E1' line 5"):
         await verifier_line_mismatch.verify(candidates=(cand2,), context=context)
 
-    # 3b. Lower bound range mismatch: check is at line 1, but range is 2-2
+    # 3b. Lower bound range mismatch: check N1 is at line 1, but range is 2-2
     mismatched_lower_bound_response = {
         "decisions": [
             {
@@ -587,14 +607,14 @@ async def test_reflection_pass_validates_service_defaults_check_id() -> None:
                         "block_id": "service-defaults",
                         "start_line": 2,
                         "end_line": 2,
-                        "check_id": "1",
+                        "check_id": "N1",
                     }
                 ],
             }
         ]
     }
     verifier_lower_mismatch = ReflectionPass(FakeVerifierModel(mismatched_lower_bound_response))
-    with pytest.raises(VerificationInvalidOutputError, match="does not cover check '1' line 1"):
+    with pytest.raises(VerificationInvalidOutputError, match="does not cover check 'N1' line 1"):
         await verifier_lower_mismatch.verify(candidates=(cand1,), context=context)
 
     # 4. Positive case: check_id matches candidate rule_id and covers line offset
@@ -610,7 +630,7 @@ async def test_reflection_pass_validates_service_defaults_check_id() -> None:
                         "block_id": "service-defaults",
                         "start_line": 1,
                         "end_line": 1,
-                        "check_id": "1",
+                        "check_id": "N1",
                     }
                 ],
             }
@@ -698,8 +718,8 @@ async def test_reflection_pass_unexpected_output_type() -> None:
 async def test_reflection_pass_verification_context_overflow() -> None:
     from dataclasses import replace
 
-    # Profile with tiny max_input_tokens = 5
-    tiny_profile = replace(make_complete_execution_profile(), max_input_tokens=5)
+    # Profile with tiny send budget = 5 (max_input_tokens=8005 minus 8000 output reserve)
+    tiny_profile = replace(make_complete_execution_profile(), max_input_tokens=8005)
     cand = make_candidate("c-1")
     snapshot = make_snapshot()
     snapshot_tiny = PolicySnapshot(
@@ -1037,7 +1057,12 @@ def test_verifier_prompt_envelope_contains_block_id_and_defaults_and_candidate_a
         ),
     )
     snapshot = make_snapshot()
-    rule = ReviewRule("sec-rule", ("*.py",), (), ("Never format SQL",))
+    rule = ReviewRule(
+        "Naming Consistency",
+        ("*.py",),
+        (),
+        ("Never format SQL", "Check 2", "Check 3", "Check 4"),
+    )
     context = ReviewContext(
         system="SYSTEM",
         rules=(rule,),
@@ -1073,10 +1098,10 @@ def test_verifier_prompt_envelope_contains_block_id_and_defaults_and_candidate_a
 @pytest.mark.anyio
 async def test_reflection_pass_guard_rejects_prompt_exceeding_token_limit() -> None:
     cand = make_candidate("c-1")
-    # execution_profile with very low max_input_tokens
+    # execution_profile with very low send budget = 10 (max_input_tokens=8010 minus 8000 reserve)
     import dataclasses
 
-    profile = dataclasses.replace(make_complete_execution_profile(), max_input_tokens=10)
+    profile = dataclasses.replace(make_complete_execution_profile(), max_input_tokens=8010)
     snapshot = dataclasses.replace(make_snapshot(), execution_profile=profile)
     context = ReviewContext(
         system="SYSTEM",
@@ -1129,7 +1154,7 @@ async def test_reflection_pass_maps_foreign_exception_error_codes() -> None:
 @pytest.mark.anyio
 async def test_reflection_pass_requirement_ref_validation_details() -> None:
     query_block_id = file_block_id("app/query.py")
-    rule = ReviewRule("service-rule", ("*.py",), (), ("Check sql",))
+    rule = ReviewRule("Naming Consistency", ("*.py",), (), ("Check sql", "c2", "c3", "c4"))
     snapshot = make_snapshot()
     context = ReviewContext(
         system="SYSTEM",
@@ -1155,7 +1180,7 @@ async def test_reflection_pass_requirement_ref_validation_details() -> None:
             body="B",
             suggestion=None,
             confidence=0.9,
-            rule_name="service-defaults:service-rule",
+            rule_name="service-defaults:N1",
             evidence_refs=[EvidenceRef(block_id=query_block_id, start_line=10, end_line=10)],
         ),
     )
@@ -1221,7 +1246,7 @@ async def test_reflection_pass_requirement_ref_validation_details() -> None:
                                 "block_id": "service-defaults",
                                 "start_line": 1,
                                 "end_line": 1,
-                                "check_id": "1",
+                                "check_id": "N1",
                             }
                         ],
                     }
@@ -1287,7 +1312,7 @@ async def test_reflection_pass_requirement_ref_validation_details() -> None:
     ):
         await v3_missing_agents.verify(candidates=(cand_agents,), context=context_agents)
 
-    # 4. Candidate with rule_name="service-defaults:service-rule"
+    # 4. Candidate with rule_name="service-defaults:N1"
     # without service-defaults ref is rejected
     cand_defaults = CandidateFindingItem(
         candidate_id="c-4",
@@ -1301,7 +1326,7 @@ async def test_reflection_pass_requirement_ref_validation_details() -> None:
             body="B",
             suggestion=None,
             confidence=0.9,
-            rule_name="service-defaults:service-rule",
+            rule_name="service-defaults:N1",
             evidence_refs=[EvidenceRef(block_id=query_block_id, start_line=10, end_line=10)],
         ),
     )
@@ -1358,7 +1383,7 @@ async def test_reflection_pass_requirement_ref_validation_details() -> None:
                                 "block_id": "service-defaults",
                                 "start_line": 1,
                                 "end_line": 1,
-                                "check_id": "1",
+                                "check_id": "N1",
                             },
                         ],
                     }
@@ -1403,7 +1428,7 @@ async def test_reflection_pass_requirement_ref_validation_details() -> None:
 @pytest.mark.anyio
 async def test_reflection_pass_service_defaults_slug_matching_for_real_rule_names() -> None:
     query_block_id = file_block_id("app/query.py")
-    rule = ReviewRule("Naming Consistency", ("*.py",), (), ("Check snake_case",))
+    rule = ReviewRule("Naming Consistency", ("*.py",), (), ("Check snake_case", "c2", "c3", "c4"))
     snapshot = make_snapshot()
     context = ReviewContext(
         system="SYSTEM",
@@ -1416,7 +1441,47 @@ async def test_reflection_pass_service_defaults_slug_matching_for_real_rule_name
         policy_snapshot=snapshot,
     )
 
-    # Candidate uses slug "naming-consistency" for rule named "Naming Consistency"
+    # 1. Stable check ID "N1" is accepted
+    cand_stable = CandidateFindingItem(
+        candidate_id="c-stable",
+        finding=ReviewFindingV2(
+            path="app/query.py",
+            line=10,
+            start_line=None,
+            severity="medium",
+            category="readability",
+            title="Naming violation",
+            body="Variable must be snake_case",
+            suggestion=None,
+            confidence=0.9,
+            rule_name="service-defaults:N1",
+            evidence_refs=[EvidenceRef(block_id=query_block_id, start_line=10, end_line=10)],
+        ),
+    )
+    response = {
+        "decisions": [
+            {
+                "candidate_id": "c-stable",
+                "status": "supported",
+                "reason": "Variable name violates Naming Consistency rule.",
+                "evidence_refs": [{"block_id": query_block_id, "start_line": 10, "end_line": 10}],
+                "requirement_refs": [
+                    {
+                        "block_id": "service-defaults",
+                        "start_line": 1,
+                        "end_line": 1,
+                        "check_id": "N1",
+                    }
+                ],
+            }
+        ]
+    }
+    verifier = ReflectionPass(FakeVerifierModel(response))
+    decisions = await verifier.verify(candidates=(cand_stable,), context=context)
+    assert len(decisions) == 1
+    assert decisions[0].status == "supported"
+
+    # 2. Unshown lowercase rule slug "naming-consistency" is rejected
     cand_slug = CandidateFindingItem(
         candidate_id="c-slug",
         finding=ReviewFindingV2(
@@ -1433,34 +1498,39 @@ async def test_reflection_pass_service_defaults_slug_matching_for_real_rule_name
             evidence_refs=[EvidenceRef(block_id=query_block_id, start_line=10, end_line=10)],
         ),
     )
-    response = {
+    response_slug = {
         "decisions": [
             {
                 "candidate_id": "c-slug",
                 "status": "supported",
-                "reason": "Variable name violates Naming Consistency rule.",
+                "reason": "Slug attempt",
                 "evidence_refs": [{"block_id": query_block_id, "start_line": 10, "end_line": 10}],
                 "requirement_refs": [
                     {
                         "block_id": "service-defaults",
                         "start_line": 1,
                         "end_line": 1,
-                        "check_id": "1",
+                        "check_id": "N1",
                     }
                 ],
             }
         ]
     }
-    verifier = ReflectionPass(FakeVerifierModel(response))
-    decisions = await verifier.verify(candidates=(cand_slug,), context=context)
-    assert len(decisions) == 1
-    assert decisions[0].status == "supported"
+    with pytest.raises(
+        VerificationInvalidOutputError,
+        match=r"does not match service defaults rule 'naming-consistency'",
+    ):
+        await ReflectionPass(FakeVerifierModel(response_slug)).verify(
+            candidates=(cand_slug,), context=context
+        )
 
 
 @pytest.mark.anyio
 async def test_reflection_pass_secondary_source_defaults_validation_branches() -> None:
     query_block_id = file_block_id("app/query.py")
-    rule = ReviewRule("rule-1", ("*.py",), (), ("Check something", "Check another"))
+    rule = ReviewRule(
+        "Naming Consistency", ("*.py",), (), ("Check something", "Check another", "c3", "c4")
+    )
     snapshot = make_snapshot()
     context = ReviewContext(
         system="SYSTEM",
@@ -1529,17 +1599,17 @@ async def test_reflection_pass_secondary_source_defaults_validation_branches() -
                         "block_id": "service-defaults",
                         "start_line": 2,
                         "end_line": 2,
-                        "check_id": "1",
+                        "check_id": "N1",
                     },
                 ],
             }
         ]
     }
     v_range = ReflectionPass(FakeVerifierModel(range_mismatch_response))
-    with pytest.raises(VerificationInvalidOutputError, match="does not cover check '1'"):
+    with pytest.raises(VerificationInvalidOutputError, match="does not cover check 'N1'"):
         await v_range.verify(candidates=(cand_rules,), context=context)
 
-    # 3. Secondary ref range upper bound mismatch: check 2 is at line 2, but range is 1-1
+    # 3. Secondary ref range upper bound mismatch: check N2 is at line 2, but range is 1-1
     range_upper_mismatch = {
         "decisions": [
             {
@@ -1553,17 +1623,17 @@ async def test_reflection_pass_secondary_source_defaults_validation_branches() -
                         "block_id": "service-defaults",
                         "start_line": 1,
                         "end_line": 1,
-                        "check_id": "2",
+                        "check_id": "N2",
                     },
                 ],
             }
         ]
     }
     v_upper = ReflectionPass(FakeVerifierModel(range_upper_mismatch))
-    with pytest.raises(VerificationInvalidOutputError, match="does not cover check '2'"):
+    with pytest.raises(VerificationInvalidOutputError, match="does not cover check 'N2'"):
         await v_upper.verify(candidates=(cand_rules,), context=context)
 
-    # 4. Secondary ref positive case: check 1 is covered by range 1-2
+    # 4. Secondary ref positive case: check N1 is covered by range 1-2
     positive_multi_response = {
         "decisions": [
             {
@@ -1577,7 +1647,7 @@ async def test_reflection_pass_secondary_source_defaults_validation_branches() -
                         "block_id": "service-defaults",
                         "start_line": 1,
                         "end_line": 2,
-                        "check_id": "1",
+                        "check_id": "N1",
                     },
                 ],
             }
@@ -1591,12 +1661,19 @@ async def test_reflection_pass_secondary_source_defaults_validation_branches() -
 
 @pytest.mark.anyio
 async def test_reflection_pass_service_defaults_exact_case_slug_matching() -> None:
+    from app.modules.reviews.application.policy_errors import PolicyError, PolicyErrorCode
+
     query_block_id = file_block_id("app/query.py")
-    rule = ReviewRule("Naming-Consistency", ("*.py",), (), ("Check snake_case",))
+    rule_errors = ReviewRule(
+        "Error Handling Standards",
+        ("*.py",),
+        (),
+        ("Err 1", "Err 2", "Err 3", "Err 4"),
+    )
     snapshot = make_snapshot()
     context = ReviewContext(
         system="SYSTEM",
-        rules=(rule,),
+        rules=(rule_errors,),
         agents_md=None,
         conventions=RepoConventions((), ()),
         pr_meta=PullRequestMeta("T", None, "u", "b", "main", (), 1, 1, 0, False, False),
@@ -1605,8 +1682,128 @@ async def test_reflection_pass_service_defaults_exact_case_slug_matching() -> No
         policy_snapshot=snapshot,
     )
 
+    # 1. Stable check ID E2 (at line 2) is accepted
+    cand_e2 = CandidateFindingItem(
+        candidate_id="c-e2",
+        finding=ReviewFindingV2(
+            path="app/query.py",
+            line=10,
+            start_line=None,
+            severity="medium",
+            category="readability",
+            title="Error handling violation",
+            body="Do not swallow errors",
+            suggestion=None,
+            confidence=0.9,
+            rule_name="service-defaults:E2",
+            evidence_refs=[EvidenceRef(block_id=query_block_id, start_line=10, end_line=10)],
+        ),
+    )
+    response_e2 = {
+        "decisions": [
+            {
+                "candidate_id": "c-e2",
+                "status": "supported",
+                "reason": "Violates E2.",
+                "evidence_refs": [{"block_id": query_block_id, "start_line": 10, "end_line": 10}],
+                "requirement_refs": [
+                    {
+                        "block_id": "service-defaults",
+                        "start_line": 2,
+                        "end_line": 2,
+                        "check_id": "E2",
+                    }
+                ],
+            }
+        ]
+    }
+    verifier = ReflectionPass(FakeVerifierModel(response_e2))
+    decisions = await verifier.verify(candidates=(cand_e2,), context=context)
+    assert len(decisions) == 1
+    assert decisions[0].status == "supported"
+
+    # 2. Exact-case rule slug "Error-Handling-Standards" is rejected (only stable ID is allowed)
     cand_slug = CandidateFindingItem(
         candidate_id="c-slug-exact",
+        finding=ReviewFindingV2(
+            path="app/query.py",
+            line=10,
+            start_line=None,
+            severity="medium",
+            category="readability",
+            title="Error handling violation",
+            body="Do not swallow errors",
+            suggestion=None,
+            confidence=0.9,
+            rule_name="service-defaults:Error-Handling-Standards",
+            evidence_refs=[EvidenceRef(block_id=query_block_id, start_line=10, end_line=10)],
+        ),
+    )
+    response_slug = {
+        "decisions": [
+            {
+                "candidate_id": "c-slug-exact",
+                "status": "supported",
+                "reason": "Violates E2.",
+                "evidence_refs": [{"block_id": query_block_id, "start_line": 10, "end_line": 10}],
+                "requirement_refs": [
+                    {
+                        "block_id": "service-defaults",
+                        "start_line": 2,
+                        "end_line": 2,
+                        "check_id": "E2",
+                    }
+                ],
+            }
+        ]
+    }
+    with pytest.raises(
+        VerificationInvalidOutputError,
+        match=r"does not match service defaults rule 'Error-Handling-Standards'",
+    ):
+        await ReflectionPass(FakeVerifierModel(response_slug)).verify(
+            candidates=(cand_slug,), context=context
+        )
+
+    # 3. Duplicate check ID across rules in context raises SNAPSHOT_INTEGRITY_ERROR
+    context_dup = replace(context, rules=(rule_errors, rule_errors))
+    with pytest.raises(PolicyError) as exc_dup:
+        await ReflectionPass(FakeVerifierModel(response_e2)).verify(
+            candidates=(cand_e2,), context=context_dup
+        )
+    assert exc_dup.value.code == PolicyErrorCode.SNAPSHOT_INTEGRITY_ERROR
+
+
+@pytest.mark.anyio
+async def test_reflection_pass_service_defaults_stable_id_and_foreign_rule_rejection() -> None:
+    query_block_id = file_block_id("app/query.py")
+    rule_naming = ReviewRule(
+        "Naming Consistency",
+        ("*.py",),
+        (),
+        ("check 1", "check 2", "check 3", "check 4"),
+    )
+    rule_errors = ReviewRule(
+        "Error Handling Standards",
+        ("*.py",),
+        (),
+        ("check 1", "check 2", "check 3", "check 4"),
+    )
+    snapshot = make_snapshot()
+    context = ReviewContext(
+        system="SYSTEM",
+        rules=(rule_naming, rule_errors),
+        agents_md=None,
+        conventions=RepoConventions((), ()),
+        pr_meta=PullRequestMeta("T", None, "u", "b", "main", (), 1, 1, 0, False, False),
+        changed_files=(ChangedFile("app/query.py", "modified", (DiffLine(10, "added", "x = 1"),)),),
+        omitted_files=(),
+        policy_snapshot=snapshot,
+    )
+
+    # 1. Matching stable check ID: rule_name="service-defaults:N1" and check_id="N1" -> OK
+    cand_ok = CandidateFindingItem(
+        candidate_id="c-ok",
         finding=ReviewFindingV2(
             path="app/query.py",
             line=10,
@@ -1617,29 +1814,566 @@ async def test_reflection_pass_service_defaults_exact_case_slug_matching() -> No
             body="Variable must be snake_case",
             suggestion=None,
             confidence=0.9,
-            rule_name="service-defaults:Naming-Consistency",
+            rule_name="service-defaults:N1",
             evidence_refs=[EvidenceRef(block_id=query_block_id, start_line=10, end_line=10)],
         ),
     )
-    response = {
+    resp_ok = {
         "decisions": [
             {
-                "candidate_id": "c-slug-exact",
+                "candidate_id": "c-ok",
                 "status": "supported",
-                "reason": "Variable name violates Naming Consistency rule.",
+                "reason": "OK",
                 "evidence_refs": [{"block_id": query_block_id, "start_line": 10, "end_line": 10}],
                 "requirement_refs": [
                     {
                         "block_id": "service-defaults",
                         "start_line": 1,
                         "end_line": 1,
-                        "check_id": "1",
+                        "check_id": "N1",
                     }
                 ],
             }
         ]
     }
-    verifier = ReflectionPass(FakeVerifierModel(response))
-    decisions = await verifier.verify(candidates=(cand_slug,), context=context)
-    assert len(decisions) == 1
-    assert decisions[0].status == "supported"
+    v_ok = ReflectionPass(FakeVerifierModel(resp_ok))
+    res = await v_ok.verify(candidates=(cand_ok,), context=context)
+    assert len(res) == 1
+    assert res[0].status == "supported"
+
+    # 2. Foreign check ID: candidate is N1,
+    # but verifier references E1 (from Error Handling)
+    cand_foreign = CandidateFindingItem(
+        candidate_id="c-foreign",
+        finding=ReviewFindingV2(
+            path="app/query.py",
+            line=10,
+            start_line=None,
+            severity="medium",
+            category="readability",
+            title="Naming violation",
+            body="Variable must be snake_case",
+            suggestion=None,
+            confidence=0.9,
+            rule_name="service-defaults:N1",
+            evidence_refs=[EvidenceRef(block_id=query_block_id, start_line=10, end_line=10)],
+        ),
+    )
+    resp_foreign = {
+        "decisions": [
+            {
+                "candidate_id": "c-foreign",
+                "status": "supported",
+                "reason": "Foreign check",
+                "evidence_refs": [{"block_id": query_block_id, "start_line": 10, "end_line": 10}],
+                "requirement_refs": [
+                    {
+                        "block_id": "service-defaults",
+                        "start_line": 5,
+                        "end_line": 5,
+                        "check_id": "E1",
+                    }
+                ],
+            }
+        ]
+    }
+    v_foreign = ReflectionPass(FakeVerifierModel(resp_foreign))
+    with pytest.raises(
+        VerificationInvalidOutputError, match=r"does not match service defaults rule 'N1'"
+    ):
+        await v_foreign.verify(candidates=(cand_foreign,), context=context)
+
+    # 3. Bogus rule: candidate has rule_name="service-defaults:BOGUS"
+    cand_bogus = CandidateFindingItem(
+        candidate_id="c-bogus",
+        finding=ReviewFindingV2(
+            path="app/query.py",
+            line=10,
+            start_line=None,
+            severity="medium",
+            category="readability",
+            title="Naming violation",
+            body="Variable must be snake_case",
+            suggestion=None,
+            confidence=0.9,
+            rule_name="service-defaults:BOGUS",
+            evidence_refs=[EvidenceRef(block_id=query_block_id, start_line=10, end_line=10)],
+        ),
+    )
+    resp_bogus = {
+        "decisions": [
+            {
+                "candidate_id": "c-bogus",
+                "status": "supported",
+                "reason": "Bogus rule",
+                "evidence_refs": [{"block_id": query_block_id, "start_line": 10, "end_line": 10}],
+                "requirement_refs": [
+                    {
+                        "block_id": "service-defaults",
+                        "start_line": 1,
+                        "end_line": 1,
+                        "check_id": "N1",
+                    }
+                ],
+            }
+        ]
+    }
+    v_bogus = ReflectionPass(FakeVerifierModel(resp_bogus))
+    with pytest.raises(
+        VerificationInvalidOutputError,
+        match=r"does not match service defaults rule 'BOGUS'",
+    ):
+        await v_bogus.verify(candidates=(cand_bogus,), context=context)
+
+
+def test_fit_changed_files_for_verifier_preserves_candidate_anchor_lines() -> None:
+    from app.modules.reviews.application.prompt_budget import EstimatedTokenCounter
+    from app.modules.reviews.application.reflection_pass import _fit_changed_files_for_verifier
+
+    counter = EstimatedTokenCounter()
+    lines = tuple(DiffLine(i, "added", f"x_{i} = {i} * 2") for i in range(1, 101))
+    file = ChangedFile("app/main.py", "modified", lines)
+    f_block_id = file_block_id("app/main.py")
+
+    # Anchor is at lines 90..95, far past the 35-line prefix budget
+    cand = CandidateFindingItem(
+        candidate_id="c1",
+        finding=ReviewFindingV2(
+            path="app/main.py",
+            line=95,
+            start_line=90,
+            severity="high",
+            category="correctness",
+            title="Logic flaw",
+            body="Invalid multiplication",
+            suggestion=None,
+            confidence=0.9,
+            rule_name=None,
+            evidence_refs=[EvidenceRef(block_id=f_block_id, start_line=90, end_line=95)],
+        ),
+    )
+
+    builder = PromptBuilder()
+    full_rendered = builder._render_changed_files((file,), include_block_id=True)
+    full_tokens = counter.count(f"<code_context>\n{full_rendered}\n</code_context>")
+
+    lines_35_rendered = builder._render_changed_files(
+        (ChangedFile("app/main.py", "modified", lines[:35], total_lines=100),),
+        include_block_id=True,
+    )
+    budget = counter.count(f"<code_context>\n{lines_35_rendered}\n</code_context>")
+    assert budget < full_tokens
+
+    fitted = _fit_changed_files_for_verifier(
+        (file,),
+        rules=(),
+        max_tokens=budget,
+        counter=counter,
+        candidates=(cand,),
+    )
+    assert len(fitted) == 1
+    assert len(fitted[0].lines) <= 35
+    line_nums = {line.number for line in fitted[0].lines}
+    assert set(range(90, 96)).issubset(line_nums)
+    assert fitted[0].total_lines == 100
+
+
+def test_fit_changed_files_for_verifier_prioritizes_candidate_files() -> None:
+    from app.modules.reviews.application.prompt_budget import EstimatedTokenCounter
+    from app.modules.reviews.application.reflection_pass import _fit_changed_files_for_verifier
+
+    counter = EstimatedTokenCounter()
+    builder = PromptBuilder()
+
+    lines_a = tuple(DiffLine(i, "added", f"val_a_{i} = {i}") for i in range(1, 51))
+    file_a = ChangedFile("app/unrelated.py", "modified", lines_a)
+
+    lines_b = tuple(DiffLine(i, "added", f"val_b_{i} = {i}") for i in range(1, 51))
+    file_b = ChangedFile("app/target.py", "modified", lines_b)
+    b_block_id = file_block_id("app/target.py")
+
+    cand = CandidateFindingItem(
+        candidate_id="c1",
+        finding=ReviewFindingV2(
+            path="app/target.py",
+            line=10,
+            start_line=None,
+            severity="critical",
+            category="security",
+            title="Security flaw",
+            body="Insecure operation",
+            suggestion=None,
+            confidence=0.95,
+            rule_name=None,
+            evidence_refs=[EvidenceRef(block_id=b_block_id, start_line=10, end_line=10)],
+        ),
+    )
+
+    one_file_rendered = builder._render_changed_files((file_b,), include_block_id=True)
+    budget = counter.count(f"<code_context>\n{one_file_rendered}\n</code_context>")
+
+    fitted = _fit_changed_files_for_verifier(
+        (file_a, file_b),
+        rules=(),
+        max_tokens=budget,
+        counter=counter,
+        candidates=(cand,),
+    )
+    paths = [f.path for f in fitted]
+    assert "app/target.py" in paths
+
+
+def test_fit_changed_files_for_verifier_retains_total_lines() -> None:
+    from app.modules.reviews.application.prompt_budget import EstimatedTokenCounter
+    from app.modules.reviews.application.reflection_pass import _fit_changed_files_for_verifier
+
+    counter = EstimatedTokenCounter()
+    builder = PromptBuilder()
+
+    lines = tuple(DiffLine(i, "added", f"line_{i} = {i}") for i in range(1, 101))
+    file = ChangedFile("app/cut.py", "modified", lines, total_lines=250)
+
+    cut_rendered = builder._render_changed_files(
+        (ChangedFile("app/cut.py", "modified", lines[:40]),), include_block_id=True
+    )
+    budget = counter.count(f"<code_context>\n{cut_rendered}\n</code_context>")
+
+    fitted = _fit_changed_files_for_verifier(
+        (file,),
+        rules=(),
+        max_tokens=budget,
+        counter=counter,
+        candidates=(),
+    )
+    assert len(fitted) == 1
+    assert len(fitted[0].lines) < 100
+    assert fitted[0].total_lines == 250
+
+    file_no_total = ChangedFile("app/no_total.py", "modified", lines)
+    fitted_no_total = _fit_changed_files_for_verifier(
+        (file_no_total,),
+        rules=(),
+        max_tokens=budget,
+        counter=counter,
+        candidates=(),
+    )
+    assert len(fitted_no_total) == 1
+    assert fitted_no_total[0].total_lines == 100
+
+
+def test_build_verifier_prompt_mandatory_envelope_overflow_and_missing_v9_asset() -> None:
+    from app.modules.reviews.application.policy_errors import PolicyError, PolicyErrorCode
+
+    # 1. Missing prompt asset v9 via __init__
+    with pytest.raises(PolicyError) as exc_init:
+        VerifierPromptBuilder(verifier_version="v9")
+    assert exc_init.value.code == PolicyErrorCode.SNAPSHOT_INTEGRITY_ERROR
+    assert "Unable to read verifier prompt resource" in str(exc_init.value)
+
+    # 2. Missing prompt asset v9 via pinned bindings in build_verifier_prompt
+    snapshot = make_snapshot()
+    bindings_v9 = replace(snapshot.prompt_bindings, verifier_version="v9")
+    snapshot_v9 = replace(snapshot, prompt_bindings=bindings_v9)
+    cand = make_candidate("c1")
+    context_v9 = ReviewContext(
+        system="SYSTEM",
+        rules=(),
+        agents_md=None,
+        conventions=RepoConventions((), ()),
+        pr_meta=PullRequestMeta("T", None, "u", "b", "main", (), 1, 1, 0, False, False),
+        changed_files=(ChangedFile("app/query.py", "modified", (DiffLine(10, "added", "x = 1"),)),),
+        omitted_files=(),
+        policy_snapshot=snapshot_v9,
+    )
+    with pytest.raises(PolicyError) as exc_build:
+        VerifierPromptBuilder().build_verifier_prompt(candidates=(cand,), context=context_v9)
+    assert exc_build.value.code == PolicyErrorCode.SNAPSHOT_INTEGRITY_ERROR
+    assert "Unable to read verifier prompt resource" in str(exc_build.value)
+
+    # 3. Mandatory envelope overflow in build_verifier_prompt (even with 0 changed_files)
+    tiny_profile = replace(make_complete_execution_profile(), max_input_tokens=8500)
+    snapshot_tiny = replace(snapshot, execution_profile=tiny_profile)
+    context_overflow = ReviewContext(
+        system="SYSTEM",
+        rules=(),
+        agents_md=None,
+        conventions=RepoConventions((), ()),
+        pr_meta=PullRequestMeta("T", None, "u", "b", "main", (), 0, 0, 0, False, False),
+        changed_files=(),
+        omitted_files=(),
+        policy_snapshot=snapshot_tiny,
+    )
+    with pytest.raises(RunFailure) as exc_overflow:
+        VerifierPromptBuilder().build_verifier_prompt(candidates=(cand,), context=context_overflow)
+    assert exc_overflow.value.error_code == "verification_context_overflow"
+
+
+@pytest.mark.anyio
+async def test_reflection_pass_verify_pre_send_guard_and_counter_v1() -> None:
+    # 1. Call-level provenance pre-send guard in ReflectionPass.verify:
+    # disallowed path "../secret.py" raises policy_context_violation with 0 verifier calls
+    bad_path = "../secret.py"
+    cand_bad = make_candidate("c-bad", path=bad_path, rule_name=None)
+    snapshot = make_snapshot()
+    context_bad = ReviewContext(
+        system="SYSTEM",
+        rules=(),
+        agents_md=None,
+        conventions=RepoConventions((), ()),
+        pr_meta=PullRequestMeta(
+            "T", None, "u", "b", "main", (), 1, 1, 0, False, False, head_sha="head_1"
+        ),
+        changed_files=(ChangedFile(bad_path, "modified", (DiffLine(10, "added", "x = 1"),)),),
+        omitted_files=(),
+        policy_snapshot=snapshot,
+    )
+    model_bad = FakeVerifierModel({"decisions": []})
+    verifier_bad = ReflectionPass(model_bad)
+    with pytest.raises(RunFailure) as exc_guard:
+        await verifier_bad.verify(candidates=(cand_bad,), context=context_bad)
+    assert exc_guard.value.error_code == "policy_context_violation"
+    assert model_bad.call_count == 0
+
+    # 2. ReflectionPass.verify with counter/v1 on 4,000-line file + 1 candidate succeeds
+    profile_v1 = replace(make_complete_execution_profile(), counter_version="counter/v1")
+    snapshot_v1 = replace(make_snapshot(), execution_profile=profile_v1)
+    big_lines = tuple(
+        DiffLine(i, "added", f"value_{i} = compute_something({i}) + 100") for i in range(1, 4001)
+    )
+    big_file = ChangedFile("app/big.py", "added", big_lines)
+    big_block_id = file_block_id("app/big.py")
+    cand_v1 = make_candidate(
+        "c-v1",
+        path="app/big.py",
+        rule_name=None,
+        evidence_refs=[EvidenceRef(block_id=big_block_id, start_line=10, end_line=15)],
+    )
+    context_v1 = ReviewContext(
+        system="SYSTEM",
+        rules=(),
+        agents_md=None,
+        conventions=RepoConventions((), ()),
+        pr_meta=PullRequestMeta(
+            "T", None, "u", "b", "main", (), 1, 4000, 0, False, False, head_sha="head_1"
+        ),
+        changed_files=(big_file,),
+        omitted_files=(),
+        policy_snapshot=snapshot_v1,
+    )
+    model_v1 = FakeVerifierModel(
+        {
+            "decisions": [
+                {
+                    "candidate_id": "c-v1",
+                    "status": "supported",
+                    "reason": "Confirmed",
+                    "evidence_refs": [{"block_id": big_block_id, "start_line": 10, "end_line": 15}],
+                    "requirement_refs": [],
+                }
+            ]
+        }
+    )
+    decisions_v1 = await ReflectionPass(model_v1).verify(candidates=(cand_v1,), context=context_v1)
+    assert model_v1.call_count == 1
+    assert len(decisions_v1) == 1
+    assert decisions_v1[0].status == "supported"
+
+
+@pytest.mark.anyio
+async def test_reflection_pass_verifier_evidence_revision_mismatch_right_and_left() -> None:
+    from unittest.mock import patch
+
+    from app.modules.reviews.application.policy_snapshot import ManifestBlock, SourceRole
+
+    cand = make_candidate("c-rev", path="app/query.py", rule_name=None)
+    query_block_id = file_block_id("app/query.py")
+    snapshot = make_snapshot()
+    base_context = ReviewContext(
+        system="SYSTEM",
+        rules=(),
+        agents_md=None,
+        conventions=RepoConventions((), ()),
+        pr_meta=PullRequestMeta(
+            "T",
+            None,
+            "u",
+            "b",
+            "main",
+            (),
+            1,
+            1,
+            0,
+            False,
+            False,
+            head_sha="head_good",
+            diff_old_sha="old_good",
+        ),
+        changed_files=(ChangedFile("app/query.py", "modified", (DiffLine(10, "added", "x = 1"),)),),
+        omitted_files=(),
+        policy_snapshot=snapshot,
+    )
+
+    builder = VerifierPromptBuilder()
+    real_prompt, real_manifest = builder.build_verifier_prompt(
+        candidates=(cand,), context=base_context
+    )
+
+    # 1. RIGHT block with foreign revision -> VerificationInvalidOutputError
+    bad_right_block = ManifestBlock(
+        block_id="retrieved-right",
+        source_role=SourceRole.RETRIEVED_EXCERPT,
+        source_kind="source_code",
+        path="app/query.py",
+        revision="foreign_head",
+        side="RIGHT",
+        start_line=1,
+        end_line=20,
+        shown_line_count=20,
+        shown_ranges=((1, 20),),
+    )
+    manifest_bad_right = replace(real_manifest, blocks=(*real_manifest.blocks, bad_right_block))
+    resp_right = {
+        "decisions": [
+            {
+                "candidate_id": "c-rev",
+                "status": "supported",
+                "reason": "OK",
+                "evidence_refs": [
+                    {"block_id": "retrieved-right", "start_line": 10, "end_line": 10}
+                ],
+                "requirement_refs": [],
+            }
+        ]
+    }
+    verifier_right = ReflectionPass(FakeVerifierModel(resp_right))
+    with (
+        patch.object(
+            verifier_right._prompt_builder,
+            "build_verifier_prompt",
+            return_value=(real_prompt, manifest_bad_right),
+        ),
+        patch("app.modules.reviews.application.reflection_pass.verify_provenance_pre_send_guard"),
+        pytest.raises(
+            VerificationInvalidOutputError,
+            match="revision 'foreign_head' does not match PR revision",
+        ),
+    ):
+        await verifier_right.verify(candidates=(cand,), context=base_context)
+
+    # 2. LEFT block with foreign revision -> VerificationInvalidOutputError
+    bad_left_block = ManifestBlock(
+        block_id="retrieved-left",
+        source_role=SourceRole.RETRIEVED_EXCERPT,
+        source_kind="source_code",
+        path="app/query.py",
+        revision="foreign_old",
+        side="LEFT",
+        start_line=1,
+        end_line=20,
+        shown_line_count=20,
+        shown_ranges=((1, 20),),
+    )
+    manifest_bad_left = replace(real_manifest, blocks=(*real_manifest.blocks, bad_left_block))
+    resp_left = {
+        "decisions": [
+            {
+                "candidate_id": "c-rev",
+                "status": "supported",
+                "reason": "OK",
+                "evidence_refs": [{"block_id": "retrieved-left", "start_line": 10, "end_line": 10}],
+                "requirement_refs": [],
+            }
+        ]
+    }
+    verifier_left = ReflectionPass(FakeVerifierModel(resp_left))
+    with (
+        patch.object(
+            verifier_left._prompt_builder,
+            "build_verifier_prompt",
+            return_value=(real_prompt, manifest_bad_left),
+        ),
+        patch("app.modules.reviews.application.reflection_pass.verify_provenance_pre_send_guard"),
+        pytest.raises(
+            VerificationInvalidOutputError,
+            match="LEFT revision 'foreign_old' does not match PR diff_old_sha 'old_good'",
+        ),
+    ):
+        await verifier_left.verify(candidates=(cand,), context=base_context)
+
+    # 3. LEFT block when diff_old_sha is None -> fail-closed VerificationInvalidOutputError
+    good_left_block = replace(bad_left_block, revision="old_good")
+    manifest_good_left = replace(real_manifest, blocks=(*real_manifest.blocks, good_left_block))
+    context_no_old_sha = replace(
+        base_context,
+        pr_meta=replace(base_context.pr_meta, diff_old_sha=None),
+    )
+    verifier_no_old = ReflectionPass(FakeVerifierModel(resp_left))
+    with (
+        patch.object(
+            verifier_no_old._prompt_builder,
+            "build_verifier_prompt",
+            return_value=(real_prompt, manifest_good_left),
+        ),
+        patch("app.modules.reviews.application.reflection_pass.verify_provenance_pre_send_guard"),
+        pytest.raises(
+            VerificationInvalidOutputError,
+            match="LEFT revision 'old_good' does not match PR diff_old_sha 'None'",
+        ),
+    ):
+        await verifier_no_old.verify(candidates=(cand,), context=context_no_old_sha)
+
+    # 4. LEFT block when diff_old_sha matches ("old_good") -> accepted!
+    verifier_ok_left = ReflectionPass(FakeVerifierModel(resp_left))
+    with patch.object(
+        verifier_ok_left._prompt_builder,
+        "build_verifier_prompt",
+        return_value=(real_prompt, manifest_good_left),
+    ):
+        decisions_ok = await verifier_ok_left.verify(candidates=(cand,), context=base_context)
+    assert len(decisions_ok) == 1
+    assert decisions_ok[0].status == "supported"
+    assert decisions_ok[0].evidence_refs[0].block_id == "retrieved-left"
+    assert query_block_id in real_prompt.user
+
+
+def test_build_verifier_prompt_counter_v1_fitting() -> None:
+    snapshot = make_snapshot()
+    exec_v1 = replace(
+        snapshot.execution_profile, counter_version="counter/v1", max_input_tokens=12000
+    )
+    snapshot_v1 = replace(snapshot, execution_profile=exec_v1)
+
+    lines = tuple(
+        DiffLine(i, "added", f"line_{i:04d} = 'sample payload content for verifier'")
+        for i in range(1, 1500)
+    )
+    cand = make_candidate("c1", path="app/query.py")
+    context_v1 = ReviewContext(
+        system="SYSTEM",
+        rules=(),
+        agents_md=None,
+        conventions=RepoConventions((), ()),
+        pr_meta=PullRequestMeta("T", None, "u", "b", "main", (), 1, 1, 0, False, False),
+        changed_files=(ChangedFile("app/query.py", "modified", lines),),
+        omitted_files=(),
+        policy_snapshot=snapshot_v1,
+    )
+    prompt_v1, _ = VerifierPromptBuilder().build_verifier_prompt(
+        candidates=(cand,), context=context_v1
+    )
+    line_count_v1 = prompt_v1.user.count("<line n=")
+
+    exec_v2 = replace(
+        snapshot.execution_profile, counter_version="counter/v2", max_input_tokens=12000
+    )
+    snapshot_v2 = replace(snapshot, execution_profile=exec_v2)
+    context_v2 = replace(context_v1, policy_snapshot=snapshot_v2)
+    prompt_v2, _ = VerifierPromptBuilder().build_verifier_prompt(
+        candidates=(cand,), context=context_v2
+    )
+    line_count_v2 = prompt_v2.user.count("<line n=")
+
+    assert line_count_v1 > line_count_v2
+    # Verify that prompt_v1 line count strictly matches v1 line count and would fail under v2
+    assert line_count_v1 == 140
+    assert line_count_v2 == 92

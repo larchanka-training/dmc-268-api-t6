@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Annotated, Literal, Protocol
 from uuid import UUID
@@ -15,8 +15,12 @@ from app.common.application.unit_of_work import UnitOfWork
 from app.modules.reviews.application.verdict import SeverityThresholdValue
 
 if TYPE_CHECKING:
-    from app.modules.reviews.application.findings_post_processor import ProcessedReviewOutput
+    from app.modules.reviews.application.findings_post_processor import (
+        ProcessedFinding,
+        ProcessedReviewOutput,
+    )
     from app.modules.reviews.application.policy_snapshot import CallManifest
+    from app.modules.reviews.application.prompt_builder import ChangedFile, PullRequestMeta
 
 type Severity = Literal["critical", "high", "medium", "low", "info"]
 type Category = Literal["security", "correctness", "performance", "readability"]
@@ -195,39 +199,130 @@ class ReviewOutputV2(BaseModel):
         return self
 
 
+def _right_hunk_ranges(shown_line_numbers: set[int]) -> tuple[tuple[int, int], ...]:
+    """Return contiguous (start, end) ranges of right-side diff hunks."""
+    right_nums = sorted(shown_line_numbers)
+    ranges: list[tuple[int, int]] = []
+    start = prev = right_nums[0]
+    for num in right_nums[1:]:
+        if num - prev > 1:
+            ranges.append((start, prev))
+            start = num
+        prev = num
+    ranges.append((start, prev))
+    return tuple(ranges)
+
+
+def validate_v2_coordinates(
+    finding: ReviewFindingV2,
+    changed_files: tuple[ChangedFile, ...],
+    *,
+    original_files: tuple[ChangedFile, ...],
+) -> tuple[bool, str | None]:
+    """Validate finding coordinates against pre-fit hunks and post-fit visibility (CVS §6.2)."""
+    line = finding.line
+    start_line = finding.start_line
+
+    orig_file = next((f for f in original_files if f.path == finding.path), None)
+    if orig_file is None:
+        return False, "unknown_path"
+    orig_right_lines = {dl.number for dl in orig_file.lines if dl.type != "removed"}
+    if line not in orig_right_lines:
+        return False, "line_absent"
+    if start_line is not None:
+        if start_line not in orig_right_lines:
+            return False, "line_absent"
+        orig_hunks = _right_hunk_ranges(orig_right_lines)
+        start_hunk = next(
+            idx for idx, (h_start, h_end) in enumerate(orig_hunks) if h_start <= start_line <= h_end
+        )
+        end_hunk = next(
+            idx for idx, (h_start, h_end) in enumerate(orig_hunks) if h_start <= line <= h_end
+        )
+        if start_hunk != end_hunk:
+            return False, "cross_hunk_range"
+    file_match = next((f for f in changed_files if f.path == finding.path), None)
+    if file_match is None:
+        return False, "anchor_not_visible"
+    shown_line_numbers = {dl.number for dl in file_match.lines if dl.type != "removed"}
+    check_start = start_line if start_line is not None else line
+    if any(n not in shown_line_numbers for n in range(check_start, line + 1)):
+        return False, "anchor_not_visible"
+    return True, None
+
+
 def validate_v2_attribution(
-    finding: ReviewFindingV2, manifest: CallManifest
+    finding: ReviewFindingV2,
+    manifest: CallManifest,
+    *,
+    pr_meta: PullRequestMeta | None = None,
 ) -> tuple[bool, str | None]:
     """Validate that finding evidence and policy references exist in the call manifest."""
     for ref in finding.evidence_refs:
         block = manifest.get_block(ref.block_id)
         if block is None:
-            return False, f"evidence block '{ref.block_id}' not found in manifest"
-        if block.source_role not in {"diff", "source_excerpt", "ast_excerpt"}:
-            return False, f"evidence block '{ref.block_id}' has invalid role '{block.source_role}'"
+            return (
+                False,
+                f"evidence_not_shown: evidence block '{ref.block_id}' not found in manifest",
+            )
+        if block.source_role not in {
+            "diff",
+            "source_excerpt",
+            "ast_excerpt",
+            "retrieved_excerpt",
+        }:
+            return (
+                False,
+                f"evidence_source_disallowed: evidence block '{ref.block_id}' "
+                f"has invalid role '{block.source_role}'",
+            )
+        if block.revision is not None and pr_meta is not None:
+            if block.side == "LEFT":
+                expected_rev = pr_meta.diff_old_sha
+                if not expected_rev or block.revision != expected_rev:
+                    return (
+                        False,
+                        f"revision_mismatch: block LEFT revision '{block.revision}' "
+                        f"does not match PR diff_old_sha '{expected_rev}'",
+                    )
+            else:
+                expected_rev = pr_meta.head_sha
+                if expected_rev is not None and block.revision != expected_rev:
+                    return (
+                        False,
+                        f"revision_mismatch: block revision '{block.revision}' "
+                        f"does not match PR revision '{expected_rev}'",
+                    )
         if not manifest.is_range_shown(ref.block_id, ref.start_line, ref.end_line):
             return (
                 False,
-                f"lines {ref.start_line}-{ref.end_line} not shown in block '{ref.block_id}'",
+                f"evidence_not_shown: lines {ref.start_line}-{ref.end_line} "
+                f"not shown in block '{ref.block_id}'",
             )
 
     if finding.rule_name == ".review/rules.md":
         has_rules = any(b.source_kind == "repository_rules" for b in manifest.blocks)
         if not has_rules:
-            return False, "rule_name is '.review/rules.md' but no repository_rules in manifest"
+            return (
+                False,
+                "evidence_source_disallowed: rule_name is '.review/rules.md' "
+                "but no repository_rules in manifest",
+            )
     elif finding.rule_name == "AGENTS.md":
         has_agents = any(b.source_kind == "project_conventions_document" for b in manifest.blocks)
         if not has_agents:
             return (
                 False,
-                "rule_name is 'AGENTS.md' but no project_conventions_document in manifest",
+                "evidence_source_disallowed: rule_name is 'AGENTS.md' "
+                "but no project_conventions_document in manifest",
             )
     elif finding.rule_name and finding.rule_name.startswith("service-defaults:"):
         has_defaults = any(b.source_role == "service_defaults" for b in manifest.blocks)
         if not has_defaults:
             return (
                 False,
-                f"rule_name is '{finding.rule_name}' but no service_defaults in manifest",
+                f"evidence_source_disallowed: rule_name is '{finding.rule_name}' "
+                "but no service_defaults in manifest",
             )
 
     return True, None
@@ -257,6 +352,100 @@ def parse_review_output(raw_output: Mapping[str, object] | str | bytes) -> Revie
         return ReviewOutput.model_validate(data)
     except (ValidationError, ValueError, json.JSONDecodeError) as exc:
         raise InvalidReviewOutput("invalid review output") from exc
+
+
+@dataclass(frozen=True)
+class DroppedCandidateRecord:
+    """One candidate finding dropped during pre-publication passes (CVS §6.2)."""
+
+    finding: ReviewFinding | ReviewFindingV2 | Mapping[str, object]
+    drop_reason: str
+    position: int
+
+
+class VerifiedReviewOutput(Mapping[str, object]):
+    """Typed carrier for verified review output and pre-publication metadata."""
+
+    def __init__(
+        self,
+        payload: Mapping[str, object],
+        *,
+        dropped_findings: Sequence[DroppedCandidateRecord | Mapping[str, object]] = (),
+        severity_threshold: SeverityThresholdValue | None = None,
+        allowed_v2_rules: frozenset[str] | None = None,
+    ) -> None:
+        self._payload: dict[str, object] = dict(payload)
+        self.dropped_findings = tuple(dropped_findings)
+        self.severity_threshold = severity_threshold
+        self.allowed_v2_rules = allowed_v2_rules
+
+    def __getitem__(self, key: str) -> object:
+        return self._payload[key]
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(self._payload)
+
+    def __len__(self) -> int:
+        return len(self._payload)
+
+
+def coerce_dropped_findings(
+    run_id: UUID,
+    raw_items: object,
+) -> tuple[ProcessedFinding, ...]:
+    """Validate and normalize pre-publication dropped findings into ProcessedFinding items."""
+    from app.modules.reviews.application.findings_post_processor import ProcessedFinding
+
+    if raw_items is None:
+        return ()
+    if not isinstance(raw_items, (list, tuple)):
+        raise InvalidReviewOutput(
+            f"Invalid dropped_findings for run_id={run_id}: expected sequence"
+        )
+    result: list[ProcessedFinding] = []
+    for idx, item in enumerate(raw_items):
+        if isinstance(item, DroppedCandidateRecord):
+            raw_f: object = item.finding
+            d_reason: object = item.drop_reason
+            pos: object = item.position
+        elif isinstance(item, Mapping):
+            raw_f = item.get("finding")
+            d_reason = item.get("drop_reason")
+            pos = item.get("position", idx)
+        else:
+            raise InvalidReviewOutput(
+                f"Invalid dropped finding entry at index {idx} for run_id={run_id}"
+            )
+        if not isinstance(d_reason, str) or not d_reason or not isinstance(pos, int):
+            raise InvalidReviewOutput(
+                f"Invalid dropped finding metadata at index {idx} for run_id={run_id}"
+            )
+        try:
+            if isinstance(raw_f, ReviewFinding):
+                f_model = raw_f
+            elif isinstance(raw_f, ReviewFindingV2):
+                f_clean = {k: v for k, v in raw_f.model_dump().items() if k != "evidence_refs"}
+                f_model = ReviewFinding.model_validate(f_clean)
+            elif isinstance(raw_f, Mapping):
+                f_clean = {k: v for k, v in raw_f.items() if k != "evidence_refs"}
+                f_model = ReviewFinding.model_validate(f_clean)
+            else:
+                raise InvalidReviewOutput(
+                    f"Invalid dropped finding payload at index {idx} for run_id={run_id}"
+                )
+        except (ValidationError, ValueError) as exc:
+            raise InvalidReviewOutput(
+                f"Invalid dropped finding at index {idx} for run_id={run_id}: {exc}"
+            ) from exc
+        result.append(
+            ProcessedFinding(
+                finding=f_model,
+                position=pos,
+                bucket="dropped",
+                drop_reason=d_reason,
+            )
+        )
+    return tuple(result)
 
 
 def parse_review_output_v2(raw_output: Mapping[str, object] | str | bytes) -> ReviewOutputV2:
@@ -383,10 +572,36 @@ class PublishReviewOutput:
         self,
         run_id: UUID,
         raw_output: Mapping[str, object] | str | bytes,
+        *,
+        dropped_findings: object = None,
+        severity_threshold: SeverityThresholdValue | None = None,
     ) -> bool:
+        from app.modules.reviews.application.findings_post_processor import FindingsPostProcessor
+
+        effective_dropped_input = (
+            dropped_findings
+            if dropped_findings is not None
+            else (
+                raw_output.dropped_findings
+                if isinstance(raw_output, VerifiedReviewOutput)
+                else None
+            )
+        )
+        effective_threshold = (
+            severity_threshold
+            if severity_threshold is not None
+            else (
+                raw_output.severity_threshold
+                if isinstance(raw_output, VerifiedReviewOutput)
+                else None
+            )
+        )
+        effective_v2_rules = (
+            raw_output.allowed_v2_rules if isinstance(raw_output, VerifiedReviewOutput) else None
+        )
+        pre_dropped = coerce_dropped_findings(run_id, effective_dropped_input)
         parsed = parse_review_output(raw_output)
         answer = _as_json_object(raw_output)
-        from app.modules.reviews.application.findings_post_processor import FindingsPostProcessor
 
         # Anchoring and custom-rule attribution are an immutable run boundary:
         # accepting caller data here would let a model response choose its own
@@ -395,13 +610,21 @@ class PublishReviewOutput:
             context = await uow.reviews.get_post_processing_input(run_id)
         if context is None:
             return False
+        threshold_to_use = (
+            effective_threshold if effective_threshold is not None else context.severity_threshold
+        )
+        v2_rules_to_use = (
+            effective_v2_rules if effective_v2_rules is not None else context.allowed_v2_rules
+        )
         processed = FindingsPostProcessor.from_default_patterns().process(
             parsed,
             hunk_lines=context.hunk_lines,
             rule_names=context.rule_names,
             repository_max_inline=context.repository_max_inline,
-            severity_threshold=context.severity_threshold,
-            allowed_v2_rules=context.allowed_v2_rules,
+            severity_threshold=threshold_to_use,
+            allowed_v2_rules=v2_rules_to_use,
+            pre_dropped=pre_dropped,
+            apply_severity_threshold=effective_threshold is None,
         )
         async with self._uow_factory() as uow:
             publication = await uow.reviews.store_review_output(run_id, answer, parsed, processed)

@@ -14,6 +14,8 @@ from app.modules.reviews.application.policy_snapshot import (
     make_policy_document_present,
 )
 from app.modules.reviews.application.prompt_builder import (
+    DEFAULT_BACKEND_V1_CHECKSUM,
+    DEFAULT_FRONTEND_V1_CHECKSUM,
     ChangedFile,
     DiffLine,
     PromptBuilder,
@@ -30,6 +32,7 @@ from app.modules.reviews.application.prompt_builder import (
 def make_test_snapshot(
     rules_text: str = "# Security\n1. Sanitize inputs.\n",
     agents_text: str = "# Conventions\nUse type hints.\n",
+    defaults_checksum: str = DEFAULT_BACKEND_V1_CHECKSUM,
 ) -> PolicySnapshot:
     rules_doc = (
         make_policy_document_present(".review/rules.md", rules_text)
@@ -63,7 +66,7 @@ def make_test_snapshot(
         builtin_exclusions_version="builtin-exclusions/v1",
         priority_matcher_version="priority-matcher/v1",
         service_defaults_rule_version_id=uuid.uuid4(),
-        defaults_checksum="defaults_0",
+        defaults_checksum=defaults_checksum,
         prompt_bindings=bindings,
         execution_profile=ExecutionProfile.fast("m1", "m2"),
         policy_digest="policy_digest_123",
@@ -470,16 +473,16 @@ def test_service_defaults_rendered_in_review_prompt_with_check_id_and_lines() ->
     snapshot = make_test_snapshot()
     rules = (
         ReviewRule(
-            name="FastAPI rules",
+            name="Naming Consistency",
             include=("app/**",),
             exclude=(),
-            checks=("Check 1: no print statements", "Check 2: return pydantic models"),
+            checks=("Check 1", "Check 2", "Check 3", "Check 4"),
         ),
         ReviewRule(
-            name="Security rules",
+            name="Meaningful Comments for Complex Logic",
             include=(),
             exclude=(),
-            checks=("Check 1: validate tokens",),
+            checks=("Dep 1", "Dep 2", "Dep 3"),
         ),
     )
     context = ReviewContext(
@@ -487,7 +490,7 @@ def test_service_defaults_rendered_in_review_prompt_with_check_id_and_lines() ->
         rules=rules,
         agents_md=None,
         conventions=RepoConventions(key_patterns=(), recommendations=()),
-        pr_meta=PullRequestMeta("PR", None, "u", "b", "main", (), 0, 0, 0, False, False),
+        pr_meta=PullRequestMeta("PR", None, "u", "b", "m", (), 0, 0, 0, False, False),
         changed_files=(),
         omitted_files=(),
         policy_snapshot=snapshot,
@@ -497,20 +500,206 @@ def test_service_defaults_rendered_in_review_prompt_with_check_id_and_lines() ->
     manifest = builder.build_manifest(context, call_id=uuid.uuid4(), stage="review")
 
     assert '<service_defaults block_id="service-defaults">' in prompt.user
-    assert '<rule name="FastAPI rules" include="app/**" exclude="">' in prompt.user
-    assert '<check id="1"><line n="1">Check 1: no print statements</line></check>' in prompt.user
-    assert '<check id="2"><line n="2">Check 2: return pydantic models</line></check>' in prompt.user
-    assert '<rule name="Security rules" include="" exclude="">' in prompt.user
-    # check id resets to 1, while line n continues from 3
-    assert '<check id="1"><line n="3">Check 1: validate tokens</line></check>' in prompt.user
+    assert '<rule name="Naming Consistency" include="app/**" exclude="">' in prompt.user
+    assert '<check id="N1"><line n="1">Check 1</line></check>' in prompt.user
+    assert '<check id="N2"><line n="2">Check 2</line></check>' in prompt.user
+    assert '<check id="N3"><line n="3">Check 3</line></check>' in prompt.user
+    assert '<check id="N4"><line n="4">Check 4</line></check>' in prompt.user
+    assert (
+        '<rule name="Meaningful Comments for Complex Logic" include="" exclude="">' in prompt.user
+    )
+    assert '<check id="D1"><line n="5">Dep 1</line></check>' in prompt.user
+    assert '<check id="D2"><line n="6">Dep 2</line></check>' in prompt.user
+    assert '<check id="D3"><line n="7">Dep 3</line></check>' in prompt.user
 
     defaults_block = manifest.get_block("service-defaults")
     assert defaults_block is not None
     assert defaults_block.source_role == "service_defaults"
     assert defaults_block.start_line == 1
-    assert defaults_block.end_line == 3
-    assert defaults_block.shown_line_count == 3
-    assert defaults_block.shown_ranges == ((1, 3),)
+    assert defaults_block.end_line == 7
+    assert defaults_block.shown_line_count == 7
+    assert defaults_block.shown_ranges == ((1, 7),)
+
+
+def test_service_defaults_all_47_stable_ids_from_v1_artifacts_and_integrity_errors() -> None:
+    import json
+    import re
+    from pathlib import Path
+
+    import pytest
+
+    from app.modules.reviews.application.policy_errors import PolicyError, PolicyErrorCode
+    from app.modules.reviews.application.prompt_builder import review_rule_from_stored
+
+    root = Path(__file__).resolve().parents[1]
+    backend_raw = json.loads((root / "review/rules/default-backend.v1.json").read_text("utf-8"))
+    frontend_raw = json.loads((root / "review/rules/default-frontend.v1.json").read_text("utf-8"))
+
+    backend_rules = tuple(review_rule_from_stored(r) for r in backend_raw["rules"])
+    frontend_rules = tuple(review_rule_from_stored(r) for r in frontend_raw["rules"])
+
+    builder = PromptBuilder()
+    pr_meta = PullRequestMeta("PR", None, "u", "b", "m", (), 0, 0, 0, False, False)
+
+    backend_prompt = builder.build_prompt(
+        ReviewContext(
+            system="S",
+            rules=backend_rules,
+            agents_md=None,
+            conventions=RepoConventions((), ()),
+            pr_meta=pr_meta,
+            changed_files=(),
+            omitted_files=(),
+            policy_snapshot=make_test_snapshot(defaults_checksum=DEFAULT_BACKEND_V1_CHECKSUM),
+        )
+    )
+    frontend_prompt = builder.build_prompt(
+        ReviewContext(
+            system="S",
+            rules=frontend_rules,
+            agents_md=None,
+            conventions=RepoConventions((), ()),
+            pr_meta=pr_meta,
+            changed_files=(),
+            omitted_files=(),
+            policy_snapshot=make_test_snapshot(defaults_checksum=DEFAULT_FRONTEND_V1_CHECKSUM),
+        )
+    )
+
+    backend_ids = re.findall(r'<check id="([^"]+)">', backend_prompt.user)
+    frontend_ids = re.findall(r'<check id="([^"]+)">', frontend_prompt.user)
+
+    assert backend_ids == [
+        "N1",
+        "N2",
+        "N3",
+        "N4",
+        "E1",
+        "E2",
+        "E3",
+        "E4",
+        "C1",
+        "C2",
+        "C3",
+        "C4",
+        "D1",
+        "D2",
+        "D3",
+        "T1",
+        "T2",
+        "T3",
+        "T4",
+        "A1",
+        "A2",
+        "A3",
+        "A4",
+        "A5",
+    ]
+    assert frontend_ids == [
+        "N1",
+        "N2",
+        "N5",
+        "N4",
+        "E1",
+        "E2",
+        "E3",
+        "E5",
+        "C1",
+        "C2",
+        "C3",
+        "C5",
+        "D1",
+        "D2",
+        "D3",
+        "T5",
+        "T3",
+        "T4",
+        "FSD1",
+        "FSD2",
+        "FSD3",
+        "FSD4",
+        "FSD5",
+    ]
+    assert len(backend_ids) + len(frontend_ids) == 47
+
+    # Unknown checksum -> policy_snapshot_integrity_error
+    with pytest.raises(PolicyError) as exc_info:
+        builder.build_prompt(
+            ReviewContext(
+                system="S",
+                rules=backend_rules,
+                agents_md=None,
+                conventions=RepoConventions((), ()),
+                pr_meta=pr_meta,
+                changed_files=(),
+                omitted_files=(),
+                policy_snapshot=make_test_snapshot(defaults_checksum="unknown_checksum"),
+            )
+        )
+    assert exc_info.value.code == PolicyErrorCode.SNAPSHOT_INTEGRITY_ERROR
+    assert "Unknown service defaults checksum" in str(exc_info.value)
+
+    # Single rule with unknown checksum raises Unknown service defaults checksum
+    with pytest.raises(PolicyError) as exc_info_single:
+        builder.build_prompt(
+            ReviewContext(
+                system="S",
+                rules=(
+                    ReviewRule(
+                        name="Single Rule",
+                        include=(),
+                        exclude=(),
+                        checks=("check1", "check2"),
+                    ),
+                ),
+                agents_md=None,
+                conventions=RepoConventions((), ()),
+                pr_meta=pr_meta,
+                changed_files=(),
+                omitted_files=(),
+                policy_snapshot=make_test_snapshot(defaults_checksum="unknown_checksum"),
+            )
+        )
+    assert exc_info_single.value.code == PolicyErrorCode.SNAPSHOT_INTEGRITY_ERROR
+    assert "Unknown service defaults checksum" in str(exc_info_single.value)
+
+    # Unknown rule name -> policy_snapshot_integrity_error
+    with pytest.raises(PolicyError) as exc_info2:
+        builder.build_prompt(
+            ReviewContext(
+                system="S",
+                rules=(ReviewRule(name="Thread Safety", include=(), exclude=(), checks=("c1",)),),
+                agents_md=None,
+                conventions=RepoConventions((), ()),
+                pr_meta=pr_meta,
+                changed_files=(),
+                omitted_files=(),
+                policy_snapshot=make_test_snapshot(defaults_checksum=DEFAULT_BACKEND_V1_CHECKSUM),
+            )
+        )
+    assert exc_info2.value.code == PolicyErrorCode.SNAPSHOT_INTEGRITY_ERROR
+    assert "is not part of pinned service defaults" in str(exc_info2.value)
+
+    # Check count mismatch -> policy_snapshot_integrity_error
+    with pytest.raises(PolicyError) as exc_info3:
+        builder.build_prompt(
+            ReviewContext(
+                system="S",
+                rules=(
+                    ReviewRule(
+                        name="Naming Consistency", include=(), exclude=(), checks=("only1",)
+                    ),
+                ),
+                agents_md=None,
+                conventions=RepoConventions((), ()),
+                pr_meta=pr_meta,
+                changed_files=(),
+                omitted_files=(),
+                policy_snapshot=make_test_snapshot(defaults_checksum=DEFAULT_BACKEND_V1_CHECKSUM),
+            )
+        )
+    assert exc_info3.value.code == PolicyErrorCode.SNAPSHOT_INTEGRITY_ERROR
+    assert "has 1 checks" in str(exc_info3.value)
 
 
 def test_first_pass_prompt_injection_defense() -> None:

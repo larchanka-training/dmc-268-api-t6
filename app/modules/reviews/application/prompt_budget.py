@@ -9,13 +9,21 @@ from __future__ import annotations
 
 import logging
 import math
+import os
 import re
 from collections.abc import Callable
 from dataclasses import replace
 from pathlib import PurePosixPath
-from typing import Protocol, runtime_checkable
+from typing import Literal, Protocol, runtime_checkable
 
-from app.modules.reviews.application.policy_snapshot import ExecutionProfile, PolicySnapshot
+from app.modules.reviews.application.diff_map import is_supported_path
+from app.modules.reviews.application.policy_errors import PolicyError, PolicyErrorCode
+from app.modules.reviews.application.policy_snapshot import (
+    CallManifest,
+    ExecutionProfile,
+    PolicySnapshot,
+    SourceRole,
+)
 from app.modules.reviews.application.prompt_builder import (
     ChangedFile,
     PromptBuilder,
@@ -26,6 +34,7 @@ from app.modules.reviews.application.prompt_builder import (
     truncation_trailer,
     xml_text,
 )
+from app.modules.reviews.application.review_ignore import IgnoreMatcher, IgnorePolicy
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -51,10 +60,119 @@ class LengthAwareTokenCounter(TokenCounter, Protocol):
 
 
 class EstimatedTokenCounter:
-    """Four characters per token, rounded up: an estimate until the model counter is wired."""
+    """Three characters per token, rounded up: a conservative upper estimate
+    matching the gateway (RFS §3.3).
+    """
+
+    def count(self, text: str) -> int:
+        return (len(text) + 2) // 3
+
+    def count_length(self, characters: int) -> int:
+        return (characters + 2) // 3
+
+
+class LegacyTokenCounter:
+    """Four characters per token: (len + 3) // 4 (legacy counter/v1)."""
 
     def count(self, text: str) -> int:
         return (len(text) + 3) // 4
+
+    def count_length(self, characters: int) -> int:
+        return (characters + 3) // 4
+
+
+SUPPORTED_TOKENIZER_VERSIONS = frozenset({"tokenizer/v1"})
+SUPPORTED_COUNTER_VERSIONS = frozenset({"counter/v1", "counter/v2"})
+SUPPORTED_RECOVERY_PROFILE_VERSIONS = frozenset({"recovery/v1"})
+SUPPORTED_BUDGET_PROFILE_VERSIONS = frozenset({"budget/v1"})
+
+_MODEL_WINDOWS: dict[str, tuple[int, int]] = {
+    "mistral-small-4": (262_144, 8_000),
+    "mistral-small-3.2-24b": (128_000, 8_000),
+}
+_DEFAULT_CONTEXT_WINDOW = 262_144
+_DEFAULT_MAX_OUTPUT_TOKENS = 8_000
+
+
+def token_counter_for(counter_version: str | None) -> TokenCounter:
+    """Resolve token counter by pinned version in ExecutionProfile (RFS §7.2)."""
+    if counter_version is None or counter_version == "counter/v2":
+        return EstimatedTokenCounter()
+    if counter_version == "counter/v1":
+        return LegacyTokenCounter()
+    raise PolicyError(
+        PolicyErrorCode.SNAPSHOT_INTEGRITY_ERROR,
+        f"Unknown counter_version '{counter_version}' in execution profile",
+    )
+
+
+def validate_execution_profile_versions(profile: ExecutionProfile) -> None:
+    """Resolve and validate pinned execution profile versions (RFS §7.1-7.2)."""
+    if (
+        profile.tokenizer_version is not None
+        and profile.tokenizer_version not in SUPPORTED_TOKENIZER_VERSIONS
+    ):
+        raise PolicyError(
+            PolicyErrorCode.SNAPSHOT_INTEGRITY_ERROR,
+            f"Unknown tokenizer_version '{profile.tokenizer_version}' in execution profile",
+        )
+    if (
+        profile.counter_version is not None
+        and profile.counter_version not in SUPPORTED_COUNTER_VERSIONS
+    ):
+        raise PolicyError(
+            PolicyErrorCode.SNAPSHOT_INTEGRITY_ERROR,
+            f"Unknown counter_version '{profile.counter_version}' in execution profile",
+        )
+    if (
+        profile.recovery_profile_version is not None
+        and profile.recovery_profile_version not in SUPPORTED_RECOVERY_PROFILE_VERSIONS
+    ):
+        raise PolicyError(
+            PolicyErrorCode.SNAPSHOT_INTEGRITY_ERROR,
+            f"Unknown recovery_profile_version '{profile.recovery_profile_version}' "
+            "in execution profile",
+        )
+    if (
+        profile.budget_profile_version is not None
+        and profile.budget_profile_version not in SUPPORTED_BUDGET_PROFILE_VERSIONS
+    ):
+        raise PolicyError(
+            PolicyErrorCode.SNAPSHOT_INTEGRITY_ERROR,
+            f"Unknown budget_profile_version '{profile.budget_profile_version}' "
+            "in execution profile",
+        )
+
+
+def send_budget_for(
+    profile: ExecutionProfile,
+    *,
+    stage: Literal["review", "verification"] = "review",
+    model_max_prompt_tokens: int | None = None,
+) -> int:
+    """Compute the prompt token budget for a stage from the model window and execution profile.
+
+    Matches ``LlmGateway.max_prompt_tokens``:
+    ``min(context_window, max_input_tokens) - max_output_tokens``.
+    """
+    validate_execution_profile_versions(profile)
+
+    model_name = profile.verifier_model if stage == "verification" else profile.review_model
+    context_window, max_output_tokens = _MODEL_WINDOWS.get(
+        model_name, (_DEFAULT_CONTEXT_WINDOW, _DEFAULT_MAX_OUTPUT_TOKENS)
+    )
+    env_window = os.environ.get("LLM_CONTEXT_WINDOW")
+    if env_window and env_window.isdigit():
+        context_window = int(env_window)
+    env_out = os.environ.get("LLM_MAX_OUTPUT_TOKENS")
+    if env_out and env_out.isdigit():
+        max_output_tokens = int(env_out)
+
+    limit = min(context_window, profile.max_input_tokens)
+    budget = max(0, limit - max_output_tokens)
+    if model_max_prompt_tokens is not None:
+        return min(budget, model_max_prompt_tokens)
+    return budget
 
 
 class PolicyBudgetExceededError(ValueError):
@@ -130,6 +248,189 @@ def verify_pre_send_guard(
         )
 
 
+_ALLOWED_SOURCE_ROLES = frozenset(
+    {
+        SourceRole.POLICY_DOCUMENT,
+        SourceRole.SERVICE_DEFAULTS,
+        SourceRole.CONVENTIONS,
+        SourceRole.PR_METADATA,
+        SourceRole.DIFF,
+        SourceRole.SOURCE_EXCERPT,
+        SourceRole.AST_EXCERPT,
+        SourceRole.RETRIEVED_EXCERPT,
+        SourceRole.CANDIDATE,
+        SourceRole.PREVIOUS_OUTPUT,
+    }
+)
+
+_ROLE_KIND_MAP = {
+    SourceRole.POLICY_DOCUMENT: frozenset({"repository_rules", "project_conventions_document"}),
+    SourceRole.SERVICE_DEFAULTS: frozenset({"service_defaults"}),
+    SourceRole.CONVENTIONS: frozenset({"generated_conventions"}),
+    SourceRole.PR_METADATA: frozenset({"pr_metadata"}),
+    SourceRole.DIFF: frozenset({"source_code"}),
+    SourceRole.SOURCE_EXCERPT: frozenset({"source_code"}),
+    SourceRole.AST_EXCERPT: frozenset({"source_code"}),
+    SourceRole.RETRIEVED_EXCERPT: frozenset({"source_code"}),
+    SourceRole.CANDIDATE: frozenset({"candidate_findings"}),
+    SourceRole.PREVIOUS_OUTPUT: frozenset({"previous_model_output"}),
+}
+
+
+def verify_provenance_pre_send_guard(
+    manifest: CallManifest,
+    *,
+    context: ReviewContext | None = None,
+    snapshot: PolicySnapshot | None = None,
+) -> None:
+    """Validate manifest blocks before any LLM call (CVS §5.2).
+
+    Failure raises PolicyError(PolicyErrorCode.CONTEXT_VIOLATION), which results
+    in RunFailure("policy_context_violation") without sending the request.
+    """
+    ignore_matcher = (
+        IgnoreMatcher(IgnorePolicy(snapshot.ignore_patterns, (), snapshot.ignore_digest))
+        if snapshot is not None and snapshot.ignore_patterns
+        else None
+    )
+    for block in manifest.blocks:
+        # 1. Role and kind validation
+        if block.source_role not in _ALLOWED_SOURCE_ROLES:
+            raise PolicyError(
+                PolicyErrorCode.CONTEXT_VIOLATION,
+                f"Block '{block.block_id}' has disallowed source_role: '{block.source_role}'",
+            )
+        allowed_kinds = _ROLE_KIND_MAP.get(block.source_role, frozenset())
+        if block.source_kind not in allowed_kinds:
+            raise PolicyError(
+                PolicyErrorCode.CONTEXT_VIOLATION,
+                f"Block '{block.block_id}' with role '{block.source_role}' "
+                f"has disallowed source_kind: '{block.source_kind}'",
+            )
+
+        # 2. Path validation
+        if block.path is not None:
+            path_str = block.path
+            if not path_str:
+                raise PolicyError(
+                    PolicyErrorCode.CONTEXT_VIOLATION,
+                    f"Block '{block.block_id}' has empty path",
+                )
+            try:
+                encoded = path_str.encode("utf-8")
+            except UnicodeEncodeError as err:
+                raise PolicyError(
+                    PolicyErrorCode.CONTEXT_VIOLATION,
+                    f"Block '{block.block_id}' path has invalid encoding",
+                ) from err
+            if len(encoded) > 1024:
+                raise PolicyError(
+                    PolicyErrorCode.CONTEXT_VIOLATION,
+                    f"Block '{block.block_id}' path exceeds 1024 bytes limit",
+                )
+            segments = path_str.split("/")
+            if len(segments) > 128:
+                raise PolicyError(
+                    PolicyErrorCode.CONTEXT_VIOLATION,
+                    f"Block '{block.block_id}' path exceeds 128 segments limit",
+                )
+            if ".." in segments or "." in segments or any(s == "" for s in segments):
+                raise PolicyError(
+                    PolicyErrorCode.CONTEXT_VIOLATION,
+                    f"Block '{block.block_id}' path violates repository path contract: "
+                    "directory traversal or empty segment",
+                )
+            if not is_supported_path(path_str):
+                raise PolicyError(
+                    PolicyErrorCode.CONTEXT_VIOLATION,
+                    f"Block '{block.block_id}' references unsupported path",
+                )
+            if ignore_matcher is not None and ignore_matcher.match(path_str) is not None:
+                raise PolicyError(
+                    PolicyErrorCode.CONTEXT_VIOLATION,
+                    f"Block '{block.block_id}' references ignored path matching deny-set",
+                )
+
+        # 3. Revision validation
+        if block.revision is not None:
+            if (
+                block.source_role
+                in {
+                    SourceRole.DIFF,
+                    SourceRole.SOURCE_EXCERPT,
+                    SourceRole.AST_EXCERPT,
+                    SourceRole.RETRIEVED_EXCERPT,
+                }
+                or block.source_kind == "source_code"
+            ):
+                if block.side == "LEFT":
+                    diff_old_sha = (
+                        context.pr_meta.diff_old_sha
+                        if context is not None and context.pr_meta is not None
+                        else None
+                    )
+                    if not diff_old_sha or block.revision != diff_old_sha:
+                        raise PolicyError(
+                            PolicyErrorCode.CONTEXT_VIOLATION,
+                            f"Block '{block.block_id}' LEFT revision does not match "
+                            f"PR revisions: diff_old_sha '{diff_old_sha}'",
+                        )
+                else:
+                    head_sha = (
+                        context.pr_meta.head_sha
+                        if context is not None and context.pr_meta is not None
+                        else None
+                    )
+                    if head_sha is not None and block.revision != head_sha:
+                        raise PolicyError(
+                            PolicyErrorCode.CONTEXT_VIOLATION,
+                            f"Block '{block.block_id}' revision does not match "
+                            f"PR revisions: head_sha '{head_sha}'",
+                        )
+            elif (
+                block.source_role == SourceRole.POLICY_DOCUMENT
+                and snapshot is not None
+                and block.revision != snapshot.policy_base_sha
+            ):
+                raise PolicyError(
+                    PolicyErrorCode.CONTEXT_VIOLATION,
+                    f"Block '{block.block_id}' revision does not match policy_base_sha",
+                )
+
+        # 4. Policy document snapshot checks
+        if snapshot is not None:
+            if block.source_kind == "repository_rules":
+                if not snapshot.rules.is_present:
+                    raise PolicyError(
+                        PolicyErrorCode.CONTEXT_VIOLATION,
+                        "Rules block present but snapshot has no rules document",
+                    )
+                if (
+                    block.content_sha256
+                    and snapshot.rules.text_sha256
+                    and block.content_sha256 != snapshot.rules.text_sha256
+                ):
+                    raise PolicyError(
+                        PolicyErrorCode.CONTEXT_VIOLATION,
+                        "Rules block checksum mismatch with policy snapshot",
+                    )
+            elif block.source_kind == "project_conventions_document":
+                if not snapshot.agents.is_present:
+                    raise PolicyError(
+                        PolicyErrorCode.CONTEXT_VIOLATION,
+                        "Agents block present but snapshot has no agents document",
+                    )
+                if (
+                    block.content_sha256
+                    and snapshot.agents.text_sha256
+                    and block.content_sha256 != snapshot.agents.text_sha256
+                ):
+                    raise PolicyError(
+                        PolicyErrorCode.CONTEXT_VIOLATION,
+                        "Agents block checksum mismatch with policy snapshot",
+                    )
+
+
 def prompt_tokens(context: ReviewContext, counter: TokenCounter) -> int:
     """Tokens of both provider messages of the rendered prompt."""
     prompt = PromptBuilder().build_prompt(context)
@@ -194,10 +495,16 @@ def fit_review_context(
 class _FileLengths:
     """Exact rendered lengths of a file and each possible line prefix."""
 
-    def __init__(self, file: ChangedFile) -> None:
+    def __init__(self, file: ChangedFile, *, include_block_id: bool = False) -> None:
         self.file = file
-        self.whole = len(render_changed_file(file))
-        self.empty = len(render_changed_file(replace(file, lines=(), total_lines=None)))
+        self.include_block_id = include_block_id
+        self.whole = len(render_changed_file(file, include_block_id=include_block_id))
+        self.empty = len(
+            render_changed_file(
+                replace(file, lines=(), total_lines=None),
+                include_block_id=include_block_id,
+            )
+        )
         prefix = [0]
         for line in file.lines:
             prefix.append(prefix[-1] + len(render_changed_line(line)))
@@ -222,10 +529,11 @@ class _PromptLengths:
     def __init__(
         self, context: ReviewContext, files: tuple[ChangedFile, ...], counter: TokenCounter
     ) -> None:
+        include_block_id = context.policy_snapshot is not None
         empty = replace(context, changed_files=(), omitted_files=())
         self.base_user = len(PromptBuilder().render_input(empty))
         self.system_tokens = counter.count(context.system)
-        self.files = tuple(_FileLengths(file) for file in files)
+        self.files = tuple(_FileLengths(file, include_block_id=include_block_id) for file in files)
         self.omitted_paths = tuple(len(xml_text(file.path)) for file in files)
         self.original_omitted = tuple(len(xml_text(path)) for path in context.omitted_files)
 

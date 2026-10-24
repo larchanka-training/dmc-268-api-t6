@@ -30,6 +30,7 @@ from app.modules.reviews.application.policy_snapshot import (
     PolicySnapshot,
     PromptBindings,
 )
+from app.modules.reviews.application.prompt_budget import validate_execution_profile_versions
 from app.modules.reviews.application.review_ignore import (
     BUILTIN_EXCLUSIONS_VERSION,
     LIMITS_VERSION,
@@ -161,10 +162,12 @@ class PreparePolicySnapshot:
         async with self._uow_factory() as uow:
             snapshot = await uow.policy.get_snapshot(run_id)
             if snapshot is not None:
+                validate_execution_profile_versions(snapshot.execution_profile)
                 return snapshot
             pins = await uow.policy.get_pins(run_id)
             if pins is None:
                 raise LookupError(f"run {run_id} has no pinned policy versions")
+            validate_execution_profile_versions(pins.execution_profile)
             staged = await uow.policy.get_staged_documents(run_id)
 
         if {item.document.path for item in staged} != {RULES_DOCUMENT_PATH, AGENTS_DOCUMENT_PATH}:

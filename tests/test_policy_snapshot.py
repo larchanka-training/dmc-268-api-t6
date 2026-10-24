@@ -303,7 +303,7 @@ def test_call_manifest_tracks_shown_ranges() -> None:
     block1 = ManifestBlock(
         block_id="code-1",
         source_role=SourceRole.DIFF,
-        source_kind="diff",
+        source_kind="source_code",
         path="app/service.py",
         start_line=10,
         end_line=25,

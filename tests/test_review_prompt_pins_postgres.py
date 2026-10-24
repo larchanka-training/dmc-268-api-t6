@@ -30,6 +30,9 @@ from app.modules.reviews.infrastructure.policy_snapshot_unit_of_work import (
 from app.modules.reviews.infrastructure.review_prompt_repository import (
     SqlAlchemyReviewPromptRepository,
 )
+from app.modules.reviews.infrastructure.run_repository import (
+    SqlAlchemyReviewOutputRepository,
+)
 from tests.portal_postgres import PROMPT, REPO_A, RUN_ATTEMPTED, Env, portal_schema
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -79,7 +82,11 @@ def test_v2_run_and_persisted_snapshot_retain_their_prompt_after_v3_activation(
                 await session.execute(
                     text("UPDATE runs SET state='running' WHERE id=:id"), {"id": RUN_ATTEMPTED}
                 )
-                assert await seed_prompt_versions(session, legacy_assets) == 4
+                await session.execute(
+                    text("UPDATE repositories SET severity_threshold='critical' WHERE id=:repo_id"),
+                    {"repo_id": REPO_A},
+                )
+                assert await seed_prompt_versions(session, legacy_assets) == 5
             async with factory() as session:
                 conventions_id = (
                     await session.scalars(
@@ -93,6 +100,8 @@ def test_v2_run_and_persisted_snapshot_retain_their_prompt_after_v3_activation(
             )
             before = await repository.get_review_prompt_input(RUN_ATTEMPTED, conventions)
             assert before is not None and before.system == v2_content
+            assert before.severity_threshold == "critical"
+            assert before.policy_snapshot is None
             rules = missing_document(RULES_DOCUMENT_PATH)
             agents = missing_document(AGENTS_DOCUMENT_PATH)
             async with uow() as work:
@@ -136,6 +145,12 @@ def test_v2_run_and_persisted_snapshot_retain_their_prompt_after_v3_activation(
             after = await repository.get_review_prompt_input(RUN_ATTEMPTED, conventions)
             assert after == before
             assert after is not None and after.system == v2_content
+            assert after.severity_threshold == "critical"
+            async with factory() as session:
+                reviews_repo = SqlAlchemyReviewOutputRepository(session=session)
+                post_input = await reviews_repo.get_post_processing_input(RUN_ATTEMPTED)
+                assert post_input is not None
+                assert post_input.severity_threshold == "critical"
             async with uow() as work:
                 after_pins = await work.policy.get_pins(RUN_ATTEMPTED)
                 assert after_pins is not None

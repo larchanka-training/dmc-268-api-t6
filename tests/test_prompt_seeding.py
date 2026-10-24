@@ -61,6 +61,7 @@ def test_load_prompt_assets_preserves_full_file_and_checksum() -> None:
         ("review.system", 2),
         ("review.system", 3),
         ("review.verifier", 1),
+        ("review.verifier", 2),
     ]
     for asset in assets:
         expected_content = (prompts_dir / f"{asset.key}.v{asset.version}.md").read_text(
@@ -139,7 +140,7 @@ def test_first_seed_makes_the_newest_version_of_each_prompt_active(
                     .order_by(PromptVersion.key)
                 )
                 active_versions = [(key, version) for key, version in rows.tuples().all()]
-                assert inserted == 6
+                assert inserted == 7
                 return active_versions
         finally:
             await engine.dispose()
@@ -147,7 +148,7 @@ def test_first_seed_makes_the_newest_version_of_each_prompt_active(
     assert asyncio.run(seed_and_read_active_versions()) == [
         ("review.conventions", 2),
         ("review.system", 3),
-        ("review.verifier", 1),
+        ("review.verifier", 2),
     ]
 
 
@@ -215,7 +216,7 @@ def test_full_seed_upgrades_v2_to_v3_once_and_preserves_old_content(
         factory = async_sessionmaker(engine, expire_on_commit=False)
         try:
             async with factory.begin() as session:
-                assert await seed_prompt_versions(session, legacy_assets) == 5
+                assert await seed_prompt_versions(session, legacy_assets) == 6
             async with factory() as session:
                 old = (
                     await session.scalars(
@@ -233,7 +234,7 @@ def test_full_seed_upgrades_v2_to_v3_once_and_preserves_old_content(
             # Read persisted rows through a fresh session, after both commits.
             async with factory() as session:
                 rows = list((await session.scalars(select(PromptVersion))).all())
-                assert len(rows) == 6
+                assert len(rows) == 7
                 active = [row for row in rows if row.key == "review.system" and row.is_active]
                 assert len(active) == 1
                 assert (active[0].version, active[0].content, active[0].checksum) == (
@@ -273,7 +274,7 @@ def test_seed_rejects_changed_v2_without_overwriting_its_persisted_content(
         factory = async_sessionmaker(engine, expire_on_commit=False)
         try:
             async with factory.begin() as session:
-                assert await seed_prompt_versions(session, assets) == 6
+                assert await seed_prompt_versions(session, assets) == 7
             with pytest.raises(ValueError, match=r"immutable prompt changed: review\.system\.v2"):
                 async with factory.begin() as session:
                     await seed_prompt_versions(session, (tampered,))

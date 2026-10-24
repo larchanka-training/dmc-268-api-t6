@@ -1075,3 +1075,302 @@ def test_filtered_source_drops_a_withheld_file_even_if_the_inner_source_returns_
     files = asyncio.run(filtered.fetch_files(REPOSITORY_ID, ("app/main.py", "web/app.ts")))
 
     assert [file.path for file in files] == ["app/main.py"]
+
+
+def test_conventions_provenance_guard_rejects_directory_traversal() -> None:
+    from app.modules.reviews.application.policy_errors import PolicyError, PolicyErrorCode
+
+    class TraversalSource(FakeSource):
+        async def fetch_tree(self, repository_id: UUID) -> tuple[RepositoryFile, ...]:
+            return (RepositoryFile("../secret.py", 50),)
+
+        async def fetch_files(
+            self, repository_id: UUID, paths: tuple[str, ...]
+        ) -> tuple[RepositoryFile, ...]:
+            return (RepositoryFile("../secret.py", 10, content="secret"),)
+
+    model = FakeModel(draft())
+    store = FakeStore()
+    factory = FakeUnitOfWorkFactory(store)
+
+    with pytest.raises(PolicyError) as exc_info:
+        asyncio.run(
+            GenerateRepoConventions(TraversalSource(), model, factory).execute(
+                repository_id=REPOSITORY_ID,
+                conventions_prompt=ActiveConventionsPrompt(PROMPT_VERSION_ID, "conventions v1"),
+                run_id=RUN_ID,
+                changed_files=("app/main.py",),
+            )
+        )
+    assert exc_info.value.code == PolicyErrorCode.CONTEXT_VIOLATION
+    assert "directory traversal" in exc_info.value.message
+    # Pre-send guard stops call BEFORE model is invoked!
+    assert len(model.calls) == 0
+
+
+def test_conventions_provenance_guard_rejects_disallowed_file_in_tree_only() -> None:
+    from app.modules.reviews.application.policy_errors import PolicyError, PolicyErrorCode
+
+    class TreeDisallowedSource(FakeSource):
+        async def fetch_tree(self, repository_id: UUID) -> tuple[RepositoryFile, ...]:
+            return (
+                RepositoryFile("app/main.py", 60),
+                RepositoryFile("../secret.py", 50),
+            )
+
+        async def fetch_files(
+            self, repository_id: UUID, paths: tuple[str, ...]
+        ) -> tuple[RepositoryFile, ...]:
+            return (RepositoryFile("app/main.py", 10, content="ok"),)
+
+    model = FakeModel(draft())
+    store = FakeStore()
+    factory = FakeUnitOfWorkFactory(store)
+
+    with pytest.raises(PolicyError) as exc_info:
+        asyncio.run(
+            GenerateRepoConventions(TreeDisallowedSource(), model, factory).execute(
+                repository_id=REPOSITORY_ID,
+                conventions_prompt=ActiveConventionsPrompt(PROMPT_VERSION_ID, "conventions v1"),
+                run_id=RUN_ID,
+                changed_files=("app/main.py",),
+            )
+        )
+    assert exc_info.value.code == PolicyErrorCode.CONTEXT_VIOLATION
+    assert len(model.calls) == 0
+
+
+def test_conventions_execution_with_passed_snapshot_and_agents_md() -> None:
+    from dataclasses import replace
+
+    from app.modules.reviews.application.llm import RunCallContext
+    from app.modules.reviews.application.policy_snapshot import (
+        CallManifest,
+        ExecutionProfile,
+        PolicySnapshot,
+        PromptBindings,
+        make_policy_document_missing,
+        make_policy_document_present,
+    )
+    from app.modules.reviews.infrastructure.llm.models import GatewayConventionsModel
+
+    agents_content = "Always use uv.\r\nSecond line.\r\n"
+
+    class CrlfSource(FakeSource):
+        async def fetch_agents_md(self, repository_id: UUID) -> RepositorySnapshot:
+            assert repository_id == REPOSITORY_ID
+            self.calls.append("agents")
+            return RepositorySnapshot(content=agents_content, sha=AGENTS_SHA)
+
+    snapshot = PolicySnapshot(
+        schema_version=1,
+        snapshot_id=uuid4(),
+        run_id=RUN_ID,
+        repository_id=REPOSITORY_ID,
+        policy_base_sha="base_commit_sha_distinct_from_agents_blob",
+        rules=make_policy_document_missing(".review/rules.md"),
+        agents=make_policy_document_present("AGENTS.md", agents_content),
+        ignore_patterns=(),
+        ignore_digest="id_0",
+        parser_profile="rules-markdown/v1",
+        parser_version="4.0.0",
+        matcher_version="review-ignore/v1",
+        limits_version="policy-limits/v1",
+        builtin_exclusions_version="builtin-exclusions/v1",
+        priority_matcher_version="priority-matcher/v1",
+        service_defaults_rule_version_id=uuid4(),
+        defaults_checksum="282d61c2da897152046db742fbd9bfda061ba1c71ce32759d47e042c06b0ff52",
+        prompt_bindings=PromptBindings("cs1", "cs2", "cs3"),
+        execution_profile=ExecutionProfile.fast("m1", "m2"),
+        policy_digest="digest_base",
+    )
+
+    model = FakeModel(draft())
+    store = FakeStore()
+    factory = FakeUnitOfWorkFactory(store)
+
+    result = asyncio.run(
+        GenerateRepoConventions(CrlfSource(), model, factory).execute(
+            repository_id=REPOSITORY_ID,
+            conventions_prompt=ActiveConventionsPrompt(PROMPT_VERSION_ID, "conventions v1"),
+            run_id=RUN_ID,
+            changed_files=("app/main.py",),
+            snapshot=snapshot,
+        )
+    )
+    assert result.agents_md == agents_content
+    assert len(model.calls) == 1
+    assert model.calls[0].snapshot is snapshot
+
+    # Verify GatewayConventionsModel builds manifest AFTER fit_conventions_request
+    captured_manifests: list[CallManifest | None] = []
+
+    class FakeGateway:
+        def max_prompt_tokens(self, engine: object = None) -> int:
+            return 300
+
+        def token_counter(self) -> HeuristicTokenCounter:
+            return HeuristicTokenCounter(3.0)
+
+        async def generate(self, task: object, run: object) -> object:
+            captured_manifests.append(getattr(task, "base_manifest", None))
+
+            class Resp:
+                output = draft()
+
+            return Resp()
+
+    from app.modules.reviews.application.prompt_budget import token_counter_for
+    from app.modules.reviews.infrastructure.llm.gateway import HeuristicTokenCounter
+
+    conv_req = model.calls[0]
+    large_tree = tuple(f"app/sub_{i}/file_{i}.py" for i in range(100))
+    conv_req_large = replace(
+        conv_req,
+        repo_tree=large_tree,
+    )
+    run_ctx = RunCallContext(
+        run_id=RUN_ID,
+        workspace_id=uuid4(),
+        attempt=1,
+        engine="fast",
+        deadline=datetime(2026, 10, 23, 18, 0, tzinfo=UTC),
+    )
+    gw_model = GatewayConventionsModel(FakeGateway(), run_ctx)  # type: ignore[arg-type]
+    asyncio.run(gw_model.draft_conventions(request=conv_req_large))
+    assert len(captured_manifests) == 1
+    manifest = captured_manifests[0]
+    assert manifest is not None
+    counter = token_counter_for(snapshot.execution_profile.counter_version)
+    fitted = fit_conventions_request(conv_req_large, max_prompt_tokens=300, counter=counter)
+    assert len(fitted.repo_tree) < len(large_tree)
+    tree_blocks = [b for b in manifest.blocks if b.block_id.startswith("tree-")]
+    assert len(tree_blocks) == len(fitted.repo_tree)
+    assert len(tree_blocks) < len(large_tree)
+
+
+def test_conventions_execution_with_bom_and_lone_cr_in_agents_md() -> None:
+    from app.modules.reviews.application.policy_documents import normalize_document
+    from app.modules.reviews.application.policy_snapshot import (
+        ExecutionProfile,
+        PolicySnapshot,
+        PromptBindings,
+        make_policy_document_missing,
+        make_policy_document_present,
+    )
+
+    raw_agents_bytes = b"\xef\xbb\xbfAlways use uv.\rLone CR line.\r\nCRLF line.\n"
+    normalized_agents = normalize_document("AGENTS.md", raw_agents_bytes, blob_oid="blob_oid_123")
+
+    class RawAgentsSource(FakeSource):
+        async def fetch_agents_md(self, repository_id: UUID) -> RepositorySnapshot:
+            # Source returns string containing BOM and lone CR
+            content = raw_agents_bytes.decode("utf-8")
+            return RepositorySnapshot(content=content, sha=AGENTS_SHA)
+
+    snapshot = PolicySnapshot(
+        schema_version=1,
+        snapshot_id=uuid4(),
+        run_id=RUN_ID,
+        repository_id=REPOSITORY_ID,
+        policy_base_sha="base_commit_sha",
+        rules=make_policy_document_missing(".review/rules.md"),
+        agents=make_policy_document_present("AGENTS.md", normalized_agents.text or ""),
+        ignore_patterns=(),
+        ignore_digest="id_0",
+        parser_profile="rules-markdown/v1",
+        parser_version="4.0.0",
+        matcher_version="review-ignore/v1",
+        limits_version="policy-limits/v1",
+        builtin_exclusions_version="builtin-exclusions/v1",
+        priority_matcher_version="priority-matcher/v1",
+        service_defaults_rule_version_id=uuid4(),
+        defaults_checksum="282d61c2da897152046db742fbd9bfda061ba1c71ce32759d47e042c06b0ff52",
+        prompt_bindings=PromptBindings("cs1", "cs2", "cs3"),
+        execution_profile=ExecutionProfile.fast("m1", "m2"),
+        policy_digest="digest_base",
+    )
+
+    model = FakeModel(draft())
+    store = FakeStore()
+    factory = FakeUnitOfWorkFactory(store)
+
+    _ = asyncio.run(
+        GenerateRepoConventions(RawAgentsSource(), model, factory).execute(
+            repository_id=REPOSITORY_ID,
+            conventions_prompt=ActiveConventionsPrompt(PROMPT_VERSION_ID, "conventions v1"),
+            run_id=RUN_ID,
+            changed_files=("app/main.py",),
+            snapshot=snapshot,
+        )
+    )
+    assert len(model.calls) == 1
+    req = model.calls[0]
+    assert req.snapshot is snapshot
+
+
+def test_draft_conventions_counter_v1_matches_transport() -> None:
+    import json
+    from dataclasses import replace
+
+    import httpx
+
+    from app.modules.reviews.application.policy_snapshot import (
+        ExecutionProfile,
+        PolicySnapshot,
+        PromptBindings,
+        make_policy_document_missing,
+    )
+    from app.modules.reviews.infrastructure.llm.models import GatewayConventionsModel
+    from tests.test_llm_gateway import Harness, completion
+
+    snapshot = PolicySnapshot(
+        schema_version=1,
+        snapshot_id=uuid4(),
+        run_id=RUN_ID,
+        repository_id=REPOSITORY_ID,
+        policy_base_sha="base_commit_sha",
+        rules=make_policy_document_missing(".review/rules.md"),
+        agents=make_policy_document_missing("AGENTS.md"),
+        ignore_patterns=(),
+        ignore_digest="id_0",
+        parser_profile="rules-markdown/v1",
+        parser_version="4.0.0",
+        matcher_version="review-ignore/v1",
+        limits_version="policy-limits/v1",
+        builtin_exclusions_version="builtin-exclusions/v1",
+        priority_matcher_version="priority-matcher/v1",
+        service_defaults_rule_version_id=uuid4(),
+        defaults_checksum="282d61c2da897152046db742fbd9bfda061ba1c71ce32759d47e042c06b0ff52",
+        prompt_bindings=PromptBindings("cs1", "cs2", "cs3"),
+        execution_profile=replace(ExecutionProfile.fast("m1", "m2"), counter_version="counter/v1"),
+        policy_digest="digest_base",
+    )
+
+    tree = tuple(f"app/path_{i:04d}/module_{i:04d}.py" for i in range(1, 10000))
+    req_v1 = ConventionsRequest(
+        system="SYS",
+        rules=(),
+        agents_md=None,
+        repo_tree=tree,
+        repo_files=(),
+        languages={},
+        changed_files=("app/main.py",),
+        snapshot=snapshot,
+    )
+
+    harness = Harness([completion(json.dumps(draft()))])
+
+    async def exercise() -> None:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(harness._handle)) as client:
+            gw = harness.gateway(client)
+            model = GatewayConventionsModel(gw, harness.run)
+            await model.draft_conventions(request=req_v1)
+
+    asyncio.run(exercise())
+    body = json.loads(harness.requests[0].content)
+    text = body["messages"][1]["content"]
+    tree_count = text.count("module_")
+    # 8129 paths fitted under counter/v1 (vs 6095 under counter/v2)
+    assert tree_count == 8129
+    assert tree_count > 6095

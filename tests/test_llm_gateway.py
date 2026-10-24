@@ -3136,3 +3136,317 @@ def test_retirement_after_pricing_does_not_consume_provider_attempt_budget() -> 
             assert len(ledger.events) == 1
 
     asyncio.run(exercise())
+
+
+def test_gateway_repair_and_fallback_enforce_provenance_pre_send_guard(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import uuid as uuid_mod
+
+    import app.modules.reviews.infrastructure.llm.gateway as gw_mod
+    from app.modules.reviews.application.policy_errors import PolicyError, PolicyErrorCode
+    from app.modules.reviews.application.policy_snapshot import (
+        CallManifest,
+        ExecutionProfile,
+        ManifestBlock,
+        PolicySnapshot,
+        PromptBindings,
+        SourceRole,
+        make_policy_document_missing,
+    )
+    from app.modules.reviews.application.prompt_budget import verify_provenance_pre_send_guard
+    from app.modules.reviews.infrastructure.llm.answers import (
+        provider_schema,
+        review_output_schema,
+        validate_review_answer,
+    )
+
+    snapshot = PolicySnapshot(
+        schema_version=1,
+        snapshot_id=uuid_mod.uuid4(),
+        run_id=RUN_ID,
+        repository_id=uuid_mod.uuid4(),
+        policy_base_sha="sha_base",
+        rules=make_policy_document_missing(".review/rules.md"),
+        agents=make_policy_document_missing("AGENTS.md"),
+        ignore_patterns=("secret/**",),
+        ignore_digest="id_0",
+        parser_profile="rules-markdown/v1",
+        parser_version="4.0.0",
+        matcher_version="review-ignore/v1",
+        limits_version="policy-limits/v1",
+        builtin_exclusions_version="builtin-exclusions/v1",
+        priority_matcher_version="priority-matcher/v1",
+        service_defaults_rule_version_id=uuid_mod.uuid4(),
+        defaults_checksum="282d61c2da897152046db742fbd9bfda061ba1c71ce32759d47e042c06b0ff52",
+        prompt_bindings=PromptBindings("cs1", "cs2", "cs3"),
+        execution_profile=ExecutionProfile.fast("m1", "m2"),
+        policy_digest="digest_base",
+    )
+
+    seen_manifests: list[CallManifest] = []
+
+    def spy_guard(
+        manifest: CallManifest,
+        *,
+        context: object = None,
+        snapshot: PolicySnapshot | None = None,
+    ) -> None:
+        seen_manifests.append(manifest)
+        verify_provenance_pre_send_guard(manifest, context=context, snapshot=snapshot)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(gw_mod, "verify_provenance_pre_send_guard", spy_guard)
+
+    # 1. Primary returns invalid JSON -> repair returns invalid JSON -> fallback returns valid JSON
+    harness = Harness(
+        [completion("{bad-json"), completion("{still-bad-json"), valid(model="fallback-model")]
+    )
+    base_manifest = CallManifest(
+        call_id=uuid_mod.uuid4(),
+        run_id=RUN_ID,
+        stage="review",
+        recovery_kind="none",
+        blocks=(
+            ManifestBlock(
+                block_id="file-1",
+                source_role=SourceRole.DIFF,
+                source_kind="source_code",
+                path="app/service.py",
+            ),
+        ),
+    )
+
+    async def run_repair_and_fallback() -> None:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(harness._handle)) as client:
+            gateway = harness.gateway(client)
+            task = StructuredTask(
+                operation="review",
+                messages=(ChatMessage("system", "SYS"), ChatMessage("user", "USER")),
+                schema=ResponseSchema("ReviewOutput", provider_schema(review_output_schema())),
+                validate=validate_review_answer,
+                base_manifest=base_manifest,
+                review_context=CONTEXT,
+                policy_snapshot=snapshot,
+            )
+            await gateway.generate(task, harness.run)
+
+    asyncio.run(run_repair_and_fallback())
+    assert [m.recovery_kind for m in seen_manifests] == ["repair", "fallback"]
+    repair_manifest = seen_manifests[0]
+    prev_blocks = [b for b in repair_manifest.blocks if b.block_id == "previous-output"]
+    assert len(prev_blocks) == 1
+    assert prev_blocks[0].source_role == SourceRole.PREVIOUS_OUTPUT
+    assert prev_blocks[0].source_kind == "previous_model_output"
+
+    # 2. Disallowed block in manifest aborts repair BEFORE repair transport call is sent
+    harness_blocked = Harness([completion("{bad-json"), valid()])
+    bad_manifest = CallManifest(
+        call_id=uuid_mod.uuid4(),
+        run_id=RUN_ID,
+        stage="review",
+        recovery_kind="none",
+        blocks=(
+            ManifestBlock(
+                block_id="file-secret",
+                source_role=SourceRole.DIFF,
+                source_kind="source_code",
+                path="secret/creds.py",
+            ),
+        ),
+    )
+
+    async def run_blocked_repair() -> None:
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(harness_blocked._handle)
+        ) as client:
+            gateway = harness_blocked.gateway(client)
+            task = StructuredTask(
+                operation="review",
+                messages=(ChatMessage("system", "SYS"), ChatMessage("user", "USER")),
+                schema=ResponseSchema("ReviewOutput", provider_schema(review_output_schema())),
+                validate=validate_review_answer,
+                base_manifest=bad_manifest,
+                review_context=CONTEXT,
+                policy_snapshot=snapshot,
+            )
+            await gateway.generate(task, harness_blocked.run)
+
+    with pytest.raises(PolicyError) as exc_info:
+        asyncio.run(run_blocked_repair())
+    assert exc_info.value.code == PolicyErrorCode.CONTEXT_VIOLATION
+    # Primary call happened, but repair transport call was blocked!
+    assert len(harness_blocked.requests) == 1
+
+    # 3. Disallowed block in manifest aborts fallback BEFORE fallback transport call is sent
+    default_settings = harness.settings or LlmSettings(primary=PRIMARY, fallback=FALLBACK)
+    settings_2calls = replace(
+        default_settings,
+        policy=replace(default_settings.policy, max_calls_per_attempt=2),
+    )
+    harness_fallback_blocked = Harness(
+        [completion("{bad-json"), valid(model="fallback-model")],
+        settings=settings_2calls,
+    )
+
+    async def run_blocked_fallback() -> None:
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(harness_fallback_blocked._handle)
+        ) as client:
+            gateway = harness_fallback_blocked.gateway(client)
+            task = StructuredTask(
+                operation="review",
+                messages=(ChatMessage("system", "SYS"), ChatMessage("user", "USER")),
+                schema=ResponseSchema("ReviewOutput", provider_schema(review_output_schema())),
+                validate=validate_review_answer,
+                base_manifest=bad_manifest,
+                review_context=CONTEXT,
+                policy_snapshot=snapshot,
+            )
+            await gateway.generate(task, harness_fallback_blocked.run)
+
+    with pytest.raises(PolicyError) as exc_fallback_info:
+        asyncio.run(run_blocked_fallback())
+    assert exc_fallback_info.value.code == PolicyErrorCode.CONTEXT_VIOLATION
+    # Primary call happened (1 call), but fallback transport call was blocked!
+    assert len(harness_fallback_blocked.requests) == 1
+
+    # 4. GatewayReviewModel / review_with_gateway forwards base_manifest and produces
+    # repair and fallback manifests with stage="review"
+    from app.modules.reviews.infrastructure.llm.models import review_with_gateway
+
+    seen_gateway_manifests: list[CallManifest] = []
+
+    def spy_review_guard(
+        manifest: CallManifest,
+        *,
+        context: object = None,
+        snapshot: PolicySnapshot | None = None,
+    ) -> None:
+        seen_gateway_manifests.append(manifest)
+        verify_provenance_pre_send_guard(manifest, context=context, snapshot=snapshot)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(gw_mod, "verify_provenance_pre_send_guard", spy_review_guard)
+    from app.modules.reviews.infrastructure.llm import models as models_mod
+
+    monkeypatch.setattr(models_mod, "verify_provenance_pre_send_guard", spy_review_guard)
+
+    harness_review = Harness(
+        [completion("{bad-json"), completion("{still-bad-json"), valid(model="fallback-model")]
+    )
+    review_context = replace(CONTEXT, policy_snapshot=snapshot)
+
+    async def run_review_with_gateway() -> None:
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(harness_review._handle)
+        ) as client:
+            gateway = harness_review.gateway(client)
+            await review_with_gateway(gateway, review_context, harness_review.run)
+
+    asyncio.run(run_review_with_gateway())
+    review_manifest_kinds = [m.recovery_kind for m in seen_gateway_manifests if m.stage == "review"]
+    assert "none" in review_manifest_kinds
+    assert "repair" in review_manifest_kinds
+    assert "fallback" in review_manifest_kinds
+
+
+def test_gateway_does_not_retain_manifests_across_calls() -> None:
+    import uuid
+
+    from app.modules.reviews.application.policy_snapshot import CallManifest
+    from app.modules.reviews.infrastructure.llm.answers import (
+        provider_schema,
+        review_output_schema,
+        validate_review_answer,
+    )
+
+    harness = Harness([valid()] * 20)
+    base_manifest = CallManifest(
+        call_id=uuid.uuid4(),
+        run_id=RUN_ID,
+        stage="review",
+        recovery_kind="none",
+        blocks=(),
+    )
+
+    async def exercise() -> None:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(harness._handle)) as client:
+            gateway = harness.gateway(client)
+            for _ in range(10):
+                task = StructuredTask(
+                    operation="review",
+                    messages=(ChatMessage("system", "SYS"), ChatMessage("user", "USER")),
+                    schema=ResponseSchema("ReviewOutput", provider_schema(review_output_schema())),
+                    validate=validate_review_answer,
+                    base_manifest=base_manifest,
+                )
+                run_context = replace(harness.run, run_id=uuid.uuid4())
+                await gateway.generate(task, run_context)
+
+            assert not hasattr(gateway, "manifests")
+            assert not hasattr(gateway, "last_manifest")
+
+    asyncio.run(exercise())
+
+
+def test_review_with_gateway_counter_v1_matches_transport() -> None:
+    import uuid
+
+    from app.modules.reviews.application.policy_snapshot import (
+        ExecutionProfile,
+        PolicySnapshot,
+        PromptBindings,
+        make_policy_document_missing,
+    )
+    from app.modules.reviews.infrastructure.llm.models import review_with_gateway
+
+    snapshot = PolicySnapshot(
+        schema_version=1,
+        snapshot_id=uuid.uuid4(),
+        run_id=RUN_ID,
+        repository_id=uuid.uuid4(),
+        policy_base_sha="sha_base",
+        rules=make_policy_document_missing(".review/rules.md"),
+        agents=make_policy_document_missing("AGENTS.md"),
+        ignore_patterns=(),
+        ignore_digest="id_0",
+        parser_profile="rules-markdown/v1",
+        parser_version="4.0.0",
+        matcher_version="review-ignore/v1",
+        limits_version="policy-limits/v1",
+        builtin_exclusions_version="builtin-exclusions/v1",
+        priority_matcher_version="priority-matcher/v1",
+        service_defaults_rule_version_id=uuid.uuid4(),
+        defaults_checksum="282d61c2da897152046db742fbd9bfda061ba1c71ce32759d47e042c06b0ff52",
+        prompt_bindings=PromptBindings("cs1", "cs2", "cs3"),
+        execution_profile=replace(
+            ExecutionProfile.fast("m1", "m2"),
+            counter_version="counter/v1",
+            max_input_tokens=32768,
+        ),
+        policy_digest="digest_base",
+    )
+
+    lines = tuple(
+        DiffLine(i, "added", f"line_{i:04d} = test_line_value_here") for i in range(1, 2500)
+    )
+    context_v1 = replace(
+        CONTEXT,
+        changed_files=(ChangedFile("app/service.py", "modified", lines),),
+        policy_snapshot=snapshot,
+    )
+
+    harness = Harness([valid()])
+
+    async def exercise() -> None:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(harness._handle)) as client:
+            gateway = harness.gateway(client)
+            await review_with_gateway(gateway, context_v1, harness.run)
+
+    asyncio.run(exercise())
+    body = json.loads(harness.requests[0].content)
+    text = body["messages"][1]["content"]
+    file_text = text.partition('path="app/service.py"')[2].partition("</file>")[0]
+    service_lines = file_text.count("<line n=")
+    # 1460 lines of app/service.py fitted under counter/v1 (vs 1095 under counter/v2)
+    assert service_lines == 1460
+    assert service_lines > 1100
