@@ -2,6 +2,7 @@
 
 A review reads the state row of its repository under the effective RAG condition and
 never waits for a build: a row another session holds is read as committed, with no write.
+A writer of the repository row is waited for only until the gate's lock timeout.
 Under its own lock the review requests an update of a `stale` index and a full of a live
 `empty` one (at most once a day and once per target, never while a build holds the lease),
 brings a TTL-purged index back in a new generation, and extends `last_used_at` at most once
@@ -17,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import time
 from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import datetime
@@ -26,6 +28,7 @@ from uuid import UUID, uuid4
 
 import pytest
 from sqlalchemy import create_engine, text
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.pool import NullPool
 from sqlalchemy.schema import CreateSchema, DropSchema
@@ -583,6 +586,35 @@ def test_rag_off_is_read_without_waiting_for_a_writer_of_the_repository(
             assert await asyncio.wait_for(_review(index, index.a), 5) == RagReadiness(enabled=False)
             await holder.rollback()
 
+        assert await _row(index, index.a) == before
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.integration
+def test_rag_on_waits_for_a_writer_of_the_repository_only_until_the_lock_timeout(
+    reviews: _Reviews,
+) -> None:
+    async def scenario() -> None:
+        index = reviews.index
+        await _stale(index, index.a)
+        before = await _row(index, index.a)
+
+        async with index.factory() as holder:
+            # A long writer of the repository row in flight, with RAG on.
+            await holder.execute(
+                text("SELECT 1 FROM repositories WHERE id = :repository FOR UPDATE"),
+                {"repository": index.a},
+            )
+            started = time.monotonic()
+            with pytest.raises(OperationalError) as caught:
+                await asyncio.wait_for(_review(index, index.a), 5)
+            waited = time.monotonic() - started
+            await holder.rollback()
+
+        # The gate fails after its 2 s lock timeout, well before the run deadline.
+        assert getattr(caught.value.orig, "sqlstate", None) == "55P03"
+        assert 1.5 <= waited < 4
         assert await _row(index, index.a) == before
 
     asyncio.run(scenario())
