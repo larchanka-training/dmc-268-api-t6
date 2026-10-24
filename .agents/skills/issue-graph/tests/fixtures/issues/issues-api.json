@@ -1,0 +1,148 @@
+{
+  "data": {
+    "repository": {
+      "i31": {
+        "id": "I_kwDOEIOM8AAAABAPI0031",
+        "number": 31,
+        "title": "[import] Парсер ссылок на задачи",
+        "state": "OPEN",
+        "repository": {
+          "nameWithOwner": "larchanka-training/dmc-268-api-t6"
+        },
+        "parent": {
+          "number": 30,
+          "repository": {
+            "nameWithOwner": "larchanka-training/dmc-268-api-t6"
+          }
+        },
+        "blockedBy": {
+          "totalCount": 0,
+          "pageInfo": {
+            "hasNextPage": false,
+            "endCursor": null
+          },
+          "nodes": []
+        },
+        "blocking": {
+          "totalCount": 1,
+          "pageInfo": {
+            "hasNextPage": false,
+            "endCursor": "MQ"
+          },
+          "nodes": [
+            {
+              "number": 9,
+              "title": "[ui] Экран импорта задач",
+              "state": "OPEN",
+              "repository": {
+                "nameWithOwner": "larchanka-training/dmc-268-ui-t6"
+              }
+            }
+          ]
+        },
+        "projectItems": {
+          "nodes": [
+            {
+              "project": {
+                "number": 12,
+                "owner": {
+                  "login": "larchanka-training"
+                }
+              },
+              "fieldValueByName": {
+                "name": "In Progress"
+              }
+            }
+          ]
+        }
+      },
+      "i32": {
+        "id": "I_kwDOEIOM8AAAABAPI0032",
+        "number": 32,
+        "title": "[import] Тесты парсера ссылок",
+        "state": "OPEN",
+        "repository": {
+          "nameWithOwner": "larchanka-training/dmc-268-api-t6"
+        },
+        "parent": {
+          "number": 31,
+          "repository": {
+            "nameWithOwner": "larchanka-training/dmc-268-api-t6"
+          }
+        },
+        "blockedBy": {
+          "totalCount": 0,
+          "pageInfo": {
+            "hasNextPage": false,
+            "endCursor": null
+          },
+          "nodes": []
+        },
+        "blocking": {
+          "totalCount": 0,
+          "pageInfo": {
+            "hasNextPage": false,
+            "endCursor": null
+          },
+          "nodes": []
+        },
+        "projectItems": {
+          "nodes": [
+            {
+              "project": {
+                "number": 12,
+                "owner": {
+                  "login": "larchanka-training"
+                }
+              },
+              "fieldValueByName": {
+                "name": "Todo"
+              }
+            }
+          ]
+        }
+      },
+      "i30": {
+        "id": "I_kwDOEIOM8AAAABAPI0030",
+        "number": 30,
+        "title": "[epic] Импорт задач из трекера",
+        "state": "OPEN",
+        "repository": {
+          "nameWithOwner": "larchanka-training/dmc-268-api-t6"
+        },
+        "parent": null,
+        "blockedBy": {
+          "totalCount": 0,
+          "pageInfo": {
+            "hasNextPage": false,
+            "endCursor": null
+          },
+          "nodes": []
+        },
+        "blocking": {
+          "totalCount": 0,
+          "pageInfo": {
+            "hasNextPage": false,
+            "endCursor": null
+          },
+          "nodes": []
+        },
+        "projectItems": {
+          "nodes": [
+            {
+              "project": {
+                "number": 12,
+                "owner": {
+                  "login": "larchanka-training"
+                }
+              },
+              "fieldValueByName": {
+                "name": "Todo"
+              }
+            }
+          ]
+        }
+      }
+    }
+  }
+}

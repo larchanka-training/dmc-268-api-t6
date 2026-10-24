@@ -1,0 +1,66 @@
+{
+  "data": {
+    "repository": {
+      "milestone": {
+        "issues": {
+          "pageInfo": {
+            "hasNextPage": false,
+            "endCursor": "Y3Vyc29yOnYyOpHOAAAAAg=="
+          },
+          "nodes": [
+            {
+              "id": "I_kwDOEIOM8AAAABAPI0042",
+              "number": 42,
+              "title": "[api] Сводка прогонов на дашборде",
+              "state": "OPEN",
+              "repository": {
+                "nameWithOwner": "larchanka-training/dmc-268-api-t6"
+              },
+              "parent": null,
+              "blockedBy": {
+                "totalCount": 2,
+                "pageInfo": {
+                  "hasNextPage": true,
+                  "endCursor": "MQ"
+                },
+                "nodes": [
+                  {
+                    "number": 40,
+                    "title": "[api] Фильтр прогонов по статусу",
+                    "state": "OPEN",
+                    "repository": {
+                      "nameWithOwner": "larchanka-training/dmc-268-api-t6"
+                    }
+                  }
+                ]
+              },
+              "blocking": {
+                "totalCount": 0,
+                "pageInfo": {
+                  "hasNextPage": false,
+                  "endCursor": null
+                },
+                "nodes": []
+              },
+              "projectItems": {
+                "nodes": [
+                  {
+                    "project": {
+                      "number": 12,
+                      "owner": {
+                        "login": "larchanka-training"
+                      }
+                    },
+                    "fieldValueByName": {
+                      "name": "In Progress"
+                    }
+                  }
+                ]
+              }
+            }
+          ]
+        }
+      }
+    }
+  }
+}

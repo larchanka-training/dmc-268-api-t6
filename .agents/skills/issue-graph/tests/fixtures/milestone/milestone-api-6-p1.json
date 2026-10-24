@@ -1,0 +1,487 @@
+{
+  "data": {
+    "repository": {
+      "milestone": {
+        "issues": {
+          "pageInfo": {
+            "hasNextPage": false,
+            "endCursor": "Y3Vyc29yOnYyOpHOAAAAAg=="
+          },
+          "nodes": [
+            {
+              "id": "I_kwDOEIOM8AAAABAPI0010",
+              "number": 10,
+              "title": "[epic] Ревью по графу символов",
+              "state": "OPEN",
+              "repository": {
+                "nameWithOwner": "larchanka-training/dmc-268-api-t6"
+              },
+              "parent": null,
+              "blockedBy": {
+                "totalCount": 0,
+                "pageInfo": {
+                  "hasNextPage": false,
+                  "endCursor": null
+                },
+                "nodes": []
+              },
+              "blocking": {
+                "totalCount": 0,
+                "pageInfo": {
+                  "hasNextPage": false,
+                  "endCursor": null
+                },
+                "nodes": []
+              },
+              "projectItems": {
+                "nodes": [
+                  {
+                    "project": {
+                      "number": 12,
+                      "owner": {
+                        "login": "larchanka-training"
+                      }
+                    },
+                    "fieldValueByName": {
+                      "name": "Todo"
+                    }
+                  }
+                ]
+              }
+            },
+            {
+              "id": "I_kwDOEIOM8AAAABAPI0011",
+              "number": 11,
+              "title": "[rag] Индекс символов репозитория",
+              "state": "OPEN",
+              "repository": {
+                "nameWithOwner": "larchanka-training/dmc-268-api-t6"
+              },
+              "parent": {
+                "number": 10,
+                "repository": {
+                  "nameWithOwner": "larchanka-training/dmc-268-api-t6"
+                }
+              },
+              "blockedBy": {
+                "totalCount": 0,
+                "pageInfo": {
+                  "hasNextPage": false,
+                  "endCursor": null
+                },
+                "nodes": []
+              },
+              "blocking": {
+                "totalCount": 1,
+                "pageInfo": {
+                  "hasNextPage": false,
+                  "endCursor": "MQ"
+                },
+                "nodes": [
+                  {
+                    "number": 15,
+                    "title": "[worker] Очередь пересборки индекса",
+                    "state": "OPEN",
+                    "repository": {
+                      "nameWithOwner": "larchanka-training/dmc-268-api-t6"
+                    }
+                  }
+                ]
+              },
+              "projectItems": {
+                "nodes": [
+                  {
+                    "project": {
+                      "number": 12,
+                      "owner": {
+                        "login": "axyi"
+                      }
+                    },
+                    "fieldValueByName": {
+                      "name": "In Progress"
+                    }
+                  },
+                  {
+                    "project": {
+                      "number": 12,
+                      "owner": {
+                        "login": "larchanka-training"
+                      }
+                    },
+                    "fieldValueByName": {
+                      "name": "On Review"
+                    }
+                  }
+                ]
+              }
+            },
+            {
+              "id": "I_kwDOEIOM8AAAABAPI0012",
+              "number": 12,
+              "title": "[rag] Провайдер контекста для ревью",
+              "state": "OPEN",
+              "repository": {
+                "nameWithOwner": "larchanka-training/dmc-268-api-t6"
+              },
+              "parent": {
+                "number": 10,
+                "repository": {
+                  "nameWithOwner": "larchanka-training/dmc-268-api-t6"
+                }
+              },
+              "blockedBy": {
+                "totalCount": 1,
+                "pageInfo": {
+                  "hasNextPage": false,
+                  "endCursor": "MQ"
+                },
+                "nodes": [
+                  {
+                    "number": 3,
+                    "title": "[ui] Тумблер графа в настройках",
+                    "state": "OPEN",
+                    "repository": {
+                      "nameWithOwner": "larchanka-training/dmc-268-ui-t6"
+                    }
+                  }
+                ]
+              },
+              "blocking": {
+                "totalCount": 2,
+                "pageInfo": {
+                  "hasNextPage": false,
+                  "endCursor": "MQ"
+                },
+                "nodes": [
+                  {
+                    "number": 4,
+                    "title": "[ui] Бейдж контекста в ревью",
+                    "state": "OPEN",
+                    "repository": {
+                      "nameWithOwner": "larchanka-training/dmc-268-ui-t6"
+                    }
+                  },
+                  {
+                    "number": 17,
+                    "title": "[ui][api] Кнопка \"Повторить\" для #42 и <Retry> в шапке страницы ревью",
+                    "state": "OPEN",
+                    "repository": {
+                      "nameWithOwner": "larchanka-training/dmc-268-api-t6"
+                    }
+                  }
+                ]
+              },
+              "projectItems": {
+                "nodes": [
+                  {
+                    "project": {
+                      "number": 12,
+                      "owner": {
+                        "login": "larchanka-training"
+                      }
+                    },
+                    "fieldValueByName": {
+                      "name": "Todo"
+                    }
+                  }
+                ]
+              }
+            },
+            {
+              "id": "I_kwDOEIOM8AAAABAPI0013",
+              "number": 13,
+              "title": "[db] Миграция таблицы индекса",
+              "state": "CLOSED",
+              "repository": {
+                "nameWithOwner": "larchanka-training/dmc-268-api-t6"
+              },
+              "parent": null,
+              "blockedBy": {
+                "totalCount": 0,
+                "pageInfo": {
+                  "hasNextPage": false,
+                  "endCursor": null
+                },
+                "nodes": []
+              },
+              "blocking": {
+                "totalCount": 3,
+                "pageInfo": {
+                  "hasNextPage": false,
+                  "endCursor": "MQ"
+                },
+                "nodes": [
+                  {
+                    "number": 14,
+                    "title": "[db] Очистка устаревших индексов",
+                    "state": "OPEN",
+                    "repository": {
+                      "nameWithOwner": "larchanka-training/dmc-268-api-t6"
+                    }
+                  },
+                  {
+                    "number": 80,
+                    "title": "[db] Схема хранения графа",
+                    "state": "CLOSED",
+                    "repository": {
+                      "nameWithOwner": "larchanka-training/dmc-268-api-t6"
+                    }
+                  },
+                  {
+                    "number": 15,
+                    "title": "[worker] Очередь пересборки индекса",
+                    "state": "OPEN",
+                    "repository": {
+                      "nameWithOwner": "larchanka-training/dmc-268-api-t6"
+                    }
+                  }
+                ]
+              },
+              "projectItems": {
+                "nodes": [
+                  {
+                    "project": {
+                      "number": 12,
+                      "owner": {
+                        "login": "larchanka-training"
+                      }
+                    },
+                    "fieldValueByName": {
+                      "name": "Done"
+                    }
+                  }
+                ]
+              }
+            },
+            {
+              "id": "I_kwDOEIOM8AAAABAPI0014",
+              "number": 14,
+              "title": "[db] Очистка устаревших индексов",
+              "state": "OPEN",
+              "repository": {
+                "nameWithOwner": "larchanka-training/dmc-268-api-t6"
+              },
+              "parent": null,
+              "blockedBy": {
+                "totalCount": 2,
+                "pageInfo": {
+                  "hasNextPage": false,
+                  "endCursor": "MQ"
+                },
+                "nodes": [
+                  {
+                    "number": 13,
+                    "title": "[db] Миграция таблицы индекса",
+                    "state": "CLOSED",
+                    "repository": {
+                      "nameWithOwner": "larchanka-training/dmc-268-api-t6"
+                    }
+                  },
+                  {
+                    "number": 80,
+                    "title": "[db] Схема хранения графа",
+                    "state": "CLOSED",
+                    "repository": {
+                      "nameWithOwner": "larchanka-training/dmc-268-api-t6"
+                    }
+                  }
+                ]
+              },
+              "blocking": {
+                "totalCount": 0,
+                "pageInfo": {
+                  "hasNextPage": false,
+                  "endCursor": null
+                },
+                "nodes": []
+              },
+              "projectItems": {
+                "nodes": [
+                  {
+                    "project": {
+                      "number": 12,
+                      "owner": {
+                        "login": "larchanka-training"
+                      }
+                    },
+                    "fieldValueByName": {
+                      "name": "In Progress"
+                    }
+                  }
+                ]
+              }
+            },
+            {
+              "id": "I_kwDOEIOM8AAAABAPI0015",
+              "number": 15,
+              "title": "[worker] Очередь пересборки индекса",
+              "state": "OPEN",
+              "repository": {
+                "nameWithOwner": "larchanka-training/dmc-268-api-t6"
+              },
+              "parent": null,
+              "blockedBy": {
+                "totalCount": 3,
+                "pageInfo": {
+                  "hasNextPage": false,
+                  "endCursor": "MQ"
+                },
+                "nodes": [
+                  {
+                    "number": 90,
+                    "title": "[infra] Стенд для нагрузочных прогонов",
+                    "state": "OPEN",
+                    "repository": {
+                      "nameWithOwner": "larchanka-training/dmc-268-api-t6"
+                    }
+                  },
+                  {
+                    "number": 13,
+                    "title": "[db] Миграция таблицы индекса",
+                    "state": "CLOSED",
+                    "repository": {
+                      "nameWithOwner": "larchanka-training/dmc-268-api-t6"
+                    }
+                  },
+                  {
+                    "number": 11,
+                    "title": "[rag] Индекс символов репозитория",
+                    "state": "OPEN",
+                    "repository": {
+                      "nameWithOwner": "larchanka-training/dmc-268-api-t6"
+                    }
+                  }
+                ]
+              },
+              "blocking": {
+                "totalCount": 0,
+                "pageInfo": {
+                  "hasNextPage": false,
+                  "endCursor": null
+                },
+                "nodes": []
+              },
+              "projectItems": {
+                "nodes": [
+                  {
+                    "project": {
+                      "number": 7,
+                      "owner": {
+                        "login": "larchanka-training"
+                      }
+                    },
+                    "fieldValueByName": {
+                      "name": "Todo"
+                    }
+                  },
+                  {
+                    "project": {
+                      "number": 12,
+                      "owner": {
+                        "login": "larchanka-training"
+                      }
+                    },
+                    "fieldValueByName": {
+                      "name": "In Progress"
+                    }
+                  }
+                ]
+              }
+            },
+            {
+              "id": "I_kwDOEIOM8AAAABAPI0016",
+              "number": 16,
+              "title": "[docs] Описание формата отчёта",
+              "state": "OPEN",
+              "repository": {
+                "nameWithOwner": "larchanka-training/dmc-268-api-t6"
+              },
+              "parent": null,
+              "blockedBy": {
+                "totalCount": 0,
+                "pageInfo": {
+                  "hasNextPage": false,
+                  "endCursor": null
+                },
+                "nodes": []
+              },
+              "blocking": {
+                "totalCount": 0,
+                "pageInfo": {
+                  "hasNextPage": false,
+                  "endCursor": null
+                },
+                "nodes": []
+              },
+              "projectItems": {
+                "nodes": [
+                  {
+                    "project": {
+                      "number": 12,
+                      "owner": {
+                        "login": "larchanka-training"
+                      }
+                    },
+                    "fieldValueByName": {
+                      "name": "Todo"
+                    }
+                  }
+                ]
+              }
+            },
+            {
+              "id": "I_kwDOEIOM8AAAABAPI0017",
+              "number": 17,
+              "title": "[ui][api] Кнопка \"Повторить\" для #42 и <Retry> в шапке страницы ревью",
+              "state": "OPEN",
+              "repository": {
+                "nameWithOwner": "larchanka-training/dmc-268-api-t6"
+              },
+              "parent": null,
+              "blockedBy": {
+                "totalCount": 1,
+                "pageInfo": {
+                  "hasNextPage": false,
+                  "endCursor": "MQ"
+                },
+                "nodes": [
+                  {
+                    "number": 12,
+                    "title": "[rag] Провайдер контекста для ревью",
+                    "state": "OPEN",
+                    "repository": {
+                      "nameWithOwner": "larchanka-training/dmc-268-api-t6"
+                    }
+                  }
+                ]
+              },
+              "blocking": {
+                "totalCount": 0,
+                "pageInfo": {
+                  "hasNextPage": false,
+                  "endCursor": null
+                },
+                "nodes": []
+              },
+              "projectItems": {
+                "nodes": [
+                  {
+                    "project": {
+                      "number": 12,
+                      "owner": {
+                        "login": "larchanka-training"
+                      }
+                    },
+                    "fieldValueByName": {
+                      "name": "Todo"
+                    }
+                  }
+                ]
+              }
+            }
+          ]
+        }
+      }
+    }
+  }
+}

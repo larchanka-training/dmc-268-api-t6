@@ -1,0 +1,22 @@
+{
+  "data": {
+    "node": {
+      "blocking": {
+        "pageInfo": {
+          "hasNextPage": false,
+          "endCursor": "Ymwz"
+        },
+        "nodes": [
+          {
+            "number": 45,
+            "title": "[infra] Архив старых прогонов",
+            "state": "CLOSED",
+            "repository": {
+              "nameWithOwner": "larchanka-training/dmc-268-api-t6"
+            }
+          }
+        ]
+      }
+    }
+  }
+}

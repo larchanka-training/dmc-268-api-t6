@@ -62,14 +62,17 @@ These files are byte-identical between the two repos, marked with a
 
 - `rules/git-workflow.md`
 - `skills/agent-loop/**`, `skills/code-review/**`, `skills/create-issue/**`,
-  `skills/pull-request/**`, `skills/planning-and-task-breakdown/**`, `skills/qa/**`
+  `skills/issue-graph/**`, `skills/pull-request/**`,
+  `skills/planning-and-task-breakdown/**`, `skills/qa/**`
 - `agents/*.md`
 - outside `.agents/`: `.github/pull_request_template.md` (SYNC marker on its first line)
 
 The marker takes the form the file type allows: `.md` — the `<!-- SYNC: … -->` line
 (after the H1 in a skill file); `.py` / `.sh` — a `# SYNC: …` comment after the shebang or
-the module docstring; golden files under `skills/create-issue/tests/golden/` — the SYNC
-line, a blank line, then the body (the golden test drops exactly those two lines).
+the module docstring; golden files under `skills/{create-issue,issue-graph}/tests/golden/` —
+the SYNC line, a blank line, then the body (the golden test drops exactly those two lines).
+JSON fixtures under `skills/issue-graph/tests/fixtures/` carry no marker (JSON has no
+comments); the `diff -r` below covers them.
 
 Everything else (`rules/frontend.md` / `rules/backend.md`, stack-specific
 skills, `templates/`) is per-repo.

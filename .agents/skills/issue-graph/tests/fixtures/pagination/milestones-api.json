@@ -1,0 +1,14 @@
+{
+  "data": {
+    "repository": {
+      "milestones": {
+        "nodes": [
+          {
+            "number": 7,
+            "title": "Спринт 7"
+          }
+        ]
+      }
+    }
+  }
+}
