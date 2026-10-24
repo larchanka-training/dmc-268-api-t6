@@ -241,8 +241,6 @@ def validate_v2_coordinates(
         )
         if start_hunk != end_hunk:
             return False, "cross_hunk_range"
-        if any(n not in orig_right_lines for n in range(start_line, line + 1)):
-            return False, "range_gap"
     file_match = next((f for f in changed_files if f.path == finding.path), None)
     if file_match is None:
         return False, "anchor_not_visible"
