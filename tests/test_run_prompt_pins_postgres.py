@@ -66,27 +66,6 @@ from tests.test_review_context_stage import Repository as SourceTree
 from tests.test_run_publication_settings_postgres import _claim, _insert, _ready
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-SYSTEM_V3_SHA = "eb851e7fc2329eb7bdff015ec0fda945c46111ec5c884934ed6f6d6803883452"
-CONVENTIONS_V2 = (
-    "review.conventions",
-    2,
-    "225a8f7d56835cf1307ddb25feac602c3d10e03c34ee51afc90a1f99af101454",
-)
-CONVENTIONS_V3 = (
-    "review.conventions",
-    3,
-    "721803a63b12b5c1e25bf758be59b6b6272c755050db5ff594333fc48250289b",
-)
-VERIFIER_V2 = (
-    "review.verifier",
-    2,
-    "1f676b4fea8477d77b83a106a6c62e78f67d19f71937d4a02093d11a9d276088",
-)
-VERIFIER_V3 = (
-    "review.verifier",
-    3,
-    "cc60d26e35e7561dc225e6fa6675afc69c46b04210992b177476a46b745300a2",
-)
 
 type PromptRow = tuple[str, int, str]
 
@@ -110,9 +89,20 @@ def _packaged(*keys: str) -> tuple[PromptAsset, ...]:
     )
 
 
+def _row(asset: PromptAsset) -> PromptRow:
+    return (asset.key, asset.version, asset.checksum)
+
+
+def _newest(key: str) -> PromptRow:
+    # From the packaged files, not the database: seeding them activates each key's newest one.
+    return _row(max(_packaged(key), key=lambda asset: asset.version))
+
+
 def _newer(key: str) -> PromptAsset:
-    content = f"---\nkey: {key}\nversion: 3\n---\nPinned by a #130 test.\n"
-    return PromptAsset(key, 3, content, sha256(content.encode("utf-8")).hexdigest())
+    # Above every packaged version, so a newly packaged prompt neither wins nor collides.
+    version = _newest(key)[1] + 1
+    content = f"---\nkey: {key}\nversion: {version}\n---\nPinned by a #130 test.\n"
+    return PromptAsset(key, version, content, sha256(content.encode("utf-8")).hexdigest())
 
 
 async def _seed(factory: async_sessionmaker[AsyncSession], assets: tuple[PromptAsset, ...]) -> None:
@@ -172,7 +162,10 @@ def test_webhook_creation_pins_active_conventions_and_verifier_and_rolls_back(
                 assert isinstance(message, PendingRunMessage)
                 run = await work.session.get(Run, message.run_id)
                 assert run is not None
-                assert await _row_pins(work.session, run) == (CONVENTIONS_V2, VERIFIER_V2)
+                assert await _row_pins(work.session, run) == (
+                    _newest("review.conventions"),
+                    _newest("review.verifier"),
+                )
                 # No commit: leaving the unit of work rolls the run and its pins back.
             async with factory() as session:
                 assert await session.get(Run, message.run_id) is None
@@ -201,8 +194,14 @@ def test_rerun_pins_current_prompt_rows_while_original_keeps_its_own(env: Env) -
                 result = await work.runs.create_rerun(original, NOW)
                 assert result.outcome is RerunOutcome.CREATED and result.message is not None
                 await work.commit()
-            assert await _pins(factory, result.message.run_id) == (CONVENTIONS_V2, VERIFIER_V3)
-            assert await _pins(factory, original) == (CONVENTIONS_V2, VERIFIER_V2)
+            assert await _pins(factory, result.message.run_id) == (
+                _newest("review.conventions"),
+                _row(_newer("review.verifier")),
+            )
+            assert await _pins(factory, original) == (
+                _newest("review.conventions"),
+                _newest("review.verifier"),
+            )
         finally:
             await engine.dispose()
 
@@ -226,7 +225,10 @@ def test_retry_keeps_prompt_pins_after_a_newer_verifier_is_activated(env: Env) -
                     run_id, worker_id="worker", available_at=NOW
                 )
             await _claim(factory, run_id, 2)
-            assert await _pins(factory, run_id) == (CONVENTIONS_V2, VERIFIER_V2)
+            assert await _pins(factory, run_id) == (
+                _newest("review.conventions"),
+                _newest("review.verifier"),
+            )
         finally:
             await engine.dispose()
 
@@ -252,7 +254,7 @@ def test_missing_active_conventions_or_verifier_still_creates_the_run(env: Env) 
                 run_id = await _insert(session)
                 run = await session.get(Run, run_id)
                 assert run is not None
-                assert await _row_pins(session, run) == (CONVENTIONS_V2, None)
+                assert await _row_pins(session, run) == (_newest("review.conventions"), None)
                 await session.rollback()
         finally:
             await engine.dispose()
@@ -279,7 +281,10 @@ def test_repository_prompt_override_applies_to_review_system_only(env: Env) -> N
                 run = await session.get(Run, run_id)
                 assert run is not None
                 assert run.prompt_version_id == system_v2
-                assert await _row_pins(session, run) == (CONVENTIONS_V2, VERIFIER_V2)
+                assert await _row_pins(session, run) == (
+                    _newest("review.conventions"),
+                    _newest("review.verifier"),
+                )
                 await session.rollback()
         finally:
             await engine.dispose()
@@ -300,7 +305,7 @@ def test_get_pins_returns_complete_bindings_from_pinned_rows(env: Env) -> None:
                 await session.execute(
                     text("UPDATE runs SET state='succeeded' WHERE id=:run"), {"run": run_id}
                 )
-            # A v3 pair proves the versions come from the rows, not the "v2" defaults.
+            # A pair above the "v2" defaults proves the versions come from the rows.
             await _seed(factory, (_newer("review.conventions"), _newer("review.verifier")))
             async with factory.begin() as session:
                 rerun = await SqlAlchemyRerunStore(session, allow_unscoped=True).create_rerun(
@@ -308,20 +313,26 @@ def test_get_pins_returns_complete_bindings_from_pinned_rows(env: Env) -> None:
                 )
             assert rerun.message is not None
             for pinned, conventions, verifier in (
-                (run_id, CONVENTIONS_V2, VERIFIER_V2),
-                (rerun.message.run_id, CONVENTIONS_V3, VERIFIER_V3),
+                (run_id, _newest("review.conventions"), _newest("review.verifier")),
+                (
+                    rerun.message.run_id,
+                    _row(_newer("review.conventions")),
+                    _row(_newer("review.verifier")),
+                ),
             ):
                 async with factory() as session:
                     run = await session.get(Run, pinned)
-                assert run is not None
+                    assert run is not None
+                    system = await _describe(session, run.prompt_version_id)
+                assert system is not None
                 async with SqlAlchemyPolicySnapshotUnitOfWork(factory) as work:
                     pins = await work.policy.get_pins(pinned)
                 assert pins is not None
                 assert pins.prompt_bindings == PromptBindings(
-                    review_system_checksum=SYSTEM_V3_SHA,
+                    review_system_checksum=system[2],
                     conventions_checksum=conventions[2],
                     verifier_checksum=verifier[2],
-                    review_system_version="v3",
+                    review_system_version=f"v{system[1]}",
                     conventions_version=f"v{conventions[1]}",
                     verifier_version=f"v{verifier[1]}",
                     review_system_id=run.prompt_version_id,
@@ -329,6 +340,43 @@ def test_get_pins_returns_complete_bindings_from_pinned_rows(env: Env) -> None:
                     verifier_id=run.verifier_prompt_version_id,
                 )
                 assert pins.prompt_bindings.is_complete is True
+        finally:
+            await engine.dispose()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.integration
+def test_get_pins_binds_only_the_prompts_a_partially_pinned_run_pinned(env: Env) -> None:
+    async def scenario() -> None:
+        engine = env.engine()
+        factory = async_sessionmaker(engine, expire_on_commit=False)
+        try:
+            await _ready(factory)
+            # No active verifier row: the run pins conventions only.
+            await _seed(factory, _packaged("review.conventions"))
+            async with factory.begin() as session:
+                run_id = await _insert(session)
+            async with factory() as session:
+                run = await session.get(Run, run_id)
+                assert run is not None
+                system = await _describe(session, run.prompt_version_id)
+            assert system is not None
+            conventions = _newest("review.conventions")
+            async with SqlAlchemyPolicySnapshotUnitOfWork(factory) as work:
+                pins = await work.policy.get_pins(run_id)
+            assert pins is not None
+            assert pins.prompt_bindings == PromptBindings(
+                review_system_checksum=system[2],
+                conventions_checksum=conventions[2],
+                verifier_checksum="",
+                review_system_version=f"v{system[1]}",
+                conventions_version=f"v{conventions[1]}",
+                review_system_id=run.prompt_version_id,
+                conventions_id=run.conventions_prompt_version_id,
+            )
+            assert pins.prompt_bindings.verifier_id is None
+            assert pins.prompt_bindings.is_complete is False
         finally:
             await engine.dispose()
 

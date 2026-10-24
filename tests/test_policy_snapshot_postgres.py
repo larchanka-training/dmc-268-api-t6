@@ -87,7 +87,7 @@ def test_pins_documents_and_snapshot_round_trip_and_stay_write_once(env: Env) ->
             assert pins.prompt_bindings.pins_review_prompt(PROMPT)
             assert pins.prompt_bindings.review_system_checksum == "c" * 64
             assert pins.prompt_bindings.review_system_version == "v1"
-            # Only the review prompt is pinned by a run today.
+            # This fixture run predates the conventions and verifier pins.
             assert pins.prompt_bindings.is_complete is False
             assert pins.execution_profile.review_model == "model-a"
             assert len(pins.defaults_checksum) == 64
