@@ -32,7 +32,7 @@ from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from decimal import Decimal, DecimalException
 from hashlib import sha256
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING, Literal, Protocol
 from uuid import UUID, uuid4
 
 from app.modules.reviews.application.llm import (
@@ -133,6 +133,8 @@ class StructuredTask:
     review_context: ReviewContext | None = None
     policy_snapshot: PolicySnapshot | None = None
     counter: TokenCounter | None = None
+    # Which model pair answers: the review pair or ``LlmSettings.verifier_route()``.
+    route: Literal["review", "verifier"] = "review"
 
 
 @dataclass(frozen=True)
@@ -223,8 +225,11 @@ class LlmGateway:
 
     async def generate(self, task: StructuredTask, context: RunCallContext) -> GatewayResult:
         policy = self._settings.policy
-        primary = self._settings.primary
-        fallback = self._settings.fallback
+        primary, fallback = (
+            self._settings.verifier_route()
+            if task.route == "verifier"
+            else (self._settings.primary, self._settings.fallback)
+        )
         state = _AttemptState()
         attempt = self._attempt_calls(context)
         max_calls = policy.max_calls_per_attempt
