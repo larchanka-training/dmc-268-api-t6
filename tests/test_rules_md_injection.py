@@ -70,6 +70,7 @@ from app.modules.reviews.application.review_output import (
     parse_review_output,
     parse_review_output_v2,
 )
+from tests.test_findings_post_processor import _added_file_diff_map
 
 type Shape = tuple[str, tuple[tuple[str, str], ...], tuple[Shape, ...]]
 
@@ -729,7 +730,7 @@ def _publish_with_rules(
     verifier = _Verifier()
     reviews = _Reviews(
         FindingPostProcessingInput(
-            hunk_lines={DIFF_PATH: frozenset({DEFECT_LINE})}, rule_names=frozenset()
+            diff_map=_added_file_diff_map(DIFF_PATH, DEFECT_LINE), rule_names=frozenset()
         )
     )
     provider = _Provider()
@@ -970,7 +971,7 @@ def test_legacy_post_processing_publishes_no_false_custom_rule_attribution() -> 
 
     processed = FindingsPostProcessor.from_default_patterns().process(
         parsed,
-        hunk_lines={DIFF_PATH: frozenset({DEFECT_LINE})},
+        diff_map=_added_file_diff_map(DIFF_PATH, DEFECT_LINE),
         rule_names=frozenset({"sql-safety"}),
     )
 
