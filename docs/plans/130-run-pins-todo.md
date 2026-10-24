@@ -35,8 +35,10 @@ TEST_RABBITMQ_URL=amqp://app:app@localhost:5672/imp130d uv run pytest
 New test files (suggested names): `tests/test_run_prompt_pins_migration.py` (Task 1) and
 `tests/test_run_prompt_pins_postgres.py` (Tasks 2–5, `@pytest.mark.integration`, skip without
 `TEST_DATABASE_URL`). PG tests seed prompts with
-`seed_prompt_versions(session, load_prompt_assets(REPO_ROOT / "review" / "prompts"))`, which
-makes system v3, conventions v2 and verifier v2 active. The claim and requeue helpers follow
+`seed_prompt_versions(session, load_prompt_assets(REPO_ROOT / "review" / "prompts"))` minus
+`review.system` v1, which makes system v3, conventions v2 and verifier v2 active. The
+`portal_schema` seed holds a fake `review.system` v1 (checksum `"c" * 64`), so seeding the
+packaged v1 again is refused as an immutable prompt change. The claim and requeue helpers follow
 `tests/test_run_publication_settings_postgres.py` (`_claim`, `SqlAlchemyRunLifecycleStore.requeue`).
 
 ## Task 0: Plan documents

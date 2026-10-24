@@ -84,6 +84,8 @@ class SqlAlchemyRerunStore:
                 prompt_version_id=candidate.prompt_version_id,
                 severity_threshold=SeverityThreshold(candidate.severity_threshold),
                 max_comments=candidate.max_comments,
+                conventions_prompt_version_id=candidate.conventions_prompt_version_id,
+                verifier_prompt_version_id=candidate.verifier_prompt_version_id,
                 attempt=0,
                 available_at=now,
                 cancel_requested=False,

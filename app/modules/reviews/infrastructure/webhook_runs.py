@@ -77,6 +77,18 @@ class SqlAlchemyWebhookRunStore:
             )
         if prompt_version_id is None:
             return CandidateMiss.MISSING_PROMPT
+        # The repository override applies to review.system only. A missing active row
+        # leaves its pin NULL; the run is still created, as before the pins existed.
+        conventions_prompt_version_id = await self._session.scalar(
+            select(PromptVersion.id).where(
+                PromptVersion.key == "review.conventions", PromptVersion.is_active.is_(True)
+            )
+        )
+        verifier_prompt_version_id = await self._session.scalar(
+            select(PromptVersion.id).where(
+                PromptVersion.key == "review.verifier", PromptVersion.is_active.is_(True)
+            )
+        )
         return RunInsertCandidate(
             ci=EligibilityCandidate(
                 code_change_id=pr.id,
@@ -106,6 +118,8 @@ class SqlAlchemyWebhookRunStore:
             prompt_version_id=prompt_version_id,
             severity_threshold=repository.severity_threshold.value,
             max_comments=repository.max_comments,
+            conventions_prompt_version_id=conventions_prompt_version_id,
+            verifier_prompt_version_id=verifier_prompt_version_id,
         )
 
     async def insert_webhook_run(
@@ -141,6 +155,8 @@ class SqlAlchemyWebhookRunStore:
                 prompt_version_id=candidate.prompt_version_id,
                 severity_threshold=candidate.severity_threshold,
                 max_comments=candidate.max_comments,
+                conventions_prompt_version_id=candidate.conventions_prompt_version_id,
+                verifier_prompt_version_id=candidate.verifier_prompt_version_id,
                 attempt=0,
                 available_at=now,
                 cancel_requested=False,
