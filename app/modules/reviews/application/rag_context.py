@@ -21,7 +21,15 @@ is a unit of work of its own: no DB transaction spans a GitHub read.
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable, Collection, Iterable, Iterator, Mapping, Sequence
+from collections.abc import (
+    Awaitable,
+    Callable,
+    Collection,
+    Iterable,
+    Iterator,
+    Mapping,
+    Sequence,
+)
 from dataclasses import dataclass, field, replace
 from typing import Protocol
 from uuid import UUID
@@ -125,6 +133,14 @@ _UNREAD = frozenset(
 )
 
 
+def ends_the_run(exc: BaseException) -> bool:
+    """Cancellation, a policy error and the run deadline end the run: an optional read
+    never takes them for its own failure."""
+    return isinstance(exc, (RunCancelled, PolicyError)) or (
+        isinstance(exc, RunFailure) and exc.error_code == "deadline_exceeded"
+    )
+
+
 class BlobSource(Protocol):
     """Blobs of the PR revision; a read failure raises."""
 
@@ -184,18 +200,16 @@ class CachedBlobSource:
         else:
             if entry.status is BlobCacheStatus.HIT and entry.content is not None:
                 # Other writers of the cache check less: a hit gets the checks of a read.
-                return _checked(entry.content.encode("utf-8"))
+                return checked_source(entry.content.encode("utf-8"))
         try:
             raw = await self._source.read_blob(blob_sha)
         except Exception as exc:
-            if isinstance(exc, (RunCancelled, PolicyError)) or (
-                isinstance(exc, RunFailure) and exc.error_code == "deadline_exceeded"
-            ):
+            if ends_the_run(exc):
                 raise
             # Extra context is best effort: the diff itself stays available.
             _LOGGER.warning("RAG blob read failed blob_sha=%s", blob_sha, exc_info=True)
             return FileUnavailable("source_read_failed")
-        result = _checked(raw)
+        result = checked_source(raw)
         if isinstance(result, str):
             await self._put(key, result)
         return result
@@ -211,8 +225,11 @@ class CachedBlobSource:
             _LOGGER.warning("RAG blob cache put failed blob_sha=%s", key.blob_sha, exc_info=True)
 
 
-def _checked(raw: bytes) -> str | FileUnavailable:
-    """The checks of an L4 read (``_Files.text`` in ``review_context``), in its order."""
+def checked_source(raw: bytes) -> str | FileUnavailable:
+    """The size, binary and UTF-8 checks of a source read, in this order, for L4
+    (``_Files.text`` in ``review_context``) and RAG alike. The service excludes binary
+    content wherever it is found: a file outside the diff is no exception, and the
+    check runs before the parser and before the facts cache."""
     if len(raw) > MAX_SOURCE_BYTES:
         return FileUnavailable(AstFailureReason.SOURCE_TOO_LARGE.value)
     if is_binary_content(raw):
@@ -279,6 +296,34 @@ class FactsCache(Protocol):
     async def put(self, blob_sha: str, language: AstLanguage, facts: AstFacts) -> None: ...
 
 
+async def guarded_facts(
+    path: str,
+    text: Callable[[], Awaitable[str | FileUnavailable]],
+    *,
+    blob_sha: str | None,
+    parser: SourceParser,
+    cache: FactsCache | None,
+) -> AstFacts | FileUnavailable:
+    """The facts of a source, for L4 and RAG alike. ``text`` is the guarded read, and it
+    runs before the facts cache: a cached blob is not a permission to show a file."""
+    language = language_for_path(path)
+    if language is None:
+        return FileUnavailable("unsupported_language")
+    content = await text()
+    if isinstance(content, FileUnavailable):
+        return content
+    if cache is not None and blob_sha is not None:
+        cached = await cache.get(blob_sha, language)
+        if cached is not None:
+            return cached
+    parsed = (await parser.parse_many((ParseRequest(path, language, content.encode()),)))[path]
+    if isinstance(parsed, AstFailureReason):
+        return FileUnavailable(parsed.value)
+    if cache is not None and blob_sha is not None:
+        await cache.put(blob_sha, language, parsed)
+    return parsed
+
+
 class _RevisionFiles:
     """The files of one PR revision a candidate reads, without the per-run file limit of L4.
 
@@ -339,25 +384,13 @@ class _RevisionFiles:
         return self._head
 
     async def _load_facts(self, path: str) -> AstFacts | FileUnavailable:
-        language = language_for_path(path)
-        if language is None:
-            return FileUnavailable("unsupported_language")
-        text = await self.text(path)
-        if isinstance(text, FileUnavailable):
-            return text
-        sha = self._tree.blob_shas.get(path)
-        if self._cache is not None and sha is not None:
-            cached = await self._cache.get(sha, language)
-            if cached is not None:
-                return cached
-        parsed = (await self._parser.parse_many((ParseRequest(path, language, text.encode()),)))[
-            path
-        ]
-        if isinstance(parsed, AstFailureReason):
-            return FileUnavailable(parsed.value)
-        if self._cache is not None and sha is not None:
-            await self._cache.put(sha, language, parsed)
-        return parsed
+        return await guarded_facts(
+            path,
+            lambda: self.text(path),
+            blob_sha=self._tree.blob_shas.get(path),
+            parser=self._parser,
+            cache=self._cache,
+        )
 
 
 @dataclass(frozen=True)
@@ -550,9 +583,7 @@ class ReverseEdgeSelector:
             try:
                 base = await self._trees.tree(diff_map.diff_old_sha)
             except Exception as exc:
-                if isinstance(exc, (RunCancelled, PolicyError)) or (
-                    isinstance(exc, RunFailure) and exc.error_code == "deadline_exceeded"
-                ):
+                if ends_the_run(exc):
                     raise
                 _LOGGER.warning(
                     "RAG base tree read failed diff_old_sha=%s",
