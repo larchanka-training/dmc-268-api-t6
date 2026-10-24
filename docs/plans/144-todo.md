@@ -203,16 +203,20 @@ CHECK refuses a sha without a time and accepts a time without a sha; downgrade t
 - `SqlAlchemyReviewIndexAccess(session)` and `SqlAlchemyReviewIndexUnitOfWork` (suggested)
   implementing Task 3's port (plan, "Adapter and its transaction"):
   1. `RAG_ON` and `GITHUB_PROVIDER` first without a lock; false → `enabled=False` with no
-     lock taken and the state not read. True → `repositories` `FOR SHARE`, then the same
-     condition again in a statement of its own
-     (`app/modules/code_index/infrastructure/maintenance.py:209-226`); false →
+     lock taken and the state not read. True → `SET LOCAL lock_timeout = '2s'` (a lock
+     timeout fails the gate: `context.rag` `{error}`, not the deadline; after team review
+     r1), then `repositories` `FOR SHARE`, then the same condition again in a statement of
+     its own (`app/modules/code_index/infrastructure/maintenance.py:209-226`); false →
      `enabled=False`, the state is not read (after review r1);
-  2. the state row `FOR UPDATE SKIP LOCKED`
-     (`app/modules/repositories/infrastructure/rules_status.py:228`); empty → a plain read:
-     no row, or a locked row read-only with no writes;
-  3. `clock_timestamp()` after the lock; Task 2's decision; the marker and the generation
-     only through `request_build(target_commit_sha=None)` / `enable()`; `last_used_at` and
-     the throttle columns by the adapter's own UPDATE with that time;
+  2. the state row without a lock and Task 2's decision on it with `clock_timestamp()`: no
+     row → `empty`; no writes → readiness from that read, no row lock (after team review
+     r1);
+  3. writes needed → the state row `FOR UPDATE SKIP LOCKED`
+     (`app/modules/repositories/infrastructure/rules_status.py:228`); empty → a plain
+     read, read-only with no writes; otherwise `clock_timestamp()` after the lock and Task
+     2's decision again on the locked row; the marker and the generation only through
+     `request_build(target_commit_sha=None)` / `enable()`; `last_used_at` and the throttle
+     columns by the adapter's own UPDATE with that time;
   4. return `rag_index(...)` over the row after the writes and
      `default_head_sha = target_commit_sha`.
 - The `CodeIndexStore` port and `_PORT_METHODS` do not change.
@@ -240,7 +244,15 @@ leaves it false):**
   `enabled=False` without waiting (the unlocked pre-check; after review r1);
 - a `stale` row under a live build lease → no marker, the hourly extension still applies;
   a `stale` row whose lease expired → marker set (after reviews r1 and r2);
-- isolation: a read of `a` never writes `b`.
+- isolation: a read of `a` never writes `b`;
+- the lock timeout: with RAG on, another session holds `FOR UPDATE` on the repository row
+  → the gate fails with a lock error (55P03) after about 2 s, no writes;
+- the lock timeout's scope: on one pooled connection `lock_timeout` is back at its
+  default after a committed and after a timed-out gate transaction;
+- a review that writes nothing takes no row lock (`FOR UPDATE NOWAIT` from another session
+  succeeds while its transaction is open), one that writes holds it;
+- the decision runs again under the lock: a marker and a use committed between the
+  unlocked read and the lock → no write (after team review r1).
 
 **Done when:**
 
