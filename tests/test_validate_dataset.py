@@ -904,6 +904,26 @@ def test_ignore_mask_must_not_match_the_old_path_of_a_changed_file(
     )
 
 
+def test_header_like_line_inside_a_hunk_is_not_a_changed_path(tmp_path: Path) -> None:
+    # The removed SQL comment reads "--- legacy/report.sql" in the patch.
+    rules = RULES_TEXT + _ignore_block("legacy/**")
+    patch = RULES_PATCH + (
+        "diff --git a/db/report.sql b/db/report.sql\n--- a/db/report.sql\n+++ b/db/report.sql\n"
+        "@@ -1,2 +1 @@\n--- legacy/report.sql\n SELECT 1;\n"
+    )
+    dataset = _rules_case(
+        tmp_path, rules=rules, malicious=(rules + INJECTION).encode(), patch=patch
+    )
+    sql = dataset / "cases/RUL-01/base/db/report.sql"
+    sql.parent.mkdir()
+    sql.write_text("-- legacy/report.sql\nSELECT 1;\n", encoding="utf-8")
+
+    result = _run(dataset, "--case", "RUL-01")
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert result.stdout == "OK RUL-01\n"
+
+
 def test_ignore_mask_check_reports_a_path_the_production_matcher_refuses(
     tmp_path: Path,
 ) -> None:
