@@ -26,6 +26,7 @@ from app.modules.reviews.infrastructure.llm.gateway import (
 )
 from app.modules.reviews.infrastructure.llm.memory import InMemoryLlmCallTrace, InMemoryUsageLedger
 from app.modules.reviews.infrastructure.llm.settings import (
+    GatewayPolicy,
     LlmConfigError,
     LlmSettings,
     ModelPrice,
@@ -282,7 +283,7 @@ class _Provider:
         return reply
 
     def run(
-        self, settings: LlmSettings, *tasks: StructuredTask
+        self, settings: LlmSettings, *tasks: StructuredTask, context: RunCallContext = RUN
     ) -> list[GatewayResult | LlmCallFailed]:
         """Run the tasks one after another in the same (run, attempt), as stages do."""
 
@@ -303,7 +304,7 @@ class _Provider:
                 outcomes: list[GatewayResult | LlmCallFailed] = []
                 for task in tasks:
                     try:
-                        outcomes.append(await gateway.generate(task, RUN))
+                        outcomes.append(await gateway.generate(task, context))
                     except LlmCallFailed as failure:
                         outcomes.append(failure)
                 return outcomes
@@ -329,10 +330,18 @@ def test_a_verifier_task_calls_the_verifier_then_the_verifier_fallback() -> None
 
 
 def test_a_review_task_keeps_the_review_pair_when_a_verifier_is_set() -> None:
+    # Live callers never pass route (models.py): the default alone keeps them on the review pair.
+    task = StructuredTask(
+        operation="review",
+        messages=(ChatMessage("system", "SYS"), ChatMessage("user", "USER")),
+        schema=ResponseSchema("Answer", {"type": "object"}),
+        validate=_validate,
+    )
     provider = _Provider([invalid(), invalid(), valid()])
 
-    [result] = provider.run(BOTH_PAIRS, _task("review"))
+    [result] = provider.run(BOTH_PAIRS, task)
 
+    assert task.route == "review"
     assert isinstance(result, GatewayResult)
     assert provider.models() == ["review-model", "review-model", "review-fallback-model"]
 
@@ -407,6 +416,52 @@ def test_after_four_review_calls_the_verifier_makes_no_request() -> None:
     assert "already made 4 provider calls" in str(verifier)
     assert verifier.calls == 0
     assert len(provider.requests) == 4
+
+
+@pytest.mark.parametrize(
+    ("engine", "route", "timeout_s"),
+    [
+        ("fast", "verifier", 90.0),
+        # PIPELINE_SPEC §3: the verifier always waits at most 90 s, deep included.
+        ("deep", "verifier", 90.0),
+        # Live pin: the review keeps its engine timeout.
+        ("deep", "review", 300.0),
+        ("fast", "review", 90.0),
+    ],
+)
+def test_a_verifier_call_waits_at_most_90_seconds_on_either_engine(
+    engine: Literal["fast", "deep"], route: Literal["review", "verifier"], timeout_s: float
+) -> None:
+    provider = _Provider([valid()])
+
+    [result] = provider.run(BOTH_PAIRS, _task(route), context=replace(RUN, engine=engine))
+
+    assert isinstance(result, GatewayResult)
+    assert [record.timeout_s for _, record in provider.trace.records] == [timeout_s]
+
+
+def test_the_verifier_cap_keeps_a_shorter_configured_timeout() -> None:
+    policy = GatewayPolicy(call_timeout_s={"fast": 15.0, "deep": 45.0})
+    provider = _Provider([valid()])
+
+    [result] = provider.run(
+        replace(BOTH_PAIRS, policy=policy), _task(), context=replace(RUN, engine="deep")
+    )
+
+    assert isinstance(result, GatewayResult)
+    assert [record.timeout_s for _, record in provider.trace.records] == [45.0]
+
+
+def test_a_deep_verifier_retries_when_200_seconds_are_left() -> None:
+    # 200 s - 2 s backoff leaves more than the 90 s verifier call; less than the deep 300 s.
+    deep = replace(RUN, engine="deep", deadline=NOW + timedelta(seconds=200))
+    provider = _Provider([unavailable(), valid()])
+
+    [result] = provider.run(BOTH_PAIRS, _task(), context=deep)
+
+    assert isinstance(result, GatewayResult)
+    assert provider.kinds() == ["primary", "retry"]
+    assert provider.models() == ["verifier-model", "verifier-model"]
 
 
 # ---------- the verifier pair a policy snapshot pins (seam with D) ----------

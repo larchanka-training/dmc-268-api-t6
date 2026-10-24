@@ -104,7 +104,8 @@ worker, and leaves `RETRIEVED_PROMPT_VERSIONS` alone.
 7. **Adapter** (`llm/models.py`):
    - `GatewayVerifierModel(gateway, run)` sends `operation="verification"`, which matches `StageName`
      (`policy_snapshot.py:27`) and PIPELINE_SPEC:170.
-   - It uses `route="verifier"` and `bounded_repair=True`.
+   - It uses `route="verifier"` and `bounded_repair=True`. On that route the gateway caps the call timeout at
+     90 s on either engine (PIPELINE_SPEC §3: the verifier is always ≤ 90 s; review round 1).
    - `counter` is `token_counter_for(profile.counter_version)` when there is a snapshot, otherwise `None`.
    - `review_context` and `policy_snapshot` come from `context`.
    - `llm.call` records carry `replace(run, prompt_version_id=bindings.verifier_id)` when the snapshot pins it.
@@ -140,7 +141,9 @@ worker, and leaves `RETRIEVED_PROMPT_VERSIONS` alone.
     - The repair turn becomes one user message with these parts:
       - `<previous_model_output block_id="previous-output" truncated="…">`: the answer, cut to the bound and
         XML-escaped with `xml.sax.saxutils.escape`;
-      - `<validation_errors>`: each error escaped, since jsonschema echoes model text;
+      - `<validation_errors>`: at most 20 errors of at most 300 characters (the validators' caps in
+        `answers.py`, applied again in the helper; review round 1), each escaped, since jsonschema echoes
+        model text;
       - the service-owned instruction.
     - The `previous-output` manifest block hashes the bounded text that is shown (other blocks hash source text,
       `prompt_builder.py:375`), with `shown_line_count` equal to its line count. The bound is OQ-5.

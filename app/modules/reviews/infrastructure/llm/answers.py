@@ -298,6 +298,11 @@ def _validation_messages(
     return messages
 
 
+def bounded_errors(errors: list[str]) -> list[str]:
+    """The validators' own caps for any error list: 20 messages of at most 300 characters."""
+    return [_bounded(message) for message in errors[:_MAX_ERRORS]]
+
+
 def _bounded(message: str) -> str:
     """jsonschema echoes the offending value; a 20 000-character body must not."""
     if len(message) <= _MAX_ERROR_CHARS:
