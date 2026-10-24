@@ -42,6 +42,9 @@ dmc_runs_active:
         description: Queued runs past available_at by more than 10 minutes
 
 # Provider calls of the LLM gateway (run_actions.tool = 'llm.call', one per generation call).
+# On a conventions cache miss the conventions call is counted with the review calls: the call
+# kind is not in the run_actions columns this role reads (deploy.sh). LlmLatencyHigh does not
+# depend on it: any call over 60 s is a problem.
 dmc_llm_calls_15m:
   query: |
     SELECT

@@ -1,4 +1,4 @@
-# Alert rules of the monitoring stack (docs/MONITORING.md §Alerts). Alertmanager sends them to the
+# Alert rules of the monitoring stack (docs/MONITORING.md §5). Alertmanager sends them to the
 # team Telegram channel. Annotations carry counts and names only: no review content, no secrets.
 # kind: event marks an alert about something that happened (a failed run, a new dead letter), not a
 # state: Alertmanager sends it once, without RESOLVED when it leaves its window
