@@ -4,7 +4,8 @@
 
 Docs-only work initially based on main `22c621ab`, issue #208 and its 23 October
 clarification; refreshed onto main `25c83fe0d024270e9a744850baa9721cb0ede617`
-after PR #256 merged. Correct two paragraphs in `docs/WEBHOOK_WORKER.md`; sanitize
+after PR #256 merged. Review round 1 rebases the existing PR #260 onto
+`1ae74b1ae8fb48aed9dc4d9e913bf4c916d5a813`. Correct two paragraphs in `docs/WEBHOOK_WORKER.md`; sanitize
 machine-specific references throughout tracked `docs/plans/`, including JSON
 metadata. Preserve historical counts, durations, warnings/skips, hashes,
 revisions, task statuses and unrelated prose. No application, test, migration,
@@ -34,7 +35,10 @@ retaining both failed and successful run results.
 The initial audit covered 101 tracked plan/evidence files; the issue scan found
 129 matching lines in 28 files, including valid matches. Review and the refreshed
 main audit expanded coverage to 103 tracked files and cleanup to 32 existing
-plan/evidence files, worker documentation and these two plans (35 documents).
+plan/evidence files (35 documents including worker and these plans) for initial
+publication. Review round 1 audits 107 current-main plan/evidence documents and
+109 branch documents including these plans. Cleanup now covers 35 historical
+documents, worker documentation and these two plans: 38 changed documents.
 Supplemental inspection covers plain-prose service ports, gate resource names,
 relative and abbreviated checkout references, and newly merged plans. Paths below are
 relative to `docs/plans/`; each batch touches at most five existing files.
@@ -50,6 +54,8 @@ relative to `docs/plans/`; each batch touches at most five existing files.
 | G | `207-plan.md`, `207-todo.md` | Checkout, Docker socket and JUnit path, including bare temporary-directory prose. |
 | H | `113-review-c.md`, `145-plan.md` (revisit), `168-withheld-files-plan.md`, `168-withheld-files-todo.md` | Review misses and refreshed-main additions: relative/abbreviated checkout references, named database/vhost, local URLs/temp directory, shell-wrapper location and concrete shared-clone exclusion. |
 | I | `185-plan.md`, `178-todo.md` (revisit) | Follow-up review: concrete managed-worktree basename and private backup directory; retain the backup date and public provenance link. |
+| J | `168-ast-parse-errors-plan.md`, `168-ast-parse-errors-todo.md`, `145-plan.md`, `129-todo.md`, `113-review-c.md` | PR #260 review: newly merged traces, remaining checkout/stash abbreviations, 113-family convention and fresh/existing UI checkout distinction. |
+| K | `178-plan.md`, `178-todo.md`, `111-todo.md`, `162-todo.md`, `140-plan.md` | Restore actual uv mechanisms with portable values, reflow the stranded line, and generalize the optional sibling-checkout example. |
 
 Preserve public portal/staging hosts and GitHub sandbox references in `111-*`,
 `142-*`, `143-*`. Preserve `110-verification.md`'s complete image-build and
@@ -131,6 +137,10 @@ diff against inventory and preservation exceptions.
 
 ## Approval checkpoint
 
+The completion statements in this and the following initial-publication
+checkpoints concern reviewed head `7335cf9`; current correction status and
+verification are recorded in “PR #260 review round 1” below.
+
 The user confirmed this saved plan and #220 coordination comment with “Ок” on
 2026-10-24; coordination is posted at the link above. Task 1 review reported
 Standards 0 / Spec 0. Task 2's first review reported Standards 0 / Spec 2 P3
@@ -169,8 +179,9 @@ worktree basename in `185-plan.md` and a private backup directory in
 2026-10-15 and separate public provenance link. It adds one historical document
 and revisits one already edited document. The final inventory is 32 historical
 documents plus worker documentation and the two new plans: 35 documents.
-The broader worktree/checkout/backup audit found no further actual local trace;
-portable sibling isolation guidance and branch names remain unchanged.
+The broader worktree/checkout/backup audit found no further actual local trace
+at that checkpoint; the later PR review found two more abbreviations, now handled
+in review round 1. Branch names remain unchanged.
 
 The initial environment search found 129 matching lines in 28 files before
 editing. The refreshed-main audit covers all 103 tracked plan/evidence documents:
@@ -180,7 +191,8 @@ Every remaining match was inspected:
 its cleanup evidence; 10 are public portal/staging hosts or GitHub sandbox
 references. Supplemental checks covered bare temporary-directory prose, sockets,
 plain-prose ports, relative checkout/paperwork paths and separate service resources.
-Portable sibling-checkout isolation guidance in `140-plan.md` remains valid.
+The previously retained sibling-checkout example in `140-plan.md` is generalized
+for consistency in review round 1; it is no longer a cleanup exception.
 The `97-*` and `151-origin-locks-*` exclusions are byte-identical to base.
 
 All 32 edited historical documents retain content/provenance hashes, recorded
@@ -214,7 +226,7 @@ exit 0. Integration service URLs were absent. This run completed; it was not
 aborted. These are baseline results only, superseded by the refreshed-main gate
 results below.
 
-## Final verification on refreshed main
+## Initial-publication verification on refreshed main
 
 Base: `25c83fe0d024270e9a744850baa9721cb0ede617`. The coordinator used a separate
 temporary runtime matching `uv.lock`; the original shared environment was not
@@ -234,4 +246,67 @@ only prose; no duplicate full test run was needed. Final preservation/scope
 checks and `git diff --check` pass, including empty application/test/migration/
 contract/dependency diffs. Final independent review reports Standards 0 / Spec 0
 on this base, and the publisher received the reviewed diff, actual gate results,
-coordination link and `Refs #208`. Handoff is complete; publication defaults to draft.
+coordination link and `Refs #208`. That handoff is complete; its initial default
+was draft. The now-published PR #260 is non-draft.
+
+## PR #260 review round 1
+
+This continues the user-approved review/development loop. The
+[review](https://github.com/larchanka-training/dmc-268-api-t6/pull/260)
+and [blocking thread](https://github.com/larchanka-training/dmc-268-api-t6/pull/260#discussion_r4367495716)
+refer to published head `7335cf9adc54fd2965cebd25618cc751c1562f41`.
+The existing branch rebased without conflict onto current main
+`1ae74b1ae8fb48aed9dc4d9e913bf4c916d5a813`; the rebase did not affect the
+original shared checkout or unrelated files. The existing PR remains non-draft and retains
+its assigned reviewer when the publisher updates it.
+
+| Review point | Disposition |
+| --- | --- |
+| P2 | Rebase complete; newly merged `168-ast-parse-errors-*` checkout, DB/vhost, URL and temporary-directory traces use the established portable inputs. Concrete local Git-exclusion guidance is conditional while retaining `git add -f`. Historical results/dates/hashes/statuses are preserved. |
+| P3.1 | The remaining UI checkout abbreviation in `145-plan.md` uses `<isolated-ui-checkout>`. |
+| P3.2 | `129-todo.md` describes a backup stash generically; the nearby full source/base hash and outcomes remain unchanged. |
+| P3.3 | `113-review-c.md` uses the documented family convention `<worktree>`. |
+| P3.4 | `178-plan.md`/`178-todo.md` retain `UV_CACHE_DIR=<task-private-cache>` and `UV_PROJECT_ENVIRONMENT=<existing-virtualenv>`; `111-todo.md` retains only the cache variable its original evidence used. The assurance about unchanged original checkout files is restored. |
+| P3.5 | `145-plan.md` explicitly distinguishes a fresh checkout at the ui#106 head from the existing ui#106 checkout. |
+| P3.6 | The stranded integration-skip line in `162-todo.md` is reflowed. |
+| P3.7 | Deliberate no-change: keep the consistent `<gate-project>` aliases, which the reviewer permits. They describe the separate gate infrastructure. Prerequisite/live/offline evidence and stock reports remain untouched. |
+| Optional P3.8 | Generalize `140-plan.md` to `<isolated-checkout>`; withdraw its prior exception rationale. |
+| Optional P3.9 | No change this round: the corrected “Superseded heads” paragraph satisfies AC2. The optional projection-table expansion can be coordinated separately if the user authorizes it; the table remains unchanged. This optional suggestion does not block the authorized corrections. |
+
+All eight before-edit acceptance checks failed for the reported omissions and
+pass after correction. Source versions were inspected before restoring uv
+mechanisms, so no usage was invented. Batches J/K touch five documents each.
+The issue scan on actual current main finds 137 lines in 32 files; the corrected
+branch finds 17 lines in 8 files. All 107 current-main plans and 109 branch plans
+were audited, including `219-*`, which are unchanged. Remaining matches are the
+same 7 permitted rollback-procedure entries and 10 public staging/sandbox entries.
+Supplemental checkout/stash/backup/socket/port/resource checks find no further
+applicable trace. The updated PR inventory is 38 documents: 35 historical
+documents, worker documentation and these two new planning files.
+
+Preservation checks pass for all changed historical documents: content/provenance
+hashes, result fragments, durations, checkbox statuses and code fences. The
+reviewed worker changes, JSON gate aliases, prerequisite/live/offline evidence,
+stock-report bytes/checksums and excluded documents are unchanged during this
+round. `git diff --check` passes; application/test/migration/contract/dependency
+diffs against current main are empty.
+
+The coordinator runs gates in its separate locked runtime on this current base:
+
+| Command | Current-round result |
+| --- | --- |
+| `uv run ruff check .` | PASS |
+| `uv run ruff format --check .` | PASS, 544 files |
+| `uv run mypy .` | PASS, 539 source files |
+| `uv run pytest` | PASS, 4679 passed, 985 skipped, 2 warnings in 313.64s; exit 0 |
+
+The earlier test counts belong to prior bases and are not current-round evidence.
+`TEST_DATABASE_URL` and `TEST_RABBITMQ_URL` were absent; skipped integration
+cases were not executed. The coordinator retained the current-round log/XML
+privately. Fresh independent review reports Standards 0 / Spec 0; the aggregate
+verdict has no actionable findings. The publisher received the reviewed diff,
+actual gates, updated inventory, coordination link and review-point dispositions.
+The publisher updates the existing PR, preserves its current non-draft status
+and reviewer, replies to the blocking thread and numbered points with the actual
+correction commit or rationale, leaves thread resolution to the reviewer, and
+re-requests the assigned reviewer. No merge or issue closure is authorized here.

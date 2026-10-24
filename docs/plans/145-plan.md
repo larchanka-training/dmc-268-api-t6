@@ -99,8 +99,9 @@ resolved, tech-lead acceptance) is covered by C8 and the publication steps.
 - Worktree `<isolated-checkout>`, branch `feat/145-rag-toggle-status` from
   `origin/main` `7546e53`. A dedicated database `<disposable-db>` on the local PG17
   (`<disposable-db-url>`).
-- UI worktree `<isolated-ui-checkout>`, branch `feat/102-rag-toggle` from `e8d47b5`
-  (the ui#106 head), `pnpm install`. The generator needs a clean tree.
+- Fresh UI worktree `<isolated-ui-checkout>`, branch `feat/102-rag-toggle` from `e8d47b5`
+  (the ui#106 head), `pnpm install`. Not the existing ui#106 checkout: the generator
+  needs a clean tree.
 - Implementation is done by a subagent from the brief file (`docs/plans/145-plan.md` plus
   the todo); the main context coordinates and verifies.
 
@@ -280,7 +281,7 @@ TEST_DATABASE_URL=<disposable-db-url> uv run pytest
 - Without a database: `test_alembic_heads.py`, `test_openapi_contract.py`,
   `test_ui_zod_contracts.py`, `test_rag_index_status.py`, `test_context_provenance.py`,
   `test_review_context_stage.py`, `test_llm_gateway.py`.
-- UI (`-102`): `pnpm lint`, `pnpm format:check`, `pnpm check-types`, `pnpm test`.
+- UI (`<isolated-ui-checkout>`): `pnpm lint`, `pnpm format:check`, `pnpm check-types`, `pnpm test`.
 - Review: a clean `code-reviewer` subagent (only `git show`/`git diff`, no checkout); then
   check the clones' branches; check review fixes against `.agents/rules/backend.md` before
   pushing.

@@ -50,8 +50,9 @@ coordinator dispatched Task 2. No further external comments or paid run are auth
   slice does not claim executed database seeding. Optional integration skips remain
   visible in the full test result.
 
-Commands ran in the managed worktree with an existing dependency environment,
-a separate temporary cache and `uv run --offline --no-sync` to avoid
+Commands ran in the managed worktree via the original checkout's existing virtual
+environment (`UV_PROJECT_ENVIRONMENT=<existing-virtualenv>`), with
+`UV_CACHE_DIR=<task-private-cache>` and `uv run --offline --no-sync` to avoid
 dependency/environment changes. No lock/dependency changes. `git diff --check`
 also passed. Independent Task 1 review reported **Standards 0, Spec 0** and
 separately reconfirmed the raw matrix, strict/normalized distinction and 25

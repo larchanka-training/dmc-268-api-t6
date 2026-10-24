@@ -325,7 +325,7 @@ the owning earlier task and fresh review rather than expanding this slice unchec
   backup, then applied it with no conflicts. Final branch/base is
   **`08d56c41f1a3f841afbc5950fc01b8277920e21f`** (`origin/main`), replacing the
   historical planning snapshot. All intended tracked/untracked changes restored;
-  backup `codex-129-before-main-08d56c4` retained until publisher verification.
+  backup stash retained until publisher verification.
 - `TEST_DATABASE_URL=<disposable-db-url> uv run pytest
   tests/test_webhook_worker_notifications_postgres.py
   tests/test_webhook_work_notifications_postgres.py

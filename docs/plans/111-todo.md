@@ -249,8 +249,8 @@ slice дал **3 passed**. Следующий slice закрепил пусты�
 Гейты lint/format/typecheck: Ruff — **All checks passed**;
 format — **354 files already formatted**; mypy — **no issues in 351 source files**.
 Formatter исправил перенос decorator нового теста перед финальными гейтами.
-Команды использовали отдельный временный uv cache: стандартный cache был
-недоступен в исходной среде. `TEST_DATABASE_URL` и `TEST_RABBITMQ_URL`
+Команды использовали `UV_CACHE_DIR=<task-private-cache>`: стандартный uv cache
+был недоступен в исходной среде. `TEST_DATABASE_URL` и `TEST_RABBITMQ_URL`
 отсутствовали (проверены boolean-значения); контейнеры других PR не использовались.
 
 Первый полный pytest в исходной среде: **2 failed, 2305 passed, 145 skipped,

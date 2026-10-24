@@ -1,6 +1,6 @@
 # Developer C correction evidence (#113 / PR #132)
 
-Worktree: `<isolated-checkout>`; source base `46a9077`, development
+Worktree: `<worktree>`; source base `46a9077`, development
 head `69505ab`. Final publication head and whole-plan gate counts belong to the
 coordinator/publisher and are not inferred here. No dependency added.
 

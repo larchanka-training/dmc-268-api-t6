@@ -19,8 +19,8 @@ source of truth; this list adds no scope. AC1–AC3h and D1–D6 are named there
 uv run ruff check .
 uv run ruff format --check .
 uv run mypy . --exclude '^docs/reports/'
-TEST_DATABASE_URL=postgresql+psycopg://app:app@localhost:5432/imp168a \
-TEST_RABBITMQ_URL=amqp://app:app@localhost:5672/imp168a uv run pytest
+TEST_DATABASE_URL=<disposable-db-url> \
+TEST_RABBITMQ_URL=<isolated-task-vhost-url> uv run pytest
 ```
 
 ### Task 0: Plan documents
@@ -30,7 +30,8 @@ TEST_RABBITMQ_URL=amqp://app:app@localhost:5672/imp168a uv run pytest
 **Files:** `docs/plans/168-ast-parse-errors-plan.md`, `docs/plans/168-ast-parse-errors-todo.md`.
 
 **Done when:** the tech lead's answers to Q1–Q4 are written into the plan; only the two
-files are committed (`git add -f`: `docs/plans/` is in the local `.git/info/exclude:14`).
+files are committed. If local `.git/info/exclude` rules hide `docs/plans/`,
+explicitly stage only these two files with `git add -f`.
 
 **Dependencies:** none.
 
@@ -268,7 +269,7 @@ and four fragments of 2000 leave 1 token at 8001.
 
 ### Checkpoint and publication
 
-- Full verification (`df -h /tmp` first).
+- Full verification (`df -h "<temporary-directory>"` first).
 - Review in a clean subagent context.
 - Rebase on `main`, then push.
 - Open the PR (title and body per the plan, `Refs #168`).

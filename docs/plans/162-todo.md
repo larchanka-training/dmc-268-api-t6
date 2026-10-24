@@ -82,9 +82,8 @@ both 422 bodies, preserving the historical decision record.
   checks passed; `uv run ruff format --check .` — 457 files already formatted;
   `uv run mypy .` — no issues in 454 source files; `uv run pytest` — 3104 passed,
   688 skipped, 2 existing deprecation warnings in 646.61 s (exit 0).
-  Integration checks needing
-  unconfigured infrastructure were skipped; this is not evidence of a live-stack
-  integration run. No duplicate full-suite run was started.
+  Integration checks needing unconfigured infrastructure were skipped; this is not
+  evidence of a live-stack integration run. No duplicate full-suite run was started.
 
 **Dependencies:** Task 1.
 

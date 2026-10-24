@@ -10,7 +10,7 @@ Recommended order: deliver legacy v3 before the #130 snapshot prompt migration; 
 
 Planning worktree HEAD and origin/main both equal `2326273e6ab7fcea89d1cf3b94b88a4be66ca5e9`, the latest remote main confirmed by the coordinator at kickoff. No implementation changes were made. Baseline is run `38701845865`, 2026-10-15, primary `mistral-small-4`, engine `fast`, prompt v2 SHA-256 `9177e358c23d1a7cd8987cbf667cf8b705c2afb27eaf8b2237480e4531431d75`.
 
-Offline `uv run python review/scripts/eval_replay.py --report-json <private-output>/replay.json` reproduced validity 7/24, micro TP/FP/FN 2/2/17, critical recall 2/5, verdict agreement 5/24. Warning: `Static input path set changed; refresh the complete baseline`. This is expected current drift, not a successful post-refresh replay. Replay used an existing dependency environment, a separate temporary cache and `uv run --offline --no-sync`; neither dependencies nor checkout files were changed. No provider calls or workflow dispatch occurred.
+Offline `uv run python review/scripts/eval_replay.py --report-json <private-output>/replay.json` reproduced validity 7/24, micro TP/FP/FN 2/2/17, critical recall 2/5, verdict agreement 5/24. Warning: `Static input path set changed; refresh the complete baseline`. This is expected current drift, not a successful post-refresh replay. Replay used `UV_CACHE_DIR=<task-private-cache>`, the original checkout's existing virtual environment through `UV_PROJECT_ENVIRONMENT=<existing-virtualenv>`, and `uv run --offline --no-sync`; neither dependencies nor original checkout files were changed. No provider calls or workflow dispatch occurred.
 
 ### All 17 invalid cases, by rule and defect
 
