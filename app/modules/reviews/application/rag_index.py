@@ -24,7 +24,8 @@ class RagReadiness:
 
 
 class ReviewIndexAccess(Protocol):
-    """Works in the caller's transaction: flushes, never commits."""
+    """Works in the caller's transaction: flushes, never commits, and sets a
+    transaction-local `lock_timeout` in it."""
 
     async def open_for_review(self, repository_id: UUID) -> RagReadiness:
         """Read the index of a repository for a review, requesting a build or extending

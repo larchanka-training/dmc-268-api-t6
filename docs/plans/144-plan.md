@@ -241,8 +241,10 @@ Branch `feat/144-rag-index-review-refresh` from `origin/main`. AC6, AC12, AC13.
 
 ### Decision (`app/modules/code_index/domain/review_trigger.py`, new)
 
-A pure function: the input is the locked row's fields and `now`, the output is which
-writes to make. Suggested inputs: the derived `RagIndexStatus` from `rag_index(...)` and
+A pure function: the input is the state row's fields and `now`, the output is which
+writes to make. The adapter runs it on the unlocked read first, only to learn whether the
+review writes, and again on the locked row with `now` read after the lock; the writes come
+only from that second decision (after team review r1). Suggested inputs: the derived `RagIndexStatus` from `rag_index(...)` and
 its `usable` (so status derivation stays in one place; after review r1 the decision keeps
 no copy of the usable statuses), `purge_reason`, `wake_requested_at`, whether a build
 lease is live (`lease_expires_at > now` under the lock, after review r1),
