@@ -23,7 +23,7 @@
 #         asks for links); verified also checks the milestone when one is set.
 #         --dry-run: {"dry_run","repo","body","milestone","status","links"} — it
 #         still runs preflight and validation, so it needs network and auth; it is
-#         not offline.
+#         not offline. A blocked duplicate (exit 4): {"duplicate","url","number","repo"}.
 # Errors: {"error": "..."} on stderr (also {"warning": "..."}, exit unaffected).
 #         stdout stays machine-readable.
 # Exit: 0 created — check "verified", it can be false · 2 usage/spec/refused ·
@@ -73,7 +73,7 @@ while [ $# -gt 0 ]; do
     --dry-run)         DRY=true; shift ;;
     --allow-duplicate) ALLOW_DUP=true; shift ;;
     --no-board)        NO_BOARD=true; shift ;;
-    -h|--help)         sed -n '4,51p' "$0"; exit 0 ;;
+    -h|--help)         sed -n '4,52p' "$0"; exit 0 ;;
     -*)                die "unknown argument: $1" 2 ;;
     *)                 SPEC="$1"; shift ;;
   esac
@@ -300,6 +300,12 @@ for r in rows:
     if (r.get("title") or "").strip() == want.strip():
         print(json.dumps(r)); break' "$SUMMARY")"
   if [ -n "$DUP" ]; then
+    # Also on stdout, structured: issue-batch.py adopts it on a rerun instead of
+    # creating a second copy (references/batch.md).
+    printf '%s' "$DUP" | python3 -c 'import json,sys
+d = json.load(sys.stdin)
+print(json.dumps({"duplicate": True, "url": d.get("url"), "number": d.get("number"),
+                  "repo": sys.argv[1]}))' "$REPO"
     die "an issue with exactly this title already exists in $REPO: $(printf '%s' "$DUP" | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d.get("url") or d.get("number"))') — pass --allow-duplicate to create another anyway" 4
   fi
 fi

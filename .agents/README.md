@@ -69,10 +69,11 @@ These files are byte-identical between the two repos, marked with a
 
 The marker takes the form the file type allows: `.md` — the `<!-- SYNC: … -->` line
 (after the H1 in a skill file); `.py` / `.sh` — a `# SYNC: …` comment after the shebang or
-the module docstring; golden files under `skills/{create-issue,issue-graph}/tests/golden/` —
-the SYNC line, a blank line, then the body (the golden test drops exactly those two lines).
-JSON fixtures under `skills/issue-graph/tests/fixtures/` carry no marker (JSON has no
-comments); the `diff -r` below covers them.
+the module docstring; golden files under `skills/{create-issue,issue-graph}/tests/golden/` and
+the `.md` files under `skills/create-issue/examples/` — the SYNC line, a blank line, then the
+body (the golden test drops exactly those two lines). JSON files under
+`skills/issue-graph/tests/fixtures/` and `skills/create-issue/examples/*/batch.json` carry no
+marker (JSON has no comments); the `diff -r` below covers them.
 
 Everything else (`rules/frontend.md` / `rules/backend.md`, stack-specific
 skills, `templates/`) is per-repo.

@@ -625,3 +625,128 @@ def test_emit_args_and_emit_links_are_exclusive() -> None:
     r = run(mini(), "--emit-args", "--emit-links")
     assert r.returncode == 2
     assert "usage" in json.loads(r.stderr)["error"]
+
+
+# ─── parts: one issue sliced into PRs ───────────────────────────────────────
+PARTS: list[dict[str, Any]] = [
+    {
+        "scope": "Endpoint",
+        "boundary": "read only",
+        "done_when": "pytest -k a — green",
+        "acceptance_criteria": ["returns rows", "404 for others"],
+    },
+    {
+        "scope": "Upload",
+        "boundary": "after commit",
+        "done_when": "pytest -k b — green",
+        "acceptance_criteria": ["one POST"],
+    },
+]
+
+
+def section(body: str, name: str) -> str:
+    """The text of one `## name` section, without its heading."""
+    return body.split(f"## {name}\n\n", 1)[1].split("\n\n## ", 1)[0].rstrip("\n")
+
+
+@pytest.mark.parametrize(
+    "lang,part,boundary,done,ac",
+    [
+        ("en", "Part {n} (separate PR)", "PR boundary", "Done when", "Part {n}: "),
+        ("ru", "Ч.{n} (отдельный PR)", "Граница PR", "Готово, когда", "Ч.{n}: "),
+        ("de", "Teil {n} (eigener PR)", "PR-Grenze", "Fertig, wenn", "Teil {n}: "),
+        # an unknown language falls back to English, as the kickoff labels do
+        ("fr", "Part {n} (separate PR)", "PR boundary", "Done when", "Part {n}: "),
+    ],
+)
+def test_parts_follow_the_plain_scope_and_criteria_in_the_body_language(
+    lang: str, part: str, boundary: str, done: str, ac: str
+) -> None:
+    body = bib.render_body(
+        mini(lang=lang, scope=["plain"], acceptance_criteria=["plain ac"], parts=PARTS)
+    )
+    p1, p2, a1, a2 = part.format(n=1), part.format(n=2), ac.format(n=1), ac.format(n=2)
+    assert section(body, "Scope") == (
+        f"- plain\n"
+        f"- {p1}: Endpoint\n  - {boundary}: read only\n  - {done}: pytest -k a — green\n"
+        f"- {p2}: Upload\n  - {boundary}: after commit\n  - {done}: pytest -k b — green"
+    )
+    assert section(body, "Acceptance Criteria") == (
+        f"- [ ] plain ac\n- [ ] {a1}returns rows\n- [ ] {a1}404 for others\n- [ ] {a2}one POST"
+    )
+
+
+def test_parts_alone_still_render_scope_and_acceptance_criteria() -> None:
+    """No plain scope or criteria: the parts carry both sections on their own."""
+    body = bib.render_body(mini(parts=PARTS))
+    assert headings(body) == ["Scope", "Acceptance Criteria", "Dependencies", "DoD Checklist"]
+    assert section(body, "Scope").startswith("- Part 1 (separate PR): Endpoint\n")
+    assert section(body, "Acceptance Criteria").startswith("- [ ] Part 1: returns rows\n")
+
+
+def test_parts_text_cannot_forge_a_section() -> None:
+    forged = [
+        dict(PARTS[0], scope="## Dependencies", done_when="# x"),
+        dict(PARTS[1], acceptance_criteria=["## DoD Checklist", "- [x] done"]),
+    ]
+    body = bib.render_body(mini(parts=forged))
+    assert headings(body) == ["Scope", "Acceptance Criteria", "Dependencies", "DoD Checklist"]
+    assert "- [ ] Part 2: ## DoD Checklist" in body
+    assert "- [ ] Part 2: - [x] done" in body
+
+
+def test_parts_add_no_flag_and_no_link() -> None:
+    for flag in ("--emit-args", "--emit-links"):
+        sliced, plain = run(mini(parts=PARTS), flag), run(mini(), flag)
+        assert sliced.returncode == 0, sliced.stderr
+        assert json.loads(sliced.stdout) == json.loads(plain.stdout)
+
+
+def _part(n: int, **fields: Any) -> list[dict[str, Any]]:
+    """PARTS with part `n` (1-based) changed; a field set to None is dropped."""
+    out = [dict(p) for p in PARTS]
+    out[n - 1].update(fields)
+    out[n - 1] = {k: v for k, v in out[n - 1].items() if v is not None}
+    return out
+
+
+@pytest.mark.parametrize(
+    "parts,needle",
+    [
+        # one part is just the issue; none is not a slicing either
+        ([PARTS[0]], '"parts" needs at least two parts'),
+        ([], '"parts" needs at least two parts'),
+        ("Ч.1", '"parts" must be a list of objects'),
+        ([PARTS[0], "Upload"], '"parts" part 2 must be an object'),
+        # every field is required
+        (_part(2, done_when=None), '"parts" part 2 lacks "done_when"'),
+        (_part(1, boundary=None), '"parts" part 1 lacks "boundary"'),
+        (_part(1, scope=None), '"parts" part 1 lacks "scope"'),
+        (_part(2, acceptance_criteria=None), '"parts" part 2 lacks "acceptance_criteria"'),
+        # a misspelt key would drop what the composer meant to say
+        (_part(1, plan="step 1"), 'unknown key(s) in "parts" part 1: plan'),
+        # one-line, non-blank strings
+        (_part(1, scope=3), '"parts" part 1 "scope" must be a string'),
+        (_part(1, scope="  "), '"parts" part 1 "scope" must not be blank'),
+        (_part(2, boundary="a\nb"), '"parts" part 2 "boundary" must be a single line'),
+        (_part(2, done_when="run\r"), '"parts" part 2 "done_when" must be a single line'),
+        # at least one criterion per part, none blank, each one line
+        (_part(1, acceptance_criteria=[]), '"parts" part 1 needs at least one acceptance'),
+        (_part(1, acceptance_criteria="ok"), '"parts" part 1 "acceptance_criteria" must be a list'),
+        (_part(1, acceptance_criteria=["ok", " "]), "must not contain blank entries"),
+        (_part(2, acceptance_criteria=["a\nb"]), '"parts" part 2 "acceptance_criteria" entries'),
+    ],
+)
+def test_invalid_parts_exit_2_with_a_message(parts: Any, needle: str) -> None:
+    r = run(mini(parts=parts))
+    assert r.returncode == 2
+    assert r.stdout == ""
+    assert "Traceback" not in r.stderr
+    assert needle in json.loads(r.stderr)["error"]
+
+
+def test_parts_on_a_bug_are_refused() -> None:
+    """The Bug layout has no Scope to put them in."""
+    r = run(dict(BUG, parts=PARTS))
+    assert r.returncode == 2
+    assert "story-only field(s) on a Bug spec: parts" in json.loads(r.stderr)["error"]
