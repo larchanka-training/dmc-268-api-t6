@@ -731,11 +731,7 @@ class _Selection:
         self, path: str, facts: AstFacts, hints: Sequence[GraphHint]
     ) -> tuple[list[_Reader], bool]:
         """The innermost declarations through which a hint is confirmed at head, each with
-        the import it reads; and whether the read limit stopped a resolution.
-
-        A class reads what its methods read, so a declaration is a place only when none
-        of the declarations it encloses reads the same binding.
-        """
+        the imports it reads; and whether the read limit stopped a resolution."""
         found: dict[int, _Reader] = {}
         limited = False
         for hint in hints:
@@ -749,56 +745,38 @@ class _Selection:
                 ).symbol_id
                 for symbol in exported_symbols(head_facts, hint.target_name)
             }
-            for item in facts.imports:
-                target = module_target(
-                    path, item.module, facts.language, self._tree, self._go_module
-                )
-                if target.resolution is not ImportResolution.RESOLVED:
-                    continue
-                for binding in item.names:
-                    # By path alone: a binding that cannot reach the changed file is not
-                    # resolved, so no read is spent on a module the edge is not about. The
-                    # indexer gives `from pkg import sub` an `imports` edge to the submodule.
-                    reaches = head_path in target.files or _binds_submodule(
-                        facts.language, binding, target, head_path, self._tree
+            for item, binding in self._reaching(path, facts, self._tree, head_path):
+                readers: dict[int, bool] = {}
+                for symbol in facts.symbols:
+                    ref = await self._resolver.resolve_binding(
+                        importer_path=path,
+                        facts=facts,
+                        symbol=symbol,
+                        item=item,
+                        binding=binding,
                     )
-                    if not reaches:
+                    if ref is None:
                         continue
-                    readers: dict[int, bool] = {}
-                    for symbol in facts.symbols:
-                        ref = await self._resolver.resolve_binding(
-                            importer_path=path,
-                            facts=facts,
-                            symbol=symbol,
-                            item=item,
-                            binding=binding,
+                    limited = limited or ref.reason == RAG_LIMIT
+                    if hint.kind is EdgeKind.IMPORTS:
+                        # The module is confirmed by its path: the declaration only has
+                        # to read the binding without rebinding it.
+                        confirms = ref.reason != "shadowed"
+                    else:
+                        # The binding resolves to the same export of the changed file.
+                        confirms = ref.resolution is ImportResolution.RESOLVED and any(
+                            resolved.symbol_id in expected for resolved in ref.resolved_symbols
                         )
-                        if ref is None:
-                            continue
-                        limited = limited or ref.reason == RAG_LIMIT
-                        if hint.kind is EdgeKind.IMPORTS:
-                            # The module is confirmed by its path: the declaration only has
-                            # to read the binding without rebinding it.
-                            confirms = ref.reason != "shadowed"
-                        else:
-                            # The binding resolves to the same export of the changed file.
-                            confirms = ref.resolution is ImportResolution.RESOLVED and any(
-                                resolved.symbol_id in expected for resolved in ref.resolved_symbols
-                            )
-                        readers[symbol.index] = confirms
-                    outer = {
-                        parent for index in readers for parent in _enclosing_indexes(facts, index)
-                    }
-                    for index, confirms in readers.items():
-                        if confirms and index not in outer:
-                            reader = found.get(index)
-                            if reader is None:
-                                found[index] = _Reader(
-                                    facts.symbols[index], (item,), hint.kind, RAG_REVERSE_EDGE
-                                )
-                            elif item not in reader.items:
-                                # The place shows the import of every binding it reads.
-                                found[index] = replace(reader, items=(*reader.items, item))
+                    readers[symbol.index] = confirms
+                for index in _innermost(facts, readers):
+                    reader = found.get(index)
+                    if reader is None:
+                        found[index] = _Reader(
+                            facts.symbols[index], (item,), hint.kind, RAG_REVERSE_EDGE
+                        )
+                    elif item not in reader.items:
+                        # The place shows the import of every binding it reads.
+                        found[index] = replace(reader, items=(*reader.items, item))
         return list(found.values()), limited
 
     async def _broken(
@@ -819,58 +797,43 @@ class _Selection:
         limited = False
         for hint in hints:
             expected = self._removed.targets[_target(hint)]
-            for item in facts.imports:
-                target = module_target(
-                    path, item.module, facts.language, base.tree, self._go_module
-                )
-                if target.resolution is not ImportResolution.RESOLVED:
-                    continue
-                for binding in item.names:
-                    reaches = hint.target_path in target.files or _binds_submodule(
-                        facts.language, binding, target, hint.target_path, base.tree
+            for item, binding in self._reaching(path, facts, base.tree, hint.target_path):
+                readers: dict[int, bool] = {}
+                for symbol in facts.symbols:
+                    before = await base.resolver.resolve_binding(
+                        importer_path=path,
+                        facts=facts,
+                        symbol=symbol,
+                        item=item,
+                        binding=binding,
                     )
-                    if not reaches:
+                    if before is None:
                         continue
-                    readers: dict[int, bool] = {}
-                    for symbol in facts.symbols:
-                        before = await base.resolver.resolve_binding(
+                    limited = limited or before.reason == RAG_LIMIT
+                    # Causality: at the base the binding brought the removed export.
+                    removed = (
+                        [ref for ref in before.resolved_symbols if ref.symbol_id in expected]
+                        if before.resolution is ImportResolution.RESOLVED
+                        else []
+                    )
+                    breaks = False
+                    if removed:
+                        after = await self._resolver.resolve_binding(
                             importer_path=path,
                             facts=facts,
                             symbol=symbol,
                             item=item,
                             binding=binding,
                         )
-                        if before is None:
-                            continue
-                        limited = limited or before.reason == RAG_LIMIT
-                        # Causality: at the base the binding brought the removed export.
-                        removed = (
-                            [ref for ref in before.resolved_symbols if ref.symbol_id in expected]
-                            if before.resolution is ImportResolution.RESOLVED
-                            else []
+                        limited = limited or (after is not None and after.reason == RAG_LIMIT)
+                        breaks = _breaks(after, self._tree)
+                    readers[symbol.index] = breaks
+                    if breaks:
+                        read.setdefault(symbol.index, {}).update(
+                            (ref.symbol_id, ref) for ref in removed
                         )
-                        breaks = False
-                        if removed:
-                            after = await self._resolver.resolve_binding(
-                                importer_path=path,
-                                facts=facts,
-                                symbol=symbol,
-                                item=item,
-                                binding=binding,
-                            )
-                            limited = limited or (after is not None and after.reason == RAG_LIMIT)
-                            breaks = _breaks(after, self._tree)
-                        readers[symbol.index] = breaks
-                        if breaks:
-                            read.setdefault(symbol.index, {}).update(
-                                (ref.symbol_id, ref) for ref in removed
-                            )
-                    outer = {
-                        parent for index in readers for parent in _enclosing_indexes(facts, index)
-                    }
-                    for index, breaks in readers.items():
-                        if breaks and index not in outer:
-                            found.setdefault(index, (item, hint.kind))
+                for index in _innermost(facts, readers):
+                    found.setdefault(index, (item, hint.kind))
         readers_found: list[_Reader] = []
         for index, (item, kind) in found.items():
             definitions = [await self._definition(base, ref) for ref in read[index].values()]
@@ -884,6 +847,23 @@ class _Selection:
                 )
             )
         return readers_found, limited
+
+    def _reaching(
+        self, path: str, facts: AstFacts, tree: RevisionTree, changed_path: str
+    ) -> Iterator[tuple[AstImport, AstImportName]]:
+        """The bindings of ``path`` that can reach ``changed_path`` in ``tree``, by path
+        alone: a binding that cannot is not resolved, so no read is spent on a module the
+        edge is not about. Python ``from pkg import sub`` reaches the submodule for any
+        edge kind: the indexer gives it an ``imports`` edge."""
+        for item in facts.imports:
+            target = module_target(path, item.module, facts.language, tree, self._go_module)
+            if target.resolution is not ImportResolution.RESOLVED:
+                continue
+            for binding in item.names:
+                if changed_path in target.files or _binds_submodule(
+                    facts.language, binding, target, changed_path, tree
+                ):
+                    yield item, binding
 
     async def _definition(self, base: _Base, ref: SymbolRef) -> RetrievedPlace | None:
         """The signature of a removed definition, read at the base."""
@@ -1018,6 +998,14 @@ def _binds_submodule(
         and target.files[0].endswith("__init__.py")
         and python_submodule_files(target.files[0], binding.name, tree) == [head_path]
     )
+
+
+def _innermost(facts: AstFacts, readers: Mapping[int, bool]) -> list[int]:
+    """The confirming declarations (``True``) of ``readers``, innermost only: a class
+    reads what its methods read, so a declaration is a place only when none of the
+    declarations it encloses reads the same binding."""
+    outer = {parent for index in readers for parent in _enclosing_indexes(facts, index)}
+    return [index for index, reads in readers.items() if reads and index not in outer]
 
 
 def _enclosing_indexes(facts: AstFacts, index: int) -> Iterator[int]:
