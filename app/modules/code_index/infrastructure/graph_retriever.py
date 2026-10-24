@@ -20,38 +20,11 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.common.infrastructure.db.unit_of_work import SqlAlchemyUnitOfWork
-from app.modules.code_index.application.index_store import IndexState
-from app.modules.code_index.domain.rag_index import RagIndex, rag_index
 from app.modules.code_index.infrastructure.index_store import SqlAlchemyCodeIndexStore
+from app.modules.code_index.infrastructure.rag_state import enabled_rag_index
 from app.modules.reviews.application.graph_retriever import GraphHint, GraphHints, GraphTarget
 
 _SNAPSHOT = text("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
-
-
-def _rag_index(state: IndexState | None) -> RagIndex:
-    if state is None:
-        return rag_index(
-            rag_enabled=True,
-            status=None,
-            indexed_commit_sha=None,
-            target_commit_sha=None,
-            published_at=None,
-            file_count=None,
-            symbol_count=None,
-            error_code=None,
-            last_error_code=None,
-        )
-    return rag_index(
-        rag_enabled=True,
-        status=state.status,
-        indexed_commit_sha=state.indexed_commit_sha,
-        target_commit_sha=state.target_commit_sha,
-        published_at=state.published_at,
-        file_count=state.file_count,
-        symbol_count=state.symbol_count,
-        error_code=state.error_code,
-        last_error_code=state.last_error_code,
-    )
 
 
 class SqlAlchemyCodeIndexSnapshotUnitOfWork(SqlAlchemyUnitOfWork):
@@ -82,7 +55,7 @@ class SqlAlchemyGraphRetriever:
     async def read_hints(self, repository_id: UUID, targets: Sequence[GraphTarget]) -> GraphHints:
         hints: list[GraphHint] = []
         async with SqlAlchemyCodeIndexSnapshotUnitOfWork(self._session_factory) as uow:
-            index = _rag_index(await uow.index.get_state(repository_id))
+            index = enabled_rag_index(await uow.index.get_state(repository_id))
             if not index.usable:
                 return GraphHints(index, ())
             for target in dict.fromkeys(targets):
