@@ -565,8 +565,8 @@ the 21st distinct blob → `rag_limit`; a failing `put` → logged, the text is 
 
 **What to do (plan, "Where", "Payload"):**
 
-- An optional `rag: RagPlan | None` on `execute`; the RAG part runs after L4 and before
-  the `finally` (`:506`).
+- An optional `rag: RagPlan | None` on `execute` (`RagPlan` is a field-less marker); the
+  RAG part runs after L4 and before the `finally` (`:506`).
 - `retrieved: tuple[RetrievedBlock, ...]` and `rag: RagStats | None` on the payload;
   `ContextLevel.RAG`; role `retrieved_excerpt`; `selection_reason`, the edge kind and
   `index_commit_sha`; the block revision is the PR side.
@@ -637,8 +637,9 @@ one revision each.
   helper that answers whether a pinned `(review_system_key, review_system_version)` has a
   retrieved section, in `app/modules/reviews/application/rag_index.py`, with this first
   caller; its test pins `("review.system", "v3")` outside the set.
-- The stage passes `RagPlan(index_commit_sha, stale)` only for a usable index and a pinned
-  prompt version in the capability set (M6).
+- The stage passes a `RagPlan()` marker (no fields: a block carries the commit of its own
+  graph read) only for a usable index and a pinned prompt version in the capability set
+  (M6).
 - `context.rag` `used`: `{outcome, candidates: {found, confirmed, dropped: {…}}, tokens}`
   with `found = confirmed + Σdropped`, no paths.
 - The RR read found no READY row → `not_ready` with the fresh status.
