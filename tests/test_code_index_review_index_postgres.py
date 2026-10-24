@@ -355,6 +355,28 @@ def test_a_review_wakes_no_index_while_a_build_holds_its_lease(reviews: _Reviews
 
 
 @pytest.mark.integration
+def test_a_review_wakes_an_index_whose_build_lease_expired(reviews: _Reviews) -> None:
+    async def scenario() -> None:
+        index = reviews.index
+        await _stale(index, index.a)
+        await _claim(index, index.a)
+        # The build stopped without releasing: its lease is still on the row, but over.
+        await _set(index, index.a, "lease_expires_at = clock_timestamp() - interval '1 minute'")
+        start = await _clock(index)
+
+        readiness = await asyncio.wait_for(_review(index, index.a), 5)
+
+        end = await _clock(index)
+        assert _seen(readiness) == ("stale", C1, None, C2)
+        expired = await _row(index, index.a)
+        assert expired is not None and expired["wake_requested_at"] is not None
+        assert start <= expired["wake_requested_at"] <= end
+        assert expired["target_commit_sha"] == C2
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.integration
 def test_a_failed_a_removed_a_disabled_and_a_missing_index_take_no_write(
     reviews: _Reviews,
 ) -> None:
