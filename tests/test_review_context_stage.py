@@ -1597,3 +1597,18 @@ def test_context_trace_lists_retrieved_blocks_with_their_side_and_revision() -> 
         "reason": "rag_broken_reference",
     }
     assert "def main" not in repr(summary)
+
+
+@pytest.mark.parametrize(("threshold", "cap"), [("critical", 1), ("warning", 3)])
+def test_publication_settings_leave_conventions_cache_identity_unchanged(
+    threshold: str, cap: int
+) -> None:
+    baseline = Store()
+    assert baseline.pins is not None
+    changed = Store(pins=replace(baseline.pins, severity_threshold=threshold, max_comments=cap))  # type: ignore[arg-type]
+    first = _stage(Trace(), store=baseline)
+    second = _stage(Trace(), store=changed)
+    asyncio.run(first.run(_RUN))
+    asyncio.run(second.run(_RUN))
+    assert first.policy_key is not None
+    assert first.policy_key == second.policy_key

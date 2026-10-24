@@ -15,6 +15,7 @@ from app.modules.reviews.application.determine_ci_eligibility import (
     CiEligibility,
     EligibilityCandidate,
 )
+from app.modules.reviews.application.verdict import SeverityThresholdValue
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -107,6 +108,8 @@ class RunInsertCandidate:
     engine: str
     rule_version_id: UUID
     prompt_version_id: UUID
+    severity_threshold: SeverityThresholdValue
+    max_comments: int
 
 
 @dataclass(frozen=True)

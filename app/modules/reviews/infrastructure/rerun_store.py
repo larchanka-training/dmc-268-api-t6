@@ -9,7 +9,7 @@ from uuid import UUID, uuid4
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from app.common.infrastructure.db.enums import CodeChangeState, Engine, RunState
+from app.common.infrastructure.db.enums import CodeChangeState, Engine, RunState, SeverityThreshold
 from app.common.infrastructure.db.unit_of_work import SqlAlchemyUnitOfWork
 from app.modules.auth.application.scope import AuthScope
 from app.modules.reviews.application.queue_messages import StoredRunMessage
@@ -82,6 +82,8 @@ class SqlAlchemyRerunStore:
                 engine=Engine(candidate.engine),
                 rule_version_id=candidate.rule_version_id,
                 prompt_version_id=candidate.prompt_version_id,
+                severity_threshold=SeverityThreshold(candidate.severity_threshold),
+                max_comments=candidate.max_comments,
                 attempt=0,
                 available_at=now,
                 cancel_requested=False,
