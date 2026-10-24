@@ -1247,8 +1247,9 @@ Policy documents хранятся отдельно от производных �
 Каноническая таблица исходов —
 [CVS §2.2](CONTEXT_AND_VERIFICATION_SPEC.md#22-порядок-операций), классификация — CVS §9.2.
 Только доказанный binary по bounded evidence CVS §9.2 — встроенное исключение:
-binary-only → skipped, binary + код может дать complete/clean. Технические пропуски T из CVS §2.2 не являются ignored
-и не входят в excluded_files. При полном inventory и **хотя бы одном T**, если
+binary-only → skipped, binary + код может дать complete/clean. Технические пропуски T
+(`unsupported_path`, `identity_unresolved`, `too_large`, `unsupported_change`)
+из CVS §2.2 не являются ignored и не входят в excluded_files. При полном inventory и **хотя бы одном T**, если
 остальные изменения только E/T, backend формирует none, verdict=null, 0 LLM,
 publishing → succeeded/neutral. С анализируемым текстом T даёт partial либо
 summary-only по оставшемуся scope; T не увеличивают пороговый счётчик 3 000 строк.

@@ -18,8 +18,8 @@ v1.2 (RAG v1, #140) — [PR #157](https://github.com/larchanka-training/dmc-268-
 
 **Редакция 2026-10-18 — [#175](https://github.com/larchanka-training/dmc-268-api-t6/issues/175),
 [PR #205](https://github.com/larchanka-training/dmc-268-api-t6/pull/205).**
-Базовые версии утверждены указанными PR; новые уточнения этой редакции проходят
-review в #205 и не приписываются утверждению #108/#135/#157.
+Базовые версии утверждены указанными PR; новые уточнения этой редакции утверждены
+в PR #205 и не приписываются утверждению #108/#135/#157.
 Версия 1.2 вносит RAG v1 по
 [ADR 0001](adr/0001-graph-rag-v1.md) в §1, §2.1, §3.1–3.2, §3.4–3.5, §4.1, §5, §8.1, §12;
 согласование остаточных расхождений — #175.
@@ -647,6 +647,14 @@ rename/copy и `unsupported_path`, лимиты, hashes и отсутствие 
 Нарушение →
 `policy_context_violation`, `failed` без отправки. Поиск regex по готовому prompt
 не заменяет эту проверку.
+
+**Текущее состояние.** `verify_pre_send_guard` в
+`app/modules/reviews/application/prompt_budget.py` проверяет только policy/total
+бюджет токенов. Отдельная `verify_provenance_pre_send_guard` уже проверяет
+provenance/ignore по manifest и выдаёт `policy_context_violation` при нарушении;
+она используется компонентами snapshot-профиля. Полный guard выше остаётся
+целевым контрактом #107; наличие этих функций не означает подключения всего
+нового профиля в боевом worker (§12).
 
 Raw response записывается с `call_id`, `manifest_id`, content digest и outcome.
 Принятый результат хранит `accepted_call_id`. Ссылки из repair/fallback разрешаются
@@ -1721,7 +1729,7 @@ quality gates не объявляются достигнутыми без baseli
 | PIPELINE_SPEC §1: нет running → skipped для ignore | §2.2: добавить переход/уведомление all_changes_ignored |
 | PIPELINE_SPEC §4–6: общий budget/recovery без verifier | §7–8: slots/cost/time reserve, новые ошибки, checkpoints |
 | PIPELINE_SPEC §9–11 / review-output schema | v2 evidence_refs и новая attribution, coverage-aware verdict; v3 side отдельно |
-| TEST_PLAN §3: production verifier не предусмотрен | §11: production-проход обязателен; raw eval и независимый ручной oracle сохраняются |
+| TEST_PLAN §3.4: после #133 есть схемы ReviewOutput v2/verifier, prompt `review.verifier.v1.md`, unit-сценарии и опциональный путь Reflection Pass в `ExecuteReviewRun`; боевой worker его не подключает до #130 | §7/§11: production-проход обязателен; подключение в боевом worker остаётся задачей #130; raw eval и независимый ручной oracle сохраняются |
 | API RunDetail/RunSession/latestRun и UI | Добавить coverage, resultVersion/verificationMode; null verdict при partial без значимых supported findings |
 | Legacy review/postprocess/lint-filter.md, порог severity | В #107 перенести severity threshold за verifier (§6.2), сохранить код lint_pattern; legacy-порядок PS §9 отдельно |
 | Postprocess/lint-filter, prompt fixtures и review README | Версии evidence/атрибуции и фильтров; не восстанавливать raw summary |
