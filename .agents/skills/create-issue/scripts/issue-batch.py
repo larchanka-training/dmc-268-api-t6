@@ -26,12 +26,13 @@ slugs match [a-z0-9][a-z0-9-]*; `parent` / `blocked_by` may name another item as
 
 Output
 ------
---dry-run: the preview on stdout — a table of the items in creation order, the items
-  already created (key, title, url), what a run would do with each exact-title
-  duplicate (adopt it or stop), then each body to create under a heading with its
-  key; every item not yet created runs `issue-create.sh --dry-run` (local refs left
-  out), so a bad milestone, Status or link target fails the preview. Nothing is
-  created, no state is written.
+--dry-run: the preview on stdout — a table of the items in creation order, the
+  builder's "Warnings" for the items to create (key, text: a blocker only in prose;
+  a `@key` or ref in blocked_by silences it), the items already created (key, title,
+  url), what a run would do with each exact-title duplicate (adopt it or stop), then
+  each body to create under a heading with its key; every item not yet created runs
+  `issue-create.sh --dry-run` (local refs left out), so a bad milestone, Status or
+  link target fails the preview. Nothing is created, no state is written.
 real run: {"id", "items": [{"key", "url", "number", "repo", "created", "adopted",
   "verified", "board", "links"}], "state_file"} on stdout — also when an item stops
   the batch (then it lists the items done before it).
@@ -41,7 +42,8 @@ real run: {"id", "items": [{"key", "url", "number", "repo", "created", "adopted"
   read_first and mines. Type, titles, wording and the AC count are not compared.
 Errors: {"error": "..."} on stderr; the item scripts' stderr is passed through, except
   for an adopted item: one {"note": "adopted <url> — …"} line replaces what
-  issue-create.sh wrote (its exit-4 duplicate error).
+  issue-create.sh wrote (its exit-4 duplicate error), and an `issue-create.sh
+  --dry-run` loses the builder's warnings — the preview lists them, the create repeats.
 
 Exit
 ----
@@ -253,8 +255,9 @@ def link_args(spec: dict[str, Any]) -> list[str]:
     return args
 
 
-def build_body(key: str, spec: dict[str, Any]) -> str:
-    """The body, from the builder itself: a spec it refuses stops the batch here."""
+def build_body(key: str, spec: dict[str, Any]) -> tuple[str, list[str]]:
+    """The body, from the builder itself: a spec it refuses stops the batch here. Also
+    the text of each warning the builder printed for it."""
     r = subprocess.run(
         [sys.executable, str(BUILDER), "-"],
         input=json.dumps(spec, ensure_ascii=False),
@@ -264,18 +267,20 @@ def build_body(key: str, spec: dict[str, Any]) -> str:
     )
     if r.returncode != 0:
         err(f'item "{key}": {last_error(r.stderr)}')
-    return r.stdout
+    return r.stdout, [text for line in r.stderr.splitlines() if (text := warning_of(line))]
 
 
-def validate(batch: dict[str, Any]) -> None:
+def validate(batch: dict[str, Any]) -> dict[str, list[str]]:
     """Every item is a spec the builder accepts; no two share a title in one repo — the
     second create would hit issue-create.sh's duplicate guard on the first one (the
     same comparison: repo, stripped title); and no body names a local ref: "@key" is
-    not an issue number, and in a body it renders as an @mention."""
+    not an issue number, and in a body it renders as an @mention. Returns the builder's
+    warnings per key, for the spec without the local refs."""
     keys = [item["key"] for item in batch["items"]]
     titles: dict[tuple[str, str], str] = {}
+    warnings: dict[str, list[str]] = {}
     for item in batch["items"]:
-        body = build_body(item["key"], spec_of(item, None))
+        body, warnings[item["key"]] = build_body(item["key"], spec_of(item, None))
         title = (item["repo"].lower(), item["summary"].strip())
         if title in titles:
             err(
@@ -290,6 +295,7 @@ def validate(batch: dict[str, Any]) -> None:
                     "issue number and renders as an @mention; describe the dependency in words, "
                     "the native link carries the number"
                 )
+    return warnings
 
 
 # ─── the item scripts ───────────────────────────────────────────────────────
@@ -300,6 +306,14 @@ def last_error(stderr: str) -> str:
         with contextlib.suppress(ValueError, TypeError, KeyError):
             return str(json.loads(line)["error"])
     return lines[-1] if lines else "no error text"
+
+
+def warning_of(line: str) -> str | None:
+    """The text of a {"warning": "..."} line, else None."""
+    with contextlib.suppress(ValueError, TypeError, KeyError):
+        text = json.loads(line)["warning"]
+        return text if isinstance(text, str) else None
+    return None
 
 
 def call(script: str, args: list[str], hold: bool = False) -> tuple[int, Any, str, str]:
@@ -502,10 +516,15 @@ def to_create(ordered: list[dict[str, Any]], recorded: dict[str, Any]) -> list[d
     return [item for item in ordered if item["key"] not in recorded]
 
 
-def dry_runs(items: list[dict[str, Any]], no_board: bool, step: str) -> dict[str, Any]:
+def dry_runs(
+    items: list[dict[str, Any]], no_board: bool, step: str, builder: dict[str, list[str]]
+) -> dict[str, Any]:
     """`issue-create.sh --dry-run` per item, local refs left out: milestone, Status
     and external link targets are checked, and the exact-title search runs, while
-    nothing of these items exists. The first failure ends the batch here."""
+    nothing of these items exists. The first failure ends the batch here. Its stderr
+    is passed on less the builder's warnings (`builder`, from validate()): the preview
+    lists the true ones and the create repeats them, and without the local refs a
+    `@key` blocker looks absent, so a prose-blocker warning here may be false."""
     flags = ["--dry-run", *(["--no-board"] if no_board else [])]
     outs: dict[str, Any] = {}
     with tempfile.TemporaryDirectory() as work:
@@ -513,7 +532,9 @@ def dry_runs(items: list[dict[str, Any]], no_board: bool, step: str) -> dict[str
             key = item["key"]
             spec_path = Path(work) / f"{key}.json"
             spec_path.write_text(json.dumps(spec_of(item, None), ensure_ascii=False), "utf-8")
-            code, out, msg, _ = call("issue-create.sh", [str(spec_path), *flags])
+            code, out, msg, said = call("issue-create.sh", [str(spec_path), *flags], hold=True)
+            lines = said.splitlines(keepends=True)
+            sys.stderr.write("".join(x for x in lines if warning_of(x) not in builder[key]))
             if code != 0 or not isinstance(out, dict) or not isinstance(out.get("body"), str):
                 err(
                     f'item "{key}": {step} failed (issue-create.sh --dry-run, exit {code}): {msg}',
@@ -534,9 +555,19 @@ def preview(
     state: dict[str, Any],
     rerun: bool,
     no_board: bool,
+    builder: dict[str, list[str]],
 ) -> int:
     recorded, started = state["items"], state["started_at"] if rerun else None
-    outs = dry_runs(to_create(ordered, recorded), no_board, "the preview")
+    todo = to_create(ordered, recorded)
+    outs = dry_runs(todo, no_board, "the preview", builder)
+    # CONTRACT: the builder's one warning is the prose blocker, and it saw each spec
+    # without the local refs — so the item's own blocked_by, a `@key` too, silences it.
+    warned = [
+        f"- `{item['key']}`: {text}"
+        for item in todo
+        if not item.get("blocked_by")
+        for text in builder[item["key"]]
+    ]
     n = len(ordered)
     rows = [
         f"Batch `{batch['id']}`: {n} issue{'' if n == 1 else 's'}, in creation order.",
@@ -573,6 +604,8 @@ def preview(
             else:
                 found = f"{dup.get('state')}, {dup.get('author')}"
                 dups.append(f"- `{key}`: would stop: duplicate #{num} ({found}) — {url}")
+    if warned:
+        rows += ["", "Warnings:", *warned]
     if done:
         rows += ["", "Already created, only their links are ensured:", *done]
     if dups:
@@ -589,6 +622,7 @@ def run(
     rerun: bool,
     path: Path,
     no_board: bool,
+    builder: dict[str, list[str]],
 ) -> int:
     recorded: dict[str, Any] = state["items"]
     results: list[dict[str, Any]] = []
@@ -641,7 +675,8 @@ def run(
     # bad milestone, Status, link target or a duplicate stops a batch that made nothing.
     todo = to_create(ordered, recorded)
     started = state["started_at"] if rerun else None
-    outs = dry_runs(todo, no_board, "the validation before the first create (nothing created)")
+    step = "the validation before the first create (nothing created)"
+    outs = dry_runs(todo, no_board, step, builder)
     for item in todo:
         key, out = item["key"], outs[item["key"]]
         dup = out.get("duplicate")
@@ -829,12 +864,12 @@ def main(argv: list[str]) -> int:
         with_status = next((i["key"] for i in ordered if "status" in i), None)
         if with_status is not None:
             err(f'item "{with_status}" sets "status" but --no-board skips the board — drop one')
-    validate(batch)
+    builder = validate(batch)
     path = state_file(batch["id"])
     state, rerun = load_state(path, ordered)
     if dry:
-        return preview(batch, ordered, state, rerun, no_board)
-    return run(batch, ordered, state, rerun, path, no_board)
+        return preview(batch, ordered, state, rerun, no_board, builder)
+    return run(batch, ordered, state, rerun, path, no_board, builder)
 
 
 if __name__ == "__main__":

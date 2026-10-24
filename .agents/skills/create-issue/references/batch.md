@@ -58,7 +58,9 @@ a heading with its key — and creates nothing, writes no state. Below the table
 items an earlier run already created (key, title, url; no dry-run, no body) and, for each
 item whose exact title already exists in its repo, what the run will do: `would adopt #N`
 (§ 5) or `would stop: duplicate #N (state, author)` — the run then stops before its first
-create; rename the item or settle that issue first.
+create; rename the item or settle that issue first. Right below the table, `Warnings:` names
+each item to create with a blocked-by group in `dependencies` and no `blocked_by` (a `@key`
+counts): its native link would be missing (`templates.md` § Dependencies).
 
 ## 3. One confirmation for the batch
 
