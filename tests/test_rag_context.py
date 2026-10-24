@@ -1092,19 +1092,91 @@ def _submodule_import(
         (EdgeKind.IMPORTS, "from .other import store\n"),
         (EdgeKind.IMPORTS, "from .other import x as store\n"),
         (EdgeKind.USES_IMPORTED, "from .other import store\n"),
+        # Another module bound to the name (M3).
+        (EdgeKind.IMPORTS, "import pkg.other as store\n"),
+        (EdgeKind.IMPORTS, "import pkg as store\n"),
+        (EdgeKind.IMPORTS, "import pkg.sub.store as store\n"),
+        # A target the resolver does not resolve (M4).
+        (EdgeKind.IMPORTS, "from external_lib import store\n"),
+        (EdgeKind.IMPORTS, "import external_lib as store\n"),
+        (EdgeKind.IMPORTS, "from .. import store\n"),
+        # A submodule of another package, or another submodule (M5).
+        (EdgeKind.IMPORTS, "from pkg2 import store\n"),
+        (EdgeKind.IMPORTS, "from . import other as store\n"),
+        (EdgeKind.IMPORTS, "from .sub import store\n"),
     ],
-    ids=["imports-def", "imports-assign", "imports-reimport", "imports-alias", "uses-reimport"],
+    ids=[
+        "imports-def",
+        "imports-assign",
+        "imports-reimport",
+        "imports-alias",
+        "uses-reimport",
+        "module-other",
+        "module-package",
+        "module-nested",
+        "external-from",
+        "external-module",
+        "parent-relative",
+        "other-package",
+        "other-submodule",
+        "nested-package",
+    ],
 )
 def test_a_package_that_binds_the_name_itself_does_not_confirm_the_submodule(
     kind: EdgeKind, init: str
 ) -> None:
     repository, diff_map, graph = _submodule_import(
-        init, kind, {"pkg/other.py": "def store(item):\n    return item\n"}
+        init,
+        kind,
+        {
+            "pkg/other.py": "def store(item):\n    return item\n",
+            "pkg/sub/__init__.py": "",
+            "pkg/sub/store.py": "def save(item):\n    return item\n",
+            "pkg2/__init__.py": "",
+            "pkg2/store.py": "def save(item):\n    return item\n",
+        },
     )
 
     result = _select(repository, diff_map, graph)
 
     # `from pkg import store` binds what the package names `store`, not the submodule.
+    assert result.places == ()
+    assert result.omissions == (RagOmission("rag_edge_unconfirmed", "app/main.py"),)
+    assert (result.found, result.confirmed) == (1, 0)
+
+
+def test_a_method_named_like_the_submodule_is_no_rebind() -> None:
+    repository, diff_map, graph = _submodule_import(
+        "class Registry:\n    def store(self):\n        return 1\n"
+    )
+
+    result = _select(repository, diff_map, graph)
+
+    # Only a top-level name of the package can stand in for the submodule.
+    assert [place.source.path for place in result.places] == ["app/main.py"]
+    assert (result.found, result.confirmed) == (1, 1)
+
+
+@pytest.mark.parametrize(
+    "main",
+    [
+        "from pkg import store\n\n\ndef run(item):\n    return store.helper(item)\n",
+        "from pkg.store import helper\n\n\ndef run(item):\n    return helper(item)\n",
+    ],
+    ids=["submodule", "named"],
+)
+def test_a_uses_imported_edge_needs_the_changed_export_itself(main: str) -> None:
+    store = (
+        "def save(item):\n    item.check()\n    return item\n\n\n"
+        "def helper(item):\n    return item\n"
+    )
+    repository, diff_map, graph = _submodule_import(
+        "", EdgeKind.USES_IMPORTED, {"pkg/store.py": store, "app/main.py": main}
+    )
+
+    result = _select(repository, diff_map, graph)
+
+    # The edge is about `save`: a read of `helper` from the same module confirms nothing.
     assert result.places == ()
     assert result.omissions == (RagOmission("rag_edge_unconfirmed", "app/main.py"),)
     assert (result.found, result.confirmed) == (1, 0)
