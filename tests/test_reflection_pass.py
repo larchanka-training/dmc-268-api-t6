@@ -2511,11 +2511,21 @@ async def test_verifier_payment_required_fails_the_run_without_a_retry() -> None
 
 
 @pytest.mark.anyio
-async def test_verifier_context_overflow_is_a_verification_overflow() -> None:
+@pytest.mark.parametrize(
+    "failure",
+    [
+        LlmCallFailed(LlmErrorCode.CONTEXT_OVERFLOW, "too long"),
+        # The code a verifier model raised before the gateway adapter.
+        RunFailure("verification_context_overflow", "too long"),
+    ],
+    ids=["gateway-overflow", "verifier-overflow"],
+)
+async def test_verifier_context_overflow_is_a_verification_overflow(failure: Exception) -> None:
     with pytest.raises(RunFailure) as caught:
-        await _verify_with_failure(LlmCallFailed(LlmErrorCode.CONTEXT_OVERFLOW, "too long"))
+        await _verify_with_failure(failure)
 
     assert caught.value.error_code == "verification_context_overflow"
+    assert caught.value.message == "Verifier prompt context overflow"
     assert "verification_context_overflow" not in RETRYABLE_ERROR_CODES
 
 

@@ -9,15 +9,17 @@ passes them to ``enter_publishing``, which writes the ``llm.verify`` run action
 from __future__ import annotations
 
 import asyncio
+import itertools
 import logging
 import re
 from dataclasses import replace
-from types import TracebackType
+from types import SimpleNamespace, TracebackType
 from typing import Any, cast
 from uuid import UUID
 
 import pytest
 
+import app.modules.reviews.application.execute_review as execute_review_module
 from app.modules.reviews.application.conventions import CachedConventions, GeneratedConventions
 from app.modules.reviews.application.execute_review import ExecuteReviewRun, ReviewPromptInput
 from app.modules.reviews.application.findings_post_processor import ProcessedReviewOutput
@@ -199,8 +201,15 @@ def _execute(findings: list[dict[str, Any]], verifier: _ReplyVerifier) -> Verifi
 
 
 def test_verified_output_carries_the_llm_verify_trace_without_reason(
-    caplog: pytest.LogCaptureFixture,
+    caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    # Each id this module draws sorts before the previous one, so prompt order is not sorted.
+    countdown = itertools.count()
+    monkeypatch.setattr(
+        execute_review_module,
+        "uuid",
+        SimpleNamespace(uuid4=lambda: UUID(int=2**64 - next(countdown))),
+    )
     verifier = _ReplyVerifier()
 
     with caplog.at_level(logging.INFO):
@@ -208,6 +217,7 @@ def test_verified_output_carries_the_llm_verify_trace_without_reason(
 
     assert len(verifier.candidate_ids) == 2
     first, second = verifier.candidate_ids
+    assert first > second
     assert output.verify_request == {
         "candidate_ids": [first, second],
         "accepted_call_id": "00000000-0000-0000-0000-000000013902",

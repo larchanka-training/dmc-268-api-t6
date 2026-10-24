@@ -172,12 +172,20 @@ def test_the_live_estimate_is_the_same_with_and_without_counter_v2(
     assert provider.estimates() == [1101]
 
 
-def test_with_a_task_counter_the_estimate_is_the_counters_count() -> None:
+@pytest.mark.parametrize(
+    "chars_per_token",
+    [
+        # The 4.0 heuristic would give 75 + 751 = 826: the heuristic alone dies here.
+        4.0,
+        # The 2.0 heuristic would give 150 + 1501 = 1651: a max of both dies here.
+        2.0,
+    ],
+)
+def test_with_a_task_counter_the_estimate_is_the_counters_count(chars_per_token: float) -> None:
     provider = _Provider()
 
-    provider.generate(replace(PROFILE, chars_per_token=4.0), EstimatedTokenCounter())
+    provider.generate(replace(PROFILE, chars_per_token=chars_per_token), EstimatedTokenCounter())
 
-    # The 4.0 heuristic would give 75 + 751 = 826.
     assert provider.estimates() == [1101]
 
 
