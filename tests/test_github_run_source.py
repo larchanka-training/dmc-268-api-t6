@@ -154,3 +154,52 @@ def test_conventions_tree_and_files_come_from_the_base_revision_when_asked() -> 
         f"/repos/octo/repo/git/trees/{HEAD}",
     ]
     assert files[0].content == "base content"
+
+
+def test_get_pull_request_meta_makes_zero_compare_requests() -> None:
+    calls: list[str] = []
+
+    def github(request: httpx.Request) -> httpx.Response:
+        calls.append(request.url.path)
+        if "/commits" in request.url.path:
+            return httpx.Response(200, json=[{"commit": {"message": "commit msg"}}])
+        if "/compare" in request.url.path:
+            raise AssertionError("unexpected /compare request!")
+        return httpx.Response(200, json={})
+
+    from app.modules.reviews.application.prompt_builder import PullRequestMeta
+    from app.modules.reviews.application.vcs_diff import VcsPullRequest
+
+    class FakeVcs:
+        async def get_pull_request(
+            self, locator: object, *, checkpoint: object = None
+        ) -> VcsPullRequest:
+            return VcsPullRequest(
+                locator=LOCATOR,
+                head_sha=HEAD,
+                base_sha=BASE,
+                meta=PullRequestMeta(
+                    "Title", None, "octo", "feature", "main", (), 1, 1, 0, False, False
+                ),
+            )
+
+        async def get_commit_messages(
+            self, locator: object, *, checkpoint: object = None
+        ) -> object:
+            from app.modules.reviews.application.vcs_diff import CommitMessagePrefix
+
+            return CommitMessagePrefix(("commit msg",), False)
+
+    source = GitHubRunSource(
+        client=httpx.AsyncClient(
+            base_url="https://api.github.test", transport=httpx.MockTransport(github)
+        ),
+        token_provider=StaticGitHubInstallationAccessTokenProvider("token"),
+        vcs=cast(VcsMetadataProvider, FakeVcs()),
+        runs=Runs(),
+        run_id=uuid4(),
+    )
+    meta = asyncio.run(source.get_pull_request_meta(uuid4()))
+    assert meta is not None
+    assert not any("/compare" in call for call in calls)
+    assert meta.diff_old_sha is None

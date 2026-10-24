@@ -728,7 +728,7 @@ rerun — новый run с новой привязкой версий и рев
 (неизвестная версия любого из полей прерывает выполнение с `policy_snapshot_integrity_error`):
 - `tokenizer_version = "tokenizer/v1"` — символьно-эвристическая схема токенизации UTF-8 без внешнего BPE-словаря, работающая в паре с закреплённым `counter_version`;
 - `recovery_profile_version = "recovery/v1"` — профиль восстановления gateway (однократный JSON-repair с блоком `previous-output` при ошибке схемы и переключение на `fallback_model` при отказе primary, с обязательным pre-send guard и manifest на каждом вызове);
-- `budget_profile_version = "budget/v1"` — профиль бюджетирования входа (`send_budget_for`: резерв выхода `8 000` токенов для `review`/`conventions` и `4 000` токенов для `verification`, эффективный потолок `min(max_input_tokens - reserve, model_max_prompt_tokens)` и квоты документов политики `12 000` / `8 000` / `18 000` токенов).
+- `budget_profile_version = "budget/v1"` — профиль бюджетирования отправки (`send_budget_for`: расчёт бюджета отправки из окна конкретной модели и профиля исполнения за вычетом резерва на максимум выхода модели `min(context_window, max_input_tokens) - max_output_tokens` с учётом переопределений окружения и модели; conventions рассчитывается через `gateway.max_prompt_tokens`, без отдельных квот документов).
 Все repository writes выполняются через use case/UoW; repository вызывает flush,
 commit выполняет use case. VCS/LLM вызовы происходят вне транзакций.
 

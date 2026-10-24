@@ -96,11 +96,21 @@ def build_conventions_manifest(
     effective_sha = agents_md_sha if agents_md_sha is not None else request.agents_md_sha
     conventions_blocks: list[ManifestBlock] = []
     if request.agents_md:
+        if (
+            effective_snapshot is not None
+            and effective_snapshot.agents.is_present
+            and effective_snapshot.agents.text is not None
+        ):
+            agents_text = effective_snapshot.agents.text
+        else:
+            agents_text = (
+                request.agents_md.removeprefix("\ufeff").replace("\r\n", "\n").replace("\r", "\n")
+            )
         agents_rev = (
             effective_snapshot.policy_base_sha if effective_snapshot is not None else effective_sha
         )
-        agents_hash = sha256(request.agents_md.replace("\r\n", "\n").encode("utf-8")).hexdigest()
-        lines_count = len(request.agents_md.splitlines()) or 1
+        agents_hash = sha256(agents_text.encode("utf-8")).hexdigest()
+        lines_count = len(agents_text.splitlines()) or 1
         conventions_blocks.append(
             ManifestBlock(
                 block_id="agents-md",

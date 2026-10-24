@@ -205,7 +205,7 @@ def _right_hunk_ranges(shown_line_numbers: set[int]) -> tuple[tuple[int, int], .
     ranges: list[tuple[int, int]] = []
     start = prev = right_nums[0]
     for num in right_nums[1:]:
-        if num - prev > 2:
+        if num - prev > 1:
             ranges.append((start, prev))
             start = num
         prev = num
@@ -217,73 +217,39 @@ def validate_v2_coordinates(
     finding: ReviewFindingV2,
     changed_files: tuple[ChangedFile, ...],
     *,
-    original_files: tuple[ChangedFile, ...] | None = None,
+    original_files: tuple[ChangedFile, ...],
 ) -> tuple[bool, str | None]:
     """Validate finding coordinates against pre-fit hunks and post-fit visibility (CVS §6.2)."""
     line = finding.line
     start_line = finding.start_line
 
-    if original_files is not None:
-        orig_file = next((f for f in original_files if f.path == finding.path), None)
-        if orig_file is None:
-            return False, "unknown_path"
-        orig_right_lines = {dl.number for dl in orig_file.lines if dl.type != "removed"}
-        if line not in orig_right_lines:
-            return False, "line_absent"
-        if start_line is not None:
-            if start_line not in orig_right_lines:
-                return False, "line_absent"
-            orig_hunks = _right_hunk_ranges(orig_right_lines)
-            start_hunk = next(
-                idx
-                for idx, (h_start, h_end) in enumerate(orig_hunks)
-                if h_start <= start_line <= h_end
-            )
-            end_hunk = next(
-                idx for idx, (h_start, h_end) in enumerate(orig_hunks) if h_start <= line <= h_end
-            )
-            if start_hunk != end_hunk:
-                return False, "cross_hunk_range"
-            if any(n not in orig_right_lines for n in range(start_line, line + 1)):
-                return False, "range_gap"
-        file_match = next((f for f in changed_files if f.path == finding.path), None)
-        if file_match is None:
-            return False, "anchor_not_visible"
-        shown_line_numbers = {dl.number for dl in file_match.lines if dl.type != "removed"}
-        check_start = start_line if start_line is not None else line
-        if any(n not in shown_line_numbers for n in range(check_start, line + 1)):
-            return False, "anchor_not_visible"
-        return True, None
-
-    file_match = next((f for f in changed_files if f.path == finding.path), None)
-    if file_match is None:
+    orig_file = next((f for f in original_files if f.path == finding.path), None)
+    if orig_file is None:
         return False, "unknown_path"
-
-    shown_line_numbers = {dl.number for dl in file_match.lines if dl.type != "removed"}
-
-    if line not in shown_line_numbers:
-        if file_match.total_lines is not None and shown_line_numbers:
-            max_shown = max(shown_line_numbers)
-            omitted_count = max(0, file_match.total_lines - len(file_match.lines))
-            if max_shown < line <= max_shown + omitted_count:
-                return False, "anchor_not_visible"
+    orig_right_lines = {dl.number for dl in orig_file.lines if dl.type != "removed"}
+    if line not in orig_right_lines:
         return False, "line_absent"
-
     if start_line is not None:
-        if start_line not in shown_line_numbers:
+        if start_line not in orig_right_lines:
             return False, "line_absent"
-        hunks = _right_hunk_ranges(shown_line_numbers)
+        orig_hunks = _right_hunk_ranges(orig_right_lines)
         start_hunk = next(
-            idx for idx, (h_start, h_end) in enumerate(hunks) if h_start <= start_line <= h_end
+            idx for idx, (h_start, h_end) in enumerate(orig_hunks) if h_start <= start_line <= h_end
         )
         end_hunk = next(
-            idx for idx, (h_start, h_end) in enumerate(hunks) if h_start <= line <= h_end
+            idx for idx, (h_start, h_end) in enumerate(orig_hunks) if h_start <= line <= h_end
         )
         if start_hunk != end_hunk:
             return False, "cross_hunk_range"
-        if any(n not in shown_line_numbers for n in range(start_line, line + 1)):
+        if any(n not in orig_right_lines for n in range(start_line, line + 1)):
             return False, "range_gap"
-
+    file_match = next((f for f in changed_files if f.path == finding.path), None)
+    if file_match is None:
+        return False, "anchor_not_visible"
+    shown_line_numbers = {dl.number for dl in file_match.lines if dl.type != "removed"}
+    check_start = start_line if start_line is not None else line
+    if any(n not in shown_line_numbers for n in range(check_start, line + 1)):
+        return False, "anchor_not_visible"
     return True, None
 
 
@@ -314,7 +280,7 @@ def validate_v2_attribution(
             )
         if block.revision is not None and pr_meta is not None:
             if block.side == "LEFT":
-                expected_rev = getattr(pr_meta, "diff_old_sha", None)
+                expected_rev = pr_meta.diff_old_sha
                 if not expected_rev or block.revision != expected_rev:
                     return (
                         False,

@@ -157,6 +157,9 @@ class ReviewInputProcessor(Protocol):
 class ReviewContextFilter(Protocol):
     """Which paths the policy stage of this attempt withheld from model inputs."""
 
+    @property
+    def diff_old_sha(self) -> str | None: ...
+
     def excluded(self, path: str) -> bool: ...
 
 
@@ -199,9 +202,8 @@ class ExecuteReviewRun:
             excluded = self._context_filter.excluded
             changed_files = tuple(file for file in changed_files if not excluded(file.path))
             omitted_files = tuple(path for path in omitted_files if not excluded(path))
-            filter_diff_old_sha = getattr(self._context_filter, "diff_old_sha", None)
-            if meta.diff_old_sha is None and isinstance(filter_diff_old_sha, str):
-                meta = replace(meta, diff_old_sha=filter_diff_old_sha)
+            if meta.diff_old_sha is None and self._context_filter.diff_old_sha is not None:
+                meta = replace(meta, diff_old_sha=self._context_filter.diff_old_sha)
         context = ReviewContext(
             system=prompt_input.system,
             rules=prompt_input.rules,
@@ -295,7 +297,7 @@ class ExecuteReviewRun:
         *,
         run_id: UUID,
         reviewer_manifest: CallManifest | None = None,
-        original_files: tuple[ChangedFile, ...] | None = None,
+        original_files: tuple[ChangedFile, ...],
     ) -> VerifiedReviewOutput:
         assert self._reflection_pass is not None
         assert context.policy_snapshot is not None

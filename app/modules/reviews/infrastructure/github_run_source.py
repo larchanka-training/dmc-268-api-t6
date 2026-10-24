@@ -18,11 +18,7 @@ from app.modules.reviews.application.conventions import RepositoryFile, Reposito
 from app.modules.reviews.application.process_run import RunVcsInput, RunVcsRepository
 from app.modules.reviews.application.prompt_builder import PullRequestMeta
 from app.modules.reviews.application.run_failures import RunCancelled
-from app.modules.reviews.application.vcs_diff import (
-    MergeBaseProvider,
-    MergeBaseUnavailable,
-    VcsMetadataProvider,
-)
+from app.modules.reviews.application.vcs_diff import VcsMetadataProvider
 from app.modules.reviews.infrastructure.github_vcs import (
     _REQUEST_TIMEOUT,
     InstallationTokenProvider,
@@ -48,7 +44,6 @@ class GitHubRunSource:
         runs: RunVcsRepository,
         run_id: UUID,
         conventions_from_base: bool = False,
-        merge_base: MergeBaseProvider | None = None,
     ) -> None:
         self._client = client
         self._tokens = token_provider
@@ -58,7 +53,6 @@ class GitHubRunSource:
         # Shared conventions describe the repository, not the pull request: with this
         # set, their tree and files come from the base revision only (CONTEXT §4.2).
         self._conventions_from_base = conventions_from_base
-        self._merge_base = merge_base
         self._run: RunVcsInput | None = None
         self._head_blobs: dict[str, str] = {}
 
@@ -143,14 +137,6 @@ class GitHubRunSource:
         run = await self._input()
         pull_request = await self._vcs.get_pull_request(run.locator, checkpoint=self._checkpoint)
         meta = pull_request.meta
-        diff_old_sha = meta.diff_old_sha
-        if diff_old_sha is None and self._merge_base is not None:
-            try:
-                diff_old_sha = await self._merge_base.get_merge_base(
-                    pull_request, checkpoint=self._checkpoint
-                )
-            except MergeBaseUnavailable:
-                diff_old_sha = None
         try:
             prefix = await self._vcs.get_commit_messages(run.locator, checkpoint=self._checkpoint)
         except httpx.HTTPError as exc:
@@ -159,5 +145,4 @@ class GitHubRunSource:
             meta,
             commit_messages=prefix.messages,
             commit_messages_incomplete=prefix.incomplete,
-            diff_old_sha=diff_old_sha,
         )

@@ -203,8 +203,6 @@ class LlmGateway:
         self._fx_provider = fx_provider
         # run_id -> calls of its current attempt; conventions and review share it.
         self._attempts: OrderedDict[UUID, _AttemptCalls] = OrderedDict()
-        self.last_manifest: CallManifest | None = None
-        self.manifests: list[CallManifest] = []
 
     @property
     def settings(self) -> LlmSettings:
@@ -242,9 +240,6 @@ class LlmGateway:
         kind = LlmCallKind.PRIMARY
         timeouts = unavailable = 0
         rate_limit_waited = repaired = False
-        if task.base_manifest is not None:
-            self.last_manifest = task.base_manifest
-            self.manifests.append(task.base_manifest)
 
         while True:
             last = await self._call(primary, kind, messages, task, context, state, attempt)
@@ -315,8 +310,6 @@ class LlmGateway:
                         context=task.review_context,
                         snapshot=task.policy_snapshot,
                     )
-                    self.last_manifest = repair_manifest
-                    self.manifests.append(repair_manifest)
                 messages = repair_messages
                 kind = LlmCallKind.REPAIR
                 continue
@@ -345,8 +338,6 @@ class LlmGateway:
                     context=task.review_context,
                     snapshot=task.policy_snapshot,
                 )
-                self.last_manifest = fallback_manifest
-                self.manifests.append(fallback_manifest)
             last = await self._call(
                 fallback, LlmCallKind.FALLBACK, task.messages, task, context, state, attempt
             )

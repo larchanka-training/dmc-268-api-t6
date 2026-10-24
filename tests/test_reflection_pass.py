@@ -2334,3 +2334,46 @@ async def test_reflection_pass_verifier_evidence_revision_mismatch_right_and_lef
     assert decisions_ok[0].status == "supported"
     assert decisions_ok[0].evidence_refs[0].block_id == "retrieved-left"
     assert query_block_id in real_prompt.user
+
+
+def test_build_verifier_prompt_counter_v1_fitting() -> None:
+    snapshot = make_snapshot()
+    exec_v1 = replace(
+        snapshot.execution_profile, counter_version="counter/v1", max_input_tokens=12000
+    )
+    snapshot_v1 = replace(snapshot, execution_profile=exec_v1)
+
+    lines = tuple(
+        DiffLine(i, "added", f"line_{i:04d} = 'sample payload content for verifier'")
+        for i in range(1, 1500)
+    )
+    cand = make_candidate("c1", path="app/query.py")
+    context_v1 = ReviewContext(
+        system="SYSTEM",
+        rules=(),
+        agents_md=None,
+        conventions=RepoConventions((), ()),
+        pr_meta=PullRequestMeta("T", None, "u", "b", "main", (), 1, 1, 0, False, False),
+        changed_files=(ChangedFile("app/query.py", "modified", lines),),
+        omitted_files=(),
+        policy_snapshot=snapshot_v1,
+    )
+    prompt_v1, _ = VerifierPromptBuilder().build_verifier_prompt(
+        candidates=(cand,), context=context_v1
+    )
+    line_count_v1 = prompt_v1.user.count("<line n=")
+
+    exec_v2 = replace(
+        snapshot.execution_profile, counter_version="counter/v2", max_input_tokens=12000
+    )
+    snapshot_v2 = replace(snapshot, execution_profile=exec_v2)
+    context_v2 = replace(context_v1, policy_snapshot=snapshot_v2)
+    prompt_v2, _ = VerifierPromptBuilder().build_verifier_prompt(
+        candidates=(cand,), context=context_v2
+    )
+    line_count_v2 = prompt_v2.user.count("<line n=")
+
+    assert line_count_v1 > line_count_v2
+    # Verify that prompt_v1 line count strictly matches v1 line count and would fail under v2
+    assert line_count_v1 == 140
+    assert line_count_v2 == 92
