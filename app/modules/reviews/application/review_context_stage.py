@@ -210,8 +210,8 @@ def _rag_readiness(readiness: RagReadiness) -> tuple[dict[str, Any], dict[str, A
         return None
     response: dict[str, Any]
     if index.usable:
-        # Recorded as `prompt_version` until a prompt version with a retrieved section
-        # exists; PR 2 adds that check here.
+        # Recorded as `prompt_version` until a pinned prompt version declares a retrieved
+        # section; the check belongs here.
         response = {"outcome": "not_ready", "reason": "prompt_version"}
     else:
         reason = index.not_ready_reason
