@@ -13,6 +13,7 @@ import pytest
 
 from app.modules.reviews.application import ast_resolution
 from app.modules.reviews.application.ast_resolution import (
+    MAX_IMPORTED_SYMBOLS_PER_RUN,
     FileUnavailable,
     GoLayout,
     ImportRef,
@@ -536,6 +537,118 @@ def test_last_import_of_a_run_is_cut_to_the_remaining_run_limit() -> None:
     assert len(shown.resolved_symbols) == 5
     assert (over.reason, len(over.names)) == ("ast_limit", 3)
     assert resolver._symbols_in_run == 100
+
+
+# --- One binding outside the limits of a run (#144) ------------------------------------
+
+
+def _resolve_binding(
+    sources: dict[str, str], importer: str, symbol: str, module: str
+) -> tuple[ImportRef | None, Provider]:
+    """``resolve_binding`` of the one name imported from ``module``, read by ``symbol``."""
+    provider = Provider(sources)
+    tree = RevisionTree(_HEAD, {path: "b" * 40 for path in sources}, True)
+    resolver = ImportResolver(tree=tree, provider=provider)
+    facts = _facts(importer, sources[importer])
+    (declaration,) = [item for item in facts.symbols if item.name == symbol]
+    (item,) = [entry for entry in facts.imports if entry.module == module]
+    (binding,) = item.names
+    ref = asyncio.run(
+        resolver.resolve_binding(
+            importer_path=importer, facts=facts, symbol=declaration, item=item, binding=binding
+        )
+    )
+    return ref, provider
+
+
+def test_resolve_binding_brings_every_definition_past_the_limits_of_a_run() -> None:
+    sources = _many_exports(MAX_IMPORTED_SYMBOLS_PER_RUN + 1)
+    tree = RevisionTree(_HEAD, {path: "b" * 40 for path in sources}, True)
+    resolver = ImportResolver(tree=tree, provider=Provider(sources))
+    resolver._symbols_in_run = MAX_IMPORTED_SYMBOLS_PER_RUN
+    facts = _facts("src/app.ts", sources["src/app.ts"])
+    (run,) = [item for item in facts.symbols if item.name == "run"]
+    (item,) = facts.imports
+    (binding,) = item.names
+
+    ref = asyncio.run(
+        resolver.resolve_binding(
+            importer_path="src/app.ts", facts=facts, symbol=run, item=item, binding=binding
+        )
+    )
+
+    assert ref is not None
+    assert (ref.resolution, ref.reason, len(ref.resolved_symbols), len(ref.names)) == (
+        ImportResolution.RESOLVED,
+        None,
+        101,
+        101,
+    )
+    assert {symbol.name for symbol in ref.resolved_symbols} == set(ref.names)
+    assert resolver._symbols_in_run == MAX_IMPORTED_SYMBOLS_PER_RUN
+    (capped,) = asyncio.run(
+        resolver.resolve(importer_path="src/app.ts", facts=facts, symbols=[run])
+    )
+    assert (capped.reason, capped.resolved_symbols) == ("ast_limit", ())
+    assert capped.importer_symbol_id == ref.importer_symbol_id
+
+
+def test_resolve_binding_does_not_resolve_a_name_the_symbol_rebinds() -> None:
+    target = {"pkg/models.py": "class User:\n    pass\n"}
+    parameter = "from .models import User\n\ndef f(User):\n    return User()\n"
+    local = "from .models import User\n\ndef f():\n    User = make()\n    return User()\n"
+
+    for importer in (parameter, local):
+        ref, provider = _resolve_binding(
+            {"pkg/app.py": importer, **target}, "pkg/app.py", "f", ".models"
+        )
+
+        assert ref is not None
+        assert (ref.resolution, ref.reason, ref.resolved_symbols) == (
+            ImportResolution.AMBIGUOUS,
+            "shadowed",
+            (),
+        )
+        assert provider.asked == []
+
+
+def test_resolve_binding_follows_only_the_module_the_import_names() -> None:
+    sources = {
+        "pkg/app.py": "from .orders import save\n\ndef run():\n    return save()\n",
+        "pkg/orders.py": "def save():\n    return 1\n",
+        "pkg/users.py": "def save():\n    return 2\n",
+    }
+
+    ref, provider = _resolve_binding(sources, "pkg/app.py", "run", ".orders")
+
+    assert ref is not None
+    assert (ref.resolution, ref.names) == (ImportResolution.RESOLVED, ("save",))
+    assert [(item.path, item.name) for item in ref.resolved_symbols] == [("pkg/orders.py", "save")]
+    assert provider.asked == ["pkg/orders.py"]
+
+
+def test_resolve_binding_does_not_take_a_call_through_a_receiver_for_a_binding() -> None:
+    script = {
+        "src/app.ts": (
+            'import { save } from "./store";\n'
+            "export function run(repository: Store) { return repository.save(); }\n"
+        ),
+        "src/store.ts": "export function save() { return 1 }\n",
+    }
+    ref, provider = _resolve_binding(script, "src/app.ts", "run", "./store")
+    assert (ref, provider.asked) == (None, [])
+
+    python = {
+        "pkg/app.py": (
+            "from .store import Store\n\ndef run(repository: Store):\n"
+            "    return repository.save()\n"
+        ),
+        "pkg/store.py": "class Store:\n    def save(self):\n        return 1\n",
+    }
+    ref, _ = _resolve_binding(python, "pkg/app.py", "run", ".store")
+    assert ref is not None
+    assert ref.names == ("Store",)
+    assert [item.name for item in ref.resolved_symbols] == ["Store"]
 
 
 # --- Public helpers shared with the graph indexer (#142) -------------------------------
