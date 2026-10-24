@@ -981,8 +981,9 @@ uv run python review/scripts/validate_dataset.py --root test-prs-dataset/rules -
 3 cases with a rule-made truth and 3 with `must_not_flag`, and Python plus
 TypeScript/React. Synthetic sources are allowed: the licensed-real-case and
 five-real-sources minimums do not apply. Every per-case check of the main profile
-applies. The required CI job runs this command in its own step, "Rules sub-corpus",
-after the gold summary.
+applies. The `Python lint / type / unit` job, which the required
+`Python lint / type / test` check depends on, runs this command in its own step,
+"Rules sub-corpus", after the gold summary.
 
 ### Policy arms, captures and A/B aggregation
 
