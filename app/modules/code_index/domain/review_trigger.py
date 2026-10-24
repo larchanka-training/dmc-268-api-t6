@@ -1,7 +1,9 @@
-"""What a review writes to the index state row it locked (#144, ADR 0001 §4, §6.1).
+"""What a review writes to the index state row (#144, ADR 0001 §4, §6.1).
 
-A pure decision over the locked row and the time read after the lock. It only picks the
-writes and never reaches the trace: readiness comes from `RagIndex` alone.
+A pure decision over the state row and a time read from the database clock. The adapter
+runs it on an unlocked read first, to learn whether the review writes at all, and again on
+the locked row with the time read after the lock; only that second decision is applied.
+It only picks the writes and never reaches the trace: readiness comes from `RagIndex` alone.
 """
 
 from __future__ import annotations
@@ -57,7 +59,7 @@ def review_trigger(
     healable_error_codes: Set[str],
     now: datetime,
 ) -> ReviewTrigger:
-    """Pick the writes for the locked row; ``status`` None means no row.
+    """Pick the writes for the row read at ``now``; ``status`` None means no row.
 
     ``status`` and ``usable`` are what `rag_index(...)` derives over the same row, so
     `stale` and whether a review may read the index are decided there. ``lease_active``
