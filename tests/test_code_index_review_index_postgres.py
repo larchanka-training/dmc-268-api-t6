@@ -692,8 +692,54 @@ def test_rag_on_waits_for_a_writer_of_the_repository_only_until_the_lock_timeout
 
         # The gate fails after its 2 s lock timeout, well before the run deadline.
         assert getattr(caught.value.orig, "sqlstate", None) == "55P03"
-        assert 1.5 <= waited < 4
+        assert 1.5 <= waited < 3
         assert await _row(index, index.a) == before
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.integration
+def test_the_review_lock_timeout_ends_with_the_gate_transaction(reviews: _Reviews) -> None:
+    async def scenario() -> None:
+        index = reviews.index
+        for repository_id in (index.a, index.b):
+            await _stale(index, repository_id)
+        async with index.factory() as session:
+            schema = await session.scalar(text("SELECT current_schema()"))
+        # One pooled connection: a setting that outlives the gate transaction stays on it.
+        engine = create_async_engine(
+            os.environ["TEST_DATABASE_URL"],
+            connect_args={"options": f"-csearch_path={schema}"},
+            pool_size=1,
+            max_overflow=0,
+        )
+        try:
+            pooled = async_sessionmaker(engine, expire_on_commit=False)
+            review = OpenReviewIndex(partial(SqlAlchemyReviewIndexUnitOfWork, pooled))
+
+            async def setting() -> tuple[object, object]:
+                async with pooled() as session:
+                    return (
+                        await session.scalar(text("SELECT pg_backend_pid()")),
+                        await session.scalar(text("SHOW lock_timeout")),
+                    )
+
+            default = await setting()
+            # A gate transaction that commits.
+            assert _seen(await review.execute(index.a)) == ("stale", C1, None, C2)
+            assert await setting() == default
+            # A gate transaction that fails on the lock timeout.
+            async with index.factory() as holder:
+                await holder.execute(
+                    text("SELECT 1 FROM repositories WHERE id = :repository FOR UPDATE"),
+                    {"repository": index.b},
+                )
+                with pytest.raises(OperationalError):
+                    await asyncio.wait_for(review.execute(index.b), 5)
+                await holder.rollback()
+            assert await setting() == default
+        finally:
+            await engine.dispose()
 
     asyncio.run(scenario())
 
