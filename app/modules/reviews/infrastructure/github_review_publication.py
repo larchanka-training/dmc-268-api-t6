@@ -153,14 +153,21 @@ class GitHubPullRequestReviewGateway:
                 await self._tokens.get_installation_access_token(submission.installation_id)
             )
             review_id = await self._find(prefix, headers, submission.findings_hash, checkpoint)
+            # A fresh POST is atomic: 201 means every inline comment of this
+            # submission exists on the provider already, so bodies are not
+            # compared after the create. Body/coordinate matching only restores
+            # placement for a review found by marker (_find).
             if review_id is None:
+                fresh = True
                 await self._ensure_current_head(prefix, headers, submission.commit_sha, checkpoint)
                 review_id = await self._post(prefix, headers, submission, checkpoint)
+            else:
+                fresh = False
             # Keep the successful receipt for append-only audit if retirement fences
             # the next request. Finalization independently fences findings/comments.
             try:
                 return await self._with_comments(
-                    prefix, headers, review_id, checkpoint, submission.findings
+                    prefix, headers, review_id, checkpoint, submission.findings, fresh=fresh
                 )
             except RunCancelled as exc:
                 _LOGGER.info(
@@ -249,6 +256,8 @@ class GitHubPullRequestReviewGateway:
         review_id: int,
         checkpoint: RunProviderCheckpoint,
         findings: tuple[PublishedFinding, ...],
+        *,
+        fresh: bool,
     ) -> SubmittedReview:
         await checkpoint()
         response = await self._client.get(
@@ -263,11 +272,16 @@ class GitHubPullRequestReviewGateway:
         comment_ids = tuple(int(item["id"]) for item in payload)
         posted: frozenset[UUID] | None = None
         if any(item.finding_id is not None for item in findings):
-            posted = (
-                frozenset()
-                if len(comment_ids) == 0
-                else _posted_inline_finding_ids(payload, findings)
-            )
+            if fresh:
+                # Review creation is atomic: 201 means every inline comment of
+                # this submission exists, whatever its exact rendered body.
+                posted = frozenset(
+                    item.finding_id for item in findings if item.finding_id is not None
+                )
+            elif len(comment_ids) == 0:
+                posted = frozenset()
+            else:
+                posted = _posted_inline_finding_ids(payload, findings)
         return SubmittedReview(review_id, comment_ids, posted_inline_finding_ids=posted)
 
 
