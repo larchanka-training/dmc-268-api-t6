@@ -1,9 +1,12 @@
-"""Graph RAG context: candidate blobs are read through the blob cache (#144, M10)."""
+"""Graph RAG context: candidate blobs read through the blob cache (#144, M10), and the
+reverse-edge candidates selected from the graph and confirmed at the PR head (ADR 0001 §8.2,
+§9)."""
 
 from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import timedelta
 from types import TracebackType
@@ -12,14 +15,44 @@ from uuid import UUID
 
 import pytest
 
-from app.modules.reviews.application.ast_resolution import FileUnavailable
+from app.modules.code_index.domain.enums import EdgeKind, IndexStatus, RagIndexStatus
+from app.modules.code_index.domain.rag_index import rag_index
+from app.modules.reviews.application.ast_resolution import (
+    FileUnavailable,
+    RevisionTree,
+    go_module_path,
+)
+from app.modules.reviews.application.ast_symbols import (
+    AstFacts,
+    AstFailureReason,
+    ParseRequest,
+    language_for_path,
+)
+from app.modules.reviews.application.context_provenance import LineRange, SourceRef, SourceRole
+from app.modules.reviews.application.diff_map import (
+    DiffFile,
+    DiffMap,
+    DiffSide,
+    VcsProviderName,
+    build_diff_map,
+)
 from app.modules.reviews.application.get_run_file_lines import (
     BlobCacheEntry,
     BlobCacheKey,
     BlobCacheStatus,
 )
-from app.modules.reviews.application.rag_context import CachedBlobSource
+from app.modules.reviews.application.graph_retriever import GraphHint, GraphHints, GraphTarget
+from app.modules.reviews.application.prompt_builder import FileStatus, PullRequestMeta
+from app.modules.reviews.application.rag_context import (
+    CachedBlobSource,
+    RagCandidates,
+    RagOmission,
+    RetrievedPlace,
+    ReverseEdgeSelector,
+)
 from app.modules.reviews.application.run_failures import RunCancelled, RunFailure
+from app.modules.reviews.application.vcs_diff import PullRequestLocator, VcsFile, VcsPullRequest
+from app.modules.reviews.infrastructure.tree_sitter_facts import extract_facts
 
 _REPOSITORY = UUID(int=1)
 _OTHER_REPOSITORY = UUID(int=2)
@@ -294,3 +327,806 @@ def test_cancellation_and_the_deadline_are_not_a_read_failure(error: Exception) 
 
     with pytest.raises(type(error)):
         asyncio.run(_source(store).text(_sha(1)))
+
+
+# --- Reverse-edge candidates: selected from the graph, confirmed at the PR head ---------
+
+_HEAD = "a" * 40
+_INDEX_COMMIT = "d" * 40
+
+
+class Words:
+    """One token per whitespace-separated word: easy to reason about in a test."""
+
+    def count(self, text: str) -> int:
+        return len(text.split())
+
+
+@dataclass
+class Repository:
+    """The PR head of one repository; ``read`` lists the paths whose blobs were read."""
+
+    files: dict[str, str]
+    failing: frozenset[str] = frozenset()
+    read: list[str] = field(default_factory=list)
+
+    def sha(self, path: str) -> str:
+        return f"{abs(hash(path)) % 10**12:040d}"
+
+    async def tree(self, revision: str) -> RevisionTree:
+        assert revision == _HEAD
+        return RevisionTree(revision, {path: self.sha(path) for path in self.files}, True)
+
+    async def read_blob(self, blob_sha: str) -> bytes:
+        path = next(item for item in self.files if self.sha(item) == blob_sha)
+        self.read.append(path)
+        if path in self.failing:
+            raise ConnectionError("provider unavailable")
+        return self.files[path].encode()
+
+
+@dataclass
+class InProcessParser:
+    parsed: list[str] = field(default_factory=list)
+
+    async def parse_many(
+        self, requests: tuple[ParseRequest, ...]
+    ) -> dict[str, AstFacts | AstFailureReason]:
+        self.parsed.extend(request.key for request in requests)
+        return {
+            request.key: extract_facts(request.language, request.source) for request in requests
+        }
+
+    async def aclose(self) -> None:
+        return None
+
+
+@dataclass
+class Graph:
+    """The default-branch graph: the hints of each repository, as a stale index may hold
+    them; a hint is returned only for a target that was asked for."""
+
+    hints: dict[UUID, tuple[GraphHint, ...]] = field(default_factory=dict)
+    status: IndexStatus = IndexStatus.READY
+    reads: list[tuple[UUID, tuple[GraphTarget, ...]]] = field(default_factory=list)
+
+    async def read_hints(self, repository_id: UUID, targets: Sequence[GraphTarget]) -> GraphHints:
+        self.reads.append((repository_id, tuple(targets)))
+        index = rag_index(
+            rag_enabled=True,
+            status=self.status,
+            indexed_commit_sha=_INDEX_COMMIT,
+            target_commit_sha=_INDEX_COMMIT,
+            published_at=None,
+            file_count=3,
+            symbol_count=9,
+            error_code=None,
+            last_error_code=None,
+        )
+        if not index.usable:
+            return GraphHints(index, ())
+        asked = set(targets)
+        return GraphHints(
+            index,
+            tuple(
+                hint
+                for hint in self.hints.get(repository_id, ())
+                if GraphTarget(hint.target_path, hint.target_name) in asked
+            ),
+        )
+
+
+def _uses(path: str, target_path: str, name: str) -> GraphHint:
+    return GraphHint(path, EdgeKind.USES_IMPORTED, target_path, name)
+
+
+def _vcs_file(
+    repository: Repository,
+    path: str,
+    patch: str | None,
+    *,
+    additions: int = 1,
+    deletions: int = 0,
+    status: FileStatus = "modified",
+    previous: str | None = None,
+) -> VcsFile:
+    return VcsFile(
+        filename=path,
+        status=status,
+        blob_sha=None if status == "removed" else repository.sha(path),
+        previous_filename=previous,
+        additions=additions,
+        deletions=deletions,
+        changes=additions + deletions,
+        patch=patch,
+    )
+
+
+def _diff_map(*files: VcsFile, repository_id: UUID = _REPOSITORY) -> DiffMap:
+    pull_request = VcsPullRequest(
+        locator=PullRequestLocator(17, "octo/repo", 7),
+        head_sha=_HEAD,
+        base_sha="b" * 40,
+        meta=PullRequestMeta(
+            title="t",
+            description=None,
+            author="octo",
+            source_branch="f",
+            target_branch="main",
+            labels=(),
+            files_changed=len(files),
+            lines_added=0,
+            lines_removed=0,
+            is_draft=False,
+            is_fork=False,
+        ),
+    )
+    return build_diff_map(
+        pull_request,
+        files,
+        provider=VcsProviderName.GITHUB,
+        repository_id=repository_id,
+        diff_old_sha="c" * 40,
+    )
+
+
+def _select(
+    repository: Repository,
+    diff_map: DiffMap,
+    graph: Graph,
+    *,
+    shown: frozenset[str] = frozenset(),
+    denied: Callable[[str], bool] = lambda path: False,
+    store: BlobStore | None = None,
+) -> RagCandidates:
+    """Select on what L4 leaves behind: the head tree and the texts and facts of the PR
+    files it loaded, which are no RAG read."""
+    blobs = store or BlobStore()
+
+    async def run() -> RagCandidates:
+        tree = await repository.tree(diff_map.head_sha)
+        changed: list[tuple[DiffFile, AstFacts]] = []
+        texts: dict[str, str | FileUnavailable] = {}
+        facts: dict[str, AstFacts | FileUnavailable] = {}
+        for file in diff_map.files:
+            language = None if file.new_path is None else language_for_path(file.new_path)
+            if file.new_path is None or language is None:
+                continue
+            source = repository.files[file.new_path]
+            parsed = extract_facts(language, source.encode())
+            texts[file.new_path] = source
+            facts[file.new_path] = parsed
+            changed.append((file, parsed))
+        go_mod = repository.files.get("go.mod")
+        selector = ReverseEdgeSelector(
+            retriever=graph,
+            blobs=CachedBlobSource(
+                repository_id=diff_map.repository_id,
+                source=repository,
+                cache=SharedBlobCache(blobs),
+                uow_factory=lambda: BlobCacheUow(blobs),
+            ),
+            parser=InProcessParser(),
+            cache=None,
+            counter=Words(),
+        )
+        return await selector.select(
+            diff_map=diff_map,
+            tree=tree,
+            go_module=None if go_mod is None else go_module_path(go_mod),
+            changed=changed,
+            loaded_texts=texts,
+            loaded_facts=facts,
+            shown=shown,
+            denied=denied,
+        )
+
+    return asyncio.run(run())
+
+
+@dataclass(frozen=True)
+class Language:
+    """A PR that changes the exported ``save`` of one file, in one language, and the
+    importer sources of the F6 cases."""
+
+    changed: str
+    source: str
+    patch: str
+    name: str
+    candidate: str
+    others: dict[str, str]
+    importers: dict[str, str]
+
+
+_PYTHON = Language(
+    changed="pkg/store.py",
+    source="def save(item):\n    item.check()\n    return item\n",
+    patch="@@ -1,2 +1,3 @@\n def save(item):\n+    item.check()\n     return item",
+    name="save",
+    candidate="pkg/app.py",
+    others={"pkg/other.py": "def save(item):\n    return item\n"},
+    importers={
+        "used": "from .store import save\n\n\ndef run(item):\n    return save(item)\n",
+        "other_module": "from .other import save\n\n\ndef run(item):\n    return save(item)\n",
+        "parameter": "from .store import save\n\n\ndef run(save):\n    return save(1)\n",
+        "rebinding": (
+            "from .store import save\n\n\ndef run(item):\n    save = print\n    return save(item)\n"
+        ),
+        "receiver": (
+            "from .store import save\n\n\ndef run(repository):\n    return repository.save()\n"
+        ),
+    },
+)
+_TYPESCRIPT = Language(
+    changed="src/store.ts",
+    source="export function save(item: number): number {\n  check(item);\n  return item;\n}\n",
+    patch=(
+        "@@ -1,3 +1,4 @@\n export function save(item: number): number {\n"
+        "+  check(item);\n   return item;\n }"
+    ),
+    name="save",
+    candidate="src/app.ts",
+    others={"src/other.ts": "export function save(item: number): number {\n  return item;\n}\n"},
+    importers={
+        "used": (
+            'import { save } from "./store";\n\n'
+            "export function run(item: number): number {\n  return save(item);\n}\n"
+        ),
+        "other_module": (
+            'import { save } from "./other";\n\n'
+            "export function run(item: number): number {\n  return save(item);\n}\n"
+        ),
+        "parameter": (
+            'import { save } from "./store";\n\n'
+            "export function run(save: Saver): number {\n  return save(1);\n}\n"
+        ),
+        "rebinding": (
+            'import { save } from "./store";\n\n'
+            "export function run(item: number): number {\n"
+            "  const save = check;\n  return save(item);\n}\n"
+        ),
+        "receiver": (
+            'import { save } from "./store";\n\n'
+            "export function run(repository: Repository): number {\n"
+            "  return repository.save();\n}\n"
+        ),
+    },
+)
+_GO = Language(
+    changed="pkg/store/store.go",
+    source="package store\n\nfunc Save(item int) int {\n\tcheck(item)\n\treturn item\n}\n",
+    patch="@@ -3,3 +3,4 @@\n func Save(item int) int {\n+\tcheck(item)\n \treturn item\n }",
+    name="Save",
+    candidate="cmd/app/app.go",
+    others={
+        "go.mod": "module example.com/m\n\ngo 1.22\n",
+        "pkg/other/other.go": "package other\n\nfunc Save(item int) int {\n\treturn item\n}\n",
+    },
+    importers={
+        "used": (
+            'package app\n\nimport "example.com/m/pkg/store"\n\n'
+            "func Run(item int) int {\n\treturn store.Save(item)\n}\n"
+        ),
+        "other_module": (
+            'package app\n\nimport "example.com/m/pkg/other"\n\n'
+            "func Run(item int) int {\n\treturn other.Save(item)\n}\n"
+        ),
+        "parameter": (
+            'package app\n\nimport "example.com/m/pkg/store"\n\n'
+            "func Run(store Saver) int {\n\treturn store.Save(1)\n}\n"
+        ),
+        "rebinding": (
+            'package app\n\nimport "example.com/m/pkg/store"\n\n'
+            "func Run(item int) int {\n\tstore := open()\n\treturn store.Save(item)\n}\n"
+        ),
+        "receiver": (
+            'package app\n\nimport "example.com/m/pkg/store"\n\n'
+            "func Run(repository Saver) int {\n\treturn repository.Save()\n}\n"
+        ),
+    },
+)
+_LANGUAGES = {"python": _PYTHON, "typescript": _TYPESCRIPT, "go": _GO}
+
+
+def _language_case(
+    language: Language, importer: str, repository_id: UUID = _REPOSITORY
+) -> tuple[Repository, DiffMap, Graph]:
+    repository = Repository(
+        {
+            language.changed: language.source,
+            language.candidate: language.importers[importer],
+            **language.others,
+        }
+    )
+    diff_map = _diff_map(
+        _vcs_file(repository, language.changed, language.patch), repository_id=repository_id
+    )
+    graph = Graph({repository_id: (_uses(language.candidate, language.changed, language.name),)})
+    return repository, diff_map, graph
+
+
+@pytest.mark.parametrize(
+    ("language", "ranges", "text"),
+    [
+        (
+            "python",
+            (LineRange(1, 1), LineRange(4, 5)),
+            "from .store import save\ndef run(item):\n    return save(item)",
+        ),
+        (
+            "typescript",
+            (LineRange(1, 1), LineRange(3, 5)),
+            'import { save } from "./store";\n'
+            "export function run(item: number): number {\n  return save(item);\n}",
+        ),
+        (
+            "go",
+            (LineRange(3, 3), LineRange(5, 7)),
+            'import "example.com/m/pkg/store"\n'
+            "func Run(item int) int {\n\treturn store.Save(item)\n}",
+        ),
+    ],
+)
+def test_a_reverse_edge_confirmed_at_head_is_used(
+    language: str, ranges: tuple[LineRange, ...], text: str
+) -> None:
+    case = _LANGUAGES[language]
+    repository, diff_map, graph = _language_case(case, "used")
+
+    result = _select(repository, diff_map, graph)
+
+    assert graph.reads == [(_REPOSITORY, (GraphTarget(case.changed, case.name),))]
+    assert result.places == (
+        RetrievedPlace(
+            source=SourceRef(
+                role=SourceRole.RETRIEVED_EXCERPT,
+                repository_id=_REPOSITORY,
+                revision=_HEAD,
+                path=case.candidate,
+                blob_sha=repository.sha(case.candidate),
+                origin_paths=(),
+                side=DiffSide.RIGHT,
+                ranges=ranges,
+                reason="rag_reverse_edge",
+            ),
+            edge_kind=EdgeKind.USES_IMPORTED,
+            index_commit_sha=_INDEX_COMMIT,
+            signature=False,
+            text=text,
+            tokens=len(text.split()),
+        ),
+    )
+    assert (result.found, result.confirmed, dict(result.dropped)) == (1, 1, {})
+    assert result.omissions == ()
+    # The changed file was loaded by L4: only the candidate is a RAG read.
+    assert repository.read == [case.candidate]
+
+
+@pytest.mark.parametrize(
+    ("language", "importer"),
+    [
+        (language, importer)
+        for language in ("python", "typescript", "go")
+        for importer in ("other_module", "parameter", "rebinding", "receiver")
+    ],
+)
+def test_f6_a_name_the_head_does_not_bind_to_the_change_is_no_candidate(
+    language: str, importer: str
+) -> None:
+    # The graph still names the edge; at head the name comes from another module, is
+    # shadowed by a parameter, rebound locally, or read only through a receiver.
+    case = _LANGUAGES[language]
+    repository, diff_map, graph = _language_case(case, importer)
+
+    result = _select(repository, diff_map, graph)
+
+    assert result.places == ()
+    assert result.omissions == (RagOmission("rag_edge_unconfirmed", case.candidate),)
+    assert (result.found, result.confirmed) == (1, 0)
+    assert dict(result.dropped) == {"rag_edge_unconfirmed": 1}
+
+
+_PY_STORE = "def save(item):\n    item.check()\n    return item\n"
+_PY_STORE_PATCH = "@@ -1,2 +1,3 @@\n def save(item):\n+    item.check()\n     return item"
+_PY_USER = "from .store import save\n\n\ndef run(item):\n    return save(item)\n"
+
+
+def _python_repository(**importers: str) -> tuple[Repository, DiffMap]:
+    repository = Repository({"pkg/store.py": _PY_STORE, **importers})
+    return repository, _diff_map(_vcs_file(repository, "pkg/store.py", _PY_STORE_PATCH))
+
+
+def _store_hints(*paths: str) -> Graph:
+    return Graph({_REPOSITORY: tuple(_uses(path, "pkg/store.py", "save") for path in paths)})
+
+
+def test_a_pr_file_and_a_definition_l4_shows_are_not_repeated() -> None:
+    repository = Repository(
+        {"pkg/store.py": _PY_STORE, "pkg/api.py": _PY_USER, "pkg/app.py": _PY_USER}
+    )
+    diff_map = _diff_map(
+        _vcs_file(repository, "pkg/store.py", _PY_STORE_PATCH),
+        _vcs_file(
+            repository,
+            "pkg/api.py",
+            "@@ -1,1 +1,1 @@\n-from .store import x\n+from .store import save",
+            deletions=1,
+        ),
+    )
+
+    result = _select(
+        repository,
+        diff_map,
+        _store_hints("pkg/api.py", "pkg/app.py"),
+        # L4 already shows `run` of pkg/app.py: the changed code imports it.
+        shown=frozenset({"aaaaaaaaaaaa:pkg/app.py#0"}),
+    )
+
+    assert result.places == ()
+    assert result.omissions == ()
+    # The PR file is no candidate at all; the importer whose place L4 shows is confirmed.
+    assert (result.found, result.confirmed, dict(result.dropped)) == (1, 1, {})
+
+
+def test_an_ignored_candidate_is_never_read_and_only_counted() -> None:
+    repository, diff_map = _python_repository(
+        **{"generated/app.py": _PY_USER, "pkg/app.py": _PY_USER}
+    )
+
+    result = _select(
+        repository,
+        diff_map,
+        _store_hints("generated/app.py", "pkg/app.py"),
+        denied=lambda path: path.startswith("generated/"),
+    )
+
+    assert repository.read == ["pkg/app.py"]
+    assert [place.source.path for place in result.places] == ["pkg/app.py"]
+    assert result.omissions == ()
+    assert (result.found, result.confirmed, dict(result.dropped)) == (2, 1, {"excluded": 1})
+
+
+def test_a_candidate_absent_from_the_head_tree_is_missing() -> None:
+    repository, diff_map = _python_repository()
+
+    result = _select(repository, diff_map, _store_hints("pkg/gone.py"))
+
+    assert result.places == ()
+    assert result.omissions == (RagOmission("rag_candidate_missing", "pkg/gone.py"),)
+    assert dict(result.dropped) == {"rag_candidate_missing": 1}
+    assert repository.read == []
+
+
+def test_a_candidate_whose_blob_read_fails_is_source_read_failed() -> None:
+    repository, diff_map = _python_repository(**{"pkg/app.py": _PY_USER})
+    repository.failing = frozenset({"pkg/app.py"})
+
+    result = _select(repository, diff_map, _store_hints("pkg/app.py"))
+
+    assert result.places == ()
+    assert result.omissions == (RagOmission("source_read_failed", "pkg/app.py"),)
+    assert dict(result.dropped) == {"source_read_failed": 1}
+
+
+def test_the_eleventh_file_is_over_the_limit_and_never_read() -> None:
+    paths = [f"pkg/user_{number:02d}.py" for number in range(11)]
+    repository, diff_map = _python_repository(**{path: _PY_USER for path in paths})
+
+    result = _select(repository, diff_map, _store_hints(*paths))
+
+    assert [place.source.path for place in result.places] == paths[:10]
+    assert result.omissions == (RagOmission("rag_limit", "pkg/user_10.py"),)
+    assert (result.found, result.confirmed, dict(result.dropped)) == (11, 10, {"rag_limit": 1})
+    assert "pkg/user_10.py" not in repository.read
+
+
+def test_the_fourth_place_of_a_file_is_over_the_limit() -> None:
+    user = "from .store import save\n" + "".join(
+        f"\n\ndef run_{number}(item):\n    return save(item)\n" for number in range(4)
+    )
+    repository, diff_map = _python_repository(**{"pkg/app.py": user})
+
+    result = _select(repository, diff_map, _store_hints("pkg/app.py"))
+
+    assert [place.source.ranges for place in result.places] == [
+        (LineRange(1, 1), LineRange(4, 5)),
+        (LineRange(1, 1), LineRange(8, 9)),
+        (LineRange(1, 1), LineRange(12, 13)),
+    ]
+    assert result.omissions == (RagOmission("rag_limit", "pkg/app.py"),)
+    assert (result.found, result.confirmed, dict(result.dropped)) == (1, 1, {})
+
+
+def test_f5_the_graph_points_at_new_utils_but_head_imports_old_utils() -> None:
+    repository = Repository(
+        {
+            "pkg/new_utils.py": "def helper(value):\n    value.check()\n    return value\n",
+            "pkg/old_utils.py": "def helper(value):\n    return value\n",
+            "pkg/app.py": (
+                "from .old_utils import helper\n\n\ndef run(item):\n    return helper(item)\n"
+            ),
+        }
+    )
+    diff_map = _diff_map(
+        _vcs_file(
+            repository,
+            "pkg/new_utils.py",
+            "@@ -1,2 +1,3 @@\n def helper(value):\n+    value.check()\n     return value",
+        )
+    )
+    graph = Graph({_REPOSITORY: (_uses("pkg/app.py", "pkg/new_utils.py", "helper"),)})
+
+    result = _select(repository, diff_map, graph)
+
+    assert result.places == ()
+    assert result.omissions == (RagOmission("rag_edge_unconfirmed", "pkg/app.py"),)
+
+
+def test_f5_the_ranges_are_the_head_lines_of_a_moved_declaration() -> None:
+    # On the default branch `run` came first; at head another function precedes it.
+    user = (
+        "from .store import save\n\n\n"
+        "def first(item):\n    return item\n\n\n"
+        "def run(item):\n    return save(item)\n"
+    )
+    repository, diff_map = _python_repository(**{"pkg/app.py": user})
+
+    result = _select(repository, diff_map, _store_hints("pkg/app.py"))
+
+    assert [place.source.ranges for place in result.places] == [(LineRange(1, 1), LineRange(8, 9))]
+    assert result.places[0].text == "from .store import save\ndef run(item):\n    return save(item)"
+
+
+def test_a_declaration_too_large_to_show_whole_gives_its_signature() -> None:
+    body = "".join(f"    step_{number} = save(item)\n" for number in range(200))
+    user = f"from .store import save\n\n\ndef run(item):\n{body}    return item\n"
+    repository, diff_map = _python_repository(**{"pkg/app.py": user})
+
+    result = _select(repository, diff_map, _store_hints("pkg/app.py"))
+
+    assert [(place.source.ranges, place.signature) for place in result.places] == [
+        ((LineRange(1, 1), LineRange(4, 4)), True)
+    ]
+    assert result.places[0].text == "from .store import save\ndef run(item):"
+
+
+def test_importers_of_a_changed_symbol_come_before_importers_of_a_changed_module() -> None:
+    store = (
+        "import os\n\n\ndef save(item):\n    item.check()\n    return item\n\n\n"
+        "def load(key):\n    return key\n"
+    )
+    patch = (
+        "@@ -1,3 +1,7 @@\n+import os\n+\n+\n def save(item):\n+    item.check()\n"
+        "     return item\n "
+    )
+    repository = Repository(
+        {
+            "pkg/store.py": store,
+            "pkg/app.py": _PY_USER,
+            "pkg/view.py": "from .store import load\n\n\ndef show(key):\n    return load(key)\n",
+        }
+    )
+    diff_map = _diff_map(_vcs_file(repository, "pkg/store.py", patch, additions=4))
+    graph = Graph(
+        {
+            _REPOSITORY: (
+                GraphHint("pkg/view.py", EdgeKind.IMPORTS, "pkg/store.py", ""),
+                GraphHint("pkg/app.py", EdgeKind.IMPORTS, "pkg/store.py", ""),
+                _uses("pkg/app.py", "pkg/store.py", "save"),
+            )
+        }
+    )
+
+    result = _select(repository, diff_map, graph)
+
+    assert graph.reads == [
+        (_REPOSITORY, (GraphTarget("pkg/store.py", "save"), GraphTarget("pkg/store.py", "")))
+    ]
+    assert [(place.source.path, place.edge_kind) for place in result.places] == [
+        ("pkg/app.py", EdgeKind.USES_IMPORTED),
+        ("pkg/view.py", EdgeKind.IMPORTS),
+    ]
+    assert [place.source.ranges for place in result.places] == [
+        (LineRange(1, 1), LineRange(4, 5)),
+        (LineRange(1, 1), LineRange(4, 5)),
+    ]
+    assert (result.found, result.confirmed) == (2, 2)
+
+
+def test_a_python_submodule_binding_is_confirmed() -> None:
+    repository = Repository(
+        {
+            "pkg/__init__.py": "",
+            "pkg/store.py": _PY_STORE,
+            "app/main.py": (
+                "from pkg import store\n\n\ndef run(item):\n    return store.save(item)\n"
+            ),
+        }
+    )
+    diff_map = _diff_map(_vcs_file(repository, "pkg/store.py", _PY_STORE_PATCH))
+    graph = Graph({_REPOSITORY: (_uses("app/main.py", "pkg/store.py", "save"),)})
+
+    result = _select(repository, diff_map, graph)
+
+    assert [(place.source.path, place.source.ranges) for place in result.places] == [
+        ("app/main.py", (LineRange(1, 1), LineRange(4, 5)))
+    ]
+
+
+def test_the_graph_is_asked_under_the_default_branch_path_of_a_renamed_file() -> None:
+    repository = Repository({"pkg/store.py": _PY_STORE})
+    diff_map = _diff_map(
+        _vcs_file(
+            repository,
+            "pkg/store.py",
+            _PY_STORE_PATCH,
+            status="renamed",
+            previous="pkg/old_store.py",
+        )
+    )
+    graph = Graph()
+
+    _select(repository, diff_map, graph)
+
+    assert graph.reads == [(_REPOSITORY, (GraphTarget("pkg/old_store.py", "save"),))]
+
+
+def test_targets_past_two_hundred_are_not_asked_and_count_as_rag_limit() -> None:
+    source = "".join(f"def f{number}():\n    return {number}\n" for number in range(201))
+    lines = source.rstrip("\n").split("\n")
+    patch = f"@@ -0,0 +1,{len(lines)} @@\n" + "\n".join(f"+{line}" for line in lines)
+    repository = Repository({"pkg/many.py": source})
+    diff_map = _diff_map(
+        _vcs_file(repository, "pkg/many.py", patch, additions=len(lines), status="added")
+    )
+    graph = Graph()
+
+    result = _select(repository, diff_map, graph)
+
+    [(_, targets)] = graph.reads
+    assert len(targets) == 200
+    assert (targets[0], targets[-1]) == (
+        GraphTarget("pkg/many.py", "f0"),
+        GraphTarget("pkg/many.py", "f199"),
+    )
+    assert result.omissions == (RagOmission("rag_limit", None, 1),)
+    assert (result.found, dict(result.dropped)) == (1, {"rag_limit": 1})
+
+
+def test_an_index_not_usable_in_the_graph_read_selects_and_reads_nothing() -> None:
+    repository, diff_map = _python_repository(**{"pkg/app.py": _PY_USER})
+    graph = _store_hints("pkg/app.py")
+    graph.status = IndexStatus.EMPTY
+
+    result = _select(repository, diff_map, graph)
+
+    assert result.index.status is RagIndexStatus.EMPTY
+    assert (result.places, result.omissions, result.found) == ((), (), 0)
+    assert repository.read == []
+
+
+def test_two_repositories_with_the_same_paths_stay_apart() -> None:
+    first, second = UUID(int=11), UUID(int=12)
+    graph = Graph(
+        {
+            first: (_uses("pkg/app.py", "pkg/store.py", "save"),),
+            second: (_uses("pkg/tool.py", "pkg/store.py", "save"),),
+        }
+    )
+    results = []
+    stores = []
+    for repository_id in (first, second):
+        repository = Repository(
+            {"pkg/store.py": _PY_STORE, "pkg/app.py": _PY_USER, "pkg/tool.py": _PY_USER}
+        )
+        diff_map = _diff_map(
+            _vcs_file(repository, "pkg/store.py", _PY_STORE_PATCH), repository_id=repository_id
+        )
+        store = BlobStore()
+        stores.append(store)
+        results.append(_select(repository, diff_map, graph, store=store))
+
+    assert [reads[0] for reads in graph.reads] == [first, second]
+    assert [
+        [(place.source.repository_id, place.source.path) for place in result.places]
+        for result in results
+    ] == [[(first, "pkg/app.py")], [(second, "pkg/tool.py")]]
+    assert [[key.repository_id for key, _, _ in store.puts] for store in stores] == [
+        [first],
+        [second],
+    ]
+
+
+def test_a_place_is_the_innermost_declaration_that_reads_the_name() -> None:
+    # A class reads what its methods read: the method is the place, not the class.
+    user = (
+        "from .store import save\n\n\n"
+        "class Service:\n"
+        "    def run(self, item):\n        return save(item)\n\n"
+        "    def other(self):\n        return 0\n"
+    )
+    repository, diff_map = _python_repository(**{"pkg/app.py": user})
+
+    result = _select(repository, diff_map, _store_hints("pkg/app.py"))
+
+    assert [place.source.ranges for place in result.places] == [(LineRange(1, 1), LineRange(5, 6))]
+
+
+def test_an_importer_of_a_changed_module_that_rebinds_the_name_is_unconfirmed() -> None:
+    store = "import os\n\n\ndef load(key):\n    return key\n"
+    repository = Repository(
+        {
+            "pkg/store.py": store,
+            "pkg/view.py": "from .store import load\n\n\ndef show(load):\n    return load(1)\n",
+        }
+    )
+    diff_map = _diff_map(_vcs_file(repository, "pkg/store.py", "@@ -1,1 +1,2 @@\n+import os\n \n"))
+    graph = Graph({_REPOSITORY: (GraphHint("pkg/view.py", EdgeKind.IMPORTS, "pkg/store.py", ""),)})
+
+    result = _select(repository, diff_map, graph)
+
+    assert graph.reads == [(_REPOSITORY, (GraphTarget("pkg/store.py", ""),))]
+    assert result.places == ()
+    assert result.omissions == (RagOmission("rag_edge_unconfirmed", "pkg/view.py"),)
+
+
+def test_a_module_the_edge_is_not_about_is_never_read() -> None:
+    user = (
+        "from .store import save\nfrom .text import shout\n\n\n"
+        "def run(item):\n    return shout(save(item))\n"
+    )
+    repository, diff_map = _python_repository(
+        **{"pkg/app.py": user, "pkg/text.py": "def shout(value):\n    return value\n"}
+    )
+
+    result = _select(repository, diff_map, _store_hints("pkg/app.py"))
+
+    assert [place.source.ranges for place in result.places] == [(LineRange(1, 1), LineRange(5, 6))]
+    assert repository.read == ["pkg/app.py"]
+
+
+def test_a_resolution_stopped_by_the_read_limit_is_rag_limit() -> None:
+    # 19 unconfirmed candidates spend 19 reads; the 20th read is the candidate itself,
+    # and its import needs `pkg/__init__.py`, which would be the 21st.
+    receivers = [f"pkg/user_{number:02d}.py" for number in range(19)]
+    receiver = "from .store import save\n\n\ndef run(repository):\n    return repository.save()\n"
+    repository = Repository(
+        {
+            "pkg/__init__.py": "",
+            "pkg/store.py": _PY_STORE,
+            "app/main.py": (
+                "from pkg import store\n\n\ndef run(item):\n    return store.save(item)\n"
+            ),
+            **{path: receiver for path in receivers},
+        }
+    )
+    diff_map = _diff_map(_vcs_file(repository, "pkg/store.py", _PY_STORE_PATCH))
+    graph = Graph(
+        {
+            _REPOSITORY: tuple(
+                _uses(path, "pkg/store.py", "save") for path in [*receivers, "app/main.py"]
+            )
+        }
+    )
+
+    result = _select(repository, diff_map, graph)
+
+    assert result.places == ()
+    assert result.omissions[-1] == RagOmission("rag_limit", "app/main.py")
+    assert dict(result.dropped) == {"rag_edge_unconfirmed": 19, "rag_limit": 1}
+    assert len(repository.read) == 20
+    assert "pkg/__init__.py" not in repository.read
+
+
+def test_a_candidate_past_the_read_limit_is_rag_limit_with_its_path() -> None:
+    # 20 unconfirmed candidates take no file slot but spend the 20 reads of the run.
+    paths = [f"pkg/user_{number:02d}.py" for number in range(21)]
+    receiver = "from .store import save\n\n\ndef run(repository):\n    return repository.save()\n"
+    repository, diff_map = _python_repository(**{path: receiver for path in paths})
+
+    result = _select(repository, diff_map, _store_hints(*paths))
+
+    assert result.places == ()
+    assert result.omissions[-1] == RagOmission("rag_limit", "pkg/user_20.py")
+    assert dict(result.dropped) == {"rag_edge_unconfirmed": 20, "rag_limit": 1}
+    assert "pkg/user_20.py" not in repository.read
