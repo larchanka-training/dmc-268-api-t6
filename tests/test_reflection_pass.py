@@ -11,6 +11,7 @@ import pytest
 from pydantic import ValidationError
 
 from app.modules.reviews.application.policy_snapshot import (
+    CallManifest,
     PolicySnapshot,
     make_complete_execution_profile,
     make_complete_prompt_bindings,
@@ -35,6 +36,7 @@ from app.modules.reviews.application.reflection_pass import (
     VerificationInvalidOutputError,
     VerificationUnavailableError,
     VerifierPromptBuilder,
+    VerifierReply,
     filter_verified_candidates,
 )
 from app.modules.reviews.application.review_output import (
@@ -49,7 +51,9 @@ class CustomModel:
     def __init__(self, exc: Exception) -> None:
         self._exc = exc
 
-    async def verify(self, *, system_prompt: str, user_prompt: str) -> Mapping[str, Any] | str:
+    async def verify(
+        self, *, system_prompt: str, user_prompt: str, **_: object
+    ) -> Mapping[str, Any] | str:
         raise self._exc
 
 
@@ -114,7 +118,7 @@ class FakeVerifierModel:
         self.last_user_prompt = ""
 
     async def verify(
-        self, *, system_prompt: str, user_prompt: str
+        self, *, system_prompt: str, user_prompt: str, **_: object
     ) -> Mapping[str, Any] | str | bytes:
         self.call_count += 1
         self.last_system_prompt = system_prompt
@@ -2377,3 +2381,104 @@ def test_build_verifier_prompt_counter_v1_fitting() -> None:
     # Verify that prompt_v1 line count strictly matches v1 line count and would fail under v2
     assert line_count_v1 == 140
     assert line_count_v2 == 92
+
+
+# ---------- #130 PR E: the verifier port gets its manifest and context ----------
+
+
+def _supported_c1_answer() -> dict[str, Any]:
+    return {
+        "decisions": [
+            {
+                "candidate_id": "c-1",
+                "status": "supported",
+                "reason": "Direct SQL injection visible on line 10.",
+                "evidence_refs": [
+                    {"block_id": file_block_id("app/query.py"), "start_line": 10, "end_line": 10}
+                ],
+                "requirement_refs": [
+                    {"block_id": "policy-rules", "start_line": 1, "end_line": 2, "check_id": None}
+                ],
+            }
+        ]
+    }
+
+
+def _query_context() -> ReviewContext:
+    return ReviewContext(
+        system="SYSTEM",
+        rules=(),
+        agents_md=None,
+        conventions=RepoConventions((), ()),
+        pr_meta=PullRequestMeta("T", None, "u", "b", "main", (), 1, 1, 0, False, False),
+        changed_files=(
+            ChangedFile("app/query.py", "modified", (DiffLine(10, "added", "query = f'SELECT'"),)),
+        ),
+        omitted_files=(),
+        policy_snapshot=make_snapshot(),
+    )
+
+
+class RecordingVerifierModel:
+    """Keeps what ``ReflectionPass`` hands the model besides the two prompts."""
+
+    def __init__(self, reply: Any) -> None:
+        self.reply = reply
+        self.manifests: list[CallManifest] = []
+        self.contexts: list[ReviewContext] = []
+
+    async def verify(
+        self,
+        *,
+        system_prompt: str,
+        user_prompt: str,
+        manifest: CallManifest,
+        context: ReviewContext,
+    ) -> Any:
+        self.manifests.append(manifest)
+        self.contexts.append(context)
+        return self.reply
+
+
+@pytest.mark.anyio
+async def test_reflection_pass_hands_the_model_its_manifest_and_context() -> None:
+    model = RecordingVerifierModel(_supported_c1_answer())
+    context = _query_context()
+
+    decisions = await ReflectionPass(model).verify(
+        candidates=(make_candidate("c-1"),), context=context
+    )
+
+    assert [d.candidate_id for d in decisions] == ["c-1"]
+    assert len(model.manifests) == 1
+    manifest = model.manifests[0]
+    assert manifest.stage == "verification"
+    assert manifest.recovery_kind == "none"
+    candidate = manifest.get_block("c-1")
+    assert candidate is not None
+    assert candidate.source_role == "candidate"
+    assert candidate.source_kind == "candidate_findings"
+    assert candidate.path == "app/query.py"
+    assert (candidate.start_line, candidate.end_line) == (10, 15)
+    assert manifest.get_block(file_block_id("app/query.py")) is not None
+    assert len(model.contexts) == 1
+    assert model.contexts[0] is context
+
+
+@pytest.mark.anyio
+async def test_reflection_pass_unwraps_a_verifier_reply() -> None:
+    context = _query_context()
+    plain = await ReflectionPass(RecordingVerifierModel(_supported_c1_answer())).verify(
+        candidates=(make_candidate("c-1"),), context=context
+    )
+    reply = VerifierReply(
+        output=_supported_c1_answer(),
+        accepted_call_id=uuid.UUID("00000000-0000-0000-0000-000000013061"),
+    )
+
+    wrapped = await ReflectionPass(RecordingVerifierModel(reply)).verify(
+        candidates=(make_candidate("c-1"),), context=context
+    )
+
+    assert wrapped == plain
+    assert [(d.candidate_id, d.status) for d in wrapped] == [("c-1", "supported")]

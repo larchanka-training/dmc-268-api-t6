@@ -119,7 +119,9 @@ class StubVerifierModel:
         self.require_policy = require_policy
         self.require_candidates = require_candidates
 
-    async def verify(self, *, system_prompt: str, user_prompt: str) -> Mapping[str, Any]:
+    async def verify(
+        self, *, system_prompt: str, user_prompt: str, **_: object
+    ) -> Mapping[str, Any]:
         self.call_count += 1
         self.last_user_prompt = user_prompt
 

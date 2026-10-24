@@ -309,7 +309,9 @@ class _Verifier:
         self._answer_ids = answer_ids
         self.user_prompts: list[str] = []
 
-    async def verify(self, *, system_prompt: str, user_prompt: str) -> Mapping[str, Any]:
+    async def verify(
+        self, *, system_prompt: str, user_prompt: str, **_: object
+    ) -> Mapping[str, Any]:
         self.user_prompts.append(user_prompt)
         shown = CANDIDATE_ID_RE.findall(user_prompt)
         answered = self._answer_ids(shown) if self._answer_ids is not None else shown
@@ -339,7 +341,9 @@ class _RawVerifier:
     def __init__(self, output: Mapping[str, Any] | str) -> None:
         self._output = output
 
-    async def verify(self, *, system_prompt: str, user_prompt: str) -> Mapping[str, Any] | str:
+    async def verify(
+        self, *, system_prompt: str, user_prompt: str, **_: object
+    ) -> Mapping[str, Any] | str:
         return self._output
 
 
@@ -347,7 +351,9 @@ class _FailingVerifier:
     def __init__(self, failure: Exception) -> None:
         self._failure = failure
 
-    async def verify(self, *, system_prompt: str, user_prompt: str) -> Mapping[str, Any]:
+    async def verify(
+        self, *, system_prompt: str, user_prompt: str, **_: object
+    ) -> Mapping[str, Any]:
         raise self._failure
 
 

@@ -213,7 +213,9 @@ class FakeVerifierModel:
         self.decisions_payload = decisions_payload
         self.call_count = 0
 
-    async def verify(self, *, system_prompt: str, user_prompt: str) -> Mapping[str, Any]:
+    async def verify(
+        self, *, system_prompt: str, user_prompt: str, **_: object
+    ) -> Mapping[str, Any]:
         self.call_count += 1
         cand_ids = re.findall(r'candidate candidate_id="([^"]+)"', user_prompt)
         payload = dict(self.decisions_payload)
@@ -417,7 +419,9 @@ def test_execute_review_run_excluded_file_does_not_reach_verifier() -> None:
     captured_verifier_prompts: list[str] = []
 
     class CapturingVerifierModel:
-        async def verify(self, *, system_prompt: str, user_prompt: str) -> Mapping[str, Any]:
+        async def verify(
+            self, *, system_prompt: str, user_prompt: str, **_: object
+        ) -> Mapping[str, Any]:
             captured_verifier_prompts.append(user_prompt)
             cand_ids = re.findall(r'candidate candidate_id="([^"]+)"', user_prompt)
             return {
@@ -917,7 +921,9 @@ def test_execute_review_json_rules_compatibility_with_reflection_pass() -> None:
     verifier_call_count = 0
 
     class TrackingVerifierModel:
-        async def verify(self, *, system_prompt: str, user_prompt: str) -> Mapping[str, Any]:
+        async def verify(
+            self, *, system_prompt: str, user_prompt: str, **_: object
+        ) -> Mapping[str, Any]:
             nonlocal verifier_call_count
             verifier_call_count += 1
             return {"decisions": []}
@@ -950,7 +956,9 @@ def test_execute_review_json_rules_compatibility_with_reflection_pass() -> None:
 )
 def test_execute_review_verifier_failure_prevents_publication(verifier_exc: Exception) -> None:
     class FailingVerifierModel:
-        async def verify(self, *, system_prompt: str, user_prompt: str) -> Mapping[str, Any]:
+        async def verify(
+            self, *, system_prompt: str, user_prompt: str, **_: object
+        ) -> Mapping[str, Any]:
             raise verifier_exc
 
     class Processor:
@@ -1389,7 +1397,9 @@ def test_execute_review_summary_cleansing_effort_categories_and_plural(
             return True
 
     class DynamicVerifierModel:
-        async def verify(self, *, system_prompt: str, user_prompt: str) -> Mapping[str, Any]:
+        async def verify(
+            self, *, system_prompt: str, user_prompt: str, **_: object
+        ) -> Mapping[str, Any]:
             import re
 
             cand_ids = re.findall(r'<candidate candidate_id="([^"]+)"', user_prompt)
@@ -1545,7 +1555,9 @@ def test_execute_review_supports_model_dump_candidate_item() -> None:
             }
 
     class DynamicVerifierModel:
-        async def verify(self, *, system_prompt: str, user_prompt: str) -> dict[str, Any]:
+        async def verify(
+            self, *, system_prompt: str, user_prompt: str, **_: object
+        ) -> dict[str, Any]:
             import re
 
             m = re.search(r'candidate_id="([^"]+)"', user_prompt)
@@ -2267,7 +2279,9 @@ def test_execute_review_run_severity_threshold_critical_drops_medium_clean_summa
             return True
 
     class FakeVerifierModelWithDecisions:
-        async def verify(self, *, system_prompt: str, user_prompt: str) -> Mapping[str, Any]:
+        async def verify(
+            self, *, system_prompt: str, user_prompt: str, **_: object
+        ) -> Mapping[str, Any]:
             cand_ids = re.findall(r'candidate candidate_id="([^"]+)"', user_prompt)
             return {
                 "decisions": [
@@ -2553,7 +2567,9 @@ def test_execute_review_all_supported_never_publishes_raw_summary() -> None:
         }
     )
 
-    async def dynamic_verify(*, system_prompt: str, user_prompt: str) -> dict[str, Any]:
+    async def dynamic_verify(
+        *, system_prompt: str, user_prompt: str, **_: object
+    ) -> dict[str, Any]:
         match = re.search(r'candidate_id="([^"]+)"', user_prompt)
         cand_id = match.group(1) if match else "dummy"
         return {
@@ -2665,7 +2681,9 @@ def test_execute_review_two_candidates_one_invalid_ref_valid_reaches_verifier() 
             return True
 
     class InspectingVerifierModel:
-        async def verify(self, *, system_prompt: str, user_prompt: str) -> dict[str, Any]:
+        async def verify(
+            self, *, system_prompt: str, user_prompt: str, **_: object
+        ) -> dict[str, Any]:
             cand_ids = re.findall(r'candidate_id="([^"]+)"', user_prompt)
             verifier_received_candidates.extend(cand_ids)
             return {
@@ -2848,7 +2866,9 @@ def test_execute_review_verifier_input_free_of_lint_duplicates_and_unknown_path(
             return True
 
     class InspectingVerifierModel:
-        async def verify(self, *, system_prompt: str, user_prompt: str) -> dict[str, Any]:
+        async def verify(
+            self, *, system_prompt: str, user_prompt: str, **_: object
+        ) -> dict[str, Any]:
             cand_ids = re.findall(r'candidate_id="([^"]+)"', user_prompt)
             verifier_received_candidates.extend(cand_ids)
             return {
@@ -2951,7 +2971,9 @@ def test_execute_review_empty_after_filters_verifier_call_count_zero() -> None:
             return True
 
     class TrackingVerifierModel:
-        async def verify(self, *, system_prompt: str, user_prompt: str) -> dict[str, Any]:
+        async def verify(
+            self, *, system_prompt: str, user_prompt: str, **_: object
+        ) -> dict[str, Any]:
             nonlocal call_count
             call_count += 1
             return {"decisions": []}
@@ -3051,7 +3073,9 @@ def test_execute_review_retrieved_excerpt_accepted_by_reviewer_and_verifier() ->
         )
 
     class DynamicVerifierModel:
-        async def verify(self, *, system_prompt: str, user_prompt: str) -> dict[str, Any]:
+        async def verify(
+            self, *, system_prompt: str, user_prompt: str, **_: object
+        ) -> dict[str, Any]:
             match = re.search(r'candidate_id="([^"]+)"', user_prompt)
             cand_id = match.group(1) if match else "dummy"
             return {
@@ -3218,7 +3242,9 @@ def test_execute_review_drops_evidence_source_disallowed_and_revision_mismatch()
     orig_build_manifest = PromptBuilder.build_manifest
 
     class VerifierModel:
-        async def verify(self, *, system_prompt: str, user_prompt: str) -> dict[str, Any]:
+        async def verify(
+            self, *, system_prompt: str, user_prompt: str, **_: object
+        ) -> dict[str, Any]:
             cand_ids = re.findall(r'candidate_id="([^"]+)"', user_prompt)
             verifier_received.extend(cand_ids)
             return {
@@ -3718,7 +3744,9 @@ def test_execute_review_coordinates_validation_with_real_fit() -> None:
             return True
 
     class InspectingVerifier:
-        async def verify(self, *, system_prompt: str, user_prompt: str) -> dict[str, Any]:
+        async def verify(
+            self, *, system_prompt: str, user_prompt: str, **_: object
+        ) -> dict[str, Any]:
             cand_ids = re.findall(r'candidate_id="([^"]+)"', user_prompt)
             verifier_received_cands.extend(cand_ids)
             return {
