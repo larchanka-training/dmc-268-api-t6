@@ -369,8 +369,12 @@ TEST_RABBITMQ_URL=amqp://app:app@localhost:5672/imp130e uv run pytest
   - Exhaustion keeps the last error class (CVS §7.3).
   - F sets the values. Live stays at 0.
 - **Tests to add:**
-  - `reserved_calls=1` on review after C1, with `R1 invalid → R2 repair invalid` → `llm_invalid_output`, no third
-    review call, and the verifier then gets 1 call.
+  - `reserved_calls=1` on review after C1, with `R1 invalid → R2 fallback invalid` → `llm_invalid_output`, no third
+    review call, and the verifier then gets 1 call. (Corrected in Task 12: the gateway keeps the last usable slot for
+    the fallback (`:237`), so with a fallback configured R2 is the fallback, not a repair; without one, the chain
+    ends after one repair even at `reserved_calls=0`.)
+  - `reserved_calls=1` after C1 + C2 repair → R1 only, no review fallback, and the verifier then gets 1 call.
+  - `reserved_calls=1` with 3 calls spent → the review makes no request (`llm_unavailable`); the verifier gets 1.
   - `reserved_calls=0` → today's chain (pin).
 - **Done when:** [ ] the tests are green; [ ] the Task 2 cap pin still holds at `reserved_calls=0`.
 - **Dependencies:** Task 2.
