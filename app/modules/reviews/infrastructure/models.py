@@ -255,6 +255,14 @@ class Run(Base):
     prompt_version_id: Mapped[UUID] = mapped_column(
         ForeignKey("prompt_versions.id"), nullable=False
     )
+    # The active conventions and verifier prompts, pinned at creation for every retry (RULES
+    # §7.2). NULL for a run created before #130 or when no active row of that key existed.
+    conventions_prompt_version_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("prompt_versions.id"), nullable=True
+    )
+    verifier_prompt_version_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("prompt_versions.id"), nullable=True
+    )
     severity_threshold: Mapped[SeverityThreshold | None] = mapped_column(
         pg_enum(SeverityThreshold, "severity_threshold"), nullable=True
     )
