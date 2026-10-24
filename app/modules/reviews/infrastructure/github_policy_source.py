@@ -28,6 +28,7 @@ from app.modules.reviews.application.policy_documents import (
     PolicyTreeEntry,
 )
 from app.modules.reviews.application.policy_errors import PolicyError, PolicyErrorCode
+from app.modules.reviews.application.run_failures import RETRY_AFTER_CEILING
 from app.modules.reviews.application.vcs_diff import (
     BlobTooLargeError,
     PullRequestLocator,
@@ -124,11 +125,12 @@ def _policy_retry_after(value: str | None) -> timedelta | None:
     if not value or not (value.isascii() and value.isdecimal()):
         return None
     try:
-        seconds = int(value)
+        seconds = int(value.lstrip("0") or "0")
     except ValueError:
-        # Python refuses untrusted integers with more than its configured digit limit.
-        return None
-    return timedelta(seconds=min(seconds, 86_400))
+        # Python refuses integers with more than its configured digit limit; without the
+        # leading zeros such a value is far beyond the ceiling, never shorter than it.
+        return RETRY_AFTER_CEILING
+    return timedelta(seconds=min(seconds, RETRY_AFTER_CEILING // timedelta(seconds=1)))
 
 
 def classify_policy_http_error(exc: httpx.HTTPError, *, policy_base_sha: str | None) -> PolicyError:

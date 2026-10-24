@@ -156,6 +156,12 @@ def test_http_failures_map_to_policy_codes_and_never_to_a_missing_document() -> 
             PolicyErrorCode.RATE_LIMITED,
             True,
         ),
+        # A Retry-After too long to convert is still a rate limit, not a lost access.
+        (
+            httpx.Response(403, headers={"Retry-After": "1" * 5000}),
+            PolicyErrorCode.RATE_LIMITED,
+            True,
+        ),
         (httpx.Response(429, headers={"Retry-After": "30"}), PolicyErrorCode.RATE_LIMITED, True),
         (httpx.Response(502), PolicyErrorCode.FETCH_TRANSIENT, True),
         (httpx.ReadTimeout("slow"), PolicyErrorCode.FETCH_TRANSIENT, True),
@@ -308,14 +314,23 @@ def test_ambiguous_tree_listing_is_unavailable_and_never_missing(
 @pytest.mark.parametrize(
     ("retry_after", "delay"),
     [
-        ("1" * 5000, None),
+        ("1" * 5000, timedelta(days=1)),
+        ("0" * 5000 + "120", timedelta(seconds=120)),
         ("9" * 30, timedelta(days=1)),
         ("soon", None),
         ("-1", None),
         ("120", timedelta(seconds=120)),
         ("86401", timedelta(days=1)),
     ],
-    ids=["over-int-limit", "over-timedelta-limit", "word", "negative", "seconds", "cap-one-day"],
+    ids=[
+        "over-int-limit",
+        "leading-zeros-over-int-limit",
+        "over-timedelta-limit",
+        "word",
+        "negative",
+        "seconds",
+        "cap-one-day",
+    ],
 )
 def test_policy_source_bounds_untrusted_retry_after(
     retry_after: str, delay: timedelta | None

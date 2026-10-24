@@ -8,7 +8,7 @@ from typing import Literal
 import httpx
 
 from app.modules.reviews.application.check_runs import RunProviderCheckpoint
-from app.modules.reviews.application.run_failures import RunFailure
+from app.modules.reviews.application.run_failures import RETRY_AFTER_CEILING, RunFailure
 from app.modules.reviews.application.vcs_diff import (
     CommitMessagePrefix,
     PullRequestLocator,
@@ -21,7 +21,7 @@ _MAX_RETRY_AFTER_SECONDS = str(timedelta.max // timedelta(seconds=1))
 
 
 def _retry_after_delay(value: str | None) -> timedelta | None:
-    """Ignore malformed values; oversized decimal delays use the existing long bucket."""
+    """Ignore malformed values; a delay too large to represent waits the ceiling."""
     if not value or not value.isascii() or not value.isdecimal():
         return None
     # Strip leading zeros before bounding/converting, including >4,300-digit inputs.
@@ -29,7 +29,7 @@ def _retry_after_delay(value: str | None) -> timedelta | None:
     if len(seconds) > len(_MAX_RETRY_AFTER_SECONDS) or (
         len(seconds) == len(_MAX_RETRY_AFTER_SECONDS) and seconds > _MAX_RETRY_AFTER_SECONDS
     ):
-        return timedelta(minutes=10)
+        return RETRY_AFTER_CEILING
     return timedelta(seconds=int(seconds))
 
 

@@ -1065,7 +1065,8 @@ def test_rules_document_counts_no_requests_for_a_failed_token_exchange() -> None
 @pytest.mark.parametrize(
     ("retry_after", "expected_delay"),
     [
-        ("1" * 5000, None),
+        # The shared policy classifier: an unconvertible value waits the one-day ceiling.
+        ("1" * 5000, timedelta(days=1)),
         ("9" * 30, timedelta(days=1)),
     ],
     ids=["over-integer-limit", "over-timedelta-limit"],

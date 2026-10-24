@@ -205,7 +205,7 @@ Legacy main ещё включает too_large в порог; указанные 
 | `queued` без доставки | 10 мин после `available_at` | реконсилер | T18 |
 | Sweep триггера | раз в 30 с (D2) | worker, лидер `pg_advisory_lock` (#34) | T2 |
 | Ожидание CI при `wait_for_ci = auto` | 2 мин | sweep | старт без CI |
-| Задержки retry | 30 с / 2 мин / 10 мин | `reviews.retry` | §4.2 |
+| Задержки retry | 30 с / 2 мин / 10 мин; `Retry-After` дольше 10 мин — через `available_at` и T18 | `reviews.retry` | §4.2 |
 
 **Дедлайн попытки и зависания.** Механизмов два, итоги у них разные. Первый — дедлайн принудительный [дефолт]: воркер ведёт попытку в `running` под watchdog с текущим дедлайном. Для fast это 8 мин от claim; для deep — 10 мин SandboxEngine, по их истечении `engine.fallback` (§5.3) и новый дедлайн fast 8 мин. Когда истекает дедлайн fast, watchdog прерывает работу в любой фазе, в том числе внутри `context.build` и `review.postprocess`: Run → `failed`, `deadline_exceeded` (T10), retry нет, check-run `neutral`. Проверки перед вызовом и на checkpoint остаются: они лишь завершают попытку раньше, если остатка не хватит на следующий вызов. У внешних вызовов внутри фаз свои лимиты (HTTP GitHub 10 с, LLM 90 / 300 с); watchdog покрывает локальную работу и зависания. Второй — heartbeat не продлевает lease после дедлайна текущей попытки (T7) [дефолт]. Если завис весь процесс (заблокирован event loop, работа не реагирует на отмену), встают и watchdog, и heartbeat: lease истекает, реконсилер применяет T12 / T13 (`lease_expired` после 3 попыток), а не `deadline_exceeded`. Верхняя граница `running` на попытку — дедлайн + lease 5 мин + период реконсилера 5 мин: fast 8 + 5 + 5 = 18 мин, deep 10 + 8 + 5 + 5 = 28 мин (граница heartbeat сдвигается вместе с дедлайном при fallback); обе меньше `consumer_timeout` 45 мин.
 
@@ -229,10 +229,17 @@ Legacy main ещё включает too_large в порог; указанные 
 |---|---|---|
 | сбой попытки 1 | 30 с | `retry.30s.{engine}` |
 | сбой попытки 2 | 2 мин | `retry.2m.{engine}` |
-| rate limit: `llm_rate_limited`, GitHub 403/429 с `Retry-After` | не меньше 2 мин; `Retry-After` > 2 мин → 10 мин | `retry.2m.{engine}` / `retry.10m.{engine}` |
+| сбой GitHub или GitLab с `Retry-After`: GitHub VCS — ответ любого статуса, кроме 404; GitHub политика — 429 или лимитный 403 (`Retry-After` у 5xx — #168 ч.6); GitLab (default-off, §8.4) — любой ответ-ошибка, `Retry-After` в секундах (до 10 цифр) или HTTP-date, у политики — на `policy_rate_limited` и `policy_fetch_transient`; чтение дерева репозитория для conventions — без `Retry-After` (см. ниже) | не меньше 2 мин и не меньше `Retry-After`: `Retry-After` > 2 мин → 10 мин, > 10 мин → сам `Retry-After`, не больше суток | `retry.2m.{engine}` / `retry.10m.{engine}` |
+| rate limit LLM ревью и conventions: `llm_rate_limited` | 2 мин; `Retry-After` до Run не доходит (см. ниже) | `retry.2m.{engine}` |
 | сбой попытки 3 | — | T10: `failed`, копия в `reviews.dlq` |
 
 `{engine}` — текущий `runs.engine`; после `engine.fallback` это `fast`.
+
+`Retry-After` больше 10 мин (#247): копия идёт в `retry.10m.{engine}`, а `available_at` = сейчас + `Retry-After` (не больше суток). Ранняя копия из `retry.10m` приходит до `available_at`; RunGuard подтверждает её (ACK) без claim, попытка не тратится. Run остаётся `queued`, и T18 публикует его заново через 10 мин после `available_at` (реконсилер раз в 5 мин): фактическая пауза — от `Retry-After` + 10 до + 15 мин. Новых очередей нет, аргументы retry-очередей не меняются. Механизм работает только для fast: у `review.run.deep` нет consumer до фазы 3, и T18 deep не публикует.
+
+Пока Run так ждёт, check-run GitHub остаётся «AI-ревью выполняется» с «попытка N из 3», а rerun по этому PR получает `409` (T3: есть активный Run), пока ожидающий Run не отменён. Через 10 мин после `available_at` Run считается `stale_queued`, пока ближайший проход реконсилера (до 5 мин) не опубликует его и worker не возьмёт; это может задеть условие `ReviewRunsStuckInQueue` (`for: 5m`, [MONITORING.md §5](MONITORING.md#5-алерты)).
+
+Правило «не меньше `Retry-After`» действует там, где сбой его несёт, — в чтениях GitHub (VCS и политика) и в rate limit verifier: он становится `verification_unavailable` с `Retry-After` провайдера (не больше суток). У LLM шлюз сам ждёт `Retry-After` не дольше 30 с, при большем переходит на fallback (§5.1); `LlmCallFailed` несёт последний `Retry-After` (`retry_after_s`), но `classify_failure` его не читает, поэтому Run с `llm_rate_limited` (ревью, conventions) повторяется через 2 мин. Передача `Retry-After` LLM в Run — #292.
 
 ### 4.3 Возврат из retry-очереди — требование к топологии SD §7.1 (реализует #34)
 
@@ -355,7 +362,7 @@ Fallback-модель — вторая модель шлюза с тем же st
 без rate-limit признаков → `policy_access_denied`, 429/limited 403 →
 `policy_rate_limited`, 5xx/transport → `policy_fetch_transient`; недопустимый документ
 сохраняет код RFS §9. `Retry-After` — ASCII целые секунды с пределом сутки; невалидное
-или не читаемое как integer значение задержки не даёт. Любая `PolicyError` завершает
+значение задержки не даёт, а слишком длинное для integer даёт сутки. Любая `PolicyError` завершает
 задание RELEASED: lease снят, `last_error_code=policy_*`, метрики записаны, старая
 публикация сохранена, новой нет. Отдельной index retry-политики для `policy_*` нет.
 

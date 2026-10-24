@@ -90,7 +90,7 @@ flowchart LR
 | Метрика | Значение |
 |---|---|
 | `dmc_runs_finished_15m_runs{state}` | прогоны, завершившиеся за 15 мин, по состоянию |
-| `dmc_runs_active_queued`, `…_in_progress`, `…_stale_queued` | незавершённые прогоны; `stale_queued` — `queued` дольше 10 мин после `available_at` (T18) |
+| `dmc_runs_active_queued`, `…_in_progress`, `…_stale_queued` | незавершённые прогоны; `stale_queued` — `queued` дольше 10 мин после `available_at` (T18). Run, ждущий долгий `Retry-After`, попадает сюда до ближайшего прохода реконсилера, то есть до 5 мин ([PIPELINE_SPEC §4.2](PIPELINE_SPEC.md#42-задержки)) |
 | `dmc_llm_calls_15m_calls`, `…_p50_seconds`, `…_p95_seconds` | вызовы LLM за 15 мин и их длительность |
 
 ## 5. Алерты
@@ -108,7 +108,7 @@ flowchart LR
 | `ReviewDeadLetters` | новые сообщения в `reviews.dlq` за 15 мин; событие. Размер DLQ (хранение 7 дней) — на панели `Review queues: ready messages` | critical |
 | `ReviewQueueBacklog` | > 20 готовых сообщений в `review.run.*`/`review.publish` 10 мин | warning |
 | `ReviewQueueWithoutConsumer` | у `review.run.fast` или `review.publish` нет консьюмера 5 мин | critical |
-| `ReviewRunsStuckInQueue` | есть `stale_queued` 5 мин | warning |
+| `ReviewRunsStuckInQueue` | есть `stale_queued` 5 мин. Ожидание долгого `Retry-After` держит Run в `stale_queued` до 5 мин и может задеть это условие ([PIPELINE_SPEC §4.2](PIPELINE_SPEC.md#42-задержки)) | warning |
 | `LlmLatencyHigh` | p95 LLM > 60 с при ≥ 3 вызовах, 10 мин (таймаут fast — 90 с) | warning |
 | `HostMemoryLow` / `HostDiskFull` / `HostCpuHigh` | < 10 % памяти 10 мин / < 15 % диска 10 мин / > 90 % CPU 15 мин | critical / critical / warning |
 | `ContainerOomKilled` | OOM-kill в контейнере compose за 10 мин | warning |

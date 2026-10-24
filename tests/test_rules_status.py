@@ -700,8 +700,15 @@ def test_a_rate_limit_keeps_its_retry_after_for_the_next_get() -> None:
 
 @pytest.mark.parametrize(
     ("header", "stored"),
-    [("86400", timedelta(days=1)), ("999999", timedelta(days=1))],
-    ids=["one-day", "capped-at-one-day"],
+    [
+        ("86400", timedelta(days=1)),
+        ("999999", timedelta(days=1)),
+        # The policy classifier is shared with runs: a value too long for int() waits the
+        # ceiling, and leading zeros do not count toward that length.
+        ("1" * 5000, timedelta(days=1)),
+        ("0" * 5000 + "120", timedelta(seconds=120)),
+    ],
+    ids=["one-day", "capped-at-one-day", "over-int-limit", "zero-padded"],
 )
 def test_the_stored_retry_after_is_at_most_one_day(header: str, stored: timedelta) -> None:
     reading = _read(

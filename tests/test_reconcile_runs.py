@@ -9,6 +9,8 @@ from types import TracebackType
 from typing import Self
 from uuid import UUID
 
+import pytest
+
 from app.modules.reviews.application.check_runs import CheckRunReport
 from app.modules.reviews.application.handle_review_run import RunGuardSnapshot
 from app.modules.reviews.application.queue_messages import ReviewPublishPointer
@@ -217,3 +219,32 @@ def test_reconciler_applies_t12_t13_t17_t18_and_leaves_retry_waits_alone() -> No
     # A Run waiting in a retry queue (available_at in the future) is not touched.
     assert runs[UUID(int=19)].state == "queued"
     assert republished == 4
+
+
+@pytest.mark.parametrize(
+    ("elapsed", "republished"),
+    [
+        pytest.param(timedelta(minutes=24), [], id="within-grace"),
+        pytest.param(
+            timedelta(minutes=26), [(UUID(int=18), 2, RunPublicationKind.QUEUED)], id="after-grace"
+        ),
+    ],
+)
+def test_long_retry_after_wait_is_republished_after_available_at_and_the_grace(
+    elapsed: timedelta, republished: list[tuple[UUID, int, RunPublicationKind]]
+) -> None:
+    # A Retry-After of 15 min keeps the 10m queue and moves available_at instead;
+    # T18 picks the Run up only once available_at and the grace have passed.
+    waiting = Run(UUID(int=18), "queued", 1, available_at=NOW + timedelta(minutes=15))
+    publisher = Publisher()
+
+    asyncio.run(
+        ReconcileRuns(
+            uow_factory=lambda: Uow(Store({waiting.id: waiting})),
+            run_publisher=publisher,
+            review_queue=publisher,
+            now=lambda: NOW + elapsed,
+        ).execute()
+    )
+
+    assert publisher.runs == republished
