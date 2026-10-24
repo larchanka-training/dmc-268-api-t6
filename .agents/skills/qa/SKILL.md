@@ -29,7 +29,7 @@ Do NOT over-interview. If the description is clear enough to file, move on.
 
 ### 2. Explore the codebase in the background
 
-While talking to the user, kick off an Agent (subagent_type=Explore) in the background to understand the relevant area (other harnesses: see `.agents/README.md` § Sub-agents across harnesses). The goal is NOT to find a fix — it's to:
+While talking to the user, kick off an Agent (subagent_type=Explore) in the background to understand the relevant area (other harnesses: see `.agents/README.md` § Sub-agents across harnesses). A harness without a sub-agent tool explores inline, in this same context: exploring only gathers context for the issue, so the fresh-session rule there for independent checks does not apply. The goal is NOT to find a fix — it's to:
 
 - Learn the domain language used in that area (check UBIQUITOUS_LANGUAGE.md if it exists)
 - Understand what the feature is supposed to do
@@ -58,20 +58,25 @@ Whether a slice is a separate issue or a part (Ч.N) of one issue: create-issue 
 
 Issues must be **durable** — they should still make sense after major refactors. Write from the user's perspective.
 
-Capture the report as one batch file (create-issue `references/batch.md` § 1) under `$(mktemp -d)`, with a new `id` per report: one item per issue, each a full create-issue spec plus a `key`. Fill each item by create-issue `SKILL.md` § Workflow steps 1–6:
+Capture the report as one batch file (create-issue `references/batch.md` § 1), defined before anything uses it:
+
+```bash
+BATCH="$(mktemp -d)/batch.json"   # every step below reads "$BATCH"
+```
+
+Its `id` is `qa-YYYYMMDD-HHMM` (UTC: `date -u +qa-%Y%m%d-%H%M`, taken once when the file is written; a second report in the same minute adds `-2`) — a fresh id per report, matching `[a-z0-9][a-z0-9-]*`. Never reuse an id for another report: it inherits the old state file and its `started_at`. A rerun that resumes this batch keeps its file and `id` (create-issue `references/batch.md` § 5). One item per issue, each a full create-issue spec plus a `key`. Fill each item by create-issue `SKILL.md` § Workflow steps 1–6:
 
 - `repo` from `issue-preflight.sh` (§ 1);
 - `type: "Bug"` with `environment` / `steps` / `expected` / `actual` for something broken, otherwise the fitting type (§ 2, `references/templates.md`);
-- `"lang": "ru"` and the body shape from create-issue (§ 4 Language, `references/templates.md`), never a hand-written body;
+- `lang`: the language create-issue § 4 Language picks (in this team: `ru`), set explicitly, and the body shape from create-issue (`references/templates.md`), never a hand-written body;
 - the Definition of Ready (§ 5): a `[component]` title, at least one acceptance criterion, the kickoff for a technical issue;
-- `blocked_by`: `@key` of another item when it genuinely blocks, or the ref of an existing issue;
+- `blocked_by`: `@key` of another item when it genuinely blocks, or the ref of an existing issue — with the matching "Blocked by" group in `dependencies` (§ A breakdown below);
 - `parent`: only when a tracking issue exists (its ref) or is an item of the same batch (`@key`), otherwise left out.
 
 #### A breakdown
 
 - **Prefer many thin issues over few thick ones** — each item independently fixable and verifiable
-- **Mark blocking relationships honestly** — if issue B genuinely can't be tested until issue A is fixed, B gets `"blocked_by": ["@a"]`. Independent items get no `blocked_by` and their Dependencies say "None"
-- **Say the dependency in words in the body** — a body cannot carry an `@key` (the driver refuses it); the native link carries the number
+- **Mark blocking relationships honestly** — if issue B genuinely can't be tested until issue A is fixed, B carries `"blocked_by": ["@a"]` and a `dependencies` object whose "Blocked by" group («Блокирующие» in a Russian body) names A in words: what it is and why B waits for it (create-issue `references/templates.md` § Dependencies). A body cannot carry an `@key` (the driver refuses it); the native link carries the number. Independent items set neither and leave Dependencies to the default ("None")
 - **Maximize parallelism** — the goal is that multiple people (or agents) can grab different issues simultaneously
 
 The driver creates parents before children and blockers before what they block, so the file order does not have to follow dependencies.
@@ -81,7 +86,7 @@ The driver creates parents before children and blockers before what they block, 
 - **Use the project's domain language** (check UBIQUITOUS_LANGUAGE.md if it exists)
 - **Describe behaviors, not code** — "the sync service fails to apply the patch" not "applyPatch() throws on line 42"; paths belong in the kickoff and follow create-issue reference hygiene (`references/templates.md` § Reference hygiene)
 - **Reproduction steps are mandatory** — if you can't determine them, ask the user
-- **Keep it concise** — a developer should be able to read the issue in 30 seconds
+- **Keep it concise** — the title and the acceptance criteria read in 30 seconds; the kickoff, DoD and Dependencies that create-issue requires stay, short
 
 #### Preview, one confirmation, create
 
