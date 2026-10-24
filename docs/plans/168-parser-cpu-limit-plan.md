@@ -10,6 +10,7 @@ and CVS wording is fixed later in docs PR G, so this PR changes no docs outside 
 
 The OS caps the CPU time of each request in the parser worker (`ast_worker.py`): a backstop for a worker whose
 parent failed to stop it (parent hung or gone while a parse spins). It never changes a parent outcome of today.
+`main()` first sets `RLIMIT_CORE` to (0, 0) (coordinator, 2026-10-24): SIGXCPU dumps core, a core holds sources.
 
 ## The design constraint
 
@@ -27,11 +28,10 @@ terminates the worker; the parent already treats a dead worker as a failed parse
 - The parent's longest wait for one request is 18 s of wall time from the write: `MAX_PARSE_CPU_SECONDS_PER_FILE
   + _WALL_SLACK_SECONDS + _STARTUP_SECONDS` (`subprocess_source_parser.py:83-88`). The first request after
   every start or restart gets the startup allowance, and restarts follow every kill.
-- After the limit is armed a request may spend at least `1 + slack` CPU seconds (rounding up only adds time).
-  The worker is single-threaded, so its CPU time never exceeds its wall time, and the limit is armed after the
-  parent's timer started. With slack 20 the OS fires no earlier than 21 s after that, 3 s after the parent's
-  latest kill: every parent outcome stays the same, and the 3 s cover a late timer of a busy parent event loop.
-  One request can spend under 22 CPU seconds.
+- Once armed, a request may spend at least `1 + slack` CPU seconds (rounding up only adds time). The worker is
+  single-threaded (CPU time never exceeds wall time) and arms the limit after the parent's timer started, so with
+  slack 20 the OS fires no earlier than 21 s after it, 3 s after the parent's latest kill: every parent outcome
+  stays the same, and the 3 s cover a late timer of a busy parent loop. A request spends under 22 CPU seconds.
 - Slack 2 would tie the 3 s wait of a normal request; slack 3 would cut short the first request, so a runaway
   parse would report `AST_RESOURCE_LIMIT` instead of `AST_TIMEOUT`. A test pins `1 + slack > 18` against the
   parent's constants, so an edit to either side fails loudly.
@@ -39,12 +39,12 @@ terminates the worker; the parent already treats a dead worker as a failed parse
 ## Tests (`tests/test_ast_worker.py`, new)
 
 - The limit computation: literal soft limits for used CPU 0.0, 0.2, 7.0 and 7.01; the slack inequality.
-- `_limit_cpu` with `resource` patched: an infinite hard limit is kept; a finite hard limit is kept and clamps
-  the soft one; no `setrlimit` call without `RLIMIT_CPU`.
+- `resource` patched: `_limit_cpu` keeps an infinite hard limit, keeps a finite one and clamps the soft one to
+  it; `_disable_core_dumps` sets (0, 0); neither calls `setrlimit` where its limit is missing.
 - Fake worker `tests/ast_workers/cpu_bound.py`: arms the real helper with the slack lowered to 0 (each request
   may spend 1 to 2 CPU seconds) and sets `RLIMIT_CORE` to 0 (no core dump). Run directly, not through the
   parent, whose wall-clock kill would fire first. A request that burns 30 s dies with `-SIGXCPU`, without an
   answer, within a few CPU seconds. Six requests of 0.5 s each survive, and their total CPU exceeds the soft
   limit armed for the first one: the limit follows each request.
-- Wiring (Linux only): after a parse through `SubprocessSourceParser`, the soft "Max cpu time" in
-  `/proc/<worker pid>/limits` is 21 plus a whole number between 1 and the worker's CPU seconds rounded up.
+- Wiring (Linux only), after a parse through `SubprocessSourceParser`, in `/proc/<worker pid>/limits`: the soft
+  "Max cpu time" is 21 plus 1 to the worker's CPU seconds rounded up; "Max core file size" is 0 and 0.
