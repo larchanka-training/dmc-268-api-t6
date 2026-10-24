@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from typing import Any
 from uuid import UUID
@@ -964,3 +964,18 @@ def test_context_stage_propagates_control_but_preserves_optional_fallback(failur
             asyncio.run(stage.run(_RUN))
         assert caught.value is error
     assert trace.steps[-1][2]["error"]["type"] == type(error).__name__
+
+
+@pytest.mark.parametrize(("threshold", "cap"), [("critical", 1), ("warning", 3)])
+def test_publication_settings_leave_conventions_cache_identity_unchanged(
+    threshold: str, cap: int
+) -> None:
+    baseline = Store()
+    assert baseline.pins is not None
+    changed = Store(pins=replace(baseline.pins, severity_threshold=threshold, max_comments=cap))  # type: ignore[arg-type]
+    first = _stage(Trace(), store=baseline)
+    second = _stage(Trace(), store=changed)
+    asyncio.run(first.run(_RUN))
+    asyncio.run(second.run(_RUN))
+    assert first.policy_key is not None
+    assert first.policy_key == second.policy_key

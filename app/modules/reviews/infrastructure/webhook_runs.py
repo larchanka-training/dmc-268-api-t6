@@ -52,7 +52,7 @@ class SqlAlchemyWebhookRunStore:
         )
         if pr is None:
             return CandidateMiss.PULL_REQUEST_GONE
-        repository = await self._session.get(Repository, pr.repository_id)
+        repository = await self._session.get(Repository, pr.repository_id, populate_existing=True)
         if repository is None:
             return CandidateMiss.REPOSITORY_GONE
         if (
@@ -104,6 +104,8 @@ class SqlAlchemyWebhookRunStore:
             engine=repository.default_engine.value,
             rule_version_id=rule_version_id,
             prompt_version_id=prompt_version_id,
+            severity_threshold=repository.severity_threshold.value,
+            max_comments=repository.max_comments,
         )
 
     async def insert_webhook_run(
@@ -137,6 +139,8 @@ class SqlAlchemyWebhookRunStore:
                 engine=candidate.engine,
                 rule_version_id=candidate.rule_version_id,
                 prompt_version_id=candidate.prompt_version_id,
+                severity_threshold=candidate.severity_threshold,
+                max_comments=candidate.max_comments,
                 attempt=0,
                 available_at=now,
                 cancel_requested=False,

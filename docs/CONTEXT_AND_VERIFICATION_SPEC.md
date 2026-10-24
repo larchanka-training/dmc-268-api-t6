@@ -45,8 +45,12 @@ default branch репозитория с включённым тумблером
 1. Политика, документы, дефолты, профили моделей, версии промптов, порог severity и inline cap
    `max_comments` неизменяемы в run. `severity_threshold` и `max_comments` читаются из Repository при создании run,
    сохраняются в привязках и policy snapshot (RULES_FORMAT_SPEC §7), retry их
-   переиспользует; изменение настройки действует на новые runs/rerun. Это целевой
-   профиль #107; legacy-оговорка о чтении во время обработки — PIPELINE_SPEC §9.
+   переиспользует; изменение настройки действует на новые runs/rerun. Закрепление
+   уже реализовано и для legacy-пути (#212): поля хранятся в Run и snapshot,
+   без изменения policy_digest, schema_version=1 и conventions key. Историческая
+   NULL-пара без backfill сохраняет live fallback к Repository при каждой обработке
+   и retry, даже если snapshot уже существует (PIPELINE_SPEC §9). Положение порога
+   после verifier и FinalReviewResult остаются целевым профилем #107/#130.
 2. Ignore применяется ко всем источникам всех LLM-вызовов, включая конвенции,
    AST, verifier, repair и fallback. Кэш не даёт разрешения на отправку источника.
 3. Карта diff доказывает допустимость якоря; manifest — видимость фрагмента;

@@ -638,7 +638,7 @@ class SqlAlchemyReviewOutputRepository:
     async def get_post_processing_input(self, run_id: UUID) -> FindingPostProcessingInput | None:
         """Snapshot the durable diff and immutable rule version for post-processing.
 
-        The repository's inline cap and severity threshold are read live, at processing time.
+        New runs use their creation-time pair; historical NULL pins read Repository live.
         """
         row = (
             await self._session.execute(
@@ -646,6 +646,8 @@ class SqlAlchemyReviewOutputRepository:
                     Run.code_change_id,
                     Run.head_sha,
                     RuleVersion.rules,
+                    Run.max_comments,
+                    Run.severity_threshold,
                     Repository.max_comments,
                     Repository.severity_threshold,
                 )
@@ -657,7 +659,9 @@ class SqlAlchemyReviewOutputRepository:
         ).one_or_none()
         if row is None:
             return None
-        _, _, rules, max_comments, severity_threshold = row
+        _, _, rules, max_comments, severity_threshold, live_cap, live_threshold = row
+        if max_comments is None and severity_threshold is None:
+            max_comments, severity_threshold = live_cap, live_threshold
         snapshots = (
             await self._session.execute(
                 select(CodeChangeDiff.filename, CodeChangeDiff.patch).where(

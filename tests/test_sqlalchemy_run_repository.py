@@ -609,7 +609,7 @@ def test_get_post_processing_input_returns_none_allowed_v2_rules_for_legacy_run(
 
     run_id = UUID(int=1)
     rules = [{"name": "Standard Rule"}]
-    first_row = (UUID(int=10), "head_sha_123", rules, 10, SeverityThreshold.ALL)
+    first_row = (UUID(int=10), "head_sha_123", rules, None, None, 10, SeverityThreshold.ALL)
     diff_rows = [("app/main.py", "@@ -1,3 +1,3 @@\n context\n+added\n context")]
 
     class MultiQueryFakeSession:

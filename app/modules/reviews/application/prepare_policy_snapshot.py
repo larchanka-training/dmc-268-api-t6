@@ -40,6 +40,7 @@ from app.modules.reviews.application.review_ignore import (
     IgnorePolicy,
     parse_review_ignore,
 )
+from app.modules.reviews.application.verdict import SeverityThresholdValue
 
 PRIORITY_MATCHER_VERSION = "priority-matcher/v1"
 
@@ -55,6 +56,8 @@ class RunPolicyPins:
     defaults_checksum: str
     prompt_bindings: PromptBindings
     execution_profile: ExecutionProfile
+    severity_threshold: SeverityThresholdValue | None = None
+    max_comments: int | None = None
 
 
 class PolicySnapshotStore(Protocol):
@@ -143,6 +146,8 @@ def build_policy_snapshot(
         prompt_bindings=pins.prompt_bindings,
         execution_profile=pins.execution_profile,
         policy_digest=sha256(canonical.encode("utf-8")).hexdigest(),
+        severity_threshold=pins.severity_threshold,
+        max_comments=pins.max_comments,
     )
 
 

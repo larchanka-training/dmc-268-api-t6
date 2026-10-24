@@ -639,8 +639,8 @@ snapshot описывается `schema_version = 1`.
 | `ignore_digest` | Checksum всех данных, определяющих допуск файлов |
 | `service_defaults_rule_version_id`, `defaults_checksum` | Первый равен `Run.rule_version_id`, checksum проверяется при чтении |
 | `prompt_bindings` | Immutable ID/checksum для `review.system`, `review.conventions`, `review.verifier`; review ID совпадает с `Run.prompt_version_id` |
-| `severity_threshold` | `all`, `warning` или `critical` из Repository; закреплён при создании run, неизменяемый вход публикации — целевое поле #107/#175, не live-read правило #149 |
-| `max_comments` | Inline cap 1–10 из Repository, закреплённый вместе с порогом; целевое поле #107/#175 |
+| `severity_threshold` | `all`, `warning` или `critical` из Repository; сохраняется в Run при создании и копируется в snapshot (#212), неизменяемый вход публикации; у исторических Run NULL |
+| `max_comments` | Inline cap 1–10 из Repository, сохраняется в Run и snapshot вместе с порогом (#212); у исторических Run NULL |
 | `execution_profile` | Закреплённые primary/fallback model IDs, provider routes, tokenizer/counter versions, temperature, response-schema, recovery/budget profile из связанной спецификации |
 | `policy_digest` | Checksum документов, допусков, дефолтов, prompt bindings, interpreter/execution versions |
 | `created_at` | Время фиксации; не влияет на policy_digest |
@@ -665,12 +665,17 @@ policy_digest = SHA256(canonical_json({
 }))
 ```
 
-Закрепление threshold/cap — цель #107/#175: текущий #149 читает их живьём при
-postprocess (PS §9), в RunPolicyPins (`prepare_policy_snapshot.py`) их пока нет.
+Закрепление threshold/cap реализовано в #212: оба значения читаются из Repository
+в транзакции создания Run, сохраняются в его полях, `RunPolicyPins` и policy snapshot.
+Текущий legacy postprocess использует поля Run независимо от наличия snapshot.
+Retry сохраняет пару; новый Run и rerun закрепляют текущие настройки Repository.
+Для исторических Run оба поля остаются NULL без backfill; postprocess и retry
+читают текущую пару Repository. Создание или чтение snapshot такого Run сохраняет
+NULL, не превращая fallback в закрепление.
 
 `severity_threshold` и `max_comments` — закреплённые настройки публикации,
 они не входят в `policy_digest` и ключ conventions cache: не меняют правила,
-источники или вход модели conventions. Они входят в `FinalReviewResult` и его
+источники или вход модели conventions. В целевом профиле #107/#130 они входят в `FinalReviewResult` и его
 `result_digest`, а через него — в идентичность публикации (CVS §8.1/§10).
 Формула `policy_digest` и `schema_version=1` здесь не меняются.
 

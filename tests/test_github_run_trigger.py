@@ -110,6 +110,8 @@ def _insert_candidate() -> RunInsertCandidate:
         engine="fast",
         rule_version_id=_RULE,
         prompt_version_id=_PROMPT,
+        severity_threshold="all",
+        max_comments=10,
     )
 
 
