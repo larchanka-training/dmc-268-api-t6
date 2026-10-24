@@ -209,7 +209,8 @@ publishable, and never changes request bytes, answer validation or the captured 
 the rate is live ECB data no pin can freeze). The historical 2026-10-15 manifest retains the earlier 49-pin list. Before the
 #178 replacement, replay printed `Static input path set changed; refresh the complete baseline`.
 The complete 2026-10-20 capture records the active 46 pins and replayed with `warnings=[]`
-until #163 added three policy modules to the pins ([Baseline drift](#baseline-drift)).
+until #168 and #219 changed pinned files and #163 added three policy modules to the pins
+([Baseline drift](#baseline-drift)).
 
 ## Recorded Mistral baseline — 2026-10-20
 
@@ -883,17 +884,23 @@ frozen commit-context inputs; production commit retrieval is not pinned (#177). 
 changed the pinned parser/schema. #177 then changed the pin list, causing
 `Static input path set changed; refresh the complete baseline` until the complete
 2026-10-20 #178 replacement. That 46-pin v3 capture replayed locally with
-`warnings=[]` until #163 (below); required replay on main after merge remains pending. The 2026-10-15,
+`warnings=[]` until #168 (below); required replay on main after merge remains pending. The 2026-10-15,
 2026-10-14 PR-prefix, 2026-10-13 snapshot and 2026-10-07 captures remain historical.
 Later changes to fingerprinted inputs require another complete separately authorized
 capture. Preserve each original capture's provenance rather than editing a digest
 to hide drift; refresh the entire response set and manifest together.
 
-#163 added the prompt renderer's policy modules (`policy_documents.py`,
-`policy_snapshot.py`, `context_provenance.py`) to the static pins, so the 2026-10-20
-capture now replays with two expected warnings until the next complete capture:
-`Static input path set changed; refresh the complete baseline` and `Static input digest
-mismatch; refresh the complete baseline`. Its metrics are unchanged.
+On `main` the 2026-10-20 capture replays with `Static input digest mismatch; refresh the
+complete baseline`: #168 changed the pinned `app/modules/reviews/application/prompt_builder.py`,
+and #219 (PR #230) changed it again together with `application/prompt_budget.py`,
+`application/review_output.py`, `infrastructure/llm/gateway.py` and
+`infrastructure/llm/models.py` under `app/modules/reviews/`. #163 adds the prompt
+renderer's policy modules (`policy_documents.py`, `policy_snapshot.py`,
+`context_provenance.py`) to the static pins and changes two pinned files
+(`app/bootstrap/llm_gateway.py`, `review/scripts/eval_live.py`), so with it the capture
+replays with two expected warnings until the next complete capture: `Static input path set
+changed; refresh the complete baseline` and `Static input digest mismatch; refresh the
+complete baseline`. Its metrics are unchanged.
 
 ## rules.md sub-corpus and policy-arm A/B (#163)
 
