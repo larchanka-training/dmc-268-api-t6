@@ -1,0 +1,85 @@
+{
+  "id": "runs-pr-filter",
+  "items": [
+    {
+      "key": "api-pr-filter",
+      "repo": "larchanka-training/dmc-268-api-t6",
+      "type": "Task",
+      "lang": "ru",
+      "summary": "[api] Фильтровать список прогонов по номеру PR",
+      "background": "Прогоны одного PR приходится искать глазами в общем списке: `GET /api/runs` не умеет отбирать прогоны по номеру PR.",
+      "scope": [
+        "Параметр `pull_number` в `GET /api/runs`: только прогоны PR с этим номером; вместе с `repo` — PR этого репозитория",
+        "Вне scope: поле фильтра в ui — это sub-issue в ui"
+      ],
+      "acceptance_criteria": [
+        "`GET /api/runs?pull_number=N` возвращает только прогоны PR с номером N; пагинация через `cursor` работает как без фильтра",
+        "`pull_number` меньше 1 — ответ 422",
+        "Параметр описан в OpenAPI; тесты use case и роута зелёные"
+      ],
+      "dependencies": {
+        "Блокирует": [
+          "sub-issue в ui — поле «PR #» в фильтре списка прогонов ждёт этот параметр"
+        ]
+      },
+      "kickoff": {
+        "repo": "larchanka-training/dmc-268-api-t6",
+        "branch": "feat/<n>-runs-pr-filter — `main` защищён, через PR",
+        "problem_shape": "Роут `GET /runs` фильтрует по статусу и репозиторию; номера PR среди параметров нет, ни в роуте, ни в use case.",
+        "read_first": [
+          "app/main.py — роут `GET /runs` и его параметры",
+          "app/modules/reviews/application/list_runs.py — use case и запрос к репозиторию прогонов"
+        ],
+        "before_writing_code": [
+          "uv run pytest tests -k list_runs — зелёная база до правок"
+        ],
+        "mines": [
+          "номер PR не уникален между репозиториями — без `repo` фильтр отдаёт прогоны PR с этим номером из всех видимых репозиториев",
+          "клиент передаёт курсор следующей страницы вместе с теми же фильтрами — нужен тест на вторую страницу с `pull_number`"
+        ]
+      }
+    },
+    {
+      "key": "ui-pr-filter",
+      "repo": "larchanka-training/dmc-268-ui-t6",
+      "type": "Story",
+      "lang": "ru",
+      "summary": "[ui] Добавить фильтр списка прогонов по номеру PR",
+      "as_role": "участник команды, который разбирает прогоны",
+      "i_want": "отфильтровать список прогонов по номеру PR",
+      "so_that": "сразу видеть все прогоны своего PR",
+      "scope": [
+        "Поле «PR #» в фильтре над списком прогонов; значение уходит параметром `pull_number` в `GET /api/runs` и хранится в адресе страницы",
+        "Вне scope: правки api — они в родительском issue"
+      ],
+      "acceptance_criteria": [
+        "Номер в поле «PR #» оставляет в списке только прогоны этого PR",
+        "Номер хранится в адресе страницы: после перезагрузки список отфильтрован так же",
+        "Тесты фильтра и запроса списка проверяют параметр `pull_number`"
+      ],
+      "dependencies": {
+        "Блокирующие": [
+          "родительский issue в api — параметр `pull_number` в `GET /api/runs` должен быть на staging"
+        ]
+      },
+      "kickoff": {
+        "repo": "larchanka-training/dmc-268-ui-t6",
+        "branch": "feat/<n>-runs-pr-filter — `main` защищён, через PR",
+        "problem_shape": "Фильтр списка прогонов знает только репозиторий (`repo` в адресе страницы); номера PR нет ни в фильтре, ни в схеме запроса.",
+        "read_first": [
+          "src/features/run-list-filter/model/runListFilter.ts — фильтр и его параметры в адресе страницы",
+          "src/entities/run/model/schemas.ts — `RunListQuerySchema`, по ней собирается запрос списка"
+        ],
+        "before_writing_code": [
+          "pnpm test src/features/run-list-filter src/entities/run — зелёная база до правок"
+        ],
+        "mines": [
+          "`RunListQuerySchema` — `z.object`, он молча отбрасывает незнакомые ключи: без `pull_number` в схеме параметр не уйдёт в запрос",
+          "пока параметра нет на staging, api отвечает без фильтра — ручная проверка до мержа api даёт ложное «работает»"
+        ]
+      },
+      "parent": "@api-pr-filter",
+      "blocked_by": ["@api-pr-filter"]
+    }
+  ]
+}

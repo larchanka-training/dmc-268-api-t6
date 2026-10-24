@@ -784,6 +784,15 @@ def test_exact_title_match_blocks_creation(tmp_path: Path) -> None:
     r = run(tmp_path, search=hits)
     assert r.returncode == 4
     assert "already exists" in json.loads(r.stderr)["error"]
+    # The duplicate is also on stdout, structured, so issue-batch.py can adopt it on a
+    # rerun instead of parsing the message.
+    assert json.loads(r.stdout) == {
+        "duplicate": True,
+        "url": "https://github.com/acme/sandbox/issues/7",
+        "number": 7,
+        "repo": "acme/sandbox",
+    }
+    assert "issue_create" not in fixture_calls(tmp_path)
     assert not board_was_called(tmp_path)
 
 
