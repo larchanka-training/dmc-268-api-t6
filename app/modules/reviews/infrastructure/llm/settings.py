@@ -87,6 +87,15 @@ class LlmSettings:
     primary: ModelProfile
     fallback: ModelProfile | None
     policy: GatewayPolicy = field(default_factory=GatewayPolicy)
+    verifier: ModelProfile | None = None
+    verifier_fallback: ModelProfile | None = None
+
+    def verifier_route(self) -> tuple[ModelProfile, ModelProfile | None]:
+        """The verifier's model pair; each unset half is the review route's model."""
+        return (
+            self.verifier or self.primary,
+            self.verifier_fallback if self.verifier_fallback is not None else self.fallback,
+        )
 
     @classmethod
     def from_env(cls, env: Mapping[str, str]) -> LlmSettings:
@@ -99,6 +108,11 @@ class LlmSettings:
         primary's; explicit fallback values override inheritance. ``prompt_json``
         requires ``LLM_ALLOW_PROMPT_JSON=1``. That flag is intended for development
         and evaluation; this parser does not restrict it by endpoint or environment.
+
+        ``LLM_VERIFIER_*`` and ``LLM_VERIFIER_FALLBACK_*`` follow the same rules as
+        ``LLM_FALLBACK_*``: the verifier inherits from the primary, its fallback from
+        the verifier route's primary. Each is read only when its ``…MODEL`` is set;
+        otherwise ``verifier_route()`` uses the review model in its place.
         """
         allow_prompt_json = env.get("LLM_ALLOW_PROMPT_JSON", "") == "1"
         primary = _profile_from_env(env, "LLM_", None, allow_prompt_json)
@@ -107,7 +121,22 @@ class LlmSettings:
             if env.get("LLM_FALLBACK_MODEL")
             else None
         )
-        return cls(primary=primary, fallback=fallback)
+        verifier = (
+            _profile_from_env(env, "LLM_VERIFIER_", primary, allow_prompt_json)
+            if env.get("LLM_VERIFIER_MODEL")
+            else None
+        )
+        verifier_fallback = (
+            _profile_from_env(env, "LLM_VERIFIER_FALLBACK_", verifier or primary, allow_prompt_json)
+            if env.get("LLM_VERIFIER_FALLBACK_MODEL")
+            else None
+        )
+        return cls(
+            primary=primary,
+            fallback=fallback,
+            verifier=verifier,
+            verifier_fallback=verifier_fallback,
+        )
 
 
 # Chosen for OQ-2 (docs/SYSTEM_DESIGN.md §15) in #46: catalog values of EUrouter on
