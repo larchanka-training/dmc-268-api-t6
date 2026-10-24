@@ -512,10 +512,16 @@ def _uses_wildcard(facts: AstFacts, symbol: AstSymbol) -> bool:
 
 _Outcome = tuple[ImportResolution, str | None, tuple[SymbolRef, ...]]
 _Loaded = list[tuple[str, AstFacts]]
+# How a symbol reads a binding: its alias, the names read as ``alias.name``, the names
+# looked up in the target.
+_Use = tuple[str | None, tuple[str, ...], tuple[str, ...]]
 
 
 class ImportResolver:
-    """Resolve the imports a changed symbol really uses, within the limits of a run."""
+    """Resolve the imports a changed symbol really uses, within the limits of a run.
+
+    ``resolve_binding`` resolves one binding by the same rules, outside those limits.
+    """
 
     def __init__(
         self, *, tree: RevisionTree, provider: FactsProvider, go_module: str | None = None
@@ -532,36 +538,13 @@ class ImportResolver:
         seen: set[tuple[str, str | None, tuple[str, ...]]] = set()
         symbols_in_file = 0
         for symbol in symbols:
-            importer_id = f"{self._tree.revision[:12]}:{importer_path}#{symbol.index}"
+            importer_id = self._importer_id(importer_path, symbol)
             for item in facts.imports:
                 for binding in item.names:
-                    alias = binding.alias
-                    if alias is None and facts.language is AstLanguage.GO:
-                        alias = await self._go_package_name(item, binding)
-                    members: tuple[str, ...]
-                    wanted: tuple[str, ...]
-                    if alias is None:
-                        # A wildcard binds names it does not list: a use is reported with
-                        # its reason, and the target is never read.
-                        # CONTRACT: the extractor emits WILDCARD only on static imports; the
-                        # form check keeps a re-export (which binds nothing) out if it changes.
-                        if not (
-                            binding.kind is ImportKind.WILDCARD
-                            and item.form is ImportForm.STATIC
-                            and _uses_wildcard(facts, symbol)
-                        ):
-                            continue
-                        members = wanted = ()
-                    else:
-                        members = tuple(
-                            sorted(
-                                {name for owner, name in symbol.member_references if owner == alias}
-                            )
-                        )
-                        named = binding.kind in {ImportKind.NAMED, ImportKind.DEFAULT}
-                        if not (alias in symbol.references if named else members):
-                            continue
-                        wanted = (binding.name,) if named and binding.name is not None else members
+                    use = await self._use(facts, symbol, item, binding)
+                    if use is None:
+                        continue
+                    alias, _, wanted = use
                     key = (item.module, alias, wanted)
                     if key in seen:
                         continue
@@ -570,24 +553,22 @@ class ImportResolver:
                         symbols_in_file >= MAX_IMPORTED_SYMBOLS_PER_FILE
                         or self._symbols_in_run >= MAX_IMPORTED_SYMBOLS_PER_RUN
                     )
-                    outcome: _Outcome
+                    ref: ImportRef
                     if over:
-                        outcome = (ImportResolution.UNSUPPORTED, "ast_limit", ())
-                    elif alias in symbol.local_bindings:
-                        outcome = (ImportResolution.AMBIGUOUS, "shadowed", ())
-                    else:
-                        outcome = await self._resolve(
-                            importer_path, facts.language, item, binding, wanted, members
+                        ref = ImportRef(
+                            importer_id,
+                            item.module,
+                            wanted,
+                            (),
+                            ImportResolution.UNSUPPORTED,
+                            "ast_limit",
                         )
-                    resolution, reason, found = outcome
-                    # A Python submodule binding is resolved through the members taken from it.
-                    through_members = (
-                        facts.language is AstLanguage.PYTHON
-                        and binding.kind is ImportKind.NAMED
-                        and bool(found)
-                        and found[0].name != binding.name
-                    )
-                    names = members if through_members else wanted
+                    else:
+                        ref = await self._binding_ref(
+                            importer_path, facts, symbol, item, binding, use
+                        )
+                    resolution, reason = ref.resolution, ref.reason
+                    names, found = ref.names, ref.resolved_symbols
                     # One import can bring several definitions: only those that fit both
                     # remaining limits are shown, the rest are reported, not presented.
                     room = min(
@@ -614,6 +595,92 @@ class ImportResolver:
                             )
                         )
         return tuple(refs)
+
+    async def resolve_binding(
+        self,
+        *,
+        importer_path: str,
+        facts: AstFacts,
+        symbol: AstSymbol,
+        item: AstImport,
+        binding: AstImportName,
+    ) -> ImportRef | None:
+        """Resolve one binding of ``item`` that ``symbol`` reads, outside the run limits.
+
+        ``None`` when ``symbol`` does not read the binding. The symbol count of the run is
+        neither checked nor advanced, so the ref carries every definition the binding brings.
+        """
+        use = await self._use(facts, symbol, item, binding)
+        if use is None:
+            return None
+        return await self._binding_ref(importer_path, facts, symbol, item, binding, use)
+
+    def _importer_id(self, importer_path: str, symbol: AstSymbol) -> str:
+        return f"{self._tree.revision[:12]}:{importer_path}#{symbol.index}"
+
+    async def _use(
+        self, facts: AstFacts, symbol: AstSymbol, item: AstImport, binding: AstImportName
+    ) -> _Use | None:
+        """How ``symbol`` reads ``binding``, or ``None`` when it does not read it."""
+        alias = binding.alias
+        if alias is None and facts.language is AstLanguage.GO:
+            alias = await self._go_package_name(item, binding)
+        if alias is None:
+            # A wildcard binds names it does not list: a use is reported with its reason,
+            # and the target is never read.
+            # CONTRACT: the extractor emits WILDCARD only on static imports; the form
+            # check keeps a re-export (which binds nothing) out if it changes.
+            if not (
+                binding.kind is ImportKind.WILDCARD
+                and item.form is ImportForm.STATIC
+                and _uses_wildcard(facts, symbol)
+            ):
+                return None
+            return None, (), ()
+        members = tuple(
+            sorted({name for owner, name in symbol.member_references if owner == alias})
+        )
+        named = binding.kind in {ImportKind.NAMED, ImportKind.DEFAULT}
+        if not (alias in symbol.references if named else members):
+            return None
+        wanted = (binding.name,) if named and binding.name is not None else members
+        return alias, members, wanted
+
+    async def _binding_ref(
+        self,
+        importer_path: str,
+        facts: AstFacts,
+        symbol: AstSymbol,
+        item: AstImport,
+        binding: AstImportName,
+        use: _Use,
+    ) -> ImportRef:
+        """Every definition a binding read by ``symbol`` brings, before any limit."""
+        alias, members, wanted = use
+        outcome: _Outcome
+        if alias in symbol.local_bindings:
+            outcome = (ImportResolution.AMBIGUOUS, "shadowed", ())
+        else:
+            outcome = await self._resolve(
+                importer_path, facts.language, item, binding, wanted, members
+            )
+        resolution, reason, found = outcome
+        # A Python submodule binding is resolved through the members taken from it.
+        through_members = (
+            facts.language is AstLanguage.PYTHON
+            and binding.kind is ImportKind.NAMED
+            and bool(found)
+            and found[0].name != binding.name
+        )
+        names = members if through_members else wanted
+        return ImportRef(
+            self._importer_id(importer_path, symbol),
+            item.module,
+            names,
+            found,
+            resolution,
+            reason,
+        )
 
     async def _go_package_name(self, item: AstImport, binding: AstImportName) -> str | None:
         """The default binding of a Go import is the package clause of its target."""

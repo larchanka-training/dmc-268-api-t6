@@ -408,8 +408,8 @@ inside, so L4 behaviour does not change.
 
 **Done when:**
 
-- [ ] the RED run and the GREEN run are recorded;
-- [ ] common verification is green.
+- [x] the RED run and the GREEN run are recorded;
+- [x] common verification is green.
 
 **Dependencies:** PR 1 opened.
 
