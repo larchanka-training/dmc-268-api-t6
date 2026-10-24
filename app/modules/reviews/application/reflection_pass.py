@@ -745,8 +745,9 @@ class ReflectionPass:
                     "llm_payment_required", "Verifier provider payment required"
                 ) from exc
             if error_code == "llm_rate_limited":
-                # RetryDelays turns any retry_after into 2m, or 10m above two minutes; the
-                # cap only keeps a huge provider header from overflowing timedelta.
+                # RetryDelays waits at least this retry_after (2m at least, the 10m queue
+                # above two minutes, up to one day); the cap keeps a huge provider header
+                # from overflowing timedelta.
                 retry_after_s = getattr(exc, "retry_after_s", None) or 0
                 raise RunFailure(
                     "verification_unavailable",

@@ -73,7 +73,8 @@ and the consumer continues. Cancellation
 propagates. Existing publish-confirm, ACK/fallback-NACK and three-error retry
 behavior remains in place. Invalid x-attempt values log a warning and use the
 existing fallback. Malformed Retry-After values are ignored; oversized numeric
-Retry-After values select the existing 10-minute bucket. Valid representable delays and leading zeros retain their
+Retry-After values keep the `10m` routing key and wait the one-day ceiling through
+`available_at` (PIPELINE_SPEC §4.2). Valid representable delays and leading zeros retain their
 semantics.
 
 SIGKILL, OOM, an unavailable database or forced process exit cannot promise a

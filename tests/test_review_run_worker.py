@@ -52,6 +52,7 @@ from app.modules.reviews.application.run_failures import (
 from app.modules.reviews.application.run_trace import traced_step
 from app.modules.reviews.application.try_enqueue_webhook_run import PendingRunMessage
 from app.modules.reviews.application.vcs_diff import PullRequestLocator
+from app.modules.reviews.infrastructure.github_policy_source import classify_policy_http_error
 from app.modules.reviews.infrastructure.github_vcs import HttpGitHubVcsProvider
 from app.modules.reviews.infrastructure.vcs_failures import (
     ClassifiedVcsProvider,
@@ -475,6 +476,43 @@ def test_rate_limit_with_long_retry_after_uses_the_ten_minute_queue() -> None:
         "2m",
         timedelta(minutes=2),
     )
+
+
+@pytest.mark.parametrize(
+    "limited",
+    [
+        pytest.param(
+            lambda delay: PolicyError(
+                PolicyErrorCode.RATE_LIMITED, "GitHub answered 429", retry_after=delay
+            ),
+            id="policy",
+        ),
+        pytest.param(
+            lambda delay: RunFailure("diff_fetch_failed", "GitHub answered 429", retry_after=delay),
+            id="vcs",
+        ),
+        # A unit case only: production LLM failures carry no Retry-After yet (#292).
+        pytest.param(
+            lambda delay: RunFailure("llm_rate_limited", retry_after=delay),
+            id="llm-unit-with-retry-after",
+        ),
+    ],
+)
+@pytest.mark.parametrize(
+    ("retry_after", "delay"),
+    [
+        pytest.param(timedelta(minutes=5), timedelta(minutes=10), id="5m"),
+        pytest.param(timedelta(minutes=10), timedelta(minutes=10), id="10m"),
+        pytest.param(timedelta(minutes=15), timedelta(minutes=15), id="15m"),
+        pytest.param(timedelta(days=1), timedelta(days=1), id="1d"),
+        pytest.param(timedelta(days=2), timedelta(days=1), id="2d-ceiling"),
+    ],
+)
+def test_rate_limited_retry_never_comes_before_retry_after(
+    limited: Callable[[timedelta], RunFailure], retry_after: timedelta, delay: timedelta
+) -> None:
+    # D3: the 10m queue stays; a longer wait lives in available_at, capped at one day.
+    assert RetryDelays().for_failure(1, limited(retry_after)) == ("10m", delay)
 
 
 @pytest.mark.parametrize(
@@ -917,6 +955,36 @@ def test_exhausted_match_budget_fails_the_run_naming_the_document_and_the_count(
     )
 
 
+def test_policy_rate_limit_retry_waits_out_a_long_retry_after() -> None:
+    run = FakeRun()
+    retry = RetryQueue()
+    clock = Clock()
+    request = httpx.Request("GET", "https://api.github.test/repos/o/r/git/trees/" + "b" * 40)
+    limited = httpx.HTTPStatusError(
+        "GitHub",
+        request=request,
+        response=httpx.Response(429, headers={"Retry-After": "900"}, request=request),
+    )
+
+    def pipeline(claimed: ClaimedAttempt) -> bool:
+        raise classify_policy_http_error(limited, policy_base_sha="b" * 40)
+
+    first = asyncio.run(handler(run, pipeline, retry=retry, clock=clock).execute(RUN))
+
+    assert first is DeliveryOutcome.ACK
+    assert (run.state, run.attempt) == ("queued", 1)
+    assert retry.published == [("10m", 2)]
+    # Exactly Retry-After, not the ceiling and not the 10m bucket.
+    assert run.available_at == NOW + timedelta(minutes=15)
+    # The copy from the 10m queue comes early: RunGuard drops it without an attempt,
+    # and T18 republishes the Run once available_at has passed (PIPELINE_SPEC §4.2).
+    clock.value = NOW + timedelta(minutes=10)
+    early = asyncio.run(handler(run, pipeline, retry=retry, clock=clock).execute(RUN))
+
+    assert early is DeliveryOutcome.ACK
+    assert (run.state, run.attempt, retry.published) == ("queued", 1, [("10m", 2)])
+
+
 def test_check_run_cancellation_logs_run_and_reason_at_info(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
@@ -1140,8 +1208,9 @@ def test_oversized_numeric_retry_after_keeps_rate_limit_retry_in_the_long_bucket
     assert failure.error_code == (
         "commit_messages_fetch_failed" if commits else "diff_fetch_failed"
     )
-    assert failure.retry_after == timedelta(minutes=10)
-    assert RetryDelays().for_failure(1, failure) == ("10m", timedelta(minutes=10))
+    # A huge wait is never shorter than a merely large one: it takes the one-day ceiling.
+    assert failure.retry_after == timedelta(days=1)
+    assert RetryDelays().for_failure(1, failure) == ("10m", timedelta(days=1))
 
 
 @pytest.mark.parametrize("commits", [False, True])

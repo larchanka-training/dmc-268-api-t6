@@ -328,8 +328,8 @@ def test_guard_preserves_republish_ack_and_fallback_nack_failure_behavior(
     ("retry_after", "bucket", "delay"),
     [
         pytest.param("later", "30s", timedelta(seconds=30), id="malformed"),
-        pytest.param("86400000000000", "10m", timedelta(minutes=10), id="timedelta-overflow"),
-        pytest.param("9" * 5000, "10m", timedelta(minutes=10), id="integer-digit-limit"),
+        pytest.param("86400000000000", "10m", timedelta(days=1), id="timedelta-overflow"),
+        pytest.param("9" * 5000, "10m", timedelta(days=1), id="integer-digit-limit"),
         pytest.param("١٢٠", "30s", timedelta(seconds=30), id="unicode-decimal"),
     ],
 )

@@ -1013,7 +1013,7 @@ nullable `line`, `column`, `pattern_index`, `limit`, `actual`, `retryable`.
 | `policy_access_denied` | `failed` | Нет; 401/403 без признаков rate limit, недоступный repository; не missing |
 | `policy_revision_unavailable` | `failed` | Нет автоматической смены SHA; закреплённая ревизия недоступна либо её листинг дерева усечён или неоднозначен (запись без mode или с mode не своего типа, имя с `/`, `.`/`..`, повтор имени): нерекурсивный листинг одного SHA всегда одинаков, повтор его не исправит |
 | `policy_fetch_transient` | Ограниченный retry, затем `failed` | Timeout/reset/5xx/нечитаемый ответ (не JSON или иная форма): его повторяют, потому что искажение мог внести сбой транспорта, в отличие от корректно разобранного усечённого или неоднозначного листинга |
-| `policy_rate_limited` | Ограниченный retry, затем `failed` | 429 или подтверждённый rate-limit 403; соблюсти Retry-After |
+| `policy_rate_limited` | Ограниченный retry, затем `failed` | 429 или подтверждённый rate-limit 403; соблюсти Retry-After, не дольше суток ([PIPELINE_SPEC §4.2](PIPELINE_SPEC.md#42-задержки)) |
 | `policy_snapshot_integrity_error` | `failed` | Нет; checksum/версии недоступны или противоречат snapshot |
 | `policy_context_violation` | `failed` до отправки | Нет; final payload содержит запрещённый source |
 | `all_changes_ignored` | `skipped` | Не retry; все изменения доказанно исключены по политике, технических пропусков нет |

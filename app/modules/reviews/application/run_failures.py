@@ -17,6 +17,8 @@ LEASE = timedelta(minutes=5)
 HEARTBEAT_INTERVAL = timedelta(seconds=60)
 FAST_ATTEMPT_DEADLINE = timedelta(minutes=8)
 RECONCILER_QUEUED_GRACE = timedelta(minutes=10)
+# The longest Retry-After a Run waits for before its next attempt; a longer one is capped.
+RETRY_AFTER_CEILING = timedelta(days=1)
 
 # "Retry: да" in the §6 catalog: T9 while attempt < 3, then failed and a copy in reviews.dlq.
 # Policy codes of RULES_FORMAT_SPEC §9 (``PolicyErrorCode``); only reads of the policy
@@ -161,11 +163,14 @@ class RetryDelays:
     def for_failure(self, attempt: int, failure: RunFailure) -> tuple[str, timedelta]:
         """Choose 10m for a long Retry-After, 2m for limits/later attempts, else 30s.
 
+        A Retry-After over 10m keeps the 10m queue and becomes the delay itself, up to
+        ``RETRY_AFTER_CEILING``: the caller sets ``available_at`` from it, RunGuard drops
+        the early copy without an attempt and T18 republishes the Run after the wait.
         The caller checks retryability and the attempt cap before using this method.
         """
         rate_limited = failure.error_code == "llm_rate_limited" or failure.retry_after is not None
         if rate_limited and failure.retry_after is not None and failure.retry_after > self.medium:
-            return "10m", self.long
+            return "10m", min(max(failure.retry_after, self.long), RETRY_AFTER_CEILING)
         if rate_limited or attempt >= 2:
             return "2m", self.medium
         return "30s", self.short
