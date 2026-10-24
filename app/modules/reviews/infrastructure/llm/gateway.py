@@ -156,6 +156,8 @@ class GatewayResult:
     model: str
     usage: tuple[LlmUsage, ...]
     calls: int
+    # The manifest ``call_id`` of the call whose answer was accepted; None without a manifest.
+    accepted_call_id: UUID | None = None
 
 
 @dataclass
@@ -257,11 +259,13 @@ class LlmGateway:
         kind = LlmCallKind.PRIMARY
         timeouts = unavailable = 0
         rate_limit_waited = repaired = False
+        # The manifest of the current call: retries reuse it, repair and fallback replace it.
+        call_id = task.base_manifest.call_id if task.base_manifest is not None else None
 
         while True:
             last = await self._call(primary, kind, messages, task, context, state, attempt)
             if last.output is not None:
-                return self._result(primary, last, state)
+                return self._result(primary, last, state, call_id)
             assert last.error is not None
             if attempt.calls >= primary_limit:
                 break
@@ -332,6 +336,7 @@ class LlmGateway:
                         context=task.review_context,
                         snapshot=task.policy_snapshot,
                     )
+                    call_id = repair_manifest.call_id
                 messages = repair_messages
                 kind = LlmCallKind.REPAIR
                 continue
@@ -348,7 +353,9 @@ class LlmGateway:
             if not self._fits_context(fallback, task.messages, context.engine, task.counter):
                 # A smaller fallback window must not turn a retryable primary error
                 # into a non-retryable context overflow.
-                raise self._failed(last.error, last.message, state)
+                raise self._failed(
+                    last.error, last.message, state, retry_after_s=last.retry_after_s
+                )
             if task.base_manifest is not None:
                 fallback_manifest = replace(
                     task.base_manifest,
@@ -360,13 +367,14 @@ class LlmGateway:
                     context=task.review_context,
                     snapshot=task.policy_snapshot,
                 )
+                call_id = fallback_manifest.call_id
             last = await self._call(
                 fallback, LlmCallKind.FALLBACK, task.messages, task, context, state, attempt
             )
             if last.output is not None:
-                return self._result(fallback, last, state)
+                return self._result(fallback, last, state, call_id)
         assert last.error is not None
-        raise self._failed(last.error, last.message, state)
+        raise self._failed(last.error, last.message, state, retry_after_s=last.retry_after_s)
 
     def _attempt_calls(self, context: RunCallContext) -> _AttemptCalls:
         current = self._attempts.get(context.run_id)
@@ -743,7 +751,12 @@ class LlmGateway:
             raise _CostMetadataError("usage.cost cannot be represented in USD") from None
 
     @staticmethod
-    def _result(profile: ModelProfile, outcome: _Outcome, state: _AttemptState) -> GatewayResult:
+    def _result(
+        profile: ModelProfile,
+        outcome: _Outcome,
+        state: _AttemptState,
+        accepted_call_id: UUID | None,
+    ) -> GatewayResult:
         assert outcome.output is not None
         usage = tuple(state.usage)
         return GatewayResult(
@@ -752,11 +765,24 @@ class LlmGateway:
             model=usage[-1].model if usage else profile.model,
             usage=usage,
             calls=state.calls,
+            accepted_call_id=accepted_call_id,
         )
 
     @staticmethod
-    def _failed(code: LlmErrorCode, message: str, state: _AttemptState) -> LlmCallFailed:
-        return LlmCallFailed(code, message, usage=tuple(state.usage), calls=state.calls)
+    def _failed(
+        code: LlmErrorCode,
+        message: str,
+        state: _AttemptState,
+        *,
+        retry_after_s: float | None = None,
+    ) -> LlmCallFailed:
+        return LlmCallFailed(
+            code,
+            message,
+            usage=tuple(state.usage),
+            calls=state.calls,
+            retry_after_s=retry_after_s,
+        )
 
 
 @dataclass(frozen=True)

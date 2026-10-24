@@ -64,11 +64,14 @@ class LlmCallFailed(Exception):
         *,
         usage: tuple[LlmUsage, ...] = (),
         calls: int = 0,
+        retry_after_s: float | None = None,
     ) -> None:
         super().__init__(f"{error_code.value}: {message}")
         self.error_code = error_code
         self.usage = usage
         self.calls = calls
+        # The last provider Retry-After; ``classify_failure`` does not read it (#130).
+        self.retry_after_s = retry_after_s
 
     @property
     def run_retryable(self) -> bool:
