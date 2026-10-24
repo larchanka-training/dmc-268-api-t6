@@ -1,0 +1,288 @@
+{
+  "data": {
+    "repository": {
+      "i1": {
+        "id": "I_kwDOEIOM8AAAABAPI0001",
+        "number": 1,
+        "title": "[core] Первый шаг цикла",
+        "state": "OPEN",
+        "repository": {
+          "nameWithOwner": "larchanka-training/dmc-268-api-t6"
+        },
+        "parent": null,
+        "blockedBy": {
+          "totalCount": 2,
+          "pageInfo": {
+            "hasNextPage": false,
+            "endCursor": "MQ"
+          },
+          "nodes": [
+            {
+              "number": 5,
+              "title": "[infra] Общий раннер для шагов цикла",
+              "state": "OPEN",
+              "repository": {
+                "nameWithOwner": "larchanka-training/dmc-268-api-t6"
+              }
+            },
+            {
+              "number": 3,
+              "title": "[core] Третий шаг цикла",
+              "state": "OPEN",
+              "repository": {
+                "nameWithOwner": "larchanka-training/dmc-268-api-t6"
+              }
+            }
+          ]
+        },
+        "blocking": {
+          "totalCount": 2,
+          "pageInfo": {
+            "hasNextPage": false,
+            "endCursor": "MQ"
+          },
+          "nodes": [
+            {
+              "number": 5,
+              "title": "[infra] Общий раннер для шагов цикла",
+              "state": "OPEN",
+              "repository": {
+                "nameWithOwner": "larchanka-training/dmc-268-api-t6"
+              }
+            },
+            {
+              "number": 2,
+              "title": "[core] Второй шаг цикла",
+              "state": "OPEN",
+              "repository": {
+                "nameWithOwner": "larchanka-training/dmc-268-api-t6"
+              }
+            }
+          ]
+        },
+        "projectItems": {
+          "nodes": [
+            {
+              "project": {
+                "number": 12,
+                "owner": {
+                  "login": "larchanka-training"
+                }
+              },
+              "fieldValueByName": {
+                "name": "In Progress"
+              }
+            }
+          ]
+        }
+      },
+      "i2": {
+        "id": "I_kwDOEIOM8AAAABAPI0002",
+        "number": 2,
+        "title": "[core] Второй шаг цикла",
+        "state": "OPEN",
+        "repository": {
+          "nameWithOwner": "larchanka-training/dmc-268-api-t6"
+        },
+        "parent": null,
+        "blockedBy": {
+          "totalCount": 2,
+          "pageInfo": {
+            "hasNextPage": false,
+            "endCursor": "MQ"
+          },
+          "nodes": [
+            {
+              "number": 5,
+              "title": "[infra] Общий раннер для шагов цикла",
+              "state": "OPEN",
+              "repository": {
+                "nameWithOwner": "larchanka-training/dmc-268-api-t6"
+              }
+            },
+            {
+              "number": 1,
+              "title": "[core] Первый шаг цикла",
+              "state": "OPEN",
+              "repository": {
+                "nameWithOwner": "larchanka-training/dmc-268-api-t6"
+              }
+            }
+          ]
+        },
+        "blocking": {
+          "totalCount": 3,
+          "pageInfo": {
+            "hasNextPage": false,
+            "endCursor": "MQ"
+          },
+          "nodes": [
+            {
+              "number": 6,
+              "title": "[infra] Старый раннер",
+              "state": "CLOSED",
+              "repository": {
+                "nameWithOwner": "larchanka-training/dmc-268-api-t6"
+              }
+            },
+            {
+              "number": 5,
+              "title": "[infra] Общий раннер для шагов цикла",
+              "state": "OPEN",
+              "repository": {
+                "nameWithOwner": "larchanka-training/dmc-268-api-t6"
+              }
+            },
+            {
+              "number": 3,
+              "title": "[core] Третий шаг цикла",
+              "state": "OPEN",
+              "repository": {
+                "nameWithOwner": "larchanka-training/dmc-268-api-t6"
+              }
+            }
+          ]
+        },
+        "projectItems": {
+          "nodes": [
+            {
+              "project": {
+                "number": 12,
+                "owner": {
+                  "login": "larchanka-training"
+                }
+              },
+              "fieldValueByName": {
+                "name": "Todo"
+              }
+            }
+          ]
+        }
+      },
+      "i3": {
+        "id": "I_kwDOEIOM8AAAABAPI0003",
+        "number": 3,
+        "title": "[core] Третий шаг цикла",
+        "state": "OPEN",
+        "repository": {
+          "nameWithOwner": "larchanka-training/dmc-268-api-t6"
+        },
+        "parent": null,
+        "blockedBy": {
+          "totalCount": 3,
+          "pageInfo": {
+            "hasNextPage": false,
+            "endCursor": "MQ"
+          },
+          "nodes": [
+            {
+              "number": 6,
+              "title": "[infra] Старый раннер",
+              "state": "CLOSED",
+              "repository": {
+                "nameWithOwner": "larchanka-training/dmc-268-api-t6"
+              }
+            },
+            {
+              "number": 5,
+              "title": "[infra] Общий раннер для шагов цикла",
+              "state": "OPEN",
+              "repository": {
+                "nameWithOwner": "larchanka-training/dmc-268-api-t6"
+              }
+            },
+            {
+              "number": 2,
+              "title": "[core] Второй шаг цикла",
+              "state": "OPEN",
+              "repository": {
+                "nameWithOwner": "larchanka-training/dmc-268-api-t6"
+              }
+            }
+          ]
+        },
+        "blocking": {
+          "totalCount": 2,
+          "pageInfo": {
+            "hasNextPage": false,
+            "endCursor": "MQ"
+          },
+          "nodes": [
+            {
+              "number": 5,
+              "title": "[infra] Общий раннер для шагов цикла",
+              "state": "OPEN",
+              "repository": {
+                "nameWithOwner": "larchanka-training/dmc-268-api-t6"
+              }
+            },
+            {
+              "number": 1,
+              "title": "[core] Первый шаг цикла",
+              "state": "OPEN",
+              "repository": {
+                "nameWithOwner": "larchanka-training/dmc-268-api-t6"
+              }
+            }
+          ]
+        },
+        "projectItems": {
+          "nodes": [
+            {
+              "project": {
+                "number": 12,
+                "owner": {
+                  "login": "larchanka-training"
+                }
+              },
+              "fieldValueByName": {
+                "name": "Todo"
+              }
+            }
+          ]
+        }
+      },
+      "i4": {
+        "id": "I_kwDOEIOM8AAAABAPI0004",
+        "number": 4,
+        "title": "[docs] Свободная задача для @octocat по #5",
+        "state": "OPEN",
+        "repository": {
+          "nameWithOwner": "larchanka-training/dmc-268-api-t6"
+        },
+        "parent": null,
+        "blockedBy": {
+          "totalCount": 0,
+          "pageInfo": {
+            "hasNextPage": false,
+            "endCursor": null
+          },
+          "nodes": []
+        },
+        "blocking": {
+          "totalCount": 0,
+          "pageInfo": {
+            "hasNextPage": false,
+            "endCursor": null
+          },
+          "nodes": []
+        },
+        "projectItems": {
+          "nodes": [
+            {
+              "project": {
+                "number": 12,
+                "owner": {
+                  "login": "larchanka-training"
+                }
+              },
+              "fieldValueByName": {
+                "name": "Todo"
+              }
+            }
+          ]
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,14 @@
+{
+  "data": {
+    "repository": {
+      "milestones": {
+        "nodes": [
+          {
+            "number": 2,
+            "title": "Спринт 9 — перенос"
+          }
+        ]
+      }
+    }
+  }
+}

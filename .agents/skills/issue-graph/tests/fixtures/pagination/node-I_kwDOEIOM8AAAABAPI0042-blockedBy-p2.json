@@ -1,0 +1,22 @@
+{
+  "data": {
+    "node": {
+      "blockedBy": {
+        "pageInfo": {
+          "hasNextPage": false,
+          "endCursor": "Mg"
+        },
+        "nodes": [
+          {
+            "number": 43,
+            "title": "[infra] Реплика БД для отчётов",
+            "state": "OPEN",
+            "repository": {
+              "nameWithOwner": "larchanka-training/dmc-268-api-t6"
+            }
+          }
+        ]
+      }
+    }
+  }
+}

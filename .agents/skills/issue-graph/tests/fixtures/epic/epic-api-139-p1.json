@@ -1,0 +1,484 @@
+{
+  "data": {
+    "repository": {
+      "issue": {
+        "title": "[context][rag] Graph RAG: граф символов репозитория как контекст ревью",
+        "subIssues": {
+          "pageInfo": {
+            "hasNextPage": false,
+            "endCursor": "OQ"
+          },
+          "nodes": [
+            {
+              "id": "I_kwDOUOEIOM8AAAABWntLzQ",
+              "number": 140,
+              "title": "[architecture][139] ADR: поправка Р-13 и SD/CVS под граф символов (RAG v1)",
+              "state": "CLOSED",
+              "repository": {
+                "nameWithOwner": "larchanka-training/dmc-268-api-t6"
+              },
+              "parent": {
+                "number": 139,
+                "repository": {
+                  "nameWithOwner": "larchanka-training/dmc-268-api-t6"
+                }
+              },
+              "blockedBy": {
+                "totalCount": 0,
+                "pageInfo": {
+                  "hasNextPage": false,
+                  "endCursor": null
+                },
+                "nodes": []
+              },
+              "blocking": {
+                "totalCount": 0,
+                "pageInfo": {
+                  "hasNextPage": false,
+                  "endCursor": null
+                },
+                "nodes": []
+              },
+              "projectItems": {
+                "nodes": [
+                  {
+                    "project": {
+                      "number": 12,
+                      "owner": {
+                        "login": "larchanka-training"
+                      }
+                    },
+                    "fieldValueByName": {
+                      "name": "Done"
+                    }
+                  }
+                ]
+              }
+            },
+            {
+              "id": "I_kwDOUOEIOM8AAAABWntPEg",
+              "number": 141,
+              "title": "[rag][139] Модель данных индекса графа и изоляция по репозиторию",
+              "state": "CLOSED",
+              "repository": {
+                "nameWithOwner": "larchanka-training/dmc-268-api-t6"
+              },
+              "parent": {
+                "number": 139,
+                "repository": {
+                  "nameWithOwner": "larchanka-training/dmc-268-api-t6"
+                }
+              },
+              "blockedBy": {
+                "totalCount": 0,
+                "pageInfo": {
+                  "hasNextPage": false,
+                  "endCursor": null
+                },
+                "nodes": []
+              },
+              "blocking": {
+                "totalCount": 0,
+                "pageInfo": {
+                  "hasNextPage": false,
+                  "endCursor": null
+                },
+                "nodes": []
+              },
+              "projectItems": {
+                "nodes": [
+                  {
+                    "project": {
+                      "number": 12,
+                      "owner": {
+                        "login": "larchanka-training"
+                      }
+                    },
+                    "fieldValueByName": {
+                      "name": "Done"
+                    }
+                  }
+                ]
+              }
+            },
+            {
+              "id": "I_kwDOUOEIOM8AAAABWntTFA",
+              "number": 142,
+              "title": "[rag][139] Индексатор: очередь index.repo и извлечение символов через AST",
+              "state": "CLOSED",
+              "repository": {
+                "nameWithOwner": "larchanka-training/dmc-268-api-t6"
+              },
+              "parent": {
+                "number": 139,
+                "repository": {
+                  "nameWithOwner": "larchanka-training/dmc-268-api-t6"
+                }
+              },
+              "blockedBy": {
+                "totalCount": 0,
+                "pageInfo": {
+                  "hasNextPage": false,
+                  "endCursor": null
+                },
+                "nodes": []
+              },
+              "blocking": {
+                "totalCount": 0,
+                "pageInfo": {
+                  "hasNextPage": false,
+                  "endCursor": null
+                },
+                "nodes": []
+              },
+              "projectItems": {
+                "nodes": [
+                  {
+                    "project": {
+                      "number": 12,
+                      "owner": {
+                        "login": "larchanka-training"
+                      }
+                    },
+                    "fieldValueByName": {
+                      "name": "Done"
+                    }
+                  }
+                ]
+              }
+            },
+            {
+              "id": "I_kwDOUOEIOM8AAAABWntXEA",
+              "number": 143,
+              "title": "[rag][139] Жизненный цикл индекса: триггеры обновления и очистка",
+              "state": "CLOSED",
+              "repository": {
+                "nameWithOwner": "larchanka-training/dmc-268-api-t6"
+              },
+              "parent": {
+                "number": 139,
+                "repository": {
+                  "nameWithOwner": "larchanka-training/dmc-268-api-t6"
+                }
+              },
+              "blockedBy": {
+                "totalCount": 0,
+                "pageInfo": {
+                  "hasNextPage": false,
+                  "endCursor": null
+                },
+                "nodes": []
+              },
+              "blocking": {
+                "totalCount": 0,
+                "pageInfo": {
+                  "hasNextPage": false,
+                  "endCursor": null
+                },
+                "nodes": []
+              },
+              "projectItems": {
+                "nodes": [
+                  {
+                    "project": {
+                      "number": 12,
+                      "owner": {
+                        "login": "larchanka-training"
+                      }
+                    },
+                    "fieldValueByName": {
+                      "name": "Done"
+                    }
+                  }
+                ]
+              }
+            },
+            {
+              "id": "I_kwDOUOEIOM8AAAABWntaYw",
+              "number": 144,
+              "title": "[rag][139] RagContextProvider: контекст графа на ревизии PR",
+              "state": "OPEN",
+              "repository": {
+                "nameWithOwner": "larchanka-training/dmc-268-api-t6"
+              },
+              "parent": {
+                "number": 139,
+                "repository": {
+                  "nameWithOwner": "larchanka-training/dmc-268-api-t6"
+                }
+              },
+              "blockedBy": {
+                "totalCount": 2,
+                "pageInfo": {
+                  "hasNextPage": false,
+                  "endCursor": "Mg"
+                },
+                "nodes": [
+                  {
+                    "number": 219,
+                    "title": "[reviews][120] Остаток #120: guard, бюджет, summary и отбрасывание кандидатов по CVS/RFS",
+                    "state": "OPEN",
+                    "repository": {
+                      "nameWithOwner": "larchanka-training/dmc-268-api-t6"
+                    }
+                  },
+                  {
+                    "number": 130,
+                    "title": "Инженер 3 - [reviews] Добавьте чтение VCS, DiffMap, загрузчик политики и AST-контекст",
+                    "state": "OPEN",
+                    "repository": {
+                      "nameWithOwner": "larchanka-training/dmc-268-api-t6"
+                    }
+                  }
+                ]
+              },
+              "blocking": {
+                "totalCount": 1,
+                "pageInfo": {
+                  "hasNextPage": false,
+                  "endCursor": "MQ"
+                },
+                "nodes": [
+                  {
+                    "number": 146,
+                    "title": "[eval][139] Замер вклада графа в точность ревью и гейт для v2",
+                    "state": "OPEN",
+                    "repository": {
+                      "nameWithOwner": "larchanka-training/dmc-268-api-t6"
+                    }
+                  }
+                ]
+              },
+              "projectItems": {
+                "nodes": [
+                  {
+                    "project": {
+                      "number": 12,
+                      "owner": {
+                        "login": "larchanka-training"
+                      }
+                    },
+                    "fieldValueByName": {
+                      "name": "On Review"
+                    }
+                  }
+                ]
+              }
+            },
+            {
+              "id": "I_kwDOUOEIOM8AAAABWntd8A",
+              "number": 145,
+              "title": "[rag][139] Тумблер RAG на репозитории, статус индекса и учёт расхода",
+              "state": "CLOSED",
+              "repository": {
+                "nameWithOwner": "larchanka-training/dmc-268-api-t6"
+              },
+              "parent": {
+                "number": 139,
+                "repository": {
+                  "nameWithOwner": "larchanka-training/dmc-268-api-t6"
+                }
+              },
+              "blockedBy": {
+                "totalCount": 0,
+                "pageInfo": {
+                  "hasNextPage": false,
+                  "endCursor": null
+                },
+                "nodes": []
+              },
+              "blocking": {
+                "totalCount": 0,
+                "pageInfo": {
+                  "hasNextPage": false,
+                  "endCursor": null
+                },
+                "nodes": []
+              },
+              "projectItems": {
+                "nodes": [
+                  {
+                    "project": {
+                      "number": 12,
+                      "owner": {
+                        "login": "larchanka-training"
+                      }
+                    },
+                    "fieldValueByName": {
+                      "name": "Done"
+                    }
+                  }
+                ]
+              }
+            },
+            {
+              "id": "I_kwDOUOEIjs8AAAABWnthvQ",
+              "number": 102,
+              "title": "[rag][139] Тумблер RAG и статус индекса в настройках репозитория",
+              "state": "CLOSED",
+              "repository": {
+                "nameWithOwner": "larchanka-training/dmc-268-ui-t6"
+              },
+              "parent": {
+                "number": 139,
+                "repository": {
+                  "nameWithOwner": "larchanka-training/dmc-268-api-t6"
+                }
+              },
+              "blockedBy": {
+                "totalCount": 0,
+                "pageInfo": {
+                  "hasNextPage": false,
+                  "endCursor": null
+                },
+                "nodes": []
+              },
+              "blocking": {
+                "totalCount": 0,
+                "pageInfo": {
+                  "hasNextPage": false,
+                  "endCursor": null
+                },
+                "nodes": []
+              },
+              "projectItems": {
+                "nodes": [
+                  {
+                    "project": {
+                      "number": 12,
+                      "owner": {
+                        "login": "larchanka-training"
+                      }
+                    },
+                    "fieldValueByName": {
+                      "name": "Done"
+                    }
+                  }
+                ]
+              }
+            },
+            {
+              "id": "I_kwDOUOEIOM8AAAABWntksQ",
+              "number": 146,
+              "title": "[eval][139] Замер вклада графа в точность ревью и гейт для v2",
+              "state": "OPEN",
+              "repository": {
+                "nameWithOwner": "larchanka-training/dmc-268-api-t6"
+              },
+              "parent": {
+                "number": 139,
+                "repository": {
+                  "nameWithOwner": "larchanka-training/dmc-268-api-t6"
+                }
+              },
+              "blockedBy": {
+                "totalCount": 1,
+                "pageInfo": {
+                  "hasNextPage": false,
+                  "endCursor": "MQ"
+                },
+                "nodes": [
+                  {
+                    "number": 144,
+                    "title": "[rag][139] RagContextProvider: контекст графа на ревизии PR",
+                    "state": "OPEN",
+                    "repository": {
+                      "nameWithOwner": "larchanka-training/dmc-268-api-t6"
+                    }
+                  }
+                ]
+              },
+              "blocking": {
+                "totalCount": 1,
+                "pageInfo": {
+                  "hasNextPage": false,
+                  "endCursor": "MQ"
+                },
+                "nodes": [
+                  {
+                    "number": 147,
+                    "title": "[rag][139] v2: векторный поиск (pgvector + эмбеддинги) после гейта eval",
+                    "state": "OPEN",
+                    "repository": {
+                      "nameWithOwner": "larchanka-training/dmc-268-api-t6"
+                    }
+                  }
+                ]
+              },
+              "projectItems": {
+                "nodes": [
+                  {
+                    "project": {
+                      "number": 12,
+                      "owner": {
+                        "login": "larchanka-training"
+                      }
+                    },
+                    "fieldValueByName": {
+                      "name": "Todo"
+                    }
+                  }
+                ]
+              }
+            },
+            {
+              "id": "I_kwDOUOEIOM8AAAABWntoiA",
+              "number": 147,
+              "title": "[rag][139] v2: векторный поиск (pgvector + эмбеддинги) после гейта eval",
+              "state": "OPEN",
+              "repository": {
+                "nameWithOwner": "larchanka-training/dmc-268-api-t6"
+              },
+              "parent": {
+                "number": 139,
+                "repository": {
+                  "nameWithOwner": "larchanka-training/dmc-268-api-t6"
+                }
+              },
+              "blockedBy": {
+                "totalCount": 1,
+                "pageInfo": {
+                  "hasNextPage": false,
+                  "endCursor": "MQ"
+                },
+                "nodes": [
+                  {
+                    "number": 146,
+                    "title": "[eval][139] Замер вклада графа в точность ревью и гейт для v2",
+                    "state": "OPEN",
+                    "repository": {
+                      "nameWithOwner": "larchanka-training/dmc-268-api-t6"
+                    }
+                  }
+                ]
+              },
+              "blocking": {
+                "totalCount": 0,
+                "pageInfo": {
+                  "hasNextPage": false,
+                  "endCursor": null
+                },
+                "nodes": []
+              },
+              "projectItems": {
+                "nodes": [
+                  {
+                    "project": {
+                      "number": 12,
+                      "owner": {
+                        "login": "larchanka-training"
+                      }
+                    },
+                    "fieldValueByName": {
+                      "name": "Todo"
+                    }
+                  }
+                ]
+              }
+            }
+          ]
+        }
+      }
+    }
+  }
+}

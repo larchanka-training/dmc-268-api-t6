@@ -1,0 +1,22 @@
+{
+  "data": {
+    "node": {
+      "blocking": {
+        "pageInfo": {
+          "hasNextPage": true,
+          "endCursor": "Ymwy"
+        },
+        "nodes": [
+          {
+            "number": 44,
+            "title": "[infra] Квота на хранилище отчётов",
+            "state": "OPEN",
+            "repository": {
+              "nameWithOwner": "larchanka-training/dmc-268-api-t6"
+            }
+          }
+        ]
+      }
+    }
+  }
+}

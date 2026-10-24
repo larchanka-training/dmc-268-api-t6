@@ -1,0 +1,64 @@
+{
+  "data": {
+    "repository": {
+      "i9": {
+        "id": "I_kwDOEIjs8AAAABUI0009",
+        "number": 9,
+        "title": "[ui] Экран импорта задач",
+        "state": "OPEN",
+        "repository": {
+          "nameWithOwner": "larchanka-training/dmc-268-ui-t6"
+        },
+        "parent": null,
+        "blockedBy": {
+          "totalCount": 2,
+          "pageInfo": {
+            "hasNextPage": false,
+            "endCursor": "MQ"
+          },
+          "nodes": [
+            {
+              "number": 5,
+              "title": "[cli] Экспорт задач в JSON",
+              "state": "OPEN",
+              "repository": {
+                "nameWithOwner": "octo/tools"
+              }
+            },
+            {
+              "number": 31,
+              "title": "[import] Парсер ссылок на задачи",
+              "state": "OPEN",
+              "repository": {
+                "nameWithOwner": "larchanka-training/dmc-268-api-t6"
+              }
+            }
+          ]
+        },
+        "blocking": {
+          "totalCount": 0,
+          "pageInfo": {
+            "hasNextPage": false,
+            "endCursor": null
+          },
+          "nodes": []
+        },
+        "projectItems": {
+          "nodes": [
+            {
+              "project": {
+                "number": 12,
+                "owner": {
+                  "login": "larchanka-training"
+                }
+              },
+              "fieldValueByName": {
+                "name": "AC Check"
+              }
+            }
+          ]
+        }
+      }
+    }
+  }
+}

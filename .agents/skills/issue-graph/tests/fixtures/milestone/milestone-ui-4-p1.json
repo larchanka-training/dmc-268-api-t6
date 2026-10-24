@@ -1,0 +1,121 @@
+{
+  "data": {
+    "repository": {
+      "milestone": {
+        "issues": {
+          "pageInfo": {
+            "hasNextPage": false,
+            "endCursor": "Y3Vyc29yOnYyOpHOAAAAAg=="
+          },
+          "nodes": [
+            {
+              "id": "I_kwDOEIjs8AAAABUI0003",
+              "number": 3,
+              "title": "[ui] Тумблер графа в настройках",
+              "state": "OPEN",
+              "repository": {
+                "nameWithOwner": "larchanka-training/dmc-268-ui-t6"
+              },
+              "parent": {
+                "number": 10,
+                "repository": {
+                  "nameWithOwner": "larchanka-training/dmc-268-api-t6"
+                }
+              },
+              "blockedBy": {
+                "totalCount": 0,
+                "pageInfo": {
+                  "hasNextPage": false,
+                  "endCursor": null
+                },
+                "nodes": []
+              },
+              "blocking": {
+                "totalCount": 1,
+                "pageInfo": {
+                  "hasNextPage": false,
+                  "endCursor": "MQ"
+                },
+                "nodes": [
+                  {
+                    "number": 12,
+                    "title": "[rag] Провайдер контекста для ревью",
+                    "state": "OPEN",
+                    "repository": {
+                      "nameWithOwner": "larchanka-training/dmc-268-api-t6"
+                    }
+                  }
+                ]
+              },
+              "projectItems": {
+                "nodes": [
+                  {
+                    "project": {
+                      "number": 12,
+                      "owner": {
+                        "login": "larchanka-training"
+                      }
+                    },
+                    "fieldValueByName": {
+                      "name": "In Progress"
+                    }
+                  }
+                ]
+              }
+            },
+            {
+              "id": "I_kwDOEIjs8AAAABUI0004",
+              "number": 4,
+              "title": "[ui] Бейдж контекста в ревью",
+              "state": "OPEN",
+              "repository": {
+                "nameWithOwner": "larchanka-training/dmc-268-ui-t6"
+              },
+              "parent": null,
+              "blockedBy": {
+                "totalCount": 1,
+                "pageInfo": {
+                  "hasNextPage": false,
+                  "endCursor": "MQ"
+                },
+                "nodes": [
+                  {
+                    "number": 12,
+                    "title": "[rag] Провайдер контекста для ревью",
+                    "state": "OPEN",
+                    "repository": {
+                      "nameWithOwner": "larchanka-training/dmc-268-api-t6"
+                    }
+                  }
+                ]
+              },
+              "blocking": {
+                "totalCount": 0,
+                "pageInfo": {
+                  "hasNextPage": false,
+                  "endCursor": null
+                },
+                "nodes": []
+              },
+              "projectItems": {
+                "nodes": [
+                  {
+                    "project": {
+                      "number": 12,
+                      "owner": {
+                        "login": "larchanka-training"
+                      }
+                    },
+                    "fieldValueByName": {
+                      "name": "Todo"
+                    }
+                  }
+                ]
+              }
+            }
+          ]
+        }
+      }
+    }
+  }
+}

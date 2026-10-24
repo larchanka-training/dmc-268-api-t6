@@ -1,0 +1,18 @@
+{
+  "data": {
+    "repository": {
+      "milestones": {
+        "nodes": [
+          {
+            "number": 5,
+            "title": "Спринт 5 (архив)"
+          },
+          {
+            "number": 6,
+            "title": "Спринт 5"
+          }
+        ]
+      }
+    }
+  }
+}
