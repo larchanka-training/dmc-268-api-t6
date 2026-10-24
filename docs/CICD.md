@@ -233,6 +233,10 @@ ACK сервера.
 
 ---
 
+### 2.3. Приёмка мониторинга staging (#186)
+
+Ручной workflow **Monitoring acceptance** (`.github/workflows/monitoring-acceptance.yml`) собирает доказательства по AC #186 с хоста staging. В отчёт попадают стек и цели Prometheus, данные дашборда, `permission denied` ролей мониторинга, возраст дампа и копии в R2, прогон восстановления во временную БД и тестовый алерт в Telegram. Запускается только через `workflow_dispatch` и только для `main`, в `environment: staging`. Права `contents: read`, группа concurrency `staging-monitoring-acceptance`. Состав проверок описан в [MONITORING.md](MONITORING.md) §10 «Приёмка на staging».
+
 ## 3. Образ и health check
 
 Образ слушает `:8000`, Uvicorn `app.main:app`, пользователь `app`.

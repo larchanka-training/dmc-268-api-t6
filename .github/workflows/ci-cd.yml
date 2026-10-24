@@ -1162,6 +1162,8 @@ jobs:
           BACKUP_S3_ACCESS_KEY_ID: ${{ secrets.BACKUP_S3_ACCESS_KEY_ID }}
           BACKUP_S3_SECRET_ACCESS_KEY: ${{ secrets.BACKUP_S3_SECRET_ACCESS_KEY }}
           BACKUP_ENCRYPTION_PASSPHRASE: ${{ secrets.BACKUP_ENCRYPTION_PASSPHRASE }}
+          # Grafana admin password the team reads in GitHub; empty: keep the one generated on the host.
+          GRAFANA_ADMIN_PASSWORD: ${{ secrets.GRAFANA_ADMIN_PASSWORD }}
         with:
           host: ${{ needs.deploy-staging.outputs.host }}
           port: ${{ needs.deploy-staging.outputs.port }}
@@ -1170,7 +1172,7 @@ jobs:
           password: ${{ needs.deploy-staging.outputs.mode == 'course' && secrets.VPS_DMC268_P || '' }}
           fingerprint: ${{ vars.STAGING_SSH_FINGERPRINT }}
           debug: false
-          envs: MONITORING_DIR,API_DIR,GRAFANA_ROOT_URL,ALERT_TELEGRAM_BOT_TOKEN,ALERT_TELEGRAM_CHAT_ID,BACKUP_S3_ENDPOINT,BACKUP_S3_BUCKET,BACKUP_S3_ACCESS_KEY_ID,BACKUP_S3_SECRET_ACCESS_KEY,BACKUP_ENCRYPTION_PASSPHRASE
+          envs: MONITORING_DIR,API_DIR,GRAFANA_ROOT_URL,ALERT_TELEGRAM_BOT_TOKEN,ALERT_TELEGRAM_CHAT_ID,BACKUP_S3_ENDPOINT,BACKUP_S3_BUCKET,BACKUP_S3_ACCESS_KEY_ID,BACKUP_S3_SECRET_ACCESS_KEY,BACKUP_ENCRYPTION_PASSPHRASE,GRAFANA_ADMIN_PASSWORD
           script: |
             set -euo pipefail
             set +o xtrace

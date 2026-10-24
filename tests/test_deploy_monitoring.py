@@ -392,6 +392,45 @@ def test_passwords_reach_postgres_and_grafana_through_stdin_only(host: Host) -> 
     )
 
 
+GRAFANA_SECRET = "Team-Grafana_pass.2026+x/y="
+
+
+def test_grafana_admin_password_from_the_secret_is_kept_when_the_secret_is_empty(
+    host: Host,
+) -> None:
+    generated = host.deploy()
+    assert generated.returncode == 0, generated.stderr
+    from_secret = host.deploy(GRAFANA_ADMIN_PASSWORD=GRAFANA_SECRET)
+    stored = host.env()["GRAFANA_ADMIN_PASSWORD"]
+    # The deploy job passes an empty value when the secret is not set.
+    kept = host.deploy(GRAFANA_ADMIN_PASSWORD="")
+
+    assert from_secret.returncode == 0, from_secret.stderr
+    assert stored == GRAFANA_SECRET
+    assert kept.returncode == 0, kept.stderr
+    assert host.env()["GRAFANA_ADMIN_PASSWORD"] == GRAFANA_SECRET
+    # Synced through stdin on every deploy, never in argv or the job log.
+    assert host.log("grafana.log").endswith(GRAFANA_SECRET * 2)
+    assert GRAFANA_SECRET not in host.log("docker.log")
+    for result in (from_secret, kept):
+        assert GRAFANA_SECRET not in result.stdout + result.stderr
+
+
+@pytest.mark.parametrize(
+    "password", ["short-password", "has$dollar-in-the-middle", "with space inside it"]
+)
+def test_invalid_grafana_admin_password_fails_before_the_host_changes(
+    host: Host, password: str
+) -> None:
+    result = host.deploy(GRAFANA_ADMIN_PASSWORD=password)
+
+    assert result.returncode == 1
+    assert "GRAFANA_ADMIN_PASSWORD must be 16-128 characters" in result.stderr
+    assert not host.env_file.exists()
+    assert host.log("psql.log") == ""
+    assert password not in result.stdout + result.stderr
+
+
 def test_telegram_token_lives_in_a_file_read_by_alertmanager_only(host: Host) -> None:
     result = host.deploy()
     token_file = host.monitoring_dir / "alertmanager" / "secrets" / "telegram_bot_token"

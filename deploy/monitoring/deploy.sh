@@ -10,6 +10,8 @@
 #   MONITORING_DIR             this stack's dir, default: the directory of this script
 #   GRAFANA_ROOT_URL           public Grafana URL in edge mode (https://grafana.<APP_DOMAIN>/)
 #   BACKUP_DIR                 host dir of the PostgreSQL dumps, default /var/backups/dmc-268/<project>
+#   GRAFANA_ADMIN_PASSWORD     set: the Grafana admin password (GitHub secret, the team reads it
+#                              there); empty or unset: keep the one in .env, generated on a fresh host
 #   ALERT_TELEGRAM_BOT_TOKEN   } both set: alerts go to that Telegram chat; both empty: alerts are
 #   ALERT_TELEGRAM_CHAT_ID     } not delivered; unset: keep the previous alert config (manual run)
 #   BACKUP_S3_ENDPOINT, BACKUP_S3_BUCKET, BACKUP_S3_ACCESS_KEY_ID, BACKUP_S3_SECRET_ACCESS_KEY,
@@ -50,6 +52,11 @@ generate_password() {
   else
     od -An -N24 -tx1 /dev/urandom | tr -d ' \n'
   fi
+}
+
+# A setting kept in .env by the previous deploy, empty on a fresh host.
+previous_setting() {
+  if [[ -f "${ENV_FILE}" ]]; then read_compose_env_var "$1" "${ENV_FILE}" || true; fi
 }
 
 # A password of this stack: kept from .env, generated once on a fresh host.
@@ -190,7 +197,20 @@ if ((offsite_given)); then
   fi
 fi
 
-GRAFANA_ADMIN_PASSWORD="$(stack_password GRAFANA_ADMIN_PASSWORD)"
+# The admin password of Grafana: from the environment when set (GitHub secret), otherwise the one in
+# .env. Written to .env unquoted, so only characters compose reads literally.
+GRAFANA_ADMIN_PATTERN='^[A-Za-z0-9._~+/=-]{16,128}$'
+if [[ -n "${GRAFANA_ADMIN_PASSWORD:-}" ]]; then
+  if [[ ! "${GRAFANA_ADMIN_PASSWORD}" =~ ${GRAFANA_ADMIN_PATTERN} ]]; then
+    echo "GRAFANA_ADMIN_PASSWORD must be 16-128 characters of A-Z a-z 0-9 . _ ~ + / = -" >&2
+    exit 1
+  fi
+else
+  GRAFANA_ADMIN_PASSWORD="$(previous_setting GRAFANA_ADMIN_PASSWORD)"
+  if [[ ! "${GRAFANA_ADMIN_PASSWORD}" =~ ${GRAFANA_ADMIN_PATTERN} ]]; then
+    GRAFANA_ADMIN_PASSWORD="$(stack_password GRAFANA_ADMIN_PASSWORD)"
+  fi
+fi
 GRAFANA_DB_PASSWORD="$(stack_password GRAFANA_DB_PASSWORD)"
 PG_EXPORTER_PASSWORD="$(stack_password PG_EXPORTER_PASSWORD)"
 PG_BACKUP_PASSWORD="$(stack_password PG_BACKUP_PASSWORD)"
@@ -202,9 +222,6 @@ BACKUP_DIR="${BACKUP_DIR:-/var/backups/dmc-268/${API_PROJECT}}"
 # service on every deploy. The passphrase reaches rclone through stdin, never argv.
 OFFSITE_SETTINGS=(BACKUP_S3_PROVIDER BACKUP_S3_ENDPOINT BACKUP_S3_BUCKET BACKUP_S3_ACCESS_KEY_ID
   BACKUP_S3_SECRET_ACCESS_KEY BACKUP_ENCRYPTION_PASSWORD_OBSCURED BACKUP_ENCRYPTION_PASSPHRASE_SHA256)
-previous_setting() {
-  if [[ -f "${ENV_FILE}" ]]; then read_compose_env_var "$1" "${ENV_FILE}" || true; fi
-}
 case "${OFFSITE_CONFIGURED}" in
   s3)
     BACKUP_S3_PROVIDER="${BACKUP_S3_PROVIDER:-Cloudflare}"

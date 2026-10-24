@@ -148,7 +148,7 @@ Job `Deploy monitoring` в `ci-cd.yml` запускается после усп�
 
 | Цель | Grafana | Prometheus / Alertmanager |
 |---|---|---|
-| Курсовой VPS | `https://grafana.<APP_DOMAIN>/` (staging: `https://grafana.dmc268-t6.axyi.ru/`), пользователь `admin`, пароль — `GRAFANA_ADMIN_PASSWORD` из `/opt/dmc-268-monitoring/.env` | без внешнего доступа: `docker compose -p dmc-268-monitoring exec prometheus wget -qO- localhost:9090/api/v1/alerts` |
+| Курсовой VPS | `https://grafana.<APP_DOMAIN>/` (staging: `https://grafana.dmc268-t6.axyi.ru/`), пользователь `admin`, пароль — secret `GRAFANA_ADMIN_PASSWORD` Environment `staging`; пока он не задан — `GRAFANA_ADMIN_PASSWORD` из `/opt/dmc-268-monitoring/.env` | без внешнего доступа: `docker compose -p dmc-268-monitoring exec prometheus wget -qO- localhost:9090/api/v1/alerts` |
 | Terraform-хост | SSH-туннель: `ssh -L 3000:127.0.0.1:3000 …`, затем `http://localhost:3000/` | то же |
 
 Grafana — на своём хосте `grafana.<APP_DOMAIN>` (A-запись на VPS). Регистрация и анонимный доступ выключены, cookie `Secure`, `/metrics` Grafana (он без логина) edge отвечает 404 — Prometheus читает его внутри docker-сети, дашборды и источники данных доступны в UI только для чтения: изменения идут через PR в `deploy/monitoring/grafana`. Имена `prometheus.<APP_DOMAIN>` и `victoria-metrics.<APP_DOMAIN>` тоже указывают на VPS, но сайта в Caddyfile не получают: у Prometheus нет аутентификации, запросы к нему — через Explore в Grafana; VictoriaMetrics в стеке нет.
@@ -266,3 +266,19 @@ uv run pytest tests/test_deploy_monitoring.py
 ```bash
 API_DIR=/path/to/<project> deploy/monitoring/deploy.sh
 ```
+
+### Приёмка на staging
+
+Ручной workflow **Monitoring acceptance** (`.github/workflows/monitoring-acceptance.yml`): Actions → Monitoring acceptance → Run workflow, ветка `main`. Он загружает `deploy/monitoring/acceptance.sh` в `/opt/dmc-268-monitoring` и запускает его по SSH. Отчёт попадает в summary прогона, ссылку на прогон кладут в PR или задачу.
+
+| Проверка | Что делает | AC #186 |
+|---|---|---|
+| Публичная Grafana | с раннера: `/api/health` и `/login` отвечают 200, `/metrics` — 404 | доступ |
+| Стек и цели | `docker compose ps`: всё `running`/`healthy`; `promtool query instant up`: все цели `1` | выкат |
+| Данные дашборда | latency LLM за 7 дней от роли `grafana_reader`, `rabbitmq_detailed_queue_messages_ready` по очередям, RPS Caddy по хостам | latency LLM, очереди, RPS |
+| Изоляция ролей | `grafana_reader` и `metrics_exporter`: `count(run_id)` читается, `run_actions.request` и `runs.review_body` — `permission denied`. Если колонка вдруг читается, значение в отчёт не попадает (лог прогона публичный) | `permission denied` |
+| Бэкапы | возраст последнего проверенного дампа ≤ 26 ч, копии в R2 ≤ 3 ч | дамп моложе 26 ч |
+| Восстановление | §9, шаг 1: самый новый дамп → `pg_restore` во временную БД `restore_drill_acceptance`, ревизия `alembic_version`, число таблиц и `runs`; БД удаляется в конце при любом исходе | процедура прогнана |
+| Тестовый алерт | `amtool alert add MonitoringAcceptanceTest` (`kind=event`: одно сообщение без RESOLVED) и ожидание роста `alertmanager_notifications_total{integration="telegram"}`; отключается входом `send_test_alert` | алерт в канал |
+
+Все проверки выполняются до конца, упавшие перечислены в итоге, и тогда job красный. На хосте меняется только временная БД, в чат уходит одно сообщение. Группа concurrency своя (`staging-monitoring-acceptance`): в `staging-monitoring` ожидающий прогон вытеснял бы ожидающий `Deploy monitoring`. Если параллельно идёт выкат, проверки стека могут упасть — запустите ещё раз.
