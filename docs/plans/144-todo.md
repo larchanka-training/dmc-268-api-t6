@@ -581,8 +581,8 @@ its reason; without a plan the payload is unchanged.
 
 **Done when:**
 
-- [ ] the RED run and the GREEN run are recorded;
-- [ ] common verification is green.
+- [x] the RED run and the GREEN run are recorded;
+- [x] common verification is green.
 
 **Dependencies:** Task 4.
 

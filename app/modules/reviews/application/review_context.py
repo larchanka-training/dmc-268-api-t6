@@ -1,4 +1,5 @@
-"""Assemble the review context L1-L4 with provenance (CONTEXT_AND_VERIFICATION_SPEC §3-4).
+"""Assemble the review context L1-L4 with provenance (CONTEXT_AND_VERIFICATION_SPEC §3-4),
+and with a RAG plan the slot of graph candidates (ADR 0001 §9).
 
 Deterministic code only: no model call. The ignore policy is applied before any file is
 chosen or read, and again for every file reached through an import; a cache hit is never
@@ -10,12 +11,14 @@ from __future__ import annotations
 
 import logging
 import math
-from collections.abc import Callable
-from dataclasses import dataclass
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Protocol
 from uuid import UUID
 
+from app.modules.code_index.domain.enums import EdgeKind
+from app.modules.code_index.domain.rag_index import RagIndex
 from app.modules.reviews.application.ast_resolution import (
     BINARY_SOURCE,
     MAX_IMPORTED_FILES,
@@ -52,6 +55,7 @@ from app.modules.reviews.application.diff_map import (
     RowKind,
     is_supported_path,
 )
+from app.modules.reviews.application.graph_retriever import GraphRetriever
 from app.modules.reviews.application.policy_errors import PolicyError
 from app.modules.reviews.application.policy_snapshot import PolicySnapshot
 from app.modules.reviews.application.prompt_budget import (
@@ -60,6 +64,12 @@ from app.modules.reviews.application.prompt_budget import (
     _matches_rule,
 )
 from app.modules.reviews.application.prompt_builder import ReviewRule
+from app.modules.reviews.application.rag_context import (
+    RAG_LIMIT,
+    CachedBlobSource,
+    RetrievedPlace,
+    ReverseEdgeSelector,
+)
 from app.modules.reviews.application.review_ignore import IgnoreMatcher, IgnoreResult
 from app.modules.reviews.application.run_failures import RunCancelled, RunFailure
 from app.modules.reviews.application.vcs_diff import _is_binary
@@ -74,6 +84,7 @@ FULL_FILE_MAX_TOKENS = 12_000
 FRAGMENT_MAX_LINES = 200
 FRAGMENT_MAX_TOKENS = 2_000
 AST_CONTEXT_MAX_TOKENS = 8_000
+RAG_CONTEXT_MAX_TOKENS = 4_000
 MAX_AST_FILES = 50
 _ROW_PREFIX = {RowKind.CONTEXT: " ", RowKind.ADDED: "+", RowKind.REMOVED: "-"}
 _ENCLOSING_KINDS = frozenset(
@@ -86,6 +97,7 @@ class ContextLevel(StrEnum):
     L2 = "L2"
     L3 = "L3"
     L4 = "L4"
+    RAG = "RAG"
 
 
 class Representation(StrEnum):
@@ -129,6 +141,55 @@ class ContextOmission:
 
 
 @dataclass(frozen=True)
+class RetrievedBlock:
+    """Unchanged code of a graph candidate, read at the PR side (ADR 0001 §9).
+
+    ``source.reason`` is the selection reason. The edge kind and the commit of the index
+    are metadata of the selection, never the revision of the text.
+    """
+
+    block_id: str
+    level: ContextLevel
+    source: SourceRef
+    representation: Representation
+    text: str
+    tokens: int
+    edge_kind: EdgeKind
+    index_commit_sha: str
+
+
+@dataclass(frozen=True)
+class RagPlan:
+    """The RAG gate found a usable index and a prompt that shows retrieved blocks.
+
+    What the gate read; a block carries the commit of its own graph read.
+    """
+
+    index_commit_sha: str
+    stale: bool
+
+
+@dataclass(frozen=True)
+class RagStats:
+    """What the RAG slot of one build did, for ``context.rag``; it names no path.
+
+    ``index`` is the status read with the graph hints; ``None`` when the build returned
+    before the slot, and ``reason`` says why (M8). Every candidate is counted once:
+    confirmed, or dropped under one reason. ``tokens`` is what the slot holds.
+    """
+
+    index: RagIndex | None = None
+    reason: str | None = None
+    confirmed: int = 0
+    dropped: Mapping[str, int] = field(default_factory=dict)
+    tokens: int = 0
+
+    @property
+    def found(self) -> int:
+        return self.confirmed + sum(self.dropped.values())
+
+
+@dataclass(frozen=True)
 class ReviewContextPayload:
     status: ContextStatus
     reason: str | None
@@ -142,6 +203,10 @@ class ReviewContextPayload:
     reviewable_lines: int
     ignored_files: int
     tokens_used: int
+    # Graph candidates of the RAG slot: no diff file holds them (ADR 0001 §2).
+    retrieved: tuple[RetrievedBlock, ...] = ()
+    # None without a RAG plan.
+    rag: RagStats | None = None
 
 
 class RevisionSource(Protocol):
@@ -181,6 +246,21 @@ def _merge(ranges: list[LineRange]) -> list[LineRange]:
     return merged
 
 
+def _retrieved_block(place: RetrievedPlace) -> RetrievedBlock:
+    ranges = ",".join(f"{item.start_line}-{item.end_line}" for item in place.source.ranges)
+    return RetrievedBlock(
+        block_id=f"{ContextLevel.RAG.value}:{place.source.path}:{ranges}",
+        level=ContextLevel.RAG,
+        source=place.source,
+        # A signature never supports a claim about the body it does not show.
+        representation=Representation.SIGNATURE if place.signature else Representation.EXACT_LINES,
+        text=place.text,
+        tokens=place.tokens,
+        edge_kind=place.edge_kind,
+        index_commit_sha=place.index_commit_sha,
+    )
+
+
 class _Files:
     """Guarded access to the files of the head revision, with facts and limits."""
 
@@ -204,6 +284,15 @@ class _Files:
         self.changed: set[str] = set()
         # Changed files past the limit of AST files: an import does not bring them back.
         self.over_limit: set[str] = set()
+
+    @property
+    def loaded_texts(self) -> Mapping[str, str | FileUnavailable]:
+        """What this run read so far, for RAG to reuse without a read of its own."""
+        return self._texts
+
+    @property
+    def loaded_facts(self) -> Mapping[str, AstFacts | FileUnavailable]:
+        return self._facts
 
     async def text(self, path: str, blob_sha: str | None = None) -> str | FileUnavailable:
         if path in self._texts:
@@ -300,12 +389,22 @@ class BuildReviewContext:
         counter: TokenCounter,
         cache: AstFactsCache | None = None,
         builtin_excluded: Callable[[str], bool] = lambda path: False,
+        retriever: GraphRetriever | None = None,
+        rag_blobs: CachedBlobSource | None = None,
     ) -> None:
         self._source = source
         self._parser = parser
         self._counter = counter
         self._cache = cache
         self._builtin_excluded = builtin_excluded
+        # The RAG sources of the run; the slot is filled only for a RAG plan.
+        self._selector = (
+            None
+            if retriever is None or rag_blobs is None
+            else ReverseEdgeSelector(
+                retriever=retriever, blobs=rag_blobs, parser=parser, cache=cache, counter=counter
+            )
+        )
 
     async def execute(
         self,
@@ -316,7 +415,11 @@ class BuildReviewContext:
         ignore: IgnoreResult,
         rules: tuple[ReviewRule, ...] = (),
         token_budget: int,
+        rag: RagPlan | None = None,
     ) -> ReviewContextPayload:
+        selector = None if rag is None else self._selector
+        if rag is not None and selector is None:
+            raise ValueError("a RAG plan needs the graph retriever and the RAG blob source")
         omissions: list[ContextOmission] = []
 
         def denied(path: str) -> bool:
@@ -353,13 +456,16 @@ class BuildReviewContext:
         if ignored:
             omissions.append(ContextOmission("ignored", count=ignored))
         reviewable = sum(file.additions + file.deletions for file, _ in allowed)
+        retrieved: list[RetrievedBlock] = []
 
         def payload(
             status: ContextStatus,
             reason: str | None,
             blocks: tuple[ContextBlock, ...] = (),
             imports: tuple[ImportRef, ...] = (),
+            stats: RagStats | None = None,
         ) -> ReviewContextPayload:
+            every_block: tuple[ContextBlock | RetrievedBlock, ...] = (*blocks, *retrieved)
             return ReviewContextPayload(
                 status=status,
                 reason=reason,
@@ -370,11 +476,15 @@ class BuildReviewContext:
                 omissions=tuple(omissions),
                 imports=imports,
                 levels_present=tuple(
-                    level for level in ContextLevel if any(b.level is level for b in blocks)
+                    level for level in ContextLevel if any(b.level is level for b in every_block)
                 ),
                 reviewable_lines=reviewable,
                 ignored_files=ignored,
-                tokens_used=sum(block.tokens for block in blocks),
+                tokens_used=sum(block.tokens for block in every_block),
+                retrieved=tuple(retrieved),
+                # A build that returns before the RAG slot still reports it (M8): no
+                # counter, and the reason of the return.
+                rag=None if rag is None else stats or RagStats(reason=reason),
             )
 
         # Completeness first: an empty list the provider does not confirm is not "no changes".
@@ -426,7 +536,9 @@ class BuildReviewContext:
                 if cut is None or not take(cut):
                     omissions.append(ContextOmission("budget", path))
         if truncated:
-            return payload(ContextStatus.REVIEW, None, tuple(blocks))
+            return payload(
+                ContextStatus.REVIEW, None, tuple(blocks), stats=RagStats(reason="budget")
+            )
 
         try:
             tree = await self._source.tree(diff_map.head_sha)
@@ -439,7 +551,9 @@ class BuildReviewContext:
                 "Context tree read failed head_sha=%s", diff_map.head_sha, exc_info=True
             )
             omissions.append(ContextOmission("tree_unavailable"))
-            return payload(ContextStatus.REVIEW, None, tuple(blocks))
+            return payload(
+                ContextStatus.REVIEW, None, tuple(blocks), stats=RagStats(reason="tree_unavailable")
+            )
         files = _Files(
             tree=tree, source=self._source, parser=self._parser, cache=self._cache, denied=denied
         )
@@ -458,6 +572,9 @@ class BuildReviewContext:
         imports: list[ImportRef] = []
         windows: dict[str, list[LineRange]] = {}
         texts: dict[str, list[str]] = {}
+        # The PR files with head facts, in their L4 order: the targets of RAG.
+        changed: list[tuple[DiffFile, AstFacts]] = []
+        stats: RagStats | None = None
         try:
             for position, (file, path) in enumerate(allowed):
                 if file.new_path is None:
@@ -485,6 +602,7 @@ class BuildReviewContext:
                     imports.extend(
                         await resolver.resolve(importer_path=path, facts=facts, symbols=touched)
                     )
+                    changed.append((file, facts))
 
             # L4: signatures and doc ranges of the definitions the changed code imports.
             ast_budget = AST_CONTEXT_MAX_TOKENS
@@ -503,6 +621,44 @@ class BuildReviewContext:
                         omissions.append(ContextOmission("ast_limit", symbol.path))
                     else:
                         ast_budget -= excerpt.tokens
+
+            # RAG: graph candidates in what L1 and L4 left; it displaces only L2 and L3,
+            # which come after it (ADR 0001 §9).
+            if selector is not None:
+                candidates = await selector.select(
+                    diff_map=diff_map,
+                    tree=tree,
+                    go_module=go_module,
+                    changed=changed,
+                    loaded_texts=files.loaded_texts,
+                    loaded_facts=files.loaded_facts,
+                    shown=shown,
+                    denied=denied,
+                )
+                omissions.extend(
+                    ContextOmission(item.reason, item.path, item.count)
+                    for item in candidates.omissions
+                )
+                slot = min(RAG_CONTEXT_MAX_TOKENS, remaining)
+                # A confirmed candidate stays confirmed when a place of it does not fit.
+                over_slot: dict[str | None, int] = {}
+                for place in candidates.places:
+                    retrieved_block = _retrieved_block(place)
+                    if retrieved_block.tokens > slot:
+                        over_slot[place.source.path] = over_slot.get(place.source.path, 0) + 1
+                        continue
+                    slot -= retrieved_block.tokens
+                    remaining -= retrieved_block.tokens
+                    retrieved.append(retrieved_block)
+                omissions.extend(
+                    ContextOmission(RAG_LIMIT, item, count) for item, count in over_slot.items()
+                )
+                stats = RagStats(
+                    index=candidates.index,
+                    confirmed=candidates.confirmed,
+                    dropped=candidates.dropped,
+                    tokens=sum(block.tokens for block in retrieved),
+                )
         finally:
             await self._parser.aclose()
 
@@ -543,7 +699,7 @@ class BuildReviewContext:
                 if not take(block):
                     omissions.append(ContextOmission("budget", path))
                     break
-        return payload(ContextStatus.REVIEW, None, tuple(blocks), tuple(imports))
+        return payload(ContextStatus.REVIEW, None, tuple(blocks), tuple(imports), stats)
 
     def _hunk_block(
         self, diff_map: DiffMap, file: DiffFile, hunk: DiffHunk, text: str, *, cut: bool
