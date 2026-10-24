@@ -375,9 +375,10 @@ class _Removed:
 
     Each target maps to the ids of its definitions at the base. Without a readable base
     the names are unknown: the targets are then the modules the PR deletes or renames
-    (name ""), and ``unknown`` says why none of their importers can be checked. A file
-    whose base extraction is not read or fails is in ``omissions``, counted once; one
-    the ignore policy denies is only counted in ``excluded``, never named.
+    (name ""), and ``unknown`` says why none of their importers can be checked; a
+    modified file is in ``omissions`` under that reason. A file whose base extraction
+    is not read or fails is in ``omissions``, counted once; one the ignore policy
+    denies is only counted in ``excluded``, never named.
     """
 
     targets: Mapping[GraphTarget, frozenset[str]] = field(default_factory=dict)
@@ -561,7 +562,8 @@ class ReverseEdgeSelector:
                 unknown = SOURCE_READ_FAILED
         if base is None:
             # The names are unknown: the importers of a deleted or renamed module are
-            # candidates that cannot be checked.
+            # candidates that cannot be checked, and a modified file is counted instead
+            # of the importers of what it may remove.
             return _Removed(
                 {
                     GraphTarget(path, ""): frozenset()
@@ -569,6 +571,11 @@ class ReverseEdgeSelector:
                     if file.change_type is not ChangeType.MODIFIED
                 },
                 unknown=unknown,
+                omissions=tuple(
+                    RagOmission(unknown, path)
+                    for file, path in sources
+                    if file.change_type is ChangeType.MODIFIED
+                ),
             )
         base_files = _RevisionFiles(
             tree=base,
