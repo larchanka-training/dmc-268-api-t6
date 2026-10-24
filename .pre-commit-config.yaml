@@ -12,7 +12,7 @@ repos:
       - id: check-toml
       - id: check-merge-conflict
 
-  # Same commands as the CI job "Python lint / type / test", so both check the same files.
+  # Same commands as the CI job "Python lint / type / unit", so both check the same files.
   - repo: local
     hooks:
       - id: ruff-check
