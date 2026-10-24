@@ -10,6 +10,8 @@ import subprocess
 import sys
 import textwrap
 from pathlib import Path
+from types import ModuleType
+from urllib.parse import urlsplit
 
 import pytest
 
@@ -29,6 +31,19 @@ def _step(name: str) -> str:
     )
     assert match is not None
     return textwrap.dedent(match.group("body"))
+
+
+def _script() -> ModuleType:
+    spec = importlib.util.spec_from_file_location("webhook_ack_load_caps", SCRIPT)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    # The dataclasses of the script resolve their annotations through sys.modules.
+    sys.modules[spec.name] = module
+    try:
+        spec.loader.exec_module(module)
+    finally:
+        sys.modules.pop(spec.name, None)
+    return module
 
 
 def _run(name: str, root: Path, env: dict[str, str]) -> subprocess.CompletedProcess[str]:
@@ -83,6 +98,8 @@ def _assert_workflow_contract(text: str) -> None:
     assert "scripts/webhook_ack_load.py" in load
     assert '--report-json "${RUNNER_TEMP}/webhook-ack-load.json"' in load
     assert "          COMMIT_SHA: ${{ github.sha }}\n" in load
+    # The script's host guard needs it to accept the Terraform host.
+    assert "          STAGING_HOST: ${{ vars.STAGING_HOST }}\n" in load
     assert "            --environment staging \\\n" in load
     assert '            --commit "${COMMIT_SHA}" \\\n' in load
     assert '            --window="${WINDOW}" \\\n' in load
@@ -138,6 +155,11 @@ def test_workflow_contract() -> None:
             "          URL: ${{ steps.target.outputs.url }}\n"
             "          LLM_API_KEYS: ${{ secrets.AI_DMC268_T6 }}\n",
         ),
+        (
+            "          # The script's host guard accepts the Terraform host only as this value.\n"
+            "          STAGING_HOST: ${{ vars.STAGING_HOST }}\n",
+            "",
+        ),
         ("retention-days: 90", "retention-days: 1"),
         (
             "  group: ${{ github.ref == 'refs/heads/main' && 'webhook-ack-load'"
@@ -173,6 +195,7 @@ def test_workflow_contract() -> None:
         "no-time-limit",
         "input-in-run-body",
         "second-secret",
+        "no-staging-host-for-the-guard",
         "short-retention",
         "upload-only-on-success",
         "static-concurrency-group",
@@ -190,15 +213,7 @@ def test_workflow_contract_rejects_unsafe_mutations(before: str, after: str) -> 
 
 
 def test_workflow_caps_match_the_script() -> None:
-    spec = importlib.util.spec_from_file_location("webhook_ack_load_caps", SCRIPT)
-    assert spec is not None and spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    # The dataclasses of the script resolve their annotations through sys.modules.
-    sys.modules[spec.name] = module
-    try:
-        spec.loader.exec_module(module)
-    finally:
-        sys.modules.pop(spec.name, None)
+    module = _script()
     validate = _step("Validate inputs")
 
     assert (module.MAX_COUNT, module.MAX_CONCURRENCY, module.MAX_BODY_BYTES) == (1000, 10, 65536)
@@ -308,6 +323,27 @@ def test_target_url_is_resolved_like_the_deploy_job(
 
     assert result.returncode == 0, result.stderr
     assert output.read_text() == f"url={url}\n"
+
+
+@pytest.mark.parametrize(
+    "host,domain",
+    [("203.0.113.7", "example.org"), ("Lab-VM.example.org", ""), ("", "example.org")],
+    ids=["terraform-ip", "terraform-name", "course-vps"],
+)
+def test_the_resolved_url_passes_the_scripts_host_guard_with_the_load_step_env(
+    tmp_path: Path, host: str, domain: str
+) -> None:
+    output = tmp_path / "output"
+    env = {"STAGING_HOST": host, "APP_DOMAIN": domain, "GITHUB_OUTPUT": str(output)}
+    assert _run("Resolve staging webhook URL", tmp_path, env).returncode == 0
+    hostname = urlsplit(output.read_text().removeprefix("url=").strip()).hostname
+    module = _script()
+
+    # The load step gets the same vars.STAGING_HOST as the resolve step (see the contract).
+    assert module.target_error(hostname, host) is None
+    if host:
+        # Without it, the Terraform host would look like production.
+        assert module.target_error(hostname, "") is not None
 
 
 @pytest.mark.parametrize(

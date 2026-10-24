@@ -17,18 +17,23 @@ Usage:
         [--environment staging] [--commit SHA] [--window="agreed window, approver, link"] \\
         [--max-seconds 600]
 
-The caps (count 1000, concurrency 10, body 64 B to 64 KiB) protect the VPS that staging shares
-with production, and so does the fail-fast: the run stops sending when a warm-up delivery does
-not get 202, after 5 failed timed deliveries in a row, when more than 10 % of the timed
-deliveries failed once at least 20 of them are done, or after `--max-seconds` (default 600, at
-most 780); the partial report is still written, with the first cause of each transport error
-kind (class and message, the target URL and host replaced). Latency is
-client-side and nearest-rank, over the 202 answers of the timed deliveries, cut to 0.01 ms; the
-verdict compares the uncut p95. The client keeps up to `--concurrency` connections alive. The
-secret is read only from GITHUB_WEBHOOK_SECRET and is never printed.
+The target host must be the local stand (`localhost`, 127.0.0.0/8, `::1`) or staging: a first
+DNS label that starts with `staging` (the course VPS, `staging-api.<APP_DOMAIN>`) or exactly the
+STAGING_HOST environment variable (the Terraform host); any other host, e.g. `api.<domain>` or an
+IP address without STAGING_HOST, is refused before the first request. The caps (count 1000,
+concurrency 10, body 64 B to 64 KiB) protect the VPS that staging shares with production, and so
+does the fail-fast: the run stops sending when a warm-up delivery does not get 202, after 5 failed
+timed deliveries in a row, when more than 10 % of the timed deliveries failed once at least 20 of
+them are done, or after `--max-seconds` (default 600, at most 780); the partial report is still
+written, with the first cause of each transport error kind (class and message, the target URL and
+host replaced). Latency is client-side and nearest-rank, over the 202 answers of the timed
+deliveries, cut to 0.01 ms; the verdict compares the uncut p95. The client keeps up to
+`--concurrency` connections alive. The secret is read only from GITHUB_WEBHOOK_SECRET and is never
+printed.
 
 Exit codes: 0 every delivery got 202 (a p95 over the target is reported, not an error);
-1 a non-202 answer, a transport error or a fail-fast stop; 2 invalid arguments or no secret.
+1 a non-202 answer, a transport error or a fail-fast stop; 2 invalid arguments, a host that is
+neither loopback nor staging, or no secret.
 """
 
 from __future__ import annotations
@@ -37,6 +42,7 @@ import argparse
 import asyncio
 import hashlib
 import hmac
+import ipaddress
 import json
 import math
 import os
@@ -55,6 +61,10 @@ from urllib.parse import urlsplit
 import httpx
 
 SECRET_ENV = "GITHUB_WEBHOOK_SECRET"
+# The workflow's Terraform branch targets http://<STAGING_HOST>; the course VPS branch is
+# https://staging-api.<APP_DOMAIN>, which the first-label rule accepts.
+STAGING_HOST_ENV = "STAGING_HOST"
+STAGING_LABEL_PREFIX = "staging"
 WEBHOOK_PATH = "/webhooks/github"
 DELIVERY_PREFIX = "loadtest-"
 DEFAULT_COUNT = 200
@@ -220,6 +230,35 @@ def verdict(
     if failed:
         return f"INVALID ({failed} of {sent} deliveries failed): {text}"
     return text
+
+
+def target_error(host: str, staging_host: str) -> str | None:
+    """Why the load may not go to ``host`` (lowercase, as urlsplit gives it), or None.
+
+    Allowed: the local stand (loopback) and staging. Staging shares its VPS with production, and
+    production must never get this load, so anything else is refused.
+    """
+    try:
+        loopback = ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        loopback = host == "localhost"
+    if loopback:
+        return None
+    if host.split(".", 1)[0].startswith(STAGING_LABEL_PREFIX):
+        return None
+    # DNS names are case-insensitive; an empty STAGING_HOST matches nothing.
+    if staging_host and host == staging_host.lower():
+        return None
+    configured = (
+        f"{STAGING_HOST_ENV} is {staging_host!r}"
+        if staging_host
+        else f"{STAGING_HOST_ENV} is unset"
+    )
+    return (
+        f"--url host {host!r} is neither the local stand (localhost, 127.0.0.0/8, ::1) nor staging "
+        f"(a first DNS label starting with {STAGING_LABEL_PREFIX!r}, or exactly "
+        f"{STAGING_HOST_ENV}; {configured}): it may be production, which shares the VPS"
+    )
 
 
 def describe_error(error: BaseException, url: str) -> tuple[str, str]:
@@ -455,6 +494,9 @@ def main(
         parser.error("--url must be an http:// or https:// URL with a host")
     if url.path != WEBHOOK_PATH:
         parser.error(f"--url must point at {WEBHOOK_PATH}")
+    refused = target_error(url.hostname, os.environ.get(STAGING_HOST_ENV, ""))
+    if refused is not None:
+        parser.error(refused)
 
     secret = os.environ.get(SECRET_ENV, "")
     if not secret:

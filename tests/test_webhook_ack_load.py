@@ -39,7 +39,14 @@ from app.modules.reviews.application.trigger_from_delivery import CiTriggerEvent
 
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts/webhook_ack_load.py"
 _SECRET = "ack-load-test-secret"
-_URL = "http://test/webhooks/github"
+# The CLI sends only to the local stand or staging; the in-process transports ignore the host.
+_URL = "http://localhost/webhooks/github"
+
+
+@pytest.fixture(autouse=True)
+def no_staging_host(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A STAGING_HOST exported in the shell must not widen the host guard under test."""
+    monkeypatch.delenv("STAGING_HOST", raising=False)
 
 
 @pytest.fixture(scope="module")
@@ -164,7 +171,7 @@ def test_every_delivery_is_a_signed_ping_the_route_stores(
         assert "installation" not in payload
         assert payload["zen"] == "Load test, ignore."
         assert len(payload["padding"]) == 25 and len(payload["fill"]) == 12
-    assert report.target_host == "test"
+    assert report.target_host == "localhost"
     assert report.aborted is None and report.all_accepted
 
 
@@ -383,6 +390,113 @@ def test_missing_secret_exits_2_without_a_request(
     assert calls == []
 
 
+# --- target host -----------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "host,staging_host",
+    [
+        ("localhost", ""),
+        ("127.0.0.1", ""),
+        ("127.10.20.30", ""),
+        ("::1", ""),
+        ("staging-api.example.org", ""),
+        ("staging.example.org", ""),
+        ("203.0.113.10", "203.0.113.10"),
+        ("lab-vm.example.org", "Lab-VM.example.org"),
+    ],
+    ids=[
+        "localhost",
+        "loopback-ipv4",
+        "loopback-ipv4-range",
+        "loopback-ipv6",
+        "course-vps-staging",
+        "staging-label",
+        "staging-host-ip",
+        "staging-host-name-any-case",
+    ],
+)
+def test_the_local_stand_and_staging_are_load_targets(
+    load: ModuleType, host: str, staging_host: str
+) -> None:
+    assert load.target_error(host, staging_host) is None
+
+
+@pytest.mark.parametrize(
+    "host,staging_host,configured",
+    [
+        ("api.example.org", "", "STAGING_HOST is unset"),
+        ("example.org", "", "STAGING_HOST is unset"),
+        ("api-staging.example.org", "", "STAGING_HOST is unset"),
+        ("api.staging.example.org", "", "STAGING_HOST is unset"),
+        ("localhost.example.org", "", "STAGING_HOST is unset"),
+        ("203.0.113.10", "", "STAGING_HOST is unset"),
+        ("128.0.0.1", "", "STAGING_HOST is unset"),
+        ("203.0.113.10", "203.0.113.11", "STAGING_HOST is '203.0.113.11'"),
+        ("api.lab-vm.example.org", "lab-vm.example.org", "STAGING_HOST is 'lab-vm.example.org'"),
+    ],
+    ids=[
+        "prod-api",
+        "bare-domain",
+        "staging-not-first",
+        "staging-second-label",
+        "localhost-subdomain",
+        "ip-without-staging-host",
+        "outside-loopback-range",
+        "other-staging-host",
+        "suffix-of-staging-host",
+    ],
+)
+def test_any_other_host_is_refused_as_possibly_production(
+    load: ModuleType, host: str, staging_host: str, configured: str
+) -> None:
+    assert load.target_error(host, staging_host) == (
+        f"--url host '{host}' is neither the local stand (localhost, 127.0.0.0/8, ::1) nor "
+        f"staging (a first DNS label starting with 'staging', or exactly STAGING_HOST; "
+        f"{configured}): it may be production, which shares the VPS"
+    )
+
+
+def test_a_production_url_exits_2_before_any_request(
+    load: ModuleType, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setenv("GITHUB_WEBHOOK_SECRET", _SECRET)
+    calls: list[httpx.Request] = []
+
+    with pytest.raises(SystemExit) as exit_info:
+        load.main(["--url", "https://api.example.org/webhooks/github"], transport=_recording(calls))
+
+    assert exit_info.value.code == 2
+    assert (
+        "error: --url host 'api.example.org' is neither the local stand "
+        "(localhost, 127.0.0.0/8, ::1) nor staging"
+    ) in capsys.readouterr().err
+    assert calls == []
+
+
+@pytest.mark.parametrize(
+    "url,staging_host",
+    [
+        ("http://[::1]:8000/webhooks/github", ""),
+        ("https://staging-api.example.org/webhooks/github", ""),
+        ("http://203.0.113.10/webhooks/github", "203.0.113.10"),
+    ],
+    ids=["loopback-ipv6", "course-vps", "terraform-host"],
+)
+def test_the_cli_sends_to_an_allowed_host(
+    load: ModuleType, monkeypatch: pytest.MonkeyPatch, url: str, staging_host: str
+) -> None:
+    monkeypatch.setenv("GITHUB_WEBHOOK_SECRET", _SECRET)
+    monkeypatch.setenv("STAGING_HOST", staging_host)
+    calls: list[httpx.Request] = []
+
+    assert (
+        load.main(["--url", url, "--count", "2", "--concurrency", "1"], transport=_recording(calls))
+        == 0
+    )
+    assert [str(call.url) for call in calls] == [url] * 3
+
+
 # --- failures and fail-fast ------------------------------------------------------------------
 
 
@@ -518,7 +632,7 @@ def test_report_json_has_the_run_parameters_labels_and_targets(
     window = "2026-10-24 10:00-10:15 UTC, axyi, #163 comment"
     argv = [
         "--url",
-        "http://test:8080/webhooks/github",
+        "http://127.0.0.1:8080/webhooks/github",
         "--count",
         "4",
         "--concurrency",
@@ -544,7 +658,7 @@ def test_report_json_has_the_run_parameters_labels_and_targets(
         "environment": "staging",
         "commit": "a" * 40,
         "window": window,
-        "target_host": "test:8080",
+        "target_host": "127.0.0.1:8080",
         "count": 4,
         "warmup": 2,
         "sent": 6,

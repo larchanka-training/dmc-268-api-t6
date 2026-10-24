@@ -244,6 +244,7 @@ _CHECKS = (
     "parallel",
     "queue_wait_within_limit",
     "dlq_empty",
+    "no_unhandled_stub_requests",
 )
 _ROWS = [_row(1), _row(2), _row(3)]
 _GOOD: dict[str, Any] = {
@@ -253,6 +254,7 @@ _GOOD: dict[str, Any] = {
     "dlq_depth": 0,
     "peak": 3,
     "timed_out": False,
+    "unhandled": [],
 }
 
 
@@ -279,6 +281,7 @@ _GOOD: dict[str, Any] = {
         ([_row(1), _row(2, started=None), _row(3)], {}, 3, ["queue_wait_within_limit"]),
         (_ROWS, {"dlq_depth": 1}, 3, ["dlq_empty"]),
         (_ROWS, {"dlq_depth": None}, 3, ["dlq_empty"]),
+        (_ROWS, {"unhandled": ["GET /nowhere"]}, 3, ["no_unhandled_stub_requests"]),
     ],
     ids=[
         "pass",
@@ -301,6 +304,7 @@ _GOOD: dict[str, Any] = {
         "never-started",
         "dlq-message",
         "no-dlq",
+        "unhandled-stub-request",
     ],
 )
 def test_verdict_rules(
@@ -701,6 +705,133 @@ def test_down_runs_compose_in_its_own_session(
     assert kwargs["start_new_session"] is True and kwargs["check"] is False
 
 
+# --- docker endpoint -------------------------------------------------------------------------
+
+_INSPECT = ["docker", "context", "inspect", "--format", "{{.Endpoints.docker.Host}}"]
+_LOCAL_SOCKET = "unix:///var/run/docker.sock"
+_STOPPED = "stopped at the first command past the endpoint"
+
+
+def _endpoint_stack(
+    driver: ModuleType, monkeypatch: pytest.MonkeyPatch, environ: dict[str, str], context: str
+) -> tuple[Any, list[list[str]]]:
+    """A real Stack: `docker context inspect` answers ``context``, any other command stops."""
+    env = driver.stack_env({"PATH": "/usr/bin", "HOME": "/home/u", **environ}, {})
+    stack = driver.Stack("dmc163test", env, {"BACKEND_PORT": 18001})
+    commands: list[list[str]] = []
+
+    def run(command: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        commands.append(command)
+        # Resolved with the very env compose gets, DOCKER_CONTEXT and DOCKER_CONFIG included.
+        assert kwargs["env"] == env
+        if command == _INSPECT:
+            return subprocess.CompletedProcess(command, 0, f"{context}\n", "")
+        raise OSError(_STOPPED)
+
+    monkeypatch.setattr(driver.subprocess, "run", run)
+    return stack, commands
+
+
+@pytest.mark.parametrize(
+    "environ,context,inspected,endpoint",
+    [
+        (
+            {"DOCKER_HOST": "tcp://203.0.113.5:2375", "DOCKER_CONTEXT": "default"},
+            _LOCAL_SOCKET,
+            False,
+            "tcp://203.0.113.5:2375",
+        ),
+        (
+            {"DOCKER_HOST": "ssh://deploy@203.0.113.5"},
+            _LOCAL_SOCKET,
+            False,
+            "ssh://deploy@203.0.113.5",
+        ),
+        (
+            {"DOCKER_CONTEXT": "course-vps", "DOCKER_CONFIG": "/home/u/.docker"},
+            "ssh://deploy@203.0.113.5",
+            True,
+            "ssh://deploy@203.0.113.5",
+        ),
+    ],
+    ids=["tcp-docker-host", "ssh-docker-host", "ssh-context"],
+)
+def test_a_remote_docker_endpoint_is_refused_before_any_compose_command(
+    driver: ModuleType,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    environ: dict[str, str],
+    context: str,
+    inspected: bool,
+    endpoint: str,
+) -> None:
+    stack, commands = _endpoint_stack(driver, monkeypatch, environ, context)
+
+    assert driver.execute(stack, _args(driver, tmp_path), "secret") == 2
+    # DOCKER_HOST wins over any context, as in the docker CLI: then nothing runs at all.
+    assert commands == ([_INSPECT] if inspected else [])
+    assert capsys.readouterr().err == (
+        f"error: docker would run the load stack on '{endpoint}', not on a local unix:// socket; "
+        "unset DOCKER_HOST and DOCKER_CONTEXT or switch to a local docker context\n"
+    )
+    assert not (tmp_path / "report.json").exists()
+
+
+@pytest.mark.parametrize(
+    "environ,inspected",
+    [
+        ({"DOCKER_HOST": "unix:///run/user/1000/docker.sock"}, False),
+        ({}, True),
+        # The docker CLI treats an empty DOCKER_HOST as unset.
+        ({"DOCKER_HOST": ""}, True),
+    ],
+    ids=["unix-docker-host", "local-context", "empty-docker-host"],
+)
+def test_a_local_unix_socket_lets_the_run_reach_compose(
+    driver: ModuleType,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    environ: dict[str, str],
+    inspected: bool,
+) -> None:
+    stack, commands = _endpoint_stack(driver, monkeypatch, environ, _LOCAL_SOCKET)
+
+    # The fake runner stops the first compose command, so the run ends there with 2.
+    assert driver.execute(stack, _args(driver, tmp_path), "secret") == 2
+    assert commands == [
+        *([_INSPECT] if inspected else []),
+        driver.compose_command("dmc163test", "ps", "-aq"),
+    ]
+    assert capsys.readouterr().err == (
+        f"error: cannot inspect compose project 'dmc163test': {_STOPPED}\n"
+    )
+
+
+def test_an_unknown_docker_context_is_refused(
+    driver: ModuleType,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    commands: list[list[str]] = []
+
+    def run(command: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        commands.append(command)
+        raise subprocess.CalledProcessError(1, command, "", 'context "gone": context not found\n')
+
+    monkeypatch.setattr(driver.subprocess, "run", run)
+    stack = driver.Stack("dmc163test", {"PATH": "/usr/bin", "DOCKER_CONTEXT": "gone"}, {})
+
+    assert driver.execute(stack, _args(driver, tmp_path), "secret") == 2
+    assert commands == [_INSPECT]
+    assert capsys.readouterr().err == (
+        "error: cannot resolve the docker endpoint: docker context inspect exited 1: "
+        'context "gone": context not found\n'
+    )
+
+
 def test_main_passes_loopback_port_values_and_numeric_ports(
     driver: ModuleType, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -756,6 +887,7 @@ class FakeStack:
         exposed: tuple[dict[str, object], ...] = (),
         config_error: Exception | None = None,
         down_code: int = 0,
+        unhandled: tuple[str, ...] = (),
     ) -> None:
         self.project = "dmc163test"
         self.leftovers = leftovers
@@ -764,12 +896,17 @@ class FakeStack:
         self.exposed = exposed
         self.config_error = config_error
         self.down_code = down_code
+        self.unhandled = unhandled
         self._rows = _ROWS if rows is None else rows
         self.on_up = on_up
         self.reject = reject
         self._receipts = {"projected": 6} if receipts is None else receipts
         self.calls: list[str] = []
         self.deliveries: list[tuple[int, str]] = []
+
+    def endpoint(self) -> str:
+        self.calls.append("endpoint")
+        return "unix:///var/run/docker.sock"
 
     def existing(self) -> list[str]:
         self.calls.append("existing")
@@ -811,7 +948,7 @@ class FakeStack:
         return {
             "review_posts": {"1": 1, "2": 1, "3": 1},
             "llm_calls": {"RepoConventionsDraft": 3, "ReviewOutput": 3},
-            "unhandled": [],
+            "unhandled": list(self.unhandled),
         }
 
     def dlq_depth(self) -> int | None:
@@ -851,7 +988,7 @@ def test_a_passing_run_sends_one_duplicate_per_pr_and_removes_its_project(
     stack = FakeStack()
 
     assert driver.execute(stack, _args(driver, tmp_path), "secret") == 0
-    assert stack.calls == ["existing", "config", "up 3", "seed", "down"]
+    assert stack.calls == ["endpoint", "existing", "config", "up 3", "seed", "down"]
     assert [number for number, _ in stack.deliveries] == [1, 2, 3, 1, 2, 3]
     assert len({delivery for _, delivery in stack.deliveries}) == 6
     report = json.loads((tmp_path / "report.json").read_text())
@@ -869,7 +1006,7 @@ def test_a_failed_up_still_removes_the_project(driver: ModuleType, tmp_path: Pat
     stack = FakeStack(up_error=driver.StackError("docker compose up exited 1: pull denied"))
 
     assert driver.execute(stack, _args(driver, tmp_path), "secret") == 1
-    assert stack.calls == ["existing", "config", "up 3", "logs", "down"]
+    assert stack.calls == ["endpoint", "existing", "config", "up 3", "logs", "down"]
     assert not (tmp_path / "report.json").exists()
 
 
@@ -879,10 +1016,21 @@ def test_a_failed_verdict_writes_the_report_and_removes_the_project(
     stack = FakeStack(rows=[_row(1), _row(2, state="failed"), _row(3)])
 
     assert driver.execute(stack, _args(driver, tmp_path), "secret") == 1
-    assert stack.calls == ["existing", "config", "up 3", "seed", "logs", "down"]
+    assert stack.calls == ["endpoint", "existing", "config", "up 3", "seed", "logs", "down"]
     report = json.loads((tmp_path / "report.json").read_text())
     assert report["passed"] is False
     assert [name for name, passed in report["checks"].items() if not passed] == ["all_succeeded"]
+
+
+def test_an_unhandled_stub_request_fails_the_verdict(driver: ModuleType, tmp_path: Path) -> None:
+    stack = FakeStack(unhandled=("GET /repos/load/parallel-runs/tarball/main",))
+
+    assert driver.execute(stack, _args(driver, tmp_path), "secret") == 1
+    assert stack.calls == ["endpoint", "existing", "config", "up 3", "seed", "logs", "down"]
+    report = json.loads((tmp_path / "report.json").read_text())
+    assert report["unhandled_stub_requests"] == ["GET /repos/load/parallel-runs/tarball/main"]
+    failed = [name for name, passed in report["checks"].items() if not passed]
+    assert failed == ["no_unhandled_stub_requests"]
 
 
 def test_keep_leaves_the_project_up(driver: ModuleType, tmp_path: Path) -> None:
@@ -907,7 +1055,7 @@ def test_an_existing_project_is_refused_and_left_alone(
 
     assert driver.execute(stack, _args(driver, tmp_path, "--keep"), "secret") == 2
     assert driver.execute(stack, _args(driver, tmp_path), "secret") == 2
-    assert stack.calls == ["existing", "existing"]
+    assert stack.calls == ["endpoint", "existing", "endpoint", "existing"]
     assert f"already has {' and '.join(leftovers)}" in capsys.readouterr().err
 
 
@@ -917,7 +1065,7 @@ def test_a_project_that_cannot_be_inspected_is_not_touched(
     stack = FakeStack(existing_error=driver.StackError("docker compose ps exited 1: no daemon"))
 
     assert driver.execute(stack, _args(driver, tmp_path), "secret") == 2
-    assert stack.calls == ["existing"]
+    assert stack.calls == ["endpoint", "existing"]
 
 
 def test_runs_that_never_finish_time_out_with_a_report(driver: ModuleType, tmp_path: Path) -> None:
@@ -939,7 +1087,7 @@ def test_a_rejected_delivery_fails_and_removes_the_project(
 
     assert driver.execute(stack, _args(driver, tmp_path), "secret") == 1
     assert stack.deliveries[0][0] == 1 and len(stack.deliveries) == 1
-    assert stack.calls == ["existing", "config", "up 3", "seed", "logs", "down"]
+    assert stack.calls == ["endpoint", "existing", "config", "up 3", "seed", "logs", "down"]
 
 
 def _marker(signum: int, frame: object) -> None:
@@ -962,7 +1110,7 @@ def test_sigterm_unwinds_into_the_cleanup_and_restores_the_handlers(
             signal.signal(sig, handler)
 
     assert code == 128 + signal.SIGTERM
-    assert stack.calls == ["existing", "config", "up 3", "down"]
+    assert stack.calls == ["endpoint", "existing", "config", "up 3", "down"]
     assert restored == (_marker, _marker)
 
 
@@ -991,7 +1139,7 @@ def test_the_stack_is_scaled_to_the_workers_not_the_runs(
 
     driver.execute(stack, _args(driver, tmp_path, "--workers", "2"), "secret")
 
-    assert stack.calls[:3] == ["existing", "config", "up 2"]
+    assert stack.calls[:4] == ["endpoint", "existing", "config", "up 2"]
 
 
 def test_a_port_beyond_loopback_is_refused_before_up(
@@ -1000,7 +1148,7 @@ def test_a_port_beyond_loopback_is_refused_before_up(
     stack = FakeStack(exposed=({"host_ip": "0.0.0.0", "published": "5432", "target": 5432},))
 
     assert driver.execute(stack, _args(driver, tmp_path), "secret") == 2
-    assert stack.calls == ["existing", "config"]
+    assert stack.calls == ["endpoint", "existing", "config"]
     assert "publishes ports beyond 127.0.0.1: backend 0.0.0.0:5432->5432" in capsys.readouterr().err
 
 
@@ -1010,7 +1158,7 @@ def test_a_config_that_cannot_be_rendered_is_refused_before_up(
     stack = FakeStack(config_error=driver.StackError("docker compose config exited 15: bad"))
 
     assert driver.execute(stack, _args(driver, tmp_path), "secret") == 2
-    assert stack.calls == ["existing", "config"]
+    assert stack.calls == ["endpoint", "existing", "config"]
 
 
 def test_a_failed_down_prints_the_removal_command(

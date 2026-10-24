@@ -4,8 +4,10 @@
 SD §13 sets v1 throughput at 100 PR/day and 5 parallel Runs, scaled by `worker` replicas. This
 driver checks that on a disposable stack:
 
-1. refuses a compose project that already has containers or volumes, the shared local stand
-   `dmc-268-api-t6` and this checkout's default project name, then runs
+1. refuses a docker endpoint that is not a local `unix://` socket (`DOCKER_HOST`, otherwise the
+   current docker context, resolved with the env compose gets), a compose project that already
+   has containers or volumes, the shared local stand `dmc-268-api-t6` and this checkout's default
+   project name, then runs
    `docker compose -p <project> ... up -d --build --wait --scale worker=<workers>` with
    deploy/load/compose.parallel-runs.yml: the `stub` service (scripts/review_load_stub.py) is
    GitHub and the LLM, every published port is a free port on 127.0.0.1 (checked in the merged
@@ -33,17 +35,19 @@ Usage:
 The verdict passes when the run finished in time, every Run succeeded on attempt 1, each PR has
 exactly one Run, one posted review and one review LLM call despite its duplicate delivery, every
 delivery was projected, all `--workers` workers took a Run, at least min(runs, workers) Runs were in
-flight at once, no queue wait exceeds `--max-queue-wait-ms` and the DLQ is empty. `--workers` below
-`--runs` measures queueing (e.g. 10 PRs on 5 workers). With `--llm-delay-ms` below about 1000 a Run
-can finish before the next one starts, so the parallel check may fail by design.
+flight at once, no queue wait exceeds `--max-queue-wait-ms`, the DLQ is empty and the stub got no
+request it does not serve. `--workers` below `--runs` measures queueing (e.g. 10 PRs on 5 workers).
+With `--llm-delay-ms` below about 1000 a Run can finish before the next one starts, so the parallel
+check may fail by design.
 
 The first `--build` needs registry access (base images, apt and PyPI); `down -v` keeps the images,
 remove them with `docker image rm $(docker image ls -q 'dmc163load-*')` (use your project name).
 Tested with Docker Compose v5.6.1.
 
 Exit codes: 0 the verdict passed; 1 it failed, or the stack did not start or finish in time;
-2 invalid arguments, a project that already exists, or a merged config that would publish a port
-on anything but 127.0.0.1; 128 + signal after SIGTERM or SIGINT.
+2 invalid arguments, a docker endpoint that is not a local unix:// socket, a project that already
+exists, or a merged config that would publish a port on anything but 127.0.0.1; 128 + signal
+after SIGTERM or SIGINT.
 """
 
 from __future__ import annotations
@@ -80,6 +84,8 @@ _PROJECT_NAME = re.compile(r"[a-z0-9][a-z0-9_-]*")
 MAX_RUNS = 20
 TERMINAL_STATES = frozenset({"succeeded", "failed", "cancelled", "skipped"})
 DLQ = "reviews.dlq"
+# The daemon of the current docker context; DOCKER_HOST, when set, takes precedence over it.
+CONTEXT_ENDPOINT = ["docker", "context", "inspect", "--format", "{{.Endpoints.docker.Host}}"]
 # The same PRs as scripts/review_load_stub.py (tests/test_parallel_runs_load.py keeps them equal).
 INSTALLATION_ID = 17
 REPOSITORY_ID = 101
@@ -229,6 +235,16 @@ def removal_hint(project: str) -> str:
     return f"cd {shlex.quote(str(REPO_ROOT))} && {assignments} {command}"
 
 
+def endpoint_error(endpoint: str) -> str | None:
+    """Why compose may not use the docker ``endpoint``, or None for a local unix:// socket."""
+    if endpoint.startswith("unix://"):
+        return None
+    return (
+        f"docker would run the load stack on {endpoint!r}, not on a local unix:// socket; "
+        "unset DOCKER_HOST and DOCKER_CONTEXT or switch to a local docker context"
+    )
+
+
 def stack_env(environ: Mapping[str, str], generated: Mapping[str, str]) -> dict[str, str]:
     """What compose sees: PATH, HOME, DOCKER_*, the pinned credentials and ``generated``."""
     kept = {
@@ -336,6 +352,7 @@ class Observed:
     dlq_depth: int | None
     peak: int
     timed_out: bool
+    unhandled: Sequence[str]
 
 
 def verdict(
@@ -363,6 +380,8 @@ def verdict(
         "queue_wait_within_limit": bool(waits)
         and all(wait is not None and wait <= max_queue_wait_ms for wait in waits),
         "dlq_empty": observed.dlq_depth == 0,
+        # A 404 from the stub means the stack asked for something this scenario does not model.
+        "no_unhandled_stub_requests": not observed.unhandled,
     }
 
 
@@ -390,6 +409,8 @@ class LoadStack(Protocol):
     """The load project as the scenario drives it (a fake in the tests)."""
 
     project: str
+
+    def endpoint(self) -> str: ...
 
     def existing(self) -> list[str]: ...
 
@@ -447,6 +468,22 @@ class Stack:
             raise StackError(
                 f"docker compose {' '.join(args[:3])} exited {failed.returncode}: {detail}"
             ) from failed
+
+    def endpoint(self) -> str:
+        """The daemon compose will use with this env: DOCKER_HOST, else the docker context's."""
+        host = self.env.get("DOCKER_HOST")
+        if host:
+            return host
+        try:
+            inspected = subprocess.run(
+                CONTEXT_ENDPOINT, env=self.env, capture_output=True, text=True, check=True
+            )
+        except subprocess.CalledProcessError as failed:
+            detail = (failed.stderr or "").strip()[-2000:]
+            raise StackError(
+                f"docker context inspect exited {failed.returncode}: {detail}"
+            ) from failed
+        return inspected.stdout.strip()
 
     def existing(self) -> list[str]:
         containers = self._run("ps", "-aq").stdout.split()
@@ -604,6 +641,7 @@ def scenario(stack: LoadStack, args: argparse.Namespace, secret: str) -> int:
         dlq_depth=stack.dlq_depth(),
         peak=max_parallel(rows),
         timed_out=timed_out,
+        unhandled=stats["unhandled"],
     )
     checks = verdict(
         metrics,
@@ -630,7 +668,7 @@ def scenario(stack: LoadStack, args: argparse.Namespace, secret: str) -> int:
         "review_posts": dict(observed.review_posts),
         "llm_calls": dict(observed.llm_calls),
         "receipts": dict(observed.receipts),
-        "unhandled_stub_requests": stats["unhandled"],
+        "unhandled_stub_requests": list(observed.unhandled),
         "dlq_depth": observed.dlq_depth,
         "checks": checks,
         "passed": all(checks.values()),
@@ -646,7 +684,19 @@ def scenario(stack: LoadStack, args: argparse.Namespace, secret: str) -> int:
 
 
 def execute(stack: LoadStack, args: argparse.Namespace, secret: str) -> int:
-    """Refuse an existing project, run the scenario, and remove only what this run created."""
+    """Refuse a remote daemon or an existing project, run the scenario, and remove only what this
+    run created."""
+    # Before any compose or docker call that reaches a daemon: a remote one (DOCKER_HOST=tcp://,
+    # ssh://, a remote context) would get the stack, e.g. the course VPS.
+    try:
+        endpoint = stack.endpoint()
+    except (StackError, OSError) as failed:
+        print(f"error: cannot resolve the docker endpoint: {failed}", file=sys.stderr)
+        return 2
+    error = endpoint_error(endpoint)
+    if error is not None:
+        print(f"error: {error}", file=sys.stderr)
+        return 2
     try:
         leftovers = stack.existing()
     except (StackError, subprocess.CalledProcessError, OSError) as failed:

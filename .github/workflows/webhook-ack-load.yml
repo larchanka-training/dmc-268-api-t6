@@ -117,6 +117,8 @@ jobs:
         env:
           GITHUB_WEBHOOK_SECRET: ${{ secrets.GH_WEBHOOK_SECRET }}
           URL: ${{ steps.target.outputs.url }}
+          # The script's host guard accepts the Terraform host only as this value.
+          STAGING_HOST: ${{ vars.STAGING_HOST }}
           COMMIT_SHA: ${{ github.sha }}
           WINDOW: ${{ inputs.window }}
           COUNT: ${{ inputs.count }}
