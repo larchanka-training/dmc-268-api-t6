@@ -1573,6 +1573,34 @@ def test_without_a_readable_base_the_importers_of_a_removed_module_are_dropped(
     assert repository.trees == trees
 
 
+@pytest.mark.parametrize(
+    ("diff_old_sha", "unavailable", "reason"),
+    [(None, False, "old_revision_unknown"), (_BASE, True, "source_read_failed")],
+)
+def test_a_modified_source_whose_base_cannot_be_read_is_counted_with_its_path(
+    diff_old_sha: str | None, unavailable: bool, reason: str
+) -> None:
+    repository = Repository(
+        {"pkg/store.py": _PY_STORE, "pkg/view.py": _PY_VIEW},
+        base={"pkg/store.py": _PY_BASE_STORE},
+        base_unavailable=unavailable,
+    )
+    diff_map = _diff_map(
+        _vcs_file(repository, "pkg/store.py", _PY_REMOVAL_PATCH, deletions=4),
+        diff_old_sha=diff_old_sha,
+    )
+    graph = _load_hints("pkg/view.py")
+
+    result = _select(repository, diff_map, graph)
+
+    # The exports the modification removes are unknown: the file is counted, never lost.
+    assert graph.reads == [(_REPOSITORY, (GraphTarget("pkg/store.py", "save"),))]
+    assert result.places == ()
+    assert result.omissions == (RagOmission(reason, "pkg/store.py"),)
+    assert (result.found, dict(result.dropped)) == (1, {reason: 1})
+    assert repository.read == []
+
+
 def _generated(path: str) -> bool:
     return path.startswith("generated/")
 
