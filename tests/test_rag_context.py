@@ -1182,6 +1182,42 @@ def test_a_module_the_edge_is_not_about_is_never_read() -> None:
     assert repository.read == ["pkg/app.py"]
 
 
+def test_a_place_shows_the_import_line_of_every_confirmed_binding() -> None:
+    util = "def helper(value):\n    value.check()\n    return value\n"
+    user = (
+        "from .store import save\nimport os\nfrom .util import helper\n\n\n"
+        "def run(item):\n    return helper(save(item))\n"
+    )
+    repository = Repository({"pkg/store.py": _PY_STORE, "pkg/util.py": util, "pkg/app.py": user})
+    diff_map = _diff_map(
+        _vcs_file(repository, "pkg/store.py", _PY_STORE_PATCH),
+        _vcs_file(
+            repository,
+            "pkg/util.py",
+            "@@ -1,2 +1,3 @@\n def helper(value):\n+    value.check()\n     return value",
+        ),
+    )
+    graph = Graph(
+        {
+            _REPOSITORY: (
+                _uses("pkg/app.py", "pkg/store.py", "save"),
+                _uses("pkg/app.py", "pkg/util.py", "helper"),
+            )
+        }
+    )
+
+    result = _select(repository, diff_map, graph)
+
+    # One place reads two changed bindings: it shows the import line of each.
+    (place,) = result.places
+    assert place.source.ranges == (LineRange(1, 1), LineRange(3, 3), LineRange(6, 7))
+    assert place.text == (
+        "from .store import save\nfrom .util import helper\n"
+        "def run(item):\n    return helper(save(item))"
+    )
+    assert (result.found, result.confirmed) == (1, 1)
+
+
 def test_a_resolution_stopped_by_the_read_limit_is_rag_limit() -> None:
     # 19 unconfirmed candidates spend 19 reads; the 20th read is the candidate itself,
     # and its import needs `pkg/__init__.py`, which would be the 21st.

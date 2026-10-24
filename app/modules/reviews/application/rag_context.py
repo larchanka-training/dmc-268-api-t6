@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable, Collection, Iterable, Iterator, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Protocol
 from uuid import UUID
 
@@ -390,10 +390,10 @@ class _Removed:
 
 @dataclass(frozen=True)
 class _Reader:
-    """A declaration through which an edge is confirmed, with the import it reads."""
+    """A declaration through which an edge is confirmed, with the imports it reads."""
 
     symbol: AstSymbol
-    item: AstImport
+    items: tuple[AstImport, ...]
     kind: EdgeKind
     reason: str
     definitions: tuple[RetrievedPlace, ...] = ()
@@ -791,10 +791,14 @@ class _Selection:
                     }
                     for index, confirms in readers.items():
                         if confirms and index not in outer:
-                            found.setdefault(
-                                index,
-                                _Reader(facts.symbols[index], item, hint.kind, RAG_REVERSE_EDGE),
-                            )
+                            reader = found.get(index)
+                            if reader is None:
+                                found[index] = _Reader(
+                                    facts.symbols[index], (item,), hint.kind, RAG_REVERSE_EDGE
+                                )
+                            elif item not in reader.items:
+                                # The place shows the import of every binding it reads.
+                                found[index] = replace(reader, items=(*reader.items, item))
         return list(found.values()), limited
 
     async def _broken(
@@ -873,7 +877,7 @@ class _Selection:
             readers_found.append(
                 _Reader(
                     facts.symbols[index],
-                    item,
+                    (item,),
                     kind,
                     RAG_BROKEN_REFERENCE,
                     tuple(place for place in definitions if place is not None),
@@ -911,7 +915,7 @@ class _Selection:
         )
 
     def _place(self, path: str, lines: list[str], reader: _Reader) -> RetrievedPlace:
-        symbol, item = reader.symbol, reader.item
+        symbol = reader.symbol
         declaration = symbol.declaration_range
         last = len(lines) - (1 if lines and lines[-1] == "" else 0)
         body = "\n".join(lines[declaration.start_line - 1 : declaration.end_line])
@@ -923,7 +927,7 @@ class _Selection:
         )
         ranges = _merged(
             (
-                LineRange(item.line, item.line),
+                *(LineRange(item.line, item.line) for item in reader.items),
                 *((declaration,) if whole else symbol.signature_ranges),
             )
         )
