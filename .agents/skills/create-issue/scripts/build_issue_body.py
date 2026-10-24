@@ -91,6 +91,31 @@ KICKOFF_LABEL = {
     },
 }
 
+# Parts — one issue sliced into PRs (references/slicing.md): each part is a separate PR
+# with its own boundary, stop criterion and acceptance criteria, rendered after the
+# plain scope and criteria, numbered from 1, labelled in the body's language.
+PART_KEYS = ("scope", "boundary", "done_when", "acceptance_criteria")
+PART_LABEL = {
+    "en": {
+        "part": "Part {n} (separate PR)",
+        "boundary": "PR boundary",
+        "done_when": "Done when",
+        "ac": "Part {n}: ",
+    },
+    "ru": {
+        "part": "Ч.{n} (отдельный PR)",
+        "boundary": "Граница PR",
+        "done_when": "Готово, когда",
+        "ac": "Ч.{n}: ",
+    },
+    "de": {
+        "part": "Teil {n} (eigener PR)",
+        "boundary": "PR-Grenze",
+        "done_when": "Fertig, wenn",
+        "ac": "Teil {n}: ",
+    },
+}
+
 # Whitelist of top-level keys. Anything else — including keys of the sibling
 # skills this one was ported from — is rejected, never silently dropped.
 ALLOWED_KEYS = {
@@ -116,6 +141,7 @@ ALLOWED_KEYS = {
     "assignees",
     "milestone",
     "kickoff",
+    "parts",
     # Native links and the board, set by issue-create.sh after the create; they do
     # not change the body (Dependencies stays the author's prose).
     "parent",
@@ -125,7 +151,7 @@ ALLOWED_KEYS = {
 KICKOFF_KEYS = set(KICKOFF_PROSE) | set(KICKOFF_LISTS)
 BUG_KEYS = {"environment", "steps", "expected", "actual", "severity"}
 # The Bug layout has no place for these; the other layouts have none for BUG_KEYS.
-STORY_KEYS = {"as_role", "i_want", "so_that", "background", "scope"}
+STORY_KEYS = {"as_role", "i_want", "so_that", "background", "scope", "parts"}
 
 STR_KEYS = (
     "repo",
@@ -245,6 +271,30 @@ def _dependencies(s: dict[str, Any]) -> str:
     return safe_block(dep)
 
 
+def _part_label(s: dict[str, Any]) -> dict[str, str]:
+    return PART_LABEL.get(s.get("lang", "en"), PART_LABEL["en"])
+
+
+def _part_scope(s: dict[str, Any]) -> list[str]:
+    """One bullet per part, its PR boundary and stop criterion nested under it."""
+    label = _part_label(s)
+    return [
+        f"- {label['part'].format(n=n)}: {safe_inline(part['scope'])}\n"
+        f"  - {label['boundary']}: {safe_inline(part['boundary'])}\n"
+        f"  - {label['done_when']}: {safe_inline(part['done_when'])}"
+        for n, part in enumerate(s.get("parts", []), 1)
+    ]
+
+
+def _part_criteria(s: dict[str, Any]) -> list[str]:
+    label = _part_label(s)
+    return [
+        f"- [ ] {label['ac'].format(n=n)}{safe_inline(ac)}"
+        for n, part in enumerate(s.get("parts", []), 1)
+        for ac in part["acceptance_criteria"]
+    ]
+
+
 def render_body(s: dict[str, Any]) -> str:
     """Fixed section order. Dependencies and the DoD checklist are emitted
     unconditionally: an issue without them is missing information, not being
@@ -276,11 +326,15 @@ def render_body(s: dict[str, Any]) -> str:
             )
         if s.get("background"):
             out.append(f"## Background\n\n{safe_block(s['background'])}")
-        if s.get("scope"):
-            out.append(f"## Scope\n\n{_bullets(s['scope'])}")
+        scope = [_bullets(s["scope"])] if s.get("scope") else []
+        scope += _part_scope(s)
+        if scope:
+            out.append("## Scope\n\n" + "\n".join(scope))
 
-    if s.get("acceptance_criteria"):
-        out.append("## Acceptance Criteria\n\n" + _tasks(s["acceptance_criteria"]))
+    criteria = [_tasks(s["acceptance_criteria"])] if s.get("acceptance_criteria") else []
+    criteria += _part_criteria(s)
+    if criteria:
+        out.append("## Acceptance Criteria\n\n" + "\n".join(criteria))
 
     out.append(f"## Dependencies\n\n{_dependencies(s)}")
     out.append("## DoD Checklist\n\n" + _tasks(s.get("dod") or DEFAULT_DOD))
@@ -416,6 +470,41 @@ def _check_links(s: dict[str, Any]) -> None:
             )
 
 
+def _check_parts(parts: Any) -> None:
+    """Every part is a PR: scope, boundary and stop criterion as one-line strings, and
+    at least one acceptance criterion. One part is just the issue."""
+    if not isinstance(parts, list):
+        err(f'"parts" must be a list of objects, got {_kind(parts)}')
+    if len(parts) < 2:
+        err('"parts" needs at least two parts — one part is just the issue, leave "parts" out')
+    for n, part in enumerate(parts, 1):
+        name = f'"parts" part {n}'
+        if not isinstance(part, dict):
+            err(f"{name} must be an object, got {_kind(part)}")
+        unknown = set(part) - set(PART_KEYS)
+        if unknown:
+            err(f'unknown key(s) in "parts" part {n}: {", ".join(sorted(unknown))}')
+        for key in PART_KEYS:
+            if key not in part:
+                err(f'{name} lacks "{key}"')
+        for key in PART_KEYS[:3]:
+            if not isinstance(part[key], str):
+                err(f'{name} "{key}" must be a string, got {_kind(part[key])}')
+            if not part[key].strip():
+                err(f'{name} "{key}" must not be blank')
+            if any(c in part[key] for c in "\r\n"):
+                err(f'{name} "{key}" must be a single line')
+        ac = part["acceptance_criteria"]
+        if not _is_str_list(ac):
+            err(f'{name} "acceptance_criteria" must be a list of strings, got {_kind(ac)}')
+        if not ac:
+            err(f"{name} needs at least one acceptance criterion")
+        if any(not item.strip() for item in ac):
+            err(f'{name} "acceptance_criteria" must not contain blank entries')
+        if any(c in item for item in ac for c in "\r\n"):
+            err(f'{name} "acceptance_criteria" entries must be single lines')
+
+
 def validate(s: Any) -> None:
     if not isinstance(s, dict):
         err("spec must be a JSON object")
@@ -478,6 +567,8 @@ def validate(s: Any) -> None:
 
     if "background" in s:
         _check_fence("background", s["background"])
+    if "parts" in s:
+        _check_parts(s["parts"])
 
     # Each layout silently ignores the other's fields; refuse them instead.
     if typ == "Bug":

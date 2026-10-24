@@ -1,6 +1,6 @@
 ---
 name: create-issue
-description: This skill should be used when the user wants to file, open, raise or write up a GitHub issue, bug report or task from a conversation — resolving the repo from the git remote, enforcing a Definition-of-Ready gate, previewing the full body for explicit approval, guarding against duplicates and putting the issue on the course board (larchanka-training project 12). Also when asked to turn something just discussed into a tracked task.
+description: This skill should be used when the user wants to file, open, raise or write up a GitHub issue, bug report or task from a conversation — resolving the repo from the git remote, enforcing a Definition-of-Ready gate, previewing the full body for explicit approval, guarding against duplicates and putting the issue on the course board (larchanka-training project 12). Also when asked to turn something just discussed into a tracked task, to slice a large task into PR-sized parts, or to file a batch of linked issues.
 metadata:
   version: 1.0.0
   source: team
@@ -36,6 +36,8 @@ All in `.agents/skills/create-issue/scripts/`:
 | `issue-create.sh <spec.json> [--dry-run] [--allow-duplicate] [--no-board]` | Validate → duplicate guard → create once → read back → board + Status → links        |
 | `issue-link.sh OWNER/REPO#N [--parent REF] [--blocked-by REF]...`          | Set native links on an existing issue, idempotently, each read back                  |
 | `issue-link.sh OWNER/REPO --check [--parent REF] [--blocked-by REF]...`    | Look the link targets up for an issue not created yet; writes nothing                |
+| `issue-batch.py <batch.json> [--dry-run] [--no-board]`                     | A batch of issues: validate, preview, create in order once, resume on a rerun        |
+| `issue-batch.py --compare-shape GOLDEN CANDIDATE`                          | Compare two batch files by shape — how the golden `examples/` are checked            |
 
 Creating labels or milestones, comments, closing: plain `gh` calls — `references/hosts.md`.
 
@@ -85,13 +87,17 @@ convention, follow its recent issues (`gh issue list --repo OWNER/REPO --limit 5
 Three hard blockers — do not create until resolved, ask the user:
 
 - a clear title describing **one** piece of work, in the form `[component] description`;
-- at least one acceptance criterion;
+- at least one acceptance criterion — with `parts`, each part's own, its PR boundary and `done_when`;
 - a `kickoff` block with `repo`, one `read_first` entry and `problem_shape`, when the
   issue is technical (a Bug or Task, or anything naming a service or a path). Purely
   non-technical issues (a decision to record) are exempt.
 
 Two soft warnings — mention, then proceed: dependencies unstated ("None" is fine); no
 obvious way to test it. An issue without acceptance criteria is a note to self.
+
+**Slicing** — more than one PR or repo, or independent parts: slice before the spec, into
+parts of one issue or sub-issues (`references/slicing.md`, goldens in `examples/`).
+**Batch** — several issues go through `issue-batch.py` (`references/batch.md`).
 
 ### 6. Build the spec and the body
 
@@ -142,7 +148,8 @@ Blocked by: <OWNER/REPO#N, …, or —>
 Board:      projects/12, Status: Todo   (the default; --no-board skips both)
 ```
 
-Then ask for confirmation. The preview alone is never a green light.
+Then ask for confirmation. The preview alone is never a green light. A batch gets one
+preview and ONE confirmation for the whole set (`references/batch.md` § 3).
 
 **Confirmation across harnesses** (same idea as "Sub-agents across harnesses" in
 `.agents/README.md` — the step must finish in every harness):
@@ -184,7 +191,7 @@ and look at the issue before anything else. Success is the read-back, not create
 | 0    | created — read `verified` (it can be `false`), `board`, `status` and `links` in the JSON                                                                                         |
 | 2    | usage, bad spec or ref, unknown key, non-GitHub remote, attribution guard; milestone not open, unknown Status, `status` with `--no-board`, link target missing or a pull request |
 | 3    | not authenticated (`gh auth login`), or no `project` scope with the board on                                                                                                     |
-| 4    | 4xx, issue tracker disabled or repo not visible, or an exact-title duplicate blocked                                                                                             |
+| 4    | 4xx, issue tracker disabled or repo not visible, or an exact-title duplicate blocked (its `url` / `number` on stdout)                                                            |
 | 5    | 5xx, network/TLS failure or a rate-limited 403, or a failed create whose outcome could not be checked                                                                            |
 | 6    | **issue created**, board step (item-add or Status) failed — never re-run the create; run only the `gh` commands stderr names                                                     |
 | 7    | **issue created**, a native link failed (wins over 6) — never re-run the create; run only the `repair:` command from stderr                                                      |
@@ -218,7 +225,7 @@ on `PATH` that pins the real command lines). From the repo root:
 ```bash
 # api
 uv run pytest .agents/skills/create-issue/tests
-uv run mypy .agents/skills/create-issue/scripts/build_issue_body.py .agents/skills/create-issue/tests
+uv run mypy .agents/skills/create-issue/scripts/*.py .agents/skills/create-issue/tests
 # ui — no Python project; pytest is fetched ephemerally, nothing is added to dependencies
 uv run --no-project --with pytest pytest -p no:cacheprovider .agents/skills/create-issue/tests
 ```
@@ -231,7 +238,7 @@ the explicit line), then `diff -r` against the other repo (`.agents/README.md`).
 
 ## Limits
 
-- GitHub only. No GitLab, and no bulk mode: one issue per run, each with its own approval.
+- GitHub only, no GitLab. Several issues: one batch, one approval (`references/batch.md`).
 - The repo is the one resolved by preflight; to file elsewhere put it in `repo` and run
   `issue-preflight.sh --repo OWNER/REPO` first. The script puts **every** issue on board
   12, including one filed into another repo — pass `--no-board` when filing outside the

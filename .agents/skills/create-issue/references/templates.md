@@ -8,8 +8,8 @@ _contents_, and they are what makes an issue useful to whoever picks it up.
 Spec keys at the top level: `repo`, `type`, `lang`, `summary`, `as_role`, `i_want`,
 `so_that`, `background`, `scope`, `acceptance_criteria`, `dependencies`, `dod`,
 `references`, `environment`, `steps`, `expected`, `actual`, `severity`, `labels`,
-`assignees`, `milestone`, `kickoff`, `parent`, `blocked_by`, `status`. Any other key is a
-hard error, as is a value of the wrong type (every list field is a list of strings) and an
+`assignees`, `milestone`, `kickoff`, `parts`, `parent`, `blocked_by`, `status`. Any other
+key is a hard error, as is a value of the wrong type (every list field is a list of strings) and an
 unclosed code fence in a prose field. `milestone` must be open in the target repo and
 `status` must be an option of the board's Status field (default `Todo`); both are checked
 before the create.
@@ -44,6 +44,7 @@ dependencies         "None" is a real answer. More than one kind of dependency �
                      an object of labelled lists, blocking group first
 references           links to designs, related issues, the discussion
 kickoff              the briefing — see § Kickoff below
+parts                more than one PR — one entry per PR, see § Parts below
 ```
 
 ## Task and Docs
@@ -53,7 +54,7 @@ summary              [component] Short imperative description
 background           why this technical work is needed
 scope                exactly what to do — and what is out of scope
 acceptance_criteria  how anyone can confirm it is finished
-dependencies, references, kickoff   as for a Story
+dependencies, references, kickoff, parts   as for a Story
 ```
 
 ## Bug
@@ -111,6 +112,39 @@ text only:
   "Related, not blocking": ["acme/sandbox#12 — shares the tooling, gates nothing here"]
 }
 ```
+
+## Parts
+
+A task bigger than one PR is sliced (`slicing.md`). Another PR by the same person, in
+sequence, is a part of this issue — «Ч.N», a separate PR with `Refs`; different code in two
+repos, another assignee or parallel work is a sub-issue instead (`batch.md`). Each entry of
+`parts` has four required fields, one line each:
+
+```json
+"parts": [
+  {
+    "scope": "Endpoint `GET /api/runs/{id}/findings.sarif` returns SARIF 2.1.0",
+    "boundary": "read only: serializer, endpoint, tests, OpenAPI; nothing is sent to GitHub",
+    "done_when": "`uv run pytest tests -k sarif` — green",
+    "acceptance_criteria": ["One `result` per finding (file, line, severity, rule)"]
+  },
+  {
+    "scope": "Upload the SARIF to GitHub code scanning when a run finishes",
+    "boundary": "the upload after the commit and its error handling; the endpoint is unchanged",
+    "done_when": "`uv run pytest tests -k sarif_upload` — green, one POST `code-scanning/sarifs`",
+    "acceptance_criteria": ["A failed upload leaves the run status unchanged"]
+  }
+]
+```
+
+The emitter numbers them from 1 and renders each after the plain `scope` bullets —
+`Part 1 (separate PR): <scope>` with `PR boundary` and `Done when` nested under it — and
+its criteria after the plain ones as `Part 1: <criterion>`; the labels follow `lang`
+(`Ч.1 (отдельный PR)`, `Граница PR`, `Готово, когда`, `Ч.1:`). `done_when` is the stop
+criterion: a check someone can run, with its expected result. With `parts` the plain
+`acceptance_criteria` may be left out — every part's criteria count. One part is refused (it
+is just the issue), as is a part with a missing, blank or multi-line field, an empty or
+blank criterion, and `parts` on a Bug. The full example: `examples/02-two-prs/`.
 
 ## Definition of Done
 
@@ -207,7 +241,8 @@ file:
 Do not write the implementation plan here. Whoever takes the issue will have current
 `main` in front of them; the plan will be stale and they will follow it anyway. Record
 instead what they cannot cheaply rediscover — which file mattered, and which command lied
-to you. Every line obeys § Reference hygiene.
+to you. Every line obeys § Reference hygiene. Decomposition is allowed and is not a plan:
+`parts` say what each PR delivers and where it stops, never how (`slicing.md`).
 
 The headings follow `lang`: a Russian repository gets `Kickoff — с чего начать` and
 Russian field names. The check before you move on: _could a competent contributor with
