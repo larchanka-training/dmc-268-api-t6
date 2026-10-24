@@ -108,7 +108,9 @@ worker, and leaves `RETRIEVED_PROMPT_VERSIONS` alone.
      90 s on either engine (PIPELINE_SPEC §3: the verifier is always ≤ 90 s; review round 1).
    - `counter` is `token_counter_for(profile.counter_version)` when there is a snapshot, otherwise `None`.
    - `review_context` and `policy_snapshot` come from `context`.
-   - `llm.call` records carry `replace(run, prompt_version_id=bindings.verifier_id)` when the snapshot pins it.
+   - `llm.call` records carry `replace(run, prompt_version_id=bindings.verifier_id)`. Without a pinned verifier
+     prompt, or without a snapshot, that is `None`, never the review prompt the run carries (decided by the
+     coordinator in review round 1).
 8. **R13 channel**:
    - `VerifiedReviewOutput` (`review_output.py:366`) carries plain dicts, not `VerificationDecision`:
      `reflection_pass.py` already imports `review_output`, so the reverse import would create a cycle.
