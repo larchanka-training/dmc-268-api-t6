@@ -147,6 +147,13 @@ class StructuredTask:
     # RFS §8.1: repair gets the previous answer as escaped, bounded data, not as an
     # assistant turn. Off for live review and conventions until F turns it on.
     bounded_repair: bool = False
+    # CVS §7.3: provider-call slots of this (run, attempt) kept for the stages after
+    # this task (the review keeps one for the verifier). F sets it; live stays at 0.
+    reserved_calls: int = 0
+
+    def __post_init__(self) -> None:
+        if self.reserved_calls < 0:
+            raise ValueError(f"reserved_calls must not be negative: {self.reserved_calls}")
 
 
 @dataclass(frozen=True)
@@ -246,12 +253,11 @@ class LlmGateway:
         )
         state = _AttemptState()
         attempt = self._attempt_calls(context)
-        max_calls = policy.max_calls_per_attempt
+        # The slots this task may spend: the shared cap minus those kept for later stages.
+        max_calls = policy.max_calls_per_attempt - task.reserved_calls
         if attempt.calls >= max_calls:
             raise self._failed(
-                LlmErrorCode.UNAVAILABLE,
-                f"attempt {context.attempt} already made {attempt.calls} provider calls",
-                state,
+                LlmErrorCode.UNAVAILABLE, _calls_exhausted(context, attempt, task), state
             )
         primary_limit = max_calls - (1 if fallback is not None else 0)
         timeout_s = policy.call_timeout_s[context.engine]
@@ -480,12 +486,10 @@ class LlmGateway:
                 state,
             )
 
-        if attempt.calls >= policy.max_calls_per_attempt:
+        if attempt.calls >= policy.max_calls_per_attempt - task.reserved_calls:
             # Guards concurrent generations of one attempt, not only their entry.
             raise self._failed(
-                LlmErrorCode.UNAVAILABLE,
-                f"attempt {context.attempt} already made {attempt.calls} provider calls",
-                state,
+                LlmErrorCode.UNAVAILABLE, _calls_exhausted(context, attempt, task), state
             )
         state.calls += 1
         attempt.calls += 1
@@ -854,6 +858,12 @@ def _bounded_repair_turn(answer: str, errors: list[str]) -> tuple[str, str]:
         f"{_BOUNDED_REPAIR_INSTRUCTION}"
     )
     return shown, envelope
+
+
+def _calls_exhausted(context: RunCallContext, attempt: _AttemptCalls, task: StructuredTask) -> str:
+    """The cap message; the reserve is named only when the task keeps one (live: never)."""
+    reserve = f", {task.reserved_calls} kept for later stages" if task.reserved_calls else ""
+    return f"attempt {context.attempt} already made {attempt.calls} provider calls{reserve}"
 
 
 def _validated(response: ChatResponse, task: StructuredTask) -> _Outcome:

@@ -289,6 +289,7 @@ The overlap lists come from intersecting E's complete file list with each PR's f
   - §9 `:576` should say v2 and the verifier schema are implemented but not live-checked.
 - **CVS:**
   - §7.3: the reserve is the per-task `reserved_calls` that F sets, and V2 is a fallback rather than a repair;
+    likewise, with one slot reserved after C1, the review's R2 is its fallback rather than a repair (Task 12);
   - `:597-598`: retry calls reuse the base `call_id`.
 - **TEST_PLAN** `:200`: the repair injection row is covered on the snapshot path.
 - **SD §15 OQ-2** and `docs/SECRETS.md`/`CICD.md`: carrying `LLM_VERIFIER_*` to staging (OQ-6).
