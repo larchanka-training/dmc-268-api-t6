@@ -232,6 +232,8 @@ class RunStore:
             prompt_version_id=_PROMPT_ID,
             severity_threshold="all",
             max_comments=10,
+            conventions_prompt_version_id=None,
+            verifier_prompt_version_id=None,
         )
 
     async def insert_webhook_run(
