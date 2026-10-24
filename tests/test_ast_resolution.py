@@ -778,7 +778,9 @@ def test_refused_go_package_is_named_by_a_clause_that_can_be_read(
         if ref.module == "example.com/m/internal/store"
     ] == [(*expected, ())]
     # The first member with a readable clause names the package: later ones are not read.
-    assert "internal/store/zz.go" not in provider.asked
+    # Only the cases with a member after that clause can show it.
+    if "internal/store/zz.go" in members:
+        assert "internal/store/zz.go" not in provider.asked
 
 
 def test_go_module_with_replace_is_not_resolved() -> None:
