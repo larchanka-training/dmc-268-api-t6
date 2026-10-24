@@ -28,22 +28,23 @@ from tests.test_run_stream_postgres import insert_queued_run
 
 STARTED = datetime(2026, 10, 24, 9, 0, 0, tzinfo=UTC)
 VERIFY_REQUEST: dict[str, Any] = {
-    "candidate_ids": ["c-1", "c-2"],
+    # Prompt order, not sorted.
+    "candidate_ids": ["c-2", "c-1"],
     "accepted_call_id": "00000000-0000-0000-0000-000000013911",
     "manifest_id": None,
 }
 VERIFY_RESPONSE: dict[str, Any] = {
     "decisions": [
         {
-            "candidate_id": "c-1",
-            "status": "supported",
-            "evidence_refs": [{"block_id": "file-1", "start_line": 10, "end_line": 10}],
-            "requirement_refs": [],
-        },
-        {
             "candidate_id": "c-2",
             "status": "insufficient_context",
             "evidence_refs": [],
+            "requirement_refs": [],
+        },
+        {
+            "candidate_id": "c-1",
+            "status": "supported",
+            "evidence_refs": [{"block_id": "file-1", "start_line": 10, "end_line": 10}],
             "requirement_refs": [],
         },
     ]
@@ -117,22 +118,40 @@ async def _actions(
         return [(index, tool, request, response) for index, tool, request, response in rows]
 
 
+async def _timings(
+    factory: async_sessionmaker[AsyncSession], run_id: UUID
+) -> list[tuple[str, datetime, int]]:
+    async with factory() as session:
+        rows = await session.execute(
+            select(RunAction.tool, RunAction.started_at, RunAction.duration_ms)
+            .where(RunAction.run_id == run_id)
+            .order_by(RunAction.index)
+        )
+        return [(tool, started_at, duration_ms) for tool, started_at, duration_ms in rows]
+
+
 @pytest.mark.integration
 def test_llm_verify_is_written_before_the_postprocess_in_one_transaction(env: Env) -> None:
     engine = env.engine()
     factory = async_sessionmaker(engine, expire_on_commit=False)
 
-    async def scenario() -> tuple[list[tuple[int, str, Any, Any]], list[tuple[int, str]]]:
+    async def scenario() -> tuple[
+        list[tuple[int, str, Any, Any]], list[tuple[int, str]], list[tuple[str, datetime, int]]
+    ]:
         try:
             run_id = await insert_queued_run(factory)
             await _publish(factory, run_id, trace=True, commit=False)
             after_rollback = [(i, tool) for i, tool, _, _ in await _actions(factory, run_id)]
             await _publish(factory, run_id, trace=True)
-            return await _actions(factory, run_id), after_rollback
+            return (
+                await _actions(factory, run_id),
+                after_rollback,
+                await _timings(factory, run_id),
+            )
         finally:
             await engine.dispose()
 
-    actions, after_rollback = asyncio.run(scenario())
+    actions, after_rollback, timings = asyncio.run(scenario())
     assert [(index, tool) for index, tool, _, _ in actions] == [
         (0, "llm.review_output"),
         (1, "llm.verify"),
@@ -141,6 +160,9 @@ def test_llm_verify_is_written_before_the_postprocess_in_one_transaction(env: En
     assert actions[1][2] == VERIFY_REQUEST
     assert actions[1][3] == VERIFY_RESPONSE
     assert after_rollback == []
+    # llm.verify reuses the publishing start with no duration of its own (verifier timing
+    # lives in its llm.call rows); review.postprocess keeps its own duration.
+    assert timings[1:] == [("llm.verify", STARTED, 0), ("review.postprocess", STARTED, 11)]
 
 
 @pytest.mark.integration

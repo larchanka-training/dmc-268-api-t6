@@ -36,7 +36,11 @@ from app.modules.reviews.application.policy_snapshot import (
     make_policy_document_missing,
     make_policy_document_present,
 )
-from app.modules.reviews.application.prompt_budget import verify_provenance_pre_send_guard
+from app.modules.reviews.application.prompt_budget import (
+    EstimatedTokenCounter,
+    LegacyTokenCounter,
+    verify_provenance_pre_send_guard,
+)
 from app.modules.reviews.application.prompt_builder import (
     DEFAULT_BACKEND_V1_CHECKSUM,
     ChangedFile,
@@ -101,7 +105,9 @@ SETTINGS = LlmSettings(
 QUERY_BLOCK = file_block_id("app/query.py")
 
 
-def _snapshot(*, verifier_id: UUID | None = VERIFIER_PROMPT_ID) -> PolicySnapshot:
+def _snapshot(
+    *, counter_version: str = "counter/v2", verifier_id: UUID | None = VERIFIER_PROMPT_ID
+) -> PolicySnapshot:
     return PolicySnapshot(
         schema_version=1,
         snapshot_id=UUID("00000000-0000-0000-0000-000000013705"),
@@ -123,7 +129,7 @@ def _snapshot(*, verifier_id: UUID | None = VERIFIER_PROMPT_ID) -> PolicySnapsho
         service_defaults_rule_version_id=UUID("00000000-0000-0000-0000-000000013707"),
         defaults_checksum=DEFAULT_BACKEND_V1_CHECKSUM,
         prompt_bindings=replace(make_complete_prompt_bindings(), verifier_id=verifier_id),
-        execution_profile=make_complete_execution_profile(),
+        execution_profile=make_complete_execution_profile(counter_version=counter_version),
         policy_digest="digest_123",
     )
 
@@ -270,10 +276,18 @@ class _Provider:
         return [record.kind.value for _, record in self.trace.records]
 
 
+@dataclass
+class _Guarded:
+    """What the gateway hands the pre-send guard before each repair and fallback call."""
+
+    manifests: list[CallManifest] = field(default_factory=list)
+    contexts: list[Any] = field(default_factory=list)
+    snapshots: list[PolicySnapshot | None] = field(default_factory=list)
+
+
 @pytest.fixture
-def manifests(monkeypatch: pytest.MonkeyPatch) -> list[CallManifest]:
-    """Every repair and fallback manifest the gateway checks before sending."""
-    seen: list[CallManifest] = []
+def guarded(monkeypatch: pytest.MonkeyPatch) -> _Guarded:
+    seen = _Guarded()
 
     def spy(
         manifest: CallManifest,
@@ -281,7 +295,9 @@ def manifests(monkeypatch: pytest.MonkeyPatch) -> list[CallManifest]:
         context: Any = None,
         snapshot: PolicySnapshot | None = None,
     ) -> None:
-        seen.append(manifest)
+        seen.manifests.append(manifest)
+        seen.contexts.append(context)
+        seen.snapshots.append(snapshot)
         verify_provenance_pre_send_guard(manifest, context=context, snapshot=snapshot)
 
     monkeypatch.setattr(gateway_module, "verify_provenance_pre_send_guard", spy)
@@ -364,7 +380,7 @@ def test_a_valid_answer_is_returned_with_the_verifier_model_and_operation() -> N
     ]
 
 
-def test_a_missing_reason_is_repaired_with_bounded_data(manifests: list[CallManifest]) -> None:
+def test_a_missing_reason_is_repaired_with_bounded_data(guarded: _Guarded) -> None:
     provider = _Provider(
         [
             _completion(_answer(_without_reason("c-1"))),
@@ -376,16 +392,16 @@ def test_a_missing_reason_is_repaired_with_bounded_data(manifests: list[CallMani
 
     assert provider.kinds() == ["primary", "repair"]
     assert provider.models() == ["verifier-model", "verifier-model"]
-    assert [manifest.recovery_kind for manifest in manifests] == ["repair"]
-    assert reply.accepted_call_id == manifests[0].call_id
+    assert [manifest.recovery_kind for manifest in guarded.manifests] == ["repair"]
+    assert reply.accepted_call_id == guarded.manifests[0].call_id
     assert reply.accepted_call_id != CALL_ID
-    assert [block.block_id for block in manifests[0].blocks][-1] == "previous-output"
+    assert [block.block_id for block in guarded.manifests[0].blocks][-1] == "previous-output"
     # bounded repair: the previous answer is quoted in a user turn, never an assistant turn
     repair_roles = [message["role"] for message in provider.bodies()[1]["messages"]]
     assert repair_roles == ["system", "user", "user"]
 
 
-def test_two_invalid_answers_go_to_the_verifier_fallback(manifests: list[CallManifest]) -> None:
+def test_two_invalid_answers_go_to_the_verifier_fallback(guarded: _Guarded) -> None:
     provider = _Provider(
         [
             _completion(_answer(_without_reason("c-1"))),
@@ -398,9 +414,9 @@ def test_two_invalid_answers_go_to_the_verifier_fallback(manifests: list[CallMan
 
     assert provider.kinds() == ["primary", "repair", "fallback"]
     assert provider.models() == ["verifier-model", "verifier-model", "verifier-fallback-model"]
-    assert [manifest.recovery_kind for manifest in manifests] == ["repair", "fallback"]
-    assert all(manifest.stage == "verification" for manifest in manifests)
-    assert reply.accepted_call_id == manifests[1].call_id
+    assert [manifest.recovery_kind for manifest in guarded.manifests] == ["repair", "fallback"]
+    assert all(manifest.stage == "verification" for manifest in guarded.manifests)
+    assert reply.accepted_call_id == guarded.manifests[1].call_id
     assert [usage.operation for _, usage in provider.ledger.events] == ["verification"] * 3
 
 
@@ -413,7 +429,49 @@ def _repaired_once() -> _Provider:
     )
 
 
-def test_a_snapshot_without_a_verifier_prompt_records_no_prompt_version() -> None:
+def test_repair_and_fallback_guards_get_the_review_context_and_its_snapshot(
+    guarded: _Guarded,
+) -> None:
+    context = _context(_snapshot())
+    provider = _Provider(
+        [
+            _completion(_answer(_without_reason("c-1"))),
+            _completion(_answer(_without_reason("c-1"))),
+            _completion(_answer(_decision("c-1"))),
+        ]
+    )
+
+    provider.verify(context=context)
+
+    assert [manifest.recovery_kind for manifest in guarded.manifests] == ["repair", "fallback"]
+    assert [item is context for item in guarded.contexts] == [True, True]
+    assert [item is context.policy_snapshot for item in guarded.snapshots] == [True, True]
+    assert [record.prompt_version_id for _, record in provider.trace.records] == [
+        VERIFIER_PROMPT_ID
+    ] * 3
+
+
+def test_a_counter_v1_snapshot_estimates_every_call_with_counter_v1() -> None:
+    provider = _repaired_once()
+
+    provider.verify(context=_context(_snapshot(counter_version="counter/v1")))
+
+    def counted(counter: LegacyTokenCounter | EstimatedTokenCounter) -> list[int]:
+        return [
+            sum(counter.count(message["content"]) for message in body["messages"])
+            for body in provider.bodies()
+        ]
+
+    assert [record.input_tokens_estimate for _, record in provider.trace.records] == counted(
+        LegacyTokenCounter()
+    )
+    # counter/v2 equals the verifier profile's heuristic: only counter/v1 shows the counter.
+    assert counted(LegacyTokenCounter()) != counted(EstimatedTokenCounter())
+
+
+def test_a_snapshot_without_a_verifier_prompt_records_no_prompt_version(
+    guarded: _Guarded,
+) -> None:
     # Decided by the coordinator: None, never the review prompt the run carries.
     context = _context(_snapshot(verifier_id=None))
     provider = _repaired_once()
@@ -422,9 +480,11 @@ def test_a_snapshot_without_a_verifier_prompt_records_no_prompt_version() -> Non
 
     assert RUN.prompt_version_id is not None
     assert [record.prompt_version_id for _, record in provider.trace.records] == [None, None]
+    assert [item is context for item in guarded.contexts] == [True]
+    assert [item is context.policy_snapshot for item in guarded.snapshots] == [True]
 
 
-def test_without_a_snapshot_the_verifier_records_no_prompt_version() -> None:
+def test_without_a_snapshot_the_verifier_records_no_prompt_version(guarded: _Guarded) -> None:
     context = _context(None)
     provider = _repaired_once()
 
@@ -433,6 +493,8 @@ def test_without_a_snapshot_the_verifier_records_no_prompt_version() -> None:
     assert reply.output == {"decisions": [_decision("c-1")]}
     assert provider.models() == ["verifier-model", "verifier-model"]
     assert [record.prompt_version_id for _, record in provider.trace.records] == [None, None]
+    assert [item is context for item in guarded.contexts] == [True]
+    assert guarded.snapshots == [None]
 
 
 def test_the_verifier_price_is_checked_against_the_run_cost_limit() -> None:

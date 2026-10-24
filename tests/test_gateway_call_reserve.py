@@ -103,6 +103,23 @@ def invalid() -> httpx.Response:
     return _completion("not json")
 
 
+def billed(content: str) -> httpx.Response:
+    """An answer the provider bills at $0.20 in ``usage.cost``, far above the model price."""
+    return httpx.Response(
+        200,
+        json={
+            "model": "answering-model",
+            "choices": [{"message": {"role": "assistant", "content": content}}],
+            "usage": {
+                "prompt_tokens": 10,
+                "completion_tokens": 5,
+                "cost": 0.2,
+                "cost_currency": "USD",
+            },
+        },
+    )
+
+
 class _Clock:
     def __init__(self) -> None:
         self.current = NOW
@@ -121,6 +138,7 @@ class _Clock:
 class _Provider:
     replies: list[httpx.Response]
     requests: list[httpx.Request] = field(default_factory=list)
+    ledger: InMemoryUsageLedger = field(default_factory=InMemoryUsageLedger)
     trace: InMemoryLlmCallTrace = field(default_factory=InMemoryLlmCallTrace)
 
     def _handle(self, request: httpx.Request) -> httpx.Response:
@@ -129,23 +147,25 @@ class _Provider:
             raise AssertionError("unexpected provider call")
         return self.replies.pop(0)
 
+    def gateway(self, client: httpx.AsyncClient, clock: _Clock) -> LlmGateway:
+        return LlmGateway(
+            SETTINGS,
+            OpenAICompatibleTransport(client),
+            self.ledger,
+            self.trace,
+            checkpoint=context_checkpoint,
+            clock=clock,
+            sleep=clock.sleep,
+            jitter=lambda: 0.0,
+            monotonic=clock.monotonic,
+        )
+
     def run(self, *tasks: StructuredTask) -> list[GatewayResult | LlmCallFailed]:
         """Run the stages one after another in the same (run, attempt)."""
 
         async def exercise() -> list[GatewayResult | LlmCallFailed]:
-            clock = _Clock()
             async with httpx.AsyncClient(transport=httpx.MockTransport(self._handle)) as client:
-                gateway = LlmGateway(
-                    SETTINGS,
-                    OpenAICompatibleTransport(client),
-                    InMemoryUsageLedger(),
-                    self.trace,
-                    checkpoint=context_checkpoint,
-                    clock=clock,
-                    sleep=clock.sleep,
-                    jitter=lambda: 0.0,
-                    monotonic=clock.monotonic,
-                )
+                gateway = self.gateway(client, _Clock())
                 outcomes: list[GatewayResult | LlmCallFailed] = []
                 for task in tasks:
                     try:
@@ -251,6 +271,73 @@ def test_a_review_cannot_start_on_the_reserved_slots() -> None:
     assert verifier.calls == 1
     assert provider.kinds() == ["primary", "repair", "fallback", "primary"]
     assert provider.models()[3:] == ["verifier-model"]
+
+
+def test_a_review_on_the_reserved_slots_fails_on_the_cap_not_on_the_budget() -> None:
+    # C1, C2 repair, C3 fallback at $0.20 each: 3 calls spent and $0.60 over the $0.50 limit.
+    # The entry guard refuses the review before the cost check: a retryable cap failure,
+    # not the terminal budget_exceeded.
+    provider = _Provider([billed("not json"), billed("not json"), billed(json.dumps(ANSWER))])
+
+    conventions, review = provider.run(_task("conventions"), _task("review", reserved_calls=1))
+
+    assert isinstance(conventions, GatewayResult)
+    assert conventions.calls == 3
+    assert isinstance(review, LlmCallFailed)
+    assert review.error_code is LlmErrorCode.UNAVAILABLE
+    assert str(review) == (
+        "llm_unavailable: attempt 1 already made 3 provider calls, 1 kept for later stages"
+    )
+    assert review.calls == 0
+    assert len(provider.requests) == 3
+
+
+class _PausingLedger(InMemoryUsageLedger):
+    """Hold the first generation after its entry check, before its first call."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.entered = asyncio.Event()
+        self.resume = asyncio.Event()
+        self.pause_next = True
+
+    async def run_cost_usd(self, run_id: UUID) -> Decimal:
+        if self.pause_next:
+            self.pause_next = False
+            self.entered.set()
+            await self.resume.wait()
+        return await super().run_cost_usd(run_id)
+
+
+def test_a_concurrent_generation_cannot_leave_the_review_the_reserved_slot() -> None:
+    # The review (one slot reserved) passes its entry check at 0 calls and pauses; a
+    # concurrent conventions generation then spends 3. The fourth slot stays the verifier's.
+    ledger = _PausingLedger()
+    provider = _Provider([invalid(), invalid(), valid(), valid()], ledger=ledger)
+
+    async def scenario() -> tuple[GatewayResult, LlmCallFailed]:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(provider._handle)) as client:
+            gateway = provider.gateway(client, _Clock())
+            paused = asyncio.create_task(gateway.generate(_task("review", reserved_calls=1), RUN))
+            await ledger.entered.wait()
+            try:
+                conventions = await gateway.generate(_task("conventions"), RUN)
+            finally:
+                ledger.resume.set()
+            with pytest.raises(LlmCallFailed) as caught:
+                await paused
+            return conventions, caught.value
+
+    conventions, review = asyncio.run(scenario())
+
+    assert conventions.calls == 3
+    assert review.error_code is LlmErrorCode.UNAVAILABLE
+    assert str(review) == (
+        "llm_unavailable: attempt 1 already made 3 provider calls, 1 kept for later stages"
+    )
+    assert review.calls == 0
+    assert len(provider.requests) == 3
+    assert provider.kinds() == ["primary", "repair", "fallback"]
 
 
 def test_a_negative_reserve_is_refused() -> None:
