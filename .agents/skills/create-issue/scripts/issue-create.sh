@@ -399,7 +399,7 @@ sys.exit(1)
 PY
 )"
   case $? in
-    0) block_duplicate "$OWN" "an issue with exactly this title, opened by you since this batch started ($SINCE), already exists in $REPO: $(printf '%s' "$OWN" | python3 -c 'import json,sys; print(json.load(sys.stdin)["url"])') — not created again" ;;
+    0) block_duplicate "$OWN" "an issue with exactly this title, opened by you at or after $SINCE, already exists in $REPO: $(printf '%s' "$OWN" | python3 -c 'import json,sys; print(json.load(sys.stdin)["url"])') — not created again" ;;
     1) ;;
     3) die "--adopt-since \"$SINCE\" is not an ISO 8601 time with a zone" 2 ;;
     *) die "cannot list the newest issues of $REPO to look for one an earlier run of this batch opened: the response is not a list" 5 ;;
