@@ -11,6 +11,7 @@ import json
 import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
+from datetime import timedelta
 from hashlib import sha256
 from importlib.resources import files
 from typing import Annotated, Any, Literal, Protocol
@@ -633,9 +634,22 @@ class ReflectionPass:
                 raise RunFailure(
                     "verification_deadline_exceeded", "Verifier deadline exceeded"
                 ) from exc
-            if error_code == "verification_context_overflow":
+            if error_code in {"llm_context_overflow", "verification_context_overflow"}:
                 raise RunFailure(
                     "verification_context_overflow", "Verifier prompt context overflow"
+                ) from exc
+            if error_code == "llm_payment_required":
+                # PIPELINE_SPEC §6: a 402 is not retried by the run either.
+                raise RunFailure(
+                    "llm_payment_required", "Verifier provider payment required"
+                ) from exc
+            if error_code == "llm_rate_limited":
+                # RetryDelays turns any retry_after into 2m, or 10m above two minutes.
+                retry_after_s = getattr(exc, "retry_after_s", None)
+                raise RunFailure(
+                    "verification_unavailable",
+                    "Verifier model rate limited",
+                    retry_after=timedelta(seconds=retry_after_s or 0),
                 ) from exc
             raise VerificationUnavailableError("Verifier model call failed") from exc
 
