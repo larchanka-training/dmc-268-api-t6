@@ -1573,6 +1573,77 @@ def test_without_a_readable_base_the_importers_of_a_removed_module_are_dropped(
     assert repository.trees == trees
 
 
+def _generated(path: str) -> bool:
+    return path.startswith("generated/")
+
+
+@pytest.mark.parametrize("case", ["deleted", "moved_into_ignored"])
+def test_a_removed_file_the_ignore_policy_denies_is_never_read_at_the_base(case: str) -> None:
+    if case == "deleted":
+        # The PR deletes an ignored module that a file it leaves alone imports.
+        view = "from generated.store import load\n\n\ndef show(key):\n    return load(key)\n"
+        repository = Repository({"pkg/view.py": view}, base={"generated/store.py": _PY_BASE_STORE})
+        diff_map = _diff_map(_deletion(repository, "generated/store.py"))
+        graph = Graph({_REPOSITORY: (_uses("pkg/view.py", "generated/store.py", "load"),)})
+    else:
+        # The PR moves a module into an ignored directory.
+        repository = Repository(
+            {"generated/store.py": _PY_BASE_STORE, "pkg/view.py": _PY_VIEW},
+            base={"pkg/store.py": _PY_BASE_STORE, "generated/store.py": None},
+        )
+        moved = _vcs_file(
+            repository,
+            "generated/store.py",
+            None,
+            additions=0,
+            status="renamed",
+            previous="pkg/store.py",
+        )
+        diff_map = _diff_map(moved)
+        graph = _load_hints("pkg/view.py")
+
+    result = _select(repository, diff_map, graph, denied=_generated)
+
+    # The base is never listed: a denied file is neither read nor named.
+    assert repository.trees == [_HEAD]
+    assert graph.reads == [(_REPOSITORY, ())]
+    assert repository.read == []
+    assert (result.places, result.omissions) == ((), ())
+    assert (result.found, dict(result.dropped)) == (0, {})
+
+
+@dataclass
+class BaseTreeRaises(Repository):
+    """A repository whose base listing raises ``error``."""
+
+    error: Exception = field(default_factory=lambda: RuntimeError("base unavailable"))
+
+    async def tree(self, revision: str) -> RevisionTree:
+        if revision == _BASE:
+            raise self.error
+        return await super().tree(revision)
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        RunCancelled("installation_unavailable"),
+        RunFailure("deadline_exceeded", "the run deadline passed"),
+        PolicyError(PolicyErrorCode.ACCESS_DENIED, "GitHub answered 403"),
+    ],
+    ids=["cancel", "deadline", "policy"],
+)
+def test_control_raised_by_the_base_listing_ends_the_selection(error: Exception) -> None:
+    repository = BaseTreeRaises(
+        {"pkg/view.py": _PY_VIEW}, base={"pkg/store.py": _PY_BASE_STORE}, error=error
+    )
+
+    with pytest.raises(type(error)) as caught:
+        _select(repository, _diff_map(_deletion(repository)), _load_hints("pkg/view.py"))
+
+    assert caught.value is error
+
+
 def test_a_broken_reference_comes_before_a_reverse_edge() -> None:
     repository = Repository(
         {"pkg/store.py": _PY_STORE, "pkg/app.py": _PY_USER, "pkg/view.py": _PY_VIEW},
