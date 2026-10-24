@@ -407,3 +407,53 @@ def test_after_four_review_calls_the_verifier_makes_no_request() -> None:
     assert "already made 4 provider calls" in str(verifier)
     assert verifier.calls == 0
     assert len(provider.requests) == 4
+
+
+# ---------- the verifier pair a policy snapshot pins (seam with D) ----------
+
+
+def _pinned_models(env: dict[str, str]) -> tuple[str, str | None, str, str | None]:
+    from app.worker import execution_profile_of
+
+    profile = execution_profile_of(LlmSettings.from_env(env))
+    return (
+        profile.review_model,
+        profile.fallback_review_model,
+        profile.verifier_model,
+        profile.fallback_verifier_model,
+    )
+
+
+def test_the_snapshot_pins_the_verifier_pair_from_the_verifier_route() -> None:
+    env = {
+        **REVIEW_ENV,
+        "LLM_VERIFIER_MODEL": "mistral-small-3.2-24b",
+        "LLM_VERIFIER_FALLBACK_MODEL": "mistral-small-4",
+    }
+
+    assert _pinned_models(env) == (
+        "mistral-small-4",
+        "mistral-small-3.2-24b",
+        "mistral-small-3.2-24b",
+        "mistral-small-4",
+    )
+
+
+def test_without_verifier_variables_the_snapshot_pins_the_review_pair_twice() -> None:
+    # Live pin: the default environment pins what it pinned before #130 PR E.
+    assert _pinned_models(REVIEW_ENV) == (
+        "mistral-small-4",
+        "mistral-small-3.2-24b",
+        "mistral-small-4",
+        "mistral-small-3.2-24b",
+    )
+
+
+def test_a_verifier_model_without_any_fallback_pins_no_verifier_fallback() -> None:
+    env = {
+        "LLM_MODEL": "mistral-small-4",
+        "LLM_API_KEYS": "sk-eu-1",
+        "LLM_VERIFIER_MODEL": "mistral-small-3.2-24b",
+    }
+
+    assert _pinned_models(env) == ("mistral-small-4", None, "mistral-small-3.2-24b", None)

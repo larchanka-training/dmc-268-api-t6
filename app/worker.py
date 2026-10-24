@@ -510,12 +510,13 @@ def execution_profile_of(llm: LlmSettings | None) -> ExecutionProfile:
     if llm is None:
         return UNPINNED_EXECUTION_PROFILE
     fallback = llm.fallback
+    verifier, verifier_fallback = llm.verifier_route()
     return ExecutionProfile(
         profile_name="fast",
         review_model=llm.primary.model,
-        verifier_model=llm.primary.model,
+        verifier_model=verifier.model,
         fallback_review_model=None if fallback is None else fallback.model,
-        fallback_verifier_model=None if fallback is None else fallback.model,
+        fallback_verifier_model=None if verifier_fallback is None else verifier_fallback.model,
         primary_provider_route=llm.primary.provider,
         fallback_provider_route=None if fallback is None else fallback.provider,
         tokenizer_version="tokenizer/v1",
