@@ -236,6 +236,16 @@ def test_shard_count_is_pinned_across_the_python_jobs() -> None:
     assert int(splits[0]) == int(name.group(1)) == _expected_shards() == len(shards)
 
 
+def test_shards_keep_the_durations_file_inside_the_checkout() -> None:
+    step = _job_step(_python_job("python-integration"), "Integration tests")
+    commands = "\n".join(line for line in step.splitlines() if not line.lstrip().startswith("#"))
+
+    # An existing --durations-path outside the checkout moves pytest's rootdir away from
+    # pyproject.toml; --strict-markers turns a lost config into a collection error.
+    assert "--durations-path" not in commands
+    assert "--strict-markers" in commands
+
+
 def _expected_shards() -> int:
     """The shard count the aggregating job checks."""
     match = re.search(r'(?m)^          SHARDS: "(\d+)"$', _python_job("python-lint-type-test"))
