@@ -2,7 +2,8 @@
 
 A review reads the state row of its repository under the effective RAG condition and
 never waits for a build: a row another session holds is read as committed, with no write.
-A writer of the repository row is waited for only until the gate's lock timeout.
+A writer of the repository row is waited for only until the gate's lock timeout. The
+row is locked only when the review writes, and the writes are decided again under the lock.
 Under its own lock the review requests an update of a `stale` index and a full of a live
 `empty` one (at most once a day and once per target, never while a build holds the lease),
 brings a TTL-purged index back in a new generation, and extends `last_used_at` at most once
@@ -36,7 +37,11 @@ from sqlalchemy.schema import CreateSchema, DropSchema
 from alembic import command
 from app.modules.code_index.domain.enums import PurgeReason
 from app.modules.code_index.infrastructure.index_store import SqlAlchemyCodeIndexStore
-from app.modules.code_index.infrastructure.review_index import SqlAlchemyReviewIndexUnitOfWork
+from app.modules.code_index.infrastructure.models import CodeIndexState
+from app.modules.code_index.infrastructure.review_index import (
+    SqlAlchemyReviewIndexAccess,
+    SqlAlchemyReviewIndexUnitOfWork,
+)
 from app.modules.reviews.application.rag_index import OpenReviewIndex, RagReadiness
 from tests.test_code_index_store_postgres import (
     C1,
@@ -533,6 +538,79 @@ def test_a_review_skips_a_locked_index_row_and_writes_nothing(reviews: _Reviews)
         assert {
             repository_id: await _row(index, repository_id) for repository_id in (index.a, index.b)
         } == (before)
+
+    asyncio.run(scenario())
+
+
+_LOCK_NOWAIT = "SELECT 1 FROM code_index_states WHERE repository_id = :repository FOR UPDATE NOWAIT"
+
+
+@pytest.mark.integration
+def test_a_review_locks_the_index_row_only_when_it_writes(reviews: _Reviews) -> None:
+    async def scenario() -> None:
+        index = reviews.index
+        # A: a ready index used 59 min ago, so the review writes nothing. B: a stale one,
+        # so the review requests an update.
+        await _enable(index, index.a)
+        await _build(index, index.a, C1, _module("aa01", 1))
+        await _set(index, index.a, "last_used_at = clock_timestamp() - interval '59 minutes'")
+        await _stale(index, index.b)
+        recent = await _row(index, index.a)
+
+        async with index.factory() as reader, index.factory() as writer:
+            read = await SqlAlchemyReviewIndexAccess(reader).open_for_review(index.a)
+            written = await SqlAlchemyReviewIndexAccess(writer).open_for_review(index.b)
+            # Both review transactions are still open.
+            async with index.factory() as probe:
+                await probe.execute(text(_LOCK_NOWAIT), {"repository": index.a})
+                await probe.rollback()
+                with pytest.raises(OperationalError) as held:
+                    await probe.execute(text(_LOCK_NOWAIT), {"repository": index.b})
+                await probe.rollback()
+            await reader.rollback()
+            await writer.rollback()
+
+        assert _seen(read) == ("ready", C1, None, None)
+        assert _seen(written) == ("stale", C1, None, C2)
+        assert getattr(held.value.orig, "sqlstate", None) == "55P03"
+        assert await _row(index, index.a) == recent
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.integration
+def test_a_review_decides_its_writes_again_under_the_index_row_lock(
+    reviews: _Reviews, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def scenario() -> None:
+        index = reviews.index
+        await _stale(index, index.a)
+        marked: dict[str, Any] = {}
+        try_lock = SqlAlchemyReviewIndexAccess._try_lock_state
+
+        async def marked_first(
+            access: SqlAlchemyReviewIndexAccess, repository_id: UUID
+        ) -> CodeIndexState | None:
+            # After the review read the row without a lock, another session queues the
+            # update and uses the index, before the review takes the lock.
+            await _set(
+                index,
+                repository_id,
+                "wake_requested_at = clock_timestamp(), last_used_at = clock_timestamp()",
+            )
+            row = await _row(index, repository_id)
+            assert row is not None
+            marked.update(row)
+            return await try_lock(access, repository_id)
+
+        monkeypatch.setattr(SqlAlchemyReviewIndexAccess, "_try_lock_state", marked_first)
+
+        readiness = await asyncio.wait_for(_review(index, index.a), 5)
+
+        assert _seen(readiness) == ("stale", C1, None, C2)
+        assert marked, "the review did not take the row lock"
+        # Under the lock the update is already queued and the use is recent: no write.
+        assert await _row(index, index.a) == marked
 
     asyncio.run(scenario())
 
