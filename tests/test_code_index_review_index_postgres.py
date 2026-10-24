@@ -207,7 +207,7 @@ def test_a_stale_index_requests_an_update_and_keeps_its_target(reviews: _Reviews
             None,
         )
 
-        # M5: a terminal refusal of the target asks for nothing; a healable code is retried.
+        # A terminal refusal of the target asks for nothing; a healable code is retried.
         await _set(
             index,
             index.a,
@@ -259,7 +259,7 @@ def test_a_ttl_purged_index_comes_back_in_a_new_generation_once_a_day(
         assert start <= back["review_full_requested_at"] <= end
         assert back["review_full_requested_sha"] is None
 
-        # M1 holds across a TTL purge: a second one within the day stays purged.
+        # The daily limit holds across a TTL purge: a second one within the day stays purged.
         await _purge(index, index.a, PurgeReason.TTL)
         again = await _row(index, index.a)
         assert again is not None
