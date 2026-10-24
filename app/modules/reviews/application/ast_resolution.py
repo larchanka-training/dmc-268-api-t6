@@ -17,6 +17,7 @@ from typing import Protocol
 
 from app.modules.reviews.application.ast_symbols import (
     AstFacts,
+    AstFailureReason,
     AstImport,
     AstImportName,
     AstLanguage,
@@ -492,6 +493,23 @@ def exported_symbols(facts: AstFacts, name: str) -> tuple[AstSymbol, ...]:
     return () if index is None else (facts.symbols[index],)
 
 
+def _uses_wildcard(facts: AstFacts, symbol: AstSymbol) -> bool:
+    """Whether ``symbol`` names something a wildcard or dot import of its file may bind.
+
+    Any name the file does not bind otherwise counts, a builtin or an attribute name
+    included: the rule over-approximates on purpose, because a missed use is silent.
+    A Go dot import binds only exported names, so only those count there.
+    """
+    bound: set[str | None] = {symbol.name, *symbol.local_bindings}
+    bound.update(binding.alias for item in facts.imports for binding in item.names)
+    bound.update(item.name for item in facts.symbols if item.enclosing is None)
+    exported_only = facts.language is AstLanguage.GO
+    return any(
+        name not in bound and (not exported_only or name[:1].isupper())
+        for name in symbol.references
+    )
+
+
 _Outcome = tuple[ImportResolution, str | None, tuple[SymbolRef, ...]]
 _Loaded = list[tuple[str, AstFacts]]
 
@@ -511,7 +529,7 @@ class ImportResolver:
         self, *, importer_path: str, facts: AstFacts, symbols: Iterable[AstSymbol]
     ) -> tuple[ImportRef, ...]:
         refs: list[ImportRef] = []
-        seen: set[tuple[str, str, tuple[str, ...]]] = set()
+        seen: set[tuple[str, str | None, tuple[str, ...]]] = set()
         symbols_in_file = 0
         for symbol in symbols:
             importer_id = f"{self._tree.revision[:12]}:{importer_path}#{symbol.index}"
@@ -520,15 +538,30 @@ class ImportResolver:
                     alias = binding.alias
                     if alias is None and facts.language is AstLanguage.GO:
                         alias = await self._go_package_name(item, binding)
+                    members: tuple[str, ...]
+                    wanted: tuple[str, ...]
                     if alias is None:
-                        continue
-                    members = tuple(
-                        sorted({name for owner, name in symbol.member_references if owner == alias})
-                    )
-                    named = binding.kind in {ImportKind.NAMED, ImportKind.DEFAULT}
-                    if not (alias in symbol.references if named else members):
-                        continue
-                    wanted = (binding.name,) if named and binding.name is not None else members
+                        # A wildcard binds names it does not list: a use is reported with
+                        # its reason, and the target is never read.
+                        # CONTRACT: the extractor emits WILDCARD only on static imports; the
+                        # form check keeps a re-export (which binds nothing) out if it changes.
+                        if not (
+                            binding.kind is ImportKind.WILDCARD
+                            and item.form is ImportForm.STATIC
+                            and _uses_wildcard(facts, symbol)
+                        ):
+                            continue
+                        members = wanted = ()
+                    else:
+                        members = tuple(
+                            sorted(
+                                {name for owner, name in symbol.member_references if owner == alias}
+                            )
+                        )
+                        named = binding.kind in {ImportKind.NAMED, ImportKind.DEFAULT}
+                        if not (alias in symbol.references if named else members):
+                            continue
+                        wanted = (binding.name,) if named and binding.name is not None else members
                     key = (item.module, alias, wanted)
                     if key in seen:
                         continue
@@ -590,9 +623,18 @@ class ImportResolver:
         if target.resolution is not ImportResolution.RESOLVED:
             return go_package_name(item.module, None)
         loaded = await self._load(list(target.files))
-        if not isinstance(loaded, list):
-            return go_package_name(item.module, None)
-        return go_package_name(item.module, (facts for _, facts in loaded))
+        if isinstance(loaded, list):
+            return go_package_name(item.module, (facts for _, facts in loaded))
+        # A refused package is still named by its clause, so the use it binds keeps the
+        # reason of the refusal. The first member, in member order, whose facts carry a
+        # clause names it, a member with syntax errors included: the extractor takes the
+        # clause only from a top-level `package_clause`. Members already asked are not
+        # counted again; each one past the refusal counts toward the file limit.
+        for path in target.files:
+            facts = await self._provider.facts_for(path)
+            if isinstance(facts, AstFacts) and facts.package_name:
+                return facts.package_name
+        return go_package_name(item.module, None)
 
     async def _resolve(
         self,
@@ -639,10 +681,13 @@ class ImportResolver:
         loaded: _Loaded = []
         for path in files:
             facts = await self._provider.facts_for(path)
+            # One unusable member leaves the whole package unresolved: uniqueness of a
+            # name cannot be shown on the remaining subset, nor on a member whose syntax
+            # errors can hide a declaration, an export or the package clause.
             if isinstance(facts, FileUnavailable):
-                # One unusable member leaves the whole package unresolved: uniqueness of
-                # a name cannot be shown on the remaining subset.
                 return facts
+            if facts.has_errors:
+                return FileUnavailable(AstFailureReason.AST_FAILED.value)
             loaded.append((path, facts))
         return loaded
 

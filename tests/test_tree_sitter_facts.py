@@ -230,6 +230,49 @@ def test_tsx_is_parsed_with_its_own_grammar() -> None:
     assert facts.has_errors is False
 
 
+def test_javascript_signatures_end_where_the_body_starts() -> None:
+    source = b"""// Adds two numbers.
+export function add(
+  a,
+  b
+) {
+  return a + b;
+}
+
+/** A counter. */
+export class Counter {
+  // Increments by a step.
+  increment(
+    step
+  ) {
+    this.value += step;
+  }
+}
+"""
+    facts = _facts(AstLanguage.JAVASCRIPT, source)
+
+    assert facts.has_errors is False
+    assert _lines(_symbol(facts, "add")) == ((2, 7), (2, 5), [(1, 1)])
+    assert _lines(_symbol(facts, "Counter")) == ((10, 17), (10, 10), [(9, 9)])
+    assert _lines(_symbol(facts, "increment")) == ((12, 16), (12, 14), [(11, 11)])
+
+
+def test_tsx_component_signature_keeps_its_typed_props() -> None:
+    source = b"""type Props = { label: string };
+
+// Renders a button.
+export function Button({
+  label,
+}: Props): JSX.Element {
+  return <button>{label}</button>;
+}
+"""
+    facts = _facts(AstLanguage.TSX, source)
+
+    assert facts.has_errors is False
+    assert _lines(_symbol(facts, "Button")) == ((4, 8), (4, 6), [(3, 3)])
+
+
 def test_go_declarations_package_and_imports() -> None:
     facts = _facts(AstLanguage.GO, _GO)
 

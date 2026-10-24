@@ -99,7 +99,7 @@ def _one(sources: dict[str, str], importer: str, symbol: str, **options: object)
     return refs[0]
 
 
-def _diff_file(patch: str, additions: int, deletions: int) -> DiffFile:
+def _diff_file(patch: str, additions: int, deletions: int, path: str = "app.py") -> DiffFile:
     pull_request = VcsPullRequest(
         locator=PullRequestLocator(17, "octo/repo", 7),
         head_sha=_HEAD,
@@ -119,7 +119,7 @@ def _diff_file(patch: str, additions: int, deletions: int) -> DiffFile:
         ),
     )
     file = VcsFile(
-        "app.py", "modified", "d" * 40, None, additions, deletions, additions + deletions, patch
+        path, "modified", "d" * 40, None, additions, deletions, additions + deletions, patch
     )
     return build_diff_map(
         pull_request,
@@ -198,6 +198,48 @@ def test_removed_lines_locate_the_symbol_by_the_surviving_lines() -> None:
     assert [item.name for item in affected_symbols(facts, removed).symbols] == ["run"]
 
 
+_TS_MODULE = """import { log } from "./log";
+
+export function first(): number {
+  return 1;
+}
+
+export class Service {
+  run(): number {
+    return 2;
+  }
+
+  stop(): number {
+    return 3;
+  }
+}
+"""
+_JS_MODULE = _TS_MODULE.replace("(): number {", "() {")
+
+
+@pytest.mark.parametrize(
+    ("path", "source"),
+    [
+        pytest.param("src/app.ts", _TS_MODULE, id="ts"),
+        pytest.param("src/app.js", _JS_MODULE, id="js"),
+    ],
+)
+def test_script_added_line_selects_the_method_and_a_statement_between_is_module_level(
+    path: str, source: str
+) -> None:
+    in_method = affected_symbols(
+        _facts(path, source.replace("    return 2;\n", "    const x = 1;\n    return 2;\n")),
+        _diff_file("@@ -8,2 +8,3 @@\n   run() {\n+    const x = 1;\n     return 2;", 1, 0, path),
+    )
+    between = affected_symbols(
+        _facts(path, source.replace("}\n\nexport class", "}\n\nlog(1);\nexport class")),
+        _diff_file("@@ -6,2 +6,3 @@\n \n+log(1);\n export class Service {", 1, 0, path),
+    )
+
+    assert ([item.name for item in in_method.symbols], in_method.module_level) == (["run"], False)
+    assert (between.symbols, between.module_level) == ((), True)
+
+
 def test_python_relative_import_resolves_the_used_name_only() -> None:
     sources = {
         "pkg/app.py": "from .models import User, Role\n\ndef make():\n    return User()\n",
@@ -267,7 +309,9 @@ def test_python_missing_name_shadowing_and_wildcard_are_not_guessed() -> None:
         "pkg/app.py",
         "f",
     )
-    assert refs == ()
+    assert [
+        (ref.module, ref.names, ref.resolved_symbols, ref.resolution, ref.reason) for ref in refs
+    ] == [(".models", (), (), ImportResolution.UNSUPPORTED, "no_named_symbol")]
     assert provider.asked == []
 
 
@@ -278,6 +322,114 @@ def test_unused_import_is_never_loaded() -> None:
     }
 
     refs, provider = _resolve(sources, "pkg/app.py", "f")
+
+    assert refs == ()
+    assert provider.asked == []
+
+
+def test_go_dot_import_used_by_the_change_is_reported_not_loaded() -> None:
+    sources = {
+        "go.mod": "module example.com/m\n\ngo 1.22\n",
+        "cmd/main.go": (
+            'package main\n\nimport . "example.com/m/internal/store"\n\n'
+            "func Run() error {\n\treturn Open()\n}\n"
+        ),
+        "internal/store/open.go": "package store\n\nfunc Open() error { return nil }\n",
+    }
+
+    refs, provider = _resolve(sources, "cmd/main.go", "Run")
+
+    assert [
+        (ref.module, ref.names, ref.resolved_symbols, ref.resolution, ref.reason) for ref in refs
+    ] == [
+        (
+            "example.com/m/internal/store",
+            (),
+            (),
+            ImportResolution.UNSUPPORTED,
+            "no_named_symbol",
+        )
+    ]
+    assert provider.asked == []
+
+
+@pytest.mark.parametrize(
+    ("importer", "symbol", "sources"),
+    [
+        pytest.param(
+            "pkg/app.py",
+            "f",
+            {
+                "pkg/app.py": "from .models import *\n\ndef f():\n    return 1\n",
+                "pkg/models.py": "class User:\n    pass\n",
+            },
+            id="python-wildcard-unused",
+        ),
+        pytest.param(
+            "pkg/app.py",
+            "run",
+            {
+                "pkg/app.py": (
+                    "from .models import *\n\n\nclass Service:\n"
+                    "    def run(self):\n        return 1\n"
+                ),
+                "pkg/models.py": "class User:\n    pass\n",
+            },
+            id="python-wildcard-unused-in-a-method",
+        ),
+        pytest.param(
+            "pkg/app.py",
+            "f",
+            {
+                "pkg/app.py": (
+                    "from .models import *\nimport os\n\n\ndef helper():\n    return 1\n\n\n"
+                    "def f(x):\n    y = x\n    return os, helper(), y\n"
+                ),
+                "pkg/models.py": "class User:\n    pass\n",
+            },
+            id="python-wildcard-only-names-the-file-binds",
+        ),
+        pytest.param(
+            "cmd/main.go",
+            "Run",
+            {
+                "go.mod": "module example.com/m\n\ngo 1.22\n",
+                "cmd/main.go": (
+                    'package main\n\nimport . "example.com/m/internal/store"\n\n'
+                    "func Run() int {\n\treturn 1\n}\n"
+                ),
+                "internal/store/open.go": "package store\n\nfunc Open() error { return nil }\n",
+            },
+            id="go-dot-import-only-predeclared-names",
+        ),
+        pytest.param(
+            "cmd/main.go",
+            "Run",
+            {
+                "go.mod": "module example.com/m\n\ngo 1.22\n",
+                "cmd/main.go": (
+                    'package main\n\nimport _ "example.com/m/internal/store"\n\n'
+                    "func Run() error {\n\treturn Open()\n}\n"
+                ),
+                "internal/store/open.go": "package store\n\nfunc Open() error { return nil }\n",
+            },
+            id="go-blank-import",
+        ),
+        pytest.param(
+            "src/app.ts",
+            "f",
+            {
+                "src/app.ts": 'export * from "./x";\nexport function f() { return g(); }\n',
+                "src/x.ts": "export function g() { return 1 }\n",
+            },
+            id="ts-export-star",
+        ),
+    ],
+)
+def test_wildcard_the_change_cannot_use_by_name_gives_no_ref(
+    importer: str, symbol: str, sources: dict[str, str]
+) -> None:
+    refs, provider = _resolve(sources, importer, symbol)
 
     assert refs == ()
     assert provider.asked == []
@@ -376,6 +528,48 @@ def test_javascript_relative_es_imports_and_the_forms_it_does_not_follow() -> No
     assert mixed.resolution is ImportResolution.UNSUPPORTED
 
 
+def test_tsx_and_jsx_components_resolve_to_their_own_extension() -> None:
+    tsx = _one(
+        {
+            "src/App.tsx": (
+                'import { Button } from "./Button";\n\n'
+                'export function App() {\n  return <Button label="ok" />;\n}\n'
+            ),
+            "src/Button.tsx": (
+                "export function Button(props: { label: string }) {\n"
+                "  return <button>{props.label}</button>;\n}\n"
+            ),
+        },
+        "src/App.tsx",
+        "App",
+    )
+    jsx = _one(
+        {
+            "src/App.jsx": (
+                'import Button from "./Button";\n\n'
+                'export function App() {\n  return <Button label="ok" />;\n}\n'
+            ),
+            "src/Button.jsx": (
+                "export default function Button({ label }) {\n"
+                "  return <button>{label}</button>;\n}\n"
+            ),
+        },
+        "src/App.jsx",
+        "App",
+    )
+
+    assert (tsx.resolution, tsx.names) == (ImportResolution.RESOLVED, ("Button",))
+    assert (tsx.resolved_symbols[0].path, tsx.resolved_symbols[0].name) == (
+        "src/Button.tsx",
+        "Button",
+    )
+    assert (jsx.resolution, jsx.names) == (ImportResolution.RESOLVED, ("default",))
+    assert (jsx.resolved_symbols[0].path, jsx.resolved_symbols[0].name) == (
+        "src/Button.jsx",
+        "Button",
+    )
+
+
 _GO_MOD = "module example.com/m\n\ngo 1.22\n"
 _GO_APP = """package main
 
@@ -460,6 +654,133 @@ def test_go_resolution_is_refused_when_the_package_is_not_fully_known() -> None:
         ImportResolution.UNSUPPORTED,
         "ast_limit",
     )
+    assert reason(store({}, unavailable={"internal/store/open.go": "source_decode_failed"})) == (
+        ImportResolution.UNSUPPORTED,
+        "source_decode_failed",
+    )
+
+
+@pytest.mark.parametrize(
+    ("path", "source", "extracted"),
+    [
+        pytest.param(
+            "internal/store/broken.go",
+            "package store\n\nfunc Close( {\n}\n",
+            ["Close"],
+            id="no-duplicate",
+        ),
+        pytest.param(
+            "internal/store/broken.go",
+            "package store\n\nvar x = (\nfunc Open() error { return nil }\n",
+            [],
+            id="declaration-inside-the-error",
+        ),
+        pytest.param(
+            "internal/store/broken.go",
+            "packag store\n\nfunc Close() {}\n",
+            ["Close"],
+            id="broken-clause-beside-a-valid-member",
+        ),
+        pytest.param(
+            "internal/store/open.go",
+            "packag store\n\nfunc Open() error { return nil }\n",
+            ["Open"],
+            id="only-member-with-a-broken-clause",
+        ),
+    ],
+)
+def test_go_member_with_a_parse_error_refuses_the_whole_package(
+    path: str, source: str, extracted: list[str]
+) -> None:
+    # CONTEXT §3.3: a member that does not parse can hide a declaration or its package
+    # clause, so a name is not unique just because the parsed members declare it once.
+    facts = _facts(path, source)
+    assert facts.has_errors is True
+    assert [symbol.name for symbol in facts.symbols] == extracted
+    sources = {
+        "go.mod": _GO_MOD,
+        "cmd/main.go": _GO_APP.replace("db.Open()", "store.Open()"),
+        "internal/store/open.go": "package store\n\nfunc Open() error { return nil }\n",
+        path: source,
+    }
+
+    refs, _ = _resolve(sources, "cmd/main.go", "Run")
+
+    assert [
+        (ref.resolution, ref.reason, ref.resolved_symbols)
+        for ref in refs
+        if ref.module == "example.com/m/internal/store"
+    ] == [(ImportResolution.UNSUPPORTED, "ast_failed", ())]
+
+
+_GO_OPEN = "package CLAUSE\n\nfunc Open() error { return nil }\n"
+
+
+@pytest.mark.parametrize("clause", ["db", "store"])
+@pytest.mark.parametrize(
+    ("members", "unavailable", "expected"),
+    [
+        pytest.param(
+            {"internal/store/open.go": _GO_OPEN + "\nfunc Close( {\n}\n"},
+            {},
+            (ImportResolution.UNSUPPORTED, "ast_failed"),
+            id="parse-error",
+        ),
+        pytest.param(
+            {"internal/store/a.go": "packag CLAUSE\n", "internal/store/open.go": _GO_OPEN},
+            {},
+            (ImportResolution.UNSUPPORTED, "ast_failed"),
+            id="member-without-a-clause-first",
+        ),
+        pytest.param(
+            {
+                "internal/store/a.go": "package CLAUSE\n",
+                "internal/store/open.go": _GO_OPEN,
+                "internal/store/zz.go": "package CLAUSE\n\nfunc Close() {}\n",
+            },
+            {"internal/store/a.go": "source_decode_failed"},
+            (ImportResolution.UNSUPPORTED, "source_decode_failed"),
+            id="decode-failure",
+        ),
+        pytest.param(
+            {"internal/store/a.go": "package CLAUSE\n", "internal/store/open.go": _GO_OPEN},
+            {"internal/store/a.go": "excluded"},
+            (ImportResolution.EXCLUDED, "excluded"),
+            id="excluded-member",
+        ),
+        pytest.param(
+            {"internal/store/a.go": _GO_OPEN, "internal/store/b.go": "package CLAUSE\n"},
+            {"internal/store/b.go": "ast_limit"},
+            (ImportResolution.UNSUPPORTED, "ast_limit"),
+            id="file-limit-after-a-read",
+        ),
+    ],
+)
+def test_refused_go_package_is_named_by_a_clause_that_can_be_read(
+    members: dict[str, str],
+    unavailable: dict[str, str],
+    expected: tuple[ImportResolution, str],
+    clause: str,
+) -> None:
+    # A clause that differs from the directory still binds the use, so the refusal is
+    # reported on it: the same outcome as for a package named after its directory.
+    sources = {
+        "go.mod": _GO_MOD,
+        "cmd/main.go": _GO_APP.replace("db.Open()", f"{clause}.Open()"),
+        **{path: source.replace("CLAUSE", clause) for path, source in members.items()},
+    }
+
+    refs, provider = _resolve(sources, "cmd/main.go", "Run", unavailable=unavailable)
+
+    assert [
+        (ref.resolution, ref.reason, ref.resolved_symbols)
+        for ref in refs
+        if ref.module == "example.com/m/internal/store"
+    ] == [(*expected, ())]
+    # The first member with a readable clause names the package: later ones are not read.
+    # Only the cases with a member after that clause can show it.
+    if "internal/store/zz.go" in members:
+        assert "internal/store/zz.go" not in provider.asked
 
 
 def test_go_module_with_replace_is_not_resolved() -> None:
@@ -489,6 +810,139 @@ def test_excluded_python_target_is_reported_and_not_shown() -> None:
     ref = _one(sources, "pkg/app.py", "f", unavailable={"pkg/client.py": "excluded"})
 
     assert (ref.resolution, ref.resolved_symbols) == (ImportResolution.EXCLUDED, ())
+
+
+@pytest.mark.parametrize(
+    ("importer", "specifier", "target"),
+    [
+        pytest.param("src/app.ts", "./models", "src/models.ts", id="ts"),
+        pytest.param("src/app.js", "./models.js", "src/models.js", id="js"),
+    ],
+)
+def test_excluded_script_target_is_reported_and_not_shown(
+    importer: str, specifier: str, target: str
+) -> None:
+    sources = {
+        importer: (
+            f'import {{ User }} from "{specifier}";\n'
+            "export function run() { return new User(); }\n"
+        ),
+        target: "export class User {}\n",
+    }
+
+    ref = _one(sources, importer, "run", unavailable={target: "excluded"})
+
+    assert (ref.resolution, ref.reason, ref.resolved_symbols) == (
+        ImportResolution.EXCLUDED,
+        "excluded",
+        (),
+    )
+
+
+_SCRIPT_IMPORTER = (
+    'import { User } from "./models";\nexport function run() { return new User(); }\n'
+)
+_SCRIPT_ERROR_ELSEWHERE = "export class User {}\nexport function broken( { }\n"
+
+
+@pytest.mark.parametrize(
+    ("importer", "target", "name", "sources"),
+    [
+        pytest.param(
+            "pkg/app.py",
+            "pkg/models.py",
+            "User",
+            {
+                "pkg/app.py": "from .models import User\n\ndef run():\n    return User()\n",
+                "pkg/models.py": "class User:\n    pass\n\ndef broken(:\n    pass\n",
+            },
+            id="py",
+        ),
+        *(
+            pytest.param(
+                f"src/app{extension}",
+                f"src/models{extension}",
+                "User",
+                {
+                    f"src/app{extension}": _SCRIPT_IMPORTER,
+                    f"src/models{extension}": _SCRIPT_ERROR_ELSEWHERE,
+                },
+                id=extension[1:],
+            )
+            for extension in (".ts", ".tsx", ".js", ".jsx")
+        ),
+        pytest.param(
+            "cmd/main.go",
+            "internal/store/open.go",
+            "Open",
+            {
+                "go.mod": _GO_MOD,
+                "cmd/main.go": (
+                    'package main\n\nimport "example.com/m/internal/store"\n\n'
+                    "func run() error {\n\treturn store.Open()\n}\n"
+                ),
+                "internal/store/open.go": (
+                    "package store\n\nfunc Open() error { return nil }\n\nfunc Close( {\n}\n"
+                ),
+            },
+            id="go",
+        ),
+    ],
+)
+def test_import_target_that_is_not_parsed_keeps_the_parse_reason(
+    importer: str, target: str, name: str, sources: dict[str, str]
+) -> None:
+    # The error is outside the imported declaration: the whole file is refused anyway,
+    # because an error region can hide a second declaration or export of the name.
+    facts = _facts(target, sources[target])
+    assert facts.has_errors is True
+    assert [symbol.complete for symbol in facts.symbols if symbol.name == name] == [True]
+
+    broken = _one(sources, importer, "run")
+    timed_out = _one(sources, importer, "run", unavailable={target: "ast_timeout"})
+
+    assert (broken.resolution, broken.reason, broken.resolved_symbols) == (
+        ImportResolution.UNSUPPORTED,
+        "ast_failed",
+        (),
+    )
+    assert (timed_out.resolution, timed_out.reason) == (ImportResolution.UNSUPPORTED, "ast_timeout")
+
+
+@pytest.mark.parametrize(
+    ("importer", "target", "sources"),
+    [
+        pytest.param(
+            "pkg/app.py",
+            "pkg/models.py",
+            {
+                "pkg/app.py": "from .models import User\n\ndef run():\n    return User()\n",
+                "pkg/models.py": "class User(:\n    pass\n",
+            },
+            id="py",
+        ),
+        pytest.param(
+            "src/app.ts",
+            "src/models.ts",
+            {"src/app.ts": _SCRIPT_IMPORTER, "src/models.ts": "export class User { x = ; }\n"},
+            id="ts",
+        ),
+    ],
+)
+def test_import_target_with_an_error_over_the_imported_symbol_is_not_resolved(
+    importer: str, target: str, sources: dict[str, str]
+) -> None:
+    # Resolved, the incomplete symbol would only be withheld later as an L4 `ast_limit`.
+    facts = _facts(target, sources[target])
+    assert [symbol.complete for symbol in facts.symbols if symbol.name == "User"] == [False]
+
+    ref = _one(sources, importer, "run")
+
+    assert (ref.resolution, ref.reason, ref.resolved_symbols) == (
+        ImportResolution.UNSUPPORTED,
+        "ast_failed",
+        (),
+    )
 
 
 def _many_exports(count: int) -> dict[str, str]:

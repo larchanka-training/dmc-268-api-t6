@@ -373,7 +373,9 @@ def test_go_mod_counts_toward_the_limit_of_imported_files() -> None:
 
     payload, repository = build(20)
     # One file over the limit: the package is not fully known, so nothing is resolved.
-    assert [ref.resolution for ref in payload.imports] != [ImportResolution.RESOLVED]
+    assert [(ref.resolution, ref.reason) for ref in payload.imports] == [
+        (ImportResolution.UNSUPPORTED, "ast_limit")
+    ]
     assert ContextLevel.L4 not in payload.levels_present
     assert len([path for path in repository.read if path != "cmd/main.go"]) <= 20
 
@@ -398,6 +400,190 @@ def test_changed_file_past_the_ast_limit_is_not_parsed_through_an_import() -> No
     assert "pkg/m50.py" not in parser.parsed
     assert len(parser.parsed) == 50
     assert all(ref.resolution is not ImportResolution.RESOLVED for ref in payload.imports)
+
+
+def test_import_target_with_a_parse_error_keeps_the_parse_reason_not_an_l4_limit() -> None:
+    # A syntax error over the imported class: the import is not resolved, so the target
+    # is never cut from L4 as if it were too large.
+    repository = _service_repository()
+    repository.files["pkg/models.py"] = _MODELS.replace("class User:", "class User(:")
+    diff_map = _diff_map(_vcs_file(repository, "pkg/service.py", _GREET_PATCH))
+
+    payload = _build(repository, diff_map)
+
+    assert [(ref.resolution, ref.reason) for ref in payload.imports] == [
+        (ImportResolution.UNSUPPORTED, "ast_failed")
+    ]
+    assert ("ast_limit", "pkg/models.py") not in [
+        (item.reason, item.path) for item in payload.omissions
+    ]
+    assert ContextLevel.L4 not in payload.levels_present
+
+
+def _docstring(words: int, *, lines: int = 1) -> str:
+    """An indented docstring of ``words`` words (one per line when ``lines`` > 1)."""
+    if lines == 1:
+        return '    """' + " ".join(["w"] * words) + '"""\n'
+    assert words == lines
+    return '    """w\n' + "    w\n" * (lines - 2) + '    w"""\n'
+
+
+def _sized(text: str, size: int) -> str:
+    """``text`` and a trailing comment line, ``size`` bytes in UTF-8 in total."""
+    padded = text + "#" * (size - len(text.encode()) - 1) + "\n"
+    assert len(padded.encode()) == size
+    return padded
+
+
+@pytest.mark.parametrize(
+    ("words", "shown"),
+    [
+        # 4 x 2000 fill the total exactly; the fifth fragment, 2 + 1 = 3 tokens, is cut.
+        pytest.param((1998, 1998, 1998, 1998, 1), [2000, 2000, 2000, 2000], id="exact"),
+        # 7999 are shown; the fifth, a bare 2-token signature, does not fit in the 1 left.
+        pytest.param((1998, 1998, 1998, 1997, None), [2000, 2000, 2000, 1999], id="one-short"),
+    ],
+)
+def test_imported_signatures_stop_at_the_l4_total_of_8000_tokens(
+    words: tuple[int | None, ...], shown: list[int]
+) -> None:
+    # A signature `def fN():` is 2 words and a docstring of k words adds k: one token a word.
+    library = "".join(
+        f"def f{n}():\n{'' if count is None else _docstring(count)}    return {n}\n\n\n"
+        for n, count in enumerate(words)
+    )
+    repository = Repository(
+        {
+            "pkg/app.py": (
+                "from .lib import f0, f1, f2, f3, f4\n\n\n"
+                "def run():\n    x = 1\n    return f0() + f1() + f2() + f3() + f4()\n"
+            ),
+            "pkg/lib.py": library,
+        }
+    )
+    patch = "@@ -4,2 +4,3 @@\n def run():\n+    x = 1\n     return f0() + f1() + f2() + f3() + f4()"
+    diff_map = _diff_map(_vcs_file(repository, "pkg/app.py", patch))
+
+    payload = _build(repository, diff_map)
+
+    imported = [block for block in payload.blocks if block.level is ContextLevel.L4]
+    assert [block.source.ranges for block in imported] == [
+        (LineRange(1, 2),),
+        (LineRange(6, 7),),
+        (LineRange(11, 12),),
+        (LineRange(16, 17),),
+    ]
+    assert [block.tokens for block in imported] == shown
+    assert [(item.reason, item.path) for item in payload.omissions] == [("ast_limit", "pkg/lib.py")]
+
+
+@pytest.mark.parametrize(
+    "docstring",
+    [
+        pytest.param(_docstring(200, lines=200), id="201-lines"),
+        pytest.param(_docstring(1999), id="2001-tokens"),
+    ],
+)
+def test_imported_signature_over_the_fragment_limit_is_not_shown(docstring: str) -> None:
+    repository = _service_repository()
+    repository.files["pkg/models.py"] = "class User:\n" + docstring
+    diff_map = _diff_map(_vcs_file(repository, "pkg/service.py", _GREET_PATCH))
+
+    payload = _build(repository, diff_map)
+
+    assert [ref.resolution for ref in payload.imports] == [ImportResolution.RESOLVED]
+    assert ("ast_limit", "pkg/models.py") in [
+        (item.reason, item.path) for item in payload.omissions
+    ]
+    assert ContextLevel.L4 not in payload.levels_present
+
+
+@pytest.mark.parametrize(
+    ("docstring", "ranges", "tokens"),
+    [
+        pytest.param(_docstring(199, lines=199), (LineRange(1, 200),), 201, id="200-lines"),
+        pytest.param(_docstring(1998), (LineRange(1, 2),), 2000, id="2000-tokens"),
+    ],
+)
+def test_imported_signature_at_the_fragment_limit_is_shown(
+    docstring: str, ranges: tuple[LineRange, ...], tokens: int
+) -> None:
+    repository = _service_repository()
+    repository.files["pkg/models.py"] = "class User:\n" + docstring
+    diff_map = _diff_map(_vcs_file(repository, "pkg/service.py", _GREET_PATCH))
+
+    payload = _build(repository, diff_map)
+
+    assert [
+        (block.source.path, block.source.ranges, block.tokens)
+        for block in payload.blocks
+        if block.level is ContextLevel.L4
+    ] == [("pkg/models.py", ranges, tokens)]
+
+
+def test_changed_file_over_256_kib_keeps_its_diff_and_is_not_parsed() -> None:
+    over = _service_repository()
+    over.files["pkg/service.py"] = _sized(_SERVICE, 262_145)
+    at = _service_repository()
+    at.files["pkg/service.py"] = _sized(_SERVICE, 262_144)
+    over_parser, at_parser = InProcessParser(), InProcessParser()
+
+    over_payload = _build(
+        over, _diff_map(_vcs_file(over, "pkg/service.py", _GREET_PATCH)), parser=over_parser
+    )
+    at_payload = _build(
+        at, _diff_map(_vcs_file(at, "pkg/service.py", _GREET_PATCH)), parser=at_parser
+    )
+
+    assert ("source_too_large", "pkg/service.py") in [
+        (item.reason, item.path) for item in over_payload.omissions
+    ]
+    assert [
+        block.source.path for block in over_payload.blocks if block.level is ContextLevel.L1
+    ] == ["pkg/service.py"]
+    assert "pkg/service.py" not in over_parser.parsed
+    assert "pkg/service.py" in at_parser.parsed
+    assert "source_too_large" not in [item.reason for item in at_payload.omissions]
+
+
+def test_imported_file_over_256_kib_is_not_resolved() -> None:
+    repository = _service_repository()
+    repository.files["pkg/models.py"] = _sized(_MODELS, 262_145)
+    diff_map = _diff_map(_vcs_file(repository, "pkg/service.py", _GREET_PATCH))
+
+    payload = _build(repository, diff_map)
+
+    assert [(ref.resolution, ref.reason) for ref in payload.imports] == [
+        (ImportResolution.UNSUPPORTED, "source_too_large")
+    ]
+
+
+@pytest.mark.parametrize(
+    "excluded",
+    [pytest.param("pkg/a.go", id="first-member"), pytest.param("pkg/b.go", id="later-member")],
+)
+def test_excluded_go_member_is_never_read_while_its_package_is_named(excluded: str) -> None:
+    # The clause `db` differs from the directory `pkg/`, so the resolver reads members to
+    # name the refused package; the masked member is skipped by path, never read.
+    repository = Repository(
+        {
+            "go.mod": "module example.com/m\n\ngo 1.22\n",
+            "cmd/main.go": (
+                'package main\n\nimport "example.com/m/pkg"\n\nfunc main() {\n\tdb.Open()\n}\n'
+            ),
+            "pkg/a.go": "package db\n\nfunc Open() {}\n",
+            "pkg/b.go": "package db\n\nfunc Close() {}\n",
+        }
+    )
+    patch = "@@ -5,2 +5,3 @@\n func main() {\n+\tdb.Open()\n }"
+    diff_map = _diff_map(_vcs_file(repository, "cmd/main.go", patch))
+
+    payload = _build(repository, diff_map, rules_text=f"```review-ignore\n{excluded}\n```\n")
+
+    assert excluded not in repository.read
+    assert [(ref.resolution, ref.reason) for ref in payload.imports] == [
+        (ImportResolution.EXCLUDED, "excluded")
+    ]
 
 
 def test_file_of_an_unresolved_identity_is_not_read_through_an_import() -> None:
