@@ -1,4 +1,4 @@
-"""Runs pin their conventions and verifier prompts at creation (#130)."""
+"""Runs pin their conventions and verifier prompts at creation; policy pins read them (#130)."""
 
 from __future__ import annotations
 
@@ -14,23 +14,52 @@ from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.bootstrap.seed_prompts import PromptAsset, load_prompt_assets, seed_prompt_versions
+from app.modules.reviews.application.policy_snapshot import ExecutionProfile, PromptBindings
+from app.modules.reviews.application.prepare_policy_snapshot import (
+    PreparePolicySnapshot,
+    RunPolicyPins,
+    build_policy_snapshot,
+)
 from app.modules.reviews.application.rerun_run import RerunOutcome
+from app.modules.reviews.application.review_ignore import parse_review_ignore
 from app.modules.reviews.application.try_enqueue_webhook_run import (
     PendingRunMessage,
     RunInsertCandidate,
 )
 from app.modules.reviews.infrastructure.models import PromptVersion, Run
-from app.modules.reviews.infrastructure.rerun_store import SqlAlchemyRerunUnitOfWork
+from app.modules.reviews.infrastructure.policy_snapshot_unit_of_work import (
+    SqlAlchemyPolicySnapshotUnitOfWork,
+)
+from app.modules.reviews.infrastructure.rerun_store import (
+    SqlAlchemyRerunStore,
+    SqlAlchemyRerunUnitOfWork,
+)
 from app.modules.reviews.infrastructure.run_lifecycle_store import SqlAlchemyRunLifecycleStore
 from app.modules.reviews.infrastructure.webhook_runs import SqlAlchemyWebhookRunUnitOfWork
-from tests.portal_postgres import NOW, PR_NEW, REPO_A, Env, portal_schema
+from tests.portal_postgres import (
+    NOW,
+    PR_NEW,
+    PROMPT,
+    REPO_A,
+    RULE_A,
+    RUN_ATTEMPTED,
+    Env,
+    portal_schema,
+)
+from tests.test_prepare_policy_snapshot import Source
 from tests.test_run_publication_settings_postgres import _claim, _insert, _ready
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+SYSTEM_V3_SHA = "eb851e7fc2329eb7bdff015ec0fda945c46111ec5c884934ed6f6d6803883452"
 CONVENTIONS_V2 = (
     "review.conventions",
     2,
     "225a8f7d56835cf1307ddb25feac602c3d10e03c34ee51afc90a1f99af101454",
+)
+CONVENTIONS_V3 = (
+    "review.conventions",
+    3,
+    "721803a63b12b5c1e25bf758be59b6b6272c755050db5ff594333fc48250289b",
 )
 VERIFIER_V2 = (
     "review.verifier",
@@ -236,6 +265,107 @@ def test_repository_prompt_override_applies_to_review_system_only(env: Env) -> N
                 assert run.prompt_version_id == system_v2
                 assert await _row_pins(session, run) == (CONVENTIONS_V2, VERIFIER_V2)
                 await session.rollback()
+        finally:
+            await engine.dispose()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.integration
+def test_get_pins_returns_complete_bindings_from_pinned_rows(env: Env) -> None:
+    async def scenario() -> None:
+        engine = env.engine()
+        factory = async_sessionmaker(engine, expire_on_commit=False)
+        try:
+            await _ready(factory)
+            await _seed(factory, _packaged())
+            async with factory.begin() as session:
+                run_id = await _insert(session)
+                await session.execute(
+                    text("UPDATE runs SET state='succeeded' WHERE id=:run"), {"run": run_id}
+                )
+            # A v3 pair proves the versions come from the rows, not the "v2" defaults.
+            await _seed(factory, (_newer("review.conventions"), _newer("review.verifier")))
+            async with factory.begin() as session:
+                rerun = await SqlAlchemyRerunStore(session, allow_unscoped=True).create_rerun(
+                    run_id, NOW
+                )
+            assert rerun.message is not None
+            for pinned, conventions, verifier in (
+                (run_id, CONVENTIONS_V2, VERIFIER_V2),
+                (rerun.message.run_id, CONVENTIONS_V3, VERIFIER_V3),
+            ):
+                async with factory() as session:
+                    run = await session.get(Run, pinned)
+                assert run is not None
+                async with SqlAlchemyPolicySnapshotUnitOfWork(factory) as work:
+                    pins = await work.policy.get_pins(pinned)
+                assert pins is not None
+                assert pins.prompt_bindings == PromptBindings(
+                    review_system_checksum=SYSTEM_V3_SHA,
+                    conventions_checksum=conventions[2],
+                    verifier_checksum=verifier[2],
+                    review_system_version="v3",
+                    conventions_version=f"v{conventions[1]}",
+                    verifier_version=f"v{verifier[1]}",
+                    review_system_id=run.prompt_version_id,
+                    conventions_id=run.conventions_prompt_version_id,
+                    verifier_id=run.verifier_prompt_version_id,
+                )
+                assert pins.prompt_bindings.is_complete is True
+        finally:
+            await engine.dispose()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.integration
+def test_historical_run_keeps_todays_pins_and_digest(env: Env) -> None:
+    profile = ExecutionProfile.fast("model-a", "", "model-c")
+    # What get_pins returned for this run before #130: the review prompt only, the
+    # conventions and verifier versions at their defaults and the injected profile.
+    legacy = RunPolicyPins(
+        run_id=RUN_ATTEMPTED,
+        repository_id=REPO_A,
+        policy_base_sha="b" * 40,
+        service_defaults_rule_version_id=RULE_A,
+        defaults_checksum="1" * 64,
+        prompt_bindings=PromptBindings(
+            review_system_checksum="c" * 64,
+            conventions_checksum="",
+            verifier_checksum="",
+            review_system_version="v1",
+            review_system_id=PROMPT,
+        ),
+        execution_profile=profile,
+    )
+
+    async def scenario() -> None:
+        engine = env.engine()
+        factory = async_sessionmaker(engine, expire_on_commit=False)
+
+        def uow() -> SqlAlchemyPolicySnapshotUnitOfWork:
+            return SqlAlchemyPolicySnapshotUnitOfWork(factory, execution_profile=profile)
+
+        try:
+            # Active conventions and verifier rows exist; the run pinned neither of them.
+            await _seed(factory, _packaged())
+            async with uow() as work:
+                pins = await work.policy.get_pins(RUN_ATTEMPTED)
+            assert pins == legacy
+            assert pins.prompt_bindings.is_complete is False
+            await _claim(factory, RUN_ATTEMPTED, 2)
+            stored = await PreparePolicySnapshot(
+                uow_factory=uow, source_factory=lambda pins: Source()
+            ).execute(RUN_ATTEMPTED)
+            expected = build_policy_snapshot(
+                legacy,
+                rules=stored.rules,
+                agents=stored.agents,
+                ignore=parse_review_ignore(stored.rules.text, policy_base_sha="b" * 40),
+                snapshot_id=stored.snapshot_id,
+            )
+            assert stored.policy_digest == expected.policy_digest
         finally:
             await engine.dispose()
 
