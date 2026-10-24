@@ -83,7 +83,7 @@ actually blocks them will get it wrong:
 
 ```json
 "dependencies": {
-  "Blocks": ["acme/sandbox#11 — the decision the work cannot start without, and why"],
+  "Blocked by": ["acme/sandbox#11 — the decision the work cannot start without, and why"],
   "Related, not blocking": ["acme/sandbox#12 — shares the tooling, gates nothing here"]
 }
 ```
@@ -91,11 +91,16 @@ actually blocks them will get it wrong:
 Labels are free text: say what the group means to the reader.
 
 Native links come from two spec keys, not from the body: `parent` (one ref — the issue
-becomes its sub-issue; same owner only) and `blocked_by` (a list of refs). A ref is `#N`
-(the spec's repo) or `OWNER/REPO#N`, so a blocker may live in the other team repo. The
-script sets them after the create and reads each back (`hosts.md`). The body still says
-_why_ each one matters — the link is what makes it visible on the other issue. "Related,
-not blocking" has no native link on GitHub and stays text only:
+becomes its sub-issue; same owner only) and `blocked_by` (a list of refs, read as "this
+issue is blocked by X"; the parent may be one of them). A ref is `#N` (the spec's repo) or
+`OWNER/REPO#N`, so a blocker may live in the other team repo. The script sets them after
+the create and reads each back (`hosts.md`). An issue that _this_ one blocks has no key:
+after the create, set that edge from the other side with
+`issue-link.sh OWNER/REPO#<other> --blocked-by <this>`. The body still says _why_ each one
+matters, under a label naming the same direction as the edge ("Blocked by" / «Блокирующие»
+for `blocked_by`, "Blocks" / «Блокирует» for the reverse) — the link is what makes it
+visible on the other issue. "Related, not blocking" has no native link on GitHub and stays
+text only:
 
 ```json
 "parent": "#11",
@@ -132,6 +137,13 @@ a request rather than a report: "Add per-node metrics endpoint", not "Per-node m
 are missing". A Bug inverts it: the title states **what is wrong** — "Diff viewer drops
 the last hunk", not "Fix the diff viewer". The fix is the issue's job; the title's job is
 identification.
+
+## Language
+
+Title and prose in Russian (`"lang": "ru"`), even if the request came in English. Section
+headings stay English (`Background`, `Scope`, `Acceptance Criteria`, `Dependencies`,
+`DoD Checklist`, `References`) as in `larchanka-training/dmc-268-api-t6#33` and `…#46`;
+Kickoff is rendered in Russian.
 
 ## Reference hygiene
 

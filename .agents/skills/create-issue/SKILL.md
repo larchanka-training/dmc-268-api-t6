@@ -20,9 +20,8 @@ draft.
 
 ## Preconditions
 
-- `gh` authenticated with scopes `repo` and `project` (`gh auth status`). Without
-  `project` the run stops before the create (exit 3) unless `--no-board`; fix with
-  `gh auth refresh -s project`.
+- `gh` authenticated with scopes `repo` and `project` (`gh auth status`); without `project`
+  the run stops before the create (exit 3) unless `--no-board` — `gh auth refresh -s project`.
 - bash 4+ (`mapfile`), GNU `find`, `curl` and python3 (stdlib only) on `PATH`.
 - Run from the clone the issue belongs to. Paths in this file are from the repo root.
 
@@ -36,6 +35,7 @@ All in `.agents/skills/create-issue/scripts/`:
 | `build_issue_body.py <spec.json> [--emit-args \| --emit-links]`            | Spec → markdown body, the `gh` flag vector, or the resolved native links             |
 | `issue-create.sh <spec.json> [--dry-run] [--allow-duplicate] [--no-board]` | Validate → duplicate guard → create once → read back → board + Status → links        |
 | `issue-link.sh OWNER/REPO#N [--parent REF] [--blocked-by REF]...`          | Set native links on an existing issue, idempotently, each read back                  |
+| `issue-link.sh OWNER/REPO --check [--parent REF] [--blocked-by REF]...`    | Look the link targets up for an issue not created yet; writes nothing                |
 
 Creating labels or milestones, comments, closing: plain `gh` calls — `references/hosts.md`.
 
@@ -69,13 +69,15 @@ picks the layout and one repo label (`bug`, `enhancement`, `documentation`) — 
 Everything discussed so far is material (title, background, scope, acceptance criteria,
 dependencies, references; for a bug environment, steps, expected, actual). Tag each part
 for the preview — `[✓ high]` stated, `[⚠ low]` inferred, `[✗ missing]` — so the user sees
-which parts were invented.
+which parts were invented. Dependencies go by direction: "this issue is blocked by X" →
+`blocked_by`; an issue this one blocks has no key — after the create run
+`issue-link.sh OWNER/REPO#<other> --blocked-by <this>`; "related, not blocking" stays text.
 
 ### 4. Language
 
-Team issues are Russian: set `"lang": "ru"` **explicitly** (the emitter's default is
-`en`) — see Body conventions. For a repo with a different convention, look at its recent
-issues (`gh issue list --repo OWNER/REPO --limit 5 --json title`) and follow them.
+Team issues are Russian: set `"lang": "ru"` **explicitly** (the emitter's default is `en`;
+headings stay English — `references/templates.md` § Language). For a repo with another
+convention, follow its recent issues (`gh issue list --repo OWNER/REPO --limit 5 --json title`).
 
 ### 5. Definition of Ready
 
@@ -100,7 +102,7 @@ cat > "$SPEC" <<'JSON'
 { "repo": "<OWNER/REPO from preflight>", "type": "Task", "lang": "ru",
   "summary": "[component] Короткий заголовок в повелительном наклонении",
   "background": "…", "scope": ["…"], "acceptance_criteria": ["…"],
-  "dependencies": {"Блокирует": ["…"], "Связано, не блокирует": ["…"]}, "references": ["…"],
+  "dependencies": {"Блокирующие": ["…"], "Связано, не блокирует": ["…"]}, "references": ["…"],
   "kickoff": {"repo": "…", "branch": "fix/<n>-<slug> — `main` защищён, через PR",
               "problem_shape": "…", "read_first": ["…"],
               "before_writing_code": ["…"], "mines": ["…"]},
@@ -115,7 +117,8 @@ would let user text forge a heading, and always emits `Dependencies` and `DoD Ch
 It refuses (exit 2) rather than drops: an unknown key, a value of the wrong type, a Bug
 with story fields (or the reverse), a newline in the title, an unclosed code fence, a ref
 that is not `#N` / `OWNER/REPO#N`, a `parent` of another owner. `parent` / `blocked_by`
-become native links after the create; the body is unchanged — `references/templates.md`.
+become native links after the create; the body is unchanged. Field contents, dependency
+shapes, the default DoD, titles, language and reference hygiene: `references/templates.md`.
 
 `issue-create.sh "$SPEC" --dry-run` prints the body, `milestone`, `status` and resolved
 `links`, creating nothing. It is **not offline**: after the attribution guard it runs
@@ -160,12 +163,14 @@ On **Edit**, ask what to change, rebuild, re-print the full preview, ask again. 
 
 After the validation: an exact-title duplicate search (exit 4 unless `--allow-duplicate`;
 **fail-open** — a failed search warns and the create proceeds), one create, a REST
-read-back. A create that returns nothing useful is never retried: only a new same-title
-issue opened by you is adopted; if that lookup fails, the outcome is unknown (exit 5).
-Then board 12 with its Status (read back, re-set once if the board's automation overwrote
-it) and the native links through `issue-link.sh`, each read back. A failed link never
-undoes the issue: exit 7, stderr ends with `repair: <issue-link.sh command>` — run only
-that; a rerun skips what is in place and never replaces a parent.
+read-back. A create that returns nothing useful is never retried: the newest issues are
+listed (a plain listing — the search index lags) and only a same-title issue that was not
+there before and was opened by you is adopted, never an older duplicate or a teammate's.
+If that lookup fails the outcome is unknown (exit 5): check the repo by hand before
+retrying. Then board 12 with its Status (read back, re-set once if the board's automation
+overwrote it) and the native links through `issue-link.sh`, each read back. A failed link
+never undoes the issue: exit 7, stderr ends with `repair: <issue-link.sh command>` — run
+only that; a rerun skips what is in place and never replaces a parent.
 
 Report the URL, `board` (`added` / `skipped` / `failed`), `status`, `links` and `verified`.
 A `verified: false` means the title or milestone read back differs from the spec — say so
@@ -173,32 +178,15 @@ and look at the issue before anything else. Success is the read-back, not create
 
 ## Exit codes
 
-| Code | Meaning                                                                                                                                              |
-| ---- | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 0    | created — read `verified` (it can be `false`), `board`, `status` and `links` in the JSON                                                             |
-| 2    | usage, bad spec or ref, unknown key, non-GitHub remote, attribution guard; milestone not open, unknown Status, link target missing or a pull request |
-| 3    | not authenticated (`gh auth login`), or no `project` scope with the board on                                                                         |
-| 4    | 4xx, issue tracker disabled or repo not visible, or an exact-title duplicate blocked                                                                 |
-| 5    | 5xx or network/TLS failure, or a failed create whose outcome could not be checked                                                                    |
-| 6    | **issue created**, board step (item-add or Status) failed — stdout has the url; never re-run the create                                              |
-| 7    | **issue created**, a native link failed (wins over 6) — stdout has the url and `links`; never re-run the create                                      |
-
-On **6** or **7** run only the command stderr names (`gh project item-add` / `item-edit`,
-or the `repair:` line; after `gh auth refresh -s project` if stderr says so).
-
-## Body conventions
-
-- **Language:** title and prose in Russian (`"lang": "ru"`), even if the request came in
-  English. Section headings stay English (`Background`, `Scope`, `Acceptance Criteria`,
-  `Dependencies`, `DoD Checklist`, `References`) as in
-  `larchanka-training/dmc-268-api-t6#33` and `…#46`; Kickoff is rendered in Russian.
-- **Title:** `[component] description` — imperative for Story, Task and Docs, "what is
-  wrong" for a Bug.
-- **Type → label:** `Bug` → `bug`, `Story` / `Task` → `enhancement`, `Docs` →
-  `documentation`; added to `--label` by the emitter, de-duplicated against `labels`.
-- **DoD:** the default is the team merge gate (one approval, all threads resolved);
-  override with `dod` only for issue-specific gates.
-- **References:** nothing may resolve only on your machine — `references/templates.md`.
+| Code | Meaning                                                                                                                                                                          |
+| ---- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 0    | created — read `verified` (it can be `false`), `board`, `status` and `links` in the JSON                                                                                         |
+| 2    | usage, bad spec or ref, unknown key, non-GitHub remote, attribution guard; milestone not open, unknown Status, `status` with `--no-board`, link target missing or a pull request |
+| 3    | not authenticated (`gh auth login`), or no `project` scope with the board on                                                                                                     |
+| 4    | 4xx, issue tracker disabled or repo not visible, or an exact-title duplicate blocked                                                                                             |
+| 5    | 5xx, network/TLS failure or a rate-limited 403, or a failed create whose outcome could not be checked                                                                            |
+| 6    | **issue created**, board step (item-add or Status) failed — never re-run the create; run only the `gh` commands stderr names                                                     |
+| 7    | **issue created**, a native link failed (wins over 6) — never re-run the create; run only the `repair:` command from stderr                                                      |
 
 ## Gate before creating
 
@@ -236,8 +224,9 @@ uv run --no-project --with pytest pytest -p no:cacheprovider .agents/skills/crea
 
 **Not in the required CI job, by decision:** api's `testpaths = ["tests"]` never collects
 them and ui has no Python in CI — a CI step must name the path, or it is green because
-nothing ran. Run them by hand whenever the skill changes (`mypy .` skips dot-directories,
-hence the explicit line), then `diff -r` against the other repo (`.agents/README.md`).
+nothing ran. Run them by hand whenever the skill changes (api's `ruff check .` and
+`ruff format --check .` do cover the `.py` files; `mypy .` skips dot-directories, hence
+the explicit line), then `diff -r` against the other repo (`.agents/README.md`).
 
 ## Limits
 

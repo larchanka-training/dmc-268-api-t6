@@ -22,8 +22,8 @@
 # Errors: {"error": "..."} on stderr.
 # Exit: 0 every link in place · 2 usage, bad ref, issue or target not found,
 #       target is a pull request, parent of another owner · 3 auth · 5 5xx,
-#       network or unknown · 7 at least one link failed (stdout still printed;
-#       rerun the same command to retry)
+#       network, rate limit or unknown · 7 at least one link failed (stdout still
+#       printed; rerun the same command to retry)
 #
 # Offline test seam: ISSUE_FIXTURE_DIR. A REST call reads the file named after
 # its path, query string dropped: GET repos/O/R/issues/N → repos/O/R/issues/N.json
@@ -138,15 +138,22 @@ api_post() {  # api_post PATH FIELD=VALUE — the response is not used: the sub-
 }
 errtext() { head -c 300 "$WORK/err" 2>/dev/null | tr '\n' ' ' | sed 's/ *$//'; }
 # The exit class of a failed lookup, from the HTTP status gh reports — not from
-# any three digits in the text, which can be an issue number.
+# any three digits in the text, which can be an issue number. A 403 that is a
+# (secondary) rate limit is transient, not a refusal.
 fail_code() {
-  local status
+  local status text
   status="$(grep -Eo 'HTTP [0-9]{3}' "$WORK/err" 2>/dev/null | head -1)"
+  text="$(lower "$(cat "$WORK/err" 2>/dev/null)")"
   case "${status#HTTP }" in
-    404)     echo 2 ;;
-    401|403) echo 3 ;;
+    404) echo 2 ;;
+    401) echo 3 ;;
+    403)
+      case "$text" in
+        *"rate limit"*|*abuse*) echo 5 ;;
+        *) echo 3 ;;
+      esac ;;
     *)
-      case "$(tr '[:upper:]' '[:lower:]' < "$WORK/err" 2>/dev/null)" in
+      case "$text" in
         *authentication*|*unauthorized*|*"bad credentials"*) echo 3 ;;
         *) echo 5 ;;  # 5xx, timeout, connection refused, or anything unrecognised
       esac ;;

@@ -134,7 +134,8 @@ def main() -> None:
     if argv[:2] == ["project", "item-edit"]:
         answer("", cfg.get("edit_rc", 0), cfg.get("edit_err", ""))
     if argv[:2] == ["api", "graphql"]:
-        # the Status read-backs, in order: after the first edit, after the retry
+        # the Status read-backs in call order: after the edit, after the pause (only for
+        # a Status other than Todo), after the re-edit — whichever of them run
         with open(os.environ["STUB_LOG"], encoding="utf-8") as fh:
             n = sum(1 for line in fh if json.loads(line)[1:3] == ["api", "graphql"])
         answer(cfg["status_reads"][n - 1])

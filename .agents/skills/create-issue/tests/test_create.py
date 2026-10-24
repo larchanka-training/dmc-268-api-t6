@@ -327,16 +327,17 @@ def run(
     project_fields: str | None = PROJECT_FIELDS,
     extra: dict[str, Any] | None = None,
     item_add: str = '{"id": "PVTI_item"}',
-    status_reads: tuple[str | None, ...] | None = None,
-    edit_code: str = "0",
+    status_reads: dict[str, str] | None = None,
     edit_err: str = "",
 ) -> subprocess.CompletedProcess[str]:
     """`None` for search / recover_before / recover / milestones / project_view /
     project_fields means the fixture file does not exist, which the script treats as
     a failed call. `extra` adds fixture files by relative path (issue-link.sh's
     REST-path files, `<name>.err` texts); dicts and lists are written as JSON.
-    `status_reads` are the board Status names read back after the first edit and
-    after the retry; by default the first read shows the Status asked for."""
+    `status_reads` maps each board Status read-back — `first` (after the edit),
+    `confirm` (after the pause, only for a Status other than Todo) and `retry` (after
+    the re-edit) — to the name it shows; a missing key is a failed read. By default
+    the first and the confirm read show the Status asked for."""
     spec = spec or BASE_SPEC
     fix = tmp_path / "fix"
     fix.mkdir(parents=True, exist_ok=True)
@@ -348,11 +349,14 @@ def run(
         "project_view.json": project_view,
         "project_fields.json": project_fields,
     }
-    reads = status_reads or (spec.get("status") or "Todo",)
-    for name, read in zip(
-        ("project_status.json", "project_status.retry.json"), reads, strict=False
+    want = spec.get("status") or "Todo"
+    reads = status_reads if status_reads is not None else {"first": want, "confirm": want}
+    for key, name in (
+        ("first", "project_status.json"),
+        ("confirm", "project_status.confirm.json"),
+        ("retry", "project_status.retry.json"),
     ):
-        optional[name] = None if read is None else status_read(read)
+        optional[name] = status_read(reads[key]) if key in reads else None
     for name, val in optional.items():
         if val is not None:
             (fix / name).write_text(val)
@@ -370,7 +374,6 @@ def run(
         "project_add.code": board_code,
         "project_add.err": board_err,
         "project_add.json": item_add,
-        "project_edit.code": edit_code,
         "project_edit.err": edit_err,
     }
     for name, val in files.items():
@@ -600,7 +603,16 @@ def test_a_missing_milestone_stops_the_run_before_the_create(
 
 @pytest.mark.parametrize(
     "err,code",
-    [("gh: Bad credentials (HTTP 401)", 3), ("gh: Server Error (HTTP 502)", 5), ("", 5)],
+    [
+        ("gh: Bad credentials (HTTP 401)", 3),
+        ("gh: Resource not accessible by integration (HTTP 403)", 3),
+        # a (secondary) rate limit is transient, not a refusal
+        ("gh: API rate limit exceeded for user ID 1. (HTTP 403)", 5),
+        ("gh: You have exceeded a secondary rate limit. (HTTP 403)", 5),
+        ("gh: You have triggered an abuse detection mechanism. (HTTP 403)", 5),
+        ("gh: Server Error (HTTP 502)", 5),
+        ("", 5),
+    ],
 )
 def test_a_failed_milestone_listing_is_classified_and_creates_nothing(
     tmp_path: Path, err: str, code: int
@@ -664,22 +676,31 @@ def test_an_unreadable_board_stops_the_run_before_the_create(
     assert "issue_create" not in fixture_calls(tmp_path)
 
 
+@pytest.mark.parametrize("flags", [("--dry-run",), ()])
 @pytest.mark.parametrize(
-    "spec,extra,needle",
+    "extra,code,needle",
     [
-        (LINKED_SPEC, {"repos/other/lib/issues/7.json": None,
-                       "repos/other/lib/issues/7.err": "gh: Not Found (HTTP 404)"},
-         "other/lib#7 not found"),
-        (LINKED_SPEC, issue_fixture("acme/sandbox#5", pull_request={"url": "https://x/pull/5"}),
-         "acme/sandbox#5 is a pull request"),
+        ({"repos/other/lib/issues/7.json": None,
+          "repos/other/lib/issues/7.err": "gh: Not Found (HTTP 404)"},
+         2, "other/lib#7 not found"),
+        (issue_fixture("acme/sandbox#5", pull_request={"url": "https://x/pull/5"}),
+         2, "acme/sandbox#5 is a pull request"),
+        # issue-link.sh --check's own class passes through: auth, transient
+        ({"repos/other/lib/issues/7.json": None,
+          "repos/other/lib/issues/7.err": "gh: Bad credentials (HTTP 401)"},
+         3, "cannot read other/lib#7: gh: Bad credentials (HTTP 401)"),
+        ({"repos/other/lib/issues/7.json": None,
+          "repos/other/lib/issues/7.err": "gh: Server Error (HTTP 502)"},
+         5, "cannot read other/lib#7: gh: Server Error (HTTP 502)"),
     ],
 )  # fmt: skip
 def test_a_link_target_that_cannot_be_linked_stops_the_run_before_the_create(
-    tmp_path: Path, spec: dict[str, Any], extra: dict[str, Any], needle: str
+    tmp_path: Path, flags: tuple[str, ...], extra: dict[str, Any], code: int, needle: str
 ) -> None:
     files = {k: v for k, v in {**TARGETS, **extra}.items() if v is not None}
-    r = run(tmp_path, spec, milestones=MILESTONES, extra=files)
-    assert r.returncode == 2
+    r = run(tmp_path, LINKED_SPEC, *flags, milestones=MILESTONES, extra=files)
+    assert r.returncode == code
+    assert r.stdout == ""
     assert needle in json.loads(r.stderr.splitlines()[-1])["error"]
     assert "issue_create" not in fixture_calls(tmp_path)
     assert not board_was_called(tmp_path)
@@ -991,18 +1012,30 @@ def test_the_board_status_is_set_and_read_back(tmp_path: Path) -> None:
     assert (out["board"], out["status"]) == ("added", "In Progress")
     assert "links" not in out, "no links asked, no links key"
     calls = fixture_calls(tmp_path)
+    # a Status other than Todo is read twice: the automation may not have run yet
     assert calls[calls.index("issue_create") :] == [
         "issue_create",
         "project_add",
         "project_edit",
         "project_status",
+        "project_status.confirm",
     ]
+
+
+def test_todo_is_read_back_once(tmp_path: Path) -> None:
+    """Todo is what the automation sets: a match needs no second read."""
+    r = run(tmp_path, None, create='{"url": "https://x/5"}')
+    assert r.returncode == 0, r.stderr
+    assert (json.loads(r.stdout)["board"], json.loads(r.stdout)["status"]) == ("added", "Todo")
+    calls = fixture_calls(tmp_path)
+    assert calls[calls.index("project_add") :] == ["project_add", "project_edit", "project_status"]
 
 
 def test_a_status_overwritten_by_the_boards_automation_is_set_once_more(tmp_path: Path) -> None:
     """ "Item added to project" may set Todo after our edit: re-edit once, read again."""
     spec = dict(BASE_SPEC, status="In Progress")
-    r = run(tmp_path, spec, create='{"url": "https://x/5"}', status_reads=("Todo", "In Progress"))
+    reads = {"first": "Todo", "retry": "In Progress"}
+    r = run(tmp_path, spec, create='{"url": "https://x/5"}', status_reads=reads)
     assert r.returncode == 0, r.stderr
     assert (json.loads(r.stdout)["board"], json.loads(r.stdout)["status"]) == (
         "added",
@@ -1018,26 +1051,43 @@ def test_a_status_overwritten_by_the_boards_automation_is_set_once_more(tmp_path
     ]
 
 
+def test_a_late_reset_by_the_automation_is_caught_by_the_second_read(tmp_path: Path) -> None:
+    """The first read can match before the automation runs: only a second match after
+    the pause is success; a reset seen then gets the one re-edit."""
+    spec = dict(BASE_SPEC, status="In Progress")
+    reads = {"first": "In Progress", "confirm": "Todo", "retry": "In Progress"}
+    r = run(tmp_path, spec, create='{"url": "https://x/5"}', status_reads=reads)
+    assert r.returncode == 0, r.stderr
+    assert (json.loads(r.stdout)["board"], json.loads(r.stdout)["status"]) == (
+        "added",
+        "In Progress",
+    )
+    calls = fixture_calls(tmp_path)
+    assert calls[calls.index("project_add") :] == [
+        "project_add",
+        "project_edit",
+        "project_status",
+        "project_status.confirm",
+        "project_edit",
+        "project_status.retry",
+    ]
+
+
 @pytest.mark.parametrize(
     "reads,edit_err,shown",
     [
-        (("Todo", "Todo"), "", '"Todo"'),
-        (("Todo", None), "", '""'),
-        ((None, None), "gh: Something went wrong (HTTP 502)", "HTTP 502"),
+        ({"first": "Todo", "retry": "Todo"}, "", '"Todo"'),
+        ({"first": "Todo"}, "", '""'),
+        ({}, "gh: Something went wrong (HTTP 502)", "HTTP 502"),
+        # the late reset, and the re-edit does not hold either
+        ({"first": "In Progress", "confirm": "Todo", "retry": "Todo"}, "", '"Todo"'),
     ],
 )
 def test_a_status_still_wrong_after_the_retry_is_exit_6(
-    tmp_path: Path, reads: tuple[str | None, ...], edit_err: str, shown: str
+    tmp_path: Path, reads: dict[str, str], edit_err: str, shown: str
 ) -> None:
     spec = dict(BASE_SPEC, status="In Progress")
-    r = run(
-        tmp_path,
-        spec,
-        create='{"url": "https://x/5"}',
-        status_reads=reads,
-        edit_code="1" if edit_err else "0",
-        edit_err=edit_err,
-    )
+    r = run(tmp_path, spec, create='{"url": "https://x/5"}', status_reads=reads, edit_err=edit_err)
     assert r.returncode == 6
     out = json.loads(r.stdout)
     assert (out["url"], out["board"]) == ("https://x/5", "failed")
@@ -1111,6 +1161,7 @@ def test_the_whole_spec_creates_boards_and_links_in_order(tmp_path: Path) -> Non
         "project_add",
         "project_edit",
         "project_status",
+        "project_status.confirm",
         f"GET {CHILD_13}",
         "GET repos/acme/sandbox/issues/5",
         "GET repos/other/lib/issues/7",
@@ -1421,7 +1472,7 @@ LIVE_ISSUES = {
 
 def test_the_real_calls_of_a_linked_issue_in_order(tmp_path: Path) -> None:
     r, gh, _ = run_live(
-        tmp_path, LINKED_SPEC, issues=LIVE_ISSUES, status_reads=[status_read("In Progress")]
+        tmp_path, LINKED_SPEC, issues=LIVE_ISSUES, status_reads=[status_read("In Progress")] * 2
     )
     assert r.returncode == 0, r.stderr
     out = json.loads(r.stdout)
@@ -1463,12 +1514,31 @@ def test_a_real_status_reset_by_the_automation_is_edited_twice(tmp_path: Path) -
     assert json.loads(r.stdout)["status"] == "In Progress"
 
 
+def graphql_reads(gh: list[list[str]]) -> int:
+    return sum(1 for c in gh if c[:2] == ["api", "graphql"])
+
+
+def test_a_real_late_reset_is_caught_by_the_second_read_and_edited_again(tmp_path: Path) -> None:
+    reads = [status_read("In Progress"), status_read("Todo"), status_read("In Progress")]
+    r, gh, _ = run_live(tmp_path, LINKED_SPEC, issues=LIVE_ISSUES, status_reads=reads)
+    assert r.returncode == 0, r.stderr
+    assert (gh.count(ITEM_EDIT), graphql_reads(gh)) == (2, 3)
+    assert json.loads(r.stdout)["status"] == "In Progress"
+
+
+def test_a_real_todo_is_read_back_once(tmp_path: Path) -> None:
+    r, gh, _ = run_live(tmp_path)
+    assert r.returncode == 0, r.stderr
+    assert json.loads(r.stdout)["status"] == "Todo"
+    assert graphql_reads(gh) == 1
+
+
 def test_a_real_link_failure_is_exit_7_with_the_repair_command(tmp_path: Path) -> None:
     r, gh, _ = run_live(
         tmp_path,
         LINKED_SPEC,
         issues=LIVE_ISSUES,
-        status_reads=[status_read("In Progress")],
+        status_reads=[status_read("In Progress")] * 2,
         sub_issue_post={"code": 1, "err": "gh: Validation Failed (HTTP 422)", "lands": False},
     )
     assert r.returncode == 7

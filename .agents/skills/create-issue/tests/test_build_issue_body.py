@@ -558,6 +558,17 @@ def test_blocked_by_may_point_at_any_owner() -> None:
     assert r.returncode == 0, r.stderr
 
 
+def test_the_parent_may_also_be_a_blocker() -> None:
+    """GitHub accepts one issue as both (live run: an issue under dev#4 and blocked by
+    dev#4); only a blocker listed twice is a duplicate."""
+    r = run(mini(repo="acme/sandbox", parent="#5", blocked_by=["acme/sandbox#5"]), "--emit-links")
+    assert r.returncode == 0, r.stderr
+    assert json.loads(r.stdout) == [
+        {"kind": "parent", "repo": "acme/sandbox", "number": 5},
+        {"kind": "blocked_by", "repo": "acme/sandbox", "number": 5},
+    ]
+
+
 @pytest.mark.parametrize(
     "fields,needle",
     [
@@ -585,6 +596,8 @@ def test_blocked_by_may_point_at_any_owner() -> None:
         # "#5" and "a/b#5" are the same issue
         ({"blocked_by": ["#5", "a/b#5"]}, '"blocked_by" lists a/b#5 more than once'),
         ({"blocked_by": ["x/y#5", "X/Y#5"]}, "more than once"),
+        # being the parent too does not excuse a blocker listed twice
+        ({"parent": "#5", "blocked_by": ["#5", "a/b#5"]}, '"blocked_by" lists a/b#5 more'),
         # a sub-issue shares its parent's owner
         ({"parent": "other/b#5"}, "owner"),
         # status: a board option name, one line
