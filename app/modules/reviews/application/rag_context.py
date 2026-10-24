@@ -90,6 +90,9 @@ RAG_LIMIT = "rag_limit"
 MAX_RAG_TARGETS = 200
 MAX_RAG_FILES = 10
 MAX_RAG_PLACES_PER_FILE = 3
+# The base extractions of broken references take at most half the reads of a run, so
+# the rest stays for the candidates.
+MAX_RAG_BASE_READS = 10
 # A place is shown whole within the fragment limits of L2 (``review_context``), else
 # its signature.
 PLACE_MAX_LINES = 200
@@ -372,12 +375,14 @@ class _Removed:
 
     Each target maps to the ids of its definitions at the base. Without a readable base
     the names are unknown: the targets are then the modules the PR deletes or renames
-    (name ""), and ``unknown`` says why none of their importers can be checked.
+    (name ""), and ``unknown`` says why none of their importers can be checked. A file
+    whose base extraction is not read or fails is in ``omissions``, counted once.
     """
 
     targets: Mapping[GraphTarget, frozenset[str]] = field(default_factory=dict)
     base: _Base | None = None
     unknown: str | None = None
+    omissions: tuple[RagOmission, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -476,6 +481,8 @@ class ReverseEdgeSelector:
             counter=self._counter,
             index_commit_sha=commit,
         )
+        for omission in removed.omissions:
+            selection.drop(omission.reason, omission.path)
         if len(targets) > MAX_RAG_TARGETS:
             selection.drop(RAG_LIMIT, None, len(targets) - MAX_RAG_TARGETS)
         in_pr = {path for file in diff_map.files for path in (file.old_path, file.new_path) if path}
@@ -509,8 +516,9 @@ class ReverseEdgeSelector:
     ) -> _Removed:
         """The exports the PR takes away from its old paths, read at the base: each export
         of a deleted or renamed file, and those a modified file loses. A modification
-        counts only when it removes lines and its head extraction is complete; the base
-        extractions are RAG reads (ADR 0001 §8.3)."""
+        counts only when it removes lines and its head extraction is complete. The base
+        extractions are RAG reads, at most ``MAX_RAG_BASE_READS``; a file past them or
+        whose extraction fails is counted with its path (ADR 0001 §8.3)."""
         after = {file.file_id: facts for file, facts in changed}
         sources: list[tuple[DiffFile, str]] = []
         for file in diff_map.files:
@@ -569,10 +577,17 @@ class ReverseEdgeSelector:
             head=files,
         )
         targets: dict[GraphTarget, frozenset[str]] = {}
-        for file, path in sources:
+        omissions: list[RagOmission] = []
+        for position, (file, path) in enumerate(sources):
+            # Each extraction is at most one read.
+            if position >= MAX_RAG_BASE_READS:
+                omissions.append(RagOmission(RAG_LIMIT, path))
+                continue
             before = await base_files.facts_for(path)
             if isinstance(before, FileUnavailable):
-                # Its exports are unknown, so none of them is a broken reference.
+                # Its exports are unknown: the file is counted instead of its importers.
+                reason = RAG_LIMIT if before.reason == RAG_LIMIT else SOURCE_READ_FAILED
+                omissions.append(RagOmission(reason, path))
                 continue
             kept = (
                 set(_exports(after[file.file_id]))
@@ -593,7 +608,7 @@ class ReverseEdgeSelector:
         # The base resolves with the module path of the head: a PR that renames the Go
         # module resolves no import at the base, so it blames no importer.
         resolver = ImportResolver(tree=base, provider=base_files, go_module=go_module)
-        return _Removed(targets, _Base(base, base_files, resolver))
+        return _Removed(targets, _Base(base, base_files, resolver), omissions=tuple(omissions))
 
 
 class _Selection:
