@@ -3,13 +3,15 @@
 resume an interrupted batch without creating anything twice.
 
 A batch is riskier than one issue in one specific way: it can stop halfway. So the
-whole batch is validated before the first create; parents and blockers are created
-before what depends on them, so a local ref `@key` can be replaced by the issue it
-names; every result is written to a state file before the next item starts; and a
-rerun of the same command is the normal way to resume — an item already in the state
-file is not created again, only its links are ensured, and an item whose create hits
-issue-create.sh's exact-title duplicate guard adopts that issue instead of creating a
-second one. Each item is created by issue-create.sh as a separate process, so the
+whole batch is validated before the first create — locally, then remotely by
+`issue-create.sh --dry-run` for every item still to create; parents and blockers are
+created before what depends on them, so a local ref `@key` can be replaced by the
+issue it names; every result is written to a state file before the next item starts;
+and a rerun of the same command is the normal way to resume — an item already in the
+state file is not created again, only its links are ensured. An exact-title duplicate
+is adopted only on a rerun, and only an open issue you opened since the batch started
+(one an earlier run created and could not record); any other duplicate stops the
+batch. Each item is created by issue-create.sh as a separate process, so the
 single-issue guarantees (attribution guard, validation, read-back, board, links) hold
 per item. Details: references/batch.md.
 
@@ -20,36 +22,41 @@ Usage
 
 Batch file: {"id": "<slug>", "items": [{"key": "<slug>", ...spec keys...}, ...]};
 slugs match [a-z0-9][a-z0-9-]*; `parent` / `blocked_by` may name another item as
-"@key".
+"@key". Python 3.10+, stdlib only.
 
 Output
 ------
---dry-run: the preview on stdout — a table of the items in creation order, then each
-  body under a heading with its key; every item also runs `issue-create.sh --dry-run`
-  (local refs left out), so a bad milestone, Status or link target fails the preview.
-  Nothing is created and no state is written.
+--dry-run: the preview on stdout — a table of the items in creation order, the items
+  already created (key, title, url), what a run would do with each exact-title
+  duplicate (adopt it or stop), then each body under a heading with its key; every
+  item runs `issue-create.sh --dry-run` (local refs left out), so a bad milestone,
+  Status or link target fails the preview. Nothing is created, no state is written.
 real run: {"id", "items": [{"key", "url", "number", "repo", "created", "adopted",
   "verified", "board", "links"}], "state_file"} on stdout — also when an item stops
   the batch (then it lists the items done before it).
 --compare-shape: {"same_shape", "differences"} — item count, and per item in creation
-  order: repo, type, the parent / blocked_by graph (local refs as positions, so keys
-  may differ), AC per part, done_when per part, kickoff read_first and mines. Titles
-  and wording are not compared.
+  order: repo, the parent / blocked_by graph (local refs as positions, so keys may
+  differ), the number of parts, whether each part has AC and a done_when, kickoff
+  read_first and mines. Type, titles, wording and the AC count are not compared.
 Errors: {"error": "..."} on stderr; the item scripts' stderr is passed through.
 
 Exit
 ----
-0 every item done · 2 usage or invalid batch (nothing ran), or an item exit 2 ·
-3 auth · 4 an item exit 4 that is not a duplicate · 5 network/unknown, or a create
-whose result could not be read · 6 an issue created but its board step failed ·
-7 a native link failed (wins over 6). 2-5 stop the batch: the state file keeps what
+0 every item done · 2 usage or invalid batch (nothing ran), a state entry that does
+not match its item, or an item exit 2 · 3 auth · 4 an item exit 4, or a duplicate
+that is not adopted · 5 network/unknown, or a create whose result could not be read
+or recorded · 6 an issue — created now or recorded earlier — whose board step failed
+· 7 a native link failed (wins over 6). 2-5 stop the batch: the state file keeps what
 was created, rerun the same command. 6 and 7 do not stop it. --compare-shape: 0 same
 shape, 1 different, 2 a file is not a batch.
 
 State: ${XDG_CACHE_HOME:-$HOME/.cache}/create-issue/batches/<id>.json —
-{key: {"url", "number", "repo"}}, written atomically after each item.
+{"started_at": ISO, "items": {key: {"url", "number", "repo", "summary", "board",
+"links"}}}; started_at is written before the first create, each entry atomically
+right after its item.
 Test seam: ISSUE_BATCH_SCRIPTS_DIR — the directory issue-create.sh and issue-link.sh
-are run from (default: this script's directory); the builder always runs from here.
+are run from (default: this script's directory; a warning says when it is set); the
+builder always runs from here.
 """
 # SYNC: mirrored in dmc-268-{ui,api}-t6/.agents/skills/create-issue/scripts/issue-batch.py
 
@@ -62,6 +69,8 @@ import re
 import subprocess
 import sys
 import tempfile
+import time
+from datetime import datetime
 from pathlib import Path
 from typing import Any, NoReturn
 
@@ -74,6 +83,7 @@ USAGE = (
 )
 # The exit codes an item may stop the batch with; anything else is reported as 5.
 STOP_CODES = (2, 3, 4, 5)
+BOARD_REPAIR = "gh project item-add 12 --owner larchanka-training --url {url}"
 
 
 class BatchError(Exception):
@@ -83,6 +93,10 @@ class BatchError(Exception):
 def err(msg: str, code: int = 2) -> NoReturn:
     print(json.dumps({"error": msg}, ensure_ascii=False), file=sys.stderr)
     sys.exit(code)
+
+
+def warn(msg: str) -> None:
+    print(json.dumps({"warning": msg}, ensure_ascii=False), file=sys.stderr)
 
 
 def load(path: str, what: str) -> Any:
@@ -245,9 +259,9 @@ def build_body(key: str, spec: dict[str, Any]) -> str:
 
 def validate(batch: dict[str, Any]) -> None:
     """Every item is a spec the builder accepts; no two share a title in one repo — the
-    second create would hit issue-create.sh's duplicate guard and adopt the first
-    issue (the same comparison: repo, stripped title); and no body names a local ref:
-    "@key" is not an issue number, and in a body it renders as an @mention."""
+    second create would hit issue-create.sh's duplicate guard on the first one (the
+    same comparison: repo, stripped title); and no body names a local ref: "@key" is
+    not an issue number, and in a body it renders as an @mention."""
     keys = [item["key"] for item in batch["items"]]
     titles: dict[tuple[str, str], str] = {}
     for item in batch["items"]:
@@ -300,6 +314,24 @@ def state_file(batch_id: str) -> Path:
     return Path(base) / "create-issue" / "batches" / f"{batch_id}.json"
 
 
+def now_utc() -> str:
+    """Whole seconds: GitHub's createdAt has none, so an issue created in the second
+    the batch started still counts as created at or after it."""
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+
+def when(text: Any) -> datetime | None:
+    """An ISO 8601 time with a zone, else None. "Z" is replaced first: fromisoformat
+    reads it only from Python 3.11 on."""
+    if not isinstance(text, str):
+        return None
+    try:
+        moment = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return moment if moment.tzinfo is not None else None
+
+
 def is_record(value: Any) -> bool:
     # CONTRACT: type(...) is int, not isinstance — JSON true/false load as bool, which
     # isinstance(..., int) accepts as an issue number.
@@ -311,11 +343,23 @@ def is_record(value: Any) -> bool:
     )
 
 
-def load_state(path: Path, ordered: list[dict[str, Any]]) -> dict[str, Any]:
-    """What earlier runs created. Never overwritten when unreadable: it is the only
-    record of which issues this batch already made."""
+def is_entry(value: Any) -> bool:
+    """A state entry: the issue, the title it was filed under, the board and links
+    results an earlier run got for it."""
+    return (
+        is_record(value)
+        and isinstance(value.get("summary"), str)
+        and (value.get("board") is None or isinstance(value["board"], str))
+        and (value.get("links") is None or isinstance(value["links"], dict))
+    )
+
+
+def load_state(path: Path, ordered: list[dict[str, Any]]) -> tuple[dict[str, Any], bool]:
+    """What earlier runs created, and whether this is a rerun: a state file exists only
+    once a run got as far as its first create. Never overwritten when unreadable: it
+    is the only record of which issues this batch already made."""
     if not path.exists():
-        return {}
+        return {"started_at": None, "items": {}}, False
     hint = "fix or remove it — it records what this batch already created"
     try:
         state = json.loads(path.read_text(encoding="utf-8"))
@@ -323,19 +367,34 @@ def load_state(path: Path, ordered: list[dict[str, Any]]) -> dict[str, Any]:
         err(f"cannot read the state file {path}: {exc}")
     except json.JSONDecodeError as exc:
         err(f"the state file {path} is not valid JSON ({exc}) — {hint}")
-    if not isinstance(state, dict):
-        err(f"the state file {path} is not an object — {hint}")
-    for key, value in state.items():
-        if not is_record(value):
-            err(f'the state file {path}: entry "{key}" needs "url", "number" and "repo" — {hint}')
-    for item in ordered:
-        rec = state.get(item["key"])
-        if rec and rec["repo"].lower() != str(item.get("repo", "")).lower():
+    if (
+        not isinstance(state, dict)
+        or set(state) != {"started_at", "items"}
+        or not isinstance(state["items"], dict)
+    ):
+        err(f'the state file {path} is not {{"started_at", "items": {{...}}}} — {hint}')
+    if when(state["started_at"]) is None:
+        err(f'the state file {path}: "started_at" is not an ISO 8601 time with a zone — {hint}')
+    for key, value in state["items"].items():
+        if not is_entry(value):
             err(
-                f'item "{item["key"]}" is recorded as {rec["repo"]}#{rec["number"]} in {path}, '
-                f"but the batch puts it in {item.get('repo')} — fix the batch or remove the entry"
+                f'the state file {path}: entry "{key}" needs "url", "number", "repo" and '
+                f'"summary" — {hint}'
             )
-    return state
+    for item in ordered:
+        key, rec = item["key"], state["items"].get(item["key"])
+        if rec is None:
+            continue
+        where = f'item "{key}" is recorded as {rec["repo"]}#{rec["number"]} in {path}'
+        fix = "fix the batch or remove the entry (references/batch.md § 5)"
+        if rec["repo"].lower() != item["repo"].lower():
+            err(f"{where}, but the batch puts it in {item['repo']} — {fix}")
+        if rec["summary"].strip() != item["summary"].strip():
+            err(
+                f"{where} with the title {rec['summary']!r}, but the batch gives it the title "
+                f"{item['summary']!r} — {fix}"
+            )
+    return state, True
 
 
 def save_state(path: Path, state: dict[str, Any]) -> None:
@@ -355,15 +414,77 @@ def save_state(path: Path, state: dict[str, Any]) -> None:
         raise
 
 
+# ─── duplicates ─────────────────────────────────────────────────────────────
+def refusal(dup: dict[str, Any], started_at: str | None, user: Any) -> str | None:
+    """Why an exact-title duplicate is not adopted, or None when it is. Only a rerun
+    adopts (`started_at` is that of an earlier run, None on a first run), and only an
+    open issue you opened at or after it: the one an earlier run created and could
+    not record. Any other is somebody's real issue — or yours from before the batch."""
+    if started_at is None:
+        return "this is the first run of the batch, so the batch did not create it"
+    if str(dup.get("state") or "").upper() != "OPEN":
+        return f"it is {str(dup.get('state') or 'not open').lower()}"
+    author = dup.get("author")
+    if not (isinstance(author, str) and isinstance(user, str) and user):
+        return "its author or yours is unknown"
+    if author.lower() != user.lower():
+        return f"it was opened by {author}, not by you ({user})"
+    start, created = when(started_at), when(dup.get("createdAt"))
+    if start is None or created is None or created < start:
+        return f"it was created before this batch started ({started_at})"
+    return None
+
+
+def named(dup: dict[str, Any]) -> str:
+    return (
+        f"an issue with exactly this title already exists: {dup.get('url')} "
+        f"({dup.get('state')}, by {dup.get('author')}, created {dup.get('createdAt')})"
+    )
+
+
+def unknown_outcome(repo: str) -> str:
+    return (
+        f"the issue may exist: check the newest issues of {repo} first — a rerun adopts an "
+        "open issue with this title that you opened since the batch started"
+    )
+
+
+# ─── the remote validation ──────────────────────────────────────────────────
+def dry_runs(items: list[dict[str, Any]], no_board: bool, step: str) -> dict[str, Any]:
+    """`issue-create.sh --dry-run` per item, local refs left out: milestone, Status
+    and external link targets are checked, and the exact-title search runs, while
+    nothing of these items exists. The first failure ends the batch here."""
+    flags = ["--dry-run", *(["--no-board"] if no_board else [])]
+    outs: dict[str, Any] = {}
+    with tempfile.TemporaryDirectory() as work:
+        for item in items:
+            key = item["key"]
+            spec_path = Path(work) / f"{key}.json"
+            spec_path.write_text(json.dumps(spec_of(item, None), ensure_ascii=False), "utf-8")
+            code, out, msg = call("issue-create.sh", [str(spec_path), *flags])
+            if code != 0 or not isinstance(out, dict) or not isinstance(out.get("body"), str):
+                err(
+                    f'item "{key}": {step} failed (issue-create.sh --dry-run, exit {code}): {msg}',
+                    code if code in STOP_CODES else 5,
+                )
+            outs[key] = out
+    return outs
+
+
 # ─── preview ────────────────────────────────────────────────────────────────
 def cell(text: Any) -> str:
     return str(text).replace("|", "\\|")
 
 
 def preview(
-    batch: dict[str, Any], ordered: list[dict[str, Any]], state: dict[str, Any], no_board: bool
+    batch: dict[str, Any],
+    ordered: list[dict[str, Any]],
+    state: dict[str, Any],
+    rerun: bool,
+    no_board: bool,
 ) -> int:
-    flags = ["--dry-run", *(["--no-board"] if no_board else [])]
+    outs = dry_runs(ordered, no_board, "the preview")
+    recorded, started = state["items"], state["started_at"] if rerun else None
     n = len(ordered)
     rows = [
         f"Batch `{batch['id']}`: {n} issue{'' if n == 1 else 's'}, in creation order.",
@@ -371,37 +492,39 @@ def preview(
         "| # | Key | Repo | Type | Title | Parent | Blocked by | Milestone | Status |",
         "| --- | --- | --- | --- | --- | --- | --- | --- | --- |",
     ]
-    bodies = []
-    with tempfile.TemporaryDirectory() as work:
-        for pos, item in enumerate(ordered, 1):
-            key, repo = item["key"], item["repo"]
-            spec_path = Path(work) / f"{key}.json"
-            spec_path.write_text(json.dumps(spec_of(item, None), ensure_ascii=False), "utf-8")
-            code, out, msg = call("issue-create.sh", [str(spec_path), *flags])
-            if code != 0 or not isinstance(out, dict) or not isinstance(out.get("body"), str):
-                err(
-                    f'item "{key}": the preview failed (issue-create.sh --dry-run, exit {code}): '
-                    f"{msg}",
-                    code if code in STOP_CODES else 5,
-                )
-            parent = full_ref(item["parent"], repo) if "parent" in item else "—"
-            blocked = ", ".join(full_ref(r, repo) for r in item.get("blocked_by", [])) or "—"
-            row = [
-                str(pos),
-                f"`{key}`",
-                repo,
-                item.get("type", "Story"),
-                cell(item["summary"]),
-                parent,
-                blocked,
-                cell(item.get("milestone") or "—"),
-                cell(out.get("status") or "—"),
-            ]
-            rows.append("| " + " | ".join(row) + " |")
-            bodies.append(f"# {pos}. `{key}` — {item['summary']}\n\n{out['body']}")
-    done = [f"`{i['key']}` → {state[i['key']]['url']}" for i in ordered if i["key"] in state]
+    bodies, done, dups = [], [], []
+    for pos, item in enumerate(ordered, 1):
+        key, repo, out = item["key"], item["repo"], outs[item["key"]]
+        parent = full_ref(item["parent"], repo) if "parent" in item else "—"
+        blocked = ", ".join(full_ref(r, repo) for r in item.get("blocked_by", [])) or "—"
+        row = [
+            str(pos),
+            f"`{key}`",
+            repo,
+            item.get("type", "Story"),
+            cell(item["summary"]),
+            parent,
+            blocked,
+            cell(item.get("milestone") or "—"),
+            cell(out.get("status") or "—"),
+        ]
+        rows.append("| " + " | ".join(row) + " |")
+        bodies.append(f"# {pos}. `{key}` — {item['summary']}\n\n{out['body']}")
+        if key in recorded:  # the search finds the item's own issue: not a duplicate
+            done.append(f"- `{key}` — {recorded[key]['summary']} — {recorded[key]['url']}")
+            continue
+        dup = out.get("duplicate")
+        if isinstance(dup, dict):
+            num, url = dup.get("number"), dup.get("url")
+            if refusal(dup, started, out.get("user")) is None:
+                dups.append(f"- `{key}`: would adopt #{num} — {url}")
+            else:
+                found = f"{dup.get('state')}, {dup.get('author')}"
+                dups.append(f"- `{key}`: would stop: duplicate #{num} ({found}) — {url}")
     if done:
-        rows += ["", "Already created, only their links are ensured: " + ", ".join(done)]
+        rows += ["", "Already created, only their links are ensured:", *done]
+    if dups:
+        rows += ["", "An issue with exactly the same title exists:", *dups]
     sys.stdout.write("\n".join(rows) + "\n" + "".join("\n" + body for body in bodies))
     return 0
 
@@ -411,9 +534,11 @@ def run(
     batch: dict[str, Any],
     ordered: list[dict[str, Any]],
     state: dict[str, Any],
+    rerun: bool,
     path: Path,
     no_board: bool,
 ) -> int:
+    recorded: dict[str, Any] = state["items"]
     results: list[dict[str, Any]] = []
     worst = 0  # 0, 6 or 7 — 7 wins
 
@@ -433,41 +558,75 @@ def run(
             code if code in STOP_CODES else 5,
         )
 
-    def record(key: str, rec: dict[str, Any]) -> None:
-        state[key] = rec
+    def record(key: str, entry: dict[str, Any], new: bool) -> None:
+        recorded[key] = entry
         try:
             save_state(path, state)
         except OSError as exc:
-            stop(
-                key,
-                5,
-                f"{rec['url']} exists but could not be recorded ({exc}); a rerun "
-                "adopts it through the duplicate guard",
-            )
+            if new:
+                lost = f"{entry['url']} exists but could not be recorded ({exc})"
+                stop(key, 5, f"{lost}; {unknown_outcome(entry['repo'])}")
+            stop(key, 5, f"its entry could not be updated ({exc})")
 
-    def ensure_links(key: str, rec: dict[str, Any], spec: dict[str, Any]) -> Any:
+    def ensure_links(key: str, entry: dict[str, Any], spec: dict[str, Any]) -> Any:
         """Links of an issue this run did not create; issue-link.sh is idempotent."""
         nonlocal worst
         args = link_args(spec)
         if not args:  # issue-link.sh refuses a call with nothing to link
             return None
-        code, out, msg = call("issue-link.sh", [f"{rec['repo']}#{rec['number']}", *args])
+        code, out, msg = call("issue-link.sh", [f"{entry['repo']}#{entry['number']}", *args])
         if code not in (0, 7):
             stop(key, code, f"issue-link.sh could not ensure its links (exit {code}): {msg}")
         worst = max(worst, code)
         return out.get("links") if isinstance(out, dict) else None
 
+    def result(key: str, entry: dict[str, Any], **fields: Any) -> None:
+        row = {k: entry[k] for k in ("url", "number", "repo")}
+        results.append({"key": key, **row, "created": False, "adopted": False, **fields})
+
+    # Everything still to create is validated remotely before the first create, so a
+    # bad milestone, Status, link target or a duplicate stops a batch that made nothing.
+    todo = [item for item in ordered if item["key"] not in recorded]
+    started = state["started_at"] if rerun else None
+    outs = dry_runs(todo, no_board, "the validation before the first create (nothing created)")
+    for item in todo:
+        out = outs[item["key"]]
+        dup = out.get("duplicate")
+        why = refusal(dup, started, out.get("user")) if isinstance(dup, dict) else None
+        if isinstance(dup, dict) and why is not None:
+            err(
+                f'item "{item["key"]}": {named(dup)}; not adopted: {why} — nothing was created; '
+                "give the item another title or settle that issue, then rerun",
+                4,
+            )
+    if todo and not rerun:
+        # CONTRACT: started_at is on disk before the first create — a rerun adopts only an
+        # issue created at or after it, so it can never be an issue that predates the batch.
+        state["started_at"] = now_utc()
+        try:
+            save_state(path, state)
+        except OSError as exc:
+            err(f"cannot write the state file {path} ({exc}) — nothing was created", 5)
+
     flags = ["--no-board"] if no_board else []
+    if rerun:  # an issue an earlier run opened and did not record is looked for
+        flags += ["--adopt-since", state["started_at"]]
     with tempfile.TemporaryDirectory() as work:
         for item in ordered:
             key = item["key"]
-            resolve = {k: f"{v['repo']}#{v['number']}" for k, v in state.items()}
+            resolve = {k: f"{v['repo']}#{v['number']}" for k, v in recorded.items()}
             spec = spec_of(item, resolve)
-            row: dict[str, Any] = {"created": False, "adopted": False, "verified": None}
-            row.update(board=None, links=None)
-            if key in state:  # created or adopted by an earlier run
-                row["links"] = ensure_links(key, state[key], spec)
-                results.append({"key": key, **state[key], **row})
+            if key in recorded:  # created or adopted by an earlier run
+                entry = recorded[key]
+                links = ensure_links(key, entry, spec)
+                record(key, {**entry, "links": links}, new=False)
+                if entry.get("board") == "failed":
+                    worst = max(worst, 6)
+                    warn(
+                        f'item "{key}": {entry["url"]} is recorded with a failed board step — '
+                        f"{BOARD_REPAIR.format(url=entry['url'])}, then set its Status on the board"
+                    )
+                result(key, entry, verified=None, board=entry.get("board"), links=links)
                 continue
             spec_path = Path(work) / f"{key}.json"
             spec_path.write_text(json.dumps(spec, ensure_ascii=False), "utf-8")
@@ -475,30 +634,40 @@ def run(
             out = out if isinstance(out, dict) else {}
             rec = {k: out.get(k) for k in ("url", "number", "repo")}
             if code == 4 and out.get("duplicate") is True:
-                # The exact-title duplicate guard named an existing issue: adopt it.
+                why = refusal(out, started, out.get("user"))
+                if why is not None:
+                    stop(key, 4, f"{named(out)}; not adopted: {why}")
                 if not is_record(rec):
                     stop(key, 5, f"issue-create.sh reported a duplicate it did not name: {msg}")
-                record(key, rec)
-                row.update(adopted=True, links=ensure_links(key, rec, spec))
+                # Adopted: its board step may never have run — `unchecked`, not `added`.
+                entry = {**rec, "summary": item["summary"], "board": "unchecked", "links": None}
+                record(key, entry, new=True)
+                links = ensure_links(key, entry, spec)
+                record(key, {**entry, "links": links}, new=False)
+                result(key, entry, adopted=True, verified=None, board="unchecked", links=links)
             elif code in (0, 6, 7):
                 if not is_record(rec):
                     stop(
                         key,
                         5,
-                        f"issue-create.sh exited {code} but printed no url — look at "
-                        f"{item['repo']} by hand; a rerun adopts an issue with this title",
+                        f"issue-create.sh exited {code} but printed no url; "
+                        + unknown_outcome(item["repo"]),
                     )
-                record(key, rec)
-                row.update(created=True, verified=out.get("verified"), board=out.get("board"))
-                row["links"] = out.get("links")
+                board, links = out.get("board"), out.get("links")
+                entry = {**rec, "summary": item["summary"], "board": board, "links": links}
+                record(key, entry, new=True)
                 worst = max(worst, code)
+                verified = out.get("verified")
+                result(key, entry, created=True, verified=verified, board=board, links=links)
             else:
-                stop(key, code, f"issue-create.sh exit {code}: {msg}")
-            results.append({"key": key, **rec, **row})
+                # a 5, or a code that means nothing: the create may have landed
+                hint = "" if code in (2, 3, 4) else f"; {unknown_outcome(item['repo'])}"
+                stop(key, code, f"issue-create.sh exit {code}: {msg}{hint}")
     report()
     return worst
 
 
+# ─── compare by shape ───────────────────────────────────────────────────────
 def compare_shape(golden_path: str, candidate_path: str) -> int:
     shapes = []
     for what, path in (("golden", golden_path), ("candidate", candidate_path)):
@@ -516,8 +685,9 @@ def compare_shape(golden_path: str, candidate_path: str) -> int:
 
 def shape(batch: Any) -> list[dict[str, Any]]:
     """What a batch decides, without its wording: per item in creation order, where it
-    goes, its type, its links (local refs as positions, so keys may differ), its parts
-    and whether the kickoff names entry points and mines."""
+    goes, its links (local refs as positions, so keys may differ), how many parts it
+    has and whether each is complete, and whether the kickoff names entry points and
+    mines. The type and the number of criteria are the writer's call, not the shape."""
     ordered = structure(batch)
     pos = {item["key"]: n for n, item in enumerate(ordered, 1)}
 
@@ -531,19 +701,22 @@ def shape(batch: Any) -> list[dict[str, Any]]:
         parts = [p if isinstance(p, dict) else {} for p in item.get("parts") or []]
         kickoff = item.get("kickoff")
         kickoff = kickoff if isinstance(kickoff, dict) else {}
-        ac = [p.get("acceptance_criteria") for p in parts]
         out.append(
             {
                 "repo": repo,
-                "type": item.get("type", "Story"),
                 "parent": ref(parent, repo) if isinstance(parent, str) else None,
                 "blocked_by": sorted(
                     ref(r, repo)
                     for r in (blocked if isinstance(blocked, list) else [])
                     if isinstance(r, str)
                 ),
-                "parts (AC per part)": [len(a) if isinstance(a, list) else 0 for a in ac],
-                "parts (done_when)": [
+                "parts": len(parts),
+                "parts (has AC)": [
+                    isinstance(p.get("acceptance_criteria"), list)
+                    and bool(p["acceptance_criteria"])
+                    for p in parts
+                ],
+                "parts (has done_when)": [
                     isinstance(p.get("done_when"), str) and bool(p["done_when"].strip())
                     for p in parts
                 ],
@@ -563,6 +736,9 @@ def main(argv: list[str]) -> int:
         if len(args) != 3:
             err(USAGE)
         return compare_shape(args[1], args[2])
+    seam = os.environ.get("ISSUE_BATCH_SCRIPTS_DIR")
+    if seam:
+        warn(f"ISSUE_BATCH_SCRIPTS_DIR is set: the item scripts run from {seam}, not {HERE}")
     dry = "--dry-run" in args
     no_board = "--no-board" in args
     paths = [a for a in args if a not in ("--dry-run", "--no-board")]
@@ -583,10 +759,10 @@ def main(argv: list[str]) -> int:
             err(f'item "{with_status}" sets "status" but --no-board skips the board — drop one')
     validate(batch)
     path = state_file(batch["id"])
-    state = load_state(path, ordered)
+    state, rerun = load_state(path, ordered)
     if dry:
-        return preview(batch, ordered, state, no_board)
-    return run(batch, ordered, state, path, no_board)
+        return preview(batch, ordered, state, rerun, no_board)
+    return run(batch, ordered, state, rerun, path, no_board)
 
 
 if __name__ == "__main__":

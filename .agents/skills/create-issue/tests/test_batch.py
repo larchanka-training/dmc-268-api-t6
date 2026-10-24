@@ -9,21 +9,25 @@ Offline — no network, nothing is ever created. Two seams:
 * the examples run the REAL scripts with the ISSUE_FIXTURE_DIR seam: the preview in
   `examples/<case>/preview.md` is what `--dry-run` prints, byte for byte.
 
-What carries weight: nothing runs before the whole batch is valid; parents and
-blockers are created before what depends on them; every result is in the state file
-before the next item starts, so a rerun never creates an item twice — an item already
-recorded only gets its links ensured, and an exact-title duplicate is adopted, never
-created again.
+What carries weight: nothing is created before the whole batch is valid, locally and
+remotely; parents and blockers are created before what depends on them; the start and
+every result are in the state file before the next create, so a rerun never creates an
+item twice — an item already recorded only gets its links ensured, and an exact-title
+duplicate is adopted only on a rerun, only open, yours and created since the start.
 """
 # SYNC: mirrored in dmc-268-{ui,api}-t6/.agents/skills/create-issue/tests/test_batch.py
 
 from __future__ import annotations
 
 import copy
+import importlib.util
 import json
+import os
+import re
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -132,9 +136,44 @@ def state(tmp_path: Path, bid: str = "b1") -> dict[str, Any]:
     return parsed
 
 
-def rec(repo: str, num: int) -> dict[str, Any]:
-    """One state-file entry."""
-    return {"url": f"https://github.com/{repo}/issues/{num}", "number": num, "repo": repo}
+# The start an earlier run recorded; fake_issue_scripts.DUP_CREATED is 5 minutes later.
+STARTED = "2026-10-24T12:00:00Z"
+
+
+def entry(
+    repo: str, num: int, key: str, board: str | None = "added", links: Any = None
+) -> dict[str, Any]:
+    """One state-file entry, for the item `key` (whose summary is "[x] key")."""
+    return {
+        "url": f"https://github.com/{repo}/issues/{num}",
+        "number": num,
+        "repo": repo,
+        "summary": f"[x] {key}",
+        "board": board,
+        "links": links,
+    }
+
+
+def state_with(a: Any) -> str:
+    """A state file whose only entry, for "a", is `a`."""
+    return json.dumps({"started_at": STARTED, "items": {"a": a}})
+
+
+def linked(ref: str) -> dict[str, Any]:
+    """A link the stand-in issue-create.sh set."""
+    return {"ref": ref, "ok": True, "action": "linked"}
+
+
+def seed(tmp_path: Path, items: dict[str, Any], bid: str = "b1") -> None:
+    """The state an earlier run left: it got as far as its first create."""
+    path = state_path(tmp_path, bid)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"started_at": STARTED, "items": items}))
+
+
+def recorded(tmp_path: Path, bid: str = "b1") -> dict[str, Any]:
+    parsed: dict[str, Any] = state(tmp_path, bid)["items"]
+    return parsed
 
 
 def cfg_create(**by_key: dict[str, Any]) -> dict[str, Any]:
@@ -302,11 +341,31 @@ def test_each_result_is_recorded_before_the_next_item_starts(tmp_path: Path) -> 
     data = batch(item("a"), item("b", parent="@a"), item("c"))
     r, calls = run(tmp_path, data, cfg=cfg_create(a={"number": 1}, b={"number": 2}))
     assert r.returncode == 0, r.stderr
+    a = entry(API, 1, "a")
+    b = entry(API, 2, "b", links={"parent": linked("acme/api#1"), "blocked_by": []})
     seen = [c["state"] for c in creates(calls)]
-    assert seen == [None, {"a": rec(API, 1)}, {"a": rec(API, 1), "b": rec(API, 2)}]
-    assert state(tmp_path) == {"a": rec(API, 1), "b": rec(API, 2), "c": rec(API, 103)}
+    started = seen[0]["started_at"]
+    assert [s["items"] for s in seen] == [{}, {"a": a}, {"a": a, "b": b}]
+    assert [s["started_at"] for s in seen] == [started] * 3
+    assert state(tmp_path) == {
+        "started_at": started,
+        "items": {"a": a, "b": b, "c": entry(API, 103, "c")},
+    }
     assert out(r)["state_file"] == str(state_path(tmp_path))
     assert out(r)["id"] == "b1"
+
+
+def test_the_start_is_on_disk_before_the_first_create(tmp_path: Path) -> None:
+    """A rerun adopts only an issue created at or after it: written after the create,
+    the issue it is there to recognise would predate it."""
+    before = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    r, calls = run(tmp_path, batch(item("a")))
+    after = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    assert r.returncode == 0, r.stderr
+    started = creates(calls)[0]["state"]["started_at"]
+    assert re.fullmatch(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ", started)
+    assert before <= started <= after
+    assert creates(calls)[0]["state"]["items"] == {}
 
 
 @pytest.mark.parametrize("xdg", [None, ""])
@@ -314,27 +373,82 @@ def test_without_xdg_cache_home_the_state_lives_under_home(tmp_path: Path, xdg: 
     r, _ = run(tmp_path, batch(item("a")), env={"XDG_CACHE_HOME": xdg})
     assert r.returncode == 0, r.stderr
     path = tmp_path / "home" / ".cache" / "create-issue" / "batches" / "b1.json"
-    assert json.loads(path.read_text()) == {"a": rec(API, 101)}
+    assert json.loads(path.read_text())["items"] == {"a": entry(API, 101, "a")}
     assert out(r)["state_file"] == str(path)
     assert not (tmp_path / "cache").exists()
 
 
-def test_the_state_file_is_written_atomically(tmp_path: Path) -> None:
-    """Nothing but the state file is left behind: no temp file next to it."""
+def test_the_state_file_leaves_no_temp_file_behind(tmp_path: Path) -> None:
     r, _ = run(tmp_path, batch(item("a"), item("b")))
     assert r.returncode == 0, r.stderr
     assert sorted(p.name for p in state_path(tmp_path).parent.iterdir()) == ["b1.json"]
+
+
+def load_driver() -> Any:
+    """issue-batch.py as a module (its name has a hyphen, so no plain import)."""
+    spec = importlib.util.spec_from_file_location("issue_batch", SCRIPT)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+class ReplaceFails:
+    """The `os` module, except that the rename which publishes the new file fails."""
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(os, name)
+
+    @staticmethod
+    def replace(src: str, dst: object) -> None:
+        raise OSError(f"disk full while replacing with {src}")
+
+
+def test_a_failed_write_keeps_the_previous_state_file_and_no_temp_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Atomic for real: the new content went to a temp file, the rename failed — the
+    old file is untouched and the temp file is gone."""
+    driver = load_driver()
+    path = tmp_path / "b1.json"
+    old = json.dumps({"started_at": STARTED, "items": {"a": entry(API, 1, "a")}})
+    path.write_text(old)
+    monkeypatch.setattr(driver, "os", ReplaceFails())
+    with pytest.raises(OSError, match=r"disk full while replacing with .*/\.b1\.json\..*\.tmp"):
+        driver.save_state(path, {"started_at": STARTED, "items": {}})
+    assert path.read_text() == old
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["b1.json"]
 
 
 @pytest.mark.parametrize(
     "content,needle",
     [
         ("{broken", "is not valid JSON"),
-        ('["a"]', "is not an object"),
-        ('{"a": {"url": "u"}}', 'entry "a"'),
-        ('{"a": {"url": "u", "number": "1", "repo": "acme/api"}}', 'entry "a"'),
+        ('["a"]', 'is not {"started_at", "items": {...}}'),
+        # the format before started_at: entries at the top level
+        (json.dumps({"a": entry(API, 1, "a")}), 'is not {"started_at", "items": {...}}'),
+        (json.dumps({"started_at": STARTED, "items": []}), 'is not {"started_at"'),
+        (json.dumps({"started_at": STARTED}), 'is not {"started_at"'),
+        (json.dumps({"started_at": "yesterday", "items": {}}), '"started_at" is not an ISO 8601'),
+        (json.dumps({"started_at": "2026-10-24T12:00:00", "items": {}}), '"started_at" is not'),
+        (json.dumps({"started_at": None, "items": {}}), '"started_at" is not an ISO 8601'),
+        (state_with({"url": "u"}), 'entry "a" needs'),
+        (
+            state_with({k: v for k, v in entry(API, 1, "a").items() if k != "summary"}),
+            'entry "a" needs "url", "number", "repo" and "summary"',
+        ),
+        (state_with(dict(entry(API, 1, "a"), number="1")), 'entry "a"'),
+        # CONTRACT of is_record: a JSON true is not an issue number
+        (state_with(dict(entry(API, 1, "a"), number=True)), 'entry "a"'),
+        (state_with(dict(entry(API, 1, "a"), board=6)), 'entry "a"'),
+        (state_with(dict(entry(API, 1, "a"), links=[])), 'entry "a"'),
     ],
-)
+    ids=[
+        "broken-json", "list", "old-format", "items-list", "no-items", "bad-time", "no-zone",
+        "null-time", "entry-url-only", "entry-no-summary", "number-str", "number-bool",
+        "board-int", "links-list",
+    ],
+)  # fmt: skip
 def test_an_unreadable_state_file_stops_before_anything_runs(
     tmp_path: Path, content: str, needle: str
 ) -> None:
@@ -348,12 +462,37 @@ def test_an_unreadable_state_file_stops_before_anything_runs(
 
 
 def test_a_state_entry_in_another_repo_than_the_item_stops_the_run(tmp_path: Path) -> None:
-    state_path(tmp_path).parent.mkdir(parents=True)
-    state_path(tmp_path).write_text(json.dumps({"a": rec(UI, 5)}))
+    seed(tmp_path, {"a": entry(UI, 5, "a")})
     r, calls = run(tmp_path, batch(item("a")))
     assert r.returncode == 2
-    assert 'item "a" is recorded as acme/ui#5' in error(r)
+    assert error(r) == (
+        f'item "a" is recorded as acme/ui#5 in {state_path(tmp_path)}, but the batch puts it '
+        "in acme/api — fix the batch or remove the entry (references/batch.md § 5)"
+    )
     assert calls == []
+
+
+@pytest.mark.parametrize("flags", [(), ("--dry-run",)])
+def test_a_state_entry_with_another_title_than_the_item_stops_the_run(
+    tmp_path: Path, flags: tuple[str, ...]
+) -> None:
+    """The key alone does not identify the issue: a renamed item may be another task."""
+    seed(tmp_path, {"a": dict(entry(API, 5, "a"), summary="[x] old title")})
+    r, calls = run(tmp_path, batch(item("a")), *flags)
+    assert r.returncode == 2
+    assert error(r) == (
+        f'item "a" is recorded as acme/api#5 in {state_path(tmp_path)} with the title '
+        "'[x] old title', but the batch gives it the title '[x] a' — fix the batch or remove "
+        "the entry (references/batch.md § 5)"
+    )
+    assert calls == []
+
+
+def test_a_recorded_title_matches_without_surrounding_blanks(tmp_path: Path) -> None:
+    seed(tmp_path, {"a": dict(entry(API, 5, "a"), summary=" [x] a ")})
+    r, calls = run(tmp_path, batch(item("a")))
+    assert r.returncode == 0, r.stderr
+    assert creates(calls) == []
 
 
 # ─── rerun: resume, never create twice ──────────────────────────────────────
@@ -364,17 +503,22 @@ def test_a_rerun_after_a_failure_creates_nothing_twice_and_ensures_links(
     first, calls = run(tmp_path, data, cfg=cfg_create(a={"number": 1}, b={"code": 5}))
     assert first.returncode == 5
     assert created_keys(calls) == ["a", "b"]
-    assert state(tmp_path) == {"a": rec(API, 1)}
+    a = entry(API, 1, "a", links={"parent": None, "blocked_by": [linked("#7")]})
+    assert recorded(tmp_path) == {"a": a}
     assert 'item "b"' in error(first)
     assert [i["key"] for i in out(first)["items"]] == ["a"], "what was done is still reported"
+    started = state(tmp_path)["started_at"]
 
     again, calls = run(tmp_path, data, cfg=cfg_create(b={"number": 2}, c={"number": 3}))
     assert again.returncode == 0, again.stderr
     assert created_keys(calls) == ["b", "c"]
+    # a rerun looks for an issue an earlier run opened and did not record
+    assert [c["argv"][1:] for c in creates(calls)] == [["--adopt-since", started]] * 2
     assert links(calls) == [["acme/api#1", "--blocked-by", "#7"]]
     assert creates(calls)[0]["spec"]["parent"] == "acme/api#1"
     assert creates(calls)[1]["spec"]["blocked_by"] == ["acme/api#2"]
     items = out(again)["items"]
+    ensured = {"parent": None, "blocked_by": [{"ref": "#7", "ok": True, "action": "exists"}]}
     assert items[0] == {
         "key": "a",
         "url": "https://github.com/acme/api/issues/1",
@@ -383,19 +527,28 @@ def test_a_rerun_after_a_failure_creates_nothing_twice_and_ensures_links(
         "created": False,
         "adopted": False,
         "verified": None,
-        "board": None,
-        "links": {
-            "parent": None,
-            "blocked_by": [{"ref": "#7", "ok": True, "action": "exists"}],
-        },
+        "board": "added",
+        "links": ensured,
     }
     assert [i["created"] for i in items] == [False, True, True]
-    assert state(tmp_path) == {"a": rec(API, 1), "b": rec(API, 2), "c": rec(API, 3)}
+    assert state(tmp_path)["started_at"] == started, "the start of the batch, not of this run"
+    assert recorded(tmp_path)["a"] == dict(a, links=ensured)
+    assert set(recorded(tmp_path)) == {"a", "b", "c"}
+
+
+def test_a_rerun_records_the_links_it_ensured(tmp_path: Path) -> None:
+    failed = {"parent": None, "blocked_by": [{"ref": "#7", "ok": False, "action": None}]}
+    seed(tmp_path, {"a": entry(API, 1, "a", links=failed)})
+    r, _ = run(tmp_path, batch(item("a", blocked_by=["#7"])))
+    assert r.returncode == 0, r.stderr
+    assert recorded(tmp_path)["a"]["links"] == {
+        "parent": None,
+        "blocked_by": [{"ref": "#7", "ok": True, "action": "exists"}],
+    }
 
 
 def test_a_recorded_item_gets_its_local_refs_from_the_state(tmp_path: Path) -> None:
-    state_path(tmp_path).parent.mkdir(parents=True)
-    state_path(tmp_path).write_text(json.dumps({"p": rec(API, 4), "c": rec(UI, 9)}))
+    seed(tmp_path, {"p": entry(API, 4, "p"), "c": entry(UI, 9, "c")})
     r, calls = run(tmp_path, batch(item("p"), item("c", repo=UI, parent="@p", blocked_by=["@p"])))
     assert r.returncode == 0, r.stderr
     assert creates(calls) == []
@@ -409,49 +562,245 @@ def test_a_rerun_of_a_finished_batch_creates_nothing(tmp_path: Path) -> None:
     assert first.returncode == 0, first.stderr
     again, calls = run(tmp_path, data)
     assert again.returncode == 0, again.stderr
-    assert creates(calls) == []
+    # nothing left to create: no validation either, only the links are ensured
+    assert [c["script"] for c in calls] == ["link"]
     assert links(calls) == [["acme/api#102", "--parent", "acme/api#101"]]
     assert [i["created"] for i in out(again)["items"]] == [False, False]
 
 
 def test_state_entries_of_other_keys_are_kept(tmp_path: Path) -> None:
-    state_path(tmp_path).parent.mkdir(parents=True)
-    state_path(tmp_path).write_text(json.dumps({"gone": rec(API, 3)}))
+    seed(tmp_path, {"gone": entry(API, 3, "gone")})
     r, _ = run(tmp_path, batch(item("a")))
     assert r.returncode == 0, r.stderr
-    assert state(tmp_path) == {"gone": rec(API, 3), "a": rec(API, 101)}
+    assert recorded(tmp_path) == {"gone": entry(API, 3, "gone"), "a": entry(API, 101, "a")}
 
 
-# ─── an exact-title duplicate is adopted, never created again ───────────────
-def test_a_duplicate_is_adopted_recorded_and_linked(tmp_path: Path) -> None:
+def test_a_rerun_validates_only_the_items_still_to_create_and_first(tmp_path: Path) -> None:
+    seed(tmp_path, {"a": entry(API, 1, "a")})
+    r, calls = run(tmp_path, batch(item("a", blocked_by=["#7"]), item("b", parent="@a")))
+    assert r.returncode == 0, r.stderr
+    assert [c["script"] for c in calls] == ["create", "link", "create"]
+    assert calls[0]["argv"][1:] == ["--dry-run"]
+    assert calls[0]["spec"]["summary"] == "[x] b"
+    assert "parent" not in calls[0]["spec"], "local refs are left out of the validation"
+
+
+# ─── an exact-title duplicate: adopted on a rerun only, and only the batch's own ─
+def test_a_rerun_adopts_an_open_duplicate_you_opened_since_the_batch_started(
+    tmp_path: Path,
+) -> None:
+    seed(tmp_path, {"a": entry(API, 1, "a")})
     data = batch(item("a"), item("b", parent="@a"), item("c", blocked_by=["@b"]))
-    cfg = cfg_create(a={"number": 1}, b={"code": 4, "duplicate": 55}, c={"number": 3})
+    cfg = cfg_create(b={"code": 4, "duplicate": {"number": 55}}, c={"number": 3})
     r, calls = run(tmp_path, data, cfg=cfg)
     assert r.returncode == 0, r.stderr
-    assert state(tmp_path) == {"a": rec(API, 1), "b": rec(API, 55), "c": rec(API, 3)}
+    ensured = {"parent": {"ref": "acme/api#1", "ok": True, "action": "exists"}, "blocked_by": []}
+    assert recorded(tmp_path)["b"] == entry(API, 55, "b", board="unchecked", links=ensured)
     assert links(calls) == [["acme/api#55", "--parent", "acme/api#1"]]
-    assert creates(calls)[2]["spec"]["blocked_by"] == ["acme/api#55"]
-    b = out(r)["items"][1]
-    assert (b["created"], b["adopted"], b["number"], b["board"]) == (False, True, 55, None)
-    assert b["links"]["parent"] == {"ref": "acme/api#1", "ok": True, "action": "exists"}
+    assert creates(calls)[1]["spec"]["blocked_by"] == ["acme/api#55"]
+    assert out(r)["items"][1] == {
+        "key": "b",
+        "url": "https://github.com/acme/api/issues/55",
+        "number": 55,
+        "repo": API,
+        "created": False,
+        "adopted": True,
+        "verified": None,
+        "board": "unchecked",
+        "links": ensured,
+    }
     assert "already exists" in r.stderr, "the guard's message is passed on"
 
 
+@pytest.mark.parametrize(
+    "dup",
+    [
+        {"number": 55, "createdAt": STARTED},  # at the start: at or after it
+        {"number": 55, "author": "OctoCat"},  # logins compare without case
+        {"number": 55, "state": "open"},  # the REST listing's spelling
+    ],
+    ids=["created-at-the-start", "login-case", "state-case"],
+)
+def test_the_adoption_rule_at_its_edges(tmp_path: Path, dup: dict[str, Any]) -> None:
+    seed(tmp_path, {})
+    r, _ = run(tmp_path, batch(item("a")), cfg=cfg_create(a={"code": 4, "duplicate": dup}))
+    assert r.returncode == 0, r.stderr
+    assert out(r)["items"][0]["adopted"] is True
+
+
+@pytest.mark.parametrize(
+    "dup,why",
+    [
+        ({"number": 55, "state": "CLOSED"}, "it is closed"),
+        ({"number": 55, "author": "teammate"}, "it was opened by teammate, not by you (octocat)"),
+        ({"number": 55, "author": None}, "its author or yours is unknown"),
+        (
+            {"number": 55, "createdAt": "2026-10-24T11:59:59Z"},
+            f"it was created before this batch started ({STARTED})",
+        ),
+        ({"number": 55, "createdAt": None}, "it was created before this batch started"),
+    ],
+    ids=["closed", "teammate", "no-author", "older", "no-created-at"],
+)
+def test_a_rerun_stops_at_a_duplicate_it_may_not_adopt(
+    tmp_path: Path, dup: dict[str, Any], why: str
+) -> None:
+    seed(tmp_path, {"a": entry(API, 1, "a")})
+    data = batch(item("a"), item("b"), item("c"))
+    r, calls = run(tmp_path, data, cfg=cfg_create(b={"code": 4, "duplicate": dup}))
+    assert r.returncode == 4
+    assert created_keys(calls) == ["b"], "c never runs"
+    assert recorded(tmp_path) == {"a": entry(API, 1, "a")}
+    assert f"; not adopted: {why}" in error(r)
+    assert 'item "b" stopped the batch: an issue with exactly this title already exists: ' in error(
+        r
+    )
+
+
+def test_the_refused_duplicate_is_named_with_its_state_and_author(tmp_path: Path) -> None:
+    seed(tmp_path, {})
+    cfg = cfg_create(a={"code": 4, "duplicate": {"number": 55, "state": "CLOSED"}})
+    r, _ = run(tmp_path, batch(item("a")), cfg=cfg)
+    assert r.returncode == 4
+    assert error(r) == (
+        'item "a" stopped the batch: an issue with exactly this title already exists: '
+        "https://github.com/acme/api/issues/55 (CLOSED, by octocat, created "
+        "2026-10-24T12:05:00Z); not adopted: it is closed — what was created so far is "
+        f"recorded in {state_path(tmp_path)}; fix the cause and rerun the same command "
+        "(recorded items are not created again)"
+    )
+
+
+def test_a_first_run_never_adopts_a_duplicate(tmp_path: Path) -> None:
+    """Even one that is open, yours and newer than the start: on a first run no issue
+    can be the batch's own yet."""
+    data = batch(item("a"), item("b", parent="@a"), item("c"))
+    late = {"number": 55, "createdAt": "2099-01-01T00:00:00Z"}
+    r, calls = run(
+        tmp_path, data, cfg=cfg_create(a={"number": 1}, b={"code": 4, "duplicate": late})
+    )
+    assert r.returncode == 4
+    assert created_keys(calls) == ["a", "b"]
+    assert all("--adopt-since" not in c["argv"] for c in creates(calls))
+    assert recorded(tmp_path) == {"a": entry(API, 1, "a")}
+    assert (
+        "; not adopted: this is the first run of the batch, so the batch did not create it"
+        in error(r)
+    )
+    assert links(calls) == []
+
+
+def test_a_duplicate_found_by_the_validation_stops_a_first_run_before_any_create(
+    tmp_path: Path,
+) -> None:
+    dup = {"number": 8, "author": "teammate", "state": "CLOSED"}
+    r, calls = run(tmp_path, batch(item("a"), item("b")), cfg=cfg_create(b={"dry_duplicate": dup}))
+    assert r.returncode == 4
+    assert creates(calls) == []
+    assert len(calls) == 2, "both items validated, nothing created"
+    assert not state_path(tmp_path).exists()
+    assert r.stdout == ""
+    assert error(r) == (
+        'item "b": an issue with exactly this title already exists: '
+        "https://github.com/acme/api/issues/8 (CLOSED, by teammate, created "
+        "2026-10-24T12:05:00Z); not adopted: this is the first run of the batch, so the batch "
+        "did not create it — nothing was created; give the item another title or settle that "
+        "issue, then rerun"
+    )
+
+
+def test_on_a_rerun_the_validation_lets_an_adoptable_duplicate_through(tmp_path: Path) -> None:
+    seed(tmp_path, {"a": entry(API, 1, "a")})
+    dup = {"number": 55}
+    cfg = cfg_create(b={"dry_duplicate": dup, "code": 4, "duplicate": dup})
+    r, _ = run(tmp_path, batch(item("a"), item("b")), cfg=cfg)
+    assert r.returncode == 0, r.stderr
+    assert out(r)["items"][1]["adopted"] is True
+
+
+def test_on_a_rerun_the_validation_stops_at_a_teammates_duplicate_first(tmp_path: Path) -> None:
+    seed(tmp_path, {"a": entry(API, 1, "a")})
+    cfg = cfg_create(b={"dry_duplicate": {"number": 8, "author": "teammate"}})
+    r, calls = run(tmp_path, batch(item("a", blocked_by=["#7"]), item("b"), item("c")), cfg=cfg)
+    assert r.returncode == 4
+    assert creates(calls) == [] and links(calls) == [], "the validation comes before anything"
+    assert "not adopted: it was opened by teammate, not by you (octocat)" in error(r)
+
+
 def test_an_adopted_item_without_links_is_only_recorded(tmp_path: Path) -> None:
-    r, calls = run(tmp_path, batch(item("a")), cfg=cfg_create(a={"code": 4, "duplicate": 8}))
+    seed(tmp_path, {})
+    r, calls = run(
+        tmp_path, batch(item("a")), cfg=cfg_create(a={"code": 4, "duplicate": {"number": 8}})
+    )
     assert r.returncode == 0, r.stderr
     assert links(calls) == []
-    assert state(tmp_path) == {"a": rec(API, 8)}
+    assert recorded(tmp_path) == {"a": entry(API, 8, "a", board="unchecked")}
     assert out(r)["items"][0]["links"] is None
 
 
 def test_an_adopted_item_whose_link_fails_is_exit_7(tmp_path: Path) -> None:
-    data = batch(item("a"), item("b", parent="@a"))
-    cfg = cfg_create(a={"number": 1}, b={"code": 4, "duplicate": 55})
+    seed(tmp_path, {"a": entry(API, 1, "a")})
+    cfg = cfg_create(b={"code": 4, "duplicate": {"number": 55}})
     cfg["link"] = {"acme/api#55": {"code": 7}}
-    r, _ = run(tmp_path, data, cfg=cfg)
+    r, _ = run(tmp_path, batch(item("a"), item("b", parent="@a")), cfg=cfg)
     assert r.returncode == 7
-    assert state(tmp_path)["b"] == rec(API, 55)
+    failed = {"parent": {"ref": "acme/api#1", "ok": False, "action": None}, "blocked_by": []}
+    assert recorded(tmp_path)["b"] == entry(API, 55, "b", board="unchecked", links=failed)
+
+
+@pytest.mark.parametrize("code", [2, 3, 5])
+def test_an_adopted_item_whose_link_step_cannot_run_stops_the_batch(
+    tmp_path: Path, code: int
+) -> None:
+    """Recorded before its links, so the rerun finds it in the state."""
+    seed(tmp_path, {"a": entry(API, 1, "a")})
+    data = batch(item("a"), item("b", parent="@a"), item("c"))
+    cfg = cfg_create(b={"code": 4, "duplicate": {"number": 55}})
+    cfg["link"] = {"acme/api#55": {"code": code}}
+    r, calls = run(tmp_path, data, cfg=cfg)
+    assert r.returncode == code
+    assert created_keys(calls) == ["b"], "c never runs"
+    assert recorded(tmp_path)["b"] == entry(API, 55, "b", board="unchecked")
+    assert (
+        f'item "b" stopped the batch: issue-link.sh could not ensure its links (exit {code})'
+        in error(r)
+    )
+    assert [i["key"] for i in out(r)["items"]] == ["a"]
+
+
+# ─── the preview of duplicates ──────────────────────────────────────────────
+def test_the_preview_says_which_duplicate_a_rerun_adopts_and_which_stops_it(
+    tmp_path: Path,
+) -> None:
+    seed(tmp_path, {"a": entry(API, 1, "a")})
+    cfg = cfg_create(
+        a={"dry_duplicate": {"number": 1}},  # its own recorded issue: not a duplicate
+        b={"dry_duplicate": {"number": 55}},
+        c={"dry_duplicate": {"number": 8, "state": "CLOSED", "author": "teammate"}},
+    )
+    r, calls = run(tmp_path, batch(item("a"), item("b"), item("c")), "--dry-run", cfg=cfg)
+    assert r.returncode == 0, r.stderr
+    assert creates(calls) == []
+    assert (
+        "\n\nAlready created, only their links are ensured:\n"
+        "- `a` — [x] a — https://github.com/acme/api/issues/1\n"
+        "\nAn issue with exactly the same title exists:\n"
+        "- `b`: would adopt #55 — https://github.com/acme/api/issues/55\n"
+        "- `c`: would stop: duplicate #8 (CLOSED, teammate) — https://github.com/acme/api/issues/8\n"
+        "\n# 1. `a` — [x] a\n"
+    ) in r.stdout
+
+
+def test_a_first_run_preview_says_a_duplicate_would_stop_it(tmp_path: Path) -> None:
+    r, _ = run(
+        tmp_path, batch(item("a")), "--dry-run", cfg=cfg_create(a={"dry_duplicate": {"number": 55}})
+    )
+    assert r.returncode == 0, r.stderr
+    assert (
+        "\nAn issue with exactly the same title exists:\n"
+        "- `a`: would stop: duplicate #55 (OPEN, octocat) — https://github.com/acme/api/issues/55\n"
+    ) in r.stdout
+    assert not (tmp_path / "cache").exists()
 
 
 # ─── exit codes: 6 and 7 continue, 2/3/4/5 stop ─────────────────────────────
@@ -463,21 +812,65 @@ def test_board_and_link_failures_do_not_stop_the_batch(tmp_path: Path, board_fir
     r, calls = run(tmp_path, data, cfg=cfg_create(a={"code": 6}, b={"code": 7}))
     assert r.returncode == 7
     assert set(created_keys(calls)) == {"a", "b", "c"}
-    assert set(state(tmp_path)) == {"a", "b", "c"}
+    assert set(recorded(tmp_path)) == {"a", "b", "c"}
     items = {i["key"]: i for i in out(r)["items"]}
     assert items["a"]["board"] == "failed"
     assert items["b"]["links"]["blocked_by"][0]["ok"] is False
 
 
-def test_a_board_failure_alone_is_exit_6(tmp_path: Path) -> None:
-    r, calls = run(tmp_path, batch(item("a"), item("b")), cfg=cfg_create(a={"code": 6}))
+def test_a_board_failure_alone_is_exit_6_and_recorded_for_the_rerun(tmp_path: Path) -> None:
+    data = batch(item("a"), item("b"))
+    r, calls = run(tmp_path, data, cfg=cfg_create(a={"code": 6}))
     assert r.returncode == 6
     assert created_keys(calls) == ["a", "b"]
+    assert recorded(tmp_path)["a"]["board"] == "failed"
+    again, calls = run(tmp_path, data)
+    assert again.returncode == 6, "the rerun does not forget it"
+    assert creates(calls) == []
+
+
+def test_a_recorded_board_failure_is_carried_into_exit_6_with_the_repair(tmp_path: Path) -> None:
+    seed(tmp_path, {"a": entry(API, 1, "a", board="failed")})
+    r, calls = run(tmp_path, batch(item("a"), item("b")))
+    assert r.returncode == 6
+    assert created_keys(calls) == ["b"]
+    assert out(r)["items"][0]["board"] == "failed"
+    url = "https://github.com/acme/api/issues/1"
+    assert {
+        "warning": f'item "a": {url} is recorded with a failed board step — gh project item-add '
+        f"12 --owner larchanka-training --url {url}, then set its Status on the board"
+    } in [json.loads(line) for line in r.stderr.splitlines()]
+    assert recorded(tmp_path)["a"]["board"] == "failed"
+
+
+def test_a_carried_board_failure_loses_to_a_failed_link(tmp_path: Path) -> None:
+    seed(tmp_path, {"a": entry(API, 1, "a", board="failed")})
+    r, _ = run(
+        tmp_path, batch(item("a"), item("b", blocked_by=["#7"])), cfg=cfg_create(b={"code": 7})
+    )
+    assert r.returncode == 7
+
+
+@pytest.mark.parametrize("board", ["added", "skipped", "unchecked", None])
+def test_other_recorded_board_results_do_not_change_the_exit(
+    tmp_path: Path, board: str | None
+) -> None:
+    seed(tmp_path, {"a": entry(API, 1, "a", board=board)})
+    r, _ = run(tmp_path, batch(item("a")))
+    assert r.returncode == 0, r.stderr
+    assert out(r)["items"][0]["board"] == board
+
+
+def test_an_entry_without_board_and_links_is_read_as_unknown(tmp_path: Path) -> None:
+    bare = {k: v for k, v in entry(API, 1, "a").items() if k not in ("board", "links")}
+    seed(tmp_path, {"a": bare})
+    r, _ = run(tmp_path, batch(item("a")))
+    assert r.returncode == 0, r.stderr
+    assert (out(r)["items"][0]["board"], out(r)["items"][0]["links"]) == (None, None)
 
 
 def test_a_failed_link_on_a_recorded_item_is_exit_7(tmp_path: Path) -> None:
-    state_path(tmp_path).parent.mkdir(parents=True)
-    state_path(tmp_path).write_text(json.dumps({"a": rec(API, 1)}))
+    seed(tmp_path, {"a": entry(API, 1, "a")})
     r, calls = run(
         tmp_path,
         batch(item("a", blocked_by=["#7"]), item("b")),
@@ -493,8 +886,7 @@ def test_a_link_step_that_cannot_run_on_a_recorded_item_stops_the_batch(
 ) -> None:
     """Auth, network or a target that no longer exists is not a link that failed to
     take: the batch stops there, as for a create."""
-    state_path(tmp_path).parent.mkdir(parents=True)
-    state_path(tmp_path).write_text(json.dumps({"a": rec(API, 1)}))
+    seed(tmp_path, {"a": entry(API, 1, "a")})
     r, calls = run(
         tmp_path,
         batch(item("a", blocked_by=["#7"]), item("b")),
@@ -505,6 +897,12 @@ def test_a_link_step_that_cannot_run_on_a_recorded_item_stops_the_batch(
     assert 'item "a"' in error(r)
 
 
+UNKNOWN = (
+    "the issue may exist: check the newest issues of acme/api first — a rerun adopts an open "
+    "issue with this title that you opened since the batch started"
+)
+
+
 @pytest.mark.parametrize("code", [2, 3, 4, 5])
 def test_a_failed_create_stops_the_batch_and_keeps_what_was_created(
     tmp_path: Path, code: int
@@ -513,10 +911,12 @@ def test_a_failed_create_stops_the_batch_and_keeps_what_was_created(
     r, calls = run(tmp_path, data, cfg=cfg_create(a={"number": 1}, b={"code": code}))
     assert r.returncode == code
     assert created_keys(calls) == ["a", "b"], "c never runs"
-    assert state(tmp_path) == {"a": rec(API, 1)}
+    assert recorded(tmp_path) == {"a": entry(API, 1, "a")}
     assert [i["key"] for i in out(r)["items"]] == ["a"]
     assert 'item "b"' in error(r)
     assert "rerun" in error(r)
+    # only a 5 can mean the create landed after all
+    assert (UNKNOWN in error(r)) is (code == 5)
 
 
 def test_an_unexpected_exit_code_of_an_item_stops_the_batch_as_5(tmp_path: Path) -> None:
@@ -524,18 +924,81 @@ def test_an_unexpected_exit_code_of_an_item_stops_the_batch_as_5(tmp_path: Path)
     assert r.returncode == 5
     assert created_keys(calls) == ["a"]
     assert "exit 1" in error(r)
+    assert UNKNOWN in error(r)
+
+
+def own_create_stub(tmp_path: Path, real_create: str) -> None:
+    """issue-create.sh as a shell script: a valid --dry-run, then `real_create`."""
+    stubs = tmp_path / "stubs"
+    stubs.mkdir()
+    (stubs / "issue-create.sh").write_text(
+        "#!/bin/sh\n"
+        'case "$*" in\n'
+        """  *--dry-run*) echo '{"dry_run": true, "body": "b", "duplicate": null}' ;;\n"""
+        f"  *) {real_create} ;;\n"
+        "esac\n"
+    )
+    (stubs / "issue-create.sh").chmod(0o755)
+    shutil.copy(FAKE, stubs / "issue-link.sh")
 
 
 def test_a_create_that_exits_0_without_a_url_stops_with_5(tmp_path: Path) -> None:
-    stubs = tmp_path / "stubs"
-    stubs.mkdir()
-    (stubs / "issue-create.sh").write_text("#!/bin/sh\necho '{}'\n")
-    (stubs / "issue-create.sh").chmod(0o755)
-    shutil.copy(FAKE, stubs / "issue-link.sh")
+    own_create_stub(tmp_path, "echo '{}'")
     r, _ = run(tmp_path, batch(item("a"), item("b")))
     assert r.returncode == 5
-    assert "no url" in error(r)
+    assert f"issue-create.sh exited 0 but printed no url; {UNKNOWN}" in error(r)
+    assert recorded(tmp_path) == {}
+
+
+def test_a_created_issue_that_cannot_be_recorded_stops_with_5(tmp_path: Path) -> None:
+    """The issue exists but the state cannot say so: the rerun's --adopt-since finds it."""
+    batches = state_path(tmp_path).parent
+    url = "https://github.com/acme/api/issues/9"
+    created = json.dumps({"url": url, "number": 9, "repo": API, "verified": True, "board": "added"})
+    own_create_stub(tmp_path, f"chmod a-w '{batches}'; echo '{created}'")
+    try:
+        r, _ = run(tmp_path, batch(item("a"), item("b")))
+    finally:
+        batches.chmod(0o755)
+    assert r.returncode == 5
+    assert f"{url} exists but could not be recorded (" in error(r)
+    assert error(r).endswith(
+        f"; {UNKNOWN} — what was created so far is recorded in {state_path(tmp_path)}; fix the "
+        "cause and rerun the same command (recorded items are not created again)"
+    )
+    assert recorded(tmp_path) == {}
+
+
+def test_a_state_file_that_cannot_be_started_creates_nothing(tmp_path: Path) -> None:
+    (tmp_path / "cache").write_text("not a directory")
+    r, calls = run(tmp_path, batch(item("a")))
+    assert r.returncode == 5
+    assert creates(calls) == []
+    assert "— nothing was created" in error(r)
+
+
+def test_a_real_run_validates_every_item_before_the_first_create(tmp_path: Path) -> None:
+    r, calls = run(
+        tmp_path, batch(item("a"), item("b"), item("c")), cfg=cfg_create(c={"dry_code": 2})
+    )
+    assert r.returncode == 2
+    assert creates(calls) == []
+    assert [c["argv"][1:] for c in calls] == [["--dry-run"]] * 3
     assert not state_path(tmp_path).exists()
+    assert r.stdout == ""
+    assert error(r) == (
+        'item "c": the validation before the first create (nothing created) failed '
+        "(issue-create.sh --dry-run, exit 2): stub issue-create.sh --dry-run failed with exit 2"
+    )
+
+
+def test_the_scripts_dir_seam_is_announced(tmp_path: Path) -> None:
+    r, _ = run(tmp_path, batch(item("a")))
+    assert r.returncode == 0, r.stderr
+    assert json.loads(r.stderr.splitlines()[0]) == {
+        "warning": f"ISSUE_BATCH_SCRIPTS_DIR is set: the item scripts run from "
+        f"{tmp_path / 'stubs'}, not {SKILL / 'scripts'}"
+    }
 
 
 # ─── --no-board and --dry-run ───────────────────────────────────────────────
@@ -579,13 +1042,12 @@ def test_a_dry_run_that_fails_for_one_item_fails_the_preview(tmp_path: Path) -> 
 
 
 def test_a_preview_names_the_items_already_created(tmp_path: Path) -> None:
-    state_path(tmp_path).parent.mkdir(parents=True)
-    state_path(tmp_path).write_text(json.dumps({"a": rec(API, 1)}))
+    seed(tmp_path, {"a": entry(API, 1, "a")})
     r, _ = run(tmp_path, batch(item("a"), item("b")), "--dry-run")
     assert r.returncode == 0, r.stderr
     assert (
-        "\nAlready created, only their links are ensured: "
-        "`a` → https://github.com/acme/api/issues/1\n"
+        "\nAlready created, only their links are ensured:\n"
+        "- `a` — [x] a — https://github.com/acme/api/issues/1\n"
     ) in r.stdout
 
 
@@ -634,6 +1096,7 @@ def test_the_example_preview_is_what_the_dry_run_prints(tmp_path: Path, case: st
         "repo_perms.json": "true",
         "project_view.json": json.dumps(PROJECT_VIEW),
         "project_fields.json": json.dumps(PROJECT_FIELDS),
+        "issue_search.json": "[]",  # no duplicate
     }.items():
         (fix / name).write_text(val)
     r = subprocess.run(
@@ -652,6 +1115,7 @@ def test_the_example_preview_is_what_the_dry_run_prints(tmp_path: Path, case: st
     assert r.returncode == 0, r.stderr
     assert r.stdout == drop_sync_header(EXAMPLES / case / "preview.md")
     assert not (tmp_path / "cache").exists()
+    assert r.stderr == "", "no warning: neither the scripts-dir seam nor a failed search"
 
 
 def test_every_example_case_is_complete() -> None:
@@ -708,8 +1172,8 @@ def test_compare_shape_is_equal_on_itself(tmp_path: Path, case: str) -> None:
 
 
 def renamed(data: dict[str, Any]) -> dict[str, Any]:
-    """Other keys, other titles, other wording, items in another file order: the shape
-    is the same."""
+    """Other keys, titles, types and wording, another number of criteria per part,
+    items in another file order: the shape is the same."""
     out = copy.deepcopy(data)
     out["id"] = "other-id"
     names = {it["key"]: f"k{n}" for n, it in enumerate(out["items"])}
@@ -717,12 +1181,14 @@ def renamed(data: dict[str, Any]) -> dict[str, Any]:
         it["key"] = names[it["key"]]
         it["summary"] = "[z] reworded"
         it["acceptance_criteria"] = ["reworded"] * len(it.get("acceptance_criteria", []))
+        it["type"] = "Story" if it.get("type") == "Task" else "Task"
         if "parent" in it:
             it["parent"] = "@" + names[it["parent"][1:]]
         if "blocked_by" in it:
             it["blocked_by"] = ["@" + names[r[1:]] for r in it["blocked_by"]]
-        for part in it.get("parts", []):
+        for n, part in enumerate(it.get("parts", [])):
             part["scope"] = part["boundary"] = part["done_when"] = "reworded"
+            part["acceptance_criteria"] = ["reworded"] * (n + 3)
     out["items"].reverse()
     return out
 
@@ -756,20 +1222,29 @@ def _repoint(items: list[dict[str, Any]]) -> None:
     [
         ("01-single", lambda i: i.append(dict(i[0], key="more")), "items: 1 != 2"),
         ("01-single", lambda i: _set(i[0], "repo", "larchanka-training/dmc-268-api-t6"), "repo"),
-        ("01-single", lambda i: _set(i[0], "type", "Story"), "type: 'Task' != 'Story'"),
-        ("02-two-prs", lambda i: i[0]["parts"].pop(), "parts (AC per part): [2, 2] != [2]"),
+        ("02-two-prs", lambda i: i[0]["parts"].pop(), "parts: 2 != 1"),
         (
             "02-two-prs",
-            lambda i: i[0]["parts"][1]["acceptance_criteria"].pop(),
-            "parts (AC per part): [2, 2] != [2, 1]",
+            lambda i: _set(i[0]["parts"][1], "acceptance_criteria", []),
+            "parts (has AC): [True, True] != [True, False]",
+        ),
+        (
+            "02-two-prs",
+            lambda i: i[0]["parts"][0].pop("acceptance_criteria"),
+            "parts (has AC): [True, True] != [False, True]",
         ),
         ("02-two-prs", lambda i: i[0]["kickoff"].pop("mines"), "kickoff mines: True != False"),
         ("02-two-prs", lambda i: i[0]["kickoff"].pop("read_first"), "kickoff read_first"),
-        ("02-two-prs", lambda i: i[0].pop("parts"), "parts (AC per part): [2, 2] != []"),
+        ("02-two-prs", lambda i: i[0].pop("parts"), "parts: 2 != 0"),
         (
             "02-two-prs",
             lambda i: i[0]["parts"][0].pop("done_when"),
-            "parts (done_when): [True, True] != [False, True]",
+            "parts (has done_when): [True, True] != [False, True]",
+        ),
+        (
+            "02-two-prs",
+            lambda i: _set(i[0]["parts"][1], "done_when", " "),
+            "parts (has done_when): [True, True] != [True, False]",
         ),
         ("03-ui-api", lambda i: i[1].pop("blocked_by"), "blocked_by: ['@1'] != []"),
         ("03-ui-api", lambda i: i[1].pop("parent"), "parent: '@1' != None"),
@@ -786,6 +1261,25 @@ def test_compare_shape_reports_each_difference(
     result = json.loads(r.stdout)
     assert result["same_shape"] is False
     assert any(needle in d for d in result["differences"]), result["differences"]
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        lambda i: _set(i[0], "type", "Story"),
+        lambda i: i[0]["parts"][0]["acceptance_criteria"].extend(["one more", "and another"]),
+        lambda i: i[0]["parts"][1]["acceptance_criteria"].pop(),
+    ],
+    ids=["type", "more-criteria", "fewer-criteria"],
+)
+def test_compare_shape_ignores_the_type_and_the_number_of_criteria(
+    tmp_path: Path, change: Any
+) -> None:
+    """The expected result is the number of parts, PR vs sub-issue and the repo; how
+    many criteria a part has is the writer's call, as long as it has one."""
+    r = compare(tmp_path, example("02-two-prs"), mutate("02-two-prs", change))
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert json.loads(r.stdout) == {"same_shape": True, "differences": []}
 
 
 def test_compare_shape_refuses_a_file_that_is_not_a_batch(tmp_path: Path) -> None:
