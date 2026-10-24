@@ -39,7 +39,9 @@ real run: {"id", "items": [{"key", "url", "number", "repo", "created", "adopted"
   order: repo, the parent / blocked_by graph (local refs as positions, so keys may
   differ), the number of parts, whether each part has AC and a done_when, kickoff
   read_first and mines. Type, titles, wording and the AC count are not compared.
-Errors: {"error": "..."} on stderr; the item scripts' stderr is passed through.
+Errors: {"error": "..."} on stderr; the item scripts' stderr is passed through, except
+  for an adopted item: one {"note": "adopted <url> — …"} line replaces what
+  issue-create.sh wrote (its exit-4 duplicate error).
 
 Exit
 ----
@@ -101,6 +103,10 @@ def err(msg: str, code: int = 2) -> NoReturn:
 
 def warn(msg: str) -> None:
     print(json.dumps({"warning": msg}, ensure_ascii=False), file=sys.stderr)
+
+
+def note(msg: str) -> None:
+    print(json.dumps({"note": msg}, ensure_ascii=False), file=sys.stderr)
 
 
 def load(path: str, what: str) -> Any:
@@ -296,20 +302,22 @@ def last_error(stderr: str) -> str:
     return lines[-1] if lines else "no error text"
 
 
-def call(script: str, args: list[str]) -> tuple[int, Any, str]:
+def call(script: str, args: list[str], hold: bool = False) -> tuple[int, Any, str, str]:
     """Run one item script as its own process; its stderr (warnings, repair commands)
-    is passed through. Returns (exit code, parsed stdout or None, error text)."""
+    is passed through unchanged — with `hold`, the caller passes it on or replaces it.
+    Returns (exit code, parsed stdout or None, error text, stderr)."""
     path = Path(os.environ.get("ISSUE_BATCH_SCRIPTS_DIR") or HERE) / script
     try:
         r = subprocess.run([str(path), *args], capture_output=True, text=True, check=False)
     except OSError as exc:
-        return 2, None, f"cannot run {path}: {exc}"
-    sys.stderr.write(r.stderr)
+        return 2, None, f"cannot run {path}: {exc}", ""
+    if not hold:
+        sys.stderr.write(r.stderr)
     try:
         parsed = json.loads(r.stdout) if r.stdout.strip() else None
     except json.JSONDecodeError:
         parsed = None
-    return r.returncode, parsed, last_error(r.stderr)
+    return r.returncode, parsed, last_error(r.stderr), r.stderr
 
 
 # ─── state ──────────────────────────────────────────────────────────────────
@@ -505,7 +513,7 @@ def dry_runs(items: list[dict[str, Any]], no_board: bool, step: str) -> dict[str
             key = item["key"]
             spec_path = Path(work) / f"{key}.json"
             spec_path.write_text(json.dumps(spec_of(item, None), ensure_ascii=False), "utf-8")
-            code, out, msg = call("issue-create.sh", [str(spec_path), *flags])
+            code, out, msg, _ = call("issue-create.sh", [str(spec_path), *flags])
             if code != 0 or not isinstance(out, dict) or not isinstance(out.get("body"), str):
                 err(
                     f'item "{key}": {step} failed (issue-create.sh --dry-run, exit {code}): {msg}',
@@ -619,7 +627,7 @@ def run(
         args = link_args(spec)
         if not args:  # issue-link.sh refuses a call with nothing to link
             return None
-        code, out, msg = call("issue-link.sh", [f"{entry['repo']}#{entry['number']}", *args])
+        code, out, msg, _ = call("issue-link.sh", [f"{entry['repo']}#{entry['number']}", *args])
         if code not in (0, 7):
             stop(key, code, f"issue-link.sh could not ensure its links (exit {code}): {msg}")
         worst = max(worst, code)
@@ -679,11 +687,19 @@ def run(
                 continue
             spec_path = Path(work) / f"{key}.json"
             spec_path.write_text(json.dumps(spec, ensure_ascii=False), "utf-8")
-            code, out, msg = call("issue-create.sh", [str(spec_path), *flags])
+            code, out, msg, said = call("issue-create.sh", [str(spec_path), *flags], hold=True)
             out = out if isinstance(out, dict) else {}
             rec = {k: out.get(k) for k in ("url", "number", "repo")}
-            if code == 4 and out.get("duplicate") is True:
-                why = refusal(out, started, out.get("user"))
+            dup = code == 4 and out.get("duplicate") is True
+            why = refusal(out, started, out.get("user")) if dup else None
+            # CONTRACT: the branches below adopt exactly when this holds — keep them in step.
+            if dup and why is None and is_record(rec):
+                # The guard's exit-4 error is how an adoption arrives, not a failure: a
+                # reader of stderr must not take a batch that went well for a failed one.
+                note(f"adopted {rec['url']} — exact title, opened by you during this batch")
+            else:  # before any stop below: the item's own error comes first
+                sys.stderr.write(said)
+            if dup:
                 if why is not None:
                     what = f"{named(out)}; not adopted: {why}"
                     if maybe_own(out, started, out.get("user")):
