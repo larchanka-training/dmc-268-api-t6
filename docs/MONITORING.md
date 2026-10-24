@@ -54,11 +54,11 @@ flowchart LR
 
 | Требование | Панель дашборда | Источник |
 |---|---|---|
-| Latency LLM-запросов | `LLM call p95`, `LLM call latency` (p50/p95/max, 5 мин) | `run_actions` с `tool = 'llm.call'`: одна запись на фактический вызов провайдера, `duration_ms` (PIPELINE_SPEC §2) |
+| Latency LLM-запросов | `LLM call p95`, `LLM call latency` (p50/p95/max, 5 мин) | `run_actions` с `tool = 'llm.call'`: одна запись на фактический вызов провайдера, `duration_ms` (PIPELINE_SPEC §2). При промахе кэша conventions в выборку попадает и вызов conventions: вида вызова нет в колонках `run_actions`, доступных роли Grafana |
 | Размер очередей | `Messages waiting in review queues`, `Review queues: ready messages`, `… in work and consumers` | `rabbitmq_detailed_queue_messages_ready/unacked/consumers{queue}` |
 | RPS | `Requests per second`, `Requests per second by host` | `caddy_http_request_duration_seconds_count{host}` |
 | Алерты об ошибках в командный канал | §5 | Prometheus → Alertmanager → Telegram |
-| Время каждого шага пайплайна | `Phase duration p95`, `Phases over the range` | `run_actions.tool` + `duration_ms`: `vcs.fetch_diff`, `context.build`, `llm.call`, `review.postprocess`, `github.publish_review`, … |
+| Время каждого шага пайплайна | `Phase duration p95`, `Phases over the range` | `run_actions.tool` + `duration_ms`: `vcs.fetch_diff`, `context.build`, `llm.call`, `review.postprocess`, `github.publish_review`, …. `context.build` в попытке, дошедшей до ревью, пишется дважды (сборка контекста по диффу и чтение входа промпта): счёт завышен, длительности смешивают два шага; `llm.call` смешивает conventions и ревью |
 | CPU / RAM серверов и воркеров | `Host CPU`, `Host memory`, `Container CPU`, `Container memory` | node-exporter, cAdvisor (метка `container_label_com_docker_compose_service`) |
 
 Ещё на дашборде: прогоны по итоговому состоянию, failed по `error_code`, стоимость и токены LLM в час (`usage_events`), доля 5xx и p95 ответа по хосту, соединения PostgreSQL, память и hit ratio Redis.

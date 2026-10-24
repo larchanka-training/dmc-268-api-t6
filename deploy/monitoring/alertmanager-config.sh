@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-# Renders alertmanager/alertmanager.yml of the monitoring stack (docs/MONITORING.md §Alerts).
+# Renders alertmanager/alertmanager.yml of the monitoring stack (docs/MONITORING.md §5).
 # Sourced by deploy.sh; CI renders both variants and checks them with amtool (job monitoring-validate).
 # Alertmanager expands no environment variables, so the chat id is written into the file and the
 # bot token into a separate file read through bot_token_file: it never appears in the config.

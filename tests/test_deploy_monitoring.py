@@ -634,6 +634,7 @@ def _run_backup(tmp_path: Path, **env: str) -> BackupRun:
     backups.mkdir(exist_ok=True)
     textfile = tmp_path / "pg_backup.prom"
     log = tmp_path / "pg.log"
+    # /bin/sh, not PATH: a local sh wrapper first on PATH would run instead of the system shell.
     result = subprocess.run(
         ["/bin/sh", str(MONITORING / "backup" / "pg-backup.sh"), "once"],
         env={
@@ -872,6 +873,7 @@ def _run_offsite(
     (tools / "rclone").chmod(0o755)
     textfile = tmp_path / "pg_backup_offsite.prom"
     log = tmp_path / "rclone.log"
+    # /bin/sh, not PATH: a local sh wrapper first on PATH would run instead of the system shell.
     result = subprocess.run(
         ["/bin/sh", str(MONITORING / "backup" / "offsite.sh"), "once"],
         env={
