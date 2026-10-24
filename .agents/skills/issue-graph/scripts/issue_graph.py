@@ -78,10 +78,10 @@ REVIEW_STATUSES = ("On Review", "AC Check")
 IN_PROGRESS = "In Progress"
 CLASS_DEFS = (
     "classDef done fill:#f1f3f5,stroke:#adb5bd,color:#868e96",
-    "classDef progress fill:#e7f5ff,stroke:#1c7ed6",
-    "classDef review fill:#fff9db,stroke:#f08c00",
-    "classDef alarm fill:#fff5f5,stroke:#e03131,stroke-width:3px",
-    "classDef external fill:#ffffff,stroke:#868e96,stroke-dasharray:5 5",
+    "classDef progress fill:#e7f5ff,stroke:#1c7ed6,color:#212529",
+    "classDef review fill:#fff9db,stroke:#f08c00,color:#212529",
+    "classDef alarm fill:#fff5f5,stroke:#e03131,stroke-width:3px,color:#212529",
+    "classDef external fill:#ffffff,stroke:#868e96,stroke-dasharray:5 5,color:#212529",
 )
 CLASS_ORDER = ("done", "progress", "review", "alarm", "external")
 EXTERNAL = " (вне выборки)"

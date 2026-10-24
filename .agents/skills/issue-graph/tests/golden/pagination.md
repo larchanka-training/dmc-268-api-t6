@@ -17,10 +17,10 @@ flowchart LR
   api_40 --> api_45
   api_43 --> api_42
   classDef done fill:#f1f3f5,stroke:#adb5bd,color:#868e96
-  classDef progress fill:#e7f5ff,stroke:#1c7ed6
-  classDef review fill:#fff9db,stroke:#f08c00
-  classDef alarm fill:#fff5f5,stroke:#e03131,stroke-width:3px
-  classDef external fill:#ffffff,stroke:#868e96,stroke-dasharray:5 5
+  classDef progress fill:#e7f5ff,stroke:#1c7ed6,color:#212529
+  classDef review fill:#fff9db,stroke:#f08c00,color:#212529
+  classDef alarm fill:#fff5f5,stroke:#e03131,stroke-width:3px,color:#212529
+  classDef external fill:#ffffff,stroke:#868e96,stroke-dasharray:5 5,color:#212529
   class api_45 done
   class api_42 alarm
   class api_43,api_44 external
