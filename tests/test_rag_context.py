@@ -1026,6 +1026,30 @@ def test_a_python_submodule_binding_is_confirmed() -> None:
     ]
 
 
+def test_a_python_submodule_import_is_confirmed_on_an_imports_edge() -> None:
+    # The indexer gives `from pkg import store` an `imports` edge to the submodule.
+    store = "import os\n\n\ndef save(item):\n    return item\n"
+    repository = Repository(
+        {
+            "pkg/__init__.py": "",
+            "pkg/store.py": store,
+            "app/main.py": (
+                "from pkg import store\n\n\ndef run(item):\n    return store.save(item)\n"
+            ),
+        }
+    )
+    diff_map = _diff_map(_vcs_file(repository, "pkg/store.py", "@@ -1,1 +1,2 @@\n+import os\n \n"))
+    graph = Graph({_REPOSITORY: (GraphHint("app/main.py", EdgeKind.IMPORTS, "pkg/store.py", ""),)})
+
+    result = _select(repository, diff_map, graph)
+
+    assert graph.reads == [(_REPOSITORY, (GraphTarget("pkg/store.py", ""),))]
+    assert [(place.source.path, place.source.ranges) for place in result.places] == [
+        ("app/main.py", (LineRange(1, 1), LineRange(4, 5)))
+    ]
+    assert (result.found, result.confirmed, dict(result.dropped)) == (1, 1, {})
+
+
 def test_the_graph_is_asked_under_the_default_branch_path_of_a_renamed_file() -> None:
     repository = Repository({"pkg/store.py": _PY_STORE})
     diff_map = _diff_map(
