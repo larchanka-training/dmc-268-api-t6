@@ -1287,6 +1287,125 @@ def test_a_title_with_a_pipe_does_not_break_the_table(tmp_path: Path) -> None:
     assert "| [x] a \\| b |" in r.stdout
 
 
+# ─── the preview warns of a blocker written only in prose ───────────────────
+PROSE = 'dependencies has a "{}" group but no blocked_by — the native link will be missing'
+
+
+def prose(label: str) -> dict[str, list[str]]:
+    return {label: ["the issue this one waits for"]}
+
+
+def test_the_preview_lists_a_blocker_written_only_in_prose_under_warnings(
+    tmp_path: Path,
+) -> None:
+    """A blocker the body names and no `blocked_by` sets stays prose — the graph #262
+    is about. The human sees it before the one confirmation; a local `@key` or a ref in
+    `blocked_by` silences it, and a recorded item is not created again."""
+    seed(tmp_path, {"f": entry(API, 1, "f")})
+    data = batch(
+        item("a", dependencies=prose("Blocked by")),
+        item("b", lang="ru", dependencies=prose("Блокирующие")),
+        item("c", lang="de", dependencies=prose("Blockiert durch")),
+        item("d", dependencies=prose("Blocked by"), blocked_by=["@a"]),
+        item("e", dependencies=prose("Blocked by"), blocked_by=["#4"]),
+        item("f", dependencies=prose("Blocked by")),
+    )
+    r, _ = run(tmp_path, data, "--dry-run")
+    assert r.returncode == 0, r.stderr
+    assert r.stdout.split("\n# 1. ", 1)[0] == (
+        "Batch `b1`: 6 issues, in creation order.\n"
+        "\n"
+        "| # | Key | Repo | Type | Title | Parent | Blocked by | Milestone | Status |\n"
+        "| --- | --- | --- | --- | --- | --- | --- | --- | --- |\n"
+        "| 1 | `a` | acme/api | Story | [x] a | — | — | — | Todo |\n"
+        "| 2 | `b` | acme/api | Story | [x] b | — | — | — | Todo |\n"
+        "| 3 | `c` | acme/api | Story | [x] c | — | — | — | Todo |\n"
+        "| 4 | `d` | acme/api | Story | [x] d | — | @a | — | Todo |\n"
+        "| 5 | `e` | acme/api | Story | [x] e | — | acme/api#4 | — | Todo |\n"
+        "| 6 | `f` | acme/api | Story | [x] f | — | — | — | — |\n"
+        "\n"
+        "Warnings:\n"
+        f"- `a`: {PROSE.format('Blocked by')}\n"
+        f"- `b`: {PROSE.format('Блокирующие')}\n"
+        f"- `c`: {PROSE.format('Blockiert durch')}\n"
+        "\n"
+        "Already created, only their links are ensured:\n"
+        "- `f` — [x] f — https://github.com/acme/api/issues/1\n"
+    )
+    assert stderr_lines(r) == []
+
+
+def real_scripts(
+    tmp_path: Path, data: dict[str, Any], *flags: str, fixtures: dict[str, str] | None = None
+) -> subprocess.CompletedProcess[str]:
+    """The real driver, issue-create.sh, preflight and builder without the board, every
+    call answered by the ISSUE_FIXTURE_DIR seam; a gh on PATH that only logs."""
+    fix = tmp_path / "fix"
+    fix.mkdir()
+    for name, val in {
+        "reach.code": "0",
+        "reach.http": "200",
+        "auth_user.code": "0",
+        "auth_user.json": '{"login": "octocat"}',
+        "repo_perms.json": "true",
+        "issue_search.json": "[]",
+        **(fixtures or {}),
+    }.items():
+        (fix / name).write_text(val)
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    (bin_dir / "gh").write_text(f"#!/bin/sh\necho \"$*\" >> '{tmp_path / 'gh.log'}'\nexit 99\n")
+    (bin_dir / "gh").chmod(0o755)
+    path = tmp_path / "batch.json"
+    path.write_text(json.dumps(data), encoding="utf-8")
+    return subprocess.run(
+        [sys.executable, str(SCRIPT), str(path), "--no-board", *flags],
+        capture_output=True,
+        text=True,
+        env={
+            "PATH": f"{bin_dir}:/usr/bin:/bin",
+            "HOME": str(tmp_path / "home"),
+            "XDG_CACHE_HOME": str(tmp_path / "cache"),
+            "ISSUE_FIXTURE_DIR": str(fix),
+        },
+        timeout=120,
+        check=False,
+    )
+
+
+def test_the_real_dry_run_leaves_the_prose_warning_to_the_preview(tmp_path: Path) -> None:
+    """issue-create.sh --dry-run builds each body without the local refs, so a `@key`
+    blocker looks absent there: that warning would be false, and a true one is already
+    in the preview — neither reaches stderr."""
+    data = batch(
+        item("a", dependencies=prose("Blocked by")),
+        item("b", dependencies=prose("Blocked by"), blocked_by=["@a"]),
+    )
+    r = real_scripts(tmp_path, data, "--dry-run")
+    assert r.returncode == 0, r.stderr
+    assert r.stderr == ""
+    assert f"\n\nWarnings:\n- `a`: {PROSE.format('Blocked by')}\n\n# 1. `a`" in r.stdout
+    assert not (tmp_path / "gh.log").exists()
+
+
+def test_the_real_run_warns_once_from_the_create_not_from_the_validation(
+    tmp_path: Path,
+) -> None:
+    url = "https://github.com/acme/api/issues/9"
+    fixtures = {
+        "issue_recover_before.json": "[]",
+        "issue_create.json": json.dumps({"url": url}),
+        "issue_view.json": json.dumps({"title": "[x] a"}),
+    }
+    data = batch(item("a", dependencies=prose("Blocked by")))
+    r = real_scripts(tmp_path, data, fixtures=fixtures)
+    assert r.returncode == 0, r.stderr
+    assert out(r)["items"][0]["url"] == url
+    warning = {"warning": PROSE.format("Blocked by")}
+    assert r.stderr == json.dumps(warning, ensure_ascii=False) + "\n"
+    assert not (tmp_path / "gh.log").exists()
+
+
 # ─── the golden examples ────────────────────────────────────────────────────
 PROJECT_VIEW = {"id": "PVT_board12", "number": 12, "title": "dmc-268-t6"}
 PROJECT_FIELDS = {

@@ -493,6 +493,21 @@ def test_dry_run_on_the_46_spec_reproduces_the_issue_body(tmp_path: Path) -> Non
     assert json.loads(r.stdout)["body"] == golden_body("issue-46")
 
 
+def test_a_blocker_only_in_prose_is_one_warning_on_a_dry_run_that_works(tmp_path: Path) -> None:
+    """The builder runs three times (body, argv, links); its warning reaches stderr
+    once and changes no exit code."""
+    spec = dict(BASE_SPEC, dependencies={"Блокирующие": ["acme/sandbox#4 — the API"]})
+    r = run(tmp_path, spec, "--dry-run")
+    assert r.returncode == 0, r.stderr
+    assert json.loads(r.stdout)["dry_run"] is True
+    assert [json.loads(line) for line in r.stderr.splitlines()] == [
+        {
+            "warning": 'dependencies has a "Блокирующие" group but no blocked_by — '
+            "the native link will be missing"
+        }
+    ]
+
+
 # ─── bad specs ──────────────────────────────────────────────────────────────
 def test_bad_spec_is_refused_before_any_call(tmp_path: Path) -> None:
     r = run(tmp_path, {"repo": "a/b"}, "--dry-run")

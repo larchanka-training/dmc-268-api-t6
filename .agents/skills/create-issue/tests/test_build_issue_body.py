@@ -6,8 +6,9 @@ pure function call or a subprocess exit code.
 Covers: golden bodies per type, the two unconditionally-emitted sections,
 fail-closed validation (including keys the emitter does not know), markdown
 section forgery, the type-to-label mapping and the CLI arg vector, non-ASCII
-passthrough, the language-dependent prose, and the native-link keys (`parent`,
-`blocked_by`, `status`) with `--emit-links`.
+passthrough, the language-dependent prose, the native-link keys (`parent`,
+`blocked_by`, `status`) with `--emit-links`, and the warning for a blocker written
+only in prose.
 """
 # SYNC: mirrored in dmc-268-{ui,api}-t6/.agents/skills/create-issue/tests/test_build_issue_body.py
 
@@ -625,6 +626,83 @@ def test_emit_args_and_emit_links_are_exclusive() -> None:
     r = run(mini(), "--emit-args", "--emit-links")
     assert r.returncode == 2
     assert "usage" in json.loads(r.stderr)["error"]
+
+
+# ─── a blocker written only in prose ────────────────────────────────────────
+def prose_warning(label: str) -> dict[str, str]:
+    return {
+        "warning": f'dependencies has a "{label}" group but no blocked_by — '
+        "the native link will be missing"
+    }
+
+
+def warnings_of(r: subprocess.CompletedProcess[str]) -> list[Any]:
+    return [json.loads(line) for line in r.stderr.splitlines()]
+
+
+@pytest.mark.parametrize(
+    "lang,label",
+    [("en", "Blocked by"), ("ru", "Блокирующие"), ("ru", "Блокируется"), ("de", "Blockiert durch")],
+)
+def test_a_blocker_only_in_prose_is_a_warning_not_a_refusal(lang: str, label: str) -> None:
+    """The failure #262 targets: the blocker is written in Dependencies and the native
+    link is never set. The body is still right, so exit 0 and the same body."""
+    spec = mini(lang=lang, dependencies={label: ["#4 — the API this work calls"]})
+    r = run(spec)
+    assert r.returncode == 0, r.stderr
+    assert r.stdout == bib.render_body(spec)
+    assert warnings_of(r) == [prose_warning(label)]
+
+
+@pytest.mark.parametrize(
+    "fields,label",
+    [
+        ({"dependencies": {"  blocked BY ": ["#4"]}}, "blocked BY"),
+        ({"dependencies": {"БЛОКИРУЮЩИЕ": "#4 — a paragraph, not a list"}}, "БЛОКИРУЮЩИЕ"),
+        ({"dependencies": {"Related": ["#3"], "Blocked by": ["#4"]}}, "Blocked by"),
+        ({"dependencies": {"Blocked by": ["#4"]}, "blocked_by": []}, "Blocked by"),
+        ({"dependencies": {"Blocked by": ["#4"]}, "parent": "#4"}, "Blocked by"),
+    ],
+)
+def test_the_label_is_matched_trimmed_and_in_any_case_and_only_blocked_by_silences(
+    fields: dict[str, Any], label: str
+) -> None:
+    r = run(mini(**fields))
+    assert r.returncode == 0, r.stderr
+    assert warnings_of(r) == [prose_warning(label)]
+
+
+@pytest.mark.parametrize(
+    "fields",
+    [
+        {"dependencies": {"Blocked by": ["#4"]}, "blocked_by": ["#4"]},
+        {"dependencies": {"Блокирующие": ["lib#4"]}, "blocked_by": ["other/lib#4"]},
+        {"dependencies": {"Blockiert durch": ["#4"]}, "blocked_by": ["#9"]},
+        # the other direction, and groups that only share a word with the labels
+        {"dependencies": {"Blocks": ["#4"], "Блокирует": ["#5"], "Not blocking": ["#6"]}},
+        {"dependencies": {"Related, not blocking": ["#7"], "Blocked by #4": ["why"]}},
+        # an empty group renders nothing, so no blocker is written
+        {"dependencies": {"Blocked by": []}},
+        # no group at all: free prose is not parsed
+        {"dependencies": "Blocked by #4"},
+        {"dependencies": ["Blocked by #4"]},
+    ],
+)
+def test_no_prose_warning_with_blocked_by_or_without_a_blocked_by_group(
+    fields: dict[str, Any],
+) -> None:
+    r = run(mini(**fields))
+    assert r.returncode == 0, r.stderr
+    assert r.stderr == ""
+
+
+@pytest.mark.parametrize("flag", ["--emit-args", "--emit-links"])
+def test_the_prose_warning_comes_with_the_body_only(flag: str) -> None:
+    """issue-create.sh runs the builder three times (body, argv, links): the warning
+    is printed once."""
+    r = run(mini(dependencies={"Blocked by": ["#4"]}), flag)
+    assert r.returncode == 0, r.stderr
+    assert r.stderr == ""
 
 
 # ─── parts: one issue sliced into PRs ───────────────────────────────────────

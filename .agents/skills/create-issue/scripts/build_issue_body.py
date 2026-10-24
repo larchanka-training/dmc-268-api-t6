@@ -19,7 +19,9 @@ Contract
 --------
 stdout carries the deliverable only. Errors go to stderr as {"error": "..."}.
 Exit 0 ok, 2 invalid spec. Never exits 0 on a spec it could not honour — a key
-the emitter does not know is a bug in the caller, not a no-op.
+the emitter does not know is a bug in the caller, not a no-op. With the body (not
+with --emit-*), a blocker written only in prose — a blocked-by group in
+`dependencies` and no `blocked_by` — is {"warning": "..."} on stderr, exit unchanged.
 """
 # SYNC: mirrored in dmc-268-{ui,api}-t6/.agents/skills/create-issue/scripts/build_issue_body.py
 
@@ -90,6 +92,11 @@ KICKOFF_LABEL = {
         "mines": "Fallstricke",
     },
 }
+
+# Dependencies group labels that mean "this issue is blocked by", in the body languages,
+# compared trimmed and case-insensitively. Such a group without `blocked_by` is a blocker
+# only in prose: the body is fine, the native link is missing — a warning, not an error.
+BLOCKED_BY_LABELS = ("blocked by", "блокирующие", "блокируется", "blockiert durch")
 
 # Parts — one issue sliced into PRs (references/slicing.md): each part is a separate PR
 # with its own boundary, stop criterion and acceptance criteria, rendered after the
@@ -194,6 +201,10 @@ ISSUE_REF = re.compile(r"(?:([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+))?#([1-9][0-9]*)")
 def err(msg: str) -> NoReturn:
     print(json.dumps({"error": msg}, ensure_ascii=False), file=sys.stderr)
     sys.exit(2)
+
+
+def warn(msg: str) -> None:
+    print(json.dumps({"warning": msg}, ensure_ascii=False), file=sys.stderr)
 
 
 # ─── escaping ───────────────────────────────────────────────────────────────
@@ -380,6 +391,23 @@ def render_links(s: dict[str, Any]) -> list[dict[str, Any]]:
         repo, num = parse_ref("blocked_by", ref, s["repo"])
         links.append({"kind": "blocked_by", "repo": repo, "number": num})
     return links
+
+
+def prose_blocker(s: dict[str, Any]) -> str | None:
+    """The warning for a blocker written only in prose — a Dependencies group the body
+    shows under a blocked-by label, and no `blocked_by` to set the native link — or
+    None. Only `blocked_by` silences it: a parent is not a blocker."""
+    dep = s.get("dependencies")
+    if s.get("blocked_by") or not isinstance(dep, dict):
+        return None
+    for group, value in dep.items():
+        # `value` as _dependencies() reads it: an empty group renders nothing.
+        if value and group.strip().casefold() in BLOCKED_BY_LABELS:
+            return (
+                f'dependencies has a "{group.strip()}" group but no blocked_by — '
+                "the native link will be missing"
+            )
+    return None
 
 
 # ─── CLI argv ───────────────────────────────────────────────────────────────
@@ -609,6 +637,11 @@ def main(argv: list[str]) -> int:
         print(json.dumps(render_links(spec), ensure_ascii=False))
     else:
         sys.stdout.write(render_body(spec))
+        # With the body only: issue-create.sh runs the emit modes as well, and one
+        # warning per issue is enough.
+        warning = prose_blocker(spec)
+        if warning:
+            warn(warning)
     return 0
 
 
