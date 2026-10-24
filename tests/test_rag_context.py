@@ -1786,7 +1786,7 @@ def test_an_importer_of_a_removed_and_a_changed_export_shows_both() -> None:
 
 # The RAG slot of the review context (ADR 0001 §9): after L1 and L4, before L2 and L3.
 
-_PLAN = RagPlan(index_commit_sha=_INDEX_COMMIT, stale=False)
+_PLAN = RagPlan()
 _MODELS = 'class Item:\n    """An item."""\n\n    def check(self):\n        return True\n'
 _SLOT_STORE = (
     "from .models import Item\n\n\ndef save(item: Item):\n    item.check()\n    return item\n"

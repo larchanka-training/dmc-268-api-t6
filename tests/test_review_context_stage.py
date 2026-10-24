@@ -1436,7 +1436,7 @@ def test_a_caught_build_failure_records_the_gate_without_rag_counters() -> None:
 
     assert asyncio.run(stage.run(_RUN)) is None
 
-    assert plans == [RagPlan(index_commit_sha=_INDEXED, stale=True)]
+    assert plans == [RagPlan()]
     assert [step[0] for step in trace.steps] == ["policy.load", "context.build", "context.rag"]
     assert trace.steps[2][1] == {
         "index_status": "stale",

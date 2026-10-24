@@ -20,7 +20,6 @@ from uuid import UUID
 from app.modules.code_index.domain.enums import EdgeKind
 from app.modules.code_index.domain.rag_index import RagIndex
 from app.modules.reviews.application.ast_resolution import (
-    BINARY_SOURCE,
     MAX_IMPORTED_FILES,
     FileUnavailable,
     ImportRef,
@@ -32,11 +31,9 @@ from app.modules.reviews.application.ast_resolution import (
     go_module_path,
 )
 from app.modules.reviews.application.ast_symbols import (
-    MAX_SOURCE_BYTES,
     AstFacts,
     AstFailureReason,
     AstLanguage,
-    ParseRequest,
     SourceParser,
     SymbolKind,
     language_for_path,
@@ -70,10 +67,12 @@ from app.modules.reviews.application.rag_context import (
     RagCandidates,
     RetrievedPlace,
     ReverseEdgeSelector,
+    checked_source,
+    ends_the_run,
+    guarded_facts,
 )
 from app.modules.reviews.application.review_ignore import IgnoreMatcher, IgnoreResult
 from app.modules.reviews.application.run_failures import RunCancelled, RunFailure
-from app.modules.reviews.application.vcs_diff import _is_binary
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -161,13 +160,8 @@ class RetrievedBlock:
 
 @dataclass(frozen=True)
 class RagPlan:
-    """The RAG gate found a usable index and a prompt that shows retrieved blocks.
-
-    What the gate read; a block carries the commit of its own graph read.
-    """
-
-    index_commit_sha: str
-    stale: bool
+    """The RAG gate found a usable index and a prompt that shows retrieved blocks: the
+    build fills the RAG slot. A block carries the commit of its own graph read."""
 
 
 @dataclass(frozen=True)
@@ -320,18 +314,7 @@ class _Files:
                 _LOGGER.warning("Context file read failed blob_sha=%s", sha, exc_info=True)
                 result = FileUnavailable("source_read_failed")
             else:
-                if len(raw) > MAX_SOURCE_BYTES:
-                    result = FileUnavailable(AstFailureReason.SOURCE_TOO_LARGE.value)
-                elif _is_binary(raw):
-                    # The service excludes binary content wherever it is found: a file
-                    # outside the diff reached through an import is no exception, and
-                    # the check runs before the parser and before the facts cache.
-                    result = FileUnavailable(BINARY_SOURCE)
-                else:
-                    try:
-                        result = raw.decode("utf-8", errors="strict")
-                    except UnicodeDecodeError:
-                        result = FileUnavailable(AstFailureReason.SOURCE_DECODE_FAILED.value)
+                result = checked_source(raw)
         self._texts[path] = result
         return result
 
@@ -361,26 +344,14 @@ class _Files:
         return result
 
     async def _load_facts(self, path: str, blob_sha: str | None) -> AstFacts | FileUnavailable:
-        language = language_for_path(path)
-        if language is None:
-            return FileUnavailable("unsupported_language")
         # The guard runs before the cache: a cached blob is not a permission to show it.
-        text = await self.text(path, blob_sha)
-        if isinstance(text, FileUnavailable):
-            return text
-        sha = blob_sha or self._tree.blob_shas.get(path)
-        if self._cache is not None and sha is not None:
-            cached = await self._cache.get(sha, language)
-            if cached is not None:
-                return cached
-        parsed = (await self._parser.parse_many((ParseRequest(path, language, text.encode()),)))[
-            path
-        ]
-        if isinstance(parsed, AstFailureReason):
-            return FileUnavailable(parsed.value)
-        if self._cache is not None and sha is not None:
-            await self._cache.put(sha, language, parsed)
-        return parsed
+        return await guarded_facts(
+            path,
+            lambda: self.text(path, blob_sha),
+            blob_sha=blob_sha or self._tree.blob_shas.get(path),
+            parser=self._parser,
+            cache=self._cache,
+        )
 
 
 class BuildReviewContext:
@@ -652,9 +623,7 @@ class BuildReviewContext:
                         denied=denied,
                     )
                 except Exception as exc:
-                    if isinstance(exc, (RunCancelled, PolicyError)) or (
-                        isinstance(exc, RunFailure) and exc.error_code == "deadline_exceeded"
-                    ):
+                    if ends_the_run(exc):
                         raise
                     # Optional like the other levels: the slot stays empty, L2 and L3 go on.
                     _LOGGER.warning("RAG slot failed head_sha=%s", diff_map.head_sha, exc_info=True)

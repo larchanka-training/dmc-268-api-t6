@@ -421,8 +421,9 @@ the parser profile changes, so the #143 reconcile rebuilds published indexes as 
 - In `BuildReviewContext.execute`, after L4 and before the `finally`
   (`app/modules/reviews/application/review_context.py:506`); the parser is still open. The
   logic lives in `app/modules/reviews/application/rag_context.py` (new).
-- The stage passes `RagPlan(index_commit_sha, stale)` only for a usable index and a pinned
-  prompt version in the capability set (M6), which this PR adds to
+- The stage passes a `RagPlan` marker (no fields: a block carries the commit of its own
+  graph read) only for a usable index and a pinned prompt version in the capability set
+  (M6), which this PR adds to
   `app/modules/reviews/application/rag_index.py` with that first caller (moved from PR 1
   after review r1). The retriever and the cached blob source are built by the factory in
   `app/worker.py:537-555`.
