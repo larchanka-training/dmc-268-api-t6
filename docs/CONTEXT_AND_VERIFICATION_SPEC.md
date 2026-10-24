@@ -712,9 +712,9 @@ Manifest хранит номера **исходных** строк, не ном�
 `selection_reason` — `rag_reverse_edge` или `rag_broken_reference`;
 `index_commit_sha` и вид ребра — метаданные выбора извлечённого блока рядом с его
 `source_ref`, а не внутри него. Omissions RAG —
-`rag_candidate_missing`, `rag_edge_unconfirmed`, `rag_limit` и существующая
-`source_read_failed`; исключённые ignore кандидаты передаются только счётчиком,
-без пути.
+`rag_candidate_missing`, `rag_edge_unconfirmed`, `rag_limit`, `old_revision_unknown`
+и существующая `source_read_failed`; исключённые ignore кандидаты передаются только
+счётчиком `excluded`, без пути.
 
 ### 5.2. Guard и связь с ответом
 
