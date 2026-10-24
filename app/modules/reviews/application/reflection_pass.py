@@ -122,12 +122,29 @@ class VerifierPrompt:
     user: str
 
 
+@dataclass(frozen=True)
+class VerifierReply:
+    """A verifier answer plus the manifest ``call_id`` of the call that produced it."""
+
+    output: Mapping[str, Any] | str | bytes
+    accepted_call_id: uuid.UUID | None = None
+
+
 class VerifierModel(Protocol):
-    """Protocol for the injected verifier model provider."""
+    """Protocol for the injected verifier model provider.
+
+    ``manifest`` describes the blocks of ``user_prompt``; ``context`` is the review context
+    the candidates came from, for the pre-send guard of repair and fallback calls.
+    """
 
     async def verify(
-        self, *, system_prompt: str, user_prompt: str
-    ) -> Mapping[str, Any] | str | bytes: ...
+        self,
+        *,
+        system_prompt: str,
+        user_prompt: str,
+        manifest: CallManifest,
+        context: ReviewContext,
+    ) -> VerifierReply | Mapping[str, Any] | str | bytes: ...
 
 
 def _fit_changed_files_for_verifier(
@@ -588,8 +605,11 @@ class ReflectionPass:
             )
 
         try:
-            raw_output = await self._model.verify(
-                system_prompt=prompt.system, user_prompt=prompt.user
+            reply = await self._model.verify(
+                system_prompt=prompt.system,
+                user_prompt=prompt.user,
+                manifest=manifest,
+                context=context,
             )
         except TimeoutError as exc:
             raise VerificationUnavailableError("Verifier model timed out") from exc
@@ -619,6 +639,7 @@ class ReflectionPass:
                 ) from exc
             raise VerificationUnavailableError("Verifier model call failed") from exc
 
+        raw_output = reply.output if isinstance(reply, VerifierReply) else reply
         try:
             if isinstance(raw_output, (str, bytes)):
                 parsed = VerificationOutput.model_validate_json(raw_output)
