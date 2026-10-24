@@ -118,6 +118,7 @@ RUN_ACTION_TOOLS = frozenset(
         "llm.repo_conventions",
         "llm.call",
         "llm.review_output",
+        "llm.verify",
         "review.postprocess",
         "github.publish_review",
         "gitlab.publish_review",

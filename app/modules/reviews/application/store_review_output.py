@@ -61,6 +61,8 @@ class PublishingRepository(ReviewOutputRepository, Protocol):
         postprocess_response: dict[str, Any],
         started_at: datetime,
         duration_ms: int,
+        verify_request: dict[str, Any] | None = None,
+        verify_response: dict[str, Any] | None = None,
     ) -> None: ...
 
 
@@ -133,6 +135,7 @@ class StoreReviewOutput:
         effective_v2_rules = (
             raw_output.allowed_v2_rules if isinstance(raw_output, VerifiedReviewOutput) else None
         )
+        verified = raw_output if isinstance(raw_output, VerifiedReviewOutput) else None
         pre_dropped = coerce_dropped_findings(run_id, effective_dropped_input)
         parsed = parse_review_output(raw_output)
         answer = _as_json_object(raw_output)
@@ -200,6 +203,8 @@ class StoreReviewOutput:
                 },
                 started_at=started_at,
                 duration_ms=int((time.monotonic() - started) * 1000),
+                verify_request=None if verified is None else verified.verify_request,
+                verify_response=None if verified is None else verified.verify_response,
             )
             await uow.commit()
 

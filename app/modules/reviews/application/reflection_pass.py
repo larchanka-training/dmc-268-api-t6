@@ -134,6 +134,16 @@ class VerifierReply:
     accepted_call_id: uuid.UUID | None = None
 
 
+@dataclass(frozen=True)
+class VerificationRecord:
+    """The verifier's decisions and the ``llm.verify`` request fields (PIPELINE_SPEC:177)."""
+
+    decisions: tuple[VerificationDecision, ...]
+    # The candidate ids sent to the verifier, in prompt order.
+    candidate_ids: tuple[str, ...]
+    accepted_call_id: uuid.UUID | None = None
+
+
 class VerifierModel(Protocol):
     """Protocol for the injected verifier model provider.
 
@@ -584,8 +594,18 @@ class ReflectionPass:
         candidates: tuple[CandidateFindingItem, ...],
         context: ReviewContext,
     ) -> tuple[VerificationDecision, ...]:
+        record = await self.verify_recorded(candidates=candidates, context=context)
+        return record.decisions
+
+    async def verify_recorded(
+        self,
+        *,
+        candidates: tuple[CandidateFindingItem, ...],
+        context: ReviewContext,
+    ) -> VerificationRecord:
+        """``verify`` plus what the ``llm.verify`` run action records (R13)."""
         if not candidates:
-            return ()
+            return VerificationRecord(decisions=(), candidate_ids=())
 
         prompt, manifest = await asyncio.to_thread(
             self._prompt_builder.build_verifier_prompt,
@@ -657,7 +677,10 @@ class ReflectionPass:
                 ) from exc
             raise VerificationUnavailableError("Verifier model call failed") from exc
 
-        raw_output = reply.output if isinstance(reply, VerifierReply) else reply
+        if isinstance(reply, VerifierReply):
+            raw_output, accepted_call_id = reply.output, reply.accepted_call_id
+        else:
+            raw_output, accepted_call_id = reply, None
         try:
             if isinstance(raw_output, (str, bytes)):
                 parsed = VerificationOutput.model_validate_json(raw_output)
@@ -845,7 +868,11 @@ class ReflectionPass:
                         f"requires at least one matching requirement_ref for this rule"
                     )
 
-        return tuple(parsed.decisions)
+        return VerificationRecord(
+            decisions=tuple(parsed.decisions),
+            candidate_ids=tuple(c.candidate_id for c in candidates),
+            accepted_call_id=accepted_call_id,
+        )
 
 
 def filter_verified_candidates(

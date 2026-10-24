@@ -825,8 +825,31 @@ class SqlAlchemyReviewOutputRepository:
         postprocess_response: dict[str, Any],
         started_at: datetime,
         duration_ms: int,
+        verify_request: dict[str, Any] | None = None,
+        verify_response: dict[str, Any] | None = None,
     ) -> None:
-        """Record ``review.postprocess``, the publishing lease and NOTIFY (T8); flush only."""
+        """Record ``review.postprocess``, the publishing lease and NOTIFY (T8); flush only.
+
+        A verifier trace is recorded first as ``llm.verify``, once per run like
+        ``llm.review_output`` (CVS §7.4); a run without a verifier pass writes none.
+        """
+        if verify_request is not None:
+            existing = await self._session.scalar(
+                select(RunAction.id).where(
+                    RunAction.run_id == run_id,
+                    RunAction.tool == "llm.verify",
+                )
+            )
+            if existing is None:
+                await insert_run_action(
+                    self._session,
+                    run_id=run_id,
+                    tool="llm.verify",
+                    request=verify_request,
+                    response=verify_response,
+                    started_at=started_at,
+                    duration_ms=0,
+                )
         await insert_run_action(
             self._session,
             run_id=run_id,
