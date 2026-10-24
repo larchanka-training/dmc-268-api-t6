@@ -43,6 +43,7 @@ from app.modules.reviews.application.get_run_file_lines import (
 )
 from app.modules.reviews.application.graph_retriever import GraphHint, GraphHints, GraphTarget
 from app.modules.reviews.application.policy_documents import missing_document
+from app.modules.reviews.application.policy_errors import PolicyError, PolicyErrorCode
 from app.modules.reviews.application.policy_snapshot import (
     AGENTS_DOCUMENT_PATH,
     RULES_DOCUMENT_PATH,
@@ -1926,6 +1927,59 @@ def test_a_plan_without_the_rag_sources_is_refused_before_any_read() -> None:
     with pytest.raises(ValueError, match="RAG plan"):
         _build(repository, diff_map, None)
     assert repository.read == []
+
+
+@dataclass
+class FailingGraph(Graph):
+    """A graph read that fails once it is asked."""
+
+    error: Exception = field(default_factory=lambda: RuntimeError("graph unavailable"))
+
+    async def read_hints(self, repository_id: UUID, targets: Sequence[GraphTarget]) -> GraphHints:
+        self.reads.append((repository_id, tuple(targets)))
+        raise self.error
+
+
+def test_a_failing_rag_slot_keeps_every_other_level_and_reports_the_error(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    repository, diff_map = _slot_repository(**{"pkg/app.py": _PY_USER})
+    graph = FailingGraph(error=RuntimeError("x" * 1_500))
+
+    without = _build(repository, diff_map, graph, plan=None)
+    with caplog.at_level(logging.WARNING, logger="app.modules.reviews.application.review_context"):
+        payload = _build(repository, diff_map, graph)
+
+    assert len(graph.reads) == 1
+    # No block of the slot; L1, L4 and L3 are those of a build without RAG.
+    assert (payload.blocks, payload.omissions, payload.tokens_used) == (
+        without.blocks,
+        without.omissions,
+        without.tokens_used,
+    )
+    assert payload.retrieved == ()
+    assert payload.rag == RagStats(error_type="RuntimeError", error_message="x" * 1_000)
+    assert [record.getMessage() for record in caplog.records] == [
+        f"RAG slot failed head_sha={_HEAD}"
+    ]
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        RunCancelled("installation_unavailable"),
+        RunFailure("deadline_exceeded", "the run deadline passed"),
+        PolicyError(PolicyErrorCode.ACCESS_DENIED, "GitHub answered 403"),
+    ],
+    ids=["cancel", "deadline", "policy"],
+)
+def test_control_raised_in_the_rag_slot_ends_the_build(error: Exception) -> None:
+    repository, diff_map = _slot_repository(**{"pkg/app.py": _PY_USER})
+
+    with pytest.raises(type(error)) as caught:
+        _build(repository, diff_map, FailingGraph(error=error))
+
+    assert caught.value is error
 
 
 _SLOT_BASE_STORE = (

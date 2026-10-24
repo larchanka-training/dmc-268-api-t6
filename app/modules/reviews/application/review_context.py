@@ -67,6 +67,7 @@ from app.modules.reviews.application.prompt_builder import ReviewRule
 from app.modules.reviews.application.rag_context import (
     RAG_LIMIT,
     CachedBlobSource,
+    RagCandidates,
     RetrievedPlace,
     ReverseEdgeSelector,
 )
@@ -174,8 +175,10 @@ class RagStats:
     """What the RAG slot of one build did, for ``context.rag``; it names no path.
 
     ``index`` is the status read with the graph hints; ``None`` when the build returned
-    before the slot, and ``reason`` says why (M8). Every candidate is counted once:
-    confirmed, or dropped under one reason. ``tokens`` is what the slot holds.
+    before the slot, and ``reason`` says why (M8), or when the slot failed: then
+    ``error_type`` and ``error_message`` say how, and the slot holds no block. Every
+    candidate is counted once: confirmed, or dropped under one reason. ``tokens`` is what
+    the slot holds.
     """
 
     index: RagIndex | None = None
@@ -183,6 +186,8 @@ class RagStats:
     confirmed: int = 0
     dropped: Mapping[str, int] = field(default_factory=dict)
     tokens: int = 0
+    error_type: str | None = None
+    error_message: str = ""
 
     @property
     def found(self) -> int:
@@ -630,17 +635,28 @@ class BuildReviewContext:
 
             # RAG: graph candidates in what L1 and L4 left; it displaces only L2 and L3,
             # which come after it (ADR 0001 §9).
+            candidates: RagCandidates | None = None
             if selector is not None:
-                candidates = await selector.select(
-                    diff_map=diff_map,
-                    tree=tree,
-                    go_module=go_module,
-                    changed=changed,
-                    loaded_texts=files.loaded_texts,
-                    loaded_facts=files.loaded_facts,
-                    shown=shown,
-                    denied=denied,
-                )
+                try:
+                    candidates = await selector.select(
+                        diff_map=diff_map,
+                        tree=tree,
+                        go_module=go_module,
+                        changed=changed,
+                        loaded_texts=files.loaded_texts,
+                        loaded_facts=files.loaded_facts,
+                        shown=shown,
+                        denied=denied,
+                    )
+                except Exception as exc:
+                    if isinstance(exc, (RunCancelled, PolicyError)) or (
+                        isinstance(exc, RunFailure) and exc.error_code == "deadline_exceeded"
+                    ):
+                        raise
+                    # Optional like the other levels: the slot stays empty, L2 and L3 go on.
+                    _LOGGER.warning("RAG slot failed head_sha=%s", diff_map.head_sha, exc_info=True)
+                    stats = RagStats(error_type=type(exc).__name__, error_message=str(exc)[:1000])
+            if candidates is not None:
                 omissions.extend(
                     ContextOmission(item.reason, item.path, item.count)
                     for item in candidates.omissions
