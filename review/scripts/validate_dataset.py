@@ -51,6 +51,8 @@ DEFAULT_ROOT = REPO_ROOT / "test-prs-dataset"
 SCHEMA_PATH = DEFAULT_ROOT / "schema" / "case.schema.json"
 HUNK = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@")
 _RENAME_OR_COPY = ("rename from ", "rename to ", "copy from ", "copy to ")
+_QUOTED_NAME = r'"(?:\\.|[^"\\])*"'
+_QUOTED_HEADER = re.compile(rf"({_QUOTED_NAME}) ({_QUOTED_NAME})")
 # The main corpus classes: the final distribution of the main profile counts exactly these.
 CLASS_PREFIX = {
     "security": "SEC",
@@ -113,7 +115,7 @@ def _patch_name(raw: str) -> str:
     """A path of a patch header line, decoded when git quoted it C-style."""
     if not raw.startswith('"'):
         return raw
-    quoted = re.match(r'^"(?:\\.|[^"\\])*"', raw)
+    quoted = re.match(f"^{_QUOTED_NAME}", raw)
     escaped = quoted.group(0)[1:-1] if quoted else ""
     return codecs.escape_decode(escaped.encode("utf-8"))[0].decode("utf-8")
 
@@ -143,18 +145,39 @@ def _patch_added_lines(patch: Path) -> dict[str, set[int]]:
     return added
 
 
+def _git_header_path(header: str) -> str | None:
+    """The path of a ``diff --git`` line whose two sides name the same file, as git reads it.
+
+    Only such a line is unambiguous: an unquoted ``a/P b/P`` splits at its middle, also when
+    ``P`` contains " b/". Different names (a rename or copy) come from the extended header.
+    """
+    names = header.removeprefix("diff --git ")
+    if quoted := _QUOTED_HEADER.fullmatch(names):
+        old, new = (_patch_name(name) for name in quoted.groups())
+    else:
+        half = len(names) // 2
+        old, new = (names[:half], names[half + 1 :]) if names[half : half + 1] == " " else ("", "")
+    if old.startswith("a/") and new.startswith("b/") and old[2:] == new[2:] != "":
+        return old[2:]
+    return None
+
+
 def _patch_changed_paths(patch: Path) -> list[str]:
     """Every repository path a patch changes, in first-seen order.
 
     Both names of each file block count: a deleted file by its old path, a rename by both,
     and a copy by its source too, since ``apply_ignore`` withholds a copy whose source a
-    mask matches. Header lines are read only before the first hunk of a block.
+    mask matches. The ``diff --git`` line also names a block without hunks (an empty file,
+    a mode change, a binary file); the other header lines are read only before the first
+    hunk of a block.
     """
     paths: dict[str, None] = {}
     in_header = True
     for text in patch.read_text(encoding="utf-8").splitlines():
         if text.startswith("diff --git "):
             in_header = True
+            if (path := _git_header_path(text)) is not None:
+                paths[path] = None
         elif not in_header:
             continue
         elif HUNK.match(text):

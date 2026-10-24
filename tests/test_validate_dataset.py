@@ -904,6 +904,127 @@ def test_ignore_mask_must_not_match_the_old_path_of_a_changed_file(
     )
 
 
+# A block without hunks has no ---/+++ lines: its path comes from the diff --git line.
+HUNKLESS_BLOCKS = {
+    "empty-new-file": (
+        "diff --git a/legacy/empty.py b/legacy/empty.py\nnew file mode 100644\n"
+        "index 0000000..e69de29\n",
+        {},
+        "legacy/empty.py",
+    ),
+    "mode-only": (
+        "diff --git a/legacy/helpers.py b/legacy/helpers.py\nold mode 100644\nnew mode 100755\n",
+        {"helpers.py": "def old():\n    return 0\n"},
+        "legacy/helpers.py",
+    ),
+    "empty-delete": (
+        "diff --git a/legacy/empty.py b/legacy/empty.py\ndeleted file mode 100644\n"
+        "index e69de29..0000000\n",
+        {"empty.py": ""},
+        "legacy/empty.py",
+    ),
+    "quoted-header": (
+        'diff --git "a/legacy/caf\\303\\251.py" "b/legacy/caf\\303\\251.py"\n'
+        "new file mode 100644\nindex 0000000..e69de29\n",
+        {},
+        "legacy/café.py",
+    ),
+    # Git splits "a/P b/P" at its middle; a split on the last " b/" would miss the path.
+    "name-with-b-slash": (
+        "diff --git a/legacy/x b/y.py b/legacy/x b/y.py\nold mode 100644\nnew mode 100755\n",
+        {"x b/y.py": "VALUE = 1\n"},
+        "legacy/x b/y.py",
+    ),
+}
+
+
+@pytest.mark.parametrize(
+    ("block", "files", "path"), list(HUNKLESS_BLOCKS.values()), ids=list(HUNKLESS_BLOCKS)
+)
+def test_ignore_mask_must_not_match_the_path_of_a_block_without_hunks(
+    tmp_path: Path, block: str, files: dict[str, str], path: str
+) -> None:
+    rules = RULES_TEXT + _ignore_block("legacy/**")
+    dataset = _rules_case(
+        tmp_path, rules=rules, malicious=(rules + INJECTION).encode(), patch=RULES_PATCH + block
+    )
+    legacy = dataset / "cases/RUL-01/base/legacy"
+    legacy.mkdir()
+    for name, text in files.items():
+        (legacy / name).parent.mkdir(parents=True, exist_ok=True)
+        (legacy / name).write_text(text, encoding="utf-8")
+
+    result = _run(dataset, "--case", "RUL-01")
+
+    assert result.returncode == 1
+    assert result.stdout == (
+        "RUL-01: policy.arms.valid: .review/rules.md: review-ignore mask legacy/** matches "
+        f"the changed path {path}\n"
+        "RUL-01: policy.arms.malicious: .review/rules.malicious.md: review-ignore mask "
+        f"legacy/** matches the changed path {path}\n"
+    )
+
+
+RENAME_BLOCKS = {
+    # The two names differ, so the diff --git line gives none: the rename lines are decoded.
+    "quoted-source": (
+        'diff --git "a/legacy/caf\\303\\251.py" b/app/helpers.py\nsimilarity index 100%\n'
+        'rename from "legacy/caf\\303\\251.py"\nrename to app/helpers.py\n',
+        "legacy/café.py",
+        "legacy/**",
+        "legacy/café.py",
+    ),
+    "new-side-only": (
+        "diff --git a/legacy/helpers.py b/generated/helpers.py\nsimilarity index 100%\n"
+        "rename from legacy/helpers.py\nrename to generated/helpers.py\n",
+        "legacy/helpers.py",
+        "generated/**",
+        "generated/helpers.py",
+    ),
+}
+
+
+@pytest.mark.parametrize(
+    ("block", "source", "mask", "path"), list(RENAME_BLOCKS.values()), ids=list(RENAME_BLOCKS)
+)
+def test_ignore_mask_must_not_match_either_name_of_a_rename(
+    tmp_path: Path, block: str, source: str, mask: str, path: str
+) -> None:
+    rules = RULES_TEXT + _ignore_block(mask)
+    dataset = _rules_case(
+        tmp_path, rules=rules, malicious=(rules + INJECTION).encode(), patch=RULES_PATCH + block
+    )
+    renamed = dataset / "cases/RUL-01/base" / source
+    renamed.parent.mkdir()
+    renamed.write_text("def old():\n    return 0\n", encoding="utf-8")
+
+    result = _run(dataset, "--case", "RUL-01")
+
+    assert result.returncode == 1
+    assert result.stdout == (
+        f"RUL-01: policy.arms.valid: .review/rules.md: review-ignore mask {mask} matches "
+        f"the changed path {path}\n"
+        "RUL-01: policy.arms.malicious: .review/rules.malicious.md: review-ignore mask "
+        f"{mask} matches the changed path {path}\n"
+    )
+
+
+def test_two_masks_on_one_path_give_one_error_per_arm(tmp_path: Path) -> None:
+    # The matcher returns the first mask in code point order ("*" < "e"), not in file order.
+    rules = RULES_TEXT + _ignore_block("app/example.py", "app/**")
+    dataset = _rules_case(tmp_path, rules=rules, malicious=(rules + INJECTION).encode())
+
+    result = _run(dataset, "--case", "RUL-01")
+
+    assert result.returncode == 1
+    assert result.stdout == (
+        "RUL-01: policy.arms.valid: .review/rules.md: review-ignore mask app/** matches "
+        "the changed path app/example.py\n"
+        "RUL-01: policy.arms.malicious: .review/rules.malicious.md: review-ignore mask "
+        "app/** matches the changed path app/example.py\n"
+    )
+
+
 def test_header_like_line_inside_a_hunk_is_not_a_changed_path(tmp_path: Path) -> None:
     # The removed SQL comment reads "--- legacy/report.sql" in the patch.
     rules = RULES_TEXT + _ignore_block("legacy/**")
