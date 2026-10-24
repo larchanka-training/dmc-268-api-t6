@@ -461,9 +461,10 @@ class ExecuteReviewRun:
             )
 
         # Pass 5: Verifier invocation
-        decisions = await self._reflection_pass.verify(
+        record = await self._reflection_pass.verify_recorded(
             candidates=tuple(filtered_candidates), context=context
         )
+        decisions = record.decisions
         supported, rejected = filter_verified_candidates(
             candidates=tuple(filtered_candidates), decisions=decisions
         )
@@ -477,10 +478,11 @@ class ExecuteReviewRun:
             )
 
         _LOGGER.info(
-            "Reflection pass completed for run %s (call %s): "
+            "Reflection pass completed for run %s (call %s, verifier call %s): "
             "total=%d, supported=%d, rejected=%d. Decisions: %s",
             run_id,
             reviewer_manifest.call_id,
+            record.accepted_call_id,
             len(filtered_candidates),
             len(supported),
             len(rejected),
@@ -519,4 +521,18 @@ class ExecuteReviewRun:
             dropped_findings=tuple(_dropped_findings),
             severity_threshold=severity_threshold,
             allowed_v2_rules=allowed_v2_rules,
+            # llm.verify (PIPELINE_SPEC:177): manifest_id stays null until manifests are
+            # persisted; reason is never stored.
+            verify_request={
+                "candidate_ids": list(record.candidate_ids),
+                "accepted_call_id": (
+                    None if record.accepted_call_id is None else str(record.accepted_call_id)
+                ),
+                "manifest_id": None,
+            },
+            verify_response={
+                "decisions": [
+                    decision.model_dump(mode="json", exclude={"reason"}) for decision in decisions
+                ]
+            },
         )

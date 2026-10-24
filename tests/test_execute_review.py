@@ -1873,6 +1873,12 @@ def test_execute_review_reflection_pass_logs_run_id_call_id_and_counters(
             return True
 
     class FakePassVerifier:
+        async def verify_recorded(self, *, candidates: Any, context: Any) -> Any:
+            from app.modules.reviews.application.reflection_pass import VerificationRecord
+
+            decisions = await self.verify(candidates=candidates, context=context)
+            return VerificationRecord(decisions, tuple(c.candidate_id for c in candidates))
+
         async def verify(self, *, candidates: Any, context: Any) -> Any:
             from app.modules.reviews.application.reflection_pass import VerificationDecision
 
@@ -2063,6 +2069,12 @@ def test_execute_review_validates_candidate_rule_name_against_manifest() -> None
             )
 
     class FakePassWithRulesVerifier:
+        async def verify_recorded(self, *, candidates: Any, context: Any) -> Any:
+            from app.modules.reviews.application.reflection_pass import VerificationRecord
+
+            decisions = await self.verify(candidates=candidates, context=context)
+            return VerificationRecord(decisions, tuple(c.candidate_id for c in candidates))
+
         async def verify(self, *, candidates: Any, context: Any) -> Any:
             from app.modules.reviews.application.reflection_pass import VerificationDecision
 

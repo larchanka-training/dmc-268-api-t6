@@ -6,7 +6,7 @@ import json
 import re
 from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Annotated, Literal, Protocol
+from typing import TYPE_CHECKING, Annotated, Any, Literal, Protocol
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
@@ -374,11 +374,16 @@ class VerifiedReviewOutput(Mapping[str, object]):
         dropped_findings: Sequence[DroppedCandidateRecord | Mapping[str, object]] = (),
         severity_threshold: SeverityThresholdValue | None = None,
         allowed_v2_rules: frozenset[str] | None = None,
+        verify_request: dict[str, Any] | None = None,
+        verify_response: dict[str, Any] | None = None,
     ) -> None:
         self._payload: dict[str, object] = dict(payload)
         self.dropped_findings = tuple(dropped_findings)
         self.severity_threshold = severity_threshold
         self.allowed_v2_rules = allowed_v2_rules
+        # The llm.verify run action (R13); plain dicts, None when the verifier was bypassed.
+        self.verify_request = verify_request
+        self.verify_response = verify_response
 
     def __getitem__(self, key: str) -> object:
         return self._payload[key]

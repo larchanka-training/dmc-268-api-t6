@@ -48,7 +48,7 @@ worker, and leaves `RETRIEVED_PROMPT_VERSIONS` alone.
 | R11 | Gateway adapter for `VerifierModel`, covering usage ledger, admission, output reserve and repair/fallback | 5, 6, 7 | The `usage_events` operation is `"verification"`. One schema-invalid answer gives `["primary","repair"]`; two give `["primary","repair","fallback"]`. Repair and fallback manifests pass the pre-send guard. The verifier window and price are used for the context and cost checks. |
 | R11 | Shared cap of 4 calls per (run, attempt) and the run cost cap | 2, 12 (OQ-2 = A) | After a review spends 3 calls, the verifier gets exactly 1 call and no fallback, and the original error class is kept. The arithmetic is in "Call budget" below. |
 | R11 | Error mapping: 402 → `llm_payment_required` with no run retry; overflow → `verification_context_overflow`; 429 → `verification_unavailable` with Retry-After | 5, 8 | `RetryDelays().for_failure(1, f)` gives `("2m", 2 min)` for Retry-After 45 s or none, and `("10m", 10 min)` for 300 s. 402 is not in `RETRYABLE_ERROR_CODES`. |
-| R13 | run_action `llm.verify` with request `{candidate_ids, accepted_call_id, manifest_id}` (`docs/PIPELINE_SPEC.md:177`; `manifest_id` is `null`, OQ-4), no migration, `reason` not persisted | 9 | A PG row `llm.verify` sits before `review.postprocess` in the same commit. No `reason` key anywhere. A legacy store writes no `llm.verify`. A second `enter_publishing` adds no second row. |
+| R13 | run_action `llm.verify` with request `{candidate_ids, accepted_call_id, manifest_id}` (`docs/PIPELINE_SPEC.md:177`; `manifest_id` is `null`, OQ-4), no migration, `reason` not persisted; the run-action catalog and two `contracts/openapi.yaml` descriptions list it, no schema change | 9 | A PG row `llm.verify` sits before `review.postprocess` in the same commit. No `reason` key anywhere. A legacy store writes no `llm.verify`. A second `enter_publishing` adds no second row. `tests/test_openapi_contract.py` catalog tests pass with `llm.verify` listed. |
 | R9 | Answer schema chosen by the bound review prompt version (OQ-1); the live review keeps v1 | 10 | No snapshot, or review prompt `v1`–`v3`: the provider schema equals `review-output.schema.json` without annotations. Review prompt `v4`: the v2 file, with `start_line==line` normalised to `null` and the ordering normalised. An unknown version (`v9`) raises `SNAPSHOT_INTEGRITY_ERROR` before any call. |
 | R16 | Repair receives the previous answer as bounded, escaped data (RFS §8.1) | 4 | Roles are `[system, user, user]`. `</previous_model_output>` inside the answer arrives escaped. An answer longer than the bound is cut, with a marker. The live shape `[system, user, assistant, user]` is unchanged (`tests/test_llm_gateway.py:1209`). |
 | Parity | The pre-send estimate stays the pinned task counter (the fitted prompt is the prompt sent); a parity test keeps counter/v2 equal to the profile `chars_per_token` heuristic (decision 11) | 3 | Lengths 0/1/3/4/3000/3001 give 0/1/1/2/1000/1001 under both counters. Every `from_env` profile counts 3.0 characters per token. The live estimate is 1101 with no counter and with `counter/v2`, for both `KNOWN_MODELS`. |
@@ -117,7 +117,11 @@ worker, and leaves `RETRIEVED_PROMPT_VERSIONS` alone.
      (`:698-713`).
    - Both existing `enter_publishing` fakes take `**kwargs` (`tests/test_review_output.py:369`, `:455`).
    - The `tool` field is a free string in the API (`api/dtos.py:78`) and in the UI Zod schema
-     (`src/entities/run/model/schemas.ts:84`, `z.string()`). No contract change.
+     (`src/entities/run/model/schemas.ts:84`, `z.string()`), so no schema changes. The run-action catalog
+     does change (corrected in Task 9; "no contract change" was wrong): `tests/test_openapi_contract.py`
+     requires every tool the code writes in `RUN_ACTION_TOOLS` and in the RunStatus and RunAction.tool
+     descriptions of `contracts/openapi.yaml`, so `llm.verify` is added to all three, worded as written on
+     the snapshot (verifier) path only and not live yet.
    - Response: `{decisions: [decision.model_dump(exclude={"reason"})]}`. `manifest_id`: see OQ-4.
 9. **R9 key** (OQ-1, decided):
    - The selector keys on the bound review prompt version, `policy_snapshot.prompt_bindings.review_system_version`,

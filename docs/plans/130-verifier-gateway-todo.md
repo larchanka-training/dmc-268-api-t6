@@ -285,7 +285,9 @@ TEST_RABBITMQ_URL=amqp://app:app@localhost:5672/imp130e uv run pytest
   - `tests/test_execute_review.py` (the ReflectionPass fakes at `:1864` and `:2054` gain `verify_recorded`);
   - new `tests/test_llm_verify_trace.py`;
   - new `tests/test_llm_verify_trace_postgres.py` (`@pytest.mark.integration`, with a skip fixture when
-    `TEST_DATABASE_URL` is unset).
+    `TEST_DATABASE_URL` is unset);
+  - `tests/test_openapi_contract.py` (`RUN_ACTION_TOOLS`) and `contracts/openapi.yaml` (RunStatus and
+    RunAction.tool descriptions), decided by the tech lead on 2026-10-24.
 - **What to do:** plan decision 8.
   - Request: `{"candidate_ids": [ids sent to the verifier], "accepted_call_id": "<uuid>", "manifest_id": null}`
     (OQ-4).
