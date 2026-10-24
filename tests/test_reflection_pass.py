@@ -5,11 +5,13 @@ from __future__ import annotations
 import uuid
 from collections.abc import Mapping
 from dataclasses import replace
+from datetime import timedelta
 from typing import Any
 
 import pytest
 from pydantic import ValidationError
 
+from app.modules.reviews.application.llm import LlmCallFailed, LlmErrorCode
 from app.modules.reviews.application.policy_snapshot import (
     CallManifest,
     PolicySnapshot,
@@ -44,7 +46,12 @@ from app.modules.reviews.application.review_output import (
     RequirementRef,
     ReviewFindingV2,
 )
-from app.modules.reviews.application.run_failures import RunFailure
+from app.modules.reviews.application.run_failures import (
+    RETRYABLE_ERROR_CODES,
+    RetryDelays,
+    RunFailure,
+    classify_failure,
+)
 
 
 class CustomModel:
@@ -2482,3 +2489,79 @@ async def test_reflection_pass_unwraps_a_verifier_reply() -> None:
 
     assert wrapped == plain
     assert [(d.candidate_id, d.status) for d in wrapped] == [("c-1", "supported")]
+
+
+# ---------- #130 PR E: verifier payment, overflow and rate-limit failures ----------
+
+
+async def _verify_with_failure(exc: Exception) -> None:
+    await ReflectionPass(CustomModel(exc)).verify(
+        candidates=(make_candidate("c-1"),), context=_query_context()
+    )
+
+
+@pytest.mark.anyio
+async def test_verifier_payment_required_fails_the_run_without_a_retry() -> None:
+    with pytest.raises(RunFailure) as caught:
+        await _verify_with_failure(LlmCallFailed(LlmErrorCode.PAYMENT_REQUIRED, "402"))
+
+    assert caught.value.error_code == "llm_payment_required"
+    assert caught.value.retry_after is None
+    assert "llm_payment_required" not in RETRYABLE_ERROR_CODES
+
+
+@pytest.mark.anyio
+async def test_verifier_context_overflow_is_a_verification_overflow() -> None:
+    with pytest.raises(RunFailure) as caught:
+        await _verify_with_failure(LlmCallFailed(LlmErrorCode.CONTEXT_OVERFLOW, "too long"))
+
+    assert caught.value.error_code == "verification_context_overflow"
+    assert "verification_context_overflow" not in RETRYABLE_ERROR_CODES
+
+
+@pytest.mark.parametrize(
+    ("retry_after_s", "retry_after", "delay"),
+    [
+        (45.0, timedelta(seconds=45), ("2m", timedelta(minutes=2))),
+        (300.0, timedelta(seconds=300), ("10m", timedelta(minutes=10))),
+        (None, timedelta(0), ("2m", timedelta(minutes=2))),
+    ],
+    ids=["retry-after-45s", "retry-after-300s", "no-retry-after"],
+)
+@pytest.mark.anyio
+async def test_verifier_rate_limit_carries_the_provider_retry_after(
+    retry_after_s: float | None, retry_after: timedelta, delay: tuple[str, timedelta]
+) -> None:
+    with pytest.raises(RunFailure) as caught:
+        await _verify_with_failure(
+            LlmCallFailed(LlmErrorCode.RATE_LIMITED, "429", retry_after_s=retry_after_s)
+        )
+
+    assert caught.value.error_code == "verification_unavailable"
+    assert caught.value.retry_after == retry_after
+    assert "verification_unavailable" in RETRYABLE_ERROR_CODES
+    assert RetryDelays().for_failure(1, caught.value) == delay
+
+
+@pytest.mark.parametrize(
+    "message",
+    ["503 from the provider", "attempt 1 already made 4 provider calls"],
+    ids=["provider-503", "call-cap"],
+)
+@pytest.mark.anyio
+async def test_verifier_unavailable_stays_a_short_retry(message: str) -> None:
+    with pytest.raises(VerificationUnavailableError, match="Verifier model unavailable") as caught:
+        await _verify_with_failure(LlmCallFailed(LlmErrorCode.UNAVAILABLE, message))
+
+    failure = classify_failure(caught.value)
+    assert failure.error_code == "verification_unavailable"
+    assert failure.retry_after is None
+    assert RetryDelays().for_failure(1, failure) == ("30s", timedelta(seconds=30))
+
+
+@pytest.mark.anyio
+async def test_verifier_invalid_output_stays_terminal() -> None:
+    with pytest.raises(VerificationInvalidOutputError, match="Verifier model output invalid"):
+        await _verify_with_failure(LlmCallFailed(LlmErrorCode.INVALID_OUTPUT, "bad"))
+
+    assert "verification_invalid_output" not in RETRYABLE_ERROR_CODES
