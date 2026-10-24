@@ -955,3 +955,14 @@ def test_optional_source_failure_remains_an_omission() -> None:
     payload = _build(repository, diff_map)
     assert payload.status is ContextStatus.REVIEW
     assert any(item.reason == "source_read_failed" for item in payload.omissions)
+
+
+def test_without_a_rag_plan_there_are_no_retrieved_blocks_and_no_rag_stats() -> None:
+    repository = _service_repository()
+    reviewed = _build(repository, _diff_map(_vcs_file(repository, "pkg/service.py", _GREET_PATCH)))
+    empty = _build(repository, _diff_map())
+
+    for payload in (reviewed, empty):
+        assert (payload.retrieved, payload.rag) == ((), None)
+        assert ContextLevel.RAG not in payload.levels_present
+    assert reviewed.tokens_used == sum(block.tokens for block in reviewed.blocks)

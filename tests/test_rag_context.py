@@ -1,6 +1,6 @@
-"""Graph RAG context: candidate blobs read through the blob cache (#144, M10), and the
+"""Graph RAG context: candidate blobs read through the blob cache (#144, M10), the
 reverse-edge candidates selected from the graph and confirmed at the PR head (ADR 0001 §8.2,
-§9)."""
+§9), and their slot in the review context payload."""
 
 from __future__ import annotations
 
@@ -42,6 +42,17 @@ from app.modules.reviews.application.get_run_file_lines import (
     BlobCacheStatus,
 )
 from app.modules.reviews.application.graph_retriever import GraphHint, GraphHints, GraphTarget
+from app.modules.reviews.application.policy_documents import missing_document
+from app.modules.reviews.application.policy_snapshot import (
+    AGENTS_DOCUMENT_PATH,
+    RULES_DOCUMENT_PATH,
+    ExecutionProfile,
+    PromptBindings,
+)
+from app.modules.reviews.application.prepare_policy_snapshot import (
+    RunPolicyPins,
+    build_policy_snapshot,
+)
 from app.modules.reviews.application.prompt_builder import FileStatus, PullRequestMeta
 from app.modules.reviews.application.rag_context import (
     CachedBlobSource,
@@ -49,6 +60,21 @@ from app.modules.reviews.application.rag_context import (
     RagOmission,
     RetrievedPlace,
     ReverseEdgeSelector,
+)
+from app.modules.reviews.application.review_context import (
+    BuildReviewContext,
+    ContextLevel,
+    ContextOmission,
+    RagPlan,
+    RagStats,
+    Representation,
+    ReviewContextPayload,
+)
+from app.modules.reviews.application.review_context_stage import context_summary
+from app.modules.reviews.application.review_ignore import (
+    IgnoreMatcher,
+    apply_ignore,
+    parse_review_ignore,
 )
 from app.modules.reviews.application.run_failures import RunCancelled, RunFailure
 from app.modules.reviews.application.vcs_diff import PullRequestLocator, VcsFile, VcsPullRequest
@@ -442,7 +468,9 @@ def _vcs_file(
     )
 
 
-def _diff_map(*files: VcsFile, repository_id: UUID = _REPOSITORY) -> DiffMap:
+def _diff_map(
+    *files: VcsFile, repository_id: UUID = _REPOSITORY, listed: int | None = None
+) -> DiffMap:
     pull_request = VcsPullRequest(
         locator=PullRequestLocator(17, "octo/repo", 7),
         head_sha=_HEAD,
@@ -454,7 +482,7 @@ def _diff_map(*files: VcsFile, repository_id: UUID = _REPOSITORY) -> DiffMap:
             source_branch="f",
             target_branch="main",
             labels=(),
-            files_changed=len(files),
+            files_changed=len(files) if listed is None else listed,
             lines_added=0,
             lines_removed=0,
             is_draft=False,
@@ -1130,3 +1158,307 @@ def test_a_candidate_past_the_read_limit_is_rag_limit_with_its_path() -> None:
     assert result.omissions[-1] == RagOmission("rag_limit", "pkg/user_20.py")
     assert dict(result.dropped) == {"rag_edge_unconfirmed": 20, "rag_limit": 1}
     assert "pkg/user_20.py" not in repository.read
+
+
+# The RAG slot of the review context (ADR 0001 §9): after L1 and L4, before L2 and L3.
+
+_PLAN = RagPlan(index_commit_sha=_INDEX_COMMIT, stale=False)
+_MODELS = 'class Item:\n    """An item."""\n\n    def check(self):\n        return True\n'
+_SLOT_STORE = (
+    "from .models import Item\n\n\ndef save(item: Item):\n    item.check()\n    return item\n"
+)
+_SLOT_PATCH = "@@ -4,2 +4,3 @@\n def save(item: Item):\n+    item.check()\n     return item"
+_TOO_LARGE_PATCH = "@@ -0,0 +1,3001 @@\n" + "\n".join("+x" for _ in range(3_001))
+
+
+class TreeUnavailable(Repository):
+    async def tree(self, revision: str) -> RevisionTree:
+        raise ConnectionError("provider unavailable")
+
+
+def _build(
+    repository: Repository,
+    diff_map: DiffMap,
+    graph: Graph | None,
+    *,
+    plan: RagPlan | None = _PLAN,
+    budget: int = 100_000,
+    rules_text: str | None = None,
+) -> ReviewContextPayload:
+    """Build the context of a run; with a graph, the builder has the RAG sources of the run."""
+    policy = parse_review_ignore(rules_text)
+    snapshot = build_policy_snapshot(
+        RunPolicyPins(
+            UUID(int=2),
+            diff_map.repository_id,
+            "b" * 40,
+            UUID(int=4),
+            "2" * 64,
+            PromptBindings("3" * 64, "", ""),
+            ExecutionProfile.fast("model-a", ""),
+        ),
+        rules=missing_document(RULES_DOCUMENT_PATH),
+        agents=missing_document(AGENTS_DOCUMENT_PATH),
+        ignore=policy,
+        snapshot_id=UUID(int=3),
+    )
+    matcher = IgnoreMatcher(policy)
+    store = BlobStore()
+    builder = BuildReviewContext(
+        source=repository,
+        parser=InProcessParser(),
+        counter=Words(),
+        retriever=graph,
+        rag_blobs=None
+        if graph is None
+        else CachedBlobSource(
+            repository_id=diff_map.repository_id,
+            source=repository,
+            cache=SharedBlobCache(store),
+            uow_factory=lambda: BlobCacheUow(store),
+        ),
+    )
+    return asyncio.run(
+        builder.execute(
+            diff_map=diff_map,
+            snapshot=snapshot,
+            matcher=matcher,
+            ignore=apply_ignore(matcher, diff_map),
+            token_budget=budget,
+            rag=plan,
+        )
+    )
+
+
+def _slot_repository(**importers: str) -> tuple[Repository, DiffMap]:
+    """A PR that changes ``save``, which reads the imported ``Item``: L1 is 11 tokens, the
+    L4 signature of ``Item`` 4, the full file (L3) 10 and its window (L2) 6."""
+    repository = Repository({"pkg/models.py": _MODELS, "pkg/store.py": _SLOT_STORE, **importers})
+    return repository, _diff_map(_vcs_file(repository, "pkg/store.py", _SLOT_PATCH))
+
+
+def _bulky_user(words: int) -> str:
+    """An importer of ``save`` whose one place is ``words + 8`` tokens."""
+    return (
+        "from .store import save\n\n\ndef run(item):\n"
+        f'    """{" ".join(["w"] * words)}"""\n    return save(item)\n'
+    )
+
+
+def test_a_retrieved_block_is_read_at_the_pr_head_and_counted_in_the_payload() -> None:
+    repository, diff_map = _slot_repository(**{"pkg/app.py": _PY_USER})
+
+    payload = _build(repository, diff_map, _store_hints("pkg/app.py", "pkg/gone.py"))
+
+    (block,) = payload.retrieved
+    assert (block.block_id, block.level, block.representation) == (
+        "RAG:pkg/app.py:1-1,4-5",
+        ContextLevel.RAG,
+        Representation.EXACT_LINES,
+    )
+    assert block.source == SourceRef(
+        role=SourceRole.RETRIEVED_EXCERPT,
+        repository_id=_REPOSITORY,
+        # The revision of the PR side, never the commit of the index.
+        revision=_HEAD,
+        path="pkg/app.py",
+        blob_sha=repository.sha("pkg/app.py"),
+        origin_paths=(),
+        side=DiffSide.RIGHT,
+        ranges=(LineRange(1, 1), LineRange(4, 5)),
+        reason="rag_reverse_edge",
+    )
+    assert (block.edge_kind, block.index_commit_sha) == (EdgeKind.USES_IMPORTED, _INDEX_COMMIT)
+    assert (block.text, block.tokens) == (
+        "from .store import save\ndef run(item):\n    return save(item)",
+        8,
+    )
+    # A retrieved block belongs to no diff file: it is kept apart, and still counted.
+    assert ContextLevel.RAG not in {item.level for item in payload.blocks}
+    assert payload.levels_present == (
+        ContextLevel.L1,
+        ContextLevel.L3,
+        ContextLevel.L4,
+        ContextLevel.RAG,
+    )
+    assert payload.tokens_used == 11 + 10 + 4 + 8
+    assert payload.omissions == (ContextOmission("rag_candidate_missing", "pkg/gone.py"),)
+    stats = payload.rag
+    assert stats is not None and stats.index is not None and stats.index.usable
+    assert (stats.reason, stats.found, stats.confirmed, dict(stats.dropped), stats.tokens) == (
+        None,
+        2,
+        1,
+        {"rag_candidate_missing": 1},
+        8,
+    )
+
+    summary = context_summary(diff_map, payload)
+
+    assert summary["levels_present"] == ["L1", "L3", "L4", "RAG"]
+    assert summary["tokens_used"] == 33
+    assert summary["tokens_by_role"] == {
+        "diff": 11,
+        "ast_excerpt": 4,
+        "source_excerpt": 10,
+        "retrieved_excerpt": 8,
+    }
+    assert summary["tokens_by_level"] == {"L1": 11, "L4": 4, "L3": 10, "RAG": 8}
+    assert summary["blocks_by_level"] == {"L1": 1, "L4": 1, "L3": 1, "RAG": 1}
+
+
+def test_the_rag_slot_displaces_l3_but_never_l1_or_l4() -> None:
+    repository, diff_map = _slot_repository(**{"pkg/app.py": _PY_USER})
+    graph = _store_hints("pkg/app.py")
+
+    # L1, L4 and the full file fill the budget exactly.
+    without = _build(repository, diff_map, graph, plan=None, budget=25)
+    with_rag = _build(repository, diff_map, graph, budget=25)
+
+    assert [item.level for item in without.blocks] == [
+        ContextLevel.L1,
+        ContextLevel.L4,
+        ContextLevel.L3,
+    ]
+    assert without.omissions == ()
+    assert with_rag.blocks == tuple(
+        item for item in without.blocks if item.level is not ContextLevel.L3
+    )
+    assert [item.tokens for item in with_rag.retrieved] == [8]
+    # Two tokens are left: neither the full file nor its window fits.
+    assert with_rag.omissions == (ContextOmission("budget", "pkg/store.py"),)
+    assert with_rag.tokens_used == 11 + 4 + 8
+    assert len(graph.reads) == 1
+
+
+def test_the_rag_slot_holds_at_most_4000_tokens() -> None:
+    paths = ["pkg/user_0.py", "pkg/user_1.py", "pkg/user_2.py"]
+    repository, diff_map = _slot_repository(**{path: _bulky_user(1_492) for path in paths})
+
+    payload = _build(repository, diff_map, _store_hints(*paths))
+
+    # Two places of 1 500 tokens fit the slot; the third would pass 4 000.
+    assert [(item.source.path, item.tokens) for item in payload.retrieved] == [
+        ("pkg/user_0.py", 1_500),
+        ("pkg/user_1.py", 1_500),
+    ]
+    assert payload.omissions == (ContextOmission("rag_limit", "pkg/user_2.py"),)
+    # The budget left after the slot still goes to L3.
+    assert [item.level for item in payload.blocks] == [
+        ContextLevel.L1,
+        ContextLevel.L4,
+        ContextLevel.L3,
+    ]
+    stats = payload.rag
+    assert stats is not None
+    # A candidate whose place does not fit is still confirmed.
+    assert (stats.found, stats.confirmed, dict(stats.dropped), stats.tokens) == (3, 3, {}, 3_000)
+
+
+def test_the_rag_slot_is_bounded_by_what_l1_and_l4_leave() -> None:
+    paths = ["pkg/user_0.py", "pkg/user_1.py"]
+    repository, diff_map = _slot_repository(**{path: _bulky_user(1_492) for path in paths})
+
+    # L1 and L4 take 15 tokens and leave 1 600, less than the slot.
+    payload = _build(repository, diff_map, _store_hints(*paths), budget=15 + 1_600)
+
+    assert [item.source.path for item in payload.retrieved] == ["pkg/user_0.py"]
+    assert payload.omissions == (ContextOmission("rag_limit", "pkg/user_1.py"),)
+    # The full file takes 10 of the 100 tokens the slot left.
+    assert [item.level for item in payload.blocks] == [
+        ContextLevel.L1,
+        ContextLevel.L4,
+        ContextLevel.L3,
+    ]
+    assert payload.tokens_used == 15 + 1_500 + 10
+
+
+def test_an_index_not_usable_at_the_graph_read_gives_no_block_and_its_fresh_status() -> None:
+    repository, diff_map = _slot_repository(**{"pkg/app.py": _PY_USER})
+    graph = _store_hints("pkg/app.py")
+    graph.status = IndexStatus.EMPTY
+
+    payload = _build(repository, diff_map, graph)
+
+    assert payload.retrieved == ()
+    stats = payload.rag
+    assert stats is not None and stats.index is not None
+    assert stats.index.status is RagIndexStatus.EMPTY
+    assert (stats.reason, stats.found, stats.tokens) == (None, 0, 0)
+    assert "pkg/app.py" not in repository.read
+
+
+def _returned_early(reason: str, graph: Graph) -> ReviewContextPayload:
+    """A build with a plan that returns before the RAG slot, for each reason it has."""
+    repository, diff_map = _slot_repository(**{"pkg/app.py": _PY_USER})
+    changed = _vcs_file(repository, "pkg/store.py", _SLOT_PATCH)
+    match reason:
+        case "diff_inventory_incomplete":
+            return _build(repository, _diff_map(changed, listed=2), graph)
+        case "no_changes":
+            return _build(repository, _diff_map(), graph)
+        case "all_changes_ignored":
+            return _build(repository, diff_map, graph, rules_text="```review-ignore\n**\n```\n")
+        case "no_reviewable_files":
+            unanchorable = _vcs_file(repository, "pkg/store.py", None, additions=3)
+            return _build(repository, _diff_map(unanchorable), graph)
+        case "diff_too_large":
+            large = _vcs_file(
+                repository, "pkg/big.py", _TOO_LARGE_PATCH, additions=3_001, status="added"
+            )
+            return _build(repository, _diff_map(large), graph)
+        case "budget":
+            # Not even the first hunk fits: L1 is cut.
+            return _build(repository, diff_map, graph, budget=1)
+        case "tree_unavailable":
+            unavailable = TreeUnavailable(repository.files)
+            unavailable_map = _diff_map(_vcs_file(unavailable, "pkg/store.py", _SLOT_PATCH))
+            return _build(unavailable, unavailable_map, graph)
+    raise AssertionError(reason)
+
+
+@pytest.mark.parametrize(
+    "reason",
+    [
+        "diff_inventory_incomplete",
+        "no_changes",
+        "all_changes_ignored",
+        "no_reviewable_files",
+        "diff_too_large",
+        "budget",
+        "tree_unavailable",
+    ],
+)
+def test_a_build_that_returns_before_the_slot_gives_its_reason_and_zero_counters(
+    reason: str,
+) -> None:
+    graph = _store_hints("pkg/app.py")
+
+    payload = _returned_early(reason, graph)
+
+    stats = payload.rag
+    assert stats == RagStats(reason=reason)
+    assert stats is not None and (stats.index, stats.found, stats.tokens) == (None, 0, 0)
+    assert payload.retrieved == ()
+    assert graph.reads == []
+
+
+def test_without_a_plan_the_rag_sources_change_nothing() -> None:
+    repository, diff_map = _slot_repository(**{"pkg/app.py": _PY_USER})
+    graph = _store_hints("pkg/app.py")
+
+    with_sources = _build(repository, diff_map, graph, plan=None)
+    without_sources = _build(repository, diff_map, None, plan=None)
+
+    assert with_sources == without_sources
+    assert (with_sources.retrieved, with_sources.rag) == ((), None)
+    assert graph.reads == []
+    assert "pkg/app.py" not in repository.read
+
+
+def test_a_plan_without_the_rag_sources_is_refused_before_any_read() -> None:
+    repository, diff_map = _slot_repository(**{"pkg/app.py": _PY_USER})
+
+    with pytest.raises(ValueError, match="RAG plan"):
+        _build(repository, diff_map, None)
+    assert repository.read == []
