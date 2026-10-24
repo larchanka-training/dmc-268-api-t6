@@ -1090,9 +1090,10 @@ def _submodule_import(
         (EdgeKind.IMPORTS, "def store(item):\n    return item\n"),
         (EdgeKind.IMPORTS, "store = None\n"),
         (EdgeKind.IMPORTS, "from .other import store\n"),
+        (EdgeKind.IMPORTS, "from .other import x as store\n"),
         (EdgeKind.USES_IMPORTED, "from .other import store\n"),
     ],
-    ids=["imports-def", "imports-assign", "imports-reimport", "uses-reimport"],
+    ids=["imports-def", "imports-assign", "imports-reimport", "imports-alias", "uses-reimport"],
 )
 def test_a_package_that_binds_the_name_itself_does_not_confirm_the_submodule(
     kind: EdgeKind, init: str
@@ -1144,6 +1145,177 @@ def test_a_package_past_the_read_limit_does_not_confirm_the_submodule() -> None:
     assert result.omissions == (RagOmission("rag_limit", "app/main.py"),)
     assert dict(result.dropped) == {"rag_limit": 1}
     assert "pkg/__init__.py" not in repository.read
+
+
+_OTHER = {"pkg/other.py": "def store(item):\n    return item\n"}
+
+
+@pytest.mark.parametrize(
+    "init",
+    [
+        "from . import store\n",
+        "from . import store as store\n",
+        "from pkg import store\n",
+        "import pkg.store as store\n",
+        "from .other import store as s2\n",
+    ],
+    ids=["relative", "relative-alias", "absolute", "module-alias", "other-name"],
+)
+def test_a_package_that_imports_its_own_submodule_still_binds_it(init: str) -> None:
+    repository, diff_map, graph = _submodule_import(init, files=_OTHER)
+
+    result = _select(repository, diff_map, graph)
+
+    # The package binds `store` to the submodule itself, or binds another name.
+    assert [place.source.path for place in result.places] == ["app/main.py"]
+    assert (result.found, result.confirmed) == (1, 1)
+
+
+@pytest.mark.parametrize(
+    "form",
+    [
+        "from . import store\n",
+        "from . import store as store\n",
+        "from pkg import store\n",
+        "import pkg.store as store\n",
+    ],
+    ids=["relative", "relative-alias", "absolute", "module-alias"],
+)
+def test_a_package_init_that_reads_its_own_submodule_is_confirmed(form: str) -> None:
+    init = f"{form}\n\ndef run(item):\n    return store.save(item)\n"
+    repository = Repository(
+        {
+            "pkg/__init__.py": init,
+            "pkg/store.py": "import os\n\n\ndef save(item):\n    return item\n",
+        }
+    )
+    diff_map = _diff_map(_vcs_file(repository, "pkg/store.py", "@@ -1,1 +1,2 @@\n+import os\n \n"))
+    graph = Graph(
+        {_REPOSITORY: (GraphHint("pkg/__init__.py", EdgeKind.IMPORTS, "pkg/store.py", ""),)}
+    )
+
+    result = _select(repository, diff_map, graph)
+
+    assert [place.source.ranges for place in result.places] == [(LineRange(1, 1), LineRange(4, 5))]
+    assert (result.found, result.confirmed) == (1, 1)
+
+
+@pytest.mark.parametrize(
+    ("main", "store"),
+    [
+        ("from pkg import store\n\n\ndef run(item):\n    return register(store)\n", None),
+        (
+            "from pkg import store\n\n\ndef run(item):\n    return store.save(item)\n",
+            "import os\n\nfrom .impl import save\n",
+        ),
+        ("from pkg import store\n\n\ndef run(item):\n    return store.helper(item)\n", None),
+        ("from pkg import store as st\n\n\ndef run(item):\n    return st.save(item)\n", None),
+    ],
+    ids=["bare-module", "reexported-member", "undeclared-member", "importer-alias"],
+)
+def test_an_imports_edge_to_a_submodule_is_confirmed_by_the_module_it_binds(
+    main: str, store: str | None
+) -> None:
+    files = {"app/main.py": main, "pkg/impl.py": "def save(item):\n    return item\n"}
+    if store is not None:
+        files["pkg/store.py"] = store
+    repository, diff_map, graph = _submodule_import("", files=files)
+
+    result = _select(repository, diff_map, graph)
+
+    # An `imports` edge is about the module: no member has to resolve in it.
+    assert [place.source.path for place in result.places] == ["app/main.py"]
+    assert (result.found, result.confirmed) == (1, 1)
+
+
+def test_a_namespace_package_without_an_init_reaches_no_submodule() -> None:
+    repository, diff_map, graph = _submodule_import("")
+    del repository.files["pkg/__init__.py"]
+
+    result = _select(repository, diff_map, graph)
+
+    # Without `__init__.py` the resolver resolves no `pkg`: the edge stays unconfirmed.
+    assert result.places == ()
+    assert result.omissions == (RagOmission("rag_edge_unconfirmed", "app/main.py"),)
+    assert repository.read == ["app/main.py"]
+
+
+_MODULE_EDGES = {
+    "python-module": (
+        {
+            "pkg/store.py": "import os\n\n\ndef save(item):\n    return item\n",
+            "app/main.py": (
+                "import pkg.store\n\n\ndef run(item):\n    return pkg.store.save(item)\n"
+            ),
+        },
+        "pkg/store.py",
+        "@@ -1,1 +1,2 @@\n+import os\n \n",
+        "app/main.py",
+    ),
+    "python-named": (
+        {
+            "pkg/store.py": "import os\n\n\ndef save(item):\n    return item\n",
+            "pkg/app.py": "from .store import save\n\n\ndef run(item):\n    return save(item)\n",
+        },
+        "pkg/store.py",
+        "@@ -1,1 +1,2 @@\n+import os\n \n",
+        "pkg/app.py",
+    ),
+    "python-facade": (
+        {
+            "pkg/store.py": "import os\n\nfrom .impl import save\n",
+            "pkg/impl.py": "def save(item):\n    return item\n",
+            "pkg/app.py": "from .store import save\n\n\ndef run(item):\n    return save(item)\n",
+        },
+        "pkg/store.py",
+        "@@ -1,1 +1,2 @@\n+import os\n \n",
+        "pkg/app.py",
+    ),
+    "typescript-default": (
+        {
+            "src/store.ts": (
+                'import { check } from "./check";\n\n'
+                "export default function store(item: number): number {\n  return item;\n}\n"
+            ),
+            "src/app.ts": (
+                'import store from "./store";\n\n'
+                "export function run(item: number): number {\n  return store(item);\n}\n"
+            ),
+        },
+        "src/store.ts",
+        '@@ -1,1 +1,2 @@\n+import { check } from "./check";\n \n',
+        "src/app.ts",
+    ),
+    "go-package": (
+        {
+            "go.mod": "module example.com/m\n\ngo 1.22\n",
+            "pkg/store/store.go": (
+                'package store\n\nimport "os"\n\nfunc Save(item int) int {\n\treturn item\n}\n'
+            ),
+            "cmd/app/app.go": (
+                'package app\n\nimport "example.com/m/pkg/store"\n\n'
+                "func Run(item int) int {\n\treturn store.Save(item)\n}\n"
+            ),
+        },
+        "pkg/store/store.go",
+        '@@ -1,2 +1,4 @@\n package store\n \n+import "os"\n+',
+        "cmd/app/app.go",
+    ),
+}
+
+
+@pytest.mark.parametrize("case", sorted(_MODULE_EDGES))
+def test_an_imports_edge_to_the_module_itself_is_confirmed_by_its_path(case: str) -> None:
+    files, changed, patch, candidate = _MODULE_EDGES[case]
+    repository = Repository(dict(files))
+    diff_map = _diff_map(_vcs_file(repository, changed, patch))
+    graph = Graph({_REPOSITORY: (GraphHint(candidate, EdgeKind.IMPORTS, changed, ""),)})
+
+    result = _select(repository, diff_map, graph)
+
+    assert graph.reads == [(_REPOSITORY, (GraphTarget(changed, ""),))]
+    assert [place.source.path for place in result.places] == [candidate]
+    assert (result.found, result.confirmed) == (1, 1)
 
 
 def test_the_graph_is_asked_under_the_default_branch_path_of_a_renamed_file() -> None:

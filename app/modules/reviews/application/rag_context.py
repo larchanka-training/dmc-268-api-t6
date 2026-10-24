@@ -730,20 +730,20 @@ class _Selection:
                     if ref is None:
                         continue
                     limited = limited or ref.reason == RAG_LIMIT
-                    if hint.kind is EdgeKind.IMPORTS and not submodule:
-                        # The module is confirmed by its path: the declaration only has
-                        # to read the binding without rebinding it.
+                    if hint.kind is EdgeKind.IMPORTS:
+                        # The module is confirmed by its path, a submodule by the name it
+                        # binds: the declaration only has to read the binding without
+                        # rebinding it, and no member has to resolve.
                         confirms = ref.reason != "shadowed"
-                    elif hint.kind is EdgeKind.IMPORTS:
-                        # A submodule is confirmed by the binding: it resolves into it.
-                        confirms = _resolves_into(ref, head_path)
                     else:
                         # The binding resolves to the same export of the changed file.
                         confirms = ref.resolution is ImportResolution.RESOLVED and any(
                             resolved.symbol_id in expected for resolved in ref.resolved_symbols
                         )
                     if confirms and submodule:
-                        confirms = not await self._package_binds(target.files[0], binding)
+                        confirms = not await self._package_binds(
+                            target.files[0], binding, head_path
+                        )
                     readers[symbol.index] = confirms
                 for index in _innermost(facts, readers):
                     reader = found.get(index)
@@ -845,14 +845,30 @@ class _Selection:
                 ):
                     yield item, binding, target
 
-    async def _package_binds(self, package_init: str, binding: AstImportName) -> bool:
-        """Whether the package imports the name of ``binding`` itself: ``from pkg import
-        name`` then binds that import, not the submodule, which the resolver does not
-        tell. A package RAG cannot read is taken to bind it."""
+    async def _package_binds(
+        self, package_init: str, binding: AstImportName, submodule: str
+    ) -> bool:
+        """Whether the package binds the name of ``binding`` over its ``submodule``: by a
+        top-level declaration of that name, or by an import of it from anything but the
+        submodule itself. ``from pkg import name`` then binds that, not the submodule,
+        which the resolver does not tell (#130)."""
         facts = await self._files.facts_for(package_init)
         if isinstance(facts, FileUnavailable):
+            # An ignored package, or one past the read limit, cannot show that the name
+            # is the submodule; the resolver read it already on a `uses_imported` edge.
             return True
-        return any(name.alias == binding.name for item in facts.imports for name in item.names)
+        if any(item.enclosing is None and item.name == binding.name for item in facts.symbols):
+            return True
+        for item in facts.imports:
+            target = module_target(
+                package_init, item.module, facts.language, self._tree, self._go_module
+            )
+            for name in item.names:
+                if name.alias == binding.name and not _imports_module(
+                    facts.language, name, target, submodule, self._tree
+                ):
+                    return True
+        return False
 
     async def _definition(self, base: _Base, ref: SymbolRef) -> RetrievedPlace | None:
         """The signature of a removed definition, read at the base."""
@@ -998,13 +1014,20 @@ def _joined(items: tuple[AstImport, ...], more: Iterable[AstImport]) -> tuple[As
     return tuple(joined)
 
 
-def _resolves_into(ref: ImportRef, path: str) -> bool:
-    """Whether a binding resolved, into ``path`` only."""
-    return (
-        ref.resolution is ImportResolution.RESOLVED
-        and bool(ref.resolved_symbols)
-        and all(item.path == path for item in ref.resolved_symbols)
-    )
+def _imports_module(
+    language: AstLanguage,
+    binding: AstImportName,
+    target: ModuleTarget,
+    path: str,
+    tree: RevisionTree,
+) -> bool:
+    """Whether an import binds the module at ``path`` itself: ``import pkg.sub as sub``,
+    or ``from pkg import sub`` as the resolver reads it."""
+    if target.resolution is not ImportResolution.RESOLVED:
+        return False
+    if binding.kind is ImportKind.MODULE:
+        return path in target.files
+    return _binds_submodule(language, binding, target, path, tree)
 
 
 def _innermost(facts: AstFacts, readers: Mapping[int, bool]) -> list[int]:
