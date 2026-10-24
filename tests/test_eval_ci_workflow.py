@@ -1,4 +1,6 @@
-"""The required CI job must publish the complete offline replay report."""
+"""The Python CI jobs: the unit job publishes the complete offline replay report, and the
+required check is red unless the unit job and every integration shard passed.
+"""
 
 from __future__ import annotations
 
@@ -8,8 +10,12 @@ import re
 import subprocess
 import sys
 import textwrap
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
+from xml.etree import ElementTree
+
+import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW = REPO_ROOT / ".github/workflows/ci-cd.yml"
@@ -24,13 +30,14 @@ def _replay_step() -> str:
         workflow,
     )
     assert match is not None
-    assert workflow.index("    name: Python lint / type / test") < match.start()
+    # The replay runs in the unit job; the required check fails when that job does.
+    assert match.group(0) in _python_job()
     return textwrap.dedent(match.group("body"))
 
 
-def _python_job() -> str:
+def _python_job(job_id: str = "python-unit") -> str:
     workflow = WORKFLOW.read_text(encoding="utf-8")
-    start = workflow.index("\n  python-lint-type-test:\n") + 1
+    start = workflow.index(f"\n  {job_id}:\n") + 1
     next_job = re.compile(r"(?m)^  \S").search(workflow, start + 1)
     return workflow[start : next_job.start() if next_job else len(workflow)]
 
@@ -187,8 +194,253 @@ def test_required_ci_replay_failure_is_not_softened_by_step_or_job_keys() -> Non
     continue_on_error = re.compile(r"(?m)^ +continue-on-error:")
     assert not continue_on_error.search(step), "replay step must not continue on error"
     assert not re.search(r"(?m)^        if:", step), "replay step must always run"
-    # Strict on purpose: any step of the required job that continues on error softens it too.
-    assert not continue_on_error.search(job), (
-        "neither Python lint / type / test nor any of its steps may continue on error"
+
+
+@pytest.mark.parametrize("job_id", ["python-unit", "python-integration"])
+def test_python_test_jobs_are_not_softened_by_job_or_step_keys(job_id: str) -> None:
+    job = _python_job(job_id)
+
+    # Strict on purpose: any step that continues on error, or a condition that skips the job,
+    # softens the required check that needs it.
+    assert not re.search(r"(?m)^ +continue-on-error:", job), (
+        f"neither {job_id} nor any of its steps may continue on error"
     )
-    assert not re.search(r"(?m)^    if:", job), "Python lint / type / test must always run"
+    assert not re.search(r"(?m)^    if:", job), f"{job_id} must always run"
+
+
+def test_required_check_fails_unless_every_python_job_succeeded() -> None:
+    job = _python_job("python-lint-type-test")
+
+    # A required check whose job is skipped counts as passed, so the aggregator runs after a
+    # failed or cancelled job and is red unless every job it needs succeeded.
+    assert "    name: Python lint / type / test\n" in job
+    assert re.search(r"(?m)^    if: always\(\)$", job)
+    assert "      - python-unit\n" in job
+    assert "      - python-integration\n" in job
+    assert "NEEDS: ${{ toJSON(needs) }}" in job
+    assert 'if result != "success"' in job
+    assert not re.search(r"(?m)^ +continue-on-error:", job)
+
+
+def test_shard_count_is_pinned_across_the_python_jobs() -> None:
+    integration = _python_job("python-integration")
+    matrix = re.search(r"(?m)^        shard: \[([\d, ]+)\]$", integration)
+    name = re.search(
+        r"(?m)^    name: Python integration \(\$\{\{ matrix\.shard \}\}/(\d+)\)$", integration
+    )
+    splits = re.findall(r"--splits (\d+)", integration)
+    assert matrix is not None and name is not None and len(splits) == 1
+
+    shards = [int(shard) for shard in matrix.group(1).split(",")]
+    assert shards == list(range(1, len(shards) + 1))
+    assert int(splits[0]) == int(name.group(1)) == _expected_shards() == len(shards)
+
+
+def _expected_shards() -> int:
+    """The shard count the aggregating job checks."""
+    match = re.search(r'(?m)^          SHARDS: "(\d+)"$', _python_job("python-lint-type-test"))
+    assert match is not None
+    return int(match.group(1))
+
+
+def _aggregator_step(name: str) -> str:
+    """The bash body of a step of the aggregating job, heredoc included, as the runner gets it."""
+    step = _job_step(_python_job("python-lint-type-test"), name)
+    match = re.search(r"(?m)^        run: \|\n(?P<body>(?:^          .*\n|^\n)*)", step)
+    assert match is not None
+    return textwrap.dedent(match.group("body"))
+
+
+def _run_aggregator_step(
+    tmp_path: Path, name: str, env: dict[str, str]
+) -> subprocess.CompletedProcess[str]:
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    shim = bin_dir / "python3"
+    shim.write_text('#!/bin/bash\nexec "$PYTHON_EXE" "$@"\n', encoding="utf-8")
+    shim.chmod(0o755)
+    return subprocess.run(
+        ["bash", "-euo", "pipefail", "-c", _aggregator_step(name)],
+        cwd=tmp_path,
+        env={
+            **os.environ,
+            "PATH": str(bin_dir) + os.pathsep + os.environ["PATH"],
+            "PYTHON_EXE": sys.executable,
+            **env,
+        },
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
+# Shard -> testcases as (nodeid, outcome); durations.json of a shard lists the same nodeids.
+Shards = dict[int, list[tuple[str, str]]]
+# Breaks a green shard set in place; returns the ::error:: text the check must print.
+Mutation = Callable[[list[str], Shards], str]
+
+
+def _green_shards() -> tuple[list[str], Shards]:
+    count = _expected_shards()
+    nodeids = [f"tests/test_shard_{n}.py::test_case[{n}]" for n in range(2 * count)]
+    shards = {
+        shard: [(nodeid, "passed") for nodeid in nodeids[2 * shard - 2 : 2 * shard]]
+        for shard in range(1, count + 1)
+    }
+    return nodeids, shards
+
+
+def _write_shard(directory: Path, cases: list[tuple[str, str]], durations: list[str]) -> None:
+    directory.mkdir()
+    suite = ElementTree.Element("testsuite", name="pytest", tests=str(len(cases)))
+    for nodeid, outcome in cases:
+        path, test = nodeid.split("::")
+        case = ElementTree.SubElement(
+            suite, "testcase", classname=path.removesuffix(".py").replace("/", "."), name=test
+        )
+        if outcome in ("skipped", "xfail"):
+            kind = "pytest.skip" if outcome == "skipped" else "pytest.xfail"
+            ElementTree.SubElement(case, "skipped", type=kind, message=outcome)
+        elif outcome in ("failure", "error"):
+            ElementTree.SubElement(case, outcome, message=outcome)
+    root = ElementTree.Element("testsuites")
+    root.append(suite)
+    ElementTree.ElementTree(root).write(directory / "junit.xml", encoding="utf-8")
+    (directory / "durations.json").write_text(
+        json.dumps({nodeid: 0.5 for nodeid in durations}), encoding="utf-8"
+    )
+
+
+def _run_suite_check(
+    tmp_path: Path,
+    collected: list[str],
+    shards: Shards,
+    durations: dict[int, list[str]] | None = None,
+) -> tuple[subprocess.CompletedProcess[str], Path]:
+    results = tmp_path / "python-tests"
+    results.mkdir()
+    (results / "integration-tests.txt").write_text(
+        "".join(f"{nodeid}\n" for nodeid in collected), encoding="utf-8"
+    )
+    for shard, cases in shards.items():
+        listed = (durations or {}).get(shard, [nodeid for nodeid, _ in cases])
+        _write_shard(results / f"integration-{shard}", cases, listed)
+    summary = tmp_path / "summary.md"
+    env = {"RESULTS": str(results), "SHARDS": str(_expected_shards())}
+    env["GITHUB_STEP_SUMMARY"] = str(summary)
+    return _run_aggregator_step(tmp_path, "Integration suite ran once (zero skips)", env), results
+
+
+def test_suite_check_merges_the_durations_of_green_shards(tmp_path: Path) -> None:
+    nodeids, shards = _green_shards()
+    shards[1][0] = (shards[1][0][0], "xfail")
+
+    result, results = _run_suite_check(tmp_path, nodeids, shards)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "::error::" not in result.stdout
+    merged = (results / ".test_durations").read_text(encoding="utf-8")
+    assert merged.endswith("}\n")
+    assert sorted(json.loads(merged)) == sorted(nodeids)
+    assert f"{len(nodeids)} collected, {len(nodeids)} ran, 0 errors" in (
+        tmp_path / "summary.md"
+    ).read_text(encoding="utf-8")
+
+
+def _lose_last(collected: list[str], shards: Shards) -> str:
+    nodeid, _ = shards[max(shards)].pop()
+    return f"Integration test did not run: {nodeid}"
+
+
+def _not_collected(collected: list[str], shards: Shards) -> str:
+    nodeid = collected.pop(0)
+    return f"Integration test ran but was not collected: {nodeid}"
+
+
+def _duplicate(collected: list[str], shards: Shards) -> str:
+    shards[2].append(shards[1][0])
+    return f"Integration test ran in 2 shards: {collected[0]}"
+
+
+def _outcome(shard: int, outcome: str, error: str) -> Mutation:
+    def mutate(collected: list[str], shards: Shards) -> str:
+        nodeid, _ = shards[shard][0]
+        shards[shard][0] = (nodeid, outcome)
+        path, test = nodeid.split("::")
+        return f"Shard {shard}: integration test {error}: {path[:-3].replace('/', '.')}::{test}"
+
+    return mutate
+
+
+def _missing_shard(collected: list[str], shards: Shards) -> str:
+    last = max(shards)
+    del shards[last]
+    return f"Shard {last} uploaded no durations.json and junit.xml"
+
+
+def _empty_collection(collected: list[str], shards: Shards) -> str:
+    collected.clear()
+    return "No integration tests were collected"
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        _lose_last,
+        _not_collected,
+        _duplicate,
+        _outcome(1, "skipped", "skipped"),
+        _outcome(2, "failure", "failed"),
+        _outcome(2, "error", "failed"),
+        _missing_shard,
+        _empty_collection,
+    ],
+    ids=["lost", "not-collected", "duplicate", "skipped", "failure", "error", "no-shard", "empty"],
+)
+def test_suite_check_fails_on_a_broken_shard_set(tmp_path: Path, mutate: Mutation) -> None:
+    nodeids, shards = _green_shards()
+    expected = mutate(nodeids, shards)
+
+    result, results = _run_suite_check(tmp_path, nodeids, shards)
+
+    assert result.returncode != 0
+    assert f"::error::{expected}\n" in result.stdout
+    assert not (results / ".test_durations").exists()
+
+
+def test_suite_check_fails_when_junit_and_durations_disagree(tmp_path: Path) -> None:
+    nodeids, shards = _green_shards()
+    durations = {2: [nodeid for nodeid, _ in shards[2]]}
+    shards[2].pop()
+
+    result, _ = _run_suite_check(tmp_path, nodeids, shards, durations)
+
+    assert result.returncode != 0
+    assert "::error::Shard 2: junit.xml lists 1 tests, durations.json 2\n" in result.stdout
+
+
+def _run_needs_check(tmp_path: Path, results: dict[str, str]) -> subprocess.CompletedProcess[str]:
+    needs = {job: {"result": result, "outputs": {}} for job, result in results.items()}
+    return _run_aggregator_step(
+        tmp_path, "Require the Python jobs to succeed", {"NEEDS": json.dumps(needs)}
+    )
+
+
+def test_needs_check_passes_when_every_python_job_succeeded(tmp_path: Path) -> None:
+    result = _run_needs_check(tmp_path, {"python-unit": "success", "python-integration": "success"})
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "::error::" not in result.stdout
+
+
+@pytest.mark.parametrize("outcome", ["failure", "cancelled", "skipped"])
+@pytest.mark.parametrize("job", ["python-unit", "python-integration"])
+def test_needs_check_fails_unless_every_python_job_succeeded(
+    tmp_path: Path, job: str, outcome: str
+) -> None:
+    results = {"python-unit": "success", "python-integration": "success", job: outcome}
+
+    result = _run_needs_check(tmp_path, results)
+
+    assert result.returncode != 0
+    assert f"::error::Job {job} finished with result '{outcome}', not 'success'\n" in result.stdout
