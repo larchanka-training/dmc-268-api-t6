@@ -942,16 +942,7 @@ def test_truncated_base_tree_fails_the_run_and_is_never_missing(stack: Stack) ->
     # No `.review` entry in a cut listing: only completeness tells absence from a gap.
     outcome = _review(stack, _github(None, fault=Fault.TRUNCATED))
 
-    assert outcome.state == "failed"
-    # Both stay allowed until #247 ч.1 decides: the code says terminal
-    # `policy_revision_unavailable`, §9 lists an incomplete load under `policy_fetch_transient`
-    # (retried, so the attempt count is not pinned either).
-    assert outcome.error_code in {"policy_revision_unavailable", "policy_fetch_transient"}
-    assert outcome.snapshots == 0
-    _assert_policy_load_failed(outcome)
-    assert outcome.tasks == []
-    assert outcome.reviews == []
-    assert outcome.check_run["conclusion"] == "neutral"
+    _assert_failed_once(outcome, frozenset({"policy_revision_unavailable"}))
 
 
 @pytest.mark.integration

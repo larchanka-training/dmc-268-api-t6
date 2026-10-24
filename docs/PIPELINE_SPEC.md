@@ -347,7 +347,7 @@ Fallback-модель — вторая модель шлюза с тем же st
 `.review/rules.md` из полных Git tree и blob той же ревизии, даже если файл есть в
 архиве. `export-ignore` делает отсутствие в архиве недоказательным, `export-subst`
 не меняет применяемые маски. `AGENTS.md` при индексации не читается. Ошибки этого пути
-классифицируются как `policy_*`: 404/409/422 → `policy_revision_unavailable`, 401/403
+классифицируются как `policy_*`: 404/409/422, усечённый или неоднозначный листинг дерева (RFS §9) → `policy_revision_unavailable`, 401/403
 без rate-limit признаков → `policy_access_denied`, 429/limited 403 →
 `policy_rate_limited`, 5xx/transport → `policy_fetch_transient`; недопустимый документ
 сохраняет код RFS §9. `Retry-After` — ASCII целые секунды с пределом сутки; невалидное

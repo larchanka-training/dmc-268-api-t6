@@ -1014,16 +1014,20 @@ def test_rules_document_accepts_exactly_65536_bytes() -> None:
         "duplicate-name",
     ],
 )
+@pytest.mark.parametrize(
+    ("path", "requests"), [(_ROOT_TREE, 1), (_REVIEW_TREE, 2)], ids=["root", "review"]
+)
 def test_rules_document_rejects_ambiguous_nonrecursive_listings(
-    entries: list[dict[str, Any]],
+    entries: list[dict[str, Any]], path: str, requests: int
 ) -> None:
-    github = GitHub({_ROOT_TREE: _answer(200, json={"tree": entries, "truncated": False})})
+    routes = _policy_routes()
+    routes[path] = _answer(200, json={"tree": entries, "truncated": False})
 
-    error, requests = _run(github, lambda source: source.rules_document(_HEAD))
+    error, counted = _run(GitHub(routes), lambda source: source.rules_document(_HEAD))
 
     assert isinstance(error, PolicyError), repr(error)
-    assert error.code.value == "policy_fetch_transient"
-    assert requests == 1
+    assert error.code.value == "policy_revision_unavailable"
+    assert counted == requests
 
 
 def test_rules_document_counts_transport_failures() -> None:

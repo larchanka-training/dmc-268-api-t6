@@ -1241,9 +1241,19 @@ class FakeGitHubApi:
         if path == f"{repo}/compare/{BASE}...{HEAD}":
             return httpx.Response(200, json={"merge_base_commit": {"sha": BASE}})
         if path == f"{repo}/git/trees/{BASE}":
-            tree = [{"path": "README.md", "type": "blob", "sha": "c" * 40, "size": 3}]
+            tree = [
+                {"path": "README.md", "mode": "100644", "type": "blob", "sha": "c" * 40, "size": 3}
+            ]
             if self.agents_md is not None:
-                tree.append({"path": "AGENTS.md", "type": "blob", "sha": "a" * 40, "size": 9})
+                tree.append(
+                    {
+                        "path": "AGENTS.md",
+                        "mode": "100644",
+                        "type": "blob",
+                        "sha": "a" * 40,
+                        "size": 9,
+                    }
+                )
             return httpx.Response(200, json={"tree": tree, "truncated": False})
         if path == f"{repo}/git/trees/{HEAD}":
             tree = [{"path": "app/example.py", "type": "blob", "sha": _FILE_SHA, "size": 21}]

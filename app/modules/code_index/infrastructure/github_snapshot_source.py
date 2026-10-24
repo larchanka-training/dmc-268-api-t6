@@ -404,21 +404,7 @@ class _SnapshotPolicySource:
             raise self._error(
                 PolicyErrorCode.FETCH_TRANSIENT, "GitHub returned an unreadable tree listing"
             ) from None
-        entries = policy_tree_entries(payload, policy_base_sha=self._sha)
-        # The shared parser classifies entries. Also verify this is a lossless,
-        # nonrecursive directory listing before using it as proof of absence.
-        modes = {"blob": {"100644", "100755", "120000"}, "tree": {"040000"}, "commit": {"160000"}}
-        items = payload["tree"]
-        if len(entries) != len(items) or any(
-            "/" in item["path"]
-            or item["path"] in {".", ".."}
-            or item.get("mode") not in modes[item["type"]]
-            for item in items
-        ):
-            raise self._error(
-                PolicyErrorCode.FETCH_TRANSIENT, "GitHub returned an ambiguous tree listing"
-            )
-        return entries
+        return policy_tree_entries(payload, policy_base_sha=self._sha)
 
     async def read_blob(self, oid: str) -> bytes:
         sha = commit_sha_segment(oid)
