@@ -397,12 +397,18 @@ class BuildReviewContext:
         self._counter = counter
         self._cache = cache
         self._builtin_excluded = builtin_excluded
-        # The RAG sources of the run; the slot is filled only for a RAG plan.
+        # The RAG sources of the run; the slot is filled only for a RAG plan. The base of a
+        # broken reference is listed by the same revision source.
         self._selector = (
             None
             if retriever is None or rag_blobs is None
             else ReverseEdgeSelector(
-                retriever=retriever, blobs=rag_blobs, parser=parser, cache=cache, counter=counter
+                retriever=retriever,
+                blobs=rag_blobs,
+                parser=parser,
+                cache=cache,
+                counter=counter,
+                trees=source,
             )
         )
 
@@ -640,16 +646,25 @@ class BuildReviewContext:
                     for item in candidates.omissions
                 )
                 slot = min(RAG_CONTEXT_MAX_TOKENS, remaining)
-                # A confirmed candidate stays confirmed when a place of it does not fit.
+                # A confirmed candidate stays confirmed when a place of it does not fit. A
+                # place goes in with the base definitions it read or not at all, and a
+                # definition once.
                 over_slot: dict[str | None, int] = {}
+                admitted: set[str] = set()
                 for place in candidates.places:
-                    retrieved_block = _retrieved_block(place)
-                    if retrieved_block.tokens > slot:
+                    group = [
+                        block
+                        for block in map(_retrieved_block, (place, *place.definitions))
+                        if block.block_id not in admitted
+                    ]
+                    tokens = sum(block.tokens for block in group)
+                    if tokens > slot:
                         over_slot[place.source.path] = over_slot.get(place.source.path, 0) + 1
                         continue
-                    slot -= retrieved_block.tokens
-                    remaining -= retrieved_block.tokens
-                    retrieved.append(retrieved_block)
+                    slot -= tokens
+                    remaining -= tokens
+                    retrieved.extend(group)
+                    admitted.update(block.block_id for block in group)
                 omissions.extend(
                     ContextOmission(RAG_LIMIT, item, count) for item, count in over_slot.items()
                 )
