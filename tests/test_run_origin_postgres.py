@@ -110,7 +110,8 @@ def test_run_origin_migration_backfills_terminal_and_nonterminal_history_and_rou
                 connection.execute(
                     text(
                         "SELECT id,to_jsonb(r)-'origin_provider_installation_id'"
-                        "-'severity_threshold'-'max_comments' FROM runs"
+                        "-'severity_threshold'-'max_comments'"
+                        "-'conventions_prompt_version_id'-'verifier_prompt_version_id' FROM runs"
                         " r ORDER BY id"
                     )
                 )
@@ -120,6 +121,12 @@ def test_run_origin_migration_backfills_terminal_and_nonterminal_history_and_rou
             assert after == before
             assert connection.execute(
                 text("SELECT severity_threshold, max_comments FROM runs ORDER BY id")
+            ).tuples().all() == [(None, None), (None, None), (None, None), (None, None)]
+            assert connection.execute(
+                text(
+                    "SELECT conventions_prompt_version_id, verifier_prompt_version_id "
+                    "FROM runs ORDER BY id"
+                )
             ).tuples().all() == [(None, None), (None, None), (None, None), (None, None)]
             context = MigrationContext.configure(
                 connection, opts={"compare_type": True, "compare_server_default": True}
