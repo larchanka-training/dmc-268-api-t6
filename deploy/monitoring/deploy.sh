@@ -198,16 +198,22 @@ if ((offsite_given)); then
 fi
 
 # The admin password of Grafana: from the environment when set (GitHub secret), otherwise the one in
-# .env. Written to .env unquoted, so only characters compose reads literally.
-GRAFANA_ADMIN_PATTERN='^[A-Za-z0-9._~+/=-]{16,128}$'
+# .env. Written to .env unquoted with $ escaped (escape_compose_value), so no whitespace, quotes,
+# backslash, backtick or '#', which compose would not read literally.
+grafana_admin_password_ok() {
+  local value="$1"
+  ((${#value} >= 16 && ${#value} <= 128)) || return 1
+  [[ "${value}" =~ ^[[:graph:]]+$ ]] || return 1
+  [[ "${value}" != *[\"\'\\\`#]* ]]
+}
 if [[ -n "${GRAFANA_ADMIN_PASSWORD:-}" ]]; then
-  if [[ ! "${GRAFANA_ADMIN_PASSWORD}" =~ ${GRAFANA_ADMIN_PATTERN} ]]; then
-    echo "GRAFANA_ADMIN_PASSWORD must be 16-128 characters of A-Z a-z 0-9 . _ ~ + / = -" >&2
+  if ! grafana_admin_password_ok "${GRAFANA_ADMIN_PASSWORD}"; then
+    echo "GRAFANA_ADMIN_PASSWORD must be 16-128 printable characters without spaces, quotes, \\, \` or #" >&2
     exit 1
   fi
 else
   GRAFANA_ADMIN_PASSWORD="$(previous_setting GRAFANA_ADMIN_PASSWORD)"
-  if [[ ! "${GRAFANA_ADMIN_PASSWORD}" =~ ${GRAFANA_ADMIN_PATTERN} ]]; then
+  if ! grafana_admin_password_ok "${GRAFANA_ADMIN_PASSWORD}"; then
     GRAFANA_ADMIN_PASSWORD="$(stack_password GRAFANA_ADMIN_PASSWORD)"
   fi
 fi
@@ -365,7 +371,7 @@ find "${MONITORING_DIR}/prometheus" "${MONITORING_DIR}/grafana" "${MONITORING_DI
   printf 'API_NETWORK=%s\n' "$(escape_compose_value "${API_NETWORK}")"
   printf 'POSTGRES_DB=%s\n' "$(escape_compose_value "${POSTGRES_DB}")"
   printf 'REDIS_PASSWORD=%s\n' "$(escape_compose_value "${REDIS_PASSWORD}")"
-  printf 'GRAFANA_ADMIN_PASSWORD=%s\n' "${GRAFANA_ADMIN_PASSWORD}"
+  printf 'GRAFANA_ADMIN_PASSWORD=%s\n' "$(escape_compose_value "${GRAFANA_ADMIN_PASSWORD}")"
   printf 'GRAFANA_DB_PASSWORD=%s\n' "${GRAFANA_DB_PASSWORD}"
   printf 'PG_EXPORTER_PASSWORD=%s\n' "${PG_EXPORTER_PASSWORD}"
   printf 'PG_BACKUP_PASSWORD=%s\n' "${PG_BACKUP_PASSWORD}"

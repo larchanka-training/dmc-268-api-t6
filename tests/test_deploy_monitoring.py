@@ -392,7 +392,8 @@ def test_passwords_reach_postgres_and_grafana_through_stdin_only(host: Host) -> 
     )
 
 
-GRAFANA_SECRET = "Team-Grafana_pass.2026+x/y="
+# Characters a password manager generates; $ is stored as $$ for compose.
+GRAFANA_SECRET = "Team-Graf@na_pass!2026%x&y$z(=)*"
 
 
 def test_grafana_admin_password_from_the_secret_is_kept_when_the_secret_is_empty(
@@ -406,9 +407,9 @@ def test_grafana_admin_password_from_the_secret_is_kept_when_the_secret_is_empty
     kept = host.deploy(GRAFANA_ADMIN_PASSWORD="")
 
     assert from_secret.returncode == 0, from_secret.stderr
-    assert stored == GRAFANA_SECRET
+    assert stored == GRAFANA_SECRET.replace("$", "$$")
     assert kept.returncode == 0, kept.stderr
-    assert host.env()["GRAFANA_ADMIN_PASSWORD"] == GRAFANA_SECRET
+    assert host.env()["GRAFANA_ADMIN_PASSWORD"] == stored
     # Synced through stdin on every deploy, never in argv or the job log.
     assert host.log("grafana.log").endswith(GRAFANA_SECRET * 2)
     assert GRAFANA_SECRET not in host.log("docker.log")
@@ -417,7 +418,16 @@ def test_grafana_admin_password_from_the_secret_is_kept_when_the_secret_is_empty
 
 
 @pytest.mark.parametrize(
-    "password", ["short-password", "has$dollar-in-the-middle", "with space inside it"]
+    "password",
+    [
+        "short-pass$word",
+        "with space inside it",
+        'has"double"quotes-here',
+        "has'single-quote-here",
+        "has\\backslash-in-the-middle",
+        "has`backtick-in-the-middle",
+        "has#hash-in-the-middle-x",
+    ],
 )
 def test_invalid_grafana_admin_password_fails_before_the_host_changes(
     host: Host, password: str
@@ -425,7 +435,7 @@ def test_invalid_grafana_admin_password_fails_before_the_host_changes(
     result = host.deploy(GRAFANA_ADMIN_PASSWORD=password)
 
     assert result.returncode == 1
-    assert "GRAFANA_ADMIN_PASSWORD must be 16-128 characters" in result.stderr
+    assert "GRAFANA_ADMIN_PASSWORD must be 16-128 printable characters" in result.stderr
     assert not host.env_file.exists()
     assert host.log("psql.log") == ""
     assert password not in result.stdout + result.stderr
