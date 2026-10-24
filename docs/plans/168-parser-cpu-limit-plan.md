@@ -21,7 +21,7 @@ long-lived worker. The limit therefore follows each request: `main()` arms it af
 passed through unchanged (an unprivileged process can never raise a lowered hard limit); a finite inherited hard
 limit (`ulimit -t`) clamps the soft one. Over the soft limit the kernel sends SIGXCPU, whose default action
 terminates the worker; the parent already treats a dead worker as a failed parse and restarts it
-(`subprocess_source_parser.py:96-99`). No-op where `resource` has no `RLIMIT_CPU`, like `_limit_memory`.
+(`subprocess_source_parser.py:96-99`).
 
 ## The slack: 20 whole seconds
 
@@ -40,7 +40,7 @@ terminates the worker; the parent already treats a dead worker as a failed parse
 
 - The limit computation: literal soft limits for used CPU 0.0, 0.2, 7.0 and 7.01; the slack inequality.
 - `resource` patched: `_limit_cpu` keeps an infinite hard limit, keeps a finite one and clamps the soft one to
-  it; `_disable_core_dumps` sets (0, 0); neither calls `setrlimit` where its limit is missing.
+  it; `_disable_core_dumps` sets (0, 0). `main()` arms the CPU limit before each request, in order (spy test).
 - Fake worker `tests/ast_workers/cpu_bound.py`: arms the real helper with the slack lowered to 0 (each request
   may spend 1 to 2 CPU seconds) and sets `RLIMIT_CORE` to 0 (no core dump). Run directly, not through the
   parent, whose wall-clock kill would fire first. A request that burns 30 s dies with `-SIGXCPU`, without an

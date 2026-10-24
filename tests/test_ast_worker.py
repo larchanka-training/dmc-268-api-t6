@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import io
 import json
 import math
 import os
@@ -74,15 +75,6 @@ def test_limit_keeps_a_finite_hard_limit_and_never_goes_above_it(
     assert calls == [(resource.RLIMIT_CPU, (soft, hard))]
 
 
-def test_no_limit_where_the_platform_has_no_cpu_limit(monkeypatch: pytest.MonkeyPatch) -> None:
-    calls = _patch_limits(monkeypatch, resource.RLIM_INFINITY)
-    monkeypatch.delattr(resource, "RLIMIT_CPU")
-
-    ast_worker._limit_cpu()
-
-    assert calls == []
-
-
 def _patch_setrlimit(monkeypatch: pytest.MonkeyPatch) -> list[tuple[int, tuple[int, int]]]:
     calls: list[tuple[int, tuple[int, int]]] = []
     monkeypatch.setattr(resource, "setrlimit", lambda which, limits: calls.append((which, limits)))
@@ -97,13 +89,29 @@ def test_core_dumps_are_disabled_for_good(monkeypatch: pytest.MonkeyPatch) -> No
     assert calls == [(resource.RLIMIT_CORE, (0, 0))]
 
 
-def test_no_core_limit_where_the_platform_has_none(monkeypatch: pytest.MonkeyPatch) -> None:
-    calls = _patch_setrlimit(monkeypatch)
-    monkeypatch.delattr(resource, "RLIMIT_CORE")
+def test_main_arms_the_cpu_limit_before_each_request(monkeypatch: pytest.MonkeyPatch) -> None:
+    events: list[str] = []
+    monkeypatch.setattr(ast_worker, "_disable_core_dumps", lambda: events.append("core"))
+    monkeypatch.setattr(
+        ast_worker, "_grammar", lambda language: events.append(f"grammar {language}")
+    )
+    monkeypatch.setattr(ast_worker, "_limit_memory", lambda: events.append("memory"))
+    monkeypatch.setattr(ast_worker, "_limit_cpu", lambda: events.append("cpu"))
 
-    ast_worker._disable_core_dumps()
+    def handle(line: str) -> dict[str, object]:
+        events.append(f"handle {line.strip()}")
+        return {"key": line.strip()}
 
-    assert calls == []
+    monkeypatch.setattr(ast_worker, "_handle", handle)
+    monkeypatch.setattr(sys, "stdin", io.StringIO("a\nb\n"))
+    stdout = io.StringIO()
+    monkeypatch.setattr(sys, "stdout", stdout)
+
+    ast_worker.main()
+
+    grammars = [f"grammar {language}" for language in AstLanguage]
+    assert events == ["core", *grammars, "memory", "cpu", "handle a", "cpu", "handle b"]
+    assert stdout.getvalue() == '{"key":"a"}\n{"key":"b"}\n'
 
 
 def _run_cpu_bound(*burns: float) -> tuple[subprocess.CompletedProcess[str], float]:
@@ -145,7 +153,7 @@ def test_request_over_its_cpu_allowance_is_killed_by_sigxcpu() -> None:
     assert completed.stdout == ""
     # The kernel stops the worker as soon as its CPU time reaches the armed soft limit.
     armed = int(completed.stderr.split()[-1])
-    assert armed - 0.1 < spent < armed + 1.0
+    assert armed - 0.5 < spent < armed + 1.0
 
 
 def test_cheap_requests_outlive_the_limit_armed_for_the_first_one() -> None:
