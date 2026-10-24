@@ -66,7 +66,7 @@ class RedisInstallationAccessTokenCache:
             )
             return await self._local.get(installation_external_id)
         if value is None:
-            return None
+            return await self._local.get(installation_external_id)
         return value.decode("utf-8") if isinstance(value, bytes) else value
 
     async def set(
