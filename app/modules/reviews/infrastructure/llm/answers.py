@@ -18,6 +18,7 @@ from jsonschema import Draft202012Validator
 from pydantic import ValidationError
 
 from app.modules.reviews.application.conventions import ConventionsDraft
+from app.modules.reviews.application.reflection_pass import VerificationOutput
 from app.modules.reviews.application.review_output import (
     InvalidReviewOutput,
     ReviewFinding,
@@ -29,6 +30,9 @@ from app.modules.reviews.application.review_output import (
 
 REVIEW_OUTPUT_SCHEMA_PATH = (
     Path(__file__).resolve().parents[5] / "review" / "schemas" / "review-output.schema.json"
+)
+VERIFIER_OUTPUT_SCHEMA_PATH = (
+    Path(__file__).resolve().parents[5] / "review" / "schemas" / "verifier-output.schema.v1.json"
 )
 _ANNOTATIONS = frozenset({"$schema", "$id", "$comment"})
 _MAX_ERRORS = 20
@@ -123,6 +127,40 @@ def _normalize_review_answer(decoded: dict[str, object]) -> dict[str, object]:
 def parse_review_answer(content: str) -> ReviewOutput:
     """The typed result of an accepted answer."""
     return parse_review_output(validate_review_answer(content))
+
+
+@cache
+def verifier_output_schema() -> dict[str, Any]:
+    """The VerificationOutput shape of the Reflection Pass verifier (draft 2020-12)."""
+    loaded: dict[str, Any] = json.loads(VERIFIER_OUTPUT_SCHEMA_PATH.read_text(encoding="utf-8"))
+    return loaded
+
+
+@cache
+def _verifier_validator() -> Draft202012Validator:
+    return Draft202012Validator(verifier_output_schema())
+
+
+def validate_verifier_answer(content: str) -> dict[str, object]:
+    """Return the accepted verifier JSON object or raise ``InvalidAnswer``.
+
+    The schema and ``VerificationOutput`` errors earn one repair call; the candidate-ID
+    and reference checks against the manifest stay in ``ReflectionPass`` (CVS §7.3).
+    """
+    decoded = _decode_object(content)
+    errors = [
+        _schema_error(error)
+        for error in sorted(
+            _verifier_validator().iter_errors(decoded), key=lambda item: item.json_path
+        )
+    ][:_MAX_ERRORS]
+    if errors:
+        raise InvalidAnswer(errors)
+    try:
+        VerificationOutput.model_validate(decoded)
+    except ValidationError as error:
+        raise InvalidAnswer(_validation_messages(error)) from None
+    return decoded
 
 
 def conventions_answer_validator(changed_files: tuple[str, ...]) -> _ConventionsValidator:
