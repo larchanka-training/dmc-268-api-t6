@@ -372,3 +372,33 @@ def test_run_worker_consumes_index_repo_beside_the_review_queues(
         "delays": delays,
         "transport": transport,
     }
+
+
+def test_github_adapters_makes_exactly_one_compare_request_per_run() -> None:
+
+    compare_requests: list[str] = []
+
+    def github_handler(request: httpx.Request) -> httpx.Response:
+        if "/compare" in request.url.path:
+            compare_requests.append(request.url.path)
+            return httpx.Response(200, json={"merge_base_commit": {"sha": "c" * 40}})
+        if "/commits" in request.url.path:
+            return httpx.Response(200, json=[{"commit": {"message": "msg"}}])
+        if "/pulls/" in request.url.path:
+            return httpx.Response(200, json={"head": {"sha": "h" * 40}, "base": {"sha": "b" * 40}})
+        return httpx.Response(200, json={})
+
+    transport = httpx.MockTransport(github_handler)
+    client = httpx.AsyncClient(base_url="https://api.github.test", transport=transport)
+    env = {**_BASE_ENV, "GITHUB_APP_ID": "42", "GITHUB_APP_PRIVATE_KEY": "key"}
+    settings = worker.WorkerSettings.from_environment(env)
+    factory = cast(async_sessionmaker[AsyncSession], object())
+    adapters = worker.github_adapters(
+        settings=settings,
+        client=client,
+        session_factory=factory,
+        redis=None,
+    )
+    assert adapters is not None
+    run_source = adapters.run_source(UUID("00000000-0000-0000-0000-000000000100"))
+    assert getattr(run_source, "_merge_base", None) is None

@@ -534,6 +534,15 @@ def test_store_review_output_persists_dropped_findings_from_reflection_pass() ->
     assert dropped_log == [{"index": 1, "drop_reason": "severity_threshold"}]
     assert len(queue.published) == 1
 
+    # Corrupted drop record through store.execute raises InvalidReviewOutput with run_id
+    corrupted_store_value = VerifiedReviewOutput(
+        valid_output(),
+        dropped_findings=[{"finding": {"bad": 1}, "drop_reason": "x", "position": 0}],
+    )
+    with pytest.raises(InvalidReviewOutput) as exc_info:
+        asyncio.run(store.execute(RUN_ID, corrupted_store_value))
+    assert str(RUN_ID) in str(exc_info.value)
+
     # Malformed dropped_findings fail closed with InvalidReviewOutput and include run_id
     for bad_dropped in (
         "not-a-list",
@@ -651,6 +660,16 @@ def test_publish_review_output_persists_dropped_findings() -> None:
     with pytest.raises(InvalidReviewOutput):
         asyncio.run(PublishReviewOutput(factory, provider).execute(RUN_ID, raw_with_underscore))
 
+    # Corrupted drop record through PublishReviewOutput.execute
+    # raises InvalidReviewOutput with run_id
+    corrupted_publish_value = VerifiedReviewOutput(
+        valid_output(),
+        dropped_findings=[{"finding": {"bad": 1}, "drop_reason": "x", "position": 0}],
+    )
+    with pytest.raises(InvalidReviewOutput) as exc_info:
+        asyncio.run(PublishReviewOutput(factory, provider).execute(RUN_ID, corrupted_publish_value))
+    assert str(RUN_ID) in str(exc_info.value)
+
 
 def test_validate_v2_coordinates_all_branches() -> None:
     from app.modules.reviews.application.prompt_builder import ChangedFile, DiffLine
@@ -683,51 +702,71 @@ def test_validate_v2_coordinates_all_branches() -> None:
 
     # 1. unknown_path
     f = make_finding(path="unknown.py", line=10)
-    assert validate_v2_coordinates(f, ()) == (False, "unknown_path")
     assert validate_v2_coordinates(f, (), original_files=()) == (False, "unknown_path")
 
-    # 2. File not truncated (total_lines is None)
+    # 2. File not truncated
     lines = (DiffLine(10, "added", "x=1"), DiffLine(12, "added", "x=2"))
     file_not_truncated = ChangedFile("app/main.py", "modified", lines)
 
     # Line not in shown
-    assert validate_v2_coordinates(make_finding(line=15), (file_not_truncated,)) == (
+    assert validate_v2_coordinates(
+        make_finding(line=15), (file_not_truncated,), original_files=(file_not_truncated,)
+    ) == (
         False,
         "line_absent",
     )
     # Start line not in shown
-    assert validate_v2_coordinates(make_finding(line=12, start_line=11), (file_not_truncated,)) == (
+    assert validate_v2_coordinates(
+        make_finding(line=12, start_line=11),
+        (file_not_truncated,),
+        original_files=(file_not_truncated,),
+    ) == (
         False,
         "line_absent",
     )
 
     # 3. File was truncated (total_lines = 100, shown lines 1..10)
+    lines_orig_100 = tuple(DiffLine(i, "added", f"x_{i}") for i in range(1, 101))
+    file_orig_100 = ChangedFile("app/main.py", "modified", lines_orig_100)
     lines_trunc = tuple(DiffLine(i, "added", f"x_{i}") for i in range(1, 11))
     file_truncated = ChangedFile("app/main.py", "modified", lines_trunc, total_lines=100)
 
     # Line > total_lines
-    assert validate_v2_coordinates(make_finding(line=105), (file_truncated,)) == (
+    assert validate_v2_coordinates(
+        make_finding(line=105), (file_truncated,), original_files=(file_orig_100,)
+    ) == (
         False,
         "line_absent",
     )
     # Line <= total_lines but not in shown (anchor_not_visible)
-    assert validate_v2_coordinates(make_finding(line=50), (file_truncated,)) == (
+    assert validate_v2_coordinates(
+        make_finding(line=50), (file_truncated,), original_files=(file_orig_100,)
+    ) == (
         False,
         "anchor_not_visible",
     )
-    # Truncated file with lines 5..10: line 2 before hunk start is line_absent
+    # Truncated file with lines 5..10: line 2 before hunk start is line_absent when not in original
     file_trunc_5_10 = ChangedFile(
         "app/main.py",
         "modified",
         tuple(DiffLine(i, "added", f"x_{i}") for i in range(5, 11)),
         total_lines=100,
     )
-    assert validate_v2_coordinates(make_finding(line=10, start_line=2), (file_trunc_5_10,)) == (
+    file_orig_5_100 = ChangedFile(
+        "app/main.py",
+        "modified",
+        tuple(DiffLine(i, "added", f"x_{i}") for i in range(5, 101)),
+    )
+    assert validate_v2_coordinates(
+        make_finding(line=10, start_line=2), (file_trunc_5_10,), original_files=(file_orig_5_100,)
+    ) == (
         False,
         "line_absent",
     )
     # Start line <= total_lines and in shown (success)
-    assert validate_v2_coordinates(make_finding(line=10, start_line=8), (file_truncated,)) == (
+    assert validate_v2_coordinates(
+        make_finding(line=10, start_line=8), (file_truncated,), original_files=(file_orig_100,)
+    ) == (
         True,
         None,
     )
@@ -782,7 +821,7 @@ def test_validate_v2_coordinates_all_branches() -> None:
         make_finding(line=5401, start_line=5399),
         (shown_file_5000,),
         original_files=(orig_file_5000,),
-    ) == (False, "range_gap")
+    ) == (False, "cross_hunk_range")
     assert validate_v2_coordinates(
         make_finding(line=6000, start_line=5005),
         (shown_file_5000,),
@@ -790,52 +829,81 @@ def test_validate_v2_coordinates_all_branches() -> None:
     ) == (False, "cross_hunk_range")
 
     # 4. Non-1-based truncated hunk (e.g. lines 5000..5056 shown out of total_lines=400)
+    orig_file_full_5000 = ChangedFile(
+        "app/main.py",
+        "modified",
+        tuple(DiffLine(i, "added", f"x_{i}") for i in range(5000, 5400)),
+    )
     file_trunc_5000 = ChangedFile(
         "app/main.py",
         "modified",
         tuple(DiffLine(i, "added", f"x_{i}") for i in range(5000, 5057)),
         total_lines=400,
     )
-    assert validate_v2_coordinates(make_finding(line=5005), (file_trunc_5000,)) == (True, None)
-    assert validate_v2_coordinates(make_finding(line=5300), (file_trunc_5000,)) == (
+    assert validate_v2_coordinates(
+        make_finding(line=5005), (file_trunc_5000,), original_files=(orig_file_full_5000,)
+    ) == (True, None)
+    assert validate_v2_coordinates(
+        make_finding(line=5300), (file_trunc_5000,), original_files=(orig_file_full_5000,)
+    ) == (
         False,
         "anchor_not_visible",
     )
-    assert validate_v2_coordinates(make_finding(line=3), (file_trunc_5000,)) == (
-        False,
-        "line_absent",
-    )
-    assert validate_v2_coordinates(make_finding(line=5600), (file_trunc_5000,)) == (
-        False,
-        "line_absent",
-    )
-    assert validate_v2_coordinates(make_finding(line=5005, start_line=3), (file_trunc_5000,)) == (
+    assert validate_v2_coordinates(
+        make_finding(line=3), (file_trunc_5000,), original_files=(orig_file_full_5000,)
+    ) == (
         False,
         "line_absent",
     )
     assert validate_v2_coordinates(
-        make_finding(line=5056, start_line=5005), (file_trunc_5000,)
+        make_finding(line=5600), (file_trunc_5000,), original_files=(orig_file_full_5000,)
+    ) == (
+        False,
+        "line_absent",
+    )
+    assert validate_v2_coordinates(
+        make_finding(line=5005, start_line=3),
+        (file_trunc_5000,),
+        original_files=(orig_file_full_5000,),
+    ) == (
+        False,
+        "line_absent",
+    )
+    assert validate_v2_coordinates(
+        make_finding(line=5056, start_line=5005),
+        (file_trunc_5000,),
+        original_files=(orig_file_full_5000,),
     ) == (True, None)
 
-    # 5. Removed-only file has no right-side lines -> line_absent
-    file_removed_only = ChangedFile(
+    # 5. RIGHT candidate on a removed-only line number via original_files -> line_absent
+    file_removed_and_added = ChangedFile(
         "app/main.py",
         "modified",
-        (DiffLine(10, "removed", "old_code"),),
+        (DiffLine(10, "removed", "old_code"), DiffLine(20, "added", "new_code")),
     )
-    assert validate_v2_coordinates(make_finding(line=10), (file_removed_only,)) == (
+    file_shown_added_only = ChangedFile(
+        "app/main.py",
+        "modified",
+        (DiffLine(20, "added", "new_code"),),
+    )
+    # Line 10 exists only as removed line -> line_absent
+    assert validate_v2_coordinates(
+        make_finding(line=10), (file_shown_added_only,), original_files=(file_removed_and_added,)
+    ) == (
         False,
         "line_absent",
     )
 
     # 6. Multiline range checks: range_gap vs cross_hunk_range
-    # Range has gap within single hunk (diff <= 2): range_gap
+    # Range spans two hunks (break > 1: line 1 and line 3): cross_hunk_range
     file_gap = ChangedFile(
         "app/main.py", "modified", (DiffLine(1, "added", "a"), DiffLine(3, "added", "c"))
     )
-    assert validate_v2_coordinates(make_finding(line=3, start_line=1), (file_gap,)) == (
+    assert validate_v2_coordinates(
+        make_finding(line=3, start_line=1), (file_gap,), original_files=(file_gap,)
+    ) == (
         False,
-        "range_gap",
+        "cross_hunk_range",
     )
 
     # Range spans two distinct hunks (10..12 and 100..102): cross_hunk_range
@@ -851,13 +919,17 @@ def test_validate_v2_coordinates_all_branches() -> None:
             DiffLine(102, "added", "z"),
         ),
     )
-    assert validate_v2_coordinates(make_finding(line=101, start_line=10), (file_two_hunks,)) == (
+    assert validate_v2_coordinates(
+        make_finding(line=101, start_line=10), (file_two_hunks,), original_files=(file_two_hunks,)
+    ) == (
         False,
         "cross_hunk_range",
     )
 
     # 7. All valid
-    assert validate_v2_coordinates(make_finding(line=10, start_line=8), (file_truncated,)) == (
+    assert validate_v2_coordinates(
+        make_finding(line=10, start_line=8), (file_truncated,), original_files=(file_orig_100,)
+    ) == (
         True,
         None,
     )

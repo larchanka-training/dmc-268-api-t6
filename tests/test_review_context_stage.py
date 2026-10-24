@@ -736,6 +736,8 @@ def test_review_prompt_gets_neither_the_content_nor_the_name_of_an_ignored_file(
             return True
 
     class Withheld:
+        diff_old_sha: str | None = None
+
         def excluded(self, path: str) -> bool:
             return path.startswith("generated/")
 
@@ -812,6 +814,7 @@ def test_stored_patch_without_hunks_and_an_unwrapped_patch_are_both_accepted() -
 
 
 def test_execution_profile_takes_what_the_worker_knows_about_its_models() -> None:
+    from app.modules.reviews.application.prompt_budget import validate_execution_profile_versions
     from app.modules.reviews.infrastructure.llm.settings import LlmSettings
     from app.worker import execution_profile_of
 
@@ -825,7 +828,64 @@ def test_execution_profile_takes_what_the_worker_knows_about_its_models() -> Non
     assert profile.verifier_model == "mistral-small-4"
     assert profile.tokenizer_version == "tokenizer/v1"
     assert profile.counter_version == "counter/v2"
+    assert profile.recovery_profile_version == "recovery/v1"
+    assert profile.budget_profile_version == "budget/v1"
+    validate_execution_profile_versions(profile)
     assert profile.is_complete is True
+
+
+def test_prepare_snapshot_and_stage_begin_raise_on_unknown_profile_version() -> None:
+    from dataclasses import replace
+    from unittest.mock import AsyncMock
+
+    from app.modules.reviews.application.policy_errors import PolicyError, PolicyErrorCode
+    from tests.test_execute_review import _make_test_snapshot
+    from tests.test_prepare_policy_snapshot import _pins
+
+    # 1. PreparePolicySnapshot.execute raises on unknown budget_profile_version in pins
+    bad_pins = _pins(
+        execution_profile=replace(_pins().execution_profile, budget_profile_version="garbage")
+    )
+    store = Store(pins=bad_pins)
+    prepare = PreparePolicySnapshot(
+        uow_factory=lambda: Uow(store), source_factory=lambda p: Policy()
+    )
+    with pytest.raises(PolicyError) as exc_info_prep:
+        asyncio.run(prepare.execute(_RUN))
+    assert exc_info_prep.value.code == PolicyErrorCode.SNAPSHOT_INTEGRITY_ERROR
+    assert "Unknown budget_profile_version 'garbage'" in str(exc_info_prep.value)
+
+    # 2. PreparePolicySnapshot.execute raises on unknown recovery_profile_version
+    # in pre-existing snapshot
+    snap_valid = _make_test_snapshot()
+    snap_bad_recovery = replace(
+        snap_valid,
+        execution_profile=replace(snap_valid.execution_profile, recovery_profile_version="garbage"),
+    )
+    store_with_snap = Store(snapshot=snap_bad_recovery)
+    prepare_with_snap = PreparePolicySnapshot(
+        uow_factory=lambda: Uow(store_with_snap), source_factory=lambda p: Policy()
+    )
+    with pytest.raises(PolicyError) as exc_info_snap:
+        asyncio.run(prepare_with_snap.execute(_RUN))
+    assert exc_info_snap.value.code == PolicyErrorCode.SNAPSHOT_INTEGRITY_ERROR
+    assert "Unknown recovery_profile_version 'garbage'" in str(exc_info_snap.value)
+
+    # 3. ReviewContextStage.begin raises on unknown profile version via prepare execution
+    stage = _stage(Trace(), store=store)
+    with pytest.raises(PolicyError) as exc_info_stage:
+        asyncio.run(stage.begin(_RUN))
+    assert exc_info_stage.value.code == PolicyErrorCode.SNAPSHOT_INTEGRITY_ERROR
+    assert "Unknown budget_profile_version 'garbage'" in str(exc_info_stage.value)
+
+    # 4. ReviewContextStage.begin line 273 validates returned snapshot
+    stage_mocked = _stage(Trace())
+    stage_mocked._prepare_policy = AsyncMock()
+    stage_mocked._prepare_policy.execute.return_value = snap_bad_recovery
+    with pytest.raises(PolicyError) as exc_info_stage_273:
+        asyncio.run(stage_mocked.begin(_RUN))
+    assert exc_info_stage_273.value.code == PolicyErrorCode.SNAPSHOT_INTEGRITY_ERROR
+    assert "Unknown recovery_profile_version 'garbage'" in str(exc_info_stage_273.value)
 
 
 def test_check_run_says_where_a_policy_failure_is() -> None:

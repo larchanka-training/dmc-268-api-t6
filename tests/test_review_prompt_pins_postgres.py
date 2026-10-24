@@ -30,6 +30,9 @@ from app.modules.reviews.infrastructure.policy_snapshot_unit_of_work import (
 from app.modules.reviews.infrastructure.review_prompt_repository import (
     SqlAlchemyReviewPromptRepository,
 )
+from app.modules.reviews.infrastructure.run_repository import (
+    SqlAlchemyReviewOutputRepository,
+)
 from tests.portal_postgres import PROMPT, REPO_A, RUN_ATTEMPTED, Env, portal_schema
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -140,9 +143,14 @@ def test_v2_run_and_persisted_snapshot_retain_their_prompt_after_v3_activation(
                     == "eb851e7fc2329eb7bdff015ec0fda945c46111ec5c884934ed6f6d6803883452"
                 )
             after = await repository.get_review_prompt_input(RUN_ATTEMPTED, conventions)
+            assert after == before
             assert after is not None and after.system == v2_content
             assert after.severity_threshold == "critical"
-            assert after.policy_snapshot == snapshot
+            async with factory() as session:
+                reviews_repo = SqlAlchemyReviewOutputRepository(session=session)
+                post_input = await reviews_repo.get_post_processing_input(RUN_ATTEMPTED)
+                assert post_input is not None
+                assert post_input.severity_threshold == "critical"
             async with uow() as work:
                 after_pins = await work.policy.get_pins(RUN_ATTEMPTED)
                 assert after_pins is not None
