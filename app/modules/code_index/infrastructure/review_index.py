@@ -3,7 +3,9 @@
 One READ COMMITTED transaction of the caller, with no network call. The effective RAG is
 read first without a lock: off returns at once, with no lock and no state read. On, the
 repository row is taken under a share lock and the condition is read again in a statement
-of its own, so a concurrent toggle-off is either seen or waits for the review. The state
+of its own, so a concurrent toggle-off is either seen or waits for the review. A writer of
+the repository row is waited for only until the lock timeout: the timeout fails the gate,
+and the review goes on without RAG instead of waiting until its deadline. The state
 row is taken `FOR UPDATE SKIP LOCKED`: a review never waits for a build and only reads a
 row another session holds. The marker and the generation are written only through the
 store's `request_build` and `enable`; `last_used_at` and the throttle columns by this
@@ -16,7 +18,7 @@ from datetime import datetime
 from typing import Any, cast
 from uuid import UUID
 
-from sqlalchemy import func, select, update
+from sqlalchemy import func, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.common.infrastructure.db.unit_of_work import SqlAlchemyUnitOfWork
@@ -28,6 +30,9 @@ from app.modules.code_index.infrastructure.index_store import SqlAlchemyCodeInde
 from app.modules.code_index.infrastructure.models import CodeIndexState
 from app.modules.repositories.infrastructure.models import ProviderInstallation, Repository
 from app.modules.reviews.application.rag_index import RagReadiness
+
+# How long a review waits for a writer of the repository row; set for the gate transaction.
+_REPOSITORY_LOCK_TIMEOUT = "2s"
 
 # The index of an enabled repository with no state row yet; the converge pass creates it.
 _NO_ROW = RagReadiness(
@@ -117,7 +122,9 @@ class SqlAlchemyReviewIndexAccess:
             return RagReadiness(enabled=False)
         # On: the lock first, the condition again in a statement of its own. Under READ
         # COMMITTED it reads what a writer the lock waited for committed, so a toggle-off
-        # in flight is seen once it commits.
+        # in flight is seen once it commits. A writer that outlasts the timeout fails the
+        # gate with a lock error, and the stage records it as a failed check.
+        await self._session.execute(text(f"SET LOCAL lock_timeout = '{_REPOSITORY_LOCK_TIMEOUT}'"))
         await self._share_repository(repository_id)
         if not await self._rag_on(repository_id):
             return RagReadiness(enabled=False)
