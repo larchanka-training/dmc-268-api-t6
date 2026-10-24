@@ -122,11 +122,13 @@ lookup:
   the issue is open, you opened it, and it was created at or after `started_at` less 120 s
   (`started_at` is this machine's clock, `createdAt` GitHub's; the margin covers this clock
   running ahead). Adopted, it is recorded, used for the links that point at it and its own
-  links are ensured (`created: false, adopted: true`); its `board` is `unchecked` — its
-  board step may never have run: look at it, and add it with the command above if it is
-  missing. Any other duplicate — on a first run, closed, a teammate's or older — stops the
-  batch with exit 4 naming it; one you opened, on a rerun, may still be this batch's own
-  (closed since, or a clock further ahead), so the message first says how to record it.
+  links are ensured (`created: false, adopted: true`); on stderr the adoption is one
+  `{"note": "adopted <url> — …"}` line, not issue-create.sh's exit-4 duplicate error. Its
+  `board` is `unchecked` — its board step may never have run: look at it, and add it with
+  the command above if it is missing. Any other duplicate — on a first run, closed, a
+  teammate's or older — stops the batch with exit 4 naming it; one you opened, on a rerun,
+  may still be this batch's own (closed since, or a clock further ahead), so the message
+  first says how to record it.
 
 The state file is kept outside /tmp so that a reboot cannot erase the record of what was
 created. Never delete it, and never start a new `id` for a batch that created anything: a new
