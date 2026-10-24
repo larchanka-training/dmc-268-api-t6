@@ -50,14 +50,15 @@ edges, a local parent of another owner, `status` with `--no-board`, an item
 `build_issue_body.py` rejects, two items with one title in one repo, a body mentioning a
 key, an unreadable state file, a state entry recorded in another repo or with another
 title than its item (§ 5). Then `--dry-run` runs `issue-create.sh <item> --dry-run` for
-each item with the local refs left out, so a milestone, Status or external link target that
-is wrong fails the preview, not the run. It prints one preview — a table in creation order
-(order, key, repo, type, title, parent, blocked by, milestone, status; local refs as
-`@key`), then every body under a heading with its key — and creates nothing, writes no
-state. Below the table it names the items an earlier run already created (key, title, url)
-and, for each item whose exact title already exists in its repo, what the run will do:
-`would adopt #N` (§ 5) or `would stop: duplicate #N (state, author)` — the run then stops
-before its first create; rename the item or settle that issue first.
+each item not yet created — the set the run validates (§ 4) — with the local refs left out,
+so a milestone, Status or external link target that is wrong fails the preview, not the run.
+It prints one preview — a table in creation order (order, key, repo, type, title, parent,
+blocked by, milestone, status; local refs as `@key`), then every body still to create under
+a heading with its key — and creates nothing, writes no state. Below the table it names the
+items an earlier run already created (key, title, url; no dry-run, no body) and, for each
+item whose exact title already exists in its repo, what the run will do: `would adopt #N`
+(§ 5) or `would stop: duplicate #N (state, author)` — the run then stops before its first
+create; rename the item or settle that issue first.
 
 ## 3. One confirmation for the batch
 
@@ -113,24 +114,29 @@ lookup:
   (then set the Status on the board by hand). The state cannot see that repair: once the
   issue is on the board, set that entry's `board` to `added` by hand.
 - an item not recorded may still exist: an earlier run created it and stopped — or crashed —
-  before recording it. A rerun passes `--adopt-since <started_at>` to issue-create.sh, which
-  looks for it in the newest issues of the repo (a plain listing: the search index lags) and
-  then runs the exact-title duplicate guard. Either way the issue found (exit 4, its `url`,
-  `number`, `state`, `author`, `createdAt` on stdout) is **adopted** only if all hold: this
-  is a rerun (the state file already had `started_at`), the issue is open, you opened it,
-  and it was created at or after `started_at`. Adopted, it is recorded, used for the links
-  that point at it and its own links are ensured (`created: false, adopted: true`); its
-  `board` is `unchecked` — its board step may never have run: look at it, and add it with
-  the command above if it is missing. Any other duplicate — on a first run, closed, a
-  teammate's or older — stops the batch with exit 4 naming it.
+  before recording it. A rerun passes `--adopt-since <started_at − 120 s>` to
+  issue-create.sh, which looks for it in the newest issues of the repo (a plain listing: the
+  search index lags) and then runs the exact-title duplicate guard. Either way the issue
+  found (exit 4, its `url`, `number`, `state`, `author`, `createdAt` on stdout) is
+  **adopted** only if all hold: this is a rerun (the state file already had `started_at`),
+  the issue is open, you opened it, and it was created at or after `started_at` less 120 s
+  (`started_at` is this machine's clock, `createdAt` GitHub's; the margin covers this clock
+  running ahead). Adopted, it is recorded, used for the links that point at it and its own
+  links are ensured (`created: false, adopted: true`); its `board` is `unchecked` — its
+  board step may never have run: look at it, and add it with the command above if it is
+  missing. Any other duplicate — on a first run, closed, a teammate's or older — stops the
+  batch with exit 4 naming it; one you opened, on a rerun, may still be this batch's own
+  (closed since, or a clock further ahead), so the message first says how to record it.
 
 The state file is kept outside /tmp so that a reboot cannot erase the record of what was
 created. Never delete it, and never start a new `id` for a batch that created anything: a new
 `id` has no `started_at`, so it adopts nothing and stops at the first issue that exists. Edit
-it by hand only for a repaired board (above) and for a recorded issue that is gone: one that
-was **deleted** — remove its entry from `items`, and the rerun files it again; one that was
-**transferred** to another repo — remove its entry, drop the item from the batch file and
-replace its `@key` in the other items by the issue's new `OWNER/REPO#N`.
+it by hand only for a repaired board (above), for an issue of this batch a rerun refused —
+add `items.<key>` with its `url`, `number`, `repo` and `summary`, and rerun — and for a
+recorded issue that is gone: one that was **deleted** — remove its entry from `items`, and
+the rerun files it again; one that was **transferred** to another repo — remove its entry,
+drop the item from the batch file and replace its `@key` in the other items by the issue's
+new `OWNER/REPO#N`.
 
 ## 6. Failures
 
