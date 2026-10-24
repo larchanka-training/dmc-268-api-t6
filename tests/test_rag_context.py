@@ -1784,6 +1784,76 @@ def test_an_importer_of_a_removed_and_a_changed_export_shows_both() -> None:
     assert (result.found, result.confirmed) == (1, 1)
 
 
+def test_a_broken_reference_shows_the_import_line_of_every_removed_binding() -> None:
+    view = (
+        "from .store import load\nimport os\nfrom .cache import fetch\n\n\n"
+        "def show(key):\n    return fetch(load(key))\n"
+    )
+    repository = Repository(
+        {"pkg/view.py": view},
+        base={"pkg/store.py": _PY_BASE_STORE, "pkg/cache.py": "def fetch(key):\n    return key\n"},
+    )
+    diff_map = _diff_map(_deletion(repository), _deletion(repository, "pkg/cache.py"))
+    graph = Graph(
+        {
+            _REPOSITORY: (
+                _uses("pkg/view.py", "pkg/store.py", "load"),
+                _uses("pkg/view.py", "pkg/cache.py", "fetch"),
+            )
+        }
+    )
+
+    result = _select(repository, diff_map, graph)
+
+    # One place reads two removed bindings: it shows the import line of each.
+    (place,) = result.places
+    assert (place.source.reason, place.source.ranges) == (
+        "rag_broken_reference",
+        (LineRange(1, 1), LineRange(3, 3), LineRange(6, 7)),
+    )
+    assert {item.source.path for item in place.definitions} == {"pkg/cache.py", "pkg/store.py"}
+    assert (result.found, result.confirmed) == (1, 1)
+
+
+def test_a_broken_reference_that_also_calls_a_changed_export_shows_both_import_lines() -> None:
+    view = (
+        "from .store import load\nimport os\nfrom .util import helper\n\n\n"
+        "def show(key):\n    return helper(load(key))\n"
+    )
+    util = "def helper(value):\n    value.check()\n    return value\n"
+    repository = Repository(
+        {"pkg/store.py": _PY_STORE, "pkg/util.py": util, "pkg/view.py": view},
+        base={"pkg/store.py": _PY_BASE_STORE},
+    )
+    diff_map = _diff_map(
+        _vcs_file(repository, "pkg/store.py", _PY_REMOVAL_PATCH, deletions=4),
+        _vcs_file(
+            repository,
+            "pkg/util.py",
+            "@@ -1,2 +1,3 @@\n def helper(value):\n+    value.check()\n     return value",
+        ),
+    )
+    graph = Graph(
+        {
+            _REPOSITORY: (
+                _uses("pkg/view.py", "pkg/store.py", "load"),
+                _uses("pkg/view.py", "pkg/util.py", "helper"),
+            )
+        }
+    )
+
+    result = _select(repository, diff_map, graph)
+
+    # One declaration is both: the broken place shows the import of every binding.
+    (place,) = result.places
+    assert (place.source.reason, place.source.ranges, len(place.definitions)) == (
+        "rag_broken_reference",
+        (LineRange(1, 1), LineRange(3, 3), LineRange(6, 7)),
+        1,
+    )
+    assert (result.found, result.confirmed) == (1, 1)
+
+
 # The RAG slot of the review context (ADR 0001 §9): after L1 and L4, before L2 and L3.
 
 _PLAN = RagPlan()

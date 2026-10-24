@@ -732,7 +732,13 @@ class _Selection:
         if broken and base is not None:
             found, limited = await self._broken(base, path, facts, broken)
         reverse, stopped = await self._places(path, facts, hints)
-        # A broken use comes first; other declarations may still call a changed export.
+        # A broken use comes first; other declarations may still call a changed export. A
+        # broken use that calls one too shows the import of both.
+        calls = {reader.symbol.index: reader.items for reader in reverse}
+        found = [
+            replace(reader, items=_joined(reader.items, calls.get(reader.symbol.index, ())))
+            for reader in found
+        ]
         taken = {reader.symbol.index for reader in found}
         places = [*found, *(reader for reader in reverse if reader.symbol.index not in taken)]
         if not places:
@@ -823,7 +829,7 @@ class _Selection:
         """
         if base.tree.blob_shas.get(path) != self._tree.blob_shas.get(path):
             return [], False
-        found: dict[int, tuple[AstImport, EdgeKind]] = {}
+        found: dict[int, tuple[tuple[AstImport, ...], EdgeKind]] = {}
         read: dict[int, dict[str, SymbolRef]] = {}
         limited = False
         for hint in hints:
@@ -864,14 +870,16 @@ class _Selection:
                             (ref.symbol_id, ref) for ref in removed
                         )
                 for index in _innermost(facts, readers):
-                    found.setdefault(index, (item, hint.kind))
+                    # The place shows the import of every binding that broke.
+                    items, kind = found.get(index, ((), hint.kind))
+                    found[index] = (_joined(items, (item,)), kind)
         readers_found: list[_Reader] = []
-        for index, (item, kind) in found.items():
+        for index, (items, kind) in found.items():
             definitions = [await self._definition(base, ref) for ref in read[index].values()]
             readers_found.append(
                 _Reader(
                     facts.symbols[index],
-                    (item,),
+                    items,
                     kind,
                     RAG_BROKEN_REFERENCE,
                     tuple(place for place in definitions if place is not None),
@@ -1029,6 +1037,15 @@ def _binds_submodule(
         and target.files[0].endswith("__init__.py")
         and python_submodule_files(target.files[0], binding.name, tree) == [head_path]
     )
+
+
+def _joined(items: tuple[AstImport, ...], more: Iterable[AstImport]) -> tuple[AstImport, ...]:
+    """``items`` and then each import of ``more`` it lacks, once."""
+    joined = list(items)
+    for item in more:
+        if item not in joined:
+            joined.append(item)
+    return tuple(joined)
 
 
 def _innermost(facts: AstFacts, readers: Mapping[int, bool]) -> list[int]:
