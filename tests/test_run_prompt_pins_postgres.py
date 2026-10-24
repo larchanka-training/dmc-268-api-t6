@@ -14,13 +14,23 @@ from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.bootstrap.seed_prompts import PromptAsset, load_prompt_assets, seed_prompt_versions
-from app.modules.reviews.application.policy_snapshot import ExecutionProfile, PromptBindings
+from app.modules.reviews.application.conventions import CachedConventions, GeneratedConventions
+from app.modules.reviews.application.policy_snapshot import (
+    ExecutionProfile,
+    PromptBindings,
+    make_complete_execution_profile,
+)
 from app.modules.reviews.application.prepare_policy_snapshot import (
     PreparePolicySnapshot,
     RunPolicyPins,
     build_policy_snapshot,
 )
 from app.modules.reviews.application.rerun_run import RerunOutcome
+from app.modules.reviews.application.review_context import BuildReviewContext
+from app.modules.reviews.application.review_context_stage import (
+    EstimatedTokenCounter,
+    ReviewContextStage,
+)
 from app.modules.reviews.application.review_ignore import parse_review_ignore
 from app.modules.reviews.application.try_enqueue_webhook_run import (
     PendingRunMessage,
@@ -34,7 +44,11 @@ from app.modules.reviews.infrastructure.rerun_store import (
     SqlAlchemyRerunStore,
     SqlAlchemyRerunUnitOfWork,
 )
+from app.modules.reviews.infrastructure.review_prompt_repository import (
+    SqlAlchemyReviewPromptRepository,
+)
 from app.modules.reviews.infrastructure.run_lifecycle_store import SqlAlchemyRunLifecycleStore
+from app.modules.reviews.infrastructure.run_repository import SqlAlchemyRunRepository
 from app.modules.reviews.infrastructure.webhook_runs import SqlAlchemyWebhookRunUnitOfWork
 from tests.portal_postgres import (
     NOW,
@@ -47,6 +61,8 @@ from tests.portal_postgres import (
     portal_schema,
 )
 from tests.test_prepare_policy_snapshot import Source
+from tests.test_review_context_stage import Parser, Vcs, _checkpoint
+from tests.test_review_context_stage import Repository as SourceTree
 from tests.test_run_publication_settings_postgres import _claim, _insert, _ready
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -366,6 +382,59 @@ def test_historical_run_keeps_todays_pins_and_digest(env: Env) -> None:
                 snapshot_id=stored.snapshot_id,
             )
             assert stored.policy_digest == expected.policy_digest
+        finally:
+            await engine.dispose()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.integration
+def test_complete_pins_make_snapshot_ready_but_prompt_input_stays_legacy(env: Env) -> None:
+    async def scenario() -> None:
+        engine = env.engine()
+        factory = async_sessionmaker(engine, expire_on_commit=False)
+
+        def uow() -> SqlAlchemyPolicySnapshotUnitOfWork:
+            # The worker injects its complete profile the same way (worker.py:534).
+            return SqlAlchemyPolicySnapshotUnitOfWork(
+                factory, execution_profile=make_complete_execution_profile()
+            )
+
+        try:
+            await _ready(factory)
+            await _seed(factory, _packaged())
+            async with factory.begin() as session:
+                run_id = await _insert(session)
+            await _claim(factory, run_id, 1)
+            prepare = PreparePolicySnapshot(uow_factory=uow, source_factory=lambda pins: Source())
+            vcs = Vcs()
+            stage = ReviewContextStage(
+                runs=SqlAlchemyRunRepository(factory, allow_unscoped=True),
+                checkpoint=_checkpoint,
+                vcs=vcs,
+                merge_base=vcs,
+                prepare_policy=prepare,
+                context_builder=lambda run: BuildReviewContext(
+                    source=SourceTree(), parser=Parser(), counter=EstimatedTokenCounter()
+                ),
+            )
+            await stage.begin(run_id)
+            snapshot = await prepare.execute(run_id)
+            # Lock 2 is lifted: the stored snapshot of a new run is ready for the LLM path.
+            assert snapshot.prompt_bindings.is_complete is True
+            assert snapshot.is_ready_for_llm is True
+            # The conventions cache identity still derives from the ignore policy alone.
+            assert stage.policy_key == snapshot.ignore_digest
+            # Lock 1 holds: the live review prompt input carries no snapshot.
+            conventions_id = await _prompt_id(factory, "review.conventions", 2)
+            prompt_input = await SqlAlchemyReviewPromptRepository(factory).get_review_prompt_input(
+                run_id,
+                GeneratedConventions(
+                    CachedConventions(REPO_A, None, conventions_id, (), (), {}), None, True
+                ),
+            )
+            assert prompt_input is not None
+            assert prompt_input.policy_snapshot is None
         finally:
             await engine.dispose()
 
