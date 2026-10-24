@@ -110,6 +110,9 @@ class RunInsertCandidate:
     prompt_version_id: UUID
     severity_threshold: SeverityThresholdValue
     max_comments: int
+    # The active rows when the run is created; ``None`` when no row of that key is active.
+    conventions_prompt_version_id: UUID | None
+    verifier_prompt_version_id: UUID | None
 
 
 @dataclass(frozen=True)

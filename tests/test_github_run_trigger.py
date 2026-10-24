@@ -112,6 +112,8 @@ def _insert_candidate() -> RunInsertCandidate:
         prompt_version_id=_PROMPT,
         severity_threshold="all",
         max_comments=10,
+        conventions_prompt_version_id=None,
+        verifier_prompt_version_id=None,
     )
 
 
