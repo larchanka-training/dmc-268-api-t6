@@ -5,46 +5,50 @@
 # put it on the course board with its Status, and set its native links.
 #
 # The sequence is validation → dup-search → create once → read the issue back →
-# board and Status → links (issue-link.sh). Validation refuses, before anything exists, a milestone that is not open
-# in the repo, a board Status that is not an option and a link target that is
-# missing or a pull request. The rest is written out as a sequence because the failure it guards against is specific and
-# has happened: the create call returns nothing useful, the caller assumes
-# failure, retries, and the server ends up with two issues — because the first
-# call had in fact succeeded. So a create is never retried blind; a create that
-# looks like it failed is followed by a lookup of the newest issues, and only an
-# issue that did not exist before the create AND was opened by the authenticated
-# user counts as "it landed".
+# board and Status → links (issue-link.sh). Validation refuses, before anything
+# exists, a milestone that is not open in the repo, a board Status that is not an
+# option and a link target that is missing or a pull request. The rest is written
+# out as a sequence because the failure it guards against is specific and has
+# happened: the create call returns nothing useful, the caller assumes failure,
+# retries, and the server ends up with two issues — because the first call had in
+# fact succeeded. So a create is never retried blind; a create that looks like it
+# failed is followed by a lookup of the newest issues, and only an issue that did
+# not exist before the create AND was opened by the authenticated user counts as
+# "it landed".
 #
 # Usage: issue-create.sh <spec.json> [--dry-run] [--allow-duplicate] [--no-board]
-# Output: {"url","number","repo","verified","board","status"[,"links"]} on
-#         stdout; board is added | skipped | failed, status the board Status read
-#         back (null when skipped), links issue-link.sh's result (only when the
-#         spec asks for links); verified also checks the milestone when one is set. --dry-run: {"dry_run","repo","body","milestone","status","links"}
-#         — it still runs preflight and validation, so it needs network and auth;
-#         it is not offline.
+# Output: {"url","number","repo","verified","board","status"[,"links"]} on stdout;
+#         board is added | skipped | failed, status the board Status read back
+#         (null when skipped), links issue-link.sh's result (only when the spec
+#         asks for links); verified also checks the milestone when one is set.
+#         --dry-run: {"dry_run","repo","body","milestone","status","links"} — it
+#         still runs preflight and validation, so it needs network and auth; it is
+#         not offline.
 # Errors: {"error": "..."} on stderr (also {"warning": "..."}, exit unaffected).
 #         stdout stays machine-readable.
 # Exit: 0 created — check "verified", it can be false · 2 usage/spec/refused ·
-#       3 auth · 4 4xx or duplicate blocked · 5 5xx/network, or a failed create
-#       whose outcome could not be checked · 6 issue CREATED but the board step
-#       (item-add or Status) failed — never re-run the create, only the gh command
-#       in the message (stdout has the url) · 7 issue CREATED but a native link
-#       failed — never re-run the create, only the issue-link.sh command in the
-#       message; 7 wins over 6 when both fail, and stdout carries both
-# Env: ISSUE_STATUS_RETRY_DELAY (seconds, default 3) — the pause before the one
-#       re-edit of a Status the board's automation overwrote.
+#       3 auth · 4 4xx or duplicate blocked · 5 5xx/network/rate limit, or a failed
+#       create whose outcome could not be checked · 6 issue CREATED but the board
+#       step (item-add or Status) failed — never re-run the create, only the gh
+#       command in the message (stdout has the url) · 7 issue CREATED but a native
+#       link failed — never re-run the create, only the issue-link.sh command in
+#       the message; 7 wins over 6 when both fail, and stdout carries both
+# Env: ISSUE_STATUS_RETRY_DELAY (seconds, default 3) — the pause before the second
+#       read of a Status other than Todo, which the board's automation can still
+#       reset, and before the one re-edit of a Status it overwrote.
 #
 # Offline test seam: ISSUE_FIXTURE_DIR (see issue-preflight.sh). Additionally
 # issue_search.json (duplicate guard), issue_recover_before.json and
 # issue_recover.json (newest issues before / after a failed create),
 # milestones.json, project_view.json, project_fields.json (validation; a missing
 # file is a failed call whose stderr is <name>.err), issue_create.json,
-# issue_view.json, project_add.{code,err,json}, project_edit.{code,err} and
-# project_status.json / project_status.retry.json (the Status read after the edit
-# and after the retry) stand in for the CLI calls; a missing file is a failed
-# call. project_add.called appears when the board step ran; the validation calls,
-# the create and the board calls are logged to calls.log. Links and their targets
-# are read by issue-link.sh from its own REST-path files (see there).
+# issue_view.json, project_add.{code,err,json}, project_edit.err and
+# project_status.json, project_status.confirm.json, project_status.retry.json (the
+# Status read after the edit, after the pause, after the re-edit) stand in for the
+# CLI calls; a missing file is a failed call. project_add.called appears when the
+# board step ran; the validation calls, the create and the board calls are logged
+# to calls.log. Links and their targets are read by issue-link.sh from its own
+# REST-path files (see there).
 
 set -uo pipefail
 
@@ -68,7 +72,7 @@ while [ $# -gt 0 ]; do
     --dry-run)         DRY=true; shift ;;
     --allow-duplicate) ALLOW_DUP=true; shift ;;
     --no-board)        NO_BOARD=true; shift ;;
-    -h|--help)         sed -n '4,47p' "$0"; exit 0 ;;
+    -h|--help)         sed -n '4,51p' "$0"; exit 0 ;;
     -*)                die "unknown argument: $1" 2 ;;
     *)                 SPEC="$1"; shift ;;
   esac
@@ -149,15 +153,22 @@ fixture() {  # fixture NAME — offline stand-in: FIX/NAME.json, or a failed cal
 }
 errtext() { head -c 300 "$WORK/err" 2>/dev/null | tr '\n' ' ' | sed 's/ *$//'; }
 # The exit class of a failed call, from the HTTP status gh reports — not from any
-# three digits in the text, which can be an issue number.
+# three digits in the text, which can be an issue number. A 403 that is a (secondary)
+# rate limit is transient, not a refusal.
 fail_code() {
-  local status
+  local status text
   status="$(grep -Eo 'HTTP [0-9]{3}' "$WORK/err" 2>/dev/null | head -1)"
+  text="$(lower "$(cat "$WORK/err" 2>/dev/null)")"
   case "${status#HTTP }" in
-    404)     echo 2 ;;
-    401|403) echo 3 ;;
+    404) echo 2 ;;
+    401) echo 3 ;;
+    403)
+      case "$text" in
+        *"rate limit"*|*abuse*) echo 5 ;;
+        *) echo 3 ;;
+      esac ;;
     *)
-      case "$(lower "$(cat "$WORK/err" 2>/dev/null)")" in
+      case "$text" in
         *authentication*|*unauthorized*|*"bad credentials"*) echo 3 ;;
         *) echo 5 ;;  # 5xx, timeout, connection refused, or anything unrecognised
       esac ;;
@@ -406,23 +417,30 @@ print("true" if ok else "false")' "$SUMMARY" "$MILESTONE")"
 # ─── 5. board and Status ────────────────────────────────────────────────────
 # After the create, so a failure here can never lose the issue: it exists, the
 # url is on stdout, and exit 6 says only the board is left to do. The board's
-# "Item added to project" automation can set Todo after our edit has landed, so
-# the Status is read back, and set once more after a pause if it differs.
+# "Item added to project" automation can set Todo after our edit has landed — even
+# after a first read already showed our value — so the Status is read back; one
+# other than Todo is read once more after a pause, and set once more if it differs.
 # shellcheck disable=SC2016  # $id is a GraphQL variable, not a shell one
 STATUS_QUERY='query($id: ID!) { node(id: $id) { ... on ProjectV2Item { fieldValueByName(name: "Status") { ... on ProjectV2ItemFieldSingleSelectValue { name } } } } }'
-set_status() {  # set_status [retry] — one edit, then the read-back into STATUS_GOT
+read_status() {  # read_status [confirm|retry] — the Status read back into STATUS_GOT
   if [ -n "$FIX" ]; then
-    printf 'project_edit\n' >> "$FIX/calls.log"
-    EERR="$(cat "$FIX/project_edit.err" 2>/dev/null)"
     READ="$(fixture "project_status${1:+.$1}")"
   else
-    EERR="$(gh project item-edit --id "$ITEM" --project-id "$PROJECT_ID" --field-id "$FIELD_ID" \
-              --single-select-option-id "$OPTION_ID" 2>&1 >/dev/null)"
     READ="$(gh api graphql -f query="$STATUS_QUERY" -f id="$ITEM" 2>"$WORK/err")"
   fi
   STATUS_GOT="$(printf '%s' "$READ" | python3 -c 'import json,sys
 try: print(json.load(sys.stdin)["data"]["node"]["fieldValueByName"]["name"] or "")
 except Exception: print("")')"
+}
+set_status() {  # set_status [retry] — one edit, then its read-back
+  if [ -n "$FIX" ]; then
+    printf 'project_edit\n' >> "$FIX/calls.log"
+    EERR="$(cat "$FIX/project_edit.err" 2>/dev/null)"
+  else
+    EERR="$(gh project item-edit --id "$ITEM" --project-id "$PROJECT_ID" --field-id "$FIELD_ID" \
+              --single-select-option-id "$OPTION_ID" 2>&1 >/dev/null)"
+  fi
+  read_status "${1:-}"
 }
 BOARD=skipped; BMSG=""; STATUS_GOT=""
 if [ "$NO_BOARD" != true ]; then
@@ -449,7 +467,13 @@ except Exception: pass')"
     BMSG="issue created ($URL) but not added to board $BOARD_NUMBER — ${MSG:-gh gave no error text}. Do not re-run the create; retry only: gh project item-add $BOARD_NUMBER --owner $BOARD_OWNER --url $URL"
   else
     set_status
-    if [ "$STATUS_GOT" != "$STATUS" ]; then
+    if [ "$STATUS_GOT" = "$STATUS" ] && [ "$STATUS" != Todo ]; then
+      # Todo is what the automation sets, so only another Status needs the second
+      # read; a reset seen there gets the one re-edit.
+      sleep "${ISSUE_STATUS_RETRY_DELAY:-3}" 2>/dev/null
+      read_status confirm
+      [ "$STATUS_GOT" = "$STATUS" ] || set_status retry
+    elif [ "$STATUS_GOT" != "$STATUS" ]; then
       sleep "${ISSUE_STATUS_RETRY_DELAY:-3}" 2>/dev/null
       set_status retry
     fi

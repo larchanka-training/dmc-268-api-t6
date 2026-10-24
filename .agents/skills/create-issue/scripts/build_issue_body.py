@@ -396,10 +396,13 @@ def _check_dependencies(dep: Any) -> None:
 def _check_links(s: dict[str, Any]) -> None:
     if "status" in s and not s["status"].strip():
         err('"status" must not be blank — leave it out for the default (Todo)')
+    # Blockers only: GitHub accepts the parent as a blocker of the same issue too.
     seen = set()
     for link in render_links(s):  # exits 2 on a ref that does not parse
+        if link["kind"] != "blocked_by":
+            continue
         key = (link["repo"].lower(), link["number"])
-        if link["kind"] == "blocked_by" and key in seen:
+        if key in seen:
             err(f'"blocked_by" lists {link["repo"]}#{link["number"]} more than once')
         seen.add(key)
     # GitHub only lets an issue be the sub-issue of a parent with the same owner;

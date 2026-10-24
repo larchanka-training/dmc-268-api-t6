@@ -254,6 +254,45 @@ def test_a_link_call_that_errored_but_landed_counts_as_linked(tmp_path: Path) ->
 
 
 @pytest.mark.parametrize(
+    "listed_after,code,want",
+    [
+        # failed and not there: gh's own text is the error
+        ([], 7, {"ref": "other/lib#7", "ok": False, "action": None,
+                 "error": "link call failed: gh: Validation Failed (HTTP 422)"}),
+        # errored but landed: the read-back decides
+        ([gh_issue("other/lib#7")], 0, {"ref": "other/lib#7", "ok": True, "action": "linked"}),
+    ],
+)  # fmt: skip
+def test_a_blocker_link_call_that_errored_is_decided_by_the_read_back(
+    tmp_path: Path, listed_after: list[dict[str, Any]], code: int, want: dict[str, Any]
+) -> None:
+    failing = fx(
+        {f"{BLOCKED_PATH}.post.code": "1"},
+        {f"{BLOCKED_PATH}.post.err": "gh: Validation Failed (HTTP 422)"},
+        {f"{BLOCKED_PATH}.after.json": listed_after},
+    )
+    r, calls = run(tmp_path, CHILD, "--blocked-by", "other/lib#7", **world(**failing))
+    assert r.returncode == code
+    assert out(r)["links"]["blocked_by"] == [want]
+    assert posts(calls) == [f"POST {BLOCKED_PATH} issue_id=9000007"]
+
+
+def test_the_parent_may_also_be_a_blocker(tmp_path: Path) -> None:
+    """As in build_issue_body.py: only a blocker given twice is a duplicate."""
+    both = fx({f"{BLOCKED_PATH}.after.json": [gh_issue("acme/sandbox#5")]})
+    r, calls = run(tmp_path, CHILD, "--parent", "#5", "--blocked-by", "#5", **world(**both))
+    assert r.returncode == 0, r.stderr
+    assert [x["action"] for x in [out(r)["links"]["parent"], *out(r)["links"]["blocked_by"]]] == [
+        "linked",
+        "linked",
+    ]
+    assert posts(calls) == [
+        f"POST {SUB_ISSUES_5} sub_issue_id=9000013",
+        f"POST {BLOCKED_PATH} issue_id=9000005",
+    ]
+
+
+@pytest.mark.parametrize(
     "missing,needle",
     [
         ({f"{CHILD_PATH}.after.json": gh_issue(CHILD)}, "not set on read-back"),
@@ -307,23 +346,57 @@ def test_a_missing_or_wrong_kind_of_issue_is_exit_2_and_nothing_is_posted(
 
 
 @pytest.mark.parametrize(
+    "path",
+    [
+        "repos/other/lib/issues/7",  # a target
+        CHILD_PATH,  # the issue being linked
+        BLOCKED_PATH,  # what it is already blocked by
+    ],
+)
+@pytest.mark.parametrize(
     "err,code",
     [
         ("gh: Bad credentials (HTTP 401)", 3),
         ("gh: Resource not accessible (HTTP 403)", 3),
+        # a 403 that is a (secondary) rate limit is transient, not a refusal
+        ("gh: API rate limit exceeded for user ID 1. (HTTP 403)", 5),
+        ("gh: You have exceeded a secondary rate limit. (HTTP 403)", 5),
+        ("gh: You have triggered an abuse detection mechanism. (HTTP 403)", 5),
         ("gh: Server Error (HTTP 502)", 5),
         ("dial tcp: lookup api.github.com: no such host", 5),
         # the class comes from the HTTP status, not from digits anywhere in the text
         ("gh: Server Error (HTTP 500) for issue 403 / 404", 5),
     ],
 )
-def test_a_failed_lookup_is_classified_by_its_http_status(
-    tmp_path: Path, err: str, code: int
+def test_a_failed_read_is_classified_by_its_http_status(
+    tmp_path: Path, path: str, err: str, code: int
 ) -> None:
-    broken = fx({"repos/other/lib/issues/7.json": None, "repos/other/lib/issues/7.err": err})
+    broken = fx({f"{path}.json": None, f"{path}.err": err})
     r, calls = run(tmp_path, CHILD, *LINK_BOTH, **world(**broken))
     assert r.returncode == code
     assert r.stdout == ""
+    assert err in error(r)
+    assert posts(calls) == []
+
+
+@pytest.mark.parametrize(
+    "broken,needle",
+    [
+        (fx({f"{CHILD_PATH}.json": {"message": "Moved Permanently"}}),
+         "cannot read acme/sandbox#13: the response is not an issue"),
+        (fx({"repos/other/lib/issues/7.json": {"id": "9000007", "number": 7}}),
+         "cannot read other/lib#7: the response is not an issue"),
+        (fx({f"{BLOCKED_PATH}.json": {"message": "x"}}),
+         "is blocked by: the response is not a list"),
+    ],
+)  # fmt: skip
+def test_an_unusable_response_is_exit_5_and_nothing_is_posted(
+    tmp_path: Path, broken: dict[str, Any], needle: str
+) -> None:
+    r, calls = run(tmp_path, CHILD, *LINK_BOTH, **world(**broken))
+    assert r.returncode == 5
+    assert r.stdout == ""
+    assert needle in error(r)
     assert posts(calls) == []
 
 
@@ -461,3 +534,25 @@ def test_a_real_post_that_does_not_land_is_exit_7(tmp_path: Path) -> None:
     links = out(r)["links"]
     assert links["parent"]["ok"] is True
     assert links["blocked_by"][0]["ok"] is False
+
+
+@pytest.mark.parametrize(
+    "lands,code,error_text",
+    [
+        (False, 7, "link call failed: gh: Validation Failed (HTTP 422)"),
+        (True, 0, None),  # errored, but the read-back lists it
+    ],
+)
+def test_a_real_blocker_post_that_errored_is_decided_by_the_read_back(
+    tmp_path: Path, lands: bool, code: int, error_text: str | None
+) -> None:
+    post = {"code": 1, "err": "gh: Validation Failed (HTTP 422)", "lands": lands}
+    r, gh = run_live(tmp_path, CHILD, "--blocked-by", "other/lib#7", blocked_by_post=post)
+    assert r.returncode == code
+    blocker = out(r)["links"]["blocked_by"][0]
+    assert blocker["ok"] is lands
+    assert blocker.get("error") == error_text
+    assert gh[-2:] == [
+        ["api", "-X", "POST", BLOCKED_PATH, "-F", "issue_id=9000007"],
+        ["api", f"{BLOCKED_PATH}?per_page=100"],
+    ]

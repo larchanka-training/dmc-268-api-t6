@@ -97,7 +97,13 @@ Board Status: `gh project view 12 --owner larchanka-training --format json` (`.i
 `Status`, option by exact name) — ids are resolved by name, never hard-coded; then
 `gh project item-edit --id <item> --project-id <project> --field-id <field>
 --single-select-option-id <option>`, read back with `gh api graphql` (`node(id: <item>)` →
-`ProjectV2Item.fieldValueByName(name: "Status")` → `name`).
+`ProjectV2Item.fieldValueByName(name: "Status")` → `name`). A spec `status` together with
+`--no-board` is refused (exit 2): there is no board item to set it on.
+
+The validation's target lookups are `issue-link.sh OWNER/REPO --check [--parent REF]
+[--blocked-by REF]...` — for an issue not created yet: each target exists, is an issue, a
+parent shares the owner; it writes nothing, prints `{"repo","targets":[{"kind","ref","id"}]}`
+and exits 2 / 3 / 5 as a link run does, which `issue-create.sh` passes through.
 
 Mines:
 
@@ -116,8 +122,12 @@ Mines:
 - **"Auto-add sub-issues to project"** (a board 12 workflow) puts a sub-issue on the board
   when its parent is there — even with `--no-board`.
 - **Status race.** The "Item added to project" automation can set Todo just after the
-  script's `item-edit`. The script reads the Status back, waits `ISSUE_STATUS_RETRY_DELAY`
-  seconds (default 3), re-sets it once, then gives up with exit 6 and the `item-edit` line.
+  script's `item-edit` — even after a first read already shows the new value. So a Status
+  other than Todo counts only when a second read, `ISSUE_STATUS_RETRY_DELAY` seconds later
+  (default 3), still shows it; a mismatch on either read gets one re-edit (after the
+  pause), then exit 6 with the `item-edit` line. Todo, what the automation sets, is read once.
+- **Rate limits.** A 403 whose text says rate limit, secondary rate limit or abuse is exit
+  5 (transient — wait, then rerun), not 3; any other 401 / 403 is auth.
 - **Exit 7** means the issue exists and a link did not land. Run only the `repair:` command
   from stderr — `issue-link.sh OWNER/REPO#N --parent … --blocked-by …`; it skips what is in
   place. Quote a short ref in a shell (`--parent '#5'`): unquoted, `#` starts a comment.
