@@ -165,7 +165,7 @@ jobs:
         # ReviewOutput schema and the gateway's answer parse path: 100% lines and branches (#33).
         run: |
           report="${RUNNER_TEMP}/unit-results.xml"
-          uv run pytest -m "not integration" -n auto -rs \
+          uv run pytest -m "not integration" -n auto -rs --strict-markers \
             --cov=app.modules.reviews.application.review_output \
             --cov=app.modules.reviews.infrastructure.llm.answers \
             --cov-branch --cov-fail-under=100 --cov-report=term-missing \
@@ -197,7 +197,7 @@ jobs:
       - name: List integration tests
         run: |
           collected="${RUNNER_TEMP}/collected.txt"
-          uv run pytest --collect-only -q -m integration > "${collected}"
+          uv run pytest --collect-only -q --strict-markers -m integration > "${collected}"
           grep '^tests/.*::' "${collected}" > "${RUNNER_TEMP}/integration-tests.txt"
           echo "Integration tests collected: $(wc -l < "${RUNNER_TEMP}/integration-tests.txt")"
 
@@ -339,13 +339,13 @@ jobs:
           results="${RUNNER_TEMP}/integration-${SHARD}"
           mkdir -p "${results}"
           # pytest-split splits by the committed .test_durations (by count while there is none) and
-          # then overwrites the copy with the durations of the tests this shard ran.
-          if [[ -f .test_durations ]]; then
-            cp .test_durations "${results}/durations.json"
-          fi
-          uv run pytest -m integration -q -rs --splits 4 --group "${SHARD}" \
-            --durations-path "${results}/durations.json" --store-durations --clean-durations \
-            --junitxml="${results}/junit.xml"
+          # overwrites it with the durations of the tests this shard ran. Keep it at its default
+          # path in the checkout: pytest picks rootdir and pyproject.toml before plugins add
+          # --durations-path, so an existing file outside the checkout moves rootdir and drops the
+          # config; --strict-markers then fails collection instead of running unconfigured.
+          uv run pytest -m integration -q -rs --strict-markers --splits 4 --group "${SHARD}" \
+            --store-durations --clean-durations --junitxml="${results}/junit.xml"
+          cp .test_durations "${results}/durations.json"
 
       - name: Upload shard results
         uses: actions/upload-artifact@v4
