@@ -496,8 +496,9 @@ def exported_symbols(facts: AstFacts, name: str) -> tuple[AstSymbol, ...]:
 def _uses_wildcard(facts: AstFacts, symbol: AstSymbol) -> bool:
     """Whether ``symbol`` names something a wildcard or dot import of its file may bind.
 
-    Any name the file does not bind otherwise counts, a builtin or an attribute name
-    included: the rule over-approximates on purpose, because a missed use is silent.
+    Any name the file does not bind otherwise counts, a builtin included (an attribute
+    name is no name read, facts/v2): the rule over-approximates on purpose, because a
+    missed use is silent.
     A Go dot import binds only exported names, so only those count there.
     """
     bound: set[str | None] = {symbol.name, *symbol.local_bindings}

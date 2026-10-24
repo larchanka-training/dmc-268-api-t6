@@ -112,7 +112,8 @@ _UNREADABLE = {
     SOURCE_READ_FAILED: SOURCE_READ_FAILED,
     RAG_LIMIT: RAG_LIMIT,
 }
-# A head resolution a module read stopped: no evidence that an import broke.
+# A resolution a module read stopped: no evidence that an import broke, nor of an
+# imports edge.
 _UNREAD = frozenset(
     {
         EXCLUDED,
@@ -709,6 +710,10 @@ class _Selection:
             if head is None:
                 continue
             head_path, head_facts = head
+            if head_facts.has_errors:
+                # A syntax error can hide what the changed module declares or binds: no
+                # edge to it is confirmed, also one whose resolution would not read it.
+                continue
             expected = {
                 symbol_ref(
                     head_facts, symbol, path=head_path, revision=self._tree.revision, blob_sha=None
@@ -733,8 +738,15 @@ class _Selection:
                     if hint.kind is EdgeKind.IMPORTS:
                         # The module is confirmed by its path, a submodule by the name it
                         # binds: the declaration only has to read the binding without
-                        # rebinding it, and no member has to resolve.
-                        confirms = ref.reason != "shadowed"
+                        # rebinding it, and no member has to resolve. A module the
+                        # resolver refused (a syntax error in a file of its package, a
+                        # file it cannot read) and a wildcard or dot import, whose use
+                        # is a guess, confirm nothing.
+                        confirms = (
+                            ref.reason != "shadowed"
+                            and ref.reason not in _UNREAD
+                            and binding.kind is not ImportKind.WILDCARD
+                        )
                     else:
                         # The binding resolves to the same export of the changed file.
                         confirms = ref.resolution is ImportResolution.RESOLVED and any(

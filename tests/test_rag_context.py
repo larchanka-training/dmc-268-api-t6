@@ -1489,6 +1489,124 @@ def test_a_place_is_the_innermost_declaration_that_reads_the_name() -> None:
     assert [place.source.ranges for place in result.places] == [(LineRange(1, 1), LineRange(5, 6))]
 
 
+_PY_BROKEN = "\n\ndef broken(:\n    pass\n"
+_GO_BROKEN = {"pkg/store/broken.go": "package store\n\nfunc Broken( {\n}\n"}
+_GO_GENERATED = "pkg/store/gen.go"
+_PY_NAMED, _, _PY_MODULE_PATCH, _ = _MODULE_EDGES["python-named"]
+_PY_DOTTED = _MODULE_EDGES["python-module"][0]
+_GO_PACKAGE, _, _GO_MODULE_PATCH, _ = _MODULE_EDGES["go-package"]
+_GO_USED = {_GO.changed: _GO.source, _GO.candidate: _GO.importers["used"], **_GO.others}
+_REFUSED_TARGETS: dict[str, tuple[dict[str, str], str, str, str, str, EdgeKind]] = {
+    # The changed module itself has a syntax error, also where no resolution reads it.
+    "python-imports": (
+        {**_PY_NAMED, "pkg/store.py": _PY_NAMED["pkg/store.py"] + _PY_BROKEN},
+        "pkg/store.py",
+        _PY_MODULE_PATCH,
+        "pkg/app.py",
+        "",
+        EdgeKind.IMPORTS,
+    ),
+    "python-imports-dotted": (
+        {**_PY_DOTTED, "pkg/store.py": _PY_DOTTED["pkg/store.py"] + _PY_BROKEN},
+        "pkg/store.py",
+        _PY_MODULE_PATCH,
+        "app/main.py",
+        "",
+        EdgeKind.IMPORTS,
+    ),
+    "python-uses-imported": (
+        {"pkg/store.py": _PY_STORE + _PY_BROKEN, "pkg/app.py": _PY_USER},
+        "pkg/store.py",
+        _PY_STORE_PATCH,
+        "pkg/app.py",
+        "save",
+        EdgeKind.USES_IMPORTED,
+    ),
+    # Another member of the changed Go package has one, or is excluded.
+    "go-imports": (
+        {**_GO_PACKAGE, **_GO_BROKEN},
+        "pkg/store/store.go",
+        _GO_MODULE_PATCH,
+        "cmd/app/app.go",
+        "",
+        EdgeKind.IMPORTS,
+    ),
+    "go-uses-imported": (
+        {**_GO_USED, **_GO_BROKEN},
+        _GO.changed,
+        _GO.patch,
+        _GO.candidate,
+        _GO.name,
+        EdgeKind.USES_IMPORTED,
+    ),
+    "go-excluded-member": (
+        {**_GO_PACKAGE, _GO_GENERATED: "package store\n\nfunc Gen() int {\n\treturn 1\n}\n"},
+        "pkg/store/store.go",
+        _GO_MODULE_PATCH,
+        "cmd/app/app.go",
+        "",
+        EdgeKind.IMPORTS,
+    ),
+}
+
+
+@pytest.mark.parametrize("case", sorted(_REFUSED_TARGETS))
+def test_a_syntax_error_or_a_refused_package_confirms_no_edge(case: str) -> None:
+    files, changed, patch, candidate, name, kind = _REFUSED_TARGETS[case]
+    repository = Repository(dict(files))
+    diff_map = _diff_map(_vcs_file(repository, changed, patch))
+    graph = Graph({_REPOSITORY: (GraphHint(candidate, kind, changed, name),)})
+
+    result = _select(repository, diff_map, graph, denied=lambda path: path == _GO_GENERATED)
+
+    assert graph.reads == [(_REPOSITORY, (GraphTarget(changed, name),))]
+    assert result.places == ()
+    assert result.omissions == (RagOmission("rag_edge_unconfirmed", candidate),)
+    assert (result.found, result.confirmed) == (1, 0)
+
+
+@pytest.mark.parametrize(
+    ("files", "changed", "patch", "candidate"),
+    [
+        (
+            {
+                "pkg/store.py": "import os\n\n\ndef save(item):\n    return item\n",
+                "pkg/app.py": "from .store import *\n\n\ndef run(item):\n    return save(item)\n",
+            },
+            "pkg/store.py",
+            "@@ -1,1 +1,2 @@\n+import os\n \n",
+            "pkg/app.py",
+        ),
+        (
+            {
+                **_GO_PACKAGE,
+                "cmd/app/app.go": (
+                    'package app\n\nimport . "example.com/m/pkg/store"\n\n'
+                    "func Run(item int) int {\n\treturn Save(item)\n}\n"
+                ),
+            },
+            "pkg/store/store.go",
+            _GO_MODULE_PATCH,
+            "cmd/app/app.go",
+        ),
+    ],
+    ids=["python-wildcard", "go-dot-import"],
+)
+def test_a_wildcard_or_dot_import_confirms_no_imports_edge(
+    files: dict[str, str], changed: str, patch: str, candidate: str
+) -> None:
+    # The resolver reports such a use by a guess, which is no evidence of the edge.
+    repository = Repository(dict(files))
+    diff_map = _diff_map(_vcs_file(repository, changed, patch))
+    graph = Graph({_REPOSITORY: (GraphHint(candidate, EdgeKind.IMPORTS, changed, ""),)})
+
+    result = _select(repository, diff_map, graph)
+
+    assert result.places == ()
+    assert result.omissions == (RagOmission("rag_edge_unconfirmed", candidate),)
+    assert (result.found, result.confirmed) == (1, 0)
+
+
 def test_an_importer_of_a_changed_module_that_rebinds_the_name_is_unconfirmed() -> None:
     store = "import os\n\n\ndef load(key):\n    return key\n"
     repository = Repository(
