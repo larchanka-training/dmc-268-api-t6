@@ -63,7 +63,7 @@ class RedisFactory:
         self.urls: list[str | None] = []
         self.client = RecordingRedis()
 
-    def from_url(self, url: str | None) -> RecordingRedis:
+    def from_url(self, url: str | None, **options: object) -> RecordingRedis:
         # Accept absent URLs too, so unconditional construction fails the contract
         # assertion below rather than an unrelated redis-py URL parser error.
         self.urls.append(url)
@@ -184,18 +184,24 @@ def test_webhook_worker_startup_selects_installation_token_cache(
     for name, value in environment(redis_url).items():
         monkeypatch.setenv(name, value)
     capture, redis = ProviderCapture(), RedisFactory()
-    resources, publisher = Closeable(), Closeable()
+    expected_resources, publisher = Closeable(), Closeable()
 
-    def stop_at_composition(*args: object) -> NoReturn:
-        assert args[0] is resources
-        assert args[2] is capture.providers[0]
-        assert args[4] is publisher
+    def stop_at_composition(
+        resources: object,
+        client: httpx.AsyncClient,
+        tokens: object,
+        config: webhook_worker.WorkerConfig,
+        run_publisher: object,
+    ) -> NoReturn:
+        assert resources is expected_resources
+        assert tokens is capture.providers[0]
+        assert run_publisher is publisher
         raise StartupCaptured
 
     def unexpected_request(request: httpx.Request) -> httpx.Response:
         raise AssertionError("startup must not call GitHub")
 
-    def client(*, base_url: str, timeout: float) -> httpx.AsyncClient:
+    def client(*, base_url: str, timeout: float, **options: object) -> httpx.AsyncClient:
         return httpx.AsyncClient(
             base_url=base_url, timeout=timeout, transport=httpx.MockTransport(unexpected_request)
         )
@@ -204,7 +210,7 @@ def test_webhook_worker_startup_selects_installation_token_cache(
     monkeypatch.setattr(
         webhook_worker,
         "ReviewsApiResources",
-        SimpleNamespace(from_database_url=lambda url: resources),
+        SimpleNamespace(from_database_url=lambda url: expected_resources),
     )
     monkeypatch.setattr(webhook_worker, "LazyAmqpPublisher", lambda url: publisher)
     monkeypatch.setattr(webhook_worker, "compose_worker", stop_at_composition)
@@ -213,6 +219,6 @@ def test_webhook_worker_startup_selects_installation_token_cache(
     with pytest.raises(StartupCaptured):
         asyncio.run(webhook_worker.run_forever())
 
-    assert resources.closed
+    assert expected_resources.closed
     assert publisher.closed
     assert_cache_selection(capture, redis, redis_url)

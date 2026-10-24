@@ -5,7 +5,8 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
-from collections.abc import Callable
+from collections.abc import AsyncIterator, Callable
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -71,20 +72,25 @@ class _GitHub:
         )
 
 
-def _process(
-    github: _GitHub, cache: InstallationAccessTokenCache
-) -> GitHubAppInstallationAccessTokenProvider:
-    """The token provider of one process: its own HTTP client and its own cache object."""
-    return GitHubAppInstallationAccessTokenProvider(
-        client=httpx.AsyncClient(
-            transport=httpx.MockTransport(github.handler), base_url="https://api.github.com"
-        ),
-        app_id="123",
-        private_key="test-private-key",
-        jwt_encoder=lambda claims, private_key: "app-jwt",
-        cache=cache,
-        now=lambda: _NOW,
-    )
+@asynccontextmanager
+async def _process(
+    github: _GitHub,
+    cache: InstallationAccessTokenCache,
+    *,
+    now: Callable[[], float] = lambda: _NOW,
+) -> AsyncIterator[GitHubAppInstallationAccessTokenProvider]:
+    """Own one process's provider client for the duration of an async scenario."""
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(github.handler), base_url="https://api.github.com"
+    ) as client:
+        yield GitHubAppInstallationAccessTokenProvider(
+            client=client,
+            app_id="123",
+            private_key="test-private-key",
+            jwt_encoder=lambda claims, private_key: "app-jwt",
+            cache=cache,
+            now=now,
+        )
 
 
 def _redis_cache(redis: FakeRedis) -> RedisInstallationAccessTokenCache:
@@ -94,43 +100,50 @@ def _redis_cache(redis: FakeRedis) -> RedisInstallationAccessTokenCache:
 def test_two_processes_with_one_redis_share_the_token_of_an_installation() -> None:
     redis = FakeRedis()
     github = _GitHub()
-    worker = _process(github, _redis_cache(redis))
-    webhook_worker = _process(github, _redis_cache(redis))
 
     async def scenario() -> list[str]:
-        return [
-            await worker.get_installation_access_token(17),
-            await webhook_worker.get_installation_access_token(17),
-            await worker.get_installation_access_token(18),
-            await webhook_worker.get_installation_access_token(18),
-        ]
+        async with (
+            _process(github, _redis_cache(redis)) as worker,
+            _process(github, _redis_cache(redis)) as webhook_worker,
+        ):
+            return [
+                await worker.get_installation_access_token(17),
+                await webhook_worker.get_installation_access_token(17),
+                await worker.get_installation_access_token(18),
+                await webhook_worker.get_installation_access_token(18),
+            ]
 
     tokens = asyncio.run(scenario())
 
-    assert tokens == ["secret-17-1", "secret-17-1", "secret-18-2", "secret-18-2"]
+    shared_tokens_match = tokens == ["secret-17-1", "secret-17-1", "secret-18-2", "secret-18-2"]
+    assert shared_tokens_match, "both processes must receive the shared installation credentials"
     assert github.posts == [17, 18]
-    assert redis.values == {"token:17": "secret-17-1", "token:18": "secret-18-2"}
+    stored_tokens_match = redis.values == {"token:17": "secret-17-1", "token:18": "secret-18-2"}
+    assert stored_tokens_match, "Redis must store each issued installation credential"
 
 
 def test_processes_without_redis_keep_separate_in_memory_tokens() -> None:
     github = _GitHub()
     first_cache = installation_token_cache(None, now=lambda: _NOW)
     second_cache = installation_token_cache(None, now=lambda: _NOW)
-    first = _process(github, first_cache)
-    second = _process(github, second_cache)
 
     async def scenario() -> list[str]:
-        return [
-            await first.get_installation_access_token(17),
-            await first.get_installation_access_token(17),
-            await second.get_installation_access_token(17),
-        ]
+        async with (
+            _process(github, first_cache) as first,
+            _process(github, second_cache) as second,
+        ):
+            return [
+                await first.get_installation_access_token(17),
+                await first.get_installation_access_token(17),
+                await second.get_installation_access_token(17),
+            ]
 
     tokens = asyncio.run(scenario())
 
     assert isinstance(first_cache, InMemoryInstallationAccessTokenCache)
     assert isinstance(second_cache, InMemoryInstallationAccessTokenCache)
-    assert tokens == ["secret-17-1", "secret-17-1", "secret-17-2"]
+    separate_tokens_match = tokens == ["secret-17-1", "secret-17-1", "secret-17-2"]
+    assert separate_tokens_match, "process-local caches must keep separate credentials"
     assert github.posts == [17, 17]
 
 
@@ -177,23 +190,25 @@ def test_unreachable_redis_leaves_the_process_on_its_own_token(
 ) -> None:
     redis = FakeRedis(broken=True)
     github = _GitHub()
-    process = _process(github, _redis_cache(redis))
 
     async def scenario() -> list[str]:
-        return [
-            await process.get_installation_access_token(17),
-            await process.get_installation_access_token(17),
-        ]
+        async with _process(github, _redis_cache(redis)) as process:
+            return [
+                await process.get_installation_access_token(17),
+                await process.get_installation_access_token(17),
+            ]
 
     with caplog.at_level(logging.WARNING):
         tokens = asyncio.run(scenario())
 
     # Minted once: the failed reads answer from the memory of the process.
-    assert tokens == ["secret-17-1", "secret-17-1"]
+    local_tokens_match = tokens == ["secret-17-1", "secret-17-1"]
+    assert local_tokens_match, "unreachable Redis must preserve the local credential"
     assert github.posts == [17]
     assert "Installation token cache read failed installation=17" in caplog.text
     assert "Installation token cache write failed installation=17" in caplog.text
-    assert "secret-17-1" not in caplog.text
+    credential_omitted = "secret-17-1" not in caplog.text
+    assert credential_omitted, "logs must omit installation credentials"
     assert all(record.exc_info is None for record in caplog.records)
 
 
@@ -228,17 +243,7 @@ def test_clean_redis_misses_reuse_local_token_when_writes_fail(
     redis, github = FakeRedis(write_broken=True), _GitHub()
 
     async def scenario() -> list[str]:
-        async with httpx.AsyncClient(
-            transport=httpx.MockTransport(github.handler), base_url="https://api.github.com"
-        ) as client:
-            provider = GitHubAppInstallationAccessTokenProvider(
-                client=client,
-                app_id="123",
-                private_key="test-private-key",
-                jwt_encoder=lambda claims, private_key: "app-jwt",
-                cache=_redis_cache(redis),
-                now=lambda: _NOW,
-            )
+        async with _process(github, _redis_cache(redis)) as provider:
             return [await provider.get_installation_access_token(17) for _ in range(3)]
 
     with caplog.at_level(logging.WARNING):
@@ -247,7 +252,6 @@ def test_clean_redis_misses_reuse_local_token_when_writes_fail(
     assert github.posts == [17]
     reused_one_token = len(set(tokens)) == 1
     assert reused_one_token, "valid local token must serve subsequent requests"
-    assert len(redis.values) == 0
     assert len(caplog.records) == 1
     warning_is_sanitized = caplog.records[0].getMessage() == (
         "Installation token cache write failed installation=17 error=ConnectionError"
@@ -268,17 +272,7 @@ def test_a_cold_clean_redis_miss_issues_a_token() -> None:
     redis, github = FakeRedis(), _GitHub()
 
     async def scenario() -> str:
-        async with httpx.AsyncClient(
-            transport=httpx.MockTransport(github.handler), base_url="https://api.github.com"
-        ) as client:
-            provider = GitHubAppInstallationAccessTokenProvider(
-                client=client,
-                app_id="123",
-                private_key="test-private-key",
-                jwt_encoder=lambda claims, private_key: "app-jwt",
-                cache=_redis_cache(redis),
-                now=lambda: _NOW,
-            )
+        async with _process(github, _redis_cache(redis)) as provider:
             return await provider.get_installation_access_token(17)
 
     token = asyncio.run(scenario())
@@ -310,17 +304,7 @@ def test_local_fallback_expires_at_the_safety_skew_boundary(
     cache = RedisInstallationAccessTokenCache(redis, now=clock)
 
     async def scenario() -> bool:
-        async with httpx.AsyncClient(
-            transport=httpx.MockTransport(github.handler), base_url="https://api.github.com"
-        ) as client:
-            provider = GitHubAppInstallationAccessTokenProvider(
-                client=client,
-                app_id="123",
-                private_key="test-private-key",
-                jwt_encoder=lambda claims, private_key: "app-jwt",
-                cache=cache,
-                now=clock,
-            )
+        async with _process(github, cache, now=clock) as provider:
             first = await provider.get_installation_access_token(17)
             clock.timestamp += elapsed_seconds
             second = await provider.get_installation_access_token(17)
@@ -330,24 +314,13 @@ def test_local_fallback_expires_at_the_safety_skew_boundary(
 
     assert github.posts == expected_posts
     assert reused is expected_reused
-    assert len(redis.values) == 0
 
 
 def test_a_redis_hit_takes_precedence_over_a_valid_local_token() -> None:
     redis, github = FakeRedis(write_broken=True), _GitHub()
 
     async def scenario() -> bool:
-        async with httpx.AsyncClient(
-            transport=httpx.MockTransport(github.handler), base_url="https://api.github.com"
-        ) as client:
-            provider = GitHubAppInstallationAccessTokenProvider(
-                client=client,
-                app_id="123",
-                private_key="test-private-key",
-                jwt_encoder=lambda claims, private_key: "app-jwt",
-                cache=_redis_cache(redis),
-                now=lambda: _NOW,
-            )
+        async with _process(github, _redis_cache(redis)) as provider:
             local = await provider.get_installation_access_token(17)
             redis.values["token:17"] = "redis-shared-credential"
             selected = await provider.get_installation_access_token(17)
@@ -357,3 +330,23 @@ def test_a_redis_hit_takes_precedence_over_a_valid_local_token() -> None:
 
     assert github.posts == [17]
     assert selected_redis_token, "a Redis hit must take precedence over the local credential"
+
+
+def test_clean_redis_misses_after_eviction_reuse_local_token() -> None:
+    redis, github = FakeRedis(), _GitHub()
+
+    async def scenario() -> bool:
+        async with _process(github, _redis_cache(redis)) as provider:
+            first = await provider.get_installation_access_token(17)
+            stored_keys = list(redis.values)
+            assert stored_keys == ["token:17"]
+            assert redis.lifetimes == {"token:17": 3540}
+            del redis.values["token:17"]
+            second = await provider.get_installation_access_token(17)
+            third = await provider.get_installation_access_token(17)
+            return first == second == third
+
+    reused_original_token = asyncio.run(scenario())
+
+    assert github.posts == [17]
+    assert reused_original_token, "eviction must preserve a valid process-local credential"

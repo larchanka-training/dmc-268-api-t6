@@ -14,12 +14,13 @@ managed checkout has detached HEAD). Initial `git status --short` was empty.
 
 ## Baseline evidence before implementation
 
-- `app/worker.py:626` builds the real GitHub adapters and passes its Redis argument to
-  `installation_token_cache`; `_run_worker:915-918`, reached through `run_worker`, only
-  constructs Redis with `settings.redis_url`, then passes it to `github_adapters:935`.
-- `app/webhook_worker.py:173-196` reads config, constructs optional Redis and builds the
-  provider inside `run_forever`; its first `compose_worker` call occurs after these steps.
-- `RedisInstallationAccessTokenCache.get:67-68` returns `None` on a clean Redis miss.
+- `app.worker.github_adapters` builds the real GitHub adapters and passes its Redis
+  argument to `installation_token_cache`; `app.worker._run_worker`, reached through
+  `run_worker`, constructs Redis only with `settings.redis_url`, then passes it to
+  `github_adapters`.
+- `app.webhook_worker.run_forever` reads config, constructs optional Redis and builds the
+  provider before its first `compose_worker` call.
+- `RedisInstallationAccessTokenCache.get` returned `None` on a clean Redis miss at baseline.
   The exception path already uses `_local.get`; `set` already records the token locally
   before attempting Redis. Local expiration already enforces the 60-second safety skew.
 - Existing tests exercise cache/factory behavior and config parsing but do not reach the
@@ -153,3 +154,39 @@ Replace the placeholders with concrete scope before requesting authorization or 
   CI already starts PostgreSQL/RabbitMQ for unrelated tests; Redis is unnecessary here.
 - No unresolved product decision. User approved this saved plan on 2026-10-24; task-level
   review remains required before proceeding to each next implementation task.
+
+
+## Review round 1 addendum (2026-10-24)
+
+The user requested that all PR #259 review comments be addressed. Continue the approved
+agent-loop review/fix phase; no second plan-approval gate. Review by verified GitHub login
+`axyi` requested changes on remote head `b465b59`: one P2 thread and six P3 groups.
+This round starts from clean local head `44b53ed610093e99dd2b6d608afcd5bce25f327b`,
+rebased onto main `1ae74b1ae8fb48aed9dc4d9e913bf4c916d5a813`; the rebase is unpushed.
+
+1. Correct the cache module/class docstrings and SD §8.3 Installation-token row: valid
+   local data serves read failures and clean misses after eviction/rejected writes,
+   only until expiry minus safety skew. State in the class docstring that future 401
+   invalidation must invalidate every process-local copy; Redis DEL alone is insufficient.
+2. Add the successful-write -> key-evicted -> two more requests regression (one issuance).
+   Remove the two tautological empty-fake-dictionary assertions. Turn `_process` into a
+   reusable async context manager with a `now` parameter, and use it across cache provider
+   tests so every httpx client closes, preserving expiry/precedence/secrecy coverage.
+3. Make Redis/client wiring fakes accept extra keyword options; use explicitly named webhook composition
+   fake parameters rather than indexes. Keep actual startup and
+   cache selection exercised; no worker composition or production behavior refactor.
+4. Replace brittle plan line references with symbols and unavailable temporary mutant-driver
+   commands with self-contained reproduction instructions or a concise inline recipe in
+   the todo evidence.
+   Do not add a permanent mutation framework/script for five small substitutions.
+5. Rerun focused tests, all five original mutation contracts and all repository gates;
+   independent review precedes commit/push. Publisher updates the title to cover both
+   parts, refreshes the PR body/checks, replies with the fix SHA and P3 disposition, and
+   re-requests the existing reviewer. Retain the externally changed Ready status.
+
+Coordination: before this round's edits, the coordinator posted the required SD-overlap
+comments on open PRs #283, #277, #254, #229, #227 and #220. No other planned file overlaps.
+Do not edit code-index source, implement 401 invalidation/circuit breakers, add dependencies,
+rewrite earlier commits merely to split parts, merge the PR or resolve the reviewer's thread.
+The developer/publisher brief is transient handoff material; the final repository evidence
+must be self-contained and must not require that brief or any disposable driver.
