@@ -436,6 +436,8 @@ def test_execute_review_run_excluded_file_does_not_reach_verifier() -> None:
             }
 
     class ContextFilter:
+        diff_old_sha: str | None = None
+
         def excluded(self, path: str) -> bool:
             return path == "app/secret_credentials.env"
 
@@ -3611,3 +3613,147 @@ def test_execute_review_counter_version_and_diff_old_sha_propagation() -> None:
     with pytest.raises(PolicyError) as exc_info:
         asyncio.run(pipeline_bad.execute(RUN_ID))
     assert exc_info.value.code == PolicyErrorCode.SNAPSHOT_INTEGRITY_ERROR
+
+
+def test_execute_review_coordinates_validation_with_real_fit() -> None:
+    snapshot = _make_test_snapshot(max_input_tokens=12_000)
+    lines_400 = tuple(DiffLine(5000 + i, "added", f"line_{i} = {i}") for i in range(400))
+    published: Any = None
+    verifier_received_cands: list[str] = []
+
+    class Processor:
+        async def prepare(self, run_id: UUID) -> GeneratedConventions:
+            return conventions()
+
+    class Repository:
+        async def get_review_prompt_input(
+            self, run_id: UUID, saved: GeneratedConventions
+        ) -> ReviewPromptInput:
+            return ReviewPromptInput(
+                system="Review carefully.",
+                rules=(),
+                agents_md=None,
+                conventions=RepoConventions((), ()),
+                changed_files=(ChangedFile("app/main.py", "modified", lines_400),),
+                omitted_files=(),
+                policy_snapshot=snapshot,
+            )
+
+    class Model:
+        async def get_pull_request_meta(self, run_id: UUID) -> PullRequestMeta:
+            return PullRequestMeta(
+                "PR", None, "u", "b", "m", (), 1, 1, 0, False, False, head_sha="head_sha_123"
+            )
+
+        async def draft_review(self, *, context: ReviewContext) -> dict[str, Any]:
+            assert len(context.changed_files[0].lines) < 400
+            assert context.changed_files[0].total_lines == 400
+            return {
+                "findings": [
+                    {
+                        "path": "app/main.py",
+                        "line": 5005,
+                        "start_line": None,
+                        "severity": "critical",
+                        "category": "security",
+                        "title": "Visible issue",
+                        "body": "Issue on visible line",
+                        "suggestion": None,
+                        "confidence": 0.95,
+                        "rule_name": None,
+                        "evidence_refs": [
+                            {
+                                "block_id": file_block_id("app/main.py"),
+                                "start_line": 5005,
+                                "end_line": 5005,
+                            }
+                        ],
+                    },
+                    {
+                        "path": "app/main.py",
+                        "line": 5300,
+                        "start_line": None,
+                        "severity": "critical",
+                        "category": "security",
+                        "title": "Truncated issue",
+                        "body": "Issue on truncated line",
+                        "suggestion": None,
+                        "confidence": 0.95,
+                        "rule_name": None,
+                        "evidence_refs": [
+                            {
+                                "block_id": file_block_id("app/main.py"),
+                                "start_line": 5300,
+                                "end_line": 5300,
+                            }
+                        ],
+                    },
+                    {
+                        "path": "app/main.py",
+                        "line": 3,
+                        "start_line": None,
+                        "severity": "critical",
+                        "category": "security",
+                        "title": "Absent issue",
+                        "body": "Issue on absent line",
+                        "suggestion": None,
+                        "confidence": 0.95,
+                        "rule_name": None,
+                        "evidence_refs": [
+                            {
+                                "block_id": file_block_id("app/main.py"),
+                                "start_line": 3,
+                                "end_line": 3,
+                            }
+                        ],
+                    },
+                ],
+                "summary": {"problem": "p", "done_well": "d", "effort": "none"},
+            }
+
+    class Publisher:
+        async def execute(self, run_id: UUID, raw_output: Any) -> bool:
+            nonlocal published
+            published = raw_output
+            return True
+
+    class InspectingVerifier:
+        async def verify(self, *, system_prompt: str, user_prompt: str) -> dict[str, Any]:
+            cand_ids = re.findall(r'candidate_id="([^"]+)"', user_prompt)
+            verifier_received_cands.extend(cand_ids)
+            return {
+                "decisions": [
+                    {
+                        "candidate_id": cid,
+                        "status": "supported",
+                        "reason": "OK",
+                        "evidence_refs": [
+                            {
+                                "block_id": file_block_id("app/main.py"),
+                                "start_line": 5005,
+                                "end_line": 5005,
+                            }
+                        ],
+                        "requirement_refs": [],
+                    }
+                    for cid in cand_ids
+                ]
+            }
+
+    pipeline = ExecuteReviewRun(
+        Processor(),
+        Repository(),
+        Model(),
+        Publisher(),
+        reflection_pass=ReflectionPass(InspectingVerifier()),
+    )
+    success = asyncio.run(pipeline.execute(RUN_ID))
+    assert success is True
+    assert len(verifier_received_cands) == 1
+    assert published is not None
+    assert len(published["findings"]) == 1
+    assert published["findings"][0]["line"] == 5005
+
+    dropped_map = {d.finding.line: d.drop_reason for d in published.dropped_findings}
+    assert dropped_map[5300] == "anchor_not_visible"
+    assert dropped_map[3] == "line_absent"

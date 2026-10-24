@@ -246,6 +246,7 @@ def test_composed_stage_stops_policy_context_requests_after_retirement(
             assert not any("installations/29" in call for call in calls)
             if origin == "active":
                 assert any(_MODELS_SHA in call for call in calls)
+                assert len([c for c in calls if "/compare/" in c]) == 1
         finally:
             await engine.dispose()
 

@@ -637,6 +637,31 @@ def test_service_defaults_all_47_stable_ids_from_v1_artifacts_and_integrity_erro
             )
         )
     assert exc_info.value.code == PolicyErrorCode.SNAPSHOT_INTEGRITY_ERROR
+    assert "Unknown service defaults checksum" in str(exc_info.value)
+
+    # Single rule with unknown checksum raises Unknown service defaults checksum
+    with pytest.raises(PolicyError) as exc_info_single:
+        builder.build_prompt(
+            ReviewContext(
+                system="S",
+                rules=(
+                    ReviewRule(
+                        name="Single Rule",
+                        include=(),
+                        exclude=(),
+                        checks=("check1", "check2"),
+                    ),
+                ),
+                agents_md=None,
+                conventions=RepoConventions((), ()),
+                pr_meta=pr_meta,
+                changed_files=(),
+                omitted_files=(),
+                policy_snapshot=make_test_snapshot(defaults_checksum="unknown_checksum"),
+            )
+        )
+    assert exc_info_single.value.code == PolicyErrorCode.SNAPSHOT_INTEGRITY_ERROR
+    assert "Unknown service defaults checksum" in str(exc_info_single.value)
 
     # Unknown rule name -> policy_snapshot_integrity_error
     with pytest.raises(PolicyError) as exc_info2:
@@ -653,6 +678,7 @@ def test_service_defaults_all_47_stable_ids_from_v1_artifacts_and_integrity_erro
             )
         )
     assert exc_info2.value.code == PolicyErrorCode.SNAPSHOT_INTEGRITY_ERROR
+    assert "is not part of pinned service defaults" in str(exc_info2.value)
 
     # Check count mismatch -> policy_snapshot_integrity_error
     with pytest.raises(PolicyError) as exc_info3:
@@ -673,6 +699,7 @@ def test_service_defaults_all_47_stable_ids_from_v1_artifacts_and_integrity_erro
             )
         )
     assert exc_info3.value.code == PolicyErrorCode.SNAPSHOT_INTEGRITY_ERROR
+    assert "has 1 checks" in str(exc_info3.value)
 
 
 def test_first_pass_prompt_injection_defense() -> None:

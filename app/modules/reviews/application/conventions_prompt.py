@@ -46,10 +46,20 @@ def build_conventions_prompt(request: ConventionsRequest) -> ReviewPrompt:
     not_traced = len(request.changed_files) - len(request.traced_files)
     if not_traced:
         changed.append(f"[{not_traced} more changed paths omitted]")
+    agents_text = (
+        request.snapshot.agents.text
+        if request.snapshot is not None
+        and request.snapshot.agents.is_present
+        and request.snapshot.agents.text is not None
+        else (request.agents_md or "")
+        .removeprefix("\ufeff")
+        .replace("\r\n", "\n")
+        .replace("\r", "\n")
+    )
     user = "\n".join(
         (
             render_custom_instructions(request.rules),
-            xml_container("agents_md", xml_text(request.agents_md or "")),
+            xml_container("agents_md", xml_text(agents_text)),
             xml_container("repo_tree", "\n".join(tree)),
             xml_container("repo_files", "\n".join(files)),
             xml_container("changed_files", "\n".join(changed)),
