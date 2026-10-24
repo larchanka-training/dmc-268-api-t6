@@ -11,13 +11,16 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from collections import Counter
 from collections.abc import Callable
-from dataclasses import replace
+from dataclasses import dataclass, replace
+from datetime import UTC, datetime
 from hashlib import sha256
 from typing import Any
 from uuid import UUID
 
+from app.modules.code_index.domain.enums import RagIndexStatus
 from app.modules.reviews.application.check_runs import RunProviderCheckpoint
 from app.modules.reviews.application.diff_map import (
     DiffMap,
@@ -30,6 +33,7 @@ from app.modules.reviews.application.policy_errors import PolicyError
 from app.modules.reviews.application.policy_snapshot import PolicySnapshot
 from app.modules.reviews.application.prepare_policy_snapshot import PreparePolicySnapshot
 from app.modules.reviews.application.process_run import RunVcsInput, RunVcsRepository
+from app.modules.reviews.application.rag_index import OpenReviewIndex, RagReadiness
 from app.modules.reviews.application.review_context import (
     BuildReviewContext,
     ContextStatus,
@@ -184,6 +188,46 @@ def context_summary(diff_map: DiffMap, payload: ReviewContextPayload) -> dict[st
     }
 
 
+@dataclass(frozen=True)
+class _RagStep:
+    """What the RAG gate found, kept until ``context.build`` is recorded: the gate runs
+    before the build, its step follows the build's in the trace."""
+
+    request: dict[str, Any]
+    response: dict[str, Any]
+    started_at: datetime
+    duration_ms: int
+
+
+def _rag_readiness(readiness: RagReadiness) -> tuple[dict[str, Any], dict[str, Any]] | None:
+    """Request and response of ``context.rag``; None when RAG is not in effect.
+
+    Readiness is read only through ``RagIndex`` (AC6): ``disabled`` is never a reason.
+    """
+    index = readiness.index
+    if not readiness.enabled or index is None:
+        return None
+    response: dict[str, Any]
+    if index.usable:
+        # Recorded as `prompt_version` until a pinned prompt version declares a retrieved
+        # section; the check belongs here.
+        response = {"outcome": "not_ready", "reason": "prompt_version"}
+    else:
+        reason = index.not_ready_reason
+        if reason is None:
+            return None
+        response = {"outcome": "not_ready", "reason": reason.value}
+        if reason is RagIndexStatus.FAILED:
+            response["error_code"] = index.last_error_code
+    request = {
+        "index_status": index.status.value,
+        "indexed_commit_sha": index.indexed_commit_sha,
+        "default_head_sha": readiness.default_head_sha,
+        "stale": index.status is RagIndexStatus.STALE,
+    }
+    return request, response
+
+
 class ReviewContextStage:
     """Policy snapshot, diff map, ignore and context of one run, recorded in its trace."""
 
@@ -199,6 +243,7 @@ class ReviewContextStage:
         trace: RunTrace | None = None,
         token_budget: int = FAST_CONTEXT_TOKEN_BUDGET,
         builtin_excluded: Callable[[str], bool] = lambda path: False,
+        rag: OpenReviewIndex | None = None,
     ) -> None:
         self._runs = runs
         self._checkpoint = checkpoint
@@ -211,6 +256,8 @@ class ReviewContextStage:
         # Built-in exclusions of the service (generated files): part of the effective
         # exclusion next to the masks of the repository.
         self._builtin_excluded = builtin_excluded
+        # None: no index access and no ``context.rag`` step (eval, replay).
+        self._rag = rag
         self._denied_paths: frozenset[str] = frozenset()
         self._snapshot: PolicySnapshot | None = None
         self._matcher: IgnoreMatcher | None = None
@@ -349,6 +396,7 @@ class ReviewContextStage:
             )
             raise RunSkipped("all_changes_ignored")
 
+        rag = await self._open_rag(run_id, run.repository_id)
         request = {"head_sha": run.head_sha, "policy_snapshot_id": str(snapshot.snapshot_id)}
         try:
             async with traced_step(self._trace, run_id, "context.build", request) as step:
@@ -368,7 +416,9 @@ class ReviewContextStage:
             if isinstance(exc, RunFailure) and exc.error_code == "deadline_exceeded":
                 raise
             _LOGGER.warning("Review context build failed run_id=%s", run_id, exc_info=True)
+            await self._record_rag(run_id, rag)
             return None
+        await self._record_rag(run_id, rag)
         if payload.status is ContextStatus.ALL_CHANGES_IGNORED:
             raise RunSkipped("all_changes_ignored")
         return payload
@@ -392,3 +442,43 @@ class ReviewContextStage:
                 "ignored_files": files,
                 "blocks": [],
             }
+
+    async def _open_rag(self, run_id: UUID, repository_id: UUID) -> _RagStep | None:
+        """Open the RAG index of the repository; a build it requests is never waited for.
+
+        Optional like the build: a policy error, a cancel and the deadline stop the
+        attempt, any other failure is kept as ``{error}`` and the review goes on without RAG.
+        """
+        if self._rag is None:
+            return None
+        started_at = datetime.now(UTC)
+        started = time.monotonic()
+        request: dict[str, Any]
+        response: dict[str, Any]
+        try:
+            readiness = await self._rag.execute(repository_id)
+        except (PolicyError, RunCancelled):
+            raise
+        except Exception as exc:
+            if isinstance(exc, RunFailure) and exc.error_code == "deadline_exceeded":
+                raise
+            _LOGGER.warning("RAG readiness gate failed run_id=%s", run_id, exc_info=True)
+            request = dict.fromkeys(
+                ("index_status", "indexed_commit_sha", "default_head_sha", "stale")
+            )
+            response = {"error": {"type": type(exc).__name__, "message": str(exc)[:1000]}}
+        else:
+            found = _rag_readiness(readiness)
+            if found is None:
+                return None
+            request, response = found
+        return _RagStep(request, response, started_at, int((time.monotonic() - started) * 1000))
+
+    async def _record_rag(self, run_id: UUID, step: _RagStep | None) -> None:
+        """Record ``context.rag`` once per attempt, right after the stage's ``context.build``,
+        also when the build failed and was caught."""
+        if step is None or self._trace is None:
+            return
+        await self._trace.record(
+            run_id, "context.rag", step.request, step.response, step.started_at, step.duration_ms
+        )
