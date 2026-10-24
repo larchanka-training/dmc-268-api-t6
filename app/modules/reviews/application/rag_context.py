@@ -715,7 +715,9 @@ class _Selection:
                 ).symbol_id
                 for symbol in exported_symbols(head_facts, hint.target_name)
             }
-            for item, binding in self._reaching(path, facts, self._tree, head_path):
+            for item, binding, target in self._reaching(path, facts, self._tree, head_path):
+                # `from pkg import sub` reaches the changed file as a submodule.
+                submodule = head_path not in target.files
                 readers: dict[int, bool] = {}
                 for symbol in facts.symbols:
                     ref = await self._resolver.resolve_binding(
@@ -728,15 +730,20 @@ class _Selection:
                     if ref is None:
                         continue
                     limited = limited or ref.reason == RAG_LIMIT
-                    if hint.kind is EdgeKind.IMPORTS:
+                    if hint.kind is EdgeKind.IMPORTS and not submodule:
                         # The module is confirmed by its path: the declaration only has
                         # to read the binding without rebinding it.
                         confirms = ref.reason != "shadowed"
+                    elif hint.kind is EdgeKind.IMPORTS:
+                        # A submodule is confirmed by the binding: it resolves into it.
+                        confirms = _resolves_into(ref, head_path)
                     else:
                         # The binding resolves to the same export of the changed file.
                         confirms = ref.resolution is ImportResolution.RESOLVED and any(
                             resolved.symbol_id in expected for resolved in ref.resolved_symbols
                         )
+                    if confirms and submodule:
+                        confirms = not await self._package_binds(target.files[0], binding)
                     readers[symbol.index] = confirms
                 for index in _innermost(facts, readers):
                     reader = found.get(index)
@@ -767,7 +774,7 @@ class _Selection:
         limited = False
         for hint in hints:
             expected = self._removed.targets[_target(hint)]
-            for item, binding in self._reaching(path, facts, base.tree, hint.target_path):
+            for item, binding, _ in self._reaching(path, facts, base.tree, hint.target_path):
                 readers: dict[int, bool] = {}
                 for symbol in facts.symbols:
                     before = await base.resolver.resolve_binding(
@@ -822,11 +829,12 @@ class _Selection:
 
     def _reaching(
         self, path: str, facts: AstFacts, tree: RevisionTree, changed_path: str
-    ) -> Iterator[tuple[AstImport, AstImportName]]:
-        """The bindings of ``path`` that can reach ``changed_path`` in ``tree``, by path
-        alone: a binding that cannot is not resolved, so no read is spent on a module the
-        edge is not about. Python ``from pkg import sub`` reaches the submodule for any
-        edge kind: the indexer gives it an ``imports`` edge."""
+    ) -> Iterator[tuple[AstImport, AstImportName, ModuleTarget]]:
+        """The bindings of ``path`` that can reach ``changed_path`` in ``tree``, with the
+        module each imports, by path alone: a binding that cannot is not resolved, so no
+        read is spent on a module the edge is not about. Python ``from pkg import sub``
+        reaches the submodule for any edge kind: the indexer gives it an ``imports``
+        edge."""
         for item in facts.imports:
             target = module_target(path, item.module, facts.language, tree, self._go_module)
             if target.resolution is not ImportResolution.RESOLVED:
@@ -835,7 +843,16 @@ class _Selection:
                 if changed_path in target.files or _binds_submodule(
                     facts.language, binding, target, changed_path, tree
                 ):
-                    yield item, binding
+                    yield item, binding, target
+
+    async def _package_binds(self, package_init: str, binding: AstImportName) -> bool:
+        """Whether the package imports the name of ``binding`` itself: ``from pkg import
+        name`` then binds that import, not the submodule, which the resolver does not
+        tell. A package RAG cannot read is taken to bind it."""
+        facts = await self._files.facts_for(package_init)
+        if isinstance(facts, FileUnavailable):
+            return True
+        return any(name.alias == binding.name for item in facts.imports for name in item.names)
 
     async def _definition(self, base: _Base, ref: SymbolRef) -> RetrievedPlace | None:
         """The signature of a removed definition, read at the base."""
@@ -979,6 +996,15 @@ def _joined(items: tuple[AstImport, ...], more: Iterable[AstImport]) -> tuple[As
         if item not in joined:
             joined.append(item)
     return tuple(joined)
+
+
+def _resolves_into(ref: ImportRef, path: str) -> bool:
+    """Whether a binding resolved, into ``path`` only."""
+    return (
+        ref.resolution is ImportResolution.RESOLVED
+        and bool(ref.resolved_symbols)
+        and all(item.path == path for item in ref.resolved_symbols)
+    )
 
 
 def _innermost(facts: AstFacts, readers: Mapping[int, bool]) -> list[int]:

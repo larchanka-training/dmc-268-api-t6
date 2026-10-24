@@ -1050,6 +1050,93 @@ def test_a_python_submodule_import_is_confirmed_on_an_imports_edge() -> None:
     assert (result.found, result.confirmed, dict(result.dropped)) == (1, 1, {})
 
 
+def _submodule_import(
+    init: str, kind: EdgeKind = EdgeKind.IMPORTS, files: dict[str, str] | None = None
+) -> tuple[Repository, DiffMap, Graph]:
+    """``app/main.py`` reads ``store.save`` through ``from pkg import store``; the PR
+    changes ``pkg/store.py`` at module level (an ``imports`` edge) or in ``save``."""
+    module = kind is EdgeKind.IMPORTS
+    repository = Repository(
+        {
+            "pkg/__init__.py": init,
+            "pkg/store.py": "import os\n\n\ndef save(item):\n    return item\n"
+            if module
+            else _PY_STORE,
+            "app/main.py": (
+                "from pkg import store\n\n\ndef run(item):\n    return store.save(item)\n"
+            ),
+            **(files or {}),
+        }
+    )
+    patch = "@@ -1,1 +1,2 @@\n+import os\n \n" if module else _PY_STORE_PATCH
+    graph = Graph(
+        {_REPOSITORY: (GraphHint("app/main.py", kind, "pkg/store.py", "" if module else "save"),)}
+    )
+    return repository, _diff_map(_vcs_file(repository, "pkg/store.py", patch)), graph
+
+
+@pytest.mark.parametrize(
+    ("kind", "init"),
+    [
+        (EdgeKind.IMPORTS, "def store(item):\n    return item\n"),
+        (EdgeKind.IMPORTS, "store = None\n"),
+        (EdgeKind.IMPORTS, "from .other import store\n"),
+        (EdgeKind.USES_IMPORTED, "from .other import store\n"),
+    ],
+    ids=["imports-def", "imports-assign", "imports-reimport", "uses-reimport"],
+)
+def test_a_package_that_binds_the_name_itself_does_not_confirm_the_submodule(
+    kind: EdgeKind, init: str
+) -> None:
+    repository, diff_map, graph = _submodule_import(
+        init, kind, {"pkg/other.py": "def store(item):\n    return item\n"}
+    )
+
+    result = _select(repository, diff_map, graph)
+
+    # `from pkg import store` binds what the package names `store`, not the submodule.
+    assert result.places == ()
+    assert result.omissions == (RagOmission("rag_edge_unconfirmed", "app/main.py"),)
+    assert (result.found, result.confirmed) == (1, 0)
+
+
+def test_a_package_the_ignore_policy_denies_does_not_confirm_the_submodule() -> None:
+    repository, diff_map, graph = _submodule_import("")
+
+    result = _select(repository, diff_map, graph, denied=lambda path: path == "pkg/__init__.py")
+
+    assert result.places == ()
+    assert result.omissions == (RagOmission("rag_edge_unconfirmed", "app/main.py"),)
+    assert "pkg/__init__.py" not in repository.read
+
+
+def test_a_package_past_the_read_limit_does_not_confirm_the_submodule() -> None:
+    fillers = {f"pkg/filler_{number:02d}.py": "" for number in range(19)}
+    repository, diff_map, graph = _submodule_import("", files=fillers)
+    store = BlobStore()
+    reader = CachedBlobSource(
+        repository_id=_REPOSITORY,
+        source=repository,
+        cache=SharedBlobCache(store),
+        uow_factory=lambda: BlobCacheUow(store),
+    )
+
+    # The run's reader spent 19 reads: the candidate is the 20th, the package would be
+    # the 21st.
+    async def spend() -> None:
+        for path in fillers:
+            await reader.text(repository.sha(path))
+
+    asyncio.run(spend())
+
+    result = _select(repository, diff_map, graph, reader=reader)
+
+    assert result.places == ()
+    assert result.omissions == (RagOmission("rag_limit", "app/main.py"),)
+    assert dict(result.dropped) == {"rag_limit": 1}
+    assert "pkg/__init__.py" not in repository.read
+
+
 def test_the_graph_is_asked_under_the_default_branch_path_of_a_renamed_file() -> None:
     repository = Repository({"pkg/store.py": _PY_STORE})
     diff_map = _diff_map(
