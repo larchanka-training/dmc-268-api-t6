@@ -134,10 +134,131 @@ jobs:
           done
           exit "${missing}"
 
-  python-lint-type-test:
-    # The name is a required status check on main; keep it verbatim.
-    name: Python lint / type / test
+  python-unit:
+    # Everything but the integration suite; none of it touches PostgreSQL, RabbitMQ or Redis.
+    name: Python lint / type / unit
     runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup uv
+        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          version: "0.12.11"
+          python-version: "3.13"
+
+      - name: uv sync
+        run: uv sync --locked --all-groups
+
+      - name: ruff check
+        run: uv run ruff check .
+
+      - name: ruff format
+        run: uv run ruff format --check .
+
+      - name: mypy
+        run: uv run mypy .
+
+      - name: Unit tests (zero skips)
+        # ReviewOutput schema and the gateway's answer parse path: 100% lines and branches (#33).
+        run: |
+          report="${RUNNER_TEMP}/unit-results.xml"
+          uv run pytest -m "not integration" -n auto -rs \
+            --cov=app.modules.reviews.application.review_output \
+            --cov=app.modules.reviews.infrastructure.llm.answers \
+            --cov-branch --cov-fail-under=100 --cov-report=term-missing \
+            -W error::coverage.exceptions.CoverageWarning \
+            --junitxml="${report}"
+          UNIT_REPORT="${report}" uv run python - <<'PYTHON'
+          import os
+          from pathlib import Path
+          from xml.etree import ElementTree
+
+          root = ElementTree.parse(os.environ["UNIT_REPORT"]).getroot()
+          cases = root.findall(".//testcase")
+          skipped = [
+              case.attrib.get("name", "<unnamed>")
+              for case in cases
+              if (outcome := case.find("skipped")) is not None
+              and outcome.attrib.get("type") != "pytest.xfail"
+          ]
+          print(f"Unit tests: {len(cases)} collected, {len(skipped)} skipped")
+          if not cases or skipped:
+              for name in skipped:
+                  print(f"::error::Unit test skipped: {name}")
+              raise SystemExit("Unit tests must exist and have zero skips")
+          with Path(os.environ["GITHUB_STEP_SUMMARY"]).open("a") as summary:
+              summary.write(f"Unit tests: {len(cases)} collected, 0 skipped\n")
+          PYTHON
+
+      # The aggregator checks the shards against this list: every integration test ran exactly once.
+      - name: List integration tests
+        run: |
+          collected="${RUNNER_TEMP}/collected.txt"
+          uv run pytest --collect-only -q -m integration > "${collected}"
+          grep '^tests/.*::' "${collected}" > "${RUNNER_TEMP}/integration-tests.txt"
+          echo "Integration tests collected: $(wc -l < "${RUNNER_TEMP}/integration-tests.txt")"
+
+      - name: Upload integration test list
+        uses: actions/upload-artifact@v4
+        with:
+          name: collected-integration-tests
+          path: ${{ runner.temp }}/integration-tests.txt
+          if-no-files-found: error
+          retention-days: 7
+          # "Re-run failed jobs" uploads the same name again.
+          overwrite: true
+
+      - name: Gold corpus and recorded replay
+        shell: bash
+        run: |
+          corpus_report="${RUNNER_TEMP}/corpus-report.json"
+          replay_report="${RUNNER_TEMP}/replay-report.json"
+          uv run python review/scripts/validate_dataset.py --final --report-json "${corpus_report}"
+          replay_status=0
+          uv run python review/scripts/eval_replay.py --report-json "${replay_report}" || replay_status=$?
+          CORPUS_REPORT="${corpus_report}" REPLAY_REPORT="${replay_report}" uv run python - <<'PYTHON'
+          import json
+          import os
+          from pathlib import Path
+
+          from review.scripts.eval_replay import format_console
+
+          corpus = json.loads(Path(os.environ["CORPUS_REPORT"]).read_text(encoding="utf-8"))
+          replay_path = Path(os.environ["REPLAY_REPORT"])
+
+          with Path(os.environ["GITHUB_STEP_SUMMARY"]).open("a", encoding="utf-8") as summary:
+              summary.write("## Gold benchmark\n\n")
+              summary.write(
+                  f"Corpus: {corpus['valid_case_count']}/{corpus['case_count']} valid; "
+                  f"distribution {'passed' if corpus['passed'] else 'failed'}.\n\n"
+              )
+              if replay_path.is_file():
+                  replay = json.loads(replay_path.read_text(encoding="utf-8"))
+                  summary.write("Recorded replay:\n\n```text\n")
+                  summary.write(format_console(replay))
+                  summary.write("\n```\n\n")
+                  for warning in replay["warnings"]:
+                      print(f"::warning::{warning}")
+              elif not Path("test-prs-dataset/responses/manifest.json").is_file():
+                  summary.write("Recorded replay failed: baseline manifest is missing.\n")
+              else:
+                  summary.write("Recorded replay failed; no report was produced.\n")
+          PYTHON
+          exit "$replay_status"
+
+  python-integration:
+    # Integration tests share advisory-lock keys, NOTIFY channels and RabbitMQ names, so they do not
+    # run under xdist on one database; each shard gets its own runner, PostgreSQL and RabbitMQ.
+    name: Python integration (${{ matrix.shard }}/4)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
     services:
       postgres:
         image: postgres:17-alpine
@@ -210,87 +331,165 @@ jobs:
           print("PostgreSQL and RabbitMQ ready")
           PYTHON
 
-      - name: ruff check
-        run: uv run ruff check .
-
-      - name: ruff format
-        run: uv run ruff format --check .
-
-      - name: mypy
-        run: uv run mypy .
-
-      - name: pytest
-        # ReviewOutput schema and the gateway's answer parse path: 100% lines and branches (#33).
-        run: >-
-          uv run pytest
-          --cov=app.modules.reviews.application.review_output
-          --cov=app.modules.reviews.infrastructure.llm.answers
-          --cov-branch --cov-fail-under=100 --cov-report=term-missing
-          -W error::coverage.exceptions.CoverageWarning
-
-      - name: Gold corpus and recorded replay
+      - name: Integration tests
         shell: bash
+        env:
+          SHARD: ${{ matrix.shard }}
         run: |
-          corpus_report="${RUNNER_TEMP}/corpus-report.json"
-          replay_report="${RUNNER_TEMP}/replay-report.json"
-          uv run python review/scripts/validate_dataset.py --final --report-json "${corpus_report}"
-          replay_status=0
-          uv run python review/scripts/eval_replay.py --report-json "${replay_report}" || replay_status=$?
-          CORPUS_REPORT="${corpus_report}" REPLAY_REPORT="${replay_report}" uv run python - <<'PYTHON'
+          results="${RUNNER_TEMP}/integration-${SHARD}"
+          mkdir -p "${results}"
+          # pytest-split splits by the committed .test_durations (by count while there is none) and
+          # then overwrites the copy with the durations of the tests this shard ran.
+          if [[ -f .test_durations ]]; then
+            cp .test_durations "${results}/durations.json"
+          fi
+          uv run pytest -m integration -q -rs --splits 4 --group "${SHARD}" \
+            --durations-path "${results}/durations.json" --store-durations --clean-durations \
+            --junitxml="${results}/junit.xml"
+
+      - name: Upload shard results
+        uses: actions/upload-artifact@v4
+        with:
+          name: integration-${{ matrix.shard }}
+          path: ${{ runner.temp }}/integration-${{ matrix.shard }}/
+          if-no-files-found: error
+          retention-days: 7
+          overwrite: true
+
+  python-lint-type-test:
+    # The name is a required status check on main; keep it verbatim. A required check whose job is
+    # skipped counts as passed, so this job always runs and is red unless every job it needs
+    # succeeded: always(), not !cancelled(), so a cancelled run turns it red too.
+    name: Python lint / type / test
+    if: always()
+    needs:
+      - python-unit
+      - python-integration
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require the Python jobs to succeed
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: |
+          python3 - <<'PYTHON'
           import json
           import os
-          from pathlib import Path
 
-          from review.scripts.eval_replay import format_console
-
-          corpus = json.loads(Path(os.environ["CORPUS_REPORT"]).read_text(encoding="utf-8"))
-          replay_path = Path(os.environ["REPLAY_REPORT"])
-
-          with Path(os.environ["GITHUB_STEP_SUMMARY"]).open("a", encoding="utf-8") as summary:
-              summary.write("## Gold benchmark\n\n")
-              summary.write(
-                  f"Corpus: {corpus['valid_case_count']}/{corpus['case_count']} valid; "
-                  f"distribution {'passed' if corpus['passed'] else 'failed'}.\n\n"
-              )
-              if replay_path.is_file():
-                  replay = json.loads(replay_path.read_text(encoding="utf-8"))
-                  summary.write("Recorded replay:\n\n```text\n")
-                  summary.write(format_console(replay))
-                  summary.write("\n```\n\n")
-                  for warning in replay["warnings"]:
-                      print(f"::warning::{warning}")
-              elif not Path("test-prs-dataset/responses/manifest.json").is_file():
-                  summary.write("Recorded replay failed: baseline manifest is missing.\n")
-              else:
-                  summary.write("Recorded replay failed; no report was produced.\n")
+          results = {job: data["result"] for job, data in json.loads(os.environ["NEEDS"]).items()}
+          failed = {job: result for job, result in sorted(results.items()) if result != "success"}
+          for job, result in failed.items():
+              print(f"::error::Job {job} finished with result '{result}', not 'success'")
+          if not results or failed:
+              raise SystemExit("Every Python job must succeed")
+          print("Succeeded: " + ", ".join(sorted(results)))
           PYTHON
-          exit "$replay_status"
 
-      - name: Integration suite (zero skips)
+      - name: Download integration test list
+        uses: actions/download-artifact@v4
+        with:
+          name: collected-integration-tests
+          path: ${{ runner.temp }}/python-tests
+
+      - name: Download shard results
+        uses: actions/download-artifact@v4
+        with:
+          pattern: integration-*
+          path: ${{ runner.temp }}/python-tests
+
+      - name: Integration suite ran once (zero skips)
+        env:
+          RESULTS: ${{ runner.temp }}/python-tests
+          # The matrix of python-integration and its --splits.
+          SHARDS: "4"
         run: |
-          report="${RUNNER_TEMP}/integration-results.xml"
-          uv run pytest -m integration -q -rs --junitxml="${report}"
-          INTEGRATION_REPORT="${report}" uv run python - <<'PYTHON'
+          python3 - <<'PYTHON'
+          import json
           import os
+          from collections import Counter
           from pathlib import Path
           from xml.etree import ElementTree
 
-          root = ElementTree.parse(os.environ["INTEGRATION_REPORT"]).getroot()
-          cases = root.findall(".//testcase")
-          skipped = [
-              case.attrib.get("name", "<unnamed>")
-              for case in cases
-              if (outcome := case.find("skipped")) is not None
-              and outcome.attrib.get("type") != "pytest.xfail"
-          ]
-          print(f"Integration tests: {len(cases)} collected, {len(skipped)} skipped")
-          if not cases or skipped:
-              for name in skipped:
-                  print(f"::error::Integration test skipped: {name}")
-              raise SystemExit("Integration suite must contain tests and have zero skips")
-          with Path(os.environ["GITHUB_STEP_SUMMARY"]).open("a") as summary:
-              summary.write(f"Integration tests: {len(cases)} collected, 0 skipped\n")
+
+          def label(case):
+              return f"{case.attrib.get('classname', '')}::{case.attrib.get('name', '<unnamed>')}"
+
+
+          results = Path(os.environ["RESULTS"])
+          listing = (results / "integration-tests.txt").read_text(encoding="utf-8")
+          collected = [line for line in listing.splitlines() if line]
+          errors = []
+          ran = Counter()
+          merged = {}
+          rows = []
+          for shard in range(1, int(os.environ["SHARDS"]) + 1):
+              directory = results / f"integration-{shard}"
+              if not (directory / "durations.json").is_file() or not (directory / "junit.xml").is_file():
+                  errors.append(f"Shard {shard} uploaded no durations.json and junit.xml")
+                  continue
+              durations = json.loads((directory / "durations.json").read_text(encoding="utf-8"))
+              cases = ElementTree.parse(directory / "junit.xml").getroot().findall(".//testcase")
+              skipped = [
+                  label(case)
+                  for case in cases
+                  if (outcome := case.find("skipped")) is not None
+                  and outcome.attrib.get("type") != "pytest.xfail"
+              ]
+              # A failed shard already fails its job; this guards against a softened one.
+              failed = [
+                  label(case)
+                  for case in cases
+                  if case.find("failure") is not None or case.find("error") is not None
+              ]
+              errors.extend(f"Shard {shard}: integration test skipped: {name}" for name in skipped)
+              errors.extend(f"Shard {shard}: integration test failed: {name}" for name in failed)
+              if len(cases) != len(durations):
+                  errors.append(
+                      f"Shard {shard}: junit.xml lists {len(cases)} tests, durations.json {len(durations)}"
+                  )
+              ran.update(durations.keys())
+              merged.update(durations)
+              rows.append((shard, len(cases), len(skipped), len(failed)))
+
+          expected = set(collected)
+          if not expected:
+              errors.append("No integration tests were collected")
+          errors.extend(f"Integration test did not run: {n}" for n in sorted(expected - ran.keys()))
+          errors.extend(
+              f"Integration test ran but was not collected: {n}" for n in sorted(ran.keys() - expected)
+          )
+          errors.extend(
+              f"Integration test ran in {count} shards: {n}"
+              for n, count in sorted(ran.items())
+              if count > 1
+          )
+
+          for shard, cases, skipped, failed in rows:
+              print(f"Shard {shard}: {cases} tests, {skipped} skipped, {failed} failed")
+          print(f"Integration tests: {len(expected)} collected, {len(ran)} ran, {len(errors)} errors")
+          with Path(os.environ["GITHUB_STEP_SUMMARY"]).open("a", encoding="utf-8") as summary:
+              summary.write("## Integration tests\n\n| Shard | Tests | Skipped | Failed |\n|---|---|---|---|\n")
+              summary.writelines(f"| {shard} | {cases} | {skipped} | {failed} |\n" for shard, cases, skipped, failed in rows)
+              summary.write(f"\n{len(expected)} collected, {len(ran)} ran, {len(errors)} errors\n")
+          if errors:
+              for error in errors:
+                  print(f"::error::{error}")
+              raise SystemExit("Every collected integration test must run exactly once and pass")
+
+          # Same format pytest-split writes; commit it as .test_durations to balance the shards.
+          with (results / ".test_durations").open("w", encoding="utf-8") as output:
+              json.dump(merged, output, sort_keys=True, indent=4)
+              output.write("\n")
           PYTHON
+
+      - name: Upload test durations
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-durations
+          path: ${{ runner.temp }}/python-tests/.test_durations
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 7
+          overwrite: true
 
   openapi-lint:
     # The name is a required status check on main; keep it verbatim.
@@ -525,6 +724,8 @@ jobs:
       - monitoring-validate
       - terraform-lint-security
       - python-lint-type-test
+      - python-unit
+      - python-integration
       - openapi-lint
       - docker-build
       - docker-scan
