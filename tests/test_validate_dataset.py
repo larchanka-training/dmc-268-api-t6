@@ -564,6 +564,8 @@ def _rules_case(
     *,
     malicious: bytes = (RULES_TEXT + INJECTION).encode(),
     agents: bytes | None = None,
+    rules: str = RULES_TEXT,
+    patch: str = RULES_PATCH,
 ) -> Path:
     record = metadata if metadata is not None else _rules_metadata()
     dataset = tmp_path / "rules"
@@ -572,11 +574,11 @@ def _rules_case(
     (base / "app").mkdir(parents=True)
     (base / "app" / "example.py").write_text("def f():\n    pass\n", encoding="utf-8")
     (base / ".review").mkdir()
-    (base / ".review" / "rules.md").write_text(RULES_TEXT, encoding="utf-8")
+    (base / ".review" / "rules.md").write_text(rules, encoding="utf-8")
     (base / ".review" / "rules.malicious.md").write_bytes(malicious)
     if agents is not None:
         (base / "AGENTS.md").write_bytes(agents)
-    (case_dir / "diff.patch").write_text(RULES_PATCH, encoding="utf-8")
+    (case_dir / "diff.patch").write_text(patch, encoding="utf-8")
     (case_dir / "case.json").write_text(json.dumps(record), encoding="utf-8")
     return dataset
 
@@ -824,6 +826,102 @@ def test_exception_reason_must_quote_both_arm_files(tmp_path: Path) -> None:
     assert result.stdout == (
         "RUL-01: must_not_flag[0].reason: not found in .review/rules.md\n"
         "RUL-01: must_not_flag[0].reason: not found in .review/rules.malicious.md\n"
+    )
+
+
+def _ignore_block(*masks: str) -> str:
+    return "\n## Generated code\n\n```review-ignore\n" + "".join(f"{m}\n" for m in masks) + "```\n"
+
+
+def test_ignore_mask_of_the_valid_rules_must_not_match_a_changed_path(tmp_path: Path) -> None:
+    # The malicious file repeats every benign section, so it carries the same block.
+    rules = RULES_TEXT + _ignore_block("app/*.js", "app/**")
+    dataset = _rules_case(tmp_path, rules=rules, malicious=(rules + INJECTION).encode())
+
+    result = _run(dataset, "--case", "RUL-01")
+
+    assert result.returncode == 1
+    assert result.stdout == (
+        "RUL-01: policy.arms.valid: .review/rules.md: review-ignore mask app/** matches "
+        "the changed path app/example.py\n"
+        "RUL-01: policy.arms.malicious: .review/rules.malicious.md: review-ignore mask "
+        "app/** matches the changed path app/example.py\n"
+    )
+
+
+def test_ignore_mask_injected_in_the_malicious_arm_must_not_match_a_changed_path(
+    tmp_path: Path,
+) -> None:
+    malicious = RULES_TEXT + INJECTION + _ignore_block("app/example.py")
+    dataset = _rules_case(tmp_path, malicious=malicious.encode())
+
+    result = _run(dataset, "--case", "RUL-01")
+
+    assert result.returncode == 1
+    assert result.stdout == (
+        "RUL-01: policy.arms.malicious: .review/rules.malicious.md: review-ignore mask "
+        "app/example.py matches the changed path app/example.py\n"
+    )
+
+
+OLD_PATH_BLOCKS = {
+    "rename": (
+        "diff --git a/legacy/helpers.py b/app/helpers.py\n"
+        "similarity index 100%\nrename from legacy/helpers.py\nrename to app/helpers.py\n"
+    ),
+    "copy": (
+        "diff --git a/legacy/helpers.py b/app/helpers.py\n"
+        "similarity index 100%\ncopy from legacy/helpers.py\ncopy to app/helpers.py\n"
+    ),
+    "delete": (
+        "diff --git a/legacy/helpers.py b/legacy/helpers.py\ndeleted file mode 100644\n"
+        "--- a/legacy/helpers.py\n+++ /dev/null\n@@ -1,2 +0,0 @@\n-def old():\n-    return 0\n"
+    ),
+}
+
+
+@pytest.mark.parametrize("block", list(OLD_PATH_BLOCKS.values()), ids=list(OLD_PATH_BLOCKS))
+def test_ignore_mask_must_not_match_the_old_path_of_a_changed_file(
+    tmp_path: Path, block: str
+) -> None:
+    # Production checks both names of a renamed or copied file (apply_ignore).
+    rules = RULES_TEXT + _ignore_block("legacy/**")
+    dataset = _rules_case(
+        tmp_path, rules=rules, malicious=(rules + INJECTION).encode(), patch=RULES_PATCH + block
+    )
+    legacy = dataset / "cases/RUL-01/base/legacy"
+    legacy.mkdir()
+    (legacy / "helpers.py").write_text("def old():\n    return 0\n", encoding="utf-8")
+
+    result = _run(dataset, "--case", "RUL-01")
+
+    assert result.returncode == 1
+    assert result.stdout == (
+        "RUL-01: policy.arms.valid: .review/rules.md: review-ignore mask legacy/** matches "
+        "the changed path legacy/helpers.py\n"
+        "RUL-01: policy.arms.malicious: .review/rules.malicious.md: review-ignore mask "
+        "legacy/** matches the changed path legacy/helpers.py\n"
+    )
+
+
+def test_ignore_mask_check_reports_a_path_the_production_matcher_refuses(
+    tmp_path: Path,
+) -> None:
+    patch = RULES_PATCH + (
+        'diff --git "a/app/tab\\there.py" "b/app/tab\\there.py"\nnew file mode 100644\n'
+        '--- /dev/null\n+++ "b/app/tab\\there.py"\n@@ -0,0 +1 @@\n+VALUE = 1\n'
+    )
+    dataset = _rules_case(tmp_path, patch=patch)
+
+    result = _run(dataset, "--case", "RUL-01")
+
+    assert result.returncode == 1
+    assert result.stdout == (
+        "RUL-01: policy.arms.valid: .review/rules.md: the changed path 'app/tab\\there.py' "
+        "cannot be matched: policy_path_invalid: A repository path violates the path contract\n"
+        "RUL-01: policy.arms.malicious: .review/rules.malicious.md: the changed path "
+        "'app/tab\\there.py' cannot be matched: policy_path_invalid: A repository path "
+        "violates the path contract\n"
     )
 
 
