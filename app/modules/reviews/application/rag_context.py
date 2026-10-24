@@ -376,13 +376,15 @@ class _Removed:
     Each target maps to the ids of its definitions at the base. Without a readable base
     the names are unknown: the targets are then the modules the PR deletes or renames
     (name ""), and ``unknown`` says why none of their importers can be checked. A file
-    whose base extraction is not read or fails is in ``omissions``, counted once.
+    whose base extraction is not read or fails is in ``omissions``, counted once; one
+    the ignore policy denies is only counted in ``excluded``, never named.
     """
 
     targets: Mapping[GraphTarget, frozenset[str]] = field(default_factory=dict)
     base: _Base | None = None
     unknown: str | None = None
     omissions: tuple[RagOmission, ...] = ()
+    excluded: int = 0
 
 
 @dataclass(frozen=True)
@@ -483,6 +485,8 @@ class ReverseEdgeSelector:
         )
         for omission in removed.omissions:
             selection.drop(omission.reason, omission.path)
+        if removed.excluded:
+            selection.exclude(removed.excluded)
         if len(targets) > MAX_RAG_TARGETS:
             selection.drop(RAG_LIMIT, None, len(targets) - MAX_RAG_TARGETS)
         in_pr = {path for file in diff_map.files for path in (file.old_path, file.new_path) if path}
@@ -578,12 +582,17 @@ class ReverseEdgeSelector:
         )
         targets: dict[GraphTarget, frozenset[str]] = {}
         omissions: list[RagOmission] = []
+        excluded = 0
         for position, (file, path) in enumerate(sources):
             # Each extraction is at most one read.
             if position >= MAX_RAG_BASE_READS:
                 omissions.append(RagOmission(RAG_LIMIT, path))
                 continue
             before = await base_files.facts_for(path)
+            if isinstance(before, FileUnavailable) and before.reason == EXCLUDED:
+                # Never read, and counted without its path.
+                excluded += 1
+                continue
             if isinstance(before, FileUnavailable):
                 # Its exports are unknown: the file is counted instead of its importers.
                 reason = RAG_LIMIT if before.reason == RAG_LIMIT else SOURCE_READ_FAILED
@@ -608,7 +617,12 @@ class ReverseEdgeSelector:
         # The base resolves with the module path of the head: a PR that renames the Go
         # module resolves no import at the base, so it blames no importer.
         resolver = ImportResolver(tree=base, provider=base_files, go_module=go_module)
-        return _Removed(targets, _Base(base, base_files, resolver), omissions=tuple(omissions))
+        return _Removed(
+            targets,
+            _Base(base, base_files, resolver),
+            omissions=tuple(omissions),
+            excluded=excluded,
+        )
 
 
 class _Selection:
@@ -649,10 +663,14 @@ class _Selection:
         self.dropped[reason] = self.dropped.get(reason, 0) + count
         self.omissions.append(RagOmission(reason, path, count))
 
+    def exclude(self, count: int = 1) -> None:
+        """An ignored file is counted, never named: no omission."""
+        self.dropped[EXCLUDED] = self.dropped.get(EXCLUDED, 0) + count
+
     async def candidate(self, path: str, hints: Sequence[GraphHint]) -> None:
         if self._denied(path):
             # Never read, and counted without its path.
-            self.dropped[EXCLUDED] = self.dropped.get(EXCLUDED, 0) + 1
+            self.exclude()
             return
         broken = [hint for hint in hints if _target(hint) in self._removed.targets]
         base = self._removed.base
