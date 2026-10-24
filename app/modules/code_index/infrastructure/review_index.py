@@ -98,11 +98,8 @@ def _trigger(state: CodeIndexState, now: datetime) -> ReviewTrigger:
 
 
 def _writes(trigger: ReviewTrigger) -> bool:
-    return (
-        trigger.action is not ReviewTriggerAction.NONE
-        or trigger.extend_last_used
-        or trigger.record_throttle
-    )
+    # A throttle record comes only with `enable` or a full request.
+    return trigger.action is not ReviewTriggerAction.NONE or trigger.extend_last_used
 
 
 class SqlAlchemyReviewIndexAccess:
