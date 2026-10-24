@@ -65,7 +65,9 @@ RAG» выводили RAG из MVP (#19); CVS §1 исключал RAG, embeddi
 
 `RagContextProvider` — реализация порта `ContextProvider`: к детерминированному
 профилю L0–L4 он добавляет кандидатов графа и возвращает **тот же
-`ContextPayload`**. Кандидаты передаются в отдельном списке `retrieved`, который у
+`ContextPayload`**. В коде провайдер реализован слотом RAG сборки
+`BuildReviewContext`, кандидатов которого выбирает `ReverseEdgeSelector`.
+Кандидаты передаются в отдельном списке `retrieved`, который у
 детерминированного профиля пуст: `FileContext` требует diff, а у неизменённого
 файла его нет. Элемент списка — `RetrievedBlock`
 ([SD §9](../SYSTEM_DESIGN.md#сборка-и-бюджет)): `block_id`, уровень `RAG`,
@@ -213,7 +215,8 @@ full, §6.1) или повторное включение тумблера.
   Топологию с retry и DLQ по образцу SD §7.1 и правку compose вносит #142.
 - Порты принадлежат потребителю (`.agents/rules/backend.md` §3, п. 2):
   `GraphRetriever` в `reviews.application` отдаёт кандидатов графа для
-  `RagContextProvider`; `CodeIndexPurger` в `repositories.application` выполняет
+  `ReverseEdgeSelector` слота RAG в `BuildReviewContext`; `CodeIndexPurger` в
+  `repositories.application` выполняет
   логическую очистку (§6.2) при `removed`, `deleted` и выключении тумблера на сессии
   вызывающего use case, в его транзакции, а `CodeIndexEnabler` там же — включение
   (запрос full) при включении тумблера (#143). Реализации — в `code_index.infrastructure`.
@@ -482,7 +485,9 @@ branch не переносятся. Неподтверждённое ребро 
 Такой импортёр — кандидат `rag_broken_reference`, а не omission. Он даёт два блока,
 у каждого одна ревизия:
 
-1. импорт и места использования в `I` на `head_sha` (RIGHT, `exact_lines`);
+1. импорт и место использования в `I` на `head_sha` (RIGHT): объявление места
+   целиком (`exact_lines`), а сверх 200 строк или 2 000 токенов — строка импорта и
+   сигнатура (`signature`), как у любого блока слота (CVS §3.5);
 2. определение `X` на `diff_old_sha` (LEFT, `signature`).
 
 Фрагменты разных ревизий не склеиваются (CVS §3.2), каждый блок проходит guard
@@ -501,16 +506,18 @@ v3 снимает это ограничение. Поэтому кейсы уд�
 
 **Слот бюджета.** Порядок `BudgetAllocator`: L1 → L4 → RAG → L2 → L3. Потолок RAG —
 4 000 токенов; не больше 20 чтений блобов, 10 файлов-кандидатов и 3 мест на файл за
-run. RAG получает остаток после L1 и L4 и вытесняет только L2 и L3; L1 и L4 не
-вытесняются, приоритет L1 сохраняется. Приоритет внутри слота: битая ссылка >
-вызывающие изменённого экспортируемого символа > импортёры изменённого модуля.
+run, а одно чтение графа — не больше 200 целей; извлечения базы для битых ссылок
+берут не больше 10 из 20 чтений. RAG получает остаток после L1 и L4 и вытесняет
+только L2 и L3; L1 и L4 не вытесняются, приоритет L1 сохраняется. Приоритет внутри
+слота: битая ссылка > вызывающие изменённого экспортируемого символа > импортёры
+изменённого модуля.
 Кандидаты сверх лимитов — omission `rag_limit`.
 
 **Роль и manifest.** Блок RAG: `source_role = retrieved_excerpt`,
 `source_kind = source_code` (сопоставление RULES_FORMAT_SPEC §8.1). В
 `ManifestBlock` `revision` — ревизия стороны PR; `selection_reason` —
-`rag_reverse_edge` или `rag_broken_reference`; `source_ref` несёт
-`index_commit_sha` и вид ребра как метаданные выбора.
+`rag_reverse_edge` или `rag_broken_reference`; `index_commit_sha` и вид ребра —
+метаданные выбора блока рядом с его `source_ref`, а не внутри него.
 
 **Evidence и якорь.** Якорь finding остаётся строкой RIGHT файла DiffMap
 (CVS §6.2 и PIPELINE_SPEC не меняются): находка о влиянии на неизменённый код
@@ -621,7 +628,7 @@ embeddings, решает #147.
 | [SYSTEM_DESIGN Р-13](../SYSTEM_DESIGN.md#1-решения) | Переписан на месте: RAG v1 — граф символов с указателями, без embeddings и текста кода; тот же `ContextPayload`; v2 после гейта #146 |
 | [SYSTEM_DESIGN Р-6](../SYSTEM_DESIGN.md#1-решения) | Ревизия индекса не закрепляется в снимке run; закрепляется версия промпта |
 | [SYSTEM_DESIGN §2](../SYSTEM_DESIGN.md#2-границы-ответственности), [§13](../SYSTEM_DESIGN.md#13-нефункциональные-требования) | Индекс как производные метаданные кода: срок, удаление; лимиты контекста RAG |
-| [SYSTEM_DESIGN §5](../SYSTEM_DESIGN.md#5-c4--уровень-3-компоненты-ai-worker) | Подпись `RagContextProvider` на схеме |
+| [SYSTEM_DESIGN §5](../SYSTEM_DESIGN.md#5-c4--уровень-3-компоненты-ai-worker) | Подпись `RagContextProvider` на схеме (в коде — слот RAG `BuildReviewContext` и `ReverseEdgeSelector`) |
 | [SYSTEM_DESIGN §9](../SYSTEM_DESIGN.md#граница-mvp-и-будущего-rag) | «Граница MVP и будущего RAG» и «Сборка и бюджет»: RAG v1, правило ревизий, слот бюджета, список `retrieved` |
 | [SYSTEM_DESIGN §10](../SYSTEM_DESIGN.md#10-стратегия-кэширования-контекстов) | Строка индекса, «не кэшируем», обоснование «только указатели» |
 | [CONTEXT_AND_VERIFICATION_SPEC](../CONTEXT_AND_VERIFICATION_SPEC.md#35-кандидаты-графа-символов-rag-v1) | Версия 1.2; §1, §2.1 `index_commit_sha`, §3.1 `retrieved_excerpt`, §3.2, §3.4, новый §3.5, §4.1, §5.1, §5.2, §8.1, §12 |
@@ -642,8 +649,8 @@ embeddings, решает #147.
 - v1 только для GitHub: клиент архива дерева и сравнения коммитов вносит #142;
   GitLab (#97) — за портом VCS, вне v1.
 - Порядок: #141 (модель данных) → #142 (индексатор) и #143 (жизненный цикл) →
-  #144 (`RagContextProvider`), #145 и ui#102 (тумблер и статус) → #146 (замер) →
-  #147 только после гейта.
+  #144 (`RagContextProvider`: слот RAG `BuildReviewContext`, `ReverseEdgeSelector`),
+  #145 и ui#102 (тумблер и статус) → #146 (замер) → #147 только после гейта.
 
 ## 16. Открытые вопросы v2
 
