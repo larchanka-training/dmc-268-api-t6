@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from dataclasses import dataclass, field, replace
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Literal
@@ -23,17 +23,15 @@ from app.modules.reviews.application.llm import LlmCallFailed, LlmErrorCode, Run
 from app.modules.reviews.infrastructure.llm.answers import InvalidAnswer
 from app.modules.reviews.infrastructure.llm.gateway import (
     GatewayResult,
-    LlmGateway,
     StructuredTask,
 )
-from app.modules.reviews.infrastructure.llm.memory import InMemoryLlmCallTrace, InMemoryUsageLedger
+from app.modules.reviews.infrastructure.llm.memory import InMemoryUsageLedger
 from app.modules.reviews.infrastructure.llm.settings import LlmSettings, ModelPrice, ModelProfile
 from app.modules.reviews.infrastructure.llm.transport import (
     ChatMessage,
-    OpenAICompatibleTransport,
     ResponseSchema,
 )
-from tests.llm_fakes import context_checkpoint
+from tests.llm_fakes import FakeClock, ScriptedProvider, completion
 
 NOW = datetime(2026, 10, 24, 12, 0, tzinfo=UTC)
 RUN = RunCallContext(
@@ -84,23 +82,12 @@ def _task(
     )
 
 
-def _completion(content: str) -> httpx.Response:
-    return httpx.Response(
-        200,
-        json={
-            "model": "answering-model",
-            "choices": [{"message": {"role": "assistant", "content": content}}],
-            "usage": {"prompt_tokens": 10, "completion_tokens": 5},
-        },
-    )
-
-
 def valid() -> httpx.Response:
-    return _completion(json.dumps(ANSWER))
+    return completion(json.dumps(ANSWER))
 
 
 def invalid() -> httpx.Response:
-    return _completion("not json")
+    return completion("not json")
 
 
 def billed(content: str) -> httpx.Response:
@@ -120,52 +107,13 @@ def billed(content: str) -> httpx.Response:
     )
 
 
-class _Clock:
-    def __init__(self) -> None:
-        self.current = NOW
-
-    def now(self) -> datetime:
-        return self.current
-
-    def monotonic(self) -> float:
-        return (self.current - NOW).total_seconds()
-
-    async def sleep(self, seconds: float) -> None:
-        self.current += timedelta(seconds=seconds)
-
-
-@dataclass
-class _Provider:
-    replies: list[httpx.Response]
-    requests: list[httpx.Request] = field(default_factory=list)
-    ledger: InMemoryUsageLedger = field(default_factory=InMemoryUsageLedger)
-    trace: InMemoryLlmCallTrace = field(default_factory=InMemoryLlmCallTrace)
-
-    def _handle(self, request: httpx.Request) -> httpx.Response:
-        self.requests.append(request)
-        if not self.replies:
-            raise AssertionError("unexpected provider call")
-        return self.replies.pop(0)
-
-    def gateway(self, client: httpx.AsyncClient, clock: _Clock) -> LlmGateway:
-        return LlmGateway(
-            SETTINGS,
-            OpenAICompatibleTransport(client),
-            self.ledger,
-            self.trace,
-            checkpoint=context_checkpoint,
-            clock=clock,
-            sleep=clock.sleep,
-            jitter=lambda: 0.0,
-            monotonic=clock.monotonic,
-        )
-
+class _Provider(ScriptedProvider):
     def run(self, *tasks: StructuredTask) -> list[GatewayResult | LlmCallFailed]:
         """Run the stages one after another in the same (run, attempt)."""
 
         async def exercise() -> list[GatewayResult | LlmCallFailed]:
-            async with httpx.AsyncClient(transport=httpx.MockTransport(self._handle)) as client:
-                gateway = self.gateway(client, _Clock())
+            async with httpx.AsyncClient(transport=httpx.MockTransport(self.handle)) as client:
+                gateway = self.gateway(SETTINGS, client, FakeClock(NOW))
                 outcomes: list[GatewayResult | LlmCallFailed] = []
                 for task in tasks:
                     try:
@@ -175,12 +123,6 @@ class _Provider:
                 return outcomes
 
         return asyncio.run(exercise())
-
-    def models(self) -> list[str]:
-        return [json.loads(request.content)["model"] for request in self.requests]
-
-    def kinds(self) -> list[str]:
-        return [record.kind.value for _, record in self.trace.records]
 
 
 def test_without_a_reserve_the_review_takes_the_verifier_slot() -> None:
@@ -316,8 +258,8 @@ def test_a_concurrent_generation_cannot_leave_the_review_the_reserved_slot() -> 
     provider = _Provider([invalid(), invalid(), valid(), valid()], ledger=ledger)
 
     async def scenario() -> tuple[GatewayResult, LlmCallFailed]:
-        async with httpx.AsyncClient(transport=httpx.MockTransport(provider._handle)) as client:
-            gateway = provider.gateway(client, _Clock())
+        async with httpx.AsyncClient(transport=httpx.MockTransport(provider.handle)) as client:
+            gateway = provider.gateway(SETTINGS, client, FakeClock(NOW))
             paused = asyncio.create_task(gateway.generate(_task("review", reserved_calls=1), RUN))
             await ledger.entered.wait()
             try:

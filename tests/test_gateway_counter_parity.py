@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from dataclasses import dataclass, field, replace
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from uuid import UUID
@@ -22,10 +22,8 @@ from app.modules.reviews.application.llm import RunCallContext
 from app.modules.reviews.application.prompt_budget import EstimatedTokenCounter, TokenCounter
 from app.modules.reviews.infrastructure.llm.gateway import (
     HeuristicTokenCounter,
-    LlmGateway,
     StructuredTask,
 )
-from app.modules.reviews.infrastructure.llm.memory import InMemoryLlmCallTrace, InMemoryUsageLedger
 from app.modules.reviews.infrastructure.llm.settings import (
     KNOWN_MODELS,
     LlmSettings,
@@ -34,10 +32,9 @@ from app.modules.reviews.infrastructure.llm.settings import (
 )
 from app.modules.reviews.infrastructure.llm.transport import (
     ChatMessage,
-    OpenAICompatibleTransport,
     ResponseSchema,
 )
-from tests.llm_fakes import context_checkpoint
+from tests.llm_fakes import FakeClock, ScriptedProvider, completion
 
 NOW = datetime(2026, 10, 24, 12, 0, tzinfo=UTC)
 RUN = RunCallContext(
@@ -62,30 +59,7 @@ LENGTHS = [0, 1, 3, 4, 3000, 3001]
 TOKENS_AT_THREE = [0, 1, 1, 2, 1000, 1001]
 
 
-class _Clock:
-    def now(self) -> datetime:
-        return NOW
-
-
-@dataclass
-class _Provider:
-    requests: list[httpx.Request] = field(default_factory=list)
-    trace: InMemoryLlmCallTrace = field(default_factory=InMemoryLlmCallTrace)
-    payment_required_first: bool = False
-
-    def _handle(self, request: httpx.Request) -> httpx.Response:
-        self.requests.append(request)
-        if self.payment_required_first and len(self.requests) == 1:
-            return httpx.Response(402, json={"error": {"message": "no credits"}})
-        return httpx.Response(
-            200,
-            json={
-                "model": "parity-model",
-                "choices": [{"message": {"role": "assistant", "content": '{"ok": true}'}}],
-                "usage": {"prompt_tokens": 10, "completion_tokens": 5},
-            },
-        )
-
+class _Provider(ScriptedProvider):
     def generate(
         self,
         profile: ModelProfile,
@@ -93,14 +67,9 @@ class _Provider:
         fallback: ModelProfile | None = None,
     ) -> None:
         async def exercise() -> None:
-            async with httpx.AsyncClient(transport=httpx.MockTransport(self._handle)) as client:
-                gateway = LlmGateway(
-                    LlmSettings(primary=profile, fallback=fallback),
-                    OpenAICompatibleTransport(client),
-                    InMemoryUsageLedger(),
-                    self.trace,
-                    checkpoint=context_checkpoint,
-                    clock=_Clock(),
+            async with httpx.AsyncClient(transport=httpx.MockTransport(self.handle)) as client:
+                gateway = self.gateway(
+                    LlmSettings(primary=profile, fallback=fallback), client, FakeClock(NOW)
                 )
                 task = StructuredTask(
                     operation="review",
@@ -115,6 +84,13 @@ class _Provider:
 
     def estimates(self) -> list[int]:
         return [record.input_tokens_estimate for _, record in self.trace.records]
+
+
+def _provider(*, payment_required_first: bool = False) -> _Provider:
+    """One accepted answer; first a 402 that sends the task to its fallback, if asked."""
+    no_credits = httpx.Response(402, json={"error": {"message": "no credits"}})
+    first = [no_credits] if payment_required_first else []
+    return _Provider([*first, completion('{"ok": true}')])
 
 
 @pytest.mark.parametrize(
@@ -165,7 +141,7 @@ def test_the_live_estimate_is_the_same_with_and_without_counter_v2(
 ) -> None:
     # The catalog profile on a test endpoint: no ECB quote is needed to price the call.
     profile = replace(KNOWN_MODELS[name], base_url="https://router.test/v1", api_keys=("sk-1",))
-    provider = _Provider()
+    provider = _provider()
 
     provider.generate(profile, counter)
 
@@ -182,7 +158,7 @@ def test_the_live_estimate_is_the_same_with_and_without_counter_v2(
     ],
 )
 def test_with_a_task_counter_the_estimate_is_the_counters_count(chars_per_token: float) -> None:
-    provider = _Provider()
+    provider = _provider()
 
     provider.generate(replace(PROFILE, chars_per_token=chars_per_token), EstimatedTokenCounter())
 
@@ -190,7 +166,7 @@ def test_with_a_task_counter_the_estimate_is_the_counters_count(chars_per_token:
 
 
 def test_without_a_task_counter_each_call_uses_its_own_model_heuristic() -> None:
-    provider = _Provider(payment_required_first=True)
+    provider = _provider(payment_required_first=True)
     fallback = replace(PROFILE, model="dense-fallback", chars_per_token=2.0)
 
     provider.generate(PROFILE, None, fallback=fallback)
