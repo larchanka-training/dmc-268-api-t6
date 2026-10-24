@@ -561,10 +561,11 @@ Eval-baseline пересобирается без смешения прогон�
   `not_ready` и превышение лимитов индекса дают ревью без RAG. Исключение — общий
   pre-send guard: блок с ревизией индекса вместо ревизии PR даёт
   `failed/policy_context_violation`, как для любого источника (§8.1).
-- `rag_candidate_missing`, `rag_edge_unconfirmed` и `rag_limit` — причины
-  coverage, как `ast_*`; ошибка чтения blob кандидата — существующая
-  `source_read_failed`. Отсутствие RAG и эти причины сами по себе не делают
-  coverage partial; правило `insufficient_context` не меняется.
+- `rag_candidate_missing`, `rag_edge_unconfirmed`, `rag_limit` и
+  `old_revision_unknown` — причины coverage, как `ast_*`; ошибка чтения blob
+  кандидата или базы `diff_old_sha` — существующая `source_read_failed`. Отсутствие
+  RAG и эти причины сами по себе не делают coverage partial; правило
+  `insufficient_context` не меняется.
 - `limit_exceeded:<лимит>`, `archive_unsafe` и `last_error_code` — коды строки
   состояния индекса, не Run.
 
