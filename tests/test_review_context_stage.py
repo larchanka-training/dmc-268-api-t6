@@ -10,6 +10,8 @@ from typing import Any
 from uuid import UUID
 
 import pytest
+from psycopg.errors import LockNotAvailable
+from sqlalchemy.exc import OperationalError
 
 from app.modules.code_index.domain.enums import RagIndexStatus
 from app.modules.code_index.domain.rag_index import RagIndex
@@ -1230,8 +1232,18 @@ def test_control_raised_by_the_build_ends_the_attempt_without_the_index_step(
 
 @pytest.mark.parametrize(
     "error",
-    [RuntimeError("the database is gone"), RunFailure("diff_fetch_failed", "optional")],
-    ids=["unexpected", "run-failure"],
+    [
+        RuntimeError("the database is gone"),
+        RunFailure("diff_fetch_failed", "optional"),
+        # What the adapter raises when a writer of the repository row outlasts its lock
+        # timeout: a gate failure, not the deadline.
+        OperationalError(
+            "SELECT repositories.id FROM repositories FOR SHARE",
+            None,
+            LockNotAvailable("canceling statement due to lock timeout"),
+        ),
+    ],
+    ids=["unexpected", "run-failure", "lock-timeout"],
 )
 def test_failed_gate_is_recorded_and_the_review_continues_without_rag(error: Exception) -> None:
     trace = Trace()
