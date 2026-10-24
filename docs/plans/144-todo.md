@@ -508,8 +508,8 @@ the 21st distinct blob → `rag_limit`; a failing `put` → logged, the text is 
 
 **Done when:**
 
-- [ ] the RED run and the GREEN run are recorded;
-- [ ] common verification is green.
+- [x] the RED run and the GREEN run are recorded;
+- [x] common verification is green.
 
 **Dependencies:** Task 1.
 
