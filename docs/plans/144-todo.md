@@ -202,9 +202,11 @@ CHECK refuses a sha without a time and accepts a time without a sha; downgrade t
 
 - `SqlAlchemyReviewIndexAccess(session)` and `SqlAlchemyReviewIndexUnitOfWork` (suggested)
   implementing Task 3's port (plan, "Adapter and its transaction"):
-  1. `repositories` `FOR SHARE`, then `RAG_ON` and `GITHUB_PROVIDER` in a statement of
-     their own (`app/modules/code_index/infrastructure/maintenance.py:209-226`); false →
-     `enabled=False`, the state is not read;
+  1. `RAG_ON` and `GITHUB_PROVIDER` first without a lock; false → `enabled=False` with no
+     lock taken and the state not read. True → `repositories` `FOR SHARE`, then the same
+     condition again in a statement of its own
+     (`app/modules/code_index/infrastructure/maintenance.py:209-226`); false →
+     `enabled=False`, the state is not read (after review r1);
   2. the state row `FOR UPDATE SKIP LOCKED`
      (`app/modules/repositories/infrastructure/rules_status.py:228`); empty → a plain read:
      no row, or a locked row read-only with no writes;
@@ -234,6 +236,10 @@ leaves it false):**
   `tests/test_code_index_store_postgres.py:2473`) → the call returns at once, read-only,
   no writes;
 - the toggle off or a GitLab installation → `enabled=False` and no state read;
+- the toggle off while another session holds `FOR UPDATE` on the repository row →
+  `enabled=False` without waiting (the unlocked pre-check; after review r1);
+- a `stale` row under a live build lease → no marker, the hourly extension still applies;
+  a `stale` row whose lease expired → marker set (after reviews r1 and r2);
 - isolation: a read of `a` never writes `b`.
 
 **Done when:**

@@ -134,8 +134,9 @@ process section and the external items in the todo.
   same target. This mirrors `refused` in `reconcile_head`
   (`app/modules/code_index/infrastructure/index_store.py:615-621`); `request_build`
   (`:574-586`) does not look at `last_error_code`.
-  - The condition (decided by the coordinator, 23.10): no wake marker, and `last_error_code IS NULL OR
-    last_error_code IN HEALABLE_ERROR_CODES`
+  - The condition (decided by the coordinator, 23.10): no wake marker, no live build lease
+    (`lease_expires_at > now` under the lock; after review r2, from the review r1 fix), and
+    `last_error_code IS NULL OR last_error_code IN HEALABLE_ERROR_CODES`
     (`app/modules/code_index/application/vcs.py:29-36`). The review knows no HEAD, so "the
     same target" is the row's own `target_commit_sha`. This relies on #143: a target change
     clears `last_error_code` — `request_build`
@@ -568,6 +569,10 @@ the database and the vhost.
 - **M1–M10** as stated above; the M1 CHECK and the M5 condition are decided by the coordinator, 23.10.
 - **GitLab (PR 1).** A GitLab repository with RAG on counts as disabled: no index source
   (#97), no step.
+- **Lease (PR 1; after review r2).** No wake while a build holds a live lease. This narrows
+  the literal AC12 «отстающий индекс получает маркер пробуждения»: a `stale` row under a live
+  lease gets no marker from the review. The leader reconcile and the wake dispatch heal the
+  row after the lease ends.
 - **Step position (PR 1).** `context.rag` is written after `context.build`, not "inside" it
   as `docs/PIPELINE_SPEC.md:110` says today; the doc is updated.
 - **Contract fields (PR 1).** `default_head_sha` is the index target; the response adds
