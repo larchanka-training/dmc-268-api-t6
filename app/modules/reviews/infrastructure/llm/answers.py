@@ -3,38 +3,49 @@
 A review answer must pass ``review/schemas/review-output.schema.json`` and then
 ``parse_review_output``; the collected messages feed the one repair call (§5.1). There
 is no second copy of the schema: the file is read once and sent to the provider as is,
-minus its ``$``-annotations.
+minus its ``$``-annotations. A run whose snapshot binds review prompt ``v4`` is held to
+``review-output.schema.v2.json`` instead (``review_answer_contract``).
 """
 
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass
 from functools import cache
 from pathlib import Path
 from typing import Any, cast
 
 from jsonschema import Draft202012Validator
-from pydantic import ValidationError
+from pydantic import BaseModel, ValidationError
 
 from app.modules.reviews.application.conventions import ConventionsDraft
+from app.modules.reviews.application.policy_errors import PolicyError, PolicyErrorCode
 from app.modules.reviews.application.reflection_pass import VerificationOutput
 from app.modules.reviews.application.review_output import (
     InvalidReviewOutput,
     ReviewFinding,
+    ReviewFindingV2,
     ReviewOutput,
     Severity,
     finding_order_key,
     parse_review_output,
+    parse_review_output_v2,
 )
 
 REVIEW_OUTPUT_SCHEMA_PATH = (
     Path(__file__).resolve().parents[5] / "review" / "schemas" / "review-output.schema.json"
 )
+REVIEW_OUTPUT_V2_SCHEMA_PATH = (
+    Path(__file__).resolve().parents[5] / "review" / "schemas" / "review-output.schema.v2.json"
+)
 VERIFIER_OUTPUT_SCHEMA_PATH = (
     Path(__file__).resolve().parents[5] / "review" / "schemas" / "verifier-output.schema.v1.json"
 )
 _ANNOTATIONS = frozenset({"$schema", "$id", "$comment"})
+# The review answer schema follows the bound review prompt version (#130 decision 9).
+_V1_REVIEW_PROMPT_VERSIONS = frozenset({"v1", "v2", "v3"})
+_V2_REVIEW_PROMPT_VERSIONS = frozenset({"v4"})
 _MAX_ERRORS = 20
 _MAX_ERROR_CHARS = 300
 
@@ -98,7 +109,69 @@ def validate_review_answer(content: str) -> dict[str, object]:
     return normalized
 
 
-def _normalize_review_answer(decoded: dict[str, object]) -> dict[str, object]:
+@cache
+def review_output_schema_v2() -> dict[str, Any]:
+    """The ReviewOutput v2 shape with ``evidence_refs`` (draft 2020-12, CVS §6.1)."""
+    loaded: dict[str, Any] = json.loads(REVIEW_OUTPUT_V2_SCHEMA_PATH.read_text(encoding="utf-8"))
+    return loaded
+
+
+@cache
+def _review_v2_validator() -> Draft202012Validator:
+    return Draft202012Validator(review_output_schema_v2())
+
+
+def validate_review_answer_v2(content: str) -> dict[str, object]:
+    """``validate_review_answer`` against the v2 schema, ending in ``parse_review_output_v2``."""
+    decoded = _decode_object(content)
+    errors = [
+        _schema_error(error)
+        for error in sorted(
+            _review_v2_validator().iter_errors(decoded), key=lambda item: item.json_path
+        )
+    ][:_MAX_ERRORS]
+    if errors:
+        raise InvalidAnswer(errors)
+    normalized = _normalize_review_answer(decoded, finding_model=ReviewFindingV2)
+    try:
+        parse_review_output_v2(normalized)
+    except InvalidReviewOutput as error:
+        raise InvalidAnswer(_pydantic_errors(error)) from None
+    return normalized
+
+
+@dataclass(frozen=True)
+class ReviewAnswerContract:
+    """The schema the provider gets for a review answer and the validator it must pass."""
+
+    name: str
+    schema: dict[str, Any]
+    validate: Callable[[str], dict[str, object]]
+
+
+def review_answer_contract(review_system_version: str | None) -> ReviewAnswerContract:
+    """Pick the review answer contract by the bound review prompt version.
+
+    No snapshot (``None``) or ``v1``-``v3``: ReviewOutput v1, the live contract. ``v4``:
+    ReviewOutput v2 with ``evidence_refs``. Any other version has no known answer shape,
+    so the run fails before a provider call.
+    """
+    if review_system_version is None or review_system_version in _V1_REVIEW_PROMPT_VERSIONS:
+        return ReviewAnswerContract("ReviewOutput", review_output_schema(), validate_review_answer)
+    if review_system_version in _V2_REVIEW_PROMPT_VERSIONS:
+        return ReviewAnswerContract(
+            "ReviewOutputV2", review_output_schema_v2(), validate_review_answer_v2
+        )
+    raise PolicyError(
+        PolicyErrorCode.SNAPSHOT_INTEGRITY_ERROR,
+        f"Unknown review prompt version '{review_system_version}' in prompt bindings: "
+        "no review answer schema is bound to it",
+    )
+
+
+def _normalize_review_answer(
+    decoded: dict[str, object], *, finding_model: type[BaseModel] = ReviewFinding
+) -> dict[str, object]:
     """Repair lossless deviations, reporting semantic errors at raw finding indexes."""
     findings = cast(list[dict[str, object]], decoded["findings"])
     normalized_findings = []
@@ -110,7 +183,7 @@ def _normalize_review_answer(decoded: dict[str, object]) -> dict[str, object]:
         if isinstance(line, int) and isinstance(start_line, int) and start_line == line:
             normalized["start_line"] = None
         try:
-            ReviewFinding.model_validate(normalized)
+            finding_model.model_validate(normalized)
         except ValidationError as error:
             errors.extend(_validation_messages(error, prefix=("findings", index)))
         normalized_findings.append(normalized)

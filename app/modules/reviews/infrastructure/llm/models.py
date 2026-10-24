@@ -40,8 +40,7 @@ from app.modules.reviews.infrastructure.llm.answers import (
     conventions_answer_validator,
     conventions_schema,
     provider_schema,
-    review_output_schema,
-    validate_review_answer,
+    review_answer_contract,
     validate_verifier_answer,
     verifier_output_schema,
 )
@@ -180,6 +179,12 @@ async def review_with_gateway(
     gateway: LlmGateway, context: ReviewContext, run: RunCallContext
 ) -> GatewayResult:
     """The whole review call: token budget, rendering, structured generation."""
+    # Before the fitting: a prompt version without a known answer schema never reaches it.
+    answer = review_answer_contract(
+        None
+        if context.policy_snapshot is None
+        else context.policy_snapshot.prompt_bindings.review_system_version
+    )
     # The fitting renders the prompt per candidate (CPU-bound on large diffs): keep it
     # off the event loop, where the worker's heartbeat and lease renewals run.
     counter: TokenCounter = (
@@ -212,8 +217,8 @@ async def review_with_gateway(
         StructuredTask(
             operation=REVIEW_OPERATION,
             messages=_messages(prompt),
-            schema=ResponseSchema("ReviewOutput", provider_schema(review_output_schema())),
-            validate=validate_review_answer,
+            schema=ResponseSchema(answer.name, provider_schema(answer.schema)),
+            validate=answer.validate,
             base_manifest=base_manifest,
             review_context=fitted,
             policy_snapshot=fitted.policy_snapshot,
