@@ -44,6 +44,11 @@ from app.modules.reviews.application.context_provenance import (
     SourceRole,
     hunk_source_refs,
 )
+from app.modules.reviews.application.context_sources import (
+    checked_source,
+    ends_the_run,
+    guarded_facts,
+)
 from app.modules.reviews.application.diff_map import (
     DiffFile,
     DiffHunk,
@@ -67,9 +72,6 @@ from app.modules.reviews.application.rag_context import (
     RagCandidates,
     RetrievedPlace,
     ReverseEdgeSelector,
-    checked_source,
-    ends_the_run,
-    guarded_facts,
 )
 from app.modules.reviews.application.review_ignore import IgnoreMatcher, IgnoreResult
 from app.modules.reviews.application.run_failures import RunCancelled, RunFailure
