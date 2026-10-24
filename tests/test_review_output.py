@@ -894,7 +894,7 @@ def test_validate_v2_coordinates_all_branches() -> None:
         "line_absent",
     )
 
-    # 6. Multiline range checks: range_gap vs cross_hunk_range
+    # 6. Multiline range checks: cross_hunk_range
     # Range spans two hunks (break > 1: line 1 and line 3): cross_hunk_range
     file_gap = ChangedFile(
         "app/main.py", "modified", (DiffLine(1, "added", "a"), DiffLine(3, "added", "c"))
