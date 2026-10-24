@@ -11,10 +11,14 @@ model loses nothing by it.
 
 Slice when any of these holds:
 
-- the work needs more than one PR;
-- it changes code in more than one repository;
+- the work needs more than one PR — the api copy of a shared file does not count (below);
+- it changes DIFFERENT code in more than one repository;
 - parts can be done independently or in parallel;
 - a part goes to another person.
+
+A task that is only "edit a shared file in ui, copy it to api" is ONE part — no `parts`
+needed. Its Scope or kickoff says ui first; the copy in api is the second PR with the same
+`Refs` (`.agents/README.md` § Sync map).
 
 Signs that a request is bigger than it looks: more than one working session, more than
 three acceptance criteria, two or more subsystems, an "and" in the title. As a size hint a

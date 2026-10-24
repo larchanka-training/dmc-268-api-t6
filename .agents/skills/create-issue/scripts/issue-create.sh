@@ -17,13 +17,23 @@
 # "it landed".
 #
 # Usage: issue-create.sh <spec.json> [--dry-run] [--allow-duplicate] [--no-board]
+#                        [--adopt-since ISO]
 # Output: {"url","number","repo","verified","board","status"[,"links"]} on stdout;
 #         board is added | skipped | failed, status the board Status read back
 #         (null when skipped), links issue-link.sh's result (only when the spec
 #         asks for links); verified also checks the milestone when one is set.
-#         --dry-run: {"dry_run","repo","body","milestone","status","links"} — it
-#         still runs preflight and validation, so it needs network and auth; it is
-#         not offline. A blocked duplicate (exit 4): {"duplicate","url","number","repo"}.
+#         --dry-run: {"dry_run","repo","body","milestone","status","links","user",
+#         "duplicate"} — it still runs preflight, validation and the exact-title
+#         search, so it needs network and auth; it is not offline. duplicate is
+#         the issue the guard would block on, {"number","url","state","author",
+#         "createdAt"}, or null (also with --allow-duplicate). A blocked duplicate
+#         (exit 4): {"duplicate": true, "repo", "user", "number", "url", "state",
+#         "author", "createdAt"} — user is the authenticated login (preflight).
+# --adopt-since ISO (issue-batch.py, on a rerun of a batch): before the search,
+#         look in the newest issues — the plain listing, the search index lags —
+#         for one with exactly this title that you opened at or after ISO; found,
+#         it is reported as the blocked duplicate (exit 4) whatever its state, for
+#         the caller to adopt or refuse; the listing failing is exit 5.
 # Errors: {"error": "..."} on stderr (also {"warning": "..."}, exit unaffected).
 #         stdout stays machine-readable.
 # Exit: 0 created — check "verified", it can be false · 2 usage/spec/refused ·
@@ -39,7 +49,8 @@
 #
 # Offline test seam: ISSUE_FIXTURE_DIR (see issue-preflight.sh). Additionally
 # issue_search.json (duplicate guard), issue_recover_before.json and
-# issue_recover.json (newest issues before / after a failed create),
+# issue_recover.json (newest issues before / after a failed create; the first is
+# also what --adopt-since reads),
 # milestones.json, project_view.json, project_fields.json (validation; a missing
 # file is a failed call whose stderr is <name>.err), issue_create.json and
 # issue_create.err (the stderr of a create that did not return a url),
@@ -67,19 +78,21 @@ die() { printf '{"error": %s}\n' "$(json_str "$1")" >&2; exit "${2:-2}"; }
 warn() { printf '{"warning": %s}\n' "$(json_str "$1")" >&2; }
 lower() { printf '%s' "$1" | tr '[:upper:]' '[:lower:]'; }
 
-SPEC=""; DRY=false; ALLOW_DUP=false; NO_BOARD=false
+SPEC=""; DRY=false; ALLOW_DUP=false; NO_BOARD=false; SINCE=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --dry-run)         DRY=true; shift ;;
     --allow-duplicate) ALLOW_DUP=true; shift ;;
     --no-board)        NO_BOARD=true; shift ;;
-    -h|--help)         sed -n '4,52p' "$0"; exit 0 ;;
+    --adopt-since)     [ $# -ge 2 ] && [ -n "$2" ] || die "--adopt-since needs a timestamp" 2
+                       SINCE="$2"; shift 2 ;;
+    -h|--help)         sed -n '4,63p' "$0"; exit 0 ;;
     -*)                die "unknown argument: $1" 2 ;;
     *)                 SPEC="$1"; shift ;;
   esac
 done
 [ -n "$SPEC" ] && [ -f "$SPEC" ] \
-  || die "usage: issue-create.sh <spec.json> [--dry-run] [--allow-duplicate] [--no-board]" 2
+  || die "usage: issue-create.sh <spec.json> [--dry-run] [--allow-duplicate] [--no-board] [--adopt-since ISO]" 2
 
 FIX="${ISSUE_FIXTURE_DIR:-}"
 
@@ -265,56 +278,66 @@ if [ ${#LINK_ARGS[@]} -gt 0 ]; then
   [ $CHRC -eq 0 ] || { printf '%s\n' "$CHECK" >&2; exit $CHRC; }
 fi
 
-if [ "$DRY" = true ]; then
-  python3 - "$REPO" "$BODY" "$MILESTONE" "$STATUS" "$LINKS_JSON" <<'PY'
-import json, sys
-repo, body, milestone, status, links = sys.argv[1:6]
-print(json.dumps({"dry_run": True, "repo": repo,
-                  "body": open(body, encoding="utf-8").read(),
-                  "milestone": milestone or None, "status": status or None,
-                  "links": json.loads(links)}, ensure_ascii=False))
-PY
-  exit 0
-fi
-
-# ─── 1. duplicate guard ─────────────────────────────────────────────────────
+# ─── 1. exact-title search ──────────────────────────────────────────────────
 # Search is substring-ish, so compare the returned title for exact equality
 # before believing it is the same issue. Fail-open by decision: when the search
-# itself fails the guard warns and lets the create proceed.
+# itself fails the guard warns and lets the create proceed. --dry-run runs it too,
+# read-only, so the preview shows the duplicate before anyone confirms.
+DUP=""
 if [ "$ALLOW_DUP" != true ]; then
   if [ -n "$FIX" ]; then
     HITS="$(cat "$FIX/issue_search.json" 2>/dev/null)"; SRC=$?
   else
     HITS="$(gh issue list --repo "$REPO" --state all --search "$SUMMARY" \
-              --json number,title,url --limit 20 2>/dev/null)"; SRC=$?
+              --json number,title,url,state,author,createdAt --limit 20 2>/dev/null)"; SRC=$?
   fi
   if [ $SRC -ne 0 ]; then
     warn "the duplicate search failed — continuing without the duplicate guard"
     HITS='[]'
   fi
+  # One shape for the duplicate, whichever lookup found it (see --adopt-since).
   DUP="$(printf '%s' "$HITS" | python3 -c 'import json,sys
 want=sys.argv[1]
 try: rows=json.load(sys.stdin)
 except Exception: rows=[]
-for r in rows:
-    if (r.get("title") or "").strip() == want.strip():
-        print(json.dumps(r)); break' "$SUMMARY")"
-  if [ -n "$DUP" ]; then
-    # Also on stdout, structured: issue-batch.py adopts it on a rerun instead of
-    # creating a second copy (references/batch.md).
-    printf '%s' "$DUP" | python3 -c 'import json,sys
-d = json.load(sys.stdin)
-print(json.dumps({"duplicate": True, "url": d.get("url"), "number": d.get("number"),
-                  "repo": sys.argv[1]}))' "$REPO"
-    die "an issue with exactly this title already exists in $REPO: $(printf '%s' "$DUP" | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d.get("url") or d.get("number"))') — pass --allow-duplicate to create another anyway" 4
-  fi
+for r in rows if isinstance(rows, list) else []:
+    if isinstance(r, dict) and (r.get("title") or "").strip() == want.strip():
+        a = r.get("author")
+        print(json.dumps({"number": r.get("number"), "url": r.get("url"),
+                          "state": str(r.get("state") or "").upper() or None,
+                          "author": a.get("login") if isinstance(a, dict) else None,
+                          "createdAt": r.get("createdAt")}))
+        break' "$SUMMARY")"
 fi
 
-# ─── 2. snapshot, then create exactly once ──────────────────────────────────
+if [ "$DRY" = true ]; then
+  python3 - "$REPO" "$BODY" "$MILESTONE" "$STATUS" "$LINKS_JSON" "$ME" "$DUP" <<'PY'
+import json, sys
+repo, body, milestone, status, links, me, dup = sys.argv[1:8]
+print(json.dumps({"dry_run": True, "repo": repo,
+                  "body": open(body, encoding="utf-8").read(),
+                  "milestone": milestone or None, "status": status or None,
+                  "links": json.loads(links), "user": me or None,
+                  "duplicate": json.loads(dup) if dup else None}, ensure_ascii=False))
+PY
+  exit 0
+fi
+
+# A blocked duplicate goes to stdout as well, structured: issue-batch.py decides from
+# it whether a rerun adopts the issue or stops (references/batch.md).
+block_duplicate() {  # block_duplicate DUP_JSON MESSAGE
+  printf '%s' "$1" | python3 -c 'import json,sys
+print(json.dumps({"duplicate": True, **json.load(sys.stdin), "repo": sys.argv[1],
+                  "user": sys.argv[2] or None}, ensure_ascii=False))' "$REPO" "$ME"
+  die "$2" 4
+}
+
+# ─── 2. snapshot of the newest issues ───────────────────────────────────────
 # The newest issues, newest first — a plain listing, not a search: the search
 # index lags, so a fresh issue can be missing from it. Taken before the create so
 # that recovery can tell an issue this run made from one that was already there
-# (--allow-duplicate makes a same-title predecessor legitimate).
+# (--allow-duplicate makes a same-title predecessor legitimate), and before the
+# guard so that --adopt-since can look in it.
 recent_issues() {  # $1: fixture file name
   if [ -n "$FIX" ]; then
     cat "$FIX/$1" 2>/dev/null
@@ -324,6 +347,69 @@ recent_issues() {  # $1: fixture file name
 }
 BEFORE_OK=false
 recent_issues issue_recover_before.json > "$WORK/before.json" && BEFORE_OK=true
+
+# ─── 3. a rerun of a batch: an issue it already opened ──────────────────────
+# An issue with this title that you opened since the batch started is the one an
+# earlier run created and did not record (it stopped or crashed in between). Looked
+# for before the guard, so an older same-title issue the search finds cannot hide
+# it; reported whatever its state — the caller decides.
+if [ -n "$SINCE" ]; then
+  [ "$BEFORE_OK" = true ] \
+    || die "cannot list the newest issues of $REPO to look for one an earlier run of this batch opened — rerun when GitHub answers" 5
+  OWN="$(python3 - "$SUMMARY" "$WORK/before.json" "$ME" "$SINCE" <<'PY'
+import json, sys
+from datetime import datetime
+
+want, path, me, since = sys.argv[1:5]
+
+
+def when(text):
+    # "Z" is read by fromisoformat only from Python 3.11 on
+    try:
+        t = datetime.fromisoformat(str(text).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return t if t.tzinfo is not None else None
+
+
+start = when(since)
+if start is None:
+    sys.exit(3)
+try:
+    with open(path, encoding="utf-8") as fh:
+        rows = json.load(fh)
+except Exception:
+    sys.exit(2)
+if not isinstance(rows, list):
+    sys.exit(2)
+for r in rows:  # newest first
+    if not isinstance(r, dict) or "pull_request" in r:
+        continue
+    user = r.get("user")
+    login = user.get("login") if isinstance(user, dict) else None
+    created = when(r.get("created_at"))
+    if ((r.get("title") or "").strip() == want.strip() and bool(me)
+            and isinstance(login, str) and login.lower() == me.lower()
+            and created is not None and created >= start):
+        print(json.dumps({"number": r.get("number"), "url": r.get("html_url"),
+                          "state": str(r.get("state") or "").upper() or None,
+                          "author": login, "createdAt": r.get("created_at")}))
+        sys.exit(0)
+sys.exit(1)
+PY
+)"
+  case $? in
+    0) block_duplicate "$OWN" "an issue with exactly this title, opened by you since this batch started ($SINCE), already exists in $REPO: $(printf '%s' "$OWN" | python3 -c 'import json,sys; print(json.load(sys.stdin)["url"])') — not created again" ;;
+    1) ;;
+    3) die "--adopt-since \"$SINCE\" is not an ISO 8601 time with a zone" 2 ;;
+    *) die "cannot list the newest issues of $REPO to look for one an earlier run of this batch opened: the response is not a list" 5 ;;
+  esac
+fi
+
+# ─── 4. the duplicate guard, then create exactly once ───────────────────────
+if [ -n "$DUP" ]; then
+  block_duplicate "$DUP" "an issue with exactly this title already exists in $REPO: $(printf '%s' "$DUP" | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d.get("url") or d.get("number"))') — pass --allow-duplicate to create another anyway"
+fi
 
 if [ -n "$FIX" ]; then
   printf 'issue_create\n' >> "$FIX/calls.log"
@@ -337,7 +423,7 @@ else
 fi
 URL="$(printf '%s' "$URL" | grep -Eo 'https?://[^[:space:]]+' | tail -1)"
 
-# ─── 3. recover by looking, never by retrying ───────────────────────────────
+# ─── 5. recover by looking, never by retrying ───────────────────────────────
 if [ -z "$URL" ] || [ $CRC -ne 0 ]; then
   # The create may still have succeeded. Only an issue with this title that was
   # NOT in the snapshot AND was opened by the authenticated user counts; one that
@@ -407,7 +493,7 @@ fi
 
 NUMBER="$(printf '%s' "$URL" | grep -Eo '[0-9]+$')"
 
-# ─── 4. verify by reading back ──────────────────────────────────────────────
+# ─── 6. verify by reading back ──────────────────────────────────────────────
 # Success is the read-back, not the exit code of the create call. REST, not
 # `gh issue view`: on gh 2.46 that command fails on the retired projectCards
 # field.
@@ -427,7 +513,7 @@ ok = (got.get("title") or "").strip() == want.strip() and (
     not milestone or (isinstance(ms, dict) and ms.get("title") == milestone))
 print("true" if ok else "false")' "$SUMMARY" "$MILESTONE")"
 
-# ─── 5. board and Status ────────────────────────────────────────────────────
+# ─── 7. board and Status ────────────────────────────────────────────────────
 # After the create, so a failure here can never lose the issue: it exists, the
 # url is on stdout, and exit 6 says only the board is left to do. The board's
 # "Item added to project" automation can set Todo after our edit has landed — even
@@ -499,7 +585,7 @@ except Exception: pass')"
   fi
 fi
 
-# ─── 6. native links ────────────────────────────────────────────────────────
+# ─── 8. native links ────────────────────────────────────────────────────────
 # Only now: there is nothing to link until the issue exists. A failed link never
 # undoes the issue — exit 7 names the issue-link.sh command that repairs it, and
 # a rerun of that command leaves the links already in place alone.
