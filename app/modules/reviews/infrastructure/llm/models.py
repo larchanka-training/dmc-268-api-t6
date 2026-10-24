@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Mapping
+from dataclasses import replace
 from uuid import UUID, uuid4
 
 from app.modules.reviews.application.conventions import (
@@ -20,6 +21,7 @@ from app.modules.reviews.application.conventions_prompt import (
 )
 from app.modules.reviews.application.execute_review import PullRequestMetaSource
 from app.modules.reviews.application.llm import RunCallContext
+from app.modules.reviews.application.policy_snapshot import CallManifest
 from app.modules.reviews.application.prompt_budget import (
     TokenCounter,
     fit_review_context,
@@ -33,12 +35,15 @@ from app.modules.reviews.application.prompt_builder import (
     ReviewContext,
     ReviewPrompt,
 )
+from app.modules.reviews.application.reflection_pass import VerifierReply
 from app.modules.reviews.infrastructure.llm.answers import (
     conventions_answer_validator,
     conventions_schema,
     provider_schema,
     review_output_schema,
     validate_review_answer,
+    validate_verifier_answer,
+    verifier_output_schema,
 )
 from app.modules.reviews.infrastructure.llm.gateway import (
     GatewayResult,
@@ -49,6 +54,7 @@ from app.modules.reviews.infrastructure.llm.transport import ChatMessage, Respon
 
 REVIEW_OPERATION = "review"
 CONVENTIONS_OPERATION = "conventions"
+VERIFICATION_OPERATION = "verification"
 
 
 class GatewayReviewModel:
@@ -117,6 +123,57 @@ class GatewayConventionsModel:
             self._run,
         )
         return result.output
+
+
+class GatewayVerifierModel:
+    """``VerifierModel``: the verifier route, its schema and bounded repair (R11).
+
+    The prompt and its manifest come from ``VerifierPromptBuilder``; the candidate-ID and
+    reference checks stay with the caller. Not wired in the worker yet (PR F).
+    """
+
+    def __init__(self, gateway: LlmGateway, run: RunCallContext) -> None:
+        self._gateway = gateway
+        self._run = run
+
+    async def verify(
+        self,
+        *,
+        system_prompt: str,
+        user_prompt: str,
+        manifest: CallManifest,
+        context: ReviewContext,
+    ) -> VerifierReply:
+        snapshot = context.policy_snapshot
+        run = self._run
+        counter: TokenCounter | None = None
+        if snapshot is not None:
+            counter = token_counter_for(snapshot.execution_profile.counter_version)
+            verifier_id = snapshot.prompt_bindings.verifier_id
+            if verifier_id is not None:
+                # llm.call names the verifier prompt version, not the review prompt.
+                run = replace(run, prompt_version_id=verifier_id)
+        result = await self._gateway.generate(
+            StructuredTask(
+                operation=VERIFICATION_OPERATION,
+                messages=(
+                    ChatMessage("system", system_prompt),
+                    ChatMessage("user", user_prompt),
+                ),
+                schema=ResponseSchema(
+                    "VerificationOutput", provider_schema(verifier_output_schema())
+                ),
+                validate=validate_verifier_answer,
+                base_manifest=manifest,
+                review_context=context,
+                policy_snapshot=snapshot,
+                counter=counter,
+                route="verifier",
+                bounded_repair=True,
+            ),
+            run,
+        )
+        return VerifierReply(result.output, result.accepted_call_id)
 
 
 async def review_with_gateway(
