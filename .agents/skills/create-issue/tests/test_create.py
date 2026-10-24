@@ -462,6 +462,7 @@ SCOPE_ERROR_TEXT = (
     "To request it, run:  gh auth refresh -s project\n"
 )
 MILESTONES = json.dumps([{"number": 3, "title": "Sprint 3"}, {"number": 4, "title": "Sprint 4"}])
+CREATED_9 = '{"url": "https://x/9"}'  # the create returns a url
 # A spec using every new key: a same-repo parent, a cross-repo blocker, a milestone
 # and a non-default board Status.
 LINKED_SPEC: dict[str, Any] = dict(
@@ -771,29 +772,75 @@ def test_ordinary_repository_vocabulary_passes_the_guard(
 
 
 # ─── duplicate guard ────────────────────────────────────────────────────────
+def search_hit(number: int, title: str = "[test] a title", **extra: Any) -> dict[str, Any]:
+    """One row of `gh issue list --json number,title,url,state,author,createdAt`."""
+    row: dict[str, Any] = {
+        "number": number,
+        "title": title,
+        "url": f"https://github.com/acme/sandbox/issues/{number}",
+        "state": "CLOSED",
+        "author": {"id": "U_1", "is_bot": False, "login": "teammate", "name": "T. Mate"},
+        "createdAt": "2026-10-01T09:00:00Z",
+    }
+    row.update(extra)
+    return row
+
+
+# The duplicate as issue-create.sh reports it: one shape for both lookups.
+DUP_7 = {
+    "number": 7,
+    "url": "https://github.com/acme/sandbox/issues/7",
+    "state": "CLOSED",
+    "author": "teammate",
+    "createdAt": "2026-10-01T09:00:00Z",
+}
+
+
 def test_exact_title_match_blocks_creation(tmp_path: Path) -> None:
-    hits = json.dumps(
-        [
-            {
-                "number": 7,
-                "title": "[test] a title",
-                "url": "https://github.com/acme/sandbox/issues/7",
-            }
-        ]
-    )
-    r = run(tmp_path, search=hits)
+    r = run(tmp_path, search=json.dumps([search_hit(6, "[test] a title, extended"), search_hit(7)]))
     assert r.returncode == 4
-    assert "already exists" in json.loads(r.stderr)["error"]
-    # The duplicate is also on stdout, structured, so issue-batch.py can adopt it on a
-    # rerun instead of parsing the message.
+    assert json.loads(r.stderr)["error"] == (
+        "an issue with exactly this title already exists in acme/sandbox: "
+        "https://github.com/acme/sandbox/issues/7 — pass --allow-duplicate to create another anyway"
+    )
+    # The duplicate is also on stdout, structured — with its state, author and age and
+    # the login of who is filing, so issue-batch.py can decide whether a rerun adopts it.
     assert json.loads(r.stdout) == {
         "duplicate": True,
-        "url": "https://github.com/acme/sandbox/issues/7",
-        "number": 7,
+        **DUP_7,
         "repo": "acme/sandbox",
+        "user": "octocat",
     }
     assert "issue_create" not in fixture_calls(tmp_path)
     assert not board_was_called(tmp_path)
+
+
+def test_dry_run_shows_the_duplicate_the_guard_would_block_on(tmp_path: Path) -> None:
+    hits = json.dumps([search_hit(6, "[test] a title, extended"), search_hit(7)])
+    r = run(tmp_path, None, "--dry-run", search=hits)
+    assert r.returncode == 0, r.stderr
+    out = json.loads(r.stdout)
+    assert out["duplicate"] == DUP_7
+    assert out["user"] == "octocat"
+    assert "issue_create" not in fixture_calls(tmp_path)
+
+
+@pytest.mark.parametrize(
+    "flags,search,warned",
+    [
+        (("--dry-run",), "[]", False),
+        (("--dry-run", "--allow-duplicate"), json.dumps([search_hit(7)]), False),
+        (("--dry-run",), None, True),  # fail-open: a failed search shows no duplicate
+    ],
+    ids=["no-match", "allow-duplicate", "failed-search"],
+)
+def test_dry_run_shows_no_duplicate(
+    tmp_path: Path, flags: tuple[str, ...], search: str | None, warned: bool
+) -> None:
+    r = run(tmp_path, None, *flags, search=search)
+    assert r.returncode == 0, r.stderr
+    assert json.loads(r.stdout)["duplicate"] is None
+    assert ("duplicate search failed" in r.stderr) is warned
 
 
 def test_substring_match_does_not_block(tmp_path: Path) -> None:
@@ -817,6 +864,140 @@ def test_a_failed_duplicate_search_warns_and_lets_the_create_proceed(tmp_path: P
     r = run(tmp_path, search=None, create='{"url": "https://x/9"}')
     assert r.returncode == 0, r.stderr
     assert "duplicate search failed" in json.loads(r.stderr)["warning"]
+
+
+# ─── --adopt-since: a rerun of a batch finds the issue it already opened ────
+SINCE = "2026-10-24T12:00:00Z"
+AFTER = "2026-10-24T12:05:00Z"
+
+
+def own(number: int, **extra: Any) -> dict[str, Any]:
+    """A listing row: open, by the authenticated user, created after SINCE."""
+    return rest_issue(number, **{"state": "open", "created_at": AFTER, **extra})
+
+
+def test_adopt_since_reports_your_issue_opened_since_then_as_the_duplicate(
+    tmp_path: Path,
+) -> None:
+    newest = listing(own(41, title="[test] another title"), own(40), own(39))
+    r = run(tmp_path, None, "--adopt-since", SINCE, recover_before=newest, create=CREATED_9)
+    assert r.returncode == 4
+    assert json.loads(r.stdout) == {
+        "duplicate": True,
+        "number": 40,
+        "url": "https://github.com/acme/sandbox/issues/40",
+        "state": "OPEN",
+        "author": "octocat",
+        "createdAt": AFTER,
+        "repo": "acme/sandbox",
+        "user": "octocat",
+    }
+    assert json.loads(r.stderr)["error"] == (
+        "an issue with exactly this title, opened by you since this batch started "
+        "(2026-10-24T12:00:00Z), already exists in acme/sandbox: "
+        "https://github.com/acme/sandbox/issues/40 — not created again"
+    )
+    assert "issue_create" not in fixture_calls(tmp_path)
+
+
+@pytest.mark.parametrize(
+    "row,state",
+    [
+        (own(40, created_at=SINCE), "OPEN"),  # at the start counts
+        (own(40, user={"login": "OctoCat"}), "OPEN"),  # logins compare without case
+        (own(40, state="closed"), "CLOSED"),  # reported whatever its state
+        (own(40, created_at="2026-10-24T14:05:00+02:00"), "OPEN"),  # = 12:05Z
+    ],
+    ids=["at-the-start", "login-case", "closed", "other-zone"],
+)
+def test_adopt_since_at_its_edges(tmp_path: Path, row: dict[str, Any], state: str) -> None:
+    r = run(tmp_path, None, "--adopt-since", SINCE, recover_before=listing(row), create=CREATED_9)
+    assert r.returncode == 4, r.stderr
+    assert (json.loads(r.stdout)["number"], json.loads(r.stdout)["state"]) == (40, state)
+    assert "issue_create" not in fixture_calls(tmp_path)
+
+
+@pytest.mark.parametrize(
+    "row",
+    [
+        own(40, user={"login": "teammate"}),
+        rest_issue(40, author=None, state="open", created_at=AFTER),
+        own(40, created_at="2026-10-24T11:59:59Z"),
+        own(40, created_at="2026-10-24T13:00:00+02:00"),  # = 11:00Z
+        own(40, created_at=None),
+        own(40, pull_request={"url": "https://api.github.com/repos/acme/sandbox/pulls/40"}),
+        own(40, title="[test] a title, extended"),
+    ],
+    ids=["teammate", "no-author", "older", "older-other-zone", "no-created-at", "pull-request",
+         "other-title"],
+)  # fmt: skip
+def test_adopt_since_leaves_any_other_issue_to_the_create(
+    tmp_path: Path, row: dict[str, Any]
+) -> None:
+    r = run(tmp_path, None, "--adopt-since", SINCE, recover_before=listing(row), create=CREATED_9)
+    assert r.returncode == 0, r.stderr
+    assert json.loads(r.stdout)["url"] == "https://x/9"
+    assert "issue_create" in fixture_calls(tmp_path)
+
+
+def test_adopt_since_wins_over_an_older_duplicate_the_search_finds(tmp_path: Path) -> None:
+    """The search lags and finds what is old; the issue the batch opened comes first."""
+    r = run(
+        tmp_path,
+        None,
+        "--adopt-since",
+        SINCE,
+        search=json.dumps([search_hit(7)]),
+        recover_before=listing(own(40)),
+        create=CREATED_9,
+    )
+    assert r.returncode == 4
+    assert json.loads(r.stdout)["number"] == 40
+
+
+def test_without_adopt_since_your_new_issue_does_not_block(tmp_path: Path) -> None:
+    r = run(tmp_path, None, recover_before=listing(own(40)), create=CREATED_9)
+    assert r.returncode == 0, r.stderr
+
+
+NO_LISTING = (
+    "cannot list the newest issues of acme/sandbox to look for one an earlier run of this "
+    "batch opened"
+)
+
+
+@pytest.mark.parametrize(
+    "newest,message",
+    [
+        (None, f"{NO_LISTING} — rerun when GitHub answers"),
+        ('{"message": "Not Found"}', f"{NO_LISTING}: the response is not a list"),
+    ],
+    ids=["failed", "not-a-list"],
+)
+def test_adopt_since_without_the_listing_is_exit_5_and_creates_nothing(
+    tmp_path: Path, newest: str | None, message: str
+) -> None:
+    """Without the listing a lagging search could let the issue be created twice."""
+    r = run(tmp_path, None, "--adopt-since", SINCE, recover_before=newest, create=CREATED_9)
+    assert r.returncode == 5
+    assert json.loads(r.stderr)["error"] == message
+    assert "issue_create" not in fixture_calls(tmp_path)
+
+
+@pytest.mark.parametrize("since", ["yesterday", "2026-10-24T12:00:00"], ids=["text", "no-zone"])
+def test_adopt_since_needs_a_time_with_a_zone(tmp_path: Path, since: str) -> None:
+    r = run(tmp_path, None, "--adopt-since", since, recover_before=listing(own(40)))
+    assert r.returncode == 2
+    assert json.loads(r.stderr)["error"] == (
+        f'--adopt-since "{since}" is not an ISO 8601 time with a zone'
+    )
+    assert "issue_create" not in fixture_calls(tmp_path)
+
+
+def test_adopt_since_needs_a_value(tmp_path: Path) -> None:
+    r = run(tmp_path, None, "--adopt-since")
+    assert r.returncode == 2
+    assert json.loads(r.stderr)["error"] == "--adopt-since needs a timestamp"
 
 
 # ─── the recovery path ──────────────────────────────────────────────────────
@@ -1401,7 +1582,8 @@ def test_the_real_calls_in_order_with_the_real_flags(tmp_path: Path) -> None:
 
     search = [
         "issue", "list", "--repo", "acme/sandbox", "--state", "all",
-        "--search", "[test] a title", "--json", "number,title,url", "--limit", "20",
+        "--search", "[test] a title", "--json", "number,title,url,state,author,createdAt",
+        "--limit", "20",
     ]  # fmt: skip
     readback = ["api", "repos/acme/sandbox/issues/13"]
     assert search in gh and readback in gh and ITEM_ADD in gh
@@ -1466,6 +1648,17 @@ def test_a_scope_error_from_gh_exits_6_with_the_refresh_hint(tmp_path: Path) -> 
     out = json.loads(r.stdout)
     assert (out["url"], out["board"]) == (URL_13, "failed")
     assert "run gh auth refresh -s project" in json.loads(r.stderr)["error"]
+
+
+def test_a_real_rerun_finds_the_batch_issue_in_the_listing_and_creates_nothing(
+    tmp_path: Path,
+) -> None:
+    r, gh, _ = run_live(tmp_path, None, "--adopt-since", SINCE, recent=[listing(own(40)), "[]"])
+    assert r.returncode == 4
+    assert json.loads(r.stdout)["number"] == 40
+    newest = ["api", "repos/acme/sandbox/issues?state=all&sort=created&direction=desc&per_page=30"]
+    assert gh.count(newest) == 1
+    assert not any(c[:2] == ["issue", "create"] for c in gh)
 
 
 def test_a_failed_create_that_landed_is_recovered_without_a_second_create(

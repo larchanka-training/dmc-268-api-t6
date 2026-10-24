@@ -10,13 +10,16 @@ each item ran.
 Answers come from the JSON config in $STUB_CFG, keyed by the item's summary (create)
 or by the issue ref (link):
 
-* `create`: {"<summary>": {"number", "code", "dry_code", "duplicate"}} — code 6 is a
-  board failure and 7 a link failure (both still print the result, as the real script
-  does); 4 with `duplicate` prints that issue as the blocked duplicate; any other
-  non-zero code prints only an error. `number` defaults to 100 + the count of real
-  creates so far.
+* `create`: {"<summary>": {"number", "code", "dry_code", "duplicate",
+  "dry_duplicate"}} — code 6 is a board failure and 7 a link failure (both still
+  print the result, as the real script does); 4 with `duplicate` prints that issue as
+  the blocked duplicate; any other non-zero code prints only an error. `number`
+  defaults to 100 + the count of real creates so far. `duplicate` / `dry_duplicate`
+  (what `--dry-run` reports) are {"number", "state", "author", "createdAt"}; state,
+  author and createdAt default to OPEN, the user and DUP_CREATED.
 * `link`: {"OWNER/REPO#N": {"code"}} — 7 marks every link failed; another non-zero
   code prints only an error.
+* `user`: the authenticated login both scripts report (default octocat).
 """
 # SYNC: mirrored in dmc-268-{ui,api}-t6/.agents/skills/create-issue/tests/fake_issue_scripts.py
 
@@ -27,6 +30,9 @@ import os
 import sys
 from pathlib import Path
 from typing import Any, NoReturn
+
+# A createdAt after the started_at the tests seed (2026-10-24T12:00:00Z).
+DUP_CREATED = "2026-10-24T12:05:00Z"
 
 
 def fail(script: str, code: int, message: str = "") -> NoReturn:
@@ -51,25 +57,40 @@ def log_call(script: str, argv: list[str], spec: Any) -> list[dict[str, Any]]:
     return before
 
 
+def duplicate(found: dict[str, Any], repo: str, user: str) -> dict[str, Any]:
+    """The duplicate as issue-create.sh reports it."""
+    num = found["number"]
+    return {
+        "number": num,
+        "url": f"https://github.com/{repo}/issues/{num}",
+        "state": found.get("state", "OPEN"),
+        "author": found.get("author", user),
+        "createdAt": found.get("createdAt", DUP_CREATED),
+    }
+
+
 def create(argv: list[str], cfg: dict[str, Any]) -> int:
     spec = json.loads(Path(argv[0]).read_text(encoding="utf-8"))
     before = log_call("create", argv, spec)
     item = cfg.get("create", {}).get(spec["summary"], {})
     repo, no_board = spec["repo"], "--no-board" in argv
+    user = cfg.get("user", "octocat")
     status = None if no_board else spec.get("status") or "Todo"
     if "--dry-run" in argv:
         code = item.get("dry_code", 0)
         if code:
             fail("issue-create.sh --dry-run", code)
+        found = item.get("dry_duplicate")
         dry = {"dry_run": True, "repo": repo, "body": f"body of {spec['summary']}\n"}
         dry.update({"milestone": spec.get("milestone"), "status": status, "links": []})
+        dry.update(user=user, duplicate=duplicate(found, repo, user) if found else None)
         print(json.dumps(dry, ensure_ascii=False))
         return 0
     code = item.get("code", 0)
     if code == 4 and "duplicate" in item:
-        num = item["duplicate"]
-        url = f"https://github.com/{repo}/issues/{num}"
-        print(json.dumps({"duplicate": True, "url": url, "number": num, "repo": repo}))
+        dup = duplicate(item["duplicate"], repo, user)
+        url = dup["url"]
+        print(json.dumps({"duplicate": True, **dup, "repo": repo, "user": user}))
         fail(
             "issue-create.sh",
             4,
