@@ -2,7 +2,8 @@
 
 ## Status and baseline
 
-Draft for tech-lead approval, written 2026-10-24 by the planning step of the agent-loop skill.
+Implemented on `feat/130-verifier-gateway` (Tasks 0–12, review round 1 applied). Written 2026-10-24 by the planning
+step of the agent-loop skill; the tech lead decided OQ-1 to OQ-6 on 2026-10-24.
 Issue: https://github.com/larchanka-training/dmc-268-api-t6/issues/130 (assignee axyi). This is PR E of
 phase 2 of the #130 remainder: R9, R11, R13 (narrowed), R16 and counter parity. Task checklist:
 [130-verifier-gateway-todo.md](130-verifier-gateway-todo.md).
@@ -80,8 +81,10 @@ worker, and leaves `RETRIEVED_PROMPT_VERSIONS` alone.
      - `None` when the task has no `base_manifest`.
    - Retry calls keep the base `call_id` today. CVS:597-598 wants a manifest per call; that goes to G (see "Docs").
 4. **Retry-After** (verifier only):
-   - `LlmCallFailed` (`application/llm.py:57-76`) gains `retry_after_s: float | None = None`, and the gateway's
-     final raise (`:347`) passes `last.retry_after_s`.
+   - `LlmCallFailed` (`application/llm.py:57-76`) gains `retry_after_s: float | None = None`. Both gateway raises
+     that end on a provider error pass `last.retry_after_s`: the final raise (`:347`) and the raise in `generate`
+     when the fallback's window cannot take the original prompt (`if not self._fits_context(fallback, …)`), so a
+     primary 429 hint survives a skipped fallback (review round 1, R2).
    - `classify_failure` is **not** changed. If it read the field, live review delays would move from 2 min to
      10 min for Retry-After above 120 s.
    - `ReflectionPass` raises `RunFailure("verification_unavailable", retry_after=…)`, and `RetryDelays` then
@@ -207,6 +210,7 @@ worker, and leaves `RETRIEVED_PROMPT_VERSIONS` alone.
 | 6–9 | Nothing: no `ReflectionPass` in the worker; the `enter_publishing` kwargs default to `None` | A PG test shows that a legacy store writes no `llm.verify`. |
 | 10 | Nothing: without a snapshot the v1 schema and validator are used | Test: the request `response_format` equals the v1 file without annotations. |
 | 11 | Same pinned values with a default environment | `tests/test_review_context_stage.py:815-833` stays green unchanged. |
+| Round 1 | The verifier route's call timeout is capped at 90 s; review and conventions read the same engine value as before | Pinned by the two `review` rows of `test_a_verifier_call_waits_at_most_90_seconds_on_either_engine`. |
 
 ## Coordination (comments posted by the coordinator before the edit)
 
@@ -289,14 +293,25 @@ The overlap lists come from intersecting E's complete file list with each PR's f
 - **PIPELINE_SPEC:**
   - `:177` `llm.verify` "код пока не пишет" (it is written on the snapshot path), plus `manifest_id`, plus no
     `reason`;
+  - `:115` also says "код пока не пишет" and state `running`: E writes `llm.verify` in the publishing transaction
+    (`enter_publishing`), on the snapshot path only;
+  - order: the stage table lists `review.postprocess` (`:114`) before the verifier (`:115`), but E writes
+    `llm.verify` at the index before `review.postprocess` (`llm.review_output` 0, `llm.verify` 1,
+    `review.postprocess` 2, pinned by `tests/test_llm_verify_trace_postgres.py`);
   - `:170` and `usage_events` need the `verification` operation;
   - `:303-311` needs the verifier 402/429 mapping;
   - §9 `:576` should say v2 and the verifier schema are implemented but not live-checked.
 - **CVS:**
   - §7.3: the reserve is the per-task `reserved_calls` that F sets, and V2 is a fallback rather than a repair;
-    likewise, with one slot reserved after C1, the review's R2 is its fallback rather than a repair (Task 12);
+    likewise, with one slot reserved after C1, the review's R2 is its fallback rather than a repair (Task 12).
+    The example chain `C1 → R1 invalid → R2 repair → V1` holds only without a fallback; with one configured and
+    `reserved_calls=1` the chain is `C1 → R1 invalid → R2 fallback → V1`. It becomes the live chain once F sets
+    the value, so F needs the tech lead's acknowledgement first (this line is not that acknowledgement);
   - `:597-598`: retry calls reuse the base `call_id`.
 - **TEST_PLAN** `:200`: the repair injection row is covered on the snapshot path.
+- **Smoke in F:** bounded repair sends `[system, user, user]`, two consecutive user turns (`gateway.py`
+  `_bounded_repair_turn`). Whether EUrouter and the Mistral models accept that shape is unproven offline; the F
+  smoke checklist runs one verifier repair against the live route.
 - **SD §15 OQ-2** and `docs/SECRETS.md`/`CICD.md`: carrying `LLM_VERIFIER_*` to staging (OQ-6).
 - **Provider route:** `ExecutionProfile` has one provider-route pair (`policy_snapshot.py:181-182`), so the
   verifier route's provider is not pinned (D, RFS §7.1).

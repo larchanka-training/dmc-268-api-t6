@@ -81,9 +81,10 @@ TEST_RABBITMQ_URL=amqp://app:app@localhost:5672/imp130e uv run pytest
   - An explicit `LLM_VERIFIER_BASE_URL` on another https host, without keys → `api_keys == ()` (keys never sent to
     another host).
 - **Done when:**
-  - [ ] the tests are green;
-  - [ ] every existing `LlmSettings(...)` construction compiles unchanged;
-  - [ ] common verification passes.
+  - [x] the tests are green;
+  - [x] every existing `LlmSettings(...)` construction compiles unchanged;
+  - [ ] common verification passes (ruff, format, mypy and the focused files are green; the full suite is the
+    coordinator's background run after review).
 - **Dependencies:** Task 0.
 
 ### Task 2: Verifier route in the gateway
@@ -108,8 +109,8 @@ TEST_RABBITMQ_URL=amqp://app:app@localhost:5672/imp130e uv run pytest
     - After 4 calls, a verifier task raises `llm_unavailable` with the message `already made 4 provider calls` and
       makes 0 requests.
 - **Done when:**
-  - [ ] the tests are green;
-  - [ ] `tests/test_llm_gateway.py` passes unchanged.
+  - [x] the tests are green;
+  - [x] `tests/test_llm_gateway.py` passes unchanged.
 - **Dependencies:** Task 1.
 
 ### Task 3: Counter parity pins
@@ -128,8 +129,8 @@ TEST_RABBITMQ_URL=amqp://app:app@localhost:5672/imp130e uv run pytest
     - without a task counter each call uses its own model's heuristic (primary 3.0 → `1101`, fallback 2.0 →
       `1651`).
 - **Done when:**
-  - [ ] the tests are green;
-  - [ ] `tests/test_llm_gateway.py:3391` and `tests/test_repo_conventions.py:1312` pass unchanged.
+  - [x] the tests are green;
+  - [x] `tests/test_llm_gateway.py:3391` and `tests/test_repo_conventions.py:1312` pass unchanged.
 - **Dependencies:** Task 2.
 
 ### Task 4: Bounded repair envelope (R16)
@@ -159,8 +160,8 @@ TEST_RABBITMQ_URL=amqp://app:app@localhost:5672/imp130e uv run pytest
   - An oversized bounded repair → skipped, and the fallback gets the original messages.
   - **Live pin:** `tests/test_llm_gateway.py:1209` and `:2910` stay green unchanged.
 - **Done when:**
-  - [ ] the tests are green;
-  - [ ] the live shape is unchanged;
+  - [x] the tests are green;
+  - [x] the live shape is unchanged;
   - [x] OQ-3 is answered: gate.
 - **Dependencies:** Task 3.
 
@@ -189,7 +190,7 @@ TEST_RABBITMQ_URL=amqp://app:app@localhost:5672/imp130e uv run pytest
     `LlmCallFailed(llm_rate_limited).retry_after_s == 45.0`.
   - **Live pin:** `classify_failure(<that error>).retry_after is None`, and
     `RetryDelays().for_failure(1, …) == ("2m", timedelta(minutes=2))`.
-- **Done when:** [ ] the tests are green; [ ] existing gateway tests pass unchanged.
+- **Done when:** [x] the tests are green; [x] existing gateway tests pass unchanged.
 - **Dependencies:** Task 4.
 
 ### Task 6: Verifier port gets its manifest and context ⚑
@@ -215,8 +216,8 @@ TEST_RABBITMQ_URL=amqp://app:app@localhost:5672/imp130e uv run pytest
   - A fake returning `VerifierReply(output=<valid decisions>, accepted_call_id=…)` yields the same decisions as the
     plain mapping.
 - **Done when:**
-  - [ ] all existing reflection, execute-review and rules-md tests pass;
-  - [ ] mypy is clean on `tests/`.
+  - [x] all existing reflection, execute-review and rules-md tests pass;
+  - [x] mypy is clean on `tests/`.
 - **Dependencies:** Task 5.
 
 ### Task 7: Gateway adapter `GatewayVerifierModel` (R11)
@@ -245,8 +246,8 @@ TEST_RABBITMQ_URL=amqp://app:app@localhost:5672/imp130e uv run pytest
   - `ReflectionPass(GatewayVerifierModel(...))` with 2 candidates → 2 decisions (port end to end, not wired in the
     worker).
 - **Done when:**
-  - [ ] the tests are green;
-  - [ ] `grep -n "ReflectionPass(" app/` is still empty.
+  - [x] the tests are green;
+  - [x] `grep -n "ReflectionPass(" app/` is still empty.
 - **Dependencies:** Task 6.
 
 ### Task 8: Verifier error mapping (R11)
@@ -267,7 +268,7 @@ TEST_RABBITMQ_URL=amqp://app:app@localhost:5672/imp130e uv run pytest
   - `llm_unavailable` (including "already made 4 provider calls") → `VerificationUnavailableError` →
     `classify_failure` gives `"verification_unavailable"` and `("30s", timedelta(seconds=30))` on attempt 1.
   - `llm_invalid_output` → `VerificationInvalidOutputError` (unchanged).
-- **Done when:** [ ] the tests are green; [ ] `run_failures.py` and `check_runs.py` are untouched.
+- **Done when:** [x] the tests are green; [x] `run_failures.py` and `check_runs.py` are untouched.
 - **Dependencies:** Task 7.
 
 ### Task 9: `llm.verify` run_action (R13, narrowed) ⚑
@@ -303,8 +304,8 @@ TEST_RABBITMQ_URL=amqp://app:app@localhost:5672/imp130e uv run pytest
     - a second call adds no second `llm.verify`;
     - without a trace, no `llm.verify` row (live pin).
 - **Done when:**
-  - [ ] the unit and PG tests are green with zero skips;
-  - [ ] `tests/test_review_output.py` and `tests/test_run_step_postgres.py` pass unchanged.
+  - [x] the unit and PG tests are green with zero skips;
+  - [x] `tests/test_review_output.py` and `tests/test_run_step_postgres.py` pass unchanged.
 - **Dependencies:** Task 8.
 
 ### Task 10: Review answer schema by bound prompt version (R9)
@@ -335,8 +336,8 @@ TEST_RABBITMQ_URL=amqp://app:app@localhost:5672/imp130e uv run pytest
     - with a snapshot whose review prompt is `v4` → the v2 file;
     - with `v9` → `SNAPSHOT_INTEGRITY_ERROR` and zero requests.
 - **Done when:**
-  - [ ] the tests are green;
-  - [ ] the snapshot tests `tests/test_llm_gateway.py:3141-3460` pass unchanged (their review prompt version is
+  - [x] the tests are green;
+  - [x] the snapshot tests `tests/test_llm_gateway.py:3141-3460` pass unchanged (their review prompt version is
     the `PromptBindings` default `v2`).
 - **Dependencies:** Task 9 (order only).
 
@@ -354,7 +355,7 @@ TEST_RABBITMQ_URL=amqp://app:app@localhost:5672/imp130e uv run pytest
     has `verifier_model == "mistral-small-3.2-24b"`, `fallback_verifier_model == "mistral-small-4"` and
     `review_model == "mistral-small-4"`.
   - **Live pin:** `tests/test_review_context_stage.py:815-833` unchanged.
-- **Done when:** [ ] the tests are green; [ ] the coordination comment in #227/#220/#254 about `app/worker.py` has
+- **Done when:** [x] the tests are green; [x] the coordination comment in #227/#220/#254 about `app/worker.py` has
   been posted.
 - **Dependencies:** Task 1.
 
@@ -376,7 +377,7 @@ TEST_RABBITMQ_URL=amqp://app:app@localhost:5672/imp130e uv run pytest
   - `reserved_calls=1` after C1 + C2 repair → R1 only, no review fallback, and the verifier then gets 1 call.
   - `reserved_calls=1` with 3 calls spent → the review makes no request (`llm_unavailable`); the verifier gets 1.
   - `reserved_calls=0` → today's chain (pin).
-- **Done when:** [ ] the tests are green; [ ] the Task 2 cap pin still holds at `reserved_calls=0`.
+- **Done when:** [x] the tests are green; [x] the Task 2 cap pin still holds at `reserved_calls=0`.
 - **Dependencies:** Task 2.
 
 ### Checkpoint and publication
