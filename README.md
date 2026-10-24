@@ -270,7 +270,19 @@ uv run pytest -m integration -rs
 | `TEST_DATABASE_URL` | every integration test | Each test creates a random schema, migrates it and drops only it, so the database of the local stack is safe to use. The user needs `CREATE SCHEMA`. |
 | `TEST_RABBITMQ_URL` | worker, index queue, rerun and cancel tests | The tests delete and redeclare the review and index topologies. Give them their own virtual host (`/test` above), never `/`, where the compose `worker` consumes. |
 
-CI runs the same tests in the job `Python lint / type / test` and fails on a skipped one.
+The tests outside `-m integration` need no services and run in parallel:
+`uv run pytest -m "not integration" -n auto`. Do not use `-n` for integration tests: they share
+advisory-lock keys, NOTIFY channels and RabbitMQ names, so parallel runs on one database or
+virtual host interfere.
+
+CI fails on a skipped test. Job `Python lint / type / unit` runs the tests outside
+`-m integration` with `-n auto`, without service containers. The four `Python integration (k/4)`
+jobs each run a quarter of the integration tests (`--splits 4 --group k`, pytest-split) with
+their own PostgreSQL and RabbitMQ. The required check `Python lint / type / test` is green only
+when all of these jobs succeeded and every collected integration test ran in exactly one shard.
+pytest-split balances the shards by `.test_durations`. To create or refresh that file, download
+the `test-durations` artifact of a green `main` run, unzip it into the repository root and commit
+it ([CICD](docs/CICD.md#1-конвейер)).
 
 ## Lint & format
 

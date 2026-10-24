@@ -806,9 +806,10 @@ Replay the current committed Mistral capture without credentials or network call
 uv run python review/scripts/eval_replay.py
 ```
 
-The existing required `Python lint / type / test` job runs the same replay
-unconditionally. A missing manifest fails the job and writes a missing-baseline
-error to the job summary. Replay metrics are included only when a replay report
+The `Python lint / type / unit` job runs the same replay unconditionally. A
+missing manifest fails the unit job and, through it, the required
+`Python lint / type / test` check, and writes a missing-baseline error to the
+job summary. Replay metrics are included only when a replay report
 exists. Quality values are reported rather than used as pass thresholds. Raw response files are excluded
 from whitespace and end-of-file rewriting hooks so a commit preserves exact bytes.
 
