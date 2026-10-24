@@ -779,12 +779,16 @@ def test_a_remote_docker_endpoint_is_refused_before_any_compose_command(
 
 
 @pytest.mark.parametrize(
-    "environ,inspected",
+    "environ,inspected,endpoint",
     [
-        ({"DOCKER_HOST": "unix:///run/user/1000/docker.sock"}, False),
-        ({}, True),
+        (
+            {"DOCKER_HOST": "unix:///run/user/1000/docker.sock"},
+            False,
+            "unix:///run/user/1000/docker.sock",
+        ),
+        ({}, True, _LOCAL_SOCKET),
         # The docker CLI treats an empty DOCKER_HOST as unset.
-        ({"DOCKER_HOST": ""}, True),
+        ({"DOCKER_HOST": ""}, True, _LOCAL_SOCKET),
     ],
     ids=["unix-docker-host", "local-context", "empty-docker-host"],
 )
@@ -795,6 +799,7 @@ def test_a_local_unix_socket_lets_the_run_reach_compose(
     capsys: pytest.CaptureFixture[str],
     environ: dict[str, str],
     inspected: bool,
+    endpoint: str,
 ) -> None:
     stack, commands = _endpoint_stack(driver, monkeypatch, environ, _LOCAL_SOCKET)
 
@@ -804,7 +809,9 @@ def test_a_local_unix_socket_lets_the_run_reach_compose(
         *([_INSPECT] if inspected else []),
         driver.compose_command("dmc163test", "ps", "-aq"),
     ]
+    # The stack line comes only after the endpoint passed (a refusal prints the error alone).
     assert capsys.readouterr().err == (
+        f"load stack 'dmc163test' on {endpoint}, loopback ports {{'BACKEND_PORT': 18001}}\n"
         f"error: cannot inspect compose project 'dmc163test': {_STOPPED}\n"
     )
 
@@ -833,7 +840,7 @@ def test_an_unknown_docker_context_is_refused(
 
 
 def test_main_passes_loopback_port_values_and_numeric_ports(
-    driver: ModuleType, monkeypatch: pytest.MonkeyPatch
+    driver: ModuleType, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     captured: list[Any] = []
     monkeypatch.setattr(driver.shutil, "which", lambda name: "/usr/bin/docker")
@@ -853,6 +860,8 @@ def test_main_passes_loopback_port_values_and_numeric_ports(
     )
     assert stack.env["REDIS_PORT"] == "18005"
     assert (stack.ports["BACKEND_PORT"], stack.ports["REDIS_PORT"]) == (18001, 18005)
+    # Nothing about the stack is printed before `execute` has checked the docker endpoint.
+    assert capsys.readouterr().err == ""
 
 
 def test_override_probes_rabbitmq_only_after_the_server_wrote_its_cookie() -> None:
@@ -890,6 +899,7 @@ class FakeStack:
         unhandled: tuple[str, ...] = (),
     ) -> None:
         self.project = "dmc163test"
+        self.ports = {"BACKEND_PORT": 18001}
         self.leftovers = leftovers
         self.up_error = up_error
         self.existing_error = existing_error
