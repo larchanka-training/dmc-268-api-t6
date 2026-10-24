@@ -478,8 +478,8 @@ does not change the read; `SHOW transaction_isolation` = `repeatable read` and
 
 **Done when:**
 
-- [ ] the RED run and the GREEN run are recorded;
-- [ ] common verification is green with zero skips.
+- [x] the RED run and the GREEN run are recorded;
+- [x] common verification is green with zero skips.
 
 **Dependencies:** Task 1.
 
