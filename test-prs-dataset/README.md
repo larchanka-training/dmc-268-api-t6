@@ -884,7 +884,7 @@ frozen commit-context inputs; production commit retrieval is not pinned (#177). 
 changed the pinned parser/schema. #177 then changed the pin list, causing
 `Static input path set changed; refresh the complete baseline` until the complete
 2026-10-20 #178 replacement. That 46-pin v3 capture replayed locally with
-`warnings=[]` until #168 (below); required replay on main after merge remains pending. The 2026-10-15,
+`warnings=[]` until #168 and #219 changed pinned files (below); required replay on main after merge remains pending. The 2026-10-15,
 2026-10-14 PR-prefix, 2026-10-13 snapshot and 2026-10-07 captures remain historical.
 Later changes to fingerprinted inputs require another complete separately authorized
 capture. Preserve each original capture's provenance rather than editing a digest
@@ -1045,5 +1045,8 @@ The eval snapshot of `none`, `valid` and `malicious` pins the canonical checksum
 default rule file the case uses, `DEFAULT_BACKEND_V1_CHECKSUM` for Python and
 `DEFAULT_FRONTEND_V1_CHECKSUM` for TypeScript and TSX (`prompt_builder.py`), as
 `RuleVersion.checksum` does in production, so `<service_defaults>` carries the production
-`<check id>` values. The main corpus replay drift this work causes is described under
+`<check id>` values. In these arms a `--backend-rules` or `--frontend-rules` override must
+therefore be the pinned default file: the recorder computes each loaded file's checksum as
+production does and refuses a mismatch before the first call; `legacy` accepts any
+override. The main corpus replay drift this work causes is described under
 [Baseline drift](#baseline-drift).

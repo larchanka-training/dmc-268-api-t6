@@ -52,6 +52,7 @@ from app.bootstrap.llm_gateway import (  # noqa: E402
     ReviewCaseFailed,
     review_case,
 )
+from app.modules.repositories.infrastructure.models import RuleVersion  # noqa: E402
 from app.modules.reviews.application.commit_prefix_limits import (  # noqa: E402
     CommitMessagePrefix,
 )
@@ -172,11 +173,13 @@ def _validated_cases(root: Path) -> list[tuple[Path, dict[str, Any]]]:
     return records
 
 
-def _rules(path: Path) -> tuple[ReviewRule, ...]:
+def _rules(path: Path) -> list[Any]:
+    """The stored rules array of a rule file, parsed and pinned by the caller."""
     value = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(value, dict) or not isinstance(value.get("rules"), list):
         raise RecorderError(f"rule file has no rules array: {path.name}")
-    return tuple(review_rule_from_stored(item) for item in value["rules"])
+    items: list[Any] = value["rules"]
+    return items
 
 
 def _first_text(record: LlmCallRecord | None) -> str:
@@ -515,10 +518,26 @@ def _input_digests(
 
 def _rules_by_language(
     rule_sets: list[tuple[Path, str, tuple[str, ...]]],
+    *,
+    pinned_defaults: bool,
 ) -> dict[str, _LanguageRules]:
+    """Parse each rule file; with ``pinned_defaults`` it must be the file its pin names."""
     by_language: dict[str, _LanguageRules] = {}
     for rule_path, checksum, matching in rule_sets:
-        parsed = _LanguageRules(_rules(rule_path), checksum)
+        items = _rules(rule_path)
+        parsed = _LanguageRules(tuple(review_rule_from_stored(item) for item in items), checksum)
+        if pinned_defaults:
+            # The checksum production stores for these rules; only .checksum of the row is read.
+            loaded = RuleVersion.from_rules(
+                repository_id=uuid5(_EVAL_POLICY_NAMESPACE, "service-defaults-check"),
+                version=1,
+                rules=items,
+            ).checksum
+            if loaded != checksum:
+                raise RecorderError(
+                    "policy arms need the pinned default rule files: "
+                    f"{_relative_input(rule_path)} has checksum {loaded}, pinned {checksum}"
+                )
         for language in matching:
             by_language[language] = parsed
     return by_language
@@ -534,6 +553,7 @@ def _capture_inputs(
     frontend_rules: Path,
     recorded_at: datetime | None,
     engine: EngineName,
+    pinned_defaults: bool,
 ) -> _CaptureInputs:
     relative_prompt = _relative_input(system_prompt)
     rule_sets = _selected_rule_sets(records, backend_rules, frontend_rules)
@@ -545,7 +565,7 @@ def _capture_inputs(
     version = _PROMPT_VERSION.search(system)
     if version is None:
         raise RecorderError("system prompt has no version")
-    rules_by_language = _rules_by_language(rule_sets)
+    rules_by_language = _rules_by_language(rule_sets, pinned_defaults=pinned_defaults)
     effective_settings = _effective_settings(settings, engine)
     timestamp = (
         (recorded_at or datetime.now(UTC)).astimezone(UTC).isoformat().replace("+00:00", "Z")
@@ -726,6 +746,8 @@ async def record_live(
         frontend_rules=frontend_rules,
         recorded_at=recorded_at,
         engine=engine,
+        # A policy-arm snapshot pins the default files, so an override must be one of them.
+        pinned_defaults=policy_arm != "legacy",
     )
     # The snapshot takes its pin from the entry that also supplies the case's rules.
     snapshots = {

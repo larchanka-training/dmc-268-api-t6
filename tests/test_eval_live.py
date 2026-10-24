@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import re
 import shutil
@@ -1944,37 +1945,170 @@ BACKEND_DEFAULTS_CHECKSUM = "282d61c2da897152046db742fbd9bfda061ba1c71ce32759d47
 FRONTEND_DEFAULTS_CHECKSUM = "32673f59b6f0f3f96155e4012dcc42718b0814c473cc255c70e69f63660dcb4a"
 
 
+@pytest.mark.parametrize("arm", ["none", "valid"])
 @pytest.mark.parametrize(
-    ("case_id", "checksum", "check_ids"),
+    ("case_ids", "pins", "check_ids"),
     [
-        ("RUL-01", BACKEND_DEFAULTS_CHECKSUM, BACKEND_CHECK_IDS),
-        ("RUL-02", FRONTEND_DEFAULTS_CHECKSUM, FRONTEND_CHECK_IDS),
-        ("RUL-04", FRONTEND_DEFAULTS_CHECKSUM, FRONTEND_CHECK_IDS),
+        (("RUL-01",), [("RUL-01", BACKEND_DEFAULTS_CHECKSUM)], [BACKEND_CHECK_IDS]),
+        (("RUL-02",), [("RUL-02", FRONTEND_DEFAULTS_CHECKSUM)], [FRONTEND_CHECK_IDS]),
+        (("RUL-04",), [("RUL-04", FRONTEND_DEFAULTS_CHECKSUM)], [FRONTEND_CHECK_IDS]),
+        (
+            ("RUL-01", "RUL-02"),
+            [("RUL-01", BACKEND_DEFAULTS_CHECKSUM), ("RUL-02", FRONTEND_DEFAULTS_CHECKSUM)],
+            [BACKEND_CHECK_IDS, FRONTEND_CHECK_IDS],
+        ),
     ],
-    ids=["python", "tsx", "typescript"],
+    ids=["python", "tsx", "typescript", "python-then-tsx"],
 )
 def test_policy_arm_pins_the_defaults_checksum_of_the_case_language(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    case_id: str,
-    checksum: str,
-    check_ids: list[str],
+    arm: str,
+    case_ids: tuple[str, ...],
+    pins: list[tuple[str, str]],
+    check_ids: list[list[str]],
 ) -> None:
     original_case_input = eval_live_module._case_input
-    pinned: list[str | None] = []
+    pinned: list[tuple[str, str | None]] = []
 
     def recording(*args: Any, **kwargs: Any) -> Any:
         snapshot = kwargs["policy_snapshot"]
-        pinned.append(None if snapshot is None else snapshot.defaults_checksum)
+        pinned.append((args[1]["id"], None if snapshot is None else snapshot.defaults_checksum))
         return original_case_input(*args, **kwargs)
 
     monkeypatch.setattr(eval_live_module, "_case_input", recording)
+    transport = FakeTransport([answer("primary-model", VALID) for _ in case_ids])
+
+    record_arm(rules_fixture_root(tmp_path, case_ids), transport, arm)
+
+    assert pinned == pins
+    assert [
+        re.findall(r'<check id="([^"]*)">', request.messages[1].content)
+        for request in transport.requests
+    ] == check_ids
+
+
+# The first rule of the overridden default file, renamed or with one more sentence in a check.
+OVERRIDDEN_RULE_NAME = "Custom Source Review"
+OVERRIDDEN_CHECK_SUFFIX = " Also flag a public function without a docstring."
+
+
+def override_rules_repo(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, slot: str, change: str
+) -> tuple[Path, Path, str, str]:
+    """Copy the static inputs into a repository and override one default rule file there.
+
+    Returns the backend and frontend rule paths, the override's canonical checksum
+    (computed here as production's RuleVersion.from_rules does) and its text marker.
+    """
+    repo = tmp_path / "repo"
+    for relative in static_input_paths(
+        "review/prompts/review.system.v2.md", rule_json_paths(REPO_ROOT)
+    ):
+        destination = repo / relative
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(REPO_ROOT / relative, destination)
+    sidecar = repo / "review/eval/pr-commit-messages.json"
+    sidecar.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(REPO_ROOT / "review/eval/pr-commit-messages.json", sidecar)
+    monkeypatch.setattr(eval_live_module, "REPO_ROOT", repo)
+    default = BACKEND_RULES if slot == "backend" else FRONTEND_RULES
+    custom_rules = json.loads(default.read_text(encoding="utf-8"))
+    first = custom_rules["rules"][0]
+    if change == "renamed":
+        first["name"] = OVERRIDDEN_RULE_NAME
+        marker = f'name="{OVERRIDDEN_RULE_NAME}"'
+    else:
+        first["checks"][0] += OVERRIDDEN_CHECK_SUFFIX
+        marker = OVERRIDDEN_CHECK_SUFFIX
+    custom = repo / f"config/custom-{slot}.json"
+    custom.parent.mkdir(parents=True)
+    custom.write_text(json.dumps(custom_rules), encoding="utf-8")
+    canonical = json.dumps(custom_rules["rules"], sort_keys=True, separators=(",", ":"))
+    backend = custom if slot == "backend" else repo / "review/rules/default-backend.v1.json"
+    frontend = custom if slot == "frontend" else repo / "review/rules/default-frontend.v1.json"
+    return backend, frontend, hashlib.sha256(canonical.encode("utf-8")).hexdigest(), marker
+
+
+OVERRIDES = pytest.mark.parametrize(
+    ("slot", "change", "rules_case", "main_case", "pinned"),
+    [
+        ("backend", "renamed", "RUL-01", "SEC-01", BACKEND_DEFAULTS_CHECKSUM),
+        ("backend", "edited", "RUL-01", "SEC-01", BACKEND_DEFAULTS_CHECKSUM),
+        ("frontend", "edited", "RUL-02", "LOG-04", FRONTEND_DEFAULTS_CHECKSUM),
+    ],
+    ids=["backend-renamed", "backend-edited", "frontend-edited"],
+)
+
+
+@pytest.mark.parametrize("arm", ["none", "valid", "malicious"])
+@OVERRIDES
+def test_policy_arm_refuses_an_overridden_rule_file_before_any_call(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    arm: str,
+    slot: str,
+    change: str,
+    rules_case: str,
+    main_case: str,
+    pinned: str,
+) -> None:
+    backend, frontend, loaded, _ = override_rules_repo(tmp_path, monkeypatch, slot, change)
+    root = rules_fixture_root(tmp_path, (rules_case,))
     transport = FakeTransport([answer("primary-model", VALID)])
 
-    record_arm(rules_fixture_root(tmp_path, (case_id,)), transport, "valid")
+    with pytest.raises(RecorderError) as raised:
+        asyncio.run(
+            record_live(
+                root,
+                settings(),
+                system_prompt=eval_live_module.REPO_ROOT / "review/prompts/review.system.v2.md",
+                backend_rules=backend,
+                frontend_rules=frontend,
+                transport=transport,
+                recorded_at=RECORDED_AT,
+                policy_arm=arm,
+            )
+        )
 
-    assert pinned == [checksum]
-    assert re.findall(r'<check id="([^"]*)">', user_message(transport)) == check_ids
+    assert str(raised.value) == (
+        "policy arms need the pinned default rule files: "
+        f"config/custom-{slot}.json has checksum {loaded}, pinned {pinned}"
+    )
+    assert loaded != pinned
+    assert transport.requests == []
+    assert not (root / "responses").exists()
+
+
+@OVERRIDES
+def test_legacy_arm_still_records_with_an_overridden_rule_file(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    slot: str,
+    change: str,
+    rules_case: str,
+    main_case: str,
+    pinned: str,
+) -> None:
+    backend, frontend, _, marker = override_rules_repo(tmp_path, monkeypatch, slot, change)
+    root = fixture_root(tmp_path, (main_case,))
+    transport = FakeTransport([answer("primary-model", VALID)])
+
+    manifest = asyncio.run(
+        record_live(
+            root,
+            settings(),
+            system_prompt=eval_live_module.REPO_ROOT / "review/prompts/review.system.v2.md",
+            backend_rules=backend,
+            frontend_rules=frontend,
+            transport=transport,
+            recorded_at=RECORDED_AT,
+        )
+    )
+
+    assert marker in user_message(transport)
+    assert f"config/custom-{slot}.json" in manifest["static_inputs"]
+    assert manifest["run_metadata"]["policy_arm"] == "legacy"
 
 
 @pytest.mark.parametrize(
