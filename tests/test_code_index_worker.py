@@ -361,7 +361,7 @@ def test_with_the_consumer_the_leader_reconciles_heads_and_dispatches_wake_ups()
 def test_the_versions_of_an_index() -> None:
     versions = index_versions(CodeIndexSettings().limits)
 
-    assert versions.extractor_version == "facts/v1"
+    assert versions.extractor_version == "facts/v2"
     assert versions.resolver_version == "resolver/v1+index/v1"
     assert len(versions.parser_profile_version) == 64
     assert versions.limits_profile_version.startswith("limits/v1:")

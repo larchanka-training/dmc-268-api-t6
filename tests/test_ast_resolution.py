@@ -1104,6 +1104,18 @@ def test_resolve_binding_does_not_take_a_call_through_a_receiver_for_a_binding()
     assert ref.names == ("Store",)
     assert [item.name for item in ref.resolved_symbols] == ["Store"]
 
+    store = {"pkg/store.py": "def save():\n    return 1\n"}
+    receiver = "from .store import save\n\ndef run(repository):\n    return repository.save()\n"
+    ref, provider = _resolve_binding(
+        {"pkg/app.py": receiver, **store}, "pkg/app.py", "run", ".store"
+    )
+    assert (ref, provider.asked) == (None, [])
+
+    bare = "from .store import save\n\ndef run(repository):\n    return save(repository)\n"
+    ref, _ = _resolve_binding({"pkg/app.py": bare, **store}, "pkg/app.py", "run", ".store")
+    assert ref is not None
+    assert [(item.path, item.name) for item in ref.resolved_symbols] == [("pkg/store.py", "save")]
+
 
 # --- Public helpers shared with the graph indexer (#142) -------------------------------
 

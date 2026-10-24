@@ -217,6 +217,15 @@ def test_python_bindings_without_a_named_use_give_only_the_imports_edge() -> Non
         assert (item.record.resolution, item.reason, item.edges) == (RESOLVED, None, only_module)
 
 
+def test_python_call_through_a_receiver_gives_no_uses_edge_to_a_named_import() -> None:
+    source = "from .store import save\n\ndef run(repository):\n"
+    source += "    return repository.save(), f(save=1)\n"
+
+    item = _one(_APP, source, paths=["pkg/store.py"])
+
+    assert item.edges == (_imports(_APP, "pkg/store.py"),)
+
+
 def test_python_excluded_target_has_no_target_path_and_no_edges() -> None:
     source = "from .secrets import KEY\n\ndef f():\n    return KEY\n"
 

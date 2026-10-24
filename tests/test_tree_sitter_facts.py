@@ -163,6 +163,58 @@ def test_python_imports_keep_module_names_and_local_bindings() -> None:
     ]
 
 
+_PYTHON_LABELS = b"""from .store import save
+
+def through_receiver(repository):
+    return repository.save()
+
+def by_keyword():
+    return f(save=1)
+
+def bare():
+    return save()
+
+def matched(point):
+    match point:
+        case Point(save=1):
+            return 1
+        case Color.save:
+            return 2
+
+def imports_locally():
+    from .other import save as kept
+    import pkg.save
+    return kept
+
+class Repository:
+    @property
+    def save(self):
+        return 1
+"""
+
+
+def test_python_receiver_attribute_and_keyword_names_are_not_name_reads() -> None:
+    facts = _facts(AstLanguage.PYTHON, _PYTHON_LABELS)
+
+    receiver = _symbol(facts, "through_receiver")
+    assert "save" not in receiver.references
+    assert ("repository", "save") in receiver.member_references
+    keyword = _symbol(facts, "by_keyword")
+    assert "save" not in keyword.references
+    assert "f" in keyword.references
+    assert "save" in _symbol(facts, "bare").references
+
+
+def test_python_pattern_import_and_method_names_are_not_name_reads() -> None:
+    facts = _facts(AstLanguage.PYTHON, _PYTHON_LABELS)
+
+    assert "Point" in _symbol(facts, "matched").references
+    assert "kept" in _symbol(facts, "imports_locally").references
+    assert "property" in _symbol(facts, "Repository").references
+    for name in ("matched", "imports_locally", "Repository", "save"):
+        assert "save" not in _symbol(facts, name).references, name
+
+
 def test_typescript_declarations_exports_and_import_forms() -> None:
     facts = _facts(AstLanguage.TYPESCRIPT, _TYPESCRIPT)
 
