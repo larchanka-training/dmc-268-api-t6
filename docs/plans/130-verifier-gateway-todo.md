@@ -36,7 +36,7 @@ TEST_RABBITMQ_URL=amqp://app:app@localhost:5672/imp130e uv run pytest
 **Phase-2 contract** (check it on every task): no `review/prompts/review.system.v4.md`, no change to
 `seed_prompts.py`, no `ReflectionPass` built in `app/worker.py`, no v4 in `RETRIEVED_PROMPT_VERSIONS`.
 
-**Order:** 0 → 1 → 2 → 3 → 4 → 5 → 6 → 7 → 8 → 9 → 10 → 11 → 12. Tasks 3, 4 and 5 all edit
+**Order:** 0 → 1 → 2 → 3 → 4 → 5 → 6 → 7 → 8 → 9 → 10 → 11 → 12. Tasks 4 and 5 both edit
 `gateway.py`, so keep them sequential.
 
 ### Task 0: Plan documents
@@ -112,25 +112,24 @@ TEST_RABBITMQ_URL=amqp://app:app@localhost:5672/imp130e uv run pytest
   - [ ] `tests/test_llm_gateway.py` passes unchanged.
 - **Dependencies:** Task 1.
 
-### Task 3: Counter parity
+### Task 3: Counter parity pins
 
-- **Commit:** `feat(llm): count prompt tokens with the larger of the pinned and profile counters (#130)`
-- **Files:** `gateway.py` (`_estimate` `:362-369`); new `tests/test_gateway_counter_parity.py`.
-- **What to do:** plan decision 11. When `counter` is set, return `max(sum(counter.count), sum(heuristic.count))`
-  with `heuristic = self.token_counter(profile)`. No version bump; the profile stays `counter/v2`.
+- **Commit:** `test(llm): pin the gateway estimate to the task counter (#130)`
+- **Files:** new `tests/test_gateway_counter_parity.py` only; `gateway.py` is not changed.
+- **What to do:** plan decision 11. Decided by the tech lead on 2026-10-24: р.4 №2 is closed by a parity test instead of a max — a max in the gateway alone would refuse a prompt the v1 fitter produced; the remaining risk is a cost-cap overshoot on counter/v1 snapshots only, which the live worker never pins.
 - **Tests to add:**
   - Lengths 0, 1, 3, 4, 3000, 3001 → 0, 1, 1, 2, 1000, 1001 under both `EstimatedTokenCounter`
     (`prompt_budget.py:62-71`) and `HeuristicTokenCounter(3.0)`.
-  - Every `KNOWN_MODELS` profile has `chars_per_token == 3.0` (`settings.py:115-143`).
+  - Every `KNOWN_MODELS` profile has `chars_per_token == 3.0` (`settings.py:115-143`), and every profile that
+    `LlmSettings.from_env` builds (both known models and an unknown self-hosted one) counts like counter/v2.
   - Messages `"S"*300` + `"U"*3001`:
     - `input_tokens_estimate == 1101` with `counter=None` and with `EstimatedTokenCounter()` (live pin);
-    - a profile with `chars_per_token=2.0` plus counter/v2 → `1651`;
-    - `LegacyTokenCounter` (counter/v1) with a 3.0 profile → `1101`, not `826`.
-  - A window where the counter/v2 count fits but the 2.0 heuristic does not → `llm_context_overflow`, zero
-    requests.
+    - with a task counter the estimate is the counter's count (a 4.0 profile plus counter/v2 → `1101`);
+    - without a task counter each call uses its own model's heuristic (primary 3.0 → `1101`, fallback 2.0 →
+      `1651`).
 - **Done when:**
   - [ ] the tests are green;
-  - [ ] `tests/test_llm_gateway.py:3391` still passes (it asserts the fitted lines only).
+  - [ ] `tests/test_llm_gateway.py:3391` and `tests/test_repo_conventions.py:1312` pass unchanged.
 - **Dependencies:** Task 2.
 
 ### Task 4: Bounded repair envelope (R16)
