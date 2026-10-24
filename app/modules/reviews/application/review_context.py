@@ -618,6 +618,8 @@ class BuildReviewContext:
             # L4: signatures and doc ranges of the definitions the changed code imports.
             ast_budget = AST_CONTEXT_MAX_TOKENS
             shown: set[str] = set()
+            # Only a definition L4 displays hides its RAG place; an omitted one does not.
+            displayed: set[str] = set()
             for ref in imports:
                 if ref.resolution is not ImportResolution.RESOLVED:
                     continue
@@ -632,6 +634,7 @@ class BuildReviewContext:
                         omissions.append(ContextOmission("ast_limit", symbol.path))
                     else:
                         ast_budget -= excerpt.tokens
+                        displayed.add(symbol.symbol_id)
 
             # RAG: graph candidates in what L1 and L4 left; it displaces only L2 and L3,
             # which come after it (ADR 0001 §9).
@@ -645,7 +648,7 @@ class BuildReviewContext:
                         changed=changed,
                         loaded_texts=files.loaded_texts,
                         loaded_facts=files.loaded_facts,
-                        shown=shown,
+                        shown=displayed,
                         denied=denied,
                     )
                 except Exception as exc:
