@@ -1,7 +1,7 @@
 # Task list: #209 token-cache wiring and local fallback
 
 Base: `22c621abc80abdd1b3daaa95bde73b6aaf81c32e`.
-Plan: [209-plan.md](209-plan.md). Tasks 1-2 reviewed; local verification complete; remote CI/publication pending.
+Plan: [209-plan.md](209-plan.md). Implementation, reviews and draft publication complete; verified CI evidence is recorded below.
 
 ## Planning gate
 
@@ -176,7 +176,7 @@ run all repository gates before handing the change to review/publishing.
 - [x] New tests are discovered by the mandatory Python CI job and require no infrastructure.
 - [x] All five mutation results and clean baseline/focused final result are recorded.
 - [x] Independent Standards/Spec review has no unresolved findings.
-- [ ] Required remote CI checks are green before publication is reported complete.
+- [x] Required remote CI checks are green before publication is reported complete.
 
 **Verification:**
 
@@ -185,7 +185,7 @@ run all repository gates before handing the change to review/publishing.
 - [x] `uv run mypy .`
 - [x] `uv run pytest` (report unrelated infrastructure skips accurately).
 - [x] Inspect `git diff --check`, `git diff --stat` and status; no mutant remains.
-- [ ] Confirm `Python lint / type / test`, `OpenAPI lint`, `Webhook container smoke`.
+- [x] Confirm `Python lint / type / test`, `OpenAPI lint`, `Webhook container smoke`.
 
 **Dependencies:** Tasks 1-2, including fixes from the independent review loop.
 
@@ -205,34 +205,64 @@ run all repository gates before handing the change to review/publishing.
 | Task 2 independent Standards / Spec review | PASS, 0 / 0 findings; fallback revert independently reproduced; 25 cache/wiring tests passed |
 | All five independent mutation contracts | PASS: e1/e2 cache-type RED; b3/b4 Redis-construction RED; fallback revert issuance-count RED; each followed clean GREEN |
 | `git diff --check` and final scope inspection | PASS; one-line production cache fix, cache tests, new wiring tests and plan/evidence docs only |
-| Full `uv run pytest` | PASS, exit 0; 5298 collected; 4337 passed, 961 skipped, 2 warnings in 384.85s (6:24) |
-| Remote required CI | PENDING publication: `Python lint / type / test`, `OpenAPI lint`, `Webhook container smoke` |
+| Full `uv run pytest` on the reviewed feature diff based on `22c621a` | PASS, exit 0; 5298 collected; 4337 passed, 961 skipped, 2 warnings in 384.85s (6:24) |
+| Remote required CI at initial code head `c9919dd` | PASS: `Python lint / type / test`, `OpenAPI lint`, `Webhook container smoke`; [run 40084814523](https://github.com/larchanka-training/dmc-268-api-t6/actions/runs/40084814523) |
 
 CI discovery verified in `.github/workflows/ci-cd.yml`: the mandatory Python job runs
 unrestricted `uv run pytest` with coverage, and `pyproject.toml` sets
 `testpaths = ["tests"]`. New tests have no integration/skip marks or service condition.
 The actual clean-miss fallback remains in the source diff; startup modules and existing
 `tests/test_worker.py` have empty diffs. No mutation source was written to this worktree.
-Status contains only the two modified implementation/test files and three untracked
-approved files (new wiring test and both planning documents); no unrelated file appeared.
+Before publication, status contained only the two modified implementation/test files
+and three untracked approved files (new wiring test and both planning documents); no
+unrelated file appeared.
 
-The coordinator's complete `uv run pytest` finished with exit 0: **5298 collected,
+The coordinator's complete `uv run pytest` on the feature diff based on `22c621a`
+finished with exit 0: **5298 collected,
 4337 passed, 961 skipped, 2 warnings in 384.85s (6:24)**. The skips belong to unrelated
 infrastructure tests without `TEST_DATABASE_URL`/broker configuration; all **19 cache
 and 6 wiring tests executed without skips**. Existing FastAPI/Starlette httpx and anyio
 BlockingPortal deprecation warnings require no change for this issue. No duplicate full
-suite or code-gate run was started after the verified source/tests were frozen.
+local suite was started; quick gates were rerun after the clean rebase, as recorded below.
 
-All local Task 3 checks are complete. Remote required CI and publication remain pending;
-publishing has not occurred and the issue remains open for the tech lead's acceptance
-check. The publisher will append PR/CI evidence after publication.
+All local Task 3 checks and initial required remote CI checks are complete. Draft
+publication and its verified CI evidence are recorded below. The issue remains open for
+the tech lead's acceptance check; no merge or review request was made.
 
 ## Publishing handoff (coordinator/publisher)
 
-- [ ] Refresh main, rebase before review, preserve the approved minimal file scope.
-- [ ] Publisher follows pull-request skill: `fix/209-token-cache-wiring`, Conventional
+- [x] Refresh main, rebase before review, preserve the approved minimal file scope.
+- [x] Publisher follows pull-request skill: `fix/209-token-cache-wiring`, Conventional
       Commit referencing #209, PR title <=72 characters, body What/Why/How to verify/Refs.
-- [ ] No closing keyword or Development-panel link; tech lead closes the issue after AC.
-- [ ] Push/open PR through authorized publisher, attach resulting PR to this chat, verify
+- [x] No closing keyword or Development-panel link; tech lead closes the issue after AC.
+- [x] Push/open PR through authorized publisher, attach resulting PR to this chat, verify
       required CI, update board 12 as authorized; no merge without current-head approval
       and resolved review threads.
+
+### Publication and CI evidence (2026-10-24)
+
+- Refreshed `main` advanced to `25c83fe0d024270e9a744850baa9721cb0ede617` via the
+  disjoint #168 review diff/prompt changes. Rebased cleanly with no conflict or change
+  to the approved five-file scope. Initial published code commit:
+  `c9919dd0319b062cad439d722e79dca57f5b0de3`.
+- On that rebased checkout, `uv run ruff check .` passed; `uv run ruff format --check .`
+  reported **535 files already formatted**; `uv run mypy .` reported **532 source
+  files, no issues**. The focused cache/adapters/wiring suite passed **46 tests,
+  0 skipped in 0.99s**. Commit hooks passed without bypass.
+- Opened and attached [Draft PR #259](https://github.com/larchanka-training/dmc-268-api-t6/pull/259)
+  from `fix/209-token-cache-wiring` to `main`, using the required PR sections/checklist.
+  No reviewer was chosen or requested; the PR has no closing issue references, and
+  issue #209 remains open. Course board #12 stays **In Progress**, consistent with Draft.
+- [Initial code-head CI run 40084814523](https://github.com/larchanka-training/dmc-268-api-t6/actions/runs/40084814523)
+  completed successfully. All three required jobs passed: **Python lint / type / test**,
+  **OpenAPI lint**, **Webhook container smoke**. All other validation/security/build
+  jobs passed; image publishing and deployment jobs were skipped for this PR event.
+  The Python job completed at **10:47:18 UTC**: its full suite had **5314 passed,
+  0 skipped, 2 warnings in 1247.55s**, with the required **100% coverage**; Gold corpus
+  and recorded replay passed; the explicit integration suite had **961 passed,
+  0 skipped, 4353 deselected, 2 warnings in 934.08s**.
+- This documentation-only followup records completed work and pinned initial code-head
+  evidence; source and tests are unchanged. Final publication is gated on the latest
+  head's required checks, available in [PR #259 checks](https://github.com/larchanka-training/dmc-268-api-t6/pull/259/checks).
+  No merge is authorized here; current-head approval and resolved review threads remain
+  prerequisites for a future merge.
