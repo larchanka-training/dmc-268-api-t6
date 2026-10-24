@@ -23,12 +23,14 @@ from app.modules.reviews.application.ast_resolution import (
     go_module_path,
 )
 from app.modules.reviews.application.ast_symbols import (
+    MAX_SOURCE_BYTES,
     AstFacts,
     AstFailureReason,
     ParseRequest,
     language_for_path,
 )
 from app.modules.reviews.application.context_provenance import LineRange, SourceRef, SourceRole
+from app.modules.reviews.application.context_sources import checked_source
 from app.modules.reviews.application.diff_map import (
     DiffFile,
     DiffMap,
@@ -313,6 +315,13 @@ def test_a_cached_text_gets_the_same_checks_as_a_read(content: str, reason: str)
 
     assert text == FileUnavailable(reason)
     assert store.reads == []
+
+
+def test_the_size_check_of_a_source_comes_before_the_binary_check() -> None:
+    # Too large and binary at once: the size decides, as for an L4 read.
+    raw = b"\x00" * (MAX_SOURCE_BYTES + 1)
+
+    assert checked_source(raw) == FileUnavailable(AstFailureReason.SOURCE_TOO_LARGE.value)
 
 
 def test_a_failing_put_is_logged_and_the_text_is_returned(
@@ -1941,6 +1950,25 @@ def test_a_broken_reference_that_also_calls_a_changed_export_shows_both_import_l
     assert (result.found, result.confirmed) == (1, 1)
 
 
+def test_a_broken_reference_is_each_method_that_reads_the_name_not_its_class() -> None:
+    view = (
+        "from .store import load\n\n\n"
+        "class View:\n"
+        "    def show(self, key):\n        return load(key)\n\n"
+        "    def other(self, key):\n        return load(key)\n"
+    )
+    repository = Repository({"pkg/view.py": view}, base={"pkg/store.py": _PY_BASE_STORE})
+
+    result = _select(repository, _diff_map(_deletion(repository)), _load_hints("pkg/view.py"))
+
+    # A class reads what its methods read: each method is a place, the class is not.
+    assert [(place.source.ranges, place.source.reason) for place in result.places] == [
+        ((LineRange(1, 1), LineRange(5, 6)), "rag_broken_reference"),
+        ((LineRange(1, 1), LineRange(8, 9)), "rag_broken_reference"),
+    ]
+    assert (result.found, result.confirmed) == (1, 1)
+
+
 # The RAG slot of the review context (ADR 0001 §9): after L1 and L4, before L2 and L3.
 
 _PLAN = RagPlan()
@@ -2118,6 +2146,22 @@ def test_a_definition_l4_cannot_show_does_not_hide_its_rag_place() -> None:
         "pkg/app.py",
         (LineRange(1, 1), LineRange(4, 6)),
     )
+    stats = payload.rag
+    assert stats is not None and (stats.found, stats.confirmed) == (1, 1)
+
+
+def test_a_definition_l4_displays_gives_no_rag_block() -> None:
+    store = "from .app import run\n\n\ndef save(item):\n    item.check()\n    return run(item)\n"
+    app = "from .store import save\n\n\ndef run(item):\n    return save(item)\n"
+    repository = Repository({"pkg/store.py": store, "pkg/app.py": app})
+    patch = "@@ -4,2 +4,3 @@\n def save(item):\n+    item.check()\n     return run(item)"
+    diff_map = _diff_map(_vcs_file(repository, "pkg/store.py", patch))
+
+    payload = _build(repository, diff_map, _store_hints("pkg/app.py"))
+
+    # L4 shows `run`, the place of the confirmed importer: the slot does not repeat it.
+    assert len([block for block in payload.blocks if block.level is ContextLevel.L4]) == 1
+    assert payload.retrieved == ()
     stats = payload.rag
     assert stats is not None and (stats.found, stats.confirmed) == (1, 1)
 
