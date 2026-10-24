@@ -35,10 +35,15 @@ Usage:
 The verdict passes when the run finished in time, every Run succeeded on attempt 1, each PR has
 exactly one Run, one posted review and one review LLM call despite its duplicate delivery, every
 delivery was projected, all `--workers` workers took a Run, at least min(runs, workers) Runs were in
-flight at once, no queue wait exceeds `--max-queue-wait-ms`, the DLQ is empty and the stub got no
-request it does not serve. `--workers` below `--runs` measures queueing (e.g. 10 PRs on 5 workers).
-With `--llm-delay-ms` below about 1000 a Run can finish before the next one starts, so the parallel
-check may fail by design.
+flight at once, no queue wait exceeds `--max-queue-wait-ms`, the DLQ is empty and the stub answered
+no HTTP request with 404 (a route it does not serve; its 400 for an LLM call with an unknown schema
+is not counted). `--workers` below `--runs` measures queueing (e.g. 10 PRs on 5 workers). With
+`--llm-delay-ms` below about 1000 a Run can finish before the next one starts, so the parallel check
+may fail by design.
+
+The endpoint guard sees only the daemon address compose gets. Out of its scope: a remote buildx
+builder (chosen through HOME, `~/.docker/buildx/current`; it would run the image build elsewhere)
+and a `unix://` socket that is forwarded to a remote host.
 
 The first `--build` needs registry access (base images, apt and PyPI); `down -v` keeps the images,
 remove them with `docker image rm $(docker image ls -q 'dmc163load-*')` (use your project name).
@@ -409,6 +414,7 @@ class LoadStack(Protocol):
     """The load project as the scenario drives it (a fake in the tests)."""
 
     project: str
+    ports: dict[str, int]
 
     def endpoint(self) -> str: ...
 
@@ -697,6 +703,11 @@ def execute(stack: LoadStack, args: argparse.Namespace, secret: str) -> int:
     if error is not None:
         print(f"error: {error}", file=sys.stderr)
         return 2
+    # Only after the check: a refused endpoint must not read as a stack about to start.
+    print(
+        f"load stack {stack.project!r} on {endpoint}, loopback ports {stack.ports}",
+        file=sys.stderr,
+    )
     try:
         leftovers = stack.existing()
     except (StackError, subprocess.CalledProcessError, OSError) as failed:
@@ -842,7 +853,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         "LOAD_GITHUB_APP_PRIVATE_KEY": throwaway_app_key(),
     }
     stack = Stack(args.project, stack_env(os.environ, generated), ports)
-    print(f"load stack {args.project!r} on loopback ports {ports}", file=sys.stderr)
     return execute(stack, args, secret)
 
 
