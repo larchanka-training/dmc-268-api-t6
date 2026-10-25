@@ -11,7 +11,12 @@ from sqlalchemy import and_, func, or_, select, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from app.common.infrastructure.db.enums import CodeChangeState, RunState, SeverityThreshold, WaitForCi
+from app.common.infrastructure.db.enums import (
+    CodeChangeState,
+    RunState,
+    SeverityThreshold,
+    WaitForCi,
+)
 from app.common.infrastructure.db.unit_of_work import SqlAlchemyUnitOfWork
 from app.modules.integrations.gitlab.application.request_credentials import GitLabRequestUnavailable
 from app.modules.integrations.gitlab.infrastructure.models import (
@@ -87,7 +92,9 @@ class SqlAlchemyWebhookRunStore:
             )
             if pr is None:
                 return CandidateMiss.PULL_REQUEST_GONE
-            repository = await self._session.get(Repository, pr.repository_id, populate_existing=True)
+            repository = await self._session.get(
+                Repository, pr.repository_id, populate_existing=True
+            )
             if repository is None:
                 return CandidateMiss.REPOSITORY_GONE
             if (

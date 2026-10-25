@@ -57,12 +57,11 @@ No further automatic fixture-debug cycle is planned after the fourth stand attem
 
 ## External acceptance gate and exclusions
 
-#171 remains OPEN. Its placement/suggestion and stale-head/finite-outcome dependencies
-must have actual merged-SHA/rebase evidence before selective live activation. Keep intake
-and per-connection activation gated; mocks, supplied SHAs and boolean flags do not satisfy
-that dependency. Real MR/run/discussion/redelivery evidence and current-head human review
+#171 was merged as 05a96bc4 and is included by the rebase onto main 063496ec.
+Placement/suggestions, stale-head checks and finite outcomes need current integration
+review. Keep intake and per-connection activation gated. Real MR/run/discussion/redelivery evidence and current-head human review
 remain required; do not close #169 or claim live AC2 from this implementation.
 
 This scope does not add GitLab OAuth/browser onboarding or portal permissions, GitLab CI,
-deep/Sandbox, LEFT publication, graph indexing, #171 payload/placement fixes, deployment,
+deep/Sandbox, LEFT publication, graph indexing, deployment,
 merge or production activation. Existing deployment scripts do not provision GitLab secrets.

@@ -159,6 +159,11 @@ def test_installed_publication_uses_real_trusted_context_and_pool_one(
                     "synthetic-authority-PAT-canary",
                 ),
                 (
+                    "GET",
+                    "https://gitlab.com/api/v4/projects/17/merge_requests/12/versions",
+                    "synthetic-authority-PAT-canary",
+                ),
+                (
                     "POST",
                     "https://gitlab.com/api/v4/projects/17/merge_requests/12/discussions",
                     "synthetic-authority-PAT-canary",
@@ -309,12 +314,12 @@ def test_current_publication_authority_between_requests_and_retries(
                     == expected
                 )
             assert published == 0
-            assert len(calls) == (2 if at == "page" else 3)
+            assert len(calls) == (2 if at == "page" else 4)
             assert pauses == ([1.0] if at == "retry" else [])
             assert "private-canary" not in repr(trace.records)
             if expected is not None:
                 await publisher.execute(pointer)  # Terminal redelivery never revives rotation.
-                assert len(calls) == (2 if at == "page" else 3)
+                assert len(calls) == (2 if at == "page" else 4)
 
     asyncio.run(asyncio.wait_for(scenario(), 25))
 
@@ -358,8 +363,8 @@ def test_factory_keeps_two_tenants_same_numeric_target_on_distinct_origins(
                 gitlab_publications=resources,
             )
             await asyncio.gather(publisher.execute(first), publisher.execute(second))
-            assert seen.count(("gitlab.com", "synthetic-authority-PAT-canary")) == 3
-            assert seen.count(("other.gitlab.example", "replacement-authority-token")) == 3
+            assert seen.count(("gitlab.com", "synthetic-authority-PAT-canary")) == 4
+            assert seen.count(("other.gitlab.example", "replacement-authority-token")) == 4
             async with fixture.sessions() as session:
                 assert (
                     await session.scalar(
@@ -420,7 +425,11 @@ def test_locked_final_write_refuses_new_payload_after_last_checkpoint(
                             review_id=701,
                             comment_ids=(),
                             findings_hash=expected.findings_hash,
-                            moved_to_body=True,
+                            moved_to_body_finding_ids=tuple(
+                                item.finding_id
+                                for item in expected.findings
+                                if item.finding_id is not None
+                            ),
                             now=datetime.now(UTC),
                             expected_publication=expected,
                         )
@@ -502,7 +511,7 @@ def test_locked_final_write_honors_current_cancellation_facts(
                         review_id=701,
                         comment_ids=(),
                         findings_hash=expected.findings_hash,
-                        moved_to_body=False,
+                        moved_to_body_finding_ids=(),
                         now=datetime.now(UTC),
                         expected_publication=expected,
                     )
@@ -708,7 +717,7 @@ def test_installed_coordinates_fallback_retains_one_transport_and_generation(
                 trace=trace,
                 gitlab_publications=resources,
             ).execute(pointer)
-            assert len(created) == 1 and tokens == ["synthetic-authority-PAT-canary"] * 7
+            assert len(created) == 1 and tokens == ["synthetic-authority-PAT-canary"] * 9
             assert len(posts) == 2 and "position" in posts[0] and "position" not in posts[1]
             assert "`x.py:1`" in posts[1]["body"]
             assert "coordinate-private-canary" not in repr(trace.records)
@@ -1003,7 +1012,7 @@ def test_final_checkpoint_only_sql_transient_uses_safe_existing_retry_and_marker
                 sleep=pause,
             ).execute(pointer)
             assert failures == 1 and pauses == [2.0]
-            assert calls == ["GET", "GET", "POST", "GET", "GET"] and len(posts) == 1
+            assert calls == ["GET", "GET", "GET", "POST", "GET", "GET"] and len(posts) == 1
             assert trace.records[0][2] == {
                 "error": {
                     "http_status": None,
@@ -1164,7 +1173,11 @@ def test_inactive_publication_fences_payload_and_route_before_terminal_mutation(
                         review_id=701,
                         comment_ids=(),
                         findings_hash=expected.findings_hash,
-                        moved_to_body=True,
+                        moved_to_body_finding_ids=tuple(
+                            item.finding_id
+                            for item in expected.findings
+                            if item.finding_id is not None
+                        ),
                         now=datetime.now(UTC),
                         expected_publication=expected,
                     )
@@ -1271,7 +1284,7 @@ def test_inactive_rebound_publication_notifies_only_locked_original_workspace(
                                 review_id=701,
                                 comment_ids=(),
                                 findings_hash=expected.findings_hash,
-                                moved_to_body=False,
+                                moved_to_body_finding_ids=(),
                                 now=datetime.now(UTC),
                                 expected_publication=expected,
                             )
@@ -1429,7 +1442,7 @@ def test_legacy_inactive_default_keeps_installation_unavailable(
                             review_id=701,
                             comment_ids=(),
                             findings_hash=pointer.findings_hash,
-                            moved_to_body=False,
+                            moved_to_body_finding_ids=(),
                             now=datetime.now(UTC),
                         )
                         == "cancelled"

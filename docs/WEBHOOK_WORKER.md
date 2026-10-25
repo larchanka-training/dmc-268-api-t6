@@ -83,9 +83,9 @@ GitHub CI/no-CI sweep and offers fast analysis only. Review worker uses real man
 policy/context and installed publication resources; docs/PIPELINE_SPEC.md §8.4 describes
 the immutable fork/diff/blob/tree boundaries. Networks remain outside SQL transactions.
 
-#171 remains OPEN: real activation/live acceptance requires its actual merged/rebased
-dependency evidence, explicit selective authorization and real MR/run/discussion/
-redelivery evidence. Synthetic component proof does not satisfy that gate. The final
+#171 is included through merge 05a96bc4 and rebase onto main 063496ec.
+Real activation/live acceptance still requires current integration review, explicit
+selective authorization and real MR/run/discussion/redelivery evidence. Synthetic component proof does not satisfy that gate. The final
 local stand attempt recorded 27 passed and one failed assertion. Trust, tree/policy
 revision and incomplete-source groups passed, including verified-TLS CLI activation,
 target/start 75/25 language sizes and incomplete-source rejection before model/cache.
@@ -95,7 +95,7 @@ configured-GitHub/retry/redelivery, retirement/sibling and generation-two groups
 unreached. No model or publication traffic occurred, so nonempty inline/summary and
 confirmed redelivery remain unproved. These were prepared-receipt checks against local
 stand-ins, not HTTP webhook ingress or live acceptance. The default-off flag is not an
-operator bypass of #171.
+operator bypass of the live acceptance gate.
 
 ## GitHub local recipe: a signed `labeled` delivery creates a queued Run
 

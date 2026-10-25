@@ -29,8 +29,9 @@ Checked items describe implemented/reviewed source boundaries, not full issue ac
       through an explicitly authorized follow-up; no automatic fixture-debug loop.
 - [ ] Establish nonempty integrated inline/summary and confirmed retry/redelivery,
       retirement/sibling and generation-two publication evidence.
-- [ ] Actual merged/rebased #171 dependency evidence, then explicit selective live setup
-      and real MR/run/discussion/redelivery acceptance. Intake stays default-off.
+- [x] #171 merged as 05a96bc4 and included by rebase onto main 063496ec.
+- [ ] Current integration review, explicit selective live setup and real
+      MR/run/discussion/redelivery acceptance. Intake stays default-off.
 
 ## Current evidence
 
