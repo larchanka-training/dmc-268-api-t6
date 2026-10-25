@@ -34,6 +34,7 @@ from app.modules.reviews.application.graph_retriever import (
 )
 from app.modules.reviews.application.policy_documents import PolicyEntryKind, PolicyTreeEntry
 from app.modules.reviews.application.policy_errors import PolicyError, PolicyErrorCode
+from app.modules.reviews.application.policy_snapshot import PolicySnapshot
 from app.modules.reviews.application.prepare_policy_snapshot import PreparePolicySnapshot
 from app.modules.reviews.application.process_run import RunVcsInput
 from app.modules.reviews.application.prompt_builder import PullRequestMeta
@@ -430,6 +431,24 @@ def test_failed_context_build_keeps_the_exclusions_and_does_not_fail_the_review(
     assert trace.steps[1][2]["error"]["type"] == "RuntimeError"
 
 
+def test_stage_keeps_the_payload_of_the_attempt_and_never_a_stale_one() -> None:
+    stage = _stage(Trace())
+
+    payload = asyncio.run(stage.run(_RUN))
+
+    assert payload is not None and stage.payload is payload
+
+    class Broken:
+        async def execute(self, **kwargs: object) -> object:
+            raise RuntimeError("the tree is unavailable")
+
+    stage._context_builder = lambda run: Broken()  # type: ignore[assignment,return-value]
+
+    assert asyncio.run(stage.run(_RUN)) is None
+    # A caught build failure leaves no payload, not the one of an earlier build.
+    assert stage.payload is None
+
+
 def test_change_of_builtin_excluded_files_only_is_skipped_before_the_context_build() -> None:
     class Broken:
         async def execute(self, **kwargs: object) -> object:
@@ -756,6 +775,7 @@ def test_review_prompt_gets_neither_the_content_nor_the_name_of_an_ignored_file(
 
     class Withheld:
         diff_old_sha: str | None = None
+        snapshot_for_llm: PolicySnapshot | None = None
 
         def excluded(self, path: str) -> bool:
             return path.startswith("generated/")

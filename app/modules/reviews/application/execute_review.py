@@ -158,10 +158,17 @@ class ReviewInputProcessor(Protocol):
 
 
 class ReviewContextFilter(Protocol):
-    """Which paths the policy stage of this attempt withheld from model inputs."""
+    """Which paths the policy stage of this attempt withheld from model inputs.
+
+    It also hands over the attempt's policy snapshot, which it gives only to a run that
+    takes the snapshot path.
+    """
 
     @property
     def diff_old_sha(self) -> str | None: ...
+
+    @property
+    def snapshot_for_llm(self) -> PolicySnapshot | None: ...
 
     def excluded(self, path: str) -> bool: ...
 
@@ -196,6 +203,11 @@ class ExecuteReviewRun:
         prompt_input = await self._repository.get_review_prompt_input(run_id, conventions)
         if prompt_input is None:
             return False
+        if self._context_filter is not None and prompt_input.policy_snapshot is None:
+            # Lock 1: the stage's snapshot of this attempt, None on the legacy path.
+            prompt_input = replace(
+                prompt_input, policy_snapshot=self._context_filter.snapshot_for_llm
+            )
         if prompt_input.review_binding is not None:
             # The stage chose the path before the conventions call; checked again here, so a
             # legacy run never gets a snapshot and a snapshot-path run without a usable one
