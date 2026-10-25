@@ -683,21 +683,6 @@ def test_repeated_issue_refs_are_deduplicated(tmp_path: Path) -> None:
     assert "Задач: 1 (" in r.stdout
 
 
-def test_epic_collects_sub_issues_from_every_page() -> None:
-    """`epic-pages`: api#61–63 on page 1, api#64–65 on page 2, api#62 blocks api#64
-    across the boundary. Page 1 alone counts 3 issues and leaves api#64 outside."""
-    r = run("--epic", "api#60", fixtures=FIXTURES / "epic-pages")
-    assert r.returncode == 0, r.stderr
-    assert "Задач: 5 (открыто 4, закрыто 1). Связей блокировки: 1. Вне выборки: 0." in r.stdout
-    assert section(r.stdout, "Без связей").splitlines()[-1] == (
-        f"- [api#65](https://github.com/{API}/issues/65) [notify] Настройки уведомлений в профиле"
-    )
-    # The cross-page edge, with both ends inside the scope.
-    assert "  api_62 --> api_64" in r.stdout.splitlines()
-    assert class_lines(r.stdout) == ["  class api_61 done"]
-    assert section(r.stdout, "Вне выборки") == "Нет."
-
-
 # ─── live wire format: pages and cursors ────────────────────────────────────
 def passed(argv: list[str], key: str) -> list[tuple[str, str]]:
     """(flag, value) of every `key=value` argument in a recorded gh argv."""
@@ -721,11 +706,10 @@ def test_live_paging_sends_cursors_and_renders_like_the_fixture_seam(
         "    f.write(json.dumps(argv) + '\\n')\n"
         "query = next(a for a in argv if a.startswith('query='))\n"
         "args = dict(a.split('=', 1) for a in argv if '=' in a and a != query)\n"
-        "if 'subIssues(' in query and args['number'] == '139':\n"
-        "    name = 'epic/epic-api-139-p1'\n"
-        "elif 'subIssues(' in query:\n"
+        "if 'subIssues(' in query:\n"
+        "    epics = {'139': 'epic/epic-api-139', '60': 'epic-pages/epic-api-60'}\n"
         "    page = 2 if 'after' in args else 1\n"
-        "    name = 'epic-pages/epic-api-' + args['number'] + '-p' + str(page)\n"
+        "    name = epics[args['number']] + '-p' + str(page)\n"
         "elif 'milestones(' in query:\n"
         "    name = 'pagination/milestones-api'\n"
         "elif 'node(id' in query:\n"
