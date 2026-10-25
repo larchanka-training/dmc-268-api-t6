@@ -232,6 +232,11 @@ Gates for every task: the four commands in the plan, with DB and vhost `imp130f`
     legacy review, conventions and verifier keep 0 s (89 s / 90 s); a snapshot-path review or
     conventions answer the decoder cannot read is recovered (repair / fallback), the legacy v1 and
     conventions validators keep the live decoder.
+  - fix round, tests only: the F1-1 pin carries `reserved_seconds` (0 s for both legacy tasks);
+    the reserve is pinned at each admission site of a snapshot review (after the FX quote: the
+    ledger is never read; before the slot: no slot, no manifest; the transport checkpoint: no
+    request); the concurrent-generation case of `test_context_manifests_postgres.py` holds the
+    review to 3 of the 4 slots and gives the 4th to the verifier.
 - **Done when:** [x] F1-1 green.
 
 ### F1-10: R18, R1 conventions, T-b, T-c ⚑

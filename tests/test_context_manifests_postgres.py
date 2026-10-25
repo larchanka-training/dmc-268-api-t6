@@ -43,11 +43,15 @@ from app.modules.reviews.application.run_trace import TransactionalRunTrace
 from app.modules.reviews.infrastructure.context_manifest_store import (
     SqlAlchemyContextManifestUnitOfWork,
 )
-from app.modules.reviews.infrastructure.llm.gateway import LlmGateway
+from app.modules.reviews.infrastructure.llm.gateway import LlmGateway, StructuredTask
 from app.modules.reviews.infrastructure.llm.memory import InMemoryLlmCallTrace, InMemoryUsageLedger
 from app.modules.reviews.infrastructure.llm.models import review_with_gateway
 from app.modules.reviews.infrastructure.llm.settings import LlmSettings
-from app.modules.reviews.infrastructure.llm.transport import ChatMessage, TransportUnavailable
+from app.modules.reviews.infrastructure.llm.transport import (
+    ChatMessage,
+    ResponseSchema,
+    TransportUnavailable,
+)
 from app.modules.reviews.infrastructure.llm_call_trace import RunTraceLlmCalls
 from app.modules.reviews.infrastructure.run_action_records import insert_run_action
 from app.modules.reviews.infrastructure.run_lifecycle_store import SqlAlchemyRunTraceUnitOfWork
@@ -562,7 +566,9 @@ def test_a_failed_manifest_write_means_no_provider_call() -> None:
 
 def test_concurrent_snapshot_generations_of_one_attempt_stay_within_four_calls() -> None:
     # The twin of test_llm_gateway's case with a manifest store: the call's slot is claimed
-    # before the store write, so a generation held in the write keeps its slot.
+    # before the store write, so a generation held in the write keeps its slot. The snapshot
+    # review keeps one of the attempt's four slots for the verifier (reserved_calls=1), so
+    # both generations together get at most three, and the fourth is left for the verifier.
     class PausingStore:
         """Hold the first manifest write until the other generation has spent the cap."""
 
@@ -598,7 +604,15 @@ def test_concurrent_snapshot_generations_of_one_attempt_stay_within_four_calls()
     run = _run()
     context = _context(FILES, SNAPSHOT)
 
-    async def scenario() -> tuple[LlmCallFailed, LlmCallFailed]:
+    verifier = StructuredTask(
+        operation="verification",
+        messages=(ChatMessage("system", "SYS"), ChatMessage("user", "USER")),
+        schema=ResponseSchema("Answer", {"type": "object"}),
+        validate=lambda answer: {},
+        route="verifier",
+    )
+
+    async def scenario() -> tuple[LlmCallFailed, LlmCallFailed, LlmCallFailed]:
         blocked = asyncio.create_task(review_with_gateway(gateway, context, run))
         await store.entered.wait()
         try:
@@ -608,16 +622,21 @@ def test_concurrent_snapshot_generations_of_one_attempt_stay_within_four_calls()
             store.resume.set()
         with pytest.raises(LlmCallFailed) as held:
             await blocked
-        return active.value, held.value
+        with pytest.raises(LlmCallFailed) as verified:
+            await gateway.generate(verifier, run)
+        return active.value, held.value, verified.value
 
-    active, held = asyncio.run(scenario())
+    active, held, verified = asyncio.run(scenario())
 
-    # The held generation kept the slot it claimed: the other one got three (two primary calls
-    # and its fallback), never a fifth call.
-    assert len(transport.requests) == 4
-    assert (active.calls, held.calls) == (3, 1)
-    # Each call keeps the number of the slot it claimed, also across the held write.
+    # The held generation kept the slot it claimed: the other one got two (its primary call
+    # and its fallback), never the verifier's slot.
+    assert (active.calls, held.calls) == (2, 1)
+    # Each call keeps the number of the slot it claimed, also across the held write; the
+    # verifier gets the fourth and last.
+    assert verified.calls == 1
     assert sorted(record.call_no for _, record in trace.records) == [1, 2, 3, 4]
+    assert [record.operation for _, record in trace.records].count("verification") == 1
+    assert len(transport.requests) == 4
     assert [entry.manifest.recovery_kind for entry in store.entries] == ["none", "none", "fallback"]
 
 
