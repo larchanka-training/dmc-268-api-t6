@@ -120,7 +120,7 @@ TEST_RABBITMQ_URL=<isolated-task-vhost-url> uv run pytest
 
 **Done when:**
 
-- [ ] the test passes on `main` with #229, and the gates are green.
+- [x] the test passes on `main` with #229, and the gates are green.
 
 **Dependencies:** Task 2, and #229 merged. If D2 = B, drop this task and add the PR-body
 note instead.
