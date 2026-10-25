@@ -443,6 +443,7 @@ def test_execute_review_run_excluded_file_does_not_reach_verifier() -> None:
 
     class ContextFilter:
         diff_old_sha: str | None = None
+        head_sha: str | None = None
         snapshot_for_llm: PolicySnapshot | None = None
         payload: ReviewContextPayload | None = None
 
@@ -3243,6 +3244,7 @@ def test_execute_review_counter_version_and_diff_old_sha_propagation() -> None:
 
     class ContextFilterWithOldSha:
         diff_old_sha = "old_base_sha_777"
+        head_sha: str | None = None
         snapshot_for_llm: PolicySnapshot | None = None
         payload: ReviewContextPayload | None = None
 
@@ -3364,6 +3366,7 @@ class _StageSnapshot:
     """The context stage as execute_review sees it: exclusions and the attempt's snapshot."""
 
     diff_old_sha: str | None = None
+    head_sha: str | None = None
     payload: ReviewContextPayload | None = None
 
     def __init__(self, snapshot: PolicySnapshot | None) -> None:

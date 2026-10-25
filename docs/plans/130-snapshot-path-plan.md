@@ -90,6 +90,12 @@ validates against v1 when no snapshot is attached (`llm/models.py:183-188`). Tha
   a stage exists only in tests and eval (`github_adapters` always wires one, `worker.py:668-678`); there
   `process_run.prepare` refuses a v4-bound run before conventions, using the bound version returned by
   `get_run_conventions_input`. `execute_review` re-checks as defence in depth.
+- Fix round of batch 2: the stage's check at `begin` keys on `_STAGE_PROVIDER`, so it passes a v4 run of
+  any provider. `process_run.prepare` reads `get_run_conventions_input` once, right after `stage.begin`
+  (so `policy.load` still opens the attempt) and before the diff fetch, and refuses a v4 run of an
+  unserved provider there in both compositions; without a stage it also refuses the missing snapshot.
+  So the refusal comes before any diff read, diff write or model call. The same read feeds the
+  conventions call; a missing active conventions prompt now also fails before the diff.
 - One property, `stage.snapshot_for_llm` (snapshot or None), feeds `execute_review`, `process_run`
   (conventions) and the stage itself (R7, R19).
 - As built in F1-2: one pure function, `snapshot_for_review(ReviewBinding, snapshot)`, decides at all three
@@ -108,7 +114,8 @@ validates against v1 when no snapshot is attached (`llm/models.py:183-188`). Tha
   other name, or no origin installation) is refused with `policy_snapshot_integrity_error` before any model
   call; it never falls to legacy, which would validate the v4 answer with the v1 contract. No catalog code
   fits better: the refusal is "the snapshot path cannot be served", like the other refusals. Pinned at the
-  selector, the processor without a stage (`require_servable_without_snapshot`) and `execute_review`.
+  selector, the processor with and without a stage (`require_served_provider`,
+  `require_servable_without_snapshot`, before the diff) and `execute_review`.
 
 **DD2. R2 slot (#144 Q2, Q3).**
 - The stage keeps its payload as a `payload` property (`review_context_stage.py:514-536`) instead of

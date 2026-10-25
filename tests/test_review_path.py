@@ -30,7 +30,11 @@ from app.modules.reviews.application.policy_snapshot import (
     make_complete_execution_profile,
 )
 from app.modules.reviews.application.prepare_policy_snapshot import PreparePolicySnapshot
-from app.modules.reviews.application.process_run import ReviewRunProcessor, RunConventionsInput
+from app.modules.reviews.application.process_run import (
+    ReviewContextStagePort,
+    ReviewRunProcessor,
+    RunConventionsInput,
+)
 from app.modules.reviews.application.prompt_builder import (
     PullRequestMeta,
     RepoConventions,
@@ -57,6 +61,7 @@ from tests.test_run_processor_context_stage import (
     RUN_ID,
     Conventions,
     GitHub,
+    Stage,
 )
 from tests.test_run_processor_context_stage import Repository as ProcessingRepository
 from tests.trigger_uow import processing_uow
@@ -283,7 +288,7 @@ def _processor(
     events: list[str],
     github: CountingGitHub,
     *,
-    stage: ReviewContextStage | None = None,
+    stage: ReviewContextStagePort | None = None,
 ) -> ReviewRunProcessor:
     repository = BoundRepository(events, binding=binding)
     options = {} if stage is None else {"context_stage": stage}
@@ -323,21 +328,54 @@ def test_processor_with_the_stage_refuses_before_the_diff_and_the_conventions_ca
     ],
     ids=["v4-github", "v4-gitlab", "v4-no-origin", "v3", "v3-gitlab", "no-binding"],
 )
-def test_processor_without_the_stage_refuses_a_snapshot_path_run_before_conventions(
+def test_processor_without_the_stage_refuses_a_snapshot_path_run_before_the_diff(
     binding: ReviewBinding | None, refused: str | None
 ) -> None:
     events: list[str] = []
-    processor = _processor(binding, events, CountingGitHub())
+    github = CountingGitHub()
+    processor = _processor(binding, events, github)
 
     if refused is not None:
         with pytest.raises(PolicyError) as raised:
             asyncio.run(processor.prepare(RUN_ID))
         assert raised.value.code is _INTEGRITY
         assert refused in str(raised.value)
-        assert events == ["diff stored"]
+        assert events == []
+        assert github.reads == []
     else:
         assert isinstance(asyncio.run(processor.prepare(RUN_ID)), GeneratedConventions)
         assert events == ["diff stored", "conventions model"]
+
+
+@pytest.mark.parametrize(
+    ("binding", "refused"),
+    [
+        (_binding("v4", "gitlab"), "does not serve the provider 'gitlab'"),
+        (_binding("v4", None), "no origin provider"),
+        (_binding("v4"), None),
+        (_binding("v3", "gitlab"), None),
+    ],
+    ids=["v4-gitlab", "v4-no-origin", "v4-github", "v3-gitlab"],
+)
+def test_processor_with_a_stage_refuses_an_unserved_provider_before_the_diff(
+    binding: ReviewBinding, refused: str | None
+) -> None:
+    # The stage builds its diff map as GitHub, so its own check at policy load passes a run of
+    # any provider (the stub passes everything); the processor checks the run's provider.
+    events: list[str] = []
+    github = CountingGitHub()
+    processor = _processor(binding, events, github, stage=Stage(events))
+
+    if refused is not None:
+        with pytest.raises(PolicyError) as raised:
+            asyncio.run(processor.prepare(RUN_ID))
+        assert raised.value.code is _INTEGRITY
+        assert refused in str(raised.value)
+        assert events == ["policy loaded"]
+        assert github.reads == []
+    else:
+        assert isinstance(asyncio.run(processor.prepare(RUN_ID)), GeneratedConventions)
+        assert events == ["policy loaded", "diff stored", "policy stage", "conventions model"]
 
 
 _META = PullRequestMeta("PR", None, "octo", "feature", "main", (), 1, 1, 0, False, False)
