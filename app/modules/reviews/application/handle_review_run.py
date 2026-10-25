@@ -523,11 +523,12 @@ class HandleReviewRun:
                 await uow.commit()
             if requeued and message is not None:
                 _LOGGER.warning(
-                    "Run %s attempt %s failed with %s (%s); retry in %s",
+                    "Run %s attempt %s failed with %s (%s); retry in %s via the %s queue",
                     claimed.run_id,
                     claimed.attempt,
                     failure.error_code,
                     failure.message,
+                    delay,
                     key,
                 )
                 # A failed confirm propagates: redelivery is acked by RunGuard, T18 republishes.

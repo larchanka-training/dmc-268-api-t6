@@ -140,7 +140,8 @@ def classify_failure(exc: BaseException) -> RunFailure:
     """Map an attempt exception to its catalog code; unknown errors are ``internal_error``.
 
     Preserve recognized ``error_code`` values from gateway errors; unknown or
-    absent codes become ``internal_error``.
+    absent codes become ``internal_error``. An ``llm_rate_limited`` failure keeps the
+    provider's Retry-After (``retry_after_s``) as its retry delay, up to the ceiling.
     """
     if isinstance(exc, RunFailure):
         return exc
@@ -148,6 +149,14 @@ def classify_failure(exc: BaseException) -> RunFailure:
         return RunFailure("llm_invalid_output", str(exc))
     code = getattr(exc, "error_code", None)
     if isinstance(code, str) and code in KNOWN_ERROR_CODES:
+        if code == "llm_rate_limited":
+            # Only this code reads the hint: RetryDelays treats any retry_after as a rate
+            # limit. A missing, zero, negative or NaN hint is none; the ceiling is applied
+            # to the float first, so a huge or infinite one cannot overflow timedelta.
+            retry_after_s = getattr(exc, "retry_after_s", None)
+            if isinstance(retry_after_s, (int, float)) and retry_after_s > 0:
+                seconds = min(retry_after_s, RETRY_AFTER_CEILING.total_seconds())
+                return RunFailure(code, str(exc), retry_after=timedelta(seconds=seconds))
         return RunFailure(code, str(exc))
     return RunFailure("internal_error", f"{type(exc).__name__}: {exc}")
 

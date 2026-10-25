@@ -230,7 +230,7 @@ Legacy main ещё включает too_large в порог; указанные 
 | сбой попытки 1 | 30 с | `retry.30s.{engine}` |
 | сбой попытки 2 | 2 мин | `retry.2m.{engine}` |
 | сбой GitHub или GitLab с `Retry-After`: GitHub VCS — ответ любого статуса, кроме 404; GitHub политика — 429 или лимитный 403 (`Retry-After` у 5xx — #168 ч.6); GitLab (default-off, §8.4) — любой ответ-ошибка, `Retry-After` в секундах (до 10 цифр) или HTTP-date, у политики — на `policy_rate_limited` и `policy_fetch_transient`; чтение дерева репозитория для conventions — без `Retry-After` (см. ниже) | не меньше 2 мин и не меньше `Retry-After`: `Retry-After` > 2 мин → 10 мин, > 10 мин → сам `Retry-After`, не больше суток | `retry.2m.{engine}` / `retry.10m.{engine}` |
-| rate limit LLM ревью и conventions: `llm_rate_limited` | 2 мин; `Retry-After` до Run не доходит (см. ниже) | `retry.2m.{engine}` |
+| rate limit LLM: `llm_rate_limited` | не меньше 2 мин и не меньше наибольшего `Retry-After` из 429 одного вызова шлюза, правило то же, что у GitHub; без заголовка — 2 мин | `retry.2m.{engine}` / `retry.10m.{engine}` |
 | сбой попытки 3 | — | T10: `failed`, копия в `reviews.dlq` |
 
 `{engine}` — текущий `runs.engine`; после `engine.fallback` это `fast`.
@@ -239,7 +239,7 @@ Legacy main ещё включает too_large в порог; указанные 
 
 Пока Run так ждёт, check-run GitHub остаётся «AI-ревью выполняется» с «попытка N из 3», а rerun по этому PR получает `409` (T3: есть активный Run), пока ожидающий Run не отменён. Через 10 мин после `available_at` Run считается `stale_queued`, пока ближайший проход реконсилера (до 5 мин) не опубликует его и worker не возьмёт; это может задеть условие `ReviewRunsStuckInQueue` (`for: 5m`, [MONITORING.md §5](MONITORING.md#5-алерты)).
 
-Правило «не меньше `Retry-After`» действует там, где сбой его несёт, — в чтениях GitHub (VCS и политика) и в rate limit verifier: он становится `verification_unavailable` с `Retry-After` провайдера (не больше суток). У LLM шлюз сам ждёт `Retry-After` не дольше 30 с, при большем переходит на fallback (§5.1); `LlmCallFailed` несёт последний `Retry-After` (`retry_after_s`), но `classify_failure` его не читает, поэтому Run с `llm_rate_limited` (ревью, conventions) повторяется через 2 мин. Передача `Retry-After` LLM в Run — #292.
+Правило «не меньше `Retry-After`» действует там, где сбой его несёт: в чтениях GitHub (VCS и политика), в rate limit LLM ревью и conventions — `classify_failure` берёт из `LlmCallFailed` (`retry_after_s`) наибольший `Retry-After` среди 429 одного вызова шлюза (`generate`: основной вызов, повтор, repair, fallback), не больше суток, — и в rate limit verifier: он становится `verification_unavailable` с тем же `Retry-After` (не больше суток). Внутри шлюза ничего не меняется: он сам ждёт `Retry-After` не дольше 30 с, при большем переходит на fallback (§5.1), и в Run заголовок приносит только итоговый отказ. `Retry-After` LLM читается только в секундах: значение в формате HTTP-date игнорируется, и действует нижняя граница 2 мин.
 
 ### 4.3 Возврат из retry-очереди — требование к топологии SD §7.1 (реализует #34)
 
@@ -310,7 +310,7 @@ Fallback-модель — вторая модель шлюза с тем же st
 | Класс | Обнаружение | Попытки и backoff | Repair / fallback / контекст | Итог Run, `error_code` | Автор PR (check-run) | UI |
 |---|---|---|---|---|---|---|
 | Таймаут | нет ответа за 90 с / 300 с | 1 повтор в шлюзе через 2 с + jitter до 1 с | fallback 1 раз, затем retry прогона (§4.2) | `failed`, `llm_timeout` после 3 попыток | `neutral` «AI-ревью не выполнено» + текст §6; ревью нет | `failed` + `errorCode`; каждый вызов — `llm.call` |
-| 429 | HTTP 429 после ротации ключей в шлюзе (#33) | 1 повтор: ждать `Retry-After`, если ≤ 30 с; без заголовка `Retry-After` — 2 с + jitter до 1 с; `Retry-After` > 30 с — сразу fallback | fallback 1 раз, retry прогона с задержкой ≥ 2 мин | `failed`, `llm_rate_limited` | то же | то же |
+| 429 | HTTP 429 после ротации ключей в шлюзе (#33) | 1 повтор: ждать `Retry-After`, если ≤ 30 с; без заголовка `Retry-After` — 2 с + jitter до 1 с; `Retry-After` > 30 с — сразу fallback | fallback 1 раз, retry прогона с задержкой ≥ 2 мин и не меньше наибольшего `Retry-After` из 429 вызова шлюза (§4.2) | `failed`, `llm_rate_limited` | то же | то же |
 | 402 | HTTP 402 от модели | тот же запрос не повторяется, ключи не ротируются | fallback 1 раз, если настроен и помещается в контекст; если последний ответ — 402, retry прогона нет | `failed`, `llm_payment_required` после первой попытки | `neutral` «AI-ревью не выполнено» + текст §6; ревью нет | `failed` + `errorCode`; каждый вызов — `llm.call` |
 | 5xx / соединение | HTTP 5xx, отказ или обрыв соединения | 2 повтора: 2 с, 8 с (+ jitter до 1 с) | fallback 1 раз, retry прогона | `failed`, `llm_unavailable` | то же | то же |
 | Невалидный или нестрогий JSON | не JSON; вывод обрезан по длине; нарушена `review-output.schema.json` или семантика §9 (`InvalidReviewOutput`) | тот же запрос не повторяется | 1 repair-вызов той же модели с ошибками валидатора, затем fallback 1 раз; если repair-переписка (ответ модели + ошибки) не помещается в лимит контекста, repair пропускается и сразу идёт fallback с исходным запросом; retry прогона нет | `failed`, `llm_invalid_output` | то же | то же; ответ модели — в `response` записи `llm.call` |
@@ -318,7 +318,7 @@ Fallback-модель — вторая модель шлюза с тем же st
 | Бюджет прогона | spent + next + обязательный резерв превышают лимит (§4.5) | вызов не делается | сокращение необязательного контекста | `failed`, `verification_budget_exceeded`, если обязательные стадии не помещаются; общая ошибка legacy/прочего бюджета — `budget_exceeded`. Deep может публиковать только уже сохранённый подтверждённый FinalReviewResult | `neutral`; непроверенных кандидатов нет | сохранённые coverage/ошибка |
 | Дедлайн | нет окна вызова и downstream резерва; истёк watchdog (§3) | вызов не делается; watchdog прерывает работу | — | `failed`, `verification_deadline_exceeded` при admission, `deadline_exceeded` при общем watchdog | `neutral`, без непроверенной публикации | `failed` + `errorCode` |
 
-Для verifier используются отдельные итоговые коды: invalid schema/семантика/ID/refs → `verification_invalid_output` без retry; временные timeout/5xx/rate limit после доступного восстановления → `verification_unavailable` с bounded retry run (30 с/2 мин, Retry-After учитывается). Неуспешный verifier запрещает публикацию любого кандидата этого набора. Provider code остаётся в trace. Ошибки оплаченных metadata сохраняют существующую terminal-политику §4.5; резерв не разрешает повторить уже оплаченный ответ.
+Для verifier используются отдельные итоговые коды: invalid schema/семантика/ID/refs → `verification_invalid_output` без retry; временные timeout/5xx/rate limit после доступного восстановления → `verification_unavailable` с bounded retry run (30 с / 2 мин, дольше — по `Retry-After`, не больше суток (§4.2)). Неуспешный verifier запрещает публикацию любого кандидата этого набора. Provider code остаётся в trace. Ошибки оплаченных metadata сохраняют существующую terminal-политику §4.5; резерв не разрешает повторить уже оплаченный ответ.
 
 ### 5.2 Сбои GitHub
 
