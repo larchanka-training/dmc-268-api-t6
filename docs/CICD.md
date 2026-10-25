@@ -43,9 +43,12 @@ flowchart TD
   health -->|ok| promote["promote digest → :staging"]
   promote --> done["staging обновлён"]
   health -->|ok| monitoring["deploy-monitoring: Prometheus, Grafana,\nAlertmanager (docs/MONITORING.md)"]
-  health -->|fail| rb["rollback на предыдущий образ"]
-  deploy -->|fail| rb
-  rb --> fail["job красный; ошибка rollback видна отдельно"]
+  health -->|fail| rb["rollback: previous или bootstrap\n(§5: Действия при отказе)"]
+  deploy -->|fail| switched{"релиз переключён?\n(§5: Действия при отказе)"}
+  switched -->|да| rb
+  switched -->|нет| unchanged["release unchanged"]
+  unchanged --> fail["job красный; ошибка rollback видна отдельно"]
+  rb --> fail
 ```
 
 | Job | Когда | Permissions | Что делает |
@@ -63,7 +66,7 @@ flowchart TD
 | `Docker image security scan` | после сборки | `contents: read` | Trivy `CRITICAL`/`HIGH` |
 | `Webhook container smoke` | PR и `main` | `contents: read` | после `Docker image build`: собранный образ применяет миграции (`alembic upgrade head`) к service-контейнеру PostgreSQL 17 и стартует API с одноразовым `GITHUB_WEBHOOK_SECRET` (`openssl rand`, маскируется, не секрет репозитория); после `GET /healthcheck` — `scripts/webhook_smoke.py --count 50`: подписанная доставка → 202 `pending`, повтор → 202 `duplicate`, испорченная подпись → 401, 50 новых доставок → 202 и p50/p95/max. Затем стартуют заглушка GitHub `scripts/github_stub.py` (порт 9999) и `webhook-worker` из того же образа (`python -m app.webhook_worker`, одноразовый ключ App из `openssl genrsa`, `GITHUB_API_URL` на заглушку); job до 90 с ждёт в его логе строку исхода доставки `labeled` — `status=ignored_unknown_repository detail=action=labeled unknown_repository` (репозиторий 101 не заведён, Run не создаётся, RabbitMQ не нужен); при падении печатает логи воркера и заглушки. Имя — required check в правилах `main` (с 04.10.2026), менять только вместе с ними. Входит в `needs` у `Push Docker image` |
 | `Push Docker image` | только `main` | `contents: read`, `packages: write`, `actions: read` | push `:sha`, resolve digest (тот же artifact, что прошёл Trivy) |
-| `Deploy staging` | только `main` | `contents: read`, `packages: read` | выбор цели (курсовой VPS или Terraform-хост, §8), подготовка хоста (Docker, на VPS — edge-прокси), Compose по digest, health check, авто-rollback при ошибке deploy или health |
+| `Deploy staging` | только `main` | `contents: read`, `packages: read` | выбор цели (курсовой VPS или Terraform-хост, §8), подготовка хоста (Docker, на VPS — edge-прокси), Compose по digest, health check, авто-rollback после переключения релиза (на первом выкате без previous — bootstrap); до переключения релиз сохраняется (§5, «Действия при отказе») |
 | `Deploy monitoring` | только `main`, после успешного `Deploy staging` | `contents: read` | загружает `deploy/monitoring` в `/opt/dmc-268-monitoring` и запускает его `deploy.sh` ([MONITORING.md](MONITORING.md) §6). Отдельный job и своя группа concurrency `staging-monitoring`: его сбой не откатывает приложение, а ожидание не отменяет `Promote staging tag` и не отменяется им |
 | `Promote staging tag` | после успешного health check | `contents: read`, `packages: write` | под lock `staging-deploy` читает `.deploy-state` на VM; если там всё ещё этот digest — `:staging-previous` ← `:staging`, `:staging` ← проверенный digest, иначе warning и пропуск |
 
@@ -253,7 +256,7 @@ GET /healthcheck
 
 У PostgreSQL, RabbitMQ и Redis нет `ports:`: `ports:` в compose публикует порт на все интерфейсы в обход файрвола хоста. Панель управления RabbitMQ — через SSH-туннель к IP контейнера. Тома `postgres-data` и `rabbitmq-data` переживают выкат и rollback образа. Фиксированный `hostname` RabbitMQ держит имя узла, а с ним каталог данных в томе: без него каждое пересоздание контейнера начинало бы новый узел, и durable-очереди пропадали бы.
 
-Образы хранилищ запиннены по digest (`<имя>:<версия>@sha256:…`), как Caddy в `deploy/edge/compose.yml`. При наличии digest Docker игнорирует тег, поэтому перевыкат и rollback не сдвигают хранилище на другую сборку; тег оставлен как подпись версии. Обновление — отдельным PR: `docker buildx imagetools inspect postgres:<версия>-alpine`, строка `Digest:` (digest multi-arch индекса), тег и digest меняются вместе. Rollback берёт compose из текущего checkout, поэтому пин хранилища вместе с образом приложения не откатывается: revert-коммит возвращает прежнюю ссылку на образ, но совместимость данных при возврате на старую версию не гарантирует — обновление хранилища проверять до мержа. Локальный `docker-compose.yml` и service-контейнеры CI остаются на плавающих тегах (`17-alpine`, `4-management-alpine`, `8-alpine`).
+Образы хранилищ запиннены по digest (`<имя>:<версия>@sha256:…`), как Caddy в `deploy/edge/compose.yml`. При наличии digest Docker игнорирует тег, поэтому перевыкат и rollback не сдвигают хранилище на другую сборку; тег оставлен как подпись версии. Обновление — отдельным PR: `docker buildx imagetools inspect postgres:<версия>-alpine`, строка `Digest:` (digest multi-arch индекса), тег и digest меняются вместе. Ручной rollback обновляет Compose из своего checkout только в режиме `edge`; в `ports` (включая Terraform-хост) workflow обновляет скрипты, сохраняя Compose на хосте. Пин хранилища вместе с образом приложения не откатывается: revert-коммит возвращает прежнюю ссылку на образ, но совместимость данных при возврате на старую версию не гарантирует — обновление хранилища проверять до мержа. Локальный `docker-compose.yml` и service-контейнеры CI остаются на плавающих тегах (`17-alpine`, `4-management-alpine`, `8-alpine`).
 
 Миграции #132 идут после схемы policy/context #136: `20261012_0030` →
 `20261010_0029` (App identity) → `20261010_0030` (origin Run). Первый выкат
@@ -353,7 +356,7 @@ policy/context #136: ревизии `20261012_0030` и `20261011_0029`, их п�
 
 Воркеры стартуют после успешного `bootstrap` и здоровых `postgres` и `rabbitmq`: `worker` без брокера не объявит топологию очередей, а `webhook-worker` при проекции квитанций создаёт прогоны и публикует их в очередь ревью (#52). HTTP-порта у воркеров нет, поэтому HTTP-healthcheck образа у них заменён: процесс раз в 10 с трогает heartbeat-файл (`WORKER_HEARTBEAT_FILE`, `app/common/infrastructure/heartbeat.py`) — `worker` только после подключения консьюмеров (двух ревью и `index.repo`; без GitHub App — только ревью), — а healthcheck считает контейнер больным, если файлу больше 30 с. Воркер, упавший на старте (например, без `GITHUB_APP_BOT_LOGIN` или `RABBITMQ_URL`), или процесс с замороженным циклом событий не становится healthy, `up --wait` падает, и `deploy.sh` откатывает выкат. Heartbeat — отдельная задача того же цикла событий, поэтому зависшую работу он не ловит: застрявшее на одном сообщении ревью или проход `webhook-worker`, который каждый раз падает (например, с битым PEM App: ошибка уходит в лог, проход возвращает 0), оставляют контейнер healthy. Это намеренно: временная недоступность GitHub или БД не должна валить выкат; зависшую работу видно по логам и метрикам очередей, не по healthcheck. Docker не перезапускает контейнер, ставший unhealthy уже после выката: `restart: unless-stopped` срабатывает только при выходе процесса.
 
-Откат (`rollback.sh`, авто и ручной) берёт compose из текущего checkout, а образ — предыдущий. Образ, собранный до heartbeat (до #35, часть 2), файл не трогает, поэтому healthcheck сначала проверяет, есть ли в образе `/srv/app/common/infrastructure/heartbeat.py`: нет — живой процесс считается здоровым (упавший на старте воркер `up --wait` всё равно не пройдёт), есть — строгая проверка возраста файла. Так откат на последний образ до воркеров проходит.
+Откат (`rollback.sh`, авто и ручной) использует Compose-файлы на хосте. Ручной workflow обновляет их из своего checkout только в режиме `edge`; в `ports` (включая Terraform-хост) обновляет только скрипты и сохраняет Compose. Целевой образ выбирается из `.deploy-state.previous` или задаётся явно. Образ, собранный до heartbeat (до #35, часть 2), файл не трогает, поэтому healthcheck сначала проверяет, есть ли в образе `/srv/app/common/infrastructure/heartbeat.py`: нет — живой процесс считается здоровым (упавший на старте воркер `up --wait` всё равно не пройдёт), есть — строгая проверка возраста файла. Так откат на последний образ до воркеров проходит.
 
 ---
 
@@ -374,7 +377,7 @@ policy/context #136: ревизии `20261012_0030` и `20261011_0029`, их п�
 1. **Автоматический.** Deploy или health check не прошли → шаг rollback вызывает `rollback.sh` с `ROLLBACK_MODE=auto` и `DEPLOY_RUN` этого run. Откат выполняется, только если `deploy.sh` этого run дошёл до переключения релиза: тогда скрипт поднимает образ из `.deploy-state.previous` и не записывает упавший образ в previous — повторный откат не вернёт сломанный релиз; на первом выкате без previous release восстанавливается bootstrap nginx. При падении `compose up` rollback вызывается и из `deploy.sh`. Какие отказы запускают откат и какой релиз становится целью — таблица в начале подраздела «Действия при отказе». Данные PostgreSQL не сбрасываются. Тег `:staging` в GHCR не меняется до успешного health check.
 2. **Ручной.** Actions → **Rollback staging** → Run workflow, ветка `main` (с другой ветки jobs пропускаются; Environment `staging` тоже ограничен веткой `main`, см. [SECRETS.md](SECRETS.md)).
    - `reason` — обязателен.
-   - Пустой `image` — предыдущий релиз из `.deploy-state.previous`; релиз, с которого откатились, становится новым previous (как `:staging` → `:staging-previous`).
+   - Пустой `image` выбирает образ из `.deploy-state.previous`; релиз, с которого откатились, становится новым previous (как `:staging` → `:staging-previous`). После завершённого автоотката или отказа `docker login` при deploy этот файл уже указывает на работающий релиз: пустой `image` применяет его повторно, печатает `rolled back to …`, а promotion может сдвинуть `:staging-previous` на тот же релиз. Для отката дальше назад задайте явный SHA или digest.
    - Конкретная версия — полный 40-символьный git SHA (→ `ghcr.io/<owner>/dmc-268-api-t6:<sha>`) или полный `ghcr.io/...@sha256:...`. Тег разрешается в immutable digest этого репозитория до admission; `staging-previous` и другие alias могут пройти promotion по сохранённому digest. Образ из другого реестра или репозитория по-прежнему валит promotion allowlist. Для точного выбора релиза предпочтителен явно проверенный digest.
    - На курсовом VPS (режим `edge`) workflow выкладывает `deploy/edge/Caddyfile` из своего checkout и делает `caddy reload`, поэтому до первого обращения к хосту шаг `caddy validate` проверяет этот Caddyfile той же командой, что job `Edge Caddyfile validate`; при ошибке откат падает, не тронув VPS.
 3. После отката проверка снаружи: для образа API — `/healthcheck`, для bootstrap — `GET /` с HTTP 200. Workflow синхронизирует `:staging` с фактически запущенным образом; bootstrap пропускает promotion, неожиданная ссылка на образ валит job.
@@ -425,7 +428,8 @@ immutable release ref, по которому ручной workflow делает 
 остаётся красным, ошибка rollback видна отдельно, `:staging` не продвигается. Уже неудавшийся
 forward deploy мог применить миграцию или заменить контейнеры **до** вызова rollback: отказ
 не отменяет эти предыдущие изменения. Гарантия начинается при входе в `rollback.sh`: ручной
-edge workflow до него уже мог загрузить bundle, подготовить host и изменить edge-прокси.
+edge workflow до него уже мог выложить Compose-файлы и скрипты, подготовить host и изменить
+edge-прокси; bundle секретов этот workflow не отправляет.
 Отказ не восстанавливает эти workflow-изменения.
 
 Граф — необходимое условие допуска, а не доказательство совместимости приложения, схемы,
@@ -617,7 +621,7 @@ Caddy (compose project `dmc-268-edge`, `/opt/dmc-268-edge`) принимает 8
 
 - **Владелец — репозиторий API.** Каждый выкат API на VPS (и Rollback) обновляет прокси: `up -d --wait`, затем `caddy reload`. Репозиторий UI и другие сервисы прокси **не выкатывают** и `deploy/edge/` не копируют.
 - Изменение маршрутов — PR в `deploy/edge/Caddyfile` этого репозитория. Перед PR проверить конфигурацию тем же образом, что на VPS: `docker run --rm -e APP_DOMAIN=example.test -v "$PWD/deploy/edge:/etc/caddy:ro" <образ caddy из deploy/edge/compose.yml> caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile`. Ту же проверку на каждом PR и push в `main` выполняет job `Edge Caddyfile validate` (§1).
-- Перед выкатом приложения (и перед Rollback) job до 180 с ждёт успешного TLS-рукопожатия с `https://staging-api.<APP_DOMAIN>/` (любой HTTP-статус, 502 тоже). Без сертификата job падает до изменений на хосте, поэтому медленный первый выпуск в Let's Encrypt не запускает авто-rollback.
+- Перед выкатом приложения (и перед Rollback) job до 180 с ждёт успешного TLS-рукопожатия с `https://staging-api.<APP_DOMAIN>/` (любой HTTP-статус, 502 тоже). Ожидание идёт после выкладки файлов, `provision.sh` и `caddy reload`. Без сертификата job падает до изменений приложения (`deploy.sh`/`rollback.sh`), поэтому медленный первый выпуск в Let's Encrypt не запускает авто-rollback.
 
 | Hostname (`APP_DOMAIN` = `dmc268-t6.axyi.ru`) | Upstream в `dmc268-edge` | Статус |
 |---|---|---|

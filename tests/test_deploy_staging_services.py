@@ -1811,6 +1811,41 @@ def test_failed_stack_start_rolls_back_once_and_the_ci_rollback_is_idempotent(ho
     assert after == after_deploy
 
 
+def test_ci_auto_rollback_after_a_failed_image_pull_restores_the_working_release(
+    host: Host,
+) -> None:
+    assert host.deploy(IMAGE_A, bundle="", env={"DEPLOY_RUN": "101-1"}).returncode == 0
+    assert host.deploy(IMAGE_B, env={"DEPLOY_RUN": "102-1"}).returncode == 0
+    state_b = (host.app_dir / ".deploy-state").read_bytes()
+    calls_before = len(host.calls())
+
+    deploy = host.deploy(IMAGE_C, env={"DEPLOY_RUN": "103-1", "STUB_PULL_FAILURE": IMAGE_C})
+
+    assert deploy.returncode != 0
+    assert f"pull {IMAGE_C}" in host.calls()[calls_before:]
+    assert not any(" up " in call for call in host.calls()[calls_before:])
+    assert _read_dotenv(host.env_file)["IMAGE"] == IMAGE_C
+    assert (host.app_dir / ".deploy-state").read_bytes() == state_b
+    rollback_calls = len(host.calls())
+
+    result = _ci_auto_rollback(host, "103-1")
+
+    assert result.returncode == 0, result.stderr
+    assert f"rolled back to {IMAGE_B}" in result.stdout
+    assert "release unchanged" not in result.stdout + result.stderr
+    assert _read_dotenv(host.env_file)["IMAGE"] == IMAGE_B
+    state = _read_dotenv(host.app_dir / ".deploy-state")
+    assert state["current_image"] == IMAGE_B and state["rolled_back"] == "true"
+    assert (host.app_dir / ".deploy-state.previous").read_bytes() == state_b
+    calls = host.calls()[rollback_calls:]
+    pull = calls.index(f"pull {IMAGE_B}")
+    probe = next(i for i, call in enumerate(calls) if " run " in call)
+    up = next(i for i, call in enumerate(calls) if " up " in call)
+    assert pull < probe < up
+    assert (host.log.parent / "probe-image").read_text().strip() == B_ID
+    assert (host.log.parent / "up-image").read_text().strip() == B_ID
+
+
 def test_ci_auto_rollback_after_a_failed_health_check_restores_the_previous_release(
     host: Host,
 ) -> None:

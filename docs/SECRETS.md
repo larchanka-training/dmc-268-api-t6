@@ -337,17 +337,21 @@ ASCII-имена по `[A-Za-z_][A-Za-z0-9_]*` и печатает отсорт�
 кавычками, дефисом или Unicode исключаются. `env | cut -d= -f1` для этого запрещён: строки
 многострочного PEM без `=` он напечатает целиком.
 
-Пример полного вывода из изолированной проверки (набор имён зависит от образа и роли):
+Пример полного вывода из изолированной проверки: набор имён зависит от образа, роли и
+заданных опциональных секретов и конфигурации. В этом примере verifier не задаёт используемые
+на staging опциональные `GITHUB_CLIENT_ID`, `LLM_BASE_URL`, `LLM_MODEL`, `LLM_FALLBACK_MODEL`
+и `PORTAL_URL`:
 
 ```text
 api environment keys: ["AUTH_JWT_AUDIENCE", "AUTH_JWT_ISSUER", "AUTH_JWT_PRIVATE_KEY", "AUTH_JWT_PUBLIC_KEY", "DATABASE_URL", "GITHUB_CLIENT_SECRET", "GITHUB_WEBHOOK_SECRET", "GPG_KEY", "HOME", "HOSTNAME", "LC_CTYPE", "PATH", "POSTGRES_DB", "POSTGRES_HOST", "POSTGRES_PASSWORD", "POSTGRES_PORT", "POSTGRES_USER", "PYTHONDONTWRITEBYTECODE", "PYTHONUNBUFFERED", "PYTHON_SHA256", "PYTHON_VERSION", "RABBITMQ_URL", "REDIS_URL", "UV_COMPILE_BYTECODE", "UV_LINK_MODE"]
 worker environment keys: ["DATABASE_URL", "GITHUB_APP_ID", "GITHUB_APP_PRIVATE_KEY", "GPG_KEY", "HOME", "HOSTNAME", "LC_CTYPE", "LLM_API_KEYS", "PATH", "PYTHONDONTWRITEBYTECODE", "PYTHONUNBUFFERED", "PYTHON_SHA256", "PYTHON_VERSION", "RABBITMQ_URL", "REDIS_URL", "UV_COMPILE_BYTECODE", "UV_LINK_MODE", "WORKER_HEARTBEAT_FILE"]
-webhook-worker environment keys: ["DATABASE_URL", "GITHUB_APP_BOT_LOGIN", "GITHUB_APP_ID", "GITHUB_APP_PRIVATE_KEY", "GPG_KEY", "HOME", "HOSTNAME", "LC_CTYPE", "PATH", "PYTHONDONTWRITEBYTECODE", "PYTHONUNBUFFERED", "PYTHON_SHA256", "PYTHON_VERSION", "RABBITMQ_URL", "UV_COMPILE_BYTECODE", "UV_LINK_MODE", "WORKER_HEARTBEAT_FILE"]
+webhook-worker environment keys: ["DATABASE_URL", "GITHUB_APP_BOT_LOGIN", "GITHUB_APP_ID", "GITHUB_APP_PRIVATE_KEY", "GPG_KEY", "HOME", "HOSTNAME", "LC_CTYPE", "PATH", "PYTHONDONTWRITEBYTECODE", "PYTHONUNBUFFERED", "PYTHON_SHA256", "PYTHON_VERSION", "RABBITMQ_URL", "REDIS_URL", "UV_COMPILE_BYTECODE", "UV_LINK_MODE", "WORKER_HEARTBEAT_FILE"]
 ```
 
 В обоих режимах после здорового `up --wait` сначала записывается identity текущего релиза и
 previous по manual/auto правилам, затем выполняется диагностика, затем печатается `rolled back`.
-Отказ по ревизии или восстановление bootstrap nginx не запускает диагностику. Диагностика
+Отказ по ревизии, восстановление bootstrap nginx и auto-skip `release unchanged` не запускают
+диагностику ([CICD §5 «Действия при отказе»](CICD.md#действия-при-отказе)). Диагностика
 принимает только stdout с точным JSON-списком и нулевым кодом; stderr отбрасывается.
 Недоступный сервис, ошибка exec и неожиданный/шумный stdout дают фиксированную
 `rollback completion failed: <service> environment key diagnostics failed`; сырой stdout/stderr
