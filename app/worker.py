@@ -109,6 +109,7 @@ from app.modules.reviews.application.publish_run_review import (
 from app.modules.reviews.application.queue_messages import ReviewPublishQueue, RunRetryQueue
 from app.modules.reviews.application.rag_context import CachedBlobSource
 from app.modules.reviews.application.rag_index import OpenReviewIndex
+from app.modules.reviews.application.reflection_pass import ReflectionPass
 from app.modules.reviews.application.review_context import BuildReviewContext
 from app.modules.reviews.application.review_context_stage import (
     EstimatedTokenCounter,
@@ -185,6 +186,7 @@ from app.modules.reviews.infrastructure.llm.gateway import LlmGateway
 from app.modules.reviews.infrastructure.llm.models import (
     GatewayConventionsModel,
     GatewayReviewModel,
+    GatewayVerifierModel,
 )
 from app.modules.reviews.infrastructure.llm.settings import LlmSettings
 from app.modules.reviews.infrastructure.no_ci_sweep_candidates import (
@@ -241,11 +243,13 @@ async def process_review_run(
     trace: TransactionalRunTrace | None = None,
     engine: str = "fast",
     context_stage: ReviewContextStage | None = None,
+    reflection_pass: ReflectionPass | None = None,
 ) -> bool:
     """Process one run using the worker's already-created database pool.
 
     The queue worker passes ``output`` (store and hand over to ``review.publish``) and
     ``trace`` (``run_actions`` steps); without them the answer is published inline.
+    ``reflection_pass`` verifies a snapshot-path review; a legacy run never calls it.
     """
 
     repository = SqlAlchemyRunRepository(session_factory, allow_unscoped=True)
@@ -280,9 +284,16 @@ async def process_review_run(
         prompts = TracedReviewPromptRepository(prompts, trace, trace, engine=engine)
     if context_stage is None:
         # A caller without GitHub App adapters: the run is composed without the stage.
-        return await ExecuteReviewRun(processor, prompts, provider, publisher).execute(run_id)
+        return await ExecuteReviewRun(
+            processor, prompts, provider, publisher, reflection_pass=reflection_pass
+        ).execute(run_id)
     return await ExecuteReviewRun(
-        processor, prompts, provider, publisher, context_filter=context_stage
+        processor,
+        prompts,
+        provider,
+        publisher,
+        context_filter=context_stage,
+        reflection_pass=reflection_pass,
     ).execute(run_id)
 
 
@@ -377,10 +388,17 @@ class AttemptReviewProvider:
         source: GitHubRunSource,
         conventions: ConventionsModel,
         review: GatewayReviewModel | UnconfiguredModel,
+        reflection_pass: ReflectionPass | None = None,
     ) -> None:
         self._source = source
         self._conventions = conventions
         self._review = review
+        self._reflection_pass = reflection_pass
+
+    @property
+    def reflection_pass(self) -> ReflectionPass | None:
+        """The attempt's verifier (R14); None on a worker without ``LLM_*``."""
+        return self._reflection_pass
 
     async def fetch_diff(self, *, code_change_id: UUID, head_sha: str) -> list[DiffSnapshot]:
         raise RuntimeError("the worker reads the diff through its VcsProvider")
@@ -764,6 +782,7 @@ def attempt_provider_factory(
             source,
             GatewayConventionsModel(gateway, run),
             GatewayReviewModel(gateway, run, source),
+            ReflectionPass(GatewayVerifierModel(gateway, run)),
         )
 
     return factory
@@ -827,15 +846,23 @@ def compose_worker_process(
             run_url=run_url,
             now=now,
         )
+        provider = factory(claimed)
         return await process_review_run(
             claimed.run_id,
-            CheckpointedProvider(factory(claimed), checkpoint),
+            CheckpointedProvider(provider, checkpoint),
             session_factory,
             github.vcs,
             output=output,
             trace=trace,
             engine=claimed.engine,
             context_stage=github.context_stage(trace, checkpoint) if github.context_stage else None,
+            # CONTRACT: only the production attempt provider carries a verifier; an injected
+            # provider (tests) runs without one, which only a snapshot-path run needs. Its
+            # calls go through the gateway, whose own checkpoint checks cancellation and
+            # keeps a whole call timeout before the attempt deadline (T11).
+            reflection_pass=(
+                provider.reflection_pass if isinstance(provider, AttemptReviewProvider) else None
+            ),
         )
 
     enqueue = TryEnqueueWebhookRun(

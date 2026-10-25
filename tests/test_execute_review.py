@@ -1627,7 +1627,7 @@ def test_execute_review_rejects_finding_with_invalid_attribution() -> None:
     assert "No verified issues were found" in published_output["summary"]["problem"]
 
 
-def test_execute_review_legacy_run_with_reflection_pass_logs_warning(
+def test_execute_review_legacy_run_with_reflection_pass_logs_no_warning(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     import logging
@@ -1674,11 +1674,8 @@ def test_execute_review_legacy_run_with_reflection_pass_logs_warning(
     with caplog.at_level(logging.WARNING):
         success = asyncio.run(pipeline.execute(RUN_ID))
     assert success is True
-    warning_records = [
-        r for r in caplog.records if "execute_review_legacy_run_without_snapshot" in r.message
-    ]
-    assert len(warning_records) == 1
-    assert str(RUN_ID) in warning_records[0].message
+    # The worker passes a reflection pass to every attempt (#130 R14): a legacy run logs nothing.
+    assert [r.message for r in caplog.records if r.levelno >= logging.WARNING] == []
 
     # Without reflection pass, no warning is logged
     caplog.clear()
@@ -1753,6 +1750,9 @@ def test_execute_review_reflection_pass_logs_run_id_call_id_and_counters(
             return True
 
     class FakePassVerifier:
+        def max_prompt_tokens(self) -> int | None:
+            return None
+
         async def verify_recorded(self, *, candidates: Any, context: Any) -> Any:
             from app.modules.reviews.application.reflection_pass import VerificationRecord
 
@@ -1949,6 +1949,9 @@ def test_execute_review_validates_candidate_rule_name_against_manifest() -> None
             )
 
     class FakePassWithRulesVerifier:
+        def max_prompt_tokens(self) -> int | None:
+            return None
+
         async def verify_recorded(self, *, candidates: Any, context: Any) -> Any:
             from app.modules.reviews.application.reflection_pass import VerificationRecord
 
@@ -3020,9 +3023,15 @@ def test_execute_review_drops_evidence_source_disallowed_and_revision_mismatch()
         call_id: UUID,
         stage: Any = "review",
         recovery_kind: Any = "none",
+        counter: Any = None,
     ) -> CallManifest:
         manifest = orig_build_manifest(
-            self, context, call_id=call_id, stage=stage, recovery_kind=recovery_kind
+            self,
+            context,
+            call_id=call_id,
+            stage=stage,
+            recovery_kind=recovery_kind,
+            counter=counter,
         )
         if stage != "review":
             return manifest

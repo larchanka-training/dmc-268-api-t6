@@ -131,7 +131,12 @@ def test_process_review_run_composes_repository_and_processor_from_a_shared_fact
 
     class Pipeline:
         def __init__(
-            self, processor: Processor, repository: object, model: Provider, publisher: object
+            self,
+            processor: Processor,
+            repository: object,
+            model: Provider,
+            publisher: object,
+            **options: object,
         ) -> None:
             assert isinstance(processor, Processor)
             assert repository is not None

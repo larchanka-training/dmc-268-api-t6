@@ -236,6 +236,27 @@ def validate_verifier_answer(content: str) -> dict[str, object]:
     return decoded
 
 
+def verifier_answer_without_reasons(content: str) -> str:
+    """The verifier answer as its ``llm.call`` stores it: without ``decisions[].reason``.
+
+    E-2 (TL-3): the reason is never stored. Text that is not one JSON object is withheld
+    whole, since a reason inside it cannot be found reliably.
+    """
+    try:
+        decoded = _decode_object(content)
+    except InvalidAnswer:
+        return f"[withheld: {len(content)} characters that are not a JSON object]"
+    decisions = decoded.get("decisions")
+    if isinstance(decisions, list):
+        decoded["decisions"] = [
+            {key: value for key, value in item.items() if key != "reason"}
+            if isinstance(item, dict)
+            else item
+            for item in decisions
+        ]
+    return json.dumps(decoded, ensure_ascii=False)
+
+
 def conventions_answer_validator(changed_files: tuple[str, ...]) -> _ConventionsValidator:
     return _ConventionsValidator(changed_files)
 

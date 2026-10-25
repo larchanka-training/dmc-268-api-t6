@@ -155,6 +155,9 @@ class StructuredTask:
     # CVS §7.3: provider-call slots of this (run, attempt) kept for the stages after
     # this task (the review keeps one for the verifier). F sets it; live stays at 0.
     reserved_calls: int = 0
+    # How a stored ``llm.call`` response shows the answer text (E-2: the verifier's
+    # without ``decisions[].reason``); None stores the provider body as is.
+    redact_answer: Callable[[str], str] | None = None
 
     def __post_init__(self) -> None:
         if self.reserved_calls < 0:
@@ -172,6 +175,8 @@ class GatewayResult:
     accepted_call_id: UUID | None = None
     # That call's manifest: the base one, or the repair or fallback manifest (T-a).
     accepted_manifest: CallManifest | None = None
+    # Its ``context_manifests`` row; None when the gateway stores no manifests.
+    accepted_manifest_id: UUID | None = None
 
 
 @dataclass
@@ -251,9 +256,13 @@ class LlmGateway:
         limit = self._settings.policy.input_token_limit["deep" if engine == "deep" else "fast"]
         return min(profile.context_window, limit)
 
-    def max_prompt_tokens(self, engine: str) -> int:
-        """The budget ``PromptBuilder`` input is fitted to, for the primary model."""
-        primary = self._settings.primary
+    def max_prompt_tokens(
+        self, engine: str, route: Literal["review", "verifier"] = "review"
+    ) -> int:
+        """The budget a prompt is fitted to, for the primary model of the route."""
+        primary = (
+            self._settings.verifier_route()[0] if route == "verifier" else self._settings.primary
+        )
         return self.context_limit(primary, engine) - primary.max_output_tokens
 
     async def generate(self, task: StructuredTask, context: RunCallContext) -> GatewayResult:
@@ -544,6 +553,7 @@ class LlmGateway:
             stage=None if named is None else named.stage,
             policy_snapshot_id=None if snapshot is None or named is None else snapshot.snapshot_id,
             manifest_id=manifest_id,
+            redact_answer=task.redact_answer,
         )
 
         async def checkpoint() -> None:
@@ -852,6 +862,9 @@ class LlmGateway:
             calls=state.calls,
             accepted_call_id=None if manifest is None else manifest.call_id,
             accepted_manifest=manifest,
+            accepted_manifest_id=None
+            if manifest is None
+            else state.manifests.get(manifest.call_id),
         )
 
     @staticmethod
@@ -886,6 +899,7 @@ class _RecordDraft:
     stage: str | None = None
     policy_snapshot_id: UUID | None = None
     manifest_id: UUID | None = None
+    redact_answer: Callable[[str], str] | None = None
 
     def finish(
         self,
@@ -906,7 +920,7 @@ class _RecordDraft:
             input_tokens_estimate=self.estimate,
             started_at=self.started_at,
             duration_ms=duration_ms,
-            response=response,
+            response=_redacted_body(response, self.redact_answer),
             error=error,
             fx=self.fx,
             paid_metadata_error=paid_metadata_error,
@@ -916,6 +930,19 @@ class _RecordDraft:
             policy_snapshot_id=self.policy_snapshot_id,
             manifest_id=self.manifest_id,
         )
+
+
+def _redacted_body(body: object, redact: Callable[[str], str] | None) -> object:
+    """The provider body with the answer text of every choice passed through ``redact``."""
+    if redact is None or not isinstance(body, dict) or not isinstance(body.get("choices"), list):
+        return body
+    choices: list[object] = []
+    for choice in body["choices"]:
+        message = choice.get("message") if isinstance(choice, dict) else None
+        if isinstance(message, dict) and isinstance(message.get("content"), str):
+            choice = {**choice, "message": {**message, "content": redact(message["content"])}}
+        choices.append(choice)
+    return {**body, "choices": choices}
 
 
 def _fx_provenance(result: FxQuoteResult | None) -> FxProvenance | None:

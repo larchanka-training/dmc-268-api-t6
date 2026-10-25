@@ -3,7 +3,8 @@
 ``ExecuteReviewRun`` hands the verifier's candidate ids, the accepted call id and the
 decisions without ``reason`` to ``StoreReviewOutput`` on ``VerifiedReviewOutput``; the store
 passes them to ``enter_publishing``, which writes the ``llm.verify`` run action
-(``docs/PIPELINE_SPEC.md:177``; ``manifest_id`` stays null until manifests are persisted).
+(``docs/PIPELINE_SPEC.md:177``; ``manifest_id`` names the stored manifest of the accepted
+verifier call, null when no manifest store is wired).
 """
 
 from __future__ import annotations
@@ -54,6 +55,7 @@ from tests.test_diff_anchor import _diff_map
 
 RUN_ID = UUID("00000000-0000-0000-0000-000000013901")
 ACCEPTED_CALL_ID = UUID("00000000-0000-0000-0000-000000013902")
+ACCEPTED_MANIFEST_ID = UUID("00000000-0000-0000-0000-000000013903")
 MAIN_BLOCK_ID = file_block_id("app/main.py")
 SUMMARY = {"problem": "A bug.", "done_well": "Small change.", "effort": "small"}
 
@@ -164,8 +166,9 @@ class _Publisher:
 class _ReplyVerifier:
     """Supports the first candidate, contradicts the rest, names an accepted call."""
 
-    def __init__(self) -> None:
+    def __init__(self, manifest_id: UUID | None = None) -> None:
         self.candidate_ids: list[str] = []
+        self.manifest_id = manifest_id
 
     async def verify(self, *, system_prompt: str, user_prompt: str, **_: object) -> VerifierReply:
         self.candidate_ids = re.findall(r'candidate candidate_id="([^"]+)"', user_prompt)
@@ -179,7 +182,11 @@ class _ReplyVerifier:
             }
             for index, candidate_id in enumerate(self.candidate_ids)
         ]
-        return VerifierReply(output={"decisions": decisions}, accepted_call_id=ACCEPTED_CALL_ID)
+        return VerifierReply(
+            output={"decisions": decisions},
+            accepted_call_id=ACCEPTED_CALL_ID,
+            manifest_id=self.manifest_id,
+        )
 
 
 def _execute(findings: list[dict[str, Any]], verifier: _ReplyVerifier) -> VerifiedReviewOutput:
@@ -243,6 +250,14 @@ def test_verified_output_carries_the_llm_verify_trace_without_reason(
     logs = [r.message for r in caplog.records if "Reflection pass completed" in r.message]
     assert len(logs) == 1
     assert "verifier call 00000000-0000-0000-0000-000000013902" in logs[0]
+
+
+def test_llm_verify_names_the_stored_manifest_of_the_accepted_verifier_call() -> None:
+    output = _execute([_finding(10, "SQL Injection")], _ReplyVerifier(ACCEPTED_MANIFEST_ID))
+
+    assert output.verify_request is not None
+    assert output.verify_request["accepted_call_id"] == "00000000-0000-0000-0000-000000013902"
+    assert output.verify_request["manifest_id"] == "00000000-0000-0000-0000-000000013903"
 
 
 def test_the_zero_candidate_bypass_writes_no_trace() -> None:

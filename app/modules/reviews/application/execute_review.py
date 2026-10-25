@@ -292,15 +292,14 @@ class ExecuteReviewRun:
             counter = token_counter_for(
                 prompt_input.policy_snapshot.execution_profile.counter_version
             )
-            verify_verifier_mandatory_budget(context, counter=counter)
+            # The verifier route's window caps the mandatory verifier budget as well.
+            verify_verifier_mandatory_budget(
+                context,
+                counter=counter,
+                max_send_budget=self._reflection_pass.max_prompt_tokens(),
+            )
             # R10: the review model fits, guards and manifests the call once; its reply
             # carries the fitted context and the accepted call's manifest.
-        elif self._reflection_pass is not None:
-            _LOGGER.warning(
-                "execute_review_legacy_run_without_snapshot: reflection pass provided but "
-                "bypassed because policy snapshot is absent for run %s",
-                run_id,
-            )
 
         reply = await self._model.draft_review(context=context)
         reviewer_manifest: CallManifest | None = None
@@ -552,14 +551,14 @@ class ExecuteReviewRun:
             dropped_findings=tuple(_dropped_findings),
             severity_threshold=severity_threshold,
             allowed_v2_rules=allowed_v2_rules,
-            # llm.verify (PIPELINE_SPEC:177): manifest_id stays null until manifests are
-            # persisted; reason is never stored.
+            # llm.verify (PIPELINE_SPEC:177): manifest_id is the stored manifest of the
+            # accepted verifier call, null without a manifest store; reason is never stored.
             verify_request={
                 "candidate_ids": list(record.candidate_ids),
                 "accepted_call_id": (
                     None if record.accepted_call_id is None else str(record.accepted_call_id)
                 ),
-                "manifest_id": None,
+                "manifest_id": None if record.manifest_id is None else str(record.manifest_id),
             },
             verify_response={
                 "decisions": [
