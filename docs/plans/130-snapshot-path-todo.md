@@ -321,7 +321,17 @@ Gates for every task: the four commands in the plan, with DB and vhost `imp130f`
 - **Files:** `application/review_context_stage.py` (`:73-77`, `run`); `app/worker.py` (`:544-572` builder takes a
   counter); `tests/test_review_context_stage.py`, `tests/test_gateway_counter_parity.py`.
 - **Tests:** v4 → `token_counter_for(counter/v2)` in the build and in the trace tokens; v3 → 4-char numbers unchanged.
-- **Done when:** [ ] F1-1 green; [ ] IMP#144 is signalled.
+  - as built: the builder factory keeps its one argument and `app/worker.py` is unchanged, because
+    about 25 test sites in 7 files (several of other open PRs) build the stage with
+    `lambda run: …`. The stage asks the factory for the builder inside the `context.build` step and,
+    on the snapshot path only, swaps its counter with `BuildReviewContext.with_counter(
+    token_counter_for(profile.counter_version))`; the copy rebuilds the RAG selector with the same
+    counter (dormant in F1: v4 is not in `RETRIEVED_PROMPT_VERSIONS`). The cases sit in
+    `tests/test_review_path.py` beside the other stage cases of the selector: v3 keeps four
+    characters with a counter/v2 profile (29 tokens), v4 counts 38 with counter/v2 and 29 with
+    counter/v1, per block and in the `context.build` response. `tests/test_gateway_counter_parity.py`
+    is unchanged: `test_counter_v2_and_the_three_character_heuristic_agree` already pins the parity.
+- **Done when:** [x] F1-1 green; [ ] IMP#144 is signalled.
 
 ### F1-14: Dormant end-to-end
 - **Commit:** `test(reviews): run a v4-bound review through the worker composition (#130)`

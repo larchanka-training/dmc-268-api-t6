@@ -9,6 +9,7 @@ fails with ``policy_snapshot_integrity_error`` before the conventions call.
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from typing import cast
 from uuid import UUID
@@ -772,3 +773,41 @@ def test_execute_review_keeps_a_legacy_run_without_a_snapshot(binding: ReviewBin
 
     assert pipeline.calls == ["prepare", "pull request meta", "draft review"]
     assert pipeline.contexts[0].policy_snapshot is None
+
+
+# ---------- #130 F1-13: the context build counts with the pinned counter (R19, DD7) ----------
+
+
+def _four_characters(text: str) -> int:
+    return (len(text) + 3) // 4
+
+
+def _three_characters(text: str) -> int:
+    return (len(text) + 2) // 3
+
+
+@pytest.mark.parametrize(
+    ("version", "counter_version", "count", "tokens_used"),
+    [
+        ("v3", "counter/v2", _four_characters, 29),
+        ("v4", "counter/v2", _three_characters, 38),
+        ("v4", "counter/v1", _four_characters, 29),
+    ],
+    ids=["v3-composition-counter", "v4-counter-v2", "v4-counter-v1"],
+)
+def test_context_build_counts_with_the_pinned_counter_only_on_the_snapshot_path(
+    version: str, counter_version: str, count: Callable[[str], int], tokens_used: int
+) -> None:
+    # A legacy run keeps the composition's four characters per token, whatever its profile
+    # pins; a snapshot-path run counts with the counter its profile pins.
+    trace = Trace()
+    stage = _context_stage(trace, store=_store(version, counter_version=counter_version))
+
+    payload = asyncio.run(stage.run(RUN_ID))
+
+    assert payload is not None and payload.blocks
+    assert [block.tokens for block in payload.blocks] == [
+        count(block.text) for block in payload.blocks
+    ]
+    [summary] = [response for tool, _, response in trace.steps if tool == "context.build"]
+    assert (payload.tokens_used, summary["tokens_used"]) == (tokens_used, tokens_used)
