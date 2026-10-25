@@ -340,6 +340,19 @@ Gates for every task: the four commands in the plan, with DB and vhost `imp130f`
   `vcs.fetch_diff`, `context.build`, the conventions `context.manifest` and `llm.call`, the review
   `context.manifest` and `llm.call`, the verification `context.manifest` and `llm.call`, `llm.verify`,
   then `llm.review_output` and `review.postprocess`. A retry reuses the pins.
+  - as built: the composition gets the factory's context stage (with `execution_profile_of`), the
+    real `GitHubRunSource`, the production gateway (`build_gateway`) and recording check-run and
+    review fakes; GitHub and the model answer over in-memory transports, and the v4 row comes
+    from `_bind_v4` only. The trace order differs from the line above: `llm.repo_conventions`
+    follows the conventions call, the review prompt read adds its own `context.build` (F3 drops
+    it), and `llm.verify` is written in the publishing transaction after `llm.review_output`,
+    right before `review.postprocess`. Pinned: one snapshot for every call, a manifest per call
+    whose count is the call's estimate (one fit, no repair), the v4 system prompt, the L3 and L4
+    excerpts, the verifier's cited reference and line, `llm.verify` naming the verification
+    manifest and call, and the stored finding handed to the publisher. A retried attempt (the
+    diff read fails once after `policy.load`) keeps the stored snapshot and the pinned
+    conventions row although a newer one went live; a v3 run in the same composition writes no
+    manifest, no `llm.verify` and no snapshot-path keys.
 - **Done when:**
   - [ ] all gates pass;
   - [ ] the PR body has the D-2 order, the rollback floor and the D-1 staging query.
