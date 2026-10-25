@@ -9,7 +9,7 @@ fails with ``policy_snapshot_integrity_error`` before the conventions call.
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import cast
 from uuid import UUID
 
@@ -36,6 +36,7 @@ from app.modules.reviews.application.process_run import (
     ReviewRunProcessor,
     RunConventionsInput,
 )
+from app.modules.reviews.application.prompt_budget import policy_tokens, token_counter_for
 from app.modules.reviews.application.prompt_builder import (
     PullRequestMeta,
     RepoConventions,
@@ -81,7 +82,11 @@ def _binding(
 
 
 def _store(
-    version: str = "v4", *, review_id: UUID = _REVIEW_V4, conventions: UUID | None = _CONVENTIONS
+    version: str = "v4",
+    *,
+    review_id: UUID = _REVIEW_V4,
+    conventions: UUID | None = _CONVENTIONS,
+    max_policy_tokens: int = 12_000,
 ) -> Store:
     """Pins as get_pins reads them; a NULL conventions pin leaves the bindings incomplete."""
     bindings = PromptBindings(
@@ -94,9 +99,8 @@ def _store(
         conventions_id=conventions,
         verifier_id=_VERIFIER,
     )
-    return Store(
-        pins=_pins(prompt_bindings=bindings, execution_profile=make_complete_execution_profile())
-    )
+    profile = replace(make_complete_execution_profile(), max_policy_tokens=max_policy_tokens)
+    return Store(pins=_pins(prompt_bindings=bindings, execution_profile=profile))
 
 
 def _snapshot(store: Store) -> PolicySnapshot:
@@ -517,6 +521,71 @@ def test_stage_policy_key_is_the_v2_conventions_key_only_on_the_snapshot_path(
     expected = conventions_cache_key(store.snapshot, ignore_key) if version == "v4" else ignore_key
     assert stage.policy_key == expected
     assert stage.policy_key != (ignore_key if version == "v4" else None)
+
+
+# ---------- #130 F1-12: the policy budget is checked at policy load (R7, TL-8) ----------
+
+# The rules.md and AGENTS.md of the fixture source, rendered and counted with counter/v2.
+_POLICY_TOKENS = 105
+
+
+def test_the_fixture_policy_has_the_counted_size() -> None:
+    snapshot = _snapshot(_store())
+    counter = token_counter_for(snapshot.execution_profile.counter_version)
+
+    assert policy_tokens(snapshot, counter) == _POLICY_TOKENS
+
+
+@pytest.mark.parametrize(
+    ("limit", "refused"),
+    [(_POLICY_TOKENS - 1, True), (_POLICY_TOKENS, False)],
+    ids=["over", "at-limit"],
+)
+def test_stage_refuses_a_v4_run_over_the_policy_budget_at_policy_load(
+    limit: int, refused: bool
+) -> None:
+    store, trace = _store(max_policy_tokens=limit), Trace()
+    stage = _stage(store, trace)
+
+    if not refused:
+        asyncio.run(stage.begin(RUN_ID))
+        assert stage.snapshot_for_llm is store.snapshot
+        return
+    with pytest.raises(PolicyError) as raised:
+        asyncio.run(stage.begin(RUN_ID))
+
+    assert raised.value.code is PolicyErrorCode.PROMPT_BUDGET_EXCEEDED
+    assert (raised.value.limit, raised.value.actual) == (limit, _POLICY_TOKENS)
+    assert stage.snapshot_for_llm is None
+    [(tool, _, response)] = trace.steps
+    assert tool == "policy.load"
+    assert response["error"]["message"] == (
+        "policy_prompt_budget_exceeded: The rendered policy documents exceed the token budget "
+        f"of the pinned profile | фактически {_POLICY_TOKENS}, допустимо {limit}"
+    )
+
+
+def test_stage_lets_the_same_policy_through_on_a_v3_run() -> None:
+    trace = Trace()
+    stage = _stage(_store("v3", max_policy_tokens=_POLICY_TOKENS - 1), trace)
+
+    asyncio.run(stage.begin(RUN_ID))
+
+    assert stage.snapshot_for_llm is None
+    assert "error" not in trace.steps[0][2]
+
+
+def test_a_v4_run_over_the_policy_budget_ends_before_the_diff_and_any_model_call() -> None:
+    events: list[str] = []
+    github = CountingGitHub()
+    stage = _stage(_store(max_policy_tokens=_POLICY_TOKENS - 1), Trace())
+
+    with pytest.raises(PolicyError) as raised:
+        asyncio.run(_processor(_binding(), events, github, stage=stage).prepare(RUN_ID))
+
+    assert raised.value.code is PolicyErrorCode.PROMPT_BUDGET_EXCEEDED
+    assert events == []
+    assert github.reads == []
 
 
 _META = PullRequestMeta("PR", None, "octo", "feature", "main", (), 1, 1, 0, False, False)

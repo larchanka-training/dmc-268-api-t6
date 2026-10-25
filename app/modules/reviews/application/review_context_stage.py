@@ -31,11 +31,16 @@ from app.modules.reviews.application.diff_map import (
     is_supported_path,
 )
 from app.modules.reviews.application.get_run_diff import DiffSnapshot
-from app.modules.reviews.application.policy_errors import PolicyError
+from app.modules.reviews.application.policy_errors import PolicyError, PolicyErrorCode
 from app.modules.reviews.application.policy_snapshot import PolicySnapshot, PromptBindings
 from app.modules.reviews.application.prepare_policy_snapshot import PreparePolicySnapshot
 from app.modules.reviews.application.process_run import RunVcsInput, RunVcsRepository
-from app.modules.reviews.application.prompt_budget import validate_execution_profile_versions
+from app.modules.reviews.application.prompt_budget import (
+    PolicyBudgetExceededError,
+    token_counter_for,
+    validate_execution_profile_versions,
+    verify_policy_budget,
+)
 from app.modules.reviews.application.rag_index import (
     OpenReviewIndex,
     RagReadiness,
@@ -322,6 +327,24 @@ def _rag_used(stats: RagStats) -> dict[str, Any]:
     return response
 
 
+def _verify_policy_budget(snapshot: PolicySnapshot) -> None:
+    """Fail closed when the rendered policy documents exceed the pinned profile's budget."""
+    profile = snapshot.execution_profile
+    try:
+        verify_policy_budget(
+            snapshot,
+            token_counter_for(profile.counter_version),
+            max_policy_tokens=profile.max_policy_tokens,
+        )
+    except PolicyBudgetExceededError as exc:
+        raise PolicyError(
+            PolicyErrorCode.PROMPT_BUDGET_EXCEEDED,
+            "The rendered policy documents exceed the token budget of the pinned profile",
+            limit=exc.limit,
+            actual=exc.actual,
+        ) from exc
+
+
 class ReviewContextStage:
     """Policy snapshot, diff map, ignore and context of one run, recorded in its trace."""
 
@@ -446,7 +469,7 @@ class ReviewContextStage:
             # CONTRACT: the snapshot's prompt bindings are the run's pins (checked on every
             # read of a stored snapshot), so they name the review prompt the run pinned.
             bindings = self._snapshot.prompt_bindings
-            self._snapshot_for_llm = snapshot_for_review(
+            snapshot_for_llm = snapshot_for_review(
                 ReviewBinding(
                     bindings.review_system_id,
                     bindings.review_system_key,
@@ -455,6 +478,11 @@ class ReviewContextStage:
                 ),
                 self._snapshot,
             )
+            if snapshot_for_llm is not None:
+                # R7 (TL-8): policy documents over their budget end the attempt here,
+                # before the conventions and the review model; legacy runs are not checked.
+                _verify_policy_budget(snapshot_for_llm)
+            self._snapshot_for_llm = snapshot_for_llm
             step.response = policy_summary(self._snapshot)
         # The snapshot keeps validated masks; the matcher is rebuilt from them.
         self._matcher = IgnoreMatcher(
