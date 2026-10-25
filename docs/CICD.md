@@ -632,10 +632,12 @@ Caddy (compose project `dmc-268-edge`, `/opt/dmc-268-edge`) принимает 8
 | `ui.<APP_DOMAIN>` | `/api/*` → `api-prod:8000`, остальное → `ui-prod:8080` | prod-выката пока нет → заглушка 503 |
 | `staging-webhook.<APP_DOMAIN>` | `webhook-staging:8000` | зарезервирован, сервиса нет → заглушка 503 |
 | `webhook.<APP_DOMAIN>` | `webhook-prod:8000` | зарезервирован, сервиса нет → заглушка 503 |
-| `staging.<APP_DOMAIN>`, `staging-www.<APP_DOMAIN>` | `landing-staging:8080` | публичный лендинг, выкатывает репозиторий UI (larchanka-training/dmc-268-ui-t6#91); до первого выката → заглушка 503 |
-| `<APP_DOMAIN>`, `www.<APP_DOMAIN>` | `landing-staging:8080` | пока prod-выката нет — тот же staging-лендинг; с prod-выкатом переедут на `landing-prod:8080` |
+| `staging.<APP_DOMAIN>`, `staging-www.<APP_DOMAIN>` | `/docs`, `/docs/*` → `docs-staging:8080`, остальное → `landing-staging:8080` | публичный лендинг (larchanka-training/dmc-268-ui-t6#91) и пользовательская документация (larchanka-training/dmc-268-ui-t6#173), обоих выкатывает репозиторий UI; до первого выката → заглушка 503 |
+| `<APP_DOMAIN>`, `www.<APP_DOMAIN>` | `/docs`, `/docs/*` → `docs-staging:8080`, остальное → `landing-staging:8080` | пока prod-выката нет — те же staging-лендинг и документация; с prod-выкатом переедут на prod-контейнеры |
 
 Один origin (решение по #20): на хосте UI — и `staging-ui`, и prod `ui` — `/api/*`, включая `/api/auth/*` и SSE `/api/stream`, идёт в `api`. UI и API живут на одном origin — CORS не нужен, cookie refresh с `Path=/api/auth` доходит до API. Caddy сразу отдаёт клиенту ответы `text/event-stream`. Хост `staging-api.<APP_DOMAIN>` остаётся для healthcheck и вебхуков GitHub.
+
+Документация на хосте лендинга (larchanka-training/dmc-268-ui-t6#173). Сайт документации собран с `basePath: '/docs'`, поэтому путь уходит в `docs-staging` без изменений (`handle`, не `handle_path`); `/docsx` и прочие пути идут в лендинг. Маршрут можно выкатить раньше контейнера `docs-staging`: Caddy стартует и с несуществующим upstream (имя резолвится при запросе, а не при загрузке конфигурации), `/docs*` отвечает заглушкой 503 из `not_deployed`, лендинг работает. Порядок выката: сначала этот маршрут на staging, потом выкат документации из репозитория UI, иначе её healthcheck через edge падает и выкат откатывается.
 
 Контракт для сервиса за прокси: подключиться к внешней docker-сети `dmc268-edge` с alias `<service>-<env>` и слушать порт из таблицы; host-порты на VPS не публиковать (80/443 заняты прокси). Пока upstream не запущен, `staging-api` и `staging-ui` отвечают 502, маршруты с заглушкой — 503, остальные работают. Webhook в MVP — отдельный сервис; роль API gateway выполняет этот прокси.
 
