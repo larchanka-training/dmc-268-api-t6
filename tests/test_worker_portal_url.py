@@ -79,6 +79,10 @@ _BASE_ENV = {
         ("http://[::1]:5173", "http://[::1]:5173/runs/11111111-2222-3333-4444-555555555555"),
         ("http://[::1]", "http://[::1]/runs/11111111-2222-3333-4444-555555555555"),
         (
+            "https://ui.test:65535",
+            "https://ui.test:65535/runs/11111111-2222-3333-4444-555555555555",
+        ),
+        (
             "https://ui.test/portal/",
             "https://ui.test/portal/runs/11111111-2222-3333-4444-555555555555",
         ),
@@ -135,6 +139,8 @@ def test_worker_settings_preserve_valid_portal_bases_and_generated_links(
         "https://ui.test:",
         "https://ui.test:bad",
         "https://ui.test:65536",
+        "https://ui.test:0",
+        "https://ui.test/\u200bpath",
         "https://ui.test\\portal",
     ],
 )
@@ -143,10 +149,19 @@ def test_worker_settings_reject_malformed_nonempty_portal_urls(portal_url: str) 
         WorkerSettings.from_environment({**_BASE_ENV, "PORTAL_URL": portal_url})
 
 
-def test_worker_settings_do_not_echo_a_credential_bearing_portal_url() -> None:
-    portal_url = "https://alice:do-not-log-this@ui.test:bad"
+@pytest.mark.parametrize(
+    "portal_url",
+    [
+        "https://alice:do-not-log-this@ui.test:bad",
+        "https://alice:do-not-log-this@ui.test／x",
+    ],
+    ids=["bad-port", "nfkc-netloc"],
+)
+def test_worker_settings_do_not_echo_a_credential_bearing_portal_url(portal_url: str) -> None:
     with pytest.raises(RuntimeError, match="PORTAL_URL") as raised:
         WorkerSettings.from_environment({**_BASE_ENV, "PORTAL_URL": portal_url})
 
     assert portal_url not in str(raised.value)
-    assert "do-not-log-this" not in "".join(format_exception(raised.value))
+    diagnostic = "".join(format_exception(raised.value))
+    assert "do-not-log-this" not in diagnostic
+    assert portal_url not in diagnostic

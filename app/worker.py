@@ -427,7 +427,7 @@ def _validated_portal_url(value: str | None) -> str | None:
     error = "PORTAL_URL must be a valid absolute HTTP(S) base URL"
     # urlsplit strips some raw whitespace/control characters before parsing.
     if any(mark in value for mark in "\\?#") or any(
-        char.isspace() or ord(char) < 32 or 127 <= ord(char) <= 159 for char in value
+        not char.isprintable() or char == " " for char in value
     ):
         raise RuntimeError(error)
     try:
@@ -441,11 +441,11 @@ def _validated_portal_url(value: str | None) -> str | None:
             and not parsed.netloc.endswith(":")
         )
         # Accessing port validates numeric syntax and the allowed range.
-        _ = parsed.port
+        port = parsed.port
     except ValueError:
         # Parser diagnostics may contain the supplied value, including credentials.
         raise RuntimeError(error) from None
-    if not valid:
+    if not valid or port == 0:
         raise RuntimeError(error)
     return value
 

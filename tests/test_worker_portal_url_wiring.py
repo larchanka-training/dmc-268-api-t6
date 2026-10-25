@@ -49,6 +49,7 @@ HASH = "f" * 64
 class Store:
     state: str
     open_units: int = 0
+    provider_observations: list[tuple[str, int]] = field(default_factory=list)
     submissions: list[ReviewSubmission] = field(default_factory=list)
     views: list[tuple[CheckRunTarget, CheckRunView]] = field(default_factory=list)
 
@@ -130,7 +131,7 @@ class Store:
             state=self.state,
             attempt=1,
             error_code="internal_error" if self.state == "failed" else None,
-            verdict="clean",
+            verdict="clean" if self.state == "succeeded" else None,
         )
 
     async def claim(
@@ -211,9 +212,9 @@ class CheckRuns:
     async def upsert(
         self, target: CheckRunTarget, view: CheckRunView, *, checkpoint: RunProviderCheckpoint
     ) -> None:
-        assert self.store.open_units == 0
+        self.store.provider_observations.append(("check-run:before", self.store.open_units))
         await checkpoint()
-        assert self.store.open_units == 0
+        self.store.provider_observations.append(("check-run:after", self.store.open_units))
         self.store.views.append((target, view))
 
 
@@ -224,9 +225,9 @@ class Reviews:
     async def submit_review(
         self, submission: ReviewSubmission, *, checkpoint: RunProviderCheckpoint
     ) -> SubmittedReview:
-        assert self.store.open_units == 0
+        self.store.provider_observations.append(("review:before", self.store.open_units))
         await checkpoint()
-        assert self.store.open_units == 0
+        self.store.provider_observations.append(("review:after", self.store.open_units))
         self.store.submissions.append(submission)
         return SubmittedReview(55, ())
 
@@ -319,41 +320,62 @@ def compose(
     )
 
 
-@pytest.mark.parametrize("portal_url", ["https://portal.test///", None], ids=["linked", "unset"])
+_PORTAL_CASES = [
+    pytest.param(
+        "https://portal.test///",
+        "https://portal.test/runs/11111111-2222-3333-4444-555555555555",
+        "\n\nhttps://portal.test/runs/11111111-2222-3333-4444-555555555555",
+        id="linked",
+    ),
+    pytest.param(None, None, None, id="unset"),
+    pytest.param("", None, None, id="empty"),
+]
+
+
+@pytest.mark.parametrize(("portal_url", "expected_url", "expected_summary_suffix"), _PORTAL_CASES)
 def test_composed_handle_run_recovery_publishes_portal_link(
-    monkeypatch: pytest.MonkeyPatch, portal_url: str | None
+    monkeypatch: pytest.MonkeyPatch,
+    portal_url: str | None,
+    expected_url: str | None,
+    expected_summary_suffix: str | None,
 ) -> None:
     store = Store("failed")
     process = compose(monkeypatch, store, portal_url)
 
     assert asyncio.run(process.handle_run.execute(RUN)) == DeliveryOutcome.ACK
 
+    assert store.provider_observations == [("check-run:before", 0), ("check-run:after", 0)]
     assert len(store.views) == 1
     target, view = store.views[0]
     assert target.run_id == UUID("11111111-2222-3333-4444-555555555555")
     assert view.status == "completed"
-    if portal_url is None:
-        assert view.details_url is None
-        assert view.summary == "`internal_error`: Внутренняя ошибка сервиса."
+    assert view.details_url == expected_url
+    if expected_summary_suffix is None:
+        assert "/runs/" not in view.summary
     else:
-        assert view.details_url == "https://portal.test/runs/11111111-2222-3333-4444-555555555555"
-        assert view.summary == (
-            "`internal_error`: Внутренняя ошибка сервиса.\n\n"
-            "https://portal.test/runs/11111111-2222-3333-4444-555555555555"
-        )
+        assert view.summary.endswith(expected_summary_suffix)
     assert store.open_units == 0
     assert store.submissions == []
 
 
-@pytest.mark.parametrize("portal_url", ["https://portal.test/", None], ids=["linked", "unset"])
+@pytest.mark.parametrize(("portal_url", "expected_url", "expected_summary_suffix"), _PORTAL_CASES)
 def test_composed_publish_review_success_publishes_portal_link(
-    monkeypatch: pytest.MonkeyPatch, portal_url: str | None
+    monkeypatch: pytest.MonkeyPatch,
+    portal_url: str | None,
+    expected_url: str | None,
+    expected_summary_suffix: str | None,
 ) -> None:
     store = Store("publishing")
     process = compose(monkeypatch, store, portal_url)
 
     asyncio.run(process.publish_review.execute(ReviewPublishPointer(RUN, HEAD, HASH, "COMMENT")))
 
+    assert store.provider_observations == [
+        ("review:before", 0),
+        ("review:after", 0),
+        ("check-run:before", 0),
+        ("check-run:after", 0),
+    ]
     assert store.state == "succeeded"
     assert len(store.submissions) == 1
     assert store.submissions[0].commit_sha == HEAD
@@ -361,16 +383,9 @@ def test_composed_publish_review_success_publishes_portal_link(
     target, view = store.views[0]
     assert target.run_id == UUID("11111111-2222-3333-4444-555555555555")
     assert view.status == "completed"
-    if portal_url is None:
-        assert view.details_url is None
-        assert (
-            view.summary
-            == "critical: 0, high: 0, medium: 0, low: 0, info: 0\ninline: 0, в теле ревью: 0"
-        )
+    assert view.details_url == expected_url
+    if expected_summary_suffix is None:
+        assert "/runs/" not in view.summary
     else:
-        assert view.details_url == "https://portal.test/runs/11111111-2222-3333-4444-555555555555"
-        assert view.summary == (
-            "critical: 0, high: 0, medium: 0, low: 0, info: 0\ninline: 0, в теле ревью: 0\n\n"
-            "https://portal.test/runs/11111111-2222-3333-4444-555555555555"
-        )
+        assert view.summary.endswith(expected_summary_suffix)
     assert store.open_units == 0

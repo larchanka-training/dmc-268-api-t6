@@ -108,9 +108,11 @@ rm jwt.pem jwt.pub
 | `POSTGRES_USER` | нет | иначе `app` |
 | `POSTGRES_DB` | нет | иначе `app` |
 | `GH_APP_BOT_LOGIN` | да: без него `webhook-worker` не стартует, выкат откатывается | `dmc268-t6-reviewer[bot]` — логин бота App. В контейнере `GITHUB_APP_BOT_LOGIN`, только у `webhook-worker` (`app/webhook_worker.py`). Префикс `GH_`, потому что GitHub не принимает `GITHUB_` и у variables; берётся из `vars.`, а не из `secrets.` |
-| `PORTAL_URL` | для ссылки на Run в staging check-run | `https://staging-ui.dmc268-t6.axyi.ru` — публичный UI-origin. Читается из `vars.PORTAL_URL`, записывается только в `worker.env` → review-worker (`worker`); в `api` и `webhook-worker` не передаётся |
+| `PORTAL_URL` | для ссылки на Run в staging check-run | `https://staging-ui.dmc268-t6.axyi.ru` — публичный UI-origin. Читается из `vars.PORTAL_URL`, записывается только в `worker.env` → review-worker (`worker`); в `api` и `webhook-worker` не передаётся; [проверка и восстановление](#portal_url) |
 | `LLM_MODEL` | нет, переопределение repository | `mistral-small-4` (OQ-2, SD §15). В контейнере только у `worker`; обычное значение задано на уровне repository |
 | `LLM_FALLBACK_MODEL` | нет, переопределение repository | `mistral-small-3.2-24b`. Только `worker`. Чтобы отключить fallback, удалите repository variable и это переопределение: значение Environment перекрывает repository, а незаданная variable приходит в `vars` пустой строкой, и `LLM_FALLBACK_MODEL` не попадает в `worker.env` |
+
+### PORTAL_URL
 
 `PORTAL_URL` задан в Environment `staging` и прочитан обратно 10.10.2026:
 `https://staging-ui.dmc268-t6.axyi.ru` (#111). Это адрес UI, не API health URL;
@@ -126,19 +128,33 @@ summary-only) и `failed`, но не `cancelled` и `skipped`, и в `details_ur
 при следующем штатном выкате; live-проверка свежего sandbox-прогона — [CICD.md §2.1](CICD.md#21-проверка-ссылки-на-run-111).
 
 Непустой `PORTAL_URL` должен быть абсолютным базовым HTTP/HTTPS URL с непустым
-хостом и корректным портом, если он указан. Разрешены localhost, IPv4, IPv6 в
-квадратных скобках и базовый путь (`https://ui.example/portal/` →
+хостом; явно заданный числовой порт — от 1 до 65535. Разрешены localhost, IPv4,
+IPv6 в квадратных скобках и базовый путь (`https://ui.example/portal/` →
 `https://ui.example/portal/runs/{run_id}`); percent-encoded путь сохраняется.
 Регистр схемы не важен, исходное значение сохраняется, при построении ссылки
 удаляются только завершающие `/`.
 
 Относительный адрес, другая схема, пустой хост, userinfo (`user:password@`),
-пробельные/управляющие символы, обратный слэш, некорректные скобки или порт,
-query/fragment (даже пустые `?` и `#`) останавливают worker при чтении настроек
-с `RuntimeError`, содержащим `PORTAL_URL`, без самого значения URL.
-Такой отказ старта может сорвать healthcheck выката и вызвать авто-rollback.
-Откат сохраняет `worker.env`, поэтому возврат образа не исправляет ошибочный URL:
-исправьте effective variable/значение env-файла и повторите штатный выкат.
+пробельные или непечатные символы (включая U+200B), обратный слэш, некорректные
+скобки/порт, query/fragment (даже пустые `?` и `#`) останавливают worker при чтении
+настроек с фиксированным `RuntimeError`, содержащим `PORTAL_URL`, без значения URL
+и диагностики парсера с учётными данными. Это ограниченная синтаксическая
+проверка базы ссылки, не проверка DNS, доступности или всей RFC-корректности
+хоста/кодирования пути: например, двойная точка в хосте и печатная пунктуация
+пути не проверяются отдельно.
+
+Отказ старта worker срывает healthcheck `up --wait`; CI запускает авто-rollback
+с тем же текущим `worker.env`. Если предыдущий релиз уже содержит валидатор
+(выкат после первого с #214), откат падает на том же значении: шаг печатает
+`rollback failed`, review-worker остаётся нездоровым. Если предыдущий релиз
+старше #214, откат может пройти, но старый worker снова строит некорректные ссылки.
+
+Для устойчивого восстановления исправьте effective `vars.PORTAL_URL`:
+Environment `staging` перекрывает одноимённую repository variable. Повторите
+штатный выкат: CI заново собирает application-secrets bundle и перезаписывает
+`worker.env`. Правка только файла на хосте живёт до следующего CI-выката;
+сохранение такого файла применимо к ручному `deploy.sh` без `APP_SECRETS_B64`,
+а не заменяет исправление GitHub variable для CI.
 
 ### LLM-шлюз — переменные приложения (#33)
 
