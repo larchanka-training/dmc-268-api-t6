@@ -782,7 +782,7 @@ def test_migration_0038_adds_the_review_throttle_and_its_downgrade_drops_it(
             "FROM code_index_states"
         )
     ).one() == (1, None, None)
-    assert connection.scalar(text("SELECT version_num FROM alembic_version")) == "20261024_0038"
+    assert connection.scalar(text("SELECT version_num FROM alembic_version")) == "20261024_0039"
 
 
 @pytest.mark.integration

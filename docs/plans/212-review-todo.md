@@ -100,12 +100,16 @@ suite), `tests/test_sqlalchemy_run_repository.py`.
 **Description:** Integrate current main and deliver a current-head reviewable patch.
 
 **Acceptance criteria:**
-- Preserve main DiffMap and worker-comment versions; retain pins, 0038 parent
-      and current CI sharding; add Refs #245 footer to follow-up commit.
-- Ruff lint/format, mypy, full pytest and available real integration gates pass;
+- [x] Preserve main DiffMap and worker-comment versions, pins and current CI
+      sharding; keep Refs #245 footer. Final migration parents follow Task 8.
+- [x] Ruff lint/format, mypy and focused real-service gates pass after Task 8;
       independent Standards/Spec reviews have no outstanding actionable findings.
-- Public warning appears BEFORE force-with-lease; pushed-head CI passes;
-      reply to each P2 thread with SHA, summarize all P3, request axyi review.
+- Final-head Linux CI must prove the complete suite with zero integration skips;
+  current-head evidence is tracked in PR #280 rather than asserted by old local results.
+- Publication warns BEFORE force-with-lease, verifies the remote head and explicit
+  lease, waits for pushed-head CI, replies with SHA to each P2 thread, summarizes P3,
+  and requests axyi review. PR #280 records live completion evidence.
+
 
 **Verification:** saved commands/results and GitHub head/check/reply inspection;
 never resolve author-owned threads or close issue. Refresh main/migration graph
@@ -114,7 +118,7 @@ before publishing and coordinate any newly advanced migration head.
 **Files:** only necessary rebase resolutions and review evidence updates.
 
 
-## Local verification — 2026-10-25
+## Historical local verification — 2026-10-25 (05a96bc)
 
 The review patch was rebased onto `05a96bc` before verification. Main's DiffMap
 publication path and broker polling explanation were preserved; migration
@@ -138,3 +142,76 @@ publication path and broker polling explanation were preserved; migration
 The local full suite is not claimed green. Subsequent main-only changes require
 a final rebase with focused checks; current-head Linux CI and publication evidence
 are tracked in [PR #280](https://github.com/larchanka-training/dmc-268-api-t6/pull/280).
+
+## 8. Preserve merged #130 D while integrating current main
+
+**Description:** Rebuild safely from the now-combined PR head, preserving foreign
+commits, then apply the already-committed review fixes on the new main base.
+This task supersedes Task 7's original 0037-parent and separate-stack assumptions.
+
+**Acceptance criteria:**
+- [x] Back up local HEAD; start from combined remote `3f8d1da71f6266f44928fa8fc6374073d64ac730`,
+      rebase #212 plus all six #130 D commits onto main
+      `48636f2cb456ecc07b7195cea3c98e36a280c376`, then cherry-pick ONLY `3c4d32c`.
+      Preserve all foreign work and every P2/P3 fix; do not replay `ab5f468`.
+- [x] Preserve IDs with one chain 0037 → `20261023_0038` → `20261024_0038` →
+      `20261024_0039`; final head assertions are 0039. Integrate registry/schema
+      documentation for both carried revisions and main's RAG migration. RFS says
+      complete prompt bindings are pinned for new runs by #130 D, while execution
+      profile is fixed at the first snapshot. No execute/store or F wiring scope.
+- [x] Static and focused real-PG #212/#130 D/migration/RAG/context/cache checks pass;
+      independent baseline identity fixtures remain valid and all six foreign
+      commits are preserved. Standards and Spec reviews report zero findings.
+- Final-head Linux CI supplies complete-suite/zero-skip evidence. Publication
+  warns first, verifies the remote still equals `3f8d1da`, uses that explicit lease,
+  and describes all combined work in PR #280 before replies/review request.
+
+
+**Verification:** Implementation agent checks commit ancestry/content preservation,
+new migration graph and literal head tests; compare reviewed source changes and
+foreign behavior after semantic conflict resolution. Rerun focused gates on the
+new base; old 210 focused/999 integration passes are historical evidence only.
+Do not repeat the known 32-minute macOS full-suite platform failures. Linux CI's
+full tests and zero-skip integration remain required on the final pushed head.
+
+**Dependencies:** Tasks 1–6 implemented; Task 7 publication waits for this task.
+**Scope:** Bounded integration pass in sequential checkpoints: history preservation,
+then schema/documentation alignment, then focused checks and final CI. Delegate
+source conflict resolutions only to the implementation agent; this planning task
+changes no source, history or GitHub state.
+**Files:** necessary semantic conflict files from main/#212/#130 D only; prioritize
+migration parent/head tests, CICD/BACKEND_ARCHITECTURE/SD/RFS and affected context
+regressions. Preserve main CI and RAG work. No new feature or migration ID.
+
+
+## Combined-branch verification — 2026-10-25
+
+The combined remote head `3f8d1da` was preserved and rebased onto `48636f2`.
+Only review fix `3c4d32c` was then applied; the rewritten feature was not replayed.
+The integration also includes main `bb09caeefcd6b4a18d7cd4e3d6e517d6848ae0db`
+(policy-tree handling). All six merged #130 D commits survive; their critical
+model, candidate, rerun, migration and regression files match the combined remote.
+The only D commit range difference is the migration graph's additional main row.
+
+The single migration chain is `20261020_0037` → `20261023_0038` →
+`20261024_0038` → `20261024_0039`. The #212 downgrade test now targets its actual
+main parent and proves main's RAG throttle columns survive removal of #212 pins.
+The new main throttle test's obsolete head assertion failed first, then passed
+with the literal final head 0039. Existing baseline digest/cache literals passed
+unchanged. Main RAG/context, execution/store paths and CI configuration are retained;
+no #130 F wiring was added.
+
+Current-base local checks:
+
+- `uv run ruff check .`, `uv run ruff format --check .` (589 files),
+  `uv run mypy .` (579 source files), and `git diff --check`: passed.
+- Publication/prompt pins, snapshots, origin, context, creation and schema checks:
+  **270 passed, 0 skipped**.
+- Migration-head compatibility cases: **4 passed**, 117 unrelated cases deselected.
+- RAG/context/graph, policy-source, prompt-seeding and worker compatibility:
+  **463 passed, 0 skipped**.
+- Independent Standards and Spec integration reviews: **0 findings**.
+
+These focused checks describe the combined branch on `bb09caee`. The earlier
+210/999 results are historical, not current-head full-suite evidence. Definitive
+complete verification is the final pushed head's Linux CI in PR #280.
