@@ -596,11 +596,17 @@ def _assert_legacy_run(observed: Observed) -> None:
     assert review[0]["content"] == observed.review_system[1]
     assert sha256(review[0]["content"].encode()).hexdigest() == _REVIEW_SYSTEM_SHA
     assert review[1]["content"] == _REVIEW_USER
-    # The tasks the gateway ran: no reserved slot, no bounded repair, no snapshot.
+    # The tasks the gateway ran: no reserved slot or time, no bounded repair, no snapshot.
     assert [
-        (task.operation, task.route, task.reserved_calls, task.bounded_repair)
+        (
+            task.operation,
+            task.route,
+            task.reserved_calls,
+            task.bounded_repair,
+            task.reserved_seconds,
+        )
         for task in observed.tasks
-    ] == [("conventions", "review", 0, False), ("review", "review", 0, False)]
+    ] == [("conventions", "review", 0, False, 0.0), ("review", "review", 0, False, 0.0)]
     assert [(task.policy_snapshot, task.counter) for task in observed.tasks] == [
         (None, None),
         (None, None),

@@ -16,13 +16,21 @@ import json
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from typing import Any
+from uuid import UUID
 
 import httpx
 import pytest
 
 from app.modules.reviews.application.conventions import ConventionsRequest
-from app.modules.reviews.application.llm import LlmCallFailed, LlmErrorCode, RunCallContext
+from app.modules.reviews.application.llm import (
+    LlmCallFailed,
+    LlmErrorCode,
+    ManifestEntry,
+    ManifestStore,
+    RunCallContext,
+)
 from app.modules.reviews.application.policy_snapshot import PolicySnapshot
 from app.modules.reviews.application.reflection_pass import VerifierPromptBuilder
 from app.modules.reviews.application.run_failures import classify_failure
@@ -31,7 +39,9 @@ from app.modules.reviews.infrastructure.llm.answers import (
     conventions_answer_validator,
     validate_review_answer,
 )
+from app.modules.reviews.infrastructure.llm.ecb_fx import FxQuote, FxQuoteProvider, FxQuoteResult
 from app.modules.reviews.infrastructure.llm.gateway import LlmGateway, StructuredTask
+from app.modules.reviews.infrastructure.llm.memory import InMemoryUsageLedger
 from app.modules.reviews.infrastructure.llm.models import (
     GatewayConventionsModel,
     GatewayReviewModel,
@@ -96,6 +106,9 @@ class _Provider(ScriptedProvider):
 
     seconds_per_call: float = 0.0
     clock: FakeClock | None = None
+    settings: LlmSettings = SETTINGS
+    fx_provider: FxQuoteProvider | None = None
+    manifest_store: ManifestStore | None = None
 
     def handle(self, request: httpx.Request) -> httpx.Response:
         if self.clock is not None:
@@ -116,7 +129,7 @@ class _Provider(ScriptedProvider):
         async def exercise() -> tuple[list[StructuredTask], list[object]]:
             async with httpx.AsyncClient(transport=httpx.MockTransport(self.handle)) as client:
                 gateway = _Recording(
-                    SETTINGS,
+                    self.settings,
                     OpenAICompatibleTransport(client),
                     self.ledger,
                     self.trace,
@@ -125,6 +138,8 @@ class _Provider(ScriptedProvider):
                     sleep=clock.sleep,
                     jitter=lambda: 0.0,
                     monotonic=clock.monotonic,
+                    fx_provider=self.fx_provider,
+                    manifest_store=self.manifest_store,
                 )
                 outcomes: list[object] = []
                 for stage in stages:
@@ -380,6 +395,85 @@ def test_a_snapshot_review_does_not_sleep_into_the_verifier_window() -> None:
     assert not isinstance(outcome, LlmCallFailed)
     assert provider.kinds() == ["primary", "fallback"]
     assert provider.models() == ["review-model", "fallback-model"]
+
+
+# The EUrouter host: each call is priced at an ECB quote fetched before it.
+EUROUTER = replace(_profile("review-model"), base_url="https://api.eurouter.ai/api/v1")
+EUROUTER_SETTINGS = replace(
+    SETTINGS, primary=EUROUTER, fallback=replace(EUROUTER, model="fallback-model")
+)
+
+
+class _Slow:
+    """The FX quote, the ledger read and the manifest write; the ``slow`` one of them takes
+    ``seconds`` of the provider's fake clock while the gateway awaits it."""
+
+    def __init__(self, provider: _Provider, slow: str, seconds: float) -> None:
+        self._provider = provider
+        self._slow = slow
+        self._seconds = seconds
+        self.quotes = 0
+        self.entries: list[ManifestEntry] = []
+
+    def take(self, site: str) -> None:
+        if site == self._slow:
+            assert self._provider.clock is not None
+            self._provider.clock.current += timedelta(seconds=self._seconds)
+
+    async def get_quote(self) -> FxQuoteResult:
+        self.quotes += 1
+        self.take("fx")
+        quote = FxQuote(Decimal("1.1"), NOW.date(), "EXR.D.USD.EUR.SP00.A", NOW)
+        return FxQuoteResult(quote, stale_cache=False)
+
+    async def record_manifest(self, run_id: UUID, entry: ManifestEntry) -> None:
+        self.entries.append(entry)
+        self.take("store")
+
+
+class _SlowLedger(InMemoryUsageLedger):
+    def __init__(self, slow: _Slow) -> None:
+        super().__init__()
+        self._slow = slow
+        self.reads = 0
+
+    async def run_cost_usd(self, run_id: UUID) -> Decimal:
+        self.reads += 1
+        self._slow.take("ledger")
+        return await super().run_cost_usd(run_id)
+
+
+@pytest.mark.parametrize(
+    ("site", "observed"),
+    [
+        # Refused right after the quote: the ledger is never read.
+        pytest.param("fx", (1, 0, 0, 0), id="after the FX quote"),
+        # Refused after the ledger read: no slot is claimed and no manifest stored.
+        pytest.param("ledger", (1, 1, 0, 0), id="before the slot"),
+        # The slot and its manifest are taken; the transport's checkpoint refuses the request.
+        pytest.param("store", (1, 1, 1, 1), id="at the transport checkpoint"),
+    ],
+)
+def test_every_admission_check_of_a_snapshot_review_keeps_the_verifier_window(
+    site: str, observed: tuple[int, int, int, int]
+) -> None:
+    # 195 s at the entry pass the 190 s window; 10 s spent in the slow await leave 185 s.
+    provider = _Provider([_review_answer()], settings=EUROUTER_SETTINGS)
+    slow = _Slow(provider, site, 10)
+    ledger = provider.ledger = _SlowLedger(slow)
+    provider.fx_provider = provider.manifest_store = slow
+
+    _, [outcome] = provider.run(REVIEW_WINDOW_S + 5, _review(_snapshot()))
+
+    assert isinstance(outcome, LlmCallFailed)
+    assert outcome.error_code is LlmErrorCode.VERIFICATION_DEADLINE_EXCEEDED
+    assert str(outcome) == (
+        "verification_deadline_exceeded: 185 s left before the attempt deadline; "
+        "a call needs 90 s and 100 s are kept for later stages"
+    )
+    # (FX quotes, ledger reads, slots claimed, manifests stored)
+    assert (slow.quotes, ledger.reads, outcome.calls, len(slow.entries)) == observed
+    assert provider.requests == []
 
 
 def test_a_negative_time_reserve_is_refused() -> None:
