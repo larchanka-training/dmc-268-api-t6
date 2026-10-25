@@ -304,6 +304,12 @@ raises `policy_prompt_budget_exceeded` (terminal), so neither the conventions no
   not a provider error (a failed manifest write: `internal_error`) and a cancellation now pass
   through `ReflectionPass` instead of becoming `verification_unavailable`; provider errors keep
   their `verification_*` mapping. `llm.verify.manifest_id` is `GatewayResult.accepted_manifest_id`.
+- Fix round (re-review of `172c8c5c`): the verifier validator turns the decoder's own
+  `RecursionError` (deep nesting) and `ValueError` (an integer past the digit limit) into
+  `InvalidAnswer`, so the gateway repairs the answer and the stored `llm.call` withholds it; the
+  redactor withholds on any of them. Verifier only: the review and conventions validators keep
+  `_decode_object` as live runs use it, so the same escape there (an `internal_error` retry) stays
+  a follow-up outside F1.
 
 ## Hazard, D-1, in-flight runs, deploy order (D-2)
 
