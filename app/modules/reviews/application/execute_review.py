@@ -53,6 +53,7 @@ from app.modules.reviews.application.review_output import (
     validate_v2_attribution,
     validate_v2_coordinates,
 )
+from app.modules.reviews.application.review_path import ReviewBinding, snapshot_for_review
 from app.modules.reviews.application.run_failures import RunFailure
 from app.modules.reviews.application.verdict import SeverityThresholdValue
 
@@ -71,6 +72,8 @@ class ReviewPromptInput:
     omitted_files: tuple[str, ...]
     policy_snapshot: PolicySnapshot | None = None
     severity_threshold: SeverityThresholdValue = "all"
+    # The review prompt the run pinned; None for a source that reads no pin (tests, eval).
+    review_binding: ReviewBinding | None = None
 
 
 def build_deterministic_summary(
@@ -193,6 +196,16 @@ class ExecuteReviewRun:
         prompt_input = await self._repository.get_review_prompt_input(run_id, conventions)
         if prompt_input is None:
             return False
+        if prompt_input.review_binding is not None:
+            # The stage chose the path before the conventions call; checked again here, so a
+            # legacy run never gets a snapshot and a snapshot-path run without a usable one
+            # never reaches the model.
+            prompt_input = replace(
+                prompt_input,
+                policy_snapshot=snapshot_for_review(
+                    prompt_input.review_binding, prompt_input.policy_snapshot
+                ),
+            )
         meta = await self._model.get_pull_request_meta(run_id)
         if meta is None:
             return False

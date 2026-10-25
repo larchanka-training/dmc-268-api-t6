@@ -89,6 +89,20 @@ validates against v1 when no snapshot is attached (`llm/models.py:183-188`). Tha
   `get_run_conventions_input`. `execute_review` re-checks as defence in depth.
 - One property, `stage.snapshot_for_llm` (snapshot or None), feeds `execute_review`, `process_run`
   (conventions) and the stage itself (R7, R19).
+- As built in F1-2: one pure function, `snapshot_for_review(ReviewBinding, snapshot)`, decides at all three
+  sites. `ReviewBinding` is the pinned review prompt id, its `v{version}` and the provider of the run's origin
+  installation, matched exactly (`"github"`, never coerced). `get_run_conventions_input` and
+  `review_prompt_repository` read it from `Run.prompt_version_id` and `Run.origin_provider_installation_id`;
+  `RunConventionsInput` and `ReviewPromptInput` carry it as `review_binding` (not just the version: the
+  provider is needed for TL-13 and the id for the pins check). The stage reads the id and version off its
+  snapshot's prompt bindings, which C re-checks against the run's pins on every read, and the provider it
+  builds the diff map with (`_STAGE_PROVIDER`).
+- TL-13 on this base: the run carries a provider (its origin installation), but the stage's input
+  (`RunVcsInput`) does not, and `get_run_vcs_input` stays untouched because #220 adds the provider there. So
+  the stage keys on `_STAGE_PROVIDER` (GitHub, one constant with the `build_diff_map` call); #220 swaps both to
+  the run's provider and extends `SNAPSHOT_REVIEW_PROVIDERS` once the GitLab path also passes the
+  `ReflectionPass`. GitLab → legacy is pinned at the selector, the processor without a stage,
+  `execute_review` and the database reads.
 
 **DD2. R2 slot (#144 Q2, Q3).**
 - The stage keeps its payload as a `payload` property (`review_context_stage.py:514-536`) instead of

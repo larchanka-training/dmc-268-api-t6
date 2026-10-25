@@ -29,6 +29,7 @@ from app.modules.reviews.application.get_run_file_lines import (
 )
 from app.modules.reviews.application.policy_snapshot import PolicySnapshot
 from app.modules.reviews.application.prompt_builder import ReviewRule
+from app.modules.reviews.application.review_path import ReviewBinding, snapshot_for_review
 from app.modules.reviews.application.run_failures import RunCancelled
 from app.modules.reviews.application.run_trace import RunTrace, traced_step
 from app.modules.reviews.application.vcs_diff import (
@@ -73,6 +74,8 @@ class RunConventionsInput:
     conventions_prompt: ActiveConventionsPrompt
     rules: tuple[ReviewRule, ...] = ()
     snapshot: PolicySnapshot | None = None
+    # The review prompt the run pinned; None for a source that reads no pin.
+    review_binding: ReviewBinding | None = None
 
 
 class RunProcessingRepository(DiffSnapshotRepository, Protocol):
@@ -251,6 +254,10 @@ class ReviewRunProcessor:
             conventions_input = await conventions_repository.get_run_conventions_input(run_id)
             if conventions_input is None:
                 return None
+            if self._context_stage is None and conventions_input.review_binding is not None:
+                # Without the policy stage there is no snapshot: a run bound to the snapshot
+                # path is refused here, before the conventions call.
+                snapshot_for_review(conventions_input.review_binding, None)
             policy_key = None if self._context_stage is None else self._context_stage.policy_key
             extra: dict[str, Any] = {}
             if policy_key is not None:

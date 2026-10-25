@@ -54,6 +54,7 @@ from app.modules.reviews.application.review_ignore import (
     IgnorePolicy,
     apply_ignore,
 )
+from app.modules.reviews.application.review_path import ReviewBinding, snapshot_for_review
 from app.modules.reviews.application.run_failures import RunCancelled, RunFailure, RunSkipped
 from app.modules.reviews.application.run_trace import RunTrace, traced_step
 from app.modules.reviews.application.vcs_diff import (
@@ -68,6 +69,10 @@ FAST_CONTEXT_TOKEN_BUDGET = 60_000
 _MAX_TRACED_BLOCKS = 200
 # ``context.rag`` of a build that had a RAG plan and failed: the slot did not complete.
 _RAG_BUILD_FAILED = "context_build_failed"
+# CONTRACT: the provider the stage builds the diff map with is the provider the review path
+# is chosen for (TL-13). The stage's input carries no provider yet; #220 replaces both uses
+# with the provider of the run.
+_STAGE_PROVIDER = VcsProviderName.GITHUB
 
 
 class EstimatedTokenCounter:
@@ -348,10 +353,17 @@ class ReviewContextStage:
         self._rag = rag
         self._denied_paths: frozenset[str] = frozenset()
         self._snapshot: PolicySnapshot | None = None
+        # The snapshot the review is given; None on the legacy path.
+        self._snapshot_for_llm: PolicySnapshot | None = None
         self._matcher: IgnoreMatcher | None = None
         self._diff_old_sha: str | None = None
         # The live PR base of the attempt when it differs from the pinned one, else None.
         self._pr_base_sha: str | None = None
+
+    @property
+    def snapshot_for_llm(self) -> PolicySnapshot | None:
+        """The attempt's snapshot when the run takes the snapshot path, else ``None``."""
+        return self._snapshot_for_llm
 
     @property
     def diff_old_sha(self) -> str | None:
@@ -407,6 +419,19 @@ class ReviewContextStage:
         async with traced_step(self._trace, run_id, "policy.load", request) as step:
             self._snapshot = await self._prepare_policy.execute(run_id)
             validate_execution_profile_versions(self._snapshot.execution_profile)
+            # The pinned review prompt picks the path. A snapshot-path run that cannot be
+            # served fails here, before the conventions call.
+            # CONTRACT: the snapshot's prompt bindings are the run's pins (checked on every
+            # read of a stored snapshot), so they name the review prompt the run pinned.
+            bindings = self._snapshot.prompt_bindings
+            self._snapshot_for_llm = snapshot_for_review(
+                ReviewBinding(
+                    bindings.review_system_id,
+                    bindings.review_system_version,
+                    _STAGE_PROVIDER.value,
+                ),
+                self._snapshot,
+            )
             step.response = policy_summary(self._snapshot)
         # The snapshot keeps validated masks; the matcher is rebuilt from them.
         self._matcher = IgnoreMatcher(
@@ -469,7 +494,7 @@ class ReviewContextStage:
         diff_map = build_diff_map(
             pull_request,
             tuple(vcs_file_from_snapshot(item) for item in stored),
-            provider=VcsProviderName.GITHUB,
+            provider=_STAGE_PROVIDER,
             repository_id=run.repository_id,
             diff_old_sha=diff_old_sha,
         )
