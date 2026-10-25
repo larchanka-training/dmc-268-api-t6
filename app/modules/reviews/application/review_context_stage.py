@@ -141,8 +141,14 @@ def policy_summary(snapshot: PolicySnapshot) -> dict[str, Any]:
     }
 
 
-def context_summary(diff_map: DiffMap, payload: ReviewContextPayload) -> dict[str, Any]:
-    """Counts and source ranges of the context; the text of a block is never stored here."""
+def context_summary(
+    diff_map: DiffMap, payload: ReviewContextPayload, *, pr_base_sha: str | None = None
+) -> dict[str, Any]:
+    """Counts and source ranges of the context; the text of a block is never stored here.
+
+    ``pr_base_sha`` is the live base of a PR that left its pinned base; it is recorded
+    here only, never in the diff map or its digest.
+    """
     # Retrieved blocks of the RAG slot count with the blocks of the diff files.
     counted: tuple[ContextBlock | RetrievedBlock, ...] = (*payload.blocks, *payload.retrieved)
     tokens: Counter[str] = Counter()
@@ -150,15 +156,18 @@ def context_summary(diff_map: DiffMap, payload: ReviewContextPayload) -> dict[st
     for block in counted:
         tokens[block.level.value] += block.tokens
         tokens_by_role[block.source.role.value] += block.tokens
+    diff: dict[str, Any] = {
+        "digest": diff_map.digest,
+        "files": len(diff_map.files),
+        "diff_old_sha": diff_map.diff_old_sha,
+        "file_list_complete": diff_map.file_list_complete,
+    }
+    if pr_base_sha is not None:
+        diff["pr_base_sha"] = pr_base_sha
     return {
         "status": payload.status.value,
         "reason": payload.reason,
-        "diff": {
-            "digest": diff_map.digest,
-            "files": len(diff_map.files),
-            "diff_old_sha": diff_map.diff_old_sha,
-            "file_list_complete": diff_map.file_list_complete,
-        },
+        "diff": diff,
         "reviewable_lines": payload.reviewable_lines,
         "ignored_files": payload.ignored_files,
         "levels_present": [level.value for level in payload.levels_present],
@@ -341,6 +350,8 @@ class ReviewContextStage:
         self._snapshot: PolicySnapshot | None = None
         self._matcher: IgnoreMatcher | None = None
         self._diff_old_sha: str | None = None
+        # The live PR base of the attempt when it differs from the pinned one, else None.
+        self._pr_base_sha: str | None = None
 
     @property
     def diff_old_sha(self) -> str | None:
@@ -413,6 +424,7 @@ class ReviewContextStage:
         """
         self._denied_paths = frozenset()
         self._diff_old_sha = None
+        self._pr_base_sha = None
         if self._snapshot is None or self._matcher is None:
             await self.begin(run_id)
         snapshot, matcher = self._snapshot, self._matcher
@@ -428,6 +440,18 @@ class ReviewContextStage:
         pull_request = await self._vcs.get_pull_request(run.locator, checkpoint=self._checkpoint)
         if pull_request.head_sha != run.head_sha:
             raise RunFailure("diff_fetch_failed", "pull request head changed after the diff")
+        if pull_request.base_sha != run.base_sha:
+            # A retarget after the diff was stored: the stored patches, the merge base and
+            # the policy all stay on the pinned base; the live one is only recorded.
+            _LOGGER.warning(
+                "Pull request base differs from the pinned run base "
+                "run_id=%s pinned_base_sha=%s pr_base_sha=%s",
+                run_id,
+                run.base_sha,
+                pull_request.base_sha,
+            )
+            self._pr_base_sha = pull_request.base_sha
+            pull_request = replace(pull_request, base_sha=run.base_sha)
         if not stored and pull_request.meta.files_changed == 0:
             # The file list and the counter of the provider agree: nothing was changed.
             await self._record_nothing_to_review(
@@ -496,7 +520,7 @@ class ReviewContextStage:
                     token_budget=self._token_budget,
                     rag=None if rag is None else rag.plan,
                 )
-                step.response = context_summary(diff_map, payload)
+                step.response = context_summary(diff_map, payload, pr_base_sha=self._pr_base_sha)
         except (PolicyError, RunCancelled):
             # The policy is also evaluated while the context is built (paths behind an
             # import). Its failure is never an optional fallback: it stops the run.
@@ -522,12 +546,15 @@ class ReviewContextStage:
         digest: str | None,
         files: int,
     ) -> None:
+        diff: dict[str, Any] = {"digest": digest, "files": files}
+        if self._pr_base_sha is not None:
+            diff["pr_base_sha"] = self._pr_base_sha
         request = {"head_sha": head_sha, "policy_snapshot_id": str(snapshot.snapshot_id)}
         async with traced_step(self._trace, run_id, "context.build", request) as step:
             step.response = {
                 "status": status.value,
                 "reason": status.value,
-                "diff": {"digest": digest, "files": files},
+                "diff": diff,
                 "ignored_files": files,
                 "blocks": [],
             }
