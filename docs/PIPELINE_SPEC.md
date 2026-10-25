@@ -6,7 +6,7 @@
 | Владелец | техлид (роль 1) |
 | Область действия | Жизненный цикл `Run` от триггера до check-run: состояния, фазы, таймауты, retry, сбои, триггер Р-10, версионирование выхода LLM, якорь находки, итоговый результат и доставка публикации. Детали контекста и Write-Back — в спецификациях #107, HTTP API — в OpenAPI |
 | Связь с SD и #107 | [`SYSTEM_DESIGN.md`](SYSTEM_DESIGN.md) задаёт архитектуру, этот документ — жизненный цикл и сбои. Для новых policy/context/verifier/publication контрактов каноничны [`RULES_FORMAT_SPEC.md`](RULES_FORMAT_SPEC.md) и [`CONTEXT_AND_VERIFICATION_SPEC.md`](CONTEXT_AND_VERIFICATION_SPEC.md); приведённые здесь целевые положения синхронизированы с ними. Непересмотренные триггеры, состояния и инфраструктурные правила сохраняются |
-| Машиночитаемые контракты | Текущие: `review/schemas/review-output.schema.json` (legacy v1), `contracts/schemas/review.{run,publish}.v1.schema.json`, `contracts/examples/*.json`, `contracts/openapi.yaml`. После #133 существуют `review/schemas/review-output.schema.v2.json`, `review/schemas/verifier-output.schema.v1.json`, исторический prompt `review/prompts/review.verifier.v1.md` (#133) и `review/prompts/review.verifier.v2.md` (#219, текущий pin по умолчанию), unit-сценарии Reflection Pass; опциональный путь в `ExecuteReviewRun` реализован, но боевой worker не подключает его до #130 (§9). Полное внедрение новых snapshots/manifests/results и API-полей требует согласованной интеграции; наличие отдельных компонентов его не подтверждает. Проверки контрактов — §16 |
+| Машиночитаемые контракты | Текущие: `review/schemas/review-output.schema.json` (legacy v1), `contracts/schemas/review.{run,publish}.v1.schema.json`, `contracts/examples/*.json`, `contracts/openapi.yaml`. После #133 существуют `review/schemas/review-output.schema.v2.json`, `review/schemas/verifier-output.schema.v1.json`, исторический prompt `review/prompts/review.verifier.v1.md` (#133) и `review/prompts/review.verifier.v2.md` (#219; runtime-версия — по закреплённой DB-строке), unit-сценарии Reflection Pass; опциональный путь в `ExecuteReviewRun` реализован, но боевой worker не подключает его до #130 (§9). Полное внедрение новых snapshots/manifests/results и API-полей требует согласованной интеграции; наличие отдельных компонентов его не подтверждает. Проверки контрактов — §16 |
 | Метки решений | **[техлид]** — решение техлида в #20; **[дефолт]** — дефолт, утверждённый вместе с планом #20; решением становится после аппрува этого PR |
 
 ---
@@ -572,18 +572,25 @@ Check-run Run, завершённого без воркера (T6 после п�
 
 **Состояние verifier после #133.** Схемы `review-output.schema.v2.json` и
 `verifier-output.schema.v1.json`, исторический prompt `review.verifier.v1.md`
-(#133) и `review.verifier.v2.md` (#219, текущий pin по умолчанию), unit-сценарии
+(#133) и `review.verifier.v2.md` (#219), unit-сценарии
 уже существуют. `ExecuteReviewRun` принимает опциональный `reflection_pass`: при
 его передаче вместе с policy snapshot проверка выполняется до публикации.
-Snapshot без `reflection_pass` даёт `policy_snapshot_integrity_error`;
+Snapshot без `reflection_pass` даёт `internal_error` — ошибку серверной сборки
+(#216), до генерации и публикации. Это меняет прежний terminal fail без retry
+с кодом `policy_snapshot_integrity_error`: теперь действуют повторы прогона по §6
+до трёх попыток суммарно, после третьей — `failed` и копия в `reviews.dlq`.
+Неготовый snapshot по-прежнему даёт `policy_snapshot_integrity_error` без retry;
 `reflection_pass` без snapshot пропускается с предупреждением в логе
 `execute_review_legacy_run_without_snapshot`. Обе композиции `process_review_run`
 в `app/worker.py` этот аргумент не передают;
-`run_repository.py` сохраняет `allowed_v2=None` до подключения в #130.
+`SqlAlchemyReviewOutputRepository.get_post_processing_input` в `run_repository.py`
+передаёт `allowed_v2_rules=None` inline: у legacy-адаптера нет проверенного manifest.
+Явно собранный snapshot-путь передаёт отдельный allowlist в `VerifiedReviewOutput`;
+одно наличие строки snapshot не разрешает атрибуцию v2.
 Reflection Pass — название реализации обязательного verifier из CVS §7;
 наличие компонентов не означает его включения в боевом worker.
 
-**Текущая реализация / legacy v1.** `review/schemas/review-output.schema.json` (draft 2020-12) и Pydantic `ReviewOutput` (`app/modules/reviews/application/review_output.py`) задают существующую форму без evidence; её проверяет `tests/test_review_output_schema.py`. Нынешние prompts в боевом legacy-пути — `review/prompts/review.system.v3.md` (#178/#233) и `review.conventions.v2.md`; это не признак внедрённого ReviewOutput v2. Snapshot-профиль по умолчанию пока закрепляет reviewer v2 и verifier v2 (#219). Существующая семантика ниже описывает legacy-путь и корпус `tests/fixtures/review_output/`; строка о custom-prefix не переносится в новый профиль:
+**Текущая реализация / legacy v1.** `review/schemas/review-output.schema.json` (draft 2020-12) и Pydantic `ReviewOutput` (`app/modules/reviews/application/review_output.py`) задают существующую форму без evidence; её проверяет `tests/test_review_output_schema.py`. Нынешние prompts в боевом legacy-пути — `review/prompts/review.system.v3.md` (#178/#233) и `review.conventions.v2.md`; это не признак внедрённого ReviewOutput v2. Метки v2 по умолчанию в `PromptBindings` и тестовых fixtures не задают runtime-выбор: при создании Run закрепляются ID активных DB-строк conventions/verifier, а при восстановлении snapshot читаются версии и checksums этих закреплённых строк. Отсутствующие у исторического/частично закреплённого Run pins остаются отсутствующими, bindings — неполными. Существующая семантика ниже описывает legacy-путь и корпус `tests/fixtures/review_output/`; строка о custom-prefix не переносится в новый профиль:
 
 | Правило | Нормализуется в шлюзе (после JSON Schema) | Pydantic напрямую | `validate_findings.py` (eval, #30) |
 |---|---|---|---|

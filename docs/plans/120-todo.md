@@ -8,7 +8,9 @@ today's worker. Review-round references: [round 2](https://github.com/larchanka-
 
 At the #133 boundary the legacy repository path supplied `allowed_v2_rules=None`, so the
 post-processor's ability to retain v2 attribution did not establish its persistence in the
-worker. That legacy default still applies. The explicitly composed snapshot pipeline now
+worker. Today `SqlAlchemyReviewOutputRepository.get_post_processing_input` passes
+`allowed_v2_rules=None` inline because this legacy adapter has no verified manifest.
+The explicitly composed snapshot pipeline now
 carries allowed names in `VerifiedReviewOutput`, so its publication can retain attribution.
 The legacy `parse_review_output` entry point silently strips `evidence_refs` even from a
 v2-looking input before v1 validation; `parse_review_output_v2` is a separate contract.
@@ -122,7 +124,7 @@ behavior separately.
   - Cataloged `verification_budget_exceeded` and `verification_deadline_exceeded` in `run_failures.py`.
   - Translated `TimeoutError`/`llm_timeout` to `VerificationUnavailableError` and generic errors to `VerificationUnavailableError`.
 - [x] **Task 21: P2 Attribution & Post-Processing**
-  - Threaded `allowed_v2_rules` through `FindingPostProcessingInput`, `FindingsPostProcessor.process()`, and `RunRepository.get_post_processing_input()` as an explicit-caller capability. The legacy repository supplied `None`; this did not establish v2 database attribution in the #133 worker.
+  - Threaded `allowed_v2_rules` through `FindingPostProcessingInput`, `FindingsPostProcessor.process()`, and `SqlAlchemyReviewOutputRepository.get_post_processing_input()` as an explicit-caller capability. The legacy repository supplied `None`; this did not establish v2 database attribution in the #133 worker.
   - Added regression test `test_findings_post_processor_v2_preserves_attribution_for_body_only_findings`.
 - [x] **Task 22: P2 Manifest & Rendering Fidelity**
   - Rendered service defaults lines in XML numbered to match manifest `shown_ranges` `1..sum(checks)`.

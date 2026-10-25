@@ -483,14 +483,19 @@ eval не запускается; pins для неиспользуемого ver
 
 **Текущее состояние после #133.** Схемы `review-output.schema.v2.json` и
 `verifier-output.schema.v1.json`, исторический prompt `review.verifier.v1.md`
-(#133) и `review.verifier.v2.md` (#219, текущий pin по умолчанию), unit-сценарии
+(#133) и `review.verifier.v2.md` (#219), unit-сценарии
 существуют. Опциональный путь Reflection Pass в `ExecuteReviewRun` реализован
 для вызова с `reflection_pass` и policy snapshot. Snapshot без `reflection_pass`
-даёт `internal_error` (ошибка серверной сборки, #216); повреждённый snapshot
+даёт `internal_error` (ошибка серверной сборки, #216): вместо прежнего terminal
+policy fail действуют повторы до трёх попыток суммарно, затем `failed` и
+`reviews.dlq`. Повреждённый snapshot
 по-прежнему даёт `policy_snapshot_integrity_error`. `reflection_pass` без snapshot
 пропускается с предупреждением в логе `execute_review_legacy_run_without_snapshot`.
 Обе композиции в боевом `app/worker.py` его не подключают; подключение остаётся
-задачей #130.
+задачей #130. Метки v2 в dataclass/fixtures — не универсальные runtime-pins:
+Run сохраняет ID активных conventions/verifier DB-строк при создании, а snapshot
+восстанавливает их версии/checksums по этим ID. Старые и частично закреплённые Run
+сохраняют отсутствующие pins и неполные bindings.
 Reflection Pass соответствует обязательному verifier из CVS §7; unit-проверки
 ниже не доказывают его работу в боевом worker или качество смысловых решений.
 Legacy-разбор `parse_review_output` молча удаляет `evidence_refs` из находок,
@@ -528,7 +533,7 @@ Adversarial eval использует пары одинакового дефек
 
 **Защита от Prompt Injection на unit-уровне (AC 7 задачи #120)**:
 Reviewer-промпт проверяют отдельно `tests/test_prompt_builder_markdown.py::test_first_pass_prompt_injection_defense` и `::test_prompt_injection_defense_escapes_closing_tags`. Параметризованный `TestPromptInjectionDefenses::test_untrusted_fields_are_safely_escaped_in_verifier_prompt` в `tests/test_reflection_evaluation.py` строит только verifier-промпт:
-- Исторический `review.verifier.v1.md` и текущий pin `review.verifier.v2.md` содержат декларацию Source Authority and Trust с наивысшим приоритетом над пользовательскими данными. Исторический Option (a) в #120 означал сохранить тогдашний reviewer prompt v2 без изменений и отложить новую декларацию доверия reviewer и её боевое подключение до #130 ([план #120, Phase 7](plans/120-plan.md#phase-7-review-round-3-fixes-alexander-khomutov--axyi-5562633453)). Нынешний `review.system.v3.md` — prompt для legacy-контракта из #178/#233; reviewer v4 с новой декларацией доверия и интеграция snapshot/verifier-профиля остаются частью #130 (§3.6).
+- Пакетные `review.verifier.v1.md` и `review.verifier.v2.md` содержат декларацию Source Authority and Trust с наивысшим приоритетом над пользовательскими данными. Исторический Option (a) в #120 означал сохранить тогдашний reviewer prompt v2 без изменений и отложить новую декларацию доверия reviewer и её боевое подключение до #130 ([план #120, Phase 7](plans/120-plan.md#phase-7-review-round-3-fixes-alexander-khomutov--axyi-5562633453)). Нынешний `review.system.v3.md` — prompt для legacy-контракта из #178/#233; reviewer v4 с новой декларацией доверия и интеграция snapshot/verifier-профиля остаются частью #130 (§3.6).
 - Все недоверенные поля (`rules_markdown`, `agents_md`, `candidate_id`, `path`, `title`, `body`, `suggestion`, `code_diff`) экранируются по стандарту XML-сущностей (`&lt;`, `&gt;`, `&amp;`, `&quot;`, `&apos;`).
 - Атрибуты XML строго валидируются: идентификаторы `service-defaults:<ID>` ограничены регулярным выражением `\A[a-zA-Z0-9_\-]+\Z`, исключая кавычки и инъекции атрибутов.
 - Тесты проверяют отсутствие неэкранированных тегов `<system>`, преждевременного закрытия контейнеров (`</candidate_findings>`, `</code_context>`) и неэкранированного `<|im_start|>` в user-тексте. Проверка отсутствия `[INST]` относится к `prompt.system`: буквальный `[INST]` может оставаться недоверенными пользовательскими данными. XML-экранирование сохраняет эти данные внутри user-контейнеров; system-промпт остаётся неизменным.

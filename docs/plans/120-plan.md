@@ -8,7 +8,9 @@ today's worker. Review-round references: [round 2](https://github.com/larchanka-
 
 At the #133 boundary the legacy repository path supplied `allowed_v2_rules=None`, so the
 post-processor's ability to retain v2 attribution did not establish its persistence in the
-worker. That legacy default still applies. The explicitly composed snapshot pipeline now
+worker. Today `SqlAlchemyReviewOutputRepository.get_post_processing_input` passes
+`allowed_v2_rules=None` inline because this legacy adapter has no verified manifest.
+The explicitly composed snapshot pipeline now
 carries allowed names in `VerifiedReviewOutput`, so its publication can retain attribution.
 The legacy `parse_review_output` entry point silently strips `evidence_refs` even from a
 v2-looking input before v1 validation; `parse_review_output_v2` is a separate contract.
@@ -84,7 +86,7 @@ Expand the review LLM pipeline to accept user-defined Markdown policy documents 
 - [x] **P1 System Prompt Preservation (Option a)**: Removed `review.system.v3.md` and golden fixtures to defer prompt rollout until #130; strictly preserved and pinned byte-level SHA-256 for `review.system.v2.md`.
 - [x] **P2 Rebase & Limits Relocation**: Rebased on `origin/main` (`f8fe9c0`) and imported `MAX_COMMIT_MESSAGES`/`MAX_COMMIT_MESSAGE_CHARS` from `commit_prefix_limits.py`.
 - [x] **P2 Error Handling & Schema Strictness**: Enforced exact 1:1 decision counts with candidate IDs, sanitized error messages (truncating IDs to 64 chars and hiding raw input payloads in ValidationError), cataloged `verification_budget_exceeded` and `verification_deadline_exceeded`, and mapped timeout/unavailable/invalid errors.
-- [x] **P2 Attribution & Post-Processing**: Added the `allowed_v2_rules` hand-off to `FindingsPostProcessor` and `RunRepository`. This made v2 attribution retention available to an explicit caller; the legacy repository supplied `None`, so #133 did not establish database attribution in the worker.
+- [x] **P2 Attribution & Post-Processing**: Added the `allowed_v2_rules` hand-off to `FindingsPostProcessor` and `SqlAlchemyReviewOutputRepository.get_post_processing_input`. This made v2 attribution retention available to an explicit caller; the legacy repository supplied `None`, so #133 did not establish database attribution in the worker.
 - [x] **P2 Manifest & Rendering Fidelity**: Numbered service-defaults lines in prompt matching manifest `shown_ranges`; neutral summary `done_well` text on cleansed summaries; legacy runs bypass reflection when `context.policy_snapshot is None`.
 - [x] **P2 Test Coverage & Docs**: 100% statement and branch coverage on review output v2 and reflection evaluation; aligned `review/README.md`, `docs/TEST_PLAN.md`, and plans.
 

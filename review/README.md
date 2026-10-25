@@ -34,9 +34,15 @@ The current live prompt files are `review.system.v3` (#178/#233) and
 `review.conventions.v2`. `seed_prompt_versions` in `app/bootstrap/seed_prompts.py`
 activates the newest known version of each key in `prompt_versions` by setting
 `is_active`. The manual gateway check in `app/bootstrap/llm_gateway.py` defaults
-to those same files. The separate policy snapshot profile still defaults to
-reviewer v2 and verifier v2 (#219). Older prompt versions remain immutable
-history: a published version is never edited or removed.
+to those same files. `PromptBindings` dataclass defaults and snapshot test fixtures
+use v2 version labels; these are not universal runtime selections. At run creation,
+`SqlAlchemyWebhookRunStore` captures the active `review.conventions` and
+`review.verifier` row IDs alongside the selected `review.system` ID.
+`SqlAlchemyPolicySnapshotStore.get_pins` restores each pinned row's version and checksum
+by ID, so activating a newer row does not change an existing run's bindings. Historical
+or partially pinned runs keep absent IDs and empty checksums; their bindings remain
+incomplete instead of acquiring today's active prompts. Older prompt versions remain
+immutable history: a published version is never edited or removed.
 
 ## Seeding contract
 
@@ -193,10 +199,10 @@ Under Policy Snapshot v2 (`policy_snapshot` present), prompts and candidate find
 - `<pr_meta>`: PR metadata (title, description, author, branch, base ref, commit messages).
 - `<changed_files>`: each `<file path="..." block_id="..." status="..." language="...">` carries a stable `block_id`. Contiguous ranges shown to the model are recorded in `ManifestBlock.shown_ranges`.
 
-**Reflection Pass (`prompts/review.verifier.v2.md`)**:
+**Reflection Pass (packaged `prompts/review.verifier.v1.md` / `v2.md`, selected by the snapshot pin)**:
 - Two-pass verification architecture to eliminate hallucinated findings.
 - **Pass 1 (Reviewer, snapshot/v2 contract)** generates candidate findings with required `evidence_refs` (pointing to visible `block_id` line ranges). This applies to the explicitly composed snapshot pipeline, not the current legacy worker response contract. Both `ExecuteReviewRun` compositions in `app/worker.py` still omit Reflection Pass; connecting that profile remains part of #130.
-- **Pass 2 (Verifier)** checks each candidate against visible code and requirements using `prompts/review.verifier.v2.md`.
+- **Pass 2 (Verifier)** checks each candidate against visible code and requirements using the packaged verifier version selected by the snapshot binding.
   - Verifier prompt envelope: contains `<repository_rules>`, `<project_conventions_document>`, `<service_defaults>`, `<repo_conventions>`, `<code_context>` (with `<changed_files>`), and `<candidate_findings count="...">` (carrying `<candidate candidate_id="..." path="..." start_line="..." line="..." category="..." severity="...">`, `<title>`, `<body>`, optional `<suggestion>`, `<evidence_refs>`, and optional `<rule_attribution name="..." />`).
   - Verifier output: validated at runtime via Pydantic (`VerificationOutput`, `ReviewFindingV2`) conforming to contract `schemas/verifier-output.schema.v1.json` (`decisions`: `candidate_id`, `status` in `supported` / `contradicted` / `insufficient_context`, `reason`, `evidence_refs`, `requirement_refs`). Legacy runs without policy snapshot continue to process v1 output.
   - Strict filtering: only candidates with `status="supported"` survive; unverified candidates are dropped, and the review summary is cleansed of hallucinated defects.
@@ -205,7 +211,8 @@ The legacy `parse_review_output` entry point silently removes each finding's `ev
 even when the input looks like v2, then validates the remaining v1 object. It does not validate
 evidence against a manifest or preserve it on parsed findings. `parse_review_output_v2` is the
 separate evidence-aware contract. Snapshot presence alone does not enable v2 attribution in
-`SqlAlchemyRunRepository.get_post_processing_input`: its legacy default remains `None`.
+`SqlAlchemyReviewOutputRepository.get_post_processing_input`: this legacy adapter passes
+`allowed_v2_rules=None` inline, because it has no verified manifest.
 The explicit snapshot pipeline carries its allowed attribution names in `VerifiedReviewOutput`.
 
 Verifier diagnostics also depend on the composition. #133 logged candidate IDs/statuses rather
