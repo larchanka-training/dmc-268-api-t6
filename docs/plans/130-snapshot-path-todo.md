@@ -280,7 +280,14 @@ Gates for every task: the four commands in the plan, with DB and vhost `imp130f`
   (`verify_policy_budget` `:204`); `tests/test_review_context_stage.py`.
 - **Tests:** v4 with more than 12k policy tokens → `policy_prompt_budget_exceeded` at `policy.load`, 0 `llm.call`;
   the same docs on v3 proceed.
-- **Done when:** [ ] F1-1 green.
+  - as built (`tests/test_review_path.py`, beside the other stage cases of the selector, instead of
+    `tests/test_review_context_stage.py`): the check runs inside the `policy.load` step after the
+    selector, with the pinned counter and `max_policy_tokens` of the snapshot's profile, before
+    `snapshot_for_llm` is set; `PolicyBudgetExceededError` becomes the terminal
+    `PolicyError(policy_prompt_budget_exceeded, limit, actual)`. A lowered limit pins the boundary
+    (at the limit passes, one over fails); through the processor a v4 run over the budget makes no
+    diff read and no conventions call; v3 with the same limit proceeds.
+- **Done when:** [x] F1-1 green.
 
 ### F1-13: R19 and T-d
 - **Commit:** `feat(reviews): count the context stage with the pinned counter (#130)`
