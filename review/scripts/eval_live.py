@@ -61,14 +61,16 @@ from app.modules.reviews.application.llm import (  # noqa: E402
     LlmCallRecord,
     LlmUsage,
 )
-from app.modules.reviews.application.policy_documents import normalize_document  # noqa: E402
+from app.modules.reviews.application.policy_documents import (  # noqa: E402
+    missing_document,
+    normalize_document,
+)
 from app.modules.reviews.application.policy_errors import PolicyError  # noqa: E402
 from app.modules.reviews.application.policy_snapshot import (  # noqa: E402
     AGENTS_DOCUMENT_PATH,
     PINNED_PROMPT_CHECKSUMS,
     POLICY_SNAPSHOT_SCHEMA_VERSION,
     RULES_DOCUMENT_PATH,
-    DocumentPresence,
     ExecutionProfile,
     PolicyDocument,
     PolicySnapshot,
@@ -231,20 +233,6 @@ def _policy_document(path: Path, snapshot_path: str) -> PolicyDocument:
     return normalize_document(snapshot_path, raw, blob_oid=blob_oid)
 
 
-def _missing_policy_document(path: str) -> PolicyDocument:
-    """Represent a policy file absent from the selected evaluation arm."""
-    return PolicyDocument(
-        path=path,
-        presence=DocumentPresence.MISSING,
-        blob_oid=None,
-        raw_sha256=None,
-        text_sha256=None,
-        text=None,
-        byte_count=None,
-        line_count=None,
-    )
-
-
 def _policy_snapshot(
     case_dir: Path,
     record: Mapping[str, Any],
@@ -259,7 +247,7 @@ def _policy_snapshot(
     base = case_dir / record["base_path"]
     try:
         if arm == "none":
-            rules = _missing_policy_document(RULES_DOCUMENT_PATH)
+            rules = missing_document(RULES_DOCUMENT_PATH)
         else:
             # The valid file is the case's .review/rules.md; the malicious one is rendered at
             # the same fixed path, exactly where an attacker's rules.md would be.
@@ -268,7 +256,7 @@ def _policy_snapshot(
         agents = (
             _policy_document(agents_path, AGENTS_DOCUMENT_PATH)
             if agents_path.is_file()
-            else _missing_policy_document(AGENTS_DOCUMENT_PATH)
+            else missing_document(AGENTS_DOCUMENT_PATH)
         )
         ignore = parse_review_ignore(rules.text)
     except (OSError, PolicyError) as exc:

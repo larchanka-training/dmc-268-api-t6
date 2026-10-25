@@ -6,6 +6,7 @@ from hashlib import sha256
 from typing import Literal
 from uuid import UUID
 
+from app.modules.reviews.application.policy_documents import missing_document
 from app.modules.reviews.application.policy_snapshot import (
     DEFAULT_MAX_POLICY_TOKENS,
     PINNED_PROMPT_CHECKSUMS,
@@ -47,16 +48,7 @@ def make_policy_document_present(
 
 def make_policy_document_missing(path: str) -> PolicyDocument:
     """Create a missing PolicyDocument with all content fields None."""
-    return PolicyDocument(
-        path=path,
-        presence=DocumentPresence.MISSING,
-        blob_oid=None,
-        raw_sha256=None,
-        text_sha256=None,
-        text=None,
-        byte_count=None,
-        line_count=None,
-    )
+    return missing_document(path)
 
 
 def make_policy_document_empty(path: str, *, blob_oid: str = "f" * 40) -> PolicyDocument:
