@@ -233,6 +233,8 @@ class Observed:
     responses: list[tuple[str, Any]]
     conventions_keys: list[tuple[UUID, str | None, UUID, str | None]]
     answers: list[object]
+    # Rows in context_manifests: a legacy run stores none (F1-6).
+    manifests: int
 
 
 async def _claim(factory: async_sessionmaker[AsyncSession], run_id: UUID) -> None:
@@ -359,6 +361,11 @@ async def _exercise(
                 {"id": run_id},
             )
         ).all()
+        manifests = (
+            await session.execute(
+                text("SELECT count(*) FROM context_manifests WHERE run_id=:id"), {"id": run_id}
+            )
+        ).scalar_one()
         conventions_keys = (
             await session.execute(
                 text(
@@ -378,6 +385,7 @@ async def _exercise(
         responses=[(tool, response) for tool, _, response in actions if tool != "llm.call"],
         conventions_keys=[tuple(row) for row in conventions_keys],
         answers=output.answers,
+        manifests=manifests,
     )
 
 
@@ -609,6 +617,8 @@ def _assert_legacy_run(observed: Observed) -> None:
         (REPO_A, _PROVIDER_AGENTS_SHA, observed.conventions_prompt_id, _IGNORE_DIGEST)
     ]
     assert observed.answers == [_REVIEW_ANSWER]
+    # The production gateway has a manifest store: a legacy run still stores no manifest.
+    assert observed.manifests == 0
 
 
 @pytest.mark.integration

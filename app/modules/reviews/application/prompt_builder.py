@@ -28,6 +28,7 @@ from app.modules.reviews.application.policy_snapshot import (
 from app.modules.reviews.application.unified_diff import split_lf
 
 if TYPE_CHECKING:
+    from app.modules.reviews.application.prompt_budget import TokenCounter
     from app.modules.reviews.application.review_context import ContextBlock, RetrievedBlock
 
 type LineType = Literal["added", "removed", "context"]
@@ -371,10 +372,18 @@ class PromptBuilder:
         call_id: uuid.UUID,
         stage: StageName = "review",
         recovery_kind: RecoveryKind = "none",
+        counter: TokenCounter | None = None,
     ) -> CallManifest:
-        """Construct the exact CallManifest presented in this prompt."""
+        """Construct the exact CallManifest presented in this prompt.
+
+        With ``counter`` (the snapshot path's pinned counter) every block carries the
+        tokens of its rendered text.
+        """
         run_id = context.policy_snapshot.run_id if context.policy_snapshot is not None else None
         blocks: list[ManifestBlock] = []
+
+        def tokens(rendered: str) -> int | None:
+            return None if counter is None else counter.count(rendered)
 
         if context.policy_snapshot is not None:
             rules_doc = context.policy_snapshot.rules
@@ -393,6 +402,7 @@ class PromptBuilder:
                             end_line=line_count,
                             shown_line_count=line_count,
                             shown_ranges=((1, line_count),),
+                            tokens=tokens(self._render_policy_rules(context.policy_snapshot)),
                         )
                     )
                 else:
@@ -407,6 +417,7 @@ class PromptBuilder:
                             start_line=None,
                             end_line=None,
                             shown_line_count=0,
+                            tokens=tokens(self._render_policy_rules(context.policy_snapshot)),
                         )
                     )
 
@@ -426,6 +437,7 @@ class PromptBuilder:
                             end_line=line_count,
                             shown_line_count=line_count,
                             shown_ranges=((1, line_count),),
+                            tokens=tokens(self._render_policy_agents(context.policy_snapshot)),
                         )
                     )
                 else:
@@ -440,6 +452,7 @@ class PromptBuilder:
                             start_line=None,
                             end_line=None,
                             shown_line_count=0,
+                            tokens=tokens(self._render_policy_agents(context.policy_snapshot)),
                         )
                     )
 
@@ -454,9 +467,21 @@ class PromptBuilder:
                         end_line=defaults_lines,
                         shown_line_count=defaults_lines,
                         shown_ranges=((1, defaults_lines),),
+                        tokens=None
+                        if counter is None
+                        else counter.count(
+                            self._render_service_defaults(
+                                context.rules,
+                                defaults_checksum=context.policy_snapshot.defaults_checksum,
+                            )
+                        ),
                     )
                 )
 
+        include_block_id = context.policy_snapshot is not None
+        repository_id = (
+            None if context.policy_snapshot is None else context.policy_snapshot.repository_id
+        )
         for file in context.changed_files:
             block_id = file_block_id(file.path)
             shown_ranges = _calculate_shown_ranges(file.lines)
@@ -475,6 +500,9 @@ class PromptBuilder:
                     end_line=end_line,
                     shown_line_count=shown_count,
                     shown_ranges=shown_ranges,
+                    tokens=tokens(render_changed_file(file, include_block_id=include_block_id)),
+                    repository_id=repository_id,
+                    truncated=file.total_lines is not None and file.total_lines > len(file.lines),
                 )
             )
 
@@ -493,6 +521,9 @@ class PromptBuilder:
                     end_line=max((end for _, end in ranges), default=None),
                     shown_line_count=sum(end - start + 1 for start, end in ranges),
                     shown_ranges=ranges,
+                    tokens=tokens(_render_excerpt(excerpt)),
+                    repository_id=source.repository_id,
+                    truncated=excerpt.truncated,
                 )
             )
 

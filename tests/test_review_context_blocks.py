@@ -210,6 +210,7 @@ def test_manifest_names_each_excerpt_by_role_with_its_shown_ranges() -> None:
             end_line=4,
             shown_line_count=2,
             shown_ranges=((3, 4),),
+            repository_id=REPOSITORY_ID,
         ),
         ManifestBlock(
             block_id="L4:sym-1",
@@ -222,6 +223,7 @@ def test_manifest_names_each_excerpt_by_role_with_its_shown_ranges() -> None:
             end_line=6,
             shown_line_count=3,
             shown_ranges=((1, 1), (5, 6)),
+            repository_id=REPOSITORY_ID,
         ),
     )
     assert manifest.is_range_shown("L4:sym-1", 5, 6)

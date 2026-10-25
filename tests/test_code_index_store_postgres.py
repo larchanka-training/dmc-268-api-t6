@@ -727,7 +727,7 @@ def test_migration_0037_adds_the_wake_marker_and_its_downgrade_drops_it(
     assert connection.execute(
         text("SELECT generation, wake_requested_at FROM code_index_states")
     ).one() == (1, None)
-    assert connection.scalar(text("SELECT version_num FROM alembic_version")) == "20261024_0039"
+    assert connection.scalar(text("SELECT version_num FROM alembic_version")) == "20261025_0040"
 
 
 @pytest.mark.integration
@@ -782,7 +782,7 @@ def test_migration_0038_adds_the_review_throttle_and_its_downgrade_drops_it(
             "FROM code_index_states"
         )
     ).one() == (1, None, None)
-    assert connection.scalar(text("SELECT version_num FROM alembic_version")) == "20261024_0039"
+    assert connection.scalar(text("SELECT version_num FROM alembic_version")) == "20261025_0040"
 
 
 @pytest.mark.integration
@@ -807,7 +807,7 @@ def test_downgrade_drops_index_tables_and_types_and_upgrade_restores_them(
         "code_index_edge_kind",
         "code_index_import_resolution",
     }
-    assert connection.scalar(text("SELECT version_num FROM alembic_version")) == "20261024_0039"
+    assert connection.scalar(text("SELECT version_num FROM alembic_version")) == "20261025_0040"
 
 
 # ADR 0001 §7: only a limit or an unsafe archive fails an index.
@@ -936,7 +936,7 @@ def test_downgrade_to_0033_drops_the_indexer_columns_and_upgrade_resets_profiles
         )
     ).one() == ("ready", C1, *(None,) * 6, 0, 0)
     assert _state_schema(connection) == (head_columns, _CHECKS["code_index_states"], _STATE_INDEXES)
-    assert connection.scalar(text("SELECT version_num FROM alembic_version")) == "20261024_0039"
+    assert connection.scalar(text("SELECT version_num FROM alembic_version")) == "20261025_0040"
 
 
 # Store behaviour: fencing, publication, purge, garbage collection and isolation.
