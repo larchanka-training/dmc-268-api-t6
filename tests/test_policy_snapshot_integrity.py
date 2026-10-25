@@ -25,6 +25,7 @@ from app.modules.reviews.application.policy_snapshot import (
 from app.modules.reviews.application.policy_snapshot_integrity import (
     verify_policy_document,
     verify_policy_snapshot,
+    verify_snapshot_pins,
 )
 from app.modules.reviews.application.prepare_policy_snapshot import (
     RunPolicyPins,
@@ -321,3 +322,73 @@ def test_the_ignore_digest_formula_is_pinned() -> None:
         == expected
     )
     assert parse_review_ignore("```review-ignore\ngenerated/**\n```\n").digest == expected
+
+
+def test_pins_equal_to_the_snapshot_pass_whatever_the_current_execution_profile() -> None:
+    snapshot = _snapshot()
+
+    verify_snapshot_pins(snapshot, _PINS)
+    # The profile of the pins is the worker's current one; the snapshot fixed its own.
+    verify_snapshot_pins(
+        snapshot, replace(_PINS, execution_profile=ExecutionProfile.deep("model-z", "model-y"))
+    )
+
+
+def test_a_pinned_version_row_that_is_gone_fails() -> None:
+    with pytest.raises(PolicyError) as caught:
+        verify_snapshot_pins(_snapshot(), None)
+
+    _assert_integrity_error(caught.value, "pinned version")
+
+
+_PIN_CHANGES: list[tuple[str, RunPolicyPins, str]] = [
+    (
+        "rule-version-id",
+        replace(_PINS, service_defaults_rule_version_id=UUID(int=5)),
+        "service_defaults_rule_version_id",
+    ),
+    ("defaults-checksum", replace(_PINS, defaults_checksum="9" * 64), "defaults_checksum"),
+    (
+        "review-checksum",
+        replace(
+            _PINS, prompt_bindings=replace(_PINS.prompt_bindings, review_system_checksum="4" * 64)
+        ),
+        "prompt_bindings",
+    ),
+    (
+        "review-id",
+        replace(
+            _PINS, prompt_bindings=replace(_PINS.prompt_bindings, review_system_id=UUID(int=32))
+        ),
+        "prompt_bindings",
+    ),
+    (
+        "review-version",
+        replace(_PINS, prompt_bindings=replace(_PINS.prompt_bindings, review_system_version="v3")),
+        "prompt_bindings",
+    ),
+    (
+        "conventions-pinned-later",
+        replace(
+            _PINS,
+            prompt_bindings=replace(
+                _PINS.prompt_bindings, conventions_checksum="5" * 64, conventions_id=UUID(int=33)
+            ),
+        ),
+        "prompt_bindings",
+    ),
+]
+
+
+@pytest.mark.parametrize(
+    ("pins", "field"),
+    [(pins, field) for _, pins, field in _PIN_CHANGES],
+    ids=[name for name, _, _ in _PIN_CHANGES],
+)
+def test_a_snapshot_whose_pins_differ_from_the_run_versions_fails(
+    pins: RunPolicyPins, field: str
+) -> None:
+    with pytest.raises(PolicyError) as caught:
+        verify_snapshot_pins(_snapshot(), pins)
+
+    _assert_integrity_error(caught.value, field)

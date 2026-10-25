@@ -32,6 +32,7 @@ from app.modules.reviews.application.policy_snapshot import (
 from app.modules.reviews.application.policy_snapshot_integrity import (
     verify_policy_document,
     verify_policy_snapshot,
+    verify_snapshot_pins,
 )
 from app.modules.reviews.application.prepare_policy_snapshot import (
     RunPolicyPins,
@@ -258,6 +259,8 @@ class SqlAlchemyPolicySnapshotStore:
         verify_policy_snapshot(
             snapshot, prompt_bindings=row.prompt_bindings, execution_profile=row.execution_profile
         )
+        # The pinned versions are re-read from the run, not only from the snapshot row.
+        verify_snapshot_pins(snapshot, await self.get_pins(run_id))
         return snapshot
 
     async def create_snapshot(self, snapshot: PolicySnapshot) -> PolicySnapshot:

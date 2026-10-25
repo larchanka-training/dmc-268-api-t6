@@ -14,7 +14,10 @@ from hashlib import sha256
 
 from app.modules.reviews.application.policy_errors import PolicyError, PolicyErrorCode
 from app.modules.reviews.application.policy_snapshot import PolicyDocument, PolicySnapshot
-from app.modules.reviews.application.prepare_policy_snapshot import canonical_policy_payload
+from app.modules.reviews.application.prepare_policy_snapshot import (
+    RunPolicyPins,
+    canonical_policy_payload,
+)
 from app.modules.reviews.application.review_ignore import ignore_digest
 
 
@@ -100,5 +103,34 @@ def verify_policy_snapshot(
     if sha256(canonical.encode("utf-8")).hexdigest() != snapshot.policy_digest:
         raise _integrity_error(
             "The stored policy_digest does not match the stored snapshot",
+            policy_base_sha=snapshot.policy_base_sha,
+        )
+
+
+def verify_snapshot_pins(snapshot: PolicySnapshot, pins: RunPolicyPins | None) -> None:
+    """Check the snapshot against the versions the run pins (RULES_FORMAT_SPEC §7.1, §7.2).
+
+    ``pins`` is read from the run and its version rows; ``None`` means a pinned row is
+    gone. Compared: the service defaults (id and checksum) and every prompt binding (id,
+    checksum, key and version). The execution profile of ``pins`` is the worker's current
+    one, so it is never compared: the first stored snapshot fixed it for the run.
+    """
+    if pins is None:
+        raise _integrity_error(
+            "A pinned version of the run is missing", policy_base_sha=snapshot.policy_base_sha
+        )
+    if snapshot.service_defaults_rule_version_id != pins.service_defaults_rule_version_id:
+        raise _integrity_error(
+            "The stored service_defaults_rule_version_id is not the rule version of the run",
+            policy_base_sha=snapshot.policy_base_sha,
+        )
+    if snapshot.defaults_checksum != pins.defaults_checksum:
+        raise _integrity_error(
+            "The stored defaults_checksum is not the checksum of the pinned rule version",
+            policy_base_sha=snapshot.policy_base_sha,
+        )
+    if snapshot.prompt_bindings != pins.prompt_bindings:
+        raise _integrity_error(
+            "The stored prompt_bindings are not the prompt versions of the run",
             policy_base_sha=snapshot.policy_base_sha,
         )
