@@ -1618,7 +1618,7 @@ def test_conventions_cache_key_is_the_v2_digest_of_the_pinned_identities() -> No
     snapshot = _conventions_snapshot("Use uv.\n")
 
     assert conventions_cache_key(snapshot, "1" * 64) == (
-        "cc66c7734bd7ce7b16e2e508d1943fd59c22c55f8643b618d1b50cd7e6ab3e2c"
+        "ec231f365b4a4743c6803edc863efc1b6b431ba2f062781802a1769de7675903"
     )
 
 
@@ -1628,34 +1628,39 @@ def _profile_change(**changes: Any) -> Callable[[PolicySnapshot], PolicySnapshot
     )
 
 
+def _bindings_change(**changes: Any) -> Callable[[PolicySnapshot], PolicySnapshot]:
+    return lambda snapshot: replace(
+        snapshot, prompt_bindings=replace(snapshot.prompt_bindings, **changes)
+    )
+
+
+def _document_change(path: str, text: str) -> Callable[[PolicySnapshot], PolicySnapshot]:
+    from app.modules.reviews.application.policy_snapshot import make_policy_document_present
+
+    document = make_policy_document_present(path, text, blob_oid="d" * 40)
+    if path == ".review/rules.md":
+        return lambda snapshot: replace(snapshot, rules=document)
+    return lambda snapshot: replace(snapshot, agents=document)
+
+
 @pytest.mark.parametrize(
     "change",
     [
-        lambda snapshot: replace(snapshot, policy_digest="digest_other"),
-        lambda snapshot: replace(snapshot, matcher_version="review-ignore/v2"),
-        lambda snapshot: replace(snapshot, defaults_checksum="0" * 64),
-        lambda snapshot: replace(
-            snapshot, prompt_bindings=replace(snapshot.prompt_bindings, conventions_checksum="x")
-        ),
-        _profile_change(tokenizer_version="tokenizer/v9"),
+        _document_change(".review/rules.md", "## Ignore\n- docs/**\n"),
+        _document_change("AGENTS.md", "Use poetry.\n"),
+        _bindings_change(conventions_id=UUID(int=7)),
+        _bindings_change(conventions_checksum="x"),
         _profile_change(counter_version="counter/v1"),
-        _profile_change(response_schema_version="schema/v9"),
-        _profile_change(recovery_profile_version="recovery/v9"),
-        _profile_change(budget_profile_version="budget/v9"),
     ],
     ids=[
-        "policy-digest",
-        "matcher",
-        "defaults",
-        "conventions-prompt",
-        "tokenizer",
+        "rules-md",
+        "agents-md",
+        "conventions-prompt-id",
+        "conventions-prompt-checksum",
         "counter",
-        "response-schema",
-        "recovery",
-        "budget",
     ],
 )
-def test_conventions_cache_key_changes_with_every_pinned_identity(
+def test_conventions_cache_key_changes_with_the_policy_agents_md_prompt_and_counter(
     change: Callable[[PolicySnapshot], PolicySnapshot],
 ) -> None:
     from app.modules.reviews.application.conventions import conventions_cache_key
@@ -1663,6 +1668,46 @@ def test_conventions_cache_key_changes_with_every_pinned_identity(
     snapshot = _conventions_snapshot("Use uv.\n")
 
     assert conventions_cache_key(change(snapshot), "1" * 64) != conventions_cache_key(
+        snapshot, "1" * 64
+    )
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        # Another PR base with the same policy: the base and the digest that covers it.
+        lambda snapshot: replace(snapshot, policy_base_sha="e" * 40, policy_digest="digest_other"),
+        _bindings_change(review_system_checksum="y", review_system_id=UUID(int=8)),
+        _bindings_change(verifier_checksum="z", verifier_id=UUID(int=9)),
+        _profile_change(tokenizer_version="tokenizer/v9"),
+        _profile_change(response_schema_version="schema/v9"),
+        _profile_change(recovery_profile_version="recovery/v9"),
+        _profile_change(budget_profile_version="budget/v9"),
+        lambda snapshot: replace(snapshot, matcher_version="review-ignore/v2"),
+        lambda snapshot: replace(snapshot, defaults_checksum="0" * 64),
+    ],
+    ids=[
+        "pr-base",
+        "review-prompt",
+        "verifier-prompt",
+        "tokenizer",
+        "response-schema",
+        "recovery",
+        "budget",
+        "matcher",
+        "defaults",
+    ],
+)
+def test_conventions_cache_key_ignores_the_pr_base_and_the_other_pins(
+    change: Callable[[PolicySnapshot], PolicySnapshot],
+) -> None:
+    # Tech lead, 2026-10-25 (TL-7): a miss only when the policy, AGENTS.md or the conventions
+    # prompt changes, so a repository's next pull request reuses the entry.
+    from app.modules.reviews.application.conventions import conventions_cache_key
+
+    snapshot = _conventions_snapshot("Use uv.\n")
+
+    assert conventions_cache_key(change(snapshot), "1" * 64) == conventions_cache_key(
         snapshot, "1" * 64
     )
 

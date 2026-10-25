@@ -409,13 +409,14 @@ class ReviewContextStage:
 
     @property
     def policy_key(self) -> str | None:
-        """Identity of what this attempt withholds, for caches derived from repository files.
+        """The key of the conventions cache entry this attempt may reuse.
 
-        The masks and built-in exclusions are in ``ignore_digest``. A rename or copy also
-        withholds names no mask matches; they are part of the identity, so an entry made
-        while such a file was still allowed is not reused once it is tainted. On the
-        snapshot path the conventions are keyed by ``repo-conventions-v2`` over this value
-        (R5, TL-7), so no entry of a legacy run is reused.
+        On the legacy path it is the attempt's ignore key: the masks and built-in
+        exclusions are in ``ignore_digest``, and a rename or copy also withholds names no
+        mask matches, so an entry made while such a file was still allowed is not reused
+        once it is tainted. On the snapshot path it is the ``repo-conventions-v2`` digest
+        over that ignore key, the policy documents, the pinned conventions prompt and the
+        counter (R5, TL-7), so no entry of a legacy run is reused.
         """
         ignore_key = self._ignore_key()
         if self._snapshot_for_llm is not None:

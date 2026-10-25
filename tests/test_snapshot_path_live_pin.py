@@ -35,7 +35,6 @@ from app.modules.reviews.application.conventions import (
     PolicyFilteredConventionsSource,
     RepositoryFile,
     RepositorySnapshot,
-    conventions_cache_key,
 )
 from app.modules.reviews.application.execute_review import ReviewReply
 from app.modules.reviews.application.get_run_diff import DiffSnapshot
@@ -860,6 +859,27 @@ def _observe_conventions(env: Env, *, v4: bool) -> ConventionsObserved:
     return asyncio.run(scenario())
 
 
+def _v2_key(conventions_id: UUID) -> str:
+    """The repo-conventions-v2 key of the fixture policy, rebuilt from literals (backend.md §5).
+
+    Only the pinned row's id is taken from the run: the database generates it.
+    """
+    identity = {
+        "namespace": "repo-conventions-v2",
+        "ignore_key": _IGNORE_DIGEST,
+        # SHA-256 of the fixture rules.md (``_RULES_TEXT``) and of ``_SNAPSHOT_AGENTS``.
+        "rules_text_sha256": "d017a747c148653d71cfbbcad0bf0ebfa67f8b2aa99859a1ebbd90ecb5a74636",
+        "agents_text_sha256": "cef4ec0adaca7ae106f98d3e111b09348458dd210cd3bc36deb08a6fc95e107f",
+        "conventions_prompt": {
+            "id": str(conventions_id),
+            "checksum": "225a8f7d56835cf1307ddb25feac602c3d10e03c34ee51afc90a1f99af101454",
+        },
+        "counter_version": "counter/v2",
+    }
+    canonical = json.dumps(identity, sort_keys=True, separators=(",", ":"))
+    return sha256(canonical.encode("utf-8")).hexdigest()
+
+
 @pytest.mark.integration
 def test_v4_conventions_use_the_pinned_prompt_the_snapshot_and_the_reserve(env: Env) -> None:
     observed = _observe_conventions(env, v4=True)
@@ -885,12 +905,7 @@ def test_v4_conventions_use_the_pinned_prompt_the_snapshot_and_the_reserve(env: 
     assert all(response["tokens_by_role"] for response in observed.manifest_responses)
     # R5 (TL-7): the v2 digest of the pinned identities, so no legacy row is reused.
     assert observed.conventions_keys == [
-        (
-            REPO_A,
-            observed.snapshot.agents.blob_oid,
-            observed.pinned[0],
-            conventions_cache_key(observed.snapshot, _IGNORE_DIGEST),
-        )
+        (REPO_A, observed.snapshot.agents.blob_oid, observed.pinned[0], _v2_key(observed.pinned[0]))
     ]
 
 

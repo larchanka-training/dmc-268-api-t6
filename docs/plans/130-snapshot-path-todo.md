@@ -282,6 +282,11 @@ Gates for every task: the four commands in the plan, with DB and vhost `imp130f`
     one case per component, the taint, a keyed fake store (legacy entry missed, repeat hit), the
     stage (v3 keeps the ignore key) and the v4 row on Postgres (`tests/test_review_path.py`,
     `tests/test_snapshot_path_live_pin.py`). The gates and this line landed in a follow-up commit.
+  - fix round (review of `9e4b557c..1c6e83fc`, TL-7 clarified by the tech lead on 2026-10-25): the key
+    covers only the ignore key, the rules.md and AGENTS.md text digests, the conventions prompt (id and
+    checksum) and the counter version; the same key for two PR bases with the same policy (unit and
+    through the stage), a different key for rules.md, AGENTS.md, the prompt id or checksum, the counter
+    and the taint; the stage pins a v4 key with a denied rename (M28); expectations are literal digests.
 - **Done when:** [x] F1-1 green.
 
 ### F1-12: R7

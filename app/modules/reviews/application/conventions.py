@@ -215,31 +215,30 @@ def build_conventions_manifest(
     )
 
 
-def conventions_cache_key(snapshot: PolicySnapshot, policy_key: str | None) -> str:
+def conventions_cache_key(snapshot: PolicySnapshot, ignore_key: str | None) -> str:
     """The ``policy_key`` of a snapshot-path conventions entry (R5, TL-7): a SHA-256 digest.
 
-    It covers the pinned identities a generated entry depends on: the policy digest, the
-    attempt's ignore key (``policy_key``, which carries any newly tainted rename or copy
-    path), the matcher, the service defaults, the conventions prompt and the execution
-    profile versions. The repository, AGENTS.md revision and prompt row stay in their own
-    columns. Deviation from CVS §4.2, recorded for G: the rendered input, shown tree and
-    source entries are not part of the key yet.
+    It covers what a generated entry depends on (tech lead, 2026-10-25): the attempt's
+    ignore key (``ignore_key``, the ignore digest with any newly tainted rename or copy
+    path), the text digests of rules.md and AGENTS.md, the pinned conventions prompt and the
+    counter version. The PR base, the review and verifier prompts and the rest of the
+    execution profile stay out, so the next pull request of a repository reuses the entry
+    and only a change of the policy, AGENTS.md or the conventions prompt misses. The
+    repository, AGENTS.md revision and prompt row stay in their own columns. Deviation from
+    CVS §4.2, recorded for G: no ``policy_base_sha``, no selector or truncator versions (no
+    such constants exist) and no rendered-input, tree or source-entry digests.
     """
-    profile = snapshot.execution_profile
+    bindings = snapshot.prompt_bindings
     identity = {
         "namespace": CONVENTIONS_KEY_NAMESPACE,
-        "policy_digest": snapshot.policy_digest,
-        "policy_key": policy_key,
-        "matcher_version": snapshot.matcher_version,
-        "defaults_checksum": snapshot.defaults_checksum,
-        "conventions_prompt_checksum": snapshot.prompt_bindings.conventions_checksum,
-        "profile_versions": {
-            "tokenizer": profile.tokenizer_version,
-            "counter": profile.counter_version,
-            "response_schema": profile.response_schema_version,
-            "recovery": profile.recovery_profile_version,
-            "budget": profile.budget_profile_version,
+        "ignore_key": ignore_key,
+        "rules_text_sha256": snapshot.rules.text_sha256,
+        "agents_text_sha256": snapshot.agents.text_sha256,
+        "conventions_prompt": {
+            "id": None if bindings.conventions_id is None else str(bindings.conventions_id),
+            "checksum": bindings.conventions_checksum,
         },
+        "counter_version": snapshot.execution_profile.counter_version,
     }
     canonical = json.dumps(identity, sort_keys=True, separators=(",", ":"))
     return sha256(canonical.encode("utf-8")).hexdigest()
@@ -290,7 +289,9 @@ class CachedConventions:
     key_patterns: tuple[str, ...]
     recommendations: tuple[str, ...]
     languages: dict[str, int]
-    # Identity of the ignore policy the entry was generated under; ``None`` without one.
+    # The cache key column: the attempt's ignore key on the legacy path, the
+    # ``repo-conventions-v2`` digest (``conventions_cache_key``) on the snapshot path;
+    # ``None`` without a policy.
     policy_key: str | None = None
 
 
