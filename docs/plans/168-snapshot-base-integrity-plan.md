@@ -162,7 +162,10 @@ The issue cites `7546e53`. At `4faa03dd` those spots are `diff_map.py:196,209`
     the worker's current one, or #280's publication settings.
   - Coverage on `main`: the defaults pin and `review.system` (id, checksum, version). The
     conventions and verifier bindings must stay empty.
-  - After #280 the same comparison covers all three prompts with no code change.
+  - After #280 the same comparison covers all three prompts with no code change. Proven on
+    the rebased branch: changing a run's `conventions_prompt_version_id` or
+    `verifier_prompt_version_id` after its snapshot is stored fails `get_snapshot`
+    (`tests/test_policy_snapshot_integrity_postgres.py`).
 
 ## Design
 

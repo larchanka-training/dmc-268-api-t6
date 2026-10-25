@@ -35,6 +35,9 @@ from app.modules.reviews.infrastructure.policy_snapshot_unit_of_work import (
 )
 from tests.portal_postgres import PR_B, PROMPT, RULE_A, RULE_B, RUN_DONE, Env, portal_schema
 from tests.test_policy_snapshot_postgres import _RAW, _documents
+from tests.test_prepare_policy_snapshot import Source
+from tests.test_run_prompt_pins_postgres import _newer, _packaged, _prompt_id, _seed
+from tests.test_run_publication_settings_postgres import _claim, _insert, _ready
 
 _PROFILE = ExecutionProfile.fast("model-a", "", "model-c")
 _RULES: dict[str, Any] = {"id": RUN_DONE, "path": RULES_DOCUMENT_PATH}
@@ -381,6 +384,55 @@ def test_a_document_row_that_disagrees_with_its_presence_is_an_integrity_error(
                 f"The stored fields of a policy document do not match its presence: {field}"
                 f" | файл `{path}`"
             )
+        finally:
+            await engine.dispose()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize(
+    ("key", "column"),
+    [
+        ("review.conventions", "conventions_prompt_version_id"),
+        ("review.verifier", "verifier_prompt_version_id"),
+    ],
+    ids=["conventions", "verifier"],
+)
+def test_a_run_prompt_pin_that_changed_after_the_snapshot_fails_on_read(
+    env: Env, key: str, column: str
+) -> None:
+    async def scenario() -> None:
+        engine = env.engine()
+        factory = async_sessionmaker(engine, expire_on_commit=False)
+        try:
+            await _ready(factory)
+            await _seed(factory, _packaged())
+            async with factory.begin() as session:
+                run_id = await _insert(session)
+            await _claim(factory, run_id, 1)
+            prepare = PreparePolicySnapshot(
+                uow_factory=lambda: _uow(factory), source_factory=lambda pins: Source()
+            )
+            stored = await prepare.execute(run_id)
+            # The run pinned both prompts at creation (#280): the snapshot binds all three.
+            assert stored.prompt_bindings.is_complete is True
+            async with _uow(factory) as work:
+                assert await work.policy.get_snapshot(run_id) == stored
+            other = _newer(key)
+            await _seed(factory, (other,))
+            other_id = await _prompt_id(factory, key, other.version)
+
+            await _tamper(
+                factory,
+                f"UPDATE runs SET {column} = :prompt WHERE id = :id",
+                {"id": run_id, "prompt": other_id},
+            )
+
+            async with _uow(factory) as work:
+                with pytest.raises(PolicyError) as caught:
+                    await work.policy.get_snapshot(run_id)
+            _assert_integrity_error(caught.value, "prompt_bindings")
         finally:
             await engine.dispose()
 
