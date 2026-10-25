@@ -58,9 +58,11 @@ a heading with its key — and creates nothing, writes no state. Below the table
 items an earlier run already created (key, title, url; no dry-run, no body) and, for each
 item whose exact title already exists in its repo, what the run will do: `would adopt #N`
 (§ 5) or `would stop: duplicate #N (state, author)` — the run then stops before its first
-create; rename the item or settle that issue first. Right below the table, `Warnings:` names
-each item to create with a blocked-by group in `dependencies` and no `blocked_by` (a `@key`
-counts): its native link would be missing (`templates.md` § Dependencies).
+create; rename the item or settle that issue first — unless it is your open issue that a run
+whose state file is lost created: record it, do not rename it (§ 5). Right below the table,
+`Warnings:` names each item to create with a blocked-by group in `dependencies` and no
+`blocked_by` (a `@key` counts): its native link would be missing (`templates.md`
+§ Dependencies).
 
 ## 3. One confirmation for the batch
 
@@ -128,15 +130,20 @@ lookup:
   `{"note": "adopted <url> — …"}` line, not issue-create.sh's exit-4 duplicate error. Its
   `board` is `unchecked` — its board step may never have run: look at it, and add it with
   the command above if it is missing. Any other duplicate — on a first run, closed, a
-  teammate's or older — stops the batch with exit 4 naming it; one you opened, on a rerun,
-  may still be this batch's own (closed since, or a clock further ahead), so the message
-  first says how to record it.
+  teammate's or older — stops the batch with exit 4 naming it. One you opened may still be
+  this batch's own: on a rerun (closed since, or a clock further ahead), and on a first run
+  if it is open and under 24 h old — a run whose state file is lost (a new container,
+  another machine, another `XDG_CACHE_HOME`) created it. Then the message first says how to
+  record it — on a first run, the whole state file to write, `started_at` the issue's
+  `createdAt` — and not to rename the item: a new title files it a second time; rename it
+  only when that issue is other work.
 
 The state file is kept outside /tmp so that a reboot cannot erase the record of what was
 created. Never delete it, and never start a new `id` for a batch that created anything: a new
 `id` has no `started_at`, so it adopts nothing and stops at the first issue that exists. Edit
-it by hand only for a repaired board (above), for an issue of this batch a rerun refused —
-add `items.<key>` with its `url`, `number`, `repo` and `summary`, and rerun — and for a
+it by hand only for a repaired board (above), for an issue of this batch a run refused —
+add `items.<key>` with its `url`, `number`, `repo` and `summary` (no state file yet: write
+the whole file the stop names), and rerun — and for a
 recorded issue that is gone: one that was **deleted** — remove its entry from `items`, and
 the rerun files it again; one that was **transferred** to another repo — remove its entry,
 drop the item from the batch file and replace its `@key` in the other items by the issue's

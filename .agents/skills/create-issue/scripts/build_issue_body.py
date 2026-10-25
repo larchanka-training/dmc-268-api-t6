@@ -21,7 +21,8 @@ stdout carries the deliverable only. Errors go to stderr as {"error": "..."}.
 Exit 0 ok, 2 invalid spec. Never exits 0 on a spec it could not honour — a key
 the emitter does not know is a bug in the caller, not a no-op. With the body (not
 with --emit-*), a blocker written only in prose — a blocked-by group in
-`dependencies` and no `blocked_by` — is {"warning": "..."} on stderr, exit unchanged.
+`dependencies` and no `blocked_by` — is {"warning": "..."} on stderr, exit unchanged;
+a group that says only «нет» / none does not count.
 """
 # SYNC: mirrored in dmc-268-{ui,api}-t6/.agents/skills/create-issue/scripts/build_issue_body.py
 
@@ -97,6 +98,13 @@ KICKOFF_LABEL = {
 # compared trimmed and case-insensitively. Such a group without `blocked_by` is a blocker
 # only in prose: the body is fine, the native link is missing — a warning, not an error.
 BLOCKED_BY_LABELS = ("blocked by", "блокирующие", "блокируется", "blockiert durch")
+# How the team says "no blockers" in such a group, compared the same way: a group whose
+# every item is a marker — alone, with a trailing ".", or followed by ":", ";", "," or a
+# spaced dash and an explanation — or a lone dash names no blocker, so no warning.
+NONE_MARKERS = ("нет", "none", "no", "keine", "n/a")
+NONE_ITEM = re.compile(
+    "(?:" + "|".join(map(re.escape, NONE_MARKERS)) + r")(?:\.|[:;,].*| [—–-] .*)?|[—–-]"
+)
 
 # Parts — one issue sliced into PRs (references/slicing.md): each part is a separate PR
 # with its own boundary, stop criterion and acceptance criteria, rendered after the
@@ -393,16 +401,24 @@ def render_links(s: dict[str, Any]) -> list[dict[str, Any]]:
     return links
 
 
+def says_none(value: Any) -> bool:
+    """A Dependencies group value — a list, or a string as one item — whose every item
+    says "no blockers" (NONE_ITEM)."""
+    items = value if isinstance(value, (list, tuple)) else [value]
+    return all(isinstance(x, str) and NONE_ITEM.fullmatch(x.strip().casefold()) for x in items)
+
+
 def prose_blocker(s: dict[str, Any]) -> str | None:
     """The warning for a blocker written only in prose — a Dependencies group the body
     shows under a blocked-by label, and no `blocked_by` to set the native link — or
-    None. Only `blocked_by` silences it: a parent is not a blocker."""
+    None. Only `blocked_by` silences it: a parent is not a blocker. A group that says
+    only «нет» / none names no blocker, and the next blocked-by group is still read."""
     dep = s.get("dependencies")
     if s.get("blocked_by") or not isinstance(dep, dict):
         return None
     for group, value in dep.items():
         # `value` as _dependencies() reads it: an empty group renders nothing.
-        if value and group.strip().casefold() in BLOCKED_BY_LABELS:
+        if value and group.strip().casefold() in BLOCKED_BY_LABELS and not says_none(value):
             return (
                 f'dependencies has a "{group.strip()}" group but no blocked_by — '
                 "the native link will be missing"
