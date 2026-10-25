@@ -1,315 +1,179 @@
-# Implementation plan: Reflection regression tests and documentation (#216)
+# Reflection regressions and documentation (#216): review round 1
 
-## Status and baseline
+## Scope and completed baseline
 
-Planning completed and the user approved this plan, the public test seams,
-the proposed coordination comments and the two exact PR #133 body corrections
-with `ок` on 2026-10-25. The newly discovered #291 coordination comment was
-separately approved with `Да, опубликовать`. Task 0 is complete: all current
-shared-file comment gates are cleared and PR #133's two body corrections were
-applied and verified. See `docs/plans/216-coordination.md` for authorization,
-refreshed overlaps, comment URLs and exact body verification. No implementation,
-mutations, services or commits were made during planning/task 0.
+Address every item in [review round 1 of PR #303](https://github.com/larchanka-training/dmc-268-api-t6/pull/303#pullrequestreview-5643731668): four P2 threads and eleven P3 items. This feedback pass continues the approved agent-loop implementation without a new feature or prompt rollout. Public behavioral test seams remain `ReflectionPass.verify`, `ExecuteReviewRun`, public builders/guards, parsers, schemas and publication outputs.
 
-- Repository: `larchanka-training/dmc-268-api-t6`.
-- Worktree: dedicated managed checkout for `chore/216-reflection-tests-docs`,
-  referenced below as `$DMC216_WORKTREE`.
-- Inspected original main: `e6d3077cfcb5584f8af0524ce4a0c8a658b2c5fb` (2026-10-25).
-- Latest adopted main: `f8b13103f908b26e3e210c3f78b125f21bfbdaba`; the full
-  service-backed gate was measured on `4faa03d` and carried across the later
-  documentation-only synchronization by exact runtime/test/resource identity.
-  All 103 final behavioral mutation replays are killed and restored green.
-  Proof is complete; publishing remains pending. See task 16 evidence.
-- Specification: [issue #216](https://github.com/larchanka-training/dmc-268-api-t6/issues/216),
-  including [PR #133 review 5575342693](https://github.com/larchanka-training/dmc-268-api-t6/pull/133#pullrequestreview-5575342693).
-- Related #219 and #211 are still OPEN. #219's implementation
-  [PR #230](https://github.com/larchanka-training/dmc-268-api-t6/pull/230) merged
-  2026-10-24. Issue status does not override the actual merged code.
-- Companion checklist: `docs/plans/216-todo.md`.
+The original implementation is preserved in commits `0a19ff12` and `bf9d4c6d`. It delivered regression coverage M01–M15, public rendering and ID validation, typed policy budgets, test-only factories, missing-Reflection server-error classification, legacy attribution fail-closed behavior, documentation corrections and two verified historical PR #133 body corrections. Original tasks 0–16 completed their independent Standards/Spec reviews before publication. Historical detail remains in Git history; [verification](216-verification.md) keeps measured results, current limits and portable reproduction.
 
-## Current code changes the interpretation of the issue
+Historical measurements must remain distinct:
 
-Issue line numbers refer to old main `a50be1a`; locate symbols rather than patching
-those lines. Main now uses stable defaults IDs (`E2`, `N1`, etc.), verifier v2,
-post-fit review budget checks, provenance checks, candidate-level reviewer drops,
-and deterministic summaries after severity filtering. Do not restore old behavior
-just to make an obsolete mutation applicable.
-
-The exact/lowercase slug map and the secondary positional-check `any` expression
-no longer exist in `ReflectionPass.verify`. They are **superseded/not applicable**,
-not equivalent mutants. Preserve their intent with stable-ID/foreign-ID and
-requirement-source tests. The old test named
-`test_reflection_pass_service_defaults_exact_case_slug_matching` now tests `E2`,
-so rename its description accurately when touching that test.
-
-`test_execute_review_run_severity_threshold_critical_drops_medium_clean_summary`
-already combines a snapshot, Reflection Pass and a critical threshold. Reuse it as
-AC evidence and prove its sensitivity; add a distinct supported-above-threshold
-case only if needed to kill the relevant mutant. Avoid redundant tests.
-
-`review.verifier.v2.md` is the current builder default and pinned factory binding;
-v1 remains a supported historical resource. Do not change published prompt bytes
-or checksum pins as part of semantic regression tests.
-
-## Design and scope decisions
-
-Keep Clean Architecture, existing public use cases and fake ports. No dependency,
-migration, live provider call, prompt rollout or runtime worker wiring is needed.
-The agreed test seams proposed for approval are `ReflectionPass.verify`,
-`VerifierPromptBuilder.build_verifier_prompt`, `PromptBuilder.build_prompt` /
-`build_manifest`, public budget guards, JSON/Pydantic parsing, `ExecuteReviewRun`,
-and post-processing/publication outputs. This satisfies the TDD skill's request to
-confirm seams before adding tests.
-
-For existing correct behavior, RED is the new test failing under its isolated
-mutant; GREEN is restoring the original code. Do not change correct production
-code to manufacture a failing test. For schema parity and hygiene, demonstrate a
-real public failure first when behavior changes, then make the smallest fix.
-
-### Mutation coverage matrix (issue part 1)
-
-Every row is recorded in `docs/plans/216-verification.md` during development with
-base SHA, exact isolated patch, command, baseline outcome, final killer test and
-result. That evidence file does not exist yet.
-
-| ID / issue item | Current probe and required evidence | Task |
+| Baseline | Measured result | Meaning |
 | --- | --- | --- |
-| M01 exact slug and exact-over-lowercase precedence | Historic map removed by #230: record source/history evidence, superseded. Test pinned stable-ID acceptance, wrong ID/foreign rule rejection; no positional or case-fold fallback. | 1, 2 |
-| M02 secondary `any` -> `all` with shared positional check | Historic expression removed: superseded. Probe current stable check-ID lookup and shown-line binding instead; duplicate stable IDs must fail closed. | 1, 2 |
-| M03 contradicted / insufficient requirement refs | For every status, reject malformed/hidden/non-policy requirement refs. `contradicted` with attributed rule needs matching source; `insufficient_context` may have no refs but must validate any supplied refs. Probe skipping validation for each status and supported-only validation. | 2 |
-| M04 verifier guard boundary / system omitted | At exact send budget model is called; one token over is rejected before model. System plus user counts must matter. Use public inputs/fake counter seam, not private method replacement. Distinguish mandatory-envelope and final-send guards. | 2 |
-| M05 empty verifier checksum | Blank checksum fails before verifier network call even when version/resource are otherwise valid. Probe removal of empty-check guard. | 2 |
-| M06 policy `>` -> `>=` | Literal configured small cap with exactly-at-limit accepted and limit+1 rejected, including error limit/actual. | 2 |
-| M07 defaults escaping: check text / rule name | Parameterize tag-breakout and quote payloads independently in both reviewer/verifier user envelopes. With canonical rule names required now, use a controlled pinned-default mapping fixture for adversarial name while exercising public builder; record why unknown name alone is not an escaping test. | 3 |
-| M08 full long rules document | At least 250 numbered policy lines, distinctive lines 200/201/final; assert actual rendered text in both prompts and manifest visibility. Verifier can cite a late requirement. Truncation at 200 must fail. Stay within policy budget. | 3 |
-| M09 insufficient_context publication | Snapshot ExecuteReviewRun with real ReflectionPass and fake model decisions: supported and insufficient candidates; only supported reaches publisher, rejected reason/counts retained. Probe allowing insufficient through. | 4 |
-| M10 all candidates' attribution / positive sources | Valid first and invalid later candidates; only offending candidate drops under current main. Positive AGENTS.md and service-defaults stable-ID flows retain attribution through public publisher seam. Probe first-item-only validation. | 4 |
-| M11 service-defaults trailing newline | Reject `service-defaults:E2\n` via v2 parser and attribution repair public output. Probe old `^...$` plus match behavior at each applicable site. | 5, 12 |
-| M12 manifest fields/counts | Noncontiguous RIGHT ranges give literal sum, not min..max span; no snapshot gives run_id=None; omitting stage or blocks raises TypeError. Probe separate mutations. | 3 |
-| M13 schema/model constraints | Draft202012 and Pydantic shared valid/invalid examples; maxLength, closed objects at every object node, array min/max, rule_name domain, 128/129 and 64/65 boundaries. Detect both narrowing and widening. Keep runtime-only cross-field semantics explicitly separate. | 5 |
-| M14 verifier prompt meaning | Semantic assertions for trust boundary, statuses, one decision/candidate, policy/check_id sources and example. Exercise historical v1 explicitly and current v2 separately; do not use checksum-only evidence. | 6 |
-| M15 reflection + severity threshold | Existing combined test plus mutation removing/moving threshold; assert exact published list, dropped reasons, counts and post-threshold deterministic summary. | 4 |
+| Pristine `e6d3077` | 5,684 passed, 2 failed, 0 skipped | Original full run was red; unchanged focused reruns passed, without proving a cause. |
+| Final original implementation `4faa03d` | 6,521 passed, 0 skipped | Service-backed full Linux run; later adoption of documentation-only `f8b13103` preserved executable bytes. |
+| Published `bf9d4c6d` | CI 6,521 passed, 0 skipped; 103 isolated mutation replays killed/restored | Historical result, superseded as current evidence once this round rebases. Review discovered an additional live survivor outside that recorded replay set. |
+| Review-round measured tree | Base `9243fd67`, HEAD `f00d1b92`, with reviewed uncommitted R1 fixes | 6,660 passed, zero failed/errors/skips; 113 live mutation probes killed/restored GREEN. Full input identity and metadata-only continuation proof are in verification. Publication/current-head CI remain pending. |
 
-Before adding tests or refactoring production code, manually apply each applicable
-mutation **one at a time** to the pristine implementation. Run the focused public
-seam first; a named failing test conclusively kills the mutant and its existing
-killer is reused. For focused survivors, run the relevant unit importing tests, recomputed
-from current imports (the historical 47-file union is now 55), plus literal resource
-readers and the focused seam. The approved isolated archive uses the exact base,
-unset service URLs and `-m "not integration"`; narrow integration expansion is
-reserved for an observed persistence/wiring risk. Restore just that patch immediately and verify exact
-source bytes. Record a green importer corpus only as preliminary gap evidence,
-never as a whole-suite survivor or automatic equivalence. Reserve full-suite mutant
-runs for unexplained behavior risk; the full pristine and final gates remain
-mandatory. This risk-based execution refinement was explicitly approved by the
-coordinator after estimating repeated PostgreSQL migration costs. The issue's
-historical green result must be rechecked, not assumed.
+Original mutation dispositions remain: the removed exact/lowercase slug map and secondary positional `any` expression are superseded by #230, not equivalent. Four domain-equivalent probes are the redundant downstream duplicate guard, isolated empty-check term in the checksum inequality, and removal of verifier arrays' `minItems: 0` for evidence/requirement refs. A mandatory-envelope equality exploration changes diagnostics before the next zero-budget guard; it is not strict equivalence and is outside the original final-send guard acceptance. No live non-equivalent survivor may remain unexplained.
 
-A surviving mutant is not automatically equivalent. An equivalent classification
-requires reachable-input/domain proof explaining why no observable result differs.
-An absent historic site is superseded. An unexecutable probe/environment error is
-blocked, not green. The PR must list each equivalent/superseded item and rationale;
-no live non-equivalent survivor is acceptable. Re-run applicable probes against
-final code; when a refactor removes a site, map its observable invariant to the
-new code and repeat the corresponding probe there. Never commit mutants.
+## Decisions and boundaries
 
-### Schema change is intentional
+- Continue on `chore/216-reflection-tests-docs` and update existing non-draft [PR #303](https://github.com/larchanka-training/dmc-268-api-t6/pull/303), with no reviewer requested. Do not create another PR, merge, close #216 or resolve reviewer-owned threads.
+- All implementation is delegated. Each task below touches at most five implementation/test/documentation files, excluding the plan/todo/evidence metadata. Fresh independent Standards and Spec reviews follow each task; findings return to development before advancement.
+- Existing-correct behavior uses isolated mutant RED followed by byte-restored GREEN. Changed behavior uses failing public tests followed by the minimum fix. No tests for trivial import/wording changes that merely mirror implementation.
+- Keep `RunFailure("internal_error")` for a snapshot composed without Reflection. Explicitly document its transition from terminal policy failure to retryable server failure (three attempts, then failed/DLQ under current worker policy). Adjacent unreadable verifier resources and duplicate defaults IDs retain their existing integrity classification in this bounded change, with an explicit disposition.
+- The schema's absolute end lookahead is a provider-compatibility risk, not evidence that a live provider accepts it. Investigate supported schema/regex subsets from authoritative sources and the actual transport. Record an explicit pre-v4 rollout gate in remaining #130 PR F rollout slice (announced as F2), linked to #217, including exact schema SHA, strict request payload, primary/fallback routes and observed provider outcome. No paid call, dependency, silent weakening of newline validation or immutable prompt edit is authorized by this task.
+- Retain the original implementation as one logical commit to preserve review provenance (rebased from `0a19ff12` to `9bdbd641`). Correct the malformed issue reference in the small publication-record commit while rebasing; new review fixes use focused Conventional Commits with `(#216)` or `Refs #216`. A history split of the original commit is optional feedback; this plan consciously declines it because it would obscure anchored review evidence without changing behavior.
 
-The v2 JSON schema currently accepts `rule_name="Security"` while the runtime
-rejects it. Add a rule_name pattern matching the current public lexical domain:
-`.review/rules.md`, `AGENTS.md`, or `service-defaults:` followed by ASCII letters,
-digits, underscore or hyphen, with an absolute end check that rejects a trailing
-newline under JSON Schema regex semantics. Null remains accepted. The schema
-must not limit IDs to a stale lowercase slug or just the built-in ID inventory;
-manifest validation owns applicability to the pinned defaults version. Examples
-include `service-defaults:E2`, `service-defaults:FSD1`, null, unknown raw name,
-empty ID and trailing newline. Boundary literals are specified independently of
-the implementation, and schema/model acceptance is tested in both directions.
+## Review inventory and acceptance map
 
-### Hygiene dispositions (issue part 3)
-
-| Review item | Proposed disposition | Task |
-| --- | --- | --- |
-| P3 9 private render calls / duplicated escaping | Promote a small coherent public rendering surface in prompt_builder; use its existing xml_text/xml_attribute in reflection; consolidate the two policy-document renderers without changing bytes. Update external callers. | 7 |
-| P3 10 dead profile dict fallback / 12000 | Remove unreachable dict/get branch; typed ExecutionProfile is authoritative. Name/reuse a single default-policy-budget constant where defaults are declared, retaining configurable per-run caps. | 8 |
-| P3 11 app test factories | Move five make_* fixture factories to tests/policy_snapshot_fakes.py; migrate nine current consumers in three small batches, then remove production definitions. Keep production checksum registry and contracts in app. Re-scan after rebase for added consumers. Task 11 also adapts the newly discovered eval_live.py consumer through public dataclass construction without a tests dependency; the bounded batch remains five files. | 9–11 |
-| P3 16 private ID regex import | Expose a named public lexical validator (or public constant if simpler) used by model and post-processor; preserve strict full-string matching and test newline rejection through public boundaries. | 12 |
-| P3 17 missing reflection assembly error | Raise existing RunFailure("internal_error") for missing reflection with snapshot; keep genuinely incomplete/corrupt snapshots as SNAPSHOT_INTEGRITY_ERROR. Assert no model/publication calls and existing author-facing internal-error text. | 13 |
-| P3 19 prompt disk read | Reject removing package resource loading in this PR: current resource is version-selected and raw-checksum validated against snapshot; choosing a DB-backed pinned-content resolver belongs with #130 wiring. Avoid a second resolver/cache invalidation policy. Document this explicit disposition and residual disk I/O in our PR, with #290 as coordination context. | 15 |
-| P3 20 allowed_v2 local | Inline None and preserve fail-closed legacy behavior and explanatory comment; never enable attribution based merely on snapshot-row existence. | 14 |
-
-Each row must end as fixed or explicitly rejected in the PR body; the proposed
-P3 19 rejection is a conscious scope decision, not a claim that disk I/O vanished.
-
-Task 7 remains within five source/test files: prompt_builder.py, prompt_budget.py,
-reflection_pass.py, tests/test_reflection_pass.py and tests/test_prompt_builder.py.
-The two existing test modules contain four and one external changed-file renderer
-calls respectively; migrate every external caller to the coherent public API.
-Place byte-preservation assertions in test_prompt_builder.py rather than expanding
-this task into test_prompt_builder_markdown.py. Do not keep private compatibility
-aliases solely for tests. This is a bounded file-list refinement, not a new task.
-
-## Documentation corrections (issue part 2)
-
-Task 15 edits only review/README.md, docs/TEST_PLAN.md, docs/plans/120-plan.md,
-and docs/plans/120-todo.md, after refreshing main and ownership checks.
-
-- README current prompts: name current verifier **v2** and historical verifier v1
-  accurately. Qualify reviewer evidence_refs as snapshot/v2-path behavior; live
-  worker/gateway rollout remains #130 at this base. Explain that legacy parsing
-  silently discards evidence_refs rather than validating/persisting them.
-- TEST_PLAN §3.4: locate the heading (now around 476, not old 333). Name reviewer
-  injection tests in test_prompt_builder_markdown.py separately from verifier
-  TestPromptInjectionDefenses; `[INST]` may remain literal untrusted user data,
-  while system text remains protected. Describe legacy evidence stripping.
-  Leave #211's neighboring AC7/Option(a)/non-code/pre-send status reconciliation
-  to #277 and preserve its eventual merged wording.
-- 120 plans: correct the DB attribution claim (current legacy default is None),
-  distinguish log ID/status counters from durable structured verifier reasons,
-  accurately describe superseded slug tests and their historical scope, document
-  legacy evidence stripping. Use verified review links: round 2 **5557688806**,
-  round 5 **5568780909**. Do not imply new #219 behavior shipped in #133.
-- Recheck all current-state statements after rebase/any #130 merge. Historical
-  phase descriptions stay historical with explicit present-state notes.
-
-PR #133 is already merged. The user explicitly authorized the following two
-exact body corrections with `ок` on 2026-10-25; both were applied and independently
-re-read that day. No comment was posted there, and the rest of the historical
-body was preserved byte-for-byte. Authorized exact line replacements:
-
-1. `очистка саммари от галлюцинированных дефектов при полном отклонении кандидатов.`
-   -> `очистка саммари от галлюцинированных дефектов при любом отклонении кандидатов, включая частичное.`
-2. `### 6. Тестовое покрытие (13 файлов, ~6 300 строк)`
-   -> `### 6. Тестовое покрытие (13 файлов, 6 472 добавленные строки)`
-
-6472 is the sum of additions for the 13 files whose path starts with `tests/`,
-independently rechecked from the paginated PR #133 files API on 2026-10-25, not
-final file lengths. The updated body equals the original with only these two
-replacements; reversing them recovers the original bytes. There is no external
-#133 deferral. Full verification is in `216-coordination.md`.
-
-## Overlap gate and proposed coordination comments
-
-AGENTS.md/backend rules forbid editing another open PR's files without a comment
-there. The user explicitly authorized the exact comments below with `ок` on
-2026-10-25, separately from general plan approval. After refreshing every open
-PR's file list and checking for duplicates, the exact comments were posted once
-on #290/#280/#229/#227/#283/#277/#220. #252 had already merged and was omitted.
-New overlap #291 received separate explicit approval (`Да, опубликовать`) and its
-exact comment was posted once. All current shared-file gates are cleared; refresh
-open PR file lists again before development/publishing as required by this plan.
-See `216-coordination.md` for actual overlaps and confirmed comment URLs.
-
-| Target | Proposed exact comment |
+| Review item | Disposition and task |
 | --- | --- |
-| [#290](https://github.com/larchanka-training/dmc-268-api-t6/pull/290) | `Coordinating #216: I plan mutation-sensitive Reflection tests and small hygiene changes in application/reflection_pass.py, application/execute_review.py, application/review_output.py and infrastructure/run_repository.py under app/modules/reviews/, plus tests/test_reflection_pass.py, tests/test_reflection_evaluation.py, tests/test_execute_review.py and tests/test_rules_md_injection.py. Scope: public rendering calls, shared ID validation, fixture imports, internal-error classification and removal of the unused allowed_v2 local. I will preserve #130 gateway interfaces/decision persistence, rebase against merged main, and adapt the tests if your interfaces land first.` |
-| [#280](https://github.com/larchanka-training/dmc-268-api-t6/pull/280) | `Coordinating #216: I plan to move test-only make_* factories out of app/modules/reviews/application/policy_snapshot.py, name the unchanged default policy budget, and remove the unused allowed_v2 local in infrastructure/run_repository.py. I will preserve publication pins and snapshot fields and rebase if #212 lands first.` |
-| [#229](https://github.com/larchanka-training/dmc-268-api-t6/pull/229) | `Coordinating #216: planned overlaps are app/modules/reviews/application/review_output.py and findings_post_processor.py (public strict service-defaults ID validator), infrastructure/run_repository.py (inline unused allowed_v2=None), tests/test_review_output.py and tests/test_findings_post_processor.py (newline regression), tests/test_rules_md_injection.py (fixture import), and tests/test_sqlalchemy_run_repository.py if needed for preserved legacy behavior. No DiffMap/publication-coordinate semantics change is intended; I will rebase and preserve your changes.` |
-| [#227](https://github.com/larchanka-training/dmc-268-api-t6/pull/227) | `Coordinating #216: planned overlaps are app/modules/reviews/application/review_output.py and findings_post_processor.py (public ID validator), infrastructure/run_repository.py (unused allowed_v2=None), tests/test_review_output.py and tests/test_findings_post_processor.py (newline regression), tests/test_llm_gateway.py, tests/test_repo_conventions.py and tests/test_rules_md_injection.py (fixture imports), tests/test_sqlalchemy_run_repository.py if required, and docs/TEST_PLAN.md §3.4 (injection-test attribution and legacy evidence stripping). I will preserve overview/run.step changes and rebase as needed.` |
-| [#283](https://github.com/larchanka-training/dmc-268-api-t6/pull/283) | `Coordinating #216: planned overlaps are app/modules/reviews/application/review_output.py and findings_post_processor.py (strict public ID validator), infrastructure/run_repository.py and tests/test_sqlalchemy_run_repository.py if needed (preserve legacy None attribution), and docs/TEST_PLAN.md §3.4 (injection assertions and legacy evidence stripping). I will preserve clean/empty-addition behavior and rebase if #213 lands first.` |
-| [#277](https://github.com/larchanka-training/dmc-268-api-t6/pull/277) | `Coordinating #216: I plan only docs/TEST_PLAN.md §3.4 corrections for reviewer versus verifier injection-test references, [INST] remaining as untrusted user data, and legacy evidence_refs stripping. #211 owns the nearby AC7/Option(a), non-code response and implementation-status wording. I will preserve that scope and rebase after your merge.` |
-| [#252](https://github.com/larchanka-training/dmc-268-api-t6/pull/252) | `Coordinating #216: docs/TEST_PLAN.md §3.4 will identify separate reviewer/verifier injection tests, clarify [INST] as user data, and document legacy evidence_refs stripping. No corpus, metric, paid-capture or A/B harness changes are intended; I will preserve your evaluation additions and rebase as needed.` |
-| [#220](https://github.com/larchanka-training/dmc-268-api-t6/pull/220) | `Coordinating #216: I plan a small hygiene edit in app/modules/reviews/infrastructure/run_repository.py to inline the unused allowed_v2=None local while retaining its fail-closed legacy behavior. I will preserve GitLab intake/credentials/publication behavior and rebase against your merge.` |
-| [#291](https://github.com/larchanka-training/dmc-268-api-t6/pull/291) | `Coordinating #216: I plan only docs/TEST_PLAN.md §3.4 corrections for reviewer versus verifier injection-test references, [INST] remaining as untrusted user data, and legacy evidence_refs stripping. I will preserve #291's test-strategy updates and rebase after your merge.` |
+| P2 factory/rebase, thread `4371232016` | R1.1: semantic rebase, thirteenth test factory consumer, #130 plan reference; refresh total consumers and full-run provenance. |
+| P2 PIPELINE/retry, thread `4371232021` | R1.5: correct snapshot error and inline `None` descriptions; retain `internal_error`, name terminal-to-retry change and bounded neighboring-error disposition. |
+| P2 portable plans, thread `4371232026` | R1.6b: remove machine paths, service addresses and session transcripts from all four #216 documents; retain numerical/SHA evidence and reproducible commands. |
+| P2 step-3 refs/allowlist, thread `4371232031` | R1.2: attributed `insufficient_context` with empty requirement refs is rejected per candidate, not a failed pass; assert exact publication allowlists for present rules/AGENTS. |
+| P3-1 provider lookahead | R1.7: documented official compatibility investigation and explicit pre-rollout validation gate; no unsupported claim of provider acceptance. |
+| P3-2 warning severity | R1.2: supported `low` survives `warning`, `info` drops; exact final summary/counts and critical-for-all mutant. |
+| P3-3 semantic source-list assert | R1.3: independently assert the complete requirement-ref source list in both packaged versions, not a repeated mention. |
+| P3-4 wrong repository class | R1.5: actual `SqlAlchemyReviewOutputRepository` in README and both #120 historical documents, without rewriting adjacent scope. |
+| P3-5 both-passes docstrings | R1.3: both affected verifier-only docstrings accurately state their coverage. |
+| P3-6 adjacent assembly errors | R1.5: explicit consciously retained resource/duplicate-ID integrity classifications, without silently changing retry behavior. |
+| P3-7 missing document duplication | R1.4: use public `policy_documents.missing_document` from eval and the test helper; preserve dataclass values/output bytes. |
+| P3-8 commits | R1.1/R1.8: repair `bf9d4c6d` message, retain original large commit by documented choice, make review commits focused. |
+| P3-9 bulky/session plans | R1.6a/R1.6b: compact durable baseline and mutation table/repro guide; concise results and accessible committed reproduction inputs. |
+| P3-10 active DB pins | R1.5: separate static fixture defaults from active-row IDs captured on run creation and restored from pinned rows, including legacy missing pins. |
+| P3-11 shared-file comments | R1.0: refresh owners and post deduplicated exact comments before touching an owned file. |
 
-#289 run-pins, #260 historical-plan cleanup and #254 RAG are read-only dependencies
-for this plan: do not edit their unique owned paths, so no comments there. The
-120 plans are not in #260's current file list. No AGENTS/rule/skill updates are
-planned. Start non-overlapping proof/schema/envelope work while comments or
-merges for shared files are pending, but do not temporarily mutate an owned
-production file before the coordination gate either.
+## R1.0: Ownership and synchronization preparation
 
-## Verification, review and publishing
+**Dependencies:** None. **Files:** Metadata only. **Size:** S. **Implementation complete:** all ten open-PR file lists and existing comments were checked; the five exact combined notices below were posted and independently read back. Receipt URLs are recorded in `216-coordination.md`. Fresh independent Standards and Spec reviews both returned zero findings.
 
-Use uv throughout. First `uv sync --locked`; establish a full pristine baseline.
-An unrelated PostgreSQL container occupies host 5432. Do not reuse, migrate or
-stop it. Start only postgres/rabbitmq from this worktree with a unique disposable
-compose project `dmc216`, `POSTGRES_PORT=55432`, `RABBITMQ_PORT=55672`,
-`RABBITMQ_MANAGEMENT_PORT=55673` (check availability), and dedicated volume names
-provided by the project. Use explicit local fake credentials if environment values
-would otherwise be inherited. Docker socket/network and this managed worktree's
-writes may require sandbox escalation; no services have been started yet.
+- Refresh every open PR's complete file list and existing comments, then identify ownership for all planned paths. New owners require the same check. Review notes exempt #300's non-overlapping TEST_PLAN changes; do not invent another comment there.
+- Post one combined coordination update per remaining owner, covering PIPELINE_SPEC and missing file names, and verify each returned comment URL. The user request to address all feedback covers these required coordination notices; no additional broad approval round is needed.
+- Inspect FYI #304: preserve its verifier Retry-After semantics if it lands first, `IgnoreMatcher(policy_base_sha=...)` and added policy-budget regression. Whichever PR lands second rebases. No order assumption replaces fresh main inspection.
 
-Create isolated RabbitMQ vhost `test216`, grant app permissions, and use:
+**Verification:** [Five verified coordination receipts](216-coordination.md) cover the verifier paragraph, its initial contracts-table pin qualifier and omitted shared-file names. All owners were checked before edits; future owners require a fresh notice. No owned-file edit bypasses the comment gate.
 
-```sh
-DMC216_WORKTREE="$(git rev-parse --show-toplevel)"
-cd "$DMC216_WORKTREE"
-export TEST_DATABASE_URL=postgresql+psycopg://app:app@127.0.0.1:55432/app
-export TEST_RABBITMQ_URL=amqp://app:app@127.0.0.1:55672/test216
-uv run ruff check .
-uv run ruff format --check .
-uv run mypy .
-uv run pytest -rs --strict-markers
-```
+## R1.1: Rebase with new run pins and factory consumer
 
-Fixtures create/migrate/drop random PostgreSQL schemas; do not run integration
-with xdist against one DB/vhost. Both env vars matter: PostgreSQL alone leaves
-RabbitMQ tests skipped. Capture full passed/failed/skipped counts and require no
-unexplained skips. A failed service startup, Alembic failure, baseline red test or
-resource limit is a visible blocker to completion, not permission to skip gates.
-Do not introduce dependency/config changes merely to hide unrelated failures.
-Run focused tests per slice. The measured pristine pytest took 2,795.29s, so
-checkpoints A/B/C use affected regression suites plus ruff, format and mypy, with
-focused DB tests for relevant repository/persistence behavior. Run one full
-quiescent pytest with both services after all changes, together with all four
-final gates. Repeat the full suite only for a failure, rebase or a new concern
-that invalidates that evidence; test-only intermediate milestones do not
-otherwise trigger a repeated complete suite. This is a verification-frequency
-refinement, not a reduction of final acceptance requirements.
+**Dependencies:** R1.0. **Files:** `app/modules/reviews/infrastructure/run_repository.py`, `tests/test_run_prompt_pins_postgres.py`, `docs/plans/130-run-pins-plan.md`; commit-message metadata. **Size:** M.
 
-After every task, update evidence/todo and have a fresh review agent use the
-code-review skill against the recorded base; its Standards and Spec checks run
-in independent parallel agents. Report hard violations separately from smells.
-Resolve findings through development agents; no coordinator implementation.
-Before publishing: rebase onto current main, refresh overlaps and current docs,
-rerun affected proof/full gates, and obtain zero findings on both axes.
+- Safely rebase current PR onto latest main. In the known repository conflict keep main's `severity_threshold_value(...)` and this PR's `allowed_v2_rules=None`. Preserve all upstream run-pin/threshold/trace changes and #304 behavior if merged.
+- Move the new test's deleted-factory import to `tests.policy_snapshot_fakes`; point the #130 plan's factory reference there. Audit every five factory names through all tracked Python, counting actual current consumers; no app or production review module imports tests.
+- Correct publication-record commit subject to `docs(reviews): record PR publication and board status (#216)` or add its `Refs #216` footer. Never reuse results measured before runtime-changing rebase as current head evidence.
 
-Publisher loads pull-request skill, uses `chore/216-reflection-tests-docs`, stages
-only intended paths, commits conventionally with `Refs #216`, and never uses
---no-verify. PR title proposal: `test(reviews): harden reflection regressions (#216)`.
-PR body: What / Why / How to verify / Refs, template checklist, exact mutations
-and equivalent/superseded explanations, every hygiene disposition, any external
-#133 deferral, and full test evidence. No closing keyword or Development link.
-Readiness/reviewer is chosen by user per publishing skill; do not select a
-reviewer or merge/close the issue. Attach the created PR to this chat. Board 12
-status is part of issue DoD; do not change unrelated fields. The tech lead closes
-#216 after AC verification; an approving review on final head and resolved threads
-remain merge requirements, not claims provided by internal agent reviews.
+**Verification:** Demonstrate the post-rebase import/collection failure before the minimal import fix, then full collection, global Ruff/format/mypy and focused run-pin PostgreSQL tests with isolated service URLs. Recheck semantic conflict by AST/diff; no new behavior test for a pure import rename. Fresh Standards/Spec reviews.
 
-## Risks and pending decisions
+**R1.1 implementation evidence:** Rebased onto `ef4e8b68b9443509a84f0c0ec273d08837b425c6`.
+The implementation commit remains one original logical unit as `9bdbd641`; splitting the
+already reviewed baseline would add history-only conflict risk. Its only semantic rebase
+conflict retained main's `severity_threshold_value(...)` and inline `allowed_v2_rules=None`.
+Publication metadata is now `a73e1a9d` with a valid `(#216)` subject. Upstream run pins,
+publication thresholds and trace behavior are preserved; #304 is not merged at this base.
+The new run-pin consumer first failed collection with the missing production factory, then
+passed all nine PostgreSQL tests after its import moved. An AST audit of 603 tracked Python
+files found 13 test consumers, all five definitions only in the test helper, no stale factory
+imports and no `app`/`review` imports of tests. Current collection: 6,608 tests. Ruff, format
+(599 files) and mypy (589 source files) pass. Full-suite proof remains pending R1.8; previous
+6,521-test results are historical and do not prove this runtime-changing rebase. Fresh independent R1.1
+Standards/Spec reviews both reported zero findings.
 
-1. **Approval received:** user approved this plan/public seams with `ок` on
-   2026-10-25, including the reasoned P3 19 retained-loader disposition.
-2. **External actions completed:** all applicable authorized coordination comments
-   and both #133 body corrections are verified in `216-coordination.md`. The new
-   #291 comment was separately authorized and posted; recheck for new overlaps
-   before future edits/publishing.
-3. **Baseline changes:** #130/#212 and other active PRs may change fixtures,
-   persistence and signatures; refresh baseline and update plans, never apply old
-   issue assumptions blindly.
-4. **Environment:** disposable PG/RabbitMQ, Docker/image access and writable
-   worktree are needed for full proof. Actual green baseline is not yet measured.
-5. **P3 19:** the approved plan retains the version/checksum checked package
-   resource loader here; document its reasoned rejection and residual disk I/O.
+## R1.2: Close public decision/publication coverage gaps
 
+**Dependencies:** R1.1. **Files (three):** `tests/test_reflection_pass.py`, `tests/test_execute_review.py`, `tests/test_review_output_v2.py` (production files mutated only temporarily). **Size:** S.
 
-## Integration B after synchronized main
+- Add an attributed `.review/rules.md` or `AGENTS.md` candidate with verifier `insufficient_context` and `requirement_refs=[]`. Public verify succeeds and returns that candidate in rejected with the exact status. Mutant adding `insufficient_context` to step-3 matching-ref-required statuses must fail this test.
+- Assert literal `published.allowed_v2_rules`: rules-only snapshot is `frozenset({".review/rules.md"})`; rules+AGENTS snapshot is `frozenset({".review/rules.md", "AGENTS.md"})`. Deleting either allowlist insertion must fail the appropriate assertion. Service-defaults preservation stays separate.
+- Add a warning-threshold flow with supported low/info candidates: low publishes, info drops; assert exact list, counts/drop reasons and backend summary. The mutant treating every non-all threshold as critical must fail. Reuse the current publication helper with a configurable threshold rather than duplicate its fake ports.
+- Separate model rejection from six independent public-parser cases (dict/string/bytes by E2/FSD1 trailing newline). This makes both current M11 probes reproducible from committed tests without a private supplemental test. Each parser assertion must execute even if the model validation also fails.
 
-Base is `4faa03dd7accfa161048f584b834b314fa1ab5b6`. The merged #290 suites
-introduce three additional factory consumers, extending task 11's old nine to
-twelve. After integration A's independent Standards and Spec reviews returned
-zero findings, integration B moves their imports to the extracted test helper.
-The bounded scope is `tests/test_gateway_answer_validation.py`,
-`tests/test_gateway_verifier_model.py`, and `tests/test_llm_verify_trace.py`.
-The coordinator explicitly approved adapting one fixture in the first file:
-its old `rule_name="rules.md"` now fails the intentionally tightened schema
-before the intended model-only semantic check. Positive integer coordinates
-`line=30`, `start_line=31` preserve that semantic failure, with the first finding
-still low severity before the later critical finding and the error still
-reporting raw finding index 0. No production behavior or assertion is weakened.
+**Verification:** RED for each isolated step-3/allowlist/warning mutant, byte-restored GREEN, all three full affected files and required static checks; record new named killer IDs. Fresh Standards/Spec reviews.
 
-All twelve consumers and seven additional gateway/verifier/trace suites pass
-661 cases with no skips on the dedicated Linux runner and disposable PostgreSQL.
-Global Ruff, format and mypy pass; exact evidence is in `216-verification.md`.
-This is compatibility checkpoint evidence, not the final complete-suite proof.
+R1.2 implementation and independent fresh Standards/Spec reviews are complete; both review axes reported zero findings.
+
+## R1.3: Pin exact verifier requirement sources
+
+**Dependencies:** R1.2. **Files:** `tests/test_reflection_evaluation.py`. **Size:** S.
+
+- Assert the requirement-ref source-list clause itself contains the exact three literal policy sources in both v1 and v2. Removing any list member must fail even if a later sentence still mentions it; evidence sources remain separately asserted.
+- Correct module/class docstrings that claim both-pass coverage. Keep immutable prompt bytes and checksums unchanged; reviewer injection defenses remain in their dedicated suite.
+
+**Verification:** Six isolated list-member removal probes (three sources by two versions) fail semantic assertions, not checksum/budget errors; restore and run the full verifier evaluation file plus static checks. Fresh Standards/Spec reviews.
+
+R1.3 implementation complete: six selective source-list deletions fail the named semantic assertion, each followed by exact restoration and all 55 evaluation tests passing. Ruff, format (599 files) and mypy (589 source files) pass. Immutable prompt bytes and checksum registry are unchanged. Fresh independent Standards/Spec reviews both report 0 findings.
+
+## R1.4: Reuse the public missing-document constructor
+
+**Dependencies:** R1.3. **Files:** `review/scripts/eval_live.py`, `tests/policy_snapshot_fakes.py`. **Size:** S.
+
+- Replace eval's duplicate private constructor and the test factory's repeated dataclass construction with `policy_documents.missing_document`; keep the public test factory signature/return behavior where existing consumers depend on it.
+- Preserve absent-document values, all arm snapshots/digests and request outputs. No dependency from production/evaluation code into tests and no unnecessary new public compatibility helper.
+
+**Verification:** Existing missing-document/policy/evaluation suites and byte/value comparisons before/after, global Ruff/format/mypy. No redundant implementation-mirroring tests. Fresh Standards/Spec reviews.
+
+R1.4 implementation complete: both consumers reuse the existing public constructor; the test factory signature is preserved. Before-change policy/offline-eval coverage passes all 362 tests. The combined capture of seven missing-document values, 12 evaluation arm snapshots/digests and eight fake-provider request envelopes is byte-identical before/after. All 950 affected tests and global Ruff/format (599 files)/mypy (589 source files) pass. Fresh independent Standards/Spec reviews both report 0 findings.
+
+## R1.5: Align current and historical contract documentation
+
+**Dependencies:** R1.4 and ownership gate. **Files (five):** `docs/PIPELINE_SPEC.md`, `review/README.md`, `docs/TEST_PLAN.md`, `docs/plans/120-plan.md`, `docs/plans/120-todo.md`. **Size:** M.
+
+- Fix PIPELINE's verifier paragraph: missing Reflection with snapshot is retryable `internal_error`, not terminal policy integrity; document three-attempt/DLQ consequence. Describe inline `allowed_v2_rules=None` and the separate verified allowlist accurately. Preserve neighboring PR edits and worker composition boundary.
+- Use actual `SqlAlchemyReviewOutputRepository.get_post_processing_input` in the three erroneous class references. Distinguish fixture/dataclass defaults from run-pinned active conventions/verifier DB rows; legacy absent pins remain absent/incomplete. Recheck exact post-rebase code instead of calling v2 universal runtime defaults.
+- Keep adjacent unreadable resource and duplicate check-ID integrity errors unchanged with a clear deliberate disposition in durable evidence and PR body. Do not broaden #211 or enable #130 worker wiring.
+
+**Verification:** Grep for stale class/error/allowed_v2 claims; named tests/links exist, direct inspection matches currentmain. Documentation-only: no new tests. Fresh Standards/Spec reviews.
+
+R1.5 implementation complete: the five documentation files match retryable `internal_error` with three total attempts/dead-letter exhaustion, inline legacy `allowed_v2_rules=None`, the actual repository method owner and creation-time active-row prompt pins restored by ID. Missing legacy pins remain absent/incomplete. Resource-read and duplicate-ID integrity classifications are deliberately retained, with the PR disposition in `216-verification.md`. Direct code/named-test/link/resource/stale-claim and diff checks pass. Fresh independent Standards/Spec reviews: 0/0.
+
+## R1.6a: Portable current mutation reproduction
+
+**Dependencies:** R1.5. **Files (three):** `review/scripts/replay_reflection_mutations.py`, `review/scripts/reflection_mutations.json`, `tests/test_reflection_mutation_replay.py`. **Size:** S.
+
+- Prefer a complete portable catalog of the 103 existing current-site probe mappings plus new feedback probes, with stable IDs, exact nonambiguous replacements, named assertion killers and restoration expectations. Include source fingerprints or other stale-site checks. No private artifact path is a runtime dependency of the committed driver/catalog.
+- Safety tests cover the driver's dirty-target, replacement-count and restoration guards. The driver captures intentional dirty tracked source bytes into a fresh owned snapshot, records their identity, applies one probe at a time there, runs a named test via uv, distinguishes named behavioral failures from collection/infrastructure errors and restores original bytes in `finally`, including interruption. Refuse unexpected replacement counts, stale fingerprints and changed snapshot inputs; never mutate the source checkout or resume unverified state.
+- If historical mappings cannot be safely reconstructed, explicitly identify the unavailable historical members and provide bounded current probes rather than claiming complete reproducibility. A full current mapping remains the preferred deliverable; historical numbers are measurements, not a replacement for runnable inputs.
+
+**Verification:** Driver dry-run lists every current catalog member; representative actual probes include source code, schema and prompt resources, plus new step-3/allowlist/warning/source-list gaps. Each proves GREEN, named-assertion RED and restored GREEN. A failed setup/collection must be reported as blocked rather than killed. Fresh Standards/Spec reviews before the documentation slice.
+
+R1.6a implementation complete: the committed catalog accounts for 113 live probes (92 historical, 11 original extras, 10 review regressions), four domain-equivalent, one diagnostic-only and two superseded records. All current anchors and committed test names validate. Sixteen representative probes, including all ten new review regressions, passed GREEN → named behavioral RED → exact restoration → GREEN in an owned isolated snapshot. Twelve driver safety tests pass; global Ruff, format (601 files) and mypy (591 files) pass. The complete 113-probe replay remains for R1.8. Fresh independent Standards/Spec reviews both report 0 findings.
+
+## R1.6b: Compact portable evidence documents
+
+**Dependencies:** R1.6a. **Files (four):** `docs/plans/216-plan.md`, `docs/plans/216-todo.md`, `docs/plans/216-verification.md`, `docs/plans/216-coordination.md`. **Size:** M.
+
+- Replace transcript-style evidence with a compact baseline/result matrix, M01–M15 mutation dispositions, exact test node IDs, review changes and service prerequisites; link the committed driver/catalog. Historical counts and SHAs stay labeled historical; delete inaccessible local artifact paths, loopback service addresses, machine-specific containers and chat/approval transcripts.
+- Retain reproducible setup commands only if they create the disposable resources they reference; otherwise use `<disposable-db-url>`, `<isolated-task-vhost-url>` and `<scratch-dir>` inputs. No reference to already-existing personal infrastructure.
+- Describe actual catalog coverage and its limits exactly; explicitly correct the newly discovered step-3 survivor instead of hiding it behind the original replay count. Preserve the original four equivalences, two superseded sites and diagnostic-only exploration.
+
+**Implementation complete:** all four documents now use compact result/disposition tables, committed reproduction inputs and portable service placeholders. The old 103-probe result is explicitly bounded: step-3 `insufficient_context`/empty refs and the masked source-list assertion were outside its effective coverage. Portability, local links, named nodes, unchanged out-of-scope files and driver instructions are audited. Documentation-only; no new tests. Fresh independent Standards/Spec reviews both report 0 findings.
+
+## R1.7: Provider schema compatibility disposition
+
+**Dependencies:** R1.6b. **Files:** `docs/plans/130-verifier-gateway-plan.md`, `docs/plans/130-verifier-gateway-todo.md`, `docs/plans/216-verification.md`; optionally one existing schema-contract test file only if justified by a real regression. **Size:** M.
+
+- Trace actual `provider_schema` and strict `response_format` behavior; establish whether lookahead is preserved. Consult authoritative provider/engine documentation for the configured endpoint and separate documented support from assumptions.
+- Keep local schema/model domain parity and newline rejection. Write the unresolved real-provider acceptance gate into the actual #130 PR F plan/todo files listed above, with exact schema SHA, strict request payload, primary/fallback routes, observed provider outcome and #217 reference; provide a reproducible contract probe or documented alternative if feasible, with no paid call here.
+
+**Verification:** Cited primary sources plus local transport/schema tests. The outcome is a reasoned compatibility disposition, not a falsely successful provider run. Fresh Standards/Spec reviews.
+
+**Implementation complete:** strict transport/regex preservation verified against current source; official compatibility/routing sources cited. The #130 plan/todo now carry an unchecked release gate before F2 v4 activation, linked to #217, without blocking dormant F1. Frozen raw schema and canonical strict payload hashes reproduce locally. Existing offline gateway/schema/parser suites: 185 passed, zero skips. Provider acceptance remains UNKNOWN; no paid/live call. Fresh independent Standards/Spec reviews both report 0 findings.
+
+## R1.8: Final proof and update existing PR
+
+**Dependencies:** R1.0–R1.7, each reviewed clean. **Files:** Evidence/coordination metadata and PR metadata; publisher commits reviewed changes. **Size:** S.
+
+- Refresh main/ownership, rebase safely again if runtime changed, then run source-quiescent final gates with disposable PostgreSQL and RabbitMQ configured: `uv run ruff check .`, `uv run ruff format --check .`, `uv run mypy .`, `uv run pytest`. No skipped required integration slice, stale result identity or unexplained baseline failure.
+- Replay applicable M01–M15 probes and all new feedback mutants against the final source; record named assertion killers and restored GREEN, alongside the four equivalences/two superseded sites and diagnostic-only exploration. Independent fresh whole-PR Standards and Spec reviewers must report zero findings.
+- Publisher stages explicit paths, makes focused conventional review commits, pushes existing PR and rewrites its four-section body for current final behavior/counts/base and every hygiene disposition. Reply in all four review threads with fix/disposition and new SHA; address the P3 list in one concise review-round summary. Authors never resolve reviewer threads. Preserve non-draft/no-requested-reviewer, no closing keywords or Development link. Attach the existing PR and monitor current-head CI. Human approval remains pending.
+
+**Verification:** Final gate evidence and current CI agree; diff contains no mutants/private artifacts/unrelated changes; all15 review items have a durable disposition. Clean up only resources created for this task after verification. Do not merge or close #216.
+
+R1.8 preflight safely rebased onto `9243fd67` (HEAD `f00d1b92`), preserving reviewed dirty changes and upstream checked-paths, trace/persistence and run-pin behavior. The existing service-default-ID test first failed eleven cases with missing `checked_paths`; adding that required argument restored all 178 tests in the bounded six-file slice. All five factories remain test-only, with 13 consumer files across 606 tracked Python files. Nine catalog fingerprints across two upstream-changed targets were audited and refreshed without changing mutant edits, node selections or semantic classifiers; all 120 records validate. Four affected source-target probes (parser, repair, shared validator and warning threshold) each passed control GREEN → named behavioral RED → restored GREEN in an isolated snapshot. Ruff, format (604 files) and mypy (594 source files) pass. Final verification is complete on the reviewed dirty tree: all 113 live catalog probes were killed by named behavioral failures and restored GREEN; full Linux pytest with dedicated PostgreSQL/RabbitMQ passed **6,660 tests, zero failures/errors/skips, two existing deprecation warnings, in 923.56 s**. All 1,207 input hashes matched before/after replay and pytest, with input identity `1d4a19f5983de54234f5f109bc5c4d04636ba53fff3bf1ae85418f794ea85192`. After a narrow driver-classifier fix, 17 safety cases and eight representative probes passed; fresh whole-PR Standards/Spec reviews reconfirmed 0/0 and global Ruff/format/mypy passed. The complete replay was then rerun on that exact final driver. Evidence metadata changes only the four #216 documents; verification records the stable 1,203-file projection. Independent final-document delta reviews, publication, review replies, current-head CI and owned-resource cleanup remain pending.
+
+## Remaining uncertainties
+
+- Main and overlapping PRs may move during the loop; fresh ownership and semantic rebase govern every later edit.
+- Provider-specific regex acceptance cannot be inferred from Python jsonschema parity or an unrelated provider's documentation; unresolved acceptance must stay an explicit rollout gate.
+- The current 6,660-test result supersedes the historical 6,521 result for this reviewed tree. A later runtime-changing rebase requires fresh verification.
