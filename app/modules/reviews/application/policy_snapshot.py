@@ -362,6 +362,13 @@ class ManifestBlock:
     end_line: int | None = None
     shown_line_count: int = 0
     shown_ranges: tuple[tuple[int, int], ...] = ()
+    # Tokens of the rendered block, counted with the call's pinned counter; None when the
+    # builder of this manifest does not count (#144 reads them per role).
+    tokens: int | None = None
+    # The repository a code block was read from; None for policy and generated blocks.
+    repository_id: UUID | None = None
+    # The block shows a prefix of its source, ending with the truncation trailer.
+    truncated: bool = False
 
 
 @dataclass(frozen=True)

@@ -461,3 +461,43 @@ class RunActionResponseBody(Base):
     run_id: Mapped[UUID] = mapped_column(ForeignKey("runs.id", ondelete="CASCADE"), nullable=False)
     body: Mapped[Any] = mapped_column(JSONB, nullable=False)
     created_at: Mapped[datetime] = timestamp_column()
+
+
+class ContextManifest(Base):
+    """The exact blocks one snapshot-path provider call was shown (CVS §5, #130 F1-6).
+
+    Written before the call; a retry reuses the row, a repair or a fallback has its own.
+    """
+
+    __tablename__ = "context_manifests"
+    __table_args__ = (
+        CheckConstraint(
+            "stage IN ('conventions', 'review', 'verification')",
+            name="ck_context_manifests_stage",
+        ),
+        CheckConstraint(
+            "recovery_kind IN ('none', 'retry', 'repair', 'fallback')",
+            name="ck_context_manifests_recovery_kind",
+        ),
+        Index("ix_context_manifests_run_attempt", "run_id", "attempt"),
+    )
+
+    # The manifest_id of the llm.call and context.manifest records.
+    id: Mapped[UUID] = mapped_column(Uuid, primary_key=True)
+    run_id: Mapped[UUID] = mapped_column(ForeignKey("runs.id", ondelete="CASCADE"), nullable=False)
+    attempt: Mapped[int] = mapped_column(INTEGER, nullable=False)
+    call_id: Mapped[UUID] = mapped_column(Uuid, nullable=False, unique=True)
+    stage: Mapped[str] = mapped_column(String(20), nullable=False)
+    recovery_kind: Mapped[str] = mapped_column(String(20), nullable=False)
+    parent_call_id: Mapped[UUID | None] = mapped_column(Uuid, nullable=True)
+    policy_snapshot_id: Mapped[UUID | None] = mapped_column(Uuid, nullable=True)
+    # SHA-256 of the canonical JSON of ``blocks``.
+    digest: Mapped[str] = mapped_column(CHAR(64), nullable=False)
+    block_count: Mapped[int] = mapped_column(INTEGER, nullable=False)
+    input_tokens: Mapped[int] = mapped_column(INTEGER, nullable=False)
+    blocks: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, nullable=False)
+    omissions: Mapped[list[dict[str, Any]]] = mapped_column(
+        JSONB, nullable=False, server_default=text("'[]'::jsonb")
+    )
+    schema_version: Mapped[int] = mapped_column(INTEGER, nullable=False, server_default=text("1"))
+    created_at: Mapped[datetime] = timestamp_column()

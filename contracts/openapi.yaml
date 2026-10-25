@@ -916,8 +916,9 @@ components:
         `context.rag`, `llm.repo_conventions` and `llm.call`; `llm.review_output` and
         `review.postprocess` are written in the transaction that moves the run to `publishing`,
         and so is `llm.verify`, before `review.postprocess`, but only on the verifier path of a
-        run with a policy snapshot, which no live run takes yet; `github.publish_review` or
-        `gitlab.publish_review` runs in `publishing` (docs/PIPELINE_SPEC.md §2).
+        run with a policy snapshot, which no live run takes yet; on that path `context.manifest`
+        precedes each `llm.call` that is not a retry, inside `running`; `github.publish_review`
+        or `gitlab.publish_review` runs in `publishing` (docs/PIPELINE_SPEC.md §2).
       enum: [queued, running, publishing, succeeded, failed, cancelled, skipped]
     RunTrigger:
       type: string
@@ -1327,10 +1328,13 @@ components:
             Step name written to run_actions; free text, not an enum. The code writes
             `policy.load`, `vcs.fetch_diff`, `context.build`, `context.rag`,
             `llm.repo_conventions`, `llm.call`, `llm.review_output`, `review.postprocess`,
-            `github.publish_review` and `gitlab.publish_review`. It writes `llm.verify` only on
-            the verifier path of a run with a policy snapshot, which no live run takes yet. The
-            per-attempt order and the planned steps that are not written yet are in
-            docs/PIPELINE_SPEC.md §2.
+            `github.publish_review` and `gitlab.publish_review`. It writes `llm.verify` and
+            `context.manifest` only on the verifier path of a run with a policy snapshot, which
+            no live run takes yet. A `context.manifest` step precedes each provider call of that
+            path that is not a retry; its response is `{manifest_id, digest, block_count,
+            input_tokens, tokens_by_role}`, where `tokens_by_role` maps a source role to the
+            tokens of the call's blocks of that role. The per-attempt order and the planned steps
+            that are not written yet are in docs/PIPELINE_SPEC.md §2.
         request:
           type: object
           description: Request metadata of the step.

@@ -45,6 +45,8 @@ from app.modules.reviews.application.llm import (
     LlmCallTrace,
     LlmErrorCode,
     LlmUsage,
+    ManifestEntry,
+    ManifestStore,
     RunCallContext,
     UsageLedger,
 )
@@ -58,6 +60,7 @@ from app.modules.reviews.application.prompt_budget import (
     TokenCounter,
     verify_provenance_pre_send_guard,
 )
+from app.modules.reviews.application.run_failures import RunFailure
 
 if TYPE_CHECKING:
     from app.modules.reviews.application.prompt_builder import ReviewContext
@@ -189,6 +192,8 @@ class _AttemptState:
 
     calls: int = 0
     usage: list[LlmUsage] = field(default_factory=list)
+    # call_id -> manifest_id of the manifests stored by this generate(); a retry reuses its row.
+    manifests: dict[UUID, UUID] = field(default_factory=dict)
 
 
 @dataclass
@@ -216,6 +221,7 @@ class LlmGateway:
         jitter: Callable[[], float] | None = None,
         monotonic: Callable[[], float] = time.monotonic,
         fx_provider: FxQuoteProvider | None = None,
+        manifest_store: ManifestStore | None = None,
     ) -> None:
         self._settings = settings
         self._checkpoint = checkpoint
@@ -228,6 +234,8 @@ class LlmGateway:
         self._jitter = jitter or (lambda: random.uniform(0, policy.max_jitter_s))
         self._monotonic = monotonic
         self._fx_provider = fx_provider
+        # Snapshot-path tasks store each call's manifest before it; None stores nothing.
+        self._manifests = manifest_store
         # run_id -> calls of its current attempt; conventions and review share it.
         self._attempts: OrderedDict[UUID, _AttemptCalls] = OrderedDict()
 
@@ -273,7 +281,9 @@ class LlmGateway:
         manifest = task.base_manifest
 
         while True:
-            last = await self._call(primary, kind, messages, task, context, state, attempt)
+            last = await self._call(
+                primary, kind, messages, task, context, state, attempt, manifest
+            )
             if last.output is not None:
                 return self._result(primary, last, state, manifest)
             assert last.error is not None
@@ -334,6 +344,8 @@ class LlmGateway:
                         start_line=1,
                         end_line=prev_lines,
                         shown_line_count=prev_lines,
+                        tokens=None if task.counter is None else task.counter.count(shown),
+                        truncated=len(shown) < len(last.answer),
                     )
                     repair_manifest = replace(
                         task.base_manifest,
@@ -379,7 +391,14 @@ class LlmGateway:
                 )
                 manifest = fallback_manifest
             last = await self._call(
-                fallback, LlmCallKind.FALLBACK, task.messages, task, context, state, attempt
+                fallback,
+                LlmCallKind.FALLBACK,
+                task.messages,
+                task,
+                context,
+                state,
+                attempt,
+                manifest,
             )
             if last.output is not None:
                 return self._result(fallback, last, state, manifest)
@@ -434,8 +453,9 @@ class LlmGateway:
         context: RunCallContext,
         state: _AttemptState,
         attempt: _AttemptCalls,
+        manifest: CallManifest | None,
     ) -> _Outcome:
-        """Check deadline, context and budget, then make one provider call."""
+        """Check deadline, context and budget, store the manifest, then make one call."""
         await self._checkpoint(context)
         policy = self._settings.policy
         timeout_s = self._call_timeout_s(task, context)
@@ -502,6 +522,10 @@ class LlmGateway:
             raise self._failed(
                 LlmErrorCode.UNAVAILABLE, _calls_exhausted(context, attempt, task), state
             )
+        # E-3 and the manifest row: snapshot-path tasks only, so a legacy call is unchanged.
+        snapshot = task.policy_snapshot
+        named = manifest if snapshot is not None else None
+        manifest_id = await self._store_manifest(task, named, context, state, estimate)
         state.calls += 1
         attempt.calls += 1
         started_at = self._clock.now()
@@ -516,6 +540,10 @@ class LlmGateway:
             started_at=started_at,
             operation=task.operation,
             fx=_fx_provenance(quote_result),
+            call_id=None if named is None else named.call_id,
+            stage=None if named is None else named.stage,
+            policy_snapshot_id=None if snapshot is None or named is None else snapshot.snapshot_id,
+            manifest_id=manifest_id,
         )
 
         async def checkpoint() -> None:
@@ -638,6 +666,47 @@ class LlmGateway:
             },
         )
         return _validated(response, task)
+
+    async def _store_manifest(
+        self,
+        task: StructuredTask,
+        manifest: CallManifest | None,
+        context: RunCallContext,
+        state: _AttemptState,
+        estimate: int,
+    ) -> UUID | None:
+        """The stored manifest of this call: written once per call id, before the call."""
+        if manifest is None or task.policy_snapshot is None or self._manifests is None:
+            return None
+        stored = state.manifests.get(manifest.call_id)
+        if stored is not None:
+            return stored
+        base = task.base_manifest
+        entry = ManifestEntry(
+            manifest_id=uuid4(),
+            attempt=context.attempt,
+            policy_snapshot_id=task.policy_snapshot.snapshot_id,
+            manifest=manifest,
+            parent_call_id=(
+                None if base is None or base.call_id == manifest.call_id else base.call_id
+            ),
+            input_tokens=estimate,
+            started_at=self._clock.now(),
+        )
+        try:
+            await self._manifests.record_manifest(context.run_id, entry)
+        except Exception as error:
+            # No manifest, no call: the provider is never shown an unrecorded input.
+            logger.exception(
+                "context manifest write failed",
+                extra={"run_id": str(context.run_id), "call_id": str(manifest.call_id)},
+            )
+            raise RunFailure(
+                "internal_error",
+                f"the context manifest could not be stored: {type(error).__name__}",
+            ) from error
+        state.manifests[manifest.call_id] = entry.manifest_id
+        return entry.manifest_id
 
     async def _record_paid_answer(
         self,
@@ -813,6 +882,10 @@ class _RecordDraft:
     started_at: datetime
     operation: str
     fx: FxProvenance | None = None
+    call_id: UUID | None = None
+    stage: str | None = None
+    policy_snapshot_id: UUID | None = None
+    manifest_id: UUID | None = None
 
     def finish(
         self,
@@ -838,6 +911,10 @@ class _RecordDraft:
             fx=self.fx,
             paid_metadata_error=paid_metadata_error,
             operation=self.operation,
+            call_id=self.call_id,
+            stage=self.stage,
+            policy_snapshot_id=self.policy_snapshot_id,
+            manifest_id=self.manifest_id,
         )
 
 

@@ -39,7 +39,7 @@ Gates for every task: the four commands in the plan, with DB and vhost `imp130f`
   - [x] green on `703c05ec`;
   - [x] fix round (batch-1 review): the responses of the non-call steps and a pre-0039 v3 run
     (NULL conventions and verifier pins) are pinned too;
-  - [ ] the `context_manifests` row count (0) is added in F1-6.
+  - [x] the `context_manifests` row count (0) is added in F1-6.
 
 ### F1-2: Path selector ⚑
 - **Commit:** `feat(reviews): choose the review path by the pinned prompt version (#130)`
@@ -128,8 +128,13 @@ Gates for every task: the four commands in the plan, with DB and vhost `imp130f`
   - new port in `application/llm.py` (`ManifestStore`) and `LlmCallRecord` fields;
   - new `infrastructure/context_manifest_store.py`;
   - `infrastructure/llm/gateway.py` (write before each send, `:270-383`);
-  - worker wiring;
-  - new `tests/test_context_manifests_postgres.py`; migration tests.
+  - worker wiring (`app/bootstrap/llm_gateway.py` `build_gateway`);
+  - new `tests/test_context_manifests_postgres.py`, `tests/test_context_manifests_migration.py`;
+  - `contracts/openapi.yaml` and `tests/test_openapi_contract.py` (`context.manifest` in the catalog);
+    `docs/PIPELINE_SPEC.md` (`llm.call` and `context.manifest` rows);
+  - the Alembic head pinned in `tests/test_app_reinstall_schema_postgres.py` and
+    `tests/test_code_index_store_postgres.py` moves to `20261025_0040`;
+  - E-5 (TL-5): closed without an SSE change, `run_action_records.py` stays as it is.
 - **Tests:**
   - one row and one `context.manifest` action per base, repair or fallback call; a retry reuses the row;
   - `llm.call` request carries `call_id`, `stage`, `policy_snapshot_id`, `manifest_id`;
@@ -137,7 +142,7 @@ Gates for every task: the four commands in the plan, with DB and vhost `imp130f`
   - a `retrieved_excerpt` block (LEFT, `diff_old_sha`, two ranges, `repository_id`) round-trips;
   - upgrade → downgrade → upgrade;
   - legacy run → 0 rows (in F1-1).
-- **Done when:** [ ] one Alembic head; [ ] F1-1 green.
+- **Done when:** [x] one Alembic head; [x] F1-1 green.
 
 ### F1-7: R14, verifier window, `llm.verify.manifest_id`, E-2 ⚑
 - **Commit:** `feat(worker): run the reflection pass on snapshot-path reviews (#130)`

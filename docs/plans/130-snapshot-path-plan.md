@@ -177,6 +177,12 @@ validates against v1 when no snapshot is attached (`llm/models.py:183-188`). Tha
   - Request `{call_id, stage, policy_snapshot_id, diff_snapshot_id: null}`, response
     `{manifest_id, digest, block_count, input_tokens}` (PIPELINE_SPEC:174).
   - If the write fails, no provider call is made (`internal_error`, retryable).
+  - As built in F1-6: the store is an optional `LlmGateway(manifest_store=…)`, wired by `build_gateway`;
+    without it nothing is written and the E-3 keys carry `manifest_id: null`. The response also has
+    `tokens_by_role` (#144). Blocks carry `tokens` only from the review manifest (`build_manifest` with
+    the snapshot's counter) and the repair's `previous-output` block; the conventions and verifier
+    builders count in F1-10 and F1-7, so until then their rows report no tokens for their blocks.
+    The step records `duration_ms: 0` (its own write is the transaction).
 - **E-3.** For snapshot-path tasks, the `llm.call` request (`application/llm.py:141-155`) adds `call_id`,
   `stage`, `policy_snapshot_id` and `manifest_id`. If #227 merges first, its `operation` key stays and
   `stage` mirrors it.
@@ -278,7 +284,7 @@ Rolling F2 back to F1 is safe. The floor goes to #297's rollback runbook.
 | E-1, E-7, E-12 | F1-9 | snapshot tasks reserve slots and time and use bounded repair; legacy tasks keep 0 and off |
 | E-2 | F1-7 | the verification `llm.call` response has no `reason` |
 | E-4 | phase 3 smoke | two user turns accepted by EUrouter/Mistral |
-| E-5 | follow-up after #227 | `verification` passes the `llm_operation` allow-list |
+| E-5 | closed (TL-5) | none: #227's contract stays, `verification` is never an SSE `llmOperation` |
 | E-6 | G | docs |
 | E-8 | follow-up | profile field change (DD4 last line) |
 | E-9 | F1-5 | `send_budget_for` ignores `LLM_CONTEXT_WINDOW` in the environment |
@@ -366,7 +372,7 @@ Recorded per the coordinator's brief; one line per decision.
 - **TL-2** (b), per the coordinator's brief: `reserved_calls` review 1, conventions 2 (CVS §7.3), snapshot path only; legacy unchanged; with a fallback the cache-miss chain is C1 → R1 → fallback → V1, and preferring repair is a follow-up.
 - **TL-3** (b), as recommended, per the coordinator's brief: the verification `llm.call` response is stored without `decisions[].reason`.
 - **TL-4** (a), as recommended, per the coordinator's brief: the gateway writes `context.manifest`, because only it sees repair and fallback.
-- **TL-5** as recommended, per the coordinator's brief: E-5 is a one-line commit after #227 merges, in F1 if #227 is in by then, otherwise a follow-up.
+- **TL-5** Decided: keep #227's contract; E-5 closed without SSE change. The verifier's `llm.call` carries `operation="verification"` in `run_actions` only; `SSE_LLM_OPERATIONS`, the openapi `RunStepEvent.llmOperation` enum and PIPELINE_SPEC:63 stay as they are.
 - **TL-6** as recommended, per the coordinator's brief: the E-7 time reserve is in F1, gated (the review's own call + 90 s + 10 s); the E-7 money reserve and E-8 (pin the verifier provider route) are follow-ups.
 - **TL-7** (b), as recommended, per the coordinator's brief: a v2 digest of the pinned identities goes into `policy_key` (namespace, `policy_digest`, the current `policy_key` value with the tainted rename and copy paths of `review_context_stage.py:362-381`, `matcher_version`, `defaults_checksum`, the conventions prompt checksum, profile versions); the deviation from CVS §4.2 is recorded for G.
 - **TL-8** yes, as recommended, per the coordinator's brief: R7 fails closed above 12k policy tokens on the snapshot path, with a read-only staging query before F2 that lists repos above the limit.

@@ -234,6 +234,7 @@ async def _fitted_review(
         call_id=uuid4(),
         stage="review",
         recovery_kind="none",
+        counter=counter if context.policy_snapshot is not None else None,
     )
     verify_provenance_pre_send_guard(base_manifest, context=fitted, snapshot=fitted.policy_snapshot)
     result = await gateway.generate(

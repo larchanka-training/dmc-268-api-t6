@@ -44,6 +44,7 @@ from app.modules.reviews.application.llm import (
     LlmCallRecord,
     LlmUsage,
     RunCallContext,
+    TransactionalManifestStore,
 )
 from app.modules.reviews.application.policy_snapshot import PolicySnapshot
 from app.modules.reviews.application.prompt_builder import (
@@ -56,6 +57,9 @@ from app.modules.reviews.application.prompt_builder import (
 from app.modules.reviews.application.review_output import ReviewOutput, parse_review_output
 from app.modules.reviews.application.run_failures import FAST_ATTEMPT_DEADLINE, RunCancelled
 from app.modules.reviews.application.run_trace import TransactionalRunTrace
+from app.modules.reviews.infrastructure.context_manifest_store import (
+    SqlAlchemyContextManifestUnitOfWork,
+)
 from app.modules.reviews.infrastructure.llm.answers import review_output_schema
 from app.modules.reviews.infrastructure.llm.ecb_fx import (
     EcbFxQuoteCache,
@@ -122,6 +126,9 @@ def build_gateway(
         ),
         checkpoint=checkpoint,
         fx_provider=fx_provider,
+        manifest_store=TransactionalManifestStore(
+            partial(SqlAlchemyContextManifestUnitOfWork, session_factory)
+        ),
     )
 
 

@@ -7,6 +7,7 @@ the attempt deadline, the run cost limit and to write the ``llm.call`` trace and
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import date, datetime
 from decimal import Decimal
@@ -14,6 +15,8 @@ from enum import StrEnum
 from typing import Any, Literal, Protocol
 from uuid import UUID
 
+from app.common.application.unit_of_work import UnitOfWork
+from app.modules.reviews.application.policy_snapshot import CallManifest
 from app.modules.reviews.application.run_failures import RETRYABLE_ERROR_CODES
 
 type EngineName = Literal["fast", "deep"]
@@ -138,6 +141,12 @@ class LlmCallRecord:
     fx: FxProvenance | None = None
     paid_metadata_error: bool = False
     operation: str | None = None
+    # E-3, snapshot-path tasks only: the manifest call this record is, its stage, the
+    # attempt's policy snapshot and the stored manifest (None while no store is wired).
+    call_id: UUID | None = None
+    stage: str | None = None
+    policy_snapshot_id: UUID | None = None
+    manifest_id: UUID | None = None
 
     def request_json(self) -> dict[str, object]:
         """Metadata only: the prompt itself is never copied into the trace."""
@@ -153,6 +162,11 @@ class LlmCallRecord:
         }
         if self.operation is not None:
             metadata["operation"] = self.operation
+        if self.call_id is not None:
+            metadata["call_id"] = str(self.call_id)
+            metadata["stage"] = self.stage
+            metadata["policy_snapshot_id"] = _uuid_or_none(self.policy_snapshot_id)
+            metadata["manifest_id"] = _uuid_or_none(self.manifest_id)
         if self.fx is not None:
             metadata["fx"] = self.fx.as_json()
         if self.paid_metadata_error:
@@ -184,6 +198,56 @@ class LlmCallTrace(Protocol):
     """Writes one ``llm.call`` run action per provider call, outside any call transaction."""
 
     async def record_call(self, run_id: UUID, record: LlmCallRecord) -> None: ...
+
+
+@dataclass(frozen=True)
+class ManifestEntry:
+    """The manifest of one snapshot-path provider call, stored before the call (CVS §5).
+
+    ``manifest_id`` names the row in ``llm.call``; ``parent_call_id`` is the base call of a
+    repair or a fallback; ``input_tokens`` is the call's pre-send count with the pinned
+    counter.
+    """
+
+    manifest_id: UUID
+    attempt: int
+    policy_snapshot_id: UUID
+    manifest: CallManifest
+    parent_call_id: UUID | None
+    input_tokens: int
+    started_at: datetime
+
+
+class ManifestStore(Protocol):
+    """Stores a manifest and its ``context.manifest`` step, committed before the call.
+
+    A failure means the call is not made.
+    """
+
+    async def record_manifest(self, run_id: UUID, entry: ManifestEntry) -> None: ...
+
+
+class ContextManifestRepository(Protocol):
+    """Adds the ``context_manifests`` row and the ``context.manifest`` step; flushes only."""
+
+    async def add(self, run_id: UUID, entry: ManifestEntry) -> None: ...
+
+
+class ContextManifestUnitOfWork(UnitOfWork, Protocol):
+    @property
+    def manifests(self) -> ContextManifestRepository: ...
+
+
+class TransactionalManifestStore:
+    """``ManifestStore``: one short transaction per manifest, never around a provider call."""
+
+    def __init__(self, uow_factory: Callable[[], ContextManifestUnitOfWork]) -> None:
+        self._uow_factory = uow_factory
+
+    async def record_manifest(self, run_id: UUID, entry: ManifestEntry) -> None:
+        async with self._uow_factory() as uow:
+            await uow.manifests.add(run_id, entry)
+            await uow.commit()
 
 
 def _uuid_or_none(value: UUID | None) -> str | None:
