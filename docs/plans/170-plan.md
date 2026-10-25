@@ -145,12 +145,12 @@ cross-repo.
 
 Define `body_count` for succeeded check-runs as the number of non-inline findings **accounted for in
 the review body**: visible Additional findings bullets plus any count embedded in the overflow line.
-Implementation options (pick one in Task 5):
-
-- Derive from post-processor metadata persisted on the run (preferred — single source of truth), or
-- Re-parse the stored body (fragile).
-
 Inline count stays separate (`inline: N` in summary).
+
+**Resolved in #170:** by construction that total equals `len(published findings) - inline`, because
+every body-only finding is either a visible bullet or counted by the footer. The implementation
+keeps that formula and adds bucket tests (including moved-from-inline) instead of parsing markdown
+or persisting a separate counter.
 
 ### D-4 — `RunStepEvent.attempt` (Ч.2)
 

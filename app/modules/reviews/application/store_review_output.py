@@ -100,7 +100,7 @@ class StoreReviewOutput:
         queue: ReviewPublishQueue,
         *,
         worker_id: str,
-        run_url: Callable[[UUID], str | None] = lambda _: None,
+        run_url: Callable[[UUID], str | None],
         now: Callable[[], datetime] = lambda: datetime.now(UTC),
     ) -> None:
         self._uow_factory = uow_factory

@@ -27,10 +27,10 @@ RUN_ID = UUID("11111111-1111-4111-8111-111111111111")
 UI_CONTRACT_COMMIT = "9bfb931d88fe66b15d77e636b32406374c76589a"
 # The base snapshot includes repository contracts from UI #102 that are not on UI main yet.
 # Keep that coverage; generate only the new event from ui#155
-# (RunStepEvent attempt + llmOperation).
+# (RunStepEvent attempt + llmOperation, merged as 0c36c497).
 # SCHEMA_NAMES=runStepEvent OUTPUT_PATH=tests/fixtures/ui_run_step_zod_contracts.json \
 # DMC_268_UI_DIR=<ui checkout after pnpm install> node tests/generate_ui_zod_contracts.mjs
-UI_RUN_STEP_CONTRACT_COMMIT = "5779d41687935a783dc8d83607e9e7403632eeb2"
+UI_RUN_STEP_CONTRACT_COMMIT = "0c36c4976b9fae07e7b465f28dc0d196f5d61bdb"
 
 
 # Where a Run came from, as the shared RunSession contract must carry it (#112).

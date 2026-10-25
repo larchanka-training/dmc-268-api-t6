@@ -260,9 +260,9 @@ Task 8 waits for 3 and 7 and lands in the same branch, not a follow-up PR.
 
 ### Checkpoint: Publication
 
-- [ ] GitHub publish tests still pass, including the check-run title
-- [ ] A fake GitLab MR receives inline notes and one summary, and a second pass does not duplicate them
-- [ ] A missing GitLab token leaves the run in `publishing`
+- [x] GitHub publish tests still pass, including the check-run title
+- [x] A fake GitLab MR receives inline notes and one summary, and a second pass does not duplicate them
+- [x] A missing GitLab token leaves the run in `publishing`
 
 ### Phase 3: Step stream
 
@@ -273,9 +273,9 @@ Task 8 waits for 3 and 7 and lands in the same branch, not a follow-up PR.
 
 ### Checkpoint: Step stream
 
-- [ ] Two steps of one run both arrive, and neither is `run.updated`
-- [ ] A rolled-back insert emits no step
-- [ ] Status replay via `Last-Event-ID` is unchanged
+- [x] Two steps of one run both arrive, and neither is `run.updated`
+- [x] A rolled-back insert emits no step
+- [x] Status replay via `Last-Event-ID` is unchanged
 
 ### Phase 4: Docs
 

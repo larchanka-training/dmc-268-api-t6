@@ -383,36 +383,6 @@ def format_body_only_overflow_footer_without_url(count: int) -> str:
     return f"\n\n**Ещё {count} находок**"
 
 
-def count_listed_additional_findings(review_body: str) -> int:
-    """Count whole finding bullets under the Additional findings section."""
-    marker = f"\n{_ADDITIONAL_FINDINGS_HEADING}\n"
-    start = review_body.find(marker)
-    if start < 0:
-        return 0
-    tail = review_body[start + len(marker) :]
-    footer_marker = "\n\n**Ещё "
-    footer_at = tail.find(footer_marker)
-    if footer_at >= 0:
-        tail = tail[:footer_at]
-    return sum(1 for line in tail.splitlines() if line.startswith("- **"))
-
-
-def parse_body_only_overflow_footer_count(review_body: str) -> int:
-    """Read ``N`` from a store-layer overflow footer (with or without a run URL)."""
-    with_url = re.search(r"\n\n\*\*Ещё (\d+) находок:\*\*", review_body)
-    if with_url is not None:
-        return int(with_url.group(1))
-    without_url = re.search(r"\n\n\*\*Ещё (\d+) находок\*\*", review_body)
-    return int(without_url.group(1)) if without_url is not None else 0
-
-
-def body_only_accounted_in_review_body(review_body: str) -> int:
-    """Visible Additional findings bullets plus any overflow footer count (D-3)."""
-    return count_listed_additional_findings(review_body) + parse_body_only_overflow_footer_count(
-        review_body
-    )
-
-
 def finalize_stored_review_body(
     output: ReviewOutput,
     processed: ProcessedReviewOutput,

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import cast
 from uuid import UUID
@@ -12,7 +13,6 @@ import pytest
 from app.modules.reviews.application.diff_map import DiffMap, VcsProviderName, build_diff_map
 from app.modules.reviews.application.findings_post_processor import (
     FindingsPostProcessor,
-    body_only_accounted_in_review_body,
     finalize_stored_review_body,
 )
 from app.modules.reviews.application.prompt_builder import PullRequestMeta
@@ -137,6 +137,36 @@ def process(  # type: ignore[no-untyped-def]
         rule_names=frozenset({"Naming Consistency"}),
         repository_max_inline=max_inline,
         severity_threshold=severity_threshold,
+    )
+
+
+def _count_listed_additional_findings(review_body: str) -> int:
+    """Count whole finding bullets under the Additional findings section (test-side D-3 assert)."""
+    marker = "\n## Additional findings\n"
+    start = review_body.find(marker)
+    if start < 0:
+        return 0
+    tail = review_body[start + len(marker) :]
+    footer_marker = "\n\n**Ещё "
+    footer_at = tail.find(footer_marker)
+    if footer_at >= 0:
+        tail = tail[:footer_at]
+    return sum(1 for line in tail.splitlines() if line.startswith("- **"))
+
+
+def _parse_body_only_overflow_footer_count(review_body: str) -> int:
+    """Read ``N`` from a store-layer overflow footer (with or without a run URL)."""
+    with_url = re.search(r"\n\n\*\*Ещё (\d+) находок:\*\*", review_body)
+    if with_url is not None:
+        return int(with_url.group(1))
+    without_url = re.search(r"\n\n\*\*Ещё (\d+) находок\*\*", review_body)
+    return int(without_url.group(1)) if without_url is not None else 0
+
+
+def _body_only_accounted_in_review_body(review_body: str) -> int:
+    """Visible Additional findings bullets plus any overflow footer count (D-3)."""
+    return _count_listed_additional_findings(review_body) + _parse_body_only_overflow_footer_count(
+        review_body
     )
 
 
@@ -626,7 +656,7 @@ def test_finalize_stored_review_body_appends_overflow_footer_within_budget() -> 
     assert finalized.review_body.endswith(run_url)
     assert "**Ещё 4 находок:**" in finalized.review_body
     assert len(finalized.review_body) <= 4000
-    assert body_only_accounted_in_review_body(finalized.review_body) == 6
+    assert _body_only_accounted_in_review_body(finalized.review_body) == 6
 
 
 def test_finalize_stored_review_body_appends_overflow_count_without_url_when_run_url_missing() -> (
@@ -650,7 +680,7 @@ def test_finalize_stored_review_body_appends_overflow_count_without_url_when_run
     assert finalized.review_body.endswith("**Ещё 4 находок**")
     assert "http" not in finalized.review_body.split("**Ещё")[-1]
     assert len(finalized.review_body) <= 4000
-    assert body_only_accounted_in_review_body(finalized.review_body) == 6
+    assert _body_only_accounted_in_review_body(finalized.review_body) == 6
 
 
 @pytest.mark.parametrize(
@@ -664,17 +694,21 @@ def test_body_only_accounted_parses_overflow_footer_with_and_without_url(
     footer: str, expected: int
 ) -> None:
     body = "## Review summary\n\n**Verdict:** attention\n\n## Additional findings\n\n- **One**\n"
-    assert body_only_accounted_in_review_body(body + footer) == 1 + expected
+    assert _body_only_accounted_in_review_body(body + footer) == 1 + expected
 
 
 def test_finalize_stored_review_body_degrades_long_summary_instead_of_asserting() -> None:
-    notes = tuple(
-        finding(title=f"Overflow {number}", confidence=0.4, body="x" * 1200)
-        for number in range(1, 7)
-    )
+    # processed must come from the same parsed output: the long summary is what forces the
+    # degraded branch (prose cannot shrink below the footer).
     parsed = ReviewOutput.model_validate(
         {
-            "findings": [finding(title="Blocking defect", severity="high"), *notes],
+            "findings": [
+                finding(title="Blocking defect", severity="high"),
+                *(
+                    finding(title=f"Overflow {number}", confidence=0.4, body="x" * 1200)
+                    for number in range(1, 7)
+                ),
+            ],
             "summary": {
                 "problem": f"{'p' * 3498}.",
                 "done_well": f"{'d' * 498}.",
@@ -700,6 +734,7 @@ def test_finalize_stored_review_body_degrades_long_summary_instead_of_asserting(
     assert finalized.review_body_budget_degraded is True
     assert len(finalized.review_body) <= 4000
     assert finalized.review_body.endswith(run_url)
+    assert finalized.omitted_body_only_count == len(processed.body_only)
 
 
 def test_body_only_accounted_matches_listed_bullets_plus_footer_n() -> None:
@@ -717,7 +752,7 @@ def test_body_only_accounted_matches_listed_bullets_plus_footer_n() -> None:
             "**Ещё 5 находок:** https://ui.test/runs/x",
         )
     )
-    assert body_only_accounted_in_review_body(body) == 7
+    assert _body_only_accounted_in_review_body(body) == 7
 
 
 def test_critical_threshold_drops_medium_low_and_info_and_turns_attention_into_clean() -> None:

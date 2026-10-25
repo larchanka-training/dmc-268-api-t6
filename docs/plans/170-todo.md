@@ -116,8 +116,10 @@ Append `**Ещё N находок:** {url}` in the store/publish path when count
 
 ## Task 5: Align check-run `body_count` with body (Ч.1)
 
-**Description:** Implement D-3 so `CheckRunReport.body_count` matches visible body-only findings plus
-overflow count, not merely `len(findings) - inline`.
+**Description:** Count `CheckRunReport.body_count` as `len(published findings) - inline`. Visible
+body-only bullets plus the count in the «Ещё N находок» footer equal that number by construction
+(D-3), so the body is not parsed; bucket tests lock the equality, including findings moved from
+inline by the 422 fallback.
 
 **Acceptance criteria:**
 
@@ -132,7 +134,7 @@ overflow count, not merely `len(findings) - inline`.
 **Files likely touched:**
 
 - `app/modules/reviews/infrastructure/run_lifecycle_store.py`
-- Possibly `runs.review_body` metadata column or derived parse — prefer explicit stored count from Task 4
+- No schema change: `body_count` derives from published findings
 
 **Estimated scope:** Medium.
 
@@ -437,7 +439,7 @@ contract pin required, note follow-up ui PR separately.
 **Acceptance criteria:**
 
 - [ ] All issue AC checkboxes satisfied.
-- [ ] `docs/plans/170-plan.md` and this file committed on the branch.
+- [x] `docs/plans/170-plan.md` and this file committed on the branch.
 
 **Verification:** Full gate block; `uv run pytest tests/test_findings_post_processor.py tests/test_run_stream.py tests/test_openapi_contract.py -q`.
 
