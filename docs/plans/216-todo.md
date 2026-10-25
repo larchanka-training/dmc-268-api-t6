@@ -540,7 +540,7 @@ implementation files only for separately reviewed fixes. **Size:** S.
 - [x] Replay all 103 applicable final behavioral mutations, verify restoration,
       and account for four true equivalents, two historical superseded sites
       outside the original 97 and the diagnostic-only exploratory M04 probe.
-- [ ] Publisher follows pull-request skill: intended files only, issue-referenced
+- [x] Publisher follows pull-request skill: intended files only, issue-referenced
       conventional commit, push, PR with template and evidence/dispositions,
       attach PR to chat and report URL. Honor required user readiness/reviewer
       choice; update board 12 status only for this issue, no merge/closure.
@@ -558,7 +558,7 @@ Clean up only dmc216's disposable services/resources; preserve foreign services.
 | Snapshot insufficient_context publication and Reflection + severity | 4; existing threshold test plus recorded killer, new insufficient boundary test |
 | README/TP/plans describe current main; legacy evidence loss documented | 15; refresh after #130/#211 merges; verified historical links |
 | Every hygiene item fixed or rejected with reason in PR | 7–14 fixes; P3 19 deliberate retained-loader reason in 15/16 |
-| Gates with TEST_DATABASE_URL; PR/review/board DoD | Final complete gates green with own PostgreSQL/RabbitMQ; whole-change/sync reviews 0/0; PR publication and board transition pending, human merge gates remain |
+| Gates with TEST_DATABASE_URL; PR/review/board DoD | Final complete gates green with own PostgreSQL/RabbitMQ; whole-change/sync reviews 0/0; PR #303 published and attached, issue #216 board status verified On Review; human merge gates remain |
 
 
 ### Task 16 measured gates and synchronization status
@@ -572,5 +572,8 @@ post-sync static gates. The original e6d3077 full run's two failures remain
 historical evidence. Final 103-probe replay is now complete: 103 unique named
 behavioral failures, 103 restored GREEN checks and exact restoration of all 610
 scratch source/resource fingerprints, with live source still matching. All proof
-work is complete; only the publisher action above remains unchecked. Task 16
-and the PR/board workflow remain open until actual publication.
+work is complete. Publication is complete: [PR #303](https://github.com/larchanka-training/dmc-268-api-t6/pull/303)
+is open and ready for review with no reviewer requested, as chosen by the user.
+The PR is attached to this chat and exact issue #216's board 12 status was
+GET-verified as `On Review` on 2026-10-25. Human approval on the final head and
+resolved review threads remain required before merge; the issue remains open.

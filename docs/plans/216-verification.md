@@ -1,5 +1,10 @@
 # Verification evidence for #216
 
+Embedded unified-diff fences normalize empty context lines to blank lines under
+the repository's trailing-whitespace hook. Exact raw scratch patch artifacts
+and the hashes recorded for those artifacts are preserved separately; the
+rendered fences are readable transcripts, not byte-identical patch files.
+
 ## Pristine implementation and services
 
 Base: `e6d3077cfcb5584f8af0524ce4a0c8a658b2c5fb`; no new tests or implementation
@@ -6033,7 +6038,7 @@ is not mislabeled strict equivalence.
 | M06-shared-default-value | `tests/test_policy_budget.py::test_execution_profiles_keep_default_policy_cap[fast]`; `tests/test_policy_budget.py::test_execution_profiles_keep_default_policy_cap[deep]`; `tests/test_policy_budget.py::test_default_policy_cap_accepts_exact_limit_and_rejects_one_over[one-over]` | 4 passed in 0.38s |
 | M06-profile-default-value | `tests/test_policy_budget.py::test_execution_profiles_keep_default_policy_cap[fast]`; `tests/test_policy_budget.py::test_execution_profiles_keep_default_policy_cap[deep]` | 2 passed in 0.36s |
 
-### Proof complete; publisher handoff pending
+### Proof complete; publication completed
 
 All issue #216 code/test/documentation acceptance evidence is ready: final
 service-backed gates green, 103 isolated behavioral replays killed/restored,
@@ -6042,8 +6047,11 @@ whole-change and documentation-sync independent Standards/Spec axes at zero
 findings. Post-adoption static gates pass (591 format / 581 mypy). No new
 dependencies were added. The historical e6d3077 full run remains separate.
 
-The publisher must still commit the intended paths, push, create the authorized
-non-draft PR with no reviewer request, attach its URL and move only issue #216
-to board 12 On Review. Those actions remain unchecked until actually performed.
+The publisher committed all 35 intended paths as
+`0a19ff125ccf0b2a6676d11c5845487c47318cbd` and pushed the approved branch.
+[PR #303](https://github.com/larchanka-training/dmc-268-api-t6/pull/303) is open,
+non-draft, attached to the chat and has no reviewer requested. Exact issue #216's
+board 12 `On Review` status was independently read back at
+`2026-10-25T12:57:23Z`. A following documentation-only commit records publication.
 Human current-head approval and resolved threads remain merge prerequisites;
 there is no merge or issue-closure authorization in this handoff.

@@ -345,3 +345,27 @@ Proof is ready for the publisher handoff. Actual commit/push/PR creation,
 attachment and only issue #216's board12 On Review transition remain pending.
 The user preference remains non-draft and no reviewer. No new external write,
 merge, closure or human approval is represented by this metadata update.
+
+## Publication completed
+
+At `2026-10-25T12:57:23Z`, the publisher independently read back
+[PR #303](https://github.com/larchanka-training/dmc-268-api-t6/pull/303): open,
+non-draft, base `main`, zero reviewer requests and zero closing issue links.
+The initial published head is `0a19ff125ccf0b2a6676d11c5845487c47318cbd`, based
+on the freshly verified main `f8b13103f908b26e3e210c3f78b125f21bfbdaba`.
+The PR was attached to the chat successfully. This publication record follows
+in a separate documentation-only commit, so its own SHA is intentionally not
+self-referenced here.
+
+After resolving board 12's actual field/options and verifying the exact
+repository issue URL, only item `PVTI_lADODlG58s4BibmCzhB7tww` was updated.
+Readback confirms project `PVT_kwDODlG58s4BibmC` (12, `dmc-268-t6`), field
+`PVTSSF_lADODlG58s4BibmCzhhTr_8` (`Status`), option `acf4cb6d` (`On Review`).
+Issue #216 remains `OPEN`; no merge, closure, human approval or thread resolution
+was performed. No reviewer was selected, honoring the user's `пока никого`.
+
+Normal commit hooks initially trimmed 30 single-space empty context lines in
+the verification document's embedded patch fences. Inspection confirmed only
+that whitespace normalization; raw scratch patch artifacts and their recorded
+hashes remain unchanged. Restaging the documentation made all normal hooks
+pass, including Ruff, format and mypy; no implementation bytes changed.
