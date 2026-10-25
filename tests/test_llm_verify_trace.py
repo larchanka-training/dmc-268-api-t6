@@ -50,6 +50,7 @@ from app.modules.reviews.application.store_review_output import (
     PublishingGuard,
     StoreReviewOutput,
 )
+from tests.test_diff_anchor import _diff_map
 
 RUN_ID = UUID("00000000-0000-0000-0000-000000013901")
 ACCEPTED_CALL_ID = UUID("00000000-0000-0000-0000-000000013902")
@@ -263,7 +264,7 @@ class _PublishingRepository:
 
     async def get_post_processing_input(self, run_id: UUID) -> FindingPostProcessingInput:
         return FindingPostProcessingInput(
-            hunk_lines={}, rule_names=frozenset(), allowed_v2_rules=frozenset()
+            diff_map=_diff_map(), rule_names=frozenset(), allowed_v2_rules=frozenset()
         )
 
     async def lock_for_publishing(self, run_id: UUID) -> PublishingGuard:
