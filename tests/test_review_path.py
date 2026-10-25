@@ -357,11 +357,12 @@ def test_processor_without_the_stage_refuses_a_snapshot_path_run_before_the_diff
     ],
     ids=["v4-gitlab", "v4-no-origin", "v4-github", "v3-gitlab"],
 )
-def test_processor_with_a_stage_refuses_an_unserved_provider_before_the_diff(
+def test_processor_with_a_stage_refuses_an_unserved_provider_before_the_policy_load(
     binding: ReviewBinding, refused: str | None
 ) -> None:
     # The stage builds its diff map as GitHub, so its own check at policy load passes a run of
-    # any provider (the stub passes everything); the processor checks the run's provider.
+    # any provider (the stub passes everything); the processor checks the run's provider
+    # before the stage loads the policy, so a policy error cannot mask the refusal.
     events: list[str] = []
     github = CountingGitHub()
     processor = _processor(binding, events, github, stage=Stage(events))
@@ -371,11 +372,44 @@ def test_processor_with_a_stage_refuses_an_unserved_provider_before_the_diff(
             asyncio.run(processor.prepare(RUN_ID))
         assert raised.value.code is _INTEGRITY
         assert refused in str(raised.value)
-        assert events == ["policy loaded"]
+        assert events == []
         assert github.reads == []
     else:
         assert isinstance(asyncio.run(processor.prepare(RUN_ID)), GeneratedConventions)
         assert events == ["policy loaded", "diff stored", "policy stage", "conventions model"]
+
+
+@dataclass
+class NoConventionsPromptRepository(BoundRepository):
+    async def get_run_conventions_input(self, run_id: UUID) -> RunConventionsInput:
+        raise LookupError("active review.conventions prompt is missing")
+
+
+@pytest.mark.parametrize("with_stage", [True, False], ids=["stage", "no-stage"])
+def test_a_missing_conventions_prompt_fails_before_the_policy_load_and_the_diff(
+    with_stage: bool,
+) -> None:
+    # The conventions input is read first: a missing active prompt ends the attempt with
+    # internal_error before policy.load, any diff read and any diff write.
+    events: list[str] = []
+    github = CountingGitHub()
+    repository = NoConventionsPromptRepository(events, binding=_binding("v3"))
+    options = {"context_stage": Stage(events)} if with_stage else {}
+    processor = ReviewRunProcessor(
+        repository,
+        None,
+        blob_cache=InMemoryBlobCache(),
+        conventions=cast(GenerateRepoConventions, Conventions(events)),
+        vcs_provider=github,
+        uow_factory=processing_uow(repository),
+        **options,  # type: ignore[arg-type]
+    )
+
+    with pytest.raises(LookupError, match="active review.conventions prompt is missing"):
+        asyncio.run(processor.prepare(RUN_ID))
+
+    assert events == []
+    assert github.reads == []
 
 
 _META = PullRequestMeta("PR", None, "octo", "feature", "main", (), 1, 1, 0, False, False)

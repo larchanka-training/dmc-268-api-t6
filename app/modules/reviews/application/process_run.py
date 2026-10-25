@@ -159,6 +159,11 @@ class ReviewRunProcessor:
             vcs_run = await vcs_repository.get_run_vcs_input(run_id)
             if vcs_run is None:
                 return None
+            if self._conventions is not None:
+                # Before the policy load: the refusal needs only the run's binding.
+                conventions_input = await self._servable_conventions_input(run_id)
+                if conventions_input is None:
+                    return None
             excluded: Callable[[DiffSnapshot], bool] | None = None
             if self._context_stage is not None:
                 # The policy comes first: it decides what the diff threshold counts.
@@ -168,10 +173,6 @@ class ReviewRunProcessor:
                 def excluded(snapshot: DiffSnapshot) -> bool:
                     return stage.excludes_change(snapshot.filename, snapshot.previous_filename)
 
-            if self._conventions is not None:
-                conventions_input = await self._servable_conventions_input(run_id)
-                if conventions_input is None:
-                    return None
             stored_files = await vcs_repository.get_run_snapshots(run_id)
             if stored_files is None:
                 request = {
@@ -282,8 +283,9 @@ class ReviewRunProcessor:
         return True
 
     async def _servable_conventions_input(self, run_id: UUID) -> RunConventionsInput | None:
-        """The run's conventions input, read before its diff: a snapshot-path run this
-        composition cannot serve is refused here, before any diff read and model call."""
+        """The run's conventions input, read before the policy load and the diff: a
+        snapshot-path run this composition cannot serve is refused here, before any
+        policy read, diff read and model call."""
         conventions_repository = cast(RunConventionsRepository, self._repository)
         conventions_input = await conventions_repository.get_run_conventions_input(run_id)
         binding = None if conventions_input is None else conventions_input.review_binding
@@ -292,8 +294,8 @@ class ReviewRunProcessor:
                 # Without the policy stage there is no snapshot.
                 require_servable_without_snapshot(binding)
             else:
-                # The stage passed the run at policy load as the provider it builds the diff
-                # map with (TL-13); the run's own provider is checked here.
+                # The stage checks the provider it builds the diff map with (TL-13); the
+                # run's own provider is checked here, before the stage loads the policy.
                 require_served_provider(binding)
         return conventions_input
 
