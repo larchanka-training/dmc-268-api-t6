@@ -64,7 +64,9 @@ Gates for every task: the four commands in the plan, with DB and vhost `imp130f`
   - fix round (batch-1 review): a v4 run of an unserved provider (GitLab, other name, no origin) → the
     same terminal error before any model call; only a `review.system` row picks the path.
   - fix round (batch-2 review): that refusal comes before the diff in both compositions: with a stage
-    (it keys on `_STAGE_PROVIDER`) `prepare` checks the run's provider right after `begin`.
+    (it keys on `_STAGE_PROVIDER`) `prepare` checks the run's provider before `begin`, so
+    `policy.load` does not run (re-review of `d2d62794`); a missing active conventions prompt fails
+    before `policy.load` and the diff.
 - **Done when:** [x] F1-1 green; [x] `answers.py` has one source for the v2-contract versions.
 
 ### F1-3: Lock 1 behind the selector (R1 review side)

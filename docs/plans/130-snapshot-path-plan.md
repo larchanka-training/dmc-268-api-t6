@@ -91,11 +91,14 @@ validates against v1 when no snapshot is attached (`llm/models.py:183-188`). Tha
   `process_run.prepare` refuses a v4-bound run before conventions, using the bound version returned by
   `get_run_conventions_input`. `execute_review` re-checks as defence in depth.
 - Fix round of batch 2: the stage's check at `begin` keys on `_STAGE_PROVIDER`, so it passes a v4 run of
-  any provider. `process_run.prepare` reads `get_run_conventions_input` once, right after `stage.begin`
-  (so `policy.load` still opens the attempt) and before the diff fetch, and refuses a v4 run of an
-  unserved provider there in both compositions; without a stage it also refuses the missing snapshot.
-  So the refusal comes before any diff read, diff write or model call. The same read feeds the
-  conventions call; a missing active conventions prompt now also fails before the diff.
+  any provider. `process_run.prepare` reads `get_run_conventions_input` once, before `stage.begin`
+  (the check needs only the run's binding, so a policy error cannot mask the refusal; re-review of
+  `d2d62794`) and before the diff fetch, and refuses a v4 run of an unserved provider there in both
+  compositions; without a stage it also refuses the missing snapshot. So the refusal comes before
+  `policy.load`, any diff read, diff write or model call. The same read feeds the conventions call.
+  Accepted effect: a missing active conventions prompt now fails with `internal_error` before
+  `policy.load`, so a run that `stage.begin` or `stage.run` would have refused or skipped with a
+  `policy_*` code fails with `internal_error` first when that prompt is missing.
 - One property, `stage.snapshot_for_llm` (snapshot or None), feeds `execute_review`, `process_run`
   (conventions) and the stage itself (R7, R19).
 - As built in F1-2: one pure function, `snapshot_for_review(ReviewBinding, snapshot)`, decides at all three
