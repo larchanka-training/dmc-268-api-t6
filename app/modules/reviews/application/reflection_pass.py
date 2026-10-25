@@ -319,7 +319,12 @@ def _fit_changed_files_for_verifier(
     counter: TokenCounter,
     candidates: tuple[CandidateFindingItem, ...] = (),
 ) -> tuple[ChangedFile, ...]:
-    """The diff part of the fit, against a budget for the ``<code_context>`` block alone."""
+    """The diff part of the fit, against a budget for the ``<code_context>`` block alone.
+
+    Test-only seam: no production code calls it (the builder fits through
+    ``_fit_verifier_code``); its cases live in the shared ``tests/test_reflection_pass.py``,
+    so it goes once #303 lands.
+    """
 
     def fits(chosen: tuple[ChangedFile, ...], shown: tuple[ContextBlock, ...]) -> bool:
         return counter.count(_verifier_code_context(chosen, shown)) <= max_tokens

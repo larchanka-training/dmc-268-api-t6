@@ -196,6 +196,10 @@ Gates for every task: the four commands in the plan, with DB and vhost `imp130f`
     withheld); the own lines of every candidate come before any file is topped up; a fitted prompt
     never trips the pre-send guard (600-window sweep); a cited excerpt that does not fit leaves
     room for the next; the pass reads its prompt file when it first verifies.
+  - fix round (re-review of `172c8c5c`): a verifier answer the JSON decoder cannot read (nesting
+    past the recursion limit, an integer past the digit limit) is repaired and stored withheld;
+    each block of the verifier user message starts on its own line; non-text `content` is stored
+    as `null`.
 - **Done when:** [x] F1-1 green.
 
 ### F1-8: R12 and #247 p3

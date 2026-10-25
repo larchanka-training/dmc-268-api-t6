@@ -220,7 +220,7 @@ def validate_verifier_answer(content: str) -> dict[str, object]:
     The schema and ``VerificationOutput`` errors earn one repair call; the candidate-ID
     and reference checks against the manifest stay in ``ReflectionPass`` (CVS §7.3).
     """
-    decoded = _decode_object(content)
+    decoded = _decode_verifier_object(content)
     errors = [
         _schema_error(error)
         for error in sorted(
@@ -245,7 +245,8 @@ def verifier_answer_without_reasons(content: str) -> str:
     """
     try:
         output = VerificationOutput.model_validate(validate_verifier_answer(content))
-    except InvalidAnswer:
+    except (RecursionError, ValueError):
+        # InvalidAnswer is a ValueError; nothing the text makes the decoder raise is stored.
         return f"[withheld: {len(content)} characters that are not a valid verifier answer]"
     allowed = {"candidate_id", "status", "evidence_refs", "requirement_refs"}
     stored = output.model_dump(mode="json", include={"decisions": {"__all__": allowed}})
@@ -279,6 +280,24 @@ class _ConventionsValidator:
 @cache
 def conventions_schema() -> dict[str, Any]:
     return ConventionsDraft.model_json_schema()
+
+
+def _decode_verifier_object(content: str) -> dict[str, object]:
+    """``_decode_object`` that also refuses what the decoder itself cannot read: nesting past
+    the recursion limit and an integer past the digit limit (re-review of 172c8c5c).
+
+    Both become ``InvalidAnswer``, so the gateway repairs them and the stored ``llm.call``
+    withholds the text, instead of an error escaping after the call is paid. Verifier only:
+    the review and conventions validators keep ``_decode_object`` as live runs use it (F1).
+    """
+    try:
+        return _decode_object(content)
+    except InvalidAnswer:
+        raise
+    except RecursionError:
+        raise InvalidAnswer(["not valid JSON: nested too deeply"]) from None
+    except ValueError:
+        raise InvalidAnswer(["not valid JSON: a number has too many digits"]) from None
 
 
 def _decode_object(content: str) -> dict[str, object]:

@@ -422,3 +422,36 @@ def test_a_failed_verifier_manifest_write_ends_the_run_with_internal_error() -> 
     assert raised.value.error_code == "internal_error"
     assert raised.value.message == "the context manifest could not be stored: OSError"
     assert provider.requests == []
+
+
+# ---------- answers the JSON decoder cannot read (re-review of 172c8c5c) ----------
+
+DEEP_NESTING = "[" * 20_000  # json.loads: RecursionError
+HUGE_INTEGER = '{"decisions": ' + "1" * 5_000 + "}"  # json.loads: ValueError (int digit limit)
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [pytest.param(DEEP_NESTING, id="deep nesting"), pytest.param(HUGE_INTEGER, id="huge integer")],
+)
+def test_an_answer_the_decoder_cannot_read_is_withheld_and_repaired(answer: str) -> None:
+    provider = ScriptedProvider([completion(answer), completion(_answer(_decision("c-1")))])
+
+    record = _verify(provider)
+
+    assert [(decision.candidate_id, decision.status) for decision in record.decisions] == [
+        ("c-1", "supported")
+    ]
+    assert provider.kinds() == ["primary", "repair"]
+    assert _stored_contents(provider)[0] == _withheld(answer)
+    assert verifier_answer_without_reasons(answer) == _withheld(answer)
+
+
+@pytest.mark.parametrize(
+    "content",
+    [pytest.param({"text": SENTINEL}, id="an object"), pytest.param(7, id="a number")],
+)
+def test_a_choice_whose_content_is_not_text_stores_no_content(content: object) -> None:
+    assert _stored_body(_body(_choice(content))) == _body(
+        {"index": 0, "finish_reason": "stop", "message": {"role": "assistant", "content": None}}
+    )

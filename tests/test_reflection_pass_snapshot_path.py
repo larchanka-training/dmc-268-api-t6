@@ -600,3 +600,12 @@ def test_a_reflection_pass_reads_its_prompt_file_only_when_it_verifies(
 
 def _verify_with(reflection: ReflectionPass) -> None:
     asyncio.run(reflection.verify_recorded(candidates=(DIFF_ONLY,), context=_context(())))
+
+
+def test_each_block_of_the_verifier_user_message_starts_on_its_own_line() -> None:
+    prompt, _ = _build((DIFF_ONLY,), _context((L2_WINDOW,)))
+
+    blocks = prompt.user.split("\n<code_context>\n")
+    assert len(blocks) == 2
+    assert blocks[0].endswith(">")
+    assert '\n</code_context>\n<candidate_findings count="1">\n' in blocks[1]
