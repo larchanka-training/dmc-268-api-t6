@@ -1,0 +1,323 @@
+"""A stored policy snapshot is re-checked from its own values before a run uses it (#168)."""
+
+from __future__ import annotations
+
+from collections.abc import Callable
+from dataclasses import replace
+from hashlib import sha256
+from typing import Any
+from uuid import UUID
+
+import pytest
+
+from app.modules.reviews.application import prepare_policy_snapshot
+from app.modules.reviews.application.policy_documents import missing_document, normalize_document
+from app.modules.reviews.application.policy_errors import PolicyError, PolicyErrorCode
+from app.modules.reviews.application.policy_snapshot import (
+    AGENTS_DOCUMENT_PATH,
+    RULES_DOCUMENT_PATH,
+    DocumentPresence,
+    ExecutionProfile,
+    PolicyDocument,
+    PolicySnapshot,
+    PromptBindings,
+)
+from app.modules.reviews.application.policy_snapshot_integrity import (
+    verify_policy_document,
+    verify_policy_snapshot,
+)
+from app.modules.reviews.application.prepare_policy_snapshot import (
+    RunPolicyPins,
+    build_policy_snapshot,
+    canonical_policy_payload,
+    pinned_to_json,
+)
+from app.modules.reviews.application.review_ignore import (
+    PARSER_VERSION,
+    ignore_digest,
+    parse_review_ignore,
+)
+
+_RAW = "# Правила\r\n\r\n```review-ignore\r\ngenerated/**\r\n```\r\n".encode()
+_PINS = RunPolicyPins(
+    run_id=UUID(int=2),
+    repository_id=UUID(int=1),
+    policy_base_sha="b" * 40,
+    service_defaults_rule_version_id=UUID(int=4),
+    defaults_checksum="2" * 64,
+    prompt_bindings=PromptBindings("3" * 64, "", "", review_system_id=UUID(int=31)),
+    execution_profile=ExecutionProfile.fast("model-a", "", "model-c"),
+)
+
+
+def _rules() -> PolicyDocument:
+    return normalize_document(RULES_DOCUMENT_PATH, _RAW, blob_oid="3" * 40)
+
+
+def _snapshot() -> PolicySnapshot:
+    rules = _rules()
+    return build_policy_snapshot(
+        _PINS,
+        rules=rules,
+        agents=missing_document(AGENTS_DOCUMENT_PATH),
+        ignore=parse_review_ignore(rules.text),
+        snapshot_id=UUID(int=11),
+    )
+
+
+def _verify(
+    snapshot: PolicySnapshot,
+    *,
+    bindings: dict[str, Any] | None = None,
+    profile: dict[str, Any] | None = None,
+) -> None:
+    """Verify as the store does: with the JSON of the pinned versions as it is stored."""
+    verify_policy_snapshot(
+        snapshot,
+        prompt_bindings=pinned_to_json(snapshot.prompt_bindings) if bindings is None else bindings,
+        execution_profile=(
+            pinned_to_json(snapshot.execution_profile) if profile is None else profile
+        ),
+    )
+
+
+def _assert_integrity_error(error: PolicyError, checksum: str) -> None:
+    assert error.error_code == PolicyErrorCode.SNAPSHOT_INTEGRITY_ERROR.value
+    assert checksum in error.message
+    # The message names the checksum; it never quotes the content of a document.
+    assert "generated" not in error.message
+    assert "Правила" not in error.message
+
+
+def test_an_untouched_snapshot_and_its_documents_pass() -> None:
+    snapshot = _snapshot()
+
+    # CRLF in the raw bytes: raw_sha256 is over the bytes, text_sha256 over the LF text.
+    assert snapshot.rules.raw_sha256 != snapshot.rules.text_sha256
+    verify_policy_document(snapshot.rules, _RAW)
+    verify_policy_document(snapshot.agents, None)
+    _verify(snapshot)
+
+
+def test_a_missing_document_that_stores_bytes_fails() -> None:
+    with pytest.raises(PolicyError) as caught:
+        verify_policy_document(missing_document(AGENTS_DOCUMENT_PATH), b"")
+
+    _assert_integrity_error(caught.value, "missing")
+
+
+@pytest.mark.parametrize(
+    ("document", "raw", "checksum"),
+    [
+        (_rules(), _RAW + b"x", "raw_sha256"),
+        (_rules(), None, "raw_sha256"),
+        (normalize_document(RULES_DOCUMENT_PATH, b"", blob_oid="3" * 40), None, "raw_sha256"),
+        (replace(_rules(), raw_sha256="0" * 64), _RAW, "raw_sha256"),
+        (replace(_rules(), byte_count=len(_RAW) + 1), _RAW, "byte_count"),
+        (replace(_rules(), text="# Правила\n\nmore\n"), _RAW, "text_sha256"),
+        (replace(_rules(), text_sha256="0" * 64), _RAW, "text_sha256"),
+    ],
+    ids=[
+        "raw-bytes",
+        "raw-lost",
+        "empty-raw-lost",
+        "raw-sha256",
+        "byte-count",
+        "text",
+        "text-sha256",
+    ],
+)
+def test_a_tampered_document_fails_naming_its_checksum(
+    document: PolicyDocument, raw: bytes | None, checksum: str
+) -> None:
+    with pytest.raises(PolicyError) as caught:
+        verify_policy_document(document, raw)
+
+    _assert_integrity_error(caught.value, checksum)
+    assert caught.value.source_path == RULES_DOCUMENT_PATH
+
+
+_TAMPERS: list[tuple[str, Callable[[PolicySnapshot], PolicySnapshot], str]] = [
+    ("ignore-patterns", lambda item: replace(item, ignore_patterns=()), "ignore_digest"),
+    ("ignore-digest", lambda item: replace(item, ignore_digest="0" * 64), "ignore_digest"),
+    ("matcher-version", lambda item: replace(item, matcher_version="m/v2"), "ignore_digest"),
+    (
+        "builtin-exclusions-version",
+        lambda item: replace(item, builtin_exclusions_version="b/v2"),
+        "ignore_digest",
+    ),
+    ("limits-version", lambda item: replace(item, limits_version="l/v2"), "ignore_digest"),
+    ("policy-base-sha", lambda item: replace(item, policy_base_sha="c" * 40), "policy_digest"),
+    ("defaults-checksum", lambda item: replace(item, defaults_checksum="9" * 64), "policy_digest"),
+    ("schema-version", lambda item: replace(item, schema_version=2), "policy_digest"),
+    ("parser-profile", lambda item: replace(item, parser_profile="p/v2"), "policy_digest"),
+    ("parser-version", lambda item: replace(item, parser_version="0.0.0"), "policy_digest"),
+    (
+        "priority-matcher-version",
+        lambda item: replace(item, priority_matcher_version="pm/v2"),
+        "policy_digest",
+    ),
+    (
+        "agents-presence",
+        lambda item: replace(item, agents=replace(_rules(), path=AGENTS_DOCUMENT_PATH)),
+        "policy_digest",
+    ),
+    ("policy-digest", lambda item: replace(item, policy_digest="0" * 64), "policy_digest"),
+]
+
+
+@pytest.mark.parametrize(
+    ("change", "checksum"),
+    [(change, checksum) for _, change, checksum in _TAMPERS],
+    ids=[name for name, _, _ in _TAMPERS],
+)
+def test_a_tampered_snapshot_field_fails_naming_its_checksum(
+    change: Callable[[PolicySnapshot], PolicySnapshot], checksum: str
+) -> None:
+    with pytest.raises(PolicyError) as caught:
+        _verify(change(_snapshot()))
+
+    _assert_integrity_error(caught.value, checksum)
+
+
+@pytest.mark.parametrize(
+    ("bindings", "profile"),
+    [
+        ({"review_system_checksum": "4" * 64}, {}),
+        ({"review_system_id": str(UUID(int=32))}, {}),
+        ({}, {"review_model": "model-b"}),
+    ],
+    ids=["binding-checksum", "binding-id", "profile-model"],
+)
+def test_tampered_stored_pins_json_fails(bindings: dict[str, Any], profile: dict[str, Any]) -> None:
+    snapshot = _snapshot()
+
+    with pytest.raises(PolicyError) as caught:
+        _verify(
+            snapshot,
+            bindings=pinned_to_json(snapshot.prompt_bindings) | bindings,
+            profile=pinned_to_json(snapshot.execution_profile) | profile,
+        )
+
+    _assert_integrity_error(caught.value, "policy_digest")
+
+
+def test_a_key_a_later_version_stored_in_the_pins_json_passes_when_the_digest_has_it() -> None:
+    snapshot = _snapshot()
+    profile = pinned_to_json(snapshot.execution_profile) | {"future_knob": "on"}
+    bindings = pinned_to_json(snapshot.prompt_bindings)
+    canonical = canonical_policy_payload(
+        schema_version=snapshot.schema_version,
+        policy_base_sha=snapshot.policy_base_sha,
+        documents=(snapshot.rules, snapshot.agents),
+        ignore_digest=snapshot.ignore_digest,
+        parser_profile=snapshot.parser_profile,
+        parser_version=snapshot.parser_version,
+        limits_version=snapshot.limits_version,
+        defaults_checksum=snapshot.defaults_checksum,
+        prompt_bindings=bindings,
+        execution_profile=profile,
+        priority_matcher_version=snapshot.priority_matcher_version,
+    )
+    stored = replace(snapshot, policy_digest=sha256(canonical.encode("utf-8")).hexdigest())
+
+    _verify(stored, bindings=bindings, profile=profile)
+    with pytest.raises(PolicyError):
+        _verify(stored, bindings=bindings)
+
+
+def test_a_snapshot_stored_by_another_parser_version_still_passes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(prepare_policy_snapshot, "PARSER_VERSION", "0.0.1")
+    stored = _snapshot()
+    monkeypatch.undo()
+
+    assert stored.parser_version == "0.0.1"
+    assert stored.parser_version != PARSER_VERSION
+    _verify(stored)
+
+
+def test_the_policy_digest_formula_is_pinned() -> None:
+    present = PolicyDocument(
+        RULES_DOCUMENT_PATH, DocumentPresence.PRESENT, "a" * 40, "1" * 64, "2" * 64, "x", 1, 1
+    )
+    golden = (
+        f'{{"defaults_checksum":"{"5" * 64}",'
+        '"documents":['
+        f'{{"path":".review/rules.md","presence":"present","raw_sha256":"{"1" * 64}",'
+        f'"text_sha256":"{"2" * 64}"}},'
+        '{"path":"AGENTS.md","presence":"missing","raw_sha256":null,"text_sha256":null}],'
+        '"exact_parser_version":"4.0.0",'
+        '"execution_profile":{"max_input_tokens":60000,"profile_name":"fast","temperature":null},'
+        f'"ignore_digest":"{"3" * 64}",'
+        '"limits_version":"policy-limits/v1",'
+        '"parser_profile":"rules-markdown/v1",'
+        f'"policy_base_sha":"{"b" * 40}",'
+        '"priority_matcher_version":"priority-matcher/v1",'
+        f'"prompt_bindings":{{"review_system_checksum":"{"6" * 64}",'
+        '"review_system_id":"00000000-0000-0000-0000-00000000001f"},'
+        '"schema_version":1}'
+    )
+
+    canonical = canonical_policy_payload(
+        schema_version=1,
+        policy_base_sha="b" * 40,
+        documents=(present, missing_document(AGENTS_DOCUMENT_PATH)),
+        ignore_digest="3" * 64,
+        parser_profile="rules-markdown/v1",
+        parser_version="4.0.0",
+        limits_version="policy-limits/v1",
+        defaults_checksum="5" * 64,
+        prompt_bindings={
+            "review_system_id": "00000000-0000-0000-0000-00000000001f",
+            "review_system_checksum": "6" * 64,
+        },
+        execution_profile={"profile_name": "fast", "temperature": None, "max_input_tokens": 60000},
+        priority_matcher_version="priority-matcher/v1",
+    )
+
+    assert canonical == golden
+
+
+def test_the_built_snapshot_digest_is_the_sha256_of_its_canonical_payload() -> None:
+    snapshot = _snapshot()
+    canonical = canonical_policy_payload(
+        schema_version=1,
+        policy_base_sha="b" * 40,
+        documents=(snapshot.rules, snapshot.agents),
+        ignore_digest=snapshot.ignore_digest,
+        parser_profile="rules-markdown/v1",
+        parser_version=PARSER_VERSION,
+        limits_version="policy-limits/v1",
+        defaults_checksum="2" * 64,
+        prompt_bindings=pinned_to_json(_PINS.prompt_bindings),
+        execution_profile=pinned_to_json(_PINS.execution_profile),
+        priority_matcher_version="priority-matcher/v1",
+    )
+
+    assert snapshot.policy_digest == sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def test_the_ignore_digest_formula_is_pinned() -> None:
+    golden = (
+        '{"builtin_exclusions_version":"builtin-exclusions/v1",'
+        '"limits_version":"policy-limits/v1",'
+        '"matcher_version":"review-ignore/v1",'
+        '"policy_document_exemption":"base-policy-role-only/v1",'
+        '"rename_copy_propagation":"both-paths/v1",'
+        '"sorted_unique_patterns":["generated/**"],'
+        '"version":1}'
+    )
+    expected = sha256(golden.encode("utf-8")).hexdigest()
+
+    assert (
+        ignore_digest(
+            ("generated/**",),
+            matcher_version="review-ignore/v1",
+            builtin_exclusions_version="builtin-exclusions/v1",
+            limits_version="policy-limits/v1",
+        )
+        == expected
+    )
+    assert parse_review_ignore("```review-ignore\ngenerated/**\n```\n").digest == expected
