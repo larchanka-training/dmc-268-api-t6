@@ -103,8 +103,10 @@ matters, under a label naming the same direction as the edge ("Blocked by" / «�
 for `blocked_by`, "Blocks" / «Блокирует» for the reverse) — the link is what makes it
 visible on the other issue. A blocked-by group ("Blocked by", «Блокирующие», «Блокируется»,
 "Blockiert durch") with no `blocked_by` gets a warning: that link would be missing. A group
-that says only «нет» / "none" (also `keine`, `n/a`, a lone `—`) names no blocker and does not
-count. "Related, not blocking" has no native link on GitHub and stays text only:
+whose every item says none names no blocker and does not count: «нет» / "none" (also `keine`,
+`n/a`) alone or with a trailing dot, with an explanation after a colon, semicolon, comma or
+spaced dash («Нет: …», «Нет; …», «нет — …»), or a lone dash. "Related, not blocking" has no
+native link on GitHub and stays text only:
 
 ```json
 "parent": "#11",

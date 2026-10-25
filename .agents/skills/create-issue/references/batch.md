@@ -141,13 +141,13 @@ lookup:
 The state file is kept outside /tmp so that a reboot cannot erase the record of what was
 created. Never delete it, and never start a new `id` for a batch that created anything: a new
 `id` has no `started_at`, so it adopts nothing and stops at the first issue that exists. Edit
-it by hand only for a repaired board (above), for an issue of this batch a run refused —
-add `items.<key>` with its `url`, `number`, `repo` and `summary` (no state file yet: write
-the whole file the stop names), and rerun — and for a
-recorded issue that is gone: one that was **deleted** — remove its entry from `items`, and
-the rerun files it again; one that was **transferred** to another repo — remove its entry,
-drop the item from the batch file and replace its `@key` in the other items by the issue's
-new `OWNER/REPO#N`.
+it by hand only for a repaired board (above), for an issue of this batch a run refused — add
+`items.<key>` with its `url`, `number`, `repo` and `summary` (no state file yet: create its
+directory and write the whole file the stop names), and rerun — and for a recorded issue
+that is gone: one that was **deleted** — remove its entry from `items`, and the rerun files
+it again; one that was **transferred** to another repo — remove its entry, drop the item
+from the batch file and replace its `@key` in the other items by the issue's new
+`OWNER/REPO#N`.
 
 ## 6. Failures
 

@@ -459,7 +459,11 @@ def refusal(dup: dict[str, Any], started_at: str | None, user: Any) -> str | Non
     created and could not record. Any other is somebody's real issue — or yours from
     before the batch."""
     if started_at is None:
-        return "this is the first run of the batch, so the batch did not create it"
+        # Not "the batch did not create it": a run whose state file is lost may have.
+        return (
+            "this run started without a state file, so it is the batch's first run, and a "
+            "first run adopts nothing"
+        )
     if str(dup.get("state") or "").upper() != "OPEN":
         return f"it is {str(dup.get('state') or 'not open').lower()}"
     author = dup.get("author")
@@ -524,16 +528,18 @@ def how_to_record(key: str, state_file: str) -> str:
 
 def how_to_start(item: dict[str, Any], dup: dict[str, Any], path: Path) -> str:
     """The way out for a duplicate maybe_own() flags on a first run, before the state
-    file exists: the whole file load_state() accepts, ready to write. started_at is the
-    issue's createdAt, so a rerun also adopts the issues that lost run created after it."""
+    file exists: the whole file load_state() accepts, ready to write — and its directory,
+    which a new container or machine lacks too. started_at is the issue's createdAt, so a
+    rerun also adopts the issues that lost run created after it."""
     record = {"url": dup.get("url"), "number": dup.get("number"), "repo": item["repo"]}
     state = {
         "started_at": dup.get("createdAt"),
         "items": {item["key"]: {**record, "summary": item["summary"]}},
     }
     return (
-        "if it is this batch's own issue (a run whose state file is lost created it), write "
-        f"{path} as {json.dumps(state, ensure_ascii=False)} and rerun; {NO_RENAME}"
+        "if it is this batch's own issue (a run whose state file is lost created it), create "
+        f"{path.parent} if it is missing, then write {path} as "
+        f"{json.dumps(state, ensure_ascii=False)} and rerun; {NO_RENAME}"
     )
 
 
