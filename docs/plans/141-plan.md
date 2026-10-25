@@ -8,7 +8,7 @@ decisions, columns, methods or scope. Where it says "match existing", the implem
 reads the named precedent in the code and copies it.
 Issue: https://github.com/larchanka-training/dmc-268-api-t6/issues/141, epic #139.
 Baseline: `origin/main` `7d3a16c5a9cbc329e71938c3b212bf6ca050001c`. The single Alembic
-head is `20261014_0031`. Worktree `projects/dmc-268-api-t6-141`, branch
+head is `20261014_0031`. Worktree `<isolated-checkout>`, branch
 `feat/141-rag-index-schema`. Task checklist: [141-todo.md](141-todo.md).
 
 ## Context
@@ -397,9 +397,9 @@ omit that leading parameter.
 
 ## Process and commit order
 
-- Worktree `projects/dmc-268-api-t6-141` from `origin/main`, branch
+- Worktree `<isolated-checkout>` from `origin/main`, branch
   `feat/141-rag-index-schema`; run `uv sync` and create `.env`. Use a dedicated database
-  `dmc_141` on the local PG17, because of parallel NOTIFY traffic.
+  `<disposable-db>` on the local PG17, because of parallel NOTIFY traffic.
 - Per `agent-loop`:
   - commit 1 is `docs/plans/141-plan.md` plus `141-todo.md` (English, the task brief for
     the executor);
@@ -429,7 +429,7 @@ uv run ruff check .
 uv run ruff format --check .
 uv run mypy .
 uv run pytest
-TEST_DATABASE_URL=postgresql+psycopg://app:app@127.0.0.1:5432/dmc_141 \
+TEST_DATABASE_URL=<disposable-db-url> \
   uv run pytest -m integration -rs tests/test_code_index_store_postgres.py \
   tests/test_initial_migration.py tests/test_alembic_heads.py   # 0 skips
 uv run alembic heads   # exactly one head: 20261015_0032

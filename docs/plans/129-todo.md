@@ -42,9 +42,9 @@ checkout from current main and PostgreSQL baseline are prerequisites.
 - Branch `fix/129-webhook-worker-notify`, isolated managed checkout from
   `7325fae976801ca33ef3999c8cbe5aa2aa37ea05`; original checkout unchanged.
 - Ownership comments in PR #121/#124 were posted by the coordinator with user approval.
-- Disposable compose project `dmc268-129-tests`: PostgreSQL 17 on port 5434,
-  RabbitMQ on port 5673 with dedicated `/test` vhost; random migrated schemas.
-- With `TEST_DATABASE_URL=postgresql+psycopg://app:app@localhost:5434/app`, baseline
+- Disposable compose project: PostgreSQL 17 and RabbitMQ on isolated loopback
+  ports with a dedicated test vhost; random migrated schemas.
+- With `TEST_DATABASE_URL=<disposable-db-url>`, baseline
   `uv run pytest tests/test_webhook_worker_revival.py tests/test_webhook_worker_publication.py
   tests/test_installation_linking.py tests/test_run_stream_postgres.py
   tests/test_webhook_deferred_receipts_postgres.py -rs`: **37 passed, zero skipped**.
@@ -55,8 +55,8 @@ checkout from current main and PostgreSQL baseline are prerequisites.
   **3 passed, zero skipped** (commit visibility, rollback, duplicate negative control).
 - `uv run ruff check .`: passed; `uv run ruff format --check .`: 348 files formatted;
   `uv run mypy .`: passed, 345 source files; `git diff --check`: clean.
-- `TEST_DATABASE_URL=postgresql+psycopg://app:app@localhost:5434/app
-  TEST_RABBITMQ_URL=amqp://app:app@localhost:5673/test uv run pytest`:
+- `TEST_DATABASE_URL=<disposable-db-url>
+  TEST_RABBITMQ_URL=<isolated-task-vhost-url> uv run pytest`:
   **2395 passed, zero skipped**, 165.28 seconds; two existing dependency
   deprecation warnings from Starlette/FastAPI test client.
 - Fresh independent Task 1 review: **Standards 0 / Spec 0**; coordinator authorized Task 2.
@@ -96,7 +96,7 @@ inside the use case's final installation reconciliation transaction.
 
 **Execution evidence — 2026-10-10:**
 
-- RED: `TEST_DATABASE_URL=postgresql+psycopg://app:app@localhost:5434/app uv run
+- RED: `TEST_DATABASE_URL=<disposable-db-url> uv run
   pytest tests/test_webhook_work_notifications_postgres.py -k oauth -q -x` failed
   with `TimeoutError` waiting five seconds for the missing reactivation signal.
   Actual `LinkGitHubInstallations` committed reconciliation and revived the receipt;
@@ -107,16 +107,15 @@ inside the use case's final installation reconciliation transaction.
   attempt/defer/retry values and rolls back workspace/application state. No-match
   reconciliation commits without signaling; permanent failure and existing
   claim-token/lease values remain intact and cannot be replayed.
-- `TEST_DATABASE_URL=postgresql+psycopg://app:app@localhost:5434/app uv run pytest
+- `TEST_DATABASE_URL=<disposable-db-url> uv run pytest
   tests/test_webhook_work_notifications_postgres.py tests/test_installation_linking.py
   tests/test_webhook_deferred_receipts_postgres.py -rs`: **32 passed, zero skipped**.
 - `uv run ruff check .`: passed (one import-order issue corrected);
   `uv run ruff format --check .`: 348 files formatted;
   `uv run mypy .`: passed, 345 source files; `git diff --check`: clean.
-- `TEST_DATABASE_URL=postgresql+psycopg://app:app@localhost:5434/app
-  TEST_RABBITMQ_URL=amqp://app:app@localhost:5673/test uv run pytest`:
+- `TEST_DATABASE_URL=<disposable-db-url>
+  TEST_RABBITMQ_URL=<isolated-task-vhost-url> uv run pytest`:
   **2400 passed, zero skipped**, 149.49 seconds; two existing dependency warnings.
-  Full output retained at `/private/tmp/129-task2-pytest.log`.
 - Implementation only observes existing UPDATE rowcount and sends the shared hint
   for matched receipts. No predicate, transaction boundary, dependency or migration
   changed; no Task 3–5 implementation, commit or push performed.
@@ -179,10 +178,9 @@ psycopg autocommit listener pattern and force a scan after successful registrati
   Real PostgreSQL interruption/recovery remains the Task 5 integration seam.
 - `uv run ruff check .`: passed; `uv run ruff format --check .`: 350 files formatted;
   `uv run mypy .`: passed, 347 source files; `git diff --check`: clean.
-- `TEST_DATABASE_URL=postgresql+psycopg://app:app@localhost:5434/app
-  TEST_RABBITMQ_URL=amqp://app:app@localhost:5673/test uv run pytest`:
+- `TEST_DATABASE_URL=<disposable-db-url>
+  TEST_RABBITMQ_URL=<isolated-task-vhost-url> uv run pytest`:
   **2407 passed, zero skipped**, 162.03 seconds; two existing dependency warnings.
-  Full output retained at `/private/tmp/129-task3-pytest.log`.
 - Only dedicated listener and its boundary tests added, plus checklist evidence.
   No Task 4–5 code, dependency, migration, commit or push added.
 
@@ -245,10 +243,9 @@ with an event wait while preserving production polling and maintenance behavior.
   tests/test_webhook_worker_publication.py -q`: **27 passed**.
 - `uv run ruff check .`: passed; `uv run ruff format --check .`: 351 files formatted;
   `uv run mypy .`: passed, 348 source files; `git diff --check`: clean.
-- `TEST_DATABASE_URL=postgresql+psycopg://app:app@localhost:5434/app
-  TEST_RABBITMQ_URL=amqp://app:app@localhost:5673/test uv run pytest`:
+- `TEST_DATABASE_URL=<disposable-db-url>
+  TEST_RABBITMQ_URL=<isolated-task-vhost-url> uv run pytest`:
   **2415 passed, zero skipped**, 159.57 seconds; two existing dependency warnings.
-  Full output retained at `/private/tmp/129-task4-pytest.log`.
 - No Task 5 code, dependency, migration, commit or push added. Actual PostgreSQL
   notification interruption/recovery and worker guidance remain Task 5.
 
@@ -328,8 +325,8 @@ the owning earlier task and fresh review rather than expanding this slice unchec
   backup, then applied it with no conflicts. Final branch/base is
   **`08d56c41f1a3f841afbc5950fc01b8277920e21f`** (`origin/main`), replacing the
   historical planning snapshot. All intended tracked/untracked changes restored;
-  backup `codex-129-before-main-08d56c4` retained until publisher verification.
-- `TEST_DATABASE_URL=postgresql+psycopg://app:app@localhost:5434/app uv run pytest
+  backup stash retained until publisher verification.
+- `TEST_DATABASE_URL=<disposable-db-url> uv run pytest
   tests/test_webhook_worker_notifications_postgres.py
   tests/test_webhook_work_notifications_postgres.py
   tests/test_webhook_deferred_receipts_postgres.py tests/test_installation_linking.py -rs`:
@@ -337,12 +334,12 @@ the owning earlier task and fresh review rather than expanding this slice unchec
 - `uv run ruff check .`: passed; `uv run ruff format --check .`: 352 files formatted;
   `uv run mypy .`: passed, 349 source files; `git diff --check`: clean.
 - With the same database URL and dedicated
-  `TEST_RABBITMQ_URL=amqp://app:app@localhost:5673/test`,
+  `TEST_RABBITMQ_URL=<isolated-task-vhost-url>`,
   `uv run pytest -m integration -rs`: **145 passed, zero skipped**, 2294 deselected,
-  93.97 seconds; log `/private/tmp/129-task5-integration.log`.
-- Same isolated URLs, `uv run pytest`: **2439 passed, zero skipped**, 169.77 seconds;
-  log `/private/tmp/129-task5-pytest.log`. Both suites emitted only the two existing
-  Starlette/FastAPI dependency deprecation warnings.
+  93.97 seconds.
+- Same isolated URLs, `uv run pytest`: **2439 passed, zero skipped**, 169.77 seconds.
+  Both suites emitted only the two existing Starlette/FastAPI dependency deprecation
+  warnings.
 - No additional production code, dependency or migration in Task 5. No commits
   or pushes made. Final independent review/publishing remain for the coordinator.
 
@@ -372,9 +369,8 @@ the owning earlier task and fresh review rather than expanding this slice unchec
   `uv run ruff format --check .`: **353 files formatted**;
   `uv run mypy .`: **350 source files, no issues**; `git diff --check`: clean.
 - Fresh full `uv run pytest`, with the same isolated PostgreSQL/RabbitMQ URLs:
-  **2444 passed, zero skipped**, exit 0, **217.25 seconds**;
-  log `/private/tmp/129-publisher-latest-main-pytest.log`. Only the two existing
-  dependency warnings remain. The full suite includes all integration tests;
+  **2444 passed, zero skipped**, exit 0, **217.25 seconds**.
+  Only the two existing dependency warnings remain. The full suite includes all integration tests;
   prior dedicated integration checkpoint was **145 passed, zero skipped**.
 
 ## Checkpoint: publishing readiness

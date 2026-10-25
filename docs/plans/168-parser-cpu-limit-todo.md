@@ -14,8 +14,8 @@ truth and this list adds no scope.
 uv run ruff check .
 uv run ruff format --check .
 uv run mypy . --exclude '^docs/reports/'
-TEST_DATABASE_URL=postgresql+psycopg://app:app@localhost:5432/imp168c \
-TEST_RABBITMQ_URL=amqp://app:app@localhost:5672/imp168c uv run pytest tests/test_ast_worker.py \
+TEST_DATABASE_URL=<disposable-db-url> \
+TEST_RABBITMQ_URL=<isolated-task-vhost-url> uv run pytest tests/test_ast_worker.py \
   tests/test_subprocess_source_parser.py tests/test_code_index_indexer_postgres.py \
   tests/test_code_index_lifecycle_postgres.py
 ```

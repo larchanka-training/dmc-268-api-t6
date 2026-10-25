@@ -1,7 +1,7 @@
 # Implementation plan: OS CPU limit for the parser worker (#168, part 6)
 
 Issue https://github.com/larchanka-training/dmc-268-api-t6/issues/168, part 6. Baseline `origin/main`
-`1ae74b1a`, branch `fix/168-parser-cpu-limit`, test DB and vhost `imp168c`, task list
+`1ae74b1a`, branch `fix/168-parser-cpu-limit`, isolated test DB and vhost, task list
 [168-parser-cpu-limit-todo.md](168-parser-cpu-limit-todo.md). The tech lead decided on 2026-10-24 (#168
 comment 6387947446): add `RLIMIT_CPU` next to `RLIMIT_AS`; the network caveat is accepted in writing; the SD
 and CVS wording is fixed later in docs PR G, so this PR changes no docs outside `docs/plans/`.

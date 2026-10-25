@@ -19,7 +19,7 @@ Planning date: 2026-10-14. Human approved the entire plan, public test seams, ow
   `dcae98372c696a662a90c6f58e40fbc8a70b44c8`; it is an ancestor of this baseline.
 - Fetched `origin/main`; isolated worktree HEAD and remote main are
   `362f7586f797ae29b4f367a3bcbd745657924976` at planning time.
-- Worktree: `/Users/qx/.codex/worktrees/81-reviewer-intent-path/dmc-268-api-t6`.
+- Worktree: `<isolated-checkout>`.
   Original checkout is `fix/111-worker-portal-url`, with untracked plans for #113
   and #117. Keep its branch, files, and committed changes out of this work.
 - `github_installation_dispatch.py` returns `IGNORED_IRRELEVANT_EVENT` for

@@ -11,8 +11,8 @@ documents; it does not change the source exercised by the recorded tests.
 
 ## Isolated environment
 
-Dedicated containers owned by this issue: `dmc268-151-tests-postgres`
-(`postgres:17-alpine`) and `dmc268-151-tests-rabbitmq` (`rabbitmq:4-alpine`).
+Dedicated containers owned by this issue: PostgreSQL (`postgres:17-alpine`)
+and RabbitMQ (`rabbitmq:4-alpine`).
 Both bind only to loopback with dynamically assigned host ports; no unrelated
 service or data was modified. Each PostgreSQL fixture creates, migrates, then drops
 its own random schema. The full-suite broker is dedicated because its tests reset

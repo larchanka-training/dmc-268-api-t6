@@ -142,8 +142,8 @@ Use `uv` for all Python tooling. Final checks:
 
 ```sh
 uv run python review/scripts/validate_dataset.py --final
-uv run python review/scripts/eval_replay.py --report-json /tmp/82-replay-1.json
-uv run python review/scripts/eval_replay.py --report-json /tmp/82-replay-2.json
+uv run python review/scripts/eval_replay.py --report-json <private-output>/replay-1.json
+uv run python review/scripts/eval_replay.py --report-json <private-output>/replay-2.json
 uv run ruff check .
 uv run ruff format --check .
 uv run mypy .

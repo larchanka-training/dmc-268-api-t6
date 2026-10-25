@@ -165,7 +165,7 @@ resolved review threads remain required before merge. No commits/pushes by devel
 Final full-feature review: Standards 0 / Spec 0, including queue fake correction.
 The missing queue fake tree route produced RED; focused GREEN 1 passed in 4.98s;
 complete code-index integration GREEN 163 passed / 0 skipped in 158.78s.
-Final full pytest with both dedicated services is running; XML evidence is in /tmp.
+Final full pytest with both dedicated services is running; XML evidence is retained privately.
 
 
 ## Final validation (2026-10-23)
@@ -173,7 +173,7 @@ Final full pytest with both dedicated services is running; XML evidence is in /t
 All Tasks 1–5 implementation and four mandatory gates are complete. Ruff lint and
 format pass (529 files); mypy passes (526 source files). Full suite on the dedicated
 PostgreSQL and RabbitMQ services: **5136 passed, 0 skipped, 2 existing dependency
-warnings in 1037.04s**. JUnit `/tmp/issue207-final-pytest.xml` confirms all 461
+warnings in 1037.04s**. JUnit evidence confirms all 461
 code-index cases passed without skips or errors. Separate code-index integration:
 163 passed / 0 skipped; indexer: 51 passed / 0 skipped. Independent final review:
 Standards 0 / Spec 0. No commits/pushes by development. Publisher handoff is ready;

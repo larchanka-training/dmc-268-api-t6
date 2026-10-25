@@ -30,8 +30,8 @@ uv run ruff check .
 uv run ruff format --check .
 uv run mypy . --exclude '^docs/reports/'
 uv run pytest
-TEST_DATABASE_URL=postgresql+psycopg://app:app@127.0.0.1:5432/dmc_144 \
-TEST_RABBITMQ_URL=amqp://app:app@127.0.0.1:5672/dmc_144 \
+TEST_DATABASE_URL=<disposable-db-url> \
+TEST_RABBITMQ_URL=<isolated-task-vhost-url> \
   uv run pytest -m integration -rs tests/test_code_index_*_postgres.py tests/test_rag_*.py \
   tests/test_app_reinstall_schema_postgres.py tests/test_worker_queue_postgres.py \
   tests/test_initial_migration.py
@@ -41,12 +41,12 @@ TEST_RABBITMQ_URL=amqp://app:app@127.0.0.1:5672/dmc_144 \
   test never counts as passing.
 - `tests/test_alembic_heads.py` carries no `integration` marker, so `-m integration`
   deselects it; it runs in the plain `uv run pytest` gate.
-- `uv run pytest` locally: the 7 failures of `test_deploy_monitoring` come from the
-  `~/.local/bin/sh` wrapper; run the gate without it in `PATH`.
-- Use only the dedicated database `dmc_144` and the vhost `dmc_144`, never another
+- `uv run pytest` locally: the 7 failures of `test_deploy_monitoring` come from a local shell wrapper
+  shadowing `sh`; run the gate with its directory off `PATH`.
+- Use only a dedicated isolated database and vhost, never another
   session's: parallel sessions pick up each other's NOTIFY traffic. The vhost must exist
   with permissions for `app` (recipe in `docs/TEST_PLAN.md:44`). Do not print credentials.
-- `df /tmp` before long runs.
+- Check free disk space before long runs.
 
 ## PR 1: `feat(code_index): refresh and keep the index alive from reviews`
 
@@ -698,4 +698,4 @@ Before the commit, the coordinator re-checks the open PRs and their files.
 - [ ] The ui one-line follow-up: map `context.rag` to CONTEXT in `TOOL_STAGE`.
 - [ ] Lab paperwork: `docs/reports/144/`, the mirror, `economics.md`, `/verify-run`.
 - [ ] Plan PR 3 in its own session after the #130 remainder (v4) and the merge of #230.
-- [ ] Clean up the worktree, the database `dmc_144` and the vhost `dmc_144`.
+- [ ] Clean up the isolated worktree, database and vhost.

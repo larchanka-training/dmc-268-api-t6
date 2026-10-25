@@ -7,8 +7,9 @@ for the executor of #168 part 2 (P2, the AC7 remainder of #130). Where the issue
 name or a shape open, the brief says **suggested** (the executor may pick another name)
 or **derived** (it follows from the cited code or spec, not from a new decision).
 Issue: https://github.com/larchanka-training/dmc-268-api-t6/issues/168. Baseline:
-`origin/main` `22c621ab` (2026-10-23). Worktree `projects/dmc-268-api-t6-168a`, branch
-`fix/168-go-parse-errors` from `22c621ab`. Test database and vhost: `imp168a`. Task list:
+`origin/main` `22c621ab` (2026-10-23). Worktree `<isolated-checkout>`, branch
+`fix/168-go-parse-errors` from `22c621ab`. Test database: `<disposable-db>`;
+vhost: `<isolated-task-vhost>`. Task list:
 [168-ast-parse-errors-todo.md](168-ast-parse-errors-todo.md).
 
 Every `file:line` below was checked against `22c621ab` on 2026-10-23. The red/green
@@ -226,17 +227,17 @@ at the todo.
 
 ## Verification
 
-Before every commit, and in full at each checkpoint (`df -h /tmp` first):
+Before every commit, and in full at each checkpoint (`df -h "<temporary-directory>"` first):
 
 ```
 uv run ruff check .
 uv run ruff format --check .
 uv run mypy . --exclude '^docs/reports/'
-TEST_DATABASE_URL=postgresql+psycopg://app:app@localhost:5432/imp168a \
-TEST_RABBITMQ_URL=amqp://app:app@localhost:5672/imp168a uv run pytest
+TEST_DATABASE_URL=<disposable-db-url> \
+TEST_RABBITMQ_URL=<isolated-task-vhost-url> uv run pytest
 ```
 
 Focused run while iterating: `uv run pytest tests/test_ast_resolution.py
 tests/test_review_context.py tests/test_tree_sitter_facts.py` (74 passed on `22c621ab`).
-Use only the database and vhost `imp168a`. Parallel sessions pick up each other's NOTIFY
-(#131).
+Use only the database `<disposable-db>` and vhost `<isolated-task-vhost>`.
+Parallel sessions pick up each other's NOTIFY (#131).

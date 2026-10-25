@@ -81,7 +81,7 @@ Decided with the tech lead on 2026-10-14:
 
 ## Work isolation and ownership
 
-Branch `docs/140-graph-rag-adr` from `origin/main`, worktree `../dmc-268-api-t6-140`.
+Branch `docs/140-graph-rag-adr` from `origin/main`, worktree `<isolated-checkout>`.
 Open PRs touching the same files were notified on 2026-10-14: #148 and #124 (SD «Сборка и
 бюджет»), #154 (PIPELINE_SPEC §6, TEST_PLAN §3), #155 (SD §15). Whoever merges second rebases.
 

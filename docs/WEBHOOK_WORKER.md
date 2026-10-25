@@ -672,8 +672,8 @@ launch opportunity, subject to current eligibility, and so does a rerun from the
 (SYSTEM_DESIGN §6.7): it creates a Run on the PR's current head without a CI check, but answers
 409 while the PR has an active Run, A with cancellation requested included (other refusals:
 PIPELINE_SPEC T3), so it works only once A is terminal. A's original check-run still promises
-review for the new commit (`В PR новый коммит — ревью будет для него.`) and carries no portal
-link.
+review for the new commit (`В PR новый коммит — ревью будет для него.`). When `PORTAL_URL` is
+configured, its `details_url` points to A's Run; its summary has no link.
 Expiry has no UI or check-run alert; the WARNING is its only failure signal.
 
 The 30-second retry interval allows approximately 120 wait polls per hour. Each CI receipt
@@ -702,9 +702,11 @@ the CI receipt becomes final without creating a Run. A rebind during the wait is
 for a CI receipt: once the receipt's installation is deleted or the repository is stored under
 another one, the retry finds no target under the receipt's installation (`processed_ci`,
 `no open pull request at this head`), and the receipt is finalized as projected, with no Run,
-no GitHub request and no token for the new installation. A PR/label receipt defers instead
-(`other_installation_repository`, see the projection results above). Generic repository refusal
-on PR/label projection keeps its existing deferral policy below.
+no GitHub request and no token for the new installation. A PR/label receipt defers instead:
+`other_installation_repository` if the repository is stored only under other installations,
+even if the receipt's installation is deleted; otherwise `disabled_repository` for a deleted
+receipt installation (see the projection results above). Generic repository refusal on
+PR/label projection keeps its existing deferral policy below.
 
 After B is inserted, failed broker confirmation is `publication_pending`, and the review
 worker's existing Run outbox recovers that Run. Receipt redelivery, distinct equivalent CI

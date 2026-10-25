@@ -17,20 +17,20 @@ the questions in that plan; the tech lead decided them on 2026-10-24.
   its `@pytest.mark.anyio` style.
 - Assert literal values from the specs. Never derive an expected value from the code under test (§5).
 
-**Common verification** (every task; run `uv sync` first, the worktree has no `.venv`; `df -h /tmp` before long
-runs):
+**Common verification** (every task; initialize the isolated environment with `uv sync`; check free disk
+space before long runs):
 
 ```
 uv run ruff check .
 uv run ruff format --check .
 uv run mypy . --exclude '^docs/reports/'
-TEST_DATABASE_URL=postgresql+psycopg://app:app@localhost:5432/imp130e \
-TEST_RABBITMQ_URL=amqp://app:app@localhost:5672/imp130e uv run pytest
+TEST_DATABASE_URL=<disposable-db-url> \
+TEST_RABBITMQ_URL=<isolated-task-vhost-url> uv run pytest
 ```
 
-- Known local-only noise: 7 failures in `tests/test_deploy_monitoring.py` caused by a `~/.local/bin/sh` wrapper.
-  They pass with `~/.local/bin` off `PATH`.
-- Use only the database and vhost `imp130e`.
+- Known local-only noise: 7 failures in `tests/test_deploy_monitoring.py` caused by a local shell wrapper
+  shadowing `sh`. They pass with the wrapper directory off `PATH`.
+- Use only isolated task database and vhost resources.
 - A skipped PG test never counts as passing.
 
 **Phase-2 contract** (check it on every task): no `review/prompts/review.system.v4.md`, no change to
@@ -73,7 +73,7 @@ TEST_RABBITMQ_URL=amqp://app:app@localhost:5672/imp130e uv run pytest
   - `LLM_VERIFIER_MODEL=mistral-small-3.2-24b`, with primary `mistral-small-4` and keys → the verifier model is
     that one, it inherits the keys (same EUrouter endpoint), and the route's fallback is `settings.fallback`.
   - Only `LLM_VERIFIER_FALLBACK_MODEL=mistral-small-4` → `(primary, <that profile>)`.
-  - Primary is self-hosted `http://localhost:1234/v1` without keys, and `LLM_VERIFIER_MODEL=mistral-small-4` →
+  - Primary is self-hosted `<self-hosted-base-url>` without keys, and `LLM_VERIFIER_MODEL=mistral-small-4` →
     `LlmConfigError("LLM_VERIFIER_API_KEYS must be set for mistral-small-4")`.
   - Unknown verifier model without a base URL → the primary's base URL.
   - `LLM_VERIFIER_STRUCTURED_OUTPUT=prompt_json` without `LLM_ALLOW_PROMPT_JSON=1` → `LlmConfigError` naming

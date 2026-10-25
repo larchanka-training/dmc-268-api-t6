@@ -9,7 +9,7 @@ name or a shape implicit, this brief says **suggested** (the executor may pick a
 name) or **derived** (it follows from the cited code, not from a new decision).
 Issue: https://github.com/larchanka-training/dmc-268-api-t6/issues/143, epic #139.
 Baseline: `origin/main` `29ac426` (#202 rules status and #223 CI merged). The single Alembic
-head is `20261018_0035`. Worktree `projects/dmc-268-api-t6-143`.
+head is `20261018_0035`. Worktree `<isolated-checkout>`.
 Branches, stacked: `feat/143-rag-index-purge` (PR 1, from `origin/main`) →
 `feat/143-rag-index-triggers` (PR 2, on PR 1). Task checklist: [143-todo.md](143-todo.md).
 
@@ -569,11 +569,11 @@ repository available (`RepositorySettings.rag_enabled` is already masked by
 
 **Environment:**
 
-- `git fetch`; the worktree `projects/dmc-268-api-t6-143` from `origin/main`;
+- `git fetch`; the worktree `<isolated-checkout>` from `origin/main`;
 - `uv sync`, `.env` (never read or print it);
-- a dedicated database `dmc_143` on the local PG17 and a dedicated RabbitMQ vhost
-  `dmc_143`: parallel sessions pick up each other's NOTIFY traffic;
-- `df /tmp` before long runs.
+- a dedicated database `<disposable-db>` on the local PG17 and a dedicated RabbitMQ
+  vhost `<isolated-task-vhost>`: parallel sessions pick up each other's NOTIFY traffic;
+- `df "<temporary-directory>"` before long runs.
 
 **Loop per `agent-loop`:**
 
@@ -601,7 +601,7 @@ repository available (`RepositorySettings.rag_enabled` is already masked by
   Staging only with the user's explicit OK;
 - check the AC, add a note in #139, update the board;
 - lab paperwork: `docs/reports/143/`, mirror in
-  `base/projects/team-6/api-t6-paperwork/issue-143/`, `economics.md`, `/verify-run`;
+  `<private-paperwork-directory>`, `economics.md`, `/verify-run`;
 - clean up the worktree, the database and the vhost.
 
 ## Deviations (stated in the PR body)
@@ -627,7 +627,7 @@ repository available (`RepositorySettings.rag_enabled` is already masked by
 ## Lab-side work
 
 - Report `docs/reports/143/` (lab-local) and its mirror in
-  `base/projects/team-6/api-t6-paperwork/issue-143/`;
+  `<private-paperwork-directory>`;
 - a row in `economics.md`;
 - after PR 2 merges, check the #143 AC and add a note in #139.
 
@@ -638,8 +638,8 @@ uv run ruff check .
 uv run ruff format --check .
 uv run mypy . --exclude '^docs/reports/'   # CI runs `uv run mypy .`; the exclude skips the lab-local ignored reports
 uv run pytest
-TEST_DATABASE_URL=postgresql+psycopg://app:app@127.0.0.1:5432/dmc_143 \
-TEST_RABBITMQ_URL=amqp://app:app@127.0.0.1:5672/dmc_143 \
+TEST_DATABASE_URL=<disposable-db-url> \
+TEST_RABBITMQ_URL=<isolated-task-vhost-url> \
   uv run pytest -m integration -rs tests/test_code_index_*_postgres.py \
   tests/test_repository_rag_postgres.py tests/test_worker_queue_postgres.py \
   tests/test_initial_migration.py   # 0 skips
