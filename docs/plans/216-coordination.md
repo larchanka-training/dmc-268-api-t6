@@ -68,7 +68,7 @@ were refreshed after explicit semantic/anchor audit, without altering probe mean
 #304 is still open and was not cherry-picked. Complete current replay/full-service
 gates subsequently passed: 113/113 live catalog probes killed/restored GREEN and 6,660 full-suite tests passed, zero failures/errors/skips, two existing warnings, in 923.56 s. Global Ruff/format (604 files)/mypy (594 source files) passed. Fresh preflight and whole-PR Standards/Spec reviews report 0/0, reconfirmed after the final driver-classifier fix.
 
-All 1,207 measured input hashes match before/after replay and full pytest: dirty-source identity `1d4a19f5983de54234f5f109bc5c4d04636ba53fff3bf1ae85418f794ea85192`. Final evidence changes only the four #216 documents; the 1,203-entry projection excluding exactly those paths remains `3dc621081dd795d1232689dc6b2e527037d41ac7a5b8156d8787ed784122616a`. The verification document records current driver/catalog/test hashes and the projection encoding. This proves passing source bytes survive the evidence update without attributing dirty work to the old HEAD. Final-document delta reviews, focused commits/push, review replies, current-head CI and owned-resource cleanup remain pending.
+All 1,207 measured input hashes match before/after replay and full pytest: dirty-source identity `1d4a19f5983de54234f5f109bc5c4d04636ba53fff3bf1ae85418f794ea85192`. Final evidence changes only the four #216 documents; the 1,203-entry projection excluding exactly those paths remains `3dc621081dd795d1232689dc6b2e527037d41ac7a5b8156d8787ed784122616a`. The verification document records current driver/catalog/test hashes and the projection encoding. This proves passing source bytes survive the evidence update without attributing dirty work to the old HEAD. The final evidence delta subsequently passed independent Standards/Spec reviews (0/0); publication, replies, exact-head CI and owned-resource cleanup are verified below.
 
 A post-verification readback still found main at `9243fd67`, remote PR head at `bf9d4c6d`, issue #216 open, no requested reviewer and the exact Board 12 item On Review. No board mutation was needed; this is pre-publication state, not a claim that the review fixes have been pushed.
 
@@ -130,3 +130,35 @@ not a board-wide issue-number match. Verified state after publication is On Revi
 Rework keeps this status under CONTRIBUTING. Before publication, read back the
 same exact issue/project item and current option. No other participant identity,
 private directory data, assignee, issue body or board field is copied here.
+
+## Review-fix publication receipts
+
+Published code/evidence head: `77d544edc8636284d6131cd7a1baf0884dc7b8bb`; base remained `9243fd67c1d4ed3beba2bfbab12d8ed85ee22f4e` at publication and cleanup. The explicit lease matched the prior remote `bf9d4c6ddb3522567476af85a92c3acac06a3f3e`; no other contributor's push was overwritten. Six focused review commits keep every issue reference valid:
+
+| Commit | Slice |
+| --- | --- |
+| `61987de5398c0dc39ad2c6a6f19e9812df071f7d` | Current-main factory/checked-path consumer integration and #130 reference. |
+| `601f6362d00623dc75ed3d8d6ab8fb16abac30eb` | Attribution/allowlist/warning/parser/source-list regressions. |
+| `07f81ded18fa2ec316edc30f8bee57bbcd330371` | Public missing-document helper reuse. |
+| `051009952ba5c6baae553fa5ca2b6710d37e2aa6` | Portable catalog, isolated replay driver and safety tests. |
+| `f2ef8309a84360c3d74567812ae6f5ab78750e81` | Retry/current-pin documentation and provider rollout gate. |
+| `77d544edc8636284d6131cd7a1baf0884dc7b8bb` | Compact portable evidence and current full-suite proof. |
+
+All commit hooks passed. All 1,207 pre-commit input bytes were unchanged across committing, and the Git worktree was clean after publication. The four-section PR body was read back exactly, covering all original hygiene dispositions and all fifteen review items.
+
+| Review thread | Verified author reply |
+| --- | --- |
+| P2 factory/rebase | [Reply 4371817016](https://github.com/larchanka-training/dmc-268-api-t6/pull/303#discussion_r4371817016) |
+| P2 PIPELINE/retry | [Reply 4371817149](https://github.com/larchanka-training/dmc-268-api-t6/pull/303#discussion_r4371817149) |
+| P2 portable documentation | [Reply 4371817263](https://github.com/larchanka-training/dmc-268-api-t6/pull/303#discussion_r4371817263) |
+| P2 step-3/allowlist | [Reply 4371817383](https://github.com/larchanka-training/dmc-268-api-t6/pull/303#discussion_r4371817383) |
+
+The [eleven-P3 disposition summary](https://github.com/larchanka-training/dmc-268-api-t6/pull/303#issuecomment-6401212141) also acknowledges #130 F1 and #304: fixes are published, whichever lands second rebases, and the F2 provider-acceptance gate remains unchecked. Every P2 reply contains the published SHA; all four threads remain unresolved for the reviewer.
+
+[CI run 40219321992](https://github.com/larchanka-training/dmc-268-api-t6/actions/runs/40219321992) succeeded on exact head `77d544edc8636284d6131cd7a1baf0884dc7b8bb`: 5,620 unit + 268/258/330/184 integration = **6,660 passed, zero skipped tests**. CI warnings (eight unit, two per integration shard) are recorded separately from local full-suite warnings. Four conditional deployment/image-publish jobs were skipped on the PR; all executed checks passed.
+
+Readback confirmed OPEN/non-draft PR, no new reviewer request, empty closing issue links, OPEN issue #216 and its exact Board 12 item On Review. No board mutation was necessary. The PR was attached to the task. No approval, merge, issue closure or reviewer-thread resolution occurred.
+
+Cleanup completed after successful CI: exactly three owned containers, four owned volumes and one owned network removed after label/endpoint checks. The owned-resource inventory is empty. Replay/pytest evidence was archived; the shared image, unrelated resources, managed worktree, backup refs and stashes were retained.
+
+This later publication record changes only the four #216 documents; the measured 1,203-file projection remains `3dc621081dd795d1232689dc6b2e527037d41ac7a5b8156d8787ed784122616a`. The verified code/evidence-head checkpoint stays explicit; subsequent metadata heads are checked through [current PR checks](https://github.com/larchanka-training/dmc-268-api-t6/pull/303/checks), avoiding a self-referential commit-SHA claim.

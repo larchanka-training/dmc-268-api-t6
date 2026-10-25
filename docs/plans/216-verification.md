@@ -21,7 +21,7 @@ No historical full-suite result proves the current runtime-changing rebase.
 | R1.6b: four evidence documents | Portability, link, named-node, command and bounded-file audits passed | Documentation only; fresh Standards = 0, Spec = 0. |
 | R1.7: provider compatibility disposition | Strict transport traced; official sources checked; local contract digests reproduced | Live acceptance UNKNOWN. Unchecked F2 gate recorded in #130 plan/todo, linked to #217; 185 offline tests passed, zero skips. Fresh independent reviews: 0/0. |
 | R1.8 preflight: base `9243fd67c1d4ed3beba2bfbab12d8ed85ee22f4e`, HEAD `f00d1b925a42f1990ad3f77b0fa349ab5ceb37cd` plus dirty fixes | Collection 6,655; bounded six-file slice 178 passed, 0 skipped, 2 existing warnings; Ruff passed, format 604 files, mypy 594 source files | Required `checked_paths` call argument first failed eleven cases and mypy, then passed after the minimal integration fix. All 120 catalog records validate after nine audited fingerprint updates. This bounded preflight precedes the final classifier fix and final proof below. |
-| R1.8 final: same base/HEAD plus reviewed dirty fixes | **6,660 passed, 0 failed, 0 errors, 0 skipped, 2 existing warnings; 923.56 s**. Global Ruff passed; format 604 files; mypy 594 source files. **113/113 live probes killed/restored GREEN**, zero unexplained survivors. | Dedicated PostgreSQL/RabbitMQ and isolated task vhost; all 1,207 input hashes matched before/after complete replay and full pytest. Fresh whole-PR Standards = 0, Spec = 0, reconfirmed after the final classifier fix. Publication/current-head CI and cleanup remain pending. |
+| R1.8 final: same base/HEAD plus reviewed dirty fixes | **6,660 passed, 0 failed, 0 errors, 0 skipped, 2 existing warnings; 923.56 s**. Global Ruff passed; format 604 files; mypy 594 source files. **113/113 live probes killed/restored GREEN**, zero unexplained survivors. | Dedicated PostgreSQL/RabbitMQ and isolated task vhost; all 1,207 input hashes matched before/after complete replay and full pytest. Fresh whole-PR Standards = 0, Spec = 0, reconfirmed after the final classifier fix. Code/evidence publication, exact-head CI and owned-resource cleanup subsequently completed; see the publication proof below. |
 
 R1.0–R1.7 each completed fresh independent Standards and Spec reviews with zero
 findings on both axes. R1.8 preflight adopted `9243fd67`, preserving upstream
@@ -102,7 +102,7 @@ The final measured source is base `9243fd67c1d4ed3beba2bfbab12d8ed85ee22f4e`, HE
 | Full-suite input preservation | All 1,207 hashes unchanged after replay and again after pytest |
 | Stable projection excluding exactly `216-plan.md`, `216-todo.md`, `216-verification.md`, `216-coordination.md` under `docs/plans/` | 1,203 entries; `3dc621081dd795d1232689dc6b2e527037d41ac7a5b8156d8787ed784122616a` |
 
-The projection hashes `json.dumps(path_to_sha256, sort_keys=True).encode()` with SHA-256, using the same measured input set with only those four metadata paths removed. This final evidence update changes only those four documents; all executable, test, catalog, prompt, schema and other input bytes remain exactly the passing version. The full 1,207-file identity labels the pre-evidence measured tree; it is not falsely reused as the identity of rewritten metadata. Independent final-document delta reviews and publication/current-head CI remain pending.
+The projection hashes `json.dumps(path_to_sha256, sort_keys=True).encode()` with SHA-256, using the same measured input set with only those four metadata paths removed. This final evidence update changes only those four documents; all executable, test, catalog, prompt, schema and other input bytes remain exactly the passing version. The full 1,207-file identity labels the pre-evidence measured tree; it is not falsely reused as the identity of rewritten metadata. The final evidence delta passed independent Standards/Spec reviews (0/0). Subsequent publication/CI/cleanup proof is recorded below; later metadata changes preserve the same 1,203-file projection.
 
 ## M01–M15 coverage map
 
@@ -284,9 +284,20 @@ uv run pytest
 Record final base/head plus dirty/input identity, counts, warnings and zero unexplained
 failures/skips; compare executable input hashes before/after. A runtime-changing
 rebase invalidates older gate proof. The recorded final tree has completed the full
-113-live replay and fresh whole-PR 0/0 reviews. Publication still requires reviewed
-final evidence metadata and green current-head CI; later changed source requires
+113-live replay and fresh whole-PR 0/0 reviews. Reviewed final evidence metadata and green CI on the published code/evidence head are recorded below; later changed source requires
 fresh proof rather than reuse of these counts. Run replay before the full suite to avoid test timing
 contention. Remove only resources created for this verification; keep shared images
 and other tasks' infrastructure. No merge, issue closure or reviewer-thread resolution
 is authorized by these checks.
+
+## Verified publication and cleanup
+
+The reviewed code/evidence was published as `77d544edc8636284d6131cd7a1baf0884dc7b8bb` over base `9243fd67c1d4ed3beba2bfbab12d8ed85ee22f4e`. All 1,207 pre-commit input bytes were preserved across six focused review-fix commits. The final evidence delta passed fresh independent Standards/Spec reviews with zero findings.
+
+[CI run 40219321992](https://github.com/larchanka-training/dmc-268-api-t6/actions/runs/40219321992) completed **successfully on that exact published head**. Unit tests: **5,620 passed**; integration shards: **268 + 258 + 330 + 184 passed**; total **6,660 passed, zero test skips**. CI reported eight unit warnings and two warnings per integration shard; these are separate from the two warnings in the local full-suite measurement. Four conditional image-publish/deployment jobs were skipped for the PR; those are job conditions, not skipped tests. All executed lint/type/configuration/security/build/smoke jobs succeeded.
+
+The PR body and four SHA-bearing P2 replies were read back exactly. One summary covers all eleven P3 items and the #130 F1/#304 merge-order coordination. The exact repository issue remains OPEN and its Board 12 item On Review. PR #303 remains non-draft with no new requested reviewer and no closing issue links. The four reviewer-owned threads remain unresolved for their author; no merge, issue closure or approval was performed. Receipt links are in [coordination](216-coordination.md).
+
+After that successful CI, ownership labels and network endpoints were verified before removing exactly three owned containers, four volumes and one network. The owned-resource inventory is empty; evidence was archived, and the shared image, managed worktree and backup refs/stashes were preserved.
+
+This publication-metadata continuation changes only the four #216 documents. The 1,203-entry projection excluding precisely those documents remains `3dc621081dd795d1232689dc6b2e527037d41ac7a5b8156d8787ed784122616a`. The code/evidence SHA above is a verified historical checkpoint; later documentation commits do not claim that a commit can contain its own SHA. Current PR checks are available from [PR #303](https://github.com/larchanka-training/dmc-268-api-t6/pull/303/checks).

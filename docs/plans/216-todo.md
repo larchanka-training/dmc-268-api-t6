@@ -79,7 +79,9 @@ Every task requires delegated implementation followed by fresh independent Stand
 - [x] `uv run ruff check .`; `uv run ruff format --check .`; `uv run mypy .`; `uv run pytest` all pass with disposable PG/Rabbit, current counts and no unexplained skips/failures.
 - [x] Fresh whole-PR Standards = 0; Spec = 0, reconfirmed after the final classifier fix.
 - [x] Final measured tree: 6,660 passed, zero failed/errors/skips, two existing warnings, 923.56 s; all 113 live probes killed/restored GREEN. All 1,207 measured input hashes match before/after both runs; the four-document evidence update preserves the 1,203-file projection recorded in verification.
-- [ ] Independent final-document delta reviews: Standards = 0; Spec = 0.
-- [ ] Publisher uses focused conventional commits and explicit staging; updates existing non-draft PR303, requests no reviewer, records current base/results/all dispositions.
-- [ ] Reply to all four P2 threads with new SHA, summarize every P3 disposition; leave thread resolution to reviewers.
-- [ ] Attach PR, verify current-head CI, remove only owned disposable resources. No merge, issue closure, self-approval or Development-panel link.
+- [x] Independent final-document delta reviews: Standards = 0; Spec = 0.
+- [x] Publisher uses focused conventional commits and explicit staging; updates existing non-draft PR303, requests no reviewer, records current base/results/all dispositions.
+- [x] Reply to all four P2 threads with new SHA, summarize every P3 disposition; leave thread resolution to reviewers.
+- [x] Attach PR, verify current-head CI, remove only owned disposable resources. No merge, issue closure, self-approval or Development-panel link.
+
+Publication proof: code/evidence head `77d544edc8636284d6131cd7a1baf0884dc7b8bb`, successful [CI run 40219321992](https://github.com/larchanka-training/dmc-268-api-t6/actions/runs/40219321992), 6,660 tests and zero skips. Four P2 reply receipts, the eleven-P3 summary, unchanged Board On Review and completed owned-resource cleanup are recorded in [coordination](216-coordination.md). Later documentation-only metadata preserves the passing 1,203-file projection; human approval and reviewer-owned thread resolution remain outside these completed author tasks.
