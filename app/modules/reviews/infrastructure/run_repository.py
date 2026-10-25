@@ -497,6 +497,10 @@ class SqlAlchemyRunRepository:
         if row is None:
             return None
         if row[1] is None or row[2] is None:
+            # Also for a snapshot-path (v4) run, which generates with its pinned row: this one
+            # read serves both paths before the policy load, and ``conventions_prompt`` is the
+            # required legacy field. The seed keeps one active row per key, so only a broken
+            # catalog fails here, with ``internal_error`` before any provider call.
             raise LookupError("active review.conventions prompt is missing")
         return RunConventionsInput(
             repository_id=row[0],

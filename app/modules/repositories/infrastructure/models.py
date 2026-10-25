@@ -186,8 +186,9 @@ class RepoConventions(Base):
     prompt_version_id: Mapped[UUID] = mapped_column(
         ForeignKey("prompt_versions.id"), nullable=False
     )
-    # Digest of the ignore policy the entry was generated under; NULL for entries made
-    # without one, which a run with a policy never reuses.
+    # The cache key: the ignore key of a legacy run, the repo-conventions-v2 digest of a
+    # snapshot-path run; NULL for entries made without a policy, which a run with one never
+    # reuses.
     policy_key: Mapped[str | None] = mapped_column(CHAR(64))
     agents_md: Mapped[str | None] = mapped_column(TEXT)
     key_patterns: Mapped[list[str]] = mapped_column(JSONB, nullable=False)

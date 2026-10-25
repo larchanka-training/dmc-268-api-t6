@@ -21,9 +21,9 @@ from app.modules.reviews.application.conventions import (
     CachedConventions,
     GeneratedConventions,
     GenerateRepoConventions,
-    conventions_cache_key,
 )
 from app.modules.reviews.application.execute_review import ExecuteReviewRun, ReviewPromptInput
+from app.modules.reviews.application.get_run_diff import DiffSnapshot
 from app.modules.reviews.application.policy_errors import PolicyError, PolicyErrorCode
 from app.modules.reviews.application.policy_snapshot import (
     PolicySnapshot,
@@ -56,8 +56,17 @@ from app.modules.reviews.application.vcs_diff import PullRequestLocator, VcsPull
 from app.modules.reviews.infrastructure.blob_cache import InMemoryBlobCache
 from app.modules.reviews.infrastructure.llm import answers
 from tests.test_prepare_policy_snapshot import Source, Store, Uow, _pins
-from tests.test_review_context_stage import Parser, Runs, Trace, Vcs, _checkpoint
+from tests.test_review_context_stage import (
+    Parser,
+    Runs,
+    Trace,
+    Vcs,
+    _checkpoint,
+    _snapshots,
+    _stored,
+)
 from tests.test_review_context_stage import Repository as SourceTree
+from tests.test_review_context_stage import _stage as _context_stage
 from tests.test_run_processor_context_stage import (
     REPOSITORY_ID,
     RUN_ID,
@@ -87,6 +96,7 @@ def _store(
     review_id: UUID = _REVIEW_V4,
     conventions: UUID | None = _CONVENTIONS,
     max_policy_tokens: int = 12_000,
+    base: str | None = None,
 ) -> Store:
     """Pins as get_pins reads them; a NULL conventions pin leaves the bindings incomplete."""
     bindings = PromptBindings(
@@ -100,7 +110,8 @@ def _store(
         verifier_id=_VERIFIER,
     )
     profile = replace(make_complete_execution_profile(), max_policy_tokens=max_policy_tokens)
-    return Store(pins=_pins(prompt_bindings=bindings, execution_profile=profile))
+    pins = _pins(prompt_bindings=bindings, execution_profile=profile)
+    return Store(pins=pins if base is None else replace(pins, policy_base_sha=base))
 
 
 def _snapshot(store: Store) -> PolicySnapshot:
@@ -507,6 +518,10 @@ def test_snapshot_path_conventions_refuse_a_pin_the_snapshot_does_not_name(
 # ---------- #130 F1-11: snapshot-path conventions keyed by repo-conventions-v2 (R5) ----------
 
 
+# The repo-conventions-v2 key of the fixture policy (``Source``), its ignore digest untainted.
+_V2_DIGEST = "fef4efc6dfdb3c7e9110ffd7b6f0f33259cd6bf2a2116efa68aa0e71ac45f898"
+
+
 @pytest.mark.parametrize("version", ["v3", "v4"])
 def test_stage_policy_key_is_the_v2_conventions_key_only_on_the_snapshot_path(
     version: str,
@@ -518,9 +533,54 @@ def test_stage_policy_key_is_the_v2_conventions_key_only_on_the_snapshot_path(
 
     assert store.snapshot is not None
     ignore_key = store.snapshot.ignore_digest
-    expected = conventions_cache_key(store.snapshot, ignore_key) if version == "v4" else ignore_key
-    assert stage.policy_key == expected
+    assert stage.policy_key == (_V2_DIGEST if version == "v4" else ignore_key)
     assert stage.policy_key != (ignore_key if version == "v4" else None)
+
+
+def test_stage_v2_key_is_the_same_for_another_pr_base_with_the_same_policy() -> None:
+    # Tech lead, 2026-10-25 (TL-7): the PR base is not part of the key, so the next pull
+    # request of the repository reuses the entry while the policy stays the same.
+    observed: list[tuple[str, str | None]] = []
+    for base in ("a" * 40, "e" * 40):
+        store = _store(base=base)
+        stage = _stage(store, Trace())
+        asyncio.run(stage.begin(RUN_ID))
+        assert store.snapshot is not None and store.snapshot.policy_base_sha == base
+        observed.append((store.snapshot.policy_digest, stage.policy_key))
+
+    [(first_digest, first_key), (second_digest, second_key)] = observed
+    assert first_digest != second_digest
+    assert first_key == second_key == _V2_DIGEST
+
+
+# The repo-conventions-v2 keys of the fixture policy without and with the denied rename.
+_PLAIN_DIGEST = "cf2ce488d691d5229dc0cf4464d1f4cac55ab4baf125c9342928237607609dc4"
+_TAINTED_DIGEST = "754d1058a2ba36df1f6da47237da247d4a70ad7915132a76eff1cc299fd815f8"
+
+
+def test_stage_v2_key_carries_the_taint_of_a_denied_rename() -> None:
+    # The key is built over the stage's ignore key: a rename out of an ignored path withholds
+    # a name no mask matches, so an entry made while it was allowed is not reused.
+    moved = DiffSnapshot(
+        "src/moved.py",
+        _stored("src/moved.py", "@@ -1 +1 @@\n-a\n+b"),
+        "f" * 40,
+        "renamed",
+        "generated/moved.py",
+        1,
+        1,
+        2,
+    )
+    plain = _context_stage(Trace(), store=_store())
+    tainted = _context_stage(Trace(), store=_store(), snapshots=[*_snapshots(), moved])
+
+    asyncio.run(plain.run(RUN_ID))
+    asyncio.run(tainted.run(RUN_ID))
+
+    assert plain.snapshot_for_llm is not None and tainted.snapshot_for_llm is not None
+    assert tainted.excluded("src/moved.py") is True
+    assert plain.policy_key == _PLAIN_DIGEST
+    assert tainted.policy_key == _TAINTED_DIGEST
 
 
 # ---------- #130 F1-12: the policy budget is checked at policy load (R7, TL-8) ----------

@@ -246,6 +246,12 @@ validates against v1 when no snapshot is attached (`llm/models.py:183-188`). Tha
 - R5: a v2 digest, built over the current `policy_key` value so the rename and copy taint stays in the key,
   goes into the existing `policy_key` column (`conventions_unit_of_work.py:26-39`). No
   migration; legacy rows never match (TL-7).
+- R5 as clarified by the tech lead (2026-10-25, review of batch 4): the v2 key is the digest of the
+  attempt's ignore key (`_ignore_key()`, with the rename and copy taint), the rules.md and AGENTS.md
+  text digests of the snapshot, the pinned conventions prompt (id and checksum) and the counter
+  version. It leaves out `policy_base_sha` (through `policy_digest`), the review and verifier prompt
+  checksums and the rest of the execution profile, so the next pull request of a repository reuses
+  the entry; a miss comes only from a change of the policy, AGENTS.md or the conventions prompt.
 
 **DD6. R7.** In `stage.begin`, after the snapshot (`review_context_stage.py:407-410`), on the snapshot
 path only: `verify_policy_budget(snapshot, counter, max_policy_tokens=profile.max_policy_tokens)`. It
@@ -466,8 +472,10 @@ Rolling F2 back to F1 is safe. The floor goes to #297's rollback runbook.
 - PIPELINE_SPEC `:132`: the canon puts `context.build` after conventions; F3 keeps the stage's single
   build before them.
 - CVS §5.2 "Текущее состояние" (`:770-780`). CVS §7.3: the example `C1 → R1 → R2 repair → V1` holds only
-  without a fallback (TL-2). CVS §4.2: the R5 key deviation (TL-7): the v2 conventions key leaves
-  out the rendered-input, tree and source-entry digests.
+  without a fallback (TL-2). CVS §4.2: the R5 key deviation (TL-7, clarified 2026-10-25): the v2
+  conventions key leaves out `policy_base_sha`, the selector and truncator versions (no such
+  constants exist) and the rendered-input, tree and source-entry digests. The F1 PR body says that
+  AC9's "repo-conventions-v2" text stays open until G aligns CVS §4.2.
 - RFS §7.2 values; TEST_PLAN §3.4 row "боевой worker его не подключает"; the rollback floor in CICD.
 - False since F1-7, left for G because #303 rewrites both paragraphs: PIPELINE_SPEC "Состояние
   verifier после #133" (`:571-590`) and TEST_PLAN §3.4 (`:483-495`) still say a reflection pass
@@ -485,7 +493,7 @@ Recorded per the coordinator's brief; one line per decision.
 - **TL-4** (a), as recommended, per the coordinator's brief: the gateway writes `context.manifest`, because only it sees repair and fallback.
 - **TL-5** Decided: keep #227's contract; E-5 closed without SSE change. The verifier's `llm.call` carries `operation="verification"` in `run_actions` only; `SSE_LLM_OPERATIONS`, the openapi `RunStepEvent.llmOperation` enum and PIPELINE_SPEC:63 stay as they are.
 - **TL-6** as recommended, per the coordinator's brief: the E-7 time reserve is in F1, gated (the review's own call + 90 s + 10 s); the E-7 money reserve and E-8 (pin the verifier provider route) are follow-ups.
-- **TL-7** (b), as recommended, per the coordinator's brief: a v2 digest of the pinned identities goes into `policy_key` (namespace, `policy_digest`, the current `policy_key` value with the tainted rename and copy paths of `review_context_stage.py:362-381`, `matcher_version`, `defaults_checksum`, the conventions prompt checksum, profile versions); the deviation from CVS §4.2 is recorded for G.
+- **TL-7** (b), as recommended, per the coordinator's brief: a v2 digest goes into `policy_key`; the deviation from CVS §4.2 is recorded for G. Clarified by the tech lead on 2026-10-25 (review of batch 4): the digest covers the namespace, the current ignore key with the tainted rename and copy paths (`review_context_stage.py` `_ignore_key`), the rules.md and AGENTS.md text digests, the pinned conventions prompt (id and checksum) and the counter version, and not `policy_base_sha`, the review and verifier prompt checksums or the execution profile.
 - **TL-8** yes, as recommended, per the coordinator's brief: R7 fails closed above 12k policy tokens on the snapshot path, with a read-only staging query before F2 that lists repos above the limit.
 - **TL-9** as recommended, per the coordinator's brief: keep the stage's `context.build` (before conventions) and remove the prompt-read step; the dashboard descriptions and MONITORING change in the same commit, and G aligns the canon.
 - **TL-10** (a), as recommended, per the coordinator's brief: keep C's terminal error for the D-1 shape, pinned by a test; the F1 PR body carries the read-only staging query.
