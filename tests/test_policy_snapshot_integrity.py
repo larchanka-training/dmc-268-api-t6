@@ -291,23 +291,44 @@ def test_the_policy_digest_formula_is_pinned() -> None:
     assert canonical == golden
 
 
-def test_the_built_snapshot_digest_is_the_sha256_of_its_canonical_payload() -> None:
-    snapshot = _snapshot()
-    canonical = canonical_policy_payload(
-        schema_version=1,
-        policy_base_sha="b" * 40,
-        documents=(snapshot.rules, snapshot.agents),
-        ignore_digest=snapshot.ignore_digest,
-        parser_profile="rules-markdown/v1",
-        parser_version=PARSER_VERSION,
-        limits_version="policy-limits/v1",
-        defaults_checksum="2" * 64,
-        prompt_bindings=pinned_to_json(_PINS.prompt_bindings),
-        execution_profile=pinned_to_json(_PINS.execution_profile),
-        priority_matcher_version="priority-matcher/v1",
+def test_the_built_snapshot_digest_is_the_sha256_of_its_canonical_payload(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The parser version is the installed markdown-it version: pinned, so a dependency
+    # bump does not move the golden.
+    monkeypatch.setattr(prepare_policy_snapshot, "PARSER_VERSION", "4.0.0")
+    golden = (
+        f'{{"defaults_checksum":"{"2" * 64}",'
+        '"documents":['
+        '{"path":".review/rules.md","presence":"present",'
+        '"raw_sha256":"1ac66841a681c698a3717859efd94bc557b097c91c76720ace1376f39f4be226",'
+        '"text_sha256":"3e88e52aa850f130e9d8a5154f8822d1cff04b26239956ae5cbc0e94522858e9"},'
+        '{"path":"AGENTS.md","presence":"missing","raw_sha256":null,"text_sha256":null}],'
+        '"exact_parser_version":"4.0.0",'
+        '"execution_profile":{"budget_profile_version":null,"conventions_model":"model-c",'
+        '"counter_version":null,"fallback_conventions_model":null,'
+        '"fallback_provider_route":null,"fallback_review_model":null,'
+        '"fallback_verifier_model":null,"max_calls_per_run":4,"max_input_tokens":60000,'
+        '"max_policy_tokens":12000,"primary_provider_route":null,"profile_name":"fast",'
+        '"recovery_profile_version":null,"response_schema_version":null,'
+        '"review_model":"model-a","temperature":null,"tokenizer_version":null,'
+        '"verifier_model":""},'
+        '"ignore_digest":"24ab4f16f70b7124f9af6fd8e6000572622dc1f868f1980616b2519fd03c9821",'
+        '"limits_version":"policy-limits/v1",'
+        '"parser_profile":"rules-markdown/v1",'
+        f'"policy_base_sha":"{"b" * 40}",'
+        '"priority_matcher_version":"priority-matcher/v1",'
+        '"prompt_bindings":{"conventions_checksum":"","conventions_id":null,'
+        '"conventions_key":"review.conventions","conventions_version":"v2",'
+        f'"review_system_checksum":"{"3" * 64}",'
+        '"review_system_id":"00000000-0000-0000-0000-00000000001f",'
+        '"review_system_key":"review.system","review_system_version":"v2",'
+        '"verifier_checksum":"","verifier_id":null,"verifier_key":"review.verifier",'
+        '"verifier_version":"v2"},'
+        '"schema_version":1}'
     )
 
-    assert snapshot.policy_digest == sha256(canonical.encode("utf-8")).hexdigest()
+    assert _snapshot().policy_digest == sha256(golden.encode("utf-8")).hexdigest()
 
 
 def test_the_ignore_digest_formula_is_pinned() -> None:
