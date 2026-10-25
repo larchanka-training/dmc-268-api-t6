@@ -352,7 +352,10 @@ docker compose up -d worker        # сервис worker в docker-compose.yml
 ненастроенном шлюзе; `GITHUB_APP_ID` и
 `GITHUB_APP_PRIVATE_KEY` необязательны: без них процесс стартует, пишет предупреждение,
 а sweep «2 мин без CI», публикация в GitHub (ревью и check-run), consumer `index.repo`
-и сверка индекса с HEAD выключены; без consumer выключена и рассылка пробуждений индекса. `WORKER_ID`
+и сверка индекса с HEAD выключены; без consumer выключена и рассылка пробуждений индекса.
+`GITLAB_TOKEN` и `GITLAB_BASE_URL` (#97) включают публикацию discussions: без токена GitLab-прогон
+остаётся в `publishing` и HTTP к GitLab нет; `GITLAB_BASE_URL` — корень инстанса, код добавляет
+`/api/v4`, по умолчанию `https://gitlab.com`. `WORKER_ID`
 (по умолчанию `hostname:pid`) пишется в `runs.worker_id`, `PORTAL_URL` даёт ссылку на
 прогон в check-run. Некорректный непустой `PORTAL_URL` не даёт worker стартовать;
 [проверка и восстановление](SECRETS.md#portal_url) описаны в операторской документации. `CODE_INDEX_*` (#142) настраивают индексатор графа, а

@@ -12,7 +12,14 @@ from uuid import UUID
 
 from app.bootstrap.postgres_listen import listen_notify, notify_listener
 from app.modules.reviews.application.run_events import RunStep
+from app.modules.reviews.infrastructure.llm.models import (
+    CONVENTIONS_OPERATION,
+    REVIEW_OPERATION,
+)
+from app.modules.reviews.infrastructure.llm_call_trace import LLM_CALL_TOOL
 from app.modules.reviews.infrastructure.run_action_records import CHANNEL
+
+_SSE_LLM_OPERATIONS = frozenset({CONVENTIONS_OPERATION, REVIEW_OPERATION})
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -34,11 +41,11 @@ def _event(payload: str) -> RunStep | None:
             raise ValueError
         tool = str(data["tool"])
         llm_operation: str | None = None
-        if tool == "llm.call":
+        if tool == LLM_CALL_TOOL:
             raw_operation = data.get("llm_operation")
             if raw_operation is not None:
                 llm_operation = str(raw_operation)
-                if llm_operation not in ("conventions", "review"):
+                if llm_operation not in _SSE_LLM_OPERATIONS:
                     raise ValueError
         return RunStep(
             run_id=UUID(data["run_id"]),

@@ -885,13 +885,15 @@ class FakeSqlAlchemySession:
     def __init__(self) -> None:
         self.rows: list[object] = []
         self.flushes = 0
-        self._scalar_values = iter((1, -1))
 
     async def execute(self, statement: object) -> EmptyResult:
         return EmptyResult()
 
     async def scalar(self, statement: object) -> int:
-        return next(self._scalar_values, -1)
+        text = str(statement)
+        if "attempt" in text:
+            return 1
+        return -1
 
     def add(self, row: object) -> None:
         self.rows.append(row)

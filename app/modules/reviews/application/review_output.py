@@ -601,7 +601,12 @@ class ReviewOutputHandler(Protocol):
 
 
 class PublishReviewOutput:
-    """Persist a validated model answer, then publish outside database transactions."""
+    """Persist a validated model answer, then publish outside database transactions.
+
+    Inline path used when the worker is given no queue output. The production queue
+    path is ``StoreReviewOutput``: both append the overflow footer; only the queue
+    path can add the portal run link.
+    """
 
     def __init__(
         self,
@@ -669,6 +674,20 @@ class PublishReviewOutput:
             allowed_v2_rules=v2_rules_to_use,
             pre_dropped=pre_dropped,
             apply_severity_threshold=effective_threshold is None,
+        )
+        from app.modules.reviews.application.findings_post_processor import (
+            finalize_stored_review_body,
+        )
+
+        processed = finalize_stored_review_body(
+            parsed,
+            processed,
+            checked_paths=context.checked_paths,
+            severity_threshold=threshold_to_use,
+            below_threshold=sum(
+                1 for item in processed.dropped if item.drop_reason == "severity_threshold"
+            ),
+            run_url=None,
         )
         async with self._uow_factory() as uow:
             publication = await uow.reviews.store_review_output(run_id, answer, parsed, processed)

@@ -13,7 +13,10 @@ import pytest
 from app.modules.reviews.application.diff_map import DiffMap, VcsProviderName, build_diff_map
 from app.modules.reviews.application.findings_post_processor import (
     FindingsPostProcessor,
+    _format_checked_files,
     finalize_stored_review_body,
+    format_body_only_overflow_footer,
+    format_body_only_overflow_footer_without_url,
 )
 from app.modules.reviews.application.prompt_builder import PullRequestMeta
 from app.modules.reviews.application.publish_run_review import move_inline_to_body
@@ -130,13 +133,24 @@ def process(  # type: ignore[no-untyped-def]
     checked_paths: frozenset[str] | None = None,
     severity_threshold: SeverityThresholdValue = "all",
 ):
+    resolved_map = diff_map if diff_map is not None else _default_diff_map()
+    paths = checked_paths if checked_paths is not None else _paths_of(resolved_map)
     return FindingsPostProcessor.from_default_patterns().process(
         output(*findings),
-        diff_map=diff_map if diff_map is not None else _default_diff_map(),
-        checked_paths=checked_paths,
+        diff_map=resolved_map,
+        checked_paths=paths,
         rule_names=frozenset({"Naming Consistency"}),
         repository_max_inline=max_inline,
         severity_threshold=severity_threshold,
+    )
+
+
+def _paths_of(diff_map: DiffMap) -> frozenset[str]:
+    return frozenset(
+        path
+        for file in diff_map.files
+        for path in (file.new_path, file.old_path)
+        if path is not None
     )
 
 
@@ -156,10 +170,10 @@ def _count_listed_additional_findings(review_body: str) -> int:
 
 def _parse_body_only_overflow_footer_count(review_body: str) -> int:
     """Read ``N`` from a store-layer overflow footer (with or without a run URL)."""
-    with_url = re.search(r"\n\n\*\*Ещё (\d+) находок:\*\*", review_body)
+    with_url = re.search(r"\n\n\*\*Ещё (\d+) наход(?:ка|ки|ок):\*\*", review_body)
     if with_url is not None:
         return int(with_url.group(1))
-    without_url = re.search(r"\n\n\*\*Ещё (\d+) находок\*\*", review_body)
+    without_url = re.search(r"\n\n\*\*Ещё (\d+) наход(?:ка|ки|ок)\*\*", review_body)
     return int(without_url.group(1)) if without_url is not None else 0
 
 
@@ -276,9 +290,11 @@ def test_default_cap_classifies_fixture_as_ten_inline_and_four_body_only() -> No
         summary=ReviewSummary.model_validate(cast(dict[str, object], payload["summary"])),
     )
 
+    example_diff = _added_file_diff_map("app/example.py", 14)
     result = FindingsPostProcessor.from_default_patterns().process(
         parsed,
-        diff_map=_added_file_diff_map("app/example.py", 14),
+        diff_map=example_diff,
+        checked_paths=_paths_of(example_diff),
         rule_names=frozenset(),
     )
 
@@ -533,6 +549,21 @@ def test_checked_files_are_none_when_the_diff_has_no_paths() -> None:
     )
 
 
+def test_overflow_phrases_agree_with_russian_cardinals() -> None:
+    assert format_body_only_overflow_footer_without_url(1).endswith("**Ещё 1 находка**")
+    assert format_body_only_overflow_footer(3, "https://ui.test/runs/x").endswith(
+        "**Ещё 3 находки:** https://ui.test/runs/x"
+    )
+    assert format_body_only_overflow_footer_without_url(11).endswith("**Ещё 11 находок**")
+    assert format_body_only_overflow_footer(21, "https://ui.test/runs/x").endswith(
+        "**Ещё 21 находка:** https://ui.test/runs/x"
+    )
+    paths = ("a.py", "b.py", "c.py", "d.py")
+    assert _format_checked_files(paths, 1).endswith("… и ещё 3 файла")
+    assert _format_checked_files(paths[:2], 1).endswith("… и ещё 1 файл")
+    assert _format_checked_files(("a.py",) * 6, 1).endswith("… и ещё 5 файлов")
+
+
 def test_character_cap_drops_only_additional_findings() -> None:
     notes = tuple(
         finding(title=f"Overflow {number}", confidence=0.4, body="x" * 1200)
@@ -561,11 +592,11 @@ def test_character_cap_drops_only_additional_findings() -> None:
         for number in range(1, 7)
     )
 
-    # #170 / D-1: ~60 long checked paths (~58 chars each) plus two body-only findings must
-    # stay within the 4000-char budget. Checked files truncate with ``… и ещё N файлов`` (not
-    # every path as its own bullet). Body-only findings must appear under Additional findings
+    # #170 / D-1: 60 long checked paths (~58 chars each) plus two body-only findings must
+    # stay within the 4000-char budget. Checked files truncate with ``… и ещё N файл/файла/файлов``
+    # (not every path as its own bullet). Body-only findings must appear under Additional findings
     # (overflow footer URL is store/publish — covered in Task 4, not here).
-    long_path_count = 62
+    long_path_count = 60
 
     def long_checked_path(index: int) -> str:
         prefix = f"pkg/file_{index:03d}_"
@@ -616,7 +647,7 @@ def test_character_cap_drops_only_additional_findings() -> None:
         1 for index in range(long_path_count) if f"- {long_checked_path(index)}" in body
     )
     assert listed_long_paths < long_path_count
-    assert "… и ещё" in body and "файлов" in body
+    assert re.search(r"… и ещё \d+ файл(?:а|ов)?", body) is not None
     assert "## Additional findings" in body
     assert "Spill note one" in body
     assert "Spill note two" in body
@@ -654,7 +685,7 @@ def test_finalize_stored_review_body_appends_overflow_footer_within_budget() -> 
     )
     assert finalized.omitted_body_only_count == processed.omitted_body_only_count
     assert finalized.review_body.endswith(run_url)
-    assert "**Ещё 4 находок:**" in finalized.review_body
+    assert "**Ещё 4 находки:**" in finalized.review_body
     assert len(finalized.review_body) <= 4000
     assert _body_only_accounted_in_review_body(finalized.review_body) == 6
 
@@ -677,7 +708,7 @@ def test_finalize_stored_review_body_appends_overflow_count_without_url_when_run
         run_url=None,
     )
     assert finalized.omitted_body_only_count == processed.omitted_body_only_count
-    assert finalized.review_body.endswith("**Ещё 4 находок**")
+    assert finalized.review_body.endswith("**Ещё 4 находки**")
     assert "http" not in finalized.review_body.split("**Ещё")[-1]
     assert len(finalized.review_body) <= 4000
     assert _body_only_accounted_in_review_body(finalized.review_body) == 6
@@ -686,8 +717,9 @@ def test_finalize_stored_review_body_appends_overflow_count_without_url_when_run
 @pytest.mark.parametrize(
     ("footer", "expected"),
     [
-        ("\n\n**Ещё 3 находок:** https://ui.test/runs/x", 3),
-        ("\n\n**Ещё 3 находок**", 3),
+        ("\n\n**Ещё 1 находка:** https://ui.test/runs/x", 1),
+        ("\n\n**Ещё 3 находки**", 3),
+        ("\n\n**Ещё 5 находок:** https://ui.test/runs/x", 5),
     ],
 )
 def test_body_only_accounted_parses_overflow_footer_with_and_without_url(
@@ -874,9 +906,11 @@ def test_inline_cap_counts_only_findings_that_pass_the_threshold() -> None:
         summary=output().summary,
     )
 
+    example_diff = _added_file_diff_map("app/example.py", 14)
     result = FindingsPostProcessor.from_default_patterns().process(
         parsed,
-        diff_map=_added_file_diff_map("app/example.py", 14),
+        diff_map=example_diff,
+        checked_paths=_paths_of(example_diff),
         rule_names=frozenset(),
         severity_threshold="critical",
     )
@@ -927,11 +961,16 @@ def test_all_threshold_keeps_the_ten_findings_fixture_result(
     processor = FindingsPostProcessor.from_default_patterns()
     diff_map = _added_file_diff_map("app/modules/billing/application/charge.py", 20)
 
+    paths = _paths_of(diff_map)
     result = (
-        processor.process(parsed, diff_map=diff_map, rule_names=frozenset())
+        processor.process(parsed, diff_map=diff_map, checked_paths=paths, rule_names=frozenset())
         if threshold is None
         else processor.process(
-            parsed, diff_map=diff_map, rule_names=frozenset(), severity_threshold=threshold
+            parsed,
+            diff_map=diff_map,
+            checked_paths=paths,
+            rule_names=frozenset(),
+            severity_threshold=threshold,
         )
     )
 
@@ -1007,9 +1046,11 @@ def test_findings_post_processor_legacy_nulls_out_v2_rules() -> None:
         summary=ReviewSummary(problem="Problem.", done_well="Done well.", effort="small"),
     )
     # Legacy run: allowed_v2_rules is None
+    main_diff = _added_file_diff_map("app/main.py", 11)
     result = processor.process(
         output,
-        diff_map=_added_file_diff_map("app/main.py", 11),
+        diff_map=main_diff,
+        checked_paths=_paths_of(main_diff),
         rule_names=frozenset(),
         allowed_v2_rules=None,
     )
@@ -1082,9 +1123,11 @@ def test_findings_post_processor_v2_allows_valid_and_rejects_malformed_rules() -
         summary=ReviewSummary(problem="Problem.", done_well="Done well.", effort="small"),
     )
     # V2 run: allowed_v2_rules provided
+    main_diff = _added_file_diff_map("app/main.py", 13)
     result = processor.process(
         output,
-        diff_map=_added_file_diff_map("app/main.py", 13),
+        diff_map=main_diff,
+        checked_paths=_paths_of(main_diff),
         rule_names=frozenset(),
         allowed_v2_rules=frozenset({".review/rules.md", "AGENTS.md"}),
     )
@@ -1124,6 +1167,7 @@ def test_collapsed_range_drops_multiline_suggestion() -> None:
             ),
         ),
         diff_map=diff_map,
+        checked_paths=_paths_of(diff_map),
         rule_names=frozenset(),
     )
 
@@ -1182,9 +1226,11 @@ def test_findings_post_processor_v2_preserves_attribution_for_body_only_findings
     )
 
     # 1. Snapshot run with allowed_v2_rules: attribution must be preserved in body_only!
+    main_diff = _added_file_diff_map("app/main.py", 10)
     result = processor.process(
         output,
-        diff_map=_added_file_diff_map("app/main.py", 10),
+        diff_map=main_diff,
+        checked_paths=_paths_of(main_diff),
         rule_names=frozenset(),
         allowed_v2_rules=frozenset({".review/rules.md"}),
     )
@@ -1195,7 +1241,8 @@ def test_findings_post_processor_v2_preserves_attribution_for_body_only_findings
     # 2. Legacy run without allowed_v2_rules: attribution must be cleared in body_only!
     legacy_result = processor.process(
         output,
-        diff_map=_added_file_diff_map("app/main.py", 10),
+        diff_map=main_diff,
+        checked_paths=_paths_of(main_diff),
         rule_names=frozenset(),
         allowed_v2_rules=None,
     )

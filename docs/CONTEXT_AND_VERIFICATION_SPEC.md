@@ -35,7 +35,7 @@ v1.2 (RAG v1, #140) — [PR #157](https://github.com/larchanka-training/dmc-268-
 маппинг координат, обязательную проверку кандидатов и воспроизводимую публикацию.
 Первая реализация использует GitHub и якоря `RIGHT`; контракт `LEFT` и полный GitLab
 ingress/diff проектируется сразу, внедряется отдельными задачами. Публикация MR discussions
-на GitLab уже есть на `main` (#97, [SD §8.4](SYSTEM_DESIGN.md#84-gitlab), адаптер
+на GitLab уже есть на `main` (#97, [SD §8.4](SYSTEM_DESIGN.md#84-координаты-gitlab-и-надёжная-публикация-107), адаптер
 [`gitlab_review_publication.py`](../app/modules/reviews/infrastructure/gitlab_review_publication.py),
 PIPELINE_SPEC §5.2, таблица «Сбои GitLab»). Embedding-модель, векторный
 поиск, исполнение проекта и автоматическое применение suggestions в эту работу не

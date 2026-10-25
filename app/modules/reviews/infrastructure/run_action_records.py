@@ -11,8 +11,15 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.modules.reviews.application.run_events import utc_rfc3339
+from app.modules.reviews.infrastructure.llm.models import (
+    CONVENTIONS_OPERATION,
+    REVIEW_OPERATION,
+)
+from app.modules.reviews.infrastructure.llm_call_trace import LLM_CALL_TOOL
 from app.modules.reviews.infrastructure.models import Run, RunAction
 from app.modules.reviews.infrastructure.run_action_payloads import place_response
+
+_SSE_LLM_OPERATIONS = frozenset({CONVENTIONS_OPERATION, REVIEW_OPERATION})
 
 CHANNEL = "run_step"
 
@@ -75,9 +82,9 @@ async def insert_run_action(
         "duration_ms": duration_ms,
         "attempt": run_attempt,
     }
-    if tool == "llm.call":
+    if tool == LLM_CALL_TOOL:
         operation = request.get("operation")
-        if operation in ("conventions", "review"):
+        if operation in _SSE_LLM_OPERATIONS:
             notify["llm_operation"] = operation
     payload = json.dumps(notify, separators=(",", ":"))
     await session.execute(select(func.pg_notify(CHANNEL, payload)))

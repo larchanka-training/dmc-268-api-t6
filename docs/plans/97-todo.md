@@ -19,8 +19,8 @@ built. The check-run title stays `AI-ревью: {verdict}`.
 - [x] For a processed review, `review_body` contains `**Verdict:**` with
       `blocking`, `attention`, or `clean` from the non-dropped findings, a
       `**Risk summary:**` line with `critical`, `high`, `medium`, `low`, and
-      `info` counts, and a `**Checked files:**` list of the sorted `hunk_lines`
-      paths (`(none)` when there are no paths).
+      `info` counts, and a       `**Checked files:**` list of the sorted paths whose `review_patch` is
+      non-null (`(none)` when there are no paths; #170 D-2).
 - [x] Main issue, Done well, Effort, and Additional findings remain. A
       coordinate-style append still sits after the overview. **Body budget:** the
       stored overview is ≤ 4000 characters with whole finding bullets only;
@@ -34,7 +34,7 @@ built. The check-run title stays `AI-ревью: {verdict}`.
 - [x] RED: a post-processor test fails because the body has no verdict, risk
       summary, or checked paths.
 - [x] GREEN: render the overview from `verdict()`, `severity_counts()`, and
-      `hunk_lines`, then run the gates.
+      checked paths (`review_patch` non-null), then run the gates.
 
 **Dependencies:** None
 

@@ -16,7 +16,8 @@ import pytest
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from app.bootstrap.run_step_listener import listen_forever as listen_run_steps
+from app.bootstrap.run_step_listener import _event
+from app.bootstrap.run_step_listener import listen_forever as listen_run_steps  # noqa: I001
 from app.bootstrap.run_update_listener import listen_forever as listen_run_updates
 from app.modules.reviews.application.conventions import CachedConventions, ConventionsFile
 from app.modules.reviews.application.findings_post_processor import ProcessedReviewOutput
@@ -131,6 +132,65 @@ def test_committed_trace_notifies_run_step_and_a_rollback_does_not(env: Env) -> 
         _step(run_id, "github.publish_review", 4, True, 9),
     ]
     assert all(payload["attempt"] == RUN_ATTEMPT for payload in received)
+
+
+@pytest.mark.integration
+def test_conventions_on_attempt_two_notifies_a_frame_and_verification_does_not(env: Env) -> None:
+    engine = env.engine()
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    trace = TransactionalRunTrace(partial(SqlAlchemyRunTraceUnitOfWork, factory))
+    conninfo = env.database_url.replace("postgresql+psycopg://", "postgresql://")
+
+    async def scenario() -> tuple[str, list[dict[str, object]]]:
+        run_id = await insert_queued_run(factory)
+        async with factory() as session, session.begin():
+            await session.execute(
+                text("UPDATE runs SET attempt = 2 WHERE id = :id"),
+                {"id": run_id},
+            )
+        connection = await psycopg.AsyncConnection.connect(conninfo, autocommit=True)
+        await connection.execute("LISTEN run_step")
+        try:
+            await trace.record(
+                run_id,
+                "llm.call",
+                {"operation": "conventions"},
+                {"files": []},
+                STARTED,
+                4,
+            )
+            await trace.record(
+                run_id,
+                "llm.call",
+                {"operation": "verification"},
+                {"ok": True},
+                STARTED,
+                5,
+            )
+            received: list[dict[str, object]] = []
+            async with asyncio.timeout(2):
+                async for notify in connection.notifies():
+                    payload = json.loads(notify.payload)
+                    if payload.get("run_id") != str(run_id):
+                        continue
+                    received.append(payload)
+                    if len(received) == 2:
+                        break
+            return str(run_id), received
+        finally:
+            await connection.close()
+            await engine.dispose()
+
+    run_id, received = asyncio.run(scenario())
+    assert received == [
+        _step(run_id, "llm.call", 0, True, 4, attempt=2, llm_operation="conventions"),
+        _step(run_id, "llm.call", 1, True, 5, attempt=2),
+    ]
+    assert "llm_operation" not in received[1]
+    frames = [_event(json.dumps(payload)) for payload in received]
+    assert frames[0] is not None and frames[0].llm_operation == "conventions"
+    assert frames[0].attempt == 2
+    assert frames[1] is not None and frames[1].llm_operation is None
 
 
 @pytest.mark.integration

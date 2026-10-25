@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 from dataclasses import dataclass, field
 from types import TracebackType
 from typing import Any, cast
@@ -653,17 +654,46 @@ def test_store_review_output_appends_overflow_footer_with_run_url() -> None:
         },
     }
 
+    from app.modules.reviews.application.review_output import (
+        DroppedCandidateRecord,
+        VerifiedReviewOutput,
+    )
+
     store = StoreReviewOutput(
         cast(Any, lambda: FakeUoW()),
         FakeQueue(),
         worker_id="test-worker",
         run_url=lambda _: run_url,
     )
-    assert asyncio.run(store.execute(RUN_ID, payload)) is True
+    verified = VerifiedReviewOutput(
+        payload,
+        dropped_findings=(
+            DroppedCandidateRecord(
+                finding={
+                    "path": "app/example.py",
+                    "line": 12,
+                    "start_line": None,
+                    "severity": "medium",
+                    "category": "correctness",
+                    "title": "Below the verifier threshold",
+                    "body": "Kept only to label the overview line.",
+                    "suggestion": None,
+                    "confidence": 0.5,
+                    "rule_name": None,
+                },
+                drop_reason="severity_threshold",
+                position=0,
+            ),
+        ),
+        severity_threshold="critical",
+    )
+    assert asyncio.run(store.execute(RUN_ID, verified)) is True
     assert len(stored_processed) == 1
     body = stored_processed[0].review_body
     assert body.endswith(run_url)
-    assert "**Ещё" in body and "находок:" in body
+    assert "Below severity threshold (critical)" in body
+    assert "Below severity threshold (all)" not in body
+    assert re.search(r"\*\*Ещё \d+ наход(?:ка|ки|ок):\*\*", body) is not None
     assert len(body) <= 4000
     response = entered_publishing[0]["postprocess_response"]
     assert response["omitted_body_only_count"] == stored_processed[0].omitted_body_only_count

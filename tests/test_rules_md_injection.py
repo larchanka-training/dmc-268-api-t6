@@ -980,6 +980,7 @@ def test_legacy_post_processing_publishes_no_false_custom_rule_attribution() -> 
     processed = FindingsPostProcessor.from_default_patterns().process(
         parsed,
         diff_map=_added_file_diff_map(DIFF_PATH, DEFECT_LINE),
+        checked_paths=frozenset({DIFF_PATH}),
         rule_names=frozenset({"sql-safety"}),
     )
 

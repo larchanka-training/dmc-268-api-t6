@@ -26,7 +26,7 @@ GitHub webhook → `webhook-api` (HMAC, delivery idempotency) → PostgreSQL `Ru
 
 Текущий legacy `ReviewOutput` — объект `{findings, summary}`, максимум 10 findings, форма из [JSON Schema](../review/schemas/review-output.schema.json). Целевой `ReviewOutput v2` сохраняет предел и координаты `path/start_line/line` на **новой** стороне diff, добавляет обязательные `evidence_refs` и атрибуцию по [RULES_FORMAT_SPEC §8](RULES_FORMAT_SPEC.md#8-атрибуция-prompt-envelope-и-защита-от-инъекций). `side: RIGHT` задаёт backend, SHA берётся из `Run.head_sha`; схема и prompt обновляются вместе. Однострочная находка: `start_line: null`, API `newLine = line`, `endLine = null`; диапазон: `start_line < line`, API `newLine = start_line`, `endLine = line`. Будущий v3 добавит явный side сквозь API/storage/eval/hash; для LEFT и GitLab diff ingress
 предусмотрены отдельные contract fixtures, без заявления о готовой интеграции. Публикация
-GitLab MR discussions на `main` покрыта #97 ([`test_publish_run_review.py`](../tests/test_publish_run_review.py),
+GitLab MR discussions на `main` покрыта #97 ([`test_gitlab_review_publication.py`](../tests/test_gitlab_review_publication.py),
 [`gitlab_review_publication.py`](../app/modules/reviews/infrastructure/gitlab_review_publication.py),
 PIPELINE_SPEC §5.2, таблица «Сбои GitLab»).
 
@@ -119,7 +119,7 @@ API baseline gates локально и в обязательном CI: `uv run r
 | Неверный snapshot/hash/revision или источник без provenance перед любой стадией | Guard останавливает отправку с `policy_context_violation`/ошибкой целостности; запрещённых LLM-вызовов нет. Кэш не обходит guard. Manifests/excerpts workspace-scoped и не выводятся в обычные логи. |
 | V2 finding с непоказанным block/строкой, неверным source или revision; ссылка неверной формы | Синтаксическая ошибка инвалидирует весь ответ; семантически недостоверная evidence отбрасывает кандидата и отражается в coverage. Все строки диапазона должны быть показаны, не только края. |
 | Якорь вне hunk, диапазон через hunks/непоказанную строку, несуществующая строка, deletion-only | General-only лишь для существующего полностью показанного RIGHT диапазона того же файла/revision, затем verifier. Невалидный якорь не становится общим замечанием и не переносится на ближайшую строку. Deletion-only без RIGHT якоря → `left_anchor_unsupported`, partial до v3. |
-| DiffMap: добавление/удаление, rename/copy, zero-length hunk, context/deletion/addition, no-newline marker, binary/missing/truncated patch | Счётчики hunks и обе стороны согласованы с provider refs; marker не расходует строку; пути не угадываются. GitHub payload использует line/side и start_line/start_side, не legacy position. GitLab fixtures проверяют version/base/start/head refs, old/new paths и диапазоны (CONTEXT §9.5); live GitLab diff/LEFT отложены. Публикация discussions — #97, gateway-тесты в `test_publish_run_review.py`. |
+| DiffMap: добавление/удаление, rename/copy, zero-length hunk, context/deletion/addition, no-newline marker, binary/missing/truncated patch | Счётчики hunks и обе стороны согласованы с provider refs; marker не расходует строку; пути не угадываются. GitHub payload использует line/side и start_line/start_side, не legacy position. GitLab fixtures проверяют version/base/start/head refs, old/new paths и диапазоны (CONTEXT §9.5); live GitLab diff/LEFT отложены. Публикация discussions — #97, gateway-тесты в `test_gitlab_review_publication.py`. |
 | Два разных дефекта на одном якоре; точный дубль; lint-похожие слова в security finding | Только точный дубль устраняется; lint-filter не скрывает содержательный дефект. Кандидаты после фильтров неизменяемы; verifier не дописывает находки, координаты, severity или suggestion. |
 | Пустой набор после фильтров; непустой набор; supported/contradicted/insufficient | Пустому verifier не нужен, повторный поиск не запускается. Для непустого каждый ID получает ровно одно решение; только supported публикуется. Неверная suggestion не исправляется скрытно. Insufficient отдельно от опровержения и даёт partial. |
 | Лишний/повторный/пропущенный ID, неверная ref/requirement ref в verifier response | Весь ответ невалиден, удобное подмножество решений не принимается. Recovery только в общем бюджете, затем `verification_invalid_output`, без retry run и публикации. |
@@ -581,7 +581,7 @@ Adversarial eval использует пары одинакового дефек
 остаются изменённые RIGHT-строки), ground truth — на этой строке. Чисто удаляющие
 кейсы в recall гейта не входят: ReviewOutput v2 не выражает их якорь
 (`left_anchor_unsupported`, [ADR 0001 §8.3](adr/0001-graph-rag-v1.md#83-удалённый-или-переименованный-экспорт)).
-Сквозная публикация GitLab MR не входит в recall-гейт v2; она покрыта pytest #97 (§1 выше).
+Живая сквозная публикация GitLab MR не входит в recall-гейт v2. Pytest #97 покрывает адаптер на fakes (§1 выше), не публикацию в настоящий GitLab.
 
 A/B на одном корпусе: одна версия промпта (при выключенном RAG она рендерит пустую
 секцию retrieved) и одна модель; плечо A без RAG, плечо B с RAG; offline replay с

@@ -48,8 +48,6 @@ Bucket = Literal["inline", "body_only", "dropped"]
 _ATTRIBUTION_PREFIX = "According to custom instructions in '"
 _ATTRIBUTION_RE = re.compile(r"^According to custom instructions in '(?P<name>[^']+)' \([^)]*\): ")
 REVIEW_BODY_CHAR_BUDGET = 4000
-_CHECKED_FILES_OVERFLOW = "… и ещё {count} файлов"
-_BODY_ONLY_OVERFLOW_FOOTER = "**Ещё {count} находок:** {run_url}"
 _ADDITIONAL_FINDINGS_HEADING = "## Additional findings"
 
 
@@ -128,7 +126,7 @@ class FindingsPostProcessor:
         allowed_v2_rules: frozenset[str] | None = None,
         pre_dropped: Sequence[ProcessedFinding] = (),
         apply_severity_threshold: bool = True,
-        checked_paths: frozenset[str] | None = None,
+        checked_paths: frozenset[str],
     ) -> ProcessedReviewOutput:
         """Classify every finding once in the documented stage order.
 
@@ -189,9 +187,7 @@ class FindingsPostProcessor:
         total_below_threshold = sum(
             1 for item in dropped if item.drop_reason == "severity_threshold"
         )
-        overview_paths = (
-            checked_paths if checked_paths is not None else frozenset(_checked_paths(diff_map))
-        )
+        overview_paths = checked_paths
         review_body, omitted_body_only_count = _pack_review_body(
             output,
             tuple(inline + body_only),
@@ -321,15 +317,6 @@ def _classify_anchor(
     return finding, "body_only"
 
 
-def _checked_paths(diff_map: DiffMap) -> tuple[str, ...]:
-    paths: set[str] = set()
-    for file in diff_map.files:
-        path = file.new_path or file.old_path
-        if path is not None:
-            paths.add(path)
-    return tuple(sorted(paths))
-
-
 def _normalize_title(title: str) -> str:
     return re.sub(r"[^a-z0-9]+", " ", title.lower()).strip()
 
@@ -344,8 +331,24 @@ def _format_checked_files(sorted_paths: tuple[str, ...], listed_count: int) -> s
     lines = [f"- {path}" for path in sorted_paths[:listed_count]]
     omitted = len(sorted_paths) - listed_count
     if omitted > 0:
-        lines.append(f"- {_CHECKED_FILES_OVERFLOW.format(count=omitted)}")
+        lines.append(f"- … и ещё {_ru_cardinal(omitted, 'файл', 'файла', 'файлов')}")
     return "\n".join(lines)
+
+
+def _ru_cardinal(count: int, one: str, few: str, many: str) -> str:
+    """Russian cardinal agreement: 1 файл, 2 файла, 5 файлов, 11 файлов, 21 файл."""
+    remainder = abs(count) % 100
+    if 11 <= remainder <= 14:
+        word = many
+    else:
+        last = remainder % 10
+        if last == 1:
+            word = one
+        elif 2 <= last <= 4:
+            word = few
+        else:
+            word = many
+    return f"{count} {word}"
 
 
 def _overview_block(
@@ -375,12 +378,14 @@ def _overview_block(
 
 def format_body_only_overflow_footer(count: int, run_url: str) -> str:
     """Russian overflow line appended at store time when the packer omitted body-only bullets."""
-    return f"\n\n{_BODY_ONLY_OVERFLOW_FOOTER.format(count=count, run_url=run_url)}"
+    phrase = _ru_cardinal(count, "находка", "находки", "находок")
+    return f"\n\n**Ещё {phrase}:** {run_url}"
 
 
 def format_body_only_overflow_footer_without_url(count: int) -> str:
     """Overflow count without a run link when the portal URL is not known yet."""
-    return f"\n\n**Ещё {count} находок**"
+    phrase = _ru_cardinal(count, "находка", "находки", "находок")
+    return f"\n\n**Ещё {phrase}**"
 
 
 def finalize_stored_review_body(

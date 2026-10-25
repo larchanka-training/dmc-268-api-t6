@@ -170,7 +170,7 @@ class StoreReviewOutput:
             parsed,
             processed,
             checked_paths=context.checked_paths,
-            severity_threshold=context.severity_threshold,
+            severity_threshold=threshold_to_use,
             below_threshold=sum(
                 1 for item in processed.dropped if item.drop_reason == "severity_threshold"
             ),

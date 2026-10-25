@@ -11,6 +11,16 @@ from app.common.infrastructure.db.enums import FindingSeverity, RunState
 from app.modules.reviews.infrastructure.run_lifecycle_store import SqlAlchemyRunLifecycleStore
 
 
+def _check_run_scalar(statement: object) -> bool | int:
+    """Answer ``check_run_report`` scalars by the query, not by call order."""
+    text = str(statement)
+    if "summary_only" in text or "bool_or" in text:
+        return False
+    if "count" in text:
+        return 0
+    raise AssertionError(text)
+
+
 def _finding(*, inline: bool) -> SimpleNamespace:
     return SimpleNamespace(inline_comment=inline, severity=FindingSeverity.MEDIUM)
 
@@ -34,7 +44,7 @@ def test_check_run_report_body_count_is_non_inline_findings() -> None:
             one_or_none=MagicMock(return_value=(run, None, repository, installation))
         )
     )
-    session.scalar = AsyncMock(side_effect=[False, 0])
+    session.scalar = AsyncMock(side_effect=_check_run_scalar)
     store = SqlAlchemyRunLifecycleStore(session)
     store._published_findings = AsyncMock(  # type: ignore[method-assign]
         return_value=(
@@ -71,7 +81,7 @@ def test_check_run_report_body_count_includes_findings_moved_from_inline() -> No
             one_or_none=MagicMock(return_value=(run, None, repository, installation))
         )
     )
-    session.scalar = AsyncMock(side_effect=[False, 0])
+    session.scalar = AsyncMock(side_effect=_check_run_scalar)
     store = SqlAlchemyRunLifecycleStore(session)
     store._published_findings = AsyncMock(  # type: ignore[method-assign]
         return_value=tuple(_finding(inline=False) for _ in range(3))

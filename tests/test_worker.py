@@ -402,3 +402,62 @@ def test_github_adapters_makes_exactly_one_compare_request_per_run() -> None:
     assert adapters is not None
     run_source = adapters.run_source(UUID("00000000-0000-0000-0000-000000000100"))
     assert getattr(run_source, "_merge_base", None) is None
+
+
+def test_compose_worker_passes_portal_run_url_to_store_review_output(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    """A missing or constant ``run_url`` must fail: the portal link is wired here (#170)."""
+    from datetime import UTC, datetime
+
+    from app.modules.reviews.application.handle_review_run import ClaimedAttempt
+
+    captured: dict[str, Any] = {}
+
+    class RecordingStore:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            captured["run_url"] = kwargs["run_url"]
+
+    async def stop_after_store(*args: object, **kwargs: object) -> bool:
+        return True
+
+    monkeypatch.setattr(worker, "StoreReviewOutput", RecordingStore)
+    monkeypatch.setattr(worker, "process_review_run", stop_after_store)
+    settings = worker.WorkerSettings(
+        database_url="unused",
+        rabbitmq_url="unused",
+        worker_id="worker-1",
+        github_app_id="1",
+        github_private_key="unused",
+        github_api_url="https://api.github.test",
+        portal_url="https://portal.test/",
+    )
+    github = worker.GitHubAdapters(
+        vcs=cast(Any, object()),
+        check_runs=cast(Any, object()),
+        reviews=cast(Any, object()),
+        eligibility=cast(Any, object()),
+        run_source=lambda _run_id: cast(Any, None),
+    )
+    process = worker.compose_worker_process(
+        settings=settings,
+        session_factory=cast(async_sessionmaker[AsyncSession], object()),
+        queue=cast(Any, object()),
+        github=github,
+    )
+    run_id = UUID("11111111-2222-3333-4444-555555555555")
+    claimed = ClaimedAttempt(
+        run_id=run_id,
+        workspace_id=UUID("00000000-0000-0000-0000-000000000001"),
+        attempt=1,
+        engine="fast",
+        deadline=datetime(2026, 10, 25, tzinfo=UTC),
+        prompt_version_id=UUID("00000000-0000-0000-0000-000000000002"),
+        rule_version_id=UUID("00000000-0000-0000-0000-000000000003"),
+        worker_id="worker-1",
+    )
+
+    assert asyncio.run(process.handle_run._pipeline(claimed)) is True
+
+    run_url = cast(Any, captured["run_url"])
+    assert run_url(run_id) == f"https://portal.test/runs/{run_id}"

@@ -447,6 +447,7 @@ def _processed_with_unanchored() -> ProcessedReviewOutput:
     return FindingsPostProcessor.from_default_patterns().process(
         parsed,
         diff_map=_EXAMPLE_DIFF_MAP,
+        checked_paths=frozenset({"app/example.py"}),
         rule_names=frozenset(),
     )
 
