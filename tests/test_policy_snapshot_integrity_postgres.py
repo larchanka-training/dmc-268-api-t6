@@ -32,7 +32,7 @@ from app.modules.reviews.application.review_ignore import parse_review_ignore
 from app.modules.reviews.infrastructure.policy_snapshot_unit_of_work import (
     SqlAlchemyPolicySnapshotUnitOfWork,
 )
-from tests.portal_postgres import RUN_DONE, Env, portal_schema
+from tests.portal_postgres import PROMPT, RULE_A, RULE_B, RUN_DONE, Env, portal_schema
 from tests.test_policy_snapshot_postgres import _RAW, _documents
 
 _PROFILE = ExecutionProfile.fast("model-a", "", "model-c")
@@ -266,6 +266,48 @@ def test_a_key_a_later_version_stored_in_the_profile_json_passes_on_read(env: En
 
             # The typed profile has no such field; the digest still covers the stored key.
             assert read == replace(stored, policy_digest=digest)
+        finally:
+            await engine.dispose()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize(
+    ("sql", "params", "field"),
+    [
+        (
+            "UPDATE rule_versions SET checksum = repeat('0', 64) WHERE id = :id",
+            {"id": RULE_A},
+            "defaults_checksum",
+        ),
+        (
+            "UPDATE prompt_versions SET checksum = repeat('0', 64) WHERE id = :id",
+            {"id": PROMPT},
+            "prompt_bindings",
+        ),
+        (
+            "UPDATE runs SET rule_version_id = :rule WHERE id = :id",
+            {"id": RUN_DONE, "rule": RULE_B},
+            "service_defaults_rule_version_id",
+        ),
+    ],
+    ids=["rule-checksum", "prompt-checksum", "run-rule-version"],
+)
+def test_a_pinned_version_that_changed_after_the_snapshot_fails_on_read(
+    env: Env, sql: str, params: dict[str, Any], field: str
+) -> None:
+    async def scenario() -> None:
+        engine = env.engine()
+        factory = async_sessionmaker(engine)
+        try:
+            stored = await _store(factory)
+            async with _uow(factory) as work:
+                assert await work.policy.get_snapshot(RUN_DONE) == stored
+
+            await _tamper(factory, sql, params)
+
+            _assert_integrity_error(await _read_error(factory), field)
         finally:
             await engine.dispose()
 
