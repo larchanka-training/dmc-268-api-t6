@@ -35,7 +35,7 @@ http://:9180 {
 # rollout and, after it, while the service is down or restarting. The text speaks of the service
 # behind the address, not of the host: on ui.* the API can be down behind a running UI. The routes
 # below are already final, so a rollout needs no Caddyfile change; only APP_DOMAIN and www move
-# to the prod landing once it exists.
+# to landing-prod:8080 and docs-prod:8080 once the prod landing and docs exist.
 (not_deployed) {
 	handle_errors 502 {
 		import hsts
@@ -124,7 +124,8 @@ staging.{$APP_DOMAIN}, staging-www.{$APP_DOMAIN} {
 }
 
 # The main domain shows the staging landing and docs until a prod rollout exists; then these two
-# hosts move to the prod landing and docs upstreams.
+# hosts move to landing-prod:8080 and docs-prod:8080. Both sites are static, with no backend and
+# no data, and their links go to staging-ui (the "Заглушка" paragraph of docs/CICD.md §8.2).
 {$APP_DOMAIN}, www.{$APP_DOMAIN} {
 	import hsts
 	import not_deployed

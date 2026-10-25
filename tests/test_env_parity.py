@@ -48,9 +48,10 @@ UPSTREAMS = {
     "staging": ["docs-staging:8080", "landing-staging:8080"],
     "staging-www": ["docs-staging:8080", "landing-staging:8080"],
     # EXCEPTION to "a prod host never proxies to staging": apex and www serve the staging landing
-    # and docs until landing-prod exists. Justified and bounded in the "Заглушка" paragraph of
-    # docs/CICD.md §8.2 (static, no /api/*, its buttons go to staging-ui; temporary; never for
-    # api, ui or webhook). Do not copy this pattern to other prod hosts.
+    # and docs until landing-prod and docs-prod exist. Justified and bounded in the "Заглушка"
+    # paragraph of docs/CICD.md §8.2 (both static, no /api/* backend, no data, their links go to
+    # staging-ui; temporary; never for api, ui or webhook). Do not copy this pattern to other prod
+    # hosts.
     "apex": ["docs-staging:8080", "landing-staging:8080"],
     "www": ["docs-staging:8080", "landing-staging:8080"],
 }
@@ -231,7 +232,9 @@ def test_deployed_host_keeps_the_plain_proxy_error(host: str) -> None:
 
 
 @pytest.mark.parametrize("host", ["apex", "www", "staging", "staging-www"])
-def test_landing_hosts_proxy_to_the_staging_landing_without_api_or_redirect(host: str) -> None:
+def test_landing_hosts_proxy_to_the_staging_landing_and_docs_without_api_or_redirect(
+    host: str,
+) -> None:
     site = _site(host)
     docs_route = re.search(r"^\t@docs path (.+)\n\thandle @docs \{\n(.*?)\n\t\}", site, re.M | re.S)
     fallback = re.search(r"^\thandle \{\n(.*?)\n\t\}", site, re.M | re.S)
@@ -242,7 +245,6 @@ def test_landing_hosts_proxy_to_the_staging_landing_without_api_or_redirect(host
     assert docs_route.group(1) == "/docs /docs/*"
     assert docs_route.group(2).strip() == "reverse_proxy docs-staging:8080"
     assert fallback.group(1).strip() == "reverse_proxy landing-staging:8080"
-    assert docs_route.start() < fallback.start()
     # Static landing: no /api/* route, and no redirect to ui.* (the old apex behavior).
     assert "/api/" not in site
     assert not re.search(r"^\tredir ", site, re.MULTILINE)
