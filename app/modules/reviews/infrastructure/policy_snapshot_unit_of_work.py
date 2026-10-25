@@ -181,11 +181,31 @@ class SqlAlchemyPolicySnapshotStore:
             .where(RunPolicyDocument.run_id == run_id)
             .order_by(RunPolicyDocument.path)
         )
-        documents = tuple(_document(row) for row in rows)
-        # A retry builds its snapshot from these rows: they are checked on every read.
-        for item in documents:
+        documents: list[LoadedPolicyDocument] = []
+        for row in rows:
+            try:
+                item = _document(row)
+            except ValueError as exc:
+                # PolicyDocument ties every content field to the presence; the CHECK of
+                # migration 0029 leaves byte_count and line_count out. The fields are
+                # named, never their values.
+                # CONTRACT: RunPolicyDocument columns carry the PolicyDocument field names.
+                present = row.presence == DocumentPresence.PRESENT.value
+                wrong = ", ".join(
+                    field.name
+                    for field in fields(PolicyDocument)
+                    if field.name not in {"path", "presence"}
+                    and (getattr(row, field.name) is None) == present
+                )
+                raise PolicyError(
+                    PolicyErrorCode.SNAPSHOT_INTEGRITY_ERROR,
+                    f"The stored fields of a policy document do not match its presence: {wrong}",
+                    source_path=row.path,
+                ) from exc
+            # A retry builds its snapshot from these rows: they are checked on every read.
             verify_policy_document(item.document, item.raw)
-        return documents
+            documents.append(item)
+        return tuple(documents)
 
     async def stage_documents(
         self, run_id: UUID, documents: tuple[LoadedPolicyDocument, ...]

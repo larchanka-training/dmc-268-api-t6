@@ -162,8 +162,13 @@ def normalize_document(
         text_sha256=sha256(text.encode("utf-8")).hexdigest(),
         text=text,
         byte_count=len(raw),
-        line_count=text.count("\n") + (1 if text and not text.endswith("\n") else 0),
+        line_count=document_line_count(text),
     )
+
+
+def document_line_count(text: str) -> int:
+    """Lines of normalized text; a last line without a newline still counts."""
+    return text.count("\n") + (1 if text and not text.endswith("\n") else 0)
 
 
 def _too_large(path: str, policy_base_sha: str | None, actual: int) -> PolicyError:

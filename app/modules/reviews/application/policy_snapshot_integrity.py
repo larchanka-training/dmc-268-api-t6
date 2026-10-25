@@ -12,6 +12,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from hashlib import sha256
 
+from app.modules.reviews.application.policy_documents import document_line_count
 from app.modules.reviews.application.policy_errors import PolicyError, PolicyErrorCode
 from app.modules.reviews.application.policy_snapshot import PolicyDocument, PolicySnapshot
 from app.modules.reviews.application.prepare_policy_snapshot import (
@@ -35,9 +36,10 @@ def _integrity_error(
 def verify_policy_document(document: PolicyDocument, raw: bytes | None) -> None:
     """Check a staged document against the raw bytes stored with it.
 
-    A missing document only must store no bytes: its other fields are ``None`` by
-    ``PolicyDocument`` and by the database CHECK, and ``policy_digest`` covers its
-    presence and its null checksums.
+    A missing document must only store no bytes: ``PolicyDocument`` forces its other
+    fields to ``None`` (the store reports a row that breaks this as an integrity error;
+    the database CHECK does not cover ``byte_count`` and ``line_count``), and
+    ``policy_digest`` covers its presence and its null checksums.
     """
     if document.is_missing:
         if raw is not None:
@@ -61,6 +63,10 @@ def verify_policy_document(document: PolicyDocument, raw: bytes | None) -> None:
     ):
         raise _integrity_error(
             "The stored text_sha256 does not match the stored text", source_path=document.path
+        )
+    if document.line_count != document_line_count(document.text):
+        raise _integrity_error(
+            "The stored line_count does not match the stored text", source_path=document.path
         )
 
 
@@ -111,13 +117,24 @@ def verify_snapshot_pins(snapshot: PolicySnapshot, pins: RunPolicyPins | None) -
     """Check the snapshot against the versions the run pins (RULES_FORMAT_SPEC §7.1, §7.2).
 
     ``pins`` is read from the run and its version rows; ``None`` means a pinned row is
-    gone. Compared: the service defaults (id and checksum) and every prompt binding (id,
-    checksum, key and version). The execution profile of ``pins`` is the worker's current
-    one, so it is never compared: the first stored snapshot fixed it for the run.
+    gone. Compared: the repository, the pinned base (``Run.base_sha``), the service
+    defaults (id and checksum) and every prompt binding (id, checksum, key and version).
+    The execution profile of ``pins`` is the worker's current one, so it is never
+    compared: the first stored snapshot fixed it for the run.
     """
     if pins is None:
         raise _integrity_error(
             "A pinned version of the run is missing", policy_base_sha=snapshot.policy_base_sha
+        )
+    if snapshot.repository_id != pins.repository_id:
+        raise _integrity_error(
+            "The stored repository_id is not the repository of the run",
+            policy_base_sha=snapshot.policy_base_sha,
+        )
+    if snapshot.policy_base_sha != pins.policy_base_sha:
+        raise _integrity_error(
+            "The stored policy_base_sha is not the pinned base of the run",
+            policy_base_sha=snapshot.policy_base_sha,
         )
     if snapshot.service_defaults_rule_version_id != pins.service_defaults_rule_version_id:
         raise _integrity_error(

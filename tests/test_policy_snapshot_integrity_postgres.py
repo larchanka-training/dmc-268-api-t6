@@ -17,6 +17,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from app.modules.reviews.application.policy_errors import PolicyError, PolicyErrorCode
 from app.modules.reviews.application.policy_snapshot import (
+    AGENTS_DOCUMENT_PATH,
     RULES_DOCUMENT_PATH,
     ExecutionProfile,
     PolicySnapshot,
@@ -32,7 +33,7 @@ from app.modules.reviews.application.review_ignore import parse_review_ignore
 from app.modules.reviews.infrastructure.policy_snapshot_unit_of_work import (
     SqlAlchemyPolicySnapshotUnitOfWork,
 )
-from tests.portal_postgres import PROMPT, RULE_A, RULE_B, RUN_DONE, Env, portal_schema
+from tests.portal_postgres import PR_B, PROMPT, RULE_A, RULE_B, RUN_DONE, Env, portal_schema
 from tests.test_policy_snapshot_postgres import _RAW, _documents
 
 _PROFILE = ExecutionProfile.fast("model-a", "", "model-c")
@@ -129,6 +130,11 @@ _ROW_TAMPERS: list[tuple[str, dict[str, Any], str]] = [
         "ignore_digest",
     ),
     (*_BASE_TAMPER, "policy_digest"),
+    (
+        "UPDATE run_policy_documents SET line_count = 99 WHERE run_id = :id AND path = :path",
+        _RULES,
+        "line_count",
+    ),
 ]
 
 
@@ -136,7 +142,7 @@ _ROW_TAMPERS: list[tuple[str, dict[str, Any], str]] = [
 @pytest.mark.parametrize(
     ("sql", "params", "checksum"),
     _ROW_TAMPERS,
-    ids=["raw-bytes", "text", "raw-sha256", "ignore-patterns", "policy-base-sha"],
+    ids=["raw-bytes", "text", "raw-sha256", "ignore-patterns", "policy-base-sha", "line-count"],
 )
 def test_a_tampered_snapshot_row_fails_on_read(
     env: Env, sql: str, params: dict[str, Any], checksum: str
@@ -233,13 +239,21 @@ def test_an_untouched_retry_reuses_the_stored_snapshot(env: Env) -> None:
 
 
 @pytest.mark.integration
-def test_a_key_a_later_version_stored_in_the_profile_json_passes_on_read(env: Env) -> None:
+@pytest.mark.parametrize("column", ["prompt_bindings", "execution_profile"])
+def test_a_key_a_later_version_stored_in_the_pins_json_passes_on_read(
+    env: Env, column: str
+) -> None:
     async def scenario() -> None:
         engine = env.engine()
         factory = async_sessionmaker(engine)
         try:
             stored = await _store(factory)
-            profile = pinned_to_json(stored.execution_profile) | {"future_knob": "on"}
+            typed = {
+                "prompt_bindings": pinned_to_json(stored.prompt_bindings),
+                "execution_profile": pinned_to_json(stored.execution_profile),
+            }
+            value = typed[column] | {"future_knob": "on"}
+            stored_json = typed | {column: value}
             canonical = canonical_policy_payload(
                 schema_version=stored.schema_version,
                 policy_base_sha=stored.policy_base_sha,
@@ -249,22 +263,22 @@ def test_a_key_a_later_version_stored_in_the_profile_json_passes_on_read(env: En
                 parser_version=stored.parser_version,
                 limits_version=stored.limits_version,
                 defaults_checksum=stored.defaults_checksum,
-                prompt_bindings=pinned_to_json(stored.prompt_bindings),
-                execution_profile=profile,
+                prompt_bindings=stored_json["prompt_bindings"],
+                execution_profile=stored_json["execution_profile"],
                 priority_matcher_version=stored.priority_matcher_version,
             )
             digest = sha256(canonical.encode("utf-8")).hexdigest()
             await _tamper(
                 factory,
-                "UPDATE run_policy_snapshots SET execution_profile = CAST(:profile AS jsonb), "
+                f"UPDATE run_policy_snapshots SET {column} = CAST(:value AS jsonb), "
                 "policy_digest = :digest WHERE run_id = :id",
-                {"id": RUN_DONE, "profile": json.dumps(profile), "digest": digest},
+                {"id": RUN_DONE, "value": json.dumps(value), "digest": digest},
             )
 
             async with _uow(factory) as work:
                 read = await work.policy.get_snapshot(RUN_DONE)
 
-            # The typed profile has no such field; the digest still covers the stored key.
+            # The typed value has no such field; the digest still covers the stored key.
             assert read == replace(stored, policy_digest=digest)
         finally:
             await engine.dispose()
@@ -291,8 +305,19 @@ def test_a_key_a_later_version_stored_in_the_profile_json_passes_on_read(env: En
             {"id": RUN_DONE, "rule": RULE_B},
             "service_defaults_rule_version_id",
         ),
+        (
+            "UPDATE runs SET base_sha = repeat('d', 40) WHERE id = :id",
+            {"id": RUN_DONE},
+            "policy_base_sha",
+        ),
+        (
+            # Another head too: one webhook run per change and head.
+            "UPDATE runs SET code_change_id = :change, head_sha = repeat('9', 40) WHERE id = :id",
+            {"id": RUN_DONE, "change": PR_B},
+            "repository_id",
+        ),
     ],
-    ids=["rule-checksum", "prompt-checksum", "run-rule-version"],
+    ids=["rule-checksum", "prompt-checksum", "run-rule-version", "run-base", "run-repository"],
 )
 def test_a_pinned_version_that_changed_after_the_snapshot_fails_on_read(
     env: Env, sql: str, params: dict[str, Any], field: str
@@ -308,6 +333,54 @@ def test_a_pinned_version_that_changed_after_the_snapshot_fails_on_read(
             await _tamper(factory, sql, params)
 
             _assert_integrity_error(await _read_error(factory), field)
+        finally:
+            await engine.dispose()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize(
+    ("sql", "path", "field"),
+    [
+        (
+            "UPDATE run_policy_documents SET byte_count = NULL WHERE run_id = :id AND path = :path",
+            RULES_DOCUMENT_PATH,
+            "byte_count",
+        ),
+        (
+            "UPDATE run_policy_documents SET line_count = NULL WHERE run_id = :id AND path = :path",
+            RULES_DOCUMENT_PATH,
+            "line_count",
+        ),
+        (
+            "UPDATE run_policy_documents SET byte_count = 7 WHERE run_id = :id AND path = :path",
+            AGENTS_DOCUMENT_PATH,
+            "byte_count",
+        ),
+    ],
+    ids=["present-without-byte-count", "present-without-line-count", "missing-with-byte-count"],
+)
+def test_a_document_row_that_disagrees_with_its_presence_is_an_integrity_error(
+    env: Env, sql: str, path: str, field: str
+) -> None:
+    async def scenario() -> None:
+        engine = env.engine()
+        factory = async_sessionmaker(engine)
+        try:
+            await _store(factory)
+            # The CHECK of migration 0029 does not cover byte_count and line_count.
+            await _tamper(factory, sql, {"id": RUN_DONE, "path": path})
+
+            error = await _read_error(factory)
+
+            # Terminal, not the retryable internal_error of a plain ValueError.
+            assert error.error_code == PolicyErrorCode.SNAPSHOT_INTEGRITY_ERROR.value
+            assert error.source_path == path
+            assert error.message == (
+                f"The stored fields of a policy document do not match its presence: {field}"
+                f" | файл `{path}`"
+            )
         finally:
             await engine.dispose()
 

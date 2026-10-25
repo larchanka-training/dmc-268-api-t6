@@ -117,6 +117,7 @@ def test_a_missing_document_that_stores_bytes_fails() -> None:
         (replace(_rules(), byte_count=len(_RAW) + 1), _RAW, "byte_count"),
         (replace(_rules(), text="# Правила\n\nmore\n"), _RAW, "text_sha256"),
         (replace(_rules(), text_sha256="0" * 64), _RAW, "text_sha256"),
+        (replace(_rules(), line_count=99), _RAW, "line_count"),
     ],
     ids=[
         "raw-bytes",
@@ -126,6 +127,7 @@ def test_a_missing_document_that_stores_bytes_fails() -> None:
         "byte-count",
         "text",
         "text-sha256",
+        "line-count",
     ],
 )
 def test_a_tampered_document_fails_naming_its_checksum(
@@ -203,10 +205,17 @@ def test_tampered_stored_pins_json_fails(bindings: dict[str, Any], profile: dict
     _assert_integrity_error(caught.value, "policy_digest")
 
 
-def test_a_key_a_later_version_stored_in_the_pins_json_passes_when_the_digest_has_it() -> None:
+@pytest.mark.parametrize("column", ["prompt_bindings", "execution_profile"])
+def test_a_key_a_later_version_stored_in_the_pins_json_passes_when_the_digest_has_it(
+    column: str,
+) -> None:
     snapshot = _snapshot()
-    profile = pinned_to_json(snapshot.execution_profile) | {"future_knob": "on"}
-    bindings = pinned_to_json(snapshot.prompt_bindings)
+    typed = {
+        "prompt_bindings": pinned_to_json(snapshot.prompt_bindings),
+        "execution_profile": pinned_to_json(snapshot.execution_profile),
+    }
+    stored_json = typed | {column: typed[column] | {"future_knob": "on"}}
+    bindings, profile = stored_json["prompt_bindings"], stored_json["execution_profile"]
     canonical = canonical_policy_payload(
         schema_version=snapshot.schema_version,
         policy_base_sha=snapshot.policy_base_sha,
@@ -223,8 +232,9 @@ def test_a_key_a_later_version_stored_in_the_pins_json_passes_when_the_digest_ha
     stored = replace(snapshot, policy_digest=sha256(canonical.encode("utf-8")).hexdigest())
 
     _verify(stored, bindings=bindings, profile=profile)
+    # The typed values drop the key: verifying them instead of the stored JSON fails.
     with pytest.raises(PolicyError):
-        _verify(stored, bindings=bindings)
+        _verify(stored, bindings=typed["prompt_bindings"], profile=typed["execution_profile"])
 
 
 def test_a_snapshot_stored_by_another_parser_version_still_passes(
@@ -342,6 +352,8 @@ def test_a_pinned_version_row_that_is_gone_fails() -> None:
 
 
 _PIN_CHANGES: list[tuple[str, RunPolicyPins, str]] = [
+    ("repository-id", replace(_PINS, repository_id=UUID(int=9)), "repository_id"),
+    ("policy-base-sha", replace(_PINS, policy_base_sha="d" * 40), "policy_base_sha"),
     (
         "rule-version-id",
         replace(_PINS, service_defaults_rule_version_id=UUID(int=5)),
