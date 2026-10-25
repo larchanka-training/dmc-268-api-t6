@@ -7,12 +7,12 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 from uuid import uuid4
 
-from app.common.infrastructure.db.enums import RunState
+from app.common.infrastructure.db.enums import FindingSeverity, RunState
 from app.modules.reviews.infrastructure.run_lifecycle_store import SqlAlchemyRunLifecycleStore
 
 
 def _finding(*, inline: bool) -> SimpleNamespace:
-    return SimpleNamespace(inline_comment=inline)
+    return SimpleNamespace(inline_comment=inline, severity=FindingSeverity.MEDIUM)
 
 
 def test_check_run_report_body_count_is_non_inline_findings() -> None:

@@ -130,11 +130,10 @@ def process(  # type: ignore[no-untyped-def]
     checked_paths: frozenset[str] | None = None,
     severity_threshold: SeverityThresholdValue = "all",
 ):
-    resolved_checked = checked_paths if checked_paths is not None else frozenset({"app/example.py"})
     return FindingsPostProcessor.from_default_patterns().process(
         output(*findings),
         diff_map=diff_map if diff_map is not None else _default_diff_map(),
-        checked_paths=resolved_checked,
+        checked_paths=checked_paths,
         rule_names=frozenset({"Naming Consistency"}),
         repository_max_inline=max_inline,
         severity_threshold=severity_threshold,
@@ -294,6 +293,7 @@ def test_review_body_starts_with_verdict_risk_summary_and_checked_paths() -> Non
                 "@@ -0,0 +1,12 @@\n" + "\n".join(f"+line{n}" for n in range(1, 13)),
             ),
         ),
+        checked_paths=frozenset({"app/example.py", "z/last.py"}),
     )
 
     assert result.review_body.startswith(
@@ -364,42 +364,25 @@ def test_checked_files_include_deleted_paths_when_reviewed() -> None:
 def test_checked_files_list_only_reviewable_snapshots() -> None:
     """Paths without review_patch stay anchorable but not under Checked files (#170 D-2)."""
     diff_map = _diff_map_from_vcs(
-        VcsFile(
-            "app/reviewed.py",
-            "modified",
-            None,
-            None,
-            1,
-            1,
-            2,
-            "@@ -1,3 +1,3 @@\n ctx\n+add\n ctx",
-        ),
-        VcsFile(
-            "vendor/ignored.py",
-            "modified",
-            None,
-            None,
-            1,
-            1,
-            2,
-            "@@ -1,1 +1,1 @@\n-x\n+y",
-        ),
-        VcsFile(
-            "docs/summary_only.md",
-            "modified",
-            None,
-            None,
-            1,
-            1,
-            2,
-            "@@ -1,1 +1,1 @@\n-a\n+b",
-        ),
+        *(
+            VcsFile(
+                path,
+                "added",
+                None,
+                None,
+                14,
+                0,
+                14,
+                "@@ -0,0 +1,14 @@\n" + "\n".join(f"+line{n}" for n in range(1, 15)),
+            )
+            for path in ("app/reviewed.py", "vendor/ignored.py", "docs/summary_only.md")
+        )
     )
     result = process(
-        finding(path="app/reviewed.py", line=2, title="Blocking defect", severity="high"),
+        finding(path="app/reviewed.py", line=12, title="Blocking defect", severity="high"),
         finding(
             path="vendor/ignored.py",
-            line=1,
+            line=12,
             title="Ignored path note",
             confidence=0.4,
         ),
@@ -496,7 +479,11 @@ def test_checked_files_cap_overflow_line_counts_omitted_paths() -> None:
 
 
 def test_checked_files_are_none_when_the_diff_has_no_paths() -> None:
-    result = process(finding(severity="high"), diff_map=_empty_diff_map())
+    result = process(
+        finding(severity="high"),
+        diff_map=_empty_diff_map(),
+        checked_paths=frozenset(),
+    )
 
     assert result.review_body == "\n".join(
         (
@@ -689,13 +676,18 @@ def test_finalize_stored_review_body_degrades_long_summary_instead_of_asserting(
         {
             "findings": [finding(title="Blocking defect", severity="high"), *notes],
             "summary": {
-                "problem": "p" * 3500,
-                "done_well": "d" * 500,
+                "problem": f"{'p' * 3498}.",
+                "done_well": f"{'d' * 498}.",
                 "effort": "small",
             },
         }
     )
-    processed = process(finding(title="Blocking defect", severity="high"), *notes)
+    processed = FindingsPostProcessor.from_default_patterns().process(
+        parsed,
+        diff_map=_default_diff_map(),
+        checked_paths=frozenset({"app/example.py"}),
+        rule_names=frozenset({"Naming Consistency"}),
+    )
     run_url = "https://ui.test/runs/11111111-1111-1111-1111-111111111111"
     finalized = finalize_stored_review_body(
         parsed,
