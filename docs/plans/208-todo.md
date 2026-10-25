@@ -1,12 +1,13 @@
 # Tasks: worker documentation and historical environment traces (#208)
 
 Plan/inventory: [208-plan.md](208-plan.md). Initial base: `22c621ab`;
-current base: `1ae74b1ae8fb48aed9dc4d9e913bf4c916d5a813`.
+current integration point: `05a96bc422468a570bab3233b11b538eb4a87ff6`.
 Status: approved by the user with “Ок” on 2026-10-24; Task 1 review passed;
-initial implementation published as PR #260. Review round 1 corrections are
-implemented and current gates pass; Spec review, the final aggregate verdict and
-publisher handoff remain pending.
-The completed Tasks 1–3 below describe initial publication, not current-round gates.
+initial implementation published as PR #260 and round 1 corrections approved.
+Round 2 latest integration rebase/audit and all gates pass; fresh final review
+reports Standards 0 / Spec 0 and publisher handoff is complete. The preceding macOS
+failure and successful `24910a0d` Linux run are retained. Completed Tasks 1–3 and round-1 outcomes
+below are historical, not current-round gates.
 
 ## Approval and coordination
 
@@ -127,10 +128,11 @@ Initial-publication preservation and docs-only scope checks passed; independent
 review and publisher handoff completed for that publication. The review-round
 section below supersedes those historical completion statements.
 
-## PR #260 review round 1
+## PR #260 review round 1 (completed; historical)
 
 Continues the approved review/development loop from head `7335cf9`; no new
-plan-approval stop. Current base is `1ae74b1ae8fb48aed9dc4d9e913bf4c916d5a813`.
+plan-approval stop. Its base was `1ae74b1ae8fb48aed9dc4d9e913bf4c916d5a813`;
+the latest reviewer approved published head `4f6d244` and resolved the thread.
 
 - [x] Read the saved review/thread and establish before-edit acceptance failures.
 - [x] P2: rebase the existing branch without conflict; sanitize newly merged
@@ -154,10 +156,10 @@ plan-approval stop. Current base is `1ae74b1ae8fb48aed9dc4d9e913bf4c916d5a813`.
       `219-*`, excluded documents, reviewed worker and stock proofs unchanged.
 - [x] Acceptance and preservation checks pass; `git diff --check` passes;
       application/test/migration/contract/dependency diff is empty.
-- [x] Current-base `uv run ruff check .`: PASS.
-- [x] Current-base `uv run ruff format --check .`: PASS, 544 files.
-- [x] Current-base `uv run mypy .`: PASS, 539 source files.
-- [x] Current-base `uv run pytest`: PASS, 4679 passed, 985 skipped, 2 warnings
+- [x] Round-1 `uv run ruff check .`: PASS.
+- [x] Round-1 `uv run ruff format --check .`: PASS, 544 files.
+- [x] Round-1 `uv run mypy .`: PASS, 539 source files.
+- [x] Round-1 `uv run pytest`: PASS, 4679 passed, 985 skipped, 2 warnings
       in 313.64s; exit 0. `TEST_DATABASE_URL` and `TEST_RABBITMQ_URL` absent;
       skipped integration cases were not executed. Log/XML retained privately.
 - [x] Fresh independent Standards/Spec review reports zero findings.
@@ -166,11 +168,71 @@ plan-approval stop. Current base is `1ae74b1ae8fb48aed9dc4d9e913bf4c916d5a813`.
       Publication replies use the actual commit/rationales, leave thread
       resolution to the reviewer and re-request that reviewer.
 
-The review-point dispositions and current-base evidence are in the plan's review
+The review-point dispositions and round-1 evidence are in the plan's review
 round section. All eight before-edit acceptance failures now pass. Historical
 results, hashes, durations, statuses and fences remain unchanged; JSON and stock
 proof bytes remain intact. No code/test/config/dependency change or duplicate
 gate run was made. Optional P3.9 does not block the other authorized corrections.
-All current-round gates pass. Fresh independent review reports Standards 0 /
+All round-1 gates passed. Fresh independent review reported Standards 0 /
 Spec 0; the aggregate verdict has no actionable findings. Publisher handoff is
 complete; publication progress and review responses are recorded on PR #260.
+
+## PR #260 review round 2 (2026-10-25)
+
+- [x] Read the actual approval review; preserve all accepted documentation and
+      the accepted optional worker-table deferral.
+- [x] Rebase both documentation commits onto
+      `f445589a7bc5b339ee9e14c741149abd5ce14e08`, then latest main
+      `24910a0d281d9d71e8362bc89e1925c8c37398bf`, without conflict.
+- [x] Save `git range-diff` evidence: both replayed patches are equivalent (`=`).
+- [x] Confirm the main `docs/plans/` delta from `1ae74b1` is empty; retain
+      107/109 plans, 137 lines/32 files → 17 permitted lines/8 files and
+      38 changed documents without unnecessary re-audit.
+- [x] Prepare the initial private PR body with only `to17` → `to 17` corrected;
+      refresh the final draft with the latest base, gates and actual macOS/Linux
+      verification outcomes.
+- [x] Only these two bookkeeping files change after rebase; accepted documents,
+      worker table, aliases and stock reports remain intact. Docs-only scope
+      and `git diff --check` pass.
+- [x] Record the preceding-base macOS full pytest failure: exit 1; 2 failed,
+      4931 passed, 985 skipped, 2 warnings in 718.14s.
+- [x] Reproduce both failures using exact clean-main workflow/test snapshots:
+      2 failed, 2 passed, 44 deselected in 1.06s; local `/bin/bash` is Bash 3.2.57.
+      The same strict empty-array expansion fails independently; no source changes.
+- [x] Earlier `24910a0d` static gates: Ruff lint PASS; format PASS, 557 files;
+      mypy PASS, 547 source files.
+- [x] Earlier `24910a0d` Linux full `uv run pytest -n 4 --junitxml=<private-output>/pytest.xml`:
+      4933 passed, 985 skipped, 8 warnings in 360.16s; exit 0. Python 3.13.11,
+      Bash 5.2.15; frozen dependencies checked, all 5918 tests collected.
+      DB/RabbitMQ/Redis integration URLs verified absent; skips were not executed.
+      Tracked-only source snapshot matched 1120 files; log/XML retained privately.
+- [x] Fresh Standards/Spec review covers rebase equivalence and bookkeeping/body typo.
+- [x] Complete publisher handoff with the existing non-draft PR metadata,
+      expected prior-head lease, corrected body, actual gate results and
+      reply/re-review instructions. Remote outcomes are recorded on PR #260.
+
+No implementation change, new test, unnecessary duplicate gate run, worker-table action,
+renewed approval question, merge or issue closure is part of this round.
+
+### Latest integration checkpoint: `05a96bc4`
+
+- [x] Preserve the two evidence files; rebase both documentation commits onto
+      `05a96bc422468a570bab3233b11b538eb4a87ff6` without conflict; range-diff
+      reports both patches equivalent (`=`), head `776a900f` before bookkeeping.
+- [x] Audit the four newly merged `171-*`/`209-*` plans: no concrete machine
+      traces; all four remain byte-identical to main with historical facts intact.
+- [x] Current inventory: 111 main/113 branch plans; issue scan 137 lines/32 files
+      → 17 permitted lines/8 files; complete PR scope remains 38 documents.
+- [x] No PR source/test/workflow/config/dependency changes. Latest static gates:
+      Ruff lint PASS; format PASS, 564 files; mypy PASS, 554 source files.
+- [x] Prepare the latest tracked-only Linux snapshot: 1131 matching files,
+      independent Git metadata, no host secrets/untracked environment files;
+      unchanged lockfile permits reuse of the verified Linux environment.
+- [x] Latest-source Linux `uv run pytest -n 4 --junitxml=<private-output>/pytest.xml`:
+      4981 passed, 988 skipped, 8 warnings in 222.85s; exit 0; all 5969 collected.
+      Python 3.13.11/Bash 5.2.15; frozen sync reported no environment changes.
+      DB/RabbitMQ/Redis integration URLs verified absent; skips were not executed.
+      Full log/XML retained privately; prior runs remain historical.
+- [x] Fresh final Standards 0 / Spec 0; frozen files, actual gates and existing-PR
+      publication instructions delivered. Publisher handoff is complete; remote
+      publication/review-response outcomes remain on PR #260.

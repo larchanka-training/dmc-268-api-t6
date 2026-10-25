@@ -5,7 +5,10 @@
 Docs-only work initially based on main `22c621ab`, issue #208 and its 23 October
 clarification; refreshed onto main `25c83fe0d024270e9a744850baa9721cb0ede617`
 after PR #256 merged. Review round 1 rebases the existing PR #260 onto
-`1ae74b1ae8fb48aed9dc4d9e913bf4c916d5a813`. Correct two paragraphs in `docs/WEBHOOK_WORKER.md`; sanitize
+`1ae74b1ae8fb48aed9dc4d9e913bf4c916d5a813`. Review round 2 rebases onto
+`24910a0d281d9d71e8362bc89e1925c8c37398bf`, then the fixed integration point
+`05a96bc422468a570bab3233b11b538eb4a87ff6` after source changes and new plans
+landed. Upstream source remains unmodified. Correct two paragraphs in `docs/WEBHOOK_WORKER.md`; sanitize
 machine-specific references throughout tracked `docs/plans/`, including JSON
 metadata. Preserve historical counts, durations, warnings/skips, hashes,
 revisions, task statuses and unrelated prose. No application, test, migration,
@@ -138,8 +141,8 @@ diff against inventory and preservation exceptions.
 ## Approval checkpoint
 
 The completion statements in this and the following initial-publication
-checkpoints concern reviewed head `7335cf9`; current correction status and
-verification are recorded in “PR #260 review round 1” below.
+checkpoints concern reviewed head `7335cf9`; subsequent correction status and
+verification are recorded in the review-round sections below.
 
 The user confirmed this saved plan and #220 coordination comment with “Ок” on
 2026-10-24; coordination is posted at the link above. Task 1 review reported
@@ -249,13 +252,17 @@ on this base, and the publisher received the reviewed diff, actual gate results,
 coordination link and `Refs #208`. That handoff is complete; its initial default
 was draft. The now-published PR #260 is non-draft.
 
-## PR #260 review round 1
+## PR #260 review round 1 (completed; historical)
+
+The outcomes below belong to base `1ae74b1` and published head `4f6d244`.
+The latest reviewer approved these changes and resolved the blocking thread.
+Current round-2 status follows this historical section.
 
 This continues the user-approved review/development loop. The
 [review](https://github.com/larchanka-training/dmc-268-api-t6/pull/260)
 and [blocking thread](https://github.com/larchanka-training/dmc-268-api-t6/pull/260#discussion_r4367495716)
 refer to published head `7335cf9adc54fd2965cebd25618cc751c1562f41`.
-The existing branch rebased without conflict onto current main
+The existing branch rebased without conflict onto then-current main
 `1ae74b1ae8fb48aed9dc4d9e913bf4c916d5a813`; the rebase did not affect the
 original shared checkout or unrelated files. The existing PR remains non-draft and retains
 its assigned reviewer when the publisher updates it.
@@ -293,7 +300,7 @@ diffs against current main are empty.
 
 The coordinator runs gates in its separate locked runtime on this current base:
 
-| Command | Current-round result |
+| Command | Round-1 result |
 | --- | --- |
 | `uv run ruff check .` | PASS |
 | `uv run ruff format --check .` | PASS, 544 files |
@@ -310,3 +317,100 @@ The publisher updates the existing PR, preserves its current non-draft status
 and reviewer, replies to the blocking thread and numbered points with the actual
 correction commit or rationale, leaves thread resolution to the reviewer, and
 re-requests the assigned reviewer. No merge or issue closure is authorized here.
+
+## PR #260 review round 2 (2026-10-25)
+
+The latest review approves head `4f6d244f36e5279526f94456a7030c4489b5aff4`,
+accepts the optional worker-table deferral and resolves the blocking thread.
+Only the required rebase and PR-body missing space remain. Both documentation
+commits first rebased onto `f445589a7bc5b339ee9e14c741149abd5ce14e08`, then
+without conflict onto `24910a0d281d9d71e8362bc89e1925c8c37398bf` after main
+advanced again. Source, tests, workflows and lockfile are unchanged between those
+bases. `git range-diff` still reports `=` for both replayed patches; the latest
+rebased head is `69246bddf594dc5f0c8d4cffa8ef7ad2ee0e0170` before bookkeeping.
+
+At the preceding `24910a0d` base, the main-branch `docs/plans/` delta from
+`1ae74b1` was empty. Its 107 main/109 branch plan inventory and scan evidence
+were unchanged. The latest integration audit is recorded below.
+No unaffected document was re-audited or edited. The initial private body draft
+corrected only `to17` to `to 17` in the saved actual body. The final draft also
+refreshes the latest base, gates and observed macOS/Linux verification outcomes.
+Worker text/table, gate aliases, stock reports and accepted evidence are intact;
+source/test/config/dependency diffs remain empty and `git diff --check` passes.
+
+All four required gates passed on `24910a0d`, using separate locked runtimes and
+Linux for pytest; the earlier macOS failure is retained below.
+That checkpoint's completion is superseded by the latest integration evidence below.
+Prior counts above remain historical. The publisher preserves the existing
+non-draft PR and reviewer, pushes with the explicit expected prior head lease,
+updates the body, replies to this review and re-requests its verified author,
+since the rebase invalidates the old approval. No worker-table coordination,
+extra approval request, merge or issue closure belongs to this round.
+
+The macOS full pytest run on preceding base `f445589a` exited **1**: **2 failed, 4931 passed,
+985 skipped, 2 warnings in 718.14s**. Both failures are
+`test_validate_uses_the_profile_of_the_selected_corpus[main-legacy]` and
+`[main-none]` in `tests/test_eval_live_workflow.py`, with
+`/bin/bash: line 8: profile[@]: unbound variable`. This is a failed gate.
+
+Clean `f445589a` Git-object snapshots of the test and workflow reproduce the
+same two failures: **2 failed, 2 passed, 44 deselected in 1.06s**; the two
+rules-profile controls pass. Both snapshots byte-match the PR worktree.
+The local `/bin/bash` reports GNU Bash **3.2.57**; an independent empty-array
+expansion under the same strict flags fails identically. The failure therefore
+also exists on clean main in this environment and is not introduced by the docs.
+Evidence and logs are retained privately. No workflow, test, strict flag or source
+was changed to bypass it. Linux validation below runs the unchanged suite with a
+modern `/bin/bash`; changing `PATH` alone cannot replace the hardcoded executable.
+
+Earlier round-2 verification on `24910a0d`:
+
+| Command | Result |
+| --- | --- |
+| `uv run ruff check .` | PASS |
+| `uv run ruff format --check .` | PASS, 557 files |
+| `uv run mypy .` | PASS, 547 source files |
+| `uv run pytest -n 4 --junitxml=<private-output>/pytest.xml` | PASS, 4933 passed, 985 skipped, 8 warnings in 360.16s; exit 0 |
+
+Pytest ran in a task-owned ephemeral Linux arm64 container with Python 3.13.11
+and Bash 5.2.15. All 1120 tracked files matched the private source snapshot,
+which retained independent Git metadata and excluded untracked environment files
+and host secrets. `uv sync --frozen --all-groups` succeeded; the frozen sync check
+reported no changes. All 5918 tests were collected with four workers, without
+selection changes or strict-flag overrides. `TEST_DATABASE_URL`,
+`TEST_RABBITMQ_URL` and `TEST_REDIS_URL` were verified absent; skipped integrations
+were not executed. Full log/XML are retained privately. Publication is pending.
+
+### Latest integration checkpoint: `05a96bc4`
+
+Main advanced with source changes and four new `171-*`/`209-*` plans. Both
+documentation commits rebased without conflict onto the fixed point
+`05a96bc422468a570bab3233b11b538eb4a87ff6`, producing head
+`776a900f6e2ec93b478e45ece74928c09a91dab9` before bookkeeping.
+Both replayed patches remain equivalent (`git range-diff`: `=`).
+The four new plans contain no applicable concrete path, endpoint or resource
+trace and remain byte-identical to main. The generic cache-access retry note
+in `209-plan.md` is preserved, including its historical results and mechanism.
+
+The actual current audit covers 111 main plans and 113 branch plans. The issue
+scan remains 137 lines/32 files before and 17 permitted lines/8 files afterward;
+supplementary scans inspected the new plans. Scope remains 38 documents, with
+no new historical-plan edits. Application/test/workflow/config/dependency diffs
+against the integration point are empty. Static gates pass: Ruff lint, format
+(564 files), and mypy (554 source files).
+
+The unchanged latest-source Linux run completed with
+`uv run pytest -n 4 --junitxml=<private-output>/pytest.xml`: **4981 passed,
+988 skipped, 8 warnings in 222.85s**, exit **0**; all 5969 tests were collected.
+Its tracked-only snapshot matched 1131 files and retained independent Git
+metadata, without untracked environment files or host secrets. The unchanged
+lockfile permitted reuse of the verified environment; frozen sync reported no
+changes. Runtime: Linux arm64, Python 3.13.11, Bash 5.2.15. Database, RabbitMQ
+and Redis integration URLs were verified absent; skipped cases were not executed.
+Full log/XML are retained privately. Earlier macOS and `24910a0d` Linux results
+remain historical evidence, distinct from this source-changed integration run.
+
+Fresh final review reports **Standards 0 / Spec 0** on this integration point.
+The frozen files, actual gates and publication instructions have been delivered
+for the existing non-draft PR; publisher handoff is complete. Remote publication
+and review-response outcomes remain recorded on PR #260.
