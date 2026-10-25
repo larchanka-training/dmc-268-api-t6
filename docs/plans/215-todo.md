@@ -1,6 +1,6 @@
 # #215 implementation checklist
 
-Plan: [215-plan.md](215-plan.md). Status: ready for publication; implementation, verification and final review are complete.
+Plan: [215-plan.md](215-plan.md). Status: published as ready-for-review [PR #297](https://github.com/larchanka-training/dmc-268-api-t6/pull/297); all agent deliverables are complete.
 
 - [x] Approve the plan before implementation (agent-loop planning gate).
 - [x] Coordinator rechecks open PR ownership and comments on #290, #279, #254, #227
@@ -29,7 +29,7 @@ Plan: [215-plan.md](215-plan.md). Status: ready for publication; implementation,
 - [x] Task 4 gates: `uv run mypy .` and `uv run pytest` pass with zero skips.
 - [x] Task 4 review: Fresh Standards and Spec reviews return zero actionable findings;
   remediate and repeat review as required, preserving mutation and gate evidence.
-- [ ] Task 4 publishing: Rebase main; publisher creates `chore/215-rollback-switch-tails`,
+- [x] Task 4 publishing: Rebase main; publisher creates `chore/215-rollback-switch-tails`,
   commits/pushes without bypassing hooks, opens PR with What/Why/How to verify/Refs,
   `Refs #215`, no closing keyword or Development link; attach PR to chat.
 
@@ -239,3 +239,20 @@ following TEST_PLAN §2 / README Tests. No shared staging service is used.
   was created by the development agent. Both recovery stashes and the owned Linux runner,
   image, venv volume and disposable service stack remain intact for publisher verification;
   coordinator cleans them after publication. Development stops editing at this handoff.
+
+
+## Publication evidence (2026-10-25)
+
+- Publisher fetched current main immediately before publication: it still matched final
+  validation base `74b42a7134fb9f272d93c913344e5b826b03b523`. No further base update was needed.
+- Created branch `chore/215-rollback-switch-tails`; staged the two plan files by exact path
+  and tracked modifications with `git add -u`. Implementation commit `051a5bf` includes only
+  the six approved paths. All configured applicable commit hooks passed; no bypass was used.
+- Pushed the branch and created normal ready-for-review
+  [PR #297](https://github.com/larchanka-training/dmc-268-api-t6/pull/297), with the required
+  What / Why / How to verify / Refs sections, template checklist and `Refs #215`. No reviewer
+  was assigned because the user will assign one. The PR was attached to this chat.
+- Publication is recorded only after successful PR creation/attachment in this docs-only
+  follow-up. Agent deliverables are complete. Human current-head approval, resolved review
+  threads and tech-lead acceptance remain separate; no merge, issue closure or board update
+  was performed. Both recovery stashes and task Docker resources remain for the coordinator.

@@ -1,6 +1,6 @@
 # Implementation Plan: #215 rollback switch boundary and runbook tails
 
-Status: ready for publication; implementation, verification and final review are complete.
+Status: published as ready-for-review [PR #297](https://github.com/larchanka-training/dmc-268-api-t6/pull/297); all agent deliverables are complete.
 Issue: https://github.com/larchanka-training/dmc-268-api-t6/issues/215
 Base inspected: `origin/main` / `e6d3077cfcb5584f8af0524ce4a0c8a658b2c5fb` (2026-10-25).
 Full-suite verification base: `f445589a7bc5b339ee9e14c741149abd5ce14e08`.
@@ -140,7 +140,7 @@ for prose that mirrors these existing contracts.
 - [x] Independent code-review skill checks Standards and Spec against the fixed base/issue,
   with zero actionable findings. Review the final diff for restored mutation, unchanged
   #179 tests, all documentation cases and overlap scope before marking tasks complete.
-- [ ] Rebase on current main, rerun affected verification after changes, and publish through
+- [x] Rebase on current main, rerun affected verification after changes, and publish through
   the agent-loop publisher on `chore/215-rollback-switch-tails`. Conventional PR title ≤72
   characters; body What / Why / How to verify / Refs, `Refs #215`, no closing keyword or
   Development-panel link. Return and attach the reviewed PR; this is the agent-loop
@@ -187,3 +187,13 @@ no PostgreSQL or Docker daemon. Initial sandbox attempts could not access uv's c
 create the managed worktree's `.venv`; an approved escalated run created it with uv
 (86 installed packages). No implementation, mutation, full-suite gate or live staging
 exercise has been performed during planning.
+
+
+## Publication evidence (2026-10-25)
+
+Ready-for-review [PR #297](https://github.com/larchanka-training/dmc-268-api-t6/pull/297)
+was created from `chore/215-rollback-switch-tails` after the required validation and independent
+reviews. Implementation commit: `051a5bf`. The PR is attached to the chat. The user will assign
+the reviewer; current-head approval and tech-lead acceptance remain human follow-up actions.
+Final fetch before publication confirmed main at `74b42a7134fb9f272d93c913344e5b826b03b523`.
+Full-suite and focused results remain tied to their respective bases above and in the todo.
