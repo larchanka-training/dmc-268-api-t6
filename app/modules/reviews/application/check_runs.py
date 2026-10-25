@@ -24,6 +24,9 @@ _ERROR_TEXTS = {
     "commit_messages_fetch_failed": "Не удалось получить сообщения коммитов PR из GitHub.",
     "github_forbidden": "У GitHub App нет доступа к репозиторию или PR.",
     "github_publish_failed": "GitHub не принял ревью.",
+    "pr_base_changed": (
+        "Целевая ветка PR изменилась после запуска ревью. Перезапустите ревью из UI."
+    ),
     "lease_expired": "Обработка прервалась 3 раза подряд.",
     "internal_error": "Внутренняя ошибка сервиса.",
     "superseded": "В PR новый коммит — ревью будет для него.",

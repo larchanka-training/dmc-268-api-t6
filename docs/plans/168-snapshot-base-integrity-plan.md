@@ -335,6 +335,7 @@ The coordinator posts these comments before the edits. "Ours" = what this PR cha
 | #220 | `vcs_diff.py`: import `:21`, `:166-167` | rewrites the same import line; `PullRequestLocator`, `VcsFile`, the blob `except` in `execute` | import line conflicts |
 | #220 | `run_failures.py`: one `KNOWN_ERROR_CODES` entry (`:59-76`) | `Literal` import, the `RequiredSourceUnavailable` class | none |
 | #220 | `check_runs.py`: one `_ERROR_TEXTS` entry | `CheckRunReport.provider` | none |
+| #220 | `tests/test_vcs_diff.py`: `test_same_head_with_changed_base_is_rejected_before_file_fetch` (`:407`, `ValueError` → `RunFailure("pr_base_changed")`, import inside the function; addendum 6398058459) | the import block (`:4-12`), new tests after `:450` | none |
 | #280 `5723fee6` | `policy_snapshot_unit_of_work.py`: `get_staged_documents` (`:131-137`), `get_snapshot` (`:165-200`; checks before `return`; calls `get_pins` unchanged) | `get_pins` body (`:92-129`), two fields at the end of the `get_snapshot` constructor, `create_snapshot` values | same function, other lines; D3 picks up their bindings |
 | #280 | `prepare_policy_snapshot.py`: `build_policy_snapshot` `:103-124` | import, `RunPolicyPins` fields, two fields after `:145` | `:145` kept as is |
 | #227 `79dc593b` | `docs/PIPELINE_SPEC.md`: `:169` and a row after `:412` | `:170`, `:415-419` | adjacent `:169`/`:170` |

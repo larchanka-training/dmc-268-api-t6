@@ -18,7 +18,7 @@ from app.modules.reviews.application.prompt_builder import (
     FileStatus,
     PullRequestMeta,
 )
-from app.modules.reviews.application.run_failures import RunCancelled
+from app.modules.reviews.application.run_failures import RunCancelled, RunFailure
 from app.modules.reviews.application.unified_diff import HunkRow, parse_hunks, split_lf
 
 _LOGGER = logging.getLogger(__name__)
@@ -164,7 +164,9 @@ class FetchVcsReviewInput:
         if pull_request.locator != locator or pull_request.head_sha != expected_head_sha:
             raise ValueError("GitHub pull request head SHA changed")
         if expected_base_sha is not None and pull_request.base_sha != expected_base_sha:
-            raise ValueError("GitHub pull request base SHA changed")
+            # A retarget before the diff is stored: the policy is already pinned to the old
+            # base, so every retry would fail the same way. A rerun pins the new base.
+            raise RunFailure("pr_base_changed", "pull request base changed after the run pinned it")
         files = await self._provider.get_diff(pull_request, checkpoint=self._checkpoint)
         changed: list[ChangedFile] = []
         omitted: list[VcsFileOmission] = []

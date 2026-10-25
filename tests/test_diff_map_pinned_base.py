@@ -10,7 +10,7 @@ from uuid import UUID
 
 import pytest
 
-from app.modules.reviews.application.check_runs import RunProviderCheckpoint
+from app.modules.reviews.application.check_runs import RunProviderCheckpoint, failure_reason
 from app.modules.reviews.application.diff_map import DiffMap, VcsProviderName, build_diff_map
 from app.modules.reviews.application.post_processing_diff_map import diff_map_from_snapshots
 from app.modules.reviews.application.review_context import (
@@ -21,8 +21,18 @@ from app.modules.reviews.application.review_context_stage import (
     EstimatedTokenCounter,
     vcs_file_from_snapshot,
 )
-from app.modules.reviews.application.run_failures import RunSkipped
-from app.modules.reviews.application.vcs_diff import PullRequestLocator, VcsPullRequest
+from app.modules.reviews.application.run_failures import (
+    KNOWN_ERROR_CODES,
+    RETRYABLE_ERROR_CODES,
+    RunFailure,
+    RunSkipped,
+    classify_failure,
+)
+from app.modules.reviews.application.vcs_diff import (
+    FetchVcsReviewInput,
+    PullRequestLocator,
+    VcsPullRequest,
+)
 from tests.test_review_context_stage import (
     _HEAD,
     _LOCATOR,
@@ -211,6 +221,51 @@ def test_the_live_base_of_an_attempt_is_not_carried_into_the_next_one() -> None:
     first, second = _contexts(trace)
     assert first["diff"]["pr_base_sha"] == "e" * 40
     assert "pr_base_sha" not in second["diff"]
+
+
+@dataclass
+class Fetching(Retargeted):
+    """A provider whose file list counts its reads; the diff itself is empty."""
+
+    diff_reads: int = 0
+
+    async def get_diff(
+        self, pull_request: VcsPullRequest, *, checkpoint: RunProviderCheckpoint
+    ) -> tuple[Any, ...]:
+        self.diff_reads += 1
+        return ()
+
+
+def test_a_pr_retargeted_before_the_diff_is_stored_fails_without_reading_the_diff() -> None:
+    vcs = Fetching()
+    fetch = FetchVcsReviewInput(vcs, checkpoint=_checkpoint, run_id=_RUN)
+
+    with pytest.raises(RunFailure) as caught:
+        asyncio.run(fetch.execute(_LOCATOR, _HEAD, "b" * 40))
+
+    assert caught.value.error_code == "pr_base_changed"
+    assert classify_failure(caught.value).error_code == "pr_base_changed"
+    assert vcs.diff_reads == 0
+
+
+def test_a_pr_on_its_pinned_base_reads_the_diff() -> None:
+    vcs = Fetching(live_base="b" * 40)
+
+    fetched = asyncio.run(
+        FetchVcsReviewInput(vcs, checkpoint=_checkpoint).execute(_LOCATOR, _HEAD, "b" * 40)
+    )
+
+    assert fetched.pull_request.base_sha == "b" * 40
+    assert vcs.diff_reads == 1
+
+
+def test_a_changed_pr_base_is_terminal_and_tells_the_author_to_rerun() -> None:
+    assert "pr_base_changed" in KNOWN_ERROR_CODES
+    assert "pr_base_changed" not in RETRYABLE_ERROR_CODES
+    assert (
+        failure_reason("pr_base_changed")
+        == "Целевая ветка PR изменилась после запуска ревью. Перезапустите ревью из UI."
+    )
 
 
 def test_the_publication_map_is_built_on_the_run_base() -> None:

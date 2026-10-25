@@ -71,6 +71,7 @@ KNOWN_ERROR_CODES = (
         "deadline_exceeded",
         "github_forbidden",
         "github_publish_failed",
+        "pr_base_changed",
         "lease_expired",
     }
 )
