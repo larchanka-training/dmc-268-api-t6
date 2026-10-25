@@ -1,9 +1,11 @@
 """Redis cache of installation access tokens, shared by the worker processes.
 
 SYSTEM_DESIGN §8.3, §10: one token per installation under ``token:{installation_id}``.
-Redis is only a cache here: when it cannot be reached the process keeps working on its
-own in-memory cache. The token is a secret, so no log line carries it or the traceback
-of a failed command.
+Redis is a shared cache: a Redis hit takes precedence over the process-local copy.
+Read errors and clean misses (for example, an evicted key or a rejected write) fall back
+to that local copy only before expiry minus the safety skew (60 seconds by default).
+Without a local copy, or at or after that boundary, the lookup remains a miss. The token
+is a secret, so no log line carries it or the traceback of a failed command.
 """
 
 from __future__ import annotations
@@ -32,9 +34,14 @@ class RedisLike(Protocol):
 class RedisInstallationAccessTokenCache:
     """Tokens under ``token:{installation_id}``, expiring before GitHub revokes them.
 
-    The key lives until ``expires_at`` minus the safety skew, so a token read from
-    Redis is always still usable. Every token is also kept in the process: a failed
-    read answers from there instead of minting a token on every call.
+    The shared Redis key lives until ``expires_at`` minus the safety skew (60 seconds
+    by default). Redis hits take precedence. A read error or a clean miss, including
+    an evicted key or rejected write, can use the process-local copy only before that
+    same boundary. With no local copy, or with an expired/inside-skew copy, the lookup
+    remains a cache miss.
+
+    Future 401 handling must invalidate Redis and every process-local copy of the token;
+    Redis DEL alone is insufficient because valid local copies can still serve a miss.
     """
 
     def __init__(
@@ -66,7 +73,7 @@ class RedisInstallationAccessTokenCache:
             )
             return await self._local.get(installation_external_id)
         if value is None:
-            return None
+            return await self._local.get(installation_external_id)
         return value.decode("utf-8") if isinstance(value, bytes) else value
 
     async def set(
