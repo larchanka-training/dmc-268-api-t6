@@ -875,6 +875,8 @@ def _v2_key(conventions_id: UUID) -> str:
             "checksum": "225a8f7d56835cf1307ddb25feac602c3d10e03c34ee51afc90a1f99af101454",
         },
         "counter_version": "counter/v2",
+        # The checksum of RULE_A, the run's rule version (``tests/portal_postgres.py``).
+        "defaults_checksum": "1" * 64,
     }
     canonical = json.dumps(identity, sort_keys=True, separators=(",", ":"))
     return sha256(canonical.encode("utf-8")).hexdigest()

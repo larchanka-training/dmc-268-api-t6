@@ -293,6 +293,10 @@ Gates for every task: the four commands in the plan, with DB and vhost `imp130f`
     checksum) and the counter version; the same key for two PR bases with the same policy (unit and
     through the stage), a different key for rules.md, AGENTS.md, the prompt id or checksum, the counter
     and the taint; the stage pins a v4 key with a denied rename (M28); expectations are literal digests.
+  - re-review of `5cb1be0f..3cea5b2b` (correction of TL-7): `defaults_checksum` is back in the key,
+    because the service defaults are rendered into the conventions prompt; the matcher, built-in
+    exclusion and limits versions reach it through the ignore digest (one case each). A legacy
+    conventions task through the adapter keeps the live decoder (`fail_closed` mutant).
 - **Done when:** [x] F1-1 green.
 
 ### F1-12: R7

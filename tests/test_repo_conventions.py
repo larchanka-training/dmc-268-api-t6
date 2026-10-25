@@ -1684,7 +1684,7 @@ def test_conventions_cache_key_is_the_v2_digest_of_the_pinned_identities() -> No
     snapshot = _conventions_snapshot("Use uv.\n")
 
     assert conventions_cache_key(snapshot, "1" * 64) == (
-        "ec231f365b4a4743c6803edc863efc1b6b431ba2f062781802a1769de7675903"
+        "87a6fa0474211d71d3e55f3746007cb3e8a7b2b546add2569aaa7d84aad48f2a"
     )
 
 
@@ -1717,6 +1717,8 @@ def _document_change(path: str, text: str) -> Callable[[PolicySnapshot], PolicyS
         _bindings_change(conventions_id=UUID(int=7)),
         _bindings_change(conventions_checksum="x"),
         _profile_change(counter_version="counter/v1"),
+        # The service defaults are rendered into the prompt (its service-defaults block).
+        lambda snapshot: replace(snapshot, defaults_checksum="0" * 64),
     ],
     ids=[
         "rules-md",
@@ -1724,6 +1726,7 @@ def _document_change(path: str, text: str) -> Callable[[PolicySnapshot], PolicyS
         "conventions-prompt-id",
         "conventions-prompt-checksum",
         "counter",
+        "defaults",
     ],
 )
 def test_conventions_cache_key_changes_with_the_policy_agents_md_prompt_and_counter(
@@ -1749,8 +1752,6 @@ def test_conventions_cache_key_changes_with_the_policy_agents_md_prompt_and_coun
         _profile_change(response_schema_version="schema/v9"),
         _profile_change(recovery_profile_version="recovery/v9"),
         _profile_change(budget_profile_version="budget/v9"),
-        lambda snapshot: replace(snapshot, matcher_version="review-ignore/v2"),
-        lambda snapshot: replace(snapshot, defaults_checksum="0" * 64),
     ],
     ids=[
         "pr-base",
@@ -1760,8 +1761,6 @@ def test_conventions_cache_key_changes_with_the_policy_agents_md_prompt_and_coun
         "response-schema",
         "recovery",
         "budget",
-        "matcher",
-        "defaults",
     ],
 )
 def test_conventions_cache_key_ignores_the_pr_base_and_the_other_pins(
@@ -1775,6 +1774,33 @@ def test_conventions_cache_key_ignores_the_pr_base_and_the_other_pins(
 
     assert conventions_cache_key(change(snapshot), "1" * 64) == conventions_cache_key(
         snapshot, "1" * 64
+    )
+
+
+@pytest.mark.parametrize(
+    "version", ["matcher_version", "builtin_exclusions_version", "limits_version"]
+)
+def test_conventions_cache_key_covers_the_ignore_versions_through_the_ignore_digest(
+    version: str,
+) -> None:
+    # The stage's ignore key starts from ignore_digest, which hashes the matcher, built-in
+    # exclusion and limits versions; the integrity check refuses a snapshot whose stored
+    # digest does not re-hash from them, so they need no field of their own in the key.
+    from app.modules.reviews.application.conventions import conventions_cache_key
+    from app.modules.reviews.application.review_ignore import ignore_digest
+
+    snapshot = _conventions_snapshot("Use uv.\n")
+    versions = {
+        "matcher_version": snapshot.matcher_version,
+        "builtin_exclusions_version": snapshot.builtin_exclusions_version,
+        "limits_version": snapshot.limits_version,
+    }
+    current = ignore_digest(snapshot.ignore_patterns, **versions)
+    changed = ignore_digest(snapshot.ignore_patterns, **{**versions, version: "other/v9"})
+    changes: dict[str, Any] = {version: "other/v9", "ignore_digest": changed}
+
+    assert conventions_cache_key(replace(snapshot, **changes), changed) != conventions_cache_key(
+        snapshot, current
     )
 
 

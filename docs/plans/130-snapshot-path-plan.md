@@ -246,12 +246,16 @@ validates against v1 when no snapshot is attached (`llm/models.py:183-188`). Tha
 - R5: a v2 digest, built over the current `policy_key` value so the rename and copy taint stays in the key,
   goes into the existing `policy_key` column (`conventions_unit_of_work.py:26-39`). No
   migration; legacy rows never match (TL-7).
-- R5 as clarified by the tech lead (2026-10-25, review of batch 4): the v2 key is the digest of the
-  attempt's ignore key (`_ignore_key()`, with the rename and copy taint), the rules.md and AGENTS.md
-  text digests of the snapshot, the pinned conventions prompt (id and checksum) and the counter
+- R5 as clarified by the tech lead (2026-10-25, review of batch 4, corrected in the re-review of
+  `5cb1be0f..3cea5b2b`): the v2 key is the digest of the attempt's ignore key (`_ignore_key()`, with
+  the rename and copy taint; `ignore_digest` hashes the matcher, built-in exclusion and limits
+  versions, and the integrity check refuses a snapshot whose stored digest does not re-hash from
+  them), the rules.md and AGENTS.md text digests of the snapshot, `defaults_checksum` (the service
+  defaults the prompt renders), the pinned conventions prompt (id and checksum) and the counter
   version. It leaves out `policy_base_sha` (through `policy_digest`), the review and verifier prompt
   checksums and the rest of the execution profile, so the next pull request of a repository reuses
-  the entry; a miss comes only from a change of the policy, AGENTS.md or the conventions prompt.
+  the entry; a miss comes only from a change of the policy, the defaults, AGENTS.md or the
+  conventions prompt.
 
 **DD6. R7.** In `stage.begin`, after the snapshot (`review_context_stage.py:407-410`), on the snapshot
 path only: `verify_policy_budget(snapshot, counter, max_policy_tokens=profile.max_policy_tokens)`. It
@@ -511,7 +515,7 @@ Recorded per the coordinator's brief; one line per decision.
 - **TL-4** (a), as recommended, per the coordinator's brief: the gateway writes `context.manifest`, because only it sees repair and fallback.
 - **TL-5** Decided: keep #227's contract; E-5 closed without SSE change. The verifier's `llm.call` carries `operation="verification"` in `run_actions` only; `SSE_LLM_OPERATIONS`, the openapi `RunStepEvent.llmOperation` enum and PIPELINE_SPEC:63 stay as they are.
 - **TL-6** as recommended, per the coordinator's brief: the E-7 time reserve is in F1, gated (the review's own call + 90 s + 10 s); the E-7 money reserve and E-8 (pin the verifier provider route) are follow-ups.
-- **TL-7** (b), as recommended, per the coordinator's brief: a v2 digest goes into `policy_key`; the deviation from CVS §4.2 is recorded for G. Clarified by the tech lead on 2026-10-25 (review of batch 4): the digest covers the namespace, the current ignore key with the tainted rename and copy paths (`review_context_stage.py` `_ignore_key`), the rules.md and AGENTS.md text digests, the pinned conventions prompt (id and checksum) and the counter version, and not `policy_base_sha`, the review and verifier prompt checksums or the execution profile.
+- **TL-7** (b), as recommended, per the coordinator's brief: a v2 digest goes into `policy_key`; the deviation from CVS §4.2 is recorded for G. Clarified by the tech lead on 2026-10-25 (review of batch 4): the digest covers the namespace, the current ignore key with the tainted rename and copy paths (`review_context_stage.py` `_ignore_key`; the ignore digest carries the matcher, built-in exclusion and limits versions), the rules.md and AGENTS.md text digests, `defaults_checksum` (corrected in the re-review of `5cb1be0f..3cea5b2b`: the service defaults are rendered into the conventions prompt), the pinned conventions prompt (id and checksum) and the counter version, and not `policy_base_sha`, the review and verifier prompt checksums or the execution profile.
 - **TL-8** yes, as recommended, per the coordinator's brief: R7 fails closed above 12k policy tokens on the snapshot path, with a read-only staging query before F2 that lists repos above the limit.
 - **TL-9** as recommended, per the coordinator's brief: keep the stage's `context.build` (before conventions) and remove the prompt-read step; the dashboard descriptions and MONITORING change in the same commit, and G aligns the canon.
 - **TL-10** (a), as recommended, per the coordinator's brief: keep C's terminal error for the D-1 shape, pinned by a test; the F1 PR body carries the read-only staging query.

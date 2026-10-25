@@ -538,3 +538,25 @@ def test_legacy_validators_keep_the_live_decoder(
 
     assert type(raised.value) is error
     assert not isinstance(raised.value, InvalidAnswer)
+
+
+@pytest.mark.parametrize(
+    ("answer", "error"),
+    [
+        pytest.param(DEEP_NESTING, RecursionError, id="deep nesting"),
+        pytest.param(HUGE_INTEGER, ValueError, id="huge integer"),
+    ],
+)
+def test_legacy_conventions_keep_the_live_decoder_through_the_adapter(
+    answer: str, error: type[Exception]
+) -> None:
+    # The adapter, not only the validator default: a legacy conventions task decodes as today,
+    # so the error escapes. A valid second answer is scripted, so a fail-closed legacy task
+    # would recover with it and not raise.
+    provider = _Provider([completion(answer), _conventions_answer()])
+
+    with pytest.raises(error) as raised:
+        provider.run(3_600, _conventions(None))
+
+    assert type(raised.value) is error
+    assert provider.kinds() == ["primary"]
