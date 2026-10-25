@@ -279,6 +279,13 @@ raises `policy_prompt_budget_exceeded` (terminal), so neither the conventions no
 - E-2: the verification `llm.call` response is stored without `decisions[].reason` (TL-3).
 - #247 p3: `_repair_attribution` (`findings_post_processor.py:259-272`) runs before the verifier.
 - R12: `allowed_v2_rules=None` when no verifier call happened (`execute_review.py:449-461`).
+- As built in F1-8: the repair runs after lint and dedupe, on the run's rule names (the same
+  `Run.rule_version_id` rules the publisher reads). On the v2 contract the parse already refuses a
+  rule name outside `.review/rules.md`, `AGENTS.md` and `service-defaults:<ID>`, and pass 3 drops a
+  name whose document is not in the manifest; so what the repair changes before the verifier is a
+  body that claims a custom instruction while `rule_name` is null: the prefix goes, the verifier
+  decides. The repair's `body_only` routing of such a finding is not carried to publication (the
+  publisher no longer sees the prefix); review attention for F2.
 - As built in F1-7, fail-closed after its review (decided by the tech lead on 2026-10-25): the
   verifier task carries `redact_answer`, and the gateway stores a redacted body as an allow-list:
   the provider metadata at the top level (`id`, `object`, `created`, `model`, `provider`,
