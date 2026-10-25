@@ -21,5 +21,6 @@ Before merge:
 - [ ] Approve is on the current head commit
 - [ ] The body describes the whole PR
 - [ ] All review threads resolved
+- [ ] User docs updated (docs-site) or not needed
 
 Rules: [merge](https://github.com/larchanka-training/dmc-268-api-t6/blob/main/docs/CONTRIBUTING.md#мерж), [issue acceptance](https://github.com/larchanka-training/dmc-268-api-t6/blob/main/docs/CONTRIBUTING.md#приёмка-задачи).

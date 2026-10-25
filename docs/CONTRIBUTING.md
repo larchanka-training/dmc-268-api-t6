@@ -117,6 +117,7 @@ gh pr view N --json title,commits --jq '[.title, (.commits[] | "\(.messageHeadli
 | Все треды закрыты, CI зелёный | кнопка Merge доступна | ruleset (§7) |
 | Тело PR описывает весь PR | ревьюер сверяет раздел What с `gh pr diff N --name-only`; расхождение — Request changes | договорённость: автор обновляет тело при каждом новом коммите |
 | Мерж не закроет issue | команды 4 и 4б выводят `0` | договорённость |
+| Пользовательская документация обновлена или не нужна | в PR есть правка `docs-site/content/docs/` или ссылка на follow-up issue; чекбокс в теле PR отмечен | договорённость (§8) |
 
 Шаблон тела PR с чек-листом перед мержем — `.github/pull_request_template.md`.
 
@@ -214,3 +215,11 @@ Ruleset `main` одинаков в обоих репо, кроме обязат�
 Решение техлида 04.10.2026 (в рамках #56): в ruleset `main` обоих репо включены «Dismiss stale pull request approvals when new commits are pushed» (`dismiss_stale_reviews_on_push`), «Require approval of the most recent reviewable push» (`require_last_push_approval`) и «Require branches to be up to date before merging» (`strict_required_status_checks_policy`); в ui обязательной стала проверка `Docker image build` (с 07.10 добавлена `UI quality`, ui#73), иначе требование «up to date» там не действует. В api обязательными стали также `OpenAPI lint` и `Webhook container smoke` (джобы из #60; с мержа PR #98 добавлена `Edge Caddyfile validate`): иначе PR с красной проверкой проходил бы мерж и останавливал только выкатку на staging. В Project 12 выключен workflow «Auto-close issue», а «Item closed» оставлен. Причина: в спринте 2 PR #38 смёржен без rebase на `main`, и `main` был красным около 3 ч; PR #42 одобрен на `dcdf95d`, а смёржен после rebase и новых коммитов, в том числе коммита ревьюера, без повторного Approve. Такое правило должно проверять GitHub, а не договорённость. Цена решения: каждый push, меняющий дифф PR (новые коммиты, rebase или Update branch после изменений в `main`, в том числе после мержа чужого PR), требует нового Approve, а ревьюер, запушивший коммит в PR, одобрить его не может — нужен другой участник.
 
 При смене техлида обновите `dismissal_restriction` в ruleset обоих репо и упоминания техлида в этом файле.
+
+## 8. Пользовательская документация
+
+Пользовательская документация живёт в `docs-site/` репозитория `dmc-268-ui-t6` (larchanka-training/dmc-268-ui-t6#173).
+
+- PR в любом из двух репо, который меняет поведение, видимое пользователю, в том же PR обновляет `docs-site/content/docs/` или ссылается на follow-up issue. Для PR в api правка — отдельный PR или issue в `dmc-268-ui-t6`, ссылка на него в теле PR.
+- Основные страницы `index.mdx` (Introduction), `how-it-works.mdx` и `features.mdx` меняются только с явным ревью этой страницы. Лучше дополнить Roadmap или FAQ либо поставить бейдж статуса, чем переписывать основную страницу.
+- Пункт «User docs updated (docs-site) or not needed» из чек-листа шаблона PR автор отмечает и тогда, когда видимого пользователю поведения PR не меняет.
