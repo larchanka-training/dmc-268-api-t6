@@ -160,6 +160,8 @@ class ReviewRunProcessor:
         vcs_run: RunVcsInput | None = None
         failed_blob_shas: frozenset[str] = frozenset()
         conventions_input: RunConventionsInput | None = None
+        # The snapshot path's conventions prompt, set once the policy load names it.
+        pinned_prompt: ActiveConventionsPrompt | None = None
         if self._vcs_provider is not None:
             vcs_repository = cast(RunVcsRepository, self._repository)
             vcs_run = await vcs_repository.get_run_vcs_input(run_id)
@@ -175,6 +177,12 @@ class ReviewRunProcessor:
                 # The policy comes first: it decides what the diff threshold counts.
                 await self._context_stage.begin(run_id)
                 stage = self._context_stage
+                if conventions_input is not None and stage.snapshot_for_llm is not None:
+                    # R1: the pinned prompt must be the one the snapshot names; checked once
+                    # the snapshot is known, before any diff read or write.
+                    pinned_prompt = _pinned_conventions_prompt(
+                        conventions_input, stage.snapshot_for_llm
+                    )
 
                 def excluded(snapshot: DiffSnapshot) -> bool:
                     return stage.excludes_change(snapshot.filename, snapshot.previous_filename)
@@ -281,7 +289,13 @@ class ReviewRunProcessor:
             if snapshot is not None:
                 # R1: the snapshot path takes the pinned prompt and the snapshot's AGENTS.md;
                 # a legacy run keeps the active row and the provider read.
-                conventions_prompt = _pinned_conventions_prompt(conventions_input, snapshot)
+                # Checked after ``begin`` above; a composition without a VCS provider loads the
+                # policy in ``stage.run``, so its check comes here.
+                conventions_prompt = (
+                    pinned_prompt
+                    if pinned_prompt is not None
+                    else _pinned_conventions_prompt(conventions_input, snapshot)
+                )
                 extra["snapshot"] = snapshot
             return await self._conventions.execute(
                 repository_id=conventions_input.repository_id,

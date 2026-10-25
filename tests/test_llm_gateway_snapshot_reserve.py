@@ -337,7 +337,7 @@ def test_a_snapshot_verifier_keeps_its_local_completion(seconds_left: int) -> No
         assert outcome.error_code is LlmErrorCode.VERIFICATION_DEADLINE_EXCEEDED
         assert str(outcome) == (
             "verification_deadline_exceeded: 99 s left before the attempt deadline, "
-            "a call needs 90 s and 10 s are kept for later stages"
+            "a call needs 90 s and 10 s are kept to complete the verification"
         )
         assert outcome.calls == 0
         assert provider.requests == []

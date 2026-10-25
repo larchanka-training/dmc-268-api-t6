@@ -896,9 +896,13 @@ class LlmGateway:
             f"a call needs {timeout_s:g} s"
         )
         if task.reserved_seconds:
+            # The verifier's reserve is its own completion, not a later stage (CVS §7.4).
+            kept_for = (
+                "to complete the verification" if task.route == "verifier" else "for later stages"
+            )
             return self._failed(
                 LlmErrorCode.VERIFICATION_DEADLINE_EXCEEDED,
-                f"{message} and {task.reserved_seconds:g} s are kept for later stages",
+                f"{message} and {task.reserved_seconds:g} s are kept {kept_for}",
                 state,
             )
         return self._failed(LlmErrorCode.DEADLINE_EXCEEDED, message, state)

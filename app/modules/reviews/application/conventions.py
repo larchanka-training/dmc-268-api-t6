@@ -172,7 +172,10 @@ def build_conventions_manifest(
                 tokens=tokens(render_custom_instructions(request.rules)),
             )
         )
-    for idx, cf in enumerate(request.repo_files):
+    # CVS §5.1: a block per item the prompt renders. A file without content and the changed
+    # paths past ``traced_files`` are omissions the prompt counts, not blocks.
+    shown_files = [cf for cf in request.repo_files if cf.content is not None]
+    for idx, cf in enumerate(shown_files):
         lines_count = len((cf.content or "").splitlines()) or 1
         conventions_blocks.append(
             ManifestBlock(
@@ -196,7 +199,7 @@ def build_conventions_manifest(
                 tokens=tokens(xml_text(tree_path)),
             )
         )
-    for idx, cf_path in enumerate(request.changed_files):
+    for idx, cf_path in enumerate(request.traced_files):
         conventions_blocks.append(
             ManifestBlock(
                 block_id=f"changed-{idx}",

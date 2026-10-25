@@ -1391,6 +1391,38 @@ def test_draft_conventions_counter_v1_matches_transport() -> None:
     assert tree_count > 5370
 
 
+def test_legacy_conventions_fit_on_the_gateway_prompt_budget() -> None:
+    # The legacy branch fits on the gateway's own budget (59k here) with its own counter; the
+    # snapshot path's send budget and pinned counter never apply to it.
+    import json
+
+    import httpx
+
+    from app.modules.reviews.infrastructure.llm.models import GatewayConventionsModel
+    from tests.test_llm_gateway import Harness, completion
+
+    request = ConventionsRequest(
+        system="SYS",
+        rules=(),
+        agents_md=None,
+        repo_tree=tuple(f"app/path_{i:04d}/module_{i:04d}.py" for i in range(8000)),
+        repo_files=(),
+        languages={},
+        changed_files=("app/main.py",),
+    )
+    harness = Harness([completion(json.dumps(draft()))])
+
+    async def exercise() -> None:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(harness._handle)) as client:
+            model = GatewayConventionsModel(harness.gateway(client), harness.run)
+            await model.draft_conventions(request=request)
+
+    asyncio.run(exercise())
+    text = json.loads(harness.requests[0].content)["messages"][1]["content"]
+    assert text.count("module_") == 6095
+    assert "[1905 more paths omitted]" in text
+
+
 # ---------- #130 F1-10: snapshot-path conventions (R1, R18) ----------
 
 
@@ -1607,6 +1639,40 @@ def test_snapshot_conventions_manifest_counts_each_block_as_rendered() -> None:
         ("tree-0", 4),
         ("changed-0", 4),
     ]
+
+
+def test_conventions_manifest_lists_only_what_the_prompt_shows() -> None:
+    # CVS §5.1: one block per rendered item. The prompt shows the first 100 changed paths with
+    # a count for the rest, and no file without content; neither omission becomes a block.
+    from app.modules.reviews.application.conventions import build_conventions_manifest
+
+    changed = tuple(f"app/changed_{index:03d}.py" for index in range(150))
+    request = ConventionsRequest(
+        system="SYS",
+        rules=(),
+        agents_md=None,
+        repo_tree=("app/a.py", "app/b.py"),
+        repo_files=(
+            RepositoryFile("app/a.py", 6, None),
+            RepositoryFile("app/b.py", 6, "x = 1\n"),
+        ),
+        languages={},
+        changed_files=changed,
+    )
+
+    manifest = build_conventions_manifest(request)
+    user = build_conventions_prompt(request).user
+
+    blocks = [(block.block_id, block.path) for block in manifest.blocks]
+    assert blocks == [
+        ("file-0", "app/b.py"),
+        ("tree-0", "app/a.py"),
+        ("tree-1", "app/b.py"),
+        *((f"changed-{index}", changed[index]) for index in range(100)),
+    ]
+    assert '<file path="app/a.py">' not in user
+    assert "[50 more changed paths omitted]" in user
+    assert "app/changed_100.py" not in user
 
 
 # ---------- #130 F1-11: snapshot-path conventions keyed by repo-conventions-v2 (R5) ----------
