@@ -478,10 +478,14 @@ eval не запускается; pins для неиспользуемого ver
 ### 3.4. Независимая оценка production pipeline и verifier (#107)
 
 **Текущее состояние после #133.** Схемы `review-output.schema.v2.json` и
-`verifier-output.schema.v1.json`, prompt `review.verifier.v1.md` и unit-сценарии
+`verifier-output.schema.v1.json`, исторический prompt `review.verifier.v1.md`
+(#133) и `review.verifier.v2.md` (#219, текущий pin по умолчанию), unit-сценарии
 существуют. Опциональный путь Reflection Pass в `ExecuteReviewRun` реализован
-для вызова с `reflection_pass` и policy snapshot, но обе композиции в боевом
-`app/worker.py` его не подключают; подключение остаётся задачей #130.
+для вызова с `reflection_pass` и policy snapshot. Snapshot без `reflection_pass`
+даёт `policy_snapshot_integrity_error`; `reflection_pass` без snapshot
+пропускается с предупреждением в логе `execute_review_legacy_run_without_snapshot`.
+Обе композиции в боевом `app/worker.py` его не подключают; подключение остаётся
+задачей #130.
 Reflection Pass соответствует обязательному verifier из CVS §7; unit-проверки
 ниже не доказывают его работу в боевом worker или качество смысловых решений.
 
@@ -515,7 +519,7 @@ Adversarial eval использует пары одинакового дефек
 
 **Защита от Prompt Injection на unit-уровне (AC 7 задачи #120)**:
 Параметризованные тесты синтаксических инъекций (`TestPromptInjectionDefenses` в `tests/test_reflection_evaluation.py`) проверяют оба прохода (reviewer и verifier):
-- Системный промпт верификатора (`review.verifier.v1.md`) содержит декларацию Source Authority and Trust с наивысшим приоритетом над пользовательскими данными. Исторический Option (a) в #120 означал сохранить тогдашний reviewer prompt v2 без изменений и отложить новую декларацию доверия reviewer и её боевое подключение до #130 ([план #120, Phase 7](plans/120-plan.md#phase-7-review-round-3-fixes-alexander-khomutov--axyi-5562633453)). Сейчас `review.system.v3.md` существует; отложена именно эта декларация и интеграция snapshot/verifier-профиля, а не наличие prompt v3.
+- Системный промпт верификатора (`review.verifier.v1.md`) содержит декларацию Source Authority and Trust с наивысшим приоритетом над пользовательскими данными. Исторический Option (a) в #120 означал сохранить тогдашний reviewer prompt v2 без изменений и отложить новую декларацию доверия reviewer и её боевое подключение до #130 ([план #120, Phase 7](plans/120-plan.md#phase-7-review-round-3-fixes-alexander-khomutov--axyi-5562633453)). Нынешний `review.system.v3.md` — prompt для legacy-контракта из #178/#233; reviewer v4 с новой декларацией доверия и интеграция snapshot/verifier-профиля остаются частью #130 (§3.6).
 - Все недоверенные поля (`rules_markdown`, `agents_md`, `candidate_id`, `path`, `title`, `body`, `suggestion`, `code_diff`) экранируются по стандарту XML-сущностей (`&lt;`, `&gt;`, `&amp;`, `&quot;`, `&apos;`).
 - Атрибуты XML строго валидируются: идентификаторы `service-defaults:<ID>` ограничены регулярным выражением `\A[a-zA-Z0-9_\-]+\Z`, исключая кавычки и инъекции атрибутов.
 - Тесты проверяют отсутствие неэкранированных тегов `<system>`, попыток преждевременного закрытия контейнеров (`</candidate_findings>`, `</code_context>`) и маркеров инструкций (`<|im_start|>`, `[INST]`).

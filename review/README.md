@@ -13,6 +13,7 @@ immutable — a file with a version in its name is never edited — and served f
 | --------------------------------------- | --------------------------------------------------- |
 | `prompts/review.system.v1.md`           | review prompt: order, filters, attribution, output  |
 | `prompts/review.system.v2.md`           | v1 + input metadata, few-shot examples              |
+| `prompts/review.system.v3.md`           | current legacy reviewer prompt (#178/#233)          |
 | `prompts/review.verifier.v1.md`         | reflection verifier prompt v1                       |
 | `prompts/review.verifier.v2.md`         | reflection verifier prompt v2: conventions & evidence refs |
 | `prompts/review.conventions.v1.md`      | pre-review prompt: repository patterns, review plan |
@@ -28,11 +29,13 @@ immutable — a file with a version in its name is never edited — and served f
 | `scripts/validate_findings.py`          | validator of model outputs: schema + semantic rules |
 | `examples/`                             | synthetic diff and sample outputs (proof run)       |
 
-The current prompt files are `review.system.v2` and `review.conventions.v2`.
-`seed_prompt_versions` in `app/bootstrap/seed_prompts.py` activates the newest known
-version of each key in `prompt_versions` by setting `is_active`. The manual gateway
-check in `app/bootstrap/llm_gateway.py` defaults to the same v2 files. The v1 prompt
-files remain immutable history: a published version is never edited or removed.
+The current live prompt files are `review.system.v3` (#178/#233) and
+`review.conventions.v2`. `seed_prompt_versions` in `app/bootstrap/seed_prompts.py`
+activates the newest known version of each key in `prompt_versions` by setting
+`is_active`. The manual gateway check in `app/bootstrap/llm_gateway.py` defaults
+to those same files. The separate policy snapshot profile still defaults to
+reviewer v2 and verifier v2 (#219). Older prompt versions remain immutable
+history: a published version is never edited or removed.
 
 ## Seeding contract
 
