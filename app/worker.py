@@ -76,6 +76,7 @@ from app.modules.reviews.application.execute_review import (
     ExecuteReviewRun,
     ReviewModel,
     ReviewPromptRepository,
+    ReviewReply,
 )
 from app.modules.reviews.application.get_run_diff import DiffSnapshot
 from app.modules.reviews.application.handle_review_run import (
@@ -404,7 +405,9 @@ class AttemptReviewProvider:
     async def get_pull_request_meta(self, run_id: UUID) -> PullRequestMeta | None:
         return await self._source.get_pull_request_meta(run_id)
 
-    async def draft_review(self, *, context: ReviewContext) -> Mapping[str, object] | str | bytes:
+    async def draft_review(
+        self, *, context: ReviewContext
+    ) -> Mapping[str, object] | str | bytes | ReviewReply:
         return await self._review.draft_review(context=context)
 
     async def publish_review(

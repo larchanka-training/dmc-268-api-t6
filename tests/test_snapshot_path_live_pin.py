@@ -33,6 +33,7 @@ from app.modules.reviews.application.conventions import (
     RepositoryFile,
     RepositorySnapshot,
 )
+from app.modules.reviews.application.execute_review import ReviewReply
 from app.modules.reviews.application.get_run_diff import DiffSnapshot
 from app.modules.reviews.application.llm import RunCallContext
 from app.modules.reviews.application.policy_snapshot import (
@@ -196,7 +197,7 @@ class Provider:
     async def get_pull_request_meta(self, run_id: UUID) -> PullRequestMeta:
         return _META
 
-    async def draft_review(self, *, context: ReviewContext) -> Mapping[str, object]:
+    async def draft_review(self, *, context: ReviewContext) -> Mapping[str, object] | ReviewReply:
         return await self._review.draft_review(context=context)
 
     async def publish_review(

@@ -19,14 +19,18 @@ from app.modules.reviews.application.conventions_prompt import (
     build_conventions_prompt,
     fit_conventions_request,
 )
-from app.modules.reviews.application.execute_review import PullRequestMetaSource
+from app.modules.reviews.application.execute_review import PullRequestMetaSource, ReviewReply
 from app.modules.reviews.application.llm import RunCallContext
+from app.modules.reviews.application.policy_errors import PolicyError, PolicyErrorCode
 from app.modules.reviews.application.policy_snapshot import CallManifest
 from app.modules.reviews.application.prompt_budget import (
+    PolicyBudgetExceededError,
+    PreSendGuardError,
     TokenCounter,
     fit_review_context,
     send_budget_for,
     token_counter_for,
+    verify_pre_send_guard,
     verify_provenance_pre_send_guard,
 )
 from app.modules.reviews.application.prompt_builder import (
@@ -36,6 +40,7 @@ from app.modules.reviews.application.prompt_builder import (
     ReviewPrompt,
 )
 from app.modules.reviews.application.reflection_pass import VerifierReply
+from app.modules.reviews.application.run_failures import RunFailure
 from app.modules.reviews.infrastructure.llm.answers import (
     conventions_answer_validator,
     conventions_schema,
@@ -57,7 +62,12 @@ VERIFICATION_OPERATION = "verification"
 
 
 class GatewayReviewModel:
-    """``ReviewModel``: fit the L1 context, render it, call the gateway."""
+    """``ReviewModel``: fit the context, render it, call the gateway.
+
+    The only fit point of a review (R10). A snapshot-path review answers with a
+    ``ReviewReply`` (the fitted context and the accepted call's manifest come with the
+    answer); a legacy review answers with the accepted mapping itself.
+    """
 
     def __init__(
         self,
@@ -70,16 +80,18 @@ class GatewayReviewModel:
         self._meta_source = meta_source
         self.last_result: GatewayResult | None = None
 
-    def max_prompt_tokens(self) -> int:
-        return self._gateway.max_prompt_tokens(self._run.engine)
-
     async def get_pull_request_meta(self, run_id: UUID) -> PullRequestMeta | None:
         return await self._meta_source.get_pull_request_meta(run_id)
 
-    async def draft_review(self, *, context: ReviewContext) -> Mapping[str, object]:
-        result = await review_with_gateway(self._gateway, context, self._run)
+    async def draft_review(self, *, context: ReviewContext) -> Mapping[str, object] | ReviewReply:
+        result, fitted = await _fitted_review(self._gateway, context, self._run)
         self.last_result = result
-        return result.output
+        if context.policy_snapshot is None:
+            return result.output
+        # CONTRACT: a snapshot-path task always carries a base manifest, so the gateway
+        # names the accepted call's manifest.
+        assert result.accepted_manifest is not None
+        return ReviewReply(result.output, fitted, result.accepted_manifest)
 
 
 class GatewayConventionsModel:
@@ -180,6 +192,14 @@ async def review_with_gateway(
     gateway: LlmGateway, context: ReviewContext, run: RunCallContext
 ) -> GatewayResult:
     """The whole review call: token budget, rendering, structured generation."""
+    result, _ = await _fitted_review(gateway, context, run)
+    return result
+
+
+async def _fitted_review(
+    gateway: LlmGateway, context: ReviewContext, run: RunCallContext
+) -> tuple[GatewayResult, ReviewContext]:
+    """The review call and the context it was fitted to."""
     # Before the fitting: a prompt version without a known answer schema never reaches it.
     answer = review_answer_contract(
         None
@@ -206,6 +226,8 @@ async def review_with_gateway(
         max_prompt_tokens=max_tokens,
         counter=counter,
     )
+    if fitted.policy_snapshot is not None:
+        _guard_snapshot_budget(fitted, counter, max_tokens)
     prompt = PromptBuilder().build_prompt(fitted)
     base_manifest = PromptBuilder().build_manifest(
         fitted,
@@ -214,7 +236,7 @@ async def review_with_gateway(
         recovery_kind="none",
     )
     verify_provenance_pre_send_guard(base_manifest, context=fitted, snapshot=fitted.policy_snapshot)
-    return await gateway.generate(
+    result = await gateway.generate(
         StructuredTask(
             operation=REVIEW_OPERATION,
             messages=_messages(prompt),
@@ -227,6 +249,19 @@ async def review_with_gateway(
         ),
         run,
     )
+    return result, fitted
+
+
+def _guard_snapshot_budget(context: ReviewContext, counter: TokenCounter, max_tokens: int) -> None:
+    """The pre-send guard of the fitted snapshot prompt: policy budget, then total size."""
+    try:
+        verify_pre_send_guard(context, counter, max_input_tokens=max_tokens)
+    except PolicyBudgetExceededError as exc:
+        raise PolicyError(
+            PolicyErrorCode.PROMPT_BUDGET_EXCEEDED, str(exc), limit=exc.limit, actual=exc.actual
+        ) from exc
+    except PreSendGuardError as exc:
+        raise RunFailure("llm_context_overflow", str(exc)) from exc
 
 
 def _messages(prompt: ReviewPrompt) -> tuple[ChatMessage, ...]:

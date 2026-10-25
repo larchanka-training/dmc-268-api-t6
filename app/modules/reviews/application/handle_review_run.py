@@ -25,7 +25,7 @@ from app.modules.reviews.application.conventions import (
     RepositoryFile,
     RepositorySnapshot,
 )
-from app.modules.reviews.application.execute_review import ReviewModel
+from app.modules.reviews.application.execute_review import ReviewModel, ReviewReply
 from app.modules.reviews.application.get_run_diff import DiffSnapshot
 from app.modules.reviews.application.llm import EngineName
 from app.modules.reviews.application.process_run import RunDiffProvider
@@ -240,7 +240,9 @@ class CheckpointedProvider:
     async def get_pull_request_meta(self, run_id: UUID) -> PullRequestMeta | None:
         return await self._inner.get_pull_request_meta(run_id)
 
-    async def draft_review(self, *, context: ReviewContext) -> Mapping[str, object] | str | bytes:
+    async def draft_review(
+        self, *, context: ReviewContext
+    ) -> Mapping[str, object] | str | bytes | ReviewReply:
         await self._checkpoint()
         return await self._inner.draft_review(context=context)
 

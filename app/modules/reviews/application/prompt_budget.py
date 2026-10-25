@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import logging
 import math
-import os
 import re
 from collections.abc import Callable
 from dataclasses import replace
@@ -153,7 +152,9 @@ def send_budget_for(
     """Compute the prompt token budget for a stage from the model window and execution profile.
 
     Matches ``LlmGateway.max_prompt_tokens``:
-    ``min(context_window, max_input_tokens) - max_output_tokens``.
+    ``min(context_window, max_input_tokens) - max_output_tokens``. The route's configured
+    window reaches this only as ``model_max_prompt_tokens`` from the caller (E-9): the
+    environment is never read here.
     """
     validate_execution_profile_versions(profile)
 
@@ -161,12 +162,6 @@ def send_budget_for(
     context_window, max_output_tokens = _MODEL_WINDOWS.get(
         model_name, (_DEFAULT_CONTEXT_WINDOW, _DEFAULT_MAX_OUTPUT_TOKENS)
     )
-    env_window = os.environ.get("LLM_CONTEXT_WINDOW")
-    if env_window and env_window.isdigit():
-        context_window = int(env_window)
-    env_out = os.environ.get("LLM_MAX_OUTPUT_TOKENS")
-    if env_out and env_out.isdigit():
-        max_output_tokens = int(env_out)
 
     limit = min(context_window, profile.max_input_tokens)
     budget = max(0, limit - max_output_tokens)

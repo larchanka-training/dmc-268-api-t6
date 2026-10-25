@@ -167,6 +167,8 @@ class GatewayResult:
     calls: int
     # The manifest ``call_id`` of the call whose answer was accepted; None without a manifest.
     accepted_call_id: UUID | None = None
+    # That call's manifest: the base one, or the repair or fallback manifest (T-a).
+    accepted_manifest: CallManifest | None = None
 
 
 @dataclass
@@ -268,12 +270,12 @@ class LlmGateway:
         timeouts = unavailable = 0
         rate_limit_waited = repaired = False
         # The manifest of the current call: retries reuse it, repair and fallback replace it.
-        call_id = task.base_manifest.call_id if task.base_manifest is not None else None
+        manifest = task.base_manifest
 
         while True:
             last = await self._call(primary, kind, messages, task, context, state, attempt)
             if last.output is not None:
-                return self._result(primary, last, state, call_id)
+                return self._result(primary, last, state, manifest)
             assert last.error is not None
             if attempt.calls >= primary_limit:
                 break
@@ -344,7 +346,7 @@ class LlmGateway:
                         context=task.review_context,
                         snapshot=task.policy_snapshot,
                     )
-                    call_id = repair_manifest.call_id
+                    manifest = repair_manifest
                 messages = repair_messages
                 kind = LlmCallKind.REPAIR
                 continue
@@ -375,12 +377,12 @@ class LlmGateway:
                     context=task.review_context,
                     snapshot=task.policy_snapshot,
                 )
-                call_id = fallback_manifest.call_id
+                manifest = fallback_manifest
             last = await self._call(
                 fallback, LlmCallKind.FALLBACK, task.messages, task, context, state, attempt
             )
             if last.output is not None:
-                return self._result(fallback, last, state, call_id)
+                return self._result(fallback, last, state, manifest)
         assert last.error is not None
         raise self._failed(last.error, last.message, state, retry_after_s=last.retry_after_s)
 
@@ -769,7 +771,7 @@ class LlmGateway:
         profile: ModelProfile,
         outcome: _Outcome,
         state: _AttemptState,
-        accepted_call_id: UUID | None,
+        manifest: CallManifest | None,
     ) -> GatewayResult:
         assert outcome.output is not None
         usage = tuple(state.usage)
@@ -779,7 +781,8 @@ class LlmGateway:
             model=usage[-1].model if usage else profile.model,
             usage=usage,
             calls=state.calls,
-            accepted_call_id=accepted_call_id,
+            accepted_call_id=None if manifest is None else manifest.call_id,
+            accepted_manifest=manifest,
         )
 
     @staticmethod

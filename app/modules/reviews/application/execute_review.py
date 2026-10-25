@@ -20,14 +20,8 @@ from app.modules.reviews.application.findings_post_processor import (
 from app.modules.reviews.application.policy_errors import PolicyError, PolicyErrorCode
 from app.modules.reviews.application.policy_snapshot import CallManifest, PolicySnapshot
 from app.modules.reviews.application.prompt_budget import (
-    PolicyBudgetExceededError,
-    PreSendGuardError,
-    fit_review_context,
-    send_budget_for,
     token_counter_for,
     validate_execution_profile_versions,
-    verify_pre_send_guard,
-    verify_provenance_pre_send_guard,
 )
 from app.modules.reviews.application.prompt_builder import (
     ChangedFile,
@@ -61,7 +55,6 @@ from app.modules.reviews.application.review_output import (
     validate_v2_coordinates,
 )
 from app.modules.reviews.application.review_path import ReviewBinding, snapshot_for_review
-from app.modules.reviews.application.run_failures import RunFailure
 from app.modules.reviews.application.verdict import SeverityThresholdValue
 
 _LOGGER = logging.getLogger(__name__)
@@ -83,6 +76,20 @@ class ReviewPromptInput:
     severity_threshold: SeverityThresholdValue = "all"
     # The review prompt the run pinned; None for a source that reads no pin (tests, eval).
     review_binding: ReviewBinding | None = None
+
+
+@dataclass(frozen=True)
+class ReviewReply:
+    """A snapshot-path answer with what its call was given (R10, T-a).
+
+    The review adapter is the only fit point: ``context`` is the fitted context the
+    accepted call was sent with and ``manifest`` that call's manifest (base, repair or
+    fallback), which attribution and the verifier check against.
+    """
+
+    output: Mapping[str, object]
+    context: ReviewContext
+    manifest: CallManifest
 
 
 def build_deterministic_summary(
@@ -153,13 +160,14 @@ class ReviewModel(PullRequestMetaSource, Protocol):
     ``draft_review`` receives the immutable context, not a rendered string: the LLM
     gateway (#33) fits it to its model's token budget, renders it with
     ``PromptBuilder`` as a system and a user message and returns the accepted JSON
-    object. Run-attempt data (deadline, attempt, cost limit) is bound to the model
+    object, on the snapshot path as a ``ReviewReply`` with the fitted context and the
+    accepted call's manifest. Run-attempt data (deadline, attempt, cost limit) is bound to the model
     adapter by the worker when it claims the run.
     """
 
     async def draft_review(
         self, *, context: ReviewContext
-    ) -> Mapping[str, object] | str | bytes: ...
+    ) -> Mapping[str, object] | str | bytes | ReviewReply: ...
 
 
 class ReviewInputProcessor(Protocol):
@@ -284,47 +292,9 @@ class ExecuteReviewRun:
             counter = token_counter_for(
                 prompt_input.policy_snapshot.execution_profile.counter_version
             )
-            max_prompt_tokens_fn = getattr(self._model, "max_prompt_tokens", None)
-            model_max_prompt_tokens: int | None = None
-            if callable(max_prompt_tokens_fn):
-                candidate_max = max_prompt_tokens_fn()
-                if isinstance(candidate_max, int):
-                    model_max_prompt_tokens = candidate_max
-            send_budget = send_budget_for(
-                prompt_input.policy_snapshot.execution_profile,
-                stage="review",
-                model_max_prompt_tokens=model_max_prompt_tokens,
-            )
             verify_verifier_mandatory_budget(context, counter=counter)
-            context = fit_review_context(context, max_prompt_tokens=send_budget, counter=counter)
-            try:
-                verify_pre_send_guard(
-                    context,
-                    counter,
-                    max_input_tokens=send_budget,
-                )
-            except PolicyBudgetExceededError as exc:
-                raise PolicyError(
-                    PolicyErrorCode.PROMPT_BUDGET_EXCEEDED,
-                    str(exc),
-                    limit=exc.limit,
-                    actual=exc.actual,
-                ) from exc
-            except PreSendGuardError as exc:
-                raise RunFailure("llm_context_overflow", str(exc)) from exc
-
-            call_id = uuid.uuid4()
-            reviewer_manifest = PromptBuilder().build_manifest(
-                context, call_id=call_id, stage="review"
-            )
-            try:
-                verify_provenance_pre_send_guard(
-                    reviewer_manifest, context=context, snapshot=prompt_input.policy_snapshot
-                )
-            except PolicyError as exc:
-                if exc.code == PolicyErrorCode.CONTEXT_VIOLATION:
-                    raise RunFailure("policy_context_violation", str(exc)) from exc
-                raise
+            # R10: the review model fits, guards and manifests the call once; its reply
+            # carries the fitted context and the accepted call's manifest.
         elif self._reflection_pass is not None:
             _LOGGER.warning(
                 "execute_review_legacy_run_without_snapshot: reflection pass provided but "
@@ -332,7 +302,15 @@ class ExecuteReviewRun:
                 run_id,
             )
 
-        model_output = await self._model.draft_review(context=context)
+        reply = await self._model.draft_review(context=context)
+        reviewer_manifest: CallManifest | None = None
+        model_output: Mapping[str, object] | str | bytes
+        if isinstance(reply, ReviewReply):
+            context, reviewer_manifest, model_output = reply.context, reply.manifest, reply.output
+        else:
+            # A model that answers with the mapping itself (eval, tests): attribution
+            # checks a manifest built from the context it was given.
+            model_output = reply
         if self._reflection_pass is not None and context.policy_snapshot is not None:
             model_output = await self._run_reflection_pass(
                 model_output,
