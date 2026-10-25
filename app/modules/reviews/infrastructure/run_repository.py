@@ -457,8 +457,9 @@ class SqlAlchemyRunRepository:
         )
 
     async def get_run_conventions_input(self, run_id: UUID) -> RunConventionsInput | None:
-        # The review prompt the run pinned, beside the active conventions row.
+        # The review and conventions prompts the run pinned, beside the active conventions row.
         review_prompt = aliased(PromptVersion)
+        pinned_conventions = aliased(PromptVersion)
         statement = (
             select(
                 CodeChange.repository_id,
@@ -469,11 +470,16 @@ class SqlAlchemyRunRepository:
                 review_prompt.key,
                 review_prompt.version,
                 ProviderInstallation.provider,
+                pinned_conventions.id,
+                pinned_conventions.content,
             )
             .select_from(Run)
             .join(CodeChange, CodeChange.id == Run.code_change_id)
             .join(RuleVersion, RuleVersion.id == Run.rule_version_id)
             .join(review_prompt, review_prompt.id == Run.prompt_version_id)
+            .outerjoin(
+                pinned_conventions, pinned_conventions.id == Run.conventions_prompt_version_id
+            )
             .outerjoin(
                 ProviderInstallation, ProviderInstallation.id == Run.origin_provider_installation_id
             )
@@ -497,6 +503,9 @@ class SqlAlchemyRunRepository:
             conventions_prompt=ActiveConventionsPrompt(id=row[1], content=row[2]),
             rules=tuple(review_rule_from_stored(item) for item in row[3]),
             review_binding=ReviewBinding(row[4], row[5], f"v{row[6]}", row[7]),
+            pinned_conventions_prompt=(
+                None if row[8] is None else ActiveConventionsPrompt(id=row[8], content=row[9])
+            ),
         )
 
     async def get_run_file_key(self, run_id: UUID, path: str) -> BlobCacheKey | None:

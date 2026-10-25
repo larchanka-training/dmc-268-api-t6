@@ -21,8 +21,17 @@ from app.modules.reviews.application.policy_snapshot import (
     RecoveryKind,
     SourceRole,
 )
-from app.modules.reviews.application.prompt_budget import verify_provenance_pre_send_guard
-from app.modules.reviews.application.prompt_builder import ReviewRule
+from app.modules.reviews.application.prompt_budget import (
+    TokenCounter,
+    verify_provenance_pre_send_guard,
+)
+from app.modules.reviews.application.prompt_builder import (
+    ReviewRule,
+    render_custom_instructions,
+    xml_attribute,
+    xml_container,
+    xml_text,
+)
 
 _STRICT = ConfigDict(extra="forbid", strict=True)
 _MAX_CONTEXT_FILES = 10
@@ -83,6 +92,19 @@ class ConventionsRequest:
         return self.changed_files[:MAX_TRACED_FILES]
 
 
+def render_repository_file(file: RepositoryFile) -> str | None:
+    """One selected file as the conventions prompt shows it; ``None`` without content."""
+    if file.content is None:
+        return None
+    lines = [
+        f'<line n="{number}">{xml_text(line)}</line>'
+        for number, line in enumerate(file.content.splitlines(), start=1)
+    ]
+    if file.omitted_lines:
+        lines.append(f"[{file.omitted_lines} more lines omitted]")
+    return f'<file path="{xml_attribute(file.path)}">\n' + "\n".join(lines) + "\n</file>"
+
+
 def build_conventions_manifest(
     request: ConventionsRequest,
     *,
@@ -90,8 +112,17 @@ def build_conventions_manifest(
     snapshot: PolicySnapshot | None = None,
     agents_md_sha: str | None = None,
     recovery_kind: RecoveryKind = "none",
+    counter: TokenCounter | None = None,
 ) -> CallManifest:
-    """Build the exact CallManifest for a conventions request (before or after fitting)."""
+    """Build the exact CallManifest for a conventions request (before or after fitting).
+
+    With ``counter`` (the snapshot path's pinned counter) every block carries the tokens of
+    its text as the prompt renders it; the tags between the blocks belong to none.
+    """
+
+    def tokens(rendered: str) -> int | None:
+        return None if counter is None else counter.count(rendered)
+
     effective_snapshot = snapshot if snapshot is not None else request.snapshot
     effective_sha = agents_md_sha if agents_md_sha is not None else request.agents_md_sha
     conventions_blocks: list[ManifestBlock] = []
@@ -122,6 +153,7 @@ def build_conventions_manifest(
                 start_line=1,
                 end_line=lines_count,
                 shown_line_count=lines_count,
+                tokens=tokens(xml_container("agents_md", xml_text(agents_text))),
             )
         )
     if request.rules:
@@ -134,6 +166,7 @@ def build_conventions_manifest(
                 start_line=1,
                 end_line=defaults_lines,
                 shown_line_count=defaults_lines,
+                tokens=tokens(render_custom_instructions(request.rules)),
             )
         )
     for idx, cf in enumerate(request.repo_files):
@@ -147,6 +180,7 @@ def build_conventions_manifest(
                 start_line=1,
                 end_line=lines_count,
                 shown_line_count=lines_count,
+                tokens=tokens(render_repository_file(cf) or ""),
             )
         )
     for idx, tree_path in enumerate(request.repo_tree):
@@ -156,6 +190,7 @@ def build_conventions_manifest(
                 source_role=SourceRole.SOURCE_EXCERPT,
                 source_kind="source_code",
                 path=tree_path,
+                tokens=tokens(xml_text(tree_path)),
             )
         )
     for idx, cf_path in enumerate(request.changed_files):
@@ -165,6 +200,7 @@ def build_conventions_manifest(
                 source_role=SourceRole.DIFF,
                 source_kind="source_code",
                 path=cf_path,
+                tokens=tokens(xml_text(cf_path)),
             )
         )
     return CallManifest(
@@ -336,9 +372,14 @@ class GenerateRepoConventions:
         policy_key: str | None = None,
         snapshot: PolicySnapshot | None = None,
     ) -> GeneratedConventions:
-        # Fetching the revision happens outside every database operation; it is the
-        # exact cache key and therefore cannot be inferred from a stale repository row.
-        agents_md = await self._source.fetch_agents_md(repository_id)
+        if snapshot is None:
+            # Fetching the revision happens outside every database operation; it is the
+            # exact cache key and therefore cannot be inferred from a stale repository row.
+            agents_md = await self._source.fetch_agents_md(repository_id)
+        else:
+            # R1: the snapshot holds the checked AGENTS.md of the pinned base revision; the
+            # provider is not read a second time.
+            agents_md = _snapshot_agents_md(snapshot)
         async with self._uow_factory() as uow:
             # Conventions generated under another ignore policy may describe files that
             # are withheld now, so the policy is part of the cache identity.
@@ -375,13 +416,16 @@ class GenerateRepoConventions:
             snapshot=snapshot,
             agents_md_sha=agents_md.sha,
         )
-        conventions_manifest = build_conventions_manifest(
-            request,
-            run_id=run_id,
-            snapshot=snapshot,
-            agents_md_sha=agents_md.sha,
-        )
-        verify_provenance_pre_send_guard(conventions_manifest, snapshot=snapshot)
+        if snapshot is None:
+            # R18: on the snapshot path the model fits first, then builds and guards the one
+            # manifest of what it sends.
+            conventions_manifest = build_conventions_manifest(
+                request,
+                run_id=run_id,
+                snapshot=snapshot,
+                agents_md_sha=agents_md.sha,
+            )
+            verify_provenance_pre_send_guard(conventions_manifest, snapshot=snapshot)
 
         raw_draft = await self._model.draft_conventions(request=request)
         draft = ConventionsDraft.model_validate(raw_draft)
@@ -406,6 +450,13 @@ class GenerateRepoConventions:
             )
             await uow.commit()
         return GeneratedConventions(saved, agents_md.content, cache_hit=False)
+
+
+def _snapshot_agents_md(snapshot: PolicySnapshot) -> RepositorySnapshot:
+    """The snapshot's AGENTS.md as the cache key and model input; a missing one has neither."""
+    if not snapshot.agents.is_present:
+        return RepositorySnapshot(content=None, sha=None)
+    return RepositorySnapshot(content=snapshot.agents.text, sha=snapshot.agents.blob_oid)
 
 
 def derive_languages(files: tuple[RepositoryFile, ...]) -> dict[str, int]:
