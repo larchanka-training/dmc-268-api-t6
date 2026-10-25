@@ -23,6 +23,7 @@ from uuid import UUID
 from app.modules.code_index.domain.enums import RagIndexStatus
 from app.modules.code_index.domain.rag_index import RagIndex
 from app.modules.reviews.application.check_runs import RunProviderCheckpoint
+from app.modules.reviews.application.conventions import conventions_cache_key
 from app.modules.reviews.application.diff_map import (
     DiffMap,
     VcsProviderName,
@@ -389,8 +390,16 @@ class ReviewContextStage:
 
         The masks and built-in exclusions are in ``ignore_digest``. A rename or copy also
         withholds names no mask matches; they are part of the identity, so an entry made
-        while such a file was still allowed is not reused once it is tainted.
+        while such a file was still allowed is not reused once it is tainted. On the
+        snapshot path the conventions are keyed by ``repo-conventions-v2`` over this value
+        (R5, TL-7), so no entry of a legacy run is reused.
         """
+        ignore_key = self._ignore_key()
+        if self._snapshot_for_llm is not None:
+            return conventions_cache_key(self._snapshot_for_llm, ignore_key)
+        return ignore_key
+
+    def _ignore_key(self) -> str | None:
         if self._snapshot is None or self._matcher is None:
             return None
         tainted = sorted(

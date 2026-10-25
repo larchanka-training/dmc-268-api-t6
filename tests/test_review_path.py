@@ -21,6 +21,7 @@ from app.modules.reviews.application.conventions import (
     CachedConventions,
     GeneratedConventions,
     GenerateRepoConventions,
+    conventions_cache_key,
 )
 from app.modules.reviews.application.execute_review import ExecuteReviewRun, ReviewPromptInput
 from app.modules.reviews.application.policy_errors import PolicyError, PolicyErrorCode
@@ -497,6 +498,25 @@ def test_snapshot_path_conventions_refuse_a_pin_the_snapshot_does_not_name(
 
     assert raised.value.code is _INTEGRITY
     assert "conventions prompt" in str(raised.value)
+
+
+# ---------- #130 F1-11: snapshot-path conventions keyed by repo-conventions-v2 (R5) ----------
+
+
+@pytest.mark.parametrize("version", ["v3", "v4"])
+def test_stage_policy_key_is_the_v2_conventions_key_only_on_the_snapshot_path(
+    version: str,
+) -> None:
+    store = _store(version)
+    stage = _stage(store, Trace())
+
+    asyncio.run(stage.begin(RUN_ID))
+
+    assert store.snapshot is not None
+    ignore_key = store.snapshot.ignore_digest
+    expected = conventions_cache_key(store.snapshot, ignore_key) if version == "v4" else ignore_key
+    assert stage.policy_key == expected
+    assert stage.policy_key != (ignore_key if version == "v4" else None)
 
 
 _META = PullRequestMeta("PR", None, "octo", "feature", "main", (), 1, 1, 0, False, False)
