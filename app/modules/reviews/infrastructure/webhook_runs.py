@@ -11,7 +11,7 @@ from sqlalchemy import func, select, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from app.common.infrastructure.db.enums import CodeChangeState, RunState
+from app.common.infrastructure.db.enums import CodeChangeState, RunState, SeverityThreshold
 from app.common.infrastructure.db.unit_of_work import SqlAlchemyUnitOfWork
 from app.modules.repositories.infrastructure.models import (
     ProviderInstallation,
@@ -153,7 +153,7 @@ class SqlAlchemyWebhookRunStore:
                 engine=candidate.engine,
                 rule_version_id=candidate.rule_version_id,
                 prompt_version_id=candidate.prompt_version_id,
-                severity_threshold=candidate.severity_threshold,
+                severity_threshold=SeverityThreshold(candidate.severity_threshold),
                 max_comments=candidate.max_comments,
                 conventions_prompt_version_id=candidate.conventions_prompt_version_id,
                 verifier_prompt_version_id=candidate.verifier_prompt_version_id,

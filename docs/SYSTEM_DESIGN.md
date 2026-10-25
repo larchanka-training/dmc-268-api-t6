@@ -30,7 +30,7 @@ runtime-профиль требуют отдельной реализации; �
 | Р-3 | Два движка за одним контрактом `ReviewOutput` (§5): **DiffEngine** (без диска, ≤ 40 с) и **SandboxEngine** (контейнер, ≤ 10 мин). v1 = DiffEngine | Движок будет меняться; всё ниже контракта об этом не знает |
 | Р-4 | Сандбокс: `--network=none`, без токенов внутри, клон монтирует контроллер снаружи | Промпт-инъекция в диффе — штатная ситуация |
 | Р-5 | GitHub: **один** review batch на run. Идентичность включает run/head/diff/final result и digest точного payload; после неоднозначной отправки — recovery без слепого POST. В тело допускаются только подтверждённые находки с существующим показанным якорем (§8.4) | Повтор доставки не создаёт новое ревью и не присваивает результат другого run; `findings_hash` недостаточен |
-| Р-6 | Неизменяемые `rule_version_id`, `prompt_version_id` и policy snapshot на run: оба base-документа, ignore, defaults, профили моделей/парсеров и checksums; целевые настройки публикации severity_threshold/max_comments закреплены отдельно от policy_digest (RFS §7). Retry использует тот же снимок. Ревизия индекса RAG в снимок не входит: она только выбирает кандидатов, текст читается на ревизиях PR, показанное фиксирует manifest; новый блок контекста закрепляется новой версией промпта ([ADR 0001 §8.1](adr/0001-graph-rag-v1.md#81-правило-ревизий)) | Воспроизводимость правил, проверки и атрибуции |
+| Р-6 | Неизменяемые `rule_version_id`, `prompt_version_id` и policy snapshot на run: оба base-документа, ignore, defaults, профили моделей/парсеров и checksums; настройки публикации severity_threshold/max_comments уже закреплены для новых legacy runs в Run и snapshot отдельно от policy_digest (#212, RFS §7). Retry использует те же pins; историческая NULL-пара читает текущие настройки Repository. Rerun закрепляет новую пару. Ревизия индекса RAG в снимок не входит: она только выбирает кандидатов, текст читается на ревизиях PR, показанное фиксирует manifest; новый блок контекста закрепляется новой версией промпта ([ADR 0001 §8.1](adr/0001-graph-rag-v1.md#81-правило-ревизий)) | Воспроизводимость правил, проверки и атрибуции |
 | Р-7 | Арендатор = **Workspace** (роль 6), к которому привязана `ProviderInstallation`; права на репозитории — из провайдера, не из своей таблицы ролей | Своя модель ролей разъедется с GitHub |
 | Р-8 | `usage_events` (токены, деньги, модель) — с первого вызова LLM, только вставка | Восстановить задним числом нельзя; основа для `CreditLedger` |
 | Р-9 | Бот односторонний: публикует, на комментарии не отвечает; **обязательно** игнорирует собственные события | Скорость запуска; защита от цикла «бот → CI → бот» |
@@ -748,13 +748,22 @@ Alembic; состав отката определяет `alembic history`, а н
 downgrade **до `20261012_0030`** откатывает не только `20261010_0030` и
 `20261010_0029` (#132), но и все более поздние ревизии; сейчас это `20261014_0031`,
 `20261015_0032`, `20261016_0033`, `20261017_0034`, `20261018_0035`, `20261019_0036`,
-`20261020_0037` и `20261023_0038`: теряются `branch_filter` и `severity_threshold`,
+`20261020_0037`, `20261023_0038`, `20261024_0038` и `20261024_0039`: теряются `branch_filter` и `severity_threshold`,
 таблицы индекса графа `code_index_*` с их ENUM, флаг `rag_enabled`, состояние индексатора
 в `code_index_states` (ветка, digest исключений, учёт байтов), сохранённые статусы правил
 `repository_rules_status`, висящие запросы пробуждения индекса
 (`code_index_states.wake_requested_at`) и троттлинг full по запросу ревью
 (`review_full_requested_at`, `review_full_requested_sha`), а CHECK `ck_runs_trigger` на
 `runs.trigger` только снимается.
+Ревизия `20261024_0038` удаляет четыре колонки публикации
+`runs.severity_threshold`, `runs.max_comments`, `run_policy_snapshots.severity_threshold`
+и `run_policy_snapshots.max_comments`, а также CHECK `ck_runs_publication_settings`
+и `ck_run_policy_snapshots_publication_settings`. Enum `severity_threshold` Repository
+при откате этой ревизии остаётся. Повторный upgrade `20261024_0038` создаёт NULL-пары
+без backfill: такие Run и retry читают текущие настройки Repository, утраченные pins
+не восстанавливаются. Ревизия `20261024_0039` дополнительно удаляет nullable FK-колонки
+`runs.conventions_prompt_version_id` и `runs.verifier_prompt_version_id` на
+`prompt_versions`; повторный upgrade возвращает их NULL без восстановления prompt pins.
 Недоступный репозиторий после отката не оживает (доступность сворачивается в `enabled AND
 installation_available`: `enabled=true` при `installation_available=false` становится
 `enabled=false`), а повторный upgrade возвращает схему со значениями по умолчанию
@@ -1631,7 +1640,7 @@ CONTEXT_AND_VERIFICATION_SPEC §5–8, §10.
 | `RepositoryRulesStatus` (#150) | одна строка на `repository_id` (FK с каскадом): `status` (`present\|missing\|invalid\|unavailable`, NULL — запрос без ответа), `branch`, `sha`, `text`, `checksum` (SHA-256 raw bytes), `ignore_masks`, `diagnostics` (§9 RULES_FORMAT_SPEC), `defaults_version`, `checked_at`; маркер запроса `refresh_requested_at` и аренда `refresh_claimed_until` (RULES_FORMAT_SPEC §10.1) |
 | `Repository` | `enabled` (предпочтение), `installation_available` (доступность App), их AND в API и review eligibility; `default_engine`, `wait_for_ci: auto\|always\|never`, `review_event`, `max_comments`; `branch_filter` (массив строк, NOT NULL, по умолчанию `{}` — все ветки, §6.1), `severity_threshold` (PG enum `severity_threshold`: `all\|warning\|critical`, NOT NULL, по умолчанию `all`, PIPELINE_SPEC §9, §11); `rag_enabled` (предпочтение RAG, BOOLEAN NOT NULL, по умолчанию false, #145; в API — AND с `installation_available`, §6.9) |
 | `CodeChange` (PR) | `number`, `head_sha`, `base_sha`, `ai_review_labeled` (стоит лейбл `ai-review`, Р-10), `ci_status` (jsonb-кэш текущего head: `{"event": "check_suite"}` или `{"event": "status"}`, маркер sweep `{"sweep": "excluded"}`, пусто `{}`; сбрасывается при смене head или состояния лейбла, PIPELINE_SPEC §8.3, [WEBHOOK_WORKER.md](WEBHOOK_WORKER.md)), `state` |
-| `Run` | `origin_provider_installation_id` (неизменяемая исходная физическая установка; NULL закрывает provider-доступ), `head_sha`, `base_sha`, `state` (§6.4), `engine`, `rule_version_id`, `prompt_version_id`, `attempt`, `available_at`, `lease_until`, `cancel_requested`, `worker_id`, `trigger`, `error_code`, `error_message`; дополнительно закреплённые policy/diff/profile/result bindings. `summaryOnly` — явный итог режима, не вывод из `patch=null` |
+| `Run` | `origin_provider_installation_id` (неизменяемая исходная физическая установка; NULL закрывает provider-доступ), `head_sha`, `base_sha`, `state` (§6.4), `engine`, `rule_version_id`, `prompt_version_id`, `attempt`, `available_at`, `lease_until`, `cancel_requested`, `worker_id`, `trigger`, `error_code`, `error_message`; дополнительно закреплённые policy/diff/profile/result bindings. `summaryOnly` — явный итог режима, не вывод из `patch=null`; #212: nullable `severity_threshold` и `max_comments` закрепляются из Repository в транзакции создания, retry сохраняет пару, rerun получает текущую. Историческая NULL-пара без backfill читает Repository при обработке; CHECK разрешает NULL-пару либо два значения с cap > 0 |
 | Контекст | §9; manifest каждого фактического call, source roles/revisions/ranges/hashes и PG evidence excerpts (§10); summary не заменяет доказательства |
 | `Finding` | итоговая проекция supported кандидатов для API; `file_path`, `line_start=start_line ?? line`, `line_end=line`, `side=RIGHT` v2, run/candidate bindings и размещение. Diagnostic drops хранятся отдельно; revision разрешается по закреплённому run/manifest |
 | `Comment` | `finding_id`, remote review/comment/discussion IDs, связь с publication item/operation key; `findings_hash` только диагностика |
@@ -1641,7 +1650,7 @@ CONTEXT_AND_VERIFICATION_SPEC §5–8, §10.
 | **Добавить:** `UsageEvent` | `run_id` (NOT NULL, FK `runs`: подставного run нет, #145), `model`, `tokens_in/out`, `cache_read_tokens`, `cost_usd` — только вставка (Р-8) |
 | **Добавить:** `RunAction` | `run_id`, `index`, `tool` (каталог — PIPELINE_SPEC §2), `request jsonb`, `response jsonb?` (≤ 64 КБ) или `response_ref` (> 64 КБ — id строки отдельной таблицы PG, PIPELINE_SPEC §2), `started_at`, `duration_ms` — Zod `RunAction` фронта |
 | Снимок диффа (Р-15) | ключ `(run_id, filename)`; исходный доступный `patch`, отдельно `review_patch`, patch_state и rename/copy provenance; `run_diff_maps` хранит immutable VCS-only revisions/provider refs/hunks/digest; отдельно run-owned immutable RunDiffClassification/file_omissions до любого выхода, включая skipped (CVS §9.2): reason + Python classification, wire alias class; классификация не входит в VCS digest |
-| **#107:** `run_policy_snapshots` | один immutable snapshot на run: документы/absence, checksums, ignore и версии профилей; целевые severity_threshold/max_comments закрепляются при создании run и не входят в policy_digest; retry их не заменяет |
+| **#107:** `run_policy_snapshots` | один immutable snapshot на run: документы/absence, checksums, ignore и версии профилей; severity_threshold/max_comments уже хранятся nullable колонками (#212, миграция `20261024_0038`) и копируются из Run; они не входят в policy_digest, schema_version=1 и conventions key не меняются. Retry их не заменяет; историческая NULL-пара сохраняет live fallback |
 | **#107:** `context_manifests`, `context_evidence_blobs` | manifest по call_id и workspace-scoped dedup точных excerpts; источник refs accepted call |
 | **#107:** `review_candidates`, `verification_results` | исходный v2 finding, candidate_id/digest, решения фильтров; решение verifier по каждому переданному ID и resolved refs |
 | **#107:** `final_review_results` | run_id UNIQUE, версия, supported findings после порога, counts, coverage, verdict, backend summary, severity_threshold/max_comments, below_severity_threshold_count и result_digest с этими настройками; immutable после publishing |

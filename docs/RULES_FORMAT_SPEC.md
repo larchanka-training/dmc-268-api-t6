@@ -36,8 +36,10 @@ v1.2 по [#140](https://github.com/larchanka-training/dmc-268-api-t6/issues/140
 `max_comments`, `review_event`, `wait_for_ci`. Они не заменяют Git-файл требований.
 `enabled` и фильтр веток проверяются по текущему состоянию при допуске run,
 включая rerun; они не закрепляются правилом неизменяемости policy snapshot.
-В целевом профиле #107 порог severity и inline cap `max_comments` закрепляются при
-создании run (§7.2); порог применяется после verifier (CVS §6.2), не меняет ignore.
+Порог severity и inline cap `max_comments` уже закрепляются для новых legacy runs
+в транзакции создания (#212, §7.2); историческая NULL-пара использует live fallback
+к Repository. Перенос порога после verifier остаётся целевым профилем #107
+(CVS §6.2); порог не меняет ignore.
 
 Единственный специальный файл требований к ревью — `.review/rules.md` относительно
 корня проверяемого репозитория. Сервис также читает только корневой `AGENTS.md` как
@@ -694,14 +696,19 @@ checksum; первый вариант достаточен для двух фа�
 
 ### 7.2. Закрепление и повторные попытки
 
-При создании нового run короткая транзакция фиксирует defaults, все три prompt
-bindings, execution profile, `severity_threshold` и `max_comments` из Repository. Это требует новой записи привязок run либо
-добавочных колонок, поскольку сейчас Run закрепляет только review prompt.
-Активные версии, порог и inline cap выбираются один раз, не на retry. Изменение
-Repository после создания run не меняет их; rerun получает новые значения.
-Обе настройки переносятся в готовый snapshot вместе с привязками версий. Это целевой контракт
-профиля #107; legacy-путь #149 читает Repository во время обработки (PIPELINE_SPEC §9). После commit worker читает VCS
-вне DB-транзакции по сохранённому base SHA.
+Для новых Run уже реализовано (#212): короткая транзакция создания сохраняет
+`severity_threshold` и `max_comments` из текущей строки Repository в Run.
+Обе настройки переносятся через `RunPolicyPins` в готовый policy snapshot;
+legacy postprocess и вход Reflection Pass читают порог Run, а не живую настройку
+Repository. Retry сохраняет пару; новый run и rerun закрепляют текущие значения.
+Исторические Run с обоими полями NULL не backfill-ятся: обе настройки читаются
+из Repository при каждой обработке и retry, готовый snapshot сохраняет NULL.
+
+Полный целевой профиль #107 дополнительно требует закреплять все три prompt
+bindings и execution profile в транзакции создания. Сейчас Run закрепляет
+review prompt и defaults, а conventions/verifier prompts и полный execution
+profile ещё не закреплены при создании; профиль фиксируется первым snapshot.
+После commit worker читает VCS вне DB-транзакции по сохранённому base SHA.
 
 До полной сборки snapshot допустимы отдельные immutable `run_policy_documents`
 с уникальным `(run_id, path)`: это staging загруженных документов/фактов отсутствия.

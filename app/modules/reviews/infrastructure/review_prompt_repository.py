@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-from typing import Literal
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from app.common.infrastructure.db.enums import SeverityThreshold
 from app.modules.repositories.infrastructure.models import Repository, RuleVersion
 from app.modules.reviews.application.conventions import GeneratedConventions
 from app.modules.reviews.application.execute_review import ReviewPromptInput
@@ -20,6 +20,7 @@ from app.modules.reviews.application.prompt_builder import (
 )
 from app.modules.reviews.application.prompt_builder import review_rule_from_stored
 from app.modules.reviews.infrastructure.models import CodeChange, CodeChangeDiff, PromptVersion, Run
+from app.modules.reviews.infrastructure.severity_threshold import severity_threshold_value
 
 
 class SqlAlchemyReviewPromptRepository:
@@ -35,7 +36,7 @@ class SqlAlchemyReviewPromptRepository:
             select(
                 PromptVersion.content,
                 RuleVersion.rules,
-                Repository.severity_threshold,
+                func.coalesce(Run.severity_threshold, Repository.severity_threshold),
             )
             .select_from(Run)
             .join(PromptVersion, PromptVersion.id == Run.prompt_version_id)
@@ -74,9 +75,8 @@ class SqlAlchemyReviewPromptRepository:
                 for (row,) in snapshots
             ]
         )
-        raw_val = getattr(raw_threshold, "value", raw_threshold)
-        threshold: Literal["all", "warning", "critical"] = (
-            raw_val if raw_val in {"all", "warning", "critical"} else "all"
+        threshold = severity_threshold_value(
+            raw_threshold if raw_threshold is not None else SeverityThreshold.ALL
         )
         return ReviewPromptInput(
             system=system,

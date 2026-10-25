@@ -12,7 +12,7 @@ from uuid import UUID
 from sqlalchemy import ColumnElement, Row, String, and_, cast, func, or_, select, true, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from app.common.infrastructure.db.enums import RunState, SeverityThreshold
+from app.common.infrastructure.db.enums import RunState
 from app.common.infrastructure.db.unit_of_work import SqlAlchemyUnitOfWork
 from app.modules.analytics.infrastructure.models import UsageEvent
 from app.modules.auth.application.scope import AuthScope
@@ -52,7 +52,6 @@ from app.modules.reviews.application.run_events import RunChange
 from app.modules.reviews.application.run_failures import RunCancelled
 from app.modules.reviews.application.store_review_output import PublishingGuard
 from app.modules.reviews.application.vcs_diff import PullRequestLocator
-from app.modules.reviews.application.verdict import SeverityThresholdValue
 from app.modules.reviews.infrastructure.models import (
     CodeChange,
     CodeChangeDiff,
@@ -66,6 +65,7 @@ from app.modules.reviews.infrastructure.run_action_records import insert_run_act
 from app.modules.reviews.infrastructure.run_notifications import notify_run_state
 from app.modules.reviews.infrastructure.run_origin import active_origin_condition, origin_active
 from app.modules.reviews.infrastructure.run_origin_locks import lock_run_origin_row
+from app.modules.reviews.infrastructure.severity_threshold import severity_threshold_value
 from app.modules.workspaces.infrastructure.repository_access import repository_access_predicate
 
 
@@ -723,7 +723,7 @@ class SqlAlchemyReviewOutputRepository:
             diff_map=diff_map,
             rule_names=rule_names,
             repository_max_inline=max_comments,
-            severity_threshold=_severity_threshold_value(severity_threshold),
+            severity_threshold=severity_threshold_value(severity_threshold),
             allowed_v2_rules=allowed_v2,
         )
 
@@ -946,17 +946,6 @@ def _to_published_finding_row(item: Finding) -> PublishedFinding:
         rule_name=item.rule_name,
         finding_id=item.id,
     )
-
-
-def _severity_threshold_value(threshold: SeverityThreshold) -> SeverityThresholdValue:
-    """Map the stored threshold onto the post-processor's value; mypy checks every member."""
-    match threshold:
-        case SeverityThreshold.ALL:
-            return "all"
-        case SeverityThreshold.WARNING:
-            return "warning"
-        case SeverityThreshold.CRITICAL:
-            return "critical"
 
 
 class SqlAlchemyCancelRunUnitOfWork(SqlAlchemyUnitOfWork):

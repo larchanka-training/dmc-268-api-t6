@@ -1,7 +1,7 @@
 # Task List: #212 publication settings pinned to run
 
 Every implementation task follows red → green → refactor with literal spec-based
-assertions. User authorization waives human plan/test-seam confirmation.
+assertions.
 
 ## Task 1: Immutable snapshot contract regressions
 
@@ -167,10 +167,10 @@ assertions. User authorization waives human plan/test-seam confirmation.
       `uv run mypy .`, `uv run pytest`.
 - [x] Focused real PostgreSQL and relevant/full integration checks run with services;
       report counts and skips accurately, and fix any change-related failures.
-- [x] Independent standards/spec agent review findings are addressed; PR body records
+- [x] Independent standards/spec review findings are addressed; PR body records
       immediate legacy migration, no-backfill fallback, testing, and `Refs #212`.
 
-**Verification:** coordinator records exact commands/results and checks current-main
+**Verification:** record exact commands/results and checks current-main
 revision compatibility before requesting review. Keep issue closure with tech lead;
 no closing keyword or Development-panel link. No dependency additions are planned.
 
@@ -202,17 +202,16 @@ Required gates passed on the final implementation:
 - `uv run ruff check .`
 - `uv run ruff format --check .` (545 files)
 - `uv run mypy .` (542 source files)
-- `uv run pytest --junitxml=/private/tmp/dmc-212-pytest.xml` with isolated PostgreSQL
+- `uv run pytest` with isolated PostgreSQL
   and RabbitMQ: **5679 passed, 0 failed, 0 skipped**, including **993 integration**
   tests; 2 existing deprecation warnings; 1025.85 seconds.
 - `git diff --check`
 
 Dedicated PostgreSQL publication/migration regressions: **8 passed, 0 skipped**.
-Independent Standards and Spec agent reviews reported **0 findings**, including
+Independent Standards and Spec reviews reported **0 findings**, including
 final migration-graph and historical-origin regression updates. These internal
 reviews do not replace the required GitHub approving review on the current head.
 
-Full-suite evidence is retained in `/private/tmp/dmc-212-pytest.log` and
-`/private/tmp/dmc-212-pytest.xml`. No dependencies were added. The draft PR records
+No dependencies were added. The draft PR records
 immediate legacy adoption, unchanged policy/cache identity and historical NULL
 live fallback without backfill; merge and issue acceptance remain pending.

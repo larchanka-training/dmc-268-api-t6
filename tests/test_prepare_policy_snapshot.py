@@ -33,6 +33,7 @@ from app.modules.reviews.application.prepare_policy_snapshot import (
     build_policy_snapshot,
 )
 from app.modules.reviews.application.review_ignore import parse_review_ignore
+from app.modules.reviews.application.verdict import SeverityThresholdValue
 
 _RUN = UUID("00000000-0000-0000-0000-000000000002")
 _BASE = "b" * 40
@@ -278,20 +279,28 @@ def test_empty_and_missing_rules_have_different_snapshots() -> None:
 
 @pytest.mark.parametrize(("threshold", "cap"), [(None, None), ("warning", 1)])
 def test_snapshot_preserves_publication_pins_and_reuses_first_pair(
-    threshold: str | None, cap: int | None
+    threshold: SeverityThresholdValue | None, cap: int | None
 ) -> None:
     store = Store(pins=_pins(severity_threshold=threshold, max_comments=cap))
     first = _prepare(store, Source())
     assert (first.severity_threshold, first.max_comments) == (threshold, cap)
     store.pins = _pins(severity_threshold="critical", max_comments=3)
     assert _prepare(store, Source()) is first
-    assert (first.severity_threshold, first.max_comments) == (threshold, cap)
 
 
 @pytest.mark.parametrize(("threshold", "cap"), [("all", 1), ("critical", 1), ("all", 3)])
-def test_publication_settings_do_not_change_policy_identity(threshold: str, cap: int) -> None:
+def test_publication_settings_do_not_change_policy_identity(
+    threshold: SeverityThresholdValue, cap: int
+) -> None:
     historical = _snapshot(_RULES_TEXT)
     pinned = _snapshot(_RULES_TEXT, severity_threshold=threshold, max_comments=cap)
     assert (pinned.severity_threshold, pinned.max_comments) == (threshold, cap)
     assert pinned.schema_version == 1
-    assert pinned.policy_digest == historical.policy_digest
+    # Unchanged _RULES_TEXT/_pins fixture archived from baseline commit 1ae74b1.
+    assert (
+        historical.policy_digest
+        == "addc955a9998f413bac8b029bb952457458d1d68ed47d25967e50de9819aaacb"
+    )
+    assert (
+        pinned.policy_digest == "addc955a9998f413bac8b029bb952457458d1d68ed47d25967e50de9819aaacb"
+    )

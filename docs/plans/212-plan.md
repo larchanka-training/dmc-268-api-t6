@@ -9,10 +9,6 @@ with current settings. Historical runs whose new columns are NULL retain live
 Repository fallback. Carry the pins into immutable policy snapshots without changing
 `policy_digest`, its schema version, or conventions-cache identity.
 
-The user explicitly requested execution without waiting for plan confirmation.
-The planning skill's human-approval checkpoint is therefore waived; implementation
-and verification proceed autonomously after this written plan.
-
 ## Architecture decisions
 
 1. Add nullable `severity_threshold` and `max_comments` to both `runs` and
@@ -117,13 +113,12 @@ rerun, severity, origin suites with services available; skipped tests do not pro
 the acceptance criteria. Follow `docs/TEST_PLAN.md` for the full zero-skip
 integration suite and separate RabbitMQ test vhost if full integration runs.
 No production networking or secrets are needed for the focused regression.
-The coordinator has prepared isolated PostgreSQL at
-`postgresql+psycopg://app:app@127.0.0.1:55412/app` for this task.
+Use disposable PostgreSQL configured through `TEST_DATABASE_URL`; use a separate
+RabbitMQ test vhost configured through `TEST_RABBITMQ_URL`.
 
 ## Ownership coordination
 
-The coordinator has posted overlap comments in these open PRs before development
-(AGENTS.md/backend rule). No planning-agent GitHub comments are sent.
+Overlap comments precede edits to the shared files listed below (AGENTS.md/backend rule).
 
 | Open PR | Planned shared files |
 | --- | --- |

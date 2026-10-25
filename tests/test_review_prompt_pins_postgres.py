@@ -162,3 +162,45 @@ def test_v2_run_and_persisted_snapshot_retain_their_prompt_after_v3_activation(
             await engine.dispose()
 
     asyncio.run(exercise())
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize(
+    ("pinned", "live", "expected"),
+    [("warning", "critical", "warning"), (None, "critical", "critical"), (None, "all", "all")],
+)
+def test_prompt_threshold_uses_run_pin_or_historical_live_fallback(
+    prompt_env: Env, pinned: str | None, live: str, expected: str
+) -> None:
+    async def scenario() -> None:
+        engine = prompt_env.engine()
+        factory = async_sessionmaker(engine, expire_on_commit=False)
+        repository = SqlAlchemyReviewPromptRepository(factory)
+        conventions = GeneratedConventions(
+            CachedConventions(REPO_A, None, PROMPT, (), (), {}), None, True
+        )
+        try:
+            async with factory.begin() as session:
+                await session.execute(
+                    text(
+                        "UPDATE runs SET severity_threshold=:threshold, "
+                        "max_comments=:cap WHERE id=:id"
+                    ),
+                    {
+                        "id": RUN_ATTEMPTED,
+                        "threshold": pinned,
+                        "cap": None if pinned is None else 3,
+                    },
+                )
+                await session.execute(
+                    text("UPDATE repositories SET severity_threshold=:threshold WHERE id=:id"),
+                    {"id": REPO_A, "threshold": live},
+                )
+            result = await repository.get_review_prompt_input(RUN_ATTEMPTED, conventions)
+            assert result is not None
+            assert result.severity_threshold == expected
+            assert await repository.get_review_prompt_input(uuid4(), conventions) is None
+        finally:
+            await engine.dispose()
+
+    asyncio.run(scenario())

@@ -15,6 +15,7 @@ from app.common.infrastructure.db.enums import (
     FindingSeverity,
     FindingSide,
     RunState,
+    SeverityThreshold,
 )
 from app.modules.auth.application.scope import AuthScope
 from app.modules.reviews.application.list_runs import RunCursor
@@ -598,8 +599,29 @@ def test_sqlalchemy_run_repository_writes_fail_fast_without_a_unit_of_work_sessi
         asyncio.run(repository.store_diff_snapshots(UUID(int=1), UUID(int=2), "a" * 40, []))
 
 
-def test_get_post_processing_input_returns_none_allowed_v2_rules_for_legacy_run() -> None:
-    from app.common.infrastructure.db.enums import SeverityThreshold
+@pytest.mark.parametrize(
+    (
+        "pinned_cap",
+        "pinned_threshold",
+        "live_cap",
+        "live_threshold",
+        "expected_cap",
+        "expected_threshold",
+    ),
+    [
+        (None, None, 10, SeverityThreshold.ALL, 10, "all"),
+        (3, SeverityThreshold.WARNING, 7, SeverityThreshold.CRITICAL, 3, "warning"),
+        (None, None, 5, SeverityThreshold.WARNING, 5, "warning"),
+    ],
+)
+def test_get_post_processing_input_returns_none_allowed_v2_rules_for_legacy_run(
+    pinned_cap: int | None,
+    pinned_threshold: SeverityThreshold | None,
+    live_cap: int,
+    live_threshold: SeverityThreshold,
+    expected_cap: int,
+    expected_threshold: str,
+) -> None:
     from app.modules.reviews.application.findings_post_processor import FindingsPostProcessor
     from app.modules.reviews.application.review_output import (
         ReviewFinding,
@@ -609,7 +631,7 @@ def test_get_post_processing_input_returns_none_allowed_v2_rules_for_legacy_run(
 
     run_id = UUID(int=1)
     rules = [{"name": "Standard Rule"}]
-    post_input_row = (rules, None, None, 10, SeverityThreshold.ALL)
+    post_input_row = (rules, pinned_cap, pinned_threshold, live_cap, live_threshold)
     run_meta_row = ("c" * 40, "b" * 40, UUID(int=20), 7, "github")
     diff_row = SimpleNamespace(
         filename="app/main.py",
@@ -673,6 +695,8 @@ def test_get_post_processing_input_returns_none_allowed_v2_rules_for_legacy_run(
     post_input = asyncio.run(repository.get_post_processing_input(run_id))
     assert post_input is not None
     assert post_input.allowed_v2_rules is None
+    assert post_input.repository_max_inline == expected_cap
+    assert post_input.severity_threshold == expected_threshold
 
     # Verify that in legacy runs without verifier, unverified v2 names are nulled out
     findings = [
@@ -730,3 +754,27 @@ def test_get_post_processing_input_returns_none_allowed_v2_rules_for_legacy_run(
     assert len(processed.inline) == 3
     for item in processed.inline:
         assert item.finding.rule_name is None
+
+
+def test_prompt_input_without_repository_settings_preserves_the_all_fallback() -> None:
+    from app.modules.reviews.application.conventions import CachedConventions, GeneratedConventions
+    from app.modules.reviews.infrastructure.review_prompt_repository import (
+        SqlAlchemyReviewPromptRepository,
+    )
+
+    class PromptResult(FakeResult):
+        def all(self) -> list[tuple[Any, ...]]:
+            return []
+
+    class MissingSettingsSession(FakeSession):
+        async def execute(self, statement: Select[Any]) -> FakeResult:
+            return PromptResult([("system", [], None)])
+
+    factory = FakeSessionFactory(MissingSettingsSession([]))
+    repository = SqlAlchemyReviewPromptRepository(cast(async_sessionmaker[AsyncSession], factory))
+    conventions = GeneratedConventions(
+        CachedConventions(UUID(int=1), None, UUID(int=2), (), (), {}), None, True
+    )
+    result = asyncio.run(repository.get_review_prompt_input(UUID(int=3), conventions))
+    assert result is not None
+    assert result.severity_threshold == "all"
