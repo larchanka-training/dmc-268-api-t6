@@ -251,8 +251,9 @@ packaged `review/rules`. Bind и create не включают intake и не aut
 GitLab HTTP выполняется вне каждой DB transaction; после HTTP locked snapshot сравнивается
 заново. Safe JSON результата не содержит token/ciphertext/digest/keyring.
 
-Activation — отдельный шаг после внешнего #171 merged/rebased deployment gate и
-разрешения на выборочную live-проверку. #171 остаётся OPEN; этот документ не разрешает
+Публикация #171 merged через PR229 и включена в текущую ветку #169. Перед отдельным
+шагом activation оператор проверяет, что deployed version включает эти изменения,
+и получает разрешение на выборочную live-проверку. Этот документ не разрешает
 production activation. CLI не принимает supplied merged SHA или boolean обхода:
 
 ```bash
