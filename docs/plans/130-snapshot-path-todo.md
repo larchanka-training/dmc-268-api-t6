@@ -35,7 +35,7 @@ Gates for every task: the four commands in the plan, with DB and vhost `imp130f`
   - `reserved_calls == 0`, `bounded_repair` off;
   - the conventions cache key `(repo, agents_md_sha, prompt_version_id, policy_key)`.
 - **Done when:**
-  - [ ] green on `703c05ec`;
+  - [x] green on `703c05ec`;
   - [ ] the `context_manifests` row count (0) is added in F1-6.
 
 ### F1-2: Path selector ⚑
