@@ -534,7 +534,8 @@ Run используют live fallback к Repository, включая retry. Ре
 (#130 D) следует за `20261024_0038` и добавляет nullable FK-колонки
 `runs.conventions_prompt_version_id` и `runs.verifier_prompt_version_id` на
 `prompt_versions`. Downgrade удаляет обе FK и колонки; повторный upgrade оставляет
-исторические prompt pins NULL без backfill. Execution profile пока фиксирует
+исторические Run prompt pins NULL без backfill; существующие snapshot bindings
+сохраняются при обоих переходах. Execution profile пока фиксирует
 первый policy snapshot, а не транзакция создания Run. Будущие изменения схемы
 оформляются новой ревизией, а не правкой уже применённой.
 

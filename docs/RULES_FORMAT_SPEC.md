@@ -704,10 +704,18 @@ Repository. Retry сохраняет пару; новый run и rerun закр�
 Исторические Run с обоими полями NULL не backfill-ятся: обе настройки читаются
 из Repository при каждой обработке и retry, готовый snapshot сохраняет NULL.
 
-Полный целевой профиль #107 дополнительно требует закреплять все три prompt
-bindings и execution profile в транзакции создания. Сейчас Run закрепляет
-review prompt и defaults, а conventions/verifier prompts и полный execution
-profile ещё не закреплены при создании; профиль фиксируется первым snapshot.
+Merged #130 D уже закрепляет все три prompt ID при создании Run: review prompt
+(`prompt_version_id`), conventions (`conventions_prompt_version_id`) и verifier
+(`verifier_prompt_version_id`, миграция `20261024_0039`). Repository override действует
+только для review prompt; для двух остальных выбираются активные версии своих keys.
+При отсутствии активной версии pin остаётся NULL без подстановки на retry;
+исторические NULL также не backfill-ятся. `RunPolicyPins` читает ID/checksum/version
+из закреплённых строк, а готовый snapshot не переписывается после активации новых
+prompts. Rerun выбирает новые текущие bindings.
+
+Execution profile пока фиксируется первым сохранённым snapshot, а не транзакцией
+создания Run: это принятое отклонение от полного целевого профиля #107.
+Подключение snapshot/полного профиля к боевому пути #130 F этим изменением не выполняется.
 После commit worker читает VCS вне DB-транзакции по сохранённому base SHA.
 
 До полной сборки snapshot допустимы отдельные immutable `run_policy_documents`

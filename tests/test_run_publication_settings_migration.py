@@ -46,7 +46,7 @@ def test_publication_pin_migration_preserves_history_and_repository_enum(
     connection = migration_schema
     config = Config("alembic.ini")
     config.attributes["connection"] = connection
-    command.upgrade(config, "20261020_0037")
+    command.upgrade(config, "20261023_0038")
     _seed(connection)
     connection.execute(
         text("""
@@ -85,7 +85,18 @@ def test_publication_pin_migration_preserves_history_and_repository_enum(
                 connection.execute(text(f"UPDATE {table} SET {values}"))
         connection.execute(text(f"UPDATE {table} SET severity_threshold='warning', max_comments=1"))
     connection.commit()
-    command.downgrade(config, "20261020_0037")
+    command.downgrade(config, "20261023_0038")
+    # Removing the publication pins must retain main's review-trigger migration.
+    assert (
+        connection.scalar(
+            text(
+                "SELECT count(*) FROM information_schema.columns "
+                "WHERE table_schema=current_schema() AND table_name='code_index_states' "
+                "AND column_name IN ('review_full_requested_at', 'review_full_requested_sha')"
+            )
+        )
+        == 2
+    )
     # Repository owns the enum and its settings survive removal of the run columns.
     assert connection.execute(
         text("SELECT severity_threshold::text, max_comments FROM repositories LIMIT 1")

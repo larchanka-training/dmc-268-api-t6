@@ -1,6 +1,7 @@
 # PR #280 review round 1 — implementation plan
 
-Address review on `5503114`, then rebase on current `main` (`05a96bc` when planned).
+Address review on `5503114`. The original rebase target was `05a96bc`;
+the integration update below supersedes that target and the old stack assumptions.
 The user authorized proceeding without plan confirmation. No API, queue, digest,
 cache-key, snapshot-version, or migration-ID change is required.
 
@@ -18,7 +19,7 @@ cache-key, snapshot-version, or migration-ID change is required.
 | P3-5 | Clarify RFS introductory paragraph and SD Р-6: threshold/cap pinning is implemented for new legacy runs; historical NULL pairs use live fallback. |
 | P3-6 | Remove temporary-log paths, local DSN/port and agent-coordination narrative from existing 212 plan/todo. Keep durable commands, measured results and useful ownership facts. New review documents contain no machine-specific evidence links. |
 | P3-7 | Rebase keeps main's worker polling implementation with its explanatory broker comment. Avoid a duplicate production/test change. Include `Refs #245` in follow-up commit footer (alongside #212); no history rewrite solely for the footer. |
-| P3-8 / stack FYI | Current main has no 0038: retain ID `20261024_0038` and parent `20261020_0037`, preserving #289's dependency. Refresh migration graph immediately before publication; if main advances migration head, coordinate rather than silently invalidating stack. |
+| P3-8 / stack FYI | Preserve migration IDs and the now-merged #130 D work. The integration update below defines the new parent chain after #254; refresh the graph before publication. |
 | Existing stack coordination comment `6387289216` | Publisher posts a public one-line warning in PR #280 BEFORE force-push, then uses force-with-lease after rebase. Reply with final SHA to all three P2 threads and summarize P3 dispositions; request review from API-verified author `axyi`. Never resolve review threads. |
 | Existing coordination comments (#130 E, #216, #211) | Preserve those boundaries: no edits to execute/store paths, no removal of factory helpers unrelated to this review, preserve accepted provenance/prompt/reflection wording while editing only pin state. |
 
@@ -79,3 +80,69 @@ Main's DiffMap SQL changes can conflict with fake-row expectations: merge query
 columns by meaning, not one side wholesale. Historical NULL behavior must not be
 accidentally converted to default or snapshot pinning. Baseline goldens must be
 computed from the same unchanged input fixture. No blocking question remains.
+
+## Integration update — #289 merged into the PR branch, #254 into main
+
+This section supersedes the earlier assumption that #289 is still a separate
+stack and that main ends at 0037. PR #289 merged at 10:20 into
+`feat/212-pin-threshold`, advancing its remote head to
+`3f8d1da71f6266f44928fa8fc6374073d64ac730`. It includes six #130 D commits
+on the old `5503114` base. Those commits are foreign work and must all survive.
+The local review fix is committed as `3c4d32c`, following feature `ab5f468`
+on `cf50ff35`; the working tree was clean when this update was requested.
+
+Main is now `48636f2cb456ecc07b7195cea3c98e36a280c376`. Merged #254 adds
+54 RAG commits, the review-trigger migration, documentation/context tests and
+migration-head assertions. Existing #212/#130 D IDs must stay stable. The single
+chain must become:
+
+`20261020_0037` → main `20261023_0038` → #212 `20261024_0038`
+→ #130 D `20261024_0039`.
+
+The implementation agent must first create a recoverable local backup of the
+current HEAD, rebuild from the combined remote head `3f8d1da`, and rebase that
+combined history onto main `48636f2`. Preserve the original #212 work and all
+#130 D commits, then cherry-pick ONLY the local review-fix commit `3c4d32c`.
+Do not cherry-pick the rewritten feature `ab5f468` or force-push the current
+local history over the combined remote head. Source conflict resolutions and
+all Git operations belong to the implementation/publishing agents.
+
+Resolve schema checks against final head `20261024_0039`, and integrate BOTH
+#212 0038 and #130 D 0039 into the migration registry and schema inventories
+without removing main's `20261023_0038` entry. Preserve #254 RAG/context behavior
+and current CI configuration. RFS §7.2 must now say new runs pin the complete
+prompt bindings through merged #130 D; execution profile remains fixed by the
+first stored snapshot, an accepted deviation. No #130 F wiring or execute/store
+implementation expansion belongs in this change.
+
+Reapply and verify every P2/P3 fix from this round, including independent literal
+identity goldens. Their fixture inputs must remain demonstrably unchanged and
+the baseline values valid after the RAG integration; do not update goldens solely
+to make the new implementation pass. Run static gates and focused real PostgreSQL
+coverage for publication pins, prompt binding D, migration upgrade/downgrade,
+RAG/context/cache identity, and affected compatibility tests. Previous 210 focused
+and 999 integration passes describe the old 05a96bc base only. Avoid another
+32-minute macOS full run with already-established platform-only failures;
+definitive full verification is current-head Linux CI with all tests and zero
+integration skips. State this distinction explicitly in the PR.
+
+The coordinating agent will post fresh public notes in #280, #283 and #291.
+The earlier public-warning-before-force-push requirement still applies. Immediately
+before publishing, reread the remote branch and confirm it still equals the
+combined head above. Use an explicit lease on that verified head; if it advanced,
+stop overwriting and incorporate the new work. The final PR body must describe
+all work now carried by PR #280, including merged #130 D, final migration order,
+review fixes and actual final-head verification. Reply with final SHAs, retain
+reviewer-owned resolution and request review on the actual published head.
+
+
+### Integrated base and verification
+
+The combined branch also incorporates main `bb09caee` after `48636f2`, including
+its ambiguous-policy-tree handling. All six #130 D commits are preserved; the
+review fix is applied once. The schema order above remains the sole chain with
+head `20261024_0039`. Current-base focused checks passed in three bounded batches:
+270 publication/prompt/context/schema cases, 4 migration-head cases, and 463
+RAG/graph/policy/worker cases, with zero skips. Ruff, format, mypy and diff checks
+passed; independent integration reviews reported zero findings. Final complete
+Linux CI and remote-head lease checks remain publication requirements in PR #280.
