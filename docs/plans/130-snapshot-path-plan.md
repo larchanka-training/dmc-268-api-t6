@@ -181,8 +181,15 @@ validates against v1 when no snapshot is attached (`llm/models.py:183-188`). Tha
   - `id` uuid PK (= `manifest_id`); `run_id` FK `runs` ON DELETE CASCADE; `attempt`; `call_id` UNIQUE;
   - `stage` CHECK (conventions | review | verification);
   - `recovery_kind` CHECK (none | retry | repair | fallback);
-  - `parent_call_id` and `policy_snapshot_id`, both NULL-able;
+  - `parent_call_id` NULL-able; `policy_snapshot_id` NOT NULL, FK `run_policy_snapshots.snapshot_id`
+    (UNIQUE) ON DELETE CASCADE (CVS §8.3; decided by the tech lead on 2026-10-25, fix round of batch 2);
   - `digest` char(64), the SHA-256 of the canonical blocks JSON; `block_count`; `input_tokens`;
+  - the CVS §5.1 identities, NOT NULL char(64), known before the call (same decision):
+    `rendered_messages_sha256` (SHA-256 of the canonical JSON of the exact provider messages, in
+    order), `prompt_checksum` (the stage's checksum in the snapshot's prompt bindings) and
+    `model_profile_version`. CVS defines no format for the last one; it is the SHA-256 of the
+    canonical JSON of the snapshot's pinned `execution_profile` as stored (`pinned_to_json`), so it
+    changes with any pinned model, route, counter or profile version and stays the same on a retry;
   - `blocks` jsonb; `omissions` jsonb DEFAULT `'[]'`; `schema_version` DEFAULT 1; `created_at`;
   - index (`run_id`, `attempt`).
 - `blocks` stores every `ManifestBlock` field (`policy_snapshot.py:351-365`) plus three additive
@@ -204,6 +211,10 @@ validates against v1 when no snapshot is attached (`llm/models.py:183-188`). Tha
     builders count in F1-10 and F1-7 (the verifier's are counted since F1-7), so until then their
     rows report no tokens for their blocks.
     The step records `duration_ms: 0` (its own write is the transaction).
+  - Fix round of batch 2: the call's slot (`attempt.calls`) is claimed before the manifest write
+    awaits, so two generations of one attempt cannot both pass the cap; the step is inserted before
+    the row, so its `SELECT … FOR UPDATE` on the run precedes the row's FK lock (no deadlock between
+    two writers of one run).
 - **E-3.** For snapshot-path tasks, the `llm.call` request (`application/llm.py:141-155`) adds `call_id`,
   `stage`, `policy_snapshot_id` and `manifest_id`. If #227 merges first, its `operation` key stays and
   `stage` mirrors it.

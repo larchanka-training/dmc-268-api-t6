@@ -54,23 +54,8 @@ class SqlAlchemyContextManifestRepository:
         blocks = [manifest_block_json(block) for block in manifest.blocks]
         canonical = json.dumps(blocks, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
         digest = sha256(canonical.encode("utf-8")).hexdigest()
-        self._session.add(
-            ContextManifest(
-                id=entry.manifest_id,
-                run_id=run_id,
-                attempt=entry.attempt,
-                call_id=manifest.call_id,
-                stage=manifest.stage,
-                recovery_kind=manifest.recovery_kind,
-                parent_call_id=entry.parent_call_id,
-                policy_snapshot_id=entry.policy_snapshot_id,
-                digest=digest,
-                block_count=len(blocks),
-                input_tokens=entry.input_tokens,
-                blocks=blocks,
-            )
-        )
-        await self._session.flush()
+        # The step first: its SELECT ... FOR UPDATE on the run comes before the row's foreign
+        # key takes KEY SHARE on it, so two writers of one run queue instead of deadlocking.
         # PIPELINE_SPEC §2: ids, digest and counters only; the blocks stay in the row.
         await insert_run_action(
             self._session,
@@ -93,6 +78,26 @@ class SqlAlchemyContextManifestRepository:
             # The step is its own write; the time it takes is the transaction's.
             duration_ms=0,
         )
+        self._session.add(
+            ContextManifest(
+                id=entry.manifest_id,
+                run_id=run_id,
+                attempt=entry.attempt,
+                call_id=manifest.call_id,
+                stage=manifest.stage,
+                recovery_kind=manifest.recovery_kind,
+                parent_call_id=entry.parent_call_id,
+                policy_snapshot_id=entry.policy_snapshot_id,
+                digest=digest,
+                rendered_messages_sha256=entry.rendered_messages_sha256,
+                prompt_checksum=entry.prompt_checksum,
+                model_profile_version=entry.model_profile_version,
+                block_count=len(blocks),
+                input_tokens=entry.input_tokens,
+                blocks=blocks,
+            )
+        )
+        await self._session.flush()
 
 
 class SqlAlchemyContextManifestUnitOfWork(SqlAlchemyUnitOfWork):

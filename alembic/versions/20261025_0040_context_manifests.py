@@ -28,8 +28,11 @@ def upgrade() -> None:
         sa.Column("stage", sa.String(length=20), nullable=False),
         sa.Column("recovery_kind", sa.String(length=20), nullable=False),
         sa.Column("parent_call_id", sa.Uuid(), nullable=True),
-        sa.Column("policy_snapshot_id", sa.Uuid(), nullable=True),
+        sa.Column("policy_snapshot_id", sa.Uuid(), nullable=False),
         sa.Column("digest", sa.CHAR(length=64), nullable=False),
+        sa.Column("rendered_messages_sha256", sa.CHAR(length=64), nullable=False),
+        sa.Column("prompt_checksum", sa.CHAR(length=64), nullable=False),
+        sa.Column("model_profile_version", sa.CHAR(length=64), nullable=False),
         sa.Column("block_count", sa.INTEGER(), nullable=False),
         sa.Column("input_tokens", sa.INTEGER(), nullable=False),
         sa.Column("blocks", postgresql.JSONB(astext_type=sa.Text()), nullable=False),
@@ -55,6 +58,9 @@ def upgrade() -> None:
             name="ck_context_manifests_recovery_kind",
         ),
         sa.ForeignKeyConstraint(["run_id"], ["runs.id"], ondelete="CASCADE"),
+        sa.ForeignKeyConstraint(
+            ["policy_snapshot_id"], ["run_policy_snapshots.snapshot_id"], ondelete="CASCADE"
+        ),
         sa.PrimaryKeyConstraint("id"),
         sa.UniqueConstraint("call_id"),
     )

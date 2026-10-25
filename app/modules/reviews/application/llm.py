@@ -7,16 +7,24 @@ the attempt deadline, the run cost limit and to write the ``llm.call`` trace and
 
 from __future__ import annotations
 
+import json
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import date, datetime
 from decimal import Decimal
 from enum import StrEnum
+from hashlib import sha256
 from typing import Any, Literal, Protocol
 from uuid import UUID
 
 from app.common.application.unit_of_work import UnitOfWork
-from app.modules.reviews.application.policy_snapshot import CallManifest
+from app.modules.reviews.application.policy_snapshot import (
+    CallManifest,
+    ExecutionProfile,
+    PromptBindings,
+    StageName,
+)
+from app.modules.reviews.application.prepare_policy_snapshot import pinned_to_json
 from app.modules.reviews.application.run_failures import RETRYABLE_ERROR_CODES
 
 type EngineName = Literal["fast", "deep"]
@@ -206,7 +214,9 @@ class ManifestEntry:
 
     ``manifest_id`` names the row in ``llm.call``; ``parent_call_id`` is the base call of a
     repair or a fallback; ``input_tokens`` is the call's pre-send count with the pinned
-    counter.
+    counter. The CVS §5.1 identities are known before the call: the SHA-256 of the exact
+    provider messages, the checksum of the prompt the stage pinned and
+    ``model_profile_version`` of the pinned execution profile.
     """
 
     manifest_id: UUID
@@ -216,6 +226,29 @@ class ManifestEntry:
     parent_call_id: UUID | None
     input_tokens: int
     started_at: datetime
+    rendered_messages_sha256: str
+    prompt_checksum: str
+    model_profile_version: str
+
+
+def stage_prompt_checksum(bindings: PromptBindings, stage: StageName) -> str:
+    """The checksum of the prompt a call's stage pinned (CVS §5.1 ``prompt_checksum``)."""
+    checksums: dict[StageName, str] = {
+        "conventions": bindings.conventions_checksum,
+        "review": bindings.review_system_checksum,
+        "verification": bindings.verifier_checksum,
+    }
+    return checksums[stage]
+
+
+def model_profile_version(profile: ExecutionProfile) -> str:
+    """CVS §5.1 ``model_profile_version``: SHA-256 of the canonical JSON of the pinned
+    execution profile as the snapshot stores it. It changes with any pinned model, route,
+    counter or profile version and stays the same on a retry."""
+    canonical = json.dumps(
+        pinned_to_json(profile), sort_keys=True, separators=(",", ":"), ensure_ascii=False
+    )
+    return sha256(canonical.encode("utf-8")).hexdigest()
 
 
 class ManifestStore(Protocol):
