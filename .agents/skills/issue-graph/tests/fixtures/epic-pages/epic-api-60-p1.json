@@ -1,0 +1,164 @@
+{
+  "data": {
+    "repository": {
+      "issue": {
+        "title": "[notify] Уведомления о завершении прогона",
+        "subIssues": {
+          "pageInfo": {
+            "hasNextPage": true,
+            "endCursor": "Mw"
+          },
+          "nodes": [
+            {
+              "id": "I_kwDOEIOM8AAAABAPI0061",
+              "number": 61,
+              "title": "[notify] Модель подписки на уведомления",
+              "state": "CLOSED",
+              "repository": {
+                "nameWithOwner": "larchanka-training/dmc-268-api-t6"
+              },
+              "parent": {
+                "number": 60,
+                "repository": {
+                  "nameWithOwner": "larchanka-training/dmc-268-api-t6"
+                }
+              },
+              "blockedBy": {
+                "totalCount": 0,
+                "pageInfo": {
+                  "hasNextPage": false,
+                  "endCursor": null
+                },
+                "nodes": []
+              },
+              "blocking": {
+                "totalCount": 0,
+                "pageInfo": {
+                  "hasNextPage": false,
+                  "endCursor": null
+                },
+                "nodes": []
+              },
+              "projectItems": {
+                "nodes": [
+                  {
+                    "project": {
+                      "number": 12,
+                      "owner": {
+                        "login": "larchanka-training"
+                      }
+                    },
+                    "fieldValueByName": {
+                      "name": "Done"
+                    }
+                  }
+                ]
+              }
+            },
+            {
+              "id": "I_kwDOEIOM8AAAABAPI0062",
+              "number": 62,
+              "title": "[notify] Очередь исходящих уведомлений",
+              "state": "OPEN",
+              "repository": {
+                "nameWithOwner": "larchanka-training/dmc-268-api-t6"
+              },
+              "parent": {
+                "number": 60,
+                "repository": {
+                  "nameWithOwner": "larchanka-training/dmc-268-api-t6"
+                }
+              },
+              "blockedBy": {
+                "totalCount": 0,
+                "pageInfo": {
+                  "hasNextPage": false,
+                  "endCursor": null
+                },
+                "nodes": []
+              },
+              "blocking": {
+                "totalCount": 1,
+                "pageInfo": {
+                  "hasNextPage": false,
+                  "endCursor": "MQ"
+                },
+                "nodes": [
+                  {
+                    "number": 64,
+                    "title": "[notify] Отправка в Telegram",
+                    "state": "OPEN",
+                    "repository": {
+                      "nameWithOwner": "larchanka-training/dmc-268-api-t6"
+                    }
+                  }
+                ]
+              },
+              "projectItems": {
+                "nodes": [
+                  {
+                    "project": {
+                      "number": 12,
+                      "owner": {
+                        "login": "larchanka-training"
+                      }
+                    },
+                    "fieldValueByName": {
+                      "name": "Todo"
+                    }
+                  }
+                ]
+              }
+            },
+            {
+              "id": "I_kwDOEIOM8AAAABAPI0063",
+              "number": 63,
+              "title": "[notify] Шаблоны писем",
+              "state": "OPEN",
+              "repository": {
+                "nameWithOwner": "larchanka-training/dmc-268-api-t6"
+              },
+              "parent": {
+                "number": 60,
+                "repository": {
+                  "nameWithOwner": "larchanka-training/dmc-268-api-t6"
+                }
+              },
+              "blockedBy": {
+                "totalCount": 0,
+                "pageInfo": {
+                  "hasNextPage": false,
+                  "endCursor": null
+                },
+                "nodes": []
+              },
+              "blocking": {
+                "totalCount": 0,
+                "pageInfo": {
+                  "hasNextPage": false,
+                  "endCursor": null
+                },
+                "nodes": []
+              },
+              "projectItems": {
+                "nodes": [
+                  {
+                    "project": {
+                      "number": 12,
+                      "owner": {
+                        "login": "larchanka-training"
+                      }
+                    },
+                    "fieldValueByName": {
+                      "name": "Todo"
+                    }
+                  }
+                ]
+              }
+            }
+          ]
+        }
+      }
+    }
+  }
+}

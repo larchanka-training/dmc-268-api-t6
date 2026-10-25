@@ -4,9 +4,10 @@ Offline: no network, no tokens, no live `gh`. An autouse guard puts a fake `gh`
 first on PATH that fails with exit 97, so any request that escapes the fixture
 seam (`ISSUE_GRAPH_FIXTURE_DIR`) or a test's own fake is an error, never a call.
 
-Covers: byte-exact golden reports for six GraphQL fixture sets (a cycle, a
-milestone found in one repo only, a full sprint milestone, an epic, nested
-pagination, explicit issues across both repos), label stripping/cutting/escaping,
+Covers: byte-exact golden reports for seven GraphQL fixture sets (a cycle, a
+milestone found in one repo only, a full sprint milestone, an epic, an epic whose
+sub-issues come in two pages, nested pagination, explicit issues across both
+repos), label stripping/cutting/escaping,
 REF parsing, the one-mode rule, the cycle walk and the tangle line under it,
 exit codes 2 and 3, and the argv
 the script hands to `gh`; and `--publish-to`: the marker key, comment paging and
@@ -114,6 +115,7 @@ CASES: list[tuple[str, list[str], int]] = [
     ("no-links", ["--milestone", "Спринт 9"], 0),
     ("milestone", ["--milestone", "Спринт 5"], 0),
     ("epic", ["--epic", "api#139"], 0),
+    ("epic-pages", ["--epic", "api#60"], 0),
     ("pagination", ["--milestone", "Спринт 7", "--repo", API], 0),
     ("issues", ["--issues", "ui#9", "api#31", "api#32", "api#30"], 0),
 ]
@@ -681,6 +683,21 @@ def test_repeated_issue_refs_are_deduplicated(tmp_path: Path) -> None:
     assert "Задач: 1 (" in r.stdout
 
 
+def test_epic_collects_sub_issues_from_every_page() -> None:
+    """`epic-pages`: api#61–63 on page 1, api#64–65 on page 2, api#62 blocks api#64
+    across the boundary. Page 1 alone counts 3 issues and leaves api#64 outside."""
+    r = run("--epic", "api#60", fixtures=FIXTURES / "epic-pages")
+    assert r.returncode == 0, r.stderr
+    assert "Задач: 5 (открыто 4, закрыто 1). Связей блокировки: 1. Вне выборки: 0." in r.stdout
+    assert section(r.stdout, "Без связей").splitlines()[-1] == (
+        f"- [api#65](https://github.com/{API}/issues/65) [notify] Настройки уведомлений в профиле"
+    )
+    # The cross-page edge, with both ends inside the scope.
+    assert "  api_62 --> api_64" in r.stdout.splitlines()
+    assert class_lines(r.stdout) == ["  class api_61 done"]
+    assert section(r.stdout, "Вне выборки") == "Нет."
+
+
 # ─── live wire format: pages and cursors ────────────────────────────────────
 def passed(argv: list[str], key: str) -> list[tuple[str, str]]:
     """(flag, value) of every `key=value` argument in a recorded gh argv."""
@@ -693,7 +710,7 @@ def test_live_paging_sends_cursors_and_renders_like_the_fixture_seam(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A fake gh serves fixture pages chosen by argv alone: the `pagination` set
-    in milestone mode, then the `epic` set in epic mode."""
+    in milestone mode, then the `epic` set and both pages of `epic-pages` in epic mode."""
     log = tmp_path / "calls.jsonl"
     body = (
         "import json, sys\n"
@@ -704,8 +721,11 @@ def test_live_paging_sends_cursors_and_renders_like_the_fixture_seam(
         "    f.write(json.dumps(argv) + '\\n')\n"
         "query = next(a for a in argv if a.startswith('query='))\n"
         "args = dict(a.split('=', 1) for a in argv if '=' in a and a != query)\n"
-        "if 'subIssues(' in query:\n"
+        "if 'subIssues(' in query and args['number'] == '139':\n"
         "    name = 'epic/epic-api-139-p1'\n"
+        "elif 'subIssues(' in query:\n"
+        "    page = 2 if 'after' in args else 1\n"
+        "    name = 'epic-pages/epic-api-' + args['number'] + '-p' + str(page)\n"
         "elif 'milestones(' in query:\n"
         "    name = 'pagination/milestones-api'\n"
         "elif 'node(id' in query:\n"
@@ -775,6 +795,18 @@ def test_live_paging_sends_cursors_and_renders_like_the_fixture_seam(
     epic_query = next(a for a in call if a.startswith("query="))
     assert connections(epic_query) == sorted([("subIssues", "50"), *fragment])
     assert "parent { number repository { nameWithOwner } }" in epic_query
+
+    log.unlink()
+    r = run("--epic", "api#60")
+
+    assert r.returncode == 0, r.stderr
+    assert r.stdout == golden_body("epic-pages")
+    calls = [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()]
+    assert [passed(c, "number") for c in calls] == [[("-F", "60")], [("-F", "60")]]
+    assert [passed(c, "after") for c in calls] == [[], [("-f", "Mw")]]
+    for c in calls:
+        epic_query = next(a for a in c if a.startswith("query="))
+        assert connections(epic_query) == sorted([("subIssues", "50"), *fragment])
 
 
 # ─── publish: no target, no REST ────────────────────────────────────────────

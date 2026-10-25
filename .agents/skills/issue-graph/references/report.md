@@ -13,6 +13,7 @@ The goldens show each case byte for byte, after a SYNC line and a blank line:
 | `tests/golden/cycle.md`      | a cycle: no layers, no critical path; titles with `#5` and `@octocat`          |
 | `tests/golden/no-links.md`   | a milestone found in api only; no links at all                                 |
 | `tests/golden/epic.md`       | an epic's sub-issues, a critical path that starts outside the scope            |
+| `tests/golden/epic-pages.md` | an epic's sub-issues on two pages, a blocking link across the page boundary    |
 | `tests/golden/pagination.md` | milestone issues and relations paged past their first page                     |
 | `tests/golden/issues.md`     | an explicit list across repos and an outside owner                             |
 
