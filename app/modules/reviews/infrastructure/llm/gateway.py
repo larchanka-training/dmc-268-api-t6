@@ -16,6 +16,10 @@ its usage recorded as soon as the call returns, outside any database transaction
 | invalid answer  | 1 repair call with validator errors| fallback once     |
 |                 | (skipped if it would overflow)     |                   |
 | context overflow| none                               | none              |
+
+A final 429 carries the longest Retry-After of this gateway call's 429s (primary, retry,
+repair, fallback) in ``LlmCallFailed.retry_after_s``; the run retry waits at least that
+long (docs/PIPELINE_SPEC.md §4.2). Any other final error carries its own call's hint.
 """
 
 from __future__ import annotations
@@ -317,6 +321,8 @@ class LlmGateway:
         rate_limit_waited = repaired = False
         # The manifest of the current call: retries reuse it, repair and fallback replace it.
         manifest = task.base_manifest
+        # A fallback 429 without the header must not shorten the primary's window (#247).
+        rate_limit_hint: float | None = None
 
         while True:
             last = await self._call(
@@ -325,6 +331,7 @@ class LlmGateway:
             if last.output is not None:
                 return self._result(primary, last, state, manifest)
             assert last.error is not None
+            rate_limit_hint = _longest_retry_after(rate_limit_hint, last)
             if attempt.calls >= primary_limit:
                 break
             delay: float | None = None
@@ -414,7 +421,10 @@ class LlmGateway:
                 # A smaller fallback window must not turn a retryable primary error
                 # into a non-retryable context overflow.
                 raise self._failed(
-                    last.error, last.message, state, retry_after_s=last.retry_after_s
+                    last.error,
+                    last.message,
+                    state,
+                    retry_after_s=_final_hint(last, rate_limit_hint),
                 )
             if task.base_manifest is not None:
                 fallback_manifest = replace(
@@ -440,8 +450,11 @@ class LlmGateway:
             )
             if last.output is not None:
                 return self._result(fallback, last, state, manifest)
+            rate_limit_hint = _longest_retry_after(rate_limit_hint, last)
         assert last.error is not None
-        raise self._failed(last.error, last.message, state, retry_after_s=last.retry_after_s)
+        raise self._failed(
+            last.error, last.message, state, retry_after_s=_final_hint(last, rate_limit_hint)
+        )
 
     def _attempt_calls(self, context: RunCallContext) -> _AttemptCalls:
         current = self._attempts.get(context.run_id)
@@ -1046,6 +1059,18 @@ def _calls_exhausted(context: RunCallContext, attempt: _AttemptCalls, task: Stru
     """The cap message; the reserve is named only when the task keeps one (live: never)."""
     reserve = f", {task.reserved_calls} kept for later stages" if task.reserved_calls else ""
     return f"attempt {context.attempt} already made {attempt.calls} provider calls{reserve}"
+
+
+def _longest_retry_after(current: float | None, outcome: _Outcome) -> float | None:
+    """The longest Retry-After so far, counting ``outcome`` when it is a rate limit."""
+    if outcome.error is not LlmErrorCode.RATE_LIMITED or outcome.retry_after_s is None:
+        return current
+    return outcome.retry_after_s if current is None else max(current, outcome.retry_after_s)
+
+
+def _final_hint(last: _Outcome, rate_limit_hint: float | None) -> float | None:
+    """A final 429 waits out every 429 of this gateway call; other errors keep their own."""
+    return rate_limit_hint if last.error is LlmErrorCode.RATE_LIMITED else last.retry_after_s
 
 
 def _validated(response: ChatResponse, task: StructuredTask) -> _Outcome:

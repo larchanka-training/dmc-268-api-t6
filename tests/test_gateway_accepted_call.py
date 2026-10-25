@@ -1,14 +1,17 @@
 """What a gateway call reports back: the accepted call's id and the provider's Retry-After (#130).
 
 ``GatewayResult.accepted_call_id`` names the manifest of the call whose answer was accepted
-(R13, ``llm.verify``); ``LlmCallFailed.retry_after_s`` carries the last provider hint for
-the verifier's retry delay. ``classify_failure`` does not read it, so live review delays
-stay as they are. No network: provider answers come from ``httpx.MockTransport``.
+(R13, ``llm.verify``); ``LlmCallFailed.retry_after_s`` carries the provider's Retry-After
+(the longest of the call's 429s when the final error is a rate limit, else the last call's)
+for the verifier's retry delay and, through ``classify_failure``, for the run retry of an
+``llm_rate_limited`` failure (#247). No network: provider answers come from
+``httpx.MockTransport``.
 """
 
 from __future__ import annotations
 
 import asyncio
+import math
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -233,15 +236,15 @@ def test_the_final_rate_limit_failure_carries_the_providers_retry_after() -> Non
     assert provider.kinds() == ["primary", "fallback"]
     assert failure.error_code is LlmErrorCode.RATE_LIMITED
     assert failure.retry_after_s == 45.0
-    # Live pin: the run retry delay ignores the hint, as before.
-    assert classify_failure(failure).retry_after is None
+    # The run retry reads the hint; 45 s is under the 2-minute floor, so it waits 2m.
+    assert classify_failure(failure).retry_after == timedelta(seconds=45)
     assert RetryDelays().for_failure(1, classify_failure(failure)) == (
         "2m",
         timedelta(minutes=2),
     )
 
 
-def test_the_hint_is_the_last_calls_not_an_earlier_one() -> None:
+def test_a_final_error_other_than_a_rate_limit_keeps_only_its_own_calls_hint() -> None:
     provider = _Provider([error(429, **{"Retry-After": "45"}), error(503)])
 
     failure = provider.failure()
@@ -264,11 +267,67 @@ def test_a_failure_without_a_hint_has_no_retry_after() -> None:
     assert LlmCallFailed(LlmErrorCode.RATE_LIMITED, "rate limited").retry_after_s is None
 
 
-def test_a_long_retry_after_does_not_move_the_live_run_retry_delay() -> None:
-    # 300 s would select the 10m delay if classify_failure read the hint.
+@pytest.mark.parametrize(
+    ("retry_after_s", "retry_after", "delay"),
+    [
+        pytest.param(900.0, timedelta(minutes=15), ("10m", timedelta(minutes=15)), id="15m"),
+        pytest.param(300.0, timedelta(minutes=5), ("10m", timedelta(minutes=10)), id="5m"),
+        pytest.param(None, None, ("2m", timedelta(minutes=2)), id="no-hint"),
+        pytest.param(0.0, None, ("2m", timedelta(minutes=2)), id="zero"),
+        pytest.param(-5.0, None, ("2m", timedelta(minutes=2)), id="negative"),
+        pytest.param(math.nan, None, ("2m", timedelta(minutes=2)), id="nan"),
+        pytest.param(120.0, timedelta(minutes=2), ("2m", timedelta(minutes=2)), id="120s"),
+        pytest.param(121.0, timedelta(seconds=121), ("10m", timedelta(minutes=10)), id="121s"),
+        # A huge header must not overflow timedelta: it is capped at one day first.
+        pytest.param(1e20, timedelta(days=1), ("10m", timedelta(days=1)), id="huge"),
+        pytest.param(math.inf, timedelta(days=1), ("10m", timedelta(days=1)), id="inf"),
+    ],
+)
+def test_a_rate_limit_hint_sets_the_run_retry_delay(
+    retry_after_s: float | None,
+    retry_after: timedelta | None,
+    delay: tuple[str, timedelta],
+) -> None:
+    # D3 (#247): the run never retries a rate-limited call before its Retry-After.
     failure = classify_failure(
-        LlmCallFailed(LlmErrorCode.RATE_LIMITED, "rate limited", retry_after_s=300.0)
+        LlmCallFailed(LlmErrorCode.RATE_LIMITED, "rate limited", retry_after_s=retry_after_s)
     )
 
-    assert failure.retry_after is None
-    assert RetryDelays().for_failure(1, failure) == ("2m", timedelta(minutes=2))
+    assert (failure.error_code, failure.retry_after) == ("llm_rate_limited", retry_after)
+    assert RetryDelays().for_failure(1, failure) == delay
+
+
+@pytest.mark.parametrize(
+    ("hints", "kinds"),
+    [
+        # Above the 30 s the gateway waits for: the primary goes straight to the fallback.
+        pytest.param(["900", None], ["primary", "fallback"], id="fallback-without-header"),
+        pytest.param(["900", "45"], ["primary", "fallback"], id="fallback-shorter"),
+        pytest.param(["45", "900"], ["primary", "fallback"], id="fallback-longer"),
+        # 5 s is waited in the gateway; the retry's 429 has the longer window.
+        pytest.param(["5", "900", None], ["primary", "retry", "fallback"], id="retry-longer"),
+    ],
+)
+def test_a_final_rate_limit_keeps_the_longest_retry_after_of_the_call(
+    hints: list[str | None], kinds: list[str]
+) -> None:
+    # No 429 of the call may shorten another one's window (#247).
+    provider = _Provider(
+        [error(429, **({} if hint is None else {"Retry-After": hint})) for hint in hints]
+    )
+
+    failure = provider.failure()
+
+    assert provider.kinds() == kinds
+    assert failure.error_code is LlmErrorCode.RATE_LIMITED
+    assert failure.retry_after_s == 900.0
+
+
+def test_a_hint_on_another_code_is_not_a_rate_limit() -> None:
+    # for_failure takes any retry_after for a rate limit, so only llm_rate_limited gets one.
+    failure = classify_failure(
+        LlmCallFailed(LlmErrorCode.UNAVAILABLE, "provider down", retry_after_s=900.0)
+    )
+
+    assert (failure.error_code, failure.retry_after) == ("llm_unavailable", None)
+    assert RetryDelays().for_failure(1, failure) == ("30s", timedelta(seconds=30))

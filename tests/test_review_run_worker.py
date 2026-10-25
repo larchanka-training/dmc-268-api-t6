@@ -491,11 +491,9 @@ def test_rate_limit_with_long_retry_after_uses_the_ten_minute_queue() -> None:
             lambda delay: RunFailure("diff_fetch_failed", "GitHub answered 429", retry_after=delay),
             id="vcs",
         ),
-        # A unit case only: production LLM failures carry no Retry-After yet (#292).
-        pytest.param(
-            lambda delay: RunFailure("llm_rate_limited", retry_after=delay),
-            id="llm-unit-with-retry-after",
-        ),
+        # The real gateway failure through the worker:
+        # test_llm_rate_limit_retry_waits_out_the_provider_retry_after.
+        pytest.param(lambda delay: RunFailure("llm_rate_limited", retry_after=delay), id="llm"),
     ],
 )
 @pytest.mark.parametrize(
@@ -983,6 +981,37 @@ def test_policy_rate_limit_retry_waits_out_a_long_retry_after() -> None:
 
     assert early is DeliveryOutcome.ACK
     assert (run.state, run.attempt, retry.published) == ("queued", 1, [("10m", 2)])
+
+
+@pytest.mark.parametrize(
+    ("retry_after_s", "key", "wait"),
+    [
+        pytest.param(900.0, "10m", timedelta(minutes=15), id="retry-after-15m"),
+        pytest.param(None, "2m", timedelta(minutes=2), id="no-retry-after"),
+    ],
+)
+def test_llm_rate_limit_retry_waits_out_the_provider_retry_after(
+    retry_after_s: float | None,
+    key: str,
+    wait: timedelta,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    run = FakeRun()
+    retry = RetryQueue()
+
+    def pipeline(claimed: ClaimedAttempt) -> bool:
+        # What the gateway raises for the review or the conventions call after its own
+        # retry and fallback: nothing on the run path catches it before the worker.
+        raise LlmCallFailed(LlmErrorCode.RATE_LIMITED, "HTTP 429", retry_after_s=retry_after_s)
+
+    outcome = asyncio.run(handler(run, pipeline, retry=retry, clock=Clock()).execute(RUN))
+
+    assert outcome is DeliveryOutcome.ACK
+    assert (run.state, run.attempt) == ("queued", 1)
+    assert retry.published == [(key, 2)]
+    assert run.available_at == NOW + wait
+    # The log names the real wait, not only the queue, which caps at 10 minutes.
+    assert f"retry in {wait} via the {key} queue" in caplog.text
 
 
 def test_check_run_cancellation_logs_run_and_reason_at_info(
