@@ -264,7 +264,15 @@ Gates for every task: the four commands in the plan, with DB and vhost `imp130f`
   `tests/test_repo_conventions.py`.
 - **Tests:** the v2 digest (TL-7 components) misses on a legacy row and hits on a repeat; the same policy with a
   newly tainted rename or copy path misses; a v3 run keeps the old key.
-- **Done when:** [ ] F1-1 green.
+  - as built: `conventions.conventions_cache_key(snapshot, policy_key)` is the SHA-256 of canonical JSON
+    (sorted keys) over the namespace `repo-conventions-v2`, `policy_digest`, the stage's ignore key
+    (with the tainted rename and copy paths), `matcher_version`, `defaults_checksum`, the conventions
+    prompt checksum and the profile versions (tokenizer, counter, response schema, recovery, budget);
+    `stage.policy_key` returns it when the attempt has `snapshot_for_llm`. Pinned by a literal digest,
+    one case per component, the taint, a keyed fake store (legacy entry missed, repeat hit), the
+    stage (v3 keeps the ignore key) and the v4 row on Postgres (`tests/test_review_path.py`,
+    `tests/test_snapshot_path_live_pin.py`). The gates and this line landed in a follow-up commit.
+- **Done when:** [x] F1-1 green.
 
 ### F1-12: R7
 - **Commit:** `feat(reviews): check the policy budget at policy load (#130)`

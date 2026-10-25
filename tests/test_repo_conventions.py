@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import os
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -33,6 +33,7 @@ from app.modules.reviews.application.conventions import (
     ConventionsDraft,
     ConventionsFile,
     ConventionsRequest,
+    GeneratedConventions,
     GenerateRepoConventions,
     PolicyFilteredConventionsSource,
     RepositoryFile,
@@ -1600,3 +1601,138 @@ def test_snapshot_conventions_manifest_counts_each_block_as_rendered() -> None:
         ("tree-0", 4),
         ("changed-0", 4),
     ]
+
+
+# ---------- #130 F1-11: snapshot-path conventions keyed by repo-conventions-v2 (R5) ----------
+
+
+def test_conventions_cache_key_is_the_v2_digest_of_the_pinned_identities() -> None:
+    from app.modules.reviews.application.conventions import conventions_cache_key
+
+    snapshot = _conventions_snapshot("Use uv.\n")
+
+    assert conventions_cache_key(snapshot, "1" * 64) == (
+        "cc66c7734bd7ce7b16e2e508d1943fd59c22c55f8643b618d1b50cd7e6ab3e2c"
+    )
+
+
+def _profile_change(**changes: Any) -> Callable[[PolicySnapshot], PolicySnapshot]:
+    return lambda snapshot: replace(
+        snapshot, execution_profile=replace(snapshot.execution_profile, **changes)
+    )
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        lambda snapshot: replace(snapshot, policy_digest="digest_other"),
+        lambda snapshot: replace(snapshot, matcher_version="review-ignore/v2"),
+        lambda snapshot: replace(snapshot, defaults_checksum="0" * 64),
+        lambda snapshot: replace(
+            snapshot, prompt_bindings=replace(snapshot.prompt_bindings, conventions_checksum="x")
+        ),
+        _profile_change(tokenizer_version="tokenizer/v9"),
+        _profile_change(counter_version="counter/v1"),
+        _profile_change(response_schema_version="schema/v9"),
+        _profile_change(recovery_profile_version="recovery/v9"),
+        _profile_change(budget_profile_version="budget/v9"),
+    ],
+    ids=[
+        "policy-digest",
+        "matcher",
+        "defaults",
+        "conventions-prompt",
+        "tokenizer",
+        "counter",
+        "response-schema",
+        "recovery",
+        "budget",
+    ],
+)
+def test_conventions_cache_key_changes_with_every_pinned_identity(
+    change: Callable[[PolicySnapshot], PolicySnapshot],
+) -> None:
+    from app.modules.reviews.application.conventions import conventions_cache_key
+
+    snapshot = _conventions_snapshot("Use uv.\n")
+
+    assert conventions_cache_key(change(snapshot), "1" * 64) != conventions_cache_key(
+        snapshot, "1" * 64
+    )
+
+
+def test_conventions_cache_key_keeps_the_rename_and_copy_taint_of_the_policy_key() -> None:
+    # The stage's policy key folds a newly tainted rename or copy path into the ignore digest;
+    # the v2 key is built over that value, so such an entry is not reused.
+    from app.modules.reviews.application.conventions import conventions_cache_key
+
+    snapshot = _conventions_snapshot("Use uv.\n")
+
+    assert conventions_cache_key(snapshot, "1" * 64) != conventions_cache_key(snapshot, "2" * 64)
+    assert conventions_cache_key(snapshot, None) != conventions_cache_key(snapshot, "1" * 64)
+
+
+@dataclass
+class KeyedStore(FakeStore):
+    """A cache that keeps one entry per full key, like the unique key of repo_conventions."""
+
+    entries: dict[tuple[UUID, str | None, UUID, str | None], CachedConventions] = field(
+        default_factory=dict
+    )
+
+    async def get(
+        self,
+        repository_id: UUID,
+        agents_md_sha: str | None,
+        prompt_version_id: UUID,
+        policy_key: str | None = None,
+    ) -> CachedConventions | None:
+        self.requested_policy_keys.append(policy_key)
+        return self.entries.get((repository_id, agents_md_sha, prompt_version_id, policy_key))
+
+    async def save_and_record_trace(
+        self,
+        run_id: UUID,
+        conventions: CachedConventions,
+        trace_files: tuple[ConventionsFile, ...],
+    ) -> CachedConventions:
+        key = (
+            conventions.repository_id,
+            conventions.agents_md_sha,
+            conventions.prompt_version_id,
+            conventions.policy_key,
+        )
+        return self.entries.setdefault(key, conventions)
+
+
+def test_a_v2_key_misses_an_entry_under_the_legacy_key_and_hits_on_a_repeat() -> None:
+    from app.modules.reviews.application.conventions import conventions_cache_key
+
+    snapshot = _conventions_snapshot("Use uv.\n")
+    # The entry a v3 run left for the same repository, AGENTS.md revision and prompt row.
+    legacy = CachedConventions(
+        REPOSITORY_ID, "b" * 40, PROMPT_VERSION_ID, ("old",), ("old",), {}, policy_key="1" * 64
+    )
+    store = KeyedStore()
+    store.entries[(REPOSITORY_ID, "b" * 40, PROMPT_VERSION_ID, "1" * 64)] = legacy
+    model = FakeModel(draft())
+    v2 = conventions_cache_key(snapshot, "1" * 64)
+
+    def run() -> GeneratedConventions:
+        return asyncio.run(
+            GenerateRepoConventions(FakeSource(), model, FakeUnitOfWorkFactory(store)).execute(
+                repository_id=REPOSITORY_ID,
+                conventions_prompt=ActiveConventionsPrompt(PROMPT_VERSION_ID, "conventions v2"),
+                run_id=RUN_ID,
+                changed_files=("app/main.py",),
+                policy_key=v2,
+                snapshot=snapshot,
+            )
+        )
+
+    first, second = run(), run()
+
+    assert (first.cache_hit, second.cache_hit) == (False, True)
+    assert len(model.calls) == 1
+    assert store.requested_policy_keys == [v2, v2]
+    assert second.conventions.key_patterns != legacy.key_patterns

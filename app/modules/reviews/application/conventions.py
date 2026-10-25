@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
@@ -40,6 +41,8 @@ _MAX_CONTEXT_LINES = 300
 # The model describes at most this many changed paths (``RepoConventionsDraft.files``);
 # the rest of a large pull request gets the generic trace entry of a cache hit.
 MAX_TRACED_FILES = 100
+# R5: the cache namespace of snapshot-path conventions; a legacy key never equals its digest.
+CONVENTIONS_KEY_NAMESPACE = "repo-conventions-v2"
 _RECOMMENDATION_SOURCE_SUFFIX = re.compile(
     r".*\(from: (standard/(security|correctness|performance|readability)|(?!standard/)[^()]+)\)"
 )
@@ -210,6 +213,36 @@ def build_conventions_manifest(
         recovery_kind=recovery_kind,
         blocks=tuple(conventions_blocks),
     )
+
+
+def conventions_cache_key(snapshot: PolicySnapshot, policy_key: str | None) -> str:
+    """The ``policy_key`` of a snapshot-path conventions entry (R5, TL-7): a SHA-256 digest.
+
+    It covers the pinned identities a generated entry depends on: the policy digest, the
+    attempt's ignore key (``policy_key``, which carries any newly tainted rename or copy
+    path), the matcher, the service defaults, the conventions prompt and the execution
+    profile versions. The repository, AGENTS.md revision and prompt row stay in their own
+    columns. Deviation from CVS §4.2, recorded for G: the rendered input, shown tree and
+    source entries are not part of the key yet.
+    """
+    profile = snapshot.execution_profile
+    identity = {
+        "namespace": CONVENTIONS_KEY_NAMESPACE,
+        "policy_digest": snapshot.policy_digest,
+        "policy_key": policy_key,
+        "matcher_version": snapshot.matcher_version,
+        "defaults_checksum": snapshot.defaults_checksum,
+        "conventions_prompt_checksum": snapshot.prompt_bindings.conventions_checksum,
+        "profile_versions": {
+            "tokenizer": profile.tokenizer_version,
+            "counter": profile.counter_version,
+            "response_schema": profile.response_schema_version,
+            "recovery": profile.recovery_profile_version,
+            "budget": profile.budget_profile_version,
+        },
+    }
+    canonical = json.dumps(identity, sort_keys=True, separators=(",", ":"))
+    return sha256(canonical.encode("utf-8")).hexdigest()
 
 
 class ConventionsFile(BaseModel):

@@ -35,6 +35,7 @@ from app.modules.reviews.application.conventions import (
     PolicyFilteredConventionsSource,
     RepositoryFile,
     RepositorySnapshot,
+    conventions_cache_key,
 )
 from app.modules.reviews.application.execute_review import ReviewReply
 from app.modules.reviews.application.get_run_diff import DiffSnapshot
@@ -876,8 +877,14 @@ def test_v4_conventions_use_the_pinned_prompt_the_snapshot_and_the_reserve(env: 
     assert observed.manifest_rows == [("conventions", "none"), ("conventions", "fallback")]
     # The manifest blocks are counted with the pinned counter.
     assert all(response["tokens_by_role"] for response in observed.manifest_responses)
-    assert [key[1:3] for key in observed.conventions_keys] == [
-        (observed.snapshot.agents.blob_oid, observed.pinned[0])
+    # R5 (TL-7): the v2 digest of the pinned identities, so no legacy row is reused.
+    assert observed.conventions_keys == [
+        (
+            REPO_A,
+            observed.snapshot.agents.blob_oid,
+            observed.pinned[0],
+            conventions_cache_key(observed.snapshot, _IGNORE_DIGEST),
+        )
     ]
 
 
