@@ -127,8 +127,8 @@ TEST_RABBITMQ_URL=amqp://app:app@localhost:5672/imp168d uv run pytest
 **Files:**
 
 - `app/modules/reviews/application/review_ignore.py` (extract `ignore_digest`);
-- `app/modules/reviews/application/prepare_policy_snapshot.py` (extract `policy_digest`;
-  keep `:145`);
+- `app/modules/reviews/application/prepare_policy_snapshot.py` (extract
+  `canonical_policy_payload`; keep `:145`);
 - `app/modules/reviews/application/policy_snapshot_integrity.py` (new; suggested name);
 - `app/modules/reviews/infrastructure/policy_snapshot_unit_of_work.py`
   (`get_staged_documents`, `get_snapshot`);

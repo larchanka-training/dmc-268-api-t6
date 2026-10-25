@@ -189,17 +189,38 @@ def parse_review_ignore(
 
 def _policy(lines: tuple[IgnorePatternLine, ...]) -> IgnorePolicy:
     patterns = tuple(sorted({item.pattern for item in lines}))
+    digest = ignore_digest(
+        patterns,
+        matcher_version=MATCHER_VERSION,
+        builtin_exclusions_version=BUILTIN_EXCLUSIONS_VERSION,
+        limits_version=LIMITS_VERSION,
+    )
+    return IgnorePolicy(patterns, lines, digest)
+
+
+def ignore_digest(
+    patterns: tuple[str, ...],
+    *,
+    matcher_version: str,
+    builtin_exclusions_version: str,
+    limits_version: str,
+) -> str:
+    """``ignore_digest`` of sorted unique masks (RULES_FORMAT_SPEC §7.1).
+
+    The versions are inputs, so a stored snapshot is re-hashed with the ones it recorded;
+    the three literals here are not stored, they are part of the formula itself.
+    """
     payload = {
         "version": 1,
-        "matcher_version": MATCHER_VERSION,
-        "builtin_exclusions_version": BUILTIN_EXCLUSIONS_VERSION,
+        "matcher_version": matcher_version,
+        "builtin_exclusions_version": builtin_exclusions_version,
         "sorted_unique_patterns": list(patterns),
         "rename_copy_propagation": "both-paths/v1",
         "policy_document_exemption": "base-policy-role-only/v1",
-        "limits_version": LIMITS_VERSION,
+        "limits_version": limits_version,
     }
     canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
-    return IgnorePolicy(patterns, lines, sha256(canonical.encode("utf-8")).hexdigest())
+    return sha256(canonical.encode("utf-8")).hexdigest()
 
 
 def _invalid_pattern(pattern: str) -> tuple[int, str] | None:

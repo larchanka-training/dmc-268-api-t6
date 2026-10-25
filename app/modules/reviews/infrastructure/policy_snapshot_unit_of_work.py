@@ -29,6 +29,10 @@ from app.modules.reviews.application.policy_snapshot import (
     PolicySnapshot,
     PromptBindings,
 )
+from app.modules.reviews.application.policy_snapshot_integrity import (
+    verify_policy_document,
+    verify_policy_snapshot,
+)
 from app.modules.reviews.application.prepare_policy_snapshot import (
     RunPolicyPins,
     pinned_to_json,
@@ -176,7 +180,11 @@ class SqlAlchemyPolicySnapshotStore:
             .where(RunPolicyDocument.run_id == run_id)
             .order_by(RunPolicyDocument.path)
         )
-        return tuple(_document(row) for row in rows)
+        documents = tuple(_document(row) for row in rows)
+        # A retry builds its snapshot from these rows: they are checked on every read.
+        for item in documents:
+            verify_policy_document(item.document, item.raw)
+        return documents
 
     async def stage_documents(
         self, run_id: UUID, documents: tuple[LoadedPolicyDocument, ...]
@@ -217,7 +225,7 @@ class SqlAlchemyPolicySnapshotStore:
                 "The policy snapshot has lost a document",
                 policy_base_sha=row.policy_base_sha,
             )
-        return PolicySnapshot(
+        snapshot = PolicySnapshot(
             schema_version=row.schema_version,
             snapshot_id=row.snapshot_id,
             run_id=row.run_id,
@@ -246,6 +254,11 @@ class SqlAlchemyPolicySnapshotStore:
             ),
             max_comments=row.max_comments,
         )
+        # The stored JSON, not the typed values: reading it drops keys a later version wrote.
+        verify_policy_snapshot(
+            snapshot, prompt_bindings=row.prompt_bindings, execution_profile=row.execution_profile
+        )
+        return snapshot
 
     async def create_snapshot(self, snapshot: PolicySnapshot) -> PolicySnapshot:
         await self._lock_active_run(snapshot.run_id)

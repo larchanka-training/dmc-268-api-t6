@@ -213,9 +213,11 @@ In `ReviewContextStage.run`, right after the head check (`:429-430`):
 - `review_ignore.py`: extract `ignore_digest(patterns, *, matcher_version,
   builtin_exclusions_version, limits_version)` from `_policy` (`:190-202`). The three
   literals the row does not store stay inside it.
-- `prepare_policy_snapshot.py`: extract `policy_digest(...)` from `build_policy_snapshot`
-  (`:103-124`). It takes every input of the §7.1 formula explicitly, with the bindings and
-  the profile as JSON mappings. Keep line `:145` as is, because #280 inserts right after it.
+- `prepare_policy_snapshot.py`: extract `canonical_policy_payload(...)` from
+  `build_policy_snapshot` (`:103-124`). It takes every input of the §7.1 formula explicitly,
+  with the bindings and the profile as JSON mappings, and returns the canonical JSON text
+  that `policy_digest` is the SHA-256 of. Keep line `:145` as is, because #280 inserts right
+  after it: it hashes that text, so the helper cannot return the digest itself.
 - New module `app/modules/reviews/application/policy_snapshot_integrity.py` (suggested
   name):
   - `verify_policy_document(document, raw)`.
@@ -296,8 +298,8 @@ All tests go into new files. `tests/test_review_context_stage.py` (#280, #220) a
   - Each tamper raises `policy_snapshot_integrity_error`: raw bytes, text, `raw_sha256`
     alone, `ignore_patterns`, `policy_base_sha`, `defaults_checksum`, one binding key,
     `policy_digest`.
-  - Golden pin: `policy_digest(...)` over fixed inputs equals the SHA-256 of canonical JSON
-    written literally in the test.
+  - Golden pin: `canonical_policy_payload(...)` over fixed inputs equals canonical JSON
+    written literally in the test, and a built snapshot's `policy_digest` is its SHA-256.
 - Task 4: `verify_snapshot_pins` passes for pins equal to the snapshot. It raises for
   `None`, another `defaults_checksum`, another rule version id, and another review checksum
   or id.

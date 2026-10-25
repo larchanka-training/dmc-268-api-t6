@@ -8,7 +8,7 @@ call is allowed before the snapshot exists.
 from __future__ import annotations
 
 import json
-from collections.abc import Callable
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import asdict, dataclass
 from hashlib import sha256
 from typing import Protocol
@@ -94,6 +94,49 @@ def pinned_to_json(value: PromptBindings | ExecutionProfile) -> dict[str, str | 
     }
 
 
+def canonical_policy_payload(
+    *,
+    schema_version: int,
+    policy_base_sha: str,
+    documents: Sequence[PolicyDocument],
+    ignore_digest: str,
+    parser_profile: str,
+    parser_version: str,
+    limits_version: str,
+    defaults_checksum: str,
+    prompt_bindings: Mapping[str, object],
+    execution_profile: Mapping[str, object],
+    priority_matcher_version: str,
+) -> str:
+    """The canonical JSON whose SHA-256 is ``policy_digest`` (RULES_FORMAT_SPEC §7.1).
+
+    Every input is explicit, so a stored snapshot is re-hashed from its own row; the
+    pinned versions come as JSON, so keys a later version stored stay covered.
+    """
+    payload = {
+        "schema_version": schema_version,
+        "policy_base_sha": policy_base_sha,
+        "documents": [
+            {
+                "path": document.path,
+                "presence": document.presence.value,
+                "raw_sha256": document.raw_sha256,
+                "text_sha256": document.text_sha256,
+            }
+            for document in documents
+        ],
+        "ignore_digest": ignore_digest,
+        "parser_profile": parser_profile,
+        "exact_parser_version": parser_version,
+        "limits_version": limits_version,
+        "defaults_checksum": defaults_checksum,
+        "prompt_bindings": dict(prompt_bindings),
+        "execution_profile": dict(execution_profile),
+        "priority_matcher_version": priority_matcher_version,
+    }
+    return json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+
+
 def build_policy_snapshot(
     pins: RunPolicyPins,
     *,
@@ -103,28 +146,19 @@ def build_policy_snapshot(
     snapshot_id: UUID,
 ) -> PolicySnapshot:
     """Assemble the snapshot; equal policies have equal ``policy_digest`` across runs."""
-    payload = {
-        "schema_version": POLICY_SNAPSHOT_SCHEMA_VERSION,
-        "policy_base_sha": pins.policy_base_sha,
-        "documents": [
-            {
-                "path": document.path,
-                "presence": document.presence.value,
-                "raw_sha256": document.raw_sha256,
-                "text_sha256": document.text_sha256,
-            }
-            for document in (rules, agents)
-        ],
-        "ignore_digest": ignore.digest,
-        "parser_profile": PARSER_PROFILE,
-        "exact_parser_version": PARSER_VERSION,
-        "limits_version": LIMITS_VERSION,
-        "defaults_checksum": pins.defaults_checksum,
-        "prompt_bindings": pinned_to_json(pins.prompt_bindings),
-        "execution_profile": pinned_to_json(pins.execution_profile),
-        "priority_matcher_version": PRIORITY_MATCHER_VERSION,
-    }
-    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+    canonical = canonical_policy_payload(
+        schema_version=POLICY_SNAPSHOT_SCHEMA_VERSION,
+        policy_base_sha=pins.policy_base_sha,
+        documents=(rules, agents),
+        ignore_digest=ignore.digest,
+        parser_profile=PARSER_PROFILE,
+        parser_version=PARSER_VERSION,
+        limits_version=LIMITS_VERSION,
+        defaults_checksum=pins.defaults_checksum,
+        prompt_bindings=pinned_to_json(pins.prompt_bindings),
+        execution_profile=pinned_to_json(pins.execution_profile),
+        priority_matcher_version=PRIORITY_MATCHER_VERSION,
+    )
     return PolicySnapshot(
         schema_version=POLICY_SNAPSHOT_SCHEMA_VERSION,
         snapshot_id=snapshot_id,
