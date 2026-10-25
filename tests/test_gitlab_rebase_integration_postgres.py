@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from hashlib import sha256
 from uuid import UUID, uuid4
 
 import httpx
@@ -206,9 +207,14 @@ def test_gitlab_enqueue_and_rerun_capture_current_publication_and_prompt_pins(
                         text(
                             "INSERT INTO prompt_versions "
                             "(id,key,version,content,checksum,is_active) "
-                            "VALUES (:id,:key,1,'synthetic prompt',:checksum,true)"
+                            "VALUES (:id,:key,1,:content,:checksum,true)"
                         ),
-                        {"id": row_id, "key": key, "checksum": "b" * 64},
+                        {
+                            "id": row_id,
+                            "key": key,
+                            "content": f"synthetic {key} prompt",
+                            "checksum": sha256(f"synthetic {key} prompt".encode()).hexdigest(),
+                        },
                     )
             publisher = Publisher(fixture, target)
             result = await enqueue(fixture, publisher).execute(
