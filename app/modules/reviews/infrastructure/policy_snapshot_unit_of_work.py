@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import fields, replace
-from typing import Any, cast
+from typing import Any
 from uuid import UUID
 
 from sqlalchemy import select
@@ -34,7 +34,6 @@ from app.modules.reviews.application.prepare_policy_snapshot import (
     pinned_to_json,
 )
 from app.modules.reviews.application.run_failures import RunCancelled
-from app.modules.reviews.application.verdict import SeverityThresholdValue
 from app.modules.reviews.infrastructure.models import (
     CodeChange,
     PromptVersion,
@@ -44,6 +43,7 @@ from app.modules.reviews.infrastructure.models import (
 )
 from app.modules.reviews.infrastructure.run_origin import origin_active
 from app.modules.reviews.infrastructure.run_origin_locks import lock_run_origin_row
+from app.modules.reviews.infrastructure.severity_threshold import severity_threshold_value
 
 _PROMPT_ID_FIELDS = frozenset({"review_system_id", "conventions_id", "verifier_id"})
 UNPINNED_EXECUTION_PROFILE = ExecutionProfile.fast(review_model="", verifier_model="")
@@ -162,7 +162,11 @@ class SqlAlchemyPolicySnapshotStore:
             prompt_bindings=bindings,
             # The worker's current profile, fixed for the run by the first stored snapshot.
             execution_profile=self._execution_profile,
-            severity_threshold=cast(SeverityThresholdValue | None, run.severity_threshold),
+            severity_threshold=(
+                severity_threshold_value(run.severity_threshold)
+                if run.severity_threshold is not None
+                else None
+            ),
             max_comments=run.max_comments,
         )
 
@@ -235,7 +239,11 @@ class SqlAlchemyPolicySnapshotStore:
             execution_profile=_profile(row.execution_profile),
             policy_digest=row.policy_digest,
             created_at=row.created_at,
-            severity_threshold=cast(SeverityThresholdValue | None, row.severity_threshold),
+            severity_threshold=(
+                severity_threshold_value(row.severity_threshold)
+                if row.severity_threshold is not None
+                else None
+            ),
             max_comments=row.max_comments,
         )
 

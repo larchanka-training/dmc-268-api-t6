@@ -61,6 +61,7 @@ from app.modules.reviews.application.vcs_diff import (
     VcsPullRequest,
     _is_generated,
 )
+from app.modules.reviews.application.verdict import SeverityThresholdValue
 from app.modules.reviews.infrastructure.tree_sitter_facts import extract_facts
 from app.worker import WorkerSettings
 from tests.test_prepare_policy_snapshot import Store, Uow
@@ -1601,14 +1602,15 @@ def test_context_trace_lists_retrieved_blocks_with_their_side_and_revision() -> 
 
 @pytest.mark.parametrize(("threshold", "cap"), [("critical", 1), ("warning", 3)])
 def test_publication_settings_leave_conventions_cache_identity_unchanged(
-    threshold: str, cap: int
+    threshold: SeverityThresholdValue, cap: int
 ) -> None:
     baseline = Store()
     assert baseline.pins is not None
-    changed = Store(pins=replace(baseline.pins, severity_threshold=threshold, max_comments=cap))  # type: ignore[arg-type]
+    changed = Store(pins=replace(baseline.pins, severity_threshold=threshold, max_comments=cap))
     first = _stage(Trace(), store=baseline)
     second = _stage(Trace(), store=changed)
     asyncio.run(first.run(_RUN))
     asyncio.run(second.run(_RUN))
-    assert first.policy_key is not None
-    assert first.policy_key == second.policy_key
+    # Unchanged _stage/Policy fixture archived from baseline commit 1ae74b1.
+    assert first.policy_key == "24ab4f16f70b7124f9af6fd8e6000572622dc1f868f1980616b2519fd03c9821"
+    assert second.policy_key == "24ab4f16f70b7124f9af6fd8e6000572622dc1f868f1980616b2519fd03c9821"

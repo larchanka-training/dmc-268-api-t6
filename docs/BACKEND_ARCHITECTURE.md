@@ -523,7 +523,19 @@ downgrade удаляет его. Ревизия `20261020_0037` (#143) доба�
 индексы, CHECK и колонку. Ревизия `20261023_0038` (#144) добавляет в `code_index_states`
 троттлинг full по запросу ревью — колонки `review_full_requested_at` и
 `review_full_requested_sha` с CHECK `ck_code_index_states_review_full_sha_at` (sha только
-вместе со временем); downgrade удаляет CHECK и колонки. Будущие изменения схемы
+вместе со временем); downgrade удаляет CHECK и колонки. Следующая ревизия
+`20261024_0038` (#212) добавляет nullable `severity_threshold` (существующий native enum)
+и `max_comments` (SMALLINT) в `runs` и `run_policy_snapshots`. CHECK
+`ck_runs_publication_settings` и `ck_run_policy_snapshots_publication_settings`
+разрешают полностью NULL историческую пару либо оба значения с положительным cap.
+Нет server default и backfill. Downgrade удаляет четыре колонки и оба CHECK,
+сохраняет enum Repository; повторный upgrade возвращает NULL-пары, поэтому эти
+Run используют live fallback к Repository, включая retry. Ревизия `20261024_0039`
+(#130 D) следует за `20261024_0038` и добавляет nullable FK-колонки
+`runs.conventions_prompt_version_id` и `runs.verifier_prompt_version_id` на
+`prompt_versions`. Downgrade удаляет обе FK и колонки; повторный upgrade оставляет
+исторические prompt pins NULL без backfill. Execution profile пока фиксирует
+первый policy snapshot, а не транзакция создания Run. Будущие изменения схемы
 оформляются новой ревизией, а не правкой уже применённой.
 
 Миграции запускаются один раз отдельным deployment-шагом до старта процессов, не

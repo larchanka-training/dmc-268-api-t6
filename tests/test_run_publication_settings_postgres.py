@@ -91,8 +91,9 @@ async def _claim(factory: async_sessionmaker[AsyncSession], run_id: UUID, attemp
         )
         await session.execute(
             text("""
-            INSERT INTO code_change_diffs (id, run_id, code_change_id, head_sha, filename, patch)
-            VALUES (gen_random_uuid(), :run, :pr, :head, :path, :patch)
+            INSERT INTO code_change_diffs (
+                id, run_id, code_change_id, head_sha, filename, patch, additions, deletions, changes
+            ) VALUES (gen_random_uuid(), :run, :pr, :head, :path, :patch, 1, 0, 1)
             ON CONFLICT DO NOTHING
         """),
             {"run": run_id, "pr": PR_NEW, "head": "f" * 40, "path": _PATH, "patch": _PATCH},
@@ -108,7 +109,7 @@ async def _publication(
     output = parse_review_output(_answer())
     processed = FindingsPostProcessor.from_default_patterns().process(
         output,
-        hunk_lines=context.hunk_lines,
+        diff_map=context.diff_map,
         rule_names=context.rule_names,
         repository_max_inline=context.repository_max_inline,
         severity_threshold=context.severity_threshold,
