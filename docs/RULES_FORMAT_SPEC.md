@@ -2,6 +2,8 @@
 
 Дата уточнения: 2026-10-14. Версия спецификации: 1.2.
 
+Пользовательская версия формата — страница [`docs-site/content/docs/rules-file.mdx`](https://github.com/larchanka-training/dmc-268-ui-t6/blob/main/docs-site/content/docs/rules-file.mdx) в `dmc-268-ui-t6`: изменение формата `.review/rules.md` здесь отражается там ([`CONTRIBUTING.md` §8](CONTRIBUTING.md#8-пользовательская-документация)).
+
 **Базовые версии: утверждены.** Спецификации для
 [#107](https://github.com/larchanka-training/dmc-268-api-t6/issues/107):
 v1.0 — [PR #108](https://github.com/larchanka-training/dmc-268-api-t6/pull/108),
