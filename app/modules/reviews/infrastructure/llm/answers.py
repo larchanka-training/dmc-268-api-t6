@@ -32,6 +32,7 @@ from app.modules.reviews.application.review_output import (
     parse_review_output,
     parse_review_output_v2,
 )
+from app.modules.reviews.application.review_path import SNAPSHOT_REVIEW_PROMPT_VERSIONS
 
 REVIEW_OUTPUT_SCHEMA_PATH = (
     Path(__file__).resolve().parents[5] / "review" / "schemas" / "review-output.schema.json"
@@ -45,7 +46,6 @@ VERIFIER_OUTPUT_SCHEMA_PATH = (
 _ANNOTATIONS = frozenset({"$schema", "$id", "$comment"})
 # The review answer schema follows the bound review prompt version (#130 decision 9).
 _V1_REVIEW_PROMPT_VERSIONS = frozenset({"v1", "v2", "v3"})
-_V2_REVIEW_PROMPT_VERSIONS = frozenset({"v4"})
 _MAX_ERRORS = 20
 _MAX_ERROR_CHARS = 300
 
@@ -158,7 +158,7 @@ def review_answer_contract(review_system_version: str | None) -> ReviewAnswerCon
     """
     if review_system_version is None or review_system_version in _V1_REVIEW_PROMPT_VERSIONS:
         return ReviewAnswerContract("ReviewOutput", review_output_schema(), validate_review_answer)
-    if review_system_version in _V2_REVIEW_PROMPT_VERSIONS:
+    if review_system_version in SNAPSHOT_REVIEW_PROMPT_VERSIONS:
         return ReviewAnswerContract(
             "ReviewOutputV2", review_output_schema_v2(), validate_review_answer_v2
         )

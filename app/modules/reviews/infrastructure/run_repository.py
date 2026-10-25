@@ -11,6 +11,7 @@ from uuid import UUID
 
 from sqlalchemy import ColumnElement, Row, String, and_, cast, func, or_, select, true, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlalchemy.orm import aliased
 
 from app.common.infrastructure.db.enums import RunState
 from app.common.infrastructure.db.unit_of_work import SqlAlchemyUnitOfWork
@@ -48,6 +49,7 @@ from app.modules.reviews.application.review_output import (
     ReviewOutput,
     ReviewPublication,
 )
+from app.modules.reviews.application.review_path import ReviewBinding
 from app.modules.reviews.application.run_events import RunChange
 from app.modules.reviews.application.run_failures import RunCancelled
 from app.modules.reviews.application.store_review_output import PublishingGuard
@@ -455,16 +457,25 @@ class SqlAlchemyRunRepository:
         )
 
     async def get_run_conventions_input(self, run_id: UUID) -> RunConventionsInput | None:
+        # The review prompt the run pinned, beside the active conventions row.
+        review_prompt = aliased(PromptVersion)
         statement = (
             select(
                 CodeChange.repository_id,
                 PromptVersion.id,
                 PromptVersion.content,
                 RuleVersion.rules,
+                Run.prompt_version_id,
+                review_prompt.version,
+                ProviderInstallation.provider,
             )
             .select_from(Run)
             .join(CodeChange, CodeChange.id == Run.code_change_id)
             .join(RuleVersion, RuleVersion.id == Run.rule_version_id)
+            .join(review_prompt, review_prompt.id == Run.prompt_version_id)
+            .outerjoin(
+                ProviderInstallation, ProviderInstallation.id == Run.origin_provider_installation_id
+            )
             .outerjoin(
                 PromptVersion,
                 and_(
@@ -484,6 +495,7 @@ class SqlAlchemyRunRepository:
             repository_id=row[0],
             conventions_prompt=ActiveConventionsPrompt(id=row[1], content=row[2]),
             rules=tuple(review_rule_from_stored(item) for item in row[3]),
+            review_binding=ReviewBinding(row[4], f"v{row[5]}", row[6]),
         )
 
     async def get_run_file_key(self, run_id: UUID, path: str) -> BlobCacheKey | None:

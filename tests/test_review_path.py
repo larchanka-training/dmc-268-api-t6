@@ -1,0 +1,382 @@
+"""The review path is chosen by the review prompt a run pinned (#130 F1-2).
+
+A run bound to a snapshot-contract prompt (v4) on GitHub takes the policy-snapshot path; any
+other run keeps the legacy path, also with a ready snapshot. A snapshot-path run that cannot be
+served fails with ``policy_snapshot_integrity_error`` before the conventions call.
+"""
+
+from __future__ import annotations
+
+import asyncio
+from dataclasses import dataclass, field
+from typing import cast
+from uuid import UUID
+
+import pytest
+
+from app.modules.reviews.application.check_runs import RunProviderCheckpoint
+from app.modules.reviews.application.conventions import (
+    ActiveConventionsPrompt,
+    CachedConventions,
+    GeneratedConventions,
+    GenerateRepoConventions,
+)
+from app.modules.reviews.application.execute_review import ExecuteReviewRun, ReviewPromptInput
+from app.modules.reviews.application.policy_errors import PolicyError, PolicyErrorCode
+from app.modules.reviews.application.policy_snapshot import (
+    PolicySnapshot,
+    PromptBindings,
+    make_complete_execution_profile,
+)
+from app.modules.reviews.application.prepare_policy_snapshot import PreparePolicySnapshot
+from app.modules.reviews.application.process_run import ReviewRunProcessor, RunConventionsInput
+from app.modules.reviews.application.prompt_builder import (
+    PullRequestMeta,
+    RepoConventions,
+    ReviewContext,
+)
+from app.modules.reviews.application.review_context import BuildReviewContext
+from app.modules.reviews.application.review_context_stage import (
+    EstimatedTokenCounter,
+    ReviewContextStage,
+)
+from app.modules.reviews.application.review_path import (
+    SNAPSHOT_REVIEW_PROMPT_VERSIONS,
+    ReviewBinding,
+    snapshot_for_review,
+)
+from app.modules.reviews.application.vcs_diff import PullRequestLocator, VcsPullRequest
+from app.modules.reviews.infrastructure.blob_cache import InMemoryBlobCache
+from app.modules.reviews.infrastructure.llm import answers
+from tests.test_prepare_policy_snapshot import Source, Store, Uow, _pins
+from tests.test_review_context_stage import Parser, Runs, Trace, Vcs, _checkpoint
+from tests.test_review_context_stage import Repository as SourceTree
+from tests.test_run_processor_context_stage import (
+    REPOSITORY_ID,
+    RUN_ID,
+    Conventions,
+    GitHub,
+)
+from tests.test_run_processor_context_stage import Repository as ProcessingRepository
+from tests.trigger_uow import processing_uow
+
+_REVIEW_V4 = UUID(int=41)
+_OTHER_REVIEW = UUID(int=42)
+_CONVENTIONS = UUID(int=43)
+_VERIFIER = UUID(int=44)
+_INTEGRITY = PolicyErrorCode.SNAPSHOT_INTEGRITY_ERROR
+
+
+def _binding(version: str = "v4", provider: str | None = "github") -> ReviewBinding:
+    return ReviewBinding(_REVIEW_V4, version, provider)
+
+
+def _store(
+    version: str = "v4", *, review_id: UUID = _REVIEW_V4, conventions: UUID | None = _CONVENTIONS
+) -> Store:
+    """Pins as get_pins reads them; a NULL conventions pin leaves the bindings incomplete."""
+    bindings = PromptBindings(
+        review_system_checksum="3" * 64,
+        conventions_checksum="" if conventions is None else "4" * 64,
+        verifier_checksum="5" * 64,
+        review_system_version=version,
+        verifier_version="v2",
+        review_system_id=review_id,
+        conventions_id=conventions,
+        verifier_id=_VERIFIER,
+    )
+    return Store(
+        pins=_pins(prompt_bindings=bindings, execution_profile=make_complete_execution_profile())
+    )
+
+
+def _snapshot(store: Store) -> PolicySnapshot:
+    prepare = PreparePolicySnapshot(
+        uow_factory=lambda: Uow(store), source_factory=lambda p: Source()
+    )
+    return asyncio.run(prepare.execute(RUN_ID))
+
+
+def test_the_snapshot_contract_has_one_source() -> None:
+    assert frozenset({"v4"}) == SNAPSHOT_REVIEW_PROMPT_VERSIONS
+    assert answers.review_answer_contract("v4").name == "ReviewOutputV2"
+    assert answers.review_answer_contract("v3").name == "ReviewOutput"
+    assert not hasattr(answers, "_V2_REVIEW_PROMPT_VERSIONS")
+
+
+@pytest.mark.parametrize(
+    ("version", "provider", "snapshot_path"),
+    [
+        ("v3", "github", False),
+        ("v2", "github", False),
+        ("v4", "github", True),
+        # TL-13: the stage builds a GitHub diff map, so other providers stay legacy.
+        ("v4", "gitlab", False),
+        # No coercion: only the exact provider name takes the snapshot path.
+        ("v4", "GitHub", False),
+        ("v4", None, False),
+    ],
+    ids=["v3", "v2", "v4-github", "v4-gitlab", "v4-unknown-provider", "v4-no-origin"],
+)
+def test_the_pinned_review_prompt_and_provider_choose_the_path(
+    version: str, provider: str | None, snapshot_path: bool
+) -> None:
+    binding = _binding(version, provider)
+    # A ready snapshot that pins the bound prompt: only the binding decides.
+    snapshot = _snapshot(_store(version))
+
+    assert binding.takes_snapshot_path is snapshot_path
+    assert snapshot_for_review(binding, snapshot) is (snapshot if snapshot_path else None)
+
+
+@pytest.mark.parametrize(
+    ("store", "message"),
+    [
+        (None, "no policy snapshot"),
+        # D-Q2/Q4: a NULL conventions pin leaves the snapshot not ready.
+        (_store(conventions=None), "not ready for the LLM"),
+        (_store(review_id=_OTHER_REVIEW), "pins another review prompt"),
+    ],
+    ids=["no-snapshot", "null-pin", "pins-mismatch"],
+)
+def test_a_snapshot_path_run_that_cannot_be_served_is_refused(
+    store: Store | None, message: str
+) -> None:
+    snapshot = None if store is None else _snapshot(store)
+
+    with pytest.raises(PolicyError) as raised:
+        snapshot_for_review(_binding(), snapshot)
+
+    assert raised.value.code is _INTEGRITY
+    assert message in str(raised.value)
+    assert "v4" in str(raised.value)
+    # The same inputs on the legacy path are never refused.
+    assert snapshot_for_review(_binding("v3"), snapshot) is None
+
+
+def _stage(store: Store, trace: Trace) -> ReviewContextStage:
+    vcs = Vcs()
+    return ReviewContextStage(
+        runs=Runs(None),
+        checkpoint=_checkpoint,
+        vcs=vcs,
+        merge_base=vcs,
+        prepare_policy=PreparePolicySnapshot(
+            uow_factory=lambda: Uow(store), source_factory=lambda pins: Source()
+        ),
+        context_builder=lambda run: BuildReviewContext(
+            source=SourceTree(), parser=Parser(), counter=EstimatedTokenCounter()
+        ),
+        trace=trace,
+    )
+
+
+# The stage reads the binding off its snapshot, whose prompt bindings are the run's pins
+# (checked on every read of a stored snapshot), and the provider it builds the diff map with
+# (GitHub until #220). So the GitLab and pins-mismatch cases are pinned at the selector, the
+# processor without a stage, execute_review and the database reads, not here.
+@pytest.mark.parametrize(
+    ("version", "gets_snapshot"),
+    [("v2", False), ("v3", False), ("v4", True)],
+    ids=["v2", "v3", "v4"],
+)
+def test_stage_gives_the_snapshot_only_to_a_snapshot_path_run(
+    version: str, gets_snapshot: bool
+) -> None:
+    store, trace = _store(version), Trace()
+    stage = _stage(store, trace)
+
+    asyncio.run(stage.begin(RUN_ID))
+
+    assert store.snapshot is not None and store.snapshot.is_ready_for_llm
+    assert stage.snapshot_for_llm is (store.snapshot if gets_snapshot else None)
+    assert [tool for tool, _, _ in trace.steps] == ["policy.load"]
+    assert "error" not in trace.steps[0][2]
+
+
+def test_stage_refuses_a_snapshot_path_run_at_policy_load() -> None:
+    # D-Q2/Q4: a v4 run with a NULL conventions pin.
+    trace = Trace()
+    stage = _stage(_store(conventions=None), trace)
+
+    with pytest.raises(PolicyError) as raised:
+        asyncio.run(stage.begin(RUN_ID))
+
+    assert raised.value.code is _INTEGRITY
+    assert stage.snapshot_for_llm is None
+    [(tool, _, response)] = trace.steps
+    assert tool == "policy.load"
+    assert response["error"]["type"] == "PolicyError"
+    assert response["error"]["message"] == (
+        "policy_snapshot_integrity_error: Review prompt v4 takes the policy snapshot path, "
+        "but the policy snapshot is not ready for the LLM"
+    )
+
+
+@dataclass
+class BoundRepository(ProcessingRepository):
+    binding: ReviewBinding | None = None
+
+    async def get_run_conventions_input(self, run_id: UUID) -> RunConventionsInput:
+        return RunConventionsInput(
+            REPOSITORY_ID,
+            ActiveConventionsPrompt(RUN_ID, "prompt"),
+            review_binding=self.binding,
+        )
+
+
+@dataclass
+class CountingGitHub(GitHub):
+    reads: list[str] = field(default_factory=list)
+
+    async def get_pull_request(
+        self, locator: PullRequestLocator, *, checkpoint: RunProviderCheckpoint
+    ) -> VcsPullRequest:
+        self.reads.append("pull request")
+        return await super().get_pull_request(locator, checkpoint=checkpoint)
+
+
+def _processor(
+    binding: ReviewBinding | None,
+    events: list[str],
+    github: CountingGitHub,
+    *,
+    stage: ReviewContextStage | None = None,
+) -> ReviewRunProcessor:
+    repository = BoundRepository(events, binding=binding)
+    options = {} if stage is None else {"context_stage": stage}
+    return ReviewRunProcessor(
+        repository,
+        None,
+        blob_cache=InMemoryBlobCache(),
+        conventions=cast(GenerateRepoConventions, Conventions(events)),
+        vcs_provider=github,
+        uow_factory=processing_uow(repository),
+        **options,  # type: ignore[arg-type]
+    )
+
+
+def test_processor_with_the_stage_refuses_before_the_diff_and_the_conventions_call() -> None:
+    events: list[str] = []
+    github = CountingGitHub()
+    stage = _stage(_store(conventions=None), Trace())
+
+    with pytest.raises(PolicyError) as raised:
+        asyncio.run(_processor(_binding(), events, github, stage=stage).prepare(RUN_ID))
+
+    assert raised.value.code is _INTEGRITY
+    assert events == []
+    assert github.reads == []
+
+
+@pytest.mark.parametrize(
+    ("binding", "refused"),
+    [
+        (_binding("v4"), True),
+        (_binding("v3"), False),
+        (_binding("v4", "gitlab"), False),
+        (None, False),
+    ],
+    ids=["v4-github", "v3", "v4-gitlab", "no-binding"],
+)
+def test_processor_without_the_stage_refuses_a_snapshot_path_run_before_conventions(
+    binding: ReviewBinding | None, refused: bool
+) -> None:
+    events: list[str] = []
+    processor = _processor(binding, events, CountingGitHub())
+
+    if refused:
+        with pytest.raises(PolicyError) as raised:
+            asyncio.run(processor.prepare(RUN_ID))
+        assert raised.value.code is _INTEGRITY
+        assert "no policy snapshot" in str(raised.value)
+        assert events == ["diff stored"]
+    else:
+        assert isinstance(asyncio.run(processor.prepare(RUN_ID)), GeneratedConventions)
+        assert events == ["diff stored", "conventions model"]
+
+
+_META = PullRequestMeta("PR", None, "octo", "feature", "main", (), 1, 1, 0, False, False)
+
+
+@dataclass
+class Pipeline:
+    binding: ReviewBinding | None
+    snapshot: PolicySnapshot | None = None
+    calls: list[str] = field(default_factory=list)
+    contexts: list[ReviewContext] = field(default_factory=list)
+
+    async def prepare(self, run_id: UUID) -> GeneratedConventions:
+        self.calls.append("prepare")
+        return GeneratedConventions(
+            CachedConventions(REPOSITORY_ID, None, RUN_ID, (), (), {}), None, False
+        )
+
+    async def get_review_prompt_input(
+        self, run_id: UUID, conventions: GeneratedConventions
+    ) -> ReviewPromptInput:
+        return ReviewPromptInput(
+            system="system",
+            rules=(),
+            agents_md=None,
+            conventions=RepoConventions((), ()),
+            changed_files=(),
+            omitted_files=(),
+            policy_snapshot=self.snapshot,
+            review_binding=self.binding,
+        )
+
+    async def get_pull_request_meta(self, run_id: UUID) -> PullRequestMeta:
+        self.calls.append("pull request meta")
+        return _META
+
+    async def draft_review(self, *, context: ReviewContext) -> dict[str, object]:
+        self.calls.append("draft review")
+        self.contexts.append(context)
+        return {}
+
+    async def execute(self, run_id: UUID, model_output: object) -> bool:
+        return True
+
+
+def _execute(pipeline: Pipeline) -> bool:
+    return asyncio.run(ExecuteReviewRun(pipeline, pipeline, pipeline, pipeline).execute(RUN_ID))
+
+
+@pytest.mark.parametrize(
+    ("store", "message"),
+    [
+        (None, "no policy snapshot"),
+        (_store(conventions=None), "not ready for the LLM"),
+        # The run read names the prompt the run pinned; a snapshot pinning another one
+        # never reaches the model.
+        (_store(review_id=_OTHER_REVIEW), "pins another review prompt"),
+    ],
+    ids=["no-snapshot", "null-pin", "pins-mismatch"],
+)
+def test_execute_review_refuses_a_snapshot_path_run_it_cannot_serve_before_any_call(
+    store: Store | None, message: str
+) -> None:
+    pipeline = Pipeline(_binding(), snapshot=None if store is None else _snapshot(store))
+
+    with pytest.raises(PolicyError) as raised:
+        _execute(pipeline)
+
+    assert raised.value.code is _INTEGRITY
+    assert message in str(raised.value)
+    assert pipeline.calls == ["prepare"]
+
+
+@pytest.mark.parametrize(
+    "binding",
+    [_binding("v3"), _binding("v4", "gitlab")],
+    ids=["v3", "v4-gitlab"],
+)
+def test_execute_review_keeps_a_legacy_run_without_a_snapshot(binding: ReviewBinding) -> None:
+    # Even a ready snapshot that pins the bound prompt is not given to a legacy run.
+    pipeline = Pipeline(binding, snapshot=_snapshot(_store(binding.review_system_version)))
+
+    assert _execute(pipeline) is True
+
+    assert pipeline.calls == ["prepare", "pull request meta", "draft review"]
+    assert pipeline.contexts[0].policy_snapshot is None

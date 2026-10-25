@@ -8,7 +8,11 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.common.infrastructure.db.enums import SeverityThreshold
-from app.modules.repositories.infrastructure.models import Repository, RuleVersion
+from app.modules.repositories.infrastructure.models import (
+    ProviderInstallation,
+    Repository,
+    RuleVersion,
+)
 from app.modules.reviews.application.conventions import GeneratedConventions
 from app.modules.reviews.application.execute_review import ReviewPromptInput
 from app.modules.reviews.application.get_run_diff import (
@@ -19,6 +23,7 @@ from app.modules.reviews.application.prompt_builder import (
     RepoConventions as PromptConventions,
 )
 from app.modules.reviews.application.prompt_builder import review_rule_from_stored
+from app.modules.reviews.application.review_path import ReviewBinding
 from app.modules.reviews.infrastructure.models import CodeChange, CodeChangeDiff, PromptVersion, Run
 from app.modules.reviews.infrastructure.severity_threshold import severity_threshold_value
 
@@ -37,19 +42,25 @@ class SqlAlchemyReviewPromptRepository:
                 PromptVersion.content,
                 RuleVersion.rules,
                 func.coalesce(Run.severity_threshold, Repository.severity_threshold),
+                Run.prompt_version_id,
+                PromptVersion.version,
+                ProviderInstallation.provider,
             )
             .select_from(Run)
             .join(PromptVersion, PromptVersion.id == Run.prompt_version_id)
             .join(RuleVersion, RuleVersion.id == Run.rule_version_id)
             .outerjoin(CodeChange, CodeChange.id == Run.code_change_id)
             .outerjoin(Repository, Repository.id == CodeChange.repository_id)
+            .outerjoin(
+                ProviderInstallation, ProviderInstallation.id == Run.origin_provider_installation_id
+            )
             .where(Run.id == run_id)
         )
         async with self._session_factory() as session:
             row = (await session.execute(statement)).one_or_none()
             if row is None:
                 return None
-            system, stored_rules, raw_threshold = row
+            system, stored_rules, raw_threshold, prompt_version_id, version, provider = row
             snapshots = (
                 await session.execute(
                     select(CodeChangeDiff)
@@ -89,4 +100,5 @@ class SqlAlchemyReviewPromptRepository:
             changed_files=changed,
             omitted_files=omitted,
             severity_threshold=threshold,
+            review_binding=ReviewBinding(prompt_version_id, f"v{version}", provider),
         )

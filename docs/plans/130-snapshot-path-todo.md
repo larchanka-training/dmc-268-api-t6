@@ -45,10 +45,12 @@ Gates for every task: the four commands in the plan, with DB and vhost `imp130f`
   - `infrastructure/llm/answers.py` (`:47-48` imports the set);
   - `application/review_context_stage.py` (`begin` `:400-414`: refusal right after the snapshot, before conventions);
   - `application/process_run.py` (`:250-266`: refusal before conventions when there is no stage) and
-    `infrastructure/run_repository.py` (`get_run_conventions_input` returns the bound version);
-  - `application/execute_review.py` (`ReviewPromptInput` gets `review_system_version`; re-check);
-  - `infrastructure/review_prompt_repository.py` (select `PromptVersion.version`);
-  - new `tests/test_review_path.py`; `tests/test_review_prompt_pins_postgres.py`.
+    `infrastructure/run_repository.py` (`get_run_conventions_input` returns the binding);
+  - `application/execute_review.py` (`ReviewPromptInput` gets `review_binding`: id, version, provider; re-check);
+  - `infrastructure/review_prompt_repository.py` (select `PromptVersion.version` and the origin provider);
+  - new `tests/test_review_path.py`; `tests/test_review_prompt_pins_postgres.py`;
+  - `tests/test_sqlalchemy_run_repository.py`: one fake row of the prompt read gains the three columns
+    (a file of #283, #227 and #220, outside the posted coordination).
 - **Tests:**
   - v3 → legacy, even with a ready snapshot;
   - v4 + ready → snapshot;
@@ -56,7 +58,7 @@ Gates for every task: the four commands in the plan, with DB and vhost `imp130f`
     not ready, pins mismatch;
   - D-1 (a): a stored review-only snapshot with all three run pins → terminal integrity error before any
     call. Under TL-10 (b): legacy instead.
-- **Done when:** [ ] F1-1 green; [ ] `answers.py` has one source for the v2-contract versions.
+- **Done when:** [x] F1-1 green; [x] `answers.py` has one source for the v2-contract versions.
 
 ### F1-3: Lock 1 behind the selector (R1 review side)
 - **Commit:** `feat(reviews): pass the attempt snapshot to snapshot-path reviews (#130)`
