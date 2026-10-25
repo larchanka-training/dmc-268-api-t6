@@ -29,7 +29,10 @@ from app.modules.reviews.application.get_run_file_lines import (
 )
 from app.modules.reviews.application.policy_snapshot import PolicySnapshot
 from app.modules.reviews.application.prompt_builder import ReviewRule
-from app.modules.reviews.application.review_path import ReviewBinding, snapshot_for_review
+from app.modules.reviews.application.review_path import (
+    ReviewBinding,
+    require_servable_without_snapshot,
+)
 from app.modules.reviews.application.run_failures import RunCancelled
 from app.modules.reviews.application.run_trace import RunTrace, traced_step
 from app.modules.reviews.application.vcs_diff import (
@@ -257,7 +260,7 @@ class ReviewRunProcessor:
             if self._context_stage is None and conventions_input.review_binding is not None:
                 # Without the policy stage there is no snapshot: a run bound to the snapshot
                 # path is refused here, before the conventions call.
-                snapshot_for_review(conventions_input.review_binding, None)
+                require_servable_without_snapshot(conventions_input.review_binding)
             policy_key = None if self._context_stage is None else self._context_stage.policy_key
             extra: dict[str, Any] = {}
             if policy_key is not None:

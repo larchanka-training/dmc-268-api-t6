@@ -3901,7 +3901,9 @@ def test_snapshot_path_review_shows_the_snapshot_documents_not_the_provider_agen
     snapshot = _v4_snapshot()
     verifier = FakeVerifierModel({"decisions": []})
 
-    pipeline = _run_bound(ReviewBinding(_V4_REVIEW, "v4", "github"), snapshot, verifier=verifier)
+    pipeline = _run_bound(
+        ReviewBinding(_V4_REVIEW, "review.system", "v4", "github"), snapshot, verifier=verifier
+    )
 
     [context] = pipeline.contexts
     assert context.policy_snapshot is snapshot
@@ -3922,7 +3924,7 @@ def test_snapshot_path_review_shows_the_snapshot_documents_not_the_provider_agen
 
 
 def test_snapshot_path_review_without_a_reflection_pass_still_fails_closed() -> None:
-    pipeline = _BoundPipeline(ReviewBinding(_V4_REVIEW, "v4", "github"))
+    pipeline = _BoundPipeline(ReviewBinding(_V4_REVIEW, "review.system", "v4", "github"))
     run = ExecuteReviewRun(
         pipeline, pipeline, pipeline, pipeline, context_filter=_StageSnapshot(_v4_snapshot())
     )
@@ -3938,8 +3940,11 @@ def test_snapshot_path_review_without_a_reflection_pass_still_fails_closed() -> 
 
 @pytest.mark.parametrize(
     "binding",
-    [ReviewBinding(_V4_REVIEW, "v3", "github"), ReviewBinding(_V4_REVIEW, "v4", "gitlab")],
-    ids=["v3", "v4-gitlab"],
+    [
+        ReviewBinding(_V4_REVIEW, "review.system", "v3", "github"),
+        ReviewBinding(_V4_REVIEW, "review.system", "v3", "gitlab"),
+    ],
+    ids=["v3", "v3-gitlab"],
 )
 def test_legacy_review_never_gets_the_stage_snapshot(binding: ReviewBinding) -> None:
     # Even a ready snapshot from the stage stays out of a legacy run's prompt.
@@ -3953,7 +3958,7 @@ def test_legacy_review_never_gets_the_stage_snapshot(binding: ReviewBinding) -> 
 
 
 def test_stage_snapshot_pinning_another_review_prompt_is_refused_before_the_model() -> None:
-    pipeline = _BoundPipeline(ReviewBinding(_V4_REVIEW, "v4", "github"))
+    pipeline = _BoundPipeline(ReviewBinding(_V4_REVIEW, "review.system", "v4", "github"))
     other = _v4_snapshot(review_system_id=UUID("00000000-0000-0000-0000-000000000042"))
     run = ExecuteReviewRun(
         pipeline,

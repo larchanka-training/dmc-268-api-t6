@@ -228,6 +228,8 @@ class Observed:
     tasks: list[StructuredTask]
     tools: list[str]
     llm_call_requests: list[dict[str, Any]]
+    # The responses of the steps before and between the model calls, by tool.
+    responses: list[tuple[str, Any]]
     conventions_keys: list[tuple[UUID, str | None, UUID, str | None]]
     answers: list[object]
 
@@ -249,11 +251,22 @@ def _live_assets() -> tuple[PromptAsset, ...]:
     )
 
 
-async def _exercise(factory: async_sessionmaker[AsyncSession]) -> Observed:
+async def _exercise(
+    factory: async_sessionmaker[AsyncSession], *, pre_0039: bool = False
+) -> Observed:
     await _ready(factory)
     await _seed(factory, _live_assets())
     async with factory.begin() as session:
         run_id = await _insert(session)
+        if pre_0039:
+            # A run created before 0039: only the review prompt is pinned.
+            await session.execute(
+                text(
+                    "UPDATE runs SET conventions_prompt_version_id=NULL, "
+                    "verifier_prompt_version_id=NULL WHERE id=:id"
+                ),
+                {"id": run_id},
+            )
     await _claim(factory, run_id)
     async with factory() as session:
         run = await session.get(Run, run_id)
@@ -338,7 +351,10 @@ async def _exercise(factory: async_sessionmaker[AsyncSession]) -> Observed:
     async with factory() as session:
         actions = (
             await session.execute(
-                text("SELECT tool, request FROM run_actions WHERE run_id=:id ORDER BY index"),
+                text(
+                    "SELECT tool, request, response FROM run_actions "
+                    "WHERE run_id=:id ORDER BY index"
+                ),
                 {"id": run_id},
             )
         ).all()
@@ -356,8 +372,9 @@ async def _exercise(factory: async_sessionmaker[AsyncSession]) -> Observed:
         conventions_prompt_id=conventions_id,
         messages=[json.loads(request.content)["messages"] for request in requests],
         tasks=tasks,
-        tools=[tool for tool, _ in actions],
-        llm_call_requests=[request for tool, request in actions if tool == "llm.call"],
+        tools=[tool for tool, _, _ in actions],
+        llm_call_requests=[request for tool, request, _ in actions if tool == "llm.call"],
+        responses=[(tool, response) for tool, _, response in actions if tool != "llm.call"],
         conventions_keys=[tuple(row) for row in conventions_keys],
         answers=output.answers,
     )
@@ -424,24 +441,121 @@ _REVIEW_USER = (
 )
 
 
-@pytest.mark.integration
-def test_v3_run_with_a_ready_snapshot_stays_on_the_legacy_path(env: Env) -> None:
+def _legacy_responses(snapshot: PolicySnapshot) -> list[tuple[str, Any]]:
+    """What a legacy run records before and between its model calls; only ids vary."""
+    return [
+        (
+            "policy.load",
+            {
+                "policy_snapshot_id": str(snapshot.snapshot_id),
+                "policy_base_sha": "b" * 40,
+                "policy_digest": snapshot.policy_digest,
+                "documents": [
+                    {"path": ".review/rules.md", "presence": "present", "bytes": 43, "lines": 5},
+                    {"path": "AGENTS.md", "presence": "present", "bytes": 54, "lines": 3},
+                ],
+                "ignore_patterns": 1,
+                "ignore_digest": _IGNORE_DIGEST,
+            },
+        ),
+        (
+            "vcs.fetch_diff",
+            {
+                "files": [
+                    {
+                        "filename": _PATH,
+                        "status": "modified",
+                        "additions": 1,
+                        "deletions": 0,
+                        "too_large": False,
+                    }
+                ],
+                "total_lines": 1,
+                "summary_only": False,
+            },
+        ),
+        (
+            "context.build",
+            {
+                "status": "review",
+                "reason": None,
+                "diff": {
+                    "digest": _DIFF_DIGEST,
+                    "files": 1,
+                    "diff_old_sha": "c" * 40,
+                    "file_list_complete": True,
+                },
+                "reviewable_lines": 1,
+                "ignored_files": 0,
+                "levels_present": ["L1", "L3"],
+                "blocks_by_level": {"L1": 1, "L3": 1},
+                "tokens_by_level": {"L1": 15, "L3": 34},
+                "tokens_by_role": {"diff": 15, "source_excerpt": 34},
+                "tokens_used": 49,
+                "imports": {},
+                "omissions": [],
+                "blocks": [
+                    {
+                        "level": "L1",
+                        "role": "diff",
+                        "path": _PATH,
+                        "side": "RIGHT",
+                        "ranges": [[10, 14]],
+                        "reason": "changed_hunk",
+                        "tokens": 15,
+                        "related": [],
+                        "truncated": False,
+                        "representation": "exact_lines",
+                    },
+                    {
+                        "level": "L3",
+                        "role": "source_excerpt",
+                        "path": _PATH,
+                        "side": "RIGHT",
+                        "ranges": [[1, 14]],
+                        "reason": "full_file",
+                        "tokens": 34,
+                        "related": [],
+                        "truncated": False,
+                        "representation": "exact_lines",
+                    },
+                ],
+            },
+        ),
+        ("llm.repo_conventions", {"files": [{"path": _PATH, "relevance": "changed file"}]}),
+        (
+            "context.build",
+            {
+                "files": [{"path": _PATH, "level_used": "L1", "priority": 0}],
+                "omitted_files": [],
+                "budget": {"limit": 60000, "used": 8},
+            },
+        ),
+    ]
+
+
+_IGNORE_DIGEST = "24ab4f16f70b7124f9af6fd8e6000572622dc1f868f1980616b2519fd03c9821"
+_DIFF_DIGEST = "7ce85b36525348b9c166a03b5d6ea674ca035b2c2ae694aab41d67e087641a42"
+
+
+def _observe(env: Env, *, pre_0039: bool = False) -> Observed:
     async def scenario() -> Observed:
         engine = env.engine()
         try:
-            return await _exercise(async_sessionmaker(engine, expire_on_commit=False))
+            return await _exercise(
+                async_sessionmaker(engine, expire_on_commit=False), pre_0039=pre_0039
+            )
         finally:
             await engine.dispose()
 
-    observed = asyncio.run(scenario())
+    return asyncio.run(scenario())
 
-    # The premise: v3 is bound, D pinned all three prompts and the snapshot is ready.
+
+def _assert_legacy_run(observed: Observed) -> None:
+    """Everything a live run sends and records, for a v3-bound run."""
     bindings = observed.snapshot.prompt_bindings
     assert observed.review_system[0] == 3
     assert bindings.review_system_version == "v3"
-    assert bindings.conventions_id == observed.conventions_prompt_id
-    assert bindings.is_complete is True
-    assert observed.snapshot.is_ready_for_llm is True
     # The exact provider messages: the legacy envelope, AGENTS.md from the provider read,
     # no snapshot document and no block id.
     conventions, review = observed.messages
@@ -461,7 +575,8 @@ def test_v3_run_with_a_ready_snapshot_stays_on_the_legacy_path(env: Env) -> None
         (None, None),
         (None, None),
     ]
-    # The run trace: the step sequence and every llm.call request, keys and values.
+    # The run trace: the step sequence, every llm.call request (keys and values) and the
+    # responses of the other steps.
     assert observed.tools == [
         "policy.load",
         "vcs.fetch_diff",
@@ -486,14 +601,34 @@ def test_v3_run_with_a_ready_snapshot_stays_on_the_legacy_path(env: Env) -> None
         }
         for call_no, operation, tokens in ((1, "conventions", 2162), (2, "review", 7445))
     ]
+    assert observed.responses == _legacy_responses(observed.snapshot)
     # The conventions cache key: the provider's AGENTS.md sha, the active conventions row
     # and the ignore digest of the snapshot as the policy key.
     assert observed.conventions_keys == [
-        (
-            REPO_A,
-            _PROVIDER_AGENTS_SHA,
-            observed.conventions_prompt_id,
-            observed.snapshot.ignore_digest,
-        )
+        (REPO_A, _PROVIDER_AGENTS_SHA, observed.conventions_prompt_id, _IGNORE_DIGEST)
     ]
     assert observed.answers == [_REVIEW_ANSWER]
+
+
+@pytest.mark.integration
+def test_v3_run_with_a_ready_snapshot_stays_on_the_legacy_path(env: Env) -> None:
+    observed = _observe(env)
+
+    # The premise: v3 is bound, D pinned all three prompts and the snapshot is ready.
+    bindings = observed.snapshot.prompt_bindings
+    assert bindings.conventions_id == observed.conventions_prompt_id
+    assert bindings.is_complete is True
+    assert observed.snapshot.is_ready_for_llm is True
+    _assert_legacy_run(observed)
+
+
+@pytest.mark.integration
+def test_v3_run_created_before_the_pins_stays_on_the_legacy_path(env: Env) -> None:
+    observed = _observe(env, pre_0039=True)
+
+    # The premise: a pre-0039 run pins only its review prompt, so its snapshot is not ready.
+    bindings = observed.snapshot.prompt_bindings
+    assert (bindings.conventions_id, bindings.verifier_id) == (None, None)
+    assert bindings.is_complete is False
+    assert observed.snapshot.is_ready_for_llm is False
+    _assert_legacy_run(observed)

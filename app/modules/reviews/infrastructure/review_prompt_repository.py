@@ -43,6 +43,7 @@ class SqlAlchemyReviewPromptRepository:
                 RuleVersion.rules,
                 func.coalesce(Run.severity_threshold, Repository.severity_threshold),
                 Run.prompt_version_id,
+                PromptVersion.key,
                 PromptVersion.version,
                 ProviderInstallation.provider,
             )
@@ -60,7 +61,7 @@ class SqlAlchemyReviewPromptRepository:
             row = (await session.execute(statement)).one_or_none()
             if row is None:
                 return None
-            system, stored_rules, raw_threshold, prompt_version_id, version, provider = row
+            system, stored_rules, raw_threshold, prompt_version_id, key, version, provider = row
             snapshots = (
                 await session.execute(
                     select(CodeChangeDiff)
@@ -100,5 +101,5 @@ class SqlAlchemyReviewPromptRepository:
             changed_files=changed,
             omitted_files=omitted,
             severity_threshold=threshold,
-            review_binding=ReviewBinding(prompt_version_id, f"v{version}", provider),
+            review_binding=ReviewBinding(prompt_version_id, key, f"v{version}", provider),
         )

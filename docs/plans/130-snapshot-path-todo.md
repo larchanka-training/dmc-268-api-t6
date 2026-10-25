@@ -1,7 +1,8 @@
 # Task list: switching on the policy-snapshot review path (#130, PR F)
 
 The design is in [130-snapshot-path-plan.md](130-snapshot-path-plan.md); this list adds no scope.
-Base: `703c05ec` (C) on `main` `d08e6c96`; Alembic head `20261024_0039`.
+Base: PR #324 (C) head `0aa29d6b` on `main` `9243fd67` (planned on `703c05ec` over `d08e6c96`);
+Alembic head `20261024_0039`.
 
 - Each task is one Conventional commit whose subject ends with `(#130)`.
 - Test first: write the named test, watch it fail, then write the code. A refactor keeps the existing
@@ -36,6 +37,8 @@ Gates for every task: the four commands in the plan, with DB and vhost `imp130f`
   - the conventions cache key `(repo, agents_md_sha, prompt_version_id, policy_key)`.
 - **Done when:**
   - [x] green on `703c05ec`;
+  - [x] fix round (batch-1 review): the responses of the non-call steps and a pre-0039 v3 run
+    (NULL conventions and verifier pins) are pinned too;
   - [ ] the `context_manifests` row count (0) is added in F1-6.
 
 ### F1-2: Path selector ⚑
@@ -57,7 +60,9 @@ Gates for every task: the four commands in the plan, with DB and vhost `imp130f`
   - v4 → `policy_snapshot_integrity_error` with 0 `llm.call` (no conventions call either) when: no context stage, NULL pin (D-Q2/Q4),
     not ready, pins mismatch;
   - D-1 (a): a stored review-only snapshot with all three run pins → terminal integrity error before any
-    call. Under TL-10 (b): legacy instead.
+    call. Under TL-10 (b): legacy instead;
+  - fix round (batch-1 review): a v4 run of an unserved provider (GitLab, other name, no origin) → the
+    same terminal error before any model call; only a `review.system` row picks the path.
 - **Done when:** [x] F1-1 green; [x] `answers.py` has one source for the v2-contract versions.
 
 ### F1-3: Lock 1 behind the selector (R1 review side)

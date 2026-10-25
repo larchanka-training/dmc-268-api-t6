@@ -129,7 +129,7 @@ def test_v2_run_and_persisted_snapshot_retain_their_prompt_after_v3_activation(
             before = await repository.get_review_prompt_input(RUN_ATTEMPTED, conventions)
             assert before is not None and before.system == v2_content
             # The bound version comes from the pinned row: a v2 run stays legacy (F1-2).
-            assert before.review_binding == ReviewBinding(PROMPT, "v2", "github")
+            assert before.review_binding == ReviewBinding(PROMPT, "review.system", "v2", "github")
             assert before.severity_threshold == "critical"
             assert before.policy_snapshot is None
             rules = missing_document(RULES_DOCUMENT_PATH)
@@ -327,20 +327,27 @@ def test_run_reads_carry_the_pinned_review_prompt_and_the_origin_provider(
         try:
             async with factory.begin() as session:
                 await seed_prompt_versions(session, _assets("review.conventions"))
-            assert await bindings() == [ReviewBinding(PROMPT, "v1", "github")] * 2
+            assert await bindings() == [ReviewBinding(PROMPT, "review.system", "v1", "github")] * 2
             async with factory.begin() as session:
                 await session.execute(
                     text("UPDATE provider_installations SET provider='gitlab' WHERE id=:id"),
                     {"id": INSTALL_A},
                 )
-            assert await bindings() == [ReviewBinding(PROMPT, "v1", "gitlab")] * 2
+            assert await bindings() == [ReviewBinding(PROMPT, "review.system", "v1", "gitlab")] * 2
             async with factory.begin() as session:
                 await session.execute(
                     text("UPDATE runs SET origin_provider_installation_id=NULL WHERE id=:id"),
                     {"id": RUN_ATTEMPTED},
                 )
-            # A run without an origin installation names no provider: legacy for v4 too.
-            assert await bindings() == [ReviewBinding(PROMPT, "v1", None)] * 2
+            # A run without an origin installation names no provider: a v4 run is refused.
+            assert await bindings() == [ReviewBinding(PROMPT, "review.system", "v1", None)] * 2
+            async with factory.begin() as session:
+                await session.execute(
+                    text("UPDATE prompt_versions SET key='review.fixture' WHERE id=:id"),
+                    {"id": PROMPT},
+                )
+            # The key is read off the pinned row: only a review.system row picks the path.
+            assert await bindings() == [ReviewBinding(PROMPT, "review.fixture", "v1", None)] * 2
         finally:
             await engine.dispose()
 

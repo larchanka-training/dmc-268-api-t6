@@ -370,7 +370,7 @@ class _Pipeline:
                 ChangedFile("secret/key.py", "added", (DiffLine(1, "added", "KEY = 1"),)),
             ),
             omitted_files=("secret/huge.py", "app/too_big.py"),
-            review_binding=ReviewBinding(V4_REVIEW_ID, self.version, "github"),
+            review_binding=ReviewBinding(V4_REVIEW_ID, "review.system", self.version, "github"),
         )
 
     async def get_pull_request_meta(self, run_id: UUID) -> PullRequestMeta:

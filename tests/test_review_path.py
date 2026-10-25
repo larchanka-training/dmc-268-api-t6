@@ -1,8 +1,9 @@
 """The review path is chosen by the review prompt a run pinned (#130 F1-2).
 
-A run bound to a snapshot-contract prompt (v4) on GitHub takes the policy-snapshot path; any
-other run keeps the legacy path, also with a ready snapshot. A snapshot-path run that cannot be
-served fails with ``policy_snapshot_integrity_error`` before the conventions call.
+A run bound to a snapshot-contract ``review.system`` prompt (v4) takes the policy-snapshot path;
+any other run keeps the legacy path, also with a ready snapshot. A snapshot-path run that cannot
+be served (no usable snapshot, or a provider the context stage does not support yet, TL-13)
+fails with ``policy_snapshot_integrity_error`` before the conventions call.
 """
 
 from __future__ import annotations
@@ -67,8 +68,10 @@ _VERIFIER = UUID(int=44)
 _INTEGRITY = PolicyErrorCode.SNAPSHOT_INTEGRITY_ERROR
 
 
-def _binding(version: str = "v4", provider: str | None = "github") -> ReviewBinding:
-    return ReviewBinding(_REVIEW_V4, version, provider)
+def _binding(
+    version: str = "v4", provider: str | None = "github", *, key: str = "review.system"
+) -> ReviewBinding:
+    return ReviewBinding(_REVIEW_V4, key, version, provider)
 
 
 def _store(
@@ -105,28 +108,67 @@ def test_the_snapshot_contract_has_one_source() -> None:
 
 
 @pytest.mark.parametrize(
-    ("version", "provider", "snapshot_path"),
+    ("key", "version", "provider", "snapshot_path"),
     [
-        ("v3", "github", False),
-        ("v2", "github", False),
-        ("v4", "github", True),
-        # TL-13: the stage builds a GitHub diff map, so other providers stay legacy.
-        ("v4", "gitlab", False),
-        # No coercion: only the exact provider name takes the snapshot path.
-        ("v4", "GitHub", False),
-        ("v4", None, False),
+        ("review.system", "v3", "github", False),
+        ("review.system", "v2", "github", False),
+        ("review.system", "v4", "github", True),
+        # A legacy version is never refused, whatever the provider.
+        ("review.system", "v3", "gitlab", False),
+        ("review.system", "v3", None, False),
+        # Only a review.system row picks the path: another key's v4 is not a review prompt.
+        ("review.conventions", "v4", "github", False),
+        ("review.verifier", "v4", "github", False),
     ],
-    ids=["v3", "v2", "v4-github", "v4-gitlab", "v4-unknown-provider", "v4-no-origin"],
+    ids=[
+        "v3",
+        "v2",
+        "v4-github",
+        "v3-gitlab",
+        "v3-no-origin",
+        "conventions-key-v4",
+        "verifier-key-v4",
+    ],
 )
-def test_the_pinned_review_prompt_and_provider_choose_the_path(
-    version: str, provider: str | None, snapshot_path: bool
+def test_the_pinned_review_prompt_chooses_the_path(
+    key: str, version: str, provider: str | None, snapshot_path: bool
 ) -> None:
-    binding = _binding(version, provider)
+    binding = _binding(version, provider, key=key)
     # A ready snapshot that pins the bound prompt: only the binding decides.
     snapshot = _snapshot(_store(version))
 
     assert binding.takes_snapshot_path is snapshot_path
     assert snapshot_for_review(binding, snapshot) is (snapshot if snapshot_path else None)
+
+
+@pytest.mark.parametrize(
+    ("provider", "named"),
+    [
+        # TL-13: the stage builds a GitHub diff map; a v4 run of another provider must not
+        # fall to legacy, which would validate the v4 answer with the v1 contract.
+        ("gitlab", "'gitlab'"),
+        # No coercion: only the exact provider name is served.
+        ("GitHub", "'GitHub'"),
+        ("", "''"),
+        (None, "no origin provider"),
+    ],
+    ids=["gitlab", "unknown-provider", "empty-provider", "no-origin"],
+)
+def test_a_snapshot_path_run_on_an_unsupported_provider_is_refused(
+    provider: str | None, named: str
+) -> None:
+    # Even a ready snapshot that pins the bound prompt does not serve it.
+    snapshot = _snapshot(_store())
+
+    with pytest.raises(PolicyError) as raised:
+        snapshot_for_review(_binding("v4", provider), snapshot)
+
+    assert raised.value.code is _INTEGRITY
+    assert str(raised.value).startswith(
+        "policy_snapshot_integrity_error: Review prompt v4 takes the policy snapshot path, "
+        "but the context stage does not serve "
+    )
+    assert named in str(raised.value)
 
 
 @pytest.mark.parametrize(
@@ -272,24 +314,26 @@ def test_processor_with_the_stage_refuses_before_the_diff_and_the_conventions_ca
 @pytest.mark.parametrize(
     ("binding", "refused"),
     [
-        (_binding("v4"), True),
-        (_binding("v3"), False),
-        (_binding("v4", "gitlab"), False),
-        (None, False),
+        (_binding("v4"), "no policy snapshot"),
+        (_binding("v4", "gitlab"), "does not serve the provider 'gitlab'"),
+        (_binding("v4", None), "no origin provider"),
+        (_binding("v3"), None),
+        (_binding("v3", "gitlab"), None),
+        (None, None),
     ],
-    ids=["v4-github", "v3", "v4-gitlab", "no-binding"],
+    ids=["v4-github", "v4-gitlab", "v4-no-origin", "v3", "v3-gitlab", "no-binding"],
 )
 def test_processor_without_the_stage_refuses_a_snapshot_path_run_before_conventions(
-    binding: ReviewBinding | None, refused: bool
+    binding: ReviewBinding | None, refused: str | None
 ) -> None:
     events: list[str] = []
     processor = _processor(binding, events, CountingGitHub())
 
-    if refused:
+    if refused is not None:
         with pytest.raises(PolicyError) as raised:
             asyncio.run(processor.prepare(RUN_ID))
         assert raised.value.code is _INTEGRITY
-        assert "no policy snapshot" in str(raised.value)
+        assert refused in str(raised.value)
         assert events == ["diff stored"]
     else:
         assert isinstance(asyncio.run(processor.prepare(RUN_ID)), GeneratedConventions)
@@ -354,7 +398,7 @@ def _execute(pipeline: Pipeline) -> bool:
     ],
     ids=["no-snapshot", "null-pin", "pins-mismatch"],
 )
-def test_execute_review_refuses_a_snapshot_path_run_it_cannot_serve_before_any_call(
+def test_execute_review_refuses_an_unservable_snapshot_path_run_before_the_review_model(
     store: Store | None, message: str
 ) -> None:
     pipeline = Pipeline(_binding(), snapshot=None if store is None else _snapshot(store))
@@ -364,13 +408,28 @@ def test_execute_review_refuses_a_snapshot_path_run_it_cannot_serve_before_any_c
 
     assert raised.value.code is _INTEGRITY
     assert message in str(raised.value)
+    # Conventions already ran (without a stage, the processor refuses before them); the PR
+    # read and the review model are never reached.
+    assert pipeline.calls == ["prepare"]
+
+
+def test_execute_review_refuses_a_v4_run_of_an_unsupported_provider_before_the_review_model() -> (
+    None
+):
+    pipeline = Pipeline(_binding("v4", "gitlab"), snapshot=_snapshot(_store()))
+
+    with pytest.raises(PolicyError) as raised:
+        _execute(pipeline)
+
+    assert raised.value.code is _INTEGRITY
+    assert "does not serve the provider 'gitlab'" in str(raised.value)
     assert pipeline.calls == ["prepare"]
 
 
 @pytest.mark.parametrize(
     "binding",
-    [_binding("v3"), _binding("v4", "gitlab")],
-    ids=["v3", "v4-gitlab"],
+    [_binding("v3"), _binding("v3", "gitlab"), _binding("v4", key="review.conventions")],
+    ids=["v3", "v3-gitlab", "conventions-key-v4"],
 )
 def test_execute_review_keeps_a_legacy_run_without_a_snapshot(binding: ReviewBinding) -> None:
     # Even a ready snapshot that pins the bound prompt is not given to a legacy run.

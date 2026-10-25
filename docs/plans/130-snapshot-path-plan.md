@@ -8,10 +8,11 @@ Issue: https://github.com/larchanka-training/dmc-268-api-t6/issues/130 (assignee
 switch of phase 2 (CVS §12 п.3, `docs/CONTEXT_AND_VERIFICATION_SPEC.md:1876-1880`; the brief's
 `:1743-1747` is stale and now points into §10.5). Task checklist: [130-snapshot-path-todo.md](130-snapshot-path-todo.md).
 
-- Base: PR C head `703c05ec` (#168 part 3, not merged yet) on `main` `d08e6c96`. F lands after C.
-  The Alembic head is `20261024_0039`.
+- Base: PR C (#324, #168 part 3, not merged yet) head `0aa29d6b` on `main` `9243fd67`, which
+  contains #227. F lands after C. The Alembic head is `20261024_0039`. (Planned on `703c05ec` over
+  `d08e6c96`; batch 1 was rebased onto the new base.)
 - Worktree: `dmc-268-api-t6-130f`. Branch: `feat/130-snapshot-path` (PR F1). Test DB and vhost: `imp130f`.
-- Every `file:line` was checked against `703c05ec` on 2026-10-25. **Suggested** marks a name the
+- Every `file:line` was checked against `703c05ec` on 2026-10-25 (the planning base). **Suggested** marks a name the
   executor may change.
 - Commit subjects end with `(#130)`. The #168 part 6 items (F3) carry `Refs #168` in the body
   unless the tech lead keeps them under #168.
@@ -79,8 +80,10 @@ validates against v1 when no snapshot is attached (`llm/models.py:183-188`). Tha
   a ready snapshot (in-flight and pre-0039 runs).
 - In the set, snapshot `is_ready_for_llm` and `pins_review_prompt(run.prompt_version_id)` → **snapshot**.
 - In the set, anything else → `policy_snapshot_integrity_error` before any model call. "Anything else"
-  means: no context stage, NULL pins (D-Q2/Q4), not ready, or the D-1 shape. The error is terminal
-  (`run_failures.py:41`).
+  means: no context stage, NULL pins (D-Q2/Q4), not ready, the D-1 shape, or a provider the stage does
+  not serve (TL-13, refined). The error is terminal (`run_failures.py:41`).
+- Only a `review.system` row picks the path: the binding carries `PromptVersion.key`, and a v4 row of
+  another key bound as the review prompt keeps the legacy path (fix round of batch 1).
 - **Where the refusal fires: before the conventions call.** `process_run.prepare` calls conventions
   (`:250-266`) before `ExecuteReviewRun` reads `ReviewPromptInput`, so the check sits in `stage.begin`
   right after the snapshot is created (next to R7, `review_context_stage.py:407-410`). A composition without
@@ -101,8 +104,11 @@ validates against v1 when no snapshot is attached (`llm/models.py:183-188`). Tha
   (`RunVcsInput`) does not, and `get_run_vcs_input` stays untouched because #220 adds the provider there. So
   the stage keys on `_STAGE_PROVIDER` (GitHub, one constant with the `build_diff_map` call); #220 swaps both to
   the run's provider and extends `SNAPSHOT_REVIEW_PROVIDERS` once the GitLab path also passes the
-  `ReflectionPass`. GitLab → legacy is pinned at the selector, the processor without a stage,
-  `execute_review` and the database reads.
+  `ReflectionPass`. TL-13 refined (fix round of batch 1): a v4 run whose provider is not served (GitLab, any
+  other name, or no origin installation) is refused with `policy_snapshot_integrity_error` before any model
+  call; it never falls to legacy, which would validate the v4 answer with the v1 contract. No catalog code
+  fits better: the refusal is "the snapshot path cannot be served", like the other refusals. Pinned at the
+  selector, the processor without a stage (`require_servable_without_snapshot`) and `execute_review`.
 
 **DD2. R2 slot (#144 Q2, Q3).**
 - The stage keeps its payload as a `payload` property (`review_context_stage.py:514-536`) instead of
@@ -246,7 +252,9 @@ Tests: F1-2 shows a v4-bound run without a context stage gets `policy_snapshot_i
 1. C is deployed.
 2. F1 is merged and deployed. Bootstrap applies 0040 (an additive table); the seed is a no-op.
 3. Check that the review worker runs the F1 image.
-4. F2 is merged and deployed. Bootstrap seeds v4 as the active version.
+4. F2 is merged and deployed. Bootstrap seeds v4 as the active version. F2 does not merge while #220
+   creates GitLab runs and the stage does not take the provider from the run: such a run would pin v4
+   and fail terminally (TL-13).
 5. Phase 3 smoke: the E-4 double user turn, and the sandbox PRs.
 
 Rolling F2 back to F1 is safe. The floor goes to #297's rollback runbook.
@@ -366,7 +374,7 @@ Recorded per the coordinator's brief; one line per decision.
 - **TL-10** (a), as recommended, per the coordinator's brief: keep C's terminal error for the D-1 shape, pinned by a test; the F1 PR body carries the read-only staging query.
 - **TL-11** (a), as recommended, per the coordinator's brief: R4 is F5, after #283, gated like F1.
 - **TL-12** confirmed, per the coordinator's brief: `context_manifests` is the candidate checkpoint (blocks of any `_ROLE_KIND_MAP` role; `ManifestBlock` gets `tokens`, `repository_id`, `truncated`); #144 PR3a stacks on F1 after tasks 4, 5, 6 and 13, PR3b on F2.
-- **TL-13** (b), per the coordinator's brief: the selector sends only GitHub runs to the snapshot path until the stage takes the provider from the run (it hard-codes `VcsProviderName.GITHUB`, `review_context_stage.py:472`); GitLab runs (after #220) stay legacy, pinned by a test in task 2.
+- **TL-13** (b), per the coordinator's brief, refined after the batch-1 review: the selector sends only GitHub runs to the snapshot path until the stage takes the provider from the run (it hard-codes `VcsProviderName.GITHUB`, `review_context_stage.py:472`); a v4 run of another provider (or without an origin) is refused with an explicit terminal error before any model call, never sent to legacy; F2 does not merge while #220 creates GitLab runs without that stage change.
 - **#144 manifest response** (added under TL-12, accepted by the coordinator), per the coordinator's brief: the `context.manifest` step response is `{manifest_id, digest, block_count, input_tokens, tokens_by_role: {<role>: int}}`, the tokens per role over all manifest blocks after the fit, counted with the pinned counter (R19); task 6 describes it in openapi and PIPELINE_SPEC `:174`.
 
 ## Tasks (details and "done when" in the todo)

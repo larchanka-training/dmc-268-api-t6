@@ -434,6 +434,7 @@ class ReviewContextStage:
             self._snapshot_for_llm = snapshot_for_review(
                 ReviewBinding(
                     bindings.review_system_id,
+                    bindings.review_system_key,
                     bindings.review_system_version,
                     _STAGE_PROVIDER.value,
                 ),
