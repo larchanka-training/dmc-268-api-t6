@@ -110,7 +110,14 @@ Gates for every task: the four commands in the plan, with DB and vhost `imp130f`
     fallback manifest;
   - `send_budget_for` ignores `LLM_CONTEXT_WINDOW`;
   - a `Mapping` reply still works.
-- **Done when:** [ ] F1-1 green; [ ] mypy is clean on the fakes.
+- **As built:** the tests are in new `tests/test_gateway_review_model.py`. The six fit and guard cases of
+  `tests/test_execute_review.py` moved there (TL decision, addendum 6400817148 on #303). The
+  proxies `CheckpointedProvider.draft_review` (`handle_review_run.py`) and
+  `AttemptReviewProvider.draft_review` (`worker.py`) widen their return type to `ReviewReply`.
+  `GatewayReviewModel.max_prompt_tokens()` is gone; its only caller was the fit removed from
+  `execute_review`. `LlmGateway.max_prompt_tokens(engine, route)` moves to F1-7, its only consumer
+  (the verifier window).
+- **Done when:** [x] F1-1 green; [x] mypy is clean on the fakes.
 
 ### F1-6: Manifest persistence, `context.manifest`, E-3 ⚑
 - **Commit:** `feat(reviews): store the manifest of every snapshot-path call (#130)`
