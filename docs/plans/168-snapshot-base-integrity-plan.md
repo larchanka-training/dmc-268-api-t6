@@ -156,9 +156,10 @@ The issue cites `7546e53`. At `4faa03dd` those spots are `diff_map.py:196,209`
   this PR, without editing `get_pins`.
   - Placement: `get_snapshot` calls the existing `self.get_pins(run_id)` unchanged and
     compares through a pure function.
-  - It compares `service_defaults_rule_version_id`, `defaults_checksum` and the full
-    `prompt_bindings`. It never compares `execution_profile`, which is the worker's current
-    one, or #280's publication settings.
+  - It compares `repository_id`, `policy_base_sha` (`Run.base_sha`),
+    `service_defaults_rule_version_id`, `defaults_checksum` and the full `prompt_bindings`
+    (review round 1 added the first two). It never compares `execution_profile`, which is
+    the worker's current one, or #280's publication settings.
   - Coverage on `main`: the defaults pin and `review.system` (id, checksum, version). The
     conventions and verifier bindings must stay empty.
   - After #280 the same comparison covers all three prompts with no code change.
@@ -221,19 +222,23 @@ In `ReviewContextStage.run`, right after the head check (`:429-430`):
 - New module `app/modules/reviews/application/policy_snapshot_integrity.py` (suggested
   name):
   - `verify_policy_document(document, raw)`.
-    - Present: `raw` is bytes, `sha256(raw) == raw_sha256`, `len(raw) == byte_count` and
-      `sha256(text.encode("utf-8")) == text_sha256`.
+    - Present: `raw` is bytes, `sha256(raw) == raw_sha256`, `len(raw) == byte_count`,
+      `sha256(text.encode("utf-8")) == text_sha256` and `line_count` equals
+      `document_line_count(text)` (extracted from `policy_documents.py:165`).
     - `presence='missing'` passes when `raw is None`, and nothing else is checked there:
-      `PolicyDocument.__post_init__` (`policy_snapshot.py:53-65`) and the DB CHECK already
-      force the other fields to `None`. The digest covers presence and the `null`
-      checksums.
+      `PolicyDocument.__post_init__` (`policy_snapshot.py:53-65`) forces the other fields to
+      `None`. The DB CHECK of migration 0029 does not cover `byte_count` and `line_count`,
+      so the adapter turns the `ValueError` of a row that breaks this into the integrity
+      error. The digest covers presence and the `null` checksums.
   - `verify_policy_snapshot(snapshot, *, prompt_bindings, execution_profile)`.
     - Recompute `ignore_digest` from the stored patterns and versions.
     - Recompute `policy_digest` from the stored fields and the stored JSON.
     - Compare both with the stored values.
   - A mismatch raises `PolicyError(SNAPSHOT_INTEGRITY_ERROR, …)` that names the checksum and
     never quotes content (`policy_errors.py:61-67`).
-- Adapter: `get_staged_documents` verifies each row. `get_snapshot` verifies the chain
+- Adapter: `get_staged_documents` verifies each row; a row whose content fields disagree
+  with its presence is `policy_snapshot_integrity_error` naming the fields, not the
+  retryable `internal_error` of a plain `ValueError`. `get_snapshot` verifies the chain
   before `return`, with `row.prompt_bindings` and `row.execution_profile`.
   `create_snapshot` re-reads through `get_snapshot` (`:230`).
 - The failure path is wired already. `PreparePolicySnapshot.execute` (`:163`) raises; the
@@ -244,6 +249,8 @@ In `ReviewContextStage.run`, right after the head check (`:429-430`):
 
 - In `policy_snapshot_integrity.py`, add `verify_snapshot_pins(snapshot, pins)`. It checks:
   - `pins` is not `None`; `None` means a pinned version row is missing (§7.2 `:718`);
+  - `snapshot.repository_id == pins.repository_id` and
+    `snapshot.policy_base_sha == pins.policy_base_sha`, which is `Run.base_sha`;
   - `snapshot.service_defaults_rule_version_id == pins.service_defaults_rule_version_id`,
     which is `Run.rule_version_id`;
   - `snapshot.defaults_checksum == pins.defaults_checksum`, which is
@@ -301,20 +308,22 @@ All tests go into new files. `tests/test_review_context_stage.py` (#280, #220) a
   - Golden pin: `canonical_policy_payload(...)` over fixed inputs equals canonical JSON
     written literally in the test, and a built snapshot's `policy_digest` is its SHA-256.
 - Task 4: `verify_snapshot_pins` passes for pins equal to the snapshot. It raises for
-  `None`, another `defaults_checksum`, another rule version id, and another review checksum
-  or id.
+  `None`, another repository, another base, another `defaults_checksum`, another rule
+  version id, and another review checksum or id.
 
 **`tests/test_policy_snapshot_integrity_postgres.py` (Tasks 3 and 4, PG).**
 
 - Use the fixtures of `tests/test_policy_snapshot_postgres.py:45-59`. Store a snapshot
   through the real UoW, then tamper with one raw SQL `UPDATE` per test, keeping the presence
   CHECK valid.
-- Task 3 tampers: `raw_bytes`, `text`, `raw_sha256`, `ignore_patterns = '[]'`,
-  `policy_base_sha`.
+- Task 3 tampers: `raw_bytes`, `text`, `raw_sha256`, `line_count = 99`,
+  `ignore_patterns = '[]'`, `policy_base_sha`; and rows that break the presence rule outside
+  the CHECK (present `byte_count`/`line_count = NULL`, missing `byte_count = 7`).
 - Task 4 tampers:
   - `rule_versions.checksum` of the pinned rule;
   - `prompt_versions.checksum` of the pinned prompt;
-  - `runs.rule_version_id` pointing to another existing rule version.
+  - `runs.rule_version_id` pointing to another existing rule version;
+  - `runs.base_sha`, and `runs.code_change_id` pointing to a change of another repository.
 - Each tamper makes `get_snapshot` raise `policy_snapshot_integrity_error`. One end-to-end
   case runs `PreparePolicySnapshot.execute`.
 - The existing round trip and rival check (`tests/test_policy_snapshot_postgres.py:63-148`)

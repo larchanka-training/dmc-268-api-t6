@@ -178,9 +178,9 @@ TEST_RABBITMQ_URL=amqp://app:app@localhost:5672/imp168d uv run pytest
   - PG: tamper `rule_versions.checksum`, `prompt_versions.checksum` and
     `runs.rule_version_id`.
 - Run them, and record the red output.
-- Add `verify_snapshot_pins(snapshot, pins)`. It compares the defaults id and checksum, and
-  the bindings field by field. It does not compare the execution profile or the publication
-  settings.
+- Add `verify_snapshot_pins(snapshot, pins)`. It compares the repository, the pinned base,
+  the defaults id and checksum, and the bindings field by field. It does not compare the
+  execution profile or the publication settings.
 - Call it in `get_snapshot` after Task 3's check, using `await self.get_pins(run_id)`.
 
 **Done when:**
