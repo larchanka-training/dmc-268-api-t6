@@ -263,9 +263,24 @@ raises `policy_prompt_budget_exceeded` (terminal), so neither the conventions no
   90 s verifier call and 10 s) joins the call timeout in every admission check of every call of
   the task (entry, after the FX quote, before the slot, the transport checkpoint) and in the
   retry backoff guard; short of it the task fails with the new
-  `LlmErrorCode.VERIFICATION_DEADLINE_EXCEEDED` (terminal, already in the catalog). Not in F1
-  (TL-6 gates only the review): conventions keep no time for the review and the verifier
-  (CVS §7.4 "conventions do not spend the reserve"), and the verifier keeps no 10 s of its own.
+  `LlmErrorCode.VERIFICATION_DEADLINE_EXCEEDED` (terminal, already in the catalog).
+- Fix round (review of `172c8c5c..9e4b557c`), correcting the F1-9 reading of CVS §7.4: "conventions
+  do not spend the reserve" means conventions must leave the review and the verifier window, so
+  snapshot-path conventions keep `LlmGateway.call_timeout_s(engine)` (the review's call) +
+  `VERIFIER_TIME_RESERVE_S`: 90 + 90 + 10 s on the fast engine, so they need 280 s left. The
+  snapshot-path verifier keeps `VERIFIER_COMPLETION_RESERVE_S` (10 s, PIPELINE_SPEC §3 "call +
+  10 s"), short of which it fails `verification_deadline_exceeded` too (`ReflectionPass` maps both
+  deadline codes). Legacy tasks keep 0 s. The deep engine (300 s calls) needs 700 s for snapshot
+  conventions, more than the 480 s attempt deadline the worker gives every run (eval deep: 600 s):
+  a snapshot-path deep run fails there before its paid call (a legacy deep cache miss whose
+  conventions call takes its whole 300 s cannot fit the review either); review attention for F2.
+- Eval comparability (decided by the tech lead on 2026-10-25): `app/bootstrap/llm_gateway.py:262`
+  passes `case.policy_snapshot`, so the eval snapshot arms (`review/scripts/eval_live.py`) take the
+  snapshot branch: the 3-call review cap, the 100 s reserve, bounded repair and no verifier stage,
+  and their conventions case the 2-slot cap and the 280 s reserve. Accepted: those arms now mirror
+  the future v4 production budget and are not comparable with older baselines; the new baseline
+  comes from the paid R15 re-shoot after F2, only with the tech lead's explicit ok. Goes into the
+  PR body.
 
 **DD9. R14.**
 - `attempt_provider_factory` (`worker.py:709-734`) builds `ReflectionPass(GatewayVerifierModel(gateway, run))`
@@ -307,9 +322,13 @@ raises `policy_prompt_budget_exceeded` (terminal), so neither the conventions no
 - Fix round (re-review of `172c8c5c`): the verifier validator turns the decoder's own
   `RecursionError` (deep nesting) and `ValueError` (an integer past the digit limit) into
   `InvalidAnswer`, so the gateway repairs the answer and the stored `llm.call` withholds it; the
-  redactor withholds on any of them. Verifier only: the review and conventions validators keep
-  `_decode_object` as live runs use it, so the same escape there (an `internal_error` retry) stays
-  a follow-up outside F1.
+  redactor withholds on any of them.
+- Fix round (review of `172c8c5c..9e4b557c`): the same fail-closed decoder
+  (`_decode_object_fail_closed`) now serves every snapshot-path validator: the ReviewOutput v2
+  validator (chosen only for a v4 binding) and the conventions validator when the request carries
+  a snapshot (`conventions_answer_validator(..., fail_closed=True)`). The legacy v1 review and
+  legacy conventions keep `_decode_object` as live runs use it, so the same escape there (an
+  `internal_error` retry) stays a follow-up outside F1.
 
 ## Hazard, D-1, in-flight runs, deploy order (D-2)
 
@@ -447,7 +466,8 @@ Rolling F2 back to F1 is safe. The floor goes to #297's rollback runbook.
 - PIPELINE_SPEC `:132`: the canon puts `context.build` after conventions; F3 keeps the stage's single
   build before them.
 - CVS §5.2 "Текущее состояние" (`:770-780`). CVS §7.3: the example `C1 → R1 → R2 repair → V1` holds only
-  without a fallback (TL-2). CVS §4.2: the R5 key deviation (TL-7).
+  without a fallback (TL-2). CVS §4.2: the R5 key deviation (TL-7): the v2 conventions key leaves
+  out the rendered-input, tree and source-entry digests.
 - RFS §7.2 values; TEST_PLAN §3.4 row "боевой worker его не подключает"; the rollback floor in CICD.
 - False since F1-7, left for G because #303 rewrites both paragraphs: PIPELINE_SPEC "Состояние
   verifier после #133" (`:571-590`) and TEST_PLAN §3.4 (`:483-495`) still say a reflection pass

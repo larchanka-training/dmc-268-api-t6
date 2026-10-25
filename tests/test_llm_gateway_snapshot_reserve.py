@@ -1,10 +1,12 @@
 """Recovery of snapshot-path tasks (#130 F1-9: E-1, E-7 time, E-12; plan DD8, TL-2, TL-6).
 
 A snapshot-path review keeps one provider call and one verifier window (a 90 s call and 10 s of
-local completion) of its attempt for the verifier; snapshot-path conventions keep two calls,
-for the review and the verifier; both repair with the bounded envelope (RULES §8.1). Legacy
-tasks keep no slot, no time and the assistant-turn repair (F1-1 pins the live chain).
-No network: provider answers come from ``httpx.MockTransport``.
+local completion) of its attempt for the verifier; snapshot-path conventions keep two calls and
+the time of a review call plus that window (CVS §7.4: they do not spend the reserve); the
+snapshot-path verifier keeps its 10 s of local completion. Review and conventions repair with the
+bounded envelope (RULES §8.1), and every snapshot-path validator decodes fail-closed. Legacy
+tasks keep no slot, no time, the live decoder and the assistant-turn repair (F1-1 pins the live
+chain). No network: provider answers come from ``httpx.MockTransport``.
 """
 
 from __future__ import annotations
@@ -22,11 +24,18 @@ import pytest
 from app.modules.reviews.application.conventions import ConventionsRequest
 from app.modules.reviews.application.llm import LlmCallFailed, LlmErrorCode, RunCallContext
 from app.modules.reviews.application.policy_snapshot import PolicySnapshot
+from app.modules.reviews.application.reflection_pass import VerifierPromptBuilder
 from app.modules.reviews.application.run_failures import classify_failure
+from app.modules.reviews.infrastructure.llm.answers import (
+    InvalidAnswer,
+    conventions_answer_validator,
+    validate_review_answer,
+)
 from app.modules.reviews.infrastructure.llm.gateway import LlmGateway, StructuredTask
 from app.modules.reviews.infrastructure.llm.models import (
     GatewayConventionsModel,
     GatewayReviewModel,
+    GatewayVerifierModel,
 )
 from app.modules.reviews.infrastructure.llm.settings import LlmSettings
 from app.modules.reviews.infrastructure.llm.transport import (
@@ -44,6 +53,10 @@ from tests.test_gateway_review_model import (
     _profile,
     _snapshot,
 )
+from tests.test_gateway_verifier_model import CALL_ID as VERIFIER_CALL_ID
+from tests.test_gateway_verifier_model import _candidate, _decision
+from tests.test_gateway_verifier_model import _context as _verifier_context
+from tests.test_gateway_verifier_model import _snapshot as _verifier_snapshot
 from tests.test_repo_conventions import draft
 
 NOW = datetime(2026, 10, 25, 12, 0, tzinfo=UTC)
@@ -55,6 +68,12 @@ SETTINGS = LlmSettings(
 )
 # The fast engine: a review call needs 90 s; the review keeps 90 s + 10 s for the verifier.
 REVIEW_WINDOW_S = 90 + 90 + 10
+# Conventions: their own call, then the review's call and the review's reserve.
+CONVENTIONS_WINDOW_S = 90 + REVIEW_WINDOW_S
+# The verifier: its 90 s call and 10 s of local completion.
+VERIFIER_WINDOW_S = 90 + 10
+DEEP_NESTING = "[" * 20_000  # json.loads: RecursionError
+HUGE_INTEGER = '{"summary": ' + "1" * 5_000 + "}"  # json.loads: ValueError (int digit limit)
 
 type Stage = Callable[[LlmGateway, RunCallContext], Awaitable[object]]
 
@@ -138,6 +157,23 @@ def _review(snapshot: PolicySnapshot | None) -> Stage:
     return stage
 
 
+def _verifier_model(snapshot: PolicySnapshot | None) -> Stage:
+    context = _verifier_context(snapshot)
+    prompt, manifest = VerifierPromptBuilder().build_verifier_prompt(
+        candidates=(_candidate("c-1"),), context=context, call_id=VERIFIER_CALL_ID
+    )
+
+    async def stage(gateway: LlmGateway, run: RunCallContext) -> object:
+        return await GatewayVerifierModel(gateway, run).verify(
+            system_prompt=prompt.system,
+            user_prompt=prompt.user,
+            manifest=manifest,
+            context=context,
+        )
+
+    return stage
+
+
 async def _verifier(gateway: LlmGateway, run: RunCallContext) -> object:
     return await gateway.generate(
         StructuredTask(
@@ -159,6 +195,10 @@ def _conventions_answer() -> httpx.Response:
     return completion(json.dumps(draft()))
 
 
+def _verifier_answer() -> httpx.Response:
+    return completion(json.dumps({"decisions": [_decision("c-1")]}))
+
+
 def _unavailable() -> httpx.Response:
     return httpx.Response(503, json={"error": {"message": "overloaded"}})
 
@@ -168,10 +208,19 @@ def _unavailable() -> httpx.Response:
     [
         (_review(_snapshot()), _review_answer, 1, True, 100.0),
         (_review(None), _review_answer, 0, False, 0.0),
-        (_conventions(_snapshot()), _conventions_answer, 2, True, 0.0),
+        (_conventions(_snapshot()), _conventions_answer, 2, True, 190.0),
         (_conventions(None), _conventions_answer, 0, False, 0.0),
+        (_verifier_model(_verifier_snapshot()), _verifier_answer, 0, True, 10.0),
+        (_verifier_model(None), _verifier_answer, 0, True, 0.0),
     ],
-    ids=["snapshot-review", "legacy-review", "snapshot-conventions", "legacy-conventions"],
+    ids=[
+        "snapshot-review",
+        "legacy-review",
+        "snapshot-conventions",
+        "legacy-conventions",
+        "snapshot-verifier",
+        "legacy-verifier",
+    ],
 )
 def test_snapshot_tasks_keep_slots_and_time_and_repair_bounded(
     stage: Stage,
@@ -240,11 +289,64 @@ def test_a_snapshot_review_is_refused_without_the_verifier_window(seconds_left: 
         assert len(provider.requests) == 1
 
 
-@pytest.mark.parametrize("seconds_left", [89, 100])
-def test_a_legacy_review_keeps_no_time_for_the_verifier(seconds_left: int) -> None:
-    provider = _Provider([_review_answer()])
+@pytest.mark.parametrize("seconds_left", [CONVENTIONS_WINDOW_S - 1, CONVENTIONS_WINDOW_S])
+def test_snapshot_conventions_leave_the_review_call_and_the_verifier_window(
+    seconds_left: int,
+) -> None:
+    provider = _Provider([_conventions_answer()])
 
-    _, [outcome] = provider.run(seconds_left, _review(None))
+    _, [outcome] = provider.run(seconds_left, _conventions(_snapshot()))
+
+    if seconds_left < CONVENTIONS_WINDOW_S:
+        assert isinstance(outcome, LlmCallFailed)
+        assert outcome.error_code is LlmErrorCode.VERIFICATION_DEADLINE_EXCEEDED
+        assert str(outcome) == (
+            "verification_deadline_exceeded: 279 s left before the attempt deadline, "
+            "a call needs 90 s and 190 s are kept for later stages"
+        )
+        assert outcome.calls == 0
+        assert provider.requests == []
+    else:
+        assert not isinstance(outcome, LlmCallFailed)
+        assert len(provider.requests) == 1
+
+
+@pytest.mark.parametrize("seconds_left", [VERIFIER_WINDOW_S - 1, VERIFIER_WINDOW_S])
+def test_a_snapshot_verifier_keeps_its_local_completion(seconds_left: int) -> None:
+    provider = _Provider([_verifier_answer()])
+
+    _, [outcome] = provider.run(seconds_left, _verifier_model(_verifier_snapshot()))
+
+    if seconds_left < VERIFIER_WINDOW_S:
+        assert isinstance(outcome, LlmCallFailed)
+        assert outcome.error_code is LlmErrorCode.VERIFICATION_DEADLINE_EXCEEDED
+        assert str(outcome) == (
+            "verification_deadline_exceeded: 99 s left before the attempt deadline, "
+            "a call needs 90 s and 10 s are kept for later stages"
+        )
+        assert outcome.calls == 0
+        assert provider.requests == []
+    else:
+        assert not isinstance(outcome, LlmCallFailed)
+        assert len(provider.requests) == 1
+
+
+@pytest.mark.parametrize(
+    ("stage", "answer"),
+    [
+        (_review(None), _review_answer),
+        (_conventions(None), _conventions_answer),
+        (_verifier_model(None), _verifier_answer),
+    ],
+    ids=["legacy-review", "legacy-conventions", "legacy-verifier"],
+)
+@pytest.mark.parametrize("seconds_left", [89, 90])
+def test_a_legacy_task_keeps_no_time_for_later_stages(
+    stage: Stage, answer: Callable[[], httpx.Response], seconds_left: int
+) -> None:
+    provider = _Provider([answer()])
+
+    _, [outcome] = provider.run(seconds_left, stage)
 
     if seconds_left < 90:
         assert isinstance(outcome, LlmCallFailed)
@@ -290,3 +392,55 @@ def test_a_negative_time_reserve_is_refused() -> None:
 
     with pytest.raises(ValueError, match="reserved_seconds must not be negative: -1"):
         replace(task, reserved_seconds=-1)
+
+
+# ---------- answers the JSON decoder cannot read (review of 172c8c5c..9e4b557c) ----------
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [pytest.param(DEEP_NESTING, id="deep nesting"), pytest.param(HUGE_INTEGER, id="huge integer")],
+)
+@pytest.mark.parametrize(
+    ("stage", "valid", "kinds"),
+    [
+        (_review(_snapshot()), _review_answer, ["primary", "repair"]),
+        # Two slots kept: the second conventions call is the fallback, not a repair.
+        (_conventions(_snapshot()), _conventions_answer, ["primary", "fallback"]),
+    ],
+    ids=["snapshot-review", "snapshot-conventions"],
+)
+def test_a_snapshot_answer_the_decoder_cannot_read_is_recovered(
+    stage: Stage, valid: Callable[[], httpx.Response], kinds: list[str], answer: str
+) -> None:
+    # InvalidAnswer, so the gateway recovers instead of an error escaping the paid call
+    # (the run's internal_error).
+    provider = _Provider([completion(answer), valid()])
+
+    _, [outcome] = provider.run(3_600, stage)
+
+    assert not isinstance(outcome, LlmCallFailed)
+    assert provider.kinds() == kinds
+
+
+@pytest.mark.parametrize(
+    ("answer", "error"),
+    [
+        pytest.param(DEEP_NESTING, RecursionError, id="deep nesting"),
+        pytest.param(HUGE_INTEGER, ValueError, id="huge integer"),
+    ],
+)
+@pytest.mark.parametrize(
+    "validate",
+    [validate_review_answer, conventions_answer_validator(("app/main.py",))],
+    ids=["legacy-review-v1", "legacy-conventions"],
+)
+def test_legacy_validators_keep_the_live_decoder(
+    validate: Callable[[str], object], answer: str, error: type[Exception]
+) -> None:
+    # F1 dormancy: legacy runs decode as today; their escape is a follow-up outside F1.
+    with pytest.raises(error) as raised:
+        validate(answer)
+
+    assert type(raised.value) is error
+    assert not isinstance(raised.value, InvalidAnswer)
