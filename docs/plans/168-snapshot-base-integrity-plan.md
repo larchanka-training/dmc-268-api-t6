@@ -333,6 +333,7 @@ The coordinator posts these comments before the edits. "Ours" = what this PR cha
 | #283 | `vcs_diff.py`: import `:21`, `FetchVcsReviewInput.execute` `:166-167` | `GIT_EMPTY_BLOB_SHA`, `VcsFile.git_mode`, `OmissionReason.EMPTY_FILE`, `_known_omission` tail | none |
 | #283 | `check_runs.py`: one `_ERROR_TEXTS` entry | `CheckRunReport` fields, `check_run_view` | none |
 | #283 | `docs/PIPELINE_SPEC.md`: `:169` row, new §6 row after `:412` | `:58`, `:106-182`, `:435`, `:564-608` | `:169` sits inside their range |
+| #283 | `tests/test_diff_map_pinned_base.py` (new): imports `vcs_file_from_snapshot` from `review_context_stage` for the rebuild test | replaces that function with `run_coverage.snapshot_vcs_file` | whoever merges second fixes the import |
 | #220 `b26076eb` | `review_context_stage.py`: as for #283 | the import block, the `provider=` line, the `except` tuple | adjacent |
 | #220 | `vcs_diff.py`: import `:21`, `:166-167` | rewrites the same import line; `PullRequestLocator`, `VcsFile`, the blob `except` in `execute` | import line conflicts |
 | #220 | `run_failures.py`: one `KNOWN_ERROR_CODES` entry (`:59-76`) | `Literal` import, the `RequiredSourceUnavailable` class | none |
