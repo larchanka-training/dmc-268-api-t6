@@ -94,7 +94,7 @@ API baseline gates локально и в обязательном CI: `uv run r
 | Пустой added __init__.py/.gitkeep без patch; removed image без нового blob и independent binary proof | missing_patch/incomplete; raw changes=0/metadata_only не доказывает чистый rename/mode-only. Без текста, при known ≤3 000 — backend partial; рядом с кодом — review partial. |
 | NUL в первых 8 KiB/PNG-JPEG-GIF-PDF-ZIP-ELF magic в blob; NUL только за 8 KiB без magic в blob; NUL в patch на любой позиции; oversized unread blob; независимо доказанный binary при oversized | Только подтверждённый binary — E; NUL вне окна blob сам не доказывает binary, но NUL в patch на любой позиции доказывает binary; без независимого evidence oversized — too_large/T до blob-based detection. Removed без blob не становится E по расширению (CVS §9.2). |
 | Доказанный pure rename/mode-only с чистым кодом; отдельно empty added с кодом | T либо incomplete препятствуют clean: partial/null при пустых findings, даже без известного непроверенного текста; отдельно T → none, incomplete при no-text known ≤3 000 → backend partial. |
-| Known ignored/generated anchor без manifest; ignored deleted-file anchor; binary anchor; unknown path, совпавший с маской; allowed anchor с ignored evidence | Trusted identity → ignore/generated раньше видимости: ignored_file сам по себе не partial; для ignored удаления побеждает структурный left_anchor_unsupported. Binary не получает этот bypass: line_absent/partial. Unknown path не доказывает E, сохраняется unknown_path/identity error. Запрещённый evidence у allowed anchor → evidence_source_disallowed/partial. Независимые причины partial не исчезают; pre-send/general guards действуют. |
+| Known ignored/generated anchor без manifest; ignored deleted-file anchor; binary anchor; unknown path, совпавший с маской; allowed anchor с ignored evidence | Trusted identity → ignore/generated раньше видимости: ignored_file сам по себе не partial; для ignored удаления `ignored_file` побеждает структурный `left_anchor_unsupported`. Binary не получает этот bypass: line_absent/partial. Unknown path не доказывает E, сохраняется unknown_path/identity error. Запрещённый evidence у allowed anchor → evidence_source_disallowed/partial. Независимые причины partial не исчезают; pre-send/general guards действуют. |
 | Pass-4 guard: изолируемый запрещённый evidence/general конкретного кандидата; неизолируемый источник/повреждённые snapshot/manifest bindings; попытка pre-send запрещённого источника | В проходе 4: evidence_source_disallowed/partial без general/verifier eligibility; при невозможности изоляции/проверки целостности — весь run snapshot_integrity_error/failed, без публикации. Отдельный pre-send guard даёт policy_context_violation/failed до следующего вызова, не drop и не второе ignored_file. |
 | Deleted-file identity вне ignore/generated; LEFT-only coordinate без deletion evidence; overlap с валидным shown deletion evidence; непоказанные/запрещённые/wrong-revision refs | Структурный left_anchor_unsupported в проходе 2; evidence-dependent отказ предварительный до прохода 3. При валидных refs без подтверждения удаления — wrong_side; при валидном подтверждении удаления без RIGHT — left_anchor_unsupported с приоритетом. Невалидные refs дают evidence-причину, не LEFT proof. Все технические drops partial, без general/verifier eligibility. |
 | Конвенция уровня 4 против SEC1/COR1 | Не отменяет дефолт; явное base rules/AGENTS исключение имеет приоритет по RFS §2 |
@@ -477,6 +477,18 @@ eval не запускается; pins для неиспользуемого ver
 
 ### 3.4. Независимая оценка production pipeline и verifier (#107)
 
+**Текущее состояние после #133.** Схемы `review-output.schema.v2.json` и
+`verifier-output.schema.v1.json`, исторический prompt `review.verifier.v1.md`
+(#133) и `review.verifier.v2.md` (#219, текущий pin по умолчанию), unit-сценарии
+существуют. Опциональный путь Reflection Pass в `ExecuteReviewRun` реализован
+для вызова с `reflection_pass` и policy snapshot. Snapshot без `reflection_pass`
+даёт `policy_snapshot_integrity_error`; `reflection_pass` без snapshot
+пропускается с предупреждением в логе `execute_review_legacy_run_without_snapshot`.
+Обе композиции в боевом `app/worker.py` его не подключают; подключение остаётся
+задачей #130.
+Reflection Pass соответствует обязательному verifier из CVS §7; unit-проверки
+ниже не доказывают его работу в боевом worker или качество смысловых решений.
+
 Новый versioned harness сохраняет для каждого кейса policy/diff snapshots, фактически показанные reviewer/verifier manifests и excerpts, raw v2 output, deterministic drops, все входные candidate IDs, решения verifier и final result. Pin-ы включают schema, prompts, defaults, selector/AST/matcher/model/recovery profiles; provenance вызовов и usage позволяют воспроизвести replay без сети. Сырые исторические v1 ответы остаются прежним baseline: evidence для них не дорисовываются, новый результат не выдаётся за пересчёт старого измерения.
 
 Сравнение raw и final выполняется на одном и том же зафиксированном ground truth, с отдельными TP/FP/FN, Precision/Recall, Critical Recall, validity и ручным Hallucination Rate для каждой стадии. Для RIGHT v2 применяется сопоставление §3.2; оно остаётся метрикой исходного корпуса с truth на добавленных строках, а не ограничением допустимости production-якоря на context line. Расширенные кейсы с допустимыми контекстными/общими находками получают отдельную versioned методику matching по показанным source ranges. Перед будущим v3 matching обязательно сравнивает `side`: LEFT ищется на удалённых строках `diff_old_sha`, RIGHT — на новой стороне; также различаются соответствующие old/new paths и revision. Находки разных сторон/ревизий не сопоставляются через одинаковый номер строки; историческое окно ±2 и его результаты не меняются задним числом.
@@ -490,7 +502,7 @@ eval не запускается; pins для неиспользуемого ver
 - **Negative cases (hallucinations)**: правдоподобное, но ложное утверждение, противоречащее видимому коду — verifier отклоняет с `contradicted`.
 - **Inapplicable rule rejection**: находка ссылается на правило репозитория, которое не применимо к данному контексту или файлу — verifier отклоняет кандидата (`insufficient_context` / `contradicted`).
 - **Gap rejection**: кандидат ссылается на строки вне показанного диапазона или контекст с разрывами — `verify()` отклоняет такой ответ verifier с `VerificationInvalidOutputError`.
-- **Non-code rejection**: замечания по нерелевантным блокам фильтруются через проверку роли manifest (`VerificationInvalidOutputError`).
+- **Non-code rejection**: ссылка `evidence_refs` на некодовый блок manifest делает весь ответ verifier невалидным: `VerificationInvalidOutputError`, код `verification_invalid_output`. Частично принятых решений из этого ответа нет.
 
 | Метрика | Числитель / знаменатель |
 | --- | --- |
@@ -505,9 +517,9 @@ eval не запускается; pins для неиспользуемого ver
 
 Adversarial eval использует пары одинакового дефекта/контекста с инъекцией и без неё и отдельные допустимые текстовые исключения. Измеряются навязанные ложные findings, подавленные реальные дефекты и нарушения законных исключений reviewer/verifier; отдельно проверяется перенос через conventions/cache/repair. Schema validity, отсутствие запрещённых tools и детерминированный guard оцениваются независимо от смысловой устойчивости модели. Результат корпуса не заявляет полной защиты от произвольного Prompt Injection.
 
-**Защита от Prompt Injection на unit-уровне (AC 7)**:
+**Защита от Prompt Injection на unit-уровне (AC 7 задачи #120)**:
 Параметризованные тесты синтаксических инъекций (`TestPromptInjectionDefenses` в `tests/test_reflection_evaluation.py`) проверяют оба прохода (reviewer и verifier):
-- Системный промпт верификатора (`review.verifier.v1.md`) содержит декларацию Source Authority and Trust с наивысшим приоритетом над пользовательскими данными (добавление аналогичной декларации в обновлённый системный промпт reviewer отложено до задачи #130 в рамках Option (a)).
+- Системный промпт верификатора (`review.verifier.v1.md`) содержит декларацию Source Authority and Trust с наивысшим приоритетом над пользовательскими данными. Исторический Option (a) в #120 означал сохранить тогдашний reviewer prompt v2 без изменений и отложить новую декларацию доверия reviewer и её боевое подключение до #130 ([план #120, Phase 7](plans/120-plan.md#phase-7-review-round-3-fixes-alexander-khomutov--axyi-5562633453)). Нынешний `review.system.v3.md` — prompt для legacy-контракта из #178/#233; reviewer v4 с новой декларацией доверия и интеграция snapshot/verifier-профиля остаются частью #130 (§3.6).
 - Все недоверенные поля (`rules_markdown`, `agents_md`, `candidate_id`, `path`, `title`, `body`, `suggestion`, `code_diff`) экранируются по стандарту XML-сущностей (`&lt;`, `&gt;`, `&amp;`, `&quot;`, `&apos;`).
 - Атрибуты XML строго валидируются: идентификаторы `service-defaults:<ID>` ограничены регулярным выражением `\A[a-zA-Z0-9_\-]+\Z`, исключая кавычки и инъекции атрибутов.
 - Тесты проверяют отсутствие неэкранированных тегов `<system>`, попыток преждевременного закрытия контейнеров (`</candidate_findings>`, `</code_context>`) и маркеров инструкций (`<|im_start|>`, `[INST]`).

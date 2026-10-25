@@ -11,8 +11,8 @@ v1.2 (RAG v1, #140) — [PR #157](https://github.com/larchanka-training/dmc-268-
 
 **Редакция 2026-10-18 — [#175](https://github.com/larchanka-training/dmc-268-api-t6/issues/175),
 [PR #205](https://github.com/larchanka-training/dmc-268-api-t6/pull/205).**
-Базовые версии утверждены указанными PR; новые уточнения этой редакции проходят
-review в #205 и не приписываются утверждению #108/#135/#157.
+Базовые версии утверждены указанными PR; новые уточнения этой редакции утверждены
+в PR #205 и не приписываются утверждению #108/#135/#157.
 
 v1.2 по [#140](https://github.com/larchanka-training/dmc-268-api-t6/issues/140) и
 [ADR 0001](adr/0001-graph-rag-v1.md) распространяет политику на RAG (§5.1, §8.1, §8.4).
