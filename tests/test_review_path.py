@@ -533,7 +533,7 @@ def test_snapshot_path_conventions_refuse_a_pin_the_snapshot_does_not_name(
 
 
 # The repo-conventions-v2 key of the fixture policy (``Source``), its ignore digest untainted.
-_V2_DIGEST = "fef4efc6dfdb3c7e9110ffd7b6f0f33259cd6bf2a2116efa68aa0e71ac45f898"
+_V2_DIGEST = "e77ea614467bd53b2183d176a2ecb94381664cc6f1fcc089d64c5d4ce9129480"
 
 
 @pytest.mark.parametrize("version", ["v3", "v4"])
@@ -568,8 +568,8 @@ def test_stage_v2_key_is_the_same_for_another_pr_base_with_the_same_policy() -> 
 
 
 # The repo-conventions-v2 keys of the fixture policy without and with the denied rename.
-_PLAIN_DIGEST = "cf2ce488d691d5229dc0cf4464d1f4cac55ab4baf125c9342928237607609dc4"
-_TAINTED_DIGEST = "754d1058a2ba36df1f6da47237da247d4a70ad7915132a76eff1cc299fd815f8"
+_PLAIN_DIGEST = "8ec0926a36f8cecb3f34d6e14cf4125e3282b470b2cc169e9929e66bc2396521"
+_TAINTED_DIGEST = "6f9fe7adf4d38d885c3ede3bbb102ad88f6964651e179277866450f84a960496"
 
 
 def test_stage_v2_key_carries_the_taint_of_a_denied_rename() -> None:

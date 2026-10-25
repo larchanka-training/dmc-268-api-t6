@@ -221,15 +221,17 @@ def build_conventions_manifest(
 def conventions_cache_key(snapshot: PolicySnapshot, ignore_key: str | None) -> str:
     """The ``policy_key`` of a snapshot-path conventions entry (R5, TL-7): a SHA-256 digest.
 
-    It covers what a generated entry depends on (tech lead, 2026-10-25): the attempt's
-    ignore key (``ignore_key``, the ignore digest with any newly tainted rename or copy
-    path), the text digests of rules.md and AGENTS.md, the pinned conventions prompt and the
-    counter version. The PR base, the review and verifier prompts and the rest of the
-    execution profile stay out, so the next pull request of a repository reuses the entry
-    and only a change of the policy, AGENTS.md or the conventions prompt misses. The
-    repository, AGENTS.md revision and prompt row stay in their own columns. Deviation from
-    CVS §4.2, recorded for G: no ``policy_base_sha``, no selector or truncator versions (no
-    such constants exist) and no rendered-input, tree or source-entry digests.
+    It covers the policy inputs the conventions prompt renders (tech lead, 2026-10-25): the
+    attempt's ignore key (``ignore_key``, the ignore digest with any newly tainted rename or
+    copy path; the digest hashes the matcher, built-in exclusion and limits versions), the
+    text digests of rules.md and AGENTS.md, the service defaults (``defaults_checksum``, the
+    prompt's service-defaults block), the pinned conventions prompt and the counter version.
+    The PR base, the review and verifier prompts and the rest of the execution profile stay
+    out, so the next pull request of a repository reuses the entry and only a change of the
+    policy, the defaults, AGENTS.md or the conventions prompt misses. The repository,
+    AGENTS.md revision and prompt row stay in their own columns. Deviation from CVS §4.2,
+    recorded for G: no ``policy_base_sha``, no selector or truncator versions (no such
+    constants exist) and no rendered-input, tree or source-entry digests.
     """
     bindings = snapshot.prompt_bindings
     identity = {
@@ -242,6 +244,7 @@ def conventions_cache_key(snapshot: PolicySnapshot, ignore_key: str | None) -> s
             "checksum": bindings.conventions_checksum,
         },
         "counter_version": snapshot.execution_profile.counter_version,
+        "defaults_checksum": snapshot.defaults_checksum,
     }
     canonical = json.dumps(identity, sort_keys=True, separators=(",", ":"))
     return sha256(canonical.encode("utf-8")).hexdigest()
