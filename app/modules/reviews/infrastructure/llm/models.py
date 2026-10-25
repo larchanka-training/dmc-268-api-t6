@@ -40,6 +40,10 @@ from app.modules.reviews.application.prompt_builder import (
     ReviewPrompt,
 )
 from app.modules.reviews.application.reflection_pass import VerifierReply
+from app.modules.reviews.application.review_output import (
+    VerifiedReviewOutput,
+    incomplete_review_paths,
+)
 from app.modules.reviews.application.run_failures import RunFailure
 from app.modules.reviews.infrastructure.llm.answers import (
     conventions_answer_validator,
@@ -92,12 +96,16 @@ class GatewayReviewModel:
     async def draft_review(self, *, context: ReviewContext) -> Mapping[str, object] | ReviewReply:
         result, fitted = await _fitted_review(self._gateway, context, self._run)
         self.last_result = result
+        output = VerifiedReviewOutput(
+            result.output,
+            incomplete_paths=incomplete_review_paths(context.changed_files, fitted.changed_files),
+        )
         if context.policy_snapshot is None:
-            return result.output
+            return output
         # CONTRACT: a snapshot-path task always carries a base manifest, so the gateway
         # names the accepted call's manifest.
         assert result.accepted_manifest is not None
-        return ReviewReply(result.output, fitted, result.accepted_manifest)
+        return ReviewReply(output, fitted, result.accepted_manifest)
 
 
 class GatewayConventionsModel:

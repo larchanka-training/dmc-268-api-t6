@@ -61,6 +61,11 @@ from app.modules.reviews.application.review_ignore import (
     apply_ignore,
 )
 from app.modules.reviews.application.review_path import ReviewBinding, snapshot_for_review
+from app.modules.reviews.application.run_coverage import (
+    RunCoverage,
+    project_run_coverage,
+    snapshot_vcs_file,
+)
 from app.modules.reviews.application.run_failures import (
     RequiredSourceUnavailable,
     RunCancelled,
@@ -89,30 +94,15 @@ class EstimatedTokenCounter:
         return -(-len(text) // 4)
 
 
-def _provider_patch(patch: str | None) -> str | None:
-    """The hunks as the provider sent them.
-
-    A stored snapshot keeps the patch for the UI under a ``diff --git`` header; the diff
-    map reads the hunks only. A stored patch without a hunk has no lines to map.
-    """
-    if patch is None or not patch.startswith("diff --git "):
-        return patch
-    hunk_start = patch.find("\n@@ ")
-    return None if hunk_start < 0 else patch[hunk_start + 1 :]
-
-
-# Stored omissions that are exclusions of the service, not incompleteness of the diff.
-_SERVICE_EXCLUSIONS = frozenset({"binary", "generated"})
-
-
-def _service_excluded_names(stored: list[DiffSnapshot]) -> frozenset[str]:
+def _service_excluded_names(stored: list[DiffSnapshot], coverage: RunCoverage) -> frozenset[str]:
     """Names of stored files that the service excluded, as the deny-set holds them.
 
     The source of a copy stays its own file: only the copy is withheld.
     """
     names: set[str] = set()
+    excluded = {item.path for item in coverage.exclusions}
     for item in stored:
-        if item.omission_reason not in _SERVICE_EXCLUSIONS:
+        if item.filename not in excluded:
             continue
         names.add(item.filename)
         if item.previous_filename is not None and item.status != "copied":
@@ -121,16 +111,8 @@ def _service_excluded_names(stored: list[DiffSnapshot]) -> frozenset[str]:
 
 
 def vcs_file_from_snapshot(snapshot: DiffSnapshot) -> VcsFile:
-    return VcsFile(
-        filename=snapshot.filename,
-        status=snapshot.status,
-        blob_sha=snapshot.blob_sha,
-        previous_filename=snapshot.previous_filename,
-        additions=snapshot.additions,
-        deletions=snapshot.deletions,
-        changes=snapshot.changes,
-        patch=_provider_patch(snapshot.patch),
-    )
+    """Shared durable-snapshot conversion for context and publication DiffMap."""
+    return snapshot_vcs_file(snapshot)
 
 
 def policy_summary(snapshot: PolicySnapshot) -> dict[str, Any]:
@@ -560,7 +542,7 @@ class ReviewContextStage:
         except ValueError:
             raise RunFailure("diff_fetch_failed", "Unsupported review source provider") from None
         diff_map = build_diff_map(
-            pull_request,
+            replace(pull_request, base_sha=run.base_sha),
             tuple(vcs_file_from_snapshot(item) for item in stored),
             provider=provider_name,
             repository_id=run.repository_id,
@@ -569,29 +551,17 @@ class ReviewContextStage:
         self._diff_old_sha = diff_map.diff_old_sha
         self._head_sha = diff_map.head_sha
         ignore = apply_ignore(matcher, diff_map, builtin_excluded=self._builtin_excluded)
+        coverage = project_run_coverage(stored, diff_map, ignore=ignore)
         # A file the service stored as binary or generated is an exclusion for every
         # consumer, also when an allowed file imports it: its names join the deny-set.
-        ignore = replace(ignore, denied_paths=ignore.denied_paths | _service_excluded_names(stored))
+        ignore = replace(
+            ignore, denied_paths=ignore.denied_paths | _service_excluded_names(stored, coverage)
+        )
         self._denied_paths = ignore.denied_paths
         # The effective exclusion: a mask of the repository, a built-in exclusion of any
         # name of the file, or a binary file. Decided here, so a skip never depends on the
         # optional build. An incomplete file list does not prove that all is excluded.
-        service_excluded = {
-            item.filename for item in stored if item.omission_reason in _SERVICE_EXCLUSIONS
-        }
-        if (
-            diff_map.files
-            and diff_map.file_list_complete
-            and all(
-                ignore.decision_for(file.file_id) is not None
-                or (file.provider_new_path or file.provider_old_path) in service_excluded
-                or (
-                    file.omission_reason is None
-                    and (file.new_path or file.old_path) in ignore.denied_paths
-                )
-                for file in diff_map.files
-            )
-        ):
+        if coverage.all_excluded:
             await self._record_nothing_to_review(
                 run_id,
                 snapshot,
@@ -599,13 +569,15 @@ class ReviewContextStage:
                 ContextStatus.ALL_CHANGES_IGNORED,
                 digest=diff_map.digest,
                 files=len(diff_map.files),
+                coverage=coverage,
             )
             raise RunSkipped("all_changes_ignored")
 
         rag = await self._open_rag(run_id, run.repository_id, snapshot.prompt_bindings)
         request = {"head_sha": run.head_sha, "policy_snapshot_id": str(snapshot.snapshot_id)}
-        try:
-            async with traced_step(self._trace, run_id, "context.build", request) as step:
+        payload: ReviewContextPayload | None = None
+        async with traced_step(self._trace, run_id, "context.build", request) as step:
+            try:
                 builder = self._context_builder(run)
                 if self._snapshot_for_llm is not None:
                     # R19 (DD7): the snapshot path counts with the counter its profile pins,
@@ -621,15 +593,31 @@ class ReviewContextStage:
                     token_budget=self._token_budget,
                     rag=None if rag is None else rag.plan,
                 )
-                step.response = context_summary(diff_map, payload, pr_base_sha=self._pr_base_sha)
-        except (PolicyError, RunCancelled, RequiredSourceUnavailable):
-            # The policy is also evaluated while the context is built (paths behind an
-            # import). Its failure is never an optional fallback: it stops the run.
-            raise
-        except Exception as exc:
-            if isinstance(exc, RunFailure) and exc.error_code == "deadline_exceeded":
+                step.response = context_summary(
+                    diff_map, payload, pr_base_sha=self._pr_base_sha
+                ) | {"coverage": coverage.to_json()}
+            except (PolicyError, RunCancelled, RequiredSourceUnavailable):
+                # Policy and required source failures stop even optional enrichment.
                 raise
-            _LOGGER.warning("Review context build failed run_id=%s", run_id, exc_info=True)
+            except Exception as exc:
+                if isinstance(exc, RunFailure) and exc.error_code == "deadline_exceeded":
+                    raise
+                _LOGGER.warning("Review context build failed run_id=%s", run_id, exc_info=True)
+                payload = None
+                step.response = {
+                    "error": {"type": type(exc).__name__, "message": str(exc)[:1000]},
+                    "coverage": coverage.to_json(),
+                    "diff": {
+                        "digest": diff_map.digest,
+                        "diff_old_sha": diff_map.diff_old_sha,
+                        **(
+                            {"pr_base_sha": self._pr_base_sha}
+                            if self._pr_base_sha is not None
+                            else {}
+                        ),
+                    },
+                }
+        if payload is None:
             await self._record_rag(run_id, rag)
             return None
         await self._record_rag(run_id, rag, payload.rag)
@@ -647,6 +635,7 @@ class ReviewContextStage:
         *,
         digest: str | None,
         files: int,
+        coverage: RunCoverage | None = None,
     ) -> None:
         diff: dict[str, Any] = {"digest": digest, "files": files}
         if self._pr_base_sha is not None:
@@ -660,6 +649,8 @@ class ReviewContextStage:
                 "ignored_files": files,
                 "blocks": [],
             }
+            if coverage is not None:
+                step.response["coverage"] = coverage.to_json()
 
     async def _open_rag(
         self, run_id: UUID, repository_id: UUID, prompt: PromptBindings

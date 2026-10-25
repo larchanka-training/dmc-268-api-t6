@@ -52,6 +52,7 @@ from app.modules.reviews.application.review_output import (
     ReviewFindingV2,
     ReviewOutputHandler,
     VerifiedReviewOutput,
+    incomplete_review_paths,
     validate_v2_attribution,
     validate_v2_coordinates,
 )
@@ -328,6 +329,9 @@ class ExecuteReviewRun:
                     run_id,
                 )
             model_output = reply
+        model_incomplete_paths = (
+            model_output.incomplete_paths if isinstance(model_output, VerifiedReviewOutput) else ()
+        )
         if self._reflection_pass is not None and context.policy_snapshot is not None:
             model_output = await self._run_reflection_pass(
                 model_output,
@@ -336,6 +340,33 @@ class ExecuteReviewRun:
                 reviewer_manifest=reviewer_manifest,
                 original_files=changed_files,
             )
+        verified = model_output if isinstance(model_output, VerifiedReviewOutput) else None
+        incomplete_paths = tuple(
+            sorted(
+                set(incomplete_review_paths(changed_files, context.changed_files))
+                | set(model_incomplete_paths)
+                | set(verified.incomplete_paths if verified is not None else ())
+            )
+        )
+        try:
+            answer_payload = (
+                dict(model_output)
+                if isinstance(model_output, Mapping)
+                else json.loads(model_output)
+            )
+        except (ValueError, TypeError) as exc:
+            raise InvalidReviewOutput("Malformed review model JSON output") from exc
+        if not isinstance(answer_payload, dict):
+            raise InvalidReviewOutput("Review model output must be an object")
+        model_output = VerifiedReviewOutput(
+            answer_payload,
+            dropped_findings=verified.dropped_findings if verified is not None else (),
+            severity_threshold=verified.severity_threshold if verified is not None else None,
+            allowed_v2_rules=verified.allowed_v2_rules if verified is not None else None,
+            verify_request=verified.verify_request if verified is not None else None,
+            verify_response=verified.verify_response if verified is not None else None,
+            incomplete_paths=incomplete_paths,
+        )
         return await self._publisher.execute(run_id, model_output)
 
     async def _run_reflection_pass(

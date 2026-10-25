@@ -332,6 +332,7 @@ workflow до него уже меняет Compose-файлы и edge-прокс
 
 | Ревизия | Что удаляет downgrade | Что даёт повторный upgrade |
 |---|---|---|
+| `20261026_0043` (#213) | переписывает `empty_file → missing_patch` в `code_change_diffs.omission_reason`; CHECK `ck_code_change_diffs_omission_reason` снова не допускает `empty_file`. Подтверждённый marker пустого файла для сохранённых run теряется | CHECK снова допускает `empty_file`, но переписанные строки остаются `missing_patch` и не повышаются заново; повторный upgrade не восстанавливает утраченный proof marker |
 | `20261024_0039` (#130 D) | колонки `runs.conventions_prompt_version_id` и `runs.verifier_prompt_version_id` и их FK на `prompt_versions` (`runs_conventions_prompt_version_id_fkey`, `runs_verifier_prompt_version_id_fkey`): закреплённые версии conventions/verifier prompts. Готовые `run_policy_snapshots` и сохранённые в них bindings остаются | обе колонки Run NULL без backfill; удалённые Run prompt pins не восстанавливаются, исторические bindings без готового snapshot остаются неполными; существующие snapshot bindings сохраняются |
 | `20261024_0038` (#212) | четыре колонки: `runs.severity_threshold`, `runs.max_comments`, `run_policy_snapshots.severity_threshold`, `run_policy_snapshots.max_comments`, и два CHECK `ck_runs_publication_settings`, `ck_run_policy_snapshots_publication_settings`; закреплённые настройки публикации теряются. Native ENUM `severity_threshold`, принадлежащий Repository, сохраняется | обе пары снова NULL без backfill; Run переходит на исторический live fallback к текущей паре Repository, включая retry. Удалённые pins не восстанавливаются; новые runs/rerun закрепляют текущие значения |
 | `20261023_0038` (#144) | колонки `code_index_states.review_full_requested_at` и `review_full_requested_sha` с CHECK `ck_code_index_states_review_full_sha_at`: время и цель последней полной сборки индекса, запрошенной ревью (троттлинг) | обе колонки = NULL; троттлинг забывает последний запрос, и следующее ревью может сразу запросить полную сборку, не дожидаясь окончания 24 ч и даже для той же цели |
@@ -355,7 +356,8 @@ installation_available`: `enabled=true` при `installation_available=false` с
 `20261012_0030`, а не только `20261010_0030` и `20261010_0029`: сейчас это ещё
 `20261014_0031`, `20261015_0032`, `20261016_0033`, `20261017_0034`, `20261018_0035`,
 `20261019_0036`, `20261020_0037`, `20261023_0038`, `20261024_0038` и
-`20261024_0039`; полный актуальный состав — таблица.
+`20261024_0039`, `20261025_0040`, `20261026_0041`, `20261026_0042` и
+`20261026_0043`; полный актуальный состав — таблица.
 
 Более глубокий downgrade **до `20261007_0028`** дополнительно откатывает
 policy/context #136: ревизии `20261012_0030` и `20261011_0029`, их потери перечислены в

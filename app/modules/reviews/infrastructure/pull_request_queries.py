@@ -7,12 +7,13 @@ from uuid import UUID
 from sqlalchemy import ColumnElement, and_, func, or_, select, true
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from app.common.infrastructure.db.enums import CodeChangeState
+from app.common.infrastructure.db.enums import CodeChangeState, RunState
 from app.modules.auth.application.scope import AuthScope
 from app.modules.repositories.infrastructure.models import Repository
 from app.modules.reviews.application.list_pulls import LatestRunRow, PullRequestRow
 from app.modules.reviews.application.list_runs import RunCursor
 from app.modules.reviews.infrastructure.models import CodeChange, CodeChangeDiff, Finding, Run
+from app.modules.reviews.infrastructure.saved_review_results import load_review_results
 from app.modules.workspaces.infrastructure.repository_access import repository_access_predicate
 
 _STATES = {
@@ -87,13 +88,13 @@ class SqlAlchemyPullRequestQueries:
             return {}
         runs = (
             await session.execute(
-                select(Run.code_change_id, Run.id, Run.state)
+                select(Run.code_change_id, Run.id, Run.state, Run.head_sha)
                 .where(Run.code_change_id.in_(pull_ids))
                 .order_by(Run.code_change_id, Run.created_at.desc(), Run.id.desc())
                 .distinct(Run.code_change_id)
             )
         ).all()
-        run_ids = [run_id for _, run_id, _ in runs]
+        run_ids = [run_id for _, run_id, _, _ in runs]
         severities: dict[UUID, list[str]] = {}
         for run_id, severity in await session.execute(
             select(Finding.run_id, Finding.severity).where(
@@ -110,12 +111,22 @@ class SqlAlchemyPullRequestQueries:
                 .distinct()
             )
         )
+        results = await load_review_results(
+            session,
+            {
+                run_id: head_sha
+                for _, run_id, state, head_sha in runs
+                if state is RunState.SUCCEEDED
+            },
+            severities,
+        )
         return {
             pull_id: LatestRunRow(
                 id=run_id,
                 status=state.value,
                 summary_only=run_id in summary_only,
                 published_severities=tuple(severities.get(run_id, ())),
+                saved_result=results.get(run_id),
             )
-            for pull_id, run_id, state in runs
+            for pull_id, run_id, state, _ in runs
         }

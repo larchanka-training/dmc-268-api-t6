@@ -19,20 +19,22 @@ from app.modules.reviews.application.findings_post_processor import (
 )
 from app.modules.reviews.application.queue_messages import ReviewPublishPointer, ReviewPublishQueue
 from app.modules.reviews.application.review_output import (
+    InvalidReviewOutput,
     ReviewOutputRepository,
     VerifiedReviewOutput,
     _as_json_object,
     coerce_dropped_findings,
     parse_review_output,
 )
+from app.modules.reviews.application.run_coverage import CoverageItem, CoverageStatus, RunCoverage
 from app.modules.reviews.application.run_failures import LEASE
 from app.modules.reviews.application.verdict import (
     HashedFinding,
     SeverityThresholdValue,
+    coverage_verdict,
     findings_hash,
     review_event,
     severity_counts,
-    verdict,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -148,6 +150,9 @@ class StoreReviewOutput:
             context = await uow.reviews.get_post_processing_input(run_id)
         if context is None:
             return False
+        coverage = context.coverage or RunCoverage(
+            CoverageStatus.PARTIAL, 0, reasons=(CoverageItem(None, "classification_unavailable"),)
+        )
         threshold_to_use = (
             effective_threshold if effective_threshold is not None else context.severity_threshold
         )
@@ -165,7 +170,16 @@ class StoreReviewOutput:
             allowed_v2_rules=v2_rules_to_use,
             pre_dropped=pre_dropped,
             apply_severity_threshold=effective_threshold is None,
+            coverage=coverage,
+            summary_only=context.summary_only,
+            incomplete_paths=(
+                raw_output.incomplete_paths if isinstance(raw_output, VerifiedReviewOutput) else ()
+            ),
         )
+        coverage = processed.coverage
+        if processed.summary is None:
+            raise InvalidReviewOutput(f"Missing backend summary for run_id={run_id}")
+        parsed = parsed.model_copy(update={"summary": processed.summary})
         processed = finalize_stored_review_body(
             parsed,
             processed,
@@ -176,9 +190,10 @@ class StoreReviewOutput:
             ),
             run_url=self._run_url(run_id),
         )
+
         findings = hashed_findings(processed)
         severities = [item.severity for item in findings]
-        run_verdict = verdict(severities)
+        run_verdict = coverage_verdict(severities, coverage.status)
         hash_ = findings_hash(findings)
 
         async with self._uow_factory() as uow:
@@ -216,6 +231,7 @@ class StoreReviewOutput:
                         for item in processed.dropped
                     ],
                     "verdict": run_verdict,
+                    "coverage": coverage.to_json(),
                     "severity_counts": severity_counts(severities),
                     "findings_hash": hash_,
                     # Kept here as well: a huge llm.review_output may be truncated (D1).

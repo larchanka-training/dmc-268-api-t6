@@ -29,6 +29,7 @@ _LOGGER = logging.getLogger(__name__)
 _MAX_PATCH_LINES = 20_000
 _MAX_PATCH_BYTES = 1_048_576
 MAX_BLOB_BYTES = 1_048_576
+GIT_EMPTY_BLOB_SHA = "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391"
 _LOCK_FILES = frozenset(
     {
         "package-lock.json",
@@ -86,10 +87,12 @@ class VcsFile:
     patch: str | None
     size: int | None = None
     omission_reason: OmissionReason | None = None
+    git_mode: str | None = None
 
 
 class OmissionReason(StrEnum):
     BINARY = "binary"
+    EMPTY_FILE = "empty_file"
     TOO_LARGE = "too_large"
     GENERATED = "generated"
     MISSING_PATCH = "missing_patch"
@@ -269,7 +272,33 @@ def _known_omission(file: VcsFile) -> OmissionReason | None:
         )
     ):
         return OmissionReason.TOO_LARGE
+    if is_proven_empty_addition(file):
+        return OmissionReason.EMPTY_FILE
     return None
+
+
+def is_proven_empty_addition(file: VcsFile) -> bool:
+    """An added regular empty Git blob with no conflicting provider evidence."""
+    return file.git_mode in {"100644", "100755"} and is_empty_addition_candidate(file)
+
+
+def is_empty_addition_candidate(file: VcsFile) -> bool:
+    """Whether file metadata warrants checking its pinned-head regular-file mode.
+
+    Reuse the canonical identity contract of DiffMap, which itself consumes VcsFile.
+    The local import avoids a module-initialization cycle between those contracts.
+    """
+    from app.modules.reviews.application.diff_map import is_supported_path
+
+    return (
+        file.status == "added"
+        and is_supported_path(file.filename)
+        and file.previous_filename is None
+        and file.blob_sha == GIT_EMPTY_BLOB_SHA
+        and file.additions == file.deletions == file.changes == 0
+        and file.patch in (None, "")
+        and file.size in (None, 0)
+    )
 
 
 def is_generated_path(path: str) -> bool:

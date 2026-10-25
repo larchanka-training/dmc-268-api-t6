@@ -629,6 +629,7 @@ def test_sqlalchemy_run_repository_writes_fail_fast_without_a_unit_of_work_sessi
         (None, None, 5, SeverityThreshold.WARNING, 5, "warning"),
     ],
 )
+@pytest.mark.parametrize("review_patch", [None, "", "@@ -1,1 +1,2 @@\n line1\n+added"])
 def test_get_post_processing_input_returns_none_allowed_v2_rules_for_legacy_run(
     pinned_cap: int | None,
     pinned_threshold: SeverityThreshold | None,
@@ -636,6 +637,7 @@ def test_get_post_processing_input_returns_none_allowed_v2_rules_for_legacy_run(
     live_threshold: SeverityThreshold,
     expected_cap: int,
     expected_threshold: str,
+    review_patch: str | None,
 ) -> None:
     from app.modules.reviews.application.findings_post_processor import FindingsPostProcessor
     from app.modules.reviews.application.review_output import (
@@ -646,7 +648,7 @@ def test_get_post_processing_input_returns_none_allowed_v2_rules_for_legacy_run(
 
     run_id = UUID(int=1)
     rules = [{"name": "Standard Rule"}]
-    post_input_row = (rules, pinned_cap, pinned_threshold, live_cap, live_threshold)
+    post_input_row = (rules, pinned_cap, pinned_threshold, live_cap, live_threshold, "c" * 40)
     run_meta_row = ("c" * 40, "b" * 40, UUID(int=20), 7, "github")
     diff_row = SimpleNamespace(
         filename="app/main.py",
@@ -659,13 +661,9 @@ def test_get_post_processing_input_returns_none_allowed_v2_rules_for_legacy_run(
         deletions=0,
         changes=1,
         omission_reason=None,
-        review_patch="@@ -1,1 +1,2 @@\n line1\n+added",
+        review_patch=review_patch,
         summary_only=False,
     )
-    checked_path_rows = [
-        ("app/main.py", "@@ -1,1 +1,2 @@\n line1\n+added"),
-        ("vendor/skipped.py", None),
-    ]
 
     class FakeScalarsResult:
         def __init__(self, items: list[Any]) -> None:
@@ -699,11 +697,9 @@ def test_get_post_processing_input_returns_none_allowed_v2_rules_for_legacy_run(
             if self.calls == 1:
                 return MultiExecuteResult(rows=[post_input_row])
             if self.calls == 2:
-                return MultiExecuteResult(rows=[run_meta_row])
-            if self.calls == 3:
                 return MultiExecuteResult(scalars=[diff_row])
             if self.calls == 4:
-                return MultiExecuteResult(rows=checked_path_rows)
+                return MultiExecuteResult(rows=[run_meta_row])
             return MultiExecuteResult()
 
         async def scalar(self, statement: Any) -> Any:
@@ -719,7 +715,9 @@ def test_get_post_processing_input_returns_none_allowed_v2_rules_for_legacy_run(
     post_input = asyncio.run(repository.get_post_processing_input(run_id))
     assert post_input is not None
     assert post_input.diff_map is not None
-    assert post_input.checked_paths == frozenset({"app/main.py"})
+    assert post_input.checked_paths == (
+        frozenset() if review_patch is None else frozenset({"app/main.py"})
+    )
     assert post_input.allowed_v2_rules is None
     assert post_input.repository_max_inline == expected_cap
     assert post_input.severity_threshold == expected_threshold

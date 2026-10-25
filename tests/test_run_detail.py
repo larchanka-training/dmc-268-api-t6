@@ -27,7 +27,9 @@ from app.modules.reviews.application.rerun_run import (
     RerunResult,
     RerunRun,
 )
+from app.modules.reviews.application.run_coverage import CoverageStatus, RunCoverage
 from app.modules.reviews.application.run_events import InMemoryRunUpdateHub, RunUpdated
+from app.modules.reviews.application.saved_review_result import SavedReviewResult
 from app.modules.reviews.application.try_enqueue_webhook_run import (
     CandidateMiss,
     PendingRunMessage,
@@ -119,11 +121,13 @@ class Detail:
         (("info", "high"), "blocking"),
         (("medium", "info"), "attention"),
         (("low",), "attention"),
-        (("info",), "clean"),
-        ((), "clean"),
+        (("info",), None),
+        ((), None),
     ],
 )
-def test_verdict_follows_the_published_findings(severities: tuple[str, ...], expected: str) -> None:
+def test_verdict_follows_the_published_findings(
+    severities: tuple[str, ...], expected: str | None
+) -> None:
     detail = asyncio.run(GetRunDetail(Detail(run_item(), review(*severities))).execute(RUN))
 
     assert detail is not None
@@ -154,6 +158,43 @@ def test_findings_are_ordered_by_severity_and_budget_uses_engine_caps() -> None:
 def test_verdict_is_null_until_success_and_for_summary_only_runs(item: RunListItem) -> None:
     detail = asyncio.run(GetRunDetail(Detail(item, review("high"))).execute(RUN))
     assert detail is not None and detail.verdict is None
+
+
+@pytest.mark.parametrize(
+    "status", ["queued", "running", "publishing", "failed", "cancelled", "skipped", "succeeded"]
+)
+def test_summary_and_saved_result_follow_displayed_status_when_run_finishes_between_reads(
+    status: str,
+) -> None:
+    class FinishesBetweenReads(Detail):
+        async def get_run_review(self, run_id: UUID) -> RunReview | None:
+            self.item = run_item("succeeded")
+            return self.stored
+
+    summary = {
+        "problem": "Подтверждённых замечаний нет.",
+        "done_well": "Проверено.",
+        "effort": "none",
+    }
+    saved = SavedReviewResult(
+        "clean", RunCoverage(CoverageStatus.COMPLETE, 1, total_files=1), summary
+    )
+    repository = FinishesBetweenReads(
+        run_item(status), replace(review(), summary=summary, saved_result=saved)
+    )
+    detail = asyncio.run(GetRunDetail(repository).execute(RUN))
+
+    assert detail is not None and repository.item is not None
+    assert repository.item.status == "succeeded"
+    assert detail.run.status == status
+    if status == "succeeded":
+        assert detail.review.summary == summary
+        assert detail.review.saved_result is saved
+        assert detail.verdict == "clean"
+    else:
+        assert detail.review.summary is None
+        assert detail.review.saved_result is None
+        assert detail.verdict is None
 
 
 def test_budget_is_null_before_the_first_llm_call() -> None:

@@ -22,6 +22,7 @@ from app.bootstrap.run_update_listener import listen_forever as listen_run_updat
 from app.modules.reviews.application.conventions import CachedConventions, ConventionsFile
 from app.modules.reviews.application.findings_post_processor import ProcessedReviewOutput
 from app.modules.reviews.application.review_output import ReviewOutput, ReviewSummary
+from app.modules.reviews.application.run_coverage import CoverageItem, CoverageStatus, RunCoverage
 from app.modules.reviews.application.run_events import (
     InMemoryRunStepHub,
     InMemoryRunUpdateHub,
@@ -277,6 +278,11 @@ def test_publishing_transaction_notifies_review_steps_only_after_commit(env: Env
         body_only=(),
         dropped=(),
         review_body="A bug.",
+        coverage=RunCoverage(
+            CoverageStatus.PARTIAL,
+            0,
+            reasons=(CoverageItem(None, "classification_unavailable"),),
+        ),
     )
 
     async def scenario() -> tuple[str, list[dict[str, object]], list[dict[str, object]]]:
@@ -451,7 +457,17 @@ def _parsed_output() -> ReviewOutput:
 
 
 def _processed_output() -> ProcessedReviewOutput:
-    return ProcessedReviewOutput(inline=(), body_only=(), dropped=(), review_body="A bug.")
+    return ProcessedReviewOutput(
+        inline=(),
+        body_only=(),
+        dropped=(),
+        review_body="A bug.",
+        coverage=RunCoverage(
+            CoverageStatus.PARTIAL,
+            0,
+            reasons=(CoverageItem(None, "classification_unavailable"),),
+        ),
+    )
 
 
 def _model_output() -> dict[str, object]:

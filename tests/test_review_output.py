@@ -967,7 +967,9 @@ def test_publish_review_output_repacks_overflow_with_verifier_threshold() -> Non
     assert provider.calls[0][1] == body
 
 
-def test_store_review_output_marks_degraded_body_in_postprocess_response() -> None:
+def test_store_review_output_marks_degraded_body_in_postprocess_response(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """A summary too long for the budget degrades the body and writes the flag (#170)."""
     from app.modules.reviews.application.store_review_output import (
         PublishingGuard,
@@ -1072,6 +1074,13 @@ def test_store_review_output_marks_degraded_body_in_postprocess_response() -> No
             "effort": "small",
         },
     }
+    # Backend prose is authoritative after #213; inject a long backend summary
+    # to retain the #170 degraded-body boundary test without trusting model prose.
+    long_backend_summary = ReviewOutput.model_validate(payload).summary
+    monkeypatch.setattr(
+        "app.modules.reviews.application.findings_post_processor.summary_from_result",
+        lambda *_: long_backend_summary,
+    )
     store = StoreReviewOutput(
         cast(Any, lambda: FakeUoW()),
         FakeQueue(),

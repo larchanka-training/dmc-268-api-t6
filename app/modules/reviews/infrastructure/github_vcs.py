@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import base64
 import binascii
+import logging
 import re
 from collections.abc import Callable
+from dataclasses import replace
 from typing import Literal, Protocol
 
 import httpx
@@ -45,6 +47,8 @@ from app.modules.reviews.application.vcs_diff import (
     PullRequestLocator,
     VcsFile,
     VcsPullRequest,
+    is_empty_addition_candidate,
+    is_generated_path,
 )
 from app.modules.reviews.infrastructure.vcs_failures import classify_vcs_error
 
@@ -53,7 +57,9 @@ _MAX_FILES = 3000
 _PAGE_SIZE = 100
 _REQUEST_TIMEOUT = 10.0
 _MAX_BLOB_RESPONSE_BYTES = 1_500_000  # 1 MiB of base64 content plus JSON envelope.
+MAX_EMPTY_FILE_TREE_BYTES = 1_500_000  # One optional pinned-head metadata read per PR diff.
 _API_VERSION = "2022-11-28"
+_LOGGER = logging.getLogger(__name__)
 
 
 class InstallationTokenProvider(Protocol):
@@ -124,6 +130,19 @@ class _Blob(_GitHubDto):
     encoding: Literal["base64"]
     content: str
     size: int = Field(ge=0)
+
+
+class _TreeEntry(_GitHubDto):
+    path: str = Field(min_length=1)
+    sha: str = Field(pattern=_SHA)
+    type: str
+    mode: str
+    size: int | None = Field(default=None, ge=0)
+
+
+class _TreeListing(_GitHubDto):
+    tree: list[_TreeEntry]
+    truncated: bool
 
 
 class _Commit(_GitHubDto):
@@ -311,7 +330,75 @@ class HttpGitHubVcsProvider:
             raise ValueError("GitHub file pagination repeated a filename")
         if await self.get_pull_request(locator, checkpoint=checkpoint) != pull_request:
             raise ValueError("GitHub pull request changed during file pagination")
-        return tuple(files)
+        return await self._with_regular_empty_modes(pull_request, tuple(files), token, checkpoint)
+
+    async def _with_regular_empty_modes(
+        self,
+        pull_request: VcsPullRequest,
+        files: tuple[VcsFile, ...],
+        token: str,
+        checkpoint: RunProviderCheckpoint,
+    ) -> tuple[VcsFile, ...]:
+        """Certify candidates only from a complete bounded tree at the immutable head."""
+        candidates = {
+            file.filename
+            for file in files
+            if is_empty_addition_candidate(file) and not is_generated_path(file.filename)
+        }
+        if not candidates:
+            return files
+        locator = pull_request.locator
+        try:
+            await checkpoint()
+            body, _ = await self._get_capped_body(
+                f"{_repository_prefix(locator)}/git/trees/"
+                f"{commit_sha_segment(pull_request.head_sha)}",
+                headers=_headers(token) | {"Accept-Encoding": "identity"},
+                params={"recursive": 1},
+                max_bytes=MAX_EMPTY_FILE_TREE_BYTES,
+                too_large=lambda: ValueError("GitHub empty-file tree exceeds metadata budget"),
+                accepted_encoding="identity",
+                unsupported_encoding=lambda: ValueError(
+                    "GitHub empty-file tree uses unsupported content encoding"
+                ),
+            )
+            listing = _TreeListing.model_validate_json(body)
+            if listing.truncated:
+                raise ValueError("GitHub empty-file tree is truncated")
+            if len({item.path for item in listing.tree}) != len(listing.tree):
+                raise ValueError("GitHub empty-file tree repeats a path")
+        except (httpx.HTTPError, ValueError):
+            _LOGGER.warning(
+                "GitHub empty-file mode proof unavailable repository=%s pr_number=%s",
+                locator.repository_full_name,
+                locator.number,
+                exc_info=True,
+            )
+            return files
+        entries = {item.path: item for item in listing.tree if item.path in candidates}
+        proven: list[VcsFile] = []
+        for file in files:
+            if file.filename not in candidates:
+                proven.append(file)
+                continue
+            entry = entries.get(file.filename)
+            if (
+                entry is not None
+                and entry.sha == file.blob_sha
+                and entry.type == "blob"
+                and entry.mode in {"100644", "100755"}
+                and entry.size in (None, 0)
+            ):
+                proven.append(replace(file, git_mode=entry.mode))
+            else:
+                _LOGGER.warning(
+                    "GitHub empty-file mode proof unavailable repository=%s pr_number=%s: "
+                    "tree lacks matching regular-file evidence",
+                    locator.repository_full_name,
+                    locator.number,
+                )
+                proven.append(file)
+        return tuple(proven)
 
     async def get_merge_base(
         self, pull_request: VcsPullRequest, *, checkpoint: RunProviderCheckpoint

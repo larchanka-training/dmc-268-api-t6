@@ -280,10 +280,15 @@ def test_public_worker_installed_gitlab_run_uses_shared_models_and_publisher(
                     )
                     if model_configured:
                         assert isinstance(body, str)
-                        assert (
-                            "**Main issue:** The branch is inverted.\n\n"
-                            "**Done well:** The change is small.\n\n**Effort:** small"
-                        ) in body
+                        assert body == (
+                            "## Review summary\n\n"
+                            "**Verdict:** clean\n"
+                            "**Risk summary:** critical: 0, high: 0, medium: 0, low: 0, info: 0\n"
+                            "**Checked files:**\n- src/app.py\n\n"
+                            "**Main issue:** Подтверждённых замечаний нет.\n\n"
+                            "**Done well:** Проанализировано файлов с текстовыми изменениями: 1; "
+                            "исключено файлов: 0.\n\n**Effort:** none"
+                        )
                     else:
                         assert body is None
                     assert await session.scalar(

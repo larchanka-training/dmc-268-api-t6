@@ -959,7 +959,9 @@ components:
       type: string
       description: >-
         Derived on the server from published findings: `blocking` if any is critical or high,
-        `attention` if any is medium or low, `clean` otherwise (info only or none).
+        `attention` if any is medium or low, and `clean` for info only or none when saved
+        coverage is complete. Nullable verdict fields are null for incomplete or unavailable
+        coverage without supported blocking or attention findings.
       enum: [blocking, attention, clean]
     Effort:
       type: string
@@ -1176,7 +1178,10 @@ components:
           anyOf:
             - $ref: "#/components/schemas/Verdict"
             - type: "null"
-          description: Null until the run has succeeded, and for summary-only runs (PIPELINE_SPEC §11).
+          description: >-
+            Null until the run has succeeded, for summary-only runs, and when coverage is
+            incomplete or unavailable without supported blocking or attention findings
+            (PIPELINE_SPEC §11).
         severityCounts:
           $ref: "#/components/schemas/SeverityCounts"
         budget:
@@ -1649,6 +1654,9 @@ components:
           anyOf:
             - $ref: "#/components/schemas/Verdict"
             - type: "null"
+          description: >-
+            Null until the run has succeeded, for summary-only runs, and when coverage is
+            incomplete or unavailable without supported blocking or attention findings.
       additionalProperties: false
     PullRequestSummary:
       type: object

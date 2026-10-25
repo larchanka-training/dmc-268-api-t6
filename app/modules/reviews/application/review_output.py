@@ -22,6 +22,7 @@ if TYPE_CHECKING:
     )
     from app.modules.reviews.application.policy_snapshot import CallManifest, PolicySnapshot
     from app.modules.reviews.application.prompt_builder import ChangedFile, PullRequestMeta
+    from app.modules.reviews.application.run_coverage import RunCoverage
 
 type Severity = Literal["critical", "high", "medium", "low", "info"]
 type Category = Literal["security", "correctness", "performance", "readability"]
@@ -403,7 +404,7 @@ class DroppedCandidateRecord:
 
 
 class VerifiedReviewOutput(Mapping[str, object]):
-    """Typed carrier for verified review output and pre-publication metadata."""
+    """Backend execution metadata; absent verification fields do not certify verification."""
 
     def __init__(
         self,
@@ -414,7 +415,9 @@ class VerifiedReviewOutput(Mapping[str, object]):
         allowed_v2_rules: frozenset[str] | None = None,
         verify_request: dict[str, Any] | None = None,
         verify_response: dict[str, Any] | None = None,
+        incomplete_paths: tuple[str, ...] = (),
     ) -> None:
+        self.incomplete_paths = incomplete_paths
         self._payload: dict[str, object] = dict(payload)
         self.dropped_findings = tuple(dropped_findings)
         self.severity_threshold = severity_threshold
@@ -431,6 +434,26 @@ class VerifiedReviewOutput(Mapping[str, object]):
 
     def __len__(self) -> int:
         return len(self._payload)
+
+
+def incomplete_review_paths(
+    original: Sequence[ChangedFile], sent: Sequence[ChangedFile]
+) -> tuple[str, ...]:
+    """Compare backend-allowed patches with the exact context sent at a model boundary."""
+    from app.modules.reviews.application.diff_map import is_supported_path
+
+    shown_files = {file.path: file for file in sent}
+    incomplete = []
+    for file in original:
+        shown = shown_files.get(file.path)
+        if is_supported_path(file.path) and (
+            shown is None
+            or shown.lines != file.lines
+            or (file.total_lines is not None and file.total_lines > len(file.lines))
+            or (shown.total_lines is not None and shown.total_lines > len(shown.lines))
+        ):
+            incomplete.append(file.path)
+    return tuple(incomplete)
 
 
 def coerce_dropped_findings(
@@ -582,6 +605,8 @@ class FindingPostProcessingInput:
     repository_max_inline: int | None = None
     severity_threshold: SeverityThresholdValue = "all"
     allowed_v2_rules: frozenset[str] | None = None
+    coverage: RunCoverage | None = None
+    summary_only: bool = False
 
 
 class ReviewOutputRepository(Protocol):
@@ -663,6 +688,11 @@ class PublishReviewOutput:
         severity_threshold: SeverityThresholdValue | None = None,
     ) -> bool:
         from app.modules.reviews.application.findings_post_processor import FindingsPostProcessor
+        from app.modules.reviews.application.run_coverage import (
+            CoverageItem,
+            CoverageStatus,
+            RunCoverage,
+        )
 
         effective_dropped_input = (
             dropped_findings
@@ -712,7 +742,18 @@ class PublishReviewOutput:
             allowed_v2_rules=v2_rules_to_use,
             pre_dropped=pre_dropped,
             apply_severity_threshold=effective_threshold is None,
+            coverage=context.coverage
+            or RunCoverage(
+                CoverageStatus.PARTIAL,
+                0,
+                reasons=(CoverageItem(None, "classification_unavailable"),),
+            ),
+            summary_only=context.summary_only,
+            incomplete_paths=(
+                raw_output.incomplete_paths if isinstance(raw_output, VerifiedReviewOutput) else ()
+            ),
         )
+        parsed = parsed.model_copy(update={"summary": processed.summary})
         from app.modules.reviews.application.findings_post_processor import (
             finalize_stored_review_body,
         )
@@ -727,6 +768,7 @@ class PublishReviewOutput:
             ),
             run_url=None,
         )
+
         async with self._uow_factory() as uow:
             publication = await uow.reviews.store_review_output(run_id, answer, parsed, processed)
             if publication is None:

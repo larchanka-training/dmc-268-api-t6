@@ -415,7 +415,7 @@ def test_empty_gitlab_migration_round_trips_preserving_github_receipts_and_setti
     connection.commit()
     for _ in range(2):
         command.upgrade(config, "head")
-        assert connection.scalar(text("SELECT version_num FROM alembic_version")) == "20261026_0042"
+        assert connection.scalar(text("SELECT version_num FROM alembic_version")) == "20261026_0043"
         for table in tables:
             after = connection.execute(text(f"SELECT to_jsonb(t) FROM {table} t")).scalar_one()
             if table == "webhook_events":
@@ -532,7 +532,7 @@ def test_downgrade_refuses_to_silently_delete_retired_gitlab_configuration(
     with pytest.raises(RuntimeError, match="configuration and receipts"):
         command.downgrade(config, "20261026_0041")
     connection.rollback()
-    assert connection.scalar(text("SELECT version_num FROM alembic_version")) == "20261026_0042"
+    assert connection.scalar(text("SELECT version_num FROM alembic_version")) == "20261026_0043"
     assert connection.scalar(text("SELECT count(*) FROM gitlab_connections")) == 1
     connection.execute(text("DELETE FROM webhook_events WHERE id=:id"), {"id": receipt})
     connection.commit()

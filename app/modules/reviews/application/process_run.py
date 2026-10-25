@@ -19,6 +19,7 @@ from app.modules.reviews.application.get_run_diff import (
     DiffSnapshot,
     DiffSnapshotRepository,
     StoreDiffSnapshot,
+    is_proven_empty_snapshot,
     review_files_from_snapshots,
 )
 from app.modules.reviews.application.get_run_file_lines import (
@@ -410,6 +411,9 @@ class ReviewRunProcessor:
                 self._blob_cache is not None
                 and (await self._blob_cache.get(key)).status is BlobCacheStatus.HIT
             ):
+                continue
+            if is_proven_empty_snapshot(file):
+                blobs.append((key, ""))
                 continue
             try:
                 blob = await vcs_provider.get_blob(

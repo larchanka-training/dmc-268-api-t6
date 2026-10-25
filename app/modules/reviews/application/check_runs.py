@@ -120,6 +120,8 @@ class CheckRunReport:
     summary_only: bool = False
     run_url: str | None = None
     provider: str = "github"
+    coverage_status: str | None = None
+    saved_summary: dict[str, str] | None = None
 
 
 type RunProviderCheckpoint = Callable[[], Awaitable[None]]
@@ -144,12 +146,17 @@ def check_run_view(report: CheckRunReport) -> CheckRunView:
             details_url=report.run_url,
         )
     if report.state == "succeeded":
+        explanation = (
+            ""
+            if report.saved_summary is None
+            else (f"\n{report.saved_summary['problem']}\n{report.saved_summary['done_well']}")
+        )
         if report.summary_only:
             return CheckRunView(
                 "completed",
                 "neutral",
                 "AI-ревью: только сводка",
-                f"PR слишком большой: только сводка{link}",
+                f"PR слишком большой: только сводка{explanation}{link}",
                 details_url=report.run_url,
             )
         counts = severity_count_phrase(report.severity_counts)
@@ -158,12 +165,17 @@ def check_run_view(report: CheckRunReport) -> CheckRunView:
             if report.below_threshold_count
             else ""
         )
+        title = report.verdict or (
+            "нет доступных для анализа изменений"
+            if report.coverage_status == "none"
+            else "проверка неполная"
+        )
         return CheckRunView(
             "completed",
             "neutral",
-            f"AI-ревью: {report.verdict or 'clean'}",
+            f"AI-ревью: {title}",
             f"{counts}\ninline: {report.inline_count}, в теле ревью: {report.body_count}"
-            f"{below}{link}",
+            f"{explanation}{below}{link}",
             details_url=report.run_url,
         )
     reason = failure_reason(report.error_code, report.error_detail)

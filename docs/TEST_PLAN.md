@@ -89,15 +89,29 @@ API baseline gates локально и в обязательном CI: `uv run r
 | AGENTS отсутствует; существует, но превышает лимит или не декодируется; размер известен либо загрузка остановлена на лимите | Отсутствие допускает продолжение; непригодный документ даёт failed до LLM. Приложение и check-run сообщают путь, причину, предел/фактическое значение, когда оно известно, и способ исправления; не подменяют отказ предупреждением или неизвестный размер точным числом. |
 | Head меняет policy; base продвинулся после fork; retry после изменения active config | Политика читается из закреплённого `policy_base_sha`; старые строки из подтверждённого `diff_old_sha`, который может отличаться. Retry не меняет pins, rerun получает собственный snapshot. Repository 404 не равен отсутствующему policy-файлу. |
 | 4 000 ignored + 50 allowed строк; 3 000/3 001 allowed; все ignored; неполная пагинация files | Обычное ревью 50 и 3 000 строк; summary-only для 3 001/неполного inventory без LLM; только доказанные E без T → skipped. UI patch сохраняется; `review_patch=null` не восстанавливается из БД как code для модели. |
-| Доказанный binary-only; доказанный binary + код; маска assets/** на oversized assets/a.txt | skipped; возможен complete/clean; ignored побеждает too_large. Канон — CVS §2.2/§9.2 |
+| Доказанный binary-only/empty-only; доказанные binary/empty_file + код; маска assets/** на oversized assets/a.txt | skipped/all_changes_ignored при полном inventory; complete/clean при полном анализе кода без supported warning/error; ignored побеждает too_large. E = маски/generated/binary/empty_file, канон — CVS §2.2/§9.2 |
 | Too_large-only; too_large >20 000 строк + 50 строк кода; неразрешённый rename/submodule/mode-only с ignored | none; обычное ревью 50 строк с partial; none при полном inventory и отсутствии иных записей. Границы лимитов — CVS §9.2 |
 | Только incomplete без hunks (missing/malformed/truncated patch); I+E, I+T, I+E+T без текста; полный inventory/known counters 0/3 000 | Backend FinalReviewResult partial, findings=[], verdict=null, summaryOnly=false; ноль conventions/context/reviewer/verifier вызовов, pins и below_severity_threshold_count=0 сохранены; reviewed_changed_lines=0, неизвестная исходная статистика null; публикация → succeeded/neutral. Классификация сохранена до раннего выхода. |
 | Truncated-only с сохранившимися разрешёнными hunks; truncated без hunks; malformed без hunks; каждый также с E/T, known counted allowed ≤3 000 | Hunks вне E/T поступают в L1: обычное review/partial, blocking возможен; без hunks — backend partial, 0 LLM. Ограничения incomplete-якорей сохраняются; raw malformed patch не становится L1. |
 | Полный inventory только T либо E/T с неизвестными raw counters T; incomplete вне E/T с неизвестными additions/deletions | В первом случае relevant counted scope пуст=0 → none, не summary-only; во втором relevant counters неизвестны → summary-only/partial до no-text ветки. E/T counters — диагностика. |
 | Missing-patch-only 3 001/4 000 known counted allowed; неизвестные relevant counters или неполный inventory | Оба триггера summary-only проверяются раньше no-text branch: partial, summaryOnly=true, 0 LLM; none/skipped не выводятся из неизвестности. |
-| Пустой added __init__.py/.gitkeep без patch; removed image без нового blob и independent binary proof | missing_patch/incomplete; raw changes=0/metadata_only не доказывает чистый rename/mode-only. Без текста, при known ≤3 000 — backend partial; рядом с кодом — review partial. |
+| Added __init__.py/.gitkeep с patch=None/пустой строкой (при reload также точная сохранённая пустая обёртка) и точным empty Git blob SHA, всеми counters=0, поддерживаемым каноническим путём, без предыдущего пути (`previous_filename is None`/логический `old_path=null`), непротиворечивым size и независимым regular mode 100644/100755 | empty_file/E; рядом с проверенным кодом complete/clean, empty-only skipped до conventions, 0 LLM; нет искусственных hunks/номеров строк |
+| Квалифицированный empty candidate: поддерживаемый канонический путь, added, previous_filename=None/old_path=null, точный empty SHA, все counters=0, size=None/0, patch=None/пустая строка (при reload также точная сохранённая пустая обёртка), но независимого ordinary-file proof нет | missing_patch/incomplete, рядом с кодом partial/null; summary/body/check-run: «Нет подтверждения обычного пустого файла»; у GitLab нет независимого tree-доказательства обычного файла в этом потоке, поэтому пустое добавление остаётся missing_patch/partial даже при empty SHA и size=0 |
+| Added с previous_filename/old path, неподдерживаемый путь, неизвестные/ненулевые counters, конфликт patch/size либо неверный/неизвестный SHA; raw metadata_only сам по себе | Не квалифицированный empty candidate и не empty_file/E; соответствующая technical/incomplete причина, с кодом partial/null; обычный added без patch: «Отсутствует подтверждённый patch» |
+| Квалифицированный empty candidate с symlink/gitlink/unknown mode, empty SHA без mode или отсутствующим/негодным tree proof | Ordinary-file proof не принят, missing_patch/incomplete; empty-текст только при сохранении всех условий квалифицированного кандидата |
+| Pinned head tree: unique exact case-sensitive path+SHA, type blob, size None/0, nontruncated; 1 500 000 / 1 500 001 response bytes | Первый предел допустим, превышение fail-closed/incomplete; максимум один дополнительный streamed identity metadata request на fetch с кандидатами, ноль без них/generated-only, ноль дополнительных blob-байт для доказанных кандидатов |
+| Wrong revision/path/SHA/type/mode; duplicate tree path; truncation/ошибка/cap; cancellation/deadline | Нет empty_file и clean без доказательства; ошибки optional proof не failed, cancellation/deadline распространяются; branch/base tree не заменяют head |
+| Fetch→snapshot store/reload→retry; legacy missing_patch с empty SHA; downgrade `20261026_0043` | Validated marker сохраняется с повторной проверкой durable identity/SHA/status/counters/patch и `previous_filename is None`; конфликт size не забывается; legacy не повышается по SHA; реальная БД принимает новый CHECK, downgrade переписывает empty_file→missing_patch |
 | NUL в первых 8 KiB/PNG-JPEG-GIF-PDF-ZIP-ELF magic в blob; NUL только за 8 KiB без magic в blob; NUL в patch на любой позиции; oversized unread blob; независимо доказанный binary при oversized | Только подтверждённый binary — E; NUL вне окна blob сам не доказывает binary, но NUL в patch на любой позиции доказывает binary; без независимого evidence oversized — too_large/T до blob-based detection. Removed без blob не становится E по расширению (CVS §9.2). |
-| Доказанный pure rename/mode-only с чистым кодом; отдельно empty added с кодом | T либо incomplete препятствуют clean: partial/null при пустых findings, даже без известного непроверенного текста; отдельно T → none, incomplete при no-text known ≤3 000 → backend partial. |
+| Доказанный pure rename/mode-only с чистым кодом; raw status/zero counters без proof | T либо missing_patch/incomplete сохраняют partial/null; используются соответствующие полные тексты таблицы причин ниже; ноль новых tree/blob/compare запросов |
+| Removed image без нового blob/independent binary proof; oversized unread blob >1 048 576 байт без независимого proof + код | missing_patch/incomplete либо too_large/T, partial/null; summary/check-run используют «Удалённое содержимое недоступно для подтверждения binary» либо «Превышен лимит размера, содержимое не проверено»; old/base/prefix/range fetch не добавляется, binary cap не повышается |
+| fit_review_context опускает весь allowed changed patch либо оставляет префикс; внутреннее усечение модели при неизменном внешнем контексте; untrimmed control; обе reflection ветки | review_input_incomplete/partial до финализации; affected файл не fully reviewed; пустые/info null, supported blocking/attention сохраняются; вспомогательный context-only omission сам по себе не меняет changed-patch coverage |
+| Полная durable membership после restore с более чем 20 причинами; повторное усечение уже incomplete файла; ignored контроль | Счётчик fully reviewed уменьшается только для ранее полного allowed patch; уже неполный не учитывается повторно; diagnostic lists ≤20, внутренний набор не сериализуется, ignored имена не раскрываются |
+| Технический unknown_path drop, включая критический кандидат; lint/duplicate/severity controls | unknown_path даёт partial, пустой остаток не clean; benign drops сами по себе не понижают complete |
+| Любой non-SUCCEEDED public detail/latest-run; trusted PUBLISHING recovery | Публичные summary и saved_result равны None без fallback; internal recovery читает сохранённый finalized outcome, не меняет event/body/verdict |
+| Literal saved JSON complete с причинами; stale/malformed/bool-as-int; недоступная classification и ignored paths | Оба читателя fail closed; invalid newest record не оживляет старый clean; fallback counts-only без имён ignored |
+| Сохранённый coverage none и итог без значимых findings | Body/check-run одинаково: «нет доступных для анализа изменений», neutral/null; inline legacy без coverage unavailable/partial |
+| Любой retained blocker + supported critical/high либо medium/low; пустые/info findings | blocking/attention допустимы и при partial; пустые/info дают null на API/check-run/review body, без fallback к clean |
 | Known ignored/generated anchor без manifest; ignored deleted-file anchor; binary anchor; unknown path, совпавший с маской; allowed anchor с ignored evidence | Trusted identity → ignore/generated раньше видимости: ignored_file сам по себе не partial; для ignored удаления `ignored_file` побеждает структурный `left_anchor_unsupported`. Binary не получает этот bypass: line_absent/partial. Unknown path не доказывает E, сохраняется unknown_path/identity error. Запрещённый evidence у allowed anchor → evidence_source_disallowed/partial. Независимые причины partial не исчезают; pre-send/general guards действуют. |
 | Pass-4 guard: изолируемый запрещённый evidence/general конкретного кандидата; неизолируемый источник/повреждённые snapshot/manifest bindings; попытка pre-send запрещённого источника | В проходе 4: evidence_source_disallowed/partial без general/verifier eligibility; при невозможности изоляции/проверки целостности — весь run snapshot_integrity_error/failed, без публикации. Отдельный pre-send guard даёт policy_context_violation/failed до следующего вызова, не drop и не второе ignored_file. |
 | Deleted-file identity вне ignore/generated; LEFT-only coordinate без deletion evidence; overlap с валидным shown deletion evidence; непоказанные/запрещённые/wrong-revision refs | Структурный left_anchor_unsupported в проходе 2; evidence-dependent отказ предварительный до прохода 3. При валидных refs без подтверждения удаления — wrong_side; при валидном подтверждении удаления без RIGHT — left_anchor_unsupported с приоритетом. Невалидные refs дают evidence-причину, не LEFT proof. Все технические drops partial, без general/verifier eligibility. |
@@ -134,6 +148,256 @@ API baseline gates локально и в обязательном CI: `uv run r
 | Push между GET и POST; ошибка записи receipt; GitLab partial publication; legacy незавершённая публикация | IDs сохраняются и связываются явно, не по порядку; старый head не объявляется проверенным. Оставшиеся GitLab POST прекращаются при устаревании, готовые не повторяются. Неоднозначный legacy result → `legacy_publication_unresolved`, без повторного POST. GitLab adapter #97 — `test_publish_run_review.py`, `test_gitlab_review_publication.py`. |
 
 Отдельные adversarial fixtures содержат инъекции в rules/AGENTS/PR/code/conventions/candidate/repair-output и попытки переноса через cache: закрытие envelope, навязывание находки, подавление настоящего дефекта, смена адресата/формата/полномочий. Рядом нужны допустимые исключения и цитаты примеров атак. Детерминированные assertions проверяют запрет отправки/публикации и границы источников; влияние на смысл ответа измеряется отдельно по §3.4. Валидная schema сама по себе не доказывает устойчивость к инъекции.
+
+Канонические тексты причин #213 для summary/body/check-run (без завершающей
+точки; оформление сводки может добавить счётчик, разделитель и точку):
+
+| Случай | Полный текст причины |
+| --- | --- |
+| Доказанный pure rename, unsupported_change | Семантика переноса файла (включая импорты) не анализируется |
+| Rename без no-text proof, missing_patch | Отсутствующий patch не подтверждает неизменность содержимого переноса |
+| Доказанный mode-only, unsupported_change | Изменения прав доступа/типа файла не анализируются |
+| Mode-change metadata без mode-only proof, missing_patch | Отсутствующий patch не подтверждает изменение только прав доступа/типа файла |
+| Удаление без независимого binary proof | Удалённое содержимое недоступно для подтверждения binary |
+| too_large без сохранённого точного источника лимита | Превышен лимит размера, содержимое не проверено |
+| Квалифицированный кандидат empty-added без принятого ordinary-file proof | Нет подтверждения обычного пустого файла |
+| Фактически отправленный changed patch опущен или усечён, review_input_incomplete | модель получила не весь patch |
+| Технический drop unknown_path | не удалось сопоставить замечание с доступным diff |
+
+Общие тексты причин (точные значения `REASON_TEXT`; специализированные случаи
+выше имеют приоритет, счётчики и завершающая точка добавляются при оформлении):
+
+| Код | Общий текст причины |
+| --- | --- |
+| classification_unavailable | нет достоверного сохранённого покрытия |
+| diff_inventory_incomplete | список изменённых файлов неполон |
+| missing_patch | Отсутствует подтверждённый patch |
+| unsupported_change | семантика изменения метаданных не анализируется |
+| too_large | Превышен лимит размера, содержимое не проверено |
+| unsupported_path | неподдерживаемый путь |
+| identity_unresolved | не установлена идентичность файла |
+| patch_truncated | patch неполон |
+| patch_malformed | patch повреждён |
+| patch_unsupported | формат patch не поддерживается |
+| summary_only | краткий обзор без проверки всех строк |
+| review_input_incomplete | модель получила не весь patch |
+| unknown_path | не удалось сопоставить замечание с доступным diff |
+
+Метки оформления сводки и списка причин (не коды причин):
+
+| Условие | Точная метка |
+| --- | --- |
+| coverage=partial | Проверка неполная |
+| coverage=none | Текстовые изменения не проверены |
+| Остаток причин после пяти отображённых, n — их количество | Ещё причин: {n} |
+| Строчная метка verdict при partial без supported риска | проверка неполная |
+| summary.done_well; reviewed_files — проверенные текстовые файлы, excluded_files — сумма exclusions | Проанализировано файлов с текстовыми изменениями: {reviewed_files}; исключено файлов: {excluded_files}. |
+| Число проверенных текстовых файлов в partial/none overview | **Проверено файлов с текстовыми изменениями:** {reviewed_files} |
+| summary.problem при наличии findings; n — число оставшихся findings | Подтверждено замечаний: {n} |
+| Строка coverage в partial/none overview; summary_problem включает точку | **Coverage:** {status} — {summary_problem} |
+
+Текст «Нет подтверждения обычного пустого файла» выбирается только по
+доверенным backend-фактам квалифицированного кандидата: поддерживаемый
+канонический путь, status=added, `previous_filename is None` (логический
+`old_path=null`), additions=deletions=changes=0, точный Git empty-blob SHA и
+size=None/0. Исходный patch равен None или пустой строке; при reload допустима
+также точная сохранённая пустая обёртка `diff --git` / `---` / `+++` того же пути
+без иных строк. При этом принятого ordinary-file proof нет. Один added, пустые
+counters либо raw metadata_only недостаточны. Предыдущий путь, неподдерживаемый
+путь, неизвестные/ненулевые counters, неверный/неизвестный SHA, конфликт размера
+или иной patch не получают empty-текст: действует соответствующая общая причина,
+для обычного added без patch — «Отсутствует подтверждённый patch».
+У GitLab в этом потоке нет независимого tree-доказательства обычного файла:
+пустое добавление остаётся `missing_patch`/partial, даже при empty SHA и size=0.
+Квалификация переносится из durable фактов, не из model JSON. Новые сохранённые
+coverage с более чем 20 причинами могут содержать внутренний optional
+`reason_variant_counts`: не более шести фиксированных семантических ключей и
+числа, без путей. Это сохраняет канонический текст за окном первых 20
+диагностических путей без раскрытия новых имён. Restore проверяет суммы по
+reason_counts и доверенную snapshot capacity; legacy без агрегата не получает
+выдуманной квалификации за окном. Поле не добавляется в публичный DTO/LLM schema.
+Отсутствие proof не утверждает, что файл действительно обычный и пустой.
+Для исключения E=empty_file нужен независимый полный nontruncated tree на
+закреплённом head: уникальное точное совпадение path+SHA, type=blob,
+mode=100644/100755 и size=None/0; предел ответа — 1 500 000 сырых байт.
+Для too_large снимок не хранит источник лимита (blob bytes, patch bytes или
+строки), поэтому публичный текст нейтрален и не приписывает всем случаям binary/1 MiB.
+
+#213: ограниченная проекция в существующих snapshots/context/postprocess JSON
+не означает активацию всех целевых backend none/no-text/summary-only маршрутов
+#107/#130/#168. Для четырёх retained случаев дополнительных запросов нет; для
+empty proof бюджет строго 1 500 000 metadata bytes / максимум один запрос,
+blob cap остаётся 1 048 576 байт, L2–L4 source cap 256 KiB независим.
+Текущая summary-only финализация отбрасывает все findings как insufficient_context:
+нет inline и blocking/attention из этих кандидатов, partial/null; обещание нуля
+LLM-вызовов остаётся целью lifecycle #107. Сохранённый полный allowed patch ещё
+не доказывает полного входа модели: omitted/prefix-truncated changed patches
+после fit_review_context дают review_input_incomplete/partial и уменьшают fully
+reviewed count, в том числе через обе reflection ветки. Технический unknown_path
+drop также понижает coverage; benign lint/dedupe/severity drops — нет.
+Остальные reflection coordinate drops, evidence_not_shown и verifier
+insufficient_context остаются за lifecycle #107/#130; их общее влияние на coverage
+не объявляется реализованным в #213.
+
+После #130 F1 worker собирает Reflection Pass, а после F2 seed активирует
+`review.system:v4` для новых runs. Snapshot-путь выбирается только по
+закреплённому v4; runs с v3 или ниже, созданные до F2 seed либо с pins до 0039,
+сохраняют legacy-путь без verifier. Адаптер ревью
+выполняет fit/guard/manifest один раз: snapshot-ответ `ReviewReply` несёт
+фактический fitted context и manifest принятого вызова, legacy — mapping.
+В обоих ответах факт потери changed patch передаётся доверенным внутренним
+carrier, сохраняется после unwrap и обеих веток Reflection Pass; JSON/schema
+ответа модели не расширяются. Остальные технические drops из целевого lifecycle
+#107/#130 не объявляются реализованными этим стыком.
+Все поверхности строятся после этого понижения; supported risk сохраняется.
+
+Независимая защита внешнего сравнения исходных файлов с `ReviewReply.context`
+проверяется `test_outer_context_loss_survives_both_reflection_returns_without_carrier_loss`
+в `tests/test_clean_without_text_sent_context.py`: контекст теряет отдельный файл,
+а carrier передаёт пустой `incomplete_paths`. Пустой ответ и supported high
+сохраняют partial; verdict соответственно null и blocking. Удаление только этого
+слагаемого объединения должно нарушать обе проверки покрытия.
+
+Внутренний `checked_paths` #170 — пути с сохранённым review_patch != null
+(пустая строка тоже входит). Этот набор обозначает доступные текстовые входы,
+а не доказывает fully reviewed coverage #213: её точный счётчик берётся из
+доверенного покрытия после fit. При partial путь доступного входа может быть
+перечислен, хотя fully reviewed count равен 0; coverage остаётся partial, а
+при пустых/info findings verdict=null. Supported blocking/attention сохраняются.
+Для списка путей overview сначала проверяется канонический поддерживаемый путь.
+При classification_unavailable либо наличии ignored exclusions все имена
+консервативно скрываются; иначе packer #170 выводит целые пути в бюджете 4 000
+Unicode-символов и строку «… и ещё N файл/файла/файлов». Это отдельный бюджет:
+ограничение 20 элементов относится к coverage diagnostics, а не к body path list.
+Перепаковка через run_url/overflow footer сохраняет backend summary, coverage и
+severity threshold; она не возвращает raw model summary и не делает partial clean.
+
+Public detail/latest-run возвращают summary=None/saved_result=None для всех
+non-SUCCEEDED; внутренний finalized-result read в PUBLISHING recovery сохраняется.
+Оба читателя отвергают complete с incomplete reasons. Missing/invalid effective
+classification fallback — counts-only без потенциально ignored имён. Restore
+использует pinned policy_base_sha (= Run.base_sha) и отдельный фактический
+diff_old_sha, без вымышленной provider metadata. Inline legacy без coverage и
+прямой FindingsPostProcessor.process(coverage=None) получают
+classification_unavailable/partial до summary/body, без clean по отсутствию данных.
+Повреждённый сохранённый JSON даёт warning с run_id без raw JSON, путей или
+секретов; ожидаемое отсутствие записи само по себе не предупреждение. Оба
+читателя используют общий валидатор status/count invariants; restore считает
+snapshot digest один раз. StoreReviewOutput явно отклоняет отсутствующий backend
+summary до записи/commit/очереди, независимо от Python -O.
+При none review body и check-run одинаково сообщают
+«нет доступных для анализа изменений». Исторические GitHub-тела не перепубликуются,
+даже если succeeded API теперь возвращает conservative fallback/null.
+
+Committed regression inventory #213 (наличие теста не заменяет отчёт о запуске):
+
+Точные метки и счётчики summary/body закреплены в
+`test_clean_without_text_reasons.py::test_qualified_empty_reason_after_twenty_diagnostics_keeps_canonical_text`
+и `::test_no_coverage_summary_uses_the_exact_unchecked_text_label`.
+
+- `test_clean_without_text_github.py::test_github_fetch_proves_empty_regular_file_from_one_pinned_tree_request`,
+  `::test_tree_cannot_prove_empty_with_unsupported_or_conflicting_evidence`,
+  `::test_one_metadata_request_proves_multiple_empty_files`,
+  `::test_no_tree_request_when_no_empty_addition_candidate_exists`,
+  `::test_optional_mode_proof_does_not_swallow_cancellation`,
+  `::test_generated_empty_addition_needs_no_mode_proof`,
+  `::test_valid_tree_at_exact_metadata_budget_proves_empty`,
+  `::test_valid_tree_over_metadata_budget_fails_for_cap`,
+  `::test_optional_tree_proof_reuses_diff_token_when_refresh_would_fail`,
+  `::test_optional_tree_http_failure_stays_missing_patch_with_reused_token`,
+  `::test_huge_streamed_tree_aborts_before_unread_tail_and_closes_response` —
+  adapter contract/cost, valid-JSON declared/streamed cap и identity request header,
+  optional proof warning/fail-closed без повторного token lookup. Тело 12 000 000
+  байт без declared length обрывается после первого chunk сверх 1 500 000
+  (прочитано ≤1 565 536), unread tail не потребляется, response закрыт; прежний
+  bounded blob fallback сохраняется, ordinary-file mode из него не выводится.
+- `test_clean_without_text.py::test_empty_proof_survives_fetch_snapshot_storage_and_reload`,
+  `::test_snapshot_does_not_erase_conflicting_fetched_size`,
+  `::test_symlink_gitlink_and_unknown_modes_never_prove_empty`,
+  `::test_executable_regular_empty_file_is_also_excluded`,
+  `::test_persisted_marker_does_not_override_conflicting_snapshot_evidence`,
+  `::test_processor_does_not_fetch_empty_blob_for_optional_cache_on_first_run_or_retry` —
+  persisted evidence и стоимость retry.
+  `::test_missing_or_contradictory_evidence_never_proves_empty` включает added с
+  `previous_filename="old.py"`: наличие предыдущего пути запрещает empty_file/E
+  даже при остальных корректных empty-file данных.
+- `test_clean_without_text_postgres.py::test_empty_file_omission_persists_and_reloads_through_real_repository`,
+  `::test_downgrade_rewrites_empty_file_to_missing_patch_before_restoring_old_constraint` —
+  реальная PostgreSQL store/reload и обратная CHECK-миграция; пропуск без DB URL
+  не является passing DB evidence.
+- `test_clean_without_text_context.py::test_stage_omits_empty_addition_and_records_complete_policy_effective_coverage`,
+  `::test_exclusion_only_stage_skips_before_any_model_input`,
+  `::test_empty_marker_cannot_skip_invalid_identity_or_incomplete_inventory`,
+  `::test_optional_builder_failure_preserves_effective_policy_coverage_for_finalization` —
+  effective policy, ранний skip и conservative coverage.
+- `test_clean_without_text_acceptance_postgres.py::test_actual_stage_persisted_empty_proof_controls_http_and_recovery_result` —
+  настоящий StoreDiffSnapshot/reload → ReviewContextStage/BuildReviewContext → SQL trace
+  (включая поздний prompt context.build без coverage) → StoreReviewOutput → восстановление
+  публикации → authenticated HTTP detail/latest-run/check-run. Пара меняет только
+  empty_file → missing_patch при одинаковом empty SHA, пути и counters.
+- `test_clean_without_text_result.py`, `test_clean_without_text_coverage_record.py`,
+  `test_clean_without_text_result_postgres.py` — deterministic summary/body и усилие,
+  сохранённая classification с effective ignore, stale/malformed fail-closed;
+  `test_clean_without_text_views.py`, `test_clean_without_text_views_postgres.py` —
+  nullable projection, referenced response body, bounded batched legacy fallback,
+  retained причины, supported risk и summary-only high/medium candidates без публикации.
+- `test_clean_without_text_sent_context.py::test_model_boundary_loss_survives_both_reflection_returns_without_outer_fit_loss`,
+  `::test_actual_budget_fit_flows_through_reflection_early_return_and_finalization`,
+  `test_clean_without_text_gateway.py::test_gateway_hidden_fit_marks_legacy_unverified_output_and_persisted_result_partial` —
+  фактический model input и обе reflection ветки до persisted outcome, включая
+  скрытое внутреннее усечение при неизменном внешнем контексте.
+- `test_clean_without_text_membership.py::test_restore_bounded_classification_then_actual_fit_reduces_only_full_allowed_patches`,
+  `::test_unknown_membership_withholds_counts_without_inventing_reviewed_files` —
+  полная membership за окном 20, отсутствие повторного уменьшения count и утечки ignored;
+  неизвестная membership не создаёт выдуманных reviewed counts.
+- `test_clean_without_text_persistence_postgres.py::test_context_restore_selects_one_explicit_classification_among_large_prompt_bodies`,
+  `::test_referenced_result_and_raw_response_cannot_read_another_runs_body`,
+  `::test_latest_nonsucceeded_runs_skip_saved_result_and_fallback_queries`,
+  `::test_nonsucceeded_details_withhold_summary_and_saved_result_without_loading_results` —
+  новейшая явная classification без загрузки поздних prompt-only тел, run-owned
+  referenced body и succeeded-only batch/public gates; требуют реальную PostgreSQL.
+- `test_clean_without_text_invariants.py::test_literal_finalized_coverage_and_summary_contract`,
+  `::test_saved_result_rejects_literal_complete_with_retained_too_large_reason`,
+  `::test_context_restore_rejects_literal_complete_with_retained_too_large_reason` —
+  literal JSON/summary oracle и complete-инвариант обоих читателей.
+- `test_clean_without_text_reasons.py::test_qualified_empty_reason_after_twenty_diagnostics_keeps_canonical_text`,
+  `::test_persisted_empty_reason_variant_cannot_exceed_trusted_snapshot_capacity`,
+  `::test_saved_reason_variant_schema_rejects_invalid_aggregates`,
+  `::test_legacy_aggregate_does_not_infer_empty_qualification_from_added_status`,
+  `::test_ignored_empty_paths_do_not_enter_semantic_aggregates_or_diagnostics`,
+  `::test_saved_reason_variants_cannot_reclassify_visible_generic_diagnostics` —
+  полный literal summary после projection→restore→finalization→saved-result read;
+  canonical empty-текст для 21-й причины без 21-го пути; поддельный aggregate
+  сверх доверенной snapshot capacity и подмена видимой generic причины отвергаются;
+  invalid aggregates/bool-as-int/unknown keys не принимаются, legacy added сам по
+  себе не получает empty-квалификацию, ignored пути не входят в агрегаты/diagnostics.
+- `test_clean_without_text_sent_context.py::test_each_independent_patch_loss_withholds_reviewability` —
+  отдельные omitted, prefix_cut, original_truncated и sent_truncated; ни один
+  случай не полагается на другой признак потери patch, untrimmed control без потери.
+- `test_clean_without_text_legacy.py::test_direct_postprocessor_without_coverage_withholds_clean`,
+  `::test_queue_store_rejects_missing_backend_summary_before_writes` —
+  прямой legacy process без coverage выдаёт точный unavailable/partial summary/body;
+  summary guard вызывает InvalidReviewOutput до записи, commit и queue publish.
+- `test_clean_without_text_restore_api.py::test_context_binding_requires_canonical_sha1_while_github_path_keeps_its_contract`,
+  `::test_context_restore_hashes_durable_snapshots_once_and_rejects_mismatch`,
+  `::test_corrupt_context_warns_with_run_id_while_absent_context_is_quiet`,
+  `test_clean_without_text_views.py::test_corrupt_saved_result_warns_with_run_id_without_serialized_data` —
+  общий canonical SHA-1 guard без сужения GitHub path contract, один snapshot hash
+  при валидном и несовпавшем restore; warnings с run_id без содержимого, отсутствие
+  сохранённой записи остаётся тихим.
+- `test_clean_without_text_overview.py::test_body_budget_preserves_partial_backend_result_and_accounts_for_all_findings`,
+  `::test_author_path_list_never_discloses_ignored_unsupported_or_unknown_scope`,
+  `test_sqlalchemy_run_repository.py::test_get_post_processing_input_returns_none_allowed_v2_rules_for_legacy_run` —
+  стык #170/#213: queue и inline сохраняют backend summary/partial coverage через
+  перепаковку целых body-only bullets, все findings учтены как bullets + footer N,
+  run_url не вытесняет факты неполноты. Fully reviewed=0 при fit-loss не запрещает
+  список доступных текстовых входов; ignored/unknown scope скрывает все имена,
+  неподдерживаемый путь не выводится. Repository сохраняет checked_paths только
+  для review_patch != null, включая пустую строку; pins/live fallback не теряются.
+- `test_clean_without_text_cache.py::test_proven_empty_file_is_readable_after_processing_and_retry_without_blob_requests`,
+  `::test_unproven_empty_marker_cannot_synthesize_cached_file_content` — first run и
+  retry с новым cache возвращают total_lines=0/lines=[] без GitHub blob reads;
+  противоречивое доказательство не создаёт фиктивное содержимое.
 
 ### 2.8. Каталог сценариев `.review/rules.md` (#163)
 
@@ -183,16 +447,18 @@ API baseline gates локально и в обязательном CI: `uv run r
 | 404 repository против отсутствующего path | Первый не становится missing policy | `test_github_policy_source.py::test_empty_tree_proves_absence_and_a_truncated_one_does_not`, `::test_ambiguous_tree_listing_is_unavailable_and_never_missing`, `test_rules_status.py::test_ambiguous_tree_is_unavailable_not_missing`, `test_github_snapshot_source.py::test_rules_document_rejects_ambiguous_nonrecursive_listings`, `test_github_policy_source.py::test_http_failures_map_to_policy_codes_and_never_to_a_missing_document`, `::test_blob_failures_are_policy_errors`, `test_policy_documents.py::test_read_failure_is_an_error_not_a_missing_document`, `test_prepare_policy_snapshot.py::test_read_failure_stages_nothing_and_is_not_a_missing_document`; E2E root-404, root-denied, tree-404, blob-404, denied |
 | 4 000 исключённых + 50 разрешённых строк | Порог и бюджет считаются по 50 разрешённым | `test_run_processor_context_stage.py::test_ignored_lines_do_not_make_the_allowed_change_summary_only`, `test_review_context.py::test_ignored_lines_do_not_count_toward_the_summary_only_threshold` |
 | Все изменения доказанно исключены по политике, технических пропусков нет | running → skipped; ноль LLM-вызовов; без clean | `test_review_context_stage.py::test_change_with_every_file_ignored_skips_the_run`, `::test_change_of_builtin_excluded_files_only_is_skipped_before_the_context_build`, `test_run_processor_context_stage.py::test_skipped_run_never_reaches_a_model_call`, `test_review_run_worker.py::test_skipped_attempt_finishes_the_run_as_skipped_with_its_reason`; E2E all-ignored |
-| Недопустимый/непредставимый путь рядом с допустимым изменённым файлом | `unsupported_path` до ignore; имя и содержимое вне входов LLM; другой файл проверяется с partial coverage | изоляция: `test_review_ignore.py::test_file_with_an_unsupported_path_is_skipped_by_the_matcher`, `test_review_context_stage.py::test_path_outside_the_contract_is_always_withheld`; partial coverage на `main` не ведётся — после остатка #130; код `policy_path_invalid` против `unsupported_path` — #168 ч.4 |
-| Полный список с `unsupported_path` и маской `**/*`, остальное ignored либо нет | Не all_changes_ignored: coverage none, 0 LLM, neutral check-run | после остатка #130: на `main` модель вызывается и публикуется clean — расхождение |
-| Доказанный binary-only либо binary + ignored/generated | skipped/`all_changes_ignored`, 0 LLM | `test_review_context_stage.py::test_change_of_builtin_excluded_files_only_is_skipped_before_the_context_build`, `::test_binary_files_count_as_exclusions_when_the_whole_change_is_excluded` |
+| Недопустимый/непредставимый путь рядом с допустимым изменённым файлом | `unsupported_path` до ignore; имя и содержимое вне входов LLM; другой файл проверяется с partial coverage | изоляция: `test_review_ignore.py::test_file_with_an_unsupported_path_is_skipped_by_the_matcher`, `test_review_context_stage.py::test_path_outside_the_contract_is_always_withheld`; bounded partial projection #213: `test_run_coverage.py::test_unresolved_identity_is_never_hidden_by_an_empty_or_binary_marker`; полный context coverage — остаток #130; код `policy_path_invalid` против `unsupported_path` — #168 ч.4 |
+| Полный список с `unsupported_path` и маской `**/*`, остальное ignored либо нет | Не all_changes_ignored: coverage none, 0 LLM, neutral check-run | Целевой none/0 LLM — после остатка #130. В очереди #213 unsupported_path сохраняет partial, при пустых/info findings — null и явную причину в summary/body/check-run; clean был историческим поведением baseline. Inline legacy без coverage также получает unavailable/partial, не clean. Изоляция и причина: `test_clean_without_text_context.py::test_empty_marker_cannot_skip_invalid_identity_or_incomplete_inventory`, `test_run_coverage.py::test_unresolved_identity_is_never_hidden_by_an_empty_or_binary_marker` |
+| Доказанный binary-only/empty-only либо E + ignored/generated | skipped/`all_changes_ignored`, 0 LLM | `test_review_context_stage.py::test_change_of_builtin_excluded_files_only_is_skipped_before_the_context_build`, `::test_binary_files_count_as_exclusions_when_the_whole_change_is_excluded`; empty-only #213: `test_clean_without_text_context.py::test_exclusion_only_stage_skips_before_any_model_input` |
 | Too_large/identity_unresolved/unsupported_change при полном inventory | coverage none, verdict null, 0 LLM, succeeded/neutral | после остатка #130 |
-| Доказанный binary + код; too_large + 50 анализируемых строк | Binary не снижает coverage; too_large даёт partial | после остатка #130 (coverage на `main` не ведётся) |
+| Доказанный binary/empty_file + код; too_large + анализируемый код | E не снижает coverage; too_large даёт partial/null с причиной | #213 bounded projection: `test_clean_without_text_context.py`, `test_run_coverage.py`; полная архитектура coverage #107 остаётся будущей |
 | Неполный inventory / unknown counters / known missing-patch-only 4 000 строк | summary-only/partial, summaryOnly=true, 0 LLM | после остатка #130 (summary-only без LLM не реализован); что неполный список не даёт skipped — `test_review_context_stage.py::test_incomplete_file_list_does_not_prove_that_every_change_is_excluded` |
 | Только incomplete без текста, полный inventory, counters ≤3 000 | Backend partial, findings=[], 0 LLM, succeeded/neutral | после остатка #130 |
-| Пустой added без patch; removed image без blob; oversized непрочитанный blob | missing_patch/incomplete; too_large/T | после остатка #130 |
-| Pure rename/mode-only либо пустое added рядом с кодом | T либо incomplete препятствуют clean | после остатка #130 |
-| Ignored anchor без manifest; неизвестный mask-matching путь; allowed anchor с ignored evidence | ignored_file, unknown_path/identity error с partial, evidence_source_disallowed | не покрыто: `ignored_file` есть только в перечне `AnchorRejection` (`diff_anchor.py:32`), код его не выдаёт; `evidence_source_disallowed` в коде нет; partial coverage на `main` не ведётся — после остатка #130 (evidence и якоря — #120/#133) |
+| Доказанный empty added с полным proof, mode 100644/100755; empty + проверенный код | empty_file/E, E-only skipped; код complete/clean лишь при полностью отправленных patches и без иных blockers | `test_clean_without_text.py::test_fetch_excludes_proven_empty_addition_without_blob_request`, `test_clean_without_text_context.py::test_stage_omits_empty_addition_and_records_complete_policy_effective_coverage`, persisted acceptance inventory §2.7 |
+| Added с previous_filename/old path даже при empty SHA/regular mode; остальные отсутствующие/противоречивые proof | Не empty_file/E; missing_patch/incomplete, с кодом partial/null | `test_clean_without_text.py::test_missing_or_contradictory_evidence_never_proves_empty`, `::test_persisted_marker_does_not_override_conflicting_snapshot_evidence`; previous_filename проверяется отдельно от общей valid identity |
+| Tree response с валидным proof ровно 1 500 000 / 1 500 001 байт; exact pinned-head match, identity encoding; конфликт/truncation | Ровно cap допустимо; превышение отклоняется именно бюджетом, не ошибкой JSON; один optional metadata request, fail-closed | `test_clean_without_text_github.py::test_valid_tree_at_exact_metadata_budget_proves_empty`, `::test_valid_tree_over_metadata_budget_fails_for_cap` (declared/streamed), literal outgoing Accept-Encoding: identity; missing/mismatched/duplicate/symlink/gitlink остаются incomplete, marker/retry проверяются inventory §2.7 |
+| Pure rename/mode-only с proof либо без; deleted без binary proof; too_large; квалифицированный empty candidate без ordinary-file proof | Девять полных текстов причин и qualifying/generic-added различие — §2.7; partial/null с кодом, supported blocking/attention сохраняются | `test_clean_without_text_result.py`, `test_clean_without_text_views.py`, `test_clean_without_text_views_postgres.py`, `test_run_coverage.py`; none/zero-LLM lifecycle — отдельная цель #107 |
+| Ignored anchor без manifest; неизвестный mask-matching путь; allowed anchor с ignored evidence | ignored_file, unknown_path/identity error с partial, evidence_source_disallowed | не покрыто: `ignored_file` есть только в перечне `AnchorRejection` (`diff_anchor.py:32`), код его не выдаёт; `evidence_source_disallowed` в коде нет; это evidence/anchor coverage за пределами bounded VCS projection #213, после остатка #130 (evidence и якоря — #120/#133) |
 | Rename/copy с одной недопустимой стороной и допустимым новым alias | Всё изменение и новый alias изолированы | `test_diff_map.py::test_rename_with_one_rejected_side_keeps_the_valid_side_but_stays_withheld` — только уровень DiffMap; изоляция нового alias от импортов, AST и conventions не доказана — после остатка #130 |
 | Изоляция недоказуема; нарушена целостность snapshot; запрещённый источник у guard | Failed; в последнем случае `policy_context_violation` до отправки | целостность: `test_prepare_policy_snapshot.py::test_concurrent_worker_snapshot_with_another_digest_is_an_integrity_error`; pre-send guard `policy_context_violation` — PR #230; failed при недоказуемой изоляции не проверяется — после остатка #130 |
 | Rename/copy `generated/client.py → src/client.py` | Diff, full file и imported AST исключены согласованно | `test_review_context_stage.py::test_builtin_exclusions_are_withheld_without_any_mask_of_the_repository`, `::test_rename_out_of_a_builtin_exclusion_stays_withheld_after_the_whole_stage` |
@@ -210,7 +476,7 @@ API baseline gates локально и в обязательном CI: `uv run r
 | Неправильный `rule_name`/source ref | Нет ложной подписи custom rule и supported без основания | `test_rules_md_injection.py::test_a_rules_md_section_name_is_not_a_rule_name`, `::test_a_policy_attribution_without_a_matching_requirement_ref_is_rejected`, `::test_a_requirement_ref_outside_the_shown_policy_is_rejected`, `::test_legacy_post_processing_publishes_no_false_custom_rule_attribution` (legacy-путь: только отсутствие ложной подписи, судьба finding — #247 ч.3); уже есть `test_reflection_evaluation.py::test_service_defaults_rule_name_rejects_injections`, `test_reflection_pass.py::test_reflection_pass_validates_requirement_refs_and_evidence_refs` |
 | `rule_name` указывает на отсутствующий, пустой или пробельный `.review/rules.md`/`AGENTS.md` | Кандидат отброшен до verifier с `evidence_source_disallowed`, run не падает | `test_review_output_policy_attribution.py::test_agents_attribution_needs_a_document_shown_with_content`, `::test_rules_attribution_needs_a_document_shown_with_content`, `::test_a_whitespace_only_document_is_not_citable_by_the_snapshot_status`, `test_execute_review.py::test_execute_review_drops_attribution_to_a_whitespace_only_agents_document` |
 
-Известные расхождения ведутся в #247 (ч.2 — диагностика §9, ч.3 — атрибуция §8.2), #168 (ч.4 — `policy_path_invalid` против `unsupported_path`, ч.6 — размер blob, вторичный 403, дата в `Retry-After`) и в остатке #130 (`policy_prompt_budget_exceeded` достижим только на пути снимка в `policy.load`, на который ни один боевой run пока не попадает, #130 F1; строка §11 про `unsupported_path` и `**/*`).
+Известные расхождения ведутся в #247 (ч.2 — диагностика §9, ч.3 — атрибуция §8.2), #168 (ч.4 — `policy_path_invalid` против `unsupported_path`, ч.6 — размер blob, вторичный 403, дата в `Retry-After`) и в остатке #130 (`policy_prompt_budget_exceeded` достижим только на пути снимка в `policy.load` с закреплённым v4 после #130 F2; строка §11 про `unsupported_path` и `**/*`).
 
 ## 3. Методология LLM eval
 
@@ -483,27 +749,32 @@ eval не запускается; pins для неиспользуемого ver
 
 ### 3.4. Независимая оценка production pipeline и verifier (#107)
 
-**Текущее состояние после #133.** Схемы `review-output.schema.v2.json` и
-`verifier-output.schema.v1.json`, исторический prompt `review.verifier.v1.md`
-(#133) и `review.verifier.v2.md` (#219), unit-сценарии
-существуют. Опциональный путь Reflection Pass в `ExecuteReviewRun` реализован
-для вызова с `reflection_pass` и policy snapshot. Snapshot без `reflection_pass`
-даёт `internal_error` (ошибка серверной сборки, #216): вместо прежнего terminal
-policy fail действуют повторы до трёх попыток суммарно, затем `failed` и
-`reviews.dlq`. Повреждённый snapshot
-по-прежнему даёт `policy_snapshot_integrity_error`. `reflection_pass` без snapshot
-пропускается с предупреждением в логе `execute_review_legacy_run_without_snapshot`.
-Обе композиции в боевом `app/worker.py` его не подключают; подключение остаётся
-задачей #130. Метки v2 в dataclass/fixtures — не универсальные runtime-pins:
-Run сохраняет ID активных conventions/verifier DB-строк при создании, а snapshot
-восстанавливает их версии/checksums по этим ID. Старые и частично закреплённые Run
-сохраняют отсутствующие pins и неполные bindings.
-Reflection Pass соответствует обязательному verifier из CVS §7; unit-проверки
-ниже не доказывают его работу в боевом worker или качество смысловых решений.
-Legacy-разбор `parse_review_output` молча удаляет `evidence_refs` из находок,
-включая вход, похожий на v2, и проверяет оставшийся v1-объект. Это не проверка
-ссылок по manifest и не сохранение evidence в parsed findings; для этого контракта
-существует отдельный `parse_review_output_v2`.
+**Текущее состояние после #130 F1 и #216.** Схемы ReviewOutput v2/verifier,
+исторический prompt `review.verifier.v1.md` (#133), `review.verifier.v2.md`
+(#219) и unit-сценарии существуют. Обе композиции `app/worker.py` создают
+lazy Reflection Pass; `ExecuteReviewRun` запускает его только со snapshot для run
+с закреплённым `review.system:v4`. Snapshot без Reflection Pass даёт
+`internal_error` (ошибка серверной сборки, #216): действуют повторы до трёх
+попыток суммарно, затем `failed` и `reviews.dlq`. Повреждённый snapshot
+по-прежнему даёт `policy_snapshot_integrity_error` без retry. Legacy без snapshot
+обходит verifier с предупреждением `execute_review_legacy_run_without_snapshot`.
+После F2 seed активирует v4 для новых runs; закреплённый v3 или ниже
+сохраняет legacy-путь. Метки v2
+в dataclass/fixtures — не универсальные runtime-pins: Run сохраняет ID активных
+conventions/verifier DB-строк при создании, snapshot восстанавливает их версии
+и checksums по этим ID; старые и частично закреплённые Run сохраняют отсутствующие
+pins и неполные bindings. Reflection Pass соответствует обязательному verifier
+из CVS §7. Контролируемые PostgreSQL-тесты `test_snapshot_path_e2e_postgres.py`
+проверяют worker composition с явно закреплённым v4 и retry; активацию seed
+проверяют `test_prompt_seeding.py`, качество смысла требует отдельной оценки. #213 дополнительно проверяет реальный GatewayReviewModel →
+ReviewReply → обе ветки Reflection Pass → StoreReviewOutput: полный/усечённый
+вход, пустой ответ, supported finding и anonymous unknown_path
+(`test_clean_without_text_gateway.py`). Legacy-разбор `parse_review_output`
+молча удаляет `evidence_refs` из находок, включая вход, похожий на v2, и проверяет
+оставшийся v1-объект. Это не проверка ссылок по manifest и не сохранение evidence
+в parsed findings; для этого контракта существует отдельный
+`parse_review_output_v2`. Unit-сценарии не заменяют независимую оценку смысла
+verifier ниже.
 
 Новый versioned harness сохраняет для каждого кейса policy/diff snapshots, фактически показанные reviewer/verifier manifests и excerpts, raw v2 output, deterministic drops, все входные candidate IDs, решения verifier и final result. Pin-ы включают schema, prompts, defaults, selector/AST/matcher/model/recovery profiles; provenance вызовов и usage позволяют воспроизвести replay без сети. Сырые исторические v1 ответы остаются прежним baseline: evidence для них не дорисовываются, новый результат не выдаётся за пересчёт старого измерения.
 

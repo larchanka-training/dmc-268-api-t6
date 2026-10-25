@@ -8,7 +8,11 @@ from typing import Protocol
 from uuid import UUID
 
 from app.modules.reviews.application.prompt_builder import ChangedFile, FileStatus
-from app.modules.reviews.application.vcs_diff import parse_file_patch
+from app.modules.reviews.application.vcs_diff import (
+    VcsFile,
+    is_proven_empty_addition,
+    parse_file_patch,
+)
 
 MAX_DIFF_LINES = 3000
 
@@ -26,6 +30,42 @@ class DiffSnapshot:
     omission_reason: str | None = None
     review_patch: str | None = None
     summary_only: bool = False
+
+
+def is_proven_empty_snapshot(snapshot: DiffSnapshot) -> bool:
+    """Revalidate an empty addition whose available evidence passed during fetch.
+
+    The stored omission is required: size and Git mode are not persisted, so proof
+    must have passed the fetcher's conflicting-size and regular-file checks.
+    Only the exact wrapper produced for an empty provider patch is stripped.
+    """
+    if (
+        snapshot.omission_reason != "empty_file"
+        or snapshot.summary_only
+        or snapshot.review_patch is not None
+    ):
+        return False
+    patch = snapshot.patch
+    empty_wrapper = (
+        f"diff --git a/{snapshot.filename} b/{snapshot.filename}\n"
+        f"--- a/{snapshot.filename}\n"
+        f"+++ b/{snapshot.filename}\n"
+    )
+    if patch == empty_wrapper:
+        patch = ""
+    return is_proven_empty_addition(
+        VcsFile(
+            filename=snapshot.filename,
+            status=snapshot.status,
+            blob_sha=snapshot.blob_sha,
+            previous_filename=snapshot.previous_filename,
+            additions=snapshot.additions,
+            deletions=snapshot.deletions,
+            changes=snapshot.changes,
+            patch=patch,
+            git_mode="100644",  # The persisted marker certifies a checked regular mode.
+        )
+    )
 
 
 class RunDiffRepository(Protocol):
