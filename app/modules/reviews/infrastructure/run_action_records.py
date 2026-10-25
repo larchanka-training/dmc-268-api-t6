@@ -19,7 +19,7 @@ from app.modules.reviews.infrastructure.llm_call_trace import LLM_CALL_TOOL
 from app.modules.reviews.infrastructure.models import Run, RunAction
 from app.modules.reviews.infrastructure.run_action_payloads import place_response
 
-_SSE_LLM_OPERATIONS = frozenset({CONVENTIONS_OPERATION, REVIEW_OPERATION})
+SSE_LLM_OPERATIONS = frozenset({CONVENTIONS_OPERATION, REVIEW_OPERATION})
 
 CHANNEL = "run_step"
 
@@ -84,7 +84,7 @@ async def insert_run_action(
     }
     if tool == LLM_CALL_TOOL:
         operation = request.get("operation")
-        if operation in _SSE_LLM_OPERATIONS:
+        if operation in SSE_LLM_OPERATIONS:
             notify["llm_operation"] = operation
     payload = json.dumps(notify, separators=(",", ":"))
     await session.execute(select(func.pg_notify(CHANNEL, payload)))

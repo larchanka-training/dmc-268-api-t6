@@ -19,7 +19,7 @@ built. The check-run title stays `AI-ревью: {verdict}`.
 - [x] For a processed review, `review_body` contains `**Verdict:**` with
       `blocking`, `attention`, or `clean` from the non-dropped findings, a
       `**Risk summary:**` line with `critical`, `high`, `medium`, `low`, and
-      `info` counts, and a       `**Checked files:**` list of the sorted paths whose `review_patch` is
+      `info` counts, and a `**Checked files:**` list of the sorted paths whose `review_patch` is
       non-null (`(none)` when there are no paths; #170 D-2).
 - [x] Main issue, Done well, Effort, and Additional findings remain. A
       coordinate-style append still sits after the overview. **Body budget:** the

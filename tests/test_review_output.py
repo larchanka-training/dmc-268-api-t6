@@ -808,18 +808,163 @@ def test_store_review_output_repacks_body_before_overflow_footer() -> None:
         async def publish_review(self, pointer: Any) -> None:
             pass
 
+    from app.modules.reviews.application.review_output import (
+        DroppedCandidateRecord,
+        VerifiedReviewOutput,
+    )
+
     store = StoreReviewOutput(
         cast(Any, lambda: FakeUoW()),
         FakeQueue(),
         worker_id="test-worker",
         run_url=lambda _: run_url,
     )
-    assert asyncio.run(store.execute(RUN_ID, payload)) is True
+    verified = VerifiedReviewOutput(
+        payload,
+        dropped_findings=(
+            DroppedCandidateRecord(
+                finding={
+                    "path": "app/example.py",
+                    "line": 12,
+                    "start_line": None,
+                    "severity": "medium",
+                    "category": "correctness",
+                    "title": "Below the verifier threshold",
+                    "body": "Kept only to label the overview line.",
+                    "suggestion": None,
+                    "confidence": 0.5,
+                    "rule_name": None,
+                },
+                drop_reason="severity_threshold",
+                position=0,
+            ),
+        ),
+        severity_threshold="critical",
+    )
+    assert asyncio.run(store.execute(RUN_ID, verified)) is True
     assert len(stored_processed) == 1
+    body = stored_processed[0].review_body
     assert stored_processed[0].omitted_body_only_count > 0
-    assert len(stored_processed[0].review_body) <= 4000
-    assert run_url in stored_processed[0].review_body
+    assert len(body) <= 4000
+    assert run_url in body
     assert stored_processed[0].review_body_budget_degraded is False
+    assert "Below severity threshold (critical)" in body
+    assert "Below severity threshold (all)" not in body
+
+
+def test_publish_review_output_repacks_overflow_with_verifier_threshold() -> None:
+    """The inline publisher repacks under the verifier threshold and still writes the footer."""
+    from app.modules.reviews.application.review_output import (
+        DroppedCandidateRecord,
+        VerifiedReviewOutput,
+    )
+
+    stored_processed: list[ProcessedReviewOutput] = []
+
+    class RecordingReviews:
+        async def get_post_processing_input(self, run_id: UUID) -> FindingPostProcessingInput:
+            assert run_id == RUN_ID
+            return FindingPostProcessingInput(
+                diff_map=_added_file_diff_map("app/example.py", 14),
+                checked_paths=frozenset({"app/example.py"}),
+                rule_names=frozenset(),
+                severity_threshold="all",
+            )
+
+        async def store_review_output(
+            self,
+            run_id: UUID,
+            model_output: dict[str, object],
+            parsed: ReviewOutput,
+            processed: ProcessedReviewOutput,
+        ) -> ReviewPublication:
+            assert run_id == RUN_ID
+            stored_processed.append(processed)
+            return ReviewPublication(
+                "a" * 40,
+                (),
+                processed.review_body,
+                "stable-key",
+            )
+
+        async def mark_review_published(self, run_id: UUID) -> None:
+            assert run_id == RUN_ID
+
+    repository = RecordingReviews()
+    factory = RecordingFactory(cast(Any, repository))
+    provider = RecordingProvider()
+    notes = [
+        {
+            "path": "app/example.py",
+            "line": 12,
+            "start_line": None,
+            "severity": "low",
+            "category": "correctness",
+            "title": f"Overflow {number}",
+            "body": "x" * (1173 + (number % 3)),
+            "suggestion": None,
+            "confidence": 0.4,
+            "rule_name": None,
+        }
+        for number in range(1, 7)
+    ]
+    payload: dict[str, object] = {
+        "findings": [
+            {
+                "path": "app/example.py",
+                "line": 12,
+                "start_line": None,
+                "severity": "high",
+                "category": "correctness",
+                "title": "Blocking defect",
+                "body": "The transaction boundary is missing.",
+                "suggestion": None,
+                "confidence": 0.9,
+                "rule_name": None,
+            },
+            *notes,
+        ],
+        "summary": {
+            "problem": "A required value is not validated at this time.",
+            "done_well": "The endpoint remains small.",
+            "effort": "small",
+        },
+    }
+    verified = VerifiedReviewOutput(
+        payload,
+        dropped_findings=(
+            DroppedCandidateRecord(
+                finding={
+                    "path": "app/example.py",
+                    "line": 12,
+                    "start_line": None,
+                    "severity": "medium",
+                    "category": "correctness",
+                    "title": "Below the verifier threshold",
+                    "body": "Kept only to label the overview line.",
+                    "suggestion": None,
+                    "confidence": 0.5,
+                    "rule_name": None,
+                },
+                drop_reason="severity_threshold",
+                position=0,
+            ),
+        ),
+        severity_threshold="critical",
+    )
+
+    assert asyncio.run(PublishReviewOutput(factory, provider).execute(RUN_ID, verified)) is True
+
+    assert len(stored_processed) == 1
+    body = stored_processed[0].review_body
+    assert stored_processed[0].omitted_body_only_count > 0
+    assert len(body) <= 4000
+    assert stored_processed[0].review_body_budget_degraded is False
+    assert re.search(r"\*\*Ещё \d+ наход(?:ка|ки|ок)\*\*", body) is not None
+    assert "http" not in body
+    assert "Below severity threshold (critical)" in body
+    assert "Below severity threshold (all)" not in body
+    assert provider.calls[0][1] == body
 
 
 def test_store_review_output_marks_degraded_body_in_postprocess_response() -> None:
