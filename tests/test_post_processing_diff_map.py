@@ -14,7 +14,7 @@ from uuid import UUID
 
 import pytest
 
-from app.modules.reviews.application.diff_anchor import Anchor, resolve_anchor
+from app.modules.reviews.application.diff_anchor import Anchor, AnchorRejection, resolve_anchor
 from app.modules.reviews.application.diff_map import (
     ChangeType,
     DiffMap,
@@ -103,3 +103,9 @@ def test_findings_diff_map_keeps_the_stored_name_for_a_bare_rename_line_in_a_hun
 
     [file] = diff_map.files
     assert (file.old_path, file.new_path, file.patch_state) == (_PATH, _PATH, PatchState.MALFORMED)
+    assert file.hunks == ()
+    assert file.anchorable is False
+    assert (
+        resolve_anchor(diff_map, path=_PATH, start_line=None, line=2)
+        == AnchorRejection.INCOMPLETE_DIFF
+    )
