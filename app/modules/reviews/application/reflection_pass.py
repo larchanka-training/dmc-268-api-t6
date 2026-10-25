@@ -16,7 +16,6 @@ from functools import cached_property
 from hashlib import sha256
 from importlib.resources import files
 from typing import TYPE_CHECKING, Annotated, Any, Literal, Protocol, runtime_checkable
-from xml.sax.saxutils import escape
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
@@ -42,6 +41,8 @@ from app.modules.reviews.application.prompt_builder import (
     file_block_id,
     get_rule_check_ids,
     render_context_excerpts,
+    xml_attribute,
+    xml_text,
 )
 from app.modules.reviews.application.review_output import (
     EvidenceRef,
@@ -59,16 +60,6 @@ _STRICT = ConfigDict(extra="forbid", strict=True)
 # The longest provider Retry-After a verifier failure carries: one day, as the other
 # Retry-After caps (code_index, rules-status).
 _MAX_RETRY_AFTER_S = 86_400.0
-
-
-def _attribute(value: str) -> str:
-    """Escape XML attributes, including double and single quotes."""
-    return escape(value, {'"': "&quot;", "'": "&apos;"})
-
-
-def _text(value: str) -> str:
-    """Escape XML text content."""
-    return escape(value)
 
 
 class VerificationDecision(BaseModel):
@@ -184,7 +175,7 @@ def _verifier_code_context(
     files: tuple[ChangedFile, ...], excerpts: tuple[ContextBlock, ...] = ()
 ) -> str:
     """The verifier's code: the changed files, then the excerpts the candidates cite."""
-    parts = [PromptBuilder._render_changed_files(files, include_block_id=True)]
+    parts = [PromptBuilder.render_changed_files(files, include_block_id=True)]
     if excerpts:
         parts.append(render_context_excerpts(excerpts))
     return "<code_context>\n" + "\n".join(parts) + "\n</code_context>"
@@ -352,12 +343,12 @@ def verify_verifier_mandatory_budget(
 
     builder = PromptBuilder()
     mandatory_blocks: list[str] = []
-    rules_part = builder._render_policy_rules(context.policy_snapshot)
-    agents_part = builder._render_policy_agents(context.policy_snapshot)
+    rules_part = builder.render_policy_rules(context.policy_snapshot)
+    agents_part = builder.render_policy_agents(context.policy_snapshot)
     mandatory_blocks.extend([rules_part, agents_part])
     if context.rules:
         mandatory_blocks.append(
-            builder._render_service_defaults(
+            builder.render_service_defaults(
                 context.rules,
                 defaults_checksum=context.policy_snapshot.defaults_checksum,
             )
@@ -365,13 +356,13 @@ def verify_verifier_mandatory_budget(
     if context.conventions and (
         context.conventions.key_patterns or context.conventions.recommendations
     ):
-        mandatory_blocks.append(builder._render_conventions(context.conventions))
+        mandatory_blocks.append(builder.render_conventions(context.conventions))
 
     bindings = context.policy_snapshot.prompt_bindings
     version = bindings.verifier_version or "v2"
     filename = f"review.verifier.{version}.md"
     try:
-        raw = files("review.prompts").joinpath(filename).read_text(encoding="utf-8")
+        raw = files("review.prompts").joinpath(filename).readxml_text(encoding="utf-8")
         if raw.startswith("---"):
             parts = raw.split("---", 2)
             system_prompt = parts[2].strip() if len(parts) >= 3 else raw
@@ -411,7 +402,7 @@ class VerifierPromptBuilder:
             filename = f"review.verifier.{verifier_version}.md"
             try:
                 prompt_file = files("review.prompts").joinpath(filename)
-                raw = prompt_file.read_text(encoding="utf-8")
+                raw = prompt_file.readxml_text(encoding="utf-8")
             except (FileNotFoundError, ModuleNotFoundError, OSError) as exc:
                 raise PolicyError(
                     PolicyErrorCode.SNAPSHOT_INTEGRITY_ERROR,
@@ -442,7 +433,7 @@ class VerifierPromptBuilder:
                 filename = f"review.verifier.{bindings.verifier_version}.md"
                 try:
                     v_file = files("review.prompts").joinpath(filename)
-                    raw = v_file.read_text(encoding="utf-8")
+                    raw = v_file.readxml_text(encoding="utf-8")
                 except (FileNotFoundError, ModuleNotFoundError, OSError) as exc:
                     raise PolicyError(
                         PolicyErrorCode.SNAPSHOT_INTEGRITY_ERROR,
@@ -479,12 +470,12 @@ class VerifierPromptBuilder:
         mandatory_blocks: list[str] = []
         if context.policy_snapshot is not None:
             validate_execution_profile_versions(context.policy_snapshot.execution_profile)
-            rules_part = builder._render_policy_rules(context.policy_snapshot)
-            agents_part = builder._render_policy_agents(context.policy_snapshot)
+            rules_part = builder.render_policy_rules(context.policy_snapshot)
+            agents_part = builder.render_policy_agents(context.policy_snapshot)
             mandatory_blocks.extend([rules_part, agents_part])
             if context.rules:
                 mandatory_blocks.append(
-                    builder._render_service_defaults(
+                    builder.render_service_defaults(
                         context.rules,
                         defaults_checksum=context.policy_snapshot.defaults_checksum,
                     )
@@ -495,7 +486,7 @@ class VerifierPromptBuilder:
         if context.conventions and (
             context.conventions.key_patterns or context.conventions.recommendations
         ):
-            conventions_rendered = builder._render_conventions(context.conventions)
+            conventions_rendered = builder.render_conventions(context.conventions)
             mandatory_blocks.append(conventions_rendered)
 
         # 3. Candidate findings
@@ -504,35 +495,35 @@ class VerifierPromptBuilder:
         for cand in candidates:
             f = cand.finding
             sugg_tag = (
-                f"<suggestion>{_text(f.suggestion)}</suggestion>\n"
+                f"<suggestion>{xml_text(f.suggestion)}</suggestion>\n"
                 if f.suggestion is not None
                 else ""
             )
             rule_tag = (
-                f'<rule_attribution name="{_attribute(f.rule_name)}" />\n'
+                f'<rule_attribution name="{xml_attribute(f.rule_name)}" />\n'
                 if f.rule_name is not None
                 else ""
             )
             evidence_tag = ""
             if f.evidence_refs:
                 refs_xml = "\n".join(
-                    f'  <ref block_id="{_attribute(ref.block_id)}" '
+                    f'  <ref block_id="{xml_attribute(ref.block_id)}" '
                     f'start_line="{ref.start_line}" end_line="{ref.end_line}" />'
                     for ref in f.evidence_refs
                 )
                 evidence_tag = f"<evidence_refs>\n{refs_xml}\n</evidence_refs>\n"
 
             start_attr = f'start_line="{f.start_line}" ' if f.start_line is not None else ""
-            category_attr = f'category="{_attribute(f.category)}" '
+            category_attr = f'category="{xml_attribute(f.category)}" '
             cand_xml = (
-                f'<candidate candidate_id="{_attribute(cand.candidate_id)}" '
-                f'path="{_attribute(f.path)}" '
+                f'<candidate candidate_id="{xml_attribute(cand.candidate_id)}" '
+                f'path="{xml_attribute(f.path)}" '
                 f"{start_attr}"
                 f'line="{f.line}" '
                 f"{category_attr}"
-                f'severity="{_attribute(f.severity)}">\n'
-                f"<title>{_text(f.title)}</title>\n"
-                f"<body>{_text(f.body)}</body>\n"
+                f'severity="{xml_attribute(f.severity)}">\n'
+                f"<title>{xml_text(f.title)}</title>\n"
+                f"<body>{xml_text(f.body)}</body>\n"
                 f"{sugg_tag}"
                 f"{rule_tag}"
                 f"{evidence_tag}"

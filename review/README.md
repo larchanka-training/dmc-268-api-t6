@@ -5,7 +5,8 @@
 The model-facing part of the product: the prompts the reviewer runs with, the format of a
 repository's custom rules with two default rule sets, and the specification of the
 deterministic filter applied to the model's answer. Everything here is versioned and
-immutable — a file with a version in its name is never edited — and served from the database.
+immutable — a file with a version in its name is never edited. Live reviewer prompts are served
+from the database; the separate snapshot verifier still loads a pinned package resource (below).
 
 ## Files
 
@@ -14,8 +15,8 @@ immutable — a file with a version in its name is never edited — and served f
 | `prompts/review.system.v1.md`           | review prompt: order, filters, attribution, output  |
 | `prompts/review.system.v2.md`           | v1 + input metadata, few-shot examples              |
 | `prompts/review.system.v3.md`           | current legacy reviewer prompt (#178/#233)          |
-| `prompts/review.verifier.v1.md`         | reflection verifier prompt v1                       |
-| `prompts/review.verifier.v2.md`         | reflection verifier prompt v2: conventions & evidence refs |
+| `prompts/review.verifier.v1.md`         | historical reflection verifier prompt from #133     |
+| `prompts/review.verifier.v2.md`         | current snapshot verifier default (#219): conventions & evidence refs |
 | `prompts/review.conventions.v1.md`      | pre-review prompt: repository patterns, review plan |
 | `prompts/review.conventions.v2.md`      | v1 + explicit counts for omitted input context    |
 | `rules/schema.json`                     | JSON Schema (draft 2020-12) of a custom rule set    |
@@ -40,7 +41,12 @@ history: a published version is never edited or removed.
 ## Seeding contract
 
 Prompts and default rule sets are loaded from this directory at deploy or migration time — an Alembic data
-migration (pending api #4) or a `seed` command owned by the backend — never read from disk at runtime. The Docker
+migration (pending api #4) or a `seed` command owned by the backend. The snapshot verifier is an exception:
+`VerifierPromptBuilder` reads the selected `review.verifier.vN.md` package resource at runtime and
+checks its raw bytes against the snapshot checksum before use. The mandatory-envelope guard also
+reads that selected resource. #216 deliberately retains this loader: replacing it with a DB-backed
+pinned-content resolver belongs with the remaining #130 composition work, rather than introducing
+a second resolver/cache policy here. Runtime package I/O remains. The Docker
 image carries `review/prompts`, `review/postprocess` and `review/rules` for seeding and `review/schemas` for runtime
 validation of the model output (LLM gateway, api #33). Prompts are global rows of `prompt_versions`.
 A `rule_versions` row belongs to one repository, so a default set becomes a repository's first `rule_versions`
@@ -189,11 +195,25 @@ Under Policy Snapshot v2 (`policy_snapshot` present), prompts and candidate find
 
 **Reflection Pass (`prompts/review.verifier.v2.md`)**:
 - Two-pass verification architecture to eliminate hallucinated findings.
-- **Pass 1 (Reviewer)** generates candidate findings with required `evidence_refs` (pointing to visible `block_id` line ranges).
+- **Pass 1 (Reviewer, snapshot/v2 contract)** generates candidate findings with required `evidence_refs` (pointing to visible `block_id` line ranges). This applies to the explicitly composed snapshot pipeline, not the current legacy worker response contract. Both `ExecuteReviewRun` compositions in `app/worker.py` still omit Reflection Pass; connecting that profile remains part of #130.
 - **Pass 2 (Verifier)** checks each candidate against visible code and requirements using `prompts/review.verifier.v2.md`.
   - Verifier prompt envelope: contains `<repository_rules>`, `<project_conventions_document>`, `<service_defaults>`, `<repo_conventions>`, `<code_context>` (with `<changed_files>`), and `<candidate_findings count="...">` (carrying `<candidate candidate_id="..." path="..." start_line="..." line="..." category="..." severity="...">`, `<title>`, `<body>`, optional `<suggestion>`, `<evidence_refs>`, and optional `<rule_attribution name="..." />`).
   - Verifier output: validated at runtime via Pydantic (`VerificationOutput`, `ReviewFindingV2`) conforming to contract `schemas/verifier-output.schema.v1.json` (`decisions`: `candidate_id`, `status` in `supported` / `contradicted` / `insufficient_context`, `reason`, `evidence_refs`, `requirement_refs`). Legacy runs without policy snapshot continue to process v1 output.
   - Strict filtering: only candidates with `status="supported"` survive; unverified candidates are dropped, and the review summary is cleansed of hallucinated defects.
+
+The legacy `parse_review_output` entry point silently removes each finding's `evidence_refs`,
+even when the input looks like v2, then validates the remaining v1 object. It does not validate
+evidence against a manifest or preserve it on parsed findings. `parse_review_output_v2` is the
+separate evidence-aware contract. Snapshot presence alone does not enable v2 attribution in
+`SqlAlchemyRunRepository.get_post_processing_input`: its legacy default remains `None`.
+The explicit snapshot pipeline carries its allowed attribution names in `VerifiedReviewOutput`.
+
+Verifier diagnostics also depend on the composition. #133 logged candidate IDs/statuses rather
+than durable structured explanations. The current explicit pipeline carries drop codes in
+`VerifiedReviewOutput`; publication can store them as `Finding.drop_reason`. After #290,
+`StoreReviewOutput` can persist a separate `llm.verify` run action with candidate IDs, accepted
+call ID and decisions/evidence/requirements. That trace excludes the verifier's free-text `reason`
+and keeps `manifest_id` null. These storage paths do not imply the worker is wired to the verifier.
 
 ## Rule sets
 
@@ -224,7 +244,7 @@ one-line title without a trailing period, the `rule_name` ↔ attribution-prefix
 
 For Policy Snapshot v2, [`schemas/review-output.schema.v2.json`](schemas/review-output.schema.v2.json) defines
 `ReviewOutputV2` with required `evidence_refs` (array of `EvidenceRef{block_id, start_line, end_line}`)
-and closed `rule_name` attribution (`.review/rules.md`, `AGENTS.md`, `service-defaults:<ID>`, or null; string type with domain validation in runtime Pydantic models).
+and closed `rule_name` attribution (`.review/rules.md`, `AGENTS.md`, `service-defaults:<ID>`, or null; the lexical domain is enforced by the schema pattern and runtime Pydantic models).
 [`schemas/verifier-output.schema.v1.json`](schemas/verifier-output.schema.v1.json) defines the reflection pass contract
 (`decisions[]` with `candidate_id`, `status`, `reason`, `evidence_refs`, and `requirement_refs`).
 

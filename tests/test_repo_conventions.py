@@ -1159,10 +1159,12 @@ def test_conventions_execution_with_passed_snapshot_and_agents_md() -> None:
         ExecutionProfile,
         PolicySnapshot,
         PromptBindings,
+    )
+    from app.modules.reviews.infrastructure.llm.models import GatewayConventionsModel
+    from tests.policy_snapshot_fakes import (
         make_policy_document_missing,
         make_policy_document_present,
     )
-    from app.modules.reviews.infrastructure.llm.models import GatewayConventionsModel
 
     agents_content = "Always use uv.\r\nSecond line.\r\n"
 
@@ -1269,6 +1271,8 @@ def test_conventions_execution_with_bom_and_lone_cr_in_agents_md() -> None:
         ExecutionProfile,
         PolicySnapshot,
         PromptBindings,
+    )
+    from tests.policy_snapshot_fakes import (
         make_policy_document_missing,
         make_policy_document_present,
     )
@@ -1333,9 +1337,11 @@ def test_draft_conventions_counter_v1_matches_transport() -> None:
         ExecutionProfile,
         PolicySnapshot,
         PromptBindings,
-        make_policy_document_missing,
     )
     from app.modules.reviews.infrastructure.llm.models import GatewayConventionsModel
+    from tests.policy_snapshot_fakes import (
+        make_policy_document_missing,
+    )
     from tests.test_llm_gateway import Harness, completion
 
     snapshot = PolicySnapshot(

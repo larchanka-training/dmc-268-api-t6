@@ -140,6 +140,11 @@ ALLOWED_V2_RULE_NAMES = frozenset({".review/rules.md", "AGENTS.md"})
 _SERVICE_DEFAULTS_ID_RE = re.compile(r"\A[a-zA-Z0-9_\-]+\Z")
 
 
+def is_valid_service_defaults_id(rule_id: str) -> bool:
+    """Accept nonempty ASCII IDs verbatim; manifest validation owns membership."""
+    return _SERVICE_DEFAULTS_ID_RE.fullmatch(rule_id) is not None
+
+
 class ReviewFindingV2(BaseModel):
     """ReviewOutput v2 finding with required evidence references and strict rule attribution."""
 
@@ -171,7 +176,7 @@ class ReviewFindingV2(BaseModel):
                 pass
             elif self.rule_name.startswith("service-defaults:"):
                 rule_id = self.rule_name.removeprefix("service-defaults:")
-                if not rule_id or not _SERVICE_DEFAULTS_ID_RE.fullmatch(rule_id):
+                if not is_valid_service_defaults_id(rule_id):
                     raise ValueError(
                         "rule_name format for service-defaults must be 'service-defaults:<ID>' "
                         "where <ID> contains only letters, digits, underscores, or hyphens"

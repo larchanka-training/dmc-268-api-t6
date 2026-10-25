@@ -37,10 +37,6 @@ from app.modules.reviews.application.policy_documents import (
 )
 from app.modules.reviews.application.policy_snapshot import (
     PolicySnapshot,
-    make_complete_execution_profile,
-    make_complete_prompt_bindings,
-    make_policy_document_missing,
-    make_policy_document_present,
 )
 from app.modules.reviews.application.prompt_builder import (
     ChangedFile,
@@ -69,6 +65,12 @@ from app.modules.reviews.application.review_output import (
     ReviewPublication,
     parse_review_output,
     parse_review_output_v2,
+)
+from tests.policy_snapshot_fakes import (
+    make_complete_execution_profile,
+    make_complete_prompt_bindings,
+    make_policy_document_missing,
+    make_policy_document_present,
 )
 from tests.test_findings_post_processor import _added_file_diff_map
 

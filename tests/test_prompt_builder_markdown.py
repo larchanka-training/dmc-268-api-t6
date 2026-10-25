@@ -10,8 +10,6 @@ from app.modules.reviews.application.policy_snapshot import (
     ExecutionProfile,
     PolicySnapshot,
     PromptBindings,
-    make_policy_document_missing,
-    make_policy_document_present,
 )
 from app.modules.reviews.application.prompt_builder import (
     DEFAULT_BACKEND_V1_CHECKSUM,
@@ -26,6 +24,10 @@ from app.modules.reviews.application.prompt_builder import (
     _calculate_shown_ranges,
     _split_policy_lines,
     file_block_id,
+)
+from tests.policy_snapshot_fakes import (
+    make_policy_document_missing,
+    make_policy_document_present,
 )
 
 
@@ -784,7 +786,7 @@ def test_split_policy_lines_strictly_splits_on_newline() -> None:
 
 
 def test_make_policy_document_present_line_count() -> None:
-    from app.modules.reviews.application.policy_snapshot import make_policy_document_present
+    from tests.policy_snapshot_fakes import make_policy_document_present
 
     # Normal text ending in newline
     doc1 = make_policy_document_present(".review/rules.md", "line 1\nline 2\n")
@@ -890,3 +892,50 @@ def test_file_block_id_with_200_character_path_in_manifest_and_evidence_ref() ->
         evidence_refs=[ref],
     )
     assert finding.path == long_path
+
+
+def manifest_context_without_snapshot() -> ReviewContext:
+    return ReviewContext(
+        system="SYSTEM",
+        rules=(),
+        agents_md=None,
+        conventions=RepoConventions((), ()),
+        pr_meta=PullRequestMeta("PR", None, "u", "b", "main", (), 1, 2, 1, False, False),
+        changed_files=(
+            ChangedFile(
+                "app/gapped.py",
+                "modified",
+                (
+                    DiffLine(1000, "removed", "deleted"),
+                    DiffLine(10, "added", "first"),
+                    DiffLine(11, "context", "adjacent"),
+                    DiffLine(15, "added", "next hunk"),
+                ),
+            ),
+        ),
+        omitted_files=(),
+    )
+
+
+def test_public_manifest_counts_only_shown_right_lines_across_gaps() -> None:
+    manifest = PromptBuilder().build_manifest(
+        manifest_context_without_snapshot(), call_id=uuid.uuid4(), stage="review"
+    )
+    block = manifest.get_block(file_block_id("app/gapped.py"))
+    assert block is not None
+    assert block.side == "RIGHT"
+    assert (block.start_line, block.end_line) == (10, 15)
+    assert block.shown_ranges == ((10, 11), (15, 15))
+    assert block.shown_line_count == 3
+    assert not manifest.is_range_shown(block.block_id, 11, 15)
+    assert not manifest.is_range_shown(block.block_id, 1000, 1000)
+
+
+def test_public_manifest_without_snapshot_has_no_run_identity() -> None:
+    call_id = uuid.uuid4()
+    manifest = PromptBuilder().build_manifest(
+        manifest_context_without_snapshot(), call_id=call_id, stage="review"
+    )
+    assert manifest.call_id == call_id
+    assert manifest.run_id is None
+    assert manifest.stage == "review"

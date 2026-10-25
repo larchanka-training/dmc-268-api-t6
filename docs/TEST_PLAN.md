@@ -486,12 +486,17 @@ eval не запускается; pins для неиспользуемого ver
 (#133) и `review.verifier.v2.md` (#219, текущий pin по умолчанию), unit-сценарии
 существуют. Опциональный путь Reflection Pass в `ExecuteReviewRun` реализован
 для вызова с `reflection_pass` и policy snapshot. Snapshot без `reflection_pass`
-даёт `policy_snapshot_integrity_error`; `reflection_pass` без snapshot
+даёт `internal_error` (ошибка серверной сборки, #216); повреждённый snapshot
+по-прежнему даёт `policy_snapshot_integrity_error`. `reflection_pass` без snapshot
 пропускается с предупреждением в логе `execute_review_legacy_run_without_snapshot`.
 Обе композиции в боевом `app/worker.py` его не подключают; подключение остаётся
 задачей #130.
 Reflection Pass соответствует обязательному verifier из CVS §7; unit-проверки
 ниже не доказывают его работу в боевом worker или качество смысловых решений.
+Legacy-разбор `parse_review_output` молча удаляет `evidence_refs` из находок,
+включая вход, похожий на v2, и проверяет оставшийся v1-объект. Это не проверка
+ссылок по manifest и не сохранение evidence в parsed findings; для этого контракта
+существует отдельный `parse_review_output_v2`.
 
 Новый versioned harness сохраняет для каждого кейса policy/diff snapshots, фактически показанные reviewer/verifier manifests и excerpts, raw v2 output, deterministic drops, все входные candidate IDs, решения verifier и final result. Pin-ы включают schema, prompts, defaults, selector/AST/matcher/model/recovery profiles; provenance вызовов и usage позволяют воспроизвести replay без сети. Сырые исторические v1 ответы остаются прежним baseline: evidence для них не дорисовываются, новый результат не выдаётся за пересчёт старого измерения.
 
@@ -522,11 +527,11 @@ Reflection Pass соответствует обязательному verifier �
 Adversarial eval использует пары одинакового дефекта/контекста с инъекцией и без неё и отдельные допустимые текстовые исключения. Измеряются навязанные ложные findings, подавленные реальные дефекты и нарушения законных исключений reviewer/verifier; отдельно проверяется перенос через conventions/cache/repair. Schema validity, отсутствие запрещённых tools и детерминированный guard оцениваются независимо от смысловой устойчивости модели. Результат корпуса не заявляет полной защиты от произвольного Prompt Injection.
 
 **Защита от Prompt Injection на unit-уровне (AC 7 задачи #120)**:
-Параметризованные тесты синтаксических инъекций (`TestPromptInjectionDefenses` в `tests/test_reflection_evaluation.py`) проверяют оба прохода (reviewer и verifier):
-- Системный промпт верификатора (`review.verifier.v1.md`) содержит декларацию Source Authority and Trust с наивысшим приоритетом над пользовательскими данными. Исторический Option (a) в #120 означал сохранить тогдашний reviewer prompt v2 без изменений и отложить новую декларацию доверия reviewer и её боевое подключение до #130 ([план #120, Phase 7](plans/120-plan.md#phase-7-review-round-3-fixes-alexander-khomutov--axyi-5562633453)). Нынешний `review.system.v3.md` — prompt для legacy-контракта из #178/#233; reviewer v4 с новой декларацией доверия и интеграция snapshot/verifier-профиля остаются частью #130 (§3.6).
+Reviewer-промпт проверяют отдельно `tests/test_prompt_builder_markdown.py::test_first_pass_prompt_injection_defense` и `::test_prompt_injection_defense_escapes_closing_tags`. Параметризованный `TestPromptInjectionDefenses::test_untrusted_fields_are_safely_escaped_in_verifier_prompt` в `tests/test_reflection_evaluation.py` строит только verifier-промпт:
+- Исторический `review.verifier.v1.md` и текущий pin `review.verifier.v2.md` содержат декларацию Source Authority and Trust с наивысшим приоритетом над пользовательскими данными. Исторический Option (a) в #120 означал сохранить тогдашний reviewer prompt v2 без изменений и отложить новую декларацию доверия reviewer и её боевое подключение до #130 ([план #120, Phase 7](plans/120-plan.md#phase-7-review-round-3-fixes-alexander-khomutov--axyi-5562633453)). Нынешний `review.system.v3.md` — prompt для legacy-контракта из #178/#233; reviewer v4 с новой декларацией доверия и интеграция snapshot/verifier-профиля остаются частью #130 (§3.6).
 - Все недоверенные поля (`rules_markdown`, `agents_md`, `candidate_id`, `path`, `title`, `body`, `suggestion`, `code_diff`) экранируются по стандарту XML-сущностей (`&lt;`, `&gt;`, `&amp;`, `&quot;`, `&apos;`).
 - Атрибуты XML строго валидируются: идентификаторы `service-defaults:<ID>` ограничены регулярным выражением `\A[a-zA-Z0-9_\-]+\Z`, исключая кавычки и инъекции атрибутов.
-- Тесты проверяют отсутствие неэкранированных тегов `<system>`, попыток преждевременного закрытия контейнеров (`</candidate_findings>`, `</code_context>`) и маркеров инструкций (`<|im_start|>`, `[INST]`).
+- Тесты проверяют отсутствие неэкранированных тегов `<system>`, преждевременного закрытия контейнеров (`</candidate_findings>`, `</code_context>`) и неэкранированного `<|im_start|>` в user-тексте. Проверка отсутствия `[INST]` относится к `prompt.system`: буквальный `[INST]` может оставаться недоверенными пользовательскими данными. XML-экранирование сохраняет эти данные внутри user-контейнеров; system-промпт остаётся неизменным.
 
 
 ### 3.5. Вклад графа RAG v1 и гейт v2 (#146)

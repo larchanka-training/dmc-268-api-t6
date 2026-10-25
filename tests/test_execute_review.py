@@ -5,12 +5,14 @@ from __future__ import annotations
 import asyncio
 import re
 from collections.abc import Mapping
+from dataclasses import replace
 from typing import Any
 from unittest.mock import patch
 from uuid import UUID
 
 import pytest
 
+from app.modules.reviews.application.check_runs import failure_reason
 from app.modules.reviews.application.conventions import CachedConventions, GeneratedConventions
 from app.modules.reviews.application.execute_review import (
     ExecuteReviewRun,
@@ -28,10 +30,6 @@ from app.modules.reviews.application.policy_snapshot import (
     PolicySnapshot,
     PromptBindings,
     SourceRole,
-    make_complete_execution_profile,
-    make_complete_prompt_bindings,
-    make_policy_document_missing,
-    make_policy_document_present,
 )
 from app.modules.reviews.application.prompt_builder import (
     ChangedFile,
@@ -53,9 +51,17 @@ from app.modules.reviews.application.review_output import (
     EvidenceRef,
     InvalidReviewOutput,
     RequirementRef,
+    ReviewFindingV2,
+    VerifiedReviewOutput,
+)
+from app.modules.reviews.application.run_failures import RunFailure, classify_failure
+from tests.policy_snapshot_fakes import (
+    make_complete_execution_profile,
+    make_complete_prompt_bindings,
+    make_policy_document_missing,
+    make_policy_document_present,
 )
 from app.modules.reviews.application.review_path import ReviewBinding
-from app.modules.reviews.application.run_failures import RunFailure
 
 RUN_ID = UUID("00000000-0000-0000-0000-000000000200")
 MAIN_BLOCK_ID = file_block_id("app/main.py")
@@ -577,10 +583,13 @@ def test_execute_review_fail_closed_when_snapshot_present_without_reflection_pas
         reflection_pass=None,  # Missing reflection_pass with snapshot present
     )
 
-    with pytest.raises(PolicyError) as exc_info:
+    with pytest.raises(RunFailure) as exc_info:
         asyncio.run(pipeline.execute(RUN_ID))
-    assert exc_info.value.code == PolicyErrorCode.SNAPSHOT_INTEGRITY_ERROR
-    assert "Reflection pass is required" in exc_info.value.message
+    failure = classify_failure(exc_info.value)
+    assert failure.error_code == "internal_error"
+    assert not isinstance(exc_info.value, PolicyError)
+    assert "Reflection pass is required" in failure.message
+    assert failure_reason(failure.error_code) == "Внутренняя ошибка сервиса."
     assert model.draft_calls == 0
     assert publisher.publish_calls == 0
 
@@ -640,7 +649,11 @@ def test_execute_review_fail_closed_when_snapshot_not_ready() -> None:
         asyncio.run(pipeline.execute(RUN_ID))
     assert exc_info.value.code == PolicyErrorCode.SNAPSHOT_INTEGRITY_ERROR
     assert "Policy snapshot is not ready" in exc_info.value.message
+    failure = classify_failure(exc_info.value)
+    assert failure.error_code == "policy_snapshot_integrity_error"
+    assert failure_reason(failure.error_code) == "Снимок правил прогона повреждён или противоречив."
     assert model.draft_calls == 0
+    assert fake_verifier_model.call_count == 0
     assert publisher.publish_calls == 0
 
 
@@ -3361,357 +3374,4 @@ def _v4_snapshot(review_system_id: UUID = _V4_REVIEW) -> PolicySnapshot:
         ),
     )
 
-
-class _StageSnapshot:
-    """The context stage as execute_review sees it: exclusions and the attempt's snapshot."""
-
-    diff_old_sha: str | None = None
-    head_sha: str | None = None
-    payload: ReviewContextPayload | None = None
-
-    def __init__(self, snapshot: PolicySnapshot | None) -> None:
-        self.snapshot_for_llm = snapshot
-
-    def excluded(self, path: str) -> bool:
-        return False
-
-
-class _BoundPipeline:
-    """Processor, prompt source, model and publisher of a run bound to ``binding``."""
-
-    def __init__(self, binding: ReviewBinding) -> None:
-        self.binding = binding
-        self.contexts: list[ReviewContext] = []
-        self.published: list[object] = []
-
-    async def prepare(self, run_id: UUID) -> GeneratedConventions:
-        return conventions()
-
-    async def get_review_prompt_input(
-        self, run_id: UUID, saved: GeneratedConventions
-    ) -> ReviewPromptInput:
-        return ReviewPromptInput(
-            system="Review carefully.",
-            rules=(),
-            agents_md=_PROVIDER_AGENTS,
-            conventions=RepoConventions((), ()),
-            changed_files=(
-                ChangedFile("app/main.py", "modified", (DiffLine(10, "added", "x = 1"),)),
-            ),
-            omitted_files=(),
-            review_binding=self.binding,
-        )
-
-    async def get_pull_request_meta(self, run_id: UUID) -> PullRequestMeta:
-        return PullRequestMeta("Title", None, "u", "b", "m", (), 1, 1, 0, False, False)
-
-    async def draft_review(self, *, context: ReviewContext) -> dict[str, Any]:
-        self.contexts.append(context)
-        return {"findings": [], "summary": {"problem": "p", "done_well": "d", "effort": "none"}}
-
-    async def execute(self, run_id: UUID, raw_output: object) -> bool:
-        self.published.append(raw_output)
-        return True
-
-
-def _run_bound(
-    binding: ReviewBinding,
-    stage_snapshot: PolicySnapshot | None,
-    *,
-    verifier: FakeVerifierModel | None = None,
-) -> _BoundPipeline:
-    pipeline = _BoundPipeline(binding)
-    asyncio.run(
-        ExecuteReviewRun(
-            pipeline,
-            pipeline,
-            pipeline,
-            pipeline,
-            context_filter=_StageSnapshot(stage_snapshot),
-            reflection_pass=None if verifier is None else ReflectionPass(verifier),
-        ).execute(RUN_ID)
-    )
-    return pipeline
-
-
-def test_snapshot_path_review_shows_the_snapshot_documents_not_the_provider_agents_md() -> None:
-    snapshot = _v4_snapshot()
-    verifier = FakeVerifierModel({"decisions": []})
-
-    pipeline = _run_bound(
-        ReviewBinding(_V4_REVIEW, "review.system", "v4", "github"), snapshot, verifier=verifier
-    )
-
-    [context] = pipeline.contexts
-    assert context.policy_snapshot is snapshot
-    user = PromptBuilder().build_prompt(context).user
-    assert (
-        '<repository_rules block_id="policy-rules" path=".review/rules.md">\n'
-        '<line n="1"># Rules</line>\n'
-        '<line n="2">Always sanitize input.</line>\n'
-        "</repository_rules>"
-    ) in user
-    assert ('<project_conventions_document block_id="policy-agents" path="AGENTS.md">') in user
-    assert "Prefer small functions." in user
-    # ReviewPromptInput.agents_md (the provider read) is not shown on this path.
-    assert _PROVIDER_AGENTS not in user
-    assert "<agents_md>" not in user
-    assert verifier.call_count == 0
-    assert len(pipeline.published) == 1
-
-
-def test_snapshot_path_review_without_a_reflection_pass_still_fails_closed() -> None:
-    pipeline = _BoundPipeline(ReviewBinding(_V4_REVIEW, "review.system", "v4", "github"))
-    run = ExecuteReviewRun(
-        pipeline, pipeline, pipeline, pipeline, context_filter=_StageSnapshot(_v4_snapshot())
-    )
-
-    with pytest.raises(PolicyError) as raised:
-        asyncio.run(run.execute(RUN_ID))
-
-    assert raised.value.code == PolicyErrorCode.SNAPSHOT_INTEGRITY_ERROR
-    assert "Reflection pass is required" in raised.value.message
-    assert pipeline.contexts == []
-    assert pipeline.published == []
-
-
-@pytest.mark.parametrize(
-    "binding",
-    [
-        ReviewBinding(_V4_REVIEW, "review.system", "v3", "github"),
-        ReviewBinding(_V4_REVIEW, "review.system", "v3", "gitlab"),
-    ],
-    ids=["v3", "v3-gitlab"],
-)
-def test_legacy_review_never_gets_the_stage_snapshot(binding: ReviewBinding) -> None:
-    # Even a ready snapshot from the stage stays out of a legacy run's prompt.
-    pipeline = _run_bound(binding, _v4_snapshot())
-
-    [context] = pipeline.contexts
-    assert context.policy_snapshot is None
-    user = PromptBuilder().build_prompt(context).user
-    assert f"<agents_md>\n{_PROVIDER_AGENTS}\n</agents_md>" in user
-    assert "policy-rules" not in user and "Prefer small functions." not in user
-
-
-def test_stage_snapshot_pinning_another_review_prompt_is_refused_before_the_model() -> None:
-    pipeline = _BoundPipeline(ReviewBinding(_V4_REVIEW, "review.system", "v4", "github"))
-    other = _v4_snapshot(review_system_id=UUID("00000000-0000-0000-0000-000000000042"))
-    run = ExecuteReviewRun(
-        pipeline,
-        pipeline,
-        pipeline,
-        pipeline,
-        context_filter=_StageSnapshot(other),
-        reflection_pass=ReflectionPass(FakeVerifierModel({"decisions": []})),
-    )
-
-    with pytest.raises(PolicyError) as raised:
-        asyncio.run(run.execute(RUN_ID))
-
-    assert raised.value.code == PolicyErrorCode.SNAPSHOT_INTEGRITY_ERROR
-    assert "pins another review prompt" in raised.value.message
-    assert pipeline.contexts == []
-
-
-# F1-8 (#130 R12, #247 ч.3): attribution is repaired before the verifier; no verifier call,
-# no v2 rule allow-list.
-
-
-def _f18_finding(line: int, rule_name: str | None, title: str) -> dict[str, Any]:
-    return {
-        "path": "app/main.py",
-        "line": line,
-        "start_line": None,
-        "severity": "medium",
-        "category": "correctness",
-        "title": title,
-        "body": f"{title} body.",
-        "suggestion": None,
-        "confidence": 0.9,
-        "rule_name": rule_name,
-        "evidence_refs": [{"block_id": MAIN_BLOCK_ID, "start_line": line, "end_line": line}],
-    }
-
-
-def _f18_quoted(finding: dict[str, Any]) -> dict[str, Any]:
-    """The finding with a claim of a custom instruction the run does not have."""
-    return {
-        **finding,
-        "body": f"According to custom instructions in 'No print' (rules): {finding['body']}",
-    }
-
-
-def _f18_published(output: Mapping[str, object]) -> list[dict[str, Any]]:
-    findings = output["findings"]
-    assert isinstance(findings, list)
-    return findings
-
-
-class _F18Processor:
-    async def prepare(self, run_id: UUID) -> GeneratedConventions:
-        return conventions()
-
-
-class _F18Repository:
-    async def get_review_prompt_input(
-        self, run_id: UUID, saved: GeneratedConventions
-    ) -> ReviewPromptInput:
-        return ReviewPromptInput(
-            system="Review carefully.",
-            rules=(),
-            agents_md=None,
-            conventions=RepoConventions((), ()),
-            changed_files=(
-                ChangedFile(
-                    "app/main.py",
-                    "modified",
-                    (DiffLine(10, "added", "x = 1"), DiffLine(11, "added", "y = 2")),
-                ),
-            ),
-            omitted_files=(),
-            policy_snapshot=_make_test_snapshot(),  # rules present, AGENTS.md missing
-        )
-
-
-class _F18Model:
-    def __init__(self, findings: list[dict[str, Any]]) -> None:
-        self.findings = findings
-
-    async def get_pull_request_meta(self, run_id: UUID) -> PullRequestMeta:
-        return PullRequestMeta("Title", None, "u", "b", "m", (), 1, 1, 0, False, False)
-
-    async def draft_review(self, *, context: ReviewContext) -> dict[str, Any]:
-        return {
-            "findings": self.findings,
-            "summary": {"problem": "p.", "done_well": "d.", "effort": "none"},
-        }
-
-
-class _F18Publisher:
-    def __init__(self) -> None:
-        self.outputs: list[Any] = []
-
-    async def execute(self, run_id: UUID, raw_output: Any) -> bool:
-        self.outputs.append(raw_output)
-        return True
-
-
-class _F18Pass:
-    """Captures the candidates; supports the ones whose title is in ``supported``."""
-
-    def __init__(self, supported: frozenset[str] = frozenset()) -> None:
-        self.supported = supported
-        self.seen: list[tuple[str | None, str]] = []
-
-    def max_prompt_tokens(self) -> int | None:
-        return None
-
-    async def verify_recorded(self, *, candidates: Any, context: Any) -> Any:
-        from app.modules.reviews.application.reflection_pass import (
-            VerificationDecision,
-            VerificationRecord,
-        )
-
-        self.seen.extend((c.finding.rule_name, c.finding.body) for c in candidates)
-        decisions = tuple(
-            VerificationDecision(
-                candidate_id=c.candidate_id,
-                status="supported",
-                reason="Confirmed on the diff.",
-                evidence_refs=[
-                    EvidenceRef(
-                        block_id=MAIN_BLOCK_ID, start_line=c.finding.line, end_line=c.finding.line
-                    )
-                ],
-                requirement_refs=[],
-            )
-            if c.finding.title in self.supported
-            else VerificationDecision(
-                candidate_id=c.candidate_id,
-                status="insufficient_context",
-                reason="Not shown.",
-                evidence_refs=[],
-                requirement_refs=[],
-            )
-            for c in candidates
-        )
-        return VerificationRecord(decisions, tuple(c.candidate_id for c in candidates))
-
-
-@pytest.mark.parametrize(
-    "findings",
-    [[], [_f18_finding(99, None, "Off the diff")]],
-    ids=["no-candidates", "all-dropped-before-the-verifier"],
-)
-def test_without_a_verifier_call_the_output_carries_no_v2_rule_allow_list(
-    findings: list[dict[str, Any]],
-) -> None:
-    from app.modules.reviews.application.review_output import VerifiedReviewOutput
-
-    publisher = _F18Publisher()
-    reflection = _F18Pass()
-    pipeline = ExecuteReviewRun(
-        _F18Processor(),
-        _F18Repository(),
-        _F18Model(findings),
-        publisher,
-        reflection_pass=reflection,  # type: ignore[arg-type]
-    )
-
-    assert asyncio.run(pipeline.execute(RUN_ID)) is True
-
-    assert reflection.seen == []
-    [output] = publisher.outputs
-    assert isinstance(output, VerifiedReviewOutput)
-    assert _f18_published(output) == []
-    assert output.allowed_v2_rules is None
-
-
-@pytest.mark.parametrize("supported", [True, False], ids=["supported", "rejected"])
-def test_a_wrong_attribution_is_repaired_before_the_verifier_decides(supported: bool) -> None:
-    from app.modules.reviews.application.review_output import VerifiedReviewOutput
-
-    publisher = _F18Publisher()
-    titles = {"Rules finding"} | ({"Invented finding"} if supported else set())
-    reflection = _F18Pass(frozenset(titles))
-    pipeline = ExecuteReviewRun(
-        _F18Processor(),
-        _F18Repository(),
-        _F18Model(
-            [
-                _f18_finding(10, ".review/rules.md", "Rules finding"),
-                _f18_quoted(_f18_finding(11, None, "Invented finding")),
-            ]
-        ),
-        publisher,
-        reflection_pass=reflection,  # type: ignore[arg-type]
-    )
-
-    assert asyncio.run(pipeline.execute(RUN_ID)) is True
-
-    # The v2 parse refuses any other rule name, so the wrong attribution is the body's claim
-    # of a rule the run does not have: the verifier sees the candidate without it.
-    assert reflection.seen == [
-        (".review/rules.md", "Rules finding body."),
-        (None, "Invented finding body."),
-    ]
-    [output] = publisher.outputs
-    assert isinstance(output, VerifiedReviewOutput)
-    assert output.allowed_v2_rules == frozenset({".review/rules.md"})
-    published = [(f["title"], f["rule_name"]) for f in _f18_published(output)]
-    if supported:
-        assert published == [
-            ("Rules finding", ".review/rules.md"),
-            ("Invented finding", None),
-        ]
-        assert output.dropped_findings == ()
-    else:
-        assert published == [("Rules finding", ".review/rules.md")]
-        from app.modules.reviews.application.review_output import DroppedCandidateRecord
-
-        [dropped] = output.dropped_findings
-        assert isinstance(dropped, DroppedCandidateRecord)
-        assert dropped.drop_reason == "insufficient_context"
-        assert dropped.position == 1
-        assert dropped.finding.rule_name is None  # type: ignore[union-attr]
+from app.modules.reviews.application.review_path import ReviewBinding

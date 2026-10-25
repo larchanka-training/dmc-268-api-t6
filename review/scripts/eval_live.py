@@ -65,13 +65,14 @@ from app.modules.reviews.application.policy_documents import normalize_document 
 from app.modules.reviews.application.policy_errors import PolicyError  # noqa: E402
 from app.modules.reviews.application.policy_snapshot import (  # noqa: E402
     AGENTS_DOCUMENT_PATH,
+    PINNED_PROMPT_CHECKSUMS,
     POLICY_SNAPSHOT_SCHEMA_VERSION,
     RULES_DOCUMENT_PATH,
+    DocumentPresence,
+    ExecutionProfile,
     PolicyDocument,
     PolicySnapshot,
-    make_complete_execution_profile,
-    make_complete_prompt_bindings,
-    make_policy_document_missing,
+    PromptBindings,
 )
 from app.modules.reviews.application.prompt_builder import (  # noqa: E402
     DEFAULT_BACKEND_V1_CHECKSUM,
@@ -230,6 +231,20 @@ def _policy_document(path: Path, snapshot_path: str) -> PolicyDocument:
     return normalize_document(snapshot_path, raw, blob_oid=blob_oid)
 
 
+def _missing_policy_document(path: str) -> PolicyDocument:
+    """Represent a policy file absent from the selected evaluation arm."""
+    return PolicyDocument(
+        path=path,
+        presence=DocumentPresence.MISSING,
+        blob_oid=None,
+        raw_sha256=None,
+        text_sha256=None,
+        text=None,
+        byte_count=None,
+        line_count=None,
+    )
+
+
 def _policy_snapshot(
     case_dir: Path,
     record: Mapping[str, Any],
@@ -244,7 +259,7 @@ def _policy_snapshot(
     base = case_dir / record["base_path"]
     try:
         if arm == "none":
-            rules = make_policy_document_missing(RULES_DOCUMENT_PATH)
+            rules = _missing_policy_document(RULES_DOCUMENT_PATH)
         else:
             # The valid file is the case's .review/rules.md; the malicious one is rendered at
             # the same fixed path, exactly where an attacker's rules.md would be.
@@ -253,7 +268,7 @@ def _policy_snapshot(
         agents = (
             _policy_document(agents_path, AGENTS_DOCUMENT_PATH)
             if agents_path.is_file()
-            else make_policy_document_missing(AGENTS_DOCUMENT_PATH)
+            else _missing_policy_document(AGENTS_DOCUMENT_PATH)
         )
         ignore = parse_review_ignore(rules.text)
     except (OSError, PolicyError) as exc:
@@ -281,11 +296,26 @@ def _policy_snapshot(
         service_defaults_rule_version_id=uuid5(_EVAL_POLICY_NAMESPACE, "service-defaults"),
         # Mirrors RuleVersion.checksum in production: the pin of the case's default rule file.
         defaults_checksum=defaults_checksum,
-        prompt_bindings=make_complete_prompt_bindings(),
-        execution_profile=make_complete_execution_profile(
-            engine,
+        prompt_bindings=PromptBindings(
+            review_system_checksum=PINNED_PROMPT_CHECKSUMS["review.system:v2"],
+            conventions_checksum=PINNED_PROMPT_CHECKSUMS["review.conventions:v2"],
+            verifier_checksum=PINNED_PROMPT_CHECKSUMS["review.verifier:v2"],
+            review_system_id=UUID(int=1),
+            conventions_id=UUID(int=2),
+            verifier_id=UUID(int=3),
+        ),
+        execution_profile=ExecutionProfile(
+            profile_name=engine,
             review_model=settings.primary.model,
             verifier_model=settings.primary.model,
+            max_input_tokens=150_000 if engine == "deep" else 60_000,
+            primary_provider_route="primary",
+            tokenizer_version="tokenizer/v1",
+            counter_version="counter/v2",
+            temperature="0.0",
+            response_schema_version="review-output/v2",
+            recovery_profile_version="recovery/v1",
+            budget_profile_version="budget/v1",
         ),
         policy_digest=hashlib.sha256(digest_input.encode("utf-8")).hexdigest(),
     )

@@ -754,17 +754,15 @@ class SqlAlchemyReviewOutputRepository:
             filename for filename, review_patch in snapshots if review_patch is not None
         )
         rule_names = frozenset(rule["name"] for rule in rules if isinstance(rule.get("name"), str))
-        # Until #130 connects live worker runs to the verifier, allowed_v2 remains None
-        # so legacy runs do not retain unverified v2 rule names even if a snapshot row exists.
-        allowed_v2: frozenset[str] | None = None
-
+        # This legacy adapter has no verified manifest: a snapshot row alone cannot
+        # authorize v2 attribution. The verified publication path supplies its own allowlist.
         return FindingPostProcessingInput(
             diff_map=diff_map,
             checked_paths=checked_paths,
             rule_names=rule_names,
             repository_max_inline=max_comments,
             severity_threshold=severity_threshold_value(severity_threshold),
-            allowed_v2_rules=allowed_v2,
+            allowed_v2_rules=None,
         )
 
     async def store_review_output(

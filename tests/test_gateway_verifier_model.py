@@ -31,10 +31,6 @@ from app.modules.reviews.application.llm import (
 from app.modules.reviews.application.policy_snapshot import (
     CallManifest,
     PolicySnapshot,
-    make_complete_execution_profile,
-    make_complete_prompt_bindings,
-    make_policy_document_missing,
-    make_policy_document_present,
 )
 from app.modules.reviews.application.prompt_budget import (
     EstimatedTokenCounter,
@@ -68,6 +64,12 @@ from app.modules.reviews.infrastructure.llm.models import (
 )
 from app.modules.reviews.infrastructure.llm.settings import LlmSettings, ModelPrice, ModelProfile
 from tests.llm_fakes import FakeClock, ScriptedProvider, completion
+from tests.policy_snapshot_fakes import (
+    make_complete_execution_profile,
+    make_complete_prompt_bindings,
+    make_policy_document_missing,
+    make_policy_document_present,
+)
 
 NOW = datetime(2026, 10, 24, 12, 0, tzinfo=UTC)
 RUN_ID = UUID("00000000-0000-0000-0000-000000013701")

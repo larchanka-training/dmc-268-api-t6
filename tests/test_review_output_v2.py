@@ -471,3 +471,35 @@ def test_parse_review_output_with_evidence_refs() -> None:
         parse_review_output('{"summary": {}}')
     with pytest.raises(InvalidReviewOutput):
         parse_review_output("123")
+
+
+@pytest.mark.parametrize("rule_name", ["service-defaults:E2\n", "service-defaults:FSD1\n"])
+def test_v2_model_and_parser_reject_rule_id_trailing_newline(rule_name: str) -> None:
+    # Exercise runtime boundaries directly: no JSON Schema validator masks the regression.
+    finding = {
+        "path": "app/main.py",
+        "line": 15,
+        "start_line": 10,
+        "severity": "high",
+        "category": "security",
+        "title": "SQL injection risk",
+        "body": "Untrusted input reaches a query",
+        "suggestion": None,
+        "confidence": 0.9,
+        "rule_name": rule_name,
+        "evidence_refs": [{"block_id": "diff-main", "start_line": 10, "end_line": 15}],
+    }
+    with pytest.raises(ValidationError):
+        ReviewFindingV2.model_validate(finding)
+    payload = {
+        "findings": [finding],
+        "summary": {
+            "problem": "Unsafe SQL input.",
+            "done_well": "Clean layering.",
+            "effort": "small",
+        },
+    }
+    with pytest.raises(InvalidReviewOutput):
+        parse_review_output_v2(payload)
+    with pytest.raises(InvalidReviewOutput):
+        parse_review_output_v2(json.dumps(payload))

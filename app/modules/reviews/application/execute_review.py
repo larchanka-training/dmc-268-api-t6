@@ -289,8 +289,8 @@ class ExecuteReviewRun:
 
         if prompt_input.policy_snapshot is not None:
             if self._reflection_pass is None:
-                raise PolicyError(
-                    PolicyErrorCode.SNAPSHOT_INTEGRITY_ERROR,
+                raise RunFailure(
+                    "internal_error",
                     "Reflection pass is required when policy snapshot is present",
                 )
             if not prompt_input.policy_snapshot.is_ready_for_llm:

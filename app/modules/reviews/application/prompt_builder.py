@@ -21,6 +21,7 @@ from app.modules.reviews.application.policy_errors import PolicyError, PolicyErr
 from app.modules.reviews.application.policy_snapshot import (
     CallManifest,
     ManifestBlock,
+    PolicyDocument,
     PolicySnapshot,
     RecoveryKind,
     StageName,
@@ -248,11 +249,11 @@ class PromptBuilder:
         blocks: list[str] = []
         include_block_id = context.policy_snapshot is not None
         if context.policy_snapshot is not None:
-            blocks.append(self._render_policy_rules(context.policy_snapshot))
-            blocks.append(self._render_policy_agents(context.policy_snapshot))
+            blocks.append(self.render_policy_rules(context.policy_snapshot))
+            blocks.append(self.render_policy_agents(context.policy_snapshot))
             if context.rules:
                 blocks.append(
-                    self._render_service_defaults(
+                    self.render_service_defaults(
                         context.rules,
                         defaults_checksum=context.policy_snapshot.defaults_checksum,
                     )
@@ -263,9 +264,9 @@ class PromptBuilder:
 
         blocks.extend(
             (
-                self._render_conventions(context.conventions),
+                self.render_conventions(context.conventions),
                 self._render_pr_meta(context.pr_meta),
-                self._render_changed_files(
+                self.render_changed_files(
                     context.changed_files, include_block_id=include_block_id
                 ),
             )
@@ -280,61 +281,26 @@ class PromptBuilder:
         return "\n".join(blocks)
 
     @staticmethod
-    def _render_policy_rules(snapshot: PolicySnapshot) -> str:
-        doc = snapshot.rules
-        if not doc.is_present:
-            return (
-                '<repository_rules block_id="policy-rules" '
-                'path=".review/rules.md" status="absent" />'
-            )
-        if not (doc.text or ""):
-            return (
-                f'<repository_rules block_id="policy-rules" '
-                f'path="{_attribute(doc.path)}" status="empty" />'
-            )
-        lines = [
-            f'<line n="{index}">{_text(line)}</line>'
-            for index, line in enumerate(_split_policy_lines(doc.text or ""), start=1)
-        ]
-        content = "\n".join(lines)
-        path_attr = _attribute(doc.path)
-        return (
-            f'<repository_rules block_id="policy-rules" path="{path_attr}">\n'
-            f"{content}\n"
-            "</repository_rules>"
+    def render_policy_rules(snapshot: PolicySnapshot) -> str:
+        """Render the numbered repository-rules block, including absence and empty state."""
+        return _render_policy_document(
+            snapshot.rules, tag="repository_rules", block_id="policy-rules"
         )
 
     @staticmethod
-    def _render_policy_agents(snapshot: PolicySnapshot) -> str:
-        doc = snapshot.agents
-        if not doc.is_present:
-            return (
-                '<project_conventions_document block_id="policy-agents" '
-                'path="AGENTS.md" status="absent" />'
-            )
-        if not (doc.text or ""):
-            return (
-                f'<project_conventions_document block_id="policy-agents" '
-                f'path="{_attribute(doc.path)}" status="empty" />'
-            )
-        lines = [
-            f'<line n="{index}">{_text(line)}</line>'
-            for index, line in enumerate(_split_policy_lines(doc.text or ""), start=1)
-        ]
-        content = "\n".join(lines)
-        path_attr = _attribute(doc.path)
-        return (
-            f'<project_conventions_document block_id="policy-agents" path="{path_attr}">\n'
-            f"{content}\n"
-            "</project_conventions_document>"
+    def render_policy_agents(snapshot: PolicySnapshot) -> str:
+        """Render the numbered AGENTS.md block, including absence and empty state."""
+        return _render_policy_document(
+            snapshot.agents, tag="project_conventions_document", block_id="policy-agents"
         )
 
     @staticmethod
-    def _render_service_defaults(
+    def render_service_defaults(
         rules: tuple[ReviewRule, ...],
         *,
         defaults_checksum: str | None = None,
     ) -> str:
+        """Render pinned service-default checks with their stable IDs and line coordinates."""
         blocks = []
         line_offset = 1
         seen_check_ids: set[str] = set()
@@ -553,7 +519,8 @@ class PromptBuilder:
         return _container("custom_instructions", "\n".join(blocks))
 
     @staticmethod
-    def _render_conventions(conventions: RepoConventions) -> str:
+    def render_conventions(conventions: RepoConventions) -> str:
+        """Render the shared repository-conventions envelope."""
         patterns = "\n".join(_element("pattern", _text(item)) for item in conventions.key_patterns)
         recommendations = "\n".join(
             _element("recommendation", _text(item)) for item in conventions.recommendations
@@ -598,15 +565,29 @@ class PromptBuilder:
         return _container("pr_meta", "\n".join(elements))
 
     @staticmethod
-    def _render_changed_files(
+    def render_changed_files(
         files: tuple[ChangedFile, ...], *, include_block_id: bool = False
     ) -> str:
+        """Render changed-file blocks for reviewer/verifier prompts and budget accounting."""
         return _container(
             "changed_files",
             "\n".join(
                 render_changed_file(file, include_block_id=include_block_id) for file in files
             ),
         )
+
+
+def _render_policy_document(document: PolicyDocument, *, tag: str, block_id: str) -> str:
+    attributes = f'block_id="{block_id}" path="{_attribute(document.path)}"'
+    if not document.is_present:
+        return f'<{tag} {attributes} status="absent" />'
+    if not (document.text or ""):
+        return f'<{tag} {attributes} status="empty" />'
+    lines = "\n".join(
+        f'<line n="{index}">{_text(line)}</line>'
+        for index, line in enumerate(_split_policy_lines(document.text or ""), start=1)
+    )
+    return f"<{tag} {attributes}>\n{lines}\n</{tag}>"
 
 
 def _split_policy_lines(text: str) -> list[str]:
