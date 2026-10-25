@@ -37,7 +37,7 @@ def test_check_run_report_body_count_is_non_inline_findings() -> None:
         review_body="legacy body without ## Additional findings section",
     )
     repository = SimpleNamespace(full_name="org/repo")
-    installation = SimpleNamespace(external_id=99)
+    installation = SimpleNamespace(external_id=99, provider="github")
     session = MagicMock()
     session.execute = AsyncMock(
         return_value=MagicMock(
@@ -74,7 +74,7 @@ def test_check_run_report_body_count_includes_findings_moved_from_inline() -> No
         review_body="## Review summary\n\n**Verdict:** attention\n\n(no Additional findings)",
     )
     repository = SimpleNamespace(full_name="org/repo")
-    installation = SimpleNamespace(external_id=99)
+    installation = SimpleNamespace(external_id=99, provider="github")
     session = MagicMock()
     session.execute = AsyncMock(
         return_value=MagicMock(
