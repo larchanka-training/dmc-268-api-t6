@@ -34,6 +34,7 @@ flowchart LR
 #### Циклы
 
 - [api#1](https://github.com/larchanka-training/dmc-268-api-t6/issues/1) → [api#2](https://github.com/larchanka-training/dmc-268-api-t6/issues/2) → [api#3](https://github.com/larchanka-training/dmc-268-api-t6/issues/3) → [api#1](https://github.com/larchanka-training/dmc-268-api-t6/issues/1)
+  - в том же клубке связей ещё: [api#5](https://github.com/larchanka-training/dmc-268-api-t6/issues/5) (вне выборки), [api#6](https://github.com/larchanka-training/dmc-268-api-t6/issues/6) (вне выборки, закрыта)
 
 #### In Progress с открытым блокером
 
