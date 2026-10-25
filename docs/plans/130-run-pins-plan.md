@@ -58,7 +58,8 @@ Facts this plan rests on:
     `sha256(read_text().encode())` with `bindings.verifier_checksum`
     (`app/modules/reviews/application/reflection_pass.py:319-381`).
 - **`PINNED_PROMPT_CHECKSUMS` is not a runtime gate** (`policy_snapshot.py:229-234`). It is used
-  only by `make_complete_prompt_bindings` defaults (`:241-258`), `tests/test_prompt_seeding.py:74-84`
+  only by the test factory `tests/policy_snapshot_fakes.py::make_complete_prompt_bindings`
+  defaults, `tests/test_prompt_seeding.py:74-84`
   and `tests/test_review_prompt_pins_postgres.py:159-160`.
 - **The live conventions prompt is the active row at processing time**
   (`run_repository.py:458-488`). The live review prompt is `Run.prompt_version_id`

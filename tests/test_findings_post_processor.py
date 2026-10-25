@@ -1165,6 +1165,7 @@ def test_postprocessor_preserves_findings_and_repairs_only_invalid_service_defau
     result = FindingsPostProcessor.from_default_patterns().process(
         parsed,
         diff_map=_default_diff_map(),
+        checked_paths=_paths_of(_default_diff_map()),
         rule_names=frozenset(),
         allowed_v2_rules=frozenset(),
     )
