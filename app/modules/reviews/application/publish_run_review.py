@@ -63,6 +63,8 @@ class ReviewSubmission:
 class SubmittedReview:
     review_id: int
     comment_ids: tuple[int, ...]
+    # When set, findings absent from this set were published in the review body, not inline.
+    posted_inline_finding_ids: frozenset[UUID] | None = None
 
 
 class PublishError(Exception):
@@ -123,7 +125,7 @@ class ReviewPublicationStore(CheckRunReports, Protocol):
         review_id: int,
         comment_ids: tuple[int, ...],
         findings_hash: str,
-        moved_to_body: bool,
+        moved_to_body_finding_ids: tuple[UUID, ...] = (),
         now: datetime,
     ) -> str | None:
         """Final state (``succeeded``, or ``cancelled`` if cancelled during the POST)."""
@@ -167,8 +169,24 @@ def publication_route(provider: str, project_id: int) -> PublicationRoute | None
     return None
 
 
+def _moved_to_body_finding_ids(
+    context_findings: tuple[PublishedFinding, ...],
+    fallback_moved: tuple[UUID, ...],
+    posted_inline: frozenset[UUID] | None,
+) -> tuple[UUID, ...]:
+    """Merge coordinate fallback with provider-reported inline markers (redelivery)."""
+    moved: set[UUID] = set(fallback_moved)
+    if posted_inline is not None:
+        for item in context_findings:
+            if item.finding_id is not None and item.finding_id not in posted_inline:
+                moved.add(item.finding_id)
+    return tuple(moved)
+
+
 def move_inline_to_body(body: str, findings: tuple[PublishedFinding, ...]) -> str:
     """The 422 fallback: every inline comment becomes a line of the review body (SD §8.3)."""
+    if not findings:
+        return body
     lines = [body, "", "## Inline findings"]
     lines.extend(
         f"- **{item.title}** (`{item.path}:{item.line}`): {item.body}" for item in findings
@@ -247,7 +265,8 @@ class PublishRunReview:
             findings=context.findings,
             findings_hash=context.findings_hash,
         )
-        moved = False
+        moved_to_body_finding_ids: tuple[UUID, ...] = ()
+        coordinate_fallback_done = False
         retries = 0
         try_no = 0
         while True:
@@ -266,9 +285,12 @@ class PublishRunReview:
             if isinstance(result, SubmittedReview):
                 break
             error = result
-            if error.kind == "coordinates" and not moved:
-                moved = True
+            if error.kind == "coordinates" and not coordinate_fallback_done:
+                coordinate_fallback_done = True
                 remaining = submission.findings if error.unposted is None else error.unposted
+                moved_to_body_finding_ids = tuple(
+                    finding_id for item in remaining if (finding_id := item.finding_id) is not None
+                )
                 submission = replace(
                     submission,
                     body=move_inline_to_body(submission.body, remaining),
@@ -311,13 +333,16 @@ class PublishRunReview:
 
         # GitLab discussion ids are not GitHub comment ids; the marker is the retry identity.
         comment_ids = () if route.gitlab else result.comment_ids
+        placement_ids = _moved_to_body_finding_ids(
+            context.findings, moved_to_body_finding_ids, result.posted_inline_finding_ids
+        )
         async with self._uow_factory() as uow:
             completed = await uow.runs.complete_publication(
                 pointer.run_id,
                 review_id=result.review_id,
                 comment_ids=comment_ids,
                 findings_hash=context.findings_hash,
-                moved_to_body=moved,
+                moved_to_body_finding_ids=placement_ids,
                 now=self._now(),
             )
             await uow.commit()

@@ -23,6 +23,7 @@ from app.modules.repositories.infrastructure.models import (
 )
 from app.modules.reviews.application.cancel_run import CancelRequestResult
 from app.modules.reviews.application.conventions import ActiveConventionsPrompt
+from app.modules.reviews.application.diff_map import DiffMap, vcs_provider_name
 from app.modules.reviews.application.findings_post_processor import (
     ProcessedFinding,
     ProcessedReviewOutput,
@@ -34,15 +35,13 @@ from app.modules.reviews.application.get_run_comments import PublishedComment
 from app.modules.reviews.application.get_run_diff import DiffSnapshot
 from app.modules.reviews.application.get_run_file_lines import BlobCacheKey
 from app.modules.reviews.application.list_runs import RunCursor, RunListItem
+from app.modules.reviews.application.post_processing_diff_map import diff_map_from_snapshots
 from app.modules.reviews.application.process_run import (
     RunConventionsInput,
     RunDiffInput,
     RunVcsInput,
 )
-from app.modules.reviews.application.prompt_builder import (
-    parse_unified_diff,
-    review_rule_from_stored,
-)
+from app.modules.reviews.application.prompt_builder import review_rule_from_stored
 from app.modules.reviews.application.review_output import (
     FindingPostProcessingInput,
     PublishedFinding,
@@ -629,6 +628,57 @@ class SqlAlchemyRunRepository:
         )
 
 
+def diff_snapshot_from_code_change_diff(row: CodeChangeDiff) -> DiffSnapshot:
+    """Map a durable diff row to the snapshot shape used by publication DiffMap rebuild."""
+    return SqlAlchemyRunRepository._to_diff_snapshot(row)
+
+
+async def load_publication_diff_map(session: AsyncSession, run_id: UUID) -> DiffMap | None:
+    """Rebuild DiffMap/v1 from durable snapshots for publish bucketing and GitLab coords."""
+    row = (
+        await session.execute(
+            select(
+                Run.head_sha,
+                Run.base_sha,
+                CodeChange.repository_id,
+                CodeChange.external_number,
+                ProviderInstallation.provider,
+            )
+            .join(CodeChange, CodeChange.id == Run.code_change_id)
+            .join(Repository, Repository.id == CodeChange.repository_id)
+            .join(
+                ProviderInstallation,
+                ProviderInstallation.id == Repository.provider_installation_id,
+            )
+            .where(Run.id == run_id)
+        )
+    ).one_or_none()
+    if row is None:
+        return None
+    head_sha, base_sha, repository_id, external_number, provider = row
+    snapshot_rows = (
+        (
+            await session.execute(
+                select(CodeChangeDiff)
+                .where(CodeChangeDiff.run_id == run_id)
+                .order_by(CodeChangeDiff.filename.asc())
+            )
+        )
+        .scalars()
+        .all()
+    )
+    snapshots = [diff_snapshot_from_code_change_diff(item) for item in snapshot_rows]
+    return diff_map_from_snapshots(
+        repository_id=repository_id,
+        code_change_number=external_number,
+        head_sha=head_sha,
+        base_sha=base_sha,
+        diff_old_sha=None,
+        snapshots=snapshots,
+        provider=vcs_provider_name(provider),
+    )
+
+
 class SqlAlchemyReviewOutputRepository:
     """Write adapter bound to a caller-owned SQLAlchemy unit of work."""
 
@@ -643,12 +693,11 @@ class SqlAlchemyReviewOutputRepository:
         row = (
             await self._session.execute(
                 select(
-                    Run.code_change_id,
-                    Run.head_sha,
                     RuleVersion.rules,
                     Repository.max_comments,
                     Repository.severity_threshold,
                 )
+                .select_from(Run)
                 .join(RuleVersion, RuleVersion.id == Run.rule_version_id)
                 .join(CodeChange, CodeChange.id == Run.code_change_id)
                 .join(Repository, Repository.id == CodeChange.repository_id)
@@ -657,22 +706,17 @@ class SqlAlchemyReviewOutputRepository:
         ).one_or_none()
         if row is None:
             return None
-        _, _, rules, max_comments, severity_threshold = row
-        snapshots = (
-            await self._session.execute(
-                select(CodeChangeDiff.filename, CodeChangeDiff.patch).where(
-                    CodeChangeDiff.run_id == run_id,
-                )
-            )
-        ).all()
-        hunk_lines = {filename: _new_hunk_lines(filename, patch) for filename, patch in snapshots}
+        rules, max_comments, severity_threshold = row
+        diff_map = await load_publication_diff_map(self._session, run_id)
+        if diff_map is None:
+            return None
         rule_names = frozenset(rule["name"] for rule in rules if isinstance(rule.get("name"), str))
         # Until #130 connects live worker runs to the verifier, allowed_v2 remains None
         # so legacy runs do not retain unverified v2 rule names even if a snapshot row exists.
         allowed_v2: frozenset[str] | None = None
 
         return FindingPostProcessingInput(
-            hunk_lines=hunk_lines,
+            diff_map=diff_map,
             rule_names=rule_names,
             repository_max_inline=max_comments,
             severity_threshold=_severity_threshold_value(severity_threshold),
@@ -873,6 +917,7 @@ def _to_published_finding_row(item: Finding) -> PublishedFinding:
         suggestion=item.suggestion,
         confidence=float(item.confidence),
         rule_name=item.rule_name,
+        finding_id=item.id,
     )
 
 
@@ -885,22 +930,6 @@ def _severity_threshold_value(threshold: SeverityThreshold) -> SeverityThreshold
             return "warning"
         case SeverityThreshold.CRITICAL:
             return "critical"
-
-
-def _new_hunk_lines(filename: str, patch: str | None) -> frozenset[int]:
-    """Return only new-version anchors in one immutable stored diff snapshot."""
-    if patch is None:
-        return frozenset()
-    diff = patch
-    if not patch.startswith("diff --git "):
-        diff = f"diff --git a/{filename} b/{filename}\n{patch}"
-    changed_files = parse_unified_diff(diff)
-    return frozenset(
-        line.number
-        for changed_file in changed_files
-        for line in changed_file.lines
-        if line.type in {"added", "context"}
-    )
 
 
 class SqlAlchemyCancelRunUnitOfWork(SqlAlchemyUnitOfWork):

@@ -226,7 +226,7 @@ def test_complete_publication_waits_for_revoke_or_rebind_then_cancels_without_pa
                     review_id=55,
                     comment_ids=(900,),
                     findings_hash="f" * 64,
-                    moved_to_body=False,
+                    moved_to_body_finding_ids=(),
                     now=datetime.now(UTC),
                 )
                 await uow.commit()

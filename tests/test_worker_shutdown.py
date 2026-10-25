@@ -213,8 +213,15 @@ def test_real_broker_busy_stop_cancels_intake_without_settling_active_work_or_re
             assert seen == [b"active"]
             assert len(subscriptions) == 1
             assert received[1].processed
-            returned = await reader.get(timeout=2)
-            assert returned is not None and returned.body == b"buffered"
+            # The broker requeues the unacked buffer asynchronously after the iterator's
+            # basic.cancel, and basic_get answers one message or None without waiting,
+            # so poll until the requeue arrives instead of a single get.
+            async with asyncio.timeout(2):
+                returned = await reader.get(fail=False)
+                while returned is None:
+                    await asyncio.sleep(0.01)
+                    returned = await reader.get(fail=False)
+            assert returned.body == b"buffered"
             await returned.ack()
             await queue.declare()
             assert queue.declaration_result.consumer_count == 0

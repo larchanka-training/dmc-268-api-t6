@@ -159,7 +159,11 @@ def test_retirement_during_token_stops_next_http_request_with_live_positive_cont
                 return httpx.Response(201, json={"id": 55})
             if path.endswith("/comments"):
                 await change("last")
-                return httpx.Response(200, json=[{"id": 900}])
+                # The comment exactly as the POST sent it (literal body): the found-review
+                # path re-verifies inline placement by body and coordinates.
+                return httpx.Response(
+                    200, json=[{"id": 900, "path": "a.py", "line": 3, "body": "**T**\n\nB"}]
+                )
             if path.endswith("/pulls/3"):
                 await change("head")
                 return httpx.Response(200, json={"head": {"sha": HEAD}})
@@ -410,7 +414,7 @@ def test_inactive_publication_has_no_target_and_terminalizes_without_payload_wri
                         review_id=55,
                         comment_ids=(900,),
                         findings_hash=context.findings_hash,
-                        moved_to_body=True,
+                        moved_to_body_finding_ids=(UUID(int=11399),),
                         now=datetime.now(UTC),
                     )
                     assert result == "cancelled"

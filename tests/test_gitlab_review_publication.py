@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import importlib
 import json
 from collections.abc import Callable
@@ -36,22 +35,14 @@ VERSIONS = "/api/v4/projects/42/merge_requests/7/versions"
 DISCUSSIONS = "/api/v4/projects/42/merge_requests/7/discussions"
 
 
-def _inline_marker(path: str, line: int, title: str, body: str, suggestion: str | None) -> str:
-    """The published marker: comment text identifies the finding, not only path and line."""
-    text = f"**{title}**\n\n{body}"
-    if suggestion:
-        text += f"\n\n```suggestion\n{suggestion}\n```"
-    finding_id = hashlib.sha256(text.encode()).hexdigest()[:16]
+def _inline_marker(path: str, line: int, finding_id: str) -> str:
     return f"<!-- ai-review findings_hash={HASH} inline={path}:{line} finding={finding_id} -->"
 
 
-INLINE_MARKER_APP = _inline_marker("src/app.py", 3, "Wrong branch", "The branch is inverted.", None)
-INLINE_MARKER_OTHER = _inline_marker(
-    "src/other.py", 9, "Narrow check", "The guard is too wide.", "return early"
-)
-INLINE_MARKER_TWIN = _inline_marker(
-    "src/app.py", 3, "Other defect", "A second problem on the same line.", None
-)
+# finding= — first 16 hex of SHA-256(comment_body(...)); literals lock the contract in tests.
+INLINE_MARKER_APP = _inline_marker("src/app.py", 3, "6888906fd671f420")
+INLINE_MARKER_OTHER = _inline_marker("src/other.py", 9, "3761ff714cafc119")
+INLINE_MARKER_TWIN = _inline_marker("src/app.py", 3, "38fff52fc9d1ab4f")
 SUMMARY_MARKER = f"<!-- ai-review findings_hash={HASH} summary -->"
 INLINE_BODY_APP = f"**Wrong branch**\n\nThe branch is inverted.\n\n{INLINE_MARKER_APP}"
 INLINE_BODY_OTHER = (
@@ -78,6 +69,24 @@ POSITION_OTHER = {
     "new_path": "src/other.py",
     "new_line": 9,
 }
+# CONTEXT §9.5 fixture patch: context row after hunks is old12/new13 on path `a`.
+CONTEXT_PATH = "a"
+CONTEXT_OLD_LINE = 12
+CONTEXT_NEW_LINE = 13
+POSITION_CONTEXT = {
+    "position_type": "text",
+    "base_sha": BASE,
+    "start_sha": START,
+    "head_sha": HEAD,
+    "old_path": CONTEXT_PATH,
+    "new_path": CONTEXT_PATH,
+    "old_line": CONTEXT_OLD_LINE,
+    "new_line": CONTEXT_NEW_LINE,
+}
+CONTEXT_TITLE = "Trailing context"
+CONTEXT_BODY = "Comment on unchanged context after the edit hunk."
+CONTEXT_MARKER = _inline_marker(CONTEXT_PATH, CONTEXT_NEW_LINE, "63801b1f58480743")
+CONTEXT_INLINE_BODY = f"**{CONTEXT_TITLE}**\n\n{CONTEXT_BODY}\n\n{CONTEXT_MARKER}"
 
 FINDING_APP = PublishedFinding(
     path="src/app.py",
@@ -115,6 +124,298 @@ FINDING_TWIN = PublishedFinding(
     confidence=0.7,
     rule_name=None,
 )
+FINDING_CONTEXT = PublishedFinding(
+    path=CONTEXT_PATH,
+    line=CONTEXT_NEW_LINE,
+    start_line=None,
+    severity="medium",
+    category="correctness",
+    title=CONTEXT_TITLE,
+    body=CONTEXT_BODY,
+    suggestion=None,
+    confidence=0.85,
+    rule_name=None,
+    gitlab_old_line=CONTEXT_OLD_LINE,
+)
+RENAME_OLD_PATH = "old/a.py"
+RENAME_NEW_PATH = "new/a.py"
+RENAME_NEW_LINE = 5
+POSITION_RENAME = {
+    "position_type": "text",
+    "base_sha": BASE,
+    "start_sha": START,
+    "head_sha": HEAD,
+    "old_path": RENAME_OLD_PATH,
+    "new_path": RENAME_NEW_PATH,
+    "new_line": RENAME_NEW_LINE,
+}
+RENAME_TITLE = "Rename path"
+RENAME_BODY = "Comment on a line after rename."
+RENAME_MARKER = _inline_marker(RENAME_NEW_PATH, RENAME_NEW_LINE, "d504dcbd0a41763d")
+RENAME_INLINE_BODY = f"**{RENAME_TITLE}**\n\n{RENAME_BODY}\n\n{RENAME_MARKER}"
+FINDING_RENAME = PublishedFinding(
+    path=RENAME_NEW_PATH,
+    line=RENAME_NEW_LINE,
+    start_line=None,
+    severity="medium",
+    category="correctness",
+    title=RENAME_TITLE,
+    body=RENAME_BODY,
+    suggestion=None,
+    confidence=0.8,
+    rule_name=None,
+    gitlab_old_path=RENAME_OLD_PATH,
+)
+
+# CONTEXT §9.5 fixture patch on path `a`: added new11 and new12 (lines 11–12).
+RANGE_PATH = "a"
+RANGE_START = 11
+RANGE_END = 12
+RANGE_LINE_CODE_SHA = "86f7e437faa5a7fce15d1ddcb9eaeaea377667b8"
+RANGE_LINE_CODE_START = f"{RANGE_LINE_CODE_SHA}_12_11"
+RANGE_LINE_CODE_END = f"{RANGE_LINE_CODE_SHA}_12_12"
+POSITION_RANGE = {
+    "position_type": "text",
+    "base_sha": BASE,
+    "start_sha": START,
+    "head_sha": HEAD,
+    "old_path": RANGE_PATH,
+    "new_path": RANGE_PATH,
+    "new_line": RANGE_END,
+    "line_range": {
+        "start": {
+            "line_code": RANGE_LINE_CODE_START,
+            "type": "new",
+            "new_line": RANGE_START,
+        },
+        "end": {
+            "line_code": RANGE_LINE_CODE_END,
+            "type": "new",
+            "new_line": RANGE_END,
+        },
+    },
+}
+RANGE_TITLE = "Validation runs after change"
+RANGE_BODY = "Move the check before the mutation."
+RANGE_SUGGESTION = "validate()\nnew_value()"
+RANGE_MARKER = _inline_marker(RANGE_PATH, RANGE_END, "02cd8756c5122068")
+RANGE_INLINE_BODY = (
+    f"**{RANGE_TITLE}**\n\n{RANGE_BODY}\n\n"
+    f"```suggestion:-1+0\n{RANGE_SUGGESTION}\n```\n\n{RANGE_MARKER}"
+)
+FINDING_RANGE = PublishedFinding(
+    path=RANGE_PATH,
+    line=RANGE_END,
+    start_line=RANGE_START,
+    severity="high",
+    category="correctness",
+    title=RANGE_TITLE,
+    body=RANGE_BODY,
+    suggestion=RANGE_SUGGESTION,
+    confidence=0.9,
+    rule_name=None,
+    gitlab_line_range_start_code=RANGE_LINE_CODE_START,
+    gitlab_line_range_end_code=RANGE_LINE_CODE_END,
+    gitlab_line_range_start_is_added=True,
+    gitlab_line_range_end_is_added=True,
+)
+LONG_RANGE_START = 1
+LONG_RANGE_END = 102
+LONG_RANGE_TITLE = "Wide span"
+LONG_RANGE_BODY = "Too many lines for an applicable suggestion."
+LONG_RANGE_SUGGESTION = "replacement"
+LONG_RANGE_MARKER = _inline_marker(RANGE_PATH, LONG_RANGE_END, "4bc11bb9227e6f9f")
+LONG_RANGE_INLINE_BODY = f"**{LONG_RANGE_TITLE}**\n\n{LONG_RANGE_BODY}\n\n{LONG_RANGE_MARKER}"
+FINDING_LONG_RANGE = PublishedFinding(
+    path=RANGE_PATH,
+    line=LONG_RANGE_END,
+    start_line=LONG_RANGE_START,
+    severity="medium",
+    category="correctness",
+    title=LONG_RANGE_TITLE,
+    body=LONG_RANGE_BODY,
+    suggestion=LONG_RANGE_SUGGESTION,
+    confidence=0.8,
+    rule_name=None,
+    gitlab_line_range_start_code=f"{RANGE_LINE_CODE_SHA}_0_1",
+    gitlab_line_range_end_code=f"{RANGE_LINE_CODE_SHA}_0_102",
+)
+
+
+def test_posts_new_side_range_discussion_with_line_range() -> None:
+    """CONTEXT §9.5: multiline new-side findings publish line_range (#171)."""
+    posts: list[dict[str, Any]] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET" and request.url.path == VERSIONS:
+            return httpx.Response(200, json=_versions())
+        if request.method == "GET" and request.url.path == DISCUSSIONS:
+            return httpx.Response(200, json=[])
+        if request.method == "POST" and request.url.path == DISCUSSIONS:
+            posts.append(_json(request))
+            note_id = 701 if "position" not in posts[-1] else 601
+            return httpx.Response(201, json={"id": "disc", "notes": [{"id": note_id, "body": ""}]})
+        raise AssertionError(f"unexpected {request.method} {request.url}")
+
+    submission = ReviewSubmission(
+        installation_id=17,
+        repository_full_name="group/project",
+        pr_number=7,
+        commit_sha=HEAD,
+        event="COMMENT",
+        body=BODY,
+        findings=(FINDING_RANGE,),
+        findings_hash=HASH,
+    )
+    result, seen = _submit(respond, submission)
+
+    assert posts == [
+        {"body": RANGE_INLINE_BODY, "position": POSITION_RANGE},
+        {"body": SUMMARY_BODY},
+    ]
+    assert posts[0]["position"]["new_line"] == RANGE_END
+    assert result == SubmittedReview(701, ())
+    _assert_gitlab_only(seen)
+
+
+def test_multiline_suggestion_uses_gitlab_span_syntax() -> None:
+    posts: list[dict[str, Any]] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET" and request.url.path == VERSIONS:
+            return httpx.Response(200, json=_versions())
+        if request.method == "GET" and request.url.path == DISCUSSIONS:
+            return httpx.Response(200, json=[])
+        if request.method == "POST" and request.url.path == DISCUSSIONS:
+            posts.append(_json(request))
+            note_id = 701 if "position" not in posts[-1] else 601
+            return httpx.Response(201, json={"id": "disc", "notes": [{"id": note_id, "body": ""}]})
+        raise AssertionError(f"unexpected {request.method} {request.url}")
+
+    submission = ReviewSubmission(
+        installation_id=17,
+        repository_full_name="group/project",
+        pr_number=7,
+        commit_sha=HEAD,
+        event="COMMENT",
+        body=BODY,
+        findings=(FINDING_RANGE,),
+        findings_hash=HASH,
+    )
+    _submit(respond, submission)
+
+    assert "```suggestion:-1+0" in posts[0]["body"]
+    assert "```suggestion\n" not in posts[0]["body"]
+
+
+def test_long_range_omits_applicable_suggestion_block() -> None:
+    posts: list[dict[str, Any]] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET" and request.url.path == VERSIONS:
+            return httpx.Response(200, json=_versions())
+        if request.method == "GET" and request.url.path == DISCUSSIONS:
+            return httpx.Response(200, json=[])
+        if request.method == "POST" and request.url.path == DISCUSSIONS:
+            posts.append(_json(request))
+            note_id = 701 if "position" not in posts[-1] else 601
+            return httpx.Response(201, json={"id": "disc", "notes": [{"id": note_id, "body": ""}]})
+        raise AssertionError(f"unexpected {request.method} {request.url}")
+
+    submission = ReviewSubmission(
+        installation_id=17,
+        repository_full_name="group/project",
+        pr_number=7,
+        commit_sha=HEAD,
+        event="COMMENT",
+        body=BODY,
+        findings=(FINDING_LONG_RANGE,),
+        findings_hash=HASH,
+    )
+    _submit(respond, submission)
+
+    assert posts[0]["body"] == LONG_RANGE_INLINE_BODY
+    assert "suggestion" not in posts[0]["body"].lower() or "```" not in posts[0]["body"]
+
+
+def test_posts_context_line_discussion_with_old_and_new_line() -> None:
+    """CONTEXT §9.5: context rows publish old_line and new_line without line_range (#171)."""
+    posts: list[dict[str, Any]] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET" and request.url.path == VERSIONS:
+            return httpx.Response(200, json=_versions())
+        if request.method == "GET" and request.url.path == DISCUSSIONS:
+            return httpx.Response(200, json=[])
+        if request.method == "POST" and request.url.path == DISCUSSIONS:
+            posts.append(_json(request))
+            note_id = 701 if "position" not in posts[-1] else 601
+            return httpx.Response(201, json={"id": "disc", "notes": [{"id": note_id, "body": ""}]})
+        raise AssertionError(f"unexpected {request.method} {request.url}")
+
+    submission = ReviewSubmission(
+        installation_id=17,
+        repository_full_name="group/project",
+        pr_number=7,
+        commit_sha=HEAD,
+        event="COMMENT",
+        body=BODY,
+        findings=(FINDING_CONTEXT,),
+        findings_hash=HASH,
+    )
+    result, seen = _submit(respond, submission)
+
+    assert [(request.method, request.url.path) for request in seen] == [
+        ("GET", VERSIONS),
+        ("GET", DISCUSSIONS),
+        ("GET", VERSIONS),
+        ("POST", DISCUSSIONS),
+        ("GET", VERSIONS),
+        ("POST", DISCUSSIONS),
+    ]
+    _assert_gitlab_only(seen)
+    assert posts == [
+        {"body": CONTEXT_INLINE_BODY, "position": POSITION_CONTEXT},
+        {"body": SUMMARY_BODY},
+    ]
+    assert "line_range" not in posts[0]["position"]
+    assert result == SubmittedReview(701, ())
+
+
+def test_posts_rename_discussion_with_distinct_old_and_new_paths() -> None:
+    """CONTEXT §9.5: rename keeps provider old_path and new_path (#171)."""
+    posts: list[dict[str, Any]] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET" and request.url.path == VERSIONS:
+            return httpx.Response(200, json=_versions())
+        if request.method == "GET" and request.url.path == DISCUSSIONS:
+            return httpx.Response(200, json=[])
+        if request.method == "POST" and request.url.path == DISCUSSIONS:
+            posts.append(_json(request))
+            note_id = 701 if "position" not in posts[-1] else 601
+            return httpx.Response(201, json={"id": "disc", "notes": [{"id": note_id, "body": ""}]})
+        raise AssertionError(f"unexpected {request.method} {request.url}")
+
+    submission = ReviewSubmission(
+        installation_id=17,
+        repository_full_name="group/project",
+        pr_number=7,
+        commit_sha=HEAD,
+        event="COMMENT",
+        body=BODY,
+        findings=(FINDING_RENAME,),
+        findings_hash=HASH,
+    )
+    result, seen = _submit(respond, submission)
+
+    assert posts == [
+        {"body": RENAME_INLINE_BODY, "position": POSITION_RENAME},
+        {"body": SUMMARY_BODY},
+    ]
+    assert posts[0]["position"]["old_path"] != posts[0]["position"]["new_path"]
+    assert result == SubmittedReview(701, ())
+    _assert_gitlab_only(seen)
 
 
 def test_posts_new_side_discussions_then_one_summary() -> None:
@@ -134,8 +435,11 @@ def test_posts_new_side_discussions_then_one_summary() -> None:
     assert [(request.method, request.url.path) for request in seen] == [
         ("GET", VERSIONS),
         ("GET", DISCUSSIONS),
+        ("GET", VERSIONS),
         ("POST", DISCUSSIONS),
+        ("GET", VERSIONS),
         ("POST", DISCUSSIONS),
+        ("GET", VERSIONS),
         ("POST", DISCUSSIONS),
     ]
     _assert_gitlab_only(seen)
@@ -284,7 +588,31 @@ def test_position_400_raises_coordinates_once(message: str) -> None:
     assert raised.value.unposted == (FINDING_APP, FINDING_OTHER)
     assert len(posts) == 1
     assert posts[0]["position"]["new_line"] == 3
-    assert version_reads == 2
+    assert version_reads == 3
+
+
+def test_moved_head_after_first_inline_is_stale_without_a_third_post() -> None:
+    posts = 0
+    version_reads = 0
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        nonlocal posts, version_reads
+        if request.method == "GET" and request.url.path == VERSIONS:
+            version_reads += 1
+            if version_reads <= 2:
+                return httpx.Response(200, json=_versions())
+            return httpx.Response(200, json=_current_versions(OTHER_HEAD))
+        if request.method == "GET" and request.url.path == DISCUSSIONS:
+            return httpx.Response(200, json=[])
+        posts += 1
+        return httpx.Response(201, json={"id": "disc", "notes": [{"id": 600 + posts}]})
+
+    with pytest.raises(PublishError) as raised:
+        _submit(respond)
+
+    assert raised.value.kind == "stale_commit"
+    assert posts == 1
+    assert version_reads == 3
 
 
 def test_position_400_after_one_inline_reports_only_the_unposted_finding() -> None:
@@ -318,7 +646,7 @@ def test_position_400_after_the_head_moves_is_stale_commit() -> None:
         nonlocal version_reads
         if request.method == "GET" and request.url.path == VERSIONS:
             version_reads += 1
-            if version_reads == 1:
+            if version_reads <= 2:
                 return httpx.Response(200, json=_versions())
             return httpx.Response(200, json=_current_versions(OTHER_HEAD))
         if request.method == "GET" and request.url.path == DISCUSSIONS:
@@ -329,7 +657,7 @@ def test_position_400_after_the_head_moves_is_stale_commit() -> None:
         _submit(respond)
 
     assert raised.value.kind == "stale_commit"
-    assert version_reads == 2
+    assert version_reads == 3
     assert [item["head_commit_sha"] for item in _current_versions(OTHER_HEAD)] == [
         OTHER_HEAD,
         HEAD,
@@ -393,6 +721,69 @@ def test_unauthorized_and_forbidden_raise_forbidden(status: int) -> None:
 
     assert raised.value.kind == "forbidden"
     assert raised.value.http_status == status
+
+
+@pytest.mark.parametrize("status", [404, 409, 422])
+def test_non_retryable_gitlab_client_errors_raise_forbidden(status: int) -> None:
+    posts: list[dict[str, Any]] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET" and request.url.path == VERSIONS:
+            return httpx.Response(200, json=_versions())
+        if request.method == "GET" and request.url.path == DISCUSSIONS:
+            return httpx.Response(200, json=[])
+        posts.append(_json(request))
+        return httpx.Response(status, json={"message": "not allowed"})
+
+    with pytest.raises(PublishError) as raised:
+        _submit(respond)
+
+    assert raised.value.kind == "forbidden"
+    assert raised.value.http_status == status
+    assert len(posts) == 1
+
+
+def test_rate_limited_post_is_retryable_with_retry_after() -> None:
+    def respond(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST":
+            return httpx.Response(
+                429, json={"message": "rate limit"}, headers={"Retry-After": "15"}
+            )
+        if request.url.path == VERSIONS:
+            return httpx.Response(200, json=_versions())
+        return httpx.Response(200, json=[])
+
+    with pytest.raises(PublishError) as raised:
+        _submit(respond)
+
+    assert raised.value.kind == "retryable"
+    assert raised.value.http_status == 429
+    assert raised.value.retry_after is not None
+    assert raised.value.retry_after.total_seconds() == 15.0
+
+
+def test_discussion_pagination_limit_is_not_retryable() -> None:
+    page = 0
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        nonlocal page
+        if request.method == "POST":
+            raise AssertionError("create must not run when discussion pagination is exhausted")
+        if request.url.path == VERSIONS:
+            return httpx.Response(200, json=_versions())
+        page += 1
+        return httpx.Response(
+            200,
+            json=[{"id": f"p{page}", "notes": [{"id": page, "body": "x"}]}],
+            headers={"X-Total": "5000", "X-Next-Page": str(page + 1)},
+        )
+
+    with pytest.raises(PublishError) as raised:
+        _submit(respond)
+
+    assert raised.value.kind == "forbidden"
+    assert str(raised.value) == "GitLab discussion pagination limit exceeded"
+    assert page == 20
 
 
 @pytest.mark.parametrize("path", [VERSIONS, DISCUSSIONS])
