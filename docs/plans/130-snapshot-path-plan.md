@@ -46,7 +46,7 @@ validates against v1 when no snapshot is attached (`llm/models.py:183-188`). Tha
 | PR | Branch (suggested) | Content | Live change | Merge after |
 |---|---|---|---|---|
 | **F1 prep** | `feat/130-snapshot-path` | path selector; lock 1 lifted behind it; R14; R2; R10 (review, conventions, verifier); manifest table and `context.manifest`; R12; #247 p3; R1/R18; R5; R7; R19; E-1, E-2, E-3, E-7 (time), E-9, E-12; P6-4 | **none**: every new branch needs a run bound to a v2-contract review prompt, and none exists before F2 | C |
-| **F2 switch** | `feat/130-snapshot-switch` (on F1) | `review.system.v4.md`, its `PINNED_PROMPT_CHECKSUMS` entry, flipped pin, seed and golden tests: **one commit** | every new run takes the snapshot path, with the verifier, reserved slots, R5 and R7 | F1 merged **and deployed** |
+| **F2 switch** | `feat/130-snapshot-switch` (on F1) | `review.system.v4.md`, its `PINNED_PROMPT_CHECKSUMS` entry, flipped pin, seed and golden tests: **one commit** | every new run takes the snapshot path, with the verifier, reserved slots, R5 and R7 | F1 merged **and deployed**; the deep engine solved (DD8) |
 | F3 | `fix/168-part6-trace` | P6-1 (covers P6-2), P6-3, P6-5, P6-6 | trace and check-run text only | #304 |
 | F4 | `chore/130-verifier-env` | `LLM_VERIFIER_*` deploy wiring | none while the variables are unset | before phase 3 |
 | F5 | `feat/130-coverage-none` | R4, gated like F1 | dormant until F2 | #283 |
@@ -276,14 +276,22 @@ raises `policy_prompt_budget_exceeded` (terminal), so neither the conventions no
   `VERIFIER_TIME_RESERVE_S`: 90 + 90 + 10 s on the fast engine, so they need 280 s left. The
   snapshot-path verifier keeps `VERIFIER_COMPLETION_RESERVE_S` (10 s, PIPELINE_SPEC §3 "call +
   10 s"), short of which it fails `verification_deadline_exceeded` too (`ReflectionPass` maps both
-  deadline codes). Legacy tasks keep 0 s. The deep engine (300 s calls) needs 700 s for snapshot
-  conventions, more than the 480 s attempt deadline the worker gives every run (eval deep: 600 s):
-  a snapshot-path deep run fails there before its paid call (a legacy deep cache miss whose
-  conventions call takes its whole 300 s cannot fit the review either); review attention for F2.
+  deadline codes). The verifier's refusal names its own completion ("10 s are kept to complete
+  the verification"), not later stages. Legacy tasks keep 0 s.
+- Deep engine (decided by the tech lead on 2026-10-25): on the snapshot path with the deep engine
+  (300 s calls) conventions + review + verifier need 700 s, more than the 480 s attempt deadline
+  the worker gives every run (eval deep: 600 s), so every deep conventions cache miss is refused
+  before its call (honest, no money spent). F1 keeps that. F2 does not merge until deep is solved
+  by a separate design: an attempt deadline derived from the profile, at least the sum of the
+  windows, together with the queue and ack timeouts, or deep repositories kept off the snapshot
+  path (a legacy deep cache miss whose conventions call takes its whole 300 s cannot fit the
+  review either).
 - Eval comparability (decided by the tech lead on 2026-10-25): `app/bootstrap/llm_gateway.py:262`
   passes `case.policy_snapshot`, so the eval snapshot arms (`review/scripts/eval_live.py`) take the
-  snapshot branch: the 3-call review cap, the 100 s reserve, bounded repair and no verifier stage,
-  and their conventions case the 2-slot cap and the 280 s reserve. Accepted: those arms now mirror
+  snapshot branch: the 3-call review cap, the 100 s reserve, bounded repair and no verifier stage.
+  `eval_live.py` has no conventions case: only the bootstrap CLI's `conventions_case`
+  (`app/bootstrap/llm_gateway.py:282`, called at `:372`) gets the 2-slot cap and the 280 s reserve,
+  when its request carries a snapshot. Accepted: those arms now mirror
   the future v4 production budget and are not comparable with older baselines; the new baseline
   comes from the paid R15 re-shoot after F2, only with the tech lead's explicit ok. Goes into the
   PR body.
@@ -371,7 +379,8 @@ Tests: F1-2 shows a v4-bound run without a context stage gets `policy_snapshot_i
 3. Check that the review worker runs the F1 image.
 4. F2 is merged and deployed. Bootstrap seeds v4 as the active version. F2 does not merge while #220
    creates GitLab runs and the stage does not take the provider from the run: such a run would pin v4
-   and fail terminally (TL-13).
+   and fail terminally (TL-13). F2 does not merge until the deep engine is solved (DD8): every deep
+   conventions cache miss on the snapshot path is refused before its call.
 5. Phase 3 smoke: the E-4 double user turn, and the sandbox PRs.
 
 Rolling F2 back to F1 is safe. The floor goes to #297's rollback runbook.
@@ -464,6 +473,15 @@ Rolling F2 back to F1 is safe. The floor goes to #297's rollback runbook.
 - **IMP#144:** answers to Q1–Q7 are in DD2–DD4 and in "#144 stack points". The fail-open at
   `prompt_budget.py:384` and the guard internals stay with #144; F only moves the call point and adds
   `repository_id`.
+
+## Follow-ups
+
+- Deep engine on the snapshot path (DD8, decided by the tech lead on 2026-10-25): a separate design,
+  an attempt deadline derived from the profile (at least the sum of the windows, with the queue and
+  ack timeouts) or deep repositories kept off the snapshot path; it gates F2.
+- `Omission` records (CVS §5.1): the conventions manifest lists only the rendered blocks, and the
+  omitted changed paths and content-less files stay counts in the prompt; `CallManifest` has no
+  `omissions` field yet (it is #303's file).
 
 ## Docs for G (false after F2, not after F1)
 

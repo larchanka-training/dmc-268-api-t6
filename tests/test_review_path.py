@@ -97,6 +97,7 @@ def _store(
     conventions: UUID | None = _CONVENTIONS,
     max_policy_tokens: int = 12_000,
     base: str | None = None,
+    counter_version: str = "counter/v2",
 ) -> Store:
     """Pins as get_pins reads them; a NULL conventions pin leaves the bindings incomplete."""
     bindings = PromptBindings(
@@ -109,7 +110,11 @@ def _store(
         conventions_id=conventions,
         verifier_id=_VERIFIER,
     )
-    profile = replace(make_complete_execution_profile(), max_policy_tokens=max_policy_tokens)
+    profile = replace(
+        make_complete_execution_profile(),
+        max_policy_tokens=max_policy_tokens,
+        counter_version=counter_version,
+    )
     pins = _pins(prompt_bindings=bindings, execution_profile=profile)
     return Store(pins=pins if base is None else replace(pins, policy_base_sha=base))
 
@@ -464,8 +469,11 @@ def _pinned_prepare(
     binding: ReviewBinding,
     snapshot: PolicySnapshot | None,
     pinned: ActiveConventionsPrompt | None = _PINNED,
+    *,
+    events: list[str] | None = None,
+    github: CountingGitHub | None = None,
 ) -> tuple[RecordingConventions, list[str]]:
-    events: list[str] = []
+    events = [] if events is None else events
     repository = PinnedRepository(events, binding=binding, pinned=pinned)
     conventions = RecordingConventions(events)
     asyncio.run(
@@ -474,7 +482,7 @@ def _pinned_prepare(
             None,
             blob_cache=InMemoryBlobCache(),
             conventions=cast(GenerateRepoConventions, conventions),
-            vcs_provider=CountingGitHub(),
+            vcs_provider=CountingGitHub() if github is None else github,
             uow_factory=processing_uow(repository),
             context_stage=Stage(events, snapshot_for_llm=snapshot),
         ).prepare(RUN_ID)
@@ -508,11 +516,17 @@ def test_legacy_conventions_keep_the_active_prompt_and_no_snapshot() -> None:
 def test_snapshot_path_conventions_refuse_a_pin_the_snapshot_does_not_name(
     pinned: ActiveConventionsPrompt | None,
 ) -> None:
+    events: list[str] = []
+    github = CountingGitHub()
+
     with pytest.raises(PolicyError) as raised:
-        _pinned_prepare(_binding("v4"), _snapshot(_store()), pinned)
+        _pinned_prepare(_binding("v4"), _snapshot(_store()), pinned, events=events, github=github)
 
     assert raised.value.code is _INTEGRITY
     assert "conventions prompt" in str(raised.value)
+    # Checked right after the policy load: no diff read or write and no stage run.
+    assert events == ["policy loaded"]
+    assert github.reads == []
 
 
 # ---------- #130 F1-11: snapshot-path conventions keyed by repo-conventions-v2 (R5) ----------
@@ -623,6 +637,17 @@ def test_stage_refuses_a_v4_run_over_the_policy_budget_at_policy_load(
         "policy_prompt_budget_exceeded: The rendered policy documents exceed the token budget "
         f"of the pinned profile | фактически {_POLICY_TOKENS}, допустимо {limit}"
     )
+
+
+def test_stage_counts_the_policy_with_the_counter_of_the_pinned_profile() -> None:
+    # R7: counter/v1 counts the fixture policy as 79 tokens, counter/v2 as 105.
+    store = _store(max_policy_tokens=78, counter_version="counter/v1")
+
+    with pytest.raises(PolicyError) as raised:
+        asyncio.run(_stage(store, Trace()).begin(RUN_ID))
+
+    assert raised.value.code is PolicyErrorCode.PROMPT_BUDGET_EXCEEDED
+    assert (raised.value.limit, raised.value.actual) == (78, 79)
 
 
 def test_stage_lets_the_same_policy_through_on_a_v3_run() -> None:
