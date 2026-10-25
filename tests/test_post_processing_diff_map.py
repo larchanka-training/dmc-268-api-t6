@@ -93,7 +93,7 @@ def test_findings_diff_map_keeps_the_stored_name_and_unshifted_lines(added: str)
         (RowKind.CONTEXT, 2, 4, "b"),
     ]
     assert resolve_anchor(diff_map, path=_PATH, start_line=None, line=2) == Anchor(
-        file.file_id, DiffSide.RIGHT, None, 2, f"{file.file_id}:0"
+        file.file_id, DiffSide.RIGHT, None, 2, file.hunks[0].hunk_id
     )
 
 
