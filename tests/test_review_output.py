@@ -553,7 +553,7 @@ def test_store_review_output_appends_overflow_footer_with_run_url() -> None:
     class FakeReviewRepo:
         async def get_post_processing_input(self, run_id: UUID) -> FindingPostProcessingInput:
             return FindingPostProcessingInput(
-                hunk_lines={"app/example.py": frozenset({10, 12})},
+                diff_map=_added_file_diff_map("app/example.py", 14),
                 checked_paths=frozenset({"app/example.py"}),
                 rule_names=frozenset(),
                 allowed_v2_rules=frozenset(),
@@ -677,7 +677,7 @@ def test_store_review_output_repacks_body_before_overflow_footer() -> None:
     class FakeReviewRepo:
         async def get_post_processing_input(self, run_id: UUID) -> FindingPostProcessingInput:
             return FindingPostProcessingInput(
-                hunk_lines={"app/example.py": frozenset({10, 12})},
+                diff_map=_added_file_diff_map("app/example.py", 14),
                 checked_paths=frozenset({"app/example.py"}),
                 rule_names=frozenset(),
                 allowed_v2_rules=frozenset(),
@@ -803,7 +803,7 @@ def test_store_review_output_persists_dropped_findings_coercion_tail() -> None:
     class FakeReviewRepo:
         async def get_post_processing_input(self, run_id: UUID) -> FindingPostProcessingInput:
             return FindingPostProcessingInput(
-                hunk_lines={"app/example.py": frozenset({10, 12})},
+                diff_map=_added_file_diff_map("app/example.py", 14),
                 checked_paths=frozenset({"app/example.py"}),
                 rule_names=frozenset(),
                 allowed_v2_rules=frozenset(),

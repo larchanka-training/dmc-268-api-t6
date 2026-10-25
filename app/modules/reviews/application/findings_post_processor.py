@@ -190,9 +190,7 @@ class FindingsPostProcessor:
             1 for item in dropped if item.drop_reason == "severity_threshold"
         )
         overview_paths = (
-            checked_paths
-            if checked_paths is not None
-            else frozenset(_checked_paths(diff_map))
+            checked_paths if checked_paths is not None else frozenset(_checked_paths(diff_map))
         )
         review_body, omitted_body_only_count = _pack_review_body(
             output,

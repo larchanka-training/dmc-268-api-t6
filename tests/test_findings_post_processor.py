@@ -130,9 +130,7 @@ def process(  # type: ignore[no-untyped-def]
     checked_paths: frozenset[str] | None = None,
     severity_threshold: SeverityThresholdValue = "all",
 ):
-    resolved_checked = (
-        checked_paths if checked_paths is not None else frozenset({"app/example.py"})
-    )
+    resolved_checked = checked_paths if checked_paths is not None else frozenset({"app/example.py"})
     return FindingsPostProcessor.from_default_patterns().process(
         output(*findings),
         diff_map=diff_map if diff_map is not None else _default_diff_map(),
