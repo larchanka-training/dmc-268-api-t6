@@ -9,7 +9,7 @@ phase 2 of the #130 remainder: R9, R11, R13 (narrowed), R16 and counter parity. 
 [130-verifier-gateway-todo.md](130-verifier-gateway-todo.md).
 
 - Baseline: `origin/main` `1ae74b1a`, single Alembic head `20261020_0037`. E adds no migration.
-- Worktree: `projects/dmc-268-api-t6-130e`. Branch: `feat/130-verifier-gateway`. Test DB and vhost: `imp130e`.
+- Worktree: isolated checkout. Branch: `feat/130-verifier-gateway`. Test DB and vhost: isolated task resources.
 - Every `file:line` below was checked against `1ae74b1a` on 2026-10-24.
 - **Suggested** marks a name or shape the executor may change. **Derived** marks something that follows from
   the cited code rather than from a new decision.
@@ -327,15 +327,16 @@ The overlap lists come from intersecting E's complete file list with each PR's f
 5. **OQ-5, previous-output bound.** Decided by the tech lead on 2026-10-24 (per the coordinator's brief): 24 000 characters.
 6. **OQ-6, carrying `LLM_VERIFIER_*` to staging.** Decided by the tech lead on 2026-10-24 (per the coordinator's brief): no deploy plumbing in E (compose, `env-file.sh`, CI); that is PR F.
 
-## Gates (every task; run `uv sync` first, the worktree has no `.venv`; `df -h /tmp` before long runs)
+## Gates (every task; initialize the isolated environment with `uv sync`; check free disk space before long runs)
 
 ```
 uv run ruff check .
 uv run ruff format --check .
 uv run mypy . --exclude '^docs/reports/'
-TEST_DATABASE_URL=postgresql+psycopg://app:app@localhost:5432/imp130e \
-TEST_RABBITMQ_URL=amqp://app:app@localhost:5672/imp130e uv run pytest
+TEST_DATABASE_URL=<disposable-db-url> \
+TEST_RABBITMQ_URL=<isolated-task-vhost-url> uv run pytest
 ```
 
-Known local-only noise: 7 failures in `tests/test_deploy_monitoring.py` caused by a `~/.local/bin/sh` wrapper.
-They pass with `~/.local/bin` off `PATH`. Use only the database and vhost `imp130e`. Never read any `.env`.
+Known local-only noise: 7 failures in `tests/test_deploy_monitoring.py` caused by a local shell wrapper
+shadowing `sh`. They pass with the wrapper directory off `PATH`. Use only isolated task database and vhost
+resources. Never read any `.env`.

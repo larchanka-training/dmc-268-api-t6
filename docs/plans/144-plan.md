@@ -10,7 +10,7 @@ name) or **derived** (it follows from the cited code or from a repository rule, 
 a new decision).
 Issue: https://github.com/larchanka-training/dmc-268-api-t6/issues/144, epic #139, part 5.
 Baseline: `origin/main` `22c621ab` (#240, landing edge). The single Alembic head is
-`20261020_0037` (`code_index_wake_marker`, #143). Worktree `projects/dmc-268-api-t6-144`.
+`20261020_0037` (`code_index_wake_marker`, #143). Worktree: isolated checkout.
 Branches, stacked: `feat/144-rag-index-review-refresh` (PR 1, from `origin/main`) →
 `feat/144-rag-context-provider` (PR 2, on PR 1). PR 3 gets its own planning session
 (below). Task checklist: [144-todo.md](144-todo.md).
@@ -552,8 +552,8 @@ shape of a `retrieved` item).
 **Environment:**
 
 - fetch over HTTPS (`git -c credential.helper='!gh auth git-credential'`; SSH is closed);
-- the worktree `projects/dmc-268-api-t6-144` from `origin/main`; `uv sync`;
-- the database and the RabbitMQ vhost `dmc_144`; `df /tmp` before long runs.
+- an isolated worktree from `origin/main`; `uv sync`;
+- isolated task database and RabbitMQ vhost resources; check free disk space before long runs.
 
 **Loop per `agent-loop`:**
 
@@ -631,15 +631,15 @@ uv run ruff check .
 uv run ruff format --check .
 uv run mypy . --exclude '^docs/reports/'   # CI runs `uv run mypy .`; the exclude skips the lab-local ignored reports
 uv run pytest
-TEST_DATABASE_URL=postgresql+psycopg://app:app@127.0.0.1:5432/dmc_144 \
-TEST_RABBITMQ_URL=amqp://app:app@127.0.0.1:5672/dmc_144 \
+TEST_DATABASE_URL=<disposable-db-url> \
+TEST_RABBITMQ_URL=<isolated-task-vhost-url> \
   uv run pytest -m integration -rs tests/test_code_index_*_postgres.py tests/test_rag_*.py \
   tests/test_app_reinstall_schema_postgres.py tests/test_worker_queue_postgres.py \
   tests/test_initial_migration.py   # 0 skips
 ```
 
-- `uv run pytest` locally: 7 failures of `test_deploy_monitoring` come from the
-  `~/.local/bin/sh` wrapper; run without it in `PATH`.
+- `uv run pytest` locally: 7 failures of `test_deploy_monitoring` come from a local shell wrapper
+  shadowing `sh`; run with its directory off `PATH`.
 - `tests/test_alembic_heads.py` carries no `integration` marker and runs in the plain gate.
 - Migration (PR 1): `uv run alembic heads` shows one head; upgrade → downgrade → upgrade on
   a clean database.

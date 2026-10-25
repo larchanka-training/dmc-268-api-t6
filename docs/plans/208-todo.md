@@ -1,11 +1,13 @@
 # Tasks: worker documentation and historical environment traces (#208)
 
 Plan/inventory: [208-plan.md](208-plan.md). Initial base: `22c621ab`;
-current integration point: `74b42a7134fb9f272d93c913344e5b826b03b523`.
+current integration point: `4faa03dd7accfa161048f584b834b314fa1ab5b6`.
 Status: approved by the user with “Ок” on 2026-10-24; Task 1 review passed;
 initial implementation published as PR #260 and round 1 corrections approved.
-Round 2 current-main rebase/audit and all gates pass; fresh review reports
-Standards 0 / Spec 0 and publisher handoff is complete. The preceding published integration passed all gates
+Merge preparation rebase/audit and all gates pass after the complete two-worker
+Linux retry; the first failed run remains recorded. Fresh review reports
+Standards 0 / Spec 0 and publisher handoff is complete. Prior published integration
+passed all gates and fresh review. The preceding published integration passed all gates
 and fresh review. The preceding macOS
 failure and successful `24910a0d` Linux run are retained. Completed Tasks 1–3 and round-1 outcomes
 below are historical, not current-round gates.
@@ -238,7 +240,7 @@ renewed approval question, merge or issue closure is part of this round.
       publication instructions delivered. Publisher handoff is complete; remote
       publication/review-response outcomes remain on PR #260.
 
-### Current integration checkpoint: `74b42a7`
+### Published integration checkpoint: `74b42a7` (historical)
 
 - [x] Fetch current main and rebase all three own documentation commits onto
       `74b42a7134fb9f272d93c913344e5b826b03b523`; no conflict. All three patches
@@ -265,3 +267,39 @@ renewed approval question, merge or issue closure is part of this round.
       expected prior-head lease `8e33974803dd5ee5d1f1c51f9134638a4cd4de97`,
       preserved non-draft status/reviewer and reply/re-review instructions.
       Remote publication outcomes remain on the PR.
+
+### Merge preparation checkpoint: `4faa03d`
+
+- [x] Rebase four own documentation commits onto current main
+      `4faa03dd7accfa161048f584b834b314fa1ab5b6`; no conflicts. Range-diff:
+      all four patches equivalent (`=`), head `90308a02` before bookkeeping.
+- [x] Audit four newly merged `130-verifier-gateway-*`/`144-*` plans. Sanitize
+      local checkout/DB/vhost/URL/temp-disk/wrapper traces; preserve result/proof,
+      dates, hashes, statuses, selection and workaround mechanisms.
+- [x] Correct fresh Spec findings: generalize the model-fixture loopback URL and
+      missed wrapper path, preserving expectations and seven-failure workaround.
+      Public dev sandbox provenance remains permitted; current scan
+      152 lines/37 files → 18 lines/9 files.
+- [x] Inventory 117 main/119 branch plans; 44-doc scope: 41 historical documents,
+      worker and two #208 plans. Prior accepted corrections and stock proofs intact.
+- [x] Source/test/workflow/config/dependency diff empty; diff check passes.
+      Current static gates: Ruff lint PASS; format PASS, 590 files; mypy PASS,
+      580 source files.
+- [x] Refresh tracked-only snapshot: 1163 matching files, independent Git metadata,
+      no untracked environment files/secrets; unchanged lock permits runtime reuse.
+- [x] Record first current Linux `uv run pytest -n 4 --junitxml=<private-output>/pytest.xml`:
+      exit 1; 2 failed, 5369 passed, 1018 skipped, 8 warnings in 333.47s; 6389 tests.
+      Two unchanged worker-shutdown process cases timed out at 8 seconds.
+- [x] Verify the two failed cases unchanged: 2 passed in 7.38s, exit 0; no container
+      CPU quota. Original 8-second timeout and strictness retained.
+- [x] Complete the full two-worker retry, keeping every test:
+      `uv run pytest -n 2 --junitxml=<private-output>/pytest-n2.xml`; 5371 passed,
+      1018 skipped, 4 warnings in 260.67s; exit 0; all 6389 tests collected.
+      Python 3.13.11/Bash 5.2.15; service integration URLs absent, skips not
+      executed. Both full attempts and focused logs/XML retained privately.
+- [x] Fresh independent Standards/Spec review reports zero actionable findings.
+- [x] Hand frozen files/actual evidence to publisher with expected prior head
+      `fa4bb7453333752f658eeec6337db5f4e482144e`, existing non-draft PR260 metadata
+      and current-head reapproval/green-CI protected-merge instructions. Coordinator
+      confirms merge before moving issue #208 to AC Check; remote outcomes stay on
+      the PR/board. No issue closure or acceptance-checkbox edit.

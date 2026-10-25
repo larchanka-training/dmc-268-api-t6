@@ -6,8 +6,9 @@ Docs-only work initially based on main `22c621ab`, issue #208 and its 23 October
 clarification; refreshed onto main `25c83fe0d024270e9a744850baa9721cb0ede617`
 after PR #256 merged. Review round 1 rebases the existing PR #260 onto
 `1ae74b1ae8fb48aed9dc4d9e913bf4c916d5a813`. Review round 2 rebases onto
-`24910a0d281d9d71e8362bc89e1925c8c37398bf`, then `05a96bc422468a570bab3233b11b538eb4a87ff6` and current main
-`74b42a7134fb9f272d93c913344e5b826b03b523` after source changes and new plans
+`24910a0d281d9d71e8362bc89e1925c8c37398bf`, then `05a96bc422468a570bab3233b11b538eb4a87ff6` and main
+`74b42a7134fb9f272d93c913344e5b826b03b523`, then current main
+`4faa03dd7accfa161048f584b834b314fa1ab5b6` after source changes and new plans
 landed. Upstream source remains unmodified. Correct two paragraphs in `docs/WEBHOOK_WORKER.md`; sanitize
 machine-specific references throughout tracked `docs/plans/`, including JSON
 metadata. Preserve historical counts, durations, warnings/skips, hashes,
@@ -415,7 +416,7 @@ The frozen files, actual gates and publication instructions have been delivered
 for the existing non-draft PR; publisher handoff is complete. Remote publication
 and review-response outcomes remain recorded on PR #260.
 
-### Current integration checkpoint: `74b42a7`
+### Published integration checkpoint: `74b42a7` (historical)
 
 Main advanced by three merged #168 parser CPU-limit commits. All three own
 documentation commits rebased without conflict onto fetched current main
@@ -452,3 +453,51 @@ Full log/XML are retained privately. The preceding `05a96bc4` result is historic
 Fresh independent review reports **Standards 0 / Spec 0**. Frozen files, actual
 gates and the current expected-head lease have been delivered to the publisher;
 handoff is complete. Remote publication and review-response outcomes remain on PR #260.
+
+### Merge preparation checkpoint: `4faa03d`
+
+After explicit authorization to merge PR #260 and then move issue #208 to
+AC Check, all four own documentation commits rebased without conflict onto
+fetched current main `4faa03dd7accfa161048f584b834b314fa1ab5b6`, producing
+head `90308a027158ab0036a49577aee0781c0e814db4` before bookkeeping.
+All four replayed patches remain range-diff equivalent (`=`).
+
+The four new `130-verifier-gateway-*`/`144-*` plans contained local checkout,
+database/vhost, loopback service URL, temporary-disk and shell-wrapper traces.
+Only those references were generalized; failed/successful results, dates,
+revisions, hashes, task states, test selection and workaround mechanisms remain
+intact. Fresh review identified the model-fixture loopback URL and one remaining shell-wrapper
+path; both are now generalized, retaining exact model/error expectations and
+the seven-failure result/workaround. Public dev sandbox repository/App provenance
+remains under the existing public staging exception, adding one permitted line.
+
+Current inventory: 117 main/119 branch plans; issue scan 152 lines/37 files before
+and 18 permitted lines/9 files after. Scope is 44 documents: 41 historical
+documents, the worker and two #208 plans. Existing accepted documents, worker
+text/table and stock proofs are intact. Source/test/workflow/config/dependency
+diffs against current main are empty; `git diff --check` passes. Static gates
+pass: Ruff lint, format (590 files), and mypy (580 source files).
+
+The first current Linux full run used
+`uv run pytest -n 4 --junitxml=<private-output>/pytest.xml` and exited **1**:
+**2 failed, 5369 passed, 1018 skipped, 8 warnings in 333.47s** (6389 tests).
+Both failures were 8-second subprocess timeouts in
+`tests/test_worker_shutdown_process.py`: the resistant-pipeline resources/lease
+backstop case and watchdog-failed-pipeline join-before-teardown case. This is a
+failed gate. Focused verification of those two unchanged cases passed:
+**2 passed in 7.38s**, exit **0**. The container CPU quota was unrestricted.
+The second full attempt retained every test with two workers:
+`uv run pytest -n 2 --junitxml=<private-output>/pytest-n2.xml`; **5371 passed,
+1018 skipped, 4 warnings in 260.67s**, exit **0**, all 6389 tests collected.
+Both full-attempt logs/XML and focused evidence are retained privately.
+No test timeout, source or strictness is changed. Its tracked-only
+snapshot matched 1163 files with independent Git metadata; no untracked
+environment files or host secrets were copied. The lockfile is unchanged and
+the verified task runtime is reused with frozen synchronization. Runtime remains
+Linux arm64, Python 3.13.11 and Bash 5.2.15. Database/RabbitMQ/Redis integration
+URLs are absent; skips must not count as executed integrations. Earlier runs
+are historical. Fresh independent review reports **Standards 0 / Spec 0**.
+Frozen documentation, actual verification outcomes and the expected prior-head
+lease have been delivered to the publisher; handoff is complete. The coordinator owns current-head reapproval, green CI and protected
+merge, followed by the board move only after confirmed merge. No protection
+bypass, issue closure or acceptance-checkbox edit is authorized here.
