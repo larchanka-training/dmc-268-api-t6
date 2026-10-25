@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       image:
-        description: "Image tag or digest. Leave empty to restore the previous successful deploy."
+        description: "Image tag/digest; empty uses .deploy-state.previous. After auto rollback or docker login failure it may reapply the current release; use an explicit SHA/digest to go farther back."
         required: false
         type: string
       reason:
