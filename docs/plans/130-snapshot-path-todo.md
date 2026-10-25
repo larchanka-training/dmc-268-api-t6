@@ -219,7 +219,11 @@ Gates for every task: the four commands in the plan, with DB and vhost `imp130f`
   - bounded repair is on;
   - the review is refused (`verification_deadline_exceeded`) when the time left is under its call + 90 s + 10 s;
   - legacy tasks are unchanged.
-- **Done when:** [ ] F1-1 green.
+  - as built (`tests/test_llm_gateway_snapshot_reserve.py`): the task fields of all four adapters;
+    the chain; snapshot conventions send a failed C1 to the fallback; the 189 s / 190 s boundary
+    (terminal, `classify_failure` keeps the code); every recovery call and the retry backoff keep
+    the window; legacy at 89 s / 100 s keeps `deadline_exceeded` and its message.
+- **Done when:** [x] F1-1 green.
 
 ### F1-10: R18, R1 conventions, T-b, T-c ⚑
 - **Commit:** `feat(reviews): give conventions the pinned prompt and the snapshot (#130)`

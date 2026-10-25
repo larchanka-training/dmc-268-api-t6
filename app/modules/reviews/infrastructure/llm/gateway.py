@@ -104,6 +104,9 @@ _BOUNDED_REPAIR_INSTRUCTION = (
 )
 # PIPELINE_SPEC §3: a verifier call waits at most 90 s, on the deep engine as well.
 _VERIFIER_CALL_TIMEOUT_S = 90.0
+# CVS §7.4 (E-7): what a snapshot-path review keeps of its attempt for the verifier: one
+# verifier call and 10 s of local completion.
+VERIFIER_TIME_RESERVE_S = _VERIFIER_CALL_TIMEOUT_S + 10.0
 # E-2: the top-level keys of a redacted provider body; none of them carries model text.
 _STORED_BODY_KEYS = ("id", "object", "created", "model", "provider", "system_fingerprint", "usage")
 _USD_QUANTUM = Decimal("0.000001")
@@ -156,11 +159,15 @@ class StructuredTask:
     # Which model pair answers: the review pair or ``LlmSettings.verifier_route()``.
     route: Literal["review", "verifier"] = "review"
     # RFS §8.1: repair gets the previous answer as escaped, bounded data, not as an
-    # assistant turn. Off for live review and conventions until F turns it on.
+    # assistant turn. On for snapshot-path review and conventions (E-12); legacy stays off.
     bounded_repair: bool = False
     # CVS §7.3: provider-call slots of this (run, attempt) kept for the stages after
-    # this task (the review keeps one for the verifier). F sets it; live stays at 0.
+    # this task (the review keeps one for the verifier). Snapshot path only; legacy stays 0.
     reserved_calls: int = 0
+    # CVS §7.4 (E-7): seconds of the attempt kept after each call of this task for the
+    # stages after it; a call short of its timeout plus these fails with
+    # verification_deadline_exceeded. Snapshot-path review only; legacy stays 0.
+    reserved_seconds: float = 0.0
     # How a stored ``llm.call`` response shows the answer text (E-2: the verifier's
     # without ``decisions[].reason``); None stores the provider body as is.
     redact_answer: Callable[[str], str] | None = None
@@ -168,6 +175,8 @@ class StructuredTask:
     def __post_init__(self) -> None:
         if self.reserved_calls < 0:
             raise ValueError(f"reserved_calls must not be negative: {self.reserved_calls}")
+        if self.reserved_seconds < 0:
+            raise ValueError(f"reserved_seconds must not be negative: {self.reserved_seconds:g}")
 
 
 @dataclass(frozen=True)
@@ -379,9 +388,9 @@ class LlmGateway:
                 continue
             else:
                 break
-            if self._seconds_left(context) - delay < timeout_s:
-                # Sleeping would leave less than one call timeout: no same-model
-                # retry; the fallback still gets the time that is left.
+            if self._seconds_left(context) - delay < timeout_s + task.reserved_seconds:
+                # Sleeping would leave less than one call timeout (and the task's time
+                # reserve): no same-model retry; the fallback still gets the time left.
                 break
             await self._sleep(delay)
             kind = LlmCallKind.RETRY
@@ -475,12 +484,8 @@ class LlmGateway:
         policy = self._settings.policy
         timeout_s = self._call_timeout_s(task, context)
         remaining = self._seconds_left(context)
-        if remaining < timeout_s:
-            raise self._failed(
-                LlmErrorCode.DEADLINE_EXCEEDED,
-                f"{remaining:.0f} s left before the attempt deadline, a call needs {timeout_s:g} s",
-                state,
-            )
+        if remaining < timeout_s + task.reserved_seconds:
+            raise self._out_of_time(task, remaining, timeout_s, state, ",")
         estimate = self._estimate(profile, messages, task.counter)
         limit = self.context_limit(profile, context.engine)
         if estimate + profile.max_output_tokens > limit:
@@ -504,13 +509,8 @@ class LlmGateway:
                     LlmErrorCode.UNAVAILABLE, "ECB EUR/USD quote cannot price this call", state
                 ) from None
             remaining = self._seconds_left(context)
-            if remaining < timeout_s:
-                raise self._failed(
-                    LlmErrorCode.DEADLINE_EXCEEDED,
-                    f"{remaining:.0f} s left before the attempt deadline; "
-                    f"a call needs {timeout_s:g} s",
-                    state,
-                )
+            if remaining < timeout_s + task.reserved_seconds:
+                raise self._out_of_time(task, remaining, timeout_s, state, ";")
         spent = await self._ledger.run_cost_usd(context.run_id)
         next_cost = price.cost_usd(tokens_in=estimate, tokens_out=profile.max_output_tokens)
         cost_limit = policy.run_cost_limit_usd[context.engine]
@@ -525,12 +525,8 @@ class LlmGateway:
         # attempt call allowance; transport also fences every actual HTTP request.
         await self._checkpoint(context)
         remaining = self._seconds_left(context)
-        if remaining < timeout_s:
-            raise self._failed(
-                LlmErrorCode.DEADLINE_EXCEEDED,
-                f"{remaining:.0f} s left before the attempt deadline; a call needs {timeout_s:g} s",
-                state,
-            )
+        if remaining < timeout_s + task.reserved_seconds:
+            raise self._out_of_time(task, remaining, timeout_s, state, ";")
 
         if attempt.calls >= policy.max_calls_per_attempt - task.reserved_calls:
             # Guards concurrent generations of one attempt, not only their entry.
@@ -568,13 +564,8 @@ class LlmGateway:
         async def checkpoint() -> None:
             await self._checkpoint(context)
             remaining = self._seconds_left(context)
-            if remaining < timeout_s:
-                raise self._failed(
-                    LlmErrorCode.DEADLINE_EXCEEDED,
-                    f"{remaining:.0f} s left before the attempt deadline; "
-                    f"a call needs {timeout_s:g} s",
-                    state,
-                )
+            if remaining < timeout_s + task.reserved_seconds:
+                raise self._out_of_time(task, remaining, timeout_s, state, ";")
 
         try:
             response = await self._transport.complete(
@@ -880,6 +871,27 @@ class LlmGateway:
             if manifest is None
             else state.manifests.get(manifest.call_id),
         )
+
+    def _out_of_time(
+        self,
+        task: StructuredTask,
+        remaining: float,
+        timeout_s: float,
+        state: _AttemptState,
+        separator: str,
+    ) -> LlmCallFailed:
+        """The refusal of a call short of its timeout plus the task's time reserve (E-7)."""
+        message = (
+            f"{remaining:.0f} s left before the attempt deadline{separator} "
+            f"a call needs {timeout_s:g} s"
+        )
+        if task.reserved_seconds:
+            return self._failed(
+                LlmErrorCode.VERIFICATION_DEADLINE_EXCEEDED,
+                f"{message} and {task.reserved_seconds:g} s are kept for later stages",
+                state,
+            )
+        return self._failed(LlmErrorCode.DEADLINE_EXCEEDED, message, state)
 
     @staticmethod
     def _failed(
