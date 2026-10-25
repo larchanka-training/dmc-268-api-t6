@@ -696,6 +696,83 @@ def test_no_prose_warning_with_blocked_by_or_without_a_blocked_by_group(
     assert r.stderr == ""
 
 
+@pytest.mark.parametrize(
+    "label,value",
+    [
+        # the team's own spellings (a survey of 300 ui/api issue bodies)
+        ("Блокирующие", ["Нет."]),
+        ("Блокирующие", ["нет"]),
+        ("Блокирующие", ["Нет"]),
+        ("Блокирующие", ["нет."]),
+        ("Блокирующие", ["Нет: всё — правки документов на main."]),
+        ("Блокирующие", ["Нет; выпуск согласовать …"]),
+        ("Блокируется", ["  НЕТ  "]),
+        ("Блокирующие", "нет"),  # a string is one item
+        ("Блокирующие", ["нет", "—"]),  # every item says none
+        ("Blocked by", ["none"]),
+        ("Blocked by", ["None."]),
+        ("Blocked by", ["No"]),
+        ("Blocked by", ["no, the API is live"]),
+        ("Blocked by", ["none — the API is live"]),
+        ("Blocked by", ["no – merged on main"]),
+        ("Blocked by", ["none - nothing waits"]),
+        ("Blocked by", ["N/A"]),
+        ("Blocked by", ["n/a."]),
+        ("Blocked by", ["—"]),
+        ("Blocked by", ["–"]),
+        ("Blocked by", ["-"]),
+        ("Blockiert durch", ["keine"]),
+        ("Blockiert durch", ["Keine."]),
+        ("Blockiert durch", ["keine – alles auf main"]),
+    ],
+    ids=[
+        "ru-Net-dot", "ru-net", "ru-Net", "ru-net-dot", "ru-colon", "ru-semicolon",
+        "ru-upper-padded", "ru-string", "ru-net-and-dash", "en-none", "en-None-dot", "en-No",
+        "en-comma", "en-em-dash", "en-en-dash", "en-hyphen", "en-N/A", "en-n/a-dot",
+        "em-dash-alone", "en-dash-alone", "hyphen-alone", "de-keine", "de-Keine-dot",
+        "de-en-dash",
+    ],
+)  # fmt: skip
+def test_a_blocked_by_group_that_says_only_none_is_no_blocker(label: str, value: Any) -> None:
+    """«нет» under «Блокирующие» is how the team writes "no blockers" (#262 itself does):
+    no link is missing, so no warning — the body still shows the group as written."""
+    spec = mini(dependencies={label: value})
+    r = run(spec)
+    assert r.returncode == 0, r.stderr
+    assert r.stdout == bib.render_body(spec)
+    assert r.stderr == ""
+
+
+@pytest.mark.parametrize(
+    "dependencies,label",
+    [
+        ({"Блокирующие": ["нет", "#4 — the API this work calls"]}, "Блокирующие"),
+        # a none-only group does not end the search: the next blocked-by group counts
+        ({"Blocked by": ["нет"], "Блокирующие": ["#4"]}, "Блокирующие"),
+        # not a marker: a word that starts with one, or a dash that is not spaced
+        ({"Blocked by": ["no-op …"]}, "Blocked by"),
+        ({"Blocked by": ["none of the tests run until #4 lands"]}, "Blocked by"),
+        ({"Blocked by": ["nobody can start before #4"]}, "Blocked by"),
+        ({"Blocked by": ["нет—#4 сначала"]}, "Blocked by"),
+        ({"Блокирующие": ["Решение техлида …"]}, "Блокирующие"),
+        # a dash counts only alone
+        ({"Blocked by": ["— #4 must land first"]}, "Blocked by"),
+        # a paragraph: a later line may name the blocker
+        ({"Блокирующие": "Нет: всё на main.\n#4 — блокирует выпуск"}, "Блокирующие"),
+    ],
+    ids=[
+        "none-beside-a-real-item", "none-group-then-a-real-group", "no-op", "none-of",
+        "nobody", "unspaced-dash", "decision-pending", "dash-with-text", "multiline",
+    ],
+)  # fmt: skip
+def test_a_blocked_by_group_with_anything_but_none_still_warns(
+    dependencies: dict[str, Any], label: str
+) -> None:
+    r = run(mini(dependencies=dependencies))
+    assert r.returncode == 0, r.stderr
+    assert warnings_of(r) == [prose_warning(label)]
+
+
 @pytest.mark.parametrize("flag", ["--emit-args", "--emit-links"])
 def test_the_prose_warning_comes_with_the_body_only(flag: str) -> None:
     """issue-create.sh runs the builder three times (body, argv, links): the warning

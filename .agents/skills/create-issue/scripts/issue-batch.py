@@ -92,6 +92,10 @@ BOARD_REPAIR = "gh project item-add 12 --owner larchanka-training --url {url}"
 # started_at is this machine's clock, GitHub's createdAt its own: an issue created up to
 # this many seconds before started_at still counts as created since the batch started.
 CLOCK_SKEW_S = 120
+# A first run has no started_at: an open issue of yours with the item's exact title,
+# created at most this many seconds ago (or up to CLOCK_SKEW_S ahead), may be one that a
+# run whose state file is lost created — an older one is other work.
+FRESH_S = 24 * 60 * 60
 
 
 class BatchError(Exception):
@@ -470,28 +474,66 @@ def refusal(dup: dict[str, Any], started_at: str | None, user: Any) -> str | Non
     return None
 
 
-def maybe_own(dup: dict[str, Any], started_at: str | None, user: Any) -> bool:
-    """A refused duplicate that may be the batch's own issue all the same: on a rerun,
-    one you opened — closed since, or created while this machine's clock ran ahead by
-    more than CLOCK_SKEW_S. Only a person can tell, so the stop says how to record it."""
-    author = dup.get("author")
-    return (
-        started_at is not None
-        and isinstance(author, str)
-        and isinstance(user, str)
-        and bool(user)
-        and author.lower() == user.lower()
+def fresh(created_at: Any) -> bool:
+    """createdAt within FRESH_S before now, or at most CLOCK_SKEW_S after it (GitHub's
+    clock ahead of this one); a missing or unparsable one is not fresh."""
+    created, now = when(created_at), when(now_utc())
+    # CONTRACT: now_utc() always parses — when() is None only for the createdAt.
+    assert now is not None
+    return created is not None and (
+        now - timedelta(seconds=FRESH_S) <= created <= now + timedelta(seconds=CLOCK_SKEW_S)
     )
 
 
+def maybe_own(dup: dict[str, Any], started_at: str | None, user: Any) -> bool:
+    """A refused duplicate that may be the batch's own issue all the same: one you opened
+    — on a rerun, closed since or created while this machine's clock ran ahead by more
+    than CLOCK_SKEW_S; on a first run, open and fresh(), created by a run whose state
+    file is lost (a new container, another machine, another XDG_CACHE_HOME). Only a
+    person can tell, so the stop says how to record it."""
+    author = dup.get("author")
+    if not (
+        isinstance(author, str)
+        and isinstance(user, str)
+        and bool(user)
+        and author.lower() == user.lower()
+    ):
+        return False
+    if started_at is not None:
+        return True
+    return str(dup.get("state") or "").upper() == "OPEN" and fresh(dup.get("createdAt"))
+
+
 RENAME = "give the item another title or settle that issue, then rerun"
+# The way out after recording, in every hint that offers it: a new title would file the
+# batch's own issue a second time.
+NO_RENAME = (
+    "do not rename the item, that files it a second time; only if that issue is other "
+    f"work, {RENAME}"
+)
 
 
 def how_to_record(key: str, state_file: str) -> str:
-    """The way out for a duplicate maybe_own() flags: first recording it, then RENAME."""
+    """The way out for a duplicate maybe_own() flags once the state file exists: first
+    recording it, then NO_RENAME."""
     return (
         f"if it is this batch's own issue, add it to {state_file} (`items.{key}`: url, "
-        f"number, repo, summary) and rerun; or {RENAME}"
+        f"number, repo, summary) and rerun; {NO_RENAME}"
+    )
+
+
+def how_to_start(item: dict[str, Any], dup: dict[str, Any], path: Path) -> str:
+    """The way out for a duplicate maybe_own() flags on a first run, before the state
+    file exists: the whole file load_state() accepts, ready to write. started_at is the
+    issue's createdAt, so a rerun also adopts the issues that lost run created after it."""
+    record = {"url": dup.get("url"), "number": dup.get("number"), "repo": item["repo"]}
+    state = {
+        "started_at": dup.get("createdAt"),
+        "items": {item["key"]: {**record, "summary": item["summary"]}},
+    }
+    return (
+        "if it is this batch's own issue (a run whose state file is lost created it), write "
+        f"{path} as {json.dumps(state, ensure_ascii=False)} and rerun; {NO_RENAME}"
     )
 
 
@@ -682,8 +724,12 @@ def run(
         dup = out.get("duplicate")
         why = refusal(dup, started, out.get("user")) if isinstance(dup, dict) else None
         if isinstance(dup, dict) and why is not None:
-            own = maybe_own(dup, started, out.get("user"))
-            fix = how_to_record(key, f"the state file {path}") if own else RENAME
+            if not maybe_own(dup, started, out.get("user")):
+                fix = RENAME
+            elif rerun:
+                fix = how_to_record(key, f"the state file {path}")
+            else:  # nothing is written yet: the hint names the whole file
+                fix = how_to_start(item, dup, path)
             err(f'item "{key}": {named(dup)}; not adopted: {why} — nothing was created; {fix}', 4)
     if todo and not rerun:
         # CONTRACT: started_at is on disk before the first create — a rerun adopts only an

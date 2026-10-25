@@ -655,6 +655,17 @@ def test_the_adoption_rule_at_its_edges(tmp_path: Path, dup: dict[str, Any]) -> 
 
 
 OWN_HINT = "if it is this batch's own issue, add it to the state file"
+# Every hint that offers to record the issue: renaming the item would file it again.
+NO_RENAME = (
+    "do not rename the item, that files it a second time; only if that issue is other work, "
+    "give the item another title or settle that issue, then rerun"
+)
+
+
+def ago(**delta: float) -> str:
+    """A createdAt as GitHub writes it, `delta` before now (UTC, whole seconds)."""
+    moment = time.time() - timedelta(**delta).total_seconds()
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(moment))
 
 
 @pytest.mark.parametrize(
@@ -697,6 +708,7 @@ def test_a_rerun_stops_at_a_duplicate_it_may_not_adopt(
         r
     )
     assert (OWN_HINT in error(r)) is own
+    assert (NO_RENAME in error(r)) is own
 
 
 @pytest.mark.parametrize(
@@ -707,8 +719,9 @@ def test_a_rerun_stops_at_a_duplicate_it_may_not_adopt(
             (
                 "not adopted: it is closed — what was created so far is recorded in {path}; if "
                 "it is this batch's own issue, add it to the state file (`items.a`: url, number, "
-                "repo, summary) and rerun; or give the item another title or settle that issue, "
-                "then rerun the same command (recorded items are not created again)"
+                "repo, summary) and rerun; do not rename the item, that files it a second time; "
+                "only if that issue is other work, give the item another title or settle that "
+                "issue, then rerun the same command (recorded items are not created again)"
             ),
         ),
         (
@@ -750,27 +763,184 @@ def test_the_validation_says_how_to_record_a_refused_issue_that_may_be_the_batch
         "2026-10-24T11:57:59Z); not adopted: it was created more than 120 s before this batch "
         f"started ({STARTED}) — nothing was created; if it is this batch's own issue, add it "
         f"to the state file {state_path(tmp_path)} (`items.b`: url, number, repo, summary) "
-        "and rerun; or give the item another title or settle that issue, then rerun"
+        "and rerun; do not rename the item, that files it a second time; only if that issue is "
+        "other work, give the item another title or settle that issue, then rerun"
     )
 
 
-def test_a_first_run_offers_no_issue_for_the_state_file(tmp_path: Path) -> None:
-    """Nothing can be the batch's own yet — and the state file does not exist."""
-    cfg = cfg_create(a={"dry_duplicate": {"number": 55}})
-    r, _ = run(tmp_path, batch(item("a")), cfg=cfg)
+@pytest.mark.parametrize(
+    "dup",
+    [
+        {"number": 55, "author": "teammate", "createdAt": "fresh"},
+        {"number": 55, "state": "CLOSED", "createdAt": "fresh"},
+        {"number": 55, "createdAt": "48h"},  # yours and open, but older than a day
+        {"number": 55, "createdAt": None},
+        {"number": 55, "createdAt": "yesterday"},
+        {"number": 55, "createdAt": "2099-01-01T00:00:00Z"},  # past the clock-skew margin
+        {"number": 55, "author": None, "createdAt": "fresh"},
+    ],
+    ids=["teammate", "closed", "older-than-a-day", "no-created-at", "unparsable", "future",
+         "no-author"],
+)  # fmt: skip
+def test_a_first_run_offers_no_issue_for_the_state_file(
+    tmp_path: Path, dup: dict[str, Any]
+) -> None:
+    """Only a fresh open issue of yours may be the batch's own on a first run (from a
+    run whose state file is lost); any other is somebody's work — or your older work —
+    so renaming the item is the only way out, as before."""
+    created = {"fresh": ago(hours=1), "48h": ago(hours=48)}
+    dup = dict(dup, createdAt=created.get(dup["createdAt"], dup["createdAt"]))
+    r, _ = run(tmp_path, batch(item("a")), cfg=cfg_create(a={"dry_duplicate": dup}))
     assert r.returncode == 4
     assert error(r).endswith(
         "did not create it — nothing was created; give the item another title or settle that "
         "issue, then rerun"
     )
+    assert "this batch's own issue" not in error(r)
     assert not state_path(tmp_path).exists()
 
 
-def test_a_first_run_never_adopts_a_duplicate(tmp_path: Path) -> None:
-    """Even one that is open, yours and newer than the start: on a first run no issue
-    can be the batch's own yet."""
+def test_a_first_run_says_how_to_write_the_lost_state_of_a_fresh_issue_of_yours(
+    tmp_path: Path,
+) -> None:
+    """A new container, another machine or another XDG_CACHE_HOME: the state file of the
+    run that created the issue is gone. Renaming would file it a second time, so the stop
+    names the whole state file to write — started_at its createdAt — and where."""
+    fresh = ago(hours=1)
+    dup = {"number": 55, "createdAt": fresh}
+    r, calls = run(tmp_path, batch(item("a"), item("b")), cfg=cfg_create(b={"dry_duplicate": dup}))
+    assert r.returncode == 4
+    assert creates(calls) == [] and links(calls) == [], "nothing runs after the validation"
+    assert not state_path(tmp_path).exists()
+    assert r.stdout == ""
+    assert error(r) == (
+        'item "b": an issue with exactly this title already exists: '
+        f"https://github.com/acme/api/issues/55 (OPEN, by octocat, created {fresh}); not "
+        "adopted: this is the first run of the batch, so the batch did not create it — nothing "
+        "was created; if it is this batch's own issue (a run whose state file is lost created "
+        f'it), write {state_path(tmp_path)} as {{"started_at": "{fresh}", "items": {{"b": '
+        '{"url": "https://github.com/acme/api/issues/55", "number": 55, "repo": "acme/api", '
+        '"summary": "[x] b"}}} and rerun; do not rename the item, that files it a second '
+        "time; only if that issue is other work, give the item another title or settle that "
+        "issue, then rerun"
+    )
+
+
+@pytest.mark.parametrize(
+    "dup",
+    [
+        {"number": 55, "author": "OctoCat"},  # logins compare without case
+        {"number": 55, "state": "open"},  # the REST listing's spelling
+        {"number": 55, "createdAt_age": {"hours": 23, "minutes": 55}},  # just under a day
+    ],
+    ids=["login-case", "state-case", "under-a-day"],
+)
+def test_the_first_run_hint_at_its_edges(tmp_path: Path, dup: dict[str, Any]) -> None:
+    dup = dict(dup)
+    age = dup.pop("createdAt_age", {"hours": 1})
+    dup["createdAt"] = ago(**age)
+    r, _ = run(tmp_path, batch(item("a")), cfg=cfg_create(a={"dry_duplicate": dup}))
+    assert r.returncode == 4
+    assert f'write {state_path(tmp_path)} as {{"started_at": "{dup["createdAt"]}"' in error(r)
+    assert error(r).endswith(f"and rerun; {NO_RENAME}")
+
+
+def test_the_state_file_the_first_run_names_resumes_the_batch(tmp_path: Path) -> None:
+    """Written exactly as the hint says, the file loads: the issue is recorded, nothing is
+    created, its links are ensured — the hint leads to a resume, not to a duplicate."""
+    data = batch(item("a", blocked_by=["#7"]))
+    fresh = ago(hours=1)
+    cfg = cfg_create(a={"dry_duplicate": {"number": 55, "createdAt": fresh}})
+    first, _ = run(tmp_path, data, cfg=cfg)
+    assert first.returncode == 4
+    hint = error(first)
+    path = Path(hint.split("write ", 1)[1].split(" as ", 1)[0])
+    assert path == state_path(tmp_path)
+    start = hint.index('{"started_at"')
+    _, end = json.JSONDecoder().raw_decode(hint, start)
+    path.parent.mkdir(parents=True)
+    path.write_text(hint[start:end], encoding="utf-8")
+
+    r, calls = run(tmp_path, data, cfg={})
+    assert r.returncode == 0, r.stderr
+    assert [c for c in calls if c["script"] == "create"] == [], "recorded: no dry-run, no create"
+    assert links(calls) == [["acme/api#55", "--blocked-by", "#7"]]
+    ensured = {
+        "parent": None,
+        "blocked_by": [{"ref": "#7", "ok": True, "action": "exists"}],
+    }
+    assert state(tmp_path) == {
+        "started_at": fresh,
+        "items": {
+            "a": {
+                "url": "https://github.com/acme/api/issues/55",
+                "number": 55,
+                "repo": API,
+                "summary": "[x] a",
+                "links": ensured,
+            }
+        },
+    }
+    assert out(r)["items"] == [
+        {
+            "key": "a",
+            "url": "https://github.com/acme/api/issues/55",
+            "number": 55,
+            "repo": API,
+            "created": False,
+            "adopted": False,
+            "verified": None,
+            "board": None,
+            "links": ensured,
+        }
+    ]
+
+
+NOW = "2026-10-25T12:00:00Z"
+
+
+@pytest.mark.parametrize(
+    "dup,started,own",
+    [
+        ({"createdAt": "2026-10-24T12:00:00Z"}, None, True),  # exactly a day before now
+        ({"createdAt": "2026-10-24T11:59:59Z"}, None, False),  # a second more
+        ({"createdAt": "2026-10-25T12:02:00Z"}, None, True),  # GitHub's clock 120 s ahead
+        ({"createdAt": "2026-10-25T12:02:01Z"}, None, False),  # a second more
+        ({"createdAt": "2026-10-25T13:00:00+01:00"}, None, True),  # now, in another zone
+        ({"createdAt": "2026-10-25T11:00:00"}, None, False),  # no zone
+        ({"createdAt": None}, None, False),
+        ({"state": "open"}, None, True),
+        ({"state": "CLOSED"}, None, False),
+        ({"author": "OctoCat"}, None, True),
+        ({"author": "teammate"}, None, False),
+        ({"author": None}, None, False),
+        # a rerun as before: yours is enough, closed or older
+        ({"state": "CLOSED", "createdAt": "2020-01-01T00:00:00Z"}, STARTED, True),
+        ({"author": "teammate"}, STARTED, False),
+    ],
+    ids=[
+        "a-day", "a-day-and-a-second", "skew", "skew-and-a-second", "other-zone", "no-zone",
+        "no-created-at", "state-case", "closed", "login-case", "teammate", "no-author",
+        "rerun-closed-old", "rerun-teammate",
+    ],
+)  # fmt: skip
+def test_who_may_be_the_batchs_own_at_the_edges(
+    monkeypatch: pytest.MonkeyPatch, dup: dict[str, Any], started: str | None, own: bool
+) -> None:
+    driver = load_driver()
+    monkeypatch.setattr(driver, "now_utc", lambda: NOW)
+    found = {"state": "OPEN", "author": "octocat", "createdAt": "2026-10-25T11:00:00Z", **dup}
+    assert driver.maybe_own(found, started, "octocat") is own
+    assert driver.maybe_own(found, started, None) is False, "your login unknown: never"
+
+
+@pytest.mark.parametrize("created", ["fresh", "2099-01-01T00:00:00Z"], ids=["fresh", "future"])
+def test_a_first_run_never_adopts_a_duplicate(tmp_path: Path, created: str) -> None:
+    """Even one that is open, yours and newer than the start: a first run never adopts.
+    The state file exists by then, so a fresh one gets the `items.<key>` hint; one
+    created past the clock-skew margin is not fresh and gets none."""
     data = batch(item("a"), item("b", parent="@a"), item("c"))
-    late = {"number": 55, "createdAt": "2099-01-01T00:00:00Z"}
+    late = {"number": 55, "createdAt": ago(hours=1) if created == "fresh" else created}
     r, calls = run(
         tmp_path, data, cfg=cfg_create(a={"number": 1}, b={"code": 4, "duplicate": late})
     )
@@ -782,7 +952,14 @@ def test_a_first_run_never_adopts_a_duplicate(tmp_path: Path) -> None:
         "; not adopted: this is the first run of the batch, so the batch did not create it"
         in error(r)
     )
-    assert OWN_HINT not in error(r), "yours, but on a first run never the batch's own"
+    if created == "fresh":
+        assert error(r).endswith(
+            "; if it is this batch's own issue, add it to the state file (`items.b`: url, "
+            f"number, repo, summary) and rerun; {NO_RENAME} the same command (recorded items "
+            "are not created again)"
+        )
+    else:
+        assert "this batch's own issue" not in error(r)
     assert links(calls) == []
 
 
@@ -1331,6 +1508,21 @@ def test_the_preview_lists_a_blocker_written_only_in_prose_under_warnings(
         "\n"
         "Already created, only their links are ensured:\n"
         "- `f` — [x] f — https://github.com/acme/api/issues/1\n"
+    )
+    assert stderr_lines(r) == []
+
+
+def test_the_preview_does_not_warn_about_a_group_that_says_only_none(tmp_path: Path) -> None:
+    """«нет» under «Блокирующие» says "no blockers": the preview's Warnings come from the
+    builder, so they name only the item with a real blocker in prose."""
+    data = batch(
+        item("a", lang="ru", dependencies={"Блокирующие": ["нет"]}),
+        item("b", dependencies=prose("Blocked by")),
+    )
+    r, _ = run(tmp_path, data, "--dry-run")
+    assert r.returncode == 0, r.stderr
+    assert r.stdout.split("\n# 1. ", 1)[0].endswith(
+        f"| — | Todo |\n\nWarnings:\n- `b`: {PROSE.format('Blocked by')}\n"
     )
     assert stderr_lines(r) == []
 
