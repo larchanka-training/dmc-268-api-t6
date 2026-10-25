@@ -21,6 +21,7 @@ from datetime import UTC, datetime, timedelta
 from functools import partial
 from pathlib import Path
 from typing import Protocol, cast
+from urllib.parse import urlsplit
 from uuid import UUID
 
 import httpx
@@ -420,6 +421,35 @@ class AttemptReviewProvider:
 type ProviderFactory = Callable[[ClaimedAttempt], ReviewWorkerProvider]
 
 
+def _validated_portal_url(value: str | None) -> str | None:
+    if not value:
+        return None
+    error = "PORTAL_URL must be a valid absolute HTTP(S) base URL"
+    # urlsplit strips some raw whitespace/control characters before parsing.
+    if any(mark in value for mark in "\\?#") or any(
+        char.isspace() or ord(char) < 32 or 127 <= ord(char) <= 159 for char in value
+    ):
+        raise RuntimeError(error)
+    try:
+        parsed = urlsplit(value)
+        valid = (
+            parsed.scheme.lower() in {"http", "https"}
+            and bool(parsed.hostname)
+            and parsed.username is None
+            and parsed.password is None
+            # urlsplit treats an explicitly empty port as absent.
+            and not parsed.netloc.endswith(":")
+        )
+        # Accessing port validates numeric syntax and the allowed range.
+        _ = parsed.port
+    except ValueError:
+        # Parser diagnostics may contain the supplied value, including credentials.
+        raise RuntimeError(error) from None
+    if not valid:
+        raise RuntimeError(error)
+    return value
+
+
 @dataclass(frozen=True)
 class WorkerSettings:
     database_url: str
@@ -450,6 +480,7 @@ class WorkerSettings:
 
         database_url = required("DATABASE_URL")
         rabbitmq_url = required("RABBITMQ_URL")
+        portal_url = _validated_portal_url(env.get("PORTAL_URL"))
         llm = LlmSettings.from_env(env) if env.get("LLM_MODEL") else None
 
         return cls(
@@ -459,7 +490,7 @@ class WorkerSettings:
             github_app_id=env.get("GITHUB_APP_ID") or None,
             github_private_key=env.get("GITHUB_APP_PRIVATE_KEY") or None,
             github_api_url=env.get("GITHUB_API_URL", "https://api.github.com"),
-            portal_url=env.get("PORTAL_URL") or None,
+            portal_url=portal_url,
             heartbeat_file=heartbeat_file(env),
             # Partly set LLM_* fails the start; none at all starts with a warning.
             llm=llm,

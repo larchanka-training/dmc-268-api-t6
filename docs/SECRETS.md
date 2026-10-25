@@ -125,6 +125,21 @@ summary-only) и `failed`, но не `cancelled` и `skipped`, и в `details_ur
 каждом создании и обновлении check-run, при любом итоге. Настройка применяется
 при следующем штатном выкате; live-проверка свежего sandbox-прогона — [CICD.md §2.1](CICD.md#21-проверка-ссылки-на-run-111).
 
+Непустой `PORTAL_URL` должен быть абсолютным базовым HTTP/HTTPS URL с непустым
+хостом и корректным портом, если он указан. Разрешены localhost, IPv4, IPv6 в
+квадратных скобках и базовый путь (`https://ui.example/portal/` →
+`https://ui.example/portal/runs/{run_id}`); percent-encoded путь сохраняется.
+Регистр схемы не важен, исходное значение сохраняется, при построении ссылки
+удаляются только завершающие `/`.
+
+Относительный адрес, другая схема, пустой хост, userinfo (`user:password@`),
+пробельные/управляющие символы, обратный слэш, некорректные скобки или порт,
+query/fragment (даже пустые `?` и `#`) останавливают worker при чтении настроек
+с `RuntimeError`, содержащим `PORTAL_URL`, без самого значения URL.
+Такой отказ старта может сорвать healthcheck выката и вызвать авто-rollback.
+Откат сохраняет `worker.env`, поэтому возврат образа не исправляет ошибочный URL:
+исправьте effective variable/значение env-файла и повторите штатный выкат.
+
 ### LLM-шлюз — переменные приложения (#33)
 
 Читает `LlmSettings.from_env` (`app/modules/reviews/infrastructure/llm/settings.py`). Секрет здесь — только ключи; остальное — конфигурация. На staging `LLM_API_KEYS` (из organization secret `AI_DMC268_T6`), `LLM_BASE_URL` (из organization variable `AI_DMC268_URL`), `LLM_MODEL` и непустой `LLM_FALLBACK_MODEL` (repository variables или переопределения Environment) приходят в `worker` через `worker.env` (§1, таблица env-файлов). Остальные `LLM_*` на staging берут дефолты, если они есть; `LLM_VERIFIER_*` на staging не передаются, и верификатор идёт парой ревью.
