@@ -337,8 +337,9 @@ Fallback-модель — вторая модель шлюза с тем же st
 | Недопустимый head MR | `gitlab.publish_review` | GET `/versions`: текущий head ≠ `commit_sha` (в т.ч. между двумя POST) | нет | `cancelled`, `superseded` | check-run GitHub не вызывается | `cancelled`; частичные remote IDs не сохраняются |
 | 400/422 по body/schema без position | `gitlab.publish_review` | validation без признаков coordinates | нет координатного fallback | `failed`: 422 **без** position → `gitlab_forbidden`; 422 **с** position → coordinates fallback (строка выше); иначе retryable ×3 → `gitlab_publish_failed` | check-run GitHub не вызывается | причина в trace |
 | Исчерпание пагинации discussions | `gitlab.publish_review` | более 20 страниц `discussions` | нет | `failed`, `gitlab_forbidden` | check-run GitHub не вызывается | без бесконечного retry |
+| Пустой `GITLAB_TOKEN` | `gitlab.publish_review` | gateway не сконфигурирован | — | Run остаётся в `publishing` (lease/reconciler T17), HTTP нет | check-run GitHub не вызывается | publishing зависает до конфигурации |
 
-Перед **каждым** POST discussion publisher сверяет актуальный head MR (GET `/versions`, первый элемент — текущая версия). Идемпотентность — маркеры `findings_hash` в теле note (SD §8.4).
+Перед **каждым** POST discussion publisher сверяет актуальный head MR (GET `/versions`, первый элемент — текущая версия). Идемпотентность — маркеры `findings_hash` в теле note (SD §8.4). Адаптер ходит в корень `GITLAB_BASE_URL`; код добавляет `/api/v4`. Координатный fallback для неопубликованных inline — тот же `move_inline_to_body`, что у GitHub.
 
 **Индексатор (#142).** Источник снимка ([github_snapshot_source.py](../app/modules/code_index/infrastructure/github_snapshot_source.py)) переводит ответы GitHub в коды порта без привязки к провайдеру. 5xx, таймаут 10 с, сбой транспорта и 401 → `vcs_unavailable`; 429 и 403 с `Retry-After` или `X-RateLimit-Remaining: 0` → `vcs_rate_limited`. Оба — TRANSIENT, retry по §4.6; `Retry-After` читается в целых секундах и не больше суток, иной формат задержки не даёт. 403 без признаков лимита и 404 → `vcs_access_denied`: RELEASED, lease снимается с `last_error_code`, без retry. Пустой репозиторий (409) или репозиторий без default branch — `empty` без ошибки. Редирект архива не на `codeload.github.com` → `vcs_unavailable`; архив больше `CODE_INDEX_MAX_DOWNLOAD_BYTES` → `failed`, `limit_exceeded:download_bytes`. Installation-токен каждое задание получает заново, поэтому попытка после 401 идёт с новым токеном. Любое другое неожиданное исключение задания (не отмена) снимает lease и пишет `internal_error` в `last_error_code` (не в `error_code`) на каждой попытке, где задание ещё держит lease (best effort: если снятие lease не удалось, код не пишется); доставка повторяется по §4.6, после третьего учтённого прохода (§4.4) — `code_index.dlq`. Отказ по квоте хранения при claim записывает `failed` и нулевые метрики задания: запросов к GitHub не было.
 
@@ -381,26 +382,6 @@ Legacy marker `<!-- ai-review findings_hash=… -->` не используетс
 Компактная backend `summary_text` ограничена 4 000 Unicode-символов; supported general findings добавляются в полное тело review сверх сводки. Перед первым POST выбранного варианта (включая body-only fallback) publisher сверяет все готовые payload и markers с лимитами закреплённого профиля VCS-адаптера, где явно заданы единицы и пределы. Превышение → `failed/publication_payload_too_large` до отправки этого варианта, без усечения findings или пересборки плана. При подготовке `suggestion_unrenderable` позволяет убрать только применяемый блок, сохранив подтверждённое замечание.
 
 **Тело review на `main` (#170).** Проверенный файл — путь со снимком, у которого `review_patch` не `null` (пустая строка тоже считается проверенной). Backend собирает markdown из `summary`, overview (verdict, checked paths, severity counts) и целых body-only пунктов в пределе **4 000 Unicode-символов** (`REVIEW_BODY_CHAR_BUDGET`); при нехватке места список путей сжимается строкой «… и ещё N файлов», body-only — строкой «**Ещё N находок:** {run_url}» (без `PORTAL_URL` — только «**Ещё N находок**», как у check-run §7). Если сам префикс (summary + overview) длиннее бюджета и переносить в футер нечего, тело не усекается. Если body-only находки есть, но тело не помещается и после перепаковки, оно обрезается по символам (`review_body_budget_degraded: true`), что может срезать конец summary. Число «в теле ревью» в check-run GitHub — `len(findings) − inline`, не разбор markdown. GitLab check-run не вызывается.
-
-### 5.2.1 Сбои GitLab (#97, SD §8.4)
-
-Реализованный адаптер публикует MR discussions через `GITLAB_TOKEN` и корень инстанса
-`GITLAB_BASE_URL` (код добавляет `/api/v4`). Check-run GitHub не вызывается. Идемпотентность —
-маркеры `findings_hash` в теле discussion, не полный контракт publication keys §10
-CONTEXT_AND_VERIFICATION_SPEC. Координатный body-only fallback для неопубликованных inline —
-общий с GitHub (`PublishRunReview.move_inline_to_body`).
-
-| Сбой | Фаза | Обнаружение | Попытки | Итог Run, `error_code` | UI |
-|---|---|---|---|---|---|
-| 5xx / таймаут / transport / не-JSON / неполный список discussions / прочие 4xx (404/409/422/429) | `gitlab.publish_review` | HTTP 5xx, таймаут 10 с, сбой соединения, невалидный JSON, короткий список, любой 4xx кроме координатного 400 и 401/403 | до 3 пауз 2 с / 8 с / 30 с внутри одного сообщения `review.publish` | `failed`, `gitlab_publish_failed` | `failed` |
-| 403 / 401 | `gitlab.publish_review` | подтверждённый отказ доступа | нет | `failed`, `gitlab_forbidden` | `failed` |
-| 400 с position/line/line_code/diff refs | `gitlab.publish_review` | текст ошибки совпадает с `_POSITION_REJECTION` в `gitlab_review_publication.py` | один body-only fallback для неопубликованных inline | `succeeded` при подтверждённом успехе варианта | тот же result |
-| Устаревший MR head | `gitlab.publish_review` | `stale_commit` при сверке diff versions | нет | `cancelled`, `superseded` | `cancelled` |
-| Пустой `GITLAB_TOKEN` | `gitlab.publish_review` | gateway не сконфигурирован | — | Run остаётся в `publishing` (lease/reconciler T17), HTTP нет | publishing зависает до конфигурации |
-
-Коды `publication_outcome_unknown`, `publication_payload_too_large` и
-`legacy_publication_unresolved` из §6 для GitLab на `main` не эмитируются; они относятся к
-целевой модели восстановления GitHub (#107) и legacy marker §5.2.
 
 ### 5.3 Деградация deep → fast (SD §13)
 

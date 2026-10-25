@@ -1474,7 +1474,9 @@ components:
         llmOperation:
           type: string
           enum: [conventions, review]
-          description: Present when `tool` is `llm.call`; omitted for other tools.
+          description: >-
+            Present when `tool` is `llm.call` and the recorded operation is `conventions` or
+            `review`. Omitted for other tools and for other `llm.call` operations.
       additionalProperties: false
     RagIndex:
       type: object

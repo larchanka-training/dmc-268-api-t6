@@ -28,7 +28,7 @@ GitHub webhook → `webhook-api` (HMAC, delivery idempotency) → PostgreSQL `Ru
 предусмотрены отдельные contract fixtures, без заявления о готовой интеграции. Публикация
 GitLab MR discussions на `main` покрыта #97 ([`test_publish_run_review.py`](../tests/test_publish_run_review.py),
 [`gitlab_review_publication.py`](../app/modules/reviews/infrastructure/gitlab_review_publication.py),
-PIPELINE_SPEC §5.2.1).
+PIPELINE_SPEC §5.2, таблица «Сбои GitLab»).
 
 Публикатор передаёт `path`, `line`, `side`, для диапазона оба `start_line/start_side`, `commit_id = Run.head_sha`, максимум 10 inline-комментариев. Только `supported` findings входят в final result; inline cap меняет размещение, но не counts или verdict. Summary строит backend из final findings и coverage, без fallback к модельному summary. Пустой набор или только info даёт `clean` лишь при coverage complete; при partial/none — null. Supported critical/high даёт blocking, medium/low — attention, включая partial coverage. До `succeeded`, а также для skipped/failed/cancelled API verdict null. `REQUEST_CHANGES` используется только при `Repository.reviewEvent = REQUEST_CHANGES` и `verdict = blocking`, иначе `COMMENT` ([PIPELINE_SPEC §11](PIPELINE_SPEC.md#11-вердикт-и-бейджи-d3)).
 

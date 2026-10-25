@@ -37,7 +37,7 @@ v1.2 (RAG v1, #140) — [PR #157](https://github.com/larchanka-training/dmc-268-
 ingress/diff проектируется сразу, внедряется отдельными задачами. Публикация MR discussions
 на GitLab уже есть на `main` (#97, [SD §8.4](SYSTEM_DESIGN.md#84-gitlab), адаптер
 [`gitlab_review_publication.py`](../app/modules/reviews/infrastructure/gitlab_review_publication.py),
-PIPELINE_SPEC §5.2.1). Embedding-модель, векторный
+PIPELINE_SPEC §5.2, таблица «Сбои GitLab»). Embedding-модель, векторный
 поиск, исполнение проекта и автоматическое применение suggestions в эту работу не
 входят. RAG v1 по [ADR 0001](adr/0001-graph-rag-v1.md) — граф символов с
 указателями без embeddings и без текста кода, построенный по разрешённому дереву
