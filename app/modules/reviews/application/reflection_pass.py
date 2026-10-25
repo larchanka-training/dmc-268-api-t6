@@ -9,9 +9,10 @@ from __future__ import annotations
 import asyncio
 import json
 import uuid
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
 from datetime import timedelta
+from functools import cached_property
 from hashlib import sha256
 from importlib.resources import files
 from typing import TYPE_CHECKING, Annotated, Any, Literal, Protocol, runtime_checkable
@@ -217,34 +218,98 @@ def _cited_excerpts(
     return tuple(block for block in blocks if block.block_id in cited)
 
 
-def _fit_cited_excerpts(
-    excerpts: tuple[ContextBlock, ...],
-    files: tuple[ChangedFile, ...],
-    max_tokens: int,
-    counter: TokenCounter,
-    candidates: tuple[CandidateFindingItem, ...],
-) -> tuple[ContextBlock, ...]:
-    """The cited excerpts that fit next to the candidates' own diff lines, whole or not at all.
+# Whether a choice of diff files and cited excerpts fits the verifier prompt.
+type _CodeFits = Callable[[tuple[ChangedFile, ...], tuple[ContextBlock, ...]], bool]
 
-    The other diff lines come after them: a candidate whose excerpt is left out gets
-    ``insufficient_context`` from the verifier.
-    """
-    protected = _protected_lines(files, candidates)
-    reserved = tuple(
-        ChangedFile(
-            file.path,
-            file.status,
-            tuple(line for line in file.lines if line.number in protected[file.path]),
-            total_lines=file.total_lines or len(file.lines),
-        )
-        for file in files
-        if protected.get(file.path)
+
+def _with_lines(file: ChangedFile, indices: tuple[int, ...]) -> ChangedFile:
+    """``file`` showing only the lines at ``indices``; the file itself when it shows them all."""
+    if len(indices) == len(file.lines):
+        return file
+    return ChangedFile(
+        file.path,
+        file.status,
+        tuple(file.lines[i] for i in indices),
+        total_lines=file.total_lines or len(file.lines),
     )
-    kept: list[ContextBlock] = []
+
+
+def _fit_verifier_code(
+    files: tuple[ChangedFile, ...],
+    excerpts: tuple[ContextBlock, ...],
+    rules: tuple[ReviewRule, ...],
+    candidates: tuple[CandidateFindingItem, ...],
+    fits: _CodeFits,
+) -> tuple[tuple[ChangedFile, ...], tuple[ContextBlock, ...]]:
+    """The diff lines and the cited excerpts the verifier is shown.
+
+    Fit order, decided by the tech lead on 2026-10-25 (CVS §7.1): the own diff lines of
+    every candidate, across all files; then the cited excerpts, each whole or not at all,
+    in payload order; then the other diff lines, file by file. A candidate whose excerpt
+    is left out gets ``insufficient_context`` from the verifier.
+    """
+    if fits(files, excerpts):
+        return files, excerpts
+    protected = _protected_lines(files, candidates)
+    order = sorted(
+        range(len(files)),
+        key=lambda idx: (
+            bool(protected.get(files[idx].path)),
+            _priority(files[idx], rules),
+            files[idx].path,
+        ),
+        reverse=True,
+    )
+    # The shown line indices of each kept file, and the shown excerpts.
+    kept: dict[int, tuple[int, ...]] = {}
+    shown: tuple[ContextBlock, ...] = ()
+
+    def chosen(index: int | None = None, indices: tuple[int, ...] = ()) -> tuple[ChangedFile, ...]:
+        picks = kept if index is None else {**kept, index: indices}
+        return tuple(_with_lines(files[i], picks[i]) for i in sorted(picks))
+
+    def widest(index: int, base: tuple[int, ...], extra: tuple[int, ...]) -> tuple[int, ...]:
+        """``base`` and the longest prefix of ``extra`` that fits, in file order."""
+        best = 0
+        if extra and fits(chosen(index, tuple(sorted((*base, *extra)))), shown):
+            best = len(extra)
+        else:
+            low, high = 1, len(extra) - 1
+            while low <= high:
+                mid = (low + high) // 2
+                if fits(chosen(index, tuple(sorted((*base, *extra[:mid])))), shown):
+                    best, low = mid, mid + 1
+                else:
+                    high = mid - 1
+        return tuple(sorted((*base, *extra[:best])))
+
+    # 1. The candidates' own lines, in every file, before anything else.
+    for index in order:
+        own_numbers = protected.get(files[index].path, set())
+        own = tuple(i for i, line in enumerate(files[index].lines) if line.number in own_numbers)
+        if picked := widest(index, (), own):
+            kept[index] = picked
+
+    # 2. The cited excerpts next to them; one that does not fit leaves room for the next.
     for excerpt in excerpts:
-        if counter.count(_verifier_code_context(reserved, (*kept, excerpt))) <= max_tokens:
-            kept.append(excerpt)
-    return tuple(kept)
+        if fits(chosen(), (*shown, excerpt)):
+            shown = (*shown, excerpt)
+
+    # 3. The other lines: own lines step 1 had no room for first, then the rest in file order.
+    for index in order:
+        lines = files[index].lines
+        own_numbers = protected.get(files[index].path, set())
+        base = kept.get(index, ())
+        taken = set(base)
+        left = [i for i in range(len(lines)) if i not in taken]
+        extra = (
+            *(i for i in left if lines[i].number in own_numbers),
+            *(i for i in left if lines[i].number not in own_numbers),
+        )
+        if picked := widest(index, base, extra):
+            kept[index] = picked
+
+    return chosen(), shown
 
 
 def _fit_changed_files_for_verifier(
@@ -253,104 +318,14 @@ def _fit_changed_files_for_verifier(
     max_tokens: int,
     counter: TokenCounter,
     candidates: tuple[CandidateFindingItem, ...] = (),
-    excerpts: tuple[ContextBlock, ...] = (),
 ) -> tuple[ChangedFile, ...]:
-    if counter.count(_verifier_code_context(files, excerpts)) <= max_tokens:
-        return files
+    """The diff part of the fit, against a budget for the ``<code_context>`` block alone."""
 
-    protected_lines = _protected_lines(files, candidates)
+    def fits(chosen: tuple[ChangedFile, ...], shown: tuple[ContextBlock, ...]) -> bool:
+        return counter.count(_verifier_code_context(chosen, shown)) <= max_tokens
 
-    order = sorted(
-        range(len(files)),
-        key=lambda idx: (
-            bool(protected_lines.get(files[idx].path)),
-            _priority(files[idx], rules),
-            files[idx].path,
-        ),
-        reverse=True,
-    )
-    kept: dict[int, ChangedFile] = {}
-
-    def fits(extra: dict[int, ChangedFile]) -> bool:
-        chosen = {**kept, **extra}
-        candidate_files = tuple(chosen[i] for i in sorted(chosen))
-        return counter.count(_verifier_code_context(candidate_files, excerpts)) <= max_tokens
-
-    for index in order:
-        file = files[index]
-        if fits({index: file}):
-            kept[index] = file
-            continue
-        lines = file.lines
-        total_lines = file.total_lines or len(file.lines)
-        file_protected = protected_lines.get(file.path, set())
-        protected_indices = [i for i, line in enumerate(lines) if line.number in file_protected]
-        unprotected_indices = [
-            i for i, line in enumerate(lines) if line.number not in file_protected
-        ]
-
-        best: ChangedFile | None = None
-        if protected_indices:
-            protected_only = ChangedFile(
-                file.path,
-                file.status,
-                tuple(lines[i] for i in protected_indices),
-                total_lines=total_lines,
-            )
-            if fits({index: protected_only}):
-                best = protected_only
-                low = 1
-                high = len(unprotected_indices)
-                while low <= high:
-                    mid = (low + high) // 2
-                    chosen_indices = sorted(protected_indices + unprotected_indices[:mid])
-                    cand_file = ChangedFile(
-                        file.path,
-                        file.status,
-                        tuple(lines[i] for i in chosen_indices),
-                        total_lines=total_lines,
-                    )
-                    if fits({index: cand_file}):
-                        best = cand_file
-                        low = mid + 1
-                    else:
-                        high = mid - 1
-            else:
-                low = 1
-                high = len(protected_indices)
-                while low <= high:
-                    mid = (low + high) // 2
-                    cand_file = ChangedFile(
-                        file.path,
-                        file.status,
-                        tuple(lines[i] for i in protected_indices[:mid]),
-                        total_lines=total_lines,
-                    )
-                    if fits({index: cand_file}):
-                        best = cand_file
-                        low = mid + 1
-                    else:
-                        high = mid - 1
-        else:
-            low = 1
-            high = len(lines)
-            while low <= high:
-                mid = (low + high) // 2
-                prefix_file = ChangedFile(
-                    file.path,
-                    file.status,
-                    lines[:mid],
-                    total_lines=total_lines,
-                )
-                if fits({index: prefix_file}):
-                    best = prefix_file
-                    low = mid + 1
-                else:
-                    high = mid - 1
-        if best is not None and best.lines:
-            kept[index] = best
-
-    return tuple(kept[i] for i in sorted(kept))
+    fitted, _ = _fit_verifier_code(files, (), rules, candidates, fits)
+    return fitted
 
 
 def verify_verifier_mandatory_budget(
@@ -585,6 +560,11 @@ class VerifierPromptBuilder:
         mandatory_text = self._system_prompt + "\n".join(mandatory_blocks)
         mandatory_tokens = counter.count(mandatory_text)
 
+        # 4. Code context: the diff and the cited excerpts, each with its block_id
+        def user_message(files: tuple[ChangedFile, ...], excerpts: tuple[ContextBlock, ...]) -> str:
+            code = _verifier_code_context(files, excerpts)
+            return "\n".join([*mandatory_blocks[:-1], code, candidates_xml])
+
         fitted_files = context.changed_files
         shown_excerpts = _cited_excerpts(context.context_blocks, candidates)
         if context.policy_snapshot is not None:
@@ -599,35 +579,33 @@ class VerifierPromptBuilder:
                     f"Verifier mandatory prompt is {mandatory_tokens} tokens, "
                     f"limit is {max_send_budget}",
                 )
-            code_budget = max_send_budget - mandatory_tokens
-            if code_budget <= 0:
+            system_tokens = counter.count(self._system_prompt)
+
+            # CONTRACT: the same sum as the pre-send guard in ReflectionPass.verify_recorded
+            # (system and user message counted apart, the user message as sent), so a fitted
+            # prompt never fails the guard.
+            def prompt_tokens(
+                files: tuple[ChangedFile, ...], excerpts: tuple[ContextBlock, ...]
+            ) -> int:
+                return system_tokens + counter.count(user_message(files, excerpts))
+
+            if prompt_tokens((), ()) > max_send_budget:
                 raise RunFailure(
                     "verification_context_overflow",
-                    f"Verifier prompt is {mandatory_tokens} tokens, limit is {max_send_budget}",
+                    f"Verifier prompt is {prompt_tokens((), ())} tokens, "
+                    f"limit is {max_send_budget}",
                 )
-            # The candidates' own diff lines first, then the excerpts they cite, then the
-            # other diff lines (decided by the tech lead on 2026-10-25, CVS §7.1).
-            shown_excerpts = _fit_cited_excerpts(
-                shown_excerpts, context.changed_files, code_budget, counter, candidates
-            )
-            fitted_files = _fit_changed_files_for_verifier(
+            fitted_files, shown_excerpts = _fit_verifier_code(
                 context.changed_files,
+                shown_excerpts,
                 context.rules,
-                code_budget,
-                counter,
-                candidates=candidates,
-                excerpts=shown_excerpts,
+                candidates,
+                lambda files, excerpts: prompt_tokens(files, excerpts) <= max_send_budget,
             )
 
-        # 4. Code context: the diff and the cited excerpts, each with its block_id
-        user_blocks = [
-            *mandatory_blocks[:-1],
-            _verifier_code_context(fitted_files, shown_excerpts),
-            candidates_xml,
-        ]
-
-        user_message = "\n".join(user_blocks)
-        prompt = VerifierPrompt(system=self._system_prompt, user=user_message)
+        prompt = VerifierPrompt(
+            system=self._system_prompt, user=user_message(fitted_files, shown_excerpts)
+        )
 
         # The manifest names exactly the shown code: never an uncited or dropped excerpt.
         fitted_context = replace(context, changed_files=fitted_files, context_blocks=shown_excerpts)
@@ -676,7 +654,13 @@ class ReflectionPass:
         system_prompt: str | None = None,
     ) -> None:
         self._model = model
-        self._prompt_builder = VerifierPromptBuilder(system_prompt=system_prompt)
+        self._system_prompt = system_prompt
+
+    @cached_property
+    def _prompt_builder(self) -> VerifierPromptBuilder:
+        """Built when the pass first verifies: the worker gives every attempt a pass, a legacy
+        one too, which never verifies, so a missing verifier prompt file must not fail it."""
+        return VerifierPromptBuilder(system_prompt=self._system_prompt)
 
     def max_prompt_tokens(self) -> int | None:
         """The verifier route's prompt window, when the model knows it (R10)."""

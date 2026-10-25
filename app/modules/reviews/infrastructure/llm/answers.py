@@ -239,22 +239,17 @@ def validate_verifier_answer(content: str) -> dict[str, object]:
 def verifier_answer_without_reasons(content: str) -> str:
     """The verifier answer as its ``llm.call`` stores it: without ``decisions[].reason``.
 
-    E-2 (TL-3): the reason is never stored. Text that is not one JSON object is withheld
-    whole, since a reason inside it cannot be found reliably.
+    E-2 (TL-3), fail-closed (decided by the tech lead on 2026-10-25): a valid answer is
+    stored as the allow-list of each decision, ``candidate_id``, ``status`` and the refs;
+    any other text is withheld whole, since a reason inside it cannot be found reliably.
     """
     try:
-        decoded = _decode_object(content)
+        output = VerificationOutput.model_validate(validate_verifier_answer(content))
     except InvalidAnswer:
-        return f"[withheld: {len(content)} characters that are not a JSON object]"
-    decisions = decoded.get("decisions")
-    if isinstance(decisions, list):
-        decoded["decisions"] = [
-            {key: value for key, value in item.items() if key != "reason"}
-            if isinstance(item, dict)
-            else item
-            for item in decisions
-        ]
-    return json.dumps(decoded, ensure_ascii=False)
+        return f"[withheld: {len(content)} characters that are not a valid verifier answer]"
+    allowed = {"candidate_id", "status", "evidence_refs", "requirement_refs"}
+    stored = output.model_dump(mode="json", include={"decisions": {"__all__": allowed}})
+    return json.dumps(stored, ensure_ascii=False)
 
 
 def conventions_answer_validator(changed_files: tuple[str, ...]) -> _ConventionsValidator:

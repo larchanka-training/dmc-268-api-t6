@@ -22,6 +22,7 @@ from uuid import UUID
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+import app.modules.reviews.application.reflection_pass as reflection_pass_module
 import app.worker as worker
 from app.modules.reviews.application.check_runs import RunProviderCheckpoint
 from app.modules.reviews.application.execute_review import ExecuteReviewRun
@@ -92,6 +93,29 @@ def test_the_production_factory_gives_each_attempt_a_reflection_pass_bound_to_it
     assert verifier._run.attempt == 2
     assert verifier._run.deadline == DEADLINE
     assert verifier._run.engine == "fast"
+
+
+class _NoPromptFiles:
+    """``importlib.resources.files`` of a package whose prompt files are gone."""
+
+    def joinpath(self, name: str) -> _NoPromptFiles:
+        return self
+
+    def read_text(self, encoding: str) -> str:
+        raise FileNotFoundError("review.verifier.v2.md")
+
+
+def test_building_an_attempt_reads_no_verifier_prompt_file(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Every attempt gets a pass, a legacy one too, which never verifies: a missing verifier
+    # prompt file must not fail it. The pass reads the file when it first verifies.
+    monkeypatch.setattr(reflection_pass_module, "files", lambda package: _NoPromptFiles())
+
+    provider = worker.attempt_provider_factory(cast(LlmGateway, object()), _github())(CLAIMED)
+
+    assert isinstance(provider, worker.AttemptReviewProvider)
+    assert isinstance(provider.reflection_pass, ReflectionPass)
 
 
 def test_a_worker_without_llm_settings_builds_no_reflection_pass() -> None:

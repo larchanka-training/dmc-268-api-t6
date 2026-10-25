@@ -85,6 +85,7 @@ from app.modules.reviews.infrastructure.llm.transport import (
     ResponseSchema,
     TransportError,
     TransportPaidAnswerError,
+    extract_text_content,
 )
 
 logger = logging.getLogger(__name__)
@@ -103,6 +104,8 @@ _BOUNDED_REPAIR_INSTRUCTION = (
 )
 # PIPELINE_SPEC §3: a verifier call waits at most 90 s, on the deep engine as well.
 _VERIFIER_CALL_TIMEOUT_S = 90.0
+# E-2: the top-level keys of a redacted provider body; none of them carries model text.
+_STORED_BODY_KEYS = ("id", "object", "created", "model", "provider", "system_fingerprint", "usage")
 _USD_QUANTUM = Decimal("0.000001")
 
 
@@ -944,16 +947,39 @@ class _RecordDraft:
 
 
 def _redacted_body(body: object, redact: Callable[[str], str] | None) -> object:
-    """The provider body with the answer text of every choice passed through ``redact``."""
-    if redact is None or not isinstance(body, dict) or not isinstance(body.get("choices"), list):
+    """The provider body as stored: as is, or fail-closed for a task that redacts its answer.
+
+    E-2 (decided by the tech lead on 2026-10-25): the model can write anywhere in a choice
+    (reasoning, tool calls, a refusal, logprobs, the legacy ``text``), so a redacted body
+    keeps only the provider metadata, and per choice its index, finish reason and a message
+    of role and the answer text passed through ``redact``. Every choice, not only the one
+    the gateway validated.
+    """
+    if redact is None or body is None:
         return body
-    choices: list[object] = []
-    for choice in body["choices"]:
-        message = choice.get("message") if isinstance(choice, dict) else None
-        if isinstance(message, dict) and isinstance(message.get("content"), str):
-            choice = {**choice, "message": {**message, "content": redact(message["content"])}}
-        choices.append(choice)
-    return {**body, "choices": choices}
+    if not isinstance(body, dict):
+        return None
+    choices = body.get("choices")
+    stored: dict[str, object] = {key: body[key] for key in _STORED_BODY_KEYS if key in body}
+    stored["choices"] = (
+        [_redacted_choice(choice, redact) for choice in choices]
+        if isinstance(choices, list)
+        else []
+    )
+    return stored
+
+
+def _redacted_choice(choice: object, redact: Callable[[str], str]) -> dict[str, object]:
+    if not isinstance(choice, dict):
+        return {}
+    stored = {key: choice[key] for key in ("index", "finish_reason") if key in choice}
+    message = choice.get("message")
+    if isinstance(message, dict):
+        text = extract_text_content(message.get("content"))
+        shown: dict[str, object] = {"role": message["role"]} if "role" in message else {}
+        shown["content"] = None if text is None else redact(text)
+        stored["message"] = shown
+    return stored
 
 
 def _fx_provenance(result: FxQuoteResult | None) -> FxProvenance | None:
