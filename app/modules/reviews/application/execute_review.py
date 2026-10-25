@@ -502,8 +502,29 @@ class ExecuteReviewRun:
                 data,
                 dropped_findings=tuple(_dropped_findings),
                 severity_threshold=severity_threshold,
-                allowed_v2_rules=allowed_v2_rules,
+                # R12: the v2 rule allow-list belongs to verified findings; no verifier call
+                # happened, so publication keeps its own attribution check.
+                allowed_v2_rules=None,
             )
+
+        # #247 p3 (RULES §8.2): a wrong attribution is removed before the verifier, so the
+        # finding reaches it as a candidate without that claim and is published only on its
+        # decision, never as a silently confirmed generic finding.
+        rule_names = frozenset(rule.name for rule in context.rules)
+        repaired_candidates: list[CandidateFindingItem] = []
+        for cand in filtered_candidates:
+            position = cand_positions.get(id(cand.finding), 0)
+            repaired = post_processor._repair_attribution(
+                ProcessedFinding(cand.finding, position, "inline"),
+                rule_names,
+                allowed_v2_rules=allowed_v2_rules,
+            ).finding
+            # CONTRACT: the repair copies the finding it gets (model_copy keeps ReviewFindingV2).
+            assert isinstance(repaired, ReviewFindingV2)
+            # CONTRACT: positions are keyed by id(); a repaired copy is a new object.
+            cand_positions[id(repaired)] = position
+            repaired_candidates.append(CandidateFindingItem(cand.candidate_id, repaired))
+        filtered_candidates = repaired_candidates
 
         # Pass 5: Verifier invocation
         record = await self._reflection_pass.verify_recorded(

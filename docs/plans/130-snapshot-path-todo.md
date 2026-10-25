@@ -203,7 +203,11 @@ Gates for every task: the four commands in the plan, with DB and vhost `imp130f`
 - **Files:** `application/execute_review.py` (`:396-415`, `:449-461`); `application/findings_post_processor.py`
   (`:259-272` reused); `tests/test_execute_review.py`.
 - **Tests:** 0 candidates → `allowed_v2_rules is None`; the verifier receives the repaired `rule_name`.
-- **Done when:** [ ] F1-1 green.
+  - as built: 0 candidates and all candidates dropped before the verifier → `None`, no verifier
+    call; a candidate whose body claims a custom instruction the run lacks reaches the verifier
+    with `rule_name` null and without the claim, and is published only when supported (a
+    rejected one is dropped at its own position); a valid `.review/rules.md` attribution is kept.
+- **Done when:** [x] F1-1 green.
 
 ### F1-9: E-1, E-7 (time), E-12
 - **Commit:** `feat(llm): reserve slots and time for later stages on the snapshot path (#130)`
