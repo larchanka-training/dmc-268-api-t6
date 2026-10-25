@@ -592,7 +592,14 @@ class ReviewContextStage:
         request = {"head_sha": run.head_sha, "policy_snapshot_id": str(snapshot.snapshot_id)}
         try:
             async with traced_step(self._trace, run_id, "context.build", request) as step:
-                payload = await self._context_builder(run).execute(
+                builder = self._context_builder(run)
+                if self._snapshot_for_llm is not None:
+                    # R19 (DD7): the snapshot path counts with the counter its profile pins,
+                    # as the policy budget and the gateway do; a legacy run keeps the
+                    # composition's counter (four characters per token), so its numbers stay.
+                    profile = self._snapshot_for_llm.execution_profile
+                    builder = builder.with_counter(token_counter_for(profile.counter_version))
+                payload = await builder.execute(
                     diff_map=diff_map,
                     snapshot=snapshot,
                     matcher=matcher,

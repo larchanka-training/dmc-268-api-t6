@@ -375,6 +375,8 @@ class BuildReviewContext:
         self._counter = counter
         self._cache = cache
         self._builtin_excluded = builtin_excluded
+        self._retriever = retriever
+        self._rag_blobs = rag_blobs
         # The RAG sources of the run; the slot is filled only for a RAG plan. The base of a
         # broken reference is listed by the same revision source.
         self._selector = (
@@ -388,6 +390,18 @@ class BuildReviewContext:
                 counter=counter,
                 trees=source,
             )
+        )
+
+    def with_counter(self, counter: TokenCounter) -> BuildReviewContext:
+        """The same build counting every block, the RAG slot included, with ``counter``."""
+        return BuildReviewContext(
+            source=self._source,
+            parser=self._parser,
+            counter=counter,
+            cache=self._cache,
+            builtin_excluded=self._builtin_excluded,
+            retriever=self._retriever,
+            rag_blobs=self._rag_blobs,
         )
 
     async def execute(
