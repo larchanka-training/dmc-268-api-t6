@@ -411,11 +411,21 @@ def test_gitlab_redelivery_after_failed_complete_restores_inline_placement(
                     {"id": RUN_ATTEMPTED},
                 )
                 report = await SqlAlchemyRunLifecycleStore(session).check_run_report(RUN_ATTEMPTED)
+                placement_counts = (
+                    await session.execute(
+                        text(
+                            "SELECT count(*) FILTER (WHERE inline_comment), "
+                            "count(*) FILTER (WHERE NOT inline_comment) FROM findings "
+                            "WHERE run_id=:run AND published AND drop_reason IS NULL"
+                        ),
+                        {"run": RUN_ATTEMPTED},
+                    )
+                ).one()
             assert run_state == "succeeded"
             assert rows == [(FINDING_INLINE_A_ID, True), (FINDING_INLINE_B_ID, False)]
-            assert report is not None
-            assert report.inline_count == 1
-            assert report.body_count == 1
+            # Stored placement is provider-neutral; GitLab emits no GitHub check report.
+            assert placement_counts == (1, 1)
+            assert report is None
             assert inline_attempts == 2
         finally:
             await engine.dispose()

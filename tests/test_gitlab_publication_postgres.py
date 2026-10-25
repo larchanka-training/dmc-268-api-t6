@@ -538,7 +538,7 @@ def test_real_startup_fault_uses_existing_retry_budget_and_fresh_owned_transport
             pointer = await publishing(fixture)
             entered: list[int] = []
             closed: list[int] = []
-            calls: list[str] = []
+            calls: list[tuple[str, str, str]] = []
             pauses: list[float] = []
 
             class Startup(httpx.AsyncBaseTransport):
@@ -552,7 +552,9 @@ def test_real_startup_fault_uses_existing_retry_budget_and_fresh_owned_transport
                     return self
 
                 async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
-                    calls.append(request.headers["PRIVATE-TOKEN"])
+                    calls.append(
+                        (request.method, request.url.path, request.headers["PRIVATE-TOKEN"])
+                    )
                     if request.url.path.endswith("/versions"):
                         return wire(200, versions())
                     return (
@@ -588,7 +590,17 @@ def test_real_startup_fault_uses_existing_retry_budget_and_fresh_owned_transport
             assert entered == list(range(2 if failures == 1 else 4))
             assert sorted(closed) == entered
             assert pauses == ([2.0] if failures == 1 else [2.0, 8.0, 30.0])
-            assert calls == (["synthetic-authority-PAT-canary"] * 3 if failures == 1 else [])
+            prefix = "/api/v4/projects/17/merge_requests/12"
+            assert calls == (
+                [
+                    ("GET", f"{prefix}/versions", "synthetic-authority-PAT-canary"),
+                    ("GET", f"{prefix}/discussions", "synthetic-authority-PAT-canary"),
+                    ("GET", f"{prefix}/versions", "synthetic-authority-PAT-canary"),
+                    ("POST", f"{prefix}/discussions", "synthetic-authority-PAT-canary"),
+                ]
+                if failures == 1
+                else []
+            )
             assert "startup-secret-canary" not in repr(trace.records)
             async with fixture.sessions() as session:
                 assert await session.scalar(

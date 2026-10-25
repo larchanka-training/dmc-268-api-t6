@@ -7,16 +7,19 @@ import base64
 import contextlib
 import json
 import os
-from collections.abc import Iterator
+from collections.abc import Awaitable, Callable, Iterator
 from typing import Any
 from uuid import UUID, uuid4
 
 import httpx
 import pytest
 from sqlalchemy import text
-from sqlalchemy.ext.asyncio import create_async_engine
+from sqlalchemy.exc import TimeoutError as SqlAlchemyTimeoutError
+from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 from sqlalchemy.pool import NullPool
 
+from app import worker as worker_module
+from app.common.infrastructure.db.leader import run_as_leader
 from app.modules.reviews.infrastructure.amqp import amqp_channels
 from app.modules.reviews.infrastructure.run_repository import SqlAlchemyRunRepository
 from app.worker import WorkerSettings, run_worker
@@ -65,6 +68,86 @@ def runtime_env(url: str, rabbit: str) -> dict[str, str]:
     }
 
 
+@pytest.fixture
+def worker_data_engines(monkeypatch: pytest.MonkeyPatch) -> list[AsyncEngine]:
+    engines: list[AsyncEngine] = []
+
+    def create_worker_engine(url: str, **kwargs: Any) -> AsyncEngine:
+        engine = create_async_engine(url, pool_size=1, max_overflow=0, pool_timeout=1, **kwargs)
+        engines.append(engine)
+        return engine
+
+    async def dedicated_leader(
+        engine: AsyncEngine,
+        key: int,
+        period: float,
+        tick: Callable[[], Awaitable[object]],
+        *,
+        name: str,
+    ) -> None:
+        # The real leader keeps its AUTOCOMMIT lease. Give it a dedicated pool so
+        # all actual worker data sessions compete for exactly one different lease.
+        leader_engine = create_async_engine(engine.url, poolclass=NullPool)
+        try:
+            await run_as_leader(leader_engine, key, period, tick, name=name)
+        finally:
+            await leader_engine.dispose()
+
+    monkeypatch.setattr(worker_module, "create_async_engine", create_worker_engine)
+    monkeypatch.setattr(worker_module, "run_as_leader", dedicated_leader)
+    return engines
+
+
+async def assert_worker_data_lease_free(engine: AsyncEngine) -> None:
+    try:
+        async with engine.connect() as connection:
+            assert await connection.scalar(text("SELECT 1")) == 1
+    except SqlAlchemyTimeoutError as exc:
+        raise AssertionError("worker data lease spans the HTTP boundary") from exc
+
+
+async def check_transaction_oracle(engine: AsyncEngine, url: str) -> None:
+    # Positive control: a proven open transaction in another task/PID cannot make
+    # a request fail. This reproduces the global pg_stat_activity race from CI.
+    unrelated = create_async_engine(url, poolclass=NullPool)
+    ready: asyncio.Future[int] = asyncio.get_running_loop().create_future()
+    release = asyncio.Event()
+
+    async def hold_unrelated_transaction() -> None:
+        async with unrelated.begin() as connection:
+            pid = await connection.scalar(text("SELECT pg_backend_pid()"))
+            assert isinstance(pid, int)
+            ready.set_result(pid)
+            await release.wait()
+
+    task = asyncio.create_task(hold_unrelated_transaction())
+    try:
+        pid = await asyncio.wait_for(ready, 5)
+        async with unrelated.connect() as observer:
+            assert (
+                await observer.scalar(
+                    text("SELECT xact_start IS NOT NULL FROM pg_stat_activity WHERE pid=:pid"),
+                    {"pid": pid},
+                )
+                is True
+            )
+        await assert_worker_data_lease_free(engine)
+    finally:
+        release.set()
+        try:
+            await task
+        finally:
+            await unrelated.dispose()
+
+    # Negative control: even when the HTTP callback runs in a child task, a lease
+    # still held by its caller must be detected; task-ID filtering would miss it.
+    async with engine.begin() as connection:
+        assert await connection.scalar(text("SELECT 1")) == 1
+        with pytest.raises(AssertionError, match="worker data lease spans the HTTP boundary"):
+            await asyncio.create_task(assert_worker_data_lease_free(engine))
+    await assert_worker_data_lease_free(engine)
+
+
 @pytest.mark.parametrize(
     "github_configured,model_configured", [(False, True), (True, True), (False, False)]
 )
@@ -72,6 +155,7 @@ def test_public_worker_installed_gitlab_run_uses_shared_models_and_publisher(
     worker_stack: tuple[tuple[str, str, UUID], str],
     github_configured: bool,
     model_configured: bool,
+    worker_data_engines: list[AsyncEngine],
 ) -> None:
     database, rabbit = worker_stack
     url, schema, _ = database
@@ -125,27 +209,13 @@ def test_public_worker_installed_gitlab_run_uses_shared_models_and_publisher(
 
             async def external(request: httpx.Request) -> httpx.Response:
                 nonlocal observed_boundary
-                if not observed_boundary and not github_configured and model_configured:
-                    observer = create_async_engine(
-                        url, poolclass=NullPool, isolation_level="AUTOCOMMIT"
-                    )
-                    try:
-                        async with observer.connect() as connection:
-                            assert (
-                                await connection.scalar(
-                                    text(
-                                        "SELECT count(*) FROM pg_stat_activity "
-                                        "WHERE datname=current_database() "
-                                        "AND backend_type='client backend' "
-                                        "AND pid<>pg_backend_pid() "
-                                        "AND xact_start IS NOT NULL"
-                                    )
-                                )
-                                == 0
-                            )
-                    finally:
-                        await observer.dispose()
+                assert len(worker_data_engines) == 1
+                engine = worker_data_engines[0]
+                if not observed_boundary:
+                    await check_transaction_oracle(engine, url)
                     observed_boundary = True
+                # Borrow the actual worker pool, not just the fixture's separate pool.
+                await assert_worker_data_lease_free(engine)
                 assert request.url.host == "gitlab.com"
                 assert request.headers["PRIVATE-TOKEN"] == "synthetic-authority-PAT-canary"
                 # Public single-lease data pool remains available at a sampled HTTP boundary.
@@ -192,6 +262,7 @@ def test_public_worker_installed_gitlab_run_uses_shared_models_and_publisher(
                 assert state == (
                     ("succeeded", 1, None) if model_configured else ("failed", 3, "llm_unavailable")
                 ), [(r.method, str(r.url)) for r in source.requests]
+                assert observed_boundary
                 assert gh_calls == []
                 assert llm.tasks == (
                     ["RepoConventionsDraft", "ReviewOutput"] if model_configured else []
