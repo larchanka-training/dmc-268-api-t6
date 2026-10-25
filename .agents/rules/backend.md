@@ -8,12 +8,9 @@
   `uv run mypy .`, `uv run pytest`.
 - No new dependency without a line in the PR body (`uv add`, commit `uv.lock`).
 - Never edit files owned by another open PR without a comment there.
-- A PR that changes user-visible behavior updates the user docs in the UI repo
-  (`dmc-268-ui-t6`, `docs-site/content/docs/`) by a linked PR, or links a follow-up
-  issue there (`docs/CONTRIBUTING.md` §8).
-- The core user docs pages, `index.mdx` (Introduction), `how-it-works.mdx` and
-  `features.mdx`, change only with an explicit review of that page. Prefer
-  adding to Roadmap or FAQ, or a status badge, over rewriting a core page.
+- User docs (the UI repo `docs-site/content/docs/`) follow `docs/CONTRIBUTING.md` §8: a PR that
+  changes user-visible behavior links a UI PR or issue; the core pages change only with an
+  explicit review.
 
 ## 2. Commands
 
