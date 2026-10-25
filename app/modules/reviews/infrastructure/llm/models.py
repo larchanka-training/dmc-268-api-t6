@@ -51,6 +51,7 @@ from app.modules.reviews.infrastructure.llm.answers import (
     verifier_output_schema,
 )
 from app.modules.reviews.infrastructure.llm.gateway import (
+    VERIFIER_TIME_RESERVE_S,
     GatewayResult,
     LlmGateway,
     StructuredTask,
@@ -60,6 +61,9 @@ from app.modules.reviews.infrastructure.llm.transport import ChatMessage, Respon
 REVIEW_OPERATION = "review"
 CONVENTIONS_OPERATION = "conventions"
 VERIFICATION_OPERATION = "verification"
+# TL-2 (CVS §7.3): provider-call slots a snapshot-path task keeps for the stages after it.
+_REVIEW_RESERVED_CALLS = 1  # the verifier
+_CONVENTIONS_RESERVED_CALLS = 2  # the review and the verifier
 
 
 class GatewayReviewModel:
@@ -131,6 +135,9 @@ class GatewayConventionsModel:
                 base_manifest=base_manifest,
                 policy_snapshot=request.snapshot,
                 counter=counter if request.snapshot is not None else None,
+                # DD8 (E-1, E-12): snapshot path only; legacy keeps 0 and the old repair.
+                bounded_repair=request.snapshot is not None,
+                reserved_calls=0 if request.snapshot is None else _CONVENTIONS_RESERVED_CALLS,
             ),
             self._run,
         )
@@ -243,6 +250,7 @@ async def _fitted_review(
         counter=counter if context.policy_snapshot is not None else None,
     )
     verify_provenance_pre_send_guard(base_manifest, context=fitted, snapshot=fitted.policy_snapshot)
+    snapshot_path = fitted.policy_snapshot is not None
     result = await gateway.generate(
         StructuredTask(
             operation=REVIEW_OPERATION,
@@ -253,6 +261,11 @@ async def _fitted_review(
             review_context=fitted,
             policy_snapshot=fitted.policy_snapshot,
             counter=counter if context.policy_snapshot is not None else None,
+            # DD8 (E-1, E-7 time, E-12): the verifier's slot and window are kept on the
+            # snapshot path only; legacy keeps 0, 0 s and the old repair.
+            bounded_repair=snapshot_path,
+            reserved_calls=_REVIEW_RESERVED_CALLS if snapshot_path else 0,
+            reserved_seconds=VERIFIER_TIME_RESERVE_S if snapshot_path else 0.0,
         ),
         run,
     )

@@ -259,6 +259,13 @@ raises `policy_prompt_budget_exceeded` (terminal), so neither the conventions no
 - E-1: `reserved_calls` (TL-2);
 - E-12: `bounded_repair=True`;
 - E-7: time reserve (TL-6).
+- As built in F1-9: `StructuredTask.reserved_seconds` (the review: `VERIFIER_TIME_RESERVE_S`, a
+  90 s verifier call and 10 s) joins the call timeout in every admission check of every call of
+  the task (entry, after the FX quote, before the slot, the transport checkpoint) and in the
+  retry backoff guard; short of it the task fails with the new
+  `LlmErrorCode.VERIFICATION_DEADLINE_EXCEEDED` (terminal, already in the catalog). Not in F1
+  (TL-6 gates only the review): conventions keep no time for the review and the verifier
+  (CVS §7.4 "conventions do not spend the reserve"), and the verifier keeps no 10 s of its own.
 
 **DD9. R14.**
 - `attempt_provider_factory` (`worker.py:709-734`) builds `ReflectionPass(GatewayVerifierModel(gateway, run))`

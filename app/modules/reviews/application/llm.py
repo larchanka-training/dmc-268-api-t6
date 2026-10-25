@@ -41,6 +41,9 @@ class LlmErrorCode(StrEnum):
     CONTEXT_OVERFLOW = "llm_context_overflow"
     BUDGET_EXCEEDED = "budget_exceeded"
     DEADLINE_EXCEEDED = "deadline_exceeded"
+    # E-7: a snapshot-path call short of its timeout plus the time its task keeps for the
+    # verifier; terminal, no unverified review is published (PIPELINE_SPEC §6).
+    VERIFICATION_DEADLINE_EXCEEDED = "verification_deadline_exceeded"
 
 
 class LlmCallKind(StrEnum):
