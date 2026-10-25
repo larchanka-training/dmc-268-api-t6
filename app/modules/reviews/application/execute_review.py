@@ -37,11 +37,18 @@ from app.modules.reviews.application.prompt_builder import (
     ReviewContext,
     ReviewRule,
 )
+from app.modules.reviews.application.rag_index import has_retrieved_section
 from app.modules.reviews.application.reflection_pass import (
     CandidateFindingItem,
     ReflectionPass,
     filter_verified_candidates,
     verify_verifier_mandatory_budget,
+)
+from app.modules.reviews.application.review_context import (
+    ContextBlock,
+    ContextLevel,
+    RetrievedBlock,
+    ReviewContextPayload,
 )
 from app.modules.reviews.application.review_output import (
     DroppedCandidateRecord,
@@ -58,6 +65,8 @@ from app.modules.reviews.application.run_failures import RunFailure
 from app.modules.reviews.application.verdict import SeverityThresholdValue
 
 _LOGGER = logging.getLogger(__name__)
+# R2: the payload levels shown as excerpts; L1 is the changed files themselves.
+_EXCERPT_LEVELS = frozenset({ContextLevel.L2, ContextLevel.L3, ContextLevel.L4})
 
 
 @dataclass(frozen=True)
@@ -170,6 +179,9 @@ class ReviewContextFilter(Protocol):
     @property
     def snapshot_for_llm(self) -> PolicySnapshot | None: ...
 
+    @property
+    def payload(self) -> ReviewContextPayload | None: ...
+
     def excluded(self, path: str) -> bool: ...
 
 
@@ -229,6 +241,19 @@ class ExecuteReviewRun:
             omitted_files = tuple(path for path in omitted_files if not excluded(path))
             if meta.diff_old_sha is None and self._context_filter.diff_old_sha is not None:
                 meta = replace(meta, diff_old_sha=self._context_filter.diff_old_sha)
+        context_blocks: tuple[ContextBlock, ...] = ()
+        retrieved: tuple[RetrievedBlock, ...] = ()
+        excluded_files = 0
+        payload = None if self._context_filter is None else self._context_filter.payload
+        if prompt_input.policy_snapshot is not None and payload is not None:
+            context_blocks = tuple(
+                block for block in payload.blocks if block.level in _EXCERPT_LEVELS
+            )
+            bindings = prompt_input.policy_snapshot.prompt_bindings
+            if has_retrieved_section(bindings.review_system_key, bindings.review_system_version):
+                retrieved = payload.retrieved
+            # P6-4: the ignored files stay counted, never named (RULES_FORMAT_SPEC §5.3).
+            excluded_files = payload.ignored_files
         context = ReviewContext(
             system=prompt_input.system,
             rules=prompt_input.rules,
@@ -239,6 +264,9 @@ class ExecuteReviewRun:
             omitted_files=omitted_files,
             policy_snapshot=prompt_input.policy_snapshot,
             severity_threshold=prompt_input.severity_threshold,
+            context_blocks=context_blocks,
+            retrieved=retrieved,
+            excluded_files=excluded_files,
         )
 
         if prompt_input.policy_snapshot is not None:
