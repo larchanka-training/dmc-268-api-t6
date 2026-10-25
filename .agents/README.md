@@ -46,7 +46,7 @@ Skills and agents here name Claude Code's sub-agent tools. The equivalent per ha
 ## Directory map
 
 - `rules/` — stack and workflow rules (`backend.md`, `git-workflow.md`).
-- `skills/` — agent skills, one `SKILL.md` per directory (8 here — no
+- `skills/` — agent skills, one `SKILL.md` per directory (9 here — no
   `manual-automation`).
 - `agents/` — agent definitions (`name`, `description`, `model` frontmatter).
 - `templates/backend/` — code/test templates with proof blocks. Fenced blocks

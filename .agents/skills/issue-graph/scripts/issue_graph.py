@@ -13,23 +13,41 @@ Usage
     issue_graph.py --milestone TITLE [--repo OWNER/NAME ...]
     issue_graph.py --epic REF
     issue_graph.py --issues REF [REF ...]
-    common: [--project-owner ORG] [--project NUMBER]
-    REF := api#N | ui#N | OWNER/NAME#N
+    common: [--project-owner ORG] [--project NUMBER] [--publish-to N|REF]
+    REF := api#N | ui#N | OWNER/NAME#N; a bare N for --publish-to means api#N
+
+With --publish-to the report also goes to that issue as one comment (gh api
+REST) whose first line is the marker `<!-- issue-graph: <scope key> -->`: the
+oldest comment carrying it is updated in place, else a new one is created. The
+search reads at most 100 pages of 100 comments. Without --publish-to no REST
+call is made.
 
 Contract
 --------
-stdout carries the report only (Markdown, Russian, ends with one newline).
-Errors go to stderr as one line {"error": "..."}. Exit 0 report printed; 1
-report printed and the graph has a cycle; 2 usage or input (bad REF, milestone
-found in no repo, epic or issue not resolvable — including a response whose
-`errors` are all NOT_FOUND); 3 gh / GraphQL failure (non-zero gh exit without
+stdout carries the report only (Markdown, Russian, ends with one newline); it is
+written before any REST call. stderr carries one JSON line: the error
+{"error": "..."}, or after a successful publish {"published": "created" |
+"updated", "url": "<html_url>"}. Exit 0 report printed (and published); 1
+report printed and the graph has a cycle (never published); 2 usage or input
+(bad REF or --publish-to target, milestone found in no repo, epic or issue not
+resolvable — including a response whose `errors` are all NOT_FOUND —, publish
+target issue or comment not found (REST 404), comment over GitHub's
+65536-character limit); 3 gh / GraphQL / REST failure (non-zero gh exit without
 such a response, gh timeout after 120 s, any other `errors`, missing fixture,
-unexpected shape).
+unexpected shape, ISSUE_GRAPH_FIXTURE_DIR set but empty, a write in fixture mode
+without ISSUE_GRAPH_WRITE_LOG, more than 10000 comments without the marker, a
+marked comment this account cannot edit (REST 403 — never a new comment instead)).
 
 Offline seam: with ISSUE_GRAPH_FIXTURE_DIR set, gh is never called and every
-request reads <dir>/<name>.json (the full {"data": ...} response) instead:
+request reads <dir>/<name>.json (the full {"data": ...} response) instead; set
+but empty exits 3 before any request, never falls through to gh:
 milestones-<alias>, milestone-<alias>-<m>-p<k>, epic-<alias>-<n>-p<k>,
 issues-<alias>, node-<id>-<field>-p<k> (the first follow-up page is p2).
+REST reads the response body itself: comments-<alias>-<n>-p<k> (a JSON array,
+or the 404 object {"status": "404"}), comment-created-<alias>-<n> and
+comment-updated-<id>. A write first appends one JSON line {"method", "path",
+"body"} to the file ISSUE_GRAPH_WRITE_LOG names; without it a write exits 3, so
+fixtures can never post a fake graph.
 """
 # SYNC: mirrored in dmc-268-{ui,api}-t6/.agents/skills/issue-graph/scripts/issue_graph.py
 
@@ -58,9 +76,11 @@ DEFAULT_REPOS = [ALIASES["api"], ALIASES["ui"]]
 DEFAULT_PROJECT_OWNER = "larchanka-training"
 DEFAULT_PROJECT = 12
 FIXTURE_ENV = "ISSUE_GRAPH_FIXTURE_DIR"
+WRITE_LOG_ENV = "ISSUE_GRAPH_WRITE_LOG"
 
 REPO_NAME = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
 REF = re.compile(r"(api|ui|[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)#([1-9][0-9]*)")
+NUMBER = re.compile(r"[1-9][0-9]*")
 LEADING_TAGS = re.compile(r"^(?:\s*\[[^\]]*\])+")
 # Mermaid entity codes, applied in one pass: a sequential replace would turn
 # the `#` of an already escaped `#amp;` into `#35;amp;`.
@@ -74,6 +94,7 @@ AUTOLINK = re.compile(r"#(?=[0-9])|@(?=[A-Za-z0-9])")
 ZERO_WIDTH = "&#8203;"
 BACKTICKS = re.compile(r"`+")
 GH_TIMEOUT = 120  # seconds per gh call
+WRITE_TIMEOUT = "; the comment may have been written — re-run to update it"
 REVIEW_STATUSES = ("On Review", "AC Check")
 IN_PROGRESS = "In Progress"
 CLASS_DEFS = (
@@ -85,6 +106,13 @@ CLASS_DEFS = (
 )
 CLASS_ORDER = ("done", "progress", "review", "alarm", "external")
 EXTERNAL = " (вне выборки)"
+COMMENTS_PAGE = 100  # REST per_page: a shorter page is the last one
+COMMENTS_MAX_PAGES = 100  # the marker search stops after this many full pages
+COMMENT_LIMIT = 65536  # GitHub's comment body limit, characters
+FOOTER = (
+    "<sub>Сгенерировано скиллом issue-graph (.agents/skills/issue-graph); "
+    "повторный запуск с тем же охватом обновит этот комментарий.</sub>"
+)
 
 # ─── GraphQL ────────────────────────────────────────────────────────────────
 _RELATION = (
@@ -171,11 +199,16 @@ def relation_query(field: str) -> str:
 
 
 # ─── errors ─────────────────────────────────────────────────────────────────
-def fail(message: str, code: int) -> NoReturn:
-    line = json.dumps({"error": message}, ensure_ascii=False) + "\n"
+def stderr_line(payload: dict[str, str]) -> None:
+    """The one JSON line on stderr: an error, or the publish result."""
+    line = json.dumps(payload, ensure_ascii=False) + "\n"
     sys.stderr.flush()
     sys.stderr.buffer.write(line.encode("utf-8"))
     sys.stderr.buffer.flush()
+
+
+def fail(message: str, code: int) -> NoReturn:
+    stderr_line({"error": message})
     sys.exit(code)
 
 
@@ -263,16 +296,40 @@ def parse_ref(text: str) -> Key:
     return (ALIASES.get(m.group(1), m.group(1)), int(m.group(2)))
 
 
+def parse_target(text: str) -> Key:
+    """`--publish-to`: a bare N is api#N (the sprint issues live there), else a REF.
+    The shape is checked here so that every bad value gets one message naming both forms."""
+    if NUMBER.fullmatch(text):
+        return (ALIASES["api"], int(text))
+    m = REF.fullmatch(text)
+    if not m or not valid_repo(ALIASES.get(m.group(1), m.group(1))):
+        fail(
+            f"bad --publish-to {text!r}: expected N (an api issue) or REF "
+            "(api#N, ui#N or OWNER/NAME#N)",
+            2,
+        )
+    return parse_ref(text)
+
+
 # ─── transport ──────────────────────────────────────────────────────────────
+def fixture_dir() -> str | None:
+    """The offline seam, or None for live gh. Set but empty is a mistake: it must
+    never fall through to a live call."""
+    value = os.environ.get(FIXTURE_ENV)
+    if value == "":
+        fail(f"{FIXTURE_ENV} is set but empty", 3)
+    return value
+
+
 def request(
     name: str, query: str, typed: dict[str, str | int], strings: dict[str, str | None]
 ) -> dict[str, Any]:
     """One GraphQL request: gh, or the fixture `<name>.json` when the seam is set.
     `typed` go as `-F` (owner, name, number), `strings` as `-f`; a None is omitted."""
-    fixture_dir = os.environ.get(FIXTURE_ENV)
+    seam = fixture_dir()
     gh_failure: str | None = None
-    if fixture_dir:
-        path = Path(fixture_dir) / f"{name}.json"
+    if seam is not None:
+        path = Path(seam) / f"{name}.json"
         try:
             raw = path.read_text(encoding="utf-8")
         except OSError as exc:
@@ -346,6 +403,78 @@ def not_found(
         if entry not in found:
             found.append(entry)
     return "; ".join(found)
+
+
+def rest(
+    method: str,
+    path: str,
+    *,
+    fixture: str,
+    missing: str,
+    body: str | None = None,
+    forbidden: str | None = None,
+) -> Any:
+    """One REST call: `gh api -X METHOD path`, or the fixture `<fixture>.json` when
+    the seam is set. A write (`body` given) sends {"body": body} on stdin; in fixture
+    mode it goes to the write log instead. A 404 is input: `missing`, exit 2. A live
+    403 with `forbidden` given fails as `<forbidden>: <gh stderr>`, exit 3."""
+    seam = fixture_dir()
+    gh_failure: str | None = None
+    gh_stderr = ""
+    if seam is not None:
+        if body is not None:
+            log_write(method, path, body)
+        source = Path(seam) / f"{fixture}.json"
+        try:
+            raw = source.read_text(encoding="utf-8")
+        except OSError as exc:
+            fail(f"cannot read fixture {source}: {exc.strerror or exc}", 3)
+    else:
+        argv = ["gh", "api", "-X", method, path]
+        payload: str | None = None
+        if body is not None:
+            argv += ["--input", "-"]
+            payload = json.dumps({"body": body}, ensure_ascii=False)
+        try:
+            proc = subprocess.run(
+                argv, input=payload, capture_output=True, encoding="utf-8", timeout=GH_TIMEOUT
+            )
+        except subprocess.TimeoutExpired:
+            written = "" if body is None else WRITE_TIMEOUT
+            fail(f"gh api -X {method} {path} timed out after {GH_TIMEOUT} s{written}", 3)
+        except OSError as exc:
+            fail(f"cannot run gh: {exc}", 3)
+        if proc.returncode != 0:
+            gh_stderr = proc.stderr.strip()
+            gh_failure = f"gh api -X {method} {path} exited {proc.returncode}: {gh_stderr}"
+        raw = proc.stdout
+    try:
+        response = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        fail(gh_failure or f"{method} {path}: response is not JSON: {exc}", 3)
+    # Live gh exits 1 for a 404 with the error object on stdout, so this is checked
+    # before the exit code.
+    status = response.get("status") if isinstance(response, dict) else None
+    if status == "404":
+        fail(missing, 2)
+    if gh_failure:
+        if status == "403" and forbidden is not None:
+            fail(f"{forbidden}: {gh_stderr}", 3)
+        fail(gh_failure, 3)
+    return response
+
+
+def log_write(method: str, path: str, body: str) -> None:
+    """Fixture mode: a write is appended to the write log, never sent anywhere."""
+    log = os.environ.get(WRITE_LOG_ENV)
+    if not log:
+        fail(f"fixture mode cannot publish: set {WRITE_LOG_ENV}", 3)
+    line = json.dumps({"method": method, "path": path, "body": body}, ensure_ascii=False) + "\n"
+    try:
+        with Path(log).open("a", encoding="utf-8") as out:
+            out.write(line)
+    except OSError as exc:
+        fail(f"cannot write {log}: {exc.strerror or exc}", 3)
 
 
 def repository(data: dict[str, Any], repo: str) -> dict[str, Any]:
@@ -816,6 +945,89 @@ def render(scope: Scope, g: Graph) -> tuple[str, bool]:
     return "\n".join(out) + "\n", bool(cycles)
 
 
+# ─── publish ────────────────────────────────────────────────────────────────
+def marker(opts: Options) -> str:
+    """`<!-- issue-graph: <key> -->`. A milestone key leaves out the repo set; an
+    `owner/name` is lower-cased (GitHub ignores its case) before issues are
+    deduplicated and sorted by Key; `%` then `>` are escaped so that a title can
+    never close the HTML comment."""
+    if opts.milestone is not None:
+        key = f"milestone={opts.milestone}"
+    elif opts.epic is not None:
+        key = f"epic={opts.epic[0].lower()}#{opts.epic[1]}"
+    else:
+        keys = sorted({(repo.lower(), n) for repo, n in opts.issues})
+        key = "issues=" + ",".join(f"{repo}#{n}" for repo, n in keys)
+    return f"<!-- issue-graph: {key.replace('%', '%25').replace('>', '%3E')} -->"
+
+
+def first_line(text: str) -> str:
+    return text.split("\n", 1)[0].removesuffix("\r")
+
+
+def find_marked(target: Key, mark: str) -> int | None:
+    """Id of the oldest comment on `target` whose first line is `mark`: pages of
+    100, oldest first, up to the first match or a short page; a full last page
+    under the cap without a match stops the search (exit 3)."""
+    repo, number = target
+    for page in range(1, COMMENTS_MAX_PAGES + 1):
+        path = f"repos/{repo}/issues/{number}/comments?per_page={COMMENTS_PAGE}&page={page}"
+        items = rest(
+            "GET",
+            path,
+            fixture=f"comments-{slug(repo)}-{number}-p{page}",
+            missing=f"issue {short(target)} not found",
+        )
+        if not isinstance(items, list):
+            fail(f"GET {path}: response is not a JSON array", 3)
+        for item in items:
+            comment = obj(item)
+            body = comment.get("body")
+            if isinstance(body, str) and first_line(body) == mark:
+                return int(comment["id"])
+        if len(items) < COMMENTS_PAGE:
+            return None
+    fail(
+        f"issue {short(target)}: more than {COMMENTS_MAX_PAGES * COMMENTS_PAGE} comments, "
+        "the marker search stopped",
+        3,
+    )
+
+
+def publish(target: Key, mark: str, report: str) -> None:
+    """Update the marked comment on `target` or create one; the result goes to stderr."""
+    body = f"{mark}\n\n{report}\n{FOOTER}\n"
+    if len(body) > COMMENT_LIMIT:
+        fail(
+            f"report is {len(body)} characters, over GitHub's {COMMENT_LIMIT}-character "
+            "comment limit; narrow the scope",
+            2,
+        )
+    repo, number = target
+    found = find_marked(target, mark)
+    if found is None:
+        action = "created"
+        response = rest(
+            "POST",
+            f"repos/{repo}/issues/{number}/comments",
+            fixture=f"comment-created-{slug(repo)}-{number}",
+            missing=f"issue {short(target)} not found",
+            body=body,
+        )
+    else:
+        action = "updated"
+        # A 403 here is final: a new comment would leave the marked one stale.
+        response = rest(
+            "PATCH",
+            f"repos/{repo}/issues/comments/{found}",
+            fixture=f"comment-updated-{found}",
+            missing=f"comment {found} not found",
+            body=body,
+            forbidden=f"comment {found} carries the marker but this account cannot edit it",
+        )
+    stderr_line({"published": action, "url": str(obj(response)["html_url"])})
+
+
 # ─── CLI ────────────────────────────────────────────────────────────────────
 class _Parser(argparse.ArgumentParser):
     def error(self, message: str) -> NoReturn:
@@ -830,6 +1042,7 @@ class Options:
     repos: list[str]
     project_owner: str
     project: int
+    publish_to: Key | None
 
 
 def parse_args(argv: list[str]) -> Options:
@@ -850,6 +1063,11 @@ def parse_args(argv: list[str]) -> Options:
     )
     parser.add_argument("--project-owner", metavar="ORG", default=DEFAULT_PROJECT_OWNER)
     parser.add_argument("--project", metavar="NUMBER", type=int, default=DEFAULT_PROJECT)
+    parser.add_argument(
+        "--publish-to",
+        metavar="N|REF",
+        help="also post the report to that issue (N = api#N), updated in place on re-run",
+    )
     ns = parser.parse_args(argv)
 
     repos = list(dict.fromkeys(ns.repo or []))
@@ -865,6 +1083,7 @@ def parse_args(argv: list[str]) -> Options:
         repos=repos or list(DEFAULT_REPOS),
         project_owner=str(ns.project_owner),
         project=int(ns.project),
+        publish_to=None if ns.publish_to is None else parse_target(str(ns.publish_to)),
     )
 
 
@@ -891,7 +1110,15 @@ def main(argv: list[str]) -> int:
     sys.stdout.flush()
     sys.stdout.buffer.write(report.encode("utf-8"))
     sys.stdout.buffer.flush()
-    return 1 if cyclic else 0
+    if opts.publish_to is None:
+        return 1 if cyclic else 0
+    if cyclic:
+        fail("not published: the graph has a cycle", 1)
+    try:
+        publish(opts.publish_to, marker(opts), report)
+    except (KeyError, TypeError, ValueError, AttributeError) as exc:
+        fail(f"unexpected REST response shape: {exc!r}", 3)
+    return 0
 
 
 if __name__ == "__main__":

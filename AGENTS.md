@@ -68,7 +68,8 @@ modules hold only `infrastructure/` code and `app/entrypoints/` does not exist y
 - `.agents/README.md` — layout, harness matrix, sync map.
 - `.agents/rules/` — stack and git-workflow rules.
 - `.agents/skills/` — agent skills (agent-loop, code-review, tdd,
-  pull-request, planning-and-task-breakdown, qa, e2e-test, create-issue).
+  pull-request, planning-and-task-breakdown, qa, e2e-test, create-issue,
+  issue-graph).
 - `.agents/agents/` — agent definitions.
 - `.agents/templates/` — code/test templates with proof blocks.
 - `docs/BACKEND_ARCHITECTURE.md` — Clean Architecture layout in full.
