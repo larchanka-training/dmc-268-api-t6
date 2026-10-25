@@ -146,20 +146,39 @@ Gates for every task: the four commands in the plan, with DB and vhost `imp130f`
 
 ### F1-7: R14, verifier window, `llm.verify.manifest_id`, E-2 ⚑
 - **Commit:** `feat(worker): run the reflection pass on snapshot-path reviews (#130)`
+- **Decided by the tech lead on 2026-10-25:** the verifier receives the L2–L4 excerpt blocks the
+  candidates cite as evidence (CVS §7.1), within the verifier-route window; an uncited excerpt is
+  never sent, and one that does not fit is left out (the verifier answers `insufficient_context`).
 - **Files:**
-  - `app/worker.py` (`attempt_provider_factory` `:709-734`, `AttemptReviewProvider` `:370`, `process_review_run` `:232-284`);
-  - `application/reflection_pass.py` (`:512`, `:621`, `VerifierModel.max_prompt_tokens`);
-  - `infrastructure/llm/models.py` (`GatewayVerifierModel`);
-  - `application/execute_review.py` (`:275-279` warning removed, `:531`);
-  - `infrastructure/llm/gateway.py` or `application/llm.py` (verification response without `reason`);
-  - tests: `tests/test_worker*.py`, `tests/test_reflection_pass.py`.
+  - `app/worker.py` (`attempt_provider_factory`, `AttemptReviewProvider.reflection_pass`, the queue
+    pipeline, `process_review_run`);
+  - `application/reflection_pass.py` (`VerifierWindow`, the window at the fit, the guard and
+    `ReflectionPass.max_prompt_tokens`; the cited excerpts; manifest tokens; `RunFailure` and
+    `RunCancelled` pass through; `VerifierReply`/`VerificationRecord.manifest_id`);
+  - `infrastructure/llm/models.py` (`GatewayVerifierModel.max_prompt_tokens`, `redact_answer`);
+  - `infrastructure/llm/gateway.py` (`max_prompt_tokens(engine, route)`, `StructuredTask.redact_answer`,
+    `GatewayResult.accepted_manifest_id`); `infrastructure/llm/answers.py`
+    (`verifier_answer_without_reasons`);
+  - `application/execute_review.py` (warning removed, the window in the mandatory verifier budget,
+    `llm.verify.manifest_id`); `docs/PIPELINE_SPEC.md` (`llm.call` response row);
+  - tests: new `tests/test_worker_reflection_pass.py`, `tests/test_reflection_pass_snapshot_path.py`,
+    `tests/test_gateway_verifier_snapshot_path.py`; `tests/test_llm_verify_trace.py`;
+    `tests/test_snapshot_path_live_pin.py` (the worker's pass is passed); fakes only in
+    `tests/test_execute_review.py` and `tests/test_worker.py`, plus the inverted warning case.
 - **Tests:**
-  - the composition passes a `ReflectionPass`;
-  - a v4 run makes a verification `llm.call` and `llm.verify` with a non-null `manifest_id`;
-  - the verifier budget equals the verifier route window;
-  - no `reason` in the stored verification response;
-  - a legacy run logs no warning.
-- **Done when:** [ ] F1-1 green.
+  - the composition passes a `ReflectionPass` (factory, queue pipeline, `process_review_run`);
+  - a v4 run makes a verification `llm.call` and `llm.verify` with a non-null `manifest_id` (the
+    accepted repair call's row after a repair);
+  - the verifier budget equals the verifier route window at the fit, the guard and the
+    mandatory check before the review call;
+  - no `reason` in the stored verification response; non-JSON text is withheld whole;
+  - a finding backed only by an excerpt is verified with the excerpt in the prompt and the
+    manifest; an uncited excerpt is not sent; the candidate's diff lines come first, then the
+    cited excerpts, then the other diff lines;
+  - every verifier manifest block carries its tokens;
+  - a verifier manifest-write failure stays `internal_error`; a cancellation stays one;
+  - a legacy run logs no warning, and the F1-1 pin passes the worker's pass.
+- **Done when:** [x] F1-1 green.
 
 ### F1-8: R12 and #247 p3
 - **Commit:** `fix(reviews): repair attribution before the verifier (#130)`

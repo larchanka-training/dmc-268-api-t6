@@ -153,6 +153,19 @@ validates against v1 when no snapshot is attached (`llm/models.py:183-188`). Tha
   - `ReflectionPass` passes it to `send_budget_for` at `reflection_pass.py:512` and `:621`.
   - E-9: `send_budget_for` stops reading `os.environ` (`prompt_budget.py:164-167`); callers pass the
     window. All of its callers are on the snapshot path.
+  - As built in F1-7: the window lives on a separate runtime-checkable `VerifierWindow` protocol,
+    not on `VerifierModel` (about 28 verifier fakes would need it). `ReflectionPass` reads it when
+    it verifies and applies it at the fit, the pre-send guard and, through
+    `ReflectionPass.max_prompt_tokens()`, the mandatory verifier budget that `execute_review`
+    checks before the review call (otherwise that check passes and the verifier overflows after
+    a paid review). The verifier manifest counts every block with the pinned counter.
+- **Verifier excerpts** (decided by the tech lead on 2026-10-25, during F1-7): the verifier gets
+  the L2–L4 blocks the candidates cite as evidence (CVS §7.1), rendered after the changed files
+  inside `<code_context>`, and its manifest names exactly the shown blocks. An uncited excerpt is
+  never sent. Fit order inside the verifier window: the candidates' own diff lines, then the
+  cited excerpts (whole or not at all, in payload order), then the other diff lines; a left-out
+  excerpt means `insufficient_context` from the verifier. Before F1-7 the verifier manifest
+  listed every payload excerpt without rendering it.
 
 **DD4. Manifest persistence.**
 - Migration `20261025_0040_context_manifests`, `down_revision = "20261024_0039"`. #283 uses
@@ -181,7 +194,8 @@ validates against v1 when no snapshot is attached (`llm/models.py:183-188`). Tha
     without it nothing is written and the E-3 keys carry `manifest_id: null`. The response also has
     `tokens_by_role` (#144). Blocks carry `tokens` only from the review manifest (`build_manifest` with
     the snapshot's counter) and the repair's `previous-output` block; the conventions and verifier
-    builders count in F1-10 and F1-7, so until then their rows report no tokens for their blocks.
+    builders count in F1-10 and F1-7 (the verifier's are counted since F1-7), so until then their
+    rows report no tokens for their blocks.
     The step records `duration_ms: 0` (its own write is the transaction).
 - **E-3.** For snapshot-path tasks, the `llm.call` request (`application/llm.py:141-155`) adds `call_id`,
   `stage`, `policy_snapshot_id` and `manifest_id`. If #227 merges first, its `operation` key stays and
@@ -216,14 +230,29 @@ raises `policy_prompt_budget_exceeded` (terminal), so neither the conventions no
 **DD9. R14.**
 - `attempt_provider_factory` (`worker.py:709-734`) builds `ReflectionPass(GatewayVerifierModel(gateway, run))`
   for each attempt. `AttemptReviewProvider` exposes it, and `process_review_run` passes it to `ExecuteReviewRun`.
-- An `UnconfiguredModel` attempt gets no `ReflectionPass` and fails with `llm_unavailable`, as today.
+- An `UnconfiguredModel` attempt gets no `ReflectionPass`; a legacy run fails with `llm_unavailable`
+  at its first model call, as today. A v4 run on such a worker fails earlier: its snapshot carries
+  the unpinned execution profile, so it is not ready and the selector refuses it with
+  `policy_snapshot_integrity_error` before any call (F1-2).
 - The warning at `execute_review.py:275-279` is removed; it would fire on every legacy run.
+- As built in F1-7: the queue pipeline takes the pass off the `AttemptReviewProvider` before
+  `CheckpointedProvider` wraps it; an injected provider (tests) runs without one. The verifier
+  call does not pass `CheckpointedProvider`'s attempt checkpoint: the gateway's own checkpoint
+  checks cancellation before every call and refuses a call without a whole call timeout before
+  the deadline, which covers T11.
 - The GitLab composition of #220 has to pass the same argument (Coordination).
 
 **DD10. Verifier output.**
 - E-2: the verification `llm.call` response is stored without `decisions[].reason` (TL-3).
 - #247 p3: `_repair_attribution` (`findings_post_processor.py:259-272`) runs before the verifier.
 - R12: `allowed_v2_rules=None` when no verifier call happened (`execute_review.py:449-461`).
+- As built in F1-7: the verifier task carries `redact_answer`; the gateway passes the answer text of
+  every stored choice through it, so the `llm.call` response of a JSON object keeps everything but
+  `decisions[].reason`, and text that is not a JSON object is withheld whole (a reason in it cannot
+  be found reliably). Review and conventions responses are stored as sent. A `RunFailure` that is
+  not a provider error (a failed manifest write: `internal_error`) and a cancellation now pass
+  through `ReflectionPass` instead of becoming `verification_unavailable`; provider errors keep
+  their `verification_*` mapping. `llm.verify.manifest_id` is `GatewayResult.accepted_manifest_id`.
 
 ## Hazard, D-1, in-flight runs, deploy order (D-2)
 
@@ -363,6 +392,11 @@ Rolling F2 back to F1 is safe. The floor goes to #297's rollback runbook.
 - CVS §5.2 "Текущее состояние" (`:770-780`). CVS §7.3: the example `C1 → R1 → R2 repair → V1` holds only
   without a fallback (TL-2). CVS §4.2: the R5 key deviation (TL-7).
 - RFS §7.2 values; TEST_PLAN §3.4 row "боевой worker его не подключает"; the rollback floor in CICD.
+- False since F1-7, left for G because #303 rewrites both paragraphs: PIPELINE_SPEC "Состояние
+  verifier после #133" (`:571-590`) and TEST_PLAN §3.4 (`:483-495`) still say a reflection pass
+  without a snapshot is skipped with the `execute_review_legacy_run_without_snapshot` warning
+  and that neither composition passes it. PIPELINE_SPEC `:177`: `llm.verify` now names its
+  `manifest_id`.
 
 ## Decided by the tech lead on 2026-10-25
 
@@ -381,6 +415,7 @@ Recorded per the coordinator's brief; one line per decision.
 - **TL-11** (a), as recommended, per the coordinator's brief: R4 is F5, after #283, gated like F1.
 - **TL-12** confirmed, per the coordinator's brief: `context_manifests` is the candidate checkpoint (blocks of any `_ROLE_KIND_MAP` role; `ManifestBlock` gets `tokens`, `repository_id`, `truncated`); #144 PR3a stacks on F1 after tasks 4, 5, 6 and 13, PR3b on F2.
 - **TL-13** (b), per the coordinator's brief, refined after the batch-1 review: the selector sends only GitHub runs to the snapshot path until the stage takes the provider from the run (it hard-codes `VcsProviderName.GITHUB`, `review_context_stage.py:472`); a v4 run of another provider (or without an origin) is refused with an explicit terminal error before any model call, never sent to legacy; F2 does not merge while #220 creates GitLab runs without that stage change.
+- **TL-14** (2026-10-25, during F1-7), per the coordinator's brief: the verifier receives the L2–L4 excerpt blocks the candidates cite as evidence (CVS §7.1), within the verifier-route window; uncited excerpts are not sent, and one that does not fit is left out, so the usual `insufficient_context` applies.
 - **#144 manifest response** (added under TL-12, accepted by the coordinator), per the coordinator's brief: the `context.manifest` step response is `{manifest_id, digest, block_count, input_tokens, tokens_by_role: {<role>: int}}`, the tokens per role over all manifest blocks after the fit, counted with the pinned counter (R19); task 6 describes it in openapi and PIPELINE_SPEC `:174`.
 
 ## Tasks (details and "done when" in the todo)

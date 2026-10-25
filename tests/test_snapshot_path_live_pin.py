@@ -1,9 +1,10 @@
 """The live review path, pinned before the policy-snapshot path is switched on (#130 F1-1).
 
 A run bound to review prompt v3 with all three prompt pins and a ready policy snapshot goes
-through ``process_review_run`` with the real context stage, the production gateway and a
-recording HTTP transport. Every F1 task keeps this test green: until F2 binds a run to a
-v2-contract prompt, the snapshot path changes nothing a live run sends or records.
+through ``process_review_run`` with the real context stage, the production gateway, the
+worker's Reflection Pass and a recording HTTP transport. Every F1 task keeps this test green:
+until F2 binds a run to a v2-contract prompt, the snapshot path changes nothing a live run
+sends or records.
 """
 
 from __future__ import annotations
@@ -42,6 +43,7 @@ from app.modules.reviews.application.policy_snapshot import (
 )
 from app.modules.reviews.application.prepare_policy_snapshot import PreparePolicySnapshot
 from app.modules.reviews.application.prompt_builder import PullRequestMeta, ReviewContext
+from app.modules.reviews.application.reflection_pass import ReflectionPass
 from app.modules.reviews.application.review_context import BuildReviewContext
 from app.modules.reviews.application.review_context_stage import (
     EstimatedTokenCounter,
@@ -58,6 +60,7 @@ from app.modules.reviews.infrastructure.llm.gateway import (
 from app.modules.reviews.infrastructure.llm.models import (
     GatewayConventionsModel,
     GatewayReviewModel,
+    GatewayVerifierModel,
 )
 from app.modules.reviews.infrastructure.llm.settings import LlmSettings
 from app.modules.reviews.infrastructure.models import PromptVersion, Run
@@ -349,6 +352,8 @@ async def _exercise(
             trace=trace,
             engine="fast",
             context_stage=stage,
+            # The worker hands every attempt its verifier (R14): a legacy run never calls it.
+            reflection_pass=ReflectionPass(GatewayVerifierModel(gateway, call_context)),
         )
     snapshot = await prepare.execute(run_id)
     async with factory() as session:

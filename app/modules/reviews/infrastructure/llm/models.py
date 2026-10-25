@@ -47,6 +47,7 @@ from app.modules.reviews.infrastructure.llm.answers import (
     provider_schema,
     review_answer_contract,
     validate_verifier_answer,
+    verifier_answer_without_reasons,
     verifier_output_schema,
 )
 from app.modules.reviews.infrastructure.llm.gateway import (
@@ -140,12 +141,16 @@ class GatewayVerifierModel:
     """``VerifierModel``: the verifier route, its schema and bounded repair (R11).
 
     The prompt and its manifest come from ``VerifierPromptBuilder``; the candidate-ID and
-    reference checks stay with the caller. Not wired in the worker yet (PR F).
+    reference checks stay with the caller. The worker builds one per attempt (R14).
     """
 
     def __init__(self, gateway: LlmGateway, run: RunCallContext) -> None:
         self._gateway = gateway
         self._run = run
+
+    def max_prompt_tokens(self) -> int:
+        """The verifier route's prompt window, which caps the verifier send budget (R10)."""
+        return self._gateway.max_prompt_tokens(self._run.engine, route="verifier")
 
     async def verify(
         self,
@@ -182,10 +187,11 @@ class GatewayVerifierModel:
                 counter=counter,
                 route="verifier",
                 bounded_repair=True,
+                redact_answer=verifier_answer_without_reasons,
             ),
             run,
         )
-        return VerifierReply(result.output, result.accepted_call_id)
+        return VerifierReply(result.output, result.accepted_call_id, result.accepted_manifest_id)
 
 
 async def review_with_gateway(

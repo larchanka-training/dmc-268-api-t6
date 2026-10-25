@@ -14,7 +14,7 @@ from dataclasses import dataclass, replace
 from datetime import timedelta
 from hashlib import sha256
 from importlib.resources import files
-from typing import Annotated, Any, Literal, Protocol
+from typing import TYPE_CHECKING, Annotated, Any, Literal, Protocol, runtime_checkable
 from xml.sax.saxutils import escape
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
@@ -40,13 +40,17 @@ from app.modules.reviews.application.prompt_builder import (
     ReviewRule,
     file_block_id,
     get_rule_check_ids,
+    render_context_excerpts,
 )
 from app.modules.reviews.application.review_output import (
     EvidenceRef,
     RequirementRef,
     ReviewFindingV2,
 )
-from app.modules.reviews.application.run_failures import RunFailure
+from app.modules.reviews.application.run_failures import RunCancelled, RunFailure
+
+if TYPE_CHECKING:
+    from app.modules.reviews.application.review_context import ContextBlock
 
 type VerificationStatus = Literal["supported", "contradicted", "insufficient_context"]
 
@@ -132,6 +136,8 @@ class VerifierReply:
 
     output: Mapping[str, Any] | str | bytes
     accepted_call_id: uuid.UUID | None = None
+    # That call's stored manifest (``context_manifests``); None without a manifest store.
+    manifest_id: uuid.UUID | None = None
 
 
 @dataclass(frozen=True)
@@ -142,6 +148,7 @@ class VerificationRecord:
     # The candidate ids sent to the verifier, in prompt order.
     candidate_ids: tuple[str, ...]
     accepted_call_id: uuid.UUID | None = None
+    manifest_id: uuid.UUID | None = None
 
 
 class VerifierModel(Protocol):
@@ -161,18 +168,31 @@ class VerifierModel(Protocol):
     ) -> VerifierReply | Mapping[str, Any] | str | bytes: ...
 
 
-def _fit_changed_files_for_verifier(
-    files: tuple[ChangedFile, ...],
-    rules: tuple[ReviewRule, ...],
-    max_tokens: int,
-    counter: TokenCounter,
-    candidates: tuple[CandidateFindingItem, ...] = (),
-) -> tuple[ChangedFile, ...]:
-    builder = PromptBuilder()
-    rendered = builder._render_changed_files(files, include_block_id=True)
-    if counter.count(f"<code_context>\n{rendered}\n</code_context>") <= max_tokens:
-        return files
+@runtime_checkable
+class VerifierWindow(Protocol):
+    """A verifier model that knows its route's prompt window (R10).
 
+    The window caps every verification send budget; a model without it (eval, fakes) is
+    fitted to the execution profile alone.
+    """
+
+    def max_prompt_tokens(self) -> int: ...
+
+
+def _verifier_code_context(
+    files: tuple[ChangedFile, ...], excerpts: tuple[ContextBlock, ...] = ()
+) -> str:
+    """The verifier's code: the changed files, then the excerpts the candidates cite."""
+    parts = [PromptBuilder._render_changed_files(files, include_block_id=True)]
+    if excerpts:
+        parts.append(render_context_excerpts(excerpts))
+    return "<code_context>\n" + "\n".join(parts) + "\n</code_context>"
+
+
+def _protected_lines(
+    files: tuple[ChangedFile, ...], candidates: tuple[CandidateFindingItem, ...]
+) -> dict[str, set[int]]:
+    """The changed-file lines each candidate stands on or cites, by path."""
     protected_lines: dict[str, set[int]] = {}
     for cand in candidates:
         s = protected_lines.setdefault(cand.finding.path, set())
@@ -186,6 +206,59 @@ def _fit_changed_files_for_verifier(
                     ref_set = protected_lines.setdefault(f.path, set())
                     for line_num in range(ref.start_line, ref.end_line + 1):
                         ref_set.add(line_num)
+    return protected_lines
+
+
+def _cited_excerpts(
+    blocks: tuple[ContextBlock, ...], candidates: tuple[CandidateFindingItem, ...]
+) -> tuple[ContextBlock, ...]:
+    """The L2-L4 blocks a candidate cites as evidence, in payload order (CVS §7.1)."""
+    cited = {ref.block_id for cand in candidates for ref in cand.finding.evidence_refs}
+    return tuple(block for block in blocks if block.block_id in cited)
+
+
+def _fit_cited_excerpts(
+    excerpts: tuple[ContextBlock, ...],
+    files: tuple[ChangedFile, ...],
+    max_tokens: int,
+    counter: TokenCounter,
+    candidates: tuple[CandidateFindingItem, ...],
+) -> tuple[ContextBlock, ...]:
+    """The cited excerpts that fit next to the candidates' own diff lines, whole or not at all.
+
+    The other diff lines come after them: a candidate whose excerpt is left out gets
+    ``insufficient_context`` from the verifier.
+    """
+    protected = _protected_lines(files, candidates)
+    reserved = tuple(
+        ChangedFile(
+            file.path,
+            file.status,
+            tuple(line for line in file.lines if line.number in protected[file.path]),
+            total_lines=file.total_lines or len(file.lines),
+        )
+        for file in files
+        if protected.get(file.path)
+    )
+    kept: list[ContextBlock] = []
+    for excerpt in excerpts:
+        if counter.count(_verifier_code_context(reserved, (*kept, excerpt))) <= max_tokens:
+            kept.append(excerpt)
+    return tuple(kept)
+
+
+def _fit_changed_files_for_verifier(
+    files: tuple[ChangedFile, ...],
+    rules: tuple[ReviewRule, ...],
+    max_tokens: int,
+    counter: TokenCounter,
+    candidates: tuple[CandidateFindingItem, ...] = (),
+    excerpts: tuple[ContextBlock, ...] = (),
+) -> tuple[ChangedFile, ...]:
+    if counter.count(_verifier_code_context(files, excerpts)) <= max_tokens:
+        return files
+
+    protected_lines = _protected_lines(files, candidates)
 
     order = sorted(
         range(len(files)),
@@ -201,8 +274,7 @@ def _fit_changed_files_for_verifier(
     def fits(extra: dict[int, ChangedFile]) -> bool:
         chosen = {**kept, **extra}
         candidate_files = tuple(chosen[i] for i in sorted(chosen))
-        candidate_rendered = builder._render_changed_files(candidate_files, include_block_id=True)
-        return counter.count(f"<code_context>\n{candidate_rendered}\n</code_context>") <= max_tokens
+        return counter.count(_verifier_code_context(candidate_files, excerpts)) <= max_tokens
 
     for index in order:
         file = files[index]
@@ -378,7 +450,9 @@ class VerifierPromptBuilder:
         candidates: tuple[CandidateFindingItem, ...],
         context: ReviewContext,
         call_id: uuid.UUID | None = None,
+        max_prompt_tokens: int | None = None,
     ) -> tuple[VerifierPrompt, CallManifest]:
+        """The verifier prompt and its manifest; ``max_prompt_tokens`` is the route window."""
         call_id = call_id or uuid.uuid4()
 
         # Check prompt checksum if snapshot binds verifier prompt
@@ -418,6 +492,8 @@ class VerifierPromptBuilder:
             else None
         )
         counter = token_counter_for(counter_version)
+        # The snapshot path counts every manifest block with the pinned counter (R19).
+        manifest_counter = counter if context.policy_snapshot is not None else None
 
         # 1. Policy documents and service defaults
         mandatory_blocks: list[str] = []
@@ -468,7 +544,7 @@ class VerifierPromptBuilder:
 
             start_attr = f'start_line="{f.start_line}" ' if f.start_line is not None else ""
             category_attr = f'category="{_attribute(f.category)}" '
-            cand_xml_list.append(
+            cand_xml = (
                 f'<candidate candidate_id="{_attribute(cand.candidate_id)}" '
                 f'path="{_attribute(f.path)}" '
                 f"{start_attr}"
@@ -482,6 +558,7 @@ class VerifierPromptBuilder:
                 f"{evidence_tag}"
                 f"</candidate>"
             )
+            cand_xml_list.append(cand_xml)
             start_l = f.start_line or f.line
             candidate_blocks.append(
                 ManifestBlock(
@@ -493,6 +570,7 @@ class VerifierPromptBuilder:
                     end_line=f.line,
                     shown_line_count=1,
                     shown_ranges=((start_l, f.line),),
+                    tokens=None if manifest_counter is None else manifest_counter.count(cand_xml),
                 )
             )
 
@@ -508,9 +586,12 @@ class VerifierPromptBuilder:
         mandatory_tokens = counter.count(mandatory_text)
 
         fitted_files = context.changed_files
+        shown_excerpts = _cited_excerpts(context.context_blocks, candidates)
         if context.policy_snapshot is not None:
             max_send_budget = send_budget_for(
-                context.policy_snapshot.execution_profile, stage="verification"
+                context.policy_snapshot.execution_profile,
+                stage="verification",
+                model_max_prompt_tokens=max_prompt_tokens,
             )
             if mandatory_tokens > max_send_budget:
                 raise RunFailure(
@@ -524,28 +605,34 @@ class VerifierPromptBuilder:
                     "verification_context_overflow",
                     f"Verifier prompt is {mandatory_tokens} tokens, limit is {max_send_budget}",
                 )
+            # The candidates' own diff lines first, then the excerpts they cite, then the
+            # other diff lines (decided by the tech lead on 2026-10-25, CVS §7.1).
+            shown_excerpts = _fit_cited_excerpts(
+                shown_excerpts, context.changed_files, code_budget, counter, candidates
+            )
             fitted_files = _fit_changed_files_for_verifier(
                 context.changed_files,
                 context.rules,
                 code_budget,
                 counter,
                 candidates=candidates,
+                excerpts=shown_excerpts,
             )
 
-        # 4. Code context (diff) with explicit block_id
-        code_context = builder._render_changed_files(fitted_files, include_block_id=True)
+        # 4. Code context: the diff and the cited excerpts, each with its block_id
         user_blocks = [
             *mandatory_blocks[:-1],
-            f"<code_context>\n{code_context}\n</code_context>",
+            _verifier_code_context(fitted_files, shown_excerpts),
             candidates_xml,
         ]
 
         user_message = "\n".join(user_blocks)
         prompt = VerifierPrompt(system=self._system_prompt, user=user_message)
 
-        fitted_context = replace(context, changed_files=fitted_files)
+        # The manifest names exactly the shown code: never an uncited or dropped excerpt.
+        fitted_context = replace(context, changed_files=fitted_files, context_blocks=shown_excerpts)
         prompt_builder_manifest = builder.build_manifest(
-            fitted_context, call_id=call_id, stage="verification"
+            fitted_context, call_id=call_id, stage="verification", counter=manifest_counter
         )
         conventions_blocks: list[ManifestBlock] = []
         if conventions_rendered is not None:
@@ -559,6 +646,9 @@ class VerifierPromptBuilder:
                     end_line=conv_lines,
                     shown_line_count=conv_lines,
                     shown_ranges=((1, conv_lines),),
+                    tokens=None
+                    if manifest_counter is None
+                    else manifest_counter.count(conventions_rendered),
                 )
             )
         all_blocks = (
@@ -588,6 +678,10 @@ class ReflectionPass:
         self._model = model
         self._prompt_builder = VerifierPromptBuilder(system_prompt=system_prompt)
 
+    def max_prompt_tokens(self) -> int | None:
+        """The verifier route's prompt window, when the model knows it (R10)."""
+        return self._model.max_prompt_tokens() if isinstance(self._model, VerifierWindow) else None
+
     async def verify(
         self,
         *,
@@ -607,10 +701,12 @@ class ReflectionPass:
         if not candidates:
             return VerificationRecord(decisions=(), candidate_ids=())
 
+        window = self.max_prompt_tokens()
         prompt, manifest = await asyncio.to_thread(
             self._prompt_builder.build_verifier_prompt,
             candidates=candidates,
             context=context,
+            max_prompt_tokens=window,
         )
 
         # Pre-send guard on verifier prompt tokens
@@ -618,7 +714,9 @@ class ReflectionPass:
             profile = context.policy_snapshot.execution_profile
             counter = token_counter_for(profile.counter_version)
             total_tokens = counter.count(prompt.system) + counter.count(prompt.user)
-            max_send_budget = send_budget_for(profile, stage="verification")
+            max_send_budget = send_budget_for(
+                profile, stage="verification", model_max_prompt_tokens=window
+            )
             if total_tokens > max_send_budget:
                 raise RunFailure(
                     "verification_context_overflow",
@@ -675,10 +773,16 @@ class ReflectionPass:
                     "Verifier model rate limited",
                     retry_after=timedelta(seconds=min(retry_after_s, _MAX_RETRY_AFTER_S)),
                 ) from exc
+            if isinstance(exc, (RunFailure, RunCancelled)):
+                # Not a provider error: a manifest write that failed keeps internal_error
+                # (PIPELINE_SPEC:174) and a cancellation stays a cancellation.
+                raise
             raise VerificationUnavailableError("Verifier model call failed") from exc
 
+        manifest_id: uuid.UUID | None = None
         if isinstance(reply, VerifierReply):
             raw_output, accepted_call_id = reply.output, reply.accepted_call_id
+            manifest_id = reply.manifest_id
         else:
             raw_output, accepted_call_id = reply, None
         try:
@@ -872,6 +976,7 @@ class ReflectionPass:
             decisions=tuple(parsed.decisions),
             candidate_ids=tuple(c.candidate_id for c in candidates),
             accepted_call_id=accepted_call_id,
+            manifest_id=manifest_id,
         )
 
 
