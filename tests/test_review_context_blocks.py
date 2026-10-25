@@ -54,6 +54,10 @@ from app.modules.reviews.application.review_context import (
     ReviewContextPayload,
 )
 from app.modules.reviews.application.review_path import ReviewBinding
+from tests.test_review_context_stage import _HEAD as STAGE_HEAD
+from tests.test_review_context_stage import _RUN as STAGE_RUN
+from tests.test_review_context_stage import Trace as StageTrace
+from tests.test_review_context_stage import _stage as _context_stage
 
 RUN_ID = UUID("00000000-0000-0000-0000-000000000300")
 REPOSITORY_ID = UUID("00000000-0000-0000-0000-000000000301")
@@ -336,6 +340,7 @@ class _Stage:
     """The context stage as execute_review sees it."""
 
     diff_old_sha: str | None = None
+    head_sha: str | None = None
 
     def __init__(self, snapshot: PolicySnapshot | None, payload: ReviewContextPayload | None):
         self.snapshot_for_llm = snapshot
@@ -458,3 +463,13 @@ def test_legacy_review_gets_neither_excerpts_nor_the_counter() -> None:
     user = PromptBuilder().build_prompt(context).user
     assert "<context_excerpts>" not in user and "<excluded_files" not in user
     assert user.endswith("<omitted_files>\napp/too_big.py\n</omitted_files>")
+
+
+def test_the_stage_names_the_head_of_the_attempts_diff_map() -> None:
+    # execute_review labels the snapshot-path diff and excerpts with it, not the live head.
+    stage = _context_stage(StageTrace())
+    assert stage.head_sha is None
+
+    asyncio.run(stage.run(STAGE_RUN))
+
+    assert stage.head_sha == STAGE_HEAD

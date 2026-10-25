@@ -32,6 +32,7 @@ from app.modules.reviews.application.prompt_builder import ReviewRule
 from app.modules.reviews.application.review_path import (
     ReviewBinding,
     require_servable_without_snapshot,
+    require_served_provider,
 )
 from app.modules.reviews.application.run_failures import RunCancelled
 from app.modules.reviews.application.run_trace import RunTrace, traced_step
@@ -152,6 +153,7 @@ class ReviewRunProcessor:
 
         vcs_run: RunVcsInput | None = None
         failed_blob_shas: frozenset[str] = frozenset()
+        conventions_input: RunConventionsInput | None = None
         if self._vcs_provider is not None:
             vcs_repository = cast(RunVcsRepository, self._repository)
             vcs_run = await vcs_repository.get_run_vcs_input(run_id)
@@ -166,6 +168,10 @@ class ReviewRunProcessor:
                 def excluded(snapshot: DiffSnapshot) -> bool:
                     return stage.excludes_change(snapshot.filename, snapshot.previous_filename)
 
+            if self._conventions is not None:
+                conventions_input = await self._servable_conventions_input(run_id)
+                if conventions_input is None:
+                    return None
             stored_files = await vcs_repository.get_run_snapshots(run_id)
             if stored_files is None:
                 request = {
@@ -225,6 +231,10 @@ class ReviewRunProcessor:
             if legacy_run is None:
                 return None
             run = legacy_run
+            if self._conventions is not None:
+                conventions_input = await self._servable_conventions_input(run_id)
+                if conventions_input is None:
+                    return None
             if self._provider is None:
                 raise RuntimeError("a VCS provider is required to process review diffs")
             files = await self._provider.fetch_diff(
@@ -253,14 +263,8 @@ class ReviewRunProcessor:
                 path for path in changed_paths if not self._context_stage.excluded(path)
             )
         if self._conventions is not None:
-            conventions_repository = cast(RunConventionsRepository, self._repository)
-            conventions_input = await conventions_repository.get_run_conventions_input(run_id)
-            if conventions_input is None:
-                return None
-            if self._context_stage is None and conventions_input.review_binding is not None:
-                # Without the policy stage there is no snapshot: a run bound to the snapshot
-                # path is refused here, before the conventions call.
-                require_servable_without_snapshot(conventions_input.review_binding)
+            # CONTRACT: read and checked before the diff whenever conventions are configured.
+            assert conventions_input is not None
             policy_key = None if self._context_stage is None else self._context_stage.policy_key
             extra: dict[str, Any] = {}
             if policy_key is not None:
@@ -276,6 +280,22 @@ class ReviewRunProcessor:
                 **extra,
             )
         return True
+
+    async def _servable_conventions_input(self, run_id: UUID) -> RunConventionsInput | None:
+        """The run's conventions input, read before its diff: a snapshot-path run this
+        composition cannot serve is refused here, before any diff read and model call."""
+        conventions_repository = cast(RunConventionsRepository, self._repository)
+        conventions_input = await conventions_repository.get_run_conventions_input(run_id)
+        binding = None if conventions_input is None else conventions_input.review_binding
+        if binding is not None:
+            if self._context_stage is None:
+                # Without the policy stage there is no snapshot.
+                require_servable_without_snapshot(binding)
+            else:
+                # The stage passed the run at policy load as the provider it builds the diff
+                # map with (TL-13); the run's own provider is checked here.
+                require_served_provider(binding)
+        return conventions_input
 
     def _provider_checkpoint(self, run_id: UUID) -> RunProviderCheckpoint:
         async def checkpoint() -> None:

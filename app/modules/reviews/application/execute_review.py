@@ -185,6 +185,9 @@ class ReviewContextFilter(Protocol):
     def diff_old_sha(self) -> str | None: ...
 
     @property
+    def head_sha(self) -> str | None: ...
+
+    @property
     def snapshot_for_llm(self) -> PolicySnapshot | None: ...
 
     @property
@@ -249,6 +252,11 @@ class ExecuteReviewRun:
             omitted_files = tuple(path for path in omitted_files if not excluded(path))
             if meta.diff_old_sha is None and self._context_filter.diff_old_sha is not None:
                 meta = replace(meta, diff_old_sha=self._context_filter.diff_old_sha)
+            if prompt_input.policy_snapshot is not None and self._context_filter.head_sha:
+                # The stored diff and the excerpts were read at the head of the attempt's
+                # diff map; a push after it must not relabel them (the live meta is read
+                # after the conventions call). Legacy keeps the live head.
+                meta = replace(meta, head_sha=self._context_filter.head_sha)
         context_blocks: tuple[ContextBlock, ...] = ()
         retrieved: tuple[RetrievedBlock, ...] = ()
         excluded_files = 0
@@ -307,8 +315,15 @@ class ExecuteReviewRun:
         if isinstance(reply, ReviewReply):
             context, reviewer_manifest, model_output = reply.context, reply.manifest, reply.output
         else:
-            # A model that answers with the mapping itself (eval, tests): attribution
-            # checks a manifest built from the context it was given.
+            # The legacy answer. On the snapshot path only a test fake answers so (the
+            # gateway adapter always replies with ReviewReply): its fit and pre-send guards
+            # did not run, and attribution checks a manifest built from the given context.
+            if context.policy_snapshot is not None:
+                _LOGGER.warning(
+                    "Snapshot-path review answered without a ReviewReply: the fit and the "
+                    "pre-send guards of the review adapter did not run run_id=%s",
+                    run_id,
+                )
             model_output = reply
         if self._reflection_pass is not None and context.policy_snapshot is not None:
             model_output = await self._run_reflection_pass(

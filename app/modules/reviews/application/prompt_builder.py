@@ -686,15 +686,24 @@ def _render_excerpt(block: ContextBlock) -> str:
         number for item in source.ranges for number in range(item.start_line, item.end_line + 1)
     ]
     # CONTRACT: the stage cuts a block's text from exactly its source ranges, one text line
-    # per source line (review_context.py ``_excerpt``, ``_symbol_block``); a mismatch raises.
-    lines = (
-        [
-            f'<line n="{number}">{_text(line)}</line>'
-            for number, line in zip(numbers, block.text.split("\n"), strict=True)
-        ]
-        if numbers
-        else []
-    )
+    # per source line (review_context.py ``_excerpt``, ``_symbol_block``). A block that breaks
+    # it would show lines under numbers they do not have: the call is refused, terminally.
+    text_lines = block.text.split("\n")
+    try:
+        lines = (
+            [
+                f'<line n="{number}">{_text(line)}</line>'
+                for number, line in zip(numbers, text_lines, strict=True)
+            ]
+            if numbers
+            else []
+        )
+    except ValueError as error:
+        raise PolicyError(
+            PolicyErrorCode.CONTEXT_VIOLATION,
+            f"Excerpt '{block.block_id}' has {len(text_lines)} text lines "
+            f"for {len(numbers)} source lines",
+        ) from error
     return f"<excerpt {' '.join(attributes)}>\n" + "\n".join(lines) + "\n</excerpt>"
 
 

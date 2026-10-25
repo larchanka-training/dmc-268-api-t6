@@ -359,6 +359,7 @@ class ReviewContextStage:
         self._payload: ReviewContextPayload | None = None
         self._matcher: IgnoreMatcher | None = None
         self._diff_old_sha: str | None = None
+        self._head_sha: str | None = None
         # The live PR base of the attempt when it differs from the pinned one, else None.
         self._pr_base_sha: str | None = None
 
@@ -376,6 +377,11 @@ class ReviewContextStage:
     def diff_old_sha(self) -> str | None:
         """The old-side diff revision (merge base) established for the current attempt."""
         return self._diff_old_sha
+
+    @property
+    def head_sha(self) -> str | None:
+        """The head revision of the attempt's diff map: its stored diff and excerpts."""
+        return self._head_sha
 
     @property
     def policy_key(self) -> str | None:
@@ -457,6 +463,7 @@ class ReviewContextStage:
         """
         self._denied_paths = frozenset()
         self._diff_old_sha = None
+        self._head_sha = None
         self._pr_base_sha = None
         self._payload = None
         if self._snapshot is None or self._matcher is None:
@@ -508,6 +515,7 @@ class ReviewContextStage:
             diff_old_sha=diff_old_sha,
         )
         self._diff_old_sha = diff_map.diff_old_sha
+        self._head_sha = diff_map.head_sha
         ignore = apply_ignore(matcher, diff_map, builtin_excluded=self._builtin_excluded)
         # A file the service stored as binary or generated is an exclusion for every
         # consumer, also when an allowed file imports it: its names join the deny-set.

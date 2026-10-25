@@ -63,6 +63,8 @@ Gates for every task: the four commands in the plan, with DB and vhost `imp130f`
     call. Under TL-10 (b): legacy instead;
   - fix round (batch-1 review): a v4 run of an unserved provider (GitLab, other name, no origin) → the
     same terminal error before any model call; only a `review.system` row picks the path.
+  - fix round (batch-2 review): that refusal comes before the diff in both compositions: with a stage
+    (it keys on `_STAGE_PROVIDER`) `prepare` checks the run's provider right after `begin`.
 - **Done when:** [x] F1-1 green; [x] `answers.py` has one source for the v2-contract versions.
 
 ### F1-3: Lock 1 behind the selector (R1 review side)
@@ -93,7 +95,11 @@ Gates for every task: the four commands in the plan, with DB and vhost `imp130f`
   - manifest roles are `source_excerpt` and `ast_excerpt`, with `shown_ranges`;
   - fit drops L3, then L2, then L4 (the reverse of the CVS §4.1 selection order), before changed files;
   - `retrieved` is not rendered while `RETRIEVED_PROMPT_VERSIONS` is empty;
-  - an ignored count appears as a counter, never as a path.
+  - an ignored count appears as a counter, never as a path;
+  - fix round (batch-2 review): an excerpt whose text does not match its source ranges fails with the
+    terminal `policy_context_violation` before any call; on the snapshot path the PR meta carries the
+    head of the attempt's diff map (stage `head_sha`), so a push after the diff map does not fail the
+    guard; the L2–L4 excerpts go through the real `GatewayReviewModel`.
 - **Done when:** [x] F1-1 green; [ ] IMP#144 is told PR3a can start (with F1-5, F1-6, F1-13).
 
 ### F1-5: R10 review, T-a, E-9 ⚑
@@ -109,7 +115,7 @@ Gates for every task: the four commands in the plan, with DB and vhost `imp130f`
   - a repair-accepted answer is attributed against the repair manifest, a fallback answer against the
     fallback manifest;
   - `send_budget_for` ignores `LLM_CONTEXT_WINDOW`;
-  - a `Mapping` reply still works.
+  - a `Mapping` reply still works; on the snapshot path it logs a warning (fix round of batch 2).
 - **As built:** the tests are in new `tests/test_gateway_review_model.py`. The six fit and guard cases of
   `tests/test_execute_review.py` moved there (TL decision, addendum 6400817148 on #303). The
   proxies `CheckpointedProvider.draft_review` (`handle_review_run.py`) and

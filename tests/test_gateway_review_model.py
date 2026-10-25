@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import re
 from collections.abc import Callable, Mapping
 from dataclasses import replace
@@ -25,6 +26,7 @@ import pytest
 
 from app.modules.reviews.application import execute_review as execute_review_module
 from app.modules.reviews.application.check_runs import RunProviderCheckpoint
+from app.modules.reviews.application.context_provenance import SourceRole
 from app.modules.reviews.application.conventions import CachedConventions, GeneratedConventions
 from app.modules.reviews.application.execute_review import (
     ExecuteReviewRun,
@@ -52,6 +54,11 @@ from app.modules.reviews.application.prompt_builder import (
     file_block_id,
 )
 from app.modules.reviews.application.reflection_pass import ReflectionPass
+from app.modules.reviews.application.review_context import (
+    ContextBlock,
+    ContextLevel,
+    ReviewContextPayload,
+)
 from app.modules.reviews.application.run_failures import RunFailure
 from app.modules.reviews.infrastructure.llm import models as models_module
 from app.modules.reviews.infrastructure.llm.gateway import LlmGateway
@@ -60,6 +67,8 @@ from app.modules.reviews.infrastructure.llm.models import GatewayReviewModel
 from app.modules.reviews.infrastructure.llm.settings import LlmSettings, ModelPrice, ModelProfile
 from app.modules.reviews.infrastructure.llm.transport import ChatRequest, ChatResponse
 from tests.llm_fakes import context_checkpoint
+from tests.test_review_context_blocks import HEAD as PINNED_HEAD
+from tests.test_review_context_blocks import L2_WINDOW, L3_FULL, L4_SIGNATURE, _block, _payload
 
 RUN_ID = UUID("00000000-0000-0000-0000-000000000500")
 MAIN = "app/main.py"
@@ -588,22 +597,160 @@ def test_execute_review_attributes_against_the_manifest_of_the_accepted_call() -
     assert verifier.candidates == []
 
 
-def test_execute_review_still_takes_a_plain_mapping_on_the_snapshot_path() -> None:
-    class MappingModel:
-        async def get_pull_request_meta(self, run_id: UUID) -> PullRequestMeta:
-            return _meta()
+class _MappingModel:
+    """A test fake that answers with the mapping itself, as no production adapter does."""
 
-        async def draft_review(self, *, context: ReviewContext) -> Mapping[str, object]:
-            return {"findings": [_finding(2)], "summary": SUMMARY}
+    async def get_pull_request_meta(self, run_id: UUID) -> PullRequestMeta:
+        return _meta()
 
+    async def draft_review(self, *, context: ReviewContext) -> Mapping[str, object]:
+        return {"findings": [_finding(2)], "summary": SUMMARY}
+
+
+def test_execute_review_still_takes_a_plain_mapping_on_the_snapshot_path(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     pipeline = _Pipeline(TEN_LINES, _snapshot())
 
-    success, verifier = _execute(pipeline, MappingModel(), line=2)
+    with caplog.at_level(logging.WARNING, logger=execute_review_module.__name__):
+        success, verifier = _execute(pipeline, _MappingModel(), line=2)
 
     assert success is True
     [published] = pipeline.published
     assert [finding["line"] for finding in published["findings"]] == [2]
     assert len(verifier.candidates) == 1
+    # It skipped the adapter's fit and guards: said, never silent.
+    [warning] = [r for r in caplog.records if r.name == execute_review_module.__name__]
+    assert warning.levelno == logging.WARNING
+    assert warning.getMessage() == (
+        "Snapshot-path review answered without a ReviewReply: the fit and the pre-send "
+        f"guards of the review adapter did not run run_id={RUN_ID}"
+    )
+
+
+def test_a_plain_mapping_on_the_legacy_path_logs_nothing(caplog: pytest.LogCaptureFixture) -> None:
+    pipeline = _Pipeline(TEN_LINES, None)
+
+    with caplog.at_level(logging.WARNING, logger=execute_review_module.__name__):
+        success, _ = _execute(pipeline, _MappingModel(), line=2)
+
+    assert success is True
+    assert [r for r in caplog.records if r.name == execute_review_module.__name__] == []
+
+
+# The L2-L4 excerpts of the payload through the real adapter (#130 F1-4 with F1-5).
+
+
+def _with_excerpts(*blocks: ContextBlock, head_sha: str = PINNED_HEAD) -> ReviewContext:
+    return replace(
+        _context(_one_line(), _snapshot()), pr_meta=_meta(head_sha), context_blocks=blocks
+    )
+
+
+def test_the_adapter_fits_guards_manifests_and_sends_the_l2_l4_excerpts() -> None:
+    transport = Transport(json.dumps(EMPTY_ANSWER))
+    context = _with_excerpts(L4_SIGNATURE, L2_WINDOW, L3_FULL)
+
+    reply = _draft(_gateway(transport), context)
+
+    assert isinstance(reply, ReviewReply)
+    assert reply.context.context_blocks == (L4_SIGNATURE, L2_WINDOW, L3_FULL)
+    assert [(block.block_id, block.source_role) for block in reply.manifest.blocks] == [
+        ("policy-rules", SourceRole.POLICY_DOCUMENT),
+        (file_block_id(MAIN), SourceRole.DIFF),
+        ("L4:sym-1", SourceRole.AST_EXCERPT),
+        ("L2:f1:3-4", SourceRole.SOURCE_EXCERPT),
+        ("L3:f2:1-3", SourceRole.SOURCE_EXCERPT),
+    ]
+    assert reply.manifest.is_range_shown("L4:sym-1", 5, 6)
+    [request] = transport.requests
+    user = request.messages[1].content
+    for block_id in ("L4:sym-1", "L2:f1:3-4", "L3:f2:1-3"):
+        assert f'<excerpt block_id="{block_id}"' in user
+    assert '<line n="6">        ...</line>' in user
+
+
+@pytest.mark.parametrize(
+    "text", ["def f():", "def f():\n    return 1\n    # one more"], ids=["shorter", "longer"]
+)
+def test_an_excerpt_whose_text_does_not_match_its_ranges_fails_before_any_call(text: str) -> None:
+    # Two source lines (3-4); the stage always cuts one text line per source line.
+    broken = _block("L2:f1:3-4", ContextLevel.L2, "app/util.py", ((3, 4),), text)
+    transport = Transport(json.dumps(EMPTY_ANSWER))
+
+    with pytest.raises(PolicyError) as raised:
+        _draft(_gateway(transport), _with_excerpts(broken))
+
+    assert raised.value.code is PolicyErrorCode.CONTEXT_VIOLATION
+    assert "Excerpt 'L2:f1:3-4' has" in str(raised.value)
+    assert transport.requests == []
+
+
+# A push after the stage built the diff map: the snapshot path keeps the attempt's head.
+
+
+class _PushedPipeline(_Pipeline):
+    """The live PR meta names a head pushed after the stage pinned the attempt's diff map."""
+
+    async def get_pull_request_meta(self, run_id: UUID) -> PullRequestMeta:
+        return _meta("f" * 40)
+
+
+class _ExcerptStage:
+    """The context stage as execute_review sees it, with the attempt's diff map head."""
+
+    diff_old_sha: str | None = None
+    head_sha: str | None = PINNED_HEAD
+
+    def __init__(self, snapshot: PolicySnapshot | None, payload: ReviewContextPayload) -> None:
+        self.snapshot_for_llm = snapshot
+        self.payload = payload
+
+    def excluded(self, path: str) -> bool:
+        return False
+
+
+def _pushed(snapshot: PolicySnapshot | None) -> tuple[GatewayReviewModel, Transport]:
+    pipeline = _PushedPipeline(_one_line(), None)
+    transport = Transport(json.dumps(EMPTY_ANSWER))
+    model = _GatewayModel(_gateway(transport), pipeline)
+    run = ExecuteReviewRun(
+        pipeline,
+        pipeline,
+        model,  # type: ignore[arg-type]
+        pipeline,
+        context_filter=_ExcerptStage(snapshot, _payload()),
+        reflection_pass=ReflectionPass(_Verifier()),
+    )
+    assert asyncio.run(run.execute(RUN_ID)) is True
+    return model.review, transport
+
+
+def test_a_push_after_the_diff_map_keeps_the_pinned_head_on_the_snapshot_path() -> None:
+    review, transport = _pushed(_snapshot())
+
+    assert review.last_result is not None and review.last_result.accepted_manifest is not None
+    revisions = {
+        block.block_id: block.revision for block in review.last_result.accepted_manifest.blocks
+    }
+    # The diff block and the excerpts name the head the stored diff and the excerpts were
+    # read at, not the pushed one.
+    assert revisions == {
+        "policy-rules": "b" * 40,
+        file_block_id(MAIN): PINNED_HEAD,
+        "L4:sym-1": PINNED_HEAD,
+        "L2:f1:3-4": PINNED_HEAD,
+    }
+    [request] = transport.requests
+    assert f"<head_sha>{PINNED_HEAD}</head_sha>" in request.messages[1].content
+
+
+def test_a_legacy_review_keeps_the_live_head_of_the_meta() -> None:
+    _, transport = _pushed(None)
+
+    [request] = transport.requests
+    assert f"<head_sha>{'f' * 40}</head_sha>" in request.messages[1].content
+    assert "<context_excerpts>" not in request.messages[1].content
 
 
 # E-9: the send budget never reads the environment; the caller passes the route window.

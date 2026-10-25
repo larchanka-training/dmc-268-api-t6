@@ -76,6 +76,14 @@ def snapshot_for_review(
     return snapshot
 
 
+def require_served_provider(binding: ReviewBinding) -> None:
+    """Refuse a snapshot-path run whose provider the context stage does not serve (TL-13);
+    a legacy run passes. The stage's own check keys on the provider it builds the diff map
+    with, so the processor checks the run's provider before the diff (#220 merges the two)."""
+    if binding.takes_snapshot_path:
+        _require_served_provider(binding)
+
+
 def require_servable_without_snapshot(binding: ReviewBinding) -> None:
     """Refuse a snapshot-path run where no policy snapshot exists (a composition without the
     context stage: tests and eval); a legacy run passes."""
