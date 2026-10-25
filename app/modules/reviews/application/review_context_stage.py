@@ -355,6 +355,8 @@ class ReviewContextStage:
         self._snapshot: PolicySnapshot | None = None
         # The snapshot the review is given; None on the legacy path.
         self._snapshot_for_llm: PolicySnapshot | None = None
+        # The context built for this attempt; None before the build or after a failed one.
+        self._payload: ReviewContextPayload | None = None
         self._matcher: IgnoreMatcher | None = None
         self._diff_old_sha: str | None = None
         # The live PR base of the attempt when it differs from the pinned one, else None.
@@ -364,6 +366,11 @@ class ReviewContextStage:
     def snapshot_for_llm(self) -> PolicySnapshot | None:
         """The attempt's snapshot when the run takes the snapshot path, else ``None``."""
         return self._snapshot_for_llm
+
+    @property
+    def payload(self) -> ReviewContextPayload | None:
+        """The context the attempt's build produced; ``None`` when it failed or did not run."""
+        return self._payload
 
     @property
     def diff_old_sha(self) -> str | None:
@@ -450,6 +457,7 @@ class ReviewContextStage:
         self._denied_paths = frozenset()
         self._diff_old_sha = None
         self._pr_base_sha = None
+        self._payload = None
         if self._snapshot is None or self._matcher is None:
             await self.begin(run_id)
         snapshot, matcher = self._snapshot, self._matcher
@@ -559,6 +567,7 @@ class ReviewContextStage:
         await self._record_rag(run_id, rag, payload.rag)
         if payload.status is ContextStatus.ALL_CHANGES_IGNORED:
             raise RunSkipped("all_changes_ignored")
+        self._payload = payload
         return payload
 
     async def _record_nothing_to_review(

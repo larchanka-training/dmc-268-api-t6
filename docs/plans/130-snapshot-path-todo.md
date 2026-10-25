@@ -63,15 +63,18 @@ Gates for every task: the four commands in the plan, with DB and vhost `imp130f`
 ### F1-3: Lock 1 behind the selector (R1 review side)
 - **Commit:** `feat(reviews): pass the attempt snapshot to snapshot-path reviews (#130)`
 - **Files:**
-  - `application/review_context_stage.py`: `snapshot_for_llm` and `payload` properties; `run()` keeps the
-    payload, `:514-536`;
-  - `application/execute_review.py`: `ReviewContextFilter` protocol and context assembly `:206-216`;
-  - `tests/test_execute_review.py`.
+  - `application/review_context_stage.py`: `snapshot_for_llm` (landed in F1-2) and `payload` properties;
+    `run()` keeps the payload, `:514-536`;
+  - `application/execute_review.py`: `ReviewContextFilter` protocol and context assembly `:206-216`. The
+    stage's snapshot fills an empty `ReviewPromptInput.policy_snapshot` before the F1-2 re-check, so the
+    re-check still drops it for a legacy binding and refuses one that pins another review prompt;
+  - `tests/test_execute_review.py`; `tests/test_review_context_stage.py` (the `Withheld` fake gains
+    `snapshot_for_llm`; payload test), both covered by the coordination addenda.
 - **Tests:**
   - a fixture `review.system` v4 row gives the user message the snapshot's rules.md and AGENTS.md blocks;
   - `ReviewPromptInput.agents_md` is ignored on that path;
   - without a `ReflectionPass` it still raises (`:219-223`; R14 comes in F1-7).
-- **Done when:** [ ] F1-1 green.
+- **Done when:** [x] F1-1 green.
 
 ### F1-4: R2 render, manifest and fit; P6-4 ⚑
 - **Commit:** `feat(reviews): render the L2-L4 context of the payload (#130)`

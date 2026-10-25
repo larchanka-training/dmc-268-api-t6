@@ -53,6 +53,7 @@ from app.modules.reviews.application.review_output import (
     InvalidReviewOutput,
     RequirementRef,
 )
+from app.modules.reviews.application.review_path import ReviewBinding
 from app.modules.reviews.application.run_failures import RunFailure
 
 RUN_ID = UUID("00000000-0000-0000-0000-000000000200")
@@ -441,6 +442,7 @@ def test_execute_review_run_excluded_file_does_not_reach_verifier() -> None:
 
     class ContextFilter:
         diff_old_sha: str | None = None
+        snapshot_for_llm: PolicySnapshot | None = None
 
         def excluded(self, path: str) -> bool:
             return path == "app/secret_credentials.env"
@@ -3559,6 +3561,7 @@ def test_execute_review_counter_version_and_diff_old_sha_propagation() -> None:
 
     class ContextFilterWithOldSha:
         diff_old_sha = "old_base_sha_777"
+        snapshot_for_llm: PolicySnapshot | None = None
 
         def excluded(self, path: str) -> bool:
             return False
@@ -3797,3 +3800,169 @@ def test_execute_review_coordinates_validation_with_real_fit() -> None:
     dropped_map = {d.finding.line: d.drop_reason for d in published.dropped_findings}
     assert dropped_map[5300] == "anchor_not_visible"
     assert dropped_map[3] == "line_absent"
+
+
+# F1-3: the attempt's snapshot reaches the review prompt only on the snapshot path.
+_V4_REVIEW = UUID("00000000-0000-0000-0000-000000000041")
+_PROVIDER_AGENTS = "Provider AGENTS.md, read outside the snapshot."
+_SNAPSHOT_AGENTS = "# Agents\nPrefer small functions.\n"
+
+
+def _v4_snapshot(review_system_id: UUID = _V4_REVIEW) -> PolicySnapshot:
+    from dataclasses import replace
+
+    snapshot = _make_test_snapshot()
+    return replace(
+        snapshot,
+        agents=make_policy_document_present(path="AGENTS.md", text=_SNAPSHOT_AGENTS),
+        prompt_bindings=replace(
+            snapshot.prompt_bindings,
+            review_system_version="v4",
+            review_system_id=review_system_id,
+        ),
+    )
+
+
+class _StageSnapshot:
+    """The context stage as execute_review sees it: exclusions and the attempt's snapshot."""
+
+    diff_old_sha: str | None = None
+
+    def __init__(self, snapshot: PolicySnapshot | None) -> None:
+        self.snapshot_for_llm = snapshot
+
+    def excluded(self, path: str) -> bool:
+        return False
+
+
+class _BoundPipeline:
+    """Processor, prompt source, model and publisher of a run bound to ``binding``."""
+
+    def __init__(self, binding: ReviewBinding) -> None:
+        self.binding = binding
+        self.contexts: list[ReviewContext] = []
+        self.published: list[object] = []
+
+    async def prepare(self, run_id: UUID) -> GeneratedConventions:
+        return conventions()
+
+    async def get_review_prompt_input(
+        self, run_id: UUID, saved: GeneratedConventions
+    ) -> ReviewPromptInput:
+        return ReviewPromptInput(
+            system="Review carefully.",
+            rules=(),
+            agents_md=_PROVIDER_AGENTS,
+            conventions=RepoConventions((), ()),
+            changed_files=(
+                ChangedFile("app/main.py", "modified", (DiffLine(10, "added", "x = 1"),)),
+            ),
+            omitted_files=(),
+            review_binding=self.binding,
+        )
+
+    async def get_pull_request_meta(self, run_id: UUID) -> PullRequestMeta:
+        return PullRequestMeta("Title", None, "u", "b", "m", (), 1, 1, 0, False, False)
+
+    async def draft_review(self, *, context: ReviewContext) -> dict[str, Any]:
+        self.contexts.append(context)
+        return {"findings": [], "summary": {"problem": "p", "done_well": "d", "effort": "none"}}
+
+    async def execute(self, run_id: UUID, raw_output: object) -> bool:
+        self.published.append(raw_output)
+        return True
+
+
+def _run_bound(
+    binding: ReviewBinding,
+    stage_snapshot: PolicySnapshot | None,
+    *,
+    verifier: FakeVerifierModel | None = None,
+) -> _BoundPipeline:
+    pipeline = _BoundPipeline(binding)
+    asyncio.run(
+        ExecuteReviewRun(
+            pipeline,
+            pipeline,
+            pipeline,
+            pipeline,
+            context_filter=_StageSnapshot(stage_snapshot),
+            reflection_pass=None if verifier is None else ReflectionPass(verifier),
+        ).execute(RUN_ID)
+    )
+    return pipeline
+
+
+def test_snapshot_path_review_shows_the_snapshot_documents_not_the_provider_agents_md() -> None:
+    snapshot = _v4_snapshot()
+    verifier = FakeVerifierModel({"decisions": []})
+
+    pipeline = _run_bound(ReviewBinding(_V4_REVIEW, "v4", "github"), snapshot, verifier=verifier)
+
+    [context] = pipeline.contexts
+    assert context.policy_snapshot is snapshot
+    user = PromptBuilder().build_prompt(context).user
+    assert (
+        '<repository_rules block_id="policy-rules" path=".review/rules.md">\n'
+        '<line n="1"># Rules</line>\n'
+        '<line n="2">Always sanitize input.</line>\n'
+        "</repository_rules>"
+    ) in user
+    assert ('<project_conventions_document block_id="policy-agents" path="AGENTS.md">') in user
+    assert "Prefer small functions." in user
+    # ReviewPromptInput.agents_md (the provider read) is not shown on this path.
+    assert _PROVIDER_AGENTS not in user
+    assert "<agents_md>" not in user
+    assert verifier.call_count == 0
+    assert len(pipeline.published) == 1
+
+
+def test_snapshot_path_review_without_a_reflection_pass_still_fails_closed() -> None:
+    pipeline = _BoundPipeline(ReviewBinding(_V4_REVIEW, "v4", "github"))
+    run = ExecuteReviewRun(
+        pipeline, pipeline, pipeline, pipeline, context_filter=_StageSnapshot(_v4_snapshot())
+    )
+
+    with pytest.raises(PolicyError) as raised:
+        asyncio.run(run.execute(RUN_ID))
+
+    assert raised.value.code == PolicyErrorCode.SNAPSHOT_INTEGRITY_ERROR
+    assert "Reflection pass is required" in raised.value.message
+    assert pipeline.contexts == []
+    assert pipeline.published == []
+
+
+@pytest.mark.parametrize(
+    "binding",
+    [ReviewBinding(_V4_REVIEW, "v3", "github"), ReviewBinding(_V4_REVIEW, "v4", "gitlab")],
+    ids=["v3", "v4-gitlab"],
+)
+def test_legacy_review_never_gets_the_stage_snapshot(binding: ReviewBinding) -> None:
+    # Even a ready snapshot from the stage stays out of a legacy run's prompt.
+    pipeline = _run_bound(binding, _v4_snapshot())
+
+    [context] = pipeline.contexts
+    assert context.policy_snapshot is None
+    user = PromptBuilder().build_prompt(context).user
+    assert f"<agents_md>\n{_PROVIDER_AGENTS}\n</agents_md>" in user
+    assert "policy-rules" not in user and "Prefer small functions." not in user
+
+
+def test_stage_snapshot_pinning_another_review_prompt_is_refused_before_the_model() -> None:
+    pipeline = _BoundPipeline(ReviewBinding(_V4_REVIEW, "v4", "github"))
+    other = _v4_snapshot(review_system_id=UUID("00000000-0000-0000-0000-000000000042"))
+    run = ExecuteReviewRun(
+        pipeline,
+        pipeline,
+        pipeline,
+        pipeline,
+        context_filter=_StageSnapshot(other),
+        reflection_pass=ReflectionPass(FakeVerifierModel({"decisions": []})),
+    )
+
+    with pytest.raises(PolicyError) as raised:
+        asyncio.run(run.execute(RUN_ID))
+
+    assert raised.value.code == PolicyErrorCode.SNAPSHOT_INTEGRITY_ERROR
+    assert "pins another review prompt" in raised.value.message
+    assert pipeline.contexts == []
