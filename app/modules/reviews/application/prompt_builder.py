@@ -8,7 +8,7 @@ import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import PurePosixPath
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 from xml.sax.saxutils import escape
 
 from app.common.application.languages import LANGUAGE_BY_SUFFIX
@@ -26,6 +26,9 @@ from app.modules.reviews.application.policy_snapshot import (
     StageName,
 )
 from app.modules.reviews.application.unified_diff import split_lf
+
+if TYPE_CHECKING:
+    from app.modules.reviews.application.review_context import ContextBlock, RetrievedBlock
 
 type LineType = Literal["added", "removed", "context"]
 
@@ -175,6 +178,15 @@ class ReviewContext:
     omitted_files: tuple[str, ...]
     policy_snapshot: PolicySnapshot | None = None
     severity_threshold: Literal["all", "warning", "critical"] = "all"
+    # Snapshot path only (R2): the L2-L4 blocks of the attempt's context payload, shown as
+    # numbered excerpts after the changed files; L1 stays ``changed_files``.
+    context_blocks: tuple[ContextBlock, ...] = ()
+    # The RAG slot of the payload, kept only for a prompt with a retrieved section; #144
+    # renders it, nothing shows it before.
+    retrieved: tuple[RetrievedBlock, ...] = ()
+    # Snapshot path only (P6-4): changed files the ignore policy withheld, shown as one
+    # counter and never by name (RULES_FORMAT_SPEC §5.3).
+    excluded_files: int = 0
 
 
 @dataclass(frozen=True)
@@ -255,11 +267,15 @@ class PromptBuilder:
                 self._render_changed_files(
                     context.changed_files, include_block_id=include_block_id
                 ),
-                _container(
-                    "omitted_files", "\n".join(_text(path) for path in context.omitted_files)
-                ),
             )
         )
+        if context.context_blocks:
+            blocks.append(render_context_excerpts(context.context_blocks))
+        blocks.append(
+            _container("omitted_files", "\n".join(_text(path) for path in context.omitted_files))
+        )
+        if context.excluded_files:
+            blocks.append(f'<excluded_files count="{context.excluded_files}" />')
         return "\n".join(blocks)
 
     @staticmethod
@@ -462,6 +478,24 @@ class PromptBuilder:
                 )
             )
 
+        for excerpt in context.context_blocks:
+            source = excerpt.source
+            ranges = tuple((item.start_line, item.end_line) for item in source.ranges)
+            blocks.append(
+                ManifestBlock(
+                    block_id=excerpt.block_id,
+                    source_role=source.role,
+                    source_kind="source_code",
+                    path=source.path,
+                    revision=source.revision,
+                    side=_manifest_side(source.side),
+                    start_line=min((start for start, _ in ranges), default=None),
+                    end_line=max((end for _, end in ranges), default=None),
+                    shown_line_count=sum(end - start + 1 for start, end in ranges),
+                    shown_ranges=ranges,
+                )
+            )
+
         return CallManifest(
             call_id=call_id,
             run_id=run_id,
@@ -600,6 +634,45 @@ def render_changed_file(file: ChangedFile, *, include_block_id: bool = False) ->
     if file.language is not None:
         attributes += f' language="{_attribute(file.language)}"'
     return f"<file {attributes}>\n" + "\n".join(body) + "\n</file>"
+
+
+def render_context_excerpts(blocks: tuple[ContextBlock, ...]) -> str:
+    """The L2-L4 blocks of the context payload, one excerpt each with its source lines."""
+    return _container("context_excerpts", "\n".join(_render_excerpt(block) for block in blocks))
+
+
+def _render_excerpt(block: ContextBlock) -> str:
+    source = block.source
+    attributes = [f'block_id="{_attribute(block.block_id)}"', f'level="{block.level.value}"']
+    if source.path is not None:
+        attributes.append(f'path="{_attribute(source.path)}"')
+    if source.revision is not None:
+        attributes.append(f'revision="{_attribute(source.revision)}"')
+    if source.side is not None:
+        attributes.append(f'side="{source.side.value}"')
+    attributes.append(f'representation="{block.representation.value}"')
+    numbers = [
+        number for item in source.ranges for number in range(item.start_line, item.end_line + 1)
+    ]
+    # CONTRACT: the stage cuts a block's text from exactly its source ranges, one text line
+    # per source line (review_context.py ``_excerpt``, ``_symbol_block``); a mismatch raises.
+    lines = (
+        [
+            f'<line n="{number}">{_text(line)}</line>'
+            for number, line in zip(numbers, block.text.split("\n"), strict=True)
+        ]
+        if numbers
+        else []
+    )
+    return f"<excerpt {' '.join(attributes)}>\n" + "\n".join(lines) + "\n</excerpt>"
+
+
+def _manifest_side(side: str | None) -> Literal["LEFT", "RIGHT"] | None:
+    if side == "LEFT":
+        return "LEFT"
+    if side == "RIGHT":
+        return "RIGHT"
+    return None
 
 
 def shorten_commit_message(message: str) -> str:

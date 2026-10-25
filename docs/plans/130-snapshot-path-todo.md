@@ -86,10 +86,10 @@ Gates for every task: the four commands in the plan, with DB and vhost `imp130f`
 - **Tests:**
   - L2–L4 excerpts carry block_id, path, revision and side;
   - manifest roles are `source_excerpt` and `ast_excerpt`, with `shown_ranges`;
-  - fit drops L4, then L3, then L2, before changed files;
+  - fit drops L3, then L2, then L4 (the reverse of the CVS §4.1 selection order), before changed files;
   - `retrieved` is not rendered while `RETRIEVED_PROMPT_VERSIONS` is empty;
   - an ignored count appears as a counter, never as a path.
-- **Done when:** [ ] F1-1 green; [ ] IMP#144 is told PR3a can start (with F1-5, F1-6, F1-13).
+- **Done when:** [x] F1-1 green; [ ] IMP#144 is told PR3a can start (with F1-5, F1-6, F1-13).
 
 ### F1-5: R10 review, T-a, E-9 ⚑
 - **Commit:** `refactor(reviews): fit, manifest and guard the review once (#130)`

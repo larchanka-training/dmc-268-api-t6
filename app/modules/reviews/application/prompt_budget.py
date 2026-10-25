@@ -442,6 +442,7 @@ def fit_review_context(
 ) -> ReviewContext:
     """Return the context whose rendered prompt fits ``max_prompt_tokens``.
 
+    Excerpts of the snapshot path go first: L3, then L2, then L4, before any file is cut.
     Deterministic: files are taken by descending SD §9 priority (ties by path); each one
     is kept whole, else cut to the longest prefix of its lines that fits, else omitted.
     A length-aware counter uses additive rendered character lengths with its exact
@@ -452,6 +453,12 @@ def fit_review_context(
     """
     if prompt_tokens(context, counter) <= max_prompt_tokens:
         return context
+    if context.context_blocks:
+        context = _drop_context_blocks(
+            context, max_prompt_tokens=max_prompt_tokens, counter=counter
+        )
+        if context.context_blocks or prompt_tokens(context, counter) <= max_prompt_tokens:
+            return context
 
     _warn_ignored_rules(context.rules)
     files = context.changed_files
@@ -490,6 +497,42 @@ def fit_review_context(
         if shown is not None:
             kept[index] = shown
     return candidate({})
+
+
+# CVS §4.1 selects L1 → L4 → RAG → L2 → L3; the fit drops excerpts in the reverse order,
+# each level from its last block (the stage appends blocks by descending file priority).
+_EXCERPT_DROP_ORDER = ("L3", "L2", "L4")
+
+
+def _drop_context_blocks(
+    context: ReviewContext, *, max_prompt_tokens: int, counter: TokenCounter
+) -> ReviewContext:
+    """The context with the fewest excerpts dropped whose prompt fits, else none of them.
+
+    Fewer excerpts never make the prompt longer, so a binary search over the number dropped
+    finds the cut; every candidate is counted whole, with ``counter``.
+    """
+    blocks = context.context_blocks
+    order = sorted(
+        range(len(blocks)),
+        key=lambda index: (_EXCERPT_DROP_ORDER.index(blocks[index].level), -index),
+    )
+
+    def without(dropped: int) -> ReviewContext:
+        gone = frozenset(order[:dropped])
+        return replace(
+            context,
+            context_blocks=tuple(block for index, block in enumerate(blocks) if index not in gone),
+        )
+
+    low, high = 1, len(blocks)
+    while low < high:
+        middle = (low + high) // 2
+        if prompt_tokens(without(middle), counter) <= max_prompt_tokens:
+            high = middle
+        else:
+            low = middle + 1
+    return without(low)
 
 
 class _FileLengths:

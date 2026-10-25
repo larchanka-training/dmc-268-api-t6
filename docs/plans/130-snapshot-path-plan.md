@@ -114,10 +114,17 @@ validates against v1 when no snapshot is attached (`llm/models.py:183-188`). Tha
 - Rendering, snapshot path only: after the changed files, one numbered excerpt per block, carrying
   `block_id`, path, revision, side and level. Manifest blocks get role `source_excerpt` or `ast_excerpt`
   with `shown_ranges`.
-- Fit: `fit_review_context` (`prompt_budget.py:440`) drops `context_blocks` from the lowest level up
-  (L4, L3, L2) before it trims changed files. #144 owns the rule for `retrieved` (ADR order L1 > RAG > L2/L3).
+- Fit: `fit_review_context` (`prompt_budget.py:440`) drops `context_blocks` before it trims changed
+  files, in the reverse of the CVS §4.1 selection order (L1 → L4 → RAG → L2 → L3): L3, then L2, then L4,
+  each level from its last block. #144 owns the rule for `retrieved` (ADR order L1 > RAG > L2/L3).
+  - As built in F1-4: the first draft said L4, L3, L2, which would drop the L4 signatures that CVS
+    §4.1 never lets RAG, L2 or L3 displace. A binary search over the number dropped counts each
+    candidate prompt whole with the fit counter, never with the stage's `ContextBlock.tokens`.
 - P6-4: on the snapshot path, the payload's `ignored` omission count becomes one counter line
   (RULES §5.3) instead of a silent drop (`execute_review.py:199-204`).
+  - As built in F1-4: `<excluded_files count="N" />` after `<omitted_files>`, only when N > 0, so the
+    path list and its length accounting stay as they are. After a caught build failure (no payload)
+    there is no counter and no excerpt.
 
 **DD3. R10: one fit point per call.**
 - **Review.**
@@ -250,7 +257,7 @@ Rolling F2 back to F1 is safe. The floor goes to #297's rollback runbook.
 |---|---|---|
 | R1 (review) | F1-3 | the snapshot run's user message holds the rules.md and AGENTS.md text of the snapshot |
 | R1 (conventions), R18, T-b, T-c | F1-10 | conventions use the pinned id and the snapshot AGENTS.md; no `fetch_agents_md` call; one manifest after fit |
-| R2 | F1-4 | L2–L4 blocks in the user message with block_id, revision and side; manifest roles; fit drops L4 first |
+| R2 | F1-4 | L2–L4 blocks in the user message with block_id, revision and side; manifest roles; fit drops L3 first, L4 last |
 | R4 | F5 (after #283) | all files unsupported → coverage none, 0 `llm.call`, neutral check-run |
 | R5 | F1-11 | the v2 key misses on a legacy row; a v3 run keeps the old key |
 | R7 | F1-12 | a v4 run with more than 12k policy tokens fails at `policy.load` with 0 `llm.call`; the same docs on v3 proceed |

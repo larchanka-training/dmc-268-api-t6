@@ -776,6 +776,7 @@ def test_review_prompt_gets_neither_the_content_nor_the_name_of_an_ignored_file(
     class Withheld:
         diff_old_sha: str | None = None
         snapshot_for_llm: PolicySnapshot | None = None
+        payload: ReviewContextPayload | None = None
 
         def excluded(self, path: str) -> bool:
             return path.startswith("generated/")
