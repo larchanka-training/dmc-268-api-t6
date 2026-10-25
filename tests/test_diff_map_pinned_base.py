@@ -244,8 +244,41 @@ def test_a_pr_retargeted_before_the_diff_is_stored_fails_without_reading_the_dif
         asyncio.run(fetch.execute(_LOCATOR, _HEAD, "b" * 40))
 
     assert caught.value.error_code == "pr_base_changed"
+    # The internal message keeps both public SHAs; the author text is the catalog one.
+    assert caught.value.message == (
+        f"pull request base changed after the run pinned it pinned={'b' * 40} live={'e' * 40}"
+    )
     assert classify_failure(caught.value).error_code == "pr_base_changed"
     assert vcs.diff_reads == 0
+
+
+def test_a_new_head_on_a_retargeted_pr_is_a_head_change_at_fetch() -> None:
+    vcs = Fetching(head_sha="f" * 40)
+
+    # The head is checked first: the attempt is retried and the webhook supersedes the run.
+    with pytest.raises(ValueError, match="head SHA changed"):
+        asyncio.run(
+            FetchVcsReviewInput(vcs, checkpoint=_checkpoint).execute(_LOCATOR, _HEAD, "b" * 40)
+        )
+
+    assert vcs.diff_reads == 0
+
+
+def test_a_new_head_on_a_retargeted_pr_fails_the_stage_as_a_head_change(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    trace = Trace()
+    stage = _stage(trace, vcs=Retargeted(head_sha="f" * 40))
+
+    with (
+        caplog.at_level(logging.WARNING, logger=_STAGE_LOGGER),
+        pytest.raises(RunFailure) as caught,
+    ):
+        asyncio.run(stage.run(_RUN))
+
+    assert caught.value.error_code == "diff_fetch_failed"
+    assert _contexts(trace) == []
+    assert _stage_warnings(caplog) == []
 
 
 def test_a_pr_on_its_pinned_base_reads_the_diff() -> None:

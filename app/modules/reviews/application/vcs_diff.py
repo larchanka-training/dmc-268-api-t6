@@ -166,7 +166,11 @@ class FetchVcsReviewInput:
         if expected_base_sha is not None and pull_request.base_sha != expected_base_sha:
             # A retarget before the diff is stored: the policy is already pinned to the old
             # base, so every retry would fail the same way. A rerun pins the new base.
-            raise RunFailure("pr_base_changed", "pull request base changed after the run pinned it")
+            raise RunFailure(
+                "pr_base_changed",
+                "pull request base changed after the run pinned it "
+                f"pinned={expected_base_sha} live={pull_request.base_sha}",
+            )
         files = await self._provider.get_diff(pull_request, checkpoint=self._checkpoint)
         changed: list[ChangedFile] = []
         omitted: list[VcsFileOmission] = []
