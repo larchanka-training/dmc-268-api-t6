@@ -868,11 +868,31 @@ def render_mermaid(g: Graph, alarm: set[Key]) -> list[str]:
     return lines
 
 
+def tangle(g: Graph, cycle: list[Key], component: set[Key]) -> list[str]:
+    """The nested line under a cycle line: the component's members off the walked
+    cycle, in Key order, tagged outside and/or closed; none when there are none."""
+    extra = sorted(component - set(cycle))
+    if not extra:
+        return []
+
+    def tagged(key: Key) -> str:
+        node = g.nodes[key]
+        tags = [
+            tag
+            for tag, on in (("вне выборки", not node.in_scope), ("закрыта", not node.is_open))
+            if on
+        ]
+        return ref(key) + (f" ({', '.join(tags)})" if tags else "")
+
+    return ["  - в том же клубке связей ещё: " + ", ".join(tagged(k) for k in extra)]
+
+
 def render(scope: Scope, g: Graph) -> tuple[str, bool]:
     cycles = find_cycles(g.edges)
+    components = cyclic_components(successors(g.edges))
     waits = waiting(g)
     # "On a cycle" = inside a cyclic component, not only on the one cycle reported.
-    alarm = set(waits).union(*cyclic_components(successors(g.edges)))
+    alarm = set(waits).union(*components)
     in_scope = g.scope()
     external = g.external()
     linked = g.linked()
@@ -896,7 +916,11 @@ def render(scope: Scope, g: Graph) -> tuple[str, bool]:
     def section(title: str, body: list[str], empty: str = "Нет.") -> None:
         out.extend(["", f"#### {title}", "", *(body or [empty])])
 
-    section("Циклы", ["- " + " → ".join(ref(k) for k in cycle) for cycle in cycles])
+    cycle_lines: list[str] = []
+    for cycle in cycles:
+        component = next(c for c in components if cycle[0] in c)
+        cycle_lines += ["- " + " → ".join(ref(k) for k in cycle), *tangle(g, cycle, component)]
+    section("Циклы", cycle_lines)
     section(
         "In Progress с открытым блокером",
         [f"- {ref(k)} ждёт {', '.join(tagged(b) for b in bs)}" for k, bs in waits.items()],
@@ -949,8 +973,9 @@ def render(scope: Scope, g: Graph) -> tuple[str, bool]:
 def marker(opts: Options) -> str:
     """`<!-- issue-graph: <key> -->`. A milestone key leaves out the repo set; an
     `owner/name` is lower-cased (GitHub ignores its case) before issues are
-    deduplicated and sorted by Key; `%` then `>` are escaped so that a title can
-    never close the HTML comment."""
+    deduplicated and sorted by Key. `%` is escaped first, then CR and LF (the
+    marker stays one line, so `first_line` can match it), then `>` (a title can
+    never close the HTML comment)."""
     if opts.milestone is not None:
         key = f"milestone={opts.milestone}"
     elif opts.epic is not None:
@@ -958,7 +983,9 @@ def marker(opts: Options) -> str:
     else:
         keys = sorted({(repo.lower(), n) for repo, n in opts.issues})
         key = "issues=" + ",".join(f"{repo}#{n}" for repo, n in keys)
-    return f"<!-- issue-graph: {key.replace('%', '%25').replace('>', '%3E')} -->"
+    for raw, escaped in (("%", "%25"), ("\r", "%0D"), ("\n", "%0A"), (">", "%3E")):
+        key = key.replace(raw, escaped)
+    return f"<!-- issue-graph: {key} -->"
 
 
 def first_line(text: str) -> str:

@@ -146,8 +146,8 @@ override this, and nothing works around it. The reply carries all of these, in t
 1. With `--publish-to`: «не опубликовано» and why (the graph has a cycle).
 2. The cycle line from «Циклы», as printed (`api#1 → api#2 → api#3 → api#1`).
 3. A person removes a `blocked by` link in GitHub and re-runs, repeating until «Циклы» reads
-   «Нет.» — one line can stand for a larger tangle; name the other issues the report links to the
-   cycle (`references/report.md`).
+   «Нет.» — name every issue on its «в том же клубке связей ещё» line with its tags, read off the
+   report, never inferred from the graph (`references/report.md`).
 4. Which link is wrong is the team's call.
 5. The «In Progress с открытым блокером» lines, if any (step 7).
 

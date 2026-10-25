@@ -44,7 +44,8 @@ The comment's first line is the marker `<!-- issue-graph: <key> -->`, e.g.
 - In `epic=` and `issues=` keys `owner/name` is lower-cased (GitHub repo names are
   case-insensitive, so `Owner/Name#5` and `owner/name#5` give one key); the milestone title is kept
   as it is.
-- In the key `%` becomes `%25`, then `>` becomes `%3E`, so a title can never close the HTML comment.
+- In the key `%` becomes `%25`, then CR `%0D` and LF `%0A`, then `>` `%3E`: the marker stays one
+  line (a multi-line title still matches on a re-run) and a title can never close the HTML comment.
 
 ## Matching
 

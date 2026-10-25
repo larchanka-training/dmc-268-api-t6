@@ -62,11 +62,13 @@ nearly invisible. `done` sets its own grey text (`#868e96`); unstyled nodes foll
 
 The strongly connected components of the whole graph, closed and outside issues included; a
 self-loop counts. One line per component: the cycle walked from its smallest key, successors in key
-order, back to the start. The line can stand for a larger tangle. In `cycle.md` it reads
-`api#1 → api#2 → api#3 → api#1`, but outside `api#5` both blocks and waits on each of the three, and
-closed `api#6` sits on `api#2 → api#6 → api#3`: all five are one component, all `alarm`, and
-removing one link of the printed cycle leaves the others. Any cycle: no layers, no critical path, no
-publish (exit 1). Empty: «Нет.».
+order, back to the start. The line can stand for a larger tangle: when the component has members
+off that cycle, one nested line under it, `- в том же клубке связей ещё: …`, names them in `Key`
+order, each tagged `(вне выборки)`, `(закрыта)` or `(вне выборки, закрыта)`; an in-scope open one
+has no tag. A component that is just its cycle gets no nested line. In `cycle.md` that line names
+`api#5 (вне выборки)` and `api#6 (вне выборки, закрыта)`: all five are one component, and removing
+one link of the printed cycle leaves the rest of the tangle. Any cycle: no layers, no critical path,
+no publish (exit 1). Empty: «Нет.».
 
 ## «In Progress с открытым блокером»
 

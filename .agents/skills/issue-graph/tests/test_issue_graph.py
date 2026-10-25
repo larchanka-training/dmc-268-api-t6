@@ -7,7 +7,8 @@ seam (`ISSUE_GRAPH_FIXTURE_DIR`) or a test's own fake is an error, never a call.
 Covers: byte-exact golden reports for six GraphQL fixture sets (a cycle, a
 milestone found in one repo only, a full sprint milestone, an epic, nested
 pagination, explicit issues across both repos), label stripping/cutting/escaping,
-REF parsing, the one-mode rule, the cycle walk, exit codes 2 and 3, and the argv
+REF parsing, the one-mode rule, the cycle walk and the tangle line under it,
+exit codes 2 and 3, and the argv
 the script hands to `gh`; and `--publish-to`: the marker key, comment paging and
 the first-line match, the page cap, create vs update in the target's own repo, the
 cycle and size guards, 404 vs 403 vs other REST failures, an empty fixture seam,
@@ -476,6 +477,48 @@ def test_cycles_are_ordered_by_first_key_not_by_discovery() -> None:
     """Tarjan completes {3, 4} before {1, 2}; the report still lists 1 first."""
     edges = {(k(1), k(2)), (k(2), k(1)), (k(1), k(3)), (k(3), k(4)), (k(4), k(3))}
     assert ig.find_cycles(edges) == [[k(1), k(2), k(1)], [k(3), k(4), k(3)]]
+
+
+def link(n: int) -> str:
+    return f"[api#{n}](https://github.com/{API}/issues/{n})"
+
+
+def cycles_of(
+    edges: set[tuple[tuple[str, int], tuple[str, int]]], closed: set[int], outside: set[int]
+) -> str:
+    """The «Циклы» body of a report on `edges`; every other node is open and in scope."""
+    keys = sorted({key for edge in edges for key in edge})
+    nodes = {
+        key: ig.Node(key, f"Задача {key[1]}", key[1] not in closed, key[1] not in outside)
+        for key in keys
+    }
+    report, has_cycle = ig.render(ig.Scope("t", [], []), ig.Graph(nodes, edges, set()))
+    assert has_cycle
+    return section(report, "Циклы")
+
+
+def test_component_equal_to_its_cycle_has_no_tangle_line() -> None:
+    edges = {(k(1), k(2)), (k(2), k(1)), (k(9), k(9))}
+    assert cycles_of(edges, closed=set(), outside=set()) == "\n".join(
+        [f"- {link(1)} → {link(2)} → {link(1)}", f"- {link(9)} → {link(9)}"]
+    )
+
+
+def test_tangle_line_names_the_rest_of_the_component_tagged_in_key_order() -> None:
+    """1 → 2 → 1 is walked; 10 (in scope, closed), 9 (outside, open) and 11 (in scope,
+    open) sit in the same component. Key order puts 9 before 10; the line stays under
+    its own cycle, and the separate 20 → 21 → 20 gets none."""
+    edges = {(k(1), k(2)), (k(2), k(1)), (k(20), k(21)), (k(21), k(20))}
+    edges |= {(k(1), k(10)), (k(10), k(1)), (k(2), k(9)), (k(9), k(2))}
+    edges |= {(k(2), k(11)), (k(11), k(2))}
+    assert cycles_of(edges, closed={10}, outside={9}) == "\n".join(
+        [
+            f"- {link(1)} → {link(2)} → {link(1)}",
+            f"  - в том же клубке связей ещё: {link(9)} (вне выборки), {link(10)} (закрыта), "
+            f"{link(11)}",
+            f"- {link(20)} → {link(21)} → {link(20)}",
+        ]
+    )
 
 
 # ─── Markdown titles: no autolink, no mention ───────────────────────────────
@@ -1079,8 +1122,54 @@ def test_bad_publish_target_exits_2_before_any_request(bad: str) -> None:
     ],
 )
 def test_marker_names_the_scope(args: list[str], key: str) -> None:
-    """The repo set is not part of a milestone key; `%` then `>` are escaped."""
+    """The repo set is not part of a milestone key; `%`, then CR and LF, then `>` are escaped."""
     assert ig.marker(ig.parse_args(args)) == f"<!-- issue-graph: {key} -->"
+
+
+@pytest.mark.parametrize(
+    "title,key",
+    [
+        ("Спринт\n4", "milestone=Спринт%0A4"),
+        ("Спринт\r4", "milestone=Спринт%0D4"),
+        ("Спринт\r\n4", "milestone=Спринт%0D%0A4"),
+        ("%0A\n>", "milestone=%250A%0A%3E"),
+    ],
+    ids=["lf", "cr", "crlf", "literal-escape"],
+)
+def test_marker_of_a_multiline_title_is_one_line(title: str, key: str) -> None:
+    """A raw CR or LF would split the marker, and the first-line match would miss it
+    on a re-run, also after GitHub normalises the line endings of the stored body."""
+    mark = ig.marker(ig.parse_args(["--milestone", title]))
+    assert mark == f"<!-- issue-graph: {key} -->"
+    assert "\r" not in mark and "\n" not in mark
+    body = f"{mark}\n\n### Граф задач\n"
+    assert ig.first_line(body) == mark
+    assert ig.first_line(body.replace("\r\n", "\n").replace("\r", "\n")) == mark
+    assert ig.first_line(body.replace("\n", "\r\n")) == mark
+
+
+def test_rerun_with_a_multiline_milestone_updates_its_comment(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The comment posted by the first run (stored with CRLF) is found and PATCHed."""
+    fixtures = case_copy(tmp_path, "milestone")
+    search = {"milestones": {"nodes": [{"number": 6, "title": "Спринт\n5"}]}}
+    write_json(fixtures / "milestones-api.json", {"data": {"repository": search}})
+    mark = "<!-- issue-graph: milestone=Спринт%0A5 -->"
+    write_json(fixtures / "comments-api-261-p1.json", [comment(7, f"{mark}\r\n\r\nold report")])
+    write_json(fixtures / "comment-updated-7.json", comment(7, "as edited"))
+    log = write_log(tmp_path, monkeypatch)
+
+    r = run("--milestone", "Спринт\n5", "--repo", API, "--publish-to", "261", fixtures=fixtures)
+
+    assert r.returncode == 0, r.stderr
+    assert outcome(r) == {
+        "published": "updated",
+        "url": f"https://github.com/{API}/issues/261#issuecomment-7",
+    }
+    (write,) = writes(log)
+    assert (write["method"], write["path"]) == ("PATCH", f"repos/{API}/issues/comments/7")
+    assert write["body"] == comment_body(mark, r.stdout)
 
 
 def test_marker_does_not_depend_on_issue_order() -> None:
