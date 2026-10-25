@@ -227,6 +227,11 @@ Gates for every task: the four commands in the plan, with DB and vhost `imp130f`
     the chain; snapshot conventions send a failed C1 to the fallback; the 189 s / 190 s boundary
     (terminal, `classify_failure` keeps the code); every recovery call and the retry backoff keep
     the window; legacy at 89 s / 100 s keeps `deadline_exceeded` and its message.
+  - fix round (review of `172c8c5c..9e4b557c`): snapshot conventions keep the review's call + 100 s
+    (279 s refused before the call, 280 s sent); the snapshot verifier keeps 10 s (99 s / 100 s);
+    legacy review, conventions and verifier keep 0 s (89 s / 90 s); a snapshot-path review or
+    conventions answer the decoder cannot read is recovered (repair / fallback), the legacy v1 and
+    conventions validators keep the live decoder.
 - **Done when:** [x] F1-1 green.
 
 ### F1-10: R18, R1 conventions, T-b, T-c ⚑

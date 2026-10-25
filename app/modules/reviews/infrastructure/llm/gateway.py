@@ -38,6 +38,7 @@ from uuid import UUID, uuid4
 from xml.sax.saxutils import escape
 
 from app.modules.reviews.application.llm import (
+    EngineName,
     FxProvenance,
     LlmCallError,
     LlmCallFailed,
@@ -104,9 +105,12 @@ _BOUNDED_REPAIR_INSTRUCTION = (
 )
 # PIPELINE_SPEC §3: a verifier call waits at most 90 s, on the deep engine as well.
 _VERIFIER_CALL_TIMEOUT_S = 90.0
+# CVS §7.4, PIPELINE_SPEC §3 ("call + 10 s"): the local completion after the verifier call,
+# which a snapshot-path verifier keeps of its attempt.
+VERIFIER_COMPLETION_RESERVE_S = 10.0
 # CVS §7.4 (E-7): what a snapshot-path review keeps of its attempt for the verifier: one
-# verifier call and 10 s of local completion.
-VERIFIER_TIME_RESERVE_S = _VERIFIER_CALL_TIMEOUT_S + 10.0
+# verifier call and its local completion.
+VERIFIER_TIME_RESERVE_S = _VERIFIER_CALL_TIMEOUT_S + VERIFIER_COMPLETION_RESERVE_S
 # E-2: the top-level keys of a redacted provider body; none of them carries model text.
 _STORED_BODY_KEYS = ("id", "object", "created", "model", "provider", "system_fingerprint", "usage")
 _USD_QUANTUM = Decimal("0.000001")
@@ -166,7 +170,8 @@ class StructuredTask:
     reserved_calls: int = 0
     # CVS §7.4 (E-7): seconds of the attempt kept after each call of this task for the
     # stages after it; a call short of its timeout plus these fails with
-    # verification_deadline_exceeded. Snapshot-path review only; legacy stays 0.
+    # verification_deadline_exceeded. Snapshot-path conventions, review and verifier only;
+    # legacy stays 0.
     reserved_seconds: float = 0.0
     # How a stored ``llm.call`` response shows the answer text (E-2: the verifier's
     # without ``decisions[].reason``); None stores the provider body as is.
@@ -279,6 +284,15 @@ class LlmGateway:
             self._settings.verifier_route()[0] if route == "verifier" else self._settings.primary
         )
         return self.context_limit(primary, engine) - primary.max_output_tokens
+
+    def call_timeout_s(
+        self, engine: EngineName, route: Literal["review", "verifier"] = "review"
+    ) -> float:
+        """The engine's call timeout; the verifier route caps it at 90 s."""
+        timeout_s = self._settings.policy.call_timeout_s[engine]
+        if route == "verifier":
+            return min(timeout_s, _VERIFIER_CALL_TIMEOUT_S)
+        return timeout_s
 
     async def generate(self, task: StructuredTask, context: RunCallContext) -> GatewayResult:
         policy = self._settings.policy
@@ -443,11 +457,7 @@ class LlmGateway:
         return (context.deadline - self._clock.now()).total_seconds()
 
     def _call_timeout_s(self, task: StructuredTask, context: RunCallContext) -> float:
-        """The engine's call timeout; a verifier task caps it at 90 s."""
-        timeout_s = self._settings.policy.call_timeout_s[context.engine]
-        if task.route == "verifier":
-            return min(timeout_s, _VERIFIER_CALL_TIMEOUT_S)
-        return timeout_s
+        return self.call_timeout_s(context.engine, task.route)
 
     def _estimate(
         self,

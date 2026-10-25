@@ -122,8 +122,11 @@ def _review_v2_validator() -> Draft202012Validator:
 
 
 def validate_review_answer_v2(content: str) -> dict[str, object]:
-    """``validate_review_answer`` against the v2 schema, ending in ``parse_review_output_v2``."""
-    decoded = _decode_object(content)
+    """``validate_review_answer`` against the v2 schema, ending in ``parse_review_output_v2``.
+
+    Only a v4-bound (snapshot-path) run is held to v2, so it decodes fail-closed.
+    """
+    decoded = _decode_object_fail_closed(content)
     errors = [
         _schema_error(error)
         for error in sorted(
@@ -220,7 +223,7 @@ def validate_verifier_answer(content: str) -> dict[str, object]:
     The schema and ``VerificationOutput`` errors earn one repair call; the candidate-ID
     and reference checks against the manifest stay in ``ReflectionPass`` (CVS §7.3).
     """
-    decoded = _decode_verifier_object(content)
+    decoded = _decode_object_fail_closed(content)
     errors = [
         _schema_error(error)
         for error in sorted(
@@ -253,18 +256,22 @@ def verifier_answer_without_reasons(content: str) -> str:
     return json.dumps(stored, ensure_ascii=False)
 
 
-def conventions_answer_validator(changed_files: tuple[str, ...]) -> _ConventionsValidator:
-    return _ConventionsValidator(changed_files)
+def conventions_answer_validator(
+    changed_files: tuple[str, ...], *, fail_closed: bool = False
+) -> _ConventionsValidator:
+    """``fail_closed``: the snapshot path's decoder; legacy conventions keep ``_decode_object``."""
+    return _ConventionsValidator(changed_files, fail_closed=fail_closed)
 
 
 class _ConventionsValidator:
     """``RepoConventionsDraft`` plus the rule that ``files`` lists exactly the PR paths."""
 
-    def __init__(self, changed_files: tuple[str, ...]) -> None:
+    def __init__(self, changed_files: tuple[str, ...], *, fail_closed: bool = False) -> None:
         self._changed_files = changed_files
+        self._decode = _decode_object_fail_closed if fail_closed else _decode_object
 
     def __call__(self, content: str) -> dict[str, object]:
-        decoded = _decode_object(content)
+        decoded = self._decode(content)
         try:
             draft = ConventionsDraft.model_validate(decoded)
         except ValidationError as error:
@@ -282,13 +289,14 @@ def conventions_schema() -> dict[str, Any]:
     return ConventionsDraft.model_json_schema()
 
 
-def _decode_verifier_object(content: str) -> dict[str, object]:
+def _decode_object_fail_closed(content: str) -> dict[str, object]:
     """``_decode_object`` that also refuses what the decoder itself cannot read: nesting past
     the recursion limit and an integer past the digit limit (re-review of 172c8c5c).
 
-    Both become ``InvalidAnswer``, so the gateway repairs them and the stored ``llm.call``
-    withholds the text, instead of an error escaping after the call is paid. Verifier only:
-    the review and conventions validators keep ``_decode_object`` as live runs use it (F1).
+    Both become ``InvalidAnswer``, so the gateway repairs them (and the stored verifier
+    ``llm.call`` withholds the text), instead of an error escaping after the call is paid.
+    Snapshot path only: the verifier, the v2 review and snapshot-path conventions. The legacy
+    v1 review and legacy conventions keep ``_decode_object`` as live runs use it (F1).
     """
     try:
         return _decode_object(content)

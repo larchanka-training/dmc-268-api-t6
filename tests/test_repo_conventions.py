@@ -1220,6 +1220,9 @@ def test_conventions_execution_with_passed_snapshot_and_agents_md() -> None:
         def max_prompt_tokens(self, engine: object = None) -> int:
             return 300
 
+        def call_timeout_s(self, engine: object = None) -> float:
+            return 90.0
+
         def token_counter(self) -> HeuristicTokenCounter:
             return HeuristicTokenCounter(3.0)
 
@@ -1516,6 +1519,9 @@ class _BudgetGateway:
 
     def max_prompt_tokens(self, engine: object = None) -> int:
         return 100_000
+
+    def call_timeout_s(self, engine: object = None) -> float:
+        return 90.0
 
     def token_counter(self) -> HeuristicTokenCounter:
         return HeuristicTokenCounter(3.0)

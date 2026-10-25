@@ -51,6 +51,7 @@ from app.modules.reviews.infrastructure.llm.answers import (
     verifier_output_schema,
 )
 from app.modules.reviews.infrastructure.llm.gateway import (
+    VERIFIER_COMPLETION_RESERVE_S,
     VERIFIER_TIME_RESERVE_S,
     GatewayResult,
     LlmGateway,
@@ -132,18 +133,30 @@ class GatewayConventionsModel:
         )
         verify_provenance_pre_send_guard(base_manifest, snapshot=request.snapshot)
         prompt = build_conventions_prompt(fitted)
+        snapshot_path = request.snapshot is not None
+        # CVS §7.4: conventions do not spend the reserve, so they leave the review a whole call
+        # and the verifier its window (the review's own reserve).
+        reserved_seconds = (
+            self._gateway.call_timeout_s(self._run.engine) + VERIFIER_TIME_RESERVE_S
+            if snapshot_path
+            else 0.0
+        )
         result = await self._gateway.generate(
             StructuredTask(
                 operation=CONVENTIONS_OPERATION,
                 messages=_messages(prompt),
                 schema=ResponseSchema("RepoConventionsDraft", conventions_schema()),
-                validate=conventions_answer_validator(request.traced_files),
+                validate=conventions_answer_validator(
+                    request.traced_files, fail_closed=snapshot_path
+                ),
                 base_manifest=base_manifest,
                 policy_snapshot=request.snapshot,
                 counter=counter if request.snapshot is not None else None,
-                # DD8 (E-1, E-12): snapshot path only; legacy keeps 0 and the old repair.
-                bounded_repair=request.snapshot is not None,
-                reserved_calls=0 if request.snapshot is None else _CONVENTIONS_RESERVED_CALLS,
+                # DD8 (E-1, E-7 time, E-12): snapshot path only; legacy keeps 0, 0 s and the
+                # old repair.
+                bounded_repair=snapshot_path,
+                reserved_calls=_CONVENTIONS_RESERVED_CALLS if snapshot_path else 0,
+                reserved_seconds=reserved_seconds,
             ),
             self._run,
         )
@@ -200,6 +213,8 @@ class GatewayVerifierModel:
                 counter=counter,
                 route="verifier",
                 bounded_repair=True,
+                # CVS §7.4: the snapshot-path verifier keeps its local completion; legacy 0 s.
+                reserved_seconds=0.0 if snapshot is None else VERIFIER_COMPLETION_RESERVE_S,
                 redact_answer=verifier_answer_without_reasons,
             ),
             run,
