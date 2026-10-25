@@ -70,6 +70,17 @@ def _profile(stored: dict[str, Any]) -> ExecutionProfile:
     return ExecutionProfile(**{name: value for name, value in stored.items() if name in known})
 
 
+# The RunPolicyDocument columns of the PolicyDocument content: set when present, NULL when missing.
+_PRESENCE_BOUND_COLUMNS = (
+    "blob_oid",
+    "raw_sha256",
+    "text_sha256",
+    "text",
+    "byte_count",
+    "line_count",
+)
+
+
 def _document(row: RunPolicyDocument) -> LoadedPolicyDocument:
     document = PolicyDocument(
         path=row.path,
@@ -189,13 +200,11 @@ class SqlAlchemyPolicySnapshotStore:
                 # PolicyDocument ties every content field to the presence; the CHECK of
                 # migration 0029 leaves byte_count and line_count out. The fields are
                 # named, never their values.
-                # CONTRACT: RunPolicyDocument columns carry the PolicyDocument field names.
                 present = row.presence == DocumentPresence.PRESENT.value
                 wrong = ", ".join(
-                    field.name
-                    for field in fields(PolicyDocument)
-                    if field.name not in {"path", "presence"}
-                    and (getattr(row, field.name) is None) == present
+                    name
+                    for name in _PRESENCE_BOUND_COLUMNS
+                    if (getattr(row, name) is None) == present
                 )
                 raise PolicyError(
                     PolicyErrorCode.SNAPSHOT_INTEGRITY_ERROR,
