@@ -4,8 +4,11 @@
   it from a model that knows it and applies it to the fit, the pre-send guard and the
   mandatory-budget check that ``ExecuteReviewRun`` runs before the review call.
 - It sees the L2-L4 excerpts the candidates cite as evidence, never the uncited ones
-  (CVS §7.1, decided by the tech lead on 2026-10-25), within that window. The candidates'
-  own diff lines are kept first, then the cited excerpts, then the other diff lines.
+  (CVS §7.1, decided by the tech lead on 2026-10-25), within that window. The own diff lines
+  of every candidate are kept first, then the cited excerpts, then the other diff lines.
+- The fit counts what the pre-send guard counts, so a fitted prompt never trips the guard.
+- ``ReflectionPass`` reads its prompt file when it first verifies: a legacy attempt, which
+  never verifies, does not need it.
 - Every block of its manifest carries the tokens of its rendered text (R19).
 - A run failure that is not a provider error (a manifest write that failed:
   ``internal_error``) and a cancellation keep their outcome; provider errors keep their
@@ -22,23 +25,22 @@ from uuid import UUID
 
 import pytest
 
+import app.modules.reviews.application.reflection_pass as reflection_pass_module
 from app.modules.reviews.application.context_provenance import SourceRole
 from app.modules.reviews.application.execute_review import ExecuteReviewRun
 from app.modules.reviews.application.policy_errors import PolicyError, PolicyErrorCode
-from app.modules.reviews.application.prompt_budget import token_counter_for
 from app.modules.reviews.application.prompt_builder import (
     ChangedFile,
     DiffLine,
-    PromptBuilder,
     PullRequestMeta,
     RepoConventions,
     ReviewContext,
     file_block_id,
-    render_context_excerpts,
 )
 from app.modules.reviews.application.reflection_pass import (
     CandidateFindingItem,
     ReflectionPass,
+    VerificationRecord,
     VerificationUnavailableError,
     VerifierPrompt,
     VerifierPromptBuilder,
@@ -61,16 +63,41 @@ from tests.test_review_context_blocks import (
 
 CALL_ID = UUID("00000000-0000-0000-0000-000000017101")
 MAIN_BLOCK = file_block_id(MAIN.path)
-COUNTER = token_counter_for("counter/v2")
+# The L2 excerpt as the verifier sees it (CVS §7.1).
+L2_WINDOW_XML = (
+    "<context_excerpts>\n"
+    f'<excerpt block_id="L2:f1:3-4" level="L2" path="app/util.py" revision="{HEAD}" '
+    'side="RIGHT" representation="exact_lines">\n'
+    '<line n="3">def f():</line>\n'
+    '<line n="4">    return 1</line>\n'
+    "</excerpt>\n"
+    "</context_excerpts>"
+)
 
 
-def _candidate(candidate_id: str, *refs: EvidenceRef, line: int = 10) -> CandidateFindingItem:
+def _tokens(text: str) -> int:
+    """counter/v2 (RFS §3.3): three characters per token, rounded up."""
+    return (len(text) + 2) // 3
+
+
+def _prompt_tokens(prompt: VerifierPrompt) -> int:
+    """What the pre-send guard counts: the system and the user message, each on its own."""
+    return _tokens(prompt.system) + _tokens(prompt.user)
+
+
+def _candidate(
+    candidate_id: str,
+    *refs: EvidenceRef,
+    path: str = MAIN.path,
+    line: int = 10,
+    start_line: int | None = None,
+) -> CandidateFindingItem:
     return CandidateFindingItem(
         candidate_id=candidate_id,
         finding=ReviewFindingV2(
-            path=MAIN.path,
+            path=path,
             line=line,
-            start_line=None,
+            start_line=start_line,
             severity="high",
             category="correctness",
             title="Wrong value",
@@ -104,13 +131,23 @@ def _build(
 def _mandatory(candidates: tuple[CandidateFindingItem, ...], context: ReviewContext) -> int:
     """The tokens of the verifier prompt without any code: the room the code is fitted to."""
     prompt, _ = _build(candidates, replace(context, changed_files=(), context_blocks=()))
-    return COUNTER.count(prompt.system) + COUNTER.count(prompt.user)
+    return _prompt_tokens(prompt)
 
 
 def _shown_lines(user: str) -> list[int]:
     code = user.split("<code_context>", 1)[1].split("</code_context>", 1)[0]
     files = code.split("<context_excerpts>", 1)[0]
     return [int(number) for number in re.findall(r'<line n="(\d+)" type=', files)]
+
+
+def _shown_by_path(user: str) -> dict[str, list[int]]:
+    code = user.split("<code_context>", 1)[1].split("<context_excerpts>", 1)[0]
+    return {
+        path: [int(number) for number in re.findall(r'<line n="(\d+)" type=', body)]
+        for path, body in re.findall(
+            r'<file block_id="[^"]+" path="([^"]+)"[^>]*>(.*?)</file>', code, re.S
+        )
+    }
 
 
 # ---------- the cited excerpts ----------
@@ -121,7 +158,7 @@ def test_a_finding_backed_only_by_an_excerpt_is_verified_with_that_excerpt() -> 
 
     prompt, manifest = _build((EXCERPT_ONLY,), context)
 
-    assert render_context_excerpts((L2_WINDOW,)) in prompt.user
+    assert L2_WINDOW_XML in prompt.user
     assert prompt.user.index("</changed_files>") < prompt.user.index("<context_excerpts>")
     assert prompt.user.index("</context_excerpts>") < prompt.user.index("</code_context>")
     block = manifest.get_block("L2:f1:3-4")
@@ -197,23 +234,25 @@ def test_the_cited_excerpt_is_kept_before_the_uncited_diff_lines() -> None:
 
     prompt, manifest = _build((EXCERPT_ONLY,), context, max_prompt_tokens=window)
 
-    assert render_context_excerpts((L2_WINDOW,)) in prompt.user
+    assert L2_WINDOW_XML in prompt.user
     assert manifest.get_block("L2:f1:3-4") is not None
     shown = _shown_lines(prompt.user)
     assert 10 in shown
     assert 1 < len(shown) < 300
 
 
+BIG = _block(
+    "L2:big:1-200",
+    ContextLevel.L2,
+    "app/big.py",
+    ((1, 200),),
+    "\n".join(f"big_value_{number} = {number}" for number in range(1, 201)),
+)
+
+
 def test_a_cited_excerpt_over_the_verifier_window_is_left_out() -> None:
-    big = _block(
-        "L2:big:1-200",
-        ContextLevel.L2,
-        "app/big.py",
-        ((1, 200),),
-        "\n".join(f"big_value_{number} = {number}" for number in range(1, 201)),
-    )
     cited = _candidate("c-big", EvidenceRef(block_id="L2:big:1-200", start_line=1, end_line=2))
-    context = _context((big,))
+    context = _context((BIG,))
     window = _mandatory((cited,), context) + 400
 
     prompt, manifest = _build((cited,), context, max_prompt_tokens=window)
@@ -221,6 +260,150 @@ def test_a_cited_excerpt_over_the_verifier_window_is_left_out() -> None:
     assert "<context_excerpts>" not in prompt.user
     assert manifest.get_block("L2:big:1-200") is None
     assert 10 in _shown_lines(prompt.user)
+
+
+def test_a_cited_excerpt_that_does_not_fit_does_not_stop_the_next_one() -> None:
+    cited = _candidate(
+        "c-both",
+        EvidenceRef(block_id="L2:big:1-200", start_line=1, end_line=2),
+        EvidenceRef(block_id="L2:f1:3-4", start_line=3, end_line=4),
+    )
+    context = _context((BIG, L2_WINDOW))
+    window = _mandatory((cited,), context) + 400
+
+    prompt, manifest = _build((cited,), context, max_prompt_tokens=window)
+
+    assert '<excerpt block_id="L2:big:1-200"' not in prompt.user
+    assert manifest.get_block("L2:big:1-200") is None
+    assert L2_WINDOW_XML in prompt.user
+    assert manifest.get_block("L2:f1:3-4") is not None
+
+
+def test_the_own_lines_of_a_candidate_come_before_the_excerpt_it_cites() -> None:
+    # The window holds the candidate's 30 lines or its 30-line excerpt, never both.
+    wide = _block(
+        "L2:wide:1-30",
+        ContextLevel.L2,
+        "app/wide.py",
+        ((1, 30),),
+        "\n".join(f"wide_value_{number} = {number}" for number in range(1, 31)),
+    )
+    cited = _candidate(
+        "c-wide",
+        EvidenceRef(block_id="L2:wide:1-30", start_line=1, end_line=30),
+        start_line=10,
+        line=39,
+    )
+    context = _context((wide,))
+    whole, _ = _build((cited,), context)
+
+    prompt, manifest = _build((cited,), context, max_prompt_tokens=_prompt_tokens(whole) - 1)
+
+    assert _shown_lines(prompt.user) == list(range(10, 40))
+    assert '<excerpt block_id="L2:wide:1-30"' not in prompt.user
+    assert manifest.get_block("L2:wide:1-30") is None
+
+
+def test_a_window_the_size_of_the_whole_prompt_keeps_it_whole() -> None:
+    context = replace(_context((L2_WINDOW,)), changed_files=(_long_file(61),))
+    whole, _ = _build((EXCERPT_ONLY,), context)
+    size = _prompt_tokens(whole)
+
+    at_size, _ = _build((EXCERPT_ONLY,), context, max_prompt_tokens=size)
+    below, _ = _build((EXCERPT_ONLY,), context, max_prompt_tokens=size - 1)
+
+    assert at_size == whole
+    assert below != whole
+    assert _prompt_tokens(below) <= size - 1
+
+
+def _numbered(path: str, name: str) -> ChangedFile:
+    return ChangedFile(
+        path,
+        "modified",
+        tuple(DiffLine(number, "added", f"{name}_{number} = {number}") for number in range(1, 201)),
+    )
+
+
+# The reviewer's probe: two 200-line files, a candidate on the first line of each; the one on
+# app/a.py cites the L2 excerpt. app/b.py sorts first; before the fix it filled the window
+# and app/a.py was left out.
+FILE_A = _numbered("app/a.py", "a")
+FILE_B = _numbered("app/b.py", "b")
+ON_A = _candidate(
+    "c-a", EvidenceRef(block_id="L2:f1:3-4", start_line=3, end_line=4), path="app/a.py", line=1
+)
+ON_B = _candidate(
+    "c-b",
+    EvidenceRef(block_id=file_block_id("app/b.py"), start_line=1, end_line=1),
+    path="app/b.py",
+    line=1,
+)
+TWO_FILES = replace(_context((L2_WINDOW,)), changed_files=(FILE_A, FILE_B))
+
+
+def test_every_candidate_keeps_its_own_lines_before_any_file_is_topped_up() -> None:
+    window = _mandatory((ON_A, ON_B), TWO_FILES) + 400
+
+    prompt, manifest = _build((ON_A, ON_B), TWO_FILES, max_prompt_tokens=window)
+
+    shown = _shown_by_path(prompt.user)
+    assert shown["app/a.py"][0] == 1
+    assert shown["app/b.py"][0] == 1
+    assert L2_WINDOW_XML in prompt.user
+    assert manifest.get_block("L2:f1:3-4") is not None
+    # The other lines top the window up, next to the kept excerpt and within the window.
+    assert len(shown["app/a.py"]) + len(shown["app/b.py"]) > 2
+    assert _prompt_tokens(prompt) <= window
+
+
+class _Abstainer:
+    """Knows its window; answers insufficient_context for every candidate it is shown."""
+
+    def __init__(self, window: int) -> None:
+        self.window = window
+        self.prompts: list[VerifierPrompt] = []
+
+    def max_prompt_tokens(self) -> int:
+        return self.window
+
+    async def verify(self, *, system_prompt: str, user_prompt: str, **_: object) -> VerifierReply:
+        self.prompts.append(VerifierPrompt(system_prompt, user_prompt))
+        ids = re.findall(r'candidate candidate_id="([^"]+)"', user_prompt)
+        decisions = [
+            {
+                "candidate_id": candidate,
+                "status": "insufficient_context",
+                "reason": "Not enough code.",
+                "evidence_refs": [],
+                "requirement_refs": [],
+            }
+            for candidate in ids
+        ]
+        return VerifierReply(output={"decisions": decisions})
+
+
+def test_a_fitted_prompt_never_trips_the_pre_send_guard() -> None:
+    # 600 windows in a row, each far below the 400 diff lines: before, the fit left out the
+    # newlines that join the user message and rounded the system and user tokens together,
+    # so in some windows the guard refused the fitted prompt by 1-19 tokens.
+    floor = _mandatory((ON_A, ON_B), TWO_FILES)
+    overflows: list[int] = []
+    for window in range(floor + 150, floor + 750):
+        verifier = _Abstainer(window)
+        try:
+            asyncio.run(
+                ReflectionPass(verifier).verify_recorded(candidates=(ON_A, ON_B), context=TWO_FILES)
+            )
+        except RunFailure as failure:
+            assert failure.error_code == "verification_context_overflow"
+            overflows.append(window)
+            continue
+        (sent,) = verifier.prompts
+        assert _prompt_tokens(sent) <= window
+        assert len(_shown_lines(sent.user)) < 400
+
+    assert overflows == []
 
 
 # ---------- the verifier route window ----------
@@ -326,18 +509,23 @@ def test_every_block_of_the_verifier_manifest_carries_its_tokens() -> None:
 
     prompt, manifest = _build((EXCERPT_ONLY, DIFF_ONLY), context)
 
-    tokens = {block.block_id: block.tokens for block in manifest.blocks}
-    assert None not in tokens.values()
-    candidates = re.findall(r"<candidate candidate_id=.*?</candidate>", prompt.user, re.S)
-    assert len(candidates) == 2
-    assert tokens["c-excerpt"] == COUNTER.count(candidates[0])
-    assert tokens["c-diff"] == COUNTER.count(candidates[1])
-    assert tokens["repo-conventions"] == COUNTER.count(
-        PromptBuilder._render_conventions(conventions)
+    # counter/v2, three characters per token rounded up: the candidates render to 280 and 295
+    # characters, the conventions to 184, the excerpt (without its container) to 225.
+    assert {block.block_id: block.tokens for block in manifest.blocks} == {
+        "policy-rules": 47,
+        MAIN_BLOCK: 496,
+        "L2:f1:3-4": 75,
+        "repo-conventions": 62,
+        "c-excerpt": 94,
+        "c-diff": 99,
+    }
+    conventions_xml = (
+        "<repo_conventions>\n<key_patterns>\n<pattern>Use services.</pattern>\n</key_patterns>\n"
+        "<recommendations>\n<recommendation>Test paths.</recommendation>\n</recommendations>\n"
+        "</repo_conventions>"
     )
-    assert tokens["L2:f1:3-4"] == COUNTER.count(
-        render_context_excerpts((L2_WINDOW,)).split("\n", 1)[1].rsplit("\n", 1)[0]
-    )
+    assert conventions_xml in prompt.user
+    assert L2_WINDOW_XML in prompt.user
 
 
 # ---------- failures that are not provider errors ----------
@@ -377,3 +565,38 @@ def test_a_cancellation_during_the_verifier_call_stays_a_cancellation() -> None:
 def test_a_provider_timeout_still_maps_to_verification_unavailable() -> None:
     with pytest.raises(VerificationUnavailableError):
         _verify(RunFailure("llm_timeout", "slow"))
+
+
+# ---------- the prompt file is read when the pass first verifies ----------
+
+
+class _NoPromptFiles:
+    """``importlib.resources.files`` of a package whose prompt files are gone."""
+
+    def joinpath(self, name: str) -> _NoPromptFiles:
+        return self
+
+    def read_text(self, encoding: str) -> str:
+        raise FileNotFoundError("review.verifier.v2.md")
+
+
+def test_a_reflection_pass_reads_its_prompt_file_only_when_it_verifies(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(reflection_pass_module, "files", lambda package: _NoPromptFiles())
+
+    reflection = ReflectionPass(_Raising(AssertionError("the verifier must not be called")))
+
+    assert asyncio.run(
+        reflection.verify_recorded(candidates=(), context=_context(()))
+    ) == VerificationRecord(decisions=(), candidate_ids=())
+    with pytest.raises(PolicyError) as raised:
+        _verify_with(reflection)
+    assert raised.value.code == PolicyErrorCode.SNAPSHOT_INTEGRITY_ERROR
+    assert raised.value.message.startswith(
+        "Unable to read verifier prompt resource 'review.verifier.v2.md'"
+    )
+
+
+def _verify_with(reflection: ReflectionPass) -> None:
+    asyncio.run(reflection.verify_recorded(candidates=(DIFF_ONLY,), context=_context(())))

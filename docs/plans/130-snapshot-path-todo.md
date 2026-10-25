@@ -188,7 +188,12 @@ Gates for every task: the four commands in the plan, with DB and vhost `imp130f`
     cited excerpts, then the other diff lines;
   - every verifier manifest block carries its tokens;
   - a verifier manifest-write failure stays `internal_error`; a cancellation stays one;
-  - a legacy run logs no warning, and the F1-1 pin passes the worker's pass.
+  - a legacy run logs no warning, and the F1-1 pin passes the worker's pass;
+  - fix round (F1-7 review): a stored verifier response keeps only the allow-list (list-form
+    content, reasoning, tool calls, refusal, logprobs, `text`, every choice, invalid answers
+    withheld); the own lines of every candidate come before any file is topped up; a fitted prompt
+    never trips the pre-send guard (600-window sweep); a cited excerpt that does not fit leaves
+    room for the next; the pass reads its prompt file when it first verifies.
 - **Done when:** [x] F1-1 green.
 
 ### F1-8: R12 and #247 p3

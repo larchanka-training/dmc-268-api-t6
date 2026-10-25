@@ -166,6 +166,13 @@ validates against v1 when no snapshot is attached (`llm/models.py:183-188`). Tha
     `ReflectionPass.max_prompt_tokens()`, the mandatory verifier budget that `execute_review`
     checks before the review call (otherwise that check passes and the verifier overflows after
     a paid review). The verifier manifest counts every block with the pinned counter.
+  - Fix round of the F1-7 review: the fit counted the code block alone against the budget minus
+    the mandatory part, while the guard counts the system and the user message apart, with the
+    newlines that join the user message; so in about 2-6 % of windows the guard refused a fitted
+    prompt by 1-19 tokens. The fit now counts the whole prompt exactly as the guard does
+    (`build_verifier_prompt` renders the user message through the same function for both).
+    `ReflectionPass` builds its `VerifierPromptBuilder` (which reads the prompt file) when it
+    first verifies: the worker gives every attempt a pass, and a legacy attempt never verifies.
 - **Verifier excerpts** (decided by the tech lead on 2026-10-25, during F1-7): the verifier gets
   the L2–L4 blocks the candidates cite as evidence (CVS §7.1), rendered after the changed files
   inside `<code_context>`, and its manifest names exactly the shown blocks. An uncited excerpt is
@@ -173,6 +180,11 @@ validates against v1 when no snapshot is attached (`llm/models.py:183-188`). Tha
   cited excerpts (whole or not at all, in payload order), then the other diff lines; a left-out
   excerpt means `insufficient_context` from the verifier. Before F1-7 the verifier manifest
   listed every payload excerpt without rendering it.
+  - Fix round of the F1-7 review: the order held only per file (the diff fit filled the files one
+    by one, so an earlier file's other lines crowded out a later file's candidate lines). The fit
+    (`_fit_verifier_code`) now runs in three steps over all files: every candidate's own lines,
+    then the cited excerpts (one that does not fit leaves room for the next), then the other lines
+    file by file, each step probing with what the earlier ones kept.
 
 **DD4. Manifest persistence.**
 - Migration `20261025_0040_context_manifests`, `down_revision = "20261024_0039"`. #283 uses
@@ -264,10 +276,14 @@ raises `policy_prompt_budget_exceeded` (terminal), so neither the conventions no
 - E-2: the verification `llm.call` response is stored without `decisions[].reason` (TL-3).
 - #247 p3: `_repair_attribution` (`findings_post_processor.py:259-272`) runs before the verifier.
 - R12: `allowed_v2_rules=None` when no verifier call happened (`execute_review.py:449-461`).
-- As built in F1-7: the verifier task carries `redact_answer`; the gateway passes the answer text of
-  every stored choice through it, so the `llm.call` response of a JSON object keeps everything but
-  `decisions[].reason`, and text that is not a JSON object is withheld whole (a reason in it cannot
-  be found reliably). Review and conventions responses are stored as sent. A `RunFailure` that is
+- As built in F1-7, fail-closed after its review (decided by the tech lead on 2026-10-25): the
+  verifier task carries `redact_answer`, and the gateway stores a redacted body as an allow-list:
+  the provider metadata at the top level (`id`, `object`, `created`, `model`, `provider`,
+  `system_fingerprint`, `usage`) and, for every choice, `index`, `finish_reason` and a message of
+  `role` and the answer text (list-form content joined). The answer text of a valid verifier answer
+  is stored as `candidate_id`, `status`, `evidence_refs` and `requirement_refs` of each decision;
+  any other text is withheld whole. Reasoning, tool calls, refusals, logprobs and the legacy
+  `text` are dropped. Review and conventions responses are stored as sent. A `RunFailure` that is
   not a provider error (a failed manifest write: `internal_error`) and a cancellation now pass
   through `ReflectionPass` instead of becoming `verification_unavailable`; provider errors keep
   their `verification_*` mapping. `llm.verify.manifest_id` is `GatewayResult.accepted_manifest_id`.
