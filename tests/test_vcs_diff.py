@@ -404,7 +404,9 @@ def test_same_head_with_changed_base_is_rejected_before_file_fetch() -> None:
             await checkpoint()
             raise AssertionError("base drift must stop before blob fetch")
 
-    with pytest.raises(ValueError, match="base SHA"):
+    from app.modules.reviews.application.run_failures import RunFailure
+
+    with pytest.raises(RunFailure, match="pr_base_changed"):
         asyncio.run(
             FetchVcsReviewInput(Provider(), checkpoint=provider_checkpoint).execute(
                 _locator(), _HEAD, _BASE

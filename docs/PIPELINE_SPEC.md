@@ -417,6 +417,7 @@ Legacy marker `<!-- ai-review findings_hash=… -->` не используетс
 | `deadline_exceeded` | `failed` | время | нет | Прогон не уложился в лимит времени. |
 | `diff_fetch_failed` | `failed` | GitHub | да: прогон | Не удалось получить дифф из GitHub. |
 | `commit_messages_fetch_failed` | `failed` | GitHub | да: прогон | Не удалось получить сообщения коммитов PR из GitHub. |
+| `pr_base_changed` | `failed` | GitHub | нет | Целевая ветка PR изменилась после запуска ревью. Перезапустите ревью из UI. |
 | `github_forbidden` | `failed` | GitHub | нет | У GitHub App нет доступа к репозиторию или PR. |
 | `github_publish_failed` | `failed` | GitHub | до 3 безопасных повторов §5.2; прогон — нет | Не удалось завершить публикацию ревью в GitHub. |
 | `gitlab_forbidden` | `failed` | GitLab (#97) | нет | check-run GitHub не вызывается |

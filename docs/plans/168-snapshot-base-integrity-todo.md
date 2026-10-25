@@ -98,7 +98,9 @@ TEST_RABBITMQ_URL=amqp://app:app@localhost:5672/imp168d uv run pytest
 - `app/modules/reviews/application/run_failures.py` (`KNOWN_ERROR_CODES`);
 - `app/modules/reviews/application/check_runs.py` (`_ERROR_TEXTS`);
 - `docs/PIPELINE_SPEC.md` (a §6 row after `:412`);
-- `tests/test_diff_map_pinned_base.py`.
+- `tests/test_diff_map_pinned_base.py`;
+- `tests/test_vcs_diff.py` (the base-drift test `:407` expects the new code; import inside
+  the function).
 
 **What to do:**
 
