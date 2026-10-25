@@ -1,11 +1,12 @@
 # Tasks: worker documentation and historical environment traces (#208)
 
 Plan/inventory: [208-plan.md](208-plan.md). Initial base: `22c621ab`;
-current integration point: `05a96bc422468a570bab3233b11b538eb4a87ff6`.
+current integration point: `74b42a7134fb9f272d93c913344e5b826b03b523`.
 Status: approved by the user with “Ок” on 2026-10-24; Task 1 review passed;
 initial implementation published as PR #260 and round 1 corrections approved.
-Round 2 latest integration rebase/audit and all gates pass; fresh final review
-reports Standards 0 / Spec 0 and publisher handoff is complete. The preceding macOS
+Round 2 current-main rebase/audit and all gates pass; fresh review reports
+Standards 0 / Spec 0 and publisher handoff is complete. The preceding published integration passed all gates
+and fresh review. The preceding macOS
 failure and successful `24910a0d` Linux run are retained. Completed Tasks 1–3 and round-1 outcomes
 below are historical, not current-round gates.
 
@@ -214,7 +215,7 @@ complete; publication progress and review responses are recorded on PR #260.
 No implementation change, new test, unnecessary duplicate gate run, worker-table action,
 renewed approval question, merge or issue closure is part of this round.
 
-### Latest integration checkpoint: `05a96bc4`
+### Published integration checkpoint: `05a96bc4` (historical)
 
 - [x] Preserve the two evidence files; rebase both documentation commits onto
       `05a96bc422468a570bab3233b11b538eb4a87ff6` without conflict; range-diff
@@ -236,3 +237,31 @@ renewed approval question, merge or issue closure is part of this round.
 - [x] Fresh final Standards 0 / Spec 0; frozen files, actual gates and existing-PR
       publication instructions delivered. Publisher handoff is complete; remote
       publication/review-response outcomes remain on PR #260.
+
+### Current integration checkpoint: `74b42a7`
+
+- [x] Fetch current main and rebase all three own documentation commits onto
+      `74b42a7134fb9f272d93c913344e5b826b03b523`; no conflict. All three patches
+      remain range-diff equivalent (`=`), head `dab5081e` before bookkeeping.
+- [x] Audit both newly merged `168-parser-cpu-limit-*` plans; sanitize the local
+      DB/vhost name and two loopback URLs. Preserve branch/hash, CPU-limit facts,
+      commands, numeric proof, fences, dates and completed task states.
+- [x] Current inventory: 113 main/115 branch plans; issue scan 139 lines/33 files
+      → 17 permitted lines/8 files. Scope: 37 historical documents + worker +
+      two #208 plans = 40 documents; no new open-PR ownership overlap.
+- [x] No PR source/test/workflow/config/dependency changes; prior corrections,
+      worker text/table and stock proofs preserved; `git diff --check` passes.
+- [x] Current static gates: Ruff lint PASS; format PASS, 566 files; mypy PASS,
+      556 source files.
+- [x] Refresh the tracked-only Linux snapshot: 1135 matching files, independent
+      Git metadata, no host secrets/untracked environment files. Unchanged lock
+      permits reuse; frozen sync reports no environment changes.
+- [x] Current Linux `uv run pytest -n 4 --junitxml=<private-output>/pytest.xml`:
+      4996 passed, 988 skipped, 8 warnings in 159.58s; exit 0; all 5984 collected.
+      Python 3.13.11/Bash 5.2.15. DB/RabbitMQ/Redis integration URLs absent;
+      skipped integrations were not executed. Full log/XML retained privately.
+- [x] Fresh independent Standards/Spec review reports zero actionable findings.
+- [x] Deliver frozen files and actual evidence to publisher for existing PR #260,
+      expected prior-head lease `8e33974803dd5ee5d1f1c51f9134638a4cd4de97`,
+      preserved non-draft status/reviewer and reply/re-review instructions.
+      Remote publication outcomes remain on the PR.

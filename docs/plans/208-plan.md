@@ -6,8 +6,8 @@ Docs-only work initially based on main `22c621ab`, issue #208 and its 23 October
 clarification; refreshed onto main `25c83fe0d024270e9a744850baa9721cb0ede617`
 after PR #256 merged. Review round 1 rebases the existing PR #260 onto
 `1ae74b1ae8fb48aed9dc4d9e913bf4c916d5a813`. Review round 2 rebases onto
-`24910a0d281d9d71e8362bc89e1925c8c37398bf`, then the fixed integration point
-`05a96bc422468a570bab3233b11b538eb4a87ff6` after source changes and new plans
+`24910a0d281d9d71e8362bc89e1925c8c37398bf`, then `05a96bc422468a570bab3233b11b538eb4a87ff6` and current main
+`74b42a7134fb9f272d93c913344e5b826b03b523` after source changes and new plans
 landed. Upstream source remains unmodified. Correct two paragraphs in `docs/WEBHOOK_WORKER.md`; sanitize
 machine-specific references throughout tracked `docs/plans/`, including JSON
 metadata. Preserve historical counts, durations, warnings/skips, hashes,
@@ -381,7 +381,7 @@ selection changes or strict-flag overrides. `TEST_DATABASE_URL`,
 `TEST_RABBITMQ_URL` and `TEST_REDIS_URL` were verified absent; skipped integrations
 were not executed. Full log/XML are retained privately. Publication is pending.
 
-### Latest integration checkpoint: `05a96bc4`
+### Published integration checkpoint: `05a96bc4` (historical)
 
 Main advanced with source changes and four new `171-*`/`209-*` plans. Both
 documentation commits rebased without conflict onto the fixed point
@@ -414,3 +414,41 @@ Fresh final review reports **Standards 0 / Spec 0** on this integration point.
 The frozen files, actual gates and publication instructions have been delivered
 for the existing non-draft PR; publisher handoff is complete. Remote publication
 and review-response outcomes remain recorded on PR #260.
+
+### Current integration checkpoint: `74b42a7`
+
+Main advanced by three merged #168 parser CPU-limit commits. All three own
+documentation commits rebased without conflict onto fetched current main
+`74b42a7134fb9f272d93c913344e5b826b03b523`, producing head
+`dab5081e455429314c9b5e8a5d54401bb361bc13` before this bookkeeping.
+`git range-diff` reports all three replayed patches equivalent (`=`).
+
+The two newly merged `168-parser-cpu-limit-*` plans contained a concrete local
+DB/vhost name and two loopback service URLs. Only those three lines were
+sanitized to isolated-resource wording and the established portable URL inputs.
+Branch/revision references, CPU-limit design and numeric proofs, commands,
+fences, dates and completed checkbox states remain intact. No other new traces
+were found in the supplementary context scan. Scope now covers 40 documents:
+37 historical documents, the worker document and the two #208 plans. The new
+plans are merged-main content, with no open-PR ownership overlap introduced.
+
+The current audit covers 113 main plans and 115 branch plans. The issue scan
+finds 139 lines/33 files before and the same 17 permitted lines/8 files after.
+The accepted worker paragraphs/table, stock proofs and all prior corrections
+remain unchanged. Application/test/workflow/config/dependency diffs against
+current main are empty. `git diff --check` passes. Current static gates pass:
+Ruff lint, format (566 files), and mypy (556 source files).
+
+The unchanged Linux full suite completed with
+`uv run pytest -n 4 --junitxml=<private-output>/pytest.xml`: **4996 passed,
+988 skipped, 8 warnings in 159.58s**, exit **0**; all 5984 tests were collected.
+Its tracked-only
+snapshot matched 1135 files and retains independent Git metadata. No untracked
+environment files or host secrets were copied. The lockfile is unchanged;
+frozen synchronization reports no environment changes. Runtime remains Linux
+arm64, Python 3.13.11 and Bash 5.2.15. Database, RabbitMQ and Redis integration
+URLs are absent; skipped integrations must not be reported as executed.
+Full log/XML are retained privately. The preceding `05a96bc4` result is historical.
+Fresh independent review reports **Standards 0 / Spec 0**. Frozen files, actual
+gates and the current expected-head lease have been delivered to the publisher;
+handoff is complete. Remote publication and review-response outcomes remain on PR #260.
