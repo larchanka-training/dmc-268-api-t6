@@ -368,7 +368,7 @@ class PromptBuilder:
                             end_line=line_count,
                             shown_line_count=line_count,
                             shown_ranges=((1, line_count),),
-                            tokens=tokens(self._render_policy_rules(context.policy_snapshot)),
+                            tokens=tokens(self.render_policy_rules(context.policy_snapshot)),
                         )
                     )
                 else:
@@ -383,7 +383,7 @@ class PromptBuilder:
                             start_line=None,
                             end_line=None,
                             shown_line_count=0,
-                            tokens=tokens(self._render_policy_rules(context.policy_snapshot)),
+                            tokens=tokens(self.render_policy_rules(context.policy_snapshot)),
                         )
                     )
 
@@ -403,7 +403,7 @@ class PromptBuilder:
                             end_line=line_count,
                             shown_line_count=line_count,
                             shown_ranges=((1, line_count),),
-                            tokens=tokens(self._render_policy_agents(context.policy_snapshot)),
+                            tokens=tokens(self.render_policy_agents(context.policy_snapshot)),
                         )
                     )
                 else:
@@ -418,7 +418,7 @@ class PromptBuilder:
                             start_line=None,
                             end_line=None,
                             shown_line_count=0,
-                            tokens=tokens(self._render_policy_agents(context.policy_snapshot)),
+                            tokens=tokens(self.render_policy_agents(context.policy_snapshot)),
                         )
                     )
 
@@ -436,7 +436,7 @@ class PromptBuilder:
                         tokens=None
                         if counter is None
                         else counter.count(
-                            self._render_service_defaults(
+                            self.render_service_defaults(
                                 context.rules,
                                 defaults_checksum=context.policy_snapshot.defaults_checksum,
                             )

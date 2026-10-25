@@ -2504,6 +2504,46 @@ def test_reflection_pass_validates_supplied_refs_for_non_supported_statuses(
     assert model.call_count == 1
 
 
+@pytest.mark.parametrize("rule_name", [".review/rules.md", "AGENTS.md"])
+def test_reflection_pass_rejects_attributed_insufficient_context_without_requirement_refs(
+    reflection_boundary_context: ReviewContext, rule_name: str
+) -> None:
+    snapshot = reflection_boundary_context.policy_snapshot
+    assert snapshot is not None
+    context = replace(
+        reflection_boundary_context,
+        policy_snapshot=replace(
+            snapshot,
+            agents=make_policy_document_present("AGENTS.md", "Preserve stored data.\n"),
+        ),
+    )
+    candidate = make_candidate("c-unknown", rule_name=rule_name)
+    model = FakeVerifierModel(
+        {
+            "decisions": [
+                {
+                    "candidate_id": "c-unknown",
+                    "status": "insufficient_context",
+                    "reason": "The cited policy does not establish this claim.",
+                    "evidence_refs": [],
+                    "requirement_refs": [],
+                }
+            ]
+        }
+    )
+    decisions = asyncio.run(ReflectionPass(model).verify(candidates=(candidate,), context=context))
+    assert len(decisions) == 1
+    assert decisions[0].candidate_id == "c-unknown"
+    assert decisions[0].status == "insufficient_context"
+    assert decisions[0].requirement_refs == []
+    supported, rejected = filter_verified_candidates(candidates=(candidate,), decisions=decisions)
+    assert supported == []
+    assert rejected == [
+        (candidate, "insufficient_context", "The cited policy does not establish this claim.")
+    ]
+    assert model.call_count == 1
+
+
 @pytest.mark.parametrize("send_budget", [152, 151], ids=["exact", "one-over"])
 def test_reflection_pass_final_budget_counts_system_and_user(
     reflection_boundary_context: ReviewContext,

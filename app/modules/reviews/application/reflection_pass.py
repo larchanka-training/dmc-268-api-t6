@@ -362,7 +362,7 @@ def verify_verifier_mandatory_budget(
     version = bindings.verifier_version or "v2"
     filename = f"review.verifier.{version}.md"
     try:
-        raw = files("review.prompts").joinpath(filename).readxml_text(encoding="utf-8")
+        raw = files("review.prompts").joinpath(filename).read_text(encoding="utf-8")
         if raw.startswith("---"):
             parts = raw.split("---", 2)
             system_prompt = parts[2].strip() if len(parts) >= 3 else raw
@@ -402,7 +402,7 @@ class VerifierPromptBuilder:
             filename = f"review.verifier.{verifier_version}.md"
             try:
                 prompt_file = files("review.prompts").joinpath(filename)
-                raw = prompt_file.readxml_text(encoding="utf-8")
+                raw = prompt_file.read_text(encoding="utf-8")
             except (FileNotFoundError, ModuleNotFoundError, OSError) as exc:
                 raise PolicyError(
                     PolicyErrorCode.SNAPSHOT_INTEGRITY_ERROR,
@@ -433,7 +433,7 @@ class VerifierPromptBuilder:
                 filename = f"review.verifier.{bindings.verifier_version}.md"
                 try:
                     v_file = files("review.prompts").joinpath(filename)
-                    raw = v_file.readxml_text(encoding="utf-8")
+                    raw = v_file.read_text(encoding="utf-8")
                 except (FileNotFoundError, ModuleNotFoundError, OSError) as exc:
                     raise PolicyError(
                         PolicyErrorCode.SNAPSHOT_INTEGRITY_ERROR,

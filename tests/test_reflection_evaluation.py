@@ -1,7 +1,7 @@
 """Evaluation and security test suite for Reflection Pass and verifier engine (Issue #120).
 
 Validates AC 6 (positive and negative evaluation examples against visible code and policy)
-and AC 7 (prompt injection defenses across both passes).
+and AC 7 verifier prompt injection defenses. Reviewer defenses are covered separately.
 """
 
 from __future__ import annotations
@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import re
 import uuid
 import xml.etree.ElementTree as ET
 from collections.abc import Mapping
@@ -812,9 +813,7 @@ class TestNegativeEvaluation:
 
 
 class TestPromptInjectionDefenses:
-    """Security verification: AC 7 prompt injection defenses across both
-    reviewer and verifier passes.
-    """
+    """Security verification: AC 7 prompt injection defenses in the verifier pass."""
 
     @pytest.mark.parametrize(
         ("field_name", "payload"),
@@ -1102,8 +1101,12 @@ def test_verifier_prompt_distinguishes_code_evidence_from_policy_check_sources(
         (line for line in rules.splitlines() if line.startswith("- `requirement_refs`")), ""
     )
     assert "exact policy blocks and line numbers" in requirements
-    for tag in ("repository_rules", "project_conventions_document", "service_defaults"):
-        assert f"`<{tag}>`" in requirements
+    source_list_clause = requirements.partition(" when a rule was attributed.")[0]
+    assert re.findall(r"`<([^>]+)>`", source_list_clause) == [
+        "repository_rules",
+        "project_conventions_document",
+        "service_defaults",
+    ], "Verifier requirement-ref source list must contain exactly the three policy tags"
     assert "when a rule was attributed" in requirements
     assert "`check_id` must match" in requirements
     assert "id attribute of the `<check>` tag" in requirements

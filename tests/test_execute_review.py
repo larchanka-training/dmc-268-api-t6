@@ -55,6 +55,7 @@ from app.modules.reviews.application.review_output import (
     VerifiedReviewOutput,
 )
 from app.modules.reviews.application.run_failures import RunFailure, classify_failure
+from app.modules.reviews.application.verdict import SeverityThresholdValue, severity_counts
 from tests.policy_snapshot_fakes import (
     make_complete_execution_profile,
     make_complete_prompt_bindings,
@@ -3374,4 +3375,679 @@ def _v4_snapshot(review_system_id: UUID = _V4_REVIEW) -> PolicySnapshot:
         ),
     )
 
-from app.modules.reviews.application.review_path import ReviewBinding
+
+class _StageSnapshot:
+    """The context stage as execute_review sees it: exclusions and the attempt's snapshot."""
+
+    diff_old_sha: str | None = None
+    head_sha: str | None = None
+    payload: ReviewContextPayload | None = None
+
+    def __init__(self, snapshot: PolicySnapshot | None) -> None:
+        self.snapshot_for_llm = snapshot
+
+    def excluded(self, path: str) -> bool:
+        return False
+
+
+class _BoundPipeline:
+    """Processor, prompt source, model and publisher of a run bound to ``binding``."""
+
+    def __init__(self, binding: ReviewBinding) -> None:
+        self.binding = binding
+        self.contexts: list[ReviewContext] = []
+        self.published: list[object] = []
+
+    async def prepare(self, run_id: UUID) -> GeneratedConventions:
+        return conventions()
+
+    async def get_review_prompt_input(
+        self, run_id: UUID, saved: GeneratedConventions
+    ) -> ReviewPromptInput:
+        return ReviewPromptInput(
+            system="Review carefully.",
+            rules=(),
+            agents_md=_PROVIDER_AGENTS,
+            conventions=RepoConventions((), ()),
+            changed_files=(
+                ChangedFile("app/main.py", "modified", (DiffLine(10, "added", "x = 1"),)),
+            ),
+            omitted_files=(),
+            review_binding=self.binding,
+        )
+
+    async def get_pull_request_meta(self, run_id: UUID) -> PullRequestMeta:
+        return PullRequestMeta("Title", None, "u", "b", "m", (), 1, 1, 0, False, False)
+
+    async def draft_review(self, *, context: ReviewContext) -> dict[str, Any]:
+        self.contexts.append(context)
+        return {"findings": [], "summary": {"problem": "p", "done_well": "d", "effort": "none"}}
+
+    async def execute(self, run_id: UUID, raw_output: object) -> bool:
+        self.published.append(raw_output)
+        return True
+
+
+def _run_bound(
+    binding: ReviewBinding,
+    stage_snapshot: PolicySnapshot | None,
+    *,
+    verifier: FakeVerifierModel | None = None,
+) -> _BoundPipeline:
+    pipeline = _BoundPipeline(binding)
+    asyncio.run(
+        ExecuteReviewRun(
+            pipeline,
+            pipeline,
+            pipeline,
+            pipeline,
+            context_filter=_StageSnapshot(stage_snapshot),
+            reflection_pass=None if verifier is None else ReflectionPass(verifier),
+        ).execute(RUN_ID)
+    )
+    return pipeline
+
+
+def test_snapshot_path_review_shows_the_snapshot_documents_not_the_provider_agents_md() -> None:
+    snapshot = _v4_snapshot()
+    verifier = FakeVerifierModel({"decisions": []})
+
+    pipeline = _run_bound(
+        ReviewBinding(_V4_REVIEW, "review.system", "v4", "github"), snapshot, verifier=verifier
+    )
+
+    [context] = pipeline.contexts
+    assert context.policy_snapshot is snapshot
+    user = PromptBuilder().build_prompt(context).user
+    assert (
+        '<repository_rules block_id="policy-rules" path=".review/rules.md">\n'
+        '<line n="1"># Rules</line>\n'
+        '<line n="2">Always sanitize input.</line>\n'
+        "</repository_rules>"
+    ) in user
+    assert ('<project_conventions_document block_id="policy-agents" path="AGENTS.md">') in user
+    assert "Prefer small functions." in user
+    # ReviewPromptInput.agents_md (the provider read) is not shown on this path.
+    assert _PROVIDER_AGENTS not in user
+    assert "<agents_md>" not in user
+    assert verifier.call_count == 0
+    assert len(pipeline.published) == 1
+
+
+def test_snapshot_path_review_without_a_reflection_pass_still_fails_closed() -> None:
+    pipeline = _BoundPipeline(ReviewBinding(_V4_REVIEW, "review.system", "v4", "github"))
+    run = ExecuteReviewRun(
+        pipeline, pipeline, pipeline, pipeline, context_filter=_StageSnapshot(_v4_snapshot())
+    )
+
+    with pytest.raises(PolicyError) as raised:
+        asyncio.run(run.execute(RUN_ID))
+
+    assert raised.value.code == PolicyErrorCode.SNAPSHOT_INTEGRITY_ERROR
+    assert "Reflection pass is required" in raised.value.message
+    assert pipeline.contexts == []
+    assert pipeline.published == []
+
+
+@pytest.mark.parametrize(
+    "binding",
+    [
+        ReviewBinding(_V4_REVIEW, "review.system", "v3", "github"),
+        ReviewBinding(_V4_REVIEW, "review.system", "v3", "gitlab"),
+    ],
+    ids=["v3", "v3-gitlab"],
+)
+def test_legacy_review_never_gets_the_stage_snapshot(binding: ReviewBinding) -> None:
+    # Even a ready snapshot from the stage stays out of a legacy run's prompt.
+    pipeline = _run_bound(binding, _v4_snapshot())
+
+    [context] = pipeline.contexts
+    assert context.policy_snapshot is None
+    user = PromptBuilder().build_prompt(context).user
+    assert f"<agents_md>\n{_PROVIDER_AGENTS}\n</agents_md>" in user
+    assert "policy-rules" not in user and "Prefer small functions." not in user
+
+
+def test_stage_snapshot_pinning_another_review_prompt_is_refused_before_the_model() -> None:
+    pipeline = _BoundPipeline(ReviewBinding(_V4_REVIEW, "review.system", "v4", "github"))
+    other = _v4_snapshot(review_system_id=UUID("00000000-0000-0000-0000-000000000042"))
+    run = ExecuteReviewRun(
+        pipeline,
+        pipeline,
+        pipeline,
+        pipeline,
+        context_filter=_StageSnapshot(other),
+        reflection_pass=ReflectionPass(FakeVerifierModel({"decisions": []})),
+    )
+
+    with pytest.raises(PolicyError) as raised:
+        asyncio.run(run.execute(RUN_ID))
+
+    assert raised.value.code == PolicyErrorCode.SNAPSHOT_INTEGRITY_ERROR
+    assert "pins another review prompt" in raised.value.message
+    assert pipeline.contexts == []
+
+
+# F1-8 (#130 R12, #247 ч.3): attribution is repaired before the verifier; no verifier call,
+# no v2 rule allow-list.
+
+
+def _f18_finding(line: int, rule_name: str | None, title: str) -> dict[str, Any]:
+    return {
+        "path": "app/main.py",
+        "line": line,
+        "start_line": None,
+        "severity": "medium",
+        "category": "correctness",
+        "title": title,
+        "body": f"{title} body.",
+        "suggestion": None,
+        "confidence": 0.9,
+        "rule_name": rule_name,
+        "evidence_refs": [{"block_id": MAIN_BLOCK_ID, "start_line": line, "end_line": line}],
+    }
+
+
+def _f18_quoted(finding: dict[str, Any]) -> dict[str, Any]:
+    """The finding with a claim of a custom instruction the run does not have."""
+    return {
+        **finding,
+        "body": f"According to custom instructions in 'No print' (rules): {finding['body']}",
+    }
+
+
+def _f18_published(output: Mapping[str, object]) -> list[dict[str, Any]]:
+    findings = output["findings"]
+    assert isinstance(findings, list)
+    return findings
+
+
+class _F18Processor:
+    async def prepare(self, run_id: UUID) -> GeneratedConventions:
+        return conventions()
+
+
+class _F18Repository:
+    async def get_review_prompt_input(
+        self, run_id: UUID, saved: GeneratedConventions
+    ) -> ReviewPromptInput:
+        return ReviewPromptInput(
+            system="Review carefully.",
+            rules=(),
+            agents_md=None,
+            conventions=RepoConventions((), ()),
+            changed_files=(
+                ChangedFile(
+                    "app/main.py",
+                    "modified",
+                    (DiffLine(10, "added", "x = 1"), DiffLine(11, "added", "y = 2")),
+                ),
+            ),
+            omitted_files=(),
+            policy_snapshot=_make_test_snapshot(),  # rules present, AGENTS.md missing
+        )
+
+
+class _F18Model:
+    def __init__(self, findings: list[dict[str, Any]]) -> None:
+        self.findings = findings
+
+    async def get_pull_request_meta(self, run_id: UUID) -> PullRequestMeta:
+        return PullRequestMeta("Title", None, "u", "b", "m", (), 1, 1, 0, False, False)
+
+    async def draft_review(self, *, context: ReviewContext) -> dict[str, Any]:
+        return {
+            "findings": self.findings,
+            "summary": {"problem": "p.", "done_well": "d.", "effort": "none"},
+        }
+
+
+class _F18Publisher:
+    def __init__(self) -> None:
+        self.outputs: list[Any] = []
+
+    async def execute(self, run_id: UUID, raw_output: Any) -> bool:
+        self.outputs.append(raw_output)
+        return True
+
+
+class _F18Pass:
+    """Captures the candidates; supports the ones whose title is in ``supported``."""
+
+    def __init__(self, supported: frozenset[str] = frozenset()) -> None:
+        self.supported = supported
+        self.seen: list[tuple[str | None, str]] = []
+
+    def max_prompt_tokens(self) -> int | None:
+        return None
+
+    async def verify_recorded(self, *, candidates: Any, context: Any) -> Any:
+        from app.modules.reviews.application.reflection_pass import (
+            VerificationDecision,
+            VerificationRecord,
+        )
+
+        self.seen.extend((c.finding.rule_name, c.finding.body) for c in candidates)
+        decisions = tuple(
+            VerificationDecision(
+                candidate_id=c.candidate_id,
+                status="supported",
+                reason="Confirmed on the diff.",
+                evidence_refs=[
+                    EvidenceRef(
+                        block_id=MAIN_BLOCK_ID, start_line=c.finding.line, end_line=c.finding.line
+                    )
+                ],
+                requirement_refs=[],
+            )
+            if c.finding.title in self.supported
+            else VerificationDecision(
+                candidate_id=c.candidate_id,
+                status="insufficient_context",
+                reason="Not shown.",
+                evidence_refs=[],
+                requirement_refs=[],
+            )
+            for c in candidates
+        )
+        return VerificationRecord(decisions, tuple(c.candidate_id for c in candidates))
+
+
+@pytest.mark.parametrize(
+    "findings",
+    [[], [_f18_finding(99, None, "Off the diff")]],
+    ids=["no-candidates", "all-dropped-before-the-verifier"],
+)
+def test_without_a_verifier_call_the_output_carries_no_v2_rule_allow_list(
+    findings: list[dict[str, Any]],
+) -> None:
+    from app.modules.reviews.application.review_output import VerifiedReviewOutput
+
+    publisher = _F18Publisher()
+    reflection = _F18Pass()
+    pipeline = ExecuteReviewRun(
+        _F18Processor(),
+        _F18Repository(),
+        _F18Model(findings),
+        publisher,
+        reflection_pass=reflection,  # type: ignore[arg-type]
+    )
+
+    assert asyncio.run(pipeline.execute(RUN_ID)) is True
+
+    assert reflection.seen == []
+    [output] = publisher.outputs
+    assert isinstance(output, VerifiedReviewOutput)
+    assert _f18_published(output) == []
+    assert output.allowed_v2_rules is None
+
+
+@pytest.mark.parametrize("supported", [True, False], ids=["supported", "rejected"])
+def test_a_wrong_attribution_is_repaired_before_the_verifier_decides(supported: bool) -> None:
+    from app.modules.reviews.application.review_output import VerifiedReviewOutput
+
+    publisher = _F18Publisher()
+    titles = {"Rules finding"} | ({"Invented finding"} if supported else set())
+    reflection = _F18Pass(frozenset(titles))
+    pipeline = ExecuteReviewRun(
+        _F18Processor(),
+        _F18Repository(),
+        _F18Model(
+            [
+                _f18_finding(10, ".review/rules.md", "Rules finding"),
+                _f18_quoted(_f18_finding(11, None, "Invented finding")),
+            ]
+        ),
+        publisher,
+        reflection_pass=reflection,  # type: ignore[arg-type]
+    )
+
+    assert asyncio.run(pipeline.execute(RUN_ID)) is True
+
+    # The v2 parse refuses any other rule name, so the wrong attribution is the body's claim
+    # of a rule the run does not have: the verifier sees the candidate without it.
+    assert reflection.seen == [
+        (".review/rules.md", "Rules finding body."),
+        (None, "Invented finding body."),
+    ]
+    [output] = publisher.outputs
+    assert isinstance(output, VerifiedReviewOutput)
+    assert output.allowed_v2_rules == frozenset({".review/rules.md"})
+    published = [(f["title"], f["rule_name"]) for f in _f18_published(output)]
+    if supported:
+        assert published == [
+            ("Rules finding", ".review/rules.md"),
+            ("Invented finding", None),
+        ]
+        assert output.dropped_findings == ()
+    else:
+        assert published == [("Rules finding", ".review/rules.md")]
+        from app.modules.reviews.application.review_output import DroppedCandidateRecord
+
+        [dropped] = output.dropped_findings
+        assert isinstance(dropped, DroppedCandidateRecord)
+        assert dropped.drop_reason == "insufficient_context"
+        assert dropped.position == 1
+        assert dropped.finding.rule_name is None  # type: ignore[union-attr]
+
+
+def _snapshot_publication_candidate(
+    title: str, *, rule_name: str | None = None, evidence_line: int = 10
+) -> dict[str, Any]:
+    return {
+        "path": "app/main.py",
+        "line": 10,
+        "start_line": None,
+        "severity": "high",
+        "category": "correctness",
+        "title": title,
+        "body": "This operation can corrupt stored data.",
+        "suggestion": None,
+        "confidence": 0.9,
+        "rule_name": rule_name,
+        "evidence_refs": [
+            {"block_id": MAIN_BLOCK_ID, "start_line": evidence_line, "end_line": evidence_line}
+        ],
+    }
+
+
+def _publish_snapshot_candidates(
+    findings: list[dict[str, Any]],
+    decisions_by_title: dict[str, dict[str, Any]],
+    *,
+    snapshot: PolicySnapshot | None = None,
+    rules: tuple[ReviewRule, ...] = (),
+    severity_threshold: SeverityThresholdValue = "all",
+) -> tuple[VerifiedReviewOutput, list[str]]:
+    published: list[VerifiedReviewOutput] = []
+    verifier_titles: list[str] = []
+
+    class Processor:
+        async def prepare(self, run_id: UUID) -> GeneratedConventions:
+            return conventions()
+
+    class Repository:
+        async def get_review_prompt_input(
+            self, run_id: UUID, saved: GeneratedConventions
+        ) -> ReviewPromptInput:
+            return ReviewPromptInput(
+                system="Review carefully.",
+                rules=rules,
+                agents_md=None,
+                conventions=RepoConventions((), ()),
+                changed_files=(
+                    ChangedFile("app/main.py", "modified", (DiffLine(10, "added", "save(data)"),)),
+                ),
+                omitted_files=(),
+                policy_snapshot=snapshot or _make_test_snapshot(),
+                severity_threshold=severity_threshold,
+            )
+
+    class Model:
+        async def get_pull_request_meta(self, run_id: UUID) -> PullRequestMeta:
+            return PullRequestMeta(
+                "PR",
+                None,
+                "author",
+                "feature",
+                "main",
+                (),
+                1,
+                1,
+                0,
+                False,
+                False,
+                head_sha="head_216",
+            )
+
+        async def draft_review(self, *, context: ReviewContext) -> dict[str, object]:
+            return {
+                "findings": findings,
+                "summary": {
+                    "problem": "Unverified claim",
+                    "done_well": "Raw praise",
+                    "effort": "none",
+                },
+            }
+
+    class Verifier:
+        async def verify(
+            self,
+            *,
+            system_prompt: str,
+            user_prompt: str,
+            manifest: CallManifest,
+            context: ReviewContext,
+        ) -> dict[str, object]:
+            candidates = re.findall(
+                r'<candidate candidate_id="([^"]+)"[^>]*>\s*<title>([^<]+)</title>', user_prompt
+            )
+            verifier_titles.extend(title for _, title in candidates)
+            return {
+                "decisions": [
+                    {"candidate_id": candidate_id, **decisions_by_title[title]}
+                    for candidate_id, title in candidates
+                ]
+            }
+
+    class Publisher:
+        async def execute(
+            self, run_id: UUID, raw_output: Mapping[str, object] | str | bytes
+        ) -> bool:
+            assert run_id == RUN_ID
+            assert isinstance(raw_output, VerifiedReviewOutput)
+            published.append(raw_output)
+            return True
+
+    pipeline = ExecuteReviewRun(
+        Processor(), Repository(), Model(), Publisher(), reflection_pass=ReflectionPass(Verifier())
+    )
+    assert asyncio.run(pipeline.execute(RUN_ID)) is True
+    assert len(published) == 1
+    return published[0], verifier_titles
+
+
+def test_execute_review_snapshot_never_publishes_insufficient_context() -> None:
+    published, verifier_titles = _publish_snapshot_candidates(
+        [
+            _snapshot_publication_candidate("Confirmed corruption"),
+            _snapshot_publication_candidate("Unknown behavior"),
+        ],
+        {
+            "Confirmed corruption": {
+                "status": "supported",
+                "reason": "The shown operation corrupts data.",
+                "evidence_refs": [{"block_id": MAIN_BLOCK_ID, "start_line": 10, "end_line": 10}],
+                "requirement_refs": [],
+            },
+            "Unknown behavior": {
+                "status": "insufficient_context",
+                "reason": "The helper implementation is absent.",
+                "evidence_refs": [],
+                "requirement_refs": [],
+            },
+        },
+    )
+    assert isinstance(published["findings"], list)
+    assert [finding["title"] for finding in published["findings"]] == ["Confirmed corruption"]
+    assert len(published.dropped_findings) == 1
+    dropped = published.dropped_findings[0]
+    assert not isinstance(dropped, Mapping)
+    assert isinstance(dropped.finding, ReviewFindingV2)
+    assert dropped.finding.title == "Unknown behavior"
+    assert dropped.drop_reason == "insufficient_context"
+    assert dropped.position == 1
+    assert verifier_titles == ["Confirmed corruption", "Unknown behavior"]
+    assert published["summary"] == {
+        "problem": "Identified 1 verified issue (correctness) in the reviewed changes.",
+        "done_well": (
+            "Code analysis and policy verification were completed across all evaluated changes."
+        ),
+        "effort": "medium",
+    }
+
+
+def test_execute_review_snapshot_checks_attribution_after_first_candidate() -> None:
+    published, verifier_titles = _publish_snapshot_candidates(
+        [
+            _snapshot_publication_candidate("Visible evidence"),
+            _snapshot_publication_candidate("Unshown evidence", evidence_line=99),
+        ],
+        {
+            title: {
+                "status": "supported",
+                "reason": "The shown operation corrupts data.",
+                "evidence_refs": [{"block_id": MAIN_BLOCK_ID, "start_line": 10, "end_line": 10}],
+                "requirement_refs": [],
+            }
+            for title in ("Visible evidence", "Unshown evidence")
+        },
+    )
+    assert isinstance(published["findings"], list)
+    assert [finding["title"] for finding in published["findings"]] == ["Visible evidence"]
+    assert len(published.dropped_findings) == 1
+    dropped = published.dropped_findings[0]
+    assert not isinstance(dropped, Mapping)
+    assert isinstance(dropped.finding, ReviewFindingV2)
+    assert dropped.finding.title == "Unshown evidence"
+    assert dropped.drop_reason == "evidence_not_shown"
+    assert dropped.position == 1
+    assert verifier_titles == ["Visible evidence"]
+
+
+@pytest.mark.parametrize(
+    "rule_name", [".review/rules.md", "AGENTS.md", "service-defaults:E2", "service-defaults:FSD1"]
+)
+def test_execute_review_snapshot_preserves_supported_policy_attribution(rule_name: str) -> None:
+    snapshot = _make_test_snapshot()
+    rules: tuple[ReviewRule, ...] = ()
+    if rule_name == ".review/rules.md":
+        requirement = {
+            "block_id": "policy-rules",
+            "start_line": 2,
+            "end_line": 2,
+            "check_id": None,
+        }
+    elif rule_name == "AGENTS.md":
+        snapshot = replace(
+            snapshot,
+            agents=make_policy_document_present(
+                path="AGENTS.md", text="Preserve stored data.\n", blob_oid="a" * 40
+            ),
+        )
+        requirement = {
+            "block_id": "policy-agents",
+            "start_line": 1,
+            "end_line": 1,
+            "check_id": None,
+        }
+    elif rule_name == "service-defaults:E2":
+        rules = (
+            ReviewRule(
+                "Error Handling Standards",
+                ("*.py",),
+                (),
+                ("Handle failures.", "Never swallow errors.", "Retain causes.", "Report failures."),
+            ),
+        )
+        requirement = {
+            "block_id": "service-defaults",
+            "start_line": 2,
+            "end_line": 2,
+            "check_id": "E2",
+        }
+    else:
+        snapshot = replace(
+            snapshot,
+            defaults_checksum="32673f59b6f0f3f96155e4012dcc42718b0814c473cc255c70e69f63660dcb4a",
+        )
+        rules = (
+            ReviewRule(
+                "FSD Layer Boundaries",
+                ("*.py",),
+                (),
+                (
+                    "Keep layers separate.",
+                    "Check imports.",
+                    "Use slices.",
+                    "Hide internals.",
+                    "Use APIs.",
+                ),
+            ),
+        )
+        requirement = {
+            "block_id": "service-defaults",
+            "start_line": 1,
+            "end_line": 1,
+            "check_id": "FSD1",
+        }
+    published, verifier_titles = _publish_snapshot_candidates(
+        [_snapshot_publication_candidate("Policy violation", rule_name=rule_name)],
+        {
+            "Policy violation": {
+                "status": "supported",
+                "reason": "The operation violates the cited policy.",
+                "evidence_refs": [{"block_id": MAIN_BLOCK_ID, "start_line": 10, "end_line": 10}],
+                "requirement_refs": [requirement],
+            }
+        },
+        snapshot=snapshot,
+        rules=rules,
+    )
+    assert isinstance(published["findings"], list)
+    assert len(published["findings"]) == 1
+    assert published["findings"][0]["title"] == "Policy violation"
+    assert published["findings"][0]["rule_name"] == rule_name
+    if rule_name == "AGENTS.md":
+        assert published.allowed_v2_rules == frozenset({".review/rules.md", "AGENTS.md"})
+    else:
+        assert published.allowed_v2_rules == frozenset({".review/rules.md"})
+    assert published.dropped_findings == ()
+    assert verifier_titles == ["Policy violation"]
+
+
+def test_execute_review_snapshot_warning_keeps_supported_low_and_drops_info() -> None:
+    low = _snapshot_publication_candidate("Possible corruption")
+    low["severity"] = "low"
+    info = _snapshot_publication_candidate("Informational risk")
+    info["severity"] = "info"
+    published, verifier_titles = _publish_snapshot_candidates(
+        [low, info],
+        {
+            title: {
+                "status": "supported",
+                "reason": "The shown operation demonstrates this issue.",
+                "evidence_refs": [{"block_id": MAIN_BLOCK_ID, "start_line": 10, "end_line": 10}],
+                "requirement_refs": [],
+            }
+            for title in ("Possible corruption", "Informational risk")
+        },
+        severity_threshold="warning",
+    )
+    assert isinstance(published["findings"], list)
+    assert [(item["title"], item["severity"]) for item in published["findings"]] == [
+        ("Possible corruption", "low")
+    ]
+    assert severity_counts(item["severity"] for item in published["findings"]) == {
+        "critical": 0,
+        "high": 0,
+        "medium": 0,
+        "low": 1,
+        "info": 0,
+    }
+    assert len(published.dropped_findings) == 1
+    dropped = published.dropped_findings[0]
+    assert not isinstance(dropped, Mapping)
+    assert isinstance(dropped.finding, ReviewFindingV2)
+    assert dropped.finding.title == "Informational risk"
+    assert dropped.drop_reason == "severity_threshold"
+    assert dropped.position == 1
+    assert published.severity_threshold == "warning"
+    assert verifier_titles == ["Possible corruption", "Informational risk"]
+    assert published["summary"] == {
+        "problem": "Identified 1 verified issue (correctness) in the reviewed changes.",
+        "done_well": (
+            "Code analysis and policy verification were completed across all evaluated changes."
+        ),
+        "effort": "small",
+    }
