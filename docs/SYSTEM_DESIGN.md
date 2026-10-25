@@ -1073,9 +1073,8 @@ project IDs. Fork получает policy/conventions из TARGET/START, кон�
 проходят обычный pipeline. Доли языков нормируются по байтам распознанных языков;
 неизвестные расширения не входят в знаменатель, нулевой размер не создаёт долю.
 
-До реального выборочного включения нужен фактический merge/rebase dependency #171 и
-проверка на rebased source; произвольный supplied SHA или boolean не доказывает merge.
-#171 остаётся OPEN; synthetic/component proof не является live MR/run/discussion/
+#171 включён через merge 05a96bc4 и rebase на main 063496ec; текущая интеграция
+проходит отдельное ревью. Synthetic/component proof не является live MR/run/discussion/
 redelivery acceptance. Intake остаётся default-off; production rollout не следует из
 наличия кода или локальных фикстур.
 
@@ -1133,8 +1132,9 @@ HTTP-запросом повторяется checkpoint claimed Run; кэшир�
 terminal payload и append-only audit сохраняются по правилам §6.9.
 
 Публикация обсуждений реализована для GitHub и GitLab (#97); installed GitLab
-intake и fast pipeline описаны в §8.1. Payload/placement/marker/outcome изменения
-#171 остаются отдельной dependency; их не следует считать реализованными этим intake.
+intake и fast pipeline описаны в §8.1. Изменения #171 включены: DiffMap задаёт
+диапазоны/rename/context позиции, placement хранится для каждого finding, а перед
+каждым POST проверяется текущий head; installed HTTP сохраняет исходную authority.
 
 Каждый installed Run сохраняет исходный `origin_provider_installation_id`. NULL,
 revoked/replaced origin или несовпадение текущей физической установки закрывает

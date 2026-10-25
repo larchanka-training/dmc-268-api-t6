@@ -80,6 +80,10 @@ def insert_candidate(target: WebhookRunIdentity | None = None) -> RunInsertCandi
         "fast",
         RULE,
         PROMPT,
+        severity_threshold="all",
+        max_comments=10,
+        conventions_prompt_version_id=None,
+        verifier_prompt_version_id=None,
         provider="gitlab",
     )
 

@@ -576,7 +576,7 @@ repository, active rules/prompt и `wait_for_ci=never`. GitHub `ai-review` label
 условия §8.1 к GitLab не применяются. `auto`/`always` не поддерживаются; no-CI sweep,
 CI deliveries и code index остаются GitHub-only; deep/RAG для GitLab не поддерживаются.
 Close/merge и новый head отменяют прежнюю работу; duplicate receipt/run не создаёт
-повторного Run. Admission и selective activation default-off; настройка и #171 gate —
+повторного Run. Admission и selective activation default-off; настройка и live acceptance gate —
 [SECRETS](SECRETS.md), транспорт receipts — [WEBHOOK_WORKER](WEBHOOK_WORKER.md).
 
 GitLab attempt использует original stored credential + generation и immutable MR refs.
@@ -737,7 +737,7 @@ request credential authority. Все provider HTTP и LLM calls — вне DB tr
 | «общий скор / вердикт» | `verdict: blocking \| attention \| clean \| null`, сохраняется backend вместе с coverage; скора нет | §11 (D3, #107) | #34, ui#57, #30 (`expected_verdict`) |
 | Diff Suggestion; предлагаемый diff-fix (карточка техлида) | `suggestion` находки: замена строк `start_line..line`; `null` — замены нет | §9 | #33, ui#57 |
 | запуск по `opened` / `synchronize` | конъюнкция Р-10: стоит лейбл `ai-review` ∧ CI зелёный; `synchronize` отменяет устаревший Run и запускает авто-повтор | §8 (D2) | #11 |
-| «GitHub / GitLab» (карточки Инженера 1 и Инженера 3) | GitHub и installed GitLab intake/fast/publication реализованы; GitLab default-off и live gate #171 сохраняются; Bitbucket не реализован (Р-11) | SD §8.1, §8.4; §2 | #97 |
+| «GitHub / GitLab» (карточки Инженера 1 и Инженера 3) | GitHub и installed GitLab intake/fast/publication реализованы; GitLab default-off и live acceptance gate сохраняются; Bitbucket не реализован (Р-11) | SD §8.1, §8.4; §2 | #97 |
 | LLM Gateway с провайдерами и fallback | LLM Gateway (SD §5): ротация ключей внутри шлюза, fallback-модель по §5.1, strict structured output (D7) | §4.5, §5 | #33 |
 | хранилище секретов | env из CI; перечень и правила — `docs/SECRETS.md` (роль 3) | SD §13, `docs/SECRETS.md` | #35 |
 | инфраструктура DevOps: PostgreSQL и Redis | PostgreSQL 17 + RabbitMQ + Redis (D1) | §14, SD §10, §14 | #35 |

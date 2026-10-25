@@ -81,7 +81,6 @@ from app.modules.reviews.application.run_failures import (
     RunCancelled,
     RunFailure,
 )
-from app.modules.reviews.application.vcs_diff import _is_binary
 
 _LOGGER = logging.getLogger(__name__)
 

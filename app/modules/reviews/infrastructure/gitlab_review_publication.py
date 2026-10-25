@@ -7,6 +7,7 @@ import re
 from collections.abc import Mapping
 from types import MappingProxyType
 from typing import Any, Protocol
+from uuid import UUID
 
 import httpx
 
@@ -15,8 +16,6 @@ from app.modules.integrations.gitlab.infrastructure.run_http import (
     GitLabRunHttpError,
     JsonValue,
 )
-from uuid import UUID
-
 from app.modules.reviews.application.publication_coordinates import gitlab_text_position
 from app.modules.reviews.application.publish_run_review import (
     PublishError,
@@ -55,15 +54,18 @@ def _inline_marker(findings_hash: str, finding: PublishedFinding) -> str:
 
 def _classify(response: GitLabPublicationResponse) -> PublishError:
     status = response.status_code
-    coordinates = _POSITION_REJECTION.search(
-        response.body.decode("utf-8", errors="replace").lower()
-    ) is not None
+    coordinates = (
+        _POSITION_REJECTION.search(response.body.decode("utf-8", errors="replace").lower())
+        is not None
+    )
     if status in (400, 422) and coordinates:
         return PublishError("coordinates", "GitLab rejected review coordinates", http_status=status)
     if status in (401, 403, 404, 409, 422):
         return PublishError("forbidden", "GitLab publication forbidden", http_status=status)
     return PublishError(
-        "retryable", "GitLab publication request failed", http_status=status,
+        "retryable",
+        "GitLab publication request failed",
+        http_status=status,
         retry_after=response.retry_after,
     )
 

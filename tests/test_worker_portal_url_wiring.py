@@ -108,7 +108,9 @@ class Store:
         findings_hash: str,
         moved_to_body_finding_ids: tuple[UUID, ...] = (),
         now: datetime,
+        expected_publication: PublishContext | None = None,
     ) -> str:
+        assert expected_publication is None
         self.assert_transaction(run_id)
         assert (review_id, comment_ids, findings_hash, moved_to_body_finding_ids, now) == (
             55,
@@ -149,6 +151,7 @@ class Store:
         error_code: str | None,
         error_message: str | None,
         now: datetime,
+        expected_publication: PublishContext | None = None,
     ) -> bool:
         raise AssertionError("neither selected success path finishes a failed publication")
 

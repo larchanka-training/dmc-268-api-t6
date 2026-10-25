@@ -51,8 +51,9 @@ from app.modules.reviews.infrastructure.run_action_records import insert_run_act
 from app.modules.reviews.infrastructure.run_notifications import notify_run_state
 from app.modules.reviews.infrastructure.run_origin import active_origin_condition, origin_active
 from app.modules.reviews.infrastructure.run_origin_locks import lock_run_origin_row
-from app.modules.reviews.infrastructure.run_repository import load_publication_diff_map
-from app.modules.reviews.infrastructure.run_repository import _to_published_finding_row
+from app.modules.reviews.infrastructure.run_repository import (
+    load_publication_diff_map,
+)
 from app.modules.reviews.infrastructure.webhook_runs import SqlAlchemyWebhookRunStore
 from app.modules.workspaces.infrastructure.models import Workspace
 
@@ -486,10 +487,10 @@ class SqlAlchemyRunLifecycleStore:
             )
             if original is not None
             else None
-)
+        )
         provider = installation.provider
         diff_map = (
-            await load_publication_diff_map(self._session, run_id) if provider == "gitlab" else None
+            await load_publication_diff_map(self._session, run.id) if provider == "gitlab" else None
         )
         return PublishContext(
             run_id=run.id,

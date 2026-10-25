@@ -47,7 +47,7 @@ Final documentation review and ONE full current-source pytest plus required stat
 remain pending. After those gates, publish an honest draft with the replay/publication
 blockers, rather than initiating another automatic fixture-debug cycle.
 
-#171 remains OPEN and external to this intake scope. Actual dependency merge/rebase,
-selective authorization, real MR/run/discussion/redelivery evidence and current-head
-human approval are required before live acceptance. Default-off configuration remains;
+#171 was merged as 05a96bc4 and is included by the rebase onto main 063496ec.
+Current integration review, selective authorization, real MR/run/discussion/redelivery
+evidence and current-head human approval are required before live acceptance. Default-off configuration remains;
 no deployment, merge, issue closure or all-AC-complete claim follows from these results.

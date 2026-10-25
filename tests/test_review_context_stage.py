@@ -1636,6 +1636,8 @@ def test_publication_settings_leave_conventions_cache_identity_unchanged(
     # Unchanged _stage/Policy fixture archived from baseline commit 1ae74b1.
     assert first.policy_key == "24ab4f16f70b7124f9af6fd8e6000572622dc1f868f1980616b2519fd03c9821"
     assert second.policy_key == "24ab4f16f70b7124f9af6fd8e6000572622dc1f868f1980616b2519fd03c9821"
+
+
 @pytest.mark.parametrize("error_code", ["diff_fetch_failed", "commit_messages_fetch_failed"])
 def test_context_stage_preserves_required_authority_failure_from_real_builder(
     error_code: Literal["diff_fetch_failed", "commit_messages_fetch_failed"],
