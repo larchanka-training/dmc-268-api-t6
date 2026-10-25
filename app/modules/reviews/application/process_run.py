@@ -27,6 +27,7 @@ from app.modules.reviews.application.get_run_file_lines import (
     BlobCacheStatus,
     BlobCacheWriter,
 )
+from app.modules.reviews.application.policy_errors import PolicyError, PolicyErrorCode
 from app.modules.reviews.application.policy_snapshot import PolicySnapshot
 from app.modules.reviews.application.prompt_builder import ReviewRule
 from app.modules.reviews.application.review_path import (
@@ -77,9 +78,11 @@ class RunConventionsInput:
     repository_id: UUID
     conventions_prompt: ActiveConventionsPrompt
     rules: tuple[ReviewRule, ...] = ()
-    snapshot: PolicySnapshot | None = None
     # The review prompt the run pinned; None for a source that reads no pin.
     review_binding: ReviewBinding | None = None
+    # The conventions prompt the run pinned (``Run.conventions_prompt_version_id``); a
+    # snapshot-path run uses it instead of the active row. None when the run pins none.
+    pinned_conventions_prompt: ActiveConventionsPrompt | None = None
 
 
 class RunProcessingRepository(DiffSnapshotRepository, Protocol):
@@ -101,6 +104,9 @@ class ReviewContextStagePort(Protocol):
 
     @property
     def policy_key(self) -> str | None: ...
+
+    @property
+    def snapshot_for_llm(self) -> PolicySnapshot | None: ...
 
     async def begin(self, run_id: UUID) -> None: ...
 
@@ -267,14 +273,19 @@ class ReviewRunProcessor:
             # CONTRACT: read and checked before the diff whenever conventions are configured.
             assert conventions_input is not None
             policy_key = None if self._context_stage is None else self._context_stage.policy_key
+            snapshot = None if self._context_stage is None else self._context_stage.snapshot_for_llm
+            conventions_prompt = conventions_input.conventions_prompt
             extra: dict[str, Any] = {}
             if policy_key is not None:
                 extra["policy_key"] = policy_key
-            if getattr(conventions_input, "snapshot", None) is not None:
-                extra["snapshot"] = conventions_input.snapshot
+            if snapshot is not None:
+                # R1: the snapshot path takes the pinned prompt and the snapshot's AGENTS.md;
+                # a legacy run keeps the active row and the provider read.
+                conventions_prompt = _pinned_conventions_prompt(conventions_input, snapshot)
+                extra["snapshot"] = snapshot
             return await self._conventions.execute(
                 repository_id=conventions_input.repository_id,
-                conventions_prompt=conventions_input.conventions_prompt,
+                conventions_prompt=conventions_prompt,
                 run_id=run_id,
                 changed_files=changed_paths,
                 rules=conventions_input.rules,
@@ -391,3 +402,16 @@ class ReviewRunProcessor:
                     for key, content in blobs:
                         await uow.blob_cache.put(key, content, ttl=BLOB_CACHE_TTL)
                 await uow.commit()
+
+
+def _pinned_conventions_prompt(
+    conventions_input: RunConventionsInput, snapshot: PolicySnapshot
+) -> ActiveConventionsPrompt:
+    """The conventions prompt a snapshot-path run pinned, which its snapshot must name."""
+    pinned = conventions_input.pinned_conventions_prompt
+    if pinned is None or pinned.id != snapshot.prompt_bindings.conventions_id:
+        raise PolicyError(
+            PolicyErrorCode.SNAPSHOT_INTEGRITY_ERROR,
+            "The policy snapshot names another conventions prompt than the run pinned",
+        )
+    return pinned

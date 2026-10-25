@@ -238,12 +238,25 @@ Gates for every task: the four commands in the plan, with DB and vhost `imp130f`
   - `application/conventions_prompt.py` (`:49-54`);
   - `infrastructure/llm/models.py` (`:91-125`);
   - `tests/test_repo_conventions.py`.
+  - as built, also: `tests/test_review_path.py`, `tests/test_snapshot_path_live_pin.py`, and the
+    `Stage` fake of `tests/test_run_processor_context_stage.py` (gains `snapshot_for_llm`).
 - **Tests:**
   - the snapshot path reads `Run.conventions_prompt_version_id`;
   - AGENTS.md comes from the snapshot, with no `fetch_agents_md` call;
   - one manifest and guard, after the fit;
   - legacy keeps the active row and `fetch_agents_md`.
-- **Done when:** [ ] F1-1 green.
+  - as built: the pinned row is read beside the active one
+    (`RunConventionsInput.pinned_conventions_prompt`) and must be the row the snapshot names, else
+    `policy_snapshot_integrity_error`; the never-set `RunConventionsInput.snapshot` goes with the
+    `getattr` (T-c); the snapshot path fits on `send_budget_for` (review route) and counts every
+    conventions manifest block with the pinned counter (`render_repository_file` moves to
+    `conventions.py`, so the count is of what the prompt shows). Through the processor on
+    Postgres, a v4 run sends a failed C1 to the fallback within its two kept slots (E-1) with the
+    pinned prompt and the snapshot AGENTS.md; a v3 run repairs C1 on the primary with the row
+    activated after it was created. Two cases from `main` (#219) in `tests/test_repo_conventions.py`
+    follow the change: the fitted tree count (52k send budget) and the returned AGENTS.md (the
+    snapshot text).
+- **Done when:** [x] F1-1 green.
 
 ### F1-11: R5
 - **Commit:** `feat(reviews): key snapshot-path conventions by repo-conventions-v2 (#130)`

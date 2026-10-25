@@ -4,12 +4,14 @@ from __future__ import annotations
 
 from dataclasses import replace
 
-from app.modules.reviews.application.conventions import ConventionsRequest
+from app.modules.reviews.application.conventions import (
+    ConventionsRequest,
+    render_repository_file,
+)
 from app.modules.reviews.application.prompt_budget import TokenCounter
 from app.modules.reviews.application.prompt_builder import (
     ReviewPrompt,
     render_custom_instructions,
-    xml_attribute,
     xml_container,
     xml_text,
 )
@@ -24,16 +26,11 @@ def build_conventions_prompt(request: ConventionsRequest) -> ReviewPrompt:
     files = []
     visible_paths: set[str] = set()
     for file in request.repo_files:
-        if file.content is None:
+        rendered = render_repository_file(file)
+        if rendered is None:
             continue
         visible_paths.add(file.path)
-        lines = [
-            f'<line n="{number}">{xml_text(line)}</line>'
-            for number, line in enumerate(file.content.splitlines(), start=1)
-        ]
-        if file.omitted_lines:
-            lines.append(f"[{file.omitted_lines} more lines omitted]")
-        files.append(f'<file path="{xml_attribute(file.path)}">\n' + "\n".join(lines) + "\n</file>")
+        files.append(rendered)
     omitted_contexts = max(
         0, len(request.repo_tree) + request.omitted_tree_paths - len(visible_paths)
     )

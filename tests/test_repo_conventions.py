@@ -5,10 +5,11 @@ from __future__ import annotations
 import asyncio
 import os
 from collections.abc import Iterator
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from decimal import Decimal
-from types import TracebackType
+from types import SimpleNamespace, TracebackType
+from typing import Any
 from uuid import UUID, uuid4
 
 import pytest
@@ -42,11 +43,14 @@ from app.modules.reviews.application.conventions_prompt import (
     build_conventions_prompt,
     fit_conventions_request,
 )
+from app.modules.reviews.application.policy_snapshot import PolicySnapshot
+from app.modules.reviews.application.prompt_budget import EstimatedTokenCounter
 from app.modules.reviews.application.prompt_builder import ReviewRule
 from app.modules.reviews.infrastructure.conventions_unit_of_work import (
     SqlAlchemyRepositoryConventionsStore,
     SqlAlchemyRepositoryConventionsUnitOfWork,
 )
+from app.modules.reviews.infrastructure.llm.gateway import HeuristicTokenCounter
 from app.modules.reviews.infrastructure.models import CodeChange, PromptVersion, Run, RunAction
 from app.modules.reviews.infrastructure.run_repository import SqlAlchemyRunRepository
 from app.modules.workspaces.infrastructure.models import Workspace
@@ -1203,7 +1207,8 @@ def test_conventions_execution_with_passed_snapshot_and_agents_md() -> None:
             snapshot=snapshot,
         )
     )
-    assert result.agents_md == agents_content
+    # R1 (#130): the snapshot's normalized AGENTS.md; the provider is not read again.
+    assert result.agents_md == snapshot.agents.text
     assert len(model.calls) == 1
     assert model.calls[0].snapshot is snapshot
 
@@ -1376,6 +1381,222 @@ def test_draft_conventions_counter_v1_matches_transport() -> None:
     body = json.loads(harness.requests[0].content)
     text = body["messages"][1]["content"]
     tree_count = text.count("module_")
-    # 8129 paths fitted under counter/v1 (vs 6095 under counter/v2)
-    assert tree_count == 8129
-    assert tree_count > 6095
+    # 7164 paths fitted under counter/v1 (vs 5370 under counter/v2) in the profile's 52k send
+    # budget (60k input minus 8k output): the snapshot path fits on send_budget_for (#130).
+    assert tree_count == 7164
+    assert tree_count > 5370
+
+
+# ---------- #130 F1-10: snapshot-path conventions (R1, R18) ----------
+
+
+def _conventions_snapshot(agents: str | None, *, max_input_tokens: int = 60_000) -> PolicySnapshot:
+    from app.modules.reviews.application.policy_snapshot import (
+        ExecutionProfile,
+        PromptBindings,
+        make_policy_document_missing,
+        make_policy_document_present,
+    )
+
+    return PolicySnapshot(
+        schema_version=1,
+        snapshot_id=uuid4(),
+        run_id=RUN_ID,
+        repository_id=REPOSITORY_ID,
+        policy_base_sha="c" * 40,
+        rules=make_policy_document_missing(".review/rules.md"),
+        agents=(
+            make_policy_document_missing("AGENTS.md")
+            if agents is None
+            else make_policy_document_present("AGENTS.md", agents, blob_oid="b" * 40)
+        ),
+        ignore_patterns=(),
+        ignore_digest="id_0",
+        parser_profile="rules-markdown/v1",
+        parser_version="4.0.0",
+        matcher_version="review-ignore/v1",
+        limits_version="policy-limits/v1",
+        builtin_exclusions_version="builtin-exclusions/v1",
+        priority_matcher_version="priority-matcher/v1",
+        service_defaults_rule_version_id=uuid4(),
+        defaults_checksum="282d61c2da897152046db742fbd9bfda061ba1c71ce32759d47e042c06b0ff52",
+        prompt_bindings=PromptBindings("cs1", "cs2", "cs3"),
+        execution_profile=replace(
+            ExecutionProfile.fast("m1", "m2"), max_input_tokens=max_input_tokens
+        ),
+        policy_digest="digest_base",
+    )
+
+
+@pytest.mark.parametrize(
+    ("agents", "text", "sha"),
+    [
+        ("Snapshot rules.\r\nSecond line.\r\n", "Snapshot rules.\nSecond line.\n", "b" * 40),
+        (None, None, None),
+    ],
+    ids=["present", "missing"],
+)
+def test_snapshot_path_conventions_take_agents_md_from_the_snapshot_without_a_fetch(
+    agents: str | None, text: str | None, sha: str | None
+) -> None:
+    # R1: fetch_agents_md is the unchecked second read; the snapshot's document replaces it,
+    # in the model input, the cache key and the result.
+    source = FakeSource()
+    store = FakeStore()
+    model = FakeModel(draft())
+
+    result = asyncio.run(
+        GenerateRepoConventions(source, model, FakeUnitOfWorkFactory(store)).execute(
+            repository_id=REPOSITORY_ID,
+            conventions_prompt=ActiveConventionsPrompt(PROMPT_VERSION_ID, "conventions v2"),
+            run_id=RUN_ID,
+            changed_files=("app/main.py",),
+            snapshot=_conventions_snapshot(agents),
+        )
+    )
+
+    assert "agents" not in source.calls
+    assert model.calls[0].agents_md == text
+    assert model.calls[0].agents_md_sha == sha
+    assert store.requested_keys == [(REPOSITORY_ID, sha, PROMPT_VERSION_ID)]
+    assert store.saved[0].agents_md_sha == sha
+    assert result.agents_md == text
+
+
+def test_snapshot_path_conventions_build_no_manifest_and_guard_before_the_fit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # R18: the model fits, then builds the one manifest and guards it; a legacy run keeps
+    # the use case's pre-fit manifest and guard.
+    import app.modules.reviews.application.conventions as conventions_module
+    from app.modules.reviews.application.prompt_budget import (
+        verify_provenance_pre_send_guard as guard,
+    )
+
+    built: list[str] = []
+    guarded: list[str] = []
+    build = conventions_module.build_conventions_manifest
+
+    def spy_build(*args: Any, **kwargs: Any) -> object:
+        built.append("manifest")
+        return build(*args, **kwargs)
+
+    def spy_guard(*args: Any, **kwargs: Any) -> None:
+        guarded.append("guard")
+        guard(*args, **kwargs)
+
+    monkeypatch.setattr(conventions_module, "build_conventions_manifest", spy_build)
+    monkeypatch.setattr(conventions_module, "verify_provenance_pre_send_guard", spy_guard)
+
+    def run(snapshot: PolicySnapshot | None) -> None:
+        asyncio.run(
+            GenerateRepoConventions(
+                FakeSource(), FakeModel(draft()), FakeUnitOfWorkFactory(FakeStore())
+            ).execute(
+                repository_id=REPOSITORY_ID,
+                conventions_prompt=ActiveConventionsPrompt(PROMPT_VERSION_ID, "conventions v2"),
+                run_id=RUN_ID,
+                changed_files=("app/main.py",),
+                snapshot=snapshot,
+            )
+        )
+
+    run(_conventions_snapshot("Use uv.\n"))
+    assert (built, guarded) == ([], [])
+    run(None)
+    assert (built, guarded) == (["manifest"], ["guard"])
+
+
+class _BudgetGateway:
+    """The gateway's prompt window is wide: only the snapshot profile can narrow it."""
+
+    def __init__(self) -> None:
+        self.tasks: list[object] = []
+
+    def max_prompt_tokens(self, engine: object = None) -> int:
+        return 100_000
+
+    def token_counter(self) -> HeuristicTokenCounter:
+        return HeuristicTokenCounter(3.0)
+
+    async def generate(self, task: object, run: object) -> object:
+        self.tasks.append(task)
+        return SimpleNamespace(output=draft())
+
+
+def _gateway_manifest(snapshot: PolicySnapshot | None, request: ConventionsRequest) -> Any:
+    from app.modules.reviews.application.llm import RunCallContext
+    from app.modules.reviews.application.policy_snapshot import CallManifest
+    from app.modules.reviews.infrastructure.llm.models import GatewayConventionsModel
+
+    gateway = _BudgetGateway()
+    run = RunCallContext(
+        run_id=RUN_ID,
+        workspace_id=uuid4(),
+        attempt=1,
+        engine="fast",
+        deadline=datetime(2026, 10, 25, 18, 0, tzinfo=UTC),
+    )
+    model = GatewayConventionsModel(gateway, run)  # type: ignore[arg-type]
+    asyncio.run(model.draft_conventions(request=replace(request, snapshot=snapshot)))
+    (task,) = gateway.tasks
+    manifest = task.base_manifest  # type: ignore[attr-defined]
+    assert isinstance(manifest, CallManifest)
+    return manifest
+
+
+def test_snapshot_conventions_fit_on_the_profile_send_budget_and_count_every_block() -> None:
+    # Plan "Conventions (R18)": the snapshot path fits on send_budget_for (the conventions call
+    # takes the review route), then builds the manifest with the pinned counter.
+    request = ConventionsRequest(
+        system="SYS",
+        rules=(),
+        agents_md=None,
+        repo_tree=tuple(f"app/sub_{index:03d}/module.py" for index in range(100)),
+        repo_files=(),
+        languages={},
+        changed_files=("app/main.py",),
+    )
+    # 8_300 input tokens minus the default 8_000 output tokens: a 300-token send budget.
+    snapshot = _conventions_snapshot(None, max_input_tokens=8_300)
+
+    snapshot_manifest = _gateway_manifest(snapshot, request)
+    legacy_manifest = _gateway_manifest(None, request)
+
+    def tree(manifest: Any) -> int:
+        return sum(block.block_id.startswith("tree-") for block in manifest.blocks)
+
+    fitted = fit_conventions_request(
+        replace(request, snapshot=snapshot), max_prompt_tokens=300, counter=EstimatedTokenCounter()
+    )
+    assert tree(snapshot_manifest) == len(fitted.repo_tree) == 30
+    assert tree(legacy_manifest) == 100
+    assert all(block.tokens is not None for block in snapshot_manifest.blocks)
+    assert all(block.tokens is None for block in legacy_manifest.blocks)
+
+
+def test_snapshot_conventions_manifest_counts_each_block_as_rendered() -> None:
+    from app.modules.reviews.application.conventions import build_conventions_manifest
+
+    request = ConventionsRequest(
+        system="SYS",
+        rules=(ReviewRule(name="Uv", include=(), exclude=(), checks=("Use uv.",)),),
+        agents_md="Snapshot rules.\n",
+        repo_tree=("app/main.py",),
+        repo_files=(RepositoryFile("app/main.py", 6, "x = 1\n"),),
+        languages={},
+        changed_files=("app/main.py",),
+    )
+    snapshot = _conventions_snapshot("Snapshot rules.\n")
+
+    manifest = build_conventions_manifest(
+        request, snapshot=snapshot, counter=EstimatedTokenCounter()
+    )
+
+    assert [(block.block_id, block.tokens) for block in manifest.blocks] == [
+        ("agents-md", 14),
+        ("service-defaults", 34),
+        ("file-0", 20),
+        ("tree-0", 4),
+        ("changed-0", 4),
+    ]

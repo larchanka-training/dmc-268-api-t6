@@ -112,17 +112,23 @@ class GatewayConventionsModel:
             if request.snapshot is not None
             else self._gateway.token_counter()
         )
-        fitted = fit_conventions_request(
-            request,
-            max_prompt_tokens=self._gateway.max_prompt_tokens(self._run.engine),
-            counter=counter,
-        )
+        max_tokens = self._gateway.max_prompt_tokens(self._run.engine)
+        if request.snapshot is not None:
+            # The conventions call takes the review route, so it fits on the review stage's
+            # send budget of the pinned profile (R18).
+            max_tokens = send_budget_for(
+                request.snapshot.execution_profile,
+                stage="review",
+                model_max_prompt_tokens=max_tokens,
+            )
+        fitted = fit_conventions_request(request, max_prompt_tokens=max_tokens, counter=counter)
         base_manifest = build_conventions_manifest(
             fitted,
             run_id=self._run.run_id,
             snapshot=request.snapshot,
             agents_md_sha=request.agents_md_sha,
             recovery_kind="none",
+            counter=counter if request.snapshot is not None else None,
         )
         verify_provenance_pre_send_guard(base_manifest, snapshot=request.snapshot)
         prompt = build_conventions_prompt(fitted)

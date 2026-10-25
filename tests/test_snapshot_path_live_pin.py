@@ -31,6 +31,8 @@ from app.modules.reviews.application.ast_resolution import RevisionTree
 from app.modules.reviews.application.check_runs import RunProviderCheckpoint
 from app.modules.reviews.application.conventions import (
     ConventionsRequest,
+    GenerateRepoConventions,
+    PolicyFilteredConventionsSource,
     RepositoryFile,
     RepositorySnapshot,
 )
@@ -42,6 +44,7 @@ from app.modules.reviews.application.policy_snapshot import (
     make_complete_execution_profile,
 )
 from app.modules.reviews.application.prepare_policy_snapshot import PreparePolicySnapshot
+from app.modules.reviews.application.process_run import ReviewRunProcessor
 from app.modules.reviews.application.prompt_builder import PullRequestMeta, ReviewContext
 from app.modules.reviews.application.reflection_pass import ReflectionPass
 from app.modules.reviews.application.review_context import BuildReviewContext
@@ -52,6 +55,10 @@ from app.modules.reviews.application.review_context_stage import (
 from app.modules.reviews.application.review_output import PublishedFinding
 from app.modules.reviews.application.run_trace import TransactionalRunTrace
 from app.modules.reviews.application.vcs_diff import PullRequestLocator, VcsFile, VcsPullRequest
+from app.modules.reviews.infrastructure.blob_cache import SqlAlchemyBlobCache
+from app.modules.reviews.infrastructure.conventions_unit_of_work import (
+    SqlAlchemyRepositoryConventionsUnitOfWork,
+)
 from app.modules.reviews.infrastructure.llm.gateway import (
     GatewayResult,
     LlmGateway,
@@ -67,16 +74,24 @@ from app.modules.reviews.infrastructure.models import PromptVersion, Run
 from app.modules.reviews.infrastructure.policy_snapshot_unit_of_work import (
     SqlAlchemyPolicySnapshotUnitOfWork,
 )
+from app.modules.reviews.infrastructure.provider_conventions import (
+    ProviderConventionsModel,
+    ProviderRepositoryConventionsSource,
+)
 from app.modules.reviews.infrastructure.run_lifecycle_store import (
     SqlAlchemyRunLifecycleStore,
     SqlAlchemyRunTraceUnitOfWork,
 )
+from app.modules.reviews.infrastructure.run_processing_unit_of_work import (
+    SqlAlchemyRunProcessingUnitOfWork,
+)
 from app.modules.reviews.infrastructure.run_repository import SqlAlchemyRunRepository
 from app.worker import process_review_run
 from tests.portal_postgres import NOW, REPO_A, RULE_A, WS_A, Env, portal_schema
-from tests.test_llm_gateway import PRIMARY, completion
+from tests.test_llm_gateway import FALLBACK, PRIMARY, completion
 from tests.test_prepare_policy_snapshot import Source
 from tests.test_review_context_stage import Parser, Vcs, _checkpoint
+from tests.test_review_prompt_pins_postgres import _bind_v4
 from tests.test_run_prompt_pins_postgres import _packaged, _seed
 from tests.test_run_publication_settings_postgres import _insert, _ready
 
@@ -648,3 +663,242 @@ def test_v3_run_created_before_the_pins_stays_on_the_legacy_path(env: Env) -> No
     assert bindings.is_complete is False
     assert observed.snapshot.is_ready_for_llm is False
     _assert_legacy_run(observed)
+
+
+# ---------- #130 F1-10: conventions on the snapshot path, through the processor ----------
+
+_ROTATED = "A conventions prompt activated after the run was created."
+
+
+class CountingProvider(Provider):
+    """The attempt's provider, counting the AGENTS.md reads the snapshot path must not make."""
+
+    def __init__(self, gateway: LlmGateway, run: RunCallContext) -> None:
+        super().__init__(gateway, run)
+        self.agents_reads = 0
+
+    async def fetch_agents_md(self, repository_id: UUID) -> RepositorySnapshot:
+        self.agents_reads += 1
+        return await super().fetch_agents_md(repository_id)
+
+
+@dataclass(frozen=True)
+class ConventionsObserved:
+    snapshot: PolicySnapshot
+    pinned: tuple[UUID, str]
+    rotated: UUID
+    messages: list[list[dict[str, str]]]
+    models: list[str]
+    tasks: list[StructuredTask]
+    agents_reads: int
+    manifest_rows: list[tuple[str, str]]
+    manifest_responses: list[Any]
+    conventions_keys: list[tuple[UUID, str | None, UUID, str | None]]
+
+
+async def _prepare_conventions(
+    factory: async_sessionmaker[AsyncSession], *, v4: bool
+) -> ConventionsObserved:
+    """``process_review_run``'s processor up to the conventions answer: C1 fails validation."""
+    await _ready(factory)
+    await _seed(factory, _live_assets())
+    async with factory.begin() as session:
+        run_id = await _insert(session)
+    if v4:
+        await _bind_v4(factory, run_id)
+    async with factory.begin() as session:
+        run = await session.get(Run, run_id)
+        assert run is not None and run.conventions_prompt_version_id is not None
+        pinned = await session.get(PromptVersion, run.conventions_prompt_version_id)
+        assert pinned is not None
+        pinned_row = (pinned.id, pinned.content)
+        prompt_version_id, rule_version_id = run.prompt_version_id, run.rule_version_id
+        # A newer conventions row goes live after the run pinned its prompt.
+        await session.execute(
+            text("UPDATE prompt_versions SET is_active=false WHERE key='review.conventions'")
+        )
+        rotated = PromptVersion(
+            key="review.conventions",
+            version=pinned.version + 1,
+            content=_ROTATED,
+            checksum=sha256(_ROTATED.encode()).hexdigest(),
+            is_active=True,
+        )
+        session.add(rotated)
+        await session.flush()
+        rotated_id = rotated.id
+    await _claim(factory, run_id)
+
+    def uow() -> SqlAlchemyPolicySnapshotUnitOfWork:
+        return SqlAlchemyPolicySnapshotUnitOfWork(
+            factory, execution_profile=make_complete_execution_profile()
+        )
+
+    prepare = PreparePolicySnapshot(
+        uow_factory=uow, source_factory=lambda pins: Source(agents=_SNAPSHOT_AGENTS)
+    )
+    trace = TransactionalRunTrace(partial(SqlAlchemyRunTraceUnitOfWork, factory))
+    vcs = LiveVcs(head_sha=_HEAD, files_changed=1)
+    stage = ReviewContextStage(
+        runs=SqlAlchemyRunRepository(factory, allow_unscoped=True),
+        checkpoint=_checkpoint,
+        vcs=vcs,
+        merge_base=vcs,
+        prepare_policy=prepare,
+        context_builder=lambda run: BuildReviewContext(
+            source=Tree(), parser=Parser(), counter=EstimatedTokenCounter()
+        ),
+        trace=trace,
+    )
+    replies = [completion("{not json"), completion(json.dumps(_CONVENTIONS_ANSWER))]
+    requests: list[httpx.Request] = []
+
+    def http(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return replies.pop(0)
+
+    tasks: list[StructuredTask] = []
+    async with httpx.AsyncClient(transport=httpx.MockTransport(http)) as client:
+        gateway = build_gateway(LlmSettings(primary=PRIMARY, fallback=FALLBACK), client, factory)
+        generate = gateway.generate
+
+        async def recording_generate(
+            task: StructuredTask, context: RunCallContext
+        ) -> GatewayResult:
+            tasks.append(task)
+            return await generate(task, context)
+
+        gateway.generate = recording_generate  # type: ignore[method-assign]
+        provider = CountingProvider(
+            gateway,
+            RunCallContext(
+                run_id=run_id,
+                workspace_id=WS_A,
+                attempt=1,
+                engine="fast",
+                deadline=datetime.now(UTC) + timedelta(minutes=10),
+                prompt_version_id=prompt_version_id,
+                rule_version_id=rule_version_id,
+            ),
+        )
+        # The composition of process_review_run (worker.py), stopped after the conventions.
+        await ReviewRunProcessor(
+            SqlAlchemyRunRepository(factory, allow_unscoped=True),
+            provider,
+            SqlAlchemyBlobCache(factory),
+            GenerateRepoConventions(
+                PolicyFilteredConventionsSource(
+                    ProviderRepositoryConventionsSource(provider), stage.excluded
+                ),
+                ProviderConventionsModel(provider),
+                lambda: SqlAlchemyRepositoryConventionsUnitOfWork(factory),
+            ),
+            vcs_provider=vcs,
+            trace=trace,
+            uow_factory=lambda: SqlAlchemyRunProcessingUnitOfWork(factory),
+            context_stage=stage,
+        ).prepare(run_id)
+    snapshot = await prepare.execute(run_id)
+    async with factory() as session:
+        manifest_rows = (
+            await session.execute(
+                text(
+                    "SELECT stage, recovery_kind FROM context_manifests "
+                    "WHERE run_id=:id ORDER BY created_at"
+                ),
+                {"id": run_id},
+            )
+        ).all()
+        manifest_responses = (
+            await session.execute(
+                text(
+                    "SELECT response FROM run_actions WHERE run_id=:id "
+                    "AND tool='context.manifest' ORDER BY index"
+                ),
+                {"id": run_id},
+            )
+        ).scalars()
+        conventions_keys = (
+            await session.execute(
+                text(
+                    "SELECT repository_id, agents_md_sha, prompt_version_id, policy_key "
+                    "FROM repo_conventions ORDER BY created_at"
+                )
+            )
+        ).all()
+    return ConventionsObserved(
+        snapshot=snapshot,
+        pinned=pinned_row,
+        rotated=rotated_id,
+        messages=[json.loads(request.content)["messages"] for request in requests],
+        models=[json.loads(request.content)["model"] for request in requests],
+        tasks=tasks,
+        agents_reads=provider.agents_reads,
+        manifest_rows=[(row[0], row[1]) for row in manifest_rows],
+        manifest_responses=list(manifest_responses),
+        conventions_keys=[tuple(row) for row in conventions_keys],
+    )
+
+
+def _observe_conventions(env: Env, *, v4: bool) -> ConventionsObserved:
+    async def scenario() -> ConventionsObserved:
+        engine = env.engine()
+        try:
+            return await _prepare_conventions(
+                async_sessionmaker(engine, expire_on_commit=False), v4=v4
+            )
+        finally:
+            await engine.dispose()
+
+    return asyncio.run(scenario())
+
+
+@pytest.mark.integration
+def test_v4_conventions_use_the_pinned_prompt_the_snapshot_and_the_reserve(env: Env) -> None:
+    observed = _observe_conventions(env, v4=True)
+
+    assert observed.snapshot.prompt_bindings.review_system_version == "v4"
+    assert observed.snapshot.prompt_bindings.conventions_id == observed.pinned[0]
+    # R1/T-b: the pinned row, not the row activated after the run was created.
+    assert [messages[0]["content"] for messages in observed.messages] == [observed.pinned[1]] * 2
+    # R1: AGENTS.md comes from the snapshot; the provider is never asked for it.
+    assert observed.agents_reads == 0
+    user = observed.messages[0][1]["content"]
+    assert "Only the snapshot path shows this." in user
+    assert "Read by fetch_agents_md." not in user
+    # E-1 (TL-2): two slots kept for the review and the verifier, so the failed C1 goes
+    # straight to the fallback within the reserve; bounded repair is on.
+    [task] = observed.tasks
+    assert (task.operation, task.reserved_calls, task.bounded_repair) == ("conventions", 2, True)
+    assert task.policy_snapshot == observed.snapshot
+    assert observed.models == ["primary-model", "fallback-model"]
+    assert [len(messages) for messages in observed.messages] == [2, 2]
+    assert observed.manifest_rows == [("conventions", "none"), ("conventions", "fallback")]
+    # The manifest blocks are counted with the pinned counter.
+    assert all(response["tokens_by_role"] for response in observed.manifest_responses)
+    assert [key[1:3] for key in observed.conventions_keys] == [
+        (observed.snapshot.agents.blob_oid, observed.pinned[0])
+    ]
+
+
+@pytest.mark.integration
+def test_v3_conventions_keep_the_active_prompt_the_provider_read_and_the_repair(
+    env: Env,
+) -> None:
+    observed = _observe_conventions(env, v4=False)
+
+    assert observed.snapshot.prompt_bindings.review_system_version == "v3"
+    assert [messages[0]["content"] for messages in observed.messages] == [_ROTATED] * 2
+    assert observed.agents_reads == 1
+    assert "Read by fetch_agents_md." in observed.messages[0][1]["content"]
+    [task] = observed.tasks
+    assert (task.operation, task.reserved_calls, task.bounded_repair) == ("conventions", 0, False)
+    assert task.policy_snapshot is None
+    # Legacy repairs C1 on the primary model (its answer and the repair turn appended)
+    # instead of going to the fallback.
+    assert observed.models == ["primary-model", "primary-model"]
+    assert [len(messages) for messages in observed.messages] == [2, 4]
+    assert observed.manifest_rows == []
+    assert [key[1:3] for key in observed.conventions_keys] == [
+        (_PROVIDER_AGENTS_SHA, observed.rotated)
+    ]

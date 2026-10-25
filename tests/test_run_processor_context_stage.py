@@ -22,6 +22,7 @@ from app.modules.reviews.application.get_run_diff import (
 )
 from app.modules.reviews.application.get_run_file_lines import BlobCacheKey
 from app.modules.reviews.application.policy_errors import PolicyError, PolicyErrorCode
+from app.modules.reviews.application.policy_snapshot import PolicySnapshot
 from app.modules.reviews.application.process_run import (
     ReviewRunProcessor,
     RunConventionsInput,
@@ -130,6 +131,8 @@ class Stage:
     events: list[str]
     skip: bool = False
     policy_key: str | None = "1" * 64
+    # The snapshot the review is given: None keeps the run on the legacy path.
+    snapshot_for_llm: PolicySnapshot | None = None
 
     async def begin(self, run_id: UUID) -> None:
         self.events.append("policy loaded")

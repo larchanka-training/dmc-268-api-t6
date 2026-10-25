@@ -412,6 +412,93 @@ def test_a_missing_conventions_prompt_fails_before_the_policy_load_and_the_diff(
     assert github.reads == []
 
 
+# ---------- #130 F1-10: conventions get the pinned prompt and the snapshot (R1, T-c) ----------
+
+_ACTIVE = ActiveConventionsPrompt(UUID(int=51), "active conventions")
+_PINNED = ActiveConventionsPrompt(_CONVENTIONS, "pinned conventions")
+
+
+@dataclass
+class PinnedRepository(BoundRepository):
+    pinned: ActiveConventionsPrompt | None = _PINNED
+
+    async def get_run_conventions_input(self, run_id: UUID) -> RunConventionsInput:
+        return RunConventionsInput(
+            REPOSITORY_ID,
+            _ACTIVE,
+            review_binding=self.binding,
+            pinned_conventions_prompt=self.pinned,
+        )
+
+
+@dataclass
+class RecordingConventions:
+    events: list[str]
+    calls: list[dict[str, object]] = field(default_factory=list)
+
+    async def execute(self, **kwargs: object) -> GeneratedConventions:
+        self.events.append("conventions model")
+        self.calls.append(kwargs)
+        return GeneratedConventions(
+            CachedConventions(REPOSITORY_ID, None, RUN_ID, (), (), {}), None, False
+        )
+
+
+def _pinned_prepare(
+    binding: ReviewBinding,
+    snapshot: PolicySnapshot | None,
+    pinned: ActiveConventionsPrompt | None = _PINNED,
+) -> tuple[RecordingConventions, list[str]]:
+    events: list[str] = []
+    repository = PinnedRepository(events, binding=binding, pinned=pinned)
+    conventions = RecordingConventions(events)
+    asyncio.run(
+        ReviewRunProcessor(
+            repository,
+            None,
+            blob_cache=InMemoryBlobCache(),
+            conventions=cast(GenerateRepoConventions, conventions),
+            vcs_provider=CountingGitHub(),
+            uow_factory=processing_uow(repository),
+            context_stage=Stage(events, snapshot_for_llm=snapshot),
+        ).prepare(RUN_ID)
+    )
+    return conventions, events
+
+
+def test_snapshot_path_conventions_get_the_pinned_prompt_and_the_snapshot() -> None:
+    snapshot = _snapshot(_store())
+
+    conventions, _ = _pinned_prepare(_binding("v4"), snapshot)
+
+    [call] = conventions.calls
+    assert call["conventions_prompt"] == _PINNED
+    assert call["snapshot"] is snapshot
+
+
+def test_legacy_conventions_keep_the_active_prompt_and_no_snapshot() -> None:
+    conventions, _ = _pinned_prepare(_binding("v3"), None)
+
+    [call] = conventions.calls
+    assert call["conventions_prompt"] == _ACTIVE
+    assert "snapshot" not in call
+
+
+@pytest.mark.parametrize(
+    "pinned",
+    [None, ActiveConventionsPrompt(UUID(int=52), "another pinned row")],
+    ids=["no-pin", "another-row"],
+)
+def test_snapshot_path_conventions_refuse_a_pin_the_snapshot_does_not_name(
+    pinned: ActiveConventionsPrompt | None,
+) -> None:
+    with pytest.raises(PolicyError) as raised:
+        _pinned_prepare(_binding("v4"), _snapshot(_store()), pinned)
+
+    assert raised.value.code is _INTEGRITY
+    assert "conventions prompt" in str(raised.value)
+
+
 _META = PullRequestMeta("PR", None, "octo", "feature", "main", (), 1, 1, 0, False, False)
 
 
