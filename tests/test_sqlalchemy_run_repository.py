@@ -780,7 +780,7 @@ def test_prompt_input_without_repository_settings_preserves_the_all_fallback() -
 
     class MissingSettingsSession(FakeSession):
         async def execute(self, statement: Select[Any]) -> FakeResult:
-            return PromptResult([("system", [], None, UUID(int=4), 3, "github")])
+            return PromptResult([("system", [], None, UUID(int=4), "review.system", 3, "github")])
 
     factory = FakeSessionFactory(MissingSettingsSession([]))
     repository = SqlAlchemyReviewPromptRepository(cast(async_sessionmaker[AsyncSession], factory))

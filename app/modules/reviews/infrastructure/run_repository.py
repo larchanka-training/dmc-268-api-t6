@@ -466,6 +466,7 @@ class SqlAlchemyRunRepository:
                 PromptVersion.content,
                 RuleVersion.rules,
                 Run.prompt_version_id,
+                review_prompt.key,
                 review_prompt.version,
                 ProviderInstallation.provider,
             )
@@ -495,7 +496,7 @@ class SqlAlchemyRunRepository:
             repository_id=row[0],
             conventions_prompt=ActiveConventionsPrompt(id=row[1], content=row[2]),
             rules=tuple(review_rule_from_stored(item) for item in row[3]),
-            review_binding=ReviewBinding(row[4], f"v{row[5]}", row[6]),
+            review_binding=ReviewBinding(row[4], row[5], f"v{row[6]}", row[7]),
         )
 
     async def get_run_file_key(self, run_id: UUID, path: str) -> BlobCacheKey | None:
