@@ -1,130 +1,80 @@
 # #214 — verification evidence
 
-**All four gates passed: 6437 tests, zero skipped, two existing deprecation
-warnings in 1532.28 s (25:32), exit 0. Final review: Standards 0; Spec 0.**
-Full verification base: `4faa03dd7accfa161048f584b834b314fa1ab5b6`.
-Final branch base: `f8b13103f908b26e3e210c3f78b125f21bfbdaba`.
-The latter adds exactly one documentation-only commit, touching 44 docs files
-and none of the eight #214 paths. Every non-documentation path is unchanged;
-app/tests/alembic/workflow/rules/review/scripts/dependency/config trees and blobs
-match. All five #214 implementation/operator/test SHA256 hashes also match.
-Static gates passed again after that rebase. The full result therefore verifies
-the final executable/test source without an unnecessary full repeat.
+PR: <https://github.com/larchanka-training/dmc-268-api-t6/pull/302>.
+Remediation main base: `d08e6c9625ac5eb45eae45c229925fa776d82b80`;
+rebased implementation parent: `a3fb8fd726dbd5f89f07fc78f1827879c2fd0dd4`.
+**Current full gates passed: 6475 tests, zero skipped, two existing TestClient
+deprecation warnings in 807.34 s (13:27); all four commands exited 0.**
+Independent agent Standards/Spec checks covered the review-round changes and
+reported no findings. This records that scoped checkpoint, not human approval
+or a blanket correctness claim. Prior full success below is historical; no live
+staging or durability result is inferred.
 
-No GitHub human approval, PR publication, live staging result or durability
-verification is claimed here.
+## Review-round test-first checks
 
-## Final gates and environment
+- Port-zero and U+200B inputs before policy refinement: exit 1, 2 failed with
+  DID NOT RAISE and 53 passed. After the minimal checks plus valid port-65535
+  boundary case: settings 56 passed in 0.49 s.
+- Restored settings/composition: 62 passed in 0.53 s. Relevant use-case/render
+  regression selection including those files: 229 passed in 0.74 s.
+- CI unit collection command:
+  `uv run pytest tests/test_worker_portal_url.py tests/test_worker_portal_url_wiring.py -m "not integration" --strict-markers --collect-only -q`.
+  All 62 collected, with no integration markers or exclusions added.
+- Generic RuntimeError retained intentionally: fixed message names PORTAL_URL
+  without input, avoiding additional diagnostic/privacy branches. Typed fakes
+  remain local to avoid coupling independent feature tests.
 
-| Command | Exit | Result |
+## Independent mutation proofs
+
+Commands below use prefix `uv run pytest`. Every mutation matched exactly one
+site and restored app/worker.py byte for byte in finally before the next check.
+
+| Mutation | Test selection | Exit and observed failure |
+| --- | --- | --- |
+| M1: remove HandleReviewRun run_url kwarg | `tests/test_worker_portal_url_wiring.py -k composed_handle_run_recovery -q` | 1; linked case at line 352: details_url=None versus literal portal Run URL; 1 failed, 2 passed, 3 deselected, 0.49 s |
+| M2: remove PublishRunReview run_url kwarg | `tests/test_worker_portal_url_wiring.py -k composed_publish_review_success -q` | 1; linked case at line 386: same missing-link assertion; 1 failed, 2 passed, 3 deselected, 0.49 s |
+| M12: remove only `from None` in parser-error handler | `tests/test_worker_portal_url.py -k do_not_echo -q` | 1; nfkc-netloc case at line 166 leaks do-not-log-this in formatted traceback; 1 failed, 1 passed, 54 deselected, 0.62 s |
+
+NFKC input is literal `https://alice:do-not-log-this@ui.test／x` (U+FF0F).
+The original ASCII bad-port input remains a separate case; it does not kill M12.
+Restored privacy selection passed both cases; the intervening restored wiring
+suite passed all 6 in 0.46 s. Full restored focused/regression results are above.
+No mutation survives. These are behavioral assertion failures, not setup failures.
+
+## Current full-gate status
+
+| Command | Exit | Actual result |
 | --- | --- | --- |
 | `uv run ruff check .` | 0 | All checks passed |
-| `uv run ruff format --check .` | 0 | 591 files already formatted |
-| `uv run mypy .` | 0 | No issues in 581 source files |
-| `uv run pytest` | 0 | 6437 passed, 0 skipped, 2 warnings, 1532.28 s |
+| `uv run ruff format --check .` | 0 | 598 files already formatted |
+| `uv run mypy .` | 0 | No issues in 588 source files |
+| `uv run pytest` | 0 | 6475 passed, 0 skipped, 2 warnings, 807.34 s |
 
-All individual and aggregate statuses were 0. The exact frozen Linux source
-snapshot had 1165 verified content hashes, including tests, rules, workflows and
-review dataset, excluding host Git metadata, environments, secrets and caches.
-The collection increase from 6032 at CF50 to 6437 reflects upstream additions.
+The frozen source used main base d08e6c9 above plus the review remediation.
+All 1191 snapshot content hashes were verified; the Linux focused regression
+selection passed 229 tests in 1.24 s and full collection confirmed 6475.
 Immutable image:
-`sha256:68e00cb4da254479b1de690dd9d83dd83f017c4e9757c196f3bb6fb484919fb1`.
-Final worker blob: `5ec99217c629a270edd577d495ba9bcd0966d5f2`.
+`sha256:da60f35061775a31c738dd788958eec8a7fee7a293ec5cde5d08873ece8e08a0`.
+Worker blob: `ea950ba905c6c793a620d4fc93a76764a5574bc2`.
+Python 3.13.17 and uv 0.12.11 used locked all-groups dependencies, reusable
+precompiled bytecode and runtime UV_COMPILE_BYTECODE=0. Tests ran without
+exclusions against dedicated PostgreSQL 17/RabbitMQ 4. Disposable PostgreSQL
+fsync was off for functional verification, providing no durability evidence.
+Only the three plan/evidence documents were reconciled after the full result;
+all six implementation/operator/test file hashes remained unchanged.
 
-Environment: official Python 3.13.17, uv 0.12.11, locked all-groups dependencies,
-non-root UID 1000, writable precompiled caches, runtime UV_COMPILE_BYTECODE=0
-and normal Python bytecode reuse. Dedicated PostgreSQL 17 and RabbitMQ 4 used
-the internal Docker network and isolated test vhost. PostgreSQL fsync was off
-only for disposable functional verification; this supplies no durability claim.
-Warnings were existing FastAPI/Starlette TestClient deprecations. Raw logs and
-individual statuses are retained outside Git. Only these three plan/evidence
-documents were reconciled after completion.
+## Historical evidence
 
-## Behavioral and test-first proof
-
-Initial settings RED on `05a96bc422468a570bab3233b11b538eb4a87ff6`:
-29 failed with DID NOT RAISE, 22 passed. Additional empty-port RED: 2 failed,
-50 passed; bracket-suffix junk was already rejected by accessing parsed port.
-GREEN: 56 portal/settings tests passed, including the literal staging base,
-valid path/host/port forms, absent configuration and credential-safe error text.
-The CI unmarked selection passed all 56; original relevant use-case/render
-regressions passed all 167.
-
-After rebasing onto 4faa, no fake or implementation adjustment was needed.
-Restored portal plus relevant use-case regressions passed 223 tests in 0.99 s;
-CI unmarked portal selection passed 56 in 0.63 s. The exact Linux snapshot's
-portal plus upstream parser CPU-cap checks passed all 71 in 6.92 s.
-
-The composition tests execute real use cases, URL factory, renderer and
-transactional trace. Typed fake gateways record emitted views, execute actual
-checkpoints and assert closed UOWs. Linked and absent cases assert the literal
-Run UUID, details URL and terminal summary without external services.
-
-## Independent missing-link mutations
-
-Both final mutations ran on base 4faa and worker blob `5ec99217...` above.
-Each removed exactly one `run_url=run_url` constructor argument, and restored
-app/worker.py byte for byte in finally. The final docs-only rebase leaves that
-worker blob and both test files unchanged.
-
-| Command (prefix `uv run pytest`) | Exit | Actual failure |
-| --- | --- | --- |
-| `tests/test_worker_portal_url_wiring.py -k composed_handle_run_recovery -q` | 1 | linked HandleReviewRun case, line 339; 1 failed, 1 passed, 2 deselected, 1.38 s |
-| `tests/test_worker_portal_url_wiring.py -k composed_publish_review_success -q` | 1 | linked PublishRunReview case, line 371; 1 failed, 1 passed, 2 deselected, 1.03 s |
-
-Both failures were the rendered gateway assertion:
-
-```text
-assert view.details_url == "https://portal.test/runs/11111111-2222-3333-4444-555555555555"
-AssertionError: assert None == 'https://portal.test/runs/11111111-2222-3333-4444-555555555555'
-```
-
-The intervening restored wiring suite passed all 4 tests in 1.33 s; the final
-restored focused suite and full gates passed above. These are missing-link
-failures, not fixture, collection or type failures. No mutation survives.
-Earlier proofs on base 05a worker blob `c44c0a47728ad6befa77e851cc19d9fef6124a92`
-also produced the same independent failures (1.01/0.88 s), restoring exactly;
-that #214 diff was unchanged by the subsequent CF50 rebase.
-
-## Historical experiments, separate from the final pass
-
-| Attempt | Actual result and interpretation |
+| Source/checkpoint | Actual outcome |
 | --- | --- |
-| Original publisher deletion before new tests, base `e6d3077cfcb5584f8af0524ce4a0c8a658b2c5fb` | Complete unexcluded pytest: exit 1, 5685 passed, 1 failed, 0 skips, 2 warnings, 2665.93 s (44:25). Sole failure: leader timing test observed zero first-leader ticks in fixed 0.3/0.5 s waits; no URL assertion. Exact restored isolated retry: exit 0, 1 passed in 2.79 s. This baseline was not green and was not repeated after rebases. |
-| Successful CF50 checkpoint, base `cf50ff359f0a5fdf0ac2aeac9ffdbfeaef4cc9b1` | All four gates exit 0; pytest 6032 passed, 0 skipped, 2 warnings in 1252.80 s (20:52). Standards 0; Spec 0. Superseded by the final result above. |
-| Extra early clean run without services | Interrupted deliberately: exit 2, 943 passed, 272 skipped in 454.37 s; partial only. |
-| Mac / earlier Linux partials | Mac session ended with the agent turn near 4%, without exit status. Linux base 05a stopped deliberately near 34% for rebase. Both partial only. |
-| CF50 Linux with inherited UV_COMPILE_BYTECODE=1 | Stopped near 85% with one rollback-test failure. Isolated controls: flag 1 failed with a 20 s timeout and compilation stderr; flag 0 passed in 14.51 s. Only runtime flag changed for the successful CF50 full run; source/image unchanged. |
+| Original pre-new-test publisher deletion, base `e6d3077cfcb5584f8af0524ce4a0c8a658b2c5fb` | Complete unexcluded pytest exit 1: 5685 passed, 1 leader timing failure, 0 skipped, 2 warnings in 2665.93 s (44:25). No URL assertion failed. Restored isolated leader retry passed in 2.79 s. Never a green baseline. |
+| Intermediate TDD suites on `05a96bc422468a570bab3233b11b538eb4a87ff6` | 29 failed / 22 passed, then empty-port slice 2 failed / 50 passed. These were intermediate suites, not the final 56-test baseline. |
+| Reviewer reproduction of final original 56 tests against pre-validator worker `f8b13103` | Review round 1 reports 33 failed / 23 passed; attributed reviewer observation, distinct from the earlier intermediate TDD runs. |
+| Full implementation checkpoint on `4faa03dd7accfa161048f584b834b314fa1ab5b6` | All four gates exit 0: Ruff passed, format 591 files, mypy 581 source files; pytest 6437 passed, 0 skipped, 2 existing TestClient deprecations in 1532.28 s (25:32). Subsequent f8 commit was docs-only; runtime/test hashes matched and static checks passed again. This predates remediation. |
 
-Partial attempts supply no full-pass evidence. No unrelated rollback test,
-leader timing code, dependency, schema or deployment wiring was changed.
-
-## Prepared publication body
-
-Ready PR publication is next; the user assigns the reviewer. This is prepared
-content, not a published PR or approval.
-
-### What
-
-Reject malformed nonempty PORTAL_URL during worker settings construction and
-protect both real composed check-run publication paths with deterministic tests.
-Document accepted bases and fail-start/rollback behavior in the operator guides.
-
-### Why
-
-A lost URL constructor argument silently removes portal links. Invalid configured
-bases must fail startup before malformed links reach GitHub; absent configuration
-continues to work without a link.
-
-### How to verify
-
-All four commands above passed, including unexcluded pytest with 6437 passed and
-zero skips. Both independent URL-argument deletions fail on missing rendered
-details_url and restore green. Settings RED/GREEN, credential privacy and the
-literal staging base are covered above. Final documentation-only upstream rebase
-preserves executable/test source; static gates pass again. No dependency added.
-
-### Refs
-
-Refs #214. Human current-head review, merge and tech-lead issue closure follow
-publication; live deployment/acceptance are outside this implementation.
+Earlier interrupted/environment-invalid attempts supplied no full-pass evidence.
+Raw logs remain outside Git. The current result supersedes the historical
+checkpoint for remediation. Deployment scripts were inspected:
+ci-cd.yml bundle and rollback reporting, env-file.sh worker allowlist,
+deploy.sh conditional write_app_env_files and rollback.sh ensure_app_env_files.
+No deployment script, live setting, dependency or schema was changed.
