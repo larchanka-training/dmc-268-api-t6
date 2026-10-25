@@ -8,7 +8,10 @@ Covers: byte-exact golden reports for six GraphQL fixture sets (a cycle, a
 milestone found in one repo only, a full sprint milestone, an epic, nested
 pagination, explicit issues across both repos), label stripping/cutting/escaping,
 REF parsing, the one-mode rule, the cycle walk, exit codes 2 and 3, and the argv
-the script hands to `gh`.
+the script hands to `gh`; and `--publish-to`: the marker key, comment paging and
+the first-line match, the page cap, create vs update in the target's own repo, the
+cycle and size guards, 404 vs 403 vs other REST failures, an empty fixture seam,
+and the write log that replaces every write in fixture mode.
 """
 # SYNC: mirrored in dmc-268-{ui,api}-t6/.agents/skills/issue-graph/tests/test_issue_graph.py
 
@@ -18,6 +21,7 @@ import importlib.util
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -62,13 +66,14 @@ def prepend_path(monkeypatch: pytest.MonkeyPatch, bin_dir: Path) -> None:
 
 @pytest.fixture(autouse=True)
 def no_live_gh(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Every test starts with a `gh` that refuses to run and no fixture dir."""
+    """Every test starts with a `gh` that refuses to run, no fixture dir and no write log."""
     guard = fake_gh(
         tmp_path / "guard-bin",
         'import sys\nsys.stderr.write("unexpected gh call\\n")\nsys.exit(97)\n',
     )
     prepend_path(monkeypatch, guard)
     monkeypatch.delenv("ISSUE_GRAPH_FIXTURE_DIR", raising=False)
+    monkeypatch.delenv("ISSUE_GRAPH_WRITE_LOG", raising=False)
 
 
 def run(*args: str, fixtures: Path | None = None) -> subprocess.CompletedProcess[str]:
@@ -727,3 +732,666 @@ def test_live_paging_sends_cursors_and_renders_like_the_fixture_seam(
     epic_query = next(a for a in call if a.startswith("query="))
     assert connections(epic_query) == sorted([("subIssues", "50"), *fragment])
     assert "parent { number repository { nameWithOwner } }" in epic_query
+
+
+# ─── publish: no target, no REST ────────────────────────────────────────────
+FOOTER = (
+    "<sub>Сгенерировано скиллом issue-graph (.agents/skills/issue-graph); "
+    "повторный запуск с тем же охватом обновит этот комментарий.</sub>"
+)
+ISSUES_ARGS = next(args for case, args, _ in CASES if case == "issues")
+ISSUES_MARKER = f"<!-- issue-graph: issues={API}#30,{API}#31,{API}#32,{UI}#9 -->"
+COMMENTS_261 = f"repos/{API}/issues/261/comments"
+# What gh 2.46 prints on stdout (exit 1) for a REST 404.
+NOT_FOUND_REST: dict[str, Any] = {
+    "message": "Not Found",
+    "documentation_url": "https://docs.github.com/rest/issues/comments#list-issue-comments",
+    "status": "404",
+}
+
+
+def case_copy(tmp_path: Path, case: str) -> Path:
+    """A golden case's fixture set copied into tmp_path; a test adds comment pages to it."""
+    target = tmp_path / "fixtures" / case
+    shutil.copytree(FIXTURES / case, target)
+    return target
+
+
+def write_log(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    log = tmp_path / "writes.jsonl"
+    monkeypatch.setenv("ISSUE_GRAPH_WRITE_LOG", str(log))
+    return log
+
+
+def writes(log: Path) -> list[dict[str, Any]]:
+    return [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()]
+
+
+def comment_body(marker: str, report: str) -> str:
+    return f"{marker}\n\n{report}\n{FOOTER}\n"
+
+
+def comment(cid: int, body: str) -> dict[str, Any]:
+    return {
+        "id": cid,
+        "body": body,
+        "html_url": f"https://github.com/{API}/issues/261#issuecomment-{cid}",
+    }
+
+
+def comments_page(
+    first: int, count: int, bodies: dict[int, str] | None = None
+) -> list[dict[str, Any]]:
+    """`count` comments with ids from `first`, oldest first; `bodies` overrides some."""
+    special = bodies or {}
+    return [comment(i, special.get(i, f"Comment {i}.")) for i in range(first, first + count)]
+
+
+def outcome(r: subprocess.CompletedProcess[str]) -> dict[str, Any]:
+    """Publish mode: stderr is exactly one JSON line, the error or the publish result."""
+    assert "Traceback" not in r.stderr
+    assert r.stderr.count("\n") == 1, r.stderr
+    parsed = json.loads(r.stderr)
+    assert isinstance(parsed, dict)
+    return parsed
+
+
+@pytest.mark.parametrize("case,args,code", CASES, ids=[c[0] for c in CASES])
+def test_without_publish_to_nothing_is_listed_or_written(
+    case: str, args: list[str], code: int, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The copied set has no comment pages, so a listing would exit 3; the log stays absent."""
+    log = write_log(tmp_path, monkeypatch)
+    r = run(*args, fixtures=case_copy(tmp_path, case))
+    assert r.stderr == ""
+    assert r.returncode == code
+    assert r.stdout == golden_body(case)
+    assert not log.exists()
+
+
+# ─── publish: one marker comment, created or updated ────────────────────────
+def test_publish_creates_the_comment_when_none_carries_the_marker(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fixtures = case_copy(tmp_path, "issues")
+    write_json(fixtures / "comments-api-261-p1.json", [])
+    write_json(fixtures / "comment-created-api-261.json", comment(9001, "as posted"))
+    log = write_log(tmp_path, monkeypatch)
+
+    r = run(*ISSUES_ARGS, "--publish-to", "261", fixtures=fixtures)
+
+    assert r.returncode == 0, r.stderr
+    assert r.stdout == golden_body("issues")
+    assert outcome(r) == {
+        "published": "created",
+        "url": f"https://github.com/{API}/issues/261#issuecomment-9001",
+    }
+    assert writes(log) == [
+        {
+            "method": "POST",
+            "path": COMMENTS_261,
+            "body": comment_body(ISSUES_MARKER, golden_body("issues")),
+        }
+    ]
+
+
+def test_publish_updates_the_marked_comment_on_page_2(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Full page 1 holds only near misses: the marker quoted, on line 2, followed by
+    two CRs, after a space. Full page 2 has the real one in a CRLF body, so only the
+    match keeps page 3 (absent: exit 3) from being read."""
+    fixtures = case_copy(tmp_path, "issues")
+    near_misses = {
+        110: f"> {ISSUES_MARKER}\n\nquoted",
+        120: f"See below.\n{ISSUES_MARKER}",
+        130: f"{ISSUES_MARKER}\r\r\nold",
+        140: f" {ISSUES_MARKER}\nold",
+    }
+    write_json(fixtures / "comments-api-261-p1.json", comments_page(101, 100, near_misses))
+    write_json(
+        fixtures / "comments-api-261-p2.json",
+        comments_page(201, 100, {250: f"{ISSUES_MARKER}\r\n\nold report"}),
+    )
+    for cid in (*near_misses, 250):
+        write_json(fixtures / f"comment-updated-{cid}.json", comment(cid, "as edited"))
+    log = write_log(tmp_path, monkeypatch)
+
+    r = run(*ISSUES_ARGS, "--publish-to", "api#261", fixtures=fixtures)
+
+    assert r.returncode == 0, r.stderr
+    assert r.stdout == golden_body("issues")
+    assert outcome(r) == {
+        "published": "updated",
+        "url": f"https://github.com/{API}/issues/261#issuecomment-250",
+    }
+    assert writes(log) == [
+        {
+            "method": "PATCH",
+            "path": f"repos/{API}/issues/comments/250",
+            "body": comment_body(ISSUES_MARKER, golden_body("issues")),
+        }
+    ]
+
+
+def test_publish_updates_the_oldest_of_two_marked_comments(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Both matches sit on a full page 1: page 2 (absent: exit 3) is never read."""
+    fixtures = case_copy(tmp_path, "issues")
+    marked = {105: f"{ISSUES_MARKER}\n\nolder", 160: f"{ISSUES_MARKER}\n\nnewer"}
+    write_json(fixtures / "comments-api-261-p1.json", comments_page(101, 100, marked))
+    for cid in marked:
+        write_json(fixtures / f"comment-updated-{cid}.json", comment(cid, "as edited"))
+    log = write_log(tmp_path, monkeypatch)
+
+    r = run(*ISSUES_ARGS, "--publish-to", "261", fixtures=fixtures)
+
+    assert r.returncode == 0, r.stderr
+    assert [(w["method"], w["path"]) for w in writes(log)] == [
+        ("PATCH", f"repos/{API}/issues/comments/105")
+    ]
+    assert outcome(r)["url"] == f"https://github.com/{API}/issues/261#issuecomment-105"
+
+
+def test_publish_ignores_another_scopes_marker(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fixtures = case_copy(tmp_path, "milestone")
+    others = [
+        f"<!-- issue-graph: epic={API}#139 -->",
+        "<!-- issue-graph: milestone=Спринт 50 -->",
+        "<!-- issue-graph: milestone=Спринт -->",
+        f"<!-- issue-graph: issues={API}#5 -->",
+    ]
+    write_json(
+        fixtures / "comments-api-261-p1.json",
+        [comment(cid, f"{m}\n\nreport") for cid, m in enumerate(others, 1)],
+    )
+    for cid in range(1, len(others) + 1):
+        write_json(fixtures / f"comment-updated-{cid}.json", comment(cid, "as edited"))
+    write_json(fixtures / "comment-created-api-261.json", comment(9002, "as posted"))
+    log = write_log(tmp_path, monkeypatch)
+
+    r = run("--milestone", "Спринт 5", "--publish-to", "261", fixtures=fixtures)
+
+    assert r.returncode == 0, r.stderr
+    assert r.stdout == golden_body("milestone")
+    assert writes(log) == [
+        {
+            "method": "POST",
+            "path": COMMENTS_261,
+            "body": comment_body(
+                "<!-- issue-graph: milestone=Спринт 5 -->", golden_body("milestone")
+            ),
+        }
+    ]
+
+
+@pytest.mark.parametrize("marked", [False, True], ids=["created", "updated"])
+@pytest.mark.parametrize(
+    "target,name,repo,number",
+    [("ui#5", "ui-5", UI, 5), ("octo/tools#7", "octo_tools-7", "octo/tools", 7)],
+    ids=["ui", "owner-name"],
+)
+def test_publish_goes_to_the_target_repo(
+    target: str,
+    name: str,
+    repo: str,
+    number: int,
+    marked: bool,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Fixture names come from slug(); the listing and the write both use the target's repo."""
+    fixtures = case_copy(tmp_path, "issues")
+    listed = [comment(42, f"{ISSUES_MARKER}\n\nold report")] if marked else []
+    write_json(fixtures / f"comments-{name}-p1.json", listed)
+    response = {"id": 42, "html_url": f"https://github.com/{repo}/issues/{number}#c"}
+    write_json(
+        fixtures / ("comment-updated-42.json" if marked else f"comment-created-{name}.json"),
+        response,
+    )
+    log = write_log(tmp_path, monkeypatch)
+
+    r = run(*ISSUES_ARGS, "--publish-to", target, fixtures=fixtures)
+
+    assert r.returncode == 0, r.stderr
+    assert r.stdout == golden_body("issues")
+    assert outcome(r) == {
+        "published": "updated" if marked else "created",
+        "url": response["html_url"],
+    }
+    assert writes(log) == [
+        {
+            "method": "PATCH" if marked else "POST",
+            "path": f"repos/{repo}/issues/comments/42"
+            if marked
+            else f"repos/{repo}/issues/{number}/comments",
+            "body": comment_body(ISSUES_MARKER, golden_body("issues")),
+        }
+    ]
+
+
+# ─── publish: errors after the report ───────────────────────────────────────
+def test_cycle_is_reported_but_not_published(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No comment pages in the set: a listing would turn the exit into 3."""
+    log = write_log(tmp_path, monkeypatch)
+    args = next(args for case, args, _ in CASES if case == "cycle")
+    r = run(*args, "--publish-to", "261", fixtures=case_copy(tmp_path, "cycle"))
+    assert r.returncode == 1
+    assert r.stdout == golden_body("cycle")
+    assert outcome(r) == {"error": "not published: the graph has a cycle"}
+    assert not log.exists()
+
+
+def test_publish_target_not_found_in_a_fixture_exits_2(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fixtures = case_copy(tmp_path, "issues")
+    write_json(fixtures / "comments-api-261-p1.json", NOT_FOUND_REST)
+    log = write_log(tmp_path, monkeypatch)
+    r = run(*ISSUES_ARGS, "--publish-to", "261", fixtures=fixtures)
+    assert r.returncode == 2
+    assert r.stdout == golden_body("issues")
+    assert outcome(r) == {"error": "issue api#261 not found"}
+    assert not log.exists()
+
+
+def test_listing_page_that_is_not_an_array_exits_3(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fixtures = case_copy(tmp_path, "issues")
+    write_json(fixtures / "comments-api-261-p1.json", {"message": "Moved", "status": "301"})
+    log = write_log(tmp_path, monkeypatch)
+    r = run(*ISSUES_ARGS, "--publish-to", "261", fixtures=fixtures)
+    assert r.returncode == 3
+    assert r.stdout == golden_body("issues")
+    assert "not a JSON array" in outcome(r)["error"]
+    assert not log.exists()
+
+
+def test_fixture_mode_without_a_write_log_never_writes(tmp_path: Path) -> None:
+    """The listing is served, so only the write itself can refuse; gh stays the guard."""
+    fixtures = case_copy(tmp_path, "issues")
+    write_json(fixtures / "comments-api-261-p1.json", [])
+    write_json(fixtures / "comment-created-api-261.json", comment(9001, "as posted"))
+    r = run(*ISSUES_ARGS, "--publish-to", "261", fixtures=fixtures)
+    assert r.returncode == 3
+    assert r.stdout == golden_body("issues")
+    assert outcome(r) == {"error": "fixture mode cannot publish: set ISSUE_GRAPH_WRITE_LOG"}
+
+
+def test_write_response_without_html_url_exits_3(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fixtures = case_copy(tmp_path, "issues")
+    write_json(fixtures / "comments-api-261-p1.json", [])
+    write_json(fixtures / "comment-created-api-261.json", {"id": 9001})
+    write_log(tmp_path, monkeypatch)
+    r = run(*ISSUES_ARGS, "--publish-to", "261", fixtures=fixtures)
+    assert r.returncode == 3
+    assert r.stdout == golden_body("issues")
+    assert outcome(r)["error"].startswith("unexpected REST response shape: ")
+
+
+# ─── publish: target and marker ─────────────────────────────────────────────
+@pytest.mark.parametrize(
+    "text,key",
+    [
+        ("261", (API, 261)),
+        ("api#261", (API, 261)),
+        ("ui#5", (UI, 5)),
+        ("octo/tools#7", ("octo/tools", 7)),
+    ],
+)
+def test_publish_target_parses(text: str, key: tuple[str, int]) -> None:
+    assert ig.parse_args(["--issues", "api#1", "--publish-to", text]).publish_to == key
+
+
+def test_publish_to_is_optional() -> None:
+    assert ig.parse_args(["--issues", "api#1"]).publish_to is None
+
+
+@pytest.mark.parametrize(
+    "bad", ["x", "0", "-3", "261x", "+5", "٣", "", "api#0", "web#3", "o/..#3", "#3"]
+)
+def test_bad_publish_target_exits_2_before_any_request(bad: str) -> None:
+    r = run("--issues", "api#1", "--publish-to", bad)
+    assert r.returncode == 2
+    assert error_of(r) == (
+        f"bad --publish-to {bad!r}: expected N (an api issue) or REF (api#N, ui#N or OWNER/NAME#N)"
+    )
+
+
+@pytest.mark.parametrize(
+    "args,key",
+    [
+        (["--milestone", "50% a>b --> c"], "milestone=50%25 a%3Eb --%3E c"),
+        (["--milestone", "%3E"], "milestone=%253E"),
+        (["--milestone", "Спринт 5"], "milestone=Спринт 5"),
+        (["--milestone", "Спринт 5", "--repo", API], "milestone=Спринт 5"),
+        (["--epic", "api#139"], f"epic={API}#139"),
+        (["--epic", "octo/tools#3"], "epic=octo/tools#3"),
+        (["--issues", "ui#2", "api#10", "api#9", "api#10"], f"issues={API}#9,{API}#10,{UI}#2"),
+    ],
+)
+def test_marker_names_the_scope(args: list[str], key: str) -> None:
+    """The repo set is not part of a milestone key; `%` then `>` are escaped."""
+    assert ig.marker(ig.parse_args(args)) == f"<!-- issue-graph: {key} -->"
+
+
+def test_marker_does_not_depend_on_issue_order() -> None:
+    first = ig.marker(ig.parse_args(["--issues", "ui#2", "api#1", "api#1"]))
+    second = ig.marker(ig.parse_args(["--issues", "api#1", "ui#2"]))
+    assert first == second == f"<!-- issue-graph: issues={API}#1,{UI}#2 -->"
+
+
+@pytest.mark.parametrize(
+    "typed,canonical,key",
+    [
+        (
+            ["--epic", "Larchanka-Training/DMC-268-API-T6#139"],
+            ["--epic", "api#139"],
+            f"epic={API}#139",
+        ),
+        (
+            ["--issues", "Zeta/X#1", "api#2", "ZETA/x#1"],
+            ["--issues", "api#2", "zeta/x#1"],
+            f"issues={API}#2,zeta/x#1",
+        ),
+        (
+            ["--issues", "A/x#10", "a/x#9"],
+            ["--issues", "a/x#9", "a/x#10"],
+            "issues=a/x#9,a/x#10",
+        ),
+    ],
+    ids=["epic", "issues-dedup", "issues-numeric-order"],
+)
+def test_marker_repo_is_case_insensitive(typed: list[str], canonical: list[str], key: str) -> None:
+    """GitHub repo names ignore case: lowered first, then deduplicated and sorted by Key."""
+    first = ig.marker(ig.parse_args(typed))
+    assert first == ig.marker(ig.parse_args(canonical)) == f"<!-- issue-graph: {key} -->"
+
+
+# ─── publish: live REST transport ───────────────────────────────────────────
+LIVE_MARKER = f"<!-- issue-graph: issues={API}#5 -->"
+LISTED = ([comment(777, f"{LIVE_MARKER}\n\nold report")], 0, "")
+GH_404 = (NOT_FOUND_REST, 1, "gh: Not Found (HTTP 404)\n")
+GH_403 = (
+    {"message": "Resource not accessible by integration", "status": "403"},
+    1,
+    "gh: Resource not accessible by integration (HTTP 403)\n",
+)
+LIST_P1 = ["api", "-X", "GET", f"{COMMENTS_261}?per_page=100&page=1"]
+LIST_P2 = ["api", "-X", "GET", f"{COMMENTS_261}?per_page=100&page=2"]
+PATCH_777 = ["api", "-X", "PATCH", f"repos/{API}/issues/comments/777", "--input", "-"]
+POST_261 = ["api", "-X", "POST", COMMENTS_261, "--input", "-"]
+UPDATED_777 = {
+    "published": "updated",
+    "url": f"https://github.com/{API}/issues/261#issuecomment-777",
+}
+
+
+def live_gh(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, plan: dict[str, Any]) -> Path:
+    """A fake gh answering from `plan`: per method (`graphql` for the report) a queue
+    of (stdout, exit, stderr), served in call order; an exhausted queue exits 98. It
+    logs every argv with its stdin, which it reads only after `--input`."""
+    log = tmp_path / "gh-calls.jsonl"
+    plan_file = tmp_path / "plan.json"
+    write_json(plan_file, plan)
+    body = (
+        "import json, os, sys\n"
+        "argv = sys.argv[1:]\n"
+        "stdin = sys.stdin.read() if '--input' in argv else None\n"
+        "def kind(a):\n"
+        "    return 'graphql' if a[1] == 'graphql' else a[2]\n"
+        f"log = {str(log)!r}\n"
+        "seen = []\n"
+        "if os.path.exists(log):\n"
+        "    with open(log, encoding='utf-8') as f:\n"
+        "        seen = [json.loads(line)['argv'] for line in f]\n"
+        "with open(log, 'a', encoding='utf-8') as f:\n"
+        "    f.write(json.dumps({'argv': argv, 'stdin': stdin}) + '\\n')\n"
+        f"with open({str(plan_file)!r}, encoding='utf-8') as f:\n"
+        "    queue = json.load(f)[kind(argv)]\n"
+        "served = sum(kind(a) == kind(argv) for a in seen)\n"
+        "if served >= len(queue):\n"
+        "    sys.stderr.write('fake gh: queue exhausted\\n')\n"
+        "    sys.exit(98)\n"
+        "out, code, err = queue[served]\n"
+        "sys.stdout.write(json.dumps(out))\n"
+        "sys.stderr.write(err)\n"
+        "sys.exit(code)\n"
+    )
+    prepend_path(monkeypatch, fake_gh(tmp_path / "rest-bin", body))
+    return log
+
+
+@pytest.mark.parametrize(
+    "plan,code,result,sent",
+    [
+        pytest.param(
+            {"GET": [LISTED], "PATCH": [(comment(777, "as edited"), 0, "")]},
+            0,
+            UPDATED_777,
+            [LIST_P1, PATCH_777],
+            id="updated",
+        ),
+        pytest.param(
+            {
+                "GET": [
+                    (comments_page(101, 100), 0, ""),
+                    ([comment(777, f"{LIVE_MARKER}\n\nold report")], 0, ""),
+                ],
+                "PATCH": [(comment(777, "as edited"), 0, "")],
+            },
+            0,
+            UPDATED_777,
+            [LIST_P1, LIST_P2, PATCH_777],
+            id="updated-page-2",
+        ),
+        pytest.param(
+            {"GET": [([], 0, "")], "POST": [(comment(778, "as posted"), 0, "")]},
+            0,
+            {
+                "published": "created",
+                "url": f"https://github.com/{API}/issues/261#issuecomment-778",
+            },
+            [LIST_P1, POST_261],
+            id="created",
+        ),
+        pytest.param(
+            {"GET": [GH_404]}, 2, {"error": "issue api#261 not found"}, [LIST_P1], id="issue-404"
+        ),
+        pytest.param(
+            {"GET": [([], 0, "")], "POST": [GH_404]},
+            2,
+            {"error": "issue api#261 not found"},
+            [LIST_P1, POST_261],
+            id="post-404",
+        ),
+        pytest.param(
+            {"GET": [LISTED], "PATCH": [GH_404]},
+            2,
+            {"error": "comment 777 not found"},
+            [LIST_P1, PATCH_777],
+            id="comment-404",
+        ),
+        pytest.param(
+            {"GET": [LISTED], "PATCH": [GH_403]},
+            3,
+            {
+                "error": "comment 777 carries the marker but this account cannot edit it: "
+                "gh: Resource not accessible by integration (HTTP 403)"
+            },
+            [LIST_P1, PATCH_777],
+            id="patch-403",
+        ),
+        pytest.param(
+            {"GET": [([], 0, "")], "POST": [GH_403]},
+            3,
+            {
+                "error": f"gh api -X POST {COMMENTS_261} exited 1: "
+                "gh: Resource not accessible by integration (HTTP 403)"
+            },
+            [LIST_P1, POST_261],
+            id="post-403",
+        ),
+    ],
+)
+def test_live_publish_argv_stdin_and_status_mapping(
+    plan: dict[str, Any],
+    code: int,
+    result: dict[str, str],
+    sent: list[list[str]],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Every REST argv in order: pages until a match or a short page, then at most one
+    write — a failed PATCH never falls back to a POST."""
+    log = live_gh(
+        tmp_path,
+        monkeypatch,
+        {"graphql": [({"data": {"repository": {"i5": CANNED_ISSUE}}}, 0, "")], **plan},
+    )
+
+    r = run("--issues", "api#5", "--publish-to", "261")
+
+    assert r.returncode == code
+    assert outcome(r) == result
+    assert r.stdout.startswith(
+        "### Граф задач: задачи [api#5](https://github.com/larchanka-training/dmc-268-api-t6/issues/5)\n"
+    )
+    graphql, *calls = [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()]
+    assert graphql["argv"][:2] == ["api", "graphql"]
+    assert [c["argv"] for c in calls] == sent
+    payload = {"body": comment_body(LIVE_MARKER, r.stdout)}
+    assert [None if c["stdin"] is None else json.loads(c["stdin"]) for c in calls] == [
+        None if argv[2] == "GET" else payload for argv in sent
+    ]
+
+
+@pytest.mark.parametrize(
+    "method,body,suffix",
+    [
+        ("GET", None, ""),
+        ("POST", "body", "; the comment may have been written — re-run to update it"),
+        ("PATCH", "body", "; the comment may have been written — re-run to update it"),
+    ],
+    ids=["GET", "POST", "PATCH"],
+)
+def test_rest_call_times_out_after_120_seconds(
+    method: str,
+    body: str | None,
+    suffix: str,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    seen: dict[str, Any] = {}
+
+    def hang(argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        seen.update(kwargs)
+        raise subprocess.TimeoutExpired(argv, kwargs["timeout"])
+
+    monkeypatch.setattr(ig.subprocess, "run", hang)
+    path = f"repos/{API}/issues/261/comments"
+    with pytest.raises(SystemExit) as exit_info:
+        ig.rest(method, path, fixture="unused", missing="unused", body=body)
+    assert exit_info.value.code == 3
+    assert seen["timeout"] == 120
+    assert seen["input"] == (None if body is None else json.dumps({"body": body}))
+    assert json.loads(capsys.readouterr().err) == {
+        "error": f"gh api -X {method} {path} timed out after 120 s{suffix}"
+    }
+
+
+# ─── publish: an empty seam and the page cap ────────────────────────────────
+def test_empty_fixture_dir_is_an_error_not_live_gh(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Set but empty must not fall through to gh: the guard would answer exit 3 too,
+    so only the message tells them apart. GraphQL runs first, so this is request()."""
+    monkeypatch.setenv("ISSUE_GRAPH_FIXTURE_DIR", "")
+    r = run("--issues", "api#1", "--publish-to", "261")
+    assert r.returncode == 3
+    assert error_of(r) == "ISSUE_GRAPH_FIXTURE_DIR is set but empty"
+
+
+@pytest.mark.parametrize("method,body", [("GET", None), ("POST", "body")], ids=["read", "write"])
+def test_empty_fixture_dir_stops_rest_before_gh(
+    method: str,
+    body: str | None,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    log = write_log(tmp_path, monkeypatch)
+    monkeypatch.setenv("ISSUE_GRAPH_FIXTURE_DIR", "")
+    with pytest.raises(SystemExit) as exit_info:
+        ig.rest(method, COMMENTS_261, fixture="unused", missing="unused", body=body)
+    assert exit_info.value.code == 3
+    assert json.loads(capsys.readouterr().err) == {
+        "error": "ISSUE_GRAPH_FIXTURE_DIR is set but empty"
+    }
+    assert not log.exists()
+
+
+def test_marker_search_stops_at_the_page_cap(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The last page under the cap is still searched to its end; a full one without
+    the marker stops the search (page 3 is absent: reading it would be another 3)."""
+    assert (ig.COMMENTS_MAX_PAGES, ig.COMMENTS_PAGE) == (100, 100)
+    monkeypatch.setattr(ig, "COMMENTS_MAX_PAGES", 2)
+    monkeypatch.setenv("ISSUE_GRAPH_FIXTURE_DIR", str(tmp_path))
+    page_2 = tmp_path / "comments-api-261-p2.json"
+    write_json(tmp_path / "comments-api-261-p1.json", comments_page(101, 100))
+
+    write_json(page_2, comments_page(201, 100, {300: LIVE_MARKER}))
+    assert ig.find_marked((API, 261), LIVE_MARKER) == 300
+    write_json(page_2, comments_page(201, 99))
+    assert ig.find_marked((API, 261), LIVE_MARKER) is None
+
+    write_json(page_2, comments_page(201, 100))
+    with pytest.raises(SystemExit) as exit_info:
+        ig.find_marked((API, 261), LIVE_MARKER)
+    assert exit_info.value.code == 3
+    assert json.loads(capsys.readouterr().err) == {
+        "error": "issue api#261: more than 200 comments, the marker search stopped"
+    }
+
+
+# ─── publish: comment size limit ────────────────────────────────────────────
+def test_body_over_the_comment_limit_is_not_published(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The limit counts characters: a Cyrillic body of exactly 65536 (about twice as
+    many bytes) goes out; one character more exits 2 before any request."""
+    calls: list[str] = []
+
+    def fake_rest(
+        method: str, path: str, *, fixture: str, missing: str, body: str | None = None
+    ) -> Any:
+        calls.append(method)
+        return [] if method == "GET" else {"html_url": "https://example.test/c"}
+
+    monkeypatch.setattr(ig, "rest", fake_rest)
+    fill = 65536 - len(comment_body(LIVE_MARKER, ""))
+
+    ig.publish((API, 261), LIVE_MARKER, "я" * fill)
+    assert calls == ["GET", "POST"]
+    assert json.loads(capsys.readouterr().err) == {
+        "published": "created",
+        "url": "https://example.test/c",
+    }
+
+    calls.clear()
+    with pytest.raises(SystemExit) as exit_info:
+        ig.publish((API, 261), LIVE_MARKER, "я" * (fill + 1))
+    assert exit_info.value.code == 2
+    assert calls == []
+    assert json.loads(capsys.readouterr().err) == {
+        "error": "report is 65537 characters, over GitHub's 65536-character comment limit; "
+        "narrow the scope"
+    }
