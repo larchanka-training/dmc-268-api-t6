@@ -662,10 +662,25 @@ NO_RENAME = (
 )
 
 
-def ago(**delta: float) -> str:
+def ago(delta: timedelta) -> str:
     """A createdAt as GitHub writes it, `delta` before now (UTC, whole seconds)."""
-    moment = time.time() - timedelta(**delta).total_seconds()
-    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(moment))
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() - delta.total_seconds()))
+
+
+HOUR = timedelta(hours=1)
+
+
+def dup_55(fields: dict[str, Any], age: timedelta | None) -> dict[str, Any]:
+    """Duplicate #55 with `fields`, created `age` before now; with `age` None its
+    createdAt is the one `fields` gives, else the stand-in's default."""
+    return {"number": 55, **fields, **({} if age is None else {"createdAt": ago(age)})}
+
+
+# How a first run refuses any duplicate: it found no state file, so it adopts nothing.
+FIRST_RUN = (
+    "this run started without a state file, so it is the batch's first run, and a first run "
+    "adopts nothing"
+)
 
 
 @pytest.mark.parametrize(
@@ -769,32 +784,31 @@ def test_the_validation_says_how_to_record_a_refused_issue_that_may_be_the_batch
 
 
 @pytest.mark.parametrize(
-    "dup",
+    "fields,age",
     [
-        {"number": 55, "author": "teammate", "createdAt": "fresh"},
-        {"number": 55, "state": "CLOSED", "createdAt": "fresh"},
-        {"number": 55, "createdAt": "48h"},  # yours and open, but older than a day
-        {"number": 55, "createdAt": None},
-        {"number": 55, "createdAt": "yesterday"},
-        {"number": 55, "createdAt": "2099-01-01T00:00:00Z"},  # past the clock-skew margin
-        {"number": 55, "author": None, "createdAt": "fresh"},
+        ({"author": "teammate"}, HOUR),
+        ({"state": "CLOSED"}, HOUR),
+        ({}, timedelta(hours=48)),  # yours and open, but older than a day
+        ({"createdAt": None}, None),
+        ({"createdAt": "yesterday"}, None),
+        ({"createdAt": "2099-01-01T00:00:00Z"}, None),  # past the clock-skew margin
+        ({"author": None}, HOUR),
     ],
     ids=["teammate", "closed", "older-than-a-day", "no-created-at", "unparsable", "future",
          "no-author"],
 )  # fmt: skip
 def test_a_first_run_offers_no_issue_for_the_state_file(
-    tmp_path: Path, dup: dict[str, Any]
+    tmp_path: Path, fields: dict[str, Any], age: timedelta | None
 ) -> None:
     """Only a fresh open issue of yours may be the batch's own on a first run (from a
     run whose state file is lost); any other is somebody's work — or your older work —
     so renaming the item is the only way out, as before."""
-    created = {"fresh": ago(hours=1), "48h": ago(hours=48)}
-    dup = dict(dup, createdAt=created.get(dup["createdAt"], dup["createdAt"]))
+    dup = dup_55(fields, age)
     r, _ = run(tmp_path, batch(item("a")), cfg=cfg_create(a={"dry_duplicate": dup}))
     assert r.returncode == 4
     assert error(r).endswith(
-        "did not create it — nothing was created; give the item another title or settle that "
-        "issue, then rerun"
+        f"; not adopted: {FIRST_RUN} — nothing was created; give the item another title or "
+        "settle that issue, then rerun"
     )
     assert "this batch's own issue" not in error(r)
     assert not state_path(tmp_path).exists()
@@ -806,7 +820,7 @@ def test_a_first_run_says_how_to_write_the_lost_state_of_a_fresh_issue_of_yours(
     """A new container, another machine or another XDG_CACHE_HOME: the state file of the
     run that created the issue is gone. Renaming would file it a second time, so the stop
     names the whole state file to write — started_at its createdAt — and where."""
-    fresh = ago(hours=1)
+    fresh = ago(HOUR)
     dup = {"number": 55, "createdAt": fresh}
     r, calls = run(tmp_path, batch(item("a"), item("b")), cfg=cfg_create(b={"dry_duplicate": dup}))
     assert r.returncode == 4
@@ -816,9 +830,10 @@ def test_a_first_run_says_how_to_write_the_lost_state_of_a_fresh_issue_of_yours(
     assert error(r) == (
         'item "b": an issue with exactly this title already exists: '
         f"https://github.com/acme/api/issues/55 (OPEN, by octocat, created {fresh}); not "
-        "adopted: this is the first run of the batch, so the batch did not create it — nothing "
-        "was created; if it is this batch's own issue (a run whose state file is lost created "
-        f'it), write {state_path(tmp_path)} as {{"started_at": "{fresh}", "items": {{"b": '
+        "adopted: this run started without a state file, so it is the batch's first run, and a "
+        "first run adopts nothing — nothing was created; if it is this batch's own issue (a run "
+        f"whose state file is lost created it), create {state_path(tmp_path).parent} if it is "
+        f'missing, then write {state_path(tmp_path)} as {{"started_at": "{fresh}", "items": {{"b": '
         '{"url": "https://github.com/acme/api/issues/55", "number": 55, "repo": "acme/api", '
         '"summary": "[x] b"}}} and rerun; do not rename the item, that files it a second '
         "time; only if that issue is other work, give the item another title or settle that "
@@ -827,21 +842,23 @@ def test_a_first_run_says_how_to_write_the_lost_state_of_a_fresh_issue_of_yours(
 
 
 @pytest.mark.parametrize(
-    "dup",
+    "fields,age",
     [
-        {"number": 55, "author": "OctoCat"},  # logins compare without case
-        {"number": 55, "state": "open"},  # the REST listing's spelling
-        {"number": 55, "createdAt_age": {"hours": 23, "minutes": 55}},  # just under a day
+        ({"author": "OctoCat"}, HOUR),  # logins compare without case
+        ({"state": "open"}, HOUR),  # the REST listing's spelling
+        ({}, timedelta(hours=23, minutes=55)),  # just under a day
     ],
     ids=["login-case", "state-case", "under-a-day"],
 )
-def test_the_first_run_hint_at_its_edges(tmp_path: Path, dup: dict[str, Any]) -> None:
-    dup = dict(dup)
-    age = dup.pop("createdAt_age", {"hours": 1})
-    dup["createdAt"] = ago(**age)
+def test_the_first_run_hint_at_its_edges(
+    tmp_path: Path, fields: dict[str, Any], age: timedelta
+) -> None:
+    dup = dup_55(fields, age)
     r, _ = run(tmp_path, batch(item("a")), cfg=cfg_create(a={"dry_duplicate": dup}))
     assert r.returncode == 4
-    assert f'write {state_path(tmp_path)} as {{"started_at": "{dup["createdAt"]}"' in error(r)
+    path = state_path(tmp_path)
+    write = f'write {path} as {{"started_at": "{dup["createdAt"]}"'
+    assert f"create {path.parent} if it is missing, then {write}" in error(r)
     assert error(r).endswith(f"and rerun; {NO_RENAME}")
 
 
@@ -849,16 +866,19 @@ def test_the_state_file_the_first_run_names_resumes_the_batch(tmp_path: Path) ->
     """Written exactly as the hint says, the file loads: the issue is recorded, nothing is
     created, its links are ensured — the hint leads to a resume, not to a duplicate."""
     data = batch(item("a", blocked_by=["#7"]))
-    fresh = ago(hours=1)
+    fresh = ago(HOUR)
     cfg = cfg_create(a={"dry_duplicate": {"number": 55, "createdAt": fresh}})
     first, _ = run(tmp_path, data, cfg=cfg)
     assert first.returncode == 4
     hint = error(first)
-    path = Path(hint.split("write ", 1)[1].split(" as ", 1)[0])
-    assert path == state_path(tmp_path)
+    said = re.search(r"create (\S+) if it is missing, then write (\S+) as ", hint)
+    assert said is not None, hint
+    folder, path = Path(said[1]), Path(said[2])
+    assert path == state_path(tmp_path) and folder == path.parent
+    assert not folder.exists(), "the case the hint is for: no cache directory either"
     start = hint.index('{"started_at"')
     _, end = json.JSONDecoder().raw_decode(hint, start)
-    path.parent.mkdir(parents=True)
+    folder.mkdir(parents=True)  # the directory the hint names, not one the test knows
     path.write_text(hint[start:end], encoding="utf-8")
 
     r, calls = run(tmp_path, data, cfg={})
@@ -934,13 +954,19 @@ def test_who_may_be_the_batchs_own_at_the_edges(
     assert driver.maybe_own(found, started, None) is False, "your login unknown: never"
 
 
-@pytest.mark.parametrize("created", ["fresh", "2099-01-01T00:00:00Z"], ids=["fresh", "future"])
-def test_a_first_run_never_adopts_a_duplicate(tmp_path: Path, created: str) -> None:
+@pytest.mark.parametrize(
+    "fields,age",
+    [({}, HOUR), ({"createdAt": "2099-01-01T00:00:00Z"}, None)],
+    ids=["fresh", "future"],
+)
+def test_a_first_run_never_adopts_a_duplicate(
+    tmp_path: Path, fields: dict[str, Any], age: timedelta | None
+) -> None:
     """Even one that is open, yours and newer than the start: a first run never adopts.
     The state file exists by then, so a fresh one gets the `items.<key>` hint; one
     created past the clock-skew margin is not fresh and gets none."""
     data = batch(item("a"), item("b", parent="@a"), item("c"))
-    late = {"number": 55, "createdAt": ago(hours=1) if created == "fresh" else created}
+    late = dup_55(fields, age)
     r, calls = run(
         tmp_path, data, cfg=cfg_create(a={"number": 1}, b={"code": 4, "duplicate": late})
     )
@@ -948,11 +974,8 @@ def test_a_first_run_never_adopts_a_duplicate(tmp_path: Path, created: str) -> N
     assert created_keys(calls) == ["a", "b"]
     assert all("--adopt-since" not in c["argv"] for c in creates(calls))
     assert recorded(tmp_path) == {"a": entry(API, 1, "a")}
-    assert (
-        "; not adopted: this is the first run of the batch, so the batch did not create it"
-        in error(r)
-    )
-    if created == "fresh":
+    assert f"; not adopted: {FIRST_RUN} — what was created so far is recorded in " in error(r)
+    if age is not None:
         assert error(r).endswith(
             "; if it is this batch's own issue, add it to the state file (`items.b`: url, "
             f"number, repo, summary) and rerun; {NO_RENAME} the same command (recorded items "
@@ -976,9 +999,8 @@ def test_a_duplicate_found_by_the_validation_stops_a_first_run_before_any_create
     assert error(r) == (
         'item "b": an issue with exactly this title already exists: '
         "https://github.com/acme/api/issues/8 (CLOSED, by teammate, created "
-        "2026-10-24T12:05:00Z); not adopted: this is the first run of the batch, so the batch "
-        "did not create it — nothing was created; give the item another title or settle that "
-        "issue, then rerun"
+        f"2026-10-24T12:05:00Z); not adopted: {FIRST_RUN} — nothing was created; give the item "
+        "another title or settle that issue, then rerun"
     )
 
 
