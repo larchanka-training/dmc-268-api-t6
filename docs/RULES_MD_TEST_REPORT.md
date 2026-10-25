@@ -264,7 +264,28 @@ uv run python scripts/parallel_runs_load.py --project dmc163load --runs 5 --llm-
 
 ### ACK на staging
 
-Меряется после мержа PR #250 одним запуском ручного workflow `webhook-ack-load` ([CICD §2.2](CICD.md#22-нагрузка-на-ack-вебхука-staging-163)) в окне, согласованном в #163: время, длительность, кто согласовал и ссылка на согласование записываются во вход `window`, на время окна не запускают deploy, promotion и Rollback. `scripts/webhook_ack_load.py` с GitHub-hosted runner шлёт подписанные `ping` без `installation`: API сохраняет квитанцию и отвечает 202, `webhook-worker` завершает её как `ignored_irrelevant_event` — ни Run, ни запросов к GitHub или LLM. Пределы — до 1000 доставок, до 10 одновременно, тело от 64 B до 64 KiB, не дольше 600 с, fail-fast; в задержке есть WAN и TLS клиента. Цифры (p50/p95/p99/max, статусы, окно) войдут в итоговый docs-PR по AC10.
+Меряется после мержа PR #250 одним запуском ручного workflow `webhook-ack-load` ([CICD §2.2](CICD.md#22-нагрузка-на-ack-вебхука-staging-163)) в окне, согласованном в #163: время, длительность, кто согласовал и ссылка на согласование записываются во вход `window`, на время окна не запускают deploy, promotion и Rollback. `scripts/webhook_ack_load.py` с GitHub-hosted runner шлёт подписанные `ping` без `installation`: API сохраняет квитанцию и отвечает 202, `webhook-worker` завершает её как `ignored_irrelevant_event` — ни Run, ни запросов к GitHub или LLM. Пределы — до 1000 доставок, до 10 одновременно, тело от 64 B до 64 KiB, не дольше 600 с, fail-fast; в задержке есть WAN и TLS новых соединений клиента.
+
+Цифры прогона — из его артефакта `webhook-ack-load.json` и job summary:
+
+| Параметр | Значение |
+| --- | --- |
+| Запуск | [`webhook-ack-load` 40191601647](https://github.com/larchanka-training/dmc-268-api-t6/actions/runs/40191601647), `main` `4faa03dd` |
+| Окно | 2026-10-25 12:05–12:20 UTC, согласовал axyi ([#163](https://github.com/larchanka-training/dmc-268-api-t6/issues/163#issuecomment-6397365478)); итог — [там же](https://github.com/larchanka-training/dmc-268-api-t6/issues/163#issuecomment-6397424512) |
+| Цель | `staging-api.dmc268-t6.axyi.ru` |
+| Нагрузка (UTC) | 12:05:41–12:05:49 |
+| Доставки | 200 замеренных + 5 прогревочных (по одной на соединение) = 205; 5 одновременно; тело 16 384 B |
+| Статусы | 202: 205 из 205, транспортных ошибок 0 |
+| p50 / p95 / p99 / max | 164,62 / 199,79 / 215,05 / 218,0 мс — nearest rank по 200 замеренным доставкам на стороне клиента, разогрев не входит |
+
+**Вердикт.** p95 = 199,79 мс: цель SD §13 (< 500 мс) выполнена; внутренняя цель 200 мс — на пределе (запас 0,21 мс, один прогон).
+
+**Дополнительно — не из артефакта прогона.**
+
+- Цель — course VPS за edge proxy: переменная `STAGING_HOST` не задана, поэтому workflow берёт `https://staging-api.<APP_DOMAIN>`.
+- Пересечений с deploy, promotion и Rollback не было (по списку запусков workflow): последний CI/CD на `main` перед окном закончился в 11:48:32 UTC, Rollback последний раз запускали 2026-10-07.
+- Алерт `ApiHigh5xxRate` за окно не срабатывал — наблюдение axyi в Telegram.
+- Квитанции `loadtest-*` в БД staging не сверялись: доступа к БД staging нет. По построению их 205; завершённые квитанции удаляются через 30 дней.
 
 ## Расхождения со спецификацией
 
