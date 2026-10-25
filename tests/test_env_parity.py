@@ -1,8 +1,8 @@
 """Environment parity contracts (ui#66, part 2).
 
 The local stack bootstraps the schema like staging, the prod UI host is one origin, the landing
-hosts reach the staging landing, hosts without an upstream answer a stub instead of a bare 502,
-and the staging stores are pinned by digest.
+hosts reach the staging landing and its docs, hosts without an upstream answer a stub instead of
+a bare 502, and the staging stores are pinned by digest.
 
 Text contracts over the compose files and the Caddyfile, in the manner of
 test_deploy_staging_services.py: no Docker daemon and no Caddy binary are needed.
@@ -44,15 +44,15 @@ UPSTREAMS = {
     "webhook": ["webhook-prod:8000"],
     "staging-ui": ["api-staging:8000", "ui-staging:8080"],
     "ui": ["api-prod:8000", "ui-prod:8080"],
-    # Public landing: static, no /api/*, no data.
-    "staging": ["landing-staging:8080"],
-    "staging-www": ["landing-staging:8080"],
+    # Public landing and its user docs (ui#173) under /docs: static, no /api/*, no data.
+    "staging": ["docs-staging:8080", "landing-staging:8080"],
+    "staging-www": ["docs-staging:8080", "landing-staging:8080"],
     # EXCEPTION to "a prod host never proxies to staging": apex and www serve the staging landing
-    # until landing-prod exists. Justified and bounded in the "Заглушка" paragraph of
+    # and docs until landing-prod exists. Justified and bounded in the "Заглушка" paragraph of
     # docs/CICD.md §8.2 (static, no /api/*, its buttons go to staging-ui; temporary; never for
     # api, ui or webhook). Do not copy this pattern to other prod hosts.
-    "apex": ["landing-staging:8080"],
-    "www": ["landing-staging:8080"],
+    "apex": ["docs-staging:8080", "landing-staging:8080"],
+    "www": ["docs-staging:8080", "landing-staging:8080"],
 }
 STORE_MAJORS = {"postgres": "17", "rabbitmq": "4", "redis": "8"}
 
@@ -233,8 +233,16 @@ def test_deployed_host_keeps_the_plain_proxy_error(host: str) -> None:
 @pytest.mark.parametrize("host", ["apex", "www", "staging", "staging-www"])
 def test_landing_hosts_proxy_to_the_staging_landing_without_api_or_redirect(host: str) -> None:
     site = _site(host)
+    docs_route = re.search(r"^\t@docs path (.+)\n\thandle @docs \{\n(.*?)\n\t\}", site, re.M | re.S)
+    fallback = re.search(r"^\thandle \{\n(.*?)\n\t\}", site, re.M | re.S)
 
-    assert re.findall(r"reverse_proxy (\S+)", site) == ["landing-staging:8080"]
+    # The user docs (ui#173) are built with basePath /docs: /docs and /docs/* reach docs-staging
+    # with the path unchanged (no handle_path), anything else (/docsx too) the landing.
+    assert docs_route is not None and fallback is not None
+    assert docs_route.group(1) == "/docs /docs/*"
+    assert docs_route.group(2).strip() == "reverse_proxy docs-staging:8080"
+    assert fallback.group(1).strip() == "reverse_proxy landing-staging:8080"
+    assert docs_route.start() < fallback.start()
     # Static landing: no /api/* route, and no redirect to ui.* (the old apex behavior).
     assert "/api/" not in site
     assert not re.search(r"^\tredir ", site, re.MULTILINE)

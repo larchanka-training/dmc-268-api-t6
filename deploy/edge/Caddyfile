@@ -107,18 +107,32 @@ ui.{$APP_DOMAIN} {
 	}
 }
 
-# Public landing (larchanka-training/dmc-268-ui-t6#91), deployed by the UI repo as
-# landing-staging. The landing is static: no /api/* route.
+# Public landing (larchanka-training/dmc-268-ui-t6#91) and its user docs (#173), both deployed by
+# the UI repo: /docs and /docs/* go to docs-staging (the docs are built with basePath /docs, so
+# the path goes through unchanged), everything else to landing-staging. Both are static: no /api/*
+# route.
 staging.{$APP_DOMAIN}, staging-www.{$APP_DOMAIN} {
 	import hsts
 	import not_deployed
-	reverse_proxy landing-staging:8080
+	@docs path /docs /docs/*
+	handle @docs {
+		reverse_proxy docs-staging:8080
+	}
+	handle {
+		reverse_proxy landing-staging:8080
+	}
 }
 
-# The main domain shows the staging landing until a prod rollout exists; then these two hosts
-# move to landing-prod:8080.
+# The main domain shows the staging landing and docs until a prod rollout exists; then these two
+# hosts move to the prod landing and docs upstreams.
 {$APP_DOMAIN}, www.{$APP_DOMAIN} {
 	import hsts
 	import not_deployed
-	reverse_proxy landing-staging:8080
+	@docs path /docs /docs/*
+	handle @docs {
+		reverse_proxy docs-staging:8080
+	}
+	handle {
+		reverse_proxy landing-staging:8080
+	}
 }
