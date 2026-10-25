@@ -1,0 +1,253 @@
+# Task list: switching on the policy-snapshot review path (#130, PR F)
+
+The design is in [130-snapshot-path-plan.md](130-snapshot-path-plan.md); this list adds no scope.
+Base: `703c05ec` (C) on `main` `d08e6c96`; Alembic head `20261024_0039`.
+
+- Each task is one Conventional commit whose subject ends with `(#130)`.
+- Test first: write the named test, watch it fail, then write the code. A refactor keeps the existing
+  tests green.
+- **Every F1 task keeps `tests/test_snapshot_path_live_pin.py` (F1-1) green.**
+- ⚑ marks a task with more than 10 edits.
+- Every brief says: never read any `.env`. The repository only flushes; the UoW commits
+  (`.agents/rules/backend.md` §3.3).
+
+Gates for every task: the four commands in the plan, with DB and vhost `imp130f`.
+
+## PR F1: `feat/130-snapshot-path` (dormant)
+
+### F1-0: Plan documents
+- **Commit:** `docs(plans): plan the snapshot path switch (#130)`
+- **Files:** these two files, staged with `git add -f`.
+- **Done when:**
+  - [x] only these two files are committed;
+  - [x] TL-1 to TL-13 are answered;
+  - [x] the coordination comments are posted.
+
+### F1-1: Legacy characterization pin
+- **Commit:** `test(reviews): pin the legacy review path before the switch (#130)`
+- **Files:** new `tests/test_snapshot_path_live_pin.py` (Postgres; reuse the fixtures of
+  `tests/test_run_prompt_pins_postgres.py`).
+- **Test:** a v3-bound run with D pins and a ready snapshot goes through `process_review_run` with the real
+  stage and a recording transport. Assert:
+  - the exact system and user bytes;
+  - the `llm.call` count and request keys;
+  - the run_action tool sequence;
+  - `reserved_calls == 0`, `bounded_repair` off;
+  - the conventions cache key `(repo, agents_md_sha, prompt_version_id, policy_key)`.
+- **Done when:**
+  - [ ] green on `703c05ec`;
+  - [ ] the `context_manifests` row count (0) is added in F1-6.
+
+### F1-2: Path selector ⚑
+- **Commit:** `feat(reviews): choose the review path by the pinned prompt version (#130)`
+- **Files:**
+  - new `app/modules/reviews/application/review_path.py`;
+  - `infrastructure/llm/answers.py` (`:47-48` imports the set);
+  - `application/review_context_stage.py` (`begin` `:400-414`: refusal right after the snapshot, before conventions);
+  - `application/process_run.py` (`:250-266`: refusal before conventions when there is no stage) and
+    `infrastructure/run_repository.py` (`get_run_conventions_input` returns the bound version);
+  - `application/execute_review.py` (`ReviewPromptInput` gets `review_system_version`; re-check);
+  - `infrastructure/review_prompt_repository.py` (select `PromptVersion.version`);
+  - new `tests/test_review_path.py`; `tests/test_review_prompt_pins_postgres.py`.
+- **Tests:**
+  - v3 → legacy, even with a ready snapshot;
+  - v4 + ready → snapshot;
+  - v4 → `policy_snapshot_integrity_error` with 0 `llm.call` (no conventions call either) when: no context stage, NULL pin (D-Q2/Q4),
+    not ready, pins mismatch;
+  - D-1 (a): a stored review-only snapshot with all three run pins → terminal integrity error before any
+    call. Under TL-10 (b): legacy instead.
+- **Done when:** [ ] F1-1 green; [ ] `answers.py` has one source for the v2-contract versions.
+
+### F1-3: Lock 1 behind the selector (R1 review side)
+- **Commit:** `feat(reviews): pass the attempt snapshot to snapshot-path reviews (#130)`
+- **Files:**
+  - `application/review_context_stage.py`: `snapshot_for_llm` and `payload` properties; `run()` keeps the
+    payload, `:514-536`;
+  - `application/execute_review.py`: `ReviewContextFilter` protocol and context assembly `:206-216`;
+  - `tests/test_execute_review.py`.
+- **Tests:**
+  - a fixture `review.system` v4 row gives the user message the snapshot's rules.md and AGENTS.md blocks;
+  - `ReviewPromptInput.agents_md` is ignored on that path;
+  - without a `ReflectionPass` it still raises (`:219-223`; R14 comes in F1-7).
+- **Done when:** [ ] F1-1 green.
+
+### F1-4: R2 render, manifest and fit; P6-4 ⚑
+- **Commit:** `feat(reviews): render the L2-L4 context of the payload (#130)`
+- **Files:**
+  - `application/prompt_builder.py` (`ReviewContext` `:166-177`, `render_input` `:233-262`, `build_manifest` `:351`);
+  - `application/prompt_budget.py` (`fit_review_context` `:440`, `prompt_tokens` `:434`);
+  - `application/execute_review.py`;
+  - new `tests/test_review_context_blocks.py`.
+- **Tests:**
+  - L2–L4 excerpts carry block_id, path, revision and side;
+  - manifest roles are `source_excerpt` and `ast_excerpt`, with `shown_ranges`;
+  - fit drops L4, then L3, then L2, before changed files;
+  - `retrieved` is not rendered while `RETRIEVED_PROMPT_VERSIONS` is empty;
+  - an ignored count appears as a counter, never as a path.
+- **Done when:** [ ] F1-1 green; [ ] IMP#144 is told PR3a can start (with F1-5, F1-6, F1-13).
+
+### F1-5: R10 review, T-a, E-9 ⚑
+- **Commit:** `refactor(reviews): fit, manifest and guard the review once (#130)`
+- **Files:**
+  - `infrastructure/llm/models.py` (`review_with_gateway` `:181-233`, `ReviewReply`);
+  - `infrastructure/llm/gateway.py` (`GatewayResult.accepted_manifest` `:162-170`, `max_prompt_tokens(engine, route)` `:244-247`);
+  - `application/execute_review.py` (drop `:241-273` on the snapshot path; use the reply);
+  - `application/prompt_budget.py` (`send_budget_for` `:147-175`, no `os.environ`);
+  - tests: `tests/test_execute_review.py`, `tests/test_llm_models.py` (or the existing adapter test file).
+- **Tests:**
+  - one `fit_review_context` call per review on the snapshot path;
+  - a repair-accepted answer is attributed against the repair manifest, a fallback answer against the
+    fallback manifest;
+  - `send_budget_for` ignores `LLM_CONTEXT_WINDOW`;
+  - a `Mapping` reply still works.
+- **Done when:** [ ] F1-1 green; [ ] mypy is clean on the fakes.
+
+### F1-6: Manifest persistence, `context.manifest`, E-3 ⚑
+- **Commit:** `feat(reviews): store the manifest of every snapshot-path call (#130)`
+- **Files:**
+  - new `alembic/versions/20261025_0040_context_manifests.py` (down `20261024_0039`);
+  - `infrastructure/models.py` (`ContextManifest`); `application/policy_snapshot.py` (`ManifestBlock` gets
+    `tokens`, `repository_id`, `truncated`);
+  - new port in `application/llm.py` (`ManifestStore`) and `LlmCallRecord` fields;
+  - new `infrastructure/context_manifest_store.py`;
+  - `infrastructure/llm/gateway.py` (write before each send, `:270-383`);
+  - worker wiring;
+  - new `tests/test_context_manifests_postgres.py`; migration tests.
+- **Tests:**
+  - one row and one `context.manifest` action per base, repair or fallback call; a retry reuses the row;
+  - `llm.call` request carries `call_id`, `stage`, `policy_snapshot_id`, `manifest_id`;
+  - a failed write → no provider call;
+  - a `retrieved_excerpt` block (LEFT, `diff_old_sha`, two ranges, `repository_id`) round-trips;
+  - upgrade → downgrade → upgrade;
+  - legacy run → 0 rows (in F1-1).
+- **Done when:** [ ] one Alembic head; [ ] F1-1 green.
+
+### F1-7: R14, verifier window, `llm.verify.manifest_id`, E-2 ⚑
+- **Commit:** `feat(worker): run the reflection pass on snapshot-path reviews (#130)`
+- **Files:**
+  - `app/worker.py` (`attempt_provider_factory` `:709-734`, `AttemptReviewProvider` `:370`, `process_review_run` `:232-284`);
+  - `application/reflection_pass.py` (`:512`, `:621`, `VerifierModel.max_prompt_tokens`);
+  - `infrastructure/llm/models.py` (`GatewayVerifierModel`);
+  - `application/execute_review.py` (`:275-279` warning removed, `:531`);
+  - `infrastructure/llm/gateway.py` or `application/llm.py` (verification response without `reason`);
+  - tests: `tests/test_worker*.py`, `tests/test_reflection_pass.py`.
+- **Tests:**
+  - the composition passes a `ReflectionPass`;
+  - a v4 run makes a verification `llm.call` and `llm.verify` with a non-null `manifest_id`;
+  - the verifier budget equals the verifier route window;
+  - no `reason` in the stored verification response;
+  - a legacy run logs no warning.
+- **Done when:** [ ] F1-1 green.
+
+### F1-8: R12 and #247 p3
+- **Commit:** `fix(reviews): repair attribution before the verifier (#130)`
+- **Files:** `application/execute_review.py` (`:396-415`, `:449-461`); `application/findings_post_processor.py`
+  (`:259-272` reused); `tests/test_execute_review.py`.
+- **Tests:** 0 candidates → `allowed_v2_rules is None`; the verifier receives the repaired `rule_name`.
+- **Done when:** [ ] F1-1 green.
+
+### F1-9: E-1, E-7 (time), E-12
+- **Commit:** `feat(llm): reserve slots and time for later stages on the snapshot path (#130)`
+- **Files:** `infrastructure/llm/models.py` (task construction `:105-124`, `:221-232`); `infrastructure/llm/gateway.py`
+  (time admission near `:259`); `tests/test_llm_gateway*.py`.
+- **Tests:**
+  - snapshot review `reserved_calls=1`, conventions `2` (per TL-2);
+  - the cache-miss chain is C1 → R1 → fallback → V1;
+  - bounded repair is on;
+  - the review is refused (`verification_deadline_exceeded`) when the time left is under its call + 90 s + 10 s;
+  - legacy tasks are unchanged.
+- **Done when:** [ ] F1-1 green.
+
+### F1-10: R18, R1 conventions, T-b, T-c ⚑
+- **Commit:** `feat(reviews): give conventions the pinned prompt and the snapshot (#130)`
+- **Files:**
+  - `infrastructure/run_repository.py` (`get_run_conventions_input` `:457-487`);
+  - `application/process_run.py` (`:250-266`);
+  - `application/conventions.py` (`:341`, `:378-384`);
+  - `application/conventions_prompt.py` (`:49-54`);
+  - `infrastructure/llm/models.py` (`:91-125`);
+  - `tests/test_repo_conventions.py`.
+- **Tests:**
+  - the snapshot path reads `Run.conventions_prompt_version_id`;
+  - AGENTS.md comes from the snapshot, with no `fetch_agents_md` call;
+  - one manifest and guard, after the fit;
+  - legacy keeps the active row and `fetch_agents_md`.
+- **Done when:** [ ] F1-1 green.
+
+### F1-11: R5
+- **Commit:** `feat(reviews): key snapshot-path conventions by repo-conventions-v2 (#130)`
+- **Files:** `application/conventions.py`; `application/review_context_stage.py` (`policy_key` `:362-381`);
+  `tests/test_repo_conventions.py`.
+- **Tests:** the v2 digest (TL-7 components) misses on a legacy row and hits on a repeat; the same policy with a
+  newly tainted rename or copy path misses; a v3 run keeps the old key.
+- **Done when:** [ ] F1-1 green.
+
+### F1-12: R7
+- **Commit:** `feat(reviews): check the policy budget at policy load (#130)`
+- **Files:** `application/review_context_stage.py` (`begin` `:400-414`); `application/prompt_budget.py`
+  (`verify_policy_budget` `:204`); `tests/test_review_context_stage.py`.
+- **Tests:** v4 with more than 12k policy tokens → `policy_prompt_budget_exceeded` at `policy.load`, 0 `llm.call`;
+  the same docs on v3 proceed.
+- **Done when:** [ ] F1-1 green.
+
+### F1-13: R19 and T-d
+- **Commit:** `feat(reviews): count the context stage with the pinned counter (#130)`
+- **Files:** `application/review_context_stage.py` (`:73-77`, `run`); `app/worker.py` (`:544-572` builder takes a
+  counter); `tests/test_review_context_stage.py`, `tests/test_gateway_counter_parity.py`.
+- **Tests:** v4 → `token_counter_for(counter/v2)` in the build and in the trace tokens; v3 → 4-char numbers unchanged.
+- **Done when:** [ ] F1-1 green; [ ] IMP#144 is signalled.
+
+### F1-14: Dormant end-to-end
+- **Commit:** `test(reviews): run a v4-bound review through the worker composition (#130)`
+- **Files:** new `tests/test_snapshot_path_e2e_postgres.py`.
+- **Test:** a fixture v4 row runs through `compose_worker_process`. Expect `policy.load`, then
+  `vcs.fetch_diff`, `context.build`, the conventions `context.manifest` and `llm.call`, the review
+  `context.manifest` and `llm.call`, the verification `context.manifest` and `llm.call`, `llm.verify`,
+  then `llm.review_output` and `review.postprocess`. A retry reuses the pins.
+- **Done when:**
+  - [ ] all gates pass;
+  - [ ] the PR body has the D-2 order, the rollback floor and the D-1 staging query.
+
+## PR F2: `feat/130-snapshot-switch` (on F1; merge only after F1 is deployed)
+
+### F2-1: The switch (R8)
+- **Commit:** `feat(prompts): add review.system.v4 and switch the snapshot path on (#130)`
+- **Files:**
+  - new `review/prompts/review.system.v4.md` (snapshot envelope, `evidence_refs`, no prefix);
+  - `application/policy_snapshot.py` (`PINNED_PROMPT_CHECKSUMS` `:229-233`);
+  - `tests/test_review_prompt_pins_postgres.py:160`; `tests/test_prompt_seeding.py`;
+  - a v4 golden envelope test.
+- **Tests:**
+  - after the seed, v4 is active and new runs pin it;
+  - a v3 run created before the seed stays legacy;
+  - F1-14 passes with the real file.
+- **Done when:**
+  - [ ] gates pass;
+  - [ ] IMP#144 is signalled for PR3b;
+  - [ ] the PR body names the TL-8 query result.
+
+## PR F3: `fix/168-part6-trace` (Refs #168; after #304)
+
+- **F3-1** `fix(reviews): record context.build once per attempt (#130)`.
+  - Drop the step in `TracedReviewPromptRepository` (`run_trace.py:131-174`). The stage's `context.build`
+    writes `context_payloads`.
+  - Edit `overview.json:560`, `:618` and `MONITORING.md:61`.
+  - Test: one `context.build` per attempt, and the payload summary is filtered (P6-2).
+- **F3-2** `fix(reviews): escape diagnostic paths in the trace (#130)`. File: `review_context_stage.py:184`
+  (CONTEXT §9.1). Test: control characters are escaped.
+- **F3-3** `fix(reviews): correct the ignore limit check-run text (#130)`. File: `check_runs.py:55`.
+- **F3-4** `refactor(worker): drop the unused policy source locators (#130)`. File: `worker.py:574`, `:588`,
+  `:621`, `:626`.
+
+## PR F4: `chore/130-verifier-env`
+
+- **F4-1** `chore(deploy): pass the verifier model variables to the worker (#130)`.
+  - Files: `docker-compose.yml:48-64`, `deploy/scripts/env-file.sh:17`, `.github/workflows/ci-cd.yml:993-998`,
+    `docs/SECRETS.md:57`, `:130`, `:138-139`, `docs/CICD.md`.
+  - Test: env-file and workflow tests list the keys, which are passed only when non-empty.
+
+## PR F5: `feat/130-coverage-none` (after #283)
+
+- **F5-1** `feat(reviews): finish an all-unsupported change without model calls (#130)`.
+  - Gated by the selector, on #283's `CoverageStatus.NONE`.
+  - Test: coverage none, 0 `llm.call`, a neutral check-run (CVS:151).
