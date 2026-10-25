@@ -14,7 +14,7 @@
 | База | `main` `22c621ab`; ссылки `file:line` на код приложения в отчёте — по этой базе |
 | PR | этап 1 по #163 |
 | Локально | PostgreSQL 17.11 и RabbitMQ 4.3.6, своя БД и отдельный vhost |
-| CI | обязательный job `Python lint / type / test` (service containers `postgres:17-alpine`, `rabbitmq:4-management-alpine`), шаг «Integration suite (zero skips)», маркер `integration` |
+| CI | после #281 — job `Python integration (k/4)`: 4 шарда по записанным длительностям, у каждого свои service containers `postgres:17-alpine` и `rabbitmq:4-management-alpine`, шаг «Integration tests», маркер `integration`. Обязательный `Python lint / type / test` зависит от шардов и шагом «Integration suite ran once (zero skips)» проверяет, что каждый собранный integration-тест прошёл ровно один раз, без skip и без падений |
 | Изоляция | одна мигрированная схема на модуль; перед каждым сценарием все таблицы, кроме `alembic_version`, очищаются (`TRUNCATE … RESTART IDENTITY CASCADE`) и заполняются тем же seed с фиксированными id, топология очередей пересоздаётся |
 | Время | 24 теста; 103–133 с при load average около 20 (машину делили параллельные сессии). Очистка и seed вместо миграции экономят около 0,8 с на сценарий (0,53–0,69 с против 1,35–1,49 с); остальное время определяется нагрузкой машины, поэтому сравнения «до/после» при одинаковой нагрузке нет. Первая версия файла (19 тестов) — 70 с на свободной машине |
 
@@ -81,8 +81,8 @@
 | Дата | 2026-10-23; мутации повторены 2026-10-24 после rebase |
 | База | `main` `c94f5402`; ссылки `file:line` на код приложения в подразделе — по этой базе. Первый прогон — на `main` `22c621ab`, итоги тестов и мутаций совпали |
 | PR | #248, этап 2 по #163 (AC6): один новый тестовый файл, код приложения не менялся |
-| #230 | тот же файл на голове #230 `fa2f4cfe` (копия через `git archive`): 32 passed, мутации дали тот же итог; #248 вливается после #230 |
-| CI | обязательный job `Python lint / type / test`, шаг `pytest` |
+| #230 | до мержа #230 файл прогнан на снимках его ветки, а не на том, что влилось: на голове `fa2f4cfe` (копия через `git archive`) — 32 passed, мутации дали тот же итог; на голове `af400577`, слитой с `main`, — вместе с тестами prompt builder и reflection pass, 106 passed ([коммент в #230](https://github.com/larchanka-training/dmc-268-api-t6/issues/230#issuecomment-6383917688)). #248 влит раньше #230 (`main` `8398da6c`), файлы не пересекаются. #230 влит rebase-merge, его последний коммит на `main` — `4427ca8a`; на нём файл прошёл в CI `main` ([run 40103283401](https://github.com/larchanka-training/dmc-268-api-t6/actions/runs/40103283401)). Позже #130 (`dc671814`) и #171 (`05a96bc4`) поменяли в файле только сигнатуру fake-verifier и DiffMap фикстуры; тесты и сценарии те же |
+| CI | после #281 — job `Python lint / type / unit`, шаг «Unit tests (zero skips)»; от него зависит обязательный `Python lint / type / test` |
 | Время | 32 теста, около 0,3 с |
 
 **Что доказывают тесты.**
@@ -137,7 +137,7 @@
 | Параметр | Значение |
 | --- | --- |
 | Дата | 2026-10-24 |
-| База | `main` `c94f5402` (содержит #251) |
+| База | `main` `c94f5402` (содержит #251). После мержа #230 сухой прогон повторён на промежуточной голове #252 `624768a9` (поверх `main` `4427ca8a`): числа те же. На влитой голове #252 `0372c4dd` (`main` `f445589a`) его не повторяли; harness (`review/scripts`), подкорпус `test-prs-dataset/rules` и промпты `review/prompts` между этими двумя головами не менялись |
 | PR | #252, этап 2 по #163: AC7 и harness для AC8 |
 | CI | обязательный PR CI, job `Python lint / type / unit`, шаг «Rules sub-corpus»: `validate_dataset.py --root test-prs-dataset/rules --final --profile rules` |
 | Сухой прогон | локально, fake transport, без вызовов LLM и без сети |
@@ -184,7 +184,7 @@ Manifest записывает токены и стоимость каждого 
 
 **От чего отказывается harness.**
 
-- `eval_live.py --policy-arm legacy` (по умолчанию: prompt до #163, без снимка политики) на корпусе с полями плеч — до первого вызова; `valid` и `malicious` — на кейсе без `policy`; recorder — на непустом `--responses-dir`. Шаг валидации ручного workflow `eval-live` отклоняет `corpus=rules` с `policy_arm=legacy`.
+- `eval_live.py --policy-arm legacy` (по умолчанию: prompt до #163, без снимка политики) на корпусе с полями плеч — до первого вызова; `valid` и `malicious` — на кейсе без `policy`; любое плечо, кроме `legacy`, — с `--backend-rules` / `--frontend-rules` для языка, который есть в корпусе, если эти правила дают чексумму (`RuleVersion.from_rules`), отличную от закреплённой у service defaults, до первого вызова; recorder — на непустом `--responses-dir`. Шаг валидации ручного workflow `eval-live` отклоняет `corpus=rules` с `policy_arm=legacy`.
 - `eval_ab.py` — отчёты с разными model, версией prompt, static- или corpus-digest, engine, effective settings или fallback model; capture, который нельзя публиковать; отчёт без этих полей, с нецелыми счётчиками или испорченным usage; одно и то же содержимое отчёта дважды; метку-плечо, не совпадающую с плечом capture.
 
 **Что не проверяется и почему.**
