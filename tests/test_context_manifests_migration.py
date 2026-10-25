@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import os
 from collections.abc import Iterator
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 from alembic.config import Config
@@ -14,6 +14,9 @@ from sqlalchemy.schema import CreateSchema, DropSchema
 
 from alembic import command
 from tests.portal_postgres import RUN_DONE, _seed
+from tests.test_context_manifests_postgres import INSERT_POLICY_SNAPSHOT, policy_snapshot_values
+
+SNAPSHOT_ID = UUID(int=0x5E)
 
 
 @pytest.fixture
@@ -39,12 +42,28 @@ def migration_schema() -> Iterator[Connection]:
         engine.dispose()
 
 
-def _insert(connection: Connection, *, stage: str = "review", recovery: str = "none") -> None:
+def _insert(
+    connection: Connection,
+    *,
+    stage: str = "review",
+    recovery: str = "none",
+    snapshot: UUID | None = SNAPSHOT_ID,
+    without: str | None = None,
+) -> None:
+    values: dict[str, object] = {
+        "rendered_messages_sha256": "1" * 64,
+        "prompt_checksum": "2" * 64,
+        "model_profile_version": "3" * 64,
+    }
+    if without is not None:
+        values[without] = None
     connection.execute(
         text(
             "INSERT INTO context_manifests (id, run_id, attempt, call_id, stage, recovery_kind, "
-            "digest, block_count, input_tokens, blocks) VALUES (:id, :run, 1, :call, :stage, "
-            ":recovery, :digest, 0, 0, '[]')"
+            "policy_snapshot_id, digest, rendered_messages_sha256, prompt_checksum, "
+            "model_profile_version, block_count, input_tokens, blocks) VALUES (:id, :run, 1, "
+            ":call, :stage, :recovery, :snapshot, :digest, :rendered_messages_sha256, "
+            ":prompt_checksum, :model_profile_version, 0, 0, '[]')"
         ),
         {
             "id": uuid4(),
@@ -52,7 +71,9 @@ def _insert(connection: Connection, *, stage: str = "review", recovery: str = "n
             "call": uuid4(),
             "stage": stage,
             "recovery": recovery,
+            "snapshot": snapshot,
             "digest": "0" * 64,
+            **values,
         },
     )
 
@@ -66,6 +87,7 @@ def test_context_manifest_migration_creates_checks_and_reverts(
     config.attributes["connection"] = connection
     command.upgrade(config, "20261024_0039")
     _seed(connection)
+    connection.execute(text(INSERT_POLICY_SNAPSHOT), policy_snapshot_values(RUN_DONE, SNAPSHOT_ID))
     connection.commit()
 
     for _ in range(2):
@@ -79,20 +101,35 @@ def test_context_manifest_migration_creates_checks_and_reverts(
             text("SELECT omissions, schema_version, created_at FROM context_manifests")
         ).one()
         assert (row[0], row[1]) == ([], 1) and row[2] is not None
-        for column, value in (("stage", "conventions_v2"), ("recovery", "retry_later")):
+        with pytest.raises(IntegrityError), connection.begin_nested():
+            _insert(connection, stage="conventions_v2")
+        with pytest.raises(IntegrityError), connection.begin_nested():
+            _insert(connection, recovery="retry_later")
+        # Every manifest names a stored snapshot (CVS §8.3) and the CVS §5.1 identities.
+        for snapshot in (None, uuid4()):
             with pytest.raises(IntegrityError), connection.begin_nested():
-                _insert(connection, **{column: value})
+                _insert(connection, snapshot=snapshot)
+        for column in ("rendered_messages_sha256", "prompt_checksum", "model_profile_version"):
+            with pytest.raises(IntegrityError), connection.begin_nested():
+                _insert(connection, without=column)
         for stage in ("conventions", "verification"):
             _insert(connection, stage=stage)
         for recovery in ("retry", "repair", "fallback"):
             _insert(connection, recovery=recovery)
-        # The manifests of a run go with it.
-        [foreign_key] = inspect(connection).get_foreign_keys("context_manifests")
-        assert (foreign_key["referred_table"], foreign_key["constrained_columns"]) == (
-            "runs",
-            ["run_id"],
-        )
-        assert foreign_key["options"].get("ondelete") == "CASCADE"
+        # The manifests of a run and of its snapshot go with them.
+        foreign_keys = inspect(connection).get_foreign_keys("context_manifests")
+        assert sorted(
+            (
+                key["referred_table"],
+                tuple(key["constrained_columns"]),
+                tuple(key["referred_columns"]),
+                key["options"].get("ondelete"),
+            )
+            for key in foreign_keys
+        ) == [
+            ("run_policy_snapshots", ("policy_snapshot_id",), ("snapshot_id",), "CASCADE"),
+            ("runs", ("run_id",), ("id",), "CASCADE"),
+        ]
         assert {
             constraint["column_names"][0]
             for constraint in inspect(connection).get_unique_constraints("context_manifests")

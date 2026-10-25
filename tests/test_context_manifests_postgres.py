@@ -16,37 +16,43 @@ from collections.abc import Iterator
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from functools import partial
+from hashlib import sha256
 from typing import Any
 from uuid import UUID
 
 import pytest
-from app.modules.reviews.infrastructure.context_manifest_store import (
-    SqlAlchemyContextManifestUnitOfWork,
-)
 from sqlalchemy import text
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.modules.reviews.application.context_provenance import SourceRole
 from app.modules.reviews.application.llm import (
+    LlmCallFailed,
     LlmCallKind,
     LlmCallRecord,
     ManifestEntry,
     RunCallContext,
     TransactionalManifestStore,
+    stage_prompt_checksum,
 )
 from app.modules.reviews.application.policy_snapshot import CallManifest, ManifestBlock
+from app.modules.reviews.application.prepare_policy_snapshot import pinned_to_json
 from app.modules.reviews.application.prompt_builder import ChangedFile, DiffLine
 from app.modules.reviews.application.run_failures import RunFailure
 from app.modules.reviews.application.run_trace import TransactionalRunTrace
+from app.modules.reviews.infrastructure.context_manifest_store import (
+    SqlAlchemyContextManifestUnitOfWork,
+)
 from app.modules.reviews.infrastructure.llm.gateway import LlmGateway
 from app.modules.reviews.infrastructure.llm.memory import InMemoryLlmCallTrace, InMemoryUsageLedger
 from app.modules.reviews.infrastructure.llm.models import review_with_gateway
 from app.modules.reviews.infrastructure.llm.settings import LlmSettings
-from app.modules.reviews.infrastructure.llm.transport import TransportUnavailable
+from app.modules.reviews.infrastructure.llm.transport import ChatMessage, TransportUnavailable
 from app.modules.reviews.infrastructure.llm_call_trace import RunTraceLlmCalls
+from app.modules.reviews.infrastructure.run_action_records import insert_run_action
 from app.modules.reviews.infrastructure.run_lifecycle_store import SqlAlchemyRunTraceUnitOfWork
 from tests.llm_fakes import context_checkpoint
-from tests.portal_postgres import REPO_A, RUN_ATTEMPTED, WS_A, Env, portal_schema
+from tests.portal_postgres import REPO_A, RULE_A, RUN_ATTEMPTED, WS_A, Env, portal_schema
 from tests.test_gateway_review_model import (
     EMPTY_ANSWER,
     MAIN,
@@ -80,13 +86,73 @@ def _tokens(text: str) -> int:
     return (len(text) + 2) // 3
 
 
+# A stored policy snapshot of the run: every manifest row names one (CVS §8.3).
+INSERT_POLICY_SNAPSHOT = (
+    "INSERT INTO run_policy_snapshots (run_id, snapshot_id, repository_id, schema_version, "
+    "policy_base_sha, ignore_patterns, ignore_digest, parser_profile, parser_version, "
+    "matcher_version, limits_version, builtin_exclusions_version, priority_matcher_version, "
+    "service_defaults_rule_version_id, defaults_checksum, prompt_bindings, execution_profile, "
+    "policy_digest) VALUES (:run, :snapshot, :repository, 1, :base, '[]'::jsonb, :ignore, "
+    "'rules-markdown/v1', '4.0.0', 'review-ignore/v1', 'limits/v1', 'builtin-exclusions/v1', "
+    "'priority/v1', :rule, :defaults, CAST(:bindings AS jsonb), CAST(:profile AS jsonb), "
+    ":digest)"
+)
+
+
+def policy_snapshot_values(run_id: UUID, snapshot_id: UUID) -> dict[str, Any]:
+    return {
+        "run": run_id,
+        "snapshot": snapshot_id,
+        "repository": REPO_A,
+        "base": "b" * 40,
+        "ignore": "0" * 64,
+        "rule": RULE_A,
+        "defaults": "f" * 64,
+        "bindings": json.dumps(pinned_to_json(SNAPSHOT.prompt_bindings)),
+        "profile": json.dumps(pinned_to_json(SNAPSHOT.execution_profile)),
+        "digest": "d" * 64,
+    }
+
+
+async def _store_snapshot(env: Env) -> None:
+    engine = env.engine()
+    try:
+        async with engine.begin() as connection:
+            await connection.execute(
+                text(INSERT_POLICY_SNAPSHOT),
+                policy_snapshot_values(RUN_ATTEMPTED, SNAPSHOT.snapshot_id),
+            )
+    finally:
+        await engine.dispose()
+
+
 @pytest.fixture
 def env() -> Iterator[Env]:
     url = os.environ.get("TEST_DATABASE_URL")
     if url is None:
         pytest.skip("set TEST_DATABASE_URL to store context manifests")
     with portal_schema(url, None) as schema:
+        asyncio.run(_store_snapshot(schema))
         yield schema
+
+
+def _messages_sha256(messages: tuple[ChatMessage, ...]) -> str:
+    # The canonical JSON of the exact messages the transport received, in order.
+    canonical = json.dumps(
+        [{"role": message.role, "content": message.content} for message in messages],
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    )
+    return sha256(canonical.encode("utf-8")).hexdigest()
+
+
+# SHA-256 of the canonical JSON of the snapshot's execution profile, as stored above.
+PROFILE_VERSION = sha256(
+    json.dumps(
+        pinned_to_json(SNAPSHOT.execution_profile), sort_keys=True, separators=(",", ":")
+    ).encode("utf-8")
+).hexdigest()
 
 
 def _run() -> RunCallContext:
@@ -134,7 +200,8 @@ async def _review(env: Env, transport: Transport, *, fallback: bool = False) -> 
                     text(
                         "SELECT id, run_id, attempt, call_id, stage, recovery_kind, "
                         "parent_call_id, policy_snapshot_id, digest, block_count, input_tokens, "
-                        "blocks, omissions, schema_version FROM context_manifests "
+                        "blocks, omissions, schema_version, rendered_messages_sha256, "
+                        "prompt_checksum, model_profile_version FROM context_manifests "
                         "ORDER BY created_at, recovery_kind"
                     )
                 )
@@ -161,7 +228,8 @@ def _ordered(manifests: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 @pytest.mark.integration
 def test_base_and_repair_calls_each_store_a_manifest_before_the_call(env: Env) -> None:
-    observed = asyncio.run(_review(env, Transport("{not json", VALID)))
+    transport = Transport("{not json", VALID)
+    observed = asyncio.run(_review(env, transport))
 
     base, repair = _ordered(observed["manifests"])
     assert [action[0] for action in observed["actions"]] == [
@@ -215,6 +283,11 @@ def test_base_and_repair_calls_each_store_a_manifest_before_the_call(env: Env) -
         assert call["input_tokens_estimate"] == row["input_tokens"]
         assert call["operation"] == "review"
     assert base["digest"] != repair["digest"] and len(base["digest"]) == 64
+    # CVS §5.1: the exact messages of each call, the review prompt's pin, the pinned profile.
+    for row, request in zip((base, repair), transport.requests, strict=True):
+        assert row["rendered_messages_sha256"] == _messages_sha256(request.messages)
+        assert row["prompt_checksum"] == SNAPSHOT.prompt_bindings.review_system_checksum
+        assert row["model_profile_version"] == PROFILE_VERSION
 
 
 @pytest.mark.integration
@@ -285,7 +358,40 @@ def _entry(manifest: CallManifest, manifest_id: UUID) -> ManifestEntry:
         parent_call_id=None,
         input_tokens=40,
         started_at=datetime.now(UTC),
+        rendered_messages_sha256="1" * 64,
+        prompt_checksum="2" * 64,
+        model_profile_version="3" * 64,
     )
+
+
+async def _record(env: Env, *entries: ManifestEntry) -> dict[str, Any]:
+    """Store the entries through the transactional store; return the rows and the steps."""
+    engine = env.engine()
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    store = TransactionalManifestStore(partial(SqlAlchemyContextManifestUnitOfWork, factory))
+    try:
+        for entry in entries:
+            await store.record_manifest(RUN_ATTEMPTED, entry)
+        async with factory() as session:
+            rows = await session.execute(
+                text(
+                    "SELECT id, stage, recovery_kind, blocks, digest, input_tokens, "
+                    "rendered_messages_sha256, prompt_checksum, model_profile_version "
+                    "FROM context_manifests ORDER BY id"
+                )
+            )
+            manifests = [dict(row) for row in rows.mappings()]
+            steps = await session.execute(
+                text(
+                    "SELECT response FROM run_actions WHERE run_id=:run AND "
+                    "tool='context.manifest' ORDER BY index"
+                ),
+                {"run": RUN_ATTEMPTED},
+            )
+            responses = [row[0] for row in steps]
+    finally:
+        await engine.dispose()
+    return {"manifests": manifests, "responses": responses}
 
 
 @pytest.mark.integration
@@ -297,25 +403,9 @@ def test_a_retrieved_excerpt_block_round_trips_with_its_side_ranges_and_reposito
     )
     changed = replace(manifest, call_id=UUID(int=902), blocks=(replace(RETRIEVED, tokens=13),))
 
-    async def scenario() -> list[dict[str, Any]]:
-        engine = env.engine()
-        factory = async_sessionmaker(engine, expire_on_commit=False)
-        store = TransactionalManifestStore(partial(SqlAlchemyContextManifestUnitOfWork, factory))
-        try:
-            await store.record_manifest(RUN_ATTEMPTED, _entry(manifest, UUID(int=911)))
-            await store.record_manifest(RUN_ATTEMPTED, _entry(changed, UUID(int=912)))
-            async with factory() as session:
-                rows = await session.execute(
-                    text(
-                        "SELECT id, stage, recovery_kind, blocks, digest, input_tokens "
-                        "FROM context_manifests ORDER BY id"
-                    )
-                )
-                return [dict(row) for row in rows.mappings()]
-        finally:
-            await engine.dispose()
-
-    first, second = asyncio.run(scenario())
+    first, second = asyncio.run(
+        _record(env, _entry(manifest, UUID(int=911)), _entry(changed, UUID(int=912)))
+    )["manifests"]
 
     assert (first["id"], first["stage"], first["recovery_kind"]) == (
         UUID(int=911),
@@ -349,8 +439,89 @@ def test_a_retrieved_excerpt_block_round_trips_with_its_side_ranges_and_reposito
         }
     )
     assert rebuilt == RETRIEVED
+    # SHA-256 of the canonical JSON of the blocks (sorted keys, no spaces; PIPELINE_SPEC §2),
+    # computed apart from the store from the literal row above.
+    assert first["digest"] == "6a0ac717eb397610be5f213b0b947d954a33a84ae0b64d077e5f1d42b510e63d"
     # The digest follows the blocks: one changed token count gives another digest.
     assert first["digest"] != second["digest"]
+    assert (
+        first["rendered_messages_sha256"],
+        first["prompt_checksum"],
+        first["model_profile_version"],
+    ) == ("1" * 64, "2" * 64, "3" * 64)
+
+
+@pytest.mark.integration
+def test_blocks_without_a_token_count_stay_out_of_tokens_by_role(env: Env) -> None:
+    rules = ManifestBlock(
+        block_id="policy-rules",
+        source_role=SourceRole.POLICY_DOCUMENT,
+        source_kind="repository_rules",
+        path=".review/rules.md",
+    )
+    manifest = CallManifest(
+        call_id=UUID(int=903),
+        stage="verification",
+        blocks=(RETRIEVED, replace(RETRIEVED, block_id="RAG:app/other.py:1-2", tokens=None), rules),
+        run_id=RUN_ATTEMPTED,
+    )
+
+    [response] = asyncio.run(_record(env, _entry(manifest, UUID(int=913))))["responses"]
+
+    # The uncounted retrieved block adds nothing; a role with no counted block is absent.
+    assert response["tokens_by_role"] == {"retrieved_excerpt": 12}
+    assert response["block_count"] == 3
+
+
+@pytest.mark.integration
+def test_the_step_locks_the_run_before_the_row_takes_its_foreign_key(
+    env: Env, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # insert_run_action takes SELECT ... FOR UPDATE on the run. A manifest row flushed before it
+    # already holds KEY SHARE on the run, and two writers of one run then deadlock.
+    rows_before_the_step: list[int] = []
+
+    async def observed(session: AsyncSession, **kwargs: Any) -> None:
+        count = await session.scalar(text("SELECT count(*) FROM context_manifests"))
+        rows_before_the_step.append(int(count or 0))
+        await insert_run_action(session, **kwargs)
+
+    monkeypatch.setattr(
+        "app.modules.reviews.infrastructure.context_manifest_store.insert_run_action", observed
+    )
+    manifest = CallManifest(
+        call_id=UUID(int=904), stage="review", blocks=(RETRIEVED,), run_id=RUN_ATTEMPTED
+    )
+
+    stored = asyncio.run(_record(env, _entry(manifest, UUID(int=914))))
+
+    assert rows_before_the_step == [0]
+    assert [row["id"] for row in stored["manifests"]] == [UUID(int=914)]
+    assert len(stored["responses"]) == 1
+
+
+@pytest.mark.integration
+def test_a_manifest_names_a_stored_snapshot_of_its_run(env: Env) -> None:
+    manifest = CallManifest(
+        call_id=UUID(int=905), stage="review", blocks=(RETRIEVED,), run_id=RUN_ATTEMPTED
+    )
+    unknown = replace(_entry(manifest, UUID(int=915)), policy_snapshot_id=UUID(int=999))
+
+    with pytest.raises(IntegrityError):
+        asyncio.run(_record(env, unknown))
+
+
+def test_the_prompt_checksum_is_the_pin_of_the_calls_stage() -> None:
+    bindings = replace(
+        SNAPSHOT.prompt_bindings,
+        review_system_checksum="r" * 64,
+        conventions_checksum="c" * 64,
+        verifier_checksum="v" * 64,
+    )
+
+    assert stage_prompt_checksum(bindings, "review") == "r" * 64
+    assert stage_prompt_checksum(bindings, "conventions") == "c" * 64
+    assert stage_prompt_checksum(bindings, "verification") == "v" * 64
 
 
 class _BrokenStore:
@@ -387,6 +558,67 @@ def test_a_failed_manifest_write_means_no_provider_call() -> None:
     assert len(store.entries) == 1
     assert transport.requests == []
     assert trace.records == []
+
+
+def test_concurrent_snapshot_generations_of_one_attempt_stay_within_four_calls() -> None:
+    # The twin of test_llm_gateway's case with a manifest store: the call's slot is claimed
+    # before the store write, so a generation held in the write keeps its slot.
+    class PausingStore:
+        """Hold the first manifest write until the other generation has spent the cap."""
+
+        def __init__(self) -> None:
+            self.entries: list[ManifestEntry] = []
+            self.entered = asyncio.Event()
+            self.resume = asyncio.Event()
+
+        async def record_manifest(self, run_id: UUID, entry: ManifestEntry) -> None:
+            self.entries.append(entry)
+            if not self.entered.is_set():
+                self.entered.set()
+                await self.resume.wait()
+
+    class Unavailable(Transport):
+        async def complete(self, request: Any, *, checkpoint: Any) -> Any:
+            await checkpoint()
+            self.requests.append(request)
+            raise TransportUnavailable("upstream 503", http_status=503)
+
+    store = PausingStore()
+    transport = Unavailable()
+    trace = InMemoryLlmCallTrace()
+    gateway = LlmGateway(
+        LlmSettings(primary=_profile(), fallback=_profile("fallback-model")),
+        transport,
+        InMemoryUsageLedger(),
+        trace,
+        checkpoint=context_checkpoint,
+        sleep=_no_sleep,
+        manifest_store=store,
+    )
+    run = _run()
+    context = _context(FILES, SNAPSHOT)
+
+    async def scenario() -> tuple[LlmCallFailed, LlmCallFailed]:
+        blocked = asyncio.create_task(review_with_gateway(gateway, context, run))
+        await store.entered.wait()
+        try:
+            with pytest.raises(LlmCallFailed) as active:
+                await review_with_gateway(gateway, context, run)
+        finally:
+            store.resume.set()
+        with pytest.raises(LlmCallFailed) as held:
+            await blocked
+        return active.value, held.value
+
+    active, held = asyncio.run(scenario())
+
+    # The held generation kept the slot it claimed: the other one got three (two primary calls
+    # and its fallback), never a fifth call.
+    assert len(transport.requests) == 4
+    assert (active.calls, held.calls) == (3, 1)
+    # Each call keeps the number of the slot it claimed, also across the held write.
+    assert sorted(record.call_no for _, record in trace.records) == [1, 2, 3, 4]
+    assert [entry.manifest.recovery_kind for entry in store.entries] == ["none", "none", "fallback"]
 
 
 def test_a_legacy_task_writes_no_manifest_and_names_none_in_llm_call() -> None:

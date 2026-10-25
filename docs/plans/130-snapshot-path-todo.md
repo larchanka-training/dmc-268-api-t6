@@ -147,7 +147,12 @@ Gates for every task: the four commands in the plan, with DB and vhost `imp130f`
   - a failed write → no provider call;
   - a `retrieved_excerpt` block (LEFT, `diff_old_sha`, two ranges, `repository_id`) round-trips;
   - upgrade → downgrade → upgrade;
-  - legacy run → 0 rows (in F1-1).
+  - legacy run → 0 rows (in F1-1);
+  - fix round (batch-2 review): `policy_snapshot_id` NOT NULL with FK to `run_policy_snapshots`, the
+    CVS §5.1 columns (`rendered_messages_sha256`, `prompt_checksum`, `model_profile_version`) in
+    0040 in place; the slot is claimed before the write (two concurrent generations stay within four
+    calls); the step precedes the row (lock order); a literal digest; uncounted blocks stay out of
+    `tokens_by_role`.
 - **Done when:** [x] one Alembic head; [x] F1-1 green.
 
 ### F1-7: R14, verifier window, `llm.verify.manifest_id`, E-2 ⚑

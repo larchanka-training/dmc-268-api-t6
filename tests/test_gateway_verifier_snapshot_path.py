@@ -209,6 +209,10 @@ def test_llm_verify_names_the_stored_manifest_of_the_accepted_repair_call() -> N
     base, repair = store.entries
     assert (base.manifest.recovery_kind, repair.manifest.recovery_kind) == ("none", "repair")
     assert {entry.manifest.stage for entry in store.entries} == {"verification"}
+    # CVS §5.1: the verifier stage's own prompt pin, not the review prompt's.
+    verifier_checksum = _snapshot().prompt_bindings.verifier_checksum
+    assert {entry.prompt_checksum for entry in store.entries} == {verifier_checksum}
+    assert verifier_checksum != _snapshot().prompt_bindings.review_system_checksum
     assert record.manifest_id == repair.manifest_id
     assert record.accepted_call_id == repair.manifest.call_id
     assert [stored.manifest_id for _, stored in provider.trace.records] == [

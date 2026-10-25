@@ -490,9 +490,18 @@ class ContextManifest(Base):
     stage: Mapped[str] = mapped_column(String(20), nullable=False)
     recovery_kind: Mapped[str] = mapped_column(String(20), nullable=False)
     parent_call_id: Mapped[UUID | None] = mapped_column(Uuid, nullable=True)
-    policy_snapshot_id: Mapped[UUID | None] = mapped_column(Uuid, nullable=True)
+    # CVS §8.3: the manifest names the snapshot of its run; it goes with it.
+    policy_snapshot_id: Mapped[UUID] = mapped_column(
+        ForeignKey("run_policy_snapshots.snapshot_id", ondelete="CASCADE"), nullable=False
+    )
     # SHA-256 of the canonical JSON of ``blocks``.
     digest: Mapped[str] = mapped_column(CHAR(64), nullable=False)
+    # CVS §5.1, known before the call: SHA-256 of the canonical JSON of the exact provider
+    # messages, the checksum of the prompt the stage pinned, and SHA-256 of the canonical JSON
+    # of the pinned execution profile.
+    rendered_messages_sha256: Mapped[str] = mapped_column(CHAR(64), nullable=False)
+    prompt_checksum: Mapped[str] = mapped_column(CHAR(64), nullable=False)
+    model_profile_version: Mapped[str] = mapped_column(CHAR(64), nullable=False)
     block_count: Mapped[int] = mapped_column(INTEGER, nullable=False)
     input_tokens: Mapped[int] = mapped_column(INTEGER, nullable=False)
     blocks: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, nullable=False)

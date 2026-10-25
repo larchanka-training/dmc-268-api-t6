@@ -21,6 +21,7 @@ its usage recorded as soon as the call returns, outside any database transaction
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import math
 import random
@@ -49,6 +50,8 @@ from app.modules.reviews.application.llm import (
     ManifestStore,
     RunCallContext,
     UsageLedger,
+    model_profile_version,
+    stage_prompt_checksum,
 )
 from app.modules.reviews.application.policy_snapshot import (
     CallManifest,
@@ -531,18 +534,21 @@ class LlmGateway:
             raise self._failed(
                 LlmErrorCode.UNAVAILABLE, _calls_exhausted(context, attempt, task), state
             )
+        # The slot is claimed before the manifest write awaits: a concurrent generation of the
+        # attempt sees it taken. A failed write fails the run, so the slot is never given back.
+        state.calls += 1
+        attempt.calls += 1
+        call_no = attempt.calls
         # E-3 and the manifest row: snapshot-path tasks only, so a legacy call is unchanged.
         snapshot = task.policy_snapshot
         named = manifest if snapshot is not None else None
-        manifest_id = await self._store_manifest(task, named, context, state, estimate)
-        state.calls += 1
-        attempt.calls += 1
+        manifest_id = await self._store_manifest(task, named, context, state, estimate, messages)
         started_at = self._clock.now()
         started = self._monotonic()
         record = _RecordDraft(
             kind=kind,
             model=profile.model,
-            call_no=attempt.calls,
+            call_no=call_no,
             context=context,
             timeout_s=timeout_s,
             estimate=estimate,
@@ -684,9 +690,11 @@ class LlmGateway:
         context: RunCallContext,
         state: _AttemptState,
         estimate: int,
+        messages: tuple[ChatMessage, ...],
     ) -> UUID | None:
         """The stored manifest of this call: written once per call id, before the call."""
-        if manifest is None or task.policy_snapshot is None or self._manifests is None:
+        snapshot = task.policy_snapshot
+        if manifest is None or snapshot is None or self._manifests is None:
             return None
         stored = state.manifests.get(manifest.call_id)
         if stored is not None:
@@ -695,13 +703,16 @@ class LlmGateway:
         entry = ManifestEntry(
             manifest_id=uuid4(),
             attempt=context.attempt,
-            policy_snapshot_id=task.policy_snapshot.snapshot_id,
+            policy_snapshot_id=snapshot.snapshot_id,
             manifest=manifest,
             parent_call_id=(
                 None if base is None or base.call_id == manifest.call_id else base.call_id
             ),
             input_tokens=estimate,
             started_at=self._clock.now(),
+            rendered_messages_sha256=rendered_messages_sha256(messages),
+            prompt_checksum=stage_prompt_checksum(snapshot.prompt_bindings, manifest.stage),
+            model_profile_version=model_profile_version(snapshot.execution_profile),
         )
         try:
             await self._manifests.record_manifest(context.run_id, entry)
@@ -1010,6 +1021,17 @@ def _validated(response: ChatResponse, task: StructuredTask) -> _Outcome:
         answer=answer,
         errors=errors,
     )
+
+
+def rendered_messages_sha256(messages: tuple[ChatMessage, ...]) -> str:
+    """CVS §5.1: SHA-256 of the canonical JSON of the exact provider messages, in order."""
+    canonical = json.dumps(
+        [{"role": message.role, "content": message.content} for message in messages],
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    )
+    return sha256(canonical.encode("utf-8")).hexdigest()
 
 
 def _elapsed_ms(started: float, finished: float) -> int:
