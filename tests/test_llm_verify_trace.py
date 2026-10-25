@@ -264,7 +264,10 @@ class _PublishingRepository:
 
     async def get_post_processing_input(self, run_id: UUID) -> FindingPostProcessingInput:
         return FindingPostProcessingInput(
-            diff_map=_diff_map(), rule_names=frozenset(), allowed_v2_rules=frozenset()
+            diff_map=_diff_map(),
+            checked_paths=frozenset(),
+            rule_names=frozenset(),
+            allowed_v2_rules=frozenset(),
         )
 
     async def lock_for_publishing(self, run_id: UUID) -> PublishingGuard:
@@ -320,7 +323,10 @@ class _Queue:
 def _store(raw_output: Any) -> list[dict[str, Any]]:
     reviews = _PublishingRepository()
     store = StoreReviewOutput(
-        cast(Any, lambda: _UnitOfWork(reviews)), _Queue(), worker_id="test-worker"
+        cast(Any, lambda: _UnitOfWork(reviews)),
+        _Queue(),
+        worker_id="test-worker",
+        run_url=lambda _: None,
     )
     assert asyncio.run(store.execute(RUN_ID, raw_output)) is True
     return reviews.entered

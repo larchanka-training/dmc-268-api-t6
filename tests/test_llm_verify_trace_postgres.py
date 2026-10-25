@@ -24,6 +24,7 @@ from app.modules.reviews.infrastructure.review_output_unit_of_work import (
     SqlAlchemyReviewOutputUnitOfWork,
 )
 from tests.portal_postgres import NOW, Env, portal_schema
+from tests.test_run_step_postgres import allow_run_steps
 from tests.test_run_stream_postgres import insert_queued_run
 
 STARTED = datetime(2026, 10, 24, 9, 0, 0, tzinfo=UTC)
@@ -76,6 +77,13 @@ def _parsed_output() -> ReviewOutput:
 
 def _processed_output() -> ProcessedReviewOutput:
     return ProcessedReviewOutput(inline=(), body_only=(), dropped=(), review_body="A bug.")
+
+
+async def _run_ready_for_actions(factory: async_sessionmaker[AsyncSession]) -> UUID:
+    """Publishing writes run actions, which require ``runs.attempt >= 1`` (#170)."""
+    run_id = await insert_queued_run(factory)
+    await allow_run_steps(factory, run_id)
+    return run_id
 
 
 async def _publish(
@@ -139,7 +147,7 @@ def test_llm_verify_is_written_before_the_postprocess_in_one_transaction(env: En
         list[tuple[int, str, Any, Any]], list[tuple[int, str]], list[tuple[str, datetime, int]]
     ]:
         try:
-            run_id = await insert_queued_run(factory)
+            run_id = await _run_ready_for_actions(factory)
             await _publish(factory, run_id, trace=True, commit=False)
             after_rollback = [(i, tool) for i, tool, _, _ in await _actions(factory, run_id)]
             await _publish(factory, run_id, trace=True)
@@ -172,7 +180,7 @@ def test_a_second_publishing_entry_adds_no_second_llm_verify(env: Env) -> None:
 
     async def scenario() -> list[tuple[int, str, Any, Any]]:
         try:
-            run_id = await insert_queued_run(factory)
+            run_id = await _run_ready_for_actions(factory)
             await _publish(factory, run_id, trace=True)
             await _publish(factory, run_id, trace=True)
             return await _actions(factory, run_id)
@@ -191,7 +199,7 @@ def test_a_legacy_store_writes_no_llm_verify(env: Env) -> None:
 
     async def scenario() -> list[tuple[int, str, Any, Any]]:
         try:
-            run_id = await insert_queued_run(factory)
+            run_id = await _run_ready_for_actions(factory)
             await _publish(factory, run_id, trace=False)
             return await _actions(factory, run_id)
         finally:
