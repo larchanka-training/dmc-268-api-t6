@@ -92,12 +92,12 @@ uv run pytest tests/test_publish_run_review.py tests/test_review_publisher.py te
 
    Verdict and counts use `verdict()` and `severity_counts()` on the same
    non-dropped findings `hashed_findings` already hashes (inline + body-only).
-   Checked paths are the sorted keys of `hunk_lines` (the files the
-   post-processor treated as the reviewable diff). An empty set still leaves
-   the heading, followed by `(none)`. The 4000-character cap applies only to
-   the Additional findings tail. Verdict, risk summary, checked paths, and the
-   three prose sections are not cut. A long path list may make the stored body
-   longer than 4000 characters; it stays under GitHub's review-body limit.
+   Checked paths are the sorted paths whose `review_patch` snapshot is non-null
+   (an empty string still counts; #170 D-2, after DiffMap). An empty set still leaves
+   the heading, followed by `(none)`. The stored body stays ≤ 4000 characters
+   (whole finding bullets only; checked paths truncate; overflow footer at
+   store time — [#170](170-plan.md) D-1). Verdict, risk summary, prose, and
+   listed paths are not cut mid-line.
    `move_inline_to_body` appends after this text, so a coordinate fallback is
    still one review and still contains the overview. The check-run title is
    unchanged (`AI-ревью: {verdict}`).
@@ -251,31 +251,31 @@ Task 8 waits for 3 and 7 and lands in the same branch, not a follow-up PR.
 
 ### Phase 1: Overview body
 
-- [ ] Task 1: Render verdict, checked paths, and severity counts in the review body
+- [x] Task 1: Render verdict, checked paths, and severity counts in the review body
 
 ### Phase 2: GitLab publication
 
-- [ ] Task 2: Post GitLab MR discussions idempotently by findings hash
-- [ ] Task 3: Dispatch the publish consumer for a GitLab run
+- [x] Task 2: Post GitLab MR discussions idempotently by findings hash
+- [x] Task 3: Dispatch the publish consumer for a GitLab run
 
 ### Checkpoint: Publication
 
-- [ ] GitHub publish tests still pass, including the check-run title
-- [ ] A fake GitLab MR receives inline notes and one summary, and a second pass does not duplicate them
-- [ ] A missing GitLab token leaves the run in `publishing`
+- [x] GitHub publish tests still pass, including the check-run title
+- [x] A fake GitLab MR receives inline notes and one summary, and a second pass does not duplicate them
+- [x] A missing GitLab token leaves the run in `publishing`
 
 ### Phase 3: Step stream
 
 - [x] Task 4: Add the `run.step` OpenAPI event
-- [ ] Task 5: Deliver `run.step` on the stream without coalescing
-- [ ] Task 6: Notify `run_step` when a traced action commits
-- [ ] Task 7: Notify `run_step` from the other action inserts
+- [x] Task 5: Deliver `run.step` on the stream without coalescing
+- [x] Task 6: Notify `run_step` when a traced action commits
+- [x] Task 7: Notify `run_step` from the other action inserts
 
 ### Checkpoint: Step stream
 
-- [ ] Two steps of one run both arrive, and neither is `run.updated`
-- [ ] A rolled-back insert emits no step
-- [ ] Status replay via `Last-Event-ID` is unchanged
+- [x] Two steps of one run both arrive, and neither is `run.updated`
+- [x] A rolled-back insert emits no step
+- [x] Status replay via `Last-Event-ID` is unchanged
 
 ### Phase 4: Docs
 

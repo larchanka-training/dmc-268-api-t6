@@ -538,6 +538,8 @@ class FindingPostProcessingInput:
     """Immutable run context required to safely anchor post-processed findings."""
 
     diff_map: DiffMap
+    # Paths with a non-null review_patch snapshot; drives Checked files only (#170 D-2).
+    checked_paths: frozenset[str]
     rule_names: frozenset[str]
     repository_max_inline: int | None = None
     severity_threshold: SeverityThresholdValue = "all"
@@ -599,7 +601,12 @@ class ReviewOutputHandler(Protocol):
 
 
 class PublishReviewOutput:
-    """Persist a validated model answer, then publish outside database transactions."""
+    """Persist a validated model answer, then publish outside database transactions.
+
+    Inline path used when the worker is given no queue output. The production queue
+    path is ``StoreReviewOutput``: both append the overflow footer; only the queue
+    path can add the portal run link.
+    """
 
     def __init__(
         self,
@@ -660,12 +667,27 @@ class PublishReviewOutput:
         processed = FindingsPostProcessor.from_default_patterns().process(
             parsed,
             diff_map=context.diff_map,
+            checked_paths=context.checked_paths,
             rule_names=context.rule_names,
             repository_max_inline=context.repository_max_inline,
             severity_threshold=threshold_to_use,
             allowed_v2_rules=v2_rules_to_use,
             pre_dropped=pre_dropped,
             apply_severity_threshold=effective_threshold is None,
+        )
+        from app.modules.reviews.application.findings_post_processor import (
+            finalize_stored_review_body,
+        )
+
+        processed = finalize_stored_review_body(
+            parsed,
+            processed,
+            checked_paths=context.checked_paths,
+            severity_threshold=threshold_to_use,
+            below_threshold=sum(
+                1 for item in processed.dropped if item.drop_reason == "severity_threshold"
+            ),
+            run_url=None,
         )
         async with self._uow_factory() as uow:
             publication = await uow.reviews.store_review_output(run_id, answer, parsed, processed)

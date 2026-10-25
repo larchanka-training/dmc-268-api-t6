@@ -803,6 +803,7 @@ def test_sqlalchemy_store_returns_cached_conventions_for_repeated_same_key(
                         rule_version_id=rule_version_id,
                         prompt_version_id=system_prompt.id,
                         available_at=now,
+                        attempt=1,
                     ),
                     Run(
                         id=SECOND_RUN_ID,
@@ -816,6 +817,7 @@ def test_sqlalchemy_store_returns_cached_conventions_for_repeated_same_key(
                         rule_version_id=rule_version_id,
                         prompt_version_id=system_prompt.id,
                         available_at=now,
+                        attempt=1,
                     ),
                 )
                 session.add(workspace)
@@ -888,6 +890,9 @@ class FakeSqlAlchemySession:
         return EmptyResult()
 
     async def scalar(self, statement: object) -> int:
+        text = str(statement)
+        if "attempt" in text:
+            return 1
         return -1
 
     def add(self, row: object) -> None:

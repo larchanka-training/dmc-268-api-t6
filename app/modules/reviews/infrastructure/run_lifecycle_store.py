@@ -336,6 +336,7 @@ class SqlAlchemyRunLifecycleStore:
             .where(Finding.run_id == run_id, Finding.drop_reason == "severity_threshold")
         )
         inline = sum(1 for item in findings if item.inline_comment)
+        body_count = len(findings) - inline
         return CheckRunReport(
             target,
             run.state.value,
@@ -343,7 +344,7 @@ class SqlAlchemyRunLifecycleStore:
             verdict=verdict(severities),
             severity_counts=severity_counts(severities),
             inline_count=inline,
-            body_count=len(findings) - inline,
+            body_count=body_count,
             below_threshold_count=below_threshold or 0,
             summary_only=bool(summary_only),
         )

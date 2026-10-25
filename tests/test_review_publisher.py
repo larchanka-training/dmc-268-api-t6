@@ -73,6 +73,7 @@ class FakeRepository:
         assert run_id == RUN_ID
         return FindingPostProcessingInput(
             _EXAMPLE_DIFF_MAP,
+            frozenset({"app/example.py"}),
             frozenset(),
             severity_threshold=self.severity_threshold,
         )
@@ -156,7 +157,11 @@ class ProcessingRepository:
 
     async def get_post_processing_input(self, run_id: UUID) -> FindingPostProcessingInput | None:
         assert run_id == RUN_ID
-        return FindingPostProcessingInput(_EXAMPLE_DIFF_MAP, frozenset())
+        return FindingPostProcessingInput(
+            _EXAMPLE_DIFF_MAP,
+            frozenset({"app/example.py"}),
+            frozenset(),
+        )
 
     async def store_review_output(
         self,
@@ -329,7 +334,9 @@ def test_publisher_does_not_allow_callers_to_override_durable_anchor_context() -
     factory = FakeUnitOfWorkFactory(repository, [])
     provider = FakeProvider([])
     untrusted_context = FindingPostProcessingInput(
-        _empty_diff_map(), frozenset({"Model supplied rule"})
+        _empty_diff_map(),
+        frozenset(),
+        frozenset({"Model supplied rule"}),
     )
     execute = cast(Any, PublishReviewOutput(factory, provider).execute)
 
@@ -440,6 +447,7 @@ def _processed_with_unanchored() -> ProcessedReviewOutput:
     return FindingsPostProcessor.from_default_patterns().process(
         parsed,
         diff_map=_EXAMPLE_DIFF_MAP,
+        checked_paths=frozenset({"app/example.py"}),
         rule_names=frozenset(),
     )
 

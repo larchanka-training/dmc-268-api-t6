@@ -12,7 +12,8 @@ from uuid import UUID
 
 from app.bootstrap.postgres_listen import listen_notify, notify_listener
 from app.modules.reviews.application.run_events import RunStep
-from app.modules.reviews.infrastructure.run_action_records import CHANNEL
+from app.modules.reviews.infrastructure.llm_call_trace import LLM_CALL_TOOL
+from app.modules.reviews.infrastructure.run_action_records import CHANNEL, SSE_LLM_OPERATIONS
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -29,13 +30,26 @@ def _event(payload: str) -> RunStep | None:
         ok = data["ok"]
         if not isinstance(ok, bool):
             raise TypeError
+        attempt = int(data["attempt"])
+        if attempt < 1:
+            raise ValueError
+        tool = str(data["tool"])
+        llm_operation: str | None = None
+        if tool == LLM_CALL_TOOL:
+            raw_operation = data.get("llm_operation")
+            if raw_operation is not None:
+                llm_operation = str(raw_operation)
+                if llm_operation not in SSE_LLM_OPERATIONS:
+                    raise ValueError
         return RunStep(
             run_id=UUID(data["run_id"]),
-            tool=str(data["tool"]),
+            tool=tool,
             index=int(data["index"]),
             ok=ok,
             started_at=datetime.fromisoformat(str(data["started_at"])),
             duration_ms=int(data["duration_ms"]),
+            attempt=attempt,
+            llm_operation=llm_operation,
         )
     except (ValueError, KeyError, TypeError):
         _LOGGER.warning("Ignoring malformed %s payload", CHANNEL)

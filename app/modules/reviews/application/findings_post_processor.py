@@ -47,6 +47,8 @@ Bucket = Literal["inline", "body_only", "dropped"]
 
 _ATTRIBUTION_PREFIX = "According to custom instructions in '"
 _ATTRIBUTION_RE = re.compile(r"^According to custom instructions in '(?P<name>[^']+)' \([^)]*\): ")
+REVIEW_BODY_CHAR_BUDGET = 4000
+_ADDITIONAL_FINDINGS_HEADING = "## Additional findings"
 
 
 @dataclass(frozen=True)
@@ -88,6 +90,8 @@ class ProcessedReviewOutput:
     body_only: tuple[ProcessedFinding, ...]
     dropped: tuple[ProcessedFinding, ...]
     review_body: str
+    omitted_body_only_count: int = 0
+    review_body_budget_degraded: bool = False
 
     @property
     def buckets(self) -> tuple[tuple[ProcessedFinding, ...], ...]:
@@ -122,6 +126,7 @@ class FindingsPostProcessor:
         allowed_v2_rules: frozenset[str] | None = None,
         pre_dropped: Sequence[ProcessedFinding] = (),
         apply_severity_threshold: bool = True,
+        checked_paths: frozenset[str],
     ) -> ProcessedReviewOutput:
         """Classify every finding once in the documented stage order.
 
@@ -182,18 +187,21 @@ class FindingsPostProcessor:
         total_below_threshold = sum(
             1 for item in dropped if item.drop_reason == "severity_threshold"
         )
+        overview_paths = checked_paths
+        review_body, omitted_body_only_count = _pack_review_body(
+            output,
+            tuple(inline + body_only),
+            tuple(body_only),
+            overview_paths,
+            severity_threshold,
+            total_below_threshold,
+        )
         return ProcessedReviewOutput(
             inline=tuple(inline),
             body_only=tuple(body_only),
             dropped=tuple(dropped),
-            review_body=_render_body(
-                output,
-                tuple(inline + body_only),
-                tuple(body_only),
-                diff_map,
-                severity_threshold,
-                total_below_threshold,
-            ),
+            review_body=review_body,
+            omitted_body_only_count=omitted_body_only_count,
         )
 
     def _drop_lint_patterns(
@@ -309,15 +317,6 @@ def _classify_anchor(
     return finding, "body_only"
 
 
-def _checked_paths(diff_map: DiffMap) -> tuple[str, ...]:
-    paths: set[str] = set()
-    for file in diff_map.files:
-        path = file.new_path or file.old_path
-        if path is not None:
-            paths.add(path)
-    return tuple(sorted(paths))
-
-
 def _normalize_title(title: str) -> str:
     return re.sub(r"[^a-z0-9]+", " ", title.lower()).strip()
 
@@ -326,39 +325,41 @@ def _quality(item: ProcessedFinding) -> tuple[int, float, int]:
     return (*finding_order_key(item.finding.severity, item.finding.confidence), item.position)
 
 
-def _render_body(
-    output: ReviewOutput,
-    kept: tuple[ProcessedFinding, ...],
-    body_only: tuple[ProcessedFinding, ...],
-    diff_map: DiffMap,
-    severity_threshold: SeverityThresholdValue,
-    below_threshold: int,
-) -> str:
-    prose = render_review_body(output.summary)
-    heading, separator, rest = prose.partition("\n\n")
-    overview = _overview(kept, diff_map, severity_threshold, below_threshold)
-    prefix = f"{heading}{separator}{overview}\n\n{rest}"
-    if not body_only:
-        return prefix
-    lines = [prefix, "", "## Additional findings"]
-    lines.extend(_render_body_only_finding(item) for item in body_only)
-    body = "\n".join(lines)
-    if len(prefix) >= 4000:
-        return prefix
-    return body[:4000]
+def _format_checked_files(sorted_paths: tuple[str, ...], listed_count: int) -> str:
+    if not sorted_paths:
+        return "(none)"
+    lines = [f"- {path}" for path in sorted_paths[:listed_count]]
+    omitted = len(sorted_paths) - listed_count
+    if omitted > 0:
+        lines.append(f"- … и ещё {_ru_cardinal(omitted, 'файл', 'файла', 'файлов')}")
+    return "\n".join(lines)
 
 
-def _overview(
+def _ru_cardinal(count: int, one: str, few: str, many: str) -> str:
+    """Russian cardinal agreement: 1 файл, 2 файла, 5 файлов, 11 файлов, 21 файл."""
+    remainder = abs(count) % 100
+    if 11 <= remainder <= 14:
+        word = many
+    else:
+        last = remainder % 10
+        if last == 1:
+            word = one
+        elif 2 <= last <= 4:
+            word = few
+        else:
+            word = many
+    return f"{count} {word}"
+
+
+def _overview_block(
     kept: tuple[ProcessedFinding, ...],
-    diff_map: DiffMap,
+    checked_files_text: str,
     severity_threshold: SeverityThresholdValue,
     below_threshold: int,
 ) -> str:
     severities = [item.finding.severity for item in kept]
     counts = severity_counts(severities)
     count_text = severity_count_phrase(counts)
-    paths = list(_checked_paths(diff_map))
-    checked = "\n".join(f"- {path}" for path in paths) if paths else "(none)"
     below = (
         (f"**Below severity threshold ({severity_threshold}):** {below_threshold}",)
         if below_threshold
@@ -370,9 +371,135 @@ def _overview(
             f"**Risk summary:** {count_text}",
             *below,
             "**Checked files:**",
-            checked,
+            checked_files_text,
         )
     )
+
+
+def format_body_only_overflow_footer(count: int, run_url: str) -> str:
+    """Russian overflow line appended at store time when the packer omitted body-only bullets."""
+    phrase = _ru_cardinal(count, "находка", "находки", "находок")
+    return f"\n\n**Ещё {phrase}:** {run_url}"
+
+
+def format_body_only_overflow_footer_without_url(count: int) -> str:
+    """Overflow count without a run link when the portal URL is not known yet."""
+    phrase = _ru_cardinal(count, "находка", "находки", "находок")
+    return f"\n\n**Ещё {phrase}**"
+
+
+def finalize_stored_review_body(
+    output: ReviewOutput,
+    processed: ProcessedReviewOutput,
+    *,
+    checked_paths: frozenset[str],
+    severity_threshold: SeverityThresholdValue,
+    below_threshold: int,
+    run_url: str | None,
+) -> ProcessedReviewOutput:
+    """Append the overflow footer at store time, repacking first when footer space is needed."""
+    omitted = processed.omitted_body_only_count
+    if omitted <= 0:
+        return processed
+
+    kept = (*processed.inline, *processed.body_only)
+
+    def footer_for(count: int) -> str:
+        if run_url:
+            return format_body_only_overflow_footer(count, run_url)
+        return format_body_only_overflow_footer_without_url(count)
+
+    def repack(char_budget: int) -> tuple[str, int]:
+        return _pack_review_body(
+            output,
+            kept,
+            processed.body_only,
+            checked_paths,
+            severity_threshold,
+            below_threshold,
+            char_budget=char_budget,
+        )
+
+    body = processed.review_body
+    for _ in range(4):
+        footer = footer_for(omitted)
+        if len(body) + len(footer) > REVIEW_BODY_CHAR_BUDGET:
+            body, omitted = repack(REVIEW_BODY_CHAR_BUDGET - len(footer))
+        footer = footer_for(omitted)
+        if len(body) + len(footer) <= REVIEW_BODY_CHAR_BUDGET:
+            return ProcessedReviewOutput(
+                inline=processed.inline,
+                body_only=processed.body_only,
+                dropped=processed.dropped,
+                review_body=f"{body}{footer}",
+                omitted_body_only_count=omitted,
+            )
+    footer = footer_for(omitted)
+    max_body_len = max(0, REVIEW_BODY_CHAR_BUDGET - len(footer))
+    body, omitted = repack(max_body_len)
+    footer = footer_for(omitted)
+    if len(body) + len(footer) > REVIEW_BODY_CHAR_BUDGET:
+        body = body[: max(0, REVIEW_BODY_CHAR_BUDGET - len(footer))].rstrip()
+    return ProcessedReviewOutput(
+        inline=processed.inline,
+        body_only=processed.body_only,
+        dropped=processed.dropped,
+        review_body=f"{body}{footer}",
+        omitted_body_only_count=omitted,
+        review_body_budget_degraded=True,
+    )
+
+
+def _pack_review_body(
+    output: ReviewOutput,
+    kept: tuple[ProcessedFinding, ...],
+    body_only: tuple[ProcessedFinding, ...],
+    checked_paths: frozenset[str],
+    severity_threshold: SeverityThresholdValue,
+    below_threshold: int,
+    *,
+    char_budget: int = REVIEW_BODY_CHAR_BUDGET,
+) -> tuple[str, int]:
+    prose = render_review_body(output.summary)
+    heading, separator, rest = prose.partition("\n\n")
+    sorted_paths = tuple(sorted(checked_paths))
+    finding_lines = [_render_body_only_finding(item) for item in body_only]
+    path_count = len(sorted_paths)
+
+    def assemble(listed_paths: int, finding_count: int) -> str:
+        checked = _format_checked_files(sorted_paths, listed_paths)
+        overview = _overview_block(kept, checked, severity_threshold, below_threshold)
+        prefix = f"{heading}{separator}{overview}\n\n{rest}"
+        if finding_count == 0:
+            return prefix
+        lines = [prefix, "", _ADDITIONAL_FINDINGS_HEADING, *finding_lines[:finding_count]]
+        return "\n".join(lines)
+
+    best_findings = 0
+    best_listed = 0
+    best_body = assemble(0, 0)
+
+    for listed_paths in range(path_count, -1, -1):
+        for finding_count in range(len(finding_lines), -1, -1):
+            candidate = assemble(listed_paths, finding_count)
+            if len(candidate) > char_budget:
+                continue
+            better = (
+                finding_count > best_findings
+                or (finding_count == best_findings and listed_paths > best_listed)
+                or (
+                    finding_count == best_findings
+                    and listed_paths == best_listed
+                    and len(candidate) > len(best_body)
+                )
+            )
+            if better:
+                best_body = candidate
+                best_findings = finding_count
+                best_listed = listed_paths
+
+    omitted = len(finding_lines) - best_findings
+    return best_body, omitted
 
 
 def _render_body_only_finding(item: ProcessedFinding) -> str:

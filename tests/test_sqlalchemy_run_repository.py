@@ -644,9 +644,13 @@ def test_get_post_processing_input_returns_none_allowed_v2_rules_for_legacy_run(
         deletions=0,
         changes=1,
         omission_reason=None,
-        review_patch=None,
+        review_patch="@@ -1,1 +1,2 @@\n line1\n+added",
         summary_only=False,
     )
+    checked_path_rows = [
+        ("app/main.py", "@@ -1,1 +1,2 @@\n line1\n+added"),
+        ("vendor/skipped.py", None),
+    ]
 
     class FakeScalarsResult:
         def __init__(self, items: list[Any]) -> None:
@@ -668,6 +672,9 @@ def test_get_post_processing_input_returns_none_allowed_v2_rules_for_legacy_run(
         def scalars(self) -> FakeScalarsResult:
             return FakeScalarsResult(self._scalars)
 
+        def all(self) -> list[tuple[Any, ...]]:
+            return self._rows
+
     class MultiQueryFakeSession:
         def __init__(self) -> None:
             self.calls = 0
@@ -680,6 +687,8 @@ def test_get_post_processing_input_returns_none_allowed_v2_rules_for_legacy_run(
                 return MultiExecuteResult(rows=[run_meta_row])
             if self.calls == 3:
                 return MultiExecuteResult(scalars=[diff_row])
+            if self.calls == 4:
+                return MultiExecuteResult(rows=checked_path_rows)
             return MultiExecuteResult()
 
         async def scalar(self, statement: Any) -> Any:
@@ -694,6 +703,8 @@ def test_get_post_processing_input_returns_none_allowed_v2_rules_for_legacy_run(
 
     post_input = asyncio.run(repository.get_post_processing_input(run_id))
     assert post_input is not None
+    assert post_input.diff_map is not None
+    assert post_input.checked_paths == frozenset({"app/main.py"})
     assert post_input.allowed_v2_rules is None
     assert post_input.repository_max_inline == expected_cap
     assert post_input.severity_threshold == expected_threshold
@@ -746,6 +757,7 @@ def test_get_post_processing_input_returns_none_allowed_v2_rules_for_legacy_run(
     processed = FindingsPostProcessor.from_default_patterns().process(
         raw_output,
         diff_map=post_input.diff_map,
+        checked_paths=post_input.checked_paths,
         rule_names=post_input.rule_names,
         repository_max_inline=post_input.repository_max_inline,
         severity_threshold=post_input.severity_threshold,

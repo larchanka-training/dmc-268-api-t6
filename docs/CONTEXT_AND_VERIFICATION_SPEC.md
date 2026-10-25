@@ -33,8 +33,11 @@ v1.2 (RAG v1, #140) — [PR #157](https://github.com/larchanka-training/dmc-268-
 
 Спецификация определяет детерминированный контекст L0–L4, происхождение данных,
 маппинг координат, обязательную проверку кандидатов и воспроизводимую публикацию.
-Первая реализация использует GitHub и якоря `RIGHT`; контракт `LEFT` и GitLab
-проектируется сразу, внедряется отдельными задачами. Embedding-модель, векторный
+Первая реализация использует GitHub и якоря `RIGHT`; контракт `LEFT` и полный GitLab
+ingress/diff проектируется сразу, внедряется отдельными задачами. Публикация MR discussions
+на GitLab уже есть на `main` (#97, [SD §8.4](SYSTEM_DESIGN.md#84-координаты-gitlab-и-надёжная-публикация-107), адаптер
+[`gitlab_review_publication.py`](../app/modules/reviews/infrastructure/gitlab_review_publication.py),
+PIPELINE_SPEC §5.2, таблица «Сбои GitLab»). Embedding-модель, векторный
 поиск, исполнение проекта и автоматическое применение suggestions в эту работу не
 входят. RAG v1 по [ADR 0001](adr/0001-graph-rag-v1.md) — граф символов с
 указателями без embeddings и без текста кода, построенный по разрешённому дереву
@@ -1500,6 +1503,11 @@ context old12/new13. SHA ниже — условные идентификато�
 
 ### 9.5. GitLab: целевой контракт, отдельная реализация
 
+На `main` (#97) реализована публикация MR discussions по более узкому профилю SD §8.4
+(маркеры `findings_hash`, `new_line` на новой стороне; без `line_code`/`line_range`/`old_line`
+из целевого §9.5); приём вебхуков, diff ingress и LEFT — вне scope #97. Ниже — целевой
+профиль координат и payload для расширения адаптера и тестов.
+
 Endpoint — `POST /projects/{id}/merge_requests/{iid}/discussions`.
 В payload обязательны `body` и для inline `position`: `position_type="text"`,
 оба исходных пути, `base_sha/start_sha/head_sha` одной закреплённой версии.
@@ -1630,7 +1638,8 @@ operation_key = SHA256(canonical_json({publication_key, ordinal, payload_digest}
 `payload_digest` охватывает все значимые отправляемые поля, включая body/event,
 координаты и SHA, но исключает только генерируемый служебный marker, чтобы избежать
 рекурсивного хеша. Ключ операции и payload связаны уникальным ограничением хранения.
-Формат backend-маркера в body:
+Формат backend-маркера в body (цель #107; на `main` GitHub/GitLab публикация #97 использует
+legacy `findings_hash` markers, см. SD §8.4 и PIPELINE_SPEC §5.2):
 
 ```text
 <!-- ai-review:v2 run=<uuid> head=<full-sha> op=<operation-key> payload=<sha256> -->
@@ -1753,8 +1762,9 @@ review. Подтверждённый legacy-object связывается с run
   fallback с фактом провайдера (`posted_inline_finding_ids`); при прочих случаях
   `run_lifecycle_store.complete_publication` связывает comments по порядку и равному
   количеству — нужен явный mapping подтверждённых remote объектов.
-- GitLab-адаптер (#171) заполняет `position` по §9.5 из DiffMap, сверяет head перед
-  каждым POST, классифицирует 400/422 с position как coordinates. Ключи §10 /
+- GitLab publication на `main` — [#97](https://github.com/larchanka-training/dmc-268-api-t6/issues/97)
+  (`gitlab_review_publication.py`, SD §8.4). Целевой #171 заполняет `position` по §9.5 из DiffMap,
+  сверяет head перед каждым POST, классифицирует 400/422 с position как coordinates. Ключи §10 /
   отдельные receipts операций и LEFT — не реализованы.
 
 ## 11. Приёмочные сценарии и оценка качества
@@ -1878,7 +1888,7 @@ quality gates не объявляются достигнутыми без baseli
    final result, API/UI coverage и write-back. Новый pipeline включается только
    после полной реализации и приёмки всей цепочки по §11. Первые отдельные PR
    не дают права заявить соответствие полному pipeline.
-4. Сквозные LEFT и GitLab внедряются отдельными задачами.
+4. Сквозные LEFT и полный GitLab ingress — отдельные задачи; публикация discussions #97 уже на `main`.
 
 Это порядок поставки компонентов, а не порядок обработки run: в runtime
 загрузка политики и применение ignore предшествуют контексту и любому LLM-вызову

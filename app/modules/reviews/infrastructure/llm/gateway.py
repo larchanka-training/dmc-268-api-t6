@@ -512,6 +512,7 @@ class LlmGateway:
             timeout_s=timeout_s,
             estimate=estimate,
             started_at=started_at,
+            operation=task.operation,
             fx=_fx_provenance(quote_result),
         )
 
@@ -807,6 +808,7 @@ class _RecordDraft:
     timeout_s: float
     estimate: int
     started_at: datetime
+    operation: str
     fx: FxProvenance | None = None
 
     def finish(
@@ -832,6 +834,7 @@ class _RecordDraft:
             error=error,
             fx=self.fx,
             paid_metadata_error=paid_metadata_error,
+            operation=self.operation,
         )
 
 

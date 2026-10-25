@@ -352,7 +352,10 @@ docker compose up -d worker        # сервис worker в docker-compose.yml
 ненастроенном шлюзе; `GITHUB_APP_ID` и
 `GITHUB_APP_PRIVATE_KEY` необязательны: без них процесс стартует, пишет предупреждение,
 а sweep «2 мин без CI», публикация в GitHub (ревью и check-run), consumer `index.repo`
-и сверка индекса с HEAD выключены; без consumer выключена и рассылка пробуждений индекса. `WORKER_ID`
+и сверка индекса с HEAD выключены; без consumer выключена и рассылка пробуждений индекса.
+`GITLAB_TOKEN` и `GITLAB_BASE_URL` (#97) включают публикацию discussions: без токена GitLab-прогон
+остаётся в `publishing` и HTTP к GitLab нет; `GITLAB_BASE_URL` — корень инстанса, код добавляет
+`/api/v4`, по умолчанию `https://gitlab.com`. `WORKER_ID`
 (по умолчанию `hostname:pid`) пишется в `runs.worker_id`, `PORTAL_URL` даёт ссылку на
 прогон в check-run. Некорректный непустой `PORTAL_URL` не даёт worker стартовать;
 [проверка и восстановление](SECRETS.md#portal_url) описаны в операторской документации. `CODE_INDEX_*` (#142) настраивают индексатор графа, а
@@ -372,7 +375,7 @@ docker compose up -d worker        # сервис worker в docker-compose.yml
 | Задача | Что делает | Use case |
 |---|---|---|
 | consumer `review.run.fast` (prefetch 1) | RunGuard, claim по lease, попытка под watchdog, retry и DLQ | [HandleReviewRun](../app/modules/reviews/application/handle_review_run.py) |
-| consumer `review.publish` (prefetch 1) | T14-T16: ревью в GitHub, check-run | [PublishRunReview](../app/modules/reviews/application/publish_run_review.py) |
+| consumer `review.publish` (prefetch 1) | T14–T16: `github.publish_review` или `gitlab.publish_review` (#97); check-run только для GitHub | [PublishRunReview](../app/modules/reviews/application/publish_run_review.py) |
 | consumer `index.repo` (prefetch 1, #142) | задание графа RAG: claim lease, HEAD default branch, архив, публикация; retry и DLQ по исходу (SD §7.4). Свой `SubprocessSourceParser` и HTTP-клиент GitHub; без GitHub App не запускается | [BuildRepositoryIndex](../app/modules/code_index/application/build_index.py) |
 | лидер-цикл (`pg_advisory_lock`, 30 с) | sweep «2 мин без CI» и повторная отправка outbox (`message_published_at IS NULL`, сигналы отмены T6); после них leader-задачи индекса графа (#143) — сходимость, рассылка пробуждений, сборка мусора, TTL-очистка и сверка с HEAD — с общим бюджетом около 10 с на тик; без GitHub App сверка и рассылка выключены, остальные работают | `SweepNoCi`, `TryEnqueueWebhookRun.replay_pending_publications`, [`CodeIndexLeaderTasks`](../app/modules/code_index/application/leader_tasks.py) |
 
@@ -383,9 +386,13 @@ Consumer `review.run.deep` не запускается, очередь толь�
 Транзакции попытки: claim (`queued` → `running`, `attempt + 1`, lease 5 мин,
 `NOTIFY run_updated`) идёт одной короткой транзакцией; diff, конвенции и вызов модели идут
 вне транзакций; heartbeat раз в 60 с продлевает lease только до дедлайна попытки
-(8 мин для fast); T8 (`review.postprocess`, находки, `publishing`) идёт одной транзакцией,
-после commit публикуется `review.publish/v1` с publisher confirms; ack входящего сообщения
-отправляется после commit. Каждая смена `state` отправляет `NOTIFY run_updated` в той же транзакции.
+(8 мин для fast); T8 (`llm.review_output`, `review.postprocess`, находки, `publishing`) идёт
+одной транзакцией, после commit публикуется `review.publish/v1` с publisher confirms; ack
+входящего сообщения отправляется после commit. Каждая смена `state` отправляет
+`NOTIFY run_updated` в той же транзакции. Каждая вставка `run_actions` шлёт `NOTIFY run_step`
+в той же транзакции; portal-api слушает канал (`run_step_listener`), парсит payload в
+`RunStep` и кладёт в in-memory hub; `/api/stream` мультиплексирует `run.updated` и `run.step`
+(`iter_visible_run_events`), отбрасывая события по невидимым Run так же, как статус.
 
 Процесс API (`app/main.py`) тоже публикует в RabbitMQ: `POST /api/runs/{id}/rerun`
 (новый Run с `trigger = rerun`, AMQP priority 9) и сигнал закрытия check-run T6 при
@@ -400,7 +407,9 @@ autocommit-соединении, [webhook_work_listener.py](../app/bootstrap/web
 Статусы из worker доходят до `/api/stream` через PostgreSQL: API слушает канал
 `run_updated` (`LISTEN` на отдельном autocommit-соединении,
 [run_update_listener.py](../app/bootstrap/run_update_listener.py)) и передаёт события в
-хаб, который хранит для медленного подписчика последний статус каждого Run.
+статусный хаб, который держит последний статус каждого Run. Отдельный хаб шагов
+(`run_step_listener`) держит каждый `run.step`. Оба буферизуют события для медленного
+подписчика, пока клиент не успевает читать SSE (см. `test_slow_subscriber_keeps_the_latest_status_and_every_step`).
 
 Хаб ничего не хранит после отключения клиента, поэтому события `/api/stream` несут `id:`, а
 переподключение с `Last-Event-ID` повторяет пропущенное (ui#74, AC 2.16). `id` — это

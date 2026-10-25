@@ -113,6 +113,7 @@ async def _publication(
         rule_names=context.rule_names,
         repository_max_inline=context.repository_max_inline,
         severity_threshold=context.severity_threshold,
+        checked_paths=context.checked_paths,
     )
     return (
         context.severity_threshold,
@@ -282,7 +283,10 @@ def test_created_run_and_retry_keep_pins_but_rerun_uses_current_pair(env: Env) -
             assert await _publication(factory, run_id) == expected
             queue = RecordingQueue()
             assert await StoreReviewOutput(
-                lambda: SqlAlchemyReviewOutputUnitOfWork(factory), queue, worker_id="worker"
+                lambda: SqlAlchemyReviewOutputUnitOfWork(factory),
+                queue,
+                worker_id="worker",
+                run_url=lambda _: None,
             ).execute(run_id, _answer())
             assert len(queue.pointers) == 1 and queue.pointers[0].run_id == run_id
             async with factory() as session:

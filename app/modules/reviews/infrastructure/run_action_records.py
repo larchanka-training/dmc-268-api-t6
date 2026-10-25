@@ -11,8 +11,15 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.modules.reviews.application.run_events import utc_rfc3339
+from app.modules.reviews.infrastructure.llm.models import (
+    CONVENTIONS_OPERATION,
+    REVIEW_OPERATION,
+)
+from app.modules.reviews.infrastructure.llm_call_trace import LLM_CALL_TOOL
 from app.modules.reviews.infrastructure.models import Run, RunAction
 from app.modules.reviews.infrastructure.run_action_payloads import place_response
+
+SSE_LLM_OPERATIONS = frozenset({CONVENTIONS_OPERATION, REVIEW_OPERATION})
 
 CHANNEL = "run_step"
 
@@ -37,7 +44,15 @@ async def insert_run_action(
     ``NOTIFY`` uses this session, so a rollback of the caller's transaction emits nothing.
     ``ok`` is taken from ``response`` before the body is stored.
     """
-    await session.execute(select(Run.id).where(Run.id == run_id).with_for_update())
+    run_attempt = await session.scalar(
+        select(Run.attempt).where(Run.id == run_id).with_for_update()
+    )
+    if run_attempt is None:
+        msg = f"run {run_id} not found"
+        raise ValueError(msg)
+    if run_attempt < 1:
+        msg = f"run {run_id} attempt must be >= 1 before recording a step (got {run_attempt})"
+        raise ValueError(msg)
     current = await session.scalar(
         select(func.coalesce(func.max(RunAction.index), -1)).where(RunAction.run_id == run_id)
     )
@@ -58,15 +73,18 @@ async def insert_run_action(
         )
     )
     await session.flush()
-    payload = json.dumps(
-        {
-            "run_id": str(run_id),
-            "tool": tool,
-            "index": index,
-            "ok": ok,
-            "started_at": utc_rfc3339(started_at),
-            "duration_ms": duration_ms,
-        },
-        separators=(",", ":"),
-    )
+    notify: dict[str, object] = {
+        "run_id": str(run_id),
+        "tool": tool,
+        "index": index,
+        "ok": ok,
+        "started_at": utc_rfc3339(started_at),
+        "duration_ms": duration_ms,
+        "attempt": run_attempt,
+    }
+    if tool == LLM_CALL_TOOL:
+        operation = request.get("operation")
+        if operation in SSE_LLM_OPERATIONS:
+            notify["llm_operation"] = operation
+    payload = json.dumps(notify, separators=(",", ":"))
     await session.execute(select(func.pg_notify(CHANNEL, payload)))
