@@ -444,7 +444,10 @@ class ExecuteReviewRun:
             # Pass 3: Validate attribution against manifest.
             # Unshown evidence refs drop only this candidate (CVS §6.2 :702, :729-730)
             valid_attr, attr_err = validate_v2_attribution(
-                finding, reviewer_manifest, pr_meta=context.pr_meta
+                finding,
+                reviewer_manifest,
+                pr_meta=context.pr_meta,
+                policy_snapshot=context.policy_snapshot,
             )
             if not valid_attr:
                 _LOGGER.info(

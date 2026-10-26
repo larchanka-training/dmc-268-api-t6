@@ -3118,6 +3118,127 @@ def test_execute_review_drops_evidence_source_disallowed_and_revision_mismatch()
         assert "revision_mismatch" in reasons
 
 
+def test_execute_review_drops_attribution_to_a_whitespace_only_agents_document() -> None:
+    # The prompt shows the blank lines of a whitespace-only AGENTS.md, so its manifest block
+    # has lines; only the run's snapshot, passed by the use case, says it is empty (#130).
+    published: Any = {}
+    verifier_received: list[str] = []
+    snapshot = replace(
+        _make_test_snapshot(),
+        agents=make_policy_document_present(path="AGENTS.md", text="  \n\t\n"),
+    )
+
+    class Processor:
+        async def prepare(self, run_id: UUID) -> GeneratedConventions:
+            return conventions()
+
+    class Repository:
+        async def get_review_prompt_input(
+            self, run_id: UUID, saved: GeneratedConventions
+        ) -> ReviewPromptInput:
+            line = DiffLine(10, "added", "x = 1")
+            return ReviewPromptInput(
+                system="Review.",
+                rules=(),
+                agents_md=None,
+                conventions=RepoConventions((), ()),
+                changed_files=(ChangedFile("app/main.py", "modified", (line,)),),
+                omitted_files=(),
+                policy_snapshot=snapshot,
+            )
+
+    class Model:
+        async def get_pull_request_meta(self, run_id: UUID) -> PullRequestMeta:
+            return PullRequestMeta(
+                "Title", None, "author", "feature", "main", (), 1, 1, 0, False, False
+            )
+
+        async def draft_review(self, *, context: ReviewContext) -> dict[str, Any]:
+            q_id = file_block_id("app/main.py")
+            finding = {
+                "path": "app/main.py",
+                "line": 10,
+                "start_line": None,
+                "severity": "high",
+                "category": "correctness",
+                "suggestion": None,
+                "confidence": 0.9,
+                "evidence_refs": [{"block_id": q_id, "start_line": 10, "end_line": 10}],
+            }
+            return {
+                "findings": [
+                    {
+                        **finding,
+                        "title": "Cites a blank AGENTS.md",
+                        "body": "Attributed to a document with no content",
+                        "rule_name": "AGENTS.md",
+                    },
+                    {
+                        **finding,
+                        "title": "Valid candidate",
+                        "body": "Valid body",
+                        "rule_name": None,
+                    },
+                ],
+                "summary": {"problem": "p", "done_well": "d", "effort": "none"},
+            }
+
+    class Publisher:
+        async def execute(self, run_id: UUID, raw_output: Any) -> bool:
+            nonlocal published
+            published = raw_output
+            return True
+
+    class VerifierModel:
+        async def verify(
+            self, *, system_prompt: str, user_prompt: str, **_: object
+        ) -> dict[str, Any]:
+            cand_ids = re.findall(r'candidate_id="([^"]+)"', user_prompt)
+            verifier_received.extend(cand_ids)
+            return {
+                "decisions": [
+                    {
+                        "candidate_id": cid,
+                        "status": "supported",
+                        "reason": "OK",
+                        "evidence_refs": [
+                            {
+                                "block_id": file_block_id("app/main.py"),
+                                "start_line": 10,
+                                "end_line": 10,
+                            }
+                        ],
+                        # Cites the shown blank AGENTS.md line, so a candidate that
+                        # reached the verifier with that attribution would be confirmed.
+                        "requirement_refs": [
+                            {
+                                "block_id": "policy-agents",
+                                "start_line": 1,
+                                "end_line": 1,
+                                "check_id": None,
+                            }
+                        ],
+                    }
+                    for cid in cand_ids
+                ]
+            }
+
+    pipeline = ExecuteReviewRun(
+        Processor(),
+        Repository(),
+        Model(),
+        Publisher(),
+        reflection_pass=ReflectionPass(VerifierModel()),
+    )
+
+    assert asyncio.run(pipeline.execute(RUN_ID)) is True
+    assert len(verifier_received) == 1
+    assert [f["title"] for f in published["findings"]] == ["Valid candidate"]
+    assert [(d.finding.rule_name, d.drop_reason) for d in published.dropped_findings] == [
+        ("AGENTS.md", "evidence_source_disallowed")
+    ]
+
+
 def test_execute_review_run_multiple_files_snapshot_fits_without_overflow() -> None:
     class Processor:
         async def prepare(self, run_id: UUID) -> GeneratedConventions:

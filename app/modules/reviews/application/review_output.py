@@ -20,7 +20,7 @@ if TYPE_CHECKING:
         ProcessedFinding,
         ProcessedReviewOutput,
     )
-    from app.modules.reviews.application.policy_snapshot import CallManifest
+    from app.modules.reviews.application.policy_snapshot import CallManifest, PolicySnapshot
     from app.modules.reviews.application.prompt_builder import ChangedFile, PullRequestMeta
 
 type Severity = Literal["critical", "high", "medium", "low", "info"]
@@ -262,8 +262,13 @@ def validate_v2_attribution(
     manifest: CallManifest,
     *,
     pr_meta: PullRequestMeta | None = None,
+    policy_snapshot: PolicySnapshot | None = None,
 ) -> tuple[bool, str | None]:
-    """Validate that finding evidence and policy references exist in the call manifest."""
+    """Validate that finding evidence and policy references exist in the call manifest.
+
+    With ``policy_snapshot`` a policy document must also have content by the snapshot's
+    own test: a whitespace-only document is shown as lines but counts as empty.
+    """
     for ref in finding.evidence_refs:
         block = manifest.get_block(ref.block_id)
         if block is None:
@@ -306,21 +311,49 @@ def validate_v2_attribution(
                 f"not shown in block '{ref.block_id}'",
             )
 
+    # A policy document is citable only when the prompt showed it with content: an empty
+    # document keeps a zero-line block in the manifest, a missing one has no block (#130).
     if finding.rule_name == ".review/rules.md":
-        has_rules = any(b.source_kind == "repository_rules" for b in manifest.blocks)
-        if not has_rules:
+        rules_blocks = [b for b in manifest.blocks if b.source_kind == "repository_rules"]
+        if not rules_blocks:
             return (
                 False,
                 "evidence_source_disallowed: rule_name is '.review/rules.md' "
                 "but no repository_rules in manifest",
             )
+        if not any(b.shown_line_count > 0 for b in rules_blocks):
+            return (
+                False,
+                "evidence_source_disallowed: rule_name is '.review/rules.md' "
+                "but repository_rules shows no lines",
+            )
+        if policy_snapshot is not None and not policy_snapshot.has_custom_rules:
+            return (
+                False,
+                "evidence_source_disallowed: rule_name is '.review/rules.md' "
+                "but the document has no content",
+            )
     elif finding.rule_name == "AGENTS.md":
-        has_agents = any(b.source_kind == "project_conventions_document" for b in manifest.blocks)
-        if not has_agents:
+        agents_blocks = [
+            b for b in manifest.blocks if b.source_kind == "project_conventions_document"
+        ]
+        if not agents_blocks:
             return (
                 False,
                 "evidence_source_disallowed: rule_name is 'AGENTS.md' "
                 "but no project_conventions_document in manifest",
+            )
+        if not any(b.shown_line_count > 0 for b in agents_blocks):
+            return (
+                False,
+                "evidence_source_disallowed: rule_name is 'AGENTS.md' "
+                "but project_conventions_document shows no lines",
+            )
+        if policy_snapshot is not None and not policy_snapshot.has_agents_doc:
+            return (
+                False,
+                "evidence_source_disallowed: rule_name is 'AGENTS.md' "
+                "but the document has no content",
             )
     elif finding.rule_name and finding.rule_name.startswith("service-defaults:"):
         has_defaults = any(b.source_role == "service_defaults" for b in manifest.blocks)
