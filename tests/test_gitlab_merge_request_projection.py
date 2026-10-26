@@ -678,3 +678,21 @@ def test_dispatch_terminal_handling_result_and_legacy_projector_are_compatible()
         result = asyncio.run(GitLabWebhookDispatchAdapter(handler).execute(raw_receipt()))
         assert result.status == InstallationDeliveryDispatchStatus.PROJECTED_PR
         assert result.detail is None
+
+
+def test_dispatch_decodes_json_once_per_claim(monkeypatch: pytest.MonkeyPatch) -> None:
+    delivery = raw_receipt()
+    calls = 0
+    loads = json.loads
+
+    def counted(*args: Any, **kwargs: Any) -> Any:
+        nonlocal calls
+        calls += 1
+        return loads(*args, **kwargs)
+
+    monkeypatch.setattr(json, "loads", counted)
+    handler = Handler()
+    result = asyncio.run(GitLabWebhookDispatchAdapter(handler).execute(delivery))
+    assert result.status == InstallationDeliveryDispatchStatus.PROJECTED_PR
+    assert handler.commands == [COMMAND]
+    assert calls == 1

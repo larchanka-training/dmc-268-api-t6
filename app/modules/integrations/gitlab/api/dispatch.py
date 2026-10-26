@@ -5,9 +5,12 @@ from __future__ import annotations
 import json
 
 from app.common.application.log_token import log_token
-from app.modules.integrations.gitlab.api.dtos import GitLabMergeRequestDto, decode_gitlab_payload
+from app.modules.integrations.gitlab.api.dtos import parse_gitlab_payload
 from app.modules.integrations.gitlab.application.request_credentials import GitLabTargetInactive
-from app.modules.integrations.gitlab.application.webhook_receipts import validate_gitlab_receipt
+from app.modules.integrations.gitlab.application.webhook_receipts import (
+    validate_gitlab_receipt_identity,
+    validate_gitlab_receipt_payload,
+)
 from app.modules.integrations.webhooks.application.github_installation_dispatch import (
     InstallationDeliveryDispatchResult,
     InstallationDeliveryDispatchStatus,
@@ -38,29 +41,27 @@ class GitLabWebhookDispatchAdapter:
 
     async def execute(self, delivery: WebhookReceipt) -> InstallationDeliveryDispatchResult:
         try:
-            payload, project_id = validate_gitlab_receipt(delivery)
-            decode_gitlab_payload(
+            origin = validate_gitlab_receipt_identity(delivery)
+            parsed = parse_gitlab_payload(
                 delivery.payload_json.encode("utf-8"), event_name=delivery.event_name
+            )
+            project_id = validate_gitlab_receipt_payload(
+                parsed.payload, event_name=delivery.event_name
             )
             if delivery.event_name != "Merge Request Hook":
                 return InstallationDeliveryDispatchResult(
                     InstallationDeliveryDispatchStatus.IGNORED_IRRELEVANT_EVENT
                 )
-            mr = GitLabMergeRequestDto.model_validate(payload)
+            mr = parsed.merge_request
+            if mr is None or project_id is None:
+                raise ValueError("invalid merge request identity")
             attributes = mr.object_attributes
-            if (
-                "target_project_id" in attributes.model_fields_set
-                and attributes.target_project_id != mr.project.id
-            ):
-                raise ValueError("invalid target project")
             if attributes.action not in GitLabMergeRequestAction:
                 return InstallationDeliveryDispatchResult(
                     InstallationDeliveryDispatchStatus.IGNORED_IRRELEVANT_EVENT
                 )
-            assert delivery.origin_provider_installation_id is not None
-            assert project_id is not None
             command = GitLabMergeRequestCommand(
-                delivery.origin_provider_installation_id,
+                origin,
                 project_id,
                 attributes.id,
                 attributes.iid,

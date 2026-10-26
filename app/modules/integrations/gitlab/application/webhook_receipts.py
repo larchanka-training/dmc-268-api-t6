@@ -15,6 +15,13 @@ class GitLabReceiptError(ValueError):
     """Constant public error codes; never include a header, body, or credential."""
 
 
+class GitLabReceiptOriginInactive(GitLabReceiptError):
+    """Admission lost its active origin after the authentication read."""
+
+    def __init__(self) -> None:
+        super().__init__("inactive_origin")
+
+
 def prepare_gitlab_receipt(
     *,
     connection_id: UUID,
@@ -57,13 +64,7 @@ def validate_gitlab_receipt(receipt: WebhookReceipt) -> tuple[dict[str, object],
     ignored receipts. If a project is supplied, it must still be bound to the origin.
     Deeper MR transport/action decoding is deliberately left to T7/T8.
     """
-    origin = receipt.origin_provider_installation_id
-    if receipt.provider != "gitlab" or not isinstance(origin, UUID):
-        raise GitLabReceiptError("invalid_origin")
-    if re.fullmatch(rf"gitlab:{origin}:[0-9a-f]{{64}}", receipt.delivery_id) is None:
-        raise GitLabReceiptError("invalid_delivery_identity")
-    if re.fullmatch(r"[A-Za-z][A-Za-z0-9 _-]{0,99}", receipt.event_name) is None:
-        raise GitLabReceiptError("invalid_event")
+    validate_gitlab_receipt_identity(receipt)
     try:
         payload = json.loads(
             receipt.payload_json, parse_float=_finite_float, parse_constant=_invalid_constant
@@ -72,6 +73,22 @@ def validate_gitlab_receipt(receipt: WebhookReceipt) -> tuple[dict[str, object],
         raise GitLabReceiptError("invalid_payload") from None
     if not isinstance(payload, dict):
         raise GitLabReceiptError("invalid_payload")
+    return payload, validate_gitlab_receipt_payload(payload, event_name=receipt.event_name)
+
+
+def validate_gitlab_receipt_identity(receipt: WebhookReceipt) -> UUID:
+    """Validate normalized authority independently of payload decoding."""
+    origin = receipt.origin_provider_installation_id
+    if receipt.provider != "gitlab" or not isinstance(origin, UUID):
+        raise GitLabReceiptError("invalid_origin")
+    if re.fullmatch(rf"gitlab:{origin}:[0-9a-f]{{64}}", receipt.delivery_id) is None:
+        raise GitLabReceiptError("invalid_delivery_identity")
+    if re.fullmatch(r"[A-Za-z][A-Za-z0-9 _-]{0,99}", receipt.event_name) is None:
+        raise GitLabReceiptError("invalid_event")
+    return origin
+
+
+def validate_gitlab_receipt_payload(payload: dict[str, object], *, event_name: str) -> int | None:
     attributes = payload.get("object_attributes")
     action = attributes.get("action") if isinstance(attributes, dict) else None
     if isinstance(action, str) and len(action) > 100:
@@ -84,11 +101,11 @@ def validate_gitlab_receipt(receipt: WebhookReceipt) -> tuple[dict[str, object],
         project_id = project.get("id")
         if type(project_id) is not int or not 0 < project_id <= 9223372036854775807:
             raise GitLabReceiptError("invalid_payload")
-    if receipt.event_name == "Merge Request Hook" and (
+    if event_name == "Merge Request Hook" and (
         project_id is None or payload.get("object_kind") != "merge_request"
     ):
         raise GitLabReceiptError("invalid_payload")
-    return payload, project_id
+    return project_id
 
 
 def _invalid_constant(value: str) -> object:

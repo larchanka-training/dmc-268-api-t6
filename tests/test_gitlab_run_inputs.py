@@ -311,3 +311,45 @@ def test_provider_metadata_cannot_replace_the_requested_origin() -> None:
             FetchVcsReviewInput(gitlab, checkpoint=checkpoint).execute(locator, HEAD, START)
         )
     assert gitlab.calls == [("metadata", locator)]
+
+
+@pytest.mark.parametrize("field", ["origin_provider_installation_id", "repository_external_id"])
+def test_credentials_reject_a_lost_authority_id_before_resolution(field: str) -> None:
+    """A malformed adapter value must fail closed even if Python assertions are disabled."""
+    from typing import Any, cast
+
+    from sqlalchemy.ext.asyncio import AsyncSession
+
+    import app.modules.integrations.gitlab.infrastructure.run_credentials as credentials_module
+    from app.modules.integrations.gitlab.infrastructure.run_credentials import GitLabRunCredentials
+
+    locator = gitlab_locator()
+    runs = RunInputs(locator)
+    calls: list[object] = []
+
+    class Authority:
+        async def resolve_target(self, identity: object) -> None:
+            calls.append(identity)
+            raise RuntimeError("invalid identity reached authority")
+
+    async def checkpoint() -> None:
+        pass
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(credentials_module, "SqlAlchemyRunRepository", lambda *a, **kw: runs)
+        assert runs.current is not None
+        credentials = GitLabRunCredentials(
+            session_factory=cast(async_sessionmaker[AsyncSession], object()),
+            authority=cast(Any, Authority()),
+            run_id=RUN,
+            expected_workspace_id=UUID(int=9),
+            expected_input=runs.current,
+            checkpoint=checkpoint,
+        )
+        # Model a malformed detached adapter value after initial construction; the boundary
+        # must reject it before constructing the authority's target identity.
+        object.__setattr__(locator, field, None)
+        with pytest.raises(RunCancelled, match="installation_unavailable"):
+            asyncio.run(credentials.bind())
+        if calls:
+            raise AssertionError("authority was called with a missing ID")
