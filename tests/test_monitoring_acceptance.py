@@ -18,6 +18,7 @@ SSH action, with the banner drone-ssh appends to it; the other workflow tests re
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import subprocess
@@ -31,6 +32,7 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = REPO_ROOT / "deploy" / "monitoring" / "acceptance.sh"
 WORKFLOW = REPO_ROOT / ".github" / "workflows" / "monitoring-acceptance.yml"
+DASHBOARD = REPO_ROOT / "deploy" / "monitoring" / "grafana" / "dashboards" / "overview.json"
 API_PROJECT = "dmc-268-api-staging"
 GRAFANA_DB_PASSWORD = "a" * 48
 PG_EXPORTER_PASSWORD = "b" * 48
@@ -75,14 +77,26 @@ bump() { echo $(($(count "$1") + 1)) > "${state}/$1"; }
 nth() { bump "$1"; [[ ",$2," == *",$(count "$1"),"* ]]; }
 case " $* " in
   *" ps -q "*)
+    # The docker CLI warns on stderr about its own config, also when the command succeeds.
+    echo 'WARNING: Error loading config file: /root/.docker/config.json: permission denied' >&2
+    if [[ -n "${STUB_DOCKER_DOWN:-}" ]]; then
+      echo 'Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is it running?' >&2
+      exit 1
+    fi
     if [[ -n "${STUB_NO_POSTGRES:-}" ]]; then exit 0; fi
     echo pgcontainer
     ;;
-  *" inspect "*) echo 172.18.0.5 ;;
+  *" inspect "*)
+    if [[ -n "${STUB_INSPECT_FAILS:-}" ]]; then
+      echo 'Error response from daemon: No such object: pgcontainer' >&2
+      exit 1
+    fi
+    echo 172.18.0.5
+    ;;
   *" config --services "*)
-    if [[ -n "${STUB_COMPOSE_FAILS:-}" ]]; then echo "Error: compose.yml not found" >&2; exit 1; fi
-    # docker compose writes warnings to stderr even when it succeeds.
+    # docker compose writes warnings to stderr before an error and when it succeeds.
     echo 'WARN[0000] /opt/dmc-268-monitoring/compose.yml: the attribute version is obsolete' >&2
+    if [[ -n "${STUB_COMPOSE_FAILS:-}" ]]; then echo "Error: compose.yml not found" >&2; exit 1; fi
     printf 'prometheus\nalertmanager\ngrafana\npg-backup\n'
     if [[ " $* " == *compose.offsite.yml* ]]; then echo backup-offsite; fi
     ;;
@@ -112,7 +126,8 @@ case " $* " in
         ;;
       *caddy_http_request_duration_seconds_count*)
         # STUB_RPS: "<host>=<rate>" pairs; Prometheus drops _other when the query selects it out.
-        for pair in ${STUB_RPS-staging-api.example.test=0.4 _other=2.5}; do
+        # grafana.<domain>: the Grafana step of the workflow requests it just before the run.
+        for pair in ${STUB_RPS-staging-api.example.test=0.4 grafana.example.test=0.1 _other=2.5}; do
           if [[ "${pair%%=*}" == _other && "$*" == *'host!="_other"'* ]]; then continue; fi
           echo "{host=\"${pair%%=*}\"} => ${pair#*=} @[1761300000]"
         done
@@ -175,6 +190,7 @@ case " $* " in
     ;;
   *" pg_restore "*)
     cat > /dev/null
+    sleep "${STUB_RESTORE_SECONDS:-0}"
     if [[ -n "${STUB_RESTORE_FAILS:-}" ]]; then
       echo 'pg_restore: error: could not execute query: ERROR:  duplicate key value' >&2
       echo 'DETAIL:  Failing row contains (secret row content).' >&2
@@ -216,11 +232,12 @@ case " $* " in
 esac
 """
 
-# timeout(1) of coreutils, absent on macOS: records the limit and runs the command, or answers 124
-# without running it when the command matches STUB_TIMES_OUT.
+# timeout(1) of coreutils, absent on macOS: records "<options> <limit> <command>" and runs the
+# command, or answers 124 without running it when the command matches STUB_TIMES_OUT.
 FAKE_TIMEOUT = r"""#!/usr/bin/env bash
-printf '%s\n' "$*" >> "${STUB_TIMEOUT_LOG}"
-seconds="$1"
+options=""
+while [[ "$1" == --* ]]; do options="${options}$1"; shift; done
+printf '%s %s\n' "${options:-none}" "$*" >> "${STUB_TIMEOUT_LOG}"
 shift
 if [[ -n "${STUB_TIMES_OUT:-}" && " $* " == *"${STUB_TIMES_OUT}"* ]]; then exit 124; fi
 exec "$@"
@@ -371,19 +388,41 @@ def test_healthy_stack_passes_every_check(tmp_path: Path) -> None:
     assert "17 calls in 24 h, p95 9.8 s" in run.line("LLM latency (Grafana source)")
     assert f"{DUMP} -> revision 20261020_0037, 31 tables, 12 runs" in run.line("restore drill")
     assert "5 expected services running" in run.line("stack services")
-    assert "1 of 1 hosts with requests in 5 min" in run.line("RPS (edge proxy)")
+    assert run.line("RPS (edge proxy)").endswith("requests in 5 min on staging-api.example.test")
     assert "scratch database restore_drill_acceptance dropped" in run.report
     # A warning of docker compose on stderr is not a service: stack services is OK above.
     assert "WARN[0000]" not in run.report
 
 
+def test_a_decimal_comma_locale_does_not_zero_the_rps(tmp_path: Path) -> None:
+    # mawk on the host and the awk of macOS read "0.4" as 0 under a decimal-comma LC_NUMERIC. The
+    # test is meaningful only where de_DE.UTF-8 exists (macOS); without it awk falls back to C.
+    run = _run(tmp_path, LC_ALL="de_DE.UTF-8")
+
+    assert run.status("RPS (edge proxy)") == "OK", run.line("RPS (edge proxy)")
+
+
 def test_the_dashboard_checks_use_the_selectors_and_range_of_the_dashboard(tmp_path: Path) -> None:
+    dashboard = json.loads(DASHBOARD.read_text(encoding="utf-8"))
+    rps_exprs = [
+        target["expr"]
+        for panel in dashboard["panels"]
+        for target in panel.get("targets", [])
+        if "caddy_http_request_duration_seconds_count" in target.get("expr", "")
+    ]
+    [selector] = {
+        m
+        for e in rps_exprs
+        for m in re.findall(r"caddy_http_request_duration_seconds_count\{[^}]*\}", e)
+        if "code=" not in m
+    }
+    hours = re.fullmatch(r"now-(\d+)h", dashboard["time"]["from"])
+    assert hours is not None
     run = _run(tmp_path)
     calls = "\n".join(run.calls)
 
-    assert 'caddy_http_request_duration_seconds_count{host!="_other"}[5m]' in calls
-    # now-24h, the default range of overview.json.
-    assert "started_at > now() - interval '24 hours'" in calls
+    assert f"{selector}[5m]" in calls
+    assert f"started_at > now() - interval '{hours.group(1)} hours'" in calls
 
 
 def test_report_shows_permission_denied_for_both_monitoring_roles(tmp_path: Path) -> None:
@@ -559,7 +598,13 @@ def test_failed_first_request_with_a_successful_retry_is_a_delivery(tmp_path: Pa
         ({"STUB_RPS": ""}, "RPS (edge proxy)", "no caddy_http_request"),
         # Scanners hitting the IP land in _other, which the RPS panels leave out.
         ({"STUB_RPS": "_other=3.1"}, "RPS (edge proxy)", "series of an application host"),
-        ({"STUB_RPS": "staging-api.example.test=0"}, "RPS (edge proxy)", "no requests in 5 min"),
+        ({"STUB_RPS": "staging-api.example.test=0"}, "RPS (edge proxy)", "no requests to staging"),
+        # Only the requests of the workflow itself, to Grafana: no traffic of the application.
+        (
+            {"STUB_RPS": "staging-api.example.test=0 grafana.example.test=0.3"},
+            "RPS (edge proxy)",
+            "no requests to staging-api or staging-ui",
+        ),
         ({"STUB_METADATA_DENIED": "1"}, "role isolation", "cannot read its metadata columns"),
         (
             {"STUB_CLOSED_ERROR": "WARNING:  x; ERROR:  permission denied for table runs"},
@@ -661,19 +706,105 @@ def test_without_the_postgres_container_the_other_checks_still_run(tmp_path: Pat
     )
 
 
-def test_every_client_call_has_a_time_limit(tmp_path: Path) -> None:
-    run = _run(tmp_path)
-    limits = {
-        tool: {line.split()[0] for line in run.limits if f" {tool} " in f" {line} "}
+def _limits(run: Run) -> dict[str, set[int]]:
+    calls = [line.split() for line in run.limits if line.split()[0].startswith("--")]
+    return {
+        tool: {int(call[1]) for call in calls if tool in call[2:]}
         for tool in ("promtool", "wget", "pg_restore", "amtool", "psql", "dropdb", "config")
     }
 
-    assert limits["promtool"] == {"60"}
-    assert limits["wget"] == {"30"}
-    assert limits["pg_restore"] == {"300"}
+
+def test_every_client_call_has_a_time_limit(tmp_path: Path) -> None:
+    run = _run(tmp_path)
+    limits = _limits(run)
+
+    assert limits["promtool"] == {60}
+    assert limits["wget"] == {30}
+    assert limits["pg_restore"] == {300}
     assert all(limits[tool] for tool in limits), limits
-    # Every docker call of the script goes through timeout.
+    # Every docker call of the script goes through timeout, with a KILL for a client that ignores
+    # TERM. A call spans several log lines when its argv does; both logs split it the same way.
     assert len(run.limits) == len(run.calls)
+    assert all(line.startswith("--kill-after=10 ") for line in run.limits if line[:2] == "--")
+
+
+def test_limits_are_cut_to_the_time_left_of_the_run(tmp_path: Path) -> None:
+    run = _run(tmp_path, RUN_BUDGET_SECONDS="100")
+    limits = _limits(run)
+
+    assert run.result.returncode == 0, run.report
+    assert max(limits["pg_restore"]) <= 100
+    assert max(limits["promtool"]) <= 60
+
+
+def test_a_spent_budget_skips_every_client_call_and_still_prints_the_summary(
+    tmp_path: Path,
+) -> None:
+    run = _run(tmp_path, RUN_BUDGET_SECONDS="0")
+
+    assert run.result.returncode == 1
+    assert run.calls == []
+    assert run.status("test alert") == "FAIL"
+    assert "the time budget of the run (0 s) is spent" in run.line("restore drill")
+    assert "the time budget of the run (0 s) is spent" in run.line("stack services")
+    assert run.status("verified dump < 26 h") == "OK"
+
+
+def test_the_alert_wait_ends_with_the_run_budget(tmp_path: Path) -> None:
+    started = time.monotonic()
+    run = _run(
+        tmp_path,
+        STUB_TELEGRAM="silent",
+        RUN_BUDGET_SECONDS="6",
+        ALERT_DELIVERY_TIMEOUT_SECONDS="50",
+    )
+
+    assert time.monotonic() - started < 30
+    assert "no request to Telegram within" in run.line("test alert")
+
+
+def test_the_scratch_database_is_dropped_past_the_budget(tmp_path: Path) -> None:
+    # The budget runs out during the restore: the drop and its check still run, outside it.
+    run = _run(tmp_path, RUN_BUDGET_SECONDS="2", STUB_RESTORE_SECONDS="3")
+    drops = [call for call in run.calls if " dropdb " in call]
+
+    # Before the restore, after it, and the EXIT trap.
+    assert len(drops) == 3
+    assert run.status("scratch db cleanup") == "OK", run.line("scratch db cleanup")
+    assert run.status("test alert") == "FAIL"
+
+
+def test_the_temporary_file_is_removed(tmp_path: Path) -> None:
+    temp = tmp_path / "temp"
+    temp.mkdir()
+    run = _run(tmp_path, TMPDIR=str(temp))
+
+    assert run.result.returncode == 0, run.report
+    assert list(temp.iterdir()) == []
+
+
+@pytest.mark.parametrize(
+    ("knob", "reason"),
+    [
+        (
+            "STUB_DOCKER_DOWN",
+            "docker ps failed: Cannot connect to the Docker daemon at unix:///var/run/docker.sock",
+        ),
+        (
+            "STUB_INSPECT_FAILS",
+            "docker inspect of postgres failed: Error response from daemon: No such object",
+        ),
+    ],
+)
+def test_a_failed_postgres_lookup_fails_only_the_database_checks(
+    tmp_path: Path, knob: str, reason: str
+) -> None:
+    run = _run(tmp_path, extra={knob: "1"})
+    failed = ["LLM latency (Grafana source)", "role isolation", "restore drill"]
+
+    _assert_only_failed(run, *failed, skipped=("scratch db cleanup",))
+    for check in failed:
+        assert reason in run.line(check)
 
 
 def test_a_hung_client_fails_its_check_as_timed_out(tmp_path: Path) -> None:
@@ -681,6 +812,8 @@ def test_a_hung_client_fails_its_check_as_timed_out(tmp_path: Path) -> None:
 
     _assert_only_failed(run, "restore drill")
     assert "error: timed out after 300 s" in run.line("restore drill")
+    # The warning of the docker CLI on stderr did not hide postgres.
+    assert "postgres:" not in run.report
 
 
 def test_ports_mode_skips_the_edge_proxy_rps(tmp_path: Path) -> None:
@@ -724,18 +857,80 @@ def test_workflow_runs_only_by_hand_on_main_with_read_permissions() -> None:
     assert "fingerprint: ${{ vars.STAGING_SSH_FINGERPRINT }}" in workflow
     assert 'source: "deploy/monitoring/acceptance.sh"' in workflow
     assert "envs: MONITORING_DIR,API_DIR,SEND_TEST_ALERT,RUN_URL,RUN_ID\n" in workflow
-    # The SSH step must end before the job does, or the report is lost: the alert waits up to
-    # 6 min and the restore up to 5 min, more than the default command_timeout of 10 min allows.
+    # The run budget of acceptance.sh (15 min) plus the drops outside it (4.7 min) fit into
+    # command_timeout, which itself ends before the job does: past it the report is lost.
     assert "command_timeout: 20m" in workflow
     assert "timeout-minutes: 25" in workflow
 
 
-def test_workflow_checks_the_credentials_of_both_targets_before_ssh() -> None:
-    target = _step("Resolve staging target")
+TERRAFORM_TARGET = {
+    "STAGING_HOST": "203.0.113.7",
+    "STAGING_SSH_PORT": "22022",
+    "STAGING_SSH_USER": "root",
+    "HAS_STAGING_SSH_KEY": "true",
+}
+COURSE_TARGET = {
+    "VPS_HOST": "203.0.113.8",
+    "HAS_VPS_USER": "true",
+    "HAS_VPS_PASSWORD": "true",
+    "APP_DOMAIN": "example.test",
+}
 
-    assert "HAS_STAGING_SSH_KEY" in WORKFLOW.read_text(encoding="utf-8")
-    assert '"${HAS_STAGING_SSH_KEY}" != "true"' in target
-    assert '"${HAS_VPS_USER}" != "true" || "${HAS_VPS_PASSWORD}" != "true"' in target
+
+def _target_step(tmp_path: Path, **env: str) -> tuple[int, str, str]:
+    output = tmp_path / "output"
+    output.touch()
+    result = subprocess.run(
+        ["/bin/bash", "-e", "-c", _step("Resolve staging target")],
+        env={
+            "PATH": os.environ["PATH"],
+            "GITHUB_OUTPUT": str(output),
+            "STAGING_SSH_FINGERPRINT": "SHA256:" + "A" * 43,
+            **env,
+        },
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return result.returncode, result.stderr, output.read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize(
+    ("target", "missing", "message"),
+    [
+        (TERRAFORM_TARGET, "STAGING_SSH_USER", "needs variable STAGING_SSH_USER and secret"),
+        (TERRAFORM_TARGET, "HAS_STAGING_SSH_KEY", "needs variable STAGING_SSH_USER and secret"),
+        (COURSE_TARGET, "HAS_VPS_USER", "needs organization secrets VPS_DMC268_U"),
+        (COURSE_TARGET, "HAS_VPS_PASSWORD", "needs organization secrets VPS_DMC268_U"),
+    ],
+)
+def test_target_step_stops_on_an_empty_ssh_credential(
+    tmp_path: Path, target: dict[str, str], missing: str, message: str
+) -> None:
+    # GitHub renders `secrets.X != ''` of an empty secret as "false" and a variable as "".
+    empty = "false" if missing.startswith("HAS_") else ""
+    code, stderr, output = _target_step(tmp_path, **{**target, missing: empty})
+
+    assert code == 1
+    assert message in stderr
+    assert output == ""
+
+
+@pytest.mark.parametrize(
+    ("target", "expected"),
+    [
+        (TERRAFORM_TARGET, ["mode=terraform", "grafana_url="]),
+        (COURSE_TARGET, ["mode=course", "grafana_url=https://grafana.example.test"]),
+    ],
+)
+def test_target_step_resolves_a_target_with_its_credentials(
+    tmp_path: Path, target: dict[str, str], expected: list[str]
+) -> None:
+    code, stderr, output = _target_step(tmp_path, **target)
+
+    assert code == 0, stderr
+    for line in expected:
+        assert line in output.splitlines()
 
 
 def test_workflow_runs_the_host_checks_and_the_report_after_a_grafana_failure() -> None:

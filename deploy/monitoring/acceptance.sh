@@ -20,9 +20,13 @@
 #                                   group of the test alert open (the event route groups by
 #                                   environment only)
 #   ALERT_POLL_SECONDS              interval of the Alertmanager metric reads, default 10
+#   RUN_BUDGET_SECONDS              time for every client call and the alert wait, default 900 (15 min)
 #
-# Needs timeout(1) of coreutils on the host: every client call is limited, so a hung one fails its
-# check instead of eating the command_timeout of the workflow, which would end the run without a report.
+# Needs timeout(1) of coreutils on the host. Every client call is limited and cut to what is left of
+# the run budget, so hung clients fail their checks and the run still prints its summary before the
+# command_timeout of the workflow (20 min); past it the SSH step is killed and the report is lost.
+# Only the drops of the scratch database and the check that it is gone run past the budget: at most
+# four calls of 70 s, so the run ends within 15 + 4.7 min.
 set -euo pipefail
 set +o xtrace
 
@@ -49,6 +53,8 @@ DUMP_MAX_AGE_SECONDS=$((26 * 3600))
 OFFSITE_MAX_AGE_SECONDS=$((3 * 3600))
 ALERT_DELIVERY_TIMEOUT_SECONDS="${ALERT_DELIVERY_TIMEOUT_SECONDS:-360}"
 ALERT_POLL_SECONDS="${ALERT_POLL_SECONDS:-10}"
+RUN_BUDGET_SECONDS="${RUN_BUDGET_SECONDS:-900}"
+RUN_DEADLINE=$(($(date -u +%s) + RUN_BUDGET_SECONDS))
 DRILL_DB=restore_drill_acceptance
 if ! command -v timeout >/dev/null; then
   echo "timeout(1) not found: install coreutils" >&2
@@ -106,7 +112,7 @@ record() {
 section() { printf '\n== %s\n' "$1"; }
 now() { date -u +%s; }
 # stderr of a command whose stdout is parsed: a warning of docker compose is not a service name.
-STDERR_FILE="$(mktemp)"
+STDERR_FILE="$(mktemp "${TMPDIR:-/tmp}/acceptance.XXXXXX")"
 DRILL_STARTED=""
 # The temporary file, and the scratch database of an aborted drill; the regular drop is checked.
 cleanup() {
@@ -114,16 +120,28 @@ cleanup() {
   if [[ -n "${DRILL_STARTED}" ]]; then drop_drill >/dev/null 2>&1 || true; fi
 }
 trap cleanup EXIT
-# Runs a command with a time limit and reports a timeout as an error line.
-limited() {
+# Runs a command with a time limit and reports a timeout as an error line. --kill-after: a client
+# that ignores TERM.
+bounded() {
   local seconds="$1" status=0
   shift
-  timeout "${seconds}" "$@" || status=$?
-  if ((status == 124)); then echo "error: timed out after ${seconds} s" >&2; fi
+  timeout --kill-after=10 "${seconds}" "$@" || status=$?
+  if ((status == 124 || status == 137)); then echo "error: timed out after ${seconds} s" >&2; fi
   return "${status}"
 }
-# The first line of an error from psql, pg_restore or a client, without DETAIL or row content.
-ERROR_LINE_RE='^(ERROR|FATAL|psql|pg_restore|createdb|dropdb|Error|error)[: ]'
+# The same, with the limit cut to what is left of the run budget; nothing runs once it is spent.
+limited() {
+  local seconds="$1" left
+  shift
+  left=$((RUN_DEADLINE - $(now)))
+  if ((left <= 0)); then
+    echo "error: the time budget of the run (${RUN_BUDGET_SECONDS} s) is spent" >&2
+    return 124
+  fi
+  bounded $((seconds < left ? seconds : left)) "$@"
+}
+# The first line of an error from psql, pg_restore, docker or a client, without DETAIL or row content.
+ERROR_LINE_RE='^((ERROR|FATAL|psql|pg_restore|createdb|dropdb|Error|error|timeout)[: ]|Cannot connect to the Docker daemon|(Got )?permission denied while trying to connect)'
 # The error psql prints for a missing grant (two spaces after ERROR:, as psql writes it).
 DENIED_RE='^ERROR:  permission denied for table '
 error_line() {
@@ -134,6 +152,11 @@ error_line() {
   else
     printf '(output hidden)'
   fi
+}
+# The first error line of stderr alone, past warnings such as WARN[0000] of docker compose. Only for
+# stderr of docker: in the output of psql or pg_restore a later line may quote row content.
+stderr_error_line() {
+  grep -m 1 -E "${ERROR_LINE_RE}" "${STDERR_FILE}" || printf '(output hidden)'
 }
 psql_app() {
   limited 60 docker exec -i "${POSTGRES_CONTAINER}" psql -X -q -At -v ON_ERROR_STOP=1 \
@@ -168,8 +191,8 @@ printf 'Monitoring acceptance, %s, deploy mode %s\n' "$(date -u +%Y-%m-%dT%H:%M:
 POSTGRES_PROBLEM="" POSTGRES_CONTAINER="" POSTGRES_ADDRESS=""
 if ! out="$(limited 60 docker ps -q \
   --filter "label=com.docker.compose.project=${API_PROJECT}" \
-  --filter "label=com.docker.compose.service=postgres" 2>&1)"; then
-  POSTGRES_PROBLEM="docker ps failed: $(error_line "${out}")"
+  --filter "label=com.docker.compose.service=postgres" 2>"${STDERR_FILE}")"; then
+  POSTGRES_PROBLEM="docker ps failed: $(stderr_error_line)"
 elif [[ -z "${out}" || "${out}" == *$'\n'* ]]; then
   POSTGRES_PROBLEM="expected one running postgres container of project ${API_PROJECT}"
 else
@@ -178,8 +201,8 @@ else
   # loopback inside the postgres image is trust and would accept a wrong password.
   if ! out="$(limited 60 docker inspect -f \
     "{{with index .NetworkSettings.Networks \"${API_PROJECT}_default\"}}{{.IPAddress}}{{end}}" \
-    "${POSTGRES_CONTAINER}" 2>&1)"; then
-    POSTGRES_PROBLEM="docker inspect of postgres failed: $(error_line "${out}")"
+    "${POSTGRES_CONTAINER}" 2>"${STDERR_FILE}")"; then
+    POSTGRES_PROBLEM="docker inspect of postgres failed: $(stderr_error_line)"
   elif [[ ! "${out}" =~ ^[0-9a-f.:]+$ ]]; then
     POSTGRES_PROBLEM="postgres has no address on network ${API_PROJECT}_default"
   else
@@ -192,10 +215,10 @@ section "Stack ${COMPOSE_PROJECT}"
 expected="" services=""
 if ! expected="$(limited 60 "${COMPOSE[@]}" "${COMPOSE_FILES[@]}" --env-file "${ENV_FILE}" \
   config --services 2>"${STDERR_FILE}")"; then
-  record FAIL "stack services" "docker compose config failed: $(error_line "$(cat "${STDERR_FILE}")")"
+  record FAIL "stack services" "docker compose config failed: $(stderr_error_line)"
 elif ! services="$(limited 60 "${COMPOSE[@]}" ps -a --format '{{.Service}} {{.State}} {{.Health}}' \
   2>"${STDERR_FILE}")"; then
-  record FAIL "stack services" "docker compose ps failed: $(error_line "$(cat "${STDERR_FILE}")")"
+  record FAIL "stack services" "docker compose ps failed: $(stderr_error_line)"
 else
   printf '%s\n' "${services}"
   problems=()
@@ -271,13 +294,23 @@ if [[ "${DEPLOY_MODE}" != edge ]]; then
 elif rps="$(promql 'sum by (host) (rate(caddy_http_request_duration_seconds_count{host!="_other"}[5m]))' 2>&1)"; then
   printf 'Requests per second by host (5m):\n%s\n' "${rps}"
   hosts="$(grep -c 'host=' <<<"${rps}" || true)"
-  active="$(awk '/host=/ { sub(/.*=> /, ""); sub(/ @.*/, ""); if ($0 + 0 > 0) n++ } END { print n + 0 }' <<<"${rps}")"
+  # Requests count only on the hosts of the application, as in ApiHigh5xxRate (alerts.yml): the
+  # Grafana step of the workflow itself hits grafana.<domain> just before. LC_ALL=C: with a decimal
+  # comma in LC_NUMERIC mawk would read 0.4 as 0.
+  active="$(LC_ALL=C awk '
+    match($0, /host="[^"]+"/) {
+      host = substr($0, RSTART + 6, RLENGTH - 7)
+      value = $0
+      sub(/.*=> /, "", value)
+      sub(/ @.*/, "", value)
+      if (host ~ /^staging-(api|ui)\./ && value + 0 > 0) print host
+    }' <<<"${rps}" | paste -sd, -)"
   if ((hosts == 0)); then
     record FAIL "RPS (edge proxy)" "no caddy_http_request_duration_seconds_count series of an application host"
-  elif ((active == 0)); then
-    record FAIL "RPS (edge proxy)" "no requests in 5 min on ${hosts} hosts: open the app, then rerun"
+  elif [[ -z "${active}" ]]; then
+    record FAIL "RPS (edge proxy)" "no requests to staging-api or staging-ui in 5 min: open the app, then rerun"
   else
-    record OK "RPS (edge proxy)" "${active} of ${hosts} hosts with requests in 5 min"
+    record OK "RPS (edge proxy)" "requests in 5 min on ${active}"
   fi
 else
   record FAIL "RPS (edge proxy)" "promtool failed: $(error_line "${rps}")"
@@ -353,9 +386,10 @@ else
 fi
 
 section "Restore drill: newest dump into the scratch database ${DRILL_DB} (MONITORING.md §9, restore, step 1)"
-# --force: a session left by a cancelled run would otherwise keep the database.
+# --force: a session left by a cancelled run would otherwise keep the database. Outside the run
+# budget: the scratch database must not stay because the budget is spent.
 drop_drill() {
-  limited 60 docker exec "${POSTGRES_CONTAINER}" dropdb -U "${POSTGRES_USER}" --force --if-exists "${DRILL_DB}" 2>&1
+  bounded 60 docker exec "${POSTGRES_CONTAINER}" dropdb -U "${POSTGRES_USER}" --force --if-exists "${DRILL_DB}" 2>&1
 }
 if [[ -n "${POSTGRES_PROBLEM}" ]]; then
   record FAIL "restore drill" "${POSTGRES_PROBLEM}"
@@ -399,7 +433,8 @@ elif [[ -n "${newest}" ]]; then
   fi
   left=""
   if out="$(drop_drill)" \
-    && left="$(psql_app -d postgres -c "SELECT count(*) FROM pg_database WHERE datname = '${DRILL_DB}'" 2>&1)" \
+    && left="$(bounded 60 docker exec -i "${POSTGRES_CONTAINER}" psql -X -q -At -v ON_ERROR_STOP=1 \
+      -U "${POSTGRES_USER}" -d postgres -c "SELECT count(*) FROM pg_database WHERE datname = '${DRILL_DB}'" 2>&1)" \
     && [[ "${left}" == 0 ]]; then
     echo "scratch database ${DRILL_DB} dropped"
     record OK "scratch db cleanup" "${DRILL_DB} dropped, absent from pg_database"
@@ -445,7 +480,9 @@ else
     record FAIL "test alert" "amtool alert add failed: $(error_line "${out}")"
   else
     echo "alert MonitoringAcceptanceTest (run_id ${RUN_ID}) sent to Alertmanager, waiting for Telegram"
-    deadline=$(($(now) + ALERT_DELIVERY_TIMEOUT_SECONDS))
+    started=$(now)
+    deadline=$((started + ALERT_DELIVERY_TIMEOUT_SECONDS))
+    if ((deadline > RUN_DEADLINE)); then deadline="${RUN_DEADLINE}"; fi
     total="${total_before}" failed="${failed_before}" reads_ok=0 reads_failed=0
     while :; do
       # One line per read: the SSH session of the workflow sends no keepalive, and a quiet
@@ -472,7 +509,7 @@ else
     elif ((reads_ok == 0)); then
       record FAIL "test alert" "cannot read the metrics of Alertmanager during the wait (${reads_failed} reads)"
     else
-      record FAIL "test alert" "no request to Telegram within ${ALERT_DELIVERY_TIMEOUT_SECONDS} s"
+      record FAIL "test alert" "no request to Telegram within $(($(now) - started)) s"
     fi
   fi
 fi
