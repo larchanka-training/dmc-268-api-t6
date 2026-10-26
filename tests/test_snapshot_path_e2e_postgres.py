@@ -9,7 +9,10 @@ fit, a manifest per call, the review citing the diff and the L3 excerpt, the ver
 that excerpt, ``llm.verify`` and the publication input. A v3 run in the same composition
 stays on the legacy path. A retried v4 attempt keeps the snapshot and every pinned prompt
 while newer rows go live, and a provider failure after a model call sends the review to the
-fallback on a manifest row of its own.
+fallback on a manifest row of its own. With a ready graph index and the v4 prompt patched to
+show a retrieved section (#144), the review shows and records the caller of the changed
+function, the verifier shows it again with the same index commit, and a retry before the
+accepted answer retrieves from a newer index publication (D8).
 """
 
 from __future__ import annotations
@@ -35,6 +38,7 @@ from app.bootstrap.llm_gateway import build_gateway
 from app.modules.integrations.webhooks.infrastructure.github_installation_tree_provider import (
     GitHubAppInstallationAccessTokenProvider,
 )
+from app.modules.reviews.application import rag_index
 from app.modules.reviews.application.prompt_builder import file_block_id
 from app.modules.reviews.application.queue_messages import ReviewPublishPointer
 from app.modules.reviews.application.try_enqueue_webhook_run import (
@@ -52,9 +56,11 @@ from app.worker import (
     execution_profile_of,
     review_context_stage_factory,
 )
-from tests.portal_postgres import REPO_A, Env, portal_schema
+from tests.portal_postgres import REPO_A, REPO_B, Env, portal_schema
+from tests.test_code_index_store_postgres import C1, C2, _build, _enable, _Index
 from tests.test_github_vcs_provider import _pull_payload
 from tests.test_llm_gateway import FALLBACK, PRIMARY, completion
+from tests.test_rag_review_context_postgres import _USER, _user_file
 from tests.test_retired_installation_postgres import DiscardTokenCache
 from tests.test_review_context import _GREET_PATCH, _MODELS, _SERVICE
 from tests.test_review_prompt_pins_postgres import _V4_CONTENT, _bind_v4
@@ -77,6 +83,13 @@ _TEST_PATH = "tests/test_service.py"
 _TEST_FILE = "def test_greet():\n    value = 1\n    assert value\n"
 _TEST_PATCH = "@@ -1,2 +1,3 @@\n def test_greet():\n+    value = 1\n     assert value"
 _ADDED_LINE = 12  # ``+    extra = 1`` of ``_GREET_PATCH``
+# ``pkg/app.py`` calls the ``greet`` the PR changes: the graph index reaches it (#144).
+_APP_PATH = "pkg/app.py"
+_APP_SHA = "7" * 40
+_CALL_LINE = 5  # ``    return greet(user_id)`` of ``_USER``
+# The pinned v4 review prompt shows a retrieved section only with this patch (production pins
+# none until v5).
+_RETRIEVED_V4 = frozenset({("review.system", "v4")})
 _LLM = LlmSettings(primary=PRIMARY, fallback=FALLBACK)
 _CONVENTIONS_ANSWER = {
     "files": [{"path": path, "relevance": "changed file"} for path in (_PATH, _TEST_PATH)],
@@ -140,6 +153,8 @@ class GitHubHttp:
     """The GitHub REST API of PR 3 of octo/a: the policy at the base, the change at the head."""
 
     files_unavailable: int = 0
+    # The head tree also holds ``pkg/app.py``, the caller the graph index retrieves.
+    rag: bool = False
     calls: list[str] = field(default_factory=list)
 
     def handle(self, request: httpx.Request) -> httpx.Response:
@@ -159,6 +174,10 @@ class GitHubHttp:
                     {"path": "pkg/models.py", "mode": "100644", "type": "blob", "sha": _MODELS_SHA},
                     {"path": _TEST_PATH, "mode": "100644", "type": "blob", "sha": _TEST_SHA},
                 ]
+                if self.rag:
+                    tree.append(
+                        {"path": _APP_PATH, "mode": "100644", "type": "blob", "sha": _APP_SHA}
+                    )
             else:
                 tree = [
                     {"path": ".review", "mode": "040000", "type": "tree", "sha": _REVIEW_TREE},
@@ -173,6 +192,7 @@ class GitHubHttp:
                 _SERVICE_SHA: _SERVICE.encode(),
                 _MODELS_SHA: _MODELS.encode(),
                 _TEST_SHA: _TEST_FILE.encode(),
+                _APP_SHA: _USER.encode(),
             }[sha]
             if request.headers["Accept"] == "application/vnd.github.raw+json":
                 return httpx.Response(200, content=raw)
@@ -226,13 +246,17 @@ class ModelHttp:
         if kind == "conventions":
             answer: dict[str, Any] = _CONVENTIONS_ANSWER
         elif kind == "review-v2":
-            # The review cites the added line in the diff and in the L3 excerpt of the file.
-            [l3] = re.findall(
-                r'<excerpt block_id="([^"]+)" level="L3"', body["messages"][-1]["content"]
-            )
+            # The review cites the added line in the diff and in the L3 excerpt of the file,
+            # and the call of ``greet`` in a retrieved block when the prompt shows one.
+            prompt = body["messages"][-1]["content"]
+            [l3] = re.findall(r'<excerpt block_id="([^"]+)" level="L3"', prompt)
             cited = [
                 *_EVIDENCE,
                 {"block_id": l3, "start_line": _ADDED_LINE, "end_line": _ADDED_LINE},
+                *(
+                    {"block_id": rag, "start_line": _CALL_LINE, "end_line": _CALL_LINE}
+                    for rag in re.findall(r'<excerpt block_id="([^"]+)" level="RAG"', prompt)
+                ),
             ]
             answer = {"findings": [{**_FINDING, "evidence_refs": cited}], "summary": _SUMMARY}
         elif kind == "review-v1":
@@ -264,6 +288,7 @@ class Observed:
     actions: dict[str, list[tuple[Any, Any]]]
     manifests: list[tuple[UUID, str, int]]
     manifest_blocks: list[list[dict[str, Any]]]
+    manifest_ids: list[UUID]
     snapshots: list[UUID]
     pins: tuple[Any, ...]
     conventions_prompt: str
@@ -281,30 +306,38 @@ async def _rows(
 
 
 async def _scenario(
-    factory: async_sessionmaker[AsyncSession], *, v4: bool, retry: bool
+    factory: async_sessionmaker[AsyncSession], *, v4: bool, retry: bool, rag: bool
 ) -> Observed:
     await _ready(factory)
     await _seed(factory, _live_assets())
     async with factory.begin() as session:
         run_id = await _insert(session)
         await session.execute(
-            text("UPDATE repositories SET enabled=true,installation_available=true WHERE id=:id"),
-            {"id": REPO_A},
+            text(
+                "UPDATE repositories SET enabled=true,installation_available=true,"
+                "rag_enabled=:rag WHERE id=:id"
+            ),
+            {"id": REPO_A, "rag": rag},
         )
+    index = _Index(factory, REPO_A, REPO_B)
+    if rag:
+        # A ready graph index of the default branch at C1 knows the caller of ``greet``.
+        await _enable(index, REPO_A)
+        await _build(index, REPO_A, C1, _user_file())
     if v4:
         await _bind_v4(factory, run_id)
     queue = Queue()
-    github_http = GitHubHttp(files_unavailable=1 if retry else 0)
+    github_http = GitHubHttp(files_unavailable=1 if retry and not rag else 0, rag=rag)
     review_kind = "review-v2" if v4 else "review-v1"
-    # On the retried attempt the provider refuses the review call once.
-    model_http = ModelHttp(
-        [
-            "conventions",
-            *(["unavailable"] if retry else []),
-            review_kind,
-            *(["verifier"] if v4 else []),
-        ]
-    )
+    if retry and rag:
+        # The first attempt fails before any answer is accepted: the provider refuses its
+        # review call on the primary and on the fallback model. The second attempt keeps the
+        # conventions of the first.
+        kinds = ["conventions", "unavailable", "unavailable", review_kind]
+    else:
+        # On the retried attempt the provider refuses the review call once.
+        kinds = ["conventions", *(["unavailable"] if retry else []), review_kind]
+    model_http = ModelHttp([*kinds, *(["verifier"] if v4 else [])])
     outcomes: list[str] = []
     async with (
         httpx.AsyncClient(
@@ -358,33 +391,37 @@ async def _scenario(
         )
         outcomes.append(await process.handle_run.execute(run_id))
         if retry:
+            if rag:
+                # A newer publication of the index, at C2, lands between the attempts.
+                await _build(index, REPO_A, C2, _user_file(), base=C1)
             async with factory.begin() as session:
-                # Newer conventions, review and verifier rows go live between the attempts;
-                # the run keeps its pins.
-                await session.execute(
-                    text(
-                        "UPDATE prompt_versions SET is_active=false WHERE key IN "
-                        "('review.conventions','review.system','review.verifier')"
-                    )
-                )
-                for key, version, content in (
-                    ("review.conventions", 99, _ROTATED),
-                    ("review.system", 98, _ROTATED_REVIEW),
-                    ("review.verifier", 97, _ROTATED_VERIFIER),
-                ):
+                if not rag:
+                    # Newer conventions, review and verifier rows go live between the
+                    # attempts; the run keeps its pins.
                     await session.execute(
                         text(
-                            "INSERT INTO prompt_versions "
-                            "(id,key,version,content,checksum,is_active) "
-                            "VALUES (gen_random_uuid(),:key,:version,:content,:sum,true)"
-                        ),
-                        {
-                            "key": key,
-                            "version": version,
-                            "content": content,
-                            "sum": sha256(content.encode()).hexdigest(),
-                        },
+                            "UPDATE prompt_versions SET is_active=false WHERE key IN "
+                            "('review.conventions','review.system','review.verifier')"
+                        )
                     )
+                    for key, version, content in (
+                        ("review.conventions", 99, _ROTATED),
+                        ("review.system", 98, _ROTATED_REVIEW),
+                        ("review.verifier", 97, _ROTATED_VERIFIER),
+                    ):
+                        await session.execute(
+                            text(
+                                "INSERT INTO prompt_versions "
+                                "(id,key,version,content,checksum,is_active) "
+                                "VALUES (gen_random_uuid(),:key,:version,:content,:sum,true)"
+                            ),
+                            {
+                                "key": key,
+                                "version": version,
+                                "content": content,
+                                "sum": sha256(content.encode()).hexdigest(),
+                            },
+                        )
                 await session.execute(
                     text(
                         "UPDATE runs SET available_at=clock_timestamp()-interval '1 minute' "
@@ -449,6 +486,14 @@ async def _scenario(
                 run_id,
             )
         ],
+        manifest_ids=[
+            row[0]
+            for row in await _rows(
+                factory,
+                "SELECT id FROM context_manifests WHERE run_id=:id ORDER BY created_at",
+                run_id,
+            )
+        ],
         snapshots=[
             row[0]
             for row in await _rows(
@@ -464,12 +509,12 @@ async def _scenario(
     )
 
 
-def _observe(env: Env, *, v4: bool, retry: bool = False) -> Observed:
+def _observe(env: Env, *, v4: bool, retry: bool = False, rag: bool = False) -> Observed:
     async def scenario() -> Observed:
         engine = env.engine()
         try:
             return await _scenario(
-                async_sessionmaker(engine, expire_on_commit=False), v4=v4, retry=retry
+                async_sessionmaker(engine, expire_on_commit=False), v4=v4, retry=retry, rag=rag
             )
         finally:
             await engine.dispose()
@@ -685,3 +730,189 @@ def test_a_v3_run_stays_on_the_legacy_path_in_the_same_composition(env: Env) -> 
     ]
     assert all("evidence_refs" not in finding for finding in output["findings"])
     assert [pointer.run_id for pointer in observed.queue.published] == [observed.run_id]
+
+
+@dataclass(frozen=True)
+class RetrievedRow:
+    """A stored call manifest and the retrieved blocks it records."""
+
+    manifest_id: str
+    stage: str
+    attempt: int
+    blocks: list[dict[str, Any]]
+
+
+def _retrieved_rows(observed: Observed) -> list[RetrievedRow]:
+    return [
+        RetrievedRow(
+            str(manifest_id),
+            stage,
+            attempt,
+            [block for block in blocks if block["source_role"] == "retrieved_excerpt"],
+        )
+        for manifest_id, (_, stage, attempt), blocks in zip(
+            observed.manifest_ids, observed.manifests, observed.manifest_blocks, strict=True
+        )
+    ]
+
+
+def _retrieved_section(prompt: str) -> str:
+    [section] = re.findall(r"<retrieved_excerpts>\n(.*?)\n</retrieved_excerpts>", prompt, re.S)
+    return str(section)
+
+
+def _assert_retrieved_and_shown_again(
+    observed: Observed,
+    *,
+    index_commit_sha: str,
+    review: RetrievedRow,
+    verification: RetrievedRow,
+    review_body: dict[str, Any],
+    verifier_body: dict[str, Any],
+) -> None:
+    """The accepted attempt: the review shows and records the caller of ``greet`` retrieved
+    from the index at ``index_commit_sha``; the verifier shows that block again, recorded with
+    the same metadata (ADR 0001 §9, CVS §5.2)."""
+    section = _retrieved_section(review_body["messages"][-1]["content"])
+    [rag] = re.findall(
+        rf'<excerpt block_id="([^"]+)" level="RAG" path="{_APP_PATH}" revision="{_HEAD}" '
+        r'side="RIGHT" representation="exact_lines">',
+        section,
+    )
+    # The snapshot-path RAG id: the head and a digest, never the path (D3).
+    assert re.fullmatch(r"RAG:f{12}:[0-9a-f]{16}", rag)
+    assert f'<line n="{_CALL_LINE}">    return greet(user_id)</line>' in section
+    [block] = review.blocks
+    assert block == {
+        "block_id": rag,
+        "source_role": "retrieved_excerpt",
+        "source_kind": "source_code",
+        "path": _APP_PATH,
+        "revision": _HEAD,
+        "side": "RIGHT",
+        "content_sha256": None,
+        "start_line": 1,
+        "end_line": _CALL_LINE,
+        "shown_line_count": 3,
+        "shown_ranges": [[1, 1], [4, _CALL_LINE]],
+        "tokens": block["tokens"],
+        "repository_id": str(REPO_A),
+        "truncated": False,
+        "selection_reason": "rag_reverse_edge",
+        "index_commit_sha": index_commit_sha,
+        "edge_kind": "uses_imported",
+    }
+    tokens_by_role = {
+        response["manifest_id"]: response["tokens_by_role"]
+        for _, response in observed.actions["context.manifest"]
+    }
+    # AC11: the manifest counts the retrieved block under its own role, no contract change.
+    assert set(tokens_by_role[review.manifest_id]) == {
+        "diff",
+        "ast_excerpt",
+        "source_excerpt",
+        "policy_document",
+        "retrieved_excerpt",
+    }
+    assert tokens_by_role[review.manifest_id]["retrieved_excerpt"] == block["tokens"]
+    # The candidate cites the block, so the verifier is shown it again and its manifest
+    # records the same block: same id, ranges, tokens and index commit.
+    verifier_prompt = verifier_body["messages"][-1]["content"]
+    assert _retrieved_section(verifier_prompt) == section
+    assert f'<ref block_id="{rag}" start_line="{_CALL_LINE}" end_line="{_CALL_LINE}" />' in (
+        verifier_prompt
+    )
+    assert verification.blocks == review.blocks
+    assert tokens_by_role[verification.manifest_id]["retrieved_excerpt"] == block["tokens"]
+    [(verify, _)] = observed.actions["llm.verify"]
+    assert verify["manifest_id"] == verification.manifest_id
+    # The stored finding keeps its citation of the retrieved block.
+    [(_, output)] = observed.actions["llm.review_output"]
+    [finding] = output["findings"]
+    assert {"block_id": rag, "start_line": _CALL_LINE, "end_line": _CALL_LINE} in (
+        finding["evidence_refs"]
+    )
+
+
+@pytest.mark.integration
+def test_a_v4_run_shows_the_retrieved_section_through_the_worker_composition(
+    env: Env, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(rag_index, "RETRIEVED_PROMPT_VERSIONS", _RETRIEVED_V4)
+
+    observed = _observe(env, v4=True, rag=True)
+
+    assert observed.outcomes == ["ack"]
+    assert observed.queue.retries == []
+    assert observed.state == ("publishing", None, 1)
+    steps = list(_SNAPSHOT_PATH_STEPS)
+    steps.insert(steps.index("context.build") + 1, "context.rag")
+    assert observed.tools == steps
+    # The stage reads the ready index at C1 and uses its one candidate.
+    [(rag_request, rag_response)] = observed.actions["context.rag"]
+    assert (rag_request["index_status"], rag_request["indexed_commit_sha"]) == ("ready", C1)
+    assert rag_response["outcome"] == "used"
+    rows = _retrieved_rows(observed)
+    assert [(row.stage, row.attempt, len(row.blocks)) for row in rows] == [
+        ("conventions", 1, 0),
+        ("review", 1, 1),
+        ("verification", 1, 1),
+    ]
+    _, review, verification = rows
+    _, review_body, verifier_body = observed.bodies
+    _assert_retrieved_and_shown_again(
+        observed,
+        index_commit_sha=C1,
+        review=review,
+        verification=verification,
+        review_body=review_body,
+        verifier_body=verifier_body,
+    )
+
+
+@pytest.mark.integration
+def test_a_retry_before_the_accepted_answer_retrieves_from_the_newer_index(
+    env: Env, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # D8: the candidate checkpoint is the stored manifest. The first attempt retrieves at C1,
+    # then its review call fails on both models before any answer is accepted. A newer
+    # publication of the index (C2) lands, and the retry retrieves again: its review and
+    # its verifier show the same block, recorded with C2.
+    monkeypatch.setattr(rag_index, "RETRIEVED_PROMPT_VERSIONS", _RETRIEVED_V4)
+
+    observed = _observe(env, v4=True, retry=True, rag=True)
+
+    assert observed.outcomes == ["ack", "ack"]
+    assert len(observed.queue.retries) == 1
+    assert observed.state == ("publishing", None, 2)
+    assert [
+        (request["indexed_commit_sha"], response["outcome"])
+        for request, response in observed.actions["context.rag"]
+    ] == [(C1, "used"), (C2, "used")]
+    rows = _retrieved_rows(observed)
+    assert [
+        (row.stage, row.attempt, [block["index_commit_sha"] for block in row.blocks])
+        for row in rows
+    ] == [
+        ("conventions", 1, []),
+        ("review", 1, [C1]),
+        ("review", 1, [C1]),
+        ("review", 2, [C2]),
+        ("verification", 2, [C2]),
+    ]
+    # The failed attempt and the retry show one block under one id; only the index differs.
+    assert {row.blocks[0]["block_id"] for row in rows[1:]} == {rows[1].blocks[0]["block_id"]}
+    # Bodies: conventions, the refused review on both models, then the retry's review and
+    # verifier (the retry keeps the first attempt's conventions).
+    _, refused, _, review_body, verifier_body = observed.bodies
+    assert _retrieved_section(refused["messages"][-1]["content"]) == _retrieved_section(
+        review_body["messages"][-1]["content"]
+    )
+    _assert_retrieved_and_shown_again(
+        observed,
+        index_commit_sha=C2,
+        review=rows[3],
+        verification=rows[4],
+        review_body=review_body,
+        verifier_body=verifier_body,
+    )

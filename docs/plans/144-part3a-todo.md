@@ -100,7 +100,7 @@ at `a9269bbd`.
   `used`; retry after a newer publication uses the new `index_commit_sha`; the verifier of the
   accepted attempt shows the same RAG blocks and `index_commit_sha`.
 - Done when:
-  - [ ] e2e and checkpoint tests green with 0 skipped.
+  - [x] e2e and checkpoint tests green with 0 skipped.
 
 **Commit:** `test(reviews): pin the retrieved section through the worker composition (#144)`
 
