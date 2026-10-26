@@ -69,6 +69,7 @@ from app.modules.reviews.application.prompt_budget import (
 )
 from app.modules.reviews.application.prompt_builder import ReviewRule
 from app.modules.reviews.application.rag_context import (
+    RAG_CANDIDATE_MISSING,
     RAG_LIMIT,
     CachedBlobSource,
     RagCandidates,
@@ -182,6 +183,20 @@ class RetrievedBlock:
     index_commit_sha: str
 
 
+def snapshot_retrieved(block: RetrievedBlock) -> RetrievedBlock:
+    """``block`` as the snapshot path shows, records and cites it.
+
+    The stage's RAG id embeds the path (``RAG:{path}:{ranges}``), so a long path passes
+    the 128-character limit of a v2 ``EvidenceRef``. The snapshot path names it as it
+    names an L4 block (``snapshot_block``): by its revision, which carries the side (the
+    base for LEFT, the head for RIGHT), and a digest of that id. The payload, its
+    ``context.build`` trace and the legacy path keep the stage's id.
+    """
+    digest = hashlib.sha256(block.block_id.encode("utf-8")).hexdigest()[:16]
+    revision = (block.source.revision or "")[:12]
+    return replace(block, block_id=f"{ContextLevel.RAG.value}:{revision}:{digest}")
+
+
 @dataclass(frozen=True)
 class RagPlan:
     """The RAG gate found a usable index and a prompt that shows retrieved blocks: the
@@ -282,6 +297,17 @@ def _retrieved_block(place: RetrievedPlace) -> RetrievedBlock:
         edge_kind=place.edge_kind,
         index_commit_sha=place.index_commit_sha,
     )
+
+
+def _shows_its_lines(block: RetrievedBlock) -> bool:
+    """The text of ``block`` is its source lines, one text line per line of its ranges.
+
+    ``rag_context`` cuts it so; the excerpt render numbers each text line by its source
+    line and refuses, terminally, a block with lines but another count of text lines
+    (``prompt_builder._render_excerpt``). Such a place is dropped before it, not the run.
+    """
+    lines = sum(item.end_line - item.start_line + 1 for item in block.source.ranges)
+    return not lines or len(block.text.split("\n")) == lines
 
 
 class _Files:
@@ -672,17 +698,19 @@ class BuildReviewContext:
                     for item in candidates.omissions
                 )
                 slot = min(RAG_CONTEXT_MAX_TOKENS, remaining)
-                # A confirmed candidate stays confirmed when a place of it does not fit. A
-                # place goes in with the base definitions it read or not at all, and a
-                # definition once.
+                # A confirmed candidate stays confirmed when a place of it does not fit or
+                # is not its lines. A place goes in with the base definitions it read or
+                # not at all, and a definition once.
                 over_slot: dict[str | None, int] = {}
+                not_its_lines: dict[str | None, int] = {}
                 admitted: set[str] = set()
                 for place in candidates.places:
-                    group = [
-                        block
-                        for block in map(_retrieved_block, (place, *place.definitions))
-                        if block.block_id not in admitted
-                    ]
+                    members = [_retrieved_block(item) for item in (place, *place.definitions)]
+                    if not all(map(_shows_its_lines, members)):
+                        key = place.source.path
+                        not_its_lines[key] = not_its_lines.get(key, 0) + 1
+                        continue
+                    group = [block for block in members if block.block_id not in admitted]
                     tokens = sum(block.tokens for block in group)
                     if tokens > slot:
                         over_slot[place.source.path] = over_slot.get(place.source.path, 0) + 1
@@ -691,6 +719,10 @@ class BuildReviewContext:
                     remaining -= tokens
                     retrieved.extend(group)
                     admitted.update(block.block_id for block in group)
+                omissions.extend(
+                    ContextOmission(RAG_CANDIDATE_MISSING, item, count)
+                    for item, count in not_its_lines.items()
+                )
                 omissions.extend(
                     ContextOmission(RAG_LIMIT, item, count) for item, count in over_slot.items()
                 )

@@ -10,6 +10,7 @@ trims a changed file. An ignored file is counted, never named (RULES_FORMAT_SPEC
 from __future__ import annotations
 
 import asyncio
+import re
 from dataclasses import replace
 from hashlib import sha256
 from typing import Any
@@ -446,7 +447,7 @@ def test_retrieved_blocks_reach_the_context_of_a_prompt_with_a_retrieved_section
 
     context = _review("v4", _payload())
 
-    assert context.retrieved == (RETRIEVED,)
+    assert context.retrieved == (replace(RETRIEVED, block_id=_bounded_rag_id(RETRIEVED)),)
     # #144 renders them; F1 only fills the slot.
     assert "RETRIEVED_CALLER_TEXT" not in PromptBuilder().build_prompt(context).user
 
@@ -528,3 +529,58 @@ def test_snapshot_review_cites_an_l4_excerpt_of_a_long_path_by_a_bounded_id() ->
     # Only L4 is renamed; the payload keeps the stage's ids (its trace and the legacy path).
     assert snapshot_block(L2_WINDOW) is L2_WINDOW
     assert payload.blocks[1].block_id == f"L4:{HEAD[:12]}:{LONG_PATH}#0"
+
+
+def _bounded_rag_id(block: RetrievedBlock) -> str:
+    # The snapshot-path id of a RAG block: the revision of its side and a digest of the
+    # stage's id.
+    revision = (block.source.revision or "")[:12]
+    return f"RAG:{revision}:{sha256(block.block_id.encode()).hexdigest()[:16]}"
+
+
+BASE = "b" * 40
+# The stage's RAG id ``RAG:{path}:{ranges}`` embeds the path. A use at the head and the
+# definition it reads at the base: one path, the same lines, the same stage id.
+LONG_USE = replace(
+    RETRIEVED,
+    block_id=f"RAG:{LONG_PATH}:1-1",
+    source=replace(RETRIEVED.source, path=LONG_PATH, ranges=(LineRange(1, 1),)),
+    text="return load(key)",
+)
+LONG_DEFINITION = replace(
+    LONG_USE,
+    source=replace(
+        LONG_USE.source, revision=BASE, side=DiffSide.LEFT, reason="rag_broken_reference"
+    ),
+    representation=Representation.SIGNATURE,
+    text="def load(key):",
+)
+
+
+def test_snapshot_review_names_a_rag_block_of_a_long_path_by_a_bounded_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        rag_index, "RETRIEVED_PROMPT_VERSIONS", frozenset({("review.system", "v4")})
+    )
+    payload = replace(_payload(), retrieved=(LONG_USE, LONG_DEFINITION))
+
+    context = _review("v4", payload)
+
+    use, definition = _bounded_rag_id(LONG_USE), _bounded_rag_id(LONG_DEFINITION)
+    assert context.retrieved == (
+        replace(LONG_USE, block_id=use),
+        replace(LONG_DEFINITION, block_id=definition),
+    )
+    # The revision prefix carries the side: one stage id, two blocks.
+    assert use.startswith(f"RAG:{HEAD[:12]}:") and definition.startswith(f"RAG:{BASE[:12]}:")
+    assert use != definition
+    for block_id in (use, definition):
+        assert re.fullmatch(r"RAG:[0-9a-f]{12}:[0-9a-f]{16}", block_id)
+        assert len(block_id) <= 128
+        assert EvidenceRef(block_id=block_id, start_line=1, end_line=1).block_id == block_id
+    # The stage's own id is past the v2 limit: it could not be cited.
+    with pytest.raises(ValueError, match="at most 128 characters"):
+        EvidenceRef(block_id=LONG_USE.block_id, start_line=1, end_line=1)
+    # The payload keeps the stage's ids (its trace and the legacy path).
+    assert [block.block_id for block in payload.retrieved] == [f"RAG:{LONG_PATH}:1-1"] * 2

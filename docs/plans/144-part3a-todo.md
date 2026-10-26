@@ -19,8 +19,8 @@ at `a9269bbd`.
   has the `RAG:{rev12}:{digest16}` shape, LEFT and RIGHT blocks of one path differ, and the payload /
   `context.build` trace keep the stage id (mirror F1's L4 test in `tests/test_review_context_blocks.py`).
 - Done when:
-  - [ ] invariant drop + omission tested;
-  - [ ] bounded snapshot RAG id tested, stage id unchanged.
+  - [x] invariant drop + omission tested;
+  - [x] bounded snapshot RAG id tested, stage id unchanged.
 
 **Commit:** `feat(reviews): bound the snapshot ids and text of rag blocks (#144)`
 

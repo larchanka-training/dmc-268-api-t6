@@ -44,6 +44,7 @@ from app.modules.reviews.application.review_context import (
     RetrievedBlock,
     ReviewContextPayload,
     snapshot_block,
+    snapshot_retrieved,
 )
 from app.modules.reviews.application.review_output import (
     DroppedCandidateRecord,
@@ -271,7 +272,7 @@ class ExecuteReviewRun:
             )
             bindings = prompt_input.policy_snapshot.prompt_bindings
             if has_retrieved_section(bindings.review_system_key, bindings.review_system_version):
-                retrieved = payload.retrieved
+                retrieved = tuple(snapshot_retrieved(block) for block in payload.retrieved)
             # P6-4: the ignored files stay counted, never named (RULES_FORMAT_SPEC §5.3).
             excluded_files = payload.ignored_files
         context = ReviewContext(

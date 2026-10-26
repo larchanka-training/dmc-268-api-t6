@@ -7,10 +7,10 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import timedelta
 from types import TracebackType
-from typing import Self
+from typing import Any, Self
 from uuid import UUID
 
 import pytest
@@ -2795,6 +2795,59 @@ def test_a_broken_reference_is_shown_with_its_definition_or_not_at_all() -> None
     stats = payload.rag
     assert stats is not None
     assert (stats.confirmed, stats.tokens) == (1, 0)
+
+
+def _extra_line(monkeypatch: pytest.MonkeyPatch, path: str) -> None:
+    """The selector's places as it returns them, with one text line too many at ``path``."""
+    select = ReverseEdgeSelector.select
+
+    def broken(place: RetrievedPlace) -> RetrievedPlace:
+        text = f"{place.text}\nan extra line" if place.source.path == path else place.text
+        return replace(place, text=text, definitions=tuple(map(broken, place.definitions)))
+
+    async def tampered(self: ReverseEdgeSelector, **kwargs: Any) -> RagCandidates:
+        candidates = await select(self, **kwargs)
+        return replace(candidates, places=tuple(map(broken, candidates.places)))
+
+    monkeypatch.setattr(ReverseEdgeSelector, "select", tampered)
+
+
+def test_a_place_whose_text_is_not_its_lines_is_dropped_and_the_slot_keeps_the_rest(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repository, diff_map = _slot_removal(**{"pkg/panel.py": _PY_VIEW, "pkg/view.py": _PY_VIEW})
+    _extra_line(monkeypatch, "pkg/panel.py")
+
+    payload = _build(repository, diff_map, _load_hints("pkg/panel.py", "pkg/view.py"))
+
+    # The render would refuse it and fail the run: the place goes, the next one takes the
+    # definition they share.
+    assert [block.block_id for block in payload.retrieved] == [
+        "RAG:pkg/view.py:1-1,4-5",
+        "RAG:pkg/store.py:8-8",
+    ]
+    assert ContextOmission("rag_candidate_missing", "pkg/panel.py") in payload.omissions
+    stats = payload.rag
+    assert stats is not None
+    assert (stats.found, stats.confirmed, dict(stats.dropped), stats.tokens) == (2, 2, {}, 10)
+
+
+def test_a_definition_whose_text_is_not_its_lines_takes_the_places_that_read_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repository, diff_map = _slot_removal(**{"pkg/panel.py": _PY_VIEW, "pkg/view.py": _PY_VIEW})
+    _extra_line(monkeypatch, "pkg/store.py")
+
+    payload = _build(repository, diff_map, _load_hints("pkg/panel.py", "pkg/view.py"))
+
+    # A broken reference is shown with its definition or not at all.
+    assert payload.retrieved == ()
+    assert [item for item in payload.omissions if item.reason == "rag_candidate_missing"] == [
+        ContextOmission("rag_candidate_missing", "pkg/panel.py"),
+        ContextOmission("rag_candidate_missing", "pkg/view.py"),
+    ]
+    stats = payload.rag
+    assert stats is not None and (stats.confirmed, stats.tokens) == (2, 0)
 
 
 class RefusedCounter:
