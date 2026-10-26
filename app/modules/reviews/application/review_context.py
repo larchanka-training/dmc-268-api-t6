@@ -9,12 +9,13 @@ tell what a model was really shown.
 
 from __future__ import annotations
 
+import copy
 import logging
 import math
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
-from typing import Protocol
+from typing import Protocol, Self
 from uuid import UUID
 
 from app.modules.code_index.domain.enums import EdgeKind
@@ -377,32 +378,32 @@ class BuildReviewContext:
         self._builtin_excluded = builtin_excluded
         self._retriever = retriever
         self._rag_blobs = rag_blobs
+        self._selector = self._rag_selector()
+
+    def _rag_selector(self) -> ReverseEdgeSelector | None:
         # The RAG sources of the run; the slot is filled only for a RAG plan. The base of a
         # broken reference is listed by the same revision source.
-        self._selector = (
-            None
-            if retriever is None or rag_blobs is None
-            else ReverseEdgeSelector(
-                retriever=retriever,
-                blobs=rag_blobs,
-                parser=parser,
-                cache=cache,
-                counter=counter,
-                trees=source,
-            )
+        if self._retriever is None or self._rag_blobs is None:
+            return None
+        return ReverseEdgeSelector(
+            retriever=self._retriever,
+            blobs=self._rag_blobs,
+            parser=self._parser,
+            cache=self._cache,
+            counter=self._counter,
+            trees=self._source,
         )
 
-    def with_counter(self, counter: TokenCounter) -> BuildReviewContext:
-        """The same build counting every block, the RAG slot included, with ``counter``."""
-        return BuildReviewContext(
-            source=self._source,
-            parser=self._parser,
-            counter=counter,
-            cache=self._cache,
-            builtin_excluded=self._builtin_excluded,
-            retriever=self._retriever,
-            rag_blobs=self._rag_blobs,
-        )
+    def with_counter(self, counter: TokenCounter) -> Self:
+        """The same build counting every block, the RAG slot included, with ``counter``.
+
+        A copy, so every collaborator (a subclass's own too) is kept; only the counter and
+        the selector that counts with it are replaced.
+        """
+        build = copy.copy(self)
+        build._counter = counter
+        build._selector = build._rag_selector()
+        return build
 
     async def execute(
         self,

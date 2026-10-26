@@ -19,6 +19,7 @@ from app.modules.code_index.domain.enums import EdgeKind, IndexStatus, RagIndexS
 from app.modules.code_index.domain.rag_index import rag_index
 from app.modules.reviews.application.ast_resolution import (
     FileUnavailable,
+    ImportResolution,
     RevisionTree,
     go_module_path,
 )
@@ -2794,3 +2795,77 @@ def test_a_broken_reference_is_shown_with_its_definition_or_not_at_all() -> None
     stats = payload.rag
     assert stats is not None
     assert (stats.confirmed, stats.tokens) == (1, 0)
+
+
+class RefusedCounter:
+    """A counter the build must stop using once ``with_counter`` replaced it."""
+
+    def count(self, text: str) -> int:
+        raise AssertionError("counted with the replaced counter")
+
+
+class SubclassedBuild(BuildReviewContext):
+    """A subclass of the build, as a test double of the stage is."""
+
+
+@pytest.mark.parametrize("swapped", [False, True], ids=["built-with-words", "swapped-to-words"])
+def test_with_counter_keeps_every_collaborator_and_the_type_of_the_build(swapped: bool) -> None:
+    # R19: the stage swaps the counter of every snapshot-path build. The copy keeps the RAG
+    # sources (else a RAG plan raises and the stage reports "context build failed") and the
+    # built-in exclusion (else an imported generated file becomes an L4 excerpt).
+    repository, diff_map = _slot_repository(**{"pkg/app.py": _PY_USER})
+    store = BlobStore()
+    builder: BuildReviewContext = SubclassedBuild(
+        source=repository,
+        parser=InProcessParser(),
+        counter=RefusedCounter() if swapped else Words(),
+        builtin_excluded=lambda path: path == "pkg/models.py",
+        retriever=_store_hints("pkg/app.py"),
+        rag_blobs=CachedBlobSource(
+            repository_id=diff_map.repository_id,
+            source=repository,
+            cache=SharedBlobCache(store),
+            uow_factory=lambda: BlobCacheUow(store),
+        ),
+    )
+    if swapped:
+        builder = builder.with_counter(Words())
+    policy = parse_review_ignore(None)
+    snapshot = build_policy_snapshot(
+        RunPolicyPins(
+            UUID(int=2),
+            diff_map.repository_id,
+            "b" * 40,
+            UUID(int=4),
+            "2" * 64,
+            PromptBindings("3" * 64, "", ""),
+            ExecutionProfile.fast("model-a", ""),
+        ),
+        rules=missing_document(RULES_DOCUMENT_PATH),
+        agents=missing_document(AGENTS_DOCUMENT_PATH),
+        ignore=policy,
+        snapshot_id=UUID(int=3),
+    )
+    matcher = IgnoreMatcher(policy)
+
+    payload = asyncio.run(
+        builder.execute(
+            diff_map=diff_map,
+            snapshot=snapshot,
+            matcher=matcher,
+            ignore=apply_ignore(matcher, diff_map),
+            token_budget=100_000,
+            rag=_PLAN,
+        )
+    )
+
+    # The RAG slot is filled and counted with the new counter.
+    [block] = payload.retrieved
+    assert (block.block_id, block.tokens) == ("RAG:pkg/app.py:1-1,4-5", 8)
+    # The imported definition is behind the built-in exclusion: never read, never L4.
+    assert [ref.resolution for ref in payload.imports] == [ImportResolution.EXCLUDED]
+    assert ContextLevel.L4 not in payload.levels_present
+    assert "pkg/models.py" not in repository.read
+    # L1 11, L3 10 and the retrieved place 8, all counted by ``Words``.
+    assert payload.tokens_used == 11 + 10 + 8
+    assert type(builder) is SubclassedBuild
