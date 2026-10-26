@@ -211,6 +211,7 @@ def _run(
     telegram: bool = True,
     deploy_mode: str = "edge",
     send_test_alert: str = "1",
+    extra: dict[str, str] | None = None,
     **env: str,
 ) -> Run:
     api_dir = tmp_path / API_PROJECT
@@ -275,6 +276,7 @@ def _run(
             "STUB_LOG": str(log),
             "STUB_PGPASSWORD_LOG": str(pgpasswords),
             "STUB_STATE": str(state),
+            **(extra or {}),
             **env,
         },
         capture_output=True,
@@ -484,7 +486,7 @@ def test_without_dumps_both_backup_checks_fail(tmp_path: Path) -> None:
 def test_a_failing_tool_still_reaches_the_summary(
     tmp_path: Path, knob: str, failed: tuple[str, ...]
 ) -> None:
-    run = _run(tmp_path, **{knob: "1"})
+    run = _run(tmp_path, extra={knob: "1"})
 
     _assert_only_failed(run, *failed)
     assert "== Summary" in run.report
