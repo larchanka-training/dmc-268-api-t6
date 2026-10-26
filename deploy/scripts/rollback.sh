@@ -65,53 +65,6 @@ refuse_rollback() {
   exit 1
 }
 
-inspect_image_id() {
-  local output id_pattern
-  # Sentinel retains the CLI newline: reject noise, multiple IDs and extra output lines.
-  if ! output="$(docker image inspect --format '{{.Id}}' "$1" 2>/dev/null && printf '.')"; then
-    return 1
-  fi
-  id_pattern='^sha256:[0-9a-f]{64}'$'\n''\.$'
-  [[ "${output}" =~ ${id_pattern} ]] || return 1
-  printf '%s' "${output%$'\n.'}"
-}
-
-resolve_target_identity() {
-  local repository_pattern digest_pattern candidate_pattern tag_pattern repository candidates candidate candidate_id matches
-  repository_pattern='[a-z0-9][a-z0-9.-]*(:[0-9]+)?/[a-z0-9]+([._-][a-z0-9]+)*(/[a-z0-9]+([._-][a-z0-9]+)*)*'
-  digest_pattern="^(${repository_pattern})(:[A-Za-z0-9_][A-Za-z0-9_.-]{0,127})?@sha256:[0-9a-f]{64}$"
-  candidate_pattern="^(${repository_pattern})@sha256:[0-9a-f]{64}$"
-  tag_pattern="^(${repository_pattern})(:[A-Za-z0-9_][A-Za-z0-9_.-]{0,127})?$"
-  TARGET_IMAGE_ID="$(inspect_image_id "${IMAGE}")" || refuse_rollback "target image identity is unavailable"
-  if [[ "${IMAGE}" =~ ^sha256:[0-9a-f]{64}$ ]]; then
-    [[ "${TARGET_IMAGE_ID}" == "${IMAGE}" ]] || refuse_rollback "target image identity is inconsistent"
-    # Verifier-only: its scoped wrapper validates a prebuilt local ID at the pull boundary.
-    # Operators use registry refs; ordinary docker pull does not accept a raw local image ID.
-    RELEASE_REF="${IMAGE}"
-  elif [[ "${IMAGE}" =~ ${digest_pattern} ]]; then
-    # Preserve the supplied immutable ref for forward promotion's state equality guard.
-    RELEASE_REF="${IMAGE}"
-  elif [[ "${IMAGE}" =~ ${tag_pattern} ]]; then
-    repository="${BASH_REMATCH[1]}"
-    if ! candidates="$(docker image inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' "${TARGET_IMAGE_ID}" 2>/dev/null)"; then
-      refuse_rollback "target release digest is unavailable"
-    fi
-    matches=0
-    while IFS= read -r candidate; do
-      [[ "${candidate}" =~ ${candidate_pattern} ]] || refuse_rollback "target release digest is unavailable"
-      if [[ "${BASH_REMATCH[1]}" == "${repository}" ]]; then
-        RELEASE_REF="${candidate}"
-        matches=$((matches + 1))
-      fi
-    done <<< "${candidates}"
-    [[ "${matches}" == 1 ]] || refuse_rollback "target release digest is unavailable"
-    candidate_id="$(inspect_image_id "${RELEASE_REF}")" || refuse_rollback "target release digest is unavailable"
-    [[ "${candidate_id}" == "${TARGET_IMAGE_ID}" ]] || refuse_rollback "target release digest is inconsistent"
-  else
-    refuse_rollback "target release reference is unsupported"
-  fi
-}
-
 check_target_revision() {
   local probe_output probe_status
   [[ -r "${SCRIPT_DIR}/check-rollback-revision.py" ]] || refuse_rollback "target checker is unavailable"
@@ -284,8 +237,12 @@ fi
 if ! docker pull "${IMAGE}" >/dev/null 2>&1; then
   refuse_rollback "target image pull failed"
 fi
-resolve_target_identity
+resolve_target_identity refuse_rollback
 check_target_revision
+if ! gitlab_bundle="$(gitlab_bundle_from_env_files "${APP_DIR}" 2>/dev/null)" || \
+   ! validate_gitlab_deployment "${TARGET_IMAGE_ID}" "${gitlab_bundle}" >/dev/null 2>&1; then
+  refuse_rollback "GitLab configuration_invalid"
+fi
 
 write_compose_env_file \
   "${ENV_FILE}" \

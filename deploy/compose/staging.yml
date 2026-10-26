@@ -66,6 +66,7 @@ services:
     # app.env: GitHub App credentials; worker.env: LLM gateway and portal links (docs/SECRETS.md).
     env_file:
       - app.env
+      - gitlab.env
       - worker.env
     environment:
       DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-app}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@postgres:5432/${POSTGRES_DB:-app}
@@ -108,6 +109,7 @@ services:
     # app.env: GitHub App credentials; webhook-worker.env: GITHUB_APP_BOT_LOGIN (docs/SECRETS.md).
     env_file:
       - app.env
+      - gitlab.env
       - webhook-worker.env
     environment:
       DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-app}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@postgres:5432/${POSTGRES_DB:-app}
@@ -140,6 +142,25 @@ services:
       options:
         max-size: "10m"
         max-file: "3"
+
+  # Trusted operator only: compose --profile gitlab-operator run --rm gitlab-admin <subcommand>.
+  # No installation changes on ordinary deploy; PAT input goes through protected stdin/FD.
+  gitlab-admin:
+    image: ${IMAGE:?IMAGE is required}
+    profiles: ["gitlab-operator"]
+    entrypoint: ["python", "-m", "app.gitlab_admin"]
+    command: []
+    env_file:
+      - gitlab.env
+    environment:
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-app}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@postgres:5432/${POSTGRES_DB:-app}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+    pull_policy: missing
+    healthcheck:
+      disable: true
 
   # This one-shot service must complete before API containers are started.  Keeping
   # both commands in the image avoids needing uv or a checkout on the deploy host.

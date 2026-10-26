@@ -52,6 +52,7 @@ SECRET_SOURCES = {
     "AUTH_JWT_PUBLIC_KEY": "AUTH_JWT_PUBLIC_KEY",
     # Organization secret of the LLM gateway (decision of the tech lead in #35, 04.10).
     "LLM_API_KEYS": "AI_DMC268_T6",
+    "GITLAB_CREDENTIAL_KEYS": "GITLAB_CREDENTIAL_KEYS",
 }
 # Non-secret configuration, routed like the secrets: the bot login is a variable of the
 # Environment, the LLM models (review and verifier pairs) are repository variables (an
@@ -65,6 +66,10 @@ VARIABLE_SOURCES = {
     "LLM_FALLBACK_MODEL": "LLM_FALLBACK_MODEL",
     "LLM_VERIFIER_MODEL": "LLM_VERIFIER_MODEL",
     "LLM_VERIFIER_FALLBACK_MODEL": "LLM_VERIFIER_FALLBACK_MODEL",
+    "GITLAB_ACTIVE_KEY_ID": "GITLAB_ACTIVE_KEY_ID",
+    "GITLAB_ALLOWED_ORIGINS": "GITLAB_ALLOWED_ORIGINS",
+    "GITLAB_PRIVATE_ORIGINS": "GITLAB_PRIVATE_ORIGINS",
+    "GITLAB_WEBHOOK_INTAKE_ENABLED": "GITLAB_WEBHOOK_INTAKE_ENABLED",
 }
 # One env file per set of recipients (docs/SECRETS.md); its bash array in env-file.sh.
 ENV_FILES = {
@@ -77,6 +82,7 @@ ENV_FILES = {
             "GITHUB_CLIENT_SECRET",
             "AUTH_JWT_PRIVATE_KEY",
             "AUTH_JWT_PUBLIC_KEY",
+            "GITLAB_WEBHOOK_INTAKE_ENABLED",
         },
     ),
     "worker.env": (
@@ -92,6 +98,15 @@ ENV_FILES = {
         },
     ),
     "webhook-worker.env": ("WEBHOOK_WORKER_ENV_KEYS", {"GITHUB_APP_BOT_LOGIN"}),
+    "gitlab.env": (
+        "GITLAB_ENV_KEYS",
+        {
+            "GITLAB_CREDENTIAL_KEYS",
+            "GITLAB_ACTIVE_KEY_ID",
+            "GITLAB_ALLOWED_ORIGINS",
+            "GITLAB_PRIVATE_ORIGINS",
+        },
+    ),
 }
 BUNDLED = {**SECRET_SOURCES, **VARIABLE_SOURCES}
 
@@ -113,12 +128,21 @@ CI_SECRETS = {
     "LLM_FALLBACK_MODEL": "mistral-small-3.2-24b",
     "LLM_VERIFIER_MODEL": "verifier-model",
     "LLM_VERIFIER_FALLBACK_MODEL": "verifier-fallback-model",
+    "GITLAB_CREDENTIAL_KEYS": "",
+    "GITLAB_ACTIVE_KEY_ID": "",
+    "GITLAB_ALLOWED_ORIGINS": "",
+    "GITLAB_PRIVATE_ORIGINS": "",
+    "GITLAB_WEBHOOK_INTAKE_ENABLED": "",
 }
 
 FAKE_DOCKER = """\
 #!/usr/bin/env bash
 # Fake docker CLI: logs every call and answers only what deploy.sh and rollback.sh ask.
-printf '%s\\n' "$*" >> "${STUB_LOG}"
+if [[ "$1" == run && " $* " == *" --env-file "* ]]; then
+  printf '%s\\n' "${@:1:9} <validator>" >> "${STUB_LOG}"
+else
+  printf '%s\\n' "$*" >> "${STUB_LOG}"
+fi
 image_identity() {
   case "$1" in
     "${STUB_SELECTED_REF:-}")
@@ -161,6 +185,12 @@ case "$1" in
       exit 1
     fi
     ;;
+  run)
+    if [[ " $* " == *" --env-file "* ]]; then
+      TMPDIR="$(dirname "${STUB_LOG}")" PYTHONPATH="${STUB_REPO_ROOT}" \
+        uv run --project "${STUB_REPO_ROOT}" python "${STUB_GITLAB_HELPER}" "$@"
+    fi
+    ;;
   compose)
     shift
     project_dir=""
@@ -197,7 +227,7 @@ case "$1" in
         printf '%s\\n' "${IMAGE:-}" > "${STUB_UP_IMAGE}"
         # Like Compose: env_file paths resolve against the directory of the first compose file.
         # Every file must exist: deploy and rollback keep each role's file in place.
-        for name in app.env api.env worker.env webhook-worker.env; do
+        for name in app.env api.env worker.env webhook-worker.env gitlab.env; do
           [[ -f "${project_dir}/${name}" ]] || { echo "env file ${name} not found" >&2; exit 1; }
         done
         if grep -qxF "IMAGE=${STUB_FAILING_IMAGE:-}" "${env_file}"; then
@@ -358,6 +388,9 @@ class Host:
             "STUB_ID_B": B_ID,
             "STUB_ID_EXPLICIT": EXPLICIT_ID,
             "STUB_EXEC_HELPER": str(self.log.parent / "exec-helper.py"),
+            "STUB_GITLAB_HELPER": str(self.log.parent / "gitlab-helper.py"),
+            "STUB_GITLAB_LOG": str(self.log.parent / "gitlab-probes.jsonl"),
+            "STUB_REPO_ROOT": str(REPO_ROOT),
             "STUB_DIAGNOSTIC_ENV": str(self.log.parent / "container-environments.json"),
             "STUB_DIAGNOSTIC_STATE": str(self.log.parent / "diagnostic-before-state"),
             "STUB_DIAGNOSTIC_CALLS": str(self.log.parent / "diagnostic-services"),
@@ -412,6 +445,7 @@ def host(tmp_path: Path) -> Host:
     tmp = tmp_path / "tmp"
     tmp.mkdir()
     (tmp_path / "exec-helper.py").write_text(EXEC_HELPER)
+    (tmp_path / "gitlab-helper.py").write_text(GITLAB_PROBE_HELPER)
     (tmp_path / "container-environments.json").write_text(
         json.dumps(
             {service: {"LC_CTYPE": "UTF-8"} for service in ("api", "worker", "webhook-worker")}
@@ -507,7 +541,7 @@ def test_bundle_step_without_secrets_outputs_an_empty_bundle(tmp_path: Path) -> 
 def test_portal_url_from_ci_reaches_only_the_review_worker(tmp_path: Path, host: Host) -> None:
     stdout, bundle = _run_bundle_step(tmp_path, {"PORTAL_URL": "https://staging-ui.example.test"})
 
-    result = host.deploy("ghcr.io/test/api@sha256:a", bundle=bundle)
+    result = host.deploy(IMAGE_A, bundle=bundle)
 
     assert result.returncode == 0, result.stderr
     assert _read_env_file(host.app_dir / "worker.env") == {
@@ -529,7 +563,7 @@ def test_optional_portal_url_is_omitted_from_env_files(
         values["PORTAL_URL"] = portal_url
     stdout, bundle = _run_bundle_step(tmp_path, values)
 
-    result = host.deploy("ghcr.io/test/api@sha256:a", bundle=bundle)
+    result = host.deploy(IMAGE_A, bundle=bundle)
 
     assert result.returncode == 0, result.stderr
     assert "not set: PORTAL_URL" in stdout.splitlines()
@@ -854,8 +888,9 @@ def test_host_allowlist_follows_the_container_table() -> None:
 
     for array, keys in ENV_FILES.values():
         assert set(_bash_array(env_file, array)) == keys, array
-    # Every bundled name has exactly one file.
-    assert sorted(k for _, keys in ENV_FILES.values() for k in keys) == sorted(BUNDLED)
+    # Every accepted name has exactly one recipient file, including operator settings.
+    accepted = set(BUNDLED) | ENV_FILES["gitlab.env"][1] | {"GITLAB_WEBHOOK_INTAKE_ENABLED"}
+    assert sorted(k for _, keys in ENV_FILES.values() for k in keys) == sorted(accepted)
 
 
 @pytest.mark.parametrize(
@@ -945,11 +980,11 @@ def test_rollbacks_keep_store_passwords_and_app_secrets(host: Host) -> None:
     for name in ("POSTGRES_PASSWORD", "RABBITMQ_USER", "RABBITMQ_PASSWORD", "REDIS_PASSWORD"):
         assert after_manual[name] == deployed[name], name
         assert after_auto[name] == deployed[name], name
-    assert all(secrets.values())  # every role has something to lose
+    assert all(secrets[name] for name in ENV_FILES if name != "gitlab.env")
     assert secrets_after_manual == secrets
     for file_name, (_, keys) in ENV_FILES.items():
         assert _read_env_file(host.app_dir / file_name) == {
-            name: rotated[name] for name in keys if rotated[name]
+            name: rotated[name] for name in keys if rotated.get(name)
         }, file_name
 
 
@@ -1019,7 +1054,7 @@ def test_moved_tag_cannot_change_admitted_runtime_or_promotion_identity(
         current if mode == "manual" else previous
     )
     calls = host.calls()[calls_before:]
-    assert calls.count(f"pull {selected}") == 1
+    assert calls.count(f"pull {selected if explicit else IMAGE_A}") == 1
     assert any(" up --pull missing " in call for call in calls)
     for role in ("api", "worker", "webhook-worker", "bootstrap"):
         assert "    image: ${IMAGE:?IMAGE is required}" in _service_block(role)
@@ -1469,12 +1504,13 @@ def test_broker_volume_without_a_password_is_never_given_a_new_one(host: Host) -
     ("bundle", "message"),
     [
         (_bundle({"PATH": "/tmp"}), "PATH is not in the allowlist"),
+        (_bundle({"GITLAB_TOKEN": "abc-PAT-CANARY"}), "GITLAB_TOKEN is not in the allowlist"),
         (_bundle({"GITHUB_CLIENT_SECRET": "abc'def"}), "single quotes are not supported"),
         (_bundle({"GITHUB_WEBHOOK_SECRET": "abc\\"}), "a trailing backslash is not supported"),
         # GNU base64 rejects the input; the macOS one decodes garbage that fails the line check.
         ("not base64!", "not valid base64|malformed line"),
     ],
-    ids=["unknown-name", "single-quote", "trailing-backslash", "not-base64"],
+    ids=["unknown-name", "gitlab-global-token", "single-quote", "trailing-backslash", "not-base64"],
 )
 def test_invalid_bundle_fails_before_the_host_changes(
     host: Host, bundle: str, message: str
@@ -1594,12 +1630,17 @@ def _list_under(block: str, key: str) -> list[str]:
 @pytest.mark.parametrize(
     ("service", "module", "env_files", "dependencies"),
     [
-        ("worker", "app.worker", ["app.env", "worker.env"], ["bootstrap", "postgres", "rabbitmq"]),
+        (
+            "worker",
+            "app.worker",
+            ["app.env", "gitlab.env", "worker.env"],
+            ["bootstrap", "postgres", "rabbitmq"],
+        ),
         # The projection creates Runs and publishes them to the review queue (#52).
         (
             "webhook-worker",
             "app.webhook_worker",
-            ["app.env", "webhook-worker.env"],
+            ["app.env", "gitlab.env", "webhook-worker.env"],
             ["bootstrap", "postgres", "rabbitmq"],
         ),
     ],
@@ -1781,16 +1822,15 @@ def test_failed_deploy_then_refused_auto_rollback_preserves_rollback_entry(host:
     ids=["marked-host", "re-run-attempt", "legacy-host"],
 )
 @pytest.mark.parametrize(
-    ("deploy_mode", "bundle", "stubs", "reason", "previous_copied"),
+    ("deploy_mode", "bundle", "stubs", "reason"),
     [
-        ("edge", _bundle({"PATH": "/tmp"}), {}, "PATH is not in the allowlist", False),
-        ("bogus", None, {}, "DEPLOY_MODE must be ports or edge, got: bogus", False),
+        ("edge", _bundle({"PATH": "/tmp"}), {}, "PATH is not in the allowlist"),
+        ("bogus", None, {}, "DEPLOY_MODE must be ports or edge, got: bogus"),
         (
             "edge",
             None,
             {"GHCR_TOKEN": "test-ghcr-token", "STUB_LOGIN_FAILURE": "registry login denied"},
-            "registry login denied",
-            True,
+            "registry login failed",
         ),
     ],
     ids=["invalid-bundle", "bad-deploy-mode", "registry-login"],
@@ -1803,7 +1843,6 @@ def test_ci_auto_rollback_keeps_the_release_when_deploy_stops_before_the_switch(
     bundle: str | None,
     stubs: dict[str, str],
     reason: str,
-    previous_copied: bool,
 ) -> None:
     # A legacy host was deployed before DEPLOY_RUN existed and has no switch marker yet.
     runs = ({"DEPLOY_RUN": "101-1"}, {"DEPLOY_RUN": "102-1"}) if marked else ({}, {})
@@ -1825,9 +1864,8 @@ def test_ci_auto_rollback_keeps_the_release_when_deploy_stops_before_the_switch(
     assert host.calls()[rollback_calls:] == []
     calls = host.calls()[calls_before:]
     assert not any(set(c.split()) & {"pull", "run", "up", "down", "rm"} for c in calls)
-    # deploy.sh copies the state to .previous before docker login; nothing else has changed.
-    copied = {".deploy-state.previous": before[".deploy-state"]} if previous_copied else {}
-    assert host.files() == {**before, **copied}
+    # Pre-switch refusal leaves the previous-release record untouched too.
+    assert host.files() == before
     state = _read_dotenv(host.app_dir / ".deploy-state")
     assert state["current_image"] == IMAGE_B and "rolled_back" not in state
     assert list(host.tmp.iterdir()) == []
@@ -1883,39 +1921,21 @@ def test_failed_stack_start_rolls_back_once_and_the_ci_rollback_is_idempotent(ho
     assert after == after_deploy
 
 
-def test_ci_auto_rollback_after_a_failed_image_pull_restores_the_working_release(
-    host: Host,
-) -> None:
+def test_ci_auto_rollback_after_a_failed_image_pull_keeps_the_working_release(host: Host) -> None:
     assert host.deploy(IMAGE_A, bundle="", env={"DEPLOY_RUN": "101-1"}).returncode == 0
     assert host.deploy(IMAGE_B, env={"DEPLOY_RUN": "102-1"}).returncode == 0
-    state_b = (host.app_dir / ".deploy-state").read_bytes()
+    before = host.files()
     calls_before = len(host.calls())
-
     deploy = host.deploy(IMAGE_C, env={"DEPLOY_RUN": "103-1", "STUB_PULL_FAILURE": IMAGE_C})
-
     assert deploy.returncode != 0
     assert f"pull {IMAGE_C}" in host.calls()[calls_before:]
-    assert not any(" up " in call for call in host.calls()[calls_before:])
-    assert _read_dotenv(host.env_file)["IMAGE"] == IMAGE_C
-    assert (host.app_dir / ".deploy-state").read_bytes() == state_b
+    assert host.files() == before
     rollback_calls = len(host.calls())
-
     result = _ci_auto_rollback(host, "103-1")
-
     assert result.returncode == 0, result.stderr
-    assert f"rolled back to {IMAGE_B}" in result.stdout
-    assert "release unchanged" not in result.stdout + result.stderr
-    assert _read_dotenv(host.env_file)["IMAGE"] == IMAGE_B
-    state = _read_dotenv(host.app_dir / ".deploy-state")
-    assert state["current_image"] == IMAGE_B and state["rolled_back"] == "true"
-    assert (host.app_dir / ".deploy-state.previous").read_bytes() == state_b
-    calls = host.calls()[rollback_calls:]
-    pull = calls.index(f"pull {IMAGE_B}")
-    probe = next(i for i, call in enumerate(calls) if " run " in call)
-    up = next(i for i, call in enumerate(calls) if " up " in call)
-    assert pull < probe < up
-    assert (host.log.parent / "probe-image").read_text().strip() == B_ID
-    assert (host.log.parent / "up-image").read_text().strip() == B_ID
+    assert result.stdout == STOPPED_BEFORE_SWITCH.format("103-1")
+    assert host.calls()[rollback_calls:] == []
+    assert host.files() == before
 
 
 def test_ci_auto_rollback_after_a_failed_health_check_restores_the_previous_release(
@@ -2058,3 +2078,680 @@ def test_worker_stop_grace_exceeds_the_application_shutdown_deadline(compose_pat
     assert re.search(r"^    stop_grace_period: 40s$", worker, re.MULTILINE)
     # SIGTERM must reach the Python worker, whose first-signal deadline includes Runner.close.
     assert '    command: ["python", "-m", "app.worker"]' in worker
+
+
+# --- GitLab configuration recipients (#335) ---------------------------------------------------
+
+
+def _write_application_bundle(directory: Path, values: Mapping[str, str]) -> None:
+    result = subprocess.run(
+        [
+            "bash",
+            "-eo",
+            "pipefail",
+            "-c",
+            'source "$ENV_HELPER"; write_app_env_files "$APP_DIR" "$APP_SECRETS_B64"',
+        ],
+        env={
+            "PATH": os.environ["PATH"],
+            "ENV_HELPER": str(REPO_ROOT / "deploy" / "scripts" / "env-file.sh"),
+            "APP_DIR": str(directory),
+            "APP_SECRETS_B64": _bundle(values),
+        },
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == ""
+
+
+@pytest.mark.parametrize("private_origins", [None, "", "[]"])
+def test_gitlab_bundle_uses_dedicated_owner_only_file_and_api_admission(
+    tmp_path: Path, private_origins: str | None
+) -> None:
+    settings = {
+        "GITLAB_CREDENTIAL_KEYS": json.dumps({"current": base64.b64encode(b"k" * 32).decode()}),
+        "GITLAB_ACTIVE_KEY_ID": "current",
+        "GITLAB_ALLOWED_ORIGINS": '["https://gitlab.com"]',
+    }
+    if private_origins is not None:
+        settings["GITLAB_PRIVATE_ORIGINS"] = private_origins
+    _write_application_bundle(
+        tmp_path,
+        {**CI_SECRETS, **settings, "GITLAB_WEBHOOK_INTAKE_ENABLED": "true"},
+    )
+    assert _read_env_file(tmp_path / "gitlab.env") == {
+        name: value for name, value in settings.items() if value
+    }
+    assert _read_env_file(tmp_path / "api.env")["GITLAB_WEBHOOK_INTAKE_ENABLED"] == "true"
+    for filename in ("app.env", "worker.env", "webhook-worker.env"):
+        assert not any(name.startswith("GITLAB_") for name in _read_env_file(tmp_path / filename))
+    assert not set(settings).intersection(_read_env_file(tmp_path / "api.env"))
+    for filename in ("gitlab.env", "app.env", "api.env", "worker.env", "webhook-worker.env"):
+        assert _mode(tmp_path / filename) == 0o600
+
+
+@pytest.mark.parametrize("configured", [False, True], ids=["github-only", "gitlab-configured"])
+def test_compose_routes_gitlab_to_workers_and_profile_only_operator(
+    tmp_path: Path, configured: bool
+) -> None:
+    if shutil.which("docker") is None:
+        pytest.skip("Docker Compose CLI is required for recipient rendering")
+    gitlab = (
+        {
+            "GITLAB_CREDENTIAL_KEYS": json.dumps({"current": base64.b64encode(b"k" * 32).decode()}),
+            "GITLAB_ACTIVE_KEY_ID": "current",
+            "GITLAB_ALLOWED_ORIGINS": '["https://gitlab.com"]',
+        }
+        if configured
+        else {}
+    )
+    admission = {"GITLAB_WEBHOOK_INTAKE_ENABLED": "true"} if configured else {}
+    _write_application_bundle(tmp_path, {**CI_SECRETS, **gitlab, **admission})
+    shutil.copy(STAGING_COMPOSE, tmp_path / "compose.yml")
+    compose_env = tmp_path / ".env"
+    compose_env.write_text(
+        f"IMAGE={IMAGE_A}\nPOSTGRES_PASSWORD=test-db\nRABBITMQ_PASSWORD=test-broker\n"
+        "REDIS_PASSWORD=test-cache\n"
+    )
+    compose_env.chmod(0o600)
+    command = ["docker", "compose", "--project-directory", str(tmp_path)]
+    environment = {"PATH": os.environ["PATH"], "HOME": os.environ["HOME"]}
+    rendered = subprocess.run(
+        [*command, "--profile", "gitlab-operator", "config", "--format", "json"],
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert rendered.returncode == 0, "Compose recipient rendering failed"
+    services = json.loads(rendered.stdout)["services"]
+    assert "gitlab-admin" in services
+    worker_keys = {
+        "GITLAB_CREDENTIAL_KEYS",
+        "GITLAB_ACTIVE_KEY_ID",
+        "GITLAB_ALLOWED_ORIGINS",
+        "GITLAB_PRIVATE_ORIGINS",
+    }
+    for name, service in services.items():
+        actual = service.get("environment", {})
+        assert {key: value for key, value in actual.items() if key in worker_keys} == (
+            gitlab if name in {"worker", "webhook-worker", "gitlab-admin"} else {}
+        ), name
+        assert {
+            key: value for key, value in actual.items() if key == "GITLAB_WEBHOOK_INTAKE_ENABLED"
+        } == (admission if name == "api" else {}), name
+        assert "GITLAB_TOKEN" not in actual
+    operator = services["gitlab-admin"]
+    assert operator["image"] == IMAGE_A
+    assert operator["profiles"] == ["gitlab-operator"]
+    assert operator["entrypoint"] == ["python", "-m", "app.gitlab_admin"]
+    assert operator["command"] == []
+    assert operator["healthcheck"] == {"disable": True}
+    assert operator["restart"] == "no"
+    assert operator["pull_policy"] == "missing"
+    for name in ("api", "worker", "webhook-worker", "bootstrap"):
+        assert services[name]["pull_policy"] == "always"
+    assert not operator.get("ports")
+    assert operator["environment"] == {
+        "DATABASE_URL": "postgresql+psycopg://app:test-db@postgres:5432/app",
+        **gitlab,
+    }
+    assert set(operator["depends_on"]) == {"postgres"}
+    normal_services = subprocess.run(
+        [*command, "config", "--services"],
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert normal_services.returncode == 0
+    assert set(normal_services.stdout.splitlines()) == {
+        "api",
+        "worker",
+        "webhook-worker",
+        "bootstrap",
+        "postgres",
+        "rabbitmq",
+        "redis",
+    }
+
+
+@pytest.mark.parametrize("private_origins", [None, "", "CONFIG_CANARY"])
+def test_ci_bundle_preserves_gitlab_sources_and_optional_absence(
+    tmp_path: Path, private_origins: str | None
+) -> None:
+    settings = {
+        "GITLAB_CREDENTIAL_KEYS": json.dumps({"current": base64.b64encode(b"k" * 32).decode()}),
+        "GITLAB_ACTIVE_KEY_ID": "current",
+        "GITLAB_ALLOWED_ORIGINS": '["https://gitlab.com"]',
+        "GITLAB_WEBHOOK_INTAKE_ENABLED": "false",
+    }
+    if private_origins is not None:
+        settings["GITLAB_PRIVATE_ORIGINS"] = private_origins
+    stdout, bundle = _run_bundle_step(tmp_path, {**CI_SECRETS, **settings})
+    decoded = {
+        name: base64.b64decode(value).decode()
+        for name, _, value in (
+            line.partition("=") for line in base64.b64decode(bundle).decode().splitlines()
+        )
+    }
+    assert decoded == {name: value for name, value in {**CI_SECRETS, **settings}.items() if value}
+    assert "CONFIG_CANARY" not in stdout
+
+
+CI_PREFLIGHT_DOCKER = """\
+#!__PYTHON__
+import base64
+import json
+import os
+import stat
+import subprocess
+import sys
+from pathlib import Path
+
+args = sys.argv[1:]
+record = {"argv": args, "docker_config": os.environ["DOCKER_CONFIG"]}
+if args[0] == "login":
+    record["token_stdin_correct"] = sys.stdin.read() == "REGISTRY_TOKEN_CANARY\\n"
+    Path(os.environ["DOCKER_CONFIG"], "config.json").write_text("auth fixture")
+if args[0] == "run":
+    path = Path(args[args.index("--env-file") + 1])
+    record["env_mode"] = stat.S_IMODE(path.stat().st_mode)
+    fields = dict(line.split("=", 1) for line in path.read_text().splitlines())
+    record["env_names"] = sorted(fields)
+    bundle = base64.b64decode(fields["GITLAB_DEPLOYMENT_BUNDLE"]).decode()
+    record["gitlab_names"] = sorted(line.split("=", 1)[0] for line in bundle.splitlines())
+    record["file_modes"] = [
+        stat.S_IMODE(candidate.stat().st_mode)
+        for candidate in path.parent.iterdir() if candidate.is_file()
+    ]
+with Path(os.environ["STUB_LOG"]).open("a") as log:
+    log.write(json.dumps(record) + "\\n")
+if os.environ.get("STUB_FAIL_STAGE") == args[0]:
+    print("synthetic docker failure", file=sys.stderr)
+    raise SystemExit(1)
+if args[0] == "run":
+    image_index = args.index(os.environ["STUB_EXPECTED_IMAGE"])
+    command = args[image_index + 1:]
+    assert command[:2] == ["python", "-c"]
+    if "STUB_PAYLOAD_OVERRIDE" in os.environ:
+        fields["GITLAB_DEPLOYMENT_BUNDLE"] = os.environ["STUB_PAYLOAD_OVERRIDE"]
+    result = subprocess.run([sys.executable, *command[1:]], env=fields, check=False)
+    raise SystemExit(result.returncode)
+"""
+
+
+def _run_ci_gitlab_pipeline(
+    tmp_path: Path, values: Mapping[str, str], *, fail_stage: str = ""
+) -> tuple[subprocess.CompletedProcess[str], list[str], list[dict[str, object]], Path]:
+    """Run actual deploy-job local shell; record remote actions instead of contacting a host."""
+    import sys
+
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    docker = bin_dir / "docker"
+    docker.write_text(CI_PREFLIGHT_DOCKER.replace("__PYTHON__", sys.executable))
+    docker.chmod(0o755)
+    temporary = tmp_path / "runner-temp"
+    temporary.mkdir()
+    output = tmp_path / "github-output"
+    log = tmp_path / "docker.jsonl"
+    environment = {
+        "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
+        "RUNNER_TEMP": str(temporary),
+        "GITHUB_OUTPUT": str(output),
+        "GHCR_TOKEN": "REGISTRY_TOKEN_CANARY",
+        "GHCR_USER": "fixture-user",
+        "REGISTRY": "ghcr.io",
+        "IMAGE": IMAGE_A,
+        "STUB_EXPECTED_IMAGE": IMAGE_A,
+        "STUB_LOG": str(log),
+        "STUB_FAIL_STAGE": fail_stage,
+        **values,
+    }
+    deploy_job = (
+        WORKFLOW.read_text()
+        .split("  deploy-staging:\n", 1)[1]
+        .split("\n  deploy-monitoring:", 1)[0]
+    )
+    mutations = []
+    result = subprocess.CompletedProcess[str]([], 0, "", "")
+    for chunk in deploy_job.split("\n      - name: ")[1:]:
+        name, _, step = chunk.partition("\n")
+        if "uses: appleboy/" in step:
+            mutations.append(name)
+        if name not in {"Bundle application secrets", "Validate GitLab deployment configuration"}:
+            continue
+        result = subprocess.run(
+            ["bash", "--noprofile", "--norc", "-eo", "pipefail", "-c", _run_script(step)],
+            cwd=REPO_ROOT,
+            env=environment,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if result.returncode:
+            break
+        if name == "Bundle application secrets":
+            environment["APP_SECRETS_B64"] = output.read_text().strip().removeprefix("bundle=")
+    calls = [json.loads(line) for line in log.read_text().splitlines()] if log.exists() else []
+    return result, mutations, calls, temporary
+
+
+def test_ci_rejects_enabled_gitlab_before_any_host_mutation(tmp_path: Path) -> None:
+    result, mutations, calls, temporary = _run_ci_gitlab_pipeline(
+        tmp_path, {**CI_SECRETS, "GITLAB_WEBHOOK_INTAKE_ENABLED": "true"}
+    )
+    assert result.returncode != 0
+    assert mutations == []
+    assert result.stderr == "configuration_invalid\n"
+    assert calls
+    assert list(temporary.iterdir()) == []
+
+
+@pytest.mark.parametrize(
+    ("settings", "valid"),
+    [
+        ({}, True),
+        (
+            {
+                "GITLAB_CREDENTIAL_KEYS": json.dumps(
+                    {"KEY_CANARY": base64.b64encode(b"q" * 32).decode()}
+                ),
+                "GITLAB_ACTIVE_KEY_ID": "KEY_CANARY",
+                "GITLAB_ALLOWED_ORIGINS": '["https://gitlab.com"]',
+                "GITLAB_WEBHOOK_INTAKE_ENABLED": "false",
+            },
+            True,
+        ),
+        (
+            {
+                "GITLAB_CREDENTIAL_KEYS": json.dumps(
+                    {"KEY_CANARY": base64.b64encode(b"q" * 32).decode()}, indent=2
+                ),
+                "GITLAB_ACTIVE_KEY_ID": "KEY_CANARY",
+                "GITLAB_ALLOWED_ORIGINS": '["https://gitlab.com"]',
+                "GITLAB_WEBHOOK_INTAKE_ENABLED": "true",
+            },
+            True,
+        ),
+        ({"GITLAB_ACTIVE_KEY_ID": "KEY_CANARY"}, False),
+        (
+            {
+                "GITLAB_CREDENTIAL_KEYS": '{"KEY_CANARY":"MATERIAL_CANARY"}',
+                "GITLAB_ACTIVE_KEY_ID": "KEY_CANARY",
+                "GITLAB_ALLOWED_ORIGINS": '["https://gitlab.com"]',
+            },
+            False,
+        ),
+        (
+            {
+                "GITLAB_CREDENTIAL_KEYS": json.dumps(
+                    {"KEY_CANARY": base64.b64encode(b"q" * 32).decode()}
+                ),
+                "GITLAB_ACTIVE_KEY_ID": "KEY_CANARY",
+                "GITLAB_ALLOWED_ORIGINS": '["https://gitlab.com"]',
+                "GITLAB_PRIVATE_ORIGINS": "PRIVATE_CANARY",
+            },
+            False,
+        ),
+        ({"GITLAB_WEBHOOK_INTAKE_ENABLED": "FLAG_CANARY"}, False),
+    ],
+    ids=["empty", "complete-off", "multiline-on", "partial", "bad-key", "bad-private", "bad-flag"],
+)
+def test_ci_preflight_validates_exact_target_with_protected_gitlab_only_input(
+    tmp_path: Path, settings: Mapping[str, str], valid: bool
+) -> None:
+    result, mutations, calls, temporary = _run_ci_gitlab_pipeline(
+        tmp_path, {**CI_SECRETS, **settings}
+    )
+    assert (result.returncode == 0) is valid
+    assert bool(mutations) is valid
+    assert result.stdout == ""
+    assert result.stderr == ("" if valid else "configuration_invalid\n")
+    assert len(calls) == 3
+    assert calls[0]["token_stdin_correct"] is True
+    assert calls[1]["argv"] == ["pull", IMAGE_A]
+    run = calls[2]
+    args = run["argv"]
+    assert isinstance(args, list)
+    assert args[:4] == ["run", "--rm", "--network", "none"]
+    assert args[4] == "--env-file"
+    assert args[6:9] == [IMAGE_A, "python", "-c"]
+    assert run["env_mode"] == 0o600
+    assert run["env_names"] == ["GITLAB_DEPLOYMENT_BUNDLE"]
+    assert run["gitlab_names"] == sorted(name for name, value in settings.items() if value)
+    file_modes = run["file_modes"]
+    assert isinstance(file_modes, list)
+    assert file_modes and set(file_modes) == {0o600}
+    for call in calls:
+        arguments = call["argv"]
+        assert isinstance(arguments, list)
+        diagnostic = "\n".join(arguments) + result.stdout + result.stderr
+        for canary in (
+            "KEY_CANARY",
+            "MATERIAL_CANARY",
+            "PRIVATE_CANARY",
+            "FLAG_CANARY",
+            "REGISTRY_TOKEN_CANARY",
+        ):
+            assert canary not in diagnostic
+        assert str(call["docker_config"]).startswith(str(temporary))
+    assert list(temporary.iterdir()) == []
+
+
+@pytest.mark.parametrize("fail_stage", ["login", "pull", "run"])
+def test_ci_preflight_failures_leave_no_registry_or_secret_files(
+    tmp_path: Path, fail_stage: str
+) -> None:
+    result, mutations, calls, temporary = _run_ci_gitlab_pipeline(
+        tmp_path, CI_SECRETS, fail_stage=fail_stage
+    )
+    assert result.returncode != 0
+    assert mutations == []
+    assert calls
+    assert "REGISTRY_TOKEN_CANARY" not in result.stdout + result.stderr
+    assert list(temporary.iterdir()) == []
+
+
+def test_ci_preflight_is_unconditional_and_precedes_all_remote_actions() -> None:
+    step = _workflow_step("Validate GitLab deployment configuration")
+    assert "        if:" not in step
+    assert "IMAGE: ${{ needs.push-image.outputs.image_ref }}" in step
+    assert "APP_SECRETS_B64: ${{ steps.app_secrets.outputs.bundle }}" in step
+    assert "GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}" in step
+    assert "GHCR_USER: ${{ github.actor }}" in step
+    deployment = (
+        WORKFLOW.read_text()
+        .split("  deploy-staging:\n", 1)[1]
+        .split("\n  deploy-monitoring:", 1)[0]
+    )
+    preflight = deployment.index("      - name: Validate GitLab deployment configuration")
+    assert deployment.index("      - name: Bundle application secrets") < preflight
+    assert preflight < deployment.index("      - name: Upload deploy files")
+    assert preflight < deployment.index("      - name: Upload edge proxy files")
+    assert preflight < deployment.index("      - name: Prepare host")
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        "PAYLOAD_CANARY!",
+        base64.b64encode(b"UNKNOWN=UEFZTE9BRF9DQU5BUlk=\n").decode(),
+        base64.b64encode(b"GITLAB_ACTIVE_KEY_ID\n").decode(),
+        base64.b64encode(b"GITLAB_ACTIVE_KEY_ID=/w==\n").decode(),
+        base64.b64encode(b"GITLAB_ACTIVE_KEY_ID=YQ==\nGITLAB_ACTIVE_KEY_ID=Yg==\n").decode(),
+    ],
+    ids=["not-base64", "unknown-name", "missing-value", "non-utf8", "duplicate-name"],
+)
+def test_target_preflight_wrapper_rejects_malformed_transport_without_traceback(
+    tmp_path: Path, payload: str
+) -> None:
+    result, mutations, _, temporary = _run_ci_gitlab_pipeline(
+        tmp_path, {**CI_SECRETS, "STUB_PAYLOAD_OVERRIDE": payload}
+    )
+    assert result.returncode != 0
+    assert mutations == []
+    assert result.stdout == ""
+    assert result.stderr == "configuration_invalid\n"
+    assert list(temporary.iterdir()) == []
+
+
+def test_ci_preflight_rejects_mutable_target_before_docker_or_host_calls(tmp_path: Path) -> None:
+    result, mutations, calls, temporary = _run_ci_gitlab_pipeline(
+        tmp_path, {**CI_SECRETS, "IMAGE": "ghcr.io/test/api:mutable"}
+    )
+    assert result.returncode != 0
+    assert result.stderr == "deployment preflight requires an immutable image digest\n"
+    assert mutations == []
+    assert calls == []
+    assert list(temporary.iterdir()) == []
+
+
+GITLAB_PROBE_HELPER = """\
+from __future__ import annotations
+import base64
+import hashlib
+import importlib.abc
+import json
+import os
+import stat
+import sys
+from pathlib import Path
+
+args = sys.argv[1:]
+path = Path(args[args.index('--env-file') + 1])
+image = args[args.index('--env-file') + 2]
+fields = dict(line.split('=', 1) for line in path.read_text().splitlines())
+record = {
+    'image': image,
+    'env_mode': stat.S_IMODE(path.stat().st_mode),
+    'before': {
+        file.name: [
+            hashlib.sha256(file.read_bytes()).hexdigest(),
+            stat.S_IMODE(file.stat().st_mode),
+        ]
+        for file in Path(os.environ['APP_DIR']).iterdir() if file.is_file()
+    },
+}
+with Path(os.environ['STUB_GITLAB_LOG']).open('a') as log:
+    log.write(json.dumps(record) + '\\n')
+kind = os.environ.get('STUB_GITLAB_IMAGE_KIND', 'current')
+class ImageModules(importlib.abc.MetaPathFinder):
+    def find_spec(self, fullname, path=None, target=None):
+        missing = {'app.bootstrap.gitlab_deployment'}
+        if kind == 'unsupported':
+            missing.add('app.modules.integrations.gitlab.infrastructure.settings')
+        if kind in {'legacy', 'unsupported'} and fullname in missing:
+            raise ModuleNotFoundError(name=fullname)
+sys.meta_path.insert(0, ImageModules())
+# Only external Docker/image behavior is faked: target parsers execute real code.
+os.environ.update(fields)
+print(os.environ.get('STUB_GITLAB_STDERR', ''), file=sys.stderr, end='')
+if os.environ.get('STUB_MOVE_TAG_AT_GITLAB') == 'true':
+    Path(os.environ['STUB_TAG_MOVED']).touch()
+assert args[-3:-1] == ['python', '-c']
+exec(compile(args[-1], '<target-gitlab-preflight>', 'exec'))
+"""
+
+
+def _gitlab_enabled_settings() -> dict[str, str]:
+    return {
+        "GITLAB_CREDENTIAL_KEYS": json.dumps({"current": base64.b64encode(b"k" * 32).decode()}),
+        "GITLAB_ACTIVE_KEY_ID": "current",
+        "GITLAB_ALLOWED_ORIGINS": '["https://gitlab.com"]',
+        "GITLAB_WEBHOOK_INTAKE_ENABLED": "true",
+    }
+
+
+def test_host_gitlab_preflight_rejects_candidate_before_any_live_mutation(host: Host) -> None:
+    assert (
+        host.deploy(IMAGE_A, bundle=_bundle(CI_SECRETS), env={"DEPLOY_RUN": "101-1"}).returncode
+        == 0
+    )
+    (host.app_dir / "api.env").chmod(0o640)
+    before = host.files()
+    modes = {path.name: _mode(path) for path in host.app_dir.iterdir()}
+    calls_before = len(host.calls())
+    result = host.deploy(
+        IMAGE_B,
+        bundle=_bundle({**CI_SECRETS, "GITLAB_WEBHOOK_INTAKE_ENABLED": "true"}),
+        env={"DEPLOY_RUN": "102-1", "STUB_GITLAB_STDERR": "PROBE_SECRET_CANARY"},
+    )
+    assert result.returncode != 0
+    assert "configuration_invalid" in result.stderr
+    assert "PROBE_SECRET_CANARY" not in result.stdout + result.stderr
+    assert host.files() == before
+    assert {path.name: _mode(path) for path in host.app_dir.iterdir()} == modes
+    assert not any(
+        call.startswith("compose ") or call.startswith("rm ")
+        for call in host.calls()[calls_before:]
+    )
+    assert list(host.tmp.iterdir()) == []
+
+
+def test_host_gitlab_deploy_accepts_legacy_parsers_without_new_helper(host: Host) -> None:
+    result = host.deploy(
+        IMAGE_A,
+        bundle=_bundle(_gitlab_enabled_settings()),
+        env={"STUB_GITLAB_IMAGE_KIND": "legacy"},
+    )
+    assert result.returncode == 0, result.stderr
+    assert _read_env_file(host.app_dir / "gitlab.env")["GITLAB_ACTIVE_KEY_ID"] == "current"
+    assert (host.log.parent / "up-image").read_text().strip() == A_ID
+
+
+@pytest.mark.parametrize("mode", ["manual", "auto"])
+def test_host_gitlab_rollback_refuses_invalid_retained_configuration_without_mutation(
+    host: Host, mode: str
+) -> None:
+    assert host.deploy(IMAGE_A, bundle=_bundle(_gitlab_enabled_settings())).returncode == 0
+    assert host.deploy(IMAGE_B).returncode == 0
+    path = host.app_dir / "gitlab.env"
+    path.write_text("GITLAB_CREDENTIAL_KEYS='CONFIG_CANARY'\n")
+    path.chmod(0o640)
+    before = host.files()
+    modes = {file.name: _mode(file) for file in host.app_dir.iterdir()}
+    calls_before = len(host.calls())
+    result = host.run(
+        "rollback.sh", env={"ROLLBACK_MODE": mode, "STUB_GITLAB_STDERR": "PROBE_SECRET_CANARY"}
+    )
+    assert result.returncode != 0
+    assert "configuration_invalid" in result.stderr
+    assert "PROBE_SECRET_CANARY" not in result.stdout + result.stderr
+    assert "CONFIG_CANARY" not in result.stdout + result.stderr
+    assert host.files() == before
+    assert {file.name: _mode(file) for file in host.app_dir.iterdir()} == modes
+    assert not any(" up " in call or call.startswith("rm ") for call in host.calls()[calls_before:])
+    assert list(host.tmp.iterdir()) == []
+
+
+@pytest.mark.parametrize("kind", ["current", "legacy", "unsupported"])
+def test_host_gitlab_target_support_is_checked_without_changing_live_files(
+    host: Host, kind: str
+) -> None:
+    assert host.deploy(IMAGE_A, bundle=_bundle(CI_SECRETS)).returncode == 0
+    before = host.files()
+    modes = {path.name: _mode(path) for path in host.app_dir.iterdir()}
+    settings = _gitlab_enabled_settings()
+    settings["GITLAB_CREDENTIAL_KEYS"] = json.dumps(
+        {"current": base64.b64encode(b"k" * 32).decode()}, indent=2
+    )
+    result = host.deploy(IMAGE_B, bundle=_bundle(settings), env={"STUB_GITLAB_IMAGE_KIND": kind})
+    if kind == "unsupported":
+        assert result.returncode != 0
+        assert "configuration_invalid" in result.stderr
+        assert host.files() == before
+        assert {path.name: _mode(path) for path in host.app_dir.iterdir()} == modes
+    else:
+        assert result.returncode == 0, result.stderr
+        assert (
+            _read_env_file(host.app_dir / "gitlab.env")["GITLAB_CREDENTIAL_KEYS"]
+            == settings["GITLAB_CREDENTIAL_KEYS"]
+        )
+    assert list(host.tmp.iterdir()) == []
+
+
+def test_host_gitlab_retained_files_are_validated_as_data_before_replacement(host: Host) -> None:
+    assert host.deploy(IMAGE_A, bundle=_bundle(_gitlab_enabled_settings())).returncode == 0
+    marker = host.log.parent / "must-not-execute"
+    (host.app_dir / "gitlab.env").write_text(f"GITLAB_ACTIVE_KEY_ID=$(touch {marker})\n")
+    (host.app_dir / "gitlab.env").chmod(0o640)
+    before = host.files()
+    modes = {path.name: _mode(path) for path in host.app_dir.iterdir()}
+    result = host.deploy(IMAGE_B)
+    assert result.returncode != 0
+    assert "configuration_invalid" in result.stderr
+    assert not marker.exists()
+    assert host.files() == before
+    assert {path.name: _mode(path) for path in host.app_dir.iterdir()} == modes
+    assert list(host.tmp.iterdir()) == []
+
+
+def test_host_gitlab_deploy_pins_tag_probe_and_startup_to_one_image(host: Host) -> None:
+    tag = "ghcr.io/test/api:mutable"
+    result = host.deploy(
+        tag,
+        bundle=_bundle(_gitlab_enabled_settings()),
+        env={
+            "STUB_SELECTED_REF": tag,
+            "STUB_MOVE_TAG_AT_GITLAB": "true",
+            "STUB_REPODIGESTS": "ghcr.io/unrelated/api@sha256:" + "d" * 64 + "\n" + IMAGE_A,
+        },
+    )
+    assert result.returncode == 0, result.stderr
+    probes = [
+        json.loads(line)
+        for line in (host.log.parent / "gitlab-probes.jsonl").read_text().splitlines()
+    ]
+    assert probes[-1]["image"] == A_ID
+    assert (host.log.parent / "tag-moved").exists()
+    assert (host.log.parent / "up-image").read_text().strip() == A_ID
+    assert _read_dotenv(host.env_file)["IMAGE"] == IMAGE_A
+    assert _read_dotenv(host.app_dir / ".deploy-state")["current_image"] == IMAGE_A
+    assert host.calls().count(f"pull {tag}") == 1
+    assert any(" up --pull missing " in call for call in host.calls())
+
+
+@pytest.mark.parametrize("mode", ["manual", "auto"])
+@pytest.mark.parametrize("kind", ["current", "legacy", "unsupported"])
+def test_host_gitlab_rollback_retains_config_and_uses_the_admitted_image(
+    host: Host, mode: str, kind: str
+) -> None:
+    assert host.deploy(IMAGE_A, bundle=_bundle(_gitlab_enabled_settings())).returncode == 0
+    assert host.deploy(IMAGE_B).returncode == 0
+    before = host.files()
+    before_config = {name: (host.app_dir / name).read_bytes() for name in ENV_FILES}
+    modes = {path.name: _mode(path) for path in host.app_dir.iterdir()}
+    result = host.run("rollback.sh", env={"ROLLBACK_MODE": mode, "STUB_GITLAB_IMAGE_KIND": kind})
+    if kind == "unsupported":
+        assert result.returncode != 0
+        assert "configuration_invalid" in result.stderr
+        assert host.files() == before
+        assert {path.name: _mode(path) for path in host.app_dir.iterdir()} == modes
+    else:
+        assert result.returncode == 0, result.stderr
+        probes = [
+            json.loads(line)
+            for line in (host.log.parent / "gitlab-probes.jsonl").read_text().splitlines()
+        ]
+        assert probes[-1]["image"] == A_ID
+        assert (host.log.parent / "probe-image").read_text().strip() == A_ID
+        assert (host.log.parent / "up-image").read_text().strip() == A_ID
+        assert {name: (host.app_dir / name).read_bytes() for name in ENV_FILES} == before_config
+    assert list(host.tmp.iterdir()) == []
+
+
+def test_host_gitlab_redeploy_disable_and_explicit_removal_preserve_bundle_semantics(
+    host: Host,
+) -> None:
+    settings = _gitlab_enabled_settings()
+    assert host.deploy(IMAGE_A, bundle=_bundle(settings)).returncode == 0
+    keyring = (host.app_dir / "gitlab.env").read_bytes()
+    assert host.deploy(IMAGE_B).returncode == 0
+    assert (host.app_dir / "gitlab.env").read_bytes() == keyring
+    assert _read_env_file(host.app_dir / "api.env")["GITLAB_WEBHOOK_INTAKE_ENABLED"] == "true"
+    settings["GITLAB_WEBHOOK_INTAKE_ENABLED"] = "false"
+    assert host.deploy(IMAGE_C, bundle=_bundle(settings)).returncode == 0
+    assert (host.app_dir / "gitlab.env").read_bytes() == keyring
+    assert _read_env_file(host.app_dir / "api.env")["GITLAB_WEBHOOK_INTAKE_ENABLED"] == "false"
+    assert host.deploy(IMAGE_A, bundle="").returncode == 0
+    for name in ENV_FILES:
+        assert (host.app_dir / name).read_bytes() == b""
+        assert _mode(host.app_dir / name) == 0o600
+
+
+def test_host_gitlab_failed_stack_start_retains_current_configuration_after_auto_rollback(
+    host: Host,
+) -> None:
+    settings = _gitlab_enabled_settings()
+    assert host.deploy(IMAGE_A, bundle=_bundle(settings)).returncode == 0
+    assert host.deploy(IMAGE_B).returncode == 0
+    before_config = {name: (host.app_dir / name).read_bytes() for name in ENV_FILES}
+    result = host.deploy(IMAGE_BAD, env={"STUB_FAILING_IMAGE": IMAGE_BAD})
+    assert result.returncode != 0
+    assert f"rolled back to {IMAGE_B}" in result.stdout
+    assert {name: (host.app_dir / name).read_bytes() for name in ENV_FILES} == before_config
+    assert list(host.tmp.iterdir()) == []
