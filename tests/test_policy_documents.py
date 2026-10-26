@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from datetime import timedelta
 from hashlib import sha256
 
 import pytest
@@ -16,7 +17,11 @@ from app.modules.reviews.application.policy_documents import (
     PolicyTreeEntry,
     normalize_document,
 )
-from app.modules.reviews.application.policy_errors import PolicyError, PolicyErrorCode
+from app.modules.reviews.application.policy_errors import (
+    PolicyError,
+    PolicyErrorCode,
+    policy_error_detail,
+)
 from app.modules.reviews.application.policy_snapshot import DocumentPresence
 
 _BASE = "b" * 40
@@ -231,3 +236,49 @@ def test_read_failure_is_an_error_not_a_missing_document() -> None:
 
     assert error.code is PolicyErrorCode.FETCH_TRANSIENT
     assert error.retryable is True
+
+
+@pytest.mark.parametrize(
+    ("failure", "detail"),
+    [
+        pytest.param(
+            PolicyError(
+                PolicyErrorCode.RATE_LIMITED,
+                "GitHub answered 429",
+                policy_base_sha=_BASE,
+                retry_after=timedelta(minutes=15),
+            ),
+            "файл `AGENTS.md`",
+            id="rate-limited",
+        ),
+        pytest.param(
+            PolicyError(
+                PolicyErrorCode.DOCUMENT_TOO_LARGE,
+                "The policy document exceeds 65536 bytes",
+                policy_base_sha=_BASE,
+                limit=65_536,
+            ),
+            "файл `AGENTS.md`, допустимо 65536",
+            id="stopped-stream",
+        ),
+    ],
+)
+def test_failed_blob_read_names_its_document_and_keeps_the_rest(
+    failure: PolicyError, detail: str
+) -> None:
+    @dataclass
+    class Failing(Source):
+        async def read_blob(self, oid: str) -> bytes:
+            raise failure
+
+    error = _fail(Failing(trees={None: {"AGENTS.md": _file("2" * 40)}}))
+
+    # The source reads by blob SHA; the loader knows the document (RFS §9).
+    assert (error.code, error.source_path, error.policy_base_sha) == (
+        failure.code,
+        "AGENTS.md",
+        _BASE,
+    )
+    assert (error.retry_after, error.limit) == (failure.retry_after, failure.limit)
+    assert policy_error_detail(error.message) == detail
+    assert error.__cause__ is failure

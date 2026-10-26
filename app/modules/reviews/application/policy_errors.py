@@ -64,6 +64,8 @@ class PolicyError(RunFailure):
     The message ends with where the problem is: the document, the line and position,
     the offending mask, and the limit with the actual value when they are known. The
     mask is the only author-written text quoted, shortened and made safe for markup.
+    When the count stopped at the limit (``actual_is_lower_bound``), the message says
+    only that the limit was exceeded and never shows the stopped count as exact.
     """
 
     def __init__(
@@ -80,6 +82,8 @@ class PolicyError(RunFailure):
         actual: int | None = None,
         excerpt: str | None = None,
         retry_after: timedelta | None = None,
+        unit: str | None = None,
+        actual_is_lower_bound: bool = False,
     ) -> None:
         parts = []
         if source_path is not None:
@@ -90,15 +94,20 @@ class PolicyError(RunFailure):
             parts.append(f"позиция {column}")
         if excerpt is not None:
             parts.append(f"маска `{_safe_excerpt(excerpt)}`")
-        if actual is not None and limit is not None:
-            parts.append(f"фактически {actual}, допустимо {limit}")
+        allowed = f"допустимо {limit} {unit}" if unit else f"допустимо {limit}"
+        if limit is not None and actual_is_lower_bound:
+            parts.append(f"фактически более {limit}, {allowed}")
+        elif actual is not None and limit is not None:
+            parts.append(f"фактически {actual}, {allowed}")
         elif limit is not None:
-            parts.append(f"допустимо {limit}")
+            parts.append(allowed)
         detail = ", ".join(parts)
+        safe_message = message
         if detail:
             message = f"{message}{POLICY_DETAIL_SEPARATOR}{detail}"
         super().__init__(code.value, message, retry_after=retry_after)
         self.code = code
+        self.safe_message = safe_message
         self.source_path = source_path
         self.policy_base_sha = policy_base_sha
         self.line = line
@@ -106,7 +115,43 @@ class PolicyError(RunFailure):
         self.pattern_index = pattern_index
         self.limit = limit
         self.actual = actual
+        self.excerpt = excerpt
+        self.unit = unit
+        self.actual_is_lower_bound = actual_is_lower_bound
 
     @property
     def retryable(self) -> bool:
         return self.code in RETRYABLE_POLICY_ERROR_CODES
+
+    def located(self, source_path: str) -> PolicyError:
+        """The same failure in a document its raise site could not name (a blob read)."""
+        return PolicyError(
+            self.code,
+            self.safe_message,
+            source_path=source_path,
+            policy_base_sha=self.policy_base_sha,
+            line=self.line,
+            column=self.column,
+            pattern_index=self.pattern_index,
+            limit=self.limit,
+            actual=self.actual,
+            excerpt=self.excerpt,
+            retry_after=self.retry_after,
+            unit=self.unit,
+            actual_is_lower_bound=self.actual_is_lower_bound,
+        )
+
+    def diagnostic(self) -> dict[str, str | int | bool | None]:
+        """The RFS §9 diagnostic for the trace; its message has no location, unknowns are null."""
+        return {
+            "code": self.code.value,
+            "source_path": self.source_path,
+            "policy_base_sha": self.policy_base_sha,
+            "message": self.safe_message,
+            "line": self.line,
+            "column": self.column,
+            "pattern_index": self.pattern_index,
+            "limit": self.limit,
+            "actual": self.actual,
+            "retryable": self.retryable,
+        }

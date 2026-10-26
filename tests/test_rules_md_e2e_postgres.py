@@ -753,11 +753,15 @@ def _rules_load(outcome: Outcome) -> dict[str, Any]:
 
 
 def _assert_policy_load_failed(outcome: Outcome) -> None:
-    # PIPELINE_SPEC §trace: a failed `policy.load` stores `{error: {type, message}}`.
+    # PIPELINE_SPEC §trace: a failed `policy.load` stores `{error: {type, message, diagnostic}}`;
+    # the diagnostic carries the RFS §9 fields of the policy failure.
     assert outcome.policy_load
     for response in outcome.policy_load:
         assert set(response) == {"error"}, response
-        assert set(response["error"]) == {"type", "message"}, response
+        assert set(response["error"]) == {"type", "message", "diagnostic"}, response
+        diagnostic = response["error"]["diagnostic"]
+        assert diagnostic["code"] == outcome.error_code, response
+        assert diagnostic["policy_base_sha"] == BASE, response
 
 
 def _assert_failed_once(outcome: Outcome, error_codes: frozenset[str]) -> None:

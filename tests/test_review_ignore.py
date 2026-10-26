@@ -24,8 +24,8 @@ def _block(*lines: str, fence: str = "```", info: str = "review-ignore") -> str:
     return "\n".join(["# Ignore", "", f"{fence}{info}", *lines, fence, ""])
 
 
-def _matcher(*patterns: str) -> IgnoreMatcher:
-    return IgnoreMatcher(parse_review_ignore(_block(*patterns)))
+def _matcher(*patterns: str, policy_base_sha: str | None = None) -> IgnoreMatcher:
+    return IgnoreMatcher(parse_review_ignore(_block(*patterns)), policy_base_sha=policy_base_sha)
 
 
 def _matches(pattern: str, path: str) -> bool:
@@ -197,18 +197,45 @@ def test_matcher_returns_the_first_mask_and_memoizes_a_path() -> None:
 
 def test_path_outside_the_contract_is_rejected_not_matched() -> None:
     with pytest.raises(PolicyError) as caught:
-        _matcher("**").match("a/../b.py")
+        _matcher("**", policy_base_sha="b" * 40).match("a/../b.py")
     assert caught.value.code is PolicyErrorCode.PATH_INVALID
+    # A repository path, not a policy document: no source_path, but the pinned base.
+    assert (caught.value.source_path, caught.value.policy_base_sha) == (None, "b" * 40)
 
 
 def test_exhausted_budget_stops_the_run(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(review_ignore, "MAX_TRANSITIONS_PER_PATH", 20)
-    matcher = _matcher("*a*a*a*b")
+    matcher = _matcher("*a*a*a*b", policy_base_sha="b" * 40)
+    matcher.match("b")
 
     with pytest.raises(PolicyError) as caught:
         matcher.match("a" * 40)
+    # RFS §9: the document of the masks, and the path counter at the stop — the
+    # confirmed excess, not the run counter and not an extrapolated total.
     assert caught.value.code is PolicyErrorCode.MATCH_BUDGET_EXCEEDED
-    assert caught.value.limit == 20
+    assert (caught.value.source_path, caught.value.limit, caught.value.actual) == (
+        ".review/rules.md",
+        20,
+        21,
+    )
+    assert matcher._run_transitions > 21
+    assert caught.value.policy_base_sha == "b" * 40
+
+
+def test_exhausted_run_budget_names_the_run_counter(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(review_ignore, "MAX_TRANSITIONS_PER_RUN", 20)
+    matcher = _matcher("*.py")
+    assert matcher.match("m0.py") == "*.py"
+
+    with pytest.raises(PolicyError) as caught:
+        for index in range(1, 20):
+            matcher.match(f"m{index}.py")
+    assert caught.value.code is PolicyErrorCode.MATCH_BUDGET_EXCEEDED
+    assert (caught.value.source_path, caught.value.limit, caught.value.actual) == (
+        ".review/rules.md",
+        20,
+        21,
+    )
 
 
 def _file(

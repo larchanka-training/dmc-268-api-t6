@@ -15,7 +15,7 @@ from sqlalchemy.exc import OperationalError
 
 from app.modules.code_index.domain.enums import EdgeKind, IndexStatus, RagIndexStatus
 from app.modules.code_index.domain.rag_index import RagIndex
-from app.modules.reviews.application import rag_index
+from app.modules.reviews.application import rag_index, review_ignore
 from app.modules.reviews.application.ast_resolution import RevisionTree
 from app.modules.reviews.application.ast_symbols import (
     AstFacts,
@@ -55,6 +55,7 @@ from app.modules.reviews.application.review_context_stage import (
     ReviewContextStage,
     context_summary,
 )
+from app.modules.reviews.application.review_ignore import IgnoreMatcher
 from app.modules.reviews.application.run_failures import RunCancelled, RunFailure, RunSkipped
 from app.modules.reviews.application.vcs_diff import (
     MergeBaseUnavailable,
@@ -382,13 +383,127 @@ def test_policy_error_ends_the_attempt_and_stays_in_the_trace() -> None:
     assert "policy_ignore_pattern_invalid" in trace.steps[0][2]["error"]["message"]
 
 
+def test_policy_error_records_its_diagnostic_in_the_policy_load_action() -> None:
+    trace = Trace()
+    masks = "\n".join(f"d{index}/**" for index in range(257))
+    crowded = Policy(rules=f"```review-ignore\n{masks}\n```\n".encode())
+
+    with pytest.raises(PolicyError):
+        asyncio.run(_stage(trace, policy=crowded).run(_RUN))
+
+    [(tool, _, response)] = trace.steps
+    assert tool == "policy.load"
+    # RFS §9: every field of the diagnostic; the message is the safe one without the
+    # location, which stays only in the Run message.
+    assert response["error"]["diagnostic"] == {
+        "code": "policy_ignore_limit_exceeded",
+        "source_path": ".review/rules.md",
+        "policy_base_sha": _BASE,
+        "message": "The review-ignore block has more than 256 masks",
+        "line": 1,
+        "column": None,
+        "pattern_index": None,
+        "limit": 256,
+        "actual": 257,
+        "retryable": False,
+    }
+    assert response["error"]["type"] == "PolicyError"
+    assert response["error"]["message"].startswith("policy_ignore_limit_exceeded: ")
+
+
+def test_match_budget_error_names_the_pinned_policy_base(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(review_ignore, "MAX_TRANSITIONS_PER_PATH", 1)
+    stage = _stage(Trace(), policy=Policy(rules=b"```review-ignore\n**/*.md\n```\n"))
+
+    with pytest.raises(PolicyError) as caught:
+        asyncio.run(stage.run(_RUN))
+
+    assert caught.value.code is PolicyErrorCode.MATCH_BUDGET_EXCEEDED
+    assert caught.value.diagnostic()["policy_base_sha"] == _BASE
+
+
+def test_mask_error_diagnostic_keeps_line_column_and_mask_index_apart() -> None:
+    trace = Trace()
+    broken = Policy(rules=b"# Rules\n\n```review-ignore\nok/**\nsrc/a?.py\n```\n")
+
+    with pytest.raises(PolicyError):
+        asyncio.run(_stage(trace, policy=broken).run(_RUN))
+
+    # Line 5, column 6 and the second mask: three different numbers, so a swap shows.
+    assert trace.steps[0][2]["error"]["diagnostic"] == {
+        "code": "policy_ignore_pattern_invalid",
+        "source_path": ".review/rules.md",
+        "policy_base_sha": _BASE,
+        "message": "Invalid review-ignore mask: the character is reserved in a mask",
+        "line": 5,
+        "column": 6,
+        "pattern_index": 1,
+        "limit": None,
+        "actual": None,
+        "retryable": False,
+    }
+
+
+def test_profile_check_failure_names_the_pinned_policy_base() -> None:
+    from dataclasses import replace
+
+    from app.modules.reviews.application.policy_snapshot import ExecutionProfile
+    from tests.test_prepare_policy_snapshot import _pins
+
+    trace = Trace()
+    profile = replace(ExecutionProfile.fast("model-a", ""), tokenizer_version="tokenizer/v0")
+
+    with pytest.raises(PolicyError) as caught:
+        asyncio.run(_stage(trace, store=Store(pins=_pins(execution_profile=profile))).run(_RUN))
+
+    assert caught.value.code is PolicyErrorCode.SNAPSHOT_INTEGRITY_ERROR
+    [(tool, _, response)] = trace.steps
+    diagnostic = response["error"]["diagnostic"]
+    # The check does not know the base; the policy.load step fills it, no document is named.
+    assert (tool, diagnostic["policy_base_sha"], diagnostic["source_path"]) == (
+        "policy.load",
+        _BASE,
+        None,
+    )
+
+
+def test_matcher_error_in_the_context_build_is_recorded_in_that_step() -> None:
+    class Probing:
+        async def execute(self, *, matcher: IgnoreMatcher, **kwargs: object) -> object:
+            return matcher.match("a/../b.py")
+
+    trace = Trace()
+    stage = _stage(trace)
+    stage._context_builder = lambda run: Probing()  # type: ignore[assignment,return-value]
+
+    with pytest.raises(PolicyError):
+        asyncio.run(stage.run(_RUN))
+
+    assert [step[0] for step in trace.steps] == ["policy.load", "context.build"]
+    # A repository path, not a policy document: no source_path, but the pinned base.
+    assert trace.steps[1][2]["error"]["diagnostic"] == {
+        "code": "policy_path_invalid",
+        "source_path": None,
+        "policy_base_sha": _BASE,
+        "message": "A repository path violates the path contract",
+        "line": None,
+        "column": None,
+        "pattern_index": None,
+        "limit": None,
+        "actual": None,
+        "retryable": False,
+    }
+
+
 def test_unreadable_policy_is_a_retryable_failure_not_an_empty_policy() -> None:
+    trace = Trace()
     denied = Policy(error=PolicyError(PolicyErrorCode.FETCH_TRANSIENT, "GitHub answered 502"))
 
     with pytest.raises(PolicyError) as caught:
-        asyncio.run(_stage(Trace(), policy=denied).run(_RUN))
+        asyncio.run(_stage(trace, policy=denied).run(_RUN))
 
     assert caught.value.retryable is True
+    assert trace.steps[0][2]["error"]["diagnostic"]["retryable"] is True
 
 
 def test_change_with_every_file_ignored_skips_the_run() -> None:
