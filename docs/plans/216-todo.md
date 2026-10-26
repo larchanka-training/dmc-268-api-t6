@@ -48,16 +48,25 @@ Both native before/after projections and the live worktree match all 1,223 sourc
 hashes recorded in verification; evidence-only edits preserve that boundary.
 The complete green run, rather than focused repeats, supplies the current proof.
 Fresh independent final evidence reviews reported Standards = 0 and Spec = 0.
-Publication and exact-head CI remain pending.
+The exact code/evidence checkpoint CI and cleanup completed below; subsequent metadata-head checks are separate.
 
 ### R2.3 — Publish existing PR
 
-- [ ] Focused conventional commits reference #216; explicit staging and verified
+- [x] Focused conventional commits reference #216; explicit staging and verified
   lease; ready PR303 body updated in What/Why/How to verify/Refs order.
-- [ ] New P2 SHA reply and four-P3 summary posted/read back; prior closed threads
+- [x] New P2 SHA reply and four-P3 summary posted/read back; prior closed threads
   preserved and reviewer-owned resolution left to reviewer.
-- [ ] Exact-head CI green; Board On Review, no new reviewer; only owned temporary
+- [x] Exact-head CI green; Board On Review, no new reviewer; only owned temporary
   resources removed. No merge, issue closure or Development-panel link.
+
+R2 author publication is verified at code/evidence head
+`821ba1a70147124e75a2214bca966daacf9d65d2`: [CI run 40316392527](https://github.com/larchanka-training/dmc-268-api-t6/actions/runs/40316392527)
+passed **6,984 tests, zero test skips**. Body/replies and Board On Review were
+read back; ownership-checked cleanup removed three containers, four volumes and
+one network, preserving shared resources. Human approval and reviewer-owned
+resolution remain pending. This later four-document record preserves the 1,223-file
+source identity; the code checkpoint is verified, and subsequent metadata-head
+CI is checked through [PR checks](https://github.com/larchanka-training/dmc-268-api-t6/pull/303/checks).
 
 ## Historical round 1 checklist
 

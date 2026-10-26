@@ -270,8 +270,44 @@ warnings are the existing Starlette/httpx and anyio deprecations. Only the four
 excluded evidence documents changed during verification. The first red run and
 its unproven timeout cause remain recorded; the successful complete rerun supplies
 the current gate proof. Fresh independent final evidence reviews reported
-Standards = 0 and Spec = 0. Publication, exact-head CI and owned-resource cleanup
-remain pending.
+Standards = 0 and Spec = 0. The reviewed tree was subsequently published as the
+verified code/evidence checkpoint recorded below; later metadata-head CI is separate.
+
+## Round 2 verified publication and cleanup
+
+The reviewed source/evidence is published as
+`821ba1a70147124e75a2214bca966daacf9d65d2` over main
+`1417faa716294865c196decdf5f19867237d234b`. Focused explicit staging and enabled
+commit hooks passed; publication used a force-with-lease against verified previous
+remote head `7c1455bf50c6a3e61d94e53d3db411731f02c323`. The 1,223-file source
+projection stayed `36f1a8eee8ceb851aff6d41a8daae435b530c0cbf220cfbe0566852ac73386d3`.
+
+[CI run 40316392527](https://github.com/larchanka-training/dmc-268-api-t6/actions/runs/40316392527)
+completed **successfully on that exact head**: **5,904 unit + 277/269/341/193
+integration = 6,984 passed, zero failures and zero skipped tests**. All 15 executed
+jobs succeeded. Four image-publish/deployment jobs were conditionally skipped;
+these are job conditions, not test skips. This independent exact-head CI agrees
+with the successful local complete native-copy run; the earlier red local run
+and its unproven timeout cause remain recorded.
+
+The existing ready PR body, [new P2 SHA reply](https://github.com/larchanka-training/dmc-268-api-t6/pull/303#discussion_r4376785579)
+and [four-P3 summary](https://github.com/larchanka-training/dmc-268-api-t6/pull/303#issuecomment-6415081263)
+were read back exactly. The [#217 F2 gate comment](https://github.com/larchanka-training/dmc-268-api-t6/issues/217#issuecomment-6413779899)
+is posted; live provider acceptance stays UNKNOWN. PR #303 remains open/non-draft
+with no new reviewer, #216 open and Board On Review. Human approval and reviewer-owned
+resolution of the new thread remain pending; no author resolution, merge or
+issue closure was performed.
+
+After successful code-head CI, ownership labels and network endpoints were checked
+before removing exactly **three containers, four volumes and one network**.
+The owned-resource inventory is empty. The shared image, unrelated resources,
+managed worktree and backup refs/stashes were preserved.
+
+This publication record changes only the four excluded #216 documents; it
+preserves the 1,223-file measured projection. The code checkpoint and CI above
+are verified; this does not claim that a later metadata commit can contain its
+own SHA or already has green CI. Subsequent metadata-head results are checked
+through [current PR checks](https://github.com/larchanka-training/dmc-268-api-t6/pull/303/checks).
 
 ## Historical round 1 publication and cleanup
 

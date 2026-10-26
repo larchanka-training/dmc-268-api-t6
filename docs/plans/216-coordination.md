@@ -201,7 +201,41 @@ matched before/after the full run and the live worktree has the same identity.
 Only the four excluded evidence documents changed during that source-frozen run.
 The first red run is retained; current proof comes from the complete successful
 rerun. Fresh independent final evidence reviews reported Standards = 0 and
-Spec = 0. Publication and current-head CI/cleanup receipts remain pending.
+Spec = 0. The exact code/evidence checkpoint CI and owned-resource cleanup subsequently completed; receipts follow.
 PR #303 stays ready, issue #216
 open and Board On Review; reviewer-owned resolution and human approval remain
 outside the author tasks.
+
+## Round 2 code-checkpoint publication receipts
+
+Published source/evidence head: `821ba1a70147124e75a2214bca966daacf9d65d2`;
+base `1417faa716294865c196decdf5f19867237d234b`. Focused explicit staging and
+commit hooks passed. The publication force-with-lease matched previous remote
+`7c1455bf50c6a3e61d94e53d3db411731f02c323`; the reviewed 1,223-file source
+projection remained unchanged. Existing PR #303 was updated and attached.
+
+| Published action | Verified receipt |
+| --- | --- |
+| New P2 reply with code-head SHA | [Reply 4376785579](https://github.com/larchanka-training/dmc-268-api-t6/pull/303#discussion_r4376785579) |
+| All four new P3 dispositions | [Summary 6415081263](https://github.com/larchanka-training/dmc-268-api-t6/pull/303#issuecomment-6415081263) |
+| F2 strict-provider acceptance gate | [#217 comment 6413779899](https://github.com/larchanka-training/dmc-268-api-t6/issues/217#issuecomment-6413779899) |
+| Exact code/evidence-head CI | [Run 40316392527](https://github.com/larchanka-training/dmc-268-api-t6/actions/runs/40316392527) — success |
+
+Body and reply readbacks match exactly. CI on that head passed **5,904 unit +
+277/269/341/193 integration = 6,984 tests, zero failures/skips**; all 15 executed
+jobs succeeded, with four conditional image-publish/deployment job skips.
+Readback confirmed ready/open PR, no new reviewer, issue #216 open and its exact
+Board item On Review. The new P2 thread remains reviewer-owned and human approval
+is pending; prior closed R1 threads were preserved.
+
+After green code-head CI, label and endpoint guards verified ownership before
+removing exactly three containers, four volumes and one network. The owned
+inventory is empty, and the shared image, unrelated resources, worktree and
+backup refs/stashes remain. No merge, issue closure or self-approval occurred.
+
+This later publication record changes only the four #216 metadata documents.
+The measured 1,223-file projection remains
+`36f1a8eee8ceb851aff6d41a8daae435b530c0cbf220cfbe0566852ac73386d3`.
+The code-head checkpoint above is verified; later metadata-head CI is a separate
+check available at [current PR checks](https://github.com/larchanka-training/dmc-268-api-t6/pull/303/checks),
+not a self-referential SHA or already-completed future CI claim.

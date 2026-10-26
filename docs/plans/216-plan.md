@@ -109,7 +109,7 @@ warnings, 1,156.88 s** (JUnit duration 1,156.689 s). All 1,223 native-copy hashe
 match before/after the complete run and the live worktree has the same identity.
 These source-preserving evidence edits change only the four excluded documents.
 Fresh independent final evidence reviews reported Standards = 0 and Spec = 0.
-Publication and exact-head CI remain pending.
+The exact code/evidence checkpoint CI and cleanup completed below; later metadata-head CI is checked separately.
 
 ### R2.3: Publish the existing PR update
 
@@ -118,17 +118,37 @@ and existing PR fields/comments. **Estimated scope:** S.
 
 **Acceptance criteria:**
 
-- [ ] Publisher explicitly stages reviewed paths, makes Conventional Commits
+- [x] Publisher explicitly stages reviewed paths, makes Conventional Commits
   referencing #216, refreshes main/remote head, and safely updates the existing
   ready PR with a verified force-with-lease if rebase requires it.
-- [ ] Rewrite the four-section PR body around the resulting change and current
+- [x] Rewrite the four-section PR body around the resulting change and current
   verification; reply to the new P2 thread with the new SHA and summarize four
   P3 dispositions. Preserve the reviewer-owned resolution boundary and prior
   closed threads; request no new reviewer.
-- [ ] Verify current-head CI and Board 12 **On Review**, then remove only owned
+- [x] Verify current-head CI and Board 12 **On Review**, then remove only owned
   temporary resources. Keep #216 open; no merge or self-approval.
 
 **Verification:** GitHub readback, exact-head CI and ownership-checked cleanup.
+
+**R2.3 code checkpoint published:** Reviewed source/evidence was committed as
+`821ba1a70147124e75a2214bca966daacf9d65d2` over main
+`1417faa716294865c196decdf5f19867237d234b`. Focused explicit staging and enabled
+commit hooks passed; the force-with-lease verified the previous remote head
+`7c1455bf50c6a3e61d94e53d3db411731f02c323`. Existing ready PR #303 was updated;
+its body, new P2 SHA reply and four-P3 summary were read back exactly.
+[CI run 40316392527](https://github.com/larchanka-training/dmc-268-api-t6/actions/runs/40316392527)
+succeeded on that exact code/evidence head: **5,904 unit + 277/269/341/193
+integration = 6,984 passed, zero failed/skipped tests**. After CI, ownership
+labels and network endpoints were checked before removing exactly three owned
+containers, four volumes and one network. The owned inventory is empty; shared
+image, unrelated resources, worktree and backups remain. Issue #216 stays open,
+Board On Review, no new reviewer. Human approval and reviewer-owned resolution of the new thread remain pending. Receipts are in [coordination](216-coordination.md).
+
+This later publication record changes only the four excluded #216 metadata
+files and preserves the 1,223-file measured source identity. The verified code
+checkpoint above stays explicit; it is not a claim that this metadata commit's
+CI has already run. Subsequent metadata-head results are available through
+[current PR checks](https://github.com/larchanka-training/dmc-268-api-t6/pull/303/checks).
 
 ### Risks and remaining unknowns
 
