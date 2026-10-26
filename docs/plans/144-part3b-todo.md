@@ -33,7 +33,7 @@ Design: [144-part3b-plan.md](144-part3b-plan.md). One task → one commit, test 
   `retrieved_excerpt` in `tokens_by_role`; a v5 run with RAG off shows an empty section and no
   `context.rag`; v4 runs show no section.
 - Done when:
-  - [ ] patches removed; PG files green with 0 skipped.
+  - [x] patches removed; PG files green with 0 skipped.
 
 **Commit:** `test(reviews): run the retrieved section on a v5 binding (#144)`
 

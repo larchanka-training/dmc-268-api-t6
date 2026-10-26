@@ -602,14 +602,8 @@ def test_retrieved_blocks_are_neither_kept_nor_shown_without_a_retrieved_section
     assert "RETRIEVED_CALLER_TEXT" not in user and "<retrieved_excerpts>" not in user
 
 
-def test_retrieved_blocks_reach_the_context_of_a_prompt_with_a_retrieved_section(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(
-        rag_index, "RETRIEVED_PROMPT_VERSIONS", frozenset({("review.system", "v4")})
-    )
-
-    context = _review("v4", _payload())
+def test_retrieved_blocks_reach_the_context_of_a_prompt_with_a_retrieved_section() -> None:
+    context = _review("v5", _payload())
 
     assert context.retrieved == (replace(RETRIEVED, block_id=_bounded_rag_id(RETRIEVED)),)
     assert context.retrieved_section
@@ -620,13 +614,8 @@ def test_retrieved_blocks_reach_the_context_of_a_prompt_with_a_retrieved_section
     assert "RETRIEVED_CALLER_TEXT" in user
 
 
-def test_the_fit_keeps_the_place_groups_under_the_snapshot_path_ids(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(
-        rag_index, "RETRIEVED_PROMPT_VERSIONS", frozenset({("review.system", "v4")})
-    )
-    context = _review("v4", replace(_payload(), retrieved=SLOT))
+def test_the_fit_keeps_the_place_groups_under_the_snapshot_path_ids() -> None:
+    context = _review("v5", replace(_payload(), retrieved=SLOT))
     assert [block.block_id for block in context.retrieved] == list(map(_bounded_rag_id, SLOT))
     l4, _ = context.context_blocks
     # Room for L4 and the second place, not for its own definition.
@@ -640,14 +629,8 @@ def test_the_fit_keeps_the_place_groups_under_the_snapshot_path_ids(
     assert (fitted.context_blocks, fitted.retrieved) == ((l4,), context.retrieved[:2])
 
 
-def test_a_failed_build_keeps_the_retrieved_section_of_the_prompt_empty(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(
-        rag_index, "RETRIEVED_PROMPT_VERSIONS", frozenset({("review.system", "v4")})
-    )
-
-    context = _review("v4", None)
+def test_a_failed_build_keeps_the_retrieved_section_of_the_prompt_empty() -> None:
+    context = _review("v5", None)
 
     # The section follows the bound prompt version, not the payload.
     assert context.retrieved == () and context.retrieved_section
@@ -768,15 +751,10 @@ LONG_DEFINITION = replace(
 )
 
 
-def test_snapshot_review_names_a_rag_block_of_a_long_path_by_a_bounded_id(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(
-        rag_index, "RETRIEVED_PROMPT_VERSIONS", frozenset({("review.system", "v4")})
-    )
+def test_snapshot_review_names_a_rag_block_of_a_long_path_by_a_bounded_id() -> None:
     payload = replace(_payload(), retrieved=(LONG_USE, LONG_DEFINITION))
 
-    context = _review("v4", payload)
+    context = _review("v5", payload)
 
     use, definition = _bounded_rag_id(LONG_USE), _bounded_rag_id(LONG_DEFINITION)
     assert context.retrieved == (
