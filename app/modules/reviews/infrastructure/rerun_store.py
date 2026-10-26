@@ -12,9 +12,13 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from app.common.infrastructure.db.enums import CodeChangeState, Engine, RunState, SeverityThreshold
 from app.common.infrastructure.db.unit_of_work import SqlAlchemyUnitOfWork
 from app.modules.auth.application.scope import AuthScope
-from app.modules.repositories.infrastructure.models import ProviderInstallation, RuleVersion
+from app.modules.repositories.infrastructure.models import (
+    ProviderInstallation,
+    Repository,
+    RuleVersion,
+)
 from app.modules.reviews.application.queue_messages import StoredRunMessage
-from app.modules.reviews.application.rerun_run import RerunOutcome, RerunResult
+from app.modules.reviews.application.rerun_run import RerunFacts, RerunOriginFacts
 from app.modules.reviews.application.try_enqueue_webhook_run import (
     PendingRunMessage,
     RunInsertCandidate,
@@ -45,7 +49,7 @@ class SqlAlchemyRerunStore:
         self._scope = scope
         self._allow_unscoped = allow_unscoped
 
-    async def create_rerun(self, run_id: UUID, now: datetime) -> RerunResult:
+    async def load_rerun_facts(self, run_id: UUID) -> RerunFacts | None:
         original = (
             await self._session.execute(
                 select(
@@ -71,7 +75,7 @@ class SqlAlchemyRerunStore:
             )
         ).one_or_none()
         if original is None:
-            return RerunResult(RerunOutcome.NOT_FOUND)
+            return None
         (
             code_change_id,
             original_origin,
@@ -90,35 +94,52 @@ class SqlAlchemyRerunStore:
         active = await self._session.scalar(
             select(Run.id).where(Run.code_change_id == code_change_id, Run.state.in_(_ACTIVE))
         )
-        if pr_state != CodeChangeState.OPEN or active is not None:
-            return RerunResult(RerunOutcome.CONFLICT)
-        if not isinstance(candidate, RunInsertCandidate):
-            # No active rule or prompt version, or no GitHub installation: not a T3 conflict.
-            return RerunResult(RerunOutcome.NOT_CONFIGURED)
-        if not candidate.ci.repository_enabled:
-            return RerunResult(RerunOutcome.CONFLICT)
-        # Freeze the repository before candidate locking so concurrent reparenting
-        # cannot turn a historical Run into authority over another repository.
-        if original_origin is None or candidate.repository_id != original_repository:
-            return RerunResult(RerunOutcome.NOT_CONFIGURED)
-        if candidate.origin_provider_installation_id != original_origin:
-            # OAuth may move the SAME repository from a retired GitHub installation.
-            # Its pinned rule version proves historical repository continuity.
-            current_account = await self._session.scalar(
-                select(ProviderInstallation.account_external_id).where(
-                    ProviderInstallation.id == candidate.origin_provider_installation_id
+        current = (
+            await self._session.execute(
+                select(
+                    Repository.id,
+                    ProviderInstallation.id,
+                    ProviderInstallation.provider,
+                    ProviderInstallation.workspace_id,
+                    ProviderInstallation.account_external_id,
+                    ProviderInstallation.deleted_at,
                 )
+                .select_from(CodeChange)
+                .join(Repository, Repository.id == CodeChange.repository_id)
+                .outerjoin(
+                    ProviderInstallation,
+                    ProviderInstallation.id == Repository.provider_installation_id,
+                )
+                .where(CodeChange.id == code_change_id)
             )
-            if (
-                original_provider != "github"
-                or candidate.provider != "github"
-                or original_deleted_at is None
-                or candidate.repository_id != rule_repository
-                or candidate.workspace_id != original_workspace
-                or original_account is None
-                or current_account != original_account
-            ):
-                return RerunResult(RerunOutcome.NOT_CONFIGURED)
+        ).one_or_none()
+        return RerunFacts(
+            code_change_id=code_change_id,
+            original_repository_id=original_repository,
+            rule_repository_id=rule_repository,
+            origin=RerunOriginFacts(
+                original_origin,
+                original_provider,
+                original_workspace,
+                original_account,
+                original_deleted_at is not None,
+            ),
+            candidate=candidate,
+            current_origin=(
+                RerunOriginFacts(
+                    current[1], current[2], current[3], current[4], current[5] is not None
+                )
+                if current is not None and current[1] is not None
+                else None
+            ),
+            current_repository_id=current[0] if current is not None else None,
+            pull_request_open=pr_state == CodeChangeState.OPEN,
+            active_run=active is not None,
+        )
+
+    async def insert_rerun(
+        self, candidate: RunInsertCandidate, code_change_id: UUID, now: datetime
+    ) -> PendingRunMessage:
         new_id = uuid4()
         self._session.add(
             Run(
@@ -148,9 +169,7 @@ class SqlAlchemyRerunStore:
         await self._session.flush()
         await notify_run_state(self._session, new_id, RunState.QUEUED)
         pending = PendingRunMessage.from_candidate(new_id, candidate, now)
-        return RerunResult(
-            RerunOutcome.CREATED, StoredRunMessage(**{**vars(pending), "trigger": "rerun"})
-        )
+        return StoredRunMessage(**{**vars(pending), "trigger": "rerun"})
 
     async def mark_rerun_published(self, run_id: UUID, now: datetime) -> None:
         await self._session.execute(

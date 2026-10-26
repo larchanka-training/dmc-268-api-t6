@@ -66,13 +66,18 @@ from app.modules.reviews.application.get_run_file_lines import (
 )
 from app.modules.reviews.application.list_pulls import LatestRunRow, PullRequestRow
 from app.modules.reviews.application.list_runs import RunCursor, RunListItem
-from app.modules.reviews.application.rerun_run import RerunOutcome, RerunResult
+from app.modules.reviews.application.rerun_run import RerunFacts
 from app.modules.reviews.application.review_output import Category, Severity
 from app.modules.reviews.application.run_events import RunUpdated
 from app.modules.reviews.application.run_trigger import RunTrigger
-from app.modules.reviews.application.try_enqueue_webhook_run import PendingRunMessage
+from app.modules.reviews.application.try_enqueue_webhook_run import (
+    CandidateMiss,
+    PendingRunMessage,
+    RunInsertCandidate,
+)
 from tests.portal_test_client import authenticated_test_client
 from tests.test_branch_patterns import INVALID_BRANCH_PATTERNS
+from tests.test_rerun_origin import facts as rerun_facts
 from tests.test_ui_zod_contracts import (
     RUN_ID,
     RUN_ORIGIN_CASES,
@@ -133,6 +138,7 @@ UNKNOWN_RUN_ID = UUID("99999999-9999-4999-8999-999999999999")
 EXPIRED_PATH = "expired.py"
 RUN_URL = f"/api/runs/{RUN_ID}"
 REPOSITORY_ID = UUID("22222222-2222-4222-8222-222222222222")
+ORIGIN_CHANGED_RUN_ID = UUID(int=169)
 CONFLICT_RUN_ID = UUID("88888888-8888-4888-8888-888888888888")
 NOT_CONFIGURED_RUN_ID = UUID("77777777-7777-4777-8777-777777777777")
 # PATCH /api/repos/{id} bodies the API rejects with 422 (#149, #145); the PostgreSQL API test
@@ -263,32 +269,37 @@ class OpenApiContractRepository(ContractRepository):
             blob_sha=("e" if path == EXPIRED_PATH else "a") * 40,
         )
 
-    async def create_rerun(self, run_id: UUID, now: datetime) -> RerunResult:
+    async def load_rerun_facts(self, run_id: UUID) -> RerunFacts | None:
+        value = rerun_facts()
         if run_id == CONFLICT_RUN_ID:
-            return RerunResult(RerunOutcome.CONFLICT)
+            return replace(value, active_run=True)
+        if run_id == ORIGIN_CHANGED_RUN_ID:
+            return replace(value, origin=replace(value.origin, installation_id=None))
         if run_id == NOT_CONFIGURED_RUN_ID:
-            return RerunResult(RerunOutcome.NOT_CONFIGURED)
+            return replace(value, candidate=CandidateMiss.MISSING_RULES)
         if run_id != RUN_ID:
-            return RerunResult(RerunOutcome.NOT_FOUND)
-        return RerunResult(
-            RerunOutcome.CREATED,
-            PendingRunMessage(
-                run_id=RUN_ID,
-                workspace_id=REPOSITORY_ID,
-                installation_id=17,
-                repository_id=REPOSITORY_ID,
-                repository_external_id=101,
-                repository_full_name="org/repo",
-                pr_number=1,
-                head_sha="a" * 40,
-                base_sha="b" * 40,
-                base_ref="main",
-                engine="fast",
-                rule_version_id=REPOSITORY_ID,
-                prompt_version_id=REPOSITORY_ID,
-                attempt=1,
-                requested_at=now,
-            ),
+            return None
+        return value
+
+    async def insert_rerun(
+        self, candidate: RunInsertCandidate, code_change_id: UUID, now: datetime
+    ) -> PendingRunMessage:
+        return PendingRunMessage(
+            run_id=RUN_ID,
+            workspace_id=REPOSITORY_ID,
+            installation_id=17,
+            repository_id=REPOSITORY_ID,
+            repository_external_id=101,
+            repository_full_name="org/repo",
+            pr_number=1,
+            head_sha="a" * 40,
+            base_sha="b" * 40,
+            base_ref="main",
+            engine="fast",
+            rule_version_id=REPOSITORY_ID,
+            prompt_version_id=REPOSITORY_ID,
+            attempt=1,
+            requested_at=now,
         )
 
     async def mark_rerun_published(self, run_id: UUID, now: datetime) -> None:
@@ -1541,3 +1552,13 @@ def test_browser_contract_documents_auth_configuration_and_provider_failures() -
                 if method in HTTP_METHODS:
                     assert "503" in operation["responses"], (method, path)
     assert "502" in paths["/api/auth/github/callback"]["post"]["responses"]
+
+
+def test_changed_rerun_origin_uses_existing_conflict_wire_contract(client: TestClient) -> None:
+    response = client.post(f"/api/runs/{ORIGIN_CHANGED_RUN_ID}/rerun")
+    assert response.status_code == 409
+    assert response.json() == {
+        "detail": "the pull request has an active run or is closed, "
+        "or repository reviews are paused or unavailable"
+    }
+    _validator_for("post", "/api/runs/{run_id}/rerun", "409").validate(response.json())

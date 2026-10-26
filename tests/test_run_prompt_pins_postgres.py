@@ -24,7 +24,7 @@ from app.modules.reviews.application.prepare_policy_snapshot import (
     RunPolicyPins,
     build_policy_snapshot,
 )
-from app.modules.reviews.application.rerun_run import RerunOutcome
+from app.modules.reviews.application.rerun_run import RerunOutcome, create_rerun
 from app.modules.reviews.application.review_context import BuildReviewContext
 from app.modules.reviews.application.review_context_stage import (
     EstimatedTokenCounter,
@@ -191,7 +191,7 @@ def test_rerun_pins_current_prompt_rows_while_original_keeps_its_own(env: Env) -
                 )
             await _seed(factory, (_newer("review.verifier"),))
             async with SqlAlchemyRerunUnitOfWork(factory, allow_unscoped=True) as work:
-                result = await work.runs.create_rerun(original, NOW)
+                result = await create_rerun(work.runs, original, NOW)
                 assert result.outcome is RerunOutcome.CREATED and result.message is not None
                 await work.commit()
             assert await _pins(factory, result.message.run_id) == (
@@ -308,8 +308,8 @@ def test_get_pins_returns_complete_bindings_from_pinned_rows(env: Env) -> None:
             # A pair above the "v2" defaults proves the versions come from the rows.
             await _seed(factory, (_newer("review.conventions"), _newer("review.verifier")))
             async with factory.begin() as session:
-                rerun = await SqlAlchemyRerunStore(session, allow_unscoped=True).create_rerun(
-                    run_id, NOW
+                rerun = await create_rerun(
+                    SqlAlchemyRerunStore(session, allow_unscoped=True), run_id, NOW
                 )
             assert rerun.message is not None
             for pinned, conventions, verifier in (

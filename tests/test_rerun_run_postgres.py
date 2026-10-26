@@ -12,6 +12,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from app.modules.auth.application.scope import AuthScope
+from app.modules.reviews.application.rerun_run import create_rerun
 from app.modules.reviews.infrastructure.rerun_store import SqlAlchemyRerunUnitOfWork
 from tests.portal_postgres import (
     HEAD,
@@ -113,11 +114,11 @@ def test_rerun_scope_or_explicit_internal_bypass_reaches_persistence(
         try:
             # Empty scopes are valid identities, but grant no run access.
             async with SqlAlchemyRerunUnitOfWork(factory, AuthScope(42, ())) as uow:
-                hidden = await uow.runs.create_rerun(RUN_DONE, NOW)
+                hidden = await create_rerun(uow.runs, RUN_DONE, NOW)
                 assert hidden.outcome == "not_found"
             scope = None if unscoped else AuthScope(42, (WS_A,))
             async with SqlAlchemyRerunUnitOfWork(factory, scope, allow_unscoped=unscoped) as uow:
-                result = await uow.runs.create_rerun(RUN_DONE, NOW)
+                result = await create_rerun(uow.runs, RUN_DONE, NOW)
                 assert result.outcome == "created"
                 assert result.message is not None
                 await uow.commit()
