@@ -10,8 +10,9 @@
 #   MONITORING_DIR             this stack's dir, default: the directory of this script
 #   GRAFANA_ROOT_URL           public Grafana URL in edge mode (https://grafana.<APP_DOMAIN>/)
 #   BACKUP_DIR                 host dir of the PostgreSQL dumps, default /var/backups/dmc-268/<project>
-#   GRAFANA_ADMIN_PASSWORD     set: the Grafana admin password (GitHub secret, the team reads it
-#                              there); empty or unset: keep the one in .env, generated on a fresh host
+#   GRAFANA_ADMIN_PASSWORD     set: the Grafana admin password (GitHub secret; GitHub never shows its
+#                              value, whoever sets it keeps a copy outside GitHub); empty or unset:
+#                              keep the one in .env (generated on a fresh host, or an earlier secret)
 #   ALERT_TELEGRAM_BOT_TOKEN   } both set: alerts go to that Telegram chat; both empty: alerts are
 #   ALERT_TELEGRAM_CHAT_ID     } not delivered; unset: keep the previous alert config (manual run)
 #   BACKUP_S3_ENDPOINT, BACKUP_S3_BUCKET, BACKUP_S3_ACCESS_KEY_ID, BACKUP_S3_SECRET_ACCESS_KEY,
@@ -201,7 +202,8 @@ fi
 # .env. Written to .env unquoted with $ escaped (escape_compose_value), so no whitespace, quotes,
 # backslash, backtick or '#', which compose would not read literally.
 grafana_admin_password_ok() {
-  local value="$1"
+  # Byte semantics: the result must not depend on the locale of the host.
+  local LC_ALL=C value="$1"
   ((${#value} >= 16 && ${#value} <= 128)) || return 1
   [[ "${value}" =~ ^[[:graph:]]+$ ]] || return 1
   [[ "${value}" != *[\"\'\\\`#]* ]]
@@ -213,8 +215,12 @@ if [[ -n "${GRAFANA_ADMIN_PASSWORD:-}" ]]; then
   fi
 else
   GRAFANA_ADMIN_PASSWORD="$(previous_setting GRAFANA_ADMIN_PASSWORD)"
-  if ! grafana_admin_password_ok "${GRAFANA_ADMIN_PASSWORD}"; then
+  if [[ -z "${GRAFANA_ADMIN_PASSWORD}" ]]; then
     GRAFANA_ADMIN_PASSWORD="$(stack_password GRAFANA_ADMIN_PASSWORD)"
+  elif ! grafana_admin_password_ok "${GRAFANA_ADMIN_PASSWORD}"; then
+    echo "GRAFANA_ADMIN_PASSWORD in ${ENV_FILE} is not a valid password: set the secret" \
+      "GRAFANA_ADMIN_PASSWORD, or remove the line to generate a new one" >&2
+    exit 1
   fi
 fi
 GRAFANA_DB_PASSWORD="$(stack_password GRAFANA_DB_PASSWORD)"

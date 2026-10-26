@@ -1162,7 +1162,8 @@ jobs:
           BACKUP_S3_ACCESS_KEY_ID: ${{ secrets.BACKUP_S3_ACCESS_KEY_ID }}
           BACKUP_S3_SECRET_ACCESS_KEY: ${{ secrets.BACKUP_S3_SECRET_ACCESS_KEY }}
           BACKUP_ENCRYPTION_PASSPHRASE: ${{ secrets.BACKUP_ENCRYPTION_PASSPHRASE }}
-          # Grafana admin password the team reads in GitHub; empty: keep the one generated on the host.
+          # Grafana admin password. GitHub never shows a secret's value: whoever sets it keeps a copy
+          # outside GitHub. Empty: keep the password in the stack's .env (generated, or an earlier secret).
           GRAFANA_ADMIN_PASSWORD: ${{ secrets.GRAFANA_ADMIN_PASSWORD }}
         with:
           host: ${{ needs.deploy-staging.outputs.host }}
