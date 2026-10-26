@@ -166,13 +166,15 @@ def test_final_document_read_releases_db_locks_and_fences_staging(
             if retired:
                 with pytest.raises(RunCancelled, match="installation_unavailable"):
                     await use_case.execute(RUN_ATTEMPTED)
-                assert await counts(factory) == (0, 0)
+                # The missing rules document was staged while the origin was active.
+                assert await counts(factory) == (1, 0)
             else:
                 frozen = await use_case.execute(RUN_ATTEMPTED)
                 assert frozen.agents.text == "ok\n"
                 assert await use_case.execute(RUN_ATTEMPTED) == frozen
                 assert await counts(factory) == (2, 1)
-            assert calls == ["tree", "blob"]
+            # One root listing per document: rules (missing), then AGENTS.md.
+            assert calls == ["tree", "tree", "blob"]
         finally:
             await engine.dispose()
 

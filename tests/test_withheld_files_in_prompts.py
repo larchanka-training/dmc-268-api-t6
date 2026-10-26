@@ -235,13 +235,15 @@ class Publisher:
 def test_removed_files_behind_a_mask_reach_neither_prompt_by_name_or_content() -> None:
     runs = Runs()
     github = GitHub()
+    # One store for every unit of work: each policy document is staged in its own.
+    store = Store()
     stage = ReviewContextStage(
         checkpoint=_checkpoint,
         runs=runs,
         vcs=github,
         merge_base=github,
         prepare_policy=PreparePolicySnapshot(
-            uow_factory=lambda: Uow(Store()), source_factory=lambda pins: Policy()
+            uow_factory=lambda: Uow(store), source_factory=lambda pins: Policy()
         ),
         context_builder=lambda run: BuildReviewContext(
             source=Repository(), parser=Parser(), counter=EstimatedTokenCounter()

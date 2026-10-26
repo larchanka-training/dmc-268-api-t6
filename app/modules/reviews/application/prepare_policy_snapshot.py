@@ -209,14 +209,22 @@ class PreparePolicySnapshot:
             validate_execution_profile_versions(pins.execution_profile)
             staged = await uow.policy.get_staged_documents(run_id)
 
-        if {item.document.path for item in staged} != {RULES_DOCUMENT_PATH, AGENTS_DOCUMENT_PATH}:
-            # The network read is outside any transaction; a failure stages nothing.
-            loaded = await LoadPolicyDocuments(
+        staged_paths = {item.document.path for item in staged}
+        missing = [
+            path for path in (RULES_DOCUMENT_PATH, AGENTS_DOCUMENT_PATH) if path not in staged_paths
+        ]
+        if missing:
+            loader = LoadPolicyDocuments(
                 self._source_factory(pins), policy_base_sha=pins.policy_base_sha
-            ).execute()
-            async with self._uow_factory() as uow:
-                staged = await uow.policy.stage_documents(run_id, (loaded.rules, loaded.agents))
-                await uow.commit()
+            )
+            for path in missing:
+                # Each read is outside any transaction and each loaded document commits
+                # before the next read: a failure keeps the earlier document for the retry
+                # and stops before the next read.
+                loaded = await loader.load_document(path)
+                async with self._uow_factory() as uow:
+                    staged = await uow.policy.stage_documents(run_id, (loaded,))
+                    await uow.commit()
 
         by_path = {item.document.path: item.document for item in staged}
         rules, agents = by_path[RULES_DOCUMENT_PATH], by_path[AGENTS_DOCUMENT_PATH]
