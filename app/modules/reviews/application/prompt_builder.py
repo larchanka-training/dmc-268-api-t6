@@ -266,9 +266,7 @@ class PromptBuilder:
             (
                 self.render_conventions(context.conventions),
                 self._render_pr_meta(context.pr_meta),
-                self.render_changed_files(
-                    context.changed_files, include_block_id=include_block_id
-                ),
+                self.render_changed_files(context.changed_files, include_block_id=include_block_id),
             )
         )
         if context.context_blocks:

@@ -54,6 +54,7 @@ from app.modules.reviews.application.review_output import (
     ReviewFindingV2,
     VerifiedReviewOutput,
 )
+from app.modules.reviews.application.review_path import ReviewBinding
 from app.modules.reviews.application.run_failures import RunFailure, classify_failure
 from app.modules.reviews.application.verdict import SeverityThresholdValue, severity_counts
 from tests.policy_snapshot_fakes import (
@@ -62,7 +63,6 @@ from tests.policy_snapshot_fakes import (
     make_policy_document_missing,
     make_policy_document_present,
 )
-from app.modules.reviews.application.review_path import ReviewBinding
 
 RUN_ID = UUID("00000000-0000-0000-0000-000000000200")
 MAIN_BLOCK_ID = file_block_id("app/main.py")
@@ -3480,10 +3480,10 @@ def test_snapshot_path_review_without_a_reflection_pass_still_fails_closed() -> 
         pipeline, pipeline, pipeline, pipeline, context_filter=_StageSnapshot(_v4_snapshot())
     )
 
-    with pytest.raises(PolicyError) as raised:
+    with pytest.raises(RunFailure) as raised:
         asyncio.run(run.execute(RUN_ID))
 
-    assert raised.value.code == PolicyErrorCode.SNAPSHOT_INTEGRITY_ERROR
+    assert raised.value.error_code == "internal_error"
     assert "Reflection pass is required" in raised.value.message
     assert pipeline.contexts == []
     assert pipeline.published == []

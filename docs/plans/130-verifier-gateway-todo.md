@@ -398,7 +398,7 @@ TEST_RABBITMQ_URL=<isolated-task-vhost-url> uv run pytest
 ### Remaining PR F2 — provider-acceptance release gate (#217)
 
 This unchecked gate blocks v4 activation in F2, not dormant F1 snapshot preparation
-stacked on #324. See the [strict v2 acceptance contract](130-verifier-gateway-plan.md#pr-f2-release-gate-strict-v2-schema-acceptance-pending-217)
+on main after #324. See the [strict v2 acceptance contract](130-verifier-gateway-plan.md#pr-f2-release-gate-strict-v2-schema-acceptance-pending-217)
 and [#217](https://github.com/larchanka-training/dmc-268-api-t6/issues/217). Provider acceptance remains **UNKNOWN**.
 
 - [ ] Freeze source/input identity, raw v2 schema SHA and canonical unchanged `provider_schema` strict `response_format` SHA; retain newline rejection.

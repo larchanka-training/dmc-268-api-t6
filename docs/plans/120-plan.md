@@ -19,8 +19,9 @@ v2-looking input before v1 validation; `parse_review_output_v2` is a separate co
 The current explicit pipeline carries drop codes in `VerifiedReviewOutput`, and publication
 can persist `Finding.drop_reason`. #290 added the verifier gateway adapter and `llm.verify`
 trace hand-off to `StoreReviewOutput`; that trace excludes free-text `reason` and has a null
-`manifest_id`. Both worker compositions still omit Reflection Pass, so their wiring remains
-in #130. These later changes are not attributed to #133.
+`manifest_id`. Main #130 F1 now supplies a lazy Reflection Pass through the production
+attempt provider; the review-version gate keeps legacy runs on their existing path.
+V4 activation remains in F2. These later changes are not attributed to #133.
 
 The old exact/lowercase slug lookup and secondary `any` branch were superseded by #230
 stable service-default IDs. The historical slug test used a name equal to its own slug and

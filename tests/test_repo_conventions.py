@@ -1433,9 +1433,8 @@ def test_legacy_conventions_fit_on_the_gateway_prompt_budget() -> None:
 
 
 def _conventions_snapshot(agents: str | None, *, max_input_tokens: int = 60_000) -> PolicySnapshot:
-    from app.modules.reviews.application.policy_snapshot import (
-        ExecutionProfile,
-        PromptBindings,
+    from app.modules.reviews.application.policy_snapshot import ExecutionProfile, PromptBindings
+    from tests.policy_snapshot_fakes import (
         make_policy_document_missing,
         make_policy_document_present,
     )
@@ -1707,7 +1706,7 @@ def _bindings_change(**changes: Any) -> Callable[[PolicySnapshot], PolicySnapsho
 
 
 def _document_change(path: str, text: str) -> Callable[[PolicySnapshot], PolicySnapshot]:
-    from app.modules.reviews.application.policy_snapshot import make_policy_document_present
+    from tests.policy_snapshot_fakes import make_policy_document_present
 
     document = make_policy_document_present(path, text, blob_oid="d" * 40)
     if path == ".review/rules.md":

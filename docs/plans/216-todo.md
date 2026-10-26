@@ -1,5 +1,66 @@
 # #216 / PR #303 review-round checklist
 
+## Current round 2: one P2 and four P3 items
+
+The [current plan](216-plan.md#current-round-2-plan) records the round 2
+scope decision to remove the replay tool. The user authorized all review
+corrections; keep the existing ready PR, no new reviewer, issue open and Board 12
+On Review. Every implementation slice requires fresh independent Standards and
+Spec reviews before advancement.
+
+### R2.1 — Complete review correction
+
+- [x] Remove exactly the replay driver, catalog and their safety-test module;
+  preserve all mutation-killing regression tests and accepted round 1 behavior.
+- [x] Keep historical numeric/result/disposition tables labeled **local run;
+  driver not in repository**; remove executable-driver instructions/dead links.
+- [x] P3-1: replace unpublished pre-rebase SHAs with published `4fa702e5` /
+  `f00d1b92`, or prose describing the local pre-rebase measurement without SHA.
+- [x] P3-2: replace stale #324 stacking claims with main after merged #324.
+- [x] P3-3: use current `policy_snapshot.py` symbols and include `eval_live.py`
+  as a checksum consumer in the five #130/#144 plan documents.
+- [x] P3-4: post one #217 comment linking the strict-schema F2 gate and record its
+  receipt; preserve UNKNOWN live acceptance and both schema/payload hashes.
+- [x] Rebase on fresh main, preserving merged F1/#324 and #216 tests/behavior;
+  inspect range-diff and bound any integration repair explicitly.
+- [x] Diff, references, exact deletions and immutable resources checked;
+  independent Standards = 0; Spec = 0.
+
+Implementation review: Standards = 0; Spec = 0. The [#217 gate comment](https://github.com/larchanka-training/dmc-268-api-t6/issues/217#issuecomment-6413779899)
+was posted/read back; strict live-provider acceptance remains UNKNOWN.
+
+### R2.2 — Final current-tree verification
+
+- [x] Source-quiescent canonical Ruff, format, mypy and full pytest pass with
+  isolated PostgreSQL/RabbitMQ; no unexplained failures or required skips.
+- [x] Record current counts/base/input boundary separately from historical
+  113-probe/6,660-test evidence; no removed-driver replay requirement.
+- [x] Final evidence preserves measured source; independent final reviews = 0/0.
+
+The first full run remains recorded as RED (6,983 passed, one
+shutdown subprocess timeout, zero skipped, two warnings; 2,161.64 s). No test or
+timeout was changed. The unchanged file then passed 39/39 cases across three
+repeats on a byte-identical native Linux-volume copy; the original timeout's
+exact causal stage is unproven. A complete canonical rerun on that copy has
+passed Ruff, format (621 files), mypy (611) and full pytest: **6,984 passed, zero
+failures/errors/skips, two existing warnings, 1,156.88 s** (JUnit 1,156.689 s).
+Both native before/after projections and the live worktree match all 1,223 source
+hashes recorded in verification; evidence-only edits preserve that boundary.
+The complete green run, rather than focused repeats, supplies the current proof.
+Fresh independent final evidence reviews reported Standards = 0 and Spec = 0.
+Publication and exact-head CI remain pending.
+
+### R2.3 — Publish existing PR
+
+- [ ] Focused conventional commits reference #216; explicit staging and verified
+  lease; ready PR303 body updated in What/Why/How to verify/Refs order.
+- [ ] New P2 SHA reply and four-P3 summary posted/read back; prior closed threads
+  preserved and reviewer-owned resolution left to reviewer.
+- [ ] Exact-head CI green; Board On Review, no new reviewer; only owned temporary
+  resources removed. No merge, issue closure or Development-panel link.
+
+## Historical round 1 checklist
+
 Read [the current plan](216-plan.md) for architecture, coordination receipts, review-item mapping and bounded file lists. The user requested all four P2 and eleven P3 feedback items. Original implementation tasks 0–16 completed before publication in `0a19ff12` / `bf9d4c6d`; their measurements are historical. The new main changes runtime/run pins, so this feedback pass needs fresh full gates.
 
 Every task requires delegated implementation followed by fresh independent Standards and Spec reviews. Correct code uses isolated mutant RED / byte-restored GREEN; actual behavior changes use public-test RED / minimal-fix GREEN. Keep each source slice at five files or fewer. Metadata updates do not authorize additional implementation scope.
@@ -49,20 +110,15 @@ Every task requires delegated implementation followed by fresh independent Stand
 - [x] Named tests/links/stale-claim audit pass, neighboring owner changes preserved.
 - [x] Fresh Standards = 0; Spec = 0.
 
-## R1.6a — Portable mutation driver/catalog
+## R1.6 — Historical local mutation run and evidence
 
-- [x] Prepare the safe driver and data catalog as a separate three-path slice (driver, catalog and driver safety tests), with all 103 available current mappings plus new feedback probes; no private artifact dependencies.
-- [x] Guard stale fingerprints and changed snapshot targets, exact replacement count, meaningful assertion kills and byte restoration in `finally`; report setup/collection failures separately.
-- [x] Dry-run catalog and real representative source/schema/prompt/new-feedback probes pass GREEN/RED/restored GREEN; any historical reproduction limits are explicit.
-- [x] Fresh Standards = 0; Spec = 0.
-
-## R1.6b — Compact portable evidence documents
-
-- [x] All four #216 documents contain durable summaries, numerical results, source SHAs and reproducible instructions linked to the committed driver/catalog.
-- [x] No personal paths, inaccessible artifacts, loopback URLs, machine-specific existing resources or quoted chat replies remain.
-- [x] Keep M01–M15 current killers/dispositions and explicitly correct the missing step-3 survivor claim; actual catalog coverage and historical limits are accurate.
-- [x] Privacy/portability grep, links and reproduction instructions pass.
-- [x] Fresh Standards = 0; Spec = 0.
+- [x] Local run; driver not in repository: 120 records comprised 113 live probes,
+  four equivalents, one diagnostic-only case and two superseded sites.
+- [x] Representative trials passed control GREEN → behavioral RED → restored
+  GREEN; the complete 113-probe result is recorded in historical R1.8.
+- [x] Keep numerical/disposition tables and committed behavioral test nodes;
+  remove the tool and its executable reproduction instructions under R2.
+- [x] Compact evidence and both independent review axes passed in R1.
 
 ## R1.7 — Provider schema compatibility
 

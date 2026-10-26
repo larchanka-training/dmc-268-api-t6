@@ -27,10 +27,6 @@ from app.modules.reviews.application.policy_snapshot import (
     POLICY_SNAPSHOT_SCHEMA_VERSION,
     ManifestBlock,
     PolicySnapshot,
-    make_complete_execution_profile,
-    make_complete_prompt_bindings,
-    make_policy_document_missing,
-    make_policy_document_present,
 )
 from app.modules.reviews.application.prompt_budget import (
     EstimatedTokenCounter,
@@ -57,6 +53,12 @@ from app.modules.reviews.application.review_context import (
 )
 from app.modules.reviews.application.review_output import EvidenceRef
 from app.modules.reviews.application.review_path import ReviewBinding
+from tests.policy_snapshot_fakes import (
+    make_complete_execution_profile,
+    make_complete_prompt_bindings,
+    make_policy_document_missing,
+    make_policy_document_present,
+)
 from tests.test_review_context_stage import _HEAD as STAGE_HEAD
 from tests.test_review_context_stage import _RUN as STAGE_RUN
 from tests.test_review_context_stage import Trace as StageTrace

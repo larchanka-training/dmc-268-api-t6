@@ -51,8 +51,8 @@ migration (pending api #4) or a `seed` command owned by the backend. The snapsho
 `VerifierPromptBuilder` reads the selected `review.verifier.vN.md` package resource at runtime and
 checks its raw bytes against the snapshot checksum before use. The mandatory-envelope guard also
 reads that selected resource. #216 deliberately retains this loader: replacing it with a DB-backed
-pinned-content resolver belongs with the remaining #130 composition work, rather than introducing
-a second resolver/cache policy here. Runtime package I/O remains. The Docker
+pinned-content resolver remains outside #216 scope. Main F1’s lazy per-attempt prompt-builder
+cache is preserved; runtime package I/O remains. The Docker
 image carries `review/prompts`, `review/postprocess` and `review/rules` for seeding and `review/schemas` for runtime
 validation of the model output (LLM gateway, api #33). Prompts are global rows of `prompt_versions`.
 A `rule_versions` row belongs to one repository, so a default set becomes a repository's first `rule_versions`
@@ -201,7 +201,7 @@ Under Policy Snapshot v2 (`policy_snapshot` present), prompts and candidate find
 
 **Reflection Pass (packaged `prompts/review.verifier.v1.md` / `v2.md`, selected by the snapshot pin)**:
 - Two-pass verification architecture to eliminate hallucinated findings.
-- **Pass 1 (Reviewer, snapshot/v2 contract)** generates candidate findings with required `evidence_refs` (pointing to visible `block_id` line ranges). This applies to the explicitly composed snapshot pipeline, not the current legacy worker response contract. Both `ExecuteReviewRun` compositions in `app/worker.py` still omit Reflection Pass; connecting that profile remains part of #130.
+- **Pass 1 (Reviewer, snapshot/v2 contract)** generates candidate findings with required `evidence_refs` (pointing to visible `block_id` line ranges). This applies to the explicitly composed snapshot pipeline, not the current legacy worker response contract. Main #130 F1 supplies a lazy Reflection Pass through the production attempt provider; version selection keeps legacy runs on their existing path, while v4 activation remains in F2.
 - **Pass 2 (Verifier)** checks each candidate against visible code and requirements using the packaged verifier version selected by the snapshot binding.
   - Verifier prompt envelope: contains `<repository_rules>`, `<project_conventions_document>`, `<service_defaults>`, `<repo_conventions>`, `<code_context>` (with `<changed_files>`), and `<candidate_findings count="...">` (carrying `<candidate candidate_id="..." path="..." start_line="..." line="..." category="..." severity="...">`, `<title>`, `<body>`, optional `<suggestion>`, `<evidence_refs>`, and optional `<rule_attribution name="..." />`).
   - Verifier output: validated at runtime via Pydantic (`VerificationOutput`, `ReviewFindingV2`) conforming to contract `schemas/verifier-output.schema.v1.json` (`decisions`: `candidate_id`, `status` in `supported` / `contradicted` / `insufficient_context`, `reason`, `evidence_refs`, `requirement_refs`). Legacy runs without policy snapshot continue to process v1 output.
@@ -220,7 +220,7 @@ than durable structured explanations. The current explicit pipeline carries drop
 `VerifiedReviewOutput`; publication can store them as `Finding.drop_reason`. After #290,
 `StoreReviewOutput` can persist a separate `llm.verify` run action with candidate IDs, accepted
 call ID and decisions/evidence/requirements. That trace excludes the verifier's free-text `reason`
-and keeps `manifest_id` null. These storage paths do not imply the worker is wired to the verifier.
+and keeps `manifest_id` null. The storage paths alone do not select the verifier: main F1 wires its lazy pass, and the pinned review version selects the snapshot path.
 
 ## Rule sets
 

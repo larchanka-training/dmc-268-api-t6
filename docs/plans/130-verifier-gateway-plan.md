@@ -136,7 +136,7 @@ worker, and leaves `RETRIEVED_PROMPT_VERSIONS` alone.
    - The selector raises inside `review_with_gateway` before the call, and not in
      `validate_execution_profile_versions`, which runs live (`prepare_policy_snapshot.py:165`, `:170`;
      `review_context_stage.py:273`).
-   - `PromptBindings` defaults `review_system_version="v2"` (`policy_snapshot.py:141`), so the five snapshot
+   - `PromptBindings` defaults `review_system_version="v2"` (`policy_snapshot.py::PromptBindings.review_system_version`), so the five snapshot
      gateway tests (`PromptBindings("cs1","cs2","cs3")`) stay on v1.
    - `app/worker.py:520` pins `response_schema_version="review-output/v2"` live; that pin is not the selector.
 10. **R16 gate**:
@@ -285,7 +285,7 @@ The overlap lists come from intersecting E's complete file list with each PR's f
 
 **Status: UNKNOWN / unchecked; blocks v4 activation in F2.** This gate belongs to
 remaining #130 rollout work and [#217](https://github.com/larchanka-training/dmc-268-api-t6/issues/217).
-It does not block dormant F1 snapshot preparation stacked on #324. The
+It does not block F1 snapshot preparation on main after #324. The
 [F1/F2 coordination notice](https://github.com/larchanka-training/dmc-268-api-t6/pull/303#issuecomment-6399851198)
 separates those slices; PR E's completed offline work is not provider acceptance.
 
@@ -308,7 +308,7 @@ primary/fallback pair. `LLM_MODEL` is required; the review fallback is absent un
 `LLM_FALLBACK_MODEL` is configured. Explicit endpoint/routing configuration may
 override catalog values. Actual deployment configuration was not inspected.
 
-Frozen #216 review-stage contract (base `ef4e8b68`, HEAD `a73e1a9d` plus dirty
+Frozen #216 review-stage contract (local measurement before rebase, with dirty
 review fixes; recalculate after any schema/transport change):
 
 | Bytes | SHA-256 |
@@ -384,7 +384,7 @@ do not silently weaken validation. No paid/live request was performed for #216.
   `_bounded_repair_turn`). Whether EUrouter and the Mistral models accept that shape is unproven offline; the F
   smoke checklist runs one verifier repair against the live route.
 - **SD §15 OQ-2** and `docs/SECRETS.md`/`CICD.md`: carrying `LLM_VERIFIER_*` to staging (OQ-6).
-- **Provider route:** `ExecutionProfile` has one provider-route pair (`policy_snapshot.py:181-182`), so the
+- **Provider route:** `ExecutionProfile` has one provider-route pair (`policy_snapshot.py::ExecutionProfile.primary_provider_route` / `fallback_provider_route`), so the
   verifier route's provider is not pinned (D, RFS §7.1).
 - **Join key:** `llm.verify.candidate_ids` cannot yet be joined to `findings` rows. `review.postprocess`
   `candidate_ids` is a #107 target (PIPELINE_SPEC:176).

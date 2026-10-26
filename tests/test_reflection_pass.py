@@ -2547,13 +2547,10 @@ def test_reflection_pass_rejects_attributed_insufficient_context_without_require
 @pytest.mark.parametrize("send_budget", [152, 151], ids=["exact", "one-over"])
 def test_reflection_pass_final_budget_counts_system_and_user(
     reflection_boundary_context: ReviewContext,
-    monkeypatch: pytest.MonkeyPatch,
     send_budget: int,
 ) -> None:
     # counter/v1: SYSTEM is 2 tokens; this fixed user envelope is 150 tokens.
     # Empty diff context prevents fitting from hiding the final one-token overflow.
-    monkeypatch.setenv("LLM_CONTEXT_WINDOW", "1000000")
-    monkeypatch.setenv("LLM_MAX_OUTPUT_TOKENS", "0")
     snapshot = make_snapshot()
     snapshot = replace(
         snapshot,
@@ -2565,7 +2562,8 @@ def test_reflection_pass_final_budget_counts_system_and_user(
         execution_profile=replace(
             snapshot.execution_profile,
             counter_version="counter/v1",
-            max_input_tokens=send_budget,
+            # The pinned mistral-small-4 reserves 8,000 output tokens.
+            max_input_tokens=8_000 + send_budget,
         ),
     )
     context = replace(reflection_boundary_context, changed_files=(), policy_snapshot=snapshot)

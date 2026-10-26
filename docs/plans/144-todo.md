@@ -167,7 +167,7 @@ CHECK refuses a sha without a time and accepts a time without a sha; downgrade t
   (all suggested names; plan, "Port, use case and capability set").
 - M6: the capability set constant, empty, with a helper (suggested) that answers whether a
   pinned `(review_system_key, review_system_version)` has a retrieved section
-  (`app/modules/reviews/application/policy_snapshot.py:136-137`) — moved to PR 2 Task 7
+  (`policy_snapshot.py::PromptBindings.review_system_key` / `review_system_version`) — moved to PR 2 Task 7
   after review r1: PR 1 has no caller of it.
 - Import from `code_index` only `app/modules/code_index/domain/rag_index.py`.
 

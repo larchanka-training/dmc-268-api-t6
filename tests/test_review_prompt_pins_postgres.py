@@ -27,7 +27,6 @@ from app.modules.reviews.application.policy_snapshot import (
     PINNED_PROMPT_CHECKSUMS,
     RULES_DOCUMENT_PATH,
     ExecutionProfile,
-    make_complete_execution_profile,
 )
 from app.modules.reviews.application.prepare_policy_snapshot import (
     PreparePolicySnapshot,
@@ -55,6 +54,7 @@ from app.modules.reviews.infrastructure.run_repository import (
     SqlAlchemyReviewOutputRepository,
     SqlAlchemyRunRepository,
 )
+from tests.policy_snapshot_fakes import make_complete_execution_profile
 from tests.portal_postgres import INSTALL_A, PROMPT, REPO_A, RUN_ATTEMPTED, Env, portal_schema
 from tests.test_prepare_policy_snapshot import Source
 from tests.test_review_context_stage import Parser, Vcs, _checkpoint
