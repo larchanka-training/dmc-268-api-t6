@@ -41,6 +41,7 @@ from app.modules.reviews.application.prompt_builder import (
     file_block_id,
     get_rule_check_ids,
     render_context_excerpts,
+    render_retrieved_excerpts,
     xml_attribute,
     xml_text,
 )
@@ -172,12 +173,17 @@ class VerifierWindow(Protocol):
 
 
 def _verifier_code_context(
-    files: tuple[ChangedFile, ...], excerpts: tuple[ContextBlock, ...] = ()
+    files: tuple[ChangedFile, ...],
+    excerpts: tuple[ContextBlock, ...] = (),
+    retrieved: tuple[RetrievedBlock, ...] = (),
 ) -> str:
-    """The verifier's code: the changed files, then the excerpts the candidates cite."""
+    """The verifier's code: the changed files, then the excerpts and the RAG blocks the
+    candidates cite."""
     parts = [PromptBuilder.render_changed_files(files, include_block_id=True)]
     if excerpts:
         parts.append(render_context_excerpts(excerpts))
+    if retrieved:
+        parts.append(render_retrieved_excerpts(retrieved))
     return "<code_context>\n" + "\n".join(parts) + "\n</code_context>"
 
 
@@ -207,6 +213,16 @@ def _cited_excerpts(
     """The L2-L4 blocks a candidate cites as evidence, in payload order (CVS §7.1)."""
     cited = {ref.block_id for cand in candidates for ref in cand.finding.evidence_refs}
     return tuple(block for block in blocks if block.block_id in cited)
+
+
+def _cited_retrieved(
+    blocks: tuple[RetrievedBlock, ...], candidates: tuple[CandidateFindingItem, ...]
+) -> tuple[RetrievedBlock, ...]:
+    """The RAG blocks a candidate cites, each place with the definitions it read (CVS §3.5),
+    in payload order: the verifier is shown again what the review was (ADR 0001 §9)."""
+    cited = {ref.block_id for cand in candidates for ref in cand.finding.evidence_refs}
+    read = {source for block in blocks if block.block_id in cited for source in block.definitions}
+    return tuple(block for block in blocks if block.block_id in cited or block.source in read)
 
 
 # Whether a choice of diff files, cited excerpts and cited RAG blocks fits the verifier prompt.
@@ -587,13 +603,21 @@ class VerifierPromptBuilder:
         mandatory_text = self._system_prompt + "\n".join(mandatory_blocks)
         mandatory_tokens = counter.count(mandatory_text)
 
-        # 4. Code context: the diff and the cited excerpts, each with its block_id
-        def user_message(files: tuple[ChangedFile, ...], excerpts: tuple[ContextBlock, ...]) -> str:
-            code = _verifier_code_context(files, excerpts)
+        # 4. Code context: the diff, the cited excerpts and RAG blocks, each with its block_id
+        def user_message(
+            files: tuple[ChangedFile, ...],
+            excerpts: tuple[ContextBlock, ...],
+            retrieved: tuple[RetrievedBlock, ...],
+        ) -> str:
+            code = _verifier_code_context(files, excerpts, retrieved)
             return "\n".join([*mandatory_blocks[:-1], code, candidates_xml])
 
         fitted_files = context.changed_files
         shown_excerpts = _cited_excerpts(context.context_blocks, candidates)
+        # The RAG blocks follow the prompt's retrieved section, as the manifest lists them.
+        shown_retrieved = (
+            _cited_retrieved(context.retrieved, candidates) if context.retrieved_section else ()
+        )
         if context.policy_snapshot is not None:
             max_send_budget = send_budget_for(
                 context.policy_snapshot.execution_profile,
@@ -612,30 +636,42 @@ class VerifierPromptBuilder:
             # (system and user message counted apart, the user message as sent), so a fitted
             # prompt never fails the guard.
             def prompt_tokens(
-                files: tuple[ChangedFile, ...], excerpts: tuple[ContextBlock, ...]
+                files: tuple[ChangedFile, ...],
+                excerpts: tuple[ContextBlock, ...],
+                retrieved: tuple[RetrievedBlock, ...],
             ) -> int:
-                return system_tokens + counter.count(user_message(files, excerpts))
+                return system_tokens + counter.count(user_message(files, excerpts, retrieved))
 
-            if prompt_tokens((), ()) > max_send_budget:
+            if prompt_tokens((), (), ()) > max_send_budget:
                 raise RunFailure(
                     "verification_context_overflow",
-                    f"Verifier prompt is {prompt_tokens((), ())} tokens, "
+                    f"Verifier prompt is {prompt_tokens((), (), ())} tokens, "
                     f"limit is {max_send_budget}",
                 )
-            fitted_files, shown_excerpts, _ = _fit_verifier_code(
+            fitted_files, shown_excerpts, shown_retrieved = _fit_verifier_code(
                 context.changed_files,
                 shown_excerpts,
                 context.rules,
                 candidates,
-                lambda files, excerpts, _: prompt_tokens(files, excerpts) <= max_send_budget,
+                lambda files, excerpts, retrieved: (
+                    prompt_tokens(files, excerpts, retrieved) <= max_send_budget
+                ),
+                retrieved=shown_retrieved,
             )
 
         prompt = VerifierPrompt(
-            system=self._system_prompt, user=user_message(fitted_files, shown_excerpts)
+            system=self._system_prompt,
+            user=user_message(fitted_files, shown_excerpts, shown_retrieved),
         )
 
-        # The manifest names exactly the shown code: never an uncited or dropped excerpt.
-        fitted_context = replace(context, changed_files=fitted_files, context_blocks=shown_excerpts)
+        # The manifest names exactly the shown code: never an uncited or dropped excerpt or
+        # RAG block.
+        fitted_context = replace(
+            context,
+            changed_files=fitted_files,
+            context_blocks=shown_excerpts,
+            retrieved=shown_retrieved,
+        )
         prompt_builder_manifest = builder.build_manifest(
             fitted_context, call_id=call_id, stage="verification", counter=manifest_counter
         )

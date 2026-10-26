@@ -74,7 +74,7 @@ at `a9269bbd`.
 - Tests first: a candidate citing a RAG block → the verifier prompt shows it and its manifest lists
   it; uncited RAG blocks are in neither; the verifier guard passes.
 - Done when:
-  - [ ] cited / uncited RAG blocks tested in the verifier prompt and manifest.
+  - [x] cited / uncited RAG blocks tested in the verifier prompt and manifest.
 
 **Commit:** `feat(reviews): show the verifier the rag blocks its candidates cite (#144)`
 
