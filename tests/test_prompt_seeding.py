@@ -424,8 +424,9 @@ def test_full_seed_upgrades_v4_to_v5_once_and_preserves_v4(
 def test_an_older_seed_after_v5_inserts_nothing_and_keeps_v5_active(
     migrated_prompt_database: tuple[str, str],
 ) -> None:
-    """The rollback floor: an F2 image (files up to v4) or an F1 image (up to v3) seeding
-    after #144 never demotes v5."""
+    """An F2 image (files up to v4) or an F1 image (up to v3) seeding after #144 never
+    demotes v5. So the rollback floor is the #144 PR3b image: an F2 image keeps v5 active
+    and, not knowing v5, would send v5-pinned runs to the legacy path."""
     database_url, schema = migrated_prompt_database
     assets = load_prompt_assets(REPO_ROOT / "review/prompts")
 

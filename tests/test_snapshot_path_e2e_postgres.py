@@ -13,7 +13,8 @@ fallback on a manifest row of its own. The v4 prompt shows no retrieved section.
 to the packaged ``review.system.v5.md`` (#144) always shows one: empty with RAG off; with a
 ready graph index the review shows and records the caller of the changed function, the
 verifier shows it again with the same index commit, and a retry before the accepted answer
-retrieves from a newer index publication (D8).
+retrieves from a newer index publication (D8). A v4 run in flight when the v5 seed makes v5
+live keeps its v4 prompt: no retrieved section, and a ready index is recorded as not used.
 """
 
 from __future__ import annotations
@@ -60,11 +61,12 @@ from tests.portal_postgres import REPO_A, REPO_B, Env, portal_schema
 from tests.test_code_index_store_postgres import C1, C2, _build, _enable, _Index
 from tests.test_github_vcs_provider import _pull_payload
 from tests.test_llm_gateway import FALLBACK, PRIMARY, completion
+from tests.test_prompt_seeding import _up_to
 from tests.test_rag_review_context_postgres import _USER, _user_file
 from tests.test_retired_installation_postgres import DiscardTokenCache
 from tests.test_review_context import _GREET_PATCH, _MODELS, _SERVICE
 from tests.test_review_prompt_pins_postgres import _V4_CONTENT, _V5_CONTENT, _bind_v4, _bind_v5
-from tests.test_run_prompt_pins_postgres import _seed
+from tests.test_run_prompt_pins_postgres import _packaged, _seed
 from tests.test_run_publication_settings_postgres import _insert, _ready
 from tests.test_snapshot_path_live_pin import _live_assets
 from tests.test_worker_queue_postgres import SETTINGS, GitHub
@@ -303,11 +305,18 @@ async def _rows(
 
 
 async def _scenario(
-    factory: async_sessionmaker[AsyncSession], *, version: int, retry: bool, rag: bool
+    factory: async_sessionmaker[AsyncSession],
+    *,
+    version: int,
+    retry: bool,
+    rag: bool,
+    v5_seeded: bool = False,
 ) -> Observed:
-    """``version``: the review.system version the run is bound to; v3 is the seeded live row."""
+    """``version``: the review.system version the run is bound to; v3 is the seeded live row.
+    ``v5_seeded``: the run is created under the seeded live v4 row, then the v5 seed makes v5
+    live before the worker takes the run."""
     await _ready(factory)
-    await _seed(factory, _live_assets())
+    await _seed(factory, _up_to(_packaged(), 4) if v5_seeded else _live_assets())
     async with factory.begin() as session:
         run_id = await _insert(session)
         await session.execute(
@@ -317,12 +326,22 @@ async def _scenario(
             ),
             {"id": REPO_A, "rag": rag},
         )
+    if v5_seeded:
+        await _seed(factory, _packaged())
+        [pinned_and_live] = await _rows(
+            factory,
+            "SELECT p.version, (SELECT version FROM prompt_versions "
+            "WHERE key='review.system' AND is_active) "
+            "FROM runs r JOIN prompt_versions p ON p.id = r.prompt_version_id WHERE r.id=:id",
+            run_id,
+        )
+        assert pinned_and_live == (4, 5)
     index = _Index(factory, REPO_A, REPO_B)
     if rag:
         # A ready graph index of the default branch at C1 knows the caller of ``greet``.
         await _enable(index, REPO_A)
         await _build(index, REPO_A, C1, _user_file())
-    if version == 4:
+    if version == 4 and not v5_seeded:
         await _bind_v4(factory, run_id)
     elif version == 5:
         await _bind_v5(factory, run_id)
@@ -510,7 +529,9 @@ async def _scenario(
     )
 
 
-def _observe(env: Env, *, version: int, retry: bool = False, rag: bool = False) -> Observed:
+def _observe(
+    env: Env, *, version: int, retry: bool = False, rag: bool = False, v5_seeded: bool = False
+) -> Observed:
     async def scenario() -> Observed:
         engine = env.engine()
         try:
@@ -519,6 +540,7 @@ def _observe(env: Env, *, version: int, retry: bool = False, rag: bool = False) 
                 version=version,
                 retry=retry,
                 rag=rag,
+                v5_seeded=v5_seeded,
             )
         finally:
             await engine.dispose()
@@ -563,10 +585,14 @@ def _assert_snapshot_path(
     earlier: tuple[str, ...] = (),
     review_fallback: bool = False,
     version: int = 4,
+    rag: bool = False,
 ) -> None:
     run_id, (review_pin, _, verifier_pin) = observed.run_id, observed.pins
     assert observed.state == ("publishing", None, attempt)
     steps = list(_SNAPSHOT_PATH_STEPS)
+    if rag:
+        # RAG is on: the stage records the index after the context build.
+        steps.insert(steps.index("context.build") + 1, "context.rag")
     stages = ["conventions", "review", "verification"]
     if review_fallback:
         # The fallback is one more review call with a manifest of its own.
@@ -580,8 +606,9 @@ def _assert_snapshot_path(
         str(snapshot_id)
     ] * (1 + earlier.count("policy.load"))
     assert observed.manifests == [(snapshot_id, stage, attempt) for stage in stages]
-    # No block of this run is retrieved (no code index is seeded): every stored block keeps
-    # the selection metadata of a retrieved one (ADR 0001 §9) as None.
+    # No block of this run is retrieved (no code index is seeded, or the pinned prompt shows
+    # none): every stored block keeps the selection metadata of a retrieved one (ADR 0001 §9)
+    # as None.
     assert len(observed.manifest_blocks) == len(stages)
     assert all(observed.manifest_blocks)
     assert {
@@ -753,6 +780,21 @@ def test_a_v5_run_without_rag_shows_an_empty_retrieved_section(env: Env) -> None
     assert observed.outcomes == ["ack"]
     assert observed.queue.retries == []
     _assert_snapshot_path(observed, attempt=1, version=5)
+
+
+@pytest.mark.integration
+def test_a_v4_run_in_flight_when_v5_is_seeded_keeps_the_v4_prompt(env: Env) -> None:
+    # The run is created under the live v4 row; the v5 seed makes v5 live before the worker
+    # takes it. RAG is on with a ready index: the run keeps its v4 pin and body, shows no
+    # retrieved section, and ``context.rag`` records the usable index as not used.
+    observed = _observe(env, version=4, rag=True, v5_seeded=True)
+
+    assert observed.outcomes == ["ack"]
+    assert observed.queue.retries == []
+    [(rag_request, rag_response)] = observed.actions["context.rag"]
+    assert (rag_request["index_status"], rag_request["indexed_commit_sha"]) == ("ready", C1)
+    assert rag_response == {"outcome": "not_ready", "reason": "prompt_version"}
+    _assert_snapshot_path(observed, attempt=1, rag=True)
 
 
 @dataclass(frozen=True)
