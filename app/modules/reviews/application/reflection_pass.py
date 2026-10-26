@@ -915,7 +915,8 @@ class ReflectionPass:
                             )
                     else:
                         expected_rev = context.pr_meta.head_sha
-                        if expected_rev is not None and block.revision != expected_rev:
+                        # Fail closed like LEFT (D7, #144): without a head no revision passes.
+                        if not expected_rev or block.revision != expected_rev:
                             raise VerificationInvalidOutputError(
                                 f"Decision {cand_id_clean} evidence_ref {block_id_clean} "
                                 f"revision '{block.revision}' does not match PR revision"

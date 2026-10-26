@@ -362,17 +362,18 @@ def verify_provenance_pre_send_guard(
                 )
 
         # 3. Revision validation
+        is_code = (
+            block.source_role
+            in {
+                SourceRole.DIFF,
+                SourceRole.SOURCE_EXCERPT,
+                SourceRole.AST_EXCERPT,
+                SourceRole.RETRIEVED_EXCERPT,
+            }
+            or block.source_kind == "source_code"
+        )
         if block.revision is not None:
-            if (
-                block.source_role
-                in {
-                    SourceRole.DIFF,
-                    SourceRole.SOURCE_EXCERPT,
-                    SourceRole.AST_EXCERPT,
-                    SourceRole.RETRIEVED_EXCERPT,
-                }
-                or block.source_kind == "source_code"
-            ):
+            if is_code:
                 if block.side == "LEFT":
                     diff_old_sha = (
                         context.pr_meta.diff_old_sha
@@ -391,7 +392,8 @@ def verify_provenance_pre_send_guard(
                         if context is not None and context.pr_meta is not None
                         else None
                     )
-                    if head_sha is not None and block.revision != head_sha:
+                    # Fail closed like LEFT (D7, #144): without a head no revision passes.
+                    if not head_sha or block.revision != head_sha:
                         raise PolicyError(
                             PolicyErrorCode.CONTEXT_VIOLATION,
                             f"Block '{block.block_id}' revision does not match "
@@ -407,7 +409,25 @@ def verify_provenance_pre_send_guard(
                     f"Block '{block.block_id}' revision does not match policy_base_sha",
                 )
 
-        # 4. Policy document snapshot checks
+        # 4. Repository validation (D7, #144): a code block belongs to the snapshot's
+        # repository, and a RAG block always names one.
+        if is_code:
+            if block.source_role == SourceRole.RETRIEVED_EXCERPT and block.repository_id is None:
+                raise PolicyError(
+                    PolicyErrorCode.CONTEXT_VIOLATION,
+                    f"Block '{block.block_id}' has no repository",
+                )
+            if (
+                snapshot is not None
+                and block.repository_id is not None
+                and block.repository_id != snapshot.repository_id
+            ):
+                raise PolicyError(
+                    PolicyErrorCode.CONTEXT_VIOLATION,
+                    f"Block '{block.block_id}' repository does not match the policy snapshot",
+                )
+
+        # 5. Policy document snapshot checks
         if snapshot is not None:
             if block.source_kind == "repository_rules":
                 if not snapshot.rules.is_present:

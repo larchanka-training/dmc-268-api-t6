@@ -74,6 +74,7 @@ from tests.test_review_context_blocks import (
     L2_WINDOW,
     L3_FULL,
     L4_SIGNATURE,
+    REPOSITORY_ID,
     _block,
     _bounded_l4_id,
     _payload,
@@ -166,7 +167,8 @@ def _snapshot(*, max_input_tokens: int = 60_000, max_policy_tokens: int = 12_000
         schema_version=POLICY_SNAPSHOT_SCHEMA_VERSION,
         snapshot_id=UUID("00000000-0000-0000-0000-000000000503"),
         run_id=RUN_ID,
-        repository_id=UUID("00000000-0000-0000-0000-000000000504"),
+        # The excerpt fixtures' repository: the guard binds code blocks to it (D7, #144).
+        repository_id=REPOSITORY_ID,
         policy_base_sha="b" * 40,
         rules=make_policy_document_present(
             path=".review/rules.md", text="# Rules\nAlways sanitize input.\n", blob_oid="r" * 40
@@ -696,6 +698,24 @@ def test_an_excerpt_whose_text_does_not_match_its_ranges_fails_before_any_call(t
 
     assert raised.value.code is PolicyErrorCode.CONTEXT_VIOLATION
     assert "Excerpt 'L2:f1:3-4' has" in str(raised.value)
+    assert transport.requests == []
+
+
+def test_an_excerpt_of_another_repository_fails_before_any_call() -> None:
+    # D7 (#144): a code block must belong to the snapshot's repository.
+    foreign = replace(
+        L2_WINDOW,
+        source=replace(
+            L2_WINDOW.source, repository_id=UUID("00000000-0000-0000-0000-000000000599")
+        ),
+    )
+    transport = Transport(json.dumps(EMPTY_ANSWER))
+
+    with pytest.raises(PolicyError) as raised:
+        _draft(_gateway(transport), _with_excerpts(foreign))
+
+    assert raised.value.error_code == "policy_context_violation"
+    assert "repository does not match the policy snapshot" in str(raised.value)
     assert transport.requests == []
 
 

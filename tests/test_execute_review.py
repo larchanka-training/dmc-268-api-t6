@@ -2889,6 +2889,8 @@ def test_execute_review_retrieved_excerpt_accepted_by_reviewer_and_verifier() ->
             shown_ranges=((1, 5),),
             revision="head_123",
             side="RIGHT",
+            # A RAG block names the run's repository (D7, #144).
+            repository_id=context.policy_snapshot.repository_id,
         )
         return CallManifest(
             call_id=manifest.call_id,

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import uuid
+from typing import Literal
 
 import pytest
 from pydantic import ValidationError
@@ -13,6 +14,7 @@ from app.modules.reviews.application.policy_snapshot import (
     CallManifest,
     ManifestBlock,
 )
+from app.modules.reviews.application.prompt_builder import PullRequestMeta
 from app.modules.reviews.application.review_output import (
     EvidenceRef,
     InvalidReviewOutput,
@@ -415,6 +417,75 @@ def test_validate_v2_attribution_additional_branches() -> None:
     valid, reason = validate_v2_attribution(f_none_rule, manifest)
     assert valid is True
     assert reason is None
+
+
+def _head_side_manifest(
+    role: SourceRole, side: Literal["RIGHT"] | None, revision: str
+) -> CallManifest:
+    return CallManifest(
+        call_id=uuid.uuid4(),
+        run_id=uuid.uuid4(),
+        stage="review",
+        blocks=(
+            ManifestBlock(
+                block_id="code-block",
+                source_role=role,
+                source_kind="source_code",
+                path="app/helper.py",
+                revision=revision,
+                side=side,
+                start_line=1,
+                end_line=30,
+                shown_line_count=30,
+            ),
+        ),
+    )
+
+
+def _meta(head_sha: str | None) -> PullRequestMeta:
+    return PullRequestMeta(
+        "PR", None, "u", "b", "main", (), 1, 1, 0, False, False, head_sha=head_sha
+    )
+
+
+@pytest.mark.parametrize("head_sha", [None, "head_good"], ids=["no-head", "other-head"])
+@pytest.mark.parametrize("side", ["RIGHT", None], ids=["right", "side-less"])
+@pytest.mark.parametrize("role", [SourceRole.DIFF, SourceRole.RETRIEVED_EXCERPT])
+def test_validate_v2_attribution_refuses_a_head_side_block_off_the_pr_head(
+    role: SourceRole, side: Literal["RIGHT"] | None, head_sha: str | None
+) -> None:
+    # D7 (#144): a missing head no longer lets any revision through.
+    finding = make_valid_finding_v2(
+        rule_name=None,
+        evidence_refs=[EvidenceRef(block_id="code-block", start_line=5, end_line=10)],
+    )
+
+    valid, reason = validate_v2_attribution(
+        finding, _head_side_manifest(role, side, "foreign_head"), pr_meta=_meta(head_sha)
+    )
+
+    assert valid is False
+    assert reason == (
+        f"revision_mismatch: block revision 'foreign_head' does not match PR revision '{head_sha}'"
+    )
+
+
+@pytest.mark.parametrize("side", ["RIGHT", None], ids=["right", "side-less"])
+def test_validate_v2_attribution_accepts_a_head_side_block_of_the_pr_head(
+    side: Literal["RIGHT"] | None,
+) -> None:
+    finding = make_valid_finding_v2(
+        rule_name=None,
+        evidence_refs=[EvidenceRef(block_id="code-block", start_line=5, end_line=10)],
+    )
+
+    valid, reason = validate_v2_attribution(
+        finding,
+        _head_side_manifest(SourceRole.RETRIEVED_EXCERPT, side, "head_good"),
+        pr_meta=_meta("head_good"),
+    )
+
+    assert (valid, reason) == (True, None)
 
 
 def test_parse_review_output_with_evidence_refs() -> None:

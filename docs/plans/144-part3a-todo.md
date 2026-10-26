@@ -88,7 +88,7 @@ at `a9269bbd`.
   `policy_context_violation`; a `retrieved_excerpt` without `repository_id` fails; a foreign path is
   still refused.
 - Done when:
-  - [ ] negative tests for the three checks; full suite green (live change).
+  - [x] negative tests for the three checks; full suite green (live change).
 
 **Commit:** `fix(reviews): refuse code blocks of another revision or repository (#144)`
 
