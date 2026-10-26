@@ -18,8 +18,10 @@ its usage recorded as soon as the call returns, outside any database transaction
 | context overflow| none                               | none              |
 
 A final 429 carries the longest Retry-After of this gateway call's 429s (primary, retry,
-repair, fallback) in ``LlmCallFailed.retry_after_s``; the run retry waits at least that
-long (docs/PIPELINE_SPEC.md §4.2). Any other final error carries its own call's hint.
+repair, fallback, and every key the transport rotated through) in
+``LlmCallFailed.retry_after_s``; the run retry waits at least that long
+(docs/PIPELINE_SPEC.md §4.2). The same-model wait above still follows the hint of the last
+rate-limited key. Any other final error carries its own call's hint.
 """
 
 from __future__ import annotations
@@ -210,6 +212,8 @@ class _Outcome:
     message: str = ""
     retryable: bool = True
     retry_after_s: float | None = None
+    # The longest hint over the rotated keys of this call: for the run, not for the wait.
+    longest_retry_after_s: float | None = None
     answer: str = ""
     errors: list[str] = field(default_factory=list)
     refused: bool = False
@@ -660,6 +664,7 @@ class LlmGateway:
                 message=error.message,
                 retryable=error.retryable,
                 retry_after_s=error.retry_after_s,
+                longest_retry_after_s=error.longest_retry_after_s,
             )
 
         duration_ms = _elapsed_ms(started, self._monotonic())
@@ -1062,10 +1067,11 @@ def _calls_exhausted(context: RunCallContext, attempt: _AttemptCalls, task: Stru
 
 
 def _longest_retry_after(current: float | None, outcome: _Outcome) -> float | None:
-    """The longest Retry-After so far, counting ``outcome`` when it is a rate limit."""
-    if outcome.error is not LlmErrorCode.RATE_LIMITED or outcome.retry_after_s is None:
+    """The longest Retry-After so far, counting ``outcome``'s keys when it is a rate limit."""
+    hint = outcome.longest_retry_after_s
+    if outcome.error is not LlmErrorCode.RATE_LIMITED or hint is None:
         return current
-    return outcome.retry_after_s if current is None else max(current, outcome.retry_after_s)
+    return hint if current is None else max(current, hint)
 
 
 def _final_hint(last: _Outcome, rate_limit_hint: float | None) -> float | None:

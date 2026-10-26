@@ -81,6 +81,7 @@ from app.modules.reviews.infrastructure.llm.transport import (
     ChatResponse,
     OpenAICompatibleTransport,
     ResponseSchema,
+    TransportRateLimited,
 )
 from tests.llm_fakes import context_checkpoint
 
@@ -847,6 +848,73 @@ def test_rotations_inside_every_call_do_not_shrink_the_call_limit() -> None:
     assert len(harness.requests) == 7
     assert result.calls == 4
     assert harness.kinds() == ["primary", "retry", "retry", "fallback"]
+
+
+@pytest.mark.parametrize(
+    ("answers", "retry_after_s", "longest"),
+    [
+        pytest.param([(429, "900"), (429, "1")], 1.0, 900.0, id="second-key-shorter"),
+        pytest.param([(429, "900"), (429, None)], None, 900.0, id="second-key-without-header"),
+        pytest.param([(429, None), (429, None)], None, None, id="no-header"),
+        # The middle key has the longest window: neither the first nor the last hint.
+        pytest.param([(429, "1"), (429, "900"), (429, "5")], 5.0, 900.0, id="middle-key-longest"),
+        # A dead key after a rate-limited one does not drop the hint.
+        pytest.param([(429, "900"), (401, None)], 900.0, 900.0, id="dead-second-key"),
+    ],
+)
+def test_rotated_rate_limited_keys_keep_the_last_hint_and_the_longest(
+    answers: list[tuple[int, str | None]], retry_after_s: float | None, longest: float | None
+) -> None:
+    replies = [
+        error(status, **({} if hint is None else {"Retry-After": hint})) for status, hint in answers
+    ]
+    request = ChatRequest(
+        profile=replace(PRIMARY, api_keys=tuple(f"sk-{index}" for index in range(len(answers)))),
+        messages=(ChatMessage("user", "Review this diff"),),
+        response_schema=None,
+        timeout_s=1,
+    )
+
+    async def checkpoint() -> None:
+        return None
+
+    async def complete() -> ChatResponse:
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(lambda _: replies.pop(0))
+        ) as client:
+            return await OpenAICompatibleTransport(client).complete(request, checkpoint=checkpoint)
+
+    with pytest.raises(TransportRateLimited) as caught:
+        asyncio.run(complete())
+
+    # The gateway's own short wait follows the last key; the run waits out every key (#247).
+    assert (caught.value.retry_after_s, caught.value.longest_retry_after_s) == (
+        retry_after_s,
+        longest,
+    )
+
+
+def test_a_final_rate_limit_waits_out_every_rotated_key_but_retries_on_the_last_keys_hint() -> None:
+    primary = replace(PRIMARY, api_keys=("sk-a", "sk-b"))
+    harness = Harness(
+        [
+            error(429, **{"Retry-After": "900"}),
+            error(429, **{"Retry-After": "1"}),
+            error(429, **{"Retry-After": "900"}),
+            error(429, **{"Retry-After": "1"}),
+            error(429),
+        ],
+        primary=primary,
+    )
+
+    failure = harness.failure()
+
+    # The last key's 1 s still drives the same-model retry, as before; the run hint is
+    # key A's 900 s, so the run does not come back before it (#247).
+    assert harness.kinds() == ["primary", "retry", "fallback"]
+    assert harness.clock.sleeps == [1.0]
+    assert failure.error_code is LlmErrorCode.RATE_LIMITED
+    assert failure.retry_after_s == 900.0
 
 
 # ---------- failure classes, §5.1 ----------

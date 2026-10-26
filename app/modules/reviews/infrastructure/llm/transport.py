@@ -108,6 +108,9 @@ class TransportError(Exception):
         self.message = message
         self.http_status = http_status
         self.retry_after_s = retry_after_s
+        # The longest Retry-After over the keys a call rotated through; ``retry_after_s``
+        # stays the hint of the error itself (the last rate-limited key).
+        self.longest_retry_after_s = retry_after_s
         self.retryable = retryable
 
 
@@ -166,6 +169,7 @@ class OpenAICompatibleTransport:
         body = _request_body(request)
         last: TransportError | None = None
         rate_limited: TransportError | None = None
+        longest: float | None = None
         for offset in range(len(keys)):
             index = (start + offset) % len(keys)
             await checkpoint()
@@ -177,6 +181,8 @@ class OpenAICompatibleTransport:
                 last = _status_error(response, profile.api_keys)
                 if isinstance(last, TransportRateLimited):
                     rate_limited = last
+                    if last.retry_after_s is not None:
+                        longest = max(longest or 0.0, last.retry_after_s)
                 logger.warning(
                     "llm provider rejected key",
                     extra={
@@ -191,7 +197,12 @@ class OpenAICompatibleTransport:
         assert last is not None
         # A key that is only rate limited outranks a dead one: the gateway then waits
         # for Retry-After and reports llm_rate_limited, not llm_unavailable.
-        raise rate_limited or last
+        if rate_limited is not None:
+            # The gateway's short wait keeps the last key's hint; the run waits out the
+            # longest window of the keys tried, which a key without one does not lower.
+            rate_limited.longest_retry_after_s = longest
+            raise rate_limited
+        raise last
 
     async def _post(
         self, request: ChatRequest, body: dict[str, Any], key: str | None
