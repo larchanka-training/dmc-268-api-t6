@@ -2,9 +2,11 @@
 
 The stage builds L1-L4 (CONTEXT_AND_VERIFICATION_SPEC §3-4); the review prompt shows L1 as
 the changed files and, on the snapshot path, every L2-L4 block as a numbered excerpt that
-names its block, path, revision, side and level. The fit drops excerpts in the reverse of
-the selection order of CVS §4.1 (L1 → L4 → RAG → L2 → L3): L3, then L2, then L4, before it
-trims a changed file. An ignored file is counted, never named (RULES_FORMAT_SPEC §5.3).
+names its block, path, revision, side and level; a prompt version with a retrieved section
+shows the RAG blocks after them in their own section (#144). The fit drops excerpts in the
+reverse of the selection order of CVS §4.1 (L1 → L4 → RAG → L2 → L3): L3, then L2, then L4,
+before it trims a changed file. An ignored file is counted, never named (RULES_FORMAT_SPEC
+§5.3).
 """
 
 from __future__ import annotations
@@ -312,16 +314,86 @@ def test_fit_keeps_every_excerpt_that_fits() -> None:
 
 
 # The execute_review side: what the stage hands over reaches the snapshot-path prompt only.
+# Lines 3-4 of its path, one text line per source line, as the stage cuts it.
 RETRIEVED = RetrievedBlock(
-    block_id="RAG:app/caller.py:2-3",
+    block_id="RAG:app/caller.py:3-4",
     level=ContextLevel.RAG,
     source=replace(L2_WINDOW.source, role=SourceRole.RETRIEVED_EXCERPT, path="app/caller.py"),
     representation=Representation.EXACT_LINES,
-    text="RETRIEVED_CALLER_TEXT",
+    text="def caller():\n    return RETRIEVED_CALLER_TEXT",
     tokens=5,
     edge_kind=EdgeKind.USES_IMPORTED,
     index_commit_sha="c" * 40,
 )
+BASE = "b" * 40
+# The definition a broken-reference place reads, at the base.
+RETRIEVED_DEFINITION = replace(
+    RETRIEVED,
+    block_id="RAG:app/defs.py:1-1",
+    source=replace(
+        RETRIEVED.source,
+        path="app/defs.py",
+        revision=BASE,
+        side=DiffSide.LEFT,
+        ranges=(LineRange(1, 1),),
+        reason="rag_broken_reference",
+    ),
+    representation=Representation.SIGNATURE,
+    text="def load(key):",
+)
+
+
+def test_the_retrieved_section_follows_the_excerpts_with_one_rag_excerpt_per_block() -> None:
+    context = replace(
+        _context((L2_WINDOW,)), retrieved=(RETRIEVED, RETRIEVED_DEFINITION), retrieved_section=True
+    )
+
+    user = PromptBuilder().build_prompt(context).user
+
+    section = (
+        "<retrieved_excerpts>\n"
+        '<excerpt block_id="RAG:app/caller.py:3-4" level="RAG" path="app/caller.py" '
+        f'revision="{HEAD}" side="RIGHT" representation="exact_lines">\n'
+        '<line n="3">def caller():</line>\n'
+        '<line n="4">    return RETRIEVED_CALLER_TEXT</line>\n'
+        "</excerpt>\n"
+        '<excerpt block_id="RAG:app/defs.py:1-1" level="RAG" path="app/defs.py" '
+        f'revision="{BASE}" side="LEFT" representation="signature">\n'
+        '<line n="1">def load(key):</line>\n'
+        "</excerpt>\n"
+        "</retrieved_excerpts>"
+    )
+    assert f"</context_excerpts>\n{section}\n<omitted_files>" in user
+    assert user.count('level="RAG"') == 2
+
+
+def test_a_prompt_with_a_retrieved_section_and_no_block_shows_it_empty() -> None:
+    # The section follows the prompt version, not the slot: both A/B arms run one version.
+    context = replace(_context(()), retrieved_section=True)
+
+    user = PromptBuilder().build_prompt(context).user
+
+    assert "</changed_files>\n<retrieved_excerpts>\n\n</retrieved_excerpts>\n<omitted_files>" in (
+        user
+    )
+
+
+@pytest.mark.parametrize("snapshot", [True, False], ids=["v4", "legacy"])
+def test_without_a_retrieved_section_retrieved_blocks_change_no_prompt_byte(
+    snapshot: bool,
+) -> None:
+    context = _context((L2_WINDOW,))
+    if not snapshot:
+        context = replace(context, policy_snapshot=None)
+
+    user = (
+        PromptBuilder()
+        .build_prompt(replace(context, retrieved=(RETRIEVED, RETRIEVED_DEFINITION)))
+        .user
+    )
+
+    assert user == PromptBuilder().build_prompt(context).user
+    assert "<retrieved_excerpts>" not in user and 'level="RAG"' not in user
 
 
 def _payload(*, ignored_files: int = 2) -> ReviewContextPayload:
@@ -434,8 +506,9 @@ def test_retrieved_blocks_are_neither_kept_nor_shown_without_a_retrieved_section
     context = _review("v4", _payload())
 
     assert not rag_index.RETRIEVED_PROMPT_VERSIONS
-    assert context.retrieved == ()
-    assert "RETRIEVED_CALLER_TEXT" not in PromptBuilder().build_prompt(context).user
+    assert context.retrieved == () and not context.retrieved_section
+    user = PromptBuilder().build_prompt(context).user
+    assert "RETRIEVED_CALLER_TEXT" not in user and "<retrieved_excerpts>" not in user
 
 
 def test_retrieved_blocks_reach_the_context_of_a_prompt_with_a_retrieved_section(
@@ -448,8 +521,27 @@ def test_retrieved_blocks_reach_the_context_of_a_prompt_with_a_retrieved_section
     context = _review("v4", _payload())
 
     assert context.retrieved == (replace(RETRIEVED, block_id=_bounded_rag_id(RETRIEVED)),)
-    # #144 renders them; F1 only fills the slot.
-    assert "RETRIEVED_CALLER_TEXT" not in PromptBuilder().build_prompt(context).user
+    assert context.retrieved_section
+    user = PromptBuilder().build_prompt(context).user
+    # Shown in their own section after the L2-L4 excerpts, by the snapshot-path id.
+    assert f'<excerpt block_id="{_bounded_rag_id(RETRIEVED)}" level="RAG"' in user
+    assert "</context_excerpts>\n<retrieved_excerpts>\n" in user
+    assert "RETRIEVED_CALLER_TEXT" in user
+
+
+def test_a_failed_build_keeps_the_retrieved_section_of_the_prompt_empty(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        rag_index, "RETRIEVED_PROMPT_VERSIONS", frozenset({("review.system", "v4")})
+    )
+
+    context = _review("v4", None)
+
+    # The section follows the bound prompt version, not the payload.
+    assert context.retrieved == () and context.retrieved_section
+    user = PromptBuilder().build_prompt(context).user
+    assert "</changed_files>\n<retrieved_excerpts>\n\n</retrieved_excerpts>\n" in user
 
 
 def test_snapshot_review_after_a_failed_build_shows_no_excerpt_and_no_counter() -> None:
@@ -466,7 +558,7 @@ def test_legacy_review_gets_neither_excerpts_nor_the_counter() -> None:
 
     assert context.policy_snapshot is None
     assert context.context_blocks == () and context.retrieved == ()
-    assert context.excluded_files == 0
+    assert not context.retrieved_section and context.excluded_files == 0
     user = PromptBuilder().build_prompt(context).user
     assert "<context_excerpts>" not in user and "<excluded_files" not in user
     assert user.endswith("<omitted_files>\napp/too_big.py\n</omitted_files>")
@@ -538,7 +630,6 @@ def _bounded_rag_id(block: RetrievedBlock) -> str:
     return f"RAG:{revision}:{sha256(block.block_id.encode()).hexdigest()[:16]}"
 
 
-BASE = "b" * 40
 # The stage's RAG id ``RAG:{path}:{ranges}`` embeds the path. A use at the head and the
 # definition it reads at the base: one path, the same lines, the same stage id.
 LONG_USE = replace(

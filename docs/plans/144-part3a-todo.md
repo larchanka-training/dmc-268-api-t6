@@ -36,7 +36,7 @@ at `a9269bbd`.
   fix the `RETRIEVED` fixture (`tests/test_review_context_blocks.py:309-318`: two text lines for
   ranges 3–4, a matching id) and flip the "not in prompt" assertion (`:445`).
 - Done when:
-  - [ ] three render cases tested; legacy goldens byte-identical.
+  - [x] three render cases tested; legacy goldens byte-identical.
 
 **Commit:** `feat(reviews): render the retrieved section of the snapshot prompt (#144)`
 
