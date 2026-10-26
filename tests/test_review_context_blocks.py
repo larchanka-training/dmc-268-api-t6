@@ -596,7 +596,7 @@ def test_snapshot_review_shows_the_l2_l4_excerpts_and_counts_the_ignored_files()
 def test_retrieved_blocks_are_neither_kept_nor_shown_without_a_retrieved_section() -> None:
     context = _review("v4", _payload())
 
-    assert not rag_index.RETRIEVED_PROMPT_VERSIONS
+    assert ("review.system", "v4") not in rag_index.RETRIEVED_PROMPT_VERSIONS
     assert context.retrieved == () and not context.retrieved_section
     user = PromptBuilder().build_prompt(context).user
     assert "RETRIEVED_CALLER_TEXT" not in user and "<retrieved_excerpts>" not in user

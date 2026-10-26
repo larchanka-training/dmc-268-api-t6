@@ -3,8 +3,8 @@
 A review answer must pass ``review/schemas/review-output.schema.json`` and then
 ``parse_review_output``; the collected messages feed the one repair call (§5.1). There
 is no second copy of the schema: the file is read once and sent to the provider as is,
-minus its ``$``-annotations. A run whose snapshot binds review prompt ``v4`` is held to
-``review-output.schema.v2.json`` instead (``review_answer_contract``).
+minus its ``$``-annotations. A run whose snapshot binds review prompt ``v4`` or ``v5`` is
+held to ``review-output.schema.v2.json`` instead (``review_answer_contract``).
 """
 
 from __future__ import annotations
@@ -124,7 +124,7 @@ def _review_v2_validator() -> Draft202012Validator:
 def validate_review_answer_v2(content: str) -> dict[str, object]:
     """``validate_review_answer`` against the v2 schema, ending in ``parse_review_output_v2``.
 
-    Only a v4-bound (snapshot-path) run is held to v2, so it decodes fail-closed.
+    Only a v4- or v5-bound (snapshot-path) run is held to v2, so it decodes fail-closed.
     """
     decoded = _decode_object_fail_closed(content)
     errors = [
@@ -155,9 +155,9 @@ class ReviewAnswerContract:
 def review_answer_contract(review_system_version: str | None) -> ReviewAnswerContract:
     """Pick the review answer contract by the bound review prompt version.
 
-    No snapshot (``None``) or ``v1``-``v3``: ReviewOutput v1, the live contract. ``v4``:
-    ReviewOutput v2 with ``evidence_refs``. Any other version has no known answer shape,
-    so the run fails before a provider call.
+    No snapshot (``None``) or ``v1``-``v3``: ReviewOutput v1, the live contract. ``v4`` and
+    ``v5``: ReviewOutput v2 with ``evidence_refs``. Any other version has no known answer
+    shape, so the run fails before a provider call.
     """
     if review_system_version is None or review_system_version in _V1_REVIEW_PROMPT_VERSIONS:
         return ReviewAnswerContract("ReviewOutput", review_output_schema(), validate_review_answer)

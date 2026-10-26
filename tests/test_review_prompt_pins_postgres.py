@@ -525,8 +525,14 @@ def test_v3_run_and_snapshot_keep_v3_and_the_legacy_path_after_v4_activation(
                 pins.prompt_bindings.review_system_id, "review.system", "v3", "github"
             )
 
+            # The files F2 packaged: review.system up to v4.
+            f2_assets = tuple(
+                asset
+                for asset in _packaged()
+                if not (asset.key == "review.system" and asset.version > 4)
+            )
             async with factory.begin() as session:
-                assert await seed_prompt_versions(session, _packaged()) == 1
+                assert await seed_prompt_versions(session, f2_assets) == 1
             async with factory() as session:
                 active = (
                     await session.scalars(

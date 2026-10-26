@@ -20,8 +20,8 @@ Design: [144-part3b-plan.md](144-part3b-plan.md). One task → one commit, test 
   (the "empty set" assertion keeps v4 as "no section").
 - Tests first: `test_review_prompt_v5.py` red without the file; then the flips.
 - Done when:
-  - [ ] v5 file, pin, both version sets; suite green at this commit;
-  - [ ] measured token delta v5 − v4 (counter/v2) in the report.
+  - [x] v5 file, pin, both version sets; suite green at this commit;
+  - [x] measured token delta v5 − v4 (counter/v2) in the report.
 
 **Commit:** `feat(prompts): add review.system.v5 with the retrieved section (#144)`
 

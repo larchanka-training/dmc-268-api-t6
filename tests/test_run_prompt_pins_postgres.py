@@ -442,7 +442,7 @@ def test_historical_run_keeps_todays_pins_and_digest(env: Env) -> None:
 
 @pytest.mark.integration
 @pytest.mark.parametrize(
-    ("v4_packaged", "version", "checksum"),
+    ("snapshot_packaged", "version", "checksum"),
     [
         pytest.param(
             False,
@@ -452,20 +452,21 @@ def test_historical_run_keeps_todays_pins_and_digest(env: Env) -> None:
         ),
         pytest.param(
             True,
-            "v4",
-            "5738227c7352228d29975e0512b5b5d3354eff31c9d161ca72086a776e9c498f",
+            "v5",
+            "7bc417534eda5b0d916e7a06ffb50a80451bec7e4edeb9ee1074a8a40e93f711",
             id="full-seed",
         ),
     ],
 )
 def test_complete_pins_make_snapshot_ready_and_the_pinned_prompt_picks_the_path(
-    env: Env, v4_packaged: bool, version: str, checksum: str
+    env: Env, snapshot_packaged: bool, version: str, checksum: str
 ) -> None:
-    # Up to v3 a new run stays legacy; the full seed (F2) activates v4 and the snapshot path.
+    # Up to v3 a new run stays legacy; the full seed activates the newest packaged
+    # review.system (v5) and the snapshot path.
     assets = tuple(
         asset
         for asset in _packaged()
-        if v4_packaged or not (asset.key == "review.system" and asset.version > 3)
+        if snapshot_packaged or not (asset.key == "review.system" and asset.version > 3)
     )
     # The review prompt row a new run pins: the newest seeded one, as reviewed.
     pinned_row = ("review.system", int(version.removeprefix("v")), checksum)
@@ -509,7 +510,7 @@ def test_complete_pins_make_snapshot_ready_and_the_pinned_prompt_picks_the_path(
             assert snapshot.is_ready_for_llm is True
             assert snapshot.prompt_bindings.review_system_version == version
             assert snapshot.prompt_bindings.review_system_checksum == checksum
-            if v4_packaged:
+            if snapshot_packaged:
                 # The snapshot path: the stage serves the snapshot, and the conventions cache
                 # key is the repo-conventions-v2 digest (R5).
                 assert stage.snapshot_for_llm == snapshot
