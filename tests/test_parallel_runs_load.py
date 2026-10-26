@@ -577,7 +577,8 @@ def test_override_pins_every_llm_and_github_setting_of_the_worker() -> None:
     override = _service_env(REPO_ROOT / "deploy/load/compose.parallel-runs.yml", "worker")
     llm_keys = re.findall(r"(?m)^      (LLM_[A-Z_]+):", base)
 
-    assert len(llm_keys) == 15
+    assert len(llm_keys) == 17
+    assert {"LLM_VERIFIER_MODEL", "LLM_VERIFIER_FALLBACK_MODEL"} <= set(llm_keys)
     for key in [*llm_keys, "GITHUB_APP_ID", "GITHUB_APP_PRIVATE_KEY", "GITHUB_API_URL"]:
         assert re.search(rf"(?m)^      {key}: ", override), key
     # Only the throwaway App key comes from the environment the driver builds.
