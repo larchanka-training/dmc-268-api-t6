@@ -590,6 +590,36 @@ def test_optional_verifier_models_are_omitted_from_worker_env(
     }
 
 
+@pytest.mark.parametrize(
+    ("kept", "value", "dropped"),
+    [
+        ("LLM_VERIFIER_MODEL", "verifier-model", "LLM_VERIFIER_FALLBACK_MODEL"),
+        ("LLM_VERIFIER_FALLBACK_MODEL", "verifier-fallback-model", "LLM_VERIFIER_MODEL"),
+    ],
+    ids=["model-only", "fallback-only"],
+)
+def test_one_verifier_model_reaches_worker_env_without_the_other(
+    tmp_path: Path, host: Host, kept: str, value: str, dropped: str
+) -> None:
+    values = {**CI_SECRETS}
+    values.pop(dropped)
+    stdout, bundle = _run_bundle_step(tmp_path, values)
+
+    result = host.deploy(IMAGE_A, bundle=bundle)
+
+    assert result.returncode == 0, result.stderr
+    assert f"set: {kept}" in stdout.splitlines()
+    assert f"not set: {dropped}" in stdout.splitlines()
+    assert _read_env_file(host.app_dir / "worker.env") == {
+        "LLM_API_KEYS": "sk-test-1,sk-test-2",
+        "LLM_BASE_URL": "https://llm.test/api/v1",
+        "LLM_MODEL": "gpt-4.1-mini",
+        "LLM_FALLBACK_MODEL": "mistral-small-3.2-24b",
+        kept: value,
+        "PORTAL_URL": "https://staging-ui.example.test",
+    }
+
+
 def test_legacy_eur_rate_is_ignored_by_bundle_and_worker_env(tmp_path: Path, host: Host) -> None:
     stdout, bundle = _run_bundle_step(tmp_path, {**CI_SECRETS, "LLM_EUR_TO_USD_RATE": "1.1204"})
 
