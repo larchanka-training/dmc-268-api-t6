@@ -553,6 +553,17 @@ def test_uncited_rag_blocks_are_neither_shown_to_the_verifier_nor_listed_in_its_
     assert all(block.source_role != "retrieved_excerpt" for block in with_slot[1].blocks)
 
 
+def test_without_a_retrieved_section_a_cited_rag_block_is_neither_shown_nor_listed() -> None:
+    # The verifier shows again what the review prompt showed: a slot it did not show stays out.
+    no_section = replace(WITH_SLOT, retrieved_section=False)
+
+    prompt, manifest = _build((EXCERPT_ONLY, ON_PLACE), no_section)
+
+    assert (prompt, manifest) == _build((EXCERPT_ONLY, ON_PLACE), replace(no_section, retrieved=()))
+    assert "<retrieved_excerpts>" not in prompt.user and 'level="RAG"' not in prompt.user
+    assert all(block.source_role != "retrieved_excerpt" for block in manifest.blocks)
+
+
 @pytest.mark.parametrize(
     "ref",
     [

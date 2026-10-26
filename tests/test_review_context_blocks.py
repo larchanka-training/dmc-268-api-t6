@@ -53,6 +53,7 @@ from app.modules.reviews.application.review_context import (
     RetrievedBlock,
     ReviewContextPayload,
     snapshot_block,
+    snapshot_retrieved,
 )
 from app.modules.reviews.application.review_output import EvidenceRef
 from app.modules.reviews.application.review_path import ReviewBinding
@@ -396,6 +397,18 @@ def test_without_a_retrieved_section_retrieved_blocks_change_no_prompt_byte(
     assert "<retrieved_excerpts>" not in user and 'level="RAG"' not in user
 
 
+def test_without_a_retrieved_section_the_manifest_lists_no_retrieved_block() -> None:
+    # The manifest follows the prompt version as the prompt does, whatever the slot holds.
+    context = _context((L2_WINDOW,))
+
+    manifest = PromptBuilder().build_manifest(
+        replace(context, retrieved=(RETRIEVED, RETRIEVED_DEFINITION)), call_id=RUN_ID
+    )
+
+    assert manifest == PromptBuilder().build_manifest(context, call_id=RUN_ID)
+    assert all(block.source_role != SourceRole.RETRIEVED_EXCERPT for block in manifest.blocks)
+
+
 # Two broken-reference places and the base definitions they read (CVS §3.5), as the slot
 # admits them: the second place shares the first one's definition and reads one of its own.
 FIRST_PLACE = replace(RETRIEVED, definitions=(RETRIEVED_DEFINITION.source,))
@@ -726,6 +739,15 @@ def _bounded_rag_id(block: RetrievedBlock) -> str:
     # stage's id.
     revision = (block.source.revision or "")[:12]
     return f"RAG:{revision}:{sha256(block.block_id.encode()).hexdigest()[:16]}"
+
+
+def test_the_snapshot_path_id_of_a_fixed_stage_rag_id_is_pinned() -> None:
+    # A literal, not only re-derived: the code and the helper above cannot drift together.
+    assert RETRIEVED.block_id == "RAG:app/caller.py:3-4"
+    pinned = "RAG:aaaaaaaaaaaa:fbc997b0a6d32191"
+
+    assert snapshot_retrieved(RETRIEVED).block_id == pinned
+    assert _bounded_rag_id(RETRIEVED) == pinned
 
 
 # The stage's RAG id ``RAG:{path}:{ranges}`` embeds the path. A use at the head and the
