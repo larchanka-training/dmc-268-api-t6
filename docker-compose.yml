@@ -65,6 +65,8 @@ services:
       LLM_FALLBACK_API_KEYS: ${LLM_FALLBACK_API_KEYS:-}
       LLM_FALLBACK_BASE_URL: ${LLM_FALLBACK_BASE_URL:-}
       # Verifier pair (#130): empty keeps the review pair (LLM_MODEL / LLM_FALLBACK_MODEL).
+      # The prefixed overrides are not passed, so only a KNOWN_MODELS model on the primary's
+      # endpoint works; any other value stops the worker at start with LlmConfigError.
       LLM_VERIFIER_MODEL: ${LLM_VERIFIER_MODEL:-}
       LLM_VERIFIER_FALLBACK_MODEL: ${LLM_VERIFIER_FALLBACK_MODEL:-}
     depends_on:
