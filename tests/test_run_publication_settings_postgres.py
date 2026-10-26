@@ -15,7 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from app.modules.repositories.infrastructure.models import Repository
 from app.modules.reviews.application.findings_post_processor import FindingsPostProcessor
 from app.modules.reviews.application.prepare_policy_snapshot import PreparePolicySnapshot
-from app.modules.reviews.application.rerun_run import RerunOutcome
+from app.modules.reviews.application.rerun_run import RerunOutcome, create_rerun
 from app.modules.reviews.application.review_output import parse_review_output
 from app.modules.reviews.application.store_review_output import StoreReviewOutput
 from app.modules.reviews.application.try_enqueue_webhook_run import (
@@ -193,8 +193,8 @@ def test_rerun_reads_current_settings_from_a_fresh_repository_pair(env: Env) -> 
                 repository = await session.get(Repository, REPO_A)
                 assert repository is not None and repository.max_comments == 10
                 await _settings(factory, "critical", 3)
-                result = await SqlAlchemyRerunStore(session, allow_unscoped=True).create_rerun(
-                    RUN_ATTEMPTED, NOW
+                result = await create_rerun(
+                    SqlAlchemyRerunStore(session, allow_unscoped=True), RUN_ATTEMPTED, NOW
                 )
                 assert result.outcome is RerunOutcome.CREATED
                 assert result.message is not None
@@ -332,8 +332,8 @@ def test_created_run_and_retry_keep_pins_but_rerun_uses_current_pair(env: Env) -
                     now=NOW,
                 )
             async with factory.begin() as session:
-                result = await SqlAlchemyRerunStore(session, allow_unscoped=True).create_rerun(
-                    run_id, NOW
+                result = await create_rerun(
+                    SqlAlchemyRerunStore(session, allow_unscoped=True), run_id, NOW
                 )
                 assert result.outcome is RerunOutcome.CREATED and result.message is not None
                 rerun_id = result.message.run_id

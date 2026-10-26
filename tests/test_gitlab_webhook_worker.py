@@ -573,7 +573,9 @@ def test_resource_close_faults_preserve_primary_and_close_owned_transport(
     )
 
 
-def test_partial_http_startup_failure_closes_owned_transport_with_static_error() -> None:
+def test_partial_http_startup_failure_closes_owned_transport_with_static_error(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     from app.bootstrap.gitlab import GitLabWebhookReplayUnavailable
 
     class StartFault(OwnedTransport):
@@ -596,7 +598,13 @@ def test_partial_http_startup_failure_closes_owned_transport_with_static_error()
         assert caught.value.__cause__ is None
         assert transport.entered is True and transport.closed is True
 
-    asyncio.run(scenario())
+    with caplog.at_level(logging.ERROR, logger="app.bootstrap.gitlab"):
+        asyncio.run(scenario())
+    [record] = [entry for entry in caplog.records if entry.name == "app.bootstrap.gitlab"]
+    assert record.getMessage() == "GitLab webhook replay startup failed"
+    assert record.__dict__["error_type"] == "RuntimeError"
+    assert record.exc_info is None and record.stack_info is None
+    assert "startup-PAT-URL-canary" not in caplog.text
 
 
 async def assert_committed_pool_and_no_transaction(

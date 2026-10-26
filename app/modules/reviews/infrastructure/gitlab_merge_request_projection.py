@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import math
 import sys
 from collections.abc import AsyncIterator, Awaitable
@@ -51,6 +52,16 @@ from app.modules.reviews.application.project_gitlab_merge_request import (
 from app.modules.reviews.infrastructure.models import CodeChange, Run
 from app.modules.workspaces.infrastructure.models import Workspace
 
+_LOGGER = logging.getLogger(__name__)
+
+
+def _log_database_error(error: Exception) -> None:
+    if not isinstance(error, GitLabRequestUnavailable):
+        _LOGGER.error(
+            "GitLab projection database operation failed",
+            extra={"error_type": type(error).__name__},
+        )
+
 
 def _timeout_milliseconds(seconds: float) -> str:
     if (
@@ -67,7 +78,10 @@ async def _database[T](operation: Awaitable[T]) -> T:
     """Translate only an awaited driver/session operation, never application code."""
     try:
         return await operation
-    except Exception:
+    except GitLabRequestUnavailable:
+        raise
+    except Exception as error:
+        _log_database_error(error)
         raise GitLabRequestUnavailable() from None
 
 
@@ -112,13 +126,18 @@ class SqlAlchemyGitLabMergeRequestProjectionLock:
         acquired = False
         try:
             try:
-                connection = await self._engine.connect()
-                await connection.execute(
-                    select(func.set_config("lock_timeout", self._timeout, False))
+                connection = await _database(self._engine.connect())
+                await _database(
+                    connection.execute(
+                        select(func.set_config("lock_timeout", self._timeout, False))
+                    )
                 )
-                await connection.execute(text("SELECT pg_advisory_lock(:key)"), {"key": key})
+                await _database(
+                    connection.execute(text("SELECT pg_advisory_lock(:key)"), {"key": key})
+                )
                 acquired = True
-            except Exception:
+            except Exception as error:
+                _log_database_error(error)
                 raise GitLabRequestUnavailable() from None
             # This yield is intentionally outside the DB error translation boundary.
             yield
@@ -150,24 +169,28 @@ class SqlAlchemyGitLabMergeRequestProjectionLock:
                 if acquired:
                     await connection.execute(text("SELECT pg_advisory_unlock(:key)"), {"key": key})
                 await connection.execute(text("RESET lock_timeout"))
-        except Exception:
+        except Exception as error:
+            _log_database_error(error)
             failed = True
             try:
                 async with asyncio.timeout(5):
                     await connection.invalidate()
-            except Exception:
+            except Exception as error:
+                _log_database_error(error)
                 # Closing the independent NullPool connection is still mandatory.
                 failed = True
         finally:
             try:
                 async with asyncio.timeout(5):
                     await connection.close()
-            except Exception:
+            except Exception as error:
+                _log_database_error(error)
                 failed = True
                 try:
                     async with asyncio.timeout(5):
                         await connection.invalidate()
-                except Exception:
+                except Exception as error:
+                    _log_database_error(error)
                     failed = True
         if failed:
             raise GitLabRequestUnavailable() from None
@@ -369,6 +392,7 @@ class SqlAlchemyGitLabMergeRequestProjectionUnitOfWork(SqlAlchemyUnitOfWork):
                     raise GitLabTargetInactive()
         except GitLabTargetInactive:
             raise
-        except Exception:
+        except Exception as error:
+            _log_database_error(error)
             raise GitLabRequestUnavailable() from None
         await self._reader.checkpoint_in_session(self.session, target)

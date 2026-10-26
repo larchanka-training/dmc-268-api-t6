@@ -15,7 +15,12 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.modules.auth.application.scope import AuthScope
 from app.modules.reviews.application.queue_messages import StoredRunMessage
-from app.modules.reviews.application.rerun_run import RerunConflict, RerunNotConfigured, RerunRun
+from app.modules.reviews.application.rerun_run import (
+    RerunConflict,
+    RerunNotConfigured,
+    RerunOriginConflict,
+    RerunRun,
+)
 from app.modules.reviews.application.try_enqueue_webhook_run import (
     PendingRunMessage,
     RunPublicationKind,
@@ -129,7 +134,7 @@ def test_public_rerun_refuses_replacement_committed_after_original_run_read(
                             {"repo": replacement.repository_id, "change": change},
                         )
                     barrier.release.set()
-                    with pytest.raises(RerunNotConfigured):
+                    with pytest.raises(RerunOriginConflict):
                         await asyncio.wait_for(task, 5)
                     assert barrier.reads == 1
                     assert publisher.messages == []
@@ -404,7 +409,7 @@ def test_historical_rerun_cannot_adopt_current_provider_or_tenant_with_colliding
                 autocommit=True,
             ) as observer:
                 observer.execute("LISTEN run_updated")
-                with pytest.raises(RerunNotConfigured):
+                with pytest.raises(RerunOriginConflict):
                     await rerun(fixture.sessions, publisher).execute(old)
                 assert list(observer.notifies(timeout=0.02, stop_after=1)) == []
             assert publisher.messages == []
@@ -437,7 +442,7 @@ def test_original_run_without_active_authority_does_not_rerun(
                 async with fixture.sessions.begin() as session:
                     await session.execute(text(statement))
             publisher = Publisher()
-            with pytest.raises(RerunNotConfigured):
+            with pytest.raises(RerunOriginConflict):
                 await rerun(fixture.sessions, publisher).execute(old)
             assert publisher.messages == []
             async with fixture.sessions() as session:
@@ -451,13 +456,15 @@ def test_original_run_without_active_authority_does_not_rerun(
     [
         ("closed", RerunConflict),
         ("active", RerunConflict),
-        ("missing_rules", RerunNotConfigured),
-        ("missing_prompt", RerunNotConfigured),
+        ("missing_rules", RerunOriginConflict),
+        ("missing_prompt", RerunOriginConflict),
         ("github_paused", RerunConflict),
-        ("github_paused_missing_rules", RerunNotConfigured),
+        ("github_paused_missing_rules", RerunOriginConflict),
+        ("valid_origin_missing_rules", RerunNotConfigured),
+        ("valid_origin_missing_prompt", RerunNotConfigured),
     ],
 )
-def test_null_origin_preserves_existing_conflict_and_configuration_precedence(
+def test_rerun_authority_precedes_configuration_but_valid_origin_retains_422(
     rerun_database: tuple[str, str, UUID],
     condition: str,
     expected: type[Exception],
@@ -479,7 +486,10 @@ def test_null_origin_preserves_existing_conflict_and_configuration_precedence(
                         text("UPDATE code_changes SET repository_id=:id"), {"id": repository}
                     )
             async with fixture.sessions.begin() as session:
-                await session.execute(text("UPDATE runs SET origin_provider_installation_id=NULL"))
+                if not condition.startswith("valid_origin"):
+                    await session.execute(
+                        text("UPDATE runs SET origin_provider_installation_id=NULL")
+                    )
                 statements = {
                     "closed": ["UPDATE code_changes SET state='closed'"],
                     "active": ["UPDATE runs SET state='queued'"],
@@ -493,7 +503,7 @@ def test_null_origin_preserves_existing_conflict_and_configuration_precedence(
                         "UPDATE repositories SET enabled=false",
                         "UPDATE rule_versions SET is_active=false",
                     ],
-                }[condition]
+                }[condition.removeprefix("valid_origin_")]
                 for statement in statements:
                     await session.execute(text(statement))
             publisher = Publisher()
@@ -763,7 +773,7 @@ def test_reinstalled_github_rerun_requires_same_account_workspace_and_original_r
                             {"repo": alternative, "id": change},
                         )
                     barrier.release.set()
-                    with pytest.raises(RerunNotConfigured):
+                    with pytest.raises(RerunOriginConflict):
                         await asyncio.wait_for(task, 5)
                     assert barrier.reads == 1
                 finally:
@@ -789,7 +799,7 @@ def test_reinstalled_github_rerun_requires_same_account_workspace_and_original_r
                         == current
                     )
             else:
-                with pytest.raises(RerunNotConfigured):
+                with pytest.raises(RerunOriginConflict):
                     await rerun(fixture.sessions, publisher).execute(old)
             assert await run_json(fixture, old) == before
             if lineage != "same":

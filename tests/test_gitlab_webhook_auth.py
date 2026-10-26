@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import traceback
 from dataclasses import dataclass, field
 from uuid import UUID
@@ -200,6 +201,11 @@ def test_resource_boundary_suppresses_raw_failure_chains(
         assert protected not in caplog.text
     assert raised.value.__cause__ is None
     assert raised.value.__suppress_context__ is True
+    [record] = [entry for entry in caplog.records if entry.name == "app.bootstrap.gitlab"]
+    assert record.levelno == logging.ERROR
+    assert record.getMessage() == f"GitLab webhook {operation} failed"
+    assert record.__dict__["error_type"] == "RuntimeError"
+    assert record.exc_info is None and record.stack_info is None
 
 
 def test_resource_boundary_preserves_expected_safe_admission_failure() -> None:

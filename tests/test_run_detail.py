@@ -21,6 +21,7 @@ from app.modules.reviews.application.list_runs import RunListItem
 from app.modules.reviews.application.queue_messages import StoredRunMessage
 from app.modules.reviews.application.rerun_run import (
     RerunConflict,
+    RerunFacts,
     RerunNotConfigured,
     RerunOutcome,
     RerunResult,
@@ -28,10 +29,13 @@ from app.modules.reviews.application.rerun_run import (
 )
 from app.modules.reviews.application.run_events import InMemoryRunUpdateHub, RunUpdated
 from app.modules.reviews.application.try_enqueue_webhook_run import (
+    CandidateMiss,
     PendingRunMessage,
+    RunInsertCandidate,
     RunPublicationKind,
 )
 from app.modules.reviews.infrastructure.run_action_payloads import ROW_LIMIT_BYTES, truncated
+from tests.test_rerun_origin import facts as rerun_facts
 
 RUN = UUID("11111111-1111-4111-8111-111111111111")
 OTHER = UUID("22222222-2222-4222-8222-222222222222")
@@ -229,8 +233,21 @@ class Reruns:
     async def rollback(self) -> None:
         return None
 
-    async def create_rerun(self, run_id: UUID, now: datetime) -> RerunResult:
-        return self.result
+    async def load_rerun_facts(self, run_id: UUID) -> RerunFacts | None:
+        if self.result.outcome is RerunOutcome.NOT_FOUND:
+            return None
+        value = rerun_facts()
+        if self.result.outcome is RerunOutcome.CONFLICT:
+            return replace(value, active_run=True)
+        if self.result.outcome is RerunOutcome.NOT_CONFIGURED:
+            return replace(value, candidate=CandidateMiss.MISSING_RULES)
+        return value
+
+    async def insert_rerun(
+        self, candidate: RunInsertCandidate, code_change_id: UUID, now: datetime
+    ) -> PendingRunMessage:
+        assert self.result.message is not None
+        return self.result.message
 
     async def mark_rerun_published(self, run_id: UUID, now: datetime) -> None:
         self.published.append(run_id)

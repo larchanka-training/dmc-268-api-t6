@@ -39,7 +39,7 @@ from app.modules.reviews.application.determine_ci_eligibility import (
     DetermineCiEligibility,
     WebhookRunIdentity,
 )
-from app.modules.reviews.application.rerun_run import RerunOutcome
+from app.modules.reviews.application.rerun_run import RerunOutcome, create_rerun
 from app.modules.reviews.application.try_enqueue_webhook_run import (
     PendingRunMessage,
     RunInsertCandidate,
@@ -273,9 +273,8 @@ def test_rerun_waits_for_source_before_taking_pr_lock_and_retains_normal_creatio
 
         async def rerun() -> RerunOutcome:
             async with factory.begin() as session:
-                result = await SqlAlchemyRerunStore(session, AuthScope(42, (WS_A,))).create_rerun(
-                    RUN_DONE,
-                    _NOW,
+                result = await create_rerun(
+                    SqlAlchemyRerunStore(session, AuthScope(42, (WS_A,))), RUN_DONE, _NOW
                 )
                 return result.outcome
 
@@ -316,17 +315,17 @@ def test_rerun_waits_for_source_before_taking_pr_lock_and_retains_normal_creatio
         (True, False, True, False, False, RerunOutcome.CONFLICT, 4),
         (False, True, True, False, False, RerunOutcome.CONFLICT, 4),
         (False, False, True, False, False, RerunOutcome.NOT_CONFIGURED, 4),
-        (False, False, True, True, False, RerunOutcome.NOT_CONFIGURED, 4),
+        (False, False, True, True, False, RerunOutcome.ORIGIN_CHANGED, 4),
         (False, False, True, False, True, RerunOutcome.NOT_CONFIGURED, 4),
         (False, False, False, False, False, RerunOutcome.CREATED, 5),
-        (False, False, False, True, False, RerunOutcome.CONFLICT, 4),
+        (False, False, False, True, False, RerunOutcome.ORIGIN_CHANGED, 4),
         (False, False, False, False, True, RerunOutcome.CONFLICT, 4),
     ],
     ids=[
         "closed-before-missing-rules",
         "active-before-missing-rules",
         "missing-rules",
-        "missing-rules-before-retired",
+        "retired-before-missing-rules",
         "missing-rules-before-paused",
         "configured-active-repository",
         "configured-retired-installation",
@@ -366,8 +365,8 @@ def test_rerun_source_lock_keeps_conflict_precedence_and_retired_refusal(
                         text("UPDATE rule_versions SET is_active=false WHERE repository_id=:id"),
                         {"id": REPO_A},
                     )
-                result = await SqlAlchemyRerunStore(session, AuthScope(42, (WS_A,))).create_rerun(
-                    RUN_DONE, _NOW
+                result = await create_rerun(
+                    SqlAlchemyRerunStore(session, AuthScope(42, (WS_A,))), RUN_DONE, _NOW
                 )
                 assert result.outcome is outcome
             async with factory() as session:

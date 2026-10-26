@@ -22,7 +22,10 @@ from app.modules.integrations.gitlab.application.authenticate_webhook import (
     GitLabWebhookAuthStatus,
 )
 from app.modules.integrations.gitlab.application.eligibility import DetermineGitLabEligibility
-from app.modules.integrations.gitlab.application.request_credentials import GitLabRequestCredentials
+from app.modules.integrations.gitlab.application.request_credentials import (
+    GitLabRequestCredentials,
+    GitLabRequestUnavailable,
+)
 from app.modules.integrations.gitlab.application.webhook_receipts import GitLabReceiptError
 from app.modules.integrations.gitlab.infrastructure.connection_store import CredentialCipherAdapter
 from app.modules.integrations.gitlab.infrastructure.credential_cipher import CredentialCipher
@@ -105,7 +108,11 @@ class GitLabWebhookResources:
             raise GitLabWebhookUnavailable()
         try:
             return await self._authenticator.execute(connection_id=connection_id, secret=secret)
-        except Exception:
+        except Exception as error:
+            logging.getLogger(__name__).error(
+                "GitLab webhook authenticate failed",
+                extra={"error_type": type(error).__name__},
+            )
             raise GitLabWebhookUnavailable() from None
 
     async def accept(self, delivery: WebhookReceipt) -> InstallationDeliveryDispatchStatus:
@@ -115,7 +122,11 @@ class GitLabWebhookResources:
             return await self._receiver.execute(delivery)
         except GitLabReceiptError:
             raise
-        except Exception:
+        except Exception as error:
+            logging.getLogger(__name__).error(
+                "GitLab webhook accept failed",
+                extra={"error_type": type(error).__name__},
+            )
             raise GitLabWebhookUnavailable() from None
 
 
@@ -197,10 +208,11 @@ async def gitlab_webhook_replay_resources(
         try:
             await close()
         except Exception as error:
-            logging.getLogger(__name__).error(
-                "GitLab webhook replay resource cleanup failed",
-                extra={"error_type": type(error).__name__},
-            )
+            if not isinstance(error, GitLabRequestUnavailable):
+                logging.getLogger(__name__).error(
+                    "GitLab webhook replay resource cleanup failed",
+                    extra={"error_type": type(error).__name__},
+                )
             if not preserve_primary:
                 raise GitLabWebhookReplayUnavailable() from None
 
@@ -257,7 +269,11 @@ async def gitlab_webhook_replay_resources(
                 ),
                 enqueuer=enqueuer,
             )
-        except Exception:
+        except Exception as error:
+            logging.getLogger(__name__).error(
+                "GitLab webhook replay startup failed",
+                extra={"error_type": type(error).__name__},
+            )
             raise GitLabWebhookReplayUnavailable() from None
         # Body/application errors are outside startup translation.
         yield resources
