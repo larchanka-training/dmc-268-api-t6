@@ -192,11 +192,12 @@ class RetrievedBlock:
 def definitions_read_by(
     blocks: tuple[RetrievedBlock, ...], places: Iterable[RetrievedBlock]
 ) -> tuple[RetrievedBlock, ...]:
-    """The blocks of ``blocks`` that one of ``places`` read, in the order of ``blocks``.
+    """The blocks of ``blocks`` that a block of ``places`` read, in the order of ``blocks``.
 
-    The one place → definitions relation (CVS §3.5): a place of a broken reference is
-    shown with the base definitions it read or not at all, and a block that no block of a
-    slot reads is a place of it. By source, not id (``RetrievedBlock.definitions``).
+    The one place → definitions relation (CVS §3.5): a place, the block of a broken
+    reference that no block of its slot reads, is shown with the base definitions it read
+    or not at all. ``places`` may also hold definitions, which read nothing. By source, not
+    id (``RetrievedBlock.definitions``).
     """
     read = {source for place in places for source in place.definitions}
     return tuple(block for block in blocks if block.source in read)

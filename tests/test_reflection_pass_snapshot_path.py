@@ -648,6 +648,23 @@ def test_a_cited_definition_is_offered_on_its_own_when_its_place_group_does_not_
     assert manifest.get_block(FIRST_PLACE.block_id) is None
 
 
+def test_an_uncited_definition_is_not_offered_alone_when_its_place_group_does_not_fit() -> None:
+    # Only the place is cited. The window holds the own line and the definition the place
+    # read, one token short of the place with it: the definition is no cited excerpt of its
+    # own, so the verifier is shown no RAG block (CVS §5.2, §7.1).
+    own_line = replace(WITH_SLOT, changed_files=(reflection_pass_module._with_lines(MAIN, (0,)),))
+    with_place, _ = _build((ON_PLACE,), own_line)
+    assert FIRST_PLACE_XML in with_place.user
+    window = _prompt_tokens(with_place) - 1
+
+    fitted = _build((ON_PLACE,), own_line, max_prompt_tokens=window)
+
+    assert fitted == _build((ON_PLACE,), replace(own_line, retrieved=()))
+    prompt, manifest = fitted
+    assert "<retrieved_excerpts>" not in prompt.user
+    assert all(block.source_role != "retrieved_excerpt" for block in manifest.blocks)
+
+
 # ---------- the verifier route window ----------
 
 

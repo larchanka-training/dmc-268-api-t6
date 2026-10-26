@@ -208,11 +208,16 @@ def _protected_lines(
     return protected_lines
 
 
+def _cited_ids(candidates: tuple[CandidateFindingItem, ...]) -> set[str]:
+    """The block ids the candidates cite as evidence."""
+    return {ref.block_id for cand in candidates for ref in cand.finding.evidence_refs}
+
+
 def _cited_excerpts(
     blocks: tuple[ContextBlock, ...], candidates: tuple[CandidateFindingItem, ...]
 ) -> tuple[ContextBlock, ...]:
     """The L2-L4 blocks a candidate cites as evidence, in payload order (CVS §7.1)."""
-    cited = {ref.block_id for cand in candidates for ref in cand.finding.evidence_refs}
+    cited = _cited_ids(candidates)
     return tuple(block for block in blocks if block.block_id in cited)
 
 
@@ -221,10 +226,10 @@ def _cited_retrieved(
 ) -> tuple[RetrievedBlock, ...]:
     """The RAG blocks a candidate cites, each place with the definitions it read (CVS §3.5),
     in payload order: the verifier is shown again what the review was (ADR 0001 §9)."""
-    cited = {ref.block_id for cand in candidates for ref in cand.finding.evidence_refs}
-    places = tuple(block for block in blocks if block.block_id in cited)
-    read = definitions_read_by(blocks, places)
-    return tuple(block for block in blocks if block in places or block in read)
+    cited = _cited_ids(candidates)
+    cited_blocks = tuple(block for block in blocks if block.block_id in cited)
+    read = definitions_read_by(blocks, cited_blocks)
+    return tuple(block for block in blocks if block in cited_blocks or block in read)
 
 
 # Whether a choice of diff files, cited excerpts and cited RAG blocks fits the verifier prompt.
@@ -313,7 +318,7 @@ def _fit_verifier_code(
     #    read (one shown already costs nothing), then each cited definition on its own (its
     #    place may have been left out), then L2 and L3. One that does not fit leaves room
     #    for the next; what is shown keeps the payload order.
-    cited = {ref.block_id for cand in candidates for ref in cand.finding.evidence_refs}
+    cited = _cited_ids(candidates)
     read = definitions_read_by(retrieved, retrieved)
     takes: list[tuple[tuple[ContextBlock, ...], tuple[RetrievedBlock, ...]]] = [
         *(((block,), ()) for block in excerpts if block.level.value == "L4"),
