@@ -54,15 +54,17 @@ SECRET_SOURCES = {
     "LLM_API_KEYS": "AI_DMC268_T6",
 }
 # Non-secret configuration, routed like the secrets: the bot login is a variable of the
-# Environment, the LLM models are repository variables (an Environment variable of the same
-# name overrides them), the portal URL is an Environment variable, and the endpoint of the
-# LLM gateway is an organization variable.
+# Environment, the LLM models (review and verifier pairs) are repository variables (an
+# Environment variable of the same name overrides them), the portal URL is an Environment
+# variable, and the endpoint of the LLM gateway is an organization variable.
 VARIABLE_SOURCES = {
     "GITHUB_APP_BOT_LOGIN": "GH_APP_BOT_LOGIN",
     "PORTAL_URL": "PORTAL_URL",
     "LLM_BASE_URL": "AI_DMC268_URL",
     "LLM_MODEL": "LLM_MODEL",
     "LLM_FALLBACK_MODEL": "LLM_FALLBACK_MODEL",
+    "LLM_VERIFIER_MODEL": "LLM_VERIFIER_MODEL",
+    "LLM_VERIFIER_FALLBACK_MODEL": "LLM_VERIFIER_FALLBACK_MODEL",
 }
 # One env file per set of recipients (docs/SECRETS.md); its bash array in env-file.sh.
 ENV_FILES = {
@@ -79,7 +81,15 @@ ENV_FILES = {
     ),
     "worker.env": (
         "WORKER_ENV_KEYS",
-        {"LLM_API_KEYS", "LLM_BASE_URL", "LLM_MODEL", "LLM_FALLBACK_MODEL", "PORTAL_URL"},
+        {
+            "LLM_API_KEYS",
+            "LLM_BASE_URL",
+            "LLM_MODEL",
+            "LLM_FALLBACK_MODEL",
+            "LLM_VERIFIER_MODEL",
+            "LLM_VERIFIER_FALLBACK_MODEL",
+            "PORTAL_URL",
+        },
     ),
     "webhook-worker.env": ("WEBHOOK_WORKER_ENV_KEYS", {"GITHUB_APP_BOT_LOGIN"}),
 }
@@ -101,6 +111,8 @@ CI_SECRETS = {
     "PORTAL_URL": "https://staging-ui.example.test",
     "LLM_MODEL": "gpt-4.1-mini",
     "LLM_FALLBACK_MODEL": "mistral-small-3.2-24b",
+    "LLM_VERIFIER_MODEL": "verifier-model",
+    "LLM_VERIFIER_FALLBACK_MODEL": "verifier-fallback-model",
 }
 
 FAKE_DOCKER = """\
@@ -544,6 +556,36 @@ def test_optional_fallback_model_is_omitted_from_worker_env(
         "LLM_API_KEYS": "sk-test-1,sk-test-2",
         "LLM_BASE_URL": "https://llm.test/api/v1",
         "LLM_MODEL": "gpt-4.1-mini",
+        "LLM_VERIFIER_MODEL": "verifier-model",
+        "LLM_VERIFIER_FALLBACK_MODEL": "verifier-fallback-model",
+        "PORTAL_URL": "https://staging-ui.example.test",
+    }
+
+
+@pytest.mark.parametrize("verifier", [None, ""], ids=["unset", "empty"])
+def test_optional_verifier_models_are_omitted_from_worker_env(
+    tmp_path: Path, host: Host, verifier: str | None
+) -> None:
+    # Without the pair the worker keeps today's route: the verifier falls back to the review
+    # models (LlmSettings.from_env, #290).
+    values = {**CI_SECRETS}
+    for name in ("LLM_VERIFIER_MODEL", "LLM_VERIFIER_FALLBACK_MODEL"):
+        if verifier is None:
+            values.pop(name)
+        else:
+            values[name] = verifier
+    stdout, bundle = _run_bundle_step(tmp_path, values)
+
+    result = host.deploy(IMAGE_A, bundle=bundle)
+
+    assert result.returncode == 0, result.stderr
+    assert "not set: LLM_VERIFIER_MODEL" in stdout.splitlines()
+    assert "not set: LLM_VERIFIER_FALLBACK_MODEL" in stdout.splitlines()
+    assert _read_env_file(host.app_dir / "worker.env") == {
+        "LLM_API_KEYS": "sk-test-1,sk-test-2",
+        "LLM_BASE_URL": "https://llm.test/api/v1",
+        "LLM_MODEL": "gpt-4.1-mini",
+        "LLM_FALLBACK_MODEL": "mistral-small-3.2-24b",
         "PORTAL_URL": "https://staging-ui.example.test",
     }
 

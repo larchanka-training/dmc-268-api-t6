@@ -73,6 +73,8 @@ services:
       LLM_FALLBACK_MODEL: ""
       LLM_FALLBACK_API_KEYS: ""
       LLM_FALLBACK_BASE_URL: ""
+      LLM_VERIFIER_MODEL: ""
+      LLM_VERIFIER_FALLBACK_MODEL: ""
     depends_on:
       stub:
         condition: service_healthy

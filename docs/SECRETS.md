@@ -32,6 +32,8 @@
 | `APP_DOMAIN` | да, для курсового VPS | `dmc268-t6.axyi.ru` — базовый домен маршрутов edge-прокси |
 | `LLM_MODEL` | для ревью моделью | `mistral-small-4` (OQ-2, SD §15). Основная модель в repository variable; передаётся в `worker.env` (деплой) и читается ручным workflow `eval-live.yml` |
 | `LLM_FALLBACK_MODEL` | нет | `mistral-small-3.2-24b` (OQ-2, SD §15). Значение передаётся в `worker.env` и в ручной workflow `eval-live.yml`. Чтобы отключить fallback, удалите variable (и переопределение в Environment `staging`, если оно есть): незаданная variable не попадает в `worker.env` |
+| `LLM_VERIFIER_MODEL` | нет | Модель верификатора (#130); пусто — `LLM_MODEL`. Значение передаётся в `worker.env`; незаданная variable в `worker.env` не попадает, и верификатор идёт моделью ревью. Ручные `eval-live.yml` и `llm-live-run.yml` её не читают: у eval нет стадии верификатора |
+| `LLM_VERIFIER_FALLBACK_MODEL` | нет | Fallback верификатора (#130); пусто — `LLM_FALLBACK_MODEL`. Передаётся в `worker.env` так же: незаданная variable туда не попадает |
 
 Repository variable `LLM_EUR_TO_USD_RATE` удалена 06.10 после проверки нового пути на staging: worker и workflow `LLM live run` её не читают, в `worker.env` она не попадает; курс вручную обновлять не нужно.
 
@@ -44,7 +46,7 @@ Repository variable `LLM_EUR_TO_USD_RATE` удалена 06.10 после про
 | `STAGING_SSH_KEY` | да, для Terraform-хоста | SCP/SSH на VM | приватный ключ к `hcloud_ssh_key.ci` |
 | `POSTGRES_PASSWORD` | нет | `<APP_DIR>/.env` на хосте | пароль PostgreSQL. Если не задан, `deploy.sh` генерирует его при первом выкате и хранит в `.env` (0600). После инициализации тома пароль не менять: Postgres его не перечитывает |
 
-Секреты приложения. GitHub не принимает имена секретов и variables с префиксом `GITHUB_` (HTTP 422), поэтому секреты App заведены как `GH_*`, а в контейнере у них имена из `.env.example`. Сопоставление делает шаг «Bundle application secrets» в `deploy-staging`; тем же путём идут organization secret `AI_DMC268_T6`, organization variable `AI_DMC268_URL` и `vars.GH_APP_BOT_LOGIN`, `vars.PORTAL_URL`, `vars.LLM_MODEL`, `vars.LLM_FALLBACK_MODEL`. Последние два задаются на уровне repository и могут быть переопределены в Environment `staging`. Незаданное значение в контейнер не попадает совсем, а не приходит пустой строкой.
+Секреты приложения. GitHub не принимает имена секретов и variables с префиксом `GITHUB_` (HTTP 422), поэтому секреты App заведены как `GH_*`, а в контейнере у них имена из `.env.example`. Сопоставление делает шаг «Bundle application secrets» в `deploy-staging`; тем же путём идут organization secret `AI_DMC268_T6`, organization variable `AI_DMC268_URL` и `vars.GH_APP_BOT_LOGIN`, `vars.PORTAL_URL`, `vars.LLM_MODEL`, `vars.LLM_FALLBACK_MODEL`, `vars.LLM_VERIFIER_MODEL`, `vars.LLM_VERIFIER_FALLBACK_MODEL`. Последние четыре задаются на уровне repository и могут быть переопределены в Environment `staging`. Незаданное значение в контейнер не попадает совсем, а не приходит пустой строкой.
 
 **Ограничение на значения:** без одинарной кавычки `'` и без `\` в конце. Значения пишутся в env-файл в одинарных кавычках (§3, п. 5), и `deploy.sh` такие значения отклоняет: выкат останавливается до изменений приложения. Шаг rollback в CI с `DEPLOY_RUN` печатает `release unchanged` и завершается с кодом 0; job остаётся красным из-за отказа deploy. На первом выкате после #35, пока в `.env` хоста нет `RABBITMQ_PASSWORD`, ручной `rollback.sh` без `DEPLOY_RUN` при откате на образ падает с `RABBITMQ_PASSWORD is required`. Завершающий перевод строки значения срезается; разбору PEM это безразлично.
 
@@ -54,7 +56,7 @@ Repository variable `LLM_EUR_TO_USD_RATE` удалена 06.10 после про
 |---|---|---|
 | `api.env` | `GITHUB_WEBHOOK_SECRET`, `GITHUB_CLIENT_ID`, `GITHUB_CLIENT_SECRET`, `AUTH_JWT_PRIVATE_KEY`, `AUTH_JWT_PUBLIC_KEY` | `api` |
 | `app.env` | `GITHUB_APP_ID`, `GITHUB_APP_PRIVATE_KEY` | `worker`, `webhook-worker` |
-| `worker.env` | `LLM_API_KEYS`, `LLM_BASE_URL`, `LLM_MODEL`, `LLM_FALLBACK_MODEL`, `PORTAL_URL` (опциональные ключи — только при непустом значении) | `worker` |
+| `worker.env` | `LLM_API_KEYS`, `LLM_BASE_URL`, `LLM_MODEL`, `LLM_FALLBACK_MODEL`, `LLM_VERIFIER_MODEL`, `LLM_VERIFIER_FALLBACK_MODEL`, `PORTAL_URL` (опциональные ключи — только при непустом значении) | `worker` |
 | `webhook-worker.env` | `GITHUB_APP_BOT_LOGIN` | `webhook-worker` |
 
 | Secret | Тип значения | Переменная в контейнере | Контейнеры | Зачем |
@@ -111,6 +113,8 @@ rm jwt.pem jwt.pub
 | `PORTAL_URL` | для ссылки на Run в staging check-run | `https://staging-ui.dmc268-t6.axyi.ru` — публичный UI-origin. Читается из `vars.PORTAL_URL`, записывается только в `worker.env` → review-worker (`worker`); в `api` и `webhook-worker` не передаётся; [проверка и восстановление](#portal_url) |
 | `LLM_MODEL` | нет, переопределение repository | `mistral-small-4` (OQ-2, SD §15). В контейнере только у `worker`; обычное значение задано на уровне repository |
 | `LLM_FALLBACK_MODEL` | нет, переопределение repository | `mistral-small-3.2-24b`. Только `worker`. Чтобы отключить fallback, удалите repository variable и это переопределение: значение Environment перекрывает repository, а незаданная variable приходит в `vars` пустой строкой, и `LLM_FALLBACK_MODEL` не попадает в `worker.env` |
+| `LLM_VERIFIER_MODEL` | нет, переопределение repository | Только `worker`; пусто — верификатор идёт моделью ревью (`LLM_MODEL`). Как у `LLM_FALLBACK_MODEL`: значение Environment перекрывает repository, незаданная variable не попадает в `worker.env` |
+| `LLM_VERIFIER_FALLBACK_MODEL` | нет, переопределение repository | Только `worker`; пусто — fallback ревью (`LLM_FALLBACK_MODEL`). Правила те же |
 
 ### PORTAL_URL
 
@@ -158,7 +162,7 @@ Environment `staging` перекрывает одноимённую repository v
 
 ### LLM-шлюз — переменные приложения (#33)
 
-Читает `LlmSettings.from_env` (`app/modules/reviews/infrastructure/llm/settings.py`). Секрет здесь — только ключи; остальное — конфигурация. На staging `LLM_API_KEYS` (из organization secret `AI_DMC268_T6`), `LLM_BASE_URL` (из organization variable `AI_DMC268_URL`), `LLM_MODEL` и непустой `LLM_FALLBACK_MODEL` (repository variables или переопределения Environment) приходят в `worker` через `worker.env` (§1, таблица env-файлов). Остальные `LLM_*` на staging берут дефолты, если они есть; `LLM_VERIFIER_*` на staging не передаются, и верификатор идёт парой ревью.
+Читает `LlmSettings.from_env` (`app/modules/reviews/infrastructure/llm/settings.py`). Секрет здесь — только ключи; остальное — конфигурация. На staging `LLM_API_KEYS` (из organization secret `AI_DMC268_T6`), `LLM_BASE_URL` (из organization variable `AI_DMC268_URL`), `LLM_MODEL` и непустые `LLM_FALLBACK_MODEL`, `LLM_VERIFIER_MODEL`, `LLM_VERIFIER_FALLBACK_MODEL` (repository variables или переопределения Environment) приходят в `worker` через `worker.env` (§1, таблица env-файлов). Остальные `LLM_*` на staging берут дефолты, если они есть; переопределения с префиксами `LLM_VERIFIER_` и `LLM_VERIFIER_FALLBACK_` (`_API_KEYS`, `_BASE_URL` и остальные) на staging не передаются и наследуются по правилам ниже. Без пары верификатора верификатор идёт парой ревью.
 
 | Переменная | Секрет | Обязательна | Значение |
 |---|---|---|---|
@@ -166,8 +170,8 @@ Environment `staging` перекрывает одноимённую repository v
 | `LLM_MODEL` | нет | да | основная модель, `mistral-small-4` (OQ-2, SD §15) |
 | `LLM_FALLBACK_MODEL` | нет | нет | fallback-модель, `mistral-small-3.2-24b`; пусто — без fallback |
 | `LLM_FALLBACK_API_KEYS` | **да** | для известной fallback-модели на другом endpoint | ключи наследуются только вместе с endpoint: если fallback идёт на тот же base URL, что и основная, — `LLM_API_KEYS`; на другой хост ключи основной не уходят никогда |
-| `LLM_VERIFIER_MODEL` | нет | нет | модель верификатора; пусто — `LLM_MODEL`. Переопределения с префиксом `LLM_VERIFIER_` (`_API_KEYS` — секрет, `_BASE_URL` и остальные) — по правилам `LLM_FALLBACK_*`, наследование от основной модели |
-| `LLM_VERIFIER_FALLBACK_MODEL` | нет | нет | fallback верификатора; пусто — `LLM_FALLBACK_MODEL`. Переопределения с префиксом `LLM_VERIFIER_FALLBACK_` (`_API_KEYS` — секрет) — по тем же правилам, наследование от модели верификатора, а без неё — от основной |
+| `LLM_VERIFIER_MODEL` | нет | нет | модель верификатора; пусто — `LLM_MODEL`. Переопределения с префиксом `LLM_VERIFIER_` (`_API_KEYS` — секрет, `_BASE_URL` и остальные) — по правилам `LLM_FALLBACK_*`, наследование от основной модели. На staging передаётся в `worker.env` (только непустое значение) |
+| `LLM_VERIFIER_FALLBACK_MODEL` | нет | нет | fallback верификатора; пусто — `LLM_FALLBACK_MODEL`. Переопределения с префиксом `LLM_VERIFIER_FALLBACK_` (`_API_KEYS` — секрет) — по тем же правилам, наследование от модели верификатора, а без неё — от основной. На staging передаётся в `worker.env` (только непустое значение) |
 | `LLM_BASE_URL`, `LLM_FALLBACK_BASE_URL` | нет | для неизвестной модели | OpenAI-совместимый endpoint; для моделей из `KNOWN_MODELS` — их собственный (`https://api.eurouter.ai/api/v1`), неизвестная fallback-модель без своего URL берёт URL основной. С ключами — только `https`, кроме локальных хостов: `localhost`, `127.0.0.1`, `::1`, `host.docker.internal`, `*.localhost`, `*.local`, `*.internal`. Compose-сервис (`http://ollama:11434/v1`) или адрес RFC 1918 по `http` работает только без ключей |
 | `LLM_CONTEXT_WINDOW` (и `LLM_FALLBACK_CONTEXT_WINDOW`) | нет | для неизвестной модели | окно модели в токенах |
 | `LLM_PROVIDER`, `LLM_MAX_OUTPUT_TOKENS`, `LLM_PRICE_INPUT_PER_MTOK`, `LLM_PRICE_OUTPUT_PER_MTOK`, `LLM_PRICE_CACHE_READ_PER_MTOK`, `LLM_EXTRA_BODY` (и те же `LLM_FALLBACK_*`) | нет | нет | дефолты: провайдер `self-hosted`, резерв на ответ 8000, цена 0, тело `{}`. **Цена 0 у удалённой модели — лимит стоимости прогона видит только `usage.cost` провайдера**; шлюз пишет предупреждение, для hosted-модели цены задавать обязательно. Метка провайдера идёт в `usage_events`, цены — USD за 1 млн токенов, `LLM_EXTRA_BODY` — доп. поля тела запроса (JSON). `LLM_EXTRA_BODY` переопределяет `temperature` и `max_tokens`, `null` убирает ключ — для reasoning-моделей, например `{"temperature": null, "max_tokens": null, "max_completion_tokens": 8000}`; `model`, `messages` и строгий `response_format` не переопределяются |
@@ -339,8 +343,8 @@ ASCII-имена по `[A-Za-z_][A-Za-z0-9_]*` и печатает отсорт�
 
 Пример полного вывода из изолированной проверки: набор имён зависит от образа, роли и
 заданных опциональных секретов и конфигурации. В этом примере verifier не задаёт используемые
-на staging опциональные `GITHUB_CLIENT_ID`, `LLM_BASE_URL`, `LLM_MODEL`, `LLM_FALLBACK_MODEL`
-и `PORTAL_URL`:
+на staging опциональные `GITHUB_CLIENT_ID`, `LLM_BASE_URL`, `LLM_MODEL`, `LLM_FALLBACK_MODEL`,
+`LLM_VERIFIER_MODEL`, `LLM_VERIFIER_FALLBACK_MODEL` и `PORTAL_URL`:
 
 ```text
 api environment keys: ["AUTH_JWT_AUDIENCE", "AUTH_JWT_ISSUER", "AUTH_JWT_PRIVATE_KEY", "AUTH_JWT_PUBLIC_KEY", "DATABASE_URL", "GITHUB_CLIENT_SECRET", "GITHUB_WEBHOOK_SECRET", "GPG_KEY", "HOME", "HOSTNAME", "LC_CTYPE", "PATH", "POSTGRES_DB", "POSTGRES_HOST", "POSTGRES_PASSWORD", "POSTGRES_PORT", "POSTGRES_USER", "PYTHONDONTWRITEBYTECODE", "PYTHONUNBUFFERED", "PYTHON_SHA256", "PYTHON_VERSION", "RABBITMQ_URL", "REDIS_URL", "UV_COMPILE_BYTECODE", "UV_LINK_MODE"]
