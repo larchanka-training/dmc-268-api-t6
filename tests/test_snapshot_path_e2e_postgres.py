@@ -260,6 +260,7 @@ class Observed:
     tools: list[str]
     actions: dict[str, list[tuple[Any, Any]]]
     manifests: list[tuple[UUID, str, int]]
+    manifest_blocks: list[list[dict[str, Any]]]
     snapshots: list[UUID]
     pins: tuple[Any, ...]
     conventions_prompt: str
@@ -433,6 +434,14 @@ async def _scenario(
                 run_id,
             )
         ],
+        manifest_blocks=[
+            row[0]
+            for row in await _rows(
+                factory,
+                "SELECT blocks FROM context_manifests WHERE run_id=:id ORDER BY created_at",
+                run_id,
+            )
+        ],
         snapshots=[
             row[0]
             for row in await _rows(
@@ -516,6 +525,15 @@ def _assert_snapshot_path(
         str(snapshot_id)
     ] * (1 + earlier.count("policy.load"))
     assert observed.manifests == [(snapshot_id, stage, attempt) for stage in stages]
+    # No block of this run is retrieved (no code index is seeded): every stored block keeps
+    # the selection metadata of a retrieved one (ADR 0001 §9) as None.
+    assert len(observed.manifest_blocks) == len(stages)
+    assert all(observed.manifest_blocks)
+    assert {
+        (block["selection_reason"], block["index_commit_sha"], block["edge_kind"])
+        for blocks in observed.manifest_blocks
+        for block in blocks
+    } == {(None, None, None)}
     # R19: the stage counts the blocks of a v4 run with the counter the profile pins
     # (counter/v2, three characters per token): L1 the two hunks, L4 the ``User`` signature
     # and docstring, L3 the whole service file, L2 the test file's window.
