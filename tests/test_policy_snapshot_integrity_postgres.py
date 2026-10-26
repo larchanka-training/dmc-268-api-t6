@@ -1,4 +1,7 @@
-"""A tampered policy snapshot row fails the run on read, on PostgreSQL (#168, part 3)."""
+"""A tampered policy snapshot row fails the run on read, on PostgreSQL (#168, part 3).
+
+A document that loaded stays staged when the other one fails (#168, part 6).
+"""
 
 from __future__ import annotations
 
@@ -235,6 +238,50 @@ def test_an_untouched_retry_reuses_the_stored_snapshot(env: Env) -> None:
             again = await prepare.execute(RUN_DONE)
 
             assert again == stored
+        finally:
+            await engine.dispose()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.integration
+def test_an_agents_failure_keeps_the_committed_rules_for_the_retry(env: Env) -> None:
+    async def scenario() -> None:
+        engine = env.engine()
+        factory = async_sessionmaker(engine)
+        try:
+            async with factory.begin() as session:
+                await session.execute(
+                    text("UPDATE runs SET state='running' WHERE id=:id"), {"id": RUN_DONE}
+                )
+            failing = Source(
+                agents=b"# Agents\n",
+                blob_errors={
+                    "2" * 40: PolicyError(PolicyErrorCode.FETCH_TRANSIENT, "GitHub answered 502")
+                },
+            )
+
+            with pytest.raises(PolicyError) as caught:
+                await PreparePolicySnapshot(
+                    uow_factory=lambda: _uow(factory), source_factory=lambda pins: failing
+                ).execute(RUN_DONE)
+
+            assert caught.value.code is PolicyErrorCode.FETCH_TRANSIENT
+            async with _uow(factory) as work:
+                staged = await work.policy.get_staged_documents(RUN_DONE)
+            assert [item.document.path for item in staged] == [RULES_DOCUMENT_PATH]
+            assert staged[0].raw == b"# Style\n\n```review-ignore\ngenerated/**\n```\n"
+
+            working = Source(agents=b"# Agents\n")
+            stored = await PreparePolicySnapshot(
+                uow_factory=lambda: _uow(factory), source_factory=lambda pins: working
+            ).execute(RUN_DONE)
+
+            assert stored.agents.text == "# Agents\n"
+            assert working.listings == {None: 1}
+            assert working.blob_reads == {"2" * 40: 1}
+            async with _uow(factory) as work:
+                assert await work.policy.get_snapshot(RUN_DONE) == stored
         finally:
             await engine.dispose()
 

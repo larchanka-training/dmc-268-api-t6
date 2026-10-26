@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections import Counter
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from types import TracebackType
@@ -12,6 +13,7 @@ from uuid import UUID
 import pytest
 
 from app.modules.reviews.application.policy_documents import (
+    MAX_DOCUMENT_BYTES,
     LoadedPolicyDocument,
     PolicyEntryKind,
     PolicyTreeEntry,
@@ -113,10 +115,15 @@ class Source:
     rules: bytes | None = _RULES_TEXT
     agents: bytes | None = None
     error: PolicyError | None = None
+    agents_size: int = 5
+    blob_errors: dict[str, PolicyError] = field(default_factory=dict)
     reads: int = 0
+    listings: Counter[str | None] = field(default_factory=Counter)
+    blob_reads: Counter[str] = field(default_factory=Counter)
 
     async def list_entries(self, tree_oid: str | None) -> Mapping[str, PolicyTreeEntry]:
         self.reads += 1
+        self.listings[tree_oid] += 1
         if self.error is not None:
             raise self.error
         if tree_oid is not None:
@@ -125,10 +132,13 @@ class Source:
         if self.rules is not None:
             entries[".review"] = PolicyTreeEntry(PolicyEntryKind.DIRECTORY, "1" * 40, None)
         if self.agents is not None:
-            entries["AGENTS.md"] = PolicyTreeEntry(PolicyEntryKind.FILE, "2" * 40, 5)
+            entries["AGENTS.md"] = PolicyTreeEntry(PolicyEntryKind.FILE, "2" * 40, self.agents_size)
         return entries
 
     async def read_blob(self, oid: str) -> bytes:
+        self.blob_reads[oid] += 1
+        if oid in self.blob_errors:
+            raise self.blob_errors[oid]
         content = self.rules if oid == "3" * 40 else self.agents
         assert content is not None
         return content
@@ -157,7 +167,7 @@ def test_first_attempt_stages_documents_and_stores_the_snapshot() -> None:
     assert store.documents[RULES_DOCUMENT_PATH].raw == _RULES_TEXT
     assert store.documents[AGENTS_DOCUMENT_PATH].raw is None
     assert store.snapshot is snapshot
-    assert store.commits == 2
+    assert store.commits == 3
 
 
 def test_retry_returns_the_stored_snapshot_without_reading_the_repository() -> None:
@@ -196,6 +206,83 @@ def test_read_failure_stages_nothing_and_is_not_a_missing_document() -> None:
     assert store.snapshot is None
 
     assert _prepare(store, Source()).rules.presence is DocumentPresence.PRESENT
+
+
+def _agents_fails(store: Store) -> Source:
+    """A first attempt whose AGENTS.md read answers 502 after the rules loaded."""
+    failing = Source(
+        agents=b"# Agents\n",
+        blob_errors={"2" * 40: PolicyError(PolicyErrorCode.FETCH_TRANSIENT, "GitHub answered 502")},
+    )
+    with pytest.raises(PolicyError) as caught:
+        _prepare(store, failing)
+    assert caught.value.code is PolicyErrorCode.FETCH_TRANSIENT
+    assert caught.value.retryable is True
+    return failing
+
+
+def test_agents_read_failure_keeps_the_staged_rules_and_is_not_a_missing_document() -> None:
+    store = Store()
+
+    failing = _agents_fails(store)
+
+    assert set(store.documents) == {RULES_DOCUMENT_PATH}
+    rules = store.documents[RULES_DOCUMENT_PATH]
+    assert rules.document.presence is DocumentPresence.PRESENT
+    assert rules.raw == b"# Style\n\n```review-ignore\ngenerated/**\n```\n"
+    assert store.snapshot is None
+    assert store.commits == 1
+    # Accepted cost: the root tree is listed once per document.
+    assert failing.listings == {None: 2, "1" * 40: 1}
+    assert failing.blob_reads == {"3" * 40: 1, "2" * 40: 1}
+
+
+def test_retry_after_an_agents_failure_reads_only_agents() -> None:
+    store = Store()
+    _agents_fails(store)
+    working = Source(agents=b"# Agents\n")
+
+    snapshot = _prepare(store, working)
+
+    assert snapshot.rules.text == "# Style\n\n```review-ignore\ngenerated/**\n```\n"
+    assert snapshot.agents.presence is DocumentPresence.PRESENT
+    assert snapshot.agents.text == "# Agents\n"
+    assert store.snapshot is snapshot
+    assert working.listings == {None: 1}
+    assert working.blob_reads == {"2" * 40: 1}
+
+
+def test_terminal_agents_error_keeps_the_staged_rules() -> None:
+    store = Store()
+    too_large = Source(agents=b"# Agents\n", agents_size=MAX_DOCUMENT_BYTES + 1)
+
+    with pytest.raises(PolicyError) as caught:
+        _prepare(store, too_large)
+
+    assert caught.value.code is PolicyErrorCode.DOCUMENT_TOO_LARGE
+    assert caught.value.retryable is False
+    assert set(store.documents) == {RULES_DOCUMENT_PATH}
+    assert store.documents[RULES_DOCUMENT_PATH].raw == (
+        b"# Style\n\n```review-ignore\ngenerated/**\n```\n"
+    )
+    assert store.snapshot is None
+    assert too_large.blob_reads == {"3" * 40: 1}
+
+
+def test_rules_read_failure_stages_nothing_and_does_not_read_agents() -> None:
+    store = Store()
+    failing = Source(
+        agents=b"# Agents\n",
+        blob_errors={"3" * 40: PolicyError(PolicyErrorCode.FETCH_TRANSIENT, "GitHub answered 502")},
+    )
+
+    with pytest.raises(PolicyError) as caught:
+        _prepare(store, failing)
+
+    assert caught.value.code is PolicyErrorCode.FETCH_TRANSIENT
+    assert store.documents == {}
+    assert store.commits == 0
+    assert failing.blob_reads == {"3" * 40: 1}
 
 
 def test_concurrent_worker_snapshot_with_another_digest_is_an_integrity_error() -> None:
