@@ -607,6 +607,36 @@ def test_a_cited_rag_group_over_the_verifier_window_is_left_out() -> None:
     assert fitted[1].get_block(FIRST_PLACE.block_id) is None
 
 
+ON_DEFINITION = _candidate(
+    "c-definition",
+    EvidenceRef(block_id=RETRIEVED_DEFINITION.block_id, start_line=1, end_line=1),
+)
+
+
+def test_a_cited_definition_is_offered_on_its_own_when_its_place_group_does_not_fit() -> None:
+    # The window holds the own line and the cited definition, not the cited place with it:
+    # the definition is a cited excerpt of its own, whole or not at all (CVS §5.2, §7.1).
+    candidates = (ON_PLACE, ON_DEFINITION)
+    own_line = replace(
+        WITH_SLOT,
+        changed_files=(reflection_pass_module._with_lines(MAIN, (0,)),),
+        retrieved=(RETRIEVED_DEFINITION,),
+    )
+    alone = _build(candidates, own_line)
+    window = _prompt_tokens(alone[0])
+    with_place, _ = _build(candidates, replace(own_line, retrieved=SLOT[:2]))
+    assert _prompt_tokens(with_place) > window
+
+    fitted = _build(candidates, WITH_SLOT, max_prompt_tokens=window)
+
+    assert fitted == alone
+    prompt, manifest = fitted
+    assert f'<excerpt block_id="{RETRIEVED_DEFINITION.block_id}"' in prompt.user
+    assert f'<excerpt block_id="{FIRST_PLACE.block_id}"' not in prompt.user
+    assert manifest.get_block(RETRIEVED_DEFINITION.block_id) is not None
+    assert manifest.get_block(FIRST_PLACE.block_id) is None
+
+
 # ---------- the verifier route window ----------
 
 

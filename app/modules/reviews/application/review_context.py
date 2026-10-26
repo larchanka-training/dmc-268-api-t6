@@ -13,7 +13,7 @@ import copy
 import hashlib
 import logging
 import math
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field, replace
 from enum import StrEnum
 from typing import Protocol, Self
@@ -187,6 +187,19 @@ class RetrievedBlock:
     edge_kind: EdgeKind
     index_commit_sha: str
     definitions: tuple[SourceRef, ...] = ()
+
+
+def definitions_read_by(
+    blocks: tuple[RetrievedBlock, ...], places: Iterable[RetrievedBlock]
+) -> tuple[RetrievedBlock, ...]:
+    """The blocks of ``blocks`` that one of ``places`` read, in the order of ``blocks``.
+
+    The one place → definitions relation (CVS §3.5): a place of a broken reference is
+    shown with the base definitions it read or not at all, and a block that no block of a
+    slot reads is a place of it. By source, not id (``RetrievedBlock.definitions``).
+    """
+    read = {source for place in places for source in place.definitions}
+    return tuple(block for block in blocks if block.source in read)
 
 
 def snapshot_retrieved(block: RetrievedBlock) -> RetrievedBlock:

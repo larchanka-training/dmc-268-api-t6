@@ -548,9 +548,12 @@ def _drop_excerpts(
     Fewer drops never make the prompt longer, so a binary search over the number dropped
     finds the cut; every candidate is counted whole, with ``counter``.
     """
+    # Local: review_context imports this module.
+    from app.modules.reviews.application.review_context import definitions_read_by
+
     blocks, retrieved = context.context_blocks, context.retrieved
-    read = {source for block in retrieved for source in block.definitions}
-    places = [index for index, block in enumerate(retrieved) if block.source not in read]
+    read = definitions_read_by(retrieved, retrieved)
+    places = [index for index, block in enumerate(retrieved) if block not in read]
     # (level, index): an index of ``blocks``, or of ``retrieved`` for a RAG place.
     drops = sorted(
         [(block.level.value, index) for index, block in enumerate(blocks)]
@@ -561,7 +564,7 @@ def _drop_excerpts(
     def without(dropped: int) -> ReviewContext:
         gone = frozenset(drops[:dropped])
         kept = [retrieved[index] for index in places if ("RAG", index) not in gone]
-        shown = {source for place in kept for source in (place.source, *place.definitions)}
+        shown = (*kept, *definitions_read_by(retrieved, kept))
         return replace(
             context,
             context_blocks=tuple(
@@ -569,7 +572,7 @@ def _drop_excerpts(
                 for index, block in enumerate(blocks)
                 if (block.level.value, index) not in gone
             ),
-            retrieved=tuple(block for block in retrieved if block.source in shown),
+            retrieved=tuple(block for block in retrieved if block in shown),
         )
 
     low, high = 1, len(drops)

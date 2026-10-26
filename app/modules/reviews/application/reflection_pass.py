@@ -45,6 +45,7 @@ from app.modules.reviews.application.prompt_builder import (
     xml_attribute,
     xml_text,
 )
+from app.modules.reviews.application.review_context import definitions_read_by
 from app.modules.reviews.application.review_output import (
     EvidenceRef,
     RequirementRef,
@@ -221,8 +222,9 @@ def _cited_retrieved(
     """The RAG blocks a candidate cites, each place with the definitions it read (CVS §3.5),
     in payload order: the verifier is shown again what the review was (ADR 0001 §9)."""
     cited = {ref.block_id for cand in candidates for ref in cand.finding.evidence_refs}
-    read = {source for block in blocks if block.block_id in cited for source in block.definitions}
-    return tuple(block for block in blocks if block.block_id in cited or block.source in read)
+    places = tuple(block for block in blocks if block.block_id in cited)
+    read = definitions_read_by(blocks, places)
+    return tuple(block for block in blocks if block in places or block in read)
 
 
 # Whether a choice of diff files, cited excerpts and cited RAG blocks fits the verifier prompt.
@@ -259,7 +261,8 @@ def _fit_verifier_code(
     in payload order; then the other diff lines, file by file. A candidate whose excerpt
     is left out gets ``insufficient_context`` from the verifier. Among the excerpts, as the
     review fit keeps them (CVS §4.1): L4 first, as the payload has it, then each RAG place
-    with the definitions it read (CVS §3.5), then L2 and L3.
+    with the definitions it read (CVS §3.5), then each definition a candidate cites on its
+    own, then L2 and L3.
     """
     if fits(files, excerpts, retrieved):
         return files, excerpts, retrieved
@@ -307,18 +310,19 @@ def _fit_verifier_code(
             kept[index] = picked
 
     # 2. The cited excerpts next to them: L4, then each RAG place with the definitions it
-    #    read (one shown already costs nothing), then L2 and L3. One that does not fit
-    #    leaves room for the next; what is shown keeps the payload order.
-    read = {source for block in retrieved for source in block.definitions}
-
-    def group(place: RetrievedBlock) -> tuple[RetrievedBlock, ...]:
-        return tuple(
-            block for block in retrieved if block is place or block.source in place.definitions
-        )
-
+    #    read (one shown already costs nothing), then each cited definition on its own (its
+    #    place may have been left out), then L2 and L3. One that does not fit leaves room
+    #    for the next; what is shown keeps the payload order.
+    cited = {ref.block_id for cand in candidates for ref in cand.finding.evidence_refs}
+    read = definitions_read_by(retrieved, retrieved)
     takes: list[tuple[tuple[ContextBlock, ...], tuple[RetrievedBlock, ...]]] = [
         *(((block,), ()) for block in excerpts if block.level.value == "L4"),
-        *(((), group(place)) for place in retrieved if place.source not in read),
+        *(
+            ((), (place, *definitions_read_by(retrieved, (place,))))
+            for place in retrieved
+            if place not in read
+        ),
+        *(((), (block,)) for block in read if block.block_id in cited),
         *(((block,), ()) for block in excerpts if block.level.value != "L4"),
     ]
     for more, more_retrieved in takes:
