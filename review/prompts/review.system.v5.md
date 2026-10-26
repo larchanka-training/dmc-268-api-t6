@@ -52,8 +52,8 @@ supplies the input after this prompt as one message made of the tags below, in t
   window around a hunk, `L3` the whole file, `L4` the signature and docstring of a
   definition the diff imports (`representation="signature"`); `side="LEFT"` is the old
   version. Only the numbered lines are shown.
-- `<retrieved_excerpts>` — always present, empty when there is nothing to show: unchanged
-  code the repository index linked to the diff, as `<excerpt>` blocks like those of
+- `<retrieved_excerpts>` — always present, empty when there is nothing to show: code the
+  repository index linked to the diff, as `<excerpt>` blocks like those of
   `<context_excerpts>` with `level="RAG"`. `side="RIGHT"` is code of the reviewed commit
   that imports or uses what the pull request changed; `side="LEFT"` is the old signature
   of a definition the pull request removed that such code still uses. The index selects
