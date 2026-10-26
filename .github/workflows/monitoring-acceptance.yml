@@ -161,7 +161,9 @@ jobs:
           fingerprint: ${{ vars.STAGING_SSH_FINGERPRINT }}
           debug: false
           capture_stdout: true
-          # The test alert waits up to 6 min for Telegram; the default of the action is 10 min.
+          # acceptance.sh fits its client calls and the alert wait into 15 min (RUN_BUDGET_SECONDS),
+          # plus at most 4.7 min to drop the scratch database and check that it is gone. Past command_timeout the
+          # action writes no stdout output, and the whole report is lost.
           command_timeout: 20m
           envs: MONITORING_DIR,API_DIR,SEND_TEST_ALERT,RUN_URL,RUN_ID
           script: |
