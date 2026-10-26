@@ -63,7 +63,7 @@ at `a9269bbd`.
   of the stored row has `retrieved_excerpt` and its share of `input_tokens`
   (`tests/test_context_manifests_postgres.py`).
 - Done when:
-  - [ ] manifest fields and the stored `tokens_by_role` tested.
+  - [x] manifest fields and the stored `tokens_by_role` tested.
 
 **Commit:** `feat(reviews): record retrieved blocks in the call manifest (#144)`
 

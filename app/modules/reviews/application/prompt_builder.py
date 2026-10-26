@@ -496,6 +496,33 @@ class PromptBuilder:
                 )
             )
 
+        # The retrieved section follows the bound prompt version, as ``render_input`` shows
+        # it; each block carries its selection metadata (ADR 0001 §9).
+        for retrieved in context.retrieved if context.retrieved_section else ():
+            source = retrieved.source
+            ranges = tuple((item.start_line, item.end_line) for item in source.ranges)
+            blocks.append(
+                ManifestBlock(
+                    block_id=retrieved.block_id,
+                    source_role=SourceRole.RETRIEVED_EXCERPT,
+                    source_kind="source_code",
+                    path=source.path,
+                    revision=source.revision,
+                    side=_manifest_side(source.side),
+                    start_line=min((start for start, _ in ranges), default=None),
+                    end_line=max((end for _, end in ranges), default=None),
+                    shown_line_count=sum(end - start + 1 for start, end in ranges),
+                    shown_ranges=ranges,
+                    tokens=tokens(_render_excerpt(retrieved)),
+                    repository_id=source.repository_id,
+                    # A RAG block is shown whole or dropped whole, never cut.
+                    truncated=False,
+                    selection_reason=source.reason,
+                    index_commit_sha=retrieved.index_commit_sha,
+                    edge_kind=retrieved.edge_kind.value,
+                )
+            )
+
         return CallManifest(
             call_id=call_id,
             run_id=run_id,
