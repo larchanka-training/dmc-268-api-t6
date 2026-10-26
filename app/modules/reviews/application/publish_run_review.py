@@ -115,19 +115,17 @@ def publication_matches(expected: PublishContext, current: PublishContext) -> bo
         current
     ):
         return False
-    return expected.publication_identity == current.publication_identity and all(
-        getattr(expected, name) == getattr(current, name)
-        for name in (
-            "run_id",
-            "head_sha",
-            "findings_hash",
-            "review_body",
-            "findings",
-            "provider",
-            "repository_full_name",
-            "pr_number",
-            "project_id",
-        )
+    return (
+        expected.publication_identity == current.publication_identity
+        and expected.run_id == current.run_id
+        and expected.head_sha == current.head_sha
+        and expected.findings_hash == current.findings_hash
+        and expected.review_body == current.review_body
+        and expected.findings == current.findings
+        and expected.provider == current.provider
+        and expected.repository_full_name == current.repository_full_name
+        and expected.pr_number == current.pr_number
+        and expected.project_id == current.project_id
     )
 
 

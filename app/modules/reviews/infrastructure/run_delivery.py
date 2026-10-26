@@ -89,7 +89,8 @@ class SqlAlchemyRunDeliveryReader:
         row = result.one_or_none()
         if row is None:
             return None
-        assert row[1] is not None
+        if row[1] is None:
+            raise ValueError("Invalid persisted run identity")
         return PersistedRunIdentity(
             RunDeliveryPointer(
                 run_id=row[0],

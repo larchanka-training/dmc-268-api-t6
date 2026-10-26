@@ -23,9 +23,10 @@ REVIEW_SYSTEM_KEY = "review.system"
 # Review prompt versions written for the snapshot envelope and ReviewOutput v2; the one
 # place a new snapshot-contract version (#144: v5) is added.
 SNAPSHOT_REVIEW_PROMPT_VERSIONS: frozenset[str] = frozenset({"v4"})
-# TL-13: the context stage builds the diff map as GitHub, so a snapshot-path run of another
-# provider is refused until the stage takes the provider from the run (#220 extends this).
-SNAPSHOT_REVIEW_PROVIDERS: frozenset[str] = frozenset({VcsProviderName.GITHUB.value})
+# The context stage builds its diff map from the persisted origin provider.
+SNAPSHOT_REVIEW_PROVIDERS: frozenset[str] = frozenset(
+    {VcsProviderName.GITHUB.value, VcsProviderName.GITLAB.value}
+)
 
 
 @dataclass(frozen=True)
@@ -77,9 +78,9 @@ def snapshot_for_review(
 
 
 def require_served_provider(binding: ReviewBinding) -> None:
-    """Refuse a snapshot-path run whose provider the context stage does not serve (TL-13);
-    a legacy run passes. The stage's own check keys on the provider it builds the diff map
-    with, so the processor checks the run's provider before the diff (#220 merges the two)."""
+    """Refuse a snapshot-path run whose persisted provider the context stage does not serve;
+    a legacy run passes. The processor checks before policy loading and diff reads, and the
+    stage checks again with the provider it builds the diff map with."""
     if binding.takes_snapshot_path:
         _require_served_provider(binding)
 

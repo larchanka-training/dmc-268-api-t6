@@ -138,6 +138,7 @@ def test_the_snapshot_contract_has_one_source() -> None:
         ("review.system", "v3", "github", False),
         ("review.system", "v2", "github", False),
         ("review.system", "v4", "github", True),
+        ("review.system", "v4", "gitlab", True),
         # A legacy version is never refused, whatever the provider.
         ("review.system", "v3", "gitlab", False),
         ("review.system", "v3", None, False),
@@ -149,6 +150,7 @@ def test_the_snapshot_contract_has_one_source() -> None:
         "v3",
         "v2",
         "v4-github",
+        "v4-gitlab",
         "v3-gitlab",
         "v3-no-origin",
         "conventions-key-v4",
@@ -166,18 +168,26 @@ def test_the_pinned_review_prompt_chooses_the_path(
     assert snapshot_for_review(binding, snapshot) is (snapshot if snapshot_path else None)
 
 
+@pytest.mark.parametrize("provider", ["github", "gitlab"])
+def test_a_snapshot_path_requires_the_run_to_pin_a_review_prompt(provider: str) -> None:
+    binding = replace(_binding(provider=provider), prompt_version_id=None)
+
+    with pytest.raises(PolicyError) as raised:
+        snapshot_for_review(binding, _snapshot(_store()))
+
+    assert raised.value.code is _INTEGRITY
+    assert "pins another review prompt" in str(raised.value)
+
+
 @pytest.mark.parametrize(
     ("provider", "named"),
     [
-        # TL-13: the stage builds a GitHub diff map; a v4 run of another provider must not
-        # fall to legacy, which would validate the v4 answer with the v1 contract.
-        ("gitlab", "'gitlab'"),
         # No coercion: only the exact provider name is served.
         ("GitHub", "'GitHub'"),
         ("", "''"),
         (None, "no origin provider"),
     ],
-    ids=["gitlab", "unknown-provider", "empty-provider", "no-origin"],
+    ids=["unknown-provider", "empty-provider", "no-origin"],
 )
 def test_a_snapshot_path_run_on_an_unsupported_provider_is_refused(
     provider: str | None, named: str
@@ -206,13 +216,14 @@ def test_a_snapshot_path_run_on_an_unsupported_provider_is_refused(
     ],
     ids=["no-snapshot", "null-pin", "pins-mismatch"],
 )
+@pytest.mark.parametrize("provider", ["github", "gitlab"])
 def test_a_snapshot_path_run_that_cannot_be_served_is_refused(
-    store: Store | None, message: str
+    store: Store | None, message: str, provider: str
 ) -> None:
     snapshot = None if store is None else _snapshot(store)
 
     with pytest.raises(PolicyError) as raised:
-        snapshot_for_review(_binding(), snapshot)
+        snapshot_for_review(_binding(provider=provider), snapshot)
 
     assert raised.value.code is _INTEGRITY
     assert message in str(raised.value)
@@ -352,7 +363,7 @@ def test_processor_with_the_stage_refuses_before_the_diff_and_the_conventions_ca
     ("binding", "refused"),
     [
         (_binding("v4"), "no policy snapshot"),
-        (_binding("v4", "gitlab"), "does not serve the provider 'gitlab'"),
+        (_binding("v4", "gitlab"), "no policy snapshot"),
         (_binding("v4", None), "no origin provider"),
         (_binding("v3"), None),
         (_binding("v3", "gitlab"), None),
@@ -382,12 +393,13 @@ def test_processor_without_the_stage_refuses_a_snapshot_path_run_before_the_diff
 @pytest.mark.parametrize(
     ("binding", "refused"),
     [
-        (_binding("v4", "gitlab"), "does not serve the provider 'gitlab'"),
+        (_binding("v4", "gitlab"), None),
+        (_binding("v4", "gitbucket"), "does not serve the provider 'gitbucket'"),
         (_binding("v4", None), "no origin provider"),
         (_binding("v4"), None),
         (_binding("v3", "gitlab"), None),
     ],
-    ids=["v4-gitlab", "v4-no-origin", "v4-github", "v3-gitlab"],
+    ids=["v4-gitlab", "v4-unknown", "v4-no-origin", "v4-github", "v3-gitlab"],
 )
 def test_processor_with_a_stage_refuses_an_unserved_provider_before_the_policy_load(
     binding: ReviewBinding, refused: str | None
@@ -759,13 +771,13 @@ def test_execute_review_refuses_an_unservable_snapshot_path_run_before_the_revie
 def test_execute_review_refuses_a_v4_run_of_an_unsupported_provider_before_the_review_model() -> (
     None
 ):
-    pipeline = Pipeline(_binding("v4", "gitlab"), snapshot=_snapshot(_store()))
+    pipeline = Pipeline(_binding("v4", "gitbucket"), snapshot=_snapshot(_store()))
 
     with pytest.raises(PolicyError) as raised:
         _execute(pipeline)
 
     assert raised.value.code is _INTEGRITY
-    assert "does not serve the provider 'gitlab'" in str(raised.value)
+    assert "does not serve the provider 'gitbucket'" in str(raised.value)
     assert pipeline.calls == ["prepare"]
 
 
@@ -843,22 +855,16 @@ def test_bound_gitlab_selector_checks_the_path_before_policy_or_diff(version: st
         uow_factory=processing_uow(repository),
         context_stage=Stage(events),
     )
-    if version == "v4":
-        with pytest.raises(PolicyError) as raised:
-            asyncio.run(processor.prepare(RUN_ID))
-        assert raised.value.code is _INTEGRITY
-        assert "does not serve the provider 'gitlab'" in str(raised.value)
-        assert events == [] and vcs.reads == []
-    else:
-        assert isinstance(asyncio.run(processor.prepare(RUN_ID)), GeneratedConventions)
-        assert events == ["policy loaded", "diff stored", "policy stage", "conventions model"]
-        assert vcs.reads == ["pull request"]
+    assert isinstance(asyncio.run(processor.prepare(RUN_ID)), GeneratedConventions)
+    assert events == ["policy loaded", "diff stored", "policy stage", "conventions model"]
+    assert vcs.reads == ["pull request"]
 
 
-def test_context_stage_cannot_expose_a_gitlab_snapshot_as_github() -> None:
-    stage = _stage(_store(), Trace(), provider="gitlab")
-    with pytest.raises(PolicyError) as raised:
-        asyncio.run(stage.begin(RUN_ID))
-    assert raised.value.code is _INTEGRITY
-    assert "does not serve the provider 'gitlab'" in str(raised.value)
-    assert stage.snapshot_for_llm is None
+def test_context_stage_exposes_a_ready_snapshot_for_the_persisted_gitlab_provider() -> None:
+    store = _store()
+    stage = _stage(store, Trace(), provider="gitlab")
+
+    asyncio.run(stage.begin(RUN_ID))
+
+    assert stage.snapshot_for_llm is store.snapshot
+    assert store.snapshot is not None and store.snapshot.is_ready_for_llm

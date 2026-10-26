@@ -182,3 +182,76 @@ def test_handler_error_is_not_converted_to_an_admission_outcome() -> None:
             ).execute(pointer())
         )
     assert caught.value is failure
+
+
+def test_delivery_reader_rejects_a_null_origin_before_building_a_pointer() -> None:
+    from types import SimpleNamespace
+    from typing import cast
+
+    from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+    import app.modules.reviews.infrastructure.run_delivery as delivery_module
+    from app.modules.reviews.infrastructure.run_delivery import SqlAlchemyRunDeliveryReader
+
+    calls: list[str] = []
+
+    class Result:
+        def one_or_none(self) -> tuple[object, ...]:
+            return (
+                RUN,
+                None,
+                "gitlab",
+                WORKSPACE,
+                71,
+                REPOSITORY,
+                17,
+                12,
+                "a" * 40,
+                "b" * 40,
+                SimpleNamespace(value="fast"),
+                RULE,
+                PROMPT,
+                "rerun",
+            )
+
+    class Session:
+        async def __aenter__(self) -> Session:
+            return self
+
+        async def __aexit__(self, *args: object) -> None:
+            calls.append("closed")
+
+        async def execute(self, statement: object) -> Result:
+            return Result()
+
+    def build_pointer(**kwargs: object) -> None:
+        calls.append("pointer")
+        raise AssertionError("a null origin reached pointer construction")
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(delivery_module, "RunDeliveryPointer", build_pointer)
+        reader = SqlAlchemyRunDeliveryReader(cast(async_sessionmaker[AsyncSession], Session))
+        with pytest.raises(ValueError, match="Invalid persisted run identity"):
+            asyncio.run(reader.read(RUN))
+    if calls != ["closed"]:
+        raise AssertionError(f"unexpected detached mapping sequence: {calls}")
+
+
+def test_authority_guards_hold_with_optimized_python() -> None:
+    import subprocess
+    import sys
+
+    script = """
+from tests import test_gitlab_run_inputs as inputs
+from tests import test_run_delivery as delivery
+for field in ('origin_provider_installation_id', 'repository_external_id'):
+    inputs.test_credentials_reject_a_lost_authority_id_before_resolution(field)
+delivery.test_delivery_reader_rejects_a_null_origin_before_building_a_pointer()
+"""
+    completed = subprocess.run(
+        [sys.executable, "-O", "-c", script],
+        text=True,
+        capture_output=True,
+        timeout=30,
+    )
+    assert completed.returncode == 0, completed.stdout + completed.stderr

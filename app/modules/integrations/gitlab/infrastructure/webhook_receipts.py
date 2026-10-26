@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.common.infrastructure.db.unit_of_work import SqlAlchemyUnitOfWork
 from app.modules.integrations.gitlab.application.webhook_receipts import (
     GitLabReceiptError,
+    GitLabReceiptOriginInactive,
     validate_gitlab_receipt,
 )
 from app.modules.integrations.gitlab.infrastructure.models import (
@@ -152,7 +153,7 @@ class SqlAlchemyGitLabWebhookReceiptStore(SqlAlchemyWebhookReceiptOperations):
         assert origin is not None
         installation_id = await self._active_origin(origin, project_id)
         if installation_id is None:
-            raise GitLabReceiptError("inactive_origin")
+            raise GitLabReceiptOriginInactive()
         attributes = payload.get("object_attributes")
         action = attributes.get("action") if isinstance(attributes, dict) else None
         unsupported = delivery.event_name != "Merge Request Hook"

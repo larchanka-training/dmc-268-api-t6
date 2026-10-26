@@ -23,6 +23,7 @@ from sqlalchemy.schema import CreateSchema, DropSchema
 from alembic import command
 from app.modules.integrations.gitlab.application.webhook_receipts import (
     GitLabReceiptError,
+    GitLabReceiptOriginInactive,
     prepare_gitlab_receipt,
 )
 from app.modules.integrations.gitlab.infrastructure.webhook_receipts import (
@@ -413,7 +414,7 @@ def test_acceptance_rechecks_origin_and_binding_and_never_auto_links(
     async def scenario() -> None:
         async with database.sessions() as sessions:
             await change_origin(sessions, change)
-            with pytest.raises(GitLabReceiptError, match="^inactive_origin$"):
+            with pytest.raises(GitLabReceiptOriginInactive, match="^inactive_origin$"):
                 await receiver(sessions).execute(receipt())
             assert await rows(sessions) == []
             if change == "rebound":

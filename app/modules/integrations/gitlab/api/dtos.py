@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import math
+from dataclasses import dataclass
 from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
@@ -102,7 +103,14 @@ def _validate_tree(payload: dict[str, object]) -> None:
                 pending.extend((child, depth + 1) for child in value)
 
 
-def decode_gitlab_payload(body: bytes, *, event_name: str) -> str:
+@dataclass(frozen=True)
+class ParsedGitLabPayload:
+    original_json: str
+    payload: dict[str, object]
+    merge_request: GitLabMergeRequestDto | None
+
+
+def parse_gitlab_payload(body: bytes, *, event_name: str) -> ParsedGitLabPayload:
     """Validate transport/MR identity without serializing parsed floating point values."""
     try:
         original = body.decode("utf-8")
@@ -112,6 +120,7 @@ def decode_gitlab_payload(body: bytes, *, event_name: str) -> str:
         if not isinstance(payload, dict):
             raise GitLabPayloadInvalid()
         _validate_tree(payload)
+        mr = None
         if event_name == "Merge Request Hook":
             mr = GitLabMergeRequestDto.model_validate(payload)
             attributes = mr.object_attributes
@@ -120,6 +129,10 @@ def decode_gitlab_payload(body: bytes, *, event_name: str) -> str:
                 and attributes.target_project_id != mr.project.id
             ) or ("event_type" in mr.model_fields_set and mr.event_type != "merge_request"):
                 raise GitLabPayloadInvalid()
-        return original
+        return ParsedGitLabPayload(original, payload, mr)
     except (ValueError, RecursionError, ValidationError):
         raise GitLabPayloadInvalid() from None
+
+
+def decode_gitlab_payload(body: bytes, *, event_name: str) -> str:
+    return parse_gitlab_payload(body, event_name=event_name).original_json

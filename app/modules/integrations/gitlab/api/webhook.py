@@ -13,6 +13,9 @@ from app.bootstrap.gitlab import (
     get_gitlab_webhook_resources,
 )
 from app.modules.integrations.gitlab.api.dtos import GitLabPayloadInvalid, decode_gitlab_payload
+from app.modules.integrations.gitlab.application.accept_webhook import (
+    GitLabWebhookAuthenticationFailed,
+)
 from app.modules.integrations.gitlab.application.authenticate_webhook import GitLabWebhookAuthStatus
 from app.modules.integrations.gitlab.application.webhook_receipts import (
     GitLabReceiptError,
@@ -84,16 +87,11 @@ async def receive_gitlab_webhook(
             idempotency_key=idempotency_key,
             payload_json=decode_gitlab_payload(await _read_body(request), event_name=event),
         )
-        try:
-            result = await resources.accept(delivery)
-        except GitLabReceiptError as error:
-            if str(error) == "inactive_origin":
-                # accept has exited its UOW, including rollback, before this new read.
-                _require_auth(
-                    await resources.authenticate(connection_id=connection_id, secret=secret)
-                )
-            raise
+        result = await resources.accept_authenticated(delivery, secret=secret)
         return {"status": result.value}
+    except GitLabWebhookAuthenticationFailed as error:
+        _require_auth(error.status)
+        raise HTTPException(status_code=503, detail="gitlab_webhook_unavailable") from None
     except (GitLabReceiptError, GitLabPayloadInvalid):
         raise HTTPException(status_code=400, detail="gitlab_webhook_invalid_request") from None
     except GitLabWebhookUnavailable:

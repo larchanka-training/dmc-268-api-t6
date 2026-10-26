@@ -130,8 +130,11 @@ class GitLabRunCredentials:
             raise RunCancelled("installation_unavailable")
         if self._target is None:
             locator = self._expected_input.locator
-            assert locator.origin_provider_installation_id is not None
-            assert locator.repository_external_id is not None
+            if (
+                locator.origin_provider_installation_id is None
+                or locator.repository_external_id is None
+            ):
+                raise RunCancelled("installation_unavailable")
             target = await self._operation(
                 self._authority.resolve_target(
                     GitLabTargetIdentity(

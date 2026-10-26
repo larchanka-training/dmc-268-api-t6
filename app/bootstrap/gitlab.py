@@ -17,6 +17,7 @@ from fastapi import FastAPI, HTTPException, Request
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.modules.integrations.gitlab.api.dispatch import GitLabWebhookDispatchAdapter, action_of
+from app.modules.integrations.gitlab.application.accept_webhook import AcceptGitLabWebhook
 from app.modules.integrations.gitlab.application.authenticate_webhook import (
     AuthenticateGitLabWebhook,
     GitLabWebhookAuthStatus,
@@ -96,6 +97,7 @@ class GitLabWebhookResources:
         self._authenticator = authenticator
         self._receiver = receiver
         self._intake_enabled = intake_enabled
+        self._admission = AcceptGitLabWebhook(authenticator=self, receiver=self)
 
     @property
     def intake_enabled(self) -> bool:
@@ -128,6 +130,11 @@ class GitLabWebhookResources:
                 extra={"error_type": type(error).__name__},
             )
             raise GitLabWebhookUnavailable() from None
+
+    async def accept_authenticated(
+        self, delivery: WebhookReceipt, *, secret: str | None
+    ) -> InstallationDeliveryDispatchStatus:
+        return await self._admission.execute(delivery, secret=secret)
 
 
 def build_gitlab_webhook_resources(

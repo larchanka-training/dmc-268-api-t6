@@ -37,7 +37,7 @@ from app.modules.reviews.application.review_context_stage import (
 )
 from app.modules.reviews.application.run_failures import RunCancelled
 from app.modules.reviews.application.run_trace import RunTrace
-from app.modules.reviews.application.vcs_diff import _is_generated
+from app.modules.reviews.application.vcs_diff import is_generated_path
 from app.modules.reviews.infrastructure.gitlab_policy_source import GitLabPolicyDocumentSource
 from app.modules.reviews.infrastructure.gitlab_publication_resources import (
     GitLabInstalledPublicationResources,
@@ -147,7 +147,7 @@ class GitLabReviewWorkerResources:
                     cache=None
                     if self._redis is None
                     else RedisAstFactsCache(self._redis, repository_id=run.repository_id),
-                    builtin_excluded=_is_generated,
+                    builtin_excluded=is_generated_path,
                 )
 
             yield GitLabAttemptBundle(
@@ -166,7 +166,7 @@ class GitLabReviewWorkerResources:
                     ),
                     context_builder=context_builder,
                     trace=trace,
-                    builtin_excluded=_is_generated,
+                    builtin_excluded=is_generated_path,
                 ),
             )
 
