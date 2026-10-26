@@ -892,6 +892,84 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Bundle application secrets
+        id: app_secrets
+        shell: bash
+        env:
+          # Environment staging secrets (docs/SECRETS.md). GitHub rejects secret names starting with
+          # GITHUB_, so the App secrets are GH_* here and GITHUB_* in the container.
+          GITHUB_APP_ID: ${{ secrets.GH_APP_ID }}
+          GITHUB_APP_PRIVATE_KEY: ${{ secrets.GH_APP_PRIVATE_KEY }}
+          GITHUB_WEBHOOK_SECRET: ${{ secrets.GH_WEBHOOK_SECRET }}
+          GITHUB_CLIENT_ID: ${{ secrets.GH_CLIENT_ID }}
+          GITHUB_CLIENT_SECRET: ${{ secrets.GH_CLIENT_SECRET }}
+          AUTH_JWT_PRIVATE_KEY: ${{ secrets.AUTH_JWT_PRIVATE_KEY }}
+          AUTH_JWT_PUBLIC_KEY: ${{ secrets.AUTH_JWT_PUBLIC_KEY }}
+          # Variable of the Environment: the prefix GITHUB_ is rejected for variables too.
+          GITHUB_APP_BOT_LOGIN: ${{ vars.GH_APP_BOT_LOGIN }}
+          # Public UI origin for links to individual Runs in review-worker check-run summaries.
+          PORTAL_URL: ${{ vars.PORTAL_URL }}
+          # LLM gateway of the worker: the organization secret and endpoint variable;
+          # models are repository variables (staging Environment may override).
+          # The worker fetches ECB FX over outbound HTTPS at call time; no rate is bundled.
+          LLM_API_KEYS: ${{ secrets.AI_DMC268_T6 }}
+          LLM_BASE_URL: ${{ vars.AI_DMC268_URL }}
+          LLM_MODEL: ${{ vars.LLM_MODEL }}
+          LLM_FALLBACK_MODEL: ${{ vars.LLM_FALLBACK_MODEL }}
+          LLM_VERIFIER_MODEL: ${{ vars.LLM_VERIFIER_MODEL }}
+          LLM_VERIFIER_FALLBACK_MODEL: ${{ vars.LLM_VERIFIER_FALLBACK_MODEL }}
+          # Installed GitLab: keyring secret and non-secret staging configuration.
+          GITLAB_CREDENTIAL_KEYS: ${{ secrets.GITLAB_CREDENTIAL_KEYS }}
+          GITLAB_ACTIVE_KEY_ID: ${{ vars.GITLAB_ACTIVE_KEY_ID }}
+          GITLAB_ALLOWED_ORIGINS: ${{ vars.GITLAB_ALLOWED_ORIGINS }}
+          GITLAB_PRIVATE_ORIGINS: ${{ vars.GITLAB_PRIVATE_ORIGINS }}
+          GITLAB_WEBHOOK_INTAKE_ENABLED: ${{ vars.GITLAB_WEBHOOK_INTAKE_ENABLED }}
+        run: |
+          # One opaque line of base64 so multi-line PEM values survive the SSH action and the shell;
+          # deploy/scripts/env-file.sh decodes it on the host. Unset secrets are left out entirely.
+          names=(GITHUB_APP_ID GITHUB_APP_PRIVATE_KEY GITHUB_WEBHOOK_SECRET GITHUB_CLIENT_ID GITHUB_CLIENT_SECRET AUTH_JWT_PRIVATE_KEY AUTH_JWT_PUBLIC_KEY GITHUB_APP_BOT_LOGIN PORTAL_URL LLM_API_KEYS LLM_BASE_URL LLM_MODEL LLM_FALLBACK_MODEL LLM_VERIFIER_MODEL LLM_VERIFIER_FALLBACK_MODEL GITLAB_CREDENTIAL_KEYS GITLAB_ACTIVE_KEY_ID GITLAB_ALLOWED_ORIGINS GITLAB_PRIVATE_ORIGINS GITLAB_WEBHOOK_INTAKE_ENABLED)
+          bundle="$(
+            for name in "${names[@]}"; do
+              if [[ -n "${!name}" ]]; then
+                printf '%s=%s\n' "${name}" "$(printf '%s' "${!name}" | base64 | tr -d '\n')"
+              fi
+            done | base64 | tr -d '\n'
+          )"
+          if [[ -n "${bundle}" ]]; then
+            echo "::add-mask::${bundle}"
+          fi
+          echo "bundle=${bundle}" >> "${GITHUB_OUTPUT}"
+          for name in "${names[@]}"; do
+            [[ -n "${!name}" ]] && echo "set: ${name}" || echo "not set: ${name}"
+          done
+
+      - name: Validate GitLab deployment configuration
+        shell: bash
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GHCR_USER: ${{ github.actor }}
+          IMAGE: ${{ needs.push-image.outputs.image_ref }}
+          APP_SECRETS_B64: ${{ steps.app_secrets.outputs.bundle }}
+        run: |
+          set -euo pipefail
+          set +o xtrace
+          if [[ ! "${IMAGE}" =~ ^[^[:space:]]+@sha256:[a-f0-9]{64}$ ]]; then
+            echo "deployment preflight requires an immutable image digest" >&2
+            exit 1
+          fi
+          umask 077
+          preflight_dir="$(mktemp -d "${RUNNER_TEMP}/gitlab-preflight.XXXXXX")"
+          trap 'rm -rf "${preflight_dir}"' EXIT
+          export DOCKER_CONFIG="${preflight_dir}/docker"
+          mkdir "${DOCKER_CONFIG}"
+          if ! printf '%s\n' "${GHCR_TOKEN}" | docker login "${REGISTRY}" --username "${GHCR_USER}" --password-stdin > /dev/null 2>&1; then
+            echo "registry authentication failed" >&2
+            exit 1
+          fi
+          docker pull "${IMAGE}" > /dev/null
+          source deploy/scripts/env-file.sh
+          TMPDIR="${preflight_dir}" validate_gitlab_deployment "${IMAGE}" "${APP_SECRETS_B64}"
+
       - name: Upload deploy files
         uses: appleboy/scp-action@ff85246acaad7bdce478db94a363cd2bf7c90345 # v1.0.0
         with:
@@ -968,51 +1046,6 @@ jobs:
             sleep 5
           done
           echo "TLS handshake with ${BASE_URL} succeeded"
-
-      - name: Bundle application secrets
-        id: app_secrets
-        shell: bash
-        env:
-          # Environment staging secrets (docs/SECRETS.md). GitHub rejects secret names starting with
-          # GITHUB_, so the App secrets are GH_* here and GITHUB_* in the container.
-          GITHUB_APP_ID: ${{ secrets.GH_APP_ID }}
-          GITHUB_APP_PRIVATE_KEY: ${{ secrets.GH_APP_PRIVATE_KEY }}
-          GITHUB_WEBHOOK_SECRET: ${{ secrets.GH_WEBHOOK_SECRET }}
-          GITHUB_CLIENT_ID: ${{ secrets.GH_CLIENT_ID }}
-          GITHUB_CLIENT_SECRET: ${{ secrets.GH_CLIENT_SECRET }}
-          AUTH_JWT_PRIVATE_KEY: ${{ secrets.AUTH_JWT_PRIVATE_KEY }}
-          AUTH_JWT_PUBLIC_KEY: ${{ secrets.AUTH_JWT_PUBLIC_KEY }}
-          # Variable of the Environment: the prefix GITHUB_ is rejected for variables too.
-          GITHUB_APP_BOT_LOGIN: ${{ vars.GH_APP_BOT_LOGIN }}
-          # Public UI origin for links to individual Runs in review-worker check-run summaries.
-          PORTAL_URL: ${{ vars.PORTAL_URL }}
-          # LLM gateway of the worker: the organization secret and endpoint variable;
-          # models are repository variables (staging Environment may override).
-          # The worker fetches ECB FX over outbound HTTPS at call time; no rate is bundled.
-          LLM_API_KEYS: ${{ secrets.AI_DMC268_T6 }}
-          LLM_BASE_URL: ${{ vars.AI_DMC268_URL }}
-          LLM_MODEL: ${{ vars.LLM_MODEL }}
-          LLM_FALLBACK_MODEL: ${{ vars.LLM_FALLBACK_MODEL }}
-          LLM_VERIFIER_MODEL: ${{ vars.LLM_VERIFIER_MODEL }}
-          LLM_VERIFIER_FALLBACK_MODEL: ${{ vars.LLM_VERIFIER_FALLBACK_MODEL }}
-        run: |
-          # One opaque line of base64 so multi-line PEM values survive the SSH action and the shell;
-          # deploy/scripts/env-file.sh decodes it on the host. Unset secrets are left out entirely.
-          names=(GITHUB_APP_ID GITHUB_APP_PRIVATE_KEY GITHUB_WEBHOOK_SECRET GITHUB_CLIENT_ID GITHUB_CLIENT_SECRET AUTH_JWT_PRIVATE_KEY AUTH_JWT_PUBLIC_KEY GITHUB_APP_BOT_LOGIN PORTAL_URL LLM_API_KEYS LLM_BASE_URL LLM_MODEL LLM_FALLBACK_MODEL LLM_VERIFIER_MODEL LLM_VERIFIER_FALLBACK_MODEL)
-          bundle="$(
-            for name in "${names[@]}"; do
-              if [[ -n "${!name}" ]]; then
-                printf '%s=%s\n' "${name}" "$(printf '%s' "${!name}" | base64 | tr -d '\n')"
-              fi
-            done | base64 | tr -d '\n'
-          )"
-          if [[ -n "${bundle}" ]]; then
-            echo "::add-mask::${bundle}"
-          fi
-          echo "bundle=${bundle}" >> "${GITHUB_OUTPUT}"
-          for name in "${names[@]}"; do
-            [[ -n "${!name}" ]] && echo "set: ${name}" || echo "not set: ${name}"
-          done
 
       - name: Deploy image
         id: deploy

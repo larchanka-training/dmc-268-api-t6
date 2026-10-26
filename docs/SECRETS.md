@@ -54,7 +54,8 @@ Repository variable `LLM_EUR_TO_USD_RATE` удалена 06.10 после про
 
 | Env-файл на хосте | Переменные | Контейнеры |
 |---|---|---|
-| `api.env` | `GITHUB_WEBHOOK_SECRET`, `GITHUB_CLIENT_ID`, `GITHUB_CLIENT_SECRET`, `AUTH_JWT_PRIVATE_KEY`, `AUTH_JWT_PUBLIC_KEY` | `api` |
+| `api.env` | `GITHUB_WEBHOOK_SECRET`, `GITHUB_CLIENT_ID`, `GITHUB_CLIENT_SECRET`, `AUTH_JWT_PRIVATE_KEY`, `AUTH_JWT_PUBLIC_KEY`, `GITLAB_WEBHOOK_INTAKE_ENABLED` | `api` |
+| `gitlab.env` | `GITLAB_CREDENTIAL_KEYS`, `GITLAB_ACTIVE_KEY_ID`, `GITLAB_ALLOWED_ORIGINS`, optional `GITLAB_PRIVATE_ORIGINS` | `worker`, `webhook-worker`, profile-only `gitlab-admin` |
 | `app.env` | `GITHUB_APP_ID`, `GITHUB_APP_PRIVATE_KEY` | `worker`, `webhook-worker` |
 | `worker.env` | `LLM_API_KEYS`, `LLM_BASE_URL`, `LLM_MODEL`, `LLM_FALLBACK_MODEL`, `LLM_VERIFIER_MODEL`, `LLM_VERIFIER_FALLBACK_MODEL`, `PORTAL_URL` (опциональные ключи — только при непустом значении) | `worker` |
 | `webhook-worker.env` | `GITHUB_APP_BOT_LOGIN` | `webhook-worker` |
@@ -68,6 +69,7 @@ Repository variable `LLM_EUR_TO_USD_RATE` удалена 06.10 после про
 | `GH_CLIENT_SECRET` | строка | `GITHUB_CLIENT_SECRET` | `api` | обмен OAuth-кода (auth-api, #11) |
 | `AUTH_JWT_PRIVATE_KEY` | многострочный PEM (RSA) | `AUTH_JWT_PRIVATE_KEY` | `api` | подпись локального access JWT |
 | `AUTH_JWT_PUBLIC_KEY` | многострочный PEM (RSA) | `AUTH_JWT_PUBLIC_KEY` | `api` | проверка access JWT |
+| `GITLAB_CREDENTIAL_KEYS` | JSON object key-ID → base64 | `GITLAB_CREDENTIAL_KEYS` | оба workers и trusted `gitlab-admin` | шифрование installation PAT; [GitLab setup](#installed-gitlab--защищённая-конфигурация-и-управление-169) |
 | `AI_DMC268_T6` (organization) | строка, ключи через запятую | `LLM_API_KEYS` | `worker` | ключи LLM-шлюза (§1, «LLM-шлюз») |
 | `AI_DMC268_URL` (organization variable, берётся из `vars.`) | URL | `LLM_BASE_URL` | `worker` | endpoint LLM-шлюза |
 
@@ -115,6 +117,10 @@ rm jwt.pem jwt.pub
 | `LLM_FALLBACK_MODEL` | нет, переопределение repository | `mistral-small-3.2-24b`. Только `worker`. Чтобы отключить fallback, удалите repository variable и это переопределение: значение Environment перекрывает repository, а незаданная variable приходит в `vars` пустой строкой, и `LLM_FALLBACK_MODEL` не попадает в `worker.env` |
 | `LLM_VERIFIER_MODEL` | нет, переопределение repository | Только `worker`; пусто — верификатор идёт моделью ревью (`LLM_MODEL`). Как у `LLM_FALLBACK_MODEL`: значение Environment перекрывает repository, незаданная variable не попадает в `worker.env` |
 | `LLM_VERIFIER_FALLBACK_MODEL` | нет, переопределение repository | Только `worker`; пусто — fallback ревью (`LLM_FALLBACK_MODEL`). Правила те же |
+| `GITLAB_ACTIVE_KEY_ID` | с GitLab runtime | ID активного ключа из secret `GITLAB_CREDENTIAL_KEYS`; только оба workers и operator |
+| `GITLAB_ALLOWED_ORIGINS` | с GitLab runtime | raw JSON, например `["https://gitlab.com"]`; те же получатели |
+| `GITLAB_PRIVATE_ORIGINS` | нет | raw JSON subset allowed; только для private-network origin, не для приватного проекта gitlab.com |
+| `GITLAB_WEBHOOK_INTAKE_ENABLED` | нет, default off | `false` для начальной настройки; `true` только с полным валидным runtime; только `api` |
 
 ### PORTAL_URL
 
@@ -202,8 +208,24 @@ Environment `staging` перекрывает одноимённую repository v
 | `GITLAB_ACTIVE_KEY_ID` | те же процессы | ID существующего ключа для новых ciphertext; ID 1–64 символа `[A-Za-z0-9][A-Za-z0-9._-]*` |
 | `GITLAB_ALLOWED_ORIGINS` | те же процессы | JSON array из 1–32 различных точных canonical HTTPS origins, без path/query/userinfo/trailing slash и явного `:443` |
 | `GITLAB_PRIVATE_ORIGINS` | те же процессы | optional JSON array (по умолчанию `[]`), subset allowed; private адрес/host требует явного exact opt-in |
-| `SSL_CERT_FILE` | GitLab HTTP composition | optional путь к PEM CA bundle; сертификат и hostname проверяются, redirects/proxy environment выключены |
+| `SSL_CERT_FILE` | только локальная process composition | optional путь к PEM CA bundle; staging не передаёт эту переменную и не монтирует CA. Отдельный custom-CA deployment требует reviewed mount/wiring. Обычная TLS/hostname verification сохраняется |
 | `GITLAB_WEBHOOK_INTAKE_ENABLED` | только API | unset/empty/`false` → off, `true` → admission on; пробелы по краям удаляются, регистр игнорируется; `0`, `1`, `yes`, `no` не принимаются |
+
+Staging источники: `GITLAB_CREDENTIAL_KEYS` — **secret** Environment `staging`;
+`GITLAB_ACTIVE_KEY_ID`, `GITLAB_ALLOWED_ORIGINS`, optional `GITLAB_PRIVATE_ORIGINS` и
+`GITLAB_WEBHOOK_INTAKE_ENABLED` — одноимённые **variables**. В GitHub UI вводится
+raw JSON: `{"key-id":"<base64>"}` или `["https://gitlab.com"]`, без внешних одинарных
+кавычек из shell-примеров `.env.example`. Keyring получает только `gitlab.env`
+(оба workers и operator); API получает только admission flag через `api.env`.
+У bootstrap, БД, broker/cache и мониторинга keyring/PAT нет.
+
+Первоначальная настройка: полный core, `GITLAB_WEBHOOK_INTAKE_ENABLED=false`, затем
+согласованный onboarding ниже. `true` без полного валидного runtime отклоняется до
+первого SCP/SSH изменения хоста. Без GitLab значений сохраняется GitHub-only default-off.
+Пустой/незаданный GitHub source не включается в bundle; пустой optional private source
+поэтому означает отсутствие поля. Непустой malformed JSON сохраняется и отклоняется.
+Приватный проект на gitlab.com не требует `GITLAB_PRIVATE_ORIGINS`: этот список относится
+к private-network адресу origin, который уже должен быть в allowed.
 
 Любое nonempty значение core/private включает проверку runtime: нужны все три core
 поля (`KEYS`, `ACTIVE_KEY_ID`, `ALLOWED_ORIGINS`). `PRIVATE_ORIGINS='[]'` без core —
@@ -213,8 +235,36 @@ partial config error. При полном core отсутствие private оз
 App поля webhook-worker задаются вместе или все отсутствуют; GitLab-only replay возможен
 без GitHub App. Частичный GitHub config остаётся ошибкой. Database и broker обязательны.
 
-Получайте 32 случайных байта через `openssl rand -base64 32` непосредственно в защищённое
-хранилище; пример полного JSON/config дан в `.env.example` только комментариями.
+Keyring создаётся один раз и сохраняется в защищённом secret manager отдельно от БД.
+Для **первого** keyring на операторской рабочей станции с uv (не на deploy-хосте):
+
+```bash
+set -euo pipefail
+set +o xtrace
+KEYRING_FILE="$protected_keyring_file" KEYRING_KEY_ID=key-2026-10 uv run python - <<'PYTHON'
+import base64
+import json
+import os
+import secrets
+fd = os.open(os.environ["KEYRING_FILE"], os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+with os.fdopen(fd, "w") as output:
+    json.dump({os.environ["KEYRING_KEY_ID"]: base64.b64encode(secrets.token_bytes(32)).decode()}, output)
+    output.write("\n")
+PYTHON
+```
+
+`protected_keyring_file` — новый путь в согласованном protected storage, не путь в Git.
+`O_EXCL` запрещает перезапись существующего keyring; файл создаётся с 0600, ключ не
+печатается. Сохраните его в secret manager и проверенном protected backup, затем
+передайте содержимое без argv/output:
+
+```bash
+gh secret set GITLAB_CREDENTIAL_KEYS --env staging -R larchanka-training/dmc-268-api-t6 < "$protected_keyring_file"
+```
+
+Для существующего keyring не заменяйте весь набор свежим ключом: старые key ID нужны
+для уже сохранённого ciphertext. `GITLAB_ACTIVE_KEY_ID` должен совпадать с существующим
+ID. Пример raw JSON/config дан в `.env.example` только комментариями.
 Не публикуйте значения keyring, PAT или webhook secret в Git, argv, chat, trace или логи.
 Keyring хранится отдельно от БД и резервируется с ограниченным доступом. Хранилище
 использует AES-GCM: GLC1 envelope, случайный 12-byte nonce, authentication tag и AAD
@@ -222,42 +272,91 @@ Keyring хранится отдельно от БД и резервируетс�
 Перенос ciphertext к другому tenant/origin/installation не даёт credential authority.
 В БД webhook secret хранится digest, не plaintext.
 
-Trusted local operator выполняет CLI из того же проверенного source/environment.
-`create` требует существующий workspace, новый installation UUID, разрешённый HTTPS
-origin и JSON ровно с `token`, `webhook_secret`; secret 32–256 печатных ASCII-символов,
-token 1–4096. `rotate-token` читает JSON только с `token`. Provision owner-only файл
-через secret manager либо передавайте pipe: CLI читает до 8192 bytes strict UTF-8 JSON
-из stdin/`--secrets-fd`, отказывается от echoed TTY. Сам CLI не создаёт защищённый файл.
-Например, все переменные ниже — только публичные IDs, origin и generation:
+Trusted operator использует reviewed deployed image и существующие разрешённые
+workspace/project: CLI не создаёт workspace, PAT или защищённый secret-файл.
+Нужны staging SSH/operator доступ, cached reviewed image (либо право pull) и PAT с реальным
+доступом к API/комментариям выбранного GitLab project. Browser login сам их не выдаёт.
+Подготовьте через secret manager owner-only файл `protected_secret_file` с JSON ровно
+`token`, `webhook_secret` (secret 32–256 печатных ASCII-символов, token 1–4096).
+Не создавайте JSON через литералы секретов в shell/history. CLI читает до 8192 bytes
+strict UTF-8 JSON из pipe/FD и отказывается от echoed TTY.
+
+На staging-хосте выберите фактический `APP_DIR` из [CICD §8.1](CICD.md#81-две-цели):
+`/opt/dmc-268-api-staging` для VPS или `/opt/dmc-268-api` для Terraform. Выполняйте
+в Bash; `COMPOSE_PROJECT` должен совпадать с deploy (по умолчанию basename каталога).
+Все пути `protected_*_file` уже предоставлены оператором; команды их не создают.
+Если image удалён из cache, сначала выполните optional registry login ниже;
+для cached reviewed image после deploy новый registry token не нужен.
 
 ```bash
-uv run python -m app.gitlab_admin create \
+set -euo pipefail
+set +o xtrace
+umask 077
+cd "${APP_DIR:?set the authorized staging APP_DIR}"
+project="${COMPOSE_PROJECT:-$(basename "$PWD")}"
+source ./env-file.sh  # helper code; credential .env/*.env никогда не source
+mode="$(read_compose_env_var DEPLOY_MODE .env)"
+[[ "$mode" == edge || "$mode" == ports ]]
+operator=(docker compose -p "$project" --env-file .env -f compose.yml \
+  -f "compose.${mode}.yml" --profile gitlab-operator)
+
+# После deploy immutable image уже cached; operator pull_policy: missing сохраняет его.
+
+"${operator[@]}" run --rm --no-deps -T gitlab-admin create \
   --workspace-id "$workspace_id" --installation-id "$installation_id" \
-  --origin "$gitlab_origin" --secrets-fd 3 3< /protected/gitlab-create.json
-uv run python -m app.gitlab_admin bind-project \
+  --origin "$gitlab_origin" --secrets-fd 0 < "$protected_secret_file"
+"${operator[@]}" run --rm --no-deps -T gitlab-admin bind-project \
   --installation-id "$installation_id" --project-id "$project_id"
-uv run python -m app.gitlab_admin inspect --installation-id "$installation_id"
-uv run python -m app.gitlab_admin rotate-token \
-  --installation-id "$installation_id" --expected-generation "$generation" \
-  --secrets-fd 3 3< /protected/gitlab-rotate.json
+"${operator[@]}" run --rm --no-deps -T gitlab-admin inspect \
+  --installation-id "$installation_id"
+# generation берётся из connection.generation в безопасном JSON inspect.
+"${operator[@]}" run --rm --no-deps -T gitlab-admin activate \
+  --installation-id "$installation_id" --expected-generation "$generation"
 ```
+
+`installation_id` — новый согласованный UUID; `workspace_id` — существующий workspace,
+`project_id` — положительный числовой GitLab project ID из разрешённой настройки,
+`gitlab_origin` — точный allowed HTTPS origin. Значения здесь — IDs/origin, не secrets.
+`--no-deps` не пересоздаёт live зависимости; у operator нет ports и HTTP healthcheck.
+Он получает только DB settings и `gitlab.env`, без GitHub/LLM credentials и очередей.
+Обычный `compose up` этот profile не запускает. Используйте `-T` и **container FD 0**:
+host `3<...` не пересылает descriptor 3 в контейнер. `--secrets-fd 3 3<...` допустим
+только для локального процесса `uv run python -m app.gitlab_admin`, не для Compose run.
+У operator `pull_policy: missing`: cached image после deploy используется без нового
+registry login; live API/workers/bootstrap сохраняют свою `always` policy. Если image
+удалён из cache, до команд выше нужен разрешённый pull приватного GHCR image. Только
+для этого случая выполните временный login, используя предоставленный protected
+read:packages token (не GitLab PAT):
+
+```bash
+operator_registry_config="$(mktemp -d)"
+export DOCKER_CONFIG="$operator_registry_config"
+trap 'docker logout ghcr.io >/dev/null 2>&1 || true; rm -rf "$operator_registry_config"' EXIT
+docker login ghcr.io --username "$registry_user" --password-stdin \
+  < "$protected_registry_token_file" >/dev/null 2>&1
+```
+
+В Compose 2.19 `run` не имеет `--pull`; не добавляйте несуществующий flag.
+
+Для rotate-token тот же Compose prefix и `--secrets-fd 0 < "$protected_rotate_file"`;
+JSON содержит только `token`, передайте текущую `--expected-generation "$generation"`.
 
 Create authenticates перед записью и сохраняет generation=1, intake disabled. Bind
 проверяет stored credential, canonical project и languages, связывает project только
 с этой installation, создаёт недостающие default rules; требует active `review.system`
-prompt. Повторный bind не дублирует repository/rules. При `prompt_not_seeded` выполните
-`uv run python -m app.bootstrap.seed_prompts`; при `rule_assets_invalid` восстановите
-packaged `review/rules`. Bind и create не включают intake и не auto-link по webhook.
+prompt. Повторный bind не дублирует repository/rules. При `prompt_not_seeded`
+восстановите успешный reviewed deploy bootstrap (он запускает packaged seed); при
+`rule_assets_invalid` восстановите packaged `review/rules` через корректный image. Bind и create не включают intake и не auto-link по webhook.
 GitLab HTTP выполняется вне каждой DB transaction; после HTTP locked snapshot сравнивается
 заново. Safe JSON результата не содержит token/ciphertext/digest/keyring.
 
-Публикация #171 merged через PR229 и включена в текущую ветку #169. Перед отдельным
-шагом activation оператор проверяет, что deployed version включает эти изменения,
+Перед отдельным шагом activation оператор проверяет, что reviewed deployed version
+включает GitLab intake #169 и публикацию #171 (PR229),
 и получает разрешение на выборочную live-проверку. Этот документ не разрешает
 production activation. CLI не принимает supplied merged SHA или boolean обхода:
 
 ```bash
-uv run python -m app.gitlab_admin activate \
+"${operator[@]}" run --rm --no-deps -T gitlab-admin activate \
   --installation-id "$installation_id" --expected-generation "$generation"
 ```
 
@@ -276,22 +375,66 @@ queued/running/publishing Runs исходной установки термин�
 calls старой authority запрещены. Старые ключи сохраняйте, пока все их envelopes не
 перезаписаны через supported rotation. Удаление key ID раньше срока закрывает decryption.
 
-При утрате keyring inspect/revoke работают только с `DATABASE_URL`, без GitLab HTTP,
-PAT или CA: `revoke-installation --installation-id ...` либо `revoke-workspace
---workspace-id ...` через тот же `uv run python -m app.gitlab_admin`. Revoke выключает
-intake, стирает stored credential, увеличивает generation при изменении и отменяет
-активные Runs с `installation_revoked`. Повторный revoke безопасен. Утраченный ключ
-не восстанавливает ciphertext: revoke и создайте новую installation UUID/credential
-с поддерживаемыми binding шагами; не меняйте origin/rebind вручную и не копируйте SQL
-из GitHub smoke recipe. Историю terminal Runs не переписывают.
+После onboarding впервые включите API admission через variable
+`GITLAB_WEBHOOK_INTAKE_ENABLED=true` и обычный reviewed deploy, сохранив полный keyring.
+Create/bind сами intake не включают; active connection и process admission нужны оба.
+Если staging уже обслуживает другие активные подключения, не выключайте общий API flag
+ради нового теста: новая installation остаётся disabled до собственного activate.
 
-Deployment scripts (`env-file.sh`, `deploy.sh`), CI/CD allowlists и compose сегодня не
-provision эти GitLab значения. Для явно разрешённой среды оператор отдельно подаёт
-защищённое полное process environment нужным процессам (например `uv run --env-file
-/protected/gitlab-runtime.env python -m app.webhook_worker`, аналогично `app.worker`;
-API получает свой admission flag). Это не доказательство изменения staging/VPS.
-Снимки состава environment ниже относятся к датированным прежним deployment и остаются
-историческими; они не утверждают наличие GitLab secret provisioning.
+Отключение одной тестовой установки — revoke именно её UUID; не revoke-workspace и
+не общий API flag, если ими пользуются другие подключения:
+
+```bash
+"${operator[@]}" run --rm --no-deps -T gitlab-admin revoke-installation \
+  --installation-id "$installation_id"
+"${operator[@]}" run --rm --no-deps -T gitlab-admin inspect \
+  --installation-id "$installation_id"
+```
+
+Проверить `revoked=true`, `intake_enabled=false`. Revoke очищает stored credential,
+увеличивает generation при изменении и отменяет активные Runs с `installation_revoked`;
+повтор безопасен. Для планового выключения intake **всей** среды задайте API variable
+`false` и выполните deploy, сохранив keyring. Это не заменяет revoke отдельной установки
+и не отменяет её уже запущенные Runs. Удаление ключей не является способом отключения.
+
+При утрате keyring inspect/revoke требуют только `DATABASE_URL`, без PAT, GitLab HTTP,
+decryption или CA. Compose всё равно требует присутствия env-файлов до запуска CLI.
+Если файл отсутствует, `ensure_app_env_files "$PWD"` из уже загруженного helper создаёт
+только отсутствующие пустые файлы с 0600 и сохраняет существующие значения; это позволяет
+DB-only inspect/revoke с `--no-deps`, но **не** восстанавливает ключи и не делает workers
+готовыми к работе. Не заменяйте сохранившийся keyring пустым файлом. Если ключ утрачён
+без backup, ciphertext не восстановить: revoke и новый installation UUID/credential
+через supported create/bind/inspect/activate; не правьте SQL/origin/rebind вручную.
+Историю terminal Runs не переписывают.
+
+Повторный deploy не создаёт connection и не меняет installation UUID, binding или PAT.
+Ручной `deploy.sh` без `APP_SECRETS_B64` сохраняет текущие role files. CI всегда передаёт
+bundle, в том числе пустой: удалённые/пустые source значения исчезают из новых файлов.
+Manual/automatic rollback сохраняет **текущий** keyring/config и DB installation,
+не восстанавливает secrets из истории образа. Target с #169 parsers, но без нового
+helper поддерживается; неизвестный target с GitLab config отклоняется до live изменений.
+Schema guard остаётся обязательным; при несовместимости выберите корректный forward
+image или documented recovery, не выполняйте downgrade/обход ради GitLab.
+
+Наличие wiring и localhost tests не доказывает живой GitLab MR. Для приёмки нужны
+reviewed staging image/operator доступ, protected PAT/webhook secret, рабочие workers,
+prompts/rules и LLM; результат — succeeded GitLab run, inline discussion(s), одна сводка,
+identical-delivery replay без дублей и revoke. Старые датированные environment snapshots
+ниже остаются историческими и не утверждают, что новая конфигурация уже развёрнута.
+GitLab onboarding UI не добавлен: [UI #173](https://github.com/larchanka-training/dmc-268-ui-t6/issues/173)
+— общий docs follow-up; GitLab-specific checklist находится в
+[#169 comment](https://github.com/larchanka-training/dmc-268-api-t6/issues/169#issuecomment-6399969129).
+
+После серии операторских команд очистите временный login:
+
+```bash
+if [[ -n "${operator_registry_config:-}" ]]; then
+  docker logout ghcr.io >/dev/null 2>&1 || true
+  rm -rf "$operator_registry_config"
+  unset DOCKER_CONFIG operator_registry_config
+  trap - EXIT
+fi
+```
 
 ### Мониторинг (`deploy/monitoring`, [MONITORING.md](MONITORING.md))
 
@@ -345,7 +488,7 @@ GitHub user access token используется только для чтени
 callback; в PostgreSQL хранится только хеш локального refresh token.
 
 1. Settings → Environments → **staging**.
-2. Secrets: `STAGING_SSH_KEY` (только для Terraform-хоста), при желании `POSTGRES_PASSWORD`, секреты приложения из §1. Текущий deployment contract для GitHub передаёт `GH_APP_ID`, `GH_APP_PRIVATE_KEY` и variable `GH_APP_BOT_LOGIN` как полный App config в `webhook-worker`; частичный набор закрывает startup и `up --wait` приводит к rollback. Полное отсутствие App config теперь отключает GitHub replay, но не запрещает отдельно настроенный GitLab-only runtime. GitLab runtime deployment-скрипты не provision (см. §1). `worker` без App ID и ключа стартует, GitHub sweep/publication отключены. Без секретов `api` (`GH_WEBHOOK_SECRET`, `GH_CLIENT_ID`, `GH_CLIENT_SECRET`, `AUTH_JWT_PRIVATE_KEY`, `AUTH_JWT_PUBLIC_KEY`) отключается соответствующая функция: без `GH_WEBHOOK_SECRET` `POST /webhooks/github` отвечает 503, без `GH_CLIENT_ID`, `GH_CLIENT_SECRET` или `AUTH_JWT_PRIVATE_KEY` вход отвечает 503, без `AUTH_JWT_PUBLIC_KEY` — каждый эндпоинт с авторизацией.
+2. Secrets: `STAGING_SSH_KEY` (только для Terraform-хоста), при желании `POSTGRES_PASSWORD`, секреты приложения из §1. Текущий deployment contract для GitHub передаёт `GH_APP_ID`, `GH_APP_PRIVATE_KEY` и variable `GH_APP_BOT_LOGIN` как полный App config в `webhook-worker`; частичный набор закрывает startup и `up --wait` приводит к rollback. Полное отсутствие App config теперь отключает GitHub replay, но не запрещает отдельно настроенный GitLab-only runtime. GitLab runtime provision идёт через отдельный `gitlab.env` и profile-only operator (см. §1); API admission по умолчанию выключен. `worker` без App ID и ключа стартует, GitHub sweep/publication отключены. Без секретов `api` (`GH_WEBHOOK_SECRET`, `GH_CLIENT_ID`, `GH_CLIENT_SECRET`, `AUTH_JWT_PRIVATE_KEY`, `AUTH_JWT_PUBLIC_KEY`) отключается соответствующая функция: без `GH_WEBHOOK_SECRET` `POST /webhooks/github` отвечает 503, без `GH_CLIENT_ID`, `GH_CLIENT_SECRET` или `AUTH_JWT_PRIVATE_KEY` вход отвечает 503, без `AUTH_JWT_PUBLIC_KEY` — каждый эндпоинт с авторизацией.
 3. Variables: хост, SSH-порт, SHA256 SSH fingerprint, SSH-пользователь, логин бота App `GH_APP_BOT_LOGIN` (обязателен, п. 2), опционально health URL, имя БД и `PORTAL_URL` (ссылка на Run).
 
    Fingerprint после `terraform apply` (формат appleboy — строка `SHA256:…` из вывода):
@@ -369,20 +512,25 @@ SSH на Terraform-хосте открыт миру намеренно: у GitHu
 
 ```mermaid
 flowchart LR
-  gha["GitHub Environment"] --> ssh["SSH/SCP, debug: false"]
+  gha["GitHub Environment"] --> preflight["bundle + target-image GitLab preflight\nnetwork none, private env input"]
+  preflight --> ssh["SSH/SCP, debug: false"]
   ssh --> script["deploy.sh / rollback.sh"]
   script --> envfile["<APP_DIR>/.env\nchmod 600"]
-  script --> appenv["<APP_DIR>/api.env, app.env,\nworker.env, webhook-worker.env\nchmod 600"]
+  script --> appenv["<APP_DIR>/api.env, app.env,\nworker.env, webhook-worker.env, gitlab.env\nchmod 600"]
   envfile --> compose["docker compose --env-file"]
-  appenv --> compose2["env_file: api.env → api,\napp.env → worker, webhook-worker,\nworker.env → worker,\nwebhook-worker.env → webhook-worker"]
+  appenv --> compose2["env_file: api.env → api,\napp.env → worker, webhook-worker,\nworker.env → worker,\nwebhook-worker.env → webhook-worker,\ngitlab.env → workers + operator profile"]
   script --> logout["docker logout ghcr.io"]
 ```
 
-1. Runner забирает secret/var только в job с `environment: staging`.
+1. Runner забирает secret/var только в job с `environment: staging`. Bundle маскируется;
+   GitLab preflight выполняется в exact immutable target image с `--network none` **до первого
+   SCP/SSH изменения хоста**. Protected временный env input содержит только GitLab payload;
+   значения и token не входят в Docker argv, registry auth идёт через stdin и temporary
+   `DOCKER_CONFIG`. Временные файлы удаляются при успехе и отказе.
 2. `appleboy/ssh-action` с `debug: false` передаёт в скрипт одноразовый `GITHUB_TOKEN`, бандл секретов приложения `APP_SECRETS_B64` (п. 5) и, если задан, `POSTGRES_PASSWORD`. SSH-пароль VPS передаётся только как `password` действия, в скрипт он не попадает.
 3. `deploy.sh` пишет `.env` с `umask 077` и `chmod 600`; без `POSTGRES_PASSWORD` генерирует пароль один раз на свежем хосте и отказывается генерировать, если `.env` или том Postgres уже есть. Пароль в stdout не печатается.
 4. Compose читает `.env` на VM. Postgres, RabbitMQ и Redis слушают только docker-сеть проекта, `ports:` у них нет.
-5. Секреты приложения шаг «Bundle application secrets» собирает в одну строку `APP_SECRETS_B64`: base64 от строк `ИМЯ=<base64 значения>`, только для заданных секретов. Строка маскируется (`::add-mask::`) и уходит через `envs:` SSH-действия; многострочные PEM так не ломаются в SSH и shell. На хосте `write_app_env_files` (`env-file.sh`) раскладывает значения по allowlist в файлы получателей (§1, таблица env-файлов), в одинарных кавычках — Compose читает их буквально, без подстановки `$`, обратный слэш остаётся обратным слэшем (кроме позиции перед кавычкой). Поэтому имя вне allowlist, значение с `'` или с `\` в конце валят выкат до любых изменений на хосте: бандл проверяется раньше, чем перезаписывается `.env` (ограничение на значения — §1).
+5. Секреты приложения шаг «Bundle application secrets» собирает в одну строку `APP_SECRETS_B64`: base64 от строк `ИМЯ=<base64 значения>`, только для заданных секретов. Строка маскируется (`::add-mask::`) и уходит через `envs:` SSH-действия; многострочные PEM так не ломаются в SSH и shell. На хосте `write_app_env_files` (`env-file.sh`) сначала раскладывает candidate значения в private staging directory, валидирует GitLab в том же admitted image ID, затем переносит значения по allowlist в файлы получателей (§1, таблица env-файлов), в одинарных кавычках — Compose читает их буквально, без подстановки `$`, обратный слэш остаётся обратным слэшем (кроме позиции перед кавычкой). Поэтому имя вне allowlist, значение с `'` или с `\` в конце валят выкат до live изменений файлов/сервисов: candidate проверяется раньше, чем перезаписываются role files, `.env`, state и switch marker (ограничение на значения — §1).
 6. `GITHUB_TOKEN` нужен лишь для pull. Логин идёт во временный `DOCKER_CONFIG` (`mktemp -d`), а не в `/root/.docker/config.json`: выкаты API и UI под общим root не мешают друг другу. После последнего pull — `docker logout`, при выходе каталог удаляется; `unset GHCR_TOKEN`.
 
 Rollback ничего из GitHub не шлёт повторно: пароли Postgres, RabbitMQ и Redis берёт из лежащего `.env`, а env-файлы секретов не трогает — откатанные контейнеры стартуют с теми же секретами. Секреты не привязаны к образу: откат образа не возвращает предыдущие значения секретов.

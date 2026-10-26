@@ -23,6 +23,7 @@ RABBITMQ_VOLUME="${RABBITMQ_VOLUME:-${COMPOSE_PROJECT}_rabbitmq-data}"
 
 # Per-run registry credentials: API and UI deploys share the root account on the course VPS, so
 # docker login must not touch /root/.docker/config.json. A rollback started from here reuses it.
+APP_STAGE_DIR=""
 DOCKER_CONFIG="$(mktemp -d)"
 export DOCKER_CONFIG
 
@@ -32,6 +33,7 @@ logout_registry() {
 cleanup_registry() {
   logout_registry
   rm -rf "${DOCKER_CONFIG}"
+  [[ -z "${APP_STAGE_DIR}" ]] || rm -rf "${APP_STAGE_DIR}"
 }
 trap cleanup_registry EXIT
 
@@ -119,22 +121,49 @@ if [[ -z "${REDIS_PASSWORD:-}" ]]; then
   echo "generated REDIS_PASSWORD on the host (stored in ${ENV_FILE})"
 fi
 
-# Application secrets from GitHub (see env-file.sh). CI always passes the bundle, empty when no
-# secret is set; a manual deploy without it keeps the files of the previous deploy. Written before
-# anything else on the host changes: an invalid bundle stops the deploy with the host untouched.
+# Stage candidates without replacing or chmodding the current role files. An absent manual
+# bundle retains them; CI explicitly supplies even an empty bundle to remove configuration.
+umask 077
+APP_STAGE_DIR="$(mktemp -d)"
 if [[ -n "${APP_SECRETS_B64+set}" ]]; then
-  write_app_env_files "${APP_DIR}" "${APP_SECRETS_B64}"
+  write_app_env_files "${APP_STAGE_DIR}" "${APP_SECRETS_B64}"
   unset APP_SECRETS_B64
+else
+  for file_name in "${ENV_FILE_NAMES[@]}"; do
+    if [[ -f "${APP_DIR}/${file_name}" ]]; then
+      cp "${APP_DIR}/${file_name}" "${APP_STAGE_DIR}/${file_name}"
+    fi
+  done
+  ensure_app_env_files "${APP_STAGE_DIR}"
 fi
-ensure_app_env_files "${APP_DIR}"
 
-if [[ -f "${STATE_FILE}" ]]; then
-  cp "${STATE_FILE}" "${STATE_FILE}.previous"
-fi
+refuse_deployment() {
+  echo "deployment refused: $1" >&2
+  exit 1
+}
 
 if [[ -n "${GHCR_TOKEN:-}" ]]; then
-  echo "${GHCR_TOKEN}" | docker login ghcr.io -u "${GHCR_USER:-github}" --password-stdin >/dev/null
+  if ! printf '%s\n' "${GHCR_TOKEN}" | docker login ghcr.io -u "${GHCR_USER:-github}" --password-stdin >/dev/null 2>&1; then
+    refuse_deployment "registry login failed"
+  fi
   unset GHCR_TOKEN
+fi
+if ! docker pull "${IMAGE}" >/dev/null 2>&1; then
+  refuse_deployment "target image pull failed"
+fi
+resolve_target_identity refuse_deployment
+if ! gitlab_bundle="$(gitlab_bundle_from_env_files "${APP_STAGE_DIR}" 2>/dev/null)" || \
+   ! validate_gitlab_deployment "${TARGET_IMAGE_ID}" "${gitlab_bundle}" >/dev/null 2>&1; then
+  refuse_deployment "GitLab configuration_invalid"
+fi
+IMAGE="${RELEASE_REF}"
+
+# Admission succeeded. Only now replace live files and record the previous release.
+for file_name in "${ENV_FILE_NAMES[@]}"; do
+  mv -f "${APP_STAGE_DIR}/${file_name}" "${APP_DIR}/${file_name}"
+done
+if [[ -f "${STATE_FILE}" ]]; then
+  cp "${STATE_FILE}" "${STATE_FILE}.previous"
 fi
 
 # Release switch: from here on the host moves to IMAGE. The CI run id (DEPLOY_RUN) lets the CI
@@ -158,7 +187,6 @@ write_compose_env_file \
   "${RABBITMQ_PASSWORD}" \
   "${REDIS_PASSWORD}"
 
-docker pull "${IMAGE}"
 
 if docker inspect "${BOOTSTRAP_NAME}" >/dev/null 2>&1; then
   docker rm -f "${BOOTSTRAP_NAME}" >/dev/null
@@ -169,7 +197,7 @@ fi
 # in compose.yml.
 "${COMPOSE[@]}" rm -sf bootstrap >/dev/null 2>&1 || true
 
-if ! "${COMPOSE[@]}" up -d --remove-orphans --wait --wait-timeout 180; then
+if ! IMAGE="${TARGET_IMAGE_ID}" "${COMPOSE[@]}" up --pull missing -d --remove-orphans --wait --wait-timeout 180; then
   echo "compose up failed; rolling back" >&2
   ROLLBACK_MODE=auto "${ROLLBACK_SCRIPT}"
   exit 1

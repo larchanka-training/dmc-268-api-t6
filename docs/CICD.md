@@ -38,7 +38,8 @@ flowchart TD
   smoke --> gate
   gate -->|нет| stop["CI зелёный, без выката"]
   gate -->|да| push["push только :sha в GHCR"]
-  push --> deploy["compose up по digest на staging"]
+  push --> admission["bundle + GitLab target-image preflight\nдо первого SCP/SSH"]
+  admission --> deploy["compose up по admitted image ID на staging"]
   deploy --> health["GET /healthcheck"]
   health -->|ok| promote["promote digest → :staging"]
   promote --> done["staging обновлён"]
@@ -66,7 +67,7 @@ flowchart TD
 | `Docker image security scan` | после сборки | `contents: read` | Trivy `CRITICAL`/`HIGH` |
 | `Webhook container smoke` | PR и `main` | `contents: read` | после `Docker image build`: собранный образ применяет миграции (`alembic upgrade head`) к service-контейнеру PostgreSQL 17 и стартует API с одноразовым `GITHUB_WEBHOOK_SECRET` (`openssl rand`, маскируется, не секрет репозитория); после `GET /healthcheck` — `scripts/webhook_smoke.py --count 50`: подписанная доставка → 202 `pending`, повтор → 202 `duplicate`, испорченная подпись → 401, 50 новых доставок → 202 и p50/p95/max. Затем стартуют заглушка GitHub `scripts/github_stub.py` (порт 9999) и `webhook-worker` из того же образа (`python -m app.webhook_worker`, одноразовый ключ App из `openssl genrsa`, `GITHUB_API_URL` на заглушку); job до 90 с ждёт в его логе строку исхода доставки `labeled` — `status=ignored_unknown_repository detail=action=labeled unknown_repository` (репозиторий 101 не заведён, Run не создаётся, RabbitMQ не нужен); при падении печатает логи воркера и заглушки. Имя — required check в правилах `main` (с 04.10.2026), менять только вместе с ними. Входит в `needs` у `Push Docker image` |
 | `Push Docker image` | только `main` | `contents: read`, `packages: write`, `actions: read` | push `:sha`, resolve digest (тот же artifact, что прошёл Trivy) |
-| `Deploy staging` | только `main` | `contents: read`, `packages: read` | выбор цели (курсовой VPS или Terraform-хост, §8), подготовка хоста (Docker, на VPS — edge-прокси), Compose по digest, health check, авто-rollback после переключения релиза (на первом выкате без previous — bootstrap); до переключения релиз сохраняется (§5, «Действия при отказе») |
+| `Deploy staging` | только `main` | `contents: read`, `packages: read` | выбор цели (курсовой VPS или Terraform-хост, §8), bundle и networkless GitLab preflight в immutable target image до SCP/SSH, подготовка хоста (Docker, на VPS — edge-прокси), Compose по digest, health check, авто-rollback после переключения релиза (на первом выкате без previous — bootstrap); до переключения релиз сохраняется (§5, «Действия при отказе») |
 | `Deploy monitoring` | только `main`, после успешного `Deploy staging` | `contents: read` | загружает `deploy/monitoring` в `/opt/dmc-268-monitoring` и запускает его `deploy.sh` ([MONITORING.md](MONITORING.md) §6). Отдельный job и своя группа concurrency `staging-monitoring`: его сбой не откатывает приложение, а ожидание не отменяет `Promote staging tag` и не отменяется им |
 | `Promote staging tag` | после успешного health check | `contents: read`, `packages: write` | под lock `staging-deploy` читает `.deploy-state` на VM; если там всё ещё этот digest — `:staging-previous` ← `:staging`, `:staging` ← проверенный digest, иначе warning и пропуск |
 
@@ -83,7 +84,7 @@ flowchart TD
 1. Settings → Environments → `staging`: Deployment branches → только `main`; для Terraform-хоста заполнить secrets/variables environment (доступ к курсовому VPS — organization secrets и repository variables, §8). Для ссылки на конкретный Run задать публичную Environment variable `PORTAL_URL` адресом UI (§2.1). Required reviewers по умолчанию не включать — см. [SECRETS.md](SECRETS.md) §2.
 2. Push (или merge) в `main`.
 3. Дождаться зелёных проверок и job **Push Docker image** (immutable `:sha` + digest в логах).
-4. Job **Deploy staging** выбирает цель (§8), копирует `deploy/` в `APP_DIR` (`/opt/dmc-268-api` на Terraform-хосте, `/opt/dmc-268-api-staging` на курсовом VPS), готовит хост и выкатывает образ по digest; bootstrap снимается только после `docker pull` и перед `compose up`.
+4. Job **Deploy staging** выбирает цель (§8), собирает bundle и проверяет GitLab config в точном target digest до первого upload/SSH; только после успеха копирует `deploy/` в `APP_DIR` (`/opt/dmc-268-api` на Terraform-хосте, `/opt/dmc-268-api-staging` на курсовом VPS), готовит хост и выкатывает образ по digest; на хосте candidate env-файлы и тот же local image ID проходят admission до замены live config/state; bootstrap снимается после допуска и перед `compose up --pull missing`.
 5. Runner проверяет `GET /healthcheck` снаружи, 12 × 5 с: Terraform-хост — `STAGING_HEALTH_URL` или `http://$STAGING_HOST/healthcheck`; курсовой VPS — `https://staging-api.<APP_DOMAIN>/healthcheck` через edge-прокси.
 6. Успех: job **Promote staging tag** продвигает проверенный digest в `:staging`, прежний `:staging` сохраняется как `:staging-previous`. Неуспех deploy или health: авто-rollback (первый выкат без previous → bootstrap), но deploy, остановленный до переключения релиза, оставляет релиз как есть (§5, «Действия при отказе»); отдельное сообщение при ошибке rollback, job красный.
 
@@ -244,6 +245,57 @@ staging».
 
 ---
 
+### 2.4. GitLab staging и trusted operator (#335)
+
+Полный setup и команды create → bind-project → inspect → activate / revoke находятся
+в [SECRETS.md, Installed GitLab](SECRETS.md#installed-gitlab--защищённая-конфигурация-и-управление-169).
+Keyring — protected Environment secret `GITLAB_CREDENTIAL_KEYS`; variables —
+`GITLAB_ACTIVE_KEY_ID`, `GITLAB_ALLOWED_ORIGINS`, optional `GITLAB_PRIVATE_ORIGINS` и
+`GITLAB_WEBHOOK_INTAKE_ENABLED`. JSON в GitHub UI вводится raw, без shell quote wrappers.
+
+`gitlab.env` (0600) получает только core/private config и подключается к обоим workers
+и `gitlab-admin` под profile `gitlab-operator`. API получает только admission flag в
+`api.env`, без keyring/PAT. В обычном `compose up` operator не стартует; его entrypoint
+`python -m app.gitlab_admin` принимает subcommand, DB и `gitlab.env`, без ports,
+GitHub/LLM credentials и broker/cache. Он не создаёт подключения при deploy.
+Compose run команды используют текущие project, `.env`, `compose.yml` и edge/ports
+override, `--no-deps -T`; secret JSON идёт в `--secrets-fd 0` через stdin.
+Operator использует `pull_policy: missing`, поэтому cached reviewed image после deploy
+не требует нового login. При отсутствии cache нужен отдельный authorized GHCR pull/login
+через protected stdin; deployment удаляет временный pull token. В установленном
+Compose 2.19 у `run` нет `--pull`; policy live API/workers/bootstrap остаётся `always`.
+
+Без GitLab settings всё остаётся default-off. Начальная подготовка допускает полный
+runtime с API flag `false`; активировать конкретную разрешённую installation нужно
+отдельно, затем включить process admission. Частичный/nonempty invalid runtime,
+недопустимый boolean или nonempty malformed private origins отклоняется. Пустой или
+unset GitHub source пропускается; private project на gitlab.com не требует private
+network opt-in. Custom CA mounts этим изменением не добавлены.
+
+CI до **первого** SCP/SSH запускает target-image validator с `--network none` и
+protected temporary env input, без secret argv. Registry token передаётся stdin,
+`DOCKER_CONFIG` и input удаляются на всех путях. Manual deploy сначала stage-ит role
+files: отсутствие `APP_SECRETS_B64` сохраняет текущие значения; CI explicit empty
+bundle удаляет их. Admission предшествует изменениям role files, `.env`, state,
+switch marker и сервисов. Запрошенный tag разрешается один раз в immutable registry
+release ref; GitLab probe и startup используют один local image ID, `up --pull missing`
+не даёт service `pull_policy: always` повторно подтянуть изменившийся tag.
+
+Повторный deploy/rollback не создаёт installation, не вращает PAT/keyring и не меняет
+binding. Rollback сохраняет текущие secrets/config и DB identity, проверяет существующий
+schema guard и GitLab settings того же target ID. Если новый helper отсутствует, но
+есть #169 runtime/API parsers, они выполняют ту же проверку. Unknown target с GitLab
+config отклоняется до live mutation; truly absent GitLab config допускает старый
+GitHub-only image (schema guard для rollback всё равно обязателен).
+Не удаляйте key ID, пока они нужны для сохранённого ciphertext; отключение одной
+тестовой installation — её revoke, а не выключение других tenants общим API flag.
+
+Это wiring/runbook, не доказательство живого MR. Staging acceptance требует protected
+operator/PAT/webhook доступ, reviewed image, prompts/rules/workers/LLM и реальный
+succeeded GitLab run с inline findings, одной summary, replay без дублей и revoke.
+GitLab onboarding UI не добавлен: [UI #173](https://github.com/larchanka-training/dmc-268-ui-t6/issues/173)
+— общий docs follow-up; GitLab checklist — [#169 comment](https://github.com/larchanka-training/dmc-268-api-t6/issues/169#issuecomment-6399969129).
+
 ## 3. Образ и health check
 
 Образ слушает `:8000`, Uvicorn `app.main:app`, пользователь `app`.
@@ -261,6 +313,7 @@ GET /healthcheck
 | `bootstrap` | тот же образ, разово: `alembic upgrade head`, сид промптов | — | проектная |
 | `worker` | тот же образ, `python -m app.worker` (#34): очереди ревью, очередь `index.repo` индексатора графа (#142), leader-цикл | — | только проектная |
 | `webhook-worker` | тот же образ, `python -m app.webhook_worker` (#11): разбор квитанций вебхуков | — | только проектная |
+| `gitlab-admin` | тот же образ, `python -m app.gitlab_admin`, только profile `gitlab-operator`; вручную `run --no-deps -T` | — | проектная DB, без published ports |
 | `postgres` | `postgres:17.11-alpine`, по digest | том `postgres-data` | только проектная |
 | `rabbitmq` | `rabbitmq:4.3.6-management-alpine`, по digest, `hostname: rabbitmq` | том `rabbitmq-data` | только проектная |
 | `redis` | `redis:8.10.2-alpine`, по digest, пароль, без персистентности, `maxmemory 128mb` + `allkeys-lru` (кэш, SD §10) | — | только проектная |
@@ -365,7 +418,7 @@ policy/context #136: ревизии `20261012_0030` и `20261011_0029`, их п�
 Восстановление удалённых данных требует проверенного backup, согласованного плана и
 образа под восстановленную схему (§5); повторный upgrade не заменяет восстановление БД.
 
-`api` стартует после успешного `bootstrap` и здорового `postgres`. От RabbitMQ и Redis он не зависит: к брокеру API подключается при первой публикации (`LazyAmqpPublisher`), поэтому сбой брокера или кэша не мешает пересозданному `api` стартовать. `up --wait` всё равно ждёт healthcheck каждого сервиса, и падение любого запускает авто-rollback. Секреты приложения приходят в каждый контейнер только через env-файлы его роли: `api.env` → `api`, `app.env` (ключ App) → оба воркера, `worker.env` (LLM и `PORTAL_URL`) → `worker`, `webhook-worker.env` (логин бота) → `webhook-worker` — [SECRETS.md](SECRETS.md) §1, §3.
+`api` стартует после успешного `bootstrap` и здорового `postgres`. От RabbitMQ и Redis он не зависит: к брокеру API подключается при первой публикации (`LazyAmqpPublisher`), поэтому сбой брокера или кэша не мешает пересозданному `api` стартовать. `up --wait` всё равно ждёт healthcheck каждого сервиса, и падение любого запускает авто-rollback. Секреты приложения приходят в каждый контейнер только через env-файлы его роли: `api.env` → `api`, `app.env` (ключ App) → оба воркера, `worker.env` (LLM и `PORTAL_URL`) → `worker`, `webhook-worker.env` (логин бота) → `webhook-worker`, `gitlab.env` (keyring/origins) → оба workers и operator profile — [SECRETS.md](SECRETS.md) §1, §3.
 
 Воркеры стартуют после успешного `bootstrap` и здоровых `postgres` и `rabbitmq`: `worker` без брокера не объявит топологию очередей, а `webhook-worker` при проекции квитанций создаёт прогоны и публикует их в очередь ревью (#52). HTTP-порта у воркеров нет, поэтому HTTP-healthcheck образа у них заменён: процесс раз в 10 с трогает heartbeat-файл (`WORKER_HEARTBEAT_FILE`, `app/common/infrastructure/heartbeat.py`) — `worker` только после подключения консьюмеров (двух ревью и `index.repo`; без GitHub App — только ревью), — а healthcheck считает контейнер больным, если файлу больше 30 с. Воркер, упавший на старте (например, без `GITHUB_APP_BOT_LOGIN` или `RABBITMQ_URL`), или процесс с замороженным циклом событий не становится healthy, `up --wait` падает, и `deploy.sh` откатывает выкат. Heartbeat — отдельная задача того же цикла событий, поэтому зависшую работу он не ловит: застрявшее на одном сообщении ревью или проход `webhook-worker`, который каждый раз падает (например, с битым PEM App: ошибка уходит в лог, проход возвращает 0), оставляют контейнер healthy. Это намеренно: временная недоступность GitHub или БД не должна валить выкат; зависшую работу видно по логам и метрикам очередей, не по healthcheck. Docker не перезапускает контейнер, ставший unhealthy уже после выката: `restart: unless-stopped` срабатывает только при выходе процесса.
 
@@ -390,7 +443,7 @@ policy/context #136: ревизии `20261012_0030` и `20261011_0029`, их п�
 1. **Автоматический.** Deploy или health check не прошли → шаг rollback вызывает `rollback.sh` с `ROLLBACK_MODE=auto` и `DEPLOY_RUN` этого run. Откат выполняется, только если `deploy.sh` этого run дошёл до переключения релиза: тогда скрипт поднимает образ из `.deploy-state.previous` и не записывает упавший образ в previous — повторный откат не вернёт сломанный релиз; на первом выкате без previous release восстанавливается bootstrap nginx. При падении `compose up` rollback вызывается и из `deploy.sh`. Какие отказы запускают откат и какой релиз становится целью — таблица в начале подраздела «Действия при отказе». Данные PostgreSQL не сбрасываются. Тег `:staging` в GHCR не меняется до успешного health check.
 2. **Ручной.** Actions → **Rollback staging** → Run workflow, ветка `main` (с другой ветки jobs пропускаются; Environment `staging` тоже ограничен веткой `main`, см. [SECRETS.md](SECRETS.md)).
    - `reason` — обязателен.
-   - Пустой `image` выбирает образ из `.deploy-state.previous`; релиз, с которого откатились, становится новым previous (как `:staging` → `:staging-previous`). После завершённого автоотката на образ приложения или отказа `docker login` при deploy этот файл уже указывает на работающий релиз: пустой `image` применяет его повторно и печатает `rolled back to …`. При успешном `docker pull :staging` promotion сдвигает `:staging-previous` на тот же релиз; проверки на совпадение digest нет. Для отката дальше назад задайте явный SHA или digest. Если previous отсутствует (в том числе после автоотката первого выката в bootstrap), пустой `image` снова восстанавливает bootstrap, печатает `restored bootstrap container`, а promotion пропускается.
+   - Пустой `image` выбирает образ из `.deploy-state.previous`; релиз, с которого откатились, становится новым previous (как `:staging` → `:staging-previous`). После завершённого автоотката на образ приложения этот файл уже указывает на работающий релиз: пустой `image` применяет его повторно и печатает `rolled back to …`. При успешном `docker pull :staging` promotion сдвигает `:staging-previous` на тот же релиз; проверки на совпадение digest нет. Для отката дальше назад задайте явный SHA или digest. Если previous отсутствует (в том числе после автоотката первого выката в bootstrap), пустой `image` снова восстанавливает bootstrap, печатает `restored bootstrap container`, а promotion пропускается.
    - Конкретная версия — полный 40-символьный git SHA (→ `ghcr.io/<owner>/dmc-268-api-t6:<sha>`) или полный `ghcr.io/...@sha256:...`. Тег разрешается в immutable digest этого репозитория до admission; `staging-previous` и другие alias могут пройти promotion по сохранённому digest. Образ из другого реестра или репозитория по-прежнему валит promotion allowlist. Для точного выбора релиза предпочтителен явно проверенный digest.
    - На курсовом VPS (режим `edge`) workflow выкладывает `deploy/edge/Caddyfile` из своего checkout и делает `caddy reload`, поэтому до первого обращения к хосту шаг `caddy validate` проверяет этот Caddyfile той же командой, что job `Edge Caddyfile validate`; при ошибке откат падает, не тронув VPS.
 3. После отката проверка снаружи: для образа API — `/healthcheck`, для bootstrap — `GET /` с HTTP 200. Workflow синхронизирует `:staging` с фактически запущенным образом; bootstrap пропускает promotion, неожиданная ссылка на образ валит job.
@@ -420,8 +473,8 @@ registry сохраняется); отсутствующая, неоднозна
 локальный `sha256:<image-id>` — только seam verifier после pull boundary: обычный Docker
 не pull-ит такой ref, а wrapper проверяет уже собранный ID. Короткие Docker aliases
 repository не нормализуются: без полного repository и подтверждённого digest допуска нет.
-Probe и все четыре app roles (`api`, `worker`, `webhook-worker`, `bootstrap`) получают один
-image ID через явный `IMAGE` override; rollback up использует `--pull missing`. Поэтому перемещение
+Schema probe, GitLab preflight и все четыре app roles (`api`, `worker`, `webhook-worker`, `bootstrap`) получают один
+image ID через явный `IMAGE` override; deploy и rollback up используют `--pull missing`. Поэтому перемещение
 remote/local тега между probe и up не меняет проверенный образ. `.env` и `current_image` содержат
 immutable release ref, по которому ручной workflow делает promotion. Pinned store images могут
 скачиваться, если отсутствуют локально. App ID уже есть после
@@ -477,9 +530,10 @@ Compose-файлами и env-file. Для этого восстановлени
 
 | Где остановился выкат | Шаг rollback в CI | Цель и состояние хоста |
 |---|---|---|
-| Шаг workflow до Deploy: «Upload deploy files», «Upload edge proxy files», «Prepare host», «Wait for the edge certificate», «Bundle application secrets» | Не запускается: его `if:` смотрит только на Deploy и Health check | Отката нет, работает прежний релиз. Уже выложенные Compose-файлы и скрипты, изменения `provision.sh` и edge-прокси (`caddy reload`) не возвращаются |
-| `deploy.sh` до переключения: аргументы, `DEPLOY_MODE`/`EDGE_ALIAS`, пароли хранилищ, bundle секретов, `docker login` | Печатает `release unchanged: ...` и завершается с кодом 0 до чтения `.env`, проверки `DEPLOY_MODE` и вызовов docker | Отката нет: контейнеры, `.env` и `.deploy-state` остаются на работающем релизе. После отказа `docker login` env-файлы ролей уже записаны из bundle, а `.deploy-state.previous` указывает на работающий релиз |
-| `deploy.sh` после переключения: запись `.env`, `docker pull`, снятие bootstrap nginx | Откатывает | `.deploy-state.previous` — релиз, работавший до этого выката; `.env` переписывается под него |
+| «Bundle application secrets» / «Validate GitLab deployment configuration», до первого upload/SSH | Не запускается: Deploy ещё не выполнялся | Live хост не затронут; удалить/исправить source config и повторить reviewed workflow |
+| Шаг workflow до Deploy: «Upload deploy files», «Upload edge proxy files», «Prepare host», «Wait for the edge certificate» | Не запускается: его `if:` смотрит только на Deploy и Health check | Отката нет, работает прежний релиз. Уже выложенные Compose-файлы и скрипты, изменения `provision.sh` и edge-прокси (`caddy reload`) не возвращаются |
+| `deploy.sh` до переключения: аргументы, `DEPLOY_MODE`/`EDGE_ALIAS`, пароли хранилищ, candidate bundle, `docker login`, pull, identity/GitLab admission | Печатает `release unchanged: ...` и завершается с кодом 0 до чтения `.env`, проверки `DEPLOY_MODE` и вызовов docker | Отката нет: контейнеры, role-file bytes/permissions, `.env`, `.deploy-state`, `.previous` и switch marker остаются прежними; временные файлы/registry auth удалены |
+| `deploy.sh` после переключения: запись `.env`, снятие bootstrap nginx | Откатывает | `.deploy-state.previous` — релиз, работавший до этого выката; `.env` переписывается под него |
 | `deploy.sh`, `compose up` | `deploy.sh` откатывает сам, шаг CI повторяет откат идемпотентно | `.deploy-state.previous` |
 | Health check | Откатывает | `.deploy-state.previous` |
 | Первый выкат (нет `.deploy-state`): отказ после переключения или health check | Откатывает | bootstrap nginx |
