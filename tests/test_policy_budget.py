@@ -766,6 +766,31 @@ def test_provenance_guard_rejects_a_retrieved_excerpt_without_a_repository(
     assert "has no repository" in exc_info.value.message
 
 
+@pytest.mark.parametrize("side", ["RIGHT", "LEFT"], ids=["right", "left"])
+@pytest.mark.parametrize("with_snapshot", [True, False], ids=["snapshot", "no-snapshot"])
+def test_provenance_guard_rejects_a_retrieved_excerpt_without_a_revision(
+    with_snapshot: bool, side: Literal["RIGHT", "LEFT"]
+) -> None:
+    # A RAG block is read at a side of the PR: without a revision no side check can run.
+    snapshot = make_snapshot()
+    block = ManifestBlock(
+        block_id="b-rag",
+        source_role=SourceRole.RETRIEVED_EXCERPT,
+        source_kind="source_code",
+        path="app/helper.py",
+        side=side,
+        repository_id=snapshot.repository_id,
+    )
+    with pytest.raises(PolicyError) as exc_info:
+        verify_provenance_pre_send_guard(
+            _code_manifest(snapshot, block),
+            context=_code_context(snapshot, head_sha="sha_head_123"),
+            snapshot=snapshot if with_snapshot else None,
+        )
+    assert exc_info.value.code == PolicyErrorCode.CONTEXT_VIOLATION
+    assert "has no revision" in exc_info.value.message
+
+
 def test_provenance_guard_passes_a_non_retrieved_code_block_without_a_repository() -> None:
     # The legacy path's code blocks carry no repository: only a RAG block must name one.
     snapshot = make_snapshot()

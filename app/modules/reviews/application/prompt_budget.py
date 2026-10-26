@@ -410,12 +410,17 @@ def verify_provenance_pre_send_guard(
                 )
 
         # 4. Repository validation (D7, #144): a code block belongs to the snapshot's
-        # repository, and a RAG block always names one.
+        # repository, and a RAG block always names one and the revision it was read at.
         if is_code:
             if block.source_role == SourceRole.RETRIEVED_EXCERPT and block.repository_id is None:
                 raise PolicyError(
                     PolicyErrorCode.CONTEXT_VIOLATION,
                     f"Block '{block.block_id}' has no repository",
+                )
+            if block.source_role == SourceRole.RETRIEVED_EXCERPT and block.revision is None:
+                raise PolicyError(
+                    PolicyErrorCode.CONTEXT_VIOLATION,
+                    f"Block '{block.block_id}' has no revision",
                 )
             if (
                 snapshot is not None
