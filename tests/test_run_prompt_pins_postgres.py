@@ -14,7 +14,11 @@ from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.bootstrap.seed_prompts import PromptAsset, load_prompt_assets, seed_prompt_versions
-from app.modules.reviews.application.conventions import CachedConventions, GeneratedConventions
+from app.modules.reviews.application.conventions import (
+    CachedConventions,
+    GeneratedConventions,
+    conventions_cache_key,
+)
 from app.modules.reviews.application.policy_snapshot import (
     ExecutionProfile,
     PromptBindings,
@@ -437,7 +441,35 @@ def test_historical_run_keeps_todays_pins_and_digest(env: Env) -> None:
 
 
 @pytest.mark.integration
-def test_complete_pins_make_snapshot_ready_but_prompt_input_stays_legacy(env: Env) -> None:
+@pytest.mark.parametrize(
+    ("v4_packaged", "version", "checksum"),
+    [
+        pytest.param(
+            False,
+            "v3",
+            "eb851e7fc2329eb7bdff015ec0fda945c46111ec5c884934ed6f6d6803883452",
+            id="seed-up-to-v3",
+        ),
+        pytest.param(
+            True,
+            "v4",
+            "5738227c7352228d29975e0512b5b5d3354eff31c9d161ca72086a776e9c498f",
+            id="full-seed",
+        ),
+    ],
+)
+def test_complete_pins_make_snapshot_ready_and_the_pinned_prompt_picks_the_path(
+    env: Env, v4_packaged: bool, version: str, checksum: str
+) -> None:
+    # Up to v3 a new run stays legacy; the full seed (F2) activates v4 and the snapshot path.
+    assets = tuple(
+        asset
+        for asset in _packaged()
+        if v4_packaged or not (asset.key == "review.system" and asset.version > 3)
+    )
+    # The review prompt row a new run pins: the newest seeded one, as reviewed.
+    pinned_row = ("review.system", int(version.removeprefix("v")), checksum)
+
     async def scenario() -> None:
         engine = env.engine()
         factory = async_sessionmaker(engine, expire_on_commit=False)
@@ -450,10 +482,14 @@ def test_complete_pins_make_snapshot_ready_but_prompt_input_stays_legacy(env: En
 
         try:
             await _ready(factory)
-            await _seed(factory, _packaged())
+            await _seed(factory, assets)
             async with factory.begin() as session:
                 run_id = await _insert(session)
             await _claim(factory, run_id, 1)
+            async with factory() as session:
+                run = await session.get(Run, run_id)
+                assert run is not None
+                assert await _describe(session, run.prompt_version_id) == pinned_row
             prepare = PreparePolicySnapshot(uow_factory=uow, source_factory=lambda pins: Source())
             vcs = Vcs()
             stage = ReviewContextStage(
@@ -471,9 +507,18 @@ def test_complete_pins_make_snapshot_ready_but_prompt_input_stays_legacy(env: En
             # Lock 2 is lifted: the stored snapshot of a new run is ready for the LLM path.
             assert snapshot.prompt_bindings.is_complete is True
             assert snapshot.is_ready_for_llm is True
-            # The conventions cache identity still derives from the ignore policy alone.
-            assert stage.policy_key == snapshot.ignore_digest
-            # Lock 1 holds: the live review prompt input carries no snapshot.
+            assert snapshot.prompt_bindings.review_system_version == version
+            assert snapshot.prompt_bindings.review_system_checksum == checksum
+            if v4_packaged:
+                # The snapshot path: the stage serves the snapshot, and the conventions cache
+                # key is the repo-conventions-v2 digest (R5).
+                assert stage.snapshot_for_llm == snapshot
+                assert stage.policy_key == conventions_cache_key(snapshot, snapshot.ignore_digest)
+            else:
+                # Lock 1 holds: no snapshot for the LLM, and the conventions cache identity
+                # still derives from the ignore policy alone.
+                assert stage.snapshot_for_llm is None
+                assert stage.policy_key == snapshot.ignore_digest
             conventions_id = await _prompt_id(factory, "review.conventions", 2)
             prompt_input = await SqlAlchemyReviewPromptRepository(factory).get_review_prompt_input(
                 run_id,
@@ -482,6 +527,9 @@ def test_complete_pins_make_snapshot_ready_but_prompt_input_stays_legacy(env: En
                 ),
             )
             assert prompt_input is not None
+            assert prompt_input.review_binding is not None
+            assert prompt_input.review_binding.review_system_version == version
+            # The repository never attaches a snapshot; the stage serves it (above).
             assert prompt_input.policy_snapshot is None
         finally:
             await engine.dispose()

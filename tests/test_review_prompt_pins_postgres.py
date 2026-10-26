@@ -1,11 +1,11 @@
-"""Activating v3 never repoints an existing v2 run or its stored policy snapshot."""
+"""Activating a newer review prompt never repoints an existing run or its stored snapshot."""
 
 from __future__ import annotations
 
 import asyncio
 import os
 from collections.abc import Iterator
-from hashlib import sha256
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import cast
 from uuid import UUID, uuid4
@@ -47,6 +47,7 @@ from app.modules.reviews.infrastructure.policy_snapshot_unit_of_work import (
 from app.modules.reviews.infrastructure.review_prompt_repository import (
     SqlAlchemyReviewPromptRepository,
 )
+from app.modules.reviews.infrastructure.run_lifecycle_store import SqlAlchemyRunLifecycleStore
 from app.modules.reviews.infrastructure.run_processing_unit_of_work import (
     SqlAlchemyRunProcessingUnitOfWork,
 )
@@ -80,7 +81,12 @@ def prompt_env() -> Iterator[Env]:
 def test_v2_run_and_persisted_snapshot_retain_their_prompt_after_v3_activation(
     prompt_env: Env,
 ) -> None:
-    assets = load_prompt_assets(REPO_ROOT / "review/prompts")
+    # The v3 activation as it ran before F2 packaged v4.
+    assets = tuple(
+        asset
+        for asset in load_prompt_assets(REPO_ROOT / "review/prompts")
+        if not (asset.key == "review.system" and asset.version > 3)
+    )
     legacy_assets = tuple(
         asset for asset in assets if (asset.key, asset.version) != ("review.system", 3)
     )
@@ -245,13 +251,17 @@ def _assets(*keys: str) -> tuple[PromptAsset, ...]:
     )
 
 
-_V4_CONTENT = (
-    "---\nkey: review.system\nversion: 4\n---\nA #130 test fixture, not the packaged v4.\n"
+# The packaged review.system v4 (F2), as the seed stores it.
+_V4 = next(
+    asset
+    for asset in load_prompt_assets(REPO_ROOT / "review/prompts")
+    if (asset.key, asset.version) == ("review.system", 4)
 )
+_V4_CONTENT = _V4.content
 
 
 async def _bind_v4(factory: async_sessionmaker[AsyncSession], run_id: UUID) -> UUID:
-    """Bind the run to a review.system v4 fixture row; nothing in F1 seeds or activates v4."""
+    """Bind the run to an inactive row of the packaged v4; these tests seed up to v3 only."""
     v4 = uuid4()
     async with factory.begin() as session:
         await session.execute(
@@ -262,7 +272,7 @@ async def _bind_v4(factory: async_sessionmaker[AsyncSession], run_id: UUID) -> U
             {
                 "id": v4,
                 "content": _V4_CONTENT,
-                "checksum": sha256(_V4_CONTENT.encode()).hexdigest(),
+                "checksum": _V4.checksum,
             },
         )
         await session.execute(
@@ -459,6 +469,89 @@ def test_review_only_snapshot_of_a_run_that_now_pins_all_three_fails_before_any_
                 raised.value
             )
             assert events == []
+        finally:
+            await engine.dispose()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.integration
+def test_v3_run_and_snapshot_keep_v3_and_the_legacy_path_after_v4_activation(
+    prompt_env: Env,
+) -> None:
+    """The F2 deploy for a run created before its seed: binding, text, pins and snapshot stay."""
+    v3_content = (REPO_ROOT / "review/prompts/review.system.v3.md").read_text(encoding="utf-8")
+
+    async def scenario() -> None:
+        engine = prompt_env.engine()
+        factory = async_sessionmaker(engine, expire_on_commit=False)
+        prompts = SqlAlchemyReviewPromptRepository(factory)
+
+        def uow() -> SqlAlchemyPolicySnapshotUnitOfWork:
+            return SqlAlchemyPolicySnapshotUnitOfWork(
+                factory, execution_profile=make_complete_execution_profile()
+            )
+
+        try:
+            await _ready(factory)
+            async with factory.begin() as session:
+                await seed_prompt_versions(session, _assets())
+                run_id = await _insert(session)
+            await _claim(factory, run_id, 1)
+            first = _stage(factory)
+            await first.begin(run_id)
+            assert first.snapshot_for_llm is None
+            async with uow() as work:
+                pins = await work.policy.get_pins(run_id)
+                snapshot = await work.policy.get_snapshot(run_id)
+            assert pins is not None and pins.prompt_bindings.is_complete
+            assert pins.prompt_bindings.review_system_version == "v3"
+            assert snapshot is not None and snapshot.is_ready_for_llm
+            async with factory() as session:
+                conventions_id = (
+                    await session.scalars(
+                        select(PromptVersion.id).where(
+                            PromptVersion.key == "review.conventions",
+                            PromptVersion.is_active.is_(True),
+                        )
+                    )
+                ).one()
+            conventions = GeneratedConventions(
+                CachedConventions(REPO_A, None, conventions_id, (), (), {}), None, True
+            )
+            before = await prompts.get_review_prompt_input(run_id, conventions)
+            assert before is not None and before.system == v3_content
+            assert before.review_binding == ReviewBinding(
+                pins.prompt_bindings.review_system_id, "review.system", "v3", "github"
+            )
+
+            async with factory.begin() as session:
+                assert await seed_prompt_versions(session, _packaged()) == 1
+            async with factory() as session:
+                active = (
+                    await session.scalars(
+                        select(PromptVersion).where(
+                            PromptVersion.key == "review.system", PromptVersion.is_active.is_(True)
+                        )
+                    )
+                ).one()
+            assert (active.version, active.checksum) == (
+                4,
+                PINNED_PROMPT_CHECKSUMS["review.system:v4"],
+            )
+
+            assert await prompts.get_review_prompt_input(run_id, conventions) == before
+            async with uow() as work:
+                assert await work.policy.get_pins(run_id) == pins
+                assert await work.policy.get_snapshot(run_id) == snapshot
+            async with factory.begin() as session:
+                assert await SqlAlchemyRunLifecycleStore(session).requeue(
+                    run_id, worker_id="worker", available_at=datetime.now(UTC)
+                )
+            await _claim(factory, run_id, 2)
+            retry = _stage(factory)
+            await retry.begin(run_id)
+            assert retry.snapshot_for_llm is None
         finally:
             await engine.dispose()
 
