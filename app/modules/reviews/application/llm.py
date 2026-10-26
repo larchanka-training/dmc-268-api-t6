@@ -84,9 +84,10 @@ class LlmCallFailed(Exception):
         self.error_code = error_code
         self.usage = usage
         self.calls = calls
-        # The provider Retry-After (#130): the longest of the gateway call's 429s when the
-        # final error is a rate limit, else the last call's. ``classify_failure`` makes it
-        # the run retry delay of an ``llm_rate_limited`` failure, up to one day (#247).
+        # The provider Retry-After (#130): the longest of the gateway call's 429s, over
+        # every rotated key, when the final error is a rate limit, else the last call's.
+        # ``classify_failure`` makes it the run retry delay of an ``llm_rate_limited``
+        # failure, up to one day (#247).
         self.retry_after_s = retry_after_s
 
     @property

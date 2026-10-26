@@ -2,10 +2,10 @@
 
 ``GatewayResult.accepted_call_id`` names the manifest of the call whose answer was accepted
 (R13, ``llm.verify``); ``LlmCallFailed.retry_after_s`` carries the provider's Retry-After
-(the longest of the call's 429s when the final error is a rate limit, else the last call's)
-for the verifier's retry delay and, through ``classify_failure``, for the run retry of an
-``llm_rate_limited`` failure (#247). No network: provider answers come from
-``httpx.MockTransport``.
+(the longest of the call's 429s, over every rotated key, when the final error is a rate
+limit, else the last call's) for the verifier's retry delay and, through
+``classify_failure``, for the run retry of an ``llm_rate_limited`` failure (#247). No
+network: provider answers come from ``httpx.MockTransport``.
 """
 
 from __future__ import annotations
