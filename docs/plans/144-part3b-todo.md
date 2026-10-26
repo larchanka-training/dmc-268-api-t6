@@ -42,6 +42,6 @@ Design: [144-part3b-plan.md](144-part3b-plan.md). One task → one commit, test 
 - Files: `review/README.md`, `docs/adr/0001-graph-rag-v1.md` §9, `docs/CONTEXT_AND_VERIFICATION_SPEC.md`
   §3.5, `docs/PIPELINE_SPEC.md` (`context.rag`), `docs/SYSTEM_DESIGN.md` (RAG "until v5" sentences only).
 - Done when:
-  - [ ] the canon names v5 as the version with the retrieved section; no other v3/v4 sweep (#130 G).
+  - [x] the canon names v5 as the version with the retrieved section; no other v3/v4 sweep (#130 G).
 
 **Commit:** `docs: name review.system.v5 as the prompt with the retrieved section (#144)`
