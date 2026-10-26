@@ -350,6 +350,10 @@ RETRIEVED = ManifestBlock(
     tokens=12,
     repository_id=REPO_A,
     truncated=True,
+    # ADR 0001 §9: the selection metadata of a retrieved block, next to its source ref.
+    selection_reason="rag_reverse_edge",
+    index_commit_sha="d" * 40,
+    edge_kind="uses_imported",
 )
 
 
@@ -433,6 +437,9 @@ def test_a_retrieved_excerpt_block_round_trips_with_its_side_ranges_and_reposito
         "tokens": 12,
         "repository_id": str(REPO_A),
         "truncated": True,
+        "selection_reason": "rag_reverse_edge",
+        "index_commit_sha": "d" * 40,
+        "edge_kind": "uses_imported",
     }
     rebuilt = ManifestBlock(
         **{
@@ -445,7 +452,7 @@ def test_a_retrieved_excerpt_block_round_trips_with_its_side_ranges_and_reposito
     assert rebuilt == RETRIEVED
     # SHA-256 of the canonical JSON of the blocks (sorted keys, no spaces; PIPELINE_SPEC §2),
     # computed apart from the store from the literal row above.
-    assert first["digest"] == "6a0ac717eb397610be5f213b0b947d954a33a84ae0b64d077e5f1d42b510e63d"
+    assert first["digest"] == "8b07db8bbf86d9bbf012aae76d9232cd0188a0c1252ccae26af633976683b0c2"
     # The digest follows the blocks: one changed token count gives another digest.
     assert first["digest"] != second["digest"]
     assert (
