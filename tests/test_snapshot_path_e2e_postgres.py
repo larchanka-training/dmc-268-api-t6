@@ -4,9 +4,12 @@
 gateway's conventions, review and verifier models), the factory's context stage and the real
 GitHub run source over in-memory HTTP transports. The run is bound to a review.system v4 row
 seeded only here: F1 ships no ``review.system.v4.md`` (that is F2). The v4 run takes the
-snapshot path: selector, snapshot, L2-L4 context, a single fit, a manifest per call, the
-review, the verifier with the cited excerpts, ``llm.verify`` and the publication input. A v3
-run in the same composition stays on the legacy path, and a retried v4 attempt keeps the pins.
+snapshot path: selector, snapshot, L2-L4 context counted with the pinned counter, a single
+fit, a manifest per call, the review citing the diff and the L3 excerpt, the verifier shown
+that excerpt, ``llm.verify`` and the publication input. A v3 run in the same composition
+stays on the legacy path. A retried v4 attempt keeps the snapshot and every pinned prompt
+while newer rows go live, and a provider failure after a model call sends the review to the
+fallback on a manifest row of its own.
 """
 
 from __future__ import annotations
@@ -19,6 +22,7 @@ import re
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
+from hashlib import sha256
 from typing import Any
 from uuid import UUID
 
@@ -65,11 +69,16 @@ _RULES = "2" * 40
 _AGENTS = "3" * 40
 _SERVICE_SHA = "4" * 40
 _MODELS_SHA = "5" * 40
+_TEST_SHA = "6" * 40
 _PATH = "pkg/service.py"
+# A changed test file: weighted below a source file, so it gets an L2 window, never L3.
+_TEST_PATH = "tests/test_service.py"
+_TEST_FILE = "def test_greet():\n    value = 1\n    assert value\n"
+_TEST_PATCH = "@@ -1,2 +1,3 @@\n def test_greet():\n+    value = 1\n     assert value"
 _ADDED_LINE = 12  # ``+    extra = 1`` of ``_GREET_PATCH``
 _LLM = LlmSettings(primary=PRIMARY, fallback=FALLBACK)
 _CONVENTIONS_ANSWER = {
-    "files": [{"path": _PATH, "relevance": "changed file"}],
+    "files": [{"path": path, "relevance": "changed file"} for path in (_PATH, _TEST_PATH)],
     "key_patterns": ["Pattern one", "Pattern two", "Pattern three"],
     "recommendations": [f"Check {index} (from: standard/correctness)" for index in range(5)],
 }
@@ -88,6 +97,8 @@ _FINDING: dict[str, Any] = {
 _SUMMARY = {"problem": "An added variable is unused.", "done_well": "Small.", "effort": "small"}
 _EVIDENCE = [{"block_id": file_block_id(_PATH), "start_line": _ADDED_LINE, "end_line": _ADDED_LINE}]
 _ROTATED = "---\nkey: review.conventions\nversion: 99\n---\nA rotated conventions prompt.\n"
+_ROTATED_REVIEW = "---\nkey: review.system\nversion: 98\n---\nA rotated review prompt.\n"
+_ROTATED_VERIFIER = "---\nkey: review.verifier\nversion: 97\n---\nA rotated verifier prompt.\n"
 
 
 @pytest.fixture
@@ -145,6 +156,7 @@ class GitHubHttp:
                 tree = [
                     {"path": _PATH, "mode": "100644", "type": "blob", "sha": _SERVICE_SHA},
                     {"path": "pkg/models.py", "mode": "100644", "type": "blob", "sha": _MODELS_SHA},
+                    {"path": _TEST_PATH, "mode": "100644", "type": "blob", "sha": _TEST_SHA},
                 ]
             else:
                 tree = [
@@ -159,10 +171,11 @@ class GitHubHttp:
                 _AGENTS: b"# AGENTS\n\nUse uv.\n",
                 _SERVICE_SHA: _SERVICE.encode(),
                 _MODELS_SHA: _MODELS.encode(),
+                _TEST_SHA: _TEST_FILE.encode(),
             }[sha]
             return _blob(sha, raw)
         if path.endswith("/pulls/3"):
-            payload = _pull_payload(changed_files=1, head_sha=_HEAD)
+            payload = _pull_payload(changed_files=2, head_sha=_HEAD)
             payload["number"] = 3
             return httpx.Response(200, json=payload)
         if path.endswith("/pulls/3/commits"):
@@ -171,16 +184,22 @@ class GitHubHttp:
             if self.files_unavailable:
                 self.files_unavailable -= 1
                 return httpx.Response(503, json={"message": "unavailable"})
-            file = {
-                "filename": _PATH,
-                "status": "modified",
-                "sha": _SERVICE_SHA,
-                "additions": 1,
-                "deletions": 0,
-                "changes": 1,
-                "patch": _GREET_PATCH,
-            }
-            return httpx.Response(200, json=[file])
+            files = [
+                {
+                    "filename": path,
+                    "status": "modified",
+                    "sha": sha,
+                    "additions": 1,
+                    "deletions": 0,
+                    "changes": 1,
+                    "patch": patch,
+                }
+                for path, sha, patch in (
+                    (_PATH, _SERVICE_SHA, _GREET_PATCH),
+                    (_TEST_PATH, _TEST_SHA, _TEST_PATCH),
+                )
+            ]
+            return httpx.Response(200, json=files)
         if "/compare/" in path:
             return httpx.Response(200, json={"merge_base_commit": {"sha": "c" * 40}})
         raise AssertionError(f"unexpected GitHub request {request.method} {request.url}")
@@ -197,10 +216,22 @@ class ModelHttp:
         body = json.loads(request.content)
         self.bodies.append(body)
         kind = self.kinds.pop(0)
+        if kind == "unavailable":
+            # One provider outage of the call. Within the slots E-1 keeps for the verifier the
+            # primary gets no second try: the gateway goes to the fallback.
+            return httpx.Response(503, json={"error": {"message": "unavailable"}})
         if kind == "conventions":
             answer: dict[str, Any] = _CONVENTIONS_ANSWER
         elif kind == "review-v2":
-            answer = {"findings": [{**_FINDING, "evidence_refs": _EVIDENCE}], "summary": _SUMMARY}
+            # The review cites the added line in the diff and in the L3 excerpt of the file.
+            [l3] = re.findall(
+                r'<excerpt block_id="([^"]+)" level="L3"', body["messages"][-1]["content"]
+            )
+            cited = [
+                *_EVIDENCE,
+                {"block_id": l3, "start_line": _ADDED_LINE, "end_line": _ADDED_LINE},
+            ]
+            answer = {"findings": [{**_FINDING, "evidence_refs": cited}], "summary": _SUMMARY}
         elif kind == "review-v1":
             answer = {"findings": [_FINDING], "summary": _SUMMARY}
         else:
@@ -232,6 +263,7 @@ class Observed:
     snapshots: list[UUID]
     pins: tuple[Any, ...]
     conventions_prompt: str
+    verifier_prompt: str
     bodies: list[dict[str, Any]]
     queue: Queue
 
@@ -259,7 +291,15 @@ async def _scenario(
     queue = Queue()
     github_http = GitHubHttp(files_unavailable=1 if retry else 0)
     review_kind = "review-v2" if v4 else "review-v1"
-    model_http = ModelHttp(["conventions", review_kind, *(["verifier"] if v4 else [])])
+    # On the retried attempt the provider refuses the review call once.
+    model_http = ModelHttp(
+        [
+            "conventions",
+            *(["unavailable"] if retry else []),
+            review_kind,
+            *(["verifier"] if v4 else []),
+        ]
+    )
     outcomes: list[str] = []
     async with (
         httpx.AsyncClient(
@@ -314,19 +354,32 @@ async def _scenario(
         outcomes.append(await process.handle_run.execute(run_id))
         if retry:
             async with factory.begin() as session:
-                # A newer conventions row goes live between the attempts; the run keeps its pin.
+                # Newer conventions, review and verifier rows go live between the attempts;
+                # the run keeps its pins.
                 await session.execute(
                     text(
-                        "UPDATE prompt_versions SET is_active=false WHERE key='review.conventions'"
+                        "UPDATE prompt_versions SET is_active=false WHERE key IN "
+                        "('review.conventions','review.system','review.verifier')"
                     )
                 )
-                await session.execute(
-                    text(
-                        "INSERT INTO prompt_versions (id,key,version,content,checksum,is_active) "
-                        "VALUES (gen_random_uuid(),'review.conventions',99,:content,:sum,true)"
-                    ),
-                    {"content": _ROTATED, "sum": "9" * 64},
-                )
+                for key, version, content in (
+                    ("review.conventions", 99, _ROTATED),
+                    ("review.system", 98, _ROTATED_REVIEW),
+                    ("review.verifier", 97, _ROTATED_VERIFIER),
+                ):
+                    await session.execute(
+                        text(
+                            "INSERT INTO prompt_versions "
+                            "(id,key,version,content,checksum,is_active) "
+                            "VALUES (gen_random_uuid(),:key,:version,:content,:sum,true)"
+                        ),
+                        {
+                            "key": key,
+                            "version": version,
+                            "content": content,
+                            "sum": sha256(content.encode()).hexdigest(),
+                        },
+                    )
                 await session.execute(
                     text(
                         "UPDATE runs SET available_at=clock_timestamp()-interval '1 minute' "
@@ -359,6 +412,12 @@ async def _scenario(
         "ON p.id = r.conventions_prompt_version_id WHERE r.id=:id",
         run_id,
     )
+    [(verifier_prompt,)] = await _rows(
+        factory,
+        "SELECT p.content FROM prompt_versions p JOIN runs r "
+        "ON p.id = r.verifier_prompt_version_id WHERE r.id=:id",
+        run_id,
+    )
     return Observed(
         run_id=run_id,
         outcomes=outcomes,
@@ -382,6 +441,7 @@ async def _scenario(
         ],
         pins=pins,
         conventions_prompt=conventions_prompt,
+        verifier_prompt=verifier_prompt,
         bodies=model_http.bodies,
         queue=queue,
     )
@@ -400,7 +460,8 @@ def _observe(env: Env, *, v4: bool, retry: bool = False) -> Observed:
     return asyncio.run(scenario())
 
 
-# The trace of a v4 attempt (PIPELINE_SPEC §7). The second ``context.build`` is the review
+# The trace of a v4 attempt, as built (G aligns the canon, PIPELINE_SPEC §7, with it). The
+# second ``context.build`` is the review
 # prompt read's own step, which F3 removes; ``llm.verify`` sits in the publishing transaction
 # right before ``review.postprocess``.
 _SNAPSHOT_PATH_STEPS = [
@@ -433,22 +494,36 @@ _LEGACY_STEPS = [
 
 
 def _assert_snapshot_path(
-    observed: Observed, *, attempt: int, earlier: tuple[str, ...] = ()
+    observed: Observed,
+    *,
+    attempt: int,
+    earlier: tuple[str, ...] = (),
+    review_fallback: bool = False,
 ) -> None:
     run_id, (review_pin, _, verifier_pin) = observed.run_id, observed.pins
     assert observed.state == ("publishing", None, attempt)
-    assert observed.tools == [*earlier, *_SNAPSHOT_PATH_STEPS]
+    steps = list(_SNAPSHOT_PATH_STEPS)
+    stages = ["conventions", "review", "verification"]
+    if review_fallback:
+        # The fallback is one more review call with a manifest of its own.
+        at = steps.index("llm.call", steps.index("llm.repo_conventions")) + 1
+        steps[at:at] = ["context.manifest", "llm.call"]
+        stages.insert(1, "review")
+    assert observed.tools == [*earlier, *steps]
     # Selector and snapshot: the run's one stored snapshot carries every call of the run.
     [snapshot_id] = observed.snapshots
     assert [policy["policy_snapshot_id"] for _, policy in observed.actions["policy.load"]] == [
         str(snapshot_id)
     ] * (1 + earlier.count("policy.load"))
-    assert observed.manifests == [
-        (snapshot_id, stage, attempt) for stage in ("conventions", "review", "verification")
-    ]
+    assert observed.manifests == [(snapshot_id, stage, attempt) for stage in stages]
+    # R19: the stage counts the blocks of a v4 run with the counter the profile pins
+    # (counter/v2, three characters per token): L1 the two hunks, L4 the ``User`` signature
+    # and docstring, L3 the whole service file, L2 the test file's window.
+    stage_build = observed.actions["context.build"][0][1]
+    assert stage_build["tokens_by_level"] == {"L1": 67, "L4": 15, "L3": 66, "L2": 16}
     calls = [request for request, _ in observed.actions["llm.call"]]
     manifests = observed.actions["context.manifest"]
-    assert [call["stage"] for call in calls] == ["conventions", "review", "verification"]
+    assert [call["stage"] for call in calls] == stages
     for call, (manifest_request, manifest) in zip(calls, manifests, strict=True):
         assert call["policy_snapshot_id"] == str(snapshot_id)
         assert (call["call_id"], call["manifest_id"]) == (
@@ -457,30 +532,47 @@ def _assert_snapshot_path(
         )
         # A single fit: the estimate of the sent prompt is the manifest's own count.
         assert call["input_tokens_estimate"] == manifest["input_tokens"]
+    bodies = observed.bodies
+    if review_fallback:
+        # The failed primary call and the fallback: one prompt, two calls, two rows.
+        assert [call["kind"] for call in calls[1:3]] == ["primary", "fallback"]
+        assert calls[1]["manifest_id"] != calls[2]["manifest_id"]
+        assert bodies[1]["messages"] == bodies[2]["messages"]
+        calls, manifests, bodies = ([items[0], *items[2:]] for items in (calls, manifests, bodies))
     assert calls[1]["prompt_version_id"] == str(review_pin)
     assert calls[2]["prompt_version_id"] == str(verifier_pin)
-    conventions_body, review_body, verifier_body = observed.bodies
+    conventions_body, review_body, verifier_body = bodies
     assert review_body["messages"][0]["content"] == _V4_CONTENT
     # L2-L4: the review gets the context excerpts of the stage, counted in its manifest.
     review_prompt = review_body["messages"][-1]["content"]
-    assert re.findall(
-        r'<excerpt block_id="[^"]+" level="(L[234])" path="([^"]+)"', review_prompt
-    ) == [
+    excerpts = re.findall(
+        r'<excerpt block_id="([^"]+)" level="(L[234])" path="([^"]+)"', review_prompt
+    )
+    assert [(level, path) for _, level, path in excerpts] == [
         ("L4", "pkg/models.py"),
         ("L3", _PATH),
+        ("L2", _TEST_PATH),
     ]
+    (l4, _, _), (l3, _, _), _ = excerpts
+    # The snapshot-path L4 id: the head and a digest, never the path.
+    assert re.fullmatch(r"L4:f{12}:[0-9a-f]{16}", l4)
     assert set(manifests[1][1]["tokens_by_role"]) == {
         "diff",
         "ast_excerpt",
         "source_excerpt",
         "policy_document",
     }
-    # The verifier gets the candidate's cited excerpt: the reference and the shown line.
+    # The verifier gets the candidate's citations: the diff line and the cited L3 excerpt.
     verifier_prompt = verifier_body["messages"][-1]["content"]
     block = file_block_id(_PATH)
     assert f'<ref block_id="{block}" start_line="12" end_line="12" />' in verifier_prompt
+    assert f'<ref block_id="{l3}" start_line="12" end_line="12" />' in verifier_prompt
     assert f'<file block_id="{block}" path="{_PATH}"' in verifier_prompt
     assert '<line n="12" type="added">    extra = 1</line>' in verifier_prompt
+    assert f'<excerpt block_id="{l3}" level="L3" path="{_PATH}"' in verifier_prompt
+    assert '<line n="12">    extra = 1</line>' in verifier_prompt
+    # Only the cited excerpt: neither the L4 signature nor the L2 window.
+    assert verifier_prompt.count("<excerpt ") == 1
     [(verify, decisions)] = observed.actions["llm.verify"]
     assert verify["manifest_id"] == manifests[2][1]["manifest_id"]
     assert verify["accepted_call_id"] == calls[2]["call_id"]
@@ -490,14 +582,27 @@ def _assert_snapshot_path(
     assert [
         (finding["path"], finding["line"], finding["evidence_refs"])
         for finding in output["findings"]
-    ] == [(_PATH, _ADDED_LINE, [{"block_id": block, "start_line": 12, "end_line": 12}])]
+    ] == [
+        (
+            _PATH,
+            _ADDED_LINE,
+            [
+                {"block_id": block, "start_line": 12, "end_line": 12},
+                {"block_id": l3, "start_line": 12, "end_line": 12},
+            ],
+        )
+    ]
     [(_, postprocess)] = observed.actions["review.postprocess"]
     assert postprocess["inline"] == 1
     assert [(pointer.run_id, pointer.findings_hash) for pointer in observed.queue.published] == [
         (run_id, postprocess["findings_hash"])
     ]
-    # The conventions call takes the run's pinned row, not the active one (R1).
+    # Every call takes the run's pinned row, not the active one (R1).
     assert conventions_body["messages"][0]["content"] == observed.conventions_prompt
+    # The verifier is sent the body of its pinned row, without the front matter.
+    assert verifier_body["messages"][0]["content"] == (
+        observed.verifier_prompt.split("\n---\n", 1)[1].strip()
+    )
 
 
 @pytest.mark.integration
@@ -512,14 +617,22 @@ def test_a_v4_run_takes_the_snapshot_path_through_the_worker_composition(env: En
 @pytest.mark.integration
 def test_a_retried_v4_attempt_keeps_the_snapshot_and_the_pins(env: Env) -> None:
     # The first attempt stores the snapshot, then the diff read fails and the run is retried.
-    # A newer conventions row goes live in between: the second attempt keeps the stored
-    # snapshot and the run's pinned prompts.
+    # Newer conventions, review and verifier rows go live in between: the second attempt keeps
+    # the stored snapshot and the run's pinned prompts. Its review call fails once at the
+    # provider, after the conventions call, and the fallback answers.
     observed = _observe(env, v4=True, retry=True)
 
     assert observed.outcomes == ["ack", "ack"]
     assert len(observed.queue.retries) == 1
-    _assert_snapshot_path(observed, attempt=2, earlier=("policy.load", "vcs.fetch_diff"))
-    assert all(_ROTATED not in body["messages"][0]["content"] for body in observed.bodies)
+    _assert_snapshot_path(
+        observed, attempt=2, earlier=("policy.load", "vcs.fetch_diff"), review_fallback=True
+    )
+    rotated = (_ROTATED, _ROTATED_REVIEW, _ROTATED_VERIFIER)
+    assert all(
+        prompt not in body["messages"][0]["content"]
+        for body in observed.bodies
+        for prompt in rotated
+    )
 
 
 @pytest.mark.integration
@@ -530,6 +643,10 @@ def test_a_v3_run_stays_on_the_legacy_path_in_the_same_composition(env: Env) -> 
     assert observed.state == ("publishing", None, 1)
     assert observed.tools == _LEGACY_STEPS
     assert observed.manifests == []
+    # A legacy run keeps the composition's counter (four characters per token) for the
+    # same blocks.
+    stage_build = observed.actions["context.build"][0][1]
+    assert stage_build["tokens_by_level"] == {"L1": 50, "L4": 11, "L3": 49, "L2": 12}
     calls = [request for request, _ in observed.actions["llm.call"]]
     assert [call["operation"] for call in calls] == ["conventions", "review"]
     # No snapshot-path keys on a legacy call (E-3) and no block ids in the legacy prompt.

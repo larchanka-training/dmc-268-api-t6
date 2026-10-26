@@ -353,6 +353,18 @@ Gates for every task: the four commands in the plan, with DB and vhost `imp130f`
     diff read fails once after `policy.load`) keeps the stored snapshot and the pinned
     conventions row although a newer one went live; a v3 run in the same composition writes no
     manifest, no `llm.verify` and no snapshot-path keys.
+  - final fix round (before push): the PR also changes a test file, so the context has an L2
+    window next to L3 and L4; the review cites the diff line and the L3 excerpt, and the verifier
+    prompt shows that excerpt only (mutant E1, no cited excerpt, fails). R19 through the
+    composition: the stage's `context.build` reports `tokens_by_level` counted with the pinned
+    counter/v2 on the v4 run and with the composition's four-character counter on the v3 run
+    (mutant E2, the stage never swaps, fails). The retried attempt rotates the conventions,
+    review and verifier rows and keeps all three pins. A same-model retry that reuses a manifest
+    row is unreachable here: within the slots E-1 keeps (`max_calls_per_attempt` 4), a failed
+    v4 call goes straight to the fallback, so the retried attempt has its review fail once at the
+    provider after the conventions call and asserts the fallback's own row; row reuse stays
+    covered at the gateway seam (`test_a_retry_reuses_the_manifest_of_its_call`). The step-list
+    comment says the order is as built, and G aligns PIPELINE_SPEC §7 with it.
 - **Done when:**
   - [ ] all gates pass;
   - [ ] the PR body has the D-2 order, the rollback floor and the D-1 staging query.
