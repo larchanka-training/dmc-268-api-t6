@@ -659,6 +659,19 @@ def test_stage_refuses_a_v4_run_over_the_policy_budget_at_policy_load(
         "policy_prompt_budget_exceeded: The rendered policy documents exceed the token budget "
         f"of the pinned profile | фактически {_POLICY_TOKENS}, допустимо {limit}"
     )
+    # RFS §9: the step records the diagnostic; policy.load fills the base the check lacks.
+    assert response["error"]["diagnostic"] == {
+        "code": "policy_prompt_budget_exceeded",
+        "source_path": None,
+        "policy_base_sha": "b" * 40,
+        "message": "The rendered policy documents exceed the token budget of the pinned profile",
+        "line": None,
+        "column": None,
+        "pattern_index": None,
+        "limit": limit,
+        "actual": _POLICY_TOKENS,
+        "retryable": False,
+    }
 
 
 def test_stage_counts_the_policy_with_the_counter_of_the_pinned_profile() -> None:

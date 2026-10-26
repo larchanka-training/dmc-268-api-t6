@@ -103,7 +103,13 @@ class LoadPolicyDocuments:
             raise self._unsupported(path)
         if entry.size is not None and entry.size > MAX_DOCUMENT_BYTES:
             raise _too_large(path, self._base_sha, entry.size)
-        raw = await self._source.read_blob(entry.oid)
+        try:
+            raw = await self._source.read_blob(entry.oid)
+        except PolicyError as exc:
+            # The source reads by blob SHA; only here is the document known (RFS §9).
+            if exc.source_path is not None:
+                raise
+            raise exc.located(path) from exc
         document = normalize_document(path, raw, blob_oid=entry.oid, policy_base_sha=self._base_sha)
         return LoadedPolicyDocument(document, raw)
 

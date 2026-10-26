@@ -250,8 +250,9 @@ def _invalid_pattern(pattern: str) -> tuple[int, str] | None:
 class IgnoreMatcher:
     """Match repository paths against the policy within the transition budget of a run."""
 
-    def __init__(self, policy: IgnorePolicy) -> None:
+    def __init__(self, policy: IgnorePolicy, *, policy_base_sha: str | None = None) -> None:
         self._patterns = tuple((pattern, pattern.split("/")) for pattern in policy.patterns)
+        self._policy_base_sha = policy_base_sha
         self._results: dict[str, str | None] = {}
         self._run_transitions = 0
         self._path_transitions = 0
@@ -262,7 +263,9 @@ class IgnoreMatcher:
             return self._results[path]
         if not is_supported_path(path):
             raise PolicyError(
-                PolicyErrorCode.PATH_INVALID, "A repository path violates the path contract"
+                PolicyErrorCode.PATH_INVALID,
+                "A repository path violates the path contract",
+                policy_base_sha=self._policy_base_sha,
             )
         self._path_transitions = 0
         segments = path.split("/")
@@ -280,12 +283,22 @@ class IgnoreMatcher:
             self._path_transitions > MAX_TRANSITIONS_PER_PATH
             or self._run_transitions > MAX_TRANSITIONS_PER_RUN
         ):
+            # The counter that crossed its limit, at the stop: a confirmed excess, a lower
+            # bound of the real cost and never shown as exact (RFS §9).
+            limit, actual = (
+                (MAX_TRANSITIONS_PER_PATH, self._path_transitions)
+                if self._path_transitions > MAX_TRANSITIONS_PER_PATH
+                else (MAX_TRANSITIONS_PER_RUN, self._run_transitions)
+            )
             raise PolicyError(
                 PolicyErrorCode.MATCH_BUDGET_EXCEEDED,
                 "The review-ignore policy is too expensive to evaluate",
-                limit=MAX_TRANSITIONS_PER_PATH
-                if self._path_transitions > MAX_TRANSITIONS_PER_PATH
-                else MAX_TRANSITIONS_PER_RUN,
+                source_path=RULES_DOCUMENT_PATH,
+                policy_base_sha=self._policy_base_sha,
+                limit=limit,
+                actual=actual,
+                unit="переходов",
+                actual_is_lower_bound=True,
             )
 
     def _match_segments(self, mask: list[str], path: list[str]) -> bool:

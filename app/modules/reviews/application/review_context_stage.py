@@ -464,31 +464,40 @@ class ReviewContextStage:
             raise RunCancelled("installation_unavailable")
         request = {"policy_base_sha": run.base_sha}
         async with traced_step(self._trace, run_id, "policy.load", request) as step:
-            self._snapshot = await self._prepare_policy.execute(run_id)
-            validate_execution_profile_versions(self._snapshot.execution_profile)
-            # The pinned review prompt picks the path. A snapshot-path run that cannot be
-            # served fails here, before the conventions call.
-            # CONTRACT: the snapshot's prompt bindings are the run's pins (checked on every
-            # read of a stored snapshot), so they name the review prompt the run pinned.
-            bindings = self._snapshot.prompt_bindings
-            snapshot_for_llm = snapshot_for_review(
-                ReviewBinding(
-                    bindings.review_system_id,
-                    bindings.review_system_key,
-                    bindings.review_system_version,
-                    run.provider,
-                ),
-                self._snapshot,
-            )
-            if snapshot_for_llm is not None:
-                # R7 (TL-8): policy documents over their budget end the attempt here,
-                # before the conventions and the review model; legacy runs are not checked.
-                _verify_policy_budget(snapshot_for_llm)
-            self._snapshot_for_llm = snapshot_for_llm
+            try:
+                self._snapshot = await self._prepare_policy.execute(run_id)
+                validate_execution_profile_versions(self._snapshot.execution_profile)
+                # The pinned review prompt picks the path. A snapshot-path run that cannot be
+                # served fails here, before the conventions call.
+                # CONTRACT: the snapshot's prompt bindings are the run's pins (checked on every
+                # read of a stored snapshot), so they name the review prompt the run pinned.
+                bindings = self._snapshot.prompt_bindings
+                snapshot_for_llm = snapshot_for_review(
+                    ReviewBinding(
+                        bindings.review_system_id,
+                        bindings.review_system_key,
+                        bindings.review_system_version,
+                        run.provider,
+                    ),
+                    self._snapshot,
+                )
+                if snapshot_for_llm is not None:
+                    # R7 (TL-8): policy documents over their budget end the attempt here,
+                    # before the conventions and the review model; legacy runs are not checked.
+                    _verify_policy_budget(snapshot_for_llm)
+                self._snapshot_for_llm = snapshot_for_llm
+            except PolicyError as exc:
+                # RFS §9: every policy failure of the run names its pinned base, also the
+                # checks that do not know it: the profile, the stored documents, the
+                # refusals of the review path selector and the policy budget.
+                if exc.policy_base_sha is None:
+                    exc.policy_base_sha = run.base_sha
+                raise
             step.response = policy_summary(self._snapshot)
         # The snapshot keeps validated masks; the matcher is rebuilt from them.
         self._matcher = IgnoreMatcher(
-            IgnorePolicy(self._snapshot.ignore_patterns, (), self._snapshot.ignore_digest)
+            IgnorePolicy(self._snapshot.ignore_patterns, (), self._snapshot.ignore_digest),
+            policy_base_sha=self._snapshot.policy_base_sha,
         )
 
     async def run(self, run_id: UUID) -> ReviewContextPayload | None:

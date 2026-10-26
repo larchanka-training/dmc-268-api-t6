@@ -16,6 +16,7 @@ from app.modules.reviews.application.execute_review import (
     ReviewPromptInput,
     ReviewPromptRepository,
 )
+from app.modules.reviews.application.policy_errors import PolicyError
 
 
 class RunTrace(Protocol):
@@ -100,11 +101,15 @@ async def traced_step(
         yield step
     except BaseException as exc:
         if trace is not None:
+            error: dict[str, Any] = {"type": type(exc).__name__, "message": str(exc)[:1000]}
+            if isinstance(exc, PolicyError):
+                # RFS §9: the structured fields of a policy failure live in the trace only.
+                error["diagnostic"] = exc.diagnostic()
             await trace.record(
                 run_id,
                 tool,
                 request,
-                {"error": {"type": type(exc).__name__, "message": str(exc)[:1000]}},
+                {"error": error},
                 started_at,
                 int((time.monotonic() - started) * 1000),
             )

@@ -7,6 +7,7 @@ from dataclasses import replace
 
 import pytest
 
+from app.modules.reviews.application import review_ignore
 from app.modules.reviews.application.policy_errors import PolicyError, PolicyErrorCode
 from app.modules.reviews.application.policy_snapshot import (
     CallManifest,
@@ -356,6 +357,26 @@ def test_provenance_guard_rejects_ignored_path() -> None:
         verify_provenance_pre_send_guard(manifest, snapshot=snapshot)
     assert exc_info.value.code == PolicyErrorCode.CONTEXT_VIOLATION
     assert "references ignored path matching deny-set" in exc_info.value.message
+
+
+def test_provenance_guard_match_budget_error_names_the_policy_base(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(review_ignore, "MAX_TRANSITIONS_PER_PATH", 1)
+    snapshot = make_snapshot(ignore_patterns=("**/*.md",))
+    block = ManifestBlock(
+        block_id="b-costly",
+        source_role=SourceRole.DIFF,
+        source_kind="source_code",
+        path="src/app.py",
+    )
+    manifest = CallManifest(
+        call_id=uuid.uuid4(), run_id=snapshot.run_id, stage="review", blocks=(block,)
+    )
+    with pytest.raises(PolicyError) as exc_info:
+        verify_provenance_pre_send_guard(manifest, snapshot=snapshot)
+    assert exc_info.value.code == PolicyErrorCode.MATCH_BUDGET_EXCEEDED
+    assert exc_info.value.policy_base_sha == "sha_base"
 
 
 def test_provenance_guard_rejects_path_exceeding_byte_limit() -> None:

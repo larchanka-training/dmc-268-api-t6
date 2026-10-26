@@ -279,7 +279,10 @@ def verify_provenance_pre_send_guard(
     in RunFailure("policy_context_violation") without sending the request.
     """
     ignore_matcher = (
-        IgnoreMatcher(IgnorePolicy(snapshot.ignore_patterns, (), snapshot.ignore_digest))
+        IgnoreMatcher(
+            IgnorePolicy(snapshot.ignore_patterns, (), snapshot.ignore_digest),
+            policy_base_sha=snapshot.policy_base_sha,
+        )
         if snapshot is not None and snapshot.ignore_patterns
         else None
     )

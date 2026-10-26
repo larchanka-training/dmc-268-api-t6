@@ -14,6 +14,7 @@ from uuid import UUID
 import httpx
 import pytest
 
+from app.modules.reviews.application import review_ignore
 from app.modules.reviews.application.check_runs import (
     CheckRunReport,
     CheckRunTarget,
@@ -33,8 +34,13 @@ from app.modules.reviews.application.handle_review_run import (
     update_check_run,
 )
 from app.modules.reviews.application.llm import LlmCallFailed, LlmErrorCode
-from app.modules.reviews.application.policy_errors import PolicyError, PolicyErrorCode
+from app.modules.reviews.application.policy_errors import (
+    PolicyError,
+    PolicyErrorCode,
+    policy_error_detail,
+)
 from app.modules.reviews.application.prompt_builder import ReviewContext
+from app.modules.reviews.application.review_ignore import IgnoreMatcher, parse_review_ignore
 from app.modules.reviews.application.review_output import InvalidReviewOutput
 from app.modules.reviews.application.run_failures import (
     RETRYABLE_ERROR_CODES,
@@ -884,6 +890,31 @@ def test_invalid_policy_fails_the_run_at_once_with_its_code() -> None:
     assert (run.state, run.error_code, run.attempt) == ("failed", "policy_document_too_large", 1)
     assert "`policy_document_too_large`" in check_runs.views[-1].summary
     assert "64 КиБ" in check_runs.views[-1].summary
+
+
+def test_exhausted_match_budget_fails_the_run_naming_the_document_and_the_count(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(review_ignore, "MAX_TRANSITIONS_PER_PATH", 20)
+    matcher = IgnoreMatcher(parse_review_ignore("```review-ignore\n*a*a*a*b\n```\n"))
+    run = FakeRun()
+
+    def pipeline(claimed: ClaimedAttempt) -> bool:
+        return matcher.match("a" * 40) is None
+
+    outcome = asyncio.run(handler(run, pipeline).execute(RUN))
+
+    assert outcome is DeliveryOutcome.ACK
+    assert (run.state, run.error_code, run.attempt) == (
+        "failed",
+        "policy_match_budget_exceeded",
+        1,
+    )
+    # The Run keeps the code and the safe message with its location (RFS §9); the
+    # stopped count is a lower bound, so the author sees an excess, not an exact value.
+    assert policy_error_detail(run.error_message) == (
+        "файл `.review/rules.md`, фактически более 20, допустимо 20 переходов"
+    )
 
 
 def test_check_run_cancellation_logs_run_and_reason_at_info(
