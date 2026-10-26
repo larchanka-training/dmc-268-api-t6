@@ -4,9 +4,9 @@ The stage builds L1-L4 (CONTEXT_AND_VERIFICATION_SPEC §3-4); the review prompt 
 the changed files and, on the snapshot path, every L2-L4 block as a numbered excerpt that
 names its block, path, revision, side and level; a prompt version with a retrieved section
 shows the RAG blocks after them in their own section (#144). The fit drops excerpts in the
-reverse of the selection order of CVS §4.1 (L1 → L4 → RAG → L2 → L3): L3, then L2, then L4,
-before it trims a changed file. An ignored file is counted, never named (RULES_FORMAT_SPEC
-§5.3).
+reverse of the selection order of CVS §4.1 (L1 → L4 → RAG → L2 → L3): L3, then L2, then the
+RAG places, each with the definitions only it read, then L4, before it trims a changed file.
+An ignored file is counted, never named (RULES_FORMAT_SPEC §5.3).
 """
 
 from __future__ import annotations
@@ -396,6 +396,84 @@ def test_without_a_retrieved_section_retrieved_blocks_change_no_prompt_byte(
     assert "<retrieved_excerpts>" not in user and 'level="RAG"' not in user
 
 
+# Two broken-reference places and the base definitions they read (CVS §3.5), as the slot
+# admits them: the second place shares the first one's definition and reads one of its own.
+FIRST_PLACE = replace(RETRIEVED, definitions=(RETRIEVED_DEFINITION.source,))
+OWN_DEFINITION = replace(
+    RETRIEVED_DEFINITION,
+    block_id="RAG:app/own.py:1-1",
+    source=replace(RETRIEVED_DEFINITION.source, path="app/own.py"),
+    text="def own(key):",
+)
+SECOND_PLACE = replace(
+    RETRIEVED,
+    block_id="RAG:app/second.py:3-4",
+    source=replace(RETRIEVED.source, path="app/second.py"),
+    definitions=(RETRIEVED_DEFINITION.source, OWN_DEFINITION.source),
+)
+SLOT = (FIRST_PLACE, RETRIEVED_DEFINITION, SECOND_PLACE, OWN_DEFINITION)
+
+
+def _with_slot(
+    blocks: tuple[ContextBlock, ...], retrieved: tuple[RetrievedBlock, ...] = SLOT
+) -> ReviewContext:
+    return replace(_context(blocks), retrieved=retrieved, retrieved_section=True)
+
+
+@pytest.mark.parametrize(
+    ("blocks", "retrieved"),
+    [
+        ((L4_SIGNATURE, L2_WINDOW, L2_SECOND), SLOT),
+        ((L4_SIGNATURE,), SLOT),
+        ((L4_SIGNATURE,), (FIRST_PLACE, RETRIEVED_DEFINITION)),
+        ((L4_SIGNATURE,), ()),
+        ((), ()),
+    ],
+    ids=["l3-first", "then-l2", "then-the-last-place", "then-the-first-place", "l4-last"],
+)
+@pytest.mark.parametrize("counter", [EstimatedTokenCounter(), _CountOnly()], ids=["fast", "plain"])
+def test_fit_drops_l3_and_l2_then_rag_places_then_l4_before_any_changed_file(
+    blocks: tuple[ContextBlock, ...], retrieved: tuple[RetrievedBlock, ...], counter: Any
+) -> None:
+    budget = prompt_tokens(_with_slot(blocks, retrieved), EstimatedTokenCounter())
+
+    fitted = fit_review_context(_with_slot(ORDERED), max_prompt_tokens=budget, counter=counter)
+
+    assert (fitted.context_blocks, fitted.retrieved) == (blocks, retrieved)
+    assert fitted.changed_files == (MAIN,)
+    assert fitted.omitted_files == ("app/too_big.py",)
+
+
+@pytest.mark.parametrize("counter", [EstimatedTokenCounter(), _CountOnly()], ids=["fast", "plain"])
+def test_a_rag_place_leaves_with_what_only_it_read_and_a_shared_definition_stays(
+    counter: Any,
+) -> None:
+    # Room for the second place, not for its own definition: the place goes with it, and
+    # the definition the first place also reads stays.
+    budget = prompt_tokens(
+        _with_slot((), (FIRST_PLACE, RETRIEVED_DEFINITION, SECOND_PLACE)), EstimatedTokenCounter()
+    )
+
+    fitted = fit_review_context(_with_slot(()), max_prompt_tokens=budget, counter=counter)
+
+    assert fitted.retrieved == (FIRST_PLACE, RETRIEVED_DEFINITION)
+    # A context whose only excerpts are retrieved blocks is fitted before any file is cut.
+    assert fitted.changed_files == (MAIN,)
+
+
+@pytest.mark.parametrize("counter", [EstimatedTokenCounter(), _CountOnly()], ids=["fast", "plain"])
+def test_fit_trims_changed_files_only_after_every_retrieved_block_is_gone(counter: Any) -> None:
+    # The empty section stays: it follows the prompt version, not the slot.
+    budget = prompt_tokens(_with_slot((), ()), EstimatedTokenCounter()) - 1
+
+    fitted = fit_review_context(_with_slot(ORDERED), max_prompt_tokens=budget, counter=counter)
+
+    assert (fitted.context_blocks, fitted.retrieved) == ((), ())
+    [main] = fitted.changed_files
+    assert main.total_lines == 30 and len(main.lines) < 30
+    assert prompt_tokens(fitted, EstimatedTokenCounter()) <= budget
+
+
 def _payload(*, ignored_files: int = 2) -> ReviewContextPayload:
     return ReviewContextPayload(
         status=ContextStatus.REVIEW,
@@ -527,6 +605,26 @@ def test_retrieved_blocks_reach_the_context_of_a_prompt_with_a_retrieved_section
     assert f'<excerpt block_id="{_bounded_rag_id(RETRIEVED)}" level="RAG"' in user
     assert "</context_excerpts>\n<retrieved_excerpts>\n" in user
     assert "RETRIEVED_CALLER_TEXT" in user
+
+
+def test_the_fit_keeps_the_place_groups_under_the_snapshot_path_ids(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        rag_index, "RETRIEVED_PROMPT_VERSIONS", frozenset({("review.system", "v4")})
+    )
+    context = _review("v4", replace(_payload(), retrieved=SLOT))
+    assert [block.block_id for block in context.retrieved] == list(map(_bounded_rag_id, SLOT))
+    l4, _ = context.context_blocks
+    # Room for L4 and the second place, not for its own definition.
+    budget = prompt_tokens(
+        replace(context, context_blocks=(l4,), retrieved=context.retrieved[:3]),
+        EstimatedTokenCounter(),
+    )
+
+    fitted = fit_review_context(context, max_prompt_tokens=budget, counter=EstimatedTokenCounter())
+
+    assert (fitted.context_blocks, fitted.retrieved) == ((l4,), context.retrieved[:2])
 
 
 def test_a_failed_build_keeps_the_retrieved_section_of_the_prompt_empty(

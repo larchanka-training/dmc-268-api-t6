@@ -171,6 +171,11 @@ class RetrievedBlock:
 
     ``source.reason`` is the selection reason. The edge kind and the commit of the index
     are metadata of the selection, never the revision of the text.
+
+    ``definitions`` are the sources of the base definitions a place of a broken reference
+    read: it is shown with them or not at all (CVS §3.5), and a definition is shown once,
+    after the first place that read it. Sources, not ids: the snapshot path renames the
+    blocks (``snapshot_retrieved``) and keeps them.
     """
 
     block_id: str
@@ -181,6 +186,7 @@ class RetrievedBlock:
     tokens: int
     edge_kind: EdgeKind
     index_commit_sha: str
+    definitions: tuple[SourceRef, ...] = ()
 
 
 def snapshot_retrieved(block: RetrievedBlock) -> RetrievedBlock:
@@ -296,6 +302,7 @@ def _retrieved_block(place: RetrievedPlace) -> RetrievedBlock:
         tokens=place.tokens,
         edge_kind=place.edge_kind,
         index_commit_sha=place.index_commit_sha,
+        definitions=tuple(item.source for item in place.definitions),
     )
 
 

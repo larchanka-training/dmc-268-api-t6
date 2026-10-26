@@ -2797,6 +2797,21 @@ def test_a_broken_reference_is_shown_with_its_definition_or_not_at_all() -> None
     assert (stats.confirmed, stats.tokens) == (1, 0)
 
 
+def test_each_place_of_a_broken_reference_names_the_definitions_it_read() -> None:
+    repository, diff_map = _slot_removal(**{"pkg/panel.py": _PY_VIEW, "pkg/view.py": _PY_VIEW})
+
+    payload = _build(repository, diff_map, _load_hints("pkg/panel.py", "pkg/view.py"))
+
+    # The definition is shown once, after the first place; both places name it, so the fit
+    # keeps it while either of them stays.
+    panel, definition, view = payload.retrieved
+    assert (panel.definitions, definition.definitions, view.definitions) == (
+        (definition.source,),
+        (),
+        (definition.source,),
+    )
+
+
 def _extra_line(monkeypatch: pytest.MonkeyPatch, path: str) -> None:
     """The selector's places as it returns them, with one text line too many at ``path``."""
     select = ReverseEdgeSelector.select

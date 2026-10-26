@@ -6,6 +6,8 @@
 - It sees the L2-L4 excerpts the candidates cite as evidence, never the uncited ones
   (CVS §7.1, decided by the tech lead on 2026-10-25), within that window. The own diff lines
   of every candidate are kept first, then the cited excerpts, then the other diff lines.
+  The excerpts are taken as the review fit keeps them (#144): L4, then each RAG place with
+  the definitions it read, then L2 and L3.
 - The fit counts what the pre-send guard counts, so a fitted prompt never trips the guard.
 - ``ReflectionPass`` reads its prompt file when it first verifies: a legacy attempt, which
   never verifies, does not need it.
@@ -46,16 +48,25 @@ from app.modules.reviews.application.reflection_pass import (
     VerifierPromptBuilder,
     VerifierReply,
 )
-from app.modules.reviews.application.review_context import ContextLevel
+from app.modules.reviews.application.review_context import (
+    ContextBlock,
+    ContextLevel,
+    RetrievedBlock,
+)
 from app.modules.reviews.application.review_output import EvidenceRef, ReviewFindingV2
 from app.modules.reviews.application.run_failures import RunCancelled, RunFailure
 from tests.test_gateway_review_model import _Pipeline
 from tests.test_review_context_blocks import (
+    FIRST_PLACE,
     HEAD,
     L2_WINDOW,
     L3_FULL,
     L4_SIGNATURE,
     MAIN,
+    OWN_DEFINITION,
+    RETRIEVED_DEFINITION,
+    SECOND_PLACE,
+    SLOT,
     _block,
     _context,
     _snapshot,
@@ -404,6 +415,63 @@ def test_a_fitted_prompt_never_trips_the_pre_send_guard() -> None:
         assert len(_shown_lines(sent.user)) < 400
 
     assert overflows == []
+
+
+# ---------- cited RAG blocks fit as the review fit keeps them ----------
+
+
+def _chars(*blocks: ContextBlock | RetrievedBlock) -> int:
+    return sum(len(block.text) for block in blocks)
+
+
+def _fit_excerpts(
+    excerpts: tuple[ContextBlock, ...], retrieved: tuple[RetrievedBlock, ...], window: int
+) -> tuple[tuple[ContextBlock, ...], tuple[RetrievedBlock, ...]]:
+    """The cited excerpts and RAG blocks a window of ``window`` text characters holds."""
+
+    def fits(
+        files: tuple[ChangedFile, ...],
+        shown: tuple[ContextBlock, ...],
+        shown_retrieved: tuple[RetrievedBlock, ...],
+    ) -> bool:
+        return _chars(*shown, *shown_retrieved) <= window
+
+    files, shown, shown_retrieved = reflection_pass_module._fit_verifier_code(
+        (), excerpts, (), (), fits, retrieved=retrieved
+    )
+    assert files == ()
+    return shown, shown_retrieved
+
+
+def test_the_verifier_fit_keeps_l4_then_a_rag_place_then_l2() -> None:
+    # Room for L4 and the place with its definition, or for L4 and L2: never for all three.
+    window = _chars(L4_SIGNATURE, FIRST_PLACE, RETRIEVED_DEFINITION)
+    assert _chars(L4_SIGNATURE, L2_WINDOW) <= window
+    assert _chars(L4_SIGNATURE, L2_WINDOW, FIRST_PLACE, RETRIEVED_DEFINITION) > window
+
+    shown = _fit_excerpts((L2_WINDOW, L4_SIGNATURE), (FIRST_PLACE, RETRIEVED_DEFINITION), window)
+
+    assert shown == ((L4_SIGNATURE,), (FIRST_PLACE, RETRIEVED_DEFINITION))
+
+
+def test_the_verifier_fit_shows_a_rag_place_with_its_definitions_or_not_at_all() -> None:
+    # Room for the second place, not for its own definition.
+    window = _chars(FIRST_PLACE, RETRIEVED_DEFINITION, SECOND_PLACE)
+
+    shown = _fit_excerpts((), SLOT, window)
+
+    assert shown == ((), (FIRST_PLACE, RETRIEVED_DEFINITION))
+
+
+def test_a_shared_definition_comes_with_the_next_place_when_the_first_one_is_left_out() -> None:
+    wide = replace(FIRST_PLACE, text="def caller():\n    return " + "x" * 200)
+    window = _chars(RETRIEVED_DEFINITION, SECOND_PLACE, OWN_DEFINITION)
+    assert _chars(wide, RETRIEVED_DEFINITION) > window
+
+    shown = _fit_excerpts((), (wide, *SLOT[1:]), window)
+
+    # In payload order: the definition stays before the place that brought it.
+    assert shown == ((), (RETRIEVED_DEFINITION, SECOND_PLACE, OWN_DEFINITION))
 
 
 # ---------- the verifier route window ----------

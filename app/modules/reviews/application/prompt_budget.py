@@ -452,7 +452,8 @@ def fit_review_context(
 ) -> ReviewContext:
     """Return the context whose rendered prompt fits ``max_prompt_tokens``.
 
-    Excerpts of the snapshot path go first: L3, then L2, then L4, before any file is cut.
+    Excerpts of the snapshot path go first: L3, then L2, then the retrieved RAG places,
+    then L4, before any file is cut.
     Deterministic: files are taken by descending SD §9 priority (ties by path); each one
     is kept whole, else cut to the longest prefix of its lines that fits, else omitted.
     A length-aware counter uses additive rendered character lengths with its exact
@@ -463,11 +464,13 @@ def fit_review_context(
     """
     if prompt_tokens(context, counter) <= max_prompt_tokens:
         return context
-    if context.context_blocks:
-        context = _drop_context_blocks(
-            context, max_prompt_tokens=max_prompt_tokens, counter=counter
-        )
-        if context.context_blocks or prompt_tokens(context, counter) <= max_prompt_tokens:
+    if context.context_blocks or context.retrieved:
+        context = _drop_excerpts(context, max_prompt_tokens=max_prompt_tokens, counter=counter)
+        if (
+            context.context_blocks
+            or context.retrieved
+            or prompt_tokens(context, counter) <= max_prompt_tokens
+        ):
             return context
 
     _warn_ignored_rules(context.rules)
@@ -510,32 +513,46 @@ def fit_review_context(
 
 
 # CVS §4.1 selects L1 → L4 → RAG → L2 → L3; the fit drops excerpts in the reverse order,
-# each level from its last block (the stage appends blocks by descending file priority).
-_EXCERPT_DROP_ORDER = ("L3", "L2", "L4")
+# each level from its last block (the stage appends blocks by descending file priority and
+# admits RAG places by descending slot priority).
+_EXCERPT_DROP_ORDER = ("L3", "L2", "RAG", "L4")
 
 
-def _drop_context_blocks(
+def _drop_excerpts(
     context: ReviewContext, *, max_prompt_tokens: int, counter: TokenCounter
 ) -> ReviewContext:
     """The context with the fewest excerpts dropped whose prompt fits, else none of them.
 
-    Fewer excerpts never make the prompt longer, so a binary search over the number dropped
+    One drop is an L2-L4 block or a RAG place. A place goes with the definitions it read
+    (CVS §3.5), except one a kept place reads too: the slot shows a definition once.
+    Fewer drops never make the prompt longer, so a binary search over the number dropped
     finds the cut; every candidate is counted whole, with ``counter``.
     """
-    blocks = context.context_blocks
-    order = sorted(
-        range(len(blocks)),
-        key=lambda index: (_EXCERPT_DROP_ORDER.index(blocks[index].level), -index),
+    blocks, retrieved = context.context_blocks, context.retrieved
+    read = {source for block in retrieved for source in block.definitions}
+    places = [index for index, block in enumerate(retrieved) if block.source not in read]
+    # (level, index): an index of ``blocks``, or of ``retrieved`` for a RAG place.
+    drops = sorted(
+        [(block.level.value, index) for index, block in enumerate(blocks)]
+        + [("RAG", index) for index in places],
+        key=lambda drop: (_EXCERPT_DROP_ORDER.index(drop[0]), -drop[1]),
     )
 
     def without(dropped: int) -> ReviewContext:
-        gone = frozenset(order[:dropped])
+        gone = frozenset(drops[:dropped])
+        kept = [retrieved[index] for index in places if ("RAG", index) not in gone]
+        shown = {source for place in kept for source in (place.source, *place.definitions)}
         return replace(
             context,
-            context_blocks=tuple(block for index, block in enumerate(blocks) if index not in gone),
+            context_blocks=tuple(
+                block
+                for index, block in enumerate(blocks)
+                if (block.level.value, index) not in gone
+            ),
+            retrieved=tuple(block for block in retrieved if block.source in shown),
         )
 
-    low, high = 1, len(blocks)
+    low, high = 1, len(drops)
     while low < high:
         middle = (low + high) // 2
         if prompt_tokens(without(middle), counter) <= max_prompt_tokens:

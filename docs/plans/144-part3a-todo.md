@@ -50,7 +50,7 @@ at `a9269bbd`.
   definition shared with a kept place stays; a context with only `retrieved` is fitted; files are
   trimmed only after every excerpt is gone; the verifier fit follows the same order.
 - Done when:
-  - [ ] drop order, groups and shared definitions tested for review and verifier fits.
+  - [x] drop order, groups and shared definitions tested for review and verifier fits.
 
 **Commit:** `feat(reviews): fit retrieved blocks between L2 and L4 (#144)`
 
