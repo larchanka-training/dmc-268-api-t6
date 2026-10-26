@@ -394,3 +394,15 @@ TEST_RABBITMQ_URL=<isolated-task-vhost-url> uv run pytest
 - [ ] Review runs in a clean subagent (reviewer ndovnar per TL decision 23.10 №4). Rebase on `main` before
   requesting review.
 - [ ] Docs drift goes to PR G (plan, "Docs for G"). No doc edits beyond `.env.example` and `docs/SECRETS.md` rows.
+
+### Remaining PR F2 — provider-acceptance release gate (#217)
+
+This unchecked gate blocks v4 activation in F2, not dormant F1 snapshot preparation
+on main after #324. See the [strict v2 acceptance contract](130-verifier-gateway-plan.md#pr-f2-release-gate-strict-v2-schema-acceptance-pending-217)
+and [#217](https://github.com/larchanka-training/dmc-268-api-t6/issues/217). Provider acceptance remains **UNKNOWN**.
+
+- [ ] Freeze source/input identity, raw v2 schema SHA and canonical unchanged `provider_schema` strict `response_format` SHA; retain newline rejection.
+- [ ] With separate authorization for real requests, test each intended primary/fallback endpoint/model and permitted serving provider independently; record synthetic request body/SHA, routing restrictions, observed provider/model, UTC timestamp, request/run ID, HTTP outcome and unrepaired locally valid response. No secrets/private prompts in evidence.
+- [ ] Reject schema 400, repaired output, automatic substitution/fallback success for another route, `prompt_json`, mocks and local parity as proof of the intended strict route.
+- [ ] Cover every permitted dynamic serving route or constrain rollout to tested routes; one unrestricted model-alias success is insufficient.
+- [ ] Only after all route evidence is accepted, enable reviewer v4 in F2. Otherwise keep F2 disabled and review any compatible schema change separately. No provider request or activation is claimed by #216.

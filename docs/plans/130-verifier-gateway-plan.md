@@ -136,7 +136,7 @@ worker, and leaves `RETRIEVED_PROMPT_VERSIONS` alone.
    - The selector raises inside `review_with_gateway` before the call, and not in
      `validate_execution_profile_versions`, which runs live (`prepare_policy_snapshot.py:165`, `:170`;
      `review_context_stage.py:273`).
-   - `PromptBindings` defaults `review_system_version="v2"` (`policy_snapshot.py:141`), so the five snapshot
+   - `PromptBindings` defaults `review_system_version="v2"` (`policy_snapshot.py::PromptBindings.review_system_version`), so the five snapshot
      gateway tests (`PromptBindings("cs1","cs2","cs3")`) stay on v1.
    - `app/worker.py:520` pins `response_schema_version="review-output/v2"` live; that pin is not the selector.
 10. **R16 gate**:
@@ -281,6 +281,77 @@ The overlap lists come from intersecting E's complete file list with each PR's f
 - F sizes the verifier send budget from the verifier route (R10). `send_budget_for` also reads
   `os.environ["LLM_CONTEXT_WINDOW"]` for both stages (`prompt_budget.py:164-169`).
 
+## PR F2 release gate: strict v2 schema acceptance (pending #217)
+
+**Status: UNKNOWN / unchecked; blocks v4 activation in F2.** This gate belongs to
+remaining #130 rollout work and [#217](https://github.com/larchanka-training/dmc-268-api-t6/issues/217).
+It does not block F1 snapshot preparation on main after #324. The
+[F1/F2 coordination notice](https://github.com/larchanka-training/dmc-268-api-t6/pull/303#issuecomment-6399851198)
+separates those slices; PR E's completed offline work is not provider acceptance.
+
+`answers.provider_schema` removes only `$schema`, `$id` and `$comment`; the v2
+`rule_name` pattern's absolute-end `(?![\s\S])` reaches
+`transport._request_body` unchanged in `response_format.json_schema.schema` with
+`strict: true`. A bound reviewer v4 selects v2; no snapshot and v1–v3 select v1.
+Keep the local newline rejection and schema/model parity intact. Replacing the
+lookahead with `$` would reopen the Python terminal-newline defect.
+
+[RE2 syntax](https://github.com/google/re2/wiki/syntax) excludes negative lookahead.
+That identifies a compatibility risk; it does **not** establish that EUrouter's
+serving routes use RE2. The [EUrouter chat contract](https://www.eurouter.ai/docs/api/chat)
+and [Mistral structured-output guide](https://docs.mistral.ai/studio/conversations/structured-output/custom)
+do not establish acceptance of this particular pattern. [EUrouter routing](https://www.eurouter.ai/docs/concepts/routing)
+is dynamic and supports provider restrictions: a model alias alone cannot identify
+its schema compiler. `mistral-small-4` and `mistral-small-3.2-24b` are known
+catalog entries with EUrouter endpoint defaults, not an automatically selected
+primary/fallback pair. `LLM_MODEL` is required; the review fallback is absent unless
+`LLM_FALLBACK_MODEL` is configured. Explicit endpoint/routing configuration may
+override catalog values. Actual deployment configuration was not inspected.
+
+Frozen #216 review-stage contract (local measurement before rebase, with dirty
+review fixes; recalculate after any schema/transport change):
+
+| Bytes | SHA-256 |
+| --- | --- |
+| Raw `review/schemas/review-output.schema.v2.json` | `d3755ccfac5088b7f5e988d9004b7724897f660d065fc842d793285a313301ac` |
+| Canonical complete `response_format` below | `4558c8250dbbec8e85fe0d71e79013c64eeea19d784cdb491f4d65319b90a673` |
+
+Reproduce the strict contract locally without credentials or a network request:
+
+```sh
+uv run python - <<'PYTHON'
+import hashlib
+import json
+from pathlib import Path
+from app.modules.reviews.infrastructure.llm.answers import provider_schema, review_output_schema_v2
+
+raw = Path("review/schemas/review-output.schema.v2.json").read_bytes()
+response_format = {"type": "json_schema", "json_schema": {
+    "name": "ReviewOutputV2", "strict": True,
+    "schema": provider_schema(review_output_schema_v2()),
+}}
+payload = json.dumps(response_format, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
+print("schema_sha256", hashlib.sha256(raw).hexdigest())
+print("response_format_sha256", hashlib.sha256(payload).hexdigest())
+print(payload.decode())
+PYTHON
+```
+
+The authorized F2 owner must attach that exact `response_format` to a synthetic,
+non-private review request and test **each intended primary and fallback route
+independently**, without repair or automatic route substitution masking rejection.
+Record source commit/input identity, both contract hashes, the full synthetic
+request body and its SHA-256, endpoint/model, routing restrictions, observed
+serving provider/model, UTC timestamp, request/run ID, HTTP outcome and the accepted
+unrepaired response's local v2 validation. Keep authorization headers, secrets and
+private prompts out of evidence. A successful fallback does not prove primary
+acceptance; it needs its own route record. HTTP 400, repair success, `prompt_json`,
+mock transport or local validation alone cannot satisfy the strict-acceptance gate.
+For dynamic routing, test every permitted serving route or restrict F2 rollout to
+the tested routes; an unrestricted alias's one successful provider is insufficient.
+If acceptance fails, leave F2 disabled and review a compatible contract separately;
+do not silently weaken validation. No paid/live request was performed for #216.
+
 ## Docs for G (drift E leaves; nothing in them becomes false on E's merge)
 
 - **RFS §7.2:**
@@ -313,7 +384,7 @@ The overlap lists come from intersecting E's complete file list with each PR's f
   `_bounded_repair_turn`). Whether EUrouter and the Mistral models accept that shape is unproven offline; the F
   smoke checklist runs one verifier repair against the live route.
 - **SD §15 OQ-2** and `docs/SECRETS.md`/`CICD.md`: carrying `LLM_VERIFIER_*` to staging (OQ-6).
-- **Provider route:** `ExecutionProfile` has one provider-route pair (`policy_snapshot.py:181-182`), so the
+- **Provider route:** `ExecutionProfile` has one provider-route pair (`policy_snapshot.py::ExecutionProfile.primary_provider_route` / `fallback_provider_route`), so the
   verifier route's provider is not pinned (D, RFS §7.1).
 - **Join key:** `llm.verify.candidate_ids` cannot yet be joined to `findings` rows. `review.postprocess`
   `candidate_ids` is a #107 target (PIPELINE_SPEC:176).

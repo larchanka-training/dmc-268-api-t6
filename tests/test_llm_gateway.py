@@ -3155,13 +3155,15 @@ def test_gateway_repair_and_fallback_enforce_provenance_pre_send_guard(
         PolicySnapshot,
         PromptBindings,
         SourceRole,
-        make_policy_document_missing,
     )
     from app.modules.reviews.application.prompt_budget import verify_provenance_pre_send_guard
     from app.modules.reviews.infrastructure.llm.answers import (
         provider_schema,
         review_output_schema,
         validate_review_answer,
+    )
+    from tests.policy_snapshot_fakes import (
+        make_policy_document_missing,
     )
 
     snapshot = PolicySnapshot(
@@ -3398,9 +3400,11 @@ def test_review_with_gateway_counter_v1_matches_transport() -> None:
         ExecutionProfile,
         PolicySnapshot,
         PromptBindings,
-        make_policy_document_missing,
     )
     from app.modules.reviews.infrastructure.llm.models import review_with_gateway
+    from tests.policy_snapshot_fakes import (
+        make_policy_document_missing,
+    )
 
     snapshot = PolicySnapshot(
         schema_version=1,

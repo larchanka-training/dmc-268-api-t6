@@ -5,12 +5,14 @@ from __future__ import annotations
 import asyncio
 import re
 from collections.abc import Mapping
+from dataclasses import replace
 from typing import Any
 from unittest.mock import patch
 from uuid import UUID
 
 import pytest
 
+from app.modules.reviews.application.check_runs import failure_reason
 from app.modules.reviews.application.conventions import CachedConventions, GeneratedConventions
 from app.modules.reviews.application.execute_review import (
     ExecuteReviewRun,
@@ -28,10 +30,6 @@ from app.modules.reviews.application.policy_snapshot import (
     PolicySnapshot,
     PromptBindings,
     SourceRole,
-    make_complete_execution_profile,
-    make_complete_prompt_bindings,
-    make_policy_document_missing,
-    make_policy_document_present,
 )
 from app.modules.reviews.application.prompt_builder import (
     ChangedFile,
@@ -53,9 +51,18 @@ from app.modules.reviews.application.review_output import (
     EvidenceRef,
     InvalidReviewOutput,
     RequirementRef,
+    ReviewFindingV2,
+    VerifiedReviewOutput,
 )
 from app.modules.reviews.application.review_path import ReviewBinding
-from app.modules.reviews.application.run_failures import RunFailure
+from app.modules.reviews.application.run_failures import RunFailure, classify_failure
+from app.modules.reviews.application.verdict import SeverityThresholdValue, severity_counts
+from tests.policy_snapshot_fakes import (
+    make_complete_execution_profile,
+    make_complete_prompt_bindings,
+    make_policy_document_missing,
+    make_policy_document_present,
+)
 
 RUN_ID = UUID("00000000-0000-0000-0000-000000000200")
 MAIN_BLOCK_ID = file_block_id("app/main.py")
@@ -577,10 +584,13 @@ def test_execute_review_fail_closed_when_snapshot_present_without_reflection_pas
         reflection_pass=None,  # Missing reflection_pass with snapshot present
     )
 
-    with pytest.raises(PolicyError) as exc_info:
+    with pytest.raises(RunFailure) as exc_info:
         asyncio.run(pipeline.execute(RUN_ID))
-    assert exc_info.value.code == PolicyErrorCode.SNAPSHOT_INTEGRITY_ERROR
-    assert "Reflection pass is required" in exc_info.value.message
+    failure = classify_failure(exc_info.value)
+    assert failure.error_code == "internal_error"
+    assert not isinstance(exc_info.value, PolicyError)
+    assert "Reflection pass is required" in failure.message
+    assert failure_reason(failure.error_code) == "Внутренняя ошибка сервиса."
     assert model.draft_calls == 0
     assert publisher.publish_calls == 0
 
@@ -640,7 +650,11 @@ def test_execute_review_fail_closed_when_snapshot_not_ready() -> None:
         asyncio.run(pipeline.execute(RUN_ID))
     assert exc_info.value.code == PolicyErrorCode.SNAPSHOT_INTEGRITY_ERROR
     assert "Policy snapshot is not ready" in exc_info.value.message
+    failure = classify_failure(exc_info.value)
+    assert failure.error_code == "policy_snapshot_integrity_error"
+    assert failure_reason(failure.error_code) == "Снимок правил прогона повреждён или противоречив."
     assert model.draft_calls == 0
+    assert fake_verifier_model.call_count == 0
     assert publisher.publish_calls == 0
 
 
@@ -3466,10 +3480,10 @@ def test_snapshot_path_review_without_a_reflection_pass_still_fails_closed() -> 
         pipeline, pipeline, pipeline, pipeline, context_filter=_StageSnapshot(_v4_snapshot())
     )
 
-    with pytest.raises(PolicyError) as raised:
+    with pytest.raises(RunFailure) as raised:
         asyncio.run(run.execute(RUN_ID))
 
-    assert raised.value.code == PolicyErrorCode.SNAPSHOT_INTEGRITY_ERROR
+    assert raised.value.error_code == "internal_error"
     assert "Reflection pass is required" in raised.value.message
     assert pipeline.contexts == []
     assert pipeline.published == []
@@ -3715,3 +3729,325 @@ def test_a_wrong_attribution_is_repaired_before_the_verifier_decides(supported: 
         assert dropped.drop_reason == "insufficient_context"
         assert dropped.position == 1
         assert dropped.finding.rule_name is None  # type: ignore[union-attr]
+
+
+def _snapshot_publication_candidate(
+    title: str, *, rule_name: str | None = None, evidence_line: int = 10
+) -> dict[str, Any]:
+    return {
+        "path": "app/main.py",
+        "line": 10,
+        "start_line": None,
+        "severity": "high",
+        "category": "correctness",
+        "title": title,
+        "body": "This operation can corrupt stored data.",
+        "suggestion": None,
+        "confidence": 0.9,
+        "rule_name": rule_name,
+        "evidence_refs": [
+            {"block_id": MAIN_BLOCK_ID, "start_line": evidence_line, "end_line": evidence_line}
+        ],
+    }
+
+
+def _publish_snapshot_candidates(
+    findings: list[dict[str, Any]],
+    decisions_by_title: dict[str, dict[str, Any]],
+    *,
+    snapshot: PolicySnapshot | None = None,
+    rules: tuple[ReviewRule, ...] = (),
+    severity_threshold: SeverityThresholdValue = "all",
+) -> tuple[VerifiedReviewOutput, list[str]]:
+    published: list[VerifiedReviewOutput] = []
+    verifier_titles: list[str] = []
+
+    class Processor:
+        async def prepare(self, run_id: UUID) -> GeneratedConventions:
+            return conventions()
+
+    class Repository:
+        async def get_review_prompt_input(
+            self, run_id: UUID, saved: GeneratedConventions
+        ) -> ReviewPromptInput:
+            return ReviewPromptInput(
+                system="Review carefully.",
+                rules=rules,
+                agents_md=None,
+                conventions=RepoConventions((), ()),
+                changed_files=(
+                    ChangedFile("app/main.py", "modified", (DiffLine(10, "added", "save(data)"),)),
+                ),
+                omitted_files=(),
+                policy_snapshot=snapshot or _make_test_snapshot(),
+                severity_threshold=severity_threshold,
+            )
+
+    class Model:
+        async def get_pull_request_meta(self, run_id: UUID) -> PullRequestMeta:
+            return PullRequestMeta(
+                "PR",
+                None,
+                "author",
+                "feature",
+                "main",
+                (),
+                1,
+                1,
+                0,
+                False,
+                False,
+                head_sha="head_216",
+            )
+
+        async def draft_review(self, *, context: ReviewContext) -> dict[str, object]:
+            return {
+                "findings": findings,
+                "summary": {
+                    "problem": "Unverified claim",
+                    "done_well": "Raw praise",
+                    "effort": "none",
+                },
+            }
+
+    class Verifier:
+        async def verify(
+            self,
+            *,
+            system_prompt: str,
+            user_prompt: str,
+            manifest: CallManifest,
+            context: ReviewContext,
+        ) -> dict[str, object]:
+            candidates = re.findall(
+                r'<candidate candidate_id="([^"]+)"[^>]*>\s*<title>([^<]+)</title>', user_prompt
+            )
+            verifier_titles.extend(title for _, title in candidates)
+            return {
+                "decisions": [
+                    {"candidate_id": candidate_id, **decisions_by_title[title]}
+                    for candidate_id, title in candidates
+                ]
+            }
+
+    class Publisher:
+        async def execute(
+            self, run_id: UUID, raw_output: Mapping[str, object] | str | bytes
+        ) -> bool:
+            assert run_id == RUN_ID
+            assert isinstance(raw_output, VerifiedReviewOutput)
+            published.append(raw_output)
+            return True
+
+    pipeline = ExecuteReviewRun(
+        Processor(), Repository(), Model(), Publisher(), reflection_pass=ReflectionPass(Verifier())
+    )
+    assert asyncio.run(pipeline.execute(RUN_ID)) is True
+    assert len(published) == 1
+    return published[0], verifier_titles
+
+
+def test_execute_review_snapshot_never_publishes_insufficient_context() -> None:
+    published, verifier_titles = _publish_snapshot_candidates(
+        [
+            _snapshot_publication_candidate("Confirmed corruption"),
+            _snapshot_publication_candidate("Unknown behavior"),
+        ],
+        {
+            "Confirmed corruption": {
+                "status": "supported",
+                "reason": "The shown operation corrupts data.",
+                "evidence_refs": [{"block_id": MAIN_BLOCK_ID, "start_line": 10, "end_line": 10}],
+                "requirement_refs": [],
+            },
+            "Unknown behavior": {
+                "status": "insufficient_context",
+                "reason": "The helper implementation is absent.",
+                "evidence_refs": [],
+                "requirement_refs": [],
+            },
+        },
+    )
+    assert isinstance(published["findings"], list)
+    assert [finding["title"] for finding in published["findings"]] == ["Confirmed corruption"]
+    assert len(published.dropped_findings) == 1
+    dropped = published.dropped_findings[0]
+    assert not isinstance(dropped, Mapping)
+    assert isinstance(dropped.finding, ReviewFindingV2)
+    assert dropped.finding.title == "Unknown behavior"
+    assert dropped.drop_reason == "insufficient_context"
+    assert dropped.position == 1
+    assert verifier_titles == ["Confirmed corruption", "Unknown behavior"]
+    assert published["summary"] == {
+        "problem": "Identified 1 verified issue (correctness) in the reviewed changes.",
+        "done_well": (
+            "Code analysis and policy verification were completed across all evaluated changes."
+        ),
+        "effort": "medium",
+    }
+
+
+def test_execute_review_snapshot_checks_attribution_after_first_candidate() -> None:
+    published, verifier_titles = _publish_snapshot_candidates(
+        [
+            _snapshot_publication_candidate("Visible evidence"),
+            _snapshot_publication_candidate("Unshown evidence", evidence_line=99),
+        ],
+        {
+            title: {
+                "status": "supported",
+                "reason": "The shown operation corrupts data.",
+                "evidence_refs": [{"block_id": MAIN_BLOCK_ID, "start_line": 10, "end_line": 10}],
+                "requirement_refs": [],
+            }
+            for title in ("Visible evidence", "Unshown evidence")
+        },
+    )
+    assert isinstance(published["findings"], list)
+    assert [finding["title"] for finding in published["findings"]] == ["Visible evidence"]
+    assert len(published.dropped_findings) == 1
+    dropped = published.dropped_findings[0]
+    assert not isinstance(dropped, Mapping)
+    assert isinstance(dropped.finding, ReviewFindingV2)
+    assert dropped.finding.title == "Unshown evidence"
+    assert dropped.drop_reason == "evidence_not_shown"
+    assert dropped.position == 1
+    assert verifier_titles == ["Visible evidence"]
+
+
+@pytest.mark.parametrize(
+    "rule_name", [".review/rules.md", "AGENTS.md", "service-defaults:E2", "service-defaults:FSD1"]
+)
+def test_execute_review_snapshot_preserves_supported_policy_attribution(rule_name: str) -> None:
+    snapshot = _make_test_snapshot()
+    rules: tuple[ReviewRule, ...] = ()
+    if rule_name == ".review/rules.md":
+        requirement = {
+            "block_id": "policy-rules",
+            "start_line": 2,
+            "end_line": 2,
+            "check_id": None,
+        }
+    elif rule_name == "AGENTS.md":
+        snapshot = replace(
+            snapshot,
+            agents=make_policy_document_present(
+                path="AGENTS.md", text="Preserve stored data.\n", blob_oid="a" * 40
+            ),
+        )
+        requirement = {
+            "block_id": "policy-agents",
+            "start_line": 1,
+            "end_line": 1,
+            "check_id": None,
+        }
+    elif rule_name == "service-defaults:E2":
+        rules = (
+            ReviewRule(
+                "Error Handling Standards",
+                ("*.py",),
+                (),
+                ("Handle failures.", "Never swallow errors.", "Retain causes.", "Report failures."),
+            ),
+        )
+        requirement = {
+            "block_id": "service-defaults",
+            "start_line": 2,
+            "end_line": 2,
+            "check_id": "E2",
+        }
+    else:
+        snapshot = replace(
+            snapshot,
+            defaults_checksum="32673f59b6f0f3f96155e4012dcc42718b0814c473cc255c70e69f63660dcb4a",
+        )
+        rules = (
+            ReviewRule(
+                "FSD Layer Boundaries",
+                ("*.py",),
+                (),
+                (
+                    "Keep layers separate.",
+                    "Check imports.",
+                    "Use slices.",
+                    "Hide internals.",
+                    "Use APIs.",
+                ),
+            ),
+        )
+        requirement = {
+            "block_id": "service-defaults",
+            "start_line": 1,
+            "end_line": 1,
+            "check_id": "FSD1",
+        }
+    published, verifier_titles = _publish_snapshot_candidates(
+        [_snapshot_publication_candidate("Policy violation", rule_name=rule_name)],
+        {
+            "Policy violation": {
+                "status": "supported",
+                "reason": "The operation violates the cited policy.",
+                "evidence_refs": [{"block_id": MAIN_BLOCK_ID, "start_line": 10, "end_line": 10}],
+                "requirement_refs": [requirement],
+            }
+        },
+        snapshot=snapshot,
+        rules=rules,
+    )
+    assert isinstance(published["findings"], list)
+    assert len(published["findings"]) == 1
+    assert published["findings"][0]["title"] == "Policy violation"
+    assert published["findings"][0]["rule_name"] == rule_name
+    if rule_name == "AGENTS.md":
+        assert published.allowed_v2_rules == frozenset({".review/rules.md", "AGENTS.md"})
+    else:
+        assert published.allowed_v2_rules == frozenset({".review/rules.md"})
+    assert published.dropped_findings == ()
+    assert verifier_titles == ["Policy violation"]
+
+
+def test_execute_review_snapshot_warning_keeps_supported_low_and_drops_info() -> None:
+    low = _snapshot_publication_candidate("Possible corruption")
+    low["severity"] = "low"
+    info = _snapshot_publication_candidate("Informational risk")
+    info["severity"] = "info"
+    published, verifier_titles = _publish_snapshot_candidates(
+        [low, info],
+        {
+            title: {
+                "status": "supported",
+                "reason": "The shown operation demonstrates this issue.",
+                "evidence_refs": [{"block_id": MAIN_BLOCK_ID, "start_line": 10, "end_line": 10}],
+                "requirement_refs": [],
+            }
+            for title in ("Possible corruption", "Informational risk")
+        },
+        severity_threshold="warning",
+    )
+    assert isinstance(published["findings"], list)
+    assert [(item["title"], item["severity"]) for item in published["findings"]] == [
+        ("Possible corruption", "low")
+    ]
+    assert severity_counts(item["severity"] for item in published["findings"]) == {
+        "critical": 0,
+        "high": 0,
+        "medium": 0,
+        "low": 1,
+        "info": 0,
+    }
+    assert len(published.dropped_findings) == 1
+    dropped = published.dropped_findings[0]
+    assert not isinstance(dropped, Mapping)
+    assert isinstance(dropped.finding, ReviewFindingV2)
+    assert dropped.finding.title == "Informational risk"
+    assert dropped.drop_reason == "severity_threshold"
+    assert dropped.position == 1
+    assert published.severity_threshold == "warning"
+    assert verifier_titles == ["Possible corruption", "Informational risk"]
+    assert published["summary"] == {
+        "problem": "Identified 1 verified issue (correctness) in the reviewed changes.",
+        "done_well": (
+            "Code analysis and policy verification were completed across all evaluated changes."
+        ),
+        "effort": "small",
+    }

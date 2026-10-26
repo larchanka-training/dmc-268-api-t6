@@ -18,7 +18,6 @@ from app.modules.reviews.application.conventions import CachedConventions, Gener
 from app.modules.reviews.application.policy_snapshot import (
     ExecutionProfile,
     PromptBindings,
-    make_complete_execution_profile,
 )
 from app.modules.reviews.application.prepare_policy_snapshot import (
     PreparePolicySnapshot,
@@ -50,6 +49,7 @@ from app.modules.reviews.infrastructure.review_prompt_repository import (
 from app.modules.reviews.infrastructure.run_lifecycle_store import SqlAlchemyRunLifecycleStore
 from app.modules.reviews.infrastructure.run_repository import SqlAlchemyRunRepository
 from app.modules.reviews.infrastructure.webhook_runs import SqlAlchemyWebhookRunUnitOfWork
+from tests.policy_snapshot_fakes import make_complete_execution_profile
 from tests.portal_postgres import (
     NOW,
     PR_NEW,

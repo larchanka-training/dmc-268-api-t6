@@ -18,6 +18,7 @@ from typing import Literal, Protocol, runtime_checkable
 from app.modules.reviews.application.diff_map import is_supported_path
 from app.modules.reviews.application.policy_errors import PolicyError, PolicyErrorCode
 from app.modules.reviews.application.policy_snapshot import (
+    DEFAULT_MAX_POLICY_TOKENS,
     CallManifest,
     ExecutionProfile,
     PolicySnapshot,
@@ -191,8 +192,8 @@ class PreSendGuardError(ValueError):
 
 def policy_tokens(snapshot: PolicySnapshot, counter: TokenCounter) -> int:
     """Measure the token count of rendered policy documents."""
-    rendered_rules = PromptBuilder._render_policy_rules(snapshot)
-    rendered_agents = PromptBuilder._render_policy_agents(snapshot)
+    rendered_rules = PromptBuilder.render_policy_rules(snapshot)
+    rendered_agents = PromptBuilder.render_policy_agents(snapshot)
     return counter.count(rendered_rules) + counter.count(rendered_agents)
 
 
@@ -200,7 +201,7 @@ def verify_policy_budget(
     snapshot: PolicySnapshot,
     counter: TokenCounter,
     *,
-    max_policy_tokens: int = 12_000,
+    max_policy_tokens: int = DEFAULT_MAX_POLICY_TOKENS,
 ) -> None:
     """Ensure rendered policy documents do not exceed max_policy_tokens.
 
@@ -224,16 +225,10 @@ def verify_pre_send_guard(
 ) -> None:
     """Pre-send guard verifying total input budget and policy budget before an LLM call."""
     if context.policy_snapshot is not None:
-        exec_profile = context.policy_snapshot.execution_profile
-        if isinstance(exec_profile, ExecutionProfile):
-            max_policy = exec_profile.max_policy_tokens
-        else:
-            raw = exec_profile.get("max_policy_tokens", 12_000)
-            max_policy = int(raw) if isinstance(raw, (int, str)) else 12_000
         verify_policy_budget(
             context.policy_snapshot,
             counter,
-            max_policy_tokens=max_policy,
+            max_policy_tokens=context.policy_snapshot.execution_profile.max_policy_tokens,
         )
 
     total = prompt_tokens(context, counter)

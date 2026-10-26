@@ -27,10 +27,6 @@ from app.modules.reviews.application.findings_post_processor import ProcessedRev
 from app.modules.reviews.application.policy_snapshot import (
     POLICY_SNAPSHOT_SCHEMA_VERSION,
     PolicySnapshot,
-    make_complete_execution_profile,
-    make_complete_prompt_bindings,
-    make_policy_document_missing,
-    make_policy_document_present,
 )
 from app.modules.reviews.application.prompt_builder import (
     ChangedFile,
@@ -50,6 +46,12 @@ from app.modules.reviews.application.review_output import (
 from app.modules.reviews.application.store_review_output import (
     PublishingGuard,
     StoreReviewOutput,
+)
+from tests.policy_snapshot_fakes import (
+    make_complete_execution_profile,
+    make_complete_prompt_bindings,
+    make_policy_document_missing,
+    make_policy_document_present,
 )
 from tests.test_diff_anchor import _diff_map
 

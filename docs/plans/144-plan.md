@@ -148,7 +148,7 @@ process section and the external items in the todo.
   first caller (moved to PR 2 Task 7 after review r1; PR 1 has no caller of it).
   - Derived: the gate compares it with the run's pinned prompt,
     `(snapshot.prompt_bindings.review_system_key, snapshot.prompt_bindings.review_system_version)`
-    (`app/modules/reviews/application/policy_snapshot.py:136-137`). The adapter formats
+    (`policy_snapshot.py::PromptBindings.review_system_key` / `review_system_version`). The adapter formats
     the version as `v{N}` (`app/modules/reviews/infrastructure/policy_snapshot_unit_of_work.py:125`).
 - **M7. Broken reference (ADR §8.3) is in PR 2.** It is the only path that reads LEFT
   (`diff_old_sha`); without it AC2 and AC9 are only half covered.

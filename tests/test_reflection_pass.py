@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 from collections.abc import Mapping
 from dataclasses import replace
@@ -12,13 +13,10 @@ import pytest
 from pydantic import ValidationError
 
 from app.modules.reviews.application.llm import LlmCallFailed, LlmErrorCode
+from app.modules.reviews.application.policy_errors import PolicyError
 from app.modules.reviews.application.policy_snapshot import (
     CallManifest,
     PolicySnapshot,
-    make_complete_execution_profile,
-    make_complete_prompt_bindings,
-    make_policy_document_missing,
-    make_policy_document_present,
 )
 from app.modules.reviews.application.prompt_builder import (
     DEFAULT_BACKEND_V1_CHECKSUM,
@@ -36,10 +34,12 @@ from app.modules.reviews.application.reflection_pass import (
     ReflectionPass,
     VerificationDecision,
     VerificationInvalidOutputError,
+    VerificationStatus,
     VerificationUnavailableError,
     VerifierPromptBuilder,
     VerifierReply,
     filter_verified_candidates,
+    verify_verifier_mandatory_budget,
 )
 from app.modules.reviews.application.review_output import (
     EvidenceRef,
@@ -51,6 +51,12 @@ from app.modules.reviews.application.run_failures import (
     RetryDelays,
     RunFailure,
     classify_failure,
+)
+from tests.policy_snapshot_fakes import (
+    make_complete_execution_profile,
+    make_complete_prompt_bindings,
+    make_policy_document_missing,
+    make_policy_document_present,
 )
 
 
@@ -1670,10 +1676,7 @@ async def test_reflection_pass_secondary_source_defaults_validation_branches() -
     assert decisions_pos[0].status == "supported"
 
 
-@pytest.mark.anyio
-async def test_reflection_pass_service_defaults_exact_case_slug_matching() -> None:
-    from app.modules.reviews.application.policy_errors import PolicyError, PolicyErrorCode
-
+def test_reflection_pass_service_defaults_stable_id_and_legacy_slug_rejection() -> None:
     query_block_id = file_block_id("app/query.py")
     rule_errors = ReviewRule(
         "Error Handling Standards",
@@ -1729,9 +1732,35 @@ async def test_reflection_pass_service_defaults_exact_case_slug_matching() -> No
         ]
     }
     verifier = ReflectionPass(FakeVerifierModel(response_e2))
-    decisions = await verifier.verify(candidates=(cand_e2,), context=context)
+    decisions = asyncio.run(verifier.verify(candidates=(cand_e2,), context=context))
     assert len(decisions) == 1
     assert decisions[0].status == "supported"
+
+    # Canonical candidate E2 must not accept a case-folded requirement ID.
+    response_lowercase = {
+        "decisions": [
+            {
+                **response_e2["decisions"][0],
+                "requirement_refs": [
+                    {
+                        "block_id": "service-defaults",
+                        "start_line": 2,
+                        "end_line": 2,
+                        "check_id": "e2",
+                    }
+                ],
+            }
+        ]
+    }
+    with pytest.raises(
+        VerificationInvalidOutputError,
+        match="check_id 'e2' does not match service defaults rule 'E2'",
+    ):
+        asyncio.run(
+            ReflectionPass(FakeVerifierModel(response_lowercase)).verify(
+                candidates=(cand_e2,), context=context
+            )
+        )
 
     # 2. Exact-case rule slug "Error-Handling-Standards" is rejected (only stable ID is allowed)
     cand_slug = CandidateFindingItem(
@@ -1772,17 +1801,22 @@ async def test_reflection_pass_service_defaults_exact_case_slug_matching() -> No
         VerificationInvalidOutputError,
         match=r"does not match service defaults rule 'Error-Handling-Standards'",
     ):
-        await ReflectionPass(FakeVerifierModel(response_slug)).verify(
-            candidates=(cand_slug,), context=context
+        asyncio.run(
+            ReflectionPass(FakeVerifierModel(response_slug)).verify(
+                candidates=(cand_slug,), context=context
+            )
         )
 
     # 3. Duplicate check ID across rules in context raises SNAPSHOT_INTEGRITY_ERROR
     context_dup = replace(context, rules=(rule_errors, rule_errors))
+    duplicate_model = FakeVerifierModel(response_e2)
     with pytest.raises(PolicyError) as exc_dup:
-        await ReflectionPass(FakeVerifierModel(response_e2)).verify(
-            candidates=(cand_e2,), context=context_dup
+        asyncio.run(
+            ReflectionPass(duplicate_model).verify(candidates=(cand_e2,), context=context_dup)
         )
-    assert exc_dup.value.code == PolicyErrorCode.SNAPSHOT_INTEGRITY_ERROR
+    assert exc_dup.value.error_code == "policy_snapshot_integrity_error"
+    assert exc_dup.value.message == "Duplicate service defaults check ID 'E1'"
+    assert duplicate_model.call_count == 0
 
 
 @pytest.mark.anyio
@@ -1965,10 +1999,10 @@ def test_fit_changed_files_for_verifier_preserves_candidate_anchor_lines() -> No
     )
 
     builder = PromptBuilder()
-    full_rendered = builder._render_changed_files((file,), include_block_id=True)
+    full_rendered = builder.render_changed_files((file,), include_block_id=True)
     full_tokens = counter.count(f"<code_context>\n{full_rendered}\n</code_context>")
 
-    lines_35_rendered = builder._render_changed_files(
+    lines_35_rendered = builder.render_changed_files(
         (ChangedFile("app/main.py", "modified", lines[:35], total_lines=100),),
         include_block_id=True,
     )
@@ -2020,7 +2054,7 @@ def test_fit_changed_files_for_verifier_prioritizes_candidate_files() -> None:
         ),
     )
 
-    one_file_rendered = builder._render_changed_files((file_b,), include_block_id=True)
+    one_file_rendered = builder.render_changed_files((file_b,), include_block_id=True)
     budget = counter.count(f"<code_context>\n{one_file_rendered}\n</code_context>")
 
     fitted = _fit_changed_files_for_verifier(
@@ -2044,7 +2078,7 @@ def test_fit_changed_files_for_verifier_retains_total_lines() -> None:
     lines = tuple(DiffLine(i, "added", f"line_{i} = {i}") for i in range(1, 101))
     file = ChangedFile("app/cut.py", "modified", lines, total_lines=250)
 
-    cut_rendered = builder._render_changed_files(
+    cut_rendered = builder.render_changed_files(
         (ChangedFile("app/cut.py", "modified", lines[:40]),), include_block_id=True
     )
     budget = counter.count(f"<code_context>\n{cut_rendered}\n</code_context>")
@@ -2388,6 +2422,233 @@ def test_build_verifier_prompt_counter_v1_fitting() -> None:
     # Verify that prompt_v1 line count strictly matches v1 line count and would fail under v2
     assert line_count_v1 == 140
     assert line_count_v2 == 92
+
+
+@pytest.fixture
+def reflection_boundary_context() -> ReviewContext:
+    return ReviewContext(
+        system="SYSTEM",
+        rules=(),
+        agents_md=None,
+        conventions=RepoConventions((), ()),
+        pr_meta=PullRequestMeta("T", None, "u", "b", "main", (), 1, 6, 0, False, False),
+        changed_files=(
+            ChangedFile(
+                "app/query.py",
+                "modified",
+                tuple(DiffLine(n, "added", "x = 1") for n in range(10, 16)),
+            ),
+        ),
+        omitted_files=(),
+        policy_snapshot=make_snapshot(),
+    )
+
+
+@pytest.mark.parametrize("status", ["contradicted", "insufficient_context"])
+@pytest.mark.parametrize(
+    ("requirement", "expected_error"),
+    [
+        pytest.param(
+            RequirementRef(block_id="hidden-policy", start_line=1, end_line=1, check_id=None),
+            "requirement_ref block 'hidden-policy' not found in manifest",
+            id="unknown-block",
+        ),
+        pytest.param(
+            RequirementRef(block_id="policy-rules", start_line=4, end_line=4, check_id=None),
+            "requirement_ref range 4-4 not shown in 'policy-rules'",
+            id="hidden-line",
+        ),
+        pytest.param(
+            RequirementRef(
+                block_id=file_block_id("app/query.py"), start_line=10, end_line=10, check_id=None
+            ),
+            "has invalid role 'diff'",
+            id="non-policy-block",
+        ),
+    ],
+)
+def test_reflection_pass_validates_supplied_refs_for_non_supported_statuses(
+    reflection_boundary_context: ReviewContext,
+    status: VerificationStatus,
+    requirement: RequirementRef,
+    expected_error: str,
+) -> None:
+    candidate = make_candidate("c-ref", rule_name=None)
+    model = FakeVerifierModel(
+        {
+            "decisions": [
+                {
+                    "candidate_id": "c-ref",
+                    "status": status,
+                    "reason": "The claim is not supported.",
+                    "evidence_refs": [
+                        {
+                            "block_id": file_block_id("app/query.py"),
+                            "start_line": 10,
+                            "end_line": 15,
+                        }
+                    ],
+                    "requirement_refs": [requirement.model_dump()],
+                }
+            ]
+        }
+    )
+    with pytest.raises(VerificationInvalidOutputError) as error:
+        asyncio.run(
+            ReflectionPass(model).verify(
+                candidates=(candidate,), context=reflection_boundary_context
+            )
+        )
+    assert error.value.error_code == "verification_invalid_output"
+    assert expected_error in str(error.value)
+    assert model.call_count == 1
+
+
+@pytest.mark.parametrize("rule_name", [".review/rules.md", "AGENTS.md"])
+def test_reflection_pass_rejects_attributed_insufficient_context_without_requirement_refs(
+    reflection_boundary_context: ReviewContext, rule_name: str
+) -> None:
+    snapshot = reflection_boundary_context.policy_snapshot
+    assert snapshot is not None
+    context = replace(
+        reflection_boundary_context,
+        policy_snapshot=replace(
+            snapshot,
+            agents=make_policy_document_present("AGENTS.md", "Preserve stored data.\n"),
+        ),
+    )
+    candidate = make_candidate("c-unknown", rule_name=rule_name)
+    model = FakeVerifierModel(
+        {
+            "decisions": [
+                {
+                    "candidate_id": "c-unknown",
+                    "status": "insufficient_context",
+                    "reason": "The cited policy does not establish this claim.",
+                    "evidence_refs": [],
+                    "requirement_refs": [],
+                }
+            ]
+        }
+    )
+    decisions = asyncio.run(ReflectionPass(model).verify(candidates=(candidate,), context=context))
+    assert len(decisions) == 1
+    assert decisions[0].candidate_id == "c-unknown"
+    assert decisions[0].status == "insufficient_context"
+    assert decisions[0].requirement_refs == []
+    supported, rejected = filter_verified_candidates(candidates=(candidate,), decisions=decisions)
+    assert supported == []
+    assert rejected == [
+        (candidate, "insufficient_context", "The cited policy does not establish this claim.")
+    ]
+    assert model.call_count == 1
+
+
+@pytest.mark.parametrize("send_budget", [152, 151], ids=["exact", "one-over"])
+def test_reflection_pass_final_budget_counts_system_and_user(
+    reflection_boundary_context: ReviewContext,
+    send_budget: int,
+) -> None:
+    # counter/v1: SYSTEM is 2 tokens; this fixed user envelope is 150 tokens.
+    # Empty diff context prevents fitting from hiding the final one-token overflow.
+    snapshot = make_snapshot()
+    snapshot = replace(
+        snapshot,
+        rules=make_policy_document_missing(".review/rules.md"),
+        prompt_bindings=replace(
+            snapshot.prompt_bindings,
+            verifier_checksum="d621c1a7169f2ca51bc8674da52e9572178a66a1dde88da24da78fe4951703f9",
+        ),
+        execution_profile=replace(
+            snapshot.execution_profile,
+            counter_version="counter/v1",
+            # The pinned mistral-small-4 reserves 8,000 output tokens.
+            max_input_tokens=8_000 + send_budget,
+        ),
+    )
+    context = replace(reflection_boundary_context, changed_files=(), policy_snapshot=snapshot)
+    candidate = make_candidate("c-budget", rule_name=None)
+    model = FakeVerifierModel(
+        {
+            "decisions": [
+                {
+                    "candidate_id": "c-budget",
+                    "status": "insufficient_context",
+                    "reason": "The diff is unavailable.",
+                    "evidence_refs": [],
+                    "requirement_refs": [],
+                }
+            ]
+        }
+    )
+    verifier = ReflectionPass(model, system_prompt="SYSTEM")
+    if send_budget == 152:
+        decisions = asyncio.run(verifier.verify(candidates=(candidate,), context=context))
+        assert tuple(decision.status for decision in decisions) == ("insufficient_context",)
+        assert model.call_count == 1
+        assert model.last_system_prompt == "SYSTEM"
+        assert "<code_context>" in model.last_user_prompt
+    else:
+        with pytest.raises(RunFailure) as error:
+            asyncio.run(verifier.verify(candidates=(candidate,), context=context))
+        assert error.value.error_code == "verification_context_overflow"
+        assert error.value.message == "Verifier prompt is 152 tokens, limit is 151"
+        assert model.call_count == 0
+
+
+@pytest.mark.parametrize("send_budget", [954, 953], ids=["exact", "one-over"])
+def test_verifier_mandatory_budget_accepts_exact_limit(
+    reflection_boundary_context: ReviewContext,
+    monkeypatch: pytest.MonkeyPatch,
+    send_budget: int,
+) -> None:
+    # Pinned v2 system prompt plus the two absent-policy envelopes: 954 counter/v1 tokens.
+    monkeypatch.setenv("LLM_CONTEXT_WINDOW", "1000000")
+    monkeypatch.setenv("LLM_MAX_OUTPUT_TOKENS", "0")
+    snapshot = make_snapshot()
+    snapshot = replace(
+        snapshot,
+        rules=make_policy_document_missing(".review/rules.md"),
+        execution_profile=replace(snapshot.execution_profile, counter_version="counter/v1"),
+    )
+    context = replace(reflection_boundary_context, policy_snapshot=snapshot)
+    if send_budget == 954:
+        verify_verifier_mandatory_budget(context, max_send_budget=send_budget)
+    else:
+        with pytest.raises(PolicyError) as error:
+            verify_verifier_mandatory_budget(context, max_send_budget=send_budget)
+        assert error.value.error_code == "policy_prompt_budget_exceeded"
+        assert error.value.limit == 953
+        assert error.value.actual == 954
+
+
+def test_reflection_pass_rejects_blank_verifier_checksum_before_model_call(
+    reflection_boundary_context: ReviewContext,
+) -> None:
+    snapshot = make_snapshot()
+    snapshot = replace(
+        snapshot, prompt_bindings=replace(snapshot.prompt_bindings, verifier_checksum="")
+    )
+    context = replace(reflection_boundary_context, policy_snapshot=snapshot)
+    candidate = make_candidate("c-empty-checksum", rule_name=None)
+    model = FakeVerifierModel(
+        {
+            "decisions": [
+                {
+                    "candidate_id": "c-empty-checksum",
+                    "status": "insufficient_context",
+                    "reason": "No supported violation.",
+                    "evidence_refs": [],
+                    "requirement_refs": [],
+                }
+            ]
+        }
+    )
+    with pytest.raises(PolicyError) as error:
+        asyncio.run(ReflectionPass(model).verify(candidates=(candidate,), context=context))
+    assert error.value.error_code == "policy_snapshot_integrity_error"
+    assert "Verifier prompt checksum mismatch: expected ''" in error.value.message
+    assert model.call_count == 0
 
 
 # ---------- #130 PR E: the verifier port gets its manifest and context ----------

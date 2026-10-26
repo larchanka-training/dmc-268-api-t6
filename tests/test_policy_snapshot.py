@@ -19,6 +19,8 @@ from app.modules.reviews.application.policy_snapshot import (
     PolicyDocument,
     PolicySnapshot,
     PromptBindings,
+)
+from tests.policy_snapshot_fakes import (
     make_policy_document_empty,
     make_policy_document_missing,
     make_policy_document_present,
@@ -332,3 +334,13 @@ def test_call_manifest_tracks_shown_ranges() -> None:
     assert manifest.is_range_shown("code-1", start_line=5, end_line=15) is False
     assert manifest.is_range_shown("code-1", start_line=20, end_line=30) is False
     assert manifest.is_range_shown("nonexistent", start_line=1, end_line=2) is False
+
+
+def test_call_manifest_constructor_requires_stage() -> None:
+    with pytest.raises(TypeError, match="stage"):
+        CallManifest(call_id=UUID(int=1), blocks=())  # type: ignore[call-arg]
+
+
+def test_call_manifest_constructor_requires_blocks() -> None:
+    with pytest.raises(TypeError, match="blocks"):
+        CallManifest(call_id=UUID(int=1), stage="review")  # type: ignore[call-arg]

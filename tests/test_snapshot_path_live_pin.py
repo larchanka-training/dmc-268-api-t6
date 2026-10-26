@@ -39,10 +39,7 @@ from app.modules.reviews.application.conventions import (
 from app.modules.reviews.application.execute_review import ReviewReply
 from app.modules.reviews.application.get_run_diff import DiffSnapshot
 from app.modules.reviews.application.llm import RunCallContext
-from app.modules.reviews.application.policy_snapshot import (
-    PolicySnapshot,
-    make_complete_execution_profile,
-)
+from app.modules.reviews.application.policy_snapshot import PolicySnapshot
 from app.modules.reviews.application.prepare_policy_snapshot import PreparePolicySnapshot
 from app.modules.reviews.application.process_run import ReviewRunProcessor
 from app.modules.reviews.application.prompt_builder import PullRequestMeta, ReviewContext
@@ -87,6 +84,7 @@ from app.modules.reviews.infrastructure.run_processing_unit_of_work import (
 )
 from app.modules.reviews.infrastructure.run_repository import SqlAlchemyRunRepository
 from app.worker import process_review_run
+from tests.policy_snapshot_fakes import make_complete_execution_profile
 from tests.portal_postgres import NOW, REPO_A, RULE_A, WS_A, Env, portal_schema
 from tests.test_llm_gateway import FALLBACK, PRIMARY, completion
 from tests.test_prepare_policy_snapshot import Source

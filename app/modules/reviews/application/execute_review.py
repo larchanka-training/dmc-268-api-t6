@@ -56,6 +56,7 @@ from app.modules.reviews.application.review_output import (
     validate_v2_coordinates,
 )
 from app.modules.reviews.application.review_path import ReviewBinding, snapshot_for_review
+from app.modules.reviews.application.run_failures import RunFailure
 from app.modules.reviews.application.verdict import SeverityThresholdValue
 
 _LOGGER = logging.getLogger(__name__)
@@ -289,8 +290,8 @@ class ExecuteReviewRun:
 
         if prompt_input.policy_snapshot is not None:
             if self._reflection_pass is None:
-                raise PolicyError(
-                    PolicyErrorCode.SNAPSHOT_INTEGRITY_ERROR,
+                raise RunFailure(
+                    "internal_error",
                     "Reflection pass is required when policy snapshot is present",
                 )
             if not prompt_input.policy_snapshot.is_ready_for_llm:

@@ -1,5 +1,33 @@
 # Implementation Plan: Markdown Rules and Reflection Pass (#120)
 
+## Historical scope and present behavior
+
+These phases record the work in #133, not a claim that its target pipeline is connected to
+today's worker. Review-round references: [round 2](https://github.com/larchanka-training/dmc-268-api-t6/pull/133#pullrequestreview-5557688806),
+[round 5](https://github.com/larchanka-training/dmc-268-api-t6/pull/133#pullrequestreview-5568780909).
+
+At the #133 boundary the legacy repository path supplied `allowed_v2_rules=None`, so the
+post-processor's ability to retain v2 attribution did not establish its persistence in the
+worker. Today `SqlAlchemyReviewOutputRepository.get_post_processing_input` passes
+`allowed_v2_rules=None` inline because this legacy adapter has no verified manifest.
+The explicitly composed snapshot pipeline now
+carries allowed names in `VerifiedReviewOutput`, so its publication can retain attribution.
+The legacy `parse_review_output` entry point silently strips `evidence_refs` even from a
+v2-looking input before v1 validation; `parse_review_output_v2` is a separate contract.
+
+#133 recorded verifier IDs/statuses in logs, not durable structured free-text explanations.
+The current explicit pipeline carries drop codes in `VerifiedReviewOutput`, and publication
+can persist `Finding.drop_reason`. #290 added the verifier gateway adapter and `llm.verify`
+trace hand-off to `StoreReviewOutput`; that trace excludes free-text `reason` and has a null
+`manifest_id`. Main #130 F1 now supplies a lazy Reflection Pass through the production
+attempt provider; the review-version gate keeps legacy runs on their existing path.
+V4 activation remains in F2. These later changes are not attributed to #133.
+
+The old exact/lowercase slug lookup and secondary `any` branch were superseded by #230
+stable service-default IDs. The historical slug test used a name equal to its own slug and
+did not vary case; it did not prove exact-case precedence. #216 tests the current stable-ID
+behavior separately.
+
 ## Overview
 Expand the review LLM pipeline to accept user-defined Markdown policy documents (`.review/rules.md` and root `AGENTS.md`) from an immutable policy snapshot, protect the prompt against prompt injection via an isolated and structured envelope, establish the v2 attribution contract (`evidence_refs` and `requirement_refs`), and implement the **Reflection Pass** (a mandatory secondary LLM verification pass) to filter hallucinations and ungrounded candidate findings before publication.
 
@@ -21,7 +49,7 @@ Expand the review LLM pipeline to accept user-defined Markdown policy documents 
    - Evaluates all non-empty candidates in a single batch call.
    - For each candidate: returns `supported`, `contradicted`, or `insufficient_context` with 1–600 char reason, `evidence_refs` (1–8 for supported/contradicted) and `requirement_refs` (0–8, referencing shown policy blocks or service defaults).
    - Only `supported` candidates advance to post-processing and publication.
-   - Unverified/contradicted candidates are dropped with structured reason recorded for run diagnostics.
+   - Unverified/contradicted candidates are dropped; #133 logs sanitized IDs/statuses. Durable free-text verifier reasons were not implemented (see the scope note above).
    - Zero candidates: Verifier is skipped (no-op, 0 calls).
    - Verifier errors (timeout, invalid schema): follow failure policy (`verification_invalid_output`, etc.), never silently publish unverified candidates.
 
@@ -52,14 +80,14 @@ Expand the review LLM pipeline to accept user-defined Markdown policy documents 
 - [x] **P2 Cleansing & Logging**: Summary cleansing on rejected candidates; sanitized ID/status logging.
 - [x] **P2 Documentation**: Updated `review/README.md`, `docs/TEST_PLAN.md`, plans.
 
-### Phase 6: Review Round 2 Fixes (Alexander Khomutov / axyi, commit c61511e)
+### Phase 6: Review Round 2 Fixes (Alexander Khomutov / axyi #5557688806)
 - [x] **P2 Mutation & Coverage Gates**: Covered `comment_body` helper, XML escaping edge cases, and achieved 100% test coverage across review output and prompt builder.
 
 ### Phase 7: Review Round 3 Fixes (Alexander Khomutov / axyi #5562633453)
 - [x] **P1 System Prompt Preservation (Option a)**: Removed `review.system.v3.md` and golden fixtures to defer prompt rollout until #130; strictly preserved and pinned byte-level SHA-256 for `review.system.v2.md`.
 - [x] **P2 Rebase & Limits Relocation**: Rebased on `origin/main` (`f8fe9c0`) and imported `MAX_COMMIT_MESSAGES`/`MAX_COMMIT_MESSAGE_CHARS` from `commit_prefix_limits.py`.
 - [x] **P2 Error Handling & Schema Strictness**: Enforced exact 1:1 decision counts with candidate IDs, sanitized error messages (truncating IDs to 64 chars and hiding raw input payloads in ValidationError), cataloged `verification_budget_exceeded` and `verification_deadline_exceeded`, and mapped timeout/unavailable/invalid errors.
-- [x] **P2 Attribution & Post-Processing**: Passed `allowed_v2_rules` through `FindingsPostProcessor` and `RunRepository` so v2 findings (`.review/rules.md`, `AGENTS.md`) retain attribution in database and during publication.
+- [x] **P2 Attribution & Post-Processing**: Added the `allowed_v2_rules` hand-off to `FindingsPostProcessor` and `SqlAlchemyReviewOutputRepository.get_post_processing_input`. This made v2 attribution retention available to an explicit caller; the legacy repository supplied `None`, so #133 did not establish database attribution in the worker.
 - [x] **P2 Manifest & Rendering Fidelity**: Numbered service-defaults lines in prompt matching manifest `shown_ranges`; neutral summary `done_well` text on cleansed summaries; legacy runs bypass reflection when `context.policy_snapshot is None`.
 - [x] **P2 Test Coverage & Docs**: 100% statement and branch coverage on review output v2 and reflection evaluation; aligned `review/README.md`, `docs/TEST_PLAN.md`, and plans.
 
@@ -72,7 +100,7 @@ Expand the review LLM pipeline to accept user-defined Markdown policy documents 
 - [x] **P2 Requirement Refs & Service Defaults Validation**: Enforced required `check_id` on `service_defaults` requirement refs and strict matching of requirement ref blocks to finding `rule_name`.
 - [x] **P2 Complete Test Coverage for Mutation Gates**: Added unit tests covering candidate XML attributes, verifier prompt `block_id` and service defaults, verifier token guard, `_split_policy_lines` strictly splitting on newline, `shown_line_count` excluding removed diff lines, `StoreReviewOutput` passing `allowed_v2_rules`, and `verification_*` error catalog in worker.
 
-### Phase 9: Review Round 5 Fixes (Alexander Khomutov / axyi #5567300448)
+### Phase 9: Review Round 5 Fixes (Alexander Khomutov / axyi #5568780909)
 - [x] **P2 Multi-source requirement_refs**: Relaxed single-source restriction to allow verifier decisions referencing multiple distinct policy blocks (`service-defaults` and `policy-rules`).
 - [x] **P2 Error catalog**: Added `verification_unavailable` and transient failure reasons to worker retry catalog.
 - [x] **P2 Rebase**: Rebased on `origin/main` (`9de20a5`).
@@ -87,7 +115,7 @@ Expand the review LLM pipeline to accept user-defined Markdown policy documents 
 - [x] **P2 Required check_id in RequirementRef**: Removed `= None` default from `RequirementRef.check_id`, making it strictly required nullable string per CONTEXT_AND_VERIFICATION_SPEC §7.2 and `verifier-output.schema.v1.json`.
 - [x] **P2 Verifier Schema Model Match**: Added `test_verifier_schema_properties_match_pydantic_models` in `test_schemas_v2.py` asserting exact match of schema `required` fields against `is_required()` for all verifier models (`VerificationOutput`, `VerificationDecision`, `RequirementRef`, `EvidenceRef`).
 - [x] **P3 Schema minLength**: Added `minLength: 1` to `check_id` in `verifier-output.schema.v1.json` and verified empty string rejection and null acceptance.
-- [x] **P3 Service Defaults Key Ordering & Upper Bound**: Ensured exact-case slug key isn't overwritten by lowercase setdefault in `reflection_pass.py`; added unit tests for exact-case slug, secondary source upper bound, and boundary tests for `path` 1024, `block_id` 128, and `check_id` 128.
+- [x] **P3 Service Defaults Key Ordering & Upper Bound**: Added exact-key precedence over lowercase `setdefault` to the historical slug implementation. Its test used a name equal to its slug and did not exercise case differences. Secondary source upper-bound and `path` 1024, `block_id` 128, `check_id` 128 boundary tests were also added. The slug implementation was later superseded by #230 (see above).
 
 
 

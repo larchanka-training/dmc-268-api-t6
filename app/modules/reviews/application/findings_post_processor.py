@@ -12,11 +12,11 @@ from typing import Literal
 from app.modules.reviews.application.diff_anchor import Anchor, AnchorRejection, resolve_anchor
 from app.modules.reviews.application.diff_map import DiffMap
 from app.modules.reviews.application.review_output import (
-    _SERVICE_DEFAULTS_ID_RE,
     ReviewFinding,
     ReviewFindingV2,
     ReviewOutput,
     finding_order_key,
+    is_valid_service_defaults_id,
     render_review_body,
 )
 from app.modules.reviews.application.verdict import (
@@ -276,7 +276,7 @@ class FindingsPostProcessor:
                 return item
             if finding.rule_name.startswith("service-defaults:"):
                 rule_id = finding.rule_name.removeprefix("service-defaults:")
-                if _SERVICE_DEFAULTS_ID_RE.fullmatch(rule_id):
+                if is_valid_service_defaults_id(rule_id):
                     return item
         match = _ATTRIBUTION_RE.match(finding.body)
         quoted_name = match.group("name") if match is not None else None

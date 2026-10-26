@@ -25,7 +25,7 @@ questions below). Tasks 0–3 and 5 remain.
 at `app/worker.py:504-523`). It becomes fixed only when the first snapshot is stored
 (`app/modules/reviews/application/prepare_policy_snapshot.py:159-200`).
 
-So `PromptBindings.is_complete` (`app/modules/reviews/application/policy_snapshot.py:151-155`)
+So `PromptBindings.is_complete` (`policy_snapshot.py::PromptBindings.is_complete`)
 is never true, `PolicySnapshot.is_ready_for_llm` (`:342-347`) is never true, and
 `execute_review.py:225-229` would refuse a snapshot. That is lock 2 of the dormant path.
 
@@ -57,9 +57,10 @@ Facts this plan rests on:
   - `VerifierPromptBuilder` reads the packaged file and compares
     `sha256(read_text().encode())` with `bindings.verifier_checksum`
     (`app/modules/reviews/application/reflection_pass.py:319-381`).
-- **`PINNED_PROMPT_CHECKSUMS` is not a runtime gate** (`policy_snapshot.py:229-234`). It is used
-  only by `make_complete_prompt_bindings` defaults (`:241-258`), `tests/test_prompt_seeding.py:74-84`
-  and `tests/test_review_prompt_pins_postgres.py:159-160`.
+- **`PINNED_PROMPT_CHECKSUMS` is not a runtime gate** (`policy_snapshot.py::PINNED_PROMPT_CHECKSUMS`). It is used
+  by `tests/policy_snapshot_fakes.py::make_complete_prompt_bindings` defaults,
+  prompt-seeding and review-prompt-pin tests, and the offline snapshot builder
+  `review/scripts/eval_live.py::_policy_snapshot`.
 - **The live conventions prompt is the active row at processing time**
   (`run_repository.py:458-488`). The live review prompt is `Run.prompt_version_id`
   (`review_prompt_repository.py:81-91`, which never sets `policy_snapshot`).

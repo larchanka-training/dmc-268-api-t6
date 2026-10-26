@@ -3,11 +3,21 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from hashlib import sha256
 from pathlib import Path
+from uuid import UUID
 
 import pytest
 
+from app.modules.reviews.application.policy_snapshot import (
+    DocumentPresence,
+    ExecutionProfile,
+    PolicyDocument,
+    PolicySnapshot,
+    PromptBindings,
+)
 from app.modules.reviews.application.prompt_builder import (
+    DEFAULT_BACKEND_V1_CHECKSUM,
     ChangedFile,
     DiffLine,
     PromptBuilder,
@@ -167,7 +177,7 @@ def test_parse_unified_diff_keeps_payloads_that_look_like_file_headers() -> None
         ),
     )
 
-    rendered = PromptBuilder._render_changed_files(files)
+    rendered = PromptBuilder.render_changed_files(files)
     assert '<line n="4" type="removed">--old_flag</line>' in rendered
     assert '<line n="4" type="added">++new_flag</line>' in rendered
 
@@ -548,3 +558,138 @@ def test_incomplete_commit_prefix_renders_literal_uncertainty_without_a_count() 
         "</commit_messages>"
     ) in prompt.user
     assert "more commits omitted" not in prompt.user
+
+
+def _policy_rendering_snapshot(text: str | None) -> PolicySnapshot:
+    """Literal documents with complete public execution contracts; no app test factories."""
+    digest = sha256((text or "").encode()).hexdigest()
+    document = PolicyDocument(
+        path=".review/rules.md",
+        presence=DocumentPresence.MISSING if text is None else DocumentPresence.PRESENT,
+        blob_oid=None if text is None else "a" * 40,
+        raw_sha256=None if text is None else digest,
+        text_sha256=None if text is None else digest,
+        text=text,
+        byte_count=None if text is None else len(text.encode()),
+        line_count=None if text is None else len(text.splitlines()),
+    )
+    return PolicySnapshot(
+        schema_version=1,
+        snapshot_id=UUID(int=1),
+        run_id=UUID(int=2),
+        repository_id=UUID(int=3),
+        policy_base_sha="b" * 40,
+        rules=document,
+        agents=replace(document, path="AGENTS.md"),
+        ignore_patterns=(),
+        ignore_digest="ignore-digest",
+        parser_profile="rules-markdown/v1",
+        parser_version="4.0.0",
+        matcher_version="review-ignore/v1",
+        limits_version="policy-limits/v1",
+        builtin_exclusions_version="builtin-exclusions/v1",
+        priority_matcher_version="priority-matcher/v1",
+        service_defaults_rule_version_id=UUID(int=4),
+        defaults_checksum=DEFAULT_BACKEND_V1_CHECKSUM,
+        prompt_bindings=PromptBindings(
+            review_system_checksum=sha256(b"SYSTEM").hexdigest(),
+            conventions_checksum=sha256(b"SYSTEM").hexdigest(),
+            verifier_checksum=sha256(b"SYSTEM").hexdigest(),
+            review_system_id=UUID(int=5),
+            conventions_id=UUID(int=6),
+            verifier_id=UUID(int=7),
+        ),
+        execution_profile=ExecutionProfile(
+            profile_name="fast",
+            review_model="review",
+            verifier_model="verifier",
+            primary_provider_route="primary",
+            tokenizer_version="tokenizer/v1",
+            counter_version="counter/v1",
+            temperature="0.0",
+            response_schema_version="review-output/v2",
+            recovery_profile_version="recovery/v1",
+            budget_profile_version="budget/v1",
+        ),
+        policy_digest="policy-digest",
+    )
+
+
+@pytest.mark.parametrize(
+    ("text", "expected_rules", "expected_agents"),
+    [
+        (
+            None,
+            '<repository_rules block_id="policy-rules" path=".review/rules.md" status="absent" />',
+            '<project_conventions_document block_id="policy-agents" '
+            'path="AGENTS.md" status="absent" />',
+        ),
+        (
+            "",
+            '<repository_rules block_id="policy-rules" path=".review/rules.md" status="empty" />',
+            '<project_conventions_document block_id="policy-agents" '
+            'path="AGENTS.md" status="empty" />',
+        ),
+        (
+            "First & <tag>\n\nLast 'quoted'.\n",
+            '<repository_rules block_id="policy-rules" path=".review/rules.md">\n'
+            '<line n="1">First &amp; &lt;tag&gt;</line>\n'
+            '<line n="2"></line>\n'
+            "<line n=\"3\">Last 'quoted'.</line>\n"
+            "</repository_rules>",
+            '<project_conventions_document block_id="policy-agents" path="AGENTS.md">\n'
+            '<line n="1">First &amp; &lt;tag&gt;</line>\n'
+            '<line n="2"></line>\n'
+            "<line n=\"3\">Last 'quoted'.</line>\n"
+            "</project_conventions_document>",
+        ),
+    ],
+    ids=["missing", "empty", "present-with-blank-line-and-final-newline"],
+)
+def test_public_policy_renderers_preserve_exact_document_bytes(
+    text: str | None, expected_rules: str, expected_agents: str
+) -> None:
+    snapshot = _policy_rendering_snapshot(text)
+
+    assert PromptBuilder.render_policy_rules(snapshot) == expected_rules
+    assert PromptBuilder.render_policy_agents(snapshot) == expected_agents
+
+
+def test_public_service_defaults_renderer_preserves_ids_and_escaping() -> None:
+    rule = ReviewRule(
+        name="Error Handling Standards",
+        include=('app/"odd"&*.py',),
+        exclude=("tests/'odd'/**",),
+        checks=("First & <safe>", "Keep 'quoted'", "Third", "Fourth"),
+    )
+
+    assert PromptBuilder.render_service_defaults(
+        (rule,), defaults_checksum=DEFAULT_BACKEND_V1_CHECKSUM
+    ) == (
+        '<service_defaults block_id="service-defaults">\n'
+        '<rule name="Error Handling Standards" include="app/&quot;odd&quot;&amp;*.py" '
+        'exclude="tests/&apos;odd&apos;/**">\n'
+        '<check id="E1"><line n="1">First &amp; &lt;safe&gt;</line></check>\n'
+        '<check id="E2"><line n="2">Keep \'quoted\'</line></check>\n'
+        '<check id="E3"><line n="3">Third</line></check>\n'
+        '<check id="E4"><line n="4">Fourth</line></check>\n'
+        "</rule>\n"
+        "</service_defaults>"
+    )
+
+
+def test_public_conventions_renderer_preserves_exact_envelope() -> None:
+    conventions = RepoConventions(
+        key_patterns=("Pattern & <tag>",), recommendations=('Keep "quotes"',)
+    )
+
+    assert PromptBuilder.render_conventions(conventions) == (
+        "<repo_conventions>\n"
+        "<key_patterns>\n"
+        "<pattern>Pattern &amp; &lt;tag&gt;</pattern>\n"
+        "</key_patterns>\n"
+        "<recommendations>\n"
+        '<recommendation>Keep "quotes"</recommendation>\n'
+        "</recommendations>\n"
+        "</repo_conventions>"
+    )

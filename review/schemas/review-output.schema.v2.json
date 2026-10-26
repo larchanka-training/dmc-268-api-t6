@@ -107,7 +107,8 @@
         "rule_name": {
           "type": ["string", "null"],
           "description": "Attribution target: '.review/rules.md', 'AGENTS.md', 'service-defaults:<ID>', or null.",
-          "maxLength": 128
+          "maxLength": 128,
+          "pattern": "^(?:\\.review/rules\\.md|AGENTS\\.md|service-defaults:[A-Za-z0-9_-]+)(?![\\s\\S])"
         },
         "evidence_refs": {
           "type": "array",

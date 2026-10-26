@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import uuid
+from dataclasses import replace
 
 import pytest
 
@@ -14,8 +15,6 @@ from app.modules.reviews.application.policy_snapshot import (
     PolicySnapshot,
     PromptBindings,
     SourceRole,
-    make_policy_document_missing,
-    make_policy_document_present,
 )
 from app.modules.reviews.application.prompt_budget import (
     EstimatedTokenCounter,
@@ -37,6 +36,10 @@ from app.modules.reviews.application.prompt_builder import (
     PullRequestMeta,
     RepoConventions,
     ReviewContext,
+)
+from tests.policy_snapshot_fakes import (
+    make_policy_document_missing,
+    make_policy_document_present,
 )
 
 
@@ -638,3 +641,76 @@ def test_verify_verifier_mandatory_budget_missing_prompt_asset_raises_integrity_
     assert exc_info.value.code == PolicyErrorCode.SNAPSHOT_INTEGRITY_ERROR
     msg = exc_info.value.message
     assert "Unable to read verifier prompt resource 'review.verifier.v999.md'" in msg
+
+
+@pytest.mark.parametrize("rule_length", [11_804, 11_805], ids=["exact", "one-over"])
+def test_default_policy_cap_accepts_exact_limit_and_rejects_one_over(rule_length: int) -> None:
+    # The single-line rules XML and absent AGENTS.md envelope add 196 characters.
+    snapshot = make_snapshot(rules_text="x" * rule_length)
+    if rule_length == 11_804:
+        verify_policy_budget(snapshot, CharCounter())
+    else:
+        with pytest.raises(PolicyBudgetExceededError) as error:
+            verify_policy_budget(snapshot, CharCounter())
+        assert error.value.limit == 12_000
+        assert error.value.actual == 12_001
+        assert str(error.value) == (
+            "policy_prompt_budget_exceeded: rendered policy is 12001 tokens, limit is 12000"
+        )
+
+
+@pytest.mark.parametrize(
+    "profile",
+    [ExecutionProfile.fast("m1", "m2"), ExecutionProfile.deep("m1", "m2")],
+    ids=["fast", "deep"],
+)
+@pytest.mark.parametrize(
+    ("cap", "exact_rule_length", "over_rule_length", "over_tokens"),
+    [(200, 4, 5, 201), (12_001, 11_805, 11_806, 12_002)],
+    ids=["below-default", "above-default"],
+)
+def test_pre_send_guard_uses_run_policy_cap(
+    profile: ExecutionProfile,
+    cap: int,
+    exact_rule_length: int,
+    over_rule_length: int,
+    over_tokens: int,
+) -> None:
+    # The rules XML plus absent AGENTS.md envelope adds 196 character-tokens.
+    snapshot = replace(
+        make_snapshot(rules_text="x" * exact_rule_length),
+        execution_profile=replace(profile, max_policy_tokens=cap),
+    )
+    context = ReviewContext(
+        system="SYSTEM",
+        rules=(),
+        agents_md=None,
+        conventions=RepoConventions((), ()),
+        pr_meta=PullRequestMeta("T", None, "u", "b", "main", (), 1, 1, 0, False, False),
+        changed_files=(),
+        omitted_files=(),
+        policy_snapshot=snapshot,
+    )
+    verify_pre_send_guard(context, CharCounter(), max_input_tokens=50_000)
+
+    over_snapshot = replace(
+        snapshot,
+        rules=make_policy_document_present(".review/rules.md", "x" * over_rule_length),
+    )
+    with pytest.raises(PolicyBudgetExceededError) as error:
+        verify_pre_send_guard(
+            replace(context, policy_snapshot=over_snapshot),
+            CharCounter(),
+            max_input_tokens=50_000,
+        )
+    assert error.value.limit == cap
+    assert error.value.actual == over_tokens
+
+
+@pytest.mark.parametrize(
+    "profile",
+    [ExecutionProfile.fast("m1", "m2"), ExecutionProfile.deep("m1", "m2")],
+    ids=["fast", "deep"],
+)
+def test_execution_profiles_keep_default_policy_cap(profile: ExecutionProfile) -> None:
+    assert profile.max_policy_tokens == 12_000

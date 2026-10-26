@@ -26,11 +26,7 @@ from app.modules.reviews.application.conventions import (
 from app.modules.reviews.application.execute_review import ExecuteReviewRun, ReviewPromptInput
 from app.modules.reviews.application.get_run_diff import DiffSnapshot
 from app.modules.reviews.application.policy_errors import PolicyError, PolicyErrorCode
-from app.modules.reviews.application.policy_snapshot import (
-    PolicySnapshot,
-    PromptBindings,
-    make_complete_execution_profile,
-)
+from app.modules.reviews.application.policy_snapshot import PolicySnapshot, PromptBindings
 from app.modules.reviews.application.prepare_policy_snapshot import PreparePolicySnapshot
 from app.modules.reviews.application.process_run import (
     ReviewContextStagePort,
@@ -56,6 +52,7 @@ from app.modules.reviews.application.review_path import (
 from app.modules.reviews.application.vcs_diff import PullRequestLocator, VcsPullRequest
 from app.modules.reviews.infrastructure.blob_cache import InMemoryBlobCache
 from app.modules.reviews.infrastructure.llm import answers
+from tests.policy_snapshot_fakes import make_complete_execution_profile
 from tests.test_prepare_policy_snapshot import Source, Store, Uow, _pins
 from tests.test_review_context_stage import (
     Parser,

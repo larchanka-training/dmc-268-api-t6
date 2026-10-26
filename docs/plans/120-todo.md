@@ -1,5 +1,33 @@
 # Task List: Markdown Rules and Reflection Pass (#120)
 
+## Historical scope and present behavior
+
+These phases record the work in #133, not a claim that its target pipeline is connected to
+today's worker. Review-round references: [round 2](https://github.com/larchanka-training/dmc-268-api-t6/pull/133#pullrequestreview-5557688806),
+[round 5](https://github.com/larchanka-training/dmc-268-api-t6/pull/133#pullrequestreview-5568780909).
+
+At the #133 boundary the legacy repository path supplied `allowed_v2_rules=None`, so the
+post-processor's ability to retain v2 attribution did not establish its persistence in the
+worker. Today `SqlAlchemyReviewOutputRepository.get_post_processing_input` passes
+`allowed_v2_rules=None` inline because this legacy adapter has no verified manifest.
+The explicitly composed snapshot pipeline now
+carries allowed names in `VerifiedReviewOutput`, so its publication can retain attribution.
+The legacy `parse_review_output` entry point silently strips `evidence_refs` even from a
+v2-looking input before v1 validation; `parse_review_output_v2` is a separate contract.
+
+#133 recorded verifier IDs/statuses in logs, not durable structured free-text explanations.
+The current explicit pipeline carries drop codes in `VerifiedReviewOutput`, and publication
+can persist `Finding.drop_reason`. #290 added the verifier gateway adapter and `llm.verify`
+trace hand-off to `StoreReviewOutput`; that trace excludes free-text `reason` and has a null
+`manifest_id`. Main #130 F1 now supplies a lazy Reflection Pass through the production
+attempt provider; the review-version gate keeps legacy runs on their existing path.
+V4 activation remains in F2. These later changes are not attributed to #133.
+
+The old exact/lowercase slug lookup and secondary `any` branch were superseded by #230
+stable service-default IDs. The historical slug test used a name equal to its own slug and
+did not vary case; it did not prove exact-case precedence. #216 tests the current stable-ID
+behavior separately.
+
 ## Phase 1: Foundation (Domain Contracts & Policy Envelope)
 - [x] **Task 1: Domain models for Policy Snapshot & Bindings**
   - Domain models defined by Engineer 3 in #134; consumed in `app/modules/reviews/application/policy_snapshot.py` alongside `CallManifest` and `ManifestBlock`.
@@ -72,7 +100,7 @@
   - Check `is_ready_for_llm`, budget checks (`verify_pre_send_guard`), missing `reflection_pass` when snapshot present.
   - Register `verification_unavailable` (retryable), `verification_invalid_output` and `verification_context_overflow` (terminal).
 - [x] **Task 15: P2 summary cleansing & sanitized logging**
-  - Cleansing when all candidates rejected (neutral summary, zero hallucinated defects).
+  - Cleansing on any rejected candidate, including partial rejection (neutral summary when all are rejected).
   - Sanitized logging (only IDs and statuses).
 - [x] **Task 16: P2 prompt trust statements & post-processor**
   - Added trust statement in `review.verifier.v1.md`.
@@ -80,7 +108,7 @@
 - [x] **Task 17: P2 documentation & test suites**
   - Updated `review/README.md`, `docs/TEST_PLAN.md`, `tests/test_reflection_evaluation.py`, `tests/test_execute_review.py`.
 
-## Phase 6: Review Round 2 Fixes (Alexander Khomutov / axyi, commit c61511e)
+## Phase 6: Review Round 2 Fixes (Alexander Khomutov / axyi #5557688806)
 - [x] **Task 17b: Mutation & Coverage Gates**
   - Covered `comment_body` helper, XML escaping edge cases, and achieved 100% test coverage across review output and prompt builder.
 
@@ -97,7 +125,7 @@
   - Cataloged `verification_budget_exceeded` and `verification_deadline_exceeded` in `run_failures.py`.
   - Translated `TimeoutError`/`llm_timeout` to `VerificationUnavailableError` and generic errors to `VerificationUnavailableError`.
 - [x] **Task 21: P2 Attribution & Post-Processing**
-  - Threaded `allowed_v2_rules` through `FindingPostProcessingInput`, `FindingsPostProcessor.process()`, and `RunRepository.get_post_processing_input()`.
+  - Threaded `allowed_v2_rules` through `FindingPostProcessingInput`, `FindingsPostProcessor.process()`, and `SqlAlchemyReviewOutputRepository.get_post_processing_input()` as an explicit-caller capability. The legacy repository supplied `None`; this did not establish v2 database attribution in the #133 worker.
   - Added regression test `test_findings_post_processor_v2_preserves_attribution_for_body_only_findings`.
 - [x] **Task 22: P2 Manifest & Rendering Fidelity**
   - Rendered service defaults lines in XML numbered to match manifest `shown_ranges` `1..sum(checks)`.
@@ -119,7 +147,7 @@
 - [x] **Task 27: P2 Complete Test Coverage for Mutation Gates**
   - Added unit tests for candidate XML attributes, verifier prompt `block_id` and service defaults, verifier token guard, `_split_policy_lines`, `shown_line_count` excluding removed lines, `StoreReviewOutput`, and `verification_*` error catalog in worker.
 
-## Phase 9: Review Round 5 Fixes (Alexander Khomutov / axyi #5567300448)
+## Phase 9: Review Round 5 Fixes (Alexander Khomutov / axyi #5568780909)
 - [x] **Task 28: Multi-source requirement_refs validation**
   - Allowed multiple `requirement_refs` in verifier decisions referencing distinct policy blocks (e.g. both `service-defaults` and `policy-rules`).
   - Added unit tests for multi-source requirement refs and strict validation of each ref against its block.
@@ -152,4 +180,4 @@
   - Added `minLength: 1` to `check_id` in `verifier-output.schema.v1.json` and tested rejection of empty string and acceptance of null.
 - [x] **Task 37: Mutation & Boundary Tests**
   - Added boundary tests for `path` 1024, `block_id` 128, and `check_id` 128 in `test_review_output_v2.py`.
-  - Added unit test for exact-case slug matching and secondary source upper-bound validation in `test_reflection_pass.py`.
+  - Added a historical slug test whose rule name equalled its slug; it did not vary case or prove exact-case precedence. Added secondary source upper-bound validation in `test_reflection_pass.py`. #230 later superseded that slug lookup with stable IDs (see above).

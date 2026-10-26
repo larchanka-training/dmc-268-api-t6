@@ -26,7 +26,6 @@ from app.modules.reviews.application.policy_snapshot import (
     ExecutionProfile,
     PolicySnapshot,
     PromptBindings,
-    make_policy_document_missing,
 )
 from app.modules.reviews.application.prompt_builder import (
     ChangedFile,
@@ -61,6 +60,7 @@ from app.modules.reviews.infrastructure.llm.transport import (
     ResponseSchema,
 )
 from tests.llm_fakes import context_checkpoint
+from tests.policy_snapshot_fakes import make_policy_document_missing
 
 CORPUS = Path(__file__).parent / "fixtures" / "review_output"
 VALID = sorted((CORPUS / "valid").glob("*.json"))
@@ -360,15 +360,14 @@ def test_v2_findings_out_of_order_are_sorted() -> None:
 
 
 def test_a_v2_semantic_error_uses_the_raw_finding_index() -> None:
-    first = dict(SAMPLE_V2["findings"][0], severity="low", rule_name="rules.md")
+    first = dict(SAMPLE_V2["findings"][0], severity="low", line=30, start_line=31)
     second = dict(SAMPLE_V2["findings"][0], severity="critical")
 
     with pytest.raises(InvalidAnswer) as caught:
         validate_review_answer_v2(json.dumps(dict(SAMPLE_V2, findings=[first, second])))
 
     assert caught.value.errors == [
-        "findings/0: Value error, rule_name must be '.review/rules.md', 'AGENTS.md', "
-        "'service-defaults:<ID>', or null"
+        "findings/0: Value error, start_line must be strictly earlier than line"
     ]
 
 

@@ -1141,6 +1141,44 @@ def test_findings_post_processor_v2_allows_valid_and_rejects_malformed_rules() -
     assert result.inline[3].finding.rule_name is None
 
 
+@pytest.mark.parametrize(
+    ("rule_name", "expected_rule_name"),
+    [
+        ("service-defaults:E2", "service-defaults:E2"),
+        ("service-defaults:FSD1", "service-defaults:FSD1"),
+        ("service-defaults:e2", "service-defaults:e2"),
+        ("service-defaults:unknown-rule_1", "service-defaults:unknown-rule_1"),
+        ("service-defaults:E2\n", None),
+        ("service-defaults:FSD1\n", None),
+        ("service-defaults:E2\r\n", None),
+        ("service-defaults:E2 ", None),
+        ("service-defaults: E2", None),
+        ("service-defaults:É2", None),
+        ("service-defaults:", None),
+    ],
+)
+def test_postprocessor_preserves_findings_and_repairs_only_invalid_service_default_ids(
+    rule_name: str, expected_rule_name: str | None
+) -> None:
+    parsed = output(finding(rule_name=rule_name))
+
+    result = FindingsPostProcessor.from_default_patterns().process(
+        parsed,
+        diff_map=_default_diff_map(),
+        checked_paths=_paths_of(_default_diff_map()),
+        rule_names=frozenset(),
+        allowed_v2_rules=frozenset(),
+    )
+
+    assert len(result.inline) == 1
+    assert result.body_only == ()
+    assert result.dropped == ()
+    assert result.inline[0].position == 0
+    assert result.inline[0].finding == parsed.findings[0].model_copy(
+        update={"rule_name": expected_rule_name}
+    )
+
+
 def test_collapsed_range_drops_multiline_suggestion() -> None:
     """Cross-hunk range narrowed to one line must not keep an applicable suggestion (#171)."""
     diff_map = _diff_map(anchor_file("src/app.py"))
