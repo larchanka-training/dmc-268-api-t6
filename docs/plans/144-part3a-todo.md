@@ -109,6 +109,6 @@ at `a9269bbd`.
 - Files: `docs/CONTEXT_AND_VERIFICATION_SPEC.md` (§3.5, §5.1, §5.2, §7.4), `docs/adr/0001-graph-rag-v1.md`
   §9 (as built, without the v5 text), `docs/PIPELINE_SPEC.md` (`context.manifest` roles).
 - Done when:
-  - [ ] canon matches the code; no v5 wording.
+  - [x] canon matches the code; no v5 wording.
 
 **Commit:** `docs: describe the retrieved section, its fit and its manifest (#144)`
