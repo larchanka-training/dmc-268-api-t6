@@ -390,7 +390,7 @@ def test_empty_gitlab_migration_round_trips_preserving_github_receipts_and_setti
 
     connection = gitlab_schema
     config = _config(connection)
-    command.upgrade(config, "20261025_0040")
+    command.upgrade(config, "20261026_0041")
     _, installation = _installation(connection, provider="github")
     _repository(connection, installation)
     connection.execute(
@@ -415,7 +415,7 @@ def test_empty_gitlab_migration_round_trips_preserving_github_receipts_and_setti
     connection.commit()
     for _ in range(2):
         command.upgrade(config, "head")
-        assert connection.scalar(text("SELECT version_num FROM alembic_version")) == "20261025_0041"
+        assert connection.scalar(text("SELECT version_num FROM alembic_version")) == "20261026_0042"
         for table in tables:
             after = connection.execute(text(f"SELECT to_jsonb(t) FROM {table} t")).scalar_one()
             if table == "webhook_events":
@@ -461,7 +461,7 @@ def test_empty_gitlab_migration_round_trips_preserving_github_receipts_and_setti
             == []
         )
         connection.commit()
-        command.downgrade(config, "20261025_0040")
+        command.downgrade(config, "20261026_0041")
         assert {
             table: connection.execute(text(f"SELECT to_jsonb(t) FROM {table} t")).scalar_one()
             for table in tables
@@ -488,7 +488,7 @@ def test_installation_sequence_starts_beyond_legacy_gitlab_ids_and_does_not_cycl
     from sqlalchemy.exc import DBAPIError
 
     connection = gitlab_schema
-    command.upgrade(_config(connection), "20261025_0040")
+    command.upgrade(_config(connection), "20261026_0041")
     _installation(connection, external=700)
     _installation(connection, provider="github", external=900)
     connection.commit()
@@ -530,18 +530,18 @@ def test_downgrade_refuses_to_silently_delete_retired_gitlab_configuration(
     )
     connection.commit()
     with pytest.raises(RuntimeError, match="configuration and receipts"):
-        command.downgrade(config, "20261025_0040")
+        command.downgrade(config, "20261026_0041")
     connection.rollback()
-    assert connection.scalar(text("SELECT version_num FROM alembic_version")) == "20261025_0041"
+    assert connection.scalar(text("SELECT version_num FROM alembic_version")) == "20261026_0042"
     assert connection.scalar(text("SELECT count(*) FROM gitlab_connections")) == 1
     connection.execute(text("DELETE FROM webhook_events WHERE id=:id"), {"id": receipt})
     connection.commit()
     with pytest.raises(RuntimeError, match="configuration and receipts"):
-        command.downgrade(config, "20261025_0040")
+        command.downgrade(config, "20261026_0041")
     connection.rollback()
     connection.execute(text("DELETE FROM gitlab_connections"))
     connection.commit()
-    command.downgrade(config, "20261025_0040")
+    command.downgrade(config, "20261026_0041")
 
 
 @pytest.mark.integration

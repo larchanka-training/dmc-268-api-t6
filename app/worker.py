@@ -782,7 +782,7 @@ def attempt_model_provider(
     gateway: LlmGateway | None,
     source: AttemptRepositorySource,
     claimed: ClaimedAttempt,
-) -> ReviewWorkerProvider:
+) -> AttemptReviewProvider:
     if gateway is None:
         return AttemptReviewProvider(source, UnconfiguredModel(), UnconfiguredModel())
     run = RunCallContext(
@@ -795,7 +795,10 @@ def attempt_model_provider(
         rule_version_id=claimed.rule_version_id,
     )
     return AttemptReviewProvider(
-        source, GatewayConventionsModel(gateway, run), GatewayReviewModel(gateway, run, source)
+        source,
+        GatewayConventionsModel(gateway, run),
+        GatewayReviewModel(gateway, run, source),
+        ReflectionPass(GatewayVerifierModel(gateway, run)),
     )
 
 
@@ -878,11 +881,14 @@ def compose_worker_process(
             source: AttemptRepositorySource | None,
             stage: ReviewContextStage | None,
         ) -> bool:
+            reflection_pass: ReflectionPass | None = None
             if provider_factory is not None:
                 provider = provider_factory(claimed)
             else:
                 assert source is not None
-                provider = attempt_model_provider(gateway, source, claimed)
+                model_provider = attempt_model_provider(gateway, source, claimed)
+                provider = model_provider
+                reflection_pass = model_provider.reflection_pass
             return await process_review_run(
                 claimed.run_id,
                 CheckpointedProvider(provider, checkpoint),
@@ -892,6 +898,7 @@ def compose_worker_process(
                 trace=trace,
                 engine=claimed.engine,
                 context_stage=stage,
+                reflection_pass=reflection_pass,
                 vcs_provider_selector=BoundVcsProviderSelector(expected.locator, vcs),
             )
 

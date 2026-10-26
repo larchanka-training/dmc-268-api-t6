@@ -1706,6 +1706,8 @@ def test_real_stage_diff_identity_uses_persisted_provider() -> None:
         await stage.begin(_RUN)
         value = await stage.run(_RUN)
         assert value is not None and value.status is ContextStatus.REVIEW
+        assert stage.head_sha == _HEAD
+        assert stage.diff_old_sha == "c" * 40
         return value
 
     github = asyncio.run(scenario("github"))

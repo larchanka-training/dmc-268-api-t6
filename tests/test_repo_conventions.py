@@ -1886,6 +1886,8 @@ def test_a_v2_key_misses_an_entry_under_the_legacy_key_and_hits_on_a_repeat() ->
     assert len(model.calls) == 1
     assert store.requested_policy_keys == [v2, v2]
     assert second.conventions.key_patterns != legacy.key_patterns
+
+
 @pytest.mark.parametrize(("listing", "sizes"), [(False, True), (True, False)])
 def test_incomplete_discovery_stops_before_model_or_new_cache_save(
     listing: bool, sizes: bool

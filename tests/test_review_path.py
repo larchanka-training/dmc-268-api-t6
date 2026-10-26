@@ -32,6 +32,7 @@ from app.modules.reviews.application.process_run import (
     ReviewContextStagePort,
     ReviewRunProcessor,
     RunConventionsInput,
+    RunVcsInput,
 )
 from app.modules.reviews.application.prompt_budget import policy_tokens, token_counter_for
 from app.modules.reviews.application.prompt_builder import (
@@ -220,10 +221,23 @@ def test_a_snapshot_path_run_that_cannot_be_served_is_refused(
     assert snapshot_for_review(_binding("v3"), snapshot) is None
 
 
-def _stage(store: Store, trace: Trace) -> ReviewContextStage:
+def _stage(store: Store, trace: Trace, *, provider: str = "github") -> ReviewContextStage:
+    class ProviderRuns(Runs):
+        async def get_run_vcs_input(self, run_id: UUID) -> RunVcsInput:
+            run = await super().get_run_vcs_input(run_id)
+            return replace(
+                run,
+                locator=replace(
+                    run.locator,
+                    provider=provider,
+                    origin_provider_installation_id=UUID(int=18),
+                    repository_external_id=19,
+                ),
+            )
+
     vcs = Vcs()
     return ReviewContextStage(
-        runs=Runs(None),
+        runs=ProviderRuns(None),
         checkpoint=_checkpoint,
         vcs=vcs,
         merge_base=vcs,
@@ -238,9 +252,8 @@ def _stage(store: Store, trace: Trace) -> ReviewContextStage:
 
 
 # The stage reads the binding off its snapshot, whose prompt bindings are the run's pins
-# (checked on every read of a stored snapshot), and the provider it builds the diff map with
-# (GitHub until #220). So the GitLab and pins-mismatch cases are pinned at the selector, the
-# processor without a stage, execute_review and the database reads, not here.
+# (checked on every read of a stored snapshot), and the provider of the persisted run.
+# Provider support is checked independently at the selector, processor and stage.
 @pytest.mark.parametrize(
     ("version", "gets_snapshot"),
     [("v2", False), ("v3", False), ("v4", True)],
@@ -379,9 +392,8 @@ def test_processor_without_the_stage_refuses_a_snapshot_path_run_before_the_diff
 def test_processor_with_a_stage_refuses_an_unserved_provider_before_the_policy_load(
     binding: ReviewBinding, refused: str | None
 ) -> None:
-    # The stage builds its diff map as GitHub, so its own check at policy load passes a run of
-    # any provider (the stub passes everything); the processor checks the run's provider
-    # before the stage loads the policy, so a policy error cannot mask the refusal.
+    # The processor checks the run's provider before the stage loads the policy,
+    # so a policy error cannot mask an unsupported snapshot-path provider.
     events: list[str] = []
     github = CountingGitHub()
     processor = _processor(binding, events, github, stage=Stage(events))
@@ -808,3 +820,45 @@ def test_context_build_counts_with_the_pinned_counter_only_on_the_snapshot_path(
     ]
     [summary] = [response for tool, _, response in trace.steps if tool == "context.build"]
     assert (payload.tokens_used, summary["tokens_used"]) == (tokens_used, tokens_used)
+
+
+@pytest.mark.parametrize("version", ["v3", "v4"])
+def test_bound_gitlab_selector_checks_the_path_before_policy_or_diff(version: str) -> None:
+    from app.worker import BoundVcsProviderSelector
+
+    events: list[str] = []
+    vcs = CountingGitHub()
+    locator = PullRequestLocator(17, "team/repo", 7, "gitlab", UUID(int=18), 19)
+
+    class GitLabRepository(BoundRepository):
+        async def get_run_vcs_input(self, run_id: UUID) -> RunVcsInput:
+            return RunVcsInput(UUID(int=20), REPOSITORY_ID, "a" * 40, "b" * 40, locator)
+
+    repository = GitLabRepository(events, binding=_binding(version, "gitlab"))
+    processor = ReviewRunProcessor(
+        repository,
+        None,
+        conventions=cast(GenerateRepoConventions, Conventions(events)),
+        vcs_provider_selector=BoundVcsProviderSelector(locator, vcs),
+        uow_factory=processing_uow(repository),
+        context_stage=Stage(events),
+    )
+    if version == "v4":
+        with pytest.raises(PolicyError) as raised:
+            asyncio.run(processor.prepare(RUN_ID))
+        assert raised.value.code is _INTEGRITY
+        assert "does not serve the provider 'gitlab'" in str(raised.value)
+        assert events == [] and vcs.reads == []
+    else:
+        assert isinstance(asyncio.run(processor.prepare(RUN_ID)), GeneratedConventions)
+        assert events == ["policy loaded", "diff stored", "policy stage", "conventions model"]
+        assert vcs.reads == ["pull request"]
+
+
+def test_context_stage_cannot_expose_a_gitlab_snapshot_as_github() -> None:
+    stage = _stage(_store(), Trace(), provider="gitlab")
+    with pytest.raises(PolicyError) as raised:
+        asyncio.run(stage.begin(RUN_ID))
+    assert raised.value.code is _INTEGRITY
+    assert "does not serve the provider 'gitlab'" in str(raised.value)
+    assert stage.snapshot_for_llm is None
