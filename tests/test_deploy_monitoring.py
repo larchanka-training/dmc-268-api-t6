@@ -441,6 +441,32 @@ def test_invalid_grafana_admin_password_fails_before_the_host_changes(
     assert password not in result.stdout + result.stderr
 
 
+def test_invalid_grafana_admin_password_in_env_is_named_not_regenerated(host: Host) -> None:
+    assert host.deploy().returncode == 0
+    env = host.env_file.read_text(encoding="utf-8")
+    host.env_file.write_text(
+        re.sub(
+            r"^GRAFANA_ADMIN_PASSWORD=.*$", "GRAFANA_ADMIN_PASSWORD=edited by hand", env, flags=re.M
+        ),
+        encoding="utf-8",
+    )
+
+    result = host.deploy(GRAFANA_ADMIN_PASSWORD="")
+
+    assert result.returncode == 1
+    assert "GRAFANA_ADMIN_PASSWORD in" in result.stderr
+    assert "is not a valid password: set the secret" in result.stderr
+    assert "edited by hand" not in result.stderr
+
+
+def test_grafana_admin_password_check_does_not_depend_on_the_locale(host: Host) -> None:
+    # 16 characters, one of them non-ASCII: rejected under any locale of the host.
+    for locale in ("C", "C.UTF-8"):
+        result = host.deploy(GRAFANA_ADMIN_PASSWORD="pässword-1234567", LC_ALL=locale)
+        assert result.returncode == 1, locale
+        assert "GRAFANA_ADMIN_PASSWORD must be" in result.stderr
+
+
 def test_telegram_token_lives_in_a_file_read_by_alertmanager_only(host: Host) -> None:
     result = host.deploy()
     token_file = host.monitoring_dir / "alertmanager" / "secrets" / "telegram_bot_token"

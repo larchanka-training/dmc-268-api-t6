@@ -231,11 +231,18 @@ p50/p95/p99/max (nearest rank, обрезка до 0,01 мс) и вердикт;
 Клиент — GitHub-hosted runner, поэтому в цифрах есть WAN и TLS новых соединений, а не только
 ACK сервера.
 
----
-
 ### 2.3. Приёмка мониторинга staging (#186)
 
-Ручной workflow **Monitoring acceptance** (`.github/workflows/monitoring-acceptance.yml`) собирает доказательства по AC #186 с хоста staging. В отчёт попадают стек и цели Prometheus, данные дашборда, `permission denied` ролей мониторинга, возраст дампа и копии в R2, прогон восстановления во временную БД и тестовый алерт в Telegram. Запускается только через `workflow_dispatch` и только для `main`, в `environment: staging`. Права `contents: read`, группа concurrency `staging-monitoring-acceptance`. Состав проверок описан в [MONITORING.md](MONITORING.md) §10 «Приёмка на staging».
+Ручной workflow **Monitoring acceptance** (`.github/workflows/monitoring-acceptance.yml`)
+собирает доказательства по AC #186 с хоста staging: стек и цели Prometheus, данные дашборда,
+`permission denied` ролей мониторинга, возраст дампа и копии в R2, прогон восстановления во
+временную БД и тестовый алерт в Telegram. Запускается только через `workflow_dispatch`; job
+идёт лишь для `main`, в `environment: staging`, с правами `contents: read` и своей группой
+concurrency `staging-monitoring-acceptance`. Рассчитан на курсовой VPS (режим `edge`,
+SSH-пользователь root). Состав проверок — [MONITORING.md](MONITORING.md) §10 «Приёмка на
+staging».
+
+---
 
 ## 3. Образ и health check
 

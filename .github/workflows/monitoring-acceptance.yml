@@ -2,8 +2,10 @@ name: Monitoring acceptance
 
 # Acceptance evidence of the monitoring stack on staging (#186, docs/MONITORING.md §10): stack and
 # targets, dashboard data, isolation of the monitoring roles, backups, a restore drill and a test
-# alert. Changes nothing on the host except the scratch database of the drill (dropped) and one
-# message to the team chat. The report goes to the job summary.
+# alert. On the host it uploads acceptance.sh into the monitoring dir and changes nothing else except
+# the scratch database of the drill (dropped) and one message to the team chat. Every step runs, the
+# report goes to the job summary and the last step decides the result. Meant for the course VPS
+# (edge mode, root SSH user); on a Terraform host RPS is skipped and the backup dir needs root.
 on:
   workflow_dispatch:
     inputs:
@@ -28,7 +30,7 @@ jobs:
     # workflow_dispatch can target any branch; only main may use the staging credentials.
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 25
     environment:
       name: staging
     env:
@@ -86,13 +88,17 @@ jobs:
           } >> "${GITHUB_OUTPUT}"
 
       - name: Public Grafana endpoints
+        id: grafana
         if: steps.target.outputs.grafana_url != ''
         env:
           GRAFANA_URL: ${{ steps.target.outputs.grafana_url }}
         run: |
-          health="$(curl -sS -o /dev/null -w '%{http_code}' "${GRAFANA_URL}/api/health")"
-          metrics="$(curl -sS -o /dev/null -w '%{http_code}' "${GRAFANA_URL}/metrics")"
-          login="$(curl -sS -o /dev/null -w '%{http_code}' "${GRAFANA_URL}/login")"
+          # A failed connection is reported as 000; the result is decided in Report, so the host
+          # checks still run.
+          code() { curl -sS -o /dev/null -w '%{http_code}' --max-time 20 "$1" || true; }
+          health="$(code "${GRAFANA_URL}/api/health")"
+          metrics="$(code "${GRAFANA_URL}/metrics")"
+          login="$(code "${GRAFANA_URL}/login")"
           {
             echo "## Public Grafana (${GRAFANA_URL})"
             echo
@@ -103,9 +109,11 @@ jobs:
             echo "| \`/metrics\` | ${metrics} | 404, closed by the edge proxy |"
             echo
           } >> "${GITHUB_STEP_SUMMARY}"
-          if [[ "${health}" != 200 || "${login}" != 200 || "${metrics}" != 404 ]]; then
-            echo "Grafana: /api/health ${health}, /login ${login}, /metrics ${metrics}" >&2
-            exit 1
+          if [[ "${health}" == 200 && "${login}" == 200 && "${metrics}" == 404 ]]; then
+            echo "result=ok" >> "${GITHUB_OUTPUT}"
+          else
+            echo "result=fail" >> "${GITHUB_OUTPUT}"
+            echo "::error::Grafana: /api/health ${health}, /login ${login}, /metrics ${metrics}"
           fi
 
       - name: Upload acceptance script
@@ -127,6 +135,7 @@ jobs:
         env:
           API_DIR: ${{ steps.target.outputs.app_dir }}
           SEND_TEST_ALERT: ${{ inputs.send_test_alert && '1' || '0' }}
+          RUN_ID: ${{ github.run_id }}-${{ github.run_attempt }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         with:
           host: ${{ steps.target.outputs.host }}
@@ -137,7 +146,9 @@ jobs:
           fingerprint: ${{ vars.STAGING_SSH_FINGERPRINT }}
           debug: false
           capture_stdout: true
-          envs: MONITORING_DIR,API_DIR,SEND_TEST_ALERT,RUN_URL
+          # The test alert waits up to 6 min for Telegram; the default of the action is 10 min.
+          command_timeout: 20m
+          envs: MONITORING_DIR,API_DIR,SEND_TEST_ALERT,RUN_URL,RUN_ID
           script: |
             set -euo pipefail
             set +o xtrace
@@ -145,18 +156,27 @@ jobs:
             bash "${MONITORING_DIR}/acceptance.sh" 2>&1 || echo "acceptance.sh exited with $?"
 
       - name: Report
-        if: always() && steps.checks.outcome == 'success'
+        if: ${{ !cancelled() && steps.target.outcome == 'success' }}
         env:
           REPORT: ${{ steps.checks.outputs.stdout }}
+          CHECKS: ${{ steps.checks.outcome }}
+          GRAFANA: ${{ steps.grafana.outputs.result || 'skipped' }}
         run: |
           {
             echo "## Host checks"
             echo
             echo '```'
-            printf '%s\n' "${REPORT}"
+            printf '%s\n' "${REPORT:-no report: the SSH step ${CHECKS}}"
             echo '```'
           } >> "${GITHUB_STEP_SUMMARY}"
-          if [[ "${REPORT}" != *"all checks passed"* ]]; then
-            echo "acceptance checks failed, see the job summary" >&2
-            exit 1
+          last="$(printf '%s\n' "${REPORT}" | sed '/^[[:space:]]*$/d' | tail -n 1)"
+          status=0
+          if [[ "${last}" != "all checks passed" ]]; then
+            echo "::error::host checks failed, see the job summary"
+            status=1
           fi
+          if [[ "${GRAFANA}" == fail ]]; then
+            echo "::error::public Grafana endpoints failed, see the job summary"
+            status=1
+          fi
+          exit "${status}"
