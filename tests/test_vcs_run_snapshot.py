@@ -534,6 +534,8 @@ def test_cached_snapshot_distinguishes_required_authority_from_optional_blob_fai
             raise failure
 
     class ContextStage:
+        snapshot_for_llm = None
+
         @property
         def policy_key(self) -> None:
             return None

@@ -1,15 +1,15 @@
 """Add referenceable installation and project ownership keys (#169).
 
-Revision ID: 20261025_0040
-Revises: 20261024_0039
+Revision ID: 20261026_0041
+Revises: 20261025_0040
 """
 
 from __future__ import annotations
 
 from alembic import op
 
-revision = "20261025_0040"
-down_revision = "20261024_0039"
+revision = "20261026_0041"
+down_revision = "20261025_0040"
 branch_labels = None
 depends_on = None
 

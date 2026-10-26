@@ -80,10 +80,6 @@ FAST_CONTEXT_TOKEN_BUDGET = 60_000
 _MAX_TRACED_BLOCKS = 200
 # ``context.rag`` of a build that had a RAG plan and failed: the slot did not complete.
 _RAG_BUILD_FAILED = "context_build_failed"
-# CONTRACT: the provider the stage builds the diff map with is the provider the review path
-# is chosen for (TL-13). The stage's input carries no provider yet; #220 replaces both uses
-# with the provider of the run.
-_STAGE_PROVIDER = VcsProviderName.GITHUB
 
 
 class EstimatedTokenCounter:
@@ -480,7 +476,7 @@ class ReviewContextStage:
                     bindings.review_system_id,
                     bindings.review_system_key,
                     bindings.review_system_version,
-                    _STAGE_PROVIDER.value,
+                    run.provider,
                 ),
                 self._snapshot,
             )

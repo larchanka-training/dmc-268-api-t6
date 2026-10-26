@@ -203,8 +203,8 @@ def test_ownership_key_migration_preserves_legacy_rows_keys_and_metadata(
     connection.commit()
 
     for _ in range(2):
-        command.upgrade(config, "20261025_0040")
-        assert connection.scalar(text("SELECT version_num FROM alembic_version")) == "20261025_0040"
+        command.upgrade(config, "20261026_0041")
+        assert connection.scalar(text("SELECT version_num FROM alembic_version")) == "20261026_0041"
         installation_keys = {
             key["name"]: key["column_names"]
             for key in inspect(connection).get_unique_constraints("provider_installations")

@@ -28,9 +28,11 @@ from app.modules.reviews.application.check_runs import RunProviderCheckpoint
 from app.modules.reviews.application.execute_review import ExecuteReviewRun
 from app.modules.reviews.application.handle_review_run import ClaimedAttempt
 from app.modules.reviews.application.llm import ManifestEntry
+from app.modules.reviews.application.process_run import RunVcsInput
 from app.modules.reviews.application.prompt_builder import file_block_id
 from app.modules.reviews.application.reflection_pass import ReflectionPass
 from app.modules.reviews.application.review_output import VerifiedReviewOutput
+from app.modules.reviews.application.vcs_diff import PullRequestLocator
 from app.modules.reviews.infrastructure.github_run_source import GitHubRunSource
 from app.modules.reviews.infrastructure.llm.gateway import LlmGateway
 from app.modules.reviews.infrastructure.llm.memory import InMemoryLlmCallTrace, InMemoryUsageLedger
@@ -149,6 +151,21 @@ def _pipeline_kwargs(monkeypatch: pytest.MonkeyPatch, **compose: Any) -> dict[st
         captured.update(kwargs)
         return True
 
+    class Runs:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            pass
+
+        async def get_run_vcs_input(self, run_id: UUID) -> RunVcsInput:
+            assert run_id == CLAIMED.run_id
+            return RunVcsInput(
+                UUID(int=4),
+                UUID(int=5),
+                "a" * 40,
+                "b" * 40,
+                PullRequestLocator(1, "team/repo", 7, "github", UUID(int=6), 1),
+            )
+
+    monkeypatch.setattr(worker, "SqlAlchemyRunRepository", Runs)
     monkeypatch.setattr(worker, "StoreReviewOutput", _NoStore)
     monkeypatch.setattr(worker, "process_review_run", record)
     process = worker.compose_worker_process(
