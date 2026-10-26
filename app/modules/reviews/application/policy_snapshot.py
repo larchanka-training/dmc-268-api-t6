@@ -175,6 +175,7 @@ class ExecutionProfile:
 
 PINNED_PROMPT_CHECKSUMS: dict[str, str] = {
     "review.system:v2": "9177e358c23d1a7cd8987cbf667cf8b705c2afb27eaf8b2237480e4531431d75",
+    "review.system:v4": "5738227c7352228d29975e0512b5b5d3354eff31c9d161ca72086a776e9c498f",
     "review.conventions:v2": "225a8f7d56835cf1307ddb25feac602c3d10e03c34ee51afc90a1f99af101454",
     "review.verifier:v1": "e00128b211ca64c9a2dd2bb902ade9abf4a29f30c7ec9066501dc7694ddc5940",
     "review.verifier:v2": "1f676b4fea8477d77b83a106a6c62e78f67d19f71937d4a02093d11a9d276088",

@@ -3,7 +3,7 @@
 ``compose_worker_process`` runs one queued run with the production attempt provider (the
 gateway's conventions, review and verifier models), the factory's context stage and the real
 GitHub run source over in-memory HTTP transports. The run is bound to a review.system v4 row
-seeded only here: F1 ships no ``review.system.v4.md`` (that is F2). The v4 run takes the
+with the bytes of the packaged ``review.system.v4.md`` (F2), inactive here. The v4 run takes the
 snapshot path: selector, snapshot, L2-L4 context counted with the pinned counter, a single
 fit, a manifest per call, the review citing the diff and the L3 excerpt, the verifier shown
 that excerpt, ``llm.verify`` and the publication input. A v3 run in the same composition

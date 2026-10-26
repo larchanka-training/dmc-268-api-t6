@@ -68,7 +68,13 @@ Everything below comes from the specs and from what F1 renders. Nothing is new b
 - RFS §3.3 `:238-243` counts the system prompt in the send budget, outside the 12k policy limit.
 - The system prompt is the stable prefix of the provider cache (README "Assembly order").
 
-The PR body states the byte size and the counter/v2 token count.
+The PR body states the byte size and the counter/v2 token count. The file came out at 26 786 bytes
+and 8 882 tokens (v3: 21 076 bytes, 6 991 tokens): the source-authority, priority, attribution and
+evidence sections are new, and the examples show policy and service-defaults blocks with
+`block_id`s and `evidence_refs`.
+Decided by the tech lead on 2026-10-26 after review: trim repeated prose and drop the section 13
+shape block (the provider gets the v2 schema as strict `response_format`); the sections copied from
+v3 stay byte-identical.
 
 ### Section outline
 
@@ -126,6 +132,11 @@ The red set is exactly the six tests below that the table marks as flipping:
 assertion). `test_pinned_checksums_match_files_and_golden_fixtures` goes red only with the pin and
 without the file, so not at step 0. No `_bind_v4` collision: its callers seed `review.system` up to v3.
 
+Step 3 ran with the real file and pin on the affected files, not the full suite (the coordinator
+runs it): the 66 test files that import the seed, the prompt pins, the selector, the builder, the
+answer contracts, the e2e or the live pin passed (1938 tests), and so did the eval, gateway and
+builder tests that read `review/prompts/` (570). Nothing outside this table went red.
+
 | Test | Why it flips | Change |
 | --- | --- | --- |
 | `test_prompt_seeding.py::test_load_prompt_assets_preserves_full_file_and_checksum` | The asset list gains v4. | Add `("review.system", 4)`. |
@@ -135,7 +146,7 @@ without the file, so not at step 0. No `_bind_v4` collision: its callers seed `r
 | `::test_pinned_checksums_match_files_and_golden_fixtures` | It iterates the pinned checksums, so the new entry needs the file. | No change: it is red until the file exists. |
 | `test_review_prompt_pins_postgres.py::test_v2_run_and_persisted_snapshot_retain_their_prompt_after_v3_activation` | Same filter problem as the seed test: 6 inserted, version 4 active. This is the parent plan's `:160`. | Restrict both asset sets to ≤ 3. |
 | `test_review_prompt_pins_postgres.py`: `_V4_CONTENT` and `_bind_v4` | The fixture row stands in for F2's file. | • `_V4_CONTENT` becomes the packaged asset's content, taken from `load_prompt_assets` (the bytes as seeded); the checksum becomes the asset's.<br>• Keep both names: the e2e test, the live pin and #330 import them.<br>• Update the docstring. |
-| `test_run_prompt_pins_postgres.py::test_complete_pins_make_snapshot_ready_but_prompt_input_stays_legacy` | It seeds `_packaged()`, so the new run pins v4. The stage then serves the snapshot, and `stage.policy_key` becomes the repo-conventions-v2 digest instead of `ignore_digest`. | Parametrize it:<br>• seed ≤ v3: legacy, `snapshot_for_llm is None`, `policy_key == ignore_digest`;<br>• full seed: the run pins the packaged v4 row (checksum = pinned), `snapshot_for_llm == snapshot`, `policy_key == conventions_cache_key(snapshot, ignore_digest)`. |
+| `test_run_prompt_pins_postgres.py::test_complete_pins_make_snapshot_ready_but_prompt_input_stays_legacy` | It seeds `_packaged()`, so the new run pins v4. The stage then serves the snapshot, and `stage.policy_key` becomes the repo-conventions-v2 digest instead of `ignore_digest`. | Parametrize it:<br>• seed ≤ v3: legacy, `snapshot_for_llm is None`, `policy_key == ignore_digest`;<br>• full seed: the run pins the packaged v4 row (checksum = pinned), `snapshot_for_llm == snapshot`, `policy_key == conventions_cache_key(snapshot, ignore_digest)`.<br>Renamed `test_complete_pins_make_snapshot_ready_and_the_pinned_prompt_picks_the_path`. In both cases the prompt input's binding is the pinned version and `policy_snapshot` stays `None`: the repository never attaches it, the stage serves it. |
 | `test_snapshot_path_e2e_postgres.py` | `review_body["messages"][0]["content"] == _V4_CONTENT` now proves the real bytes are sent; nothing else changes. | The module docstring only, lines 5-6. #330 edits from line 9 on. |
 | `test_snapshot_path_live_pin.py` | Stays green, because `_live_assets()` binds v3. After F2 it pins the floor: in-flight runs and pre-0039 runs. | None in F2: #283 also edits this file (see "Coordination"), so its docstring goes to G. |
 
