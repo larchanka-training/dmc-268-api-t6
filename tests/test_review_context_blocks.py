@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import replace
+from hashlib import sha256
 from typing import Any
 from uuid import UUID
 
@@ -52,7 +53,9 @@ from app.modules.reviews.application.review_context import (
     Representation,
     RetrievedBlock,
     ReviewContextPayload,
+    snapshot_block,
 )
+from app.modules.reviews.application.review_output import EvidenceRef
 from app.modules.reviews.application.review_path import ReviewBinding
 from tests.test_review_context_stage import _HEAD as STAGE_HEAD
 from tests.test_review_context_stage import _RUN as STAGE_RUN
@@ -410,10 +413,11 @@ def _review(version: str, payload: ReviewContextPayload | None) -> ReviewContext
 def test_snapshot_review_shows_the_l2_l4_excerpts_and_counts_the_ignored_files() -> None:
     context = _review("v4", _payload())
 
-    assert context.context_blocks == (L4_SIGNATURE, L2_WINDOW)
+    l4 = replace(L4_SIGNATURE, block_id=_bounded_l4_id(L4_SIGNATURE))
+    assert context.context_blocks == (l4, L2_WINDOW)
     assert context.excluded_files == 2
     user = PromptBuilder().build_prompt(context).user
-    assert '<excerpt block_id="L4:sym-1" level="L4"' in user
+    assert f'<excerpt block_id="{l4.block_id}" level="L4"' in user
     assert '<excerpt block_id="L2:f1:3-4" level="L2"' in user
     # L1 is the changed files, never a second time as an excerpt.
     assert 'block_id="L1:h1"' not in user
@@ -473,3 +477,52 @@ def test_the_stage_names_the_head_of_the_attempts_diff_map() -> None:
     asyncio.run(stage.run(STAGE_RUN))
 
     assert stage.head_sha == STAGE_HEAD
+
+
+def _bounded_l4_id(block: ContextBlock) -> str:
+    # The snapshot-path id of an L4 block: its revision and a digest of the stage's id.
+    return f"L4:{HEAD[:12]}:{sha256(block.block_id.encode()).hexdigest()[:16]}"
+
+
+# A 200-character path: the stage's L4 id ``L4:{revision[:12]}:{path}#{index}`` embeds it.
+LONG_PATH = "pkg/" + "d" * 191 + "/m.py"
+LONG_FIRST = _block(
+    f"L4:{HEAD[:12]}:{LONG_PATH}#0",
+    ContextLevel.L4,
+    LONG_PATH,
+    ((1, 1),),
+    "class First:",
+    role=SourceRole.AST_EXCERPT,
+    representation=Representation.SIGNATURE,
+)
+LONG_SECOND = replace(
+    LONG_FIRST,
+    block_id=f"L4:{HEAD[:12]}:{LONG_PATH}#1",
+    source=replace(LONG_FIRST.source, ranges=(LineRange(4, 4),)),
+    text="class Second:",
+)
+
+
+def test_snapshot_review_cites_an_l4_excerpt_of_a_long_path_by_a_bounded_id() -> None:
+    assert len(LONG_PATH) == 200
+    payload = replace(_payload(), blocks=(L1_HUNK, LONG_FIRST, LONG_SECOND, L2_WINDOW))
+
+    context = _review("v4", payload)
+
+    first, second = _bounded_l4_id(LONG_FIRST), _bounded_l4_id(LONG_SECOND)
+    assert [block.block_id for block in context.context_blocks] == [first, second, "L2:f1:3-4"]
+    assert first != second and len(first) <= 128
+    # The stage's own id is past the v2 limit: it could not be cited.
+    with pytest.raises(ValueError, match="at most 128 characters"):
+        EvidenceRef(block_id=LONG_FIRST.block_id, start_line=1, end_line=1)
+    # The one bounded id is shown, recorded in the manifest and cited.
+    user = PromptBuilder().build_prompt(context).user
+    assert f'<excerpt block_id="{first}" level="L4" path="{LONG_PATH}"' in user
+    assert LONG_FIRST.block_id not in user
+    manifest = PromptBuilder().build_manifest(context, call_id=RUN_ID)
+    ref = EvidenceRef(block_id=first, start_line=1, end_line=1)
+    assert manifest.is_range_shown(ref.block_id, ref.start_line, ref.end_line)
+    assert manifest.is_range_shown(second, 4, 4) and not manifest.is_range_shown(second, 1, 1)
+    # Only L4 is renamed; the payload keeps the stage's ids (its trace and the legacy path).
+    assert snapshot_block(L2_WINDOW) is L2_WINDOW
+    assert payload.blocks[1].block_id == f"L4:{HEAD[:12]}:{LONG_PATH}#0"

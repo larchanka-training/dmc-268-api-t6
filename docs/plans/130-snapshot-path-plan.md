@@ -141,6 +141,15 @@ validates against v1 when no snapshot is attached (`llm/models.py:183-188`). Tha
   - As built in F1-4: `<excluded_files count="N" />` after `<omitted_files>`, only when N > 0, so the
     path list and its length accounting stay as they are. After a caught build failure (no payload)
     there is no counter and no excerpt.
+- Final fix round (before push): the stage's L4 id `L4:{revision[:12]}:{path}#{index}`
+  (`ast_resolution.py` `symbol_ref`) embeds the path, so a path past ~110 characters made the excerpt
+  uncitable by a v2 `EvidenceRef` (`block_id` at most 128, `review_output.py`). `execute_review` now
+  takes the excerpts through `snapshot_block` (`review_context.py`): an L4 block becomes
+  `L4:{revision[:12]}:{sha256(stage id)[:16]}` (32 characters), the one id the excerpt, the manifest,
+  the verifier and the attribution share; L1-L3 ids are bounded already. The payload, its
+  `context.build` trace and the legacy path keep the stage's id. Raising the v2 limit was not taken:
+  a path can pass any fixed bound, and it would change the published review-output/v2 schema. #144
+  mirrors the format for its `RAG:{path}:{ranges}` ids.
 
 **DD3. R10: one fit point per call.**
 - **Review.**
@@ -209,6 +218,10 @@ validates against v1 when no snapshot is attached (`llm/models.py:183-188`). Tha
   - index (`run_id`, `attempt`).
 - `blocks` stores every `ManifestBlock` field (`policy_snapshot.py:351-365`) plus three additive
   defaults: `tokens`, `repository_id`, `truncated`.
+  - Final fix round (accepted under TL-12 for #144): three more optional fields, the selection
+    metadata of ADR 0001 §9 next to the source ref, `selection_reason`, `index_commit_sha` and
+    `edge_kind` (the `EdgeKind` value); None for every block F1 writes, #144 PR3a fills them. They
+    change every manifest digest once.
   - Any `_ROLE_KIND_MAP` role (`prompt_budget.py:266-277`) round-trips.
   - So #144's `retrieved_excerpt` with side, revision and `shown_ranges` needs no schema change.
   - This table is the candidate checkpoint #144 agreed to.

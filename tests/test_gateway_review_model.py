@@ -68,7 +68,14 @@ from app.modules.reviews.infrastructure.llm.settings import LlmSettings, ModelPr
 from app.modules.reviews.infrastructure.llm.transport import ChatRequest, ChatResponse
 from tests.llm_fakes import context_checkpoint
 from tests.test_review_context_blocks import HEAD as PINNED_HEAD
-from tests.test_review_context_blocks import L2_WINDOW, L3_FULL, L4_SIGNATURE, _block, _payload
+from tests.test_review_context_blocks import (
+    L2_WINDOW,
+    L3_FULL,
+    L4_SIGNATURE,
+    _block,
+    _bounded_l4_id,
+    _payload,
+)
 
 RUN_ID = UUID("00000000-0000-0000-0000-000000000500")
 MAIN = "app/main.py"
@@ -738,7 +745,7 @@ def test_a_push_after_the_diff_map_keeps_the_pinned_head_on_the_snapshot_path() 
     assert revisions == {
         "policy-rules": "b" * 40,
         file_block_id(MAIN): PINNED_HEAD,
-        "L4:sym-1": PINNED_HEAD,
+        _bounded_l4_id(L4_SIGNATURE): PINNED_HEAD,
         "L2:f1:3-4": PINNED_HEAD,
     }
     [request] = transport.requests

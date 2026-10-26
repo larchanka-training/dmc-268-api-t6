@@ -10,10 +10,11 @@ tell what a model was really shown.
 from __future__ import annotations
 
 import copy
+import hashlib
 import logging
 import math
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import StrEnum
 from typing import Protocol, Self
 from uuid import UUID
@@ -127,6 +128,22 @@ class ContextBlock:
     truncated: bool
     # The other side of a diff hunk: removed lines come from the old revision.
     related_sources: tuple[SourceRef, ...] = ()
+
+
+def snapshot_block(block: ContextBlock) -> ContextBlock:
+    """``block`` as the snapshot path shows, records and cites it.
+
+    The stage's L4 id embeds the symbol's path (``L4:{revision[:12]}:{path}#{index}``), so
+    a long path passes the 128-character limit of a v2 ``EvidenceRef`` and the excerpt
+    could not be cited. The snapshot path names it by its revision and a digest of that
+    id, unique as the id is; the payload, its ``context.build`` trace and the legacy path
+    keep the stage's id. L1-L3 ids are bounded already (a file id and a line range).
+    """
+    if block.level is not ContextLevel.L4:
+        return block
+    digest = hashlib.sha256(block.block_id.encode("utf-8")).hexdigest()[:16]
+    revision = (block.source.revision or "")[:12]
+    return replace(block, block_id=f"L4:{revision}:{digest}")
 
 
 @dataclass(frozen=True)

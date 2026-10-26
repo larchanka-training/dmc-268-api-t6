@@ -43,6 +43,7 @@ from app.modules.reviews.application.review_context import (
     ContextLevel,
     RetrievedBlock,
     ReviewContextPayload,
+    snapshot_block,
 )
 from app.modules.reviews.application.review_output import (
     DroppedCandidateRecord,
@@ -262,8 +263,9 @@ class ExecuteReviewRun:
         excluded_files = 0
         payload = None if self._context_filter is None else self._context_filter.payload
         if prompt_input.policy_snapshot is not None and payload is not None:
+            # Every excerpt by the id the prompt, the manifest and the evidence share.
             context_blocks = tuple(
-                block for block in payload.blocks if block.level in _EXCERPT_LEVELS
+                snapshot_block(block) for block in payload.blocks if block.level in _EXCERPT_LEVELS
             )
             bindings = prompt_input.policy_snapshot.prompt_bindings
             if has_retrieved_section(bindings.review_system_key, bindings.review_system_version):

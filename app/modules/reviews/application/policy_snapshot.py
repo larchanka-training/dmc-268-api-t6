@@ -369,6 +369,12 @@ class ManifestBlock:
     repository_id: UUID | None = None
     # The block shows a prefix of its source, ending with the truncation trailer.
     truncated: bool = False
+    # The selection metadata of a retrieved block, next to its source (ADR 0001 §9): why it
+    # was chosen, the commit of the index that chose it and the edge it was reached by
+    # (``EdgeKind`` value). None for every block that was not retrieved.
+    selection_reason: str | None = None
+    index_commit_sha: str | None = None
+    edge_kind: str | None = None
 
 
 @dataclass(frozen=True)
