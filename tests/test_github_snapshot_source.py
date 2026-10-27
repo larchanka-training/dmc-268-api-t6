@@ -1114,3 +1114,36 @@ def test_rules_document_bounds_untrusted_retry_after(
     assert error.code.value == "policy_rate_limited"
     assert error.retry_after == expected_delay
     assert counted == requests
+
+
+# The message GitHub sends with a secondary rate limit; only its "secondary rate limit" counts.
+_SECONDARY_LIMIT = {
+    "message": "You have exceeded a secondary rate limit. Please wait a few minutes before you "
+    "try again.",
+    "documentation_url": "https://docs.github.com/rest/using-the-rest-api/rate-limits-for-the-rest-api",
+}
+
+
+@pytest.mark.parametrize(
+    ("path", "requests"), [(_ROOT_TREE, 1), (_RULES_BLOB, 3)], ids=["tree", "blob"]
+)
+@pytest.mark.parametrize(
+    ("status", "body", "code", "delay"),
+    [
+        (403, _SECONDARY_LIMIT, "policy_rate_limited", timedelta(seconds=60)),
+        (429, _SECONDARY_LIMIT, "policy_rate_limited", timedelta(seconds=60)),
+        (403, {"message": "Resource not accessible by integration"}, "policy_access_denied", None),
+    ],
+    ids=["403-marker", "429-marker", "403-other-message"],
+)
+def test_rules_document_reads_a_secondary_rate_limit_without_headers(
+    path: str, requests: int, status: int, body: object, code: str, delay: timedelta | None
+) -> None:
+    routes = _policy_routes()
+    routes[path] = _answer(status, json=body)
+
+    error, counted = _run(GitHub(routes), lambda source: source.rules_document(_HEAD))
+
+    assert isinstance(error, PolicyError), repr(error)
+    assert (error.code.value, error.retry_after) == (code, delay)
+    assert counted == requests

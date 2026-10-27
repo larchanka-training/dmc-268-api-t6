@@ -5,9 +5,11 @@ from __future__ import annotations
 import asyncio
 import gzip
 import hashlib
+import json
 from collections.abc import AsyncIterator
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from typing import Any
+from uuid import UUID
 
 import httpx
 import pytest
@@ -15,6 +17,7 @@ import pytest
 from app.modules.integrations.webhooks.infrastructure.github_installation_tree_provider import (
     StaticGitHubInstallationAccessTokenProvider,
 )
+from app.modules.repositories.application.rules_status import RulesRefreshTarget
 from app.modules.reviews.application.policy_documents import LoadPolicyDocuments, PolicyEntryKind
 from app.modules.reviews.application.policy_errors import (
     PolicyError,
@@ -22,8 +25,13 @@ from app.modules.reviews.application.policy_errors import (
     policy_error_detail,
 )
 from app.modules.reviews.application.policy_snapshot import DocumentPresence
+from app.modules.reviews.application.run_failures import RetryDelays
 from app.modules.reviews.application.vcs_diff import PullRequestLocator
-from app.modules.reviews.infrastructure.github_policy_source import GitHubPolicyDocumentSource
+from app.modules.reviews.infrastructure.github_policy_source import (
+    GitHubDefaultBranchHeadSource,
+    GitHubPolicyDocumentSource,
+)
+from app.modules.reviews.infrastructure.vcs_failures import StreamedStatusError
 from tests.github_raw_blobs import RAW_BLOB_MEDIA_TYPE, git_blob_oid
 
 _BASE = "b" * 40
@@ -544,3 +552,225 @@ def test_policy_source_reads_retry_after_as_seconds_or_an_http_date(
         _run(respond, lambda source: source.list_entries(None))
 
     assert (caught.value.code, caught.value.retry_after) == (code, delay)
+
+
+# The message GitHub sends with a secondary rate limit; only its "secondary rate limit" counts.
+_SECONDARY_LIMIT = {
+    "message": "You have exceeded a secondary rate limit. Please wait a few minutes before you "
+    "try again.",
+    "documentation_url": "https://docs.github.com/rest/using-the-rest-api/rate-limits-for-the-rest-api",
+}
+_NO_ACCESS = {"message": "Resource not accessible by integration"}
+
+
+def _read(target: str) -> Any:
+    if target == "tree":
+        return lambda source: source.list_entries(None)
+    return lambda source: source.read_blob(_AGENTS)
+
+
+@pytest.mark.parametrize("target", ["tree", "blob"])
+@pytest.mark.parametrize(
+    ("status", "headers", "body", "code", "delay"),
+    [
+        (403, {}, _SECONDARY_LIMIT, PolicyErrorCode.RATE_LIMITED, timedelta(seconds=60)),
+        (429, {}, _SECONDARY_LIMIT, PolicyErrorCode.RATE_LIMITED, timedelta(seconds=60)),
+        (
+            403,
+            {},
+            {"message": "SECONDARY RATE LIMIT exceeded"},
+            PolicyErrorCode.RATE_LIMITED,
+            timedelta(seconds=60),
+        ),
+        # The headers of a limit decide first; the message only stands in for them.
+        (
+            403,
+            {"Retry-After": "30"},
+            _SECONDARY_LIMIT,
+            PolicyErrorCode.RATE_LIMITED,
+            timedelta(seconds=30),
+        ),
+        (403, {"X-RateLimit-Remaining": "0"}, _SECONDARY_LIMIT, PolicyErrorCode.RATE_LIMITED, None),
+        # An unreadable Retry-After gives no wait, so the minute of the message applies.
+        (
+            403,
+            {"Retry-After": "soon"},
+            _SECONDARY_LIMIT,
+            PolicyErrorCode.RATE_LIMITED,
+            timedelta(seconds=60),
+        ),
+        (403, {}, _NO_ACCESS, PolicyErrorCode.ACCESS_DENIED, None),
+        # As before #168 part 6: a 429 is a limit, yet without headers it names no wait.
+        (429, {}, _NO_ACCESS, PolicyErrorCode.RATE_LIMITED, None),
+        # Only a 403 or a 429 can be a secondary rate limit.
+        (404, {}, _SECONDARY_LIMIT, PolicyErrorCode.REVISION_UNAVAILABLE, None),
+        (502, {}, _SECONDARY_LIMIT, PolicyErrorCode.FETCH_TRANSIENT, None),
+        # The phrase counts only as the JSON message.
+        (403, {}, "secondary rate limit", PolicyErrorCode.ACCESS_DENIED, None),
+        (
+            403,
+            {},
+            {"documentation_url": "secondary rate limit"},
+            PolicyErrorCode.ACCESS_DENIED,
+            None,
+        ),
+    ],
+    ids=[
+        "403-marker",
+        "429-marker",
+        "403-marker-upper-case",
+        "403-marker-retry-after",
+        "403-marker-remaining-0",
+        "403-marker-unreadable-retry-after",
+        "403-other-message",
+        "429-other-message",
+        "404-marker",
+        "502-marker",
+        "403-plain-text",
+        "403-marker-outside-message",
+    ],
+)
+def test_secondary_rate_limit_without_headers_waits_a_minute(
+    target: str,
+    status: int,
+    headers: dict[str, str],
+    body: object,
+    code: PolicyErrorCode,
+    delay: timedelta | None,
+) -> None:
+    def respond(request: httpx.Request) -> httpx.Response:
+        if isinstance(body, str):
+            return httpx.Response(status, headers=headers, text=body)
+        return httpx.Response(status, headers=headers, json=body)
+
+    with pytest.raises(PolicyError) as caught:
+        _run(respond, _read(target))
+
+    assert (caught.value.code, caught.value.retry_after) == (code, delay)
+    if delay == timedelta(seconds=60):
+        # A minute is shorter than the 2m queue, which a rate limit takes anyway.
+        assert RetryDelays().for_failure(1, caught.value) == ("2m", timedelta(minutes=2))
+
+
+def _padded_secondary_limit(size: int) -> bytes:
+    """The secondary-limit JSON, led by blanks to ``size`` bytes: cut short, it is no JSON."""
+    message = json.dumps(_SECONDARY_LIMIT).encode()
+    return b" " * (size - len(message)) + message
+
+
+@pytest.mark.parametrize(
+    ("size", "code"),
+    [(4096, PolicyErrorCode.RATE_LIMITED), (4097, PolicyErrorCode.ACCESS_DENIED)],
+    ids=["4096-bytes", "4097-bytes"],
+)
+def test_error_body_of_a_policy_blob_is_read_up_to_4_kib(size: int, code: PolicyErrorCode) -> None:
+    body = _Chunks(_padded_secondary_limit(size), chunk=1024)
+
+    with pytest.raises(PolicyError) as caught:
+        _run(lambda request: httpx.Response(403, stream=body), _read("blob"))
+
+    assert caught.value.code is code
+    assert body.sent == 4096
+
+
+def test_long_error_body_of_a_policy_blob_stops_the_stream() -> None:
+    body = _Chunks(_padded_secondary_limit(1_048_576), chunk=1000)
+
+    with pytest.raises(PolicyError) as caught:
+        _run(lambda request: httpx.Response(403, stream=body), _read("blob"))
+
+    assert caught.value.code is PolicyErrorCode.ACCESS_DENIED
+    # The read stops with the first chunk that reaches 4 KiB: five chunks of 1000 bytes.
+    assert body.sent == 5000
+    # Only the first 4 KiB of them are kept with the failure.
+    assert isinstance(caught.value.__cause__, StreamedStatusError)
+    assert len(caught.value.__cause__.body) == 4096
+
+
+@pytest.mark.parametrize(
+    ("size", "code"),
+    [(4096, PolicyErrorCode.RATE_LIMITED), (4097, PolicyErrorCode.ACCESS_DENIED)],
+    ids=["4096-bytes", "4097-bytes"],
+)
+def test_error_body_of_a_tree_listing_counts_up_to_4_kib(size: int, code: PolicyErrorCode) -> None:
+    # A plain request reads the whole body; only its first 4 KiB count, as with a stream.
+    body = _padded_secondary_limit(size)
+
+    with pytest.raises(PolicyError) as caught:
+        _run(lambda request: httpx.Response(403, content=body), _read("tree"))
+
+    assert caught.value.code is code
+
+
+def test_encoded_error_body_of_a_policy_blob_is_not_decoded() -> None:
+    # The read asks for identity: a gzip body could expand far past 4 KiB once decoded.
+    encoded = gzip.compress(json.dumps(_SECONDARY_LIMIT).encode())
+    body = _Chunks(encoded)
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(403, headers={"Content-Encoding": "gzip"}, stream=body)
+
+    with pytest.raises(PolicyError) as caught:
+        _run(respond, _read("blob"))
+
+    assert caught.value.code is PolicyErrorCode.ACCESS_DENIED
+    assert body.sent == 0
+
+
+class _BrokenChunks(httpx.AsyncByteStream):
+    """One chunk of a body, then a read timeout."""
+
+    def __init__(self, first: bytes) -> None:
+        self._first = first
+
+    async def __aiter__(self) -> AsyncIterator[bytes]:
+        yield self._first
+        raise httpx.ReadTimeout("body cut short")
+
+
+@pytest.mark.parametrize(
+    ("status", "code"),
+    [(403, PolicyErrorCode.ACCESS_DENIED), (429, PolicyErrorCode.RATE_LIMITED)],
+)
+def test_error_body_cut_short_keeps_the_status_verdict(status: int, code: PolicyErrorCode) -> None:
+    # The status is the answer; a body that fails to arrive only lacks the marker.
+    def respond(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(status, stream=_BrokenChunks(b'{"message": "secondary'))
+
+    with pytest.raises(PolicyError) as caught:
+        _run(respond, _read("blob"))
+
+    assert (caught.value.code, caught.value.retry_after) == (code, None)
+
+
+def test_default_branch_head_reads_a_secondary_rate_limit_without_headers() -> None:
+    # The rules status resolves the head with plain requests; their body is read too.
+    target = RulesRefreshTarget(
+        UUID(int=1),
+        17,
+        "octo/repo",
+        "main",
+        datetime(2026, 10, 27, tzinfo=UTC),
+        datetime(2026, 10, 27, 0, 5, tzinfo=UTC),
+    )
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(403, json=_SECONDARY_LIMIT)
+
+    async def resolve() -> Any:
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(respond), base_url="https://api.github.test"
+        ) as client:
+            heads = GitHubDefaultBranchHeadSource(
+                client=client, token_provider=StaticGitHubInstallationAccessTokenProvider("token")
+            )
+            return await heads.resolve(target)
+
+    with pytest.raises(PolicyError) as caught:
+        asyncio.run(resolve())
+
+    assert (caught.value.code, caught.value.retry_after) == (
+        PolicyErrorCode.RATE_LIMITED,
+        timedelta(seconds=60),
+    )
+    assert caught.value.policy_base_sha is None
