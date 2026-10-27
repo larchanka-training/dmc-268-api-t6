@@ -72,8 +72,9 @@ delivery gets one best-effort NACK(false); a failure of that settlement is logge
 and the consumer continues. Cancellation
 propagates. Existing publish-confirm, ACK/fallback-NACK and three-error retry
 behavior remains in place. Invalid x-attempt values log a warning and use the
-existing fallback. Malformed Retry-After values are ignored; oversized numeric
-Retry-After values keep the `10m` routing key and wait the one-day ceiling through
+existing fallback. A GitHub Retry-After that is neither ASCII delta-seconds nor an
+HTTP-date is ignored; oversized numeric Retry-After values and HTTP-dates more than
+a day ahead keep the `10m` routing key and wait the one-day ceiling through
 `available_at` (PIPELINE_SPEC §4.2). Valid representable delays and leading zeros retain their
 semantics.
 
