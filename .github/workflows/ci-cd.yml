@@ -943,7 +943,7 @@ jobs:
             [[ -n "${!name}" ]] && echo "set: ${name}" || echo "not set: ${name}"
           done
 
-      - name: Validate GitLab deployment configuration
+      - name: Validate application bundle and GitLab configuration
         shell: bash
         env:
           GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}

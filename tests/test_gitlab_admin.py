@@ -77,6 +77,44 @@ def test_help_documents_public_commands_and_protected_fd_ergonomics() -> None:
         assert value in result.stdout
 
 
+@pytest.mark.parametrize(
+    "command",
+    [
+        [],
+        ["create"],
+        ["bind-project"],
+        ["rotate-token"],
+        ["activate"],
+        ["revoke-installation"],
+        ["revoke-workspace"],
+        ["inspect"],
+    ],
+)
+def test_help_uses_the_python_available_in_the_container(command: list[str]) -> None:
+    result = cli([*command, "--help"], _CANARY.encode(), SSL_CERT_FILE="/missing/CA_CANARY")
+    assert result.returncode == 0
+    assert result.stderr == b""
+    assert result.stdout.startswith(b"usage: python -m app.gitlab_admin")
+    assert b"uv run" not in result.stdout
+    assert _CANARY.encode() not in result.stdout
+    assert b"CA_CANARY" not in result.stdout
+
+
+def test_help_distinguishes_container_stdin_from_local_extra_descriptors() -> None:
+    result = cli(["--help"])
+    help_text = b" ".join(result.stdout.split())
+    assert result.returncode == 0
+    assert b"Container example" in help_text
+    assert b"run on the host" in help_text
+    assert (
+        b"docker compose --profile gitlab-operator run --rm -T gitlab-admin "
+        b"create [public options] --secrets-fd 0 < /protected/secrets.json"
+    ) in help_text
+    assert b"Local process only" in help_text
+    assert b"Compose does not forward extra descriptors" in help_text
+    assert b"python -m app.bootstrap.seed_prompts" in help_text
+
+
 def create_args() -> list[str]:
     return [
         "create",

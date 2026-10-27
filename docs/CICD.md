@@ -247,7 +247,8 @@ staging».
 
 ### 2.4. GitLab staging и trusted operator (#335)
 
-Полный setup и команды create → bind-project → inspect → activate / revoke находятся
+Полный setup create → bind-project → inspect → project webhook → authorized activate →
+process admission → real MR / replay → revoke и удаление test hook находится
 в [SECRETS.md, Installed GitLab](SECRETS.md#installed-gitlab--защищённая-конфигурация-и-управление-169).
 Keyring — protected Environment secret `GITLAB_CREDENTIAL_KEYS`; variables —
 `GITLAB_ACTIVE_KEY_ID`, `GITLAB_ALLOWED_ORIGINS`, optional `GITLAB_PRIVATE_ORIGINS` и
@@ -272,14 +273,28 @@ runtime с API flag `false`; активировать конкретную ра�
 unset GitHub source пропускается; private project на gitlab.com не требует private
 network opt-in. Custom CA mounts этим изменением не добавлены.
 
-CI до **первого** SCP/SSH запускает target-image validator с `--network none` и
-protected temporary env input, без secret argv. Registry token передаётся stdin,
+CI в шаге **Validate application bundle and GitLab configuration** проверяет format
+всего application bundle, затем до **первого** SCP/SSH запускает target-image validator
+с `--network none` и protected temporary env input из generated role files, без secret
+argv. Unknown name, одинарная кавычка или trailing backslash в значении отклоняются
+здесь: Deploy ещё не запускался, automatic rollback пропускается; исправьте source
+config и повторите reviewed workflow. Registry token передаётся stdin,
 `DOCKER_CONFIG` и input удаляются на всех путях. Manual deploy сначала stage-ит role
 files: отсутствие `APP_SECRETS_B64` сохраняет текущие значения; CI explicit empty
 bundle удаляет их. Admission предшествует изменениям role files, `.env`, state,
 switch marker и сервисов. Запрошенный tag разрешается один раз в immutable registry
 release ref; GitLab probe и startup используют один local image ID, `up --pull missing`
 не даёт service `pull_policy: always` повторно подтянуть изменившийся tag.
+
+Retained `api.env` и `gitlab.env` manual deploy/rollback читают строго как generator
+data `NAME='value'`, с multiline values и обязательным завершающим newline каждой
+записи; arbitrary shell syntax/unquoted values не поддерживаются. Оба файла
+проверяются даже в GitHub-only среде, никогда не `source`. Safe diagnostics включают
+только фиксированные basename/category, например
+`GitLab configuration_invalid (gitlab.env: format_invalid)` или
+`GitLab configuration_invalid (api.env: read_failed)`; другие ошибки дают общий отказ.
+Восстанавливайте файлы через generator/защищённый configuration deploy, без печати
+секретов или ручного sourcing/editing на хосте.
 
 Повторный deploy/rollback не создаёт installation, не вращает PAT/keyring и не меняет
 binding. Rollback сохраняет текущие secrets/config и DB identity, проверяет существующий
@@ -289,6 +304,22 @@ config отклоняется до live mutation; truly absent GitLab config д�
 GitHub-only image (schema guard для rollback всё равно обязателен).
 Не удаляйте key ID, пока они нужны для сохранённого ciphertext; отключение одной
 тестовой installation — её revoke, а не выключение других tenants общим API flag.
+
+Project hook настраивается **до** activate: Settings → Webhooks, URL
+`https://<staging-api>/webhooks/gitlab/<installation_id>` с UUID из create/inspect,
+тот же protected `webhook_secret` в **Secret token** (`X-Gitlab-Token`), только
+**Merge request events**, SSL verification включена. Receiver требует stable
+`webhook-id` (GitLab 19.0+) или `Idempotency-Key` (17.4+); оба должны совпадать,
+старый webhook UUID недостаточен. Подробные protected steps и capability check —
+[SECRETS.md](SECRETS.md#installed-gitlab--защищённая-конфигурация-и-управление-169).
+Новый Signing token, custom headers/payload и canonical-check bypass не заменяют
+этот contract. После activation/process admission подтвердите реальную доставку
+через Recent events HTTP 202 и matching installation receipt в логе webhook-worker;
+это intake proof, не `succeeded` Run. Replay — **View details → Resend Request**
+исходной доставки, затем сравнение фактических Run/discussion/summary counts;
+кнопка Test не заменяет replay ([GitLab Webhooks](https://docs.gitlab.com/user/project/integrations/webhooks/)).
+Завершение — revoke только test installation, проверка отказа intake/отмены работы,
+затем удаление её project hook; остальные подключения продолжают работать.
 
 Это wiring/runbook, не доказательство живого MR. Staging acceptance требует protected
 operator/PAT/webhook доступ, reviewed image, prompts/rules/workers/LLM и реальный
@@ -530,7 +561,7 @@ Compose-файлами и env-file. Для этого восстановлени
 
 | Где остановился выкат | Шаг rollback в CI | Цель и состояние хоста |
 |---|---|---|
-| «Bundle application secrets» / «Validate GitLab deployment configuration», до первого upload/SSH | Не запускается: Deploy ещё не выполнялся | Live хост не затронут; удалить/исправить source config и повторить reviewed workflow |
+| «Bundle application secrets» / «Validate application bundle and GitLab configuration», включая неизвестное имя, кавычку или trailing backslash в значении, до первого upload/SSH | Не запускается: Deploy ещё не выполнялся | Live хост не затронут; исправить source config и повторить reviewed workflow |
 | Шаг workflow до Deploy: «Upload deploy files», «Upload edge proxy files», «Prepare host», «Wait for the edge certificate» | Не запускается: его `if:` смотрит только на Deploy и Health check | Отката нет, работает прежний релиз. Уже выложенные Compose-файлы и скрипты, изменения `provision.sh` и edge-прокси (`caddy reload`) не возвращаются |
 | `deploy.sh` до переключения: аргументы, `DEPLOY_MODE`/`EDGE_ALIAS`, пароли хранилищ, candidate bundle, `docker login`, pull, identity/GitLab admission | Печатает `release unchanged: ...` и завершается с кодом 0 до чтения `.env`, проверки `DEPLOY_MODE` и вызовов docker | Отката нет: контейнеры, role-file bytes/permissions, `.env`, `.deploy-state`, `.previous` и switch marker остаются прежними; временные файлы/registry auth удалены |
 | `deploy.sh` после переключения: запись `.env`, снятие bootstrap nginx | Откатывает | `.deploy-state.previous` — релиз, работавший до этого выката; `.env` переписывается под него |

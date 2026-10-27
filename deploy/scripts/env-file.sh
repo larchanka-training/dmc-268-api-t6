@@ -84,6 +84,7 @@ write_compose_env_file() {
 # Everything is validated before any file is replaced; the body runs in a subshell so that the
 # EXIT trap removes the temporary files on any failure. Temporary file i belongs to ENV_FILE_NAMES[i].
 write_app_env_files() (
+  set -o pipefail
   dir="$1"
   bundle="$2"
   tmp_files=()
@@ -94,7 +95,9 @@ write_app_env_files() (
   fi
   umask 077
   for file_name in "${ENV_FILE_NAMES[@]}"; do
-    tmp_files+=("$(mktemp "${dir}/.${file_name}.XXXXXX")")
+    temporary_file="$(mktemp "${dir}/.${file_name}.XXXXXX")" || exit 1
+    [[ -n "${temporary_file}" && -f "${temporary_file}" ]] || exit 1
+    tmp_files+=("${temporary_file}")
   done
   while IFS= read -r line; do
     [[ -n "${line}" ]] || continue
@@ -124,13 +127,13 @@ write_app_env_files() (
     fi
     for i in "${!ENV_FILE_NAMES[@]}"; do
       if [[ "${ENV_FILE_NAMES[i]}" == "${file_name}" ]]; then
-        printf "%s='%s'\n" "${name}" "${value}" >> "${tmp_files[i]}"
+        printf "%s='%s'\n" "${name}" "${value}" >> "${tmp_files[i]}" || exit 1
       fi
     done
   done <<< "${decoded}"
-  chmod 600 "${tmp_files[@]}"
+  chmod 600 "${tmp_files[@]}" || exit 1
   for i in "${!ENV_FILE_NAMES[@]}"; do
-    mv -f "${tmp_files[i]}" "${dir}/${ENV_FILE_NAMES[i]}"
+    mv -f "${tmp_files[i]}" "${dir}/${ENV_FILE_NAMES[i]}" || exit 1
   done
 )
 
@@ -139,26 +142,46 @@ ensure_app_env_files() {
   local dir="$1" name
   umask 077
   for name in "${ENV_FILE_NAMES[@]}"; do
-    [[ -f "${dir}/${name}" ]] || : > "${dir}/${name}"
-    chmod 600 "${dir}/${name}"
+    if [[ ! -f "${dir}/${name}" ]]; then
+      : > "${dir}/${name}" || return 1
+    fi
+    chmod 600 "${dir}/${name}" || return 1
   done
 }
 
 # Validate in the target image, not in the runner/host interpreter. The opaque input preserves
 # multi-line JSON without Docker's raw env-file parser treating it as several variable entries.
+# CI normalizes the full application bundle; host input is already generated GitLab records.
 # Only GitLab names enter the preflight container; all temporary recipient files stay owner-only.
 validate_gitlab_deployment() (
   set -euo pipefail
   image="$1"
-  bundle="$2"
+  input_bundle="$2"
+  input_kind="${3:-application}"
   umask 077
-  preflight_dir="$(mktemp -d "${TMPDIR:-/tmp}/gitlab-validation.XXXXXX")"
+  preflight_dir="$(mktemp -d "${TMPDIR:-/tmp}/gitlab-validation.XXXXXX")" || exit 1
+  [[ -n "${preflight_dir}" && -d "${preflight_dir}" ]] || exit 1
   trap 'rm -rf "${preflight_dir}"' EXIT
-  write_app_env_files "${preflight_dir}" "${bundle}"
-  gitlab_bundle="$(
-    printf '%s' "${bundle}" | base64 -d | awk -F= '$1 ~ /^GITLAB_/' | base64 | tr -d '\n'
-  )"
-  printf 'GITLAB_DEPLOYMENT_BUNDLE=%s\n' "${gitlab_bundle}" > "${preflight_dir}/preflight.env"
+  write_app_env_files "${preflight_dir}" "${input_bundle}" || exit 1
+  case "${input_kind}" in
+    application)
+      gitlab_bundle="$(gitlab_bundle_from_env_files "${preflight_dir}")" || exit 1
+      ;;
+    literal-gitlab)
+      # Host input was read from the files being admitted: preserve its exact values.
+      gitlab_bundle="${input_bundle}"
+      ;;
+    *) exit 1 ;;
+  esac
+  gitlab_names=("${GITLAB_ENV_KEYS[@]}")
+  for name in "${API_ENV_KEYS[@]}"; do
+    if [[ "${name}" == GITLAB_* ]]; then
+      gitlab_names+=("${name}")
+    fi
+  done
+  printf 'GITLAB_DEPLOYMENT_BUNDLE=%s\n' "${gitlab_bundle}" > "${preflight_dir}/preflight.env" || exit 1
+  printf 'GITLAB_DEPLOYMENT_KEYS=%s\n' "${gitlab_names[*]}" >> "${preflight_dir}/preflight.env" || exit 1
+  chmod 600 "${preflight_dir}/preflight.env" || exit 1
   validator="$(cat <<'PYTHON'
 import base64
 import binascii
@@ -168,10 +191,7 @@ import sys
 try:
     encoded = os.environ.pop("GITLAB_DEPLOYMENT_BUNDLE")
     raw = base64.b64decode(encoded, validate=True).decode("utf-8")
-    allowed = {
-        "GITLAB_CREDENTIAL_KEYS", "GITLAB_ACTIVE_KEY_ID", "GITLAB_ALLOWED_ORIGINS",
-        "GITLAB_PRIVATE_ORIGINS", "GITLAB_WEBHOOK_INTAKE_ENABLED",
-    }
+    allowed = set(os.environ.pop("GITLAB_DEPLOYMENT_KEYS").split())
     values = {}
     for line in raw.splitlines():
         name, separator, value = line.partition("=")
@@ -200,7 +220,7 @@ except (ValueError, TypeError, UnicodeError, KeyError, AttributeError, ImportErr
     print("configuration_invalid", file=sys.stderr)
     raise SystemExit(2)
 PYTHON
-  )"
+  )" || exit 1
   docker run --rm --network none --env-file "${preflight_dir}/preflight.env" \
     "${image}" python -c "${validator}"
 )
@@ -263,25 +283,82 @@ gitlab_bundle_from_env_files() (
   entry_pattern="^([A-Z][A-Z0-9_]*)='([^']*)'"$'\n'
   for file_name in "${GITLAB_ENV_FILE_NAME}" "${API_ENV_FILE_NAME}"; do
     [[ -f "${directory}/${file_name}" ]] || continue
-    content="$(cat "${directory}/${file_name}" && printf '.')"
+    if [[ "${file_name}" == "${GITLAB_ENV_FILE_NAME}" ]]; then
+      read_failure=21
+      format_failure=22
+    else
+      read_failure=23
+      format_failure=24
+    fi
+    content="$(cat "${directory}/${file_name}" 2>/dev/null && printf '.')" || exit "${read_failure}"
     content="${content%.}"
     while [[ -n "${content}" ]]; do
       if [[ ! "${content}" =~ ${entry_pattern} ]]; then
-        echo "configuration_invalid" >&2
-        exit 1
+        exit "${format_failure}"
       fi
       entry="${BASH_REMATCH[0]}"
       name="${BASH_REMATCH[1]}"
       value="${BASH_REMATCH[2]}"
       content="${content:${#entry}}"
       if ! expected_file="$(env_file_for_key "${name}")" || [[ "${expected_file}" != "${file_name}" ]]; then
-        echo "configuration_invalid" >&2
-        exit 1
+        exit "${format_failure}"
       fi
       if [[ "${name}" == GITLAB_* ]]; then
-        records+="${name}=$(printf '%s' "${value}" | base64 | tr -d '\n')"$'\n'
+        encoded_value="$(printf '%s' "${value}" | base64 | tr -d '\n')" || exit 1
+        records+="${name}=${encoded_value}"$'\n'
       fi
     done
   done
   printf '%s' "${records}" | base64 | tr -d '\n'
+)
+
+
+# Only trusted helper statuses select diagnostics; never include file contents or raw CLI errors.
+gitlab_deployment_failure_reason() {
+  case "$1" in
+    21) printf '%s' 'GitLab configuration_invalid (gitlab.env: read_failed)' ;;
+    22) printf '%s' 'GitLab configuration_invalid (gitlab.env: format_invalid)' ;;
+    23) printf '%s' 'GitLab configuration_invalid (api.env: read_failed)' ;;
+    24) printf '%s' 'GitLab configuration_invalid (api.env: format_invalid)' ;;
+    *) printf '%s' 'GitLab configuration_invalid' ;;
+  esac
+}
+
+
+# Capture untrusted registry stderr privately; only static categories leave this subshell.
+# Explicit guards are required because callers use this helper in conditional contexts.
+run_registry_command() (
+  set -o pipefail
+  umask 077
+  [[ -n "${DOCKER_CONFIG:-}" && -d "${DOCKER_CONFIG}" ]] || exit 1
+  capture_file="$(mktemp "${DOCKER_CONFIG}/registry-error.XXXXXX" 2>/dev/null)" || exit 1
+  [[ -n "${capture_file}" && -f "${capture_file}" ]] || exit 1
+  trap 'rm -f "${capture_file}" 2>/dev/null || exit 1' EXIT
+  chmod 600 "${capture_file}" 2>/dev/null || exit 1
+  printf '%s' 'capture-ready' 2>/dev/null > "${capture_file}" || exit 1
+  capture_probe="$(cat "${capture_file}" 2>/dev/null)" || exit 1
+  [[ "${capture_probe}" == capture-ready ]] || exit 1
+  printf '' 2>/dev/null > "${capture_file}" || exit 1
+  registry_status=0
+  { "$@" >/dev/null 2>"${capture_file}"; } 2>/dev/null || registry_status=$?
+  [[ "${registry_status}" != 0 ]] || exit 0
+  registry_error="$(cat "${capture_file}" 2>/dev/null)" || exit 1
+  reason=""
+  case "${registry_error}" in
+    *unauthorized*|*"authentication required"*|*"denied:"*|*"login denied"*|*"pull access denied"*)
+      reason='authentication_denied: check registry credentials and package access'
+      ;;
+    *"manifest unknown"*|*manifest*"not found"*)
+      reason='manifest_missing: verify the reviewed image reference'
+      ;;
+    *"no space left on device"*|*"No space left on device"*|*"disk quota exceeded"*)
+      reason='insufficient_storage: check host disk space'
+      ;;
+    *"network is unreachable"*|*"no route to host"*|*"connection refused"*|*"i/o timeout"*|\
+    *"context deadline exceeded"*|*"TLS handshake timeout"*|*"no such host"*|*"connection reset"*)
+      reason='network_unavailable: check registry connectivity'
+      ;;
+  esac
+  printf '%s' "${reason}" || exit 1
+  exit 1
 )

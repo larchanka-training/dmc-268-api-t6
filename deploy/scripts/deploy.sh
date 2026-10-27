@@ -124,7 +124,7 @@ fi
 # Stage candidates without replacing or chmodding the current role files. An absent manual
 # bundle retains them; CI explicitly supplies even an empty bundle to remove configuration.
 umask 077
-APP_STAGE_DIR="$(mktemp -d)"
+APP_STAGE_DIR="$(mktemp -d "${APP_DIR}/.stage.XXXXXX")"
 if [[ -n "${APP_SECRETS_B64+set}" ]]; then
   write_app_env_files "${APP_STAGE_DIR}" "${APP_SECRETS_B64}"
   unset APP_SECRETS_B64
@@ -143,17 +143,21 @@ refuse_deployment() {
 }
 
 if [[ -n "${GHCR_TOKEN:-}" ]]; then
-  if ! printf '%s\n' "${GHCR_TOKEN}" | docker login ghcr.io -u "${GHCR_USER:-github}" --password-stdin >/dev/null 2>&1; then
-    refuse_deployment "registry login failed"
+  if ! registry_reason="$(printf '%s\n' "${GHCR_TOKEN}" | run_registry_command docker login ghcr.io -u "${GHCR_USER:-github}" --password-stdin)"; then
+    refuse_deployment "registry login failed${registry_reason:+ (${registry_reason})}"
   fi
   unset GHCR_TOKEN
 fi
-if ! docker pull "${IMAGE}" >/dev/null 2>&1; then
-  refuse_deployment "target image pull failed"
+if ! registry_reason="$(run_registry_command docker pull "${IMAGE}")"; then
+  refuse_deployment "target image pull failed${registry_reason:+ (${registry_reason})}"
 fi
 resolve_target_identity refuse_deployment
-if ! gitlab_bundle="$(gitlab_bundle_from_env_files "${APP_STAGE_DIR}" 2>/dev/null)" || \
-   ! validate_gitlab_deployment "${TARGET_IMAGE_ID}" "${gitlab_bundle}" >/dev/null 2>&1; then
+gitlab_bundle_status=0
+gitlab_bundle="$(gitlab_bundle_from_env_files "${APP_STAGE_DIR}" 2>/dev/null)" || gitlab_bundle_status=$?
+if [[ "${gitlab_bundle_status}" != 0 ]]; then
+  refuse_deployment "$(gitlab_deployment_failure_reason "${gitlab_bundle_status}")"
+fi
+if ! validate_gitlab_deployment "${TARGET_IMAGE_ID}" "${gitlab_bundle}" literal-gitlab >/dev/null 2>&1; then
   refuse_deployment "GitLab configuration_invalid"
 fi
 IMAGE="${RELEASE_REF}"
@@ -187,7 +191,6 @@ write_compose_env_file \
   "${RABBITMQ_PASSWORD}" \
   "${REDIS_PASSWORD}"
 
-
 if docker inspect "${BOOTSTRAP_NAME}" >/dev/null 2>&1; then
   docker rm -f "${BOOTSTRAP_NAME}" >/dev/null
 fi
@@ -203,8 +206,8 @@ if ! IMAGE="${TARGET_IMAGE_ID}" "${COMPOSE[@]}" up --pull missing -d --remove-or
   exit 1
 fi
 
-# The host is a shared root account: drop the GHCR credential right after the last pull
-# (compose up pulls again because of pull_policy: always). The EXIT trap stays as a fallback.
+# Shared root account: drop credentials after startup pinned to the admitted local image
+# with --pull missing. The EXIT trap stays as a fallback.
 logout_registry
 
 {

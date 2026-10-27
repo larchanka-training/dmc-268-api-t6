@@ -59,19 +59,26 @@ def _descriptor(value: str) -> int:
 
 def _parser() -> SafeArgumentParser:
     parser = SafeArgumentParser(
-        prog="uv run python -m app.gitlab_admin",
+        prog="python -m app.gitlab_admin",
         description="Manage GitLab connections; create and bind leave intake disabled.",
         epilog=(
             "Secrets: --secrets-fd N (default 0) reads bounded UTF-8 JSON from a pipe or "
             "already-open protected file descriptor; echoed TTY input is refused. "
             "create requires token and webhook_secret; rotate-token requires token. "
-            "Example: ... create [public options] --secrets-fd 3 3< /protected/secrets.json. "
             "Provision that file with owner-only access, or use a secret-manager pipe. "
+            "Container example (run on the host, using the staging Compose file/environment "
+            "selection in the runbook): docker compose --profile gitlab-operator run --rm -T "
+            "gitlab-admin "
+            "create [public options] --secrets-fd 0 < /protected/secrets.json. "
+            "This redirects the protected host file to container stdin (FD 0). "
+            "Local process only: python -m app.gitlab_admin create [public options] "
+            "--secrets-fd 3 3< /protected/secrets.json. "
+            "Compose does not forward extra descriptors such as FD 3. "
             "Config: DATABASE_URL, GITLAB_CREDENTIAL_KEYS (JSON key-ID/base64 object), "
             "GITLAB_ACTIVE_KEY_ID, GITLAB_ALLOWED_ORIGINS (JSON array), optional "
             "GITLAB_PRIVATE_ORIGINS (JSON array). SSL_CERT_FILE optionally supplies a PEM "
             "CA bundle with TLS verification. inspect/revoke need only DATABASE_URL. "
-            "For prompt_not_seeded: uv run python -m app.bootstrap.seed_prompts. "
+            "For prompt_not_seeded, inside the image: python -m app.bootstrap.seed_prompts. "
             "For rule_assets_invalid: restore the packaged review/rules assets. "
             "activate reauthenticates the stored credential and requires ready bindings, rules "
             "and prompt. Deployment activation requires the external #171 merged/rebased gate. "

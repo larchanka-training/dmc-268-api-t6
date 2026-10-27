@@ -48,7 +48,7 @@ Repository variable `LLM_EUR_TO_USD_RATE` удалена 06.10 после про
 
 Секреты приложения. GitHub не принимает имена секретов и variables с префиксом `GITHUB_` (HTTP 422), поэтому секреты App заведены как `GH_*`, а в контейнере у них имена из `.env.example`. Сопоставление делает шаг «Bundle application secrets» в `deploy-staging`; тем же путём идут organization secret `AI_DMC268_T6`, organization variable `AI_DMC268_URL` и `vars.GH_APP_BOT_LOGIN`, `vars.PORTAL_URL`, `vars.LLM_MODEL`, `vars.LLM_FALLBACK_MODEL`, `vars.LLM_VERIFIER_MODEL`, `vars.LLM_VERIFIER_FALLBACK_MODEL`. Последние четыре задаются на уровне repository и могут быть переопределены в Environment `staging`. Незаданное значение в контейнер не попадает совсем, а не приходит пустой строкой.
 
-**Ограничение на значения:** без одинарной кавычки `'` и без `\` в конце. Значения пишутся в env-файл в одинарных кавычках (§3, п. 5), и `deploy.sh` такие значения отклоняет: выкат останавливается до изменений приложения. Шаг rollback в CI с `DEPLOY_RUN` печатает `release unchanged` и завершается с кодом 0; job остаётся красным из-за отказа deploy. На первом выкате после #35, пока в `.env` хоста нет `RABBITMQ_PASSWORD`, ручной `rollback.sh` без `DEPLOY_RUN` при откате на образ падает с `RABBITMQ_PASSWORD is required`. Завершающий перевод строки значения срезается; разбору PEM это безразлично.
+**Ограничение на значения:** без одинарной кавычки `'` и без trailing backslash. Значения пишутся в env-файл в одинарных кавычках (§3, п. 5). В CI такие значения отклоняет шаг **Validate application bundle and GitLab configuration** до первого SCP/SSH: Deploy ещё не запускался, automatic rollback пропускается, job остаётся красным. Исправьте source config и повторите reviewed workflow. При ручном запуске `deploy.sh` проверяет те же ограничения до изменений приложения. На первом выкате после #35, пока в `.env` хоста нет `RABBITMQ_PASSWORD`, ручной `rollback.sh` без `DEPLOY_RUN` при откате на образ падает с `RABBITMQ_PASSWORD is required`. Завершающий перевод строки значения срезается; разбору PEM это безразлично.
 
 Каждый контейнер получает только env-файлы своей роли (`deploy/scripts/env-file.sh`, `deploy/compose/staging.yml`):
 
@@ -239,6 +239,7 @@ Keyring создаётся один раз и сохраняется в защи
 Для **первого** keyring на операторской рабочей станции с uv (не на deploy-хосте):
 
 ```bash
+(
 set -euo pipefail
 set +o xtrace
 KEYRING_FILE="$protected_keyring_file" KEYRING_KEY_ID=key-2026-10 uv run python - <<'PYTHON'
@@ -251,6 +252,7 @@ with os.fdopen(fd, "w") as output:
     json.dump({os.environ["KEYRING_KEY_ID"]: base64.b64encode(secrets.token_bytes(32)).decode()}, output)
     output.write("\n")
 PYTHON
+)
 ```
 
 `protected_keyring_file` — новый путь в согласованном protected storage, не путь в Git.
@@ -289,30 +291,30 @@ strict UTF-8 JSON из pipe/FD и отказывается от echoed TTY.
 для cached reviewed image после deploy новый registry token не нужен.
 
 ```bash
-set -euo pipefail
 set +o xtrace
 umask 077
-cd "${APP_DIR:?set the authorized staging APP_DIR}"
-project="${COMPOSE_PROJECT:-$(basename "$PWD")}"
-source ./env-file.sh  # helper code; credential .env/*.env никогда не source
-mode="$(read_compose_env_var DEPLOY_MODE .env)"
-[[ "$mode" == edge || "$mode" == ports ]]
+unset operator
+# source только helper code; credential .env/*.env никогда не source.
+cd "${APP_DIR:?set the authorized staging APP_DIR}" &&
+project="${COMPOSE_PROJECT:-$(basename "$PWD")}" &&
+source ./env-file.sh &&
+mode="$(read_compose_env_var DEPLOY_MODE .env)" &&
+[[ "$mode" == edge || "$mode" == ports ]] &&
 operator=(docker compose -p "$project" --env-file .env -f compose.yml \
-  -f "compose.${mode}.yml" --profile gitlab-operator)
-
-# После deploy immutable image уже cached; operator pull_policy: missing сохраняет его.
-
+  -f "compose.${mode}.yml" --profile gitlab-operator) &&
 "${operator[@]}" run --rm --no-deps -T gitlab-admin create \
   --workspace-id "$workspace_id" --installation-id "$installation_id" \
-  --origin "$gitlab_origin" --secrets-fd 0 < "$protected_secret_file"
+  --origin "$gitlab_origin" --secrets-fd 0 < "$protected_secret_file" &&
 "${operator[@]}" run --rm --no-deps -T gitlab-admin bind-project \
-  --installation-id "$installation_id" --project-id "$project_id"
+  --installation-id "$installation_id" --project-id "$project_id" &&
 "${operator[@]}" run --rm --no-deps -T gitlab-admin inspect \
   --installation-id "$installation_id"
-# generation берётся из connection.generation в безопасном JSON inspect.
-"${operator[@]}" run --rm --no-deps -T gitlab-admin activate \
-  --installation-id "$installation_id" --expected-generation "$generation"
 ```
+
+Цепочка `&&` останавливается на первой ошибке, в том числе не запускает bind после
+неуспешного create, и не закрывает интерактивную SSH-сессию. Продолжайте следующие
+шаги только после успешного inspect; при ошибке устраните её и проверьте состояние.
+`operator`, `project` и `mode` остаются в той же Bash-сессии для команд ниже.
 
 `installation_id` — новый согласованный UUID; `workspace_id` — существующий workspace,
 `project_id` — положительный числовой GitLab project ID из разрешённой настройки,
@@ -329,13 +331,15 @@ registry login; live API/workers/bootstrap сохраняют свою `always` 
 read:packages token (не GitLab PAT):
 
 ```bash
-operator_registry_config="$(mktemp -d)"
-export DOCKER_CONFIG="$operator_registry_config"
-trap 'docker logout ghcr.io >/dev/null 2>&1 || true; rm -rf "$operator_registry_config"' EXIT
+operator_registry_config="$(mktemp -d)" &&
+export DOCKER_CONFIG="$operator_registry_config" &&
+trap 'docker logout ghcr.io >/dev/null 2>&1 || true; rm -rf "$operator_registry_config"' EXIT &&
 docker login ghcr.io --username "$registry_user" --password-stdin \
   < "$protected_registry_token_file" >/dev/null 2>&1
 ```
 
+Продолжайте setup только после успешного login; при отказе исправьте registry доступ,
+затем очистите временный login командой в конце этого раздела.
 В Compose 2.19 `run` не имеет `--pull`; не добавляйте несуществующий flag.
 
 Для rotate-token тот же Compose prefix и `--secrets-fd 0 < "$protected_rotate_file"`;
@@ -350,12 +354,44 @@ prompt. Повторный bind не дублирует repository/rules. При
 GitLab HTTP выполняется вне каждой DB transaction; после HTTP locked snapshot сравнивается
 заново. Safe JSON результата не содержит token/ciphertext/digest/keyring.
 
+**Project webhook — до activation.** В разрешённом GitLab project откройте
+**Settings → Webhooks → Add new webhook** (нужен Maintainer/Owner):
+
+1. URL: `https://<staging-api>/webhooks/gitlab/<installation_id>`, где host —
+   фактический staging API из [CICD §8.1](CICD.md#81-две-цели), а UUID — тот же
+   `installation_id`, который использован в create и подтверждён inspect.
+   Endpoint должен иметь проверяемый TLS-сертификат; HTTP-only target сначала
+   требует согласованной настройки HTTPS.
+2. В **Secret token** передайте **тот же** `webhook_secret` из защищённого JSON
+   create/secret manager. GitLab передаёт его в `X-Gitlab-Token`; не печатайте JSON
+   или secret в терминал, argv, chat, Git или отчёт. Этот receiver проверяет secret
+   token; новый **Signing token/HMAC** его не заменяет.
+3. В **Trigger** оставьте только **Merge request events**, снимите остальные
+   события; **Enable SSL verification** оставьте включённым. Сохраните hook без
+   custom payload/template, custom headers или обхода canonical project/origin checks.
+4. Проверьте возможности тестового GitLab: stable `Idempotency-Key` доступен с
+   17.4, `webhook-id` — с 19.0; нужен хотя бы один из них. Если приходят оба,
+   значения должны совпадать. `X-Gitlab-Webhook-UUID` и `X-Gitlab-Event-UUID` не
+   заменяют этот ключ. При отсутствии поддержки остановите onboarding.
+
+Названия полей, версии delivery headers и просмотр доставок —
+[официальная документация GitLab Webhooks](https://docs.gitlab.com/user/project/integrations/webhooks/).
+Настройка hook не включает connection intake; не отправляйте приёмочный MR до
+activation и process admission ниже.
+
 Перед отдельным шагом activation оператор проверяет, что reviewed deployed version
 включает GitLab intake #169 и публикацию #171 (PR229),
 и получает разрешение на выборочную live-проверку. Этот документ не разрешает
-production activation. CLI не принимает supplied merged SHA или boolean обхода:
+production activation. В той же Bash-сессии получите **свежий** inspect, проверьте
+`connection.installation_id`, `workspace_id`, origin, bindings и readiness, затем
+введите положительное `connection.generation` именно из этого результата.
+CLI не принимает supplied merged SHA или boolean обхода:
 
 ```bash
+"${operator[@]}" run --rm --no-deps -T gitlab-admin inspect \
+  --installation-id "$installation_id" &&
+read -r -p 'connection.generation из этого inspect: ' generation &&
+[[ "$generation" =~ ^[1-9][0-9]*$ ]] &&
 "${operator[@]}" run --rm --no-deps -T gitlab-admin activate \
   --installation-id "$installation_id" --expected-generation "$generation"
 ```
@@ -381,6 +417,39 @@ Create/bind сами intake не включают; active connection и process 
 Если staging уже обслуживает другие активные подключения, не выключайте общий API flag
 ради нового теста: новая installation остаётся disabled до собственного activate.
 
+**Приёмка реального MR.** После успешного activate и reviewed deploy с process
+admission отправьте реальное MR-событие из разрешённого project (fast review требует
+`ai-review`, `wait_for_ci=never`, готовые rules/prompt и LLM). В **Settings → Webhooks →
+Edit → Recent events → View details** сохраните безопасное evidence: время, URL с тем
+же installation UUID, MR/project/head, stable delivery header, HTTP **202** и ответ
+`{"status":"pending"}`. Повтор уже сохранённой доставки отвечает
+`{"status":"duplicate"}`. Не копируйте `X-Gitlab-Token` или полный request с секретом.
+
+Подтвердите matching receipt через существующий лог `webhook-worker`:
+
+```bash
+"${operator[@]}" logs --since 15m --no-color webhook-worker
+```
+
+Нужна строка `GitLab webhook delivery gitlab:<installation_id>:<sha256-key>
+event=... status=... detail=...`, где suffix — SHA-256 от исходного UTF-8 значения
+`webhook-id` (либо `Idempotency-Key`), а UUID совпадает с inspect и URL доставки.
+Сохраняйте только соответствующие безопасные строки; нет matching receipt — intake
+evidence неполно. CLI inspect показывает connection/bindings, не receipt или Runs;
+matching receipt подтверждается приведённым логом, без изменения SQL.
+HTTP 202 подтверждает durable intake, не `succeeded` Run и не публикацию.
+
+Зафиксируйте фактические Run ID/status и **числа** Runs, inline discussions и summary
+для того же MR/head в защищённом live acceptance evidence: ожидается ровно один
+`succeeded` Run, одна summary и измеренное число ожидаемых inline findings.
+Затем у **этой исходной доставки** выберите
+**Recent events → View details → Resend Request**: GitLab сохраняет её payload и
+`Idempotency-Key` ([GitLab](https://docs.gitlab.com/user/project/integrations/webhooks/#inspect-request-and-response-details)).
+Проверьте неизменность URL/payload/stable key, 202 duplicate и те же буквальные
+Run/publication counts без новых Runs/discussions/summary. Кнопка Test создаёт
+тестовое событие и эту identical-delivery replay проверку не заменяет. Без доступа
+к фактическим Run evidence live gate остаётся pending; одних логов intake недостаточно.
+
 Отключение одной тестовой установки — revoke именно её UUID; не revoke-workspace и
 не общий API flag, если ими пользуются другие подключения:
 
@@ -393,7 +462,11 @@ Create/bind сами intake не включают; active connection и process 
 
 Проверить `revoked=true`, `intake_enabled=false`. Revoke очищает stored credential,
 увеличивает generation при изменении и отменяет активные Runs с `installation_revoked`;
-повтор безопасен. Для планового выключения intake **всей** среды задайте API variable
+повтор безопасен. До удаления hook повторите исходную доставку и подтвердите отказ
+intake (401 вместо 202), отсутствие новых Runs/публикаций и отмену ранее активной
+работы. Затем удалите **только этот project hook** через Settings → Webhooks и
+проверьте прекращение новых доставок; другие installations/hooks не меняйте.
+Для планового выключения intake **всей** среды задайте API variable
 `false` и выполните deploy, сохранив keyring. Это не заменяет revoke отдельной установки
 и не отменяет её уже запущенные Runs. Удаление ключей не является способом отключения.
 
@@ -415,6 +488,16 @@ Manual/automatic rollback сохраняет **текущий** keyring/config �
 helper поддерживается; неизвестный target с GitLab config отклоняется до live изменений.
 Schema guard остаётся обязательным; при несовместимости выберите корректный forward
 image или documented recovery, не выполняйте downgrade/обход ради GitLab.
+
+При сохранении файлов manual deploy и rollback строго читают **оба** `api.env` и
+`gitlab.env`, даже для GitHub-only среды: только generator format `NAME='value'`,
+допускающий multiline value, с завершающим newline после каждой записи. Произвольный
+shell syntax, unquoted values и отсутствие последнего newline не принимаются;
+credential files никогда не `source`. Ошибки чтения/формата дают только статический
+basename/category, например `GitLab configuration_invalid (gitlab.env: read_failed)`
+или `GitLab configuration_invalid (api.env: format_invalid)`; другие ошибки — общий
+safe отказ. Исправляйте источник через generator/защищённый configuration deploy,
+не выводите содержимое файлов и не редактируйте secrets вручную на хосте.
 
 Наличие wiring и localhost tests не доказывает живой GitLab MR. Для приёмки нужны
 reviewed staging image/operator доступ, protected PAT/webhook secret, рабочие workers,
@@ -523,14 +606,16 @@ flowchart LR
 ```
 
 1. Runner забирает secret/var только в job с `environment: staging`. Bundle маскируется;
-   GitLab preflight выполняется в exact immutable target image с `--network none` **до первого
-   SCP/SSH изменения хоста**. Protected временный env input содержит только GitLab payload;
+   шаг **Validate application bundle and GitLab configuration** сначала проверяет
+   representation всего application bundle, затем GitLab config в exact immutable target
+   image с `--network none` **до первого SCP/SSH изменения хоста**. Protected временный
+   env input содержит только GitLab payload, извлечённый из generated role files;
    значения и token не входят в Docker argv, registry auth идёт через stdin и temporary
    `DOCKER_CONFIG`. Временные файлы удаляются при успехе и отказе.
 2. `appleboy/ssh-action` с `debug: false` передаёт в скрипт одноразовый `GITHUB_TOKEN`, бандл секретов приложения `APP_SECRETS_B64` (п. 5) и, если задан, `POSTGRES_PASSWORD`. SSH-пароль VPS передаётся только как `password` действия, в скрипт он не попадает.
 3. `deploy.sh` пишет `.env` с `umask 077` и `chmod 600`; без `POSTGRES_PASSWORD` генерирует пароль один раз на свежем хосте и отказывается генерировать, если `.env` или том Postgres уже есть. Пароль в stdout не печатается.
 4. Compose читает `.env` на VM. Postgres, RabbitMQ и Redis слушают только docker-сеть проекта, `ports:` у них нет.
-5. Секреты приложения шаг «Bundle application secrets» собирает в одну строку `APP_SECRETS_B64`: base64 от строк `ИМЯ=<base64 значения>`, только для заданных секретов. Строка маскируется (`::add-mask::`) и уходит через `envs:` SSH-действия; многострочные PEM так не ломаются в SSH и shell. На хосте `write_app_env_files` (`env-file.sh`) сначала раскладывает candidate значения в private staging directory, валидирует GitLab в том же admitted image ID, затем переносит значения по allowlist в файлы получателей (§1, таблица env-файлов), в одинарных кавычках — Compose читает их буквально, без подстановки `$`, обратный слэш остаётся обратным слэшем (кроме позиции перед кавычкой). Поэтому имя вне allowlist, значение с `'` или с `\` в конце валят выкат до live изменений файлов/сервисов: candidate проверяется раньше, чем перезаписываются role files, `.env`, state и switch marker (ограничение на значения — §1).
+5. Секреты приложения шаг «Bundle application secrets» собирает в одну строку `APP_SECRETS_B64`: base64 от строк `ИМЯ=<base64 значения>`, только для заданных секретов. Строка маскируется (`::add-mask::`) и уходит через `envs:` SSH-действия; многострочные PEM так не ломаются в SSH и shell. Generator пишет значения по allowlist в файлы получателей (§1, таблица env-файлов), в одинарных кавычках: Compose читает их буквально, без подстановки `$`. Имя вне allowlist, значение с `'` или с trailing backslash отклоняется уже в **Validate application bundle and GitLab configuration** до SCP/SSH. Deploy не запускался, automatic rollback пропускается; исправьте source config и повторите reviewed workflow. На хосте `write_app_env_files` (`env-file.sh`) повторяет generation в private staging directory и валидирует GitLab из generated role files в том же admitted image ID до замены role files, `.env`, state, switch marker и сервисов. Ручной deploy проверяет те же ограничения до live mutation (ограничение на значения — §1).
 6. `GITHUB_TOKEN` нужен лишь для pull. Логин идёт во временный `DOCKER_CONFIG` (`mktemp -d`), а не в `/root/.docker/config.json`: выкаты API и UI под общим root не мешают друг другу. После последнего pull — `docker logout`, при выходе каталог удаляется; `unset GHCR_TOKEN`.
 
 Rollback ничего из GitHub не шлёт повторно: пароли Postgres, RabbitMQ и Redis берёт из лежащего `.env`, а env-файлы секретов не трогает — откатанные контейнеры стартуют с теми же секретами. Секреты не привязаны к образу: откат образа не возвращает предыдущие значения секретов.
