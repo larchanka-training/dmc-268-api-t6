@@ -16,6 +16,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from functools import lru_cache
 from hashlib import sha256
+from uuid import UUID
 
 import markdown_it
 from markdown_it import MarkdownIt
@@ -212,6 +213,7 @@ def snapshot_ignore_policy(snapshot: PolicySnapshot) -> IgnorePolicy:
     its stored values, so such a mismatch is drift of the parser, its limits or grammar.
     """
     return _snapshot_ignore_policy(
+        snapshot.repository_id,
         snapshot.rules.text,
         snapshot.policy_base_sha,
         snapshot.ignore_patterns,
@@ -223,9 +225,11 @@ def snapshot_ignore_policy(snapshot: PolicySnapshot) -> IgnorePolicy:
 
 
 # The guard reads the snapshot before every model call, and a long rules text takes
-# hundreds of milliseconds to parse: one parse per snapshot content and process.
+# hundreds of milliseconds to parse: one parse (and warning) per repository, snapshot
+# content and process.
 @lru_cache(maxsize=64)
 def _snapshot_ignore_policy(
+    repository_id: UUID,
     rules_text: str | None,
     policy_base_sha: str,
     patterns: tuple[str, ...],
@@ -253,11 +257,12 @@ def _snapshot_ignore_policy(
             reason = "the re-parsed digest differs from the stored one"
         else:
             return IgnorePolicy(patterns, policy.source_lines, digest)
-    # Only the reason and the base: never the rules text or a mask.
+    # Only the reason, the repository and the base: never the rules text or a mask.
     _LOGGER.warning(
         "Ignore source lines are unavailable, the stored masks apply without them: "
-        "%s policy_base_sha=%s",
+        "%s repository_id=%s policy_base_sha=%s",
         reason,
+        repository_id,
         policy_base_sha,
     )
     return IgnorePolicy(patterns, (), digest)
