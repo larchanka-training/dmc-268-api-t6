@@ -283,6 +283,44 @@ def test_policy_failure_is_never_optional_absence(status: int, code: str) -> Non
     asyncio.run(scenario())
 
 
+@pytest.mark.parametrize("listing", ["", ".review"], ids=["root", "review-dir"])
+def test_policy_oversized_tree_listing_is_unavailable_not_a_too_large_document(
+    listing: str,
+) -> None:
+    from app.modules.reviews.application.policy_documents import LoadPolicyDocuments
+    from app.modules.reviews.application.policy_errors import PolicyError
+
+    async def scenario() -> None:
+        router = SourceRouter()
+
+        def external(request: httpx.Request) -> httpx.Response:
+            if (
+                request.url.path.endswith("/repository/tree")
+                and request.url.params.get("path", "") == listing
+            ):
+                # A valid page over the 1 MiB cap of a tree listing: the listing is cut,
+                # and no policy document in it was measured.
+                return reply([router.entry("AGENTS.md") | {"name": " " * 1_048_576}])
+            return router.response(request)
+
+        async with GitLabRunHttp(
+            credentials=Credentials(), origin_policy=POLICY, transport=httpx.MockTransport(external)
+        ) as http:
+            source = GitLabPolicyDocumentSource(
+                trees=GitLabRepositoryTree(http=http, checkpoint=checkpoint),
+                policy_base_sha=INPUT.base_sha,
+            )
+            with pytest.raises(PolicyError) as error:
+                await LoadPolicyDocuments(source, policy_base_sha=INPUT.base_sha).execute()
+        assert (error.value.error_code, error.value.safe_message) == (
+            "policy_revision_unavailable",
+            "GitLab policy source is unavailable",
+        )
+        assert (error.value.limit, error.value.actual, error.value.retryable) == (None, None, False)
+
+    asyncio.run(scenario())
+
+
 @pytest.mark.parametrize(
     ("raw", "code"),
     [
