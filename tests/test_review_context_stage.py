@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
@@ -987,6 +988,16 @@ def test_policy_codes_have_a_retry_class_and_an_author_facing_text() -> None:
     )
     assert codes - retryable == TERMINAL_POLICY_ERROR_CODES
     assert codes | {"all_changes_ignored", "no_changes"} <= set(_ERROR_TEXTS)
+
+
+def test_ignore_limit_text_names_a_too_long_mask_in_correct_russian() -> None:
+    from app.modules.reviews.application.check_runs import _ERROR_TEXTS, failure_reason
+
+    assert failure_reason("policy_ignore_limit_exceeded") == (
+        "В блоке review-ignore слишком много масок или слишком длинная маска."
+    )
+    # The misspelt word, not the prefix of the correct «длинная».
+    assert [text for text in _ERROR_TEXTS.values() if re.search(r"\bдлинна\b", text)] == []
 
 
 def test_redis_address_is_optional_for_the_worker() -> None:

@@ -144,10 +144,10 @@ Base: `origin/main` `f40cabf3`. Branch `fix/168-trace-and-output`, DB and vhost 
 - **Test and the mutant it must kill:**
   - `failure_reason("policy_ignore_limit_exceeded")` is exactly «В блоке review-ignore слишком много
     масок или слишком длинная маска.»;
-  - no `_ERROR_TEXTS` value contains «длинна»;
+  - no `_ERROR_TEXTS` value contains the word «длинна» (a word match: «длинная» starts with it);
   - kills: the old text.
 - **Done when:**
-  - [ ] the gates pass;
+  - [x] the gates pass;
   - [ ] the PR body notes that rules-status shows the text through `failure_reason`
     (`rules_status.py:111`) until #342.
 

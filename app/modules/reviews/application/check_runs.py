@@ -52,7 +52,9 @@ _ERROR_TEXTS = {
     "policy_ignore_block_unclosed": "Блок review-ignore в .review/rules.md не закрыт.",
     "policy_ignore_info_invalid": "review-ignore не принимает дополнительные параметры.",
     "policy_ignore_pattern_invalid": "В блоке review-ignore недопустимая маска.",
-    "policy_ignore_limit_exceeded": "В блоке review-ignore слишком много масок или маска длинна.",
+    "policy_ignore_limit_exceeded": (
+        "В блоке review-ignore слишком много масок или слишком длинная маска."
+    ),
     "policy_path_invalid": "В изменениях есть недопустимый путь файла.",
     "policy_match_budget_exceeded": (
         "Маски review-ignore слишком дороги в проверке. Упростите политику."
