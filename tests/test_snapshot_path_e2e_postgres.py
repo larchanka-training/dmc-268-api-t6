@@ -267,6 +267,7 @@ class Observed:
     verifier_prompt: str
     bodies: list[dict[str, Any]]
     queue: Queue
+    payloads: list[tuple[Any, ...]]
 
 
 async def _rows(
@@ -419,6 +420,9 @@ async def _scenario(
         "ON p.id = r.verifier_prompt_version_id WHERE r.id=:id",
         run_id,
     )
+    payloads = await _rows(
+        factory, "SELECT schema_version, summary FROM context_payloads WHERE run_id=:id", run_id
+    )
     return Observed(
         run_id=run_id,
         outcomes=outcomes,
@@ -453,6 +457,7 @@ async def _scenario(
         verifier_prompt=verifier_prompt,
         bodies=model_http.bodies,
         queue=queue,
+        payloads=payloads,
     )
 
 
@@ -470,9 +475,8 @@ def _observe(env: Env, *, v4: bool, retry: bool = False) -> Observed:
 
 
 # The trace of a v4 attempt, as built (G aligns the canon, PIPELINE_SPEC §7, with it). The
-# second ``context.build`` is the review
-# prompt read's own step, which F3 removes; ``llm.verify`` sits in the publishing transaction
-# right before ``review.postprocess``.
+# stage's ``context.build`` is the attempt's only one (#168 part 6); ``llm.verify`` sits in
+# the publishing transaction right before ``review.postprocess``.
 _SNAPSHOT_PATH_STEPS = [
     "policy.load",
     "vcs.fetch_diff",
@@ -480,7 +484,6 @@ _SNAPSHOT_PATH_STEPS = [
     "context.manifest",
     "llm.call",
     "llm.repo_conventions",
-    "context.build",
     "context.manifest",
     "llm.call",
     "context.manifest",
@@ -495,7 +498,6 @@ _LEGACY_STEPS = [
     "context.build",
     "llm.call",
     "llm.repo_conventions",
-    "context.build",
     "llm.call",
     "llm.review_output",
     "review.postprocess",
@@ -537,8 +539,10 @@ def _assert_snapshot_path(
     # R19: the stage counts the blocks of a v4 run with the counter the profile pins
     # (counter/v2, three characters per token): L1 the two hunks, L4 the ``User`` signature
     # and docstring, L3 the whole service file, L2 the test file's window.
-    stage_build = observed.actions["context.build"][0][1]
+    [(_, stage_build)] = observed.actions["context.build"]
     assert stage_build["tokens_by_level"] == {"L1": 67, "L4": 15, "L3": 66, "L2": 16}
+    # The run's one context_payloads row is that build's response (schema 2).
+    assert observed.payloads == [(2, stage_build)]
     calls = [request for request, _ in observed.actions["llm.call"]]
     manifests = observed.actions["context.manifest"]
     assert [call["stage"] for call in calls] == stages
@@ -663,8 +667,9 @@ def test_a_v3_run_stays_on_the_legacy_path_in_the_same_composition(env: Env) -> 
     assert observed.manifests == []
     # A legacy run keeps the composition's counter (four characters per token) for the
     # same blocks.
-    stage_build = observed.actions["context.build"][0][1]
+    [(_, stage_build)] = observed.actions["context.build"]
     assert stage_build["tokens_by_level"] == {"L1": 50, "L4": 11, "L3": 49, "L2": 12}
+    assert observed.payloads == [(2, stage_build)]
     calls = [request for request, _ in observed.actions["llm.call"]]
     assert [call["operation"] for call in calls] == ["conventions", "review"]
     # No snapshot-path keys on a legacy call (E-3) and no block ids in the legacy prompt.

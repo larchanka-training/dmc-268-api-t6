@@ -102,9 +102,9 @@ Base: `origin/main` `f40cabf3`. Branch `fix/168-trace-and-output`, DB and vhost 
   - `test_worker_queue_postgres.py:701`, `:704-708`: the composition without a stage writes no
     `context.build` and no payload row.
 - **Done when:**
-  - [ ] the gates pass;
-  - [ ] the step-0 red set matches the extended table;
-  - [ ] `rg -n "TracedReviewPromptRepository|FAST_TOKEN_LIMIT" app tests` is empty;
+  - [x] the gates pass;
+  - [x] the step-0 red set matches the extended table;
+  - [x] `rg -n "TracedReviewPromptRepository|FAST_TOKEN_LIMIT" app tests` is empty;
   - [ ] the PR body has:
     - [ ] the trace change: one fewer action in `GET /api/runs/{id}/actions` and in SSE, no schema change;
     - [ ] the ui dependency and the deploy order (Q1);

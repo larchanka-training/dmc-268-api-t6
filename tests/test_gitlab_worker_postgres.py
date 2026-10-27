@@ -275,6 +275,22 @@ def test_public_worker_installed_gitlab_run_uses_shared_models_and_publisher(
                         "summary -->"
                     )
                 async with fixture.sessions() as session:
+                    # The GitLab stage records the attempt's only context.build and writes
+                    # its response as the run's context_payloads row (#168 part 6).
+                    builds = await session.scalar(
+                        text(
+                            "SELECT count(*) FROM run_actions "
+                            "WHERE run_id=:id AND tool='context.build'"
+                        ),
+                        {"id": seeded.run_id},
+                    )
+                    payloads = await session.scalar(
+                        text("SELECT count(*) FROM context_payloads WHERE run_id=:id"),
+                        {"id": seeded.run_id},
+                    )
+                # Without a model each of the three attempts builds before its conventions call.
+                assert (builds, payloads) == ((1, 1) if model_configured else (3, 1))
+                async with fixture.sessions() as session:
                     body = await session.scalar(
                         text("SELECT review_body FROM runs WHERE id=:id"), {"id": seeded.run_id}
                     )

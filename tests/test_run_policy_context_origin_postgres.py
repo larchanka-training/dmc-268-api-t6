@@ -26,7 +26,7 @@ from app.modules.reviews.application.prompt_builder import ReviewContext
 from app.modules.reviews.application.queue_messages import ReviewPublishPointer
 from app.modules.reviews.application.review_context_stage import ReviewContextStage
 from app.modules.reviews.application.run_failures import RunCancelled
-from app.modules.reviews.application.run_trace import RunTrace
+from app.modules.reviews.application.run_trace import ContextTrace
 from app.modules.reviews.application.try_enqueue_webhook_run import (
     PendingRunMessage,
     RunPublicationKind,
@@ -545,7 +545,7 @@ def test_worker_composition_passes_claimed_checkpoint_to_context_stage(
                 )
 
                 def stage(
-                    trace: RunTrace | None, checkpoint: RunProviderCheckpoint
+                    trace: ContextTrace | None, checkpoint: RunProviderCheckpoint
                 ) -> ReviewContextStage:
                     # Observe the public composition input after the real claim commits.
                     with observer.connect() as connection:
@@ -619,10 +619,10 @@ def test_worker_composition_passes_claimed_checkpoint_to_context_stage(
                         )
                     ]
                     tools = [step[0] for step in steps]
-                    # The stage's context.build opens the attempt's context steps.
+                    # The stage's context.build opens the attempt's context steps and is its
+                    # only one (#168 part 6); one gate step follows it.
                     assert tools[0] == "context.build"
-                    # One gate step, after the stage's context.build; the prompt read's own
-                    # context.build is not pinned here.
+                    assert tools.count("context.build") == 1
                     assert tools.count("context.rag") == (1 if rag else 0)
                     # No state row yet: the gate reads an empty index and the review goes on.
                     if rag:

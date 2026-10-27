@@ -36,7 +36,7 @@ from app.modules.reviews.application.review_context_stage import (
     ReviewContextStage,
 )
 from app.modules.reviews.application.run_failures import RunCancelled
-from app.modules.reviews.application.run_trace import RunTrace
+from app.modules.reviews.application.run_trace import ContextTrace
 from app.modules.reviews.application.vcs_diff import is_generated_path
 from app.modules.reviews.infrastructure.gitlab_policy_source import GitLabPolicyDocumentSource
 from app.modules.reviews.infrastructure.gitlab_publication_resources import (
@@ -100,7 +100,7 @@ class GitLabReviewWorkerResources:
         claimed: ClaimedAttempt,
         expected_input: RunVcsInput,
         checkpoint: RunProviderCheckpoint,
-        trace: RunTrace | None = None,
+        trace: ContextTrace | None = None,
     ) -> AsyncIterator[GitLabAttemptBundle]:
         credentials = GitLabRunCredentials(
             session_factory=self._sessions,
@@ -167,6 +167,7 @@ class GitLabReviewWorkerResources:
                     context_builder=context_builder,
                     trace=trace,
                     builtin_excluded=is_generated_path,
+                    payloads=trace,
                 ),
             )
 
