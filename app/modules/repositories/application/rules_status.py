@@ -110,10 +110,13 @@ def status_text(error: PolicyError) -> str:
         parts.append(f"column {error.column}")
     if error.excerpt is not None:
         parts.append(f"mask `{error.excerpt}`")
-    if error.actual is not None and error.limit is not None:
-        parts.append(f"actual {error.actual}, allowed {error.limit}")
+    allowed = f"allowed {error.limit} {error.unit}" if error.unit else f"allowed {error.limit}"
+    if error.limit is not None and error.actual_is_lower_bound:
+        parts.append(f"actual more than {error.limit}, {allowed}")
+    elif error.actual is not None and error.limit is not None:
+        parts.append(f"actual {error.actual}, {allowed}")
     elif error.limit is not None:
-        parts.append(f"allowed {error.limit}")
+        parts.append(allowed)
     text = _STATUS_TEXTS.get(error.code, error.code.value)
     return f"{text} Where: {', '.join(parts)}." if parts else text
 
