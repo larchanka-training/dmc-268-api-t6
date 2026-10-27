@@ -3225,6 +3225,7 @@ def test_gateway_repair_and_fallback_enforce_provenance_pre_send_guard(
         SourceRole,
     )
     from app.modules.reviews.application.prompt_budget import verify_provenance_pre_send_guard
+    from app.modules.reviews.application.review_ignore import parse_review_ignore
     from app.modules.reviews.infrastructure.llm.answers import (
         provider_schema,
         review_output_schema,
@@ -3232,18 +3233,22 @@ def test_gateway_repair_and_fallback_enforce_provenance_pre_send_guard(
     )
     from tests.policy_snapshot_fakes import (
         make_policy_document_missing,
+        make_policy_document_present,
     )
 
+    # The stored masks are the ones of the stored rules text, as in a real snapshot.
+    rules_text = "```review-ignore\nsecret/**\n```\n"
+    ignore = parse_review_ignore(rules_text)
     snapshot = PolicySnapshot(
         schema_version=1,
         snapshot_id=uuid_mod.uuid4(),
         run_id=RUN_ID,
         repository_id=uuid_mod.uuid4(),
         policy_base_sha="sha_base",
-        rules=make_policy_document_missing(".review/rules.md"),
+        rules=make_policy_document_present(".review/rules.md", rules_text),
         agents=make_policy_document_missing("AGENTS.md"),
-        ignore_patterns=("secret/**",),
-        ignore_digest="id_0",
+        ignore_patterns=ignore.patterns,
+        ignore_digest=ignore.digest,
         parser_profile="rules-markdown/v1",
         parser_version="4.0.0",
         matcher_version="review-ignore/v1",

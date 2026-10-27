@@ -56,6 +56,11 @@ def make_snapshot(
     agents_text: str = "",
     ignore_patterns: tuple[str, ...] = (),
 ) -> PolicySnapshot:
+    if ignore_patterns:
+        # A snapshot stores the masks of its rules text: they go into its review-ignore block.
+        masks = "".join(f"{mask}\n" for mask in ignore_patterns)
+        rules_text = f"{rules_text}```review-ignore\n{masks}```\n"
+    ignore = review_ignore.parse_review_ignore(rules_text)
     return PolicySnapshot(
         schema_version=1,
         snapshot_id=uuid.uuid4(),
@@ -72,8 +77,8 @@ def make_snapshot(
             if agents_text
             else make_policy_document_missing("AGENTS.md")
         ),
-        ignore_patterns=ignore_patterns,
-        ignore_digest="id_0",
+        ignore_patterns=ignore.patterns,
+        ignore_digest=ignore.digest,
         parser_profile="rules-markdown/v1",
         parser_version="4.0.0",
         matcher_version="review-ignore/v1",
@@ -357,6 +362,50 @@ def test_provenance_guard_rejects_ignored_path() -> None:
         verify_provenance_pre_send_guard(manifest, snapshot=snapshot)
     assert exc_info.value.code == PolicyErrorCode.CONTEXT_VIOLATION
     assert "references ignored path matching deny-set" in exc_info.value.message
+
+
+@pytest.mark.parametrize(
+    ("path", "mask", "line"),
+    [("secret/key.py", "secret/**", 4), ("docs/guide.md", "docs/**", 5)],
+    ids=["first-of-a-repeated-mask", "single-mask"],
+)
+def test_provenance_guard_names_the_ignore_mask_and_its_rules_line(
+    path: str, mask: str, line: int
+) -> None:
+    # Masks on lines 4-6; secret/** repeats on line 6, and its first line is the one named.
+    snapshot = make_snapshot(
+        rules_text="# Rules\n\n```review-ignore\nsecret/**\ndocs/**\nsecret/**\n```\n"
+    )
+    block = ManifestBlock(
+        block_id="b-ignored", source_role=SourceRole.DIFF, source_kind="source_code", path=path
+    )
+    manifest = CallManifest(
+        call_id=uuid.uuid4(), run_id=snapshot.run_id, stage="review", blocks=(block,)
+    )
+
+    with pytest.raises(PolicyError) as exc_info:
+        verify_provenance_pre_send_guard(manifest, snapshot=snapshot)
+
+    error = exc_info.value
+    assert error.code is PolicyErrorCode.CONTEXT_VIOLATION
+    assert (error.source_path, error.line) == (".review/rules.md", line)
+    assert str(error) == (
+        "policy_context_violation: Block 'b-ignored' references ignored path matching "
+        f"deny-set | файл `.review/rules.md`, строка {line}, маска `{mask}`"
+    )
+    # RFS §9 defines pattern_index for a mask parse error only, so it stays null here.
+    assert error.diagnostic() == {
+        "code": "policy_context_violation",
+        "source_path": ".review/rules.md",
+        "policy_base_sha": "sha_base",
+        "message": "Block 'b-ignored' references ignored path matching deny-set",
+        "line": line,
+        "column": None,
+        "pattern_index": None,
+        "limit": None,
+        "actual": None,
+        "retryable": False,
+    }
 
 
 def test_provenance_guard_match_budget_error_names_the_policy_base(

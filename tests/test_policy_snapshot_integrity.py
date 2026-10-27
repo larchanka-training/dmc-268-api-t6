@@ -10,7 +10,7 @@ from uuid import UUID
 
 import pytest
 
-from app.modules.reviews.application import prepare_policy_snapshot
+from app.modules.reviews.application import prepare_policy_snapshot, review_ignore
 from app.modules.reviews.application.policy_documents import missing_document, normalize_document
 from app.modules.reviews.application.policy_errors import PolicyError, PolicyErrorCode
 from app.modules.reviews.application.policy_snapshot import (
@@ -35,6 +35,7 @@ from app.modules.reviews.application.prepare_policy_snapshot import (
 )
 from app.modules.reviews.application.review_ignore import (
     PARSER_VERSION,
+    IgnorePatternLine,
     ignore_digest,
     parse_review_ignore,
 )
@@ -425,3 +426,98 @@ def test_a_snapshot_whose_pins_differ_from_the_run_versions_fails(
         verify_snapshot_pins(_snapshot(), pins)
 
     _assert_integrity_error(caught.value, field)
+
+
+# Masks on lines 4 and 6 of the document, sorted the other way round in the snapshot.
+_TWO_MASKS = "# Правила\n\n```review-ignore\nvendor/**\n\nbuild/**\n```\n".encode()
+
+
+def _snapshot_of(rules: PolicyDocument) -> PolicySnapshot:
+    return build_policy_snapshot(
+        _PINS,
+        rules=rules,
+        agents=missing_document(AGENTS_DOCUMENT_PATH),
+        ignore=parse_review_ignore(rules.text),
+        snapshot_id=UUID(int=11),
+    )
+
+
+def _two_masks() -> PolicySnapshot:
+    return _snapshot_of(normalize_document(RULES_DOCUMENT_PATH, _TWO_MASKS, blob_oid="3" * 40))
+
+
+def test_the_ignore_policy_of_a_snapshot_gives_back_the_source_lines_of_its_masks() -> None:
+    snapshot = _two_masks()
+
+    policy = review_ignore.snapshot_ignore_policy(snapshot)
+
+    # RFS §7.1: the lines are not a stored field; the staged rules text gives them back.
+    assert policy.source_lines == (
+        IgnorePatternLine("vendor/**", 4),
+        IgnorePatternLine("build/**", 6),
+    )
+    assert policy.patterns == ("build/**", "vendor/**")
+    assert policy.digest == snapshot.ignore_digest
+
+
+@pytest.mark.parametrize(
+    ("change", "message"),
+    [
+        (
+            lambda item: replace(item, ignore_patterns=("vendor/**",)),
+            "The stored ignore_patterns do not match the masks of the stored rules text",
+        ),
+        (
+            lambda item: replace(item, ignore_digest="0" * 64),
+            "The stored ignore_digest does not match the masks of the stored rules text",
+        ),
+    ],
+    ids=["ignore-patterns", "ignore-digest"],
+)
+def test_a_snapshot_whose_masks_disagree_with_its_rules_text_fails(
+    change: Callable[[PolicySnapshot], PolicySnapshot], message: str
+) -> None:
+    with pytest.raises(PolicyError) as caught:
+        review_ignore.snapshot_ignore_policy(change(_two_masks()))
+
+    assert caught.value.diagnostic() == {
+        "code": "policy_snapshot_integrity_error",
+        "source_path": None,
+        "policy_base_sha": "b" * 40,
+        "message": message,
+        "line": None,
+        "column": None,
+        "pattern_index": None,
+        "limit": None,
+        "actual": None,
+        "retryable": False,
+    }
+
+
+def test_a_snapshot_without_rules_has_the_empty_ignore_policy() -> None:
+    snapshot = _snapshot_of(missing_document(RULES_DOCUMENT_PATH))
+
+    policy = review_ignore.snapshot_ignore_policy(snapshot)
+
+    assert (policy.patterns, policy.source_lines) == ((), ())
+    assert policy.digest == snapshot.ignore_digest
+
+
+def test_an_invalid_mask_of_the_stored_rules_text_fails_with_its_own_error() -> None:
+    broken = normalize_document(
+        RULES_DOCUMENT_PATH, b"```review-ignore\nsrc/a?.py\n```\n", blob_oid="3" * 40
+    )
+    snapshot = replace(_two_masks(), rules=broken)
+
+    with pytest.raises(PolicyError) as caught:
+        review_ignore.snapshot_ignore_policy(snapshot)
+
+    # The parser's error at the pinned base, not an integrity error of the snapshot.
+    error = caught.value
+    assert error.code is PolicyErrorCode.IGNORE_PATTERN_INVALID
+    assert (error.source_path, error.policy_base_sha, error.line, error.column) == (
+        RULES_DOCUMENT_PATH,
+        "b" * 40,
+        2,
+        6,
+    )
