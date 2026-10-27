@@ -634,8 +634,6 @@ def review_context_stage_factory(
                 ),
             )
 
-        locators: dict[UUID, PullRequestLocator] = {}
-
         def _policy_source(run_id: UUID, policy_base_sha: str) -> PolicyDocumentSource:
             return _LazyPolicySource(
                 runs=runs,
@@ -648,7 +646,6 @@ def review_context_stage_factory(
                     policy_base_sha=policy_base_sha,
                     checkpoint=checkpoint,
                 ),
-                locators=locators,
             )
 
         return ReviewContextStage(
@@ -682,12 +679,10 @@ class _LazyPolicySource:
         runs: SqlAlchemyRunRepository,
         run_id: UUID,
         build: Callable[[PullRequestLocator], PolicyDocumentSource],
-        locators: dict[UUID, PullRequestLocator],
     ) -> None:
         self._runs = runs
         self._run_id = run_id
         self._build = build
-        self._locators = locators
         self._source: PolicyDocumentSource | None = None
 
     async def _bound(self) -> PolicyDocumentSource:
