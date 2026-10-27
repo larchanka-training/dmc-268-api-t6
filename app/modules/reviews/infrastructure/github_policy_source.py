@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import re
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import timedelta
 from typing import Literal
@@ -32,7 +32,7 @@ from app.modules.reviews.application.policy_documents import (
 )
 from app.modules.reviews.application.policy_errors import PolicyError, PolicyErrorCode
 from app.modules.reviews.application.run_failures import parse_retry_after
-from app.modules.reviews.application.vcs_diff import BlobTooLargeError, PullRequestLocator
+from app.modules.reviews.application.vcs_diff import PullRequestLocator
 from app.modules.reviews.infrastructure.github_vcs import (
     _REQUEST_TIMEOUT,
     _SHA,
@@ -208,7 +208,7 @@ class GitHubRepositoryPolicySource:
     The rules status of a repository reads its default branch head with it (#150); the
     run source below adds the checkpoints and the pull request of its run. Both share
     the reads and the error classification, so a 404 is ``unavailable`` for both. A blob
-    is streamed raw unless a test hands in ``read_blob``.
+    is streamed raw.
     """
 
     def __init__(
@@ -219,14 +219,12 @@ class GitHubRepositoryPolicySource:
         installation_external_id: int,
         repository_full_name: str,
         policy_base_sha: str,
-        read_blob: Callable[[str], Awaitable[bytes]] | None = None,
         checkpoint: RunProviderCheckpoint = _no_checkpoint,
     ) -> None:
         self._client = client
         self._tokens = token_provider
         self._installation = installation_external_id
         self._full_name = repository_full_name
-        self._read_blob = self._read_raw_blob if read_blob is None else read_blob
         self._checkpoint = checkpoint
         self._base_sha = policy_base_sha
 
@@ -266,14 +264,7 @@ class GitHubRepositoryPolicySource:
 
     async def read_blob(self, oid: str) -> bytes:
         try:
-            return await self._read_blob(oid)
-        except BlobTooLargeError as exc:
-            raise PolicyError(
-                PolicyErrorCode.DOCUMENT_TOO_LARGE,
-                f"The policy document exceeds {MAX_DOCUMENT_BYTES} bytes",
-                policy_base_sha=self._base_sha,
-                limit=MAX_DOCUMENT_BYTES,
-            ) from exc
+            return await self._read_raw_blob(oid)
         except httpx.HTTPError as exc:
             raise self._classify(exc) from exc
         except ValueError as exc:
