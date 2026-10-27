@@ -70,6 +70,7 @@ from app.modules.reviews.infrastructure.github_policy_source import (
     classify_policy_http_error,
     policy_blob_too_large,
     policy_tree_entries,
+    refuse_encoded_policy_blob,
 )
 from app.modules.reviews.infrastructure.vcs_failures import (
     plain_error_body,
@@ -417,6 +418,7 @@ class _SnapshotPolicySource:
                 follow_redirects=False,
             ) as response:
                 await raise_for_streamed_status(response)
+                refuse_encoded_policy_blob(response, policy_base_sha=self._sha)
                 body = await capped_body(response, MAX_DOCUMENT_BYTES)
         except httpx.HTTPError as exc:
             raise classify_policy_http_error(exc, policy_base_sha=self._sha) from None

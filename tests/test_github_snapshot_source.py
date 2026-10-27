@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import gzip
 import logging
 import tracemalloc
 from collections.abc import AsyncIterator, Awaitable, Callable
@@ -977,6 +978,19 @@ def test_too_large_rules_blob_reports_its_size(
         actual,
         lower_bound,
     )
+
+
+def test_encoded_rules_blob_is_refused_before_reading() -> None:
+    # The read asks for identity; an encoded answer would be decoded whole chunk by chunk.
+    body = httpx.ByteStream(gzip.compress(b"x" * 1_048_576))
+    routes = _policy_routes()
+    routes[_RULES_BLOB] = _answer(200, headers={"Content-Encoding": "gzip"}, stream=body)
+
+    error, requests = _run(GitHub(routes), lambda source: source.rules_document(_HEAD))
+
+    assert isinstance(error, PolicyError), repr(error)
+    assert (error.code.value, error.retryable) == ("policy_fetch_transient", True)
+    assert requests == 3
 
 
 @pytest.mark.parametrize(
