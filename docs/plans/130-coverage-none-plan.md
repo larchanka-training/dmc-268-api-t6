@@ -256,7 +256,7 @@ Only the lines F5 makes false. Line numbers are at `db5c5cf5`.
 | Doc | Lines | Change |
 | --- | --- | --- |
 | PS, CVS, RFS, SD (the shared #213 block) | PS `:225-230`, CVS `:1380-1385`, RFS `:1433-1438`, SD `:1863-1868` | "zero-LLM lifecycle summary-only/none/no-text partial остаются целевыми" becomes: none is active on the snapshot path since #130 F5; summary-only and no-text partial stay targets of #107. The four copies stay identical. |
-| PS | `:258-263` (after "это не T19 и не summaryOnly") | add one sentence: on the snapshot path the route is built (#130 F5) with the trace of DD3; legacy (≤ v3) classifies the same way but still calls conventions and review; summary-only by too_large lines keeps its path (`:274`) |
+| PS | `:258-263` (after "это не T19 и не summaryOnly") | add one sentence: on the snapshot path the route is built (#130 F5) with the trace of DD3; legacy (≤ v3) does not take it and still calls conventions and review, with unsupported_path and identity_unresolved partial there (DD1) and too_large/unsupported_change none as since #283; summary-only by too_large lines keeps its path (`:274`) |
 | PS | `:280` `context.build` row | add the none response of DD3; the `context_payloads` sentence is unchanged (the row is written, F3's exceptions stay the skips and a caught build failure) |
 | PS | `:707` succeeded row | "(общий zero-LLM lifecycle none остаётся целью #107/#175)" becomes "на snapshot path — без вызовов модели (#130 F5); legacy вызывает модель" |
 | TP | `:452`, `:454` | the coverage column names the F5 tests; drop "после остатка #130" and "В очереди #213 unsupported_path сохраняет partial" |
