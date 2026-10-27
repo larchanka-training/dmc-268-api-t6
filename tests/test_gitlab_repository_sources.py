@@ -360,9 +360,9 @@ def test_policy_exact_raw_limit_and_shared_normalization(raw: bytes, code: str |
 @pytest.mark.parametrize(
     ("cached", "actual", "lower_bound", "detail"),
     [
-        (True, 70_000, False, "файл `AGENTS.md`, фактически 70000, допустимо 65536"),
+        (True, 70_000, False, "file `AGENTS.md`, actual 70000, allowed 65536"),
         # The reader stops past the limit without telling how far it read.
-        (False, 65_537, True, "файл `AGENTS.md`, фактически более 65536, допустимо 65536"),
+        (False, 65_537, True, "file `AGENTS.md`, actual more than 65536, allowed 65536"),
     ],
     ids=["cached-raw", "stopped-read"],
 )

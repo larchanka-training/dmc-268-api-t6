@@ -381,9 +381,7 @@ def test_too_large_blob_reports_the_declared_size_as_exact() -> None:
         70_000,
         False,
     )
-    assert (
-        policy_error_detail(error.message) == "файл `AGENTS.md`, фактически 70000, допустимо 65536"
-    )
+    assert policy_error_detail(error.message) == "file `AGENTS.md`, actual 70000, allowed 65536"
     assert error.diagnostic() == {
         "code": "policy_document_too_large",
         "source_path": "AGENTS.md",
@@ -406,7 +404,7 @@ def test_too_large_blob_without_a_declared_size_reports_the_bytes_read_as_a_lowe
     assert (error.actual, error.actual_is_lower_bound) == (69_632, True)
     # The read stopped past the limit, so "more than 65536" is true; 69632 is never shown.
     assert policy_error_detail(error.message) == (
-        "файл `AGENTS.md`, фактически более 65536, допустимо 65536"
+        "file `AGENTS.md`, actual more than 65536, allowed 65536"
     )
     diagnostic = error.diagnostic()
     assert (diagnostic["actual"], diagnostic["actual_is_lower_bound"]) == (69_632, True)
