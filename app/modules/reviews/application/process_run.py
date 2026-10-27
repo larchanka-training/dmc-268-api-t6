@@ -130,7 +130,14 @@ class ReviewContextStagePort(Protocol):
 
     async def begin(self, run_id: UUID) -> None: ...
 
-    async def run(self, run_id: UUID) -> object: ...
+    async def run(self, run_id: UUID) -> object:
+        """Enforce the attempt's policy, then build its context.
+
+        On the snapshot path a change of technical skips only raises ``NoReviewableText``
+        after its ``context.build`` (#130 F5). ``prepare`` lets it through; only
+        ``ExecuteReviewRun`` handles it, around ``prepare``.
+        """
+        ...
 
     def excluded(self, path: str) -> bool: ...
 
@@ -172,7 +179,13 @@ class ReviewRunProcessor:
         self._context_stage = context_stage
 
     async def execute(self, run_id: UUID) -> bool:
-        """Fetch and snapshot the exact head associated with a durable run."""
+        """Fetch and snapshot the exact head associated with a durable run.
+
+        The worker never calls it: ``ExecuteReviewRun`` calls ``prepare``. With a context
+        stage, ``NoReviewableText`` (a snapshot-path change of technical skips only, #130 F5)
+        leaves this method unhandled; only ``ExecuteReviewRun`` handles it, around
+        ``prepare``, and ``classify_failure`` would make it a retryable ``internal_error``.
+        """
 
         return await self.prepare(run_id) is not None
 

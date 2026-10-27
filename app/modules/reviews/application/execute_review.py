@@ -41,6 +41,7 @@ from app.modules.reviews.application.reflection_pass import (
 from app.modules.reviews.application.review_context import (
     ContextBlock,
     ContextLevel,
+    NoReviewableText,
     RetrievedBlock,
     ReviewContextPayload,
     snapshot_block,
@@ -59,6 +60,7 @@ from app.modules.reviews.application.review_output import (
 )
 from app.modules.reviews.application.review_path import ReviewBinding, snapshot_for_review
 from app.modules.reviews.application.run_failures import RunFailure
+from app.modules.reviews.application.store_review_output import NoModelAnswer
 from app.modules.reviews.application.verdict import SeverityThresholdValue
 
 _LOGGER = logging.getLogger(__name__)
@@ -224,7 +226,12 @@ class ExecuteReviewRun:
         self._reflection_pass = reflection_pass
 
     async def execute(self, run_id: UUID) -> bool:
-        conventions = await self._processor.prepare(run_id)
+        try:
+            conventions = await self._processor.prepare(run_id)
+        except NoReviewableText:
+            # CVS §2.2: the stage recorded a change of technical skips only. Nothing is shown
+            # to a model: the backend result (coverage none) is published (#130 F5).
+            return await self._publisher.execute(run_id, NoModelAnswer())
         if not isinstance(conventions, GeneratedConventions):
             return False
         prompt_input = await self._repository.get_review_prompt_input(run_id, conventions)

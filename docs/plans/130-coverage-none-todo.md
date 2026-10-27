@@ -227,15 +227,16 @@ Rules for every task:
   - the `except` wraps more than `prepare` (6, with a fake whose `draft_review` raises it);
   - the stage builds before raising (1).
 - **Done when:**
-  - [ ] 1–8 pass;
-  - [ ] the full suite passes with PostgreSQL and RabbitMQ;
-  - [ ] `test_snapshot_path_e2e_postgres.py` and `test_clean_without_text*_postgres.py` pass unchanged.
+  - [x] 1–8 pass;
+  - [x] the full suite passes with PostgreSQL and RabbitMQ (the review's run on `e903bb68`: 9 468 passed, 3 failed,
+        the known `test_gitlab_admin_postgres` CLI subprocess failures);
+  - [x] `test_snapshot_path_e2e_postgres.py` and `test_clean_without_text*_postgres.py` pass unchanged.
 
 ## Checkpoint B (after T4)
 
-- [ ] The full suite is green.
-- [ ] `grep -rn "llm.review_output" app` shows the only writer is still `run_repository.py:863-880`.
-- [ ] `git diff db5c5cf5 -- $(uv run python -c "from review.scripts.eval_provenance import _REVIEW_CODE; print(*_REVIEW_CODE)")`
+- [x] The full suite is green (the same run).
+- [x] `grep -rn "llm.review_output" app` shows the only writer is still `run_repository.py:863-880`.
+- [x] `git diff db5c5cf5 -- $(uv run python -c "from review.scripts.eval_provenance import _REVIEW_CODE; print(*_REVIEW_CODE)")`
       is empty, or the PR body states the digest change. Diff against the branch base, so #346's own changes do not
       count.
 
