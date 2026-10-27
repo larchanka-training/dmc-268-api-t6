@@ -1189,7 +1189,12 @@ def test_verification_error_codes_classification_and_check_runs() -> None:
 
 
 def _provider_retry_after_failure(
-    retry_after: str, *, status: int = 403, commits: bool = False, remaining: str | None = None
+    retry_after: str,
+    *,
+    status: int = 403,
+    commits: bool = False,
+    remaining: str | None = None,
+    date: str | None = None,
 ) -> RunFailure:
     class Tokens:
         async def get_installation_access_token(self, installation_external_id: int) -> str:
@@ -1199,6 +1204,8 @@ def _provider_retry_after_failure(
         headers = [(b"Retry-After", retry_after.encode("utf-8"))]
         if remaining is not None:
             headers.append((b"X-RateLimit-Remaining", remaining.encode("ascii")))
+        if date is not None:
+            headers.append((b"Date", date.encode("ascii")))
         async with httpx.AsyncClient(
             base_url="https://api.github.test",
             transport=httpx.MockTransport(lambda request: httpx.Response(status, headers=headers)),
@@ -1225,6 +1232,8 @@ def _provider_retry_after_failure(
 @pytest.mark.parametrize(
     "header",
     [
+        # Representable, yet beyond a day: the shared parser caps it like the policy read.
+        pytest.param("86399999999999", id="largest-representable-seconds"),
         pytest.param("86400000000000", id="timedelta-overflow"),
         pytest.param("9" * 5000, id="integer-digit-limit"),
     ],
@@ -1252,7 +1261,6 @@ def test_oversized_numeric_retry_after_keeps_rate_limit_retry_in_the_long_bucket
         pytest.param("+120", id="positive-sign"),
         pytest.param("120.0", id="fractional"),
         pytest.param(" 120", id="whitespace"),
-        pytest.param("Wed, 21 Oct 2026 07:28:00 GMT", id="http-date"),
         pytest.param("²", id="superscript-digit"),
         pytest.param("١٢٠", id="unicode-decimal"),
     ],
@@ -1275,18 +1283,41 @@ def test_malformed_retry_after_preserves_forbidden_and_retryable_classification(
 @pytest.mark.parametrize(
     ("header", "delay", "queue"),
     [
+        pytest.param(
+            "Wed, 21 Oct 2026 07:28:00 GMT", timedelta(seconds=120), "2m", id="two-minutes"
+        ),
+        pytest.param(
+            "Wed, 21 Oct 2026 07:31:00 GMT", timedelta(seconds=300), "10m", id="five-minutes"
+        ),
+        # Already past at the response Date: no wait, and still a limit, not a lost access.
+        pytest.param("Wed, 21 Oct 2026 07:25:00 GMT", timedelta(0), "2m", id="past"),
+    ],
+)
+def test_http_date_retry_after_is_a_retryable_limit_with_its_delay(
+    header: str, delay: timedelta, queue: str, status: int, commits: bool
+) -> None:
+    failure = _provider_retry_after_failure(
+        header, status=status, commits=commits, date="Wed, 21 Oct 2026 07:26:00 GMT"
+    )
+
+    assert failure.error_code == (
+        "commit_messages_fetch_failed" if commits else "diff_fetch_failed"
+    )
+    assert failure.retry_after == delay
+    assert RetryDelays().for_failure(1, failure)[0] == queue
+
+
+@pytest.mark.parametrize("commits", [False, True])
+@pytest.mark.parametrize("status", [403, 429])
+@pytest.mark.parametrize(
+    ("header", "delay", "queue"),
+    [
         pytest.param("0", timedelta(0), "2m", id="zero"),
         pytest.param("120", timedelta(seconds=120), "2m", id="two-minutes"),
         pytest.param("300", timedelta(seconds=300), "10m", id="five-minutes"),
         pytest.param("000120", timedelta(seconds=120), "2m", id="leading-zeros"),
         pytest.param("0" * 5000 + "300", timedelta(seconds=300), "10m", id="many-leading-zeros"),
         pytest.param("0" * 5000, timedelta(0), "2m", id="many-zero-digits"),
-        pytest.param(
-            "86399999999999",
-            timedelta(days=999_999_999, seconds=86_399),
-            "10m",
-            id="largest-representable-seconds",
-        ),
     ],
 )
 def test_representable_numeric_retry_after_preserves_delay_and_existing_queue(

@@ -28,7 +28,7 @@ from app.modules.reviews.application.policy_documents import (
     PolicyTreeEntry,
 )
 from app.modules.reviews.application.policy_errors import PolicyError, PolicyErrorCode
-from app.modules.reviews.application.run_failures import RETRY_AFTER_CEILING
+from app.modules.reviews.application.run_failures import parse_retry_after
 from app.modules.reviews.application.vcs_diff import (
     BlobTooLargeError,
     PullRequestLocator,
@@ -120,19 +120,6 @@ def policy_tree_entries(payload: object, *, policy_base_sha: str) -> dict[str, P
     return entries
 
 
-def _policy_retry_after(value: str | None) -> timedelta | None:
-    """ASCII seconds capped at one day, matching the snapshot adapter's retry bound."""
-    if not value or not (value.isascii() and value.isdecimal()):
-        return None
-    try:
-        seconds = int(value.lstrip("0") or "0")
-    except ValueError:
-        # Python refuses integers with more than its configured digit limit; without the
-        # leading zeros such a value is far beyond the ceiling, never shorter than it.
-        return RETRY_AFTER_CEILING
-    return timedelta(seconds=min(seconds, RETRY_AFTER_CEILING // timedelta(seconds=1)))
-
-
 def classify_policy_http_error(exc: httpx.HTTPError, *, policy_base_sha: str | None) -> PolicyError:
     """The §9 code of a failed GitHub read; a 404 is never a missing document."""
 
@@ -147,7 +134,10 @@ def classify_policy_http_error(exc: httpx.HTTPError, *, policy_base_sha: str | N
         )
     response = exc.response
     status = response.status_code
-    delay = _policy_retry_after(response.headers.get("Retry-After"))
+    delay = parse_retry_after(
+        response.headers.get("Retry-After"), date=response.headers.get("Date")
+    )
+    # A date already past is a 0 s delay and still a limit, so test for None.
     limited = response.headers.get("X-RateLimit-Remaining") == "0" or delay is not None
     message = f"GitHub answered {status}"
     if status == 429 or (status == 403 and limited):
@@ -155,7 +145,8 @@ def classify_policy_http_error(exc: httpx.HTTPError, *, policy_base_sha: str | N
     if status in {401, 403}:
         return error(PolicyErrorCode.ACCESS_DENIED, message)
     if status >= 500:
-        return error(PolicyErrorCode.FETCH_TRANSIENT, message)
+        # Still a transient read, not a rate limit, yet it waits out a given Retry-After.
+        return error(PolicyErrorCode.FETCH_TRANSIENT, message, delay)
     # 404, 409 and 422: the pinned revision or its object cannot be read.
     return error(PolicyErrorCode.REVISION_UNAVAILABLE, message)
 
