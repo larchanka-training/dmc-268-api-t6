@@ -140,6 +140,17 @@ def policy_summary(snapshot: PolicySnapshot) -> dict[str, Any]:
     }
 
 
+def _with_live_base(diff: dict[str, Any], pr_base_sha: str | None) -> dict[str, Any]:
+    """The traced ``diff`` with the live base of a PR that left its pinned base.
+
+    A PR on its pinned base records no key. The live base is recorded in the trace only,
+    never in the diff map or its digest.
+    """
+    if pr_base_sha is None:
+        return diff
+    return diff | {"pr_base_sha": pr_base_sha}
+
+
 def context_summary(
     diff_map: DiffMap, payload: ReviewContextPayload, *, pr_base_sha: str | None = None
 ) -> dict[str, Any]:
@@ -155,14 +166,15 @@ def context_summary(
     for block in counted:
         tokens[block.level.value] += block.tokens
         tokens_by_role[block.source.role.value] += block.tokens
-    diff: dict[str, Any] = {
-        "digest": diff_map.digest,
-        "files": len(diff_map.files),
-        "diff_old_sha": diff_map.diff_old_sha,
-        "file_list_complete": diff_map.file_list_complete,
-    }
-    if pr_base_sha is not None:
-        diff["pr_base_sha"] = pr_base_sha
+    diff = _with_live_base(
+        {
+            "digest": diff_map.digest,
+            "files": len(diff_map.files),
+            "diff_old_sha": diff_map.diff_old_sha,
+            "file_list_complete": diff_map.file_list_complete,
+        },
+        pr_base_sha,
+    )
     return {
         "status": payload.status.value,
         "reason": payload.reason,
@@ -618,15 +630,10 @@ class ReviewContextStage:
                 step.response = {
                     "error": {"type": type(exc).__name__, "message": str(exc)[:1000]},
                     "coverage": coverage.to_json(),
-                    "diff": {
-                        "digest": diff_map.digest,
-                        "diff_old_sha": diff_map.diff_old_sha,
-                        **(
-                            {"pr_base_sha": self._pr_base_sha}
-                            if self._pr_base_sha is not None
-                            else {}
-                        ),
-                    },
+                    "diff": _with_live_base(
+                        {"digest": diff_map.digest, "diff_old_sha": diff_map.diff_old_sha},
+                        self._pr_base_sha,
+                    ),
                 }
         if payload is None:
             await self._record_rag(run_id, rag)
@@ -653,9 +660,7 @@ class ReviewContextStage:
         files: int,
         coverage: RunCoverage | None = None,
     ) -> None:
-        diff: dict[str, Any] = {"digest": digest, "files": files}
-        if self._pr_base_sha is not None:
-            diff["pr_base_sha"] = self._pr_base_sha
+        diff = _with_live_base({"digest": digest, "files": files}, self._pr_base_sha)
         request = {"head_sha": head_sha, "policy_snapshot_id": str(snapshot.snapshot_id)}
         async with traced_step(self._trace, run_id, "context.build", request) as step:
             step.response = {
