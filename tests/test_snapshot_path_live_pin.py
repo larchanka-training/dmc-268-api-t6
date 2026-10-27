@@ -1,9 +1,10 @@
-"""The live review path, pinned before the policy-snapshot path is switched on (#130 F1-1).
+"""Legacy live review behavior for runs whose existing prompt pins keep this path.
 
-A run bound to review prompt v3 with all three prompt pins and a ready policy snapshot goes
-through ``process_review_run`` with the real context stage, the production gateway, the
-worker's Reflection Pass and a recording HTTP transport. Every F1 task keeps this test green:
-until F2 binds a run to a v2-contract prompt, the snapshot path changes nothing a live run
+A run bound to v3 or lower, created before the F2 seed or with pre-0039 pins, keeps
+this path. This test's v3 run has all three prompt pins and a ready policy snapshot
+and goes through ``process_review_run`` with the real context stage, the production
+gateway, the worker's Reflection Pass and a recording HTTP transport. New runs can
+pin the active v4 after F2; that activation does not change what this legacy run
 sends or records.
 """
 
@@ -511,6 +512,22 @@ def _legacy_responses(snapshot: PolicySnapshot) -> list[tuple[str, Any]]:
                     "files": 1,
                     "diff_old_sha": "c" * 40,
                     "file_list_complete": True,
+                },
+                "coverage": {
+                    "version": 1,
+                    "status": "complete",
+                    "head_sha": "f" * 40,
+                    "diff_digest": _DIFF_DIGEST,
+                    "snapshot_digest": (
+                        "37b3a1161fb0e982a2dc2b23f8d2c52b22cd7cf0e9c6a11076cd6c0815afecf8"
+                    ),
+                    "total_files": 1,
+                    "reviewed_files": 1,
+                    "file_list_complete": True,
+                    "reason_counts": {},
+                    "exclusion_counts": {},
+                    "reasons": [],
+                    "exclusions": [],
                 },
                 "reviewable_lines": 1,
                 "ignored_files": 0,

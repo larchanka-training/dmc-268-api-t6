@@ -174,13 +174,18 @@ def test_findings_below_the_repository_threshold_are_stored_and_counted_on_the_c
     if summary_line is None:
         assert "Below severity threshold" not in body
         assert view.title == "AI-ревью: blocking"
-        assert view.summary == (
-            "critical: 0, high: 1, medium: 1, low: 1, info: 0\ninline: 3, в теле ревью: 0"
+        assert view.summary.startswith(
+            "critical: 0, high: 1, medium: 1, low: 1, info: 0\ninline: 3, в теле ревью: 0\n"
         )
+        assert "Подтверждено замечаний: 3 (correctness: 3)" in view.summary
     else:
         assert f"**Below severity threshold ({threshold}):** {below}" in body
         assert view.title == "AI-ревью: blocking"
-        assert view.summary == (
-            "critical: 0, high: 1, medium: 0, low: 0, info: 0\n"
-            f"inline: 1, в теле ревью: 0\n{summary_line}"
+        assert view.summary.startswith(
+            "critical: 0, high: 1, medium: 0, low: 0, info: 0\ninline: 1, в теле ревью: 0\n"
         )
+        assert "Подтверждено замечаний: 1 (correctness: 1)" in view.summary
+        assert view.summary.endswith(summary_line)
+    assert report.saved_summary is not None
+    assert report.saved_summary["problem"] in view.summary
+    assert "Проверка неполная" in view.summary

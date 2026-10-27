@@ -10,6 +10,7 @@ from uuid import UUID
 from app.modules.reviews.application.get_run_comments import PublishedComment
 from app.modules.reviews.application.list_pulls import run_verdict
 from app.modules.reviews.application.list_runs import RunListItem
+from app.modules.reviews.application.saved_review_result import SavedReviewResult
 from app.modules.reviews.application.verdict import SEVERITIES, Verdict, severity_counts
 
 
@@ -48,6 +49,7 @@ class RunReview:
     tokens_in: int
     tokens_out: int
     cost_usd: Decimal
+    saved_result: SavedReviewResult | None = None
 
 
 @dataclass(frozen=True)
@@ -90,6 +92,8 @@ class GetRunDetail:
         review = await self._repository.get_run_review(run_id)
         if run is None or review is None:
             return None
+        if run.status != "succeeded":
+            review = replace(review, summary=None, saved_result=None)
         severities = tuple(item.comment.severity for item in review.findings)
         token_limit, cost_limit = ENGINE_LIMITS[run.engine]
         return RunDetail(
@@ -100,7 +104,7 @@ class GetRunDetail:
                     review.findings, key=lambda item: SEVERITIES.index(item.comment.severity)
                 ),
             ),
-            verdict=run_verdict(run.status, run.summary_only, severities),
+            verdict=run_verdict(run.status, run.summary_only, severities, review.saved_result),
             severity_counts=severity_counts(severities),
             budget=(
                 RunBudget(

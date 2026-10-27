@@ -57,7 +57,13 @@ def verdict(severities: Iterable[str]) -> Verdict:
     return "clean"
 
 
-def review_event(repository_review_event: str, run_verdict: Verdict) -> str:
+def coverage_verdict(severities: Iterable[str], coverage_status: str | None) -> Verdict | None:
+    """Retain supported risk verdicts; clean additionally requires complete coverage."""
+    result = verdict(severities)
+    return None if result == "clean" and coverage_status != "complete" else result
+
+
+def review_event(repository_review_event: str, run_verdict: Verdict | None) -> str:
     """``REQUEST_CHANGES`` only for a blocking verdict of an opted-in repository."""
     if repository_review_event.upper() == "REQUEST_CHANGES" and run_verdict == "blocking":
         return "REQUEST_CHANGES"

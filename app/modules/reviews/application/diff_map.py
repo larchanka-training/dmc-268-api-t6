@@ -178,25 +178,48 @@ def build_diff_map(
     diff_old_sha: str | None,
 ) -> DiffMap:
     """Build the map from one complete provider read; no network and no database."""
+    return build_diff_map_from_facts(
+        files=files,
+        provider=provider,
+        repository_id=repository_id,
+        code_change_number=pull_request.locator.number,
+        policy_base_sha=pull_request.base_sha,
+        head_sha=pull_request.head_sha,
+        diff_old_sha=diff_old_sha,
+        file_list_complete=len(files) == pull_request.meta.files_changed,
+    )
+
+
+def build_diff_map_from_facts(
+    *,
+    files: tuple[VcsFile, ...],
+    provider: VcsProviderName,
+    repository_id: UUID,
+    code_change_number: int,
+    policy_base_sha: str,
+    head_sha: str,
+    diff_old_sha: str | None,
+    file_list_complete: bool,
+) -> DiffMap:
+    """Build from actual durable identities and inventory facts, without provider metadata."""
     identity: list[str | int] = [
         provider.value,
         str(repository_id),
-        pull_request.locator.number,
-        pull_request.head_sha,
+        code_change_number,
+        head_sha,
     ]
     diff_files = tuple(_build_file(identity, file) for file in files)
-    complete = len(files) == pull_request.meta.files_changed
-    incomplete_reasons = () if complete else (_FILE_COUNT_MISMATCH,)
+    incomplete_reasons = () if file_list_complete else (_FILE_COUNT_MISMATCH,)
     payload = {
         "schema_version": DIFF_MAP_SCHEMA_VERSION,
         "parser_version": DIFF_MAP_PARSER_VERSION,
         "provider": provider.value,
         "repository_id": str(repository_id),
-        "code_change_number": pull_request.locator.number,
-        "policy_base_sha": pull_request.base_sha,
-        "head_sha": pull_request.head_sha,
+        "code_change_number": code_change_number,
+        "policy_base_sha": policy_base_sha,
+        "head_sha": head_sha,
         "diff_old_sha": diff_old_sha,
-        "file_list_complete": complete,
+        "file_list_complete": file_list_complete,
         "incomplete_reasons": list(incomplete_reasons),
         "files": [_file_digest_entry(file) for file in diff_files],
     }
@@ -205,11 +228,11 @@ def build_diff_map(
         parser_version=DIFF_MAP_PARSER_VERSION,
         provider=provider,
         repository_id=repository_id,
-        code_change_number=pull_request.locator.number,
-        policy_base_sha=pull_request.base_sha,
-        head_sha=pull_request.head_sha,
+        code_change_number=code_change_number,
+        policy_base_sha=policy_base_sha,
+        head_sha=head_sha,
         diff_old_sha=diff_old_sha,
-        file_list_complete=complete,
+        file_list_complete=file_list_complete,
         incomplete_reasons=incomplete_reasons,
         files=diff_files,
         digest=_digest(payload),

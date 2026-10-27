@@ -172,7 +172,23 @@ class ProcessingRepository:
     ) -> ReviewPublication | None:
         assert run_id == RUN_ID
         assert model_output == output_with_body_only()
-        assert parsed.summary.effort == "small"
+        assert model_output["summary"] == {
+            "problem": "A transaction can span a provider call.",
+            "done_well": "The repository adapter is small.",
+            "effort": "small",
+        }
+        assert parsed.findings == ReviewOutput.model_validate(output_with_body_only()).findings
+        assert parsed.summary.model_dump() == {
+            "problem": (
+                "Подтверждено замечаний: 2 (correctness: 2); Проверка неполная: "
+                "нет достоверного сохранённого покрытия (1)."
+            ),
+            "done_well": (
+                "Проанализировано файлов с текстовыми изменениями: 0; исключено файлов: 0."
+            ),
+            "effort": "medium",
+        }
+        assert processed.summary == parsed.summary
         self.processed = processed
         findings = tuple(
             PublishedFinding(
@@ -275,6 +291,12 @@ def test_publisher_receives_only_inline_findings_and_renders_body_only_findings(
         "validate the low confidence risk before publishing"
     )
     assert provider.calls[0][1] == repository.processed.review_body
+    assert (
+        "Подтверждено замечаний: 2 (correctness: 2); Проверка неполная: "
+        "нет достоверного сохранённого покрытия (1)."
+    ) in provider.calls[0][1]
+    assert "**Effort:** medium" in provider.calls[0][1]
+    assert "A transaction can span a provider call." not in provider.calls[0][1]
     assert [item.title for item in provider.calls[0][2]] == ["Missing transaction boundary"]
     assert "validate the low confidence risk before publishing" not in provider.calls[0][1]
 
@@ -384,7 +406,24 @@ def test_gateway_json_text_is_parsed_and_stored_as_the_exact_object(
     assert published is True
     assert repository.raw == [json.loads(text)]
     assert list(repository.raw[0]) == ["findings", "summary"]
-    assert repository.stored[0][1] == ReviewOutput.model_validate(output())
+    stored = repository.stored[0][1]
+    assert stored.findings == ReviewOutput.model_validate(output()).findings
+    assert stored.summary.model_dump() == {
+        "problem": (
+            "Подтверждено замечаний: 1 (correctness: 1); Проверка неполная: "
+            "нет достоверного сохранённого покрытия (1)."
+        ),
+        "done_well": ("Проанализировано файлов с текстовыми изменениями: 0; исключено файлов: 0."),
+        "effort": "medium",
+    }
+    assert repository.processed is not None
+    assert repository.processed.summary == stored.summary
+    assert (
+        "Подтверждено замечаний: 1 (correctness: 1); Проверка неполная: "
+        "нет достоверного сохранённого покрытия (1)."
+    ) in repository.processed.review_body
+    assert "**Effort:** medium" in repository.processed.review_body
+    assert "A transaction can span a provider call." not in repository.processed.review_body
 
 
 def test_json_text_that_is_not_an_object_is_rejected_before_any_write() -> None:

@@ -36,7 +36,6 @@ from app.modules.reviews.application.verdict import (
     findings_hash,
     review_event,
     severity_counts,
-    verdict,
 )
 from app.modules.reviews.infrastructure.models import (
     CodeChange,
@@ -51,9 +50,8 @@ from app.modules.reviews.infrastructure.run_action_records import insert_run_act
 from app.modules.reviews.infrastructure.run_notifications import notify_run_state
 from app.modules.reviews.infrastructure.run_origin import active_origin_condition, origin_active
 from app.modules.reviews.infrastructure.run_origin_locks import lock_run_origin_row
-from app.modules.reviews.infrastructure.run_repository import (
-    load_publication_diff_map,
-)
+from app.modules.reviews.infrastructure.run_repository import load_publication_diff_map
+from app.modules.reviews.infrastructure.saved_review_results import load_review_results
 from app.modules.reviews.infrastructure.webhook_runs import SqlAlchemyWebhookRunStore
 from app.modules.workspaces.infrastructure.models import Workspace
 
@@ -424,13 +422,22 @@ class SqlAlchemyRunLifecycleStore:
             .select_from(Finding)
             .where(Finding.run_id == run_id, Finding.drop_reason == "severity_threshold")
         )
+        result = (
+            await load_review_results(
+                self._session,
+                {run_id: run.head_sha},
+                {run_id: severities},
+            )
+        )[run_id]
         inline = sum(1 for item in findings if item.inline_comment)
         body_count = len(findings) - inline
         return CheckRunReport(
             target,
             run.state.value,
             run.attempt,
-            verdict=verdict(severities),
+            verdict=None if summary_only else result.verdict,
+            coverage_status=result.coverage.status.value,
+            saved_summary=result.summary,
             severity_counts=severity_counts(severities),
             inline_count=inline,
             body_count=body_count,
@@ -441,12 +448,18 @@ class SqlAlchemyRunLifecycleStore:
 
     async def _publish_pointer(self, run: Run, repository: Repository) -> ReviewPublishPointer:
         findings = await self._published_findings(run.id)
-        run_verdict = verdict(item.severity.value for item in findings)
+        result = (
+            await load_review_results(
+                self._session,
+                {run.id: run.head_sha},
+                {run.id: [item.severity.value for item in findings]},
+            )
+        )[run.id]
         return ReviewPublishPointer(
             run_id=run.id,
             head_sha=run.head_sha,
             findings_hash=findings_hash(_hashed(item) for item in findings),
-            review_event=review_event(repository.review_event.value, run_verdict),
+            review_event=review_event(repository.review_event.value, result.verdict),
         )
 
     async def publish_context(self, run_id: UUID) -> PublishContext | None:

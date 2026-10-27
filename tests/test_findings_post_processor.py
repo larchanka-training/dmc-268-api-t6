@@ -26,6 +26,7 @@ from app.modules.reviews.application.review_output import (
     ReviewOutput,
     ReviewSummary,
 )
+from app.modules.reviews.application.run_coverage import CoverageStatus, RunCoverage
 from app.modules.reviews.application.vcs_diff import PullRequestLocator, VcsFile, VcsPullRequest
 from app.modules.reviews.application.verdict import SeverityThresholdValue
 from tests.test_diff_anchor import _diff_map
@@ -126,6 +127,17 @@ def output(*findings: dict[str, object]) -> ReviewOutput:
     )
 
 
+def _trusted_coverage(paths: frozenset[str]) -> RunCoverage:
+    """Formatting fixtures provide trusted coverage separately from diff anchors."""
+    return RunCoverage(
+        CoverageStatus.COMPLETE if paths else CoverageStatus.NONE,
+        len(paths),
+        total_files=len(paths),
+        file_list_complete=True,
+        durable_reviewable_paths=paths,
+    )
+
+
 def process(  # type: ignore[no-untyped-def]
     *findings: dict[str, object],
     max_inline: int | None = None,
@@ -142,6 +154,7 @@ def process(  # type: ignore[no-untyped-def]
         rule_names=frozenset({"Naming Consistency"}),
         repository_max_inline=max_inline,
         severity_threshold=severity_threshold,
+        coverage=_trusted_coverage(paths),
     )
 
 
@@ -296,6 +309,7 @@ def test_default_cap_classifies_fixture_as_ten_inline_and_four_body_only() -> No
         diff_map=example_diff,
         checked_paths=_paths_of(example_diff),
         rule_names=frozenset(),
+        coverage=_trusted_coverage(_paths_of(example_diff)),
     )
 
     assert len(result.inline) == 10
@@ -349,15 +363,21 @@ def test_review_body_starts_with_verdict_risk_summary_and_checked_paths() -> Non
                 "",
                 "**Verdict:** blocking",
                 "**Risk summary:** critical: 0, high: 1, medium: 0, low: 0, info: 1",
+                "**Coverage:** partial — Проверка неполная: "
+                "не удалось сопоставить замечание с доступным diff (1).",
+                "- не удалось сопоставить замечание с доступным diff",
+                "**Проверено файлов с текстовыми изменениями:** 2",
                 "**Checked files:**",
                 "- app/example.py",
                 "- z/last.py",
                 "",
-                "**Main issue:** A required value is not validated.",
+                "**Main issue:** Подтверждено замечаний: 2 (correctness: 2); Проверка неполная: "
+                "не удалось сопоставить замечание с доступным diff (1).",
                 "",
-                "**Done well:** The endpoint remains small.",
+                "**Done well:** Проанализировано файлов с текстовыми изменениями: 2; "
+                "исключено файлов: 0.",
                 "",
-                "**Effort:** small",
+                "**Effort:** medium",
             )
         )
     )
@@ -535,16 +555,22 @@ def test_checked_files_are_none_when_the_diff_has_no_paths() -> None:
         (
             "## Review summary",
             "",
-            "**Verdict:** clean",
+            "**Verdict:** проверка неполная",
             "**Risk summary:** critical: 0, high: 0, medium: 0, low: 0, info: 0",
+            "**Coverage:** partial — Проверка неполная: "
+            "не удалось сопоставить замечание с доступным diff (1).",
+            "- не удалось сопоставить замечание с доступным diff",
+            "**Проверено файлов с текстовыми изменениями:** 0",
             "**Checked files:**",
             "(none)",
             "",
-            "**Main issue:** A required value is not validated.",
+            "**Main issue:** Подтверждённых замечаний нет; Проверка неполная: "
+            "не удалось сопоставить замечание с доступным diff (1).",
             "",
-            "**Done well:** The endpoint remains small.",
+            "**Done well:** Проанализировано файлов с текстовыми изменениями: 0; "
+            "исключено файлов: 0.",
             "",
-            "**Effort:** small",
+            "**Effort:** none",
         )
     )
 
@@ -584,7 +610,7 @@ def test_character_cap_drops_only_additional_findings() -> None:
     )
     assert len(capped.review_body) <= 4000
     assert capped.omitted_body_only_count == 4
-    assert "**Effort:** small" in capped.review_body
+    assert "**Effort:** medium" in capped.review_body
     assert "Overflow 1" in capped.review_body
     assert "Overflow 6" not in capped.review_body
     assert all(
@@ -642,7 +668,7 @@ def test_character_cap_drops_only_additional_findings() -> None:
     assert "**Verdict:** blocking" in body
     assert "- app/example.py" in body
     assert body.index("- app/example.py") < body.index(f"- {long_checked_path(0)}")
-    assert "**Effort:** small" in body
+    assert "**Effort:** medium" in body
     listed_long_paths = sum(
         1 for index in range(long_path_count) if f"- {long_checked_path(index)}" in body
     )
@@ -729,7 +755,9 @@ def test_body_only_accounted_parses_overflow_footer_with_and_without_url(
     assert _body_only_accounted_in_review_body(body + footer) == 1 + expected
 
 
-def test_finalize_stored_review_body_degrades_long_summary_instead_of_asserting() -> None:
+def test_finalize_stored_review_body_degrades_long_summary_instead_of_asserting(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     # processed must come from the same parsed output: the long summary is what forces the
     # degraded branch (prose cannot shrink below the footer).
     parsed = ReviewOutput.model_validate(
@@ -748,11 +776,18 @@ def test_finalize_stored_review_body_degrades_long_summary_instead_of_asserting(
             },
         }
     )
+    # #213 normally builds bounded backend prose. Exercise the packer's robustness
+    # for an unusually long backend summary, rather than republishing raw model prose.
+    monkeypatch.setattr(
+        "app.modules.reviews.application.findings_post_processor.summary_from_result",
+        lambda *_: parsed.summary,
+    )
     processed = FindingsPostProcessor.from_default_patterns().process(
         parsed,
         diff_map=_default_diff_map(),
         checked_paths=frozenset({"app/example.py"}),
         rule_names=frozenset({"Naming Consistency"}),
+        coverage=_trusted_coverage(frozenset({"app/example.py"})),
     )
     run_url = "https://ui.test/runs/11111111-1111-1111-1111-111111111111"
     finalized = finalize_stored_review_body(
@@ -816,11 +851,12 @@ def test_critical_threshold_drops_medium_low_and_info_and_turns_attention_into_c
             "**Checked files:**",
             "- app/example.py",
             "",
-            "**Main issue:** A required value is not validated.",
+            "**Main issue:** Подтверждённых замечаний нет.",
             "",
-            "**Done well:** The endpoint remains small.",
+            "**Done well:** Проанализировано файлов с текстовыми изменениями: 1; "
+            "исключено файлов: 0.",
             "",
-            "**Effort:** small",
+            "**Effort:** none",
         )
     )
 
@@ -913,6 +949,7 @@ def test_inline_cap_counts_only_findings_that_pass_the_threshold() -> None:
         checked_paths=_paths_of(example_diff),
         rule_names=frozenset(),
         severity_threshold="critical",
+        coverage=_trusted_coverage(_paths_of(example_diff)),
     )
 
     assert [item.finding.title for item in result.inline] == [
@@ -963,7 +1000,13 @@ def test_all_threshold_keeps_the_ten_findings_fixture_result(
 
     paths = _paths_of(diff_map)
     result = (
-        processor.process(parsed, diff_map=diff_map, checked_paths=paths, rule_names=frozenset())
+        processor.process(
+            parsed,
+            diff_map=diff_map,
+            checked_paths=paths,
+            rule_names=frozenset(),
+            coverage=_trusted_coverage(paths),
+        )
         if threshold is None
         else processor.process(
             parsed,
@@ -971,6 +1014,7 @@ def test_all_threshold_keeps_the_ten_findings_fixture_result(
             checked_paths=paths,
             rule_names=frozenset(),
             severity_threshold=threshold,
+            coverage=_trusted_coverage(paths),
         )
     )
 
@@ -1053,6 +1097,7 @@ def test_findings_post_processor_legacy_nulls_out_v2_rules() -> None:
         checked_paths=_paths_of(main_diff),
         rule_names=frozenset(),
         allowed_v2_rules=None,
+        coverage=_trusted_coverage(_paths_of(main_diff)),
     )
     # Both v2 rule names must be nulled out in legacy mode!
     assert len(result.inline) == 2
@@ -1130,6 +1175,7 @@ def test_findings_post_processor_v2_allows_valid_and_rejects_malformed_rules() -
         checked_paths=_paths_of(main_diff),
         rule_names=frozenset(),
         allowed_v2_rules=frozenset({".review/rules.md", "AGENTS.md"}),
+        coverage=_trusted_coverage(_paths_of(main_diff)),
     )
     assert len(result.inline) == 4
     # .review/rules.md is allowed
@@ -1207,6 +1253,7 @@ def test_collapsed_range_drops_multiline_suggestion() -> None:
         diff_map=diff_map,
         checked_paths=_paths_of(diff_map),
         rule_names=frozenset(),
+        coverage=_trusted_coverage(_paths_of(diff_map)),
     )
 
     assert len(result.inline) == 1
@@ -1271,6 +1318,7 @@ def test_findings_post_processor_v2_preserves_attribution_for_body_only_findings
         checked_paths=_paths_of(main_diff),
         rule_names=frozenset(),
         allowed_v2_rules=frozenset({".review/rules.md"}),
+        coverage=_trusted_coverage(_paths_of(main_diff)),
     )
     assert len(result.body_only) == 2
     assert result.body_only[0].finding.rule_name == ".review/rules.md"
@@ -1283,6 +1331,7 @@ def test_findings_post_processor_v2_preserves_attribution_for_body_only_findings
         checked_paths=_paths_of(main_diff),
         rule_names=frozenset(),
         allowed_v2_rules=None,
+        coverage=_trusted_coverage(_paths_of(main_diff)),
     )
     assert len(legacy_result.body_only) == 2
     assert legacy_result.body_only[0].finding.rule_name is None

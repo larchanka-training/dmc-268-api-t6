@@ -8,7 +8,8 @@ from typing import Protocol
 from uuid import UUID
 
 from app.modules.reviews.application.list_runs import RunCursor
-from app.modules.reviews.application.verdict import Verdict, verdict
+from app.modules.reviews.application.saved_review_result import SavedReviewResult
+from app.modules.reviews.application.verdict import Verdict, coverage_verdict
 
 
 @dataclass(frozen=True)
@@ -17,6 +18,7 @@ class LatestRunRow:
     status: str
     summary_only: bool
     published_severities: tuple[str, ...]
+    saved_result: SavedReviewResult | None = None
 
 
 @dataclass(frozen=True)
@@ -63,11 +65,16 @@ class PullRequestRepository(Protocol):
         ...
 
 
-def run_verdict(status: str, summary_only: bool, severities: tuple[str, ...]) -> Verdict | None:
-    """Null until the run succeeded, and for summary-only runs (PIPELINE_SPEC §11)."""
+def run_verdict(
+    status: str,
+    summary_only: bool,
+    severities: tuple[str, ...],
+    saved_result: SavedReviewResult | None = None,
+) -> Verdict | None:
+    """A succeeded run uses its saved verdict; absent coverage cannot authorize clean."""
     if status != "succeeded" or summary_only:
         return None
-    return verdict(severities)
+    return saved_result.verdict if saved_result is not None else coverage_verdict(severities, None)
 
 
 class ListRepositoryPulls:
@@ -109,6 +116,7 @@ class ListRepositoryPulls:
                                 row.latest_run.status,
                                 row.latest_run.summary_only,
                                 row.latest_run.published_severities,
+                                row.latest_run.saved_result,
                             ),
                         )
                         if row.latest_run is not None

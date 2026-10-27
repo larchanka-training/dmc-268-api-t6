@@ -2,14 +2,14 @@
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import ColumnElement, Row, String, and_, cast, func, or_, select, true, update
+from sqlalchemy import ColumnElement, String, and_, case, cast, func, or_, select, true, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import aliased
 
@@ -50,6 +50,10 @@ from app.modules.reviews.application.review_output import (
     ReviewPublication,
 )
 from app.modules.reviews.application.review_path import ReviewBinding
+from app.modules.reviews.application.run_coverage import (
+    read_context_coverage_pins,
+    restore_context_coverage,
+)
 from app.modules.reviews.application.run_events import RunChange
 from app.modules.reviews.application.run_failures import RunCancelled
 from app.modules.reviews.application.store_review_output import PublishingGuard
@@ -67,6 +71,7 @@ from app.modules.reviews.infrastructure.run_action_records import insert_run_act
 from app.modules.reviews.infrastructure.run_notifications import notify_run_state
 from app.modules.reviews.infrastructure.run_origin import active_origin_condition, origin_active
 from app.modules.reviews.infrastructure.run_origin_locks import lock_run_origin_row
+from app.modules.reviews.infrastructure.saved_review_results import load_review_results
 from app.modules.reviews.infrastructure.severity_threshold import severity_threshold_value
 from app.modules.workspaces.infrastructure.repository_access import repository_access_predicate
 
@@ -213,13 +218,16 @@ class SqlAlchemyRunRepository:
 
     async def get_run_review(self, run_id: UUID) -> RunReview | None:
         async with self._session_scope() as session:
-            pr = await session.scalar(
-                select(CodeChange)
-                .join(Run, Run.code_change_id == CodeChange.id)
-                .where(Run.id == run_id, self._authorized_run())
-            )
-            if pr is None:
+            row = (
+                await session.execute(
+                    select(CodeChange, Run.head_sha, Run.state)
+                    .join(Run, Run.code_change_id == CodeChange.id)
+                    .where(Run.id == run_id, self._authorized_run())
+                )
+            ).one_or_none()
+            if row is None:
                 return None
+            pr, head_sha, state = row
             findings = (
                 await session.scalars(
                     select(Finding)
@@ -231,19 +239,15 @@ class SqlAlchemyRunRepository:
                     .order_by(Finding.created_at.asc(), Finding.id.asc())
                 )
             ).all()
-            outputs = (
-                await session.execute(
-                    select(RunAction.tool, RunAction.response, RunActionResponseBody.body)
-                    .outerjoin(
-                        RunActionResponseBody,
-                        cast(RunActionResponseBody.id, String) == RunAction.response_ref,
+            result = None
+            if state is RunState.SUCCEEDED:
+                result = (
+                    await load_review_results(
+                        session,
+                        {run_id: head_sha},
+                        {run_id: [item.severity.value for item in findings]},
                     )
-                    .where(
-                        RunAction.run_id == run_id,
-                        RunAction.tool.in_(["review.postprocess", "llm.review_output"]),
-                    )
-                )
-            ).all()
+                )[run_id]
             usage = (
                 await session.execute(
                     select(
@@ -267,7 +271,8 @@ class SqlAlchemyRunRepository:
                 )
                 for item in findings
             ],
-            summary=_review_summary(outputs),
+            summary=result.summary if result is not None else None,
+            saved_result=result,
             usage_calls=int(usage[0]),
             tokens_in=int(usage[1]),
             tokens_out=int(usage[2]),
@@ -311,7 +316,10 @@ class SqlAlchemyRunRepository:
             .join(Run, RunAction.run_id == Run.id)
             .outerjoin(
                 RunActionResponseBody,
-                cast(RunActionResponseBody.id, String) == RunAction.response_ref,
+                and_(
+                    RunActionResponseBody.run_id == RunAction.run_id,
+                    cast(RunActionResponseBody.id, String) == RunAction.response_ref,
+                ),
             )
             .where(Run.id == run_id, RunAction.index == index, self._authorized_run())
         )
@@ -673,7 +681,14 @@ def diff_snapshot_from_code_change_diff(row: CodeChangeDiff) -> DiffSnapshot:
     return SqlAlchemyRunRepository._to_diff_snapshot(row)
 
 
-async def load_publication_diff_map(session: AsyncSession, run_id: UUID) -> DiffMap | None:
+async def load_publication_diff_map(
+    session: AsyncSession,
+    run_id: UUID,
+    *,
+    snapshots: list[DiffSnapshot] | None = None,
+    diff_old_sha: str | None = None,
+    file_list_complete: bool = True,
+) -> DiffMap | None:
     """Rebuild DiffMap/v1 from durable snapshots for publish bucketing and GitLab coords."""
     row = (
         await session.execute(
@@ -696,26 +711,28 @@ async def load_publication_diff_map(session: AsyncSession, run_id: UUID) -> Diff
     if row is None:
         return None
     head_sha, base_sha, repository_id, external_number, provider = row
-    snapshot_rows = (
-        (
-            await session.execute(
-                select(CodeChangeDiff)
-                .where(CodeChangeDiff.run_id == run_id)
-                .order_by(CodeChangeDiff.filename.asc())
+    if snapshots is None:
+        snapshot_rows = (
+            (
+                await session.execute(
+                    select(CodeChangeDiff)
+                    .where(CodeChangeDiff.run_id == run_id)
+                    .order_by(CodeChangeDiff.filename.asc())
+                )
             )
+            .scalars()
+            .all()
         )
-        .scalars()
-        .all()
-    )
-    snapshots = [diff_snapshot_from_code_change_diff(item) for item in snapshot_rows]
+        snapshots = [diff_snapshot_from_code_change_diff(item) for item in snapshot_rows]
     return diff_map_from_snapshots(
         repository_id=repository_id,
         code_change_number=external_number,
         head_sha=head_sha,
         base_sha=base_sha,
-        diff_old_sha=None,
+        diff_old_sha=diff_old_sha,
         snapshots=snapshots,
         provider=vcs_provider_name(provider),
+        file_list_complete=file_list_complete,
     )
 
 
@@ -738,6 +755,7 @@ class SqlAlchemyReviewOutputRepository:
                     Run.severity_threshold,
                     Repository.max_comments,
                     Repository.severity_threshold,
+                    Run.head_sha,
                 )
                 .select_from(Run)
                 .join(RuleVersion, RuleVersion.id == Run.rule_version_id)
@@ -748,24 +766,68 @@ class SqlAlchemyReviewOutputRepository:
         ).one_or_none()
         if row is None:
             return None
-        rules, max_comments, severity_threshold, live_cap, live_threshold = row
+        rules, max_comments, severity_threshold, live_cap, live_threshold, head_sha = row
         if max_comments is None and severity_threshold is None:
             max_comments, severity_threshold = live_cap, live_threshold
-        diff_map = await load_publication_diff_map(self._session, run_id)
-        if diff_map is None:
-            return None
-        snapshots = (
-            await self._session.execute(
-                select(
-                    CodeChangeDiff.filename,
-                    CodeChangeDiff.review_patch,
-                ).where(
-                    CodeChangeDiff.run_id == run_id,
+        durable = [
+            diff_snapshot_from_code_change_diff(item)
+            for item in (
+                await self._session.execute(
+                    select(CodeChangeDiff)
+                    .where(CodeChangeDiff.run_id == run_id)
+                    .order_by(CodeChangeDiff.filename.asc())
                 )
             )
-        ).all()
+            .scalars()
+            .all()
+        ]
+        # A referenced JSON null deserializes as None, like an absent body. Keep
+        # that same precedence while testing key presence inside PostgreSQL, so
+        # prompt-only actions never send their potentially large bodies here.
+        response = case(
+            (func.jsonb_typeof(RunActionResponseBody.body) == "null", RunAction.response),
+            else_=func.coalesce(RunActionResponseBody.body, RunAction.response),
+        )
+        context_row = (
+            await self._session.execute(
+                select(RunAction.request, RunAction.response, RunActionResponseBody.body)
+                .outerjoin(
+                    RunActionResponseBody,
+                    and_(
+                        RunActionResponseBody.run_id == RunAction.run_id,
+                        cast(RunActionResponseBody.id, String) == RunAction.response_ref,
+                    ),
+                )
+                .where(
+                    RunAction.run_id == run_id,
+                    RunAction.tool == "context.build",
+                    func.jsonb_typeof(response) == "object",
+                    response.op("?")("coverage"),
+                )
+                .order_by(RunAction.index.desc())
+                .limit(1)
+            )
+        ).one_or_none()
+        request: object = None
+        response_value: object = None
+        if context_row is not None:
+            request, inline, body = context_row
+            response_value = body if body is not None else inline
+        pins = read_context_coverage_pins(request, response_value, head_sha=head_sha)
+        diff_map = await load_publication_diff_map(
+            self._session,
+            run_id,
+            snapshots=durable,
+            diff_old_sha=pins.diff_old_sha if pins is not None else None,
+            file_list_complete=pins.file_list_complete if pins is not None else True,
+        )
+        if diff_map is None:
+            return None
         checked_paths = frozenset(
-            filename for filename, review_patch in snapshots if review_patch is not None
+            item.filename for item in durable if item.review_patch is not None
+        )
+        coverage = restore_context_coverage(
+            request, response_value, snapshots=durable, diff_map=diff_map, run_id=run_id
         )
         rule_names = frozenset(rule["name"] for rule in rules if isinstance(rule.get("name"), str))
         # This legacy adapter has no verified manifest: a snapshot row alone cannot
@@ -777,6 +839,8 @@ class SqlAlchemyReviewOutputRepository:
             repository_max_inline=max_comments,
             severity_threshold=severity_threshold_value(severity_threshold),
             allowed_v2_rules=None,
+            coverage=coverage,
+            summary_only=any(item.summary_only for item in durable),
         )
 
     async def store_review_output(
@@ -920,25 +984,6 @@ class SqlAlchemyReviewOutputRepository:
         )
         await self._session.flush()
         await notify_run_state(self._session, run_id, RunState.PUBLISHING)
-
-
-def _review_summary(outputs: Sequence[Row[tuple[str, Any, Any]]]) -> dict[str, str] | None:
-    """``ReviewOutput.summary``: from ``review.postprocess``, else from ``llm.review_output``.
-
-    ``review.postprocess`` stays small; a huge ``llm.review_output`` may be a truncation
-    wrapper without the summary.
-    """
-    by_tool = {tool: body if body is not None else inline for tool, inline, body in outputs}
-    for tool in ("review.postprocess", "llm.review_output"):
-        value = by_tool.get(tool)
-        summary = value.get("summary") if isinstance(value, dict) else None
-        if isinstance(summary, dict):
-            return {
-                "problem": str(summary.get("problem", "")),
-                "done_well": str(summary.get("done_well", "")),
-                "effort": str(summary.get("effort", "none")),
-            }
-    return None
 
 
 def _to_published_finding(item: object) -> PublishedFinding:

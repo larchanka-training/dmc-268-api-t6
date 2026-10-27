@@ -139,7 +139,7 @@ class CodeChangeDiff(Base):
         ),
         CheckConstraint(
             "omission_reason IS NULL OR omission_reason IN "
-            "('binary', 'too_large', 'generated', 'missing_patch')",
+            "('binary', 'too_large', 'generated', 'missing_patch', 'empty_file')",
             name="ck_code_change_diffs_omission_reason",
         ),
     )

@@ -19,6 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.modules.reviews.application.findings_post_processor import ProcessedReviewOutput
 from app.modules.reviews.application.review_output import ReviewOutput, ReviewSummary
+from app.modules.reviews.application.run_coverage import CoverageItem, CoverageStatus, RunCoverage
 from app.modules.reviews.infrastructure.models import RunAction
 from app.modules.reviews.infrastructure.review_output_unit_of_work import (
     SqlAlchemyReviewOutputUnitOfWork,
@@ -76,7 +77,17 @@ def _parsed_output() -> ReviewOutput:
 
 
 def _processed_output() -> ProcessedReviewOutput:
-    return ProcessedReviewOutput(inline=(), body_only=(), dropped=(), review_body="A bug.")
+    return ProcessedReviewOutput(
+        inline=(),
+        body_only=(),
+        dropped=(),
+        review_body="A bug.",
+        coverage=RunCoverage(
+            CoverageStatus.PARTIAL,
+            0,
+            reasons=(CoverageItem(None, "classification_unavailable"),),
+        ),
+    )
 
 
 async def _run_ready_for_actions(factory: async_sessionmaker[AsyncSession]) -> UUID:

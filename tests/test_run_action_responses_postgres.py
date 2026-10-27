@@ -12,6 +12,7 @@ import pytest
 
 from app.modules.auth.application.scope import AuthScope
 from app.modules.reviews.application.conventions import CachedConventions, ConventionsFile
+from app.modules.reviews.application.run_coverage import CoverageStatus, RunCoverage
 from app.modules.reviews.application.run_trace import TransactionalRunTrace
 from app.modules.reviews.infrastructure.conventions_unit_of_work import (
     SqlAlchemyRepositoryConventionsUnitOfWork,
@@ -21,6 +22,7 @@ from app.modules.reviews.infrastructure.run_lifecycle_store import (
     SqlAlchemyRunTraceUnitOfWork,
 )
 from tests.portal_postgres import (
+    HEAD,
     NOW,
     PROMPT,
     REPO_A,
@@ -111,18 +113,56 @@ def test_large_repo_conventions_trace_is_stored_by_reference(env: Env) -> None:
 
 @pytest.mark.integration
 def test_run_detail_keeps_the_summary_when_the_review_output_is_truncated(env: Env) -> None:
-    summary = {"problem": "A bug.", "done_well": "Small change.", "effort": "small"}
-    huge_output = {"findings": [{"body": "z" * (ROW_LIMIT_BYTES + 10)}], "summary": summary}
+    raw_summary = {"problem": "A bug.", "done_well": "Small change.", "effort": "small"}
+    huge_output = {"findings": [{"body": "z" * (ROW_LIMIT_BYTES + 10)}], "summary": raw_summary}
+    finalized_summary = {
+        "problem": "Подтверждено замечаний: 1 (correctness: 1).",
+        "done_well": "Проанализировано файлов с текстовыми изменениями: 1; исключено файлов: 0.",
+        "effort": "small",
+    }
+    # The seeded run has one published medium finding. A finalized result binds
+    # its public summary to that finding set and the run's head, not the model prose.
+    finalized = {
+        "summary": finalized_summary,
+        "verdict": "attention",
+        "severity_counts": {"critical": 0, "high": 0, "medium": 1, "low": 0, "info": 0},
+        "coverage": RunCoverage(
+            CoverageStatus.COMPLETE,
+            1,
+            head_sha=HEAD,
+            diff_digest="d" * 64,
+            snapshot_digest="c" * 64,
+            total_files=1,
+            file_list_complete=True,
+        ).to_json(),
+    }
     with api(env, AuthScope(42, (WS_A,))) as (client, factory):
         trace = TransactionalRunTrace(partial(SqlAlchemyRunTraceUnitOfWork, factory))
         asyncio.run(trace.record(RUN_DONE, "llm.review_output", {}, huge_output, NOW, 0))
         truncated_detail = client.get(f"/api/runs/{RUN_DONE}").json()
-        asyncio.run(trace.record(RUN_DONE, "review.postprocess", {}, {"summary": summary}, NOW, 0))
+        raw_response = client.get(f"/api/runs/{RUN_DONE}/actions/0/response").json()
+        asyncio.run(
+            trace.record(RUN_DONE, "review.postprocess", {}, {"summary": raw_summary}, NOW, 0)
+        )
+        legacy_detail = client.get(f"/api/runs/{RUN_DONE}").json()
+        asyncio.run(trace.record(RUN_DONE, "review.postprocess", {}, finalized, NOW, 0))
         detail = client.get(f"/api/runs/{RUN_DONE}").json()
 
-    assert truncated_detail["summary"] is None
+    assert raw_response["truncated"] is True
+    assert truncated_detail["summary"] == {
+        "problem": (
+            "Подтверждено замечаний: 1; Проверка неполная: "
+            "нет достоверного сохранённого покрытия (1)."
+        ),
+        "doneWell": "Проанализировано файлов с текстовыми изменениями: 0; исключено файлов: 0.",
+        "effort": "small",
+    }
+    assert legacy_detail["summary"] == truncated_detail["summary"]
+    assert (
+        truncated_detail["verdict"] == legacy_detail["verdict"] == detail["verdict"] == "attention"
+    )
     assert detail["summary"] == {
-        "problem": "A bug.",
-        "doneWell": "Small change.",
+        "problem": "Подтверждено замечаний: 1 (correctness: 1).",
+        "doneWell": "Проанализировано файлов с текстовыми изменениями: 1; исключено файлов: 0.",
         "effort": "small",
     }

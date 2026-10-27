@@ -45,6 +45,7 @@ from tests.test_review_context_stage import (
     _snapshots,
     _stage,
 )
+from tests.test_run_coverage import code_snapshot, empty_snapshot
 
 _STAGE_LOGGER = "app.modules.reviews.application.review_context_stage"
 
@@ -312,3 +313,35 @@ def test_the_publication_map_is_built_on_the_run_base() -> None:
     )
 
     assert diff_map.policy_base_sha == "b" * 40
+
+
+@pytest.mark.parametrize("retargeted", [False, True])
+def test_optional_context_failure_keeps_the_retarget_only_when_it_exists(
+    retargeted: bool,
+) -> None:
+    trace = Trace()
+
+    def broken_builder(run: object) -> BuildReviewContext:
+        raise RuntimeError("optional context enrichment failed")
+
+    stage = _stage(
+        trace,
+        vcs=Retargeted() if retargeted else Vcs(),
+        snapshots=[code_snapshot(), empty_snapshot()],
+        context_builder=broken_builder,
+    )
+    assert asyncio.run(stage.run(_RUN)) is None
+    (context,) = _contexts(trace)
+    assert context["error"] == {
+        "type": "RuntimeError",
+        "message": "optional context enrichment failed",
+    }
+    assert context["diff"]["diff_old_sha"] == "c" * 40
+    assert context["coverage"]["status"] == "complete"
+    assert context["coverage"]["reviewed_files"] == 1
+    assert context["coverage"]["exclusion_counts"] == {"empty_file": 1}
+    assert context["coverage"]["reason_counts"] == {}
+    if retargeted:
+        assert context["diff"]["pr_base_sha"] == "e" * 40
+    else:
+        assert "pr_base_sha" not in context["diff"]

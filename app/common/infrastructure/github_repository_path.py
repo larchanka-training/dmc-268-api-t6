@@ -12,13 +12,13 @@ from __future__ import annotations
 import re
 from urllib.parse import quote
 
+from app.common.application.git_identity import is_commit_sha
 from app.common.application.github_repository_name import (
     REPOSITORY_FULL_NAME_MAX_LENGTH,
     REPOSITORY_FULL_NAME_PATTERN,
 )
 
 _REPOSITORY_FULL_NAME = re.compile(REPOSITORY_FULL_NAME_PATTERN)
-_COMMIT_SHA = re.compile(r"[0-9a-fA-F]{40}|[0-9a-fA-F]{64}")
 
 
 class InvalidGitHubPathSegment(ValueError):
@@ -46,6 +46,6 @@ def ref_segment(name: str) -> str:
 
 def commit_sha_segment(sha: str) -> str:
     """Return a full 40 or 64 digit hexadecimal commit SHA unchanged."""
-    if _COMMIT_SHA.fullmatch(sha) is None:
+    if not is_commit_sha(sha):
         raise InvalidGitHubPathSegment("GitHub commit SHA must be 40 or 64 hexadecimal characters")
     return sha

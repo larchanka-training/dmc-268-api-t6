@@ -4,27 +4,36 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import Sequence
-from dataclasses import dataclass
+from collections import Counter
+from collections.abc import Iterable, Sequence
+from dataclasses import dataclass, field, replace
 from importlib.resources import files
 from typing import Literal
 
 from app.modules.reviews.application.diff_anchor import Anchor, AnchorRejection, resolve_anchor
-from app.modules.reviews.application.diff_map import DiffMap
+from app.modules.reviews.application.diff_map import DiffMap, is_supported_path
 from app.modules.reviews.application.review_output import (
+    Effort,
     ReviewFinding,
     ReviewFindingV2,
     ReviewOutput,
+    ReviewSummary,
     finding_order_key,
     is_valid_service_defaults_id,
     render_review_body,
 )
+from app.modules.reviews.application.run_coverage import (
+    CoverageItem,
+    CoverageStatus,
+    RunCoverage,
+    finalize_run_coverage,
+)
 from app.modules.reviews.application.verdict import (
     PUBLISHED_SEVERITIES,
     SeverityThresholdValue,
+    coverage_verdict,
     severity_count_phrase,
     severity_counts,
-    verdict,
 )
 
 DropReason = (
@@ -45,10 +54,11 @@ DropReason = (
 )
 Bucket = Literal["inline", "body_only", "dropped"]
 
-_ATTRIBUTION_PREFIX = "According to custom instructions in '"
-_ATTRIBUTION_RE = re.compile(r"^According to custom instructions in '(?P<name>[^']+)' \([^)]*\): ")
 REVIEW_BODY_CHAR_BUDGET = 4000
 _ADDITIONAL_FINDINGS_HEADING = "## Additional findings"
+
+_ATTRIBUTION_PREFIX = "According to custom instructions in '"
+_ATTRIBUTION_RE = re.compile(r"^According to custom instructions in '(?P<name>[^']+)' \([^)]*\): ")
 
 
 @dataclass(frozen=True)
@@ -92,6 +102,8 @@ class ProcessedReviewOutput:
     review_body: str
     omitted_body_only_count: int = 0
     review_body_budget_degraded: bool = False
+    summary: ReviewSummary | None = None
+    coverage: RunCoverage = field(kw_only=True)
 
     @property
     def buckets(self) -> tuple[tuple[ProcessedFinding, ...], ...]:
@@ -120,19 +132,29 @@ class FindingsPostProcessor:
         output: ReviewOutput,
         *,
         diff_map: DiffMap,
+        checked_paths: frozenset[str],
         rule_names: frozenset[str],
         repository_max_inline: int | None = None,
         severity_threshold: SeverityThresholdValue = "all",
         allowed_v2_rules: frozenset[str] | None = None,
         pre_dropped: Sequence[ProcessedFinding] = (),
         apply_severity_threshold: bool = True,
-        checked_paths: frozenset[str],
+        coverage: RunCoverage | None = None,
+        summary_only: bool = False,
+        incomplete_paths: tuple[str, ...] = (),
     ) -> ProcessedReviewOutput:
         """Classify every finding once in the documented stage order.
 
         The repository severity threshold runs after lint and dedupe, before routing and the
         inline cap (docs/PIPELINE_SPEC.md §9).
         """
+        if coverage is None:
+            coverage = RunCoverage(
+                CoverageStatus.PARTIAL,
+                0,
+                reasons=(CoverageItem(None, "classification_unavailable"),),
+                head_sha=diff_map.head_sha,
+            )
         cap = min(
             self._patterns.max_inline,
             repository_max_inline
@@ -144,6 +166,13 @@ class FindingsPostProcessor:
             for position, item in enumerate(output.findings)
         ]
         dropped: list[ProcessedFinding] = list(pre_dropped)
+        if summary_only:
+            # An overview has no analyzed code scope from which to support a finding.
+            dropped.extend(
+                ProcessedFinding(item.finding, item.position, "dropped", "insufficient_context")
+                for item in candidates
+            )
+            candidates = []
 
         candidates, lint_dropped = self._drop_lint_patterns(candidates)
         dropped.extend(lint_dropped)
@@ -187,14 +216,29 @@ class FindingsPostProcessor:
         total_below_threshold = sum(
             1 for item in dropped if item.drop_reason == "severity_threshold"
         )
-        overview_paths = checked_paths
+        kept = tuple(inline + body_only)
+        coverage = finalize_run_coverage(
+            coverage,
+            incomplete_paths=incomplete_paths,
+            unknown_path_count=sum(item.drop_reason == "unknown_path" for item in dropped),
+        )
+        final_output = output.model_copy(
+            update={
+                "summary": summary_from_result(
+                    (item.finding.severity for item in kept),
+                    (item.finding.category for item in kept),
+                    coverage,
+                )
+            }
+        )
         review_body, omitted_body_only_count = _pack_review_body(
-            output,
-            tuple(inline + body_only),
+            final_output,
+            kept,
             tuple(body_only),
-            overview_paths,
+            checked_paths,
             severity_threshold,
             total_below_threshold,
+            coverage=coverage,
         )
         return ProcessedReviewOutput(
             inline=tuple(inline),
@@ -202,6 +246,8 @@ class FindingsPostProcessor:
             dropped=tuple(dropped),
             review_body=review_body,
             omitted_body_only_count=omitted_body_only_count,
+            summary=final_output.summary,
+            coverage=coverage,
         )
 
     def _drop_lint_patterns(
@@ -325,6 +371,39 @@ def _quality(item: ProcessedFinding) -> tuple[int, float, int]:
     return (*finding_order_key(item.finding.severity, item.finding.confidence), item.position)
 
 
+def summary_from_result(
+    severities: Iterable[str], categories: Iterable[str], coverage: RunCoverage
+) -> ReviewSummary:
+    """One backend summary from the already filtered findings and actual scope."""
+    counts = severity_counts(severities)
+    category_counts = Counter(categories)
+    count = sum(counts.values())
+    problem = f"Подтверждено замечаний: {count}" if count else "Подтверждённых замечаний нет"
+    if category_counts:
+        problem += (
+            " (" + ", ".join(f"{name}: {n}" for name, n in sorted(category_counts.items())) + ")"
+        )
+    if coverage.status is not CoverageStatus.COMPLETE:
+        problem += "; " + coverage.summary_problem().removesuffix(".")
+    effort: Effort = (
+        "large"
+        if counts["critical"]
+        else "medium"
+        if counts["high"]
+        else "small"
+        if counts["medium"] or counts["low"]
+        else "none"
+    )
+    return ReviewSummary(
+        problem=problem + ".",
+        done_well=(
+            f"Проанализировано файлов с текстовыми изменениями: {coverage.reviewed_files}; "
+            f"исключено файлов: {sum(coverage.exclusion_counts.values())}."
+        ),
+        effort=effort,
+    )
+
+
 def _format_checked_files(sorted_paths: tuple[str, ...], listed_count: int) -> str:
     if not sorted_paths:
         return "(none)"
@@ -356,22 +435,43 @@ def _overview_block(
     checked_files_text: str,
     severity_threshold: SeverityThresholdValue,
     below_threshold: int,
+    *,
+    coverage: RunCoverage,
 ) -> str:
     severities = [item.finding.severity for item in kept]
     counts = severity_counts(severities)
     count_text = severity_count_phrase(counts)
+    run_verdict = coverage_verdict(severities, coverage.status)
+    coverage_lines = (
+        ()
+        if coverage.status is CoverageStatus.COMPLETE
+        else (
+            f"**Coverage:** {coverage.status.value} — {coverage.summary_problem()}",
+            coverage.body_explanation(),
+        )
+    )
+    checked_lines = (
+        (f"**Проверено файлов с текстовыми изменениями:** {coverage.reviewed_files}",)
+        if coverage.status is not CoverageStatus.COMPLETE
+        else ()
+    ) + ("**Checked files:**", checked_files_text)
     below = (
         (f"**Below severity threshold ({severity_threshold}):** {below_threshold}",)
         if below_threshold
         else ()
     )
+    unavailable_label = (
+        "нет доступных для анализа изменений"
+        if coverage.status is CoverageStatus.NONE
+        else "проверка неполная"
+    )
     return "\n".join(
         (
-            f"**Verdict:** {verdict(severities)}",
+            f"**Verdict:** {run_verdict or unavailable_label}",
             f"**Risk summary:** {count_text}",
             *below,
-            "**Checked files:**",
-            checked_files_text,
+            *coverage_lines,
+            *checked_lines,
         )
     )
 
@@ -398,6 +498,8 @@ def finalize_stored_review_body(
     run_url: str | None,
 ) -> ProcessedReviewOutput:
     """Append the overflow footer at store time, repacking first when footer space is needed."""
+    if processed.summary is not None:
+        output = output.model_copy(update={"summary": processed.summary})
     omitted = processed.omitted_body_only_count
     if omitted <= 0:
         return processed
@@ -418,6 +520,7 @@ def finalize_stored_review_body(
             severity_threshold,
             below_threshold,
             char_budget=char_budget,
+            coverage=processed.coverage,
         )
 
     body = processed.review_body
@@ -427,10 +530,8 @@ def finalize_stored_review_body(
             body, omitted = repack(REVIEW_BODY_CHAR_BUDGET - len(footer))
         footer = footer_for(omitted)
         if len(body) + len(footer) <= REVIEW_BODY_CHAR_BUDGET:
-            return ProcessedReviewOutput(
-                inline=processed.inline,
-                body_only=processed.body_only,
-                dropped=processed.dropped,
+            return replace(
+                processed,
                 review_body=f"{body}{footer}",
                 omitted_body_only_count=omitted,
             )
@@ -440,10 +541,8 @@ def finalize_stored_review_body(
     footer = footer_for(omitted)
     if len(body) + len(footer) > REVIEW_BODY_CHAR_BUDGET:
         body = body[: max(0, REVIEW_BODY_CHAR_BUDGET - len(footer))].rstrip()
-    return ProcessedReviewOutput(
-        inline=processed.inline,
-        body_only=processed.body_only,
-        dropped=processed.dropped,
+    return replace(
+        processed,
         review_body=f"{body}{footer}",
         omitted_body_only_count=omitted,
         review_body_budget_degraded=True,
@@ -459,16 +558,28 @@ def _pack_review_body(
     below_threshold: int,
     *,
     char_budget: int = REVIEW_BODY_CHAR_BUDGET,
+    coverage: RunCoverage,
 ) -> tuple[str, int]:
     prose = render_review_body(output.summary)
     heading, separator, rest = prose.partition("\n\n")
-    sorted_paths = tuple(sorted(checked_paths))
+    # Checked paths describe durable text inputs (#170), not fully reviewed
+    # allocations (#213). An unknown policy or any ignored allocation withholds
+    # names conservatively because bounded coverage diagnostics hide ignored paths.
+    allowed = frozenset(path for path in checked_paths if is_supported_path(path))
+    if (
+        coverage.exclusion_counts.get("ignored", 0)
+        or "classification_unavailable" in coverage.reason_counts
+    ):
+        allowed = frozenset()
+    sorted_paths = tuple(sorted(allowed))
     finding_lines = [_render_body_only_finding(item) for item in body_only]
     path_count = len(sorted_paths)
 
     def assemble(listed_paths: int, finding_count: int) -> str:
         checked = _format_checked_files(sorted_paths, listed_paths)
-        overview = _overview_block(kept, checked, severity_threshold, below_threshold)
+        overview = _overview_block(
+            kept, checked, severity_threshold, below_threshold, coverage=coverage
+        )
         prefix = f"{heading}{separator}{overview}\n\n{rest}"
         if finding_count == 0:
             return prefix
