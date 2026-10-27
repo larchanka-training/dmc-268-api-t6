@@ -1,11 +1,11 @@
 """Parser worker process: one JSON request per line in, one JSON result per line out.
 
-The parent starts it with an empty environment, so no credential of the service reaches
-it. It reads sources from its pipe only, opens no network connection, never executes
-repository content and writes no core dump. Address space is capped after the grammars are
-loaded. A running parse cannot be interrupted from Python, so the parent enforces the time
-limit by wall clock; the OS also caps the CPU time of each request, a backstop should the
-parent fail to stop it.
+The parent starts it with a minimal environment (``PYTHONPATH``, ``PYTHONDONTWRITEBYTECODE``),
+so no credential of the service reaches it. It reads sources from its pipe only, opens no
+network connection, never executes repository content and writes no core dump. Address space
+is capped after the grammars are loaded. A running parse cannot be interrupted from Python,
+so the parent enforces the time limit by wall clock; the OS also caps the CPU time of each
+request, a backstop should the parent fail to stop it.
 """
 
 from __future__ import annotations
