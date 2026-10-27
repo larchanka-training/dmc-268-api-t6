@@ -248,7 +248,7 @@ def test_read_failure_is_an_error_not_a_missing_document() -> None:
                 policy_base_sha=_BASE,
                 retry_after=timedelta(minutes=15),
             ),
-            "файл `AGENTS.md`",
+            "file `AGENTS.md`",
             id="rate-limited",
         ),
         pytest.param(
@@ -258,7 +258,7 @@ def test_read_failure_is_an_error_not_a_missing_document() -> None:
                 policy_base_sha=_BASE,
                 limit=65_536,
             ),
-            "файл `AGENTS.md`, допустимо 65536",
+            "file `AGENTS.md`, allowed 65536",
             id="stopped-stream",
         ),
     ],
