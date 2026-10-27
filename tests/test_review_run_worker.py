@@ -1359,6 +1359,97 @@ def test_exhausted_github_rate_limit_remains_retryable_with_malformed_retry_afte
     assert failure.retry_after is None
 
 
+# The message GitHub sends with a secondary rate limit; only its "secondary rate limit" counts.
+_SECONDARY_LIMIT = {
+    "message": "You have exceeded a secondary rate limit. Please wait a few minutes before you "
+    "try again.",
+    "documentation_url": "https://docs.github.com/rest/using-the-rest-api/rate-limits-for-the-rest-api",
+}
+_PULL = {
+    "id": 901,
+    "number": 7,
+    "title": "Fix parser",
+    "user": {"login": "octo"},
+    "head": {"ref": "feature", "sha": HEAD, "repo": {"full_name": "octo/repo"}},
+    "base": {"ref": "main", "sha": "b" * 40, "repo": {"full_name": "octo/repo"}},
+    "draft": False,
+    "changed_files": 1,
+    "additions": 1,
+    "deletions": 0,
+}
+
+
+def _github_read_failure(read: str, status: int, body: object) -> RunFailure:
+    """The failure of one run read whose GitHub answer has ``body`` and no limit headers."""
+
+    class Tokens:
+        async def get_installation_access_token(self, installation_external_id: int) -> str:
+            return "fake-installation-token"
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        if read == "diff" and request.url.path.endswith("/pulls/7"):
+            return httpx.Response(200, json=_PULL)
+        return httpx.Response(status, json=body)
+
+    async def checkpoint() -> None:
+        return None
+
+    async def exercise() -> None:
+        async with httpx.AsyncClient(
+            base_url="https://api.github.test", transport=httpx.MockTransport(respond)
+        ) as client:
+            provider = ClassifiedVcsProvider(
+                HttpGitHubVcsProvider(client=client, token_provider=Tokens())
+            )
+            locator = PullRequestLocator(17, "octo/repo", 7)
+            if read == "commits":
+                await provider.get_commit_messages(locator, checkpoint=checkpoint)
+                return
+            pull_request = await provider.get_pull_request(locator, checkpoint=checkpoint)
+            await provider.get_diff(pull_request, checkpoint=checkpoint)
+
+    with pytest.raises(RunFailure) as caught:
+        asyncio.run(exercise())
+    return caught.value
+
+
+_FETCH_FAILED = {
+    "pull": "diff_fetch_failed",
+    "diff": "diff_fetch_failed",
+    "commits": "commit_messages_fetch_failed",
+}
+
+
+@pytest.mark.parametrize("read", ["pull", "diff", "commits"])
+@pytest.mark.parametrize("status", [403, 429])
+def test_secondary_rate_limit_without_headers_is_a_retryable_limit_of_a_minute(
+    read: str, status: int
+) -> None:
+    failure = _github_read_failure(read, status, _SECONDARY_LIMIT)
+
+    assert (failure.error_code, failure.retry_after) == (
+        _FETCH_FAILED[read],
+        timedelta(seconds=60),
+    )
+    assert RetryDelays().for_failure(1, failure) == ("2m", timedelta(minutes=2))
+
+
+@pytest.mark.parametrize("read", ["pull", "diff", "commits"])
+def test_forbidden_without_the_secondary_limit_message_stays_forbidden(read: str) -> None:
+    failure = _github_read_failure(read, 403, {"message": "Resource not accessible by integration"})
+
+    assert (failure.error_code, failure.retry_after) == ("github_forbidden", None)
+
+
+@pytest.mark.parametrize("read", ["pull", "diff", "commits"])
+def test_too_many_requests_without_headers_or_message_keeps_no_delay(read: str) -> None:
+    # As before #168 part 6: retryable, yet with no wait of its own.
+    failure = _github_read_failure(read, 429, {"message": "Too many requests"})
+
+    assert (failure.error_code, failure.retry_after) == (_FETCH_FAILED[read], None)
+    assert RetryDelays().for_failure(1, failure) == ("30s", timedelta(seconds=30))
+
+
 @pytest.mark.parametrize("provider", ["gitlab", "unknown"])
 @pytest.mark.parametrize(
     "state", ["queued", "running", "publishing", "succeeded", "failed", "cancelled", "skipped"]

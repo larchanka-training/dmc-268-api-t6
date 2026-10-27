@@ -31,7 +31,6 @@ from app.modules.reviews.application.policy_documents import (
     PolicyTreeEntry,
 )
 from app.modules.reviews.application.policy_errors import PolicyError, PolicyErrorCode
-from app.modules.reviews.application.run_failures import parse_retry_after
 from app.modules.reviews.application.vcs_diff import PullRequestLocator
 from app.modules.reviews.infrastructure.github_vcs import (
     _REQUEST_TIMEOUT,
@@ -41,6 +40,11 @@ from app.modules.reviews.infrastructure.github_vcs import (
     _headers,
     _no_checkpoint,
     _repository_prefix,
+)
+from app.modules.reviews.infrastructure.vcs_failures import (
+    github_rate_limit,
+    plain_error_body,
+    raise_for_streamed_status,
 )
 
 _SYMLINK_MODE = "120000"
@@ -171,8 +175,13 @@ def policy_tree_entries(payload: object, *, policy_base_sha: str) -> dict[str, P
     return entries
 
 
-def classify_policy_http_error(exc: httpx.HTTPError, *, policy_base_sha: str | None) -> PolicyError:
-    """The §9 code of a failed GitHub read; a 404 is never a missing document."""
+def classify_policy_http_error(
+    exc: httpx.HTTPError, *, policy_base_sha: str | None, body: bytes = b""
+) -> PolicyError:
+    """The §9 code of a failed GitHub read; a 404 is never a missing document.
+
+    ``body`` is the answer of a plain request, read for a secondary rate limit.
+    """
 
     def error(
         code: PolicyErrorCode, message: str, retry_after: timedelta | None = None
@@ -185,11 +194,7 @@ def classify_policy_http_error(exc: httpx.HTTPError, *, policy_base_sha: str | N
         )
     response = exc.response
     status = response.status_code
-    delay = parse_retry_after(
-        response.headers.get("Retry-After"), date=response.headers.get("Date")
-    )
-    # A date already past is a 0 s delay and still a limit, so test for None.
-    limited = response.headers.get("X-RateLimit-Remaining") == "0" or delay is not None
+    limited, delay = github_rate_limit(exc, body=body)
     message = f"GitHub answered {status}"
     if status == 429 or (status == 403 and limited):
         return error(PolicyErrorCode.RATE_LIMITED, message, delay)
@@ -247,7 +252,7 @@ class GitHubRepositoryPolicySource:
             )
             response.raise_for_status()
         except httpx.HTTPError as exc:
-            raise self._classify(exc) from exc
+            raise self._classify(exc, body=plain_error_body(exc)) from exc
         except ValueError as exc:
             # The token answer of GitHub has another shape.
             raise self._error(
@@ -287,7 +292,7 @@ class GitHubRepositoryPolicySource:
             headers=_headers(token) | {"Accept": _RAW_BLOB, "Accept-Encoding": "identity"},
             timeout=_REQUEST_TIMEOUT,
         ) as response:
-            response.raise_for_status()
+            await raise_for_streamed_status(response)
             body = await capped_body(response, MAX_DOCUMENT_BYTES)
         if isinstance(body, OversizedBody):
             raise policy_blob_too_large(body, policy_base_sha=self._base_sha)
@@ -303,8 +308,8 @@ class GitHubRepositoryPolicySource:
     ) -> PolicyError:
         return PolicyError(code, message, policy_base_sha=self._base_sha, retry_after=retry_after)
 
-    def _classify(self, exc: httpx.HTTPError) -> PolicyError:
-        return classify_policy_http_error(exc, policy_base_sha=self._base_sha)
+    def _classify(self, exc: httpx.HTTPError, *, body: bytes = b"") -> PolicyError:
+        return classify_policy_http_error(exc, policy_base_sha=self._base_sha, body=body)
 
 
 class GitHubPolicyDocumentSource(GitHubRepositoryPolicySource):
@@ -367,7 +372,9 @@ class GitHubDefaultBranchHeadSource:
             )
             response.raise_for_status()
         except httpx.HTTPError as exc:
-            raise classify_policy_http_error(exc, policy_base_sha=None) from exc
+            raise classify_policy_http_error(
+                exc, policy_base_sha=None, body=plain_error_body(exc)
+            ) from exc
         except ValueError as exc:
             # The token or the repository answer of GitHub has another shape.
             raise PolicyError(

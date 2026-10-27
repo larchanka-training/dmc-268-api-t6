@@ -50,7 +50,10 @@ from app.modules.reviews.application.vcs_diff import (
     is_empty_addition_candidate,
     is_generated_path,
 )
-from app.modules.reviews.infrastructure.vcs_failures import classify_vcs_error
+from app.modules.reviews.infrastructure.vcs_failures import (
+    classify_vcs_error,
+    raise_for_streamed_status,
+)
 
 _SHA = r"^(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})$"
 _MAX_FILES = 3000
@@ -496,7 +499,8 @@ class HttpGitHubVcsProvider:
         async with self._client.stream(
             "GET", path, headers=headers, params=params, timeout=_REQUEST_TIMEOUT
         ) as response:
-            response.raise_for_status()
+            # At most 4 KiB of an error body, for a secondary rate limit (#168).
+            await raise_for_streamed_status(response)
             # Check before httpx reads/decodes chunks: compression could allocate above
             # the commit cap even when the compressed transport chunk fits the budget.
             if unsupported_encoding is not None and response.headers.get(

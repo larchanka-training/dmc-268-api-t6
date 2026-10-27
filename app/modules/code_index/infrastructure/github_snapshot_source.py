@@ -71,6 +71,10 @@ from app.modules.reviews.infrastructure.github_policy_source import (
     policy_blob_too_large,
     policy_tree_entries,
 )
+from app.modules.reviews.infrastructure.vcs_failures import (
+    plain_error_body,
+    raise_for_streamed_status,
+)
 
 _API_VERSION = "2022-11-28"
 _REQUEST_TIMEOUT = 10.0
@@ -383,7 +387,9 @@ class _SnapshotPolicySource:
             )
             response.raise_for_status()
         except httpx.HTTPError as exc:
-            raise classify_policy_http_error(exc, policy_base_sha=self._sha) from None
+            raise classify_policy_http_error(
+                exc, policy_base_sha=self._sha, body=plain_error_body(exc)
+            ) from None
         except ValueError:
             raise self._error(
                 PolicyErrorCode.FETCH_TRANSIENT, "GitHub returned an unreadable token"
@@ -410,7 +416,7 @@ class _SnapshotPolicySource:
                 timeout=_REQUEST_TIMEOUT,
                 follow_redirects=False,
             ) as response:
-                response.raise_for_status()
+                await raise_for_streamed_status(response)
                 body = await capped_body(response, MAX_DOCUMENT_BYTES)
         except httpx.HTTPError as exc:
             raise classify_policy_http_error(exc, policy_base_sha=self._sha) from None
