@@ -77,8 +77,8 @@ _RAW_BLOB = "application/vnd.github.raw+json"
 
 @dataclass(frozen=True)
 class OversizedBody:
-    """A body over its cap: ``actual`` is its declared length, or else the bytes received
-    when the read stopped, then only a lower bound."""
+    """A body over its cap: ``actual`` is the declared length of an unencoded body, or else
+    the bytes received when the read stopped, then only a lower bound."""
 
     actual: int
     actual_is_lower_bound: bool
@@ -90,7 +90,12 @@ async def capped_body(response: httpx.Response, max_bytes: int) -> bytes | Overs
     The read stops with the first chunk past the cap, so at most one chunk more is taken.
     """
     declared = response.headers.get("Content-Length")
-    if declared is not None and declared.isdecimal() and int(declared) > max_bytes:
+    # An encoded body declares the length of other bytes than the decoded ones counted here.
+    encoded = response.headers.get("Content-Encoding", "").strip().casefold() not in {
+        "",
+        "identity",
+    }
+    if not encoded and declared is not None and declared.isdecimal() and int(declared) > max_bytes:
         return OversizedBody(int(declared), actual_is_lower_bound=False)
     body = bytearray()
     async for chunk in response.aiter_bytes():
@@ -98,6 +103,21 @@ async def capped_body(response: httpx.Response, max_bytes: int) -> bytes | Overs
             return OversizedBody(len(body) + len(chunk), actual_is_lower_bound=True)
         body.extend(chunk)
     return bytes(body)
+
+
+def policy_blob_too_large(oversized: OversizedBody, *, policy_base_sha: str) -> PolicyError:
+    """The §9 failure of a policy blob read over ``MAX_DOCUMENT_BYTES``, with its size.
+
+    The loader adds the document path (``PolicyError.located``).
+    """
+    return PolicyError(
+        PolicyErrorCode.DOCUMENT_TOO_LARGE,
+        f"The policy document exceeds {MAX_DOCUMENT_BYTES} bytes",
+        policy_base_sha=policy_base_sha,
+        limit=MAX_DOCUMENT_BYTES,
+        actual=oversized.actual,
+        actual_is_lower_bound=oversized.actual_is_lower_bound,
+    )
 
 
 def _git_blob_oid(raw: bytes, *, like: str) -> str:
@@ -279,12 +299,7 @@ class GitHubRepositoryPolicySource:
             response.raise_for_status()
             body = await capped_body(response, MAX_DOCUMENT_BYTES)
         if isinstance(body, OversizedBody):
-            raise PolicyError(
-                PolicyErrorCode.DOCUMENT_TOO_LARGE,
-                f"The policy document exceeds {MAX_DOCUMENT_BYTES} bytes",
-                policy_base_sha=self._base_sha,
-                limit=MAX_DOCUMENT_BYTES,
-            )
+            raise policy_blob_too_large(body, policy_base_sha=self._base_sha)
         # The raw answer echoes no SHA: a proxy page or another blob must not pass.
         if _git_blob_oid(body, like=sha) != sha.casefold():
             raise self._error(

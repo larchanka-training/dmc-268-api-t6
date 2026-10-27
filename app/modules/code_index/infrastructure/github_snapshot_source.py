@@ -68,6 +68,7 @@ from app.modules.reviews.infrastructure.github_policy_source import (
     OversizedBody,
     capped_body,
     classify_policy_http_error,
+    policy_blob_too_large,
     policy_tree_entries,
 )
 
@@ -418,10 +419,5 @@ class _SnapshotPolicySource:
                 PolicyErrorCode.FETCH_TRANSIENT, "GitHub returned an unreadable blob"
             ) from None
         if isinstance(body, OversizedBody):
-            raise PolicyError(
-                PolicyErrorCode.DOCUMENT_TOO_LARGE,
-                f"The policy document exceeds {MAX_DOCUMENT_BYTES} bytes",
-                policy_base_sha=self._sha,
-                limit=MAX_DOCUMENT_BYTES,
-            )
+            raise policy_blob_too_large(body, policy_base_sha=self._sha)
         return body

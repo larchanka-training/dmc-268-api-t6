@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import gzip
 import hashlib
 from collections.abc import AsyncIterator
 from datetime import timedelta
@@ -15,7 +16,11 @@ from app.modules.integrations.webhooks.infrastructure.github_installation_tree_p
     StaticGitHubInstallationAccessTokenProvider,
 )
 from app.modules.reviews.application.policy_documents import LoadPolicyDocuments, PolicyEntryKind
-from app.modules.reviews.application.policy_errors import PolicyError, PolicyErrorCode
+from app.modules.reviews.application.policy_errors import (
+    PolicyError,
+    PolicyErrorCode,
+    policy_error_detail,
+)
 from app.modules.reviews.application.policy_snapshot import DocumentPresence
 from app.modules.reviews.application.vcs_diff import PullRequestLocator
 from app.modules.reviews.infrastructure.github_policy_source import GitHubPolicyDocumentSource
@@ -294,6 +299,77 @@ def test_policy_blob_id_of_64_digits_is_checked_with_sha256() -> None:
     oid = hashlib.sha256(b"blob %d\0" % len(raw) + raw).hexdigest()
 
     assert _run(lambda request: httpx.Response(200, content=raw), lambda s: s.read_blob(oid)) == raw
+
+
+def _too_large_agents(blob: httpx.Response) -> PolicyError:
+    """The failure of loading an ``AGENTS.md`` whose listing has no size, so its blob is read."""
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith(f"/git/trees/{_BASE}"):
+            entry = {"path": "AGENTS.md", "mode": "100644", "type": "blob", "sha": _AGENTS}
+            return httpx.Response(200, json={"tree": [entry], "truncated": False})
+        assert request.url.path.endswith(f"/git/blobs/{_AGENTS}")
+        return blob
+
+    with pytest.raises(PolicyError) as caught:
+        _run(respond, lambda source: LoadPolicyDocuments(source, policy_base_sha=_BASE).execute())
+    assert caught.value.code is PolicyErrorCode.DOCUMENT_TOO_LARGE
+    return caught.value
+
+
+def test_too_large_blob_reports_the_declared_size_as_exact() -> None:
+    error = _too_large_agents(
+        httpx.Response(200, headers={"Content-Length": "70000"}, stream=_Chunks(b"a" * 70_000))
+    )
+
+    assert (error.source_path, error.actual, error.actual_is_lower_bound) == (
+        "AGENTS.md",
+        70_000,
+        False,
+    )
+    assert (
+        policy_error_detail(error.message) == "файл `AGENTS.md`, фактически 70000, допустимо 65536"
+    )
+    assert error.diagnostic() == {
+        "code": "policy_document_too_large",
+        "source_path": "AGENTS.md",
+        "policy_base_sha": _BASE,
+        "message": "The policy document exceeds 65536 bytes",
+        "line": None,
+        "column": None,
+        "pattern_index": None,
+        "limit": 65_536,
+        "actual": 70_000,
+        "actual_is_lower_bound": False,
+        "retryable": False,
+    }
+
+
+def test_too_large_blob_without_a_declared_size_reports_the_bytes_read_as_a_lower_bound() -> None:
+    error = _too_large_agents(httpx.Response(200, stream=_Chunks(b"a" * 1_048_576)))
+
+    # 17 chunks of 4096 bytes were read when the stream stopped: the blob has at least those.
+    assert (error.actual, error.actual_is_lower_bound) == (69_632, True)
+    # The read stopped past the limit, so "more than 65536" is true; 69632 is never shown.
+    assert policy_error_detail(error.message) == (
+        "файл `AGENTS.md`, фактически более 65536, допустимо 65536"
+    )
+    diagnostic = error.diagnostic()
+    assert (diagnostic["actual"], diagnostic["actual_is_lower_bound"]) == (69_632, True)
+
+
+def test_declared_size_of_an_encoded_blob_is_not_taken_as_its_size() -> None:
+    # The Content-Length of a gzip body counts compressed bytes: only the decoded count is
+    # known, and only up to where the read stopped.
+    error = _too_large_agents(
+        httpx.Response(
+            200,
+            headers={"Content-Encoding": "gzip", "Content-Length": "70000"},
+            stream=_Chunks(gzip.compress(b"a" * 1_048_576)),
+        )
+    )
+
+    assert (error.actual, error.actual_is_lower_bound) == (1_048_576, True)
 
 
 def test_answer_that_cannot_be_decoded_is_a_policy_fetch_failure_not_an_internal_one() -> None:

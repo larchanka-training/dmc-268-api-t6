@@ -951,6 +951,35 @@ def test_rules_document_preserves_review_validation(raw: bytes, code: str) -> No
 
 
 @pytest.mark.parametrize(
+    ("answer", "actual", "lower_bound"),
+    [
+        (_answer(200, content=b"x" * 70_000), 70_000, False),
+        (_answer(200, stream=httpx.ByteStream(b"x" * 70_000)), 70_000, True),
+    ],
+    ids=["content-length", "stopped-stream"],
+)
+def test_too_large_rules_blob_reports_its_size(
+    answer: Callable[[httpx.Request], httpx.Response], actual: int, lower_bound: bool
+) -> None:
+    # No size in the listing: only the blob read can tell.
+    routes = _policy_routes()
+    entry = _policy_entry("rules.md")
+    del entry["size"]
+    routes[_REVIEW_TREE] = _answer(200, json={"tree": [entry]})
+    routes[_RULES_BLOB] = answer
+
+    error, _ = _run(GitHub(routes), lambda source: source.rules_document(_HEAD))
+
+    assert isinstance(error, PolicyError), repr(error)
+    assert (error.source_path, error.limit, error.actual, error.actual_is_lower_bound) == (
+        ".review/rules.md",
+        65_536,
+        actual,
+        lower_bound,
+    )
+
+
+@pytest.mark.parametrize(
     ("parent", "kind", "mode", "requests"),
     [
         (True, "blob", "100644", 1),
