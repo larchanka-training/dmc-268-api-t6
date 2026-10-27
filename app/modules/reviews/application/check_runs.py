@@ -82,7 +82,7 @@ def failure_reason(error_code: str | None, detail: str | None = None) -> str:
     repository (#150), so that both say the same thing about one policy error.
     """
     reason = _ERROR_TEXTS.get(error_code or "", error_code or "")
-    return f"{reason} Где: {detail}." if detail else reason
+    return f"{reason} Where: {detail}." if detail else reason
 
 
 @dataclass(frozen=True)

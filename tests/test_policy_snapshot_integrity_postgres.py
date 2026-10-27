@@ -429,7 +429,7 @@ def test_a_document_row_that_disagrees_with_its_presence_is_an_integrity_error(
             assert error.source_path == path
             assert error.message == (
                 f"The stored fields of a policy document do not match its presence: {field}"
-                f" | файл `{path}`"
+                f" | file `{path}`"
             )
         finally:
             await engine.dispose()

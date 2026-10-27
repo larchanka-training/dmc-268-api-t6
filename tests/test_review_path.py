@@ -660,7 +660,7 @@ def test_stage_refuses_a_v4_run_over_the_policy_budget_at_policy_load(
     assert tool == "policy.load"
     assert response["error"]["message"] == (
         "policy_prompt_budget_exceeded: The rendered policy documents exceed the token budget "
-        f"of the pinned profile | фактически {_POLICY_TOKENS}, допустимо {limit}"
+        f"of the pinned profile | actual {_POLICY_TOKENS}, allowed {limit}"
     )
     # RFS §9: the step records the diagnostic; policy.load fills the base the check lacks.
     assert response["error"]["diagnostic"] == {
