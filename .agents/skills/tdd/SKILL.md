@@ -12,9 +12,12 @@ metadata:
 TDD is the red → green loop. This skill makes that loop produce tests worth
 keeping: what a good test is, where tests go, the anti-patterns, the rules.
 
-Tests are pytest, one file per feature: `tests/test_<feature>.py`. No
-`pytest-asyncio` plugin — drive async code with `asyncio.run`. Every test
-function is annotated `-> None` (mypy `strict` applies to `tests` too). See
+Tests are pytest, one feature per file prefix: `tests/test_<feature>.py`, or
+several `tests/test_<feature>_<aspect>.py` files sharing one prefix; PostgreSQL
+tests usually sit in `_postgres` files, as in the `test_clean_without_text_*` and
+`test_coverage_none_*` families. No `pytest-asyncio` plugin — drive
+async code with `asyncio.run`. Every test function is annotated `-> None`
+(mypy `strict` applies to `tests` too). See
 the stack rules file in `.agents/rules/` for full conventions.
 
 ## What a good test is
