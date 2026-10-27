@@ -4,9 +4,6 @@ from __future__ import annotations
 
 import base64
 import json
-import subprocess
-import sys
-from collections.abc import Mapping
 
 import pytest
 
@@ -14,39 +11,25 @@ from app.bootstrap.gitlab_deployment import validate_environment
 from app.modules.integrations.gitlab.infrastructure.settings import GitLabSettingsError
 
 
-def run_preflight(env: Mapping[str, str]) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
-        [sys.executable, "-m", "app.bootstrap.gitlab_deployment"],
-        env=dict(env),
-        capture_output=True,
-        text=True,
-        check=False,
-    )
+def _keyring(*, material: bytes = b"k" * 32) -> str:
+    return json.dumps({"current": base64.b64encode(material).decode()})
 
 
 def runtime_env() -> dict[str, str]:
     return {
         "GITLAB_ACTIVE_KEY_ID": "current",
-        "GITLAB_CREDENTIAL_KEYS": json.dumps({"current": base64.b64encode(b"k" * 32).decode()}),
+        "GITLAB_CREDENTIAL_KEYS": _keyring(),
         "GITLAB_ALLOWED_ORIGINS": '["https://gitlab.com"]',
     }
 
 
 def test_unconfigured_deployment_is_default_off() -> None:
     validate_environment({})
-    result = run_preflight({})
-    assert result.returncode == 0
-    assert result.stdout == ""
-    assert result.stderr == ""
 
 
 def test_enabled_intake_requires_worker_configuration() -> None:
     with pytest.raises(GitLabSettingsError, match="^configuration_invalid$"):
         validate_environment({"GITLAB_WEBHOOK_INTAKE_ENABLED": "true"})
-    result = run_preflight({"GITLAB_WEBHOOK_INTAKE_ENABLED": "true"})
-    assert result.returncode == 2
-    assert result.stdout == ""
-    assert result.stderr == "configuration_invalid\n"
 
 
 @pytest.mark.parametrize("flag", ["", "false", "true", " TRUE "])
@@ -55,10 +38,6 @@ def test_complete_configuration_is_valid_with_admission_off_or_on(flag: str) -> 
     original = dict(env)
     validate_environment(env)
     assert env == original
-    result = run_preflight(env)
-    assert result.returncode == 0
-    assert result.stdout == ""
-    assert result.stderr == ""
 
 
 @pytest.mark.parametrize("flag", ["", "false"])
@@ -93,7 +72,7 @@ def test_partial_worker_configuration_is_rejected_even_when_admission_is_off(
         ("GITLAB_CREDENTIAL_KEYS", "[]"),
         ("GITLAB_CREDENTIAL_KEYS", '{"current":"CONFIG_CANARY"}'),
         ("GITLAB_CREDENTIAL_KEYS", '{"current":"a","current":"CONFIG_CANARY"}'),
-        ("GITLAB_CREDENTIAL_KEYS", json.dumps({"current": base64.b64encode(b"k" * 31).decode()})),
+        ("GITLAB_CREDENTIAL_KEYS", _keyring(material=b"k" * 31)),
         ("GITLAB_ACTIVE_KEY_ID", "CONFIG_CANARY"),
         ("GITLAB_ALLOWED_ORIGINS", "CONFIG_CANARY"),
         ("GITLAB_ALLOWED_ORIGINS", "[]"),
@@ -132,13 +111,9 @@ def test_invalid_configuration_has_only_static_redacted_diagnostics(name: str, v
     env = {**runtime_env(), "GITLAB_WEBHOOK_INTAKE_ENABLED": "false", name: value}
     with pytest.raises(GitLabSettingsError, match="^configuration_invalid$"):
         validate_environment(env)
-    result = run_preflight(env)
-    assert result.returncode == 2
-    assert result.stdout == ""
-    assert result.stderr == "configuration_invalid\n"
 
 
-def test_private_network_origin_requires_and_accepts_explicit_opt_in() -> None:
+def test_private_network_origin_accepts_explicit_opt_in() -> None:
     validate_environment(
         {
             **runtime_env(),

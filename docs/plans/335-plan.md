@@ -1,7 +1,8 @@
 # Plan: GitLab staging configuration (#335)
 
-Status: human-approved; tasks 1–5 implemented; refreshed candidate passed final Linux gates and fresh cumulative reviews; publication and real GitLab acceptance pending.
-Integration baseline: `f160ce4c82220c20e627fbfdc0230b43a5f34492` (`main`, merged monitoring #279 retained).
+Status: human-approved implementation published as [PR #339](https://github.com/larchanka-training/dmc-268-api-t6/pull/339); original gates and CI passed. Round 1 corrections R0–R6 and final verification are complete: all four code gates pass (9298 tests, zero skips/failures/errors), production-image smoke passes, and fresh cumulative Standards/Spec reviews report zero actionable findings. This committed snapshot precedes round 1 publication, new-head CI and thread replies; the live PR records those subsequent results. Real GitLab acceptance remains pending.
+Published integration baseline: `f160ce4c82220c20e627fbfdc0230b43a5f34492` (`main`, merged monitoring #279 retained).
+Round 1 integration baseline: `430d6604a0fc289916b34cc5aa6bdd307cea40b8`; fetched/rebased without conflicts, preserving all original PR file bytes and planner changes.
 Original design/test baseline: `88bbc0734e50e33fa769940291a79ff997102994` (#169 merged).
 Workspace: dedicated managed worktree for #335.
 Specification: <https://github.com/larchanka-training/dmc-268-api-t6/issues/335>.
@@ -201,8 +202,8 @@ production or launch repeated full tests to fill the wait.
 
 ## Coordination before edits
 
-Read-only open PR file lists were checked during planning; refresh before edits.
-Only the following currently overlap this plan (no authors identified):
+Historical open PR file lists were checked during original planning. These notices
+were authorized and published before the original shared edits (no authors identified):
 
 - <https://github.com/larchanka-training/dmc-268-api-t6/pull/279>:
   `.github/workflows/ci-cd.yml`, `docs/CICD.md`, `docs/SECRETS.md`.
@@ -222,10 +223,19 @@ Approved exact notice in #283:
 > preflight, rollback and the trusted operator runbook. I will preserve your
 > #213 deployment/prompt documentation; whoever merges second rebases.
 
-The human approved the plan and exact notices on 2026-10-26. Refreshed overlaps
-remained limited to these two PRs. Authorized notices were published before edits:
+The human approved the plan and exact notices on 2026-10-26. Original overlaps
+were limited to these two PRs. Authorized notices were published before edits:
 [#279](https://github.com/larchanka-training/dmc-268-api-t6/pull/279#issuecomment-6426698992),
 [#283](https://github.com/larchanka-training/dmc-268-api-t6/pull/283#issuecomment-6426700273).
+
+Round 1 refresh also finds [#340](https://github.com/larchanka-training/dmc-268-api-t6/pull/340):
+`.env.example`, `.github/workflows/ci-cd.yml`, `deploy/compose/staging.yml`,
+`deploy/scripts/env-file.sh`, `docs/CICD.md`, `docs/SECRETS.md`. The human authorized
+the new notice and it was [published before corrective shared edits](https://github.com/larchanka-training/dmc-268-api-t6/pull/340#issuecomment-6438984537).
+The existing #283 notice covers
+its continuing `docs/CICD.md` overlap. Add #340 to PR Refs and agree that the second
+PR to merge rebases on the first, manually reconciling allowlists and recipient
+tables. Refresh open PR file lists before development and publication.
 
 ## Required main refresh before publication
 
@@ -255,3 +265,190 @@ Publisher uses the pull-request skill, explicit staging paths, Conventional Comm
 referencing #335, and `What / Why / How to verify / Refs` body sections. No closing
 keywords or Development-panel link. Attach the created PR to the chat. Rebase before
 requesting review; merge and issue closure are outside this implementation approval.
+
+## Review round 1 corrective plan
+
+Review of published head `eb9e8340aa63a23f8b7334219927d60fa72c92f6` requests three
+P2 fixes and fifteen P3 corrections. The approved architecture and live acceptance
+boundary remain unchanged. The existing approved implementation/review loop covers
+these corrections; this is its next iteration, not a new feature plan.
+
+### R0 — Refresh integration and ownership (S)
+
+Dependencies: none; the #340 notice above is authorized and published.
+Files: existing plan/todo; Git history and later PR metadata only.
+
+- Fetch and record exact current main, preserve the candidate, then rebase before
+  implementation. The known delta `f160ce4c..430d6604` contains ten commits for
+  #247/#130/#168 and touches no #335 implementation paths; inspect the actual
+  fetched delta rather than relying on that historical result.
+- Preserve upstream policy/prompt behavior and monitoring documentation. Old gates
+  and green CI describe the published head only; the corrected/rebased candidate
+  needs fresh gates and review. Mark publication/CI historical completion accurately
+  and keep new-round work unchecked; omit workstation/runtime traces from plans.
+- Verification: clean scoped status and inspected delta before rebase; inspect the
+  cumulative post-rebase diff and overlap list. Covers P3.13, P3.14 and P3.15's
+  stale rebase assertion; metadata completion belongs to R7.
+
+### R1 — Fail closed on helper I/O and stage on the destination filesystem (M)
+
+Dependencies: R0 and published #340 notice. Files: `deploy/scripts/env-file.sh`,
+`deploy/scripts/deploy.sh`, `deploy/scripts/rollback.sh`,
+`tests/test_deploy_staging_services.py`.
+
+- Explicitly check every fallible operation in the helpers called through `if !`:
+  directory/file creation, role-file generation, reads, encoding pipelines,
+  preflight-file writes, permissions and renames. Audit nested
+  `write_app_env_files` too; `set -e` inside a subshell is insufficient. Install
+  cleanup only after a nonempty private directory exists; failure must never form
+  a root-relative secret path or continue to Docker validation. Missing retained
+  files keep existing semantics; an existing unreadable file is an error.
+- Create deploy stage with `mktemp -d "${APP_DIR}/.stage.XXXXXX"` and retain cleanup,
+  owner-only access and preflight-before-replacement. Each admitted recipient file
+  then moves by rename on the same filesystem; this is not an all-files transaction.
+- RED/GREEN: deploy and manual/automatic rollback with invalid TMPDIR, injected
+  retained-file read failure and injected creation/write/encoding failures must
+  refuse before mutation, preserving bytes, modes, state/switch and compose
+  activity. Assert no outside/temp secret files and cleanup; use executable error
+  injection for unreadability so root test runners cannot bypass chmod. Direct
+  helpers must also fail when invoked in the actual conditional context. Covers
+  P2 thread `4387180590` and P3.3.
+
+### R2 — Prove current and legacy target refusal (S)
+
+Dependencies: R0; tests do not touch the shared implementation files.
+File: `tests/test_deploy_staging_services.py`.
+
+- Parameterize enabled-intake/no-runtime deploy and rollback refusal over current
+  and legacy targets, including manual/automatic rollback. Preserve supported
+  legacy acceptance and unsupported-target refusal, with unchanged live files and
+  modes. Split unsupported cases from accepted current/legacy cases instead of
+  branching assertions inside one parameterized test.
+- RED/GREEN: remove only the legacy `admission.intake_enabled and runtime is None`
+  guard in a disposable mutation copy; the new deploy and rollback regressions
+  must fail, then pass on restored code. Never leave mutation in the candidate.
+  Covers P2 thread `4387180603` and P3.8's `kind == "unsupported"` branches.
+
+Checkpoint R1–R2: host refusal is fail-closed under real conditional calls and
+both supported image generations, with unchanged live state and mutation proof.
+
+### R3 — Validate one normalized configuration contract (M)
+
+Dependencies: R1–R2 and published #340 notice. Files: `env-file.sh`,
+`.github/workflows/ci-cd.yml`, `app/bootstrap/gitlab_deployment.py`,
+`tests/test_deploy_staging_services.py`, `tests/test_gitlab_deployment_settings.py`,
+plus minimal `deploy.sh`/`rollback.sh` callers for safe retained-file errors.
+
+- After generating protected role files, construct validation input using
+  `gitlab_bundle_from_env_files`; CI and host must validate identical post-generator
+  bytes, including trailing-newline normalization and multiline JSON. Host admission
+  preserves already-generated role-file values exactly; it must not normalize a
+  retained trailing newline a second time. CI normalizes raw source values once. Name the
+  complete application bundle and filtered GitLab bundle distinctly. Derive
+  container accepted-name input from the shell routing keys instead of maintaining
+  a second Python literal; retain duplicate/unknown-name refusal. Test literal
+  expected keys against routing and validator input, plus current/legacy outcome
+  parity, so future key additions cannot silently drift.
+- Retained files remain strict generator-format data, never shell-sourced. Expose
+  only a static allowlisted basename (`api.env` or `gitlab.env`) and error category
+  for read/format failures; do not forward paths, lines, values or raw stderr.
+  Test unquoted and missing-final-newline records on GitHub-only retained files as
+  well as malformed GitLab files, through deploy and rollback. R5 documents it.
+- Remove the unused module CLI and its subprocess-only tests; production and direct
+  unit tests both exercise `validate_environment`, while host/CI tests exercise the
+  real heredoc and fallback. This removes the cwd-dependent unused `-m` path.
+  Simplify the redundant accepted-key union/comment; extract one synthetic keyring
+  helper per test module; rename the acceptance-only private-origin test; move sys
+  import to module scope where still needed; parse the fake Docker command boundary
+  instead of the magic `${@:1:9}` count. RED/GREEN parity examples include an active
+  key ending in newline, multiline JSON, default-off and invalid values; all secret
+  canaries remain absent from stdout/stderr/argv. Covers P3.1, P3.2, P3.6, P3.7,
+  and the remaining P3.8 items.
+
+### R4 — Restore safe actionable registry diagnostics (M)
+
+Dependencies: R1. Files: `deploy.sh`, `rollback.sh`, `env-file.sh` if a shared
+helper is justified, and `tests/test_deploy_staging_services.py`.
+
+- Assess stderr rather than assuming all registry output is safe: capture it in a
+  protected temporary file, classify recognized unauthorized/denied, missing
+  manifest, disk-full and network failures into static actionable messages, and
+  use a generic static fallback. Do not forward raw CLI stderr, credentials or
+  token-bearing URLs; remove capture on every exit. Apply deploy/rollback parity.
+- RED/GREEN recognized categories and unknown stderr with credential canaries;
+  retain password-stdin and pre-mutation refusal. Fix obsolete `pull_policy: always`
+  cleanup comments to describe the pinned `--pull missing` startup; remove the
+  extra blank line. Covers P3.4 and P3.5.
+
+Checkpoint R3–R4: focused deployment/settings regressions and secret-canary checks
+pass, shared key knowledge and production validator path agree, diagnostics help
+the operator without exposing raw external output.
+
+### R5 — Complete the protected project-hook runbook (S)
+
+Dependencies: R3–R4 and published #340 notice. Files: `docs/SECRETS.md`,
+`docs/CICD.md` (preserve #283 sections).
+
+- End initial setup commands at inspect; use interactive-safe error handling, and
+  obtain/validate generation before the single separately gated activate command.
+  Place project-hook setup after create/bind/inspect, then authorized activation,
+  API admission if first onboarding, and real MR delivery. Existing installations
+  keep their process flag; no broad disable or unrelated-workspace operation.
+- Specify Settings → Webhooks, URL
+  `https://<staging-api>/webhooks/gitlab/<installation_id>` using the create UUID,
+  protected create JSON's `webhook_secret` as Secret token (`X-Gitlab-Token`), only
+  Merge request events and enabled SSL verification. Require stable `webhook-id`
+  or `Idempotency-Key` (both agree if supplied); verify test-instance support.
+  Explain 202 in Recent events and matching installation receipt as intake proof
+  only; replay that original event and compare run/publication counts. Revoke the
+  specific installation before deleting its project hook, then verify shutdown.
+- Document strict retained generator format and safe filename diagnostics; update
+  quote/trailing-backslash refusal to the early CI preflight (before SSH and no
+  rollback), and rename the CI step to reflect whole-bundle representation plus
+  GitLab runtime validation. Verify shell example syntax, actual CLI flags,
+  generation ordering and repo webhook contract; no live claim. Covers P2 thread
+  `4387180613`, P3.2 documentation, P3.9 and P3.10 (step rename in R3/R5 handoff).
+
+Provider UI/header/replay details checked against
+[GitLab Webhooks](https://docs.gitlab.com/user/project/integrations/webhooks/).
+Use the repository's existing secret-token authentication; newer GitLab signing
+token advice does not authorize an authentication redesign. Do not substitute a
+Test-generated event for identical original delivery replay or live MR acceptance.
+
+### R6 — Make CLI help usable in the deployed image (M)
+
+Dependencies: R0 and published #340 notice for env-example formatting.
+Files: `app/gitlab_admin.py`, `tests/test_gitlab_admin.py`, `.env.example`.
+
+- Use `python -m app.gitlab_admin` in help, show protected stdin/FD 0 for the
+  container and distinguish local-process additional descriptors. Show
+  `python -m app.bootstrap.seed_prompts` without uv in image instructions; preserve
+  permission and deployment prerequisites. Wrap the long env-example comment.
+- RED/GREEN help contract assertions; inspect all subcommand help and reconcile
+  with runbook examples/image Python command. No new installation/credential flow.
+  Covers P3.11 and P3.12.
+
+### R7 — Freeze, verify, review and update the existing PR (M)
+
+Dependencies: R0–R6. Files: existing plan/todo and existing PR metadata only.
+
+- Run focused deployment/settings/admin suites, shell syntax and affected checks
+  during each slice; retain RED/GREEN and legacy mutation evidence privately.
+  Runnable focused command for reviewers:
+  `uv run pytest tests/test_deploy_staging_services.py tests/test_gitlab_deployment_settings.py tests/test_gitlab_admin.py`.
+  Freeze the final rebased candidate and source fingerprint, then execute the four
+  required gates once: `uv run ruff check .`, `uv run ruff format --check .`,
+  `uv run mypy .`, `uv run pytest`. Use a fresh disposable Linux runner, isolated
+  real PG/Rabbit services, read-only source and a writable executable `/src/.venv`:
+  nested uv fixture environments drop `UV_PROJECT_ENVIRONMENT`. Record zero-skip
+  integration evidence; previous resources were cleaned up. Repeat a full run only
+  for a changed candidate or unresolved failure, not for every slice.
+- Fresh cumulative Standards/Spec review must account for all 18 findings and the
+  rebase. Update existing PR #339 with `What / Why / How to verify / Refs`, #340
+  coordination/order, literal runnable focused test command, historical-vs-current
+  evidence and an honest current-main checkbox. Publish authorized fixes and
+  inspect new CI; reply to each reviewer thread with the fix SHA and let its opener
+  resolve it. New push requires approval on that head. No merge/issue closure.
+- Preserve separately pending real staging acceptance (Task 7); local regression,
+  hook docs and 202 receipts do not complete AC3/AC4/AC5. Covers P3.13–P3.15 final
+  evidence and publication. Original successful gates/CI remain historical facts.

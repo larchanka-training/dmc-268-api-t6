@@ -228,19 +228,23 @@ done
 cd "${APP_DIR}"
 
 if [[ -n "${GHCR_TOKEN:-}" ]]; then
-  if ! echo "${GHCR_TOKEN}" | docker login ghcr.io -u "${GHCR_USER:-github}" --password-stdin >/dev/null 2>&1; then
-    refuse_rollback "registry login failed"
+  if ! registry_reason="$(printf '%s\n' "${GHCR_TOKEN}" | run_registry_command docker login ghcr.io -u "${GHCR_USER:-github}" --password-stdin)"; then
+    refuse_rollback "registry login failed${registry_reason:+ (${registry_reason})}"
   fi
   unset GHCR_TOKEN
 fi
 
-if ! docker pull "${IMAGE}" >/dev/null 2>&1; then
-  refuse_rollback "target image pull failed"
+if ! registry_reason="$(run_registry_command docker pull "${IMAGE}")"; then
+  refuse_rollback "target image pull failed${registry_reason:+ (${registry_reason})}"
 fi
 resolve_target_identity refuse_rollback
 check_target_revision
-if ! gitlab_bundle="$(gitlab_bundle_from_env_files "${APP_DIR}" 2>/dev/null)" || \
-   ! validate_gitlab_deployment "${TARGET_IMAGE_ID}" "${gitlab_bundle}" >/dev/null 2>&1; then
+gitlab_bundle_status=0
+gitlab_bundle="$(gitlab_bundle_from_env_files "${APP_DIR}" 2>/dev/null)" || gitlab_bundle_status=$?
+if [[ "${gitlab_bundle_status}" != 0 ]]; then
+  refuse_rollback "$(gitlab_deployment_failure_reason "${gitlab_bundle_status}")"
+fi
+if ! validate_gitlab_deployment "${TARGET_IMAGE_ID}" "${gitlab_bundle}" literal-gitlab >/dev/null 2>&1; then
   refuse_rollback "GitLab configuration_invalid"
 fi
 
@@ -261,7 +265,7 @@ ensure_app_env_files "${APP_DIR}"
 
 IMAGE="${TARGET_IMAGE_ID}" "${COMPOSE[@]}" up --pull missing -d --remove-orphans --wait --wait-timeout 180
 
-# Shared root account: drop the GHCR credential after the last pull (compose up, pull_policy: always).
+# Shared root account: drop credentials after pinned-image startup with --pull missing.
 logout_registry
 
 # Healthy up has changed the running release; persist its identity before fallible diagnostics.
