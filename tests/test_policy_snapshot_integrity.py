@@ -484,7 +484,7 @@ def _warnings(caplog: pytest.LogCaptureFixture) -> list[str]:
 def _fallback_warning(reason: str) -> str:
     return (
         "Ignore source lines are unavailable, the stored masks apply without them: "
-        f"{reason} policy_base_sha={'b' * 40}"
+        f"{reason} repository_id=00000000-0000-0000-0000-000000000001 policy_base_sha={'b' * 40}"
     )
 
 
@@ -535,7 +535,8 @@ def test_masks_that_the_current_limits_reject_keep_the_stored_ones_without_lines
 
     assert policy == IgnorePolicy(("build/**", "vendor/**"), (), stored.ignore_digest)
     assert _warnings(caplog) == [_fallback_warning("policy_ignore_limit_exceeded")]
-    assert "vendor" not in caplog.text
+    # Neither the rules text nor a mask of it reaches the log.
+    assert [mask for mask in ("vendor", "build") if mask in caplog.text] == []
 
 
 def test_a_snapshot_stored_under_another_matcher_version_keeps_its_source_lines() -> None:
@@ -583,6 +584,21 @@ def test_the_rules_text_of_a_snapshot_is_parsed_once(monkeypatch: pytest.MonkeyP
         IgnorePatternLine("vendor/**", 4),
         IgnorePatternLine("build/**", 6),
     )
+
+    # The same rules text and base with another stored value is another entry each time.
+    others = [
+        replace(stored, ignore_patterns=("vendor/**",)),
+        replace(stored, ignore_digest="0" * 64),
+        replace(stored, matcher_version="review-ignore/v0"),
+        replace(stored, builtin_exclusions_version="builtin-exclusions/v0"),
+        replace(stored, limits_version="policy-limits/v0"),
+        replace(stored, repository_id=UUID(int=9)),
+    ]
+    counts = []
+    for other in others:
+        review_ignore.snapshot_ignore_policy(other)
+        counts.append(len(calls))
+    assert counts == [2, 3, 4, 5, 6, 7]
 
 
 def test_a_snapshot_without_rules_has_the_empty_ignore_policy() -> None:

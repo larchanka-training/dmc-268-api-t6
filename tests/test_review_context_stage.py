@@ -382,7 +382,8 @@ def test_stored_masks_that_disagree_with_the_rules_text_still_decide_the_run(
         record.getMessage() for record in caplog.records if record.name == review_ignore.__name__
     ] == [
         "Ignore source lines are unavailable, the stored masks apply without them: "
-        f"the re-parsed masks differ from the stored ones policy_base_sha={_BASE}"
+        "the re-parsed masks differ from the stored ones "
+        f"repository_id=00000000-0000-0000-0000-000000000001 policy_base_sha={_BASE}"
     ]
 
 
