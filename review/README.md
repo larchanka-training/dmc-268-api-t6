@@ -14,7 +14,8 @@ from the database; the separate snapshot verifier still loads a pinned package r
 | --------------------------------------- | --------------------------------------------------- |
 | `prompts/review.system.v1.md`           | review prompt: order, filters, attribution, output  |
 | `prompts/review.system.v2.md`           | v1 + input metadata, few-shot examples              |
-| `prompts/review.system.v3.md`           | current legacy reviewer prompt (#178/#233)          |
+| `prompts/review.system.v3.md`           | legacy reviewer prompt (#178/#233)                  |
+| `prompts/review.system.v4.md`           | current snapshot-path reviewer prompt (#130)        |
 | `prompts/review.verifier.v1.md`         | historical reflection verifier prompt from #133     |
 | `prompts/review.verifier.v2.md`         | current snapshot verifier default (#219): conventions & evidence refs |
 | `prompts/review.conventions.v1.md`      | pre-review prompt: repository patterns, review plan |
@@ -30,19 +31,23 @@ from the database; the separate snapshot verifier still loads a pinned package r
 | `scripts/validate_findings.py`          | validator of model outputs: schema + semantic rules |
 | `examples/`                             | synthetic diff and sample outputs (proof run)       |
 
-The current live prompt files are `review.system.v3` (#178/#233) and
+The current live prompt files are `review.system.v4` (#130) and
 `review.conventions.v2`. `seed_prompt_versions` in `app/bootstrap/seed_prompts.py`
 activates the newest known version of each key in `prompt_versions` by setting
-`is_active`. The manual gateway check in `app/bootstrap/llm_gateway.py` defaults
-to those same files. `PromptBindings` dataclass defaults and snapshot test fixtures
-use v2 version labels; these are not universal runtime selections. At run creation,
-`SqlAlchemyWebhookRunStore` captures the active `review.conventions` and
-`review.verifier` row IDs alongside the selected `review.system` ID.
-`SqlAlchemyPolicySnapshotStore.get_pins` restores each pinned row's version and checksum
-by ID, so activating a newer row does not change an existing run's bindings. Historical
-or partially pinned runs keep absent IDs and empty checksums; their bindings remain
-incomplete instead of acquiring today's active prompts. Older prompt versions remain
-immutable history: a published version is never edited or removed.
+`is_active`, so a new run pins v4, unless its repository overrides the review prompt
+(`repositories.prompt_version_id`), and takes the snapshot path; a run pinned to
+`review.system.v3` or lower keeps the legacy path. The manual gateway check in
+`app/bootstrap/llm_gateway.py` still defaults to `review.system.v3` and
+`review.conventions.v2` until the paid eval re-shoot switches it (#130; R15 in
+`docs/plans/130-snapshot-switch-plan.md`). `PromptBindings` dataclass defaults
+and snapshot test fixtures use v2 version labels; these are not universal
+runtime selections. At run creation, `SqlAlchemyWebhookRunStore` captures the
+active `review.conventions` and `review.verifier` row IDs alongside the selected
+`review.system` ID. `SqlAlchemyPolicySnapshotStore.get_pins` restores each pinned row's
+version and checksum by ID, so activating a newer row does not change an existing run's
+bindings. Historical or partially pinned runs keep absent IDs and empty checksums; their
+bindings remain incomplete instead of acquiring today's active prompts. Older prompt
+versions remain immutable history: a published version is never edited or removed.
 
 ## Seeding contract
 
@@ -74,13 +79,22 @@ Canonical JSON is `json.dumps(rules, sort_keys=True, separators=(",", ":"))` in 
 the checksum is recomputable from the row. A change to a prompt or a rule set is a new file
 with the next version number; the old file stays. A run references the `prompt_version_id`
 and `rule_version_id` it was made with. `RepoConventionsDraft` is split on save:
-`key_patterns` and `recommendations` go to `repo_conventions`, cached per `(repository,
-AGENTS.md sha, prompt_version)` and reused by every pull request of the repository until
-`AGENTS.md` or the prompt version changes; `files[]` describes one pull request and goes to
+`key_patterns` and `recommendations` go to `repo_conventions`, cached per
+`(repository, AGENTS.md sha, prompt_version, policy_key)` and reused by every
+pull request of the repository until one of them changes. `policy_key` is
+the attempt's ignore key on the legacy path (NULL for a run without a policy
+snapshot), so a changed ignore policy misses; on the snapshot path it is the
+`repo-conventions-v2` digest (`docs/CONTEXT_AND_VERIFICATION_SPEC.md` §4.2), which
+also changes with rules.md, AGENTS.md, the service defaults, the pinned conventions
+prompt or the token counter. `files[]` describes one pull request and goes to
 the run trace (`run_actions`); `repo_conventions.languages` is computed deterministically by
 the backend and is not part of the draft.
 
 ## Assembly order
+
+This order and the review tags of "Input envelope" below are those of the legacy path (a run pinned to
+`review.system.v3` or lower); a v4 run's review request uses the envelope in "Policy snapshot v2 envelope and
+reflection pass" below, and the `review.conventions` tags are the same on both paths.
 
 One request is assembled as `system → <custom_instructions> → <agents_md> → <repo_conventions> → <pr_meta> →
 <changed_files> → <omitted_files>`: the prompt file is the system message, the tags follow in this order. The
@@ -198,13 +212,16 @@ Under Policy Snapshot v2 (`policy_snapshot` present), prompts and candidate find
 - `<repo_conventions>`: cached repository conventions.
 - `<pr_meta>`: PR metadata (title, description, author, branch, base ref, commit messages).
 - `<changed_files>`: each `<file path="..." block_id="..." status="..." language="...">` carries a stable `block_id`. Contiguous ranges shown to the model are recorded in `ManifestBlock.shown_ranges`.
+- `<context_excerpts>`: the L2-L4 blocks of the context stage, one `<excerpt block_id="..." level="..." path="..." revision="..." side="..." representation="...">` each (`path`, `revision` and `side` only when the block's source has them), with pre-numbered `<line n="...">` source lines; present only when the stage produced such blocks. A legacy run's stage context reaches the run trace only.
+- `<omitted_files>`: as in the legacy envelope.
+- `<excluded_files count="N" />`: the number of files the repository's ignore policy withholds, never their names; present only when N > 0.
 
 **Reflection Pass (packaged `prompts/review.verifier.v1.md` / `v2.md`, selected by the snapshot pin)**:
 - Two-pass verification architecture to eliminate hallucinated findings.
-- **Pass 1 (Reviewer, snapshot/v2 contract)** generates candidate findings with required `evidence_refs` (pointing to visible `block_id` line ranges). This applies to the explicitly composed snapshot pipeline, not the current legacy worker response contract. Main #130 F1 supplies a lazy Reflection Pass through the production attempt provider; version selection keeps legacy runs on their existing path, while v4 activation remains in F2.
+- **Pass 1 (Reviewer, snapshot/v2 contract)** generates candidate findings with required `evidence_refs` (pointing to visible `block_id` line ranges). This applies to the snapshot path: since #130 F2 a new run pins the active `review.system.v4`, the snapshot-contract prompt, unless its repository overrides the review prompt, and the worker passes the reviewer's answer to the Reflection Pass, which main #130 F1 supplies lazily through the production attempt provider. A run pinned to `review.system.v3` or lower keeps the legacy path and the v1 response contract, without a Reflection Pass.
 - **Pass 2 (Verifier)** checks each candidate against visible code and requirements using the packaged verifier version selected by the snapshot binding.
   - Verifier prompt envelope: contains `<repository_rules>`, `<project_conventions_document>`, `<service_defaults>`, `<repo_conventions>`, `<code_context>` (with `<changed_files>`), and `<candidate_findings count="...">` (carrying `<candidate candidate_id="..." path="..." start_line="..." line="..." category="..." severity="...">`, `<title>`, `<body>`, optional `<suggestion>`, `<evidence_refs>`, and optional `<rule_attribution name="..." />`).
-  - Verifier output: validated at runtime via Pydantic (`VerificationOutput`, `ReviewFindingV2`) conforming to contract `schemas/verifier-output.schema.v1.json` (`decisions`: `candidate_id`, `status` in `supported` / `contradicted` / `insufficient_context`, `reason`, `evidence_refs`, `requirement_refs`). Legacy runs without policy snapshot continue to process v1 output.
+  - Verifier output: validated at runtime via Pydantic (`VerificationOutput`, `ReviewFindingV2`) conforming to contract `schemas/verifier-output.schema.v1.json` (`decisions`: `candidate_id`, `status` in `supported` / `contradicted` / `insufficient_context`, `reason`, `evidence_refs`, `requirement_refs`). Legacy runs (pinned to `review.system.v3` or lower, with or without a policy snapshot) continue to process v1 output.
   - Strict filtering: only candidates with `status="supported"` survive; unverified candidates are dropped, and the review summary is cleansed of hallucinated defects.
 
 The legacy `parse_review_output` entry point silently removes each finding's `evidence_refs`,
@@ -220,7 +237,8 @@ than durable structured explanations. The current explicit pipeline carries drop
 `VerifiedReviewOutput`; publication can store them as `Finding.drop_reason`. After #290,
 `StoreReviewOutput` can persist a separate `llm.verify` run action with candidate IDs, accepted
 call ID and decisions/evidence/requirements. That trace excludes the verifier's free-text `reason`
-and keeps `manifest_id` null. The storage paths alone do not select the verifier: main F1 wires its lazy pass, and the pinned review version selects the snapshot path.
+and carries the stored manifest of the accepted verifier call as `manifest_id` (null only
+when the composition has no manifest store). The storage paths alone do not select the verifier: main F1 wires its lazy pass, and the pinned review version selects the snapshot path.
 
 ## Rule sets
 
