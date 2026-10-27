@@ -319,6 +319,46 @@ def test_policy_exact_raw_limit_and_shared_normalization(raw: bytes, code: str |
     asyncio.run(scenario())
 
 
+@pytest.mark.parametrize(
+    ("cached", "actual", "lower_bound", "detail"),
+    [
+        (True, 70_000, False, "файл `AGENTS.md`, фактически 70000, допустимо 65536"),
+        # The reader stops past the limit without telling how far it read.
+        (False, 65_537, True, "файл `AGENTS.md`, фактически более 65536, допустимо 65536"),
+    ],
+    ids=["cached-raw", "stopped-read"],
+)
+def test_policy_too_large_names_its_size(
+    cached: bool, actual: int, lower_bound: bool, detail: str
+) -> None:
+    from app.modules.reviews.application.policy_documents import LoadPolicyDocuments
+    from app.modules.reviews.application.policy_errors import PolicyError, policy_error_detail
+
+    async def scenario() -> None:
+        router = SourceRouter()
+        router.files["AGENTS.md"] = ("1" * 40, b"x" * 70_000)
+        async with GitLabRunHttp(
+            credentials=Credentials(),
+            origin_policy=POLICY,
+            transport=httpx.MockTransport(router.response),
+        ) as http:
+            trees = GitLabRepositoryTree(http=http, checkpoint=checkpoint)
+            if cached:
+                # Another reader of the run already holds the whole blob.
+                assert len(await trees.read_blob("1" * 40, max_bytes=1_048_576)) == 70_000
+            source = GitLabPolicyDocumentSource(trees=trees, policy_base_sha=INPUT.base_sha)
+            with pytest.raises(PolicyError) as error:
+                await LoadPolicyDocuments(source, policy_base_sha=INPUT.base_sha).execute()
+        assert (error.value.error_code, error.value.safe_message) == (
+            "policy_document_too_large",
+            "The policy document exceeds 65536 bytes",
+        )
+        assert (error.value.actual, error.value.actual_is_lower_bound) == (actual, lower_bound)
+        assert policy_error_detail(error.value.message) == detail
+
+    asyncio.run(scenario())
+
+
 @pytest.mark.parametrize("empty", [True, False])
 def test_only_complete_parent_proves_policy_absence_and_unknown_directory_never_routes(
     empty: bool,

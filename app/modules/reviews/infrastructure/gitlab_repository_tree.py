@@ -182,6 +182,11 @@ class GitLabRepositoryTree:
             raise GitLabRunHttpError("invalid_response")
         return value
 
+    def cached_blob_size(self, oid: str) -> int | None:
+        """The exact size of a blob some reader of the run already holds, else ``None``."""
+        cached = self._raw.get(oid)
+        return None if cached is None else len(cached)
+
     async def read_blob(self, oid: str, *, max_bytes: int = 1048576) -> bytes:
         await self.checkpoint()
         if type(max_bytes) is not int or not 0 < max_bytes <= 1048576:

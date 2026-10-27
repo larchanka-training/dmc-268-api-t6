@@ -142,7 +142,11 @@ class PolicyError(RunFailure):
         )
 
     def diagnostic(self) -> dict[str, str | int | bool | None]:
-        """The RFS §9 diagnostic for the trace; its message has no location, unknowns are null."""
+        """The RFS §9 diagnostic for the trace; its message has no location, unknowns are null.
+
+        ``actual_is_lower_bound`` marks an ``actual`` that is only the count where a read
+        stopped, so the trace never shows it as the exact size.
+        """
         return {
             "code": self.code.value,
             "source_path": self.source_path,
@@ -153,5 +157,6 @@ class PolicyError(RunFailure):
             "pattern_index": self.pattern_index,
             "limit": self.limit,
             "actual": self.actual,
+            "actual_is_lower_bound": self.actual_is_lower_bound,
             "retryable": self.retryable,
         }

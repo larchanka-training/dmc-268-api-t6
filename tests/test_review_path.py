@@ -670,6 +670,7 @@ def test_stage_refuses_a_v4_run_over_the_policy_budget_at_policy_load(
         "pattern_index": None,
         "limit": limit,
         "actual": _POLICY_TOKENS,
+        "actual_is_lower_bound": False,
         "retryable": False,
     }
 

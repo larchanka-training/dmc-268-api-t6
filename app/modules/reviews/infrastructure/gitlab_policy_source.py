@@ -73,4 +73,19 @@ class GitLabPolicyDocumentSource:
                 raise GitLabRunHttpError("invalid_response")
             return await self._trees.read_blob(oid, max_bytes=MAX_DOCUMENT_BYTES)
         except GitLabRunHttpError as error:
+            if error.kind == "body_too_large":
+                raise self._too_large(oid) from None
             raise self._error(error) from None
+
+    def _too_large(self, oid: str) -> PolicyError:
+        size = self._trees.cached_blob_size(oid)
+        return PolicyError(
+            PolicyErrorCode.DOCUMENT_TOO_LARGE,
+            f"The policy document exceeds {MAX_DOCUMENT_BYTES} bytes",
+            policy_base_sha=self._base,
+            limit=MAX_DOCUMENT_BYTES,
+            # The reader stops past the limit without telling how far it read: the blob has
+            # at least one byte more than the limit, and no exact size is claimed.
+            actual=MAX_DOCUMENT_BYTES + 1 if size is None else size,
+            actual_is_lower_bound=size is None,
+        )

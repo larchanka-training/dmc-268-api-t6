@@ -452,6 +452,7 @@ def test_policy_error_records_its_diagnostic_in_the_policy_load_action() -> None
         "pattern_index": None,
         "limit": 256,
         "actual": 257,
+        "actual_is_lower_bound": False,
         "retryable": False,
     }
     assert response["error"]["type"] == "PolicyError"
@@ -487,6 +488,7 @@ def test_mask_error_diagnostic_keeps_line_column_and_mask_index_apart() -> None:
         "pattern_index": 1,
         "limit": None,
         "actual": None,
+        "actual_is_lower_bound": False,
         "retryable": False,
     }
 
@@ -538,6 +540,7 @@ def test_matcher_error_in_the_context_build_is_recorded_in_that_step() -> None:
         "pattern_index": None,
         "limit": None,
         "actual": None,
+        "actual_is_lower_bound": False,
         "retryable": False,
     }
 
