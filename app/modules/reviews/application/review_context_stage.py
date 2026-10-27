@@ -51,6 +51,7 @@ from app.modules.reviews.application.review_context import (
     BuildReviewContext,
     ContextBlock,
     ContextStatus,
+    NoReviewableText,
     RagPlan,
     RagStats,
     RetrievedBlock,
@@ -599,6 +600,32 @@ class ReviewContextStage:
                 coverage=coverage,
             )
             raise RunSkipped("all_changes_ignored")
+        if (
+            self._snapshot_for_llm is not None
+            and coverage.technical_only
+            and not any(item.summary_only for item in stored)
+        ):
+            # CVS §2.2 and §11: technical skips beside exclusions only, no text the review
+            # could check. The snapshot path records the context and ends before RAG, the
+            # build and every model call; the run is published with the backend result
+            # (coverage none), not skipped. A legacy run keeps its model calls, and a
+            # summary-only change its path (#107/#175).
+            response = await self._record_nothing_to_review(
+                run_id,
+                snapshot,
+                diff_map.head_sha,
+                ContextStatus.NO_REVIEWABLE_TEXT,
+                digest=diff_map.digest,
+                files=len(diff_map.files),
+                coverage=coverage,
+                diff_map=diff_map,
+                ignored_files=sum(coverage.exclusion_counts.values()),
+            )
+            if self._payloads is not None:
+                # The attempt's one context.build is also its context_payloads row: a failed
+                # write, or a retired origin, ends the attempt before publishing.
+                await self._payloads.save_context_payload(run_id, response)
+            raise NoReviewableText
 
         rag = await self._open_rag(run_id, run.repository_id, snapshot.prompt_bindings)
         request = {"head_sha": run.head_sha, "policy_snapshot_id": str(snapshot.snapshot_id)}
@@ -663,19 +690,36 @@ class ReviewContextStage:
         digest: str | None,
         files: int,
         coverage: RunCoverage | None = None,
-    ) -> None:
-        diff = _with_live_base({"digest": digest, "files": files}, self._pr_base_sha)
+        diff_map: DiffMap | None = None,
+        ignored_files: int | None = None,
+    ) -> dict[str, Any]:
+        """Record ``context.build`` for a change the context is not built for; return it.
+
+        The skips (``no_changes``, ``all_changes_ignored``) keep ``{digest, files}`` and count
+        every file as ignored. Only the record of a change without reviewable text passes
+        ``diff_map`` (#130 F5): its diff also names the old side and the inventory, from
+        which the publication map is rebuilt, and ``ignored_files`` counts the exclusions.
+        """
+        known: dict[str, Any] = {"digest": digest, "files": files}
+        if diff_map is not None:
+            known |= {
+                "diff_old_sha": diff_map.diff_old_sha,
+                "file_list_complete": diff_map.file_list_complete,
+            }
+        diff = _with_live_base(known, self._pr_base_sha)
         request = {"head_sha": head_sha, "policy_snapshot_id": str(snapshot.snapshot_id)}
         async with traced_step(self._trace, run_id, "context.build", request) as step:
             step.response = {
                 "status": status.value,
                 "reason": status.value,
                 "diff": diff,
-                "ignored_files": files,
+                "ignored_files": files if ignored_files is None else ignored_files,
                 "blocks": [],
             }
             if coverage is not None:
                 step.response["coverage"] = coverage.to_json()
+        response: dict[str, Any] = step.response
+        return response
 
     async def _open_rag(
         self, run_id: UUID, repository_id: UUID, prompt: PromptBindings

@@ -19,6 +19,7 @@ from app.modules.reviews.application.diff_map import DiffMap, VcsProviderName, b
 from app.modules.reviews.application.findings_post_processor import summary_from_result
 from app.modules.reviews.application.get_run_diff import DiffSnapshot
 from app.modules.reviews.application.prompt_builder import PullRequestMeta
+from app.modules.reviews.application.review_context import NoReviewableText
 from app.modules.reviews.application.review_ignore import (
     IgnoreMatcher,
     apply_ignore,
@@ -141,7 +142,12 @@ def test_the_stage_classifies_an_unsupported_path_by_the_path_of_the_run(
         trace, store=_store(version), snapshots=[unsupported_path()], vcs=Vcs(files_changed=1)
     )
 
-    asyncio.run(stage.run(_RUN))
+    if version == "v4":
+        # The snapshot path then ends the attempt without a model call (the route, T4).
+        with pytest.raises(NoReviewableText):
+            asyncio.run(stage.run(_RUN))
+    else:
+        assert asyncio.run(stage.run(_RUN)) is not None
 
     [coverage] = [
         response["coverage"] for tool, _, response in trace.steps if tool == "context.build"
