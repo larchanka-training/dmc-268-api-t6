@@ -445,7 +445,7 @@ SQLModel не используется: ORM отделена от transport DTO 
 | --- | --- |
 | [workspaces](../app/modules/workspaces/infrastructure/models.py) | Workspace |
 | [repositories](../app/modules/repositories/infrastructure/models.py) | ProviderInstallation, Repository, RuleVersion, RepoConventions, RepositoryRulesStatus (статус `.review/rules.md`, #150) |
-| [reviews](../app/modules/reviews/infrastructure/models.py) | PromptVersion, CodeChange, Run, RunPolicyDocument, RunPolicySnapshot, ContextPayload, Finding, Comment, RunAction, ContextManifest |
+| [reviews](../app/modules/reviews/infrastructure/models.py) | PromptVersion, CodeChange, CodeChangeDiff, CachedFileBlob, Run, RunPolicyDocument, RunPolicySnapshot, ContextPayload, Finding, Comment, RunAction, RunActionResponseBody, ContextManifest |
 | [webhooks](../app/modules/integrations/webhooks/infrastructure/models.py) | WebhookEvent |
 | [billing](../app/modules/billing/infrastructure/models.py) | Payment, CreditLedger |
 | [analytics](../app/modules/analytics/infrastructure/models.py) | UsageEvent |
