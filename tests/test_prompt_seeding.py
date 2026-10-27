@@ -32,6 +32,12 @@ def _up_to_v3(assets: tuple[PromptAsset, ...]) -> tuple[PromptAsset, ...]:
     )
 
 
+def _up_to_v4(assets: tuple[PromptAsset, ...]) -> tuple[PromptAsset, ...]:
+    return tuple(
+        asset for asset in assets if not (asset.key == "review.system" and asset.version > 4)
+    )
+
+
 @pytest.fixture
 def migrated_prompt_database() -> Iterator[tuple[str, str]]:
     """Provide a disposable, migrated PostgreSQL schema when explicitly configured."""
@@ -302,11 +308,7 @@ def test_seed_rejects_changed_v2_without_overwriting_its_persisted_content(
     migrated_prompt_database: tuple[str, str],
 ) -> None:
     database_url, schema = migrated_prompt_database
-    assets = tuple(
-        asset
-        for asset in load_prompt_assets(REPO_ROOT / "review/prompts")
-        if asset.key != "review.system" or asset.version <= 3
-    )
+    assets = load_prompt_assets(REPO_ROOT / "review/prompts")
     old = next(asset for asset in assets if (asset.key, asset.version) == ("review.system", 2))
     tampered = replace(old, content="changed v2", checksum=sha256(b"changed v2").hexdigest())
     old_content = (REPO_ROOT / "tests/fixtures/prompt_builder/sample.system.txt").read_text()
@@ -318,7 +320,7 @@ def test_seed_rejects_changed_v2_without_overwriting_its_persisted_content(
         factory = async_sessionmaker(engine, expire_on_commit=False)
         try:
             async with factory.begin() as session:
-                assert await seed_prompt_versions(session, assets) == 8
+                assert await seed_prompt_versions(session, assets) == len(assets)
             with pytest.raises(ValueError, match=r"immutable prompt changed: review\.system\.v2"):
                 async with factory.begin() as session:
                     await seed_prompt_versions(session, (tampered,))
@@ -355,7 +357,7 @@ def test_full_seed_upgrades_v3_to_v4_once_and_preserves_v3(
 ) -> None:
     """The F2 deploy: the bootstrap seed finds v3 active and the packaged v4 new."""
     database_url, schema = migrated_prompt_database
-    assets = load_prompt_assets(REPO_ROOT / "review/prompts")
+    assets = _up_to_v4(load_prompt_assets(REPO_ROOT / "review/prompts"))
     v3_content = (REPO_ROOT / "review/prompts/review.system.v3.md").read_text(encoding="utf-8")
     v4_content = (REPO_ROOT / "review/prompts/review.system.v4.md").read_text(encoding="utf-8")
 
@@ -397,7 +399,7 @@ def test_an_older_seed_after_v4_inserts_nothing_and_keeps_v4_active(
 ) -> None:
     """The rollback floor: an F1 image (files up to v3) seeding after F2 never demotes v4."""
     database_url, schema = migrated_prompt_database
-    assets = load_prompt_assets(REPO_ROOT / "review/prompts")
+    assets = _up_to_v4(load_prompt_assets(REPO_ROOT / "review/prompts"))
 
     async def exercise() -> None:
         engine = create_async_engine(

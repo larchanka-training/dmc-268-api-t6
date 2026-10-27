@@ -88,9 +88,7 @@ def test_v2_run_and_persisted_snapshot_retain_their_prompt_after_v3_activation(
         if not (asset.key == "review.system" and asset.version > 3)
     )
     legacy_assets = tuple(
-        asset
-        for asset in assets
-        if (asset.key, asset.version) not in {("review.system", 3), ("review.system", 5)}
+        asset for asset in assets if (asset.key, asset.version) != ("review.system", 3)
     )
     v2_content = (REPO_ROOT / "tests/fixtures/prompt_builder/sample.system.txt").read_text()
 
@@ -163,7 +161,7 @@ def test_v2_run_and_persisted_snapshot_retain_their_prompt_after_v3_activation(
                 )
                 await work.commit()
             async with factory.begin() as session:
-                assert await seed_prompt_versions(session, assets) == 2
+                assert await seed_prompt_versions(session, assets) == 1
             async with factory.begin() as session:
                 assert await seed_prompt_versions(session, assets) == 0
             async with factory() as session:
@@ -527,8 +525,13 @@ def test_v3_run_and_snapshot_keep_v3_and_the_legacy_path_after_v4_activation(
                 pins.prompt_bindings.review_system_id, "review.system", "v3", "github"
             )
 
+            # Recreate the historical F2 rollout: v5 belongs to the later Bitbucket
+            # release and must not be inserted in this v3 -> v4 snapshot test.
+            v4_assets = tuple(
+                asset for asset in _packaged() if asset.key != "review.system" or asset.version <= 4
+            )
             async with factory.begin() as session:
-                assert await seed_prompt_versions(session, _packaged()) == 1
+                assert await seed_prompt_versions(session, v4_assets) == 1
             async with factory() as session:
                 active = (
                     await session.scalars(
