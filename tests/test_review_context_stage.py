@@ -1179,7 +1179,7 @@ def test_check_run_says_where_a_policy_failure_is() -> None:
         parse_review_ignore("# Ignore\n\n```review-ignore\nok/**\nsrc/a?.py\n```\n")
     assert summary(mask.value) == (
         "`policy_ignore_pattern_invalid`: В блоке review-ignore недопустимая маска. "
-        "Где: файл `.review/rules.md`, строка 5, позиция 6, маска `src/a?.py`."
+        "Where: file `.review/rules.md`, line 5, column 6, mask `src/a?.py`."
     )
 
     # A long or hostile mask is quoted short and cannot break the markup around it.
@@ -1192,7 +1192,7 @@ def test_check_run_says_where_a_policy_failure_is() -> None:
 
     with pytest.raises(PolicyError) as size:
         normalize_document("AGENTS.md", b"a" * 87_040, blob_oid="f" * 40)
-    assert summary(size.value).endswith("Где: файл `AGENTS.md`, фактически 87040, допустимо 65536.")
+    assert summary(size.value).endswith("Where: file `AGENTS.md`, actual 87040, allowed 65536.")
 
     # A failure without a location keeps the plain text of its code.
     plain = PolicyError(PolicyErrorCode.ACCESS_DENIED, "GitHub answered 403")

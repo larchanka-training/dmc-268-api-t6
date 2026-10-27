@@ -339,7 +339,7 @@ def test_policy_over_its_budget_fails_closed_before_any_provider_call() -> None:
     assert raised.value.code == PolicyErrorCode.PROMPT_BUDGET_EXCEEDED
     assert raised.value.limit == 1
     assert raised.value.actual is not None and raised.value.actual > 1
-    assert "допустимо 1" in str(raised.value)
+    assert "allowed 1" in str(raised.value)
     assert transport.requests == []
 
 
