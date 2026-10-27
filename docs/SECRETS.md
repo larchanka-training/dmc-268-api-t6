@@ -312,7 +312,26 @@ operator=(docker compose -p "$project" --env-file .env -f compose.yml \
 Продолжайте только после успешного prefix-блока. Ошибка `cd`, helper или режима
 останавливает цепочку; `operator` заранее сброшен, чтобы не использовать старую цель.
 `operator`, `project` и `mode` остаются в текущей Bash-сессии. Для существующей
-installation не повторяйте create: после prefix выполняйте только нужную команду.
+installation не повторяйте create. После prefix **явно задайте записанный UUID** из
+защищённой operator-записи этой установки, затем выполните свежий inspect:
+
+```bash
+unset installation_id generation
+if read -r -p 'Записанный installation_id из operator record: ' installation_id &&
+  [[ "$installation_id" =~ ^[[:xdigit:]]{8}-[[:xdigit:]]{4}-[[:xdigit:]]{4}-[[:xdigit:]]{4}-[[:xdigit:]]{12}$ ]]; then
+  "${operator[@]}" run --rm --no-deps -T gitlab-admin inspect \
+    --installation-id "$installation_id"
+else
+  unset installation_id
+  printf '%s\n' 'GitLab installation UUID invalid; recovery stopped.' >&2
+  false
+fi
+```
+
+Продолжайте только после успеха и сверки `connection.installation_id`,
+`connection.workspace_id`, `connection.instance_origin` с защищённой записью.
+Берите `connection.generation` только из свежего inspect перед activate/rotate,
+не из старой записи или унаследованной переменной. Команды list у CLI нет.
 Для первоначального onboarding отдельно выполните create → bind → inspect:
 
 ```bash
@@ -362,8 +381,24 @@ fi
 временный login командой в конце этого раздела. Интерактивная SSH-сессия остаётся открытой.
 В Compose 2.19 `run` не имеет `--pull`; не добавляйте несуществующий flag.
 
-Для rotate-token тот же Compose prefix и `--secrets-fd 0 < "$protected_rotate_file"`;
-JSON содержит только `token`, передайте текущую `--expected-generation "$generation"`.
+Для разрешённой rotation существующей установки используйте prefix и UUID выше.
+Protected JSON `protected_rotate_file` содержит только новый `token`. Сверьте identity
+в новом inspect, затем введите generation из него; ошибка не запускает rotation:
+
+```bash
+unset generation
+"${operator[@]}" run --rm --no-deps -T gitlab-admin inspect \
+  --installation-id "${installation_id:?set the recorded installation UUID}" &&
+if read -r -p 'connection.generation из этого inspect: ' generation &&
+  [[ "$generation" =~ ^[1-9][0-9]*$ ]]; then
+  "${operator[@]}" run --rm --no-deps -T gitlab-admin rotate-token \
+    --installation-id "$installation_id" --expected-generation "$generation" \
+    --secrets-fd 0 < "$protected_rotate_file"
+else
+  printf '%s\n' 'GitLab rotation generation invalid; rotation stopped.' >&2
+  false
+fi
+```
 
 Create authenticates перед записью и сохраняет generation=1, intake disabled. Bind
 проверяет stored credential, canonical project и languages, связывает project только
@@ -374,7 +409,58 @@ prompt. Повторный bind не дублирует repository/rules. При
 GitLab HTTP выполняется вне каждой DB transaction; после HTTP locked snapshot сравнивается
 заново. Safe JSON результата не содержит token/ciphertext/digest/keyring.
 
-**Project webhook — до activation.** В разрешённом GitLab project откройте
+Перед отдельным шагом activation оператор проверяет, что reviewed deployed version
+включает GitLab intake #169 и публикацию #171 (PR229),
+и получает разрешение на выборочную live-проверку. Этот документ не разрешает
+production activation. В той же Bash-сессии получите **свежий** inspect, проверьте
+`connection.installation_id`, `connection.workspace_id` и `connection.instance_origin`
+против согласованных IDs/origin. Проверьте нужные `repositories[].project_id`,
+`repositories[].enabled`, `repositories[].available`, `repositories[].rules_ready`
+и top-level `prompt_ready`; paused sibling не обязан быть ready. Затем введите
+положительное `connection.generation` именно из этого результата.
+CLI не принимает supplied merged SHA или boolean обхода:
+
+```bash
+unset generation
+"${operator[@]}" run --rm --no-deps -T gitlab-admin inspect \
+  --installation-id "${installation_id:?set the recorded installation UUID}" &&
+if read -r -p 'connection.generation из этого inspect: ' generation &&
+  [[ "$generation" =~ ^[1-9][0-9]*$ ]]; then
+  "${operator[@]}" run --rm --no-deps -T gitlab-admin activate \
+    --installation-id "$installation_id" --expected-generation "$generation"
+else
+  printf '%s\n' 'GitLab activation generation invalid; activation stopped.' >&2
+  false
+fi
+```
+
+Пустой, нулевой или malformed generation даёт статический diagnostic и ненулевой
+status без activate; SSH-сессия не закрывается. Исправьте ввод по свежему inspect,
+не продолжайте при ошибке. Generation обязателен и положителен. Activate повторно
+authenticates stored token и проверяет доступ к каждому binding вне transaction,
+затем под locks сверяет весь snapshot.
+Нужен хотя бы один enabled/available repository с `wait_for_ci=never`, active rules и
+active `review.system` prompt; paused sibling не блокирует ready sibling, но identities
+и API access всех bindings проверяются. Budget gate отсутствует. Команда меняет только
+connection intake flag, не generation, rules, prompt или budgets; повтор с той же
+generation всё равно проверяет provider. Activate не требует существования project hook.
+API process flag независимо остаётся обязательным.
+
+Rotate проверяет новый token на всех bindings и expected generation (если передана),
+записывает новый encrypted credential active key и увеличивает generation. Активные
+queued/running/publishing Runs исходной установки терминализируются `cancelled` с
+`credential_rotated`, worker lease снимается, попытки сохраняются; дальнейшие provider
+calls старой authority запрещены. Старые ключи сохраняйте, пока все их envelopes не
+перезаписаны через supported rotation. Удаление key ID раньше срока закрывает decryption.
+
+После onboarding впервые включите API admission через variable
+`GITLAB_WEBHOOK_INTAKE_ENABLED=true` и обычный reviewed deploy, сохранив полный keyring.
+Create/bind сами intake не включают; active connection и process admission нужны оба.
+Если staging уже обслуживает другие активные подключения, не выключайте общий API flag
+ради нового теста: новая installation остаётся disabled до собственного activate.
+
+**Новый project webhook — после activation и process admission.**
+В разрешённом GitLab project откройте
 **Settings → Webhooks → Add new webhook** (нужен Maintainer/Owner):
 
 1. URL: `https://<staging-api>/webhooks/gitlab/<installation_id>`, где host —
@@ -400,72 +486,39 @@ GitLab HTTP выполняется вне каждой DB transaction; посл�
 
 Названия полей, версии delivery headers и просмотр доставок —
 [официальная документация GitLab Webhooks](https://docs.gitlab.com/user/project/integrations/webhooks/).
-Настройка hook не включает connection intake; не отправляйте приёмочный MR до
-activation и process admission ниже.
+Настройка hook сама intake не включает. Нормальный порядок: create → bind → inspect →
+отдельно разрешённый activate → process admission → новый hook → приёмочный MR.
+Сохраните hook и проверьте enabled state до создания приёмочного MR; Test для нового
+hook не требуется.
 
-Перед отдельным шагом activation оператор проверяет, что reviewed deployed version
-включает GitLab intake #169 и публикацию #171 (PR229),
-и получает разрешение на выборочную live-проверку. Этот документ не разрешает
-production activation. В той же Bash-сессии получите **свежий** inspect, проверьте
-`connection.installation_id`, `connection.workspace_id` и `connection.instance_origin`
-против согласованных IDs/origin. Проверьте нужные `repositories[].project_id`,
-`repositories[].enabled`, `repositories[].available`, `repositories[].rules_ready`
-и top-level `prompt_ready`; paused sibling не обязан быть ready. Затем введите
-положительное `connection.generation` именно из этого результата.
-CLI не принимает supplied merged SHA или boolean обхода:
+**Восстановление уже существующего hook — отдельный путь.** После устранения
+причины отказа и успешных activation/process admission проверьте enabled state в
+**Settings → Webhooks**: прежние 503 могли вызвать [автоотключение GitLab](https://docs.gitlab.com/user/project/integrations/webhooks/#auto-disabled-webhooks).
+Для Temporarily disabled/Disabled hook **Test → Merge request events** с ответом
+**2xx** [включает hook снова](https://docs.gitlab.com/user/project/integrations/webhooks/#re-enable-disabled-webhooks).
+Проверьте Recent events и enabled state; при отказе остановитесь и исправьте причину.
 
-```bash
-"${operator[@]}" run --rm --no-deps -T gitlab-admin inspect \
-  --installation-id "$installation_id" &&
-if read -r -p 'connection.generation из этого inspect: ' generation &&
-  [[ "$generation" =~ ^[1-9][0-9]*$ ]]; then
-  "${operator[@]}" run --rm --no-deps -T gitlab-admin activate \
-    --installation-id "$installation_id" --expected-generation "$generation"
-else
-  printf '%s\n' 'GitLab activation generation invalid; activation stopped.' >&2
-  false
-fi
-```
-
-Пустой, нулевой или malformed generation даёт статический diagnostic и ненулевой
-status без activate; SSH-сессия не закрывается. Исправьте ввод по свежему inspect,
-не продолжайте при ошибке. Generation обязателен и положителен. Activate повторно
-authenticates stored token и проверяет доступ к каждому binding вне transaction,
-затем под locks сверяет весь snapshot.
-Нужен хотя бы один enabled/available repository с `wait_for_ci=never`, active rules и
-active `review.system` prompt; paused sibling не блокирует ready sibling, но identities
-и API access всех bindings проверяются. Budget gate отсутствует. Команда меняет только
-connection intake flag, не generation, rules, prompt или budgets; повтор с той же
-generation всё равно проверяет provider. API process flag независимо остаётся обязательным.
-
-Rotate проверяет новый token на всех bindings и expected generation (если передана),
-записывает новый encrypted credential active key и увеличивает generation. Активные
-queued/running/publishing Runs исходной установки терминализируются `cancelled` с
-`credential_rotated`, worker lease снимается, попытки сохраняются; дальнейшие provider
-calls старой authority запрещены. Старые ключи сохраняйте, пока все их envelopes не
-перезаписаны через supported rotation. Удаление key ID раньше срока закрывает decryption.
-
-После onboarding впервые включите API admission через variable
-`GITLAB_WEBHOOK_INTAKE_ENABLED=true` и обычный reviewed deploy, сохранив полный keyring.
-Create/bind сами intake не включают; active connection и process admission нужны оба.
-Если staging уже обслуживает другие активные подключения, не выключайте общий API flag
-ради нового теста: новая installation остаётся disabled до собственного activate.
-
-**Hook после admission.** До приёмочного MR откройте **Settings → Webhooks** и
-проверьте, что именно этот project hook enabled: прежние события до activation/API
-admission могли получать 503 и вызвать [автоотключение GitLab](https://docs.gitlab.com/user/project/integrations/webhooks/#auto-disabled-webhooks).
-Если он Temporarily disabled/Disabled, сначала устраните причину отказа, затем
-выберите **Test → Merge request events** для этого hook. Согласно [Re-enable
-disabled webhooks](https://docs.gitlab.com/user/project/integrations/webhooks/#re-enable-disabled-webhooks),
-успешный ответ **2xx** на Test включает hook снова. Проверьте status в Recent events
-и enabled state; если тест не получает 2xx, остановитесь и исправьте причину.
-Этот Test может создать отдельную receipt/Run: отметьте её как диагностическую и
-не включайте в counts приёмочного MR. Он подтверждает восстановление hook,
-а не real-MR/identical-delivery replay acceptance.
+Test использует **самый новый по времени создания MR** и action `open`; без MR он
+завершается ошибкой — см. upstream [ProjectTestData.merge_requests_events_data](https://gitlab.com/gitlab-org/gitlab/-/blob/master/app/services/concerns/integrations/project_test_data.rb#L34-40).
+[WebHookService.build_headers](https://gitlab.com/gitlab-org/gitlab/-/blob/master/app/services/web_hook_service.rb#L210-230)
+передаёт обычные token/delivery headers. Если выбранный MR открыт и eligible, Test
+может создать **настоящий Run, вызвать LLM и опубликовать review**, заняв этот head
+для webhook-триггера. Выполняйте recovery Test **до создания приёмочного MR**, на
+согласованном отдельном тестовом MR. Если приёмочный MR уже существует, после Test
+сделайте новый push и принимайте **новый head**, измеряя все его Runs/publications.
+Не исключайте диагностический Run из counts того же head: повторное событие может
+получить `HEAD_ALREADY_REVIEWED` (PIPELINE_SPEC T1). Test не заменяет Resend исходной
+доставки. Это проверка текущих upstream исходников; поведение установленной версии,
+реальные headers и результаты остаются отдельным live gate.
 
 **Приёмка реального MR.** После успешного activate, reviewed deploy с process
-admission и enabled hook отправьте реальное MR-событие из разрешённого project
-(fast review требует `ai-review`, `wait_for_ci=never`, готовые rules/prompt и LLM).
+admission и enabled hook отправьте реальное MR-событие из разрешённого project.
+GitLab события **open/update/reopen** для bound enabled/available project проходят
+provider-specific eligibility: active connection, process admission, открытый MR,
+текущий head, `wait_for_ci=never`, готовые active rules/prompt и рабочие workers/LLM.
+Метка `ai-review` применяется только к GitHub, для GitLab она не нужна. Используйте
+изолированный разрешённый project с согласованными тестовыми MR: любой eligible MR
+в нём может запустить review и расход LLM.
 В **Settings → Webhooks →
 Edit → Recent events → View details** сохраните безопасное evidence: время, URL с тем
 же installation UUID, MR/project/head, stable delivery header, HTTP **202** и ответ
@@ -510,7 +563,7 @@ Run/publication counts без новых Runs/discussions/summary. Кнопка 
   --installation-id "$installation_id"
 ```
 
-Проверить `revoked=true`, `intake_enabled=false`. Revoke очищает stored credential,
+Проверить `connection.revoked=true`, `connection.intake_enabled=false`. Revoke очищает stored credential,
 увеличивает generation при изменении и отменяет активные Runs с `installation_revoked`;
 повтор безопасен. До удаления hook повторите исходную доставку и подтвердите отказ
 intake (401 вместо 202), отсутствие новых Runs/публикаций и отмену ранее активной

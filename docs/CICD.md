@@ -247,8 +247,8 @@ staging».
 
 ### 2.4. GitLab staging и trusted operator (#335)
 
-Полный setup create → bind-project → inspect → project webhook → authorized activate →
-process admission → real MR / replay → revoke и удаление test hook находится
+Полный setup create → bind-project → inspect → authorized activate → process admission →
+project webhook → real MR / replay → revoke и удаление test hook находится
 в [SECRETS.md, Installed GitLab](SECRETS.md#installed-gitlab--защищённая-конфигурация-и-управление-169).
 Keyring — protected Environment secret `GITLAB_CREDENTIAL_KEYS`; variables —
 `GITLAB_ACTIVE_KEY_ID`, `GITLAB_ALLOWED_ORIGINS`, optional `GITLAB_PRIVATE_ORIGINS` и
@@ -260,7 +260,7 @@ Keyring — protected Environment secret `GITLAB_CREDENTIAL_KEYS`; variables —
 `python -m app.gitlab_admin` принимает subcommand, DB и `gitlab.env`, без ports,
 GitHub/LLM credentials и broker/cache. Он не создаёт подключения при deploy.
 Compose run команды используют текущие project, `.env`, `compose.yml` и edge/ports
-override, `--no-deps -T`; secret JSON идёт в `--secrets-fd 0` через stdin.
+override, `run --rm --no-deps -T`; secret JSON идёт в `--secrets-fd 0` через stdin.
 Operator использует `pull_policy: missing`, поэтому cached reviewed image после deploy
 не требует нового login. При отсутствии cache нужен отдельный authorized GHCR pull/login
 через protected stdin; deployment удаляет временный pull token. В установленном
@@ -301,7 +301,8 @@ deploy/rollback их не читает и автоматически не уда
    и ручные deploy/rollback на время проверки. Одна CI concurrency group не
    исключает ручные процессы. Не удаляйте каталог во время активной операции.
 2. Смотрите только names/owner/mode/mtime и состояние процессов, не содержимое
-   role files. Для **одного явно выбранного** `.stage.*` внутри этого `APP_DIR`
+   role files. Примеры read-only проверки приведены ниже. Для **одного явно
+   выбранного** `.stage.*` внутри этого `APP_DIR`
    установите, какой завершённой операции он принадлежал; проверьте отсутствие
    deploy/rollback и дочерних процессов, открытых файлов и cwd в нём. Старый mtime
    сам по себе не доказывает abandonment. Если ownership/activity неясны,
@@ -318,6 +319,52 @@ deploy/rollback их не читает и автоматически не уда
    отзовите/замените затронутый credential поддерживаемым способом. Старые key ID
    сохраняйте до поддерживаемой перезаписи всех нужных ciphertext; автоматического
    удаления ключей или stage sweep эта процедура не добавляет.
+
+Пример для Linux-хоста с GNU `stat`/`find`/`ps` и `lsof`: сначала получите у оператора
+точный stage и PID исходной операции из защищённой записи. Нужны права видеть
+**все** процессы и открытые файлы этой операции, включая других пользователей;
+неполная видимость, отсутствующая команда, permission error или иной сбой — stop,
+согласуйте доступ. Этот блок ничего не удаляет и не читает credential contents:
+
+```bash
+# Задайте точные согласованные APP_DIR, stage_path, operation_pid; без glob.
+if [[ -n "${APP_DIR:-}" && -n "${stage_path:-}" &&
+      "$stage_path" == "$APP_DIR"/.stage.* &&
+      "${stage_path%/*}" == "$APP_DIR" && -d "$stage_path" && ! -L "$stage_path" &&
+      "${operation_pid:-}" =~ ^[1-9][0-9]*$ ]] &&
+  command -v stat >/dev/null && command -v find >/dev/null &&
+  command -v ps >/dev/null && command -v lsof >/dev/null; then
+  stat -c 'path=%n owner=%U:%G mode=%a mtime=%y' -- "$APP_DIR" "$stage_path" &&
+  find "$stage_path" -xdev -maxdepth 1 -printf '%y %u:%g %m %TY-%Tm-%TdT%TH:%TM %f\n' &&
+  ps -p "$operation_pid" -o pid=,ppid=,pgid=,comm= &&
+  ps --ppid "$operation_pid" -o pid=,ppid=,pgid=,comm= &&
+  lsof -nP +D "$stage_path"
+else
+  printf '%s\n' 'Stage inspection prerequisites failed; recovery stopped.' >&2
+  false
+fi
+```
+
+`ps` выводит только PID/PPID/PGID/comm, без полного argv с возможными secrets.
+Повторите `ps --ppid <PID> -o pid=,ppid=,pgid=,comm=` для каждого найденного потомка,
+пока не проверено всё дерево (включая сменивших process group детей). Если родитель
+завершился, учтите известных из записи операции детей, в том числе reparented;
+неполное дерево требует остановки. Сверяйте PID
+с записью операции, чтобы не принять повторно использованный PID за прежний.
+Для каждого ещё существующего PID проверьте cwd, подставив его в точный список
+`operation_pids` (через запятую, без пробелов):
+
+```bash
+lsof -nP -a -p "${operation_pids:?set the reviewed operation PID list}" -d cwd
+```
+
+`lsof +D` показывает открытые файлы/cwd внутри выбранного stage; cwd процесса также
+нужно проверить по второму примеру. Не скрывайте stderr и не используйте `|| true`:
+нет вывода/exit 1 (например, процесс завершился), старый mtime или отсутствие PID
+сами по себе **не доказывают** abandonment. При таком результате цепочка остановлена;
+оператор должен подтвердить завершение исходной операции и всех детей с достаточной
+видимостью, при необходимости повторить проверку и только затем отдельно согласовать
+ручное удаление точного пути по п. 3. Ошибку доступа нельзя считать «нет активности».
 
 Retained `api.env` и `gitlab.env` manual deploy/rollback читают строго как generator
 data `NAME='value'`, с multiline values и обязательным завершающим newline каждой
@@ -338,22 +385,37 @@ GitHub-only image (schema guard для rollback всё равно обязате
 Не удаляйте key ID, пока они нужны для сохранённого ciphertext; отключение одной
 тестовой installation — её revoke, а не выключение других tenants общим API flag.
 
-Project hook настраивается **до** activate: Settings → Webhooks, URL
+Новый project hook создаётся **после** успешного separately authorized activate и
+process admission; activate не зависит от hook. Settings → Webhooks, URL
 `https://<staging-api>/webhooks/gitlab/<installation_id>` с UUID из create/inspect,
 тот же protected `webhook_secret` в **Secret token** (`X-Gitlab-Token`), только
-**Merge request events**, SSL verification включена. Receiver требует stable
-`webhook-id` или `Idempotency-Key`; старый webhook UUID недостаточен. [Официальная
-история delivery headers](https://docs.gitlab.com/user/project/integrations/webhooks/#delivery-headers)
+**Merge request events**, SSL verification включена. Сохраните hook, проверьте enabled
+state и лишь затем создавайте приёмочный MR; Test в обычном новом setup не нужен.
+Receiver требует stable `webhook-id` или `Idempotency-Key`; старый webhook UUID
+недостаточен. [История delivery headers](https://docs.gitlab.com/user/project/integrations/webhooks/#delivery-headers)
 указывает введение `Idempotency-Key` в 17.4 и `webhook-id` в 19.0, стабильность обоих
-ID при retry и равенство их значений. Если приходят оба, receiver требует равенство.
-Подробные protected steps и отдельная проверка фактической версии/headers —
-[SECRETS.md](SECRETS.md#installed-gitlab--защищённая-конфигурация-и-управление-169).
-Новый Signing token, custom headers/payload и canonical-check bypass не заменяют
-этот contract. После activation/process admission проверьте, что hook enabled:
-прежние 503 могли вызвать [auto-disable](https://docs.gitlab.com/user/project/integrations/webhooks/#auto-disabled-webhooks).
-Для disabled hook после исправления причины выполните **Test → Merge request events**
-и проверьте **2xx** и enabled state: это [поддерживаемый GitLab re-enable](https://docs.gitlab.com/user/project/integrations/webhooks/#re-enable-disabled-webhooks).
-Отдельный диагностический Test не является real-MR acceptance или replay.
+ID при retry и равенство значений. Если приходят оба, receiver требует равенство.
+Protected steps и проверка установленной версии/headers — [SECRETS.md](SECRETS.md#installed-gitlab--защищённая-конфигурация-и-управление-169).
+Signing token, custom headers/payload и canonical-check bypass не заменяют contract.
+
+Восстановление **существующего** disabled hook — отдельный путь после исправления
+причины, activation и process admission: **Test → Merge request events**, затем
+проверка **2xx** и enabled state ([GitLab re-enable](https://docs.gitlab.com/user/project/integrations/webhooks/#re-enable-disabled-webhooks)).
+По upstream [ProjectTestData](https://gitlab.com/gitlab-org/gitlab/-/blob/master/app/services/concerns/integrations/project_test_data.rb#L34-40)
+Test берёт самый новый MR, отправляет action `open`, а без MR завершается ошибкой;
+[WebHookService](https://gitlab.com/gitlab-org/gitlab/-/blob/master/app/services/web_hook_service.rb#L210-230)
+создаёт обычные token/delivery headers. Открытый eligible MR может получить **настоящий
+Run, LLM-вызовы и публикацию**, заняв head (`HEAD_ALREADY_REVIEWED`, PIPELINE_SPEC T1).
+Сделайте recovery Test на согласованном отдельном MR **до создания приёмочного MR**;
+если приёмочный MR уже есть, после Test отправьте новый push и измеряйте все counts
+для нового head. Нельзя просто исключить диагностический Run того же head из counts.
+Test не заменяет Resend; установленная версия и её live результаты ещё требуют proof.
+
+GitLab open/update/reopen для bound enabled/available project проходят eligibility при
+active connection, process admission, open MR/current head, `wait_for_ci=never`,
+готовых active rules/prompt и рабочих workers/LLM. GitHub-метка `ai-review` для GitLab
+не требуется. Используйте изолированный разрешённый project и только согласованные
+тестовые MR: любой eligible MR может запустить review и расход LLM.
 Затем подтвердите реальную доставку
 через Recent events HTTP 202 и matching installation receipt в логе webhook-worker;
 это intake proof, не `succeeded` Run. Replay — **View details → Resend Request**
@@ -389,7 +451,7 @@ GET /healthcheck
 | `bootstrap` | тот же образ, разово: `alembic upgrade head`, сид промптов | — | проектная |
 | `worker` | тот же образ, `python -m app.worker` (#34): очереди ревью, очередь `index.repo` индексатора графа (#142), leader-цикл | — | только проектная |
 | `webhook-worker` | тот же образ, `python -m app.webhook_worker` (#11): разбор квитанций вебхуков | — | только проектная |
-| `gitlab-admin` | тот же образ, `python -m app.gitlab_admin`, только profile `gitlab-operator`; вручную `run --no-deps -T` | — | проектная DB, без published ports |
+| `gitlab-admin` | тот же образ, `python -m app.gitlab_admin`, только profile `gitlab-operator`; вручную `run --rm --no-deps -T` | — | проектная DB, без published ports |
 | `postgres` | `postgres:17.11-alpine`, по digest | том `postgres-data` | только проектная |
 | `rabbitmq` | `rabbitmq:4.3.6-management-alpine`, по digest, `hostname: rabbitmq` | том `rabbitmq-data` | только проектная |
 | `redis` | `redis:8.10.2-alpine`, по digest, пароль, без персистентности, `maxmemory 128mb` + `allkeys-lru` (кэш, SD §10) | — | только проектная |
