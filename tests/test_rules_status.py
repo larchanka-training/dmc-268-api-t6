@@ -32,8 +32,10 @@ from app.modules.repositories.application.rules_status import (
     RulesStatusKind,
     StoredRulesStatus,
     needs_refresh,
+    status_text,
 )
 from app.modules.reviews.application.policy_documents import MAX_DOCUMENT_BYTES
+from app.modules.reviews.application.policy_errors import PolicyError, PolicyErrorCode
 from app.modules.reviews.infrastructure.github_policy_source import (
     GitHubDefaultBranchHeadSource,
     GitHubRepositoryPolicySource,
@@ -219,9 +221,32 @@ def test_too_large_file_is_invalid_without_reading_its_blob() -> None:
         MAX_DOCUMENT_BYTES,
         MAX_DOCUMENT_BYTES + 1,
     )
-    assert "64 КиБ" in diagnostic.message
-    assert "Где: файл `.review/rules.md`" in diagnostic.message
+    assert diagnostic.message == (
+        "The rules document is over 64 KiB. A review will not run with it; make the document"
+        f" smaller. Where: file `.review/rules.md`, actual {MAX_DOCUMENT_BYTES + 1},"
+        f" allowed {MAX_DOCUMENT_BYTES}."
+    )
     assert not any("/git/blobs/" in path for path in github.paths)
+
+
+def test_bad_mask_diagnostic_is_english_and_carries_the_mask() -> None:
+    reading = _read(FakeGitHub(rules=b"```review-ignore\nsrc/a?.py\n```\n"))
+
+    (diagnostic,) = reading.diagnostics
+    assert diagnostic.excerpt == "src/a?.py"
+    assert diagnostic.message.startswith(
+        "The review-ignore block has a mask that is not allowed. Where: file `.review/rules.md`,"
+        " line 2, column "
+    )
+    assert diagnostic.message.endswith(", mask `src/a?.py`.")
+
+
+@pytest.mark.parametrize("code", list(PolicyErrorCode))
+def test_every_policy_code_has_an_english_status_text(code: PolicyErrorCode) -> None:
+    text = status_text(PolicyError(code, "technical"))
+
+    assert text != code.value
+    assert text.isascii()
 
 
 def test_symlink_is_invalid() -> None:
@@ -352,7 +377,7 @@ def test_unreadable_commit_sha_is_a_transient_failure(answer: str) -> None:
     assert (reading.status, reading.sha) == (RulesStatusKind.UNAVAILABLE, None)
     assert reading.diagnostics[0] == RulesDiagnostic(
         "policy_fetch_transient",
-        "Не удалось прочитать документы правил из GitHub.",
+        "Could not read the rules documents from GitHub.",
         None,
         None,
         True,
@@ -595,7 +620,7 @@ def test_a_repository_the_app_lost_is_access_denied_without_a_request(
         diagnostics=(
             RulesDiagnostic(
                 "policy_access_denied",
-                "Нет доступа к документам правил репозитория.",
+                "No access to the rules documents of the repository.",
                 None,
                 None,
                 False,
@@ -687,7 +712,7 @@ def test_refresh_saves_each_claimed_read_and_an_unexpected_failure_as_transient(
         diagnostics=(
             RulesDiagnostic(
                 "policy_fetch_transient",
-                "Не удалось прочитать документы правил из GitHub.",
+                "Could not read the rules documents from GitHub.",
                 None,
                 None,
                 True,

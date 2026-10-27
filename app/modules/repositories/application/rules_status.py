@@ -24,16 +24,11 @@ from typing import Protocol
 from uuid import UUID
 
 from app.common.application.unit_of_work import UnitOfWork
-from app.modules.reviews.application.check_runs import failure_reason
 from app.modules.reviews.application.policy_documents import (
     LoadPolicyDocuments,
     PolicyDocumentSource,
 )
-from app.modules.reviews.application.policy_errors import (
-    PolicyError,
-    PolicyErrorCode,
-    policy_error_detail,
-)
+from app.modules.reviews.application.policy_errors import PolicyError, PolicyErrorCode
 from app.modules.reviews.application.policy_snapshot import RULES_DOCUMENT_PATH
 from app.modules.reviews.application.review_ignore import parse_review_ignore
 
@@ -52,15 +47,77 @@ RULES_STATUS_MAX_RETRY_AFTER = timedelta(days=1)
 RULES_REFRESH_LEASE = timedelta(minutes=5)
 RULES_REFRESH_BATCH = 20
 
-# The run texts of these codes speak of a run; the settings page shows no run.
-_STATUS_TEXTS = {
+# The English texts of the settings page, by code (#341). The UI shows its own text for a
+# code it knows, in the language of the interface, and this one only for a code it does not
+# know yet; the check-run of a run keeps its own texts (check_runs.py), which speak of a run.
+_STATUS_TEXTS: dict[PolicyErrorCode, str] = {
     PolicyErrorCode.DOCUMENT_TOO_LARGE: (
-        "Документ правил превышает 64 КиБ. Ревью с ним не выполнится; уменьшите документ."
+        "The rules document is over 64 KiB. A review will not run with it;"
+        " make the document smaller."
     ),
+    PolicyErrorCode.DOCUMENT_DECODE_ERROR: (
+        "The rules document must be valid UTF-8. Fix the encoding."
+    ),
+    PolicyErrorCode.DOCUMENT_CONTROL_CHARACTER: (
+        "The rules document has a control character that is not allowed."
+    ),
+    PolicyErrorCode.DOCUMENT_TYPE_UNSUPPORTED: (
+        "The rules document must be a regular file in Git."
+    ),
+    PolicyErrorCode.IGNORE_BLOCK_DUPLICATE: (
+        ".review/rules.md may have only one review-ignore block."
+    ),
+    PolicyErrorCode.IGNORE_BLOCK_NESTED: (
+        "The review-ignore block must be at the top level of .review/rules.md."
+    ),
+    PolicyErrorCode.IGNORE_BLOCK_UNCLOSED: (
+        "The review-ignore block in .review/rules.md is not closed."
+    ),
+    PolicyErrorCode.IGNORE_INFO_INVALID: "review-ignore takes no extra parameters.",
+    PolicyErrorCode.IGNORE_PATTERN_INVALID: (
+        "The review-ignore block has a mask that is not allowed."
+    ),
+    PolicyErrorCode.IGNORE_LIMIT_EXCEEDED: (
+        "The review-ignore block has too many masks, or a mask is too long."
+    ),
+    PolicyErrorCode.PATH_INVALID: "The changes have a file path that is not allowed.",
+    PolicyErrorCode.MATCH_BUDGET_EXCEEDED: (
+        "The review-ignore masks are too costly to check. Simplify the rules."
+    ),
+    PolicyErrorCode.PROMPT_BUDGET_EXCEEDED: (
+        "The rules documents do not fit in the model context in full."
+    ),
+    PolicyErrorCode.ACCESS_DENIED: "No access to the rules documents of the repository.",
     PolicyErrorCode.REVISION_UNAVAILABLE: (
-        "Ревизия default branch недоступна: GitHub не подтвердил, есть ли файл правил."
+        "The default branch revision is unavailable: GitHub did not confirm whether the"
+        " rules file exists."
     ),
+    PolicyErrorCode.FETCH_TRANSIENT: "Could not read the rules documents from GitHub.",
+    PolicyErrorCode.RATE_LIMITED: "GitHub limited the request rate while reading the rules.",
+    PolicyErrorCode.SNAPSHOT_INTEGRITY_ERROR: "The rules snapshot is damaged or inconsistent.",
+    PolicyErrorCode.CONTEXT_VIOLATION: "A forbidden source got into the model context.",
 }
+
+
+def status_text(error: PolicyError) -> str:
+    """The English text of a policy error and where it is, for the settings page (#341)."""
+    parts = []
+    if error.source_path is not None:
+        parts.append(f"file `{error.source_path}`")
+    if error.line is not None:
+        parts.append(f"line {error.line}")
+    if error.column is not None:
+        parts.append(f"column {error.column}")
+    if error.excerpt is not None:
+        parts.append(f"mask `{error.excerpt}`")
+    if error.actual is not None and error.limit is not None:
+        parts.append(f"actual {error.actual}, allowed {error.limit}")
+    elif error.limit is not None:
+        parts.append(f"allowed {error.limit}")
+    text = _STATUS_TEXTS.get(error.code, error.code.value)
+    return f"{text} Where: {', '.join(parts)}." if parts else text
+
+
 # Errors of the document itself; every other policy error means the read proved nothing.
 _DOCUMENT_ERRORS = frozenset(
     {
@@ -88,7 +145,7 @@ class RulesStatusKind(StrEnum):
 
 @dataclass(frozen=True)
 class RulesDiagnostic:
-    """One RULES_FORMAT_SPEC §9 diagnostic; the message is the author-facing text."""
+    """One RULES_FORMAT_SPEC §9 diagnostic; the message is the English author-facing text."""
 
     code: str
     message: str
@@ -100,20 +157,16 @@ class RulesDiagnostic:
     # ``actual`` is only a lower bound (§9), such as the bytes of a stopped blob read.
     actual_is_lower_bound: bool = False
     pattern_index: int | None = None
+    # The offending mask, shortened and safe for markup, when the error has one (#341).
+    excerpt: str | None = None
     # The ``Retry-After`` of a rate limit; stored for the next GET, never shown.
     retry_after: timedelta | None = None
 
     @classmethod
     def from_error(cls, error: PolicyError) -> RulesDiagnostic:
-        detail = policy_error_detail(error.message)
-        text = _STATUS_TEXTS.get(error.code)
         return cls(
             code=error.code.value,
-            message=(
-                failure_reason(error.code.value, detail)
-                if text is None
-                else (f"{text} Где: {detail}." if detail else text)
-            ),
+            message=status_text(error),
             line=error.line,
             column=error.column,
             retryable=error.retryable,
@@ -121,6 +174,7 @@ class RulesDiagnostic:
             actual=error.actual,
             actual_is_lower_bound=error.actual_is_lower_bound,
             pattern_index=error.pattern_index,
+            excerpt=error.excerpt,
             retry_after=(
                 None
                 if error.retry_after is None

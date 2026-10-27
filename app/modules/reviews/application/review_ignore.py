@@ -367,7 +367,7 @@ class IgnoreMatcher:
                 policy_base_sha=self._policy_base_sha,
                 limit=limit,
                 actual=actual,
-                unit="переходов",
+                unit="transitions",
                 actual_is_lower_bound=True,
             )
 
