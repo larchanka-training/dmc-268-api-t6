@@ -68,6 +68,39 @@
 - Коды бюджета проверяются только unit-тестами: `policy_match_budget_exceeded` — `tests/test_review_ignore.py::test_exhausted_budget_stops_the_run`, `policy_prompt_budget_exceeded` на `main` этапа 1 (до #130 F2) был недостижим (остаток #130). Тогда ожидалось: когда текст rules.md попадёт в prompt, сценарий at-limit (65 536 байт) может упереться в бюджет 12 000 токенов (RFS §3.3) раньше байтового лимита.
 - Заголовок и summary check-run не проверяются; проверяется только `conclusion` по PIPELINE_SPEC §7.
 
+### Этап 1 на v4
+
+**Что добавлено.** С #130 F2 (PR #332) каждый новый run GitHub закрепляет `review.system` v4 и идёт по пути снимка, где текст rules.md доходит до reviewer и verifier. Этап 1 засевал v1 и проверял только legacy-путь, поэтому текст в prompt не проверялся (см. выше). Теперь seed — параметр: `[legacy]` — прежний seed (`review.system` v1, conventions v1), `[v4]` — упакованные `review.system` v4, `review.conventions` v2 и `review.verifier` v2 с checksum исходных файлов и фиксированными id. Fake LLM отвечает по схеме: `ReviewOutputV2` — находка на добавленной строке `app/service.py` с `evidence_refs` на блок файла, `VerificationOutput` — `supported` для каждого кандидата.
+
+**Окружение.**
+
+| Параметр | Значение |
+| --- | --- |
+| Дата | 2026-10-28 |
+| База | `main` `f8b09818`; ссылки `file:line` на код приложения — по этой базе |
+| Локально | PostgreSQL и RabbitMQ локального compose, своя БД и отдельный vhost |
+| Время | 32 теста, 84–95 с против 63–66 с у 24 тестов до изменения (два прогона подряд, load average 6–10) |
+
+**Сценарии.** 32 теста вместо 24. На обоих seed — 7 сценариев: missing, valid, agents-md, empty (вместе с missing), all-ignored, head-added, head-changed. At-limit — отдельный тест на каждом seed. 16 сбоев загрузки (9 невалидных документов, symlink, 5 отказов чтения, truncated) идут только на `[v4]` без суффикса id: они завершают `policy.load` до выбора пути; пробный прогон всех 16 на обоих seed дал одинаковый итог (48 passed). На `[v4]` проверяется, что:
+
+- блок `<repository_rules block_id="policy-rules" path=".review/rules.md">` во входе reviewer и verifier ровно один и равен ожидаемому: весь текст base построчно (valid, head-changed), `status="absent"` (missing, agents-md, head-added), `status="empty"` (empty);
+- valid: текст правил вне `<changed_files>`, `<excluded_files count="1" />`, ни пути, ни маркера `generated/client.py` нет ни в одном вызове, включая verifier; agents-md: оба файла есть и у verifier;
+- head-added, head-changed: маска `**/*` из head не применена, текст head доходит до модели только как код head — diff и выдержки L3 (RFS §5.3);
+- на `[legacy]` `<repository_rules` нет ни в одном вызове.
+
+**At-limit на v4.** 65 536 байт проходят байтовый лимит, но отрендеренный блок — 21 911 токенов counter/v2 против 12 000 (RFS §3.3). Итог: `failed`, `policy_prompt_budget_exceeded`, `attempt = 1`, 0 LLM, ревью нет, check-run `neutral`; диагностика в `policy.load`: `limit = 12000`, `actual = 21911`, `source_path = null` (RFS §9). Строка `run_policy_snapshots` есть: снимок сохраняется до проверки бюджета, RFS §7.2 это допускает. Это совпадает со спецификацией, xfail нет. На `[legacy]` at-limit по-прежнему `succeeded`: legacy-envelope текста не передаёт.
+
+**Мутационная проверка.** Каждая мутация вносилась в код приложения, затем прогонялся весь файл и правка откатывалась (`git checkout`).
+
+| # | Мутация | Результат | Покраснел тест |
+| --- | --- | --- | --- |
+| V1 | `policy_snapshot_unit_of_work.py:175`: политика читается и рендерится с `head_sha` вместо `base_sha` | красный | head-added, head-changed на обоих seed (`skipped` вместо `succeeded`: применилась маска `**/*` из head) и все 16 сбоев загрузки |
+| V2 | `prompt_builder.py:255`: блок `<repository_rules>` снят из входа ревью на пути снимка | красный | `[v4]` missing, valid, agents-md, empty, head-added, head-changed — сравнение блока во входе `ReviewOutputV2`; сам run при этом `succeeded` |
+| V3a | `execute_review.py:352-354`: reflection pass получает список изменённых файлов без фильтра политики | зелёный, эквивалентная мутация: у исключённого файла нет модельного patch (`get_run_diff.py:122-123`), во входе ревью его нет и до фильтра | — |
+| V3b | V3a и `get_run_diff.py:122-123`: модельный patch исключённого файла сохраняется | красный | valid `[v4]`: `failed`, `policy_context_violation` — сработал pre-send guard verifier (`reflection_pass.py:781-783`), не проверка тел; `[legacy]` и вход ревью чисты |
+| V3c | V3b и снят guard verifier | красный | valid `[v4]`: маркер `generated/client.py` во входе verifier — проверка тел всех вызовов |
+| V4 | `review_context_stage.py:492`: снята проверка бюджета политики в `policy.load` | красный | at-limit `[v4]`: `policy.load` без ошибки. Код и `failed` при этом те же: бюджет ловит более поздняя проверка, поэтому тест проверяет и шаг |
+
 ## Этап 2 — envelope, инъекции и A/B
 
 ### AC6 — envelope и инъекции (#248)
@@ -291,4 +324,4 @@ uv run python scripts/parallel_runs_load.py --project dmc163load --runs 5 --llm-
 
 - #247 ч.2 — диагностика §9; ч.3 — атрибуция §8.2.
 - #168 ч.4 — `policy_path_invalid` против `unsupported_path`; ч.6 — размер blob, вторичный 403, дата в `Retry-After`.
-- Остаток #130 — `policy_prompt_budget_exceeded` недостижим; строка RFS §11 про `unsupported_path` и `**/*` (на `main` модель вызывается и публикуется clean).
+- Остаток #130 — строка RFS §11 про `unsupported_path` и `**/*` (на `main` модель вызывается и публикуется clean). `policy_prompt_budget_exceeded` на пути снимка достижим и совпадает со спецификацией — «Этап 1 на v4».
