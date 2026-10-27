@@ -159,8 +159,8 @@ Base: `origin/main` `f40cabf3`. Branch `fix/168-trace-and-output`, DB and vhost 
   (`test_run_policy_context_origin_postgres.py:226`, `:538`; `test_rag_review_context_postgres.py:216`;
   `test_snapshot_path_e2e_postgres.py:325`).
 - **Done when:**
-  - [ ] the gates pass;
-  - [ ] `rg -n "_locators|locators=" app/worker.py` is empty.
+  - [x] the gates pass;
+  - [x] `rg -n "_locators|locators=" app/worker.py` is empty.
 
 ## After merge
 
