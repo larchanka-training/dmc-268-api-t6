@@ -326,5 +326,5 @@ uv run python scripts/parallel_runs_load.py --project dmc163load --runs 5 --llm-
 ## Расхождения со спецификацией
 
 - #247 ч.2 — диагностика §9; ч.3 — атрибуция §8.2.
-- #168 ч.4 — `policy_path_invalid` против `unsupported_path`; ч.6 — размер blob, вторичный 403, дата в `Retry-After`.
-- Строка RFS §11 про `unsupported_path` и `**/*` на пути снимка выполняется с #130 F5: coverage none, 0 LLM, `succeeded`/`neutral` (TEST_PLAN §2.8, таблица Б); legacy-run (≤ v3) для того же набора по-прежнему вызывает модель. `policy_prompt_budget_exceeded` на пути снимка достижим и совпадает со спецификацией — «Этап 1 на v4».
+- #168 ч.4 — `policy_path_invalid` против `unsupported_path`: закрыто строкой RFS §9 (защитный код, на `main` недостижим); ч.6 — размер blob, вторичный 403, дата в `Retry-After`: покрыто (#347, TEST_PLAN §2.8).
+- Строка RFS §11 про `unsupported_path` и `**/*` на пути снимка выполняется с #130 F5: coverage none, 0 LLM, `succeeded`/`neutral` (TEST_PLAN §2.8, таблица Б); legacy-run (≤ v3) для того же набора по-прежнему вызывает модель и сохраняет partial, а не clean. `policy_prompt_budget_exceeded` на пути снимка достижим и совпадает со спецификацией — «Этап 1 на v4» и `test_review_path.py`.
