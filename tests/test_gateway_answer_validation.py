@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
+from collections.abc import Callable
 from copy import deepcopy
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -42,11 +44,15 @@ from app.modules.reviews.application.review_output import (
 from app.modules.reviews.infrastructure.llm.answers import (
     REVIEW_OUTPUT_SCHEMA_PATH,
     InvalidAnswer,
+    conventions_schema,
     parse_review_answer,
     provider_schema,
+    review_answer_contract,
     review_output_schema,
+    review_output_schema_v2,
     validate_review_answer,
     validate_review_answer_v2,
+    verifier_output_schema,
 )
 from app.modules.reviews.infrastructure.llm.ecb_fx import FxQuote, FxQuoteResult
 from app.modules.reviews.infrastructure.llm.gateway import LlmGateway, StructuredTask
@@ -319,6 +325,110 @@ def test_provider_schema_is_the_schema_file_without_any_annotation() -> None:
     assert sent["required"] == ["findings", "summary"]
 
 
+def test_provider_schema_rewrites_only_the_final_anchor_of_a_pattern_keyword() -> None:
+    schema = {
+        "type": "object",
+        "properties": {
+            "inner": {"type": "string", "pattern": r"^a(?![\s\S])|b$"},
+            "described": {"type": "string", "description": r"ends with (?![\s\S])"},
+            "pattern": {
+                "$comment": "a property named pattern is a sub-schema",
+                "type": "string",
+                "description": r"ends with (?![\s\S])",
+                "pattern": r"^c(?![\s\S])",
+            },
+        },
+    }
+
+    assert provider_schema(schema) == {
+        "type": "object",
+        "properties": {
+            "inner": {"type": "string", "pattern": r"^a(?![\s\S])|b$"},
+            "described": {"type": "string", "description": r"ends with (?![\s\S])"},
+            "pattern": {
+                "type": "string",
+                "description": r"ends with (?![\s\S])",
+                "pattern": r"^c$",
+            },
+        },
+    }
+
+
+# Every schema ``models.py`` sends as ``response_format``, built the way it builds them.
+PROVIDER_SCHEMAS: dict[str, Callable[[], dict[str, Any]]] = {
+    "conventions": conventions_schema,
+    "review-v1": lambda: provider_schema(review_answer_contract(None).schema),
+    "review-v2": lambda: provider_schema(review_answer_contract("v4").schema),
+    "verifier": lambda: provider_schema(verifier_output_schema()),
+}
+# Lookaround, backreferences, ``(?P<``/``(?P=``: Python ``re`` has them, providers may not.
+UNPORTABLE_REGEX = re.compile(r"\(\?(?:<?[=!]|P[<=])|\\[1-9]|\\k<")
+
+
+@pytest.mark.parametrize(
+    ("regex", "flagged"),
+    [
+        (r"(?=x)", True),
+        (r"(?!x)", True),
+        (r"(?<=x)", True),
+        (r"(?<!x)", True),
+        (r"\1", True),
+        (r"\k<name>", True),
+        (r"(?P=name)", True),
+        (r"(?P<name>x)", True),
+        (r"^(?P<part>a)(?P=part)$", True),
+        (r"(?:x)", False),
+        (r"(?<name>x)", False),
+        (r"^a$", False),
+        (r"\d+", False),
+        (r"[A-Za-z0-9_-]+", False),
+        (r"^(?:\.review/rules\.md|AGENTS\.md|service-defaults:[A-Za-z0-9_-]+)$", False),
+    ],
+)
+def test_the_unportable_regex_filter_flags_lookarounds_backreferences_and_python_named_groups(
+    regex: str, flagged: bool
+) -> None:
+    assert (UNPORTABLE_REGEX.search(regex) is not None) is flagged
+
+
+def _schema_regexes(node: object) -> list[str]:
+    """Every regex of a schema: ``pattern`` values and ``patternProperties`` keys."""
+    if isinstance(node, dict):
+        pattern = node.get("pattern")
+        found = [pattern] if isinstance(pattern, str) else []
+        if isinstance(node.get("patternProperties"), dict):
+            found.extend(node["patternProperties"])
+        for value in node.values():
+            found.extend(_schema_regexes(value))
+        return found
+    if isinstance(node, list):
+        return [regex for item in node for regex in _schema_regexes(item)]
+    return []
+
+
+@pytest.mark.parametrize("name", sorted(PROVIDER_SCHEMAS))
+def test_no_provider_schema_carries_a_lookaround_or_a_backreference(name: str) -> None:
+    regexes = _schema_regexes(PROVIDER_SCHEMAS[name]())
+
+    assert [regex for regex in regexes if UNPORTABLE_REGEX.search(regex)] == []
+
+
+def test_the_provider_gets_the_v2_rule_name_pattern_with_an_ecma_end_anchor() -> None:
+    sent = provider_schema(review_answer_contract("v4").schema)
+
+    assert sent["$defs"]["ReviewFindingV2"]["properties"]["rule_name"]["pattern"] == (
+        r"^(?:\.review/rules\.md|AGENTS\.md|service-defaults:[A-Za-z0-9_-]+)$"
+    )
+    # Local validation keeps the file's anchor: Python's `$` also matches before a final "\n".
+    on_file = review_output_schema_v2()["$defs"]["ReviewFindingV2"]["properties"]["rule_name"]
+    assert on_file["pattern"] == (
+        r"^(?:\.review/rules\.md|AGENTS\.md|service-defaults:[A-Za-z0-9_-]+)(?![\s\S])"
+    )
+    finding = dict(SAMPLE_V2["findings"][0], rule_name="AGENTS.md\n")
+    with pytest.raises(InvalidAnswer):
+        validate_review_answer_v2(json.dumps(dict(SAMPLE_V2, findings=[finding])))
+
+
 def test_a_long_echoed_value_keeps_the_message_short_and_its_verdict() -> None:
     value = json.loads(json.dumps(SAMPLE))
     value["findings"][0]["body"] = "x" * 20_000
@@ -535,9 +645,12 @@ def test_review_prompt_v4_sends_the_v2_schema_and_accepts_a_v2_answer() -> None:
     (request,) = transport.requests
     assert request.response_schema is not None
     assert request.response_schema.name == "ReviewOutputV2"
-    assert request.response_schema.schema == {
-        key: value for key, value in on_disk.items() if key not in {"$schema", "$id"}
-    }
+    expected = {key: value for key, value in on_disk.items() if key not in {"$schema", "$id"}}
+    # The one rewrite for the provider: the Python-only end anchor is sent as ECMA-262 `$`.
+    expected["$defs"]["ReviewFindingV2"]["properties"]["rule_name"]["pattern"] = (
+        r"^(?:\.review/rules\.md|AGENTS\.md|service-defaults:[A-Za-z0-9_-]+)$"
+    )
+    assert request.response_schema.schema == expected
     assert output == SAMPLE_V2
     assert kinds == ["primary"]
 

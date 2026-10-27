@@ -3,7 +3,8 @@
 A review answer must pass ``review/schemas/review-output.schema.json`` and then
 ``parse_review_output``; the collected messages feed the one repair call (§5.1). There
 is no second copy of the schema: the file is read once and sent to the provider as is,
-minus its ``$``-annotations. A run whose snapshot binds review prompt ``v4`` or ``v5`` is
+minus its ``$``-annotations and with a Python-only end anchor in a ``pattern`` written as
+``$`` (``provider_schema``). A run whose snapshot binds review prompt ``v4`` or ``v5`` is
 held to ``review-output.schema.v2.json`` instead (``review_answer_contract``).
 """
 
@@ -44,6 +45,9 @@ VERIFIER_OUTPUT_SCHEMA_PATH = (
     Path(__file__).resolve().parents[5] / "review" / "schemas" / "verifier-output.schema.v1.json"
 )
 _ANNOTATIONS = frozenset({"$schema", "$id", "$comment"})
+# Python's ``$`` also matches before a final newline, so a schema file ends a ``pattern``
+# with this lookahead; ECMA-262 ``$`` without the ``m`` flag already means the end of input.
+_PYTHON_END_ANCHOR = r"(?![\s\S])"
 # The review answer schema follows the bound review prompt version (#130 decision 9).
 _V1_REVIEW_PROMPT_VERSIONS = frozenset({"v1", "v2", "v3"})
 _MAX_ERRORS = 20
@@ -71,19 +75,37 @@ def _review_validator() -> Draft202012Validator:
 
 
 def provider_schema(schema: Mapping[str, Any]) -> dict[str, Any]:
-    """The schema for ``response_format``: identical, without ``$``-annotations at any level."""
+    """The schema for ``response_format``: a copy without ``$``-annotations at any level.
+
+    A ``pattern`` that ends with the Python-only end anchor ``(?![\\s\\S])`` ends with ``$``
+    instead: the provider reads the ECMA-262 dialect, where that is the same anchor, and may
+    reject a lookahead (#130). Local validation keeps the file's own pattern.
+    """
     stripped: Any = _strip_annotations(schema)
     return dict(stripped)
 
 
 def _strip_annotations(node: Any) -> Any:
+    # A ``pattern`` keyword is a string; a property named ``pattern`` is a sub-schema.
     if isinstance(node, Mapping):
         return {
-            key: _strip_annotations(value) for key, value in node.items() if key not in _ANNOTATIONS
+            key: (
+                _ecma_end_anchor(value)
+                if key == "pattern" and isinstance(value, str)
+                else _strip_annotations(value)
+            )
+            for key, value in node.items()
+            if key not in _ANNOTATIONS
         }
     if isinstance(node, list):
         return [_strip_annotations(item) for item in node]
     return node
+
+
+def _ecma_end_anchor(pattern: str) -> str:
+    if pattern.endswith(_PYTHON_END_ANCHOR):
+        return pattern.removesuffix(_PYTHON_END_ANCHOR) + "$"
+    return pattern
 
 
 def validate_review_answer(content: str) -> dict[str, object]:
