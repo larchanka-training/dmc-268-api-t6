@@ -299,7 +299,8 @@ def validate_v2_attribution(
                     )
             else:
                 expected_rev = pr_meta.head_sha
-                if expected_rev is not None and block.revision != expected_rev:
+                # Fail closed like LEFT (D7, #144): without a head no revision passes.
+                if not expected_rev or block.revision != expected_rev:
                     return (
                         False,
                         f"revision_mismatch: block revision '{block.revision}' "

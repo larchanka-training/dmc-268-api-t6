@@ -183,9 +183,12 @@ class ReviewContext:
     # Snapshot path only (R2): the L2-L4 blocks of the attempt's context payload, shown as
     # numbered excerpts after the changed files; L1 stays ``changed_files``.
     context_blocks: tuple[ContextBlock, ...] = ()
-    # The RAG slot of the payload, kept only for a prompt with a retrieved section; #144
-    # renders it, nothing shows it before.
+    # The RAG slot of the payload, kept only for a prompt with a retrieved section and
+    # shown in it after the L2-L4 excerpts.
     retrieved: tuple[RetrievedBlock, ...] = ()
+    # Whether the bound prompt version has a retrieved section (ADR 0001 §9): it follows
+    # the version, not the slot, so an empty slot still shows an empty section.
+    retrieved_section: bool = False
     # Snapshot path only (P6-4): changed files the ignore policy withheld, shown as one
     # counter and never by name (RULES_FORMAT_SPEC §5.3).
     excluded_files: int = 0
@@ -271,6 +274,8 @@ class PromptBuilder:
         )
         if context.context_blocks:
             blocks.append(render_context_excerpts(context.context_blocks))
+        if context.retrieved_section:
+            blocks.append(render_retrieved_excerpts(context.retrieved))
         blocks.append(
             _container("omitted_files", "\n".join(_text(path) for path in context.omitted_files))
         )
@@ -491,6 +496,33 @@ class PromptBuilder:
                 )
             )
 
+        # The retrieved section follows the bound prompt version, as ``render_input`` shows
+        # it; each block carries its selection metadata (ADR 0001 §9).
+        for retrieved in context.retrieved if context.retrieved_section else ():
+            source = retrieved.source
+            ranges = tuple((item.start_line, item.end_line) for item in source.ranges)
+            blocks.append(
+                ManifestBlock(
+                    block_id=retrieved.block_id,
+                    source_role=SourceRole.RETRIEVED_EXCERPT,
+                    source_kind="source_code",
+                    path=source.path,
+                    revision=source.revision,
+                    side=_manifest_side(source.side),
+                    start_line=min((start for start, _ in ranges), default=None),
+                    end_line=max((end for _, end in ranges), default=None),
+                    shown_line_count=sum(end - start + 1 for start, end in ranges),
+                    shown_ranges=ranges,
+                    tokens=tokens(_render_excerpt(retrieved)),
+                    repository_id=source.repository_id,
+                    # A RAG block is shown whole or dropped whole, never cut.
+                    truncated=False,
+                    selection_reason=source.reason,
+                    index_commit_sha=retrieved.index_commit_sha,
+                    edge_kind=retrieved.edge_kind.value,
+                )
+            )
+
         return CallManifest(
             call_id=call_id,
             run_id=run_id,
@@ -651,7 +683,13 @@ def render_context_excerpts(blocks: tuple[ContextBlock, ...]) -> str:
     return _container("context_excerpts", "\n".join(_render_excerpt(block) for block in blocks))
 
 
-def _render_excerpt(block: ContextBlock) -> str:
+def render_retrieved_excerpts(blocks: tuple[RetrievedBlock, ...]) -> str:
+    """The RAG blocks of the context payload in their own untrusted section (ADR 0001 §9),
+    one excerpt each with its source lines, as ``render_context_excerpts`` shows L2-L4."""
+    return _container("retrieved_excerpts", "\n".join(_render_excerpt(block) for block in blocks))
+
+
+def _render_excerpt(block: ContextBlock | RetrievedBlock) -> str:
     source = block.source
     attributes = [f'block_id="{_attribute(block.block_id)}"', f'level="{block.level.value}"']
     if source.path is not None:
@@ -665,8 +703,9 @@ def _render_excerpt(block: ContextBlock) -> str:
         number for item in source.ranges for number in range(item.start_line, item.end_line + 1)
     ]
     # CONTRACT: the stage cuts a block's text from exactly its source ranges, one text line
-    # per source line (review_context.py ``_excerpt``, ``_symbol_block``). A block that breaks
-    # it would show lines under numbers they do not have: the call is refused, terminally.
+    # per source line (review_context.py ``_excerpt``, ``_symbol_block``; a RAG place that
+    # breaks it is dropped when the slot is filled). A block that breaks it would show lines
+    # under numbers they do not have: the call is refused, terminally.
     text_lines = block.text.split("\n")
     try:
         lines = (

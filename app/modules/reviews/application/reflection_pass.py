@@ -41,9 +41,11 @@ from app.modules.reviews.application.prompt_builder import (
     file_block_id,
     get_rule_check_ids,
     render_context_excerpts,
+    render_retrieved_excerpts,
     xml_attribute,
     xml_text,
 )
+from app.modules.reviews.application.review_context import definitions_read_by
 from app.modules.reviews.application.review_output import (
     EvidenceRef,
     RequirementRef,
@@ -52,7 +54,7 @@ from app.modules.reviews.application.review_output import (
 from app.modules.reviews.application.run_failures import RunCancelled, RunFailure
 
 if TYPE_CHECKING:
-    from app.modules.reviews.application.review_context import ContextBlock
+    from app.modules.reviews.application.review_context import ContextBlock, RetrievedBlock
 
 type VerificationStatus = Literal["supported", "contradicted", "insufficient_context"]
 
@@ -172,12 +174,17 @@ class VerifierWindow(Protocol):
 
 
 def _verifier_code_context(
-    files: tuple[ChangedFile, ...], excerpts: tuple[ContextBlock, ...] = ()
+    files: tuple[ChangedFile, ...],
+    excerpts: tuple[ContextBlock, ...] = (),
+    retrieved: tuple[RetrievedBlock, ...] = (),
 ) -> str:
-    """The verifier's code: the changed files, then the excerpts the candidates cite."""
+    """The verifier's code: the changed files, then the excerpts and the RAG blocks the
+    candidates cite."""
     parts = [PromptBuilder.render_changed_files(files, include_block_id=True)]
     if excerpts:
         parts.append(render_context_excerpts(excerpts))
+    if retrieved:
+        parts.append(render_retrieved_excerpts(retrieved))
     return "<code_context>\n" + "\n".join(parts) + "\n</code_context>"
 
 
@@ -201,16 +208,34 @@ def _protected_lines(
     return protected_lines
 
 
+def _cited_ids(candidates: tuple[CandidateFindingItem, ...]) -> set[str]:
+    """The block ids the candidates cite as evidence."""
+    return {ref.block_id for cand in candidates for ref in cand.finding.evidence_refs}
+
+
 def _cited_excerpts(
     blocks: tuple[ContextBlock, ...], candidates: tuple[CandidateFindingItem, ...]
 ) -> tuple[ContextBlock, ...]:
     """The L2-L4 blocks a candidate cites as evidence, in payload order (CVS §7.1)."""
-    cited = {ref.block_id for cand in candidates for ref in cand.finding.evidence_refs}
+    cited = _cited_ids(candidates)
     return tuple(block for block in blocks if block.block_id in cited)
 
 
-# Whether a choice of diff files and cited excerpts fits the verifier prompt.
-type _CodeFits = Callable[[tuple[ChangedFile, ...], tuple[ContextBlock, ...]], bool]
+def _cited_retrieved(
+    blocks: tuple[RetrievedBlock, ...], candidates: tuple[CandidateFindingItem, ...]
+) -> tuple[RetrievedBlock, ...]:
+    """The RAG blocks a candidate cites, each place with the definitions it read (CVS §3.5),
+    in payload order: the verifier is shown again what the review was (ADR 0001 §9)."""
+    cited = _cited_ids(candidates)
+    cited_blocks = tuple(block for block in blocks if block.block_id in cited)
+    read = definitions_read_by(blocks, cited_blocks)
+    return tuple(block for block in blocks if block in cited_blocks or block in read)
+
+
+# Whether a choice of diff files, cited excerpts and cited RAG blocks fits the verifier prompt.
+type _CodeFits = Callable[
+    [tuple[ChangedFile, ...], tuple[ContextBlock, ...], tuple[RetrievedBlock, ...]], bool
+]
 
 
 def _with_lines(file: ChangedFile, indices: tuple[int, ...]) -> ChangedFile:
@@ -231,16 +256,21 @@ def _fit_verifier_code(
     rules: tuple[ReviewRule, ...],
     candidates: tuple[CandidateFindingItem, ...],
     fits: _CodeFits,
-) -> tuple[tuple[ChangedFile, ...], tuple[ContextBlock, ...]]:
-    """The diff lines and the cited excerpts the verifier is shown.
+    *,
+    retrieved: tuple[RetrievedBlock, ...] = (),
+) -> tuple[tuple[ChangedFile, ...], tuple[ContextBlock, ...], tuple[RetrievedBlock, ...]]:
+    """The diff lines, the cited excerpts and the cited RAG blocks the verifier is shown.
 
     Fit order, decided by the tech lead on 2026-10-25 (CVS §7.1): the own diff lines of
     every candidate, across all files; then the cited excerpts, each whole or not at all,
     in payload order; then the other diff lines, file by file. A candidate whose excerpt
-    is left out gets ``insufficient_context`` from the verifier.
+    is left out gets ``insufficient_context`` from the verifier. Among the excerpts, as the
+    review fit keeps them (CVS §4.1): L4 first, as the payload has it, then each RAG place
+    with the definitions it read (CVS §3.5), then each definition a candidate cites on its
+    own, then L2 and L3.
     """
-    if fits(files, excerpts):
-        return files, excerpts
+    if fits(files, excerpts, retrieved):
+        return files, excerpts, retrieved
     protected = _protected_lines(files, candidates)
     order = sorted(
         range(len(files)),
@@ -251,9 +281,10 @@ def _fit_verifier_code(
         ),
         reverse=True,
     )
-    # The shown line indices of each kept file, and the shown excerpts.
+    # The shown line indices of each kept file, and the shown excerpts and RAG blocks.
     kept: dict[int, tuple[int, ...]] = {}
     shown: tuple[ContextBlock, ...] = ()
+    shown_retrieved: tuple[RetrievedBlock, ...] = ()
 
     def chosen(index: int | None = None, indices: tuple[int, ...] = ()) -> tuple[ChangedFile, ...]:
         picks = kept if index is None else {**kept, index: indices}
@@ -262,13 +293,15 @@ def _fit_verifier_code(
     def widest(index: int, base: tuple[int, ...], extra: tuple[int, ...]) -> tuple[int, ...]:
         """``base`` and the longest prefix of ``extra`` that fits, in file order."""
         best = 0
-        if extra and fits(chosen(index, tuple(sorted((*base, *extra)))), shown):
+        if extra and fits(chosen(index, tuple(sorted((*base, *extra)))), shown, shown_retrieved):
             best = len(extra)
         else:
             low, high = 1, len(extra) - 1
             while low <= high:
                 mid = (low + high) // 2
-                if fits(chosen(index, tuple(sorted((*base, *extra[:mid])))), shown):
+                if fits(
+                    chosen(index, tuple(sorted((*base, *extra[:mid])))), shown, shown_retrieved
+                ):
                     best, low = mid, mid + 1
                 else:
                     high = mid - 1
@@ -281,10 +314,29 @@ def _fit_verifier_code(
         if picked := widest(index, (), own):
             kept[index] = picked
 
-    # 2. The cited excerpts next to them; one that does not fit leaves room for the next.
-    for excerpt in excerpts:
-        if fits(chosen(), (*shown, excerpt)):
-            shown = (*shown, excerpt)
+    # 2. The cited excerpts next to them: L4, then each RAG place with the definitions it
+    #    read (one shown already costs nothing), then each cited definition on its own (its
+    #    place may have been left out), then L2 and L3. One that does not fit leaves room
+    #    for the next; what is shown keeps the payload order.
+    cited = _cited_ids(candidates)
+    read = definitions_read_by(retrieved, retrieved)
+    takes: list[tuple[tuple[ContextBlock, ...], tuple[RetrievedBlock, ...]]] = [
+        *(((block,), ()) for block in excerpts if block.level.value == "L4"),
+        *(
+            ((), (place, *definitions_read_by(retrieved, (place,))))
+            for place in retrieved
+            if place not in read
+        ),
+        *(((), (block,)) for block in read if block.block_id in cited),
+        *(((block,), ()) for block in excerpts if block.level.value != "L4"),
+    ]
+    for more, more_retrieved in takes:
+        picks = tuple(block for block in excerpts if block in shown or block in more)
+        picks_retrieved = tuple(
+            block for block in retrieved if block in shown_retrieved or block in more_retrieved
+        )
+        if fits(chosen(), picks, picks_retrieved):
+            shown, shown_retrieved = picks, picks_retrieved
 
     # 3. The other lines: own lines step 1 had no room for first, then the rest in file order.
     for index in order:
@@ -300,7 +352,7 @@ def _fit_verifier_code(
         if picked := widest(index, base, extra):
             kept[index] = picked
 
-    return chosen(), shown
+    return chosen(), shown, shown_retrieved
 
 
 def _fit_changed_files_for_verifier(
@@ -317,10 +369,14 @@ def _fit_changed_files_for_verifier(
     so it goes once #303 lands.
     """
 
-    def fits(chosen: tuple[ChangedFile, ...], shown: tuple[ContextBlock, ...]) -> bool:
+    def fits(
+        chosen: tuple[ChangedFile, ...],
+        shown: tuple[ContextBlock, ...],
+        _retrieved: tuple[RetrievedBlock, ...],
+    ) -> bool:
         return counter.count(_verifier_code_context(chosen, shown)) <= max_tokens
 
-    fitted, _ = _fit_verifier_code(files, (), rules, candidates, fits)
+    fitted, _, _ = _fit_verifier_code(files, (), rules, candidates, fits)
     return fitted
 
 
@@ -556,13 +612,21 @@ class VerifierPromptBuilder:
         mandatory_text = self._system_prompt + "\n".join(mandatory_blocks)
         mandatory_tokens = counter.count(mandatory_text)
 
-        # 4. Code context: the diff and the cited excerpts, each with its block_id
-        def user_message(files: tuple[ChangedFile, ...], excerpts: tuple[ContextBlock, ...]) -> str:
-            code = _verifier_code_context(files, excerpts)
+        # 4. Code context: the diff, the cited excerpts and RAG blocks, each with its block_id
+        def user_message(
+            files: tuple[ChangedFile, ...],
+            excerpts: tuple[ContextBlock, ...],
+            retrieved: tuple[RetrievedBlock, ...],
+        ) -> str:
+            code = _verifier_code_context(files, excerpts, retrieved)
             return "\n".join([*mandatory_blocks[:-1], code, candidates_xml])
 
         fitted_files = context.changed_files
         shown_excerpts = _cited_excerpts(context.context_blocks, candidates)
+        # The RAG blocks follow the prompt's retrieved section, as the manifest lists them.
+        shown_retrieved = (
+            _cited_retrieved(context.retrieved, candidates) if context.retrieved_section else ()
+        )
         if context.policy_snapshot is not None:
             max_send_budget = send_budget_for(
                 context.policy_snapshot.execution_profile,
@@ -581,30 +645,42 @@ class VerifierPromptBuilder:
             # (system and user message counted apart, the user message as sent), so a fitted
             # prompt never fails the guard.
             def prompt_tokens(
-                files: tuple[ChangedFile, ...], excerpts: tuple[ContextBlock, ...]
+                files: tuple[ChangedFile, ...],
+                excerpts: tuple[ContextBlock, ...],
+                retrieved: tuple[RetrievedBlock, ...],
             ) -> int:
-                return system_tokens + counter.count(user_message(files, excerpts))
+                return system_tokens + counter.count(user_message(files, excerpts, retrieved))
 
-            if prompt_tokens((), ()) > max_send_budget:
+            if prompt_tokens((), (), ()) > max_send_budget:
                 raise RunFailure(
                     "verification_context_overflow",
-                    f"Verifier prompt is {prompt_tokens((), ())} tokens, "
+                    f"Verifier prompt is {prompt_tokens((), (), ())} tokens, "
                     f"limit is {max_send_budget}",
                 )
-            fitted_files, shown_excerpts = _fit_verifier_code(
+            fitted_files, shown_excerpts, shown_retrieved = _fit_verifier_code(
                 context.changed_files,
                 shown_excerpts,
                 context.rules,
                 candidates,
-                lambda files, excerpts: prompt_tokens(files, excerpts) <= max_send_budget,
+                lambda files, excerpts, retrieved: (
+                    prompt_tokens(files, excerpts, retrieved) <= max_send_budget
+                ),
+                retrieved=shown_retrieved,
             )
 
         prompt = VerifierPrompt(
-            system=self._system_prompt, user=user_message(fitted_files, shown_excerpts)
+            system=self._system_prompt,
+            user=user_message(fitted_files, shown_excerpts, shown_retrieved),
         )
 
-        # The manifest names exactly the shown code: never an uncited or dropped excerpt.
-        fitted_context = replace(context, changed_files=fitted_files, context_blocks=shown_excerpts)
+        # The manifest names exactly the shown code: never an uncited or dropped excerpt or
+        # RAG block.
+        fitted_context = replace(
+            context,
+            changed_files=fitted_files,
+            context_blocks=shown_excerpts,
+            retrieved=shown_retrieved,
+        )
         prompt_builder_manifest = builder.build_manifest(
             fitted_context, call_id=call_id, stage="verification", counter=manifest_counter
         )
@@ -848,7 +924,8 @@ class ReflectionPass:
                             )
                     else:
                         expected_rev = context.pr_meta.head_sha
-                        if expected_rev is not None and block.revision != expected_rev:
+                        # Fail closed like LEFT (D7, #144): without a head no revision passes.
+                        if not expected_rev or block.revision != expected_rev:
                             raise VerificationInvalidOutputError(
                                 f"Decision {cand_id_clean} evidence_ref {block_id_clean} "
                                 f"revision '{block.revision}' does not match PR revision"

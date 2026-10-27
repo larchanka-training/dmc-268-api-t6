@@ -25,7 +25,9 @@ from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from app.modules.reviews.application.context_provenance import SourceRole
+from app.modules.code_index.domain.enums import EdgeKind
+from app.modules.reviews.application.context_provenance import LineRange, SourceRef, SourceRole
+from app.modules.reviews.application.diff_map import DiffSide
 from app.modules.reviews.application.llm import (
     LlmCallFailed,
     LlmCallKind,
@@ -37,7 +39,12 @@ from app.modules.reviews.application.llm import (
 )
 from app.modules.reviews.application.policy_snapshot import CallManifest, ManifestBlock
 from app.modules.reviews.application.prepare_policy_snapshot import pinned_to_json
-from app.modules.reviews.application.prompt_builder import ChangedFile, DiffLine
+from app.modules.reviews.application.prompt_builder import ChangedFile, DiffLine, ReviewContext
+from app.modules.reviews.application.review_context import (
+    ContextLevel,
+    Representation,
+    RetrievedBlock,
+)
 from app.modules.reviews.application.run_failures import RunFailure
 from app.modules.reviews.application.run_trace import TransactionalRunTrace
 from app.modules.reviews.infrastructure.context_manifest_store import (
@@ -64,6 +71,7 @@ from tests.test_gateway_review_model import (
     Transport,
     _context,
     _finding,
+    _meta,
     _profile,
     _snapshot,
 )
@@ -189,13 +197,19 @@ def _stored_gateway(
     )
 
 
-async def _review(env: Env, transport: Transport, *, fallback: bool = False) -> dict[str, Any]:
+async def _review(
+    env: Env,
+    transport: Transport,
+    *,
+    fallback: bool = False,
+    context: ReviewContext | None = None,
+) -> dict[str, Any]:
     engine = env.engine()
     factory = async_sessionmaker(engine, expire_on_commit=False)
     try:
         await review_with_gateway(
             _stored_gateway(factory, transport, fallback=fallback),
-            _context(FILES, SNAPSHOT),
+            _context(FILES, SNAPSHOT) if context is None else context,
             _run(),
         )
         async with factory() as session:
@@ -334,6 +348,136 @@ def test_a_fallback_call_stores_its_own_manifest(env: Env) -> None:
         block["block_id"] for block in base["blocks"]
     ]
     assert len({base["call_id"], repair["call_id"], fallback["call_id"]}) == 3
+
+
+# The RAG slot of a snapshot-path prompt: a place at the head and the base definition it
+# read (CVS §3.5), named as the snapshot path names them. ``tokens`` is the stage's count;
+# the manifest counts the rendered excerpt with the pinned counter (D5).
+BASE_SHA = "e" * 40
+RAG_DEFINITION = RetrievedBlock(
+    block_id="RAG:eeeeeeeeeeee:1b2c3d4e5f607182",
+    level=ContextLevel.RAG,
+    source=SourceRef(
+        role=SourceRole.RETRIEVED_EXCERPT,
+        repository_id=SNAPSHOT.repository_id,
+        revision=BASE_SHA,
+        path="app/defs.py",
+        blob_sha=None,
+        origin_paths=(),
+        side=DiffSide.LEFT,
+        ranges=(LineRange(1, 1),),
+        reason="rag_broken_reference",
+    ),
+    representation=Representation.SIGNATURE,
+    text="def helper(value):",
+    tokens=1,
+    edge_kind=EdgeKind.USES_IMPORTED,
+    index_commit_sha="d" * 40,
+)
+RAG_PLACE = RetrievedBlock(
+    block_id="RAG:head_sha_123:0a1b2c3d4e5f6071",
+    level=ContextLevel.RAG,
+    source=replace(
+        RAG_DEFINITION.source,
+        revision="head_sha_123",
+        path="app/caller.py",
+        side=DiffSide.RIGHT,
+        ranges=(LineRange(3, 4), LineRange(7, 7)),
+    ),
+    representation=Representation.EXACT_LINES,
+    text="def caller():\n    x = helper(1)\n    return x",
+    tokens=1,
+    edge_kind=EdgeKind.IMPORTS,
+    index_commit_sha="d" * 40,
+    definitions=(RAG_DEFINITION.source,),
+)
+# The two excerpts as the retrieved section renders them, counted with counter/v2.
+RAG_PLACE_BLOCK = (
+    '<excerpt block_id="RAG:head_sha_123:0a1b2c3d4e5f6071" level="RAG" path="app/caller.py" '
+    'revision="head_sha_123" side="RIGHT" representation="exact_lines">\n'
+    '<line n="3">def caller():</line>\n'
+    '<line n="4">    x = helper(1)</line>\n'
+    '<line n="7">    return x</line>\n'
+    "</excerpt>"
+)
+RAG_DEFINITION_BLOCK = (
+    '<excerpt block_id="RAG:eeeeeeeeeeee:1b2c3d4e5f607182" level="RAG" path="app/defs.py" '
+    f'revision="{BASE_SHA}" side="LEFT" representation="signature">\n'
+    '<line n="1">def helper(value):</line>\n'
+    "</excerpt>"
+)
+
+
+@pytest.mark.integration
+def test_retrieved_blocks_are_recorded_with_their_selection_and_rendered_tokens(
+    env: Env,
+) -> None:
+    transport = Transport(VALID)
+    context = replace(
+        _context(FILES, SNAPSHOT),
+        pr_meta=replace(_meta(), diff_old_sha=BASE_SHA),
+        retrieved=(RAG_PLACE, RAG_DEFINITION),
+        retrieved_section=True,
+    )
+
+    observed = asyncio.run(_review(env, transport, context=context))
+
+    [row] = observed["manifests"]
+    # The counted text is the shown text: both excerpts are in the call's user message.
+    [request] = transport.requests
+    assert RAG_PLACE_BLOCK + "\n" + RAG_DEFINITION_BLOCK in request.messages[1].content
+    assert [block["block_id"] for block in row["blocks"]] == [
+        "policy-rules",
+        "file-app-main-py-990f7e41",
+        RAG_PLACE.block_id,
+        RAG_DEFINITION.block_id,
+    ]
+    place, definition = row["blocks"][2:]
+    assert place == {
+        "block_id": RAG_PLACE.block_id,
+        "source_role": "retrieved_excerpt",
+        "source_kind": "source_code",
+        "path": "app/caller.py",
+        "revision": "head_sha_123",
+        "side": "RIGHT",
+        "content_sha256": None,
+        "start_line": 3,
+        "end_line": 7,
+        "shown_line_count": 3,
+        "shown_ranges": [[3, 4], [7, 7]],
+        "tokens": _tokens(RAG_PLACE_BLOCK),
+        "repository_id": str(SNAPSHOT.repository_id),
+        # A RAG block is only ever dropped whole (D5).
+        "truncated": False,
+        "selection_reason": "rag_broken_reference",
+        "index_commit_sha": "d" * 40,
+        "edge_kind": "imports",
+    }
+    assert definition == {
+        **place,
+        "block_id": RAG_DEFINITION.block_id,
+        "path": "app/defs.py",
+        "revision": BASE_SHA,
+        "side": "LEFT",
+        "start_line": 1,
+        "end_line": 1,
+        "shown_line_count": 1,
+        "shown_ranges": [[1, 1]],
+        "tokens": _tokens(RAG_DEFINITION_BLOCK),
+        "edge_kind": "uses_imported",
+    }
+    [(_, _, response)] = [
+        action for action in observed["actions"] if action[0] == "context.manifest"
+    ]
+    retrieved_tokens = _tokens(RAG_PLACE_BLOCK) + _tokens(RAG_DEFINITION_BLOCK)
+    assert response["tokens_by_role"] == {
+        "policy_document": _tokens(RULES_BLOCK),
+        "diff": _tokens(FILE_BLOCK),
+        "retrieved_excerpt": retrieved_tokens,
+    }
+    # The retrieved share is part of the call's input tokens, as every counted role is.
+    assert response["input_tokens"] == row["input_tokens"]
+    assert sum(response["tokens_by_role"].values()) <= row["input_tokens"]
 
 
 RETRIEVED = ManifestBlock(

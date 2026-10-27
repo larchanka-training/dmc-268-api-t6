@@ -1622,7 +1622,7 @@ class FileContext(BaseModel):
     priority: float                       # для инспектора: почему этот файл получил больше
 
 class RetrievedBlock(BaseModel):          # RAG v1: неизменённый код кандидата графа (CVS §3.5)
-    block_id: str                         # "RAG:<path>:<a>-<b>,…"
+    block_id: str                         # "RAG:<path>:<a>-<b>,…" в payload; промпт, manifest и evidence snapshot-пути — "RAG:<revision[:12]>:<sha256(block_id)[:16]>" (CVS §3.5)
     level: Literal["RAG"]                 # после L4, до L2/L3
     source: SourceRef                     # role retrieved_excerpt; revision, blob_sha и side — сторона PR (head_sha/RIGHT, diff_old_sha/LEFT); path, ranges; reason — rag_reverse_edge | rag_broken_reference
     representation: Literal["exact_lines", "signature"]  # объявление целиком или импорт и сигнатура; LEFT — всегда signature
@@ -1630,6 +1630,7 @@ class RetrievedBlock(BaseModel):          # RAG v1: неизменённый к�
     tokens: int
     edge_kind: Literal["imports", "uses_imported"]  # метаданные выбора
     index_commit_sha: str                 # публикация индекса, по которой выбран кандидат; никогда не ревизия текста
+    definitions: list[SourceRef]          # место битой ссылки: источники прочитанных им определений LEFT, входит с ними или не входит (CVS §3.5); иначе пуст
 
 class ContextPayload(BaseModel):          # сущность роли 6
     run_id: str

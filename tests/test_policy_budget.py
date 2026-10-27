@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import replace
+from typing import Literal
 
 import pytest
 
@@ -626,6 +627,218 @@ def test_provenance_guard_rejects_foreign_revision() -> None:
     assert (
         "LEFT revision does not match PR revisions: diff_old_sha 'None'" in exc_info.value.message
     )
+
+
+# D7 (#144): a code block is bound to the PR head and to the snapshot's repository.
+
+_CODE_ROLES = (
+    SourceRole.DIFF,
+    SourceRole.SOURCE_EXCERPT,
+    SourceRole.AST_EXCERPT,
+    SourceRole.RETRIEVED_EXCERPT,
+)
+
+
+def _code_context(snapshot: PolicySnapshot, *, head_sha: str | None) -> ReviewContext:
+    return ReviewContext(
+        system="SYSTEM",
+        rules=(),
+        agents_md=None,
+        conventions=RepoConventions((), ()),
+        pr_meta=PullRequestMeta(
+            "PR",
+            None,
+            "u",
+            "b",
+            "main",
+            (),
+            1,
+            1,
+            0,
+            False,
+            False,
+            head_sha=head_sha,
+            diff_old_sha="sha_old_789",
+        ),
+        changed_files=(),
+        omitted_files=(),
+        policy_snapshot=snapshot,
+    )
+
+
+def _code_manifest(snapshot: PolicySnapshot, block: ManifestBlock) -> CallManifest:
+    return CallManifest(
+        call_id=uuid.uuid4(), run_id=snapshot.run_id, stage="review", blocks=(block,)
+    )
+
+
+@pytest.mark.parametrize("head_sha", [None, "sha_head_123"], ids=["no-head", "other-head"])
+@pytest.mark.parametrize("side", ["RIGHT", None], ids=["right", "side-less"])
+@pytest.mark.parametrize("role", _CODE_ROLES)
+def test_provenance_guard_rejects_a_head_side_code_block_off_the_pr_head(
+    role: SourceRole, side: Literal["RIGHT"] | None, head_sha: str | None
+) -> None:
+    # A missing head no longer lets any revision through: the non-LEFT branch fails closed.
+    snapshot = make_snapshot()
+    block = ManifestBlock(
+        block_id="b-head",
+        source_role=role,
+        source_kind="source_code",
+        path="app/main.py",
+        revision="foreign_revision_456",
+        side=side,
+        repository_id=snapshot.repository_id,
+    )
+    with pytest.raises(PolicyError) as exc_info:
+        verify_provenance_pre_send_guard(
+            _code_manifest(snapshot, block),
+            context=_code_context(snapshot, head_sha=head_sha),
+            snapshot=snapshot,
+        )
+    assert exc_info.value.code == PolicyErrorCode.CONTEXT_VIOLATION
+    assert f"does not match PR revisions: head_sha '{head_sha}'" in exc_info.value.message
+
+
+@pytest.mark.parametrize("side", ["RIGHT", None], ids=["right", "side-less"])
+@pytest.mark.parametrize("role", _CODE_ROLES)
+def test_provenance_guard_passes_a_code_block_of_the_pr_head_and_repository(
+    role: SourceRole, side: Literal["RIGHT"] | None
+) -> None:
+    snapshot = make_snapshot()
+    block = ManifestBlock(
+        block_id="b-head",
+        source_role=role,
+        source_kind="source_code",
+        path="app/main.py",
+        revision="sha_head_123",
+        side=side,
+        repository_id=snapshot.repository_id,
+    )
+    verify_provenance_pre_send_guard(
+        _code_manifest(snapshot, block),
+        context=_code_context(snapshot, head_sha="sha_head_123"),
+        snapshot=snapshot,
+    )
+
+
+@pytest.mark.parametrize("role", _CODE_ROLES)
+def test_provenance_guard_rejects_a_code_block_of_another_repository(role: SourceRole) -> None:
+    snapshot = make_snapshot()
+    block = ManifestBlock(
+        block_id="b-repo",
+        source_role=role,
+        source_kind="source_code",
+        path="app/main.py",
+        revision="sha_head_123",
+        side="RIGHT",
+        repository_id=uuid.uuid4(),
+    )
+    with pytest.raises(PolicyError) as exc_info:
+        verify_provenance_pre_send_guard(
+            _code_manifest(snapshot, block),
+            context=_code_context(snapshot, head_sha="sha_head_123"),
+            snapshot=snapshot,
+        )
+    assert exc_info.value.code == PolicyErrorCode.CONTEXT_VIOLATION
+    assert "repository does not match the policy snapshot" in exc_info.value.message
+
+
+@pytest.mark.parametrize("with_snapshot", [True, False], ids=["snapshot", "no-snapshot"])
+def test_provenance_guard_rejects_a_retrieved_excerpt_without_a_repository(
+    with_snapshot: bool,
+) -> None:
+    snapshot = make_snapshot()
+    block = ManifestBlock(
+        block_id="b-rag",
+        source_role=SourceRole.RETRIEVED_EXCERPT,
+        source_kind="source_code",
+        path="app/helper.py",
+        revision="sha_head_123",
+        side="RIGHT",
+    )
+    with pytest.raises(PolicyError) as exc_info:
+        verify_provenance_pre_send_guard(
+            _code_manifest(snapshot, block),
+            context=_code_context(snapshot, head_sha="sha_head_123"),
+            snapshot=snapshot if with_snapshot else None,
+        )
+    assert exc_info.value.code == PolicyErrorCode.CONTEXT_VIOLATION
+    assert "has no repository" in exc_info.value.message
+
+
+@pytest.mark.parametrize("side", ["RIGHT", "LEFT"], ids=["right", "left"])
+@pytest.mark.parametrize("with_snapshot", [True, False], ids=["snapshot", "no-snapshot"])
+def test_provenance_guard_rejects_a_retrieved_excerpt_without_a_revision(
+    with_snapshot: bool, side: Literal["RIGHT", "LEFT"]
+) -> None:
+    # A RAG block is read at a side of the PR: without a revision no side check can run.
+    snapshot = make_snapshot()
+    block = ManifestBlock(
+        block_id="b-rag",
+        source_role=SourceRole.RETRIEVED_EXCERPT,
+        source_kind="source_code",
+        path="app/helper.py",
+        side=side,
+        repository_id=snapshot.repository_id,
+    )
+    with pytest.raises(PolicyError) as exc_info:
+        verify_provenance_pre_send_guard(
+            _code_manifest(snapshot, block),
+            context=_code_context(snapshot, head_sha="sha_head_123"),
+            snapshot=snapshot if with_snapshot else None,
+        )
+    assert exc_info.value.code == PolicyErrorCode.CONTEXT_VIOLATION
+    assert "has no revision" in exc_info.value.message
+
+
+def test_provenance_guard_passes_a_non_retrieved_code_block_without_a_repository() -> None:
+    # The legacy path's code blocks carry no repository: only a RAG block must name one.
+    snapshot = make_snapshot()
+    block = ManifestBlock(
+        block_id="b-diff",
+        source_role=SourceRole.DIFF,
+        source_kind="source_code",
+        path="app/main.py",
+        revision="sha_head_123",
+        side="RIGHT",
+    )
+    verify_provenance_pre_send_guard(
+        _code_manifest(snapshot, block),
+        context=_code_context(snapshot, head_sha="sha_head_123"),
+        snapshot=snapshot,
+    )
+
+
+@pytest.mark.parametrize(
+    ("path", "message"),
+    [
+        ("../etc/passwd", "directory traversal"),
+        ("internal/helper.py", "references ignored path matching deny-set"),
+    ],
+    ids=["traversal", "ignored"],
+)
+def test_provenance_guard_still_refuses_a_retrieved_excerpt_of_a_foreign_path(
+    path: str, message: str
+) -> None:
+    # The head and the repository match: the path check alone refuses the block.
+    snapshot = make_snapshot(ignore_patterns=("internal/**",))
+    block = ManifestBlock(
+        block_id="b-rag",
+        source_role=SourceRole.RETRIEVED_EXCERPT,
+        source_kind="source_code",
+        path=path,
+        revision="sha_head_123",
+        side="RIGHT",
+        repository_id=snapshot.repository_id,
+    )
+    with pytest.raises(PolicyError) as exc_info:
+        verify_provenance_pre_send_guard(
+            _code_manifest(snapshot, block),
+            context=_code_context(snapshot, head_sha="sha_head_123"),
+            snapshot=snapshot,
+        )
+    assert exc_info.value.code == PolicyErrorCode.CONTEXT_VIOLATION
+    assert message in exc_info.value.message
 
 
 def test_provenance_guard_rejects_rules_block_when_absent_in_snapshot() -> None:

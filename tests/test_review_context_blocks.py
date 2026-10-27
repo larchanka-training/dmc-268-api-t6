@@ -2,14 +2,17 @@
 
 The stage builds L1-L4 (CONTEXT_AND_VERIFICATION_SPEC §3-4); the review prompt shows L1 as
 the changed files and, on the snapshot path, every L2-L4 block as a numbered excerpt that
-names its block, path, revision, side and level. The fit drops excerpts in the reverse of
-the selection order of CVS §4.1 (L1 → L4 → RAG → L2 → L3): L3, then L2, then L4, before it
-trims a changed file. An ignored file is counted, never named (RULES_FORMAT_SPEC §5.3).
+names its block, path, revision, side and level; a prompt version with a retrieved section
+shows the RAG blocks after them in their own section (#144). The fit drops excerpts in the
+reverse of the selection order of CVS §4.1 (L1 → L4 → RAG → L2 → L3): L3, then L2, then the
+RAG places, each with the definitions only it read, then L4, before it trims a changed file.
+An ignored file is counted, never named (RULES_FORMAT_SPEC §5.3).
 """
 
 from __future__ import annotations
 
 import asyncio
+import re
 from dataclasses import replace
 from hashlib import sha256
 from typing import Any
@@ -50,6 +53,7 @@ from app.modules.reviews.application.review_context import (
     RetrievedBlock,
     ReviewContextPayload,
     snapshot_block,
+    snapshot_retrieved,
 )
 from app.modules.reviews.application.review_output import EvidenceRef
 from app.modules.reviews.application.review_path import ReviewBinding
@@ -311,16 +315,176 @@ def test_fit_keeps_every_excerpt_that_fits() -> None:
 
 
 # The execute_review side: what the stage hands over reaches the snapshot-path prompt only.
+# Lines 3-4 of its path, one text line per source line, as the stage cuts it.
 RETRIEVED = RetrievedBlock(
-    block_id="RAG:app/caller.py:2-3",
+    block_id="RAG:app/caller.py:3-4",
     level=ContextLevel.RAG,
     source=replace(L2_WINDOW.source, role=SourceRole.RETRIEVED_EXCERPT, path="app/caller.py"),
     representation=Representation.EXACT_LINES,
-    text="RETRIEVED_CALLER_TEXT",
+    text="def caller():\n    return RETRIEVED_CALLER_TEXT",
     tokens=5,
     edge_kind=EdgeKind.USES_IMPORTED,
     index_commit_sha="c" * 40,
 )
+BASE = "b" * 40
+# The definition a broken-reference place reads, at the base.
+RETRIEVED_DEFINITION = replace(
+    RETRIEVED,
+    block_id="RAG:app/defs.py:1-1",
+    source=replace(
+        RETRIEVED.source,
+        path="app/defs.py",
+        revision=BASE,
+        side=DiffSide.LEFT,
+        ranges=(LineRange(1, 1),),
+        reason="rag_broken_reference",
+    ),
+    representation=Representation.SIGNATURE,
+    text="def load(key):",
+)
+
+
+def test_the_retrieved_section_follows_the_excerpts_with_one_rag_excerpt_per_block() -> None:
+    context = replace(
+        _context((L2_WINDOW,)), retrieved=(RETRIEVED, RETRIEVED_DEFINITION), retrieved_section=True
+    )
+
+    user = PromptBuilder().build_prompt(context).user
+
+    section = (
+        "<retrieved_excerpts>\n"
+        '<excerpt block_id="RAG:app/caller.py:3-4" level="RAG" path="app/caller.py" '
+        f'revision="{HEAD}" side="RIGHT" representation="exact_lines">\n'
+        '<line n="3">def caller():</line>\n'
+        '<line n="4">    return RETRIEVED_CALLER_TEXT</line>\n'
+        "</excerpt>\n"
+        '<excerpt block_id="RAG:app/defs.py:1-1" level="RAG" path="app/defs.py" '
+        f'revision="{BASE}" side="LEFT" representation="signature">\n'
+        '<line n="1">def load(key):</line>\n'
+        "</excerpt>\n"
+        "</retrieved_excerpts>"
+    )
+    assert f"</context_excerpts>\n{section}\n<omitted_files>" in user
+    assert user.count('level="RAG"') == 2
+
+
+def test_a_prompt_with_a_retrieved_section_and_no_block_shows_it_empty() -> None:
+    # The section follows the prompt version, not the slot: both A/B arms run one version.
+    context = replace(_context(()), retrieved_section=True)
+
+    user = PromptBuilder().build_prompt(context).user
+
+    assert "</changed_files>\n<retrieved_excerpts>\n\n</retrieved_excerpts>\n<omitted_files>" in (
+        user
+    )
+
+
+@pytest.mark.parametrize("snapshot", [True, False], ids=["v4", "legacy"])
+def test_without_a_retrieved_section_retrieved_blocks_change_no_prompt_byte(
+    snapshot: bool,
+) -> None:
+    context = _context((L2_WINDOW,))
+    if not snapshot:
+        context = replace(context, policy_snapshot=None)
+
+    user = (
+        PromptBuilder()
+        .build_prompt(replace(context, retrieved=(RETRIEVED, RETRIEVED_DEFINITION)))
+        .user
+    )
+
+    assert user == PromptBuilder().build_prompt(context).user
+    assert "<retrieved_excerpts>" not in user and 'level="RAG"' not in user
+
+
+def test_without_a_retrieved_section_the_manifest_lists_no_retrieved_block() -> None:
+    # The manifest follows the prompt version as the prompt does, whatever the slot holds.
+    context = _context((L2_WINDOW,))
+
+    manifest = PromptBuilder().build_manifest(
+        replace(context, retrieved=(RETRIEVED, RETRIEVED_DEFINITION)), call_id=RUN_ID
+    )
+
+    assert manifest == PromptBuilder().build_manifest(context, call_id=RUN_ID)
+    assert all(block.source_role != SourceRole.RETRIEVED_EXCERPT for block in manifest.blocks)
+
+
+# Two broken-reference places and the base definitions they read (CVS §3.5), as the slot
+# admits them: the second place shares the first one's definition and reads one of its own.
+FIRST_PLACE = replace(RETRIEVED, definitions=(RETRIEVED_DEFINITION.source,))
+OWN_DEFINITION = replace(
+    RETRIEVED_DEFINITION,
+    block_id="RAG:app/own.py:1-1",
+    source=replace(RETRIEVED_DEFINITION.source, path="app/own.py"),
+    text="def own(key):",
+)
+SECOND_PLACE = replace(
+    RETRIEVED,
+    block_id="RAG:app/second.py:3-4",
+    source=replace(RETRIEVED.source, path="app/second.py"),
+    definitions=(RETRIEVED_DEFINITION.source, OWN_DEFINITION.source),
+)
+SLOT = (FIRST_PLACE, RETRIEVED_DEFINITION, SECOND_PLACE, OWN_DEFINITION)
+
+
+def _with_slot(
+    blocks: tuple[ContextBlock, ...], retrieved: tuple[RetrievedBlock, ...] = SLOT
+) -> ReviewContext:
+    return replace(_context(blocks), retrieved=retrieved, retrieved_section=True)
+
+
+@pytest.mark.parametrize(
+    ("blocks", "retrieved"),
+    [
+        ((L4_SIGNATURE, L2_WINDOW, L2_SECOND), SLOT),
+        ((L4_SIGNATURE,), SLOT),
+        ((L4_SIGNATURE,), (FIRST_PLACE, RETRIEVED_DEFINITION)),
+        ((L4_SIGNATURE,), ()),
+        ((), ()),
+    ],
+    ids=["l3-first", "then-l2", "then-the-last-place", "then-the-first-place", "l4-last"],
+)
+@pytest.mark.parametrize("counter", [EstimatedTokenCounter(), _CountOnly()], ids=["fast", "plain"])
+def test_fit_drops_l3_and_l2_then_rag_places_then_l4_before_any_changed_file(
+    blocks: tuple[ContextBlock, ...], retrieved: tuple[RetrievedBlock, ...], counter: Any
+) -> None:
+    budget = prompt_tokens(_with_slot(blocks, retrieved), EstimatedTokenCounter())
+
+    fitted = fit_review_context(_with_slot(ORDERED), max_prompt_tokens=budget, counter=counter)
+
+    assert (fitted.context_blocks, fitted.retrieved) == (blocks, retrieved)
+    assert fitted.changed_files == (MAIN,)
+    assert fitted.omitted_files == ("app/too_big.py",)
+
+
+@pytest.mark.parametrize("counter", [EstimatedTokenCounter(), _CountOnly()], ids=["fast", "plain"])
+def test_a_rag_place_leaves_with_what_only_it_read_and_a_shared_definition_stays(
+    counter: Any,
+) -> None:
+    # Room for the second place, not for its own definition: the place goes with it, and
+    # the definition the first place also reads stays.
+    budget = prompt_tokens(
+        _with_slot((), (FIRST_PLACE, RETRIEVED_DEFINITION, SECOND_PLACE)), EstimatedTokenCounter()
+    )
+
+    fitted = fit_review_context(_with_slot(()), max_prompt_tokens=budget, counter=counter)
+
+    assert fitted.retrieved == (FIRST_PLACE, RETRIEVED_DEFINITION)
+    # A context whose only excerpts are retrieved blocks is fitted before any file is cut.
+    assert fitted.changed_files == (MAIN,)
+
+
+@pytest.mark.parametrize("counter", [EstimatedTokenCounter(), _CountOnly()], ids=["fast", "plain"])
+def test_fit_trims_changed_files_only_after_every_retrieved_block_is_gone(counter: Any) -> None:
+    # The empty section stays: it follows the prompt version, not the slot.
+    budget = prompt_tokens(_with_slot((), ()), EstimatedTokenCounter()) - 1
+
+    fitted = fit_review_context(_with_slot(ORDERED), max_prompt_tokens=budget, counter=counter)
+
+    assert (fitted.context_blocks, fitted.retrieved) == ((), ())
+    [main] = fitted.changed_files
+    assert main.total_lines == 30 and len(main.lines) < 30
+    assert prompt_tokens(fitted, EstimatedTokenCounter()) <= budget
 
 
 def _payload(*, ignored_files: int = 2) -> ReviewContextPayload:
@@ -433,8 +597,9 @@ def test_retrieved_blocks_are_neither_kept_nor_shown_without_a_retrieved_section
     context = _review("v4", _payload())
 
     assert not rag_index.RETRIEVED_PROMPT_VERSIONS
-    assert context.retrieved == ()
-    assert "RETRIEVED_CALLER_TEXT" not in PromptBuilder().build_prompt(context).user
+    assert context.retrieved == () and not context.retrieved_section
+    user = PromptBuilder().build_prompt(context).user
+    assert "RETRIEVED_CALLER_TEXT" not in user and "<retrieved_excerpts>" not in user
 
 
 def test_retrieved_blocks_reach_the_context_of_a_prompt_with_a_retrieved_section(
@@ -446,9 +611,48 @@ def test_retrieved_blocks_reach_the_context_of_a_prompt_with_a_retrieved_section
 
     context = _review("v4", _payload())
 
-    assert context.retrieved == (RETRIEVED,)
-    # #144 renders them; F1 only fills the slot.
-    assert "RETRIEVED_CALLER_TEXT" not in PromptBuilder().build_prompt(context).user
+    assert context.retrieved == (replace(RETRIEVED, block_id=_bounded_rag_id(RETRIEVED)),)
+    assert context.retrieved_section
+    user = PromptBuilder().build_prompt(context).user
+    # Shown in their own section after the L2-L4 excerpts, by the snapshot-path id.
+    assert f'<excerpt block_id="{_bounded_rag_id(RETRIEVED)}" level="RAG"' in user
+    assert "</context_excerpts>\n<retrieved_excerpts>\n" in user
+    assert "RETRIEVED_CALLER_TEXT" in user
+
+
+def test_the_fit_keeps_the_place_groups_under_the_snapshot_path_ids(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        rag_index, "RETRIEVED_PROMPT_VERSIONS", frozenset({("review.system", "v4")})
+    )
+    context = _review("v4", replace(_payload(), retrieved=SLOT))
+    assert [block.block_id for block in context.retrieved] == list(map(_bounded_rag_id, SLOT))
+    l4, _ = context.context_blocks
+    # Room for L4 and the second place, not for its own definition.
+    budget = prompt_tokens(
+        replace(context, context_blocks=(l4,), retrieved=context.retrieved[:3]),
+        EstimatedTokenCounter(),
+    )
+
+    fitted = fit_review_context(context, max_prompt_tokens=budget, counter=EstimatedTokenCounter())
+
+    assert (fitted.context_blocks, fitted.retrieved) == ((l4,), context.retrieved[:2])
+
+
+def test_a_failed_build_keeps_the_retrieved_section_of_the_prompt_empty(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        rag_index, "RETRIEVED_PROMPT_VERSIONS", frozenset({("review.system", "v4")})
+    )
+
+    context = _review("v4", None)
+
+    # The section follows the bound prompt version, not the payload.
+    assert context.retrieved == () and context.retrieved_section
+    user = PromptBuilder().build_prompt(context).user
+    assert "</changed_files>\n<retrieved_excerpts>\n\n</retrieved_excerpts>\n" in user
 
 
 def test_snapshot_review_after_a_failed_build_shows_no_excerpt_and_no_counter() -> None:
@@ -465,7 +669,7 @@ def test_legacy_review_gets_neither_excerpts_nor_the_counter() -> None:
 
     assert context.policy_snapshot is None
     assert context.context_blocks == () and context.retrieved == ()
-    assert context.excluded_files == 0
+    assert not context.retrieved_section and context.excluded_files == 0
     user = PromptBuilder().build_prompt(context).user
     assert "<context_excerpts>" not in user and "<excluded_files" not in user
     assert user.endswith("<omitted_files>\napp/too_big.py\n</omitted_files>")
@@ -528,3 +732,66 @@ def test_snapshot_review_cites_an_l4_excerpt_of_a_long_path_by_a_bounded_id() ->
     # Only L4 is renamed; the payload keeps the stage's ids (its trace and the legacy path).
     assert snapshot_block(L2_WINDOW) is L2_WINDOW
     assert payload.blocks[1].block_id == f"L4:{HEAD[:12]}:{LONG_PATH}#0"
+
+
+def _bounded_rag_id(block: RetrievedBlock) -> str:
+    # The snapshot-path id of a RAG block: the revision of its side and a digest of the
+    # stage's id.
+    revision = (block.source.revision or "")[:12]
+    return f"RAG:{revision}:{sha256(block.block_id.encode()).hexdigest()[:16]}"
+
+
+def test_the_snapshot_path_id_of_a_fixed_stage_rag_id_is_pinned() -> None:
+    # A literal, not only re-derived: the code and the helper above cannot drift together.
+    assert RETRIEVED.block_id == "RAG:app/caller.py:3-4"
+    pinned = "RAG:aaaaaaaaaaaa:fbc997b0a6d32191"
+
+    assert snapshot_retrieved(RETRIEVED).block_id == pinned
+    assert _bounded_rag_id(RETRIEVED) == pinned
+
+
+# The stage's RAG id ``RAG:{path}:{ranges}`` embeds the path. A use at the head and the
+# definition it reads at the base: one path, the same lines, the same stage id.
+LONG_USE = replace(
+    RETRIEVED,
+    block_id=f"RAG:{LONG_PATH}:1-1",
+    source=replace(RETRIEVED.source, path=LONG_PATH, ranges=(LineRange(1, 1),)),
+    text="return load(key)",
+)
+LONG_DEFINITION = replace(
+    LONG_USE,
+    source=replace(
+        LONG_USE.source, revision=BASE, side=DiffSide.LEFT, reason="rag_broken_reference"
+    ),
+    representation=Representation.SIGNATURE,
+    text="def load(key):",
+)
+
+
+def test_snapshot_review_names_a_rag_block_of_a_long_path_by_a_bounded_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        rag_index, "RETRIEVED_PROMPT_VERSIONS", frozenset({("review.system", "v4")})
+    )
+    payload = replace(_payload(), retrieved=(LONG_USE, LONG_DEFINITION))
+
+    context = _review("v4", payload)
+
+    use, definition = _bounded_rag_id(LONG_USE), _bounded_rag_id(LONG_DEFINITION)
+    assert context.retrieved == (
+        replace(LONG_USE, block_id=use),
+        replace(LONG_DEFINITION, block_id=definition),
+    )
+    # The revision prefix carries the side: one stage id, two blocks.
+    assert use.startswith(f"RAG:{HEAD[:12]}:") and definition.startswith(f"RAG:{BASE[:12]}:")
+    assert use != definition
+    for block_id in (use, definition):
+        assert re.fullmatch(r"RAG:[0-9a-f]{12}:[0-9a-f]{16}", block_id)
+        assert len(block_id) <= 128
+        assert EvidenceRef(block_id=block_id, start_line=1, end_line=1).block_id == block_id
+    # The stage's own id is past the v2 limit: it could not be cited.
+    with pytest.raises(ValueError, match="at most 128 characters"):
+        EvidenceRef(block_id=LONG_USE.block_id, start_line=1, end_line=1)
+    # The payload keeps the stage's ids (its trace and the legacy path).
+    assert [block.block_id for block in payload.retrieved] == [f"RAG:{LONG_PATH}:1-1"] * 2

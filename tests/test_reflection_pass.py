@@ -7,7 +7,7 @@ import uuid
 from collections.abc import Mapping
 from dataclasses import replace
 from datetime import timedelta
-from typing import Any
+from typing import Any, Literal
 
 import pytest
 from pydantic import ValidationError
@@ -2316,6 +2316,8 @@ async def test_reflection_pass_verifier_evidence_revision_mismatch_right_and_lef
         start_line=1,
         end_line=20,
         shown_line_count=20,
+        # A RAG block names its repository (D7, #144): case 4 runs the real guard.
+        repository_id=snapshot.repository_id,
         shown_ranges=((1, 20),),
     )
     manifest_bad_left = replace(real_manifest, blocks=(*real_manifest.blocks, bad_left_block))
@@ -2379,6 +2381,81 @@ async def test_reflection_pass_verifier_evidence_revision_mismatch_right_and_lef
     assert decisions_ok[0].status == "supported"
     assert decisions_ok[0].evidence_refs[0].block_id == "retrieved-left"
     assert query_block_id in real_prompt.user
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("head_sha", [None, "head_good"], ids=["no-head", "other-head"])
+@pytest.mark.parametrize("side", ["RIGHT", None], ids=["right", "side-less"])
+async def test_reflection_pass_verifier_refuses_a_head_side_block_off_the_pr_head(
+    side: Literal["RIGHT"] | None, head_sha: str | None
+) -> None:
+    # D7 (#144): a missing head no longer lets any revision through.
+    from unittest.mock import patch
+
+    from app.modules.reviews.application.policy_snapshot import ManifestBlock, SourceRole
+
+    cand = make_candidate("c-head", path="app/query.py", rule_name=None)
+    snapshot = make_snapshot()
+    context = ReviewContext(
+        system="SYSTEM",
+        rules=(),
+        agents_md=None,
+        conventions=RepoConventions((), ()),
+        pr_meta=PullRequestMeta(
+            "T", None, "u", "b", "main", (), 1, 1, 0, False, False, head_sha=head_sha
+        ),
+        changed_files=(ChangedFile("app/query.py", "modified", (DiffLine(10, "added", "x = 1"),)),),
+        omitted_files=(),
+        policy_snapshot=snapshot,
+    )
+    real_prompt, real_manifest = VerifierPromptBuilder().build_verifier_prompt(
+        candidates=(cand,), context=context
+    )
+    block = ManifestBlock(
+        block_id="retrieved-head",
+        source_role=SourceRole.RETRIEVED_EXCERPT,
+        source_kind="source_code",
+        path="app/query.py",
+        revision="foreign_head",
+        side=side,
+        start_line=1,
+        end_line=20,
+        shown_line_count=20,
+        shown_ranges=((1, 20),),
+        repository_id=snapshot.repository_id,
+    )
+    manifest = replace(real_manifest, blocks=(*real_manifest.blocks, block))
+    verifier = ReflectionPass(
+        FakeVerifierModel(
+            {
+                "decisions": [
+                    {
+                        "candidate_id": "c-head",
+                        "status": "supported",
+                        "reason": "OK",
+                        "evidence_refs": [
+                            {"block_id": "retrieved-head", "start_line": 10, "end_line": 10}
+                        ],
+                        "requirement_refs": [],
+                    }
+                ]
+            }
+        )
+    )
+    with (
+        patch.object(
+            verifier._prompt_builder,
+            "build_verifier_prompt",
+            return_value=(real_prompt, manifest),
+        ),
+        # The answer check alone: the pre-send guard refuses the same block (test_policy_budget).
+        patch("app.modules.reviews.application.reflection_pass.verify_provenance_pre_send_guard"),
+        pytest.raises(
+            VerificationInvalidOutputError,
+            match="revision 'foreign_head' does not match PR revision",
+        ),
+    ):
+        await verifier.verify(candidates=(cand,), context=context)
 
 
 def test_build_verifier_prompt_counter_v1_fitting() -> None:

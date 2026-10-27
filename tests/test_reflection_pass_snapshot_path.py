@@ -6,6 +6,11 @@
 - It sees the L2-L4 excerpts the candidates cite as evidence, never the uncited ones
   (CVS §7.1, decided by the tech lead on 2026-10-25), within that window. The own diff lines
   of every candidate are kept first, then the cited excerpts, then the other diff lines.
+  The excerpts are taken as the review fit keeps them (#144): L4, then each RAG place with
+  the definitions it read, then L2 and L3.
+- It sees the RAG blocks the candidates cite, each place with the definitions it read, and
+  never the uncited ones (ADR 0001 §9, CVS §5.2, #144); the fit pays for them and its
+  manifest lists exactly the ones it shows.
 - The fit counts what the pre-send guard counts, so a fitted prompt never trips the guard.
 - ``ReflectionPass`` reads its prompt file when it first verifies: a legacy attempt, which
   never verifies, does not need it.
@@ -46,16 +51,27 @@ from app.modules.reviews.application.reflection_pass import (
     VerifierPromptBuilder,
     VerifierReply,
 )
-from app.modules.reviews.application.review_context import ContextLevel
+from app.modules.reviews.application.review_context import (
+    ContextBlock,
+    ContextLevel,
+    RetrievedBlock,
+)
 from app.modules.reviews.application.review_output import EvidenceRef, ReviewFindingV2
 from app.modules.reviews.application.run_failures import RunCancelled, RunFailure
 from tests.test_gateway_review_model import _Pipeline
 from tests.test_review_context_blocks import (
+    BASE,
+    FIRST_PLACE,
     HEAD,
     L2_WINDOW,
     L3_FULL,
     L4_SIGNATURE,
     MAIN,
+    META,
+    OWN_DEFINITION,
+    RETRIEVED_DEFINITION,
+    SECOND_PLACE,
+    SLOT,
     _block,
     _context,
     _snapshot,
@@ -404,6 +420,249 @@ def test_a_fitted_prompt_never_trips_the_pre_send_guard() -> None:
         assert len(_shown_lines(sent.user)) < 400
 
     assert overflows == []
+
+
+# ---------- cited RAG blocks fit as the review fit keeps them ----------
+
+
+def _chars(*blocks: ContextBlock | RetrievedBlock) -> int:
+    return sum(len(block.text) for block in blocks)
+
+
+def _fit_excerpts(
+    excerpts: tuple[ContextBlock, ...], retrieved: tuple[RetrievedBlock, ...], window: int
+) -> tuple[tuple[ContextBlock, ...], tuple[RetrievedBlock, ...]]:
+    """The cited excerpts and RAG blocks a window of ``window`` text characters holds."""
+
+    def fits(
+        files: tuple[ChangedFile, ...],
+        shown: tuple[ContextBlock, ...],
+        shown_retrieved: tuple[RetrievedBlock, ...],
+    ) -> bool:
+        return _chars(*shown, *shown_retrieved) <= window
+
+    files, shown, shown_retrieved = reflection_pass_module._fit_verifier_code(
+        (), excerpts, (), (), fits, retrieved=retrieved
+    )
+    assert files == ()
+    return shown, shown_retrieved
+
+
+def test_the_verifier_fit_keeps_l4_then_a_rag_place_then_l2() -> None:
+    # Room for L4 and the place with its definition, or for L4 and L2: never for all three.
+    window = _chars(L4_SIGNATURE, FIRST_PLACE, RETRIEVED_DEFINITION)
+    assert _chars(L4_SIGNATURE, L2_WINDOW) <= window
+    assert _chars(L4_SIGNATURE, L2_WINDOW, FIRST_PLACE, RETRIEVED_DEFINITION) > window
+
+    shown = _fit_excerpts((L2_WINDOW, L4_SIGNATURE), (FIRST_PLACE, RETRIEVED_DEFINITION), window)
+
+    assert shown == ((L4_SIGNATURE,), (FIRST_PLACE, RETRIEVED_DEFINITION))
+
+
+def test_the_verifier_fit_shows_a_rag_place_with_its_definitions_or_not_at_all() -> None:
+    # Room for the second place, not for its own definition.
+    window = _chars(FIRST_PLACE, RETRIEVED_DEFINITION, SECOND_PLACE)
+
+    shown = _fit_excerpts((), SLOT, window)
+
+    assert shown == ((), (FIRST_PLACE, RETRIEVED_DEFINITION))
+
+
+def test_a_shared_definition_comes_with_the_next_place_when_the_first_one_is_left_out() -> None:
+    wide = replace(FIRST_PLACE, text="def caller():\n    return " + "x" * 200)
+    window = _chars(RETRIEVED_DEFINITION, SECOND_PLACE, OWN_DEFINITION)
+    assert _chars(wide, RETRIEVED_DEFINITION) > window
+
+    shown = _fit_excerpts((), (wide, *SLOT[1:]), window)
+
+    # In payload order: the definition stays before the place that brought it.
+    assert shown == ((), (RETRIEVED_DEFINITION, SECOND_PLACE, OWN_DEFINITION))
+
+
+# ---------- the cited RAG blocks ----------
+
+# The slot the review prompt showed; its definitions are read at the base of the diff.
+WITH_SLOT = replace(
+    _context((L2_WINDOW,)),
+    pr_meta=replace(META, diff_old_sha=BASE),
+    retrieved=SLOT,
+    retrieved_section=True,
+)
+ON_PLACE = _candidate(
+    "c-place", EvidenceRef(block_id=FIRST_PLACE.block_id, start_line=3, end_line=4)
+)
+# The first place and the definition it read, as the verifier sees them.
+FIRST_PLACE_XML = (
+    "<retrieved_excerpts>\n"
+    '<excerpt block_id="RAG:app/caller.py:3-4" level="RAG" path="app/caller.py" '
+    f'revision="{HEAD}" side="RIGHT" representation="exact_lines">\n'
+    '<line n="3">def caller():</line>\n'
+    '<line n="4">    return RETRIEVED_CALLER_TEXT</line>\n'
+    "</excerpt>\n"
+    '<excerpt block_id="RAG:app/defs.py:1-1" level="RAG" path="app/defs.py" '
+    f'revision="{BASE}" side="LEFT" representation="signature">\n'
+    '<line n="1">def load(key):</line>\n'
+    "</excerpt>\n"
+    "</retrieved_excerpts>"
+)
+
+
+def test_a_cited_rag_place_is_shown_to_the_verifier_with_the_definitions_it_read() -> None:
+    prompt, manifest = _build((EXCERPT_ONLY, ON_PLACE), WITH_SLOT)
+
+    # After the cited L2-L4 excerpts, inside the code context.
+    assert f"{L2_WINDOW_XML}\n{FIRST_PLACE_XML}\n</code_context>" in prompt.user
+    for block in (FIRST_PLACE, RETRIEVED_DEFINITION):
+        listed = manifest.get_block(block.block_id)
+        assert listed is not None
+        assert listed.source_role == SourceRole.RETRIEVED_EXCERPT
+        assert (listed.path, listed.revision, listed.side) == (
+            block.source.path,
+            block.source.revision,
+            block.source.side.value if block.source.side is not None else None,
+        )
+        assert listed.shown_ranges == tuple(
+            (item.start_line, item.end_line) for item in block.source.ranges
+        )
+    for block in (SECOND_PLACE, OWN_DEFINITION):
+        assert manifest.get_block(block.block_id) is None
+        assert block.block_id not in prompt.user
+
+
+def test_a_cited_definition_is_shown_without_the_places_that_read_it() -> None:
+    cited = _candidate(
+        "c-definition",
+        EvidenceRef(block_id=RETRIEVED_DEFINITION.block_id, start_line=1, end_line=1),
+    )
+
+    prompt, manifest = _build((cited,), WITH_SLOT)
+
+    shown = [
+        block.block_id for block in manifest.blocks if block.source_role == "retrieved_excerpt"
+    ]
+    assert shown == [RETRIEVED_DEFINITION.block_id]
+    assert prompt.user.count('level="RAG"') == 1
+
+
+def test_uncited_rag_blocks_are_neither_shown_to_the_verifier_nor_listed_in_its_manifest() -> None:
+    with_slot = _build((EXCERPT_ONLY, DIFF_ONLY), WITH_SLOT)
+    without = _build((EXCERPT_ONLY, DIFF_ONLY), replace(WITH_SLOT, retrieved=()))
+
+    assert with_slot == without
+    assert "<retrieved_excerpts>" not in with_slot[0].user
+    assert all(block.source_role != "retrieved_excerpt" for block in with_slot[1].blocks)
+
+
+def test_without_a_retrieved_section_a_cited_rag_block_is_neither_shown_nor_listed() -> None:
+    # The verifier shows again what the review prompt showed: a slot it did not show stays out.
+    no_section = replace(WITH_SLOT, retrieved_section=False)
+
+    prompt, manifest = _build((EXCERPT_ONLY, ON_PLACE), no_section)
+
+    assert (prompt, manifest) == _build((EXCERPT_ONLY, ON_PLACE), replace(no_section, retrieved=()))
+    assert "<retrieved_excerpts>" not in prompt.user and 'level="RAG"' not in prompt.user
+    assert all(block.source_role != "retrieved_excerpt" for block in manifest.blocks)
+
+
+@pytest.mark.parametrize(
+    "ref",
+    [
+        EvidenceRef(block_id=FIRST_PLACE.block_id, start_line=3, end_line=4),
+        EvidenceRef(block_id=RETRIEVED_DEFINITION.block_id, start_line=1, end_line=1),
+    ],
+    ids=["place", "definition"],
+)
+def test_the_verifier_may_cite_the_rag_blocks_it_is_shown(ref: EvidenceRef) -> None:
+    # The pre-send guard and the evidence check both run on the verifier's own manifest.
+    verifier = _Supporter(ref.block_id, ref.start_line, ref.end_line)
+
+    record = asyncio.run(
+        ReflectionPass(verifier).verify_recorded(candidates=(ON_PLACE,), context=WITH_SLOT)
+    )
+
+    assert [(decision.candidate_id, decision.status) for decision in record.decisions] == [
+        ("c-place", "supported")
+    ]
+    assert FIRST_PLACE_XML in verifier.users[0]
+
+
+def test_the_cited_rag_blocks_are_kept_before_the_uncited_diff_lines_and_paid_for() -> None:
+    # The window holds the whole file and no RAG block: the place and its definition take
+    # the room of uncited diff lines, never more.
+    whole, _ = _build((ON_PLACE,), replace(WITH_SLOT, retrieved=()))
+    window = _prompt_tokens(whole)
+
+    prompt, manifest = _build((ON_PLACE,), WITH_SLOT, max_prompt_tokens=window)
+
+    assert FIRST_PLACE_XML in prompt.user
+    assert manifest.get_block(FIRST_PLACE.block_id) is not None
+    assert _prompt_tokens(prompt) <= window
+    shown = _shown_lines(prompt.user)
+    assert 10 in shown
+    assert len(shown) < len(MAIN.lines)
+
+
+def test_a_cited_rag_group_over_the_verifier_window_is_left_out() -> None:
+    # The window holds the candidate's own line, not the place with its definition.
+    own_line = replace(
+        WITH_SLOT,
+        changed_files=(reflection_pass_module._with_lines(MAIN, (0,)),),
+        retrieved=(),
+    )
+    alone = _build((ON_PLACE,), own_line)
+
+    fitted = _build((ON_PLACE,), WITH_SLOT, max_prompt_tokens=_prompt_tokens(alone[0]))
+
+    assert fitted == alone
+    assert "<retrieved_excerpts>" not in fitted[0].user
+    assert fitted[1].get_block(FIRST_PLACE.block_id) is None
+
+
+ON_DEFINITION = _candidate(
+    "c-definition",
+    EvidenceRef(block_id=RETRIEVED_DEFINITION.block_id, start_line=1, end_line=1),
+)
+
+
+def test_a_cited_definition_is_offered_on_its_own_when_its_place_group_does_not_fit() -> None:
+    # The window holds the own line and the cited definition, not the cited place with it:
+    # the definition is a cited excerpt of its own, whole or not at all (CVS §5.2, §7.1).
+    candidates = (ON_PLACE, ON_DEFINITION)
+    own_line = replace(
+        WITH_SLOT,
+        changed_files=(reflection_pass_module._with_lines(MAIN, (0,)),),
+        retrieved=(RETRIEVED_DEFINITION,),
+    )
+    alone = _build(candidates, own_line)
+    window = _prompt_tokens(alone[0])
+    with_place, _ = _build(candidates, replace(own_line, retrieved=SLOT[:2]))
+    assert _prompt_tokens(with_place) > window
+
+    fitted = _build(candidates, WITH_SLOT, max_prompt_tokens=window)
+
+    assert fitted == alone
+    prompt, manifest = fitted
+    assert f'<excerpt block_id="{RETRIEVED_DEFINITION.block_id}"' in prompt.user
+    assert f'<excerpt block_id="{FIRST_PLACE.block_id}"' not in prompt.user
+    assert manifest.get_block(RETRIEVED_DEFINITION.block_id) is not None
+    assert manifest.get_block(FIRST_PLACE.block_id) is None
+
+
+def test_an_uncited_definition_is_not_offered_alone_when_its_place_group_does_not_fit() -> None:
+    # Only the place is cited. The window holds the own line and the definition the place
+    # read, one token short of the place with it: the definition is no cited excerpt of its
+    # own, so the verifier is shown no RAG block (CVS §5.2, §7.1).
+    own_line = replace(WITH_SLOT, changed_files=(reflection_pass_module._with_lines(MAIN, (0,)),))
+    with_place, _ = _build((ON_PLACE,), own_line)
+    assert FIRST_PLACE_XML in with_place.user
+    window = _prompt_tokens(with_place) - 1
+
+    fitted = _build((ON_PLACE,), own_line, max_prompt_tokens=window)
+
+    assert fitted == _build((ON_PLACE,), replace(own_line, retrieved=()))
+    prompt, manifest = fitted
+    assert "<retrieved_excerpts>" not in prompt.user
+    assert all(block.source_role != "retrieved_excerpt" for block in manifest.blocks)
 
 
 # ---------- the verifier route window ----------

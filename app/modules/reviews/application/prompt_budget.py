@@ -362,17 +362,18 @@ def verify_provenance_pre_send_guard(
                 )
 
         # 3. Revision validation
+        is_code = (
+            block.source_role
+            in {
+                SourceRole.DIFF,
+                SourceRole.SOURCE_EXCERPT,
+                SourceRole.AST_EXCERPT,
+                SourceRole.RETRIEVED_EXCERPT,
+            }
+            or block.source_kind == "source_code"
+        )
         if block.revision is not None:
-            if (
-                block.source_role
-                in {
-                    SourceRole.DIFF,
-                    SourceRole.SOURCE_EXCERPT,
-                    SourceRole.AST_EXCERPT,
-                    SourceRole.RETRIEVED_EXCERPT,
-                }
-                or block.source_kind == "source_code"
-            ):
+            if is_code:
                 if block.side == "LEFT":
                     diff_old_sha = (
                         context.pr_meta.diff_old_sha
@@ -391,7 +392,8 @@ def verify_provenance_pre_send_guard(
                         if context is not None and context.pr_meta is not None
                         else None
                     )
-                    if head_sha is not None and block.revision != head_sha:
+                    # Fail closed like LEFT (D7, #144): without a head no revision passes.
+                    if not head_sha or block.revision != head_sha:
                         raise PolicyError(
                             PolicyErrorCode.CONTEXT_VIOLATION,
                             f"Block '{block.block_id}' revision does not match "
@@ -407,7 +409,30 @@ def verify_provenance_pre_send_guard(
                     f"Block '{block.block_id}' revision does not match policy_base_sha",
                 )
 
-        # 4. Policy document snapshot checks
+        # 4. Repository validation (D7, #144): a code block belongs to the snapshot's
+        # repository, and a RAG block always names one and the revision it was read at.
+        if is_code:
+            if block.source_role == SourceRole.RETRIEVED_EXCERPT and block.repository_id is None:
+                raise PolicyError(
+                    PolicyErrorCode.CONTEXT_VIOLATION,
+                    f"Block '{block.block_id}' has no repository",
+                )
+            if block.source_role == SourceRole.RETRIEVED_EXCERPT and block.revision is None:
+                raise PolicyError(
+                    PolicyErrorCode.CONTEXT_VIOLATION,
+                    f"Block '{block.block_id}' has no revision",
+                )
+            if (
+                snapshot is not None
+                and block.repository_id is not None
+                and block.repository_id != snapshot.repository_id
+            ):
+                raise PolicyError(
+                    PolicyErrorCode.CONTEXT_VIOLATION,
+                    f"Block '{block.block_id}' repository does not match the policy snapshot",
+                )
+
+        # 5. Policy document snapshot checks
         if snapshot is not None:
             if block.source_kind == "repository_rules":
                 if not snapshot.rules.is_present:
@@ -452,7 +477,8 @@ def fit_review_context(
 ) -> ReviewContext:
     """Return the context whose rendered prompt fits ``max_prompt_tokens``.
 
-    Excerpts of the snapshot path go first: L3, then L2, then L4, before any file is cut.
+    Excerpts of the snapshot path go first: L3, then L2, then the retrieved RAG places,
+    then L4, before any file is cut.
     Deterministic: files are taken by descending SD §9 priority (ties by path); each one
     is kept whole, else cut to the longest prefix of its lines that fits, else omitted.
     A length-aware counter uses additive rendered character lengths with its exact
@@ -463,11 +489,13 @@ def fit_review_context(
     """
     if prompt_tokens(context, counter) <= max_prompt_tokens:
         return context
-    if context.context_blocks:
-        context = _drop_context_blocks(
-            context, max_prompt_tokens=max_prompt_tokens, counter=counter
-        )
-        if context.context_blocks or prompt_tokens(context, counter) <= max_prompt_tokens:
+    if context.context_blocks or context.retrieved:
+        context = _drop_excerpts(context, max_prompt_tokens=max_prompt_tokens, counter=counter)
+        if (
+            context.context_blocks
+            or context.retrieved
+            or prompt_tokens(context, counter) <= max_prompt_tokens
+        ):
             return context
 
     _warn_ignored_rules(context.rules)
@@ -510,32 +538,49 @@ def fit_review_context(
 
 
 # CVS §4.1 selects L1 → L4 → RAG → L2 → L3; the fit drops excerpts in the reverse order,
-# each level from its last block (the stage appends blocks by descending file priority).
-_EXCERPT_DROP_ORDER = ("L3", "L2", "L4")
+# each level from its last block (the stage appends blocks by descending file priority and
+# admits RAG places by descending slot priority).
+_EXCERPT_DROP_ORDER = ("L3", "L2", "RAG", "L4")
 
 
-def _drop_context_blocks(
+def _drop_excerpts(
     context: ReviewContext, *, max_prompt_tokens: int, counter: TokenCounter
 ) -> ReviewContext:
     """The context with the fewest excerpts dropped whose prompt fits, else none of them.
 
-    Fewer excerpts never make the prompt longer, so a binary search over the number dropped
+    One drop is an L2-L4 block or a RAG place. A place goes with the definitions it read
+    (CVS §3.5), except one a kept place reads too: the slot shows a definition once.
+    Fewer drops never make the prompt longer, so a binary search over the number dropped
     finds the cut; every candidate is counted whole, with ``counter``.
     """
-    blocks = context.context_blocks
-    order = sorted(
-        range(len(blocks)),
-        key=lambda index: (_EXCERPT_DROP_ORDER.index(blocks[index].level), -index),
+    # Local: review_context imports this module.
+    from app.modules.reviews.application.review_context import definitions_read_by
+
+    blocks, retrieved = context.context_blocks, context.retrieved
+    read = definitions_read_by(retrieved, retrieved)
+    places = [index for index, block in enumerate(retrieved) if block not in read]
+    # (level, index): an index of ``blocks``, or of ``retrieved`` for a RAG place.
+    drops = sorted(
+        [(block.level.value, index) for index, block in enumerate(blocks)]
+        + [("RAG", index) for index in places],
+        key=lambda drop: (_EXCERPT_DROP_ORDER.index(drop[0]), -drop[1]),
     )
 
     def without(dropped: int) -> ReviewContext:
-        gone = frozenset(order[:dropped])
+        gone = frozenset(drops[:dropped])
+        kept = [retrieved[index] for index in places if ("RAG", index) not in gone]
+        shown = (*kept, *definitions_read_by(retrieved, kept))
         return replace(
             context,
-            context_blocks=tuple(block for index, block in enumerate(blocks) if index not in gone),
+            context_blocks=tuple(
+                block
+                for index, block in enumerate(blocks)
+                if (block.level.value, index) not in gone
+            ),
+            retrieved=tuple(block for block in retrieved if block in shown),
         )
 
-    low, high = 1, len(blocks)
+    low, high = 1, len(drops)
     while low < high:
         middle = (low + high) // 2
         if prompt_tokens(without(middle), counter) <= max_prompt_tokens:
