@@ -62,7 +62,7 @@ from app.modules.reviews.infrastructure.llm.memory import InMemoryLlmCallTrace, 
 from app.modules.reviews.infrastructure.llm.models import GatewayReviewModel
 from app.modules.reviews.infrastructure.llm.settings import LlmSettings, ModelPrice, ModelProfile
 from app.modules.reviews.infrastructure.llm.transport import ChatRequest, ChatResponse
-from tests.llm_fakes import context_checkpoint
+from tests.llm_fakes import FakeClock, context_checkpoint
 from tests.policy_snapshot_fakes import (
     make_complete_execution_profile,
     make_complete_prompt_bindings,
@@ -139,15 +139,19 @@ def _gateway(
         InMemoryUsageLedger(),
         InMemoryLlmCallTrace(),
         checkpoint=context_checkpoint,
+        clock=FakeClock(NOW),
     )
 
 
+# CONTRACT: RUN's deadline is fixed against NOW, not the import time (#130); every gateway that
+# serves RUN reads FakeClock(NOW). A gateway on the system clock fails at once, not mid-run.
+NOW = datetime(2026, 10, 24, 12, 0, tzinfo=UTC)
 RUN = RunCallContext(
     run_id=RUN_ID,
     workspace_id=UUID("00000000-0000-0000-0000-000000000501"),
     attempt=1,
     engine="fast",
-    deadline=datetime.now(UTC) + timedelta(hours=1),
+    deadline=NOW + timedelta(hours=1),
 )
 
 
