@@ -87,18 +87,18 @@ class PolicyError(RunFailure):
     ) -> None:
         parts = []
         if source_path is not None:
-            parts.append(f"файл `{source_path}`")
+            parts.append(f"file `{source_path}`")
         if line is not None:
-            parts.append(f"строка {line}")
+            parts.append(f"line {line}")
         if column is not None:
-            parts.append(f"позиция {column}")
+            parts.append(f"column {column}")
         if excerpt is not None:
-            parts.append(f"маска `{_safe_excerpt(excerpt)}`")
-        allowed = f"допустимо {limit} {unit}" if unit else f"допустимо {limit}"
+            parts.append(f"mask `{_safe_excerpt(excerpt)}`")
+        allowed = f"allowed {limit} {unit}" if unit else f"allowed {limit}"
         if limit is not None and actual_is_lower_bound:
-            parts.append(f"фактически более {limit}, {allowed}")
+            parts.append(f"actual more than {limit}, {allowed}")
         elif actual is not None and limit is not None:
-            parts.append(f"фактически {actual}, {allowed}")
+            parts.append(f"actual {actual}, {allowed}")
         elif limit is not None:
             parts.append(allowed)
         detail = ", ".join(parts)
@@ -115,7 +115,8 @@ class PolicyError(RunFailure):
         self.pattern_index = pattern_index
         self.limit = limit
         self.actual = actual
-        self.excerpt = excerpt
+        # The offending mask as quoted in the message: shortened and safe for markup.
+        self.excerpt = None if excerpt is None else _safe_excerpt(excerpt)
         self.unit = unit
         self.actual_is_lower_bound = actual_is_lower_bound
 

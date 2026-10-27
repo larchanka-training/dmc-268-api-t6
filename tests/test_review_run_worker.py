@@ -949,7 +949,7 @@ def test_exhausted_match_budget_fails_the_run_naming_the_document_and_the_count(
     # The Run keeps the code and the safe message with its location (RFS §9); the
     # stopped count is a lower bound, so the author sees an excess, not an exact value.
     assert policy_error_detail(run.error_message) == (
-        "файл `.review/rules.md`, фактически более 20, допустимо 20 переходов"
+        "file `.review/rules.md`, actual more than 20, allowed 20 transitions"
     )
 
 

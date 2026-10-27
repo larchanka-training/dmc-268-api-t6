@@ -87,6 +87,7 @@ def _diagnostic(item: dict[str, Any]) -> RulesDiagnostic:
         # Rows stored before the flag have no key; no read reported a lower bound then.
         actual_is_lower_bound=item.get("actual_is_lower_bound", False),
         pattern_index=item.get("pattern_index"),
+        excerpt=item.get("excerpt"),
         retry_after=(
             None
             if item.get("retry_after_seconds") is None
@@ -106,6 +107,7 @@ def _diagnostic_json(item: RulesDiagnostic) -> dict[str, Any]:
         "actual": item.actual,
         "actual_is_lower_bound": item.actual_is_lower_bound,
         "pattern_index": item.pattern_index,
+        "excerpt": item.excerpt,
         "retry_after_seconds": (
             None if item.retry_after is None else int(item.retry_after.total_seconds())
         ),

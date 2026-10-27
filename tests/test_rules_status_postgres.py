@@ -214,7 +214,7 @@ def test_a_repository_the_app_lost_is_access_denied_and_not_requested(
     assert body["diagnostics"] == [
         {
             "code": "policy_access_denied",
-            "message": "Нет доступа к документам правил репозитория.",
+            "message": "No access to the rules documents of the repository.",
             "line": None,
             "column": None,
             "retryable": False,
