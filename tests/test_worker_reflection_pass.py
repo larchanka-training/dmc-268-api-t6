@@ -39,9 +39,10 @@ from app.modules.reviews.infrastructure.llm.memory import InMemoryLlmCallTrace, 
 from app.modules.reviews.infrastructure.llm.models import GatewayVerifierModel
 from app.modules.reviews.infrastructure.llm.settings import LlmSettings
 from app.modules.reviews.infrastructure.llm.transport import ChatRequest, ChatResponse
-from tests.llm_fakes import context_checkpoint
+from tests.llm_fakes import FakeClock, context_checkpoint
 from tests.test_gateway_review_model import (
     MAIN,
+    NOW,
     RUN,
     RUN_ID,
     SUMMARY,
@@ -305,6 +306,7 @@ def test_a_v4_review_makes_a_verification_call_and_llm_verify_names_its_manifest
         InMemoryUsageLedger(),
         trace,
         checkpoint=context_checkpoint,
+        clock=FakeClock(NOW),
         manifest_store=manifests,
     )
     pipeline = _Pipeline(_one_line(), _snapshot())

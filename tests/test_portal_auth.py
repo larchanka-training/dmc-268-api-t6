@@ -101,7 +101,7 @@ def test_every_portal_route_rejects_missing_bearer(method: str, path: str) -> No
         {"sub": "someone"},
         {"github_user_id": 99},
         {"github_user_id": 42.0},
-        {"exp": float((datetime.now(UTC) + timedelta(minutes=15)).timestamp())},
+        {"exp": float(datetime(2100, 1, 1, tzinfo=UTC).timestamp())},
         {"iss": "wrong"},
         {"aud": "wrong"},
         {"exp": 1},
