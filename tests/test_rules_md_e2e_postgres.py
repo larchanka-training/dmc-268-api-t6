@@ -6,6 +6,11 @@ publishes it to a real RabbitMQ; the real ``run_worker`` consumes it, loads the 
 (``policy.load``), analyses with a fake LLM and publishes to a fake GitHub. The test never
 inserts a Run. Expected values are the literals of RULES_FORMAT_SPEC §3, §4, §9 and §11.
 
+Two seeds pick the review path through the active review prompt the run pins: ``legacy``
+(review.system v1) and ``v4`` (the packaged review.system v4 with conventions v2 and verifier
+v2: the snapshot path, where the rules.md text reaches the reviewer and the verifier). A case
+that fails in ``policy.load`` before the path is chosen runs on the v4 seed only.
+
 The module migrates one schema; each case starts from emptied tables with the same seed and
 from a deleted review topology, so the cases stay isolated.
 
@@ -25,8 +30,10 @@ import re
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
 from enum import StrEnum
+from pathlib import Path
 from typing import Any, Literal, NoReturn
 from uuid import UUID, uuid4
+from xml.sax.saxutils import escape
 
 import httpx
 import pytest
@@ -41,10 +48,12 @@ from app.bootstrap.reviews_api import (
     ReviewsApiResources,
     get_github_webhook_receipt_uow_factory,
 )
+from app.bootstrap.seed_prompts import load_prompt_assets
 from app.main import app, get_github_webhook_secret
 from app.modules.integrations.webhooks.infrastructure.github_installation_tree_provider import (
     StaticGitHubInstallationAccessTokenProvider,
 )
+from app.modules.reviews.application.prompt_builder import file_block_id
 from app.modules.reviews.infrastructure.amqp import amqp_channels
 from app.worker import WorkerSettings, run_worker
 from tests.github_raw_blobs import blob_answer
@@ -82,7 +91,28 @@ _REPOSITORY = UUID("00000000-0000-4000-8000-000000000003")
 _RULE_VERSION = UUID("00000000-0000-4000-8000-000000000004")
 _REVIEW_PROMPT = UUID("00000000-0000-4000-8000-000000000005")
 _CONVENTIONS_PROMPT = UUID("00000000-0000-4000-8000-000000000006")
+_VERIFIER_PROMPT = UUID("00000000-0000-4000-8000-000000000007")
 _CHANGED_FILES = re.compile(r"<changed_files>\n(.*?)\n</changed_files>", re.DOTALL)
+# The rules.md block of a snapshot-path prompt: numbered lines, or one absent/empty tag.
+_POLICY_RULES = re.compile(
+    r'<repository_rules block_id="policy-rules"[^>]*?(?: />|>\n.*?\n</repository_rules>)',
+    re.DOTALL,
+)
+# RFS §8.1 `source_code`: what a prompt shows of the changed files, read at the head.
+_SOURCE_CODE = re.compile(r"<(changed_files|context_excerpts)>.*?</\1>", re.DOTALL)
+_CANDIDATE = re.compile(r'<candidate candidate_id="([^"]+)" path="([^"]+)" line="(\d+)"')
+# RFS §3.3: the two rendered policy blocks together, in input tokens.
+_MAX_POLICY_TOKENS = 12_000
+
+
+class Seed(StrEnum):
+    """The active review prompt of the seed, which picks the review path of the run."""
+
+    LEGACY = "legacy"
+    V4 = "v4"
+
+
+_REVIEW_TASK = {Seed.LEGACY: "ReviewOutput", Seed.V4: "ReviewOutputV2"}
 
 _BASE_FILES = {
     "README.md": b"# Service\n",
@@ -103,6 +133,24 @@ _FINDING_LINE = 6
 
 def _block(*lines: str, fence: str = "```", info: str = "review-ignore") -> str:
     return "\n".join(["# Ignore", "", f"{fence}{info}", *lines, fence, ""])
+
+
+def _rules_block(rules: bytes | None) -> str:
+    """The ``<repository_rules>`` block RFS §3.2 and §8.1 expect for these base bytes.
+
+    The whole text, one XML-escaped ``<line>`` per line; a missing file is ``absent`` and an
+    empty one ``empty``, so neither is shown as a document with no lines.
+    """
+    tag = f'<repository_rules block_id="policy-rules" path="{RULES}"'
+    if rules is None:
+        return f'{tag} status="absent" />'
+    if not rules:
+        return f'{tag} status="empty" />'
+    lines = rules.decode().removesuffix("\n").split("\n")
+    numbered = "\n".join(
+        f'<line n="{index}">{escape(line)}</line>' for index, line in enumerate(lines, start=1)
+    )
+    return f"{tag}>\n{numbered}\n</repository_rules>"
 
 
 VALID_RULES = (
@@ -359,8 +407,10 @@ def _github(
 class FakeLlm:
     """An OpenAI-compatible chat endpoint; each request body is kept as sent.
 
-    A request the fake cannot answer is recorded and raises, so a test reports the harness
-    gap instead of an odd ``llm_*`` failure of the run.
+    It answers by the response schema: conventions list the changed paths, a review flags
+    the added line of ``app/service.py`` (a v2 review cites it in the file's block), and the
+    verifier supports every candidate. A request the fake cannot answer is recorded and
+    raises, so a test reports the harness gap instead of an odd ``llm_*`` failure of the run.
     """
 
     def __init__(self) -> None:
@@ -379,49 +429,17 @@ class FakeLlm:
         task = body["response_format"]["json_schema"]["name"]
         self.tasks.append(task)
         self.bodies.append(request.content.decode())
-        paths: list[str] = []
+        prompt = _user_message(body)
         if task == "RepoConventionsDraft":
-            # The conventions answer must list exactly the paths of <changed_files>, in order.
-            prompt = next(item["content"] for item in body["messages"] if item["role"] == "user")
-            listed = _CHANGED_FILES.search(prompt)
-            if listed is None:
-                self._fail(
-                    "the RepoConventionsDraft prompt has no <changed_files> block: "
-                    "the fake cannot list the files of the pull request"
-                )
-            paths = listed.group(1).split("\n")
-        answer: dict[str, object] = (
-            {
-                "files": [{"path": path, "relevance": "Changed module."} for path in paths],
-                "key_patterns": ["Pattern one.", "Pattern two.", "Pattern three."],
-                "recommendations": [
-                    f"Recommendation {n} (from: standard/correctness)"
-                    for n in ("one", "two", "three", "four", "five")
-                ],
-            }
-            if task == "RepoConventionsDraft"
-            else {
-                "findings": [
-                    {
-                        "path": "app/service.py",
-                        "line": _FINDING_LINE,
-                        "start_line": None,
-                        "severity": "high",
-                        "category": "correctness",
-                        "title": "Constant result",
-                        "body": "The new function always returns the same string.",
-                        "suggestion": None,
-                        "confidence": 0.9,
-                        "rule_name": None,
-                    }
-                ],
-                "summary": {
-                    "problem": "The new function returns a constant.",
-                    "done_well": "The change is small.",
-                    "effort": "small",
-                },
-            }
-        )
+            answer = self._conventions(prompt)
+        elif task == "ReviewOutput":
+            answer = {"findings": [_FINDING], "summary": _SUMMARY}
+        elif task == "ReviewOutputV2":
+            answer = self._review_v2(prompt)
+        elif task == "VerificationOutput":
+            answer = self._verification(prompt)
+        else:
+            self._fail(f"the fake has no answer for the {task} schema")
         return httpx.Response(
             200,
             json={
@@ -430,6 +448,84 @@ class FakeLlm:
                 "usage": {"prompt_tokens": 1200, "completion_tokens": 300},
             },
         )
+
+    def _conventions(self, prompt: str) -> dict[str, object]:
+        # The conventions answer must list exactly the paths of <changed_files>, in order.
+        listed = _CHANGED_FILES.search(prompt)
+        if listed is None:
+            self._fail(
+                "the RepoConventionsDraft prompt has no <changed_files> block: "
+                "the fake cannot list the files of the pull request"
+            )
+        return {
+            "files": [
+                {"path": path, "relevance": "Changed module."}
+                for path in listed.group(1).split("\n")
+            ],
+            "key_patterns": ["Pattern one.", "Pattern two.", "Pattern three."],
+            "recommendations": [
+                f"Recommendation {n} (from: standard/correctness)"
+                for n in ("one", "two", "three", "four", "five")
+            ],
+        }
+
+    def _review_v2(self, prompt: str) -> dict[str, object]:
+        # A v2 finding needs evidence: the added line in the block of its file.
+        block = file_block_id(SERVICE_PATH)
+        if f'<file block_id="{block}" path="{SERVICE_PATH}"' not in prompt:
+            self._fail(f"the ReviewOutputV2 prompt does not show {SERVICE_PATH}")
+        evidence = {"block_id": block, "start_line": _FINDING_LINE, "end_line": _FINDING_LINE}
+        return {"findings": [{**_FINDING, "evidence_refs": [evidence]}], "summary": _SUMMARY}
+
+    def _verification(self, prompt: str) -> dict[str, object]:
+        # One decision per candidate of the prompt, citing the line the candidate stands on.
+        candidates = _CANDIDATE.findall(prompt)
+        if not candidates:
+            self._fail("the VerificationOutput prompt has no candidate")
+        return {
+            "decisions": [
+                {
+                    "candidate_id": candidate,
+                    "status": "supported",
+                    "reason": "The added function returns a constant.",
+                    "evidence_refs": [
+                        {
+                            "block_id": file_block_id(path),
+                            "start_line": int(line),
+                            "end_line": int(line),
+                        }
+                    ],
+                    "requirement_refs": [],
+                }
+                for candidate, path, line in candidates
+            ]
+        }
+
+
+_FINDING: dict[str, object] = {
+    "path": SERVICE_PATH,
+    "line": _FINDING_LINE,
+    "start_line": None,
+    "severity": "high",
+    "category": "correctness",
+    "title": "Constant result",
+    "body": "The new function always returns the same string.",
+    "suggestion": None,
+    "confidence": 0.9,
+    "rule_name": None,
+}
+_SUMMARY = {
+    "problem": "The new function returns a constant.",
+    "done_well": "The change is small.",
+    "effort": "small",
+}
+
+
+def _user_message(body: Mapping[str, Any]) -> str:
+    """The last user message of a chat request: the input envelope of the call."""
+    return str(
+        next(item["content"] for item in reversed(body["messages"]) if item["role"] == "user")
+    )
 
 
 @dataclass(frozen=True)
@@ -460,17 +556,56 @@ _SEED: tuple[tuple[str, dict[str, Any]], ...] = (
         "VALUES (:id, :repo, 1, '[]'::jsonb, :checksum, true)",
         {"id": _RULE_VERSION, "repo": _REPOSITORY, "checksum": "a" * 64},
     ),
-    (
-        "INSERT INTO prompt_versions (id, key, version, content, checksum, is_active) "
-        "VALUES (:id, 'review.system', 1, 'system', :checksum, true)",
-        {"id": _REVIEW_PROMPT, "checksum": "c" * 64},
-    ),
-    (
-        "INSERT INTO prompt_versions (id, key, version, content, checksum, is_active) "
-        "VALUES (:id, 'review.conventions', 1, 'conventions', :checksum, true)",
-        {"id": _CONVENTIONS_PROMPT, "checksum": "d" * 64},
-    ),
 )
+_PROMPT_ROW = (
+    "INSERT INTO prompt_versions (id, key, version, content, checksum, is_active) "
+    "VALUES (:id, :key, :version, :content, :checksum, true)"
+)
+# The packaged prompt files, as the deploy seed stores them (content and source checksum).
+_PACKAGED = {
+    (asset.key, asset.version): asset
+    for asset in load_prompt_assets(Path(__file__).resolve().parents[1] / "review" / "prompts")
+}
+
+
+def _packaged_row(prompt_id: UUID, key: str, version: int) -> dict[str, Any]:
+    asset = _PACKAGED[(key, version)]
+    return {
+        "id": prompt_id,
+        "key": key,
+        "version": version,
+        "content": asset.content,
+        "checksum": asset.checksum,
+    }
+
+
+# One active row per key: the projection pins the active review.system row (the repository
+# has no override) and the active conventions and verifier rows (or NULL).
+_PROMPTS: dict[Seed, tuple[dict[str, Any], ...]] = {
+    Seed.LEGACY: (
+        {
+            "id": _REVIEW_PROMPT,
+            "key": "review.system",
+            "version": 1,
+            "content": "system",
+            "checksum": "c" * 64,
+        },
+        {
+            "id": _CONVENTIONS_PROMPT,
+            "key": "review.conventions",
+            "version": 1,
+            "content": "conventions",
+            "checksum": "d" * 64,
+        },
+    ),
+    # The v4 run needs a verifier pin whose checksum is the packaged file's: the verifier
+    # builder reads that file and compares (policy_snapshot_integrity_error otherwise).
+    Seed.V4: (
+        _packaged_row(_REVIEW_PROMPT, "review.system", 4),
+        _packaged_row(_CONVENTIONS_PROMPT, "review.conventions", 2),
+        _packaged_row(_VERIFIER_PROMPT, "review.verifier", 2),
+    ),
+}
 
 
 @pytest.fixture(scope="module")
@@ -505,7 +640,14 @@ def stack() -> Iterator[Stack]:
         engine.dispose()
 
 
-def _reset(stack: Stack) -> None:
+@pytest.fixture(params=list(Seed), ids=str)
+def seed(request: pytest.FixtureRequest) -> Seed:
+    """A catalog case on both review paths: ``[legacy]`` and ``[v4]``."""
+    chosen: Seed = request.param
+    return chosen
+
+
+def _reset(stack: Stack, seed: Seed) -> None:
     """Empty every table but ``alembic_version``, seed it again, delete the topology.
 
     The seed ids are fixed: the pins of a run (the review prompt id among them) enter
@@ -529,6 +671,8 @@ def _reset(stack: Stack) -> None:
             connection.execute(text(f"TRUNCATE {names} RESTART IDENTITY CASCADE"))
             for statement, values in _SEED:
                 connection.execute(text(statement), values)
+            for row in _PROMPTS[seed]:
+                connection.execute(text(_PROMPT_ROW), row)
     finally:
         engine.dispose()
     asyncio.run(_reset_topology(stack.rabbitmq_url))
@@ -728,9 +872,9 @@ async def _scenario(stack: Stack, github: FakeGitHub, llm: FakeLlm) -> Outcome:
     )
 
 
-def _review(stack: Stack, github: FakeGitHub) -> Outcome:
+def _review(stack: Stack, github: FakeGitHub, seed: Seed) -> Outcome:
     """Run one case on emptied tables and a fresh review topology."""
-    _reset(stack)
+    _reset(stack, seed)
     try:
         outcome = asyncio.run(_scenario(stack, github, FakeLlm()))
     finally:
@@ -773,13 +917,57 @@ def _assert_failed_once(outcome: Outcome, error_codes: frozenset[str]) -> None:
     assert outcome.check_run["conclusion"] == "neutral"
 
 
-def _assert_published(outcome: Outcome) -> None:
+def _assert_published(outcome: Outcome, seed: Seed) -> None:
     assert (outcome.state, outcome.error_code) == ("succeeded", None)
-    assert "ReviewOutput" in outcome.tasks
+    assert _REVIEW_TASK[seed] in outcome.tasks
     assert len(outcome.reviews) == 1
     assert outcome.reviews[0]["commit_id"] == HEAD
     # PIPELINE_SPEC §7: `succeeded` → `completed` / `neutral`.
     assert outcome.check_run["conclusion"] == "neutral"
+
+
+def _texts(outcome: Outcome) -> list[str]:
+    """Every message of every LLM call, parsed: the raw bodies escape quotes and newlines."""
+    return [
+        "\n".join(item["content"] for item in json.loads(body)["messages"])
+        for body in outcome.bodies
+    ]
+
+
+def _user_texts(outcome: Outcome) -> list[str]:
+    """The input envelope of every call; the system prompts are the service's own text."""
+    return [_user_message(json.loads(body)) for body in outcome.bodies]
+
+
+def _user_messages(outcome: Outcome, task: str) -> list[str]:
+    """The input envelopes of the calls with this response schema; at least one was made."""
+    messages = [
+        _user_message(json.loads(body))
+        for name, body in zip(outcome.tasks, outcome.bodies, strict=True)
+        if name == task
+    ]
+    assert messages, (task, outcome.tasks)
+    return messages
+
+
+def _assert_rules_shown(outcome: Outcome, seed: Seed, rules: bytes | None) -> None:
+    """The rules.md block each review path puts in the model's input.
+
+    The snapshot path shows the base document whole in one ``<repository_rules>`` block of
+    the reviewer's and the verifier's input (RFS §5.3, §8.1); the legacy envelope never
+    carries the rules.md text.
+    """
+    if seed is Seed.LEGACY:
+        assert all("<repository_rules" not in item for item in _texts(outcome))
+        return
+    for task in (_REVIEW_TASK[seed], "VerificationOutput"):
+        for message in _user_messages(outcome, task):
+            assert _POLICY_RULES.findall(message) == [_rules_block(rules)], task
+
+
+def _outside_source_code(message: str) -> str:
+    """The envelope without the head's code: the diff and the excerpts of changed files."""
+    return _SOURCE_CODE.sub("", message)
 
 
 # §9 for a 404: `policy_revision_unavailable` ("закреплённая ревизия недоступна") or
@@ -791,70 +979,129 @@ _ACCESS_DENIED = frozenset({"policy_access_denied"})
 
 
 @pytest.mark.integration
-def test_missing_rules_md_lets_the_whole_diff_reach_the_model(stack: Stack) -> None:
-    outcome = _review(stack, _github(None))
+def test_missing_rules_md_lets_the_whole_diff_reach_the_model(stack: Stack, seed: Seed) -> None:
+    outcome = _review(stack, _github(None), seed)
 
-    _assert_published(outcome)
+    _assert_published(outcome, seed)
     assert outcome.documents[RULES][:2] == ("missing", None)
     assert _rules_load(outcome)["presence"] == "missing"
     # Without a policy both changed files reach the model: the control of the valid case.
     for needle in (SERVICE_PATH, SERVICE_MARKER, CLIENT_PATH, CLIENT_MARKER):
         assert any(needle in body for body in outcome.bodies), needle
+    _assert_rules_shown(outcome, seed, None)
 
 
 @pytest.mark.integration
-def test_review_ignore_keeps_the_ignored_file_out_of_every_llm_call(stack: Stack) -> None:
-    outcome = _review(stack, _github(VALID_RULES))
+def test_review_ignore_keeps_the_ignored_file_out_of_every_llm_call(
+    stack: Stack, seed: Seed
+) -> None:
+    outcome = _review(stack, _github(VALID_RULES), seed)
 
-    _assert_published(outcome)
+    _assert_published(outcome, seed)
     assert outcome.documents[RULES][0] == "present"
     assert _rules_load(outcome)["presence"] == "present"
+    # Every call: on the snapshot path the verifier's too (`_assert_rules_shown` needs one).
     assert all(CLIENT_MARKER not in body for body in outcome.bodies)
     assert all(CLIENT_PATH not in body for body in outcome.bodies)
     assert any(SERVICE_MARKER in body for body in outcome.bodies)
+    # The base document whole, its review-ignore block included (§3.2), as policy only.
+    _assert_rules_shown(outcome, seed, VALID_RULES)
+    if seed is Seed.V4:
+        for message in _user_messages(outcome, _REVIEW_TASK[seed]):
+            [diff] = re.findall(r"<changed_files>.*?</changed_files>", message, re.DOTALL)
+            assert "Prefer small functions." not in diff
+            assert "generated/**" not in diff
+            # §5.3: the ignored file is counted, never named.
+            assert '<excluded_files count="1" />' in message
 
 
 @pytest.mark.integration
-def test_review_ignore_in_agents_md_is_ordinary_text(stack: Stack) -> None:
+def test_review_ignore_in_agents_md_is_ordinary_text(stack: Stack, seed: Seed) -> None:
     # §4.1, §4.3: only `.review/rules.md` is read for masks; in AGENTS.md the block is text.
-    outcome = _review(stack, _github(None, agents=AGENTS_WITH_IGNORE_BLOCK))
+    outcome = _review(stack, _github(None, agents=AGENTS_WITH_IGNORE_BLOCK), seed)
 
-    _assert_published(outcome)
+    _assert_published(outcome, seed)
     assert outcome.documents["AGENTS.md"][0] == "present"
     assert outcome.documents[RULES][:2] == ("missing", None)
     for path in (SERVICE_PATH, CLIENT_PATH):
         assert any(path in body for body in outcome.bodies), path
+    _assert_rules_shown(outcome, seed, None)
+    if seed is Seed.V4:
+        # Nothing is excluded, so the verifier is shown both changed files as well.
+        for message in _user_messages(outcome, "VerificationOutput"):
+            assert SERVICE_MARKER in message and CLIENT_MARKER in message
 
 
 @pytest.mark.integration
 def test_empty_rules_md_is_present_and_has_another_policy_than_a_missing_one(
-    stack: Stack,
+    stack: Stack, seed: Seed
 ) -> None:
-    missing = _review(stack, _github(None))
-    empty = _review(stack, _github(b""))
+    missing = _review(stack, _github(None), seed)
+    empty = _review(stack, _github(b""), seed)
 
     # AC2: the empty and the missing file never share the snapshot identity (§3.2).
     assert missing.policy_digest is not None and empty.policy_digest is not None
     assert empty.policy_digest != missing.policy_digest
     assert empty.documents[RULES] == ("present", EMPTY_SHA256, 0)
     assert _rules_load(empty)["presence"] == "present"
-    _assert_published(empty)
+    _assert_published(empty, seed)
     assert missing.documents[RULES][:2] == ("missing", None)
+    # The model tells them apart as well: an empty document, not an absent one.
+    _assert_rules_shown(empty, seed, b"")
+    _assert_rules_shown(missing, seed, None)
+
+
+_AT_LIMIT = b"a" * 65_536
 
 
 @pytest.mark.integration
-def test_rules_md_at_the_size_limit_is_present(stack: Stack) -> None:
-    # 65 536 bytes is the limit itself (§3.3): the document is loaded whole.
-    outcome = _review(stack, _github(b"a" * 65_536))
+@pytest.mark.parametrize("seed", [Seed.LEGACY], ids=str)
+def test_rules_md_at_the_size_limit_is_present(stack: Stack, seed: Seed) -> None:
+    # 65 536 bytes is the limit itself (§3.3): the document is loaded whole. The legacy
+    # envelope does not show it, so the policy token budget is not checked there.
+    outcome = _review(stack, _github(_AT_LIMIT), seed)
 
-    _assert_published(outcome)
+    _assert_published(outcome, seed)
     presence, _, byte_count = outcome.documents[RULES]
     assert (presence, byte_count) == ("present", 65_536)
 
 
 @pytest.mark.integration
-def test_all_changes_ignored_skips_the_run_without_llm_or_review(stack: Stack) -> None:
-    outcome = _review(stack, _github(ALL_IGNORED_RULES))
+@pytest.mark.parametrize("seed", [Seed.V4], ids=str)
+def test_rules_md_at_the_size_limit_exceeds_the_policy_budget(stack: Stack, seed: Seed) -> None:
+    # §3.3: the 65 536 bytes pass the byte limit, but rendered whole the block is over the
+    # 12 000 tokens of the two policy blocks; §11: failed without LLM and without retry, the
+    # document not truncated. §9: the budget fails in `policy.load` and names no document.
+    outcome = _review(stack, _github(_AT_LIMIT), seed)
+
+    assert (outcome.state, outcome.attempt) == ("failed", 1)
+    assert outcome.error_code == "policy_prompt_budget_exceeded"
+    assert outcome.documents[RULES] == ("present", hashlib.sha256(_AT_LIMIT).hexdigest(), 65_536)
+    _assert_policy_load_failed(outcome)
+    [load] = outcome.policy_load
+    diagnostic = load["error"]["diagnostic"]
+    # §3.3 counts both rendered blocks; counter/v2 is `(len + 2) // 3` per block (§7.2).
+    agents = (
+        '<project_conventions_document block_id="policy-agents" path="AGENTS.md" status="absent" />'
+    )
+    actual = sum((len(block) + 2) // 3 for block in (_rules_block(_AT_LIMIT), agents))
+    assert (diagnostic["source_path"], diagnostic["limit"], diagnostic["actual"]) == (
+        None,
+        _MAX_POLICY_TOKENS,
+        actual,
+    )
+    # Current behaviour: the snapshot is stored before its budget is checked; RFS §7.2
+    # allows a failed configuration with or without one.
+    assert outcome.snapshots == 1
+    assert outcome.tasks == []
+    assert outcome.reviews == []
+    # PIPELINE_SPEC §7: `failed` → `completed` / `neutral`.
+    assert outcome.check_run["conclusion"] == "neutral"
+
+
+@pytest.mark.integration
+def test_all_changes_ignored_skips_the_run_without_llm_or_review(stack: Stack, seed: Seed) -> None:
+    outcome = _review(stack, _github(ALL_IGNORED_RULES), seed)
 
     assert (outcome.state, outcome.error_code) == ("skipped", "all_changes_ignored")
     assert outcome.documents[RULES][0] == "present"
@@ -862,6 +1109,10 @@ def test_all_changes_ignored_skips_the_run_without_llm_or_review(stack: Stack) -
     assert outcome.reviews == []
     # PIPELINE_SPEC §7: `skipped` → `completed` / `skipped`.
     assert outcome.check_run["conclusion"] == "skipped"
+
+
+# The failures below end `policy.load` while the documents are read, before the review path
+# is chosen: they run on the v4 seed, the path of every new GitHub run, only.
 
 
 @pytest.mark.integration
@@ -902,7 +1153,7 @@ def test_all_changes_ignored_skips_the_run_without_llm_or_review(stack: Stack) -
 def test_invalid_rules_md_fails_the_run_once_without_llm(
     stack: Stack, rules: bytes, error_code: str
 ) -> None:
-    outcome = _review(stack, _github(rules))
+    outcome = _review(stack, _github(rules), Seed.V4)
 
     _assert_failed_once(outcome, frozenset({error_code}))
 
@@ -910,7 +1161,7 @@ def test_invalid_rules_md_fails_the_run_once_without_llm(
 @pytest.mark.integration
 def test_symlinked_rules_md_fails_the_run_once_without_llm(stack: Stack) -> None:
     # §3.1: a symlink is never dereferenced; the document must be a regular Git blob.
-    outcome = _review(stack, _github(b"../docs/rules.md", symlink=True))
+    outcome = _review(stack, _github(b"../docs/rules.md", symlink=True), Seed.V4)
 
     _assert_failed_once(outcome, frozenset({"policy_document_type_unsupported"}))
 
@@ -931,7 +1182,7 @@ def test_symlinked_rules_md_fails_the_run_once_without_llm(stack: Stack) -> None
 def test_unreadable_rules_md_fails_the_run_and_is_never_missing(
     stack: Stack, base_rules: bytes | None, fault: Fault, error_codes: frozenset[str]
 ) -> None:
-    outcome = _review(stack, _github(base_rules, fault=fault))
+    outcome = _review(stack, _github(base_rules, fault=fault), Seed.V4)
 
     # Failing proves the read was not taken for a missing document (§3.1, §11).
     _assert_failed_once(outcome, error_codes)
@@ -940,22 +1191,34 @@ def test_unreadable_rules_md_fails_the_run_and_is_never_missing(
 @pytest.mark.integration
 def test_truncated_base_tree_fails_the_run_and_is_never_missing(stack: Stack) -> None:
     # No `.review` entry in a cut listing: only completeness tells absence from a gap.
-    outcome = _review(stack, _github(None, fault=Fault.TRUNCATED))
+    outcome = _review(stack, _github(None, fault=Fault.TRUNCATED), Seed.V4)
 
     _assert_failed_once(outcome, frozenset({"policy_revision_unavailable"}))
 
 
 @pytest.mark.integration
-def test_rules_md_added_by_the_head_is_not_the_policy(stack: Stack) -> None:
-    outcome = _review(stack, _github(None, head_rules=IGNORE_EVERYTHING_RULES))
+def test_rules_md_added_by_the_head_is_not_the_policy(stack: Stack, seed: Seed) -> None:
+    outcome = _review(stack, _github(None, head_rules=IGNORE_EVERYTHING_RULES), seed)
 
-    _assert_published(outcome)
+    _assert_published(outcome, seed)
     assert outcome.documents[RULES][:2] == ("missing", None)
+    # §5.3: the added text is no policy. The base has none, and its `**/*` is not applied.
+    _assert_rules_shown(outcome, seed, None)
+    for path in (SERVICE_PATH, CLIENT_PATH):
+        assert any(path in body for body in outcome.bodies), path
+    # It is ordinary changed code (§5.3): no call shows it but as the head's code.
+    assert all("**/*" not in _outside_source_code(item) for item in _user_texts(outcome))
 
 
 @pytest.mark.integration
-def test_rules_md_changed_by_the_head_keeps_the_base_policy(stack: Stack) -> None:
-    outcome = _review(stack, _github(PLAIN_RULES, head_rules=IGNORE_EVERYTHING_RULES))
+def test_rules_md_changed_by_the_head_keeps_the_base_policy(stack: Stack, seed: Seed) -> None:
+    outcome = _review(stack, _github(PLAIN_RULES, head_rules=IGNORE_EVERYTHING_RULES), seed)
 
-    _assert_published(outcome)
+    _assert_published(outcome, seed)
     assert outcome.documents[RULES][:2] == ("present", hashlib.sha256(PLAIN_RULES).hexdigest())
+    # §3.1, §5.3: the base text is the policy; the head's `**/*` is neither shown as policy
+    # nor applied, and reaches the model only as the head's code of a changed file.
+    _assert_rules_shown(outcome, seed, PLAIN_RULES)
+    for path in (SERVICE_PATH, CLIENT_PATH):
+        assert any(path in body for body in outcome.bodies), path
+    assert all("**/*" not in _outside_source_code(item) for item in _user_texts(outcome))
