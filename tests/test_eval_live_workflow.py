@@ -77,6 +77,7 @@ def test_live_failure_is_not_hidden_and_diagnostics_remain(tmp_path: Path) -> No
             "RUNNER_TEMP": str(tmp_path),
             "LLM_API_KEYS": "test-key-not-a-real-credential",
             "EVAL_POLICY_ARM": "malicious",
+            "EVAL_REVIEW_PROMPT": "v4",
         },
     )
 
@@ -88,6 +89,8 @@ def test_live_failure_is_not_hidden_and_diagnostics_remain(tmp_path: Path) -> No
         "review/scripts/eval_live.py",
         "--root",
         str(tmp_path / "eval-corpus"),
+        "--system",
+        "review/prompts/review.system.v4.md",
         "--policy-arm",
         "malicious",
         "--report-json",
@@ -110,6 +113,7 @@ def test_missing_key_fails_before_provider_call(tmp_path: Path) -> None:
             "LLM_API_KEYS": "",
             "PATH": str(tmp_path),
             "EVAL_POLICY_ARM": "legacy",
+            "EVAL_REVIEW_PROMPT": "v3",
         },
     )
     assert result.returncode != 0
@@ -125,6 +129,7 @@ def test_missing_key_fails_before_provider_call(tmp_path: Path) -> None:
             "LLM_API_KEYS": "test-key",
             "PATH": str(tmp_path),
             "EVAL_POLICY_ARM": "legacy",
+            "EVAL_REVIEW_PROMPT": "v3",
         },
     )
     assert control.returncode == 42
@@ -168,10 +173,12 @@ def test_summary_uses_replay_metrics_without_model_diagnostics(tmp_path: Path) -
             "PYTHONPATH": str(REPO_ROOT),
             "RUNNER_TEMP": str(tmp_path),
             "GITHUB_STEP_SUMMARY": str(summary),
+            "EVAL_REVIEW_PROMPT": "v4",
         },
     )
     assert result.returncode == 0, result.stderr
     content = summary.read_text()
+    assert content.startswith("## Live corpus evaluation\n\nReview prompt: v4\n\n")
     assert "Model: model&lt;test&gt;" in content
     assert "Validity: 66.7% (16/24)" in content
     assert "Precision=37.5% Recall=15.8%" in content
@@ -179,6 +186,33 @@ def test_summary_uses_replay_metrics_without_model_diagnostics(tmp_path: Path) -
     assert "Verdict agreement: 29.2% (7/24)" in content
     assert "Warning: Recorded capture is not publishable" in content
     assert "RAW MODEL TEXT MUST NOT APPEAR" not in content
+
+
+def test_summary_names_the_selected_prompt_without_a_report(tmp_path: Path) -> None:
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    shim = bin_dir / "uv"
+    shim.write_text('#!/bin/bash\nexec "$PYTHON_EXE" -\n')
+    shim.chmod(0o755)
+    summary = tmp_path / "summary.md"
+    result = _run(
+        "Summarize evaluation",
+        tmp_path,
+        {
+            "PATH": str(bin_dir) + os.pathsep + os.environ["PATH"],
+            "PYTHON_EXE": sys.executable,
+            "PYTHONPATH": str(REPO_ROOT),
+            "RUNNER_TEMP": str(tmp_path),
+            "GITHUB_STEP_SUMMARY": str(summary),
+            "EVAL_REVIEW_PROMPT": "v4",
+        },
+    )
+    assert result.returncode == 0, result.stderr
+    assert summary.read_text() == (
+        "## Live corpus evaluation\n\n"
+        "Review prompt: v4\n\n"
+        "No evaluation report was produced. See the failed step for details.\n"
+    )
 
 
 def _assert_workflow_contract(text: str) -> None:
@@ -241,8 +275,21 @@ def _assert_selection_contract(text: str) -> None:
         "          - malicious\n"
         "        default: legacy\n"
     ) in text
+    # v3 by default: the default legacy arm refuses the snapshot-path v4 (eval_live.py).
+    assert (
+        "      review_prompt:\n"
+        '        description: "Review prompt: v3, or v4 (snapshot path: needs policy_arm none, '
+        'valid or malicious)"\n'
+        "        required: false\n"
+        "        type: choice\n"
+        "        options:\n"
+        "          - v3\n"
+        "          - v4\n"
+        "        default: v3\n"
+    ) in text
     assert "      EVAL_CORPUS: ${{ inputs.corpus || 'main' }}\n" in text
     assert "      EVAL_POLICY_ARM: ${{ inputs.policy_arm || 'legacy' }}\n" in text
+    assert "      EVAL_REVIEW_PROMPT: ${{ inputs.review_prompt || 'v3' }}\n" in text
     bodies = _run_bodies(text)
     assert len(bodies) == 7
     assert not [body for body in bodies if "${{" in body]
@@ -250,7 +297,11 @@ def _assert_selection_contract(text: str) -> None:
         'validate_dataset.py --root "$RUNNER_TEMP/eval-corpus" --final "${profile[@]}"\n'
     ) in text
     assert "            profile=(--profile rules)\n" in text
-    assert '            --policy-arm "$EVAL_POLICY_ARM" \\\n' in text
+    assert (
+        '            --system "review/prompts/review.system.$EVAL_REVIEW_PROMPT.md" \\\n'
+        '            --policy-arm "$EVAL_POLICY_ARM" \\\n'
+    ) in text
+    assert '              summary.write(f"Review prompt: {prompt}\\n\\n")\n' in text
     # Artifacts of different corpora and arms stay apart in one repository's artifact list.
     run = "${{ github.run_id }}-${{ github.run_attempt }}"
     selection = "${{ env.EVAL_CORPUS }}-${{ env.EVAL_POLICY_ARM }}"
@@ -287,6 +338,19 @@ def test_manual_workflow_security_and_selection_contract() -> None:
             "    type: string\n        options:\n          - main",
         ),
         ("${{ inputs.policy_arm || 'legacy' }}", "legacy"),
+        ("          - v4\n", ""),
+        ("        default: v3\n", "        default: v4\n"),
+        (
+            "    type: choice\n        options:\n          - v3",
+            "    type: string\n        options:\n          - v3",
+        ),
+        ("${{ inputs.review_prompt || 'v3' }}", "v3"),
+        ('            --system "review/prompts/review.system.$EVAL_REVIEW_PROMPT.md" \\\n', ""),
+        (
+            '--system "review/prompts/review.system.$EVAL_REVIEW_PROMPT.md"',
+            '--system "review/prompts/review.system.${{ inputs.review_prompt }}.md"',
+        ),
+        ('summary.write(f"Review prompt: {prompt}\\n\\n")', ""),
         ('--policy-arm "$EVAL_POLICY_ARM"', '--policy-arm "${{ inputs.policy_arm }}"'),
         (
             '"$RUNNER_TEMP/eval-corpus" --final "${profile[@]}"',

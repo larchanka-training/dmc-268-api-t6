@@ -31,6 +31,14 @@ on:
           - valid
           - malicious
         default: legacy
+      review_prompt:
+        description: "Review prompt: v3, or v4 (snapshot path: needs policy_arm none, valid or malicious)"
+        required: false
+        type: choice
+        options:
+          - v3
+          - v4
+        default: v3
 
 permissions:
   contents: read
@@ -52,6 +60,7 @@ jobs:
       # Inputs reach the shell only through these variables, never as expressions in run.
       EVAL_CORPUS: ${{ inputs.corpus || 'main' }}
       EVAL_POLICY_ARM: ${{ inputs.policy_arm || 'legacy' }}
+      EVAL_REVIEW_PROMPT: ${{ inputs.review_prompt || 'v3' }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -102,6 +111,7 @@ jobs:
           fi
           uv run python review/scripts/eval_live.py \
             --root "$RUNNER_TEMP/eval-corpus" \
+            --system "review/prompts/review.system.$EVAL_REVIEW_PROMPT.md" \
             --policy-arm "$EVAL_POLICY_ARM" \
             --report-json "$RUNNER_TEMP/eval-report.json" \
             --redacted-responses "$RUNNER_TEMP/eval-response-metadata"
@@ -129,8 +139,10 @@ jobs:
           from review.scripts.eval_replay import format_console
 
           report_path = Path(os.environ["RUNNER_TEMP"]) / "eval-report.json"
+          prompt = html.escape(os.environ["EVAL_REVIEW_PROMPT"])
           with Path(os.environ["GITHUB_STEP_SUMMARY"]).open("a", encoding="utf-8") as summary:
               summary.write("## Live corpus evaluation\n\n")
+              summary.write(f"Review prompt: {prompt}\n\n")
               if report_path.is_file():
                   report = json.loads(report_path.read_text(encoding="utf-8"))
                   summary.write("<pre>" + html.escape(format_console(report)) + "</pre>\n")
