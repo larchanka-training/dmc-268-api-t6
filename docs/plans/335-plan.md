@@ -1,10 +1,9 @@
 # Plan: GitLab staging configuration (#335)
 
-Status: human-approved implementation published as [PR #339](https://github.com/larchanka-training/dmc-268-api-t6/pull/339); original gates and CI passed. Round 1 corrections R0–R6 and final verification are complete: all four code gates pass (9298 tests, zero skips/failures/errors), production-image smoke passes, and fresh cumulative Standards/Spec reviews report zero actionable findings. This committed snapshot precedes round 1 publication, new-head CI and thread replies; the live PR records those subsequent results. Real GitLab acceptance remains pending.
+Status: human-approved implementation published as [PR #339](https://github.com/larchanka-training/dmc-268-api-t6/pull/339). Round 1 corrections R0–R7 were published on `1f74bd78db8468d5a719b0891b4c36bde6503e76`: the PR body and three thread replies were updated, all three threads were resolved, [CI 40497818211](https://github.com/larchanka-training/dmc-268-api-t6/actions/runs/40497818211) passed, and the [round 2 human review](https://github.com/larchanka-training/dmc-268-api-t6/pull/339#pullrequestreview-5667073079) approved that head. Historical round 1 verification included all four code gates (9298 tests, zero skips/failures/errors), production-image smoke and zero actionable cumulative Standards/Spec findings. Round 2 implementation and final code verification for all ten P3 items are complete: all four release gates pass (9604 tests, zero skips/failures/errors), actual production-image CLI help passes, and cumulative Standards/Spec reviews report zero actionable findings. Historical approval does not approve the new round 2 diff; publication, new-head CI and approval are recorded on the live PR. Real GitLab acceptance remains pending.
 Published integration baseline: `f160ce4c82220c20e627fbfdc0230b43a5f34492` (`main`, merged monitoring #279 retained).
 Round 1 integration baseline: `430d6604a0fc289916b34cc5aa6bdd307cea40b8`; fetched/rebased without conflicts, preserving all original PR file bytes and planner changes.
 Original design/test baseline: `88bbc0734e50e33fa769940291a79ff997102994` (#169 merged).
-Workspace: dedicated managed worktree for #335.
 Specification: <https://github.com/larchanka-training/dmc-268-api-t6/issues/335>.
 
 ## Outcome and limits
@@ -237,18 +236,18 @@ its continuing `docs/CICD.md` overlap. Add #340 to PR Refs and agree that the se
 PR to merge rebases on the first, manually reconciling allowlists and recipient
 tables. Refresh open PR file lists before development and publication.
 
-## Required main refresh before publication
+## Original main refresh before publication (completed)
 
 Main advanced by six monitoring commits after the previous candidate review. The
 candidate was preserved in a scoped recoverable backup, then reapplied onto
-`f160ce4c82220c20e627fbfdc0230b43a5f34492`. Keep upstream Grafana-secret wiring,
-manual monitoring acceptance and bounded app-RPS checks. The merged monitoring
-subsection stays 2.3; GitLab operator documentation is now 2.4. Earlier slice
-results remain historical evidence; fresh cumulative review and final code gates
-are required for this integrated candidate. Refreshed overlap checks passed (14 tests);
+`f160ce4c82220c20e627fbfdc0230b43a5f34492`. Upstream Grafana-secret wiring,
+manual monitoring acceptance and bounded app-RPS checks were retained. The merged
+monitoring subsection remained 2.3; GitLab operator documentation became 2.4.
+Refreshed overlap checks passed (14 tests);
 all eight non-overlap implementation files and all six upstream-only monitoring
-files match their preserved sources byte for byte. The candidate is frozen for
-fresh cumulative review and final gates. Real GitLab acceptance remains pending.
+files matched their preserved sources byte for byte. Fresh cumulative review and
+final gates subsequently passed as recorded in the task list. These are historical
+results; real GitLab acceptance remains pending.
 
 ## User documentation and publishing
 
@@ -266,12 +265,13 @@ referencing #335, and `What / Why / How to verify / Refs` body sections. No clos
 keywords or Development-panel link. Attach the created PR to the chat. Rebase before
 requesting review; merge and issue closure are outside this implementation approval.
 
-## Review round 1 corrective plan
+## Review round 1 corrective plan (completed)
 
 Review of published head `eb9e8340aa63a23f8b7334219927d60fa72c92f6` requests three
-P2 fixes and fifteen P3 corrections. The approved architecture and live acceptance
-boundary remain unchanged. The existing approved implementation/review loop covers
-these corrections; this is its next iteration, not a new feature plan.
+P2 fixes and fifteen P3 corrections. R0–R7 below record that completed round. The
+approved architecture and live acceptance boundary remain unchanged. The existing
+approved implementation/review loop covers these corrections; this is its next
+iteration, not a new feature plan.
 
 ### R0 — Refresh integration and ownership (S)
 
@@ -438,10 +438,9 @@ Dependencies: R0–R6. Files: existing plan/todo and existing PR metadata only.
   `uv run pytest tests/test_deploy_staging_services.py tests/test_gitlab_deployment_settings.py tests/test_gitlab_admin.py`.
   Freeze the final rebased candidate and source fingerprint, then execute the four
   required gates once: `uv run ruff check .`, `uv run ruff format --check .`,
-  `uv run mypy .`, `uv run pytest`. Use a fresh disposable Linux runner, isolated
-  real PG/Rabbit services, read-only source and a writable executable `/src/.venv`:
-  nested uv fixture environments drop `UV_PROJECT_ENVIRONMENT`. Record zero-skip
-  integration evidence; previous resources were cleaned up. Repeat a full run only
+  `uv run mypy .`, `uv run pytest`. Use a fresh disposable Linux runner with
+  isolated real PG/Rabbit services and verify nested uv invocation before the run.
+  Record zero-skip integration evidence. Repeat a full run only
   for a changed candidate or unresolved failure, not for every slice.
 - Fresh cumulative Standards/Spec review must account for all 18 findings and the
   rebase. Update existing PR #339 with `What / Why / How to verify / Refs`, #340
@@ -452,3 +451,63 @@ Dependencies: R0–R6. Files: existing plan/todo and existing PR metadata only.
 - Preserve separately pending real staging acceptance (Task 7); local regression,
   hook docs and 202 receipts do not complete AC3/AC4/AC5. Covers P3.13–P3.15 final
   evidence and publication. Original successful gates/CI remain historical facts.
+
+## Review round 2 — all ten P3 items in current PR #339
+
+The user chose current-PR corrections and accepts obtaining a new approval after
+publication. The approved architecture and pending live acceptance boundary stay
+in place. The [human review](https://github.com/larchanka-training/dmc-268-api-t6/pull/339#pullrequestreview-5667073079)
+is the finding source; checked implementation status lives in `335-todo.md`.
+
+1. **Integration and coordination (completed).** Refreshed main/open-PR overlaps
+   and rebased onto `916796ac62a46001e681b8f096dd6e99701dc809` before shared edits;
+   resulting head `5062c7caea30c68962c683e236afb5d8a6a2869f` preserves both feature
+   commits unchanged in range-diff. Independent CLI/plan edits were restored with
+   matching hashes. The existing authorized #340 notice covered the shared scope;
+   the user also authorized an [additional round 2 notice](https://github.com/larchanka-training/dmc-268-api-t6/pull/340#issuecomment-6446326442),
+   now published. Upstream prompt/deployment work is preserved; unrelated Bitbucket
+   changes are outside scope.
+2. **Deploy test contracts (P3-1, P3-2, P3-4, P3-6, P3-8; completed).** Correct the TMPDIR
+   test's boundary description; narrowly inject the GitLab validation rename
+   failure and prove the isolated missing guard mutant fails. Require every
+   `GITLAB_*` routing entry to live in literal `gitlab.env` or `api.env`. Separate
+   known diagnostic categories from unknown fallback, retaining secrecy/cleanup
+   assertions; remove only the two duplicate shell blank lines. The isolated
+   missing-guard mutant failed all three public operations; isolated misrouting
+   failed the routing invariant. The unchanged complete deploy test file passed
+   348 tests in 456.29s, with zero skips/failures/errors; affected static checks pass.
+3. **Operator runbook (P3-3, P3-7a–e, P3-9).** Document conservative recovery of
+   abandoned `.stage.*` secret copies and rotation accounting without automatic
+   cleanup. Make the prefix reusable in a fresh session; name actual inspect JSON
+   keys; make login/generation failures visible without continuing setup or
+   exiting the SSH shell. Check/re-enable the hook after process admission before
+   the real MR. Cite primary GitLab header/Resend contracts while keeping installed
+   version, observed delivery/replay and revocation proof pending. Verify extracted
+   Bash syntax and synthetic stub control flow; do not claim live evidence.
+4. **CLI help (P3-5).** Require `run --rm --no-deps -T`, retain container stdin
+   FD 0 versus local FD 3 and image-available Python, and direct
+   `prompt_not_seeded` recovery through successful reviewed deploy bootstrap.
+   Use actual help RED/GREEN and the complete admin test file.
+5. **Historical bookkeeping (P3-10).** Record completed round 1 body, publication,
+   CI, replies, resolved threads and approval above and in the task list. Remove
+   obsolete status qualifications and workstation traces; keep Task 7 incomplete.
+6. **Final candidate verification (completed).** Focused checks are complete and fresh
+   cumulative Standards/Spec reviews of all 15 feature paths report zero actionable
+   findings, accounting for all ten P3 items. All four mandatory gates passed on
+   the frozen candidate: Ruff lint, format (744 files), mypy (734 source files),
+   and one isolated Linux full suite with real PG/Rabbit: **9604 passed in
+   2265.01s (37m45s)**, zero skips/failures/errors and two dependency deprecation
+   warnings. Independent log/XML inspection confirmed the count and zero skipped
+   outcomes. All 15 candidate paths, dependency inputs, HEAD `5062c7ca` and all
+   374 effective production-image inputs matched before/after verification.
+   The actual production image passed eight network-disabled CLI help probes
+   (root plus seven commands); no new preflight wrapper matrix or live acceptance
+   is claimed. Historical counts remain evidence for their own heads.
+
+Round 2's bounded source ledger covers implementation, review and final code
+verification only. Publication, new-head CI, thread replies and approval are
+recorded on [PR #339](https://github.com/larchanka-training/dmc-268-api-t6/pull/339)
+when they occur; recording them does not require another bookkeeping commit.
+Refresh main before requesting review and again before merge; a diff-changing push
+invalidates the historical approval and requires approval on the new head. No
+merge, deployment, live AC completion or issue closure is included in this round.
