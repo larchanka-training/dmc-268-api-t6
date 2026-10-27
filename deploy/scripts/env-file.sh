@@ -312,7 +312,6 @@ gitlab_bundle_from_env_files() (
   printf '%s' "${records}" | base64 | tr -d '\n'
 )
 
-
 # Only trusted helper statuses select diagnostics; never include file contents or raw CLI errors.
 gitlab_deployment_failure_reason() {
   case "$1" in
@@ -323,7 +322,6 @@ gitlab_deployment_failure_reason() {
     *) printf '%s' 'GitLab configuration_invalid' ;;
   esac
 }
-
 
 # Capture untrusted registry stderr privately; only static categories leave this subshell.
 # Explicit guards are required because callers use this helper in conditional contexts.

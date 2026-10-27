@@ -278,7 +278,7 @@ Trusted operator использует reviewed deployed image и существ�
 workspace/project: CLI не создаёт workspace, PAT или защищённый secret-файл.
 Нужны staging SSH/operator доступ, cached reviewed image (либо право pull) и PAT с реальным
 доступом к API/комментариям выбранного GitLab project. Browser login сам их не выдаёт.
-Подготовьте через secret manager owner-only файл `protected_secret_file` с JSON ровно
+Для create подготовьте через secret manager owner-only файл `protected_secret_file` с JSON ровно
 `token`, `webhook_secret` (secret 32–256 печатных ASCII-символов, token 1–4096).
 Не создавайте JSON через литералы секретов в shell/history. CLI читает до 8192 bytes
 strict UTF-8 JSON из pipe/FD и отказывается от echoed TTY.
@@ -286,9 +286,14 @@ strict UTF-8 JSON из pipe/FD и отказывается от echoed TTY.
 На staging-хосте выберите фактический `APP_DIR` из [CICD §8.1](CICD.md#81-две-цели):
 `/opt/dmc-268-api-staging` для VPS или `/opt/dmc-268-api` для Terraform. Выполняйте
 в Bash; `COMPOSE_PROJECT` должен совпадать с deploy (по умолчанию basename каталога).
-Все пути `protected_*_file` уже предоставлены оператором; команды их не создают.
+Нужные для выбранной операции пути `protected_*_file` уже предоставлены оператором;
+команды их не создают. Logs, inspect и revoke не требуют create JSON или нового PAT;
+rotate использует отдельный protected JSON только с новым `token`.
 Если image удалён из cache, сначала выполните optional registry login ниже;
 для cached reviewed image после deploy новый registry token не нужен.
+
+Сначала отдельно соберите reusable prefix — этот блок не выполняет create/bind и
+подходит для новой SSH Bash-сессии перед logs, inspect, rotate или revoke:
 
 ```bash
 set +o xtrace
@@ -301,7 +306,16 @@ source ./env-file.sh &&
 mode="$(read_compose_env_var DEPLOY_MODE .env)" &&
 [[ "$mode" == edge || "$mode" == ports ]] &&
 operator=(docker compose -p "$project" --env-file .env -f compose.yml \
-  -f "compose.${mode}.yml" --profile gitlab-operator) &&
+  -f "compose.${mode}.yml" --profile gitlab-operator)
+```
+
+Продолжайте только после успешного prefix-блока. Ошибка `cd`, helper или режима
+останавливает цепочку; `operator` заранее сброшен, чтобы не использовать старую цель.
+`operator`, `project` и `mode` остаются в текущей Bash-сессии. Для существующей
+installation не повторяйте create: после prefix выполняйте только нужную команду.
+Для первоначального onboarding отдельно выполните create → bind → inspect:
+
+```bash
 "${operator[@]}" run --rm --no-deps -T gitlab-admin create \
   --workspace-id "$workspace_id" --installation-id "$installation_id" \
   --origin "$gitlab_origin" --secrets-fd 0 < "$protected_secret_file" &&
@@ -314,7 +328,6 @@ operator=(docker compose -p "$project" --env-file .env -f compose.yml \
 Цепочка `&&` останавливается на первой ошибке, в том числе не запускает bind после
 неуспешного create, и не закрывает интерактивную SSH-сессию. Продолжайте следующие
 шаги только после успешного inspect; при ошибке устраните её и проверьте состояние.
-`operator`, `project` и `mode` остаются в той же Bash-сессии для команд ниже.
 
 `installation_id` — новый согласованный UUID; `workspace_id` — существующий workspace,
 `project_id` — положительный числовой GitLab project ID из разрешённой настройки,
@@ -334,12 +347,19 @@ read:packages token (не GitLab PAT):
 operator_registry_config="$(mktemp -d)" &&
 export DOCKER_CONFIG="$operator_registry_config" &&
 trap 'docker logout ghcr.io >/dev/null 2>&1 || true; rm -rf "$operator_registry_config"' EXIT &&
-docker login ghcr.io --username "$registry_user" --password-stdin \
-  < "$protected_registry_token_file" >/dev/null 2>&1
+if docker login ghcr.io --username "$registry_user" --password-stdin \
+  >/dev/null 2>&1 < "$protected_registry_token_file"; then
+  :
+else
+  printf '%s\n' 'GitLab operator registry login failed; setup stopped.' >&2
+  false
+fi
 ```
 
-Продолжайте setup только после успешного login; при отказе исправьте registry доступ,
-затем очистите временный login командой в конце этого раздела.
+Блок возвращает ненулевой status при отказе login; статический diagnostic не
+превращает ошибку в успех. Продолжайте setup только после успешного блока; при
+отказе не запускайте зависимые команды, исправьте registry доступ, затем очистите
+временный login командой в конце этого раздела. Интерактивная SSH-сессия остаётся открытой.
 В Compose 2.19 `run` не имеет `--pull`; не добавляйте несуществующий flag.
 
 Для rotate-token тот же Compose prefix и `--secrets-fd 0 < "$protected_rotate_file"`;
@@ -369,10 +389,14 @@ GitLab HTTP выполняется вне каждой DB transaction; посл�
 3. В **Trigger** оставьте только **Merge request events**, снимите остальные
    события; **Enable SSL verification** оставьте включённым. Сохраните hook без
    custom payload/template, custom headers или обхода canonical project/origin checks.
-4. Проверьте возможности тестового GitLab: stable `Idempotency-Key` доступен с
-   17.4, `webhook-id` — с 19.0; нужен хотя бы один из них. Если приходят оба,
-   значения должны совпадать. `X-Gitlab-Webhook-UUID` и `X-Gitlab-Event-UUID` не
-   заменяют этот ключ. При отсутствии поддержки остановите onboarding.
+4. Проверьте возможности тестового GitLab. По [официальной истории delivery
+   headers](https://docs.gitlab.com/user/project/integrations/webhooks/#delivery-headers),
+   `Idempotency-Key` введён в 17.4, `webhook-id` — в 19.0; оба идентификатора
+   стабильны при retry, а `webhook-id` равен `Idempotency-Key`. Receiver требует
+   хотя бы один из них и равенство, если приходят оба. `X-Gitlab-Webhook-UUID` и
+   `X-Gitlab-Event-UUID` не заменяют этот ключ. Отдельно зафиксируйте установленную
+   версию и наблюдаемые headers на реальной доставке; ссылка подтверждает contract,
+   а не возможности staging instance. При отсутствии поддержки остановите onboarding.
 
 Названия полей, версии delivery headers и просмотр доставок —
 [официальная документация GitLab Webhooks](https://docs.gitlab.com/user/project/integrations/webhooks/).
@@ -383,21 +407,31 @@ activation и process admission ниже.
 включает GitLab intake #169 и публикацию #171 (PR229),
 и получает разрешение на выборочную live-проверку. Этот документ не разрешает
 production activation. В той же Bash-сессии получите **свежий** inspect, проверьте
-`connection.installation_id`, `workspace_id`, origin, bindings и readiness, затем
-введите положительное `connection.generation` именно из этого результата.
+`connection.installation_id`, `connection.workspace_id` и `connection.instance_origin`
+против согласованных IDs/origin. Проверьте нужные `repositories[].project_id`,
+`repositories[].enabled`, `repositories[].available`, `repositories[].rules_ready`
+и top-level `prompt_ready`; paused sibling не обязан быть ready. Затем введите
+положительное `connection.generation` именно из этого результата.
 CLI не принимает supplied merged SHA или boolean обхода:
 
 ```bash
 "${operator[@]}" run --rm --no-deps -T gitlab-admin inspect \
   --installation-id "$installation_id" &&
-read -r -p 'connection.generation из этого inspect: ' generation &&
-[[ "$generation" =~ ^[1-9][0-9]*$ ]] &&
-"${operator[@]}" run --rm --no-deps -T gitlab-admin activate \
-  --installation-id "$installation_id" --expected-generation "$generation"
+if read -r -p 'connection.generation из этого inspect: ' generation &&
+  [[ "$generation" =~ ^[1-9][0-9]*$ ]]; then
+  "${operator[@]}" run --rm --no-deps -T gitlab-admin activate \
+    --installation-id "$installation_id" --expected-generation "$generation"
+else
+  printf '%s\n' 'GitLab activation generation invalid; activation stopped.' >&2
+  false
+fi
 ```
 
-Generation обязателен и положителен. Activate повторно authenticates stored token и
-проверяет доступ к каждому binding вне transaction, затем под locks сверяет весь snapshot.
+Пустой, нулевой или malformed generation даёт статический diagnostic и ненулевой
+status без activate; SSH-сессия не закрывается. Исправьте ввод по свежему inspect,
+не продолжайте при ошибке. Generation обязателен и положителен. Activate повторно
+authenticates stored token и проверяет доступ к каждому binding вне transaction,
+затем под locks сверяет весь snapshot.
 Нужен хотя бы один enabled/available repository с `wait_for_ci=never`, active rules и
 active `review.system` prompt; paused sibling не блокирует ready sibling, но identities
 и API access всех bindings проверяются. Budget gate отсутствует. Команда меняет только
@@ -417,9 +451,22 @@ Create/bind сами intake не включают; active connection и process 
 Если staging уже обслуживает другие активные подключения, не выключайте общий API flag
 ради нового теста: новая installation остаётся disabled до собственного activate.
 
-**Приёмка реального MR.** После успешного activate и reviewed deploy с process
-admission отправьте реальное MR-событие из разрешённого project (fast review требует
-`ai-review`, `wait_for_ci=never`, готовые rules/prompt и LLM). В **Settings → Webhooks →
+**Hook после admission.** До приёмочного MR откройте **Settings → Webhooks** и
+проверьте, что именно этот project hook enabled: прежние события до activation/API
+admission могли получать 503 и вызвать [автоотключение GitLab](https://docs.gitlab.com/user/project/integrations/webhooks/#auto-disabled-webhooks).
+Если он Temporarily disabled/Disabled, сначала устраните причину отказа, затем
+выберите **Test → Merge request events** для этого hook. Согласно [Re-enable
+disabled webhooks](https://docs.gitlab.com/user/project/integrations/webhooks/#re-enable-disabled-webhooks),
+успешный ответ **2xx** на Test включает hook снова. Проверьте status в Recent events
+и enabled state; если тест не получает 2xx, остановитесь и исправьте причину.
+Этот Test может создать отдельную receipt/Run: отметьте её как диагностическую и
+не включайте в counts приёмочного MR. Он подтверждает восстановление hook,
+а не real-MR/identical-delivery replay acceptance.
+
+**Приёмка реального MR.** После успешного activate, reviewed deploy с process
+admission и enabled hook отправьте реальное MR-событие из разрешённого project
+(fast review требует `ai-review`, `wait_for_ci=never`, готовые rules/prompt и LLM).
+В **Settings → Webhooks →
 Edit → Recent events → View details** сохраните безопасное evidence: время, URL с тем
 же installation UUID, MR/project/head, stable delivery header, HTTP **202** и ответ
 `{"status":"pending"}`. Повтор уже сохранённой доставки отвечает
@@ -444,7 +491,10 @@ HTTP 202 подтверждает durable intake, не `succeeded` Run и не �
 `succeeded` Run, одна summary и измеренное число ожидаемых inline findings.
 Затем у **этой исходной доставки** выберите
 **Recent events → View details → Resend Request**: GitLab сохраняет её payload и
-`Idempotency-Key` ([GitLab](https://docs.gitlab.com/user/project/integrations/webhooks/#inspect-request-and-response-details)).
+`Idempotency-Key` ([GitLab](https://docs.gitlab.com/user/project/integrations/webhooks/#inspect-request-and-response-details));
+после изменения URL GitLab не разрешает этот Resend. Не меняйте URL между исходной
+доставкой и replay. Это документированный contract; фактические headers/payload и
+результат replay на установленной версии ещё нужно подтвердить живой проверкой.
 Проверьте неизменность URL/payload/stable key, 202 duplicate и те же буквальные
 Run/publication counts без новых Runs/discussions/summary. Кнопка Test создаёт
 тестовое событие и эту identical-delivery replay проверку не заменяет. Без доступа
@@ -498,6 +548,12 @@ basename/category, например `GitLab configuration_invalid (gitlab.env: r
 или `GitLab configuration_invalid (api.env: format_invalid)`; другие ошибки — общий
 safe отказ. Исправляйте источник через generator/защищённый configuration deploy,
 не выводите содержимое файлов и не редактируйте secrets вручную на хосте.
+
+SIGKILL/host crash может оставить копии role secrets в `${APP_DIR}/.stage.*` на
+постоянном диске; следующий deploy/rollback не читает их и не очищает автоматически.
+Перед rotation учтите такие копии вместе с protected backups; консервативная
+процедура для одной подтверждённо abandoned директории —
+[CICD: восстановление orphan stage](CICD.md#gitlab-orphan-stage).
 
 Наличие wiring и localhost tests не доказывает живой GitLab MR. Для приёмки нужны
 reviewed staging image/operator доступ, protected PAT/webhook secret, рабочие workers,

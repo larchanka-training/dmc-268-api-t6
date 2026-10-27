@@ -3,7 +3,7 @@
 Published integration baseline `f160ce4c82220c20e627fbfdc0230b43a5f34492`.
 Round 1 integration baseline `430d6604a0fc289916b34cc5aa6bdd307cea40b8` (freshly fetched and rebased without conflicts).
 Original design/test baseline `88bbc0734e50e33fa769940291a79ff997102994`.
-Plan: [335-plan.md](335-plan.md). Human-approved implementation published as [PR #339](https://github.com/larchanka-training/dmc-268-api-t6/pull/339), with original gates and CI green. Round 1 corrections and final code verification are complete; this committed snapshot precedes round 1 publication/new-head CI/thread replies, which the live PR records. Real GitLab acceptance remains pending.
+Plan: [335-plan.md](335-plan.md). Human-approved implementation published as [PR #339](https://github.com/larchanka-training/dmc-268-api-t6/pull/339). Round 1 corrections, final code verification and publication on `1f74bd78db8468d5a719b0891b4c36bde6503e76` are complete: body/replies updated, three threads resolved, [CI 40497818211](https://github.com/larchanka-training/dmc-268-api-t6/actions/runs/40497818211) passed, and [round 2 human review](https://github.com/larchanka-training/dmc-268-api-t6/pull/339#pullrequestreview-5667073079) approved that head. Round 2 implementation and final code verification for all ten new P3 corrections are complete: all four gates passed with 9604 tests and zero skips/failures/errors, actual image help passed, and cumulative Standards/Spec findings are zero. Historical approval does not approve the new diff; publication/new-head CI/approval status belongs on the live PR. Real GitLab acceptance remains pending.
 
 ## Gates before development
 
@@ -13,7 +13,7 @@ Plan: [335-plan.md](335-plan.md). Human-approved implementation published as [PR
       Only #279/#283 overlap; notices: [#279](https://github.com/larchanka-training/dmc-268-api-t6/pull/279#issuecomment-6426698992),
       [#283](https://github.com/larchanka-training/dmc-268-api-t6/pull/283#issuecomment-6426700273).
 - [x] Record one historical pre-development baseline on original main: 269 passed,
-      no skips/failures; initial sandbox denial was before collection.
+      no skips/failures.
 - [x] Configure task-owned disposable Linux integration resources before final gates;
       PostgreSQL/RabbitMQ readiness verified; no full gates run during preparation.
 
@@ -28,7 +28,7 @@ Dependencies: approval. Likely files: `app/bootstrap/gitlab_deployment.py` (new)
 - [x] GREEN: reuse runtime/API parsers; admission true requires valid worker config.
 - [x] Static redacted errors; no network/DB/provider/file discovery side effects.
 - [x] Verify focused tests: 65 passed (36 deployment + 29 runtime); touched-file
-      Ruff lint, format check and strict mypy pass. Verification evidence retained privately.
+      Ruff lint, format check and strict mypy pass.
 - [x] Independent Standards/Spec review reports zero findings (both task 1 reviews).
 
 ## Task 2 — Route configuration to its recipients (M)
@@ -45,7 +45,6 @@ Dependencies: task 1. Likely files: `deploy/scripts/env-file.sh`,
       no PAT env/global token fallback and no installation changes on deploy.
 - [x] Verify GitHub-only defaults and real Compose recipient/profile smoke:
       16 focused tests passed; Ruff lint/format, mypy and shell syntax pass.
-      Evidence retained privately.
 - [x] Independent task 2 Standards/Spec review reports zero findings (both reviews).
 
 Checkpoint: settings and recipients contract demonstrated; no real secrets used.
@@ -62,7 +61,7 @@ Dependencies: tasks 1–2. Likely files: `.github/workflows/ci-cd.yml`,
       validator using protected temporary env input; mask and clean up correctly.
 - [x] Preserve existing deployment concurrency, source mappings and empty config.
 - [x] Verify focused CI/bundle/preflight checks: 28 passed, no skips; Ruff lint,
-      format, mypy, shell syntax and diff checks pass. Verification evidence retained privately.
+      format, mypy, shell syntax and diff checks pass.
 - [x] Independent task 3 Standards/Spec review reports zero findings (both reviews).
 
 ## Task 4 — Preserve deploy and rollback state (M)
@@ -82,7 +81,7 @@ if the existing target-image parser fallback needs shared support.
 - [x] Verify deployment/rollback regression: 343 passed, no skips; 17 focused host
       cases passed. Real Compose policy fixture confirmed `--pull missing` overrides
       `pull_policy: always`; task 2 real recipient/profile config smoke is green.
-      Touched lint/format/mypy, shell syntax and diff checks pass. Evidence retained privately.
+      Touched lint/format/mypy, shell syntax and diff checks pass.
 - [x] Independent task 4 Standards/Spec review reports zero findings (both reviews).
 
 Checkpoint: focused regressions green; no repeated full pytest run at this point.
@@ -103,7 +102,7 @@ Dependencies: task 4. Files: `.env.example`, `docs/SECRETS.md`, `docs/CICD.md`.
 - [x] Actual operator smoke found cached-image pull failure with `always`; restrict
       `missing` policy to operator only. Focused rendered recipient tests: 2 passed.
       Actual unchanged-source operator smoke now exits 0 without registry access;
-      ordinary service `always` policies remain unchanged. Evidence retained privately.
+      ordinary service `always` policies remain unchanged.
 - [x] Independent task 5 / final cumulative Standards and Spec review clean.
 
 ## Required main refresh
@@ -128,8 +127,7 @@ Dependencies: task 5. All changes delegated; coordinator never writes implementa
 - [x] Run final `uv run mypy .`: no issues in 703 source files.
 - [x] Run final `uv run pytest` with disposable PG/Rabbit resources on Linux:
       9092 passed, no skips/failures/errors in 1573.16s, two dependency deprecation
-      warnings; complete JUnit evidence checked. The earlier old-baseline attempt
-      was stopped for a runner-only nested-uv venv error and is not a final verdict.
+      warnings; complete JUnit evidence checked.
 - [x] Fresh independent Standards/Spec review reports zero findings.
 - [x] Publisher staged intended files, committed and pushed head `eb9e8340`, and
       opened/attached [PR #339](https://github.com/larchanka-training/dmc-268-api-t6/pull/339),
@@ -155,11 +153,11 @@ keyring/PAT/webhook secret, test workspace/project, healthy workers/prompts/LLM.
 - [ ] Leave issue open for the designated acceptor; do not mark live AC or the task
       complete from mocked/local results or a PR alone.
 
-## Review round 1 — all findings remain tracked until verified
+## Review round 1 — completed corrections and publication
 
 The existing human-approved implementation/review loop authorizes corrections
 within the original #335 architecture. Historical checked tasks above describe
-the published head; they do not certify the new candidate. No merge, closure or
+the published head; they do not certify the round 2 candidate. No merge, closure or
 production activation is authorized by this checklist.
 
 ### R0 — Rebase and coordination
@@ -198,8 +196,8 @@ Dependencies: R0. Files: env-file helper, deploy, rollback, deployment tests.
       and original-stage proof also fail. GREEN: 38 failure/staging cases pass;
       45 focused existing GitLab/CI/host regressions pass. Affected Ruff, format,
       mypy, Bash syntax and diff checks pass. Fresh R1 Standards/Spec checkpoint
-      reviews report zero actionable findings; final whole-candidate gates remain
-      pending. Evidence retained privately.
+      reviews report zero actionable findings; whole-candidate gates were later
+      completed in R7.
 
 ### R2 — Current/legacy refusal coverage
 
@@ -313,8 +311,7 @@ Files: gitlab_admin, its tests, env example.
 Dependencies: R0–R6. Files: plan/todo and existing PR metadata/evidence.
 
 - [x] Freeze rebased candidate and fingerprint after focused RED/GREEN checks;
-      prepare fresh isolated Linux PG/Rabbit runner with read-only source and
-      writable executable /src/.venv for nested uv's scrubbed environments.
+      prepare fresh isolated Linux PG/Rabbit runner and verify nested uv invocation.
 - [x] Run final `uv run ruff check .` on frozen corrected candidate.
 - [x] Run final `uv run ruff format --check .` on that same candidate.
 - [x] Run final `uv run mypy .` on that same candidate.
@@ -327,15 +324,68 @@ Dependencies: R0–R6. Files: plan/todo and existing PR metadata/evidence.
 - [x] Fresh cumulative Standards/Spec reviews report zero actionable findings;
       account for 3 P2 + 15 P3 explicitly and preserve legacy mutation evidence.
 
-Publication snapshot: the unchecked steps below occur after this commit.
-[PR #339](https://github.com/larchanka-training/dmc-268-api-t6/pull/339) is the live
-publication/CI/reply ledger; no follow-up source commit is needed to mirror it.
-
-- [ ] Update PR #339 body with current What/Why/How to verify/Refs, #340 and
+- [x] Update PR #339 body with current What/Why/How to verify/Refs, #340 and
       second-merger rebase/manual reconciliation agreement (P3.14), exact runnable
-      focused command and truthful current-main checkbox (P3.15).
-- [ ] Publish authorized fixes and attach/retain existing PR; new-head CI passes.
-      Reply to all three threads with fix SHA; reviewer resolves threads and must
-      approve new head. Update plan status accurately, no host traces (P3.13).
-- [ ] Keep Task 7 real GitLab acceptance pending until its actual protected live
-      evidence exists; no merge, issue closure or production claim.
+      focused command and accurate main status for that publication (P3.15).
+- [x] Publish authorized fixes on `1f74bd78db8468d5a719b0891b4c36bde6503e76`
+      and retain PR #339. [CI 40497818211](https://github.com/larchanka-training/dmc-268-api-t6/actions/runs/40497818211)
+      passed: 15 jobs passed and four deploy/publish jobs were correctly skipped.
+- [x] Reply to all three round 1 threads with the fix SHA; all three were resolved.
+      The [round 2 human review](https://github.com/larchanka-training/dmc-268-api-t6/pull/339#pullrequestreview-5667073079)
+      approved `1f74bd78` and confirms the resolved threads. This approval is
+      historical once the round 2 diff is published.
+
+Task 7 remains pending until protected live evidence exists. Completed code
+publication does not imply a merge, live AC completion or issue closure.
+
+## Review round 2 — bounded code ledger
+
+Scope: all ten P3 findings in the linked round 2 human review, within current
+PR #339. The user accepts a new approval after a diff-changing push. This ledger
+ends at final code verification; PR publication/CI/review activity is recorded on
+the live PR when it occurs, without another source checkbox cycle.
+
+- [x] Refresh main/open-PR overlaps and rebase before shared-file edits, preserving
+      upstream prompt/deployment work. Main `916796ac62a46001e681b8f096dd6e99701dc809`,
+      rebased head `5062c7caea30c68962c683e236afb5d8a6a2869f`; both feature commits
+      unchanged in range-diff and four independent CLI/plan hashes restored exactly.
+- [x] Verify existing authorized #340 notice covers the same shared scope before
+      edits; also publish the user-authorized [additional round 2 notice](https://github.com/larchanka-training/dmc-268-api-t6/pull/340#issuecomment-6446326442).
+- [x] P3-1/P3-2: correct TMPDIR test naming, narrow rename injection to the GitLab
+      validation `gitlab.env` destination, and record isolated guard-mutant failure
+      plus passing unchanged public deploy/manual+auto rollback tests. Isolated
+      guard mutant fails all three public operations; unchanged candidate passes.
+- [x] P3-4: test every `GITLAB_*` key in every `ENV_FILES` entry against literal
+      allowed destinations `gitlab.env`/`api.env`; isolated misrouting fails once.
+- [x] P3-6/P3-8: separate known diagnostic categories from unknown fallback,
+      preserve behavioral secrecy/cleanup checks and remove two blank lines only.
+      Complete unchanged deploy test file: 348 passed in 456.29s, zero
+      skips/failures/errors. Affected Ruff/format/mypy and shell syntax checks pass.
+- [x] P3-3: document conservative orphan-stage recovery/rotation, with no global
+      deletion, active-generation removal or secure-erasure promise.
+- [x] P3-7a–e: independent operator prefix; exact inspect keys; visible safe login
+      and generation failure flow; post-admission hook enabled/re-enable check.
+      Nine GitLab Bash blocks pass syntax checks; 13 synthetic flow cases cover
+      fresh-session commands, invalid prefix/generation and login success/failure
+      without live side effects. Actual CLI DTO serializer/inspect keys checked.
+- [x] P3-5: help RED failed for both mismatches; identical help selection GREEN
+      (12 passed), complete admin file 58 passed. `--no-deps`, reviewed bootstrap
+      advice, FD 0/FD 3 and image Python retained. Touched Ruff/format/mypy pass;
+      independent Standards/Spec reviews report zero actionable findings.
+- [x] P3-9: cite official header versions/equality and Resend contract in both
+      runbooks; installed-version/live MR/replay/revoke acceptance stays pending.
+- [x] P3-10: record completed round 1 publication/body/CI/replies/resolution/approval,
+      remove obsolete publication status and workstation traces, and preserve
+      Task 7 pending in this separate round 2 ledger.
+- [x] Complete owner-focused checks and fresh cumulative Standards/Spec review
+      across all 15 feature paths: both axes report zero actionable findings and
+      account for all ten P3 findings and nested P3-7 items.
+- [x] Freeze final integrated candidate; run `uv run ruff check .`,
+      `uv run ruff format --check .`, `uv run mypy .`, and one final `uv run pytest`
+      with isolated real Linux PG/Rabbit services. All passed: format 744 files,
+      mypy 734 source files; **9604 passed in 2265.01s (37m45s)**, two dependency
+      deprecation warnings. Independent log/XML inspection confirmed 9604 cases,
+      zero skips/failures/errors. All 15 frozen paths, dependency inputs, HEAD
+      `5062c7ca` and 374 production-image inputs matched before/after verification.
+      Actual production-image help passed eight network-disabled commands (root
+      plus all seven subcommands). No new wrapper matrix or live AC proof claimed.

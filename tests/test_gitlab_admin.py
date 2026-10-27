@@ -107,12 +107,23 @@ def test_help_distinguishes_container_stdin_from_local_extra_descriptors() -> No
     assert b"Container example" in help_text
     assert b"run on the host" in help_text
     assert (
-        b"docker compose --profile gitlab-operator run --rm -T gitlab-admin "
+        b"docker compose --profile gitlab-operator run --rm --no-deps -T gitlab-admin "
         b"create [public options] --secrets-fd 0 < /protected/secrets.json"
     ) in help_text
     assert b"Local process only" in help_text
     assert b"Compose does not forward extra descriptors" in help_text
-    assert b"python -m app.bootstrap.seed_prompts" in help_text
+    assert b"--secrets-fd 3 3< /protected/secrets.json" in help_text
+
+
+def test_help_restores_reviewed_deploy_bootstrap_when_prompt_is_not_seeded() -> None:
+    result = cli(["--help"])
+    help_text = b" ".join(result.stdout.split())
+    assert result.returncode == 0
+    assert (
+        b"For prompt_not_seeded: restore successful reviewed deploy bootstrap "
+        b"(it runs the packaged seed)."
+    ) in help_text
+    assert b"python -m app.bootstrap.seed_prompts" not in help_text
 
 
 def create_args() -> list[str]:

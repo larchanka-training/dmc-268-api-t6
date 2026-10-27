@@ -913,6 +913,13 @@ def test_host_allowlist_follows_the_container_table() -> None:
     assert sorted(k for _, keys in ENV_FILES.values() for k in keys) == sorted(BUNDLED)
 
 
+def test_every_gitlab_key_routes_only_to_api_or_gitlab_env() -> None:
+    for file_name, (_, keys) in ENV_FILES.items():
+        for key in keys:
+            if key.startswith("GITLAB_"):
+                assert file_name in {"api.env", "gitlab.env"}, (file_name, key)
+
+
 @pytest.mark.parametrize(
     "secrets",
     [CI_SECRETS, {**CI_SECRETS, "GITHUB_WEBHOOK_SECRET": "whsec$1\\x"}],
@@ -2857,8 +2864,12 @@ case "$STUB_IO_FAILURE:$command_name" in
   retained-read:cat)
     if [[ "${1:-}" == */gitlab.env ]]; then exit 1; fi
     ;;
-  permission:chmod|rename:mv)
+  permission:chmod)
     if [[ "$*" == *gitlab-validation.* ]]; then exit 1; fi
+    ;;
+  rename:mv)
+    destination="${@: -1}"
+    if [[ "${destination}" == */gitlab-validation.*/gitlab.env ]]; then exit 1; fi
     ;;
   filter:tr|encode:base64)
     cat >/dev/null
@@ -2965,9 +2976,10 @@ def test_host_refuses_gitlab_io_failures_before_validation_or_live_changes(
 
 
 @pytest.mark.parametrize("operation", ["deploy", "manual-rollback", "auto-rollback"])
-def test_host_rejects_unavailable_temporary_directory_without_live_changes(
+def test_host_rejects_unavailable_docker_config_directory_without_live_changes(
     host: Host, operation: str
 ) -> None:
+    # Missing TMPDIR refuses top-level Docker auth setup before GitLab validation begins.
     assert host.deploy(IMAGE_A, bundle=_bundle(_gitlab_enabled_settings())).returncode == 0
     assert host.deploy(IMAGE_B).returncode == 0
     before = host.files()
@@ -3221,33 +3233,9 @@ with Path(os.environ['STUB_REGISTRY_CAPTURE_LOG']).open('a') as log:
 """
 
 
-@pytest.mark.parametrize("operation", ["deploy", "manual", "auto"])
-@pytest.mark.parametrize(
-    ("stage", "message", "category"),
-    [
-        ("login", "unauthorized: authentication required", "authentication_denied"),
-        ("login", "dial tcp: i/o timeout", "network_unavailable"),
-        ("login", "unrecognized registry response", ""),
-        ("pull", "denied: requested access to the resource is denied", "authentication_denied"),
-        ("pull", "manifest unknown: requested manifest was not found", "manifest_missing"),
-        ("pull", "no space left on device", "insufficient_storage"),
-        ("pull", "TLS handshake timeout", "network_unavailable"),
-        ("pull", "unrecognized registry response", ""),
-    ],
-    ids=[
-        "auth-login",
-        "network-login",
-        "unknown-login",
-        "auth-pull",
-        "manifest",
-        "disk",
-        "network-pull",
-        "unknown-pull",
-    ],
-)
-def test_safe_registry_diagnostics_keep_static_categories_and_stdin_credentials(
-    host: Host, operation: str, stage: str, message: str, category: str
-) -> None:
+def _registry_failure_with_safety_checks(
+    host: Host, operation: str, stage: str, message: str
+) -> subprocess.CompletedProcess[str]:
     assert host.deploy(IMAGE_A, bundle=_bundle(CI_SECRETS)).returncode == 0
     assert host.deploy(IMAGE_B).returncode == 0
     helper = host.log.parent / "registry-capture-probe.py"
@@ -3276,12 +3264,6 @@ def test_safe_registry_diagnostics_keep_static_categories_and_stdin_credentials(
     else:
         result = host.run("rollback.sh", env={**environment, "ROLLBACK_MODE": operation})
     assert result.returncode != 0
-    prefix = "registry login failed" if stage == "login" else "target image pull failed"
-    assert prefix in result.stderr
-    assert category in result.stderr
-    # The unknown fallback contains neither guessed reasons nor raw external output.
-    if not category:
-        assert f"{prefix}\n" in result.stderr
     for canary in ("REGISTRY_STDERR_CANARY", "URL_SECRET_CANARY", "REGISTRY_TOKEN_CANARY"):
         assert canary not in result.stdout + result.stderr + "\n".join(host.calls())
     captures = [json.loads(line) for line in capture_log.read_text().splitlines()]
@@ -3295,6 +3277,58 @@ def test_safe_registry_diagnostics_keep_static_categories_and_stdin_credentials(
     )
     assert list(shared_config.iterdir()) == []
     assert list(host.tmp.iterdir()) == []
+    return result
+
+
+@pytest.mark.parametrize("operation", ["deploy", "manual", "auto"])
+@pytest.mark.parametrize(
+    ("stage", "message", "expected_diagnostic"),
+    [
+        (
+            "login",
+            "unauthorized: authentication required",
+            "registry login failed (authentication_denied:",
+        ),
+        ("login", "dial tcp: i/o timeout", "registry login failed (network_unavailable:"),
+        (
+            "pull",
+            "denied: requested access to the resource is denied",
+            "target image pull failed (authentication_denied:",
+        ),
+        (
+            "pull",
+            "manifest unknown: requested manifest was not found",
+            "target image pull failed (manifest_missing:",
+        ),
+        ("pull", "no space left on device", "target image pull failed (insufficient_storage:"),
+        ("pull", "TLS handshake timeout", "target image pull failed (network_unavailable:"),
+    ],
+    ids=["auth-login", "network-login", "auth-pull", "manifest", "disk", "network-pull"],
+)
+def test_known_registry_failures_keep_static_categories_and_stdin_credentials(
+    host: Host, operation: str, stage: str, message: str, expected_diagnostic: str
+) -> None:
+    result = _registry_failure_with_safety_checks(host, operation, stage, message)
+
+    assert expected_diagnostic in result.stderr
+
+
+@pytest.mark.parametrize("operation", ["deploy", "manual", "auto"])
+@pytest.mark.parametrize(
+    ("stage", "expected_diagnostic"),
+    [("login", "registry login failed"), ("pull", "target image pull failed")],
+)
+def test_unknown_registry_failures_keep_plain_static_diagnostic_and_stdin_credentials(
+    host: Host, operation: str, stage: str, expected_diagnostic: str
+) -> None:
+    result = _registry_failure_with_safety_checks(
+        host, operation, stage, "unrecognized registry response"
+    )
+
+    assert (
+        f"deployment refused: {expected_diagnostic}" in result.stderr.splitlines()
+        or f"rollback refused: {expected_diagnostic}" in result.stderr.splitlines()
+    )
 
 
 def _inject_registry_capture_failure(host: Host, failure: str) -> dict[str, str]:

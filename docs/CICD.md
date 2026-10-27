@@ -286,6 +286,39 @@ switch marker и сервисов. Запрошенный tag разрешает
 release ref; GitLab probe и startup используют один local image ID, `up --pull missing`
 не даёт service `pull_policy: always` повторно подтянуть изменившийся tag.
 
+<a id="gitlab-orphan-stage"></a>
+
+**Orphan stage после аварии.** Host deploy создаёт owner-only staging-каталог
+`${APP_DIR}/.stage.*` на том же filesystem, что live role files. Обычный exit trap
+убирает его, но SIGKILL и падение хоста не выполняют trap. Копии secrets могут
+остаться на постоянном диске и пережить последующую rotation; следующий
+deploy/rollback их не читает и автоматически не удаляет.
+
+Для разрешённого operator recovery:
+
+1. Выберите согласованный staging `APP_DIR` (§8.1) и сериализуйте работы: дождитесь
+   завершения/согласованной остановки CI deploy/rollback, запретите новые workflow
+   и ручные deploy/rollback на время проверки. Одна CI concurrency group не
+   исключает ручные процессы. Не удаляйте каталог во время активной операции.
+2. Смотрите только names/owner/mode/mtime и состояние процессов, не содержимое
+   role files. Для **одного явно выбранного** `.stage.*` внутри этого `APP_DIR`
+   установите, какой завершённой операции он принадлежал; проверьте отсутствие
+   deploy/rollback и дочерних процессов, открытых файлов и cwd в нём. Старый mtime
+   сам по себе не доказывает abandonment. Если ownership/activity неясны,
+   остановитесь и согласуйте проверку с оператором этой операции.
+3. После подтверждения abandonment удалите только согласованный точный путь,
+   повторно проверив его parent, owner и отсутствие symlink; не используйте
+   wildcard/global `.stage.*` cleanup. Не удаляйте live role files, активный stage,
+   `.deploy-state`, switch markers или рабочие поколения релиза. Затем возобновите
+   согласованные deploy/rollback и проверьте их обычный status.
+4. При rotation учитывайте все копии secrets: live role files, abandoned stage,
+   operator input, временные registry credentials, snapshots и protected backups.
+   Ограничьте доступ и примените согласованную retention/backup процедуру; удаление
+   файла не обещает secure erasure с диска/snapshots. При подозрении на раскрытие
+   отзовите/замените затронутый credential поддерживаемым способом. Старые key ID
+   сохраняйте до поддерживаемой перезаписи всех нужных ciphertext; автоматического
+   удаления ключей или stage sweep эта процедура не добавляет.
+
 Retained `api.env` и `gitlab.env` manual deploy/rollback читают строго как generator
 data `NAME='value'`, с multiline values и обязательным завершающим newline каждой
 записи; arbitrary shell syntax/unquoted values не поддерживаются. Оба файла
@@ -309,15 +342,27 @@ Project hook настраивается **до** activate: Settings → Webhooks
 `https://<staging-api>/webhooks/gitlab/<installation_id>` с UUID из create/inspect,
 тот же protected `webhook_secret` в **Secret token** (`X-Gitlab-Token`), только
 **Merge request events**, SSL verification включена. Receiver требует stable
-`webhook-id` (GitLab 19.0+) или `Idempotency-Key` (17.4+); оба должны совпадать,
-старый webhook UUID недостаточен. Подробные protected steps и capability check —
+`webhook-id` или `Idempotency-Key`; старый webhook UUID недостаточен. [Официальная
+история delivery headers](https://docs.gitlab.com/user/project/integrations/webhooks/#delivery-headers)
+указывает введение `Idempotency-Key` в 17.4 и `webhook-id` в 19.0, стабильность обоих
+ID при retry и равенство их значений. Если приходят оба, receiver требует равенство.
+Подробные protected steps и отдельная проверка фактической версии/headers —
 [SECRETS.md](SECRETS.md#installed-gitlab--защищённая-конфигурация-и-управление-169).
 Новый Signing token, custom headers/payload и canonical-check bypass не заменяют
-этот contract. После activation/process admission подтвердите реальную доставку
+этот contract. После activation/process admission проверьте, что hook enabled:
+прежние 503 могли вызвать [auto-disable](https://docs.gitlab.com/user/project/integrations/webhooks/#auto-disabled-webhooks).
+Для disabled hook после исправления причины выполните **Test → Merge request events**
+и проверьте **2xx** и enabled state: это [поддерживаемый GitLab re-enable](https://docs.gitlab.com/user/project/integrations/webhooks/#re-enable-disabled-webhooks).
+Отдельный диагностический Test не является real-MR acceptance или replay.
+Затем подтвердите реальную доставку
 через Recent events HTTP 202 и matching installation receipt в логе webhook-worker;
 это intake proof, не `succeeded` Run. Replay — **View details → Resend Request**
-исходной доставки, затем сравнение фактических Run/discussion/summary counts;
-кнопка Test не заменяет replay ([GitLab Webhooks](https://docs.gitlab.com/user/project/integrations/webhooks/)).
+исходной доставки, затем сравнение фактических Run/discussion/summary counts.
+[GitLab Resend contract](https://docs.gitlab.com/user/project/integrations/webhooks/#inspect-request-and-response-details)
+сохраняет данные и `Idempotency-Key`; при изменённом URL Resend недоступен.
+Кнопка Test не заменяет replay. Ссылки подтверждают документированный contract;
+установленная версия, наблюдаемые headers и replay без дублей требуют отдельного
+живого evidence и пока не подтверждены этим wiring/runbook.
 Завершение — revoke только test installation, проверка отказа intake/отмены работы,
 затем удаление её project hook; остальные подключения продолжают работать.
 
