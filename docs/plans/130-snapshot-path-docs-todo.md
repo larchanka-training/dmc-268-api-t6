@@ -4,12 +4,12 @@ The design is in [130-snapshot-path-docs-plan.md](130-snapshot-path-docs-plan.md
 
 - Each task is one Conventional commit whose subject ends with `(#130)`. Part-4 tasks add `Refs #168` to the
   body.
-- Re-read every anchor before editing; line numbers are from `4f4a6dfd`.
-- Docs only. Do not change code. Never read any `.env`.
+- Re-read every anchor before editing; G2 line numbers are from `f8b09818`.
+- Docs only. Do not change code, except G2-8 (`.agents` rule text) and G2-9 (one docstring outside eval `_REVIEW_CODE`). Never read any `.env`.
 - Gates for every task:
   - `uv run ruff check .`, `uv run ruff format --check .`, `uv run mypy . --exclude '^docs/reports/'`.
   - Once per PR: the full `uv run pytest` with an isolated DB and vhost.
-- G1 and G2 open only after #332 merges, each rebased on main.
+- #332 merged; G1 merged as #343; G2 opens on main.
 
 ## G1
 
@@ -45,24 +45,47 @@ The design is in [130-snapshot-path-docs-plan.md](130-snapshot-path-docs-plan.md
 
 ## G2
 
-Before the first commit, the coordinator posts the plan §5 line list in #283, #304, #330, #338 and #339.
+Before G2-1, the coordinator posts the §5 lines in #339, #340 and #334 (#342 FYI).
 
-- **G2-1** `docs(pipeline): trace catalog and order of the snapshot path (#130)`
-  - Items: P1-P9.
-  - Done when no "ни один боевой run" phrase is left and P6 cites TL-9.
-- **G2-2** `docs(pipeline): no_changes, reserves, verifier codes and the v4 state (#130)`
-  - Items: P10-P14.
-- **G2-3** `docs(specs): the snapshot path is live in CVS §5.2, §8.3 and §12 (#130)`
-  - Items: C4, C8, C9.
-- **G2-4** `docs(rules): RFS §7.2 after F2 and policy_path_invalid in §9 (#130)`
-  - Items: R3, R6.
-  - Rebase over #338 if it merges first.
-- **G2-5** `docs(design): SD §11 lists the policy and manifest tables as existing (#130)`
-  - Item: S4.
+- **G2-0** `docs(plans): refresh the G2 plan on main (#130)`
+  - Done when only the two plan files are in the commit.
+- **G2-1** `docs(pipeline): verifier trace order, prompt override and pr_base_changed (#130)`
+  - Items: P1, P2, P4, P5, P7.
+  - Done when:
+    - the order of both tables matches `run_repository.py:866-985`;
+    - no "цель #107" remains on `llm.verify`;
+    - no text says GitLab yields `pr_base_changed`.
+- **G2-2** `docs(pipeline): no_changes, reserves, verifier codes and the silent legacy skip (#130)`
+  - Body: `Refs #168`.
+  - Items: P10-P13.
+  - Done when:
+    - PS :648 equals `check_runs.py:37`;
+    - `grep -rn execute_review_legacy_run_without_snapshot docs/*.md` is empty.
+- **G2-3** `docs(specs): CVS §8.3 tables that exist and the attribution allowlist (#130)`
+  - Items: C8, C10.
+- **G2-4** `docs(rules): RFS §7.2 after F2, the §5.3 counter and policy_path_invalid in §9 (#130)`
+  - Body: `Refs #168`.
+  - Items: R3, R6, R7, T5.
+  - Done when:
+    - §9 has a `policy_path_invalid` row;
+    - neither «этим изменением не выполняется» nor «передана в #168» is left.
+- **G2-5** `docs(design): SD §11 and the reviews model row list the existing tables (#130)`
+  - Body: `Refs #168`.
+  - Items: S4, B1.
+  - Done when BA :448 names all 13 classes.
 - **G2-6** `docs(test-plan): map the #130 and #168 tests and the v4 state (#130)`
-  - Items: T1-T6.
-  - Done when every test file in T1 exists and the FakeRedis wording is exact.
+  - Body: `Refs #168`.
+  - Items: T1-T4.
+  - Done when:
+    - every mapped file exists under `tests/`;
+    - the FakeRedis sentence names both in-test classes.
 - **G2-7** `docs(cicd): REDIS_URL at the workers, rollback row 0040 and the F1 floor (#130)`
+  - Body: `Refs #168`.
   - Items: O1-O3.
-- **G2-8** dropped: C5's text goes into #337 itself (plan §6 item 4).
-- **X1** dropped: #283 is asked to carry the text (plan §6 item 6).
+  - Done when the 0040 row sits above 0039 in `alembic history` order.
+- **G2-8** `docs(agents): name the merged test-file layout in backend.md §5 (#130)`
+  - Item: A1.
+  - Done when both lines agree and AGENTS.md is untouched.
+- **G2-9** `docs(reviews): the parser worker gets a minimal environment (#130)`
+  - Item: X2.
+  - Done when no `_REVIEW_CODE` file is in the diff and `uv run ruff format --check .` is green.
