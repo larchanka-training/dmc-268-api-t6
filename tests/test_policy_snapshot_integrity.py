@@ -494,6 +494,30 @@ def test_a_snapshot_whose_masks_disagree_with_its_rules_text_fails(
     }
 
 
+def test_a_snapshot_stored_under_another_matcher_version_keeps_its_ignore_policy() -> None:
+    current = _two_masks()
+    # The digest of the same masks under the versions this snapshot pinned, not the current ones.
+    stored = replace(
+        current,
+        matcher_version="review-ignore/v0",
+        ignore_digest=ignore_digest(
+            current.ignore_patterns,
+            matcher_version="review-ignore/v0",
+            builtin_exclusions_version=current.builtin_exclusions_version,
+            limits_version=current.limits_version,
+        ),
+    )
+
+    policy = review_ignore.snapshot_ignore_policy(stored)
+
+    assert policy.source_lines == (
+        IgnorePatternLine("vendor/**", 4),
+        IgnorePatternLine("build/**", 6),
+    )
+    assert policy.patterns == ("build/**", "vendor/**")
+    assert policy.digest == "ecf9380e9c4bee07509465c825727eadaf6143ecbaac76c4cec4e84fa6976a6a"
+
+
 def test_a_snapshot_without_rules_has_the_empty_ignore_policy() -> None:
     snapshot = _snapshot_of(missing_document(RULES_DOCUMENT_PATH))
 

@@ -203,7 +203,8 @@ def snapshot_ignore_policy(snapshot: PolicySnapshot) -> IgnorePolicy:
 
     The snapshot stores the masks, not the lines they came from (RULES_FORMAT_SPEC §7.1):
     they are recovered by parsing its staged rules text again, which must give back the
-    stored masks and ``ignore_digest``. A parse error of that text is raised unchanged.
+    stored masks and, hashed with the versions the snapshot pinned, its ``ignore_digest``.
+    A parse error of that text is raised unchanged.
     """
     policy = parse_review_ignore(snapshot.rules.text, policy_base_sha=snapshot.policy_base_sha)
     if policy.patterns != snapshot.ignore_patterns:
@@ -212,15 +213,19 @@ def snapshot_ignore_policy(snapshot: PolicySnapshot) -> IgnorePolicy:
             "The stored ignore_patterns do not match the masks of the stored rules text",
             policy_base_sha=snapshot.policy_base_sha,
         )
-    # CONTRACT: the digest is the one of this matcher's versions, so a snapshot pinned to
-    # other versions is refused rather than matched with rules it was not stored under.
-    if policy.digest != snapshot.ignore_digest:
+    expected = ignore_digest(
+        policy.patterns,
+        matcher_version=snapshot.matcher_version,
+        builtin_exclusions_version=snapshot.builtin_exclusions_version,
+        limits_version=snapshot.limits_version,
+    )
+    if expected != snapshot.ignore_digest:
         raise PolicyError(
             PolicyErrorCode.SNAPSHOT_INTEGRITY_ERROR,
             "The stored ignore_digest does not match the masks of the stored rules text",
             policy_base_sha=snapshot.policy_base_sha,
         )
-    return policy
+    return IgnorePolicy(policy.patterns, policy.source_lines, snapshot.ignore_digest)
 
 
 def ignore_digest(
