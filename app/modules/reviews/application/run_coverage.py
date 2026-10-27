@@ -23,6 +23,7 @@ from app.modules.reviews.application.coverage_schema import (
 )
 from app.modules.reviews.application.coverage_schema import (
     REASON_VARIANT_TEXT,
+    TECHNICAL_REASON_CODES,
     read_reason_variants,
     reason_variant,
     valid_coverage_status,
@@ -52,6 +53,9 @@ from app.modules.reviews.application.review_ignore import IgnoreResult
 from app.modules.reviews.application.vcs_diff import VcsFile, is_empty_addition_candidate
 
 _LOGGER = logging.getLogger(__name__)
+# The technical skips of a legacy (<= v3) run. It still calls the model for an unsupported
+# path or an unresolved identity, so these stay incompleteness there (#130 F5, TL-Q3).
+_LEGACY_TECHNICAL_REASON_CODES = frozenset({"too_large", "unsupported_change"})
 
 
 @dataclass(frozen=True)
@@ -133,6 +137,15 @@ class RunCoverage:
             and sum(self.exclusion_counts.values()) == self.total_files
             and not self.reasons
         )
+
+    @property
+    def technical_only(self) -> bool:
+        """No reviewable text, and at least one technical skip beside the exclusions.
+
+        Coverage none with a reason: a complete inventory of T and E files (CVS §2.2).
+        An exclusions-only change has no reason; it is ``all_excluded`` (T19).
+        """
+        return self.status is CoverageStatus.NONE and bool(self.reasons)
 
     def to_json(self) -> dict[str, Any]:
         """Bound displayed paths while retaining exact reason counts and identities."""
@@ -251,10 +264,24 @@ def _empty_addition_candidate(snapshot: DiffSnapshot) -> bool:
 
 
 def project_run_coverage(
-    snapshots: list[DiffSnapshot], diff_map: DiffMap, *, ignore: IgnoreResult | None = None
+    snapshots: list[DiffSnapshot],
+    diff_map: DiffMap,
+    *,
+    ignore: IgnoreResult | None = None,
+    snapshot_path: bool = False,
 ) -> RunCoverage:
+    """Classify every stored file of the attempt under its effective policy.
+
+    ``snapshot_path``: the run takes the snapshot path, which ends a change of technical
+    skips only without a model call, so an unsupported path and an unresolved identity
+    count as technical skips (CVS §2.2). A legacy run keeps them incomplete.
+    """
     return _project_run_coverage(
-        snapshots, diff_map, ignore=ignore, snapshot_digest=snapshot_coverage_digest(snapshots)
+        snapshots,
+        diff_map,
+        ignore=ignore,
+        snapshot_digest=snapshot_coverage_digest(snapshots),
+        snapshot_path=snapshot_path,
     )
 
 
@@ -264,6 +291,7 @@ def _project_run_coverage(
     *,
     ignore: IgnoreResult | None = None,
     snapshot_digest: str,
+    snapshot_path: bool = False,
 ) -> RunCoverage:
     reasons: list[CoverageItem] = []
     exclusions: list[CoverageItem] = []
@@ -324,7 +352,8 @@ def _project_run_coverage(
                 reviewable_paths.add(path)
         else:
             reasons.append(item)
-    incomplete = any(item.reason not in {"too_large", "unsupported_change"} for item in reasons)
+    technical = TECHNICAL_REASON_CODES if snapshot_path else _LEGACY_TECHNICAL_REASON_CODES
+    incomplete = any(item.reason not in technical for item in reasons)
     status = (
         CoverageStatus.PARTIAL
         if incomplete or (reviewed and reasons)

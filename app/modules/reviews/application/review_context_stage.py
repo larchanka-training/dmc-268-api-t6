@@ -574,7 +574,11 @@ class ReviewContextStage:
         self._diff_old_sha = diff_map.diff_old_sha
         self._head_sha = diff_map.head_sha
         ignore = apply_ignore(matcher, diff_map, builtin_excluded=self._builtin_excluded)
-        coverage = project_run_coverage(stored, diff_map, ignore=ignore)
+        # The snapshot path counts an unsupported path and an unresolved identity as
+        # technical skips; a legacy run keeps them incomplete (#130 F5, TL-Q3).
+        coverage = project_run_coverage(
+            stored, diff_map, ignore=ignore, snapshot_path=self._snapshot_for_llm is not None
+        )
         # A file the service stored as binary or generated is an exclusion for every
         # consumer, also when an allowed file imports it: its names join the deny-set.
         ignore = replace(

@@ -26,6 +26,12 @@ REASON_TEXT = {
 }
 COVERAGE_REASON_CODES = frozenset(REASON_TEXT)
 COVERAGE_EXCLUSION_CODES = frozenset({"ignored", "binary", "generated", "empty_file"})
+# CVS §2.2 T: a technical skip, a file without text the review could check. A complete
+# inventory of T and exclusions only has coverage none. Only the snapshot path classifies
+# an unsupported path or an unresolved identity so (#130 F5); see ``project_run_coverage``.
+TECHNICAL_REASON_CODES = frozenset(
+    {"too_large", "unsupported_change", "unsupported_path", "identity_unresolved"}
+)
 
 
 class CoverageStatus(StrEnum):
@@ -110,7 +116,7 @@ def valid_coverage_status(
     if status is CoverageStatus.COMPLETE and (not complete or reviewed == 0 or reasons):
         return False
     if status is CoverageStatus.NONE and (
-        not complete or reviewed or set(reasons) - {"too_large", "unsupported_change"}
+        not complete or reviewed or set(reasons) - TECHNICAL_REASON_CODES
     ):
         return False
     if status is CoverageStatus.PARTIAL and not reasons:

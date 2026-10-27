@@ -98,14 +98,14 @@ Rules for every task:
   - the inventory check is dropped (6);
   - `technical_only` ignores the reasons (9).
 - **Done when:**
-  - [ ] 1–9 pass and `tests/test_clean_without_text_context.py` passes unchanged;
-  - [ ] `tests/test_run_coverage.py` and `tests/test_clean_without_text*.py` pass unchanged otherwise;
-  - [ ] the gates pass.
+  - [x] 1–9 pass and `tests/test_clean_without_text_context.py` passes unchanged;
+  - [x] `tests/test_run_coverage.py` and `tests/test_clean_without_text*.py` pass unchanged otherwise;
+  - [x] the gates pass.
 
 ## Checkpoint A (after T2)
 
-- [ ] The gates are green.
-- [ ] The coverage unit suites are green.
+- [x] The gates are green.
+- [x] The coverage unit suites are green.
 
 ## T3: Backend result without a model answer (DD6)
 
