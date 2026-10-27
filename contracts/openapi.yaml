@@ -1778,10 +1778,11 @@ components:
     RulesDiagnostic:
       type: object
       description: >-
-        One diagnostic of RULES_FORMAT_SPEC §9. `message` is the author-facing text with where
-        the problem is; `line` and `column` are 1-based (the column in Unicode scalars) and null
-        when the problem has no position. `limit`, `actual` and `patternIndex` are omitted when
-        the error has none.
+        One diagnostic of RULES_FORMAT_SPEC §9. `message` is the English author-facing text with
+        where the problem is; a client shows its own text for a `code` it knows, in the language
+        of its interface, and `message` for a code it does not know. `line` and `column` are
+        1-based (the column in Unicode scalars) and null when the problem has no position.
+        `limit`, `actual`, `patternIndex` and `excerpt` are omitted when the error has none.
       required: [code, message, line, column, retryable]
       properties:
         code:
@@ -1815,6 +1816,11 @@ components:
           type: integer
           minimum: 0
           description: Index of the offending mask among the masks of the block.
+        excerpt:
+          type: string
+          description: >-
+            The offending mask, cut to 80 characters with `...`; backticks become `'` and control
+            characters `?`.
       additionalProperties: false
     RulesStatus:
       description: The last read of `.review/rules.md`, told apart by `status`.
