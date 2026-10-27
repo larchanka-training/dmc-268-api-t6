@@ -404,6 +404,7 @@ def test_provenance_guard_names_the_ignore_mask_and_its_rules_line(
         "pattern_index": None,
         "limit": None,
         "actual": None,
+        "actual_is_lower_bound": False,
         "retryable": False,
     }
 
