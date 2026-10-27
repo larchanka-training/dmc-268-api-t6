@@ -449,7 +449,10 @@ class HttpGitHubVcsProvider:
         *,
         checkpoint: RunProviderCheckpoint = _no_checkpoint,
     ) -> bytes:
-        """A blob by id, outside any pull request: the rules status reads one (#150)."""
+        """A blob by id in its base64 JSON answer, within the 1 MiB review budget.
+
+        ``get_blob`` reads the blobs of a pull request with it.
+        """
         if installation_external_id <= 0:
             raise ValueError("GitHub installation must be positive")
         prefix = repository_path_from_full_name(repository_full_name)

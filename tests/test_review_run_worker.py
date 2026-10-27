@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable
+from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -1389,6 +1389,8 @@ def _github_read_failure(read: str, status: int, body: object) -> RunFailure:
     def respond(request: httpx.Request) -> httpx.Response:
         if read == "diff" and request.url.path.endswith("/pulls/7"):
             return httpx.Response(200, json=_PULL)
+        if isinstance(body, httpx.AsyncByteStream):
+            return httpx.Response(status, stream=body)
         return httpx.Response(status, json=body)
 
     async def checkpoint() -> None:
@@ -1448,6 +1450,30 @@ def test_too_many_requests_without_headers_or_message_keeps_no_delay(read: str) 
 
     assert (failure.error_code, failure.retry_after) == (_FETCH_FAILED[read], None)
     assert RetryDelays().for_failure(1, failure) == ("30s", timedelta(seconds=30))
+
+
+class _CountedBody(httpx.AsyncByteStream):
+    """A body sent in chunks of 1000 bytes; counts the bytes handed out."""
+
+    def __init__(self, body: bytes) -> None:
+        self._body = body
+        self.sent = 0
+
+    async def __aiter__(self) -> AsyncIterator[bytes]:
+        for start in range(0, len(self._body), 1000):
+            piece = self._body[start : start + 1000]
+            self.sent += len(piece)
+            yield piece
+
+
+def test_commit_message_stream_reads_at_most_4_kib_of_an_error_body() -> None:
+    body = _CountedBody(b" " * 1_048_576)
+
+    failure = _github_read_failure("commits", 403, body)
+
+    assert (failure.error_code, failure.retry_after) == ("github_forbidden", None)
+    # The read stops with the first chunk that reaches 4 KiB: five chunks of 1000 bytes.
+    assert body.sent == 5000
 
 
 @pytest.mark.parametrize("provider", ["gitlab", "unknown"])
