@@ -7,6 +7,8 @@ erDiagram
     PROVIDER_INSTALLATIONS o|--o{ WEBHOOK_EVENTS : receives
     PROMPT_VERSIONS o|--o{ REPOSITORIES : overrides
     PROMPT_VERSIONS ||--o{ RUNS : snapshots
+    PROMPT_VERSIONS o|--o{ RUNS : "pins conventions"
+    PROMPT_VERSIONS o|--o{ RUNS : "pins verifier"
     PROMPT_VERSIONS ||--o{ REPO_CONVENTIONS : builds
     REPOSITORIES ||--o{ RULE_VERSIONS : versions
     REPOSITORIES ||--o{ CODE_CHANGES : contains
@@ -17,12 +19,18 @@ erDiagram
     REPOSITORIES ||--o{ CODE_INDEX_SYMBOLS : declares
     REPOSITORIES ||--o{ CODE_INDEX_EDGES : links
     REPOSITORIES ||--o{ CODE_INDEX_IMPORTS : records
+    REPOSITORIES ||--o{ RUN_POLICY_SNAPSHOTS : scopes
     RULE_VERSIONS ||--o{ RUNS : snapshots
+    RULE_VERSIONS ||--o{ RUN_POLICY_SNAPSHOTS : defaults
     CODE_CHANGES ||--o{ RUNS : triggers
     RUNS ||--o| CONTEXT_PAYLOADS : stores
     RUNS ||--o{ FINDINGS : yields
     RUNS ||--o{ USAGE_EVENTS : consumes
     RUNS ||--o{ RUN_ACTIONS : traces
+    RUNS ||--o{ RUN_POLICY_DOCUMENTS : loads
+    RUNS ||--o| RUN_POLICY_SNAPSHOTS : pins
+    RUNS ||--o{ CONTEXT_MANIFESTS : records
+    RUN_POLICY_SNAPSHOTS ||--o{ CONTEXT_MANIFESTS : bounds
     FINDINGS ||--o| COMMENTS : publishes
     USAGE_EVENTS o|--o| CREDIT_LEDGER : debits
     PAYMENTS o|--o| CREDIT_LEDGER : credits
@@ -62,6 +70,8 @@ erDiagram
       uuid code_change_id FK
       uuid rule_version_id FK
       uuid prompt_version_id FK
+      uuid conventions_prompt_version_id FK
+      uuid verifier_prompt_version_id FK
       char idempotency_key UK
       enum state
       enum engine
@@ -71,6 +81,8 @@ erDiagram
       timestamptz started_at
       timestamptz finished_at
       timestamptz available_at
+      enum severity_threshold
+      smallint max_comments
     }
     CONTEXT_PAYLOADS {
       uuid id PK
@@ -147,6 +159,7 @@ erDiagram
       uuid repository_id FK
       uuid prompt_version_id FK
       varchar agents_md_sha
+      char policy_key
       text agents_md
       jsonb key_patterns
       jsonb recommendations
@@ -162,6 +175,43 @@ erDiagram
       text response_ref
       timestamptz started_at
       int duration_ms
+    }
+    RUN_POLICY_DOCUMENTS {
+      uuid id PK
+      uuid run_id FK
+      varchar path
+      varchar presence
+      varchar blob_oid
+      char text_sha256
+      text text
+    }
+    RUN_POLICY_SNAPSHOTS {
+      uuid run_id PK, FK
+      uuid snapshot_id UK
+      uuid repository_id FK
+      uuid service_defaults_rule_version_id FK
+      int schema_version
+      varchar policy_base_sha
+      char ignore_digest
+      char defaults_checksum
+      jsonb prompt_bindings
+      jsonb execution_profile
+      char policy_digest
+      enum severity_threshold
+      smallint max_comments
+    }
+    CONTEXT_MANIFESTS {
+      uuid id PK
+      uuid run_id FK
+      int attempt
+      uuid call_id UK
+      varchar stage
+      varchar recovery_kind
+      uuid parent_call_id
+      uuid policy_snapshot_id FK
+      char digest
+      int input_tokens
+      jsonb blocks
     }
     CODE_INDEX_STATES {
       uuid repository_id PK, FK
