@@ -251,9 +251,9 @@ Rules for every task:
   - TP `:452`, `:454`: the coverage column names T2 and T4 tests; remove "после остатка #130" and "В очереди #213
     unsupported_path сохраняет partial".
 - **Done when:**
-  - [ ] `diff` of the four block copies is empty;
-  - [ ] every new code anchor resolves on the branch head;
-  - [ ] no G2 line is touched: PS `:104-135`, `:171-180`, CVS `:766-779`, TP `:82`, `:119`, `:197-211`, `:484-500`
+  - [x] `diff` of the four block copies is empty;
+  - [x] every new code anchor resolves on the branch head;
+  - [x] no G2 line is touched: PS `:104-135`, `:171-180`, CVS `:766-779`, TP `:82`, `:119`, `:197-211`, `:484-500`
         (G plan §2).
 
 ## Checkpoint C (complete)
