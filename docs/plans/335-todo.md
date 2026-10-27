@@ -3,7 +3,7 @@
 Published integration baseline `f160ce4c82220c20e627fbfdc0230b43a5f34492`.
 Round 1 integration baseline `430d6604a0fc289916b34cc5aa6bdd307cea40b8` (freshly fetched and rebased without conflicts).
 Original design/test baseline `88bbc0734e50e33fa769940291a79ff997102994`.
-Plan: [335-plan.md](335-plan.md). Human-approved implementation published as [PR #339](https://github.com/larchanka-training/dmc-268-api-t6/pull/339). Round 1 publication on `1f74bd78` and its approval are historical. Round 2 corrections were published on `91556a06f122cfc4a083c9f11636165cb9cd91e9`; body/replies were updated and [CI 40542067728](https://github.com/larchanka-training/dmc-268-api-t6/actions/runs/40542067728) passed (15 successful jobs, four expected deployment/publication skips). The subsequent [round 3 review](https://github.com/larchanka-training/dmc-268-api-t6/pull/339#pullrequestreview-5671678508) requested changes. Historical local full-suite evidence (round 1: 9298; round 2: 9604 tests, zero skips/failures/errors) and prior approval do not verify or approve this new head. The bounded round 3 source amendment below covers all two P2 and seven concrete P3 units. Final publication, CI, replies and approval are recorded on the live PR. Real GitLab acceptance remains pending.
+Plan: [335-plan.md](335-plan.md). Human-approved implementation published as [PR #339](https://github.com/larchanka-training/dmc-268-api-t6/pull/339). Round 1 publication on `1f74bd78` and its approval are historical. Round 2 corrections were published on `91556a06f122cfc4a083c9f11636165cb9cd91e9`; body/replies were updated and [CI 40542067728](https://github.com/larchanka-training/dmc-268-api-t6/actions/runs/40542067728) passed (15 successful jobs, four expected deployment/publication skips). The subsequent [round 3 review](https://github.com/larchanka-training/dmc-268-api-t6/pull/339#pullrequestreview-5671678508) requested changes. Historical local full-suite evidence (round 1: 9298; round 2: 9604 tests, zero skips/failures/errors) and prior approval do not verify or approve this new head. Round 3 was published on `225df166afd2bf0dcc1f844fc088d0dd487b8353`; [CI 40577630853](https://github.com/larchanka-training/dmc-268-api-t6/actions/runs/40577630853) passed with 9643 tests (7921 unit + 1722 integration), zero skips/failures/errors. [Round 4 review 5674303775](https://github.com/larchanka-training/dmc-268-api-t6/pull/339#pullrequestreview-5674303775) approved that historical head and confirmed all five threads resolved. The bounded round 4 amendment below addresses all three P3 findings; the next head still needs fresh CI and approval. Final publication, CI, replies and review request are recorded on the live PR. Real GitLab acceptance remains pending.
 
 ## Gates before development
 
@@ -447,3 +447,40 @@ local repo-wide Ruff lint/format/mypy. Full pytest runs on the actual published 
 in unchanged canonical unit/four-integration-shard/exact-once CI. Report actual new
 results on the PR; historical 9604 is not a fresh count. Task 7's eight live checks
 remain unchecked; no merge, deploy, acceptance or issue closure is authorized here.
+
+
+## Review round 4 — bounded source ledger
+
+Historical R3 publication `225df166` / CI 40577630853: **9643 passed = 7921 unit +
+1722 integration**, zero skips/failures/errors. R4 review 5674303775 approved that
+head and confirmed all five threads resolved; a new diff needs fresh approval.
+The existing same-PR/all-P3 choice and #340 coordination remain applicable.
+
+- [x] R0: rebase four existing commits onto main `fff588d6`, yielding `371d89d5`;
+      four range-diff `=` entries, all 15 feature blobs unchanged, all 37 incoming
+      main path blobs retained. Remote publication head remained `225df166`.
+- [x] P3-1: independent stat/find/parent-ps/children-ps/stage-lsof with rc output,
+      root/tools/full-visibility prerequisites and separate guarded cwd/PID-list
+      inspection. Old actual chained snippet fails the missing-parent regression;
+      ten disposable actual non-root/explicitly EUID-omitted fixture checks pass.
+      No privileged-host visibility, abandonment or deletion claim.
+- [x] P3-2: six affected source links pinned to verified official GitLab commit
+      `d993f849b41862881e4c4b2445f991fef0c67822`; read both pinned files and verify
+      ProjectTestData lines 37–43 / WebHookService lines 227–242. No affected moving
+      master links remain; installed-version/live evidence remains pending.
+- [x] P3-3: both runbooks state no active MR Run (Р-2), separate receipt/head dedup,
+      and preserve DEFERRED only for another head with cancellation requested,
+      otherwise DUPLICATE; only DEFERRED maps to GitLab receipt deferral.
+      Provider predicates separated from rules/prompt/workers/LLM readiness.
+      Local source/PIPELINE_SPEC checked; trigger suite: **91 passed in 0.32s**,
+      zero skips (managed environment-lock warning only).
+- [x] Focused source proof: all 13 extracted GitLab Bash blocks pass `bash -n`;
+      local Bash/stub cases only, without live credentials/server/Test/SSH,
+      provider/LLM calls, new images or permanent prose-mirroring tests.
+
+This four-doc ledger ends at implementation/focused verification. Fresh cumulative
+Standards/Spec review, three whole local static gates and full canonical CI on the
+published head follow source freeze. Historical 9643 does not verify the new head;
+publication/replies/review request stay on the live PR, without a bookkeeping loop.
+All eight Task 7 live boxes remain unchecked; no merge, deployment, live acceptance
+or issue closure is authorized.
