@@ -760,7 +760,7 @@ lazy Reflection Pass; `ExecuteReviewRun` запускает его только 
 `internal_error` (ошибка серверной сборки, #216): действуют повторы до трёх
 попыток суммарно, затем `failed` и `reviews.dlq`. Повреждённый snapshot
 по-прежнему даёт `policy_snapshot_integrity_error` без retry. Legacy без snapshot
-обходит verifier с предупреждением `execute_review_legacy_run_without_snapshot`.
+обходит verifier молча, без предупреждения в логе.
 После F2 seed активирует v4 для новых runs; закреплённый v3 или ниже
 сохраняет legacy-путь. Метки v2
 в dataclass/fixtures — не универсальные runtime-pins: Run сохраняет ID активных
