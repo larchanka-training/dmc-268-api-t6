@@ -59,12 +59,13 @@ class Repository:
     async def store_review_output(
         self,
         run_id: UUID,
-        model_output: dict[str, object],
+        model_output: dict[str, object] | None,
         parsed: ReviewOutput,
         processed: ProcessedReviewOutput,
     ) -> ReviewPublication:
         self.body = processed.review_body
-        self.diagnostic = model_output
+        if model_output is not None:
+            self.diagnostic = model_output
         self.state = "publishing"
         return ReviewPublication("a" * 40, (), self.body)
 

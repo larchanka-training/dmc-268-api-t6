@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, Protocol
@@ -16,11 +16,14 @@ from app.modules.reviews.application.findings_post_processor import (
     ProcessedFinding,
     ProcessedReviewOutput,
     finalize_stored_review_body,
+    summary_from_result,
 )
 from app.modules.reviews.application.queue_messages import ReviewPublishPointer, ReviewPublishQueue
 from app.modules.reviews.application.review_output import (
     InvalidReviewOutput,
+    ReviewOutput,
     ReviewOutputRepository,
+    ReviewPublication,
     VerifiedReviewOutput,
     _as_json_object,
     coerce_dropped_findings,
@@ -55,6 +58,16 @@ class PublishingGuard:
 class PublishingRepository(ReviewOutputRepository, Protocol):
     async def lock_for_publishing(self, run_id: UUID) -> PublishingGuard | None: ...
 
+    async def store_review_output(
+        self,
+        run_id: UUID,
+        model_output: dict[str, object] | None,
+        parsed: ReviewOutput,
+        processed: ProcessedReviewOutput,
+    ) -> ReviewPublication | None:
+        """``model_output`` is None for a backend result without a model answer (#130 F5)."""
+        ...
+
     async def enter_publishing(
         self,
         run_id: UUID,
@@ -72,6 +85,25 @@ class PublishingRepository(ReviewOutputRepository, Protocol):
 class PublishingUnitOfWork(UnitOfWork, Protocol):
     @property
     def reviews(self) -> PublishingRepository: ...
+
+
+class NoModelAnswer(Mapping[str, object]):
+    """The backend result of a run that made no model call: a marker, never an answer.
+
+    A snapshot-path change of technical skips only (coverage none, CVS §2.2) is finished
+    without the review model (#130 F5). It is stored as any result, but nothing is parsed,
+    no ``llm.review_output`` is written, and the post-processor's backend summary is the
+    only one. Empty, so the inline ``PublishReviewOutput`` refuses it as an invalid answer.
+    """
+
+    def __getitem__(self, key: str) -> object:
+        raise KeyError(key)
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(())
+
+    def __len__(self) -> int:
+        return 0
 
 
 def hashed_findings(processed: ProcessedReviewOutput) -> tuple[HashedFinding, ...]:
@@ -142,8 +174,11 @@ class StoreReviewOutput:
         )
         verified = raw_output if isinstance(raw_output, VerifiedReviewOutput) else None
         pre_dropped = coerce_dropped_findings(run_id, effective_dropped_input)
-        parsed = parse_review_output(raw_output)
-        answer = _as_json_object(raw_output)
+        # CONTRACT: the marker of a run without a model call is never parsed as an answer,
+        # and the repository is given no answer to record as llm.review_output.
+        model_answer = not isinstance(raw_output, NoModelAnswer)
+        parsed = parse_review_output(raw_output) if model_answer else None
+        answer = _as_json_object(raw_output) if model_answer else None
         started_at = self._now()
         started = time.monotonic()
         async with self._uow_factory() as uow:
@@ -153,6 +188,10 @@ class StoreReviewOutput:
         coverage = context.coverage or RunCoverage(
             CoverageStatus.PARTIAL, 0, reasons=(CoverageItem(None, "classification_unavailable"),)
         )
+        if parsed is None:
+            # No findings to process. The post-processor replaces this summary with its own
+            # backend summary of the same result, the only one stored.
+            parsed = ReviewOutput(findings=[], summary=summary_from_result((), (), coverage))
         threshold_to_use = (
             effective_threshold if effective_threshold is not None else context.severity_threshold
         )

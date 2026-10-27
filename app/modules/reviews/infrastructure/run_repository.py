@@ -846,14 +846,15 @@ class SqlAlchemyReviewOutputRepository:
     async def store_review_output(
         self,
         run_id: UUID,
-        model_output: dict[str, object],
+        model_output: dict[str, object] | None,
         parsed: ReviewOutput,
         processed: ProcessedReviewOutput,
     ) -> ReviewPublication | None:
         """Flush one validated answer; the use case commits it before networking.
 
         ``model_output`` is the gateway's normalized answer (PIPELINE_SPEC §9); the raw
-        provider answer stays only in the ``llm.call`` trace.
+        provider answer stays only in the ``llm.call`` trace. None is a backend result
+        without a model call (coverage none, #130 F5): no ``llm.review_output`` is written.
         """
         run = await self._session.scalar(select(Run).where(Run.id == run_id).with_for_update())
         if run is None or run.state in {RunState.SUCCEEDED, RunState.CANCELLED}:
@@ -866,15 +867,16 @@ class SqlAlchemyReviewOutputRepository:
             )
         )
         if existing is None:
-            await insert_run_action(
-                self._session,
-                run_id=run_id,
-                tool="llm.review_output",
-                request={},
-                response=model_output,
-                started_at=datetime.now(UTC),
-                duration_ms=0,
-            )
+            if model_output is not None:
+                await insert_run_action(
+                    self._session,
+                    run_id=run_id,
+                    tool="llm.review_output",
+                    request={},
+                    response=model_output,
+                    started_at=datetime.now(UTC),
+                    duration_ms=0,
+                )
             findings = tuple(_to_published_finding(item.finding) for item in processed.inline)
             records = (*processed.inline, *processed.body_only, *processed.dropped)
             self._session.add_all([_to_finding(run_id, item) for item in records])
