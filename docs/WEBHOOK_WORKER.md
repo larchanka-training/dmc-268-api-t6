@@ -282,7 +282,8 @@ request survives and is answered by the next scan. The save also checks that the
 its own (the lease end it wrote): a read whose lease ended and whose row another worker claimed
 is dropped with a warning instead of overwriting the newer result. A read that raises is stored
 as `unavailable` with `policy_fetch_transient`, so a GET asks again after 30 seconds; a rate
-limit waits for GitHub's `Retry-After` when it is longer than 30 seconds, but no longer than
+limit, and a 5xx that sends `Retry-After`, wait for GitHub's `Retry-After` when it is longer
+than 30 seconds (a secondary rate limit without one waits 60 seconds), but no longer than
 the 10-minute age (the stored value is capped at one day). A repository whose
 `installation_available` is false is never claimed; its GET answers `unavailable` with
 `policy_access_denied` and requests nothing. A full batch of 20 runs the next scan at once, like
