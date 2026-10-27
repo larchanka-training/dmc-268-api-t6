@@ -281,7 +281,11 @@ def verify_provenance_pre_send_guard(
     """Validate manifest blocks before any LLM call (CVS §5.2).
 
     Failure raises PolicyError(PolicyErrorCode.CONTEXT_VIOLATION), which results
-    in RunFailure("policy_context_violation") without sending the request.
+    in RunFailure("policy_context_violation") without sending the request. A block of an
+    ignored path names ``.review/rules.md`` and the matched mask, with the mask's first
+    line when the snapshot's rules text still gives back its masks; reading those lines
+    never fails the call. Evaluating the masks can raise
+    PolicyError(PolicyErrorCode.MATCH_BUDGET_EXCEEDED).
     """
     ignore_policy: IgnorePolicy | None = None
     ignore_matcher: IgnoreMatcher | None = None
@@ -349,8 +353,10 @@ def verify_provenance_pre_send_guard(
                     f"Block '{block.block_id}' references ignored path matching deny-set",
                     source_path=RULES_DOCUMENT_PATH,
                     policy_base_sha=snapshot.policy_base_sha,
+                    # No line when the rules text no longer gives back the stored masks.
                     line=next(
-                        item.line for item in ignore_policy.source_lines if item.pattern == mask
+                        (item.line for item in ignore_policy.source_lines if item.pattern == mask),
+                        None,
                     ),
                     excerpt=mask,
                 )
