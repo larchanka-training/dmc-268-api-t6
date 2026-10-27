@@ -249,6 +249,19 @@ def test_every_policy_code_has_an_english_status_text(code: PolicyErrorCode) -> 
     assert text.isascii()
 
 
+def test_status_text_never_shows_a_stopped_count_as_exact() -> None:
+    error = PolicyError(
+        PolicyErrorCode.MATCH_BUDGET_EXCEEDED,
+        "technical",
+        limit=20,
+        actual=21,
+        unit="transitions",
+        actual_is_lower_bound=True,
+    )
+
+    assert status_text(error).endswith("Where: actual more than 20, allowed 20 transitions.")
+
+
 def test_symlink_is_invalid() -> None:
     class Linked(FakeGitHub):
         def respond(self, request: httpx.Request) -> httpx.Response:
