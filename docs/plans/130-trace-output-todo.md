@@ -134,7 +134,7 @@ Base: `origin/main` `f40cabf3`. Branch `fix/168-trace-and-output`, DB and vhost 
     `ContextOmission.diagnostic_path` and `test_review_context.py:687` stay raw.
     - Kills: escaping at the payload level.
 - **Done when:**
-  - [ ] the gates pass.
+  - [x] the gates pass.
 
 ## T3: The check-run text (item 5)
 

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from uuid import UUID
 
+import pytest
+
 from app.modules.reviews.application.diff_map import (
     ChangeType,
     DiffHunk,
@@ -13,6 +15,7 @@ from app.modules.reviews.application.diff_map import (
     RowKind,
     VcsProviderName,
     build_diff_map,
+    diagnostic_text,
     is_supported_path,
 )
 from app.modules.reviews.application.prompt_builder import FileStatus, PullRequestMeta
@@ -363,3 +366,50 @@ def test_digest_is_stable_for_the_same_input_and_changes_with_the_diff() -> None
     assert first.digest != _build(_file(patch="@@ -1 +1 @@\n-old\n+other")).digest
     assert first.digest != _build(_file(), head_sha="e" * 40).digest
     assert first.files[0].file_id != _build(_file(), head_sha="e" * 40).files[0].file_id
+
+
+def test_diagnostic_text_escapes_controls_and_keeps_ordinary_unicode() -> None:
+    assert diagnostic_text("src/модуль\n.py") == "src/модуль\\x0a.py"
+    assert diagnostic_text("src/модуль.py") == "src/модуль.py"
+
+
+@pytest.mark.parametrize(
+    ("path", "expected"),
+    [
+        ("a" + chr(0x85) + "b", "a\\x85b"),
+        ("a" + chr(0x202E) + "b", "a\\u202eb"),
+        ("a" + chr(0x2028) + "b", "a\\u2028b"),
+        ("a" + chr(0x2029) + "b", "a\\u2029b"),
+        ("a" + chr(0xD800) + "b", "a\\ud800b"),
+        ("a" + chr(0xE0001) + "b", "a\\U000e0001b"),
+        ("a\x00b", "a\\x00b"),
+    ],
+    ids=["c1", "cf-bidi", "zl", "zp", "cs", "cf-astral", "nul"],
+)
+def test_diagnostic_text_escapes_c1_format_separator_and_surrogate_characters(
+    path: str, expected: str
+) -> None:
+    assert diagnostic_text(path) == expected
+
+
+def test_diagnostic_text_is_reversible_between_a_backslash_and_a_control() -> None:
+    backslash_n, newline = "a\\nb", "a\nb"
+
+    assert diagnostic_text(backslash_n) == "a\\\\nb"
+    assert diagnostic_text(newline) == "a\\x0ab"
+    assert diagnostic_text(backslash_n) != diagnostic_text(newline)
+    assert diagnostic_text("src\\bad.py") == "src\\\\bad.py"
+
+
+def test_diagnostic_text_is_bounded_and_never_cuts_an_escape() -> None:
+    assert len(diagnostic_text("a" * 1024)) == 1024
+    long = diagnostic_text("a" * 5000)
+    assert long == "a" * 1024 + "…"
+    # 1 021 letters and a newline: its four-character escape does not fit whole.
+    cut = diagnostic_text("a" * 1021 + "\n" + "b" * 10)
+    assert cut == "a" * 1021 + "…"
+    fits = diagnostic_text("a" * 1020 + "\n")
+    assert fits == "a" * 1020 + "\\x0a"
+    # The bound counts characters, not UTF-8 bytes: a Cyrillic letter is two bytes.
+    assert diagnostic_text("я" * 1024) == "я" * 1024
+    assert diagnostic_text("я" * 1025) == "я" * 1024 + "…"

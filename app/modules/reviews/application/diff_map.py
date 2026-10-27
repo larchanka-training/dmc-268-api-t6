@@ -22,6 +22,8 @@ DIFF_MAP_SCHEMA_VERSION = 1
 DIFF_MAP_PARSER_VERSION = "unified-hunks/v1"
 MAX_PATH_BYTES = 1024
 MAX_PATH_SEGMENTS = 128
+# Characters of escaped text that ``diagnostic_text`` keeps; characters, not UTF-8 bytes.
+MAX_DIAGNOSTIC_CHARS = 1024
 
 _FILE_COUNT_MISMATCH = "file_count_mismatch"
 
@@ -167,6 +169,41 @@ def is_supported_path(path: str) -> bool:
     return len(segments) <= MAX_PATH_SEGMENTS and all(
         segment not in {"", ".", ".."} for segment in segments
     )
+
+
+# Unicode categories a diagnostic text never shows raw: control, format, surrogate, line and
+# paragraph separators.
+_ESCAPED_CATEGORIES = frozenset({"Cc", "Cf", "Cs", "Zl", "Zp"})
+
+
+def diagnostic_text(path: str) -> str:
+    """A provider name as the trace shows it: escaped and bounded (CVS §9.1, RFS §9).
+
+    A backslash is doubled and every character of an escaped category becomes ``\\xNN``,
+    ``\\uNNNN`` or ``\\UNNNNNNNN``; every other character, Cyrillic included, is kept. The
+    escape is reversible. A longer text keeps its first ``MAX_DIAGNOSTIC_CHARS`` characters,
+    cut between two characters of the name, plus ``…``; that truncation is not reversible.
+    Never a canonical path.
+    """
+    parts: list[str] = []
+    size = 0
+    for char in path:
+        code = ord(char)
+        if char == "\\":
+            part = "\\\\"
+        elif unicodedata.category(char) not in _ESCAPED_CATEGORIES:
+            part = char
+        elif code <= 0xFF:
+            part = f"\\x{code:02x}"
+        elif code <= 0xFFFF:
+            part = f"\\u{code:04x}"
+        else:
+            part = f"\\U{code:08x}"
+        if size + len(part) > MAX_DIAGNOSTIC_CHARS:
+            return "".join(parts) + "…"
+        parts.append(part)
+        size += len(part)
+    return "".join(parts)
 
 
 def build_diff_map(
