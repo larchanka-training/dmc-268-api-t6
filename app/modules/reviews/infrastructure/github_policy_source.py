@@ -109,6 +109,17 @@ async def capped_body(response: httpx.Response, max_bytes: int) -> bytes | Overs
     return bytes(body)
 
 
+def refuse_encoded_policy_blob(response: httpx.Response, *, policy_base_sha: str) -> None:
+    """Refuse an encoded policy blob unread: it is asked for with ``Accept-Encoding:
+    identity``, and httpx would decode each chunk whole before the cap could stop it."""
+    if response.headers.get("Content-Encoding", "").strip().casefold() not in {"", "identity"}:
+        raise PolicyError(
+            PolicyErrorCode.FETCH_TRANSIENT,
+            "GitHub returned an encoded policy blob",
+            policy_base_sha=policy_base_sha,
+        )
+
+
 def policy_blob_too_large(oversized: OversizedBody, *, policy_base_sha: str) -> PolicyError:
     """The §9 failure of a policy blob read over ``MAX_DOCUMENT_BYTES``, with its size.
 
@@ -293,6 +304,7 @@ class GitHubRepositoryPolicySource:
             timeout=_REQUEST_TIMEOUT,
         ) as response:
             await raise_for_streamed_status(response)
+            refuse_encoded_policy_blob(response, policy_base_sha=self._base_sha)
             body = await capped_body(response, MAX_DOCUMENT_BYTES)
         if isinstance(body, OversizedBody):
             raise policy_blob_too_large(body, policy_base_sha=self._base_sha)

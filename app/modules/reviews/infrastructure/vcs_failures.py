@@ -57,7 +57,8 @@ async def raise_for_streamed_status(response: httpx.Response) -> None:
 
 async def _error_body(response: httpx.Response) -> bytes:
     if response.headers.get("Content-Encoding", "").strip().casefold() not in {"", "identity"}:
-        # Every stream asks for identity: a decoder could expand a chunk far past the cap.
+        # Never decoded: a decoder could expand one chunk far past the cap. The policy and
+        # commit streams ask for identity; get_repository_blob keeps the client default.
         return b""
     body = bytearray()
     # The status and the headers are the answer; a body cut short only lacks the marker.

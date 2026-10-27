@@ -366,18 +366,20 @@ def test_too_large_blob_without_a_declared_size_reports_the_bytes_read_as_a_lowe
     assert (diagnostic["actual"], diagnostic["actual_is_lower_bound"]) == (69_632, True)
 
 
-def test_declared_size_of_an_encoded_blob_is_not_taken_as_its_size() -> None:
-    # The Content-Length of a gzip body counts compressed bytes: only the decoded count is
-    # known, and only up to where the read stopped.
-    error = _too_large_agents(
-        httpx.Response(
-            200,
-            headers={"Content-Encoding": "gzip", "Content-Length": "70000"},
-            stream=_Chunks(gzip.compress(b"a" * 1_048_576)),
-        )
-    )
+@pytest.mark.parametrize("encoding", ["gzip", "deflate", "br"])
+def test_encoded_policy_blob_is_refused_before_reading(encoding: str) -> None:
+    # The read asks for identity: httpx would decode each chunk whole, so 1 MiB gzipped
+    # would be in memory before the 64 KiB cap could stop it.
+    body = _Chunks(gzip.compress(b"a" * 1_048_576))
 
-    assert (error.actual, error.actual_is_lower_bound) == (1_048_576, True)
+    def respond(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, headers={"Content-Encoding": encoding}, stream=body)
+
+    with pytest.raises(PolicyError) as caught:
+        _run(respond, lambda source: source.read_blob(_AGENTS))
+
+    assert (caught.value.code, caught.value.retryable) == (PolicyErrorCode.FETCH_TRANSIENT, True)
+    assert body.sent == 0
 
 
 def test_answer_that_cannot_be_decoded_is_a_policy_fetch_failure_not_an_internal_one() -> None:
