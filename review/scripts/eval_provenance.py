@@ -28,6 +28,7 @@ _REVIEW_CODE = (
     "app/modules/reviews/application/prompt_budget.py",
     "app/modules/reviews/application/prompt_builder.py",
     "app/modules/reviews/application/review_output.py",
+    "app/modules/reviews/application/review_path.py",
     "app/modules/reviews/application/run_failures.py",
     "app/modules/reviews/infrastructure/llm/answers.py",
     "app/modules/reviews/infrastructure/llm/gateway.py",
@@ -37,6 +38,7 @@ _REVIEW_CODE = (
     "app/modules/reviews/infrastructure/llm/transport.py",
     "review/eval/pr-commit-messages.json",
     "review/schemas/review-output.schema.json",
+    "review/schemas/review-output.schema.v2.json",
     "review/scripts/eval_live.py",
     "review/scripts/commit_context.py",
 )

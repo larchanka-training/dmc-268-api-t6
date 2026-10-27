@@ -677,6 +677,8 @@ def test_records_only_first_valid_answer_with_explicit_inputs(tmp_path: Path) ->
     assert "review/rules/default-frontend.v1.json" in manifest["static_inputs"]
     assert "review/rules/schema.json" not in manifest["static_inputs"]
     assert "review/schemas/review-output.schema.json" in manifest["static_inputs"]
+    assert "review/schemas/review-output.schema.v2.json" in manifest["static_inputs"]
+    assert "app/modules/reviews/application/review_path.py" in manifest["static_inputs"]
     assert "app/common/application/languages.py" in manifest["static_inputs"]
     assert "app/modules/reviews/application/prompt_builder.py" in manifest["static_inputs"]
     assert "app/modules/reviews/application/prompt_budget.py" in manifest["static_inputs"]

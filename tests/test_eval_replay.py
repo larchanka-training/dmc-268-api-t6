@@ -837,6 +837,7 @@ def test_corpus_digest_rejects_symlinked_preimage_directory(tmp_path: Path) -> N
     [
         "app/common/application/languages.py",
         "review/schemas/review-output.schema.json",
+        "review/schemas/review-output.schema.v2.json",
     ],
 )
 def test_replay_warns_on_request_shape_or_output_schema_edit(tmp_path: Path, changed: str) -> None:
@@ -861,6 +862,8 @@ def test_replay_warns_on_request_shape_or_output_schema_edit(tmp_path: Path, cha
         "review/scripts/eval_live.py",
         "app/modules/reviews/infrastructure/llm/settings.py",
         "app/modules/reviews/infrastructure/llm/transport.py",
+        "app/modules/reviews/application/review_path.py",
+        "app/modules/reviews/infrastructure/llm/answers.py",
     ],
 )
 def test_replay_warns_on_request_source_only_edit(tmp_path: Path, changed: str) -> None:
