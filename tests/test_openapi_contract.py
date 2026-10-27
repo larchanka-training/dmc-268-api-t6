@@ -114,6 +114,16 @@ UI_ZOD_COMPONENTS = {
     "fileSlice": "FileSlice",
     "authSession": "AuthSession",
     "me": "Me",
+    "bitbucketDiscoveryRequest": "BitbucketDiscoveryRequest",
+    "bitbucketDiscoveredRepository": "BitbucketDiscoveredRepository",
+    "bitbucketDiscoveryResponse": "BitbucketDiscoveryResponse",
+    "bitbucketConnectRequest": "BitbucketConnectRequest",
+    "bitbucketWebhookSetup": "BitbucketWebhookSetup",
+    "bitbucketConnectResponse": "BitbucketConnectResponse",
+    "bitbucketConnectionItem": "BitbucketConnectionItem",
+    "bitbucketConnectionList": "BitbucketConnectionList",
+    "bitbucketCredentialRotateRequest": "BitbucketCredentialRotateRequest",
+    "bitbucketCredentialRotateResponse": "BitbucketCredentialRotateResponse",
 }
 # z.int() exports the safe-integer range as its bounds; the spec leaves such integers unbounded.
 ZOD_SAFE_INTEGER = 2**53 - 1
@@ -1007,6 +1017,8 @@ def _split_null(
             rest = [name for name in types if name != "null"]
             branch = {**branch, "type": rest[0] if len(rest) == 1 else rest}
         branches.append(branch)
+    if not branches:
+        return nullable, {}
     if len(branches) == 1:
         return nullable, branches[0]
     return nullable, {"anyOf": branches}
@@ -1089,6 +1101,11 @@ def _contract_mismatches(
 def test_ui_zod_snapshot_covers_the_shared_dtos() -> None:
     assert _generated_schemas().keys() == UI_ZOD_COMPONENTS.keys()
     assert len(UI_ZOD_COMPONENTS) >= 12
+
+
+def test_contract_mirror_distinguishes_null_only_from_nullable_string() -> None:
+    assert _contract_mismatches({"type": "null"}, {"type": "null"}, {}, "cursor") == []
+    assert _contract_mismatches({"type": ["string", "null"]}, {"type": "null"}, {}, "cursor")
 
 
 @pytest.mark.parametrize(("zod_name", "component"), UI_ZOD_COMPONENTS.items())

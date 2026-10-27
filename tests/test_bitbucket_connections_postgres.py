@@ -471,6 +471,30 @@ def test_bitbucket_repository_enters_common_list_only_for_current_workspace_memb
         visible = client.get("/api/repos")
         assert visible.status_code == 200
         assert [item["id"] for item in visible.json()] == [str(repository_id)]
+        assert visible.json()[0]["provider"] == "bitbucket"
+        for body, field in (
+            ({"waitForCi": "auto"}, "waitForCi"),
+            ({"waitForCi": "always"}, "waitForCi"),
+            ({"reviewEvent": "REQUEST_CHANGES"}, "reviewEvent"),
+        ):
+            rejected = client.patch(f"/api/repos/{repository_id}", json=body)
+            assert rejected.status_code == 422
+            assert rejected.json()["detail"][0]["loc"] == ["body", field]
+        assert tuple(
+            db.execute(
+                text("SELECT wait_for_ci, review_event FROM repositories WHERE id=:id"),
+                {"id": repository_id},
+            ).one()
+        ) == ("never", "comment")
+        accepted = client.patch(
+            f"/api/repos/{repository_id}",
+            json={"waitForCi": "never", "reviewEvent": "COMMENT"},
+        )
+        assert accepted.status_code == 200
+        assert (accepted.json()["waitForCi"], accepted.json()["reviewEvent"]) == (
+            "never",
+            "COMMENT",
+        )
         app.dependency_overrides[get_auth_scope] = lambda: AuthScope(43, (workspace,))
         assert client.get("/api/repos").json() == []
         app.dependency_overrides[get_auth_scope] = lambda: AuthScope(42, (workspace,))

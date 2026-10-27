@@ -75,6 +75,7 @@ from app.modules.repositories.application.repository_settings import (
     RepositorySettings,
     RepositorySettingsChange,
     RepositorySettingsUowFactory,
+    UnsupportedRepositorySetting,
     UpdateRepository,
 )
 from app.modules.repositories.application.rules_status import (
@@ -942,19 +943,24 @@ async def update_repository(
     body: RepositoryUpdateDto,
     uow_factory: Annotated[RepositorySettingsUowFactory, Depends(get_repository_settings)],
 ) -> RepositoryDto:
-    item = await UpdateRepository(uow_factory).execute(
-        repo_id,
-        RepositorySettingsChange(
-            enabled=body.enabled,
-            default_engine=body.default_engine,
-            wait_for_ci=body.wait_for_ci,
-            max_comments=body.max_comments,
-            review_event=body.review_event,
-            branch_filter=None if body.branch_filter is None else tuple(body.branch_filter),
-            severity_threshold=body.severity_threshold,
-            rag_enabled=body.rag_enabled,
-        ),
-    )
+    try:
+        item = await UpdateRepository(uow_factory).execute(
+            repo_id,
+            RepositorySettingsChange(
+                enabled=body.enabled,
+                default_engine=body.default_engine,
+                wait_for_ci=body.wait_for_ci,
+                max_comments=body.max_comments,
+                review_event=body.review_event,
+                branch_filter=None if body.branch_filter is None else tuple(body.branch_filter),
+                severity_threshold=body.severity_threshold,
+                rag_enabled=body.rag_enabled,
+            ),
+        )
+    except UnsupportedRepositorySetting as error:
+        raise RequestValidationError(
+            [{"loc": ("body", error.field), "msg": str(error), "type": "value_error"}]
+        ) from error
     if item is None:
         raise HTTPException(status_code=404, detail="repository not found")
     return to_repository_dto(item)

@@ -390,16 +390,17 @@ confirm no duplicates. Save sanitized evidence and URLs in #333/PR description.
 - [x] After the UI branch has a committed head, regenerate
   `tests/fixtures/ui_zod_contracts.json` from that real commit and remove the
   temporary #333 provider overlay in `tests/test_ui_zod_contracts.py`. Pinned
-  UI commit: `34f81ce9dc5631e7e2061aa9958ec7dac13c5dcb`; the generated
-  fixture requires `provider` for repository, run session and PR projections.
-  UI Zod/OpenAPI contract tests: 171 passed.
+  UI commit: `39ad67682d1247d2674015ed80dd1abcdf223ce9`; the generated
+  fixture requires `provider` for repository, run session and PR projections
+  and covers ten Bitbucket connection DTOs. UI Zod/OpenAPI contract tests:
+  182 passed on the rebased API branch.
 
 **Verification:** Live Bitbucket UI/API, PostgreSQL counts, backend and UI gates;
 independent Standards/Spec review. Exact sanitized procedure:
 [`333-live-acceptance.md`](333-live-acceptance.md). Current blockers:
 disposable repo has no PR, `/private/tmp/bitbucket-333-write.env` is absent,
 and the `staging` Environment lacks the Bitbucket keyring secret and both
-variables (names only checked 2026-10-27). Local gate evidence on API base
+variables (names only checked 2026-10-27). Earlier local gate evidence on API base
 `f160ce4c` and UI commit `34f81ce9dc5631e7e2061aa9958ec7dac13c5dcb`:
 backend ruff check, ruff format check, mypy and diff check passed; focused
 rebased PG/API/deployment tests 596 passed; UI lint, typecheck, format,
@@ -413,7 +414,12 @@ The initial unfiltered run completed with 18 failed, 8963 passed and 85
 skipped; the remaining failures were repaired and verified by the final run.
 The final wrapper had a zsh `status` read-only variable error after pytest
 printed its successful summary, so the recorded process exit reflects the
-wrapper rather than a failing test. No live acceptance evidence is claimed.
+wrapper rather than a failing test. Current Task 9 evidence on rebased API
+`430d6604` and committed UI `39ad67682d1247d2674015ed80dd1abcdf223ce9`:
+182 UI Zod/OpenAPI contract tests, 25 focused repository/Bitbucket/prompt tests,
+ruff check, ruff format check, mypy and diff check passed; the full PostgreSQL
+suite is running with the same three explicit clean-main deselections.
+No live acceptance evidence is claimed.
 **Dependencies:** T9–T13 and the remaining T1
 live probe/accepted suggestion contract. **Likely files:**
 `docs/plans/333-todo.md` (evidence checklist), PR bodies. **Scope:** M.
