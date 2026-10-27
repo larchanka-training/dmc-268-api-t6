@@ -1015,10 +1015,12 @@ def _split_null(
         if isinstance(types, list) and "null" in types:
             nullable = True
             rest = [name for name in types if name != "null"]
+            if not rest:
+                continue
             branch = {**branch, "type": rest[0] if len(rest) == 1 else rest}
         branches.append(branch)
     if not branches:
-        return nullable, {}
+        return nullable, {"type": "null"}
     if len(branches) == 1:
         return nullable, branches[0]
     return nullable, {"anyOf": branches}
@@ -1105,7 +1107,10 @@ def test_ui_zod_snapshot_covers_the_shared_dtos() -> None:
 
 def test_contract_mirror_distinguishes_null_only_from_nullable_string() -> None:
     assert _contract_mismatches({"type": "null"}, {"type": "null"}, {}, "cursor") == []
+    assert _contract_mismatches({"type": ["null"]}, {"type": "null"}, {}, "cursor") == []
     assert _contract_mismatches({"type": ["string", "null"]}, {"type": "null"}, {}, "cursor")
+    assert _contract_mismatches({}, {"type": "null"}, {}, "cursor")
+    assert _contract_mismatches({"type": "null"}, {}, {}, "cursor")
 
 
 @pytest.mark.parametrize(("zod_name", "component"), UI_ZOD_COMPONENTS.items())
