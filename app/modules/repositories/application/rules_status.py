@@ -97,6 +97,8 @@ class RulesDiagnostic:
     retryable: bool
     limit: int | None = None
     actual: int | None = None
+    # ``actual`` is only a lower bound (§9), such as the bytes of a stopped blob read.
+    actual_is_lower_bound: bool = False
     pattern_index: int | None = None
     # The ``Retry-After`` of a rate limit; stored for the next GET, never shown.
     retry_after: timedelta | None = None
@@ -117,6 +119,7 @@ class RulesDiagnostic:
             retryable=error.retryable,
             limit=error.limit,
             actual=error.actual,
+            actual_is_lower_bound=error.actual_is_lower_bound,
             pattern_index=error.pattern_index,
             retry_after=(
                 None

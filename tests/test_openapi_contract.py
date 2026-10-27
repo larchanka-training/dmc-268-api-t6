@@ -445,6 +445,14 @@ RULES_STATUSES: dict[str, RulesStatus | None] = {
     "invalid-too-large": RulesStatus(
         RulesStatusKind.INVALID, "main", "a" * 40, CHECKED_AT, diagnostics=(_TOO_LARGE,)
     ),
+    # A read that stopped past the cap knows only a lower bound of the size.
+    "invalid-too-large-lower-bound": RulesStatus(
+        RulesStatusKind.INVALID,
+        "main",
+        "a" * 40,
+        CHECKED_AT,
+        diagnostics=(replace(_TOO_LARGE, actual=69_632, actual_is_lower_bound=True),),
+    ),
     "unavailable": RulesStatus(
         RulesStatusKind.UNAVAILABLE, "main", None, CHECKED_AT, diagnostics=(_TRANSIENT,)
     ),

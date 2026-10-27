@@ -8,7 +8,7 @@ default branch, the commit SHA, the trees and the blob are requested exactly as 
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable
+from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from hashlib import sha256
@@ -51,10 +51,16 @@ _LEASE_END = _NOW + timedelta(minutes=5)
 _TARGET = RulesRefreshTarget(_REPOSITORY, 17, "octo/repo", "main", _NOW, _LEASE_END)
 
 
-def _entry(path: str, sha: str, *, kind: str = "blob", size: int = 5) -> dict[str, Any]:
+def _entry(path: str, sha: str, *, kind: str = "blob", size: int | None = 5) -> dict[str, Any]:
     mode = {"blob": "100644", "tree": "040000", "link": "120000"}[kind]
     item = {"path": path, "mode": mode, "type": "tree" if kind == "tree" else "blob", "sha": sha}
-    return item if kind == "tree" else item | {"size": size}
+    return item if kind == "tree" or size is None else item | {"size": size}
+
+
+async def _chunks(raw: bytes) -> AsyncIterator[bytes]:
+    """A body sent in 4096-byte chunks: httpx declares no ``Content-Length`` for it."""
+    for start in range(0, len(raw), 4096):
+        yield raw[start : start + 4096]
 
 
 @dataclass
@@ -68,6 +74,9 @@ class FakeGitHub:
     # Path suffix -> status code answered instead of the normal response.
     failures: dict[str, int] = field(default_factory=dict)
     headers: dict[str, str] = field(default_factory=dict)
+    # The listing gives the file no size and its blob comes without a length, so only a
+    # read that stops past the cap tells that the file is too large.
+    unsized: bool = False
     paths: list[str] = field(default_factory=list)
 
     def respond(self, request: httpx.Request) -> httpx.Response:
@@ -91,14 +100,20 @@ class FakeGitHub:
             tree = (
                 []
                 if self.rules is None
-                else [_entry("rules.md", git_blob_oid(self.rules), size=len(self.rules))]
+                else [
+                    _entry(
+                        "rules.md",
+                        git_blob_oid(self.rules),
+                        size=None if self.unsized else len(self.rules),
+                    )
+                ]
             )
             return httpx.Response(200, json={"tree": tree})
         if self.rules is not None and path == "/repos/octo/repo/git/blobs/" + git_blob_oid(
             self.rules
         ):
             assert request.headers["Accept"] == RAW_BLOB_MEDIA_TYPE
-            return httpx.Response(200, content=self.rules)
+            return httpx.Response(200, content=_chunks(self.rules) if self.unsized else self.rules)
         raise AssertionError(f"unexpected GitHub request: {request.url}")
 
 
@@ -220,6 +235,29 @@ def test_symlink_is_invalid() -> None:
 
     assert reading.status is RulesStatusKind.INVALID
     assert reading.diagnostics[0].code == "policy_document_type_unsupported"
+
+
+@pytest.mark.parametrize(
+    ("unsized", "actual"),
+    # 17 chunks of 4096 bytes had arrived when the read stopped: the file has at least those.
+    [(True, 69_632), (False, 70_000)],
+    ids=["stopped-read", "listed-size"],
+)
+def test_a_too_large_diagnostic_tells_whether_its_actual_is_a_lower_bound(
+    unsized: bool, actual: int
+) -> None:
+    reading = _read(FakeGitHub(rules=b"x" * 70_000, unsized=unsized))
+
+    assert (reading.status, reading.text) == (RulesStatusKind.INVALID, None)
+    (diagnostic,) = reading.diagnostics
+    assert (
+        diagnostic.code,
+        diagnostic.limit,
+        diagnostic.actual,
+        diagnostic.actual_is_lower_bound,
+    ) == ("policy_document_too_large", MAX_DOCUMENT_BYTES, actual, unsized)
+    # Only an exact size is named in the text; a lower bound is told as over the limit.
+    assert (str(actual) in diagnostic.message) is not unsized
 
 
 @pytest.mark.parametrize(
