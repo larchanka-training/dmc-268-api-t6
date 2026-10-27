@@ -59,6 +59,7 @@ def _portal_routes() -> list[tuple[str, str]]:
         ("GET", "/healthcheck"),
         ("POST", "/webhooks/github"),
         ("POST", "/webhooks/gitlab/{installationId}"),
+        ("POST", "/webhooks/bitbucket/{installation_id}/{repository_id}"),
         *(
             (method, path)
             for method in ("GET", "HEAD")

@@ -91,7 +91,12 @@ APP_PATH = Path(__file__).parents[1] / "app"
 HTTP_METHODS = frozenset({"get", "put", "post", "delete", "options", "head", "patch", "trace"})
 # api#20 D9: the webhook receiver and the liveness probe are not part of the browser API.
 EXCLUDED_APP_PATHS = frozenset(
-    {"/healthcheck", "/webhooks/github", "/webhooks/gitlab/{installationId}"}
+    {
+        "/healthcheck",
+        "/webhooks/github",
+        "/webhooks/gitlab/{installationId}",
+        "/webhooks/bitbucket/{installation_id}/{repository_id}",
+    }
 )
 # DTOs shared with the UI: Zod snapshot name -> contracts/openapi.yaml component.
 UI_ZOD_COMPONENTS = {
@@ -130,6 +135,7 @@ RUN_ACTION_TOOLS = frozenset(
         "review.postprocess",
         "github.publish_review",
         "gitlab.publish_review",
+        "bitbucket.publish_review",
     }
 )
 # A backticked `<lower>.<lower_snake>` token; state names and docs/ paths do not match.

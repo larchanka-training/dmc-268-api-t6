@@ -93,9 +93,13 @@ def test_a_port_error_propagates_and_nothing_is_committed() -> None:
     assert uow.rolled_back is True
 
 
-def test_no_pinned_prompt_version_has_a_retrieved_section_yet() -> None:
-    assert not RETRIEVED_PROMPT_VERSIONS
+def test_only_the_production_v5_prompt_has_a_retrieved_section() -> None:
+    assert frozenset({("review.system", "v5")}) == RETRIEVED_PROMPT_VERSIONS
     assert has_retrieved_section("review.system", "v3") is False
+    assert has_retrieved_section("review.system", "v4") is False
+    assert has_retrieved_section("review.system", "v5") is True
+    assert has_retrieved_section("review.system", "v6") is False
+    assert has_retrieved_section("unknown", "v5") is False
 
 
 def test_the_capability_set_is_read_when_the_gate_asks(monkeypatch: pytest.MonkeyPatch) -> None:

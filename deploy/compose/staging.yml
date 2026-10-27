@@ -8,6 +8,7 @@ services:
     # api.env only: the API reads no GitHub App credentials, app.env is for the workers.
     env_file:
       - api.env
+      - bitbucket.env
     environment:
       DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-app}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@postgres:5432/${POSTGRES_DB:-app}
       POSTGRES_HOST: postgres
@@ -67,6 +68,7 @@ services:
     env_file:
       - app.env
       - worker.env
+      - bitbucket.env
     environment:
       DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-app}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@postgres:5432/${POSTGRES_DB:-app}
       RABBITMQ_URL: amqp://${RABBITMQ_USER:-app}:${RABBITMQ_PASSWORD:?RABBITMQ_PASSWORD is required}@rabbitmq:5672/
@@ -109,6 +111,7 @@ services:
     env_file:
       - app.env
       - webhook-worker.env
+      - bitbucket.env
     environment:
       DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-app}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@postgres:5432/${POSTGRES_DB:-app}
       RABBITMQ_URL: amqp://${RABBITMQ_USER:-app}:${RABBITMQ_PASSWORD:?RABBITMQ_PASSWORD is required}@rabbitmq:5672/

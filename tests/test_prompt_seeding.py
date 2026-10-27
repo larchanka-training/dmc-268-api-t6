@@ -62,16 +62,18 @@ def test_load_prompt_assets_preserves_full_file_and_checksum() -> None:
 
     assets = load_prompt_assets(prompts_dir)
 
-    assert [(asset.key, asset.version) for asset in assets] == [
+    expected = [
         ("review.conventions", 1),
         ("review.conventions", 2),
         ("review.system", 1),
         ("review.system", 2),
         ("review.system", 3),
         ("review.system", 4),
+        ("review.system", 5),
         ("review.verifier", 1),
         ("review.verifier", 2),
     ]
+    assert [(asset.key, asset.version) for asset in assets] == expected
     for asset in assets:
         expected_content = (prompts_dir / f"{asset.key}.v{asset.version}.md").read_text(
             encoding="utf-8"
@@ -169,7 +171,15 @@ def test_first_seed_makes_the_newest_version_of_each_prompt_active(
                     .order_by(PromptVersion.key)
                 )
                 active_versions = [(key, version) for key, version in rows.tuples().all()]
-                assert inserted == 8
+                assert inserted == len(load_prompt_assets(REPO_ROOT / "review" / "prompts"))
+                v5 = (
+                    await session.scalars(
+                        select(PromptVersion).where(
+                            PromptVersion.key == "review.system", PromptVersion.version == 5
+                        )
+                    )
+                ).one()
+                assert not v5.is_active
                 return active_versions
         finally:
             await engine.dispose()
@@ -292,7 +302,11 @@ def test_seed_rejects_changed_v2_without_overwriting_its_persisted_content(
     migrated_prompt_database: tuple[str, str],
 ) -> None:
     database_url, schema = migrated_prompt_database
-    assets = load_prompt_assets(REPO_ROOT / "review/prompts")
+    assets = tuple(
+        asset
+        for asset in load_prompt_assets(REPO_ROOT / "review/prompts")
+        if asset.key != "review.system" or asset.version <= 3
+    )
     old = next(asset for asset in assets if (asset.key, asset.version) == ("review.system", 2))
     tampered = replace(old, content="changed v2", checksum=sha256(b"changed v2").hexdigest())
     old_content = (REPO_ROOT / "tests/fixtures/prompt_builder/sample.system.txt").read_text()

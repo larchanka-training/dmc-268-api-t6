@@ -316,7 +316,7 @@ RETRIEVED = RetrievedBlock(
     level=ContextLevel.RAG,
     source=replace(L2_WINDOW.source, role=SourceRole.RETRIEVED_EXCERPT, path="app/caller.py"),
     representation=Representation.EXACT_LINES,
-    text="RETRIEVED_CALLER_TEXT",
+    text="RETRIEVED_CALLER_TEXT\nnext line",
     tokens=5,
     edge_kind=EdgeKind.USES_IMPORTED,
     index_commit_sha="c" * 40,
@@ -432,23 +432,19 @@ def test_snapshot_review_shows_the_l2_l4_excerpts_and_counts_the_ignored_files()
 def test_retrieved_blocks_are_neither_kept_nor_shown_without_a_retrieved_section() -> None:
     context = _review("v4", _payload())
 
-    assert not rag_index.RETRIEVED_PROMPT_VERSIONS
+    assert not rag_index.has_retrieved_section("review.system", "v4")
     assert context.retrieved == ()
     assert "RETRIEVED_CALLER_TEXT" not in PromptBuilder().build_prompt(context).user
 
 
-def test_retrieved_blocks_reach_the_context_of_a_prompt_with_a_retrieved_section(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(
-        rag_index, "RETRIEVED_PROMPT_VERSIONS", frozenset({("review.system", "v4")})
-    )
-
-    context = _review("v4", _payload())
+def test_retrieved_blocks_reach_the_v5_prompt_with_citable_source_lines() -> None:
+    context = _review("v5", _payload())
 
     assert context.retrieved == (RETRIEVED,)
-    # #144 renders them; F1 only fills the slot.
-    assert "RETRIEVED_CALLER_TEXT" not in PromptBuilder().build_prompt(context).user
+    user = PromptBuilder().build_prompt(context).user
+    assert "<retrieved_excerpts>" in user
+    assert '<line n="3">RETRIEVED_CALLER_TEXT</line>' in user
+    assert '<line n="4">next line</line>' in user
 
 
 def test_snapshot_review_after_a_failed_build_shows_no_excerpt_and_no_counter() -> None:

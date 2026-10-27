@@ -744,7 +744,7 @@ request credential authority. Все provider HTTP и LLM calls — вне DB tr
 | «общий скор / вердикт» | `verdict: blocking \| attention \| clean \| null`, сохраняется backend вместе с coverage; скора нет | §11 (D3, #107) | #34, ui#57, #30 (`expected_verdict`) |
 | Diff Suggestion; предлагаемый diff-fix (карточка техлида) | `suggestion` находки: замена строк `start_line..line`; `null` — замены нет | §9 | #33, ui#57 |
 | запуск по `opened` / `synchronize` | конъюнкция Р-10: стоит лейбл `ai-review` ∧ CI зелёный; `synchronize` отменяет устаревший Run и запускает авто-повтор | §8 (D2) | #11 |
-| «GitHub / GitLab» (карточки Инженера 1 и Инженера 3) | GitHub и installed GitLab intake/fast/publication реализованы; GitLab default-off и live acceptance gate сохраняются; Bitbucket не реализован (Р-11) | SD §8.1, §8.4; §2 | #97 |
+| «GitHub / GitLab / Bitbucket» (карточки Инженера 1 и Инженера 3) | GitHub и installed GitLab intake/fast/publication реализованы; GitLab default-off и live acceptance gate сохраняются. Bitbucket Cloud #333 использует отдельные signed receipts, UUID-bound PR/head projection, pinned diff/context, inline comments и commit status; live PR evidence ещё требуется | SD §8.1, §8.4; [план #333](plans/333-plan.md) | #97, #333 |
 | LLM Gateway с провайдерами и fallback | LLM Gateway (SD §5): ротация ключей внутри шлюза, fallback-модель по §5.1, strict structured output (D7) | §4.5, §5 | #33 |
 | хранилище секретов | env из CI; перечень и правила — `docs/SECRETS.md` (роль 3) | SD §13, `docs/SECRETS.md` | #35 |
 | инфраструктура DevOps: PostgreSQL и Redis | PostgreSQL 17 + RabbitMQ + Redis (D1) | §14, SD §10, §14 | #35 |
@@ -808,3 +808,7 @@ request credential authority. Все provider HTTP и LLM calls — вне DB tr
 - тип значений record (`additionalProperties: {…}`) и `additionalProperties` объекта без `properties` (`RunAction.request`) не сравниваются;
 - схема без типа («любой JSON», `RunAction.response`; в Zod — `anyOf: [{}, null]`) считается nullable, её содержимое не сравнивается; объединение из нескольких не-null схем не сравнивается и считается расхождением;
 - в снимок не входят query-схемы (`RunListQuerySchema`, `FileSliceQuerySchema`) и `RefreshResponseSchema` (ответ `POST /api/auth/refresh`).
+
+## Bitbucket Cloud path (#333)
+
+Для каждого активного repository binding Bitbucket URL webhook содержит installation ID и portal repository ID; отдельный секрет подписывает `X-Hub-Signature` по исходным байтам. Контракт и коды ошибок — [`BITBUCKET_WEBHOOK.md`](BITBUCKET_WEBHOOK.md). Durable receipt связывает webhook с immutable Bitbucket repository UUID и portal workspace; текущий PR/head перепроверяется перед Run, stale head отменяет старый Run, а повтор доставки не создаёт второй Run. Worker читает pinned diff/source/policy и при включённом RAG добавляет индексный контекст по тому же tenant/repository/head. Перед каждым внешним write publisher перепроверяет origin и head; finding/summary markers и commit status key защищают повторы. Невозможность полного чтения diff/fork не превращается в clean review. Suggestion пока текстовый inline patch для ручного применения; native REST capability и полный live path остаются приёмочным gate #333.

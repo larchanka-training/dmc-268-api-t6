@@ -126,8 +126,9 @@ def _snapshot(store: Store) -> PolicySnapshot:
 
 
 def test_the_snapshot_contract_has_one_source() -> None:
-    assert frozenset({"v4"}) == SNAPSHOT_REVIEW_PROMPT_VERSIONS
+    assert frozenset({"v4", "v5"}) == SNAPSHOT_REVIEW_PROMPT_VERSIONS
     assert answers.review_answer_contract("v4").name == "ReviewOutputV2"
+    assert answers.review_answer_contract("v5").name == "ReviewOutputV2"
     assert answers.review_answer_contract("v3").name == "ReviewOutput"
     assert not hasattr(answers, "_V2_REVIEW_PROMPT_VERSIONS")
 

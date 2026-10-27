@@ -46,6 +46,10 @@ from app.common.application.github_repository_name import REPOSITORY_FULL_NAME_M
 from app.common.infrastructure.db.enums import RunState
 from app.modules.auth.api.router import auth_router
 from app.modules.auth.application.scope import AuthScope
+from app.modules.integrations.bitbucket.api.connections import (
+    router as bitbucket_connections_router,
+)
+from app.modules.integrations.bitbucket.api.webhook import router as bitbucket_webhook_router
 from app.modules.integrations.gitlab.api.webhook import router as gitlab_webhook_router
 from app.modules.integrations.gitlab.infrastructure.settings import GitLabApiSettings
 from app.modules.integrations.webhooks.api.dtos import GitHubWebhookPayloadDto
@@ -419,6 +423,7 @@ def _validate_jsonb_unicode(value: object) -> None:
 def to_run_session_dto(item: RunListItem) -> RunSessionDto:
     return RunSessionDto(
         id=item.id,
+        provider=item.provider,
         status=item.status,
         engine=item.engine,
         attempt=item.attempt,
@@ -432,6 +437,7 @@ def to_run_session_dto(item: RunListItem) -> RunSessionDto:
         action_count=item.action_count,
         summary_only=item.summary_only,
         pull_request=PullRequestDto(
+            provider=item.provider,
             repo=item.repo,
             number=item.number,
             title=item.title,
@@ -1008,6 +1014,8 @@ async def list_repository_pulls(
 
 
 app.include_router(api_router)
+app.include_router(bitbucket_connections_router)
+app.include_router(bitbucket_webhook_router)
 app.include_router(github_webhook_router)
 app.include_router(gitlab_webhook_router)
 app.include_router(auth_router)

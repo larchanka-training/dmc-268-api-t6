@@ -26,6 +26,9 @@ from app.modules.reviews.infrastructure.models import PromptVersion
 _FILENAME_RE = re.compile(r"^(?P<key>.+)\.v(?P<version>\d+)\.md$")
 _FRONTMATTER_RE = re.compile(r"\A---\r?\n(?P<fields>.*?)\r?\n---\r?\n", re.DOTALL)
 _FIELD_RE = re.compile(r"^(?P<name>key|version):\s*(?P<value>.+?)\s*$")
+# v5 is selected only for Bitbucket runs. Keep the global active prompt used by
+# GitHub/GitLab unchanged when seeding this new immutable asset.
+_PROVIDER_PINNED_VERSIONS = frozenset({("review.system", 5)})
 
 
 @dataclass(frozen=True)
@@ -96,8 +99,8 @@ async def seed_prompt_versions(session: AsyncSession, assets: tuple[PromptAsset,
     """Insert assets without mutating old versions and activate each newest version.
 
     An already-persisted ``(key, version)`` whose checksum differs is an immutable
-    artifact violation and aborts the deploy.  The newest known version for every
-    seeded key is the active one.
+    artifact violation and aborts the deploy. The newest general version is active;
+    provider-pinned versions are available for explicit run pinning but stay inactive.
     """
     inserted = 0
     assets_by_key: dict[str, list[PromptAsset]] = {}
@@ -126,7 +129,15 @@ async def seed_prompt_versions(session: AsyncSession, assets: tuple[PromptAsset,
                     f"has checksum {current.checksum} in database"
                 )
 
-        active_version = max((*existing.keys(), *(asset.version for asset in key_assets)))
+        general_versions = (*existing.keys(), *(asset.version for asset in key_assets))
+        eligible = [
+            version
+            for version in general_versions
+            if (key, version) not in _PROVIDER_PINNED_VERSIONS
+        ]
+        if not eligible:
+            continue
+        active_version = max(eligible)
         # The partial unique index permits only one active version for a key.
         # PostgreSQL does not guarantee the row order of a conditional bulk update,
         # so transition the versions in two statements rather than setting v1 false

@@ -9,20 +9,24 @@
 # container environment.
 # One file per set of recipients (docs/SECRETS.md); a container reads only the files of its role.
 APP_ENV_FILE_NAME="app.env"  # GitHub App credentials: worker and webhook-worker
+BITBUCKET_ENV_FILE_NAME="bitbucket.env"  # shared encryption keyring: api and both workers
 API_ENV_FILE_NAME="api.env"  # api only: webhook signature and user authorization
 WORKER_ENV_FILE_NAME="worker.env"  # worker only: LLM gateway and portal links
 WEBHOOK_WORKER_ENV_FILE_NAME="webhook-worker.env"  # webhook-worker only: bot login
 APP_ENV_KEYS=(GITHUB_APP_ID GITHUB_APP_PRIVATE_KEY)
-API_ENV_KEYS=(GITHUB_WEBHOOK_SECRET GITHUB_CLIENT_ID GITHUB_CLIENT_SECRET AUTH_JWT_PRIVATE_KEY AUTH_JWT_PUBLIC_KEY)
+BITBUCKET_ENV_KEYS=(BITBUCKET_CREDENTIAL_KEYS BITBUCKET_ACTIVE_KEY_ID)
+API_ENV_KEYS=(GITHUB_WEBHOOK_SECRET GITHUB_CLIENT_ID GITHUB_CLIENT_SECRET AUTH_JWT_PRIVATE_KEY AUTH_JWT_PUBLIC_KEY BITBUCKET_WEBHOOK_BASE_URL)
 WORKER_ENV_KEYS=(LLM_API_KEYS LLM_BASE_URL LLM_MODEL LLM_FALLBACK_MODEL LLM_VERIFIER_MODEL LLM_VERIFIER_FALLBACK_MODEL PORTAL_URL)
 WEBHOOK_WORKER_ENV_KEYS=(GITHUB_APP_BOT_LOGIN)
-ENV_FILE_NAMES=("${APP_ENV_FILE_NAME}" "${API_ENV_FILE_NAME}" "${WORKER_ENV_FILE_NAME}" "${WEBHOOK_WORKER_ENV_FILE_NAME}")
+ENV_FILE_NAMES=("${APP_ENV_FILE_NAME}" "${API_ENV_FILE_NAME}" "${WORKER_ENV_FILE_NAME}" "${WEBHOOK_WORKER_ENV_FILE_NAME}" "${BITBUCKET_ENV_FILE_NAME}")
 
 # The env file of an allowlisted key; fails for any other name.
 env_file_for_key() {
   local name="$1"
   if [[ " ${APP_ENV_KEYS[*]} " == *" ${name} "* ]]; then
     printf '%s' "${APP_ENV_FILE_NAME}"
+  elif [[ " ${BITBUCKET_ENV_KEYS[*]} " == *" ${name} "* ]]; then
+    printf '%s' "${BITBUCKET_ENV_FILE_NAME}"
   elif [[ " ${API_ENV_KEYS[*]} " == *" ${name} "* ]]; then
     printf '%s' "${API_ENV_FILE_NAME}"
   elif [[ " ${WORKER_ENV_KEYS[*]} " == *" ${name} "* ]]; then

@@ -271,8 +271,16 @@ def _merge(ranges: list[LineRange]) -> list[LineRange]:
 
 def _retrieved_block(place: RetrievedPlace) -> RetrievedBlock:
     ranges = ",".join(f"{item.start_line}-{item.end_line}" for item in place.source.ranges)
+    identifier = f"{ContextLevel.RAG.value}:{place.source.path}:{ranges}"
+    if len(identifier) > 128:
+        # EvidenceRef.block_id is bounded. Keep the source path and ranges in the typed
+        # source/manifest while giving a long valid path a stable, citable identity.
+        digest = hashlib.sha256(
+            f"{place.source.revision}:{place.source.side}:{identifier}".encode()
+        ).hexdigest()[:24]
+        identifier = f"{ContextLevel.RAG.value}:{(place.source.revision or '')[:12]}:{digest}"
     return RetrievedBlock(
-        block_id=f"{ContextLevel.RAG.value}:{place.source.path}:{ranges}",
+        block_id=identifier,
         level=ContextLevel.RAG,
         source=place.source,
         # A signature never supports a claim about the body it does not show.

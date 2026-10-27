@@ -1,9 +1,9 @@
 {
   "provenance": {
     "repository": "https://github.com/larchanka-training/dmc-268-ui-t6",
-    "commit": "9bfb931d88fe66b15d77e636b32406374c76589a",
+    "commit": "34f81ce9dc5631e7e2061aa9958ec7dac13c5dcb",
     "generator": "z.toJSONSchema (Zod 4)",
-    "command": "DMC_268_UI_DIR=<ui checkout after pnpm install> node tests/generate_ui_zod_contracts.mjs"
+    "command": "DMC_268_UI_DIR=<ui checkout after pnpm install> SCHEMA_NAMES=runSession,runAction,reviewComment,runDetail,findingView,runListPage,runUpdatedEvent,repository,repositoryUpdate,rawFileDiff,fileSlice,authSession,me OUTPUT_PATH=tests/fixtures/ui_zod_contracts.json node tests/generate_ui_zod_contracts.mjs"
   },
   "schemas": {
     "runSession": {
@@ -14,6 +14,14 @@
           "type": "string",
           "format": "uuid",
           "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+        },
+        "provider": {
+          "type": "string",
+          "enum": [
+            "github",
+            "gitlab",
+            "bitbucket"
+          ]
         },
         "engine": {
           "type": "string",
@@ -92,6 +100,14 @@
         "pullRequest": {
           "type": "object",
           "properties": {
+            "provider": {
+              "type": "string",
+              "enum": [
+                "github",
+                "gitlab",
+                "bitbucket"
+              ]
+            },
             "repo": {
               "type": "string"
             },
@@ -130,6 +146,7 @@
             }
           },
           "required": [
+            "provider",
             "repo",
             "number",
             "title",
@@ -152,6 +169,7 @@
       },
       "required": [
         "id",
+        "provider",
         "engine",
         "model",
         "status",
@@ -344,6 +362,14 @@
           "format": "uuid",
           "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
         },
+        "provider": {
+          "type": "string",
+          "enum": [
+            "github",
+            "gitlab",
+            "bitbucket"
+          ]
+        },
         "engine": {
           "type": "string",
           "enum": [
@@ -421,6 +447,14 @@
         "pullRequest": {
           "type": "object",
           "properties": {
+            "provider": {
+              "type": "string",
+              "enum": [
+                "github",
+                "gitlab",
+                "bitbucket"
+              ]
+            },
             "repo": {
               "type": "string"
             },
@@ -459,6 +493,7 @@
             }
           },
           "required": [
+            "provider",
             "repo",
             "number",
             "title",
@@ -727,6 +762,7 @@
       },
       "required": [
         "id",
+        "provider",
         "engine",
         "model",
         "status",
@@ -877,6 +913,14 @@
                 "format": "uuid",
                 "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
               },
+              "provider": {
+                "type": "string",
+                "enum": [
+                  "github",
+                  "gitlab",
+                  "bitbucket"
+                ]
+              },
               "engine": {
                 "type": "string",
                 "enum": [
@@ -954,6 +998,14 @@
               "pullRequest": {
                 "type": "object",
                 "properties": {
+                  "provider": {
+                    "type": "string",
+                    "enum": [
+                      "github",
+                      "gitlab",
+                      "bitbucket"
+                    ]
+                  },
                   "repo": {
                     "type": "string"
                   },
@@ -992,6 +1044,7 @@
                   }
                 },
                 "required": [
+                  "provider",
                   "repo",
                   "number",
                   "title",
@@ -1014,6 +1067,7 @@
             },
             "required": [
               "id",
+              "provider",
               "engine",
               "model",
               "status",
@@ -1080,6 +1134,14 @@
           "type": "string",
           "format": "uuid",
           "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+        },
+        "provider": {
+          "type": "string",
+          "enum": [
+            "github",
+            "gitlab",
+            "bitbucket"
+          ]
         },
         "fullName": {
           "type": "string",
@@ -1207,6 +1269,7 @@
       },
       "required": [
         "id",
+        "provider",
         "fullName",
         "url",
         "defaultBranch",

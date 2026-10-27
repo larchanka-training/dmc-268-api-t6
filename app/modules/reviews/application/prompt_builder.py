@@ -26,6 +26,7 @@ from app.modules.reviews.application.policy_snapshot import (
     RecoveryKind,
     StageName,
 )
+from app.modules.reviews.application.rag_index import has_retrieved_section
 from app.modules.reviews.application.unified_diff import split_lf
 
 if TYPE_CHECKING:
@@ -271,6 +272,10 @@ class PromptBuilder:
         )
         if context.context_blocks:
             blocks.append(render_context_excerpts(context.context_blocks))
+        if context.policy_snapshot is not None:
+            bindings = context.policy_snapshot.prompt_bindings
+            if has_retrieved_section(bindings.review_system_key, bindings.review_system_version):
+                blocks.append(render_retrieved_excerpts(context.retrieved))
         blocks.append(
             _container("omitted_files", "\n".join(_text(path) for path in context.omitted_files))
         )
@@ -491,6 +496,32 @@ class PromptBuilder:
                 )
             )
 
+        if context.policy_snapshot is not None:
+            bindings = context.policy_snapshot.prompt_bindings
+            if has_retrieved_section(bindings.review_system_key, bindings.review_system_version):
+                for retrieved_block in context.retrieved:
+                    source = retrieved_block.source
+                    ranges = tuple((item.start_line, item.end_line) for item in source.ranges)
+                    blocks.append(
+                        ManifestBlock(
+                            block_id=retrieved_block.block_id,
+                            source_role=SourceRole.RETRIEVED_EXCERPT,
+                            source_kind="source_code",
+                            path=source.path,
+                            revision=source.revision,
+                            side=_manifest_side(source.side),
+                            start_line=min((start for start, _ in ranges), default=None),
+                            end_line=max((end for _, end in ranges), default=None),
+                            shown_line_count=sum(end - start + 1 for start, end in ranges),
+                            shown_ranges=ranges,
+                            tokens=tokens(_render_excerpt(retrieved_block)),
+                            repository_id=source.repository_id,
+                            selection_reason=source.reason,
+                            index_commit_sha=retrieved_block.index_commit_sha,
+                            edge_kind=retrieved_block.edge_kind.value,
+                        )
+                    )
+
         return CallManifest(
             call_id=call_id,
             run_id=run_id,
@@ -651,7 +682,14 @@ def render_context_excerpts(blocks: tuple[ContextBlock, ...]) -> str:
     return _container("context_excerpts", "\n".join(_render_excerpt(block) for block in blocks))
 
 
-def _render_excerpt(block: ContextBlock) -> str:
+def render_retrieved_excerpts(blocks: tuple[RetrievedBlock, ...]) -> str:
+    """The v5 graph context, including an empty section when retrieval is unused."""
+    return _container("retrieved_excerpts", "\n".join(_render_excerpt(block) for block in blocks))
+
+
+def _render_excerpt(block: ContextBlock | RetrievedBlock) -> str:
+    from app.modules.reviews.application.review_context import RetrievedBlock
+
     source = block.source
     attributes = [f'block_id="{_attribute(block.block_id)}"', f'level="{block.level.value}"']
     if source.path is not None:
@@ -661,6 +699,14 @@ def _render_excerpt(block: ContextBlock) -> str:
     if source.side is not None:
         attributes.append(f'side="{source.side.value}"')
     attributes.append(f'representation="{block.representation.value}"')
+    if isinstance(block, RetrievedBlock):
+        attributes.extend(
+            (
+                f'selection_reason="{_attribute(source.reason)}"',
+                f'edge_kind="{block.edge_kind.value}"',
+                f'index_commit_sha="{_attribute(block.index_commit_sha)}"',
+            )
+        )
     numbers = [
         number for item in source.ranges for number in range(item.start_line, item.end_line + 1)
     ]

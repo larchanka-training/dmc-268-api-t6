@@ -168,7 +168,7 @@ class PendingRunMessage:
 
 
 def _validate_provider(provider: str) -> None:
-    if type(provider) is not str or provider not in {"github", "gitlab"}:
+    if type(provider) is not str or provider not in {"github", "gitlab", "bitbucket"}:
         raise ValueError("Unsupported run provider")
 
 

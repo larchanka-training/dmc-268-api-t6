@@ -1,8 +1,7 @@
 """The composed context stage reads graph candidates and records their use (#144).
 
 `review_context_stage_factory` against PostgreSQL: the RAG gate, the repeatable-read graph
-read and the blob cache of the run, with a pinned review prompt that declares a retrieved
-section (production pins none until v5).
+read and the blob cache of the run, with the real seeded v5 retrieval prompt.
 """
 
 from __future__ import annotations
@@ -11,22 +10,26 @@ import asyncio
 import base64
 import os
 from collections.abc import Iterator
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from functools import partial
+from pathlib import Path
+from uuid import UUID
 
 import httpx
 import pytest
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
+from app.bootstrap.seed_prompts import load_prompt_assets, seed_prompt_versions
 from app.modules.code_index.application.index_store import ImportRecord, IndexedFile
 from app.modules.integrations.webhooks.infrastructure.github_installation_tree_provider import (
     GitHubAppInstallationAccessTokenProvider,
 )
-from app.modules.reviews.application import rag_index
 from app.modules.reviews.application.ast_resolution import ImportResolution
 from app.modules.reviews.application.get_run_diff import DiffSnapshot, StoreDiffSnapshot
 from app.modules.reviews.application.handle_review_run import AttemptCheckpoint
+from app.modules.reviews.application.prompt_builder import PromptBuilder
 from app.modules.reviews.application.run_trace import TransactionalRunTrace
 from app.modules.reviews.infrastructure.github_vcs import HttpGitHubVcsProvider
 from app.modules.reviews.infrastructure.run_lifecycle_store import (
@@ -38,6 +41,7 @@ from app.modules.reviews.infrastructure.run_processing_unit_of_work import (
 )
 from app.modules.reviews.infrastructure.run_repository import SqlAlchemyRunRepository
 from app.worker import review_context_stage_factory
+from tests.policy_snapshot_fakes import make_complete_execution_profile
 from tests.portal_postgres import (
     HEAD,
     INSTALL_A,
@@ -49,6 +53,7 @@ from tests.portal_postgres import (
 )
 from tests.test_code_index_store_postgres import C1, _build, _enable, _imports, _Index, _uses
 from tests.test_github_vcs_provider import _pull_payload
+from tests.test_prompt_builder import _metadata_context
 from tests.test_retired_installation_postgres import DiscardTokenCache
 from tests.test_review_context import _GREET_PATCH, _MODELS, _SERVICE
 from tests.test_run_origin_guard_postgres import prepare
@@ -62,8 +67,6 @@ _MODELS_SHA = "5" * 40
 _USER_SHA = "6" * 40
 # `pkg/app.py` calls the `greet` the PR changes; the default-branch graph knows it.
 _USER = "from .service import greet\n\n\ndef welcome(user_id):\n    return greet(user_id)\n"
-# The review prompt the portal seed pins: version 1.
-_PINNED = ("review.system", "v1")
 
 
 @pytest.fixture
@@ -91,10 +94,8 @@ def _user_file() -> IndexedFile:
 
 @pytest.mark.integration
 def test_the_composed_stage_reads_graph_candidates_and_records_their_use(
-    rag_env: Env, monkeypatch: pytest.MonkeyPatch
+    rag_env: Env,
 ) -> None:
-    monkeypatch.setattr(rag_index, "RETRIEVED_PROMPT_VERSIONS", frozenset({_PINNED}))
-
     async def exercise() -> None:
         engine = rag_env.engine()
         factory = async_sessionmaker(engine, expire_on_commit=False)
@@ -166,6 +167,47 @@ def test_the_composed_stage_reads_graph_candidates_and_records_their_use(
 
         try:
             await prepare(factory, "active", "running")
+            supplemental_assets = tuple(
+                asset
+                for asset in load_prompt_assets(
+                    Path(__file__).resolve().parents[1] / "review/prompts"
+                )
+                if asset.key != "review.system" or asset.version == 5
+            )
+            async with factory.begin() as session:
+                assert await seed_prompt_versions(session, supplemental_assets) == len(
+                    supplemental_assets
+                )
+                v5_id = await session.scalar(
+                    text("SELECT id FROM prompt_versions WHERE key='review.system' AND version=5")
+                )
+                assert v5_id is not None
+                conventions_id = await session.scalar(
+                    text(
+                        "SELECT id FROM prompt_versions "
+                        "WHERE key='review.conventions' AND is_active=true"
+                    )
+                )
+                verifier_id = await session.scalar(
+                    text(
+                        "SELECT id FROM prompt_versions "
+                        "WHERE key='review.verifier' AND is_active=true"
+                    )
+                )
+                assert conventions_id is not None and verifier_id is not None
+                await session.execute(
+                    text(
+                        "UPDATE runs SET prompt_version_id=:prompt, "
+                        "conventions_prompt_version_id=:conventions, "
+                        "verifier_prompt_version_id=:verifier WHERE id=:id"
+                    ),
+                    {
+                        "prompt": v5_id,
+                        "conventions": conventions_id,
+                        "verifier": verifier_id,
+                        "id": RUN_ATTEMPTED,
+                    },
+                )
             async with factory.begin() as session:
                 await session.execute(
                     text("UPDATE provider_installations SET account_external_id=700 WHERE id=:id"),
@@ -220,6 +262,7 @@ def test_the_composed_stage_reads_graph_candidates_and_records_their_use(
                     runs=runs,
                     session_factory=factory,
                     redis=None,
+                    execution_profile=make_complete_execution_profile(),
                 )
                 trace = TransactionalRunTrace(partial(SqlAlchemyRunTraceUnitOfWork, factory))
                 stage = build_stage(trace, checkpoint)
@@ -228,6 +271,20 @@ def test_the_composed_stage_reads_graph_candidates_and_records_their_use(
 
             assert payload is not None
             (block,) = payload.retrieved
+            snapshot = stage.snapshot_for_llm
+            assert snapshot is not None
+            presented = replace(
+                _metadata_context(), policy_snapshot=snapshot, retrieved=payload.retrieved
+            )
+            user_prompt = PromptBuilder().render_input(presented)
+            assert "<retrieved_excerpts>" in user_prompt
+            assert block.text.splitlines()[0] in user_prompt
+            manifest = PromptBuilder().build_manifest(
+                presented, call_id=UUID(int=15), stage="review"
+            )
+            shown = manifest.get_block(block.block_id)
+            assert shown is not None and shown.source_role == "retrieved_excerpt"
+            assert shown.repository_id == REPO_A and shown.revision == HEAD
             # Read at the PR head, from the PR tree; the index commit is metadata only.
             assert (block.source.path, block.source.revision, block.source.blob_sha) == (
                 "pkg/app.py",

@@ -10,9 +10,9 @@ from uuid import UUID
 from app.common.application.unit_of_work import UnitOfWork
 from app.modules.code_index.domain.rag_index import RagIndex
 
-# The pinned review prompts, as `(key, version)`, that have a retrieved section (M6). Empty
-# until v5: a usable index is then recorded as `not_ready` / `prompt_version`.
-RETRIEVED_PROMPT_VERSIONS: frozenset[tuple[str, str]] = frozenset()
+# Only the immutable v5 prompt declares the retrieved section. Earlier runs retain
+# their original input envelope and record `not_ready` / `prompt_version` instead.
+RETRIEVED_PROMPT_VERSIONS: frozenset[tuple[str, str]] = frozenset({("review.system", "v5")})
 
 
 def has_retrieved_section(review_system_key: str, review_system_version: str) -> bool:

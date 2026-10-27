@@ -982,6 +982,9 @@ jobs:
           GITHUB_CLIENT_SECRET: ${{ secrets.GH_CLIENT_SECRET }}
           AUTH_JWT_PRIVATE_KEY: ${{ secrets.AUTH_JWT_PRIVATE_KEY }}
           AUTH_JWT_PUBLIC_KEY: ${{ secrets.AUTH_JWT_PUBLIC_KEY }}
+          BITBUCKET_CREDENTIAL_KEYS: ${{ secrets.BITBUCKET_CREDENTIAL_KEYS }}
+          BITBUCKET_ACTIVE_KEY_ID: ${{ vars.BITBUCKET_ACTIVE_KEY_ID }}
+          BITBUCKET_WEBHOOK_BASE_URL: ${{ vars.BITBUCKET_WEBHOOK_BASE_URL }}
           # Variable of the Environment: the prefix GITHUB_ is rejected for variables too.
           GITHUB_APP_BOT_LOGIN: ${{ vars.GH_APP_BOT_LOGIN }}
           # Public UI origin for links to individual Runs in review-worker check-run summaries.
@@ -998,7 +1001,7 @@ jobs:
         run: |
           # One opaque line of base64 so multi-line PEM values survive the SSH action and the shell;
           # deploy/scripts/env-file.sh decodes it on the host. Unset secrets are left out entirely.
-          names=(GITHUB_APP_ID GITHUB_APP_PRIVATE_KEY GITHUB_WEBHOOK_SECRET GITHUB_CLIENT_ID GITHUB_CLIENT_SECRET AUTH_JWT_PRIVATE_KEY AUTH_JWT_PUBLIC_KEY GITHUB_APP_BOT_LOGIN PORTAL_URL LLM_API_KEYS LLM_BASE_URL LLM_MODEL LLM_FALLBACK_MODEL LLM_VERIFIER_MODEL LLM_VERIFIER_FALLBACK_MODEL)
+          names=(GITHUB_APP_ID GITHUB_APP_PRIVATE_KEY GITHUB_WEBHOOK_SECRET GITHUB_CLIENT_ID GITHUB_CLIENT_SECRET AUTH_JWT_PRIVATE_KEY AUTH_JWT_PUBLIC_KEY BITBUCKET_CREDENTIAL_KEYS BITBUCKET_ACTIVE_KEY_ID BITBUCKET_WEBHOOK_BASE_URL GITHUB_APP_BOT_LOGIN PORTAL_URL LLM_API_KEYS LLM_BASE_URL LLM_MODEL LLM_FALLBACK_MODEL LLM_VERIFIER_MODEL LLM_VERIFIER_FALLBACK_MODEL)
           bundle="$(
             for name in "${names[@]}"; do
               if [[ -n "${!name}" ]]; then

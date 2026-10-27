@@ -29,13 +29,15 @@ _FILE_COUNT_MISMATCH = "file_count_mismatch"
 class VcsProviderName(StrEnum):
     GITHUB = "github"
     GITLAB = "gitlab"
+    BITBUCKET = "bitbucket"
 
 
 def vcs_provider_name(provider: str) -> VcsProviderName:
     """Map durable installation provider strings onto DiffMap provider facts."""
-    if provider == VcsProviderName.GITLAB.value:
-        return VcsProviderName.GITLAB
-    return VcsProviderName.GITHUB
+    try:
+        return VcsProviderName(provider)
+    except ValueError:
+        raise ValueError("unsupported VCS provider") from None
 
 
 class DiffSide(StrEnum):

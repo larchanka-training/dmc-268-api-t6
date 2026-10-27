@@ -31,6 +31,7 @@ class RepositorySettings:
     # is derived from this effective value (#145).
     rag_enabled: bool
     rag_index: RagIndex
+    provider: str = "github"
 
 
 @dataclass(frozen=True)

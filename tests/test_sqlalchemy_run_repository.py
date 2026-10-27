@@ -443,6 +443,7 @@ def test_sqlalchemy_run_repository_reads_the_installation_scoped_vcs_locator() -
                 "github",
                 UUID(int=17),
                 101,
+                None,
             )
         ]
     )

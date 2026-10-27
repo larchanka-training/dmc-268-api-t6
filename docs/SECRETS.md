@@ -529,3 +529,17 @@ Workflow по умолчанию: `contents: read`. Расширение точ�
 | Rollback staging: `promote-staging` | `contents: read`, `packages: write` | синхронизировать `:staging` с откатанным образом |
 
 `security-events`, `id-token`, `pull-requests` не выдаются; `actions: read` есть только у `push-image`. `packages: write` — только у jobs `promote-staging`, на VM этот токен не уходит. `HCLOUD_TOKEN` в Actions нет — apply вне CI.
+
+## Bitbucket Cloud (#333)
+
+Токен Bitbucket принадлежит конкретному portal workspace connection и хранится в БД в зашифрованном виде. Процессам передают только keyring, не Atlassian API token. Первый ручной flow требует `read:repository:bitbucket` и `read:pullrequest:bitbucket`; эти read-scopes покрывают используемые REST comment/status endpoints по официальным справочникам. Права на управление webhook через API не нужны: пользователь вручную настраивает repository webhook в Bitbucket.
+
+| Переменная | Получатели staging | Контракт |
+| --- | --- | --- |
+| `BITBUCKET_CREDENTIAL_KEYS` | API, review worker, webhook worker (`bitbucket.env`) | Защищённый JSON key-ID → canonical base64 32-байтного ключа шифрования. Хранить как Environment secret, не в Git. |
+| `BITBUCKET_ACTIVE_KEY_ID` | те же процессы (`bitbucket.env`) | ID ключа для новых ciphertext; ключ должен присутствовать в keyring. Хранить как Environment variable. |
+| `BITBUCKET_WEBHOOK_BASE_URL` | только API (`api.env`) | Публичный HTTPS origin без path/query; для курсового staging `https://staging-api.<APP_DOMAIN>`, не зарезервированный `staging-webhook` host. Хранить как Environment variable. |
+
+CI собирает эти значения в защищённый bundle и `deploy/scripts/env-file.sh` записывает role-specific файлы с правами 0600. `bitbucket.env` подключён только к API и двум workers; `app.env` с GitHub App private key остаётся только у workers. Пустые значения не передаются в контейнер. Rollback сохраняет или восстанавливает env-файлы вместе с release state; перед публикацией проверить доступность прежних key IDs для уже зашифрованных connections. При ротации keyring сначала добавить новый ключ и переключить active ID, сохранив старые ключи для чтения; удалять старый ключ только после пере-шифрования всех сохранённых данных. Не выводить содержимое файлов, токены или одноразовые webhook secrets в лог/issue/PR.
+
+Связанные контракты: [browser OpenAPI](../contracts/openapi.yaml), [приём webhook](BITBUCKET_WEBHOOK.md), [план #333](plans/333-plan.md). Реальная публикация comments/status и формат native suggestion ещё требуют disposable PR проверки; до неё `suggestion` публикуется как текст для ручного применения.

@@ -71,6 +71,7 @@ class RerunFacts:
     current_repository_id: UUID | None
     pull_request_open: bool
     active_run: bool
+    origin_active: bool = True
 
 
 class RerunStore(Protocol):
@@ -91,6 +92,8 @@ def _rerun_outcome(facts: RerunFacts) -> RerunOutcome:
     if not facts.pull_request_open or facts.active_run:
         return RerunOutcome.CONFLICT
     origin, current = facts.origin, facts.current_origin
+    if origin.provider == "bitbucket" and not facts.origin_active:
+        return RerunOutcome.ORIGIN_CHANGED
     if (
         origin.installation_id is None
         or current is None

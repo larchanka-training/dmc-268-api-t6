@@ -88,7 +88,9 @@ def test_v2_run_and_persisted_snapshot_retain_their_prompt_after_v3_activation(
         if not (asset.key == "review.system" and asset.version > 3)
     )
     legacy_assets = tuple(
-        asset for asset in assets if (asset.key, asset.version) != ("review.system", 3)
+        asset
+        for asset in assets
+        if (asset.key, asset.version) not in {("review.system", 3), ("review.system", 5)}
     )
     v2_content = (REPO_ROOT / "tests/fixtures/prompt_builder/sample.system.txt").read_text()
 
@@ -161,7 +163,7 @@ def test_v2_run_and_persisted_snapshot_retain_their_prompt_after_v3_activation(
                 )
                 await work.commit()
             async with factory.begin() as session:
-                assert await seed_prompt_versions(session, assets) == 1
+                assert await seed_prompt_versions(session, assets) == 2
             async with factory.begin() as session:
                 assert await seed_prompt_versions(session, assets) == 0
             async with factory() as session:

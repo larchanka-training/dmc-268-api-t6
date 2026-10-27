@@ -62,6 +62,9 @@ from app.modules.code_index.infrastructure.amqp import (
     handle_index_delivery,
     lease_waits,
 )
+from app.modules.code_index.infrastructure.bitbucket_snapshot_source import (
+    BitbucketRepositorySnapshotSource,
+)
 from app.modules.code_index.infrastructure.github_snapshot_source import (
     GitHubRepositorySnapshotSource,
 )
@@ -73,6 +76,13 @@ from app.modules.code_index.infrastructure.repository_reader import (
     SqlAlchemyIndexRepositoryReader,
 )
 from app.modules.code_index.infrastructure.tar_archive import TarArchiveReader
+from app.modules.integrations.bitbucket.infrastructure.credential_cipher import (
+    BitbucketCredentialCipher,
+)
+from app.modules.integrations.bitbucket.infrastructure.request_credentials import (
+    BitbucketRequestCredentials,
+    SqlAlchemyBitbucketTargetReader,
+)
 from app.modules.integrations.webhooks.infrastructure.github_installation_tree_provider import (
     GitHubAppInstallationAccessTokenProvider,
     InMemoryInstallationAccessTokenCache,
@@ -254,14 +264,17 @@ def snapshot_sources(
     private_key: str,
     now: Callable[[], float] = time.time,
     cache: InstallationAccessTokenCache | None = None,
+    bitbucket_source_factory: Callable[[IndexedRepository], RepositorySnapshotSource] | None = None,
 ) -> Callable[[IndexedRepository], RepositorySnapshotSource]:
-    """The VCS port of one job; GitHub only (GitLab is #97).
+    """The VCS port of one job; GitHub and UUID-bound Bitbucket Cloud.
 
     With `cache`, every source shares it: one head reconcile run. Without it, each
     source gets a cache of its own.
     """
 
     def source(repository: IndexedRepository) -> RepositorySnapshotSource:
+        if repository.provider == "bitbucket" and bitbucket_source_factory is not None:
+            return bitbucket_source_factory(repository)
         if repository.provider != "github":
             raise ValueError(f"the indexer has no snapshot source for {repository.provider}")
         # The raw provider: its failures map to the port's errors in the source. A cache
@@ -415,13 +428,14 @@ async def index_consumer(
     delays: RetryDelays,
     transport: httpx.AsyncBaseTransport | None = None,
 ) -> AsyncIterator[IndexConsumer | None]:
-    """Declare the topology and compose the consumer; `None` without the GitHub App.
+    """Declare the topology and compose the consumer for configured providers.
 
     `transport` replaces the network in tests of this composition.
     """
     channel = await connection.channel(publisher_confirms=True, on_return_raises=True)
     await declare_topology(channel, delays)
-    if not (settings.github_app_id and settings.github_private_key):
+    bitbucket_cipher: BitbucketCredentialCipher | None = getattr(settings, "bitbucket_cipher", None)
+    if not (settings.github_app_id and settings.github_private_key) and bitbucket_cipher is None:
         _LOGGER.warning(
             "GITHUB_APP_ID or GITHUB_APP_PRIVATE_KEY is not set: the index.repo consumer is "
             "disabled"
@@ -429,10 +443,23 @@ async def index_consumer(
         yield None
         return
     code_index = settings.code_index
-    app_id, private_key = settings.github_app_id, settings.github_private_key
+    app_id, private_key = settings.github_app_id or "", settings.github_private_key or ""
     async with httpx.AsyncClient(
         base_url=settings.github_api_url, timeout=10.0, transport=transport
     ) as client:
+        bitbucket_factory: Callable[[IndexedRepository], RepositorySnapshotSource] | None = None
+        if bitbucket_cipher is not None:
+            reader = SqlAlchemyBitbucketTargetReader(session_factory)
+            credentials = BitbucketRequestCredentials(reader, bitbucket_cipher)
+
+            def bitbucket_factory(repository: IndexedRepository) -> RepositorySnapshotSource:
+                return BitbucketRepositorySnapshotSource(
+                    client=client,
+                    target_for_repository=partial(
+                        reader.resolve_repository_target, repository.repository_id
+                    ),
+                    credentials=credentials,
+                )
 
         def reconcile_sources() -> Callable[[IndexedRepository], RepositorySnapshotSource]:
             # One token cache per head reconcile run.
@@ -441,6 +468,7 @@ async def index_consumer(
                 app_id=app_id,
                 private_key=private_key,
                 cache=InMemoryInstallationAccessTokenCache(now=time.time),
+                bitbucket_source_factory=bitbucket_factory,
             )
 
         parser = SubprocessSourceParser(attempt_cpu_seconds=None)
@@ -449,7 +477,12 @@ async def index_consumer(
             build = BuildRepositoryIndex(
                 uow=partial(SqlAlchemyCodeIndexUnitOfWork, session_factory),
                 repositories=SqlAlchemyIndexRepositoryReader(session_factory),
-                sources=snapshot_sources(client, app_id=app_id, private_key=private_key),
+                sources=snapshot_sources(
+                    client,
+                    app_id=app_id,
+                    private_key=private_key,
+                    bitbucket_source_factory=bitbucket_factory,
+                ),
                 archives=TarArchiveReader(code_index.limits),
                 parser=parser,
                 wakeups=wakeups,
