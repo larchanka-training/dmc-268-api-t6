@@ -52,6 +52,7 @@ from app.modules.reviews.application.prompt_builder import (
 )
 from app.modules.reviews.application.review_output import ReviewOutput, parse_review_output
 from app.modules.reviews.application.run_failures import RunCancelled
+from app.modules.reviews.infrastructure.llm.answers import conventions_schema
 from app.modules.reviews.infrastructure.llm.ecb_fx import EcbFxQuoteCache, FxQuote, FxQuoteResult
 from app.modules.reviews.infrastructure.llm.gateway import (
     GatewayResult,
@@ -2971,6 +2972,8 @@ def test_conventions_usage_counts_toward_the_run_cost_limit_of_the_review() -> N
     assert len(harness.requests) == 1
     body = harness.bodies()[0]
     assert body["response_format"]["json_schema"]["name"] == "RepoConventionsDraft"
+    # The builder the provider-schema guard scans (test_gateway_answer_validation.py).
+    assert body["response_format"]["json_schema"]["schema"] == conventions_schema()
     user = body["messages"][1]["content"]
     assert "<repo_tree>\napp/service.py\ntests/test_service.py\n</repo_tree>" in user
     assert '<file path="app/service.py">\n<line n="1">import x</line>' in user
