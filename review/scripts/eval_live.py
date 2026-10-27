@@ -100,6 +100,7 @@ from app.modules.reviews.application.review_ignore import (  # noqa: E402
 from app.modules.reviews.application.review_path import (  # noqa: E402
     SNAPSHOT_REVIEW_PROMPT_VERSIONS,
 )
+from app.modules.reviews.application.run_failures import RunFailure  # noqa: E402
 from app.modules.reviews.infrastructure.llm.answers import (  # noqa: E402
     review_answer_contract,
 )
@@ -685,6 +686,14 @@ async def _record_case(
         calls = failure.trace
         usage = failure.usage
         gateway_status = failure.error_code.value
+    except RunFailure as failure:
+        # A run failure of this case (a PolicyError of a snapshot guard, a context overflow)
+        # is recorded like a gateway failure. review_case carries no trace for it: the
+        # budget guard raises before any send, a repair or fallback guard would lose the
+        # calls before it.
+        calls = ()
+        usage = ()
+        gateway_status = failure.error_code
     first = calls[0] if calls else None
     content = _first_text(first)
     provider_label, provider_digest = _first_serving_provider(first)

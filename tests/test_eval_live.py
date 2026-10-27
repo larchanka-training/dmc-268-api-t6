@@ -17,9 +17,12 @@ from typing import Any
 import httpx
 import pytest
 
+import app.modules.reviews.infrastructure.llm.models as llm_models_module
 import review.scripts.eval_live as eval_live_module
 from app.modules.reviews.application.check_runs import RunProviderCheckpoint
+from app.modules.reviews.application.policy_errors import PolicyError, PolicyErrorCode
 from app.modules.reviews.application.policy_snapshot import PINNED_PROMPT_CHECKSUMS
+from app.modules.reviews.application.run_failures import RunFailure
 from app.modules.reviews.infrastructure.llm.settings import (
     GatewayPolicy,
     LlmSettings,
@@ -2696,3 +2699,69 @@ def test_legacy_arm_refuses_a_snapshot_path_prompt_before_any_call(tmp_path: Pat
     )
     assert transport.requests == []
     assert not (root / "responses").exists()
+
+
+@pytest.mark.parametrize(
+    ("failure", "code"),
+    [
+        (
+            PolicyError(PolicyErrorCode.PROMPT_BUDGET_EXCEEDED, "rules exceed the policy budget"),
+            "policy_prompt_budget_exceeded",
+        ),
+        (
+            RunFailure("llm_context_overflow", "rendered prompt is too large"),
+            "llm_context_overflow",
+        ),
+    ],
+    ids=["policy-error", "run-failure"],
+)
+def test_a_per_case_policy_failure_is_recorded_and_the_run_goes_on(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    failure: RunFailure,
+    code: str,
+) -> None:
+    original_guard = llm_models_module._guard_snapshot_budget
+    guarded: list[str] = []
+
+    def guard_first_case(context: Any, counter: Any, max_tokens: int) -> None:
+        guarded.append(context.changed_files[0].path)
+        if len(guarded) == 1:
+            raise failure
+        original_guard(context, counter, max_tokens)
+
+    monkeypatch.setattr(llm_models_module, "_guard_snapshot_budget", guard_first_case)
+    root = fixture_root(tmp_path, ("CLEAN-01", "SEC-01"))
+    transport = FakeTransport([answer("primary-model", VALID)])
+
+    exit_code = main(
+        ["--root", str(root), "--policy-arm", "none"],
+        transport=transport,
+        model_settings=settings(),
+    )
+
+    assert exit_code == 1
+    assert len(guarded) == 2
+    assert len(transport.requests) == 1
+    manifest = json.loads((root / "responses/manifest.json").read_text(encoding="utf-8"))
+    cases = manifest["run_metadata"]["cases"]
+    assert response(root, "CLEAN-01") == b""
+    assert cases["CLEAN-01"] == {
+        "first_call": "no_call",
+        "first_model": None,
+        "first_kind": None,
+        "first_provider_label": None,
+        "first_provider_digest": None,
+        "gateway_status": code,
+        "paid_metadata_error": False,
+    }
+    assert manifest["run_metadata"]["usage"]["CLEAN-01"] == []
+    assert response(root, "SEC-01") == VALID.encode()
+    assert cases["SEC-01"]["gateway_status"] == "accepted"
+    assert manifest["run_metadata"]["nonpublishable_case_ids"] == ["CLEAN-01"]
+    captured = capsys.readouterr()
+    assert captured.err == (
+        "eval live: not publishable; provider or infrastructure failures occurred in CLEAN-01\n"
+    )
+    assert "Cases: 2" in captured.out
