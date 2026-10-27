@@ -155,6 +155,7 @@ The manifest also stores sorted `static_inputs`, `static_digest`, and `corpus_di
 | `app/modules/reviews/application/prompt_budget.py` | Chooses whole, truncated, and omitted diff files. |
 | `app/modules/reviews/application/prompt_builder.py` | Renders the system/user message envelope, including commit lines. |
 | `app/modules/reviews/application/review_output.py` | Parses and validates review output; a failure triggers repair. |
+| `app/modules/reviews/application/review_path.py` | `SNAPSHOT_REVIEW_PROMPT_VERSIONS` decides which bound review prompt versions get the ReviewOutput v2 schema. |
 | `app/modules/reviews/application/run_failures.py` | Deliberately wide. Only `FAST_ATTEMPT_DEADLINE` (`run_failures.py:17`) shapes the eval, through `CASE_DEADLINE["fast"]` (`llm_gateway.py:147`): the gateway refuses a call with less than one call timeout left (`gateway.py:334-341`) and skips a same-model retry that would leave less (`gateway.py:278-281`). `llm.py:17` also imports `RETRYABLE_ERROR_CODES` for `LlmCallFailed.run_retryable`, which the eval never calls. The rest is worker retry, lease and failure-code policy: its edits do not shape the eval but still cause static drift. |
 | `app/common/infrastructure/github_link_header.py` | `has_next_relation` decides a sidecar page's tail, hence the omission marker. |
 | `app/modules/reviews/infrastructure/llm/answers.py` | Builds the provider schema, validates answers and prepares repair feedback. |
@@ -165,6 +166,7 @@ The manifest also stores sorted `static_inputs`, `static_digest`, and `corpus_di
 | `app/modules/reviews/infrastructure/llm/transport.py` | Encodes provider requests and extracts response text. |
 | `review/eval/pr-commit-messages.json` | Supplies verified bounded PR prefixes and tail evidence. |
 | `review/schemas/review-output.schema.json` | Defines strict response format and validation. |
+| `review/schemas/review-output.schema.v2.json` | Defines the response format and validation of a snapshot-path prompt (v4). |
 | `review/scripts/eval_live.py` | Assembles each case request and selects first-call raw content. |
 | `review/scripts/commit_context.py` | Validates prefix schema and binds cohort/active identities. |
 | `test-prs-dataset/cases/*/case.json` (each canonical file) | Supplies the complete cohort identity used by sidecar binding, including subset captures. |
@@ -1015,7 +1017,9 @@ capture that records its arm.
 
 Run the live A/B in the manual workflow with `corpus=rules` and
 `policy_arm=none|valid|malicious` (the validate step refuses `rules` with `legacy`), three
-runs per arm. Dispatch one run at a time: the workflow's concurrency group
+runs per arm. `review_prompt` selects the prompt (`v3` by default, or `v4`): every arm but
+`legacy` binds that prompt's version and pin, and `legacy` refuses v4 before any call.
+Dispatch one run at a time: the workflow's concurrency group
 `eval-live-eurouter` keeps one run pending, and a newer pending run cancels the older
 pending one. Artifacts are named `eval-live-<corpus>-<arm>-<run-id>-<attempt>` (raw:
 `eval-live-raw-<corpus>-<arm>-<run-id>-<attempt>`). Aggregate the downloaded reports:
@@ -1036,9 +1040,9 @@ settings or fallback model, a capture that is not publishable, a report without 
 fields or with non-integer counts or malformed usage, and the same report content given
 twice; it warns when only some runs of an arm carry usage, and notes under the table that
 in arm `none` the rule and exception figures are found and flagged without rules (there
-"Exceptions respected" does not apply). Live runs wait for the v4 `review.system` prompt (#130): v3 tells the model
-that only `<custom_instructions>` instruct it, so today the effect is about zero by
-construction.
+"Exceptions respected" does not apply). A live A/B needs a snapshot-path prompt and an arm
+other than `legacy`: v3 tells the model that only `<custom_instructions>` instruct it, so on
+v3 the effect is about zero by construction. The AC8 runs wait for v5 (#144 part 3b).
 
 ### Service defaults in the policy arms
 
