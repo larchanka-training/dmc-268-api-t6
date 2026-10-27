@@ -1370,7 +1370,8 @@ severity threshold; она не возвращает raw model summary и не �
 одну достоверную durable identity; восстановление — application-решение над
 реальными сохранёнными входами, без фиктивных provider locator/meta.
 Выбирается новейшая context.build с явной coverage classification; последующие
-prompt-only записи её не заслоняют, невалидная новая classification не
+prompt-only записи (их писали только попытки до #168 ч.6) её не заслоняют, невалидная
+новая classification не
 возвращает старый clean. Referenced response body принадлежит тому же run.
 
 Итог учитывает точный контекст после ignore и единственного fit_review_context

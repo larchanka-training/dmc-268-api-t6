@@ -72,7 +72,11 @@ from app.modules.reviews.application.run_failures import (
     RunFailure,
     RunSkipped,
 )
-from app.modules.reviews.application.run_trace import RunTrace, traced_step
+from app.modules.reviews.application.run_trace import (
+    ContextPayloadStore,
+    RunTrace,
+    traced_step,
+)
 from app.modules.reviews.application.vcs_diff import (
     MergeBaseProvider,
     MergeBaseUnavailable,
@@ -344,6 +348,7 @@ class ReviewContextStage:
         token_budget: int = FAST_CONTEXT_TOKEN_BUDGET,
         builtin_excluded: Callable[[str], bool] = lambda path: False,
         rag: OpenReviewIndex | None = None,
+        payloads: ContextPayloadStore | None = None,
     ) -> None:
         self._runs = runs
         self._checkpoint = checkpoint
@@ -358,6 +363,8 @@ class ReviewContextStage:
         self._builtin_excluded = builtin_excluded
         # None: no index access and no ``context.rag`` step (eval, replay).
         self._rag = rag
+        # The run's ``context_payloads`` row; None: the build is only traced (tests, eval).
+        self._payloads = payloads
         self._denied_paths: frozenset[str] = frozenset()
         self._snapshot: PolicySnapshot | None = None
         # The snapshot the review is given; None on the legacy path.
@@ -624,6 +631,11 @@ class ReviewContextStage:
         await self._record_rag(run_id, rag, payload.rag)
         if payload.status is ContextStatus.ALL_CHANGES_IGNORED:
             raise RunSkipped("all_changes_ignored")
+        if self._payloads is not None:
+            # The attempt's one context.build is also its context_payloads row (#168 part 6).
+            # Outside the optional build: a failed write, or a retired origin, ends the attempt
+            # before the conventions call.
+            await self._payloads.save_context_payload(run_id, step.response)
         self._payload = payload
         return payload
 

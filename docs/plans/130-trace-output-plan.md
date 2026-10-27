@@ -75,6 +75,10 @@ decision 6239860585 ("keep the prompt-read row"), as the G plan records in its �
   - Every attempt that built a payload gets the row, including summary-only.
   - A skip gets no row (`_record_nothing_to_review` and the build's `all_changes_ignored`), as today.
   - A caught build failure gets no row (Q2).
+- **Schema version (Q2(a), refined in T1).** The upsert sets `schema_version=2` in its update
+  clause too (`run_lifecycle_store.py:762-766`): `set_` held only `summary`, so a retry over a
+  schema-1 row would keep 1 with the new shape. Pinned by the `existing` case of the re-targeted
+  `test_run_context_origin_postgres.py` test.
 - **Fence.** `save_context_payload` locks the run origin and raises `RunCancelled`
   (`run_lifecycle_store.py:749-759`). That now happens before conventions.
   - Between conventions and the review call, the production fence is `AttemptCheckpoint`
@@ -100,7 +104,9 @@ decision 6239860585 ("keep the prompt-read row"), as the G plan records in its �
   - `TracedReviewPromptRepository` and `FAST_TOKEN_LIMIT` (`run_trace.py:132-179`);
   - their imports `GeneratedConventions`, `ReviewPromptInput`, `ReviewPromptRepository`
     (`run_trace.py:14-18`);
-  - the import at `worker.py:144` and the wrap at `:294-295`.
+  - the import at `worker.py:144` and the wrap at `:294-295`;
+  - found in T1: `process_review_run`'s `engine` parameter, which only fed the wrap, with its two
+    callers (`worker.py:899`, `test_snapshot_path_live_pin.py:366`).
 - **Compositions without a stage.**
   - The only ones with a trace are in tests: `test_worker_queue_postgres.py`, `test_worker.py` and
     `test_queue_messages.py`. In production, `github_adapters` (`worker.py:738-748`) and the GitLab
@@ -173,6 +179,15 @@ decision 6239860585 ("keep the prompt-read row"), as the G plan records in its �
 
 ## Tests that flip (grep list; the authoritative list is the step-0 red set)
 
+Step-0 red set (2026-10-27, `f40cabf3` with the wrap deleted, full suite, PG and RabbitMQ on
+`imp130f3`, `GITHUB_ACTIONS=true` so the GitLab broker-guarded files run): the three
+`test_snapshot_path_e2e_postgres.py` tests, the two live-pin tests and
+`test_full_path_queued_running_publishing_succeeded_is_readable_over_rest`; plus the three
+local-only `test_gitlab_admin_postgres.py` CLI failures (the `operator.py` shadow, red at the base
+too). No test was skipped. `test_run_context_origin_postgres.py` builds the class itself, and the
+policy-context and GitLab worker rows are new pins, so none of them is in the set. The table needs
+no addition.
+
 | Test | What it pins today | After F3 |
 |---|---|---|
 | `test_snapshot_path_e2e_postgres.py:471-500` (`_SNAPSHOT_PATH_STEPS`, `_LEGACY_STEPS`, the comment `:471-474`) | two builds on both paths | one build; add: the payload row equals the stage response |
@@ -189,13 +204,17 @@ decision 6239860585 ("keep the prompt-read row"), as the G plan records in its �
   - `:172`: drop «переходная»; `context_payloads` is written from this response (none on a skip or a
     caught failure); `omissions[].diagnostic_path` is escaped and bounded (CVS §9.1);
   - `:126`: one `context.build`;
-  - `:130`: "omitted_files входа промпта" becomes the stage's `omissions`.
+  - `:130`: "omitted_files входа промпта" is replaced. Corrected in T1: the stage's record does not
+    list the allowed files either (`blocks: []`, their lines in `reviewable_lines`); its `omissions`
+    holds only the unusable files and the ignored count (`review_context.py:455-477`).
+  - `:110` (fix round 1): drop «переходная»; the «#168 ч.6» clause says the record is the attempt's
+    only `context.build`, before conventions; «Результат пока не передаётся модели» stays for G2;
+  - the canon `:135` (fix round 1): one `context.build` before conventions, in the order of `:126`.
 - `MONITORING.md:61`, `overview.json:560`, `:618`: once per attempt since F3; attempts before F3 show two.
 
 **G2 (G plan P2, P5, P6), stays there:**
-- `:110` (the row text, «переходная», the «#168 ч.6» clause);
+- the rest of `:110` («Результат пока не передаётся модели (остаток #130)»);
 - the snapshot-path order bullets `:125-131`, rebased on F3's `:126` and `:130`;
-- the canon `:135` (TL-9: G aligns the canon);
 - optionally `:111` "а не после `context.build` входа промпта", which becomes moot;
 - the RFS §5.3 note on the legacy counter (Q3 accepted).
 
@@ -224,6 +243,8 @@ Recorded per the coordinator's brief; one line per decision.
 
 - **Q1** accepted: the prompt read's `context.build` is removed (once per attempt, the stage's record survives, TL-9) and the API content change is accepted (one fewer action, shifted indices, no schema change); a backward-compatible ui change goes first (ui issue and PR by the coordinator: "context done" is a non-failed `llm.repo_conventions`, the old rule kept for logs without `policy.load`); F3 merges only after that ui change is seen live on staging-ui, and the ui change reaches prod before the tech lead's prod deploy of F3; F3 is written now, the merge gate is the coordinator's.
 - **Q2** accepted, both parts: (a) `context_payloads.schema_version=2`; (b) a caught build failure writes no row, with the known limitation that a retry whose build fails keeps the earlier attempt's row.
+- **Fix round 1** (PS `:110` and the canon `:135`): fixed in F3, not G2, but only what F3 makes false.
+- **Fix round 1** (wiring guard): an AST test in a new file checks that every `ReviewContextStage(...)` call in `app/` passes `payloads`, and that it finds at least the GitHub factory and the GitLab bundle.
 - **Q3** accepted: item 4 is met (names are hidden on both paths, the counter is v4-only, legacy without the counter is pinned by a test); recorded in the AC check, the RFS §5.3 note goes to G2.
 
 ## Already done or wrong in the sources

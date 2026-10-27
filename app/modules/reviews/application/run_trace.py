@@ -11,11 +11,6 @@ from typing import Any, Protocol
 from uuid import UUID
 
 from app.common.application.unit_of_work import UnitOfWork
-from app.modules.reviews.application.conventions import GeneratedConventions
-from app.modules.reviews.application.execute_review import (
-    ReviewPromptInput,
-    ReviewPromptRepository,
-)
 from app.modules.reviews.application.policy_errors import PolicyError
 
 
@@ -129,51 +124,5 @@ class ContextPayloadStore(Protocol):
     async def save_context_payload(self, run_id: UUID, summary: dict[str, Any]) -> None: ...
 
 
-# SD §13: input token limit of the fast engine; only L1 (the diff) is built in sprint 2.
-FAST_TOKEN_LIMIT = 60_000
-
-
-class TracedReviewPromptRepository:
-    """Record ``context.build`` and its ``ContextPayload`` summary around the context read."""
-
-    def __init__(
-        self,
-        inner: ReviewPromptRepository,
-        trace: RunTrace,
-        payloads: ContextPayloadStore,
-        *,
-        engine: str,
-    ) -> None:
-        self._inner = inner
-        self._trace = trace
-        self._payloads = payloads
-        self._engine = engine
-
-    async def get_review_prompt_input(
-        self, run_id: UUID, conventions: GeneratedConventions
-    ) -> ReviewPromptInput | None:
-        request = {"engine": self._engine, "token_limit": FAST_TOKEN_LIMIT}
-        async with traced_step(self._trace, run_id, "context.build", request) as step:
-            prompt_input = await self._inner.get_review_prompt_input(run_id, conventions)
-            if prompt_input is None:
-                return None
-            summary = {
-                "files": [
-                    {"path": file.path, "level_used": "L1", "priority": index}
-                    for index, file in enumerate(prompt_input.changed_files)
-                ],
-                "omitted_files": list(prompt_input.omitted_files),
-                "budget": {
-                    "limit": FAST_TOKEN_LIMIT,
-                    # Rough estimate, four characters per token; the gateway (#33) counts exactly.
-                    "used": sum(
-                        len(line.content)
-                        for file in prompt_input.changed_files
-                        for line in file.lines
-                    )
-                    // 4,
-                },
-            }
-            await self._payloads.save_context_payload(run_id, summary)
-            step.response = summary
-        return prompt_input
+class ContextTrace(RunTrace, ContextPayloadStore, Protocol):
+    """The trace of an attempt that also keeps its ``context_payloads`` row (the stage's)."""

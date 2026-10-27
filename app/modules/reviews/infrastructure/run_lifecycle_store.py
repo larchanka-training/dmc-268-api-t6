@@ -770,11 +770,14 @@ class SqlAlchemyRunTraceStore:
             raise RunCancelled("installation_unavailable")
         if row[0].state != RunState.RUNNING:
             raise RunCancelled("run_inactive")
+        # Schema 2: the response of the stage's context.build (#168 part 6); schema 1 rows
+        # hold the summary of the removed review prompt read. A retry rewrites both.
         await self._session.execute(
             insert(ContextPayload)
-            .values(run_id=run_id, schema_version=1, summary=summary, s3_ref=None)
+            .values(run_id=run_id, schema_version=2, summary=summary, s3_ref=None)
             .on_conflict_do_update(
-                index_elements=[ContextPayload.run_id], set_={"summary": summary}
+                index_elements=[ContextPayload.run_id],
+                set_={"summary": summary, "schema_version": 2},
             )
         )
 

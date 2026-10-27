@@ -58,6 +58,7 @@ from app.modules.reviews.application.review_context_stage import (
 )
 from app.modules.reviews.application.review_ignore import IgnoreMatcher
 from app.modules.reviews.application.run_failures import RunCancelled, RunFailure, RunSkipped
+from app.modules.reviews.application.run_trace import ContextPayloadStore, RunTrace
 from app.modules.reviews.application.vcs_diff import (
     MergeBaseUnavailable,
     PullRequestLocator,
@@ -191,6 +192,19 @@ class Trace:
         self.steps.append((tool, request, response))
 
 
+@dataclass
+class Payloads:
+    """``context_payloads`` of the run: every write the stage made, or a failing store."""
+
+    rows: list[tuple[UUID, dict[str, Any]]] = field(default_factory=list)
+    error: Exception | None = None
+
+    async def save_context_payload(self, run_id: UUID, summary: dict[str, Any]) -> None:
+        if self.error is not None:
+            raise self.error
+        self.rows.append((run_id, summary))
+
+
 def _stored(path: str, patch: str) -> str:
     """The patch as ``StoreDiffSnapshot`` keeps it for the UI: under a git header."""
     return f"diff --git a/{path} b/{path}\n--- a/{path}\n+++ b/{path}\n{patch}"
@@ -217,7 +231,7 @@ def _snapshots() -> list[DiffSnapshot]:
 
 
 def _stage(
-    trace: Trace,
+    trace: RunTrace,
     *,
     store: Store | None = None,
     policy: Policy | None = None,
@@ -228,6 +242,7 @@ def _stage(
     builtin_excluded: Callable[[str], bool] = lambda path: False,
     context_builder: Callable[[RunVcsInput], BuildReviewContext] | None = None,
     rag: OpenReviewIndex | None = None,
+    payloads: ContextPayloadStore | None = None,
 ) -> ReviewContextStage:
     shared = store or Store()
     provider = vcs or Vcs()
@@ -248,6 +263,7 @@ def _stage(
         trace=trace,
         builtin_excluded=builtin_excluded,
         rag=rag,
+        payloads=payloads,
     )
 
 
@@ -2000,3 +2016,122 @@ def test_real_gitlab_stage_uses_policy_start_mergebase_old_and_fork_head_sources
         )
 
     asyncio.run(scenario())
+
+
+class _AllIgnoredByTheBuild(BuildReviewContext):
+    """A build that itself finds every change ignored, after the stage's own check."""
+
+    async def execute(self, **kwargs: Any) -> ReviewContextPayload:
+        payload = await super().execute(**kwargs)
+        return replace(payload, status=ContextStatus.ALL_CHANGES_IGNORED)
+
+
+class _BrokenBuild:
+    async def execute(self, **kwargs: object) -> object:
+        raise RuntimeError("the tree is unavailable")
+
+
+@pytest.mark.parametrize("kind", ["review", "summary_only", "rag"])
+def test_stage_saves_its_context_build_response_as_the_context_payload(
+    kind: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    trace, payloads = Trace(), Payloads()
+    if kind == "rag":
+        monkeypatch.setattr(rag_index, "RETRIEVED_PROMPT_VERSIONS", frozenset({_PINNED}))
+        gate, _ = _gate(_readiness(RagIndexStatus.READY))
+        builder = _rag_builder(_greet_hints("src/main.py"))
+        stage = _stage(trace, rag=gate, context_builder=builder, payloads=payloads)
+    elif kind == "summary_only":
+        # The pull request reports two files; only the ignored one is known.
+        stage = _stage(trace, snapshots=[_snapshots()[1]], payloads=payloads)
+    else:
+        stage = _stage(trace, payloads=payloads)
+
+    payload = asyncio.run(stage.run(_RUN))
+
+    assert payload is not None and stage.payload is payload
+    (build,) = [response for tool, _, response in trace.steps if tool == "context.build"]
+    # The one row of the attempt is the build's own trace response, key for key.
+    assert payloads.rows == [(_RUN, build)]
+    assert (build["status"], build["reason"]) == {
+        "review": ("review", None),
+        "summary_only": ("summary_only", "diff_inventory_incomplete"),
+        "rag": ("review", None),
+    }[kind]
+    assert build["omissions"] == [
+        {"reason": "ignored", "path": None, "count": 1, "diagnostic_path": None}
+    ]
+    assert [block["level"] for block in build["blocks"]].count("RAG") == (kind == "rag")
+
+
+@pytest.mark.parametrize(
+    "case",
+    ["no_changes", "ignored_before_the_build", "ignored_by_the_build", "build_failure"],
+)
+def test_stage_saves_no_context_payload_on_a_skip_or_a_caught_build_failure(case: str) -> None:
+    trace, payloads = Trace(), Payloads()
+    if case == "no_changes":
+        stage = _stage(trace, vcs=Vcs(files_changed=0), snapshots=[], empty=True, payloads=payloads)
+    elif case == "ignored_before_the_build":
+        stage = _stage(
+            trace, policy=Policy(rules=b"```review-ignore\n**\n```\n"), payloads=payloads
+        )
+    elif case == "ignored_by_the_build":
+        stage = _stage(
+            trace,
+            context_builder=lambda run: _AllIgnoredByTheBuild(
+                source=Repository(), parser=Parser(), counter=EstimatedTokenCounter()
+            ),
+            payloads=payloads,
+        )
+    else:
+        stage = _stage(trace, payloads=payloads)
+        stage._context_builder = lambda run: _BrokenBuild()  # type: ignore[assignment,return-value]
+
+    if case == "build_failure":
+        assert asyncio.run(stage.run(_RUN)) is None
+    else:
+        with pytest.raises(RunSkipped):
+            asyncio.run(stage.run(_RUN))
+
+    # The attempt reached its context.build record, and no context_payloads row was written.
+    last = trace.steps[-1]
+    assert last[0] == "context.build"
+    assert (last[2].get("status"), "error" in last[2]) == {
+        "no_changes": ("no_changes", False),
+        "ignored_before_the_build": ("all_changes_ignored", False),
+        "ignored_by_the_build": ("all_changes_ignored", False),
+        "build_failure": (None, True),
+    }[case]
+    assert payloads.rows == []
+    assert stage.payload is None
+
+
+def test_a_failed_context_payload_write_fails_the_attempt() -> None:
+    trace = Trace()
+    stage = _stage(trace, payloads=Payloads(error=RuntimeError("context_payloads is down")))
+
+    # Not an optional build failure: the attempt ends, and no payload is kept for the review.
+    with pytest.raises(RuntimeError, match="context_payloads is down"):
+        asyncio.run(stage.run(_RUN))
+
+    assert stage.payload is None
+    assert [step[0] for step in trace.steps] == ["policy.load", "context.build"]
+    assert trace.steps[1][2]["status"] == "review"
+
+
+def test_neither_the_context_build_nor_its_payload_names_an_ignored_file() -> None:
+    trace, payloads = Trace(), Payloads()
+
+    asyncio.run(_stage(trace, payloads=payloads).run(_RUN))
+
+    # Exactly one write, so the absence below is not that of a missing row.
+    [(run_id, summary)] = payloads.rows
+    assert run_id == _RUN
+    # ``generated/api.py`` is ignored by the policy: counted, never named.
+    assert summary["ignored_files"] == 1
+    assert summary["omissions"] == [
+        {"reason": "ignored", "path": None, "count": 1, "diagnostic_path": None}
+    ]
+    assert "generated" not in repr(payloads.rows)
+    assert "generated" not in repr(trace.steps)

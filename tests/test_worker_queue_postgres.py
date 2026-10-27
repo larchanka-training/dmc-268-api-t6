@@ -677,7 +677,7 @@ def test_full_path_queued_running_publishing_succeeded_is_readable_over_rest(env
                     text("SELECT s3_ref, summary FROM context_payloads WHERE run_id = :id"),
                     {"id": run_id},
                 )
-            ).one()
+            ).all()
             run = (
                 await session.execute(
                     text("SELECT attempt, worker_id, finished_at IS NOT NULL FROM runs")
@@ -698,14 +698,16 @@ def test_full_path_queued_running_publishing_succeeded_is_readable_over_rest(env
     assert model.deadlines[0] - published_at < timedelta(minutes=8, seconds=5)
     assert findings == [(True, True)]
     assert comments == 1
-    assert payload[0] is None and payload[1]["files"][0]["level_used"] == "L1"
+    # A composition without the context stage records no context.build and no payload; the
+    # per-provider rows are pinned with the stage (e2e and GitLab worker tests).
+    assert payload == []
     assert run == (1, "worker-it", True)
     names = [action[0] for action in actions]
-    for tool in ("vcs.fetch_diff", "context.build", "review.postprocess", "github.publish_review"):
+    assert "context.build" not in names
+    for tool in ("vcs.fetch_diff", "review.postprocess", "github.publish_review"):
         assert names.count(tool) == 1, names
         assert all(action[1] >= 0 for action in actions if action[0] == tool)
     assert names.count("llm.review_output") == 1
-    assert names.index("vcs.fetch_diff") < names.index("context.build")
     assert names.index("review.postprocess") < names.index("github.publish_review")
     assert github.reviews[0].commit_sha == HEAD
     assert [(status, conclusion) for _, status, conclusion in github.check_runs] == [

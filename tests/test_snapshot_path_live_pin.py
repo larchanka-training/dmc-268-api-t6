@@ -364,7 +364,6 @@ async def _exercise(
             vcs,
             output=output,
             trace=trace,
-            engine="fast",
             context_stage=stage,
             # The worker hands every attempt its verifier (R14): a legacy run never calls it.
             reflection_pass=ReflectionPass(GatewayVerifierModel(gateway, call_context)),
@@ -567,14 +566,6 @@ def _legacy_responses(snapshot: PolicySnapshot) -> list[tuple[str, Any]]:
             },
         ),
         ("llm.repo_conventions", {"files": [{"path": _PATH, "relevance": "changed file"}]}),
-        (
-            "context.build",
-            {
-                "files": [{"path": _PATH, "level_used": "L1", "priority": 0}],
-                "omitted_files": [],
-                "budget": {"limit": 60000, "used": 8},
-            },
-        ),
     ]
 
 
@@ -633,7 +624,6 @@ def _assert_legacy_run(observed: Observed) -> None:
         "context.build",
         "llm.call",
         "llm.repo_conventions",
-        "context.build",
         "llm.call",
     ]
     review_prompt = str(bindings.review_system_id)

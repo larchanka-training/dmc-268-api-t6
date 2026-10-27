@@ -24,10 +24,7 @@ from app.modules.reviews.application.review_context_stage import (
     EstimatedTokenCounter,
     ReviewContextStage,
 )
-from app.modules.reviews.application.run_trace import (
-    TracedReviewPromptRepository,
-    TransactionalRunTrace,
-)
+from app.modules.reviews.application.run_trace import TransactionalRunTrace
 from app.modules.reviews.application.store_review_output import StoreReviewOutput
 from app.modules.reviews.application.vcs_diff import PullRequestLocator, VcsPullRequest
 from app.modules.reviews.infrastructure.models import Run, RunAction
@@ -139,6 +136,7 @@ def test_actual_stage_persisted_empty_proof_controls_http_and_recovery_result(
                     source=RevisionSource(), parser=Parser(), counter=EstimatedTokenCounter()
                 ),
                 trace=trace,
+                payloads=trace,
             )
             payload = await stage.run(RUN_ATTEMPTED)
             assert payload is not None
@@ -180,10 +178,10 @@ def test_actual_stage_persisted_empty_proof_controls_http_and_recovery_result(
                 {"empty_file": 1} if marker == "empty_file" else {}
             )
             assert classification["reason_counts"] == expected_reasons
-            # Exercise the real later prompt trace, whose context.build has no coverage.
-            prompt = await TracedReviewPromptRepository(
-                SqlAlchemyReviewPromptRepository(factory), trace, trace, engine="fast"
-            ).get_review_prompt_input(
+            # The real later prompt read records nothing (#168 part 6): the stage's
+            # context.build stays the attempt's only one, and its response, coverage
+            # included, is the run's context_payloads row.
+            prompt = await SqlAlchemyReviewPromptRepository(factory).get_review_prompt_input(
                 RUN_ATTEMPTED,
                 GeneratedConventions(
                     CachedConventions(REPO_A, None, PROMPT, (), (), {}), None, True
@@ -200,9 +198,17 @@ def test_actual_stage_persisted_empty_proof_controls_http_and_recovery_result(
                         .order_by(RunAction.index)
                     )
                 ).all()
-                assert len(contexts) == 2
-                assert isinstance(contexts[-1].response, dict)
-                assert "coverage" not in contexts[-1].response
+                [(schema_version, stored)] = (
+                    await session.execute(
+                        text(
+                            "SELECT schema_version, summary FROM context_payloads WHERE run_id=:id"
+                        ),
+                        {"id": RUN_ATTEMPTED},
+                    )
+                ).all()
+            assert [item.response for item in contexts] == [recorded]
+            assert (schema_version, stored) == (2, recorded)
+            assert stored["coverage"] == classification
             async with SqlAlchemyReviewOutputUnitOfWork(factory) as uow:
                 post_input = await uow.reviews.get_post_processing_input(RUN_ATTEMPTED)
             assert post_input is not None and post_input.coverage is not None

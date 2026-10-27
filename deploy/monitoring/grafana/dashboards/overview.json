@@ -557,7 +557,7 @@
     {
       "type": "timeseries",
       "title": "Phase duration p95",
-      "description": "95th percentile per trace tool (docs/PIPELINE_SPEC.md §2): diff, context, LLM, post-processing, publication. llm.call mixes the conventions call (on a cache miss) and the review calls: the call kind is not in the run_actions columns the Grafana role can read. context.build mixes two steps: the context build from the diff and the read of the review prompt input.",
+      "description": "95th percentile per trace tool (docs/PIPELINE_SPEC.md §2): diff, context, LLM, post-processing, publication. llm.call mixes the conventions call (on a cache miss) and the review calls: the call kind is not in the run_actions columns the Grafana role can read. context.build is the context build from the diff, once per attempt since #168 part 6; attempts recorded before it also hold the read of the review prompt input, so a range across that deploy mixes the two steps.",
       "id": 11,
       "datasource": {
         "type": "grafana-postgresql-datasource",
@@ -615,7 +615,7 @@
     {
       "type": "table",
       "title": "Phases over the range",
-      "description": "Calls and durations of each trace tool in the dashboard range. context.build is written twice in an attempt that reaches the review (context build from the diff, then the prompt input read), so its count is doubled and its durations mix the two steps; a skipped attempt writes it once. llm.call counts the conventions call (on a cache miss) with the review calls.",
+      "description": "Calls and durations of each trace tool in the dashboard range. context.build is written once per attempt since #168 part 6 (the context build from the diff); an attempt recorded before it that reached the review also wrote the prompt input read, so its count is doubled there and its durations mix the two steps. llm.call counts the conventions call (on a cache miss) with the review calls.",
       "id": 12,
       "datasource": {
         "type": "grafana-postgresql-datasource",

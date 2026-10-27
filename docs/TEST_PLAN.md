@@ -332,7 +332,8 @@ Committed regression inventory #213 (наличие теста не заменя
   effective policy, ранний skip и conservative coverage.
 - `test_clean_without_text_acceptance_postgres.py::test_actual_stage_persisted_empty_proof_controls_http_and_recovery_result` —
   настоящий StoreDiffSnapshot/reload → ReviewContextStage/BuildReviewContext → SQL trace
-  (включая поздний prompt context.build без coverage) → StoreReviewOutput → восстановление
+  (один context.build стадии с coverage, он же строка `context_payloads`; позднее чтение
+  входа промпта записи не пишет, #168 ч.6) → StoreReviewOutput → восстановление
   публикации → authenticated HTTP detail/latest-run/check-run. Пара меняет только
   empty_file → missing_patch при одинаковом empty SHA, пути и counters.
 - `test_clean_without_text_result.py`, `test_clean_without_text_coverage_record.py`,

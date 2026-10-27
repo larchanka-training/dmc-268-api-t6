@@ -139,11 +139,7 @@ from app.modules.reviews.application.run_failures import (
     RunCancelled,
     RunFailure,
 )
-from app.modules.reviews.application.run_trace import (
-    RunTrace,
-    TracedReviewPromptRepository,
-    TransactionalRunTrace,
-)
+from app.modules.reviews.application.run_trace import ContextTrace, TransactionalRunTrace
 from app.modules.reviews.application.store_review_output import StoreReviewOutput
 from app.modules.reviews.application.sweep_no_ci import SweepNoCi
 from app.modules.reviews.application.try_enqueue_webhook_run import (
@@ -251,7 +247,6 @@ async def process_review_run(
     *,
     output: ReviewOutputHandler | None = None,
     trace: TransactionalRunTrace | None = None,
-    engine: str = "fast",
     context_stage: ReviewContextStage | None = None,
     reflection_pass: ReflectionPass | None = None,
     vcs_provider_selector: VcsProviderSelector | None = None,
@@ -291,8 +286,6 @@ async def process_review_run(
         lambda: SqlAlchemyReviewOutputUnitOfWork(session_factory), provider
     )
     prompts: ReviewPromptRepository = SqlAlchemyReviewPromptRepository(session_factory)
-    if trace is not None:
-        prompts = TracedReviewPromptRepository(prompts, trace, trace, engine=engine)
     if context_stage is None:
         # A caller without GitHub App adapters: the run is composed without the stage.
         return await ExecuteReviewRun(
@@ -570,9 +563,9 @@ class GitHubAdapters:
     reviews: PullRequestReviewGateway
     eligibility: EligibilityChecker
     run_source: Callable[[UUID], GitHubRunSource]
-    context_stage: Callable[[RunTrace | None, RunProviderCheckpoint], ReviewContextStage] | None = (
-        None
-    )
+    context_stage: (
+        Callable[[ContextTrace | None, RunProviderCheckpoint], ReviewContextStage] | None
+    ) = None
 
 
 def execution_profile_of(llm: LlmSettings | None) -> ExecutionProfile:
@@ -607,10 +600,10 @@ def review_context_stage_factory(
     session_factory: async_sessionmaker[AsyncSession],
     redis: RedisLike | None,
     execution_profile: ExecutionProfile = UNPINNED_EXECUTION_PROFILE,
-) -> Callable[[RunTrace | None, RunProviderCheckpoint], ReviewContextStage]:
+) -> Callable[[ContextTrace | None, RunProviderCheckpoint], ReviewContextStage]:
     """Compose the policy and context stage; every run gets its own parser."""
 
-    def stage(trace: RunTrace | None, checkpoint: RunProviderCheckpoint) -> ReviewContextStage:
+    def stage(trace: ContextTrace | None, checkpoint: RunProviderCheckpoint) -> ReviewContextStage:
         def context_builder(run: RunVcsInput) -> BuildReviewContext:
             source = GitHubRevisionSource(
                 client=client,
@@ -674,6 +667,7 @@ def review_context_stage_factory(
             trace=trace,
             builtin_excluded=_is_generated,
             rag=OpenReviewIndex(partial(SqlAlchemyReviewIndexUnitOfWork, session_factory)),
+            payloads=trace,
         )
 
     return stage
@@ -896,7 +890,6 @@ def compose_worker_process(
                 vcs,
                 output=output,
                 trace=trace,
-                engine=claimed.engine,
                 context_stage=stage,
                 reflection_pass=reflection_pass,
                 vcs_provider_selector=BoundVcsProviderSelector(expected.locator, vcs),
