@@ -982,7 +982,20 @@ def test_too_large_rules_blob_reports_its_size(
 
 def test_encoded_rules_blob_is_refused_before_reading() -> None:
     # The read asks for identity; an encoded answer would be decoded whole chunk by chunk.
-    body = httpx.ByteStream(gzip.compress(b"x" * 1_048_576))
+    class Counted(httpx.AsyncByteStream):
+        """A body in 4096-byte chunks that counts the bytes handed out."""
+
+        def __init__(self, raw: bytes) -> None:
+            self.raw = raw
+            self.sent = 0
+
+        async def __aiter__(self) -> AsyncIterator[bytes]:
+            for start in range(0, len(self.raw), 4096):
+                piece = self.raw[start : start + 4096]
+                self.sent += len(piece)
+                yield piece
+
+    body = Counted(gzip.compress(b"x" * 1_048_576))
     routes = _policy_routes()
     routes[_RULES_BLOB] = _answer(200, headers={"Content-Encoding": "gzip"}, stream=body)
 
@@ -991,6 +1004,8 @@ def test_encoded_rules_blob_is_refused_before_reading() -> None:
     assert isinstance(error, PolicyError), repr(error)
     assert (error.code.value, error.retryable) == ("policy_fetch_transient", True)
     assert requests == 3
+    # Refused on its headers: not one byte of the body was taken.
+    assert body.sent == 0
 
 
 @pytest.mark.parametrize(
