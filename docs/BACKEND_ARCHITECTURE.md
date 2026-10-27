@@ -445,7 +445,7 @@ SQLModel не используется: ORM отделена от transport DTO 
 | --- | --- |
 | [workspaces](../app/modules/workspaces/infrastructure/models.py) | Workspace |
 | [repositories](../app/modules/repositories/infrastructure/models.py) | ProviderInstallation, Repository, RuleVersion, RepoConventions, RepositoryRulesStatus (статус `.review/rules.md`, #150) |
-| [reviews](../app/modules/reviews/infrastructure/models.py) | PromptVersion, CodeChange, Run, ContextPayload, Finding, Comment, RunAction |
+| [reviews](../app/modules/reviews/infrastructure/models.py) | PromptVersion, CodeChange, Run, RunPolicyDocument, RunPolicySnapshot, ContextPayload, Finding, Comment, RunAction, ContextManifest |
 | [webhooks](../app/modules/integrations/webhooks/infrastructure/models.py) | WebhookEvent |
 | [billing](../app/modules/billing/infrastructure/models.py) | Payment, CreditLedger |
 | [analytics](../app/modules/analytics/infrastructure/models.py) | UsageEvent |
@@ -503,8 +503,10 @@ model `RepositorySettings` несёт `RagIndex` из домена `code_index` 
 контракт этого модуля.
 
 ERD показывает связи и ключевые поля; он отражает актуальные поля состояния Run,
-enum Finding, inline response для RunAction, модель UsageEvent и таблицы
-`code_index`. Полный состав
+закрепления промптов и настроек публикации Run, enum Finding, inline response для
+RunAction, модель UsageEvent, таблицы `code_index`, снимок политики run
+(RunPolicyDocument, RunPolicySnapshot), `policy_key` в RepoConventions и manifest
+фактически отправленного контекста (ContextManifest). Полный состав
 колонок и ограничения следует смотреть в коде. Используются UUID, TIMESTAMPTZ,
 JSONB, точный Numeric для денежных значений, native ENUM и частичные unique indexes.
 Общая metadata нужна для FK между модулями и единой истории миграций; она не даёт
