@@ -19,6 +19,7 @@ from app.modules.reviews.application.diff_map import is_supported_path
 from app.modules.reviews.application.policy_errors import PolicyError, PolicyErrorCode
 from app.modules.reviews.application.policy_snapshot import (
     DEFAULT_MAX_POLICY_TOKENS,
+    RULES_DOCUMENT_PATH,
     CallManifest,
     ExecutionProfile,
     PolicySnapshot,
@@ -34,7 +35,11 @@ from app.modules.reviews.application.prompt_builder import (
     truncation_trailer,
     xml_text,
 )
-from app.modules.reviews.application.review_ignore import IgnoreMatcher, IgnorePolicy
+from app.modules.reviews.application.review_ignore import (
+    IgnoreMatcher,
+    IgnorePolicy,
+    snapshot_ignore_policy,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -278,14 +283,11 @@ def verify_provenance_pre_send_guard(
     Failure raises PolicyError(PolicyErrorCode.CONTEXT_VIOLATION), which results
     in RunFailure("policy_context_violation") without sending the request.
     """
-    ignore_matcher = (
-        IgnoreMatcher(
-            IgnorePolicy(snapshot.ignore_patterns, (), snapshot.ignore_digest),
-            policy_base_sha=snapshot.policy_base_sha,
-        )
-        if snapshot is not None and snapshot.ignore_patterns
-        else None
-    )
+    ignore_policy: IgnorePolicy | None = None
+    ignore_matcher: IgnoreMatcher | None = None
+    if snapshot is not None and snapshot.ignore_patterns:
+        ignore_policy = snapshot_ignore_policy(snapshot)
+        ignore_matcher = IgnoreMatcher(ignore_policy, policy_base_sha=snapshot.policy_base_sha)
     for block in manifest.blocks:
         # 1. Role and kind validation
         if block.source_role not in _ALLOWED_SOURCE_ROLES:
@@ -338,10 +340,19 @@ def verify_provenance_pre_send_guard(
                     PolicyErrorCode.CONTEXT_VIOLATION,
                     f"Block '{block.block_id}' references unsupported path",
                 )
-            if ignore_matcher is not None and ignore_matcher.match(path_str) is not None:
+            mask = ignore_matcher.match(path_str) if ignore_matcher is not None else None
+            if mask is not None:
+                # CONTRACT: a mask only comes from the matcher built over ignore_policy.
+                assert ignore_policy is not None and snapshot is not None
                 raise PolicyError(
                     PolicyErrorCode.CONTEXT_VIOLATION,
                     f"Block '{block.block_id}' references ignored path matching deny-set",
+                    source_path=RULES_DOCUMENT_PATH,
+                    policy_base_sha=snapshot.policy_base_sha,
+                    line=next(
+                        item.line for item in ignore_policy.source_lines if item.pattern == mask
+                    ),
+                    excerpt=mask,
                 )
 
         # 3. Revision validation

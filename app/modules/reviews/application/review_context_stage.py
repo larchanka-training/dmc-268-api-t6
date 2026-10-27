@@ -57,8 +57,8 @@ from app.modules.reviews.application.review_context import (
 )
 from app.modules.reviews.application.review_ignore import (
     IgnoreMatcher,
-    IgnorePolicy,
     apply_ignore,
+    snapshot_ignore_policy,
 )
 from app.modules.reviews.application.review_path import ReviewBinding, snapshot_for_review
 from app.modules.reviews.application.run_coverage import (
@@ -476,11 +476,13 @@ class ReviewContextStage:
                     exc.policy_base_sha = run.base_sha
                 raise
             step.response = policy_summary(self._snapshot)
-        # The snapshot keeps validated masks; the matcher is rebuilt from them.
-        self._matcher = IgnoreMatcher(
-            IgnorePolicy(self._snapshot.ignore_patterns, (), self._snapshot.ignore_digest),
-            policy_base_sha=self._snapshot.policy_base_sha,
-        )
+            # The snapshot keeps validated masks; the matcher is rebuilt from its rules text,
+            # which must give them back. A mismatch is a read check of the snapshot, so it
+            # stays in this step (RFS §9).
+            self._matcher = IgnoreMatcher(
+                snapshot_ignore_policy(self._snapshot),
+                policy_base_sha=self._snapshot.policy_base_sha,
+            )
 
     async def run(self, run_id: UUID) -> ReviewContextPayload | None:
         """Enforce the policy of the run, then build its context.

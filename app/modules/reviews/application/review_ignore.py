@@ -20,7 +20,7 @@ from markdown_it import MarkdownIt
 
 from app.modules.reviews.application.diff_map import ChangeType, DiffMap, is_supported_path
 from app.modules.reviews.application.policy_errors import PolicyError, PolicyErrorCode
-from app.modules.reviews.application.policy_snapshot import RULES_DOCUMENT_PATH
+from app.modules.reviews.application.policy_snapshot import RULES_DOCUMENT_PATH, PolicySnapshot
 
 PARSER_PROFILE = "rules-markdown/v1"
 PARSER_VERSION: str = markdown_it.__version__
@@ -196,6 +196,31 @@ def _policy(lines: tuple[IgnorePatternLine, ...]) -> IgnorePolicy:
         limits_version=LIMITS_VERSION,
     )
     return IgnorePolicy(patterns, lines, digest)
+
+
+def snapshot_ignore_policy(snapshot: PolicySnapshot) -> IgnorePolicy:
+    """The ignore policy of a stored snapshot, with the source lines of its masks.
+
+    The snapshot stores the masks, not the lines they came from (RULES_FORMAT_SPEC §7.1):
+    they are recovered by parsing its staged rules text again, which must give back the
+    stored masks and ``ignore_digest``. A parse error of that text is raised unchanged.
+    """
+    policy = parse_review_ignore(snapshot.rules.text, policy_base_sha=snapshot.policy_base_sha)
+    if policy.patterns != snapshot.ignore_patterns:
+        raise PolicyError(
+            PolicyErrorCode.SNAPSHOT_INTEGRITY_ERROR,
+            "The stored ignore_patterns do not match the masks of the stored rules text",
+            policy_base_sha=snapshot.policy_base_sha,
+        )
+    # CONTRACT: the digest is the one of this matcher's versions, so a snapshot pinned to
+    # other versions is refused rather than matched with rules it was not stored under.
+    if policy.digest != snapshot.ignore_digest:
+        raise PolicyError(
+            PolicyErrorCode.SNAPSHOT_INTEGRITY_ERROR,
+            "The stored ignore_digest does not match the masks of the stored rules text",
+            policy_base_sha=snapshot.policy_base_sha,
+        )
+    return policy
 
 
 def ignore_digest(
