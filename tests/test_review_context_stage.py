@@ -2135,3 +2135,32 @@ def test_neither_the_context_build_nor_its_payload_names_an_ignored_file() -> No
     ]
     assert "generated" not in repr(payloads.rows)
     assert "generated" not in repr(trace.steps)
+
+
+def test_context_trace_escapes_the_diagnostic_path_of_an_unsupported_name() -> None:
+    raw = "src\\bad" + chr(0x202E) + ".py"
+    rejected = DiffSnapshot(
+        raw, _stored("bad.py", "@@ -1 +1 @@\n-a\n+b"), "f" * 40, "modified", None, 1, 1, 2
+    )
+    trace, payloads = Trace(), Payloads()
+    stage = _stage(
+        trace, snapshots=[*_snapshots(), rejected], vcs=Vcs(files_changed=3), payloads=payloads
+    )
+
+    payload = asyncio.run(stage.run(_RUN))
+
+    assert payload is not None
+    # The payload keeps the provider's name as it came; only the trace text is escaped.
+    assert [
+        item.diagnostic_path for item in payload.omissions if item.reason == "unsupported_path"
+    ] == [raw]
+    (build,) = [response for tool, _, response in trace.steps if tool == "context.build"]
+    assert [item for item in build["omissions"] if item["reason"] == "unsupported_path"] == [
+        {
+            "reason": "unsupported_path",
+            "path": None,
+            "count": 1,
+            "diagnostic_path": "src\\\\bad\\u202e.py",
+        }
+    ]
+    assert payloads.rows == [(_RUN, build)]

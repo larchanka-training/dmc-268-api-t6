@@ -28,6 +28,7 @@ from app.modules.reviews.application.diff_map import (
     DiffMap,
     VcsProviderName,
     build_diff_map,
+    diagnostic_text,
     is_supported_path,
 )
 from app.modules.reviews.application.get_run_diff import DiffSnapshot
@@ -179,7 +180,9 @@ def context_summary(
                 "reason": item.reason,
                 "path": item.path,
                 "count": item.count,
-                "diagnostic_path": item.diagnostic_path,
+                "diagnostic_path": None
+                if item.diagnostic_path is None
+                else diagnostic_text(item.diagnostic_path),
             }
             for item in payload.omissions
         ],
