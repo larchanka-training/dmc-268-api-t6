@@ -20,6 +20,11 @@ renders no policy snapshot, exactly the prompt before #163; ``none``, ``valid`` 
 ``.review/rules.md``, or its ``policy.arms.malicious`` file, with AGENTS.md from the case
 base. The manifest records the arm, a digest of the arm files and the token and cost
 usage of every paid call. --responses-dir keeps arms and repeated runs apart.
+
+Every arm except ``legacy`` binds the version and SHA-256 of the --system prompt it sends,
+as production binds the pinned prompt row; a version with a pin must be the pinned file and
+must have a known answer schema. ``legacy`` refuses a snapshot-path prompt (v4), which is
+only reviewed with a policy snapshot. All three checks run before the first call.
 """
 
 from __future__ import annotations
@@ -91,6 +96,12 @@ from app.modules.reviews.application.review_ignore import (  # noqa: E402
     PARSER_PROFILE,
     PARSER_VERSION,
     parse_review_ignore,
+)
+from app.modules.reviews.application.review_path import (  # noqa: E402
+    SNAPSHOT_REVIEW_PROMPT_VERSIONS,
+)
+from app.modules.reviews.infrastructure.llm.answers import (  # noqa: E402
+    review_answer_contract,
 )
 from app.modules.reviews.infrastructure.llm.settings import (  # noqa: E402
     LlmConfigError,
@@ -240,9 +251,10 @@ def _policy_snapshot(
     settings: LlmSettings,
     engine: EngineName,
     defaults_checksum: str,
+    prompt_bindings: PromptBindings | None,
 ) -> PolicySnapshot | None:
-    """Build the in-memory snapshot of one arm; ``legacy`` keeps the pre-#163 envelope."""
-    if arm == "legacy":
+    """Build one arm's in-memory snapshot; ``legacy`` (no bindings) keeps the pre-#163 envelope."""
+    if prompt_bindings is None:
         return None
     base = case_dir / record["base_path"]
     try:
@@ -284,14 +296,7 @@ def _policy_snapshot(
         service_defaults_rule_version_id=uuid5(_EVAL_POLICY_NAMESPACE, "service-defaults"),
         # Mirrors RuleVersion.checksum in production: the pin of the case's default rule file.
         defaults_checksum=defaults_checksum,
-        prompt_bindings=PromptBindings(
-            review_system_checksum=PINNED_PROMPT_CHECKSUMS["review.system:v2"],
-            conventions_checksum=PINNED_PROMPT_CHECKSUMS["review.conventions:v2"],
-            verifier_checksum=PINNED_PROMPT_CHECKSUMS["review.verifier:v2"],
-            review_system_id=UUID(int=1),
-            conventions_id=UUID(int=2),
-            verifier_id=UUID(int=3),
-        ),
+        prompt_bindings=prompt_bindings,
         execution_profile=ExecutionProfile(
             profile_name=engine,
             review_model=settings.primary.model,
@@ -306,6 +311,45 @@ def _policy_snapshot(
             budget_profile_version="budget/v1",
         ),
         policy_digest=hashlib.sha256(digest_input.encode("utf-8")).hexdigest(),
+    )
+
+
+def _prompt_bindings(inputs: _CaptureInputs, arm: str) -> PromptBindings | None:
+    """Bind the review prompt the run sends, before any call; ``legacy`` binds none.
+
+    The gateway picks the answer schema by the bound version, so the snapshot carries the
+    version and SHA-256 of the --system file, as production binds ``PromptVersion``.
+    """
+    version = inputs.prompt_version
+    if arm == "legacy":
+        # Production never reviews a snapshot-path prompt on the legacy path either.
+        if version in SNAPSHOT_REVIEW_PROMPT_VERSIONS:
+            raise RecorderError(
+                f"--policy-arm legacy renders no policy snapshot, which review prompt {version} "
+                "needs; use --policy-arm none, valid or malicious"
+            )
+        return None
+    pinned = PINNED_PROMPT_CHECKSUMS.get(f"review.system:{version}")
+    if pinned is not None and pinned != inputs.prompt_sha:
+        raise RecorderError(
+            f"policy arms need the pinned review prompt: {inputs.prompt_path} "
+            f"(review.system {version}) has checksum {inputs.prompt_sha}, pinned {pinned}"
+        )
+    try:
+        review_answer_contract(version)
+    except PolicyError:
+        raise RecorderError(
+            "policy arms need a review prompt with a known answer schema: "
+            f"{inputs.prompt_path} has version {version}"
+        ) from None
+    return PromptBindings(
+        review_system_checksum=inputs.prompt_sha,
+        conventions_checksum=PINNED_PROMPT_CHECKSUMS["review.conventions:v2"],
+        verifier_checksum=PINNED_PROMPT_CHECKSUMS["review.verifier:v2"],
+        review_system_version=version,
+        review_system_id=UUID(int=1),
+        conventions_id=UUID(int=2),
+        verifier_id=UUID(int=3),
     )
 
 
@@ -767,6 +811,7 @@ async def record_live(
         # A policy-arm snapshot pins the default files, so an override must be one of them.
         pinned_defaults=policy_arm != "legacy",
     )
+    prompt_bindings = _prompt_bindings(inputs, policy_arm)
     # The snapshot takes its pin from the entry that also supplies the case's rules.
     snapshots = {
         record["id"]: _policy_snapshot(
@@ -776,6 +821,7 @@ async def record_live(
             settings,
             engine,
             inputs.rules_by_language[record["language"]].defaults_checksum,
+            prompt_bindings,
         )
         for case_dir, record in records
     }
