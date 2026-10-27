@@ -99,7 +99,9 @@ from a missing scope.
 
 ## 5. Testing
 
-- One file per feature: `tests/test_<feature>.py`.
+- One feature per file prefix: `tests/test_<feature>.py`, or several
+  `tests/test_<feature>_<aspect>.py` files sharing one prefix; PostgreSQL tests usually sit in
+  `_postgres` files, as in the `test_clean_without_text_*` and `test_coverage_none_*` families.
 - Plain `pytest`, no `pytest-asyncio` plugin — drive async code with `asyncio.run`.
 - Unit tests exercise use cases against fakes of the ports (Protocols), not real
   infrastructure.
