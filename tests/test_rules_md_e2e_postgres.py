@@ -16,7 +16,6 @@ RabbitMQ: the review topology is deleted around every case); in CI ``RABBITMQ_UR
 from __future__ import annotations
 
 import asyncio
-import base64
 import difflib
 import hashlib
 import hmac
@@ -48,6 +47,7 @@ from app.modules.integrations.webhooks.infrastructure.github_installation_tree_p
 )
 from app.modules.reviews.infrastructure.amqp import amqp_channels
 from app.worker import WorkerSettings, run_worker
+from tests.github_raw_blobs import blob_answer
 from tests.test_worker_queue_postgres import (
     _APP_PEM,
     LLM_ENV,
@@ -268,7 +268,7 @@ class FakeGitHub:
         if tail.startswith("/git/trees/"):
             return self._tree(tail.removeprefix("/git/trees/"), request)
         if tail.startswith("/git/blobs/"):
-            return self._blob(tail.removeprefix("/git/blobs/"))
+            return self._blob(tail.removeprefix("/git/blobs/"), request)
         if tail == "/pulls/7":
             return httpx.Response(200, json=_pull_request(self.files))
         if tail == "/pulls/7/files":
@@ -324,18 +324,14 @@ class FakeGitHub:
             return httpx.Response(200, json={"sha": sha, "tree": listing, "truncated": False})
         return None
 
-    def _blob(self, sha: str) -> httpx.Response | None:
+    def _blob(self, sha: str, request: httpx.Request) -> httpx.Response | None:
         for revision in (self.base, self.head):
             for path, data in revision.files.items():
                 if _blob_sha(data) != sha:
                     continue
                 if path == RULES and revision is self.base and self.fault is Fault.BLOB_404:
                     return httpx.Response(404, json={"message": "Not Found"})
-                content = base64.b64encode(data).decode()
-                return httpx.Response(
-                    200,
-                    json={"sha": sha, "encoding": "base64", "content": content, "size": len(data)},
-                )
+                return blob_answer(request, data)
         return None
 
 

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import base64
 import os
 from collections.abc import Iterator, Mapping
 from datetime import UTC, datetime, timedelta
@@ -38,6 +37,7 @@ from app.modules.reviews.infrastructure.run_processing_unit_of_work import (
 )
 from app.modules.reviews.infrastructure.run_repository import SqlAlchemyRunRepository
 from app.worker import GitHubAdapters, compose_worker_process, review_context_stage_factory
+from tests.github_raw_blobs import blob_answer, git_blob_oid
 from tests.portal_postgres import HEAD, INSTALL_A, REPO_A, RUN_ATTEMPTED, Env, portal_schema
 from tests.test_app_reinstall_postgres import FreshGitHub, apply
 from tests.test_github_vcs_provider import _pull_payload
@@ -54,8 +54,8 @@ from tests.test_worker_queue_postgres import (
 
 _BASE = "b" * 40
 _REVIEW = "1" * 40
-_RULES = "2" * 40
-_AGENTS = "3" * 40
+_RULES = git_blob_oid(b"rules")
+_AGENTS = git_blob_oid(b"agents")
 _APP = "4" * 40
 _MODELS_SHA = "5" * 40
 
@@ -160,15 +160,7 @@ def test_composed_stage_stops_policy_context_requests_after_retirement(
                     _APP: _SERVICE.encode(),
                     _MODELS_SHA: _MODELS.encode(),
                 }[sha]
-                return httpx.Response(
-                    200,
-                    json={
-                        "sha": sha,
-                        "encoding": "base64",
-                        "content": base64.b64encode(raw).decode(),
-                        "size": len(raw),
-                    },
-                )
+                return blob_answer(request, raw)
             if path.endswith("/pulls/3"):
                 payload = _pull_payload(changed_files=1, head_sha=HEAD)
                 payload["number"] = 3
@@ -465,15 +457,7 @@ def test_worker_composition_passes_claimed_checkpoint_to_context_stage(
                     _APP: _SERVICE.encode(),
                     _MODELS_SHA: _MODELS.encode(),
                 }[sha]
-                return httpx.Response(
-                    200,
-                    json={
-                        "sha": sha,
-                        "encoding": "base64",
-                        "content": base64.b64encode(raw).decode(),
-                        "size": len(raw),
-                    },
-                )
+                return blob_answer(request, raw)
             if path.endswith("/pulls/3"):
                 payload = _pull_payload(changed_files=1, head_sha=HEAD)
                 payload["number"] = 3

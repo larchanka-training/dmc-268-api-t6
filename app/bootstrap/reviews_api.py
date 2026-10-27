@@ -117,7 +117,6 @@ from app.modules.reviews.infrastructure.github_pull_request_projection import (
     SqlAlchemyPullRequestProjectionLock,
     SqlAlchemyPullRequestProjectionUnitOfWork,
 )
-from app.modules.reviews.infrastructure.github_vcs import HttpGitHubVcsProvider
 from app.modules.reviews.infrastructure.pull_request_queries import SqlAlchemyPullRequestQueries
 from app.modules.reviews.infrastructure.rerun_store import SqlAlchemyRerunUnitOfWork
 from app.modules.reviews.infrastructure.run_repository import (
@@ -227,7 +226,6 @@ class ReviewsApiResources:
         token_provider: GitHubInstallationAccessTokenProvider,
     ) -> RefreshRulesStatuses:
         """Compose the ``webhook-worker`` reads of ``.review/rules.md`` (#150)."""
-        vcs = HttpGitHubVcsProvider(client=client, token_provider=token_provider)
 
         def source(target: RulesRefreshTarget, sha: str) -> GitHubRepositoryPolicySource:
             return GitHubRepositoryPolicySource(
@@ -236,11 +234,6 @@ class ReviewsApiResources:
                 installation_external_id=target.installation_external_id,
                 repository_full_name=target.repository_full_name,
                 policy_base_sha=sha,
-                read_blob=partial(
-                    vcs.get_repository_blob,
-                    target.installation_external_id,
-                    target.repository_full_name,
-                ),
             )
 
         return RefreshRulesStatuses(

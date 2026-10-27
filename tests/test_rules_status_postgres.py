@@ -54,6 +54,7 @@ from app.modules.repositories.infrastructure.rules_status import (
     SqlAlchemyRulesStatusUnitOfWork,
     request_rules_refresh,
 )
+from tests.github_raw_blobs import git_blob_oid
 from tests.portal_postgres import INSTALL_A, REPO_A, REPO_B, WS_A, Env, api, portal_schema, scalar
 from tests.test_rules_status import _HEAD, FakeGitHub, _read
 
@@ -661,7 +662,7 @@ def test_the_worker_composition_reads_through_github_and_stores_the_result(env: 
     assert refreshed == 1
     assert (stored.status, stored.sha, stored.ignore_masks) == ("present", _HEAD, ["docs/**"])
     assert stored.checksum == sha256(raw).hexdigest()
-    assert github.paths[-1] == "/repos/octo/repo/git/blobs/" + "3" * 40
+    assert github.paths[-1] == "/repos/octo/repo/git/blobs/" + git_blob_oid(raw)
 
 
 @pytest.fixture

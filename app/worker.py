@@ -641,7 +641,6 @@ def review_context_stage_factory(
                 build=lambda locator: GitHubPolicyDocumentSource(
                     client=client,
                     token_provider=tokens,
-                    vcs=vcs,
                     locator=locator,
                     policy_base_sha=policy_base_sha,
                     checkpoint=checkpoint,

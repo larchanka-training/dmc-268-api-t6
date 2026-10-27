@@ -65,6 +65,8 @@ from app.modules.reviews.application.policy_documents import (
 from app.modules.reviews.application.policy_errors import PolicyError, PolicyErrorCode
 from app.modules.reviews.application.policy_snapshot import RULES_DOCUMENT_PATH, PolicyDocument
 from app.modules.reviews.infrastructure.github_policy_source import (
+    OversizedBody,
+    capped_body,
     classify_policy_http_error,
     policy_tree_entries,
 )
@@ -207,19 +209,6 @@ def _archive_url(location: str | None) -> httpx.URL:
     return url
 
 
-async def _capped_body(response: httpx.Response, max_bytes: int) -> bytes | None:
-    """The decoded body, or `None` when it is declared or read over `max_bytes`."""
-    declared = response.headers.get("Content-Length")
-    if declared is not None and declared.isdecimal() and int(declared) > max_bytes:
-        return None
-    body = bytearray()
-    async for chunk in response.aiter_bytes():
-        if len(body) + len(chunk) > max_bytes:
-            return None
-        body.extend(chunk)
-    return bytes(body)
-
-
 class GitHubRepositorySnapshotSource:
     """``RepositorySnapshotSource`` of one repository through its GitHub App installation."""
 
@@ -291,10 +280,10 @@ class GitHubRepositorySnapshotSource:
                     return None
                 if not response.is_success:
                     raise _classify(response)
-                body = await _capped_body(response, _MAX_COMPARE_RESPONSE_BYTES)
+                body = await capped_body(response, _MAX_COMPARE_RESPONSE_BYTES)
         except httpx.HTTPError as exc:
             raise _transport_failure(exc) from None
-        if body is None:
+        if isinstance(body, OversizedBody):
             return Comparison(ancestry=None, files=(), complete=False)
         try:
             comparison = _COMPARISON.validate_json(body)
@@ -415,19 +404,20 @@ class _SnapshotPolicySource:
             async with source._client.stream(
                 "GET",
                 f"{source._prefix}/git/blobs/{sha}",
-                headers=_headers(token, accept="application/vnd.github.raw+json"),
+                headers=_headers(token, accept="application/vnd.github.raw+json")
+                | {"Accept-Encoding": "identity"},
                 timeout=_REQUEST_TIMEOUT,
                 follow_redirects=False,
             ) as response:
                 response.raise_for_status()
-                body = await _capped_body(response, MAX_DOCUMENT_BYTES)
+                body = await capped_body(response, MAX_DOCUMENT_BYTES)
         except httpx.HTTPError as exc:
             raise classify_policy_http_error(exc, policy_base_sha=self._sha) from None
         except ValueError:
             raise self._error(
                 PolicyErrorCode.FETCH_TRANSIENT, "GitHub returned an unreadable blob"
             ) from None
-        if body is None:
+        if isinstance(body, OversizedBody):
             raise PolicyError(
                 PolicyErrorCode.DOCUMENT_TOO_LARGE,
                 f"The policy document exceeds {MAX_DOCUMENT_BYTES} bytes",
