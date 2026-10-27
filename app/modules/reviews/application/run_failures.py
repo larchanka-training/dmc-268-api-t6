@@ -6,8 +6,10 @@ Only codes in ``RETRYABLE_ERROR_CODES`` can enter T9 before ``MAX_ATTEMPTS``;
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
+from email.utils import parsedate_to_datetime
 from typing import Literal
 
 from app.modules.reviews.application.review_output import InvalidReviewOutput
@@ -19,6 +21,53 @@ FAST_ATTEMPT_DEADLINE = timedelta(minutes=8)
 RECONCILER_QUEUED_GRACE = timedelta(minutes=10)
 # The longest Retry-After a Run waits for before its next attempt; a longer one is capped.
 RETRY_AFTER_CEILING = timedelta(days=1)
+_CEILING_SECONDS = RETRY_AFTER_CEILING // timedelta(seconds=1)
+
+
+def parse_retry_after(
+    value: str | None, *, date: str | None = None, now: Callable[[], datetime] | None = None
+) -> timedelta | None:
+    """The delay of a GitHub ``Retry-After``: ASCII delta-seconds or an HTTP-date.
+
+    An HTTP-date counts from the response ``Date`` when it parses, else from ``now()``
+    (UTC by default); a date already past is no wait, ``timedelta(0)``, yet still a limit.
+    Every HTTP-date is GMT (RFC 9110 §5.6.7), so one parsed without a zone (asctime or
+    ``-0000``) is read as UTC. Either form is capped at ``RETRY_AFTER_CEILING``; anything
+    else is None.
+    """
+    if not value:
+        return None
+    if value.isascii() and value.isdecimal():
+        digits = value.lstrip("0") or "0"
+        # More digits than the ceiling has is beyond it: never convert them, since Python
+        # refuses integers longer than its digit limit and timedelta overflows long before.
+        if len(digits) > len(str(_CEILING_SECONDS)):
+            return RETRY_AFTER_CEILING
+        return timedelta(seconds=min(int(digits), _CEILING_SECONDS))
+    retry_at = _aware_http_date(value)
+    if retry_at is None:
+        return None
+    reference = _aware_http_date(date) if date else None
+    if reference is None:
+        # CONTRACT: an injected now() returns an aware datetime, like the default.
+        reference = (now or _utc_now)()
+    # Aware datetimes subtract without a conversion to UTC, which could overflow year 9999.
+    return min(max(retry_at - reference, timedelta(0)), RETRY_AFTER_CEILING)
+
+
+def _aware_http_date(value: str) -> datetime | None:
+    try:
+        parsed = parsedate_to_datetime(value)
+    except ValueError:
+        # Python 3.10+ raises ValueError for every unreadable date.
+        return None
+    # Asctime and a "-0000" zone give a naive datetime; an HTTP-date is GMT by definition.
+    return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=UTC)
+
+
+def _utc_now() -> datetime:
+    return datetime.now(UTC)
+
 
 # "Retry: да" in the §6 catalog: T9 while attempt < 3, then failed and a copy in reviews.dlq.
 # Policy codes of RULES_FORMAT_SPEC §9 (``PolicyErrorCode``); only reads of the policy

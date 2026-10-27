@@ -2,13 +2,12 @@
 
 from __future__ import annotations
 
-from datetime import timedelta
 from typing import Literal
 
 import httpx
 
 from app.modules.reviews.application.check_runs import RunProviderCheckpoint
-from app.modules.reviews.application.run_failures import RETRY_AFTER_CEILING, RunFailure
+from app.modules.reviews.application.run_failures import RunFailure, parse_retry_after
 from app.modules.reviews.application.vcs_diff import (
     CommitMessagePrefix,
     PullRequestLocator,
@@ -16,21 +15,6 @@ from app.modules.reviews.application.vcs_diff import (
     VcsMetadataProvider,
     VcsPullRequest,
 )
-
-_MAX_RETRY_AFTER_SECONDS = str(timedelta.max // timedelta(seconds=1))
-
-
-def _retry_after_delay(value: str | None) -> timedelta | None:
-    """Ignore malformed values; a delay too large to represent waits the ceiling."""
-    if not value or not value.isascii() or not value.isdecimal():
-        return None
-    # Strip leading zeros before bounding/converting, including >4,300-digit inputs.
-    seconds = value.lstrip("0") or "0"
-    if len(seconds) > len(_MAX_RETRY_AFTER_SECONDS) or (
-        len(seconds) == len(_MAX_RETRY_AFTER_SECONDS) and seconds > _MAX_RETRY_AFTER_SECONDS
-    ):
-        return RETRY_AFTER_CEILING
-    return timedelta(seconds=int(seconds))
 
 
 def classify_vcs_error(
@@ -42,7 +26,10 @@ def classify_vcs_error(
 ) -> RunFailure:
     if isinstance(exc, httpx.HTTPStatusError):
         response = exc.response
-        delay = _retry_after_delay(response.headers.get("Retry-After"))
+        delay = parse_retry_after(
+            response.headers.get("Retry-After"), date=response.headers.get("Date")
+        )
+        # A date already past is a 0 s delay and still a limit, so test for None.
         limited = response.headers.get("X-RateLimit-Remaining") == "0" or delay is not None
         status = response.status_code
         if status == 404 or (status == 403 and not limited):

@@ -343,3 +343,53 @@ def test_policy_source_bounds_untrusted_retry_after(
 
     assert caught.value.code is PolicyErrorCode.RATE_LIMITED
     assert caught.value.retry_after == delay
+
+
+@pytest.mark.parametrize(
+    ("status", "retry_after", "code", "delay"),
+    [
+        (
+            403,
+            "Tue, 27 Oct 2026 07:02:00 GMT",
+            PolicyErrorCode.RATE_LIMITED,
+            timedelta(seconds=120),
+        ),
+        (
+            429,
+            "Tue, 27 Oct 2026 07:02:00 GMT",
+            PolicyErrorCode.RATE_LIMITED,
+            timedelta(seconds=120),
+        ),
+        # Already past at the response Date: no wait, and still a limit, not a lost access.
+        (403, "Tue, 27 Oct 2026 06:59:00 GMT", PolicyErrorCode.RATE_LIMITED, timedelta(0)),
+        (403, "soon", PolicyErrorCode.ACCESS_DENIED, None),
+        (502, "30", PolicyErrorCode.FETCH_TRANSIENT, timedelta(seconds=30)),
+        (
+            503,
+            "Tue, 27 Oct 2026 07:02:00 GMT",
+            PolicyErrorCode.FETCH_TRANSIENT,
+            timedelta(seconds=120),
+        ),
+        (503, "soon", PolicyErrorCode.FETCH_TRANSIENT, None),
+    ],
+    ids=[
+        "403-http-date",
+        "429-http-date",
+        "403-past-http-date",
+        "403-word",
+        "502-seconds",
+        "503-http-date",
+        "503-word",
+    ],
+)
+def test_policy_source_reads_retry_after_as_seconds_or_an_http_date(
+    status: int, retry_after: str, code: PolicyErrorCode, delay: timedelta | None
+) -> None:
+    def respond(request: httpx.Request) -> httpx.Response:
+        headers = {"Retry-After": retry_after, "Date": "Tue, 27 Oct 2026 07:00:00 GMT"}
+        return httpx.Response(status, headers=headers)
+
+    with pytest.raises(PolicyError) as caught:
+        _run(respond, Blobs(), lambda source: source.list_entries(None))
+
+    assert (caught.value.code, caught.value.retry_after) == (code, delay)
