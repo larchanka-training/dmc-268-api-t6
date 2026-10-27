@@ -219,18 +219,23 @@ def test_blob_failures_are_policy_errors(status: int, code: PolicyErrorCode) -> 
 
 
 class _Chunks(httpx.AsyncByteStream):
-    """A body without ``Content-Length`` sent in fixed chunks; counts the bytes handed out."""
+    """A body without ``Content-Length`` sent in fixed chunks; counts the bytes handed out
+    and the closes of the stream."""
 
     def __init__(self, body: bytes, chunk: int = 4096) -> None:
         self._body = body
         self._chunk = chunk
         self.sent = 0
+        self.closed = 0
 
     async def __aiter__(self) -> AsyncIterator[bytes]:
         for start in range(0, len(self._body), self._chunk):
             piece = self._body[start : start + self._chunk]
             self.sent += len(piece)
             yield piece
+
+    async def aclose(self) -> None:
+        self.closed += 1
 
 
 def test_policy_blob_is_streamed_raw_by_its_sha() -> None:
@@ -307,6 +312,47 @@ def test_policy_blob_id_of_64_digits_is_checked_with_sha256() -> None:
     oid = hashlib.sha256(b"blob %d\0" % len(raw) + raw).hexdigest()
 
     assert _run(lambda request: httpx.Response(200, content=raw), lambda s: s.read_blob(oid)) == raw
+
+
+def test_empty_policy_blob_passes_the_id_check() -> None:
+    # The Git id of the empty blob, as `git hash-object --stdin </dev/null` prints it.
+    oid = "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391"
+
+    assert _run(lambda request: httpx.Response(200, content=b""), lambda s: s.read_blob(oid)) == b""
+
+
+@pytest.mark.parametrize(
+    ("status", "headers", "raw", "outcome"),
+    [
+        (200, {}, b"agents", None),
+        (200, {}, b"a" * 65_537, PolicyErrorCode.DOCUMENT_TOO_LARGE),
+        (200, {"Content-Length": "70000"}, b"a" * 70_000, PolicyErrorCode.DOCUMENT_TOO_LARGE),
+        (200, {}, b"rules", PolicyErrorCode.FETCH_TRANSIENT),
+        (403, {}, b'{"message": "Forbidden"}', PolicyErrorCode.ACCESS_DENIED),
+        (
+            200,
+            {"Content-Encoding": "gzip"},
+            gzip.compress(b"agents"),
+            PolicyErrorCode.FETCH_TRANSIENT,
+        ),
+    ],
+    ids=["read", "cap-stop", "content-length-stop", "id-mismatch", "error-status", "encoded"],
+)
+def test_policy_blob_stream_is_closed_on_every_exit(
+    status: int, headers: dict[str, str], raw: bytes, outcome: PolicyErrorCode | None
+) -> None:
+    body = _Chunks(raw)
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(status, headers=headers, stream=body)
+
+    if outcome is None:
+        assert _run(respond, lambda source: source.read_blob(_AGENTS)) == raw
+    else:
+        with pytest.raises(PolicyError) as caught:
+            _run(respond, lambda source: source.read_blob(_AGENTS))
+        assert caught.value.code is outcome
+    assert body.closed == 1
 
 
 def _too_large_agents(blob: httpx.Response) -> PolicyError:
