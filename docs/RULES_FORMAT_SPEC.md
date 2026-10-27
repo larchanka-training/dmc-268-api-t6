@@ -1069,7 +1069,8 @@ ignore в `.review/rules.md` на default branch или версии встро�
 ## 9. Ошибки и наблюдаемость
 
 Диагностика содержит `code`, `source_path`, `policy_base_sha`, безопасное `message`,
-nullable `line`, `column`, `pattern_index`, `limit`, `actual`, `retryable`.
+nullable `line`, `column`, `pattern_index`, `limit`, `actual`, флаг
+`actual_is_lower_bound` (`true`, когда `actual` — лишь нижняя граница) и `retryable`.
 Строка/столбец — 1-based, столбец считается в Unicode scalars, не UTF-8 байтах.
 Для ошибки маски указывается её строка в документе и первый недопустимый символ;
 для duplicate block — второе открытие. Ошибка не выводит весь документ или секреты
@@ -1103,6 +1104,26 @@ nullable `line`, `column`, `pattern_index`, `limit`, `actual`, `retryable`.
 в момент остановки: нижняя граница реальной стоимости, а не точное значение.
 Поэтому сообщение говорит «фактически более {limit}, допустимо {limit} переходов».
 
+У `policy_document_too_large` `actual` точен, когда размер известен без чтения всего
+blob: размер записи дерева, у GitHub также `Content-Length` несжатого ответа, у
+GitLab — длина blob, который run уже прочитал. Иначе это нижняя граница с
+`actual_is_lower_bound=true`: у GitHub — байты, полученные к остановке потока, у
+GitLab — 65 537 (его чтение останавливается за пределом, не сообщая, сколько
+прочитано). Сообщение тогда говорит «фактически более 65536, допустимо 65536», без
+выдуманного точного значения.
+
+Источники политики GitHub (run и статус правил, §10) читают blob документа сами, не
+через VCS-провайдер run, поэтому его `BlobTooLargeError` на путь политики не
+попадает: too_large дают размер записи дерева или сам поток. Поток
+`application/vnd.github.raw+json` с `Accept-Encoding: identity` останавливается, как
+только получено больше 65 536 байт (ровно 65 536 проходят); несжатый ответ с
+`Content-Length` больше 65 536 не читается вовсе. Raw-ответ не повторяет SHA,
+поэтому Git blob id полученных байтов пересчитывается (SHA-1, для id из 64 hex —
+SHA-256) и сверяется с запрошенным; расхождение — retryable
+`policy_fetch_transient`. Индексатор читает `.review/rules.md` тем же потоком с тем
+же пределом, но id не сверяет
+([PIPELINE_SPEC §5.2](PIPELINE_SPEC.md#52-сбои-github)).
+
 Диагностику в trace не пишут фазы вне шагов трассировки, у них остаются только
 `error_code` и сообщение Run: `apply_ignore` стадии политики
 (`review_context_stage.py`) и проверки перед отправкой модели: pre-send guard
@@ -1127,7 +1148,7 @@ nullable `line`, `column`, `pattern_index`, `limit`, `actual`, `retryable`.
 | `error_code` / причина | Исход | Retry и сообщение |
 | --- | --- | --- |
 | Документ достоверно отсутствует | Продолжение | Не ошибка; `presence=missing` |
-| `policy_document_too_large` | `failed` | Нет; «AGENTS.md превышает 65536 байт» с реальным source_path |
+| `policy_document_too_large` | `failed` | Нет; «AGENTS.md превышает 65536 байт» с реальным source_path и `actual` — точным размером либо нижней границей с `actual_is_lower_bound=true` (сообщение «фактически более 65536») |
 | `policy_document_decode_error` | `failed` | Нет; «Документ правил должен быть корректным UTF-8» |
 | `policy_document_control_character` | `failed` | Нет; «Недопустимый управляющий символ», строка/столбец |
 | `policy_document_type_unsupported` | `failed` | Нет; «Документ должен быть обычным Git blob» |
@@ -1138,10 +1159,10 @@ nullable `line`, `column`, `pattern_index`, `limit`, `actual`, `retryable`.
 | `unsupported_path` | Локальный технический пропуск при доказанной изоляции | Остальные файлы продолжают обработку; неполное покрытие, подробности в CONTEXT_AND_VERIFICATION_SPEC §9.1 |
 | `policy_match_budget_exceeded` | `failed` | Нет; упрощение политики/новый профиль, не случайный timeout |
 | `policy_prompt_budget_exceeded` | `failed` | Нет; «Документы политики не помещаются целиком в закреплённый профиль» |
-| `policy_access_denied` | `failed` | Нет; 401/403 без признаков rate limit, недоступный repository; не missing |
+| `policy_access_denied` | `failed` | Нет; 401/403 без признаков rate limit (у GitHub — без читаемого `Retry-After`, `X-RateLimit-Remaining: 0` и вторичного лимита в теле), недоступный repository; не missing |
 | `policy_revision_unavailable` | `failed` | Нет автоматической смены SHA; закреплённая ревизия недоступна либо её листинг дерева усечён или неоднозначен (запись без mode или с mode не своего типа, имя с `/`, `.`/`..`, повтор имени): нерекурсивный листинг одного SHA всегда одинаков, повтор его не исправит |
-| `policy_fetch_transient` | Ограниченный retry, затем `failed` | Timeout/reset/5xx/нечитаемый ответ (не JSON или иная форма): его повторяют, потому что искажение мог внести сбой транспорта, в отличие от корректно разобранного усечённого или неоднозначного листинга |
-| `policy_rate_limited` | Ограниченный retry, затем `failed` | 429 или подтверждённый rate-limit 403; соблюсти Retry-After, не дольше суток ([PIPELINE_SPEC §4.2](PIPELINE_SPEC.md#42-задержки)) |
+| `policy_fetch_transient` | Ограниченный retry, затем `failed` | Timeout/reset/5xx/нечитаемый ответ (не JSON или иная форма) либо blob другого Git id: его повторяют, потому что искажение мог внести сбой транспорта, в отличие от корректно разобранного усечённого или неоднозначного листинга; пауза после 5xx с `Retry-After` — по правилу лимита ([PIPELINE_SPEC §4.2](PIPELINE_SPEC.md#42-задержки)) |
+| `policy_rate_limited` | Ограниченный retry, затем `failed` | 429 или подтверждённый rate-limit 403. У GitHub признак лимита — `Retry-After` (целые секунды или HTTP-date), `X-RateLimit-Remaining: 0` либо, без них, вторичный лимит: `message` JSON-тела 403/429 (учитываются первые 4 KiB) содержит «secondary rate limit» в любом регистре — GitHub документирует такое сообщение, но не его точный текст; задержка тогда 60 с. Соблюсти Retry-After, не дольше суток ([PIPELINE_SPEC §4.2](PIPELINE_SPEC.md#42-задержки)) |
 | `policy_snapshot_integrity_error` | `failed` | Нет; checksum/версии недоступны или противоречат snapshot |
 | `policy_context_violation` | `failed` до отправки | Нет; final payload содержит запрещённый source |
 | `all_changes_ignored` | `skipped` | Не retry; все изменения доказанно исключены по политике, технических пропусков нет |
