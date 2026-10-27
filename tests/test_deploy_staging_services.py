@@ -2979,7 +2979,7 @@ def test_host_refuses_gitlab_io_failures_before_validation_or_live_changes(
 def test_host_rejects_unavailable_docker_config_directory_without_live_changes(
     host: Host, operation: str
 ) -> None:
-    # Missing TMPDIR refuses top-level Docker auth setup before GitLab validation begins.
+    # Missing TMPDIR refuses Docker auth setup before any Docker command can run.
     assert host.deploy(IMAGE_A, bundle=_bundle(_gitlab_enabled_settings())).returncode == 0
     assert host.deploy(IMAGE_B).returncode == 0
     before = host.files()
@@ -2997,10 +2997,7 @@ def test_host_rejects_unavailable_docker_config_directory_without_live_changes(
     assert result.returncode != 0
     assert host.files() == before
     assert {path.name: _mode(path) for path in host.app_dir.iterdir()} == modes
-    assert not any(
-        call == "run" or call.startswith("run ") or " up " in call
-        for call in host.calls()[calls_before:]
-    )
+    assert host.calls()[calls_before:] == []
     assert list(host.tmp.iterdir()) == []
 
 
@@ -3313,22 +3310,26 @@ def test_known_registry_failures_keep_static_categories_and_stdin_credentials(
     assert expected_diagnostic in result.stderr
 
 
-@pytest.mark.parametrize("operation", ["deploy", "manual", "auto"])
+@pytest.mark.parametrize(
+    ("operation", "expected_prefix"),
+    [
+        ("deploy", "deployment refused:"),
+        ("manual", "rollback refused:"),
+        ("auto", "rollback refused:"),
+    ],
+)
 @pytest.mark.parametrize(
     ("stage", "expected_diagnostic"),
     [("login", "registry login failed"), ("pull", "target image pull failed")],
 )
 def test_unknown_registry_failures_keep_plain_static_diagnostic_and_stdin_credentials(
-    host: Host, operation: str, stage: str, expected_diagnostic: str
+    host: Host, operation: str, expected_prefix: str, stage: str, expected_diagnostic: str
 ) -> None:
     result = _registry_failure_with_safety_checks(
         host, operation, stage, "unrecognized registry response"
     )
 
-    assert (
-        f"deployment refused: {expected_diagnostic}" in result.stderr.splitlines()
-        or f"rollback refused: {expected_diagnostic}" in result.stderr.splitlines()
-    )
+    assert f"{expected_prefix} {expected_diagnostic}" in result.stderr.splitlines()
 
 
 def _inject_registry_capture_failure(host: Host, failure: str) -> dict[str, str]:

@@ -3,7 +3,7 @@
 Published integration baseline `f160ce4c82220c20e627fbfdc0230b43a5f34492`.
 Round 1 integration baseline `430d6604a0fc289916b34cc5aa6bdd307cea40b8` (freshly fetched and rebased without conflicts).
 Original design/test baseline `88bbc0734e50e33fa769940291a79ff997102994`.
-Plan: [335-plan.md](335-plan.md). Human-approved implementation published as [PR #339](https://github.com/larchanka-training/dmc-268-api-t6/pull/339). Round 1 corrections, final code verification and publication on `1f74bd78db8468d5a719b0891b4c36bde6503e76` are complete: body/replies updated, three threads resolved, [CI 40497818211](https://github.com/larchanka-training/dmc-268-api-t6/actions/runs/40497818211) passed, and [round 2 human review](https://github.com/larchanka-training/dmc-268-api-t6/pull/339#pullrequestreview-5667073079) approved that head. Round 2 implementation and final code verification for all ten new P3 corrections are complete: all four gates passed with 9604 tests and zero skips/failures/errors, actual image help passed, and cumulative Standards/Spec findings are zero. Historical approval does not approve the new diff; publication/new-head CI/approval status belongs on the live PR. Real GitLab acceptance remains pending.
+Plan: [335-plan.md](335-plan.md). Human-approved implementation published as [PR #339](https://github.com/larchanka-training/dmc-268-api-t6/pull/339). Round 1 publication on `1f74bd78` and its approval are historical. Round 2 corrections were published on `91556a06f122cfc4a083c9f11636165cb9cd91e9`; body/replies were updated and [CI 40542067728](https://github.com/larchanka-training/dmc-268-api-t6/actions/runs/40542067728) passed (15 successful jobs, four expected deployment/publication skips). The subsequent [round 3 review](https://github.com/larchanka-training/dmc-268-api-t6/pull/339#pullrequestreview-5671678508) requested changes. Historical local full-suite evidence (round 1: 9298; round 2: 9604 tests, zero skips/failures/errors) and prior approval do not verify or approve this new head. The bounded round 3 source amendment below covers all two P2 and seven concrete P3 units. Final publication, CI, replies and approval are recorded on the live PR. Real GitLab acceptance remains pending.
 
 ## Gates before development
 
@@ -142,7 +142,8 @@ Dependencies: reviewed deployment available, authorized operator access, protect
 keyring/PAT/webhook secret, test workspace/project, healthy workers/prompts/LLM.
 
 - [ ] Verify prerequisites securely; missing access remains an explicit pending gate.
-- [ ] Create/bind/inspect/activate only the authorized disposable installation.
+- [ ] Create/bind/inspect, then separately authorize/activate only the disposable
+      installation and establish process admission.
 - [ ] Configure a real GitLab MR webhook and run a fixture yielding inline findings.
 - [ ] Record one succeeded `provider=gitlab` run, no GitHub API, inline discussion(s)
       and exactly one summary; record real MR/head/delivery/run references privately.
@@ -277,7 +278,8 @@ Dependencies: R3–R4. Files: SECRETS, CICD; preserve existing #283 sections.
 - [x] Add Settings → Webhooks, correct staging URL/create UUID, same protected
       webhook_secret as Secret token / X-Gitlab-Token, only Merge request events,
       SSL verification, stable webhook-id or Idempotency-Key prerequisite, and
-      precise configure → activate → process-admission → real MR order
+      precise activate → process-admission → configure-hook → real MR order
+      (round 3 corrects the historical pre-activation hook order)
       (P2 `4387180613`). Keep unrelated installations operational.
 - [x] Explain 202/installation receipt as intake evidence only, exact original
       Recent events resend with unchanged identity/payload, publication counts,
@@ -303,7 +305,8 @@ Files: gitlab_admin, its tests, env example.
 - [x] Wrap env-example long optional-origin comment without behavior change (P3.12).
 - [x] Check all subcommand help against runbook and focused admin tests; affected
       lint/type/format checks pass. Seven current subcommands checked; 57 focused
-      admin tests pass, including nine new help regressions with recorded RED/GREEN.
+      admin tests pass, including nine new root-help text regressions with recorded RED/GREEN;
+      seven subcommand help probes exit zero.
       Fresh independent R6 Standards/Spec reviews report zero actionable findings.
 
 ### R7 — Fresh final candidate and existing PR update
@@ -354,7 +357,9 @@ the live PR when it occurs, without another source checkbox cycle.
 - [x] P3-1/P3-2: correct TMPDIR test naming, narrow rename injection to the GitLab
       validation `gitlab.env` destination, and record isolated guard-mutant failure
       plus passing unchanged public deploy/manual+auto rollback tests. Isolated
-      guard mutant fails all three public operations; unchanged candidate passes.
+      guard mutant fails all three public operations; the human review counted
+      four including the conditional-helper case (count clarification only).
+      Unchanged candidate passes.
 - [x] P3-4: test every `GITLAB_*` key in every `ENV_FILES` entry against literal
       allowed destinations `gitlab.env`/`api.env`; isolated misrouting fails once.
 - [x] P3-6/P3-8: separate known diagnostic categories from unknown fallback,
@@ -388,4 +393,57 @@ the live PR when it occurs, without another source checkbox cycle.
       zero skips/failures/errors. All 15 frozen paths, dependency inputs, HEAD
       `5062c7ca` and 374 production-image inputs matched before/after verification.
       Actual production-image help passed eight network-disabled commands (root
-      plus all seven subcommands). No new wrapper matrix or live AC proof claimed.
+      plus all seven subcommands). Text assertions about flags/FD/bootstrap apply
+      only to root help; seven subcommand help probes exit zero. No new wrapper
+      matrix or live AC proof claimed.
+
+
+## Review round 3 — bounded source ledger
+
+Source scope: two P2 plus seven concrete P3 units; existing current-PR approval and
+#340 coordination apply. This ledger stops at implementation/focused proof. Final
+publication/CI/replies/review request are recorded on the live PR, without another
+bookkeeping commit; historical approval does not approve the new diff.
+
+- [x] R0: rebase onto main `1727a954186b42d508b5bab2ee59391bf0e75c54`, yielding
+      `4d282a343a6f893c7a588c6da52419868431c2c8`; three range-diff `=` entries,
+      all 15 feature blobs and 42 new-main path blobs preserved; existing #340
+      notice still covers this scope and second-merger reconciliation.
+- [x] P2 hook: normal create/bind/inspect → separately authorized activate → process
+      admission → register hook → acceptance MR; activate has no hook dependency.
+      Recovery Test separately warns newest MR/action open, no-MR failure and real
+      Run/LLM/publication/head consumption. Test before acceptance MR or push new
+      head afterward; measure all its counts, then Resend original delivery.
+- [x] P2 label: remove GitLab label prerequisite; document bound enabled/available
+      project open/update/reopen, active connection/process admission, open/current
+      head, `wait_for_ci=never`, rules/prompt and workers/LLM; isolate test MRs.
+      Preserve GitHub label policy. Existing GitLab trigger suite: 91 passed,
+      zero skips; cache-only warning from managed-checkout permissions.
+- [x] P3-1: entire Docker-call suffix is empty; isolated top-level Docker-config
+      TMPDIR-bypass mutant fails three cases at the new assertion.
+- [x] P3-2: explicitly input recorded installation UUID, inspect and match identity;
+      obtain fresh generation before activate/rotate, rejecting empty/malformed,
+      inherited stale, EOF and inspect-error flows without terminating the shell.
+- [x] P3-3: revoke inspect uses `connection.revoked` / `connection.intake_enabled`.
+- [x] P3-4: service table and operator commands use `run --rm --no-deps -T`.
+- [x] P3-5: select literal diagnostic prefix by operation; isolated wrong-prefix
+      mutant fails six cases at the new assertion. Combined candidate boundary,
+      unknown/known diagnostic selection: 27 passed in 48.93s, zero skips;
+      affected Ruff/format/mypy pass. Runtime scripts unchanged.
+- [x] P3-6a: one exact-stage read-only metadata/PID/PPID/PGID/comm/open-file/cwd
+      examples; required visibility/tools, serialization, full child review and
+      failure/empty-output stops. No secret contents or automatic cleanup.
+- [x] P3-6b: R2 headings 3–5 completed; actual `91556a06` publication/body/replies,
+      CI 40542067728 (15 success/four expected skips), then R3 requested changes.
+      Root-help text only versus seven exit-zero subcommand probes; three public
+      missing-guard cases versus four including helper clarified as historical counts.
+- [x] Owner B proof: 13 extracted Bash blocks pass `bash -n`; 23 synthetic interactive
+      operator flows and 12 scoped orphan fixture/error flows pass. Official upstream
+      ProjectTestData/WebHookService and local eligibility/head dedup/PIPELINE_SPEC
+      checked. No live server, hook Test, provider/LLM call or abandonment proof.
+
+Source freeze is followed by fresh cumulative independent Standards/Spec reviews and
+local repo-wide Ruff lint/format/mypy. Full pytest runs on the actual published head
+in unchanged canonical unit/four-integration-shard/exact-once CI. Report actual new
+results on the PR; historical 9604 is not a fresh count. Task 7's eight live checks
+remain unchecked; no merge, deploy, acceptance or issue closure is authorized here.

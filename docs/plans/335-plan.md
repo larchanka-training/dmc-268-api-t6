@@ -1,6 +1,6 @@
 # Plan: GitLab staging configuration (#335)
 
-Status: human-approved implementation published as [PR #339](https://github.com/larchanka-training/dmc-268-api-t6/pull/339). Round 1 corrections R0–R7 were published on `1f74bd78db8468d5a719b0891b4c36bde6503e76`: the PR body and three thread replies were updated, all three threads were resolved, [CI 40497818211](https://github.com/larchanka-training/dmc-268-api-t6/actions/runs/40497818211) passed, and the [round 2 human review](https://github.com/larchanka-training/dmc-268-api-t6/pull/339#pullrequestreview-5667073079) approved that head. Historical round 1 verification included all four code gates (9298 tests, zero skips/failures/errors), production-image smoke and zero actionable cumulative Standards/Spec findings. Round 2 implementation and final code verification for all ten P3 items are complete: all four release gates pass (9604 tests, zero skips/failures/errors), actual production-image CLI help passes, and cumulative Standards/Spec reviews report zero actionable findings. Historical approval does not approve the new round 2 diff; publication, new-head CI and approval are recorded on the live PR. Real GitLab acceptance remains pending.
+Status: human-approved implementation published as [PR #339](https://github.com/larchanka-training/dmc-268-api-t6/pull/339). Round 1 publication on `1f74bd78` and its approval are historical. Round 2 corrections were published on `91556a06f122cfc4a083c9f11636165cb9cd91e9`; body/replies were updated and [CI 40542067728](https://github.com/larchanka-training/dmc-268-api-t6/actions/runs/40542067728) passed (15 successful jobs, four expected deployment/publication skips). The subsequent [round 3 review](https://github.com/larchanka-training/dmc-268-api-t6/pull/339#pullrequestreview-5671678508) requested changes. Historical local full-suite evidence (round 1: 9298; round 2: 9604 tests, zero skips/failures/errors) and prior approval do not verify or approve this new head. The bounded round 3 source amendment below covers all two P2 and seven concrete P3 units. Final publication, CI, replies and approval are recorded on the live PR. Real GitLab acceptance remains pending.
 Published integration baseline: `f160ce4c82220c20e627fbfdc0230b43a5f34492` (`main`, merged monitoring #279 retained).
 Round 1 integration baseline: `430d6604a0fc289916b34cc5aa6bdd307cea40b8`; fetched/rebased without conflicts, preserving all original PR file bytes and planner changes.
 Original design/test baseline: `88bbc0734e50e33fa769940291a79ff997102994` (#169 merged).
@@ -391,8 +391,8 @@ Dependencies: R3–R4 and published #340 notice. Files: `docs/SECRETS.md`,
 
 - End initial setup commands at inspect; use interactive-safe error handling, and
   obtain/validate generation before the single separately gated activate command.
-  Place project-hook setup after create/bind/inspect, then authorized activation,
-  API admission if first onboarding, and real MR delivery. Existing installations
+  Place separately authorized activation after create/bind/inspect, then
+  API admission if first onboarding, project-hook registration, and real MR delivery. Existing installations
   keep their process flag; no broad disable or unrelated-workspace operation.
 - Specify Settings → Webhooks, URL
   `https://<staging-api>/webhooks/gitlab/<installation_id>` using the create UUID,
@@ -473,10 +473,12 @@ is the finding source; checked implementation status lives in `335-todo.md`.
    `GITLAB_*` routing entry to live in literal `gitlab.env` or `api.env`. Separate
    known diagnostic categories from unknown fallback, retaining secrecy/cleanup
    assertions; remove only the two duplicate shell blank lines. The isolated
-   missing-guard mutant failed all three public operations; isolated misrouting
+   missing-guard mutant failed all three public operations (deploy/manual/auto
+   rollback); the human review counted four including the conditional-helper
+   case, a count clarification only. Isolated misrouting
    failed the routing invariant. The unchanged complete deploy test file passed
    348 tests in 456.29s, with zero skips/failures/errors; affected static checks pass.
-3. **Operator runbook (P3-3, P3-7a–e, P3-9).** Document conservative recovery of
+3. **Operator runbook (P3-3, P3-7a–e, P3-9; completed).** Document conservative recovery of
    abandoned `.stage.*` secret copies and rotation accounting without automatic
    cleanup. Make the prefix reusable in a fresh session; name actual inspect JSON
    keys; make login/generation failures visible without continuing setup or
@@ -484,11 +486,11 @@ is the finding source; checked implementation status lives in `335-todo.md`.
    the real MR. Cite primary GitLab header/Resend contracts while keeping installed
    version, observed delivery/replay and revocation proof pending. Verify extracted
    Bash syntax and synthetic stub control flow; do not claim live evidence.
-4. **CLI help (P3-5).** Require `run --rm --no-deps -T`, retain container stdin
+4. **CLI help (P3-5; completed).** Require `run --rm --no-deps -T`, retain container stdin
    FD 0 versus local FD 3 and image-available Python, and direct
    `prompt_not_seeded` recovery through successful reviewed deploy bootstrap.
    Use actual help RED/GREEN and the complete admin test file.
-5. **Historical bookkeeping (P3-10).** Record completed round 1 body, publication,
+5. **Historical bookkeeping (P3-10; completed).** Record completed round 1 body, publication,
    CI, replies, resolved threads and approval above and in the task list. Remove
    obsolete status qualifications and workstation traces; keep Task 7 incomplete.
 6. **Final candidate verification (completed).** Focused checks are complete and fresh
@@ -501,13 +503,58 @@ is the finding source; checked implementation status lives in `335-todo.md`.
    outcomes. All 15 candidate paths, dependency inputs, HEAD `5062c7ca` and all
    374 effective production-image inputs matched before/after verification.
    The actual production image passed eight network-disabled CLI help probes
-   (root plus seven commands); no new preflight wrapper matrix or live acceptance
-   is claimed. Historical counts remain evidence for their own heads.
+   (root plus seven commands). The `--no-deps`, FD 0/FD 3 and bootstrap text
+   assertions apply to root help only; all seven subcommand helps exited zero. No new preflight wrapper matrix
+   or live acceptance is claimed. Historical counts remain evidence for their own heads.
 
 Round 2's bounded source ledger covers implementation, review and final code
-verification only. Publication, new-head CI, thread replies and approval are
-recorded on [PR #339](https://github.com/larchanka-training/dmc-268-api-t6/pull/339)
-when they occur; recording them does not require another bookkeeping commit.
+verification only. Round 2 publication, body/thread replies and new-head CI
+completed on [PR #339](https://github.com/larchanka-training/dmc-268-api-t6/pull/339)
+head `91556a06` (CI 40542067728: 15 success, four expected skips), followed by
+round 3 REQUEST_CHANGES; no new approval is claimed. Recording live publication activity
+does not require another bookkeeping commit.
 Refresh main before requesting review and again before merge; a diff-changing push
 invalidates the historical approval and requires approval on the new head. No
 merge, deployment, live AC completion or issue closure is included in this round.
+
+
+## Review round 3 — bounded source amendment
+
+The existing approved current-PR scope covers both P2 threads and all seven concrete
+P3 units in [review 5671678508](https://github.com/larchanka-training/dmc-268-api-t6/pull/339#pullrequestreview-5671678508).
+Rebased before edits onto main `1727a954186b42d508b5bab2ee59391bf0e75c54`, yielding
+`4d282a343a6f893c7a588c6da52419868431c2c8`: all three feature range-diff entries
+are unchanged (`=`), all 15 feature blobs and all 42 new-main path blobs preserved.
+Existing #340 coordination covers the same continuing shared files; whoever merges
+second still rebases and reconciles allowlists/recipient tables. Owners edit only the
+one existing deployment test file and these four documentation files.
+
+| Finding | Correction and focused evidence |
+|---|---|
+| P2 hook recovery | Normal create/bind/inspect → separately authorized activate → process admission → hook → acceptance MR; activation has no hook dependency. Recovery Test is separate: newest MR/action open, no-MR failure, real Run/LLM/publication and head consumption. Test before acceptance MR or push a new head afterward; count all publications for that head. Resend preserves the original delivery. |
+| P2 GitLab label | GitLab open/update/reopen uses enabled bound project, active connection/process admission, open MR/current head, `wait_for_ci=never`, ready rules/prompt and workers/LLM. No `ai-review` admission; GitHub labeling retained. Use isolated acceptance-only MRs. Existing GitLab trigger tests: 91 passed, zero skips. |
+| P3-1 Docker boundary | Require the complete Docker-call suffix to be empty for deploy/manual/auto rollback. Isolated top-level Docker-config TMPDIR-bypass mutant: three failures at the new assertion; unchanged runtime. |
+| P3-2 fresh session | Explicit recorded installation UUID input, fresh inspect/identity check, fresh generation for activate/rotate; malformed/empty/stale/EOF/error paths stop the operation while the interactive shell survives. |
+| P3-3 inspect keys | Revoke verification uses `connection.revoked` and `connection.intake_enabled`. |
+| P3-4 operator table | All operator examples/table use `run --rm --no-deps -T`. |
+| P3-5 diagnostic prefix | Operation-specific literal deployment/rollback prefix; isolated swapped-prefix mutant: six failures at the new assertion. Combined candidate deployment selection: 27 passed in 48.93s, zero skips. |
+| P3-6a orphan examples | Read-only exact-stage metadata, scoped PID/PPID/PGID/comm tree, open-file/cwd commands. Required tools/full authorized visibility, serialized work, child review, all errors/empty outputs fail closed; no credential contents or cleanup automation. |
+| P3-6b ledger | R2 items 3–5 marked completed; recorded actual R2 publication/CI and subsequent requested changes. Root-help text versus seven exit-zero subcommand probes and three public mutation cases versus four including helper are clarified without new evidence claims. |
+
+Bash syntax passes for 13 extracted GitLab section blocks (11 SECRETS, two CICD).
+Synthetic interactive Bash/stub checks pass 23 operator flows and 12 scoped orphan
+fixture/error flows; they use no real credentials/server/provider calls and do not
+prove live abandonment. GitLab claims were checked against official upstream
+[ProjectTestData](https://gitlab.com/gitlab-org/gitlab/-/blob/master/app/services/concerns/integrations/project_test_data.rb#L34-40)
+and [WebHookService headers](https://gitlab.com/gitlab-org/gitlab/-/blob/master/app/services/web_hook_service.rb#L210-230),
+local GitLab eligibility, head dedup and PIPELINE_SPEC T1/§8.4. Installed-version,
+real MR/replay/revoke and Task 7 evidence remain pending.
+
+This ledger ends at source implementation/focused verification. Fresh independent
+cumulative Standards/Spec review and the final three local static gates follow source
+freeze. Full pytest is the unchanged canonical published-head CI: unit zero-skip gate,
+four integration shards and exact-once/zero-skip aggregator. Historical 9604 is not a
+new-head result; do not duplicate the historical 38-minute local full run for this
+docs/assertions-only round. Final publication, actual CI/security results, thread
+replies and review request are recorded on the live PR without another source ledger
+commit. No merge, deployment, live acceptance or issue closure is included.
