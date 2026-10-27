@@ -408,6 +408,34 @@ def test_provenance_guard_names_the_ignore_mask_and_its_rules_line(
     }
 
 
+def test_provenance_guard_names_a_mask_without_a_line_when_the_rules_text_drifted() -> None:
+    # The stored rules text no longer gives back the stored mask: it still applies, unlined.
+    snapshot = replace(
+        make_snapshot(ignore_patterns=("secret/**",)),
+        rules=make_policy_document_missing(".review/rules.md"),
+    )
+    block = ManifestBlock(
+        block_id="b-ignored",
+        source_role=SourceRole.DIFF,
+        source_kind="source_code",
+        path="secret/key.py",
+    )
+    manifest = CallManifest(
+        call_id=uuid.uuid4(), run_id=snapshot.run_id, stage="review", blocks=(block,)
+    )
+
+    with pytest.raises(PolicyError) as exc_info:
+        verify_provenance_pre_send_guard(manifest, snapshot=snapshot)
+
+    error = exc_info.value
+    assert error.code is PolicyErrorCode.CONTEXT_VIOLATION
+    assert (error.source_path, error.line) == (".review/rules.md", None)
+    assert str(error) == (
+        "policy_context_violation: Block 'b-ignored' references ignored path matching "
+        "deny-set | файл `.review/rules.md`, маска `secret/**`"
+    )
+
+
 def test_provenance_guard_match_budget_error_names_the_policy_base(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

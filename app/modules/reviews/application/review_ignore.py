@@ -9,10 +9,12 @@ shell glob. Ignore decisions are kept apart from the diff map and keyed by ``fil
 from __future__ import annotations
 
 import json
+import logging
 import re
 import unicodedata
 from collections.abc import Callable
 from dataclasses import dataclass
+from functools import lru_cache
 from hashlib import sha256
 
 import markdown_it
@@ -33,6 +35,7 @@ MAX_PATTERN_SEGMENTS = 32
 MAX_TRANSITIONS_PER_PATH = 8_000_000
 MAX_TRANSITIONS_PER_RUN = 80_000_000
 
+_LOGGER = logging.getLogger(__name__)
 _INFO = "review-ignore"
 _FORBIDDEN_LITERALS = frozenset("\\!?[]{}")
 _DRIVE_PREFIX = re.compile(r"[A-Za-z]:")
@@ -199,33 +202,65 @@ def _policy(lines: tuple[IgnorePatternLine, ...]) -> IgnorePolicy:
 
 
 def snapshot_ignore_policy(snapshot: PolicySnapshot) -> IgnorePolicy:
-    """The ignore policy of a stored snapshot, with the source lines of its masks.
+    """The ignore policy of a stored snapshot, with the source lines of its masks if it can.
 
     The snapshot stores the masks, not the lines they came from (RULES_FORMAT_SPEC §7.1):
-    they are recovered by parsing its staged rules text again, which must give back the
-    stored masks and, hashed with the versions the snapshot pinned, its ``ignore_digest``.
-    A parse error of that text is raised unchanged.
+    they are recovered by parsing its staged rules text again. The lines are diagnostics
+    and never fail the run: when the text no longer parses, or gives back other masks or,
+    hashed with the versions the snapshot pinned, another ``ignore_digest``, the stored
+    masks apply without lines and a warning is logged. Reading the snapshot already checked
+    its stored values, so such a mismatch is drift of the parser, its limits or grammar.
     """
-    policy = parse_review_ignore(snapshot.rules.text, policy_base_sha=snapshot.policy_base_sha)
-    if policy.patterns != snapshot.ignore_patterns:
-        raise PolicyError(
-            PolicyErrorCode.SNAPSHOT_INTEGRITY_ERROR,
-            "The stored ignore_patterns do not match the masks of the stored rules text",
-            policy_base_sha=snapshot.policy_base_sha,
-        )
-    expected = ignore_digest(
-        policy.patterns,
-        matcher_version=snapshot.matcher_version,
-        builtin_exclusions_version=snapshot.builtin_exclusions_version,
-        limits_version=snapshot.limits_version,
+    return _snapshot_ignore_policy(
+        snapshot.rules.text,
+        snapshot.policy_base_sha,
+        snapshot.ignore_patterns,
+        snapshot.ignore_digest,
+        snapshot.matcher_version,
+        snapshot.builtin_exclusions_version,
+        snapshot.limits_version,
     )
-    if expected != snapshot.ignore_digest:
-        raise PolicyError(
-            PolicyErrorCode.SNAPSHOT_INTEGRITY_ERROR,
-            "The stored ignore_digest does not match the masks of the stored rules text",
-            policy_base_sha=snapshot.policy_base_sha,
-        )
-    return IgnorePolicy(policy.patterns, policy.source_lines, snapshot.ignore_digest)
+
+
+# The guard reads the snapshot before every model call, and a long rules text takes
+# hundreds of milliseconds to parse: one parse per snapshot content and process.
+@lru_cache(maxsize=64)
+def _snapshot_ignore_policy(
+    rules_text: str | None,
+    policy_base_sha: str,
+    patterns: tuple[str, ...],
+    digest: str,
+    matcher_version: str,
+    builtin_exclusions_version: str,
+    limits_version: str,
+) -> IgnorePolicy:
+    try:
+        policy = parse_review_ignore(rules_text, policy_base_sha=policy_base_sha)
+    except PolicyError as exc:
+        reason = exc.code.value
+    else:
+        if policy.patterns != patterns:
+            reason = "the re-parsed masks differ from the stored ones"
+        elif (
+            ignore_digest(
+                policy.patterns,
+                matcher_version=matcher_version,
+                builtin_exclusions_version=builtin_exclusions_version,
+                limits_version=limits_version,
+            )
+            != digest
+        ):
+            reason = "the re-parsed digest differs from the stored one"
+        else:
+            return IgnorePolicy(patterns, policy.source_lines, digest)
+    # Only the reason and the base: never the rules text or a mask.
+    _LOGGER.warning(
+        "Ignore source lines are unavailable, the stored masks apply without them: "
+        "%s policy_base_sha=%s",
+        reason,
+        policy_base_sha,
+    )
+    return IgnorePolicy(patterns, (), digest)
 
 
 def ignore_digest(

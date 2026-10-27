@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
@@ -357,33 +358,32 @@ def test_retry_reuses_the_stored_policy_snapshot() -> None:
     assert second.steps[0][2]["ignore_patterns"] == 1
 
 
-def test_stored_masks_that_disagree_with_the_rules_text_fail_the_policy_load() -> None:
+def test_stored_masks_that_disagree_with_the_rules_text_still_decide_the_run(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    review_ignore._snapshot_ignore_policy.cache_clear()
     store = Store()
     asyncio.run(_stage(Trace(), store=store).run(_RUN))
     assert store.snapshot is not None
     # The rules text still says generated/**; the stored masks no longer do.
     store.snapshot = replace(store.snapshot, ignore_patterns=("other/**",))
     trace = Trace()
+    stage = _stage(trace, store=store)
 
-    with pytest.raises(PolicyError) as caught:
-        asyncio.run(_stage(trace, store=store).run(_RUN))
+    with caplog.at_level(logging.WARNING, logger=review_ignore.__name__):
+        payload = asyncio.run(stage.run(_RUN))
 
-    assert caught.value.code is PolicyErrorCode.SNAPSHOT_INTEGRITY_ERROR
-    # The attempt ends in policy.load: no diff, no context and no model input.
-    [(tool, _, response)] = trace.steps
-    assert tool == "policy.load"
-    assert response["error"]["diagnostic"] == {
-        "code": "policy_snapshot_integrity_error",
-        "source_path": None,
-        "policy_base_sha": _BASE,
-        "message": "The stored ignore_patterns do not match the masks of the stored rules text",
-        "line": None,
-        "column": None,
-        "pattern_index": None,
-        "limit": None,
-        "actual": None,
-        "retryable": False,
-    }
+    # The source lines are diagnostics: their loss never fails the run, and the stored
+    # masks, not the re-parsed ones, decide what is withheld.
+    assert payload is not None
+    assert [step[0] for step in trace.steps] == ["policy.load", "context.build"]
+    assert (stage.excluded("other/a.py"), stage.excluded("generated/b.py")) == (True, False)
+    assert [
+        record.getMessage() for record in caplog.records if record.name == review_ignore.__name__
+    ] == [
+        "Ignore source lines are unavailable, the stored masks apply without them: "
+        f"the re-parsed masks differ from the stored ones policy_base_sha={_BASE}"
+    ]
 
 
 def test_unknown_merge_base_is_recorded_as_unknown_not_as_the_policy_base() -> None:

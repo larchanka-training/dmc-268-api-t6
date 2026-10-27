@@ -476,9 +476,8 @@ class ReviewContextStage:
                     exc.policy_base_sha = run.base_sha
                 raise
             step.response = policy_summary(self._snapshot)
-            # The snapshot keeps validated masks; the matcher is rebuilt from its rules text,
-            # which must give them back. A mismatch is a read check of the snapshot, so it
-            # stays in this step (RFS §9).
+            # The snapshot keeps validated masks; the matcher is rebuilt from them, with their
+            # source lines when its rules text still gives them back.
             self._matcher = IgnoreMatcher(
                 snapshot_ignore_policy(self._snapshot),
                 policy_base_sha=self._snapshot.policy_base_sha,

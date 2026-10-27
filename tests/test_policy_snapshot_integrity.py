@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
+import logging
+from collections.abc import Callable, Iterator
 from dataclasses import replace
 from hashlib import sha256
 from typing import Any
@@ -36,6 +37,7 @@ from app.modules.reviews.application.prepare_policy_snapshot import (
 from app.modules.reviews.application.review_ignore import (
     PARSER_VERSION,
     IgnorePatternLine,
+    IgnorePolicy,
     ignore_digest,
     parse_review_ignore,
 )
@@ -460,62 +462,127 @@ def test_the_ignore_policy_of_a_snapshot_gives_back_the_source_lines_of_its_mask
     assert policy.digest == snapshot.ignore_digest
 
 
+_LOGGER_NAME = "app.modules.reviews.application.review_ignore"
+
+
+@pytest.fixture
+def fresh_ignore_cache() -> Iterator[None]:
+    """The re-parse of a snapshot is cached; a test that observes it starts and ends empty."""
+    review_ignore._snapshot_ignore_policy.cache_clear()
+    yield
+    review_ignore._snapshot_ignore_policy.cache_clear()
+
+
+def _warnings(caplog: pytest.LogCaptureFixture) -> list[str]:
+    return [
+        record.getMessage()
+        for record in caplog.records
+        if record.name == _LOGGER_NAME and record.levelno == logging.WARNING
+    ]
+
+
+def _fallback_warning(reason: str) -> str:
+    return (
+        "Ignore source lines are unavailable, the stored masks apply without them: "
+        f"{reason} policy_base_sha={'b' * 40}"
+    )
+
+
 @pytest.mark.parametrize(
-    ("change", "message"),
+    ("change", "patterns", "reason"),
     [
         (
             lambda item: replace(item, ignore_patterns=("vendor/**",)),
-            "The stored ignore_patterns do not match the masks of the stored rules text",
+            ("vendor/**",),
+            "the re-parsed masks differ from the stored ones",
         ),
         (
             lambda item: replace(item, ignore_digest="0" * 64),
-            "The stored ignore_digest does not match the masks of the stored rules text",
+            ("build/**", "vendor/**"),
+            "the re-parsed digest differs from the stored one",
         ),
     ],
     ids=["ignore-patterns", "ignore-digest"],
 )
-def test_a_snapshot_whose_masks_disagree_with_its_rules_text_fails(
-    change: Callable[[PolicySnapshot], PolicySnapshot], message: str
+@pytest.mark.usefixtures("fresh_ignore_cache")
+def test_a_snapshot_whose_masks_disagree_with_its_rules_text_keeps_its_stored_masks(
+    change: Callable[[PolicySnapshot], PolicySnapshot],
+    patterns: tuple[str, ...],
+    reason: str,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
-    with pytest.raises(PolicyError) as caught:
-        review_ignore.snapshot_ignore_policy(change(_two_masks()))
+    stored = change(_two_masks())
 
-    assert caught.value.diagnostic() == {
-        "code": "policy_snapshot_integrity_error",
-        "source_path": None,
-        "policy_base_sha": "b" * 40,
-        "message": message,
-        "line": None,
-        "column": None,
-        "pattern_index": None,
-        "limit": None,
-        "actual": None,
-        "retryable": False,
-    }
+    with caplog.at_level(logging.WARNING, logger=_LOGGER_NAME):
+        policy = review_ignore.snapshot_ignore_policy(stored)
+
+    # The stored values are checked on read (part 3), so a mismatch here is version drift:
+    # the lines are diagnostics and never fail the run.
+    assert policy == IgnorePolicy(patterns, (), stored.ignore_digest)
+    assert _warnings(caplog) == [_fallback_warning(reason)]
 
 
-def test_a_snapshot_stored_under_another_matcher_version_keeps_its_ignore_policy() -> None:
-    current = _two_masks()
-    # The digest of the same masks under the versions this snapshot pinned, not the current ones.
-    stored = replace(
-        current,
-        matcher_version="review-ignore/v0",
-        ignore_digest=ignore_digest(
-            current.ignore_patterns,
-            matcher_version="review-ignore/v0",
-            builtin_exclusions_version=current.builtin_exclusions_version,
-            limits_version=current.limits_version,
-        ),
+@pytest.mark.usefixtures("fresh_ignore_cache")
+def test_masks_that_the_current_limits_reject_keep_the_stored_ones_without_lines(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    stored = _two_masks()
+    # A deploy lowered the limit after the snapshot was stored: its text no longer parses.
+    monkeypatch.setattr(review_ignore, "MAX_PATTERN_LINES", 1)
+
+    with caplog.at_level(logging.WARNING, logger=_LOGGER_NAME):
+        policy = review_ignore.snapshot_ignore_policy(stored)
+
+    assert policy == IgnorePolicy(("build/**", "vendor/**"), (), stored.ignore_digest)
+    assert _warnings(caplog) == [_fallback_warning("policy_ignore_limit_exceeded")]
+    assert "vendor" not in caplog.text
+
+
+def test_a_snapshot_stored_under_another_matcher_version_keeps_its_source_lines() -> None:
+    golden = (
+        '{"builtin_exclusions_version":"builtin-exclusions/v1",'
+        '"limits_version":"policy-limits/v1",'
+        '"matcher_version":"review-ignore/v0",'
+        '"policy_document_exemption":"base-policy-role-only/v1",'
+        '"rename_copy_propagation":"both-paths/v1",'
+        '"sorted_unique_patterns":["build/**","vendor/**"],'
+        '"version":1}'
     )
+    expected = sha256(golden.encode("utf-8")).hexdigest()
+    # The digest of the same masks under the versions the snapshot pinned, not the current ones.
+    stored = replace(_two_masks(), matcher_version="review-ignore/v0", ignore_digest=expected)
 
     policy = review_ignore.snapshot_ignore_policy(stored)
 
-    assert policy.source_lines == (
+    assert policy == IgnorePolicy(
+        ("build/**", "vendor/**"),
+        (IgnorePatternLine("vendor/**", 4), IgnorePatternLine("build/**", 6)),
+        expected,
+    )
+
+
+@pytest.mark.usefixtures("fresh_ignore_cache")
+def test_the_rules_text_of_a_snapshot_is_parsed_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[str | None] = []
+    parse = review_ignore.parse_review_ignore
+
+    def counting(rules_text: str | None, *, policy_base_sha: str | None = None) -> IgnorePolicy:
+        calls.append(rules_text)
+        return parse(rules_text, policy_base_sha=policy_base_sha)
+
+    monkeypatch.setattr(review_ignore, "parse_review_ignore", counting)
+    stored = _two_masks()
+
+    first = review_ignore.snapshot_ignore_policy(stored)
+    second = review_ignore.snapshot_ignore_policy(stored)
+
+    # The guard reads the snapshot before every model call of the run.
+    assert len(calls) == 1
+    assert second == first
+    assert first.source_lines == (
         IgnorePatternLine("vendor/**", 4),
         IgnorePatternLine("build/**", 6),
     )
-    assert policy.patterns == ("build/**", "vendor/**")
-    assert policy.digest == "ecf9380e9c4bee07509465c825727eadaf6143ecbaac76c4cec4e84fa6976a6a"
 
 
 def test_a_snapshot_without_rules_has_the_empty_ignore_policy() -> None:
@@ -525,23 +592,3 @@ def test_a_snapshot_without_rules_has_the_empty_ignore_policy() -> None:
 
     assert (policy.patterns, policy.source_lines) == ((), ())
     assert policy.digest == snapshot.ignore_digest
-
-
-def test_an_invalid_mask_of_the_stored_rules_text_fails_with_its_own_error() -> None:
-    broken = normalize_document(
-        RULES_DOCUMENT_PATH, b"```review-ignore\nsrc/a?.py\n```\n", blob_oid="3" * 40
-    )
-    snapshot = replace(_two_masks(), rules=broken)
-
-    with pytest.raises(PolicyError) as caught:
-        review_ignore.snapshot_ignore_policy(snapshot)
-
-    # The parser's error at the pinned base, not an integrity error of the snapshot.
-    error = caught.value
-    assert error.code is PolicyErrorCode.IGNORE_PATTERN_INVALID
-    assert (error.source_path, error.policy_base_sha, error.line, error.column) == (
-        RULES_DOCUMENT_PATH,
-        "b" * 40,
-        2,
-        6,
-    )
