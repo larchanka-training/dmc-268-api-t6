@@ -28,7 +28,9 @@ class GitLabPolicyDocumentSource:
             "rate_limited": PolicyErrorCode.RATE_LIMITED,
             "not_found": PolicyErrorCode.REVISION_UNAVAILABLE,
             "invalid_response": PolicyErrorCode.REVISION_UNAVAILABLE,
-            "body_too_large": PolicyErrorCode.DOCUMENT_TOO_LARGE,
+            # ``read_blob`` handles its own oversized blob, so this is a tree listing page
+            # over its cap: a cut listing proves nothing, as GitHub's truncated one.
+            "body_too_large": PolicyErrorCode.REVISION_UNAVAILABLE,
             "budget_exhausted": PolicyErrorCode.REVISION_UNAVAILABLE,
         }.get(error.kind, PolicyErrorCode.FETCH_TRANSIENT)
         return PolicyError(
@@ -36,7 +38,6 @@ class GitLabPolicyDocumentSource:
             "GitLab policy source is unavailable",
             policy_base_sha=self._base,
             retry_after=error.retry_after,
-            limit=MAX_DOCUMENT_BYTES if code is PolicyErrorCode.DOCUMENT_TOO_LARGE else None,
         )
 
     async def list_entries(self, tree_oid: str | None) -> Mapping[str, PolicyTreeEntry]:
