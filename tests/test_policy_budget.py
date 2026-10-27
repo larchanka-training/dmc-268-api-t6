@@ -392,7 +392,7 @@ def test_provenance_guard_names_the_ignore_mask_and_its_rules_line(
     assert (error.source_path, error.line) == (".review/rules.md", line)
     assert str(error) == (
         "policy_context_violation: Block 'b-ignored' references ignored path matching "
-        f"deny-set | файл `.review/rules.md`, строка {line}, маска `{mask}`"
+        f"deny-set | file `.review/rules.md`, line {line}, mask `{mask}`"
     )
     # RFS §9 defines pattern_index for a mask parse error only, so it stays null here.
     assert error.diagnostic() == {
@@ -434,7 +434,7 @@ def test_provenance_guard_names_a_mask_without_a_line_when_the_rules_text_drifte
     assert (error.source_path, error.line) == (".review/rules.md", None)
     assert str(error) == (
         "policy_context_violation: Block 'b-ignored' references ignored path matching "
-        "deny-set | файл `.review/rules.md`, маска `secret/**`"
+        "deny-set | file `.review/rules.md`, mask `secret/**`"
     )
 
 

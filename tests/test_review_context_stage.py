@@ -1186,7 +1186,7 @@ def test_check_run_says_where_a_policy_failure_is() -> None:
     hostile = "a?" + "`" + "x" * 200
     with pytest.raises(PolicyError) as long_mask:
         parse_review_ignore(f"```review-ignore\n{hostile}\n```\n")
-    quoted = summary(long_mask.value).split("маска ")[1]
+    quoted = summary(long_mask.value).split("mask ")[1]
     assert quoted == "`a?'" + "x" * 77 + "...`."
     assert quoted.count("`") == 2
 
