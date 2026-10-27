@@ -91,10 +91,11 @@ def _is_not_true(value: object) -> bool:
 
 
 class RulesDiagnosticDto(ApiDto):
-    """RULES_FORMAT_SPEC §9 in camelCase; ``limit``, ``actual`` and ``patternIndex`` are
-    omitted, not null, when the error has none. ``actualIsLowerBound`` is sent only as
-    ``true``, when ``actual`` is only a lower bound (such as the bytes of a blob read that
-    stopped past the cap); an exact ``actual`` goes without it."""
+    """RULES_FORMAT_SPEC §9 in camelCase; ``limit``, ``actual``, ``patternIndex`` and
+    ``excerpt`` are omitted, not null, when the error has none. ``actualIsLowerBound`` is
+    sent only as ``true``, when ``actual`` is only a lower bound (such as the bytes of a blob
+    read that stopped past the cap); an exact ``actual`` goes without it. ``message`` is
+    English; the UI shows its own text for a ``code`` it knows (#341)."""
 
     code: str
     message: str
@@ -105,6 +106,7 @@ class RulesDiagnosticDto(ApiDto):
     actual: int | None = Field(default=None, exclude_if=_is_none)
     actual_is_lower_bound: bool | None = Field(default=None, exclude_if=_is_not_true)
     pattern_index: int | None = Field(default=None, exclude_if=_is_none)
+    excerpt: str | None = Field(default=None, exclude_if=_is_none)
 
 
 class PresentRulesStatusDto(ApiDto):

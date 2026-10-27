@@ -402,10 +402,10 @@ class ContractRepositories:
 
 CHECKED_AT = datetime(2026, 10, 18, 9, 0, tzinfo=UTC)
 _TOO_LARGE = RulesDiagnostic(
-    "policy_document_too_large", "Документ правил превышает 64 КиБ.", None, None, False, 65536
+    "policy_document_too_large", "The rules document is over 64 KiB.", None, None, False, 65536
 )
 _TRANSIENT = RulesDiagnostic(
-    "policy_fetch_transient", "Не удалось прочитать документы правил из GitHub.", None, None, True
+    "policy_fetch_transient", "Could not read the rules documents from GitHub.", None, None, True
 )
 # One stored result of every variant; None is a repository that was never read.
 RULES_STATUSES: dict[str, RulesStatus | None] = {
@@ -436,9 +436,7 @@ RULES_STATUSES: dict[str, RulesStatus | None] = {
         "a" * 40,
         CHECKED_AT,
         diagnostics=(
-            RulesDiagnostic(
-                "policy_ignore_pattern_invalid", "Маска.", 5, 6, False, pattern_index=0
-            ),
+            RulesDiagnostic("policy_ignore_pattern_invalid", "Mask.", 5, 6, False, pattern_index=0),
         ),
         text="```review-ignore\nsrc/a?.py\n```\n",
     ),
@@ -794,13 +792,32 @@ def test_diagnostic_omits_the_limits_it_does_not_know() -> None:
     assert body.json()["diagnostics"] == [
         {
             "code": "policy_ignore_pattern_invalid",
-            "message": "Маска.",
+            "message": "Mask.",
             "line": 5,
             "column": 6,
             "retryable": False,
             "patternIndex": 0,
         }
     ]
+
+
+def test_diagnostic_serves_the_offending_mask_when_it_has_one() -> None:
+    stored = RULES_STATUSES["invalid"]
+    assert stored is not None
+    (diagnostic,) = stored.diagnostics
+    store = ContractRulesStatus(
+        replace(stored, diagnostics=(replace(diagnostic, excerpt="src/a?.py"),))
+    )
+    app.dependency_overrides[get_rules_status] = lambda: GetRulesStatus(
+        lambda: store, now=lambda: CHECKED_AT
+    )
+    try:
+        body = authenticated_test_client(app).get(f"/api/repos/{REPOSITORY_ID}/rules-status")
+    finally:
+        app.dependency_overrides.clear()
+
+    assert body.json()["diagnostics"][0]["excerpt"] == "src/a?.py"
+    _validator_for("get", "/api/repos/{repo_id}/rules-status", "200").validate(body.json())
 
 
 def test_rules_operations_are_replaced_and_the_status_is_not_shared_with_zod() -> None:
