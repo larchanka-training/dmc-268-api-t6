@@ -327,6 +327,65 @@ def test_failed_reads_are_stored_with_their_diagnostic(
 
 
 @pytest.mark.integration
+@pytest.mark.parametrize(
+    ("unsized", "actual", "flag"),
+    # The read stops after 17 chunks of 4096 bytes: 69632 is only a lower bound.
+    [(True, 69_632, {"actualIsLowerBound": True}), (False, 70_000, {})],
+    ids=["stopped-read", "listed-size"],
+)
+def test_a_too_large_actual_is_stored_and_shown_with_whether_it_is_a_lower_bound(
+    env: Env, unsized: bool, actual: int, flag: dict[str, bool]
+) -> None:
+    with api(env, _SCOPE) as (client, factory):
+        client.get(f"/api/repos/{REPO_A}/rules-status")
+        _refresh(factory, GitHubReader(FakeGitHub(rules=b"x" * 70_000, unsized=unsized)))
+        (stored,) = _row(factory, REPO_A).diagnostics
+        (shown,) = client.get(f"/api/repos/{REPO_A}/rules-status").json()["diagnostics"]
+
+    assert (stored["actual"], stored["actual_is_lower_bound"]) == (actual, unsized)
+    message = shown.pop("message")
+    # Present only as true: an exact size has no key at all, not false.
+    assert shown == {
+        "code": "policy_document_too_large",
+        "line": None,
+        "column": None,
+        "retryable": False,
+        "limit": 65_536,
+        "actual": actual,
+        **flag,
+    }
+    assert (str(actual) in message) is not unsized
+
+
+@pytest.mark.integration
+def test_a_diagnostic_stored_without_the_lower_bound_flag_reads_as_exact(env: Env) -> None:
+    async def stored_flag(factory: async_sessionmaker[Any]) -> bool:
+        async with SqlAlchemyRulesStatusUnitOfWork(factory, allow_unscoped=True) as uow:
+            stored = await uow.rules_status.get(REPO_A)
+        assert stored is not None and stored.status is not None
+        (diagnostic,) = stored.status.diagnostics
+        return diagnostic.actual_is_lower_bound
+
+    with api(env, _SCOPE) as (client, factory):
+        client.get(f"/api/repos/{REPO_A}/rules-status")
+        _refresh(factory, GitHubReader(FakeGitHub(rules=b"x" * 70_000, unsized=True)))
+        written = _row(factory, REPO_A).diagnostics[0]["actual_is_lower_bound"]
+        # A row written before the flag was stored has no key.
+        _execute(
+            factory,
+            "UPDATE repository_rules_status "
+            "SET diagnostics = diagnostics #- '{0,actual_is_lower_bound}'",
+        )
+        (old,) = _row(factory, REPO_A).diagnostics
+        (shown,) = client.get(f"/api/repos/{REPO_A}/rules-status").json()["diagnostics"]
+        read = asyncio.run(stored_flag(factory))
+
+    assert written is True
+    assert "actual_is_lower_bound" not in old and old["actual"] == 69_632
+    assert (read, shown["actual"], "actualIsLowerBound" in shown) == (False, 69_632, False)
+
+
+@pytest.mark.integration
 def test_a_stale_or_retryable_result_is_requested_again_on_get(env: Env) -> None:
     transient = RulesReading(
         RulesStatusKind.UNAVAILABLE,

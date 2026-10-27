@@ -1805,6 +1805,12 @@ components:
         actual:
           type: integer
           minimum: 0
+        actualIsLowerBound:
+          type: boolean
+          description: >-
+            Present, and true, only when `actual` is a lower bound and not the exact value,
+            such as the bytes received before a blob read stopped past `limit`. Omitted when
+            `actual` is exact or absent.
         patternIndex:
           type: integer
           minimum: 0
