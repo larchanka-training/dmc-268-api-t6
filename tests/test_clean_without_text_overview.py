@@ -82,7 +82,7 @@ def test_body_budget_preserves_partial_backend_result_and_accounts_for_all_findi
             async def store_review_output(
                 self,
                 run_id: UUID,
-                model_output: dict[str, object],
+                model_output: dict[str, object] | None,
                 parsed: ReviewOutput,
                 processed: ProcessedReviewOutput,
             ) -> ReviewPublication:

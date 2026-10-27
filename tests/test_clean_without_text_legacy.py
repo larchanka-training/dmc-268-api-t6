@@ -42,13 +42,13 @@ def test_legacy_inline_default_unknown_and_none_have_matching_body_labels(no_tex
         async def store_review_output(
             self,
             run_id: UUID,
-            model_output: dict[str, object],
+            model_output: dict[str, object] | None,
             parsed: ReviewOutput,
             processed: ProcessedReviewOutput,
         ) -> ReviewPublication:
             stored.append(processed)
             assert processed.summary == parsed.summary
-            assert model_output["summary"] == answer()["summary"]
+            assert model_output is not None and model_output["summary"] == answer()["summary"]
             return ReviewPublication("a" * 40, (), processed.review_body)
 
     repository = Repository(

@@ -149,9 +149,9 @@ Rules for every task:
   - the event ignores the null verdict (3);
   - the T8 guard is skipped on the second call (4).
 - **Done when:**
-  - [ ] 1–5 pass;
-  - [ ] the path is not wired yet, so live is unchanged;
-  - [ ] the gates pass.
+  - [x] 1–5 pass;
+  - [x] the path is not wired yet, so live is unchanged;
+  - [x] the gates pass.
 
 ## T4: The zero-LLM none route on the snapshot path (DD2–DD5)
 
