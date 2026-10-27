@@ -750,7 +750,7 @@ snapshot описывается `schema_version = 1`.
 | `run_id`, `snapshot_id`, `repository_id` | Владелец и идентичность снимка; repository должен совпадать с run |
 | `policy_base_sha` | Ровно сохранённый `Run.base_sha`; не обозначает автоматически LEFT diff |
 | `documents` | Ровно две записи для `.review/rules.md` и `AGENTS.md`: presence, blob_oid, raw/text SHA-256, raw bytes, text, byte/line counts |
-| `ignore_patterns` | Уникальные валидные маски в лексикографическом порядке; исходные строки отдельно для диагностики |
+| `ignore_patterns` | Уникальные валидные маски в лексикографическом порядке. Исходные строки масок для диагностики — не отдельное поле: они в staged `rules.text` снимка. Читатель снимка восстанавливает их повторным разбором этого текста и сверяет результат с `ignore_patterns` и `ignore_digest`; расхождение — `policy_snapshot_integrity_error`. Отказ pre-send guard по маске называет эту маску и первую строку с ней в `.review/rules.md` |
 | `parser_profile`, `matcher_version`, `limits_version` | `rules-markdown/v1`, `review-ignore/v1`, `policy-limits/v1`; exact parser version также закреплена |
 | `builtin_exclusions_version`, `priority_matcher_version` | Версии встроенных исключений и отдельного matcher веса |
 | `ignore_digest` | Checksum всех данных, определяющих допуск файлов |
@@ -1091,8 +1091,9 @@ nullable `line`, `column`, `pattern_index`, `limit`, `actual`, `retryable`.
 сопоставителя на пути run (стадия политики и pre-send guard) несут её сами.
 `source_path` называет документ, когда ошибка относится к нему: размер, кодировка,
 управляющий символ, тип, блок и маски, чтение blob документа, проверка при чтении
-сохранённых документов и снимка, бюджет сопоставления (`.review/rules.md` с
-масками). `source_path` — `null`, когда ошибка не относится к одному документу:
+сохранённых документов и снимка, бюджет сопоставления и отказ pre-send guard по
+маске (`.review/rules.md` с масками). `source_path` — `null`, когда ошибка не
+относится к одному документу:
 чтение дерева (корня или `.review`), HTTP-отказ при чтении ветки или репозитория,
 `policy_snapshot_integrity_error` профиля или снимка в целом, бюджет документов
 политики (`policy_prompt_budget_exceeded`) и `policy_path_invalid` — ошибка о пути
