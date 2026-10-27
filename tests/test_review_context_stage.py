@@ -39,7 +39,7 @@ from app.modules.reviews.application.policy_errors import PolicyError, PolicyErr
 from app.modules.reviews.application.policy_snapshot import PolicySnapshot
 from app.modules.reviews.application.prepare_policy_snapshot import PreparePolicySnapshot
 from app.modules.reviews.application.process_run import RunVcsInput
-from app.modules.reviews.application.prompt_builder import PullRequestMeta
+from app.modules.reviews.application.prompt_builder import FileStatus, PullRequestMeta
 from app.modules.reviews.application.rag_context import CachedBlobSource
 from app.modules.reviews.application.rag_index import OpenReviewIndex, RagReadiness
 from app.modules.reviews.application.review_context import (
@@ -72,6 +72,7 @@ from app.worker import WorkerSettings
 from tests.test_prepare_policy_snapshot import Store, Uow
 from tests.test_rag_context import BlobCacheUow, BlobStore, Graph, SharedBlobCache, _uses
 from tests.test_rag_readiness import FakeReviewIndexUow, StubReviewIndexAccess
+from tests.test_run_coverage import empty_snapshot
 
 _RUN = UUID("00000000-0000-0000-0000-000000000002")
 _HEAD = "a" * 40
@@ -578,6 +579,55 @@ def test_stage_names_what_it_withheld_from_model_inputs() -> None:
     assert stage.excluded("src/app.py") is False
 
 
+def test_stage_names_the_changed_files_an_anchor_proves_ignored() -> None:
+    # CVS §6.2 pass 2: every name of a changed file of proven identity that a mask, a
+    # built-in exclusion or the generated marker excluded. A binary or empty file, the
+    # source of a copy and a file of unresolved identity are not proven ignored files;
+    # under a mask a binary or empty file is (coverage classifies ``ignored`` first).
+    def changed(
+        path: str, status: FileStatus = "modified", previous: str | None = None
+    ) -> DiffSnapshot:
+        patch = _stored(path, "@@ -1 +1 @@\n-a\n+b")
+        return DiffSnapshot(path, patch, "f" * 40, status, previous, 1, 1, 2)
+
+    snapshots = [
+        *_snapshots(),
+        DiffSnapshot("generated/gone.py", None, None, "removed", None, 0, 1, 1),
+        changed("src/moved.py", "renamed", "generated/moved.py"),
+        changed("generated/copy.py", "copied", "src/app.py"),
+        changed("dist/bundle.ts"),
+        DiffSnapshot("src/schema.py", None, "8" * 40, omission_reason="generated"),
+        _binary(),
+        _binary("generated/logo.png"),
+        empty_snapshot(),
+        replace(empty_snapshot(), filename="generated/__init__.py"),
+        DiffSnapshot("generated/lost.py", None, status="renamed"),
+    ]
+    stage = _stage(
+        Trace(),
+        vcs=Vcs(files_changed=len(snapshots)),
+        snapshots=snapshots,
+        builtin_excluded=_is_generated,
+    )
+    assert stage.ignored_file_paths == frozenset()
+
+    asyncio.run(stage.run(_RUN))
+
+    assert stage.ignored_file_paths == {
+        "generated/api.py",
+        "generated/gone.py",
+        "src/moved.py",
+        "generated/moved.py",
+        "generated/copy.py",
+        "dist/bundle.ts",
+        "src/schema.py",
+        "generated/logo.png",
+        "generated/__init__.py",
+    }
+    # Withheld from every model input all the same, yet not proven ignored files.
+    assert all(stage.excluded(path) for path in ("logo.png", "pkg/__init__.py"))
+
+
 def test_failed_context_build_keeps_the_exclusions_and_does_not_fail_the_review() -> None:
     class Broken:
         async def execute(self, **kwargs: object) -> object:
@@ -943,6 +993,7 @@ def test_review_prompt_gets_neither_the_content_nor_the_name_of_an_ignored_file(
         head_sha: str | None = None
         snapshot_for_llm: PolicySnapshot | None = None
         payload: ReviewContextPayload | None = None
+        ignored_file_paths: frozenset[str] = frozenset()
 
         def excluded(self, path: str) -> bool:
             return path.startswith("generated/")

@@ -453,6 +453,7 @@ def test_execute_review_run_excluded_file_does_not_reach_verifier() -> None:
         head_sha: str | None = None
         snapshot_for_llm: PolicySnapshot | None = None
         payload: ReviewContextPayload | None = None
+        ignored_file_paths: frozenset[str] = frozenset()
 
         def excluded(self, path: str) -> bool:
             return path == "app/secret_credentials.env"
@@ -3384,6 +3385,7 @@ def test_execute_review_counter_version_and_diff_old_sha_propagation() -> None:
         head_sha: str | None = None
         snapshot_for_llm: PolicySnapshot | None = None
         payload: ReviewContextPayload | None = None
+        ignored_file_paths: frozenset[str] = frozenset()
 
         def excluded(self, path: str) -> bool:
             return False
@@ -3505,6 +3507,7 @@ class _StageSnapshot:
     diff_old_sha: str | None = None
     head_sha: str | None = None
     payload: ReviewContextPayload | None = None
+    ignored_file_paths: frozenset[str] = frozenset()
 
     def __init__(self, snapshot: PolicySnapshot | None) -> None:
         self.snapshot_for_llm = snapshot

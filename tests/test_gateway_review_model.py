@@ -734,6 +734,7 @@ class _ExcerptStage:
 
     diff_old_sha: str | None = None
     head_sha: str | None = PINNED_HEAD
+    ignored_file_paths: frozenset[str] = frozenset()
 
     def __init__(self, snapshot: PolicySnapshot | None, payload: ReviewContextPayload) -> None:
         self.snapshot_for_llm = snapshot
