@@ -1,6 +1,6 @@
 # Plan: GitLab staging configuration (#335)
 
-Status: human-approved implementation published as [PR #339](https://github.com/larchanka-training/dmc-268-api-t6/pull/339). Round 1 publication on `1f74bd78` and its approval are historical. Round 2 corrections were published on `91556a06f122cfc4a083c9f11636165cb9cd91e9`; body/replies were updated and [CI 40542067728](https://github.com/larchanka-training/dmc-268-api-t6/actions/runs/40542067728) passed (15 successful jobs, four expected deployment/publication skips). The subsequent [round 3 review](https://github.com/larchanka-training/dmc-268-api-t6/pull/339#pullrequestreview-5671678508) requested changes. Historical local full-suite evidence (round 1: 9298; round 2: 9604 tests, zero skips/failures/errors) and prior approval do not verify or approve this new head. The bounded round 3 source amendment below covers all two P2 and seven concrete P3 units. Final publication, CI, replies and approval are recorded on the live PR. Real GitLab acceptance remains pending.
+Status: human-approved implementation published as [PR #339](https://github.com/larchanka-training/dmc-268-api-t6/pull/339). Round 1 publication on `1f74bd78` and its approval are historical. Round 2 corrections were published on `91556a06f122cfc4a083c9f11636165cb9cd91e9`; body/replies were updated and [CI 40542067728](https://github.com/larchanka-training/dmc-268-api-t6/actions/runs/40542067728) passed (15 successful jobs, four expected deployment/publication skips). The subsequent [round 3 review](https://github.com/larchanka-training/dmc-268-api-t6/pull/339#pullrequestreview-5671678508) requested changes. Historical local full-suite evidence (round 1: 9298; round 2: 9604 tests, zero skips/failures/errors) and prior approval do not verify or approve this new head. Round 3 was published on `225df166afd2bf0dcc1f844fc088d0dd487b8353`; [CI 40577630853](https://github.com/larchanka-training/dmc-268-api-t6/actions/runs/40577630853) passed with 9643 tests (7921 unit + 1722 integration), zero skips/failures/errors. [Round 4 review 5674303775](https://github.com/larchanka-training/dmc-268-api-t6/pull/339#pullrequestreview-5674303775) approved that historical head and confirmed all five threads resolved. The bounded round 4 amendment below addresses all three P3 findings; the next head still needs fresh CI and approval. Final publication, CI, replies and review request are recorded on the live PR. Real GitLab acceptance remains pending.
 Published integration baseline: `f160ce4c82220c20e627fbfdc0230b43a5f34492` (`main`, merged monitoring #279 retained).
 Round 1 integration baseline: `430d6604a0fc289916b34cc5aa6bdd307cea40b8`; fetched/rebased without conflicts, preserving all original PR file bytes and planner changes.
 Original design/test baseline: `88bbc0734e50e33fa769940291a79ff997102994` (#169 merged).
@@ -532,7 +532,7 @@ one existing deployment test file and these four documentation files.
 | Finding | Correction and focused evidence |
 |---|---|
 | P2 hook recovery | Normal create/bind/inspect → separately authorized activate → process admission → hook → acceptance MR; activation has no hook dependency. Recovery Test is separate: newest MR/action open, no-MR failure, real Run/LLM/publication and head consumption. Test before acceptance MR or push a new head afterward; count all publications for that head. Resend preserves the original delivery. |
-| P2 GitLab label | GitLab open/update/reopen uses enabled bound project, active connection/process admission, open MR/current head, `wait_for_ci=never`, ready rules/prompt and workers/LLM. No `ai-review` admission; GitHub labeling retained. Use isolated acceptance-only MRs. Existing GitLab trigger tests: 91 passed, zero skips. |
+| P2 GitLab label | GitLab open/update/reopen uses enabled bound project, active connection/process admission, open MR/current head and `wait_for_ci=never`; no `ai-review` admission. Rules/prompt/workers/LLM are operational readiness; R4 below adds the shared active-Run/head gates. GitHub labeling retained. Use isolated acceptance-only MRs. Existing GitLab trigger tests: 91 passed, zero skips. |
 | P3-1 Docker boundary | Require the complete Docker-call suffix to be empty for deploy/manual/auto rollback. Isolated top-level Docker-config TMPDIR-bypass mutant: three failures at the new assertion; unchanged runtime. |
 | P3-2 fresh session | Explicit recorded installation UUID input, fresh inspect/identity check, fresh generation for activate/rotate; malformed/empty/stale/EOF/error paths stop the operation while the interactive shell survives. |
 | P3-3 inspect keys | Revoke verification uses `connection.revoked` and `connection.intake_enabled`. |
@@ -545,8 +545,8 @@ Bash syntax passes for 13 extracted GitLab section blocks (11 SECRETS, two CICD)
 Synthetic interactive Bash/stub checks pass 23 operator flows and 12 scoped orphan
 fixture/error flows; they use no real credentials/server/provider calls and do not
 prove live abandonment. GitLab claims were checked against official upstream
-[ProjectTestData](https://gitlab.com/gitlab-org/gitlab/-/blob/master/app/services/concerns/integrations/project_test_data.rb#L34-40)
-and [WebHookService headers](https://gitlab.com/gitlab-org/gitlab/-/blob/master/app/services/web_hook_service.rb#L210-230),
+[ProjectTestData](https://gitlab.com/gitlab-org/gitlab/-/blob/d993f849b41862881e4c4b2445f991fef0c67822/app/services/concerns/integrations/project_test_data.rb#L37-43)
+and [WebHookService headers](https://gitlab.com/gitlab-org/gitlab/-/blob/d993f849b41862881e4c4b2445f991fef0c67822/app/services/web_hook_service.rb#L227-242),
 local GitLab eligibility, head dedup and PIPELINE_SPEC T1/§8.4. Installed-version,
 real MR/replay/revoke and Task 7 evidence remain pending.
 
@@ -558,3 +558,33 @@ new-head result; do not duplicate the historical 38-minute local full run for th
 docs/assertions-only round. Final publication, actual CI/security results, thread
 replies and review request are recorded on the live PR without another source ledger
 commit. No merge, deployment, live acceptance or issue closure is included.
+
+
+## Review round 4 — bounded source amendment
+
+Continue the approved current-PR scope for all three P3 findings in
+[review 5674303775](https://github.com/larchanka-training/dmc-268-api-t6/pull/339#pullrequestreview-5674303775).
+The R3 publication/CI and R4 approval above are historical evidence for `225df166`.
+Rebased the four existing feature commits onto main
+`fff588d69b16c66595f3b54dd1f42a1903c37029`, yielding
+`371d89d551e364da58f8d94fae7cfc934f6a3d59`: four range-diff `=` entries,
+all 15 feature blobs unchanged and all 37 new-main path blobs retained. Existing
+#340 coordination covers the continuing CICD/SECRETS edits and second-merger
+reconciliation. This amendment changes only these four documentation files.
+
+| Finding | Correction and focused evidence |
+|---|---|
+| P3-1 orphan inspection | Root/full-visibility/tool guards; metadata, parent/child ps and stage lsof execute independently and print each rc. Cwd has its own guarded PID-list check/rc. Missing parent/children no longer skip lsof; stderr and ambiguous lsof exit 1 require operator review. Actual old chained snippet fails the dead-parent regression. Ten disposable checks pass: actual non-root refusal plus explicitly EUID-omitted fixture branches for independent checks, tool/error/path/symlink/cwd cases. No privileged-host visibility or abandonment proof is claimed. |
+| P3-2 source anchors | All six affected links across CICD/SECRETS/this plan use official GitLab commit `d993f849b41862881e4c4b2445f991fef0c67822`. Both pinned files were read: ProjectTestData lines 37–43 select newest MR/action open and reject no MR; WebHookService lines 227–242 build token/delivery headers. No affected moving master link remains; installed-version/live-header proof remains pending. |
+| P3-3 eligibility/readiness | Both runbooks separate provider predicates from rules/prompt/workers/LLM readiness and state the shared no-active-Run gate (Р-2) plus webhook head dedup. `ActiveRunBlocker` yields DEFERRED only for another head with cancellation requested, otherwise DUPLICATE; only DEFERRED maps to GitLab receipt deferral. Stable-key receipt dedup and HEAD_ALREADY_REVIEWED remain distinct. Local eligibility/candidate store/enqueue/dispatch and PIPELINE_SPEC T1/§8.4 checked; focused GitLab trigger suite: 91 passed in 0.32s, zero skips. |
+
+All 13 extracted GitLab-section Bash blocks pass `bash -n`. The orphan fixtures
+use local Bash/stubs and actual non-root guards; no Docker pull/build, real server,
+GitLab Test, SSH, provider/LLM call or cleanup occurred. The managed environment
+reported an environment-lock warning; the focused suite completed successfully.
+This ledger ends at implementation/focused verification. Fresh cumulative independent
+review, repo-wide static gates and full canonical CI on the actual published head
+follow source freeze; historical 9643 is not a new-head result. Publication, CI and
+review-request evidence stays on the live PR without another bookkeeping commit.
+Task 7's eight live checks remain unchecked; no merge, deployment, acceptance or
+issue closure is authorized here.

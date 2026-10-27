@@ -499,8 +499,8 @@ hook не требуется.
 Проверьте Recent events и enabled state; при отказе остановитесь и исправьте причину.
 
 Test использует **самый новый по времени создания MR** и action `open`; без MR он
-завершается ошибкой — см. upstream [ProjectTestData.merge_requests_events_data](https://gitlab.com/gitlab-org/gitlab/-/blob/master/app/services/concerns/integrations/project_test_data.rb#L34-40).
-[WebHookService.build_headers](https://gitlab.com/gitlab-org/gitlab/-/blob/master/app/services/web_hook_service.rb#L210-230)
+завершается ошибкой — см. upstream [ProjectTestData.merge_requests_events_data](https://gitlab.com/gitlab-org/gitlab/-/blob/d993f849b41862881e4c4b2445f991fef0c67822/app/services/concerns/integrations/project_test_data.rb#L37-43).
+[WebHookService.build_headers](https://gitlab.com/gitlab-org/gitlab/-/blob/d993f849b41862881e4c4b2445f991fef0c67822/app/services/web_hook_service.rb#L227-242)
 передаёт обычные token/delivery headers. Если выбранный MR открыт и eligible, Test
 может создать **настоящий Run, вызвать LLM и опубликовать review**, заняв этот head
 для webhook-триггера. Выполняйте recovery Test **до создания приёмочного MR**, на
@@ -515,10 +515,19 @@ Test использует **самый новый по времени созда
 admission и enabled hook отправьте реальное MR-событие из разрешённого project.
 GitLab события **open/update/reopen** для bound enabled/available project проходят
 provider-specific eligibility: active connection, process admission, открытый MR,
-текущий head, `wait_for_ci=never`, готовые active rules/prompt и рабочие workers/LLM.
-Метка `ai-review` применяется только к GitHub, для GitLab она не нужна. Используйте
-изолированный разрешённый project с согласованными тестовыми MR: любой eligible MR
-в нём может запустить review и расход LLM.
+текущий head и `wait_for_ci=never`. Метка `ai-review` применяется только к GitHub,
+для GitLab она не нужна. Общий enqueue дополнительно требует **отсутствия активного
+Run для этого MR (Р-2)** и отсутствия webhook Run для того же `(MR, head)` (PIPELINE_SPEC T1).
+При `ActiveRunBlocker` результат `DEFERRED` возможен только для другого head с
+запрошенной отменой активного Run; иначе — `DUPLICATE`. GitLab dispatch откладывает
+receipt как `DEFERRED_RUN_TRIGGER` только для `DEFERRED`, поэтому не каждый конфликт
+означает повтор позже. Уже обработанный head может дать `HEAD_ALREADY_REVIEWED`.
+Дедупликация исходной доставки по stable key — отдельная проверка durable intake.
+
+Для успешного выполнения отдельно проверьте operational readiness: active
+rules/prompt и рабочие workers/LLM. Это условия готовности приёмки, отдельно от
+provider predicates. Используйте изолированный разрешённый project с согласованными
+тестовыми MR: любой eligible MR в нём может запустить review и расход LLM.
 В **Settings → Webhooks →
 Edit → Recent events → View details** сохраните безопасное evidence: время, URL с тем
 же installation UUID, MR/project/head, stable delivery header, HTTP **202** и ответ

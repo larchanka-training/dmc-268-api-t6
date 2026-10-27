@@ -323,22 +323,35 @@ deploy/rollback их не читает и автоматически не уда
 Пример для Linux-хоста с GNU `stat`/`find`/`ps` и `lsof`: сначала получите у оператора
 точный stage и PID исходной операции из защищённой записи. Нужны права видеть
 **все** процессы и открытые файлы этой операции, включая других пользователей;
-неполная видимость, отсутствующая команда, permission error или иной сбой — stop,
-согласуйте доступ. Этот блок ничего не удаляет и не читает credential contents:
+запускайте блоки от root (`EUID=0`). Root сам по себе не гарантирует полную
+видимость (например, в ограниченном namespace); неполная видимость, отсутствующая
+команда, permission error или иной сбой — stop, согласуйте доступ. Этот блок ничего
+не удаляет и не читает credential contents:
 
 ```bash
 # Задайте точные согласованные APP_DIR, stage_path, operation_pid; без glob.
-if [[ -n "${APP_DIR:-}" && -n "${stage_path:-}" &&
-      "$stage_path" == "$APP_DIR"/.stage.* &&
+if (( EUID == 0 )) && [[ -n "${APP_DIR:-}" && -d "$APP_DIR" && ! -L "$APP_DIR" &&
+      -n "${stage_path:-}" && "$stage_path" == "$APP_DIR"/.stage.* &&
       "${stage_path%/*}" == "$APP_DIR" && -d "$stage_path" && ! -L "$stage_path" &&
       "${operation_pid:-}" =~ ^[1-9][0-9]*$ ]] &&
   command -v stat >/dev/null && command -v find >/dev/null &&
   command -v ps >/dev/null && command -v lsof >/dev/null; then
-  stat -c 'path=%n owner=%U:%G mode=%a mtime=%y' -- "$APP_DIR" "$stage_path" &&
-  find "$stage_path" -xdev -maxdepth 1 -printf '%y %u:%g %m %TY-%Tm-%TdT%TH:%TM %f\n' &&
-  ps -p "$operation_pid" -o pid=,ppid=,pgid=,comm= &&
-  ps --ppid "$operation_pid" -o pid=,ppid=,pgid=,comm= &&
-  lsof -nP +D "$stage_path"
+  stage_inspection_incomplete=0
+  stage_check() {
+    local check="$1" rc
+    shift
+    if "$@"; then rc=0; else rc=$?; stage_inspection_incomplete=1; fi
+    printf '%s rc=%s\n' "$check" "$rc"
+  }
+  stage_check stat stat -c 'path=%n owner=%U:%G mode=%a mtime=%y' -- "$APP_DIR" "$stage_path"
+  stage_check find find "$stage_path" -xdev -maxdepth 1 -printf '%y %u:%g %m %TY-%Tm-%TdT%TH:%TM %f\n'
+  stage_check parent-ps ps -p "$operation_pid" -o pid=,ppid=,pgid=,comm=
+  stage_check children-ps ps --ppid "$operation_pid" -o pid=,ppid=,pgid=,comm=
+  stage_check stage-lsof lsof -nP +D "$stage_path"
+  if (( stage_inspection_incomplete != 0 )); then
+    printf '%s\n' 'Inspection needs operator review; cleanup is not established.' >&2
+    false
+  fi
 else
   printf '%s\n' 'Stage inspection prerequisites failed; recovery stopped.' >&2
   false
@@ -355,16 +368,33 @@ fi
 `operation_pids` (через запятую, без пробелов):
 
 ```bash
-lsof -nP -a -p "${operation_pids:?set the reviewed operation PID list}" -d cwd
+# operation_pids: set the reviewed operation PID list, comma-separated, no spaces.
+if (( EUID == 0 )) && [[ "${operation_pids:-}" =~ ^[1-9][0-9]*(,[1-9][0-9]*)*$ ]] &&
+  command -v lsof >/dev/null; then
+  if lsof -nP -a -p "$operation_pids" -d cwd; then rc=0; else rc=$?; fi
+  printf 'cwd-lsof rc=%s\n' "$rc"
+  if (( rc != 0 )); then
+    printf '%s\n' 'Cwd inspection incomplete; recovery stopped.' >&2
+    false
+  fi
+else
+  printf '%s\n' 'Cwd inspection prerequisites failed; recovery stopped.' >&2
+  false
+fi
 ```
 
 `lsof +D` показывает открытые файлы/cwd внутри выбранного stage; cwd процесса также
 нужно проверить по второму примеру. Не скрывайте stderr и не используйте `|| true`:
-нет вывода/exit 1 (например, процесс завершился), старый mtime или отсутствие PID
-сами по себе **не доказывают** abandonment. При таком результате цепочка остановлена;
-оператор должен подтвердить завершение исходной операции и всех детей с достаточной
-видимостью, при необходимости повторить проверку и только затем отдельно согласовать
-ручное удаление точного пути по п. 3. Ошибку доступа нельзя считать «нет активности».
+каждая проверка выполняется независимо и печатает свой rc. `ps` exit 1 при
+завершившемся родителе/отсутствии детей не пропускает последующие проверки `lsof`.
+`lsof` exit 1 неоднозначен: это могут быть отсутствие совпадений или ошибка;
+смотрите stderr, ошибки/неполная видимость запрещают решение об удалении.
+Нет вывода/exit 1, старый mtime или отсутствие PID сами по себе **не доказывают**
+abandonment. Ненулевой rc помечает проверку как требующую отдельного разбора после
+выполнения всех команд. Оператор должен подтвердить завершение исходной операции и
+всех детей с достаточной видимостью, при необходимости повторить проверку и только
+затем отдельно согласовать ручное удаление точного пути по п. 3. Ошибку доступа
+нельзя считать «нет активности».
 
 Retained `api.env` и `gitlab.env` manual deploy/rollback читают строго как generator
 data `NAME='value'`, с multiline values и обязательным завершающим newline каждой
@@ -401,9 +431,9 @@ Signing token, custom headers/payload и canonical-check bypass не замен�
 Восстановление **существующего** disabled hook — отдельный путь после исправления
 причины, activation и process admission: **Test → Merge request events**, затем
 проверка **2xx** и enabled state ([GitLab re-enable](https://docs.gitlab.com/user/project/integrations/webhooks/#re-enable-disabled-webhooks)).
-По upstream [ProjectTestData](https://gitlab.com/gitlab-org/gitlab/-/blob/master/app/services/concerns/integrations/project_test_data.rb#L34-40)
+По upstream [ProjectTestData](https://gitlab.com/gitlab-org/gitlab/-/blob/d993f849b41862881e4c4b2445f991fef0c67822/app/services/concerns/integrations/project_test_data.rb#L37-43)
 Test берёт самый новый MR, отправляет action `open`, а без MR завершается ошибкой;
-[WebHookService](https://gitlab.com/gitlab-org/gitlab/-/blob/master/app/services/web_hook_service.rb#L210-230)
+[WebHookService](https://gitlab.com/gitlab-org/gitlab/-/blob/d993f849b41862881e4c4b2445f991fef0c67822/app/services/web_hook_service.rb#L227-242)
 создаёт обычные token/delivery headers. Открытый eligible MR может получить **настоящий
 Run, LLM-вызовы и публикацию**, заняв head (`HEAD_ALREADY_REVIEWED`, PIPELINE_SPEC T1).
 Сделайте recovery Test на согласованном отдельном MR **до создания приёмочного MR**;
@@ -411,11 +441,21 @@ Run, LLM-вызовы и публикацию**, заняв head (`HEAD_ALREADY_
 для нового head. Нельзя просто исключить диагностический Run того же head из counts.
 Test не заменяет Resend; установленная версия и её live результаты ещё требуют proof.
 
-GitLab open/update/reopen для bound enabled/available project проходят eligibility при
-active connection, process admission, open MR/current head, `wait_for_ci=never`,
-готовых active rules/prompt и рабочих workers/LLM. GitHub-метка `ai-review` для GitLab
-не требуется. Используйте изолированный разрешённый project и только согласованные
-тестовые MR: любой eligible MR может запустить review и расход LLM.
+GitLab open/update/reopen для bound enabled/available project проходят provider
+eligibility при active connection, process admission, open MR/current head и
+`wait_for_ci=never`. GitHub-метка `ai-review` для GitLab не требуется. Общий enqueue
+дополнительно требует **отсутствия активного Run для этого MR (Р-2)** и отсутствия
+webhook Run для того же `(MR, head)` (PIPELINE_SPEC T1). При `ActiveRunBlocker` доставка получает
+`DEFERRED` только для другого head с запрошенной отменой активного Run; иначе —
+`DUPLICATE`. Это не обещание повтора каждого конфликта: GitLab dispatch откладывает
+receipt как `DEFERRED_RUN_TRIGGER` только для `DEFERRED`. Уже обработанный head
+может дать `HEAD_ALREADY_REVIEWED`; дедупликация исходной доставки по stable key —
+отдельная проверка durable intake.
+
+Для успешной приёмки отдельно нужны active rules/prompt и рабочие workers/LLM:
+это operational readiness, а не все перечисленные выше provider predicates.
+Используйте изолированный разрешённый project и только согласованные тестовые MR:
+любой eligible MR может запустить review и расход LLM.
 Затем подтвердите реальную доставку
 через Recent events HTTP 202 и matching installation receipt в логе webhook-worker;
 это intake proof, не `succeeded` Run. Replay — **View details → Resend Request**
