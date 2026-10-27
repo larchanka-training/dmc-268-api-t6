@@ -55,8 +55,9 @@ from tests.test_run_origin_guard_postgres import prepare
 
 _BASE = "b" * 40
 _REVIEW = "1" * 40
-_RULES = "2" * 40
-_AGENTS = "3" * 40
+# The Git blob ids of b"rules" and b"agents": the raw policy read checks them (#168).
+_RULES = "8b30841cdeae6458fe8bfca3e53f697bd46f64dd"
+_AGENTS = "93aa575b2804e25ec8ff4398e131a66fea60eb53"
 _APP = "4" * 40
 _MODELS_SHA = "5" * 40
 _USER_SHA = "6" * 40
@@ -144,6 +145,8 @@ def test_the_composed_stage_reads_graph_candidates_and_records_their_use(
                     _MODELS_SHA: _MODELS.encode(),
                     _USER_SHA: _USER.encode(),
                 }[sha]
+                if request.headers["Accept"] == "application/vnd.github.raw+json":
+                    return httpx.Response(200, content=raw)
                 return httpx.Response(
                     200,
                     json={

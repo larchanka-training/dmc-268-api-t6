@@ -104,6 +104,7 @@ from app.modules.reviews.infrastructure.run_lifecycle_store import (
 from app.modules.reviews.infrastructure.run_repository import SqlAlchemyRunRepository
 from app.worker import GitHubAdapters, WorkerSettings, compose_worker_process, run_worker
 from tests import test_gitlab_projection_postgres as projection
+from tests.github_raw_blobs import blob_answer, git_blob_oid
 from tests.portal_test_client import authenticated_test_client
 from tests.test_gitlab_projection_postgres import rig
 from tests.test_run_delivery_postgres import seeded
@@ -1248,8 +1249,11 @@ class FakeGitHubApi:
             )
         if path == f"{repo}/git/blobs/{_FILE_SHA}":
             return self.blob(_FILE_SHA, _FILE_TEXT)
-        if path == f"{repo}/git/blobs/{'a' * 40}" and self.agents_md is not None:
-            return self.blob("a" * 40, self.agents_md)
+        if (
+            self.agents_md is not None
+            and path == f"{repo}/git/blobs/{git_blob_oid(self.agents_md)}"
+        ):
+            return blob_answer(request, self.agents_md)
         if path == f"{repo}/compare/{BASE}...{HEAD}":
             return httpx.Response(200, json={"merge_base_commit": {"sha": BASE}})
         if path == f"{repo}/git/trees/{BASE}":
@@ -1262,7 +1266,7 @@ class FakeGitHubApi:
                         "path": "AGENTS.md",
                         "mode": "100644",
                         "type": "blob",
-                        "sha": "a" * 40,
+                        "sha": git_blob_oid(self.agents_md),
                         "size": 9,
                     }
                 )

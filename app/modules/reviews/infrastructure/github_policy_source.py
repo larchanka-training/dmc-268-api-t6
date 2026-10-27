@@ -1,14 +1,17 @@
 """GitHub reads of the policy documents of one pinned revision.
 
-Trees are listed by SHA and blobs are read by SHA, never ``contents`` by path. A 404 is
-never reported as a missing document: with a private repository it cannot be told apart
-from a lost access (RULES_FORMAT_SPEC §3.1).
+Trees are listed by SHA and blobs are read by SHA, never ``contents`` by path. A blob is
+streamed raw and the read stops past ``MAX_DOCUMENT_BYTES`` (#168). A 404 is never reported
+as a missing document: with a private repository it cannot be told apart from a lost access
+(RULES_FORMAT_SPEC §3.1).
 """
 
 from __future__ import annotations
 
+import hashlib
 import re
 from collections.abc import Awaitable, Callable, Mapping
+from dataclasses import dataclass
 from datetime import timedelta
 from typing import Literal
 
@@ -29,11 +32,7 @@ from app.modules.reviews.application.policy_documents import (
 )
 from app.modules.reviews.application.policy_errors import PolicyError, PolicyErrorCode
 from app.modules.reviews.application.run_failures import parse_retry_after
-from app.modules.reviews.application.vcs_diff import (
-    BlobTooLargeError,
-    PullRequestLocator,
-    VcsProvider,
-)
+from app.modules.reviews.application.vcs_diff import BlobTooLargeError, PullRequestLocator
 from app.modules.reviews.infrastructure.github_vcs import (
     _REQUEST_TIMEOUT,
     _SHA,
@@ -73,6 +72,38 @@ class _Repository(_GitHubDto):
 _REPOSITORY = TypeAdapter(_Repository)
 # The portal shows a 40 hex commit SHA; GitHub has no SHA-256 repositories.
 _FULL_SHA = re.compile(r"[0-9a-fA-F]{40}")
+_RAW_BLOB = "application/vnd.github.raw+json"
+
+
+@dataclass(frozen=True)
+class OversizedBody:
+    """A body over its cap: ``actual`` is its declared length, or else the bytes received
+    when the read stopped, then only a lower bound."""
+
+    actual: int
+    actual_is_lower_bound: bool
+
+
+async def capped_body(response: httpx.Response, max_bytes: int) -> bytes | OversizedBody:
+    """The decoded body, or its known size once it is declared or read over ``max_bytes``.
+
+    The read stops with the first chunk past the cap, so at most one chunk more is taken.
+    """
+    declared = response.headers.get("Content-Length")
+    if declared is not None and declared.isdecimal() and int(declared) > max_bytes:
+        return OversizedBody(int(declared), actual_is_lower_bound=False)
+    body = bytearray()
+    async for chunk in response.aiter_bytes():
+        if len(body) + len(chunk) > max_bytes:
+            return OversizedBody(len(body) + len(chunk), actual_is_lower_bound=True)
+        body.extend(chunk)
+    return bytes(body)
+
+
+def _git_blob_oid(raw: bytes, *, like: str) -> str:
+    """The Git object id of a blob, hashed as ``like`` is: SHA-256 for 64 digits."""
+    digest = hashlib.sha256 if len(like) == 64 else hashlib.sha1
+    return digest(b"blob %d\0" % len(raw) + raw, usedforsecurity=False).hexdigest()
 
 
 def _kind(item: _TreeItem) -> PolicyEntryKind:
@@ -156,7 +187,8 @@ class GitHubRepositoryPolicySource:
 
     The rules status of a repository reads its default branch head with it (#150); the
     run source below adds the checkpoints and the pull request of its run. Both share
-    the reads and the error classification, so a 404 is ``unavailable`` for both.
+    the reads and the error classification, so a 404 is ``unavailable`` for both. A blob
+    is streamed raw unless a test hands in ``read_blob``.
     """
 
     def __init__(
@@ -167,14 +199,14 @@ class GitHubRepositoryPolicySource:
         installation_external_id: int,
         repository_full_name: str,
         policy_base_sha: str,
-        read_blob: Callable[[str], Awaitable[bytes]],
+        read_blob: Callable[[str], Awaitable[bytes]] | None = None,
         checkpoint: RunProviderCheckpoint = _no_checkpoint,
     ) -> None:
         self._client = client
         self._tokens = token_provider
         self._installation = installation_external_id
         self._full_name = repository_full_name
-        self._read_blob = read_blob
+        self._read_blob = self._read_raw_blob if read_blob is None else read_blob
         self._checkpoint = checkpoint
         self._base_sha = policy_base_sha
 
@@ -225,10 +257,40 @@ class GitHubRepositoryPolicySource:
         except httpx.HTTPError as exc:
             raise self._classify(exc) from exc
         except ValueError as exc:
-            # The blob answer is not JSON, not base64 or of another shape.
+            # A blob id or a token answer of another shape.
             raise self._error(
                 PolicyErrorCode.FETCH_TRANSIENT, "GitHub returned an unreadable blob"
             ) from exc
+
+    async def _read_raw_blob(self, oid: str) -> bytes:
+        sha = commit_sha_segment(oid)
+        prefix = self._prefix()
+        await self._checkpoint()
+        token = await self._tokens.get_installation_access_token(self._installation)
+        await self._checkpoint()
+        async with self._client.stream(
+            "GET",
+            f"{prefix}/git/blobs/{sha}",
+            # The bytes of the document: base64 JSON would cut it at ~48 KiB, and with a
+            # transfer encoding the declared length would count other bytes.
+            headers=_headers(token) | {"Accept": _RAW_BLOB, "Accept-Encoding": "identity"},
+            timeout=_REQUEST_TIMEOUT,
+        ) as response:
+            response.raise_for_status()
+            body = await capped_body(response, MAX_DOCUMENT_BYTES)
+        if isinstance(body, OversizedBody):
+            raise PolicyError(
+                PolicyErrorCode.DOCUMENT_TOO_LARGE,
+                f"The policy document exceeds {MAX_DOCUMENT_BYTES} bytes",
+                policy_base_sha=self._base_sha,
+                limit=MAX_DOCUMENT_BYTES,
+            )
+        # The raw answer echoes no SHA: a proxy page or another blob must not pass.
+        if _git_blob_oid(body, like=sha) != sha.casefold():
+            raise self._error(
+                PolicyErrorCode.FETCH_TRANSIENT, "GitHub returned a blob of another id"
+            )
+        return body
 
     def _error(
         self, code: PolicyErrorCode, message: str, *, retry_after: timedelta | None = None
@@ -247,7 +309,6 @@ class GitHubPolicyDocumentSource(GitHubRepositoryPolicySource):
         *,
         client: httpx.AsyncClient,
         token_provider: InstallationTokenProvider,
-        vcs: VcsProvider,
         locator: PullRequestLocator,
         checkpoint: RunProviderCheckpoint,
         policy_base_sha: str,
@@ -258,7 +319,6 @@ class GitHubPolicyDocumentSource(GitHubRepositoryPolicySource):
             installation_external_id=locator.installation_external_id,
             repository_full_name=locator.repository_full_name,
             policy_base_sha=policy_base_sha,
-            read_blob=lambda oid: vcs.get_blob(locator, oid, checkpoint=checkpoint),
             checkpoint=checkpoint,
         )
         self._locator = locator

@@ -8,7 +8,6 @@ default branch, the commit SHA, the trees and the blob are requested exactly as 
 from __future__ import annotations
 
 import asyncio
-import base64
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -39,13 +38,14 @@ from app.modules.reviews.infrastructure.github_policy_source import (
     GitHubDefaultBranchHeadSource,
     GitHubRepositoryPolicySource,
 )
-from app.modules.reviews.infrastructure.github_vcs import HttpGitHubVcsProvider
+from tests.github_raw_blobs import RAW_BLOB_MEDIA_TYPE, git_blob_oid
 
 _REPOSITORY = UUID("00000000-0000-4000-8000-0000000000a2")
 _HEAD = "a" * 40
 _ROOT = "1" * 40
 _REVIEW = "2" * 40
-_RULES = "3" * 40
+# The blob id of the `rules` document most tests serve; any other is hashed as well.
+_RULES = git_blob_oid(b"rules")
 _NOW = datetime(2026, 10, 18, 12, 0, tzinfo=UTC)
 _LEASE_END = _NOW + timedelta(minutes=5)
 _TARGET = RulesRefreshTarget(_REPOSITORY, 17, "octo/repo", "main", _NOW, _LEASE_END)
@@ -88,20 +88,17 @@ class FakeGitHub:
                 tree.append(_entry(".review", _REVIEW, kind="tree"))
             return httpx.Response(200, json={"tree": tree, "truncated": self.truncated})
         if path == f"/repos/octo/repo/git/trees/{_REVIEW}":
-            tree = [] if self.rules is None else [_entry("rules.md", _RULES, size=len(self.rules))]
-            return httpx.Response(200, json={"tree": tree})
-        if path == f"/repos/octo/repo/git/blobs/{_RULES}":
-            assert self.rules is not None
-            content = base64.b64encode(self.rules).decode()
-            return httpx.Response(
-                200,
-                json={
-                    "sha": _RULES,
-                    "encoding": "base64",
-                    "content": content,
-                    "size": len(self.rules),
-                },
+            tree = (
+                []
+                if self.rules is None
+                else [_entry("rules.md", git_blob_oid(self.rules), size=len(self.rules))]
             )
+            return httpx.Response(200, json={"tree": tree})
+        if self.rules is not None and path == "/repos/octo/repo/git/blobs/" + git_blob_oid(
+            self.rules
+        ):
+            assert request.headers["Accept"] == RAW_BLOB_MEDIA_TYPE
+            return httpx.Response(200, content=self.rules)
         raise AssertionError(f"unexpected GitHub request: {request.url}")
 
 
@@ -111,7 +108,6 @@ def _read(github: FakeGitHub) -> RulesReading:
             transport=httpx.MockTransport(github.respond), base_url="https://api.github.test"
         ) as client:
             tokens = StaticGitHubInstallationAccessTokenProvider("token")
-            vcs = HttpGitHubVcsProvider(client=client, token_provider=tokens)
 
             def source(target: RulesRefreshTarget, sha: str) -> GitHubRepositoryPolicySource:
                 return GitHubRepositoryPolicySource(
@@ -120,9 +116,6 @@ def _read(github: FakeGitHub) -> RulesReading:
                     installation_external_id=target.installation_external_id,
                     repository_full_name=target.repository_full_name,
                     policy_base_sha=sha,
-                    read_blob=lambda oid: vcs.get_repository_blob(
-                        target.installation_external_id, target.repository_full_name, oid
-                    ),
                 )
 
             reader = ReadRulesDocument(
@@ -152,7 +145,7 @@ def test_present_file_gives_text_masks_and_checksum_of_the_head_commit() -> None
         "/repos/octo/repo/commits/main",
         f"/repos/octo/repo/git/trees/{_HEAD}",
         f"/repos/octo/repo/git/trees/{_REVIEW}",
-        f"/repos/octo/repo/git/blobs/{_RULES}",
+        f"/repos/octo/repo/git/blobs/{git_blob_oid(raw)}",
     ]
 
 

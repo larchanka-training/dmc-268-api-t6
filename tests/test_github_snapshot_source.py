@@ -866,6 +866,8 @@ def test_rules_document_reads_only_the_pinned_rules_blob_and_normalizes_it() -> 
         f"https://api.github.com/repos/octo/repo/git/blobs/{'e' * 40}",
     ]
     assert github.seen[-1].headers["Accept"] == "application/vnd.github.raw+json"
+    # The limit counts the bytes of the document, not those of a transfer encoding.
+    assert github.seen[-1].headers["Accept-Encoding"] == "identity"
     assert all(not request.url.query for request in github.seen)
 
 

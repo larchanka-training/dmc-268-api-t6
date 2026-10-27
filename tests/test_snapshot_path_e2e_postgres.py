@@ -65,8 +65,9 @@ from tests.test_worker_queue_postgres import SETTINGS, GitHub
 
 _HEAD = "f" * 40  # the head of PR_NEW after ``_ready``
 _REVIEW_TREE = "1" * 40
-_RULES = "2" * 40
-_AGENTS = "3" * 40
+# The Git blob ids of the two policy documents below: the raw policy read checks them (#168).
+_RULES = "ce0b715d4d8a24915dca62ff7df9fd0255e44312"
+_AGENTS = "b45208a635f8eff05a44ab890c4650a41a108041"
 _SERVICE_SHA = "4" * 40
 _MODELS_SHA = "5" * 40
 _TEST_SHA = "6" * 40
@@ -173,6 +174,8 @@ class GitHubHttp:
                 _MODELS_SHA: _MODELS.encode(),
                 _TEST_SHA: _TEST_FILE.encode(),
             }[sha]
+            if request.headers["Accept"] == "application/vnd.github.raw+json":
+                return httpx.Response(200, content=raw)
             return _blob(sha, raw)
         if path.endswith("/pulls/3"):
             payload = _pull_payload(changed_files=2, head_sha=_HEAD)
