@@ -25,7 +25,10 @@ from app.modules.integrations.bitbucket.infrastructure.commit_hash import (
     pr_commit_hash,
     resolved_commit_hash,
 )
-from app.modules.integrations.bitbucket.infrastructure.models import BitbucketRunOrigin
+from app.modules.integrations.bitbucket.infrastructure.models import (
+    BitbucketConnection,
+    BitbucketRunOrigin,
+)
 from app.modules.integrations.bitbucket.infrastructure.retry_after import parse_retry_after
 from app.modules.repositories.infrastructure.models import ProviderInstallation, Repository
 from app.modules.reviews.application.bitbucket_status import (
@@ -71,7 +74,14 @@ class SqlAlchemyBitbucketStatusSource:
             .exists()
         )
         statement = (
-            select(Run, CodeChange, Repository, ProviderInstallation, BitbucketRunOrigin)
+            select(
+                Run,
+                CodeChange,
+                Repository,
+                ProviderInstallation,
+                BitbucketRunOrigin,
+                BitbucketConnection,
+            )
             .join(CodeChange, CodeChange.id == Run.code_change_id)
             .join(Repository, Repository.id == CodeChange.repository_id)
             .join(
@@ -79,6 +89,14 @@ class SqlAlchemyBitbucketStatusSource:
                 ProviderInstallation.id == Run.origin_provider_installation_id,
             )
             .join(BitbucketRunOrigin, BitbucketRunOrigin.run_id == Run.id)
+            .join(
+                BitbucketConnection,
+                and_(
+                    BitbucketConnection.provider_installation_id == ProviderInstallation.id,
+                    BitbucketConnection.workspace_id == ProviderInstallation.workspace_id,
+                    BitbucketConnection.revoked_at.is_(None),
+                ),
+            )
             .where(
                 Run.id == run_id,
                 ProviderInstallation.provider == "bitbucket",
@@ -92,7 +110,7 @@ class SqlAlchemyBitbucketStatusSource:
                 CodeChange.head_sha == Run.head_sha,
                 ~newer_same_head,
                 active_origin_condition(),
-                active_bitbucket_run_origin(),
+                active_bitbucket_run_origin(require_current_credential=False),
             )
         )
         async with self._sessions() as session:
@@ -117,7 +135,7 @@ class SqlAlchemyBitbucketStatusSource:
                 coverage_status = result.coverage.status.value
         if row is None:
             return None
-        run, change, _, installation, origin = row
+        run, change, _, installation, origin, connection = row
         return BitbucketStatusSnapshot(
             run.id,
             BoundBitbucketTarget(
@@ -125,7 +143,7 @@ class SqlAlchemyBitbucketStatusSource:
                 installation.workspace_id,
                 origin.repository_id,
                 origin.repository_uuid,
-                origin.credential_generation,
+                connection.credential_generation,
                 origin.binding_generation,
             ),
             origin.pr_number,
@@ -138,9 +156,16 @@ class SqlAlchemyBitbucketStatusSource:
 
 
 class BitbucketStatusUnavailable(ValueError):
-    def __init__(self, message: str, *, retry_after: timedelta | None = None) -> None:
+    def __init__(
+        self,
+        message: str,
+        *,
+        retry_after: timedelta | None = None,
+        reason: str = "status_unavailable",
+    ) -> None:
         super().__init__(message)
         self.retry_after = retry_after
+        self.reason = reason
 
 
 class BitbucketStatusForbidden(BitbucketStatusUnavailable):
@@ -195,6 +220,7 @@ class BitbucketBuildStatusPublisher:
         body: dict[str, str] | None = None,
         checkpoint: Callable[[], Awaitable[None]] | None = None,
         missing_ok: bool = False,
+        not_found_reason: str = "status_unavailable",
     ) -> object:
         if checkpoint is not None:
             await checkpoint()
@@ -208,6 +234,10 @@ class BitbucketBuildStatusPublisher:
         ) as response:
             if missing_ok and response.status_code == 404:
                 return None
+            if response.status_code == 404:
+                raise BitbucketStatusUnavailable(
+                    "Bitbucket status resource is missing", reason=not_found_reason
+                )
             if response.status_code == 429:
                 raise BitbucketStatusUnavailable(
                     "Bitbucket status endpoint is rate limited",
@@ -306,6 +336,19 @@ class BitbucketBuildStatusPublisher:
                     )
                 ):
                     return
+                if (
+                    intent.applied_run_id == intent.run_id
+                    and intent.applied_state in {"running", "publishing"}
+                    and intent.desired_state == "queued"
+                ):
+                    # Requeue keeps the already published INPROGRESS payload.
+                    if not await ledger.mark_applied(claim, intent):
+                        raise BitbucketStatusLeaseLost("Bitbucket status lease lost")
+                    newest = await self._source.current(intent.run_id)
+                    if newest is not None and newest.state != intent.desired_state:
+                        await ledger.register(newest, intent.run_url)
+                        continue
+                    return
                 try:
                     posted = await self._publish_once(
                         snapshot,
@@ -320,9 +363,13 @@ class BitbucketBuildStatusPublisher:
                 except BitbucketStatusForbidden:
                     await self._ledger.forbid(claim, snapshot.target.credential_generation)
                     raise
+                except BitbucketStatusLeaseLost:
+                    raise
                 except BitbucketStatusUnavailable as error:
                     if error.retry_after is not None:
                         await self._ledger.defer_rate_limit(claim, error.retry_after)
+                    else:
+                        await self._ledger.defer_failure(claim, error.reason, timedelta(minutes=5))
                     raise
                 if not posted:
                     continue
@@ -370,6 +417,7 @@ class BitbucketBuildStatusPublisher:
                     f"{root}/pullrequests/{snapshot.pr_number}",
                     credential.token,
                     checkpoint=lambda: checkpoint(target),
+                    not_found_reason="pr_missing",
                 )
             )
             source = _mapping(pr.get("source"))
@@ -395,14 +443,14 @@ class BitbucketBuildStatusPublisher:
                     raise BitbucketStatusUnavailable("Bitbucket PR head is malformed") from None
             else:
                 head = prefix
+            if pr.get("state") != "OPEN" and not (
+                snapshot.state == "cancelled" and pr.get("state") in {"DECLINED", "MERGED"}
+            ):
+                raise BitbucketStatusUnavailable(
+                    "Bitbucket PR is no longer open", reason="pr_not_open"
+                )
             if (
                 pr.get("id") != snapshot.pr_number
-                or (
-                    pr.get("state") != "OPEN"
-                    and not (
-                        snapshot.state == "cancelled" and pr.get("state") in {"DECLINED", "MERGED"}
-                    )
-                )
                 or _uuid(_mapping(destination.get("repository")).get("uuid"))
                 != target.repository_uuid
                 or head != snapshot.head_sha
@@ -456,6 +504,8 @@ class BitbucketBuildStatusPublisher:
 
 
 class StatusReplayLedger(Protocol):
+    async def retire_expired(self, *, limit: int = 1000) -> int: ...
+
     async def pending(self, *, limit: int = 100) -> list[tuple[UUID, str]]: ...
 
 
@@ -482,6 +532,7 @@ class BitbucketStatusReconciler:
     async def tick(self) -> None:
         try:
             async with asyncio.timeout(self._deadline_seconds):
+                await self._ledger.retire_expired()
                 for run_id, run_url in await self._ledger.pending():
                     try:
                         await self._publisher.replay(run_id, run_url)
