@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import Protocol
+from typing import Protocol, runtime_checkable
 from uuid import UUID
 
 from app.modules.reviews.application.check_runs import RunProviderCheckpoint
@@ -140,6 +140,13 @@ class VcsProvider(Protocol):
     ) -> bytes: ...
 
 
+@runtime_checkable
+class VcsStageVerifier(Protocol):
+    """A provider that rechecks mutable PR identity after pinned stage reads."""
+
+    async def verify_current(self, *, checkpoint: RunProviderCheckpoint) -> None: ...
+
+
 class VcsProviderSelector(Protocol):
     """Select a provider using detached persisted routing, never a queue pointer."""
 
@@ -260,6 +267,8 @@ class FetchVcsReviewInput:
                 changed.append(parse_file_patch(file.filename, file.status, file.patch))
             else:
                 omitted.append(VcsFileOmission(file, reason))
+        if isinstance(self._provider, VcsStageVerifier):
+            await self._provider.verify_current(checkpoint=self._checkpoint)
         return FetchedVcsReviewInput(
             pull_request=pull_request,
             files=files,

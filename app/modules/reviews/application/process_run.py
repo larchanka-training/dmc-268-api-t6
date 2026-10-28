@@ -48,6 +48,7 @@ from app.modules.reviews.application.vcs_diff import (
     PullRequestLocator,
     VcsProvider,
     VcsProviderSelector,
+    VcsStageVerifier,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -459,6 +460,8 @@ class ReviewRunProcessor:
                 continue
             blobs.append((key, content))
 
+        if isinstance(vcs_provider, VcsStageVerifier):
+            await vcs_provider.verify_current(checkpoint=self._provider_checkpoint(run_id, run))
         if blobs:
             async with self._uow_factory() as uow:
                 if uow.blob_cache is not None:
