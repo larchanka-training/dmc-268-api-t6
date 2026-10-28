@@ -253,6 +253,23 @@ async def test_unreadable_private_fork_stops_before_comment() -> None:
 
 
 @sync_test
+async def test_abbreviated_fork_head_rejects_unrelated_commit_before_comment() -> None:
+    port = CommentsPort()
+
+    async def unrelated_commit(repository_uuid: UUID, head_sha: str) -> object:
+        assert repository_uuid == SOURCE
+        assert head_sha == HEAD[:12]
+        return {"hash": "c" * 40}
+
+    port.source_commit = unrelated_commit  # type: ignore[method-assign]
+    gateway = BitbucketPullRequestCommentGateway(port, run_id=RUN, repository_uuid=REPO)
+    with pytest.raises(PublishError, match="fork source") as error:
+        await gateway.submit_review(_submission(_finding()))
+    assert error.value.kind == "retryable"
+    assert port.posts == []
+
+
+@sync_test
 async def test_second_finding_rechecks_head_before_write_and_resume_keeps_first() -> None:
     port = CommentsPort()
     first = _finding()
