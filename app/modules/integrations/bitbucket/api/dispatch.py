@@ -19,6 +19,7 @@ from app.modules.integrations.webhooks.application.receive_github_delivery impor
 from app.modules.reviews.application.project_bitbucket_pull_request import (
     BitbucketPullRequestIdentityMismatch,
     BitbucketPullRequestStale,
+    BitbucketPullRequestUntrackedClosed,
 )
 from app.modules.reviews.application.try_enqueue_webhook_run import EnqueueResult, EnqueueStatus
 
@@ -118,6 +119,10 @@ class BitbucketWebhookDispatchAdapter:
         except BitbucketPullRequestStale:
             return InstallationDeliveryDispatchResult(
                 InstallationDeliveryDispatchStatus.DEFERRED_KNOWN_EVENT, "canonical_stale"
+            )
+        except BitbucketPullRequestUntrackedClosed:
+            return InstallationDeliveryDispatchResult(
+                InstallationDeliveryDispatchStatus.IGNORED_IRRELEVANT_EVENT, "untracked_closed_pr"
             )
         except BitbucketPullRequestIdentityMismatch:
             return InstallationDeliveryDispatchResult(

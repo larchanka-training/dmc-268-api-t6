@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
 
@@ -40,6 +40,7 @@ from app.modules.integrations.webhooks.application.github_installation_dispatch 
 from app.modules.reviews.application.determine_ci_eligibility import WebhookRunIdentity
 from app.modules.reviews.application.project_bitbucket_pull_request import (
     BitbucketPullRequestCommand,
+    BitbucketPullRequestUntrackedClosed,
     BitbucketRunEnqueuer,
     CanonicalBitbucketPullRequest,
     ProjectBitbucketPullRequest,
@@ -217,6 +218,17 @@ def test_same_head_replay_recovers_missing_and_deferred_run(
             assert resolved.workspace_id == workspace
             assert resolved.bitbucket_workspace_uuid == remote_workspace
             assert resolved.workspace_id != resolved.bitbucket_workspace_uuid
+            untracked_closed = replace(
+                await current.get_current(resolved, 18),
+                state="closed",
+                head_sha=None,
+                base_sha="b" * 12,
+            )
+            async with SqlAlchemyBitbucketProjectionUnitOfWork(sessions) as uow:
+                with pytest.raises(BitbucketPullRequestUntrackedClosed):
+                    await uow.pull_requests.project(resolved, 2, untracked_closed)
+            async with sessions() as session:
+                assert await session.scalar(text("SELECT count(*) FROM code_changes")) == 0
 
             def projector(enqueuer: BitbucketRunEnqueuer) -> ProjectBitbucketPullRequest:
                 return ProjectBitbucketPullRequest(
@@ -302,9 +314,10 @@ def test_projection_current_head_metadata_push_and_disconnect(
 ) -> None:
     db = bitbucket_connection_schema
     command.upgrade(_config(db), "head")
-    workspace, installation, remote_workspace, remote_repo, sibling_remote = (
-        uuid4() for _ in range(5)
+    workspace, installation, remote_workspace, remote_repo, sibling_remote, source_fork = (
+        uuid4() for _ in range(6)
     )
+    source_workspace = uuid4()
     db.execute(
         text("INSERT INTO workspaces (id,name,daily_budget_usd) VALUES (:id,'test',7)"),
         {"id": workspace},
@@ -511,13 +524,29 @@ def test_projection_current_head_metadata_push_and_disconnect(
             assert await SqlAlchemyRunDeliveryReader(sessions).read(run.run_id) is not None
             remote_head = ["d" * 40]
             remote_state = ["OPEN"]
+            fork_reads: list[str] = []
+            closed_base_reads: list[str] = []
+            pr_commit_reads: list[str] = []
 
             def respond(request: httpx.Request) -> httpx.Response:
                 assert request.url.host == "api.bitbucket.org"
                 assert request.headers["Authorization"] == "Bearer test-token"
+                if f"{{{source_fork}}}" in request.url.path:
+                    fork_reads.append(str(request.url))
+                    return httpx.Response(404)
+                if request.url.path.endswith("/pullrequests/17/commits"):
+                    pr_commit_reads.append(str(request.url))
+                    return httpx.Response(
+                        200, json={"values": [{"hash": "c" * 40}, {"hash": "d" * 40}]}
+                    )
                 if request.url.path.endswith(f"/commit/{remote_head[0][:12]}"):
+                    if remote_head[0] == "d" * 40:
+                        return httpx.Response(404)
                     return httpx.Response(200, json={"hash": remote_head[0]})
                 if request.url.path.endswith("/commit/bbbbbbbbbbbb"):
+                    if remote_state[0] != "OPEN":
+                        closed_base_reads.append(str(request.url))
+                        return httpx.Response(404)
                     return httpx.Response(200, json={"hash": "b" * 40})
                 if "pullrequests" not in request.url.path:
                     return httpx.Response(
@@ -554,8 +583,17 @@ def test_projection_current_head_metadata_push_and_disconnect(
                         "author": {"nickname": "reviewer"},
                         "source": {
                             "branch": {"name": "feature"},
-                            "commit": {"hash": remote_head[0][:12]},
-                            "repository": {"uuid": "{" + str(remote_repo) + "}"},
+                            "commit": (
+                                {"hash": remote_head[0][:12]} if remote_state[0] == "OPEN" else None
+                            ),
+                            "repository": (
+                                {
+                                    "uuid": "{" + str(source_fork) + "}",
+                                    "workspace": {"uuid": "{" + str(source_workspace) + "}"},
+                                }
+                                if remote_state[0] == "OPEN"
+                                else None
+                            ),
                         },
                         "destination": {
                             "branch": {"name": "main"},
@@ -591,6 +629,8 @@ def test_projection_current_head_metadata_push_and_disconnect(
                 swept = await replay.receiver.replay_batch()
                 assert (swept.handled_count, swept.error_count) == (1, 0)
                 assert [item.head_sha for item in publisher.messages] == ["c" * 40, "d" * 40]
+                assert fork_reads == []
+                assert len(pr_commit_reads) == 1
                 assert (
                     await replay.receiver.execute(delivery)
                     == InstallationDeliveryDispatchStatus.DUPLICATE
@@ -668,6 +708,7 @@ def test_projection_current_head_metadata_push_and_disconnect(
                 )
                 closed_sweep = await replay.receiver.replay_batch()
                 assert (closed_sweep.handled_count, closed_sweep.error_count) == (1, 0)
+                assert closed_base_reads == []
                 assert len(publisher.messages) == 3
                 async with sessions() as session:
                     assert (
@@ -676,6 +717,13 @@ def test_projection_current_head_metadata_push_and_disconnect(
                             {"id": repository},
                         )
                         == projected_state
+                    )
+                    assert (
+                        await session.scalar(
+                            text("SELECT head_sha FROM code_changes WHERE repository_id=:id"),
+                            {"id": repository},
+                        )
+                        == "e" * 40
                     )
                     cancelled = (
                         await session.execute(

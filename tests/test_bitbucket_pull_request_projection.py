@@ -77,6 +77,7 @@ class Store:
     ) -> ProjectedBitbucketPullRequest:
         assert target == TARGET and webhook_generation == 7
         self.calls.append("project")
+        assert current.head_sha is not None
         return ProjectedBitbucketPullRequest(
             UUID(int=9), 17, current.head_sha, current.state, self.changed
         )
