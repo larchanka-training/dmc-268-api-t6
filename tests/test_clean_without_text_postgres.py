@@ -153,7 +153,7 @@ def test_downgrade_rewrites_empty_file_to_missing_patch_before_restoring_old_con
             )
             throttle_before = connection.execute(throttle_row, {"repository": REPO_A}).one()
             connection.commit()
-            command.downgrade(config, "-1")
+            command.downgrade(config, "20261026_0042")
             assert (
                 connection.scalar(text("SELECT version_num FROM alembic_version"))
                 == "20261026_0042"
@@ -186,7 +186,7 @@ def test_downgrade_rewrites_empty_file_to_missing_patch_before_restoring_old_con
             command.upgrade(config, "head")
             assert (
                 connection.scalar(text("SELECT version_num FROM alembic_version"))
-                == "20261026_0043"
+                == "20261028_0044"
             )
             assert tuple(connection.execute(throttle_schema).one()) == (2, 1, 1)
             assert connection.execute(throttle_row, {"repository": REPO_A}).one() == throttle_before

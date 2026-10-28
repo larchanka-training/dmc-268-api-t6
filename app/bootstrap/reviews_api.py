@@ -81,6 +81,7 @@ from app.modules.reviews.application.cancel_run import (
     CancelRun,
 )
 from app.modules.reviews.application.determine_ci_eligibility import DetermineCiEligibility
+from app.modules.reviews.application.get_metrics_summary import GetMetricsSummary
 from app.modules.reviews.application.get_run import RunDetailRepository
 from app.modules.reviews.application.get_run_actions import RunActionsRepository
 from app.modules.reviews.application.get_run_comments import RunCommentsRepository
@@ -117,6 +118,7 @@ from app.modules.reviews.infrastructure.github_pull_request_projection import (
     SqlAlchemyPullRequestProjectionLock,
     SqlAlchemyPullRequestProjectionUnitOfWork,
 )
+from app.modules.reviews.infrastructure.metrics_summary import SqlAlchemyMetricsSummary
 from app.modules.reviews.infrastructure.pull_request_queries import SqlAlchemyPullRequestQueries
 from app.modules.reviews.infrastructure.rerun_store import SqlAlchemyRerunUnitOfWork
 from app.modules.reviews.infrastructure.run_repository import (
@@ -388,6 +390,13 @@ def get_repository_settings(
     return partial(
         SqlAlchemyRepositorySettingsUnitOfWork, _resources(request).session_factory, scope
     )
+
+
+def get_metrics_summary(
+    request: Request,
+    scope: Annotated[AuthScope, Depends(get_auth_scope)],
+) -> GetMetricsSummary:
+    return GetMetricsSummary(SqlAlchemyMetricsSummary(_resources(request).session_factory, scope))
 
 
 def get_rules_status(

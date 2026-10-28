@@ -38,6 +38,9 @@ from app.bootstrap.reviews_api import (
     reviews_api_lifespan,
 )
 from app.bootstrap.reviews_api import (
+    get_metrics_summary as get_metrics_summary_use_case,
+)
+from app.bootstrap.reviews_api import (
     get_run_event_hub as get_run_event_hub,
 )
 from app.bootstrap.run_step_listener import run_step_listener
@@ -81,23 +84,36 @@ from app.modules.repositories.application.rules_status import (
 from app.modules.reviews.api.dtos import (
     DiffFileDto,
     FileLinesDto,
+    FindingsByCategoryDto,
     FindingViewDto,
     LatestRunDto,
+    MetricsDayDto,
+    MetricsSummaryDto,
+    MetricsTotalsDto,
     PullRequestDetailDto,
     PullRequestDto,
     PullRequestPageDto,
     PullRequestSummaryDto,
+    PullsByVerdictDto,
     ReviewCommentDto,
     ReviewSummaryDto,
     RunActionDto,
     RunBudgetDto,
     RunDetailDto,
     RunListDto,
+    RunsByStatusDto,
     RunSessionDto,
+    RunUsageDto,
     SeverityCountsDto,
+    WorkspaceDailyBudgetDto,
 )
 from app.modules.reviews.application.cancel_run import (
     CancelRun,
+)
+from app.modules.reviews.application.get_metrics_summary import (
+    FindingsByCategory,
+    GetMetricsSummary,
+    MetricsSummary,
 )
 from app.modules.reviews.application.get_run import (
     GetRunDetail,
@@ -431,6 +447,12 @@ def to_run_session_dto(item: RunListItem) -> RunSessionDto:
         model=item.model,
         action_count=item.action_count,
         summary_only=item.summary_only,
+        usage=RunUsageDto(
+            tokens_in=item.usage.tokens_in,
+            tokens_out=item.usage.tokens_out,
+            cost_usd=float(item.usage.cost_usd),
+        ),
+        triggered_by=item.triggered_by,
         pull_request=PullRequestDto(
             repo=item.repo,
             number=item.number,
@@ -557,6 +579,70 @@ def to_review_comment_dto(item: PublishedComment) -> ReviewCommentDto:
     )
 
 
+def _findings_by_category_dto(item: FindingsByCategory) -> FindingsByCategoryDto:
+    return FindingsByCategoryDto(
+        security=item.security,
+        correctness=item.correctness,
+        performance=item.performance,
+        readability=item.readability,
+    )
+
+
+def to_metrics_summary_dto(item: MetricsSummary) -> MetricsSummaryDto:
+    totals = item.totals
+    return MetricsSummaryDto(
+        range=item.range,
+        totals=MetricsTotalsDto(
+            runs_by_status=RunsByStatusDto(
+                queued=totals.runs_by_status.queued,
+                running=totals.runs_by_status.running,
+                publishing=totals.runs_by_status.publishing,
+                succeeded=totals.runs_by_status.succeeded,
+                failed=totals.runs_by_status.failed,
+                cancelled=totals.runs_by_status.cancelled,
+                skipped=totals.runs_by_status.skipped,
+            ),
+            pulls_by_verdict=PullsByVerdictDto(
+                blocking=totals.pulls_by_verdict.blocking,
+                attention=totals.pulls_by_verdict.attention,
+                clean=totals.pulls_by_verdict.clean,
+                no_verdict=totals.pulls_by_verdict.no_verdict,
+            ),
+            findings_by_severity=SeverityCountsDto(
+                critical=totals.findings_by_severity.critical,
+                high=totals.findings_by_severity.high,
+                medium=totals.findings_by_severity.medium,
+                low=totals.findings_by_severity.low,
+                info=totals.findings_by_severity.info,
+            ),
+            findings_by_category=_findings_by_category_dto(totals.findings_by_category),
+            succeeded_average_duration_seconds=totals.succeeded_average_duration_seconds,
+            tokens_in=totals.tokens_in,
+            tokens_out=totals.tokens_out,
+            cost_usd=float(totals.cost_usd),
+        ),
+        series=[
+            MetricsDayDto(
+                day=day.day,
+                findings_by_category=_findings_by_category_dto(day.findings_by_category),
+                run_count=day.run_count,
+                average_duration_seconds=day.average_duration_seconds,
+                cost_usd=float(day.cost_usd),
+            )
+            for day in item.series
+        ],
+        workspaces=[
+            WorkspaceDailyBudgetDto(
+                name=workspace.name,
+                daily_budget_usd=float(workspace.daily_budget_usd),
+                spent_today_usd=float(workspace.spent_today_usd),
+                paused=workspace.paused,
+            )
+            for workspace in item.workspaces
+        ],
+    )
+
+
 def to_run_action_dto(item: RunActionTrace) -> RunActionDto:
     return RunActionDto(
         id=item.id,
@@ -616,6 +702,30 @@ async def list_runs(
     return RunListDto(
         items=[to_run_session_dto(item) for item in page.items], next_cursor=page.next_cursor
     )
+
+
+@api_router.get(
+    "/metrics/summary",
+    response_model=MetricsSummaryDto,
+    summary="Totals, a daily series, and workspace budgets",
+    description=(
+        "Runs, verdicts, findings, and spend for repositories the caller can see. "
+        "An unknown or invisible repo is an empty summary."
+    ),
+    responses={
+        401: {"description": "Unauthorized"},
+        422: {"description": "Invalid query parameters"},
+    },
+)
+async def get_metrics_summary(
+    use_case: Annotated[GetMetricsSummary, Depends(get_metrics_summary_use_case)],
+    scope: Annotated[AuthScope, Depends(get_auth_scope)],
+    range: Annotated[Literal["24h", "7d", "30d"], Query()] = "24h",
+    repo: Annotated[
+        str | None, Query(min_length=1, max_length=REPOSITORY_FULL_NAME_MAX_LENGTH)
+    ] = None,
+) -> MetricsSummaryDto:
+    return to_metrics_summary_dto(await use_case.execute(scope, range=range, repo=repo))
 
 
 @api_router.get(
