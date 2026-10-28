@@ -35,7 +35,7 @@ runtime-профиль требуют отдельной реализации; �
 | Р-8 | `usage_events` (токены, деньги, модель) — с первого вызова LLM, только вставка | Восстановить задним числом нельзя; основа для `CreditLedger` |
 | Р-9 | Бот односторонний: публикует, на комментарии не отвечает; **обязательно** игнорирует собственные события | Скорость запуска; защита от цикла «бот → CI → бот» |
 | Р-10 | Триггер — **конъюнкция двух событий в любом порядке**: на PR стоит лейбл `ai-review` ∧ CI успешен для текущего `head_sha`. Бота нельзя запросить ревьюером: GitHub отвечает 201 с пустым `requested_reviewers`, событие `review_requested` не приходит ([#37](https://github.com/larchanka-training/dmc-268-api-t6/issues/37#issuecomment-5874776355)). **После пуша — авто-повтор**, пока PR открыт и стоит лейбл (наш флаг `ai_review_labeled`): бот лейбл не снимает; флаг сверяется с текущими лейблами PR, поэтому его снимает `unlabeled` не от нашего бота, а закрытие PR флаг не трогает — новые Run для закрытого PR не создаются (решения техлида по #20, OQ-1, по #37 и #56). Условие «CI успешен» и sweep «2 мин без CI» — §6.1, [PIPELINE_SPEC](PIPELINE_SPEC.md) §8 | Решение мита; события независимы, порядок не гарантирован. Лейбл ставит только участник с правом triage и выше: внешний автор PR не запустит ревью и не потратит бюджет LLM |
-| Р-11 | Провайдер VCS — за портом `VcsProvider`. GitHub и установленный GitLab поддерживают приём, fast-анализ и публикацию; GitLab intake по умолчанию выключен, live-приёмка остаётся отдельным гейтом (§8.1). Bitbucket не реализован | Запись в GitLab — discussions, маркеры `findings_hash` и inline `position` по §9.5 (#171); ключи §10 / отдельные receipts операций — не реализованы |
+| Р-11 | Провайдер VCS — за портом `VcsProvider`. GitHub, установленный GitLab и Bitbucket Cloud имеют отдельные пути приёма, анализа и публикации; GitLab intake по умолчанию выключен, а Bitbucket live-приёмка #333 остаётся отдельным гейтом (§8.1) | Bitbucket привязывается по UUID репозитория и portal workspace, подписывает repository webhook отдельным секретом; нативная REST-suggestion ещё не подтверждена на реальном PR |
 | Р-12 | Один monorepo и пять независимо собираемых сервисов (`portal-api`, `auth-api`, `webhook-api`, `worker`, `publisher`) с собственными зависимостями; у роли `webhook-api` второй процесс — `webhook-worker` (тот же образ, `python -m app.webhook_worker`, §4) | Изоляция релизов и зависимостей без потери единого lock-файла и локального окружения |
 | Р-13 | **RAG v1 — граф символов репозитория с указателями** ([ADR 0001](adr/0001-graph-rag-v1.md)). Worker получает контекст через порт `ContextProvider`: детерминированный сборщик L0–L4 и `RagContextProvider`, возвращающий тот же `ContextPayload`; в коде провайдер реализован слотом RAG сборки `BuildReviewContext`, кандидатов которого выбирает `ReverseEdgeSelector`. Индекс RAG v1 хранит по репозиторию определения, ссылки и импорты символов и рёбра между ними с указателями — путь, диапазон строк, `blob_sha`, `indexed_commit_sha`; без embeddings и без текста кода. Индексируются только репозитории с включённым тумблером RAG (по умолчанию выключен). v2 (векторный поиск, embeddings) — только после гейта eval #146 | Граф даёт то, чего нет у L4: обратные рёбра — кто импортирует или использует изменённый символ. Нет затрат и рисков embeddings/vector DB, код клиента сверх 7-дневного кэша не хранится; LLM, post-processing и публикация не меняются. Решение #19 «RAG не в MVP» пересмотрено эпиком #139 |
 | Р-14 | Успешный прогон — статус **`succeeded`** везде: домен (`RunState.SUCCEEDED`), PG enum `run_state`, API, Zod фронтенда. Полный набор: `queued\|running\|publishing\|succeeded\|failed\|cancelled\|skipped` (§6.4); `completed` — только события и статусы GitHub (`check_suite`, `check_run`, `workflow_run`) | Одно имя от БД до UI без маппинга; код и миграция уже используют `succeeded` и `publishing` |
@@ -878,11 +878,12 @@ ID — UUID без префиксов, как в БД; `findings_hash` — 64 he
 ### 7.3 Реализация (#34): отступления
 
 Этот раздел фиксирует существующий runtime. С #130 F2 он двухпутный: путь выбирает
-закреплённый за run `review.system`; новый run закрепляет активный v4, если
-репозиторий не переопределил review prompt, и идёт snapshot-путём, run на v3 или
-ниже остаётся на legacy-пути. Run на v4 на legacy-путь не откатывается: без
+закреплённый за run `review.system`; Bitbucket run закрепляет общую активную версию `review.system`
+так же, как GitHub/GitLab, если репозиторий не переопределил review prompt.
+После #350 активен общий v5; ранее закреплённые v4 сохраняют свой prompt. Оба идут
+snapshot-путём, run на v3 или ниже остаётся на legacy-пути. Run на v4 или v5 на legacy-путь не откатывается: без
 пригодного снимка политики или с провайдером вне `SNAPSHOT_REVIEW_PROVIDERS`
-(GitHub и GitLab) он падает с `policy_snapshot_integrity_error` до любого вызова
+(GitHub, GitLab и Bitbucket Cloud) он падает с `policy_snapshot_integrity_error` до любого вызова
 модели. В частности, публикация raw summary ниже — legacy, а не разрешённый
 вариант целевых контрактов §5, §9–11.
 
@@ -897,7 +898,7 @@ ID — UUID без префиксов, как в БД; `findings_hash` — 64 he
 - Все адаптеры, функции авторизации и фабрики с параметром `scope: AuthScope | None` обязаны работать fail-closed: создание или вызов без `AuthScope` вызывает `ValueError`, если доверенный внутренний вызывающий код явно не передал `allow_unscoped=True`. Актуальные примеры адаптеров: [`SqlAlchemyRunRepository`](../app/modules/reviews/infrastructure/run_repository.py), [`SqlAlchemyCancelRunUnitOfWork`](../app/modules/reviews/infrastructure/run_repository.py), [`SqlAlchemyRerunStore`](../app/modules/reviews/infrastructure/rerun_store.py), [`SqlAlchemyRerunUnitOfWork`](../app/modules/reviews/infrastructure/rerun_store.py), [`SqlAlchemyPullRequestQueries`](../app/modules/reviews/infrastructure/pull_request_queries.py), [`SqlAlchemyRepositorySettingsStore`](../app/modules/repositories/infrastructure/repository_settings.py) и [`SqlAlchemyRepositorySettingsUnitOfWork`](../app/modules/repositories/infrastructure/repository_settings.py). Функция авторизации [`authorized_run`](../app/modules/reviews/infrastructure/run_repository.py) проверяет scope напрямую; фабрика [`ReviewsApiResources.run_repository`](../app/bootstrap/reviews_api.py) делегирует защищённому конструктору репозитория. Отсутствие scope само по себе не разрешает обход. Scoped rerun использует тот же DB-предикат видимости, что чтение Run.
 - `POST /api/runs/{id}/rerun` допускает 422 с массивом `detail` при невалидном UUID и со строковым `detail` при отсутствии кандидата запуска (в частности, активной версии правил или промпта). Причины 409 и порядок решений — [PIPELINE_SPEC §6.1](PIPELINE_SPEC.md#61-http-отказы-rerun).
 - `GET /api/runs/{id}` отдаёт `RunDetail`; `author`, `headRef` и `baseRef` в `PullRequestRef` заполняются только в нём, список `GET /api/runs` отдаёт `RunSession` без них. Zod-схема UI допускает оба ответа: с ui#59 (`4369e02`) эти поля `nullable().optional()`; снимок Zod-схем ui (`tests/fixtures/ui_zod_contracts.json`) сверяется со спекой поле в поле, порядок перегенерации — PIPELINE_SPEC §16; коммит ui, с которого он снят, — в `provenance.commit` и `UI_CONTRACT_COMMIT`.
-- Worker собирает LLM Gateway (#33) один раз на процесс, а модели ревью и конвенций на каждую попытку с её `RunCallContext` (дедлайн, номер попытки, версии). AGENTS.md, дерево и файлы для конвенций читаются на `base_sha` (файлы — через blob) на обоих путях с #136, метаданные PR берутся у провайдера. Legacy-путь (run на `review.system` v3 или ниже): ключ кэша конвенций — (repository_id, agents_md_sha, prompt_version_id, policy_key = ignore key попытки; NULL у run без снимка), контекст стадии `context.build` попадает только в трассу, её бюджет считается по 4 символа на токен. Snapshot-путь (run на v4): тот же base-вход, `policy_key` — digest `repo-conventions-v2` (§10), блоки L2–L4 стадии идут в prompt как `<context_excerpts>`, стадия считает токены закреплённым в снимке counter (`counter/v2`, 3 символа на токен), после ревью работает verifier, а вызовы конвенций и ревью оставляют следующим стадиям резерв слотов и времени (CONTEXT_AND_VERIFICATION_SPEC §7.3–7.4). Без `LLM_MODEL` worker стартует с предупреждением, а Run завершается `failed` / `llm_unavailable` с сообщением о том, что шлюз не настроен (#52). `llm_unavailable` ретраится (`RETRYABLE_ERROR_CODES`), поэтому Run проходит все три попытки, и сообщение видно в `runs.error_message` только после третьей. Локальные модели: таймаут вызова fast фиксирован, 90 с (`GatewayPolicy.call_timeout_s`, из env не задаётся), и reasoning-модели на локальном железе в него обычно не укладываются; LM Studio с gpt-oss отвечает 400 на строгую схему (`json_schema`), ему нужны `LLM_STRUCTURED_OUTPUT=prompt_json` и `LLM_ALLOW_PROMPT_JSON=1` (README, «LLM gateway»).
+- Worker собирает LLM Gateway (#33) один раз на процесс, а модели ревью и конвенций на каждую попытку с её `RunCallContext` (дедлайн, номер попытки, версии). AGENTS.md, дерево и файлы для конвенций читаются на `base_sha` (файлы — через blob) на обоих путях с #136, метаданные PR берутся у провайдера. Legacy-путь (run на `review.system` v3 или ниже): ключ кэша конвенций — (repository_id, agents_md_sha, prompt_version_id, policy_key = ignore key попытки; NULL у run без снимка), контекст стадии `context.build` попадает только в трассу, её бюджет считается по 4 символа на токен. Snapshot-путь (run на v4 или v5): тот же base-вход, `policy_key` — digest `repo-conventions-v2` (§10), блоки L2–L4 стадии идут в prompt как `<context_excerpts>`, стадия считает токены закреплённым в снимке counter (`counter/v2`, 3 символа на токен), после ревью работает verifier, а вызовы конвенций и ревью оставляют следующим стадиям резерв слотов и времени (CONTEXT_AND_VERIFICATION_SPEC §7.3–7.4). Без `LLM_MODEL` worker стартует с предупреждением, а Run завершается `failed` / `llm_unavailable` с сообщением о том, что шлюз не настроен (#52). `llm_unavailable` ретраится (`RETRYABLE_ERROR_CODES`), поэтому Run проходит все три попытки, и сообщение видно в `runs.error_message` только после третьей. Локальные модели: таймаут вызова fast фиксирован, 90 с (`GatewayPolicy.call_timeout_s`, из env не задаётся), и reasoning-модели на локальном железе в него обычно не укладываются; LM Studio с gpt-oss отвечает 400 на строгую схему (`json_schema`), ему нужны `LLM_STRUCTURED_OUTPUT=prompt_json` и `LLM_ALLOW_PROMPT_JSON=1` (README, «LLM gateway»).
 - Перед `POST /pulls/{n}/reviews` publisher сверяет голову PR в GitHub: push, который webhook-worker ещё не записал в PostgreSQL, превращает публикацию в `cancelled` / `superseded` (T15), а не в ревью на старый коммит (#52).
 - `deep` (SandboxEngine) относится к фазе 3: `PATCH /api/repos/{id}` принимает только `fast`, реконсилер не публикует в `review.run.deep`, очередь только объявляется (#52).
 - **Лимит повторов AMQP и маршрутизация в DLQ при неожиданных ошибках (#54).** Очереди `review.run.*` объявлены как классические очереди RabbitMQ из-за несовместимости `x-max-priority` с кворум-очередями брокера. Classic-очереди RabbitMQ не выставляют заголовок `x-delivery-count`. Доменные повторы отслеживаются через `runs.attempt` в PostgreSQL и проявляются в AMQP через `x-death` после возвращения из exchange `reviews.retry` и очередей задержки `retry.{30s,2m,10m}.{fast,deep}` (§6.8, §7.2). Для защиты от необработанных исключений потребителя вводится второй, отдельный счётчик повторов через заголовок `x-attempt`: он считает любые исключения, вылетевшие из обработчика, в обеих очередях (`review.run.*` и `review.publish`); гибель процесса не считается. При возникновении исключения обработчик воркера выполняет confirmed-перепубликацию копии сообщения с инкрементированным заголовком `x-attempt: attempts` через exchange `reviews` с последующим подтверждением `ack()` исходной доставки. Если перепубликация завершается ошибкой (сбой соединения или брокера), воркер перехватывает исключение и выполняет fallback на `nack(requeue=True)`. Заголовок `x-death` отложенных очередей не расходует бюджет неожиданных сбоев. Некорректные или повреждённые заголовки попыток логируются с уровнем `WARNING` и fallback на 1. При достижении порога `MAX_UNEXPECTED_RETRIES = 3` сообщение маршрутизируется в `reviews.dlq` через `nack(requeue=False)`, в лог пишется `ERROR` с полным `exc_info=True`, а локальный кэш попыток процесса очищается. Локальное fallback-состояние ограничено 1024 записями (`MAX_LOCAL_RETRY_ENTRIES`) с TTL 300 с от последнего сохранения (`LOCAL_RETRY_TTL_SECONDS`); истёкшие записи удаляются лениво при следующем обращении retry к состоянию, при заполнении вытесняются старейшие. Успешная confirmed-перепубликация и ack оригинала очищают локальную запись; ошибка publish или ack сохраняет ограниченный fallback. Между процессами счётчик переносит заголовок `x-attempt`. Без `message_id` локальный ключ — стабильный SHA-256 routing key и тела сообщения. Остаточные риски: 1) внезапная гибель процесса (SIGKILL, OOM-killer) не считается счётчиком, так как обработчик не успевает выполнить перепубликацию до падения процесса; 2) если копия опубликована, а `ack` оригинала упал, в очереди окажутся и оригинал, и копия; это безопасно благодаря идемпотентности обработчиков (Р-5, §7.2).
@@ -1050,7 +1051,9 @@ class VcsProvider(Protocol):
 GitHub поддерживает вебхуки, diff, блобы, check-run и `post_review`. Установленный
 GitLab поддерживает durable MR receipts, проекцию, очередь, fast-анализ и discussions
 через отдельные адаптеры (§8.4); GitHub check-run для GitLab не вызывается.
-`BitbucketProvider` не реализован. Минимальная совместимая версия GitLab — 17.4.
+Bitbucket Cloud использует отдельный UUID-bound adapter для PR, diff, source,
+inline comments и commit statuses; детали и live-гейт — [план #333](plans/333-plan.md).
+Минимальная совместимая версия GitLab — 17.4.
 
 GitLab HTTP admission включается отдельно через `GITLAB_WEBHOOK_INTAKE_ENABLED`
 (по умолчанию false), а каждый connection — через проверяемый `gitlab_admin activate`
@@ -1070,7 +1073,7 @@ receiver отсутствует. Вебхук не создаёт installation �
 MR open/update/reopen читают текущее состояние, сериализуют проекцию и допускают
 запуск только bound enabled/available репозитория с `wait_for_ci=never`, активными
 rules/prompt и неизменным head. Close/merge отменяет активную работу. GitLab CI,
-no-CI sweep, deep/Sandbox, Graph/RAG и Bitbucket не поддерживаются; GitHub CI,
+no-CI sweep, deep/Sandbox и Graph/RAG для GitLab не поддерживаются; GitHub CI,
 sweep, index и cache сохраняют прежнее поведение.
 
 Diff закреплён за сохранённой версией MR с точными head/start/base и target/source
@@ -1231,6 +1234,38 @@ Timeout или неоднозначный 5xx после возможной от
 diff допускает один сохранённый body-only вариант тех же supported findings;
 произвольный 400/422, ошибка доступа, stale diff или unknown outcome его не разрешают.
 GitLab хранит receipt каждой discussion отдельно и не повторяет успешные операции.
+
+### 8.5 Bitbucket Cloud (#333)
+
+Browser connection принадлежит portal workspace и хранит immutable Bitbucket
+workspace/repository UUID, зашифрованный API token и отдельный webhook secret
+каждого репозитория. API проверяет scope чтения выбранного PR при подключении и
+ротации. Входящий repository webhook проверяет HMAC исходных байтов и binding/
+webhook generation, затем сохраняет durable receipt; worker проецирует текущий
+PR/head только после HTTP 202. `repo:push` переоценивает открытые PR, а события
+`pullrequest:fulfilled`/`pullrequest:rejected` закрывают их работу. Подробные
+форматы ответа и ошибки — [BITBUCKET_WEBHOOK.md](BITBUCKET_WEBHOOK.md).
+
+Review worker читает pinned source/diff/policy по UUID-bound адаптеру, с полными
+40-символьными SHA. Bitbucket индекс RAG доступен только при эффективном тумблере,
+готовом/отставшем индексе и закреплённом snapshot-промпте с секцией retrieved;
+с #350 это общий `review.system:v5`. Снимок индекса через `/src`
+ограничен бюджетом запросов и размера и не скачивает raw файлы при превышении
+лимита. Для Bitbucket `wait_for_ci=auto|always` не поддерживается: изменения этих
+настроек API отклоняет, а webhook eligibility безопасно пропускает не-`never`
+наследованные настройки. `review_event` не посылает отдельного approve/request
+changes действия: публикация состоит из inline comments и одной сводки;
+многострочный patch пока только текст для ручного применения.
+
+Статус прогона записывается как commit status на head исходной ветки под
+`AI-REVIEW-<30 hex>`; `queued`/`running`/`publishing` → `INPROGRESS`, `succeeded`
+→ `SUCCESSFUL`, `failed`/`cancelled`/`skipped` → `STOPPED` (§7.1 PIPELINE_SPEC).
+Журнал желаемого статуса переживает сбой между фиксацией Run и HTTP-записью;
+повторная публикация комментариев сверяет маркеры на всех страницах и не
+дублирует уже подтверждённые findings. Поведение fork, merge checks и native
+suggestion остаётся предметом disposable live-приёмки #333. Вводить UI #195
+следует только после мержа и выката аддитивного API #340 с обязательным
+`provider` в ответах существующих GitHub/GitLab маршрутов.
 
 ---
 
@@ -1842,9 +1877,9 @@ LLM ReviewOutput. Технический drop unknown_path
 verifier insufficient_context остаются за lifecycle #107/#130; их общее влияние
 на coverage не объявляется реализованным в #213.
 
-После #130 F1 worker собирает Reflection Pass, а после F2 seed активирует
-`review.system:v4` для новых runs. Snapshot-путь выбирается только по
-закреплённому v4; runs с v3 или ниже, созданные до F2 seed либо с pins до 0039,
+После #130 F1 worker собирает Reflection Pass; F2 seed активировал
+`review.system:v4`, а после #350 новые runs закрепляют общий v5. Snapshot-путь выбирается по
+закреплённому v4 или v5; runs с v3 или ниже, созданные до F2 seed либо с pins до 0039,
 сохраняют legacy-путь без verifier. Адаптер ревью
 выполняет fit/guard/manifest один раз: snapshot-ответ `ReviewReply` несёт
 фактический fitted context и manifest принятого вызова, legacy — mapping.
@@ -2020,7 +2055,8 @@ lease, затем удаляет порции до первой неполной
 Итог задачи индексации пишется без новых колонок — статусом, `error_code` и
 `last_error_code` (`mark_failed`/`release`, сброс `last_error_code` публикацией —
 #142). Каждая задача, получившая lease (кроме LEASE_LOST), записывает метрики
-(`github_request_count`, `downloaded_bytes`, `build_duration_ms`) своего прогона;
+(`github_request_count` — историческое имя, также считает Bitbucket HTTP-запросы,
+`downloaded_bytes`, `build_duration_ms`) своего прогона;
 отказ по квоте при claim, где lease не выдаётся, тоже пишет нули, потому что задача не
 делала запросов к GitHub. Неожиданное исключение задачи пишет в `last_error_code`
 мягкий код `internal_error`, не в `error_code`; отмена кода не пишет (#145).
@@ -2074,6 +2110,14 @@ PATCH даёт 422. Шаблон `branchFilter` (синтаксис — §6.1) �
 либо заканчивается на `/`, `.` или `.lock`; равен `@`. Список — не больше 20
 шаблонов, без повторов. Zod-схема UI делает три поля ответа обязательными, поэтому
 API с ними выкатывается раньше, чем мёржится соответствующий PR UI.
+
+Для Bitbucket Cloud `waitForCi` поддерживает только `never`, а `reviewEvent` —
+только `COMMENT`. Попытка установить `auto`/`always` или `REQUEST_CHANGES`
+через `PATCH /api/repos/{id}` возвращает 422 с массивом `detail`, где элемент
+имеет `loc: ["body", "waitForCi"]` и `msg: "bitbucket_wait_for_ci_unsupported"`
+либо `loc: ["body", "reviewEvent"]` и
+`msg: "bitbucket_review_event_unsupported"`; `type` равен `value_error`.
+Для GitHub и GitLab эти настройки сохраняют прежнюю семантику.
 
 **Тумблер и статус RAG [техлид, 16.10.2026, #145].** В `Repository` обязательны
 `ragEnabled` (boolean, эффективное значение, §6.9) и `ragIndex` (схема `RagIndex`,
@@ -2317,7 +2361,7 @@ Configured цены/лимиты совпадают с предыдущими; a
 ## 17. Проверка DoD
 
 - [x] Компоненты, потоки данных, границы backend / frontend / LLM — §2, §3–§5
-- [x] Правила взаимодействия с VCS (GitHub и installed GitLab fast; GitLab live activation gated, Bitbucket нет) — §8
+- [x] Правила взаимодействия с VCS (GitHub, installed GitLab fast и Bitbucket Cloud #333; live acceptance отдельно) — §8
 - [x] Форматы очереди задач (RabbitMQ) — §7
 - [x] Стратегия кэширования контекстов — §10
 - [x] Сборщик контекста: структуры данных на 4 уровнях — §9

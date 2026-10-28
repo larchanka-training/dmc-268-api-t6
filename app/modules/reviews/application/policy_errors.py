@@ -84,6 +84,8 @@ class PolicyError(RunFailure):
         retry_after: timedelta | None = None,
         unit: str | None = None,
         actual_is_lower_bound: bool = False,
+        http_status: int | None = None,
+        pin_head: bool = False,
     ) -> None:
         parts = []
         if source_path is not None:
@@ -118,6 +120,8 @@ class PolicyError(RunFailure):
         self.excerpt = excerpt
         self.unit = unit
         self.actual_is_lower_bound = actual_is_lower_bound
+        self.http_status = http_status
+        self.pin_head = pin_head
 
     @property
     def retryable(self) -> bool:
@@ -139,6 +143,8 @@ class PolicyError(RunFailure):
             retry_after=self.retry_after,
             unit=self.unit,
             actual_is_lower_bound=self.actual_is_lower_bound,
+            http_status=self.http_status,
+            pin_head=self.pin_head,
         )
 
     def diagnostic(self) -> dict[str, str | int | bool | None]:

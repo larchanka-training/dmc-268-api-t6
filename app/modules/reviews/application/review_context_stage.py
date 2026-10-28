@@ -682,7 +682,10 @@ class ReviewContextStage:
                 # Policy and required source failures stop even optional enrichment.
                 raise
             except Exception as exc:
-                if isinstance(exc, RunFailure) and exc.error_code == "deadline_exceeded":
+                if isinstance(exc, RunFailure) and (
+                    exc.error_code in {"deadline_exceeded", "bitbucket_review_limit_exceeded"}
+                    or exc.rate_limited
+                ):
                     raise
                 _LOGGER.warning("Review context build failed run_id=%s", run_id, exc_info=True)
                 payload = None

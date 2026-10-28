@@ -43,6 +43,7 @@ STOPPED_BEFORE_SWITCH = (
 # GitHub rejects secret names starting with GITHUB_, so the App secrets are GH_* in the
 # Environment (comment of the tech lead in #35); the container keeps the names of .env.example.
 SECRET_SOURCES = {
+    "BITBUCKET_CREDENTIAL_KEYS": "BITBUCKET_CREDENTIAL_KEYS",
     "GITHUB_APP_ID": "GH_APP_ID",
     "GITHUB_APP_PRIVATE_KEY": "GH_APP_PRIVATE_KEY",
     "GITHUB_WEBHOOK_SECRET": "GH_WEBHOOK_SECRET",
@@ -58,6 +59,8 @@ SECRET_SOURCES = {
 # Environment variable of the same name overrides them), the portal URL is an Environment
 # variable, and the endpoint of the LLM gateway is an organization variable.
 VARIABLE_SOURCES = {
+    "BITBUCKET_ACTIVE_KEY_ID": "BITBUCKET_ACTIVE_KEY_ID",
+    "BITBUCKET_WEBHOOK_BASE_URL": "BITBUCKET_WEBHOOK_BASE_URL",
     "GITHUB_APP_BOT_LOGIN": "GH_APP_BOT_LOGIN",
     "PORTAL_URL": "PORTAL_URL",
     "LLM_BASE_URL": "AI_DMC268_URL",
@@ -69,6 +72,10 @@ VARIABLE_SOURCES = {
 # One env file per set of recipients (docs/SECRETS.md); its bash array in env-file.sh.
 ENV_FILES = {
     "app.env": ("APP_ENV_KEYS", {"GITHUB_APP_ID", "GITHUB_APP_PRIVATE_KEY"}),  # both workers
+    "bitbucket.env": (
+        "BITBUCKET_ENV_KEYS",
+        {"BITBUCKET_CREDENTIAL_KEYS", "BITBUCKET_ACTIVE_KEY_ID"},
+    ),
     "api.env": (
         "API_ENV_KEYS",
         {
@@ -77,6 +84,7 @@ ENV_FILES = {
             "GITHUB_CLIENT_SECRET",
             "AUTH_JWT_PRIVATE_KEY",
             "AUTH_JWT_PUBLIC_KEY",
+            "BITBUCKET_WEBHOOK_BASE_URL",
         },
     ),
     "worker.env": (
@@ -98,6 +106,9 @@ BUNDLED = {**SECRET_SOURCES, **VARIABLE_SOURCES}
 # Multi-line like a PEM, with what a shell or Compose could rewrite: $, ${...} and backslashes.
 FAKE_PEM = "-----BEGIN TEST KEY-----\nAAAA$HOME/${PATH}\nBB\\nBB\\\\CC\n-----END TEST KEY-----"
 CI_SECRETS = {
+    "BITBUCKET_CREDENTIAL_KEYS": '{"test-key":"' + base64.b64encode(b"b" * 32).decode() + '"}',
+    "BITBUCKET_ACTIVE_KEY_ID": "test-key",
+    "BITBUCKET_WEBHOOK_BASE_URL": "https://staging-api.example.test",
     "GITHUB_APP_ID": "424242",
     "GITHUB_APP_PRIVATE_KEY": FAKE_PEM,
     "GITHUB_WEBHOOK_SECRET": "",  # not set in the Environment: GitHub yields an empty string
@@ -197,7 +208,7 @@ case "$1" in
         printf '%s\\n' "${IMAGE:-}" > "${STUB_UP_IMAGE}"
         # Like Compose: env_file paths resolve against the directory of the first compose file.
         # Every file must exist: deploy and rollback keep each role's file in place.
-        for name in app.env api.env worker.env webhook-worker.env; do
+        for name in app.env api.env worker.env webhook-worker.env bitbucket.env; do
           [[ -f "${project_dir}/${name}" ]] || { echo "env file ${name} not found" >&2; exit 1; }
         done
         if grep -qxF "IMAGE=${STUB_FAILING_IMAGE:-}" "${env_file}"; then
@@ -889,7 +900,7 @@ def test_empty_value_in_the_bundle_is_left_out(host: Host) -> None:
     assert host.deploy(IMAGE_A, bundle=bundle).returncode == 0
 
     assert _read_env_file(host.app_dir / "app.env") == {"GITHUB_APP_ID": "7"}
-    for name in ("api.env", "worker.env", "webhook-worker.env"):
+    for name in ("api.env", "worker.env", "webhook-worker.env", "bitbucket.env"):
         assert _read_env_file(host.app_dir / name) == {}
 
 
@@ -1579,7 +1590,10 @@ def test_api_gets_only_its_own_env_file() -> None:
     env_files = api[api.index("    env_file:\n") : api.index("    environment:\n")]
 
     # The API reads no GitHub App credentials: app.env belongs to the workers.
-    assert re.findall(r"^      - (\S+)$", env_files, re.MULTILINE) == ["api.env"]
+    assert re.findall(r"^      - (\S+)$", env_files, re.MULTILINE) == [
+        "api.env",
+        "bitbucket.env",
+    ]
     assert "GITHUB_" not in api
     assert "AUTH_JWT_PRIVATE_KEY" not in api
 
@@ -1594,12 +1608,17 @@ def _list_under(block: str, key: str) -> list[str]:
 @pytest.mark.parametrize(
     ("service", "module", "env_files", "dependencies"),
     [
-        ("worker", "app.worker", ["app.env", "worker.env"], ["bootstrap", "postgres", "rabbitmq"]),
+        (
+            "worker",
+            "app.worker",
+            ["app.env", "worker.env", "bitbucket.env"],
+            ["bootstrap", "postgres", "rabbitmq"],
+        ),
         # The projection creates Runs and publishes them to the review queue (#52).
         (
             "webhook-worker",
             "app.webhook_worker",
-            ["app.env", "webhook-worker.env"],
+            ["app.env", "webhook-worker.env", "bitbucket.env"],
             ["bootstrap", "postgres", "rabbitmq"],
         ),
     ],

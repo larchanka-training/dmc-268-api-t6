@@ -7,10 +7,12 @@ import binascii
 import json
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Protocol
+from typing import Literal, Protocol
 from uuid import UUID
 
 from app.modules.reviews.application.run_trigger import RunTrigger
+
+type RunProvider = Literal["github", "gitlab", "bitbucket"]
 
 
 @dataclass(frozen=True)
@@ -62,6 +64,7 @@ class RunListItem:
     head_sha: str
     created_at: datetime
     trigger: RunTrigger
+    provider: RunProvider
     summary_only: bool = False
 
 

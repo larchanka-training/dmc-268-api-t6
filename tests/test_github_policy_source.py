@@ -800,6 +800,7 @@ def test_default_branch_head_reads_a_secondary_rate_limit_without_headers() -> N
         "main",
         datetime(2026, 10, 27, tzinfo=UTC),
         datetime(2026, 10, 27, 0, 5, tzinfo=UTC),
+        "github",
     )
 
     def respond(request: httpx.Request) -> httpx.Response:

@@ -20,10 +20,18 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
-from typing import Protocol
+from typing import Literal, Protocol
 from uuid import UUID
 
 from app.common.application.unit_of_work import UnitOfWork
+from app.modules.code_index.application.vcs import (
+    BranchHead as VcsBranchHead,
+)
+from app.modules.code_index.application.vcs import (
+    VcsAccessDenied,
+    VcsUnavailable,
+)
+from app.modules.integrations.bitbucket.application.request_credentials import BoundBitbucketTarget
 from app.modules.reviews.application.check_runs import failure_reason
 from app.modules.reviews.application.policy_documents import (
     LoadPolicyDocuments,
@@ -34,7 +42,7 @@ from app.modules.reviews.application.policy_errors import (
     PolicyErrorCode,
     policy_error_detail,
 )
-from app.modules.reviews.application.policy_snapshot import RULES_DOCUMENT_PATH
+from app.modules.reviews.application.policy_snapshot import RULES_DOCUMENT_PATH, PolicyDocument
 from app.modules.reviews.application.review_ignore import parse_review_ignore
 
 _LOGGER = logging.getLogger(__name__)
@@ -60,6 +68,13 @@ _STATUS_TEXTS = {
     PolicyErrorCode.REVISION_UNAVAILABLE: (
         "Ревизия default branch недоступна: GitHub не подтвердил, есть ли файл правил."
     ),
+}
+_BITBUCKET_STATUS_TEXTS = {
+    PolicyErrorCode.REVISION_UNAVAILABLE: (
+        "Ревизия default branch недоступна: источник не подтвердил, есть ли файл правил."
+    ),
+    PolicyErrorCode.FETCH_TRANSIENT: "Не удалось прочитать документ правил из репозитория.",
+    PolicyErrorCode.RATE_LIMITED: "Источник ограничил частоту запросов при чтении правил.",
 }
 # Errors of the document itself; every other policy error means the read proved nothing.
 _DOCUMENT_ERRORS = frozenset(
@@ -104,9 +119,15 @@ class RulesDiagnostic:
     retry_after: timedelta | None = None
 
     @classmethod
-    def from_error(cls, error: PolicyError) -> RulesDiagnostic:
+    def from_error(
+        cls, error: PolicyError, *, provider: Literal["github", "bitbucket"] = "github"
+    ) -> RulesDiagnostic:
         detail = policy_error_detail(error.message)
-        text = _STATUS_TEXTS.get(error.code)
+        text = (
+            _BITBUCKET_STATUS_TEXTS.get(error.code)
+            if provider == "bitbucket"
+            else _STATUS_TEXTS.get(error.code)
+        )
         return cls(
             code=error.code.value,
             message=(
@@ -274,6 +295,8 @@ class RulesRefreshTarget:
     # The lease end written by this claim; ``save`` checks it, so a read whose claim was
     # taken over after the lease cannot overwrite the newer read.
     claimed_until: datetime
+    provider: Literal["github", "bitbucket"]
+    bitbucket_target: BoundBitbucketTarget | None = None
 
 
 @dataclass(frozen=True)
@@ -359,6 +382,77 @@ class ReadRulesDocument:
         )
 
 
+class BitbucketRulesSource(Protocol):
+    async def head(self) -> VcsBranchHead | None: ...
+
+    async def rules_document(self, commit_sha: str) -> PolicyDocument: ...
+
+    async def checkpoint(self) -> None: ...
+
+
+class ReadBitbucketRulesDocument:
+    """Read a bound Bitbucket repository at one verified default-branch commit."""
+
+    def __init__(self, sources: Callable[[RulesRefreshTarget], BitbucketRulesSource]) -> None:
+        self._sources = sources
+
+    async def read(self, target: RulesRefreshTarget) -> RulesReading:
+        source = self._sources(target)
+        try:
+            head = await source.head()
+        except (VcsUnavailable, VcsAccessDenied) as error:
+            return _unavailable(
+                target.default_branch, None, _bitbucket_source_error(error), provider="bitbucket"
+            )
+        if head is None:
+            return _unavailable(
+                target.default_branch,
+                None,
+                PolicyError(
+                    PolicyErrorCode.REVISION_UNAVAILABLE,
+                    "Bitbucket default branch has no readable head",
+                ),
+                provider="bitbucket",
+            )
+        pinned = BranchHead(head.branch, head.commit_sha)
+        try:
+            document = await source.rules_document(head.commit_sha)
+            await source.checkpoint()
+        except PolicyError as error:
+            if error.code in _DOCUMENT_ERRORS:
+                return _invalid(pinned, None, error)
+            return _unavailable(pinned.branch, pinned.sha, error, provider="bitbucket")
+        except (VcsUnavailable, VcsAccessDenied) as error:
+            return _unavailable(
+                pinned.branch, pinned.sha, _bitbucket_source_error(error), provider="bitbucket"
+            )
+        if document.is_missing:
+            return RulesReading(RulesStatusKind.MISSING, pinned.branch, pinned.sha)
+        assert document.text is not None and document.raw_sha256 is not None
+        try:
+            policy = parse_review_ignore(document.text, policy_base_sha=pinned.sha)
+        except PolicyError as error:
+            return _invalid(pinned, document.text, error)
+        return RulesReading(
+            RulesStatusKind.PRESENT,
+            pinned.branch,
+            pinned.sha,
+            text=document.text,
+            checksum=document.raw_sha256,
+            ignore_masks=policy.patterns,
+        )
+
+
+def _bitbucket_source_error(error: VcsUnavailable | VcsAccessDenied) -> PolicyError:
+    if isinstance(error, VcsUnavailable):
+        return PolicyError(
+            PolicyErrorCode.RATE_LIMITED if error.rate_limited else PolicyErrorCode.FETCH_TRANSIENT,
+            "Bitbucket rules source is unavailable",
+            retry_after=error.retry_after,
+        )
+    return PolicyError(PolicyErrorCode.ACCESS_DENIED, "Bitbucket rules source is inaccessible")
+
+
 def _invalid(head: BranchHead, text: str | None, error: PolicyError) -> RulesReading:
     return RulesReading(
         RulesStatusKind.INVALID,
@@ -369,22 +463,60 @@ def _invalid(head: BranchHead, text: str | None, error: PolicyError) -> RulesRea
     )
 
 
-def _unavailable(branch: str, sha: str | None, error: PolicyError) -> RulesReading:
+def _unavailable(
+    branch: str,
+    sha: str | None,
+    error: PolicyError,
+    *,
+    provider: Literal["github", "bitbucket"] = "github",
+) -> RulesReading:
     return RulesReading(
         RulesStatusKind.UNAVAILABLE,
         branch,
         sha,
-        diagnostics=(RulesDiagnostic.from_error(error),),
+        diagnostics=(RulesDiagnostic.from_error(error, provider=provider),),
     )
 
 
 def _unexpected_failure(target: RulesRefreshTarget) -> RulesReading:
     error = PolicyError(PolicyErrorCode.FETCH_TRANSIENT, "The rules read failed unexpectedly")
-    return _unavailable(target.default_branch, None, error)
+    return _unavailable(target.default_branch, None, error, provider=target.provider)
 
 
 class RulesDocumentReader(Protocol):
     async def read(self, target: RulesRefreshTarget) -> RulesReading: ...
+
+
+class ProviderRulesDocumentReader:
+    """Route each claimed read to the configured provider without fallback."""
+
+    def __init__(
+        self,
+        *,
+        github: RulesDocumentReader | None,
+        bitbucket: RulesDocumentReader | None,
+    ) -> None:
+        self._github = github
+        self._bitbucket = bitbucket
+
+    async def read(self, target: RulesRefreshTarget) -> RulesReading:
+        if target.provider == "github":
+            reader = self._github
+        elif target.provider == "bitbucket":
+            reader = self._bitbucket
+        else:
+            raise ValueError("Unsupported rules status provider")
+        if reader is None:
+            return _unavailable(
+                target.default_branch,
+                None,
+                PolicyError(
+                    PolicyErrorCode.FETCH_TRANSIENT,
+                    "Repository rules reader is not configured for this provider",
+                ),
+                provider=target.provider,
+            )
+        return await reader.read(target)
 
 
 class RefreshRulesStatuses:

@@ -18,6 +18,7 @@ from app.modules.reviews.application.run_delivery import (
     RunDeliveryPointer,
     RunDeliveryUnavailable,
 )
+from app.modules.reviews.infrastructure.bitbucket_run_origin import active_bitbucket_run_origin
 from app.modules.reviews.infrastructure.models import CodeChange, Run
 from app.modules.reviews.infrastructure.run_origin import active_origin_condition
 
@@ -70,6 +71,10 @@ class SqlAlchemyRunDeliveryReader:
                     and_(
                         ProviderInstallation.provider == "gitlab",
                         gitlab.c.origin_provider_installation_id.is_not(None),
+                    ),
+                    and_(
+                        ProviderInstallation.provider == "bitbucket",
+                        active_bitbucket_run_origin(),
                     ),
                 ),
             )

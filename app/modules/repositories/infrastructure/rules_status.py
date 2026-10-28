@@ -14,12 +14,26 @@ from datetime import datetime, timedelta
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import ColumnElement, case, func, null, or_, select, true, update
+from sqlalchemy import ColumnElement, and_, case, func, null, or_, select, true, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.common.infrastructure.db.unit_of_work import SqlAlchemyUnitOfWork
 from app.modules.auth.application.scope import AuthScope
+from app.modules.integrations.bitbucket.application.request_credentials import (
+    BitbucketBindingGenerationChanged,
+    BitbucketCredentialGenerationChanged,
+    BitbucketTargetInactive,
+    BoundBitbucketTarget,
+)
+from app.modules.integrations.bitbucket.infrastructure.models import (
+    BitbucketConnection,
+    BitbucketRepositoryIdentity,
+    BitbucketRepositoryWebhookSecret,
+)
+from app.modules.integrations.bitbucket.infrastructure.request_credentials import (
+    SqlAlchemyBitbucketTargetReader,
+)
 from app.modules.integrations.webhooks.infrastructure.webhook_notifications import (
     notify_webhook_work,
 )
@@ -194,8 +208,15 @@ class SqlAlchemyRulesStatusUnitOfWork(SqlAlchemyUnitOfWork):
 
 
 class SqlAlchemyRulesRefreshStore:
-    def __init__(self, session: AsyncSession) -> None:
+    def __init__(
+        self,
+        session: AsyncSession,
+        bitbucket_targets: SqlAlchemyBitbucketTargetReader,
+        allowed_providers: frozenset[str],
+    ) -> None:
         self._session = session
+        self._bitbucket_targets = bitbucket_targets
+        self._allowed_providers = allowed_providers
 
     async def claim(
         self, *, now: datetime, until: datetime, limit: int
@@ -208,6 +229,12 @@ class SqlAlchemyRulesRefreshStore:
                     RepositoryRulesStatus.repository_id,
                     RepositoryRulesStatus.refresh_requested_at,
                     ProviderInstallation.external_id,
+                    ProviderInstallation.provider,
+                    ProviderInstallation.id.label("installation_id"),
+                    ProviderInstallation.workspace_id,
+                    BitbucketRepositoryIdentity.repository_uuid,
+                    BitbucketConnection.credential_generation,
+                    BitbucketRepositoryWebhookSecret.binding_generation,
                     Repository.full_name,
                     Repository.default_branch,
                 )
@@ -216,6 +243,21 @@ class SqlAlchemyRulesRefreshStore:
                     ProviderInstallation,
                     ProviderInstallation.id == Repository.provider_installation_id,
                 )
+                .outerjoin(
+                    BitbucketRepositoryIdentity,
+                    BitbucketRepositoryIdentity.repository_id == Repository.id,
+                )
+                .outerjoin(
+                    BitbucketConnection,
+                    and_(
+                        BitbucketConnection.provider_installation_id == ProviderInstallation.id,
+                        BitbucketConnection.workspace_id == ProviderInstallation.workspace_id,
+                    ),
+                )
+                .outerjoin(
+                    BitbucketRepositoryWebhookSecret,
+                    BitbucketRepositoryWebhookSecret.repository_id == Repository.id,
+                )
                 .where(
                     RepositoryRulesStatus.refresh_requested_at.is_not(None),
                     or_(
@@ -223,7 +265,18 @@ class SqlAlchemyRulesRefreshStore:
                         RepositoryRulesStatus.refresh_claimed_until <= now,
                     ),
                     Repository.installation_available,
-                    ProviderInstallation.provider == "github",
+                    ProviderInstallation.provider.in_(self._allowed_providers),
+                    or_(
+                        ProviderInstallation.provider == "github",
+                        and_(
+                            ProviderInstallation.provider == "bitbucket",
+                            BitbucketRepositoryIdentity.repository_uuid.is_not(None),
+                            BitbucketConnection.revoked_at.is_(None),
+                            BitbucketConnection.token_ciphertext.is_not(None),
+                            BitbucketRepositoryWebhookSecret.revoked_at.is_(None),
+                            BitbucketRepositoryWebhookSecret.binding_generation.is_not(None),
+                        ),
+                    ),
                     ProviderInstallation.deleted_at.is_(None),
                 )
                 .order_by(RepositoryRulesStatus.refresh_requested_at)
@@ -246,6 +299,19 @@ class SqlAlchemyRulesRefreshStore:
                 default_branch=row.default_branch,
                 requested_at=row.refresh_requested_at,
                 claimed_until=until,
+                provider=row.provider,
+                bitbucket_target=(
+                    BoundBitbucketTarget(
+                        row.installation_id,
+                        row.workspace_id,
+                        row.repository_id,
+                        row.repository_uuid,
+                        row.credential_generation,
+                        row.binding_generation,
+                    )
+                    if row.provider == "bitbucket"
+                    else None
+                ),
             )
             for row in rows
         )
@@ -253,6 +319,29 @@ class SqlAlchemyRulesRefreshStore:
     async def save(
         self, target: RulesRefreshTarget, reading: RulesReading, *, checked_at: datetime
     ) -> bool:
+        if target.provider == "bitbucket":
+            try:
+                if target.bitbucket_target is None:
+                    raise BitbucketTargetInactive()
+                await self._bitbucket_targets.checkpoint_in_session(
+                    self._session, target.bitbucket_target, lock=True
+                )
+            except (
+                BitbucketTargetInactive,
+                BitbucketCredentialGenerationChanged,
+                BitbucketBindingGenerationChanged,
+            ):
+                # A changed binding must not store a result read with old authority.
+                # Keep the request and release this claim for the next sweep.
+                await self._session.execute(
+                    update(RepositoryRulesStatus)
+                    .where(
+                        RepositoryRulesStatus.repository_id == target.repository_id,
+                        RepositoryRulesStatus.refresh_claimed_until == target.claimed_until,
+                    )
+                    .values(refresh_claimed_until=None)
+                )
+                return False
         defaults_version: str | None = None
         if reading.status is RulesStatusKind.MISSING:
             version = await self._session.scalar(
@@ -318,9 +407,19 @@ class SqlAlchemyRulesRefreshStore:
 
 
 class SqlAlchemyRulesRefreshUnitOfWork(SqlAlchemyUnitOfWork):
-    def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
+    def __init__(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        *,
+        allowed_providers: frozenset[str] = frozenset({"github", "bitbucket"}),
+    ) -> None:
         super().__init__(session_factory)
+        self._allowed_providers = allowed_providers
 
     @property
     def rules(self) -> SqlAlchemyRulesRefreshStore:
-        return SqlAlchemyRulesRefreshStore(self.session)
+        return SqlAlchemyRulesRefreshStore(
+            self.session,
+            SqlAlchemyBitbucketTargetReader(self._session_factory),
+            self._allowed_providers,
+        )

@@ -7,6 +7,7 @@ from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
+from typing import cast as type_cast
 from uuid import UUID
 
 from sqlalchemy import ColumnElement, String, and_, case, cast, func, or_, select, true, update
@@ -17,6 +18,7 @@ from app.common.infrastructure.db.enums import RunState
 from app.common.infrastructure.db.unit_of_work import SqlAlchemyUnitOfWork
 from app.modules.analytics.infrastructure.models import UsageEvent
 from app.modules.auth.application.scope import AuthScope
+from app.modules.integrations.bitbucket.infrastructure.models import BitbucketRunOrigin
 from app.modules.repositories.infrastructure.models import (
     ProviderInstallation,
     Repository,
@@ -35,7 +37,7 @@ from app.modules.reviews.application.get_run_actions import RunActionResponse
 from app.modules.reviews.application.get_run_comments import PublishedComment
 from app.modules.reviews.application.get_run_diff import DiffSnapshot
 from app.modules.reviews.application.get_run_file_lines import BlobCacheKey
-from app.modules.reviews.application.list_runs import RunCursor, RunListItem
+from app.modules.reviews.application.list_runs import RunCursor, RunListItem, RunProvider
 from app.modules.reviews.application.post_processing_diff_map import diff_map_from_snapshots
 from app.modules.reviews.application.process_run import (
     RunConventionsInput,
@@ -58,6 +60,10 @@ from app.modules.reviews.application.run_events import RunChange
 from app.modules.reviews.application.run_failures import RunCancelled
 from app.modules.reviews.application.store_review_output import PublishingGuard
 from app.modules.reviews.application.vcs_diff import PullRequestLocator
+from app.modules.reviews.infrastructure.bitbucket_run_origin import (
+    active_bitbucket_run_origin,
+    bitbucket_run_origin_active,
+)
 from app.modules.reviews.infrastructure.models import (
     CodeChange,
     CodeChangeDiff,
@@ -167,9 +173,22 @@ class SqlAlchemyRunRepository:
         )
         summary_only = self._summary_only_projection()
         statement = (
-            select(Run, CodeChange, Repository.full_name, latest_model, action_count, summary_only)
+            select(
+                Run,
+                CodeChange,
+                Repository.full_name,
+                latest_model,
+                action_count,
+                summary_only,
+                # Runs predating the origin migration have NULL origin; they are GitHub.
+                func.coalesce(ProviderInstallation.provider, "github"),
+            )
             .join(CodeChange, Run.code_change_id == CodeChange.id)
             .join(Repository, CodeChange.repository_id == Repository.id)
+            .outerjoin(
+                ProviderInstallation,
+                Run.origin_provider_installation_id == ProviderInstallation.id,
+            )
             .where(self._authorized_run())
             .order_by(Run.created_at.desc(), Run.id.desc())
             .limit(limit)
@@ -206,9 +225,21 @@ class SqlAlchemyRunRepository:
         )
         summary_only = self._summary_only_projection()
         statement = (
-            select(Run, CodeChange, Repository.full_name, latest_model, action_count, summary_only)
+            select(
+                Run,
+                CodeChange,
+                Repository.full_name,
+                latest_model,
+                action_count,
+                summary_only,
+                func.coalesce(ProviderInstallation.provider, "github"),
+            )
             .join(CodeChange, Run.code_change_id == CodeChange.id)
             .join(Repository, CodeChange.repository_id == Repository.id)
+            .outerjoin(
+                ProviderInstallation,
+                Run.origin_provider_installation_id == ProviderInstallation.id,
+            )
             .where(Run.id == run_id)
             .where(self._authorized_run())
         )
@@ -393,6 +424,10 @@ class SqlAlchemyRunRepository:
         run, repository, installation = row
         if installation is None or not origin_active(run, repository, installation):
             raise RunCancelled("installation_unavailable")
+        if installation.provider == "bitbucket" and not await bitbucket_run_origin_active(
+            session, run.id
+        ):
+            raise RunCancelled("installation_unavailable")
         if run.state != RunState.RUNNING:
             raise RunCancelled("run_inactive")
         if run.diff_snapshotted_at is not None:
@@ -450,6 +485,7 @@ class SqlAlchemyRunRepository:
                 ProviderInstallation.provider,
                 Run.origin_provider_installation_id,
                 Repository.external_id,
+                BitbucketRunOrigin.repository_uuid,
             )
             .select_from(Run)
             .join(CodeChange, CodeChange.id == Run.code_change_id)
@@ -457,7 +493,15 @@ class SqlAlchemyRunRepository:
             .join(
                 ProviderInstallation, ProviderInstallation.id == Run.origin_provider_installation_id
             )
-            .where(Run.id == run_id, active_origin_condition())
+            .outerjoin(BitbucketRunOrigin, BitbucketRunOrigin.run_id == Run.id)
+            .where(
+                Run.id == run_id,
+                active_origin_condition(),
+                or_(
+                    ProviderInstallation.provider != "bitbucket",
+                    active_bitbucket_run_origin(),
+                ),
+            )
         )
         async with self._session_scope() as session:
             row = (await session.execute(statement)).one_or_none()
@@ -475,6 +519,7 @@ class SqlAlchemyRunRepository:
                 provider=row[7],
                 origin_provider_installation_id=row[8],
                 repository_external_id=row[9],
+                repository_uuid=row[10],
             ),
         )
 
@@ -622,8 +667,11 @@ class SqlAlchemyRunRepository:
         repository_name: str,
         model: str | None,
         action_count: int,
-        summary_only: bool = False,
+        summary_only: bool,
+        provider: str,
     ) -> RunListItem:
+        if provider not in {"github", "gitlab", "bitbucket"}:
+            raise ValueError("unsupported repository provider")
         return RunListItem(
             id=run.id,
             status=run.state.value,
@@ -643,6 +691,7 @@ class SqlAlchemyRunRepository:
             created_at=run.created_at,
             trigger=run.trigger,
             summary_only=summary_only,
+            provider=type_cast(RunProvider, provider),
         )
 
     @staticmethod

@@ -19,6 +19,7 @@ class FakeRunDetailRepository:
 def test_get_run_returns_the_repository_projection() -> None:
     run_id = UUID("00000000-0000-0000-0000-000000000001")
     item = RunListItem(
+        provider="github",
         id=run_id,
         status="succeeded",
         engine="fast",

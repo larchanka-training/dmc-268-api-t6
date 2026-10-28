@@ -10,6 +10,7 @@ App; with it, it also reconciles heads and dispatches wake-ups (#143).
 from __future__ import annotations
 
 import asyncio
+import base64
 import dataclasses
 import json
 import logging
@@ -62,10 +63,17 @@ from app.modules.code_index.infrastructure.amqp import (
     IndexRepoMessage,
     handle_index_delivery,
 )
+from app.modules.code_index.infrastructure.bitbucket_snapshot_source import (
+    BitbucketRepositorySnapshotSource,
+)
+from app.modules.integrations.bitbucket.infrastructure.credential_cipher import (
+    BitbucketCredentialCipher,
+)
 from app.modules.integrations.webhooks.infrastructure.github_installation_tree_provider import (
     InMemoryInstallationAccessTokenCache,
 )
 from app.modules.reviews.application.run_failures import RetryDelays
+from app.worker import WorkerSettings
 
 _MIB = 1_048_576
 _PEM = (
@@ -490,6 +498,7 @@ class Worker:
     github_app_id: str | None = "1"
     github_private_key: str | None = _PEM
     github_api_url: str = "https://api.github.test"
+    bitbucket_cipher: BitbucketCredentialCipher | None = None
 
 
 @dataclass
@@ -595,6 +604,57 @@ def test_without_the_github_app_the_topology_is_declared_and_nothing_consumes(
     assert len(declared) == 1 and len(connection.channels) == 1
     assert parsers == []
     assert "the index.repo consumer is disabled" in caplog.text
+
+
+def test_bitbucket_only_worker_composes_uuid_bound_snapshot_source(
+    composed: tuple[list[Parser], list[Any]],
+) -> None:
+    """A Bitbucket deployment can index even when no GitHub App is configured."""
+
+    async def scenario() -> None:
+        async with code_index_worker.index_consumer(
+            Worker(
+                github_app_id=None,
+                github_private_key=None,
+                bitbucket_cipher=BitbucketCredentialCipher(
+                    active_key_id="test", keys={"test": b"a" * 32}
+                ),
+            ),
+            cast(AbstractRobustConnection, FakeConnection()),
+            _SESSIONS,
+            RetryDelays(),
+        ) as consumer:
+            assert consumer is not None
+            source = consumer.sources()(IndexedRepository(uuid4(), "bitbucket", 7, "old/slug"))
+            assert isinstance(source, BitbucketRepositorySnapshotSource)
+
+    asyncio.run(scenario())
+
+
+def test_bitbucket_cipher_from_worker_environment_reaches_index_consumer(
+    composed: tuple[list[Parser], list[Any]],
+) -> None:
+    settings = WorkerSettings.from_environment(
+        {
+            "DATABASE_URL": "postgresql+psycopg://localhost/test",
+            "RABBITMQ_URL": "amqp://localhost",
+            "BITBUCKET_ACTIVE_KEY_ID": "test",
+            "BITBUCKET_CREDENTIAL_KEYS": json.dumps({"test": base64.b64encode(b"a" * 32).decode()}),
+        }
+    )
+
+    async def scenario() -> None:
+        async with code_index_worker.index_consumer(
+            settings,
+            cast(AbstractRobustConnection, FakeConnection()),
+            _SESSIONS,
+            RetryDelays(),
+        ) as consumer:
+            assert consumer is not None
+            source = consumer.sources()(IndexedRepository(uuid4(), "bitbucket", 7, "team/repo"))
+            assert isinstance(source, BitbucketRepositorySnapshotSource)
+
+    asyncio.run(scenario())
 
 
 @pytest.mark.parametrize(
