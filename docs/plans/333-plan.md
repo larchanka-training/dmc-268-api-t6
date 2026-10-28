@@ -1,15 +1,16 @@
 # Implementation plan: #333 Bitbucket Cloud
 
-> Round 1 review repairs and current blockers are tracked in
-> [333-review-round1-todo.md](333-review-round1-todo.md). This plan records the
-> original implementation decisions; its early checkpoint results do not
-> establish live Bitbucket acceptance.
+> Round 5 review repairs and current blockers are tracked in
+> [333-todo.md](333-todo.md) and [333-live-acceptance.md](333-live-acceptance.md).
+> This plan records the original implementation decisions; historical test
+> results do not establish live Bitbucket acceptance.
 
 ## Source and baseline
 
 - Issue: https://github.com/larchanka-training/dmc-268-api-t6/issues/333 (read 2026-10-26).
-- Code baseline: `origin/main` at `88bbc073`; the original checkout is an older
-  `fix/111-worker-portal-url` branch. Implement on a fresh checkout of `origin/main`.
+- Historical implementation baseline: `origin/main` at `88bbc073`. The round 5
+  integration candidate is based on `10d2848a`; rebase on the current `main`
+  before publication and record the published head in PR #340.
 - Scope: full Bitbucket Cloud support across backend, UI and user documentation.
   Bitbucket Data Center/Server is outside scope.
 - Rollout order: merge and deploy API #340 first, then merge and deploy UI #195.
@@ -17,9 +18,10 @@
   UI fixture on its source SHA until UI #195 is merged; repin to the merged UI
   SHA only after that merge, then rerun the mirror contract gate.
 - API PR #283 merged `20261026_0043` into main. #340's Bitbucket migrations
-  now follow it as `20261026_0044`–`20261027_0050`, followed by local
-  HTTP-status revision `20261027_0051`. The integrated chain has one Alembic
-  head; PostgreSQL upgrade/downgrade/reupgrade and `alembic check` passed.
+  follow it as `20261026_0044`–`20261027_0050`, followed by HTTP-status
+  revision `20261027_0051`. The earlier integrated chain had one Alembic head;
+  repeat the PostgreSQL upgrade/downgrade/reupgrade and `alembic check` on the
+  final rebased head.
 - The T1 contract checkpoint below records the documented Cloud surface as of
   2026-10-26. A disposable private-repository probe is still required for
   suggestion, inline-coordinate and fork/status behavior.
@@ -274,7 +276,8 @@ origin, with page and body limits.
 Manual Bitbucket hook configuration uses URL
 `https://<portal-host>/webhooks/bitbucket/{installation_id}/{repository_id}`,
 a distinct random secret for each repository binding,
-and events `repo:push`, `pullrequest:created`, `pullrequest:updated`. The
+and events `repo:push`, `pullrequest:created`, `pullrequest:updated`,
+`pullrequest:fulfilled` and `pullrequest:rejected`. The
 receiver authenticates `X-Hub-Signature: sha256=<hex>` against the original
 body bytes before parsing JSON, using constant-time comparison. The signature
 is absent if the hook has no secret and such deliveries are rejected.
@@ -349,6 +352,14 @@ lists follow their bounded cursors. A shared credential rotation is a distinct
 action from repository disconnect or per-repository webhook-secret rotation.
 The one-time webhook secret remains transient in UI state. Demo mode implements
 the same workspace-scoped connection lifecycle without calling a live API.
+The API fixture is pinned to the published UI #195 head
+`46b2807492a52e100bcfb48052b1e640cbd50beb` while that PR is open; both
+connection response slugs have a 1–128 character bound. Discovery slugs are a
+separate response shape. Repin the fixture to the merged UI SHA after squash
+merge and repeat the mirror checks. Unknown `vcs_provider_name` values now
+fail explicitly rather than being interpreted as GitHub. Bitbucket validation
+errors redact secret input, while GitHub/GitLab retain their standard 422
+`msg`/`input`/`ctx` shape.
 
 These paths use the portal JWT, never the Atlassian token. `workspace_id` is
 the portal UUID. Save the API token under the installation/workspace identity,
@@ -397,20 +408,20 @@ T4 pins these public HTTP shapes with ASGI tests and OpenAPI.
 
 ### Live capability proof still required
 
-The 2026-10-26 read-only probe used a short-lived token from a local private
-file (never copied into the repo): `GET /2.0/repositories/nvdovnar/test-ai-review`
-returned 200, `uuid={3791f4cc-f59a-4412-9a52-f34a7829ba1c}`,
-`full_name=nvdovnar/test-ai-review`, `is_private=true`, workspace
-`uuid={b2d0d95e-1f8d-4990-9fb2-f09f87ae5f60}`. `GET` the open PR list
-returned 200 with `size=0`, so no comment, suggestion, status or webhook
-capability was probed; no write was made. A second read-only probe of the
-documented UUID locator returned 200 for the same private repository, proving
-rotation can resolve it after a slug change. [Atlassian UUID URI contract](https://developer.atlassian.com/cloud/bitbucket/rest/intro/#repository-object-and-uuid).
-Once a disposable PR exists, read it,
+The 2026-10-26 read-only public-repository locator probes returned 200 for a
+documented workspace/repository UUID route. They establish only that public
+locator shape at that time. No private fork, scoped token, writable PR,
+comment, suggestion, status or webhook was exercised. In particular, the
+runtime's percent-encoded `{workspace-uuid}/{repo-uuid}` form remains to be
+confirmed on a disposable private repository. [Atlassian UUID URI contract](https://developer.atlassian.com/cloud/bitbucket/rest/intro/#repository-object-and-uuid).
+Once a disposable private PR and scoped credential are available, read it,
 create one inline
 comment and one candidate native suggestion on disposable lines; inspect the
 actual PR UI and GET comment representation; post/update/read one build status
 with `refname`; inspect signed webhook headers and redelivery. Record sanitized
 HTTP status, request shape, returned IDs/coordinates, UI result and any scope
-error. Then delete test comments/hook and revoke token. A failed or missing
-native-suggestion proof leaves that AC open; mocks/docs cannot close it.
+error. Exercise the private fork and destination-only credential, rename/edit,
+pagination, optional diffstat, merge-base and target-branch push cases in
+[`333-live-acceptance.md`](333-live-acceptance.md). Then delete test
+comments/hook and revoke token. A failed or missing native-suggestion proof
+leaves that AC open; mocks/docs cannot close it.

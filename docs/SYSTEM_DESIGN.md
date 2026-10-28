@@ -1143,8 +1143,12 @@ HTTP-запросом повторяется checkpoint claimed Run; кэшир�
 не заменяет разрешение. GitHub/LLM calls выполняются вне DB-транзакций. Существующие
 terminal payload и append-only audit сохраняются по правилам §6.9.
 
-Публикация обсуждений реализована для GitHub и GitLab (#97); installed GitLab
-intake и fast pipeline описаны в §8.1. Изменения #171 включены: DiffMap задаёт
+Публикация обсуждений реализована для GitHub, GitLab (#97) и Bitbucket Cloud
+(#333); installed GitLab intake и fast pipeline описаны в §8.1. Bitbucket
+публикует inline-комментарии и одну сводку через PR comments с устойчивыми
+маркерами Run. Блок `suggestion` в тексте Bitbucket-комментария пока даёт
+ручной патч, а не доказанную применяемую через UI подсказку; её native API
+возможность остаётся в живой приёмке #333. Изменения #171 включены: DiffMap задаёт
 диапазоны/rename/context позиции, placement хранится для каждого finding, а перед
 каждым POST проверяется текущий head; installed HTTP сохраняет исходную authority.
 
@@ -2059,6 +2063,13 @@ API с ними выкатывается раньше, чем мёржится �
 либо `loc: ["body", "reviewEvent"]` и
 `msg: "bitbucket_review_event_unsupported"`; `type` равен `value_error`.
 Для GitHub и GitLab эти настройки сохраняют прежнюю семантику.
+Bitbucket connect и connection-item ответы ограничивают `workspaceSlug` и
+`repositorySlug` длиной 1–128 символов, включая вложенные элементы списка;
+discovery имеет отдельную схему. Bitbucket-ошибки 422 скрывают входной секрет
+и контекст валидации; для остальных маршрутов GitHub/GitLab сохраняется
+стандартное тело FastAPI с `msg`, `input` и `ctx`, когда эти поля есть.
+`GET /api/repos/{id}/rules-status` и его описание OpenAPI относятся ко всем
+трём провайдерам, без умолчания `github` при отсутствии имени провайдера.
 
 **Тумблер и статус RAG [техлид, 16.10.2026, #145].** В `Repository` обязательны
 `ragEnabled` (boolean, эффективное значение, §6.9) и `ragIndex` (схема `RagIndex`,
