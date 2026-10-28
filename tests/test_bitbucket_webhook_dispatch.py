@@ -16,6 +16,9 @@ from app.modules.integrations.webhooks.application.github_installation_dispatch 
     InstallationDeliveryDispatchStatus as Status,
 )
 from app.modules.integrations.webhooks.application.receive_github_delivery import WebhookReceipt
+from app.modules.reviews.application.project_bitbucket_pull_request import (
+    BitbucketPullRequestUntrackedClosed,
+)
 from app.modules.reviews.application.try_enqueue_webhook_run import EnqueueResult, EnqueueStatus
 
 INSTALLATION = UUID(int=31)
@@ -157,6 +160,10 @@ def test_token_rotation_defers_receipt_but_binding_change_is_inactive() -> None:
         handler.failure = BitbucketBindingGenerationChanged()
         rebound = await adapter.execute(delivery)
         assert rebound.status == Status.IGNORED_IRRELEVANT_EVENT
+        handler.failure = BitbucketPullRequestUntrackedClosed()
+        untracked_close = await adapter.execute(delivery)
+        assert untracked_close.status == Status.IGNORED_IRRELEVANT_EVENT
+        assert untracked_close.detail == "untracked_closed_pr"
         handler.failure = None
         stale = await adapter.execute(delivery)
         assert stale.status == Status.DEFERRED_KNOWN_EVENT
