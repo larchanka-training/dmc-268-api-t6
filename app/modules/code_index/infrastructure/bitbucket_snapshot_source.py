@@ -658,8 +658,6 @@ class BitbucketRepositorySnapshotSource:
             if entry.size is None or entry.size > _MAX_FILE_BYTES:
                 raise IndexLimitExceeded("download_bytes")
             remaining = max_bytes - total
-            if entry.size > remaining:
-                raise IndexLimitExceeded("download_bytes")
             body = await self._file(
                 sha, entry.path, max_bytes=max(1, remaining), skip_redirect=True
             )

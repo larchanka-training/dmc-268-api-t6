@@ -269,7 +269,6 @@ class BitbucketRepositoryTree:
             repository, f"src/{revision}/{quote(path, safe='/')}", max_bytes=max_bytes
         )
         await self.checkpoint()
-        await self.checkpoint()
         return raw
 
     async def read_blob(self, oid: str, *, max_bytes: int) -> bytes:
