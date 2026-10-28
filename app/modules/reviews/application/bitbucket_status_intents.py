@@ -61,9 +61,13 @@ class StatusIntentStore(Protocol):
 
     async def defer_rate_limit(self, claim: StatusClaim, delay: timedelta) -> None: ...
 
+    async def defer_failure(self, claim: StatusClaim, reason: str, delay: timedelta) -> None: ...
+
     async def release(self, claim: StatusClaim) -> None: ...
 
     async def retire(self, run_id: UUID) -> None: ...
+
+    async def retire_expired(self, *, limit: int = 1000) -> int: ...
 
     async def pending(self, *, limit: int = 100) -> list[tuple[UUID, str]]: ...
 
@@ -116,6 +120,11 @@ class BitbucketStatusIntents:
             await uow.statuses.defer_rate_limit(claim, delay)
             await uow.commit()
 
+    async def defer_failure(self, claim: StatusClaim, reason: str, delay: timedelta) -> None:
+        async with self._uow_factory() as uow:
+            await uow.statuses.defer_failure(claim, reason, delay)
+            await uow.commit()
+
     async def release(self, claim: StatusClaim) -> None:
         async with self._uow_factory() as uow:
             await uow.statuses.release(claim)
@@ -125,6 +134,12 @@ class BitbucketStatusIntents:
         async with self._uow_factory() as uow:
             await uow.statuses.retire(run_id)
             await uow.commit()
+
+    async def retire_expired(self, *, limit: int = 1000) -> int:
+        async with self._uow_factory() as uow:
+            retired = await uow.statuses.retire_expired(limit=limit)
+            await uow.commit()
+        return retired
 
     async def pending(self, *, limit: int = 100) -> list[tuple[UUID, str]]:
         async with self._uow_factory() as uow:

@@ -6,6 +6,7 @@ import asyncio
 from datetime import UTC, datetime
 from uuid import UUID
 
+from app.modules.reviews.application.bitbucket_status import bitbucket_status_payload
 from app.modules.reviews.application.handle_review_run import HandleReviewRun
 from tests.test_review_run_worker import RUN, FakeRun, FakeStore, FakeUow, RetryQueue
 
@@ -55,5 +56,32 @@ def test_worker_emits_running_and_cancelled_status_without_github() -> None:
         )
         await worker.execute(RUN)
         assert observed == ["running", "cancelled"]
+
+        attempted_cancel = FakeRun(attempt=1, cancel_requested=True)
+        worker = HandleReviewRun(
+            uow_factory=lambda: FakeUow(FakeStore(attempted_cancel)),
+            pipeline=pipeline,
+            retry_queue=RetryQueue(),
+            check_runs=None,
+            bitbucket_statuses=Statuses(attempted_cancel),
+            worker_id="worker-1",
+            run_url=lambda _: "https://review.example/runs/one",
+            now=lambda: datetime(2026, 10, 27, tzinfo=UTC),
+        )
+        await worker.execute(RUN)
+        assert attempted_cancel.attempt == 1
+        assert observed == ["running", "cancelled", "cancelled"]
+        assert (
+            bitbucket_status_payload(
+                workspace_id=UUID(int=1),
+                repository_uuid=UUID(int=2),
+                pr_number=7,
+                head_sha="a" * 40,
+                source_branch="feature/review",
+                run_url="https://review.example/runs/one",
+                state=observed[-1],
+            )["state"]
+            == "STOPPED"
+        )
 
     asyncio.run(scenario())
