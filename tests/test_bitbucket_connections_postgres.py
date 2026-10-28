@@ -6,6 +6,7 @@ import asyncio
 import os
 from collections.abc import Iterator
 from pathlib import Path
+from typing import cast
 from uuid import UUID, uuid4
 
 import httpx
@@ -28,6 +29,7 @@ from app.bootstrap.reviews_api import ReviewsApiResources
 from app.main import app
 from app.modules.auth.application.scope import AuthScope
 from app.modules.integrations.bitbucket.application.manage_connection import (
+    BitbucketRepositoryProvider,
     ManageBitbucketConnection,
 )
 from app.modules.integrations.bitbucket.application.request_credentials import (
@@ -187,6 +189,40 @@ def test_two_workspace_credentials_rotate_and_revoke_independently(
                     assert len(rows) == 2
                     assert all(row[2] == 1 for row in rows)
                     assert all(b"token" not in row[3] for row in rows)
+                    for table, key, identity, uuid_columns in (
+                        (
+                            "bitbucket_installation_identities",
+                            "provider_installation_id",
+                            first_installation,
+                            (
+                                "provider_installation_id",
+                                "workspace_id",
+                                "bitbucket_workspace_uuid",
+                            ),
+                        ),
+                        (
+                            "bitbucket_repository_identities",
+                            "repository_id",
+                            first_bindings[0].repository_id,
+                            (
+                                "repository_id",
+                                "provider_installation_id",
+                                "workspace_id",
+                                "repository_uuid",
+                            ),
+                        ),
+                    ):
+                        for column in uuid_columns:
+                            with pytest.raises(IntegrityError) as immutable:
+                                async with session.begin_nested():
+                                    await session.execute(
+                                        text(
+                                            f"UPDATE {table} SET {column}=:changed "
+                                            f"WHERE {key}=:identity"
+                                        ),
+                                        {"changed": uuid4(), "identity": identity},
+                                    )
+                            assert getattr(immutable.value.orig, "sqlstate", None) == "23514"
                     with pytest.raises(IntegrityError) as error:
                         async with session.begin_nested():
                             await session.execute(
@@ -515,9 +551,43 @@ def test_bitbucket_repository_enters_common_list_only_for_current_workspace_memb
             return repository_id, other_repository_id
 
     repository_id, other_repository_id = asyncio.run(setup())
+    manager = ManageBitbucketConnection(
+        uow_factory=lambda: SqlAlchemyBitbucketManagementUnitOfWork(factory),
+        cipher=BitbucketCredentialCodecAdapter(cipher),
+        provider=cast(BitbucketRepositoryProvider, object()),
+        rule_sets={},
+        webhook_base_url="https://portal.example",
+    )
     app.state.reviews_api_resources = ReviewsApiResources(engine, factory)
+    app.dependency_overrides[get_bitbucket_management] = lambda: manager
     try:
         client = TestClient(app)
+        app.dependency_overrides[get_auth_scope] = lambda: AuthScope(
+            42, (workspace, other_workspace)
+        )
+        assert {item["id"] for item in client.get("/api/repos").json()} == {
+            str(repository_id),
+            str(other_repository_id),
+        }
+        app.dependency_overrides[get_auth_scope] = lambda: AuthScope(42, (workspace,))
+        own_connections = client.get(f"/api/workspaces/{workspace}/bitbucket/connections")
+        assert own_connections.status_code == 200
+        assert [item["repositoryId"] for item in own_connections.json()["connections"]] == [
+            str(repository_id)
+        ]
+        assert (
+            client.get(f"/api/workspaces/{other_workspace}/bitbucket/connections").status_code
+            == 404
+        )
+        assert client.get(f"/api/repos/{other_repository_id}").status_code == 404
+        app.dependency_overrides[get_auth_scope] = lambda: AuthScope(42, (other_workspace,))
+        other_connections = client.get(f"/api/workspaces/{other_workspace}/bitbucket/connections")
+        assert other_connections.status_code == 200
+        assert [item["repositoryId"] for item in other_connections.json()["connections"]] == [
+            str(other_repository_id)
+        ]
+        assert client.get(f"/api/workspaces/{workspace}/bitbucket/connections").status_code == 404
+        assert client.get(f"/api/repos/{repository_id}").status_code == 404
         app.dependency_overrides[get_auth_scope] = lambda: AuthScope(42, (workspace,))
         visible = client.get("/api/repos")
         assert visible.status_code == 200
@@ -898,6 +968,10 @@ def test_browser_connect_reuses_one_credential_and_disconnects_one_repository(
             f"{url}/{first.json()['id']}/repositories/{first.json()['repositoryId']}"
         )
         assert disconnect.status_code == 204
+        repeated_disconnect = client.delete(
+            f"{url}/{first.json()['id']}/repositories/{first.json()['repositoryId']}"
+        )
+        assert repeated_disconnect.status_code == 204
         assert [item["repositoryId"] for item in client.get(url).json()["connections"]] == [
             second.json()["repositoryId"]
         ]
@@ -927,11 +1001,128 @@ def test_browser_connect_reuses_one_credential_and_disconnects_one_repository(
             },
         )
         assert conflicting.status_code == 409
+        assert conflicting.json() == {"detail": "credential_rotation_required"}
+        # The final disconnect must count only this installation's repositories,
+        # even while another Bitbucket installation and other providers stay live.
+        other_workspace = uuid4()
+        db.execute(
+            text("INSERT INTO workspaces (id, name, daily_budget_usd) VALUES (:id, 'other', 7)"),
+            {"id": other_workspace},
+        )
+        unrelated_repositories: list[UUID] = []
+        for provider, owner, external_id in (
+            ("github", workspace, 900001),
+            ("gitlab", other_workspace, 900002),
+        ):
+            other_installation, other_repository = uuid4(), uuid4()
+            db.execute(
+                text(
+                    "INSERT INTO provider_installations "
+                    '(id, workspace_id, provider, external_id, "metadata") '
+                    "VALUES (:id, :workspace, :provider, :external_id, '{}'::jsonb)"
+                ),
+                {
+                    "id": other_installation,
+                    "workspace": owner,
+                    "provider": provider,
+                    "external_id": external_id,
+                },
+            )
+            db.execute(
+                text(
+                    "INSERT INTO repositories "
+                    "(id, provider_installation_id, external_id, full_name, "
+                    "default_branch, web_url) "
+                    "VALUES (:id, :installation, :external_id, :name, 'main', :url)"
+                ),
+                {
+                    "id": other_repository,
+                    "installation": other_installation,
+                    "external_id": external_id,
+                    "name": f"{provider}/unrelated",
+                    "url": f"https://example.test/{provider}/unrelated",
+                },
+            )
+            unrelated_repositories.append(other_repository)
+        db.commit()
+        peer_installation = uuid4()
+        peer_remote_workspace = uuid4()
+        peer_remote_repository = uuid4()
+
+        async def create_peer_bitbucket_connection() -> UUID:
+            peer_cipher = BitbucketCredentialCipher(active_key_id="test", keys={"test": b"a" * 32})
+            async with factory() as session:
+                store = SqlAlchemyBitbucketConnectionStore(session)
+                await store.create_connection(
+                    workspace_id=workspace,
+                    installation_id=peer_installation,
+                    bitbucket_workspace_uuid=peer_remote_workspace,
+                    token=peer_cipher.encrypt(
+                        "peer-token",
+                        context=CredentialContext(peer_installation, workspace),
+                        purpose=CredentialPurpose.TOKEN,
+                    ),
+                )
+                peer_repository, created = await store.bind_repository(
+                    workspace_id=workspace,
+                    installation_id=peer_installation,
+                    repository_uuid=peer_remote_repository,
+                    full_name="peer/active",
+                    default_branch="main",
+                    web_url="https://bitbucket.org/peer/active",
+                )
+                assert created
+                await store.set_repository_webhook_secret(
+                    workspace_id=workspace,
+                    installation_id=peer_installation,
+                    repository_id=peer_repository,
+                    secret=peer_cipher.encrypt(
+                        "h" * 40,
+                        context=CredentialContext(peer_installation, workspace, peer_repository),
+                        purpose=CredentialPurpose.WEBHOOK_SECRET,
+                    ),
+                )
+                await session.commit()
+                return peer_repository
+
+        peer_repository = asyncio.run(create_peer_bitbucket_connection())
         assert (
             client.delete(
                 f"{url}/{second.json()['id']}/repositories/{second.json()['repositoryId']}"
             ).status_code
             == 204
+        )
+        revoked_connection = db.execute(
+            text(
+                "SELECT revoked_at, token_ciphertext FROM bitbucket_connections "
+                "WHERE provider_installation_id=:installation"
+            ),
+            {"installation": first.json()["id"]},
+        ).one()
+        assert revoked_connection.revoked_at is not None
+        assert revoked_connection.token_ciphertext is None
+        peer_connection = db.execute(
+            text(
+                "SELECT revoked_at, token_ciphertext FROM bitbucket_connections "
+                "WHERE provider_installation_id=:installation"
+            ),
+            {"installation": peer_installation},
+        ).one()
+        assert peer_connection.revoked_at is None
+        assert peer_connection.token_ciphertext is not None
+        assert db.scalar(
+            text("SELECT installation_available FROM repositories WHERE id=:id"),
+            {"id": peer_repository},
+        )
+        assert (
+            db.scalar(
+                text(
+                    "SELECT count(*) FROM repositories "
+                    "WHERE id IN (:first, :second) AND installation_available"
+                ),
+                {"first": unrelated_repositories[0], "second": unrelated_repositories[1]},
+            )
+            == 2
         )
         db.execute(
             text(
@@ -983,6 +1174,19 @@ def test_browser_connect_reuses_one_credential_and_disconnects_one_repository(
             client.put(
                 f"{url}/{first.json()['id']}/credential",
                 json={"apiToken": "rotated-token"},
+            ).status_code
+            == 404
+        )
+        assert (
+            client.delete(
+                f"{url}/{first.json()['id']}/repositories/{first.json()['repositoryId']}"
+            ).status_code
+            == 404
+        )
+        assert (
+            client.post(
+                f"{url}/{first.json()['id']}/repositories/"
+                f"{first.json()['repositoryId']}/webhook-secret"
             ).status_code
             == 404
         )

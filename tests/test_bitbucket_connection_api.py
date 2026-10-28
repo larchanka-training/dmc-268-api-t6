@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import asyncio
-from types import SimpleNamespace
+from types import SimpleNamespace, TracebackType
+from typing import Self, cast
 from uuid import UUID
 
 import httpx
@@ -17,8 +18,18 @@ from app.bootstrap.portal_auth import get_auth_scope
 from app.bootstrap.reviews_api import ReviewsApiResources
 from app.main import app
 from app.modules.auth.application.scope import AuthScope
+from app.modules.integrations.bitbucket.application.manage_connection import (
+    BitbucketCredentialCodec,
+    BitbucketManagementStore,
+    BitbucketManagementUnitOfWork,
+    BitbucketRepositoryProvider,
+    ManageBitbucketConnection,
+)
 from app.modules.integrations.bitbucket.infrastructure.credential_cipher import (
     BitbucketCredentialCipher,
+)
+from app.modules.integrations.bitbucket.infrastructure.credential_codec import (
+    BitbucketCredentialCodecAdapter,
 )
 from app.modules.integrations.bitbucket.infrastructure.repository_provider import (
     BitbucketCloudRepositoryProvider,
@@ -27,6 +38,125 @@ from app.modules.integrations.bitbucket.infrastructure.repository_provider impor
 
 WORKSPACE = UUID("00000000-0000-4000-8000-000000000333")
 REPOSITORY = UUID("00000000-0000-4000-8000-000000000334")
+
+
+class _MembershipOnlyStore:
+    def __init__(self, member: bool) -> None:
+        self.member = member
+
+    async def is_member(self, *, user_id: int, workspace_id: UUID, lock: bool = False) -> bool:
+        assert user_id == 42
+        assert workspace_id == WORKSPACE
+        return self.member
+
+    def __getattr__(self, name: str) -> object:
+        raise AssertionError(f"management passed membership fence: {name}")
+
+
+class _MembershipOnlyUow:
+    def __init__(self, member: bool) -> None:
+        self._store = _MembershipOnlyStore(member)
+
+    @property
+    def connections(self) -> BitbucketManagementStore:
+        return cast(BitbucketManagementStore, self._store)
+
+    async def __aenter__(self) -> Self:
+        return self
+
+    async def __aexit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> None:
+        return None
+
+    async def commit(self) -> None:
+        raise AssertionError("management passed membership fence: commit")
+
+    async def rollback(self) -> None:
+        raise AssertionError("management passed membership fence: rollback")
+
+
+class _AbsentRepositoryStore(_MembershipOnlyStore):
+    def __init__(self) -> None:
+        super().__init__(member=True)
+        self.disconnect_calls = 0
+
+    async def disconnect_repository(
+        self, *, workspace_id: UUID, installation_id: UUID, repository_id: UUID
+    ) -> bool:
+        assert (workspace_id, installation_id, repository_id) == (
+            WORKSPACE,
+            REPOSITORY,
+            UUID(int=335),
+        )
+        self.disconnect_calls += 1
+        return False
+
+
+class _AbsentRepositoryUow(_MembershipOnlyUow):
+    def __init__(self) -> None:
+        super().__init__(member=True)
+        self._store = _AbsentRepositoryStore()
+        self.commits = 0
+
+    @property
+    def store(self) -> _AbsentRepositoryStore:
+        return cast(_AbsentRepositoryStore, self._store)
+
+    async def commit(self) -> None:
+        self.commits += 1
+
+
+class _MissingManagementStore(_MembershipOnlyStore):
+    def __init__(self) -> None:
+        super().__init__(member=True)
+        self.connection_lookups = 0
+        self.secret_rotations = 0
+
+    async def installation_by_id(self, *, workspace_id: UUID, installation_id: UUID) -> None:
+        assert (workspace_id, installation_id) == (WORKSPACE, REPOSITORY)
+        self.connection_lookups += 1
+        return None
+
+    async def list_bindings(self, *, workspace_id: UUID) -> tuple[()]:
+        assert workspace_id == WORKSPACE
+        return ()
+
+    async def set_repository_webhook_secret(
+        self, *, workspace_id: UUID, installation_id: UUID, repository_id: UUID, secret: object
+    ) -> int:
+        assert (workspace_id, installation_id, repository_id) == (
+            WORKSPACE,
+            REPOSITORY,
+            UUID(int=335),
+        )
+        self.secret_rotations += 1
+        raise ValueError("repository_not_found")
+
+
+class _MissingManagementUow(_MembershipOnlyUow):
+    def __init__(self) -> None:
+        super().__init__(member=True)
+        self._store = _MissingManagementStore()
+
+    @property
+    def store(self) -> _MissingManagementStore:
+        return cast(_MissingManagementStore, self._store)
+
+
+def _manager_with_membership(
+    *, member: bool, provider: object | None = None
+) -> ManageBitbucketConnection:
+    return ManageBitbucketConnection(
+        uow_factory=lambda: cast(BitbucketManagementUnitOfWork, _MembershipOnlyUow(member)),
+        cipher=cast(BitbucketCredentialCodec, object()),
+        provider=cast(BitbucketRepositoryProvider, provider or object()),
+        rule_sets={},
+        webhook_base_url="https://portal.example.test",
+    )
 
 
 @pytest.mark.parametrize(
@@ -260,6 +390,11 @@ def test_bitbucket_connection_list_rejects_workspace_outside_claim() -> None:
             f"connections/{REPOSITORY}/repositories/{UUID(int=335)}",
             None,
         ),
+        (
+            "post",
+            f"connections/{REPOSITORY}/repositories/{UUID(int=335)}/webhook-secret",
+            None,
+        ),
     ],
 )
 def test_other_workspace_cannot_list_rotate_or_disconnect(
@@ -279,6 +414,172 @@ def test_other_workspace_cannot_list_rotate_or_disconnect(
         app.dependency_overrides.clear()
 
     assert response.status_code == 404
+
+
+def test_connect_rejects_repository_uuid_mismatch_before_probing_or_persisting() -> None:
+    fetched: list[tuple[str, str]] = []
+
+    class MismatchedRepositoryProvider:
+        async def fetch_repository(
+            self, *, workspace_slug: str, repository_slug: str, token: str
+        ) -> SimpleNamespace:
+            assert token == "test-token"
+            fetched.append((workspace_slug, repository_slug))
+            return SimpleNamespace(uuid=UUID(int=999), workspace_uuid=UUID(int=998))
+
+        async def probe_pull_request_read(self, **_kwargs: object) -> None:
+            raise AssertionError("mismatched repository reached provider probe")
+
+    manager = _manager_with_membership(member=True, provider=MismatchedRepositoryProvider())
+    app.dependency_overrides[get_auth_scope] = lambda: AuthScope(42, (WORKSPACE,))
+    app.dependency_overrides[get_bitbucket_workspace_scope] = lambda: AuthScope(42, (WORKSPACE,))
+    app.dependency_overrides[get_bitbucket_management] = lambda: manager
+    try:
+        response = TestClient(app).post(
+            f"/api/workspaces/{WORKSPACE}/bitbucket/connections",
+            json={
+                "bitbucketWorkspace": "team",
+                "repositorySlug": "repo",
+                "repositoryUuid": str(REPOSITORY),
+                "apiToken": "test-token",
+            },
+        )
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 409
+    assert response.json() == {"detail": "repository_uuid_mismatch"}
+    assert fetched == [("team", "repo")]
+
+
+@pytest.mark.parametrize("code", ["invalid_slug", "invalid_credential"])
+def test_provider_rejection_has_explicit_http_code_and_sanitized_body(code: str) -> None:
+    class RejectingProvider:
+        async def fetch_repository(self, **_kwargs: object) -> None:
+            raise BitbucketProviderError(code)
+
+    manager = _manager_with_membership(member=True, provider=RejectingProvider())
+    app.dependency_overrides[get_auth_scope] = lambda: AuthScope(42, (WORKSPACE,))
+    app.dependency_overrides[get_bitbucket_workspace_scope] = lambda: AuthScope(42, (WORKSPACE,))
+    app.dependency_overrides[get_bitbucket_management] = lambda: manager
+    try:
+        response = TestClient(app).post(
+            f"/api/workspaces/{WORKSPACE}/bitbucket/connections",
+            json={
+                "bitbucketWorkspace": "team",
+                "repositorySlug": "repo",
+                "repositoryUuid": str(REPOSITORY),
+                "apiToken": "test-token",
+            },
+        )
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 400
+    assert response.json() == {"detail": code}
+    assert "test-token" not in response.text
+
+
+@pytest.mark.parametrize(
+    ("method", "path"),
+    [
+        ("delete", f"connections/{REPOSITORY}/repositories/{UUID(int=335)}"),
+        (
+            "post",
+            f"connections/{REPOSITORY}/repositories/{UUID(int=335)}/webhook-secret",
+        ),
+    ],
+)
+def test_removed_member_cannot_disconnect_or_rotate_webhook_secret(method: str, path: str) -> None:
+    # The claim still names the workspace, but database membership was removed.
+    manager = _manager_with_membership(member=False)
+    app.dependency_overrides[get_auth_scope] = lambda: AuthScope(42, (WORKSPACE,))
+    app.dependency_overrides[get_bitbucket_workspace_scope] = lambda: AuthScope(42, (WORKSPACE,))
+    app.dependency_overrides[get_bitbucket_management] = lambda: manager
+    try:
+        response = TestClient(app).request(method, f"/api/workspaces/{WORKSPACE}/bitbucket/{path}")
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 404
+    assert response.json() == {"detail": "workspace_not_found"}
+
+
+def test_valid_member_can_repeat_disconnect_of_absent_repository() -> None:
+    uow = _AbsentRepositoryUow()
+    manager = ManageBitbucketConnection(
+        uow_factory=lambda: cast(BitbucketManagementUnitOfWork, uow),
+        cipher=cast(BitbucketCredentialCodec, object()),
+        provider=cast(BitbucketRepositoryProvider, object()),
+        rule_sets={},
+        webhook_base_url="https://portal.example.test",
+    )
+    app.dependency_overrides[get_auth_scope] = lambda: AuthScope(42, (WORKSPACE,))
+    app.dependency_overrides[get_bitbucket_workspace_scope] = lambda: AuthScope(42, (WORKSPACE,))
+    app.dependency_overrides[get_bitbucket_management] = lambda: manager
+    try:
+        client = TestClient(app)
+        responses = [
+            client.delete(
+                f"/api/workspaces/{WORKSPACE}/bitbucket/connections/{REPOSITORY}"
+                f"/repositories/{UUID(int=335)}"
+            )
+            for _ in range(2)
+        ]
+    finally:
+        app.dependency_overrides.clear()
+
+    assert [response.status_code for response in responses] == [204, 204]
+    assert uow.store.disconnect_calls == 2
+    assert uow.commits == 2
+
+
+@pytest.mark.parametrize(
+    ("method", "path", "body", "code"),
+    [
+        (
+            "put",
+            f"connections/{REPOSITORY}/credential",
+            {"apiToken": "test-token"},
+            "connection_not_found",
+        ),
+        (
+            "post",
+            f"connections/{REPOSITORY}/repositories/{UUID(int=335)}/webhook-secret",
+            None,
+            "repository_not_found",
+        ),
+    ],
+)
+def test_connection_and_repository_not_found_codes_are_explicit_on_wire(
+    method: str, path: str, body: dict[str, str] | None, code: str
+) -> None:
+    uow = _MissingManagementUow()
+    manager = ManageBitbucketConnection(
+        uow_factory=lambda: cast(BitbucketManagementUnitOfWork, uow),
+        cipher=BitbucketCredentialCodecAdapter(
+            BitbucketCredentialCipher(active_key_id="test", keys={"test": b"a" * 32})
+        ),
+        provider=cast(BitbucketRepositoryProvider, object()),
+        rule_sets={},
+        webhook_base_url="https://portal.example.test",
+    )
+
+    app.dependency_overrides[get_auth_scope] = lambda: AuthScope(42, (WORKSPACE,))
+    app.dependency_overrides[get_bitbucket_workspace_scope] = lambda: AuthScope(42, (WORKSPACE,))
+    app.dependency_overrides[get_bitbucket_management] = lambda: manager
+    try:
+        response = TestClient(app).request(
+            method, f"/api/workspaces/{WORKSPACE}/bitbucket/{path}", json=body
+        )
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 404
+    assert response.json() == {"detail": code}
+    assert (uow.store.connection_lookups, uow.store.secret_rotations) == (
+        (1, 0) if method == "put" else (0, 1)
+    )
 
 
 def test_discovery_propagates_sanitized_retry_after() -> None:
