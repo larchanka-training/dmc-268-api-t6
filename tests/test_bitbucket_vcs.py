@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 from uuid import UUID
 
 import httpx
@@ -17,13 +18,19 @@ from app.modules.integrations.bitbucket.infrastructure.run_http import (
     BitbucketRunHttp,
     BitbucketRunHttpError,
 )
+from app.modules.reviews.application.check_runs import RunProviderCheckpoint, failure_reason
 from app.modules.reviews.application.diff_map import VcsProviderName, vcs_provider_name
 from app.modules.reviews.application.run_failures import (
     RETRYABLE_ERROR_CODES,
     RunCancelled,
     RunFailure,
 )
-from app.modules.reviews.application.vcs_diff import FetchVcsReviewInput, PullRequestLocator
+from app.modules.reviews.application.vcs_diff import (
+    FetchVcsReviewInput,
+    PullRequestLocator,
+    VcsFile,
+    VcsPullRequest,
+)
 from app.modules.reviews.infrastructure.bitbucket_vcs import HttpBitbucketVcsProvider
 
 DEST = UUID("11111111-1111-4111-8111-111111111111")
@@ -263,6 +270,59 @@ def test_exhausted_total_budget_fails_instead_of_omitting_one_file(
                     _locator(), HEAD, BASE
                 )
             assert error.value.error_code == "bitbucket_response_budget_exceeded"
+
+    asyncio.run(scenario())
+
+
+def test_exhausted_request_budget_on_required_blob_fails_review(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen: list[str] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        seen.append(path)
+        if path == f"{PREFIX}/pullrequests/7":
+            return httpx.Response(200, json=_pr())
+        if path == f"{PREFIX}/diffstat/{HEAD}..{BASE}":
+            return httpx.Response(200, json=_stat())
+        if path == f"{PREFIX}/diff/{HEAD}..{BASE}":
+            return httpx.Response(200, text="diff --git a/src/a.py b/src/a.py\n")
+        raise AssertionError(path)
+
+    async def scenario() -> None:
+        async def checkpoint() -> None:
+            return None
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+            http = BitbucketRunHttp(client, Credentials(), TARGET)
+
+            class CapAtBlob(HttpBitbucketVcsProvider):
+                async def get_diff(
+                    self, pull_request: VcsPullRequest, *, checkpoint: RunProviderCheckpoint
+                ) -> tuple[VcsFile, ...]:
+                    files = await super().get_diff(pull_request, checkpoint=checkpoint)
+                    # Simulate a provider file that requires blob classification.
+                    return tuple(replace(file, omission_reason=None) for file in files)
+
+                async def get_blob(
+                    self,
+                    locator: PullRequestLocator,
+                    sha: str,
+                    *,
+                    checkpoint: RunProviderCheckpoint,
+                ) -> bytes:
+                    monkeypatch.setattr(run_http, "_MAX_REQUESTS", http.request_count)
+                    return await super().get_blob(locator, sha, checkpoint=checkpoint)
+
+            vcs = CapAtBlob(http=http, locator=_locator())
+            with pytest.raises(BitbucketRunHttpError) as error:
+                await FetchVcsReviewInput(vcs, checkpoint=checkpoint).execute(
+                    _locator(), HEAD, BASE
+                )
+            assert error.value.error_code == "bitbucket_request_budget_exceeded"
+            assert error.value.error_code not in RETRYABLE_ERROR_CODES
+            assert all("/src/" not in path for path in seen)
 
     asyncio.run(scenario())
 
@@ -548,6 +608,34 @@ def test_merge_base_429_preserves_retry_after() -> None:
     asyncio.run(scenario())
 
 
+def test_merge_base_request_budget_preserves_bitbucket_budget_code(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def respond(request: httpx.Request) -> httpx.Response:
+        if request.url.path == f"{PREFIX}/pullrequests/7":
+            return httpx.Response(200, json=_pr())
+        if request.url.path == f"{PREFIX}/diffstat/{HEAD}..{BASE}":
+            return httpx.Response(200, json=_stat())
+        raise AssertionError(request.url.path)
+
+    async def scenario() -> None:
+        async def checkpoint() -> None:
+            return None
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+            http = BitbucketRunHttp(client, Credentials(), TARGET)
+            vcs = HttpBitbucketVcsProvider(http=http, locator=_locator())
+            pr = await vcs.get_pull_request(_locator(), checkpoint=checkpoint)
+            # The cached PR guard succeeds, then the required merge-base read reaches the cap.
+            monkeypatch.setattr(run_http, "_MAX_REQUESTS", http.request_count)
+            with pytest.raises(BitbucketRunHttpError) as error:
+                await vcs.get_merge_base(pr, checkpoint=checkpoint)
+            assert error.value.kind == "request_budget_exceeded"
+            assert error.value.error_code == "bitbucket_request_budget_exceeded"
+
+    asyncio.run(scenario())
+
+
 def test_run_request_cap_fails_before_an_extra_http_call(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(run_http, "_MAX_REQUESTS", 1)
     calls = 0
@@ -563,10 +651,68 @@ def test_run_request_cap_fails_before_an_extra_http_call(monkeypatch: pytest.Mon
             assert await http.get_bytes(DEST, f"src/{HEAD}/first", max_bytes=1) == b"x"
             with pytest.raises(RunFailure) as error:
                 await http.get_bytes(DEST, f"src/{HEAD}/second", max_bytes=1)
-            assert error.value.error_code == "bitbucket_review_limit_exceeded"
+            assert error.value.error_code == "bitbucket_request_budget_exceeded"
+            assert error.value.error_code not in RETRYABLE_ERROR_CODES
+            assert failure_reason(error.value.error_code) == (
+                "Лимит запросов к Bitbucket для ревью исчерпан."
+            )
 
     asyncio.run(scenario())
     assert calls == 1
+
+
+def test_run_http_failure_reports_bitbucket_source_instead_of_github_diff() -> None:
+    async def scenario() -> None:
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(lambda request: httpx.Response(503))
+        ) as client:
+            http = BitbucketRunHttp(client, Credentials(), TARGET)
+            with pytest.raises(BitbucketRunHttpError) as error:
+                await http.get_json(DEST, "pullrequests/7")
+            assert error.value.kind == "unexpected_status"
+            assert error.value.error_code == "bitbucket_fetch_failed"
+            assert error.value.error_code in RETRYABLE_ERROR_CODES
+            assert failure_reason(error.value.error_code) == (
+                "Не удалось получить данные ревью из Bitbucket."
+            )
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("malformed_kind", ["pr", "commit", "diffstat", "json"])
+def test_malformed_bitbucket_response_is_terminal(malformed_kind: str) -> None:
+    malformed = _pr(head=HEAD[:12] if malformed_kind == "commit" else HEAD)
+    if malformed_kind == "pr":
+        malformed["author"] = {}
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        if request.url.path == f"{PREFIX}/pullrequests/7":
+            if malformed_kind == "json":
+                return httpx.Response(200, content=b"not-json")
+            return httpx.Response(200, json=malformed)
+        if request.url.path == f"{PREFIX}/commit/{HEAD[:12]}":
+            return httpx.Response(200, json={"hash": "invalid"})
+        if request.url.path == f"{PREFIX}/diffstat/{HEAD}..{BASE}":
+            return httpx.Response(200, json={"values": "invalid"})
+        raise AssertionError(request.url.path)
+
+    async def scenario() -> None:
+        async def checkpoint() -> None:
+            return None
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+            vcs = HttpBitbucketVcsProvider(
+                http=BitbucketRunHttp(client, Credentials(), TARGET), locator=_locator()
+            )
+            with pytest.raises(RunFailure) as error:
+                await vcs.get_pull_request(_locator(), checkpoint=checkpoint)
+            assert error.value.error_code == "bitbucket_invalid_response"
+            assert error.value.error_code not in RETRYABLE_ERROR_CODES
+            assert failure_reason(error.value.error_code) == (
+                "Bitbucket вернул некорректные данные для ревью."
+            )
+
+    asyncio.run(scenario())
 
 
 @pytest.mark.parametrize("file_count", [100, 200])

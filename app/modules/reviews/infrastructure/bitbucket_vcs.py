@@ -291,7 +291,9 @@ class HttpBitbucketVcsProvider:
         except RunCancelled:
             raise
         except (ValueError, TypeError):
-            raise RunFailure("diff_fetch_failed", "Bitbucket PR response is malformed") from None
+            raise RunFailure(
+                "bitbucket_invalid_response", "Bitbucket PR response is malformed"
+            ) from None
         if current.source_uuid != self._http.target.repository_uuid:
             self._http.allow_source_repository(current.source_uuid)
         try:
@@ -323,7 +325,9 @@ class HttpBitbucketVcsProvider:
         try:
             full = resolved_commit_hash(_object(raw).get("hash"), prefix)
         except (ValueError, TypeError):
-            raise RunFailure("diff_fetch_failed", "Bitbucket commit is malformed") from None
+            raise RunFailure(
+                "bitbucket_invalid_response", "Bitbucket commit is malformed"
+            ) from None
         self._resolved_commits[identity] = full
         return full
 
@@ -346,7 +350,9 @@ class HttpBitbucketVcsProvider:
             if _sha(_object(raw).get("hash")) != current.head:
                 raise ValueError("mismatched Bitbucket source commit")
         except (ValueError, TypeError):
-            raise RunFailure("diff_fetch_failed", "Bitbucket fork source is unreadable") from None
+            raise RunFailure(
+                "bitbucket_invalid_response", "Bitbucket fork source is unreadable"
+            ) from None
 
     @staticmethod
     def _stat(raw: object) -> _Stat:
@@ -448,7 +454,9 @@ class HttpBitbucketVcsProvider:
                 "bitbucket_review_limit_exceeded", "Bitbucket PR exceeds the diffstat file limit"
             ) from None
         except (ValueError, TypeError):
-            raise RunFailure("diff_fetch_failed", "Bitbucket diffstat is incomplete") from None
+            raise RunFailure(
+                "bitbucket_invalid_response", "Bitbucket diffstat is incomplete"
+            ) from None
 
     async def get_pull_request(
         self, locator: PullRequestLocator, *, checkpoint: RunProviderCheckpoint
@@ -753,6 +761,7 @@ class HttpBitbucketVcsProvider:
             if error.error_code in {
                 "bitbucket_response_budget_exceeded",
                 "bitbucket_review_limit_exceeded",
+                "bitbucket_request_budget_exceeded",
             } or (isinstance(error, BitbucketRunHttpError) and error.kind == "rate_limited"):
                 raise
             raise MergeBaseUnavailable("Bitbucket merge base is unavailable") from None

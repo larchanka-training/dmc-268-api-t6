@@ -43,14 +43,20 @@ class BitbucketRunHttpError(RunFailure):
         code = (
             "bitbucket_response_budget_exceeded"
             if kind == "total_budget_exceeded"
-            else "bitbucket_review_limit_exceeded"
+            else "bitbucket_request_budget_exceeded"
             if kind == "request_budget_exceeded"
-            else "diff_fetch_failed"
+            else "bitbucket_invalid_response"
+            if kind == "invalid_json"
+            else "bitbucket_fetch_failed"
         )
         super().__init__(
             code,
             "Bitbucket response budget is exhausted"
             if kind == "total_budget_exceeded"
+            else "Bitbucket request budget is exhausted"
+            if kind == "request_budget_exceeded"
+            else "Bitbucket response is malformed"
+            if kind == "invalid_json"
             else "Bitbucket review source is unavailable",
             retry_after=retry_after,
             rate_limited=kind == "rate_limited",
