@@ -157,7 +157,9 @@ def test_status_429_exposes_retry_after() -> None:
     async def scenario() -> None:
         run_id, installation, workspace, repository, remote = (uuid4() for _ in range(5))
         target = BoundBitbucketTarget(installation, workspace, repository, remote, 1, 1)
-        snapshot = BitbucketStatusSnapshot(run_id, target, 7, HEAD, "feature/review", "running")
+        snapshot = BitbucketStatusSnapshot(
+            run_id, target, 7, HEAD, "feature/review", "running", target_branch="main"
+        )
 
         class Source:
             async def current(self, selected: UUID) -> BitbucketStatusSnapshot | None:
@@ -206,13 +208,16 @@ def test_status_gateway_updates_one_key_after_ambiguous_write_and_checks_pr_head
     async def scenario() -> None:
         run_id, installation, workspace, repository, remote = (uuid4() for _ in range(5))
         target = BoundBitbucketTarget(installation, workspace, repository, remote, 1, 1)
-        snapshot = BitbucketStatusSnapshot(run_id, target, 7, HEAD, "feature/review", "running")
+        snapshot = BitbucketStatusSnapshot(
+            run_id, target, 7, HEAD, "feature/review", "running", target_branch="main"
+        )
         statuses: list[dict[str, str]] = []
         requests: list[httpx.Request] = []
         ambiguous = True
         source_uuid = remote
         remote_head = HEAD
         remote_state = "OPEN"
+        remote_target_branch = "main"
         get_status = 200
         post_status = 201
 
@@ -252,7 +257,11 @@ def test_status_gateway_updates_one_key_after_ambiguous_write_and_checks_pr_head
                             "branch": {"name": "feature/review"},
                             "repository": {"uuid": f"{{{source_uuid}}}"},
                         },
-                        "destination": {"repository": {"uuid": f"{{{remote}}}"}},
+                        "destination": {
+                            "branch": {"name": remote_target_branch},
+                            "commit": {"hash": "d" * 12},
+                            "repository": {"uuid": f"{{{remote}}}"},
+                        },
                     },
                 )
             payload: dict[str, str] = json.loads(request.content)
@@ -287,6 +296,13 @@ def test_status_gateway_updates_one_key_after_ambiguous_write_and_checks_pr_head
         assert requests[-1].headers["Authorization"] == "Bearer target-repo-token"
         assert statuses[-1]["state"] == "STOPPED"
         assert statuses[-1]["key"] == statuses[0]["key"]
+
+        remote_target_branch = "release"
+        snapshot = replace(snapshot, state="succeeded")
+        with pytest.raises(BitbucketStatusUnavailable, match="head or identity changed"):
+            await publisher.upsert(run_id, RUN_URL)
+        assert len(statuses) == 3
+        remote_target_branch = "main"
 
         remote_head = "b" * 40
         snapshot = replace(snapshot, state="succeeded")

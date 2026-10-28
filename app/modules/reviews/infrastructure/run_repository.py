@@ -486,6 +486,7 @@ class SqlAlchemyRunRepository:
                 Run.origin_provider_installation_id,
                 Repository.external_id,
                 BitbucketRunOrigin.repository_uuid,
+                Run.base_ref,
             )
             .select_from(Run)
             .join(CodeChange, CodeChange.id == Run.code_change_id)
@@ -521,6 +522,7 @@ class SqlAlchemyRunRepository:
                 repository_external_id=row[9],
                 repository_uuid=row[10],
             ),
+            base_ref=row[11] if row[7] == "bitbucket" else None,
         )
 
     async def get_run_conventions_input(self, run_id: UUID) -> RunConventionsInput | None:

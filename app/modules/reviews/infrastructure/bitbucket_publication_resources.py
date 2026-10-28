@@ -258,6 +258,7 @@ class BitbucketInstalledPublicationResources:
             or vcs.locator.repository_uuid is None
             or vcs.locator.origin_provider_installation_id is None
             or vcs.locator.provider != "bitbucket"
+            or vcs.base_ref is None
             or vcs.head_sha != context.head_sha
             or vcs.locator.number != context.pr_number
             or not publication_matches(context, context)
@@ -336,7 +337,10 @@ class BitbucketInstalledPublicationResources:
                     checkpoint=claim_checkpoint,
                 )
                 yield BitbucketPullRequestCommentGateway(
-                    port, run_id=context.run_id, repository_uuid=target.repository_uuid
+                    port,
+                    run_id=context.run_id,
+                    repository_uuid=target.repository_uuid,
+                    pinned_target_branch=vcs.base_ref,
                 )
         finally:
             heartbeat_task.cancel()
