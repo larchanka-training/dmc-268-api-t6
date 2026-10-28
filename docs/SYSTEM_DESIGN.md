@@ -2249,7 +2249,7 @@ legacy-контракта**. V2 и его golden-фикстура остаютс
 порядка версий. Отдельно разрешённая полная съёмка 24 ответов выполнена ниже;
 съёмки не смешивались.
 
-**Текущий raw baseline #178 (20.10.2026).**
+**Исторический raw baseline #178 (20.10.2026).**
 [Run 39443263258, attempt 1](https://github.com/larchanka-training/dmc-268-api-t6/actions/runs/39443263258)
 на source `47f9add7c4df2b7c32db0091d39296cdd2e4810c` снял все 24 первых ответа с
 `review.system.v3` (SHA-256 `eb851e7fc2329eb7bdff015ec0fda945c46111ec5c884934ed6f6d6803883452`),
@@ -2283,6 +2283,16 @@ critical recall **2/5** без изменения, verdict agreement **4/24** п
 качество verifier/final pipeline, repair/latency/cost savings не установлены.
 Configured цены/лимиты совпадают с предыдущими; actual spend, billed tokens и
 баланс artifacts не сообщают.
+
+**Текущий raw baseline `review.system.v5` (28.10.2026, #144, #130 R15).**
+[Run 40774280790, attempt 1](https://github.com/larchanka-training/dmc-268-api-t6/actions/runs/40774280790)
+на source `973218054ef2c9a32f1e75a955284323196ffafd` снял все 24 первых ответа с v5,
+плечо `none`, без RAG (#146) и verifier (#217); один разрешённый техлидом платный
+прогон. Replay `warnings=[]`: validity **21/24**, TP/FP/FN **5/13/14**, critical recall
+**4/5**, verdict agreement **9/24**. Контракт ответа сменился с v1 на v2 (без префикса
+атрибуции), поэтому сравнение с v3 не прямое. Полные метрики и provenance —
+[README корпуса](../test-prs-dataset/README.md#recorded-mistral-baseline--2026-10-28)
+и [TEST_PLAN §3.2.5](TEST_PLAN.md#325-зафиксированный-v5-raw-baseline-144-2026-10-28).
 
 **Закрытие OQ-2: проверка по D7.** Значения — каталог EUrouter (`GET https://api.eurouter.ai/api/v1/models` и `/endpoints`) на 05.10.2026; цены — за 1 млн токенов, по эндпоинтам и в их валюте. `KNOWN_MODELS` хранит в USD нижнюю границу цены самой дорогой известной ветки: Regolo для основной, GreenPT для fallback, с историческим курсом 1.1225. На известном EUrouter endpoint эффективная цена — покомпонентный максимум каталожной USD-границы, EUR-цены самой дорогой ветки × полученный перед вызовом курс ЕЦБ и значения из env; меньшее значение env границу не ослабляет. Для другого endpoint явно заданная цена env применяется без этой границы.
 

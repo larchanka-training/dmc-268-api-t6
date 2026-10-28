@@ -525,7 +525,7 @@ Redis-кэши (кэш контекста и кэш токенов устано�
 
 Каждый кейс имеет JSON metadata/ground truth, исходное состояние файла (pre-image), применимый unified `.patch` и источник; raw responses хранятся отдельно от кейса, в `test-prs-dataset/responses/`. Для real PR обязательны URL PR/commit, revision, название и URL лицензии, attribution и ручная проверка права на конкретный excerpt. Ground truth использует `path`, `start_line`, `line`, `severity`, `category` из Finding; `start_line: null` означает одну строку, иначе `< line`. Ожидаемый `verdict` выводится из severity по [PIPELINE_SPEC §11](PIPELINE_SPEC.md#11-вердикт-и-бейджи-d3): `critical/high → blocking`, иначе `medium/low → attention`, иначе `clean`. Case schema собственная; [ReviewOutput schema](../review/schemas/review-output.schema.json) применяется только к ответу модели. `git apply --check` выполняется на копии pre-image, truth якорится в добавленных строках новой стороны; answer-hint комментарии запрещены.
 
-Оценивать **сырой** ответ модели до post-processing, hunk-фильтра, production verifier, severity threshold, cap inline и публикации: иначе качество промпта скрывается правилами выпуска. Replay читает committed raw response без сети и ключа, с model ID, prompt version/SHA и run metadata. Валиден только ответ, для которого `validate_findings.py` завершился кодом 0 **и** напечатал строку своей схемы: у съёмки на v1–v3 — `uv run python review/scripts/validate_findings.py <response.json>` и `OK ReviewOutput`, у съёмки промпта snapshot-пути (v4/v5) — тот же скрипт с `--schema v2` и `OK ReviewOutputV2` (схема v2 и модель ReviewOutputV2). Обе проверки идут по сырому ответу до нормализации шлюза: `start_line`, равный `line`, и находки не по порядку severity/confidence шлюз исправляет и принимает, а replay считает невалидными — у v2 так же, как у v1; exit 1/2 и `RepoConventionsDraft` невалидны. Ссылки evidence против manifest вызова replay не проверяет. Live использует PromptBuilder и `review/prompts/`, выбранную модель и внешние credentials, сохраняет raw output и ту же provenance для replay. Live запускается вручную (§2, `eval-live.yml`); закоммиченный baseline — ответы и `manifest.json` в `test-prs-dataset/responses/`, его модель и provenance описаны в [README корпуса](../test-prs-dataset/README.md); историческая съёмка 2026-10-13 использовала одиночные revision snapshots (результат §3.2.1); полная замена всех 24 ответов с проверенными PR prefixes сохранена как исторический baseline §3.2.2; текущий post-rebase baseline после merged #149 — §3.2.3. LLM-as-a-judge для оценки этого raw benchmark не используется. Обязательный production verifier по #107 — часть продукта, качество которого оценивается отдельно (§3.4).
+Оценивать **сырой** ответ модели до post-processing, hunk-фильтра, production verifier, severity threshold, cap inline и публикации: иначе качество промпта скрывается правилами выпуска. Replay читает committed raw response без сети и ключа, с model ID, prompt version/SHA и run metadata. Валиден только ответ, для которого `validate_findings.py` завершился кодом 0 **и** напечатал строку своей схемы: у съёмки на v1–v3 — `uv run python review/scripts/validate_findings.py <response.json>` и `OK ReviewOutput`, у съёмки промпта snapshot-пути (v4/v5) — тот же скрипт с `--schema v2` и `OK ReviewOutputV2` (схема v2 и модель ReviewOutputV2). Обе проверки идут по сырому ответу до нормализации шлюза: `start_line`, равный `line`, и находки не по порядку severity/confidence шлюз исправляет и принимает, а replay считает невалидными — у v2 так же, как у v1; exit 1/2 и `RepoConventionsDraft` невалидны. Ссылки evidence против manifest вызова replay не проверяет. Live использует PromptBuilder и `review/prompts/`, выбранную модель и внешние credentials, сохраняет raw output и ту же provenance для replay. Live запускается вручную (§2, `eval-live.yml`); закоммиченный baseline — ответы и `manifest.json` в `test-prs-dataset/responses/`, его модель и provenance описаны в [README корпуса](../test-prs-dataset/README.md); историческая съёмка 2026-10-13 использовала одиночные revision snapshots (результат §3.2.1); полная замена всех 24 ответов с проверенными PR prefixes сохранена как исторический baseline §3.2.2; post-rebase baseline после merged #149 — исторический §3.2.3; полная съёмка v3 #178 — исторический §3.2.4; текущий baseline `review.system.v5` — §3.2.5. LLM-as-a-judge для оценки этого raw benchmark не используется. Обязательный production verifier по #107 — часть продукта, качество которого оценивается отдельно (§3.4).
 
 ### 3.2. Однозначное сопоставление и счётчики
 
@@ -547,7 +547,7 @@ CLEAN-03/LOG-03/SEC-04 по 1 сообщению, RES-03/SYN-04 по 20 и uncer
 Strict schema и canonical/active binding проверяются до calls/staging; все
 canonical case.json identity inputs и shaping modules входят в static provenance.
 Результаты ниже относятся только к capture 2026-10-13 и не измеряют новые
-prefixes; новая полная съёмка описана в §3.2.2; текущий baseline — §3.2.3.
+prefixes; новая полная съёмка описана в §3.2.2; текущий baseline — §3.2.5.
 
 [Actions run 38468081001, attempt 1](https://github.com/larchanka-training/dmc-268-api-t6/actions/runs/38468081001)
 снял все 24 первых ответа на source SHA `80ede3cd274d745616b8a24082ff7d1d00f5b736`;
@@ -657,7 +657,7 @@ billed-token totals и остаток баланса отсутствуют в a
 
 ### 3.2.3. Зафиксированный post-rebase raw baseline #82 (2026-10-15)
 
-Исторический baseline; текущая полная съёмка v3 — §3.2.4 (20.10.2026).
+Исторический baseline; следующая полная съёмка v3 — §3.2.4 (20.10.2026), текущий baseline v5 — §3.2.5 (28.10.2026).
 Original raw bytes и manifest сохранены [на pre-import revision](https://github.com/larchanka-training/dmc-268-api-t6/tree/47f9add7c4df2b7c32db0091d39296cdd2e4810c/test-prs-dataset/responses).
 
 [Actions run 38701845865, attempt 1](https://github.com/larchanka-training/dmc-268-api-t6/actions/runs/38701845865)
@@ -709,6 +709,9 @@ billed-token totals или баланс — этих величин в artifacts
 
 ### 3.2.4. Зафиксированный v3 raw baseline #178 (2026-10-20)
 
+Исторический baseline; текущая съёмка `review.system.v5` — §3.2.5 (28.10.2026).
+Original raw bytes и manifest сохранены [на source revision съёмки v5](https://github.com/larchanka-training/dmc-268-api-t6/tree/973218054ef2c9a32f1e75a955284323196ffafd/test-prs-dataset/responses).
+
 [Actions run 39443263258, attempt 1](https://github.com/larchanka-training/dmc-268-api-t6/actions/runs/39443263258)
 снял все 24 первых raw ответа на source `47f9add7c4df2b7c32db0091d39296cdd2e4810c`,
 ветка `feat/178-first-answer-format`, начало `2026-10-20T14:53:06.772709Z`
@@ -741,7 +744,7 @@ Final corpus validation 24/24, два offline report byte-identical, `warnings=[
 после удаления только validator diagnostics offline совпадает с live safe report
 byte-for-byte. Raw-first validity измерена до нормализации/repair/fallback и verifier.
 
-| Метрика | Исторический 2026-10-15 | Текущий 2026-10-20 |
+| Метрика | Исторический 2026-10-15 | Исторический 2026-10-20 |
 | --- | --- | --- |
 | Validity | 29.2% (7/24) | 41.7% (10/24) |
 | Micro TP / FP / FN | 2 / 2 / 17 | 3 / 5 / 16 |
@@ -781,6 +784,96 @@ Effective settings полностью совпадают с историческ
 nominal USD 0.50/кейс (USD 12 для 24), 4 calls/attempt и 90s timeout.
 Actual spend, billed tokens и баланс artifacts не сообщают. Verifier в этом legacy
 eval не запускается; pins для неиспользуемого verifier не добавлены.
+
+### 3.2.5. Зафиксированный v5 raw baseline #144 (2026-10-28)
+
+[Actions run 40774280790, attempt 1](https://github.com/larchanka-training/dmc-268-api-t6/actions/runs/40774280790)
+снял все 24 первых raw ответа на source `973218054ef2c9a32f1e75a955284323196ffafd`
+(тогдашний head `main`), начало `2026-10-28T21:43:37.394394Z` (22:43:37 Europe/Warsaw).
+Это единственная платная пересъёмка #130 R15, которая переводит записанный replay и
+eval-baseline с `review.system.v3` на `review.system.v5` (#144 AC 8). Техлид разрешил
+один платный capture; выполнен ровно один workflow без rerun и подмены кейсов.
+
+Inputs: `review_prompt=v5`, `policy_arm=none`, `corpus=main`, `export_raw_responses=true`,
+model пуст (`vars.LLM_MODEL`). Engine `fast`, configured provider `eurouter`, primary
+`mistral-small-4`, fallback `mistral-small-3.2-24b`. Corpus/truth и frozen PR prefixes
+не менялись: 19 synthetic + 5 real, SEC-05 исключён. Prompt `review.system.v5`, SHA-256
+`3bd7d39939b60d0c16b08090a4d3e5f0cbdb8a731fa4bde91bd6570546e085c9`. Плечо `none` — путь
+snapshot без `.review/rules.md` (`policy_arm_digest` null): запрос несёт закреплённые
+service defaults, AGENTS.md в кейсах main-корпуса нет; ответы проверяются как
+ReviewOutput v2 (`evidence_refs`, без префикса атрибуции v1). RAG в eval нет (#146):
+индекса нет, поэтому секция `<retrieved_excerpts>` пуста в каждом запросе — форма
+продакшна с выключенным тумблером RAG. Стадии verifier в eval нет (#217, без
+исполнителя): качество verifier и final output не измеряется.
+52 pins, static digest
+`sha256-v1:7b8bba23a40bf167fac3d441434896e3417332bccb200b21ae71ff8a7f838508`;
+corpus digest
+`sha256-v1:1ab8ca9a16cc50c357b39e1571c73b1e6674752737c444bd8b58d3f2aab81dfa`.
+Все 24 first calls — answer/primary/mistral-small-4, serving-provider label mistral,
+gateway accepted, paid-metadata errors false; publishable=true, nonpublishable IDs
+пусты. Каждый кейс — ровно один платный вызов `review`: repair и fallback не
+вызывались. Это проверка целостности, не порог качества.
+
+Manifest впервые хранит usage каждого платного вызова по журналу шлюза (#163):
+24 вызова, 242 989 входных токенов (из них 160 504 cache read), 9 068 выходных,
+`cost_usd` 0.022242 — стоимость от провайдера, если ответ её нёс, иначе configured
+цена × токены; это не billed spend и не остаток баланса.
+
+Полные 25 файлов импортированы byte-for-byte после проверки safe/raw artifacts
+`eval-live-main-none-40774280790-1` (ID `12854471057`) и
+`eval-live-raw-main-none-40774280790-1` (ID `12854221376`). Все hashes/sizes совпали;
+raw/safe manifest SHA-256
+`bb00e2a025524add39721170d7a78b1fb73bb5679c75c3ffcdb2d853b6f06a76`.
+Final corpus validation 24/24, два offline report byte-identical, `warnings=[]`;
+после удаления только validator diagnostics offline совпадает с live safe report
+byte-for-byte. Raw-first validity измерена до нормализации/repair/fallback и verifier.
+Required CI replay на main после merge **ещё не выполнен**.
+
+| Метрика | Исторический 2026-10-20 (v3) | Текущий 2026-10-28 (v5) |
+| --- | --- | --- |
+| Validity | 41.7% (10/24) | 87.5% (21/24) |
+| Micro TP / FP / FN | 3 / 5 / 16 | 5 / 13 / 14 |
+| Precision | 37.5% (3/8) | 27.8% (5/18) |
+| Recall | 15.8% (3/19) | 26.3% (5/19) |
+| Critical Recall | 40.0% (2/5) | 80.0% (4/5) |
+| Verdict agreement | 16.7% (4/24) | 37.5% (9/24) |
+| Severity mismatches | 2/3 matched | 3/5 matched: LOG-02 high/critical, LOG-04 high/medium, LOG-05 high/critical |
+
+| Category | TP | FP | FN | Precision | Recall |
+| --- | --- | --- | --- | --- | --- |
+| security | 2 | 0 | 2 | 100.0% (2/2) | 50.0% (2/4) |
+| correctness | 3 | 8 | 2 | 27.3% (3/11) | 60.0% (3/5) |
+| performance | 0 | 0 | 5 | undefined | 0.0% (0/5) |
+| readability | 0 | 5 | 5 | 0.0% (0/5) | 0.0% (0/5) |
+
+| Case class | Validity | TP / FP / FN | Verdict agreement |
+| --- | --- | --- | --- |
+| security | 4/4 | 2 / 5 / 2 | 2/4 |
+| resource | 4/5 | 0 / 5 / 5 | 0/5 |
+| logic | 4/5 | 3 / 0 / 2 | 2/5 |
+| syntax | 4/5 | 0 / 1 / 5 | 1/5 |
+| clean | 5/5 | 0 / 2 / 0 | 4/5 |
+
+Real validity 2/5, synthetic 19/19: все три невалидных ответа (LOG-03, RES-03, SYN-04) —
+real-кейсы; ни один прежде валидный кейс не стал невалидным. Они остаются в
+знаменателе, predictions не интерпретируются, truths остаются FN. Причина у всех
+трёх одна: 13 equal ranges (3/3/7); reversed ranges, attribution, empty/missing
+answers, JSON parse и другие ошибки отсутствуют. SYN-04 ещё ставит `info` перед
+`high`, но ReviewOutputV2 проверяет порядок только после полей, поэтому validator
+эту ошибку не печатает. Пропущенная critical truth — RES-05.
+Все case IDs и группы — [README корпуса](../test-prs-dataset/README.md#recorded-mistral-baseline--2026-10-28).
+
+Съёмки различаются не только промптом: v3 — legacy envelope и контракт v1 с префиксом
+атрибуции, v5 — envelope snapshot (плечо `none`) и контракт v2 с `evidence_refs` без
+префикса. 27 attribution omissions v3 (12 кейсов) под v2 невозможны, поэтому рост
+validity в основном даёт смена контракта, а не лучшее соблюдение формата; ссылки
+evidence против manifest вызова replay не проверяет. Результаты смешанные: validity,
+TP, recall, critical recall и verdict agreement выросли, FP выросли (5 → 13, readability
+0 → 5), precision снизилась. Весь cohort сохранён, без cherry-picking или повторной
+съёмки. Разные captures не являются controlled experiment; semantic
+improvement/Hallucination Rate, production verifier/final-output quality и
+repair/latency/cost saving не измерены. Effective settings полностью совпадают с
+§3.2.4, включая nominal USD 0.50/кейс (USD 12 для 24), 4 calls/attempt и 90s timeout.
 
 ### 3.3. Ручной оракул семантики
 
