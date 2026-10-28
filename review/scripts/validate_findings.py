@@ -15,7 +15,7 @@ missing, not JSON, or its top-level shape matches neither kind.
 `--schema v2` checks `findings` as ReviewOutputV2, the answer of a snapshot-path
 review prompt (v4): review/schemas/review-output.schema.v2.json, then the runtime
 ReviewOutputV2 model itself, with `evidence_refs` and without the v1 attribution
-prefix. `--schema v1` is the default.
+prefix; a `files` document under `--schema v2` exits 2. `--schema v1` is the default.
 """
 
 from __future__ import annotations
@@ -338,6 +338,13 @@ def main(argv: list[str] | None = None) -> int:
     if "findings" in data and "files" in data:
         print(
             "error: unknown kind: top-level object has both 'findings' and 'files'",
+            file=sys.stderr,
+        )
+        return 2
+
+    if schema == "v2" and "files" in data:
+        print(
+            "error: --schema v2 checks a ReviewOutput ('findings'); this file has 'files'",
             file=sys.stderr,
         )
         return 2

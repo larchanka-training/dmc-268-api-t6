@@ -1394,3 +1394,54 @@ def test_replay_validates_an_answer_by_the_contract_of_the_recorded_prompt_versi
     ]
     assert report["valid_response_count"] == int(valid)
     assert report["micro"]["tp"] == int(valid)
+
+
+VALIDATE_FINDINGS = REPO_ROOT / "review" / "scripts" / "validate_findings.py"
+USAGE = "usage: validate_findings.py [--schema v1|v2] <file.json>\n"
+
+
+@pytest.mark.parametrize(
+    ("arguments", "exit_code", "stdout", "stderr"),
+    [
+        (["--schema", "v2", "{v2}"], 0, "OK ReviewOutputV2 1 items\n", ""),
+        (["--schema", "v1", "{findings}"], 0, "OK ReviewOutput 5 items\n", ""),
+        (["{conventions}"], 0, "OK RepoConventionsDraft 3 items\n", ""),
+        (["--schema", "v3", "{v2}"], 2, "", USAGE),
+        (["--schema", "{v2}"], 2, "", USAGE),
+        (["{v2}", "--schema", "v2"], 2, "", USAGE),
+        (
+            ["--schema", "v2", "{conventions}"],
+            2,
+            "",
+            "error: --schema v2 checks a ReviewOutput ('findings'); this file has 'files'\n",
+        ),
+    ],
+    ids=[
+        "v2",
+        "explicit-v1",
+        "conventions",
+        "unknown-schema",
+        "missing-value",
+        "option-after-file",
+        "v2-on-conventions",
+    ],
+)
+def test_validate_findings_takes_one_file_and_an_optional_answer_schema(
+    tmp_path: Path, arguments: list[str], exit_code: int, stdout: str, stderr: str
+) -> None:
+    answer_v2 = tmp_path / "answer-v2.json"
+    answer_v2.write_text(json.dumps(review_output(findings=[finding_v2()])), encoding="utf-8")
+    paths = {
+        "v2": str(answer_v2),
+        "findings": str(REPO_ROOT / "review/examples/findings.sample.json"),
+        "conventions": str(REPO_ROOT / "review/examples/conventions.sample.json"),
+    }
+
+    result = subprocess.run(
+        [sys.executable, str(VALIDATE_FINDINGS), *(item.format(**paths) for item in arguments)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert (result.returncode, result.stdout, result.stderr) == (exit_code, stdout, stderr)
