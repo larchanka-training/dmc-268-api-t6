@@ -138,6 +138,7 @@ def test_restore_bounded_classification_then_actual_fit_reduces_only_full_allowe
         head_sha = "a" * 40
         snapshot_for_llm = None
         payload = None
+        ignored_file_paths: frozenset[str] = frozenset()
 
         def excluded(self, path: str) -> bool:
             return path in ignore.denied_paths

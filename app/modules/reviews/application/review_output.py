@@ -225,11 +225,18 @@ def validate_v2_coordinates(
     changed_files: tuple[ChangedFile, ...],
     *,
     original_files: tuple[ChangedFile, ...],
+    ignored_paths: frozenset[str] = frozenset(),
 ) -> tuple[bool, str | None]:
-    """Validate finding coordinates against pre-fit hunks and post-fit visibility (CVS §6.2)."""
+    """Validate finding coordinates against pre-fit hunks and post-fit visibility (CVS §6.2).
+
+    ``ignored_paths``: the names of changed files the policy stage proved ignored. An anchor
+    on one is ``ignored_file`` before any check of its line: their text is never shown.
+    """
     line = finding.line
     start_line = finding.start_line
 
+    if finding.path in ignored_paths:
+        return False, "ignored_file"
     orig_file = next((f for f in original_files if f.path == finding.path), None)
     if orig_file is None:
         return False, "unknown_path"

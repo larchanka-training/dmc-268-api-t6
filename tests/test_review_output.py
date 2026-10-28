@@ -1571,6 +1571,56 @@ def test_validate_v2_coordinates_all_branches() -> None:
     )
 
 
+def test_validate_v2_coordinates_drops_an_anchor_on_a_proven_ignored_file_first() -> None:
+    from app.modules.reviews.application.prompt_builder import ChangedFile, DiffLine
+    from app.modules.reviews.application.review_output import (
+        EvidenceRef,
+        ReviewFindingV2,
+        validate_v2_coordinates,
+    )
+
+    def make_finding(path: str) -> ReviewFindingV2:
+        return ReviewFindingV2(
+            path=path,
+            line=10,
+            start_line=None,
+            severity="high",
+            category="correctness",
+            title="Title",
+            body="Body",
+            suggestion=None,
+            confidence=0.9,
+            rule_name=None,
+            evidence_refs=[EvidenceRef(block_id="b1", start_line=10, end_line=10)],
+        )
+
+    shown = ChangedFile("app/main.py", "modified", (DiffLine(10, "added", "x=1"),))
+    ignored = frozenset({"generated/api.py"})
+
+    # CVS §6.2 pass 2: the stage proved the name, so the check precedes the lookup.
+    assert validate_v2_coordinates(
+        make_finding("generated/api.py"), (shown,), original_files=(shown,), ignored_paths=ignored
+    ) == (False, "ignored_file")
+    # It also precedes the existence of the line.
+    masked = ChangedFile("generated/api.py", "modified", (DiffLine(1, "added", "y=1"),))
+    assert validate_v2_coordinates(
+        make_finding("generated/api.py"),
+        (shown,),
+        original_files=(shown, masked),
+        ignored_paths=ignored,
+    ) == (False, "ignored_file")
+    # Another name, even under the same mask, proves nothing.
+    assert validate_v2_coordinates(
+        make_finding("generated/invented.py"),
+        (shown,),
+        original_files=(shown,),
+        ignored_paths=ignored,
+    ) == (False, "unknown_path")
+    assert validate_v2_coordinates(
+        make_finding("app/main.py"), (shown,), original_files=(shown,), ignored_paths=ignored
+    ) == (True, None)
+
+
 def test_validate_v2_attribution_all_branches() -> None:
     from app.modules.reviews.application.policy_snapshot import (
         CallManifest,

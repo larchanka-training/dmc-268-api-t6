@@ -42,6 +42,7 @@ DropReason = (
         "duplicate",
         "severity_threshold",
         "unknown_path",
+        "ignored_file",
         "line_absent",
         "anchor_not_visible",
         "evidence_not_shown",

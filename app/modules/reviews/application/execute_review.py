@@ -199,6 +199,15 @@ class ReviewContextFilter(Protocol):
     @property
     def payload(self) -> ReviewContextPayload | None: ...
 
+    @property
+    def ignored_file_paths(self) -> frozenset[str]:
+        """Names of changed files of proven identity whose text the policy withholds.
+
+        A mask, a built-in exclusion or the generated marker excluded them; an anchor on
+        one of them is ``ignored_file`` (CVS §6.2 pass 2).
+        """
+        ...
+
     def excluded(self, path: str) -> bool: ...
 
 
@@ -430,6 +439,10 @@ class ExecuteReviewRun:
                 context, call_id=uuid.uuid4(), stage="review"
             )
 
+        # Names of changed files the policy stage proved ignored: their text is never shown.
+        ignored_paths = (
+            frozenset() if self._context_filter is None else self._context_filter.ignored_file_paths
+        )
         _dropped_findings: list[DroppedCandidateRecord] = []
         candidates: list[CandidateFindingItem] = []
         cand_positions: dict[int, int] = {}
@@ -471,7 +484,10 @@ class ExecuteReviewRun:
 
             # Pass 2: Coordinates validation against fitted context (CVS §6.2 :701)
             valid_coords, coord_err = validate_v2_coordinates(
-                finding, context.changed_files, original_files=original_files
+                finding,
+                context.changed_files,
+                original_files=original_files,
+                ignored_paths=ignored_paths,
             )
             if not valid_coords:
                 _LOGGER.info(

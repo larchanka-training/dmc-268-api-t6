@@ -17,6 +17,8 @@ from app.modules.reviews.application.execute_review import (
     ReviewPromptInput,
     ReviewReply,
 )
+from app.modules.reviews.application.get_run_diff import DiffSnapshot
+from app.modules.reviews.application.policy_snapshot import PolicySnapshot
 from app.modules.reviews.application.prompt_builder import (
     ChangedFile,
     DiffLine,
@@ -27,6 +29,7 @@ from app.modules.reviews.application.prompt_builder import (
     file_block_id,
 )
 from app.modules.reviews.application.reflection_pass import ReflectionPass
+from app.modules.reviews.application.review_context import ReviewContextPayload
 from app.modules.reviews.application.review_output import VerifiedReviewOutput
 from app.modules.reviews.application.store_review_output import StoreReviewOutput
 from app.modules.reviews.infrastructure.llm.models import GatewayReviewModel
@@ -78,6 +81,151 @@ def test_unknown_path_drop_downgrades_before_summary_verdict_and_storage(
     assert queue.pointers[0].review_event == (
         "REQUEST_CHANGES" if severity == "high" else "COMMENT"
     )
+
+
+class _Withheld:
+    """The context stage as pass 2 sees it: a ``generated/**`` mask, a file the fetch
+    marked generated and a binary file.
+
+    Every name of a changed file under the mask or marked generated is a proven
+    ignored file; the binary file is withheld but is not one of them.
+    """
+
+    diff_old_sha: str | None = None
+    head_sha: str | None = None
+    snapshot_for_llm: PolicySnapshot | None = None
+    payload: ReviewContextPayload | None = None
+    ignored_file_paths = frozenset(
+        {
+            "generated/api.py",
+            "generated/gone.py",
+            "src/moved.py",
+            "generated/moved.py",
+            "src/schema.py",
+        }
+    )
+
+    def excluded(self, path: str) -> bool:
+        return path.startswith("generated/") or path in {
+            "src/moved.py",
+            "src/schema.py",
+            "assets/logo.png",
+        }
+
+
+def _review_beside_withheld_files(anchor: str) -> Repository:
+    """Run a snapshot-path review whose only candidate is anchored on ``anchor``."""
+    repository = Repository(
+        coverage(
+            [
+                code_snapshot(),
+                replace(code_snapshot(), filename="generated/api.py"),
+                DiffSnapshot("generated/gone.py", "@@ -1 +0,0 @@\n-old", status="removed"),
+                replace(
+                    code_snapshot(),
+                    filename="src/moved.py",
+                    status="renamed",
+                    previous_filename="generated/moved.py",
+                ),
+                DiffSnapshot("src/schema.py", None, omission_reason="generated"),
+                DiffSnapshot("assets/logo.png", None, omission_reason="binary"),
+            ],
+            rules="```review-ignore\ngenerated/**\n```\n",
+        )
+    )
+    assert repository.coverage is not None and repository.coverage.status.value == "complete"
+    committed: list[str] = []
+    store = StoreReviewOutput(
+        lambda: Uow(repository, committed),
+        Queue(committed),
+        worker_id="worker",
+        run_url=lambda _: None,
+    )
+
+    class Processor:
+        async def prepare(self, run_id: UUID) -> Any:
+            return conventions()
+
+    class Prompts:
+        async def get_review_prompt_input(self, run_id: UUID, saved: Any) -> ReviewPromptInput:
+            return ReviewPromptInput(
+                "Review carefully.",
+                (),
+                None,
+                RepoConventions((), ()),
+                (
+                    ChangedFile("src/app.py", "modified", (DiffLine(1, "added", "new"),)),
+                    ChangedFile("generated/api.py", "modified", (DiffLine(1, "added", "new"),)),
+                ),
+                ("assets/logo.png",),
+                policy_snapshot=_make_test_snapshot(),
+            )
+
+    class Model:
+        async def get_pull_request_meta(self, run_id: UUID) -> PullRequestMeta:
+            return PullRequestMeta("PR", None, "u", "b", "m", (), 6, 3, 3, False, False)
+
+        async def draft_review(self, *, context: ReviewContext) -> dict[str, object]:
+            assert [file.path for file in context.changed_files] == ["src/app.py"]
+            value = answer()
+            item = finding(anchor)
+            item["evidence_refs"] = [
+                {"block_id": file_block_id("src/app.py"), "start_line": 1, "end_line": 1}
+            ]
+            value["findings"] = [item]
+            return value
+
+    verifier = FakeVerifierModel({"decisions": []})
+    assert asyncio.run(
+        ExecuteReviewRun(
+            Processor(),
+            Prompts(),
+            Model(),
+            store,
+            context_filter=_Withheld(),
+            reflection_pass=ReflectionPass(verifier),
+        ).execute(_RUN)
+    )
+    assert verifier.call_count == 0
+    return repository
+
+
+@pytest.mark.parametrize(
+    "anchor",
+    ["generated/api.py", "generated/gone.py", "src/moved.py", "src/schema.py"],
+    ids=["masked", "masked-deleted", "renamed-out-of-mask", "fetch-generated"],
+)
+def test_anchor_on_an_ignored_changed_file_is_dropped_without_lowering_coverage(
+    anchor: str,
+) -> None:
+    # CVS §6.2 pass 2: the file's text is withheld by design, so the anchor is
+    # ignored_file, not unknown_path, and that drop alone does not make coverage partial.
+    repository = _review_beside_withheld_files(anchor)
+
+    saved = repository.response
+    assert saved["dropped"] == [{"index": 0, "drop_reason": "ignored_file"}]
+    assert saved["coverage"]["status"] == "complete"
+    assert saved["coverage"]["reason_counts"] == {}
+    assert (saved["inline"], saved["body_only"]) == (0, 0)
+    assert anchor not in repository.body
+    assert "Unchecked authorization" not in repository.body
+
+
+def test_invented_path_under_the_mask_stays_unknown_path_and_partial() -> None:
+    # A mask match does not prove that the path is a changed file.
+    saved = _review_beside_withheld_files("generated/invented.py").response
+
+    assert saved["dropped"] == [{"index": 0, "drop_reason": "unknown_path"}]
+    assert saved["coverage"]["status"] == "partial"
+    assert saved["coverage"]["reason_counts"] == {"unknown_path": 1}
+
+
+def test_binary_anchor_is_not_an_ignored_file_and_keeps_coverage_partial() -> None:
+    saved = _review_beside_withheld_files("assets/logo.png").response
+
+    [dropped] = saved["dropped"]
+    assert dropped["drop_reason"] != "ignored_file"
+    assert saved["coverage"]["status"] == "partial"
 
 
 def test_actual_budget_fit_flows_through_reflection_early_return_and_finalization() -> None:

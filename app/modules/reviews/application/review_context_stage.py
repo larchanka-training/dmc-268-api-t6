@@ -91,6 +91,10 @@ FAST_CONTEXT_TOKEN_BUDGET = 60_000
 _MAX_TRACED_BLOCKS = 200
 # ``context.rag`` of a build that had a RAG plan and failed: the slot did not complete.
 _RAG_BUILD_FAILED = "context_build_failed"
+# Coverage exclusions whose text is withheld by policy (a mask, a built-in exclusion or the
+# generated marker): an anchor on such a file is ``ignored_file`` (CVS §6.2 pass 2). A
+# binary or empty file is excluded too, yet an anchor on it is not proven ignored.
+_IGNORED_FILE_REASONS = frozenset({"ignored", "generated"})
 
 
 class EstimatedTokenCounter:
@@ -100,13 +104,21 @@ class EstimatedTokenCounter:
         return -(-len(text) // 4)
 
 
-def _service_excluded_names(stored: list[DiffSnapshot], coverage: RunCoverage) -> frozenset[str]:
+def _service_excluded_names(
+    stored: list[DiffSnapshot],
+    coverage: RunCoverage,
+    *,
+    reasons: frozenset[str] | None = None,
+) -> frozenset[str]:
     """Names of stored files that the service excluded, as the deny-set holds them.
 
-    The source of a copy stays its own file: only the copy is withheld.
+    ``reasons`` keeps only the exclusions with one of these coverage reasons. The source
+    of a copy stays its own file: only the copy is withheld.
     """
     names: set[str] = set()
-    excluded = {item.path for item in coverage.exclusions}
+    excluded = {
+        item.path for item in coverage.exclusions if reasons is None or item.reason in reasons
+    }
     for item in stored:
         if item.filename not in excluded:
             continue
@@ -382,6 +394,7 @@ class ReviewContextStage:
         # The run's ``context_payloads`` row; None: the build is only traced (tests, eval).
         self._payloads = payloads
         self._denied_paths: frozenset[str] = frozenset()
+        self._ignored_file_paths: frozenset[str] = frozenset()
         self._snapshot: PolicySnapshot | None = None
         # The snapshot the review is given; None on the legacy path.
         self._snapshot_for_llm: PolicySnapshot | None = None
@@ -402,6 +415,15 @@ class ReviewContextStage:
     def payload(self) -> ReviewContextPayload | None:
         """The context the attempt's build produced; ``None`` when it failed or did not run."""
         return self._payload
+
+    @property
+    def ignored_file_paths(self) -> frozenset[str]:
+        """Names of changed files of proven identity whose text the policy withholds.
+
+        A mask, a built-in exclusion or the generated marker excluded them; a binary or
+        empty file is withheld as well but is not among them.
+        """
+        return self._ignored_file_paths
 
     @property
     def diff_old_sha(self) -> str | None:
@@ -516,6 +538,7 @@ class ReviewContextStage:
         force and the review continues with the diff.
         """
         self._denied_paths = frozenset()
+        self._ignored_file_paths = frozenset()
         self._diff_old_sha = None
         self._head_sha = None
         self._pr_base_sha = None
@@ -586,6 +609,11 @@ class ReviewContextStage:
             ignore, denied_paths=ignore.denied_paths | _service_excluded_names(stored, coverage)
         )
         self._denied_paths = ignore.denied_paths
+        # Only coverage proves an ignored file: the deny-set also holds binary and empty
+        # names and every name of a file whose identity is unresolved.
+        self._ignored_file_paths = _service_excluded_names(
+            stored, coverage, reasons=_IGNORED_FILE_REASONS
+        )
         # The effective exclusion: a mask of the repository, a built-in exclusion of any
         # name of the file, or a binary file. Decided here, so a skip never depends on the
         # optional build. An incomplete file list does not prove that all is excluded.
