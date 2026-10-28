@@ -216,6 +216,7 @@ def test_status_gateway_updates_one_key_after_ambiguous_write_and_checks_pr_head
         ambiguous = True
         source_uuid = remote
         remote_head = HEAD
+        resolved_head = HEAD
         remote_state = "OPEN"
         remote_target_branch = "main"
         get_status = 200
@@ -243,7 +244,7 @@ def test_status_gateway_updates_one_key_after_ambiguous_write_and_checks_pr_head
             assert request.headers["Authorization"] == "Bearer target-repo-token"
             if request.method == "GET" and "/commit/" in request.url.path:
                 assert request.url.path.endswith(f"/commit/{remote_head[:12]}")
-                return httpx.Response(200, json={"hash": remote_head})
+                return httpx.Response(200, json={"hash": resolved_head})
             if request.method == "GET":
                 if get_status != 200:
                     return httpx.Response(get_status, headers={"Location": "https://evil.example"})
@@ -305,12 +306,18 @@ def test_status_gateway_updates_one_key_after_ambiguous_write_and_checks_pr_head
         remote_target_branch = "main"
 
         remote_head = "b" * 40
+        resolved_head = remote_head
         snapshot = replace(snapshot, state="succeeded")
         with pytest.raises(BitbucketStatusUnavailable, match="head or identity changed"):
             await publisher.upsert(run_id, RUN_URL)
         assert len(statuses) == 3
 
         remote_head = HEAD
+        resolved_head = "c" * 40
+        with pytest.raises(BitbucketStatusUnavailable, match="head is malformed"):
+            await publisher.upsert(run_id, RUN_URL)
+        assert len(statuses) == 3
+        resolved_head = HEAD
         post_status = 403
         with pytest.raises(BitbucketStatusForbidden):
             await publisher.upsert(run_id, RUN_URL)
