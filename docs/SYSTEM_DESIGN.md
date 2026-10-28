@@ -1882,12 +1882,12 @@ fallback/null, тогда как ранее опубликованное GitHub-
 
 Нового публичного coverage DTO, LLM-полей, result_id или таблиц результата нет.
 Полный #107, общий run-owned file_omissions #130/#168 и zero-LLM lifecycle
-summary-only/no-text partial остаются целевыми, а не активированными #213.
+no-text partial остаются целевыми, а не активированными #213.
 Zero-LLM lifecycle none активен на snapshot path с #130 F5; legacy (≤ v3) для того же
 inventory по-прежнему вызывает модель.
-Текущий summary-only может вызывать модель, но все его findings отбрасываются
-как insufficient_context: нет inline, blocking/attention или дефектов из них;
-coverage partial, verdict null. Обещание zero-LLM относится к будущему lifecycle.
+Summary-only с нулём вызовов модели — текущий жизненный цикл, не будущий:
+стадия останавливается до RAG, conventions, ревью и verifier и публикует
+`NoModelAnswer`; coverage partial, verdict null.
 
 
 

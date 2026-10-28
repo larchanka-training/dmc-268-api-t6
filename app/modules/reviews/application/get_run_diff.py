@@ -112,10 +112,7 @@ class StoreDiffSnapshot:
         are an ordinary review of those 50.
         """
         withheld = [excluded is not None and excluded(file) for file in files]
-        allowed = [file for file, skip in zip(files, withheld, strict=True) if not skip]
-        summary_only = (
-            _total_line_count(files) if excluded is None else _changed_line_count(allowed)
-        ) > MAX_DIFF_LINES
+        summary_only = over_max_diff_lines(files, excluded=excluded)
         snapshots = []
         for file, skip in zip(files, withheld, strict=True):
             snapshot = _normalize_snapshot(file)
@@ -157,6 +154,23 @@ def _normalize_snapshot(snapshot: DiffSnapshot) -> DiffSnapshot:
 # Binary and generated files are exclusions and add nothing to the threshold. A text file
 # whose patch is missing or too large is incompleteness: its lines still count.
 _UNCOUNTED_OMISSIONS = frozenset({"binary", "generated"})
+
+
+def over_max_diff_lines(
+    files: list[DiffSnapshot],
+    *,
+    excluded: Callable[[DiffSnapshot], bool] | None = None,
+) -> bool:
+    """Whether this change is over ``MAX_DIFF_LINES`` by the store's own counter.
+
+    With an exclusion predicate the counter is added and removed lines of the allowed
+    files. Without one it is the patch line count of files that have a patch. The
+    comparison is ``>``.
+    """
+    if excluded is None:
+        return _total_line_count(files) > MAX_DIFF_LINES
+    allowed = [file for file in files if not excluded(file)]
+    return _changed_line_count(allowed) > MAX_DIFF_LINES
 
 
 def _changed_line_count(files: list[DiffSnapshot]) -> int:

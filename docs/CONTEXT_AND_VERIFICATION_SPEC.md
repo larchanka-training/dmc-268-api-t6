@@ -291,10 +291,7 @@ Ignore применяется до подсчёта: 4 000 исключённы�
 очищать UI-снимок. Роль `code` не может восстановить такой patch для LLM из БД.
 
 Целевой summary-only v1 формируется backend по разрешённой файловой статистике,
-**без LLM-вызовов**, L1–L4, кандидатов и inline-комментариев. В текущем #213
-zero-LLM lifecycle ещё не активирован: вызовы conventions/review возможны,
-но все findings summary-only отбрасываются как insufficient_context, без inline
-и blocking/attention из них; сохраняется partial/null. Это уточнение старого
+**без LLM-вызовов**, L1–L4, кандидатов и inline-комментариев. Это уточнение старого
 описания «сводка по списку файлов»: сводка не утверждает дефекты по названиям файлов.
 Итог `succeeded`, `coverage.status=partial`, `verdict=null`, check-run `neutral`:
 «Построчное AI-ревью не выполнено: превышен лимит diff» (либо неполный список).
@@ -1497,12 +1494,12 @@ fallback/null, тогда как ранее опубликованное GitHub-
 
 Нового публичного coverage DTO, LLM-полей, result_id или таблиц результата нет.
 Полный #107, общий run-owned file_omissions #130/#168 и zero-LLM lifecycle
-summary-only/no-text partial остаются целевыми, а не активированными #213.
+no-text partial остаются целевыми, а не активированными #213.
 Zero-LLM lifecycle none активен на snapshot path с #130 F5; legacy (≤ v3) для того же
 inventory по-прежнему вызывает модель.
-Текущий summary-only может вызывать модель, но все его findings отбрасываются
-как insufficient_context: нет inline, blocking/attention или дефектов из них;
-coverage partial, verdict null. Обещание zero-LLM относится к будущему lifecycle.
+Summary-only с нулём вызовов модели — текущий жизненный цикл, не будущий:
+стадия останавливается до RAG, conventions, ревью и verifier и публикует
+`NoModelAnswer`; coverage partial, verdict null.
 
 
 Уже существуют `run_policy_snapshots` вместе со staging `run_policy_documents`

@@ -23,6 +23,7 @@ from app.modules.repositories.infrastructure.models import (
     RuleVersion,
 )
 from app.modules.reviews.application.cancel_run import CancelRequestResult
+from app.modules.reviews.application.check_runs import summary_only_reason_of
 from app.modules.reviews.application.conventions import ActiveConventionsPrompt
 from app.modules.reviews.application.diff_map import DiffMap, vcs_provider_name
 from app.modules.reviews.application.findings_post_processor import (
@@ -841,6 +842,7 @@ class SqlAlchemyReviewOutputRepository:
             allowed_v2_rules=None,
             coverage=coverage,
             summary_only=any(item.summary_only for item in durable),
+            summary_reason=summary_only_reason_of(response_value),
         )
 
     async def store_review_output(

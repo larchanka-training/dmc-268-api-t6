@@ -26,12 +26,13 @@ from app.modules.reviews.application.check_runs import RunProviderCheckpoint
 from app.modules.reviews.application.conventions import conventions_cache_key
 from app.modules.reviews.application.diff_map import (
     DiffMap,
+    DiffOmissionReason,
     VcsProviderName,
     build_diff_map,
     diagnostic_text,
     is_supported_path,
 )
-from app.modules.reviews.application.get_run_diff import DiffSnapshot
+from app.modules.reviews.application.get_run_diff import DiffSnapshot, over_max_diff_lines
 from app.modules.reviews.application.policy_errors import PolicyError, PolicyErrorCode
 from app.modules.reviews.application.policy_snapshot import PolicySnapshot, PromptBindings
 from app.modules.reviews.application.prepare_policy_snapshot import PreparePolicySnapshot
@@ -56,9 +57,11 @@ from app.modules.reviews.application.review_context import (
     RagStats,
     RetrievedBlock,
     ReviewContextPayload,
+    SummaryOnlyReview,
 )
 from app.modules.reviews.application.review_ignore import (
     IgnoreMatcher,
+    IgnoreResult,
     apply_ignore,
     snapshot_ignore_policy,
 )
@@ -88,6 +91,11 @@ from app.modules.reviews.application.vcs_diff import (
 
 _LOGGER = logging.getLogger(__name__)
 FAST_CONTEXT_TOKEN_BUDGET = 60_000
+# A legacy run still sends these inventories to the model (#130). They are not the
+# residual no_reviewable_files stop.
+_LEGACY_MODEL_OMISSIONS = frozenset(
+    {DiffOmissionReason.UNSUPPORTED_PATH, DiffOmissionReason.IDENTITY_UNRESOLVED}
+)
 _MAX_TRACED_BLOCKS = 200
 # ``context.rag`` of a build that had a RAG plan and failed: the slot did not complete.
 _RAG_BUILD_FAILED = "context_build_failed"
@@ -633,11 +641,11 @@ class ReviewContextStage:
             and coverage.technical_only
             and not any(item.summary_only for item in stored)
         ):
-            # CVS §2.2 and §11: technical skips beside exclusions only, no text the review
-            # could check. The snapshot path records the context and ends before RAG, the
-            # build and every model call; the run is published with the backend result
-            # (coverage none), not skipped. A legacy run keeps its model calls, and a
-            # summary-only change its path (#107/#175).
+            # CVS §2.2 and §11: this branch is only technical skips on the snapshot path.
+            # It records the context and ends before RAG, the build and every model call;
+            # the run is published with the backend result (coverage none), not skipped.
+            # A legacy run keeps its model calls. Stored summary_only rows are already
+            # excluded here and stop in _summary_only_reason before any model call.
             response = await self._record_nothing_to_review(
                 run_id,
                 snapshot,
@@ -654,6 +662,26 @@ class ReviewContextStage:
                 # write, or a retired origin, ends the attempt before publishing.
                 await self._payloads.save_context_payload(run_id, response)
             raise NoReviewableText
+        reason = self._summary_only_reason(diff_map, stored, coverage, ignore)
+        if reason is not None:
+            # #313: incomplete inventory, the line flag, or residual no_reviewable_files.
+            # Recorded like coverage none, then published with NoModelAnswer. No RAG and
+            # no model call. T19 and the legacy technical-only path already returned.
+            response = await self._record_nothing_to_review(
+                run_id,
+                snapshot,
+                diff_map.head_sha,
+                ContextStatus.SUMMARY_ONLY,
+                digest=diff_map.digest,
+                files=len(diff_map.files),
+                coverage=coverage,
+                diff_map=diff_map,
+                ignored_files=sum(coverage.exclusion_counts.values()),
+                reason=reason,
+            )
+            if self._payloads is not None:
+                await self._payloads.save_context_payload(run_id, response, mark_summary_only=True)
+            raise SummaryOnlyReview
 
         rag = await self._open_rag(run_id, run.repository_id, snapshot.prompt_bindings)
         request = {"head_sha": run.head_sha, "policy_snapshot_id": str(snapshot.snapshot_id)}
@@ -708,6 +736,63 @@ class ReviewContextStage:
         self._payload = payload
         return payload
 
+    def _summary_only_reason(
+        self,
+        diff_map: DiffMap,
+        stored: list[DiffSnapshot],
+        coverage: RunCoverage,
+        ignore: IgnoreResult,
+    ) -> str | None:
+        """Why this attempt stops before RAG, or None when the model path stays.
+
+        An incomplete file list wins even when the persisted flag is set. Order 2 is the
+        store's line counter, not that flag: a retry of residual ``no_reviewable_files``
+        stays that reason. The residual stop does not take a legacy technical-only change
+        or a legacy unsupported path: those still reach the model.
+        """
+        if not diff_map.file_list_complete:
+            return "diff_inventory_incomplete"
+        if over_max_diff_lines(
+            stored,
+            excluded=lambda item: self.excludes_change(item.filename, item.previous_filename),
+        ):
+            return "diff_too_large"
+        if self._is_residual_no_reviewable_files(diff_map, coverage, ignore):
+            return "no_reviewable_files"
+        return None
+
+    def _is_residual_no_reviewable_files(
+        self, diff_map: DiffMap, coverage: RunCoverage, ignore: IgnoreResult
+    ) -> bool:
+        """Bucket counts stay aligned with ``BuildReviewContext.execute``'s early split
+        between ``all_changes_ignored`` and ``no_reviewable_files``.
+        """
+        if coverage.technical_only:
+            return False
+        if self._snapshot_for_llm is None and any(
+            file.omission_reason in _LEGACY_MODEL_OMISSIONS for file in diff_map.files
+        ):
+            return False
+        allowed = 0
+        ignored = 0
+        withheld = 0
+        for file in diff_map.files:
+            names = [item for item in (file.old_path, file.new_path) if item]
+            if file.omission_reason is not None:
+                withheld += 1
+            elif ignore.decision_for(file.file_id) is not None or any(
+                item in ignore.denied_paths or self._builtin_excluded(item) for item in names
+            ):
+                ignored += 1
+            elif not file.anchorable:
+                withheld += 1
+            else:
+                allowed += 1
+        if allowed or not diff_map.files:
+            return False
+        pure_ignore = ignored > 0 and withheld == 0
+        return not pure_ignore
+
     async def _record_nothing_to_review(
         self,
         run_id: UUID,
@@ -720,13 +805,15 @@ class ReviewContextStage:
         coverage: RunCoverage | None = None,
         diff_map: DiffMap | None = None,
         ignored_files: int | None = None,
+        reason: str | None = None,
     ) -> dict[str, Any]:
         """Record ``context.build`` for a change the context is not built for; return it.
 
         The skips (``no_changes``, ``all_changes_ignored``) keep ``{digest, files}`` and count
-        every file as ignored. Only the record of a change without reviewable text passes
-        ``diff_map`` (#130 F5): its diff also names the old side and the inventory, from
-        which the publication map is rebuilt, and ``ignored_files`` counts the exclusions.
+        every file as ignored. A change without reviewable text (#130 F5) and a summary-only
+        stop (#313) pass ``diff_map``: the diff also names the old side and the inventory,
+        and ``ignored_files`` counts the exclusions. ``reason`` overrides ``status`` when the
+        summary-only stop is not the status word itself.
         """
         known: dict[str, Any] = {"digest": digest, "files": files}
         if diff_map is not None:
@@ -739,7 +826,7 @@ class ReviewContextStage:
         async with traced_step(self._trace, run_id, "context.build", request) as step:
             step.response = {
                 "status": status.value,
-                "reason": status.value,
+                "reason": status.value if reason is None else reason,
                 "diff": diff,
                 "ignored_files": files if ignored_files is None else ignored_files,
                 "blocks": [],

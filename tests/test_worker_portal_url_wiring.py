@@ -179,7 +179,9 @@ class Store:
         self.assert_transaction(run_id)
         assert tool == "github.publish_review"
 
-    async def save_context_payload(self, run_id: UUID, summary: dict[str, Any]) -> None:
+    async def save_context_payload(
+        self, run_id: UUID, summary: dict[str, Any], *, mark_summary_only: bool = False
+    ) -> None:
         raise AssertionError("these paths must not build review context")
 
 

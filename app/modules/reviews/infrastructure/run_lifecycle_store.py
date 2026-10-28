@@ -18,7 +18,11 @@ from app.modules.integrations.gitlab.infrastructure.request_credentials import (
     active_gitlab_target_metadata,
 )
 from app.modules.repositories.infrastructure.models import ProviderInstallation, Repository
-from app.modules.reviews.application.check_runs import CheckRunReport, CheckRunTarget
+from app.modules.reviews.application.check_runs import (
+    CheckRunReport,
+    CheckRunTarget,
+    summary_only_reason_of,
+)
 from app.modules.reviews.application.handle_review_run import RunGuardSnapshot
 from app.modules.reviews.application.policy_errors import policy_error_detail
 from app.modules.reviews.application.process_run import RunVcsInput
@@ -417,6 +421,9 @@ class SqlAlchemyRunLifecycleStore:
                 CodeChangeDiff.run_id == run_id
             )
         )
+        context_summary = await self._session.scalar(
+            select(ContextPayload.summary).where(ContextPayload.run_id == run_id)
+        )
         below_threshold = await self._session.scalar(
             select(func.count())
             .select_from(Finding)
@@ -443,6 +450,7 @@ class SqlAlchemyRunLifecycleStore:
             body_count=body_count,
             below_threshold_count=below_threshold or 0,
             summary_only=bool(summary_only),
+            summary_reason=summary_only_reason_of(context_summary),
             provider=installation.provider,
         )
 
@@ -759,7 +767,9 @@ class SqlAlchemyRunTraceStore:
             duration_ms=duration_ms,
         )
 
-    async def save_context_payload(self, run_id: UUID, summary: dict[str, Any]) -> None:
+    async def save_context_payload(
+        self, run_id: UUID, summary: dict[str, Any], *, mark_summary_only: bool = False
+    ) -> None:
         # Context is durable review input, not an append-only provider audit.
         row = await lock_run_origin_row(
             self._session,
@@ -780,6 +790,15 @@ class SqlAlchemyRunTraceStore:
                 set_={"summary": summary, "schema_version": 2},
             )
         )
+        # Same short transaction as the context.build payload. The UI patch stays.
+        # Only the stage's summary-only stop sets the flag: a legacy technical-only
+        # build can also record status summary_only and must keep the model path.
+        if mark_summary_only:
+            await self._session.execute(
+                update(CodeChangeDiff)
+                .where(CodeChangeDiff.run_id == run_id)
+                .values(summary_only=True, review_patch=None)
+            )
 
 
 class SqlAlchemyRunTraceUnitOfWork(SqlAlchemyUnitOfWork):

@@ -44,6 +44,7 @@ from app.modules.reviews.application.review_context import (
     NoReviewableText,
     RetrievedBlock,
     ReviewContextPayload,
+    SummaryOnlyReview,
     snapshot_block,
     snapshot_retrieved,
 )
@@ -237,9 +238,9 @@ class ExecuteReviewRun:
     async def execute(self, run_id: UUID) -> bool:
         try:
             conventions = await self._processor.prepare(run_id)
-        except NoReviewableText:
-            # CVS §2.2: the stage recorded a change of technical skips only. Nothing is shown
-            # to a model: the backend result (coverage none) is published (#130 F5).
+        except (NoReviewableText, SummaryOnlyReview):
+            # Nothing is shown to a model. Coverage none (#130 F5) and summary-only (#313)
+            # both publish the backend result.
             return await self._publisher.execute(run_id, NoModelAnswer())
         if not isinstance(conventions, GeneratedConventions):
             return False
