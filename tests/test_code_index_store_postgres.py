@@ -80,6 +80,7 @@ _COLUMNS = {
         "purge_reason": ("code_index_purge_reason", True, None),
         "error_code": ("varchar", True, 64),
         "last_error_code": ("varchar", True, 64),
+        "last_error_http_status": ("int4", True, None),
         "indexed_commit_sha": ("varchar", True, 64),
         "target_commit_sha": ("varchar", True, 64),
         "published_at": ("timestamptz", True, None),
@@ -727,7 +728,7 @@ def test_migration_0037_adds_the_wake_marker_and_its_downgrade_drops_it(
     assert connection.execute(
         text("SELECT generation, wake_requested_at FROM code_index_states")
     ).one() == (1, None)
-    assert connection.scalar(text("SELECT version_num FROM alembic_version")) == "20261026_0043"
+    assert connection.scalar(text("SELECT version_num FROM alembic_version")) == "20261027_0051"
 
 
 @pytest.mark.integration
@@ -782,7 +783,7 @@ def test_migration_0038_adds_the_review_throttle_and_its_downgrade_drops_it(
             "FROM code_index_states"
         )
     ).one() == (1, None, None)
-    assert connection.scalar(text("SELECT version_num FROM alembic_version")) == "20261026_0043"
+    assert connection.scalar(text("SELECT version_num FROM alembic_version")) == "20261027_0051"
 
 
 @pytest.mark.integration
@@ -807,7 +808,7 @@ def test_downgrade_drops_index_tables_and_types_and_upgrade_restores_them(
         "code_index_edge_kind",
         "code_index_import_resolution",
     }
-    assert connection.scalar(text("SELECT version_num FROM alembic_version")) == "20261026_0043"
+    assert connection.scalar(text("SELECT version_num FROM alembic_version")) == "20261027_0051"
 
 
 # ADR 0001 §7: only a limit or an unsafe archive fails an index.
@@ -897,6 +898,7 @@ def test_downgrade_to_0033_drops_the_indexer_columns_and_upgrade_resets_profiles
         "wake_requested_at",
         "review_full_requested_at",
         "review_full_requested_sha",
+        "last_error_http_status",
     }
     assert _state_schema(connection) == (head_columns, _CHECKS["code_index_states"], _STATE_INDEXES)
     connection.rollback()
@@ -936,7 +938,7 @@ def test_downgrade_to_0033_drops_the_indexer_columns_and_upgrade_resets_profiles
         )
     ).one() == ("ready", C1, *(None,) * 6, 0, 0)
     assert _state_schema(connection) == (head_columns, _CHECKS["code_index_states"], _STATE_INDEXES)
-    assert connection.scalar(text("SELECT version_num FROM alembic_version")) == "20261026_0043"
+    assert connection.scalar(text("SELECT version_num FROM alembic_version")) == "20261027_0051"
 
 
 # Store behaviour: fencing, publication, purge, garbage collection and isolation.
@@ -953,7 +955,12 @@ _PROFILE_FIELDS = {
     "default_branch": "main",
     "exclusions_digest": _DIGEST,
 }
-_NO_STATS = {"downloaded_bytes": 0, "build_duration_ms": 0, "github_request_count": 0}
+_NO_STATS = {
+    "downloaded_bytes": 0,
+    "build_duration_ms": 0,
+    "github_request_count": 0,
+    "http_status": None,
+}
 # ADR 0001 §7: 2 jobs in all, 1 per installation, 512 MiB per repository, 2 GiB per Workspace.
 _ADMISSION = IndexAdmission(
     max_leases=2,
@@ -971,7 +978,12 @@ _BUSY = ClaimRefused(ClaimRefusal.BUSY)
 #   180+3·3 = 189, import `.a` 160+2·4+2·2+2·4 = 180, import `requests` 160+2·4+2·8 = 184.
 _MODULE_BYTES = 346
 _IMPORTER_BYTES = 1_079
-_STATS_FIELDS = {"downloaded_bytes": 48_213, "build_duration_ms": 1_250, "github_request_count": 3}
+_STATS_FIELDS = {
+    "downloaded_bytes": 48_213,
+    "build_duration_ms": 1_250,
+    "github_request_count": 3,
+    "http_status": None,
+}
 _COUNT_ROWS = (
     "SELECT (SELECT count(*) FROM code_index_files WHERE repository_id = :repository), "
     "(SELECT count(*) FROM code_index_symbols WHERE repository_id = :repository), "
@@ -1336,6 +1348,7 @@ def test_publications_record_literal_state_and_incremental_closes_rewritten_file
             "purge_reason": None,
             "error_code": None,
             "last_error_code": None,
+            "last_error_http_status": None,
             "indexed_commit_sha": C1,
             "target_commit_sha": None,
             "reserved_publication": 1,
@@ -1374,6 +1387,7 @@ def test_publications_record_literal_state_and_incremental_closes_rewritten_file
             "purge_reason": None,
             "error_code": None,
             "last_error_code": None,
+            "last_error_http_status": None,
             "indexed_commit_sha": C2,
             "target_commit_sha": None,
             "reserved_publication": 2,
@@ -1488,6 +1502,7 @@ def test_purge_hides_every_row_gc_deletes_them_and_a_repeated_purge_is_a_no_op(
             "purge_reason": "disabled",
             "error_code": None,
             "last_error_code": None,
+            "last_error_http_status": None,
             "indexed_commit_sha": None,
             "target_commit_sha": None,
             "reserved_publication": 1,
@@ -1531,6 +1546,7 @@ def test_enable_keeps_a_ready_index_and_disable_then_enable_rejects_the_old_fenc
             "purge_reason": None,
             "error_code": None,
             "last_error_code": None,
+            "last_error_http_status": None,
             "indexed_commit_sha": None,
             "target_commit_sha": None,
             "reserved_publication": 0,
@@ -2364,6 +2380,7 @@ def test_a_publication_miss_spends_the_lease_so_the_next_wake_up_claims_at_once(
             "purge_reason": None,
             "error_code": None,
             "last_error_code": None,
+            "last_error_http_status": None,
             "indexed_commit_sha": C1,
             "target_commit_sha": None,
             "reserved_publication": 2,
@@ -2382,6 +2399,7 @@ def test_a_publication_miss_spends_the_lease_so_the_next_wake_up_claims_at_once(
                 "downloaded_bytes": 81_920,
                 "build_duration_ms": 42_000,
                 "github_request_count": 4,
+                "http_status": None,
             },
         }
         assert missed is not None and missed.lease_expires_at is None
@@ -2732,6 +2750,7 @@ def test_mark_failed_drops_the_publication_and_gc_removes_every_row(index: _Inde
             "purge_reason": None,
             "error_code": "limit_exceeded:symbols",
             "last_error_code": "vcs_unavailable",
+            "last_error_http_status": None,
             "indexed_commit_sha": None,
             "target_commit_sha": None,
             "reserved_publication": 3,
@@ -2754,6 +2773,7 @@ def test_mark_failed_drops_the_publication_and_gc_removes_every_row(index: _Inde
             "purge_reason": None,
             "error_code": "archive_unsafe",
             "last_error_code": None,
+            "last_error_http_status": None,
             "indexed_commit_sha": None,
             "target_commit_sha": None,
             "reserved_publication": 1,
@@ -2769,6 +2789,7 @@ def test_mark_failed_drops_the_publication_and_gc_removes_every_row(index: _Inde
                 "downloaded_bytes": 1_024,
                 "build_duration_ms": 900_000,
                 "github_request_count": 4,
+                "http_status": None,
             },
         }
         assert await _reads(index, index.a) == (None, [], [], [], [])
@@ -2807,6 +2828,7 @@ def test_release_keeps_the_last_publication_and_records_the_last_error_code(
             "purge_reason": None,
             "error_code": None,
             "last_error_code": "vcs_unavailable",
+            "last_error_http_status": None,
             "indexed_commit_sha": None,
             "target_commit_sha": None,
             "reserved_publication": 1,
@@ -2877,6 +2899,7 @@ def test_release_records_the_job_metrics_and_keeps_the_publication_counters(
         "downloaded_bytes": 2_048,
         "build_duration_ms": 30_000,
         "github_request_count": 2,
+        "http_status": None,
     }
 
     async def scenario() -> None:
@@ -2893,6 +2916,7 @@ def test_release_records_the_job_metrics_and_keeps_the_publication_counters(
             "purge_reason": None,
             "error_code": None,
             "last_error_code": "vcs_unavailable",
+            "last_error_http_status": None,
             "indexed_commit_sha": C1,
             "target_commit_sha": None,
             "reserved_publication": 2,
@@ -2917,6 +2941,7 @@ def test_release_records_the_job_metrics_and_keeps_the_publication_counters(
             "purge_reason": None,
             "error_code": None,
             "last_error_code": "vcs_access_denied",
+            "last_error_http_status": None,
             "indexed_commit_sha": None,
             "target_commit_sha": None,
             "reserved_publication": 1,
@@ -3085,6 +3110,7 @@ def test_repository_quota_refuses_the_claim_and_fails_the_index(index: _Index) -
             "purge_reason": None,
             "error_code": "limit_exceeded:repository_storage",
             "last_error_code": None,
+            "last_error_http_status": None,
             "indexed_commit_sha": None,
             "target_commit_sha": C2,
             "reserved_publication": 2,
@@ -3833,6 +3859,67 @@ def test_a_new_target_clears_a_terminal_refusal_so_a_lost_wake_up_is_recovered(
             None,
         )
         assert await _marker(index, index.a) is not None
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.integration
+def test_terminal_release_for_old_head_cannot_refuse_new_target(index: _Index) -> None:
+    async def scenario() -> None:
+        await _enable(index, index.a)
+        assert await _request_build(index, index.a, C2)
+        fence = await _claim(index, index.a)
+        assert await _request_build(index, index.a, C3)
+        await _unmark(index, index.a)  # The newer target's wake-up was lost.
+
+        async with index.uow() as uow:
+            await uow.index.release(
+                index.a,
+                fence,
+                last_error_code="vcs_access_denied",
+                stats=IndexBuildStats(0, 0, 3, http_status=401),
+                terminal_head_sha=C2,
+                expected_target_sha=C2,
+            )
+            await uow.commit()
+        after_release = await _state(index, index.a)
+        assert after_release is not None
+        assert (after_release.target_commit_sha, after_release.last_error_code) == (C3, None)
+        assert after_release.last_error_http_status is None
+
+        assert await _reconcile(index, index.a, commit=C3)
+        assert await _marker(index, index.a) is not None
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.integration
+def test_successful_publish_clears_previous_http_status(index: _Index) -> None:
+    async def scenario() -> None:
+        await _enable(index, index.a)
+        assert await _request_build(index, index.a, C2)
+        fence = await _claim(index, index.a)
+        async with index.uow() as uow:
+            await uow.index.release(
+                index.a,
+                fence,
+                last_error_code="vcs_access_denied",
+                stats=IndexBuildStats(0, 0, 3, http_status=401),
+                terminal_head_sha=C2,
+                expected_target_sha=C2,
+            )
+            await uow.commit()
+        refused = await _state(index, index.a)
+        assert refused is not None
+        assert (refused.last_error_code, refused.last_error_http_status) == (
+            "vcs_access_denied",
+            401,
+        )
+
+        await _build(index, index.a, C2, _module("aa01", 1))
+        published = await _state(index, index.a)
+        assert published is not None
+        assert (published.last_error_code, published.last_error_http_status) == (None, None)
 
     asyncio.run(scenario())
 

@@ -65,12 +65,24 @@ class WebhookReceipt:
     payload_json: str = field(repr=False)
     provider: str = "github"
     origin_provider_installation_id: UUID | None = None
+    origin_repository_id: UUID | None = None
+    origin_binding_generation: int | None = None
+    origin_webhook_generation: int | None = None
 
     def __post_init__(self) -> None:
-        if self.provider not in {"github", "gitlab"}:
+        if self.provider not in {"github", "gitlab", "bitbucket"}:
             raise ValueError("unsupported webhook provider")
         if self.provider == "gitlab" and not isinstance(self.origin_provider_installation_id, UUID):
             raise ValueError("GitLab receipt requires an immutable origin UUID")
+        if self.provider == "bitbucket" and (
+            not isinstance(self.origin_provider_installation_id, UUID)
+            or not isinstance(self.origin_repository_id, UUID)
+            or type(self.origin_binding_generation) is not int
+            or type(self.origin_webhook_generation) is not int
+            or self.origin_binding_generation <= 0
+            or self.origin_webhook_generation <= 0
+        ):
+            raise ValueError("Bitbucket receipt requires a repository origin and generations")
 
 
 @dataclass(frozen=True)
@@ -175,10 +187,12 @@ class ReceiveWebhookDelivery:
         action_of: Callable[[WebhookReceipt], str | None] | None = None,
         classify_failure: Callable[[BaseException], FailureCategory] | None = None,
     ) -> None:
-        if provider not in {"github", "gitlab"}:
+        if provider not in {"github", "gitlab", "bitbucket"}:
             raise ValueError("unsupported webhook provider")
         self._provider = provider
-        self._provider_label = "GitHub" if provider == "github" else "GitLab"
+        self._provider_label = {"github": "GitHub", "gitlab": "GitLab", "bitbucket": "Bitbucket"}[
+            provider
+        ]
         if not 0 < dispatch_timeout_seconds < _LEASE.total_seconds():
             raise ValueError("dispatch timeout must be shorter than claim lease")
         self._uow_factory = uow_factory

@@ -46,6 +46,7 @@ NOW = datetime(2026, 9, 30, tzinfo=UTC)
 
 def run_item(status: str = "succeeded", *, summary_only: bool = False) -> RunListItem:
     return RunListItem(
+        provider="github",
         id=RUN,
         status=status,
         engine="fast",

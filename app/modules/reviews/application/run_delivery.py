@@ -61,6 +61,6 @@ class HandleRunDelivery:
         identity = await self._reader.read(pointer.run_id)
         if identity is None:
             return DeliveryOutcome.ACK
-        if pointer.provider not in {"github", "gitlab"} or pointer != identity.pointer:
+        if pointer.provider not in {"github", "gitlab", "bitbucket"} or pointer != identity.pointer:
             return DeliveryOutcome.DEAD_LETTER
         return await self._handler(identity.pointer.run_id)

@@ -45,6 +45,7 @@ Repository variable `LLM_EUR_TO_USD_RATE` удалена 06.10 после про
 |---|---|---|---|
 | `STAGING_SSH_KEY` | да, для Terraform-хоста | SCP/SSH на VM | приватный ключ к `hcloud_ssh_key.ci` |
 | `POSTGRES_PASSWORD` | нет | `<APP_DIR>/.env` на хосте | пароль PostgreSQL. Если не задан, `deploy.sh` генерирует его при первом выкате и хранит в `.env` (0600). После инициализации тома пароль не менять: Postgres его не перечитывает |
+| `BITBUCKET_CREDENTIAL_KEYS` | для Bitbucket Cloud | `bitbucket.env` → `api`, `worker`, `webhook-worker` | JSON keyring для шифрования токенов и webhook secrets; список ключей должен сохранять старые key IDs до миграции ciphertext |
 
 Секреты приложения. GitHub не принимает имена секретов и variables с префиксом `GITHUB_` (HTTP 422), поэтому секреты App заведены как `GH_*`, а в контейнере у них имена из `.env.example`. Сопоставление делает шаг «Bundle application secrets» в `deploy-staging`; тем же путём идут organization secret `AI_DMC268_T6`, organization variable `AI_DMC268_URL` и `vars.GH_APP_BOT_LOGIN`, `vars.PORTAL_URL`, `vars.LLM_MODEL`, `vars.LLM_FALLBACK_MODEL`, `vars.LLM_VERIFIER_MODEL`, `vars.LLM_VERIFIER_FALLBACK_MODEL`. Последние четыре задаются на уровне repository и могут быть переопределены в Environment `staging`. Незаданное значение в контейнер не попадает совсем, а не приходит пустой строкой.
 
@@ -54,11 +55,12 @@ Repository variable `LLM_EUR_TO_USD_RATE` удалена 06.10 после про
 
 | Env-файл на хосте | Переменные | Контейнеры |
 |---|---|---|
-| `api.env` | `GITHUB_WEBHOOK_SECRET`, `GITHUB_CLIENT_ID`, `GITHUB_CLIENT_SECRET`, `AUTH_JWT_PRIVATE_KEY`, `AUTH_JWT_PUBLIC_KEY`, `GITLAB_WEBHOOK_INTAKE_ENABLED` | `api` |
+| `api.env` | `GITHUB_WEBHOOK_SECRET`, `GITHUB_CLIENT_ID`, `GITHUB_CLIENT_SECRET`, `AUTH_JWT_PRIVATE_KEY`, `AUTH_JWT_PUBLIC_KEY`, `GITLAB_WEBHOOK_INTAKE_ENABLED`, `BITBUCKET_WEBHOOK_BASE_URL` | `api` |
 | `gitlab.env` | `GITLAB_CREDENTIAL_KEYS`, `GITLAB_ACTIVE_KEY_ID`, `GITLAB_ALLOWED_ORIGINS`, optional `GITLAB_PRIVATE_ORIGINS` | `worker`, `webhook-worker`, profile-only `gitlab-admin` |
 | `app.env` | `GITHUB_APP_ID`, `GITHUB_APP_PRIVATE_KEY` | `worker`, `webhook-worker` |
 | `worker.env` | `LLM_API_KEYS`, `LLM_BASE_URL`, `LLM_MODEL`, `LLM_FALLBACK_MODEL`, `LLM_VERIFIER_MODEL`, `LLM_VERIFIER_FALLBACK_MODEL`, `PORTAL_URL` (опциональные ключи — только при непустом значении) | `worker` |
 | `webhook-worker.env` | `GITHUB_APP_BOT_LOGIN` | `webhook-worker` |
+| `bitbucket.env` | `BITBUCKET_CREDENTIAL_KEYS`, `BITBUCKET_ACTIVE_KEY_ID` | `api`, `worker`, `webhook-worker` |
 
 | Secret | Тип значения | Переменная в контейнере | Контейнеры | Зачем |
 |---|---|---|---|---|
@@ -113,6 +115,8 @@ rm jwt.pem jwt.pub
 | `POSTGRES_DB` | нет | иначе `app` |
 | `GH_APP_BOT_LOGIN` | обязателен для GitHub replay; частичный App config закрывает startup | `dmc268-t6-reviewer[bot]` — логин бота App. В контейнере `GITHUB_APP_BOT_LOGIN`, только у `webhook-worker` (`app/webhook_worker.py`). Префикс `GH_`, потому что GitHub не принимает `GITHUB_` и у variables; берётся из `vars.`, а не из `secrets.` |
 | `PORTAL_URL` | для ссылки на Run в staging check-run | `https://staging-ui.dmc268-t6.axyi.ru` — публичный UI-origin. Читается из `vars.PORTAL_URL`, записывается только в `worker.env` → review-worker (`worker`); в `api` и `webhook-worker` не передаётся; [проверка и восстановление](#portal_url) |
+| `BITBUCKET_ACTIVE_KEY_ID` | для Bitbucket Cloud | ID ключа в `BITBUCKET_CREDENTIAL_KEYS`, записывается в `bitbucket.env` трёх процессов; без него новые ciphertext не создаются |
+| `BITBUCKET_WEBHOOK_BASE_URL` | для Bitbucket Cloud | Публичный HTTPS origin API, записывается только в `api.env`; не содержит path/query |
 | `LLM_MODEL` | нет, переопределение repository | `mistral-small-4` (OQ-2, SD §15). В контейнере только у `worker`; обычное значение задано на уровне repository |
 | `LLM_FALLBACK_MODEL` | нет, переопределение repository | `mistral-small-3.2-24b`. Только `worker`. Чтобы отключить fallback, удалите repository variable и это переопределение: значение Environment перекрывает repository, а незаданная variable приходит в `vars` пустой строкой, и `LLM_FALLBACK_MODEL` не попадает в `worker.env` |
 | `LLM_VERIFIER_MODEL` | нет, переопределение repository | Только `worker`; пусто — верификатор идёт моделью ревью (`LLM_MODEL`). Как у `LLM_FALLBACK_MODEL`: значение Environment перекрывает repository, незаданная variable не попадает в `worker.env` |
@@ -728,9 +732,9 @@ flowchart LR
   preflight --> ssh["SSH/SCP, debug: false"]
   ssh --> script["deploy.sh / rollback.sh"]
   script --> envfile["<APP_DIR>/.env\nchmod 600"]
-  script --> appenv["<APP_DIR>/api.env, app.env,\nworker.env, webhook-worker.env, gitlab.env\nchmod 600"]
+  script --> appenv["<APP_DIR>/api.env, app.env,\nworker.env, webhook-worker.env, gitlab.env, bitbucket.env\nchmod 600"]
   envfile --> compose["docker compose --env-file"]
-  appenv --> compose2["env_file: api.env → api,\napp.env → worker, webhook-worker,\nworker.env → worker,\nwebhook-worker.env → webhook-worker,\ngitlab.env → workers + operator profile"]
+  appenv --> compose2["env_file: api.env → api,\napp.env → worker, webhook-worker,\nworker.env → worker,\nwebhook-worker.env → webhook-worker,\ngitlab.env → workers + operator profile,\nbitbucket.env → api, worker, webhook-worker"]
   script --> logout["docker logout ghcr.io"]
 ```
 
@@ -891,3 +895,17 @@ Workflow по умолчанию: `contents: read`. Расширение точ�
 | Rollback staging: `promote-staging` | `contents: read`, `packages: write` | синхронизировать `:staging` с откатанным образом |
 
 `security-events`, `id-token`, `pull-requests` не выдаются; `actions: read` есть только у `push-image`. `packages: write` — только у jobs `promote-staging`, на VM этот токен не уходит. `HCLOUD_TOKEN` в Actions нет — apply вне CI.
+
+## Bitbucket Cloud (#333)
+
+Токен Bitbucket принадлежит конкретному portal workspace connection и хранится в БД в зашифрованном виде. Процессам передают только keyring, не Atlassian API token. Первый ручной flow требует `read:repository:bitbucket` и `read:pullrequest:bitbucket`: [Atlassian указывает](https://developer.atlassian.com/cloud/bitbucket/rest/api-group-pullrequests/) `read:pullrequest:bitbucket` для REST-комментариев и [указывает](https://developer.atlassian.com/cloud/bitbucket/rest/api-group-commit-statuses/) `read:repository:bitbucket` для REST commit statuses, включая POST/PUT. Живую публикацию на приватном репозитории ещё нужно проверить. Для подготовки disposable репозитория отдельному оператору могут потребоваться `write:repository:bitbucket` (push) и `write:pullrequest:bitbucket` (создание PR); эти права не нужны runtime-токену по текущему REST-контракту. Права на управление webhook через API не нужны: пользователь вручную настраивает repository webhook в Bitbucket.
+
+| Переменная | Получатели staging | Контракт |
+| --- | --- | --- |
+| `BITBUCKET_CREDENTIAL_KEYS` | API, review worker, webhook worker (`bitbucket.env`) | Защищённый JSON key-ID → canonical base64 32-байтного ключа шифрования. Хранить как Environment secret, не в Git. |
+| `BITBUCKET_ACTIVE_KEY_ID` | те же процессы (`bitbucket.env`) | ID ключа для новых ciphertext; ключ должен присутствовать в keyring. Хранить как Environment variable. |
+| `BITBUCKET_WEBHOOK_BASE_URL` | только API (`api.env`) | Публичный HTTPS origin без path/query; для курсового staging `https://staging-api.<APP_DOMAIN>`, не зарезервированный `staging-webhook` host. Хранить как Environment variable. |
+
+CI собирает эти значения в защищённый bundle и `deploy/scripts/env-file.sh` записывает role-specific файлы с правами 0600. `bitbucket.env` подключён только к API и двум workers; `app.env` с GitHub App private key остаётся только у workers. Пустые значения не передаются в контейнер. Rollback оставляет текущие env-файлы на хосте, включая `bitbucket.env`, и откатывает образ/release state; перед откатом нужно убедиться, что прежний образ понимает текущие key IDs и ciphertext. При ротации keyring сначала добавить новый ключ и переключить active ID, сохранив старые ключи для чтения. Автоматического пути перешифрования старых connections нет: старый ключ нельзя удалять, пока все записи им зашифрованы. Keyring с правом расшифровки доступен internet-facing API для connect/rotate и скрыт от логов; это осознанный компромисс относительно GitHub App PEM, который API не получает. Не выводить содержимое файлов, токены или одноразовые webhook secrets в лог/issue/PR.
+
+Связанные контракты: [browser OpenAPI](../contracts/openapi.yaml), [приём webhook](BITBUCKET_WEBHOOK.md), [план #333](plans/333-plan.md). Реальная публикация comments/status и формат native suggestion ещё требуют disposable PR проверки; до неё `suggestion` публикуется как текст для ручного применения.

@@ -92,6 +92,8 @@ class SourceArchive:
 
     commit_sha: str
     content: bytes = field(repr=False)
+    # Provider entries intentionally omitted before archive construction.
+    provider_skips: Mapping[str, int] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -137,11 +139,17 @@ class VcsUnavailable(Exception):
     """
 
     def __init__(
-        self, message: str, *, rate_limited: bool = False, retry_after: timedelta | None = None
+        self,
+        message: str,
+        *,
+        rate_limited: bool = False,
+        retry_after: timedelta | None = None,
+        http_status: int | None = None,
     ) -> None:
         super().__init__(message)
         self.rate_limited = rate_limited
         self.retry_after = retry_after
+        self.http_status = http_status
         self.code = VCS_RATE_LIMITED if rate_limited else VCS_UNAVAILABLE
 
 
@@ -149,6 +157,13 @@ class VcsAccessDenied(Exception):
     """The repository or the installation can no longer be read."""
 
     code = VCS_ACCESS_DENIED
+
+    def __init__(
+        self, message: str, *, http_status: int | None = None, pin_head: bool = False
+    ) -> None:
+        super().__init__(message)
+        self.http_status = http_status
+        self.pin_head = pin_head
 
 
 class ArchiveUnsafe(Exception):

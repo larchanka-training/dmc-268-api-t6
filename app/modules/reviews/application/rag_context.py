@@ -779,8 +779,22 @@ class _Selection:
         is resolved in both trees, and the import keeps its specifier. Another blob is no
         evidence about this PR.
         """
-        if base.tree.blob_shas.get(path) != self._tree.blob_shas.get(path):
+        base_blob = base.tree.blob_shas.get(path)
+        head_blob = self._tree.blob_shas.get(path)
+        if base_blob is None or head_blob is None:
             return [], False
+        if base_blob != head_blob:
+            # Some VCS listings expose revision-scoped ids rather than content
+            # ids. Confirm an unchanged candidate from pinned bytes before
+            # attributing a broken import to the PR.
+            before_text = await base.files.text(path)
+            after_text = await self._files.text(path)
+            if isinstance(before_text, FileUnavailable):
+                return [], before_text.reason == RAG_LIMIT
+            if isinstance(after_text, FileUnavailable):
+                return [], after_text.reason == RAG_LIMIT
+            if before_text != after_text:
+                return [], False
         found: dict[int, tuple[tuple[AstImport, ...], EdgeKind]] = {}
         read: dict[int, dict[str, SymbolRef]] = {}
         limited = False
