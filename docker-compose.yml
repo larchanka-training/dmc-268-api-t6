@@ -10,6 +10,9 @@ services:
       AUTH_JWT_PUBLIC_KEY: ${AUTH_JWT_PUBLIC_KEY:-}
       AUTH_JWT_ISSUER: ${AUTH_JWT_ISSUER:-dmc-268-api}
       AUTH_JWT_AUDIENCE: ${AUTH_JWT_AUDIENCE:-dmc-268-ui}
+      BITBUCKET_CREDENTIAL_KEYS: ${BITBUCKET_CREDENTIAL_KEYS:-}
+      BITBUCKET_ACTIVE_KEY_ID: ${BITBUCKET_ACTIVE_KEY_ID:-}
+      BITBUCKET_WEBHOOK_BASE_URL: ${BITBUCKET_WEBHOOK_BASE_URL:-}
       RABBITMQ_URL: amqp://${RABBITMQ_USER:-app}:${RABBITMQ_PASSWORD:-app}@rabbitmq:5672/
     ports:
       - "${BACKEND_PORT:-8000}:8000"
@@ -47,6 +50,8 @@ services:
       PORTAL_URL: ${PORTAL_URL:-}
       GITLAB_TOKEN: ${GITLAB_TOKEN:-}
       GITLAB_BASE_URL: ${GITLAB_BASE_URL:-https://gitlab.com}
+      BITBUCKET_CREDENTIAL_KEYS: ${BITBUCKET_CREDENTIAL_KEYS:-}
+      BITBUCKET_ACTIVE_KEY_ID: ${BITBUCKET_ACTIVE_KEY_ID:-}
       # LLM gateway (#33): without LLM_MODEL the worker starts and every run fails with
       # llm_unavailable after all three attempts, naming the missing configuration.
       LLM_MODEL: ${LLM_MODEL:-}
@@ -154,6 +159,8 @@ services:
       GITHUB_APP_PRIVATE_KEY: ${GITHUB_APP_PRIVATE_KEY:-}
       GITHUB_APP_BOT_LOGIN: ${GITHUB_APP_BOT_LOGIN:-}
       GITHUB_API_URL: ${GITHUB_API_URL:-https://api.github.com}
+      BITBUCKET_CREDENTIAL_KEYS: ${BITBUCKET_CREDENTIAL_KEYS:-}
+      BITBUCKET_ACTIVE_KEY_ID: ${BITBUCKET_ACTIVE_KEY_ID:-}
       RABBITMQ_URL: amqp://${RABBITMQ_USER:-app}:${RABBITMQ_PASSWORD:-app}@rabbitmq:5672/
       REDIS_URL: redis://redis:6379/0
       WORKER_HEARTBEAT_FILE: /tmp/webhook-worker.heartbeat

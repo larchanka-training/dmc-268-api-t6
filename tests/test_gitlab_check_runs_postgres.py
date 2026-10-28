@@ -76,6 +76,44 @@ def test_gitlab_sql_report_is_absent_for_an_active_terminal_origin(
     asyncio.run(asyncio.wait_for(scenario(), 30))
 
 
+@pytest.mark.parametrize("pause", ["repository", "intake", "connection"])
+def test_gitlab_inflight_origin_stays_active_after_management_pause(
+    check_database: tuple[str, str, UUID], pause: str
+) -> None:
+    async def scenario() -> None:
+        async with rig(check_database) as fixture:
+            target = await fixture.seed()
+            change = await seed_change(fixture, target.repository_id)
+            run = await seed_run(fixture, target, change, state="running", attempt=1)
+            async with fixture.sessions.begin() as session:
+                if pause == "repository":
+                    await session.execute(
+                        text("UPDATE repositories SET enabled=false WHERE id=:id"),
+                        {"id": target.repository_id},
+                    )
+                elif pause == "intake":
+                    await session.execute(
+                        text(
+                            "UPDATE gitlab_connections SET intake_enabled=false "
+                            "WHERE provider_installation_id=:id"
+                        ),
+                        {"id": target.origin_provider_installation_id},
+                    )
+                else:
+                    await session.execute(
+                        text(
+                            "UPDATE gitlab_connections SET intake_enabled=false, "
+                            "revoked_at=now(), token_ciphertext=NULL, credential_key_id=NULL "
+                            "WHERE provider_installation_id=:id"
+                        ),
+                        {"id": target.origin_provider_installation_id},
+                    )
+            async with fixture.sessions() as session:
+                assert await SqlAlchemyRunLifecycleStore(session).provider_origin_active(run)
+
+    asyncio.run(asyncio.wait_for(scenario(), 30))
+
+
 def test_gitlab_terminal_redelivery_never_invokes_configured_github_gateway(
     check_database: tuple[str, str, UUID],
 ) -> None:

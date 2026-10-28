@@ -28,6 +28,7 @@ class RagIndexDto(ApiDto):
 
 class RepositoryDto(ApiDto):
     id: UUID
+    provider: Literal["github", "gitlab", "bitbucket"]
     full_name: str
     url: str
     default_branch: str

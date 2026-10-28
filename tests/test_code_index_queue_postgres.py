@@ -55,6 +55,9 @@ from app.modules.code_index.infrastructure.amqp import (
     handle_index_delivery,
 )
 from app.modules.code_index.infrastructure.index_store import SqlAlchemyCodeIndexUnitOfWork
+from app.modules.integrations.bitbucket.infrastructure.credential_cipher import (
+    BitbucketCredentialCipher,
+)
 from app.modules.reviews.application.run_failures import RetryDelays
 from app.worker import WorkerSettings, run_worker
 
@@ -461,6 +464,7 @@ class Worker:
     github_app_id: str | None = "1"
     github_private_key: str | None = _PEM
     github_api_url: str = "https://api.github.test"
+    bitbucket_cipher: BitbucketCredentialCipher | None = None
 
 
 async def _enable(factory: async_sessionmaker[AsyncSession], repository_id: UUID) -> int:

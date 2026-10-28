@@ -557,6 +557,9 @@ class PublishedFinding:
     gitlab_line_range_start_old_line: int | None = None
     gitlab_line_range_end_old_line: int | None = None
     finding_id: UUID | None = None
+    # A deleted-file/old-side Bitbucket anchor. New-side findings use ``line``.
+    bitbucket_old_line: int | None = None
+    bitbucket_anchor_valid: bool = True
 
 
 def comment_body(title: str, body: str, suggestion: str | None) -> str:

@@ -112,6 +112,7 @@ class CodeIndexState(Base):
     )
     error_code: Mapped[str | None] = mapped_column(String(64))
     last_error_code: Mapped[str | None] = mapped_column(String(64))
+    last_error_http_status: Mapped[int | None] = mapped_column(INTEGER)
     indexed_commit_sha: Mapped[str | None] = mapped_column(String(64))
     target_commit_sha: Mapped[str | None] = mapped_column(String(64))
     published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

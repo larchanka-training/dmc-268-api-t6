@@ -1,10 +1,12 @@
 # Provider webhook receipt worker
 
 The GitHub endpoint verifies the signature; the default-off installed GitLab endpoint
-verifies the selected connection's webhook-secret digest. Each commits a durable JSONB
+verifies the selected connection's webhook-secret digest. Bitbucket Cloud verifies a
+per-repository HMAC secret over the original body bytes. Each commits a durable JSONB
 receipt before returning `202`. The worker claims provider-bound receipts and projects
-GitHub installation/PR events or GitLab MR events after the HTTP response. Expired claims
-and failed dispatches are retried. GitLab setup and external activation gates are below.
+GitHub installation/PR events, GitLab MR events or Bitbucket PR/push events after the HTTP
+response. Expired claims and failed dispatches are retried. GitLab setup and external
+activation gates are below.
 
 Set `DATABASE_URL` and `RABBITMQ_URL` (both required). For GitHub replay, set
 `GITHUB_APP_ID`, `GITHUB_APP_PRIVATE_KEY`, and `GITHUB_APP_BOT_LOGIN` together (the exact
@@ -13,8 +15,17 @@ startup. GitLab-only replay uses the complete optional runtime block in `.env.ex
 and needs no GitHub App. With `REDIS_URL`, webhook and review workers share the async
 GitHub installation-token cache (`token:{installation_id}`, expiry minus 60 seconds);
 without Redis, or on Redis errors, tokens use a safe local in-memory fallback. This
-cache does not grant GitLab credential authority. Apply the migrations and seed the prompts: without
-an active `review.system` prompt no Run is created. Then run:
+cache does not grant GitLab credential authority.
+
+For Bitbucket replay, `BITBUCKET_CREDENTIAL_KEYS` and `BITBUCKET_ACTIVE_KEY_ID`
+must be a complete keyring in the webhook worker, review worker and API;
+`BITBUCKET_WEBHOOK_BASE_URL` belongs only to the API. The provider token stays
+encrypted in the database and is resolved only after the original binding and
+generation are checked. See [SECRETS](SECRETS.md#bitbucket-cloud-333) and the
+[signed receiver contract](BITBUCKET_WEBHOOK.md).
+
+Apply the migrations and seed the prompts: without an active `review.system`
+prompt no Run is created. Then run:
 
 ```bash
 uv run alembic upgrade head
@@ -34,6 +45,20 @@ Values of the dev GitHub App and its smee.io delivery path: [README](../README.m
 ```bash
 docker compose --profile webhooks up --build
 ```
+
+## Bitbucket Cloud replay
+
+The Bitbucket worker uses the same durable receipt claim/replay loop. Its
+receiver stores signed `repo:push`, `pullrequest:created`, `pullrequest:updated`,
+`pullrequest:fulfilled`, and `pullrequest:rejected` deliveries. A receipt can
+project a current PR, be ignored when the event is irrelevant or its original
+binding is inactive, or be deferred when a concurrent token rotation prevents
+a safe provider read. `credential_rotated` and `canonical_stale` are deferred
+reasons; `invalid_payload` and `identity_mismatch` are invalid-event reasons.
+Projection refetches the current PR, and close events cancel active work. A
+`repo:push` fan-out is bounded at 500 open PR candidates per branch; larger
+fan-out is a known limit requiring a separate scalable implementation. See
+[Bitbucket webhook](BITBUCKET_WEBHOOK.md) and [pipeline](PIPELINE_SPEC.md#bitbucket-cloud-path-333).
 
 ## Installed GitLab replay and activation
 

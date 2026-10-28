@@ -151,3 +151,44 @@ def enrich_gitlab_publication_finding(
     if not updates:
         return finding
     return replace(finding, **updates)
+
+
+def enrich_bitbucket_publication_finding(
+    diff_map: DiffMap | None, finding: PublishedFinding
+) -> PublishedFinding:
+    """Choose exactly one Bitbucket inline side from the pinned DiffMap."""
+    if diff_map is None:
+        return replace(finding, bitbucket_anchor_valid=False)
+
+    def same_hunk(file: DiffFile, row: DiffRow, *, old_side: bool) -> bool:
+        if finding.start_line is None:
+            return True
+        return any(
+            row in hunk.rows
+            and any(
+                (start.old_line if old_side else start.new_line) == finding.start_line
+                for start in hunk.rows
+            )
+            for hunk in file.hunks
+        )
+
+    for file in diff_map.files:
+        if not file.anchorable:
+            continue
+        if file.new_path == finding.path:
+            row = _row_for_new_line(file, finding.line)
+            if (
+                row is not None
+                and row.kind is not RowKind.REMOVED
+                and same_hunk(file, row, old_side=False)
+            ):
+                return replace(finding, bitbucket_old_line=None)
+        if file.new_path is None and file.old_path == finding.path:
+            row = _row_for_old_line(file, finding.line)
+            if (
+                row is not None
+                and row.kind is RowKind.REMOVED
+                and same_hunk(file, row, old_side=True)
+            ):
+                return replace(finding, bitbucket_old_line=finding.line)
+    return replace(finding, bitbucket_anchor_valid=False)

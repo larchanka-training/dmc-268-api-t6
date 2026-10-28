@@ -73,6 +73,16 @@ infrastructure implementations
 | `<module>/infrastructure` | repositories и реализации внешних зависимостей конкретного модуля | application/domain модуля, внешние библиотеки; исключение — unit of work может построить на своей сессии адаптер `infrastructure` другого модуля (`installation_repository_unit_of_work.py` берёт `workspaces.infrastructure.github_installation_locks`, а `index_purger` обоих UoW модуля `repositories` — `SqlAlchemyCodeIndexPurger`, `index_enabler` UoW настроек — `SqlAlchemyCodeIndexEnabler`, #143) |
 | `entrypoints` | FastAPI routers, webhook endpoint, consumers, scheduler, dependency wiring | application-модули и bootstrap |
 
+Для статуса `.review/rules.md` есть узкое инфраструктурное исключение к строке выше:
+`repositories.infrastructure.rules_status` собирает read model из таблиц
+`integrations.bitbucket.infrastructure` и проверяет поколение credential/binding перед
+сохранением результата. `integrations.bitbucket.infrastructure.connection_store` вызывает
+`request_rules_refresh` модуля `repositories` в той же короткой транзакции подключения.
+Владение таблицами остаётся у соответствующих модулей; внешние HTTP-запросы выполняются
+между транзакциями claim и save. Application использует свои порты и публичные
+application-контракты других модулей (`BoundBitbucketTarget`, `BranchHead`, ошибки VCS),
+как описано в таблице слоёв.
+
 HTTP DTO и сообщения RabbitMQ — транспортные модели Pydantic. ORM-модели — детали
 persistence-слоя. Ни те, ни другие не пересекают границу application.
 
@@ -375,9 +385,9 @@ docker compose up -d worker        # сервис worker в docker-compose.yml
 | Задача | Что делает | Use case |
 |---|---|---|
 | consumer `review.run.fast` (prefetch 1) | RunGuard, claim по lease, попытка под watchdog, retry и DLQ | [HandleReviewRun](../app/modules/reviews/application/handle_review_run.py) |
-| consumer `review.publish` (prefetch 1) | T14–T16: `github.publish_review` или `gitlab.publish_review` (#97); check-run только для GitHub | [PublishRunReview](../app/modules/reviews/application/publish_run_review.py) |
-| consumer `index.repo` (prefetch 1, #142) | задание графа RAG: claim lease, HEAD default branch, архив, публикация; retry и DLQ по исходу (SD §7.4). Свой `SubprocessSourceParser` и HTTP-клиент GitHub; без GitHub App не запускается | [BuildRepositoryIndex](../app/modules/code_index/application/build_index.py) |
-| лидер-цикл (`pg_advisory_lock`, 30 с) | sweep «2 мин без CI» и повторная отправка outbox (`message_published_at IS NULL`, сигналы отмены T6); после них leader-задачи индекса графа (#143) — сходимость, рассылка пробуждений, сборка мусора, TTL-очистка и сверка с HEAD — с общим бюджетом около 10 с на тик; без GitHub App сверка и рассылка выключены, остальные работают | `SweepNoCi`, `TryEnqueueWebhookRun.replay_pending_publications`, [`CodeIndexLeaderTasks`](../app/modules/code_index/application/leader_tasks.py) |
+| consumer `review.publish` (prefetch 1) | T14–T16: `github.publish_review`, `gitlab.publish_review` или `bitbucket.publish_review` (#333); check-run только для GitHub, Bitbucket commit status обслуживается отдельно | [PublishRunReview](../app/modules/reviews/application/publish_run_review.py) |
+| consumer `index.repo` (prefetch 1, #142) | задание графа RAG: claim lease, HEAD default branch, архив, публикация; retry и DLQ по исходу (SD §7.4). Свой `SubprocessSourceParser` и HTTP-клиент; для GitHub нужен GitHub App, для Bitbucket Cloud — keyring и snapshot source. Consumer запускается, если настроен хотя бы один из этих провайдеров | [BuildRepositoryIndex](../app/modules/code_index/application/build_index.py) |
+| лидер-цикл (`pg_advisory_lock`, 30 с) | sweep «2 мин без CI» и повторная отправка outbox (`message_published_at IS NULL`, сигналы отмены T6); после них leader-задачи индекса графа (#143) — сходимость, рассылка пробуждений, сборка мусора, TTL-очистка и сверка с HEAD — с общим бюджетом около 10 с на тик; сверка и рассылка включены при наличии настроенного GitHub App или Bitbucket keyring и consumer, остальные задачи работают всегда | `SweepNoCi`, `TryEnqueueWebhookRun.replay_pending_publications`, [`CodeIndexLeaderTasks`](../app/modules/code_index/application/leader_tasks.py) |
 
 Consumer `review.run.deep` не запускается, очередь только объявляется. Реконсилер
 (T12, T13, T17, T18) работает лидер-циклом процесса API (`app/main.py`, раз в 5 минут,
@@ -404,6 +414,13 @@ autocommit-соединении, [webhook_work_listener.py](../app/bootstrap/web
 уведомление отправляют сохранение новой квитанции, повторная активация отложенных квитанций
 при OAuth и запрос статуса правил (#150), а обход раз в 30 с остаётся резервным
 ([WEBHOOK_WORKER.md](WEBHOOK_WORKER.md#how-the-worker-handles-deliveries)).
+Для статуса правил GitHub запрашивает чтение при подключении и `push` в default branch,
+Bitbucket — при создании или повторной активации binding. У обоих GET запрашивает чтение,
+если результата ещё нет, он старше 10 минут или пора повторить retryable-сбой. Bitbucket
+`repo:push` пока не запрашивает немедленное чтение правил. `webhook-worker` берёт только
+запросы провайдеров, для которых настроен reader, читает закреплённый SHA вне транзакции
+и сохраняет `present`, `missing`, `invalid` или `unavailable`; первый GET до сохранения
+показывает `pending`.
 Статусы из worker доходят до `/api/stream` через PostgreSQL: API слушает канал
 `run_updated` (`LISTEN` на отдельном autocommit-соединении,
 [run_update_listener.py](../app/bootstrap/run_update_listener.py)) и передаёт события в

@@ -56,15 +56,23 @@ class PullRequestLocator:
     provider: str = "github"
     origin_provider_installation_id: UUID | None = None
     repository_external_id: int | None = None
+    repository_uuid: UUID | None = None
 
     def __post_init__(self) -> None:
-        if self.provider not in {"github", "gitlab"}:
+        if self.provider not in {"github", "gitlab", "bitbucket"}:
             raise ValueError("unsupported VCS provider")
         if self.provider == "gitlab":
             if self.origin_provider_installation_id is None:
                 raise ValueError("GitLab routing requires an immutable origin")
             if self.repository_external_id is None or self.repository_external_id <= 0:
                 raise ValueError("GitLab routing requires a positive project ID")
+        if self.provider == "bitbucket":
+            if type(self.origin_provider_installation_id) is not UUID:
+                raise ValueError("Bitbucket routing requires an immutable installation origin")
+            if self.repository_external_id is None or self.repository_external_id <= 0:
+                raise ValueError("Bitbucket routing requires a positive repository ID")
+            if type(self.repository_uuid) is not UUID:
+                raise ValueError("Bitbucket routing requires an immutable repository UUID")
 
 
 @dataclass(frozen=True)
@@ -216,7 +224,10 @@ class FetchVcsReviewInput:
                     except (RunCancelled, RequiredSourceUnavailable):
                         raise
                     except Exception as exc:
-                        if isinstance(exc, RunFailure) and exc.error_code == "deadline_exceeded":
+                        if isinstance(exc, RunFailure) and exc.error_code in {
+                            "deadline_exceeded",
+                            "bitbucket_response_budget_exceeded",
+                        }:
                             raise
                         # Blob classification is best effort; retain this file as an omission.
                         _LOGGER.warning(

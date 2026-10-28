@@ -112,7 +112,7 @@ def test_sqlalchemy_run_repository_filters_and_orders_with_a_tied_timestamp_curs
     code_change = SimpleNamespace(
         external_number=5, title="Review me", web_url="https://example.test/pull/5"
     )
-    session = FakeSession([(run, code_change, "org/repo", "gpt-test", 3, True)])
+    session = FakeSession([(run, code_change, "org/repo", "gpt-test", 3, True, "github")])
     repository = SqlAlchemyRunRepository(
         cast(async_sessionmaker[AsyncSession], FakeSessionFactory(session)),
         allow_unscoped=True,
@@ -131,6 +131,7 @@ def test_sqlalchemy_run_repository_filters_and_orders_with_a_tied_timestamp_curs
     assert items[0].model == "gpt-test"
     assert items[0].action_count == 3
     assert items[0].summary_only is True
+    assert items[0].provider == "github"
     assert items[0].head_sha == "a" * 40
     assert session.statement is not None
     compiled = session.statement.compile()
@@ -166,7 +167,7 @@ def test_sqlalchemy_run_repository_gets_detail_with_one_summary_query() -> None:
     code_change = SimpleNamespace(
         external_number=5, title="Review me", web_url="https://example.test/pull/5"
     )
-    session = FakeSession([(run, code_change, "org/repo", None, 4)])
+    session = FakeSession([(run, code_change, "org/repo", None, 4, False, "github")])
     repository = SqlAlchemyRunRepository(
         cast(async_sessionmaker[AsyncSession], FakeSessionFactory(session)),
         allow_unscoped=True,
@@ -178,6 +179,7 @@ def test_sqlalchemy_run_repository_gets_detail_with_one_summary_query() -> None:
     assert item.model is None
     assert item.action_count == 4
     assert item.trigger == "rerun"
+    assert item.provider == "github"
     assert item.created_at == created_at
     assert session.statement is not None
     compiled = session.statement.compile()
@@ -445,6 +447,7 @@ def test_sqlalchemy_run_repository_reads_the_installation_scoped_vcs_locator() -
                 "github",
                 UUID(int=17),
                 101,
+                None,
             )
         ]
     )
