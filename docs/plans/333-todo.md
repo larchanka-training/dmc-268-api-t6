@@ -1,11 +1,11 @@
 # #333 Bitbucket Cloud task list
 
-> This is the original implementation checklist. Review round 1 repairs,
-> currently open external dependencies and fresh verification are tracked in
-> [333-review-round1-todo.md](333-review-round1-todo.md). Historical gate counts
-> below describe earlier heads and do not prove the current local diff.
+> This is the original implementation checklist. Current review repairs are
+> tracked in [333-live-acceptance.md](333-live-acceptance.md) and PR #340;
+> historical gate counts below describe earlier heads and do not prove the
+> final rebased diff.
 
-Status: T1 official-document research and private-repo read probe recorded;
+Status: T1 official-document research and public UUID-locator probe recorded;
 live PR publication checks and native-suggestion decision still open. T2 UUID
 schema and scoped lookup passed independent review (0 Standards / 0 Spec).
 T3/T4 and T5 passed independent review (0 Standards / 0 Spec). T6 PR/push
@@ -16,10 +16,12 @@ projection and immutable Run origin passed independent review (0 Standards /
 live PR capability proof remains pending. T10 status publication passed
 independent review (0 Standards / 0 Spec). T11 RAG indexing/retrieval and T12
 UI passed independent review (0 Standards / 0 Spec). T13 deployment and docs
-have focused tests and static gates green; independent review is pending. The full
-backend pytest gate remains due on the stable final diff. Backend
-base `88bbc073` (`origin/main`); UI base `a1f7513`
-(`origin/main`). Issue: https://github.com/larchanka-training/dmc-268-api-t6/issues/333.
+have focused tests and static gates green; round 5 integration and final
+independent review are in progress. The full backend pytest gate remains due
+on the stable final diff. Historical API base: `88bbc073`; round 5 candidate
+base: `10d2848a`; published UI #195 head and fixture pin:
+`46b2807492a52e100bcfb48052b1e640cbd50beb`. Recheck both PR heads before
+publication. Issue: https://github.com/larchanka-training/dmc-268-api-t6/issues/333.
 
 ## Task 1: Fix the provider contract before implementation
 
@@ -32,7 +34,7 @@ exact request/response examples and error mapping in the plan/OpenAPI draft.
 **Acceptance criteria:**
 
 - [x] Documented provider capabilities and minimum API-token scopes are sourced in `333-plan.md` (2026-10-26).
-- [x] Read-only probe: private repo `nvdovnar/test-ai-review` returned 200 and immutable UUID; open PR list returned 200 with zero PRs (sanitized details in `333-plan.md`).
+- [x] Read-only public-repository UUID-locator probe returned 200; no private-repository or scoped-token behavior was established (`333-plan.md`).
 - [ ] Disposable private-repo API probe confirms access, inline coordinates, status association and uncertain webhook retry behavior.
 - [ ] Native code suggestion syntax is demonstrated, or the documented plain inline patch-text fallback is explicitly accepted without claiming native support.
 - [x] Draft backend/UI endpoints, local access policy, secret lifecycle and UUID mapping are explicit in `333-plan.md`.
@@ -99,25 +101,24 @@ transport over application use cases; update canonical OpenAPI.
 
 **Acceptance criteria:**
 
-- [x] Authorized user connects an accessible private repo and sees it in the common repository list; the read-only live parser accepted the disposable private repo.
+- [x] ASGI/PostgreSQL tests show an authorized user can connect a provider fixture and see it in the common repository list; private-repository access remains a live gate.
 - [x] Unauthorized workspace access and disconnected/expired credentials fail closed, including after current membership is removed.
 - [x] With two repositories under one Bitbucket workspace installation, disconnecting one deactivates only that binding and revokes only its webhook secret; the other remains usable. The last disconnect revokes the installation credential.
 - [x] Connecting a second repository reuses the existing credential without silently replacing its token; token replacement is an explicit rotate operation.
 - [x] Disconnect cannot be undone by stale work: a per-repository binding generation fences only that repository while sibling in-flight targets remain valid; shared generation changes on token rotation or last revoke.
 - [x] Each repository receives a distinct one-time webhook setup secret and URL; rotating one secret leaves the sibling's secret intact.
-- [x] Token rotation resolves every repository by immutable UUID after a slug rename and refreshes saved names/URLs; a read-only live UUID-locator probe returned 200 for the private test repo.
+- [x] Token rotation resolves repository fixtures by immutable UUID after a slug rename and refreshes saved names/URLs; a public UUID-locator probe returned 200, while the private runtime locator still needs live proof.
 - [x] Token rotation compares each binding generation after network I/O; a concurrent disconnect+rebind of the same repository returns 409 instead of rotating against stale authority.
 - [x] Provider discovery bounds decoded JSON to 2 MiB, rejects oversized/arbitrary cursor queries, and forwards a bounded valid `Retry-After` on 429.
 
 **Verification:** ASGI, PostgreSQL and OpenAPI focused suite: 227 passed after
 the four independent-review fixes. RED/GREEN PostgreSQL and ASGI regressions
 pass for sibling in-flight targets, rename-safe rotation and provider
-response bounds/retry handling. A read-only live UUID-locator probe returned 200;
+response bounds/retry handling. A read-only public UUID-locator probe returned 200;
 an ASGI/PostgreSQL RED/GREEN race test covers disconnect+rebind during token
 rotation without changing the active repository ID set;
-provider parser also succeeded
-against private `nvdovnar/test-ai-review` (UUID
-`3791f4cc-f59a-4412-9a52-f34a7829ba1c`) without printing credentials.
+provider parser also passed fixture-based private-repository responses without
+printing credentials; no private provider request was made in this round.
 Ruff, format and mypy pass. Independent review 0 Standards / 0 Spec; final full pytest pending.
 **Dependencies:** T3. **Likely files:** `app/modules/integrations/bitbucket/api/connections.py`,
 `app/bootstrap/bitbucket.py`, `app/main.py`, `contracts/openapi.yaml`,
@@ -126,7 +127,8 @@ Ruff, format and mypy pass. Independent review 0 Standards / 0 Spec; final full 
 ### Checkpoint A (T1–T4)
 
 - [ ] Identity/permission/credential contract reviewed; all backend gates green.
-- [ ] Two-workspace PostgreSQL tests run rather than skipped.
+- [x] Two-workspace PostgreSQL tests ran rather than being skipped on the
+  round 5 candidate; repeat them after the final rebase.
 
 ## Task 5: Receive signed webhook receipts
 
@@ -180,8 +182,10 @@ replay/NOTIFY, and redelivery does not create a second run.
 
 ### Checkpoint B (T5–T6)
 
-- [ ] Signed webhook through durable queue reaches exactly one Bitbucket run.
-- [ ] Existing GitHub/GitLab webhook/queue regressions green.
+- [x] A signed webhook through the durable queue reaches exactly one Bitbucket
+  Run in local integration tests; live delivery remains Task 14.
+- [x] Existing GitHub/GitLab webhook/queue regressions passed in local focused
+  runs; rerun the full gate on the final head.
 
 ## Task 7: Read pinned Bitbucket PR metadata and diff
 
@@ -395,21 +399,23 @@ confirm no duplicates. Save sanitized evidence and URLs in #333/PR description.
 - [ ] GitHub/GitLab/backend/UI regressions and all required gates are green.
 - [x] Align the five UI #195 Zod mirror assertions and regenerate
   `tests/fixtures/ui_zod_contracts.json` from the current committed UI head
-  `c581bf660837c3a7d03101c3740f946282a752b1` (2026-10-28; not a
+  `46b2807492a52e100bcfb48052b1e640cbd50beb` (2026-10-28; not a
   merged UI SHA). No temporary provider overlay remains in
   `tests/test_ui_zod_contracts.py`. The fixture requires `provider` for
   repository, run session and PR projections and covers ten Bitbucket
-  connection DTOs. The historical `39ad6768` and `99077506` fixtures had five
-  Bitbucket mirror mismatches; all ten mirror cases and the 255-test contract
-  slice now pass. Recheck the UI head before publication and repin to the
+  connection DTOs, including 1–128 character response slugs. The historical
+  `39ad6768` and `99077506` fixtures had five Bitbucket mirror mismatches;
+  the round 5 contract slice passed 365 tests after integrating stacked API
+  #359. Recheck the UI head before publication and repin to the
   merged SHA after UI #195 is squash-merged.
 
 **Verification:** Live Bitbucket UI/API, PostgreSQL counts, backend and UI gates;
 independent Standards/Spec review. Exact sanitized procedure:
 [`333-live-acceptance.md`](333-live-acceptance.md). Current blockers:
-disposable repo PR and a protected write credential are still needed,
-and the `staging` Environment lacks the Bitbucket keyring secret and both
-variables (names only checked 2026-10-27). Earlier local gate evidence on API base
+disposable private repo PR and scoped credential are unavailable; only local
+checks are authorized. The `staging` Environment lacked the Bitbucket keyring
+secret and both variables when names were checked on 2026-10-27; recheck before
+deploy. Earlier local gate evidence on API base
 `f160ce4c` and UI commit `34f81ce9dc5631e7e2061aa9958ec7dac13c5dcb`:
 backend ruff check, ruff format check, mypy and diff check passed; focused
 rebased PG/API/deployment tests 596 passed; UI lint, typecheck, format,
@@ -437,9 +443,10 @@ live probe/accepted suggestion contract. **Likely files:**
 ## Review follow-ups outside PR #340
 
 The round-1 review of PR #340 marked the P3 items below for separate work.
-They are open technical debt, not completed acceptance criteria. No scoped
-GitHub issue or owner is assigned yet; do not cite this checklist as a merged
-fix. The partial schema correction for P3 3 remains in this PR.
+They are tracked in [follow-up issue #360](https://github.com/larchanka-training/dmc-268-api-t6/issues/360),
+assigned to `ndovnar`. They remain open technical debt, not completed
+acceptance criteria; do not cite this checklist as a merged fix. The partial
+schema correction for P3 3 remains in this PR.
 
 | P3 | Follow-up | Acceptance criterion |
 | --- | --- | --- |
@@ -453,12 +460,41 @@ fix. The partial schema correction for P3 3 remains in this PR.
 | 26 | Bound provider calls per inline finding. | Measured GET/POST and claim-refresh counts for N findings are bounded without weakening head or claim fences. |
 | 27 | Avoid Bitbucket status reads for other providers. | GitHub/GitLab Run transitions make zero Bitbucket status-source queries; Bitbucket transitions retain status intent. |
 
+Earlier P3 items retained in #340 have these round 5 gates: #5 has direct proxy
+mutation tests; #7 has migration/ORM CHECK-name tests; #9 remains a private
+percent-encoded UUID-locator live probe; #14 adds `updated_on` and
+`diagnostics:ping` acceptance cases; #21 requires the strict
+`vcs_provider_name` behavior in the PR body; #23 has heartbeat failure logging
+proof; #28 tests credential-generation recovery; #32 boots Bitbucket workers
+without fake GitHub credentials; #39 replaces stale links/checkpoints here;
+#44 pins the open UI #195 head now and tracks the merged-SHA repin in #360.
+None of these statements substitutes for a final published-head test run.
+
+### Round 4 P3 45–60 disposition (local candidate, not published proof)
+
+| P3 | Disposition | Remaining gate |
+| --- | --- | --- |
+| 45–46 | Planned in Task 15: remove the duplicate checkpoint and unreachable size branch. | Recheck the final diff and index tests. |
+| 47 | Symlink/non-UTF-8 skip and 429 tests are in the candidate; Task 11 adds unsafe diffstat full fallback and 5xx/subrepository proofs. | Task 11 independent review passed; final gates and published SHA remain. |
+| 48 | Planned in Task 15: avoid duplicate Bitbucket base/head RAG reads. | Request-count and PostgreSQL RAG proof. |
+| 49 | Fork projection, deleted-fork close/decline and prefix handling are in the candidate. | Task 19 mutation tests and private fork live probe. |
+| 50 | Queued re-entry and status backoff are fixed in the candidate. | Final PostgreSQL suite. |
+| 51 | Pipeline spec now distinguishes Bitbucket `STOPPED` from GitHub's absent check-run for `repo_disabled`. | Final docs review. |
+| 52 | Tech-lead decision: whether superseded old-head `INPROGRESS` needs remote `STOPPED`. | Record decision and private Bitbucket merge-check probe. |
+| 53–55 | OpenAPI/runtime response bounds, rules-status descriptions and Bitbucket-only redaction with standard GitHub/GitLab 422 are in the candidate. | Final contract tests and published SHA. |
+| 56 | Direct security/helper mutation tests are in the candidate. | Final gates. |
+| 57 | Planned in Task 15: decide and test RAG refresh when review is disabled. | Index/refresh proof and docs. |
+| 58 | Planned in Task 19: copied/draft/ORM and production composition proofs, plus replacement of brittle call-count assertions. | Independent review. |
+| 59 | SD publication sentence and PIPELINE_SPEC `context.manifest` punctuation corrected. | Final docs review. |
+| 60 | Rules-status provider defaults removed in the candidate. | Final contract tests. |
+
 Two release follow-ups remain explicit: after UI PR #195 is squash-merged,
-repin `UI_CONTRACT_COMMIT` and regenerate the API fixture from the merged SHA;
+repin `UI_CONTRACT_COMMIT` and regenerate the API fixture from the merged SHA
+([issue #360](https://github.com/larchanka-training/dmc-268-api-t6/issues/360));
 merge and deploy API PR #340 before UI PR #195. Full live acceptance still
-needs a disposable private Bitbucket PR and a write-capable token. The earlier
-read-only repository probe does not prove inline, suggestion, status or
-redelivery behavior.
+needs a disposable private Bitbucket PR and a scoped token. The earlier
+public read-only locator probe does not prove private access, inline,
+suggestion, status or redelivery behavior.
 
 ### Final checkpoint
 
