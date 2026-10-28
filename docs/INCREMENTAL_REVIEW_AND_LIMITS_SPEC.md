@@ -5,7 +5,7 @@
 | **Статус** | **Черновик Ч.1, PR #334** (Идентичность находок, подавление дубликатов и стратегия тредов) |
 | **Владелец** | Техлид (роль 1) |
 | **Область действия** | Идентичность замечания между прогонами (Finding Fingerprint), сопоставление со старыми коммитами, пересчет координат без привязки к абсолютным номерам строк (Line Offset Tracking), алгоритм межпрогонного подавления дубликатов в плане публикации (Cross-Run Dedup), стратегия классификации и разрешения устаревших/исправленных тредов на VCS (Outdated / Resolved Threads) через GraphQL `resolveReviewThread`, права GitHub App, исключение собственных событий бота по правилу Р-9, квотирование мутаций GitHub API. |
-| **Связанные документы** | [`SYSTEM_DESIGN.md`](SYSTEM_DESIGN.md) (Р-5, Р-9, §8, §13 «Риск схлопывания»), [`CONTEXT_AND_VERIFICATION_SPEC.md`](CONTEXT_AND_VERIFICATION_SPEC.md) (§6.2, §10 «Write-back: неизменяемая публикация»), [`PIPELINE_SPEC.md`](PIPELINE_SPEC.md) (§1, §6, §8). |
+| **Связанные документы** | [`SYSTEM_DESIGN.md`](SYSTEM_DESIGN.md) (Р-5, Р-9, §6.9, §8, §13 «Риск схлопывания»), [`CONTEXT_AND_VERIFICATION_SPEC.md`](CONTEXT_AND_VERIFICATION_SPEC.md) (§6.2, §10 «Write-back: неизменяемая публикация»), [`PIPELINE_SPEC.md`](PIPELINE_SPEC.md) (§1, §6, §8), `WEBHOOK_WORKER.md` (§6). |
 | **Definition of Done (DoD Ч.1)** | 1. Ключ идентичности находки между Run не зависит от абсолютных номеров строк; формализованы поля из модели `Finding`, нормализация с сохранением отступов, позиционное сопоставление вхождений и каноническая сериализация.<br/>2. Спроектирован алгоритм подавления дубликатов как фильтр плана публикации (Pass 6b) по квитанциям `comments`: подавленный повтор сохраняет `drop_reason IS NULL`, получает `publication_action = 'suppressed_duplicate'`, учитывается в severity counts, вердикте и Check Run, но исключается из массива `comments[]` со ссылкой на существующий комментарий (`linked_comment_id`).<br/>3. Задана стратегия классификации тредов (оставить, закрыть через GraphQL `resolveReviewThread`, строгий приоритет человека); определены порядок предикатов, проверка полноты покрытия перед закрытием и правила для всех состояний.<br/>4. Сняты противоречия с неизменяемой публикацией (CVS §10), одним review batch (Р-5) и запретом компенсирующего удаления (SD §13).<br/>5. Спроектированы изменения схемы БД (Alembic), модель жизненного цикла треда и интеграция этапа чистки как фазы внутри состояния `publishing` перед T14.<br/>6. Составлена расширенная таблица сквозных сценариев для регресса QA с корректными значениями Check Run. |
 
 ---
@@ -16,7 +16,7 @@
 
 - **Full PR Diff (`base_sha...head_sha`)**: Полный унифицированный дифф pull request относительно целевой базовой ветки. Все inline-комментарии в GitHub API адресуются исключительно по координатам полного диффа.
 - **Commit Delta / Incremental Diff**: Разница коммитов между ревизией исходной публикации замечания (`anchor_head_sha`) и новой головой PR (`current_head_sha`), получаемая через `VcsProvider.compare_commits`.
-- **Base Git Coordinate Translation (Смещение строк / Line Offset Tracking)**: Алгоритмический пересчет номеров строк открытых замечаний из координат исходной ревизии публикации в координаты новой ревизии с учетом смещений, вносимых добавленными и удаленными строками коммит-дельты. Исходные координаты в базе данных не перезаписываются (терминальные данные неизменяемы по SD §8.3); смещение рассчитывается динамически для каждого Run относительно `anchor_head_sha`.
+- **Base Git Coordinate Translation (Смещение строк / Line Offset Tracking)**: Алгоритмический пересчет номеров строк открытых замечаний из координат исходной ревизии публикации в координаты новой ревизии с учетом смещений, вносимых добавленными и удаленными строками коммит-дельты. Исходные координаты в базе данных не перезаписываются (терминальные данные неизменяемы по SD §6.9); смещение рассчитывается динамически для каждого Run относительно `anchor_head_sha`.
 - **Finding Fingerprint (Идентичность находки)**: Детерминированный хеш находки, не зависящий от абсолютного номера строки в файле и вычисляемый от канонического представления атрибутов проблемы и нормализованного кода под якорем.
 - **Anchor Code Hash (`anchor_code_hash`)**: Нормализованный криптографический хеш текста блока кода под якорем замечания, очищенный от крайних пробелов и нормализованный по переводам строк с сохранением значимых синтаксических отступов.
 - **Outdated Thread (Устаревший тред)**: Состояние треда на стороне VCS, когда строка или блок кода, к которому было привязано замечание, подверглись изменению в последующих коммитах. GitHub переводит тред в свернутое состояние `outdated` автоматически на уровне платформы; при этом тред остается открытым (`isResolved = false`) и требует явного закрытия при подтверждении исправления дефекта.
@@ -30,17 +30,20 @@
 2. **Опубликованное определяется строго по квитанциям (`comments`, remote IDs)**: Принадлежность замечания к опубликованным определяется наличием записи в таблице `comments` с `github_comment_id` для данного PR, а не статусом Run (`succeeded` / `cancelled`). Run, отмененный по T15 после выполнения POST-запроса, уже оставил комментарии на PR; они считаются опубликованными.
 3. **Сохранность счетчиков и вердикта при дедупликации**: Подавление повторных находок является фильтром плана публикации, а не причиной отсева (drop reason). Сохраняющаяся находка сохраняет `drop_reason IS NULL`, получает `publication_action = 'suppressed_duplicate'`, связывается с существующей записью комментария (`linked_comment_id`) и в полном объеме учитывается в severity counts, вердикте PR и статусе Check Run. Неисправленный критический дефект не превращает вердикт в `clean`.
 4. **Общие замечания (Body-only findings) и квитанции**:
-   - Находки без inline-координат (general-only) и находки сверх inline cap публикуются в теле ревью. Их дедупликация ведется по `FindingFingerprint` (вычисляемому по тем же правилам). Прежние body-only находки читаются из `findings` предыдущих Run данного PR со статусом `published = true` и `inline_comment = false`. Повторные general-находки опускаются при формировании итогового тела рецензии.
-   - Inline-находка без подтвержденной квитанции (`github_comment_id IS NULL`) не считается опубликованной. На `main` запись квитанций пакета inline-комментариев атомарна (`len(comment_ids) == len(inline)`); по этой причине подавленные дубли исключаются из массива `inline` до отправки, что гарантирует сохранение инварианта длин.
+   - Находки без inline-координат (general-only) и находки сверх inline cap (`Repository.max_comments`) публикуются в теле ревью.
+   - Для поиска ранее опубликованных замечаний в теле ревью предикат использует строго `f.publication_action = 'publish_body'` (а не `inline_comment = false`, чтобы не захватывать подавленные дубликаты).
+   - Подавление повторных general-замечаний действует в рамках предшествующего Run (или непрерывной цепочки Run): повторное general-замечание с тем же fingerprint получает `publication_action = 'suppressed_duplicate'`, `linked_comment_id = NULL` и опускается при формировании тела рецензии.
+   - Кандидат сверх cap `Repository.max_comments`, совпадающий с открытым inline-тредом в реестре, получает `publication_action = 'suppressed_duplicate'`, связывается с существующим тредом (`linked_comment_id = comment.id`) и не попадает в тело ревью.
+   - Ограничение #298 ч.1: пока задача #298 ч.1 не реализована, в ветке `moved_to_body_finding_ids` строки `Comment` не создаются; эти находки сохраняются с `publication_action = 'publish_body'`. На `main` запись квитанций пакета inline-комментариев атомарна (`len(comment_ids) == len(inline)`); подавленные дубли исключаются из массива `inline` до отправки.
 5. **Неизменяемость текста публикации (Immutable Payload)**: Закрытие треда на VCS через GraphQL `resolveReviewThread` меняет только состояние треда (`isResolved`), но не редактирует и не удаляет опубликованный текст комментария (`body`), сохраняя квитанции, аудит и payload digest по CVS §10.
 6. **Human-in-the-loop Priority (Приоритет человека)**:
    - Если в треде бота ответил человек, бот не закрывает тред автоматически, даже если считает дефект устраненным. Тред передается на разрешение человеку (`HUMAN_DISCUSSION`).
    - Если человек закрыл тред вручную (`RESOLVED_BY_USER`), бот считает его закрытым и не переоткрывает.
    - Если человек снял resolve с треда, ранее закрытого ботом (в БД `RESOLVED_BY_BOT`, а на GitHub `isResolved == false`), тред переходит в `HUMAN_DISCUSSION` под управление человека; бот повторно его не закрывает.
    - В любом из этих состояний повторная публикация замечания с тем же `FindingFingerprint` подавляется, пока тред существует на PR.
-7. **Игнорирование собственных событий (Правило Р-9)**: События `pull_request_review_thread.resolved` / `unresolved`, инициированные ботом, принимаются HTTP-маршрутом с кодом 202, сохраняются в квитанциях и отбрасываются в `webhook-worker` по правилу `sender.type == "Bot"` и совпадению `sender.login.casefold() == bot_login.casefold()` с присвоением статуса `ignored_irrelevant_event` (detail `action=<action> ignored_own_bot`). Полноценный разбор событий тредов подключается в задаче #321.
-8. **Квотирование мутаций GitHub API**: Вторичные лимиты GitHub ограничивают трафик до 1 мутации в секунду, не более 80 content-generating запросов в минуту и 500 в час на установку. На один Run устанавливается лимит не более 30 вызовов мутации `resolveReviewThread` с паузой не менее 1.2 секунды между запросами. Оставшиеся к закрытию треды обрабатываются в последующих прогонах.
-9. **Граница провайдеров VCS (GitLab)**: Прием вебхуков и запуск ревью для GitLab реализованы на `main` (#169), однако GitLab intake по умолчанию выключен. GitLab использует API discussions без квитанций `comments` с внешними thread ID. Для GitLab метод `get_review_threads` возвращает пустой список, `resolve_review_thread` возвращает `SUCCESS` (no-op), а реестр замечаний работает с пустым списком тредов. Повторы на GitLab на этапе MR update являются известным временным ограничением.
+7. **Игнорирование собственных событий (Правило Р-9)**: События `pull_request_review_thread.resolved` / `unresolved`, инициированные ботом, в MVP не обрабатываются, так как приложение на них не подписано. В рамках будущей задачи сбора обратной связи `FeedbackSignal` (после MVP) вебхук-воркер будет отбрасывать события собственных мутаций бота по правилу `sender.type == "Bot"` и `_normalize_login(sender.login) == bot_key` с присвоением статуса `ignored_irrelevant_event` (detail `action=<action> ignored_own_bot`), предотвращая ложные сигналы обратной связи.
+8. **Квотирование мутаций GitHub API**: Вторичные лимиты GitHub ограничивают трафик до 1 мутации в секунду, не более 80 content-generating запросов в минуту и 500 в час на установку. На один Run устанавливается квота не более 30 вызовов мутации `resolveReviewThread` с паузой не менее 1.2 секунды между запросами. Счетчик квоты ведется на уровне Run. Оставшиеся к закрытию треды обрабатываются в последующих прогонах.
+9. **Граница провайдеров VCS (GitLab)**: Прием вебхуков и запуск ревью для GitLab реализованы на `main` (#169), однако GitLab intake по умолчанию выключен. GitLab использует API discussions без квитанций `comments` с внешними thread ID. Для GitLab метод `get_review_threads` возвращает пустую страницу, `resolve_review_thread` возвращает `UNSUPPORTED`, а реестр замечаний работает с пустым списком тредов. Повторы на GitLab на этапе MR update являются известным временным ограничением.
 
 ---
 
@@ -65,7 +68,9 @@
 4. **`rule_name`**: Имя или источник правила (`Finding.rule_name`, nullable string, допустимые значения: `.review/rules.md`, `AGENTS.md`, `service-defaults:<ID>` или null). Если правило не задано (`null`), в структуру подставляется пустая строка `""`.
 5. **`anchor_code_hash`**: SHA-256 хеш нормализованного блока кода под якорем дефекта (см. §2.3).
 6. **`normalized_claim`**: Нормализованный заголовок утверждения дефекта (`Finding.title`). Для согласованности используется канонический алгоритм из `findings_post_processor.py:364-365`: приведение к нижнему регистру, замена последовательностей не-буквенно-цифровых символов `[^a-z0-9]+` на одиночный пробел и `strip()`.
-7. **`occurrence_index`**: Локальный индекс вхождения идентичного блока кода в файле. Для устранения сдвигов при вставке аналогичного блока выше по файлу индекс вхождения привязывается к ближайшему перенесенному диапазону координат (§2.4), а не к сырому порядковому номеру от начала файла.
+7. **`occurrence_index`**: Локальный индекс вхождения идентичного дефекта в файле. Индекс назначается детерминированным двухшаговым алгоритмом:
+   - Кандидаты текущего прогона и строки комментариев реестра группируются по базовому ключу без индекса: `(file_path, side, category, rule_name, normalized_claim, anchor_code_hash)`.
+   - Внутри каждой группы выполняется спаривание кандидатов со строками реестра один-к-одному с минимизацией абсолютного расстояния до перенесенного диапазона: `abs(candidate.line - transferred.new_start)`. Спаренному кандидату присваивается `occurrence_index` спаренной строки реестра; непарные кандидаты получают `max(occurrence_index in group) + 1` (начиная с 0). Это устраняет сдвиги и ложные совпадения при вставке аналогичного блока кода выше по файлу.
 
 **Каноническая сериализация и хеширование**:
 Компоненты ключа упаковываются в канонический JSON-объект с сортировкой ключей, разделителями `separators=(',', ':')` и `ensure_ascii=False`, аналогично построению payload digest в CVS §10.1:
@@ -89,14 +94,12 @@ FindingFingerprint = SHA-256(canonical_json_utf8_bytes)
 **Нестабильность формулировок модели (Graceful Matching)**:
 Если LLM при повторном анализе перефразировала заголовок или опустила необязательное имя правила, применяется двухступенчатое сопоставление:
 1. Точное совпадение по `FindingFingerprint`.
-2. Запасное сопоставление (Fallback Match): если точного совпадения нет, но на том же якоре `(file_path, anchor_code_hash)` в реестре найден ровно один открытый тред с совпадающей категорией, он признается тем же замечанием. Если кандидатов несколько, fallback не применяется во избежание неоднозначности.
+2. Запасное сопоставление (Fallback Match): применяется строго при взаимной однозначности: на перенесенном диапазоне `[new_start, new_end]` (§2.4) должен существовать **ровно один** кандидат текущего Run и **ровно один** открытый тред в реестре (`ACTIVE`, `PERSISTING`) с совпадающей категорией и файлом. Если кандидатов или открытых тредов на участке больше одного, fallback не применяется (требуется точный `FindingFingerprint`), что предотвращает риск схлопывания дефектов (SD §13).
 
 ### 2.3. Нормализация блока кода якоря (`anchor_code_hash`)
 
 Для корректной работы с языками с позиционным синтаксисом (Python, YAML) нормализация сохраняет отступы:
-1. Замена всех вариантов переводов строк на канонический LF (`
-` -> `
-`).
+1. Замена всех вариантов переводов строк на канонический LF (`\r\n -> \n`, `\r -> \n`).
 2. Удаление хвостовых пробелов и табуляций в конце каждой строки (`rstrip()`). Ведущие пробелы (отступы) сохраняются.
 3. Удаление пустых строк в начале и конце блока якоря `[line_start, line_end]`.
 4. Преобразование нормализованной строки в UTF-8 байты и вычисление SHA-256: `anchor_code_hash = SHA-256(normalized_code_bytes)`.
@@ -130,10 +133,16 @@ FindingFingerprint = SHA-256(canonical_json_utf8_bytes)
        -> Файл не изменялся между anchor_head_sha и current_head_sha.
        -> Исход: PERSISTING (код под якорем гарантированно не затронут).
        -> Завершить алгоритм.
-     Если файл присутствует в списке, но patch is None (бинарный файл или превышен лимит diff):
+     Если файл присутствует в списке сравнения, но patch in (None, "") ∧ changes == 0 (на main PatchState.METADATA_ONLY: чистое переименование или изменение прав mode):
+       -> Хунков нет, строки не смещались.
+       -> Исход: PERSISTING (по новому пути target_path). Завершить алгоритм.
+     Если файл присутствует в списке, но patch is None при changes > 0 (бинарный файл, усечение diff или превышение лимита):
        -> Исход: UNKNOWN (невозможно подтвердить сохранность/исправление кода).
        -> Безопасное умолчание: LEAVE_ACTIVE.
        -> Завершить алгоритм.
+     Если файл был изменен в PR, но затем возвращен коммитом к состоянию base_sha (отсутствует в полном diff PR base_sha...head_sha):
+       -> Код дефекта устранен возвратом к базовой ревизии.
+       -> Исход: RESOLVED_BY_FILE_DELETION (тред закрывается resolveReviewThread во избежание вечной блокировки мержа). Завершить алгоритм.
 
   4. Расчет смещения строк по hunks файла:
      delta_offset = 0
@@ -171,6 +180,11 @@ FindingFingerprint = SHA-256(canonical_json_utf8_bytes)
            delta_offset += (число '+' выше comment.line_start - число '-' выше comment.line_start)
 
   5. Валидация сохранности кода якоря:
+     Если comment.anchor_code_hash IS NULL (legacy-строка до миграции схемы):
+       -> Исход: UNKNOWN (невозможно подтвердить неизменность или модификацию кода).
+       -> Безопасное умолчание: LEAVE_ACTIVE. Никогда не классифицировать как ANCHOR_MODIFIED / RESOLVED_BY_FIX.
+       -> Завершить алгоритм.
+
      Если is_anchor_modified == false:
        new_start = comment.line_start + delta_offset
        new_end = end + delta_offset
@@ -184,7 +198,9 @@ FindingFingerprint = SHA-256(canonical_json_utf8_bytes)
 
   6. Обработка изменения кода якоря:
      Если is_anchor_modified == true:
-       -> Исход: ANCHOR_MODIFIED (требуется сопоставление с результатами ревью нового Run).
+       Вычислить перенесенный диапазон transferred_range = [comment.line_start + delta_offset, end + delta_offset],
+       расширенный диапазоном хунка [hunk.new_start, hunk.new_start + hunk.new_count - 1], изменившего якорь.
+       -> Исход: ANCHOR_MODIFIED с привязанным transferred_range (требуется сопоставление с кандидатами ревью нового Run).
 ```
 
 ### 2.5. Модель данных и миграции схемы БД
@@ -213,7 +229,7 @@ ALTER TABLE comments ADD COLUMN resolved_by_commit VARCHAR(64) NULL;
 ALTER TABLE comments ADD COLUMN resolved_by_actor VARCHAR(100) NULL;
 
 ALTER TABLE comments ADD CONSTRAINT ck_comments_thread_status
-    CHECK (thread_status IN ('ACTIVE', 'PERSISTING', 'HUMAN_DISCUSSION', 'RESOLVED_BY_USER', 'RESOLVED_BY_BOT', 'OUTDATED'));
+    CHECK (thread_status IN ('ACTIVE', 'PERSISTING', 'HUMAN_DISCUSSION', 'RESOLVED_BY_USER', 'RESOLVED_BY_BOT', 'OUTDATED', 'NOT_FOUND'));
 
 CREATE INDEX ix_comments_thread_status ON comments(thread_status);
 CREATE INDEX ix_comments_github_thread_id ON comments(github_thread_id);
@@ -224,25 +240,26 @@ CREATE INDEX ix_comments_github_thread_id ON comments(github_thread_id);
 - `PERSISTING`: Дефект подтвержден в последующих прогонах, код под якорем не менялся или сдвинулся по строкам, тред остается открытым на GitHub.
 - `RESOLVED_BY_BOT`: Дефект устранен автором коммита (при подтвержденном полном анализе участка) или файл удален; тред закрыт ботом через GraphQL `resolveReviewThread`.
 - `RESOLVED_BY_USER`: Тред был закрыт разработчиком вручную в интерфейсе GitHub.
-- `OUTDATED`: Код под якорем изменен автором, тред на GitHub перешел в статус outdated. Если дефект мутировал, старый тред закрывается при публикации нового дефекта.
+- `OUTDATED`: Код под якорем изменен автором, тред на GitHub перешел в статус outdated. Если дефект мутировал, старый тред закрывается ботом при публикации нового дефекта.
 - `HUMAN_DISCUSSION`: В треде ответил человек либо человек отменил resolve бота. Бот уступает приоритет человеку и никогда не закрывает такой тред автоматически.
+- `NOT_FOUND`: Тред отсутствует на GitHub (удален пользователем или удалена ветка), обнаружено после полного безошибочного чтения карты тредов; либо узел GraphQL не найден при попытке мутации.
 
 **Таблица соответствия: Исход §2.4 -> Действие §4.1 -> Статус БД**:
 
 | Исход смещения (§2.4) | Проверка покрытия нового Run | Исход классификации (§4.1) | Действие на GitHub VCS | Результирующий `thread_status` |
 |---|---|---|---|---|
-| `RESOLVED_BY_FILE_DELETION` | Не требуется (файл удален) | `RESOLVED_BY_DELETION` | Закрыть тред (`resolveReviewThread`) | `RESOLVED_BY_BOT` |
-| `ANCHOR_MODIFIED` | `coverage_complete == True`, дефектов нет | `RESOLVED_BY_FIX` | Закрыть тред (`resolveReviewThread`) | `RESOLVED_BY_BOT` |
-| `ANCHOR_MODIFIED` | Покрытие неполное (skipped / truncated) | `LEAVE_ACTIVE` | NOOP (нельзя подтвердить фикс) | Сохраняет прежний статус |
-| `ANCHOR_MODIFIED` | Дефект обнаружен на измененном коде | `OUTDATED_MUTATED` | Закрыть старый тред + опубликовать новый | Старый: `OUTDATED`, Новый: `ACTIVE` |
+| `RESOLVED_BY_FILE_DELETION` | Не требуется (файл удален или возвращен к base) | `RESOLVED_BY_DELETION` | Закрыть тред (`resolveReviewThread`) | `RESOLVED_BY_BOT` |
+| `ANCHOR_MODIFIED` | `coverage.status == 'complete' ∧ not summary_only`, дефектов и отсеянных кандидатов нет | `RESOLVED_BY_FIX` | Закрыть тред (`resolveReviewThread`) | `RESOLVED_BY_BOT` |
+| `ANCHOR_MODIFIED` | Покрытие неполное (`partial`/`none`/`summary_only`) или был кандидат, отсеянный фильтрами | `LEAVE_ACTIVE` | NOOP (нельзя подтвердить фикс) | Сохраняет прежний статус (`ACTIVE`/`PERSISTING`) |
+| `ANCHOR_MODIFIED` | Дефект обнаружен на измененном коде | `OUTDATED_MUTATED` | Закрыть старый тред + опубликовать новый | Старый: `RESOLVED_BY_BOT` (reason: outdated), Новый: `ACTIVE` |
 | `PERSISTING` | Любая | `LEAVE_ACTIVE` | NOOP (тред остается открытым) | `PERSISTING` (или `HUMAN_*` без понижения) |
-| `UNKNOWN` | Любая | `LEAVE_ACTIVE` | NOOP (безопасное умолчание) | Сохраняет прежний статус |
+| `UNKNOWN` (вкл. legacy NULL hash) | Любая | `LEAVE_ACTIVE` | NOOP (безопасное умолчание) | Сохраняет прежний статус (`ACTIVE`/`PERSISTING`) |
 
 **Разграничение ключей и целостность связей**:
-1. Колонка `comments.findings_hash` хранит хеш всего набора находок прогона для верификации неизменяемости публикации (CVS §10), и **не является** ключом отдельной находки.
+1. Колонка `comments.findings_hash` хранит хеш всего набора находок прогона как диагностическое поле (CVS §10.1, SD §6.9), и **не является** ключом отдельной находки.
 2. Ограничение `UNIQUE(finding_id)` в таблице `comments` связывает строку комментария с породившей ее находкой первоначального Run.
 3. При сохранении дефекта в последующих Run повторная строка в `comments` не создается. Новая находка сохраняет `drop_reason IS NULL`, получает `publication_action = 'suppressed_duplicate'`, `inline_comment = false`, а ссылка на исходный комментарий фиксируется в колонке `findings.linked_comment_id = comments.id`.
-4. **Обработка исторических строк (Legacy Rows)**: Для строк `comments`, созданных до миграции, колонка `finding_fingerprint` в исходной находке заполняется бэкфиллом. Если блоб отсутствует в кэше, используется сопоставление по `(file_path, category, normalized_claim)`. До завершения бэкфилла такие строки признаются активными legacy-комментариями и участвуют в дедупликации через fallback.
+4. **Обработка исторических строк (Legacy Rows)**: Для строк `comments`, созданных до миграции, колонка `finding_fingerprint` заполняется бэкфиллом. У строк до миграции `anchor_code_hash` равен NULL: классификатор смещения возвращает для них `UNKNOWN`, поэтому они всегда остаются `LEAVE_ACTIVE` и защищены от ложной чистки (никогда не закрываются автоматически по `RESOLVED_BY_FIX`). При дедупликации они участвуют по 1-to-1 fallback (§2.2).
 
 ---
 
@@ -257,12 +274,16 @@ SELECT c.id AS comment_id,
        c.github_comment_id,
        c.github_thread_id,
        c.thread_status,
+       c.created_at,
        r.head_sha AS anchor_head_sha,
        f.id AS original_finding_id,
        f.finding_fingerprint,
        f.file_path,
+       f.side,
+       f.rule_name,
        f.line_start,
        f.line_end,
+       f.occurrence_index,
        f.anchor_code_hash,
        f.title,
        f.category,
@@ -271,14 +292,14 @@ FROM comments c
 JOIN findings f ON c.finding_id = f.id
 JOIN runs r ON f.run_id = r.id
 WHERE r.code_change_id = :current_code_change_id
-  AND c.github_comment_id IS NOT NULL;
+ORDER BY c.created_at DESC;
 ```
 
 В дедупликации участвуют **все** опубликованные комментарии PR, включая треды в состояниях `HUMAN_DISCUSSION`, `RESOLVED_BY_USER` и `RESOLVED_BY_BOT`.
 
 ### 3.2. Место дедупликации в конвейере фильтрации (Pass 6b)
 
-Межпрогонная дедупликация встраивается в конвейер фильтрации (`docs/CONTEXT_AND_VERIFICATION_SPEC.md` §6.2) как **Pass 6b (Cross-Run Dedup)** строго **до** заморозки плана публикации (`freeze_publication_plan`) и вычисления `findings_hash`:
+Межпрогонная дедупликация встраивается в `findings_post_processor.py:process()` как **Pass 6b (Cross-Run Dedup)** на реальном шве между подготовкой кандидатов (`prepared.append(...)`) и срезом cap (`inline = inline_candidates[:cap]`):
 
 ```mermaid
 flowchart TD
@@ -286,37 +307,48 @@ flowchart TD
     Pass2 --> Pass3["Pass 3: Evidence & Provenance"]
     Pass3 --> Pass4["Pass 4: Политика и Lint-фильтр"]
     Pass4 --> Pass5["Pass 5: Обязательный LLM Verifier (supported)"]
-    Pass5 --> Pass6["Pass 6: Severity Threshold & Placement"]
-    Pass6 --> Pass6b["Pass 6b: Cross-Run Dedup (Фильтр плана публикации)"]
-    Pass6b --> FinalVerdict["Counts, Findings Hash, PR Verdict & Check Run"]
-    Pass6b --> PubPlan["План публикации Review Batch"]
-    PubPlan --> PostReviews["POST /pulls/{n}/reviews (только новые inline-комментарии)"]
+    Pass5 --> PrepCandidates["Подготовка: Anchor classification & Confidence"]
+    PrepCandidates --> Pass6b["Pass 6b: Cross-Run Dedup (Сверка всех кандидатов с реестром)"]
+    Pass6b --> CapSlice["Срез cap: Repository.max_comments (дубли не сжигают слоты)"]
+    CapSlice --> BodyPack["Форматирование тела ревью и упаковка"]
+    BodyPack --> StoreOutput["store_review_output.py: HashedFindings, Verdict & Check Run"]
+    StoreOutput --> PubRun["publish_run_review.py: POST reviews -> T14 succeeded -> cleanup"]
 ```
+
+**Таблица соответствия: Бакет находок -> Поля модели и публикация**:
+
+| Бакет кандидата | `publication_action` | `inline_comment` | `linked_comment_id` | `published` (до T14 / после T14) | Входит в `hashed_findings` | Входит в тело ревью | Учет в Check Run |
+|---|---|---|---|---|---|---|---|
+| **`inline`** (новое замечание в пределах cap) | `'publish_inline'` | `true` | `NULL` | `false` / `true` | Да | Нет (inline) | `severity_counts`, `inline_count` |
+| **`body_only`** (сверх cap, general, low confidence) | `'publish_body'` | `false` | `NULL` | `false` / `true` | Да | Да (строки списка) | `severity_counts`, `body_count` |
+| **`suppressed`** (дубликат активного/закрытого треда) | `'suppressed_duplicate'` | `false` | `UUID` комментария реестра | `false` / `true` | Да | Нет (не спамит в сводку) | `severity_counts` (в общем числе дефектов) |
+| **`dropped`** (отсеян фильтрами 2–6) | `NULL` | `false` | `NULL` | `false` / `false` | Нет | Нет | `below_threshold_count` (если severity) |
 
 **Правила обработки находок в плане публикации**:
 1. Все подтвержденные верификатором кандидаты признаются итоговыми находками прогона (`drop_reason IS NULL`).
-2. Для каждого кандидата с назначением `disposition = inline` выполняется поиск соответствия в реестре опубликованных замечаний PR по `FindingFingerprint` (или fallback-правилу §2.2).
-3. **Подавленные дубли не сжигают inline cap**: Находки, признанные дубликатами, исключаются из подсчета лимита `inline_cap = 25`, освобождая слоты для новых уникальных находок.
+2. Для **всех** кандидатов (как потенциальных inline, так и body_only) выполняется поиск соответствия в реестре опубликованных замечаний PR по `FindingFingerprint` (или 1-to-1 fallback §2.2).
+3. **Подавленные дубли не сжигают inline cap**: Находки, признанные `suppressed_duplicate`, исключаются из массива `inline_candidates` до среза cap, поэтому они не расходуют слоты настройки репозитория `Repository.max_comments` (по умолчанию 10, максимум 10), освобождая слоты для новых уникальных находок.
 4. **При совпадении с активным или обсуждаемым тредом (`ACTIVE`, `PERSISTING`, `HUMAN_DISCUSSION`)**:
    - Находка исключается из массива `comments[]` отправляемого review batch.
-   - Находке присваивается `publication_action = 'suppressed_duplicate'`.
-   - В модели данных выставляется `inline_comment = false` (чтобы `len(comment_ids) == len(inline)` сошлось при записи квитанций) и `published = true`.
+   - Находке присваивается `publication_action = 'suppressed_duplicate'`, `inline_comment = false` (благодаря чему равенство `len(comment_ids) == len(inline)` строго соблюдается при записи квитанций).
+   - Поле `published` остается `false` на этапе плана и выставляется в `true` атомарно в транзакции T14 `complete_publication`.
    - Проставляется ссылка на существующий комментарий: `findings.linked_comment_id = registry.comment_id`.
    - Если статус в реестре был `ACTIVE`, он обновляется на `thread_status = 'PERSISTING'`. Если статус был `HUMAN_DISCUSSION` или `RESOLVED_BY_USER`, он сохраняется без понижения.
-   - Находка в полном объеме участвует в расчете счетчиков серьезности, формировании вердикта PR (`critical` или `high` дают `blocking`, `medium` или `low` дают `attention`) и статуса Check Run.
+   - Находка в полном объеме входит в `hashed_findings`, участвует в расчете счетчиков серьезности и формировании вердикта PR (`critical` или `high` дают `blocking`, `medium` или `low` дают `attention`, а в Check Run выставляется `completed / neutral`).
 5. **При совпадении с тредом, закрытым человеком (`RESOLVED_BY_USER`)**:
-   - Находка исключается из отправляемого review batch (`publication_action = 'suppressed_duplicate'`).
+   - Находка исключается из review batch (`publication_action = 'suppressed_duplicate'`).
    - Бот уважает решение пользователя и не открывает тред повторно.
 6. **При совпадении с тредом, ранее закрытым ботом (`RESOLVED_BY_BOT`)**:
-   - Если код под якорем не изменялся: тред остается закрытым, повторная публикация подавляется.
-   - Если автор внес изменения, вернувшие дефект (регресс): старый тред считается архивным, находка включается в review batch как новое замечание (`publication_action = 'publish_inline'`, `inline_comment = true`). Если в реестре несколько записей с одинаковым fingerprint, побеждает самая свежая запись.
-7. **При совпадении с тредом `OUTDATED`**:
-   - Если код вернули к дефектному состоянию, создается новое замечание (`ACTIVE`).
-8. **Удаленный комментарий на GitHub**:
-   - Если тред отсутствует в карте GraphQL тредов GitHub, запись в БД помечается `NOT_FOUND`, подавление снимается, и замечание публикуется заново.
+   - Если в реестре несколько записей с одинаковым fingerprint, сопоставление выполняется с самой свежей записью (`ORDER BY comments.created_at DESC`).
+   - Если автор внес изменения, вернувшие дефект (регресс на измененном коде): старый тред считается архивным, находка включается в review batch как новое замечание (`publication_action = 'publish_inline'`, `inline_comment = true`).
+7. **При совпадении с тредом в статусе `OUTDATED`**:
+   - Если дефект сохранился или видоизменился на измененном коде: старый тред закрывается ботом мутацией `resolveReviewThread` (исход `OUTDATED_MUTATED`), а новое замечание публикуется как отдельный тред (`ACTIVE`).
+8. **Поведение при отсутствии треда на GitHub (`NOT_FOUND`)**:
+   - Повторная публикация замечания при отсутствии треда на GitHub разрешена **исключительно** в том случае, если чтение карты тредов PR было **полным и безошибочным** (`thread_map.is_complete == True`, 0 ошибок пагинации, 0 сетевых таймаутов/403/429, отсутствие узлов с пустыми ID). Только при этом условии тред в реестре помечается `thread_status = 'NOT_FOUND'`, подавление снимается, и замечание публикуется заново (`publication_action = 'publish_inline'`).
+   - **Защита от массового спама при неполной карте**: Если чтение карты тредов завершилось ошибкой, таймаутом, усечением или вторичным лимитом rate limit (`thread_map.is_complete == False`), карта признается неполной. В этом случае статус `NOT_FOUND` не выставляется, правило 8 блокируется, и замечания продолжают подавляться по fingerprint из БД во избежание нарушения инварианта 1 (защита от повторной публикации уже откомментированных участков).
 9. **При отсутствии совпадений в реестре**:
-   - Находка признается новой, получает `publication_action = 'publish_inline'`, `inline_comment = true` и включается в массив `comments[]` для отправки в `POST /pulls/{n}/reviews`.
-   - После успешного ответа GitHub создается запись в таблице `comments` со статусом `ACTIVE`.
+   - Находка признается новой, получает `publication_action = 'publish_inline'` (для inline) или `publication_action = 'publish_body'` (для body_only).
+   - В пределах cap `inline`-находка получает `inline_comment = true` и включается в массив `comments[]` для отправки в review batch.
 
 ---
 
@@ -328,15 +360,17 @@ flowchart TD
 
 | Порядок | Исход | Предикат условия | Действие в БД | Действие на GitHub VCS |
 |---|---|---|---|---|
-| 1 | **`HUMAN_TOUCHED`** | В треде есть ответ человека (`__typename != "Bot"` и логин не равен боту), либо тред закрыт/открыт человеком (`resolvedBy` не бот, либо снят resolve: в БД `RESOLVED_BY_BOT`, а на GitHub `isResolved == false`). | `thread_status = HUMAN_DISCUSSION` (или `RESOLVED_BY_USER`). | **NOOP**. Бот полностью уступает управление человеку. Мутации не вызываются. |
-| 2 | **`RESOLVED_BY_DELETION`** | Файл, содержавший дефект, полностью удален в диффе дельты коммитов (`status == 'removed'`). | `thread_status = RESOLVED_BY_BOT`, `resolved_at = NOW()`, `resolved_by_commit = head_sha`, `resolved_by_actor = 'bot'`. | **Закрыть тред**: вызов GraphQL-мутации `resolveReviewThread`. |
-| 3 | **`RESOLVED_BY_FIX`** | Код под якорем изменен автором (`is_anchor_modified == true`), **И** текущий Run выполнил полный анализ файла (`coverage_complete == True`, диапазон якоря входит в разобранный diff), и дефект на участке не обнаружен. | `thread_status = RESOLVED_BY_BOT`, `resolved_at = NOW()`, `resolved_by_commit = head_sha`, `resolved_by_actor = 'bot'`. | **Закрыть тред**: вызов GraphQL-мутации `resolveReviewThread`. |
-| 4 | **`OUTDATED_MUTATED`** | Код под якорем изменен автором коммита, и новый прогон выявил на нем сохранившийся или видоизмененный дефект (диапазон новой находки пересекается с перенесенным диапазоном старой, файл и категория совпадают). | Прежний комментарий переводится в `thread_status = OUTDATED`. Новый дефект публикуется как `ACTIVE`. | **Закрыть старый тред** мутацией `resolveReviewThread` во избежание блокировки мержа под ruleset `required_review_thread_resolution`. Новый дефект публикуется новым тредом. Метод `minimizeComment` не применяется. |
-| 5 | **`LEAVE_ACTIVE`** | Код под якорем не изменялся (или сместился по строкам без правки текста дефекта), либо анализ файла был неполным (`coverage_complete == False`, файл `too_large`, сгенерированный или исключенный). | `thread_status = PERSISTING`. Исходные координаты в БД неизменны. | **NOOP**. Тред остается открытым на GitHub. |
-| 6 | **`REVIEWER_OMISSION`** | Код под якорем не изменялся в дельте коммитов, однако модель в новом Run не выдала замечание на этот участок. | `thread_status = PERSISTING`. | **NOOP**. Из-за стохастичности LLM замечание не считается устраненным без правок кода автора. Тред остается открытым. |
+| 1 | **`HUMAN_TOUCHED`** | В треде есть ответ человека (`__typename != "Bot"` и логин не равен боту), либо тред закрыт человеком (`isResolved ∧ resolvedBy != null ∧ _normalize_login(resolvedBy.login) != bot_login`), либо человек снял resolve (в БД `RESOLVED_BY_BOT`, а на GitHub `isResolved == false`). | `thread_status = HUMAN_DISCUSSION` (или `RESOLVED_BY_USER`). | **NOOP**. Бот полностью уступает управление человеку. Мутации не вызываются. |
+| 2 | **`RESOLVED_BY_DELETION`** | Файл, содержавший дефект, полностью удален в дельте коммитов (`status == 'removed'`) либо возвращен коммитом к состоянию `base_sha` (отсутствует в полном diff PR). | `thread_status = RESOLVED_BY_BOT`, `resolved_at = NOW(), resolved_by_commit = head_sha, resolved_by_actor = 'bot'`. | **Закрыть тред**: вызов GraphQL-мутации `resolveReviewThread`. |
+| 3 | **`RESOLVED_BY_FIX`** | `comment.anchor_code_hash IS NOT NULL` **И** `is_anchor_modified == true` (код изменен автором) **И** полный анализ файла (`coverage.status == 'complete' ∧ not coverage.summary_only`, диапазон якоря входит в разобранный diff) **И** на перенесенном участке не возникло ни одного кандидата (ни принятого, ни отсеянного проходами 4–6 по `severity_threshold`, `lint_pattern`, `duplicate` или `insufficient_context`), кроме явно отвергнутых верификатором как `contradicted`. | `thread_status = RESOLVED_BY_BOT`, `resolved_at = NOW(), resolved_by_commit = head_sha, resolved_by_actor = 'bot'`. | **Закрыть тред**: вызов GraphQL-мутации `resolveReviewThread`. |
+| 4 | **`OUTDATED_MUTATED`** | Код под якорем изменен автором коммита, и новый прогон выявил на нем дефект (диапазон новой находки пересекается с перенесенным диапазоном `transferred_range`, файл и категория совпадают). | Прежний комментарий переводится в `thread_status = RESOLVED_BY_BOT` (с признаком outdated). Новый дефект публикуется как `ACTIVE`. | **Закрыть старый тред** мутацией `resolveReviewThread` во избежание блокировки мержа под ruleset `required_review_thread_resolution`. Новый дефект публикуется новым inline-тредом. |
+| 5 | **`LEAVE_ACTIVE`** | Код под якорем не изменялся (включая стохастический пропуск модели при неизменном коде), либо `anchor_code_hash IS NULL` (legacy), либо анализ файла был неполным (`coverage.status != 'complete'` или `summary_only`), либо кандидат был отсеян фильтрами 4–6. | Сохраняет прежний статус (`ACTIVE`, `PERSISTING` или `HUMAN_*`). Исходные координаты в БД неизменны. | **NOOP**. Тред остается открытым на GitHub. |
 
 > [!WARNING]
-> **Защита от ложной чистки (False Cleanup Prevention)**: Если файл или участок кода не был проанализирован моделью в текущем Run (summary-only прогон, частичный дифф, пропуск из-за prompt budget или verifier fallback), исход `RESOLVED_BY_FIX` категорически запрещен: тред переводится в `LEAVE_ACTIVE`. Ложное закрытие треда нарушает правила качества и снимает блокировку мержа.
+> **Защита от ложной чистки (False Cleanup Prevention)**:
+> 1. Если `anchor_code_hash IS NULL` (строки до миграции схемы), исход `RESOLVED_BY_FIX` категорически запрещен: запись сохраняет статус `LEAVE_ACTIVE`.
+> 2. Если файл или участок кода не был проанализирован моделью в текущем Run (`coverage.status != 'complete'`, summary-only прогон, частичный дифф, пропуск из-за prompt budget или verifier fallback), исход `RESOLVED_BY_FIX` запрещен.
+> 3. Если кандидат на перенесенном участке был отсеян фильтрами (`severity_threshold`, `lint_pattern`, `duplicate`, verifier `insufficient_context`), дефект не считается устраненным: тред переводится в `LEAVE_ACTIVE`.
 
 ### 4.2. Механизм разрешения тредов на GitHub: GraphQL `resolveReviewThread`
 
@@ -402,52 +436,69 @@ query GetPullRequestReviewThreads($owner: String!, $repo: String!, $pr: Int!, $c
 }
 ```
 
-**Правила сопоставления**:
-1. Обход страниц выполняется в цикле, пока `pageInfo.hasNextPage` истинно.
-2. Поле `fullDatabaseId` (строка BigInt) корневого комментария сравнивается со значением `comments.github_comment_id`. Если `fullDatabaseId` равно null, узел пропускается.
-3. Проверка участия человека:
-   - Если среди `lastComments` есть автор с `__typename != "Bot"` и нормализованный логин не равен логину бота (`login.casefold() != bot_slug.casefold()`), тред признается `HUMAN_DISCUSSION`.
-   - Если `totalCommentsCount.totalCount > 6`, тред признается `HUMAN_DISCUSSION` без необходимости дочитывания промежуточных страниц.
-   - Автор со значением `null` (удаленный аккаунт) признается человеком.
-4. Определение собственного resolve бота: GraphQL возвращает логин без суффикса `[bot]` (например, `dmc268-t6-reviewer`), в то время как REST и slug содержат `[bot]`. При проверке суффикс `[bot]` отсекается, и сравнение проводится в нижнем регистре: `resolvedBy.login.casefold() == bot_slug.casefold()`.
+**Правила сопоставления и нормализации**:
+1. **Точка вызова**: Пакетное чтение карты тредов выполняется вне транзакций БД на этапе `running` **до** выполнения Pass 6b. Признак завершенности чтения `thread_map.is_complete` устанавливается в `True` только при обходе всех страниц (`hasNextPage == False`), отсутствии HTTP-ошибок (403/429/5xx), таймаутов и отсутствии `errors[]` в ответе GraphQL.
+2. **Единая нормализация логина бота (`[bot]`)**:
+   В GraphQL автор комментария имеет тип `Bot` и логин без суффикса, а объект `resolvedBy` имеет тип `User` и возвращает логин **с суффиксом `[bot]`**. Для устранения расхождений применяется единое правило нормализации для обеих сторон:
+   ```python
+   def _normalize_login(login: str | None) -> str:
+       return "" if not login else login.removesuffix("[bot]").casefold()
+   ```
+   Сравнение логинов выполняется как `_normalize_login(login) == bot_key`, где `bot_key = _normalize_login(settings.GITHUB_APP_BOT_LOGIN)`. Переменная `GITHUB_APP_BOT_LOGIN` передается в окружение review worker / publisher (с fallback-получением логина через `GET /app` с JWT App при инициализации).
+3. **Участие человека**:
+   - Тред признается `HUMAN_DISCUSSION`, если среди комментариев есть автор с `__typename != "Bot"` и `_normalize_login(author.login) != bot_key`, либо `totalCommentsCount.totalCount > 6`, либо автор комментария равен `null` (удаленный аккаунт).
+   - Тред признается `RESOLVED_BY_USER`, если `isResolved == true`, `resolvedBy != null` и `_normalize_login(resolvedBy.login) != bot_key`.
+4. **Сверка состояния GitHub и БД («GitHub побеждает, БД — кэш»)**:
+   В короткой транзакции до Pass 6b обновляются статусы тредов в БД:
+   - На GitHub тред закрыт ботом (`isResolved == true ∧ _normalize_login(resolvedBy.login) == bot_key`), а в БД не закрыт -> `thread_status = 'RESOLVED_BY_BOT'`.
+   - На GitHub тред закрыт человеком -> `thread_status = 'RESOLVED_BY_USER'`.
+   - На GitHub тред открыт (`isResolved == false`), а в БД числился `RESOLVED_BY_BOT` -> `thread_status = 'HUMAN_DISCUSSION'` (человек отменил resolve бота).
+   - Тред отсутствует в карте при `thread_map.is_complete == True` -> `thread_status = 'NOT_FOUND'`.
+   - При `thread_map.is_complete == False` статусы в БД не меняются (сохраняются прежние значения).
 5. Идентификатор `thread.id` сохраняется в колонке `comments.github_thread_id`.
 
 ### 4.4. Достаточность прав GitHub App и обработка отказов
 
-Мутация `resolveReviewThread` требует права доступа `pull_requests: write`.
-В `SYSTEM_DESIGN.md` §8.2 права зафиксированы: `pull_requests: write`, `checks: write`, `contents: read`.
-
-**Обработка отказа по правам доступа (FORBIDDEN)**:
-Если GitHub возвращает ошибку `FORBIDDEN` или `Resource not accessible by integration`:
-- Фаза чистки немедленно прерывается для текущего Run, чтобы не расходовать время на заведомо неуспешные вызовы.
-- В лог пишется предупреждение: `Rules thread resolution disabled: missing pull_requests:write permission`.
-- Прогон Run **не завершается ошибкой** и сохраняет статус `succeeded`.
+По официальной документации GitHub GraphQL API мутация `resolveReviewThread` требует прав `pull_requests: write`. В сообществе (GitHub Community Discussion #44650) отмечались прецеденты, когда для отдельных действий с тредами требовались права `contents: write`.
+- Достаточность прав `pull_requests: write` подтверждается предварительной живой пробой в staging-песочнице перед включением мутаций в продакшене.
+- **Обработка отказа по правам доступа (FORBIDDEN)**:
+  Если GitHub возвращает ошибку `FORBIDDEN` или `Resource not accessible by integration`:
+  - Фаза чистки немедленно прерывается для текущего Run без падения прогона.
+  - В лог пишется предупреждение с текстом ошибки от GitHub: `_LOGGER.warning("Review thread resolution disabled: %s (code %s)", error_message, error_code)`.
+  - Прогон Run сохраняет штатный статус `succeeded`.
 
 ### 4.5. Интеграция этапа чистки в жизненный цикл Run
 
-В соответствии с инвариантом D5 / Р-14, **набор состояний Run не изменяется** (`queued`, `running`, `publishing`, `succeeded`, `failed`, `cancelled`).
-Чистка тредов является **внутренней фазой состояния `publishing`** и выполняется после успешной отправки review batch, но до финального перехода T14 в `succeeded`:
+В соответствии с инвариантом D5 / Р-14, **набор состояний Run не изменяется** (`queued`, `running`, `publishing`, `succeeded`, `failed`, `cancelled`, `skipped`).
+На `main` запись квитанций комментариев, простановка `published = true` и переход T14 в `succeeded` выполняются в единой атомарной транзакции `complete_publication` (`run_lifecycle_store.py:550-630`).
+Чистка тредов выполняется компонентом `publish_run_review.py` как **best-effort шаг publisher сразу после перехода T14**, аналогично вызову `update_check_run`:
 
 ```text
-ЖИЗНЕННЫЙ ЦИКЛ PUBLISHING:
+ЖИЗНЕННЫЙ ЦИКЛ PUBLISHER:
   1. POST /pulls/{n}/reviews — отправка review batch с новыми inline-комментариями и сводкой.
-  2. Запись квитанций в таблицу comments (атомарно, len(comment_ids) == len(inline)).
-  3. Фаза чистки тредов (Thread Cleanup Phase):
-     - Если провайдер не GitHub или нет кандидатов к закрытию -> перейти к шагу 4.
-     - Проверить актуальность головы PR (origin checkpoint) и lease.
+  2. Транзакция T14 complete_publication:
+     - сохранение квитанций в таблицу comments (len(comment_ids) == len(inline));
+     - findings.published = true для сохраненных находок;
+     - переход Run.state = succeeded (или cancelled при T15);
+     - освобождение lease: run.lease_until = None.
+  3. Фаза чистки тредов publisher (Thread Cleanup Phase, best-effort):
+     - Если провайдер не GitHub или нет сохраненного плана кандидатов к закрытию -> завершить.
+     - Список кандидатов к закрытию берется из сохраненного плана публикации T8 (вне findings_hash).
+     - Фаза выполняется со своим тайм-бюджетом (не более 60 секунд на Run).
      - Для каждого треда-кандидата (до 30 вызовов):
-       a. Перепроверить статус треда одиночным GraphQL-запросом node(id: $thread_id).
-       b. Если человек оставил ответ или закрыл тред -> пропустить.
+       a. Проверить актуальность головы PR: GET /pulls/{n} (или DB checkpoint). При смене head_sha -> немедленный break.
+       b. Перепроверить тред запросом get_review_thread(node_id). Если человек ответил или закрыл -> пропустить.
        c. Выполнить мутацию resolveReviewThread.
-       d. В короткой транзакции обновить thread_status = 'RESOLVED_BY_BOT'.
+       d. Разобрать ответ: HTTP-статус и массив errors[].
+          - FORBIDDEN -> прервать фазу чистки;
+          - RATE_LIMITED (или HTTP 403/429) -> прервать фазу чистки, остаток перенести на следующий Run;
+          - NOT_FOUND -> обновить thread_status = 'NOT_FOUND', продолжить;
+          - SUCCESS -> в короткой транзакции обновить thread_status = 'RESOLVED_BY_BOT', resolved_at = NOW(), resolved_by_commit = head_sha, resolved_by_actor = 'bot'.
        e. Выдержать паузу 1.2 секунды.
-  4. Переход T14: перевести Run в состояние succeeded.
 ```
 
-**Обработка гонки T15 (Head Superseded)**:
-Если во время фазы чистки обнаруживается push новой головы PR (`head_sha` изменился):
-- Фаза чистки немедленно прерывается.
-- Run переводится в `cancelled` по правилу T15.
+**Повторная доставка (T17)**:
+Если publisher завершился аварийно или брокер повторно доставил задачу по T17, повторный consumer видит, что Run уже перешел в состояние `succeeded` (`complete_publication` возвращает `None`), поэтому повторный POST ревью и повторная чистка не выполняются.
 
 **Обработка Skipped Run**:
 Для прогонов, завершившихся без анализа (`no_changes`, `all_changes_ignored`), фаза чистки не запускается; треды остаются в текущих состояниях.
@@ -467,7 +518,7 @@ query GetPullRequestReviewThreads($owner: String!, $repo: String!, $pr: Int!, $c
 
 События вебхуков `pull_request_review_thread.resolved` / `unresolved`, генерируемые мутациями бота, обрабатываются по `SYSTEM_DESIGN.md` §8.3:
 1. HTTP-контроллер приема вебхуков сохраняет входящее событие, отвечает кодом 202 и ставит задачу в очередь `webhook-worker`.
-2. Компонент `webhook-worker` проверяет отправителя: если `sender.type == "Bot"` и `sender.login.casefold() == bot_login.casefold()`, событие помечается как `ignored_irrelevant_event` с detail `action=<action> ignored_own_bot`. Разбор событий тредов для обратной связи подключается в задаче #321.
+2. Компонент `webhook-worker` проверяет отправителя: если `sender.type == "Bot"` и `_normalize_login(sender.login) == bot_key`, событие помечается как `ignored_irrelevant_event` с detail `action=<action> ignored_own_bot`. Разбор событий тредов планируется в задаче сбора обратной связи `FeedbackSignal` (после MVP).
 
 ---
 
@@ -477,22 +528,22 @@ query GetPullRequestReviewThreads($owner: String!, $repo: String!, $pr: Int!, $c
 
 | ID | Сценарий | Исходное состояние (Head 1) | Изменение в коммите (Head 2) | Ожидаемые публикации на GitHub | Вердикт PR и Check Run | Состояние в БД (`comments` / `findings`) |
 |---|---|---|---|---|---|---|
-| **QA-REC-01** | **Неизмененный дефект (Идентичный повтор)** | Опубликован inline-комментарий к строке 42 `auth.py` (critical). | Добавлен `README.md`, файл `auth.py` не менялся. | **0 новых комментариев**. Тред на строке 42 остается открытым. | Verdict: `blocking`. Check Run: `completed / neutral` (заголовок `blocking`). | Находка: `drop_reason IS NULL`, `publication_action = 'suppressed_duplicate'`, `linked_comment_id` заполнен. Comment: `PERSISTING`. |
-| **QA-REC-02** | **Смещение строк без изменения дефекта** | Опубликован inline-комментарий к строке 42 `auth.py` (high). | В начало `auth.py` добавлено 10 строк импортов. Код дефекта не менялся. | **0 новых комментариев**. Тред отображается на новой строке 52. | Verdict: `blocking`. Check Run: `completed / neutral` (заголовок `blocking`). | Находка: `drop_reason IS NULL`, `publication_action = 'suppressed_duplicate'`. Comment: `PERSISTING`. Исходные координаты в БД неизменны. |
-| **QA-REC-03** | **Успешное исправление дефекта автором** | Опубликован inline-комментарий к строке 42 `auth.py`. | Автор переписал строку 42, исправив дефект. Анализ подтвердил отсутствие дефекта (`coverage_complete == True`). | **0 новых комментариев**. Тред закрыт мутацией `resolveReviewThread`. | Verdict: `clean` (при отсутствии других дефектов). Check Run: `completed / success` (заголовок `clean`). | Comment: `thread_status = RESOLVED_BY_BOT`, заполнены `resolved_at` и `resolved_by_commit = head_2`. |
-| **QA-REC-04** | **Удаление файла с дефектом** | Опубликован inline-комментарий в `legacy_utils.py`. | Автор удалил файл `legacy_utils.py` целиком. | **0 новых комментариев**. Тред закрыт мутацией `resolveReviewThread`. | Verdict: `clean`. Check Run: `completed / success` (заголовок `clean`). | Comment: `thread_status = RESOLVED_BY_BOT`. |
-| **QA-REC-05** | **Приоритет человека (Human reply)** | Опубликован inline-комментарий. Автор ответил в треде: *«Временный хак»*. | Автор запушил коммит с правкой якоря. | **Бот не закрывает тред**. Мутация `resolveReviewThread` не вызывается. На повторном пуше без правок якоря — **0 новых комментариев**. | Verdict: определяется наличием замечаний. | Comment: `thread_status = HUMAN_DISCUSSION`. Тред остается открытым под контролем участников команды. |
-| **QA-REC-06** | **Тред закрыт пользователем вручную** | Опубликован inline-комментарий (medium). Автор нажал «Resolve conversation» в UI GitHub. | Автор запушил новый коммит. | **Никаких мутаций (NOOP)**. На повторном пуше без изменений — **0 новых комментариев**, бот не переоткрывает тред. | Verdict: `attention` (дефект сохраняется и учитывается по инварианту 3). Check Run: `completed / neutral`. | Comment: `thread_status = RESOLVED_BY_USER`. Находка: `publication_action = 'suppressed_duplicate'`. |
-| **QA-REC-07** | **Появление аналогичного дефекта в новом месте** | В `auth.py` на строке 42 есть открытое замечание. | Автор скопировал уязвимый метод в `billing.py` на строку 15. | В `auth.py` тред остается открытым. В `billing.py` **публикуется новый inline-комментарий**. | Verdict: `blocking`. Check Run: `completed / neutral`. | Для `auth.py` — `PERSISTING`. Для `billing.py` — новая находка и новый comment со статусом `ACTIVE`. |
-| **QA-REC-08** | **Повторяющийся код в одном файле** | В файле две одинаковые строки `except Exception: pass`. Замечание опубликовано на первой строке. | Выше первой строки вставлен такой же блок. | Позиционное сопоставление сопоставляет прежнее замечание со сдвинутым блоком; для нового блока публикуется комментарий. | Verdict: `blocking`. Check Run: `completed / neutral`. | Различаются по локальному индексу вхождения без ложного схлопывания. |
-| **QA-REC-09** | **Дельта недоступна или force push** | Опубликован комментарий на строке 42. | Выполнен force-push, старая голова не является предком новой; `compare_commits` вернул ошибку. | **0 новых комментариев**. Безопасное умолчание: мутации закрытия не вызываются. | Verdict: по результатам нового прогона. | Прежний тред остается открытым (`LEAVE_ACTIVE`). |
-| **QA-REC-10** | **Превышение лимита в 30 мутаций** | На PR исправлено 45 замечаний. | Автор запушил исправление всех 45 мест в одном коммите. | **30 тредов закрыты** с интервалом 1.2 с. Оставшиеся 15 тредов остаются открытыми до следующего Run. | Verdict: `clean` (все дефекты устранены). Check Run: `completed / success`. | Первые 30 comments переведены в `RESOLVED_BY_BOT`, оставшиеся 15 сохраняют прежний статус до следующего прогона. |
-| **QA-REC-11** | **Ошибка GraphQL API при закрытии** | Тред намечен к закрытию. | GitHub API возвращает 403 Forbidden / Secondary Rate Limit на вызов мутации. | Мутации прекращаются. Прогон завершается штатно. | Verdict: `clean`. Check Run: `completed / success`. | Comment остается открытым, ошибка логируется, Run сохраняет статус `succeeded`. |
+| **QA-REC-01** | **Неизмененный дефект (Идентичный повтор)** | Опубликован inline-комментарий к строке 42 `auth.py` (critical). | Добавлен `README.md`, файл `auth.py` не менялся. | **0 новых комментариев**. Тред на строке 42 остается открытым. | Verdict: `blocking`. Check Run: `completed / neutral` (заголовок `blocking`). | Находка: `drop_reason IS NULL`, `publication_action = 'suppressed_duplicate'`, `linked_comment_id` заполнен. Comment: `thread_status = 'PERSISTING'`. |
+| **QA-REC-02** | **Смещение строк без изменения дефекта** | Опубликован inline-комментарий к строке 42 `auth.py` (high). | В начало `auth.py` добавлено 10 строк импортов. Код дефекта не менялся. | **0 новых комментариев**. Тред отображается на новой строке 52. | Verdict: `blocking`. Check Run: `completed / neutral` (заголовок `blocking`). | Находка: `drop_reason IS NULL`, `publication_action = 'suppressed_duplicate'`. Comment: `thread_status = 'PERSISTING'`. Исходные координаты в БД неизменны. |
+| **QA-REC-03** | **Успешное исправление дефекта автором** | Опубликован inline-комментарий к строке 42 `auth.py`. | Автор переписал строку 42, исправив дефект. Анализ подтвердил отсутствие дефекта (`coverage.status == 'complete' ∧ not summary_only`, дефектов и отсеянных кандидатов нет). | **0 новых комментариев**. Тред закрыт мутацией `resolveReviewThread`. | Verdict: `clean` (при отсутствии других дефектов). Check Run: `completed / neutral` (заголовок `clean`). | Comment: `thread_status = 'RESOLVED_BY_BOT'`, заполнены `resolved_at` и `resolved_by_commit = head_2`. |
+| **QA-REC-04** | **Удаление файла с дефектом** | Опубликован inline-комментарий в `legacy_utils.py`. | Автор удалил файл `legacy_utils.py` целиком (или возвратил к base). | **0 новых комментариев**. Тред закрыт мутацией `resolveReviewThread`. | Verdict: `clean`. Check Run: `completed / neutral` (заголовок `clean`). | Comment: `thread_status = 'RESOLVED_BY_BOT'`. |
+| **QA-REC-05** | **Приоритет человека (Human reply)** | Опубликован inline-комментарий. Автор ответил в треде: *«Временный хак»*. | Автор запушил коммит с правкой якоря. | **Бот не закрывает тред**. Мутация `resolveReviewThread` не вызывается. На повторном пуше без правок якоря — **0 новых комментариев**. | Verdict: `attention` (или `blocking` по severity). Check Run: `completed / neutral`. | Comment: `thread_status = 'HUMAN_DISCUSSION'`. Тред остается открытым под контролем участников команды. |
+| **QA-REC-06** | **Тред закрыт пользователем вручную** | Опубликован inline-комментарий (medium). Автор нажал «Resolve conversation» в UI GitHub. | Автор запушил новый коммит. | **Никаких мутаций (NOOP)**. На повторном пуше без изменений — **0 новых комментариев**, бот не переоткрывает тред. | Verdict: `attention` (дефект сохраняется и учитывается по инварианту 3). Check Run: `completed / neutral`. | Comment: `thread_status = 'RESOLVED_BY_USER'`. Находка: `publication_action = 'suppressed_duplicate'`. |
+| **QA-REC-07** | **Появление аналогичного дефекта в новом месте** | В `auth.py` на строке 42 есть открытое замечание. | Автор скопировал уязвимый метод в `billing.py` на строку 15. | В `auth.py` тред остается открытым. В `billing.py` **публикуется новый inline-комментарий** (разные `file_path` дают разные `FindingFingerprint`). | Verdict: `blocking`. Check Run: `completed / neutral`. | В `auth.py` — `PERSISTING`. В `billing.py` — новый `Comment` со статусом `ACTIVE`. |
+| **QA-REC-08** | **Позиционное сопоставление одинаковых дефектов** | В файле два идентичных блока `except Exception: pass`. Замечание опубликовано на первой строке. | Выше первой строки вставлен такой же блок. | Позиционное спаривание по минимальному расстоянию к перенесенному диапазону сопоставляет прежнее замечание со сдвинутым блоком; для нового блока публикуется комментарий с новым `occurrence_index`. | Verdict: `blocking`. Check Run: `completed / neutral`. | Различаются двухшаговым сопоставлением `occurrence_index` без ложного схлопывания. |
+| **QA-REC-09** | **Дельта недоступна или force push** | Опубликован комментарий на строке 42. | Выполнен force-push, старая голова не является предком новой; `compare_commits` вернул ошибку. | **0 новых комментариев**. Безопасное умолчание: мутации закрытия не вызываются. | Verdict: по результатам нового прогона. Check Run: `completed / neutral`. | Прежний тред сохраняет статус `ACTIVE` / `PERSISTING` (`LEAVE_ACTIVE`). |
+| **QA-REC-10** | **Превышение лимита в 30 мутаций** | На PR исправлено 45 замечаний. | Автор запушил исправление всех 45 мест в одном коммите. | **30 тредов закрыты** с интервалом 1.2 с. Оставшиеся 15 тредов остаются открытыми до следующего Run и блокируют merge под ruleset. | Verdict: `clean` (все дефекты устранены). Check Run: `completed / neutral`. | Первые 30 comments переведены в `RESOLVED_BY_BOT`, оставшиеся 15 сохраняют прежний статус до следующего прогона. |
+| **QA-REC-11** | **Ошибка GraphQL API при закрытии** | Тред намечен к закрытию. | GitHub API возвращает 403 Forbidden / Secondary Rate Limit на вызов мутации. | Мутации прекращаются. Прогон завершается штатно. | Verdict: `clean`. Check Run: `completed / neutral`. | Comment остается открытым (`ACTIVE`/`PERSISTING`), ошибка логируется, Run сохраняет статус `succeeded`. |
 | **QA-REC-12** | **Гонка T15 во время чистки** | Выполняется последовательное закрытие тредов. | Автор запушил новую голову PR во время паузы между мутациями. | Фаза чистки немедленно прерывается. Мутации для устаревшей головы не отправляются. | Run переводится в `cancelled` по T15. | Недопустимые мутации на устаревшей голове предотвращены. |
 | **QA-REC-13** | **Регресс после разрешения ботом** | Дефект был закрыт ботом (`RESOLVED_BY_BOT`). | Автор вернул дефектный код в следующем коммите. | **Публикуется новый комментарий**. Прежний закрытый тред остается в истории. | Verdict: `blocking`. Check Run: `completed / neutral`. | Прежний comment: `RESOLVED_BY_BOT`, новый comment: `ACTIVE`. |
-| **QA-REC-14** | **Человек снял отметку разрешения (Un-resolve)** | Тред был закрыт ботом (`RESOLVED_BY_BOT`). | Разработчик нажал «Unresolve conversation» на GitHub. | **Бот не закрывает тред повторно**. Тред переходит под управление человека. | Verdict: по наличию дефекта. | Comment: `thread_status = HUMAN_DISCUSSION`. |
-| **QA-REC-15** | **Переименование файла (Rename tracking)** | Опубликован комментарий в `src/old_name.py`. | Файл переименован в `src/new_name.py` без изменения дефекта. | **0 новых комментариев**. Тред отслеживается по новому пути. | Verdict: `blocking`. Check Run: `completed / neutral`. | Comment: `PERSISTING`. Fingerprint сопоставлен с учетом `previous_filename`. |
-| **QA-REC-16** | **Неполный анализ файла (Coverage incomplete)** | Опубликован комментарий на строке 42. | Коммит изменил файл, но файл стал `too_large` или превышен бюджет. | **Мутация не вызывается**. Тред остается открытым. | Verdict: null (неполный анализ). | Comment: `LEAVE_ACTIVE` (защита от ложной чистки). |
+| **QA-REC-14** | **Человек снял отметку разрешения (Un-resolve)** | Тред был закрыт ботом (`RESOLVED_BY_BOT`). | Разработчик нажал «Unresolve conversation» на GitHub. | **Бот не закрывает тред повторно**. Если дефект подтверждается в новом Run, публикуется новый комментарий (`ACTIVE`). | Verdict: по наличию дефекта. Check Run: `completed / neutral`. | Прежний comment: `thread_status = 'HUMAN_DISCUSSION'`. |
+| **QA-REC-15** | **Переименование файла (Rename tracking)** | Опубликован комментарий в `src/old_name.py`. | Файл переименован в `src/new_name.py` без изменения дефекта. | **0 новых комментариев**. Тред отслеживается по новому пути. | Verdict: `blocking`. Check Run: `completed / neutral`. | Comment: `thread_status = 'PERSISTING'`. Fingerprint сопоставлен с учетом `previous_filename`. |
+| **QA-REC-16** | **Неполный анализ файла (Coverage incomplete)** | Опубликован комментарий на строке 42. | Коммит изменил файл, но файл стал `too_large` или превышен бюджет. | **Мутация не вызывается**. Тред остается открытым. | Verdict: null (неполный анализ). Check Run: `completed / neutral`. | Comment: сохраняет `thread_status = 'PERSISTING'` (исход `LEAVE_ACTIVE`, защита от ложной чистки). |
 
 ---
 
