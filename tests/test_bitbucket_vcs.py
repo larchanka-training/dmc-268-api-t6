@@ -774,10 +774,11 @@ def test_changed_blob_reads_have_bounded_pr_rechecks(file_count: int) -> None:
                 assert (
                     await vcs.get_blob(_locator(), file.blob_sha, checkpoint=checkpoint) == b"new\n"
                 )
-            assert http.request_count == (304 if file_count == 100 else 605)
+            await vcs.verify_current(checkpoint=checkpoint)
+            assert http.request_count == (205 if file_count == 100 else 406)
 
     asyncio.run(scenario())
-    assert pr_reads == file_count + 3
+    assert pr_reads == 4
 
 
 def test_fork_blob_redirect_is_not_followed_with_token() -> None:

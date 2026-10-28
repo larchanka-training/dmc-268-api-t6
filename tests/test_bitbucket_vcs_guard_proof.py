@@ -214,7 +214,7 @@ def test_destination_uuid_mismatch_cancels_before_diffstat() -> None:
     assert len(requests) == 1
 
 
-def test_blob_read_rechecks_head_after_the_bytes_arrive() -> None:
+def test_blob_stage_rechecks_head_after_the_bytes_arrive() -> None:
     head = HEAD
     blob_reads = 0
 
@@ -244,8 +244,11 @@ def test_blob_read_rechecks_head_after_the_bytes_arrive() -> None:
             pr = await vcs.get_pull_request(_locator(), checkpoint=checkpoint)
             files = await vcs.get_diff(pr, checkpoint=checkpoint)
             assert files[0].blob_sha is not None
+            assert (
+                await vcs.get_blob(_locator(), files[0].blob_sha, checkpoint=checkpoint) == b"new\n"
+            )
             with pytest.raises(RunCancelled, match="superseded"):
-                await vcs.get_blob(_locator(), files[0].blob_sha, checkpoint=checkpoint)
+                await vcs.verify_current(checkpoint=checkpoint)
 
     asyncio.run(scenario())
     assert blob_reads == 1
