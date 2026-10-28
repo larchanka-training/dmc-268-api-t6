@@ -107,6 +107,7 @@ def test_sqlalchemy_run_repository_filters_and_orders_with_a_tied_timestamp_curs
         head_sha="a" * 40,
         created_at=created_at,
         trigger="webhook",
+        triggered_by=None,
     )
     code_change = SimpleNamespace(
         external_number=5, title="Review me", web_url="https://example.test/pull/5"
@@ -160,6 +161,7 @@ def test_sqlalchemy_run_repository_gets_detail_with_one_summary_query() -> None:
         head_sha="a" * 40,
         created_at=created_at,
         trigger="rerun",
+        triggered_by=None,
     )
     code_change = SimpleNamespace(
         external_number=5, title="Review me", web_url="https://example.test/pull/5"

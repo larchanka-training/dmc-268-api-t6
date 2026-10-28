@@ -109,6 +109,7 @@ UI_ZOD_COMPONENTS = {
     "fileSlice": "FileSlice",
     "authSession": "AuthSession",
     "me": "Me",
+    "metricsSummary": "MetricsSummary",
 }
 # z.int() exports the safe-integer range as its bounds; the spec leaves such integers unbounded.
 ZOD_SAFE_INTEGER = 2**53 - 1
