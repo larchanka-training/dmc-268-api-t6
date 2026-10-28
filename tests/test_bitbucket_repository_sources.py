@@ -9,7 +9,11 @@ from uuid import UUID
 import httpx
 import pytest
 
-from app.modules.integrations.bitbucket.infrastructure.run_http import BitbucketRunHttp
+from app.modules.integrations.bitbucket.infrastructure import run_http
+from app.modules.integrations.bitbucket.infrastructure.run_http import (
+    BitbucketRunHttp,
+    BitbucketRunHttpError,
+)
 from app.modules.reviews.application.diff_map import VcsProviderName, build_diff_map
 from app.modules.reviews.application.policy_documents import LoadPolicyDocuments, missing_document
 from app.modules.reviews.application.policy_errors import PolicyError, PolicyErrorCode
@@ -124,6 +128,98 @@ def test_tree_rate_limit_propagates_retry_delay() -> None:
             assert error.value.retry_after == timedelta(seconds=120)
 
     asyncio.run(scenario())
+
+
+def test_tree_walk_does_not_convert_request_budget_to_partial_listing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen: list[str] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        seen.append(path)
+        if path == f"{PREFIX}/pullrequests/7":
+            return httpx.Response(200, json=_pr(source=DEST))
+        if path == f"{PREFIX}/diffstat/{HEAD}..{BASE}":
+            return httpx.Response(200, json={"size": 0, "values": []})
+        if path == f"{PREFIX}/src/{BASE}/":
+            monkeypatch.setattr(run_http, "_MAX_REQUESTS", len(seen))
+            return httpx.Response(
+                200,
+                json={
+                    "size": 1,
+                    "values": [
+                        {"type": "commit_directory", "path": "sub", "commit": {"hash": BASE}}
+                    ],
+                },
+            )
+        raise AssertionError(path)
+
+    async def scenario() -> None:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+            http = BitbucketRunHttp(client, Credentials(), TARGET)
+            vcs = HttpBitbucketVcsProvider(http=http, locator=INPUT.locator)
+            trees = BitbucketRepositoryTree(
+                http=http, expected_input=INPUT, vcs=vcs, checkpoint=checkpoint
+            )
+            with pytest.raises(BitbucketRunHttpError) as caught:
+                await trees.walk(BASE)
+            assert caught.value.error_code == "bitbucket_request_budget_exceeded"
+
+    asyncio.run(scenario())
+    assert seen[-1] == f"{PREFIX}/src/{BASE}/"
+
+
+def test_tree_context_skips_symlink_and_non_utf8_bytes() -> None:
+    seen: list[str] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        seen.append(path)
+        if path == f"{PREFIX}/pullrequests/7":
+            return httpx.Response(200, json=_pr(source=DEST))
+        if path == f"{PREFIX}/diffstat/{HEAD}..{BASE}":
+            return httpx.Response(200, json={"size": 0, "values": []})
+        if path == f"{PREFIX}/src/{BASE}/":
+            return httpx.Response(
+                200,
+                json={
+                    "size": 3,
+                    "values": [
+                        {
+                            "type": "commit_file",
+                            "path": name,
+                            "size": 1,
+                            "attributes": ["link"] if name == "linked.py" else [],
+                            "commit": {"hash": BASE},
+                        }
+                        for name in ("linked.py", "invalid.py", "valid.py")
+                    ],
+                },
+            )
+        if path == f"{PREFIX}/src/{BASE}/invalid.py":
+            return httpx.Response(200, content=b"\xff")
+        if path == f"{PREFIX}/src/{BASE}/valid.py":
+            return httpx.Response(200, content=b"x")
+        raise AssertionError(path)
+
+    async def scenario() -> None:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+            http = BitbucketRunHttp(client, Credentials(), TARGET)
+            vcs = HttpBitbucketVcsProvider(http=http, locator=INPUT.locator)
+            trees = BitbucketRepositoryTree(
+                http=http, expected_input=INPUT, vcs=vcs, checkpoint=checkpoint
+            )
+            source = BitbucketRunSource(trees=trees, vcs=vcs, run_id=RUN_ID)
+            tree = await source.fetch_tree(INPUT.repository_id)
+            assert tuple(file.path for file in tree.files) == ("invalid.py", "valid.py")
+            files = await source.fetch_files(
+                INPUT.repository_id, ("linked.py", "invalid.py", "valid.py")
+            )
+            assert tuple((file.path, file.content) for file in files) == (("valid.py", "x"),)
+
+    asyncio.run(scenario())
+    assert f"{PREFIX}/src/{BASE}/linked.py" not in seen
 
 
 def test_optional_file_429_stops_context_fetch() -> None:
@@ -619,7 +715,7 @@ def test_policy_blob_failure_keeps_diagnostic_after_document_location(blob_respo
                 assert error.value.limit == 65_536
                 assert error.value.actual == 65_537
                 assert error.value.actual_is_lower_bound
-                assert "фактически более 65536" in str(error.value)
+                assert "actual more than 65536" in str(error.value)
             else:
                 assert error.value.code is PolicyErrorCode.ACCESS_DENIED
                 assert error.value.http_status == 401

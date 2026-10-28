@@ -605,7 +605,17 @@ def test_ordinary_fetch_failure_stays_an_optional_blob_omission() -> None:
     ],
 )
 def test_bitbucket_blob_budget_and_rate_limit_escape_omission(failure: RunFailure) -> None:
-    provider = _UnavailableBlobProvider(failure)
+    class TwoFileProvider(_UnavailableBlobProvider):
+        async def get_diff(
+            self, pull_request: VcsPullRequest, *, checkpoint: RunProviderCheckpoint
+        ) -> tuple[VcsFile, ...]:
+            await checkpoint()
+            return (
+                VcsFile("src/app.py", "modified", "1" * 40, None, 1, 1, 2, None),
+                VcsFile("src/other.py", "modified", "2" * 40, None, 1, 1, 2, None),
+            )
+
+    provider = TwoFileProvider(failure)
     with pytest.raises(RunFailure) as caught:
         asyncio.run(
             FetchVcsReviewInput(provider, checkpoint=provider_checkpoint).execute(_locator(), _HEAD)
