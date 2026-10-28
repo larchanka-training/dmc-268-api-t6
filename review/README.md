@@ -42,9 +42,11 @@ activates the newest known version of each key in `prompt_versions` by setting
 (always present, empty without RAG), the rule that repository code in it is data, not
 instructions, and its evidence rules: a retrieved excerpt is never the anchor, and a
 LEFT one is evidence only. The manual gateway check in `app/bootstrap/llm_gateway.py`
-still defaults to `review.system.v3` and `review.conventions.v2`, and the recorded
-replay and the eval baseline stay on v3, until the paid eval re-shoot switches them
-(#130; R15 in `docs/plans/130-snapshot-switch-plan.md`). `PromptBindings` dataclass defaults
+still defaults to `review.system.v3` and `review.conventions.v2`. The recorded replay and
+the eval baseline moved to v5 with the single paid eval re-shoot (#130, R15 in
+`docs/plans/130-snapshot-switch-plan.md`; #144): the
+[2026-10-28 capture](../test-prs-dataset/README.md#recorded-mistral-baseline--2026-10-28).
+`PromptBindings` dataclass defaults
 and snapshot test fixtures use v2 version labels; these are not universal
 runtime selections. At run creation, `SqlAlchemyWebhookRunStore` captures the
 active `review.conventions` and `review.verifier` row IDs alongside the selected
@@ -170,11 +172,15 @@ fingerprinted. [Run 38701845865, attempt 1](https://github.com/larchanka-trainin
 captured all 24 first raw answers on 2026-10-15 at frozen source `a1cc6229c6a6fdba65ecb640c60ca823e262a6aa`
 with `mistral-small-4` and raw export. All 25 baseline files match the raw artifact
 byte-for-byte and safe hashes/sizes; two offline reports are identical with no
-drift and match the redacted live report. Current measured results are in the
+drift and match the redacted live report. Its measured results, now historical, are in the
 [corpus README](../test-prs-dataset/README.md#recorded-mistral-baseline--2026-10-15)
 and [test plan](../docs/TEST_PLAN.md#323-зафиксированный-post-rebase-raw-baseline-82-2026-10-15).
 This complete post-rebase replacement includes the merged #149 parser/schema changes;
 its static digest is `sha256-v1:77d46f9c731dc26aded94c7ec60cb860314fe7835e6041a318d63b8ddc690449`.
+The current baseline is the 2026-10-28 `review.system.v5` capture
+([corpus README](../test-prs-dataset/README.md#recorded-mistral-baseline--2026-10-28),
+[test plan](../docs/TEST_PLAN.md#325-зафиксированный-v5-raw-baseline-144-2026-10-28));
+the 2026-10-20 v3 capture is historical.
 The [2026-10-14 PR-prefix capture](../test-prs-dataset/README.md#recorded-mistral-baseline--2026-10-14)
 remains historical with original bytes/digests at revision bf09117.
 The [2026-10-13 snapshot capture](https://github.com/larchanka-training/dmc-268-api-t6/actions/runs/38468081001)
