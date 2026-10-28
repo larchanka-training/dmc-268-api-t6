@@ -116,8 +116,8 @@ class ConnectResponse(ApiDto):
     id: UUID
     repository_id: UUID
     repository_uuid: UUID
-    workspace_slug: str
-    repository_slug: str
+    workspace_slug: str = Field(min_length=1, max_length=128)
+    repository_slug: str = Field(min_length=1, max_length=128)
     status: Literal["awaiting_webhook", "active"]
     credential_generation: int
     webhook: WebhookSetup | None
@@ -127,8 +127,8 @@ class ConnectionItem(ApiDto):
     id: UUID
     repository_id: UUID
     repository_uuid: UUID
-    workspace_slug: str
-    repository_slug: str
+    workspace_slug: str = Field(min_length=1, max_length=128)
+    repository_slug: str = Field(min_length=1, max_length=128)
     status: Literal["awaiting_webhook", "active"]
     credential_generation: int
     webhook_url: str

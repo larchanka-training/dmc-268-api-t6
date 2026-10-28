@@ -1829,8 +1829,8 @@ components:
         id: { type: string, format: uuid, description: Shared installation ID. }
         repositoryId: { type: string, format: uuid, description: Portal repository binding ID. }
         repositoryUuid: { type: string, format: uuid }
-        workspaceSlug: { type: string, minLength: 1 }
-        repositorySlug: { type: string, minLength: 1 }
+        workspaceSlug: { type: string, minLength: 1, maxLength: 128 }
+        repositorySlug: { type: string, minLength: 1, maxLength: 128 }
         status: { type: string, enum: [awaiting_webhook, active] }
         credentialGeneration: { type: integer, minimum: 1 }
         webhook:
@@ -1853,8 +1853,8 @@ components:
         id: { type: string, format: uuid }
         repositoryId: { type: string, format: uuid }
         repositoryUuid: { type: string, format: uuid }
-        workspaceSlug: { type: string, minLength: 1 }
-        repositorySlug: { type: string, minLength: 1 }
+        workspaceSlug: { type: string, minLength: 1, maxLength: 128 }
+        repositorySlug: { type: string, minLength: 1, maxLength: 128 }
         status: { type: string, enum: [awaiting_webhook, active] }
         credentialGeneration: { type: integer, minimum: 1 }
         webhookUrl: { type: string, format: uri }

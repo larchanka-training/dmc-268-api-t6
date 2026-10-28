@@ -1203,6 +1203,44 @@ def test_bitbucket_api_token_schema_accepts_only_printable_ascii_up_to_4096(
         assert not validator.is_valid(invalid)
 
 
+@pytest.mark.parametrize(
+    ("zod_name", "component"),
+    [
+        ("bitbucketDiscoveryRequest", "BitbucketDiscoveryRequest"),
+        ("bitbucketConnectRequest", "BitbucketConnectRequest"),
+        ("bitbucketCredentialRotateRequest", "BitbucketCredentialRotateRequest"),
+    ],
+)
+def test_bitbucket_api_token_patterns_match_the_printable_ascii_contract(
+    zod_name: str, component: str
+) -> None:
+    spec_token = _components()[component]["properties"]["apiToken"]
+    ui_token = _generated_schemas()[zod_name]["properties"]["apiToken"]
+    values = [
+        "",
+        *(chr(codepoint) for codepoint in range(128)),
+        "é",
+        "Ａ",
+        "A\n",
+        "A A",
+        "A" * 4096,
+        "A" * 4097,
+    ]
+
+    for source, schema in (("OpenAPI", spec_token), ("UI Zod", ui_token)):
+        assert schema["type"] == "string", source
+        assert (schema["minLength"], schema["maxLength"]) == (1, 4096), source
+        pattern = schema["pattern"]
+        assert pattern.startswith("^"), source
+        assert pattern.endswith(("$", r"(?![\s\S])")), source
+        for value in values:
+            expected = 1 <= len(value) <= 4096 and all(
+                33 <= ord(character) <= 126 for character in value
+            )
+            actual = 1 <= len(value) <= 4096 and re.fullmatch(pattern, value) is not None
+            assert actual == expected, (source, component, repr(value[:20]))
+
+
 def test_contract_mirror_distinguishes_null_only_from_nullable_string() -> None:
     assert _contract_mismatches({"type": "null"}, {"type": "null"}, {}, "cursor") == []
     assert _contract_mismatches({"type": ["null"]}, {"type": "null"}, {}, "cursor") == []
