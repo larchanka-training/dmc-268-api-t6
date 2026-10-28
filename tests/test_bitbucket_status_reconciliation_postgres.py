@@ -10,7 +10,7 @@ import httpx
 import pytest
 from sqlalchemy import Connection, text
 from sqlalchemy.engine import make_url
-from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker, create_async_engine
 
 from alembic import command
 from app.modules.integrations.bitbucket.application.request_credentials import (
@@ -22,6 +22,7 @@ from app.modules.reviews.application.bitbucket_status_intents import BitbucketSt
 from app.modules.reviews.infrastructure.bitbucket_ci import (
     BitbucketBuildStatusPublisher,
     BitbucketStatusReconciler,
+    BitbucketStatusUnavailable,
 )
 from app.modules.reviews.infrastructure.bitbucket_status_ledger import (
     SqlAlchemyBitbucketStatusUnitOfWork,
@@ -37,8 +38,8 @@ def test_missed_terminal_status_is_recovered_and_stale_rows_do_not_starve_live(
 ) -> None:
     db = bitbucket_connection_schema
     command.upgrade(_config(db), "head")
-    workspace, installation, repository, change, rule, prompt, live_run = (
-        uuid4() for _ in range(7)
+    workspace, installation, repository, change, rule, prompt, live_run, expired_run = (
+        uuid4() for _ in range(8)
     )
     stale_runs = [uuid4() for _ in range(100)]
     remote_repo = uuid4()
@@ -94,6 +95,7 @@ def test_missed_terminal_status_is_recovered_and_stale_rows_do_not_starve_live(
     for run_id, key, state in (
         *((run, f"{i + 1:064x}", "succeeded") for i, run in enumerate(stale_runs)),
         (live_run, "f" * 64, "succeeded"),
+        (expired_run, "e" * 64, "succeeded"),
     ):
         db.execute(
             text(
@@ -131,6 +133,28 @@ def test_missed_terminal_status_is_recovered_and_stale_rows_do_not_starve_live(
                 "head": f"{i:040x}",
                 "run": stale_runs[i],
                 "url": "https://review.example/stale",
+            },
+        )
+    db.execute(
+        text("UPDATE runs SET finished_at=now()-interval '2 hours' WHERE id=:run"),
+        {"run": expired_run},
+    )
+    for i in range(100):
+        db.execute(
+            text(
+                "INSERT INTO bitbucket_status_publications "
+                "(workspace_id,repository_uuid,pr_number,head_sha,run_id,run_order,"
+                "run_url,desired_state,desired_rank,applied_run_id,applied_state,next_check_at) "
+                "VALUES (:workspace,:repo,:pr,:head,:run,1,:url,'succeeded',3,"
+                ":run,'succeeded',now()-interval '1 minute')"
+            ),
+            {
+                "workspace": workspace,
+                "repo": remote_repo,
+                "pr": i + 101,
+                "head": f"{i + 100:040x}",
+                "run": expired_run,
+                "url": "https://review.example/expired",
             },
         )
     live_url = "https://review.example/live"
@@ -209,6 +233,11 @@ def test_missed_terminal_status_is_recovered_and_stale_rows_do_not_starve_live(
             reconciler = BitbucketStatusReconciler(ledger, publisher)
             await reconciler.tick()
             assert await ledger.pending() == [(live_run, live_url)]
+            async with sessions() as session:
+                assert (
+                    await session.scalar(text("SELECT count(*) FROM bitbucket_status_publications"))
+                    == 1
+                )
             await reconciler.tick()
             assert posted == ["POST"]
             async with sessions() as session:
@@ -236,6 +265,281 @@ def test_missed_terminal_status_is_recovered_and_stale_rows_do_not_starve_live(
                     {"run": live_run},
                 )
             assert await ledger.pending() == []
+        finally:
+            await engine.dispose()
+
+    asyncio.run(scenario())
+
+
+def test_running_run_requeued_reconciles_without_spin_or_duplicate_status(
+    bitbucket_connection_schema: Connection,
+) -> None:
+    engine, workspace, installation, repository, run_id, remote_repo = _seed_status_run(
+        bitbucket_connection_schema
+    )
+
+    async def scenario() -> None:
+        try:
+            sessions = async_sessionmaker(engine)
+            ledger = BitbucketStatusIntents(lambda: SqlAlchemyBitbucketStatusUnitOfWork(sessions))
+            target = BoundBitbucketTarget(installation, workspace, repository, remote_repo, 1, 1)
+            current_state = "running"
+
+            class Source:
+                async def current(self, selected: UUID) -> BitbucketStatusSnapshot | None:
+                    assert selected == run_id
+                    return BitbucketStatusSnapshot(
+                        run_id, target, 7, "a" * 40, "feature/review", current_state, 1
+                    )
+
+            class Credentials:
+                async def checkpoint(self, selected: BoundBitbucketTarget) -> None:
+                    assert selected == target
+
+                async def credential_for(
+                    self, selected: BoundBitbucketTarget
+                ) -> BitbucketRequestCredential:
+                    return BitbucketRequestCredential(selected, "test-token")
+
+            posts: list[httpx.Request] = []
+
+            def respond(request: httpx.Request) -> httpx.Response:
+                if request.method == "POST":
+                    posts.append(request)
+                    return httpx.Response(201, json={})
+                return httpx.Response(
+                    200,
+                    json={
+                        "id": 7,
+                        "state": "OPEN",
+                        "source": {
+                            "commit": {"hash": "a" * 40},
+                            "branch": {"name": "feature/review"},
+                            "repository": {"uuid": f"{{{remote_repo}}}"},
+                        },
+                        "destination": {"repository": {"uuid": f"{{{remote_repo}}}"}},
+                    },
+                )
+
+            publisher = BitbucketBuildStatusPublisher(
+                Source(),
+                Credentials(),
+                ledger=ledger,
+                transport_factory=lambda: httpx.MockTransport(respond),
+            )
+            run_url = "https://review.example/runs/one"
+            await publisher.upsert(run_id, run_url)
+            assert len(posts) == 1
+            async with sessions.begin() as session:
+                await session.execute(
+                    text("UPDATE runs SET state='queued' WHERE id=:run"), {"run": run_id}
+                )
+                await session.execute(
+                    text(
+                        "UPDATE bitbucket_status_publications SET next_check_at=now() "
+                        "WHERE run_id=:run"
+                    ),
+                    {"run": run_id},
+                )
+            current_state = "queued"
+            await publisher.upsert(run_id, run_url)
+            assert len(posts) == 1
+            async with sessions() as session:
+                row = (
+                    await session.execute(
+                        text(
+                            "SELECT desired_state,applied_state "
+                            "FROM bitbucket_status_publications WHERE run_id=:run"
+                        ),
+                        {"run": run_id},
+                    )
+                ).one()
+            assert row == ("queued", "queued")
+            assert await ledger.pending() == []
+        finally:
+            await engine.dispose()
+
+    asyncio.run(scenario())
+
+
+def _seed_status_run(db: Connection) -> tuple[AsyncEngine, UUID, UUID, UUID, UUID, UUID]:
+    command.upgrade(_config(db), "head")
+    workspace, installation, repository, change, rule, prompt, run_id, remote_repo = (
+        uuid4() for _ in range(8)
+    )
+    db.execute(
+        text("INSERT INTO workspaces (id,name,daily_budget_usd) VALUES (:id,'test',7)"),
+        {"id": workspace},
+    )
+    db.execute(
+        text(
+            "INSERT INTO provider_installations "
+            "(id,workspace_id,provider,external_id,metadata) "
+            "VALUES (:id,:workspace,'bitbucket',123,'{}'::jsonb)"
+        ),
+        {"id": installation, "workspace": workspace},
+    )
+    db.execute(
+        text(
+            "INSERT INTO repositories "
+            "(id,provider_installation_id,external_id,full_name,default_branch,web_url) "
+            "VALUES (:id,:installation,123,'team/repo','main','https://bitbucket.org/team/repo')"
+        ),
+        {"id": repository, "installation": installation},
+    )
+    db.execute(
+        text(
+            "INSERT INTO prompt_versions (id,key,version,content,checksum,is_active) "
+            "VALUES (:id,'review.system',1,'prompt',:checksum,true)"
+        ),
+        {"id": prompt, "checksum": "c" * 64},
+    )
+    db.execute(
+        text(
+            "INSERT INTO rule_versions (id,repository_id,version,rules,checksum,is_active) "
+            "VALUES (:id,:repo,1,'[]'::jsonb,:checksum,true)"
+        ),
+        {"id": rule, "repo": repository, "checksum": "d" * 64},
+    )
+    db.execute(
+        text(
+            "INSERT INTO code_changes "
+            "(id,repository_id,external_id,external_number,title,source_branch,"
+            "target_branch,base_sha,head_sha,state,web_url) VALUES "
+            "(:id,:repo,7,7,'PR','feature/review','main',:base,:head,'open',:url)"
+        ),
+        {
+            "id": change,
+            "repo": repository,
+            "base": "b" * 40,
+            "head": "a" * 40,
+            "url": "https://bitbucket.org/team/repo/pull-requests/7",
+        },
+    )
+    db.execute(
+        text(
+            "INSERT INTO runs (id,code_change_id,origin_provider_installation_id,"
+            "base_sha,base_ref,head_sha,state,trigger,idempotency_key,engine,"
+            "rule_version_id,prompt_version_id,available_at) VALUES "
+            "(:id,:change,:installation,:base,'main',:head,'running','manual',"
+            ":key,'fast',:rule,:prompt,now())"
+        ),
+        {
+            "id": run_id,
+            "change": change,
+            "installation": installation,
+            "base": "b" * 40,
+            "head": "a" * 40,
+            "key": "f" * 64,
+            "rule": rule,
+            "prompt": prompt,
+        },
+    )
+    db.commit()
+    schema = str(db.scalar(text("SELECT current_schema()")))
+    url = make_url(os.environ["TEST_DATABASE_URL"]).set(drivername="postgresql+psycopg_async")
+    engine = create_async_engine(url, connect_args={"options": f"-csearch_path={schema}"})
+
+    return engine, workspace, installation, repository, run_id, remote_repo
+
+
+@pytest.mark.parametrize(
+    ("failure", "expected_reason"),
+    [
+        ("server_error", "status_unavailable"),
+        ("missing_pr", "pr_missing"),
+        ("missing_status", "status_unavailable"),
+        ("declined_pr", "pr_not_open"),
+    ],
+)
+def test_status_failure_without_retry_after_is_deferred_and_not_selected_next_tick(
+    bitbucket_connection_schema: Connection, failure: str, expected_reason: str
+) -> None:
+    engine, workspace, installation, repository, run_id, remote_repo = _seed_status_run(
+        bitbucket_connection_schema
+    )
+
+    async def scenario() -> None:
+        try:
+            sessions = async_sessionmaker(engine)
+            ledger = BitbucketStatusIntents(lambda: SqlAlchemyBitbucketStatusUnitOfWork(sessions))
+            target = BoundBitbucketTarget(installation, workspace, repository, remote_repo, 1, 1)
+            snapshot = BitbucketStatusSnapshot(
+                run_id, target, 7, "a" * 40, "feature/review", "running", 1
+            )
+
+            class Source:
+                async def current(self, selected: UUID) -> BitbucketStatusSnapshot | None:
+                    assert selected == run_id
+                    return snapshot
+
+            class Credentials:
+                async def checkpoint(self, selected: BoundBitbucketTarget) -> None:
+                    assert selected == target
+
+                async def credential_for(
+                    self, selected: BoundBitbucketTarget
+                ) -> BitbucketRequestCredential:
+                    return BitbucketRequestCredential(selected, "test-token")
+
+            requests: list[httpx.Request] = []
+
+            def respond(request: httpx.Request) -> httpx.Response:
+                requests.append(request)
+                if failure == "missing_status" and request.method == "POST":
+                    return httpx.Response(404)
+                if failure == "server_error":
+                    return httpx.Response(503)
+                if failure == "missing_pr":
+                    return httpx.Response(404)
+                return httpx.Response(
+                    200,
+                    json={
+                        "id": 7,
+                        "state": "DECLINED" if failure == "declined_pr" else "OPEN",
+                        "source": {
+                            "commit": {"hash": snapshot.head_sha},
+                            "branch": {"name": snapshot.source_branch},
+                            "repository": {"uuid": f"{{{remote_repo}}}"},
+                        },
+                        "destination": {"repository": {"uuid": f"{{{remote_repo}}}"}},
+                    },
+                )
+
+            publisher = BitbucketBuildStatusPublisher(
+                Source(),
+                Credentials(),
+                ledger=ledger,
+                transport_factory=lambda: httpx.MockTransport(respond),
+            )
+            with pytest.raises(BitbucketStatusUnavailable):
+                await publisher.upsert(run_id, "https://review.example/runs/one")
+            expected_requests = 2 if failure == "missing_status" else 1
+            assert len(requests) == expected_requests
+            async with sessions() as session:
+                row = (
+                    await session.execute(
+                        text(
+                            "SELECT last_error,next_check_at > now() "
+                            "FROM bitbucket_status_publications WHERE run_id=:run"
+                        ),
+                        {"run": run_id},
+                    )
+                ).one()
+            assert row == (expected_reason, True)
+            assert await ledger.pending() == []
+            await publisher.upsert(run_id, "https://review.example/runs/one")
+            await BitbucketStatusReconciler(ledger, publisher).tick()
+            assert len(requests) == expected_requests
+            async with sessions.begin() as session:
+                await session.execute(
+                    text(
+                        "UPDATE bitbucket_status_publications SET next_check_at=now() "
+                        "WHERE run_id=:run"
+                    ),
+                    {"run": run_id},
+                )
+            assert await ledger.pending() == [(run_id, "https://review.example/runs/one")]
         finally:
             await engine.dispose()
 
