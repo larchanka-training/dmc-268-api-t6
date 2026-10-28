@@ -25,7 +25,11 @@ from app.modules.reviews.application.process_run import (
     RunVcsInput,
 )
 from app.modules.reviews.application.prompt_builder import DiffLine, PullRequestMeta
-from app.modules.reviews.application.run_failures import RequiredSourceUnavailable, RunFailure
+from app.modules.reviews.application.run_failures import (
+    RequiredSourceUnavailable,
+    RunCancelled,
+    RunFailure,
+)
 from app.modules.reviews.application.vcs_diff import (
     PullRequestLocator,
     VcsFile,
@@ -475,6 +479,46 @@ def test_blob_cache_writes_are_committed_by_the_processor() -> None:
 
     assert [uow.commits for uow in opened] == [1]
     assert asyncio.run(cache.get(BlobCacheKey(REPOSITORY_ID, "1" * 40))).content == "saved\n"
+
+
+def test_cached_snapshot_rechecks_head_after_prefetch_before_cache_write() -> None:
+    stored = [DiffSnapshot("src/a.py", None, blob_sha="1" * 40)]
+    fetched: list[str] = []
+    verified = 0
+
+    class Provider:
+        async def get_blob(
+            self, locator: PullRequestLocator, sha: str, *, checkpoint: RunProviderCheckpoint
+        ) -> bytes:
+            fetched.append(sha)
+            return b"saved\n"
+
+        async def verify_current(self, *, checkpoint: RunProviderCheckpoint) -> None:
+            nonlocal verified
+            verified += 1
+            raise RunCancelled("superseded")
+
+    class Repository:
+        async def get_run_vcs_input(self, run_id: UUID) -> RunVcsInput:
+            return RunVcsInput(CODE_CHANGE_ID, REPOSITORY_ID, HEAD, BASE, LOCATOR)
+
+        async def get_run_snapshots(self, run_id: UUID) -> list[DiffSnapshot]:
+            return stored
+
+    cache = InMemoryBlobCache()
+    repository = Repository()
+    processor = ReviewRunProcessor(
+        cast(Any, repository),
+        None,
+        blob_cache=cache,
+        vcs_provider=cast(Any, Provider()),
+        uow_factory=processing_uow(repository, cache),
+    )
+    with pytest.raises(RunCancelled, match="superseded"):
+        asyncio.run(processor.execute(RUN_ID))
+    assert fetched == ["1" * 40]
+    assert verified == 1
+    assert asyncio.run(cache.get(BlobCacheKey(REPOSITORY_ID, "1" * 40))).content is None
 
 
 @pytest.mark.parametrize("case", ["required_diff", "required_commits", "deadline", "optional"])

@@ -20,6 +20,7 @@ from app.modules.reviews.application.vcs_diff import (
     VcsFile,
     VcsMetadataProvider,
     VcsPullRequest,
+    VcsStageVerifier,
 )
 
 # At most this much of a failed answer is read: a secondary rate limit names itself in a
@@ -164,3 +165,7 @@ class ClassifiedVcsProvider:
         self, locator: PullRequestLocator, sha: str, *, checkpoint: RunProviderCheckpoint
     ) -> bytes:
         return await self._inner.get_blob(locator, sha, checkpoint=checkpoint)
+
+    async def verify_current(self, *, checkpoint: RunProviderCheckpoint) -> None:
+        if isinstance(self._inner, VcsStageVerifier):
+            await self._inner.verify_current(checkpoint=checkpoint)
