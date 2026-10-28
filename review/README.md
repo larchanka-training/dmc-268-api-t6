@@ -175,12 +175,12 @@ byte-for-byte and safe hashes/sizes; two offline reports are identical with no
 drift and match the redacted live report. Its measured results, now historical, are in the
 [corpus README](../test-prs-dataset/README.md#recorded-mistral-baseline--2026-10-15)
 and [test plan](../docs/TEST_PLAN.md#323-зафиксированный-post-rebase-raw-baseline-82-2026-10-15).
+This complete post-rebase replacement includes the merged #149 parser/schema changes;
+its static digest is `sha256-v1:77d46f9c731dc26aded94c7ec60cb860314fe7835e6041a318d63b8ddc690449`.
 The current baseline is the 2026-10-28 `review.system.v5` capture
 ([corpus README](../test-prs-dataset/README.md#recorded-mistral-baseline--2026-10-28),
 [test plan](../docs/TEST_PLAN.md#325-зафиксированный-v5-raw-baseline-144-2026-10-28));
 the 2026-10-20 v3 capture is historical.
-This complete post-rebase replacement includes the merged #149 parser/schema changes;
-its static digest is `sha256-v1:77d46f9c731dc26aded94c7ec60cb860314fe7835e6041a318d63b8ddc690449`.
 The [2026-10-14 PR-prefix capture](../test-prs-dataset/README.md#recorded-mistral-baseline--2026-10-14)
 remains historical with original bytes/digests at revision bf09117.
 The [2026-10-13 snapshot capture](https://github.com/larchanka-training/dmc-268-api-t6/actions/runs/38468081001)
