@@ -15,6 +15,9 @@ ready graph index the review shows and records the caller of the changed functio
 verifier shows it again with the same index commit, and a retry before the accepted answer
 retrieves from a newer index publication (D8). A v4 run in flight when the v5 seed makes v5
 live keeps its v4 prompt: no retrieved section, and a ready index is recorded as not used.
+A verifier answer citing a range the diff block does not show, or a rule finding without a
+requirement of its rule, earns the attempt's one free slot: the fallback, or a bounded repair
+without a fallback model; the recovered answer publishes.
 """
 
 from __future__ import annotations
@@ -244,7 +247,7 @@ class ModelHttp:
             return httpx.Response(503, json={"error": {"message": "unavailable"}})
         if kind == "conventions":
             answer: dict[str, Any] = _CONVENTIONS_ANSWER
-        elif kind == "review-v2":
+        elif kind in ("review-v2", "review-v2-rule"):
             # The review cites the added line in the diff and in the L3 excerpt of the file,
             # and the call of ``greet`` in a retrieved block when the prompt shows one.
             prompt = body["messages"][-1]["content"]
@@ -257,20 +260,46 @@ class ModelHttp:
                     for rag in re.findall(r'<excerpt block_id="([^"]+)" level="RAG"', prompt)
                 ),
             ]
-            answer = {"findings": [{**_FINDING, "evidence_refs": cited}], "summary": _SUMMARY}
+            # ``review-v2-rule``: the finding names the repository rules it breaks.
+            rule = ".review/rules.md" if kind == "review-v2-rule" else None
+            finding = {**_FINDING, "rule_name": rule, "evidence_refs": cited}
+            answer = {"findings": [finding], "summary": _SUMMARY}
         elif kind == "review-v1":
             answer = {"findings": [_FINDING], "summary": _SUMMARY}
         else:
-            assert kind == "verifier"
-            ids = re.findall(r'candidate_id="([^"]+)"', body["messages"][-1]["content"])
+            assert kind in ("verifier", "verifier-unshown", "verifier-rule")
+            # The verifier prompt, also under the repair turn of a repair call.
+            prompt = body["messages"][1]["content"]
+            ids = re.findall(r'candidate_id="([^"]+)"', prompt)
+            evidence = _EVIDENCE
+            requirements: list[dict[str, Any]] = []
+            if kind == "verifier-unshown":
+                # Lines past the end of the shown hunk (RIGHT 9-13): never in the prompt.
+                evidence = [{"block_id": file_block_id(_PATH), "start_line": 22, "end_line": 24}]
+            elif kind == "verifier-rule":
+                # The rule finding cites the shown lines of the repository rules.
+                [rules] = re.findall(
+                    r'<repository_rules block_id="policy-rules"[^>]*>\n(.*?)\n</repository_rules>',
+                    prompt,
+                    flags=re.DOTALL,
+                )
+                shown = [int(n) for n in re.findall(r'<line n="(\d+)">', rules)]
+                requirements = [
+                    {
+                        "block_id": "policy-rules",
+                        "start_line": min(shown),
+                        "end_line": max(shown),
+                        "check_id": None,
+                    }
+                ]
             answer = {
                 "decisions": [
                     {
                         "candidate_id": candidate,
                         "status": "supported",
                         "reason": "The cited added line is never read.",
-                        "evidence_refs": _EVIDENCE,
-                        "requirement_refs": [],
+                        "evidence_refs": evidence,
+                        "requirement_refs": requirements,
                     }
                     for candidate in ids
                 ]
@@ -311,10 +340,14 @@ async def _scenario(
     retry: bool,
     rag: bool,
     v5_seeded: bool = False,
+    llm: LlmSettings = _LLM,
+    review_kind: str | None = None,
+    verifier_kinds: tuple[str, ...] = ("verifier",),
 ) -> Observed:
     """``version``: the review.system version the run is bound to; v3 is the seeded live row.
     ``v5_seeded``: the run is created under the seeded live v4 row, then the v5 seed makes v5
-    live before the worker takes the run."""
+    live before the worker takes the run. ``llm``: the models of the composition;
+    ``review_kind`` and ``verifier_kinds``: how the review and the verifier calls answer."""
     await _ready(factory)
     await _seed(factory, _up_to(_packaged(), 4) if v5_seeded else _live_assets())
     async with factory.begin() as session:
@@ -348,7 +381,8 @@ async def _scenario(
     snapshot_path = version >= 4
     queue = Queue()
     github_http = GitHubHttp(files_unavailable=1 if retry and not rag else 0, rag=rag)
-    review_kind = "review-v2" if snapshot_path else "review-v1"
+    if review_kind is None:
+        review_kind = "review-v2" if snapshot_path else "review-v1"
     if retry and rag:
         # The first attempt fails before any answer is accepted: the provider refuses its
         # review call on the primary and on the fallback model. The second attempt keeps the
@@ -357,7 +391,7 @@ async def _scenario(
     else:
         # On the retried attempt the provider refuses the review call once.
         kinds = ["conventions", *(["unavailable"] if retry else []), review_kind]
-    model_http = ModelHttp([*kinds, *(["verifier"] if snapshot_path else [])])
+    model_http = ModelHttp([*kinds, *(verifier_kinds if snapshot_path else [])])
     outcomes: list[str] = []
     async with (
         httpx.AsyncClient(
@@ -386,7 +420,7 @@ async def _scenario(
                 runs=runs,
                 session_factory=factory,
                 redis=None,
-                execution_profile=execution_profile_of(_LLM),
+                execution_profile=execution_profile_of(llm),
             ),
             vcs=vcs,
             run_source=lambda run: GitHubRunSource(
@@ -406,7 +440,7 @@ async def _scenario(
             session_factory=factory,
             queue=queue,
             github=adapters,
-            gateway=build_gateway(_LLM, llm_client, factory),
+            gateway=build_gateway(llm, llm_client, factory),
             attempt_deadline=timedelta(minutes=10),
         )
         outcomes.append(await process.handle_run.execute(run_id))
@@ -530,7 +564,15 @@ async def _scenario(
 
 
 def _observe(
-    env: Env, *, version: int, retry: bool = False, rag: bool = False, v5_seeded: bool = False
+    env: Env,
+    *,
+    version: int,
+    retry: bool = False,
+    rag: bool = False,
+    v5_seeded: bool = False,
+    llm: LlmSettings = _LLM,
+    review_kind: str | None = None,
+    verifier_kinds: tuple[str, ...] = ("verifier",),
 ) -> Observed:
     async def scenario() -> Observed:
         engine = env.engine()
@@ -541,6 +583,9 @@ def _observe(
                 retry=retry,
                 rag=rag,
                 v5_seeded=v5_seeded,
+                llm=llm,
+                review_kind=review_kind,
+                verifier_kinds=verifier_kinds,
             )
         finally:
             await engine.dispose()
@@ -974,3 +1019,87 @@ def test_a_retry_before_the_accepted_answer_retrieves_from_the_newer_index(env: 
         review_body=review_body,
         verifier_body=verifier_body,
     )
+
+
+# The review models without a fallback: the one slot a cache-miss attempt leaves after the
+# conventions, the review and the verifier goes to a repair of the same model.
+_NO_FALLBACK = LlmSettings(primary=PRIMARY, fallback=None)
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize(
+    ("llm", "recovery", "recovery_model"),
+    [(_LLM, "fallback", FALLBACK.model), (_NO_FALLBACK, "repair", PRIMARY.model)],
+    ids=["fallback", "repair"],
+)
+@pytest.mark.parametrize(
+    ("review_kind", "invalid", "valid", "error"),
+    [
+        # A range past the shown hunk (RIGHT 9-13) of the diff block.
+        ("review-v2", "verifier-unshown", "verifier", ":22-24 is not shown in verifier manifest"),
+        # RULES_FORMAT_SPEC §8.2: a supported rule finding with no requirement of its rule.
+        (
+            "review-v2-rule",
+            "verifier",
+            "verifier-rule",
+            "for candidate with rule_name '.review/rules.md' requires at least one matching "
+            "requirement_ref for this rule",
+        ),
+    ],
+    ids=["unshown-range", "rule-without-requirement"],
+)
+def test_an_invalid_verifier_reference_earns_the_bounded_recovery(
+    env: Env,
+    llm: LlmSettings,
+    recovery: str,
+    recovery_model: str,
+    review_kind: str,
+    invalid: str,
+    valid: str,
+    error: str,
+) -> None:
+    # PIPELINE_SPEC :632, TEST_PLAN :139 (#130 hotfix, tech lead 28.10): a verifier answer
+    # citing what its manifest does not show earns the bounded repair/fallback of §4.5 within
+    # the attempt's slots before verification_invalid_output; the accepted answer publishes.
+    observed = _observe(
+        env, version=4, llm=llm, review_kind=review_kind, verifier_kinds=(invalid, valid)
+    )
+
+    assert observed.state == ("publishing", None, 1)
+    calls = [request for request, _ in observed.actions["llm.call"]]
+    verification = [call for call in calls if call["stage"] == "verification"]
+    assert [(call["kind"], call["model"]) for call in verification] == [
+        ("primary", PRIMARY.model),
+        (recovery, recovery_model),
+    ]
+    assert [call["operation"] for call in verification] == ["verification", "verification"]
+    # CVS §5.2: the recovery call has a manifest row of its own; llm.verify names the
+    # accepted call and that row.
+    first, accepted = verification
+    assert first["manifest_id"] != accepted["manifest_id"]
+    [(verify, decisions)] = observed.actions["llm.verify"]
+    assert (verify["accepted_call_id"], verify["manifest_id"]) == (
+        accepted["call_id"],
+        accepted["manifest_id"],
+    )
+    assert [decision["status"] for decision in decisions["decisions"]] == ["supported"]
+    *_, first_body, recovery_body = observed.bodies
+    if recovery == "repair":
+        # The error goes back in the escaped validation errors of the bounded repair turn.
+        assert [message["role"] for message in recovery_body["messages"]] == [
+            "system",
+            "user",
+            "user",
+        ]
+        [errors] = re.findall(
+            r"<validation_errors>\n(.*?)</validation_errors>",
+            recovery_body["messages"][-1]["content"],
+            flags=re.DOTALL,
+        )
+        assert error in errors
+    else:
+        # The fallback gets the original verifier prompt.
+        assert recovery_body["messages"] == first_body["messages"]
+    [(_, postprocess)] = observed.actions["review.postprocess"]
+    assert postprocess["inline"] == 1
+    assert [pointer.run_id for pointer in observed.queue.published] == [observed.run_id]

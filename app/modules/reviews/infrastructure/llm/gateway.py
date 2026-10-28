@@ -182,8 +182,14 @@ class StructuredTask:
     # How a stored ``llm.call`` response shows the answer text (E-2: the verifier's
     # without ``decisions[].reason``); None stores the provider body as is.
     redact_answer: Callable[[str], str] | None = None
+    # The errors of an answer ``validate`` accepted, against the manifest of the call that
+    # produced it (CVS §5.2: the base, repair or fallback one); they earn the same recovery
+    # as the validator's. The verifier's reference checks; needs ``base_manifest``.
+    check_answer: Callable[[dict[str, object], CallManifest], list[str]] | None = None
 
     def __post_init__(self) -> None:
+        if self.check_answer is not None and self.base_manifest is None:
+            raise ValueError("check_answer needs a base_manifest to check against")
         if self.reserved_calls < 0:
             raise ValueError(f"reserved_calls must not be negative: {self.reserved_calls}")
         if self.reserved_seconds < 0:
@@ -703,7 +709,7 @@ class LlmGateway:
                 "duration_ms": duration_ms,
             },
         )
-        return _validated(response, task)
+        return _validated(response, task, manifest, context.run_id)
 
     async def _store_manifest(
         self,
@@ -1079,7 +1085,9 @@ def _final_hint(last: _Outcome, rate_limit_hint: float | None) -> float | None:
     return rate_limit_hint if last.error is LlmErrorCode.RATE_LIMITED else last.retry_after_s
 
 
-def _validated(response: ChatResponse, task: StructuredTask) -> _Outcome:
+def _validated(
+    response: ChatResponse, task: StructuredTask, manifest: CallManifest | None, run_id: UUID
+) -> _Outcome:
     answer = response.content or ""
     if response.refusal is not None:
         # A refusal is not a format error: repeating it with validator errors is wasted.
@@ -1095,9 +1103,35 @@ def _validated(response: ChatResponse, task: StructuredTask) -> _Outcome:
         errors = ["the answer has no text content"]
     else:
         try:
-            return _Outcome(output=task.validate(answer))
+            output = task.validate(answer)
         except InvalidAnswer as error:
             errors = error.errors
+        else:
+            if task.check_answer is None:
+                return _Outcome(output=output)
+            # CONTRACT: a task with check_answer has a base manifest (__post_init__), and
+            # every repair and fallback manifest is derived from it.
+            assert manifest is not None
+            errors = task.check_answer(output, manifest)
+            if not errors:
+                return _Outcome(output=output)
+            # The checks carry counts, line numbers, our candidate ids and rule names, manifest
+            # roles and revisions, the PR's diff_old_sha, and block, check and candidate ids cut to
+            # 64 characters (model text only when such an id matched nothing in the manifest or
+            # the candidates), never `reason` or other answer text; the same caps as the repair
+            # envelope. The default formatter drops extras, so the message carries the errors
+            # too; json.dumps escapes newlines in model-supplied ids.
+            logged = bounded_errors(errors)
+            logger.info(
+                "llm answer failed the manifest check: %s",
+                json.dumps(logged),
+                extra={
+                    "run_id": str(run_id),
+                    "operation": task.operation,
+                    "call_id": str(manifest.call_id),
+                    "errors": logged,
+                },
+            )
     return _Outcome(
         error=LlmErrorCode.INVALID_OUTPUT,
         message="; ".join(errors)[:500],

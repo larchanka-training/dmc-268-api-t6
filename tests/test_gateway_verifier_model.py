@@ -3,7 +3,9 @@
 ``GatewayVerifierModel`` sends the verifier prompt through ``LlmGateway`` on the verifier
 route: its own model pair, the ``verification`` ledger operation, bounded repair and the
 strict ``review/schemas/verifier-output.schema.v1.json``. The candidate-ID and reference
-checks stay in ``ReflectionPass``. No network: provider answers come from
+checks of ``ReflectionPass`` run in the gateway on every schema-valid answer, against the
+manifest of its call: their errors earn the same repair and fallback within the attempt's
+slots (#130, tech lead 2026-10-28). No network: provider answers come from
 ``httpx.MockTransport``.
 """
 
@@ -11,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
@@ -49,20 +52,23 @@ from app.modules.reviews.application.prompt_builder import (
 from app.modules.reviews.application.reflection_pass import (
     CandidateFindingItem,
     ReflectionPass,
+    VerificationInvalidOutputError,
     VerifierPromptBuilder,
     VerifierReply,
 )
 from app.modules.reviews.application.review_output import EvidenceRef, ReviewFindingV2
+from app.modules.reviews.application.run_failures import RETRYABLE_ERROR_CODES, classify_failure
 from app.modules.reviews.infrastructure.llm.answers import (
     InvalidAnswer,
     validate_verifier_answer,
 )
-from app.modules.reviews.infrastructure.llm.gateway import LlmGateway
+from app.modules.reviews.infrastructure.llm.gateway import LlmGateway, StructuredTask
 from app.modules.reviews.infrastructure.llm.models import (
     VERIFICATION_OPERATION,
     GatewayVerifierModel,
 )
 from app.modules.reviews.infrastructure.llm.settings import LlmSettings, ModelPrice, ModelProfile
+from app.modules.reviews.infrastructure.llm.transport import ChatMessage, ResponseSchema
 from tests.llm_fakes import FakeClock, ScriptedProvider, completion
 from tests.policy_snapshot_fakes import (
     make_complete_execution_profile,
@@ -498,3 +504,187 @@ def test_reflection_pass_verifies_two_candidates_through_the_gateway() -> None:
     assert provider.run(verify) == [("c-1", "supported"), ("c-2", "contradicted")]
     assert provider.models() == ["verifier-model"]
     assert [usage.operation for _, usage in provider.ledger.events] == ["verification"]
+
+
+# ---------- reference errors earn the bounded recovery (#130 hotfix, tech lead 28.10) ----------
+
+
+def _unshown(candidate_id: str) -> dict[str, Any]:
+    """A decision citing lines the diff block never showed (it shows line 10 only)."""
+    return dict(
+        _decision(candidate_id),
+        evidence_refs=[{"block_id": QUERY_BLOCK, "start_line": 22, "end_line": 24}],
+    )
+
+
+def _verify_one(context: ReviewContext | None = None) -> Callable[[LlmGateway], Awaitable[Any]]:
+    async def verify(gateway: LlmGateway) -> Any:
+        return await ReflectionPass(GatewayVerifierModel(gateway, RUN)).verify_recorded(
+            candidates=(_candidate("c-1"),),
+            context=_context(_snapshot()) if context is None else context,
+        )
+
+    return verify
+
+
+def test_reference_errors_earn_the_repair_then_the_fallback(guarded: _Guarded) -> None:
+    # PIPELINE_SPEC :632, TEST_PLAN :139: a range the manifest does not show, then a decision
+    # for an id that was never sent; the fallback's answer is accepted.
+    provider = _Provider(
+        [
+            completion(_answer(_unshown("c-1"))),
+            completion(_answer(_decision("c-9"))),
+            completion(_answer(_decision("c-1"))),
+        ]
+    )
+
+    record = provider.run(_verify_one())
+
+    assert provider.kinds() == ["primary", "repair", "fallback"]
+    assert provider.models() == ["verifier-model", "verifier-model", "verifier-fallback-model"]
+    assert [usage.operation for _, usage in provider.ledger.events] == ["verification"] * 3
+    assert [manifest.recovery_kind for manifest in guarded.manifests] == ["repair", "fallback"]
+    assert record.accepted_call_id == guarded.manifests[1].call_id
+    assert [(decision.candidate_id, decision.status) for decision in record.decisions] == [
+        ("c-1", "supported")
+    ]
+    # The repair turn quotes the reference error in the escaped, bounded validation errors.
+    repair_turn = provider.bodies()[1]["messages"][-1]["content"]
+    assert (
+        "<validation_errors>\n"
+        f"- Decision c-1 evidence_ref {QUERY_BLOCK}:22-24 is not shown in verifier manifest\n"
+        "</validation_errors>"
+    ) in repair_turn
+
+
+def test_the_repair_turn_names_the_missing_and_unknown_candidate_ids() -> None:
+    provider = _Provider(
+        [completion(_answer(_decision("c-9"))), completion(_answer(_decision("c-1")))]
+    )
+
+    record = provider.run(_verify_one())
+
+    assert provider.kinds() == ["primary", "repair"]
+    assert [decision.candidate_id for decision in record.decisions] == ["c-1"]
+    assert (
+        "<validation_errors>\n"
+        "- Verifier returned decisions for 1 items, expected 1: missing c-1; unknown c-9\n"
+        "</validation_errors>"
+    ) in provider.bodies()[1]["messages"][-1]["content"]
+
+
+def test_a_rule_finding_without_its_requirement_earns_the_repair() -> None:
+    # RULES_FORMAT_SPEC §8.2: a supported finding with rule_name cites its rule.
+    provider = _Provider(
+        [
+            completion(_answer(dict(_decision("c-1"), requirement_refs=[]))),
+            completion(_answer(_decision("c-1"))),
+        ]
+    )
+
+    record = provider.run(_verify_one())
+
+    assert provider.kinds() == ["primary", "repair"]
+    assert [decision.status for decision in record.decisions] == ["supported"]
+    assert (
+        "- Decision c-1 for candidate with rule_name '.review/rules.md' requires at least one "
+        "matching requirement_ref for this rule\n"
+    ) in provider.bodies()[1]["messages"][-1]["content"]
+
+
+def test_three_invalid_references_fail_with_verification_invalid_output() -> None:
+    provider = _Provider([completion(_answer(_unshown("c-1"))) for _ in range(3)])
+
+    with pytest.raises(VerificationInvalidOutputError) as caught:
+        provider.run(_verify_one())
+
+    assert provider.kinds() == ["primary", "repair", "fallback"]
+    # Terminal: no run retry.
+    failure = classify_failure(caught.value)
+    assert failure.error_code == "verification_invalid_output"
+    assert failure.error_code not in RETRYABLE_ERROR_CODES
+
+
+def test_reference_errors_are_logged_without_the_answer_text(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    provider = _Provider(
+        [completion(_answer(_unshown("c-1"))), completion(_answer(_decision("c-1")))]
+    )
+
+    with caplog.at_level(logging.INFO, logger=gateway_module.__name__):
+        provider.run(_verify_one())
+
+    [record] = [
+        record
+        for record in caplog.records
+        if record.getMessage().startswith("llm answer failed the manifest check")
+    ]
+    errors = [f"Decision c-1 evidence_ref {QUERY_BLOCK}:22-24 is not shown in verifier manifest"]
+    assert record.levelno == logging.INFO
+    assert {key: record.__dict__[key] for key in ("run_id", "operation", "errors")} == {
+        "run_id": str(RUN_ID),
+        "operation": "verification",
+        "errors": errors,
+    }
+    # The default formatter drops extras: the message itself carries the errors.
+    assert json.dumps(errors) in record.getMessage()
+    # Ids and line numbers only: the answer's reason is in no log record.
+    reason = _decision("c-1")["reason"]
+    assert reason not in record.getMessage()
+    assert not any(reason in str(vars(record)) for record in caplog.records)
+
+
+def test_a_reference_error_without_a_free_slot_fails_without_recovery() -> None:
+    # C1 -> R1 -> R2 fallback -> V1: the verifier's primary is the attempt's fourth and last
+    # call (max_calls_per_attempt=4), so its invalid answer has no repair and no fallback.
+    spent = StructuredTask(
+        operation="review",
+        messages=(ChatMessage("user", "spend one slot"),),
+        schema=ResponseSchema("Spent", {"type": "object"}),
+        validate=lambda content: dict(json.loads(content)),
+    )
+    provider = _Provider(
+        [*(completion("{}") for _ in range(3)), completion(_answer(_unshown("c-1")))]
+    )
+
+    async def verify(gateway: LlmGateway) -> Any:
+        for _ in range(3):
+            await gateway.generate(spent, RUN)
+        return await _verify_one()(gateway)
+
+    with pytest.raises(VerificationInvalidOutputError) as caught:
+        provider.run(verify)
+
+    assert provider.kinds() == ["primary"] * 4
+    assert [usage.operation for _, usage in provider.ledger.events] == [
+        "review",
+        "review",
+        "review",
+        "verification",
+    ]
+    assert classify_failure(caught.value).error_code == "verification_invalid_output"
+
+
+def test_a_repair_answer_is_checked_against_the_repair_manifest() -> None:
+    # CVS §5.2: refs of a repair resolve against its own manifest, where the previous answer
+    # is a previous_output block and never code evidence. Without a verifier fallback the
+    # repair's own error ends the verification.
+    citing_previous = dict(
+        _decision("c-1"),
+        evidence_refs=[{"block_id": "previous-output", "start_line": 1, "end_line": 1}],
+    )
+    provider = _Provider(
+        [completion(_answer(_unshown("c-1"))), completion(_answer(citing_previous))]
+    )
+    settings = LlmSettings(primary=REVIEW, fallback=None, verifier=VERIFIER)
+
+    with pytest.raises(VerificationInvalidOutputError) as caught:
+        provider.run(_verify_one(), settings=settings)
+
+    assert provider.kinds() == ["primary", "repair"]
+    assert isinstance(caught.value.__cause__, LlmCallFailed)
+    assert str(caught.value.__cause__) == (
+        "llm_invalid_output: Decision c-1 evidence_ref previous-output has non-code role "
+        "'previous_output'"
+    )

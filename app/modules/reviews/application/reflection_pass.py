@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import json
 import uuid
+from collections import Counter
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
 from datetime import timedelta
@@ -62,6 +63,10 @@ _STRICT = ConfigDict(extra="forbid", strict=True)
 # The longest provider Retry-After a verifier failure carries: one day, as the other
 # Retry-After caps (code_index, rules-status).
 _MAX_RETRY_AFTER_S = 86_400.0
+# The most reference errors one verifier answer reports: the gateway's cap on validator errors.
+_MAX_ANSWER_ERRORS = 20
+# The most unknown candidate ids the 1:1 mismatch error names; the rest are only counted.
+_MAX_UNKNOWN_IDS = 5
 
 
 class VerificationDecision(BaseModel):
@@ -132,6 +137,8 @@ class VerifierReply:
     accepted_call_id: uuid.UUID | None = None
     # That call's stored manifest (``context_manifests``); None without a manifest store.
     manifest_id: uuid.UUID | None = None
+    # That call's manifest (the base, repair or fallback one); None checks the base manifest.
+    accepted_manifest: CallManifest | None = None
 
 
 @dataclass(frozen=True)
@@ -145,11 +152,18 @@ class VerificationRecord:
     manifest_id: uuid.UUID | None = None
 
 
+# The reference checks of a schema-valid verifier answer against the manifest of the call that
+# produced it: ``verification_answer_errors`` bound to the candidates and the context.
+type VerifierAnswerCheck = Callable[[VerificationOutput, CallManifest], list[str]]
+
+
 class VerifierModel(Protocol):
     """Protocol for the injected verifier model provider.
 
     ``manifest`` describes the blocks of ``user_prompt``; ``context`` is the review context
-    the candidates came from, for the pre-send guard of repair and fallback calls.
+    the candidates came from, for the pre-send guard of repair and fallback calls. ``check``
+    returns the reference errors of an answer against its call's manifest; a model with
+    recovery repairs or falls back on them (PIPELINE_SPEC §4.5).
     """
 
     async def verify(
@@ -159,6 +173,7 @@ class VerifierModel(Protocol):
         user_prompt: str,
         manifest: CallManifest,
         context: ReviewContext,
+        check: VerifierAnswerCheck | None = None,
     ) -> VerifierReply | Mapping[str, Any] | str | bytes: ...
 
 
@@ -716,6 +731,229 @@ class VerifierPromptBuilder:
     # Pre-send guard on verifier prompt tokens is performed in ReflectionPass.verify.
 
 
+def _service_defaults_check_lines(context: ReviewContext) -> dict[str, int]:
+    """The shown stable check_id of each service default -> its line in the defaults block."""
+    service_defaults_check_lines: dict[str, int] = {}
+    line_offset = 1
+    if context.rules:
+        defaults_checksum = (
+            context.policy_snapshot.defaults_checksum
+            if context.policy_snapshot is not None
+            else None
+        )
+        for r in context.rules:
+            check_ids = get_rule_check_ids(r, defaults_checksum=defaults_checksum)
+            for c_id in check_ids:
+                if c_id in service_defaults_check_lines:
+                    raise PolicyError(
+                        PolicyErrorCode.SNAPSHOT_INTEGRITY_ERROR,
+                        f"Duplicate service defaults check ID {c_id!r}",
+                    )
+                service_defaults_check_lines[c_id] = line_offset
+                line_offset += 1
+    return service_defaults_check_lines
+
+
+def verification_answer_errors(
+    output: VerificationOutput,
+    *,
+    candidates: tuple[CandidateFindingItem, ...],
+    manifest: CallManifest,
+    context: ReviewContext,
+    check_lines: Mapping[str, int],
+) -> list[str]:
+    """The errors of a schema-valid verifier answer against its call's manifest (CVS §7.2).
+
+    Empty when the answer is acceptable: one decision per candidate ID, every ref shown in
+    ``manifest`` with its source role and revision, and a requirement of its rule for each
+    supported or contradicted rule finding (RULES_FORMAT_SPEC §8.2). The gateway validator
+    sends them to the bounded repair and the fallback; ``ReflectionPass`` raises the first as
+    its final guard. At most ``_MAX_ANSWER_ERRORS``, carrying only counts, line numbers, our
+    candidate ids, the candidate's ``rule_name`` (or its service-defaults rule id), manifest
+    source roles and block revisions, the PR's ``diff_old_sha``, and block, check and candidate
+    ids cut to 64 characters, model text only when such an id matched nothing in the manifest
+    or the candidates; never ``reason`` or other answer text. ``check_lines`` is
+    ``_service_defaults_check_lines(context)``.
+    """
+    # Ensure exact 1:1 match of decisions to candidate IDs
+    cand_by_id = {c.candidate_id: c for c in candidates}
+    decision_ids = {d.candidate_id for d in output.decisions}
+    if len(output.decisions) != len(candidates) or decision_ids != set(cand_by_id.keys()):
+        return [
+            f"Verifier returned decisions for {len(output.decisions)} items, "
+            f"expected {len(candidates)}{_candidate_mismatch(output, cand_by_id)}"
+        ]
+
+    errors: list[str] = []
+    for decision in output.decisions:
+        cand = cand_by_id[decision.candidate_id]
+        cand_id_clean = decision.candidate_id[:64]
+        # 1. Validate evidence_refs
+        for ref in decision.evidence_refs:
+            error = _evidence_ref_error(ref, cand_id_clean, manifest, context)
+            if error is not None:
+                errors.append(error)
+        # 2. Validate requirement_refs
+        for req_ref in decision.requirement_refs:
+            error = _requirement_ref_error(req_ref, cand, cand_id_clean, manifest, check_lines)
+            if error is not None:
+                errors.append(error)
+        # 3. For supported/contradicted with rule_name, require at least one matching
+        # requirement_ref (RULES_FORMAT_SPEC §8.2)
+        error = _rule_requirement_error(decision, cand, manifest)
+        if error is not None:
+            errors.append(error)
+    return errors[:_MAX_ANSWER_ERRORS]
+
+
+def _candidate_mismatch(
+    output: VerificationOutput, cand_by_id: Mapping[str, CandidateFindingItem]
+) -> str:
+    """What breaks the 1:1 match, for the repair: ``": missing …; unknown …; duplicated …"``.
+
+    Missing and duplicated ids are ours; unknown ids are the model's, cut to 64 characters, at
+    most ``_MAX_UNKNOWN_IDS`` named and the rest counted. Each group sorted, empty ones left out.
+    """
+    counts = Counter(d.candidate_id for d in output.decisions)
+    missing = sorted(c_id for c_id in cand_by_id if c_id not in counts)
+    unknown = sorted({c_id[:64] for c_id in counts if c_id not in cand_by_id})
+    duplicated = sorted(c_id for c_id in cand_by_id if counts[c_id] > 1)
+    groups: list[str] = []
+    if missing:
+        groups.append(f"missing {', '.join(missing)}")
+    if unknown:
+        more = len(unknown) - _MAX_UNKNOWN_IDS
+        suffix = f" (+{more} more)" if more > 0 else ""
+        groups.append(f"unknown {', '.join(unknown[:_MAX_UNKNOWN_IDS])}{suffix}")
+    if duplicated:
+        groups.append(f"duplicated {', '.join(duplicated)}")
+    return f": {'; '.join(groups)}" if groups else ""
+
+
+def _evidence_ref_error(
+    ref: EvidenceRef, cand_id_clean: str, manifest: CallManifest, context: ReviewContext
+) -> str | None:
+    block_id_clean = ref.block_id[:64]
+    block = manifest.get_block(ref.block_id)
+    if block is None:
+        return f"Decision {cand_id_clean} evidence_ref {block_id_clean} not found in manifest"
+    if block.source_role not in {
+        "diff",
+        "source_excerpt",
+        "ast_excerpt",
+        "retrieved_excerpt",
+    }:
+        return (
+            f"Decision {cand_id_clean} evidence_ref {block_id_clean} "
+            f"has non-code role '{block.source_role}'"
+        )
+    if block.revision is not None and context.pr_meta is not None:
+        if block.side == "LEFT":
+            expected_rev = context.pr_meta.diff_old_sha
+            if not expected_rev or block.revision != expected_rev:
+                return (
+                    f"Decision {cand_id_clean} evidence_ref {block_id_clean} "
+                    f"LEFT revision '{block.revision}' does not match "
+                    f"PR diff_old_sha '{expected_rev}'"
+                )
+        else:
+            expected_rev = context.pr_meta.head_sha
+            # Fail closed like LEFT (D7, #144): without a head no revision passes.
+            if not expected_rev or block.revision != expected_rev:
+                return (
+                    f"Decision {cand_id_clean} evidence_ref {block_id_clean} "
+                    f"revision '{block.revision}' does not match PR revision"
+                )
+    if not manifest.is_range_shown(ref.block_id, ref.start_line, ref.end_line):
+        return (
+            f"Decision {cand_id_clean} evidence_ref {block_id_clean}:"
+            f"{ref.start_line}-{ref.end_line} is not shown in verifier manifest"
+        )
+    return None
+
+
+def _requirement_ref_error(
+    req_ref: RequirementRef,
+    cand: CandidateFindingItem,
+    cand_id_clean: str,
+    manifest: CallManifest,
+    check_lines: Mapping[str, int],
+) -> str | None:
+    req_block_id_clean = req_ref.block_id[:64]
+    block = manifest.get_block(req_ref.block_id)
+    if block is None:
+        return (
+            f"Decision {cand_id_clean} requirement_ref block "
+            f"'{req_block_id_clean}' not found in manifest"
+        )
+    if block.source_role not in {"policy_document", "service_defaults"}:
+        return (
+            f"Decision {cand_id_clean} requirement_ref block "
+            f"'{req_block_id_clean}' has invalid role '{block.source_role}'"
+        )
+    if not manifest.is_range_shown(req_ref.block_id, req_ref.start_line, req_ref.end_line):
+        return (
+            f"Decision {cand_id_clean} requirement_ref range "
+            f"{req_ref.start_line}-{req_ref.end_line} "
+            f"not shown in '{req_block_id_clean}'"
+        )
+    if block.source_role != "service_defaults":
+        if req_ref.check_id is not None:
+            return (
+                f"Decision {cand_id_clean} check_id is only allowed "
+                f"for service_defaults, got '{block.source_role}'"
+            )
+        return None
+    if req_ref.check_id is None:
+        return f"Decision {cand_id_clean} check_id is required for service_defaults"
+    req_check_id_clean = req_ref.check_id[:64]
+    if cand.finding.rule_name and cand.finding.rule_name.startswith("service-defaults:"):
+        rule_id = cand.finding.rule_name.removeprefix("service-defaults:")
+        expected_line = check_lines.get(rule_id) if req_ref.check_id == rule_id else None
+        if expected_line is None:
+            return (
+                f"Decision {cand_id_clean} check_id '{req_check_id_clean}' "
+                f"does not match service defaults rule '{rule_id}'"
+            )
+    else:
+        expected_line = check_lines.get(req_ref.check_id)
+        if expected_line is None:
+            return (
+                f"Decision {cand_id_clean} check_id '{req_check_id_clean}' "
+                "does not match any service defaults rule"
+            )
+    if not (req_ref.start_line <= expected_line <= req_ref.end_line):
+        return (
+            f"Decision {cand_id_clean} requirement_ref range "
+            f"{req_ref.start_line}-{req_ref.end_line} does not cover check "
+            f"'{req_check_id_clean}' line {expected_line}"
+        )
+    return None
+
+
+def _rule_requirement_error(
+    decision: VerificationDecision, cand: CandidateFindingItem, manifest: CallManifest
+) -> str | None:
+    if cand.finding.rule_name is None or decision.status not in {"supported", "contradicted"}:
+        return None
+    rname = cand.finding.rule_name
+    for req_ref in decision.requirement_refs:
+        block = manifest.get_block(req_ref.block_id)
+        if block is not None and (
+            rname == ".review/rules.md"
+            and block.source_kind == "repository_rules"
+            or rname == "AGENTS.md"
+            and block.source_kind == "project_conventions_document"
+            or rname.startswith("service-defaults:")
+            and block.source_role == "service_defaults"
+        ):
+            return None
+    return (
+        f"Decision {decision.candidate_id} for candidate with rule_name '{rname}' "
+        f"requires at least one matching requirement_ref for this rule"
+    )
+
+
 class ReflectionPass:
     """Orchestrates candidate verification against visible code and policy requirements."""
 
@@ -782,12 +1020,24 @@ class ReflectionPass:
                 manifest, context=context, snapshot=context.policy_snapshot
             )
 
+        check_lines = _service_defaults_check_lines(context)
+
+        def check(output: VerificationOutput, call_manifest: CallManifest) -> list[str]:
+            return verification_answer_errors(
+                output,
+                candidates=candidates,
+                manifest=call_manifest,
+                context=context,
+                check_lines=check_lines,
+            )
+
         try:
             reply = await self._model.verify(
                 system_prompt=prompt.system,
                 user_prompt=prompt.user,
                 manifest=manifest,
                 context=context,
+                check=check,
             )
         except TimeoutError as exc:
             raise VerificationUnavailableError("Verifier model timed out") from exc
@@ -837,9 +1087,10 @@ class ReflectionPass:
             raise VerificationUnavailableError("Verifier model call failed") from exc
 
         manifest_id: uuid.UUID | None = None
+        accepted_manifest: CallManifest | None = None
         if isinstance(reply, VerifierReply):
             raw_output, accepted_call_id = reply.output, reply.accepted_call_id
-            manifest_id = reply.manifest_id
+            manifest_id, accepted_manifest = reply.manifest_id, reply.accepted_manifest
         else:
             raw_output, accepted_call_id = reply, None
         try:
@@ -858,177 +1109,17 @@ class ReflectionPass:
                 "Malformed verifier response schema or JSON"
             ) from exc
 
-        # Ensure exact 1:1 match of decisions to candidate IDs
-        cand_by_id = {c.candidate_id: c for c in candidates}
-        decision_ids = {d.candidate_id for d in parsed.decisions}
-
-        if len(parsed.decisions) != len(candidates) or decision_ids != set(cand_by_id.keys()):
-            raise VerificationInvalidOutputError(
-                f"Verifier returned decisions for {len(parsed.decisions)} items, "
-                f"expected {len(candidates)}"
-            )
-
-        # Build check lines mapping for service defaults:
-        # shown stable check_id -> line_number
-        service_defaults_check_lines: dict[str, int] = {}
-        line_offset = 1
-        if context.rules:
-            defaults_checksum = (
-                context.policy_snapshot.defaults_checksum
-                if context.policy_snapshot is not None
-                else None
-            )
-            for r in context.rules:
-                check_ids = get_rule_check_ids(r, defaults_checksum=defaults_checksum)
-                for c_id in check_ids:
-                    if c_id in service_defaults_check_lines:
-                        raise PolicyError(
-                            PolicyErrorCode.SNAPSHOT_INTEGRITY_ERROR,
-                            f"Duplicate service defaults check ID {c_id!r}",
-                        )
-                    service_defaults_check_lines[c_id] = line_offset
-                    line_offset += 1
-
-        # Validate evidence and requirement references against manifest
-        for decision in parsed.decisions:
-            cand = cand_by_id[decision.candidate_id]
-            cand_id_clean = decision.candidate_id[:64]
-
-            # 1. Validate evidence_refs
-            for ref in decision.evidence_refs:
-                block_id_clean = ref.block_id[:64]
-                block = manifest.get_block(ref.block_id)
-                if block is None:
-                    raise VerificationInvalidOutputError(
-                        f"Decision {cand_id_clean} evidence_ref {block_id_clean} "
-                        "not found in manifest"
-                    )
-                if block.source_role not in {
-                    "diff",
-                    "source_excerpt",
-                    "ast_excerpt",
-                    "retrieved_excerpt",
-                }:
-                    raise VerificationInvalidOutputError(
-                        f"Decision {cand_id_clean} evidence_ref {block_id_clean} "
-                        f"has non-code role '{block.source_role}'"
-                    )
-                if block.revision is not None and context.pr_meta is not None:
-                    if block.side == "LEFT":
-                        expected_rev = context.pr_meta.diff_old_sha
-                        if not expected_rev or block.revision != expected_rev:
-                            raise VerificationInvalidOutputError(
-                                f"Decision {cand_id_clean} evidence_ref {block_id_clean} "
-                                f"LEFT revision '{block.revision}' does not match "
-                                f"PR diff_old_sha '{expected_rev}'"
-                            )
-                    else:
-                        expected_rev = context.pr_meta.head_sha
-                        # Fail closed like LEFT (D7, #144): without a head no revision passes.
-                        if not expected_rev or block.revision != expected_rev:
-                            raise VerificationInvalidOutputError(
-                                f"Decision {cand_id_clean} evidence_ref {block_id_clean} "
-                                f"revision '{block.revision}' does not match PR revision"
-                            )
-                if not manifest.is_range_shown(ref.block_id, ref.start_line, ref.end_line):
-                    raise VerificationInvalidOutputError(
-                        f"Decision {cand_id_clean} evidence_ref {block_id_clean}:"
-                        f"{ref.start_line}-{ref.end_line} is not shown in verifier manifest"
-                    )
-
-            # 2. Validate requirement_refs
-            for req_ref in decision.requirement_refs:
-                req_block_id_clean = req_ref.block_id[:64]
-                block = manifest.get_block(req_ref.block_id)
-                if block is None:
-                    raise VerificationInvalidOutputError(
-                        f"Decision {cand_id_clean} requirement_ref block "
-                        f"'{req_block_id_clean}' not found in manifest"
-                    )
-                if block.source_role not in {"policy_document", "service_defaults"}:
-                    raise VerificationInvalidOutputError(
-                        f"Decision {cand_id_clean} requirement_ref block "
-                        f"'{req_block_id_clean}' has invalid role '{block.source_role}'"
-                    )
-                if not manifest.is_range_shown(
-                    req_ref.block_id, req_ref.start_line, req_ref.end_line
-                ):
-                    raise VerificationInvalidOutputError(
-                        f"Decision {cand_id_clean} requirement_ref range "
-                        f"{req_ref.start_line}-{req_ref.end_line} "
-                        f"not shown in '{req_block_id_clean}'"
-                    )
-                if block.source_role == "service_defaults":
-                    if req_ref.check_id is None:
-                        raise VerificationInvalidOutputError(
-                            f"Decision {cand_id_clean} check_id is required for service_defaults"
-                        )
-                    req_check_id_clean = req_ref.check_id[:64]
-                    if cand.finding.rule_name and cand.finding.rule_name.startswith(
-                        "service-defaults:"
-                    ):
-                        rule_id = cand.finding.rule_name.removeprefix("service-defaults:")
-                        expected_line = (
-                            service_defaults_check_lines.get(rule_id)
-                            if req_ref.check_id == rule_id
-                            else None
-                        )
-                        if expected_line is None:
-                            raise VerificationInvalidOutputError(
-                                f"Decision {cand_id_clean} check_id '{req_check_id_clean}' "
-                                f"does not match service defaults rule '{rule_id}'"
-                            )
-                        if not (req_ref.start_line <= expected_line <= req_ref.end_line):
-                            raise VerificationInvalidOutputError(
-                                f"Decision {cand_id_clean} requirement_ref range "
-                                f"{req_ref.start_line}-{req_ref.end_line} does not cover check "
-                                f"'{req_check_id_clean}' line {expected_line}"
-                            )
-                    else:
-                        expected_line = service_defaults_check_lines.get(req_ref.check_id)
-                        if expected_line is None:
-                            raise VerificationInvalidOutputError(
-                                f"Decision {cand_id_clean} check_id '{req_check_id_clean}' "
-                                "does not match any service defaults rule"
-                            )
-                        if not (req_ref.start_line <= expected_line <= req_ref.end_line):
-                            raise VerificationInvalidOutputError(
-                                f"Decision {cand_id_clean} requirement_ref range "
-                                f"{req_ref.start_line}-{req_ref.end_line} does not cover check "
-                                f"'{req_check_id_clean}' line {expected_line}"
-                            )
-                else:
-                    if req_ref.check_id is not None:
-                        raise VerificationInvalidOutputError(
-                            f"Decision {cand_id_clean} check_id is only allowed "
-                            f"for service_defaults, got '{block.source_role}'"
-                        )
-
-            # 3. For supported/contradicted with rule_name, require at least one matching
-            # requirement_ref (RULES_FORMAT_SPEC §8.2)
-            if cand.finding.rule_name is not None and decision.status in {
-                "supported",
-                "contradicted",
-            }:
-                rname = cand.finding.rule_name
-                matched = False
-                for req_ref in decision.requirement_refs:
-                    block = manifest.get_block(req_ref.block_id)
-                    if block is not None and (
-                        rname == ".review/rules.md"
-                        and block.source_kind == "repository_rules"
-                        or rname == "AGENTS.md"
-                        and block.source_kind == "project_conventions_document"
-                        or rname.startswith("service-defaults:")
-                        and block.source_role == "service_defaults"
-                    ):
-                        matched = True
-                        break
-                if not matched:
-                    raise VerificationInvalidOutputError(
-                        f"Decision {decision.candidate_id} for candidate with rule_name '{rname}' "
-                        f"requires at least one matching requirement_ref for this rule"
-                    )
+        # The final guard: the same checks the gateway validator ran on the accepted answer,
+        # against that call's manifest (CVS §7.2), the base one when the model names none.
+        errors = verification_answer_errors(
+            parsed,
+            candidates=candidates,
+            manifest=manifest if accepted_manifest is None else accepted_manifest,
+            context=context,
+            check_lines=check_lines,
+        )
+        if errors:
+            raise VerificationInvalidOutputError(errors[0])
 
         return VerificationRecord(
             decisions=tuple(parsed.decisions),
