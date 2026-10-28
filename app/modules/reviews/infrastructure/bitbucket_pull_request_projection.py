@@ -28,6 +28,7 @@ from app.modules.reviews.application.project_bitbucket_pull_request import (
     BitbucketPullRequestCommand,
     BitbucketPullRequestIdentityMismatch,
     BitbucketPullRequestStale,
+    BitbucketPullRequestUntrackedClosed,
     CanonicalBitbucketPullRequest,
     ProjectedBitbucketPullRequest,
 )
@@ -200,6 +201,35 @@ class SqlAlchemyBitbucketPullRequestProjectionStore:
         await _check_target(self._session, target, webhook_generation)
         if current.repository_uuid != target.repository_uuid:
             raise BitbucketPullRequestIdentityMismatch()
+        lookup = (
+            select(CodeChange)
+            .where(
+                CodeChange.repository_id == target.repository_id,
+                (CodeChange.external_id == current.number)
+                | (CodeChange.external_number == current.number),
+            )
+            .order_by(CodeChange.id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+        existing: tuple[CodeChange, ...] = ()
+        if current.head_sha is None:
+            if current.state == "open":
+                raise BitbucketPullRequestIdentityMismatch()
+            existing = tuple(await self._session.scalars(lookup))
+            if not existing:
+                raise BitbucketPullRequestUntrackedClosed()
+            if (
+                len(existing) != 1
+                or existing[0].external_id != current.number
+                or existing[0].external_number != current.number
+            ):
+                raise BitbucketPullRequestStale()
+            head_sha = existing[0].head_sha
+            base_sha = existing[0].base_sha
+        else:
+            head_sha = current.head_sha
+            base_sha = current.base_sha
         values = dict(
             repository_id=target.repository_id,
             external_id=current.number,
@@ -209,32 +239,22 @@ class SqlAlchemyBitbucketPullRequestProjectionStore:
             author_login=current.author_login,
             source_branch=current.source_branch,
             target_branch=current.target_branch,
-            base_sha=current.base_sha,
-            head_sha=current.head_sha,
+            base_sha=base_sha,
+            head_sha=head_sha,
             state=CodeChangeState(current.state),
             provider_updated_at=current.provider_updated_at,
             web_url=current.web_url,
         )
         now = datetime.now(UTC)
-        inserted = await self._session.scalar(
-            insert(CodeChange)
-            .values(id=uuid4(), head_first_seen_at=now, **values)
-            .on_conflict_do_nothing()
-            .returning(CodeChange.id)
-        )
-        rows = tuple(
-            await self._session.scalars(
-                select(CodeChange)
-                .where(
-                    CodeChange.repository_id == target.repository_id,
-                    (CodeChange.external_id == current.number)
-                    | (CodeChange.external_number == current.number),
-                )
-                .order_by(CodeChange.id)
-                .with_for_update()
-                .execution_options(populate_existing=True)
+        inserted = None
+        if not existing:
+            inserted = await self._session.scalar(
+                insert(CodeChange)
+                .values(id=uuid4(), head_first_seen_at=now, **values)
+                .on_conflict_do_nothing()
+                .returning(CodeChange.id)
             )
-        )
+        rows = existing or tuple(await self._session.scalars(lookup))
         if (
             len(rows) != 1
             or rows[0].external_id != current.number
@@ -244,20 +264,17 @@ class SqlAlchemyBitbucketPullRequestProjectionStore:
         row = rows[0]
         if row.provider_updated_at is not None and (
             current.provider_updated_at < row.provider_updated_at
-            or (
-                current.provider_updated_at == row.provider_updated_at
-                and current.head_sha != row.head_sha
-            )
+            or (current.provider_updated_at == row.provider_updated_at and head_sha != row.head_sha)
         ):
             raise BitbucketPullRequestStale()
-        changed = inserted is not None or row.head_sha != current.head_sha
+        changed = inserted is not None or row.head_sha != head_sha
         if changed:
             row.head_first_seen_at = now
         for key, value in values.items():
             setattr(row, key, value)
         if changed or current.state != "open":
             reason = "superseded" if current.state == "open" else "closed"
-            await self._cancel_obsolete(row.id, target.workspace_id, current.head_sha, reason, now)
+            await self._cancel_obsolete(row.id, target.workspace_id, head_sha, reason, now)
         await self._session.flush()
         external_id = await self._session.scalar(
             select(Repository.external_id).where(Repository.id == target.repository_id)
@@ -270,14 +287,14 @@ class SqlAlchemyBitbucketPullRequestProjectionStore:
             await self._session.scalar(
                 select(Run.id).where(
                     Run.code_change_id == row.id,
-                    Run.head_sha == current.head_sha,
+                    Run.head_sha == head_sha,
                     Run.trigger == "webhook",
                 )
             )
             is None
         )
         return ProjectedBitbucketPullRequest(
-            row.id, external_id, current.head_sha, current.state, changed, run_missing
+            row.id, external_id, head_sha, current.state, changed, run_missing
         )
 
     async def _cancel_obsolete(

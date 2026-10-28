@@ -29,6 +29,11 @@ class BitbucketPullRequestStale(ValueError):
         super().__init__("bitbucket_pull_request_stale")
 
 
+class BitbucketPullRequestUntrackedClosed(ValueError):
+    def __init__(self) -> None:
+        super().__init__("bitbucket_pull_request_untracked_closed")
+
+
 @dataclass(frozen=True)
 class BitbucketPullRequestCommand:
     installation_id: UUID
@@ -65,7 +70,7 @@ class CanonicalBitbucketPullRequest:
     source_branch: str
     target_branch: str
     base_sha: str
-    head_sha: str
+    head_sha: str | None
     provider_updated_at: datetime
     web_url: str
 
