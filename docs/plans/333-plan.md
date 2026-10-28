@@ -8,9 +8,10 @@
 ## Source and baseline
 
 - Issue: https://github.com/larchanka-training/dmc-268-api-t6/issues/333 (read 2026-10-26).
-- Historical implementation baseline: `origin/main` at `88bbc073`. The round 5
-  integration candidate is based on `10d2848a`; rebase on the current `main`
-  before publication and record the published head in PR #340.
+- Historical implementation baseline: `origin/main` at `88bbc073`; the round 5
+  candidate before rebase was based on `10d2848a`. The current candidate is
+  rebased on `main` at `c89e838c`; recheck `main` and record the published head
+  in PR #340 before publication.
 - Scope: full Bitbucket Cloud support across backend, UI and user documentation.
   Bitbucket Data Center/Server is outside scope.
 - Rollout order: merge and deploy API #340 first, then merge and deploy UI #195.
