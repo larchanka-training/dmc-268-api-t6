@@ -521,6 +521,7 @@ def _diff_map(
     repository_id: UUID = _REPOSITORY,
     listed: int | None = None,
     diff_old_sha: str | None = _BASE,
+    provider: VcsProviderName = VcsProviderName.GITHUB,
 ) -> DiffMap:
     pull_request = VcsPullRequest(
         locator=PullRequestLocator(17, "octo/repo", 7),
@@ -543,7 +544,7 @@ def _diff_map(
     return build_diff_map(
         pull_request,
         files,
-        provider=VcsProviderName.GITHUB,
+        provider=provider,
         repository_id=repository_id,
         diff_old_sha=diff_old_sha,
     )
@@ -1748,7 +1749,9 @@ def _load_hints(*paths: str) -> Graph:
     return Graph({_REPOSITORY: tuple(_uses(path, "pkg/store.py", "load") for path in paths)})
 
 
-def _removal(case: str) -> tuple[Repository, DiffMap]:
+def _removal(
+    case: str, *, provider: VcsProviderName = VcsProviderName.GITHUB
+) -> tuple[Repository, DiffMap]:
     """A PR that takes the export ``load`` away from ``pkg/store.py``; ``pkg/view.py``
     imports it, and the PR leaves that file alone."""
     if case == "renamed_symbol":
@@ -1757,10 +1760,12 @@ def _removal(case: str) -> tuple[Repository, DiffMap]:
             {"pkg/store.py": head, "pkg/view.py": _PY_VIEW}, base={"pkg/store.py": _PY_BASE_STORE}
         )
         patch = "@@ -5,2 +5,2 @@\n-def load(key):\n+def fetch(key):\n     return key"
-        return repository, _diff_map(_vcs_file(repository, "pkg/store.py", patch, deletions=1))
+        return repository, _diff_map(
+            _vcs_file(repository, "pkg/store.py", patch, deletions=1), provider=provider
+        )
     if case == "deleted_file":
         repository = Repository({"pkg/view.py": _PY_VIEW}, base={"pkg/store.py": _PY_BASE_STORE})
-        return repository, _diff_map(_deletion(repository))
+        return repository, _diff_map(_deletion(repository), provider=provider)
     assert case == "moved_file"
     repository = Repository(
         {"pkg/storage.py": _PY_BASE_STORE, "pkg/view.py": _PY_VIEW},
@@ -1769,7 +1774,7 @@ def _removal(case: str) -> tuple[Repository, DiffMap]:
     moved = _vcs_file(
         repository, "pkg/storage.py", None, additions=0, status="renamed", previous="pkg/store.py"
     )
-    return repository, _diff_map(moved)
+    return repository, _diff_map(moved, provider=provider)
 
 
 def _view_place(repository: Repository) -> RetrievedPlace:
@@ -1851,7 +1856,7 @@ def test_unchanged_bitbucket_importer_with_revision_bound_ids_is_a_broken_refere
         def base_sha(self, path: str) -> str:
             return sha256(f"bitbucket:{_REPOSITORY}:{_BASE}:{path}".encode()).hexdigest()
 
-    original, diff_map = _removal("renamed_symbol")
+    original, diff_map = _removal("renamed_symbol", provider=VcsProviderName.BITBUCKET)
     repository = BitbucketRepository(original.files, base=original.base)
 
     result = _select(repository, diff_map, _load_hints("pkg/view.py"))
@@ -1861,6 +1866,7 @@ def test_unchanged_bitbucket_importer_with_revision_bound_ids_is_a_broken_refere
     assert result.places[0].source.reason == "rag_broken_reference"
     assert result.places[0].text == "from .store import load\ndef show(key):\n    return load(key)"
     assert (result.found, result.confirmed, dict(result.dropped)) == (1, 1, {})
+    assert repository.read == ["pkg/store.py@base", "pkg/view.py"]
 
 
 def test_revision_bound_importer_with_changed_content_is_not_a_broken_reference() -> None:
@@ -1871,7 +1877,13 @@ def test_revision_bound_importer_with_changed_content_is_not_a_broken_reference(
         def base_sha(self, path: str) -> str:
             return sha256(f"bitbucket:{_REPOSITORY}:{_BASE}:{path}".encode()).hexdigest()
 
-    original, diff_map = _removal("renamed_symbol")
+    original, diff_map = _removal("renamed_symbol", provider=VcsProviderName.BITBUCKET)
+    # A partial provider list cannot prove that the importer was unchanged.
+    diff_map = replace(
+        diff_map,
+        file_list_complete=False,
+        incomplete_reasons=("file_count_mismatch",),
+    )
     repository = BitbucketRepository(
         original.files,
         base={**original.base, "pkg/view.py": "def show(key):\n    return key\n"},
@@ -1885,6 +1897,7 @@ def test_revision_bound_importer_with_changed_content_is_not_a_broken_reference(
         0,
         {"rag_edge_unconfirmed": 1},
     )
+    assert repository.read == ["pkg/store.py@base", "pkg/view.py", "pkg/view.py@base"]
 
 
 def test_revision_bound_importer_base_read_at_cap_reports_rag_limit() -> None:

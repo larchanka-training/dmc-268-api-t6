@@ -82,7 +82,6 @@ class SqlAlchemyBitbucketIndexRefreshRepositories:
         )
         if (
             repository is None
-            or not repository.enabled
             or not repository.installation_available
             or not repository.rag_enabled
             or repository.default_branch not in branches

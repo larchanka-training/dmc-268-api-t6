@@ -818,19 +818,21 @@ def test_two_portal_workspaces_index_same_remote_uuid_without_cross_tenant_reads
                 assert await refresh.execute(
                     installations[1], ids[1], remote_uuid, frozenset({"main"}), 1, 2
                 )
-            for table, id_column, disabled, restored in (
-                ("repositories", "id", "enabled=false", "enabled=true"),
+            for table, id_column, disabled, restored, expected in (
+                ("repositories", "id", "enabled=false", "enabled=true", True),
                 (
                     "repositories",
                     "id",
                     "installation_available=false",
                     "installation_available=true",
+                    False,
                 ),
                 (
                     "bitbucket_repository_webhook_secrets",
                     "repository_id",
                     "confirmed_at=NULL",
                     "confirmed_at=clock_timestamp()",
+                    False,
                 ),
             ):
                 async with factory.begin() as session:
@@ -845,20 +847,21 @@ def test_two_portal_workspaces_index_same_remote_uuid_without_cross_tenant_reads
                         text(f"UPDATE {table} SET {disabled} WHERE {id_column}=:repository"),
                         {"repository": ids[1]},
                     )
-                assert not await refresh.execute(
-                    installations[1], ids[1], remote_uuid, frozenset({"main"}), 1, 2
+                assert (
+                    await refresh.execute(
+                        installations[1], ids[1], remote_uuid, frozenset({"main"}), 1, 2
+                    )
+                    is expected
                 )
                 async with factory() as session:
-                    assert (
-                        await session.scalar(
-                            text(
-                                "SELECT wake_requested_at FROM code_index_states "
-                                "WHERE repository_id=:repository"
-                            ),
-                            {"repository": ids[1]},
-                        )
-                        is None
+                    wake = await session.scalar(
+                        text(
+                            "SELECT wake_requested_at FROM code_index_states "
+                            "WHERE repository_id=:repository"
+                        ),
+                        {"repository": ids[1]},
                     )
+                    assert (wake is not None) is expected
                 async with factory.begin() as session:
                     await session.execute(
                         text(f"UPDATE {table} SET {restored} WHERE {id_column}=:repository"),
