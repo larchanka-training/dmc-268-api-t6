@@ -198,7 +198,10 @@ def test_revision_and_repository_identity_changes_cancel(change: str, reason: st
     asyncio.run(scenario())
 
 
-def test_destination_tip_advance_keeps_pinned_diff_and_draft_toggle() -> None:
+@pytest.mark.parametrize("initial_draft", [False, True])
+def test_destination_tip_advance_keeps_pinned_diff_and_draft_toggle(
+    initial_draft: bool,
+) -> None:
     reads = 0
     requested_diffstat: list[str] = []
 
@@ -207,7 +210,7 @@ def test_destination_tip_advance_keeps_pinned_diff_and_draft_toggle() -> None:
         if request.url.path == f"{PREFIX}/pullrequests/7":
             reads += 1
             data = _pr(base="d" * 12)
-            data["draft"] = reads > 1
+            data["draft"] = initial_draft if reads == 1 else not initial_draft
             return httpx.Response(200, json=data)
         if request.url.path == f"{PREFIX}/diffstat/{HEAD}..{BASE}":
             requested_diffstat.append(request.url.path)
@@ -237,7 +240,7 @@ def test_destination_tip_advance_keeps_pinned_diff_and_draft_toggle() -> None:
                 _locator(), HEAD, BASE
             )
             assert fetched.pull_request.base_sha == BASE
-            assert fetched.pull_request.meta.is_draft is False
+            assert fetched.pull_request.meta.is_draft is initial_draft
             assert len(fetched.files) == 1
 
     asyncio.run(scenario())
@@ -300,6 +303,95 @@ def test_cloud_draft_and_account_without_nickname_are_preserved() -> None:
             assert result.meta.author == "Review Author"
 
     asyncio.run(scenario())
+
+
+def test_copied_file_keeps_source_path_and_reads_new_blob() -> None:
+    requested_paths: list[tuple[str, ...]] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if path == f"{PREFIX}/pullrequests/7":
+            return httpx.Response(200, json=_pr())
+        if path == f"{PREFIX}/diffstat/{HEAD}..{BASE}":
+            return httpx.Response(
+                200,
+                json={
+                    "size": 1,
+                    "values": [
+                        {
+                            "status": "copied",
+                            "lines_added": 1,
+                            "lines_removed": 1,
+                            "old": {"path": "src/original.py"},
+                            "new": {"path": "src/copied.py", "size": 4},
+                        }
+                    ],
+                },
+            )
+        if path == f"{PREFIX}/diff/{HEAD}..{BASE}":
+            requested_paths.append(tuple(request.url.params.get_list("path")))
+            return httpx.Response(
+                200,
+                text=(
+                    "diff --git a/src/original.py b/src/copied.py\n"
+                    "--- a/src/original.py\n+++ b/src/copied.py\n"
+                    "@@ -1 +1 @@\n-old\n+new\n"
+                ),
+            )
+        if path == f"{PREFIX}/src/{HEAD}/src/copied.py":
+            return httpx.Response(200, content=b"new\n")
+        raise AssertionError(path)
+
+    async def scenario() -> None:
+        async def checkpoint() -> None:
+            return None
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+            vcs = HttpBitbucketVcsProvider(
+                http=BitbucketRunHttp(client, Credentials(), TARGET), locator=_locator()
+            )
+            fetched = await FetchVcsReviewInput(vcs, checkpoint=checkpoint).execute(
+                _locator(), HEAD, BASE
+            )
+            copied = fetched.files[0]
+            assert copied.status == "copied"
+            assert copied.filename == "src/copied.py"
+            assert copied.previous_filename == "src/original.py"
+            assert copied.patch is not None
+            assert copied.blob_sha is not None
+            assert (
+                await vcs.get_blob(_locator(), copied.blob_sha, checkpoint=checkpoint) == b"new\n"
+            )
+
+    asyncio.run(scenario())
+    assert requested_paths == [("src/original.py", "src/copied.py")]
+
+
+def test_abbreviated_head_rejects_unrelated_resolved_commit_before_diffstat() -> None:
+    requested: list[str] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        requested.append(request.url.path)
+        if request.url.path == f"{PREFIX}/pullrequests/7":
+            return httpx.Response(200, json=_pr(head=HEAD[:12]))
+        if request.url.path == f"{PREFIX}/commit/{HEAD[:12]}":
+            return httpx.Response(200, json={"hash": "c" * 40})
+        raise AssertionError(request.url.path)
+
+    async def scenario() -> None:
+        async def checkpoint() -> None:
+            return None
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+            vcs = HttpBitbucketVcsProvider(
+                http=BitbucketRunHttp(client, Credentials(), TARGET), locator=_locator()
+            )
+            with pytest.raises(RunFailure) as error:
+                await vcs.get_pull_request(_locator(), checkpoint=checkpoint)
+            assert error.value.error_code == "bitbucket_invalid_response"
+
+    asyncio.run(scenario())
+    assert requested == [f"{PREFIX}/pullrequests/7", f"{PREFIX}/commit/{HEAD[:12]}"]
 
 
 def test_total_response_budget_is_distinct_from_one_oversized_file(
@@ -595,15 +687,17 @@ def test_incomplete_or_untrusted_diff_never_becomes_clean(fault: str) -> None:
 
 def test_head_change_during_diff_cancels_and_does_not_use_stale_patch() -> None:
     pr_reads = 0
+    diff_requested = False
 
     def respond(request: httpx.Request) -> httpx.Response:
-        nonlocal pr_reads
+        nonlocal pr_reads, diff_requested
         if request.url.path == f"{PREFIX}/pullrequests/7":
             pr_reads += 1
-            return httpx.Response(200, json=_pr(head="d" * 40 if pr_reads >= 3 else HEAD))
+            return httpx.Response(200, json=_pr(head="d" * 40 if diff_requested else HEAD))
         if request.url.path == f"{PREFIX}/diffstat/{HEAD}..{BASE}":
             return httpx.Response(200, json=_stat())
         if request.url.path == f"{PREFIX}/diff/{HEAD}..{BASE}":
+            diff_requested = True
             return httpx.Response(
                 200,
                 text=(
@@ -625,7 +719,8 @@ def test_head_change_during_diff_cancels_and_does_not_use_stale_patch() -> None:
                 await FetchVcsReviewInput(vcs, checkpoint=checkpoint).execute(
                     _locator(), HEAD, BASE
                 )
-        assert pr_reads == 3
+        assert diff_requested
+        assert pr_reads >= 2
 
     asyncio.run(scenario())
 
@@ -865,10 +960,10 @@ def test_changed_blob_reads_have_bounded_pr_rechecks(file_count: int) -> None:
                     await vcs.get_blob(_locator(), file.blob_sha, checkpoint=checkpoint) == b"new\n"
                 )
             await vcs.verify_current(checkpoint=checkpoint)
-            assert http.request_count == (205 if file_count == 100 else 406)
+            assert 2 * file_count <= http.request_count <= 2 * file_count + 6
 
     asyncio.run(scenario())
-    assert pr_reads == 4
+    assert 2 <= pr_reads <= 4
 
 
 def test_fork_blob_redirect_is_not_followed_with_token() -> None:

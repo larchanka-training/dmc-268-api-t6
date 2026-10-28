@@ -22,12 +22,14 @@ from app.modules.integrations.bitbucket.infrastructure.run_http import (
     BitbucketRunHttpError,
 )
 from app.modules.reviews.application.bitbucket_status import BitbucketStatusSnapshot
+from app.modules.reviews.application.check_runs import RunProviderCheckpoint
 from app.modules.reviews.application.diff_map import VcsProviderName, build_diff_map
 from app.modules.reviews.application.findings_post_processor import ProcessedReviewOutput
 from app.modules.reviews.application.handle_review_run import ClaimedAttempt
 from app.modules.reviews.application.policy_errors import PolicyError
 from app.modules.reviews.application.prepare_policy_snapshot import PreparePolicySnapshot
 from app.modules.reviews.application.process_run import RunVcsInput
+from app.modules.reviews.application.prompt_builder import PullRequestMeta
 from app.modules.reviews.application.publish_run_review import (
     PublicationIdentity,
     PublishContext,
@@ -47,7 +49,11 @@ from app.modules.reviews.application.review_path import ReviewBinding, require_s
 from app.modules.reviews.application.run_coverage import restore_run_coverage
 from app.modules.reviews.application.run_failures import RunFailure
 from app.modules.reviews.application.store_review_output import PublishingGuard
-from app.modules.reviews.application.vcs_diff import PullRequestLocator
+from app.modules.reviews.application.vcs_diff import (
+    PullRequestLocator,
+    VcsFile,
+    VcsPullRequest,
+)
 from app.modules.reviews.infrastructure.bitbucket_ci import BitbucketBuildStatusPublisher
 from app.modules.reviews.infrastructure.bitbucket_policy_source import BitbucketPolicyDocumentSource
 from app.modules.reviews.infrastructure.bitbucket_publication_resources import (
@@ -67,8 +73,8 @@ from app.modules.reviews.infrastructure.llm.settings import LlmSettings
 from tests.llm_fakes import context_checkpoint
 from tests.policy_snapshot_fakes import make_complete_prompt_bindings
 from tests.test_bitbucket_vcs import BASE, DEST, HEAD, PREFIX, TARGET, Credentials, _locator, _pr
-from tests.test_gateway_review_model import SUMMARY, _finding, _profile
-from tests.test_gitlab_snapshot_path import GitLab, NoGitHub, Output, Runs, Tree, _checkpoint
+from tests.test_gateway_review_model import MAIN, SUMMARY, _finding, _profile
+from tests.test_gitlab_snapshot_path import Output, Runs, Tree, _checkpoint
 from tests.test_prepare_policy_snapshot import Source, Uow
 from tests.test_review_context_stage import Parser, Trace
 from tests.test_review_path import RecordingConventions, _binding, _store
@@ -106,11 +112,65 @@ class BitbucketRuns(Runs):
         )
 
 
+class BitbucketVcs:
+    def __init__(self) -> None:
+        self.locators: list[PullRequestLocator] = []
+
+    async def get_pull_request(
+        self, locator: PullRequestLocator, *, checkpoint: RunProviderCheckpoint
+    ) -> VcsPullRequest:
+        await checkpoint()
+        assert locator == LOCATOR and locator.provider == "bitbucket"
+        self.locators.append(locator)
+        return VcsPullRequest(
+            locator,
+            HEAD,
+            BASE,
+            PullRequestMeta("PR", None, "author", "feature", "main", (), 1, 1, 0, False, False),
+        )
+
+    async def get_diff(
+        self, pull_request: VcsPullRequest, *, checkpoint: RunProviderCheckpoint
+    ) -> tuple[VcsFile, ...]:
+        await checkpoint()
+        assert pull_request.locator == LOCATOR
+        return (VcsFile(MAIN, "added", "e" * 40, None, 1, 0, 1, "@@ -0,0 +1 @@\n+x = 1"),)
+
+    async def get_blob(
+        self, locator: PullRequestLocator, sha: str, *, checkpoint: RunProviderCheckpoint
+    ) -> bytes:
+        await checkpoint()
+        assert locator == LOCATOR
+        return b"x = 1\n"
+
+    async def get_merge_base(
+        self, pull_request: VcsPullRequest, *, checkpoint: RunProviderCheckpoint
+    ) -> str:
+        await checkpoint()
+        assert pull_request.locator == LOCATOR
+        return "c" * 40
+
+    async def get_pull_request_meta(self, run_id: UUID) -> PullRequestMeta:
+        assert run_id == RUN_ID
+        return PullRequestMeta(
+            "PR", None, "author", "feature", "main", (), 1, 1, 0, False, False, head_sha="d" * 40
+        )
+
+
+class ForbiddenOtherVcs:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def __getattr__(self, name: str) -> Any:
+        self.calls += 1
+        raise AssertionError(f"Bitbucket must not route through another VCS adapter: {name}")
+
+
 @pytest.mark.parametrize("with_verifier", [True, False])
 def test_bitbucket_full_mocked_review_never_uses_github_or_gitlab(
     monkeypatch: pytest.MonkeyPatch, with_verifier: bool
 ) -> None:
-    runs, vcs, forbidden = BitbucketRuns(), GitLab(), NoGitHub()
+    runs, vcs, forbidden = BitbucketRuns(), BitbucketVcs(), ForbiddenOtherVcs()
     store, trace, output = _store(), Trace(), Output()
     assert store.pins is not None
     store.pins = replace(
@@ -191,6 +251,8 @@ def test_bitbucket_full_mocked_review_never_uses_github_or_gitlab(
         assert stage.head_sha == RUN.head_sha
         assert stage.snapshot_for_llm is store.snapshot
     assert forbidden.calls == 0
+    assert vcs.locators
+    assert all(locator == LOCATOR for locator in vcs.locators)
 
 
 @pytest.mark.parametrize(
