@@ -21,10 +21,15 @@ from typing import Literal, NoReturn, Protocol, cast
 import httpx
 from redis.asyncio import Redis
 
+from app.bootstrap.bitbucket import bitbucket_webhook_replay_resources
 from app.bootstrap.gitlab import gitlab_webhook_replay_resources
 from app.bootstrap.reviews_api import ReviewsApiResources
 from app.bootstrap.webhook_work_listener import listen_forever
 from app.common.infrastructure.heartbeat import beat, heartbeat_file, reset
+from app.modules.integrations.bitbucket.infrastructure.credential_cipher import (
+    BitbucketCredentialCipher,
+    optional_bitbucket_cipher_from_environment,
+)
 from app.modules.integrations.gitlab.infrastructure.settings import (
     GitLabRuntimeSettings,
     GitLabSettingsError,
@@ -66,6 +71,7 @@ class WorkerConfig:
     heartbeat_file: Path | None = None
     redis_url: str | None = field(default=None, repr=False)
     gitlab: GitLabRuntimeSettings | None = field(default=None, repr=False)
+    bitbucket: BitbucketCredentialCipher | None = field(default=None, repr=False)
 
     @property
     def github_configured(self) -> bool:
@@ -108,6 +114,12 @@ class WorkerConfig:
                 "GITLAB_CREDENTIAL_KEYS, GITLAB_ACTIVE_KEY_ID, GITLAB_ALLOWED_ORIGINS, "
                 "GITLAB_PRIVATE_ORIGINS and SSL_CERT_FILE"
             ) from None
+        try:
+            bitbucket = optional_bitbucket_cipher_from_environment(env)
+        except ValueError:
+            raise RuntimeError(
+                "BITBUCKET_CREDENTIAL_KEYS and BITBUCKET_ACTIVE_KEY_ID must be valid together"
+            ) from None
         return cls(
             database_url=database_url,
             app_id=app_id,
@@ -118,6 +130,7 @@ class WorkerConfig:
             heartbeat_file=heartbeat_file(env),
             redis_url=env.get("REDIS_URL") or None,
             gitlab=gitlab,
+            bitbucket=bitbucket,
         )
 
 
@@ -139,6 +152,24 @@ def compose_worker(
     )
 
 
+def compose_rules_refresher(
+    resources: ReviewsApiResources,
+    client: httpx.AsyncClient | None,
+    tokens: GitHubInstallationAccessTokenProvider | None,
+    config: WorkerConfig,
+    *,
+    bitbucket_client: httpx.AsyncClient | None = None,
+) -> RefreshRulesStatuses | None:
+    if tokens is None and config.bitbucket is None:
+        return None
+    return resources.rules_status_refresher(
+        client=client,
+        token_provider=tokens,
+        bitbucket_cipher=config.bitbucket,
+        bitbucket_client=bitbucket_client,
+    )
+
+
 class WebhookReplayReceiver(Protocol):
     async def replay_batch(self, *, limit: int = 100) -> ReplayBatchResult: ...
 
@@ -147,12 +178,12 @@ class WebhookReplayReceiver(Protocol):
 
 @dataclass(frozen=True)
 class WebhookReplayProvider:
-    provider: Literal["github", "gitlab"]
+    provider: Literal["github", "gitlab", "bitbucket"]
     receiver: WebhookReplayReceiver
     reviver: ReviveDeferredInstallationDeliveries | None = None
 
     def __post_init__(self) -> None:
-        if self.provider not in {"github", "gitlab"} or (
+        if self.provider not in {"github", "gitlab", "bitbucket"} or (
             self.provider != "github" and self.reviver is not None
         ):
             raise ValueError("Invalid webhook replay provider")
@@ -164,7 +195,7 @@ async def _scan_once(provider: WebhookReplayProvider) -> ReplayBatchResult | Non
     except Exception as error:
         _LOGGER.error(
             "%s webhook replay sweep failed",
-            "GitHub" if provider.provider == "github" else "GitLab",
+            {"github": "GitHub", "gitlab": "GitLab", "bitbucket": "Bitbucket"}[provider.provider],
             extra={"provider": provider.provider, "error_type": type(error).__name__},
         )
         return None
@@ -177,14 +208,16 @@ async def sweep_once(receiver: ReceiveGitHubDelivery) -> int:
 
 
 async def purge_once(
-    receiver: WebhookReplayReceiver, *, provider: Literal["github", "gitlab"] = "github"
+    receiver: WebhookReplayReceiver,
+    *,
+    provider: Literal["github", "gitlab", "bitbucket"],
 ) -> int:
     try:
         return await receiver.purge_finished()
     except Exception as error:
         _LOGGER.error(
             "%s webhook receipt purge failed",
-            "GitHub" if provider == "github" else "GitLab",
+            {"github": "GitHub", "gitlab": "GitLab", "bitbucket": "Bitbucket"}[provider],
             extra={"provider": provider, "error_type": type(error).__name__},
         )
         return 0
@@ -213,7 +246,7 @@ async def refresh_rules_once(refresher: RefreshRulesStatuses) -> int:
 async def hourly_maintenance(
     receiver: WebhookReplayReceiver, reviver: ReviveDeferredInstallationDeliveries
 ) -> None:
-    await purge_once(receiver)
+    await purge_once(receiver, provider="github")
     await revive_once(reviver)
 
 
@@ -308,12 +341,22 @@ async def run_forever() -> None:
         if redis is not None:
             stack.push_async_callback(close_owned, redis.aclose)
         providers: list[WebhookReplayProvider] = []
-        rules: RefreshRulesStatuses | None = None
+        client: httpx.AsyncClient | None = None
+        tokens: GitHubInstallationAccessTokenProvider | None = None
         if config.github_configured:
-            assert config.app_id is not None and config.private_key is not None
             client = httpx.AsyncClient(base_url=config.github_api_url, timeout=10.0)
             stack.push_async_callback(close_owned, client.aclose)
             await client.__aenter__()
+        bitbucket_rules_client: httpx.AsyncClient | None = None
+        if config.bitbucket is not None:
+            bitbucket_rules_client = httpx.AsyncClient(
+                timeout=10.0, trust_env=False, follow_redirects=False
+            )
+            stack.push_async_callback(close_owned, bitbucket_rules_client.aclose)
+            await bitbucket_rules_client.__aenter__()
+        if config.github_configured:
+            assert config.app_id is not None and config.private_key is not None
+            assert client is not None
             tokens = GitHubAppInstallationAccessTokenProvider(
                 client=client,
                 app_id=str(config.app_id),
@@ -325,8 +368,14 @@ async def run_forever() -> None:
             reviver = ReviveDeferredInstallationDeliveries(
                 uow_factory=resources.github_webhook_receipts, now=lambda: datetime.now(UTC)
             )
-            rules = resources.rules_status_refresher(client=client, token_provider=tokens)
             providers.append(WebhookReplayProvider("github", receiver, reviver))
+        rules = (
+            compose_rules_refresher(
+                resources, client, tokens, config, bitbucket_client=bitbucket_rules_client
+            )
+            if client is not None or bitbucket_rules_client is not None
+            else None
+        )
         if config.gitlab is not None:
             gitlab = await stack.enter_async_context(
                 gitlab_webhook_replay_resources(
@@ -334,6 +383,15 @@ async def run_forever() -> None:
                 )
             )
             providers.append(WebhookReplayProvider("gitlab", gitlab.receiver))
+        if config.bitbucket is not None:
+            bitbucket = await stack.enter_async_context(
+                bitbucket_webhook_replay_resources(
+                    resources.session_factory,
+                    cipher=config.bitbucket,
+                    run_publisher=publisher,
+                )
+            )
+            providers.append(WebhookReplayProvider("bitbucket", bitbucket.receiver))
         wake = asyncio.Event()
         # TaskGroup exits/awaits listener, scans and heartbeat BEFORE owned resources.
         async with asyncio.TaskGroup() as tasks:

@@ -8,10 +8,14 @@ from collections.abc import Awaitable, Callable
 from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
-from typing import Protocol
+from typing import Protocol, cast
 from uuid import UUID
 
 from app.common.application.unit_of_work import UnitOfWork
+from app.modules.reviews.application.bitbucket_status import (
+    BitbucketStatusGateway,
+    update_bitbucket_status,
+)
 from app.modules.reviews.application.check_runs import CheckRunGateway, RunProviderCheckpoint
 from app.modules.reviews.application.handle_review_run import (
     CheckRunReports,
@@ -122,6 +126,13 @@ def publication_matches(expected: PublishContext, current: PublishContext) -> bo
         and expected.findings_hash == current.findings_hash
         and expected.review_body == current.review_body
         and expected.findings == current.findings
+        # An inactive origin deliberately hides its VCS route. Availability is
+        # outside the immutable payload; compare routes only when both are live.
+        and (
+            not expected.origin_active
+            or not current.origin_active
+            or expected.vcs_input == current.vcs_input
+        )
         and expected.provider == current.provider
         and expected.repository_full_name == current.repository_full_name
         and expected.pr_number == current.pr_number
@@ -197,6 +208,18 @@ class GitLabPublicationResources(Protocol):
     ) -> AbstractAsyncContextManager[GitLabPublicationGateway]: ...
 
 
+class BitbucketPublicationGateway(Protocol):
+    async def submit_review(self, submission: ReviewSubmission) -> SubmittedReview: ...
+
+    async def checkpoint(self) -> None: ...
+
+
+class BitbucketPublicationResources(Protocol):
+    def open(
+        self, context: PublishContext, *, checkpoint: RunProviderCheckpoint
+    ) -> AbstractAsyncContextManager[BitbucketPublicationGateway]: ...
+
+
 class ReviewPublicationStore(CheckRunReports, Protocol):
     async def finish(
         self,
@@ -242,10 +265,11 @@ class PublicationRoute:
     error_prefix: str
     writes_check_run: bool
     project_id: int | None
+    bitbucket: bool = False
 
 
 def publication_route(provider: str, project_id: int) -> PublicationRoute | None:
-    """GitHub and GitLab only. Any other provider string is not the GitHub path."""
+    """Explicit provider routing. Unknown providers never reach GitHub."""
     if provider == "gitlab":
         return PublicationRoute(
             gitlab=True,
@@ -261,6 +285,15 @@ def publication_route(provider: str, project_id: int) -> PublicationRoute | None
             error_prefix="github",
             writes_check_run=True,
             project_id=None,
+        )
+    if provider == "bitbucket":
+        return PublicationRoute(
+            gitlab=False,
+            tool="bitbucket.publish_review",
+            error_prefix="bitbucket",
+            writes_check_run=False,
+            project_id=None,
+            bitbucket=True,
         )
     return None
 
@@ -303,10 +336,14 @@ class PublishRunReview:
         now: Callable[[], datetime] = lambda: datetime.now(UTC),
         gitlab_reviews: GitLabDiscussionGateway | None = None,
         gitlab_publications: GitLabPublicationResources | None = None,
+        bitbucket_publications: BitbucketPublicationResources | None = None,
+        bitbucket_statuses: BitbucketStatusGateway | None = None,
     ) -> None:
         if gitlab_reviews is not None and gitlab_publications is not None:
             raise ValueError("Configure exactly one GitLab publication gateway")
         self._gitlab_publications = gitlab_publications
+        self._bitbucket_publications = bitbucket_publications
+        self._bitbucket_statuses = bitbucket_statuses
         self._uow_factory = uow_factory
         self._reviews = reviews
         self._gitlab_reviews = gitlab_reviews
@@ -321,11 +358,16 @@ class PublishRunReview:
             context = await uow.runs.publish_context(pointer.run_id)
         if context is None or context.state != "publishing":
             return
-        installed = self._gitlab_publications is not None and (
-            context.provider == "gitlab"
-            or not context.origin_active
-            and context.publication_identity is not None
-            and context.publication_identity.origin_provider == "gitlab"
+        persisted_provider = (
+            context.publication_identity.origin_provider
+            if context.publication_identity is not None
+            else context.provider
+        )
+        installed = (
+            persisted_provider == "gitlab"
+            and self._gitlab_publications is not None
+            or persisted_provider == "bitbucket"
+            and self._bitbucket_publications is not None
         )
         expected = context if installed else None
         if installed and (context.head_sha, context.findings_hash) != (
@@ -375,7 +417,13 @@ class PublishRunReview:
 
         checkpoint = self._publication_checkpoint(context, pointer) if installed else None
         try:
-            if installed:
+            if installed and route.bitbucket:
+                assert self._bitbucket_publications is not None and checkpoint is not None
+                async with self._bitbucket_publications.open(
+                    context, checkpoint=checkpoint
+                ) as gateway:
+                    await self._publish(context, pointer, route, gateway, gateway.checkpoint)
+            elif installed:
                 assert self._gitlab_publications is not None and checkpoint is not None
                 async with self._gitlab_publications.open(
                     context, checkpoint=checkpoint
@@ -425,7 +473,7 @@ class PublishRunReview:
         context: PublishContext,
         pointer: ReviewPublishPointer,
         route: PublicationRoute,
-        gateway: GitLabDiscussionGateway | None,
+        gateway: GitLabDiscussionGateway | BitbucketPublicationGateway | None,
         checkpoint: RunProviderCheckpoint | None,
     ) -> None:
         expected = context if checkpoint is not None else None
@@ -452,7 +500,7 @@ class PublishRunReview:
                     pointer,
                     try_no,
                     route=route,
-                    gitlab_gateway=gateway,
+                    installed_gateway=gateway,
                     publication_checkpoint=checkpoint,
                 )
             except RunCancelled as exc:
@@ -521,9 +569,13 @@ class PublishRunReview:
             return
 
         # GitLab discussion ids are not GitHub comment ids; the marker is the retry identity.
-        comment_ids = () if route.gitlab else result.comment_ids
-        placement_ids = _moved_to_body_finding_ids(
-            context.findings, moved_to_body_finding_ids, result.posted_inline_finding_ids
+        comment_ids = () if route.gitlab or route.bitbucket else result.comment_ids
+        placement_ids = (
+            moved_to_body_finding_ids
+            if coordinate_fallback_done
+            else _moved_to_body_finding_ids(
+                context.findings, moved_to_body_finding_ids, result.posted_inline_finding_ids
+            )
         )
         async with self._uow_factory() as uow:
             completed = await uow.runs.complete_publication(
@@ -540,8 +592,19 @@ class PublishRunReview:
             await update_check_run(
                 self._uow_factory, self._check_runs, pointer.run_id, self._run_url
             )
+        if completed and route.bitbucket:
+            await update_bitbucket_status(
+                self._bitbucket_statuses, pointer.run_id, self._run_url(pointer.run_id)
+            )
 
     def _gateway_ready(self, run_id: UUID, route: PublicationRoute) -> bool:
+        if route.bitbucket:
+            if self._bitbucket_publications is None:
+                _LOGGER.warning(
+                    "Bitbucket publication is not configured; run %s stays publishing", run_id
+                )
+                return False
+            return True
         if route.gitlab:
             if self._gitlab_reviews is None and self._gitlab_publications is None:
                 _LOGGER.warning(
@@ -561,7 +624,7 @@ class PublishRunReview:
         try_no: int,
         *,
         route: PublicationRoute,
-        gitlab_gateway: GitLabDiscussionGateway | None,
+        installed_gateway: GitLabDiscussionGateway | BitbucketPublicationGateway | None,
         publication_checkpoint: RunProviderCheckpoint | None,
     ) -> SubmittedReview | PublishError:
         request = {
@@ -583,12 +646,22 @@ class PublishRunReview:
                     raise RunCancelled("installation_unavailable")
 
             if route.gitlab:
-                assert gitlab_gateway is not None
+                assert installed_gateway is not None
                 assert route.project_id is not None
-                result = await gitlab_gateway.submit_review(submission, project_id=route.project_id)
+                result = await cast(GitLabDiscussionGateway, installed_gateway).submit_review(
+                    submission, project_id=route.project_id
+                )
                 if publication_checkpoint is not None:
                     await publication_checkpoint()
                 response: object = {"gitlab_review_id": result.review_id}
+            elif route.bitbucket:
+                assert installed_gateway is not None
+                result = await cast(BitbucketPublicationGateway, installed_gateway).submit_review(
+                    submission
+                )
+                if publication_checkpoint is not None:
+                    await publication_checkpoint()
+                response = {"bitbucket_comment_id": result.review_id}
             else:
                 assert self._reviews is not None
                 result = await self._reviews.submit_review(submission, checkpoint=checkpoint)
@@ -626,3 +699,9 @@ class PublishRunReview:
             await uow.commit()
         if finished and check_run:
             await update_check_run(self._uow_factory, self._check_runs, run_id, self._run_url)
+        if (
+            finished
+            and expected_publication is not None
+            and expected_publication.provider == "bitbucket"
+        ):
+            await update_bitbucket_status(self._bitbucket_statuses, run_id, self._run_url(run_id))

@@ -13,7 +13,7 @@ from app.common.infrastructure.db.unit_of_work import SqlAlchemyUnitOfWork
 from app.modules.auth.application.scope import AuthScope
 from app.modules.code_index.domain.enums import PurgeReason
 from app.modules.code_index.domain.rag_index import rag_index
-from app.modules.code_index.infrastructure.effective_rag import GITHUB_PROVIDER
+from app.modules.code_index.infrastructure.effective_rag import INDEXABLE_PROVIDER
 from app.modules.code_index.infrastructure.models import CodeIndexState
 from app.modules.code_index.infrastructure.purger import (
     SqlAlchemyCodeIndexEnabler,
@@ -29,17 +29,22 @@ from app.modules.workspaces.infrastructure.repository_access import repository_a
 # The repository row and the state columns the RAG index status is derived from (#145); the
 # outer join gives None for each of them when the repository has no state row yet.
 # `_to_settings` reads them by name, so the column order here carries no meaning.
-_SETTINGS = select(
-    Repository,
-    CodeIndexState.status,
-    CodeIndexState.indexed_commit_sha,
-    CodeIndexState.target_commit_sha,
-    CodeIndexState.published_at,
-    CodeIndexState.file_count,
-    CodeIndexState.symbol_count,
-    CodeIndexState.error_code,
-    CodeIndexState.last_error_code,
-).outerjoin(CodeIndexState, CodeIndexState.repository_id == Repository.id)
+_SETTINGS = (
+    select(
+        Repository,
+        ProviderInstallation.provider,
+        CodeIndexState.status,
+        CodeIndexState.indexed_commit_sha,
+        CodeIndexState.target_commit_sha,
+        CodeIndexState.published_at,
+        CodeIndexState.file_count,
+        CodeIndexState.symbol_count,
+        CodeIndexState.error_code,
+        CodeIndexState.last_error_code,
+    )
+    .join(ProviderInstallation, ProviderInstallation.id == Repository.provider_installation_id)
+    .outerjoin(CodeIndexState, CodeIndexState.repository_id == Repository.id)
+)
 
 
 def _visible(scope: AuthScope | None) -> ColumnElement[bool]:
@@ -51,6 +56,7 @@ def _to_settings(row: Row[Any]) -> RepositorySettings:
     rag_enabled = repository.rag_enabled and repository.installation_available
     return RepositorySettings(
         id=repository.id,
+        provider=row.provider,
         full_name=repository.full_name,
         url=repository.web_url,
         default_branch=repository.default_branch,
@@ -200,7 +206,7 @@ class SqlAlchemyScopedCodeIndexEnabler:
             .join(
                 ProviderInstallation, ProviderInstallation.id == Repository.provider_installation_id
             )
-            .where(Repository.id == repository_id, GITHUB_PROVIDER, _visible(self._scope))
+            .where(Repository.id == repository_id, INDEXABLE_PROVIDER, _visible(self._scope))
         )
         if visible is not None:
             await self._enabler.enable(repository_id)

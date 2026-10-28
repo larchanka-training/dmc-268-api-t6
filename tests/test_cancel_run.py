@@ -81,6 +81,7 @@ class FakeCancelRunUow:
 def make_item(value: int, status: str) -> RunListItem:
     created_at = datetime(2026, 9, 25, tzinfo=UTC)
     return RunListItem(
+        provider="github",
         id=UUID(f"00000000-0000-0000-0000-{value:012d}"),
         status=status,
         engine="fast",

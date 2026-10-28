@@ -9,6 +9,7 @@ import logging
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import timedelta
+from hashlib import sha256
 from types import TracebackType
 from typing import Any, Self
 from uuid import UUID
@@ -1840,6 +1841,83 @@ def test_an_importer_of_a_removed_export_is_a_broken_reference(
     # sides and is read once.
     assert repository.read == ["pkg/store.py@base", "pkg/view.py"]
     assert repository.trees == [_HEAD, _BASE]
+
+
+def test_unchanged_bitbucket_importer_with_revision_bound_ids_is_a_broken_reference() -> None:
+    class BitbucketRepository(Repository):
+        def sha(self, path: str) -> str:
+            return sha256(f"bitbucket:{_REPOSITORY}:{_HEAD}:{path}".encode()).hexdigest()
+
+        def base_sha(self, path: str) -> str:
+            return sha256(f"bitbucket:{_REPOSITORY}:{_BASE}:{path}".encode()).hexdigest()
+
+    original, diff_map = _removal("renamed_symbol")
+    repository = BitbucketRepository(original.files, base=original.base)
+
+    result = _select(repository, diff_map, _load_hints("pkg/view.py"))
+
+    assert len(result.places) == 1
+    assert result.places[0].source.path == "pkg/view.py"
+    assert result.places[0].source.reason == "rag_broken_reference"
+    assert result.places[0].text == "from .store import load\ndef show(key):\n    return load(key)"
+    assert (result.found, result.confirmed, dict(result.dropped)) == (1, 1, {})
+
+
+def test_revision_bound_importer_with_changed_content_is_not_a_broken_reference() -> None:
+    class BitbucketRepository(Repository):
+        def sha(self, path: str) -> str:
+            return sha256(f"bitbucket:{_REPOSITORY}:{_HEAD}:{path}".encode()).hexdigest()
+
+        def base_sha(self, path: str) -> str:
+            return sha256(f"bitbucket:{_REPOSITORY}:{_BASE}:{path}".encode()).hexdigest()
+
+    original, diff_map = _removal("renamed_symbol")
+    repository = BitbucketRepository(
+        original.files,
+        base={**original.base, "pkg/view.py": "def show(key):\n    return key\n"},
+    )
+
+    result = _select(repository, diff_map, _load_hints("pkg/view.py"))
+
+    assert result.places == ()
+    assert (result.found, result.confirmed, dict(result.dropped)) == (
+        1,
+        0,
+        {"rag_edge_unconfirmed": 1},
+    )
+
+
+def test_revision_bound_importer_base_read_at_cap_reports_rag_limit() -> None:
+    class BitbucketRepository(Repository):
+        def sha(self, path: str) -> str:
+            return sha256(f"bitbucket:{_REPOSITORY}:{_HEAD}:{path}".encode()).hexdigest()
+
+        def base_sha(self, path: str) -> str:
+            return sha256(f"bitbucket:{_REPOSITORY}:{_BASE}:{path}".encode()).hexdigest()
+
+    original, diff_map = _removal("renamed_symbol")
+    repository = BitbucketRepository(original.files, base=original.base)
+    store = BlobStore()
+    reader = CachedBlobSource(
+        repository_id=_REPOSITORY,
+        source=repository,
+        cache=SharedBlobCache(store),
+        uow_factory=lambda: BlobCacheUow(store),
+    )
+
+    async def preload() -> None:
+        for index in range(18):
+            blob = f"{index:040x}"
+            store.cached[BlobCacheKey(_REPOSITORY, blob)] = (BlobCacheStatus.HIT, "x")
+            assert await reader.text(blob) == "x"
+
+    asyncio.run(preload())
+    result = _select(repository, diff_map, _load_hints("pkg/view.py"), store=store, reader=reader)
+
+    assert result.places == ()
+    assert result.omissions[-1] == RagOmission("rag_limit", "pkg/view.py")
+    assert (result.found, result.confirmed, dict(result.dropped)) == (1, 0, {"rag_limit": 1})
+    assert "pkg/view.py@base" not in repository.read
 
 
 @pytest.mark.parametrize(

@@ -273,6 +273,8 @@ class Store:
         *,
         last_error_code: str | None = None,
         stats: IndexBuildStats | None = None,
+        terminal_head_sha: str | None = None,
+        expected_target_sha: str | None = None,
     ) -> IndexStatus:
         self._call("release")
         await self._wait_if_held("release")

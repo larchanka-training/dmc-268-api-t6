@@ -111,7 +111,10 @@ def test_origin_rejection_preserves_staged_bytes_and_frozen_snapshot(
             async with SqlAlchemyPolicySnapshotUnitOfWork(factory) as work:
                 assert await work.policy.get_pins(RUN_ATTEMPTED) is not None
                 staged = await work.policy.get_staged_documents(RUN_ATTEMPTED)
-                assert staged == (() if boundary == "documents" else _documents())
+                expected = () if boundary == "documents" else _documents()
+                assert {item.document.path: item for item in staged} == {
+                    item.document.path: item for item in expected
+                }
                 assert await work.policy.get_snapshot(RUN_ATTEMPTED) == frozen
         finally:
             await engine.dispose()

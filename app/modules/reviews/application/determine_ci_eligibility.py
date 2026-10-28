@@ -46,11 +46,14 @@ class WebhookRunIdentity:
     repository_external_id: int
     instance_origin: str | None = None
     credential_generation: int | None = None
+    repository_uuid: UUID | None = None
+    binding_generation: int | None = None
+    webhook_generation: int | None = None
 
     def __post_init__(self) -> None:
         if (
             type(self.provider) is not str
-            or self.provider not in {"github", "gitlab"}
+            or self.provider not in {"github", "gitlab", "bitbucket"}
             or type(self.origin_provider_installation_id) is not UUID
             or type(self.workspace_id) is not UUID
             or type(self.repository_id) is not UUID
@@ -59,13 +62,35 @@ class WebhookRunIdentity:
         ):
             raise ValueError("Invalid webhook run identity")
         if self.provider == "github":
-            if self.instance_origin is not None or self.credential_generation is not None:
+            if (
+                self.instance_origin is not None
+                or self.credential_generation is not None
+                or self.repository_uuid is not None
+                or self.binding_generation is not None
+                or self.webhook_generation is not None
+            ):
+                raise ValueError("Invalid webhook run identity")
+            return
+        if self.provider == "bitbucket":
+            if (
+                self.instance_origin is not None
+                or type(self.repository_uuid) is not UUID
+                or type(self.credential_generation) is not int
+                or not 0 < self.credential_generation <= 9223372036854775807
+                or type(self.binding_generation) is not int
+                or not 0 < self.binding_generation <= 9223372036854775807
+                or type(self.webhook_generation) is not int
+                or not 0 < self.webhook_generation <= 9223372036854775807
+            ):
                 raise ValueError("Invalid webhook run identity")
             return
         if (
             type(self.instance_origin) is not str
             or type(self.credential_generation) is not int
             or not 0 < self.credential_generation <= 9223372036854775807
+            or self.repository_uuid is not None
+            or self.binding_generation is not None
+            or self.webhook_generation is not None
         ):
             raise ValueError("Invalid webhook run identity")
         try:

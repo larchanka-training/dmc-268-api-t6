@@ -30,7 +30,7 @@ from app.modules.code_index.domain.review_trigger import (
     ReviewTriggerAction,
     review_trigger,
 )
-from app.modules.code_index.infrastructure.effective_rag import GITHUB_PROVIDER, RAG_ON
+from app.modules.code_index.infrastructure.effective_rag import INDEXABLE_PROVIDER, RAG_ON
 from app.modules.code_index.infrastructure.index_store import SqlAlchemyCodeIndexStore
 from app.modules.code_index.infrastructure.models import CodeIndexState
 from app.modules.code_index.infrastructure.rag_state import enabled_rag_index
@@ -93,7 +93,7 @@ class SqlAlchemyReviewIndexAccess:
             .join(
                 ProviderInstallation, ProviderInstallation.id == Repository.provider_installation_id
             )
-            .where(Repository.id == repository_id, RAG_ON, GITHUB_PROVIDER)
+            .where(Repository.id == repository_id, RAG_ON, INDEXABLE_PROVIDER)
         )
         return rag_on is not None
 
