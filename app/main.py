@@ -15,6 +15,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Path, Query, Request
 from fastapi.dependencies.models import Dependant
+from fastapi.exception_handlers import request_validation_exception_handler
 from fastapi.exceptions import RequestValidationError
 from fastapi.openapi.utils import get_openapi
 from fastapi.responses import JSONResponse, Response, StreamingResponse
@@ -352,7 +353,24 @@ def _safe_validation_location(request: Request, error: dict[str, Any]) -> tuple[
 
 @app.exception_handler(RequestValidationError)
 async def render_validation_error(request: Request, exc: RequestValidationError) -> Response:
-    """Return useful error locations without echoing rejected input or error context."""
+    """Preserve FastAPI errors outside Bitbucket while redacting its credential routes."""
+    path = request.url.path
+    segments = path.split("/")
+    is_bitbucket_route = (
+        (
+            len(segments) >= 5
+            and segments[1:3] == ["api", "workspaces"]
+            and segments[4] == "bitbucket"
+        )
+        or path == "/webhooks/bitbucket"
+        or path.startswith("/webhooks/bitbucket/")
+    )
+    if not is_bitbucket_route:
+        try:
+            return await request_validation_exception_handler(request, exc)
+        except UnicodeEncodeError:
+            # JSONResponse cannot encode a lone surrogate in a rejected value (#149).
+            pass
     detail = [
         {
             "type": error["type"],

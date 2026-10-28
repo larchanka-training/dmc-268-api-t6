@@ -28,12 +28,13 @@ info:
     in #11.
 
     **Errors.** `HTTPException` errors are `{"detail": "<message>"}` (`ErrorResponse`);
-    request validation failures use `HTTPValidationError` with only `type`, `loc` and
-    `msg` in each detail item. Rejected `input` and validation `ctx` are omitted;
-    `loc` preserves declared field names and array indices but replaces submitted
-    object keys outside the declared schema with `<unknown field>`. This prevents
-    credentials and other submitted values or property names from being echoed in
-    a 422 response.
+    non-Bitbucket request validation failures use FastAPI's `HTTPValidationError`:
+    each detail item contains `type`, `loc` and `msg`, plus rejected `input` and
+    validation `ctx` when available. Bitbucket connection request failures use
+    `BitbucketHTTPValidationError`: rejected `input` and `ctx` are omitted, and
+    `loc` preserves declared field names and array indices while replacing
+    submitted object keys outside the declared schema with `<unknown field>`.
+    This keeps Bitbucket credentials out of its 422 response.
 
     **Extensions.** `x-service` names the logical service that owns an operation (one FastAPI
     app today, see Origin and CORS).
@@ -495,8 +496,8 @@ paths:
         "404": { $ref: "#/components/responses/NotFound" }
         "422": { $ref: "#/components/responses/BitbucketValidationFailed" }
         "429": { $ref: "#/components/responses/BitbucketRateLimited" }
-        "502": { description: Bitbucket provider failure. }
-        "503": { description: Bitbucket connection is not configured. }
+        "502": { $ref: "#/components/responses/BitbucketProviderFailure" }
+        "503": { $ref: "#/components/responses/BitbucketUnavailable" }
   /api/workspaces/{workspace_id}/bitbucket/connections:
     parameters:
       - name: workspace_id
@@ -516,7 +517,8 @@ paths:
               schema: { $ref: "#/components/schemas/BitbucketConnectionList" }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "404": { $ref: "#/components/responses/NotFound" }
-        "503": { description: Bitbucket connection is not configured. }
+        "422": { $ref: "#/components/responses/BitbucketValidationFailed" }
+        "503": { $ref: "#/components/responses/BitbucketUnavailable" }
     post:
       operationId: connectBitbucketRepository
       tags: [bitbucket]
@@ -541,11 +543,11 @@ paths:
         "400": { $ref: "#/components/responses/BadRequest" }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "404": { $ref: "#/components/responses/NotFound" }
-        "409": { description: UUID conflict or explicit credential rotation required. }
+        "409": { $ref: "#/components/responses/BitbucketConflict" }
         "422": { $ref: "#/components/responses/BitbucketValidationFailed" }
         "429": { $ref: "#/components/responses/BitbucketRateLimited" }
-        "502": { description: Bitbucket provider failure. }
-        "503": { description: Bitbucket connection is not configured. }
+        "502": { $ref: "#/components/responses/BitbucketProviderFailure" }
+        "503": { $ref: "#/components/responses/BitbucketUnavailable" }
   /api/workspaces/{workspace_id}/bitbucket/connections/{installation_id}/credential:
     parameters:
       - name: workspace_id
@@ -575,11 +577,11 @@ paths:
         "400": { $ref: "#/components/responses/BadRequest" }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "404": { $ref: "#/components/responses/NotFound" }
-        "409": { description: Installation changed during verification. }
+        "409": { $ref: "#/components/responses/BitbucketConflict" }
         "422": { $ref: "#/components/responses/BitbucketValidationFailed" }
         "429": { $ref: "#/components/responses/BitbucketRateLimited" }
-        "502": { description: Bitbucket provider failure. }
-        "503": { description: Bitbucket connection is not configured. }
+        "502": { $ref: "#/components/responses/BitbucketProviderFailure" }
+        "503": { $ref: "#/components/responses/BitbucketUnavailable" }
   /api/workspaces/{workspace_id}/bitbucket/connections/{installation_id}/repositories/{repository_id}:
     parameters:
       - name: workspace_id
@@ -606,7 +608,8 @@ paths:
         "204": { description: Disconnected or already absent. }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "404": { $ref: "#/components/responses/NotFound" }
-        "503": { description: Bitbucket connection is not configured. }
+        "422": { $ref: "#/components/responses/BitbucketValidationFailed" }
+        "503": { $ref: "#/components/responses/BitbucketUnavailable" }
   /api/workspaces/{workspace_id}/bitbucket/connections/{installation_id}/repositories/{repository_id}/webhook-secret:
     parameters:
       - name: workspace_id
@@ -634,7 +637,9 @@ paths:
               schema: { $ref: "#/components/schemas/BitbucketWebhookSetup" }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "404": { $ref: "#/components/responses/NotFound" }
-        "503": { description: Bitbucket connection is not configured. }
+        "409": { $ref: "#/components/responses/BitbucketConflict" }
+        "422": { $ref: "#/components/responses/BitbucketValidationFailed" }
+        "503": { $ref: "#/components/responses/BitbucketUnavailable" }
   /api/repos/{repo_id}:
     parameters:
       - $ref: "#/components/parameters/RepoId"
@@ -760,7 +765,7 @@ paths:
         result per repository. A read happens when the repository is connected, after each
         `push` to the default branch, and when this GET finds the stored result older than
         10 minutes or failed with a retryable error (then at most once per 30 seconds, or after
-        GitHub's `Retry-After` when it is longer, but never later than those 10 minutes); the GET
+        the VCS provider's `Retry-After` when it is longer, but never later than those 10 minutes); the GET
         still returns the stored result and a later GET shows the new one. So a change of the
         file usually shows here a few seconds after the push. Without the `push` event the
         10 minutes count from the last read, not from the push: a GET after them requests a
@@ -772,7 +777,7 @@ paths:
         The variant is told by `status`, never by a message: `present` (an empty file too),
         `missing` (the file is reliably absent and the service defaults apply), `invalid` (a
         format or limit error), `unavailable` (an access or temporary error: the read proved
-        nothing, an ambiguous GitHub 404 and a truncated tree included) and `pending`.
+        nothing, an ambiguous provider 404 and a truncated tree included) and `pending`.
       x-service: portal-api
       responses:
         "200":
@@ -1090,7 +1095,7 @@ components:
         application/json:
           schema:
             anyOf:
-              - $ref: "#/components/schemas/HTTPValidationError"
+              - $ref: "#/components/schemas/BitbucketHTTPValidationError"
               - $ref: "#/components/schemas/ErrorResponse"
     BitbucketRateLimited:
       description: Bitbucket rate limit. Retry-After is present when supplied by the provider.
@@ -1098,6 +1103,21 @@ components:
         Retry-After:
           description: Delay in whole seconds before retrying, when available.
           schema: { type: string }
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorResponse" }
+    BitbucketConflict:
+      description: Repository or credential state conflicts with the requested operation.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorResponse" }
+    BitbucketProviderFailure:
+      description: Bitbucket provider failure.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorResponse" }
+    BitbucketUnavailable:
+      description: Bitbucket connection or credential is unavailable.
       content:
         application/json:
           schema: { $ref: "#/components/schemas/ErrorResponse" }
@@ -1112,7 +1132,7 @@ components:
       additionalProperties: false
     HTTPValidationError:
       type: object
-      description: Request validation error with rejected values and context redacted.
+      description: Standard FastAPI request validation error.
       required: [detail]
       properties:
         detail:
@@ -1122,7 +1142,37 @@ components:
       additionalProperties: false
     ValidationError:
       type: object
-      description: Safe validation type and location, with submitted object keys redacted and without input or context.
+      description: Standard FastAPI validation detail, including the rejected input and context when available.
+      required: [loc, msg, type]
+      properties:
+        loc:
+          type: array
+          items:
+            anyOf:
+              - type: string
+              - type: integer
+        msg:
+          type: string
+        type:
+          type: string
+        input: {}
+        ctx:
+          type: object
+          additionalProperties: true
+      additionalProperties: false
+    BitbucketHTTPValidationError:
+      type: object
+      description: Bitbucket request validation error with rejected values and context redacted.
+      required: [detail]
+      properties:
+        detail:
+          type: array
+          items:
+            $ref: "#/components/schemas/BitbucketValidationError"
+      additionalProperties: false
+    BitbucketValidationError:
+      type: object
+      description: Safe validation type and location; submitted object keys are redacted.
       required: [loc, msg, type]
       properties:
         loc:
@@ -1829,8 +1879,8 @@ components:
         id: { type: string, format: uuid, description: Shared installation ID. }
         repositoryId: { type: string, format: uuid, description: Portal repository binding ID. }
         repositoryUuid: { type: string, format: uuid }
-        workspaceSlug: { type: string, minLength: 1 }
-        repositorySlug: { type: string, minLength: 1 }
+        workspaceSlug: { type: string, minLength: 1, maxLength: 128 }
+        repositorySlug: { type: string, minLength: 1, maxLength: 128 }
         status: { type: string, enum: [awaiting_webhook, active] }
         credentialGeneration: { type: integer, minimum: 1 }
         webhook:
@@ -1853,8 +1903,8 @@ components:
         id: { type: string, format: uuid }
         repositoryId: { type: string, format: uuid }
         repositoryUuid: { type: string, format: uuid }
-        workspaceSlug: { type: string, minLength: 1 }
-        repositorySlug: { type: string, minLength: 1 }
+        workspaceSlug: { type: string, minLength: 1, maxLength: 128 }
+        repositorySlug: { type: string, minLength: 1, maxLength: 128 }
         status: { type: string, enum: [awaiting_webhook, active] }
         credentialGeneration: { type: integer, minimum: 1 }
         webhookUrl: { type: string, format: uri }
@@ -2311,7 +2361,7 @@ components:
         branch:
           type: string
           minLength: 1
-          description: The default branch, as stored when GitHub did not name it.
+          description: The default branch, as stored when the provider did not name it.
         path:
           type: string
           const: .review/rules.md
