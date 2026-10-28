@@ -33,6 +33,7 @@ from app.modules.integrations.bitbucket.infrastructure.request_credentials impor
     BitbucketRequestCredentials,
     SqlAlchemyBitbucketTargetReader,
 )
+from app.modules.integrations.bitbucket.infrastructure.retry_after import parse_retry_after
 from app.modules.reviews.application.bitbucket_publication_claims import (
     BitbucketPublicationClaims,
 )
@@ -56,13 +57,6 @@ _MAX_RESPONSE_BYTES = 2 * 1024 * 1024
 _MAX_TOTAL_BYTES = 16 * 1024 * 1024
 _COORDINATE_ERROR = re.compile(rb"\b(?:inline|line|path|position|diff)\b", re.I)
 _LOGGER = logging.getLogger(__name__)
-
-
-def _retry_after(value: str | None) -> timedelta | None:
-    if value is None or not value.isascii() or not value.isdecimal() or len(value) > 4:
-        return None
-    seconds = int(value)
-    return timedelta(seconds=seconds) if 1 <= seconds <= 3600 else None
 
 
 class BitbucketPublicationHttp:
@@ -162,7 +156,9 @@ class BitbucketPublicationHttp:
                 body = b"".join(chunks)
                 self._total_bytes += size
                 status = response.status_code
-                retry_after = _retry_after(response.headers.get("Retry-After"))
+                retry_after = parse_retry_after(response.headers.get("Retry-After"))
+                if status == 429 and retry_after is None:
+                    retry_after = timedelta(hours=1)
         except httpx.RequestError:
             raise PublishError("retryable", "Bitbucket publication request failed") from None
         if status not in ({201} if method == "POST" else {200}):
