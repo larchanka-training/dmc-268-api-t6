@@ -78,7 +78,11 @@ from app.modules.reviews.application.ast_symbols import (
 from app.modules.reviews.application.policy_documents import missing_document, normalize_document
 from app.modules.reviews.application.policy_errors import PolicyError, PolicyErrorCode
 from app.modules.reviews.application.policy_snapshot import PolicyDocument
-from app.modules.reviews.application.review_ignore import parse_review_ignore
+from app.modules.reviews.application.review_ignore import (
+    IgnoreMatcher,
+    IgnorePolicy,
+    parse_review_ignore,
+)
 from app.modules.reviews.infrastructure.tree_sitter_facts import extract_facts
 
 _REPO = UUID("00000000-0000-0000-0000-000000000142")
@@ -866,6 +870,105 @@ def test_an_incremental_build_rewrites_the_changes_and_their_importers_only() ->
     assert (outcome.written_files, outcome.deleted_files) == (2, 1)
 
 
+def test_sparse_incremental_build_does_not_fetch_unchanged_100_file_archive(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    created_matchers: list[IgnoreMatcher] = []
+
+    def tracked_matcher(policy: IgnorePolicy) -> IgnoreMatcher:
+        matcher = IgnoreMatcher(policy)
+        created_matchers.append(matcher)
+        return matcher
+
+    monkeypatch.setattr(build_index, "IgnoreMatcher", tracked_matcher)
+    tree: Tree = {
+        **{f"f{i:03}.py": b"value = 1\n" for i in range(97)},
+        "pkg/__init__.py": b"value = 1\n",
+        "consumer.py": b"from pkg import value\n",
+        "secret.py": b"private = 1\n",
+    }
+    old_tree: Tree = {**tree, "pkg/__init__.py": b"value = 0\n"}
+    old_tree = {path: value for path, value in old_tree.items() if path != "secret.py"}
+    comparison = _comparison(_changed("pkg/__init__.py"), _changed("secret.py", ChangeStatus.ADDED))
+    world = _world(
+        tree,
+        state=_state(file_count=99),
+        comparison=comparison,
+        files=_indexed(old_tree),
+        imports=[ImportRecord("consumer.py", "pkg", ImportResolution.RESOLVED, "pkg/__init__.py")],
+    )
+
+    @dataclass
+    class SparseSource(Source):
+        tree: Tree = field(default_factory=dict)
+        selected: list[frozenset[str]] = field(default_factory=list)
+
+        async def manifest(self, commit_sha: str) -> Mapping[str, ArchiveEntry]:
+            assert commit_sha == _HEAD
+            await self._call("manifest")
+            return {
+                path: ArchiveEntry(
+                    path,
+                    len(value) if isinstance(value, bytes) else 0,
+                    symlink=isinstance(value, Link),
+                )
+                for path, value in self.tree.items()
+            }
+
+        async def archive_paths(
+            self, commit_sha: str, paths: Set[str], *, max_bytes: int
+        ) -> SourceArchive:
+            assert commit_sha == _HEAD and max_bytes == _LIMITS.download_bytes
+            await self._call("archive_paths")
+            self.selected.append(frozenset(paths))
+            return SourceArchive(commit_sha, "\n".join(sorted(paths)).encode())
+
+        async def archive(self, commit_sha: str, *, max_bytes: int) -> SourceArchive:
+            raise AssertionError("full archive must not be fetched for a proven one-file change")
+
+    @dataclass
+    class SparseArchives(Archives):
+        async def scan(
+            self, archive: SourceArchive, *, documents: Set[str], deadline: float
+        ) -> ArchiveScan:
+            complete = await super().scan(archive, documents=documents, deadline=deadline)
+            selected = set(archive.content.decode().splitlines())
+            return replace(
+                complete,
+                entries={
+                    path: entry for path, entry in complete.entries.items() if path in selected
+                },
+                documents={
+                    path: body for path, body in complete.documents.items() if path in selected
+                },
+            )
+
+        async def contents(
+            self, archive: SourceArchive, paths: Set[str], *, deadline: float, batch_files: int
+        ) -> AsyncIterator[tuple[tuple[str, bytes], ...]]:
+            selected = set(archive.content.decode().splitlines())
+            async for batch in super().contents(
+                archive, paths & selected, deadline=deadline, batch_files=batch_files
+            ):
+                yield batch
+
+    world.source = SparseSource(world.tracker, comparison=comparison, policy_tree=tree, tree=tree)
+    world.archives = SparseArchives(tree)
+
+    outcome = world.run()
+
+    assert outcome.status is BuildStatus.PUBLISHED
+    assert outcome.mode is BuildMode.INCREMENTAL
+    assert sorted(world.written()) == ["consumer.py", "pkg/__init__.py"]
+    assert world.source.selected == [
+        frozenset(),
+        frozenset({"consumer.py", "pkg/__init__.py"}),
+    ]
+    assert outcome.exclusions[ExclusionClass.SECRET] == 1
+    assert len(created_matchers) == 1
+    assert world.store.publications[0]["full"] is False
+
+
 def test_an_incremental_build_also_rewrites_a_stored_file_whose_blob_differs() -> None:
     stored = {**_indexed(_HEAD_TREE), "app/views.py": "f" * 40}
     world = _world(
@@ -1172,6 +1275,12 @@ def _fail_at_scan(world: World, error: BaseException) -> None:
         ),
         (_fail_at_scan, IndexLimitExceeded("unpacked_bytes"), "limit_exceeded:unpacked_bytes", 3),
         (_fail_at_scan, IndexLimitExceeded("archive_entries"), "limit_exceeded:archive_entries", 3),
+        (
+            _fail_at_archive,
+            IndexLimitExceeded("provider_requests"),
+            "limit_exceeded:provider_requests",
+            3,
+        ),
         (_fail_at_scan, IndexLimitExceeded("deadline"), "limit_exceeded:deadline", 3),
         (_fail_at_scan, ArchiveUnsafe("unsafe"), "archive_unsafe", 3),
     ],
@@ -1190,6 +1299,25 @@ def test_an_archive_failure_fails_the_index_with_its_code_and_the_request_count(
     assert stats is not None
     assert stats.github_request_count == requests
     assert world.store.releases == []
+
+
+def test_provider_request_cap_keeps_the_previous_index_publication() -> None:
+    world = _world(
+        state=_state(file_count=1),
+        comparison=_comparison(_changed("app/models.py")),
+        files={"app/models.py": _blob(_MODELS)},
+    )
+    world.source.errors["archive"] = IndexLimitExceeded("provider_requests")
+
+    outcome = world.run()
+
+    assert (outcome.status, outcome.error_code) == (
+        BuildStatus.FAILED,
+        "limit_exceeded:provider_requests",
+    )
+    assert world.store.publications == []
+    assert world.store.state is not None
+    assert world.store.state.indexed_commit_sha == _OLD
 
 
 @pytest.mark.parametrize(
