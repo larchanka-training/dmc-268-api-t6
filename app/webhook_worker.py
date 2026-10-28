@@ -152,6 +152,24 @@ def compose_worker(
     )
 
 
+def compose_rules_refresher(
+    resources: ReviewsApiResources,
+    client: httpx.AsyncClient | None,
+    tokens: GitHubInstallationAccessTokenProvider | None,
+    config: WorkerConfig,
+    *,
+    bitbucket_client: httpx.AsyncClient | None = None,
+) -> RefreshRulesStatuses | None:
+    if tokens is None and config.bitbucket is None:
+        return None
+    return resources.rules_status_refresher(
+        client=client,
+        token_provider=tokens,
+        bitbucket_cipher=config.bitbucket,
+        bitbucket_client=bitbucket_client,
+    )
+
+
 class WebhookReplayReceiver(Protocol):
     async def replay_batch(self, *, limit: int = 100) -> ReplayBatchResult: ...
 
@@ -323,12 +341,22 @@ async def run_forever() -> None:
         if redis is not None:
             stack.push_async_callback(close_owned, redis.aclose)
         providers: list[WebhookReplayProvider] = []
-        rules: RefreshRulesStatuses | None = None
+        client: httpx.AsyncClient | None = None
+        tokens: GitHubInstallationAccessTokenProvider | None = None
         if config.github_configured:
-            assert config.app_id is not None and config.private_key is not None
             client = httpx.AsyncClient(base_url=config.github_api_url, timeout=10.0)
             stack.push_async_callback(close_owned, client.aclose)
             await client.__aenter__()
+        bitbucket_rules_client: httpx.AsyncClient | None = None
+        if config.bitbucket is not None:
+            bitbucket_rules_client = httpx.AsyncClient(
+                timeout=10.0, trust_env=False, follow_redirects=False
+            )
+            stack.push_async_callback(close_owned, bitbucket_rules_client.aclose)
+            await bitbucket_rules_client.__aenter__()
+        if config.github_configured:
+            assert config.app_id is not None and config.private_key is not None
+            assert client is not None
             tokens = GitHubAppInstallationAccessTokenProvider(
                 client=client,
                 app_id=str(config.app_id),
@@ -340,8 +368,14 @@ async def run_forever() -> None:
             reviver = ReviveDeferredInstallationDeliveries(
                 uow_factory=resources.github_webhook_receipts, now=lambda: datetime.now(UTC)
             )
-            rules = resources.rules_status_refresher(client=client, token_provider=tokens)
             providers.append(WebhookReplayProvider("github", receiver, reviver))
+        rules = (
+            compose_rules_refresher(
+                resources, client, tokens, config, bitbucket_client=bitbucket_rules_client
+            )
+            if client is not None or bitbucket_rules_client is not None
+            else None
+        )
         if config.gitlab is not None:
             gitlab = await stack.enter_async_context(
                 gitlab_webhook_replay_resources(

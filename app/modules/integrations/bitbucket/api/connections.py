@@ -6,7 +6,7 @@ from typing import Annotated, Literal, NoReturn
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Response
-from pydantic import ConfigDict
+from pydantic import ConfigDict, Field, field_validator
 
 from app.bootstrap.bitbucket import get_bitbucket_management, get_bitbucket_workspace_scope
 from app.bootstrap.portal_auth import get_auth_scope
@@ -26,22 +26,41 @@ router = APIRouter(
     dependencies=[Depends(get_auth_scope)],
 )
 
-_WEBHOOK_EVENTS = ["repo:push", "pullrequest:created", "pullrequest:updated"]
+_WEBHOOK_EVENTS = [
+    "repo:push",
+    "pullrequest:created",
+    "pullrequest:updated",
+    "pullrequest:fulfilled",
+    "pullrequest:rejected",
+]
 
 
-class ConnectRequest(ApiDto):
+class _TokenRequest(ApiDto):
     model_config = ConfigDict(extra="forbid")
 
+    api_token: str = Field(
+        min_length=1,
+        max_length=4096,
+        # Pydantic's regex engine does not support the JSON Schema end-of-input lookahead.
+        json_schema_extra={"pattern": r"^[!-~]+(?![\s\S])", "writeOnly": True},
+    )
+
+    @field_validator("api_token")
+    @classmethod
+    def validate_api_token(cls, value: str) -> str:
+        if not all(33 <= ord(character) <= 126 for character in value):
+            raise ValueError("invalid Bitbucket token")
+        return value
+
+
+class ConnectRequest(_TokenRequest):
     bitbucket_workspace: str
     repository_slug: str
     repository_uuid: UUID
-    api_token: str
 
 
-class CredentialRotateRequest(ApiDto):
-    model_config = ConfigDict(extra="forbid")
-
-    api_token: str
+class CredentialRotateRequest(_TokenRequest):
+    pass
 
 
 class CredentialRotateResponse(ApiDto):
@@ -49,11 +68,8 @@ class CredentialRotateResponse(ApiDto):
     credential_generation: int
 
 
-class DiscoveryRequest(ApiDto):
-    model_config = ConfigDict(extra="forbid")
-
+class DiscoveryRequest(_TokenRequest):
     bitbucket_workspace: str
-    api_token: str
     cursor: str | None = None
 
 

@@ -1,7 +1,7 @@
 {
   "provenance": {
     "repository": "https://github.com/larchanka-training/dmc-268-ui-t6",
-    "commit": "39ad67682d1247d2674015ed80dd1abcdf223ce9",
+    "commit": "c581bf660837c3a7d03101c3740f946282a752b1",
     "generator": "z.toJSONSchema (Zod 4)",
     "command": "DMC_268_UI_DIR=<ui checkout after pnpm install> SCHEMA_NAMES=runSession,runAction,reviewComment,runDetail,findingView,runListPage,runUpdatedEvent,repository,repositoryUpdate,rawFileDiff,fileSlice,authSession,me,bitbucketDiscoveryRequest,bitbucketDiscoveredRepository,bitbucketDiscoveryResponse,bitbucketConnectRequest,bitbucketWebhookSetup,bitbucketConnectResponse,bitbucketConnectionItem,bitbucketConnectionList,bitbucketCredentialRotateRequest,bitbucketCredentialRotateResponse OUTPUT_PATH=tests/fixtures/ui_zod_contracts.json node tests/generate_ui_zod_contracts.mjs"
   },
@@ -1550,7 +1550,9 @@
         },
         "apiToken": {
           "type": "string",
-          "minLength": 1
+          "minLength": 1,
+          "maxLength": 4096,
+          "pattern": "^[\\x21-\\x7E]+(?![\\s\\S])"
         },
         "cursor": {
           "type": [
@@ -1683,7 +1685,9 @@
         },
         "apiToken": {
           "type": "string",
-          "minLength": 1
+          "minLength": 1,
+          "maxLength": 4096,
+          "pattern": "^[\\x21-\\x7E]+(?![\\s\\S])"
         }
       },
       "required": [
@@ -1709,7 +1713,9 @@
             "enum": [
               "repo:push",
               "pullrequest:created",
-              "pullrequest:updated"
+              "pullrequest:updated",
+              "pullrequest:fulfilled",
+              "pullrequest:rejected"
             ]
           }
         },
@@ -1780,7 +1786,9 @@
                     "enum": [
                       "repo:push",
                       "pullrequest:created",
-                      "pullrequest:updated"
+                      "pullrequest:updated",
+                      "pullrequest:fulfilled",
+                      "pullrequest:rejected"
                     ]
                   }
                 },
@@ -1948,7 +1956,9 @@
       "properties": {
         "apiToken": {
           "type": "string",
-          "minLength": 1
+          "minLength": 1,
+          "maxLength": 4096,
+          "pattern": "^[\\x21-\\x7E]+(?![\\s\\S])"
         }
       },
       "required": [

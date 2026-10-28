@@ -13,7 +13,7 @@ from datetime import UTC, datetime, timedelta
 from hashlib import sha256
 from pathlib import Path
 from typing import Any
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import httpx
 import psycopg
@@ -27,12 +27,24 @@ from sqlalchemy.schema import CreateSchema, DropSchema
 
 from alembic import command
 from app.bootstrap.reviews_api import ReviewsApiResources
+from app.main import app
 from app.modules.auth.application.scope import AuthScope
+from app.modules.integrations.bitbucket.infrastructure.connection_store import (
+    SqlAlchemyBitbucketConnectionStore,
+)
+from app.modules.integrations.bitbucket.infrastructure.credential_cipher import (
+    BitbucketCredentialCipher,
+    CredentialContext,
+    CredentialPurpose,
+)
 from app.modules.integrations.webhooks.infrastructure.github_installation_tree_provider import (
     StaticGitHubInstallationAccessTokenProvider,
 )
 from app.modules.repositories.application.installation_repositories import RepositorySnapshot
-from app.modules.repositories.application.onboard_repository import load_default_rule_sets
+from app.modules.repositories.application.onboard_repository import (
+    OnboardRepository,
+    load_default_rule_sets,
+)
 from app.modules.repositories.application.rules_status import (
     RefreshRulesStatuses,
     RequestRulesRefreshOnPush,
@@ -54,10 +66,13 @@ from app.modules.repositories.infrastructure.rules_status import (
     SqlAlchemyRulesStatusUnitOfWork,
     request_rules_refresh,
 )
+from app.webhook_worker import WorkerConfig, compose_rules_refresher
 from tests.portal_postgres import INSTALL_A, REPO_A, REPO_B, WS_A, Env, api, portal_schema, scalar
 from tests.test_rules_status import _HEAD, FakeGitHub, _read
 
 _SCOPE = AuthScope(42, (WS_A,))
+_BITBUCKET_WORKSPACE_UUID = UUID("11111111-1111-4111-8111-111111111111")
+_BITBUCKET_REPOSITORY_UUID = UUID("22222222-2222-4222-8222-222222222222")
 
 
 @pytest.fixture
@@ -129,6 +144,49 @@ def _execute(factory: async_sessionmaker[Any], sql: str, **values: Any) -> None:
             await session.commit()
 
     asyncio.run(run())
+
+
+def _seed_bitbucket_binding(factory: async_sessionmaker[Any]) -> None:
+    _execute(
+        factory,
+        "UPDATE provider_installations SET provider = 'bitbucket' WHERE id = :id",
+        id=INSTALL_A,
+    )
+    _execute(
+        factory,
+        "INSERT INTO bitbucket_installation_identities "
+        "(provider_installation_id, workspace_id, bitbucket_workspace_uuid) "
+        "VALUES (:installation, :workspace, :uuid)",
+        installation=INSTALL_A,
+        workspace=WS_A,
+        uuid=_BITBUCKET_WORKSPACE_UUID,
+    )
+    _execute(
+        factory,
+        "INSERT INTO bitbucket_repository_identities "
+        "(repository_id, provider_installation_id, workspace_id, "
+        "repository_external_id, repository_uuid) "
+        "VALUES (:repository, :installation, :workspace, 101, :uuid)",
+        repository=REPO_A,
+        installation=INSTALL_A,
+        workspace=WS_A,
+        uuid=_BITBUCKET_REPOSITORY_UUID,
+    )
+    _execute(
+        factory,
+        "INSERT INTO bitbucket_connections "
+        "(provider_installation_id, workspace_id, credential_generation, "
+        "token_key_id, token_ciphertext) "
+        "VALUES (:installation, :workspace, 1, 'test', :ciphertext)",
+        installation=INSTALL_A,
+        workspace=WS_A,
+        ciphertext=b"x",
+    )
+    _execute(
+        factory,
+        "INSERT INTO bitbucket_repository_webhook_secrets (repository_id) VALUES (:repository)",
+        repository=REPO_A,
+    )
 
 
 @pytest.mark.integration
@@ -220,6 +278,27 @@ def test_a_repository_the_app_lost_is_access_denied_and_not_requested(
         }
     ]
     assert markers == 0
+
+
+@pytest.mark.integration
+def test_an_inactive_bitbucket_binding_is_hidden_without_refresh(env: Env) -> None:
+    with api(env, _SCOPE) as (client, factory):
+        _seed_bitbucket_binding(factory)
+        _execute(
+            factory,
+            "UPDATE repositories SET installation_available = false WHERE id = :id",
+            id=REPO_A,
+        )
+        repository = client.get(f"/api/repos/{REPO_A}")
+        response = client.get(f"/api/repos/{REPO_A}/rules-status")
+        requested = scalar(
+            factory,
+            "SELECT count(*) AS n FROM repository_rules_status "
+            "WHERE refresh_requested_at IS NOT NULL",
+        ).n
+    assert repository.status_code == 404
+    assert response.status_code == 404
+    assert requested == 0
 
 
 @pytest.mark.integration
@@ -456,6 +535,75 @@ def _save(factory: async_sessionmaker[Any], target: RulesRefreshTarget, reading:
 
 
 @pytest.mark.integration
+def test_worker_claims_active_bitbucket_rules_requests(
+    factory: async_sessionmaker[Any],
+) -> None:
+    _seed_bitbucket_binding(factory)
+    asyncio.run(_request(factory))
+
+    targets = _claim(factory, datetime.now(UTC))
+
+    assert [(target.repository_id, target.provider) for target in targets] == [
+        (REPO_A, "bitbucket")
+    ]
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize(
+    ("disable_sql", "target_id"),
+    [
+        ("UPDATE provider_installations SET deleted_at = now() WHERE id = :id", INSTALL_A),
+        ("UPDATE repositories SET installation_available = false WHERE id = :id", REPO_A),
+    ],
+    ids=["deleted-installation", "repository-unavailable"],
+)
+def test_worker_does_not_claim_inactive_bitbucket_rules_requests(
+    factory: async_sessionmaker[Any], disable_sql: str, target_id: UUID
+) -> None:
+    _seed_bitbucket_binding(factory)
+    asyncio.run(_request(factory))
+    _execute(factory, disable_sql, id=target_id)
+
+    assert _claim(factory, datetime.now(UTC)) == ()
+    assert _row(factory, REPO_A).refresh_requested_at is not None
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize(
+    ("change_sql", "target_id"),
+    [
+        (
+            "UPDATE bitbucket_connections SET credential_generation = 2 "
+            "WHERE provider_installation_id = :id",
+            INSTALL_A,
+        ),
+        (
+            "UPDATE bitbucket_repository_webhook_secrets SET binding_generation = 2 "
+            "WHERE repository_id = :id",
+            REPO_A,
+        ),
+        ("UPDATE repositories SET installation_available = false WHERE id = :id", REPO_A),
+    ],
+    ids=["token-rotated", "binding-changed", "disconnected"],
+)
+def test_bitbucket_read_cannot_save_after_its_binding_changes(
+    factory: async_sessionmaker[Any], change_sql: str, target_id: UUID
+) -> None:
+    _seed_bitbucket_binding(factory)
+    asyncio.run(_request(factory))
+    (target,) = _claim(factory, datetime.now(UTC))
+    _execute(factory, change_sql, id=target_id)
+
+    saved = _save(factory, target, RulesReading(RulesStatusKind.MISSING, "main", _HEAD))
+    row = _row(factory, REPO_A)
+
+    assert saved is False
+    assert row.status is None
+    assert row.refresh_requested_at is not None
+    assert row.refresh_claimed_until is None
+
+
+@pytest.mark.integration
 def test_a_claimed_request_is_taken_again_only_after_its_lease(
     factory: async_sessionmaker[Any],
 ) -> None:
@@ -662,6 +810,142 @@ def test_the_worker_composition_reads_through_github_and_stores_the_result(env: 
     assert (stored.status, stored.sha, stored.ignore_masks) == ("present", _HEAD, ["docs/**"])
     assert stored.checksum == sha256(raw).hexdigest()
     assert github.paths[-1] == "/repos/octo/repo/git/blobs/" + "3" * 40
+
+
+@pytest.mark.integration
+def test_bitbucket_only_worker_turns_pending_terminal_and_preserves_github_request(
+    env: Env,
+) -> None:
+    installation_id, remote_workspace, remote_repository = uuid4(), uuid4(), uuid4()
+    cipher = BitbucketCredentialCipher(active_key_id="test", keys={"test": b"a" * 32})
+    sha = "a" * 40
+    seen: list[str] = []
+
+    def bitbucket_response(request: httpx.Request) -> httpx.Response:
+        assert request.url.host == "api.bitbucket.org"
+        assert request.headers["Authorization"] == "Bearer test-token"
+        path = request.url.path
+        seen.append(path)
+        if path.endswith(f"{{{remote_repository}}}/"):
+            return httpx.Response(
+                200,
+                json={"uuid": f"{{{remote_repository}}}", "mainbranch": {"name": "main"}},
+            )
+        if path.endswith("/refs/branches/main"):
+            return httpx.Response(200, json={"target": {"hash": sha}})
+        if path.endswith(f"/src/{sha}/"):
+            return httpx.Response(200, json={"values": []})
+        raise AssertionError(path)
+
+    with api(env, _SCOPE) as (client, factory):
+
+        async def setup() -> UUID:
+            async with factory() as session:
+                store = SqlAlchemyBitbucketConnectionStore(session)
+                await store.create_connection(
+                    workspace_id=WS_A,
+                    installation_id=installation_id,
+                    bitbucket_workspace_uuid=remote_workspace,
+                    token=cipher.encrypt(
+                        "test-token",
+                        context=CredentialContext(installation_id, WS_A),
+                        purpose=CredentialPurpose.TOKEN,
+                    ),
+                )
+                repository_id, created = await store.bind_repository(
+                    workspace_id=WS_A,
+                    installation_id=installation_id,
+                    repository_uuid=remote_repository,
+                    full_name="team/repo",
+                    default_branch="main",
+                    web_url="https://bitbucket.org/team/repo",
+                )
+                assert created
+                await store.set_repository_webhook_secret(
+                    workspace_id=WS_A,
+                    installation_id=installation_id,
+                    repository_id=repository_id,
+                    secret=cipher.encrypt(
+                        "h" * 40,
+                        context=CredentialContext(installation_id, WS_A, repository_id),
+                        purpose=CredentialPurpose.WEBHOOK_SECRET,
+                    ),
+                )
+                await OnboardRepository(
+                    store, load_default_rule_sets(Path("review/rules"))
+                ).execute(repository_id, {"Python": 1})
+                await store.request_rules_refresh(repository_id)
+                await request_rules_refresh(session, REPO_A)
+                await session.commit()
+                return repository_id
+
+        repository_id = asyncio.run(setup())
+        assert client.get(f"/api/repos/{repository_id}/rules-status").json()["status"] == "pending"
+        assert client.get(f"/api/repos/{REPO_A}/rules-status").json()["status"] == "pending"
+        resources = app.state.reviews_api_resources
+        bitbucket_config = WorkerConfig(
+            database_url=env.database_url,
+            app_id=None,
+            private_key=None,
+            bot_login=None,
+            github_api_url="https://api.github.com",
+            rabbitmq_url="amqp://unused",
+            bitbucket=cipher,
+        )
+
+        async def refresh_bitbucket() -> int:
+            async with httpx.AsyncClient(
+                transport=httpx.MockTransport(bitbucket_response), trust_env=False
+            ) as bitbucket_http:
+                worker = compose_rules_refresher(
+                    resources, None, None, bitbucket_config, bitbucket_client=bitbucket_http
+                )
+                assert worker is not None
+                return await worker.execute()
+
+        assert asyncio.run(refresh_bitbucket()) == 1
+        bitbucket_status = client.get(f"/api/repos/{repository_id}/rules-status").json()
+        assert (bitbucket_status["status"], bitbucket_status["sha"]) == ("missing", sha)
+        assert bitbucket_status["defaultsVersion"] == "v1"
+        assert _row(factory, repository_id).refresh_requested_at is None
+        assert _row(factory, REPO_A).refresh_requested_at is not None
+        assert client.get(f"/api/repos/{REPO_A}/rules-status").json()["status"] == "pending"
+        assert len(seen) == 3
+
+        async def request_bitbucket_again() -> None:
+            async with factory() as session:
+                await request_rules_refresh(session, repository_id)
+                await session.commit()
+
+        asyncio.run(request_bitbucket_again())
+        _execute(factory, "UPDATE repositories SET full_name='octo/repo' WHERE id=:id", id=REPO_A)
+        github = FakeGitHub(rules=None, review_dir=False)
+        github_config = WorkerConfig(
+            database_url=env.database_url,
+            app_id=17,
+            private_key="test",
+            bot_login="reviewer[bot]",
+            github_api_url="https://api.github.test",
+            rabbitmq_url="amqp://unused",
+        )
+
+        async def refresh_github() -> int:
+            async with httpx.AsyncClient(
+                transport=httpx.MockTransport(github.respond), base_url="https://api.github.test"
+            ) as http:
+                worker = compose_rules_refresher(
+                    resources,
+                    http,
+                    StaticGitHubInstallationAccessTokenProvider("token"),
+                    github_config,
+                )
+                assert worker is not None
+                return await worker.execute()
+
+        assert asyncio.run(refresh_github()) == 1
+        assert client.get(f"/api/repos/{REPO_A}/rules-status").json()["status"] == "missing"
+        assert _row(factory, repository_id).refresh_requested_at is not None
+        assert _row(factory, repository_id).status == "missing"
 
 
 @pytest.fixture

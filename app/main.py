@@ -268,11 +268,47 @@ app.openapi = custom_openapi  # type: ignore[method-assign]
 
 @app.exception_handler(RequestValidationError)
 async def render_validation_error(request: Request, exc: RequestValidationError) -> Response:
-    """Render FastAPI's default 422 body, ASCII-escaped when UTF-8 cannot encode it.
+    """Render 422 errors without exposing Bitbucket credentials.
 
-    The default body echoes the rejected input; a lone surrogate in it would turn the 422 into
-    a 500 (#149).
+    Elsewhere the default body is retained, ASCII-escaped when UTF-8 cannot encode it (#149).
     """
+    if request.url.path.startswith("/api/workspaces/") and "/bitbucket/" in request.url.path:
+        known_location_segments = {
+            "body",
+            "path",
+            "query",
+            "header",
+            "cookie",
+            "apiToken",
+            "bitbucketWorkspace",
+            "repositorySlug",
+            "repositoryUuid",
+            "cursor",
+            "workspace_id",
+            "installation_id",
+            "repository_id",
+        }
+        detail = [
+            {
+                "type": error["type"],
+                "loc": [
+                    segment
+                    if isinstance(segment, int)
+                    or (isinstance(segment, str) and segment in known_location_segments)
+                    else "unknown"
+                    for segment in error["loc"]
+                ],
+                "msg": (
+                    "Invalid Bitbucket token"
+                    if "apiToken" in error["loc"]
+                    else "Invalid request value"
+                ),
+            }
+            for error in exc.errors()
+        ]
+        return Response(
+            json.dumps({"detail": detail}), status_code=422, media_type="application/json"
+        )
     try:
         return await request_validation_exception_handler(request, exc)
     except UnicodeEncodeError:

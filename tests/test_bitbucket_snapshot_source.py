@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+from datetime import timedelta
 from uuid import UUID
 
 import httpx
@@ -15,6 +16,7 @@ from app.modules.code_index.application.vcs import (
     VcsUnavailable,
 )
 from app.modules.code_index.domain.limits import IndexLimits
+from app.modules.code_index.infrastructure import bitbucket_snapshot_source
 from app.modules.code_index.infrastructure.bitbucket_snapshot_source import (
     BitbucketRepositorySnapshotSource,
 )
@@ -23,6 +25,7 @@ from app.modules.integrations.bitbucket.application.request_credentials import (
     BitbucketRequestCredential,
     BoundBitbucketTarget,
 )
+from app.modules.reviews.application.policy_errors import PolicyError, PolicyErrorCode
 from app.modules.reviews.application.policy_snapshot import DocumentPresence
 
 _SHA = "a" * 40
@@ -160,6 +163,204 @@ def test_opaque_page_archive_and_rules_are_pinned() -> None:
             assert credentials.checks >= 4
 
     asyncio.run(exercise())
+
+
+def test_oversized_source_listing_is_unavailable_not_an_invalid_rules_file() -> None:
+    def handle(request: httpx.Request) -> httpx.Response:
+        assert request.url.path.endswith(f"/src/{_SHA}/")
+        return httpx.Response(200, headers={"Content-Length": str(2 * 1024 * 1024 + 1)})
+
+    async def exercise() -> PolicyError:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
+            source = _source(_Credentials(), client)
+            with pytest.raises(PolicyError) as caught:
+                await source.rules_document(_SHA)
+        return caught.value
+
+    error = asyncio.run(exercise())
+
+    assert error.code is PolicyErrorCode.FETCH_TRANSIENT
+    assert error.retryable is True
+
+
+def test_exhausted_total_source_budget_is_unavailable_not_invalid(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(bitbucket_snapshot_source, "_MAX_TOTAL_SOURCE_BYTES", 10)
+
+    async def exercise() -> PolicyError:
+        transport = httpx.MockTransport(lambda _: httpx.Response(200, json={"values": []}))
+        async with httpx.AsyncClient(transport=transport) as client:
+            with pytest.raises(PolicyError) as caught:
+                await _source(_Credentials(), client).rules_document(_SHA)
+        return caught.value
+
+    assert asyncio.run(exercise()).code is PolicyErrorCode.FETCH_TRANSIENT
+
+
+def test_complete_empty_rules_listing_proves_missing() -> None:
+    def handle(request: httpx.Request) -> httpx.Response:
+        assert request.url.path.endswith(f"/src/{_SHA}/")
+        return httpx.Response(200, json={"values": [], "size": 0})
+
+    async def exercise() -> DocumentPresence:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
+            return (await _source(_Credentials(), client).rules_document(_SHA)).presence
+
+    assert asyncio.run(exercise()) is DocumentPresence.MISSING
+
+
+def test_incomplete_rules_listing_cannot_prove_missing() -> None:
+    def handle(request: httpx.Request) -> httpx.Response:
+        assert request.url.path.endswith(f"/src/{_SHA}/")
+        return httpx.Response(200, json={"values": [], "size": 1})
+
+    async def exercise() -> PolicyError:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
+            with pytest.raises(PolicyError) as caught:
+                await _source(_Credentials(), client).rules_document(_SHA)
+        return caught.value
+
+    assert asyncio.run(exercise()).code is PolicyErrorCode.FETCH_TRANSIENT
+
+
+def test_rules_listing_rate_limit_preserves_retry_after() -> None:
+    def handle(request: httpx.Request) -> httpx.Response:
+        assert request.url.path.endswith(f"/src/{_SHA}/")
+        return httpx.Response(429, headers={"Retry-After": "17"})
+
+    async def exercise() -> PolicyError:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
+            source = _source(_Credentials(), client)
+            with pytest.raises(PolicyError) as caught:
+                await source.rules_document(_SHA)
+        return caught.value
+
+    error = asyncio.run(exercise())
+
+    assert error.code is PolicyErrorCode.RATE_LIMITED
+    assert error.retry_after == timedelta(seconds=17)
+
+
+def test_declared_oversized_rules_file_remains_invalid() -> None:
+    def handle(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith(f"/src/{_SHA}/"):
+            return httpx.Response(
+                200,
+                json={
+                    "values": [
+                        {"path": ".review", "type": "commit_directory", "commit": {"hash": _SHA}}
+                    ]
+                },
+            )
+        if request.url.path.endswith(f"/src/{_SHA}/.review/"):
+            return httpx.Response(
+                200,
+                json={
+                    "values": [
+                        {
+                            "path": ".review/rules.md",
+                            "type": "commit_file",
+                            "size": 65_537,
+                            "commit": {"hash": _SHA},
+                        }
+                    ]
+                },
+            )
+        raise AssertionError(str(request.url))
+
+    async def exercise() -> PolicyError:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
+            source = _source(_Credentials(), client)
+            with pytest.raises(PolicyError) as caught:
+                await source.rules_document(_SHA)
+        return caught.value
+
+    error = asyncio.run(exercise())
+
+    assert error.code is PolicyErrorCode.DOCUMENT_TOO_LARGE
+    assert error.limit == 65_536
+
+
+def test_oversized_rules_response_body_remains_invalid() -> None:
+    def handle(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith(f"/src/{_SHA}/"):
+            return httpx.Response(
+                200,
+                json={
+                    "values": [
+                        {"path": ".review", "type": "commit_directory", "commit": {"hash": _SHA}}
+                    ]
+                },
+            )
+        if request.url.path.endswith(f"/src/{_SHA}/.review/"):
+            return httpx.Response(
+                200,
+                json={
+                    "values": [
+                        {
+                            "path": ".review/rules.md",
+                            "type": "commit_file",
+                            "size": 1,
+                            "commit": {"hash": _SHA},
+                        }
+                    ]
+                },
+            )
+        if request.url.path.endswith(f"/src/{_SHA}/.review/rules.md"):
+            return httpx.Response(200, content=b"x" * 65_537)
+        raise AssertionError(str(request.url))
+
+    async def exercise() -> PolicyError:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
+            with pytest.raises(PolicyError) as caught:
+                await _source(_Credentials(), client).rules_document(_SHA)
+        return caught.value
+
+    assert asyncio.run(exercise()).code is PolicyErrorCode.DOCUMENT_TOO_LARGE
+
+
+@pytest.mark.parametrize(
+    ("declared_size", "body"),
+    [(20, b"# Rules\n"), (1, b"# Rules\n")],
+    ids=["truncated-200", "longer-than-listing"],
+)
+def test_rules_file_size_mismatch_is_unavailable(declared_size: int, body: bytes) -> None:
+    def handle(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith(f"/src/{_SHA}/"):
+            return httpx.Response(
+                200,
+                json={
+                    "values": [
+                        {"path": ".review", "type": "commit_directory", "commit": {"hash": _SHA}}
+                    ]
+                },
+            )
+        if request.url.path.endswith(f"/src/{_SHA}/.review/"):
+            return httpx.Response(
+                200,
+                json={
+                    "values": [
+                        {
+                            "path": ".review/rules.md",
+                            "type": "commit_file",
+                            "size": declared_size,
+                            "commit": {"hash": _SHA},
+                        }
+                    ]
+                },
+            )
+        if request.url.path.endswith(f"/src/{_SHA}/.review/rules.md"):
+            return httpx.Response(200, content=body)
+        raise AssertionError(str(request.url))
+
+    async def exercise() -> PolicyError:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
+            with pytest.raises(PolicyError) as caught:
+                await _source(_Credentials(), client).rules_document(_SHA)
+        return caught.value
+
+    assert asyncio.run(exercise()).code is PolicyErrorCode.FETCH_TRANSIENT
 
 
 def test_redirect_fails_closed_without_following() -> None:

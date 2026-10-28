@@ -28,6 +28,7 @@ from app.modules.repositories.infrastructure.models import ProviderInstallation,
 from app.modules.repositories.infrastructure.rule_version_repository import (
     SqlAlchemyRepositoryRuleVersionStore,
 )
+from app.modules.repositories.infrastructure.rules_status import request_rules_refresh
 from app.modules.workspaces.infrastructure.models import GitHubUserWorkspaceAccess, Workspace
 
 
@@ -270,6 +271,9 @@ class SqlAlchemyBitbucketConnectionStore:
         self, repository_id: UUID, version: int, rules: list[dict[str, object]]
     ) -> PersistedRuleVersion:
         return await self._rules.get_or_create_initial_rule_version(repository_id, version, rules)
+
+    async def request_rules_refresh(self, repository_id: UUID) -> None:
+        await request_rules_refresh(self._session, repository_id)
 
     async def bind_repository(
         self,

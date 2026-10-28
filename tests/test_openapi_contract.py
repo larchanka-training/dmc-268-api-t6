@@ -1105,6 +1105,26 @@ def test_ui_zod_snapshot_covers_the_shared_dtos() -> None:
     assert len(UI_ZOD_COMPONENTS) >= 12
 
 
+@pytest.mark.parametrize(
+    "component",
+    [
+        "BitbucketDiscoveryRequest",
+        "BitbucketConnectRequest",
+        "BitbucketCredentialRotateRequest",
+    ],
+)
+def test_bitbucket_api_token_schema_accepts_only_printable_ascii_up_to_4096(
+    component: str,
+) -> None:
+    token_schema = _components()[component]["properties"]["apiToken"]
+    validator = Draft202012Validator(token_schema)
+
+    assert token_schema["writeOnly"] is True
+    assert validator.is_valid("A" * 4096)
+    for invalid in ("", "A" * 4097, "A token", "A\n", "A\x7f", "Aé"):
+        assert not validator.is_valid(invalid)
+
+
 def test_contract_mirror_distinguishes_null_only_from_nullable_string() -> None:
     assert _contract_mismatches({"type": "null"}, {"type": "null"}, {}, "cursor") == []
     assert _contract_mismatches({"type": ["null"]}, {"type": "null"}, {}, "cursor") == []

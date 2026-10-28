@@ -48,7 +48,7 @@ _REVIEW = "2" * 40
 _RULES = "3" * 40
 _NOW = datetime(2026, 10, 18, 12, 0, tzinfo=UTC)
 _LEASE_END = _NOW + timedelta(minutes=5)
-_TARGET = RulesRefreshTarget(_REPOSITORY, 17, "octo/repo", "main", _NOW, _LEASE_END)
+_TARGET = RulesRefreshTarget(_REPOSITORY, 17, "octo/repo", "main", _NOW, _LEASE_END, "github")
 
 
 def _entry(path: str, sha: str, *, kind: str = "blob", size: int = 5) -> dict[str, Any]:
@@ -632,7 +632,7 @@ class FakeReader:
 
 
 def test_refresh_saves_each_claimed_read_and_an_unexpected_failure_as_transient() -> None:
-    broken = RulesRefreshTarget(UUID(int=1), 17, "octo/broken", "main", _NOW, _LEASE_END)
+    broken = RulesRefreshTarget(UUID(int=1), 17, "octo/broken", "main", _NOW, _LEASE_END, "github")
     store = FakeRefreshStore((broken, _TARGET))
     missing = RulesReading(RulesStatusKind.MISSING, "main", _HEAD)
 

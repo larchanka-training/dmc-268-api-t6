@@ -62,6 +62,13 @@ class _Entry:
     size: int | None
 
 
+class _TotalSourceBudgetExceeded(IndexLimitExceeded):
+    """The combined source budget says nothing about one document's size."""
+
+    def __init__(self) -> None:
+        super().__init__("download_bytes")
+
+
 def _sha(value: object) -> str:
     if not isinstance(value, str) or _SHA.fullmatch(value) is None:
         raise ValueError("Invalid Bitbucket commit SHA")
@@ -158,6 +165,10 @@ class BitbucketRepositorySnapshotSource:
     def request_count(self) -> int:
         return self._requests
 
+    async def checkpoint(self) -> None:
+        """Fence a completed rules read against disconnect or token rotation."""
+        await self._bound()
+
     async def _bound(self) -> BoundBitbucketTarget:
         if self._target is None:
             try:
@@ -199,11 +210,10 @@ class BitbucketRepositorySnapshotSource:
                     raise IndexLimitExceeded("download_bytes")
                 body = bytearray()
                 async for chunk in response.aiter_bytes():
-                    if (
-                        len(body) + len(chunk) > max_bytes
-                        or self._read_bytes + len(body) + len(chunk) > _MAX_TOTAL_SOURCE_BYTES
-                    ):
+                    if len(body) + len(chunk) > max_bytes:
                         raise IndexLimitExceeded("download_bytes")
+                    if self._read_bytes + len(body) + len(chunk) > _MAX_TOTAL_SOURCE_BYTES:
+                        raise _TotalSourceBudgetExceeded()
                     body.extend(chunk)
         except httpx.RequestError:
             raise VcsUnavailable("Bitbucket source request failed") from None
@@ -364,6 +374,7 @@ class BitbucketRepositorySnapshotSource:
 
     async def rules_document(self, commit_sha: str) -> PolicyDocument:
         sha = _sha(commit_sha)
+        reading_file = False
         try:
             root = await self._directory(sha, "")
             review = next((item for item in root if item.path == ".review"), None)
@@ -395,21 +406,34 @@ class BitbucketRepositorySnapshotSource:
                     source_path=RULES_DOCUMENT_PATH,
                     limit=MAX_DOCUMENT_BYTES,
                 )
+            reading_file = True
             raw = await self._file(sha, RULES_DOCUMENT_PATH, max_bytes=MAX_DOCUMENT_BYTES)
+            if len(raw) != rules.size:
+                raise VcsUnavailable("Bitbucket rules file size differs from the pinned listing")
             oid = sha256(f"{sha}:{RULES_DOCUMENT_PATH}".encode()).hexdigest()
             return normalize_document(RULES_DOCUMENT_PATH, raw, blob_oid=oid, policy_base_sha=sha)
         except (VcsUnavailable, VcsAccessDenied, IndexLimitExceeded) as error:
-            code = (
-                PolicyErrorCode.DOCUMENT_TOO_LARGE
-                if isinstance(error, IndexLimitExceeded)
-                else PolicyErrorCode.FETCH_TRANSIENT
+            oversized_document = (
+                reading_file
+                and isinstance(error, IndexLimitExceeded)
+                and error.limit == "download_bytes"
+                and not isinstance(error, _TotalSourceBudgetExceeded)
             )
+            if oversized_document:
+                code = PolicyErrorCode.DOCUMENT_TOO_LARGE
+            elif isinstance(error, VcsUnavailable) and error.rate_limited:
+                code = PolicyErrorCode.RATE_LIMITED
+            elif isinstance(error, VcsAccessDenied):
+                code = PolicyErrorCode.ACCESS_DENIED
+            else:
+                code = PolicyErrorCode.FETCH_TRANSIENT
             raise PolicyError(
                 code,
                 "Bitbucket rules could not be read",
                 policy_base_sha=sha,
                 source_path=RULES_DOCUMENT_PATH,
                 limit=MAX_DOCUMENT_BYTES if code is PolicyErrorCode.DOCUMENT_TOO_LARGE else None,
+                retry_after=error.retry_after if isinstance(error, VcsUnavailable) else None,
             ) from None
 
     async def archive(self, commit_sha: str, *, max_bytes: int) -> SourceArchive:

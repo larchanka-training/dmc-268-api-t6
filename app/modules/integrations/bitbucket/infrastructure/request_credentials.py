@@ -203,7 +203,12 @@ class SqlAlchemyBitbucketTargetReader:
         )
         if lock:
             statement = statement.with_for_update(
-                of=(ProviderInstallation, BitbucketConnection, Repository)
+                of=(
+                    ProviderInstallation,
+                    BitbucketConnection,
+                    Repository,
+                    BitbucketRepositoryWebhookSecret,
+                )
             )
         row = (await session.execute(statement)).one_or_none()
         if row is None or row[3] is None or row[4] is None:

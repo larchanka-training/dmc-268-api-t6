@@ -191,6 +191,8 @@ class BitbucketManagementStore(RepositoryRuleVersionStore, Protocol):
         web_url: str,
     ) -> tuple[UUID, bool]: ...
 
+    async def request_rules_refresh(self, repository_id: UUID) -> None: ...
+
     async def set_repository_webhook_secret(
         self,
         *,
@@ -318,6 +320,7 @@ class ManageBitbucketConnection:
             language_sizes = {remote.language: 1} if remote.language else {}
             await OnboardRepository(store, self._rule_sets).execute(repository_id, language_sizes)
             if newly_active:
+                await store.request_rules_refresh(repository_id)
                 generated_secret = secrets.token_urlsafe(36)
                 await store.set_repository_webhook_secret(
                     workspace_id=workspace_id,

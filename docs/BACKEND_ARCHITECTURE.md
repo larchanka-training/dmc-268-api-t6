@@ -73,6 +73,16 @@ infrastructure implementations
 | `<module>/infrastructure` | repositories и реализации внешних зависимостей конкретного модуля | application/domain модуля, внешние библиотеки; исключение — unit of work может построить на своей сессии адаптер `infrastructure` другого модуля (`installation_repository_unit_of_work.py` берёт `workspaces.infrastructure.github_installation_locks`, а `index_purger` обоих UoW модуля `repositories` — `SqlAlchemyCodeIndexPurger`, `index_enabler` UoW настроек — `SqlAlchemyCodeIndexEnabler`, #143) |
 | `entrypoints` | FastAPI routers, webhook endpoint, consumers, scheduler, dependency wiring | application-модули и bootstrap |
 
+Для статуса `.review/rules.md` есть узкое инфраструктурное исключение к строке выше:
+`repositories.infrastructure.rules_status` собирает read model из таблиц
+`integrations.bitbucket.infrastructure` и проверяет поколение credential/binding перед
+сохранением результата. `integrations.bitbucket.infrastructure.connection_store` вызывает
+`request_rules_refresh` модуля `repositories` в той же короткой транзакции подключения.
+Владение таблицами остаётся у соответствующих модулей; внешние HTTP-запросы выполняются
+между транзакциями claim и save. Application использует свои порты и публичные
+application-контракты других модулей (`BoundBitbucketTarget`, `BranchHead`, ошибки VCS),
+как описано в таблице слоёв.
+
 HTTP DTO и сообщения RabbitMQ — транспортные модели Pydantic. ORM-модели — детали
 persistence-слоя. Ни те, ни другие не пересекают границу application.
 
@@ -404,6 +414,13 @@ autocommit-соединении, [webhook_work_listener.py](../app/bootstrap/web
 уведомление отправляют сохранение новой квитанции, повторная активация отложенных квитанций
 при OAuth и запрос статуса правил (#150), а обход раз в 30 с остаётся резервным
 ([WEBHOOK_WORKER.md](WEBHOOK_WORKER.md#how-the-worker-handles-deliveries)).
+Для статуса правил GitHub запрашивает чтение при подключении и `push` в default branch,
+Bitbucket — при создании или повторной активации binding. У обоих GET запрашивает чтение,
+если результата ещё нет, он старше 10 минут или пора повторить retryable-сбой. Bitbucket
+`repo:push` пока не запрашивает немедленное чтение правил. `webhook-worker` берёт только
+запросы провайдеров, для которых настроен reader, читает закреплённый SHA вне транзакции
+и сохраняет `present`, `missing`, `invalid` или `unavailable`; первый GET до сохранения
+показывает `pending`.
 Статусы из worker доходят до `/api/stream` через PostgreSQL: API слушает канал
 `run_updated` (`LISTEN` на отдельном autocommit-соединении,
 [run_update_listener.py](../app/bootstrap/run_update_listener.py)) и передаёт события в

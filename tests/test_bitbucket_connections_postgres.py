@@ -691,6 +691,17 @@ def test_browser_connect_reuses_one_credential_and_disconnects_one_repository(
         assert second.json()["id"] == first.json()["id"]
         assert second.json()["webhook"]["secret"]
         assert second.json()["webhook"]["secret"] != first.json()["webhook"]["secret"]
+        for connected in (first, second):
+            assert (
+                db.scalar(
+                    text(
+                        "SELECT refresh_requested_at FROM repository_rules_status "
+                        "WHERE repository_id=:id"
+                    ),
+                    {"id": connected.json()["repositoryId"]},
+                )
+                is not None
+            )
         assert first.json()["repositoryId"] in first.json()["webhook"]["url"]
         assert second.json()["repositoryId"] in second.json()["webhook"]["url"]
         first_secret_before = db.scalar(
@@ -797,6 +808,14 @@ def test_browser_connect_reuses_one_credential_and_disconnects_one_repository(
             ).status_code
             == 204
         )
+        db.execute(
+            text(
+                "UPDATE repository_rules_status SET refresh_requested_at=NULL "
+                "WHERE repository_id=:id"
+            ),
+            {"id": first.json()["repositoryId"]},
+        )
+        db.commit()
         reconnected = client.post(
             url,
             json={
@@ -809,6 +828,16 @@ def test_browser_connect_reuses_one_credential_and_disconnects_one_repository(
         assert reconnected.status_code == 201
         assert reconnected.json()["id"] == first.json()["id"]
         assert reconnected.json()["webhook"]["secret"] != first.json()["webhook"]["secret"]
+        assert (
+            db.scalar(
+                text(
+                    "SELECT refresh_requested_at FROM repository_rules_status "
+                    "WHERE repository_id=:id"
+                ),
+                {"id": first.json()["repositoryId"]},
+            )
+            is not None
+        )
         db.execute(
             text(
                 "DELETE FROM github_user_workspace_access "
