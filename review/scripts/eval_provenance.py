@@ -27,6 +27,7 @@ _REVIEW_CODE = (
     "app/modules/reviews/application/policy_snapshot.py",
     "app/modules/reviews/application/prompt_budget.py",
     "app/modules/reviews/application/prompt_builder.py",
+    "app/modules/reviews/application/rag_index.py",
     "app/modules/reviews/application/review_output.py",
     "app/modules/reviews/application/review_path.py",
     "app/modules/reviews/application/run_failures.py",

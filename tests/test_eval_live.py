@@ -679,6 +679,7 @@ def test_records_only_first_valid_answer_with_explicit_inputs(tmp_path: Path) ->
     assert "review/schemas/review-output.schema.json" in manifest["static_inputs"]
     assert "review/schemas/review-output.schema.v2.json" in manifest["static_inputs"]
     assert "app/modules/reviews/application/review_path.py" in manifest["static_inputs"]
+    assert "app/modules/reviews/application/rag_index.py" in manifest["static_inputs"]
     assert "app/common/application/languages.py" in manifest["static_inputs"]
     assert "app/modules/reviews/application/prompt_builder.py" in manifest["static_inputs"]
     assert "app/modules/reviews/application/prompt_budget.py" in manifest["static_inputs"]
@@ -2574,12 +2575,12 @@ VERIFIER_V2_PIN = "1f676b4fea8477d77b83a106a6c62e78f67d19f71937d4a02093d11a9d276
 
 
 @pytest.mark.parametrize(
-    ("arm", "prompt", "version", "checksum", "schema_name"),
+    ("arm", "prompt", "version", "checksum", "schema_name", "retrieved_sections"),
     [
-        ("valid", V5_SYSTEM, "v5", V5_PIN, "ReviewOutputV2"),
-        ("valid", V4_SYSTEM, "v4", V4_PIN, "ReviewOutputV2"),
-        ("valid", SYSTEM, "v2", V2_PIN, "ReviewOutput"),
-        ("none", V3_SYSTEM, "v3", V3_SHA, "ReviewOutput"),
+        ("valid", V5_SYSTEM, "v5", V5_PIN, "ReviewOutputV2", 1),
+        ("valid", V4_SYSTEM, "v4", V4_PIN, "ReviewOutputV2", 0),
+        ("valid", SYSTEM, "v2", V2_PIN, "ReviewOutput", 0),
+        ("none", V3_SYSTEM, "v3", V3_SHA, "ReviewOutput", 0),
     ],
     ids=["valid-v5", "valid-v4", "valid-v2", "none-v3"],
 )
@@ -2591,6 +2592,7 @@ def test_policy_arm_binds_the_version_and_pin_of_the_prompt_it_sends(
     version: str,
     checksum: str,
     schema_name: str,
+    retrieved_sections: int,
 ) -> None:
     original_case_input = eval_live_module._case_input
     bound: list[Any] = []
@@ -2621,6 +2623,10 @@ def test_policy_arm_binds_the_version_and_pin_of_the_prompt_it_sends(
     (request,) = transport.requests
     assert request.response_schema is not None
     assert request.response_schema.name == schema_name
+    # Eval has no RAG index: v5 shows its retrieved section empty, as production does then.
+    user = request.messages[1].content
+    assert user.count("<retrieved_excerpts>") == retrieved_sections
+    assert user.count("<retrieved_excerpts>\n\n</retrieved_excerpts>") == retrieved_sections
     assert manifest["prompt_version"] == version
     assert manifest["run_metadata"]["cases"]["RUL-04"]["gateway_status"] == "accepted"
 

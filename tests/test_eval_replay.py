@@ -868,6 +868,7 @@ def test_replay_warns_on_request_shape_or_output_schema_edit(tmp_path: Path, cha
         "app/modules/reviews/infrastructure/llm/settings.py",
         "app/modules/reviews/infrastructure/llm/transport.py",
         "app/modules/reviews/application/review_path.py",
+        "app/modules/reviews/application/rag_index.py",
         "app/modules/reviews/infrastructure/llm/answers.py",
     ],
 )

@@ -54,6 +54,7 @@ from app.modules.reviews.application.prompt_builder import (
     ReviewRule,
     parse_unified_diff,
 )
+from app.modules.reviews.application.rag_index import has_retrieved_section
 from app.modules.reviews.application.review_output import ReviewOutput, parse_review_output
 from app.modules.reviews.application.run_failures import FAST_ATTEMPT_DEADLINE, RunCancelled
 from app.modules.reviews.application.run_trace import TransactionalRunTrace
@@ -251,6 +252,14 @@ async def review_case(
     Raises ``ReviewCaseFailed`` (an ``LlmCallFailed`` with the normalized ``error_code``,
     like the worker path) that also carries every ``llm.call`` record of the case.
     """
+    retrieved_section = False
+    if case.policy_snapshot is not None:
+        # As in ExecuteReviewRun, the section follows the bound prompt version; a case has
+        # no RAG index, so a prompt with the section shows it empty.
+        bindings = case.policy_snapshot.prompt_bindings
+        retrieved_section = has_retrieved_section(
+            bindings.review_system_key, bindings.review_system_version
+        )
     context = ReviewContext(
         system=case.system,
         rules=case.rules,
@@ -260,6 +269,7 @@ async def review_case(
         changed_files=parse_unified_diff(case.diff),
         omitted_files=(),
         policy_snapshot=case.policy_snapshot,
+        retrieved_section=retrieved_section,
     )
     result, _, calls, latency_ms = await _run_database_free_case(
         settings,
