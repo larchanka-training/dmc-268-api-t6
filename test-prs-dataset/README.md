@@ -1169,8 +1169,9 @@ twice; it warns when only some runs of an arm carry usage, and notes under the t
 in arm `none` the rule and exception figures are found and flagged without rules (there
 "Exceptions respected" does not apply). A live A/B needs a snapshot-path prompt and an arm
 other than `legacy`: v3 tells the model that only `<custom_instructions>` instruct it, so on
-v3 the effect is about zero by construction. The AC8 runs use `review_prompt=v5` (#144
-part 3b) and wait for budget approval.
+v3 the effect is about zero by construction. The AC8 runs used `review_prompt=v5` (#144
+part 3b); their results are in
+[RULES_MD_TEST_REPORT](../docs/RULES_MD_TEST_REPORT.md#ac8--живой-ab-на-v5).
 
 ### Service defaults in the policy arms
 
