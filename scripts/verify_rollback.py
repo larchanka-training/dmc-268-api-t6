@@ -31,6 +31,7 @@ HOST_FILES = (
     "app.env",
     "worker.env",
     "webhook-worker.env",
+    "bitbucket.env",
     ".deploy-state",
     ".deploy-state.previous",
 )

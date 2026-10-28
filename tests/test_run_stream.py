@@ -35,6 +35,7 @@ UPDATED_AT_ID = "1791376496123457"
 def make_item(status: str = "running") -> RunListItem:
     created_at = datetime(2026, 9, 25, tzinfo=UTC)
     return RunListItem(
+        provider="github",
         id=RUN_ID,
         status=status,
         engine="fast",

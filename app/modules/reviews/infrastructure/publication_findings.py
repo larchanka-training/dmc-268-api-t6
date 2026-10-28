@@ -6,6 +6,7 @@ import logging
 
 from app.modules.reviews.application.diff_map import DiffMap
 from app.modules.reviews.application.publication_coordinates import (
+    enrich_bitbucket_publication_finding,
     enrich_gitlab_publication_finding,
 )
 from app.modules.reviews.application.review_output import PublishedFinding
@@ -34,6 +35,8 @@ def published_finding_from_row(
         rule_name=item.rule_name,
         finding_id=item.id,
     )
+    if provider == "bitbucket":
+        return enrich_bitbucket_publication_finding(diff_map, finding)
     if provider != "gitlab":
         return finding
     if diff_map is None:

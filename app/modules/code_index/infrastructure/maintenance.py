@@ -20,7 +20,7 @@ from app.modules.code_index.application.maintenance import (
 )
 from app.modules.code_index.application.ports import IndexedRepository
 from app.modules.code_index.domain.enums import IndexStatus, PurgeReason
-from app.modules.code_index.infrastructure.effective_rag import GITHUB_PROVIDER, RAG_ON
+from app.modules.code_index.infrastructure.effective_rag import INDEXABLE_PROVIDER, RAG_ON
 from app.modules.code_index.infrastructure.index_store import (
     DISPLACED_GRACE,
     SqlAlchemyCodeIndexUnitOfWork,
@@ -32,14 +32,14 @@ from app.modules.repositories.infrastructure.models import ProviderInstallation,
 # A repository to re-arm (ADR §4): no state row, or one purged by a removal or a toggle.
 _REARM = and_(
     RAG_ON,
-    GITHUB_PROVIDER,
+    INDEXABLE_PROVIDER,
     or_(
         CodeIndexState.repository_id.is_(None),
         CodeIndexState.purge_reason.in_([PurgeReason.REMOVED, PurgeReason.DISABLED]),
     ),
 )
 # A live index to disarm, and its purge reason: turned off by the user, else lost access.
-_DISARM = and_(CodeIndexState.purge_reason.is_(None), not_(RAG_ON))
+_DISARM = and_(CodeIndexState.purge_reason.is_(None), not_(and_(RAG_ON, INDEXABLE_PROVIDER)))
 _DISARM_REASON = case(
     (not_(Repository.rag_enabled), PurgeReason.DISABLED.value), else_=PurgeReason.REMOVED.value
 )
@@ -153,7 +153,7 @@ class SqlAlchemyCodeIndexMaintenance:
             )
             .where(
                 RAG_ON,
-                GITHUB_PROVIDER,
+                INDEXABLE_PROVIDER,
                 CodeIndexState.purge_reason.is_(None),
                 CodeIndexState.status != IndexStatus.FAILED,
                 true() if after is None else CodeIndexState.repository_id > after,

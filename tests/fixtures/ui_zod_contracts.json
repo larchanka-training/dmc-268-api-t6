@@ -1,9 +1,9 @@
 {
   "provenance": {
     "repository": "https://github.com/larchanka-training/dmc-268-ui-t6",
-    "commit": "9bfb931d88fe66b15d77e636b32406374c76589a",
+    "commit": "c581bf660837c3a7d03101c3740f946282a752b1",
     "generator": "z.toJSONSchema (Zod 4)",
-    "command": "DMC_268_UI_DIR=<ui checkout after pnpm install> node tests/generate_ui_zod_contracts.mjs"
+    "command": "DMC_268_UI_DIR=<ui checkout after pnpm install> SCHEMA_NAMES=runSession,runAction,reviewComment,runDetail,findingView,runListPage,runUpdatedEvent,repository,repositoryUpdate,rawFileDiff,fileSlice,authSession,me,bitbucketDiscoveryRequest,bitbucketDiscoveredRepository,bitbucketDiscoveryResponse,bitbucketConnectRequest,bitbucketWebhookSetup,bitbucketConnectResponse,bitbucketConnectionItem,bitbucketConnectionList,bitbucketCredentialRotateRequest,bitbucketCredentialRotateResponse OUTPUT_PATH=tests/fixtures/ui_zod_contracts.json node tests/generate_ui_zod_contracts.mjs"
   },
   "schemas": {
     "runSession": {
@@ -14,6 +14,14 @@
           "type": "string",
           "format": "uuid",
           "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+        },
+        "provider": {
+          "type": "string",
+          "enum": [
+            "github",
+            "gitlab",
+            "bitbucket"
+          ]
         },
         "engine": {
           "type": "string",
@@ -92,6 +100,14 @@
         "pullRequest": {
           "type": "object",
           "properties": {
+            "provider": {
+              "type": "string",
+              "enum": [
+                "github",
+                "gitlab",
+                "bitbucket"
+              ]
+            },
             "repo": {
               "type": "string"
             },
@@ -130,6 +146,7 @@
             }
           },
           "required": [
+            "provider",
             "repo",
             "number",
             "title",
@@ -152,6 +169,7 @@
       },
       "required": [
         "id",
+        "provider",
         "engine",
         "model",
         "status",
@@ -344,6 +362,14 @@
           "format": "uuid",
           "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
         },
+        "provider": {
+          "type": "string",
+          "enum": [
+            "github",
+            "gitlab",
+            "bitbucket"
+          ]
+        },
         "engine": {
           "type": "string",
           "enum": [
@@ -421,6 +447,14 @@
         "pullRequest": {
           "type": "object",
           "properties": {
+            "provider": {
+              "type": "string",
+              "enum": [
+                "github",
+                "gitlab",
+                "bitbucket"
+              ]
+            },
             "repo": {
               "type": "string"
             },
@@ -459,6 +493,7 @@
             }
           },
           "required": [
+            "provider",
             "repo",
             "number",
             "title",
@@ -727,6 +762,7 @@
       },
       "required": [
         "id",
+        "provider",
         "engine",
         "model",
         "status",
@@ -877,6 +913,14 @@
                 "format": "uuid",
                 "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
               },
+              "provider": {
+                "type": "string",
+                "enum": [
+                  "github",
+                  "gitlab",
+                  "bitbucket"
+                ]
+              },
               "engine": {
                 "type": "string",
                 "enum": [
@@ -954,6 +998,14 @@
               "pullRequest": {
                 "type": "object",
                 "properties": {
+                  "provider": {
+                    "type": "string",
+                    "enum": [
+                      "github",
+                      "gitlab",
+                      "bitbucket"
+                    ]
+                  },
                   "repo": {
                     "type": "string"
                   },
@@ -992,6 +1044,7 @@
                   }
                 },
                 "required": [
+                  "provider",
                   "repo",
                   "number",
                   "title",
@@ -1014,6 +1067,7 @@
             },
             "required": [
               "id",
+              "provider",
               "engine",
               "model",
               "status",
@@ -1080,6 +1134,14 @@
           "type": "string",
           "format": "uuid",
           "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+        },
+        "provider": {
+          "type": "string",
+          "enum": [
+            "github",
+            "gitlab",
+            "bitbucket"
+          ]
         },
         "fullName": {
           "type": "string",
@@ -1207,6 +1269,7 @@
       },
       "required": [
         "id",
+        "provider",
         "fullName",
         "url",
         "defaultBranch",
@@ -1473,6 +1536,454 @@
         "name",
         "avatarUrl",
         "workspaces"
+      ],
+      "additionalProperties": false
+    },
+    "bitbucketDiscoveryRequest": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "bitbucketWorkspace": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "apiToken": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096,
+          "pattern": "^[\\x21-\\x7E]+(?![\\s\\S])"
+        },
+        "cursor": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "bitbucketWorkspace",
+        "apiToken"
+      ],
+      "additionalProperties": false
+    },
+    "bitbucketDiscoveredRepository": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "uuid": {
+          "type": "string",
+          "format": "uuid",
+          "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+        },
+        "workspaceSlug": {
+          "type": "string",
+          "minLength": 1
+        },
+        "slug": {
+          "type": "string",
+          "minLength": 1
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "isPrivate": {
+          "type": "boolean"
+        },
+        "htmlUrl": {
+          "type": "string",
+          "format": "uri"
+        }
+      },
+      "required": [
+        "uuid",
+        "workspaceSlug",
+        "slug",
+        "name",
+        "isPrivate",
+        "htmlUrl"
+      ],
+      "additionalProperties": false
+    },
+    "bitbucketDiscoveryResponse": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "repositories": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "uuid": {
+                "type": "string",
+                "format": "uuid",
+                "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+              },
+              "workspaceSlug": {
+                "type": "string",
+                "minLength": 1
+              },
+              "slug": {
+                "type": "string",
+                "minLength": 1
+              },
+              "name": {
+                "type": "string",
+                "minLength": 1
+              },
+              "isPrivate": {
+                "type": "boolean"
+              },
+              "htmlUrl": {
+                "type": "string",
+                "format": "uri"
+              }
+            },
+            "required": [
+              "uuid",
+              "workspaceSlug",
+              "slug",
+              "name",
+              "isPrivate",
+              "htmlUrl"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "nextCursor": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "repositories",
+        "nextCursor"
+      ],
+      "additionalProperties": false
+    },
+    "bitbucketConnectRequest": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "bitbucketWorkspace": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "repositorySlug": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "repositoryUuid": {
+          "type": "string",
+          "format": "uuid",
+          "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+        },
+        "apiToken": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096,
+          "pattern": "^[\\x21-\\x7E]+(?![\\s\\S])"
+        }
+      },
+      "required": [
+        "bitbucketWorkspace",
+        "repositorySlug",
+        "repositoryUuid",
+        "apiToken"
+      ],
+      "additionalProperties": false
+    },
+    "bitbucketWebhookSetup": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "url": {
+          "type": "string",
+          "format": "uri"
+        },
+        "events": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": [
+              "repo:push",
+              "pullrequest:created",
+              "pullrequest:updated",
+              "pullrequest:fulfilled",
+              "pullrequest:rejected"
+            ]
+          }
+        },
+        "secret": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "required": [
+        "url",
+        "events",
+        "secret"
+      ],
+      "additionalProperties": false
+    },
+    "bitbucketConnectResponse": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "format": "uuid",
+          "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+        },
+        "repositoryId": {
+          "type": "string",
+          "format": "uuid",
+          "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+        },
+        "repositoryUuid": {
+          "type": "string",
+          "format": "uuid",
+          "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+        },
+        "workspaceSlug": {
+          "type": "string",
+          "minLength": 1
+        },
+        "repositorySlug": {
+          "type": "string",
+          "minLength": 1
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "awaiting_webhook",
+            "active"
+          ]
+        },
+        "credentialGeneration": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "webhook": {
+          "anyOf": [
+            {
+              "type": "object",
+              "properties": {
+                "url": {
+                  "type": "string",
+                  "format": "uri"
+                },
+                "events": {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "enum": [
+                      "repo:push",
+                      "pullrequest:created",
+                      "pullrequest:updated",
+                      "pullrequest:fulfilled",
+                      "pullrequest:rejected"
+                    ]
+                  }
+                },
+                "secret": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              },
+              "required": [
+                "url",
+                "events",
+                "secret"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "repositoryId",
+        "repositoryUuid",
+        "workspaceSlug",
+        "repositorySlug",
+        "status",
+        "credentialGeneration",
+        "webhook"
+      ],
+      "additionalProperties": false
+    },
+    "bitbucketConnectionItem": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "format": "uuid",
+          "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+        },
+        "repositoryId": {
+          "type": "string",
+          "format": "uuid",
+          "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+        },
+        "repositoryUuid": {
+          "type": "string",
+          "format": "uuid",
+          "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+        },
+        "workspaceSlug": {
+          "type": "string",
+          "minLength": 1
+        },
+        "repositorySlug": {
+          "type": "string",
+          "minLength": 1
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "awaiting_webhook",
+            "active"
+          ]
+        },
+        "credentialGeneration": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "webhookUrl": {
+          "type": "string",
+          "format": "uri"
+        }
+      },
+      "required": [
+        "id",
+        "repositoryId",
+        "repositoryUuid",
+        "workspaceSlug",
+        "repositorySlug",
+        "status",
+        "credentialGeneration",
+        "webhookUrl"
+      ],
+      "additionalProperties": false
+    },
+    "bitbucketConnectionList": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "connections": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string",
+                "format": "uuid",
+                "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+              },
+              "repositoryId": {
+                "type": "string",
+                "format": "uuid",
+                "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+              },
+              "repositoryUuid": {
+                "type": "string",
+                "format": "uuid",
+                "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+              },
+              "workspaceSlug": {
+                "type": "string",
+                "minLength": 1
+              },
+              "repositorySlug": {
+                "type": "string",
+                "minLength": 1
+              },
+              "status": {
+                "type": "string",
+                "enum": [
+                  "awaiting_webhook",
+                  "active"
+                ]
+              },
+              "credentialGeneration": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 9007199254740991
+              },
+              "webhookUrl": {
+                "type": "string",
+                "format": "uri"
+              }
+            },
+            "required": [
+              "id",
+              "repositoryId",
+              "repositoryUuid",
+              "workspaceSlug",
+              "repositorySlug",
+              "status",
+              "credentialGeneration",
+              "webhookUrl"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "nextCursor": {
+          "type": "null"
+        }
+      },
+      "required": [
+        "connections",
+        "nextCursor"
+      ],
+      "additionalProperties": false
+    },
+    "bitbucketCredentialRotateRequest": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "apiToken": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096,
+          "pattern": "^[\\x21-\\x7E]+(?![\\s\\S])"
+        }
+      },
+      "required": [
+        "apiToken"
+      ],
+      "additionalProperties": false
+    },
+    "bitbucketCredentialRotateResponse": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "format": "uuid",
+          "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+        },
+        "credentialGeneration": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        }
+      },
+      "required": [
+        "id",
+        "credentialGeneration"
       ],
       "additionalProperties": false
     }

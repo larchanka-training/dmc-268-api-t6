@@ -6,7 +6,8 @@ info:
     Browser-facing HTTP surface of the AI Code Reviewer: `portal-api` (runs, repositories,
     pull requests, live updates) and `auth-api` (GitHub App user authorization), as decided
     in api#20 (D4, D9, D10, D11). The provider webhook receivers (`/webhooks/github` and
-    `/webhooks/gitlab/{installationId}`) and `/healthcheck` are not part of the browser
+    `/webhooks/gitlab/{installationId}`, and
+    `/webhooks/bitbucket/{installation_id}/{repository_id}`) and `/healthcheck` are not part of the browser
     surface and are not described here. GitLab operator setup and activation use the
     trusted local CLI (docs/SECRETS.md); no new browser GitLab grants are implied.
 
@@ -27,7 +28,12 @@ info:
     in #11.
 
     **Errors.** `HTTPException` errors are `{"detail": "<message>"}` (`ErrorResponse`);
-    request validation failures are FastAPI's `HTTPValidationError`.
+    request validation failures use `HTTPValidationError` with only `type`, `loc` and
+    `msg` in each detail item. Rejected `input` and validation `ctx` are omitted;
+    `loc` preserves declared field names and array indices but replaces submitted
+    object keys outside the declared schema with `<unknown field>`. This prevents
+    credentials and other submitted values or property names from being echoed in
+    a 422 response.
 
     **Extensions.** `x-service` names the logical service that owns an operation (one FastAPI
     app today, see Origin and CORS).
@@ -48,7 +54,9 @@ tags:
   - name: stream
     description: Live run updates over Server-Sent Events.
   - name: repositories
-    description: Repositories connected through the GitHub App installation.
+    description: Repositories visible through a GitHub App grant or an active Bitbucket binding.
+  - name: bitbucket
+    description: Workspace-scoped Bitbucket Cloud repository connection management.
   - name: rules
     description: >-
       The `.review/rules.md` status of a repository; the planned DB rule set operations are
@@ -441,10 +449,11 @@ paths:
     get:
       operationId: listRepositories
       tags: [repositories]
-      summary: List repositories the GitHub App installation gives access to
+      summary: List repositories visible to the caller
       description: >-
-        Repositories are connected by installing the GitHub App (D10); there is no create
-        operation and no collection update.
+        GitHub repositories follow installation grants; Bitbucket repositories follow current
+        portal workspace membership and an active Bitbucket binding. Connection management
+        uses the workspace-scoped Bitbucket endpoints below.
       x-service: portal-api
       responses:
         "200":
@@ -459,6 +468,173 @@ paths:
           $ref: "#/components/responses/Unauthorized"
         "503":
           description: Authentication is not configured.
+  /api/workspaces/{workspace_id}/bitbucket/discovery:
+    parameters:
+      - name: workspace_id
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    post:
+      operationId: discoverBitbucketRepositories
+      tags: [bitbucket]
+      summary: Discover accessible Bitbucket repositories without saving a token
+      x-service: portal-api
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/BitbucketDiscoveryRequest" }
+      responses:
+        "200":
+          description: One bounded provider page.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/BitbucketDiscoveryResponse" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "422": { $ref: "#/components/responses/BitbucketValidationFailed" }
+        "429": { $ref: "#/components/responses/BitbucketRateLimited" }
+        "502": { description: Bitbucket provider failure. }
+        "503": { description: Bitbucket connection is not configured. }
+  /api/workspaces/{workspace_id}/bitbucket/connections:
+    parameters:
+      - name: workspace_id
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    get:
+      operationId: listBitbucketConnections
+      tags: [bitbucket]
+      summary: List active Bitbucket repository bindings in one portal workspace
+      x-service: portal-api
+      responses:
+        "200":
+          description: Active bindings; secrets are omitted.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/BitbucketConnectionList" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "503": { description: Bitbucket connection is not configured. }
+    post:
+      operationId: connectBitbucketRepository
+      tags: [bitbucket]
+      summary: Bind one accessible repository to the portal workspace
+      description: >-
+        The supplied token must read the selected repository UUID. A second repository in the
+        same Bitbucket workspace reuses the existing installation only when its token matches;
+        token replacement requires explicit credential rotation. A new binding returns its
+        per-repository webhook secret once. No provider network call runs in a DB transaction.
+      x-service: portal-api
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/BitbucketConnectRequest" }
+      responses:
+        "201":
+          description: Connected repository and one-time webhook setup.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/BitbucketConnectResponse" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { description: UUID conflict or explicit credential rotation required. }
+        "422": { $ref: "#/components/responses/BitbucketValidationFailed" }
+        "429": { $ref: "#/components/responses/BitbucketRateLimited" }
+        "502": { description: Bitbucket provider failure. }
+        "503": { description: Bitbucket connection is not configured. }
+  /api/workspaces/{workspace_id}/bitbucket/connections/{installation_id}/credential:
+    parameters:
+      - name: workspace_id
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+      - name: installation_id
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    put:
+      operationId: rotateBitbucketCredential
+      tags: [bitbucket]
+      summary: Replace a shared API token after checking every active repository
+      x-service: portal-api
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/BitbucketCredentialRotateRequest" }
+      responses:
+        "200":
+          description: New credential generation; repository hook secrets are unchanged.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/BitbucketCredentialRotateResponse" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { description: Installation changed during verification. }
+        "422": { $ref: "#/components/responses/BitbucketValidationFailed" }
+        "429": { $ref: "#/components/responses/BitbucketRateLimited" }
+        "502": { description: Bitbucket provider failure. }
+        "503": { description: Bitbucket connection is not configured. }
+  /api/workspaces/{workspace_id}/bitbucket/connections/{installation_id}/repositories/{repository_id}:
+    parameters:
+      - name: workspace_id
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+      - name: installation_id
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+      - name: repository_id
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    delete:
+      operationId: disconnectBitbucketRepository
+      tags: [bitbucket]
+      summary: Disconnect one repository binding
+      description: >-
+        Revokes only this repository and its webhook secret. Sibling repositories keep their
+        token and hooks. The installation is revoked when its last binding is disconnected.
+      x-service: portal-api
+      responses:
+        "204": { description: Disconnected or already absent. }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "503": { description: Bitbucket connection is not configured. }
+  /api/workspaces/{workspace_id}/bitbucket/connections/{installation_id}/repositories/{repository_id}/webhook-secret:
+    parameters:
+      - name: workspace_id
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+      - name: installation_id
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+      - name: repository_id
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    post:
+      operationId: rotateBitbucketRepositoryWebhookSecret
+      tags: [bitbucket]
+      summary: Rotate one repository webhook secret
+      x-service: portal-api
+      responses:
+        "200":
+          description: New secret shown once; sibling webhook secrets are unchanged.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/BitbucketWebhookSetup" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "503": { description: Bitbucket connection is not configured. }
   /api/repos/{repo_id}:
     parameters:
       - $ref: "#/components/parameters/RepoId"
@@ -486,6 +662,13 @@ paths:
       operationId: updateRepository
       tags: [repositories]
       summary: Change review settings of one repository
+      description: >-
+        For Bitbucket Cloud, waitForCi accepts only never and reviewEvent accepts only
+        COMMENT. The recognized waitForCi values auto/always and reviewEvent value
+        REQUEST_CHANGES return 422 with an HTTPValidationError detail array: the
+        item's loc is [body, waitForCi] or [body, reviewEvent], its type is
+        value_error, and its msg is the safe code
+        bitbucket_wait_for_ci_unsupported or bitbucket_review_event_unsupported.
       x-service: portal-api
       requestBody:
         required: true
@@ -505,7 +688,27 @@ paths:
         "404":
           $ref: "#/components/responses/NotFound"
         "422":
-          $ref: "#/components/responses/ValidationFailed"
+          description: >-
+            Request validation failure. Bitbucket Cloud rejects waitForCi auto/always
+            with bitbucket_wait_for_ci_unsupported and reviewEvent REQUEST_CHANGES
+            with bitbucket_review_event_unsupported.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HTTPValidationError"
+              examples:
+                waitForCi:
+                  value:
+                    detail:
+                      - loc: [body, waitForCi]
+                        msg: bitbucket_wait_for_ci_unsupported
+                        type: value_error
+                reviewEvent:
+                  value:
+                    detail:
+                      - loc: [body, reviewEvent]
+                        msg: bitbucket_review_event_unsupported
+                        type: value_error
         "503":
           description: Authentication is not configured.
   /api/repos/{repo_id}/pulls:
@@ -876,6 +1079,28 @@ components:
         application/json:
           schema:
             $ref: "#/components/schemas/HTTPValidationError"
+    BadRequest:
+      description: A provider or connection input failed a semantic check.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorResponse" }
+    BitbucketValidationFailed:
+      description: Request validation failure or a provider scope/access refusal.
+      content:
+        application/json:
+          schema:
+            anyOf:
+              - $ref: "#/components/schemas/HTTPValidationError"
+              - $ref: "#/components/schemas/ErrorResponse"
+    BitbucketRateLimited:
+      description: Bitbucket rate limit. Retry-After is present when supplied by the provider.
+      headers:
+        Retry-After:
+          description: Delay in whole seconds before retrying, when available.
+          schema: { type: string }
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorResponse" }
   schemas:
     ErrorResponse:
       type: object
@@ -887,14 +1112,17 @@ components:
       additionalProperties: false
     HTTPValidationError:
       type: object
-      description: FastAPI request validation error.
+      description: Request validation error with rejected values and context redacted.
+      required: [detail]
       properties:
         detail:
           type: array
           items:
             $ref: "#/components/schemas/ValidationError"
+      additionalProperties: false
     ValidationError:
       type: object
+      description: Safe validation type and location, with submitted object keys redacted and without input or context.
       required: [loc, msg, type]
       properties:
         loc:
@@ -907,9 +1135,7 @@ components:
           type: string
         type:
           type: string
-        input: {}
-        ctx:
-          type: object
+      additionalProperties: false
     RunStatus:
       type: string
       description: >-
@@ -917,11 +1143,12 @@ components:
         as run actions inside `running` are `policy.load`, `vcs.fetch_diff`, `context.build`,
         `context.rag`, `llm.repo_conventions` and `llm.call`; `llm.review_output` and
         `review.postprocess` are written in the transaction that moves the run to `publishing`,
-        and so is `llm.verify`, before `review.postprocess`, but only on the snapshot path
-        (a run bound to a snapshot-contract review prompt); on that path `context.manifest`
-        precedes each `llm.call` that is not a retry (conventions, review and
+        and so is `llm.verify`, before `review.postprocess`, but only on the snapshot path (a run
+        bound to a snapshot-contract review prompt), including Bitbucket Cloud runs; on that path
+        `context.manifest` precedes each `llm.call` that is not a retry (conventions, review and
         verifier calls alike), inside `running`; `github.publish_review` or
-        `gitlab.publish_review` runs in `publishing` (docs/PIPELINE_SPEC.md §2).
+        `gitlab.publish_review` and `bitbucket.publish_review` run in `publishing`
+        (docs/PIPELINE_SPEC.md §2).
       enum: [queued, running, publishing, succeeded, failed, cancelled, skipped]
     RunTrigger:
       type: string
@@ -992,8 +1219,11 @@ components:
       enum: [disabled, empty, building, ready, stale, failed]
     PullRequestRef:
       type: object
-      required: [repo, number, title, url, headSha]
+      required: [provider, repo, number, title, url, headSha]
       properties:
+        provider:
+          type: string
+          enum: [github, gitlab, bitbucket]
         repo:
           type: string
           description: Repository full name, `owner/name`.
@@ -1022,6 +1252,7 @@ components:
       description: API view of the Run entity.
       required:
         - id
+        - provider
         - engine
         - model
         - status
@@ -1039,6 +1270,9 @@ components:
         id:
           type: string
           format: uuid
+        provider:
+          type: string
+          enum: [github, gitlab, bitbucket]
         engine:
           $ref: "#/components/schemas/Engine"
         model:
@@ -1095,6 +1329,7 @@ components:
         (tests/test_openapi_contract.py checks that they stay identical).
       required:
         - id
+        - provider
         - engine
         - model
         - status
@@ -1117,6 +1352,9 @@ components:
         id:
           type: string
           format: uuid
+        provider:
+          type: string
+          enum: [github, gitlab, bitbucket]
         engine:
           $ref: "#/components/schemas/Engine"
         model:
@@ -1339,13 +1577,14 @@ components:
             Step name written to run_actions; free text, not an enum. The code writes
             `policy.load`, `vcs.fetch_diff`, `context.build`, `context.rag`,
             `llm.repo_conventions`, `llm.call`, `llm.review_output`, `review.postprocess`,
-            `github.publish_review` and `gitlab.publish_review`. It writes `llm.verify` and
+            `github.publish_review`, `gitlab.publish_review`, and
+            `bitbucket.publish_review`. It writes `llm.verify` and
             `context.manifest` only on the snapshot path (a run bound to a snapshot-contract
-            review prompt). A `context.manifest` step precedes each provider call of that path
-            (conventions, review and verifier) that is not a retry; its response is
-            `{manifest_id, digest, block_count, input_tokens, tokens_by_role}`, where
-            `tokens_by_role` maps a source role to the tokens of the call's blocks of that role.
-            The per-attempt order and the planned steps that are not written yet are in
+            review prompt), including Bitbucket Cloud runs. A `context.manifest` step precedes each
+            provider call of that path (conventions, review and verifier) that is not a retry;
+            its response is `{manifest_id, digest, block_count, input_tokens, tokens_by_role}`,
+            where `tokens_by_role` maps a source role to the tokens of the call's blocks of that
+            role. The per-attempt order and the planned steps that are not written yet are in
             docs/PIPELINE_SPEC.md §2.
         request:
           type: object
@@ -1526,10 +1765,127 @@ components:
             that ended without a publication, null when there is none. Always null for
             `disabled`.
       additionalProperties: false
+    BitbucketDiscoveryRequest:
+      type: object
+      required: [bitbucketWorkspace, apiToken]
+      properties:
+        bitbucketWorkspace: { type: string, minLength: 1, maxLength: 128, pattern: '^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$' }
+        apiToken: { type: string, minLength: 1, maxLength: 4096, pattern: '^[!-~]+(?![\s\S])', writeOnly: true }
+        cursor: { type: [string, "null"] }
+      additionalProperties: false
+    BitbucketDiscoveredRepository:
+      type: object
+      required: [uuid, workspaceSlug, slug, name, isPrivate, htmlUrl]
+      properties:
+        uuid: { type: string, format: uuid }
+        workspaceSlug: { type: string, minLength: 1 }
+        slug: { type: string, minLength: 1 }
+        name: { type: string, minLength: 1 }
+        isPrivate: { type: boolean }
+        htmlUrl: { type: string, format: uri }
+      additionalProperties: false
+    BitbucketDiscoveryResponse:
+      type: object
+      required: [repositories, nextCursor]
+      properties:
+        repositories:
+          type: array
+          items: { $ref: "#/components/schemas/BitbucketDiscoveredRepository" }
+        nextCursor: { type: [string, "null"] }
+      additionalProperties: false
+    BitbucketConnectRequest:
+      type: object
+      required: [bitbucketWorkspace, repositorySlug, repositoryUuid, apiToken]
+      properties:
+        bitbucketWorkspace: { type: string, minLength: 1, maxLength: 128, pattern: '^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$' }
+        repositorySlug: { type: string, minLength: 1, maxLength: 128, pattern: '^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$' }
+        repositoryUuid: { type: string, format: uuid }
+        apiToken: { type: string, minLength: 1, maxLength: 4096, pattern: '^[!-~]+(?![\s\S])', writeOnly: true }
+      additionalProperties: false
+    BitbucketWebhookSetup:
+      type: object
+      required: [url, events, secret]
+      properties:
+        url: { type: string, format: uri }
+        events:
+          type: array
+          items:
+            type: string
+            enum: [repo:push, pullrequest:created, pullrequest:updated, pullrequest:fulfilled, pullrequest:rejected]
+        secret: { type: string, minLength: 1, description: One-time repository hook secret. }
+      additionalProperties: false
+    BitbucketConnectResponse:
+      type: object
+      required:
+        - id
+        - repositoryId
+        - repositoryUuid
+        - workspaceSlug
+        - repositorySlug
+        - status
+        - credentialGeneration
+        - webhook
+      properties:
+        id: { type: string, format: uuid, description: Shared installation ID. }
+        repositoryId: { type: string, format: uuid, description: Portal repository binding ID. }
+        repositoryUuid: { type: string, format: uuid }
+        workspaceSlug: { type: string, minLength: 1 }
+        repositorySlug: { type: string, minLength: 1 }
+        status: { type: string, enum: [awaiting_webhook, active] }
+        credentialGeneration: { type: integer, minimum: 1 }
+        webhook:
+          anyOf:
+            - $ref: "#/components/schemas/BitbucketWebhookSetup"
+            - type: "null"
+      additionalProperties: false
+    BitbucketConnectionItem:
+      type: object
+      required:
+        - id
+        - repositoryId
+        - repositoryUuid
+        - workspaceSlug
+        - repositorySlug
+        - status
+        - credentialGeneration
+        - webhookUrl
+      properties:
+        id: { type: string, format: uuid }
+        repositoryId: { type: string, format: uuid }
+        repositoryUuid: { type: string, format: uuid }
+        workspaceSlug: { type: string, minLength: 1 }
+        repositorySlug: { type: string, minLength: 1 }
+        status: { type: string, enum: [awaiting_webhook, active] }
+        credentialGeneration: { type: integer, minimum: 1 }
+        webhookUrl: { type: string, format: uri }
+      additionalProperties: false
+    BitbucketConnectionList:
+      type: object
+      required: [connections, nextCursor]
+      properties:
+        connections:
+          type: array
+          items: { $ref: "#/components/schemas/BitbucketConnectionItem" }
+        nextCursor: { type: "null" }
+      additionalProperties: false
+    BitbucketCredentialRotateRequest:
+      type: object
+      required: [apiToken]
+      properties:
+        apiToken: { type: string, minLength: 1, maxLength: 4096, pattern: '^[!-~]+(?![\s\S])', writeOnly: true }
+      additionalProperties: false
+    BitbucketCredentialRotateResponse:
+      type: object
+      required: [id, credentialGeneration]
+      properties:
+        id: { type: string, format: uuid }
+        credentialGeneration: { type: integer, minimum: 1 }
+      additionalProperties: false
     Repository:
       type: object
       required:
         - id
+        - provider
         - fullName
         - url
         - defaultBranch
@@ -1547,6 +1903,9 @@ components:
         id:
           type: string
           format: uuid
+        provider:
+          type: string
+          enum: [github, gitlab, bitbucket]
         fullName:
           type: string
           minLength: 1

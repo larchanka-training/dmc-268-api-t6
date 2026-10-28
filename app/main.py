@@ -6,16 +6,15 @@ import json
 import math
 import os
 import time
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Callable, Mapping
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
-from typing import Annotated, Any, Literal, NoReturn, cast
+from types import UnionType
+from typing import Annotated, Any, Literal, NoReturn, Union, cast, get_args, get_origin
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Path, Query, Request
 from fastapi.dependencies.models import Dependant
-from fastapi.encoders import jsonable_encoder
-from fastapi.exception_handlers import request_validation_exception_handler
 from fastapi.exceptions import RequestValidationError
 from fastapi.openapi.utils import get_openapi
 from fastapi.responses import JSONResponse, Response, StreamingResponse
@@ -46,6 +45,10 @@ from app.common.application.github_repository_name import REPOSITORY_FULL_NAME_M
 from app.common.infrastructure.db.enums import RunState
 from app.modules.auth.api.router import auth_router
 from app.modules.auth.application.scope import AuthScope
+from app.modules.integrations.bitbucket.api.connections import (
+    router as bitbucket_connections_router,
+)
+from app.modules.integrations.bitbucket.api.webhook import router as bitbucket_webhook_router
 from app.modules.integrations.gitlab.api.webhook import router as gitlab_webhook_router
 from app.modules.integrations.gitlab.infrastructure.settings import GitLabApiSettings
 from app.modules.integrations.webhooks.api.dtos import GitHubWebhookPayloadDto
@@ -71,6 +74,7 @@ from app.modules.repositories.application.repository_settings import (
     RepositorySettings,
     RepositorySettingsChange,
     RepositorySettingsUowFactory,
+    UnsupportedRepositorySetting,
     UpdateRepository,
 )
 from app.modules.repositories.application.rules_status import (
@@ -261,18 +265,103 @@ def custom_openapi() -> dict[str, Any]:
 app.openapi = custom_openapi  # type: ignore[method-assign]
 
 
+_SAFE_VALIDATION_MESSAGES = frozenset(
+    {"bitbucket_wait_for_ci_unsupported", "bitbucket_review_event_unsupported"}
+)
+
+
+def _safe_validation_message(error: dict[str, Any]) -> str:
+    if error["type"] == "missing":
+        return "Field required"
+    message = error["msg"]
+    if (
+        error["type"] == "value_error"
+        and isinstance(message, str)
+        and message in _SAFE_VALIDATION_MESSAGES
+    ):
+        return message
+    return "Invalid input"
+
+
+def _validation_parameter_annotation(dependant: Dependant, source: str, name: str) -> object | None:
+    fields = {
+        "path": dependant.path_params,
+        "query": dependant.query_params,
+        "header": dependant.header_params,
+        "cookie": dependant.cookie_params,
+    }[source]
+    for field in fields:
+        if field.alias == name:
+            return field.field_info.annotation
+    for dependency in dependant.dependencies:
+        annotation = _validation_parameter_annotation(dependency, source, name)
+        if annotation is not None:
+            return annotation
+    return None
+
+
+def _safe_validation_segment(annotation: object, segment: object) -> tuple[str | int, object]:
+    origin = get_origin(annotation)
+    if origin is Annotated:
+        return _safe_validation_segment(get_args(annotation)[0], segment)
+    if origin in (Union, UnionType):
+        for variant in get_args(annotation):
+            safe, next_annotation = _safe_validation_segment(variant, segment)
+            if safe == segment or next_annotation is not None:
+                return safe, next_annotation
+        return "<unknown field>", None
+    if origin in (list, tuple) and type(segment) is int and segment >= 0:
+        args = get_args(annotation)
+        return segment, args[0] if args else Any
+    if origin in (dict, Mapping):
+        args = get_args(annotation)
+        return "<unknown field>", args[1] if len(args) > 1 else Any
+    if isinstance(annotation, type) and issubclass(annotation, BaseModel):
+        for name, field in annotation.model_fields.items():
+            if segment in (name, field.alias, field.validation_alias):
+                return cast(str, segment), field.annotation
+    return "<unknown field>", None
+
+
+def _safe_validation_location(request: Request, error: dict[str, Any]) -> tuple[str | int, ...]:
+    location = error.get("loc")
+    if not isinstance(location, (tuple, list)) or not location:
+        return ("body",)
+    source = location[0]
+    if source not in {"body", "path", "query", "header", "cookie"}:
+        return ("body",)
+    route = request.scope.get("route")
+    if not isinstance(route, APIRoute):
+        return (source,)
+    annotation: object = (
+        route.body_field.field_info.annotation
+        if source == "body" and route.body_field is not None
+        else None
+    )
+    safe_location: list[str | int] = [source]
+    for segment in location[1:]:
+        if source != "body" and len(safe_location) == 1 and isinstance(segment, str):
+            annotation = _validation_parameter_annotation(route.dependant, source, segment)
+            if annotation is not None:
+                safe_location.append(segment)
+                continue
+        safe_segment, annotation = _safe_validation_segment(annotation, segment)
+        safe_location.append(safe_segment)
+    return tuple(safe_location)
+
+
 @app.exception_handler(RequestValidationError)
 async def render_validation_error(request: Request, exc: RequestValidationError) -> Response:
-    """Render FastAPI's default 422 body, ASCII-escaped when UTF-8 cannot encode it.
-
-    The default body echoes the rejected input; a lone surrogate in it would turn the 422 into
-    a 500 (#149).
-    """
-    try:
-        return await request_validation_exception_handler(request, exc)
-    except UnicodeEncodeError:
-        body = json.dumps({"detail": jsonable_encoder(exc.errors())})
-        return Response(body, status_code=422, media_type="application/json")
+    """Return useful error locations without echoing rejected input or error context."""
+    detail = [
+        {
+            "type": error["type"],
+            "loc": _safe_validation_location(request, error),
+            "msg": _safe_validation_message(error),
+        }
+        for error in exc.errors()
+    ]
+    return JSONResponse({"detail": detail}, status_code=422)
 
 
 @app.get(
@@ -419,6 +508,7 @@ def _validate_jsonb_unicode(value: object) -> None:
 def to_run_session_dto(item: RunListItem) -> RunSessionDto:
     return RunSessionDto(
         id=item.id,
+        provider=item.provider,
         status=item.status,
         engine=item.engine,
         attempt=item.attempt,
@@ -432,6 +522,7 @@ def to_run_session_dto(item: RunListItem) -> RunSessionDto:
         action_count=item.action_count,
         summary_only=item.summary_only,
         pull_request=PullRequestDto(
+            provider=item.provider,
             repo=item.repo,
             number=item.number,
             title=item.title,
@@ -936,19 +1027,24 @@ async def update_repository(
     body: RepositoryUpdateDto,
     uow_factory: Annotated[RepositorySettingsUowFactory, Depends(get_repository_settings)],
 ) -> RepositoryDto:
-    item = await UpdateRepository(uow_factory).execute(
-        repo_id,
-        RepositorySettingsChange(
-            enabled=body.enabled,
-            default_engine=body.default_engine,
-            wait_for_ci=body.wait_for_ci,
-            max_comments=body.max_comments,
-            review_event=body.review_event,
-            branch_filter=None if body.branch_filter is None else tuple(body.branch_filter),
-            severity_threshold=body.severity_threshold,
-            rag_enabled=body.rag_enabled,
-        ),
-    )
+    try:
+        item = await UpdateRepository(uow_factory).execute(
+            repo_id,
+            RepositorySettingsChange(
+                enabled=body.enabled,
+                default_engine=body.default_engine,
+                wait_for_ci=body.wait_for_ci,
+                max_comments=body.max_comments,
+                review_event=body.review_event,
+                branch_filter=None if body.branch_filter is None else tuple(body.branch_filter),
+                severity_threshold=body.severity_threshold,
+                rag_enabled=body.rag_enabled,
+            ),
+        )
+    except UnsupportedRepositorySetting as error:
+        raise RequestValidationError(
+            [{"loc": ("body", error.field), "msg": str(error), "type": "value_error"}]
+        ) from error
     if item is None:
         raise HTTPException(status_code=404, detail="repository not found")
     return to_repository_dto(item)
@@ -1008,6 +1104,8 @@ async def list_repository_pulls(
 
 
 app.include_router(api_router)
+app.include_router(bitbucket_connections_router)
+app.include_router(bitbucket_webhook_router)
 app.include_router(github_webhook_router)
 app.include_router(gitlab_webhook_router)
 app.include_router(auth_router)

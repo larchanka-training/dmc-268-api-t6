@@ -31,6 +31,7 @@ class RepositorySettings:
     # is derived from this effective value (#145).
     rag_enabled: bool
     rag_index: RagIndex
+    provider: str
 
 
 @dataclass(frozen=True)
@@ -45,6 +46,14 @@ class RepositorySettingsChange:
     branch_filter: tuple[str, ...] | None = None
     severity_threshold: str | None = None
     rag_enabled: bool | None = None
+
+
+class UnsupportedRepositorySetting(ValueError):
+    """A provider cannot honor a requested review setting."""
+
+    def __init__(self, field: str, code: str) -> None:
+        super().__init__(code)
+        self.field = field
 
 
 class RepositorySettingsStore(Protocol):
@@ -99,6 +108,21 @@ class UpdateRepository:
         self, repository_id: UUID, change: RepositorySettingsChange
     ) -> RepositorySettings | None:
         async with self._uow_factory() as uow:
+            if (
+                change.wait_for_ci not in (None, "never")
+                or change.review_event == "REQUEST_CHANGES"
+            ):
+                current = await uow.repositories.get_repository(repository_id)
+                if current is None:
+                    return None
+                if current.provider == "bitbucket":
+                    if change.wait_for_ci not in (None, "never"):
+                        raise UnsupportedRepositorySetting(
+                            "waitForCi", "bitbucket_wait_for_ci_unsupported"
+                        )
+                    raise UnsupportedRepositorySetting(
+                        "reviewEvent", "bitbucket_review_event_unsupported"
+                    )
             item = await uow.repositories.update_repository(repository_id, change)
             if item is None:
                 return None

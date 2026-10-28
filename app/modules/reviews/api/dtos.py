@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 from uuid import UUID
 
 from pydantic import AfterValidator, BaseModel, ConfigDict
@@ -28,6 +28,7 @@ class ApiDto(BaseModel):
 
 
 class PullRequestDto(ApiDto):
+    provider: Literal["github", "gitlab", "bitbucket"]
     repo: str
     number: int
     title: str
@@ -37,6 +38,7 @@ class PullRequestDto(ApiDto):
 
 class RunSessionDto(ApiDto):
     id: UUID
+    provider: Literal["github", "gitlab", "bitbucket"]
     status: str
     engine: str
     attempt: int
