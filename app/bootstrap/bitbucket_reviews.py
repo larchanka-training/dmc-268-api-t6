@@ -251,7 +251,12 @@ class BitbucketReviewWorkerResources:
             follow_redirects=False,
         ) as client:
             http = BitbucketRunHttp(client, self._credentials, target)
-            vcs = HttpBitbucketVcsProvider(http=http, locator=expected_input.locator)
+            vcs = HttpBitbucketVcsProvider(
+                http=http,
+                locator=expected_input.locator,
+                pinned_base_sha=expected_input.base_sha,
+                pinned_target_branch=expected_input.base_ref,
+            )
             trees = BitbucketRepositoryTree(
                 http=http, expected_input=expected_input, vcs=vcs, checkpoint=checkpoint
             )

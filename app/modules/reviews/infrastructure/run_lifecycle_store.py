@@ -586,6 +586,7 @@ class SqlAlchemyRunLifecycleStore:
                     repository_external_id=repository.external_id,
                     repository_uuid=repository_uuid,
                 ),
+                base_ref=run.base_ref if installation.provider == "bitbucket" else None,
             )
             if active
             else None,

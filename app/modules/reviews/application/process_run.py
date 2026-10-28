@@ -80,6 +80,7 @@ class RunVcsInput:
     head_sha: str
     base_sha: str
     locator: PullRequestLocator
+    base_ref: str | None = None
 
     @property
     def provider(self) -> str:
