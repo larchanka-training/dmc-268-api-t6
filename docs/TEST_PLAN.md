@@ -416,7 +416,8 @@ Committed regression inventory #213 (наличие теста не заменя
    `test_context_provenance.py` (роль, ревизия, путь и диапазоны строк фрагмента); что каждая
    production-композиция стадии пишет строку `context_payloads`, стережёт
    `test_context_stage_wiring.py`.
-6. Snapshot-путь (v4): `test_review_path.py`, `test_snapshot_path_live_pin.py`,
+6. Snapshot-путь с закреплённым `review.system:v4` или `review.system:v5`:
+   `test_review_path.py`, `test_snapshot_path_live_pin.py`,
    `test_review_prompt_v4.py`, `test_review_context_blocks.py`,
    `test_reflection_pass_snapshot_path.py`, `test_gateway_verifier_snapshot_path.py`,
    `test_llm_gateway_snapshot_reserve.py`, `test_gateway_repair_envelope.py`,
@@ -891,7 +892,8 @@ lazy Reflection Pass; `ExecuteReviewRun` запускает его только 
 попыток суммарно, затем `failed` и `reviews.dlq`. Повреждённый snapshot
 по-прежнему даёт `policy_snapshot_integrity_error` без retry. Legacy без snapshot
 обходит verifier молча, без предупреждения в логе.
-После F2 seed активирует v4 (с #350 — v5) для новых runs; закреплённый v3 или ниже
+После F2 seed v4 был активен для новых runs; после #350 новые runs закрепляют общий v5.
+Закреплённый v3 или ниже
 сохраняет legacy-путь. Метки v2
 в dataclass/fixtures — не универсальные runtime-pins: Run сохраняет ID активных
 conventions/verifier DB-строк при создании, snapshot восстанавливает их версии
@@ -1068,3 +1070,11 @@ Recall — micro по ожидаемым находкам этих кейсов,
 Browser API сверяется с `contracts/openapi.yaml` в `tests/test_openapi_contract.py`; входящий provider webhook описан отдельно в [`BITBUCKET_WEBHOOK.md`](BITBUCKET_WEBHOOK.md). PostgreSQL/ASGI набор `tests/test_bitbucket_*` проверяет UUID и portal workspace изоляцию, private repo connect/disconnect, ключи и секреты, HMAC raw bytes, durable receipt/replay, один Run на PR/head, pinned diff/source, worker, RAG, inline/summary markers и commit status. `tests/test_deploy_staging_services.py` проверяет CI bundle → 0600 env-файлы → контейнеры/rollback. Запускать с реальным `TEST_DATABASE_URL`, иначе skipped PG тесты не являются доказательством. UI `pnpm test` проверяет выбор workspace и границу Zod; `pnpm --dir docs-site check-types && pnpm --dir docs-site build` проверяет публичную инструкцию.
 
 Отдельный live gate на disposable private Bitbucket Cloud repo/PR: зафиксировать URL PR, head SHA и deployed backend/UI SHA; подключить репозиторий к portal workspace, вручную настроить repository webhook с одноразовым секретом, доставить подписанные PR/push события, дождаться succeeded Run, проверить inline comments, ровно один summary, commit status и число публикаций после повтора доставки. Native applyable suggestion нужно подтвердить реальным API-запросом или явно согласовать текстовый fallback; mock не доказывает эту возможность. В отчёт записывать только санитизированные идентификаторы/счётчики, без токена и секрета. Полные backend/UI gates обязательны на итоговом diff.
+
+Подробный [чеклист](plans/333-live-acceptance.md) отдельно проверяет приватный
+UUID locator, fork с ограниченным токеном назначения, rename+edit, пагинацию,
+merge-base, движение и смену целевой ветки, пять webhook-событий, статусы и
+merge checks, точные token scopes и 429/`Retry-After`. Публичные read-only
+UUID-пробы 2026-10-26 подтверждают только форму локатора; доступа к
+одноразовому приватному репозиторию и токену на 2026-10-28 нет. Локальные
+MockTransport/PostgreSQL тесты не отмечают этот live gate выполненным.

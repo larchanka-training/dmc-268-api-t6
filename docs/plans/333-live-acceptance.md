@@ -3,8 +3,11 @@
 This is the execution checklist for a disposable private Bitbucket Cloud
 repository selected for #333. Record sanitized evidence in the issue/PR after
 each step. A PR, scoped credential and deployed same-SHA stack are still required;
-the local review has not exercised this checklist. Never copy an API token, webhook secret, Authorization
-header, keyring, raw signed payload or ciphertext into Git, chat, issue or PR.
+the local review has not exercised this checklist. As of 2026-10-28 there is
+no disposable private repository or token available, and work is limited to
+local checks. The 2026-10-26 read-only probes covered a public UUID locator
+only. Never copy an API token, webhook secret, Authorization header, keyring,
+raw signed payload or ciphertext into Git, chat, issue or PR.
 
 ## Preconditions
 
@@ -13,7 +16,9 @@ header, keyring, raw signed payload or ciphertext into Git, chat, issue or PR.
    outside Git and read its value only inside the process making the request.
    The runtime connection token needs `read:repository:bitbucket` and
    `read:pullrequest:bitbucket` according to the REST endpoint references;
-   test those exact scopes against the disposable private PR. Use separate
+   test those exact scopes on private repository GET, PR GET, inline comment
+   POST and commit-status POST/PUT. Record 401/403 without token text, and
+   confirm no broader saved token scopes are required. Use separate
    operator authority for creating the branch/PR and configuring its webhook;
    do not grant write scopes to the stored runtime token merely to prepare the fixture.
 2. Verify the `staging` GitHub Environment has a protected
@@ -41,6 +46,8 @@ header, keyring, raw signed payload or ciphertext into Git, chat, issue or PR.
 2. Set the repository webhook in Bitbucket to the one-time URL and secret from
    the connect response. Subscribe to `repo:push`, `pullrequest:created`,
    `pullrequest:updated`, `pullrequest:fulfilled` and `pullrequest:rejected`.
+   Compare those five wire response events from connect and secret rotation
+   with the webhook configuration; a three-event response is a contract failure.
    The first valid signed delivery must switch that
    repository from `awaiting_webhook` to `active`; invalid signature must not.
    Record only delivery HTTP status, event type, hook/request UUIDs if safe and
@@ -51,7 +58,9 @@ header, keyring, raw signed payload or ciphertext into Git, chat, issue or PR.
    `ai-review run=<RUN_ID> ... inline=...` markers and exactly one summary
    marker for that Run. Check each inline path/line in the PR UI. Inspect the
    commit status on the same head; it must have the tenant-scoped deterministic
-   key, terminal `SUCCESSFUL` state and a portal Run URL.
+   key (`AI-REVIEW-` plus 30 hex characters), terminal `SUCCESSFUL` state and
+   a portal Run URL. Repeat after a token rotation and record an ownership
+   failure rather than silently switching status keys if the author changes.
 4. Trigger redelivery of the same signed event, then count Runs for the same
    PR/head, inline markers, summary markers and commit-status keys again.
    Expected: one Run, unchanged comment counts, one summary and one status key.
@@ -67,6 +76,49 @@ header, keyring, raw signed payload or ciphertext into Git, chat, issue or PR.
    Confirm later hook deliveries and queued work are rejected, while a sibling
    binding (if used) remains usable. Record only statuses and counts.
 
+## Focused provider probes before disconnect
+
+- **Private UUID route and fork (R4-01, R1-16).** Read the connected private
+  repository through the runtime's percent-encoded UUID locator. Open a PR
+  from a private fork that the destination token cannot read directly, while
+  the destination PR and commits list remain readable. Verify one Run is
+  projected, its pinned source SHA and destination repository UUID are exact,
+  and an inaccessible fork yields a bounded, explicit failure only when the
+  destination APIs cannot establish the source head. Repeat fulfillment and
+  rejection after the fork branch is deleted (`source.commit = null`); neither
+  event may create a new review. Keep the fork's repository and credential
+  under this disposable test workspace.
+- **Pinned diff and lifecycle (R1-15, R1-16).** Make a rename plus edit and
+  inspect old/new file paths and inline coordinates. Compare optional or
+  missing diffstat, more than one page of commit history and diffstat, and
+  merge-base selection against the PR UI. Advance the destination branch tip
+  without changing its branch identity: the existing Run must retain its
+  original base SHA. Retarget the PR to a different branch or advance the
+  source head between diff fetch and publication: the old Run must not
+  publish comments or a successful status. Toggle draft with the same head
+  and record the expected Run behavior.
+- **Webhook ordering and diagnostics (P3-14).** Deliver two signed PR updates
+  with equal `updated_on` and distinct source heads; the newer head must not
+  be lost. Check a `diagnostics:ping` delivery without `repository.uuid`
+  receives 400 and creates no receipt or Run. Keep sanitized event/order
+  evidence only.
+- **Limits and failure surfaces (R1-05, R4-02).** Observe the Bitbucket rate
+  limit bucket and `Retry-After` on a disposable test request, including a
+  missing or HTTP-date value if Bitbucket emits one. Record request counts for
+  required diff/blob reads and optional context separately. A 429 or exhausted
+  request budget must report the correct retryable or terminal code; optional
+  context exhaustion must leave a diff-only review when required data is
+  complete. Do not manufacture provider load to force a 429 on a shared repo.
+- **Status and merge check (R1-03, R1-06, R1-31).** Confirm the ≤40-character
+  deterministic status key and portal target URL on the pinned source SHA.
+  Exercise a skipped/failed Run and inspect `STOPPED` plus its description and
+  the repository's actual merge-check interpretation. For a fork, verify
+  whether the destination token can write status to the source commit; record
+  403 without claiming success. Redelivery and worker restart must not create
+  duplicate keys or reverse a newer same-head Run. Whether an old head's
+  `INPROGRESS` needs remote `STOPPED` after supersession remains a tech-lead
+  decision (P3-52), not an inferred acceptance result.
+
 ## Evidence fields
 
 | Field | Safe value |
@@ -78,8 +130,9 @@ header, keyring, raw signed payload or ciphertext into Git, chat, issue or PR.
 | Status | Key, head SHA, terminal state and target URL |
 | Replay | Counts before/after redelivery and restart |
 | Suggestion | Sanitized REST shape, status and UI apply action or explicit fallback decision |
+| Focused probes | Private UUID/fork outcome, pinned SHAs, page counts, rate-limit headers, status/merge-check behavior |
 
-An earlier read-only private-repository probe established only access and UUID
-at that time. No row in this checklist is evidence of live success until a
-real PR and deployed stack have been exercised. See the
-[round 1 checklist](333-review-round1-todo.md) for the remaining gates.
+No row in this checklist is evidence of live success until a real private PR
+and deployed stack have been exercised. The public read-only locator probe
+established only its documented URL shape; current open gates are recorded in
+[the task list](333-todo.md) and [PR #340](https://github.com/larchanka-training/dmc-268-api-t6/pull/340).
