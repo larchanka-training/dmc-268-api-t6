@@ -2562,15 +2562,20 @@ def test_oracle_answers_score_perfectly_in_every_arm_of_the_committed_corpus(
 
 V3_SYSTEM = REPO_ROOT / "review/prompts/review.system.v3.md"
 V4_SYSTEM = REPO_ROOT / "review/prompts/review.system.v4.md"
-# v3 has no pin (tests/test_review_prompt_pins_postgres.py): an arm binds the sha of its bytes.
-V3_SHA = hashlib.sha256(V3_SYSTEM.read_bytes()).hexdigest()
+# The pins of PINNED_PROMPT_CHECKSUMS (sha256 of the file bytes). v3 has no pin
+# (tests/test_review_prompt_pins_postgres.py): an arm binds the sha of its bytes.
+V2_PIN = "9177e358c23d1a7cd8987cbf667cf8b705c2afb27eaf8b2237480e4531431d75"
+V3_SHA = "eb851e7fc2329eb7bdff015ec0fda945c46111ec5c884934ed6f6d6803883452"
+V4_PIN = "5738227c7352228d29975e0512b5b5d3354eff31c9d161ca72086a776e9c498f"
+CONVENTIONS_V2_PIN = "225a8f7d56835cf1307ddb25feac602c3d10e03c34ee51afc90a1f99af101454"
+VERIFIER_V2_PIN = "1f676b4fea8477d77b83a106a6c62e78f67d19f71937d4a02093d11a9d276088"
 
 
 @pytest.mark.parametrize(
     ("arm", "prompt", "version", "checksum", "schema_name"),
     [
-        ("valid", V4_SYSTEM, "v4", PINNED_PROMPT_CHECKSUMS["review.system:v4"], "ReviewOutputV2"),
-        ("valid", SYSTEM, "v2", PINNED_PROMPT_CHECKSUMS["review.system:v2"], "ReviewOutput"),
+        ("valid", V4_SYSTEM, "v4", V4_PIN, "ReviewOutputV2"),
+        ("valid", SYSTEM, "v2", V2_PIN, "ReviewOutput"),
         ("none", V3_SYSTEM, "v3", V3_SHA, "ReviewOutput"),
     ],
     ids=["valid-v4", "valid-v2", "none-v3"],
@@ -2606,8 +2611,8 @@ def test_policy_arm_binds_the_version_and_pin_of_the_prompt_it_sends(
         bindings.review_system_checksum,
     ) == ("review.system", version, checksum)
     assert (bindings.conventions_checksum, bindings.verifier_checksum) == (
-        PINNED_PROMPT_CHECKSUMS["review.conventions:v2"],
-        PINNED_PROMPT_CHECKSUMS["review.verifier:v2"],
+        CONVENTIONS_V2_PIN,
+        VERIFIER_V2_PIN,
     )
     assert "review.system:v3" not in PINNED_PROMPT_CHECKSUMS
     (request,) = transport.requests
@@ -2662,7 +2667,7 @@ def test_policy_arm_refuses_a_changed_pinned_prompt_before_any_call(
     assert str(raised.value) == (
         "policy arms need the pinned review prompt: review/prompts/review.system.v4.md "
         f"(review.system v4) has checksum {hashlib.sha256(changed.encode()).hexdigest()}, "
-        f"pinned {PINNED_PROMPT_CHECKSUMS['review.system:v4']}"
+        f"pinned {V4_PIN}"
     )
     assert transport.requests == []
     assert not (root / "responses").exists()
