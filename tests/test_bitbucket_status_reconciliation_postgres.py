@@ -218,7 +218,10 @@ def test_missed_terminal_status_is_recovered_and_stale_rows_do_not_starve_live(
                                 "branch": {"name": snapshot.source_branch},
                                 "repository": {"uuid": f"{{{remote_repo}}}"},
                             },
-                            "destination": {"repository": {"uuid": f"{{{remote_repo}}}"}},
+                            "destination": {
+                                "branch": {"name": "main"},
+                                "repository": {"uuid": f"{{{remote_repo}}}"},
+                            },
                         },
                     )
                 posted.append(request.method)
@@ -317,7 +320,10 @@ def test_running_run_requeued_reconciles_without_spin_or_duplicate_status(
                             "branch": {"name": "feature/review"},
                             "repository": {"uuid": f"{{{remote_repo}}}"},
                         },
-                        "destination": {"repository": {"uuid": f"{{{remote_repo}}}"}},
+                        "destination": {
+                            "branch": {"name": "main"},
+                            "repository": {"uuid": f"{{{remote_repo}}}"},
+                        },
                     },
                 )
 
@@ -502,7 +508,10 @@ def test_status_failure_without_retry_after_is_deferred_and_not_selected_next_ti
                             "branch": {"name": snapshot.source_branch},
                             "repository": {"uuid": f"{{{remote_repo}}}"},
                         },
-                        "destination": {"repository": {"uuid": f"{{{remote_repo}}}"}},
+                        "destination": {
+                            "branch": {"name": "main"},
+                            "repository": {"uuid": f"{{{remote_repo}}}"},
+                        },
                     },
                 )
 

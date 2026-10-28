@@ -52,13 +52,13 @@ _MAX_PATCH_BYTES = 1024 * 1024
 @dataclass(frozen=True)
 class _Current:
     head: str
-    base: str
+    base: str = field(compare=False)
     source_uuid: UUID
     title: str = field(compare=False)
     description: str | None = field(compare=False)
     author: str = field(compare=False)
     source_branch: str = field(compare=False)
-    target_branch: str = field(compare=False)
+    target_branch: str
     draft: bool = field(compare=False)
 
 
@@ -204,7 +204,14 @@ def _git_marker_matches(line: str, prefix: str, expected: str) -> bool:
 class HttpBitbucketVcsProvider:
     """The locator and UUID-bound credential are fixed for one Run attempt."""
 
-    def __init__(self, *, http: BitbucketRunHttp, locator: PullRequestLocator) -> None:
+    def __init__(
+        self,
+        *,
+        http: BitbucketRunHttp,
+        locator: PullRequestLocator,
+        pinned_base_sha: str | None = None,
+        pinned_target_branch: str | None = None,
+    ) -> None:
         if (
             locator.provider != "bitbucket"
             or locator.origin_provider_installation_id != http.target.installation_id
@@ -213,6 +220,8 @@ class HttpBitbucketVcsProvider:
             raise ValueError("Bitbucket VCS origin mismatch")
         self._http = http
         self._locator = locator
+        self._pinned_base_sha = _sha(pinned_base_sha) if pinned_base_sha is not None else None
+        self._pinned_target_branch = pinned_target_branch
         self._current: _Current | None = None
         self._stats: tuple[_Stat, ...] | None = None
         self._pull_request: VcsPullRequest | None = None
@@ -308,9 +317,11 @@ class HttpBitbucketVcsProvider:
                     "bitbucket_source_unavailable", "Bitbucket fork source is unreadable"
                 ) from None
             raise
-        base = await self._resolve_commit(
-            self._http.target.repository_uuid, current.base, checkpoint
-        )
+        base = self._pinned_base_sha
+        if base is None:
+            base = await self._resolve_commit(
+                self._http.target.repository_uuid, current.base, checkpoint
+            )
         return replace(current, head=head, base=base)
 
     async def _resolve_commit(
@@ -469,6 +480,11 @@ class HttpBitbucketVcsProvider:
             await checkpoint()
             return self._pull_request
         current = await self._canonical(checkpoint)
+        if (
+            self._pinned_target_branch is not None
+            and current.target_branch != self._pinned_target_branch
+        ):
+            raise RunCancelled("superseded")
         if current.source_uuid != self._http.target.repository_uuid:
             self._http.allow_source_repository(current.source_uuid)
         await self._verify_source(current, checkpoint)

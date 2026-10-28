@@ -92,10 +92,18 @@ def _comment_body(finding: PublishedFinding) -> str:
 class BitbucketPullRequestCommentGateway:
     """Uses durable comment markers to recover partial/ambiguous POST outcomes."""
 
-    def __init__(self, port: BitbucketCommentPort, *, run_id: UUID, repository_uuid: UUID) -> None:
+    def __init__(
+        self,
+        port: BitbucketCommentPort,
+        *,
+        run_id: UUID,
+        repository_uuid: UUID,
+        pinned_target_branch: str | None = None,
+    ) -> None:
         self._port = port
         self._run_id = run_id
         self._repository_uuid = repository_uuid
+        self._pinned_target_branch = pinned_target_branch
         self._source_uuid: UUID | None = None
 
     async def checkpoint(self) -> None:
@@ -125,6 +133,11 @@ class BitbucketPullRequestCommentGateway:
         source_uuid = _uuid(_mapping(source.get("repository")).get("uuid"))
         if destination_uuid != self._repository_uuid:
             raise PublishError("forbidden", "Bitbucket PR destination identity changed")
+        if (
+            self._pinned_target_branch is not None
+            and _mapping(destination.get("branch")).get("name") != self._pinned_target_branch
+        ):
+            raise PublishError("stale_commit", "Bitbucket PR destination branch changed")
         if self._source_uuid is not None and source_uuid != self._source_uuid:
             raise PublishError("stale_commit", "Bitbucket PR source moved")
         self._source_uuid = source_uuid

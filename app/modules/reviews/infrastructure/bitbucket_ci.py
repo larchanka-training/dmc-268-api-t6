@@ -136,6 +136,8 @@ class SqlAlchemyBitbucketStatusSource:
         if row is None:
             return None
         run, change, _, installation, origin, connection = row
+        if run.base_ref is None:
+            return None
         return BitbucketStatusSnapshot(
             run.id,
             BoundBitbucketTarget(
@@ -152,6 +154,7 @@ class SqlAlchemyBitbucketStatusSource:
             run.state.value,
             origin.run_order,
             coverage_status,
+            run.base_ref,
         )
 
 
@@ -455,6 +458,10 @@ class BitbucketBuildStatusPublisher:
                 != target.repository_uuid
                 or head != snapshot.head_sha
                 or _mapping(source.get("branch")).get("name") != snapshot.source_branch
+                or (
+                    snapshot.target_branch is not None
+                    and _mapping(destination.get("branch")).get("name") != snapshot.target_branch
+                )
             ):
                 raise BitbucketStatusUnavailable("Bitbucket PR head or identity changed")
             payload = bitbucket_status_payload(

@@ -8,9 +8,14 @@ from types import SimpleNamespace
 from typing import Self, cast
 from uuid import UUID
 
+import httpx
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from app.modules.integrations.bitbucket.application.request_credentials import (
+    BitbucketRequestCredential,
+    BoundBitbucketTarget,
+)
 from app.modules.integrations.bitbucket.infrastructure.credential_cipher import (
     BitbucketCredentialCipher,
 )
@@ -20,6 +25,7 @@ from app.modules.reviews.application.publish_run_review import (
     ObsoletePublication,
     PublicationIdentity,
     PublishContext,
+    PublishError,
     ReviewSubmission,
 )
 from app.modules.reviews.application.vcs_diff import PullRequestLocator
@@ -104,7 +110,7 @@ def _context() -> PublishContext:
         "bitbucket",
         42,
         WORKSPACE,
-        RunVcsInput(CHANGE, REPOSITORY, HEAD, BASE, locator),
+        RunVcsInput(CHANGE, REPOSITORY, HEAD, BASE, locator, base_ref="main"),
         PublicationIdentity(INSTALLATION, WORKSPACE, 37, "bitbucket", REPOSITORY, CHANGE, BASE),
     )
 
@@ -155,6 +161,58 @@ def test_installed_publication_client_ignores_proxy_environment(
             pass
 
     asyncio.run(scenario())
+    assert claims.released
+
+
+def test_installed_publication_wires_pinned_target_branch_into_comment_guard(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    claims = _Claims()
+    resources = _resources(monkeypatch, claims)
+    writes: list[httpx.Request] = []
+
+    class Credentials:
+        async def checkpoint(self, _target: BoundBitbucketTarget) -> None:
+            return None
+
+        async def credential_for(self, target: BoundBitbucketTarget) -> BitbucketRequestCredential:
+            return BitbucketRequestCredential(target, "test-token")
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        if request.method != "GET":
+            writes.append(request)
+            raise AssertionError("retargeted Run must not publish")
+        return httpx.Response(
+            200,
+            json={
+                "id": 7,
+                "state": "OPEN",
+                "source": {
+                    "commit": {"hash": HEAD},
+                    "repository": {"uuid": f"{{{REMOTE_REPOSITORY}}}"},
+                },
+                "destination": {
+                    "branch": {"name": "release"},
+                    "repository": {"uuid": f"{{{REMOTE_REPOSITORY}}}"},
+                },
+            },
+        )
+
+    monkeypatch.setattr(resources, "_credentials", Credentials())
+    monkeypatch.setattr(resources, "_transports", lambda: httpx.MockTransport(respond))
+
+    async def scenario() -> None:
+        context = _context()
+        assert context.vcs_input is not None and context.vcs_input.base_ref == "main"
+        async with resources.open(context, checkpoint=_checkpoint) as gateway:
+            submission = ReviewSubmission(
+                37, "team/repo", 7, HEAD, "COMMENT", "Summary", (), "f" * 64
+            )
+            with pytest.raises(PublishError, match="destination branch"):
+                await gateway.submit_review(submission)
+
+    asyncio.run(scenario())
+    assert writes == []
     assert claims.released
 
 

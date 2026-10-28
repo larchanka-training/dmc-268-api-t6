@@ -181,6 +181,7 @@ def test_persisted_origin_admits_bitbucket_http_without_holding_db_lease(
                 sessions, allow_unscoped=True
             ).get_run_vcs_input(run_id)
             assert expected is not None
+            assert expected.base_ref == "main"
             claimed = ClaimedAttempt(
                 run_id,
                 workspace,
@@ -202,7 +203,7 @@ def test_persisted_origin_admits_bitbucket_http_without_holding_db_lease(
                 if request.url.path.endswith("/pullrequests/7"):
                     from tests.test_bitbucket_vcs import _pr
 
-                    payload = _pr(source=remote_repo)
+                    payload = _pr(base="d" * 12, source=remote_repo)
                     destination = payload["destination"]
                     assert isinstance(destination, dict)
                     destination["repository"] = {"uuid": "{" + str(remote_repo) + "}"}
