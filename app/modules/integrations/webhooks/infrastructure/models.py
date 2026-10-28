@@ -30,13 +30,24 @@ from app.common.infrastructure.db.columns import timestamp_column
 class WebhookEvent(Base):
     __tablename__ = "webhook_events"
     __table_args__ = (
-        CheckConstraint("provider IN ('github', 'gitlab')", name="ck_webhook_events_provider"),
         CheckConstraint(
-            "(provider = 'github' AND gitlab_connection_id IS NULL) OR "
+            "provider IN ('github', 'gitlab', 'bitbucket')", name="ck_webhook_events_provider"
+        ),
+        CheckConstraint(
+            "(provider = 'github' AND gitlab_connection_id IS NULL AND "
+            "bitbucket_repository_id IS NULL AND bitbucket_binding_generation IS NULL "
+            "AND bitbucket_webhook_generation IS NULL) OR "
             "(provider = 'gitlab' AND gitlab_connection_id IS NOT NULL AND "
             "provider_installation_id IS NOT NULL AND "
-            "gitlab_connection_id = provider_installation_id)",
-            name="ck_webhook_events_gitlab_origin",
+            "gitlab_connection_id = provider_installation_id AND "
+            "bitbucket_repository_id IS NULL AND bitbucket_binding_generation IS NULL "
+            "AND bitbucket_webhook_generation IS NULL) OR "
+            "(provider = 'bitbucket' AND gitlab_connection_id IS NULL AND "
+            "provider_installation_id IS NOT NULL AND bitbucket_repository_id IS NOT NULL "
+            "AND bitbucket_binding_generation IS NOT NULL "
+            "AND bitbucket_webhook_generation IS NOT NULL "
+            "AND bitbucket_binding_generation > 0 AND bitbucket_webhook_generation > 0)",
+            name="ck_webhook_events_provider_origin",
         ),
         CheckConstraint(
             "payload IS NOT NULL OR payload_s3_ref IS NOT NULL",
@@ -69,6 +80,11 @@ class WebhookEvent(Base):
     gitlab_connection_id: Mapped[UUID | None] = mapped_column(
         ForeignKey("gitlab_connections.provider_installation_id"), nullable=True
     )
+    bitbucket_repository_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("bitbucket_repository_identities.repository_id"), nullable=True
+    )
+    bitbucket_binding_generation: Mapped[int | None] = mapped_column(BIGINT, nullable=True)
+    bitbucket_webhook_generation: Mapped[int | None] = mapped_column(BIGINT, nullable=True)
     installation_external_id: Mapped[int | None] = mapped_column(BIGINT, nullable=True)
     delivery_id: Mapped[str] = mapped_column(String(255), nullable=False, unique=True)
     event: Mapped[str] = mapped_column(String(100), nullable=False)

@@ -23,6 +23,10 @@ _ERROR_TEXTS = {
     "diff_fetch_failed": "Не удалось получить дифф из GitHub.",
     "commit_messages_fetch_failed": "Не удалось получить сообщения коммитов PR из GitHub.",
     "github_forbidden": "У GitHub App нет доступа к репозиторию или PR.",
+    "bitbucket_source_unavailable": "Нет доступа к исходному fork-репозиторию Bitbucket.",
+    "bitbucket_review_limit_exceeded": "PR Bitbucket превышает лимит файлов для ревью.",
+    "bitbucket_response_budget_exceeded": "Исчерпан бюджет ответов Bitbucket для одного прогона.",
+    "bitbucket_engine_unsupported": "Выбранный движок ревью не поддерживается Bitbucket.",
     "github_publish_failed": "GitHub не принял ревью.",
     "pr_base_changed": (
         "Целевая ветка PR изменилась после запуска ревью. Перезапустите ревью из UI."

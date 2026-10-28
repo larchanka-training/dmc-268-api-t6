@@ -40,6 +40,7 @@ registerHooks({
 const load = (path) => import(pathToFileURL(resolve(uiDir, path)).href)
 
 const { z } = await load('node_modules/zod/index.js')
+const bitbucket = await load('src/features/bitbucket-connections/model/schemas.ts')
 const diff = await load('src/entities/diff/model/schemas.ts')
 const repository = await load('src/entities/repository/model/schemas.ts')
 const review = await load('src/entities/review/model/schemas.ts')
@@ -69,6 +70,16 @@ const sources = {
   fileSlice: diff.FileSliceSchema,
   authSession: user.AuthSessionSchema,
   me: user.MeSchema,
+  bitbucketDiscoveryRequest: bitbucket.BitbucketDiscoveryRequestSchema,
+  bitbucketDiscoveredRepository: bitbucket.BitbucketDiscoveredRepositorySchema,
+  bitbucketDiscoveryResponse: bitbucket.BitbucketDiscoveryResponseSchema,
+  bitbucketConnectRequest: bitbucket.BitbucketConnectRequestSchema,
+  bitbucketWebhookSetup: bitbucket.BitbucketWebhookSetupSchema,
+  bitbucketConnectResponse: bitbucket.BitbucketConnectResponseSchema,
+  bitbucketConnectionItem: bitbucket.BitbucketConnectionItemSchema,
+  bitbucketConnectionList: bitbucket.BitbucketConnectionListSchema,
+  bitbucketCredentialRotateRequest: bitbucket.BitbucketCredentialRotateRequestSchema,
+  bitbucketCredentialRotateResponse: bitbucket.BitbucketCredentialRotateResponseSchema,
 }
 
 const schemaNames = process.env.SCHEMA_NAMES?.split(',') ?? Object.keys(sources)

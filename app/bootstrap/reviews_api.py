@@ -24,7 +24,18 @@ from app.bootstrap.reconciler import reconciler_loop
 from app.modules.auth.application.scope import AuthScope
 from app.modules.auth.infrastructure.sessions import SqlAlchemyAuthSessionUnitOfWork
 from app.modules.code_index.application.index_refresh import RequestIndexRefresh
+from app.modules.code_index.infrastructure.bitbucket_snapshot_source import (
+    BitbucketRepositorySnapshotSource,
+)
 from app.modules.code_index.infrastructure.index_refresh import SqlAlchemyIndexRefreshUnitOfWork
+from app.modules.integrations.bitbucket.application.request_credentials import BoundBitbucketTarget
+from app.modules.integrations.bitbucket.infrastructure.credential_cipher import (
+    BitbucketCredentialCipher,
+)
+from app.modules.integrations.bitbucket.infrastructure.request_credentials import (
+    BitbucketRequestCredentials,
+    SqlAlchemyBitbucketTargetReader,
+)
 from app.modules.integrations.webhooks.api.dispatch import GitHubWebhookDispatchAdapter, action_of
 from app.modules.integrations.webhooks.application.github_installation_dispatch import (
     GitHubInstallationDeliveryDispatcher,
@@ -64,6 +75,8 @@ from app.modules.repositories.application.repository_settings import (
 )
 from app.modules.repositories.application.rules_status import (
     GetRulesStatus,
+    ProviderRulesDocumentReader,
+    ReadBitbucketRulesDocument,
     ReadRulesDocument,
     RefreshRulesStatuses,
     RequestRulesRefreshOnPush,
@@ -222,26 +235,67 @@ class ReviewsApiResources:
     def rules_status_refresher(
         self,
         *,
-        client: httpx.AsyncClient,
-        token_provider: GitHubInstallationAccessTokenProvider,
+        client: httpx.AsyncClient | None = None,
+        token_provider: GitHubInstallationAccessTokenProvider | None = None,
+        bitbucket_cipher: BitbucketCredentialCipher | None = None,
+        bitbucket_client: httpx.AsyncClient | None = None,
     ) -> RefreshRulesStatuses:
-        """Compose the ``webhook-worker`` reads of ``.review/rules.md`` (#150)."""
+        """Compose provider-bound ``webhook-worker`` reads of ``.review/rules.md``."""
+        github_reader: ReadRulesDocument | None = None
+        if token_provider is not None:
+            if client is None:
+                raise ValueError("GitHub rules require an HTTP client")
 
-        def source(target: RulesRefreshTarget, sha: str) -> GitHubRepositoryPolicySource:
-            return GitHubRepositoryPolicySource(
-                client=client,
-                token_provider=token_provider,
-                installation_external_id=target.installation_external_id,
-                repository_full_name=target.repository_full_name,
-                policy_base_sha=sha,
-            )
+            def source(target: RulesRefreshTarget, sha: str) -> GitHubRepositoryPolicySource:
+                return GitHubRepositoryPolicySource(
+                    client=client,
+                    token_provider=token_provider,
+                    installation_external_id=target.installation_external_id,
+                    repository_full_name=target.repository_full_name,
+                    policy_base_sha=sha,
+                )
 
-        return RefreshRulesStatuses(
-            uow_factory=partial(SqlAlchemyRulesRefreshUnitOfWork, self._session_factory),
-            reader=ReadRulesDocument(
+            github_reader = ReadRulesDocument(
                 heads=GitHubDefaultBranchHeadSource(client=client, token_provider=token_provider),
                 sources=source,
+            )
+
+        bitbucket_reader: ReadBitbucketRulesDocument | None = None
+        if bitbucket_cipher is not None:
+            if bitbucket_client is None or bitbucket_client is client:
+                raise ValueError("Bitbucket rules require a separate HTTP client")
+            target_reader = SqlAlchemyBitbucketTargetReader(self._session_factory)
+            credentials = BitbucketRequestCredentials(target_reader, bitbucket_cipher)
+
+            def bitbucket_source(target: RulesRefreshTarget) -> BitbucketRepositorySnapshotSource:
+                async def claimed_target() -> BoundBitbucketTarget:
+                    if target.bitbucket_target is None:
+                        raise ValueError("Bitbucket rules target has no binding")
+                    return target.bitbucket_target
+
+                return BitbucketRepositorySnapshotSource(
+                    client=bitbucket_client,
+                    target_for_repository=claimed_target,
+                    credentials=credentials,
+                )
+
+            bitbucket_reader = ReadBitbucketRulesDocument(bitbucket_source)
+
+        allowed_providers = frozenset(
+            provider
+            for provider, configured in (
+                ("github", github_reader is not None),
+                ("bitbucket", bitbucket_reader is not None),
+            )
+            if configured
+        )
+        return RefreshRulesStatuses(
+            uow_factory=partial(
+                SqlAlchemyRulesRefreshUnitOfWork,
+                self._session_factory,
+                allowed_providers=allowed_providers,
             ),
+            reader=ProviderRulesDocumentReader(github=github_reader, bitbucket=bitbucket_reader),
         )
 
     def installation_onboarding(

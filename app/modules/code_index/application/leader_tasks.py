@@ -325,8 +325,8 @@ class ReconcileIndexHeads:
         self._batch = batch
         self._clock = clock
         self._after: UUID | None = None
-        # Installation external id → the monotonic time its rate limit ends.
-        self._paused: dict[int, float] = {}
+        # Provider and installation external id → the monotonic time its rate limit ends.
+        self._paused: dict[tuple[str, int], float] = {}
 
     @property
     def batch(self) -> int:
@@ -337,7 +337,7 @@ class ReconcileIndexHeads:
         if budget_seconds < HEAD_READ_RESERVE_SECONDS:
             return True
         source = self._sources()
-        limited: set[int] = set()
+        limited: set[tuple[str, int]] = set()
         reconciled = marked = 0
         try:
             async with self._uow() as uow:
@@ -347,7 +347,7 @@ class ReconcileIndexHeads:
                     return True
                 repository = candidate.repository
                 self._after = repository.repository_id
-                installation = repository.installation_external_id
+                installation = (repository.provider, repository.installation_external_id)
                 if installation in limited or self._is_paused(installation):
                     continue
                 # CONTRACT: `Exception` only, so a cancellation still stops the run.
@@ -397,7 +397,7 @@ class ReconcileIndexHeads:
                     marked,
                 )
 
-    def _is_paused(self, installation: int) -> bool:
+    def _is_paused(self, installation: tuple[str, int]) -> bool:
         until = self._paused.get(installation)
         if until is None:
             return False

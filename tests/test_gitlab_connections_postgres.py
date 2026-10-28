@@ -415,12 +415,15 @@ def test_empty_gitlab_migration_round_trips_preserving_github_receipts_and_setti
     connection.commit()
     for _ in range(2):
         command.upgrade(config, "head")
-        assert connection.scalar(text("SELECT version_num FROM alembic_version")) == "20261026_0043"
+        assert connection.scalar(text("SELECT version_num FROM alembic_version")) == "20261027_0051"
         for table in tables:
             after = connection.execute(text(f"SELECT to_jsonb(t) FROM {table} t")).scalar_one()
             if table == "webhook_events":
                 assert after.pop("provider") == "github"
                 assert after.pop("gitlab_connection_id") is None
+                assert after.pop("bitbucket_repository_id") is None
+                assert after.pop("bitbucket_binding_generation") is None
+                assert after.pop("bitbucket_webhook_generation") is None
             assert after == before[table]
         # Alembic does not compare CHECK constraints: retain explicit physical and
         # metadata names; the adversarial tests above exercise their SQL semantics.
@@ -436,7 +439,7 @@ def test_empty_gitlab_migration_round_trips_preserving_github_receipts_and_setti
             "gitlab_project_bindings": {"ck_gitlab_project_bindings_project_positive"},
             "webhook_events": {
                 "ck_webhook_events_provider",
-                "ck_webhook_events_gitlab_origin",
+                "ck_webhook_events_provider_origin",
                 "ck_webhook_events_payload_present",
                 "ck_webhook_events_projection_claim_pair",
                 "ck_webhook_events_projection_attempt_count_nonnegative",
@@ -532,7 +535,7 @@ def test_downgrade_refuses_to_silently_delete_retired_gitlab_configuration(
     with pytest.raises(RuntimeError, match="configuration and receipts"):
         command.downgrade(config, "20261026_0041")
     connection.rollback()
-    assert connection.scalar(text("SELECT version_num FROM alembic_version")) == "20261026_0043"
+    assert connection.scalar(text("SELECT version_num FROM alembic_version")) == "20261027_0051"
     assert connection.scalar(text("SELECT count(*) FROM gitlab_connections")) == 1
     connection.execute(text("DELETE FROM webhook_events WHERE id=:id"), {"id": receipt})
     connection.commit()
