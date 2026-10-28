@@ -17,7 +17,10 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 import app.worker as worker
 from app.bootstrap.bitbucket_reviews import BitbucketAttemptBundle
-from app.modules.integrations.bitbucket.infrastructure.run_http import BitbucketRunHttp
+from app.modules.integrations.bitbucket.infrastructure.run_http import (
+    BitbucketRunHttp,
+    BitbucketRunHttpError,
+)
 from app.modules.reviews.application.bitbucket_status import BitbucketStatusSnapshot
 from app.modules.reviews.application.diff_map import VcsProviderName, build_diff_map
 from app.modules.reviews.application.findings_post_processor import ProcessedReviewOutput
@@ -190,9 +193,12 @@ def test_bitbucket_full_mocked_review_never_uses_github_or_gitlab(
     assert forbidden.calls == 0
 
 
-@pytest.mark.parametrize("technical_only", [False, True])
+@pytest.mark.parametrize(
+    ("technical_only", "context_budget_exceeded"),
+    [(False, False), (True, False), (False, True)],
+)
 def test_composed_bitbucket_review_uses_pinned_cloud_reads_and_writes(
-    monkeypatch: pytest.MonkeyPatch, technical_only: bool
+    monkeypatch: pytest.MonkeyPatch, technical_only: bool, context_budget_exceeded: bool
 ) -> None:
     """The worker's VCS, policy, source and context adapters share one pinned Cloud route."""
     source_bytes = b"def compute():\n    return 2\n"
@@ -339,6 +345,10 @@ def test_composed_bitbucket_review_uses_pinned_cloud_reads_and_writes(
                 await super().get_run_conventions_input(run_id), repository_id=TARGET.repository_id
             )
 
+    class RequestBudgetContext(BuildReviewContext):
+        async def execute(self, **kwargs: Any) -> Any:
+            raise BitbucketRunHttpError("request_budget_exceeded")
+
     async def scenario() -> None:
         credentials = CloudCredentials()
         async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
@@ -384,7 +394,9 @@ def test_composed_bitbucket_review_uses_pinned_cloud_reads_and_writes(
                         trees=trees, policy_base_sha=pins.policy_base_sha
                     ),
                 ),
-                context_builder=lambda selected: BuildReviewContext(
+                context_builder=lambda selected: (
+                    RequestBudgetContext if context_budget_exceeded else BuildReviewContext
+                )(
                     source=BitbucketRevisionSource(trees=trees, locator=selected.locator),
                     parser=Parser(),
                     counter=EstimatedTokenCounter(),
@@ -656,8 +668,18 @@ def test_composed_bitbucket_review_uses_pinned_cloud_reads_and_writes(
             else:
                 assert agents_bytes.decode().strip() in prompt_text
                 assert "Check changed function behavior." in prompt_text
-                assert stage.payload is not None
-                assert ContextLevel.L3 in stage.payload.levels_present
+                if context_budget_exceeded:
+                    assert stage.payload is None
+                    assert "def compute():" in prompt_text
+                    assert len(answers.requests) == 1
+                    assert any(
+                        response.get("error", {}).get("type") == "BitbucketRunHttpError"
+                        for tool, _, response in trace.steps
+                        if tool == "context.build"
+                    )
+                else:
+                    assert stage.payload is not None
+                    assert ContextLevel.L3 in stage.payload.levels_present
             await process.publish_review.execute(pointer)
             assert memory.state == "succeeded"
             assert memory.review_body in cast(dict[str, str], comments[0]["content"])["raw"]

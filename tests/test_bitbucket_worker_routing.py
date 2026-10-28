@@ -116,8 +116,9 @@ def test_bitbucket_run_without_configured_resources_fails_without_github(
         queue=cast(Any, object()),
         github=None,
     )
-    with pytest.raises(RunFailure, match="Bitbucket review capability is unavailable"):
+    with pytest.raises(RunFailure, match="Bitbucket review capability is unavailable") as error:
         asyncio.run(process_root.handle_run._pipeline(CLAIMED))
+    assert error.value.error_code == "bitbucket_fetch_failed"
 
 
 def test_unsupported_bitbucket_engine_fails_terminally(
