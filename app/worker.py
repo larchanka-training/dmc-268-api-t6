@@ -211,6 +211,10 @@ from app.modules.reviews.infrastructure.redis_context_cache import (
     RedisLike,
     RedisTreeCache,
 )
+from app.modules.reviews.infrastructure.redis_review_result_cache import (
+    REVIEW_RESULT_CACHE_SOCKET_TIMEOUT_SECONDS,
+    RedisReviewResultCache,
+)
 from app.modules.reviews.infrastructure.review_output_unit_of_work import (
     SqlAlchemyReviewOutputUnitOfWork,
 )
@@ -781,6 +785,7 @@ def attempt_model_provider(
         deadline=claimed.deadline,
         prompt_version_id=claimed.prompt_version_id,
         rule_version_id=claimed.rule_version_id,
+        repository_id=claimed.repository_id,
     )
     return AttemptReviewProvider(
         source,
@@ -1024,6 +1029,17 @@ async def _run_worker(
             _LOGGER.warning("LLM_MODEL is not set: %s; every review run fails", LLM_NOT_CONFIGURED)
         else:
             # One gateway and separate LLM/ECB HTTP pools per process.
+            result_cache: RedisReviewResultCache | None = None
+            if settings.redis_url is not None:
+                # Second client on the same URL. Tokens, AST, and trees keep the
+                # shared client below, whose socket wait is unchanged (#209, #315).
+                result_redis = Redis.from_url(
+                    settings.redis_url,
+                    socket_connect_timeout=REVIEW_RESULT_CACHE_SOCKET_TIMEOUT_SECONDS,
+                    socket_timeout=REVIEW_RESULT_CACHE_SOCKET_TIMEOUT_SECONDS,
+                )
+                stack.push_async_callback(result_redis.aclose)
+                result_cache = RedisReviewResultCache(cast(RedisLike, result_redis))
             llm_client = await stack.enter_async_context(httpx.AsyncClient(transport=llm_transport))
             fx_client = await stack.enter_async_context(httpx.AsyncClient(transport=fx_transport))
             gateway = build_gateway(
@@ -1031,11 +1047,12 @@ async def _run_worker(
                 llm_client,
                 session_factory,
                 fx_provider=EcbFxQuoteCache(EcbFxRateAdapter(fx_client)),
+                result_cache=result_cache,
             )
         redis: Redis | None = None
         if settings.redis_url is not None:
-            # Only a cache (context stage and installation tokens): the pool connects on
-            # first use and a failure reads as a miss.
+            # Tokens, AST facts, and file trees. The pool connects on first use
+            # and a failure reads as a miss. Constructor arguments stay as they are.
             redis = Redis.from_url(settings.redis_url)
             stack.push_async_callback(redis.aclose)
         async with amqp_channels(settings.rabbitmq_url, delays or RetryDelays()) as channels:

@@ -915,7 +915,7 @@ components:
       description: >-
         Run lifecycle state. Terminal: succeeded, failed, cancelled, skipped. The steps recorded
         as run actions inside `running` are `policy.load`, `vcs.fetch_diff`, `context.build`,
-        `context.rag`, `llm.repo_conventions` and `llm.call`; `llm.review_output` and
+        `context.rag`, `llm.repo_conventions`, `llm.call` and `llm.result_cache`; `llm.review_output` and
         `review.postprocess` are written in the transaction that moves the run to `publishing`,
         and so is `llm.verify`, before `review.postprocess`, but only on the snapshot path
         (a run bound to a snapshot-contract review prompt); on that path `context.manifest`
@@ -1338,7 +1338,7 @@ components:
           description: >-
             Step name written to run_actions; free text, not an enum. The code writes
             `policy.load`, `vcs.fetch_diff`, `context.build`, `context.rag`,
-            `llm.repo_conventions`, `llm.call`, `llm.review_output`, `review.postprocess`,
+            `llm.repo_conventions`, `llm.call`, `llm.result_cache`, `llm.review_output`, `review.postprocess`,
             `github.publish_review` and `gitlab.publish_review`. It writes `llm.verify` and
             `context.manifest` only on the snapshot path (a run bound to a snapshot-contract
             review prompt). A `context.manifest` step precedes each provider call of that path

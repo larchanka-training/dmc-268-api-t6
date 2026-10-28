@@ -56,6 +56,7 @@ from app.modules.reviews.application.prompt_builder import (
 )
 from app.modules.reviews.application.rag_index import has_retrieved_section
 from app.modules.reviews.application.review_output import ReviewOutput, parse_review_output
+from app.modules.reviews.application.review_result_cache import ReviewResultCache
 from app.modules.reviews.application.run_failures import FAST_ATTEMPT_DEADLINE, RunCancelled
 from app.modules.reviews.application.run_trace import TransactionalRunTrace
 from app.modules.reviews.infrastructure.context_manifest_store import (
@@ -99,11 +100,13 @@ def build_gateway(
     session_factory: async_sessionmaker[AsyncSession],
     *,
     fx_provider: FxQuoteProvider | None = None,
+    result_cache: ReviewResultCache | None = None,
 ) -> LlmGateway:
     """The production gateway: HTTP transport, ``usage_events`` and ``llm.call`` in PG.
 
-    The ReviewOutput schema is read here, so a missing file fails the process start,
-    not the first review.
+    ``result_cache`` stores accepted review and verifier answers. ``None`` leaves
+    every call on the provider. The ReviewOutput schema is read here, so a missing
+    file fails the process start, not the first review.
     """
     review_output_schema()
 
@@ -130,6 +133,7 @@ def build_gateway(
         manifest_store=TransactionalManifestStore(
             partial(SqlAlchemyContextManifestUnitOfWork, session_factory)
         ),
+        result_cache=result_cache,
     )
 
 

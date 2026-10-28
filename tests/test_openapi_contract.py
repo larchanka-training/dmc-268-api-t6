@@ -125,6 +125,7 @@ RUN_ACTION_TOOLS = frozenset(
         "context.manifest",
         "llm.repo_conventions",
         "llm.call",
+        "llm.result_cache",
         "llm.review_output",
         "llm.verify",
         "review.postprocess",
