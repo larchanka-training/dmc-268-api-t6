@@ -282,6 +282,7 @@ class Verifier:
         user_prompt: str,
         manifest: CallManifest,
         context: ReviewContext,
+        **_: object,
     ) -> dict[str, Any]:
         await _note(
             self._trace,
