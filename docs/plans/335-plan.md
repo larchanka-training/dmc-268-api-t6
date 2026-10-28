@@ -532,7 +532,7 @@ one existing deployment test file and these four documentation files.
 | Finding | Correction and focused evidence |
 |---|---|
 | P2 hook recovery | Normal create/bind/inspect → separately authorized activate → process admission → hook → acceptance MR; activation has no hook dependency. Recovery Test is separate: newest MR/action open, no-MR failure, real Run/LLM/publication and head consumption. Test before acceptance MR or push a new head afterward; count all publications for that head. Resend preserves the original delivery. |
-| P2 GitLab label | GitLab open/update/reopen uses enabled bound project, active connection/process admission, open MR/current head and `wait_for_ci=never`; no `ai-review` admission. Rules/prompt/workers/LLM are operational readiness; R4 below adds the shared active-Run/head gates. GitHub labeling retained. Use isolated acceptance-only MRs. Existing GitLab trigger tests: 91 passed, zero skips. |
+| P2 GitLab label | GitLab open/update/reopen uses enabled bound project, active connection/process admission, open MR/current head and `wait_for_ci=never`; no `ai-review` admission. R5 corrects the earlier readiness classification: active rules and resolved `review.system` are shared enqueue requirements; workers/LLM are execution readiness. Shared active-Run/head gates also apply. GitHub labeling retained. Use isolated acceptance-only MRs. Existing GitLab trigger tests: 91 passed, zero skips. |
 | P3-1 Docker boundary | Require the complete Docker-call suffix to be empty for deploy/manual/auto rollback. Isolated top-level Docker-config TMPDIR-bypass mutant: three failures at the new assertion; unchanged runtime. |
 | P3-2 fresh session | Explicit recorded installation UUID input, fresh inspect/identity check, fresh generation for activate/rotate; malformed/empty/stale/EOF/error paths stop the operation while the interactive shell survives. |
 | P3-3 inspect keys | Revoke verification uses `connection.revoked` and `connection.intake_enabled`. |
@@ -576,15 +576,45 @@ reconciliation. This amendment changes only these four documentation files.
 |---|---|
 | P3-1 orphan inspection | Root/full-visibility/tool guards; metadata, parent/child ps and stage lsof execute independently and print each rc. Cwd has its own guarded PID-list check/rc. Missing parent/children no longer skip lsof; stderr and ambiguous lsof exit 1 require operator review. Actual old chained snippet fails the dead-parent regression. Ten disposable checks pass: actual non-root refusal plus explicitly EUID-omitted fixture branches for independent checks, tool/error/path/symlink/cwd cases. No privileged-host visibility or abandonment proof is claimed. |
 | P3-2 source anchors | All six affected links across CICD/SECRETS/this plan use official GitLab commit `d993f849b41862881e4c4b2445f991fef0c67822`. Both pinned files were read: ProjectTestData lines 37–43 select newest MR/action open and reject no MR; WebHookService lines 227–242 build token/delivery headers. No affected moving master link remains; installed-version/live-header proof remains pending. |
-| P3-3 eligibility/readiness | Both runbooks separate provider predicates from rules/prompt/workers/LLM readiness and state the shared no-active-Run gate (Р-2) plus webhook head dedup. `ActiveRunBlocker` yields DEFERRED only for another head with cancellation requested, otherwise DUPLICATE; only DEFERRED maps to GitLab receipt deferral. Stable-key receipt dedup and HEAD_ALREADY_REVIEWED remain distinct. Local eligibility/candidate store/enqueue/dispatch and PIPELINE_SPEC T1/§8.4 checked; focused GitLab trigger suite: 91 passed in 0.32s, zero skips. |
+| P3-3 eligibility/readiness | Both runbooks state the shared no-active-Run gate (Р-2) plus webhook head dedup. The original rules/prompt readiness classification is superseded by R5: active rules and resolved `review.system` are shared enqueue requirements; only workers/LLM are execution readiness. `ActiveRunBlocker` yields DEFERRED only for another head with cancellation requested, otherwise DUPLICATE; only DEFERRED maps to GitLab receipt deferral. Stable-key receipt dedup and HEAD_ALREADY_REVIEWED remain distinct. Local eligibility/candidate store/enqueue/dispatch and PIPELINE_SPEC T1/§8.4 checked; focused GitLab trigger suite: 91 passed in 0.32s, zero skips. |
 
 All 13 extracted GitLab-section Bash blocks pass `bash -n`. The orphan fixtures
 use local Bash/stubs and actual non-root guards; no Docker pull/build, real server,
-GitLab Test, SSH, provider/LLM call or cleanup occurred. The managed environment
-reported an environment-lock warning; the focused suite completed successfully.
+GitLab Test, SSH, provider/LLM call or cleanup occurred. The focused suite completed
+successfully.
 This ledger ends at implementation/focused verification. Fresh cumulative independent
 review, repo-wide static gates and full canonical CI on the actual published head
 follow source freeze; historical 9643 is not a new-head result. Publication, CI and
 review-request evidence stays on the live PR without another bookkeeping commit.
 Task 7's eight live checks remain unchecked; no merge, deployment, acceptance or
 issue closure is authorized here.
+
+
+## Review round 5 — bounded source amendment
+
+The all-comments instruction covers both P3 findings in
+[review 5675151378](https://github.com/larchanka-training/dmc-268-api-t6/pull/339#pullrequestreview-5675151378)
+and the 0041/0042 rollback request in
+[comment 6455817706](https://github.com/larchanka-training/dmc-268-api-t6/pull/339#issuecomment-6455817706).
+Historical R4 publication `d9b3cf33` / CI 40590080450 passed **9876 tests = 8148
+unit + 1728 integration**, zero skips/failures/errors; R5 approved that old head.
+A new diff requires fresh approval and canonical CI on its actual published head.
+Rebased five existing commits onto main `f8b09818`, yielding `b58d9819`: five
+range-diff `=` entries, all 15 feature blobs unchanged and all 23 incoming main
+path blobs retained. This amendment changes only the same four documents.
+
+| Finding | Correction and focused evidence |
+|---|---|
+| P3-1 shared enqueue configuration | Both runbooks and earlier current ledger classifications distinguish provider eligibility from required active rules/resolved `review.system` (override or active global version), Р-2 and webhook-head dedup. Missing rules/prompt → `UNCONFIGURED` → `PROJECTED_PR` → consumed nondeferred receipt, no Run. Stable-key Resend is duplicate; GitHub `auto`-only no-CI sweep cannot recover GitLab `never`. Configure before delivery; after repair send a fresh eligible open/update/reopen event (acceptance: new push/head). Workers/LLM remain execution readiness; optional conventions/verifier pins are not enqueue guards. Full local candidate/enqueue/dispatch/receipt/sweep chain and PIPELINE_SPEC checked. |
+| P3-2 source hygiene | Remove workstation warning traces while preserving historical successful commands, counts and zero-skip facts. |
+| General rollback request | Read complete immutable 0041/0042 revisions and Alembic transaction setup. Add rows in 0043 → 0042 → 0041 order: 0042 exclusive-lock/refusal, explicit cleanup and lost GitLab state versus empty recreated structures/sequence; 0041 ownership constraints only, retained rows. Metadata attributes both to #169. #353 owns the separate 0040 row, optional Redis wording and F1 image floor; second merger rebases and reconciles these adjacent changes. Image rollback still does not downgrade schema. No migration or live downgrade was executed. |
+
+Existing focused tests: **125 passed in 7.69s, zero skips**: 91 GitLab trigger
+cases plus selected shared missing-candidate, typed dispatch, receipt acknowledgement
+and stable-key admission cases. These use synthetic/local seams, not a live GitLab,
+provider/LLM call or a fresh PostgreSQL migration proof. No permanent tests added.
+Fresh independent cumulative reviews and three whole local static gates follow
+source freeze. Complete pytest remains required through canonical published-head
+unit/four-integration-shard/exact-once CI. Historical 9876 is not new-head evidence;
+publication, final CI, actual replies and review request stay on the live PR.
+Task 7's eight live checks remain unchecked; live acceptance remains pending.
