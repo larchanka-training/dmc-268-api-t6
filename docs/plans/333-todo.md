@@ -18,8 +18,9 @@ independent review (0 Standards / 0 Spec). T11 RAG indexing/retrieval and T12
 UI passed independent review (0 Standards / 0 Spec). T13 deployment and docs
 have focused tests and static gates green; round 5 integration and final
 independent review are in progress. The full backend pytest gate remains due
-on the stable final diff. Historical API base: `88bbc073`; round 5 candidate
-base: `10d2848a`; published UI #195 head and fixture pin:
+on the stable final diff. Historical API base: `88bbc073`; round 5 pre-rebase
+base: `10d2848a`; current candidate base: `c89e838c`. Published UI #195 head
+and fixture pin:
 `46b2807492a52e100bcfb48052b1e640cbd50beb`. Recheck both PR heads before
 publication. Issue: https://github.com/larchanka-training/dmc-268-api-t6/issues/333.
 
@@ -477,7 +478,7 @@ None of these statements substitutes for a final published-head test run.
 | 45–46 | Task 15 removes the duplicate checkpoint and unreachable size branch. | Final diff and index gates on the published SHA. |
 | 47 | Symlink/non-UTF-8 skip and 429 tests are in the candidate; Task 11 adds unsafe diffstat full fallback and 5xx/subrepository proofs. | Task 11 independent review passed; final gates and published SHA remain. |
 | 48 | Task 15 reuses unchanged Bitbucket importer content across base/head with complete pinned trees and diff. | Request-count and PostgreSQL RAG proof on the final candidate. |
-| 49 | Fork projection, deleted-fork close/decline and prefix handling are in the candidate. | Task 19 mutation tests and private fork live probe. |
+| 49 | Fork projection, deleted-fork close/decline, prefix handling and Task 19 mutation tests are in the candidate (`134db419`). | Final gates and private fork live probe. |
 | 50 | Queued re-entry and status backoff are fixed in the candidate. | Final PostgreSQL suite. |
 | 51 | Pipeline spec now distinguishes Bitbucket `STOPPED` from GitHub's absent check-run for `repo_disabled`. | Final docs review. |
 | 52 | Tech-lead decision: whether superseded old-head `INPROGRESS` needs remote `STOPPED`. | Record decision and private Bitbucket merge-check probe. |
