@@ -1018,7 +1018,8 @@ capture that records its arm.
 Run the live A/B in the manual workflow with `corpus=rules` and
 `policy_arm=none|valid|malicious` (the validate step refuses `rules` with `legacy`), three
 runs per arm. `review_prompt` selects the prompt (`v3` by default, or `v4`): every arm but
-`legacy` binds that prompt's version and pin, and `legacy` refuses v4 before any call.
+`legacy` binds that prompt's version and pin, or, for a version without a pin, the sha of the
+prompt bytes, and `legacy` refuses v4 before any call.
 Dispatch one run at a time: the workflow's concurrency group
 `eval-live-eurouter` keeps one run pending, and a newer pending run cancels the older
 pending one. Artifacts are named `eval-live-<corpus>-<arm>-<run-id>-<attempt>` (raw:
