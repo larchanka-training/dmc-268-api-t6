@@ -243,7 +243,7 @@ def test_bad_mask_diagnostic_is_english_and_carries_the_mask() -> None:
 
 @pytest.mark.parametrize("code", list(PolicyErrorCode))
 def test_every_policy_code_has_an_english_status_text(code: PolicyErrorCode) -> None:
-    text = status_text(PolicyError(code, "technical"))
+    text = status_text(PolicyError(code, "technical"), provider="github")
 
     assert text != code.value
     assert text.isascii()
@@ -259,7 +259,9 @@ def test_status_text_never_shows_a_stopped_count_as_exact() -> None:
         actual_is_lower_bound=True,
     )
 
-    assert status_text(error).endswith("Where: actual more than 20, allowed 20 transitions.")
+    assert status_text(error, provider="github").endswith(
+        "Where: actual more than 20, allowed 20 transitions."
+    )
 
 
 def test_symlink_is_invalid() -> None:

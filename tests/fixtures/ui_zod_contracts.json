@@ -1,7 +1,7 @@
 {
   "provenance": {
     "repository": "https://github.com/larchanka-training/dmc-268-ui-t6",
-    "commit": "c581bf660837c3a7d03101c3740f946282a752b1",
+    "commit": "46b2807492a52e100bcfb48052b1e640cbd50beb",
     "generator": "z.toJSONSchema (Zod 4)",
     "command": "DMC_268_UI_DIR=<ui checkout after pnpm install> SCHEMA_NAMES=runSession,runAction,reviewComment,runDetail,findingView,runListPage,runUpdatedEvent,repository,repositoryUpdate,rawFileDiff,fileSlice,authSession,me,bitbucketDiscoveryRequest,bitbucketDiscoveredRepository,bitbucketDiscoveryResponse,bitbucketConnectRequest,bitbucketWebhookSetup,bitbucketConnectResponse,bitbucketConnectionItem,bitbucketConnectionList,bitbucketCredentialRotateRequest,bitbucketCredentialRotateResponse OUTPUT_PATH=tests/fixtures/ui_zod_contracts.json node tests/generate_ui_zod_contracts.mjs"
   },
@@ -1651,7 +1651,7 @@
           "type": "string",
           "minLength": 1,
           "maxLength": 4096,
-          "pattern": "^[\\x21-\\x7E]+(?![\\s\\S])"
+          "pattern": "^[\\x21-\\x7E]+$"
         },
         "cursor": {
           "type": [
@@ -1786,7 +1786,7 @@
           "type": "string",
           "minLength": 1,
           "maxLength": 4096,
-          "pattern": "^[\\x21-\\x7E]+(?![\\s\\S])"
+          "pattern": "^[\\x21-\\x7E]+$"
         }
       },
       "required": [
@@ -1851,11 +1851,13 @@
         },
         "workspaceSlug": {
           "type": "string",
-          "minLength": 1
+          "minLength": 1,
+          "maxLength": 128
         },
         "repositorySlug": {
           "type": "string",
-          "minLength": 1
+          "minLength": 1,
+          "maxLength": 128
         },
         "status": {
           "type": "string",
@@ -1942,11 +1944,13 @@
         },
         "workspaceSlug": {
           "type": "string",
-          "minLength": 1
+          "minLength": 1,
+          "maxLength": 128
         },
         "repositorySlug": {
           "type": "string",
-          "minLength": 1
+          "minLength": 1,
+          "maxLength": 128
         },
         "status": {
           "type": "string",
@@ -2003,11 +2007,13 @@
               },
               "workspaceSlug": {
                 "type": "string",
-                "minLength": 1
+                "minLength": 1,
+                "maxLength": 128
               },
               "repositorySlug": {
                 "type": "string",
-                "minLength": 1
+                "minLength": 1,
+                "maxLength": 128
               },
               "status": {
                 "type": "string",
@@ -2057,7 +2063,7 @@
           "type": "string",
           "minLength": 1,
           "maxLength": 4096,
-          "pattern": "^[\\x21-\\x7E]+(?![\\s\\S])"
+          "pattern": "^[\\x21-\\x7E]+$"
         }
       },
       "required": [

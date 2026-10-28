@@ -11,6 +11,7 @@ import httpx
 import pytest
 from fastapi import Request
 from fastapi.testclient import TestClient
+from pydantic import ValidationError
 
 from app.bootstrap import bitbucket as bitbucket_bootstrap
 from app.bootstrap.bitbucket import get_bitbucket_management, get_bitbucket_workspace_scope
@@ -18,6 +19,11 @@ from app.bootstrap.portal_auth import get_auth_scope
 from app.bootstrap.reviews_api import ReviewsApiResources
 from app.main import app
 from app.modules.auth.application.scope import AuthScope
+from app.modules.integrations.bitbucket.api.connections import (
+    ConnectionItem,
+    ConnectResponse,
+    DiscoveredRepository,
+)
 from app.modules.integrations.bitbucket.application.manage_connection import (
     BitbucketCredentialCodec,
     BitbucketManagementStore,
@@ -38,6 +44,58 @@ from app.modules.integrations.bitbucket.infrastructure.repository_provider impor
 
 WORKSPACE = UUID("00000000-0000-4000-8000-000000000333")
 REPOSITORY = UUID("00000000-0000-4000-8000-000000000334")
+
+
+@pytest.mark.parametrize("response_model", [ConnectResponse, ConnectionItem])
+@pytest.mark.parametrize("field", ["workspace_slug", "repository_slug"])
+def test_connected_repository_response_slugs_stop_at_128_characters(
+    response_model: type[ConnectResponse] | type[ConnectionItem], field: str
+) -> None:
+    values: dict[str, object] = {
+        "id": UUID(int=333),
+        "repository_id": REPOSITORY,
+        "repository_uuid": UUID(int=335),
+        "workspace_slug": "team",
+        "repository_slug": "repo",
+        "status": "active",
+        "credential_generation": 1,
+    }
+    if response_model is ConnectResponse:
+        values["webhook"] = None
+    else:
+        values["webhook_url"] = "https://portal.test/webhooks/bitbucket"
+
+    values[field] = "a" * 128
+    assert getattr(response_model.model_validate(values), field) == "a" * 128
+    values[field] = "a" * 129
+    with pytest.raises(ValidationError):
+        response_model.model_validate(values)
+
+
+def test_connected_slug_bounds_are_in_http_schema_without_bounding_discovery() -> None:
+    response = TestClient(app).get("/openapi.json")
+    assert response.status_code == 200
+    schemas = response.json()["components"]["schemas"]
+    for name in ("ConnectResponse", "ConnectionItem"):
+        for field in ("workspaceSlug", "repositorySlug"):
+            assert (
+                schemas[name]["properties"][field]["minLength"],
+                schemas[name]["properties"][field]["maxLength"],
+            ) == (1, 128)
+    for field in ("workspaceSlug", "slug"):
+        assert "maxLength" not in schemas["DiscoveredRepository"]["properties"][field]
+    for field in ("bitbucketWorkspace", "repositorySlug"):
+        assert schemas["ConnectRequest"]["properties"][field]["maxLength"] == 128
+
+    discovered = DiscoveredRepository(
+        uuid=REPOSITORY,
+        workspace_slug="w" * 129,
+        slug="r" * 129,
+        name="Provider repo",
+        is_private=True,
+        html_url="https://bitbucket.org/team/repo",
+    )
+    assert len(discovered.workspace_slug) == len(discovered.slug) == 129
 
 
 class _MembershipOnlyStore:
