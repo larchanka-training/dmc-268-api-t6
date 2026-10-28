@@ -594,7 +594,7 @@ rename/copy связям; сервис не объявляет поиск про
 
 Автоматические `repo_tree`, `changed_files`, `omitted_files` скрывают имена
 исключённых файлов на обоих путях. Общий счётчик `<excluded_files count>` вместо них
-есть только на snapshot-пути (v4) с собранным контекстом; legacy-путь (≤ v3) и
+есть только на snapshot-пути (v4, v5) с собранным контекстом; legacy-путь (≤ v3) и
 snapshot-путь после перехваченного сбоя сборки счётчика не показывают.
 В UI/диагностике остаются пути,
 совпавшие маски, исходные пути rename/copy и причины. Эти файлы не считаются
@@ -862,7 +862,7 @@ rerun — новый run с новой привязкой версий и рев
 определяется версией `counter_version = "counter/v2"`. Подсчёт разрешается через фабрику
 `token_counter_for(counter_version)`: неизвестная версия счётчика прерывает выполнение
 с ошибкой `policy_snapshot_integrity_error`. Прежняя оценка в 4 символа на токен закреплена
-за версией `"counter/v1"`. Контекстная стадия на snapshot-пути (v4) считает счётчиком,
+за версией `"counter/v1"`. Контекстная стадия на snapshot-пути (v4, v5) считает счётчиком,
 закреплённым в профиле snapshot, как бюджет политики и gateway; legacy-путь (≤ v3) сохраняет
 локальный счётчик в 4 символа на токен. Модели verifier `verifier_model` и
 `fallback_verifier_model` закрепляются из `LLM_VERIFIER_MODEL` и `LLM_VERIFIER_FALLBACK_MODEL`;
@@ -1088,7 +1088,7 @@ nullable `line`, `column`, `pattern_index`, `limit`, `actual`, флаг
 `response.error.diagnostic` ([PIPELINE_SPEC §2](PIPELINE_SPEC.md#2-фазы-внутри-running-и-трейс-run_actions)):
 ошибка загрузки или разбора документов, проверки профиля исполнения и бюджета
 документов политики (`policy_prompt_budget_exceeded` с `limit`/`actual`, на пути
-снимка с закреплённым v4 после #130 F2) — в `policy.load`,
+снимка с закреплённым v4 или v5 после #130 F2) — в `policy.load`,
 ошибка сопоставления масок — в шаге, где сработал сопоставитель (`vcs.fetch_diff`,
 `context.build`). `message` диагностики — без указания места. Run хранит только
 `error_code` и безопасное сообщение с местом в `error_message`; отдельных колонок
@@ -1445,8 +1445,8 @@ verifier insufficient_context остаются за lifecycle #107/#130; их о
 на coverage не объявляется реализованным в #213.
 
 После #130 F1 worker собирает Reflection Pass, а после F2 seed активирует
-`review.system:v4` для новых runs. Snapshot-путь выбирается только по
-закреплённому v4; runs с v3 или ниже, созданные до F2 seed либо с pins до 0039,
+`review.system:v4` (с #350 — v5) для новых runs. Snapshot-путь выбирается
+только по закреплённому v4 или v5; runs с v3 или ниже, созданные до F2 seed либо с pins до 0039,
 сохраняют legacy-путь без verifier. Адаптер ревью
 выполняет fit/guard/manifest один раз: snapshot-ответ `ReviewReply` несёт
 фактический fitted context и manifest принятого вызова, legacy — mapping.
