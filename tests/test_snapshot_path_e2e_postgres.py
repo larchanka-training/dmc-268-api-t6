@@ -267,10 +267,16 @@ class ModelHttp:
         elif kind == "review-v1":
             answer = {"findings": [_FINDING], "summary": _SUMMARY}
         else:
-            assert kind in ("verifier", "verifier-unshown", "verifier-rule")
+            assert kind in (
+                "verifier",
+                "verifier-contradicted",
+                "verifier-unshown",
+                "verifier-rule",
+            )
             # The verifier prompt, also under the repair turn of a repair call.
             prompt = body["messages"][1]["content"]
             ids = re.findall(r'candidate_id="([^"]+)"', prompt)
+            status = "contradicted" if kind == "verifier-contradicted" else "supported"
             evidence = _EVIDENCE
             requirements: list[dict[str, Any]] = []
             if kind == "verifier-unshown":
@@ -296,7 +302,7 @@ class ModelHttp:
                 "decisions": [
                     {
                         "candidate_id": candidate,
-                        "status": "supported",
+                        "status": status,
                         "reason": "The cited added line is never read.",
                         "evidence_refs": evidence,
                         "requirement_refs": requirements,
@@ -1037,10 +1043,10 @@ _NO_FALLBACK = LlmSettings(primary=PRIMARY, fallback=None)
     [
         # A range past the shown hunk (RIGHT 9-13) of the diff block.
         ("review-v2", "verifier-unshown", "verifier", ":22-24 is not shown in verifier manifest"),
-        # RULES_FORMAT_SPEC §8.2: a supported rule finding with no requirement of its rule.
+        # RULES_FORMAT_SPEC §8.2: a contradicted rule finding with no requirement of its rule.
         (
             "review-v2-rule",
-            "verifier",
+            "verifier-contradicted",
             "verifier-rule",
             "for candidate with rule_name '.review/rules.md' requires at least one matching "
             "requirement_ref for this rule",
