@@ -1010,7 +1010,8 @@ API, хранения, hash/dedup и eval. Старые v1 findings не пол�
 | 4. Политика/дубли | Допущенные candidates, IgnorePolicy, закреплённый lint-filter и dedup keys | Defense guard разрешённых источников для evidence/general, чистый lint, точная дедупликация; порог severity здесь не применяется | Сохранённый набор; drop `lint_pattern`, `duplicate`; guard: изолируемый запрещённый evidence/general → `evidence_source_disallowed`/partial, неизолируемый источник либо нарушенная целостность → failed/`snapshot_integrity_error`; не переименовывает evidence-причины прохода 3 и не заменяет anchor-ignore прохода 2; pre-send guard не является проходом по ответу |
 | 5. Verifier | Замороженные candidates после прохода 4, policy/defaults, код и отдельный manifest | Обязательный смысловой batch по §7 | `supported` идёт дальше; `contradicted`, `insufficient_context` сохраняются без публикации; ошибки всего вызова — §8.4 |
 | 6. Порог и размещение | Только supported, закреплённый `severity_threshold`, `max_comments` | Порог после verifier (§7), затем сортировка и закреплённый inline cap | Drop `severity_threshold` с отдельным счётчиком; остальные — final findings с disposition inline/general; сверх cap — general, не drop |
-| 7. Публикация | FinalReviewResult и immutable publication plan, текущая идентичность VCS | Допустимый адаптер, свежесть head/diff | Публикация или явный отказ по §9–10: `superseded`, `pr_closed`, `publication_payload_too_large`, provider-specific ошибки, `publication_outcome_unknown`; без угадывания координат |
+| 6b. Межпрогонный дедуп | Final findings прохода 6, реестр опубликованных комментариев PR (`comments` с `github_comment_id`) | Межпрогонная дедупликация до заморозки плана публикации (Cross-Run Dedup по [`INCREMENTAL_REVIEW_AND_LIMITS_SPEC.md`](INCREMENTAL_REVIEW_AND_LIMITS_SPEC.md)); подавленные дубли не сжигают inline cap | Повторные находки сохраняют `drop_reason IS NULL`, в полном объёме учитываются в severity counts, вердикте и check-run, связываются с существующим `Comment` (`linked_comment_id`) и помечаются `publication_action = 'suppressed_duplicate'`; из массива `inline` исключаются до заморозки плана и вычисления findings hash; новые получают `publication_action = 'publish_inline'` |
+| 7. Публикация | FinalReviewResult и immutable publication plan (сформированный после прохода 6b), текущая идентичность VCS | Проверка допустимого адаптера, свежести head/diff; отправка одного review batch на VCS; чистка тредов в состоянии `publishing` перед T14 | Новые inline-находки публикуются одним batch; чистка устаревших/решённых тредов мутацией `resolveReviewThread` по квоте до 30; явный отказ публикации всего batch по §9–10: `superseded`, `pr_closed`, `publication_payload_too_large`, provider-specific ошибки, `publication_outcome_unknown`; без угадывания координат |
 
 `lint_pattern` и `duplicate` сохраняют действующие имена legacy-кодов;
 переименование/миграция причин не вводится. `ignored_file` для якоря выдаёт проход 2
@@ -1062,6 +1063,16 @@ RIGHT того же файла/ревизии, не имеющем inline-яко
 смысл/код. Семантическое объединение моделью и перенос suggestion запрещены.
 Текущий lint-filter версионируется и закрепляется; исключение чистого форматирования
 не должно скрывать correctness/security проблему с похожими словами.
+Межпрогонная дедупликация (Cross-Run Dedup, проход 6b) между разными Run одного PR выполняется по
+спецификации [`INCREMENTAL_REVIEW_AND_LIMITS_SPEC.md`](INCREMENTAL_REVIEW_AND_LIMITS_SPEC.md) (Ч.1):
+в отличие от внутрипрогонной проверки, ключ `FindingFingerprint` не зависит от абсолютных
+номеров строк и использует `anchor_code_hash`, а сопоставление строится по квитанциям
+опубликованных комментариев (`comments` с `github_comment_id`). Проход выполняется строго до
+заморозки плана публикации и вычисления `findings_hash`. Подавление повторов является фильтром плана
+публикации, а не причиной отсева (drop reason): совпавшие находки сохраняют `drop_reason IS NULL`,
+в полном объёме учитываются в severity counts, вердикте PR и статусе Check Run, связываются с ранее
+опубликованным комментарием (`linked_comment_id`), не сжигают слоты `inline_cap` и исключаются из массива
+inline-комментариев отправляемого review batch без создания повторного комментария на VCS.
 
 Для каждого кандидата backend создаёт UUID `candidate_id`, хранит исходный digest,
 accepted_call_id и все решения фильтров. ID не вычисляется только по координате.
@@ -2031,6 +2042,19 @@ comments/discussions обязательна; ошибка чтения или л
    привязана к исходному head, её IDs сохраняются, а run отмечается cancelled,
    если устарел или отменён. Новый head не объявляется проверенным. Автоматическое
    удаление опубликованного комментария для сокрытия гонки не выполняется.
+5. Разрешение устаревших и исправленных замечаний (VCS Write-back). В соответствии
+   со спецификацией [`INCREMENTAL_REVIEW_AND_LIMITS_SPEC.md`](INCREMENTAL_REVIEW_AND_LIMITS_SPEC.md)
+   (Ч.1), после подтверждения успешности публикации основного review batch на GitHub
+   выполняется фаза разрешения тредов (VCS Thread Clean-up) внутри состояния `publishing` перед
+   финальным переходом T14 в `succeeded`. Набор состояний Run (Р-14 / D5) не изменяется. Замечания,
+   дефекты которых были устранены автором в новой ревизии (при подтверждённом полном анализе участка)
+   или файлы которых были удалены, переводятся в статус `RESOLVED_BY_BOT` с вызовом GraphQL-мутации
+   `resolveReviewThread`. Эта операция изменяет состояние жизненного цикла треда (`isResolved`),
+   не изменяя исходный текст комментария (`body`), payload digest и delivery receipts, сохраняя гарантии
+   неизменяемости публикации. Вызовы GraphQL выполняются строго вне транзакций БД под тем же
+   publishing lease с проверкой origin checkpoint; мутации квотируются (до 30 на run) с соблюдением
+   вторичных лимитов GitHub (интервал ≥ 1.2 с); остаток свыше 30 переходит на обработку в последующие Run.
+   При ошибках GraphQL или нехватке прав треды остаются открытыми, Run не прерывается и сохраняет статус `succeeded`.
 
 Lease/уникальный ключ предотвращают обычную конкуренцию workers, но не дают
 атомарности с HTTP. После истечения lease с незавершённым запросом новый worker
