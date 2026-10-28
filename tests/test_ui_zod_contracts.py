@@ -23,11 +23,13 @@ from tests.portal_test_client import authenticated_test_client as TestClient
 CONTRACTS_PATH = Path(__file__).parent / "fixtures" / "ui_zod_contracts.json"
 RUN_STEP_CONTRACTS_PATH = Path(__file__).parent / "fixtures" / "ui_run_step_zod_contracts.json"
 RUN_ID = UUID("11111111-1111-4111-8111-111111111111")
-# The base snapshot stays pinned until a single UI commit contains all shared contracts.
-UI_CONTRACT_COMMIT = "9bfb931d88fe66b15d77e636b32406374c76589a"
-# The base snapshot includes repository contracts from UI #102 that are not on UI main yet.
-# Keep that coverage; generate only the new event from ui#155
-# (RunStepEvent attempt + llmOperation, merged as 0c36c497).
+# Base snapshot from the ui commit that requires usage, triggeredBy, and MetricsSummary.
+# runStepEvent is not in this file; the two snapshots must stay disjoint.
+UI_CONTRACT_COMMIT = "00580e9067845aed0ed68f45beacb20c132f59c8"
+# SCHEMA_NAMES excludes runStepEvent. See tests/generate_ui_zod_contracts.mjs.
+# OUTPUT_PATH=tests/fixtures/ui_zod_contracts.json
+# DMC_268_UI_DIR=<ui checkout after pnpm install> node tests/generate_ui_zod_contracts.mjs
+# RunStepEvent (attempt + llmOperation) stays on ui#155, merged as 0c36c497.
 # SCHEMA_NAMES=runStepEvent OUTPUT_PATH=tests/fixtures/ui_run_step_zod_contracts.json \
 # DMC_268_UI_DIR=<ui checkout after pnpm install> node tests/generate_ui_zod_contracts.mjs
 UI_RUN_STEP_CONTRACT_COMMIT = "0c36c4976b9fae07e7b465f28dc0d196f5d61bdb"
