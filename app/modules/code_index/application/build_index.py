@@ -76,6 +76,7 @@ from app.modules.code_index.application.vcs import (
     IndexLimitExceeded,
     RepositorySnapshotSource,
     SourceArchive,
+    SparseRepositorySnapshotSource,
     VcsAccessDenied,
     VcsUnavailable,
 )
@@ -315,6 +316,8 @@ def _admit(
     entries: Mapping[str, ArchiveEntry],
     paths: Sequence[str],
     deadline: float,
+    *,
+    count: bool = True,
 ) -> tuple[list[str], list[str]]:
     """The admitted files among `paths`, counting the excluded ones, and every Go file and
     package `__init__.py` of the archive that a resolved import may read."""
@@ -322,7 +325,12 @@ def _admit(
     for path in paths:
         _check_deadline(deadline)
         entry = entries[path]
-        if exclusions.admit_entry(path, symlink=entry.symlink, size=entry.size) is None:
+        excluded = (
+            exclusions.admit_entry(path, symlink=entry.symlink, size=entry.size)
+            if count
+            else exclusions.entry_class(path, symlink=entry.symlink, size=entry.size)
+        )
+        if excluded is None:
             admitted.append(path)
     languages = {language_for_path(path) for path in admitted}
     targets = []
@@ -705,14 +713,29 @@ class _Job:
         comparison = await self._comparison(state, head)
         document = await self._network(lambda: self._source.rules_document(head.commit_sha))
         policy = parse_review_ignore(document.text)
-        archive = await self._network(
-            lambda: self._source.archive(head.commit_sha, max_bytes=self._limits.download_bytes)
-        )
-        self._provider_skips = archive.provider_skips
-        self._downloaded = len(archive.content)
-        scan = await self._archives.scan(archive, documents=_DOCUMENTS, deadline=self._deadline)
         exclusions = IndexExclusions(IgnoreMatcher(policy), self._limits)
         self._exclusions = exclusions
+        sparse = None
+        plan: _Plan | None = None
+        if (
+            comparison is not None
+            and state.profile is not None
+            and state.profile.exclusions_digest == policy.digest
+            and isinstance(self._source, SparseRepositorySnapshotSource)
+        ):
+            sparse = await self._sparse_inputs(
+                self._source, state, comparison, head.commit_sha, exclusions
+            )
+        if sparse is None:
+            archive = await self._network(
+                lambda: self._source.archive(head.commit_sha, max_bytes=self._limits.download_bytes)
+            )
+        else:
+            archive, scan, plan = sparse
+        self._provider_skips = archive.provider_skips
+        self._downloaded = len(archive.content)
+        if sparse is None:
+            scan = await self._archives.scan(archive, documents=_DOCUMENTS, deadline=self._deadline)
         if (
             comparison is not None
             and profile is not None
@@ -720,14 +743,19 @@ class _Job:
         ):
             self._full(FullBuildReason.EXCLUSIONS_CHANGED)
             comparison = None
-        go_module = _go_module(scan, self._limits)
-        plan = None
-        if comparison is not None:
-            plan = await self._incremental(state, comparison, scan, go_module)
-        if plan is None:
-            plan = _Plan(True, tuple(sorted(scan.entries)), frozenset(), IndexCounts(0, 0, 0))
+        if sparse is None:
+            go_module = _go_module(scan, self._limits)
+            plan = None
+            if comparison is not None:
+                plan = await self._incremental(state, comparison, scan, go_module)
+            if plan is None:
+                plan = _Plan(True, tuple(sorted(scan.entries)), frozenset(), IndexCounts(0, 0, 0))
+            else:
+                self._mode = BuildMode.INCREMENTAL
         else:
+            go_module = _go_module(scan, self._limits)
             self._mode = BuildMode.INCREMENTAL
+        assert plan is not None
         written = await self._index(archive, scan, exclusions, go_module, plan)
         deleted = tuple(sorted(plan.closes - written))
         self._written, self._deleted = len(written), len(deleted)
@@ -750,6 +778,95 @@ class _Job:
             return self._outcome(BuildStatus.REWAKE)
         await self._wake_if_the_target_moved()
         return self._outcome(BuildStatus.PUBLISHED)
+
+    async def _sparse_inputs(
+        self,
+        source: SparseRepositorySnapshotSource,
+        state: IndexState,
+        comparison: Comparison,
+        commit_sha: str,
+        exclusions: IndexExclusions,
+    ) -> tuple[SourceArchive, ArchiveScan, _Plan] | None:
+        """Build an incremental archive from a complete pinned manifest and changed blobs.
+
+        A complete diffstat proves unchanged files retain their blobs. The stored blob
+        IDs supply those unchanged paths to the resolver; selected paths are fetched
+        and hashed by the ordinary archive reader before any index row is written.
+        """
+        manifest = await self._network(lambda: source.manifest(commit_sha))
+        stored = await self._stored_files()
+        compared: set[str] = set()
+        delta: set[str] = set()
+        for item in comparison.files:
+            compared.add(item.path)
+            if item.previous_path:
+                compared.add(item.previous_path)
+                delta.add(item.previous_path)
+            if item.status not in _SAME_PATH:
+                delta.add(item.path)
+        changed = compared | (stored.keys() - manifest.keys())
+        for path in changed:
+            entry = manifest.get(path)
+            if entry is None or entry.symlink or path not in stored:
+                delta.add(path)
+        limit = self._limits.incremental_files
+        if len(changed) > limit:
+            self._full(FullBuildReason.TOO_MANY_CHANGES)
+            return None
+        module_paths = frozenset({"go.mod"} & manifest.keys())
+        module_archive = await self._network(
+            lambda: source.archive_paths(
+                commit_sha, module_paths, max_bytes=self._limits.download_bytes
+            )
+        )
+        module_scan = await self._archives.scan(
+            module_archive, documents=_DOCUMENTS, deadline=self._deadline
+        )
+        go_module = _go_module(module_scan, self._limits)
+        records = await self._stored_imports()
+        affected = await asyncio.to_thread(
+            affected_importers,
+            records,
+            delta=delta,
+            changed=changed,
+            go_module=go_module,
+            limit=limit,
+        )
+        if affected is None:
+            self._full(FullBuildReason.TOO_MANY_CHANGES)
+            return None
+        targets = changed | affected
+        closes = frozenset(targets & stored.keys())
+        async with self._uow() as uow:
+            closing = await uow.index.visible_counts(self._id, sorted(closes))
+        kept = IndexCounts(
+            state.file_count - closing.file_count,
+            state.symbol_count - closing.symbol_count,
+            state.edge_count - closing.edge_count,
+        )
+        plan = _Plan(False, tuple(sorted(targets & manifest.keys())), closes, kept)
+        provisional = {
+            path: replace(entry, blob_sha=stored.get(path)) for path, entry in manifest.items()
+        }
+        admitted, target_facts = await asyncio.to_thread(
+            _admit, exclusions, provisional, plan.paths, self._deadline, count=False
+        )
+        selected = frozenset(admitted) | frozenset(target_facts) | module_paths
+        archive = await self._network(
+            lambda: source.archive_paths(
+                commit_sha, selected, max_bytes=self._limits.download_bytes
+            )
+        )
+        sparse_scan = await self._archives.scan(
+            archive, documents=_DOCUMENTS, deadline=self._deadline
+        )
+        # Redirected selected blobs are omitted, just as in a full archive.
+        for path in selected:
+            provisional.pop(path, None)
+        provisional.update(sparse_scan.entries)
+        scan = replace(sparse_scan, entries=provisional)
+        plan = replace(plan, paths=tuple(path for path in plan.paths if path in provisional))
+        return archive, scan, plan
 
     async def _network[T](self, call: Callable[[], Awaitable[T]]) -> T:
         remaining = self._deadline - time.monotonic()

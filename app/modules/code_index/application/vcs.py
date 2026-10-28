@@ -13,7 +13,7 @@ from collections.abc import AsyncIterator, Mapping, Set
 from dataclasses import dataclass, field
 from datetime import timedelta
 from enum import StrEnum
-from typing import Protocol
+from typing import Protocol, runtime_checkable
 
 from app.modules.code_index.domain.codes import FAILED_ERROR_CODES
 from app.modules.reviews.application.policy_errors import PolicyErrorCode
@@ -217,6 +217,17 @@ class RepositorySnapshotSource(Protocol):
         """The archive of `commit_sha`; more than `max_bytes` downloaded raises
         `IndexLimitExceeded("download_bytes")`."""
         ...
+
+
+@runtime_checkable
+class SparseRepositorySnapshotSource(RepositorySnapshotSource, Protocol):
+    """Optional pinned tree and selected-content port for complete incremental diffs."""
+
+    async def manifest(self, commit_sha: str) -> Mapping[str, ArchiveEntry]: ...
+
+    async def archive_paths(
+        self, commit_sha: str, paths: Set[str], *, max_bytes: int
+    ) -> SourceArchive: ...
 
 
 class ArchiveReader(Protocol):

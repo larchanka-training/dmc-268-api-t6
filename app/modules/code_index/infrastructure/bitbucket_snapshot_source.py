@@ -13,7 +13,7 @@ import io
 import json
 import re
 import tarfile
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Set
 from dataclasses import dataclass
 from datetime import timedelta
 from hashlib import sha256
@@ -23,6 +23,7 @@ import httpx
 
 from app.modules.code_index.application.vcs import (
     Ancestry,
+    ArchiveEntry,
     BranchHead,
     ChangedPath,
     ChangeStatus,
@@ -50,7 +51,7 @@ _ORIGIN = "https://api.bitbucket.org"
 _SHA = re.compile(r"[0-9a-f]{40}\Z")
 _PAGE_SIZE = 100
 _MAX_PAGES_PER_DIRECTORY = 5
-_MAX_DIRECTORIES = 32
+_MAX_DIRECTORIES = 160
 _MAX_DEPTH = 16
 _MAX_ENTRIES = 160
 _MAX_REQUESTS = 160
@@ -180,6 +181,8 @@ class BitbucketRepositorySnapshotSource:
         self._listed_entries = 0
         self._tree_cache: dict[str, dict[str, _Entry]] = {}
         self._directory_cache: dict[tuple[str, str], tuple[_Entry, ...]] = {}
+        self._file_cache: dict[tuple[str, str], bytes | _FileRedirect] = {}
+        self._redirect_skips: set[tuple[str, str]] = set()
         self._skipped_entries: dict[str, int] = {}
 
     @property
@@ -225,7 +228,7 @@ class BitbucketRepositorySnapshotSource:
             raise VcsAccessDenied("Bitbucket repository credential changed") from None
         endpoint = f"/2.0/repositories/%7B%7D/%7B{target.repository_uuid}%7D/{suffix}"
         if self._requests >= _MAX_REQUESTS:
-            raise IndexLimitExceeded("archive_entries")
+            raise IndexLimitExceeded("provider_requests")
         try:
             self._requests += 1
             async with self._client.stream(
@@ -343,15 +346,20 @@ class BitbucketRepositorySnapshotSource:
                     raise VcsUnavailable("Bitbucket returned an invalid diffstat")
                 old = item.get("old")
                 new = item.get("new")
-                if status == "removed":
-                    path = _path(old.get("path") if isinstance(old, dict) else None)
-                else:
-                    path = _path(new.get("path") if isinstance(new, dict) else None)
-                previous = (
-                    _path(old.get("path") if isinstance(old, dict) else None)
-                    if status in {"renamed", "copied"}
-                    else None
-                )
+                try:
+                    if status == "removed":
+                        path = _path(old.get("path") if isinstance(old, dict) else None)
+                    else:
+                        path = _path(new.get("path") if isinstance(new, dict) else None)
+                    previous = (
+                        _path(old.get("path") if isinstance(old, dict) else None)
+                        if status in {"renamed", "copied"}
+                        else None
+                    )
+                except VcsUnavailable:
+                    # A provider path that cannot be represented safely is not an
+                    # incremental change set. A complete full walk can skip it.
+                    return Comparison(Ancestry.AHEAD, (), False)
                 files.append(ChangedPath(path, ChangeStatus(status), previous))
                 if len(files) > self._limits.incremental_files:
                     return Comparison(Ancestry.AHEAD, (), False)
@@ -494,14 +502,24 @@ class BitbucketRepositorySnapshotSource:
     async def _file(
         self, commit_sha: str, path: str, *, max_bytes: int, skip_redirect: bool = False
     ) -> bytes | _FileRedirect:
+        key = (commit_sha, path)
+        if key in self._file_cache:
+            await self._bound()
+            cached = self._file_cache[key]
+            if isinstance(cached, bytes) and len(cached) > max_bytes:
+                raise IndexLimitExceeded("download_bytes")
+            return cached
+        body: bytes | _FileRedirect
         try:
-            return await self._read(
+            body = await self._read(
                 f"src/{commit_sha}/{quote(_path(path), safe='/')}",
                 max_bytes=max_bytes,
                 skip_file_redirect=skip_redirect,
             )
         except _FileRedirect as error:
-            return error
+            body = error
+        self._file_cache[key] = body
+        return body
 
     async def rules_document(self, commit_sha: str) -> PolicyDocument:
         sha = _sha(commit_sha)
@@ -594,19 +612,46 @@ class BitbucketRepositorySnapshotSource:
             raise ValueError("Invalid Bitbucket archive limit")
         max_bytes = min(max_bytes, _MAX_TOTAL_SOURCE_BYTES, self._limits.download_bytes)
         entries = await self._tree(sha)
+        selected = {
+            entry.path
+            for entry in entries.values()
+            if not entry.directory
+            and entry.size is not None
+            and entry.size <= self._limits.read_bytes
+        }
+        return await self.archive_paths(sha, selected, max_bytes=max_bytes)
+
+    async def manifest(self, commit_sha: str) -> dict[str, ArchiveEntry]:
+        """Complete pinned path set for a sparse incremental index build."""
+        sha = _sha(commit_sha)
+        entries = await self._tree(sha)
+        return {
+            entry.path: ArchiveEntry(entry.path, entry.size or 0, symlink=entry.symlink)
+            for entry in entries.values()
+            if not entry.directory
+        }
+
+    async def archive_paths(
+        self, commit_sha: str, paths: Set[str], *, max_bytes: int
+    ) -> SourceArchive:
+        """Fetch only selected files after a complete pinned tree listing."""
+        sha = _sha(commit_sha)
+        if max_bytes <= 0:
+            raise ValueError("Invalid Bitbucket archive limit")
+        max_bytes = min(max_bytes, _MAX_TOTAL_SOURCE_BYTES, self._limits.download_bytes)
+        entries = await self._tree(sha)
+        if any(path not in entries or entries[path].directory for path in paths):
+            raise VcsUnavailable("Bitbucket sparse archive path is absent from the pinned tree")
         eligible = [
             entry
-            for entry in sorted(entries.values(), key=lambda item: item.path)
-            if (
-                not entry.directory
-                and entry.size is not None
-                and entry.size <= self._limits.read_bytes
-            )
+            for entry in sorted((entries[path] for path in paths), key=lambda item: item.path)
+            if entry.size is not None and entry.size <= self._limits.read_bytes
         ]
         if sum(entry.size or 0 for entry in eligible) > max_bytes:
             raise IndexLimitExceeded("download_bytes")
-        if self._requests + len(eligible) > _MAX_REQUESTS:
-            raise IndexLimitExceeded("archive_entries")
+        uncached = sum((sha, entry.path) not in self._file_cache for entry in eligible)
+        if self._requests + uncached > _MAX_REQUESTS:
+            raise IndexLimitExceeded("provider_requests")
         contents: list[tuple[_Entry, bytes]] = []
         total = 0
         for entry in eligible:
@@ -619,7 +664,10 @@ class BitbucketRepositorySnapshotSource:
                 sha, entry.path, max_bytes=max(1, remaining), skip_redirect=True
             )
             if isinstance(body, _FileRedirect):
-                self._skip("redirect")
+                key = (sha, entry.path)
+                if key not in self._redirect_skips:
+                    self._redirect_skips.add(key)
+                    self._skip("redirect")
                 continue
             if len(body) != entry.size:
                 raise VcsUnavailable("Bitbucket source file size differs from the pinned listing")
