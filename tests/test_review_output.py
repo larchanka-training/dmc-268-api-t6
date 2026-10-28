@@ -1079,7 +1079,7 @@ def test_store_review_output_marks_degraded_body_in_postprocess_response(
     long_backend_summary = ReviewOutput.model_validate(payload).summary
     monkeypatch.setattr(
         "app.modules.reviews.application.findings_post_processor.summary_from_result",
-        lambda *_: long_backend_summary,
+        lambda *_args, **_kwargs: long_backend_summary,
     )
     store = StoreReviewOutput(
         cast(Any, lambda: FakeUoW()),

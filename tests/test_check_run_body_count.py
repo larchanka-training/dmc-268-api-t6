@@ -11,13 +11,16 @@ from app.common.infrastructure.db.enums import FindingSeverity, RunState
 from app.modules.reviews.infrastructure.run_lifecycle_store import SqlAlchemyRunLifecycleStore
 
 
-def _check_run_scalar(statement: object) -> bool | int:
+def _check_run_scalar(statement: object) -> bool | int | None:
     """Answer ``check_run_report`` scalars by the query, not by call order."""
     text = str(statement)
     if "summary_only" in text or "bool_or" in text:
         return False
     if "count" in text:
         return 0
+    # No summary-only context.build row: the check-run keeps the size line.
+    if "context_payloads.summary" in text:
+        return None
     raise AssertionError(text)
 
 

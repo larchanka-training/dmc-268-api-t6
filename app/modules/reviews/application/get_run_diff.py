@@ -126,22 +126,27 @@ class StoreDiffSnapshot:
         )
 
 
+def stored_review_patch(patch: str | None, omission_reason: str | None) -> str | None:
+    """Model patch of a stored UI patch. A git header contributes only its hunk."""
+    if patch is None or omission_reason is not None:
+        return None
+    if patch.startswith("diff --git "):
+        hunk_start = patch.find("\n@@ ")
+        if hunk_start < 0:
+            return None
+        return patch[hunk_start + 1 :]
+    return patch
+
+
 def _normalize_snapshot(snapshot: DiffSnapshot) -> DiffSnapshot:
     if snapshot.patch is None:
         return snapshot
+    review_patch = stored_review_patch(snapshot.patch, snapshot.omission_reason)
     if snapshot.patch.startswith("diff --git "):
-        hunk_start = snapshot.patch.find("\n@@ ")
-        return replace(
-            snapshot,
-            review_patch=(
-                snapshot.patch[hunk_start + 1 :]
-                if hunk_start >= 0 and snapshot.omission_reason is None
-                else None
-            ),
-        )
+        return replace(snapshot, review_patch=review_patch)
     return replace(
         snapshot,
-        review_patch=snapshot.patch if snapshot.omission_reason is None else None,
+        review_patch=review_patch,
         patch=(
             f"diff --git a/{snapshot.filename} b/{snapshot.filename}\n"
             f"--- a/{snapshot.filename}\n"

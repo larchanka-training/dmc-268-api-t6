@@ -7,7 +7,7 @@ from uuid import UUID
 
 import pytest
 
-from app.modules.reviews.application.diff_map import VcsProviderName, build_diff_map
+from app.modules.reviews.application.diff_map import DiffMap, VcsProviderName, build_diff_map
 from app.modules.reviews.application.get_run_diff import DiffSnapshot
 from app.modules.reviews.application.prompt_builder import PullRequestMeta
 from app.modules.reviews.application.review_ignore import (
@@ -18,6 +18,7 @@ from app.modules.reviews.application.review_ignore import (
 from app.modules.reviews.application.run_coverage import (
     RunCoverage,
     project_run_coverage,
+    restore_context_coverage,
     snapshot_vcs_file,
 )
 from app.modules.reviews.application.vcs_diff import PullRequestLocator, VcsPullRequest
@@ -36,9 +37,9 @@ def empty_snapshot() -> DiffSnapshot:
     return DiffSnapshot("pkg/__init__.py", None, _EMPTY, "added", omission_reason="empty_file")
 
 
-def coverage(
+def coverage_inputs(
     files: list[DiffSnapshot], *, expected: int | None = None, rules: str = ""
-) -> RunCoverage:
+) -> tuple[RunCoverage, DiffMap]:
     pr = VcsPullRequest(
         PullRequestLocator(17, "octo/repo", 7),
         "a" * 40,
@@ -65,7 +66,14 @@ def coverage(
         diff_old_sha="c" * 40,
     )
     ignore = apply_ignore(IgnoreMatcher(parse_review_ignore(rules)), diff)
-    return project_run_coverage(files, diff, ignore=ignore)
+    return project_run_coverage(files, diff, ignore=ignore), diff
+
+
+def coverage(
+    files: list[DiffSnapshot], *, expected: int | None = None, rules: str = ""
+) -> RunCoverage:
+    result, _ = coverage_inputs(files, expected=expected, rules=rules)
+    return result
 
 
 def test_reviewed_code_with_proven_empty_addition_has_complete_coverage() -> None:
@@ -196,6 +204,40 @@ def test_compact_coverage_bounds_paths_but_retains_exact_counts() -> None:
     assert len(result["reasons"]) == 20
     assert result["reason_counts"] == {"missing_patch": 25}
     assert result["total_files"] == 26
+
+
+def test_flagged_rows_restore_coverage_recorded_before_the_summary_only_mark() -> None:
+    raw = code_snapshot()
+    stored = replace(
+        raw,
+        review_patch=raw.patch,
+        patch=(
+            f"diff --git a/{raw.filename} b/{raw.filename}\n"
+            f"--- a/{raw.filename}\n"
+            f"+++ b/{raw.filename}\n"
+            f"{raw.patch}"
+        ),
+    )
+    files = [stored, empty_snapshot()]
+    saved, diff = coverage_inputs(files, expected=3)
+    flagged = [replace(item, summary_only=True, review_patch=None) for item in files]
+
+    restored = restore_context_coverage(
+        {"head_sha": "a" * 40},
+        {
+            "status": "summary_only",
+            "reason": "diff_inventory_incomplete",
+            "coverage": saved.to_json(),
+            "diff": {"digest": diff.digest, "diff_old_sha": "c" * 40},
+        },
+        snapshots=flagged,
+        diff_map=diff,
+    )
+
+    assert restored is not None
+    assert restored.reason_counts == {"diff_inventory_incomplete": 1}
+    assert restored.reviewed_files == 1
+    assert restored.exclusion_counts == {"empty_file": 1}
 
 
 def test_durable_classification_digest_changes_without_altering_raw_diff_identity() -> None:

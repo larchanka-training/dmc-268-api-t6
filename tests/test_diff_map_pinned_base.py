@@ -16,6 +16,7 @@ from app.modules.reviews.application.post_processing_diff_map import diff_map_fr
 from app.modules.reviews.application.review_context import (
     BuildReviewContext,
     ReviewContextPayload,
+    SummaryOnlyReview,
 )
 from app.modules.reviews.application.review_context_stage import (
     EstimatedTokenCounter,
@@ -82,11 +83,20 @@ class CapturingBuild(BuildReviewContext):
         return await super().execute(diff_map=diff_map, **kwargs)
 
 
-def _run(vcs: Vcs) -> tuple[Trace, DiffMap]:
+def _run(vcs: Vcs) -> tuple[Trace, DiffMap | None]:
+    """The stage's diff map, or None when an incomplete list stops before the builder.
+
+    #313 records ``context.build`` and raises ``SummaryOnlyReview`` before RAG and the
+    context build. A complete list still hands the map to the builder.
+    """
     trace = Trace()
     diff_maps: list[DiffMap] = []
     stage = _stage(trace, vcs=vcs, context_builder=lambda run: CapturingBuild(diff_maps))
-    assert asyncio.run(stage.run(_RUN)) is not None
+    try:
+        assert asyncio.run(stage.run(_RUN)) is not None
+    except SummaryOnlyReview:
+        assert diff_maps == []
+        return trace, None
     (diff_map,) = diff_maps
     return trace, diff_map
 
@@ -122,15 +132,23 @@ def test_a_retargeted_pr_is_mapped_on_the_pinned_run_base(
     with caplog.at_level(logging.WARNING, logger=_STAGE_LOGGER):
         trace, diff_map = _run(vcs)
 
-    assert diff_map.policy_base_sha == "b" * 40
     assert vcs.merge_base_requests == ["b" * 40]
-    assert diff_map.diff_old_sha == "c" * 40
-    # The provider counter stays live: the pinned-base list is compared with it.
-    assert diff_map.file_list_complete is complete
-    assert diff_map.incomplete_reasons == reasons
     (context,) = _contexts(trace)
-    assert context["diff"]["pr_base_sha"] == "e" * 40
+    assert context["diff"]["diff_old_sha"] == "c" * 40
+    # The provider counter stays live: the pinned-base list is compared with it.
     assert context["diff"]["file_list_complete"] is complete
+    assert context["diff"]["pr_base_sha"] == "e" * 40
+    if complete:
+        assert diff_map is not None
+        assert diff_map.policy_base_sha == "b" * 40
+        assert diff_map.diff_old_sha == "c" * 40
+        assert diff_map.file_list_complete is True
+        assert diff_map.incomplete_reasons == reasons
+    else:
+        # An incomplete list is summary-only before the builder (#313).
+        assert diff_map is None
+        assert context["status"] == "summary_only"
+        assert context["reason"] == "diff_inventory_incomplete"
     assert _stage_warnings(caplog) == [
         "Pull request base differs from the pinned run base "
         f"run_id={_RUN} pinned_base_sha={'b' * 40} pr_base_sha={'e' * 40}"
@@ -142,13 +160,21 @@ def test_the_live_base_stays_out_of_the_diff_map_and_its_digest(
     files_changed: int, complete: bool, reasons: tuple[str, ...]
 ) -> None:
     trace, retargeted = _run(Retargeted(files_changed=files_changed))
-    _, control = _run(Vcs(files_changed=files_changed))
+    control_trace, control = _run(Vcs(files_changed=files_changed))
 
-    # The map of a retargeted PR is the map of a PR that kept the pinned base.
-    assert retargeted == control
-    assert retargeted.digest == control.digest
+    # The live base is recorded beside the map. It is not part of the digest.
     (context,) = _contexts(trace)
-    assert context["diff"]["digest"] == control.digest
+    (control_context,) = _contexts(control_trace)
+    assert context["diff"]["pr_base_sha"] == "e" * 40
+    assert "pr_base_sha" not in control_context["diff"]
+    assert context["diff"]["digest"] == control_context["diff"]["digest"]
+    if complete:
+        assert retargeted == control
+        assert retargeted is not None
+        assert retargeted.digest == control_context["diff"]["digest"]
+    else:
+        assert retargeted is None and control is None
+        assert context["reason"] == "diff_inventory_incomplete"
 
 
 @_COUNTS
@@ -183,6 +209,7 @@ def test_a_pr_on_its_pinned_base_records_no_live_base(caplog: pytest.LogCaptureF
     with caplog.at_level(logging.WARNING, logger=_STAGE_LOGGER):
         trace, diff_map = _run(Vcs())
 
+    assert diff_map is not None
     assert diff_map.policy_base_sha == "b" * 40
     (context,) = _contexts(trace)
     assert "pr_base_sha" not in context["diff"]
