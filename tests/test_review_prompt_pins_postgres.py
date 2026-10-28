@@ -251,35 +251,53 @@ def _assets(*keys: str) -> tuple[PromptAsset, ...]:
     )
 
 
-# The packaged review.system v4 (F2), as the seed stores it.
-_V4 = next(
-    asset
-    for asset in load_prompt_assets(REPO_ROOT / "review/prompts")
-    if (asset.key, asset.version) == ("review.system", 4)
-)
+def _packaged_review(version: int) -> PromptAsset:
+    return next(
+        asset
+        for asset in load_prompt_assets(REPO_ROOT / "review/prompts")
+        if (asset.key, asset.version) == ("review.system", version)
+    )
+
+
+# The packaged review.system v4 (F2) and v5 (#144), as the seed stores them.
+_V4 = _packaged_review(4)
 _V4_CONTENT = _V4.content
+_V5 = _packaged_review(5)
+_V5_CONTENT = _V5.content
 
 
-async def _bind_v4(factory: async_sessionmaker[AsyncSession], run_id: UUID) -> UUID:
-    """Bind the run to an inactive row of the packaged v4; these tests seed up to v3 only."""
-    v4 = uuid4()
+async def _bind_review(
+    factory: async_sessionmaker[AsyncSession], run_id: UUID, review: PromptAsset
+) -> UUID:
+    """Bind the run to an inactive row of a packaged review.system; these tests seed up to
+    v3 only."""
+    prompt = uuid4()
     async with factory.begin() as session:
         await session.execute(
             text(
                 "INSERT INTO prompt_versions (id, key, version, content, checksum, is_active) "
-                "VALUES (:id, 'review.system', 4, :content, :checksum, false)"
+                "VALUES (:id, 'review.system', :version, :content, :checksum, false)"
             ),
             {
-                "id": v4,
-                "content": _V4_CONTENT,
-                "checksum": _V4.checksum,
+                "id": prompt,
+                "version": review.version,
+                "content": review.content,
+                "checksum": review.checksum,
             },
         )
         await session.execute(
             text("UPDATE runs SET prompt_version_id=:prompt WHERE id=:id"),
-            {"prompt": v4, "id": run_id},
+            {"prompt": prompt, "id": run_id},
         )
-    return v4
+    return prompt
+
+
+async def _bind_v4(factory: async_sessionmaker[AsyncSession], run_id: UUID) -> UUID:
+    return await _bind_review(factory, run_id, _V4)
+
+
+async def _bind_v5(factory: async_sessionmaker[AsyncSession], run_id: UUID) -> UUID:
+    return await _bind_review(factory, run_id, _V5)
 
 
 def _stage(factory: async_sessionmaker[AsyncSession]) -> ReviewContextStage:
@@ -525,8 +543,14 @@ def test_v3_run_and_snapshot_keep_v3_and_the_legacy_path_after_v4_activation(
                 pins.prompt_bindings.review_system_id, "review.system", "v3", "github"
             )
 
+            # The files F2 packaged: review.system up to v4.
+            f2_assets = tuple(
+                asset
+                for asset in _packaged()
+                if not (asset.key == "review.system" and asset.version > 4)
+            )
             async with factory.begin() as session:
-                assert await seed_prompt_versions(session, _packaged()) == 1
+                assert await seed_prompt_versions(session, f2_assets) == 1
             async with factory() as session:
                 active = (
                     await session.scalars(

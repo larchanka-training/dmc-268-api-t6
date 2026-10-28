@@ -9,10 +9,12 @@ fit, a manifest per call, the review citing the diff and the L3 excerpt, the ver
 that excerpt, ``llm.verify`` and the publication input. A v3 run in the same composition
 stays on the legacy path. A retried v4 attempt keeps the snapshot and every pinned prompt
 while newer rows go live, and a provider failure after a model call sends the review to the
-fallback on a manifest row of its own. With a ready graph index and the v4 prompt patched to
-show a retrieved section (#144), the review shows and records the caller of the changed
-function, the verifier shows it again with the same index commit, and a retry before the
-accepted answer retrieves from a newer index publication (D8).
+fallback on a manifest row of its own. The v4 prompt shows no retrieved section. A run bound
+to the packaged ``review.system.v5.md`` (#144) always shows one: empty with RAG off; with a
+ready graph index the review shows and records the caller of the changed function, the
+verifier shows it again with the same index commit, and a retry before the accepted answer
+retrieves from a newer index publication (D8). A v4 run in flight when the v5 seed makes v5
+live keeps its v4 prompt: no retrieved section, and a ready index is recorded as not used.
 """
 
 from __future__ import annotations
@@ -38,7 +40,6 @@ from app.bootstrap.llm_gateway import build_gateway
 from app.modules.integrations.webhooks.infrastructure.github_installation_tree_provider import (
     GitHubAppInstallationAccessTokenProvider,
 )
-from app.modules.reviews.application import rag_index
 from app.modules.reviews.application.prompt_builder import file_block_id
 from app.modules.reviews.application.queue_messages import ReviewPublishPointer
 from app.modules.reviews.application.try_enqueue_webhook_run import (
@@ -60,11 +61,12 @@ from tests.portal_postgres import REPO_A, REPO_B, Env, portal_schema
 from tests.test_code_index_store_postgres import C1, C2, _build, _enable, _Index
 from tests.test_github_vcs_provider import _pull_payload
 from tests.test_llm_gateway import FALLBACK, PRIMARY, completion
+from tests.test_prompt_seeding import _up_to
 from tests.test_rag_review_context_postgres import _USER, _user_file
 from tests.test_retired_installation_postgres import DiscardTokenCache
 from tests.test_review_context import _GREET_PATCH, _MODELS, _SERVICE
-from tests.test_review_prompt_pins_postgres import _V4_CONTENT, _bind_v4
-from tests.test_run_prompt_pins_postgres import _seed
+from tests.test_review_prompt_pins_postgres import _V4_CONTENT, _V5_CONTENT, _bind_v4, _bind_v5
+from tests.test_run_prompt_pins_postgres import _packaged, _seed
 from tests.test_run_publication_settings_postgres import _insert, _ready
 from tests.test_snapshot_path_live_pin import _live_assets
 from tests.test_worker_queue_postgres import SETTINGS, GitHub
@@ -87,9 +89,6 @@ _ADDED_LINE = 12  # ``+    extra = 1`` of ``_GREET_PATCH``
 _APP_PATH = "pkg/app.py"
 _APP_SHA = "7" * 40
 _CALL_LINE = 5  # ``    return greet(user_id)`` of ``_USER``
-# The pinned v4 review prompt shows a retrieved section only with this patch (production pins
-# none until v5).
-_RETRIEVED_V4 = frozenset({("review.system", "v4")})
 _LLM = LlmSettings(primary=PRIMARY, fallback=FALLBACK)
 _CONVENTIONS_ANSWER = {
     "files": [{"path": path, "relevance": "changed file"} for path in (_PATH, _TEST_PATH)],
@@ -306,10 +305,18 @@ async def _rows(
 
 
 async def _scenario(
-    factory: async_sessionmaker[AsyncSession], *, v4: bool, retry: bool, rag: bool
+    factory: async_sessionmaker[AsyncSession],
+    *,
+    version: int,
+    retry: bool,
+    rag: bool,
+    v5_seeded: bool = False,
 ) -> Observed:
+    """``version``: the review.system version the run is bound to; v3 is the seeded live row.
+    ``v5_seeded``: the run is created under the seeded live v4 row, then the v5 seed makes v5
+    live before the worker takes the run."""
     await _ready(factory)
-    await _seed(factory, _live_assets())
+    await _seed(factory, _up_to(_packaged(), 4) if v5_seeded else _live_assets())
     async with factory.begin() as session:
         run_id = await _insert(session)
         await session.execute(
@@ -319,16 +326,29 @@ async def _scenario(
             ),
             {"id": REPO_A, "rag": rag},
         )
+    if v5_seeded:
+        await _seed(factory, _packaged())
+        [pinned_and_live] = await _rows(
+            factory,
+            "SELECT p.version, (SELECT version FROM prompt_versions "
+            "WHERE key='review.system' AND is_active) "
+            "FROM runs r JOIN prompt_versions p ON p.id = r.prompt_version_id WHERE r.id=:id",
+            run_id,
+        )
+        assert pinned_and_live == (4, 5)
     index = _Index(factory, REPO_A, REPO_B)
     if rag:
         # A ready graph index of the default branch at C1 knows the caller of ``greet``.
         await _enable(index, REPO_A)
         await _build(index, REPO_A, C1, _user_file())
-    if v4:
+    if version == 4 and not v5_seeded:
         await _bind_v4(factory, run_id)
+    elif version == 5:
+        await _bind_v5(factory, run_id)
+    snapshot_path = version >= 4
     queue = Queue()
     github_http = GitHubHttp(files_unavailable=1 if retry and not rag else 0, rag=rag)
-    review_kind = "review-v2" if v4 else "review-v1"
+    review_kind = "review-v2" if snapshot_path else "review-v1"
     if retry and rag:
         # The first attempt fails before any answer is accepted: the provider refuses its
         # review call on the primary and on the fallback model. The second attempt keeps the
@@ -337,7 +357,7 @@ async def _scenario(
     else:
         # On the retried attempt the provider refuses the review call once.
         kinds = ["conventions", *(["unavailable"] if retry else []), review_kind]
-    model_http = ModelHttp([*kinds, *(["verifier"] if v4 else [])])
+    model_http = ModelHttp([*kinds, *(["verifier"] if snapshot_path else [])])
     outcomes: list[str] = []
     async with (
         httpx.AsyncClient(
@@ -509,12 +529,18 @@ async def _scenario(
     )
 
 
-def _observe(env: Env, *, v4: bool, retry: bool = False, rag: bool = False) -> Observed:
+def _observe(
+    env: Env, *, version: int, retry: bool = False, rag: bool = False, v5_seeded: bool = False
+) -> Observed:
     async def scenario() -> Observed:
         engine = env.engine()
         try:
             return await _scenario(
-                async_sessionmaker(engine, expire_on_commit=False), v4=v4, retry=retry, rag=rag
+                async_sessionmaker(engine, expire_on_commit=False),
+                version=version,
+                retry=retry,
+                rag=rag,
+                v5_seeded=v5_seeded,
             )
         finally:
             await engine.dispose()
@@ -558,10 +584,15 @@ def _assert_snapshot_path(
     attempt: int,
     earlier: tuple[str, ...] = (),
     review_fallback: bool = False,
+    version: int = 4,
+    rag: bool = False,
 ) -> None:
     run_id, (review_pin, _, verifier_pin) = observed.run_id, observed.pins
     assert observed.state == ("publishing", None, attempt)
     steps = list(_SNAPSHOT_PATH_STEPS)
+    if rag:
+        # RAG is on: the stage records the index after the context build.
+        steps.insert(steps.index("context.build") + 1, "context.rag")
     stages = ["conventions", "review", "verification"]
     if review_fallback:
         # The fallback is one more review call with a manifest of its own.
@@ -575,8 +606,9 @@ def _assert_snapshot_path(
         str(snapshot_id)
     ] * (1 + earlier.count("policy.load"))
     assert observed.manifests == [(snapshot_id, stage, attempt) for stage in stages]
-    # No block of this run is retrieved (no code index is seeded): every stored block keeps
-    # the selection metadata of a retrieved one (ADR 0001 §9) as None.
+    # No block of this run is retrieved (no code index is seeded, or the pinned prompt shows
+    # none): every stored block keeps the selection metadata of a retrieved one (ADR 0001 §9)
+    # as None.
     assert len(observed.manifest_blocks) == len(stages)
     assert all(observed.manifest_blocks)
     assert {
@@ -612,9 +644,16 @@ def _assert_snapshot_path(
     assert calls[1]["prompt_version_id"] == str(review_pin)
     assert calls[2]["prompt_version_id"] == str(verifier_pin)
     conventions_body, review_body, verifier_body = bodies
-    assert review_body["messages"][0]["content"] == _V4_CONTENT
+    assert review_body["messages"][0]["content"] == (_V5_CONTENT if version == 5 else _V4_CONTENT)
     # L2-L4: the review gets the context excerpts of the stage, counted in its manifest.
     review_prompt = review_body["messages"][-1]["content"]
+    # v4 has no retrieved section; v5 always shows one, here empty.
+    if version == 5:
+        assert "</context_excerpts>\n<retrieved_excerpts>\n\n</retrieved_excerpts>\n" in (
+            review_prompt
+        )
+    else:
+        assert "<retrieved_excerpts>" not in review_prompt
     excerpts = re.findall(
         r'<excerpt block_id="([^"]+)" level="(L[234])" path="([^"]+)"', review_prompt
     )
@@ -677,7 +716,7 @@ def _assert_snapshot_path(
 
 @pytest.mark.integration
 def test_a_v4_run_takes_the_snapshot_path_through_the_worker_composition(env: Env) -> None:
-    observed = _observe(env, v4=True)
+    observed = _observe(env, version=4)
 
     assert observed.outcomes == ["ack"]
     assert observed.queue.retries == []
@@ -690,7 +729,7 @@ def test_a_retried_v4_attempt_keeps_the_snapshot_and_the_pins(env: Env) -> None:
     # Newer conventions, review and verifier rows go live in between: the second attempt keeps
     # the stored snapshot and the run's pinned prompts. Its review call fails once at the
     # provider, after the conventions call, and the fallback answers.
-    observed = _observe(env, v4=True, retry=True)
+    observed = _observe(env, version=4, retry=True)
 
     assert observed.outcomes == ["ack", "ack"]
     assert len(observed.queue.retries) == 1
@@ -707,7 +746,7 @@ def test_a_retried_v4_attempt_keeps_the_snapshot_and_the_pins(env: Env) -> None:
 
 @pytest.mark.integration
 def test_a_v3_run_stays_on_the_legacy_path_in_the_same_composition(env: Env) -> None:
-    observed = _observe(env, v4=False)
+    observed = _observe(env, version=3)
 
     assert observed.outcomes == ["ack"]
     assert observed.state == ("publishing", None, 1)
@@ -730,6 +769,32 @@ def test_a_v3_run_stays_on_the_legacy_path_in_the_same_composition(env: Env) -> 
     ]
     assert all("evidence_refs" not in finding for finding in output["findings"])
     assert [pointer.run_id for pointer in observed.queue.published] == [observed.run_id]
+
+
+@pytest.mark.integration
+def test_a_v5_run_without_rag_shows_an_empty_retrieved_section(env: Env) -> None:
+    # RAG is off for the repository: no ``context.rag`` step, and the bound v5 prompt still
+    # shows its retrieved section, empty.
+    observed = _observe(env, version=5)
+
+    assert observed.outcomes == ["ack"]
+    assert observed.queue.retries == []
+    _assert_snapshot_path(observed, attempt=1, version=5)
+
+
+@pytest.mark.integration
+def test_a_v4_run_in_flight_when_v5_is_seeded_keeps_the_v4_prompt(env: Env) -> None:
+    # The run is created under the live v4 row; the v5 seed makes v5 live before the worker
+    # takes it. RAG is on with a ready index: the run keeps its v4 pin and body, shows no
+    # retrieved section, and ``context.rag`` records the usable index as not used.
+    observed = _observe(env, version=4, rag=True, v5_seeded=True)
+
+    assert observed.outcomes == ["ack"]
+    assert observed.queue.retries == []
+    [(rag_request, rag_response)] = observed.actions["context.rag"]
+    assert (rag_request["index_status"], rag_request["indexed_commit_sha"]) == ("ready", C1)
+    assert rag_response == {"outcome": "not_ready", "reason": "prompt_version"}
+    _assert_snapshot_path(observed, attempt=1, rag=True)
 
 
 @dataclass(frozen=True)
@@ -773,6 +838,7 @@ def _assert_retrieved_and_shown_again(
     """The accepted attempt: the review shows and records the caller of ``greet`` retrieved
     from the index at ``index_commit_sha``; the verifier shows that block again, recorded with
     the same metadata (ADR 0001 §9, CVS §5.2)."""
+    assert review_body["messages"][0]["content"] == _V5_CONTENT
     section = _retrieved_section(review_body["messages"][-1]["content"])
     [rag] = re.findall(
         rf'<excerpt block_id="([^"]+)" level="RAG" path="{_APP_PATH}" revision="{_HEAD}" '
@@ -835,12 +901,8 @@ def _assert_retrieved_and_shown_again(
 
 
 @pytest.mark.integration
-def test_a_v4_run_shows_the_retrieved_section_through_the_worker_composition(
-    env: Env, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setattr(rag_index, "RETRIEVED_PROMPT_VERSIONS", _RETRIEVED_V4)
-
-    observed = _observe(env, v4=True, rag=True)
+def test_a_v5_run_shows_the_retrieved_section_through_the_worker_composition(env: Env) -> None:
+    observed = _observe(env, version=5, rag=True)
 
     assert observed.outcomes == ["ack"]
     assert observed.queue.retries == []
@@ -871,16 +933,12 @@ def test_a_v4_run_shows_the_retrieved_section_through_the_worker_composition(
 
 
 @pytest.mark.integration
-def test_a_retry_before_the_accepted_answer_retrieves_from_the_newer_index(
-    env: Env, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_a_retry_before_the_accepted_answer_retrieves_from_the_newer_index(env: Env) -> None:
     # D8: the candidate checkpoint is the stored manifest. The first attempt retrieves at C1,
     # then its review call fails on both models before any answer is accepted. A newer
     # publication of the index (C2) lands, and the retry retrieves again: its review and
     # its verifier show the same block, recorded with C2.
-    monkeypatch.setattr(rag_index, "RETRIEVED_PROMPT_VERSIONS", _RETRIEVED_V4)
-
-    observed = _observe(env, v4=True, retry=True, rag=True)
+    observed = _observe(env, version=5, retry=True, rag=True)
 
     assert observed.outcomes == ["ack", "ack"]
     assert len(observed.queue.retries) == 1

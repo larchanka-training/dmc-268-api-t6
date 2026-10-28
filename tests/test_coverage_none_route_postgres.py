@@ -63,7 +63,7 @@ def _observe(env: Env, monkeypatch: pytest.MonkeyPatch, *, v4: bool) -> tuple[e2
     # lists every changed file it is shown; a legacy run shows it none here.
     monkeypatch.setattr(e2e, "GitHubHttp", TechnicalOnlyGitHub)
     monkeypatch.setattr(e2e, "_CONVENTIONS_ANSWER", {**e2e._CONVENTIONS_ANSWER, "files": []})
-    observed = e2e._observe(env, v4=v4)
+    observed = e2e._observe(env, version=4 if v4 else 3)
 
     async def usage() -> int:
         engine = env.engine()

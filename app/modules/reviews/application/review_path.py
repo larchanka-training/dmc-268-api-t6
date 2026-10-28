@@ -20,9 +20,9 @@ from app.modules.reviews.application.policy_snapshot import PolicySnapshot
 
 # The prompt key of the review stage; only its rows choose the path.
 REVIEW_SYSTEM_KEY = "review.system"
-# Review prompt versions written for the snapshot envelope and ReviewOutput v2; the one
-# place a new snapshot-contract version (#144: v5) is added.
-SNAPSHOT_REVIEW_PROMPT_VERSIONS: frozenset[str] = frozenset({"v4"})
+# Review prompt versions written for the snapshot envelope and ReviewOutput v2 (v5 adds the
+# retrieved section, #144); the one place a new snapshot-contract version is added.
+SNAPSHOT_REVIEW_PROMPT_VERSIONS: frozenset[str] = frozenset({"v4", "v5"})
 # The context stage builds its diff map from the persisted origin provider.
 SNAPSHOT_REVIEW_PROVIDERS: frozenset[str] = frozenset(
     {VcsProviderName.GITHUB.value, VcsProviderName.GITLAB.value}

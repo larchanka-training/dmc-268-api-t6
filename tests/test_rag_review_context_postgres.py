@@ -1,8 +1,8 @@
 """The composed context stage reads graph candidates and records their use (#144).
 
 `review_context_stage_factory` against PostgreSQL: the RAG gate, the repeatable-read graph
-read and the blob cache of the run, with a pinned review prompt that declares a retrieved
-section (production pins none until v5).
+read and the blob cache of the run, with the run's pinned review prompt patched to declare a
+retrieved section (in production only review.system v5 has one).
 """
 
 from __future__ import annotations

@@ -1252,7 +1252,7 @@ def test_rag_toggle_off_records_no_index_step() -> None:
             "limit_exceeded:files",
             {"outcome": "not_ready", "reason": "failed", "error_code": "limit_exceeded:files"},
         ),
-        # No prompt version has a retrieved section yet: a usable index is not used.
+        # The stage's pinned prompt (v2) has no retrieved section: a usable index is not used.
         (RagIndexStatus.READY, None, {"outcome": "not_ready", "reason": "prompt_version"}),
         (RagIndexStatus.STALE, None, {"outcome": "not_ready", "reason": "prompt_version"}),
     ],
