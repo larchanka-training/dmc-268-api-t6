@@ -918,7 +918,9 @@ def compose_worker_process(
                     "bitbucket_engine_unsupported", "Bitbucket supports only the fast review engine"
                 )
             if bitbucket is None:
-                raise RunFailure("diff_fetch_failed", "Bitbucket review capability is unavailable")
+                raise RunFailure(
+                    "bitbucket_fetch_failed", "Bitbucket review capability is unavailable"
+                )
             async with bitbucket.attempt(
                 claimed=claimed, expected_input=expected, checkpoint=checkpoint, trace=trace
             ) as bb_bundle:

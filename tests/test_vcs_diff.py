@@ -597,6 +597,23 @@ def test_ordinary_fetch_failure_stays_an_optional_blob_omission() -> None:
     assert result.failed_blob_shas == frozenset({"1" * 40})
 
 
+@pytest.mark.parametrize(
+    "failure",
+    [
+        RunFailure("bitbucket_request_budget_exceeded"),
+        RunFailure("bitbucket_fetch_failed", rate_limited=True),
+    ],
+)
+def test_bitbucket_blob_budget_and_rate_limit_escape_omission(failure: RunFailure) -> None:
+    provider = _UnavailableBlobProvider(failure)
+    with pytest.raises(RunFailure) as caught:
+        asyncio.run(
+            FetchVcsReviewInput(provider, checkpoint=provider_checkpoint).execute(_locator(), _HEAD)
+        )
+    assert caught.value is failure
+    assert provider.requested == ["1" * 40]
+
+
 def test_task_cancellation_escapes_blob_classification() -> None:
     failure = asyncio.CancelledError()
     with pytest.raises(asyncio.CancelledError) as caught:

@@ -224,10 +224,16 @@ class FetchVcsReviewInput:
                     except (RunCancelled, RequiredSourceUnavailable):
                         raise
                     except Exception as exc:
-                        if isinstance(exc, RunFailure) and exc.error_code in {
-                            "deadline_exceeded",
-                            "bitbucket_response_budget_exceeded",
-                        }:
+                        if (
+                            isinstance(exc, RunFailure)
+                            and exc.error_code
+                            in {
+                                "deadline_exceeded",
+                                "bitbucket_request_budget_exceeded",
+                                "bitbucket_response_budget_exceeded",
+                            }
+                            or (isinstance(exc, RunFailure) and exc.rate_limited)
+                        ):
                             raise
                         # Blob classification is best effort; retain this file as an omission.
                         _LOGGER.warning(

@@ -1205,7 +1205,8 @@ def test_check_run_says_where_a_policy_failure_is() -> None:
 
 
 @pytest.mark.parametrize(
-    "failure", ["cancel", "deadline", "bitbucket_limit", "rate_limited", "optional"]
+    "failure",
+    ["cancel", "deadline", "bitbucket_limit", "rate_limited", "request_budget", "optional"],
 )
 def test_context_stage_propagates_control_but_preserves_optional_fallback(failure: str) -> None:
     error = {
@@ -1213,6 +1214,7 @@ def test_context_stage_propagates_control_but_preserves_optional_fallback(failur
         "deadline": RunFailure("deadline_exceeded"),
         "bitbucket_limit": RunFailure("bitbucket_review_limit_exceeded"),
         "rate_limited": RunFailure("diff_fetch_failed", "provider 429", rate_limited=True),
+        "request_budget": RunFailure("bitbucket_request_budget_exceeded"),
         "optional": RunFailure("diff_fetch_failed", "optional enrichment"),
     }[failure]
 
@@ -1227,7 +1229,7 @@ def test_context_stage_propagates_control_but_preserves_optional_fallback(failur
             source=Repository(), parser=Parser(), counter=EstimatedTokenCounter()
         ),
     )
-    if failure == "optional":
+    if failure in {"optional", "request_budget"}:
         assert asyncio.run(stage.run(_RUN)) is None
         assert stage.excluded("generated/api.py")
     else:
