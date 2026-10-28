@@ -104,6 +104,11 @@ worker, and leaves `RETRIEVED_PROMPT_VERSIONS` alone.
      plus `VerificationOutput`. These errors get one repair, then the fallback.
    - The 1:1 candidate-ID check and the ref checks against the manifest stay in `ReflectionPass`. They fail
      straight to `verification_invalid_output` without repair (PIPELINE_SPEC:311).
+   - **Reversed 2026-10-28** (tech lead, option A, after a staging run failed with `verification_invalid_output`
+     on a verifier ref outside the shown hunk): the ID, ref and rule-attribution checks
+     (`verification_answer_errors`) also run as the gateway task's `check_answer`, against the manifest of each
+     call (primary, repair, fallback). Their errors earn the bounded repair and then the fallback within the
+     attempt's slots; `ReflectionPass` repeats them on the accepted call's manifest as the final guard.
 7. **Adapter** (`llm/models.py`):
    - `GatewayVerifierModel(gateway, run)` sends `operation="verification"`, which matches `StageName`
      (`policy_snapshot.py:27`) and PIPELINE_SPEC:170.
