@@ -2151,6 +2151,10 @@ discovery имеет отдельную схему. Bitbucket-ошибки 422 �
 дают 422. Zod-схемы UI — ui#109 (снимок `tests/fixtures/ui_zod_contracts.json`;
 коммит ui, с которого он снят, — в `provenance.commit` и `UI_CONTRACT_COMMIT`); поля
 ответа там обязательны, поэтому API с ними выкатывается раньше мёржа PR UI.
+Для Bitbucket `Repository.enabled=false` оставляет review выключенным, но
+подписанный `repo:push` по default branch всё равно запрашивает обновление
+индекса, если `rag_enabled=true`, installation доступна и webhook binding
+подтверждён. Проверки tenant, UUID и поколения binding при этом сохраняются.
 
 **Контракт авторизации** (D4 — решение техлида по #20; хранение access в памяти, подпись в `auth-api` с проверкой публичным ключом и граница Workspace — дефолт по #20):
 
