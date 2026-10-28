@@ -1336,7 +1336,7 @@ def test_replay_reads_a_capture_from_another_responses_directory(
 
 
 def finding_v2(**changes: Any) -> dict[str, Any]:
-    """A ReviewOutput v2 finding of review prompt v4: evidence refs, no attribution prefix."""
+    """A ReviewOutput v2 finding of review prompt v4/v5: evidence refs, no attribution prefix."""
     return {
         **finding(),
         "rule_name": "service-defaults:E3",
@@ -1349,6 +1349,7 @@ def finding_v2(**changes: Any) -> dict[str, Any]:
     ("prompt_version", "item", "valid", "validator_output"),
     [
         ("v4", finding_v2(), True, "OK ReviewOutputV2 1 items"),
+        ("v5", finding_v2(), True, "OK ReviewOutputV2 1 items"),
         (
             "v4",
             finding(),
@@ -1370,7 +1371,7 @@ def finding_v2(**changes: Any) -> dict[str, Any]:
             "findings[0]: Additional properties are not allowed ('evidence_refs' was unexpected)",
         ),
     ],
-    ids=["v4-answer", "v4-without-evidence", "v4-model-rule", "v3-keeps-v1"],
+    ids=["v4-answer", "v5-answer", "v4-without-evidence", "v4-model-rule", "v3-keeps-v1"],
 )
 def test_replay_validates_an_answer_by_the_contract_of_the_recorded_prompt_version(
     tmp_path: Path,

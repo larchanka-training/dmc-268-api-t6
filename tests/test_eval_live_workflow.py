@@ -58,7 +58,16 @@ def test_prepare_live_corpus_preserves_committed_responses(tmp_path: Path) -> No
     assert not (runner / "eval-corpus/responses").exists()
 
 
-def test_live_failure_is_not_hidden_and_diagnostics_remain(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("review_prompt", "system"),
+    [
+        ("v4", "review/prompts/review.system.v4.md"),
+        ("v5", "review/prompts/review.system.v5.md"),
+    ],
+)
+def test_live_failure_is_not_hidden_and_diagnostics_remain(
+    tmp_path: Path, review_prompt: str, system: str
+) -> None:
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     shim = bin_dir / "uv"
@@ -77,7 +86,7 @@ def test_live_failure_is_not_hidden_and_diagnostics_remain(tmp_path: Path) -> No
             "RUNNER_TEMP": str(tmp_path),
             "LLM_API_KEYS": "test-key-not-a-real-credential",
             "EVAL_POLICY_ARM": "malicious",
-            "EVAL_REVIEW_PROMPT": "v4",
+            "EVAL_REVIEW_PROMPT": review_prompt,
         },
     )
 
@@ -90,7 +99,7 @@ def test_live_failure_is_not_hidden_and_diagnostics_remain(tmp_path: Path) -> No
         "--root",
         str(tmp_path / "eval-corpus"),
         "--system",
-        "review/prompts/review.system.v4.md",
+        system,
         "--policy-arm",
         "malicious",
         "--report-json",
@@ -188,7 +197,16 @@ def test_summary_uses_replay_metrics_without_model_diagnostics(tmp_path: Path) -
     assert "RAW MODEL TEXT MUST NOT APPEAR" not in content
 
 
-def test_summary_names_the_selected_prompt_without_a_report(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("review_prompt", "heading"),
+    [
+        ("v4", "## Live corpus evaluation\n\nReview prompt: v4\n\n"),
+        ("v5", "## Live corpus evaluation\n\nReview prompt: v5\n\n"),
+    ],
+)
+def test_summary_names_the_selected_prompt_without_a_report(
+    tmp_path: Path, review_prompt: str, heading: str
+) -> None:
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     shim = bin_dir / "uv"
@@ -204,14 +222,12 @@ def test_summary_names_the_selected_prompt_without_a_report(tmp_path: Path) -> N
             "PYTHONPATH": str(REPO_ROOT),
             "RUNNER_TEMP": str(tmp_path),
             "GITHUB_STEP_SUMMARY": str(summary),
-            "EVAL_REVIEW_PROMPT": "v4",
+            "EVAL_REVIEW_PROMPT": review_prompt,
         },
     )
     assert result.returncode == 0, result.stderr
     assert summary.read_text() == (
-        "## Live corpus evaluation\n\n"
-        "Review prompt: v4\n\n"
-        "No evaluation report was produced. See the failed step for details.\n"
+        heading + "No evaluation report was produced. See the failed step for details.\n"
     )
 
 
@@ -275,16 +291,17 @@ def _assert_selection_contract(text: str) -> None:
         "          - malicious\n"
         "        default: legacy\n"
     ) in text
-    # v3 by default: the default legacy arm refuses the snapshot-path v4 (eval_live.py).
+    # v3 by default: the default legacy arm refuses the snapshot-path v4/v5 (eval_live.py).
     assert (
         "      review_prompt:\n"
-        '        description: "Review prompt: v3, or v4 (snapshot path: needs policy_arm none, '
-        'or valid or malicious with corpus rules)"\n'
+        '        description: "Review prompt: v3, or v4 or v5 (snapshot path: needs policy_arm '
+        'none, or valid or malicious with corpus rules)"\n'
         "        required: false\n"
         "        type: choice\n"
         "        options:\n"
         "          - v3\n"
         "          - v4\n"
+        "          - v5\n"
         "        default: v3\n"
     ) in text
     assert "      EVAL_CORPUS: ${{ inputs.corpus || 'main' }}\n" in text
@@ -339,6 +356,7 @@ def test_manual_workflow_security_and_selection_contract() -> None:
         ),
         ("${{ inputs.policy_arm || 'legacy' }}", "legacy"),
         ("          - v4\n", ""),
+        ("          - v5\n", ""),
         ("        default: v3\n", "        default: v4\n"),
         (
             "    type: choice\n        options:\n          - v3",

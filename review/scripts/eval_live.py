@@ -23,7 +23,7 @@ usage of every paid call. --responses-dir keeps arms and repeated runs apart.
 
 Every arm except ``legacy`` binds the version and SHA-256 of the --system prompt it sends,
 as production binds the pinned prompt row; a version with a pin must be the pinned file and
-must have a known answer schema. ``legacy`` refuses a snapshot-path prompt (v4), which is
+must have a known answer schema. ``legacy`` refuses a snapshot-path prompt (v4/v5), which is
 only reviewed with a policy snapshot. All three checks run before the first call.
 """
 

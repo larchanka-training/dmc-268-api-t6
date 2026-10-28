@@ -2562,11 +2562,13 @@ def test_oracle_answers_score_perfectly_in_every_arm_of_the_committed_corpus(
 
 V3_SYSTEM = REPO_ROOT / "review/prompts/review.system.v3.md"
 V4_SYSTEM = REPO_ROOT / "review/prompts/review.system.v4.md"
+V5_SYSTEM = REPO_ROOT / "review/prompts/review.system.v5.md"
 # The pins of PINNED_PROMPT_CHECKSUMS (sha256 of the file bytes). v3 has no pin
 # (tests/test_review_prompt_pins_postgres.py): an arm binds the sha of its bytes.
 V2_PIN = "9177e358c23d1a7cd8987cbf667cf8b705c2afb27eaf8b2237480e4531431d75"
 V3_SHA = "eb851e7fc2329eb7bdff015ec0fda945c46111ec5c884934ed6f6d6803883452"
 V4_PIN = "5738227c7352228d29975e0512b5b5d3354eff31c9d161ca72086a776e9c498f"
+V5_PIN = "3bd7d39939b60d0c16b08090a4d3e5f0cbdb8a731fa4bde91bd6570546e085c9"
 CONVENTIONS_V2_PIN = "225a8f7d56835cf1307ddb25feac602c3d10e03c34ee51afc90a1f99af101454"
 VERIFIER_V2_PIN = "1f676b4fea8477d77b83a106a6c62e78f67d19f71937d4a02093d11a9d276088"
 
@@ -2574,11 +2576,12 @@ VERIFIER_V2_PIN = "1f676b4fea8477d77b83a106a6c62e78f67d19f71937d4a02093d11a9d276
 @pytest.mark.parametrize(
     ("arm", "prompt", "version", "checksum", "schema_name"),
     [
+        ("valid", V5_SYSTEM, "v5", V5_PIN, "ReviewOutputV2"),
         ("valid", V4_SYSTEM, "v4", V4_PIN, "ReviewOutputV2"),
         ("valid", SYSTEM, "v2", V2_PIN, "ReviewOutput"),
         ("none", V3_SYSTEM, "v3", V3_SHA, "ReviewOutput"),
     ],
-    ids=["valid-v4", "valid-v2", "none-v3"],
+    ids=["valid-v5", "valid-v4", "valid-v2", "none-v3"],
 )
 def test_policy_arm_binds_the_version_and_pin_of_the_prompt_it_sends(
     tmp_path: Path,
@@ -2693,17 +2696,32 @@ def test_policy_arm_refuses_a_prompt_version_without_an_answer_schema_before_any
     assert not (root / "responses").exists()
 
 
-def test_legacy_arm_refuses_a_snapshot_path_prompt_before_any_call(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("prompt", "message"),
+    [
+        (
+            V4_SYSTEM,
+            "--policy-arm legacy renders no policy snapshot, which review prompt v4 needs; "
+            "use --policy-arm none (valid and malicious need a corpus with policy arms)",
+        ),
+        (
+            V5_SYSTEM,
+            "--policy-arm legacy renders no policy snapshot, which review prompt v5 needs; "
+            "use --policy-arm none (valid and malicious need a corpus with policy arms)",
+        ),
+    ],
+    ids=["v4", "v5"],
+)
+def test_legacy_arm_refuses_a_snapshot_path_prompt_before_any_call(
+    tmp_path: Path, prompt: Path, message: str
+) -> None:
     root = fixture_root(tmp_path, ("SEC-01",))
     transport = FakeTransport([answer("primary-model", VALID)])
 
     with pytest.raises(RecorderError) as raised:
-        record_arm(root, transport, "legacy", system_prompt=V4_SYSTEM)
+        record_arm(root, transport, "legacy", system_prompt=prompt)
 
-    assert str(raised.value) == (
-        "--policy-arm legacy renders no policy snapshot, which review prompt v4 needs; "
-        "use --policy-arm none (valid and malicious need a corpus with policy arms)"
-    )
+    assert str(raised.value) == message
     assert transport.requests == []
     assert not (root / "responses").exists()
 

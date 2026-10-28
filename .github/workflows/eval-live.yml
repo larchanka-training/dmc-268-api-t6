@@ -32,12 +32,13 @@ on:
           - malicious
         default: legacy
       review_prompt:
-        description: "Review prompt: v3, or v4 (snapshot path: needs policy_arm none, or valid or malicious with corpus rules)"
+        description: "Review prompt: v3, or v4 or v5 (snapshot path: needs policy_arm none, or valid or malicious with corpus rules)"
         required: false
         type: choice
         options:
           - v3
           - v4
+          - v5
         default: v3
 
 permissions:

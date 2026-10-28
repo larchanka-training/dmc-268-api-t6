@@ -42,7 +42,7 @@ directory (``--responses-dir``, one per arm and run) replays unchanged. ``policy
 ``policy_arm_digest`` and ``usage`` are optional (absent in captures before #163): a missing
 arm is ``legacy`` and missing usage is reported as not recorded.
 Invalid recorded output contributes to scoring as invalid rather than being
-corrected or dropped. The answers of a snapshot-path ``prompt_version`` (v4) are
+corrected or dropped. The answers of a snapshot-path ``prompt_version`` (v4/v5) are
 validated as ReviewOutput v2 (``validate_findings.py --schema v2``). Schema-v1
 manifests require all three digest fields and publishability metadata consistent
 with per-case statuses, so replay cannot silently skip drift or terminal provider
@@ -467,7 +467,7 @@ def replay(
     # A legacy capture saw no policy snapshot: score it on every truth, as before #163.
     recorded_arm = manifest["run_metadata"].get("policy_arm", "legacy")
     scoring_arm = None if recorded_arm == "legacy" else recorded_arm
-    # A snapshot-path prompt (v4) answers in ReviewOutput v2, as the gateway required.
+    # A snapshot-path prompt (v4/v5) answers in ReviewOutput v2, as the gateway required.
     v2 = manifest["prompt_version"] in SNAPSHOT_REVIEW_PROMPT_VERSIONS
     cases = []
     statuses = []

@@ -13,7 +13,7 @@ codes: 0 = valid (prints "OK <kind> <n> items"), 1 = contract violations (one
 missing, not JSON, or its top-level shape matches neither kind.
 
 `--schema v2` checks `findings` as ReviewOutputV2, the answer of a snapshot-path
-review prompt (v4): review/schemas/review-output.schema.v2.json, then the runtime
+review prompt (v4/v5): review/schemas/review-output.schema.v2.json, then the runtime
 ReviewOutputV2 model itself, with `evidence_refs` and without the v1 attribution
 prefix; a `files` document under `--schema v2` exits 2. `--schema v1` is the default.
 """
