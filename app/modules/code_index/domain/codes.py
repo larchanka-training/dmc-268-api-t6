@@ -21,6 +21,7 @@ FAILED_ERROR_CODES = frozenset(
         "limit_exceeded:download_bytes",
         "limit_exceeded:unpacked_bytes",
         "limit_exceeded:archive_entries",
+        "limit_exceeded:provider_requests",
         "limit_exceeded:parsed_files",
         "limit_exceeded:symbols",
         "limit_exceeded:edges",
