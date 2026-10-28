@@ -214,7 +214,7 @@ def test_installed_publication_checks_origin_and_releases_db_before_http(
                 "bitbucket",
                 repository_external_id,
                 workspace,
-                RunVcsInput(change, repository, HEAD, BASE, locator),
+                RunVcsInput(change, repository, HEAD, BASE, locator, base_ref="main"),
                 PublicationIdentity(
                     installation, workspace, external_id, "bitbucket", repository, change, BASE
                 ),
@@ -241,7 +241,10 @@ def test_installed_publication_checks_origin_and_releases_db_before_http(
                                 "commit": {"hash": HEAD},
                                 "repository": {"uuid": f"{{{remote_repo}}}"},
                             },
-                            "destination": {"repository": {"uuid": f"{{{remote_repo}}}"}},
+                            "destination": {
+                                "branch": {"name": "main"},
+                                "repository": {"uuid": f"{{{remote_repo}}}"},
+                            },
                         },
                     )
                 if request.url.path.endswith("/pullrequests/7/comments"):
