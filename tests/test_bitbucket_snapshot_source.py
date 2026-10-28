@@ -289,7 +289,7 @@ def test_archive_preflights_remaining_request_count(
     async def exercise() -> None:
         async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
             source = _source(_Credentials(), client)
-            with pytest.raises(IndexLimitExceeded, match="archive_entries"):
+            with pytest.raises(IndexLimitExceeded, match="provider_requests"):
                 await source.archive(_SHA, max_bytes=100_000)
 
     asyncio.run(exercise())
@@ -430,6 +430,118 @@ def test_changed_head_supported_repository_has_measurable_full_snapshot_budget()
     assert sum(f"/src/{_SHA}/f" in path for path in paths) == 100
 
 
+def test_sparse_snapshot_reads_only_selected_blob_from_100_file_tree() -> None:
+    raw_paths: list[str] = []
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if path.endswith(f"/src/{_SHA}/"):
+            return httpx.Response(
+                200,
+                json={
+                    "size": 100,
+                    "values": [
+                        {
+                            "path": f"f{i:03}.py",
+                            "type": "commit_file",
+                            "size": 1,
+                            "commit": {"hash": _SHA},
+                        }
+                        for i in range(100)
+                    ],
+                },
+            )
+        raw_paths.append(path)
+        assert path.endswith(f"/src/{_SHA}/f000.py")
+        return httpx.Response(200, content=b"x")
+
+    async def exercise() -> None:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
+            source = _source(_Credentials(), client)
+            manifest = await source.manifest(_SHA)
+            assert len(manifest) == 100
+            archive = await source.archive_paths(_SHA, {"f000.py"}, max_bytes=100_000)
+            repeat = await source.archive_paths(_SHA, {"f000.py"}, max_bytes=100_000)
+            assert repeat.content == archive.content
+            scan = await TarArchiveReader(IndexLimits()).scan(
+                archive, documents=set(), deadline=time.monotonic() + 5
+            )
+            assert set(scan.entries) == {"f000.py"}
+            assert source.request_count == 2
+
+    asyncio.run(exercise())
+    assert len(raw_paths) == 1
+
+
+def test_cached_go_module_redirect_counts_one_skipped_provider_entry() -> None:
+    raw_paths: list[str] = []
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if path.endswith(f"/src/{_SHA}/"):
+            return httpx.Response(
+                200,
+                json={
+                    "size": 1,
+                    "values": [
+                        {
+                            "path": "go.mod",
+                            "type": "commit_file",
+                            "size": 1,
+                            "commit": {"hash": _SHA},
+                        }
+                    ],
+                },
+            )
+        raw_paths.append(path)
+        assert path.endswith(f"/src/{_SHA}/go.mod")
+        return httpx.Response(302, headers={"Location": "https://blob.example/go.mod"})
+
+    async def exercise() -> None:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
+            source = _source(_Credentials(), client)
+            first = await source.archive_paths(_SHA, {"go.mod"}, max_bytes=100_000)
+            second = await source.archive_paths(_SHA, {"go.mod"}, max_bytes=100_000)
+            assert first.provider_skips == {"redirect": 1}
+            assert second.provider_skips == {"redirect": 1}
+            assert source.request_count == 2
+
+    asyncio.run(exercise())
+    assert len(raw_paths) == 1
+
+
+def test_forty_directory_root_can_be_indexed_with_bounded_requests() -> None:
+    def handle(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if path.endswith(f"/src/{_SHA}/"):
+            return httpx.Response(
+                200,
+                json={
+                    "size": 40,
+                    "values": [
+                        {
+                            "path": f"d{i:02}",
+                            "type": "commit_directory",
+                            "commit": {"hash": _SHA},
+                        }
+                        for i in range(40)
+                    ],
+                },
+            )
+        if f"/src/{_SHA}/d" in path:
+            return httpx.Response(200, json={"size": 0, "values": []})
+        raise AssertionError(path)
+
+    async def exercise() -> None:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
+            source = _source(_Credentials(), client)
+            archive = await source.archive(_SHA, max_bytes=100_000)
+            assert archive.commit_sha == _SHA
+            assert source.request_count == 41
+
+    asyncio.run(exercise())
+
+
 def test_snapshot_skips_binary_lfs_and_files_over_configured_read_limit() -> None:
     raw_paths: list[str] = []
 
@@ -502,6 +614,106 @@ def test_compare_requires_merge_base_proof_before_incremental_files() -> None:
 
     asyncio.run(exercise())
     assert len(seen) == 2
+
+
+@pytest.mark.parametrize("unsafe_path", ["bad\\name.py", "bad\x01name.py", "x" * 1025])
+@pytest.mark.parametrize("status", ["added", "removed", "renamed"])
+def test_unsafe_diffstat_path_uses_full_snapshot(unsafe_path: str, status: str) -> None:
+    base = "b" * 40
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith(f"/merge-base/{base}..{_SHA}"):
+            return httpx.Response(200, json={"hash": base})
+        if request.url.path.endswith(f"/diffstat/{base}..{_SHA}"):
+            return httpx.Response(
+                200,
+                json={
+                    "size": 1,
+                    "values": [
+                        {
+                            "status": status,
+                            "old": {"path": unsafe_path},
+                            "new": {"path": "safe.py" if status == "renamed" else unsafe_path},
+                        }
+                    ],
+                },
+            )
+        raise AssertionError(request.url.path)
+
+    async def exercise() -> None:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
+            comparison = await _source(_Credentials(), client).compare(base, _SHA)
+            assert comparison is not None
+            assert comparison.ancestry is Ancestry.AHEAD
+            assert not comparison.complete
+            assert comparison.files == ()
+
+    asyncio.run(exercise())
+
+
+def test_unsafe_diffstat_path_can_fall_back_to_skip_safe_full_walk() -> None:
+    base = "b" * 40
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if path.endswith(f"/merge-base/{base}..{_SHA}"):
+            return httpx.Response(200, json={"hash": base})
+        if path.endswith(f"/diffstat/{base}..{_SHA}"):
+            return httpx.Response(
+                200,
+                json={"size": 1, "values": [{"status": "added", "new": {"path": "bad\\x"}}]},
+            )
+        if path.endswith(f"/src/{_SHA}/"):
+            return httpx.Response(
+                200,
+                json={
+                    "size": 2,
+                    "values": [
+                        {
+                            "path": "bad\\x",
+                            "type": "commit_file",
+                            "size": 1,
+                            "commit": {"hash": _SHA},
+                        },
+                        {
+                            "path": "safe.py",
+                            "type": "commit_file",
+                            "size": 1,
+                            "commit": {"hash": _SHA},
+                        },
+                    ],
+                },
+            )
+        assert path.endswith(f"/src/{_SHA}/safe.py")
+        return httpx.Response(200, content=b"x")
+
+    async def exercise() -> None:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
+            source = _source(_Credentials(), client)
+            comparison = await source.compare(base, _SHA)
+            assert comparison is not None and not comparison.complete
+            archive = await source.archive(_SHA, max_bytes=100_000)
+            scan = await TarArchiveReader(IndexLimits()).scan(
+                archive, documents=set(), deadline=time.monotonic() + 5
+            )
+            assert set(scan.entries) == {"safe.py"}
+            assert archive.provider_skips == {"unrepresentable_path": 1}
+
+    asyncio.run(exercise())
+
+
+def test_source_503_preserves_http_status_for_transient_index_outcome() -> None:
+    async def exercise() -> None:
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(lambda _: httpx.Response(503))
+        ) as client:
+            source = _source(_Credentials(), client)
+            with pytest.raises(VcsUnavailable) as caught:
+                await source.archive(_SHA, max_bytes=100_000)
+            assert caught.value.http_status == 503
+            assert not caught.value.rate_limited
+
+    asyncio.run(exercise())
 
 
 def test_compare_429_does_not_start_full_walk() -> None:
