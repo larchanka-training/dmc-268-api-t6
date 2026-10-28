@@ -7,6 +7,7 @@ import json
 import shutil
 import subprocess
 import sys
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -14,6 +15,10 @@ import pytest
 
 import review.scripts.eval_live as eval_live_module
 import review.scripts.eval_replay as eval_replay_module
+from app.modules.reviews.infrastructure.llm.answers import (
+    validate_review_answer,
+    validate_review_answer_v2,
+)
 from review.scripts import eval_provenance
 from review.scripts.eval_provenance import (
     DigestInputError,
@@ -1394,6 +1399,72 @@ def test_replay_validates_an_answer_by_the_contract_of_the_recorded_prompt_versi
     ]
     assert report["valid_response_count"] == int(valid)
     assert report["micro"]["tp"] == int(valid)
+
+
+@pytest.mark.parametrize(
+    ("prompt_version", "findings", "validator_output", "gateway", "accepted_findings"),
+    [
+        (
+            "v4",
+            [finding_v2(start_line=3)],
+            "findings[0]: Value error, start_line must be strictly earlier than line",
+            validate_review_answer_v2,
+            [finding_v2()],
+        ),
+        (
+            "v4",
+            [finding_v2(severity="medium"), finding_v2()],
+            "$: Value error, findings must be severity then confidence ordered",
+            validate_review_answer_v2,
+            [finding_v2(), finding_v2(severity="medium")],
+        ),
+        (
+            "v3",
+            [{**finding(), "start_line": 3}],
+            "findings[0].start_line: must be < line",
+            validate_review_answer,
+            [finding()],
+        ),
+        (
+            "v3",
+            [{**finding(), "severity": "medium"}, finding()],
+            "findings: must be ordered by severity, then by confidence descending",
+            validate_review_answer,
+            [finding(), {**finding(), "severity": "medium"}],
+        ),
+    ],
+    ids=["v4-start-line-is-line", "v4-unordered", "v3-start-line-is-line", "v3-unordered"],
+)
+def test_replay_rejects_the_raw_answer_the_gateway_normalizes(
+    tmp_path: Path,
+    prompt_version: str,
+    findings: list[dict[str, Any]],
+    validator_output: str,
+    gateway: Callable[[str], dict[str, object]],
+    accepted_findings: list[dict[str, Any]],
+) -> None:
+    """Replay scores the raw first answer before the gateway's repair, for v2 as for v1."""
+    answer = review_output(findings=findings)
+    root = fixture_root(tmp_path)
+    record(root, {"SEC-01": answer})
+    manifest_path = root / "responses/manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["prompt_version"] = prompt_version
+    manifest_path.write_text(json.dumps(manifest))
+
+    report = replay(root)
+
+    assert report["responses"] == [
+        {
+            "case_id": "SEC-01",
+            "path": "responses/SEC-01.json",
+            "valid": False,
+            "validator_exit_code": 1,
+            "validator_output": validator_output,
+        }
+    ]
+    assert report["valid_response_count"] == 0
+    assert gateway(json.dumps(answer)) == review_output(findings=accepted_findings)
 
 
 VALIDATE_FINDINGS = REPO_ROOT / "review" / "scripts" / "validate_findings.py"
