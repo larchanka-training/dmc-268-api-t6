@@ -9,7 +9,7 @@ inserts a Run. Expected values are the literals of RULES_FORMAT_SPEC §3, §4, �
 Two seeds pick the review path through the active review prompt the run pins: ``legacy``
 (review.system v1) and ``v4`` (the packaged review.system v4 with conventions v2 and verifier
 v2: the snapshot path, where the rules.md text reaches the reviewer and the verifier). A case
-that fails in ``policy.load`` before the path is chosen runs on the v4 seed only.
+that fails while ``policy.load`` reads the documents runs on the v4 seed only.
 
 The module migrates one schema; each case starts from emptied tables with the same seed and
 from a deleted review topology, so the cases stay isolated.
@@ -33,7 +33,6 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Any, Literal, NoReturn
 from uuid import UUID, uuid4
-from xml.sax.saxutils import escape
 
 import httpx
 import pytest
@@ -135,32 +134,51 @@ def _block(*lines: str, fence: str = "```", info: str = "review-ignore") -> str:
     return "\n".join(["# Ignore", "", f"{fence}{info}", *lines, fence, ""])
 
 
-def _rules_block(rules: bytes | None) -> str:
-    """The ``<repository_rules>`` block RFS §3.2 and §8.1 expect for these base bytes.
-
-    The whole text, one XML-escaped ``<line>`` per line; a missing file is ``absent`` and an
-    empty one ``empty``, so neither is shown as a document with no lines.
-    """
-    tag = f'<repository_rules block_id="policy-rules" path="{RULES}"'
-    if rules is None:
-        return f'{tag} status="absent" />'
-    if not rules:
-        return f'{tag} status="empty" />'
-    lines = rules.decode().removesuffix("\n").split("\n")
-    numbered = "\n".join(
-        f'<line n="{index}">{escape(line)}</line>' for index, line in enumerate(lines, start=1)
-    )
-    return f"{tag}>\n{numbered}\n</repository_rules>"
-
-
+# `&`, `<` and `>` reach the model escaped (RFS §8.1).
 VALID_RULES = (
-    "# Rules\n\n## Style\n\nPrefer small functions.\n\n" + _block("generated/**")
+    "# Rules\n\n## Style\n\nPrefer small functions.\nKeep `a < b && b > c` checks explicit.\n\n"
+    + _block("generated/**")
 ).encode()
 ALL_IGNORED_RULES = _block("app/**", "generated/**").encode()
 PLAIN_RULES = b"# Rules\n\nPrefer small functions.\n"
+# A head rule without a mask: only the policy revision tells the head text from the base one.
+HEAD_ONLY_RULE = "Head-only rule."
+PLAIN_RULES_WITH_A_HEAD_RULE = PLAIN_RULES + f"{HEAD_ONLY_RULE}\n".encode()
 IGNORE_EVERYTHING_RULES = _block("**/*").encode()
 # A review-ignore block covering both changed files, in AGENTS.md: ordinary text there (§4.3).
 AGENTS_WITH_IGNORE_BLOCK = ("# Agents\n\n" + _block("app/**", "generated/**")).encode()
+
+# The rules.md block of the snapshot-path input, as review.system v4 describes it
+# (review/prompts/review.system.v4.md:22-26): the base text, one `<line n="…">` per line from
+# 1, XML-escaped; a missing document is a self-closing tag with `status="absent"`, an empty
+# one with `status="empty"`. Written out, so the renderer's escaping and splitting are not reused.
+_ABSENT_RULES_BLOCK = (
+    '<repository_rules block_id="policy-rules" path=".review/rules.md" status="absent" />'
+)
+_EMPTY_RULES_BLOCK = (
+    '<repository_rules block_id="policy-rules" path=".review/rules.md" status="empty" />'
+)
+_VALID_RULES_BLOCK = """\
+<repository_rules block_id="policy-rules" path=".review/rules.md">
+<line n="1"># Rules</line>
+<line n="2"></line>
+<line n="3">## Style</line>
+<line n="4"></line>
+<line n="5">Prefer small functions.</line>
+<line n="6">Keep `a &lt; b &amp;&amp; b &gt; c` checks explicit.</line>
+<line n="7"></line>
+<line n="8"># Ignore</line>
+<line n="9"></line>
+<line n="10">```review-ignore</line>
+<line n="11">generated/**</line>
+<line n="12">```</line>
+</repository_rules>"""
+_PLAIN_RULES_BLOCK = """\
+<repository_rules block_id="policy-rules" path=".review/rules.md">
+<line n="1"># Rules</line>
+<line n="2"></line>
+<line n="3">Prefer small functions.</line>
+</repository_rules>"""
 
 
 class Fault(StrEnum):
@@ -950,24 +968,41 @@ def _user_messages(outcome: Outcome, task: str) -> list[str]:
     return messages
 
 
-def _assert_rules_shown(outcome: Outcome, seed: Seed, rules: bytes | None) -> None:
-    """The rules.md block each review path puts in the model's input.
+def _assert_rules_shown(outcome: Outcome, seed: Seed, rules: bytes | None, block: str) -> None:
+    """The rules.md each review path puts in the model's input, for these base bytes.
 
-    The snapshot path shows the base document whole in one ``<repository_rules>`` block of
-    the reviewer's and the verifier's input (RFS §5.3, §8.1); the legacy envelope never
-    carries the rules.md text.
+    The snapshot path shows the base document whole as exactly ``block``, once in the
+    reviewer's and once in the verifier's input (RFS §5.3, §8.1). The legacy envelope carries
+    neither the block nor the base text; a changed rules.md reaches it as the head's code only.
     """
     if seed is Seed.LEGACY:
         assert all("<repository_rules" not in item for item in _texts(outcome))
+        lines = [line for line in (rules or b"").decode().splitlines() if line.strip()]
+        for item in _texts(outcome):
+            outside = _outside_source_code(item)
+            assert [line for line in lines if line in outside] == []
         return
     for task in (_REVIEW_TASK[seed], "VerificationOutput"):
         for message in _user_messages(outcome, task):
-            assert _POLICY_RULES.findall(message) == [_rules_block(rules)], task
+            assert _POLICY_RULES.findall(message) == [block], task
 
 
 def _outside_source_code(message: str) -> str:
     """The envelope without the head's code: the diff and the excerpts of changed files."""
     return _SOURCE_CODE.sub("", message)
+
+
+def _changed_files(message: str) -> str:
+    """The one ``<changed_files>`` block of a reviewer or verifier input: the diff."""
+    [diff] = re.findall(r"<changed_files>.*?</changed_files>", message, re.DOTALL)
+    return str(diff)
+
+
+def _assert_in_the_diff(outcome: Outcome, seed: Seed, text: str) -> None:
+    """On the snapshot path the reviewer and the verifier get ``text`` as changed code."""
+    for task in (_REVIEW_TASK[seed], "VerificationOutput"):
+        for message in _user_messages(outcome, task):
+            assert text in _changed_files(message), task
 
 
 # §9 for a 404: `policy_revision_unavailable` ("закреплённая ревизия недоступна") or
@@ -988,7 +1023,7 @@ def test_missing_rules_md_lets_the_whole_diff_reach_the_model(stack: Stack, seed
     # Without a policy both changed files reach the model: the control of the valid case.
     for needle in (SERVICE_PATH, SERVICE_MARKER, CLIENT_PATH, CLIENT_MARKER):
         assert any(needle in body for body in outcome.bodies), needle
-    _assert_rules_shown(outcome, seed, None)
+    _assert_rules_shown(outcome, seed, None, _ABSENT_RULES_BLOCK)
 
 
 @pytest.mark.integration
@@ -1005,13 +1040,15 @@ def test_review_ignore_keeps_the_ignored_file_out_of_every_llm_call(
     assert all(CLIENT_PATH not in body for body in outcome.bodies)
     assert any(SERVICE_MARKER in body for body in outcome.bodies)
     # The base document whole, its review-ignore block included (§3.2), as policy only.
-    _assert_rules_shown(outcome, seed, VALID_RULES)
+    _assert_rules_shown(outcome, seed, VALID_RULES, _VALID_RULES_BLOCK)
     if seed is Seed.V4:
+        for task in (_REVIEW_TASK[seed], "VerificationOutput"):
+            for message in _user_messages(outcome, task):
+                diff = _changed_files(message)
+                assert "Prefer small functions." not in diff
+                assert "generated/**" not in diff
+        # §5.3: the ignored file is counted, never named; the counter is in the review input.
         for message in _user_messages(outcome, _REVIEW_TASK[seed]):
-            [diff] = re.findall(r"<changed_files>.*?</changed_files>", message, re.DOTALL)
-            assert "Prefer small functions." not in diff
-            assert "generated/**" not in diff
-            # §5.3: the ignored file is counted, never named.
             assert '<excluded_files count="1" />' in message
 
 
@@ -1025,7 +1062,7 @@ def test_review_ignore_in_agents_md_is_ordinary_text(stack: Stack, seed: Seed) -
     assert outcome.documents[RULES][:2] == ("missing", None)
     for path in (SERVICE_PATH, CLIENT_PATH):
         assert any(path in body for body in outcome.bodies), path
-    _assert_rules_shown(outcome, seed, None)
+    _assert_rules_shown(outcome, seed, None, _ABSENT_RULES_BLOCK)
     if seed is Seed.V4:
         # Nothing is excluded, so the verifier is shown both changed files as well.
         for message in _user_messages(outcome, "VerificationOutput"):
@@ -1047,8 +1084,8 @@ def test_empty_rules_md_is_present_and_has_another_policy_than_a_missing_one(
     _assert_published(empty, seed)
     assert missing.documents[RULES][:2] == ("missing", None)
     # The model tells them apart as well: an empty document, not an absent one.
-    _assert_rules_shown(empty, seed, b"")
-    _assert_rules_shown(missing, seed, None)
+    _assert_rules_shown(empty, seed, b"", _EMPTY_RULES_BLOCK)
+    _assert_rules_shown(missing, seed, None, _ABSENT_RULES_BLOCK)
 
 
 _AT_LIMIT = b"a" * 65_536
@@ -1080,19 +1117,15 @@ def test_rules_md_at_the_size_limit_exceeds_the_policy_budget(stack: Stack, seed
     _assert_policy_load_failed(outcome)
     [load] = outcome.policy_load
     diagnostic = load["error"]["diagnostic"]
-    # §3.3 counts both rendered blocks; counter/v2 is `(len + 2) // 3` per block (§7.2).
-    agents = (
-        '<project_conventions_document block_id="policy-agents" path="AGENTS.md" status="absent" />'
-    )
-    actual = sum((len(block) + 2) // 3 for block in (_rules_block(_AT_LIMIT), agents))
+    # §3.3 counts both rendered blocks, the 65 536 `a` on one numbered line and the absent
+    # AGENTS.md tag: 21 911 tokens by counter/v2, `(len + 2) // 3` per block (§7.2).
     assert (diagnostic["source_path"], diagnostic["limit"], diagnostic["actual"]) == (
         None,
         _MAX_POLICY_TOKENS,
-        actual,
+        21_911,
     )
-    # Current behaviour: the snapshot is stored before its budget is checked; RFS §7.2
-    # allows a failed configuration with or without one.
-    assert outcome.snapshots == 1
+    # The stored snapshot is not asserted: RFS §7.2 allows a failed configuration with or
+    # without one.
     assert outcome.tasks == []
     assert outcome.reviews == []
     # PIPELINE_SPEC §7: `failed` → `completed` / `neutral`.
@@ -1111,8 +1144,9 @@ def test_all_changes_ignored_skips_the_run_without_llm_or_review(stack: Stack, s
     assert outcome.check_run["conclusion"] == "skipped"
 
 
-# The failures below end `policy.load` while the documents are read, before the review path
-# is chosen: they run on the v4 seed, the path of every new GitHub run, only.
+# The failures below end in `prepare_policy.execute` (`policy.load`); the only earlier
+# path-specific call, `require_served_provider` (`process_run.py:214` -> `:368`), passes a
+# GitHub run on either path. They run on the v4 seed, the path of every new GitHub run, only.
 
 
 @pytest.mark.integration
@@ -1203,11 +1237,14 @@ def test_rules_md_added_by_the_head_is_not_the_policy(stack: Stack, seed: Seed) 
     _assert_published(outcome, seed)
     assert outcome.documents[RULES][:2] == ("missing", None)
     # §5.3: the added text is no policy. The base has none, and its `**/*` is not applied.
-    _assert_rules_shown(outcome, seed, None)
+    _assert_rules_shown(outcome, seed, None, _ABSENT_RULES_BLOCK)
     for path in (SERVICE_PATH, CLIENT_PATH):
         assert any(path in body for body in outcome.bodies), path
-    # It is ordinary changed code (§5.3): no call shows it but as the head's code.
+    # It is ordinary changed code (§5.3): no call shows it but as the head's code, and the
+    # snapshot path does show it in the diff.
     assert all("**/*" not in _outside_source_code(item) for item in _user_texts(outcome))
+    if seed is Seed.V4:
+        _assert_in_the_diff(outcome, seed, "**/*")
 
 
 @pytest.mark.integration
@@ -1218,7 +1255,31 @@ def test_rules_md_changed_by_the_head_keeps_the_base_policy(stack: Stack, seed: 
     assert outcome.documents[RULES][:2] == ("present", hashlib.sha256(PLAIN_RULES).hexdigest())
     # §3.1, §5.3: the base text is the policy; the head's `**/*` is neither shown as policy
     # nor applied, and reaches the model only as the head's code of a changed file.
-    _assert_rules_shown(outcome, seed, PLAIN_RULES)
+    _assert_rules_shown(outcome, seed, PLAIN_RULES, _PLAIN_RULES_BLOCK)
     for path in (SERVICE_PATH, CLIENT_PATH):
         assert any(path in body for body in outcome.bodies), path
     assert all("**/*" not in _outside_source_code(item) for item in _user_texts(outcome))
+    if seed is Seed.V4:
+        _assert_in_the_diff(outcome, seed, "**/*")
+
+
+@pytest.mark.integration
+def test_rules_md_changed_by_the_head_without_a_mask_keeps_the_base_text(
+    stack: Stack, seed: Seed
+) -> None:
+    # The head adds a rule and no mask: the run is the same either way, so only the shown
+    # policy and its stored hash tell the base revision from the head one (§3.1).
+    outcome = _review(stack, _github(PLAIN_RULES, head_rules=PLAIN_RULES_WITH_A_HEAD_RULE), seed)
+
+    _assert_published(outcome, seed)
+    _assert_rules_shown(outcome, seed, PLAIN_RULES, _PLAIN_RULES_BLOCK)
+    assert all(
+        HEAD_ONLY_RULE not in block
+        for item in _user_texts(outcome)
+        for block in _POLICY_RULES.findall(item)
+    )
+    assert outcome.documents[RULES][:2] == ("present", hashlib.sha256(PLAIN_RULES).hexdigest())
+    # §5.3: the head's rule is ordinary changed code.
+    assert all(HEAD_ONLY_RULE not in _outside_source_code(item) for item in _user_texts(outcome))
+    if seed is Seed.V4:
+        _assert_in_the_diff(outcome, seed, HEAD_ONLY_RULE)
