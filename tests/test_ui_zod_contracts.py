@@ -23,7 +23,7 @@ from tests.portal_test_client import authenticated_test_client as TestClient
 CONTRACTS_PATH = Path(__file__).parent / "fixtures" / "ui_zod_contracts.json"
 RUN_STEP_CONTRACTS_PATH = Path(__file__).parent / "fixtures" / "ui_run_step_zod_contracts.json"
 RUN_ID = UUID("11111111-1111-4111-8111-111111111111")
-UI_CONTRACT_COMMIT = "c581bf660837c3a7d03101c3740f946282a752b1"
+UI_CONTRACT_COMMIT = "46b2807492a52e100bcfb48052b1e640cbd50beb"
 # The RunStepEvent supplement retains its separate UI #155 provenance.
 # SCHEMA_NAMES=runStepEvent OUTPUT_PATH=tests/fixtures/ui_run_step_zod_contracts.json \
 # DMC_268_UI_DIR=<ui checkout after pnpm install> node tests/generate_ui_zod_contracts.mjs
