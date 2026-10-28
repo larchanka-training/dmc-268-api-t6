@@ -24,6 +24,7 @@ class BitbucketStatusSnapshot:
     state: str
     run_order: int | None = None
     coverage_status: str | None = None
+    target_branch: str | None = None
 
 
 class BitbucketStatusGateway(Protocol):

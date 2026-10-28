@@ -88,12 +88,15 @@ class CommentsPort:
         self.updates: list[tuple[int, dict[str, object]]] = []
         self.head = HEAD
         self.destination = REPO
+        self.destination_branch = "main"
+        self.destination_base = "b" * 40
         self.source = SOURCE
         self.fail_after_post = False
         self.page_size = 2
         self.comment_reads: list[str | None] = []
         self.checkpoints = 0
         self.source_readable = True
+        self.retarget_after_listing = False
 
     async def checkpoint(self) -> None:
         self.checkpoints += 1
@@ -106,7 +109,11 @@ class CommentsPort:
                 "commit": {"hash": self.head[:12]},
                 "repository": {"uuid": f"{{{self.source}}}"},
             },
-            "destination": {"repository": {"uuid": f"{{{self.destination}}}"}},
+            "destination": {
+                "branch": {"name": self.destination_branch},
+                "commit": {"hash": self.destination_base},
+                "repository": {"uuid": f"{{{self.destination}}}"},
+            },
         }
 
     async def source_commit(self, repository_uuid: UUID, head_sha: str) -> object:
@@ -117,6 +124,8 @@ class CommentsPort:
         return {"hash": self.head}
 
     async def list_comments(self, cursor: str | None) -> object:
+        if self.retarget_after_listing:
+            self.destination_branch = "release"
         self.comment_reads.append(cursor)
         page = int(cursor or "0")
         values = self.comments[page : page + self.page_size]
@@ -142,6 +151,22 @@ class CommentsPort:
                 comment.update(payload)
                 return comment
         raise AssertionError("comment missing")
+
+
+@sync_test
+async def test_late_retarget_blocks_comment_post_after_initial_pr_check() -> None:
+    port = CommentsPort()
+    port.destination_base = "d" * 12
+    port.retarget_after_listing = True
+    gateway = BitbucketPullRequestCommentGateway(
+        port, run_id=RUN, repository_uuid=REPO, pinned_target_branch="main"
+    )
+
+    with pytest.raises(PublishError, match="destination branch"):
+        await gateway.submit_review(_submission(_finding()))
+
+    assert port.posts == []
+    assert port.updates == []
 
 
 @sync_test

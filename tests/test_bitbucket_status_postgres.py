@@ -205,7 +205,10 @@ def test_status_uses_active_run_origin_and_no_db_transaction_over_http(
                                 "branch": {"name": "feature/review"},
                                 "repository": {"uuid": f"{{{remote_repo}}}"},
                             },
-                            "destination": {"repository": {"uuid": f"{{{remote_repo}}}"}},
+                            "destination": {
+                                "branch": {"name": "main"},
+                                "repository": {"uuid": f"{{{remote_repo}}}"},
+                            },
                         },
                     )
                 payload: dict[str, str] = json.loads(request.content)
@@ -493,6 +496,7 @@ def test_status_uses_active_run_origin_and_no_db_transaction_over_http(
             assert await SqlAlchemyBitbucketStatusSource(sessions).current(run_id) is None
             active_snapshot = await SqlAlchemyBitbucketStatusSource(sessions).current(newer_run)
             assert active_snapshot is not None
+            assert active_snapshot.target_branch == "main"
             async with sessions() as session:
                 old_order = await session.scalar(
                     text("SELECT run_order FROM bitbucket_run_origins WHERE run_id=:run"),

@@ -471,6 +471,41 @@ def test_sqlalchemy_run_repository_reads_the_installation_scoped_vcs_locator() -
     assert "JOIN provider_installations" in sql
 
 
+def test_bitbucket_vcs_input_keeps_the_runs_pinned_target_branch() -> None:
+    repository_uuid = UUID("11111111-1111-4111-8111-111111111111")
+    session = FakeSession(
+        [
+            (
+                UUID(int=2),
+                UUID(int=3),
+                "a" * 40,
+                "b" * 40,
+                17,
+                "old/repo",
+                7,
+                "bitbucket",
+                UUID(int=17),
+                101,
+                repository_uuid,
+                "main",
+            )
+        ]
+    )
+    repository = SqlAlchemyRunRepository(
+        cast(async_sessionmaker[AsyncSession], FakeSessionFactory(session)),
+        allow_unscoped=True,
+    )
+
+    result = asyncio.run(repository.get_run_vcs_input(UUID(int=1)))
+
+    assert result is not None
+    assert result.base_sha == "b" * 40
+    assert result.base_ref == "main"
+    assert result.locator.repository_uuid == repository_uuid
+    assert session.statement is not None
+    assert "runs.base_ref" in str(session.statement.compile())
+
+
 def test_sqlalchemy_run_repository_uses_snapshot_membership_for_an_immutable_file_key() -> None:
     run_id = UUID("00000000-0000-0000-0000-000000000001")
     repository_id = UUID("00000000-0000-0000-0000-000000000002")

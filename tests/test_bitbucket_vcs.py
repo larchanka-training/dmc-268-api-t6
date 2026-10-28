@@ -150,7 +150,7 @@ def test_metadata_edits_do_not_supersede_pinned_revision() -> None:
     ("change", "reason"),
     [
         ("head", "superseded"),
-        ("base", "superseded"),
+        ("target_branch", "superseded"),
         ("source_repository", "superseded"),
         ("destination_repository", "installation_unavailable"),
         ("state", "pr_closed"),
@@ -165,10 +165,14 @@ def test_revision_and_repository_identity_changes_cancel(change: str, reason: st
             reads += 1
             data = _pr()
             if reads == 2:
-                if change in {"head", "base"}:
-                    side = data["source" if change == "head" else "destination"]
+                if change == "head":
+                    side = data["source"]
                     assert isinstance(side, dict)
                     side["commit"] = {"hash": "d" * 40}
+                elif change == "target_branch":
+                    side = data["destination"]
+                    assert isinstance(side, dict)
+                    side["branch"] = {"name": "release"}
                 elif change in {"source_repository", "destination_repository"}:
                     side = data["source" if change == "source_repository" else "destination"]
                     assert isinstance(side, dict)
@@ -192,6 +196,84 @@ def test_revision_and_repository_identity_changes_cancel(change: str, reason: st
                 await vcs.get_pull_request(_locator(), checkpoint=checkpoint)
 
     asyncio.run(scenario())
+
+
+def test_destination_tip_advance_keeps_pinned_diff_and_draft_toggle() -> None:
+    reads = 0
+    requested_diffstat: list[str] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        nonlocal reads
+        if request.url.path == f"{PREFIX}/pullrequests/7":
+            reads += 1
+            data = _pr(base="d" * 12)
+            data["draft"] = reads > 1
+            return httpx.Response(200, json=data)
+        if request.url.path == f"{PREFIX}/diffstat/{HEAD}..{BASE}":
+            requested_diffstat.append(request.url.path)
+            return httpx.Response(200, json=_stat())
+        if request.url.path == f"{PREFIX}/diff/{HEAD}..{BASE}":
+            return httpx.Response(
+                200,
+                text=(
+                    "diff --git a/src/a.py b/src/a.py\n"
+                    "--- a/src/a.py\n+++ b/src/a.py\n@@ -1 +1 @@\n-old\n+new\n"
+                ),
+            )
+        raise AssertionError(request.url.path)
+
+    async def scenario() -> None:
+        async def checkpoint() -> None:
+            return None
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+            vcs = HttpBitbucketVcsProvider(
+                http=BitbucketRunHttp(client, Credentials(), TARGET),
+                locator=_locator(),
+                pinned_base_sha=BASE,
+                pinned_target_branch="main",
+            )
+            fetched = await FetchVcsReviewInput(vcs, checkpoint=checkpoint).execute(
+                _locator(), HEAD, BASE
+            )
+            assert fetched.pull_request.base_sha == BASE
+            assert fetched.pull_request.meta.is_draft is False
+            assert len(fetched.files) == 1
+
+    asyncio.run(scenario())
+    assert requested_diffstat == [f"{PREFIX}/diffstat/{HEAD}..{BASE}"]
+    assert reads >= 3
+
+
+def test_retarget_before_initial_fetch_cancels_pinned_run() -> None:
+    requests: list[str] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        requests.append(request.url.path)
+        data = _pr(base="d" * 40)
+        destination = data["destination"]
+        assert isinstance(destination, dict)
+        destination["branch"] = {"name": "release"}
+        return httpx.Response(200, json=data)
+
+    async def scenario() -> None:
+        async def checkpoint() -> None:
+            return None
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+            vcs = HttpBitbucketVcsProvider(
+                http=BitbucketRunHttp(client, Credentials(), TARGET),
+                locator=_locator(),
+                pinned_base_sha=BASE,
+                pinned_target_branch="main",
+            )
+            with pytest.raises(RunCancelled, match="superseded"):
+                await FetchVcsReviewInput(vcs, checkpoint=checkpoint).execute(
+                    _locator(), HEAD, BASE
+                )
+
+    asyncio.run(scenario())
+    assert requests == [f"{PREFIX}/pullrequests/7"]
 
 
 def test_cloud_draft_and_account_without_nickname_are_preserved() -> None:
