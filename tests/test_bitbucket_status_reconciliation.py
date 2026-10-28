@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from uuid import UUID, uuid4
 
 import httpx
+import pytest
 
 from app.modules.integrations.bitbucket.application.request_credentials import (
     BitbucketRequestCredential,
@@ -23,6 +25,7 @@ from app.modules.reviews.application.bitbucket_status_intents import (
 )
 from app.modules.reviews.infrastructure.bitbucket_ci import (
     BitbucketBuildStatusPublisher,
+    BitbucketStatusLeaseLost,
     BitbucketStatusReconciler,
 )
 
@@ -134,11 +137,104 @@ def test_terminal_recheck_posts_only_after_remote_mismatch() -> None:
     asyncio.run(scenario())
 
 
+def test_status_heartbeat_failure_logs_and_does_not_defer_a_lost_lease(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    run_id, installation, workspace, repository, remote_repo = (uuid4() for _ in range(5))
+    target = BoundBitbucketTarget(installation, workspace, repository, remote_repo, 1, 1)
+    snapshot = BitbucketStatusSnapshot(run_id, target, 7, "a" * 40, "feature/review", "running", 1)
+    claim = StatusClaim(status_key(snapshot), uuid4(), 1)
+    heartbeat_failed = asyncio.Event()
+
+    class Source:
+        async def current(self, selected: UUID) -> BitbucketStatusSnapshot | None:
+            assert selected == run_id
+            return snapshot
+
+    class Credentials:
+        async def checkpoint(self, selected: BoundBitbucketTarget) -> None:
+            assert selected == target
+
+        async def credential_for(
+            self, selected: BoundBitbucketTarget
+        ) -> BitbucketRequestCredential:
+            return BitbucketRequestCredential(selected, "test-token")
+
+    class Ledger:
+        renewals = 0
+        deferred = 0
+
+        async def register(self, current: BitbucketStatusSnapshot, url: str) -> None:
+            assert current == snapshot
+
+        async def acquire(self, key: object) -> StatusClaim | None:
+            assert key == claim.key
+            return claim
+
+        async def intent(self, selected: StatusClaim) -> StatusIntent | None:
+            return StatusIntent(
+                claim.key, run_id, "running", "https://review.example/run", None, None
+            )
+
+        async def renew(self, selected: StatusClaim) -> bool:
+            self.renewals += 1
+            if self.renewals == 1:
+                return True
+            heartbeat_failed.set()
+            raise RuntimeError("heartbeat database unavailable")
+
+        async def defer_failure(self, selected: StatusClaim, reason: str, delay: object) -> None:
+            self.deferred += 1
+
+        async def release(self, selected: StatusClaim) -> None:
+            assert selected == claim
+
+    async def respond(request: httpx.Request) -> httpx.Response:
+        await heartbeat_failed.wait()
+        assert request.method == "GET"
+        return httpx.Response(
+            200,
+            json={
+                "id": 7,
+                "state": "OPEN",
+                "source": {
+                    "commit": {"hash": snapshot.head_sha},
+                    "branch": {"name": snapshot.source_branch},
+                    "repository": {"uuid": f"{{{remote_repo}}}"},
+                },
+                "destination": {"repository": {"uuid": f"{{{remote_repo}}}"}},
+            },
+        )
+
+    async def scenario() -> None:
+        ledger = Ledger()
+        publisher = BitbucketBuildStatusPublisher(
+            Source(),
+            Credentials(),
+            ledger=ledger,  # type: ignore[arg-type]
+            transport_factory=lambda: httpx.MockTransport(respond),
+            heartbeat_interval_seconds=0.001,
+        )
+        with pytest.raises(BitbucketStatusLeaseLost):
+            await publisher.upsert(run_id, "https://review.example/run")
+        assert ledger.deferred == 0
+        assert ledger.renewals >= 2
+
+    with caplog.at_level(logging.ERROR):
+        asyncio.run(scenario())
+    assert any(
+        "Bitbucket status lease heartbeat failed" in record.message for record in caplog.records
+    )
+
+
 def test_reconciler_has_a_total_deadline() -> None:
     first = (uuid4(), "https://review.example/slow")
     second = (uuid4(), "https://review.example/next")
 
     class Ledger:
+        async def retire_expired(self, *, limit: int = 1000) -> int:
+            return 0
+
         async def pending(self, *, limit: int = 100) -> list[tuple[UUID, str]]:
             return [first, second]
 

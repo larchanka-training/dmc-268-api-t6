@@ -650,7 +650,38 @@ def test_status_uses_active_run_origin_and_no_db_transaction_over_http(
                     {"id": installation},
                 )
             await publisher.upsert(newer_run, "https://review.example/runs/two")
-            assert len([request for request in requests if request.method == "POST"]) == 9
+            posts_after_rotation = [request for request in requests if request.method == "POST"]
+            assert len(posts_after_rotation) == 10
+            assert json.loads(posts_after_rotation[-1].content)["state"] == "SUCCESSFUL"
+            # A new credential generation may recover a prior status-author 403
+            # without creating a new Run or changing the immutable head.
+            forbid_key = None
+            async with sessions.begin() as session:
+                await session.execute(
+                    text(
+                        "UPDATE bitbucket_connections SET credential_generation=2 "
+                        "WHERE provider_installation_id=:id"
+                    ),
+                    {"id": installation2},
+                )
+            rotated = await SqlAlchemyBitbucketStatusSource(sessions).current(run2)
+            assert rotated is not None
+            assert rotated.target.credential_generation == 2
+            await publisher.upsert(run2, "https://review.example/runs/other")
+            assert len([request for request in requests if request.method == "POST"]) == 11
+            async with sessions() as session:
+                recovery = (
+                    await session.execute(
+                        text(
+                            "SELECT blocked_generation,last_error,applied_state "
+                            "FROM bitbucket_status_publications "
+                            "WHERE workspace_id=:workspace AND repository_uuid=:repo "
+                            "AND pr_number=7 AND head_sha=:head"
+                        ),
+                        {"workspace": workspace2, "repo": remote_repo, "head": HEAD},
+                    )
+                ).one()
+            assert recovery == (None, None, "succeeded")
         finally:
             await engine.dispose()
 
