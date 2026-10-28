@@ -12,6 +12,7 @@ from app.modules.integrations.bitbucket.infrastructure.run_http import (
     BitbucketRunHttp,
     BitbucketRunHttpError,
 )
+from app.modules.reviews.application.commit_prefix_limits import COMMIT_PAGE_SIZE
 from app.modules.reviews.application.process_run import RunVcsInput
 from app.modules.reviews.application.run_failures import RunCancelled, RunFailure
 from app.modules.reviews.infrastructure.bitbucket_repository_tree import BitbucketRepositoryTree
@@ -71,7 +72,7 @@ def test_diffstat_next_rejects_only_changed_origin(origin: str) -> None:
     ids=["foreign-host", "insecure-scheme"],
 )
 def test_commit_page_next_rejects_only_changed_origin(origin: str) -> None:
-    next_url = f"{origin}{PREFIX}/pullrequests/7/commits?pagelen=20&page=2"
+    next_url = f"{origin}{PREFIX}/pullrequests/7/commits?pagelen={COMMIT_PAGE_SIZE}&page=2"
     requests: list[httpx.Request] = []
 
     def respond(request: httpx.Request) -> httpx.Response:
@@ -96,7 +97,10 @@ def test_commit_page_next_rejects_only_changed_origin(origin: str) -> None:
                 await _provider(client).get_commit_messages(_locator(), checkpoint=checkpoint)
 
     asyncio.run(scenario())
-    assert all(request.url.host == "api.bitbucket.org" for request in requests)
+    assert all(
+        request.url.scheme == "https" and request.url.host == "api.bitbucket.org"
+        for request in requests
+    )
     assert len([request for request in requests if request.url.path.endswith("/commits")]) == 1
 
 
