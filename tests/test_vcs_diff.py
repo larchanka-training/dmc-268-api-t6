@@ -614,6 +614,32 @@ def test_bitbucket_blob_budget_and_rate_limit_escape_omission(failure: RunFailur
     assert provider.requested == ["1" * 40]
 
 
+def test_blob_stage_rechecks_provider_head_after_all_pinned_reads() -> None:
+    from app.modules.reviews.infrastructure.vcs_failures import ClassifiedVcsProvider
+
+    verified = 0
+
+    class Provider(_UnavailableBlobProvider):
+        async def get_blob(
+            self, locator: PullRequestLocator, sha: str, *, checkpoint: RunProviderCheckpoint
+        ) -> bytes:
+            return b"source bytes"
+
+        async def verify_current(self, *, checkpoint: RunProviderCheckpoint) -> None:
+            nonlocal verified
+            verified += 1
+            raise RunCancelled("superseded")
+
+    with pytest.raises(RunCancelled, match="superseded"):
+        asyncio.run(
+            FetchVcsReviewInput(
+                ClassifiedVcsProvider(cast(Any, Provider(RunFailure("diff_fetch_failed")))),
+                checkpoint=provider_checkpoint,
+            ).execute(_locator(), _HEAD)
+        )
+    assert verified == 1
+
+
 def test_task_cancellation_escapes_blob_classification() -> None:
     failure = asyncio.CancelledError()
     with pytest.raises(asyncio.CancelledError) as caught:

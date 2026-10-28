@@ -734,8 +734,9 @@ class HttpBitbucketVcsProvider:
                 checkpoint,
                 max_bytes=MAX_BLOB_BYTES,
             )
-            if await self._canonical(checkpoint) != self._current:
-                raise RunCancelled("superseded")
+            # Source bytes are pinned by the full commit SHA. The caller verifies
+            # the mutable PR once at the end of the blob stage, not per file.
+            await self._http.checkpoint()
             return result
         except BitbucketRunHttpError as error:
             if error.kind == "body_too_large":
