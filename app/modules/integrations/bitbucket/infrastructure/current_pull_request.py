@@ -5,13 +5,11 @@ from __future__ import annotations
 from dataclasses import replace
 from datetime import UTC, datetime
 from typing import Protocol
+from urllib.parse import parse_qsl, urlsplit
 from uuid import UUID
 
 import httpx
 
-from app.modules.integrations.bitbucket.application.credential_input import (
-    canonical_bitbucket_slug,
-)
 from app.modules.integrations.bitbucket.application.request_credentials import (
     BitbucketRequestCredential,
     BoundBitbucketTarget,
@@ -31,6 +29,13 @@ from app.modules.reviews.application.project_bitbucket_pull_request import (
 )
 
 _MAX_BODY_BYTES = 2 * 1024 * 1024
+_MAX_COMMIT_PAGES = 20
+_COMMIT_PAGE_SIZE = 100
+
+
+class _DestinationCommitMissing(BitbucketProviderError):
+    def __init__(self) -> None:
+        super().__init__("repository_inaccessible")
 
 
 class BitbucketTokenSource(Protocol):
@@ -63,54 +68,23 @@ class BitbucketCurrentPullRequestProvider:
             f"{repository.workspace_slug}/{repository.slug}/pullrequests/{number}"
         )
         try:
-            async with self._client.stream(
-                "GET",
-                url,
-                headers={"Authorization": f"Bearer {credential.token}"},
-                follow_redirects=False,
-            ) as response:
-                _check_response(response)
-                chunks: list[bytes] = []
-                size = 0
-                async for chunk in response.aiter_bytes():
-                    size += len(chunk)
-                    if size > _MAX_BODY_BYTES:
-                        raise BitbucketProviderError("invalid_provider_response")
-                    chunks.append(chunk)
-        except httpx.RequestError:
-            raise BitbucketProviderError("provider_unavailable") from None
-        try:
-            raw = httpx.Response(200, content=b"".join(chunks)).json()
+            raw = await self._read_json(url, credential.token)
             current = _parse_pull_request(raw, target.repository_uuid, number, repository.full_name)
+            if current.head_sha is None:
+                return current
             if len(current.head_sha) == 40 and len(current.base_sha) == 40:
                 return current
             if not isinstance(raw, dict):
                 raise ValueError("invalid_pr")
-            source = raw["source"]
-            if not isinstance(source, dict):
-                raise ValueError("invalid_source")
-            source_repository = source.get("repository")
-            if isinstance(source_repository, dict):
-                source_uuid = _parse_uuid(source_repository.get("uuid"))
-            elif len(current.head_sha) == 40:
-                source_uuid = target.repository_uuid
-            else:
-                raise ValueError("missing_source_repository")
-            source_workspace: UUID | str = target.bitbucket_workspace_uuid
-            if source_uuid != target.repository_uuid:
-                if not isinstance(source_repository, dict):
-                    raise ValueError("missing_source_repository")
-                source_workspace_data = source_repository.get("workspace")
-                if isinstance(source_workspace_data, dict):
-                    source_workspace = _parse_uuid(source_workspace_data.get("uuid"))
-                else:
-                    full_name = source_repository.get("full_name")
-                    if not isinstance(full_name, str) or full_name.count("/") != 1:
-                        raise ValueError("missing_source_workspace")
-                    source_workspace = canonical_bitbucket_slug(full_name.split("/", 1)[0])
-            head = await self._resolve_commit(
-                source_workspace, source_uuid, current.head_sha, credential.token
-            )
+            try:
+                head = await self._resolve_commit(
+                    target.bitbucket_workspace_uuid,
+                    target.repository_uuid,
+                    current.head_sha,
+                    credential.token,
+                )
+            except _DestinationCommitMissing:
+                head = await self._resolve_pr_head(url, current.head_sha, credential.token)
             base = await self._resolve_commit(
                 target.bitbucket_workspace_uuid,
                 target.repository_uuid,
@@ -124,15 +98,47 @@ class BitbucketCurrentPullRequestProvider:
             raise BitbucketProviderError("invalid_provider_response") from None
 
     async def _resolve_commit(
-        self, workspace: UUID | str, repository_uuid: UUID, prefix: str, token: str
+        self, workspace: UUID, repository_uuid: UUID, prefix: str, token: str
     ) -> str:
         if len(prefix) == 40:
             return prefix
-        workspace_locator = f"%7B{workspace}%7D" if isinstance(workspace, UUID) else workspace
         url = (
             "https://api.bitbucket.org/2.0/repositories/"
-            f"{workspace_locator}/%7B{repository_uuid}%7D/commit/{prefix}"
+            f"%7B{workspace}%7D/%7B{repository_uuid}%7D/commit/{prefix}"
         )
+        raw = await self._read_json(url, token, commit_lookup=True)
+        if not isinstance(raw, dict):
+            raise ValueError("invalid_commit")
+        return resolved_commit_hash(raw.get("hash"), prefix)
+
+    async def _resolve_pr_head(self, pr_url: str, prefix: str, token: str) -> str:
+        commits_path = urlsplit(pr_url).path + "/commits"
+        url: str | None = f"https://api.bitbucket.org{commits_path}?pagelen={_COMMIT_PAGE_SIZE}"
+        visited: set[str] = set()
+        last_hash: str | None = None
+        for _ in range(_MAX_COMMIT_PAGES):
+            if url is None or url in visited:
+                raise BitbucketProviderError("invalid_provider_response")
+            visited.add(url)
+            raw = await self._read_json(url, token)
+            if not isinstance(raw, dict):
+                raise ValueError("invalid_commit_page")
+            values = raw.get("values")
+            if not isinstance(values, list) or not values or len(values) > _COMMIT_PAGE_SIZE:
+                raise ValueError("invalid_commit_page")
+            for commit in values:
+                if not isinstance(commit, dict):
+                    raise ValueError("invalid_commit_page")
+                last_hash = resolved_commit_hash(commit.get("hash"), "")
+            next_url = raw.get("next")
+            if next_url is None:
+                if last_hash is None:
+                    raise BitbucketProviderError("invalid_provider_response")
+                return resolved_commit_hash(last_hash, prefix)
+            url = _validate_pr_commits_cursor(next_url, commits_path)
+        raise BitbucketProviderError("invalid_provider_response")
+
+    async def _read_json(self, url: str, token: str, *, commit_lookup: bool = False) -> object:
         try:
             async with self._client.stream(
                 "GET",
@@ -140,6 +146,8 @@ class BitbucketCurrentPullRequestProvider:
                 headers={"Authorization": f"Bearer {token}"},
                 follow_redirects=False,
             ) as response:
+                if commit_lookup and response.status_code == 404:
+                    raise _DestinationCommitMissing()
                 _check_response(response)
                 chunks: list[bytes] = []
                 size = 0
@@ -148,12 +156,49 @@ class BitbucketCurrentPullRequestProvider:
                     if size > _MAX_BODY_BYTES:
                         raise BitbucketProviderError("invalid_provider_response")
                     chunks.append(chunk)
-            raw = httpx.Response(200, content=b"".join(chunks)).json()
-            if not isinstance(raw, dict):
-                raise ValueError("invalid_commit")
-            return resolved_commit_hash(raw.get("hash"), prefix)
+            return httpx.Response(200, content=b"".join(chunks)).json()
         except httpx.RequestError:
             raise BitbucketProviderError("provider_unavailable") from None
+
+
+def _validate_pr_commits_cursor(value: object, commits_path: str) -> str:
+    if not isinstance(value, str) or len(value) > 2048 or not value.isascii():
+        raise BitbucketProviderError("invalid_provider_response")
+    parsed = urlsplit(value)
+    if (
+        parsed.scheme != "https"
+        or parsed.netloc != "api.bitbucket.org"
+        or parsed.path != commits_path
+        or not parsed.query
+        or parsed.fragment
+    ):
+        raise BitbucketProviderError("invalid_provider_response")
+    try:
+        pairs = parse_qsl(parsed.query, strict_parsing=True, keep_blank_values=True)
+    except ValueError:
+        raise BitbucketProviderError("invalid_provider_response") from None
+    params = dict(pairs)
+    if (
+        len(pairs) != len(params)
+        or any(not item for _, item in pairs)
+        or set(params) - {"page", "after", "pagelen"}
+        or ("page" in params) == ("after" in params)
+        or ("pagelen" in params and params["pagelen"] != str(_COMMIT_PAGE_SIZE))
+    ):
+        raise BitbucketProviderError("invalid_provider_response")
+    if "page" in params and (
+        not params["page"].isascii()
+        or not params["page"].isdecimal()
+        or not 1 <= int(params["page"]) <= 10000
+    ):
+        raise BitbucketProviderError("invalid_provider_response")
+    if "after" in params and (
+        not 1 <= len(params["after"]) <= 512
+        or not params["after"].isascii()
+        or any(ord(char) < 33 or ord(char) > 126 for char in params["after"])
+    ):
+        raise BitbucketProviderError("invalid_provider_response")
+    return value
 
 
 def _parse_pull_request(
@@ -186,7 +231,7 @@ def _parse_pull_request(
             login = _string(candidate, 255)
     source_branch = _branch(source)
     target_branch = _branch(destination)
-    head_sha = _commit(source)
+    head_sha = None if state != "open" and source.get("commit") is None else _commit(source)
     base_sha = _commit(destination)
     updated_on = raw.get("updated_on")
     if not isinstance(updated_on, str) or len(updated_on) > 64:
