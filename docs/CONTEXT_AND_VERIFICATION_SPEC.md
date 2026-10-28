@@ -1010,8 +1010,8 @@ API, хранения, hash/dedup и eval. Старые v1 findings не пол�
 | 4. Политика/дубли | Допущенные candidates, IgnorePolicy, закреплённый lint-filter и dedup keys | Defense guard разрешённых источников для evidence/general, чистый lint, точная дедупликация; порог severity здесь не применяется | Сохранённый набор; drop `lint_pattern`, `duplicate`; guard: изолируемый запрещённый evidence/general → `evidence_source_disallowed`/partial, неизолируемый источник либо нарушенная целостность → failed/`snapshot_integrity_error`; не переименовывает evidence-причины прохода 3 и не заменяет anchor-ignore прохода 2; pre-send guard не является проходом по ответу |
 | 5. Verifier | Замороженные candidates после прохода 4, policy/defaults, код и отдельный manifest | Обязательный смысловой batch по §7 | `supported` идёт дальше; `contradicted`, `insufficient_context` сохраняются без публикации; ошибки всего вызова — §8.4 |
 | 6. Порог и размещение | Только supported, закреплённый `severity_threshold`, `max_comments` | Порог после verifier (§7), затем сортировка и закреплённый inline cap | Drop `severity_threshold` с отдельным счётчиком; остальные — final findings с disposition inline/general; сверх cap — general, не drop |
-| 6b. Межпрогонный дедуп | Final findings прохода 6, реестр опубликованных комментариев PR (`comments` с `github_comment_id`) | Межпрогонная дедупликация до заморозки плана публикации (Cross-Run Dedup по [`INCREMENTAL_REVIEW_AND_LIMITS_SPEC.md`](INCREMENTAL_REVIEW_AND_LIMITS_SPEC.md)); подавленные дубли не сжигают inline cap | Повторные находки сохраняют `drop_reason IS NULL`, в полном объёме учитываются в severity counts, вердикте и check-run, связываются с существующим `Comment` (`linked_comment_id`) и помечаются `publication_action = 'suppressed_duplicate'`; из массива `inline` исключаются до заморозки плана и вычисления findings hash; новые получают `publication_action = 'publish_inline'` |
-| 7. Публикация | FinalReviewResult и immutable publication plan (сформированный после прохода 6b), текущая идентичность VCS | Проверка допустимого адаптера, свежести head/diff; отправка одного review batch на VCS; чистка тредов в состоянии `publishing` перед T14 | Новые inline-находки публикуются одним batch; чистка устаревших/решённых тредов мутацией `resolveReviewThread` по квоте до 30; явный отказ публикации всего batch по §9–10: `superseded`, `pr_closed`, `publication_payload_too_large`, provider-specific ошибки, `publication_outcome_unknown`; без угадывания координат |
+| 6b. Межпрогонный дедуп | Supported-кандидаты после Pass 5, реестр опубликованных комментариев PR (`comments` с `github_comment_id`) | Межпрогонная дедупликация кандидатов внутри post-processor до среза cap `Repository.max_comments` (Cross-Run Dedup по [`INCREMENTAL_REVIEW_AND_LIMITS_SPEC.md`](INCREMENTAL_REVIEW_AND_LIMITS_SPEC.md)); подавленные дубли не сжигают inline cap | Повторные находки сохраняют `drop_reason IS NULL`, в полном объёме учитываются в severity counts, вердикте и check-run, связываются с существующим `Comment` (`linked_comment_id`) и помечаются `publication_action = 'suppressed_duplicate'`; не попадают в срез inline cap и не рендерятся в теле ревью; новые получают `publication_action = 'publish_inline'` (или `publish_body`) |
+| 7. Публикация | FinalReviewResult и immutable publication plan (сформированный после прохода 6b), текущая идентичность VCS | Проверка допустимого адаптера, свежести head/diff; отправка review batch на GitHub (дискуссий на GitLab); чистка тредов publisher после перехода T14 | Новые inline-находки публикуются review batch; чистка устаревших/решённых тредов мутацией `resolveReviewThread` по квоте до 30; явный отказ публикации всего batch по §9–10: `superseded`, `pr_closed`, `publication_payload_too_large`, provider-specific ошибки, `publication_outcome_unknown`; без угадывания координат |
 
 `lint_pattern` и `duplicate` сохраняют действующие имена legacy-кодов;
 переименование/миграция причин не вводится. `ignored_file` для якоря выдаёт проход 2
@@ -2044,15 +2044,16 @@ comments/discussions обязательна; ошибка чтения или л
    удаление опубликованного комментария для сокрытия гонки не выполняется.
 5. Разрешение устаревших и исправленных замечаний (VCS Write-back). В соответствии
    со спецификацией [`INCREMENTAL_REVIEW_AND_LIMITS_SPEC.md`](INCREMENTAL_REVIEW_AND_LIMITS_SPEC.md)
-   (Ч.1), после подтверждения успешности публикации основного review batch на GitHub
-   выполняется фаза разрешения тредов (VCS Thread Clean-up) внутри состояния `publishing` перед
-   финальным переходом T14 в `succeeded`. Набор состояний Run (Р-14 / D5) не изменяется. Замечания,
-   дефекты которых были устранены автором в новой ревизии (при подтверждённом полном анализе участка)
-   или файлы которых были удалены, переводятся в статус `RESOLVED_BY_BOT` с вызовом GraphQL-мутации
-   `resolveReviewThread`. Эта операция изменяет состояние жизненного цикла треда (`isResolved`),
-   не изменяя исходный текст комментария (`body`), payload digest и delivery receipts, сохраняя гарантии
-   неизменяемости публикации. Вызовы GraphQL выполняются строго вне транзакций БД под тем же
-   publishing lease с проверкой origin checkpoint; мутации квотируются (до 30 на run) с соблюдением
+   (Ч.1), после подтверждения успешности публикации review batch на GitHub и атомарного перехода
+   T14 в `succeeded` (вместе с сохранением квитанций comments в единой транзакции) publisher выполняет
+   фазу разрешения тредов (VCS Thread Clean-up) как best-effort шаг. Набор состояний Run (Р-14 / D5)
+   не изменяется. Замечания, дефекты которых были устранены автором в новой ревизии (при подтверждённом
+   полном анализе участка и отсутствии отсеянных кандидатов) или файлы которых были удалены,
+   переводятся в статус `RESOLVED_BY_BOT` с вызовом GraphQL-мутации `resolveReviewThread`. Эта операция
+   изменяет состояние жизненного цикла треда (`isResolved`), не изменяя исходный текст комментария
+   (`body`), payload digest и delivery receipts, сохраняя гарантии неизменяемости публикации.
+   Вызовы GraphQL выполняются строго вне транзакций БД со своим таймаутом и проверкой origin checkpoint;
+   мутации квотируются (до 30 на run) с соблюдением
    вторичных лимитов GitHub (интервал ≥ 1.2 с); остаток свыше 30 переходит на обработку в последующие Run.
    При ошибках GraphQL или нехватке прав треды остаются открытыми, Run не прерывается и сохраняет статус `succeeded`.
 
