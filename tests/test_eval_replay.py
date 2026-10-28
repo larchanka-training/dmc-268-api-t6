@@ -7,6 +7,7 @@ import json
 import shutil
 import subprocess
 import sys
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -14,6 +15,10 @@ import pytest
 
 import review.scripts.eval_live as eval_live_module
 import review.scripts.eval_replay as eval_replay_module
+from app.modules.reviews.infrastructure.llm.answers import (
+    validate_review_answer,
+    validate_review_answer_v2,
+)
 from review.scripts import eval_provenance
 from review.scripts.eval_provenance import (
     DigestInputError,
@@ -837,6 +842,7 @@ def test_corpus_digest_rejects_symlinked_preimage_directory(tmp_path: Path) -> N
     [
         "app/common/application/languages.py",
         "review/schemas/review-output.schema.json",
+        "review/schemas/review-output.schema.v2.json",
     ],
 )
 def test_replay_warns_on_request_shape_or_output_schema_edit(tmp_path: Path, changed: str) -> None:
@@ -861,6 +867,9 @@ def test_replay_warns_on_request_shape_or_output_schema_edit(tmp_path: Path, cha
         "review/scripts/eval_live.py",
         "app/modules/reviews/infrastructure/llm/settings.py",
         "app/modules/reviews/infrastructure/llm/transport.py",
+        "app/modules/reviews/application/review_path.py",
+        "app/modules/reviews/application/rag_index.py",
+        "app/modules/reviews/infrastructure/llm/answers.py",
     ],
 )
 def test_replay_warns_on_request_source_only_edit(tmp_path: Path, changed: str) -> None:
@@ -1325,3 +1334,187 @@ def test_replay_reads_a_capture_from_another_responses_directory(
     (moved / "stray.json").write_text("{}", encoding="utf-8")
     with pytest.raises(ReplayError, match="unreferenced response file"):
         replay(root, responses_dir=moved)
+
+
+def finding_v2(**changes: Any) -> dict[str, Any]:
+    """A ReviewOutput v2 finding of review prompt v4/v5: evidence refs, no attribution prefix."""
+    return {
+        **finding(),
+        "rule_name": "service-defaults:E3",
+        "evidence_refs": [{"block_id": "F1:app/authorization.py", "start_line": 1, "end_line": 3}],
+        **changes,
+    }
+
+
+@pytest.mark.parametrize(
+    ("prompt_version", "item", "valid", "validator_output"),
+    [
+        ("v4", finding_v2(), True, "OK ReviewOutputV2 1 items"),
+        ("v5", finding_v2(), True, "OK ReviewOutputV2 1 items"),
+        (
+            "v4",
+            finding(),
+            False,
+            "findings[0]: 'evidence_refs' is a required property",
+        ),
+        (
+            "v4",
+            finding_v2(title="Authorization check is bypassed."),
+            False,
+            "findings[0]: Value error, title must not end with a period",
+        ),
+        (
+            "v3",
+            finding_v2(),
+            False,
+            'findings[0].body: rule_name is set, body must start with "According to custom '
+            "instructions in 'service-defaults:E3' (\"\n"
+            "findings[0]: Additional properties are not allowed ('evidence_refs' was unexpected)",
+        ),
+    ],
+    ids=["v4-answer", "v5-answer", "v4-without-evidence", "v4-model-rule", "v3-keeps-v1"],
+)
+def test_replay_validates_an_answer_by_the_contract_of_the_recorded_prompt_version(
+    tmp_path: Path,
+    prompt_version: str,
+    item: dict[str, Any],
+    valid: bool,
+    validator_output: str,
+) -> None:
+    root = fixture_root(tmp_path)
+    record(root, {"SEC-01": review_output(findings=[item])})
+    manifest_path = root / "responses/manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["prompt_version"] = prompt_version
+    manifest_path.write_text(json.dumps(manifest))
+
+    report = replay(root)
+
+    assert report["responses"] == [
+        {
+            "case_id": "SEC-01",
+            "path": "responses/SEC-01.json",
+            "valid": valid,
+            "validator_exit_code": 0 if valid else 1,
+            "validator_output": validator_output,
+        }
+    ]
+    assert report["valid_response_count"] == int(valid)
+    assert report["micro"]["tp"] == int(valid)
+
+
+@pytest.mark.parametrize(
+    ("prompt_version", "findings", "validator_output", "gateway", "accepted_findings"),
+    [
+        (
+            "v4",
+            [finding_v2(start_line=3)],
+            "findings[0]: Value error, start_line must be strictly earlier than line",
+            validate_review_answer_v2,
+            [finding_v2()],
+        ),
+        (
+            "v4",
+            [finding_v2(severity="medium"), finding_v2()],
+            "$: Value error, findings must be severity then confidence ordered",
+            validate_review_answer_v2,
+            [finding_v2(), finding_v2(severity="medium")],
+        ),
+        (
+            "v3",
+            [{**finding(), "start_line": 3}],
+            "findings[0].start_line: must be < line",
+            validate_review_answer,
+            [finding()],
+        ),
+        (
+            "v3",
+            [{**finding(), "severity": "medium"}, finding()],
+            "findings: must be ordered by severity, then by confidence descending",
+            validate_review_answer,
+            [finding(), {**finding(), "severity": "medium"}],
+        ),
+    ],
+    ids=["v4-start-line-is-line", "v4-unordered", "v3-start-line-is-line", "v3-unordered"],
+)
+def test_replay_rejects_the_raw_answer_the_gateway_normalizes(
+    tmp_path: Path,
+    prompt_version: str,
+    findings: list[dict[str, Any]],
+    validator_output: str,
+    gateway: Callable[[str], dict[str, object]],
+    accepted_findings: list[dict[str, Any]],
+) -> None:
+    """Replay scores the raw first answer before the gateway's repair, for v2 as for v1."""
+    answer = review_output(findings=findings)
+    root = fixture_root(tmp_path)
+    record(root, {"SEC-01": answer})
+    manifest_path = root / "responses/manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["prompt_version"] = prompt_version
+    manifest_path.write_text(json.dumps(manifest))
+
+    report = replay(root)
+
+    assert report["responses"] == [
+        {
+            "case_id": "SEC-01",
+            "path": "responses/SEC-01.json",
+            "valid": False,
+            "validator_exit_code": 1,
+            "validator_output": validator_output,
+        }
+    ]
+    assert report["valid_response_count"] == 0
+    assert gateway(json.dumps(answer)) == review_output(findings=accepted_findings)
+
+
+VALIDATE_FINDINGS = REPO_ROOT / "review" / "scripts" / "validate_findings.py"
+USAGE = "usage: validate_findings.py [--schema v1|v2] <file.json>\n"
+
+
+@pytest.mark.parametrize(
+    ("arguments", "exit_code", "stdout", "stderr"),
+    [
+        (["--schema", "v2", "{v2}"], 0, "OK ReviewOutputV2 1 items\n", ""),
+        (["--schema", "v1", "{findings}"], 0, "OK ReviewOutput 5 items\n", ""),
+        (["{conventions}"], 0, "OK RepoConventionsDraft 3 items\n", ""),
+        (["--schema", "v3", "{v2}"], 2, "", USAGE),
+        (["--schema", "{v2}"], 2, "", USAGE),
+        (["{v2}", "--schema", "v2"], 2, "", USAGE),
+        (
+            ["--schema", "v2", "{conventions}"],
+            2,
+            "",
+            "error: --schema v2 checks a ReviewOutput ('findings'); this file has 'files'\n",
+        ),
+    ],
+    ids=[
+        "v2",
+        "explicit-v1",
+        "conventions",
+        "unknown-schema",
+        "missing-value",
+        "option-after-file",
+        "v2-on-conventions",
+    ],
+)
+def test_validate_findings_takes_one_file_and_an_optional_answer_schema(
+    tmp_path: Path, arguments: list[str], exit_code: int, stdout: str, stderr: str
+) -> None:
+    answer_v2 = tmp_path / "answer-v2.json"
+    answer_v2.write_text(json.dumps(review_output(findings=[finding_v2()])), encoding="utf-8")
+    paths = {
+        "v2": str(answer_v2),
+        "findings": str(REPO_ROOT / "review/examples/findings.sample.json"),
+        "conventions": str(REPO_ROOT / "review/examples/conventions.sample.json"),
+    }
+
+    result = subprocess.run(
+        [sys.executable, str(VALIDATE_FINDINGS), *(item.format(**paths) for item in arguments)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert (result.returncode, result.stdout, result.stderr) == (exit_code, stdout, stderr)

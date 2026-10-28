@@ -17,8 +17,12 @@ from typing import Any
 import httpx
 import pytest
 
+import app.modules.reviews.infrastructure.llm.models as llm_models_module
 import review.scripts.eval_live as eval_live_module
 from app.modules.reviews.application.check_runs import RunProviderCheckpoint
+from app.modules.reviews.application.policy_errors import PolicyError, PolicyErrorCode
+from app.modules.reviews.application.policy_snapshot import PINNED_PROMPT_CHECKSUMS
+from app.modules.reviews.application.run_failures import RunFailure
 from app.modules.reviews.infrastructure.llm.settings import (
     GatewayPolicy,
     LlmSettings,
@@ -673,6 +677,9 @@ def test_records_only_first_valid_answer_with_explicit_inputs(tmp_path: Path) ->
     assert "review/rules/default-frontend.v1.json" in manifest["static_inputs"]
     assert "review/rules/schema.json" not in manifest["static_inputs"]
     assert "review/schemas/review-output.schema.json" in manifest["static_inputs"]
+    assert "review/schemas/review-output.schema.v2.json" in manifest["static_inputs"]
+    assert "app/modules/reviews/application/review_path.py" in manifest["static_inputs"]
+    assert "app/modules/reviews/application/rag_index.py" in manifest["static_inputs"]
     assert "app/common/application/languages.py" in manifest["static_inputs"]
     assert "app/modules/reviews/application/prompt_builder.py" in manifest["static_inputs"]
     assert "app/modules/reviews/application/prompt_budget.py" in manifest["static_inputs"]
@@ -1803,12 +1810,13 @@ def record_arm(
     *,
     responses_dir: Path | None = None,
     model_settings: LlmSettings | None = None,
+    system_prompt: Path = SYSTEM,
 ) -> dict[str, Any]:
     return asyncio.run(
         record_live(
             root,
             model_settings or settings(),
-            system_prompt=SYSTEM,
+            system_prompt=system_prompt,
             backend_rules=BACKEND_RULES,
             frontend_rules=FRONTEND_RULES,
             transport=transport,
@@ -1993,6 +2001,24 @@ OVERRIDDEN_RULE_NAME = "Custom Source Review"
 OVERRIDDEN_CHECK_SUFFIX = " Also flag a public function without a docstring."
 
 
+def static_inputs_repo(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    prompt: str = "review/prompts/review.system.v2.md",
+) -> Path:
+    """Copy the static inputs of ``prompt`` and the commit sidecar into the recorder's root."""
+    repo = tmp_path / "repo"
+    for relative in static_input_paths(prompt, rule_json_paths(REPO_ROOT)):
+        destination = repo / relative
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(REPO_ROOT / relative, destination)
+    sidecar = repo / "review/eval/pr-commit-messages.json"
+    sidecar.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(REPO_ROOT / "review/eval/pr-commit-messages.json", sidecar)
+    monkeypatch.setattr(eval_live_module, "REPO_ROOT", repo)
+    return repo
+
+
 def override_rules_repo(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, slot: str, change: str
 ) -> tuple[Path, Path, str, str]:
@@ -2001,17 +2027,7 @@ def override_rules_repo(
     Returns the backend and frontend rule paths, the override's canonical checksum
     (computed here as production's RuleVersion.from_rules does) and its text marker.
     """
-    repo = tmp_path / "repo"
-    for relative in static_input_paths(
-        "review/prompts/review.system.v2.md", rule_json_paths(REPO_ROOT)
-    ):
-        destination = repo / relative
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(REPO_ROOT / relative, destination)
-    sidecar = repo / "review/eval/pr-commit-messages.json"
-    sidecar.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(REPO_ROOT / "review/eval/pr-commit-messages.json", sidecar)
-    monkeypatch.setattr(eval_live_module, "REPO_ROOT", repo)
+    repo = static_inputs_repo(tmp_path, monkeypatch)
     default = BACKEND_RULES if slot == "backend" else FRONTEND_RULES
     custom_rules = json.loads(default.read_text(encoding="utf-8"))
     first = custom_rules["rules"][0]
@@ -2541,3 +2557,306 @@ def test_oracle_answers_score_perfectly_in_every_arm_of_the_committed_corpus(
     assert report["verdict"] == {"agreed": 8, "total": 8, "agreement": 1.0}
     assert report["rule_constraints"] == rule_constraints
     assert report["exceptions"] == exceptions
+
+
+# --- #163: the review prompt a policy arm binds -----------------------------------------------
+
+V3_SYSTEM = REPO_ROOT / "review/prompts/review.system.v3.md"
+V4_SYSTEM = REPO_ROOT / "review/prompts/review.system.v4.md"
+V5_SYSTEM = REPO_ROOT / "review/prompts/review.system.v5.md"
+# The pins of PINNED_PROMPT_CHECKSUMS (sha256 of the file bytes). v3 has no pin
+# (tests/test_review_prompt_pins_postgres.py): an arm binds the sha of its bytes.
+V2_PIN = "9177e358c23d1a7cd8987cbf667cf8b705c2afb27eaf8b2237480e4531431d75"
+V3_SHA = "eb851e7fc2329eb7bdff015ec0fda945c46111ec5c884934ed6f6d6803883452"
+V4_PIN = "5738227c7352228d29975e0512b5b5d3354eff31c9d161ca72086a776e9c498f"
+V5_PIN = "3bd7d39939b60d0c16b08090a4d3e5f0cbdb8a731fa4bde91bd6570546e085c9"
+CONVENTIONS_V2_PIN = "225a8f7d56835cf1307ddb25feac602c3d10e03c34ee51afc90a1f99af101454"
+VERIFIER_V2_PIN = "1f676b4fea8477d77b83a106a6c62e78f67d19f71937d4a02093d11a9d276088"
+
+
+@pytest.mark.parametrize(
+    ("arm", "prompt", "version", "checksum", "schema_name", "retrieved_sections"),
+    [
+        ("valid", V5_SYSTEM, "v5", V5_PIN, "ReviewOutputV2", 1),
+        ("valid", V4_SYSTEM, "v4", V4_PIN, "ReviewOutputV2", 0),
+        ("valid", SYSTEM, "v2", V2_PIN, "ReviewOutput", 0),
+        ("none", V3_SYSTEM, "v3", V3_SHA, "ReviewOutput", 0),
+    ],
+    ids=["valid-v5", "valid-v4", "valid-v2", "none-v3"],
+)
+def test_policy_arm_binds_the_version_and_pin_of_the_prompt_it_sends(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    arm: str,
+    prompt: Path,
+    version: str,
+    checksum: str,
+    schema_name: str,
+    retrieved_sections: int,
+) -> None:
+    original_case_input = eval_live_module._case_input
+    bound: list[Any] = []
+
+    def recording(*args: Any, **kwargs: Any) -> Any:
+        bound.append(kwargs["policy_snapshot"].prompt_bindings)
+        return original_case_input(*args, **kwargs)
+
+    monkeypatch.setattr(eval_live_module, "_case_input", recording)
+    transport = FakeTransport([answer("primary-model", VALID)])
+
+    manifest = record_arm(
+        rules_fixture_root(tmp_path, ("RUL-04",)), transport, arm, system_prompt=prompt
+    )
+
+    (bindings,) = bound
+    assert checksum == hashlib.sha256(prompt.read_bytes()).hexdigest() == manifest["prompt_sha"]
+    assert (
+        bindings.review_system_key,
+        bindings.review_system_version,
+        bindings.review_system_checksum,
+    ) == ("review.system", version, checksum)
+    assert (bindings.conventions_checksum, bindings.verifier_checksum) == (
+        CONVENTIONS_V2_PIN,
+        VERIFIER_V2_PIN,
+    )
+    assert "review.system:v3" not in PINNED_PROMPT_CHECKSUMS
+    (request,) = transport.requests
+    assert request.response_schema is not None
+    assert request.response_schema.name == schema_name
+    # Eval has no RAG index: v5 shows its retrieved section empty, as production does then.
+    user = request.messages[1].content
+    assert user.count("<retrieved_excerpts>") == retrieved_sections
+    assert user.count("<retrieved_excerpts>\n\n</retrieved_excerpts>") == retrieved_sections
+    assert manifest["prompt_version"] == version
+    assert manifest["run_metadata"]["cases"]["RUL-04"]["gateway_status"] == "accepted"
+
+
+def _prompt_repo_copy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, name: str, text: str
+) -> tuple[Path, Path]:
+    """A prompt file inside a copied repository, and the root of that repository."""
+    repo = static_inputs_repo(tmp_path, monkeypatch, "review/prompts/review.system.v4.md")
+    prompt = repo / "review/prompts" / name
+    prompt.write_text(text, encoding="utf-8")
+    return repo, prompt
+
+
+def _record_in_repo(
+    root: Path, repo: Path, prompt: Path, arm: str, transport: FakeTransport
+) -> Any:
+    return asyncio.run(
+        record_live(
+            root,
+            settings(),
+            system_prompt=prompt,
+            backend_rules=repo / "review/rules/default-backend.v1.json",
+            frontend_rules=repo / "review/rules/default-frontend.v1.json",
+            transport=transport,
+            recorded_at=RECORDED_AT,
+            policy_arm=arm,
+        )
+    )
+
+
+@pytest.mark.parametrize("arm", ["none", "valid", "malicious"])
+def test_policy_arm_refuses_a_changed_pinned_prompt_before_any_call(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, arm: str
+) -> None:
+    original = V4_SYSTEM.read_text(encoding="utf-8")
+    changed = original.replace("Source authority", "Source Authority", 1)
+    assert len(changed) == len(original) and changed != original
+    assert "\nversion: 4\n" in changed
+    repo, prompt = _prompt_repo_copy(tmp_path, monkeypatch, "review.system.v4.md", changed)
+    root = rules_fixture_root(tmp_path, ("RUL-01",))
+    transport = FakeTransport([answer("primary-model", VALID)])
+
+    with pytest.raises(RecorderError) as raised:
+        _record_in_repo(root, repo, prompt, arm, transport)
+
+    assert str(raised.value) == (
+        "policy arms need the pinned review prompt: review/prompts/review.system.v4.md "
+        f"(review.system v4) has checksum {hashlib.sha256(changed.encode()).hexdigest()}, "
+        f"pinned {V4_PIN}"
+    )
+    assert transport.requests == []
+    assert not (root / "responses").exists()
+
+
+def test_policy_arm_refuses_a_prompt_version_without_an_answer_schema_before_any_call(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    text = SYSTEM.read_text(encoding="utf-8").replace("\nversion: 2\n", "\nversion: 9\n", 1)
+    assert "\nversion: 9\n" in text
+    repo, prompt = _prompt_repo_copy(tmp_path, monkeypatch, "review.system.v9.md", text)
+    root = fixture_root(tmp_path, ("SEC-01",))
+    transport = FakeTransport([answer("primary-model", VALID)])
+
+    with pytest.raises(RecorderError) as raised:
+        _record_in_repo(root, repo, prompt, "none", transport)
+
+    assert str(raised.value) == (
+        "policy arms need a review prompt with a known answer schema: "
+        "review/prompts/review.system.v9.md has version v9"
+    )
+    assert transport.requests == []
+    assert not (root / "responses").exists()
+
+
+@pytest.mark.parametrize(
+    ("prompt", "message"),
+    [
+        (
+            V4_SYSTEM,
+            "--policy-arm legacy renders no policy snapshot, which review prompt v4 needs; "
+            "use --policy-arm none (valid and malicious need a corpus with policy arms)",
+        ),
+        (
+            V5_SYSTEM,
+            "--policy-arm legacy renders no policy snapshot, which review prompt v5 needs; "
+            "use --policy-arm none (valid and malicious need a corpus with policy arms)",
+        ),
+    ],
+    ids=["v4", "v5"],
+)
+def test_legacy_arm_refuses_a_snapshot_path_prompt_before_any_call(
+    tmp_path: Path, prompt: Path, message: str
+) -> None:
+    root = fixture_root(tmp_path, ("SEC-01",))
+    transport = FakeTransport([answer("primary-model", VALID)])
+
+    with pytest.raises(RecorderError) as raised:
+        record_arm(root, transport, "legacy", system_prompt=prompt)
+
+    assert str(raised.value) == message
+    assert transport.requests == []
+    assert not (root / "responses").exists()
+
+
+@pytest.mark.parametrize(
+    ("failure", "code"),
+    [
+        (
+            PolicyError(PolicyErrorCode.PROMPT_BUDGET_EXCEEDED, "rules exceed the policy budget"),
+            "policy_prompt_budget_exceeded",
+        ),
+        (
+            RunFailure("llm_context_overflow", "rendered prompt is too large"),
+            "llm_context_overflow",
+        ),
+    ],
+    ids=["policy-error", "run-failure"],
+)
+def test_a_per_case_policy_failure_is_recorded_and_the_run_goes_on(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    failure: RunFailure,
+    code: str,
+) -> None:
+    original_guard = llm_models_module._guard_snapshot_budget
+    guarded: list[str] = []
+
+    def guard_first_case(context: Any, counter: Any, max_tokens: int) -> None:
+        guarded.append(context.changed_files[0].path)
+        if len(guarded) == 1:
+            raise failure
+        original_guard(context, counter, max_tokens)
+
+    monkeypatch.setattr(llm_models_module, "_guard_snapshot_budget", guard_first_case)
+    root = fixture_root(tmp_path, ("CLEAN-01", "SEC-01"))
+    transport = FakeTransport([answer("primary-model", VALID)])
+
+    exit_code = main(
+        ["--root", str(root), "--policy-arm", "none"],
+        transport=transport,
+        model_settings=settings(),
+    )
+
+    assert exit_code == 1
+    assert len(guarded) == 2
+    assert len(transport.requests) == 1
+    manifest = json.loads((root / "responses/manifest.json").read_text(encoding="utf-8"))
+    cases = manifest["run_metadata"]["cases"]
+    assert response(root, "CLEAN-01") == b""
+    assert cases["CLEAN-01"] == {
+        "first_call": "no_call",
+        "first_model": None,
+        "first_kind": None,
+        "first_provider_label": None,
+        "first_provider_digest": None,
+        "gateway_status": code,
+        "paid_metadata_error": False,
+    }
+    assert manifest["run_metadata"]["usage"]["CLEAN-01"] == []
+    assert response(root, "SEC-01") == VALID.encode()
+    assert cases["SEC-01"]["gateway_status"] == "accepted"
+    assert manifest["run_metadata"]["nonpublishable_case_ids"] == ["CLEAN-01"]
+    captured = capsys.readouterr()
+    assert captured.err == (
+        "eval live: not publishable; provider, infrastructure or policy failures occurred in "
+        "CLEAN-01\n"
+    )
+    assert "Cases: 2" in captured.out
+    assert (
+        "Warning: Recorded capture is not publishable: provider, infrastructure or policy failure"
+    ) in captured.out.splitlines()
+
+
+def test_v4_capture_with_a_v2_answer_replays_valid_and_scored(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root = fixture_root(tmp_path, ("SEC-01",))
+    report_path = tmp_path / "report.json"
+    v2_answer = json.dumps(
+        {
+            "findings": [
+                {
+                    "path": "app/authorization.py",
+                    "line": 3,
+                    "start_line": None,
+                    "severity": "critical",
+                    "category": "security",
+                    "title": "Authorization check is bypassed",
+                    "body": "The permission check does not protect this path.",
+                    "suggestion": None,
+                    "confidence": 0.9,
+                    "rule_name": "service-defaults:E3",
+                    "evidence_refs": [
+                        {"block_id": "F1:app/authorization.py", "start_line": 1, "end_line": 3}
+                    ],
+                }
+            ],
+            "summary": {
+                "problem": "Authorization is incomplete.",
+                "done_well": "The handler is readable.",
+                "effort": "small",
+            },
+        }
+    )
+    transport = FakeTransport([answer("primary-model", v2_answer)])
+
+    exit_code = main(
+        [
+            "--root",
+            str(root),
+            "--system",
+            str(V4_SYSTEM),
+            "--policy-arm",
+            "none",
+            "--report-json",
+            str(report_path),
+        ],
+        transport=transport,
+        model_settings=settings(),
+    )
+
+    assert exit_code == 0, capsys.readouterr().err
+    (request,) = transport.requests
+    assert request.response_schema is not None
+    assert request.response_schema.name == "ReviewOutputV2"
+    assert response(root, "SEC-01") == v2_answer.encode()
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    assert report["provenance"]["prompt_version"] == "v4"
+    assert (report["valid_response_count"], report["case_count"]) == (1, 1)
+    assert report["micro"]["tp"] == 1
+    assert report["critical"] == {"matched": 1, "total": 1, "recall": 1.0}

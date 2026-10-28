@@ -99,7 +99,7 @@ Case metadata deliberately contains **no model response or model/prompt provenan
 
 The recorder scores the **first call**, even if a retry, repair, or fallback later succeeds. A first-call HTTP 429 or timeout therefore records an empty response and counts as invalid; the later valid answer never replaces it. The manifest distinguishes `first_call: no_content` (a provider call failed before an answer), `empty_answer` (a provider answer had no text), and `no_call` (the gateway did not send a request). A successful later fallback can make a transient first-call failure part of a publishable, measured raw-first baseline, while its invalid response remains in the denominator.
 
-Terminal provider or infrastructure failure for a case, such as HTTP 402 on both primary and fallback or invalid accounting metadata on a paid HTTP 200 response, sets `run_metadata.baseline_publishable` to `false` and lists affected IDs in `nonpublishable_case_ids`. The safe per-case `paid_metadata_error` marker distinguishes the paid-metadata failure from ordinary invalid model text; the first raw answer remains recorded even when its JSON validates. The recorder saves all first raw responses, statuses, and the full manifest for diagnosis; both live and offline replay CLI return nonzero, and replay warns that the capture is not publishable. Capture is prepared in a same-filesystem temporary directory and promoted only after every response and the manifest are ready; an unexpected mid-corpus exception leaves no partial baseline, and an existing populated `responses/` is preserved. After inspecting the diagnostic capture and resolving the failure, manually delete or move `test-prs-dataset/responses/` out of the dataset before rerunning all 24 cases; the recorder refuses to overwrite an existing populated directory. Publish metrics or responses only from the complete replacement capture.
+Terminal provider or infrastructure failure for a case, such as HTTP 402 on both primary and fallback or invalid accounting metadata on a paid HTTP 200 response, sets `run_metadata.baseline_publishable` to `false` and lists affected IDs in `nonpublishable_case_ids`. So does a policy failure of a case before its first call, such as the snapshot prompt budget (#163): an empty response, `no_call` and the policy error code as `gateway_status`. The safe per-case `paid_metadata_error` marker distinguishes the paid-metadata failure from ordinary invalid model text; the first raw answer remains recorded even when its JSON validates. The recorder saves all first raw responses, statuses, and the full manifest for diagnosis; both live and offline replay CLI return nonzero, and replay warns that the capture is not publishable. Capture is prepared in a same-filesystem temporary directory and promoted only after every response and the manifest are ready; an unexpected mid-corpus exception leaves no partial baseline, and an existing populated `responses/` is preserved. After inspecting the diagnostic capture and resolving the failure, manually delete or move `test-prs-dataset/responses/` out of the dataset before rerunning all 24 cases; the recorder refuses to overwrite an existing populated directory. Publish metrics or responses only from the complete replacement capture.
 
 For each case, `run_metadata.cases` records the requested `first_model` and the actual first response's serving `provider` as `first_provider_label` plus a domain-separated `first_provider_digest`. Known EUrouter route names use safe public labels; any other provider string becomes `custom` with its digest, and a first call with no provider response records nulls. A paid but rejected first response keeps its available provider identity. This differs from the configured provider in `effective_settings`. Report observed provider labels and any custom digests with the measured baseline, without copying raw provider strings, URLs, or keys into the manifest or README.
 
@@ -154,7 +154,9 @@ The manifest also stores sorted `static_inputs`, `static_digest`, and `corpus_di
 | `app/modules/reviews/application/llm.py` | `LlmCallRecord.response` holds the envelope the recorder reads; `LlmErrorCode` values are the recorded `gateway_status` replay's publishability check reads. |
 | `app/modules/reviews/application/prompt_budget.py` | Chooses whole, truncated, and omitted diff files. |
 | `app/modules/reviews/application/prompt_builder.py` | Renders the system/user message envelope, including commit lines. |
+| `app/modules/reviews/application/rag_index.py` | `has_retrieved_section` decides which bound review prompt versions (v5) show the `<retrieved_excerpts>` section; eval has no RAG index, so it is empty. |
 | `app/modules/reviews/application/review_output.py` | Parses and validates review output; a failure triggers repair. |
+| `app/modules/reviews/application/review_path.py` | `SNAPSHOT_REVIEW_PROMPT_VERSIONS` decides which bound review prompt versions get the ReviewOutput v2 schema. |
 | `app/modules/reviews/application/run_failures.py` | Deliberately wide. Only `FAST_ATTEMPT_DEADLINE` (`run_failures.py:17`) shapes the eval, through `CASE_DEADLINE["fast"]` (`llm_gateway.py:147`): the gateway refuses a call with less than one call timeout left (`gateway.py:334-341`) and skips a same-model retry that would leave less (`gateway.py:278-281`). `llm.py:17` also imports `RETRYABLE_ERROR_CODES` for `LlmCallFailed.run_retryable`, which the eval never calls. The rest is worker retry, lease and failure-code policy: its edits do not shape the eval but still cause static drift. |
 | `app/common/infrastructure/github_link_header.py` | `has_next_relation` decides a sidecar page's tail, hence the omission marker. |
 | `app/modules/reviews/infrastructure/llm/answers.py` | Builds the provider schema, validates answers and prepares repair feedback. |
@@ -165,6 +167,7 @@ The manifest also stores sorted `static_inputs`, `static_digest`, and `corpus_di
 | `app/modules/reviews/infrastructure/llm/transport.py` | Encodes provider requests and extracts response text. |
 | `review/eval/pr-commit-messages.json` | Supplies verified bounded PR prefixes and tail evidence. |
 | `review/schemas/review-output.schema.json` | Defines strict response format and validation. |
+| `review/schemas/review-output.schema.v2.json` | Defines the response format and validation of a snapshot-path prompt (v4/v5). |
 | `review/scripts/eval_live.py` | Assembles each case request and selects first-call raw content. |
 | `review/scripts/commit_context.py` | Validates prefix schema and binds cohort/active identities. |
 | `test-prs-dataset/cases/*/case.json` (each canonical file) | Supplies the complete cohort identity used by sidecar binding, including subset captures. |
@@ -1015,7 +1018,10 @@ capture that records its arm.
 
 Run the live A/B in the manual workflow with `corpus=rules` and
 `policy_arm=none|valid|malicious` (the validate step refuses `rules` with `legacy`), three
-runs per arm. Dispatch one run at a time: the workflow's concurrency group
+runs per arm. `review_prompt` selects the prompt (`v3` by default, or `v4` or `v5`): every arm but
+`legacy` binds that prompt's version and pin, or, for a version without a pin, the sha of the
+prompt bytes, and `legacy` refuses v4 and v5 before any call.
+Dispatch one run at a time: the workflow's concurrency group
 `eval-live-eurouter` keeps one run pending, and a newer pending run cancels the older
 pending one. Artifacts are named `eval-live-<corpus>-<arm>-<run-id>-<attempt>` (raw:
 `eval-live-raw-<corpus>-<arm>-<run-id>-<attempt>`). Aggregate the downloaded reports:
@@ -1036,9 +1042,10 @@ settings or fallback model, a capture that is not publishable, a report without 
 fields or with non-integer counts or malformed usage, and the same report content given
 twice; it warns when only some runs of an arm carry usage, and notes under the table that
 in arm `none` the rule and exception figures are found and flagged without rules (there
-"Exceptions respected" does not apply). Live runs wait for the v4 `review.system` prompt (#130): v3 tells the model
-that only `<custom_instructions>` instruct it, so today the effect is about zero by
-construction.
+"Exceptions respected" does not apply). A live A/B needs a snapshot-path prompt and an arm
+other than `legacy`: v3 tells the model that only `<custom_instructions>` instruct it, so on
+v3 the effect is about zero by construction. The AC8 runs use `review_prompt=v5` (#144
+part 3b) and wait for budget approval.
 
 ### Service defaults in the policy arms
 
