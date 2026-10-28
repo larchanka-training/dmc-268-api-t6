@@ -111,7 +111,7 @@ _BITBUCKET_STATUS_TEXTS: dict[PolicyErrorCode, str] = {
 }
 
 
-def status_text(error: PolicyError, *, provider: Literal["github", "bitbucket"] = "github") -> str:
+def status_text(error: PolicyError, *, provider: Literal["github", "bitbucket"]) -> str:
     """The settings-page text of a policy error and its safe source location (#341)."""
     parts = []
     if error.source_path is not None:
@@ -184,7 +184,7 @@ class RulesDiagnostic:
 
     @classmethod
     def from_error(
-        cls, error: PolicyError, *, provider: Literal["github", "bitbucket"] = "github"
+        cls, error: PolicyError, *, provider: Literal["github", "bitbucket"]
     ) -> RulesDiagnostic:
         return cls(
             code=error.code.value,
@@ -297,7 +297,7 @@ def _no_installation_access(branch: str, now: datetime) -> RulesStatus:
         branch=branch,
         sha=None,
         checked_at=now,
-        diagnostics=(RulesDiagnostic.from_error(error),),
+        diagnostics=(RulesDiagnostic.from_error(error, provider="github"),),
     )
 
 
@@ -412,21 +412,21 @@ class ReadRulesDocument:
         try:
             head = await self._heads.resolve(target)
         except PolicyError as error:
-            return _unavailable(target.default_branch, None, error)
+            return _unavailable(target.default_branch, None, error, provider="github")
         loader = LoadPolicyDocuments(self._sources(target, head.sha), policy_base_sha=head.sha)
         try:
             loaded = await loader.load_document(RULES_DOCUMENT_PATH)
         except PolicyError as error:
             if error.code in _DOCUMENT_ERRORS:
-                return _invalid(head, None, error)
-            return _unavailable(head.branch, head.sha, error)
+                return _invalid(head, None, error, provider="github")
+            return _unavailable(head.branch, head.sha, error, provider="github")
         document = loaded.document
         if loaded.raw is None or document.text is None:
             return RulesReading(RulesStatusKind.MISSING, head.branch, head.sha)
         try:
             policy = parse_review_ignore(document.text, policy_base_sha=head.sha)
         except PolicyError as error:
-            return _invalid(head, document.text, error)
+            return _invalid(head, document.text, error, provider="github")
         return RulesReading(
             RulesStatusKind.PRESENT,
             head.branch,
@@ -475,7 +475,7 @@ class ReadBitbucketRulesDocument:
             await source.checkpoint()
         except PolicyError as error:
             if error.code in _DOCUMENT_ERRORS:
-                return _invalid(pinned, None, error)
+                return _invalid(pinned, None, error, provider="bitbucket")
             return _unavailable(pinned.branch, pinned.sha, error, provider="bitbucket")
         except (VcsUnavailable, VcsAccessDenied) as error:
             return _unavailable(
@@ -487,7 +487,7 @@ class ReadBitbucketRulesDocument:
         try:
             policy = parse_review_ignore(document.text, policy_base_sha=pinned.sha)
         except PolicyError as error:
-            return _invalid(pinned, document.text, error)
+            return _invalid(pinned, document.text, error, provider="bitbucket")
         return RulesReading(
             RulesStatusKind.PRESENT,
             pinned.branch,
@@ -508,13 +508,19 @@ def _bitbucket_source_error(error: VcsUnavailable | VcsAccessDenied) -> PolicyEr
     return PolicyError(PolicyErrorCode.ACCESS_DENIED, "Bitbucket rules source is inaccessible")
 
 
-def _invalid(head: BranchHead, text: str | None, error: PolicyError) -> RulesReading:
+def _invalid(
+    head: BranchHead,
+    text: str | None,
+    error: PolicyError,
+    *,
+    provider: Literal["github", "bitbucket"],
+) -> RulesReading:
     return RulesReading(
         RulesStatusKind.INVALID,
         head.branch,
         head.sha,
         text=text,
-        diagnostics=(RulesDiagnostic.from_error(error),),
+        diagnostics=(RulesDiagnostic.from_error(error, provider=provider),),
     )
 
 
@@ -523,7 +529,7 @@ def _unavailable(
     sha: str | None,
     error: PolicyError,
     *,
-    provider: Literal["github", "bitbucket"] = "github",
+    provider: Literal["github", "bitbucket"],
 ) -> RulesReading:
     return RulesReading(
         RulesStatusKind.UNAVAILABLE,
