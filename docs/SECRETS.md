@@ -516,17 +516,28 @@ admission и enabled hook отправьте реальное MR-событие 
 GitLab события **open/update/reopen** для bound enabled/available project проходят
 provider-specific eligibility: active connection, process admission, открытый MR,
 текущий head и `wait_for_ci=never`. Метка `ai-review` применяется только к GitHub,
-для GitLab она не нужна. Общий enqueue дополнительно требует **отсутствия активного
-Run для этого MR (Р-2)** и отсутствия webhook Run для того же `(MR, head)` (PIPELINE_SPEC T1).
+для GitLab она не нужна. Общий enqueue дополнительно требует **active rule version
+и разрешённого `review.system` prompt** (repository override либо active global
+version), **отсутствия активного Run для этого MR (Р-2)** и отсутствия webhook Run
+для того же `(MR, head)` (PIPELINE_SPEC T1).
 При `ActiveRunBlocker` результат `DEFERRED` возможен только для другого head с
 запрошенной отменой активного Run; иначе — `DUPLICATE`. GitLab dispatch откладывает
 receipt как `DEFERRED_RUN_TRIGGER` только для `DEFERRED`, поэтому не каждый конфликт
 означает повтор позже. Уже обработанный head может дать `HEAD_ALREADY_REVIEWED`.
 Дедупликация исходной доставки по stable key — отдельная проверка durable intake.
 
-Для успешного выполнения отдельно проверьте operational readiness: active
-rules/prompt и рабочие workers/LLM. Это условия готовности приёмки, отдельно от
-provider predicates. Используйте изолированный разрешённый project с согласованными
+Настройте rules/prompt **до доставки события**. Без них `lock_candidate` возвращает
+`MISSING_RULES`/`MISSING_PROMPT` → enqueue `UNCONFIGURED` → GitLab dispatch
+`PROJECTED_PR`: `mark_projected` потребляет receipt без deferred retry и без Run.
+Resend того же stable key отвечает duplicate и не повторяет enqueue. Sweep «2 мин
+без CI» выбирает только GitHub с `wait_for_ci=auto`, поэтому GitLab `never` не
+восстановит. После исправления нужен **новый eligible open/update/reopen event с
+новым delivery key**; для приёмки отправьте новый push/head. Здесь потребляется
+receipt, а не Run/head. Необязательные pins `review.conventions`/`review.verifier`
+не являются этим enqueue guard.
+
+Отдельно проверьте operational readiness выполнения: рабочие workers/LLM.
+Используйте изолированный разрешённый project с согласованными
 тестовыми MR: любой eligible MR в нём может запустить review и расход LLM.
 В **Settings → Webhooks →
 Edit → Recent events → View details** сохраните безопасное evidence: время, URL с тем

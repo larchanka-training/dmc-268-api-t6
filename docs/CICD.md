@@ -444,16 +444,28 @@ Test не заменяет Resend; установленная версия и е
 GitLab open/update/reopen для bound enabled/available project проходят provider
 eligibility при active connection, process admission, open MR/current head и
 `wait_for_ci=never`. GitHub-метка `ai-review` для GitLab не требуется. Общий enqueue
-дополнительно требует **отсутствия активного Run для этого MR (Р-2)** и отсутствия
-webhook Run для того же `(MR, head)` (PIPELINE_SPEC T1). При `ActiveRunBlocker` доставка получает
+дополнительно требует **active rule version и разрешённого `review.system` prompt**
+(repository override либо active global version), **отсутствия активного Run для
+этого MR (Р-2)** и отсутствия webhook Run для того же `(MR, head)` (PIPELINE_SPEC T1).
+При `ActiveRunBlocker` доставка получает
 `DEFERRED` только для другого head с запрошенной отменой активного Run; иначе —
 `DUPLICATE`. Это не обещание повтора каждого конфликта: GitLab dispatch откладывает
 receipt как `DEFERRED_RUN_TRIGGER` только для `DEFERRED`. Уже обработанный head
 может дать `HEAD_ALREADY_REVIEWED`; дедупликация исходной доставки по stable key —
 отдельная проверка durable intake.
 
-Для успешной приёмки отдельно нужны active rules/prompt и рабочие workers/LLM:
-это operational readiness, а не все перечисленные выше provider predicates.
+Настройте rules/prompt **до доставки события**. `lock_candidate` без них возвращает
+`MISSING_RULES`/`MISSING_PROMPT`, общий enqueue — `UNCONFIGURED`, GitLab dispatch —
+`PROJECTED_PR`: receipt помечается обработанным (`mark_projected`), без deferred retry
+и без создания Run. Resend с тем же stable key даёт duplicate и не запускает enqueue
+заново. Sweep «2 мин без CI» выбирает только GitHub с `wait_for_ci=auto` и не
+восстанавливает GitLab `never`. После исправления конфигурации отправьте **новое
+eligible open/update/reopen событие с новым delivery key**; для приёмки — новый
+push/head. Отсутствие rules/prompt потребляет receipt, а не Run/head. Необязательные
+`review.conventions`/`review.verifier` pins не являются этим enqueue guard.
+
+Для выполнения и успешной приёмки отдельно нужны рабочие workers/LLM
+(operational readiness).
 Используйте изолированный разрешённый project и только согласованные тестовые MR:
 любой eligible MR может запустить review и расход LLM.
 Затем подтвердите реальную доставку
@@ -564,6 +576,8 @@ workflow до него уже меняет Compose-файлы и edge-прокс
 | Ревизия | Что удаляет downgrade | Что даёт повторный upgrade |
 |---|---|---|
 | `20261026_0043` (#213) | переписывает `empty_file → missing_patch` в `code_change_diffs.omission_reason`; CHECK `ck_code_change_diffs_omission_reason` снова не допускает `empty_file`. Подтверждённый marker пустого файла для сохранённых run теряется | CHECK снова допускает `empty_file`, но переписанные строки остаются `missing_patch` и не повышаются заново; повторный upgrade не восстанавливает утраченный proof marker |
+| `20261026_0042` (#169) | Сначала берёт `ACCESS EXCLUSIVE` lock на `gitlab_connections` и `webhook_events`; **отказывает**, пока есть любая connection (включая revoked) или GitLab receipt. После отдельно согласованного явного удаления этих данных удаляет GitLab connection/binding structures (credentials, config, generation/reservations), external-ID sequence, provider/origin колонки receipt и связанные FK/CHECK/guards. GitHub receipts сохраняются | пустые GitLab connection/binding structures; sequence инициализируется по существующим положительным GitLab installation external IDs. Удалённые credentials/config/bindings/receipts не восстанавливаются |
+| `20261026_0041` (#169) | только composite UNIQUE `uq_provider_installations_owner` и `uq_repositories_owner`; строки installations/repositories остаются | оба ownership UNIQUE создаются заново; данные не пересоздаются |
 | `20261024_0039` (#130 D) | колонки `runs.conventions_prompt_version_id` и `runs.verifier_prompt_version_id` и их FK на `prompt_versions` (`runs_conventions_prompt_version_id_fkey`, `runs_verifier_prompt_version_id_fkey`): закреплённые версии conventions/verifier prompts. Готовые `run_policy_snapshots` и сохранённые в них bindings остаются | обе колонки Run NULL без backfill; удалённые Run prompt pins не восстанавливаются, исторические bindings без готового snapshot остаются неполными; существующие snapshot bindings сохраняются |
 | `20261024_0038` (#212) | четыре колонки: `runs.severity_threshold`, `runs.max_comments`, `run_policy_snapshots.severity_threshold`, `run_policy_snapshots.max_comments`, и два CHECK `ck_runs_publication_settings`, `ck_run_policy_snapshots_publication_settings`; закреплённые настройки публикации теряются. Native ENUM `severity_threshold`, принадлежащий Repository, сохраняется | обе пары снова NULL без backfill; Run переходит на исторический live fallback к текущей паре Repository, включая retry. Удалённые pins не восстанавливаются; новые runs/rerun закрепляют текущие значения |
 | `20261023_0038` (#144) | колонки `code_index_states.review_full_requested_at` и `review_full_requested_sha` с CHECK `ck_code_index_states_review_full_sha_at`: время и цель последней полной сборки индекса, запрошенной ревью (троттлинг) | обе колонки = NULL; троттлинг забывает последний запрос, и следующее ревью может сразу запросить полную сборку, не дожидаясь окончания 24 ч и даже для той же цели |

@@ -416,9 +416,10 @@ bookkeeping commit; historical approval does not approve the new diff.
       head afterward; measure all its counts, then Resend original delivery.
 - [x] P2 label: remove GitLab label prerequisite; document bound enabled/available
       project open/update/reopen, active connection/process admission, open/current
-      head, `wait_for_ci=never`, rules/prompt and workers/LLM; isolate test MRs.
-      Preserve GitHub label policy. Existing GitLab trigger suite: 91 passed,
-      zero skips; cache-only warning from managed-checkout permissions.
+      head, `wait_for_ci=never`; isolate test MRs and preserve GitHub label policy.
+      R5 clarifies active rules/resolved `review.system` as shared enqueue guards
+      and workers/LLM as execution readiness. Existing trigger suite: 91 passed,
+      zero skips.
 - [x] P3-1: entire Docker-call suffix is empty; isolated top-level Docker-config
       TMPDIR-bypass mutant fails three cases at the new assertion.
 - [x] P3-2: explicitly input recorded installation UUID, inspect and match identity;
@@ -471,9 +472,10 @@ The existing same-PR/all-P3 choice and #340 coordination remain applicable.
 - [x] P3-3: both runbooks state no active MR Run (Р-2), separate receipt/head dedup,
       and preserve DEFERRED only for another head with cancellation requested,
       otherwise DUPLICATE; only DEFERRED maps to GitLab receipt deferral.
-      Provider predicates separated from rules/prompt/workers/LLM readiness.
+      R5 supersedes the original readiness classification: active rules/resolved
+      `review.system` are shared enqueue guards; workers/LLM are execution readiness.
       Local source/PIPELINE_SPEC checked; trigger suite: **91 passed in 0.32s**,
-      zero skips (managed environment-lock warning only).
+      zero skips.
 - [x] Focused source proof: all 13 extracted GitLab Bash blocks pass `bash -n`;
       local Bash/stub cases only, without live credentials/server/Test/SSH,
       provider/LLM calls, new images or permanent prose-mirroring tests.
@@ -484,3 +486,39 @@ published head follow source freeze. Historical 9643 does not verify the new hea
 publication/replies/review request stay on the live PR, without a bookkeeping loop.
 All eight Task 7 live boxes remain unchecked; no merge, deployment, live acceptance
 or issue closure is authorized.
+
+
+## Review round 5 — bounded source ledger
+
+Historical R4 publication `d9b3cf33` / CI 40590080450: **9876 passed = 8148 unit +
+1728 integration**, zero skips/failures/errors. R5 review 5675151378 approved that
+old head; publication needs fresh approval and exact-head canonical CI.
+
+- [x] R0: rebase five existing commits onto main `f8b09818`, yielding `b58d9819`;
+      five range-diff `=` entries, all 15 feature blobs unchanged and all 23 incoming
+      main path blobs retained; remote publication lease remains `d9b3cf33`.
+- [x] P3-1: both runbooks and earlier current ledgers classify active rules and
+      resolved `review.system` (repository override or active global version) as
+      required shared enqueue guards, alongside Р-2/head dedup. Optional conventions/
+      verifier pins are not required; workers/LLM remain execution readiness.
+- [x] Trace missing rules/prompt → UNCONFIGURED → PROJECTED_PR → consumed receipt,
+      no deferred retry and no Run. Same-key Resend is duplicate; GitHub-auto-only
+      sweep does not recover GitLab never. Configure before delivery; after repair
+      send fresh eligible open/update/reopen event; acceptance uses new push/head.
+      Missing configuration consumes receipt, not Run/head. Preserve exact
+      DEFERRED/ActiveRunBlocker, HEAD_ALREADY_REVIEWED and GitHub label policy.
+- [x] P3-2: remove workstation-warning traces; retain successful historical
+      command/count and zero-skip evidence.
+- [x] General comment 6455817706: add 0042/0041 rollback rows from complete frozen
+      migrations (#169), including exclusive-lock/refusal for any connection or
+      GitLab receipt, explicit cleanup and lost/recreated state, then constraint-only
+      0041. Preserve separate #353 ownership of 0040/optional Redis/F1 image floor;
+      second merger rebases and reconciles. No live migration proof claimed.
+- [x] Focused existing checks: **125 passed in 7.69s, zero skips** (91 trigger cases
+      plus selected shared missing-candidate/dispatch/receipt/admission cases).
+      Local synthetic seams only; no new permanent tests or runtime changes.
+
+This ledger ends before source freeze/reviews/static gates and publication. Full
+pytest remains mandatory through exact-head canonical unit/four-integration-shard/
+exact-once CI; historical 9876 is not a new-head result. Final CI, actual replies and
+review request stay on the live PR. All eight Task 7 live boxes remain unchecked.
