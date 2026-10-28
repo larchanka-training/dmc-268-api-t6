@@ -35,7 +35,7 @@ from app.modules.reviews.application.get_run_actions import RunActionResponse
 from app.modules.reviews.application.get_run_comments import PublishedComment
 from app.modules.reviews.application.get_run_diff import DiffSnapshot
 from app.modules.reviews.application.get_run_file_lines import BlobCacheKey
-from app.modules.reviews.application.list_runs import RunCursor, RunListItem
+from app.modules.reviews.application.list_runs import RunCursor, RunListItem, RunUsage
 from app.modules.reviews.application.post_processing_diff_map import diff_map_from_snapshots
 from app.modules.reviews.application.process_run import (
     RunConventionsInput,
@@ -165,9 +165,20 @@ class SqlAlchemyRunRepository:
             .where(RunAction.run_id == Run.id)
             .scalar_subquery()
         )
+        tokens_in, tokens_out, cost_usd = self._usage_totals()
         summary_only = self._summary_only_projection()
         statement = (
-            select(Run, CodeChange, Repository.full_name, latest_model, action_count, summary_only)
+            select(
+                Run,
+                CodeChange,
+                Repository.full_name,
+                latest_model,
+                action_count,
+                summary_only,
+                tokens_in,
+                tokens_out,
+                cost_usd,
+            )
             .join(CodeChange, Run.code_change_id == CodeChange.id)
             .join(Repository, CodeChange.repository_id == Repository.id)
             .where(self._authorized_run())
@@ -204,9 +215,20 @@ class SqlAlchemyRunRepository:
             .where(RunAction.run_id == Run.id)
             .scalar_subquery()
         )
+        tokens_in, tokens_out, cost_usd = self._usage_totals()
         summary_only = self._summary_only_projection()
         statement = (
-            select(Run, CodeChange, Repository.full_name, latest_model, action_count, summary_only)
+            select(
+                Run,
+                CodeChange,
+                Repository.full_name,
+                latest_model,
+                action_count,
+                summary_only,
+                tokens_in,
+                tokens_out,
+                cost_usd,
+            )
             .join(CodeChange, Run.code_change_id == CodeChange.id)
             .join(Repository, CodeChange.repository_id == Repository.id)
             .where(Run.id == run_id)
@@ -252,9 +274,9 @@ class SqlAlchemyRunRepository:
                 await session.execute(
                     select(
                         func.count(UsageEvent.id),
-                        func.coalesce(func.sum(UsageEvent.tokens_in), 0),
-                        func.coalesce(func.sum(UsageEvent.tokens_out), 0),
-                        func.coalesce(func.sum(UsageEvent.cost_usd), 0),
+                        self._coalesced_usage_sum(UsageEvent.tokens_in),
+                        self._coalesced_usage_sum(UsageEvent.tokens_out),
+                        self._coalesced_usage_sum(UsageEvent.cost_usd),
                     ).where(UsageEvent.run_id == run_id)
                 )
             ).one()
@@ -590,6 +612,25 @@ class SqlAlchemyRunRepository:
         return CancelRequestResult(found=True, changed=False)
 
     @staticmethod
+    def _coalesced_usage_sum(column: Any) -> ColumnElement[Any]:
+        return func.coalesce(func.sum(column), 0)
+
+    @staticmethod
+    def _usage_totals() -> tuple[ColumnElement[int], ColumnElement[int], ColumnElement[Decimal]]:
+        def total(column: Any) -> ColumnElement[Any]:
+            return (
+                select(SqlAlchemyRunRepository._coalesced_usage_sum(column))
+                .where(UsageEvent.run_id == Run.id)
+                .scalar_subquery()
+            )
+
+        return (
+            total(UsageEvent.tokens_in),
+            total(UsageEvent.tokens_out),
+            total(UsageEvent.cost_usd),
+        )
+
+    @staticmethod
     def _summary_only_projection() -> ColumnElement[bool]:
         summary_only = (
             select(func.bool_or(CodeChangeDiff.summary_only))
@@ -623,6 +664,9 @@ class SqlAlchemyRunRepository:
         model: str | None,
         action_count: int,
         summary_only: bool = False,
+        tokens_in: int = 0,
+        tokens_out: int = 0,
+        cost_usd: Decimal = Decimal(0),
     ) -> RunListItem:
         return RunListItem(
             id=run.id,
@@ -643,6 +687,12 @@ class SqlAlchemyRunRepository:
             created_at=run.created_at,
             trigger=run.trigger,
             summary_only=summary_only,
+            usage=RunUsage(
+                tokens_in=int(tokens_in),
+                tokens_out=int(tokens_out),
+                cost_usd=Decimal(cost_usd),
+            ),
+            triggered_by=run.triggered_by,
         )
 
     @staticmethod

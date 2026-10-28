@@ -46,6 +46,7 @@ from app.modules.reviews.application.trigger_from_delivery import (
     TriggerFromDelivery,
 )
 from app.modules.reviews.application.try_enqueue_webhook_run import (
+    UNSET,
     CandidateMiss,
     DuplicateReason,
     EnqueueResult,
@@ -54,6 +55,7 @@ from app.modules.reviews.application.try_enqueue_webhook_run import (
     RunInsertCandidate,
     RunPublicationKind,
     TryEnqueueWebhookRun,
+    UnsetType,
 )
 from app.modules.reviews.infrastructure.ci_eligibility_candidates import (
     SqlAlchemyEligibilityCandidateStore,
@@ -151,7 +153,11 @@ class Runs:
         return self.candidate
 
     async def insert_webhook_run(
-        self, candidate: RunInsertCandidate, now: datetime
+        self,
+        candidate: RunInsertCandidate,
+        now: datetime,
+        *,
+        triggered_by: str | None | UnsetType = UNSET,
     ) -> PendingRunMessage | DuplicateReason:
         if self.pending is not None:
             return self.duplicate
@@ -627,6 +633,60 @@ def test_a_pr_with_no_open_row_is_reported_without_enqueueing() -> None:
         trigger.on_label(PullRequestLabelEvent(_outcome_event(), "ai-review"))
     ) == RunTriggerOutcome("no open pull request")
     assert enqueuer.calls == []
+
+
+def test_qualifying_delivery_passes_the_sender_and_ci_does_not() -> None:
+    recorded: list[str | None | UnsetType] = []
+
+    class Enqueuer:
+        async def execute(
+            self,
+            code_change_id: UUID,
+            expected_head_sha: str,
+            *,
+            expected_installation_external_id: int | None = None,
+            triggered_by: str | None | UnsetType = UNSET,
+        ) -> EnqueueResult:
+            recorded.append(triggered_by)
+            return EnqueueResult(EnqueueStatus.ENQUEUED)
+
+    trigger = TriggerFromDelivery(uow_factory=targets_uow(OutcomeTargets()), enqueuer=Enqueuer())
+
+    asyncio.run(trigger.on_pr(replace(_outcome_event("synchronize"), sender_login="octocat")))
+    asyncio.run(trigger.on_pr(replace(_outcome_event("reopened"), sender_login="dependabot[bot]")))
+    asyncio.run(
+        trigger.on_label(
+            PullRequestLabelEvent(
+                replace(_outcome_event("labeled"), sender_login="labeler"), "ai-review"
+            )
+        )
+    )
+    asyncio.run(trigger.on_pr(replace(_outcome_event("synchronize"), sender_login=None)))
+    asyncio.run(trigger.on_ci(CiTriggerEvent(17, 101, _HEAD, "check_suite")))
+
+    assert recorded == ["octocat", "dependabot[bot]", "labeler", None, UNSET]
+
+
+def test_an_enqueuer_without_triggered_by_still_runs() -> None:
+    calls: list[UUID] = []
+
+    class Enqueuer:
+        async def execute(
+            self,
+            code_change_id: UUID,
+            expected_head_sha: str,
+            *,
+            expected_installation_external_id: int | None = None,
+        ) -> EnqueueResult:
+            calls.append(code_change_id)
+            return EnqueueResult(EnqueueStatus.ENQUEUED)
+
+    trigger = TriggerFromDelivery(uow_factory=targets_uow(OutcomeTargets()), enqueuer=Enqueuer())
+
+    asyncio.run(trigger.on_pr(replace(_outcome_event("synchronize"), sender_login="octocat")))
+    asyncio.run(trigger.on_ci(CiTriggerEvent(17, 101, _HEAD, "check_suite")))
+
+    assert calls == [_PR, _PR]
 
 
 @pytest.mark.parametrize(

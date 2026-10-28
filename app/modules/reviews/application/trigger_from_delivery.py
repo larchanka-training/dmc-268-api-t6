@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
+import inspect
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Protocol, cast
 from uuid import UUID
 
 from app.common.application.unit_of_work import UnitOfWork
@@ -13,8 +14,10 @@ from app.modules.reviews.application.project_github_pull_request import (
     PullRequestLabelEvent,
 )
 from app.modules.reviews.application.try_enqueue_webhook_run import (
+    UNSET,
     EnqueueResult,
     EnqueueStatus,
+    UnsetType,
     describe_enqueue,
 )
 
@@ -85,7 +88,10 @@ class TriggerFromDelivery:
         if target is None:
             return RunTriggerOutcome(_NO_OPEN_PULL_REQUEST)
         return await self._enqueue(
-            target.code_change_id, target.head_sha, event.installation_external_id
+            target.code_change_id,
+            target.head_sha,
+            event.installation_external_id,
+            triggered_by=event.sender_login,
         )
 
     async def on_label(self, event: PullRequestLabelEvent) -> RunTriggerOutcome:
@@ -109,14 +115,52 @@ class TriggerFromDelivery:
         )
 
     async def _enqueue(
-        self, code_change_id: UUID, head_sha: str, installation_external_id: int
+        self,
+        code_change_id: UUID,
+        head_sha: str,
+        installation_external_id: int,
+        *,
+        triggered_by: str | None | UnsetType = UNSET,
     ) -> RunTriggerOutcome:
-        result = await self._enqueuer.execute(
+        result = await _execute(
+            self._enqueuer,
             code_change_id,
             head_sha,
-            expected_installation_external_id=installation_external_id,
+            installation_external_id,
+            triggered_by=triggered_by,
         )
         return RunTriggerOutcome(
             describe_enqueue(code_change_id, head_sha, result),
             retry_required=result.status == EnqueueStatus.DEFERRED,
         )
+
+
+def _accepts_triggered_by(method: Callable[..., object]) -> bool:
+    parameters = inspect.signature(method).parameters
+    return "triggered_by" in parameters or any(
+        parameter.kind is inspect.Parameter.VAR_KEYWORD for parameter in parameters.values()
+    )
+
+
+async def _execute(
+    enqueuer: WebhookRunEnqueuer,
+    code_change_id: UUID,
+    head_sha: str,
+    installation_external_id: int,
+    *,
+    triggered_by: str | None | UnsetType,
+) -> EnqueueResult:
+    execute = enqueuer.execute
+    if triggered_by is not UNSET and _accepts_triggered_by(execute):
+        accepting = cast(Callable[..., Awaitable[EnqueueResult]], execute)
+        return await accepting(
+            code_change_id,
+            head_sha,
+            expected_installation_external_id=installation_external_id,
+            triggered_by=triggered_by,
+        )
+    return await execute(
+        code_change_id,
+        head_sha,
+        expected_installation_external_id=installation_external_id,
+    )

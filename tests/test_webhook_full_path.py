@@ -54,6 +54,7 @@ from app.modules.reviews.application.trigger_from_delivery import (
     TriggerFromDelivery,
 )
 from app.modules.reviews.application.try_enqueue_webhook_run import (
+    UNSET,
     CandidateMiss,
     DuplicateReason,
     EnqueueStatus,
@@ -61,6 +62,7 @@ from app.modules.reviews.application.try_enqueue_webhook_run import (
     RunInsertCandidate,
     RunPublicationKind,
     TryEnqueueWebhookRun,
+    UnsetType,
 )
 from app.modules.reviews.application.vcs_diff import PullRequestLocator, VcsFile, VcsPullRequest
 from tests.installation_onboarding_fakes import provider_checkpoint
@@ -237,7 +239,11 @@ class RunStore:
         )
 
     async def insert_webhook_run(
-        self, candidate: RunInsertCandidate, now: datetime
+        self,
+        candidate: RunInsertCandidate,
+        now: datetime,
+        *,
+        triggered_by: str | None | UnsetType = UNSET,
     ) -> PendingRunMessage | DuplicateReason:
         if self.state.message is not None:
             return DuplicateReason.ACTIVE_RUN

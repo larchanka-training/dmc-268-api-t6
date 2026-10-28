@@ -7,7 +7,7 @@ import pytest
 
 from app.main import app, get_run_repository
 from app.modules.reviews.application.get_run import RunReview, RunReviewRepository
-from app.modules.reviews.application.list_runs import RunCursor, RunListItem
+from app.modules.reviews.application.list_runs import RunCursor, RunListItem, RunUsage
 from app.modules.reviews.application.run_trigger import RunTrigger
 from tests.portal_test_client import authenticated_test_client as TestClient
 
@@ -104,6 +104,8 @@ def test_runs_list_uses_the_camel_case_contract() -> None:
                 "model": "gpt-test",
                 "actionCount": 2,
                 "summaryOnly": False,
+                "usage": {"tokensIn": 0, "tokensOut": 0, "costUsd": 0.0},
+                "triggeredBy": None,
                 "pullRequest": {
                     "repo": "org/repo",
                     "number": 1,
@@ -115,6 +117,72 @@ def test_runs_list_uses_the_camel_case_contract() -> None:
         ],
         "nextCursor": None,
     }
+
+
+def test_runs_list_and_detail_return_usage_totals() -> None:
+    created_at = datetime(2026, 9, 24, tzinfo=UTC)
+    quiet = make_item(1, created_at)
+    summed = replace(
+        make_item(2, created_at),
+        usage=RunUsage(tokens_in=3, tokens_out=5, cost_usd=Decimal("0.375")),
+    )
+
+    class UsageReviewRepository(FakeRunDetailRepository):
+        async def get_run_review(self, run_id: UUID) -> RunReview | None:
+            if self.item is None:
+                return None
+            return replace(
+                empty_review(),
+                usage_calls=1,
+                tokens_in=3,
+                tokens_out=5,
+                cost_usd=Decimal("0.375"),
+            )
+
+    try:
+        client = TestClient(app)
+        app.dependency_overrides[get_run_repository] = lambda: FakeRunRepository([quiet, summed])
+        listed = client.get("/api/runs")
+        app.dependency_overrides[get_run_repository] = lambda: UsageReviewRepository(summed)
+        detail = client.get(f"/api/runs/{summed.id}")
+    finally:
+        app.dependency_overrides.clear()
+
+    assert listed.status_code == 200
+    assert listed.json()["items"][0]["usage"] == {"tokensIn": 0, "tokensOut": 0, "costUsd": 0.0}
+    assert listed.json()["items"][1]["usage"] == {"tokensIn": 3, "tokensOut": 5, "costUsd": 0.375}
+    body = detail.json()
+    assert detail.status_code == 200
+    assert body["usage"] == {"tokensIn": 3, "tokensOut": 5, "costUsd": 0.375}
+    assert body["budget"]["tokensIn"] == 3
+    assert body["budget"]["tokensOut"] == 5
+    assert body["budget"]["costUsd"] == 0.375
+
+
+def test_runs_list_and_detail_return_triggered_by() -> None:
+    created_at = datetime(2026, 9, 24, tzinfo=UTC)
+    named = replace(make_item(1, created_at), triggered_by="octocat")
+    unnamed = make_item(2, created_at)
+
+    try:
+        client = TestClient(app)
+        app.dependency_overrides[get_run_repository] = lambda: FakeRunRepository([named, unnamed])
+        listed = client.get("/api/runs")
+        app.dependency_overrides[get_run_repository] = lambda: FakeRunDetailRepository(named)
+        detail = client.get(f"/api/runs/{named.id}")
+        app.dependency_overrides[get_run_repository] = lambda: FakeRunDetailRepository(unnamed)
+        quiet = client.get(f"/api/runs/{unnamed.id}")
+    finally:
+        app.dependency_overrides.clear()
+
+    assert listed.status_code == 200
+    assert listed.json()["items"][0]["triggeredBy"] == "octocat"
+    assert listed.json()["items"][1]["triggeredBy"] is None
+    assert detail.status_code == 200
+    assert detail.json()["triggeredBy"] == "octocat"
+    assert quiet.status_code == 200
+    assert quiet.json()["triggeredBy"] is None
+    assert "triggeredBy" in quiet.json()
 
 
 def test_runs_list_validates_filters_and_passes_a_stable_cursor() -> None:

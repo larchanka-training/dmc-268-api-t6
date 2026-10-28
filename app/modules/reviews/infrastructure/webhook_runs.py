@@ -26,6 +26,7 @@ from app.modules.integrations.gitlab.infrastructure.models import (
 from app.modules.integrations.gitlab.infrastructure.request_credentials import (
     active_gitlab_target_metadata,
 )
+from app.modules.integrations.webhooks.infrastructure.models import WebhookEvent
 from app.modules.repositories.infrastructure.models import (
     ProviderInstallation,
     Repository,
@@ -38,11 +39,13 @@ from app.modules.reviews.application.determine_ci_eligibility import (
 )
 from app.modules.reviews.application.project_github_pull_request import PullRequestState
 from app.modules.reviews.application.try_enqueue_webhook_run import (
+    UNSET,
     ActiveRunBlocker,
     CandidateMiss,
     DuplicateReason,
     PendingRunMessage,
     RunInsertCandidate,
+    UnsetType,
 )
 from app.modules.reviews.infrastructure.gitlab_eligibility_candidates import (
     read_gitlab_eligibility_candidate,
@@ -229,7 +232,11 @@ class SqlAlchemyWebhookRunStore:
         return ci, pr, repository, installation
 
     async def insert_webhook_run(
-        self, candidate: RunInsertCandidate, now: datetime
+        self,
+        candidate: RunInsertCandidate,
+        now: datetime,
+        *,
+        triggered_by: str | None | UnsetType = UNSET,
     ) -> PendingRunMessage | DuplicateReason | ActiveRunBlocker:
         code_change_id = candidate.ci.code_change_id
         active = await self._session.scalar(
@@ -240,6 +247,7 @@ class SqlAlchemyWebhookRunStore:
         )
         if active is not None:
             return ActiveRunBlocker(active.head_sha, active.cancel_requested)
+        login = await self._push_author(candidate) if triggered_by is UNSET else triggered_by
         idempotency_key = sha256(
             f"webhook:{code_change_id}:{candidate.ci.head_sha}".encode()
         ).hexdigest()
@@ -268,6 +276,7 @@ class SqlAlchemyWebhookRunStore:
                 cancel_requested=False,
                 message_published_at=None,
                 created_at=now,
+                triggered_by=login,
             )
             # ``head_already_reviewed`` is inferred from any unique violation here. That is safe
             # only because the PR row lock and the active-Run pre-check above make
@@ -279,6 +288,24 @@ class SqlAlchemyWebhookRunStore:
         if inserted is None:
             return DuplicateReason.HEAD_ALREADY_REVIEWED
         return PendingRunMessage.from_candidate(inserted, candidate, now)
+
+    async def _push_author(self, candidate: RunInsertCandidate) -> str | None:
+        login = await self._session.scalar(
+            select(WebhookEvent.payload["sender"]["login"].as_string())
+            .where(
+                WebhookEvent.event == "pull_request",
+                WebhookEvent.action == "synchronize",
+                WebhookEvent.payload.is_not(None),
+                WebhookEvent.installation_external_id == candidate.ci.installation_external_id,
+                WebhookEvent.payload["repository"]["id"].as_string()
+                == str(candidate.repository_external_id),
+                WebhookEvent.payload["pull_request"]["head"]["sha"].as_string()
+                == candidate.ci.head_sha,
+            )
+            .order_by(WebhookEvent.received_at.desc())
+            .limit(1)
+        )
+        return login if isinstance(login, str) else None
 
     async def notify_run_updated(self, run_id: UUID, workspace_id: UUID, status: str) -> None:
         payload = json.dumps(

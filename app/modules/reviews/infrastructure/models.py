@@ -249,6 +249,7 @@ class Run(Base):
         pg_enum(RunState, "run_state"), nullable=False, server_default=RunState.QUEUED.value
     )
     trigger: Mapped[RunTrigger] = mapped_column(String(50), nullable=False)
+    triggered_by: Mapped[str | None] = mapped_column(String(255), nullable=True)
     idempotency_key: Mapped[str] = mapped_column(CHAR(64), nullable=False)
     engine: Mapped[Engine] = mapped_column(pg_enum(Engine, "engine"), nullable=False)
     rule_version_id: Mapped[UUID] = mapped_column(ForeignKey("rule_versions.id"), nullable=False)

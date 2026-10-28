@@ -54,7 +54,7 @@ tags:
       The `.review/rules.md` status of a repository; the planned DB rule set operations are
       replaced (RULES_FORMAT_SPEC §10).
   - name: metrics
-    description: Usage metrics (post-MVP).
+    description: Usage totals, a daily series, and workspace daily budgets.
   - name: auth
     description: GitHub App user authorization and session tokens.
 paths:
@@ -685,10 +685,12 @@ paths:
     get:
       operationId: getMetricsSummary
       tags: [metrics]
-      summary: Usage tiles and time series from recorded usage events
+      summary: Totals, a daily series, and workspace daily budgets
+      description: >-
+        Runs, verdicts, findings, and spend for repositories the caller can see.
+        An unknown or invisible `repo` is an empty summary, not 404. `repo` does not
+        filter the workspace list.
       x-service: portal-api
-      x-status: planned
-      x-note: Post-MVP; the shape is indicative until the metrics dashboard is scheduled.
       parameters:
         - name: range
           in: query
@@ -697,6 +699,14 @@ paths:
             type: string
             enum: [24h, 7d, 30d]
             default: 24h
+        - name: repo
+          in: query
+          required: false
+          description: Repository full name, `owner/name`.
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 512
       responses:
         "200":
           description: Metrics for the requested range.
@@ -1034,6 +1044,8 @@ components:
         - summaryOnly
         - pullRequest
         - actionCount
+        - usage
+        - triggeredBy
         - errorCode
       properties:
         id:
@@ -1082,6 +1094,11 @@ components:
         actionCount:
           type: integer
           minimum: 0
+        usage:
+          $ref: "#/components/schemas/RunUsage"
+        triggeredBy:
+          type: [string, "null"]
+          description: GitHub login that started the run; null when the actor is unknown.
         errorCode:
           type: [string, "null"]
           description: >-
@@ -1107,6 +1124,8 @@ components:
         - summaryOnly
         - pullRequest
         - actionCount
+        - usage
+        - triggeredBy
         - errorCode
         - findings
         - summary
@@ -1160,6 +1179,11 @@ components:
         actionCount:
           type: integer
           minimum: 0
+        usage:
+          $ref: "#/components/schemas/RunUsage"
+        triggeredBy:
+          type: [string, "null"]
+          description: GitHub login that started the run; null when the actor is unknown.
         errorCode:
           type: [string, "null"]
           description: >-
@@ -1275,6 +1299,23 @@ components:
           minimum: 0
         info:
           type: integer
+          minimum: 0
+      additionalProperties: false
+    RunUsage:
+      type: object
+      description: >-
+        Sum of usage_events for this run, including every attempt. Zeros when the run has no
+        events. Token and cost caps stay on RunBudget.
+      required: [tokensIn, tokensOut, costUsd]
+      properties:
+        tokensIn:
+          type: integer
+          minimum: 0
+        tokensOut:
+          type: integer
+          minimum: 0
+        costUsd:
+          type: number
           minimum: 0
       additionalProperties: false
     RunBudget:
@@ -2041,25 +2082,147 @@ components:
       additionalProperties: false
     MetricsSummary:
       type: object
-      description: Indicative shape; fixed when the metrics dashboard is scheduled.
-      required: [range, tiles, series]
+      description: Totals, a zero-filled UTC day series, and workspace daily budgets.
+      required: [range, totals, series, workspaces]
       properties:
         range:
           type: string
           enum: [24h, 7d, 30d]
-        tiles:
-          type: object
-          description: Named totals for the range, e.g. runs, findings, costUsd.
-          additionalProperties:
-            type: number
+        totals:
+          $ref: "#/components/schemas/MetricsTotals"
         series:
           type: array
           items:
-            type: object
-            required: [bucketStart]
-            properties:
-              bucketStart:
-                type: string
-                format: date-time
-            additionalProperties:
-              type: number
+            $ref: "#/components/schemas/MetricsDay"
+        workspaces:
+          type: array
+          items:
+            $ref: "#/components/schemas/WorkspaceDailyBudget"
+      additionalProperties: false
+    MetricsTotals:
+      type: object
+      required:
+        - runsByStatus
+        - pullsByVerdict
+        - findingsBySeverity
+        - findingsByCategory
+        - succeededAverageDurationSeconds
+        - tokensIn
+        - tokensOut
+        - costUsd
+      properties:
+        runsByStatus:
+          $ref: "#/components/schemas/RunsByStatus"
+        pullsByVerdict:
+          $ref: "#/components/schemas/PullsByVerdict"
+        findingsBySeverity:
+          $ref: "#/components/schemas/SeverityCounts"
+        findingsByCategory:
+          $ref: "#/components/schemas/FindingsByCategory"
+        succeededAverageDurationSeconds:
+          type: number
+          minimum: 0
+        tokensIn:
+          type: integer
+          minimum: 0
+        tokensOut:
+          type: integer
+          minimum: 0
+        costUsd:
+          type: number
+          minimum: 0
+      additionalProperties: false
+    RunsByStatus:
+      type: object
+      required: [queued, running, publishing, succeeded, failed, cancelled, skipped]
+      properties:
+        queued:
+          type: integer
+          minimum: 0
+        running:
+          type: integer
+          minimum: 0
+        publishing:
+          type: integer
+          minimum: 0
+        succeeded:
+          type: integer
+          minimum: 0
+        failed:
+          type: integer
+          minimum: 0
+        cancelled:
+          type: integer
+          minimum: 0
+        skipped:
+          type: integer
+          minimum: 0
+      additionalProperties: false
+    PullsByVerdict:
+      type: object
+      required: [blocking, attention, clean, noVerdict]
+      properties:
+        blocking:
+          type: integer
+          minimum: 0
+        attention:
+          type: integer
+          minimum: 0
+        clean:
+          type: integer
+          minimum: 0
+        noVerdict:
+          type: integer
+          minimum: 0
+      additionalProperties: false
+    FindingsByCategory:
+      type: object
+      required: [security, correctness, performance, readability]
+      properties:
+        security:
+          type: integer
+          minimum: 0
+        correctness:
+          type: integer
+          minimum: 0
+        performance:
+          type: integer
+          minimum: 0
+        readability:
+          type: integer
+          minimum: 0
+      additionalProperties: false
+    MetricsDay:
+      type: object
+      required: [day, findingsByCategory, runCount, averageDurationSeconds, costUsd]
+      properties:
+        day:
+          type: string
+          format: date
+        findingsByCategory:
+          $ref: "#/components/schemas/FindingsByCategory"
+        runCount:
+          type: integer
+          minimum: 0
+        averageDurationSeconds:
+          type: number
+          minimum: 0
+        costUsd:
+          type: number
+          minimum: 0
+      additionalProperties: false
+    WorkspaceDailyBudget:
+      type: object
+      required: [name, dailyBudgetUsd, spentTodayUsd, paused]
+      properties:
+        name:
+          type: string
+        dailyBudgetUsd:
+          type: number
+          minimum: 0
+        spentTodayUsd:
+          type: number
+          minimum: 0
+        paused:
+          type: boolean
+      additionalProperties: false
