@@ -141,3 +141,296 @@ def test_reads_current_pr_after_uuid_lookup_and_rejects_redirects() -> None:
                 )
 
     asyncio.run(scenario())
+
+
+def test_resolves_private_fork_head_through_destination_pr_authority() -> None:
+    """A destination credential must not need permission to read the source fork."""
+
+    async def scenario() -> None:
+        fork_uuid = UUID(int=9)
+        fork_workspace = UUID(int=10)
+        requests: list[str] = []
+
+        def respond(request: httpx.Request) -> httpx.Response:
+            url = str(request.url)
+            requests.append(url)
+            assert request.url.host == "api.bitbucket.org"
+            assert request.headers["Authorization"] == "Bearer test-token"
+            if request.url.path.endswith("/pullrequests/17"):
+                return httpx.Response(
+                    200,
+                    json={
+                        "id": 17,
+                        "state": "OPEN",
+                        "title": "Fork change",
+                        "description": None,
+                        "updated_on": "2026-10-26T10:00:00+00:00",
+                        "source": {
+                            "branch": {"name": "feature"},
+                            "commit": {"hash": "a" * 12},
+                            "repository": {
+                                "uuid": "{" + str(fork_uuid) + "}",
+                                "workspace": {"uuid": "{" + str(fork_workspace) + "}"},
+                            },
+                        },
+                        "destination": {
+                            "branch": {"name": "main"},
+                            "commit": {"hash": "b" * 12},
+                            "repository": {"uuid": "{" + str(TARGET.repository_uuid) + "}"},
+                        },
+                    },
+                )
+            if request.url.path.endswith("/commit/aaaaaaaaaaaa"):
+                if f"{{{TARGET.repository_uuid}}}" in request.url.path:
+                    return httpx.Response(200, json={"hash": "a" * 40})
+                return httpx.Response(404)
+            if request.url.path.endswith("/commit/bbbbbbbbbbbb"):
+                return httpx.Response(200, json={"hash": "b" * 40})
+            return httpx.Response(
+                200,
+                json={
+                    "uuid": "{" + str(TARGET.repository_uuid) + "}",
+                    "workspace": {
+                        "uuid": "{" + str(TARGET.bitbucket_workspace_uuid) + "}",
+                        "slug": "team",
+                    },
+                    "slug": "repo",
+                    "full_name": "team/repo",
+                    "name": "Repo",
+                    "is_private": True,
+                    "mainbranch": {"name": "main"},
+                    "links": {"html": {"href": "https://bitbucket.org/team/repo"}},
+                },
+            )
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+            current = await BitbucketCurrentPullRequestProvider(client, Credentials()).get_current(
+                TARGET, 17
+            )
+        assert current.head_sha == "a" * 40
+        assert current.base_sha == "b" * 40
+        assert current.state == "open"
+        assert any(f"%7B{TARGET.repository_uuid}%7D/commit/aaaaaaaaaaaa" in url for url in requests)
+        assert not any(f"%7B{fork_uuid}%7D/commit/" in url for url in requests)
+
+    asyncio.run(scenario())
+
+
+def test_private_fork_head_falls_back_to_last_destination_pr_commit() -> None:
+    """The PR commits endpoint is chronological; the last page carries the head."""
+
+    async def scenario() -> None:
+        requests: list[str] = []
+        commits_path = "/2.0/repositories/team/repo/pullrequests/17/commits"
+
+        def respond(request: httpx.Request) -> httpx.Response:
+            requests.append(str(request.url))
+            assert request.url.host == "api.bitbucket.org"
+            assert request.headers["Authorization"] == "Bearer test-token"
+            if request.url.path.endswith("/pullrequests/17"):
+                return httpx.Response(
+                    200,
+                    json={
+                        "id": 17,
+                        "state": "OPEN",
+                        "title": "Private fork change",
+                        "updated_on": "2026-10-26T10:00:00+00:00",
+                        "source": {
+                            "branch": {"name": "feature"},
+                            "commit": {"hash": "a" * 12},
+                            "repository": {"uuid": "{" + str(UUID(int=9)) + "}"},
+                        },
+                        "destination": {
+                            "branch": {"name": "main"},
+                            "commit": {"hash": "b" * 40},
+                            "repository": {"uuid": "{" + str(TARGET.repository_uuid) + "}"},
+                        },
+                    },
+                )
+            if request.url.path.endswith("/commit/aaaaaaaaaaaa"):
+                return httpx.Response(404)
+            if request.url.path == commits_path:
+                if request.url.params.get("page") == "2":
+                    return httpx.Response(200, json={"values": [{"hash": "a" * 40}]})
+                return httpx.Response(
+                    200,
+                    json={
+                        "values": [{"hash": "c" * 40}],
+                        "next": "https://api.bitbucket.org" + commits_path + "?pagelen=100&page=2",
+                    },
+                )
+            return httpx.Response(
+                200,
+                json={
+                    "uuid": "{" + str(TARGET.repository_uuid) + "}",
+                    "workspace": {
+                        "uuid": "{" + str(TARGET.bitbucket_workspace_uuid) + "}",
+                        "slug": "team",
+                    },
+                    "slug": "repo",
+                    "full_name": "team/repo",
+                    "name": "Repo",
+                    "is_private": True,
+                    "mainbranch": {"name": "main"},
+                    "links": {"html": {"href": "https://bitbucket.org/team/repo"}},
+                },
+            )
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+            current = await BitbucketCurrentPullRequestProvider(client, Credentials()).get_current(
+                TARGET, 17
+            )
+        assert current.head_sha == "a" * 40
+        assert current.base_sha == "b" * 40
+        assert len(requests) == 5
+        assert requests[-2:] == [
+            "https://api.bitbucket.org" + commits_path + "?pagelen=100",
+            "https://api.bitbucket.org" + commits_path + "?pagelen=100&page=2",
+        ]
+        assert all(f"%7B{UUID(int=9)}%7D" not in path for path in requests)
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize(
+    "failure", ["host", "path", "blank_pagelen", "blank_key", "prefix", "empty", "page_limit"]
+)
+def test_pr_commits_fallback_rejects_untrusted_or_unbounded_pages(failure: str) -> None:
+    async def scenario() -> None:
+        requests: list[str] = []
+        commits_path = "/2.0/repositories/team/repo/pullrequests/17/commits"
+
+        def respond(request: httpx.Request) -> httpx.Response:
+            requests.append(str(request.url))
+            assert request.url.host == "api.bitbucket.org"
+            assert request.headers["Authorization"] == "Bearer test-token"
+            if request.url.path.endswith("/pullrequests/17"):
+                return httpx.Response(
+                    200,
+                    json={
+                        "id": 17,
+                        "state": "OPEN",
+                        "title": "Fork change",
+                        "updated_on": "2026-10-26T10:00:00+00:00",
+                        "source": {
+                            "branch": {"name": "feature"},
+                            "commit": {"hash": "a" * 12},
+                        },
+                        "destination": {
+                            "branch": {"name": "main"},
+                            "commit": {"hash": "b" * 40},
+                            "repository": {"uuid": "{" + str(TARGET.repository_uuid) + "}"},
+                        },
+                    },
+                )
+            if request.url.path.endswith("/commit/aaaaaaaaaaaa"):
+                return httpx.Response(404)
+            if request.url.path == commits_path:
+                if failure == "prefix":
+                    return httpx.Response(200, json={"values": [{"hash": "c" * 40}]})
+                if failure == "empty":
+                    return httpx.Response(200, json={"values": []})
+                if failure == "host":
+                    next_url = "https://evil.example" + commits_path + "?page=2"
+                elif failure == "path":
+                    next_url = "https://api.bitbucket.org/2.0/repositories/other?page=2"
+                elif failure == "blank_pagelen":
+                    next_url = "https://api.bitbucket.org" + commits_path + "?page=2&pagelen="
+                elif failure == "blank_key":
+                    next_url = "https://api.bitbucket.org" + commits_path + "?page=2&unknown="
+                else:
+                    page = int(request.url.params.get("page", "1"))
+                    next_url = (
+                        "https://api.bitbucket.org" + commits_path + f"?pagelen=100&page={page + 1}"
+                    )
+                return httpx.Response(200, json={"values": [{"hash": "c" * 40}], "next": next_url})
+            return httpx.Response(
+                200,
+                json={
+                    "uuid": "{" + str(TARGET.repository_uuid) + "}",
+                    "workspace": {
+                        "uuid": "{" + str(TARGET.bitbucket_workspace_uuid) + "}",
+                        "slug": "team",
+                    },
+                    "slug": "repo",
+                    "full_name": "team/repo",
+                    "name": "Repo",
+                    "is_private": True,
+                    "mainbranch": {"name": "main"},
+                    "links": {"html": {"href": "https://bitbucket.org/team/repo"}},
+                },
+            )
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+            with pytest.raises(BitbucketProviderError, match="invalid_provider_response"):
+                await BitbucketCurrentPullRequestProvider(client, Credentials()).get_current(
+                    TARGET, 17
+                )
+        assert all(request.startswith("https://api.bitbucket.org/") for request in requests)
+        if failure in {"host", "path", "blank_pagelen", "blank_key", "prefix", "empty"}:
+            assert len(requests) == 4
+        else:
+            assert len(requests) == 23  # Repository, PR, short commit, then 20 bounded pages.
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("base_status", [404, 503])
+def test_closed_pr_with_deleted_source_branch_preserves_missing_head(base_status: int) -> None:
+    """Closing must not depend on resolving a base commit that projection will discard."""
+
+    async def scenario() -> None:
+        requests: list[str] = []
+
+        def respond(request: httpx.Request) -> httpx.Response:
+            requests.append(str(request.url))
+            if request.url.path.endswith("/pullrequests/17"):
+                return httpx.Response(
+                    200,
+                    json={
+                        "id": 17,
+                        "state": "DECLINED",
+                        "title": "Closed fork change",
+                        "updated_on": "2026-10-26T11:00:00+00:00",
+                        "source": {
+                            "branch": {"name": "feature"},
+                            "commit": None,
+                            "repository": None,
+                        },
+                        "destination": {
+                            "branch": {"name": "main"},
+                            "commit": {"hash": "b" * 12},
+                            "repository": {"uuid": "{" + str(TARGET.repository_uuid) + "}"},
+                        },
+                    },
+                )
+            if request.url.path.endswith("/commit/bbbbbbbbbbbb"):
+                return httpx.Response(base_status)
+            return httpx.Response(
+                200,
+                json={
+                    "uuid": "{" + str(TARGET.repository_uuid) + "}",
+                    "workspace": {
+                        "uuid": "{" + str(TARGET.bitbucket_workspace_uuid) + "}",
+                        "slug": "team",
+                    },
+                    "slug": "repo",
+                    "full_name": "team/repo",
+                    "name": "Repo",
+                    "is_private": True,
+                    "mainbranch": {"name": "main"},
+                    "links": {"html": {"href": "https://bitbucket.org/team/repo"}},
+                },
+            )
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+            current = await BitbucketCurrentPullRequestProvider(client, Credentials()).get_current(
+                TARGET, 17
+            )
+        assert current.state == "closed"
+        assert current.head_sha is None
+        assert current.base_sha == "b" * 12
+        assert len(requests) == 2
+        assert all("/commit/" not in path for path in requests)
+
+    asyncio.run(scenario())
