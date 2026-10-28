@@ -233,7 +233,8 @@ TEST_RABBITMQ_URL=<isolated-task-vhost-url> uv run pytest
 - **What to do:** plan decisions 6 and 7. The task carries `route="verifier"`, `bounded_repair=True`,
   `base_manifest=manifest`, `review_context=context` and `policy_snapshot=context.policy_snapshot`, with the
   counter taken from the snapshot. The adapter returns `VerifierReply(result.output, result.accepted_call_id)`.
-  The ID and ref checks stay in `ReflectionPass`.
+  The ID and ref checks stay in `ReflectionPass`. Reversed 2026-10-28 (tech lead, option A, staging defect):
+  they also run in the gateway on every call's manifest and earn the bounded repair and fallback (plan item 6).
 - **Tests to add** (in-memory ledger and trace with `httpx.MockTransport`, as in
   `tests/test_gateway_answer_validation.py`):
   - A valid answer → the decisions; the request `model` is the verifier's; the ledger operation is
