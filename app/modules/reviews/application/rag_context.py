@@ -68,6 +68,7 @@ from app.modules.reviews.application.diff_map import (
     DiffMap,
     DiffSide,
     RowKind,
+    VcsProviderName,
 )
 from app.modules.reviews.application.get_run_file_lines import (
     BLOB_CACHE_TTL,
@@ -278,6 +279,7 @@ class _RevisionFiles:
         texts: Mapping[str, str | FileUnavailable],
         facts: Mapping[str, AstFacts | FileUnavailable],
         head: _RevisionFiles | None = None,
+        unchanged_at_head: Collection[str] = (),
     ) -> None:
         self._tree = tree
         self._blobs = blobs
@@ -287,6 +289,7 @@ class _RevisionFiles:
         self._texts = dict(texts)
         self._facts = dict(facts)
         self._head = head
+        self._unchanged_at_head = frozenset(unchanged_at_head)
 
     async def text(self, path: str) -> str | FileUnavailable:
         if self._denied(path):
@@ -313,7 +316,10 @@ class _RevisionFiles:
 
     def _same_at_head(self, path: str) -> _RevisionFiles | None:
         sha = self._tree.blob_shas.get(path)
-        if self._head is None or sha is None or self._head._tree.blob_shas.get(path) != sha:
+        if self._head is None or sha is None:
+            return None
+        head_sha = self._head._tree.blob_shas.get(path)
+        if head_sha is None or (head_sha != sha and path not in self._unchanged_at_head):
             return None
         return self._head
 
@@ -325,6 +331,28 @@ class _RevisionFiles:
             parser=self._parser,
             cache=self._cache,
         )
+
+
+def _unchanged_bitbucket_paths(
+    diff_map: DiffMap, base: RevisionTree, head: RevisionTree
+) -> frozenset[str]:
+    """Use a complete pinned diff when Bitbucket lists revision-bound pseudo blob IDs."""
+    if (
+        diff_map.provider is not VcsProviderName.BITBUCKET
+        or not diff_map.file_list_complete
+        or not base.complete
+        or not head.complete
+        or base.revision != diff_map.diff_old_sha
+        or head.revision != diff_map.head_sha
+    ):
+        return frozenset()
+    changed = {
+        path
+        for file in diff_map.files
+        for path in (file.old_path, file.new_path)
+        if path is not None
+    }
+    return frozenset((base.blob_shas.keys() & head.blob_shas.keys()) - changed)
 
 
 @dataclass(frozen=True)
@@ -432,7 +460,12 @@ class ReverseEdgeSelector:
                 modules.append(GraphTarget(graph_path, ""))
         # The removed exports are targets too, so the base is read before the graph.
         removed = await self._removed(
-            diff_map=diff_map, go_module=go_module, changed=changed, files=files, denied=denied
+            diff_map=diff_map,
+            head_tree=tree,
+            go_module=go_module,
+            changed=changed,
+            files=files,
+            denied=denied,
         )
         targets = list(dict.fromkeys([*removed.targets, *named, *modules]))
         hints = await self._retriever.read_hints(diff_map.repository_id, targets[:MAX_RAG_TARGETS])
@@ -481,6 +514,7 @@ class ReverseEdgeSelector:
         self,
         *,
         diff_map: DiffMap,
+        head_tree: RevisionTree,
         go_module: str | None,
         changed: Sequence[tuple[DiffFile, AstFacts]],
         files: _RevisionFiles,
@@ -551,6 +585,7 @@ class ReverseEdgeSelector:
             texts={},
             facts={},
             head=files,
+            unchanged_at_head=_unchanged_bitbucket_paths(diff_map, base, head_tree),
         )
         targets: dict[GraphTarget, frozenset[str]] = {}
         omissions: list[RagOmission] = []

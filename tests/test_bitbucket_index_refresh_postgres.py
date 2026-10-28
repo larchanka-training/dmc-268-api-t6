@@ -84,7 +84,7 @@ def test_refresh_waits_for_connection_management_before_repository_lock(
                 await session.execute(
                     update(Repository)
                     .where(Repository.id == repository_id)
-                    .values(rag_enabled=True)
+                    .values(rag_enabled=True, enabled=False)
                 )
                 generation = await store.set_repository_webhook_secret(
                     workspace_id=workspace_id,

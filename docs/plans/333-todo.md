@@ -474,17 +474,17 @@ None of these statements substitutes for a final published-head test run.
 
 | P3 | Disposition | Remaining gate |
 | --- | --- | --- |
-| 45–46 | Planned in Task 15: remove the duplicate checkpoint and unreachable size branch. | Recheck the final diff and index tests. |
+| 45–46 | Task 15 removes the duplicate checkpoint and unreachable size branch. | Final diff and index gates on the published SHA. |
 | 47 | Symlink/non-UTF-8 skip and 429 tests are in the candidate; Task 11 adds unsafe diffstat full fallback and 5xx/subrepository proofs. | Task 11 independent review passed; final gates and published SHA remain. |
-| 48 | Planned in Task 15: avoid duplicate Bitbucket base/head RAG reads. | Request-count and PostgreSQL RAG proof. |
+| 48 | Task 15 reuses unchanged Bitbucket importer content across base/head with complete pinned trees and diff. | Request-count and PostgreSQL RAG proof on the final candidate. |
 | 49 | Fork projection, deleted-fork close/decline and prefix handling are in the candidate. | Task 19 mutation tests and private fork live probe. |
 | 50 | Queued re-entry and status backoff are fixed in the candidate. | Final PostgreSQL suite. |
 | 51 | Pipeline spec now distinguishes Bitbucket `STOPPED` from GitHub's absent check-run for `repo_disabled`. | Final docs review. |
 | 52 | Tech-lead decision: whether superseded old-head `INPROGRESS` needs remote `STOPPED`. | Record decision and private Bitbucket merge-check probe. |
 | 53–55 | OpenAPI/runtime response bounds, rules-status descriptions and Bitbucket-only redaction with standard GitHub/GitLab 422 are in the candidate. | Final contract tests and published SHA. |
 | 56 | Direct security/helper mutation tests are in the candidate. | Final gates. |
-| 57 | Planned in Task 15: decide and test RAG refresh when review is disabled. | Index/refresh proof and docs. |
-| 58 | Planned in Task 19: copied/draft/ORM and production composition proofs, plus replacement of brittle call-count assertions. | Independent review. |
+| 57 | Task 15 keeps RAG index refresh on signed default-branch pushes when review is disabled, RAG is enabled and the installation and binding remain available. | PostgreSQL refresh proof and final gates. |
+| 58 | Task 19 adds copied/draft/ORM and production-composition proofs and replaces brittle call-count assertions. | Final gates on the integrated candidate. |
 | 59 | SD publication sentence and PIPELINE_SPEC `context.manifest` punctuation corrected. | Final docs review. |
 | 60 | Rules-status provider defaults removed in the candidate. | Final contract tests. |
 
