@@ -447,7 +447,9 @@ def replay(
     warnings = _prompt_warnings(manifest, prompt_root)
     warnings.extend(_digest_warnings(manifest, prompt_root, root, records))
     if not manifest["run_metadata"]["baseline_publishable"]:
-        warnings.append("Recorded capture is not publishable: provider or infrastructure failure")
+        warnings.append(
+            "Recorded capture is not publishable: provider, infrastructure or policy failure"
+        )
     entries = manifest["responses"]
     case_ids = {record["id"] for _, record in records}
     missing = sorted(case_ids - entries.keys())

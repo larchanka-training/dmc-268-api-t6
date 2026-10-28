@@ -2764,9 +2764,13 @@ def test_a_per_case_policy_failure_is_recorded_and_the_run_goes_on(
     assert manifest["run_metadata"]["nonpublishable_case_ids"] == ["CLEAN-01"]
     captured = capsys.readouterr()
     assert captured.err == (
-        "eval live: not publishable; provider or infrastructure failures occurred in CLEAN-01\n"
+        "eval live: not publishable; provider, infrastructure or policy failures occurred in "
+        "CLEAN-01\n"
     )
     assert "Cases: 2" in captured.out
+    assert (
+        "Warning: Recorded capture is not publishable: provider, infrastructure or policy failure"
+    ) in captured.out.splitlines()
 
 
 def test_v4_capture_with_a_v2_answer_replays_valid_and_scored(

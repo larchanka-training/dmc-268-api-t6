@@ -980,7 +980,7 @@ def main(
     print(format_console(report))
     if not manifest["run_metadata"]["baseline_publishable"]:
         print(
-            "eval live: not publishable; provider or infrastructure failures occurred in "
+            "eval live: not publishable; provider, infrastructure or policy failures occurred in "
             + ", ".join(manifest["run_metadata"]["nonpublishable_case_ids"]),
             file=sys.stderr,
         )
