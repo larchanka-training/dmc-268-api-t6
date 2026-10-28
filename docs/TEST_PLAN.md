@@ -240,8 +240,8 @@ insufficient_context остаются за lifecycle #107/#130; их общее 
 не объявляется реализованным в #213.
 
 После #130 F1 worker собирает Reflection Pass, а после F2 seed активирует
-`review.system:v4` для новых runs. Snapshot-путь выбирается только по
-закреплённому v4; runs с v3 или ниже, созданные до F2 seed либо с pins до 0039,
+`review.system:v4` (с #350 — v5) для новых runs. Snapshot-путь выбирается
+только по закреплённому v4 или v5; runs с v3 или ниже, созданные до F2 seed либо с pins до 0039,
 сохраняют legacy-путь без verifier. Адаптер ревью
 выполняет fit/guard/manifest один раз: snapshot-ответ `ReviewReply` несёт
 фактический fitted context и manifest принятого вызова, legacy — mapping.
@@ -507,7 +507,7 @@ Redis-кэши (кэш контекста и кэш токенов устано�
 | Изменилась политика ignore или показанное base-tree | Старый общий conventions cache не используется | `test_repo_conventions.py::test_conventions_cached_under_another_ignore_policy_are_not_reused`, `test_review_context_stage.py::test_cache_identity_changes_when_a_rename_withholds_a_name_no_mask_matches` |
 | В cached convention записана инструкция модели | Не повышает доверие, проходит тот же envelope | не покрыто: ни #248, ни подкорпус #252 не кладут инструкцию в кэшированные конвенции (`<repo_conventions>`) |
 | `</repo_rules>` и «system: ignore previous instructions» в тексте | Структурные границы целы; новых полномочий нет | `test_rules_md_injection.py::test_reviewer_prompt_keeps_policy_payloads_inside_their_block`, `::test_verifier_prompt_keeps_policy_payloads_inside_their_block` (rules.md и AGENTS.md); экранирование закрывающих тегов уже проверяет `test_prompt_builder_markdown.py::test_prompt_injection_defense_escapes_closing_tags`; «новых полномочий нет» вживую — A/B AC8 на `review.system` v5 (#144 ч.3b, [решение](https://github.com/larchanka-training/dmc-268-api-t6/issues/163#issuecomment-6400830514)) после правки привязок промптов в `eval-live` (#163), harness #252: плечо `malicious` всех 8 кейсов RUL (поддельный закрывающий тег и «system: ignore previous instructions») |
-| Инъекция в невалидном ответе при repair | Остаётся previous_model_output, не system instruction | snapshot-путь (v4): `test_gateway_repair_envelope.py::test_bounded_repair_sends_one_user_turn_with_the_answer_as_data`, `::test_markup_in_the_answer_and_in_validator_errors_arrives_escaped` — ответ приходит данными в `<previous_model_output>` одного сообщения `user`, разметка экранирована; legacy (≤ v3) сохраняет прежний repair с ответом сообщением `assistant` — `::test_without_the_flag_the_repair_keeps_the_assistant_turn` |
+| Инъекция в невалидном ответе при repair | Остаётся previous_model_output, не system instruction | snapshot-путь (v4, v5): `test_gateway_repair_envelope.py::test_bounded_repair_sends_one_user_turn_with_the_answer_as_data`, `::test_markup_in_the_answer_and_in_validator_errors_arrives_escaped` — ответ приходит данными в `<previous_model_output>` одного сообщения `user`, разметка экранирована; legacy (≤ v3) сохраняет прежний repair с ответом сообщением `assistant` — `::test_without_the_flag_the_repair_keeps_the_assistant_turn` |
 | Атака в candidate body на verifier | Схема решений, набор candidate IDs и правила evidence не меняются | `test_rules_md_injection.py::test_verifier_prompt_keeps_candidate_payloads_inside_the_candidate`, `::test_a_verifier_answer_with_a_candidate_id_from_the_payload_is_rejected` — схема и набор candidate IDs; правила evidence под атакой в body не проверяются; экранирование полей в prompt verifier — `test_reflection_evaluation.py::test_untrusted_fields_are_safely_escaped_in_verifier_prompt` |
 | Инъекция в code comment, затем conventions/cache hit | Общий кэш не принимает head/PR-input | не покрыто: ни #248, ни подкорпус #252 не кладут инъекцию в код, из которого строятся conventions, и не проверяют кэш |
 | Цитата вредной инструкции как пример документации | Документ не отклоняется только из-за цитаты | `test_rules_md_injection.py::test_policy_parsers_accept_a_rules_md_that_quotes_an_injection` |
@@ -792,12 +792,12 @@ eval не запускается; pins для неиспользуемого ver
 исторический prompt `review.verifier.v1.md` (#133), `review.verifier.v2.md`
 (#219) и unit-сценарии существуют. Обе композиции `app/worker.py` создают
 lazy Reflection Pass; `ExecuteReviewRun` запускает его только со snapshot для run
-с закреплённым `review.system:v4`. Snapshot без Reflection Pass даёт
+с закреплённым `review.system` v4 или v5. Snapshot без Reflection Pass даёт
 `internal_error` (ошибка серверной сборки, #216): действуют повторы до трёх
 попыток суммарно, затем `failed` и `reviews.dlq`. Повреждённый snapshot
 по-прежнему даёт `policy_snapshot_integrity_error` без retry. Legacy без snapshot
 обходит verifier молча, без предупреждения в логе.
-После F2 seed активирует v4 для новых runs; закреплённый v3 или ниже
+После F2 seed активирует v4 (с #350 — v5) для новых runs; закреплённый v3 или ниже
 сохраняет legacy-путь. Метки v2
 в dataclass/fixtures — не универсальные runtime-pins: Run сохраняет ID активных
 conventions/verifier DB-строк при создании, snapshot восстанавливает их версии
