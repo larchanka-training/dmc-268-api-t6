@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import replace
+from datetime import timedelta
 from uuid import UUID
 
 import httpx
@@ -547,16 +548,20 @@ def test_head_change_during_diff_cancels_and_does_not_use_stale_patch() -> None:
     asyncio.run(scenario())
 
 
-@pytest.mark.parametrize("fault", ["truncated", "rate_limited", "invalid_retry"])
+@pytest.mark.parametrize("fault", ["truncated", "rate_limited", "invalid_retry", "missing_retry"])
 def test_diffstat_count_and_rate_limit_are_fail_closed(fault: str) -> None:
     def respond(request: httpx.Request) -> httpx.Response:
         if request.url.path == f"{PREFIX}/pullrequests/7":
             return httpx.Response(200, json=_pr())
         if request.url.path == f"{PREFIX}/diffstat/{HEAD}..{BASE}":
-            if fault in {"rate_limited", "invalid_retry"}:
+            if fault in {"rate_limited", "invalid_retry", "missing_retry"}:
                 return httpx.Response(
                     429,
-                    headers={"Retry-After": "17" if fault == "rate_limited" else "9" * 5000},
+                    headers=(
+                        {"Retry-After": "17" if fault == "rate_limited" else "9" * 5000}
+                        if fault != "missing_retry"
+                        else {}
+                    ),
                 )
             page = _stat()
             page["size"] = 2
@@ -576,6 +581,9 @@ def test_diffstat_count_and_rate_limit_are_fail_closed(fault: str) -> None:
             if fault == "rate_limited":
                 assert error.value.retry_after is not None
                 assert error.value.retry_after.total_seconds() == 17
+            elif fault in {"invalid_retry", "missing_retry"}:
+                assert error.value.rate_limited
+                assert error.value.retry_after == timedelta(hours=1)
 
     asyncio.run(scenario())
 

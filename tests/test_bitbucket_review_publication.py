@@ -6,7 +6,8 @@ import asyncio
 from collections.abc import AsyncIterator, Callable, Coroutine
 from contextlib import asynccontextmanager
 from dataclasses import replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
+from email.utils import format_datetime
 from typing import Any
 from uuid import UUID
 
@@ -508,6 +509,40 @@ async def test_publication_http_bounds_body_and_preserves_retry_after() -> None:
         assert rate.value.retry_after.total_seconds() == 17
         with pytest.raises(PublishError, match="too large"):
             await http.pull_request()
+
+
+@pytest.mark.parametrize("retry_header", ["date", "missing"])
+def test_publication_429_uses_bounded_date_or_default_backoff(retry_header: str) -> None:
+    async def scenario() -> None:
+        target = BoundBitbucketTarget(RUN, RUN, RUN, REPO, 1)
+        credentials = Credentials()
+        headers = (
+            {"Retry-After": format_datetime(datetime.now(UTC) + timedelta(seconds=120))}
+            if retry_header == "date"
+            else {}
+        )
+        seen: list[httpx.Request] = []
+
+        def respond(request: httpx.Request) -> httpx.Response:
+            seen.append(request)
+            return httpx.Response(429, headers=headers)
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+            http = BitbucketPublicationHttp(
+                client, credentials, target, pr_number=7, checkpoint=lambda: asyncio.sleep(0)
+            )
+            with pytest.raises(PublishError) as caught:
+                await http.pull_request()
+        assert len(seen) == 1
+        assert caught.value.kind == "retryable"
+        assert caught.value.http_status == 429
+        assert caught.value.retry_after is not None
+        if retry_header == "date":
+            assert 115 <= caught.value.retry_after.total_seconds() <= 120
+        else:
+            assert caught.value.retry_after == timedelta(hours=1)
+
+    asyncio.run(scenario())
 
 
 @sync_test
