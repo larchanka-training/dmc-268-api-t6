@@ -279,7 +279,7 @@ def _assert_selection_contract(text: str) -> None:
     assert (
         "      review_prompt:\n"
         '        description: "Review prompt: v3, or v4 (snapshot path: needs policy_arm none, '
-        'valid or malicious)"\n'
+        'or valid or malicious with corpus rules)"\n'
         "        required: false\n"
         "        type: choice\n"
         "        options:\n"

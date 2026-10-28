@@ -2697,7 +2697,7 @@ def test_legacy_arm_refuses_a_snapshot_path_prompt_before_any_call(tmp_path: Pat
 
     assert str(raised.value) == (
         "--policy-arm legacy renders no policy snapshot, which review prompt v4 needs; "
-        "use --policy-arm none, valid or malicious"
+        "use --policy-arm none (valid and malicious need a corpus with policy arms)"
     )
     assert transport.requests == []
     assert not (root / "responses").exists()

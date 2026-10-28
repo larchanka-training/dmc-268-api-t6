@@ -327,7 +327,7 @@ def _prompt_bindings(inputs: _CaptureInputs, arm: str) -> PromptBindings | None:
         if version in SNAPSHOT_REVIEW_PROMPT_VERSIONS:
             raise RecorderError(
                 f"--policy-arm legacy renders no policy snapshot, which review prompt {version} "
-                "needs; use --policy-arm none, valid or malicious"
+                "needs; use --policy-arm none (valid and malicious need a corpus with policy arms)"
             )
         return None
     pinned = PINNED_PROMPT_CHECKSUMS.get(f"review.system:{version}")

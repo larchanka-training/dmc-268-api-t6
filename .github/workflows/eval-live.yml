@@ -32,7 +32,7 @@ on:
           - malicious
         default: legacy
       review_prompt:
-        description: "Review prompt: v3, or v4 (snapshot path: needs policy_arm none, valid or malicious)"
+        description: "Review prompt: v3, or v4 (snapshot path: needs policy_arm none, or valid or malicious with corpus rules)"
         required: false
         type: choice
         options:
