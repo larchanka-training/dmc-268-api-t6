@@ -42,10 +42,12 @@ directory (``--responses-dir``, one per arm and run) replays unchanged. ``policy
 ``policy_arm_digest`` and ``usage`` are optional (absent in captures before #163): a missing
 arm is ``legacy`` and missing usage is reported as not recorded.
 Invalid recorded output contributes to scoring as invalid rather than being
-corrected or dropped. Schema-v1 manifests require all three digest fields and
-publishability metadata consistent with per-case statuses, so replay cannot
-silently skip drift or terminal provider failures. Recorded run_metadata, including
-any effective settings snapshot, is returned as provenance;
+corrected or dropped. The answers of a snapshot-path ``prompt_version`` (v4) are
+validated as ReviewOutput v2 (``validate_findings.py --schema v2``). Schema-v1
+manifests require all three digest fields and publishability metadata consistent
+with per-case statuses, so replay cannot silently skip drift or terminal provider
+failures. Recorded run_metadata, including any effective settings snapshot, is
+returned as provenance;
 offline replay does not read the current model environment or detect env drift.
 """
 
@@ -66,6 +68,9 @@ from jsonschema import Draft202012Validator
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
+from app.modules.reviews.application.review_path import (  # noqa: E402
+    SNAPSHOT_REVIEW_PROMPT_VERSIONS,
+)
 from review.scripts.eval_provenance import (  # noqa: E402
     DigestInputError,
     DigestInputMissing,
@@ -86,6 +91,7 @@ from review.scripts.validate_dataset import (  # noqa: E402
 
 VALIDATOR_SCRIPT = Path(__file__).with_name("validate_findings.py")
 SUCCESS = re.compile(r"OK ReviewOutput \d+ items")
+SUCCESS_V2 = re.compile(r"OK ReviewOutputV2 \d+ items")
 SHA256 = re.compile(r"[0-9a-f]{64}")
 REPO_ROOT = Path(__file__).resolve().parents[2]
 # ``legacy`` renders no policy snapshot (the prompt before #163); the others are case arms.
@@ -319,15 +325,17 @@ def _response_paths(responses_dir: Path, entries: dict[str, object]) -> dict[str
     return mapped
 
 
-def _validated_raw(path: Path) -> tuple[object, bool, int, str]:
+def _validated_raw(path: Path, *, v2: bool) -> tuple[object, bool, int, str]:
+    schema = ["--schema", "v2"] if v2 else []
     result = subprocess.run(
-        [sys.executable, str(VALIDATOR_SCRIPT), str(path)],
+        [sys.executable, str(VALIDATOR_SCRIPT), *schema, str(path)],
         capture_output=True,
         text=True,
         check=False,
     )
     output = result.stdout.strip() or result.stderr.strip()
-    valid = result.returncode == 0 and SUCCESS.fullmatch(result.stdout.strip()) is not None
+    success = SUCCESS_V2 if v2 else SUCCESS
+    valid = result.returncode == 0 and success.fullmatch(result.stdout.strip()) is not None
     if not valid:
         return None, False, result.returncode, output
     try:
@@ -457,12 +465,14 @@ def replay(
     # A legacy capture saw no policy snapshot: score it on every truth, as before #163.
     recorded_arm = manifest["run_metadata"].get("policy_arm", "legacy")
     scoring_arm = None if recorded_arm == "legacy" else recorded_arm
+    # A snapshot-path prompt (v4) answers in ReviewOutput v2, as the gateway required.
+    v2 = manifest["prompt_version"] in SNAPSHOT_REVIEW_PROMPT_VERSIONS
     cases = []
     statuses = []
     for case_dir, record in records:
         case_id = record["id"]
         response_path = response_paths[case_id]
-        raw, valid, exit_code, validator_output = _validated_raw(response_path)
+        raw, valid, exit_code, validator_output = _validated_raw(response_path, v2=v2)
         cases.append(
             ScoringCase(
                 case_id=case_id,

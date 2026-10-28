@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Validator for the AI reviewer's JSON outputs.
 
-Usage: uv run python review/scripts/validate_findings.py <file.json>
+Usage: uv run python review/scripts/validate_findings.py [--schema v1|v2] <file.json>
 
 The kind is autodetected from the top-level key: `findings` -> ReviewOutput
 (review/prompts/review.system.v2.md, section 10), `files` -> RepoConventionsDraft
@@ -11,6 +11,11 @@ against review/schemas/review-output.schema.json (hence `jsonschema` and
 codes: 0 = valid (prints "OK <kind> <n> items"), 1 = contract violations (one
 "path.to.field: message" line per violation, on stdout), 2 = the file is
 missing, not JSON, or its top-level shape matches neither kind.
+
+`--schema v2` checks `findings` as ReviewOutputV2, the answer of a snapshot-path
+review prompt (v4): review/schemas/review-output.schema.v2.json, then the runtime
+ReviewOutputV2 model itself, with `evidence_refs` and without the v1 attribution
+prefix. `--schema v1` is the default.
 """
 
 from __future__ import annotations
@@ -24,7 +29,14 @@ from typing import TypeGuard
 
 from jsonschema import Draft202012Validator, ValidationError
 
+if __package__ in (None, ""):
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+
 REVIEW_OUTPUT_SCHEMA = Path(__file__).resolve().parents[1] / "schemas" / "review-output.schema.json"
+REVIEW_OUTPUT_V2_SCHEMA = (
+    Path(__file__).resolve().parents[1] / "schemas" / "review-output.schema.v2.json"
+)
+REVIEW_SCHEMAS = ("v1", "v2")
 
 MAX_KEY_PATTERN_CHARS = 160
 MAX_MESSAGE_CHARS = 200
@@ -64,6 +76,12 @@ def _review_output_validator() -> Draft202012Validator:
     return Draft202012Validator(schema)
 
 
+@cache
+def _review_output_v2_validator() -> Draft202012Validator:
+    schema = json.loads(REVIEW_OUTPUT_V2_SCHEMA.read_text(encoding="utf-8"))
+    return Draft202012Validator(schema)
+
+
 def _field_path(json_path: str) -> str:
     """`$.findings[0].line` -> `findings[0].line`; the root stays `$`."""
     return json_path.removeprefix("$.")
@@ -87,6 +105,32 @@ def validate_review_output(data: object) -> list[str]:
     if isinstance(data, dict):
         errors.extend(_semantic_errors(data))
     return sorted(errors)
+
+
+def validate_review_output_v2(data: object) -> list[str]:
+    """Validate `data` against ReviewOutputV2: its schema, then the runtime model."""
+    errors = [
+        _err(_field_path(error.json_path), _schema_message(error))
+        for error in _review_output_v2_validator().iter_errors(data)
+    ]
+    if errors:
+        return sorted(errors)
+    # Imported only here, so the v1 check keeps running standalone.
+    from pydantic import ValidationError as ModelValidationError
+
+    from app.modules.reviews.application.review_output import ReviewOutputV2
+
+    try:
+        ReviewOutputV2.model_validate(data)
+    except ModelValidationError as exc:
+        return sorted(_err(_model_path(item["loc"]), item["msg"]) for item in exc.errors())
+    return []
+
+
+def _model_path(loc: tuple[int | str, ...]) -> str:
+    """`("findings", 0, "title")` -> `findings[0].title`, as the schema paths read."""
+    path = "".join(f"[{part}]" if isinstance(part, int) else f".{part}" for part in loc)
+    return path.removeprefix(".") or "$"
 
 
 def _semantic_errors(data: dict[object, object]) -> list[str]:
@@ -270,8 +314,11 @@ def _load(path: Path) -> tuple[object | None, str | None]:
 
 def main(argv: list[str] | None = None) -> int:
     args = sys.argv[1:] if argv is None else argv
+    schema = "v1"
+    if len(args) == 3 and args[0] == "--schema" and args[1] in REVIEW_SCHEMAS:
+        schema, args = args[1], args[2:]
     if len(args) != 1:
-        print("usage: validate_findings.py <file.json>", file=sys.stderr)
+        print("usage: validate_findings.py [--schema v1|v2] <file.json>", file=sys.stderr)
         return 2
 
     path = Path(args[0])
@@ -295,7 +342,11 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 2
 
-    if "findings" in data:
+    if "findings" in data and schema == "v2":
+        kind = "ReviewOutputV2"
+        errors = validate_review_output_v2(data)
+        n_items = len(data["findings"]) if isinstance(data.get("findings"), list) else 0
+    elif "findings" in data:
         kind = "ReviewOutput"
         errors = validate_review_output(data)
         n_items = len(data["findings"]) if isinstance(data.get("findings"), list) else 0

@@ -2765,3 +2765,63 @@ def test_a_per_case_policy_failure_is_recorded_and_the_run_goes_on(
         "eval live: not publishable; provider or infrastructure failures occurred in CLEAN-01\n"
     )
     assert "Cases: 2" in captured.out
+
+
+def test_v4_capture_with_a_v2_answer_replays_valid_and_scored(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root = fixture_root(tmp_path, ("SEC-01",))
+    report_path = tmp_path / "report.json"
+    v2_answer = json.dumps(
+        {
+            "findings": [
+                {
+                    "path": "app/authorization.py",
+                    "line": 3,
+                    "start_line": None,
+                    "severity": "critical",
+                    "category": "security",
+                    "title": "Authorization check is bypassed",
+                    "body": "The permission check does not protect this path.",
+                    "suggestion": None,
+                    "confidence": 0.9,
+                    "rule_name": "service-defaults:E3",
+                    "evidence_refs": [
+                        {"block_id": "F1:app/authorization.py", "start_line": 1, "end_line": 3}
+                    ],
+                }
+            ],
+            "summary": {
+                "problem": "Authorization is incomplete.",
+                "done_well": "The handler is readable.",
+                "effort": "small",
+            },
+        }
+    )
+    transport = FakeTransport([answer("primary-model", v2_answer)])
+
+    exit_code = main(
+        [
+            "--root",
+            str(root),
+            "--system",
+            str(V4_SYSTEM),
+            "--policy-arm",
+            "none",
+            "--report-json",
+            str(report_path),
+        ],
+        transport=transport,
+        model_settings=settings(),
+    )
+
+    assert exit_code == 0, capsys.readouterr().err
+    (request,) = transport.requests
+    assert request.response_schema is not None
+    assert request.response_schema.name == "ReviewOutputV2"
+    assert response(root, "SEC-01") == v2_answer.encode()
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    assert report["provenance"]["prompt_version"] == "v4"
+    assert (report["valid_response_count"], report["case_count"]) == (1, 1)
+    assert report["micro"]["tp"] == 1
+    assert report["critical"] == {"matched": 1, "total": 1, "recall": 1.0}

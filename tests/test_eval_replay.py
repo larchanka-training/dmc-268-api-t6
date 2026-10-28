@@ -1325,3 +1325,69 @@ def test_replay_reads_a_capture_from_another_responses_directory(
     (moved / "stray.json").write_text("{}", encoding="utf-8")
     with pytest.raises(ReplayError, match="unreferenced response file"):
         replay(root, responses_dir=moved)
+
+
+def finding_v2(**changes: Any) -> dict[str, Any]:
+    """A ReviewOutput v2 finding of review prompt v4: evidence refs, no attribution prefix."""
+    return {
+        **finding(),
+        "rule_name": "service-defaults:E3",
+        "evidence_refs": [{"block_id": "F1:app/authorization.py", "start_line": 1, "end_line": 3}],
+        **changes,
+    }
+
+
+@pytest.mark.parametrize(
+    ("prompt_version", "item", "valid", "validator_output"),
+    [
+        ("v4", finding_v2(), True, "OK ReviewOutputV2 1 items"),
+        (
+            "v4",
+            finding(),
+            False,
+            "findings[0]: 'evidence_refs' is a required property",
+        ),
+        (
+            "v4",
+            finding_v2(title="Authorization check is bypassed."),
+            False,
+            "findings[0]: Value error, title must not end with a period",
+        ),
+        (
+            "v3",
+            finding_v2(),
+            False,
+            'findings[0].body: rule_name is set, body must start with "According to custom '
+            "instructions in 'service-defaults:E3' (\"\n"
+            "findings[0]: Additional properties are not allowed ('evidence_refs' was unexpected)",
+        ),
+    ],
+    ids=["v4-answer", "v4-without-evidence", "v4-model-rule", "v3-keeps-v1"],
+)
+def test_replay_validates_an_answer_by_the_contract_of_the_recorded_prompt_version(
+    tmp_path: Path,
+    prompt_version: str,
+    item: dict[str, Any],
+    valid: bool,
+    validator_output: str,
+) -> None:
+    root = fixture_root(tmp_path)
+    record(root, {"SEC-01": review_output(findings=[item])})
+    manifest_path = root / "responses/manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["prompt_version"] = prompt_version
+    manifest_path.write_text(json.dumps(manifest))
+
+    report = replay(root)
+
+    assert report["responses"] == [
+        {
+            "case_id": "SEC-01",
+            "path": "responses/SEC-01.json",
+            "valid": valid,
+            "validator_exit_code": 0 if valid else 1,
+            "validator_output": validator_output,
+        }
+    ]
+    assert report["valid_response_count"] == int(valid)
+    assert report["micro"]["tp"] == int(valid)
