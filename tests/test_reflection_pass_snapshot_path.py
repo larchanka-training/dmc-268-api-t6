@@ -34,6 +34,7 @@ import app.modules.reviews.application.reflection_pass as reflection_pass_module
 from app.modules.reviews.application.context_provenance import SourceRole
 from app.modules.reviews.application.execute_review import ExecuteReviewRun
 from app.modules.reviews.application.policy_errors import PolicyError, PolicyErrorCode
+from app.modules.reviews.application.policy_snapshot import CallManifest
 from app.modules.reviews.application.prompt_builder import (
     ChangedFile,
     DiffLine,
@@ -45,8 +46,11 @@ from app.modules.reviews.application.prompt_builder import (
 from app.modules.reviews.application.reflection_pass import (
     CandidateFindingItem,
     ReflectionPass,
+    VerificationInvalidOutputError,
+    VerificationOutput,
     VerificationRecord,
     VerificationUnavailableError,
+    VerifierAnswerCheck,
     VerifierPrompt,
     VerifierPromptBuilder,
     VerifierReply,
@@ -824,6 +828,136 @@ def test_a_cancellation_during_the_verifier_call_stays_a_cancellation() -> None:
 def test_a_provider_timeout_still_maps_to_verification_unavailable() -> None:
     with pytest.raises(VerificationUnavailableError):
         _verify(RunFailure("llm_timeout", "slow"))
+
+
+# ---------- the reference checks follow the accepted call's manifest ----------
+
+
+class _AcceptedVerifier:
+    """Answers with a ref to the diff block under the manifest ``accepted`` makes of the base;
+    keeps the base manifest and the ``check`` it was handed."""
+
+    def __init__(self, accepted: Any) -> None:
+        self.accepted = accepted
+        self.seen: list[tuple[CallManifest, VerifierAnswerCheck | None]] = []
+
+    async def verify(
+        self, *, manifest: CallManifest, check: VerifierAnswerCheck | None = None, **_: object
+    ) -> VerifierReply:
+        self.seen.append((manifest, check))
+        decision = {
+            "candidate_id": "c-diff",
+            "status": "supported",
+            "reason": "The constant is returned.",
+            "evidence_refs": [{"block_id": MAIN_BLOCK, "start_line": 10, "end_line": 10}],
+            "requirement_refs": [],
+        }
+        return VerifierReply(
+            {"decisions": [decision]},
+            accepted_call_id=CALL_ID,
+            accepted_manifest=self.accepted(manifest),
+        )
+
+
+def _without_the_diff(manifest: CallManifest) -> CallManifest:
+    # A fallback manifest that shows fewer blocks than the base one (CVS §5.2).
+    return replace(
+        manifest,
+        recovery_kind="fallback",
+        blocks=tuple(block for block in manifest.blocks if block.block_id != MAIN_BLOCK),
+    )
+
+
+def _verify_accepted(verifier: _AcceptedVerifier) -> VerificationRecord:
+    return asyncio.run(
+        ReflectionPass(verifier).verify_recorded(candidates=(DIFF_ONLY,), context=_context(()))
+    )
+
+
+def test_the_final_guard_checks_the_accepted_calls_manifest() -> None:
+    # CVS §7.2: refs resolve only against the manifest of the accepted verifier call.
+    with pytest.raises(VerificationInvalidOutputError) as raised:
+        _verify_accepted(_AcceptedVerifier(_without_the_diff))
+
+    assert str(raised.value) == f"Decision c-diff evidence_ref {MAIN_BLOCK} not found in manifest"
+
+
+def test_the_model_gets_the_check_of_the_final_guard() -> None:
+    verifier = _AcceptedVerifier(lambda manifest: None)
+
+    record = _verify_accepted(verifier)
+
+    # Without an accepted manifest the base one is checked, and the answer passes.
+    assert [decision.status for decision in record.decisions] == ["supported"]
+    [(base, check)] = verifier.seen
+    assert check is not None
+    output = VerificationOutput.model_validate(
+        {
+            "decisions": [
+                {
+                    "candidate_id": "c-diff",
+                    "status": "supported",
+                    "reason": "The constant is returned.",
+                    # The diff block shows lines 10-39.
+                    "evidence_refs": [{"block_id": MAIN_BLOCK, "start_line": 52, "end_line": 54}],
+                    "requirement_refs": [],
+                }
+            ]
+        }
+    )
+    assert check(output, base) == [
+        f"Decision c-diff evidence_ref {MAIN_BLOCK}:52-54 is not shown in verifier manifest"
+    ]
+    assert check(output, _without_the_diff(base)) == [
+        f"Decision c-diff evidence_ref {MAIN_BLOCK} not found in manifest"
+    ]
+
+
+def _the_bound_check() -> tuple[VerifierAnswerCheck, CallManifest]:
+    verifier = _AcceptedVerifier(lambda manifest: None)
+    _verify_accepted(verifier)
+    [(base, check)] = verifier.seen
+    assert check is not None
+    return check, base
+
+
+def _decisions_for(*candidate_ids: str) -> VerificationOutput:
+    """An answer with one decision per id; ``model_copy`` skips the 64-character schema cap."""
+    decision = VerificationOutput.model_validate(
+        {
+            "decisions": [
+                {
+                    "candidate_id": "c-diff",
+                    "status": "supported",
+                    "reason": "The constant is returned.",
+                    "evidence_refs": [{"block_id": MAIN_BLOCK, "start_line": 10, "end_line": 10}],
+                    "requirement_refs": [],
+                }
+            ]
+        }
+    ).decisions[0]
+    return VerificationOutput.model_construct(
+        decisions=[decision.model_copy(update={"candidate_id": c_id}) for c_id in candidate_ids]
+    )
+
+
+def test_an_unknown_candidate_id_is_named_cut_to_64_characters() -> None:
+    check, base = _the_bound_check()
+    unknown = "c-" + "9" * 98
+
+    assert check(_decisions_for(unknown), base) == [
+        f"Verifier returned decisions for 1 items, expected 1: missing c-diff; "
+        f"unknown {unknown[:64]}"
+    ]
+
+
+def test_at_most_five_unknown_candidate_ids_are_named() -> None:
+    check, base = _the_bound_check()
+
+    assert check(_decisions_for(*(f"c-{n}" for n in range(7, 0, -1))), base) == [
+        "Verifier returned decisions for 7 items, expected 1: missing c-diff; "
+        "unknown c-1, c-2, c-3, c-4, c-5 (+2 more)"
+    ]
 
 
 # ---------- the prompt file is read when the pass first verifies ----------

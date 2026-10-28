@@ -7,7 +7,7 @@ use cases keep their narrow ports and know nothing about providers or retries.
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import replace
 from uuid import UUID, uuid4
 
@@ -39,7 +39,11 @@ from app.modules.reviews.application.prompt_builder import (
     ReviewContext,
     ReviewPrompt,
 )
-from app.modules.reviews.application.reflection_pass import VerifierReply
+from app.modules.reviews.application.reflection_pass import (
+    VerificationOutput,
+    VerifierAnswerCheck,
+    VerifierReply,
+)
 from app.modules.reviews.application.review_output import (
     VerifiedReviewOutput,
     incomplete_review_paths,
@@ -174,8 +178,11 @@ class GatewayConventionsModel:
 class GatewayVerifierModel:
     """``VerifierModel``: the verifier route, its schema and bounded repair (R11).
 
-    The prompt and its manifest come from ``VerifierPromptBuilder``; the candidate-ID and
-    reference checks stay with the caller. The worker builds one per attempt (R14).
+    The prompt and its manifest come from ``VerifierPromptBuilder``. The caller's ``check``
+    (the candidate-ID and reference checks) runs on every schema-valid answer against the
+    manifest of its call, so its errors earn the bounded repair and the fallback like schema
+    errors (#130, tech lead 2026-10-28); the caller still checks the accepted answer. The
+    worker builds one per attempt (R14).
     """
 
     def __init__(self, gateway: LlmGateway, run: RunCallContext) -> None:
@@ -193,6 +200,7 @@ class GatewayVerifierModel:
         user_prompt: str,
         manifest: CallManifest,
         context: ReviewContext,
+        check: VerifierAnswerCheck | None = None,
     ) -> VerifierReply:
         snapshot = context.policy_snapshot
         counter: TokenCounter | None = None
@@ -224,10 +232,23 @@ class GatewayVerifierModel:
                 # CVS §7.4: the snapshot-path verifier keeps its local completion; legacy 0 s.
                 reserved_seconds=0.0 if snapshot is None else VERIFIER_COMPLETION_RESERVE_S,
                 redact_answer=verifier_answer_without_reasons,
+                check_answer=None if check is None else _checked_against(check),
             ),
             run,
         )
-        return VerifierReply(result.output, result.accepted_call_id, result.accepted_manifest_id)
+        return VerifierReply(
+            result.output,
+            result.accepted_call_id,
+            result.accepted_manifest_id,
+            accepted_manifest=result.accepted_manifest,
+        )
+
+
+def _checked_against(
+    check: VerifierAnswerCheck,
+) -> Callable[[dict[str, object], CallManifest], list[str]]:
+    """``check`` on the answer ``validate_verifier_answer`` accepted, as decoded."""
+    return lambda output, manifest: check(VerificationOutput.model_validate(output), manifest)
 
 
 async def review_with_gateway(

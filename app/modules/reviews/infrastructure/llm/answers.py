@@ -242,8 +242,9 @@ def _verifier_validator() -> Draft202012Validator:
 def validate_verifier_answer(content: str) -> dict[str, object]:
     """Return the accepted verifier JSON object or raise ``InvalidAnswer``.
 
-    The schema and ``VerificationOutput`` errors earn one repair call; the candidate-ID
-    and reference checks against the manifest stay in ``ReflectionPass`` (CVS §7.3).
+    The schema and ``VerificationOutput`` errors earn one repair call. The candidate-ID and
+    reference checks against the call's manifest follow as the task's ``check_answer`` and
+    earn the same recovery (``GatewayVerifierModel``, #130 tech lead 2026-10-28).
     """
     decoded = _decode_object_fail_closed(content)
     errors = [
