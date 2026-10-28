@@ -286,7 +286,9 @@ printed one per line), `2` when the file is not JSON or its kind is unknown. One
 (prints `OK ReviewOutput 5 items`):
 `uv run python review/scripts/validate_findings.py review/examples/findings.sample.json`. The kind is
 detected from the top-level key: `findings` → `ReviewOutput`, `files` →
-`RepoConventionsDraft`. A file carrying both keys is rejected with exit `2`. The 120-word `body` limit of
+`RepoConventionsDraft`. A file carrying both keys is rejected with exit `2`. `--schema v2` checks the
+answer of a snapshot-path prompt (v4/v5) as `ReviewOutputV2`, the v2 schema and then the runtime model
+(prints `OK ReviewOutputV2 <n> items`). The 120-word `body` limit of
 `review.system.v2.md` §7 is a prompt-level brevity target, not part of the backend schema: the validator
 enforces only the 1200-character ceiling. The tests run it over `examples/*.sample.json`. Quality targets and
 the evaluation corpus (`test-prs-dataset/`) are defined in [`docs/TEST_PLAN.md`](../docs/TEST_PLAN.md) §3–5.

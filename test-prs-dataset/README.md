@@ -166,7 +166,7 @@ The manifest also stores sorted `static_inputs`, `static_digest`, and `corpus_di
 | `app/modules/reviews/infrastructure/llm/transport.py` | Encodes provider requests and extracts response text. |
 | `review/eval/pr-commit-messages.json` | Supplies verified bounded PR prefixes and tail evidence. |
 | `review/schemas/review-output.schema.json` | Defines strict response format and validation. |
-| `review/schemas/review-output.schema.v2.json` | Defines the response format and validation of a snapshot-path prompt (v4). |
+| `review/schemas/review-output.schema.v2.json` | Defines the response format and validation of a snapshot-path prompt (v4/v5). |
 | `review/scripts/eval_live.py` | Assembles each case request and selects first-call raw content. |
 | `review/scripts/commit_context.py` | Validates prefix schema and binds cohort/active identities. |
 | `test-prs-dataset/cases/*/case.json` (each canonical file) | Supplies the complete cohort identity used by sidecar binding, including subset captures. |
@@ -1017,9 +1017,9 @@ capture that records its arm.
 
 Run the live A/B in the manual workflow with `corpus=rules` and
 `policy_arm=none|valid|malicious` (the validate step refuses `rules` with `legacy`), three
-runs per arm. `review_prompt` selects the prompt (`v3` by default, or `v4`): every arm but
+runs per arm. `review_prompt` selects the prompt (`v3` by default, or `v4` or `v5`): every arm but
 `legacy` binds that prompt's version and pin, or, for a version without a pin, the sha of the
-prompt bytes, and `legacy` refuses v4 before any call.
+prompt bytes, and `legacy` refuses v4 and v5 before any call.
 Dispatch one run at a time: the workflow's concurrency group
 `eval-live-eurouter` keeps one run pending, and a newer pending run cancels the older
 pending one. Artifacts are named `eval-live-<corpus>-<arm>-<run-id>-<attempt>` (raw:
@@ -1043,7 +1043,8 @@ twice; it warns when only some runs of an arm carry usage, and notes under the t
 in arm `none` the rule and exception figures are found and flagged without rules (there
 "Exceptions respected" does not apply). A live A/B needs a snapshot-path prompt and an arm
 other than `legacy`: v3 tells the model that only `<custom_instructions>` instruct it, so on
-v3 the effect is about zero by construction. The AC8 runs wait for v5 (#144 part 3b).
+v3 the effect is about zero by construction. The AC8 runs use `review_prompt=v5` (#144
+part 3b) and wait for budget approval.
 
 ### Service defaults in the policy arms
 
