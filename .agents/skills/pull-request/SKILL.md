@@ -23,16 +23,28 @@ metadata:
    - Run `git status`, `git diff`, and `git diff --staged` to inspect what changed.
    - Run `git remote -v` to confirm the project origin.
    - Run `git branch --show-current`. On `main`, pick a branch name per
-     `.agents/rules/git-workflow.md`; on a feature branch that already exists (the
-     implement-issue skill cuts one), keep its name.
+     `.agents/rules/git-workflow.md`; on any other checkout step 2 decides whether it can
+     take this change (the implement-issue skill cuts the task branch before this skill runs).
    - Pick a Conventional Commits message — see `commit-message-instructions.md` in this skill
      for the full format.
 
-2. **Create branch, commit, and push**:
-   - On `main`: `git checkout -b <branch-name>`. Already on a feature branch (not `main`):
-     stay on it, no `git checkout -b`, but first check it has no merged pull request —
-     `gh pr list --head <branch> --state merged --json number` must print `[]`. If it lists
-     one, the branch belongs to finished work: stop and ask the user.
+2. **Create branch, commit, and push** — by what `git branch --show-current` printed, before
+   staging anything:
+   - Empty (detached HEAD): stop and ask the user — there is no branch to commit on.
+   - `main`: `git checkout -b <branch-name>`.
+   - A task branch — the name matches `.agents/rules/git-workflow.md`:
+     `^(feat|fix|docs|chore)/[a-z0-9]+(?:[._-][a-z0-9]+)*$` or
+     `^deps-update-[0-9]{4}-[0-9]{2}-[0-9]{2}$`. Stay on it, no `git checkout -b`, and list its
+     pull requests: `gh pr list --head <branch> --state all --json number,state,url`.
+     - `[]`: commit and push; step 3 opens the pull request.
+     - An `OPEN` one: this change updates that pull request. Ask the user before pushing — a
+       push that changes the diff dismisses its approve — then commit and push, and in step 3
+       do not run `gh pr create`.
+     - Only `MERGED` / `CLOSED` ones: the branch belongs to finished work — stop and ask the
+       user.
+   - Any other name (`staging`, `release`, a branch that predates the naming rule): stop and
+     ask the user; go on only when the user confirms it is this change's branch
+     (grandfathered, `git-workflow.md`), then list its pull requests as for a task branch.
    - `git add <explicit paths>` for every new file of this change and `git add -u` for
      modified tracked files (never `git add .`).
    - Check `git status` before committing: no unrelated untracked files (`.env`, proof
@@ -41,6 +53,10 @@ metadata:
    - Never `--no-verify`.
 
 3. **Create the pull request**:
+   - Step 2 found an open pull request on the branch: no `gh pr create`. If its body no longer
+     describes the whole pull request, update it
+     (`gh api -X PATCH repos/<owner>/<repo>/pulls/<number> -F body=@<file>`), report its URL
+     and stop here.
    - `gh pr create --title "<type>(<scope>): <subject>" --body "<body>" --base main`.
    - Title: Conventional Commits, ≤72 characters.
    - Body has four sections, in this order: `What`, `Why`, `How to verify`, `Refs`.
