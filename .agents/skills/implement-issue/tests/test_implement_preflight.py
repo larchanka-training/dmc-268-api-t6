@@ -436,7 +436,7 @@ def test_refs_forms_that_do_not_count(tmp_path: Path, refs: str) -> None:
 def test_a_bare_refs_from_the_other_repo_is_not_this_issue(tmp_path: Path) -> None:
     # `Refs #13` in a ui pull request is ui#13; the api issue needs the full form.
     assert not counts(tmp_path, refs_pr(30, "Part 1 of #13: x", repo=UI))
-    assert counts(tmp_path, refs_pr(30, "Part 1 of #13: x", refs=f"Refs {API}#13", repo=UI))
+    assert counts(tmp_path, refs_pr(30, "Part 1 of api#13: x", refs=f"Refs {API}#13", repo=UI))
     # ...and the other way round, for a ui issue.
     assert counts(tmp_path, refs_pr(30, "Part 1 of #13: x", repo=UI), ref="ui#13")
     assert not counts(tmp_path, refs_pr(30, "Part 1 of #13: x", repo=API), ref="ui#13")
@@ -525,8 +525,6 @@ def named_in(
         ("feat: y", "<!-- Part 2 -->\nPart 1 of #13: x", [1]),  # comments are not text
         ("feat: y", "```\nPart 2\n```\nPart 1 of #13: x", [1]),  # nor are fences
         # What names only the first part it mentions: the rest is context
-        ("feat: y", UI_177_WHAT, [1]),
-        ("docs: y", API_358_WHAT, [2]),
         ("feat: y", "Part 1 of #13: x. Part 2 comes later.", [1]),
         ("feat: y", "Part 2 of #13: x. Part 1 is merged.", [2]),  # first by position, not smallest
         ("feat: y", "SYNC copy of ui#1 (Part 2 of #13): y; Part 1 is merged", [2]),
@@ -658,6 +656,104 @@ def test_ui_203_is_a_stray_of_ui_186(tmp_path: Path) -> None:
     assert doc["reasons"] == [stray_reason(f"{UI}#203 (OPEN)")]
 
 
+# «Part K of <ref>» is the part of the issue <ref>. When that is not the issue under check the
+# mention is skipped as if absent: the next one decides in a title, and a What line whose
+# first mention is skipped names nothing. A label without `of <ref>` counts as before.
+@pytest.mark.parametrize(
+    ("title", "what", "expected"),
+    [
+        ("Part 2 of #14: x", "", []),
+        ("Part 2 of api#14: x", "", []),
+        ("Part 2 of ui#13: x", "", []),
+        (f"Part 2 of {UI}#13: x", "", []),
+        ("Part 2 of #130", "", []),
+        ("Part 2 of #1", "", []),
+        ("Part 2 of #13: x", "", [2]),
+        ("Part 2 of api#13: x", "", [2]),
+        ("Part 2 of API#13: x", "", [2]),
+        (f"Part 2 of {API}#13: x", "", [2]),
+        (f"Part 2 of {API.upper()}#13: x", "", [2]),
+        ("Part 2 of\xa0#13: x", "", [2]),
+        ("Part 2 of #13.", "", [2]),
+        # the next match decides in a title; a skipped title falls back to What
+        ("Part 2 of #14 and Part 1 of #13", "", [1]),
+        ("Part 1 of #13 and Part 2 of #14", "", [1]),
+        ("Part 2 of #14: x", "Part 1 of #13: z", [1]),
+        ("Part 2 of #14: x", "Part 2 of #14: z", []),
+        # the first mention of What decides alone: skipped, the line names nothing
+        ("feat: y", "Part 2 of #14: x. Part 1 of #13 is merged.", []),
+        ("feat: y", "SYNC copy of ui#1 (Part 2 of #14): x. Part 1 of #13 is merged.", []),
+        ("feat: y", "Part 1 of #13: x. Part 2 of #14 follows.", [1]),
+        # German and Russian carry the same ref
+        ("Teil 2 von #14: y", "", []),
+        ("Часть 2 из #14: y", "", []),
+        ("Teil 2 von api#13: y", "", [2]),
+        ("Часть 2 из #13: y", "", [2]),
+        # a label without `of <ref>` counts as today
+        ("Part 2", "", [2]),
+        ("Part 2 (#14)", "", [2]),
+        ("Part 2 for #14", "", [2]),
+        ("Part 2 of the plan in #14", "", [2]),
+        ("Part 2 offline #14", "", [2]),
+        ("Part 2 of ", "", [2]),
+        ("Part 2 of foo#14", "", [2]),
+        # a range is a range, whatever follows it
+        ("Parts 1–2 of #14: x. Part 2 of #13", "", []),
+    ],
+)
+def test_a_part_of_another_issue_is_not_a_part_of_this_one(
+    tmp_path: Path, title: str, what: str, expected: list[int]
+) -> None:
+    assert named_in(tmp_path, refs_pr(65, what, title=title)) == expected
+
+
+def test_a_pull_request_with_refs_to_two_issues_names_a_part_of_one(tmp_path: Path) -> None:
+    node = refs_pr(66, "does a thing", title="Part 2 of #14: x", refs="Refs #13, #14")
+    # for #13 the pull request is a stray ...
+    code, doc = facts(tmp_path, issue_response(body=TWO_PARTS, timeline=[node]))
+    assert (code, doc["selected"]) == (0, {"part": 1, "reason": "first-todo"})
+    assert [p["status"] for p in doc["parts"]] == ["todo", "todo"]
+    assert doc["warnings"] == [
+        f"pull requests with Refs that name no part of this issue: {API}#66 (MERGED)"
+    ]
+    # ... for #14 it is Part 2
+    code, doc = facts(tmp_path, issue_response(body=TWO_PARTS, timeline=[node]), ref="api#14")
+    assert [p["ref"] for p in parts_of(doc)[2]["prs"]] == [f"{API}#66"]
+    assert [p["status"] for p in doc["parts"]] == ["todo", "done"]
+    assert doc["warnings"] == []
+
+
+def test_an_open_pull_request_for_another_issues_part_stops_this_one(tmp_path: Path) -> None:
+    node = refs_pr(66, "does a thing", title="Part 2 of #14: x", refs="Refs #13, #14", state="OPEN")
+    code, doc = facts(tmp_path, issue_response(body=TWO_PARTS, timeline=[node]))
+    assert (code, doc["selected"]) == (1, None)
+    assert doc["reasons"] == [stray_reason(f"{API}#66 (OPEN)")]
+    _, doc = facts(tmp_path, issue_response(body=TWO_PARTS, timeline=[node]), ref="api#14")
+    assert doc["selected"] == {"part": 1, "reason": "first-todo"}  # Part 2 is open, Part 1 is free
+
+
+@pytest.mark.parametrize(
+    ("what", "issue_ref", "repo", "refs", "expected"),
+    [
+        # a ui pull request for an api issue says where the issue is
+        ("Part 1 of api#13: x", "api#13", UI, f"Refs {API}#13", [1]),
+        (f"Part 1 of {API}#13: x", "api#13", UI, f"Refs {API}#13", [1]),
+        ("SYNC copy of api#9 (Part 1 of api#13): x", "api#13", UI, f"Refs {API}#13", [1]),
+        # a bare #13 in the ui pull request is ui#13
+        ("Part 1 of #13: x", "api#13", UI, f"Refs {API}#13", []),
+        ("Part 1 of #13: x", "ui#13", UI, "Refs #13", [1]),
+        ("Part 1 of ui#13: x", "ui#13", UI, "Refs #13", [1]),
+        ("Part 1 of api#13: x", "ui#13", UI, "Refs #13", []),
+        ("Part 1 of ui#13: x", "api#13", API, "Refs #13", []),
+    ],
+)
+def test_a_part_of_is_resolved_against_the_repo_of_the_pull_request(
+    tmp_path: Path, what: str, issue_ref: str, repo: str, refs: str, expected: list[int]
+) -> None:
+    node = refs_pr(67, what, refs=refs, repo=repo)
+    assert named_in(tmp_path, node, ref=issue_ref) == expected
+
+
 def test_a_body_without_what_names_by_its_first_line(tmp_path: Path) -> None:
     node = pr(41, body="Mirror of ui#56 part 2\n\nRefs #13\n")
     assert named_in(tmp_path, node) == [2]
@@ -695,6 +791,13 @@ def test_a_what_naming_two_parts_counts_for_the_first_and_does_not_warn(tmp_path
     assert doc["warnings"] == []
 
 
+def test_the_real_first_lines_name_the_part_of_their_own_issue(tmp_path: Path) -> None:
+    ui_177 = refs_pr(177, UI_177_WHAT, title="feat: y", refs=f"Refs {API}#268", repo=UI)
+    assert named_in(tmp_path, ui_177, ref="api#268") == [1]
+    api_358 = refs_pr(358, API_358_WHAT, title="docs: y", refs="Refs #273")
+    assert named_in(tmp_path, api_358, ref="api#273") == [2]
+
+
 def test_a_merged_pull_request_that_mentions_the_next_part_does_not_finish_it(
     tmp_path: Path,
 ) -> None:
@@ -704,11 +807,11 @@ def test_a_merged_pull_request_that_mentions_the_next_part_does_not_finish_it(
         177,
         UI_177_WHAT,
         title="feat(agents): add the issue-graph script",
-        refs=f"Refs {API}#13",
+        refs=f"Refs {API}#268",
         repo=UI,
     )
     for body in (TWO_PARTS, THREE_PARTS):
-        code, doc = facts(tmp_path, issue_response(body=body, timeline=[ui_177]))
+        code, doc = facts(tmp_path, issue_response(body=body, timeline=[ui_177]), ref="api#268")
         assert (code, doc["selected"]) == (0, {"part": 2, "reason": "first-todo"})
         assert [p["ref"] for p in parts_of(doc)[1]["prs"]] == [f"{UI}#177"]
         assert parts_of(doc)[2]["status"] == "todo"
@@ -717,8 +820,10 @@ def test_a_merged_pull_request_that_mentions_the_next_part_does_not_finish_it(
 
 def test_a_pull_request_that_looks_back_at_part_1_is_part_2_only(tmp_path: Path) -> None:
     # api#358: "Part 2 of #273: … Part 1, … is merged in #357." — Part 1 stays todo.
-    api_358 = refs_pr(358, API_358_WHAT, title="docs(contributing): the sprint start ritual")
-    code, doc = facts(tmp_path, issue_response(body=TWO_PARTS, timeline=[api_358]))
+    api_358 = refs_pr(
+        358, API_358_WHAT, title="docs(contributing): the sprint start ritual", refs="Refs #273"
+    )
+    code, doc = facts(tmp_path, issue_response(body=TWO_PARTS, timeline=[api_358]), ref="api#273")
     assert (code, doc["selected"]) == (0, {"part": 1, "reason": "first-todo"})
     assert parts_of(doc)[1]["prs"] == [] and parts_of(doc)[2]["status"] == "done"
     assert doc["warnings"] == []

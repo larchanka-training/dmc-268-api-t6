@@ -83,10 +83,12 @@ line of its `## What` — a later "Part 1 is merged" in that line is context, no
 are `Part K`, `Ч.K`, `Teil K` and `Часть K` (also `Части K`, `Частью K`). A range (`Parts 1–3`,
 `Part 1-3`; the dash is `-`, `–` or `—`) names no part, and nothing after it stands in: a title
 with a range anywhere names none, a `What` line that starts with a range names none
-(`Parts 1–2 of #13: both. Part 3 is next.` is not Part 3). A pull request with `Refs` that names
-no part of the issue stops the run while it is OPEN (no `--part`), and is a warning when MERGED
-or CLOSED or when `--part` is given. Checkboxes play no part: the tech lead ticks them at
-acceptance.
+(`Parts 1–2 of #13: both. Part 3 is next.` is not Part 3). A `Part K of <ref>` belongs to the issue
+`<ref>`: if that is not the issue under check the mention is skipped (a title goes on to its next
+mention, a `What` line whose first mention is skipped names nothing). A pull request with `Refs`
+that names no part of the issue stops the run while it is OPEN (no `--part`), and is a warning
+when MERGED or CLOSED or when `--part` is given. Checkboxes play no part: the tech lead ticks
+them at acceptance.
 
 ### 2. Read the briefing
 
@@ -149,7 +151,8 @@ and the Status as read back.
 
 The next preflight finds this run's part only through its pull request, so:
 
-- The first line of `## What` starts `Part K of owner/repo#N: …` (`Part K of #N` in the same repo).
+- The first line of `## What` starts `Part K of owner/repo#N: …` (`Part K of #N` in the same repo;
+  in the other repo a bare `#N` is that repo's own issue, so write `api#N` or `owner/repo#N`).
   A SYNC copy names the part too: `SYNC copy of owner/repo#M (Part K of #N): …`. Name the part
   this PR is first: only the first part in that line counts, so "Part 1 is merged" after it is
   safe. The title may name it instead; if it does, the title wins.
