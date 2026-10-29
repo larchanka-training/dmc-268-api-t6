@@ -1132,6 +1132,88 @@ def test_rules_md_at_the_size_limit_exceeds_the_policy_budget(stack: Stack, seed
     assert outcome.check_run["conclusion"] == "neutral"
 
 
+# §3.3 counts the two rendered blocks together, `(len + 2) // 3` per block by counter/v2
+# (§7.2). One line of letters each: the rules.md block adds 106 characters of markup to its
+# text and the AGENTS.md block 124, so these bytes render to 6 000 tokens each, 12 000
+# together. Either document alone is half the budget: only the sum can reach it.
+_RULES_HALF = b"r" * 17_894
+_AGENTS_HALF = b"g" * 17_876
+_RULES_HALF_BLOCK = (
+    '<repository_rules block_id="policy-rules" path=".review/rules.md">\n'
+    f'<line n="1">{_RULES_HALF.decode()}</line>\n'
+    "</repository_rules>"
+)
+_AGENTS_HALF_BLOCK = (
+    '<project_conventions_document block_id="policy-agents" path="AGENTS.md">\n'
+    f'<line n="1">{_AGENTS_HALF.decode()}</line>\n'
+    "</project_conventions_document>"
+)
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize("seed", [Seed.V4], ids=str)
+def test_policy_documents_together_at_the_budget_reach_the_model_whole(
+    stack: Stack, seed: Seed
+) -> None:
+    # §3.3: 12 000 tokens of the two blocks is the budget itself, so the run goes on and
+    # the model gets both documents whole.
+    outcome = _review(stack, _github(_RULES_HALF, agents=_AGENTS_HALF), seed)
+
+    _assert_published(outcome, seed)
+    assert outcome.documents[RULES] == (
+        "present",
+        hashlib.sha256(_RULES_HALF).hexdigest(),
+        len(_RULES_HALF),
+    )
+    assert outcome.documents["AGENTS.md"] == (
+        "present",
+        hashlib.sha256(_AGENTS_HALF).hexdigest(),
+        len(_AGENTS_HALF),
+    )
+    _assert_rules_shown(outcome, seed, _RULES_HALF, _RULES_HALF_BLOCK)
+    for task in (_REVIEW_TASK[seed], "VerificationOutput"):
+        for message in _user_messages(outcome, task):
+            assert message.count(_AGENTS_HALF_BLOCK) == 1, task
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize("seed", [Seed.V4], ids=str)
+def test_policy_documents_together_over_the_budget_fail_the_run_without_llm(
+    stack: Stack, seed: Seed
+) -> None:
+    # One byte more of AGENTS.md: 6 001 tokens, 12 001 together, each document still far
+    # under 64 KiB and under the budget alone. §3.3, §11: failed in `policy.load` before
+    # the conventions model, without retry, and neither document is truncated.
+    agents = _AGENTS_HALF + b"g"
+    outcome = _review(stack, _github(_RULES_HALF, agents=agents), seed)
+
+    assert (outcome.state, outcome.attempt) == ("failed", 1)
+    assert outcome.error_code == "policy_prompt_budget_exceeded"
+    assert outcome.documents[RULES] == (
+        "present",
+        hashlib.sha256(_RULES_HALF).hexdigest(),
+        len(_RULES_HALF),
+    )
+    assert outcome.documents["AGENTS.md"] == (
+        "present",
+        hashlib.sha256(agents).hexdigest(),
+        len(agents),
+    )
+    _assert_policy_load_failed(outcome)
+    [load] = outcome.policy_load
+    diagnostic = load["error"]["diagnostic"]
+    # §9: the budget of the two documents names neither of them.
+    assert (diagnostic["source_path"], diagnostic["limit"], diagnostic["actual"]) == (
+        None,
+        _MAX_POLICY_TOKENS,
+        12_001,
+    )
+    assert outcome.tasks == []
+    assert outcome.reviews == []
+    # PIPELINE_SPEC §7: `failed` → `completed` / `neutral`.
+    assert outcome.check_run["conclusion"] == "neutral"
+
+
 @pytest.mark.integration
 def test_all_changes_ignored_skips_the_run_without_llm_or_review(stack: Stack, seed: Seed) -> None:
     outcome = _review(stack, _github(ALL_IGNORED_RULES), seed)
