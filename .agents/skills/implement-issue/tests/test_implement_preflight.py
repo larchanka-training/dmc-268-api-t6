@@ -647,6 +647,98 @@ def test_a_pull_request_with_refs_that_names_no_part_is_a_warning(tmp_path: Path
     ]
 
 
+# An OPEN pull request with Refs that names no part may be the work of any part: the run
+# cannot tell which one is taken, so it stops (unless the part is given).
+UNATTRIBUTED = "feat: no part named"
+
+
+def unattributed(number: int, state: str, **kw: Any) -> dict[str, Any]:
+    return refs_pr(number, "does a thing", title=UNATTRIBUTED, state=state, **kw)
+
+
+def stray_reason(*listed: str) -> str:
+    return (
+        f"open pull requests with Refs that name no part of this issue: {', '.join(listed)}"
+        " — say which part each covers, or pass --part"
+    )
+
+
+def test_an_open_pull_request_that_names_no_part_stops(tmp_path: Path) -> None:
+    node = unattributed(46, "OPEN")
+    code, doc = facts(tmp_path, issue_response(body=TWO_PARTS, timeline=[node]))
+    assert code == 1
+    assert (doc["verdict"], doc["selected"]) == ("stop", None)
+    assert doc["reasons"] == [stray_reason(f"{API}#46 (OPEN)")]
+    assert doc["warnings"] == [  # the warning stays: it is the same fact for a reader of the JSON
+        f"pull requests with Refs that name no part of this issue: {API}#46 (OPEN)"
+    ]
+
+
+def test_every_open_pull_request_that_names_no_part_is_listed(tmp_path: Path) -> None:
+    timeline = [unattributed(48, "OPEN"), unattributed(47, "OPEN", repo=UI, refs=f"Refs {API}#13")]
+    timeline.append(unattributed(49, "MERGED"))  # not listed: only the open ones stop the run
+    code, doc = facts(tmp_path, issue_response(body=TWO_PARTS, timeline=timeline))
+    assert code == 1
+    assert doc["reasons"] == [stray_reason(f"{API}#48 (OPEN)", f"{UI}#47 (OPEN)")]
+
+
+def test_an_explicit_part_goes_past_an_open_pull_request_that_names_no_part(
+    tmp_path: Path,
+) -> None:
+    node = unattributed(46, "OPEN")
+    for part in ("1", "2"):
+        code, doc = facts(tmp_path, issue_response(body=TWO_PARTS, timeline=[node]), "--part", part)
+        assert (code, doc["selected"]) == (0, {"part": int(part), "reason": "explicit"})
+        assert doc["warnings"] == [
+            f"pull requests with Refs that name no part of this issue: {API}#46 (OPEN)"
+        ]
+
+
+@pytest.mark.parametrize("state", ["MERGED", "CLOSED"])
+def test_a_merged_or_closed_pull_request_that_names_no_part_is_only_a_warning(
+    tmp_path: Path, state: str
+) -> None:
+    node = unattributed(46, state)
+    code, doc = facts(tmp_path, issue_response(body=TWO_PARTS, timeline=[node]))
+    assert (code, doc["selected"]) == (0, {"part": 1, "reason": "first-todo"})
+    assert doc["warnings"] == [
+        f"pull requests with Refs that name no part of this issue: {API}#46 ({state})"
+    ]
+
+
+@pytest.mark.parametrize(
+    "title",
+    ["Part 3 of #13: no such part", "Parts 1–2 of #13", "Частей 1 и 2", "Части 1–2 of #13"],
+)
+def test_an_open_pull_request_naming_a_part_the_issue_lacks_or_a_range_stops(
+    tmp_path: Path, title: str
+) -> None:
+    node = refs_pr(46, "does a thing", title=title, state="OPEN")
+    code, doc = facts(tmp_path, issue_response(body=TWO_PARTS, timeline=[node]))
+    assert code == 1
+    assert doc["reasons"] == [stray_reason(f"{API}#46 (OPEN)")]
+
+
+def test_the_open_pull_request_that_names_no_part_stops_before_the_part_checks(
+    tmp_path: Path,
+) -> None:
+    timeline = [unattributed(46, "OPEN"), refs_pr(100, "Part 1 of #13: x", state="OPEN")]
+    _, doc = facts(tmp_path, issue_response(body=TWO_PARTS, timeline=timeline))
+    assert doc["reasons"] == [stray_reason(f"{API}#46 (OPEN)")]  # not "Part 1 already has…"
+    # ...but never before the closed issue and the blockers
+    _, doc = facts(
+        tmp_path, issue_response(body=TWO_PARTS, timeline=timeline, blocked=[blocker(5)])
+    )
+    assert doc["reasons"] == [f"blocked by {API}#5 — blocker 5"]
+
+
+def test_an_open_pull_request_that_names_a_part_is_not_a_stray(tmp_path: Path) -> None:
+    node = refs_pr(46, "Part 2 of #13: x", state="OPEN")
+    code, doc = facts(tmp_path, issue_response(body=TWO_PARTS, timeline=[node]))
+    assert (code, doc["selected"]) == (0, {"part": 1, "reason": "first-todo"})
+    assert doc["warnings"] == []
+
+
 # ─── part status and selection ──────────────────────────────────────────────
 def two_part_run(
     tmp_path: Path, states: dict[int, list[str]], *args: str, body: str = TWO_PARTS

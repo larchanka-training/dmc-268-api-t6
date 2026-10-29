@@ -58,9 +58,12 @@ and quotes do not count.
 
 Decisions, in this order: the issue is CLOSED -> stop; any OPEN blocker -> stop;
 parts not numbered 1..k -> stop; `--part K` must exist (exit 2) and is taken
-as is; no `--part`: the first part that is not done — open_pr stops, todo is
+as is; no `--part`: an OPEN pull request with `Refs` that names no part of the
+issue stops (whichever part it belongs to is not known: "say which part it covers,
+or pass --part"), else the first part that is not done — open_pr stops, todo is
 taken, all done stops; no parts: the whole task, unless a pull request with
-`Refs` is OPEN or MERGED (stop).
+`Refs` is OPEN or MERGED (stop). With `--part K`, or when the pull request that
+names no part is MERGED or CLOSED, it is only a warning.
 
 Exit 0 go; 1 stop (the document is still on stdout); 2 usage, bad REF or a
 `--part` the issue does not have; 3 gh / API error (non-zero gh exit, timeout,
@@ -675,9 +678,13 @@ def listing(prs: list[dict[str, Any]]) -> str:
 
 # ─── the decision ───────────────────────────────────────────────────────────
 def decide(
-    facts: dict[str, Any], part: int | None, numbering_error: str | None
+    facts: dict[str, Any],
+    part: int | None,
+    numbering_error: str | None,
+    stray_open: list[dict[str, Any]],
 ) -> tuple[dict[str, Any] | None, list[str]]:
-    """(selected, reasons): reasons non-empty means stop."""
+    """(selected, reasons): reasons non-empty means stop. `stray_open` are the OPEN
+    pull requests with `Refs` that name no part of an issue that has parts."""
     if facts["issue"]["state"] == "CLOSED":
         return None, [f"issue {facts['issue']['repo']}#{facts['issue']['number']} is CLOSED"]
     open_blockers = [b for b in facts["blockers"] if b["state"] == "OPEN"]
@@ -700,6 +707,11 @@ def decide(
                 " — a rework PR is a human decision"
             ]
         return {"part": None, "reason": "whole-task"}, []
+    if stray_open:
+        return None, [
+            "open pull requests with Refs that name no part of this issue: "
+            f"{listing(stray_open)} — say which part each covers, or pass --part"
+        ]
     for p in parts:
         if p["status"] == "done":
             continue
@@ -766,7 +778,8 @@ def collect(repo: str, number: int, part: int | None) -> dict[str, Any]:
         "task_prs": [] if parts else [public(pr) for pr in prs],
         "kickoff": {"present": bool(kickoff_text), "text": kickoff_text},
     }
-    selected, reasons = decide(facts, part, numbering_error)
+    stray_open = [pr for pr in unnamed if pr["state"] == "OPEN"]
+    selected, reasons = decide(facts, part, numbering_error, stray_open)
     if selected is not None and selected["reason"] == "explicit":
         chosen = next(p for p in parts if p["n"] == selected["part"])
         if chosen["status"] != "todo":
