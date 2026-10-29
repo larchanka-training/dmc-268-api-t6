@@ -1,0 +1,85 @@
+{
+  "data": {
+    "repository": {
+      "issue": {
+        "title": "Synthetic issue",
+        "url": "https://github.com/larchanka-training/dmc-268-api-t6/issues/13",
+        "state": "OPEN",
+        "stateReason": "REOPENED",
+        "body": "",
+        "timelineItems": {
+          "pageInfo": {
+            "hasNextPage": false,
+            "endCursor": null
+          },
+          "nodes": [
+            {
+              "__typename": "ClosedEvent",
+              "createdAt": "2026-10-01T09:00:00Z",
+              "actor": {
+                "login": "axyi"
+              },
+              "stateReason": "COMPLETED",
+              "closer": {
+                "__typename": "PullRequest",
+                "number": 70,
+                "repository": {
+                  "nameWithOwner": "larchanka-training/dmc-268-ui-t6"
+                }
+              }
+            },
+            {
+              "__typename": "ReopenedEvent",
+              "createdAt": "2026-10-02T09:00:00Z",
+              "actor": {
+                "login": "axyi"
+              }
+            },
+            {
+              "__typename": "CrossReferencedEvent",
+              "willCloseTarget": true,
+              "source": {
+                "__typename": "PullRequest",
+                "number": 71,
+                "title": "feat: wip",
+                "url": "https://github.com/larchanka-training/dmc-268-api-t6/pull/71",
+                "body": "Closes #13",
+                "state": "OPEN",
+                "mergedAt": null,
+                "headRefOid": "4747474747474747474747474747474747474747",
+                "repository": {
+                  "nameWithOwner": "larchanka-training/dmc-268-api-t6"
+                },
+                "commits": {
+                  "nodes": [
+                    {
+                      "commit": {
+                        "statusCheckRollup": {
+                          "state": "PENDING"
+                        }
+                      }
+                    }
+                  ]
+                },
+                "reviewThreads": {
+                  "pageInfo": {
+                    "hasNextPage": false,
+                    "endCursor": null
+                  },
+                  "nodes": [
+                    {
+                      "isResolved": false
+                    },
+                    {
+                      "isResolved": true
+                    }
+                  ]
+                }
+              }
+            }
+          ]
+        }
+      }
+    }
+  }
+}

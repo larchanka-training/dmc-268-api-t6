@@ -1,0 +1,286 @@
+{
+  "checkboxes": {
+    "ac": {
+      "checked": 13,
+      "items": [
+        {
+          "checked": true,
+          "text": "Мерж в `main` выкатывает staging без ручных шагов: прогон `CI/CD` зелёный вместе с `deploy-staging` и `promote-staging`, `https://staging-api.dmc268-t6.axyi.ru/healthcheck` отвечает `\"status\":\"ok\"`; ссылка на прогон — в PR"
+        },
+        {
+          "checked": true,
+          "text": "RabbitMQ работает на staging только во внутренней сети compose: в `deploy/compose/staging*.yml` у него нет `ports:`, порты 5672 и 15672 снаружи VPS закрыты (вывод проверки — в PR)"
+        },
+        {
+          "checked": true,
+          "text": "После `docker compose up -d --force-recreate` сервиса RabbitMQ durable-очереди и сообщения в них на месте (`rabbitmqctl list_queues` до и после — в PR)"
+        },
+        {
+          "checked": true,
+          "text": "Redis работает на staging во внутренней сети, с паролем, без `ports:`; приложение не использует его как очередь"
+        },
+        {
+          "checked": true,
+          "text": "После мержа #34 сервис `worker` из того же образа, что `api`, поднимается при каждом выкате из `main` и подключается к RabbitMQ; воркер, упавший при старте, валит выкат и запускает авто-откат так же, как `api`; у `worker` в `deploy/compose/staging.yml` свой healthcheck (или `healthcheck: disable: true` и другая проверка старта) вместо унаследованной HTTP-проверки образа, и `up --wait` проходит с ним _(дополнено по карточке спринта)_"
+        },
+        {
+          "checked": true,
+          "text": "Секреты приложения из scope попадают в контейнеры `api` и `worker` (секреты авторизации — только в `api`) только через GitHub Secrets и `.env` 0600 на хосте; в git, образе и логах CI их нет, gitleaks зелёный; после авто-отката в `deploy-staging` и ручного `rollback.yml` на предыдущий образ они на месте (список имён из `docker compose exec api env` и `docker compose exec worker env` после отката, без значений — в PR) _(дополнено по карточке спринта)_"
+        },
+        {
+          "checked": true,
+          "text": "Незаданный секрет отсутствует в окружении контейнера, а не приходит пустой строкой: список имён из `docker compose exec api env` (без значений) — в PR"
+        },
+        {
+          "checked": true,
+          "text": "`https://staging-ui.dmc268-t6.axyi.ru/api/runs` отвечает JSON от приложения `api`, а не `index.html` фронтенда; `/api/auth/*` и `/api/stream` идут тем же маршрутом (вывод `curl -i` — в PR) _(обновлено по #20)_"
+        },
+        {
+          "checked": true,
+          "text": "`docs/INFRASTRUCTURE.md` фиксирует, что окружение staging — курсовой VPS вне Terraform, и почему; стеки Hetzner описаны как альтернатива, джобы `terraform-fmt-validate` и `terraform-lint-security` остаются зелёными"
+        },
+        {
+          "checked": true,
+          "text": "`push-image` не стартует, пока не прошёл `Python lint / type / test`"
+        },
+        {
+          "checked": true,
+          "text": "`docs/SECRETS.md` перечисляет каждое новое имя: тип, уровень (organization / Environment), куда уходит; строка про `AI_DMC268_T6` обновлена; `docs/CICD.md` и SD §14 перечисляют сервисы staging"
+        },
+        {
+          "checked": true,
+          "text": "Фронтенд: после мержа в `main` larchanka-training/dmc-268-ui-t6 `https://staging-ui.dmc268-t6.axyi.ru` обновляется сам; ссылка на зелёный прогон ui `CI/CD` — в комментарии при закрытии issue"
+        },
+        {
+          "checked": true,
+          "text": "Набор инфраструктуры staging совпадает с утверждённым в #20 (D1, [комментарий-решение в #20](https://github.com/larchanka-training/dmc-268-api-t6/issues/20#issuecomment-5860133963)): PostgreSQL 17, RabbitMQ (`rabbitmq:4-management-alpine`), Redis (`redis:8-alpine`), объектного хранилища нет; фактические версии — в описании PR _(обновлено по #20)_"
+        }
+      ],
+      "total": 13
+    },
+    "dod": {
+      "checked": 6,
+      "items": [
+        {
+          "checked": true,
+          "text": "Прогон `CI/CD` на `main` после последнего мержа зелёный целиком, включая `deploy-staging` и `promote-staging`"
+        },
+        {
+          "checked": true,
+          "text": "Required check `Python lint / type / test` зелёный; если менялся Python — гейты AGENTS.md зелёные"
+        },
+        {
+          "checked": true,
+          "text": "Ни одного значения секрета в git, образе, логах CI и описании PR"
+        },
+        {
+          "checked": true,
+          "text": "PR оформлены и прошли ревью по `docs/CONTRIBUTING.md`: заголовок ≤ 72 символов, тело What / Why / How to verify / Refs, ревьюер не автор, треды закрыты"
+        },
+        {
+          "checked": true,
+          "text": "`docs/SECRETS.md`, `docs/CICD.md`, `docs/INFRASTRUCTURE.md` и SD §14 обновлены"
+        },
+        {
+          "checked": true,
+          "text": "Смёржено до 04.10.2026; issue закрывается после мержа последнего PR (часть про воркер — после #34), а не переносом карточки на доске"
+        }
+      ],
+      "total": 6
+    },
+    "outside": 0
+  },
+  "closing": {
+    "events": [
+      {
+        "actor": "axyi",
+        "at": "2026-10-03T21:30:22Z",
+        "closer": "merge",
+        "closer_ref": "larchanka-training/dmc-268-api-t6#45",
+        "kind": "closed",
+        "state_reason": "COMPLETED"
+      },
+      {
+        "actor": "axyi",
+        "at": "2026-10-03T22:04:34Z",
+        "kind": "reopened"
+      },
+      {
+        "actor": "axyi",
+        "at": "2026-10-05T16:34:43Z",
+        "closer": "manual",
+        "closer_ref": null,
+        "kind": "closed",
+        "state_reason": "COMPLETED"
+      }
+    ],
+    "ever_closed_by_merge": true,
+    "last_closer": "manual"
+  },
+  "issue": {
+    "ref": "larchanka-training/dmc-268-api-t6#35",
+    "state": "CLOSED",
+    "state_reason": "COMPLETED",
+    "title": "DevOps Инженер (Staging-окружение & сквозной CD)",
+    "url": "https://github.com/larchanka-training/dmc-268-api-t6/issues/35"
+  },
+  "prs": [
+    {
+      "ci": null,
+      "head_sha": "523d6dd4cec8d1138996299abd0da7001b403f35",
+      "merged_at": null,
+      "ref": "larchanka-training/dmc-268-api-t6#10",
+      "refs": false,
+      "state": "CLOSED",
+      "title": "feat: restructure backend as microservices monorepo",
+      "unresolved_threads": 2,
+      "url": "https://github.com/larchanka-training/dmc-268-api-t6/pull/10",
+      "will_close": false
+    },
+    {
+      "ci": "SUCCESS",
+      "head_sha": "9dd0aeb8943b2322bce41dfbdb3115a54f73b288",
+      "merged_at": "2026-09-29T11:58:38Z",
+      "ref": "larchanka-training/dmc-268-api-t6#36",
+      "refs": true,
+      "state": "MERGED",
+      "title": "docs(spec): pin pipeline, API and LLM output contracts (#20)",
+      "unresolved_threads": 0,
+      "url": "https://github.com/larchanka-training/dmc-268-api-t6/pull/36",
+      "will_close": false
+    },
+    {
+      "ci": "FAILURE",
+      "head_sha": "c5bf9d816378467e369cedf6c63fc50620b0f78b",
+      "merged_at": "2026-10-01T08:11:23Z",
+      "ref": "larchanka-training/dmc-268-api-t6#38",
+      "refs": false,
+      "state": "MERGED",
+      "title": "feat: implement GitHub webhook reviews and portal auth (#11)",
+      "unresolved_threads": 0,
+      "url": "https://github.com/larchanka-training/dmc-268-api-t6/pull/38",
+      "will_close": false
+    },
+    {
+      "ci": "SUCCESS",
+      "head_sha": "50f667544a12ec11ac4cb4e0f42aea2eb2291f73",
+      "merged_at": "2026-10-03T18:31:18Z",
+      "ref": "larchanka-training/dmc-268-api-t6#40",
+      "refs": false,
+      "state": "MERGED",
+      "title": "feat(reviews): add LLM gateway with structured review output (#33)",
+      "unresolved_threads": 0,
+      "url": "https://github.com/larchanka-training/dmc-268-api-t6/pull/40",
+      "will_close": false
+    },
+    {
+      "ci": "SUCCESS",
+      "head_sha": "b2b0f1731aefd9198a8bebf454015c2457361dbf",
+      "merged_at": "2026-10-03T21:30:20Z",
+      "ref": "larchanka-training/dmc-268-api-t6#45",
+      "refs": true,
+      "state": "MERGED",
+      "title": "feat(deploy): add RabbitMQ, Redis and app secrets to staging (#35)",
+      "unresolved_threads": 0,
+      "url": "https://github.com/larchanka-training/dmc-268-api-t6/pull/45",
+      "will_close": false
+    },
+    {
+      "ci": "SUCCESS",
+      "head_sha": "c253b142d1189df3ce8d4e7312c514905e5af86e",
+      "merged_at": "2026-10-05T11:54:07Z",
+      "ref": "larchanka-training/dmc-268-api-t6#59",
+      "refs": false,
+      "state": "MERGED",
+      "title": "docs(contributing): issue acceptance and merge rules (#56)",
+      "unresolved_threads": 0,
+      "url": "https://github.com/larchanka-training/dmc-268-api-t6/pull/59",
+      "will_close": false
+    },
+    {
+      "ci": "SUCCESS",
+      "head_sha": "97a335fd4b268858f464b4a90cc7d21f86bfb116",
+      "merged_at": "2026-10-05T09:15:20Z",
+      "ref": "larchanka-training/dmc-268-api-t6#60",
+      "refs": false,
+      "state": "MERGED",
+      "title": "docs: webhook and auth docs, SD drift, container smoke (#56)",
+      "unresolved_threads": 0,
+      "url": "https://github.com/larchanka-training/dmc-268-api-t6/pull/60",
+      "will_close": false
+    },
+    {
+      "ci": "SUCCESS",
+      "head_sha": "644c9d2f8b023237552686938a1ff9870c02d003",
+      "merged_at": "2026-10-05T11:58:38Z",
+      "ref": "larchanka-training/dmc-268-api-t6#63",
+      "refs": true,
+      "state": "MERGED",
+      "title": "feat(deploy): run worker and webhook-worker on staging (#35)",
+      "unresolved_threads": 0,
+      "url": "https://github.com/larchanka-training/dmc-268-api-t6/pull/63",
+      "will_close": false
+    },
+    {
+      "ci": "SUCCESS",
+      "head_sha": "a0d1d4868c198c954a0867810536e82db1485e33",
+      "merged_at": "2026-10-05T19:31:07Z",
+      "ref": "larchanka-training/dmc-268-api-t6#64",
+      "refs": false,
+      "state": "MERGED",
+      "title": "fix(pipeline): assemble webhook to LLM review path (#52)",
+      "unresolved_threads": 0,
+      "url": "https://github.com/larchanka-training/dmc-268-api-t6/pull/64",
+      "will_close": false
+    },
+    {
+      "ci": "SUCCESS",
+      "head_sha": "a55303b79ee4c80ae252b256c749cd43af5031a0",
+      "merged_at": "2026-10-05T16:21:44Z",
+      "ref": "larchanka-training/dmc-268-api-t6#67",
+      "refs": false,
+      "state": "MERGED",
+      "title": "fix(llm): reassign OQ-2 models after the live run (#46)",
+      "unresolved_threads": 0,
+      "url": "https://github.com/larchanka-training/dmc-268-api-t6/pull/67",
+      "will_close": false
+    },
+    {
+      "ci": "SUCCESS",
+      "head_sha": "eb878f99543c147bc0c3df9f8beb6fc96a70d336",
+      "merged_at": "2026-10-19T17:50:30Z",
+      "ref": "larchanka-training/dmc-268-api-t6#148",
+      "refs": false,
+      "state": "MERGED",
+      "title": "feat(webhooks): share installation tokens through Redis (#62)",
+      "unresolved_threads": 0,
+      "url": "https://github.com/larchanka-training/dmc-268-api-t6/pull/148",
+      "will_close": false
+    },
+    {
+      "ci": "SUCCESS",
+      "head_sha": "9df640596e07b98a7652289a4bc65c841ecefc54",
+      "merged_at": "2026-10-19T16:19:31Z",
+      "ref": "larchanka-training/dmc-268-api-t6#187",
+      "refs": false,
+      "state": "MERGED",
+      "title": "feat(monitoring): add Prometheus, Grafana and Alertmanager stack",
+      "unresolved_threads": 0,
+      "url": "https://github.com/larchanka-training/dmc-268-api-t6/pull/187",
+      "will_close": false
+    },
+    {
+      "ci": "SUCCESS",
+      "head_sha": "c94401043b6b93f03bfc43f426604d5901beafcc",
+      "merged_at": "2026-10-25T15:52:35Z",
+      "ref": "larchanka-training/dmc-268-api-t6#297",
+      "refs": false,
+      "state": "MERGED",
+      "title": "test(deploy): cover rollback boundary and align runbook (#215)",
+      "unresolved_threads": 0,
+      "url": "https://github.com/larchanka-training/dmc-268-api-t6/pull/297",
+      "will_close": false
+    }
+  ],
+  "schema": 1
+}

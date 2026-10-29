@@ -1,0 +1,58 @@
+{
+  "data": {
+    "repository": {
+      "issue": {
+        "title": "[process][106] Проведите приёмку автоматически закрытой задачи #56",
+        "url": "https://github.com/larchanka-training/dmc-268-api-t6/issues/117",
+        "state": "CLOSED",
+        "stateReason": "COMPLETED",
+        "body": "## Background\n\n\\#106, часть 8: по итогам #57 задача #56 закрылась через Development-связь с PR #60, без отмеченных AC и комментария приёмки.\n\n## Scope\n\n- Сверить актуальное состояние #56 и доказательства выполнения её AC с CONTRIBUTING.\n- Оформить фактическую приёмку либо вернуть незавершённую задачу в работу.\n\n## Acceptance Criteria\n\n- [x] Каждый AC #56 проверен по фактам; в #56 есть итог с доказательствами. Выполненные AC отмечены, непроверенные остаются открытыми.\n- [x] Если работа не принята полностью, #56 переоткрыта с перечислением оставшихся пунктов; если принята — решение техлида о закрытии записано.\n\n## Dependencies\n\nБлокирующих зависимостей нет. #56 и PR #60 — предмет проверки; #106 — трекер.\n\n## DoD Checklist\n\n- [x] Доказательства и решения зафиксированы в соответствующих issue; отмечены только подтверждённые AC.\n- [x] Техлид проверил результат; статус отражён в #106 и на доске 12.\n\n## References\n\n- [Трекер API #106](https://github.com/larchanka-training/dmc-268-api-t6/issues/106)\n- [Задача #56](https://github.com/larchanka-training/dmc-268-api-t6/issues/56)\n- [PR #60](https://github.com/larchanka-training/dmc-268-api-t6/pull/60)\n\n## Kickoff — с чего начать\n\n**Репозиторий:** larchanka-training/dmc-268-api-t6\n\n**Форма проблемы:** Состояние issue не подтверждено явной приёмкой по правилам команды.\n\n**Что прочитать первым:**\n\n- docs/CONTRIBUTING.md — кто принимает AC и закрывает issue.\n\n",
+        "timelineItems": {
+          "pageInfo": {
+            "hasNextPage": false,
+            "endCursor": "Y3Vyc29yOnYyOpPPAAABoW3MAqgCqzE3NTgxMTAxMDEx"
+          },
+          "nodes": [
+            {
+              "__typename": "CrossReferencedEvent",
+              "willCloseTarget": false,
+              "source": {
+                "__typename": "Issue"
+              }
+            },
+            {
+              "__typename": "CrossReferencedEvent",
+              "willCloseTarget": false,
+              "source": {
+                "__typename": "Issue"
+              }
+            },
+            {
+              "__typename": "ClosedEvent",
+              "createdAt": "2026-10-19T18:24:03Z",
+              "actor": {
+                "login": "axyi"
+              },
+              "stateReason": "COMPLETED",
+              "closer": null
+            },
+            {
+              "__typename": "CrossReferencedEvent",
+              "willCloseTarget": false,
+              "source": {
+                "__typename": "Issue"
+              }
+            },
+            {
+              "__typename": "CrossReferencedEvent",
+              "willCloseTarget": false,
+              "source": {
+                "__typename": "Issue"
+              }
+            }
+          ]
+        }
+      }
+    }
+  }
+}

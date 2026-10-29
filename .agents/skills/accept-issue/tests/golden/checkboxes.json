@@ -1,0 +1,76 @@
+{
+  "checkboxes": {
+    "ac": {
+      "checked": 2,
+      "items": [
+        {
+          "checked": true,
+          "text": "AC one is done"
+        },
+        {
+          "checked": false,
+          "text": "AC two is open"
+        },
+        {
+          "checked": true,
+          "text": "AC three, star bullet, capital X"
+        },
+        {
+          "checked": false,
+          "text": "AC four, nested"
+        },
+        {
+          "checked": false,
+          "text": "AC five, under a deeper heading"
+        },
+        {
+          "checked": false,
+          "text": "AC six, the heading repeats"
+        }
+      ],
+      "total": 6
+    },
+    "dod": {
+      "checked": 2,
+      "items": [
+        {
+          "checked": true,
+          "text": "DoD one"
+        },
+        {
+          "checked": false,
+          "text": "DoD two"
+        },
+        {
+          "checked": true,
+          "text": "DoD three, deeper heading"
+        }
+      ],
+      "total": 3
+    },
+    "outside": 4
+  },
+  "closing": {
+    "events": [
+      {
+        "actor": "axyi",
+        "at": "2026-10-01T09:00:00Z",
+        "closer": "manual",
+        "closer_ref": null,
+        "kind": "closed",
+        "state_reason": "COMPLETED"
+      }
+    ],
+    "ever_closed_by_merge": false,
+    "last_closer": "manual"
+  },
+  "issue": {
+    "ref": "larchanka-training/dmc-268-api-t6#13",
+    "state": "CLOSED",
+    "state_reason": "COMPLETED",
+    "title": "Synthetic issue",
+    "url": "https://github.com/larchanka-training/dmc-268-api-t6/issues/13"
+  },
+  "prs": [],
+  "schema": 1
+}
