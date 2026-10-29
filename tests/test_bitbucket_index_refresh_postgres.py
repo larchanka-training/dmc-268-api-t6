@@ -185,6 +185,31 @@ def test_refresh_waits_for_connection_management_before_repository_lock(
             async with factory() as verify:
                 state = await verify.get(CodeIndexState, repository_id)
                 assert state is not None and state.wake_requested_at is not None
+
+            # The confirmed webhook may still deliver after the user disables RAG.
+            # Review is already disabled, so this exercises the independent RAG gate.
+            async with factory.begin() as session:
+                await session.execute(
+                    update(Repository)
+                    .where(Repository.id == repository_id)
+                    .values(rag_enabled=False)
+                )
+                await session.execute(
+                    update(CodeIndexState)
+                    .where(CodeIndexState.repository_id == repository_id)
+                    .values(wake_requested_at=None)
+                )
+            assert not await refresh.execute(
+                installation_id,
+                repository_id,
+                repository_uuid,
+                frozenset({"main"}),
+                1,
+                generation,
+            )
+            async with factory() as verify:
+                state = await verify.get(CodeIndexState, repository_id)
+                assert state is not None and state.wake_requested_at is None
         finally:
             await engine.dispose()
 
