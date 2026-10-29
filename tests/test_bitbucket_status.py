@@ -321,6 +321,10 @@ def test_status_gateway_updates_one_key_after_ambiguous_write_and_checks_pr_head
         with pytest.raises(BitbucketStatusUnavailable, match="head or identity changed"):
             await publisher.upsert(run_id, RUN_URL)
         assert len(statuses) == 4
+        snapshot = replace(snapshot, state="running")
+        with pytest.raises(BitbucketStatusUnavailable, match="head or identity changed"):
+            await publisher.upsert(run_id, RUN_URL)
+        assert len(statuses) == 4
         remote_target_branch = "main"
 
         snapshot = replace(snapshot, state="cancelled")
@@ -373,5 +377,18 @@ def test_status_gateway_updates_one_key_after_ambiguous_write_and_checks_pr_head
         await publisher.upsert(run_id, RUN_URL)
         assert statuses[-1]["state"] == "STOPPED"
         assert statuses[-1]["key"] == statuses[0]["key"]
+
+        remote_state = "MERGED"
+        await publisher.upsert(run_id, RUN_URL)
+        assert statuses[-1]["state"] == "STOPPED"
+        assert statuses[-1]["key"] == statuses[0]["key"]
+
+        remote_state = "DECLINED"
+        snapshot = replace(snapshot, state="failed")
+        before_closed_failure = len(statuses)
+        with pytest.raises(BitbucketStatusUnavailable) as closed_error:
+            await publisher.upsert(run_id, RUN_URL)
+        assert closed_error.value.reason == "pr_not_open"
+        assert len(statuses) == before_closed_failure
 
     asyncio.run(scenario())
