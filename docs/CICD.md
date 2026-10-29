@@ -819,9 +819,9 @@ Auto rollback verifier вызывает без `DEPLOY_RUN`, то есть пр�
 установлен только в пользовательском Docker config, тот же plugin доступен через symlink в
 приватном config, без копирования credentials. Реальные шесть acceptance cases, полные ID,
 ревизии, снимки контейнеров, хеши файлов и cleanup от 2026-10-12:
-[отчёт и ограничения](plans/110-verification.md), [redacted JSON](plans/110-verification.json).
+[отчёт и ограничения](https://github.com/larchanka-training/dmc-268-api-t6/blob/f1c1b9587f4edaecf784eefd5a0aed79488ec7fa/docs/plans/110-verification.md), [redacted JSON](https://github.com/larchanka-training/dmc-268-api-t6/blob/f1c1b9587f4edaecf784eefd5a0aed79488ec7fa/docs/plans/110-verification.json).
 Повторная проверка 2026-10-16 (PR #160: verifier ждёт `REDIS_URL` у worker):
-[отчёт](plans/110-verifier-verification.md), [метаданные проверки](plans/110-verifier-verification.json).
+[отчёт](https://github.com/larchanka-training/dmc-268-api-t6/blob/f1c1b9587f4edaecf784eefd5a0aed79488ec7fa/docs/plans/110-verifier-verification.md), [метаданные проверки](https://github.com/larchanka-training/dmc-268-api-t6/blob/f1c1b9587f4edaecf784eefd5a0aed79488ec7fa/docs/plans/110-verifier-verification.json).
 
 ---
 
