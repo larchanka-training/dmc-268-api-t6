@@ -223,6 +223,8 @@ def test_status_gateway_updates_one_key_after_ambiguous_write_and_checks_pr_head
         requests: list[httpx.Request] = []
         ambiguous = True
         source_uuid = remote
+        remote_pr_id = 7
+        remote_source_branch = "feature/review"
         remote_head = HEAD
         resolved_head = HEAD
         remote_state = "OPEN"
@@ -259,11 +261,11 @@ def test_status_gateway_updates_one_key_after_ambiguous_write_and_checks_pr_head
                 return httpx.Response(
                     200,
                     json={
-                        "id": 7,
+                        "id": remote_pr_id,
                         "state": remote_state,
                         "source": {
                             "commit": {"hash": remote_head[:12]},
-                            "branch": {"name": "feature/review"},
+                            "branch": {"name": remote_source_branch},
                             "repository": {"uuid": f"{{{source_uuid}}}"},
                         },
                         "destination": {
@@ -315,7 +317,28 @@ def test_status_gateway_updates_one_key_after_ambiguous_write_and_checks_pr_head
         with pytest.raises(BitbucketStatusUnavailable, match="head or identity changed"):
             await publisher.upsert(run_id, RUN_URL)
         assert len(statuses) == 4
+        snapshot = replace(snapshot, state="failed")
+        with pytest.raises(BitbucketStatusUnavailable, match="head or identity changed"):
+            await publisher.upsert(run_id, RUN_URL)
+        assert len(statuses) == 4
         remote_target_branch = "main"
+
+        snapshot = replace(snapshot, state="cancelled")
+        remote_pr_id = 8
+        with pytest.raises(BitbucketStatusUnavailable, match="head or identity changed"):
+            await publisher.upsert(run_id, RUN_URL)
+        remote_pr_id = 7
+        remote_head = "b" * 40
+        resolved_head = remote_head
+        with pytest.raises(BitbucketStatusUnavailable, match="head or identity changed"):
+            await publisher.upsert(run_id, RUN_URL)
+        remote_head = HEAD
+        resolved_head = HEAD
+        remote_source_branch = "other/branch"
+        with pytest.raises(BitbucketStatusUnavailable, match="head or identity changed"):
+            await publisher.upsert(run_id, RUN_URL)
+        remote_source_branch = "feature/review"
+        assert len(statuses) == 4
 
         remote_head = "b" * 40
         resolved_head = remote_head

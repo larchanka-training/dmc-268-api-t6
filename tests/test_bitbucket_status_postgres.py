@@ -611,6 +611,16 @@ def test_status_uses_active_run_origin_and_no_db_transaction_over_http(
                     )
                 ).one()
             assert blocked == (1, "author_forbidden")
+            async with sessions.begin() as session:
+                await session.execute(
+                    text(
+                        "UPDATE bitbucket_status_publications SET next_check_at=now() "
+                        "WHERE workspace_id=:workspace AND repository_uuid=:repo "
+                        "AND pr_number=7 AND head_sha=:head"
+                    ),
+                    {"workspace": workspace2, "repo": remote_repo, "head": HEAD},
+                )
+            assert (run2, "https://review.example/runs/other") not in await ledger.pending()
             post_count = len([request for request in requests if request.method == "POST"])
             await BitbucketStatusReconciler(ledger, publisher).tick()
             assert len([request for request in requests if request.method == "POST"]) == post_count
