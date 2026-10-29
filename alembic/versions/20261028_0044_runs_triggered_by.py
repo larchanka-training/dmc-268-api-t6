@@ -21,7 +21,7 @@ def upgrade() -> None:
     op.create_index(
         "ix_webhook_events_pull_request_head",
         "webhook_events",
-        ["installation_external_id", sa.text("(payload #>> '{pull_request,head,sha}')")],
+        ["installation_external_id", sa.text("(payload #>> '{pull_request,head,sha}'::text[])")],
         postgresql_where=sa.text(
             "event = 'pull_request' AND action = 'synchronize' AND payload IS NOT NULL"
         ),
@@ -29,7 +29,7 @@ def upgrade() -> None:
     op.create_index(
         "ix_webhook_events_push_after",
         "webhook_events",
-        ["installation_external_id", sa.text("(payload #>> '{after}')")],
+        ["installation_external_id", sa.text("(payload #>> '{after}'::text[])")],
         postgresql_where=sa.text("event = 'push' AND payload IS NOT NULL"),
     )
 
