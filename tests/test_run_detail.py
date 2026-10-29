@@ -17,7 +17,7 @@ from app.main import app
 from app.modules.reviews.application.cancel_run import CancelRequestResult, CancelRun
 from app.modules.reviews.application.get_run import FindingView, GetRunDetail, RunReview
 from app.modules.reviews.application.get_run_comments import PublishedComment
-from app.modules.reviews.application.list_runs import RunListItem
+from app.modules.reviews.application.list_runs import RunListItem, RunUsage
 from app.modules.reviews.application.queue_messages import StoredRunMessage
 from app.modules.reviews.application.rerun_run import (
     RerunConflict,
@@ -208,7 +208,10 @@ def test_run_detail_endpoint_emits_pull_request_refs_and_camel_case_results() ->
     from app.main import get_run_repository
     from tests.portal_test_client import authenticated_test_client
 
-    app.dependency_overrides[get_run_repository] = lambda: Detail(run_item(), review("high"))
+    app.dependency_overrides[get_run_repository] = lambda: Detail(
+        replace(run_item(), usage=RunUsage(100, 20, Decimal("0.01"))),
+        review("high"),
+    )
     try:
         body = authenticated_test_client(app).get(f"/api/runs/{RUN}").json()
     finally:
