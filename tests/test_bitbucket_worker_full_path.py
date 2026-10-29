@@ -22,7 +22,6 @@ from app.bootstrap.bitbucket_reviews import (
 )
 from app.modules.code_index.domain.enums import RagIndexStatus
 from app.modules.code_index.domain.rag_index import RagIndex
-from app.modules.integrations.bitbucket.infrastructure import run_http
 from app.modules.integrations.bitbucket.infrastructure.run_http import (
     BitbucketRunHttp,
     BitbucketRunHttpError,
@@ -619,8 +618,7 @@ def test_composed_bitbucket_review_uses_pinned_cloud_reads_and_writes(
                     remaining = (
                         700
                         if context_byte_case == "tree"
-                        else run_http._POST_CONTEXT_TAIL_RESERVE_BYTES
-                        + (1200 if context_byte_case == "rag" else 650)
+                        else 6_422_528 + (1200 if context_byte_case == "rag" else 650)
                     )
                     http._read_bytes = 32 * 1024 * 1024 - remaining
                 source_type = (
