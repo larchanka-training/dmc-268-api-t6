@@ -13,12 +13,6 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW = REPO_ROOT / ".github/workflows/docs-size-budget.yml"
-REQUIRED_CHECKS = {
-    "OpenAPI lint",
-    "Python lint / type / test",
-    "Webhook container smoke",
-    "Edge Caddyfile validate",
-}
 
 
 def _workflow() -> str:
@@ -55,9 +49,19 @@ def _git(repo: Path, *args: str) -> None:
     subprocess.run(["git", *args], cwd=repo, env=_git_env(), check=True, capture_output=True)
 
 
-def _write(repo: Path, path: str, size: int) -> None:
+def _content(seed: str, size: int) -> bytes:
+    """Text of ``size`` bytes, unique per seed; a longer one extends a shorter one of the same seed.
+
+    Distinct files must not look alike, or git would pair an added and a deleted file as a rename.
+    """
+    line_length = len(seed.encode()) + 8  # "<seed> NNNNNN\n"
+    text = "".join(f"{seed} {index:06d}\n" for index in range(size // line_length + 1))
+    return text.encode()[:size]
+
+
+def _write(repo: Path, path: str, size: int, seed: str | None = None) -> None:
     (repo / path).parent.mkdir(parents=True, exist_ok=True)
-    (repo / path).write_bytes(b"x" * size)
+    (repo / path).write_bytes(_content(seed or path, size))
 
 
 def _run(tmp_path: Path, base: dict[str, int], change: Callable[[Path], None]) -> tuple[str, str]:
@@ -90,7 +94,7 @@ def _run(tmp_path: Path, base: dict[str, int], change: Callable[[Path], None]) -
             "GITHUB_STEP_SUMMARY": str(summary),
         },
         capture_output=True,
-        text=True,
+        encoding="utf-8",
         check=False,
     )
     assert result.returncode == 0, result.stderr
@@ -100,11 +104,16 @@ def _run(tmp_path: Path, base: dict[str, int], change: Callable[[Path], None]) -
 def test_workflow_is_a_separate_non_required_check_with_an_80_kib_budget() -> None:
     workflow = _workflow()
     assert _budget() == 80 * 1024
+    # The job name is the check name: it must stay out of the required checks of ruleset `main`.
     assert "    name: Docs size budget\n" in workflow
-    assert "Docs size budget" not in REQUIRED_CHECKS
+    # The pull_request event only: no pull_request_target, no push.
+    on_block = workflow.split("\non:\n", 1)[1].split("\n\n", 1)[0]
+    assert re.findall(r"(?m)^  (\w+):$", on_block) == ["pull_request"]
     assert '      - "docs/*.md"\n' in workflow
     assert "permissions:\n  contents: read\n" in workflow
-    assert "fetch-depth: 2" in workflow
+    assert re.search(r"(?m)^    timeout-minutes: 5$", workflow)
+    assert re.search(r"(?m)^ +fetch-depth: 2$", workflow)
+    assert re.search(r"(?m)^ +persist-credentials: false$", workflow)
     assert "${{" not in _step()
 
 
@@ -114,10 +123,15 @@ def test_warns_for_top_level_docs_that_grew_over_the_budget(tmp_path: Path) -> N
         "docs/grow_over.md": budget - 900,
         "docs/grow_under.md": 1000,
         "docs/shrink_over.md": budget + 8000,
+        "docs/same_size_over.md": budget + 500,
         "docs/at_budget.md": budget - 1000,
         "docs/cross.md": budget,
         "docs/rename_src.md": budget + 1,
+        "docs/rename_grow_src.md": budget - 900,
+        "docs/sub/moved.md": budget - 500,
+        "docs/leaving.md": budget + 1,
         "docs/with space.md": budget - 100,
+        "docs/\u00fcbersicht.md": budget - 900,
         "docs/deleted_over.md": budget + 1,
         "docs/sub/nested_over.md": budget - 900,
         "docs/big.txt": 10,
@@ -127,32 +141,50 @@ def test_warns_for_top_level_docs_that_grew_over_the_budget(tmp_path: Path) -> N
         _write(repo, "docs/grow_over.md", budget + 100)
         _write(repo, "docs/grow_under.md", 2000)
         _write(repo, "docs/shrink_over.md", budget + 4000)
+        _write(repo, "docs/same_size_over.md", budget + 500, seed="edited")
         _write(repo, "docs/at_budget.md", budget)
         _write(repo, "docs/cross.md", budget + 1)
         _write(repo, "docs/new_over.md", budget + 100)
         _write(repo, "docs/with space.md", budget + 100)
+        _write(repo, "docs/\u00fcbersicht.md", budget + 100)
         _write(repo, "docs/sub/nested_over.md", budget + 100)
         _write(repo, "docs/big.txt", budget + 100)
         _git(repo, "mv", "docs/rename_src.md", "docs/rename_dst.md")
+        _git(repo, "mv", "docs/rename_grow_src.md", "docs/rename_grow_dst.md")
+        _write(repo, "docs/rename_grow_dst.md", budget + 100, seed="docs/rename_grow_src.md")
+        _git(repo, "mv", "docs/sub/moved.md", "docs/moved_up.md")
+        _write(repo, "docs/moved_up.md", budget + 100, seed="docs/sub/moved.md")
+        _git(repo, "mv", "docs/leaving.md", "docs/sub/leaving.md")
         _git(repo, "rm", "-q", "docs/deleted_over.md")
 
     stdout, summary = _run(tmp_path, base, change)
 
     warned = re.findall(r"(?m)^::warning file=([^:]+)::", stdout)
-    assert warned == [
+    # A pure rename (rename_dst), a same-size edit (same_size_over) and a move out of the top
+    # level (sub/leaving) stay silent; a rename that grew is compared with its old path.
+    assert sorted(warned) == [
         "docs/cross.md",
         "docs/grow_over.md",
+        "docs/moved_up.md",
         "docs/new_over.md",
-        "docs/rename_dst.md",
+        "docs/rename_grow_dst.md",
         "docs/with space.md",
+        "docs/\u00fcbersicht.md",
     ]
     assert (
         f"::warning file=docs/grow_over.md::docs/grow_over.md grew from {budget - 900} "
         f"to {budget + 100} bytes, over the {budget}-byte budget (#380)"
     ) in stdout
-    grown = f"| `docs/grow_over.md` | {budget - 900} | {budget + 100} | +1000 | {budget} |"
-    assert grown in summary
-    assert f"| `docs/new_over.md` | 0 | {budget + 100} | +{budget + 100} | {budget} |" in summary
+    rows = {
+        "docs/grow_over.md": budget - 900,
+        "docs/new_over.md": 0,
+        "docs/rename_grow_dst.md": budget - 900,
+        "docs/moved_up.md": budget - 500,
+        "docs/\u00fcbersicht.md": budget - 900,
+    }
+    for path, before in rows.items():
+        after = budget + 100
+        assert f"| `{path}` | {before} | {after} | +{after - before} | {budget} |" in summary
     assert summary.count("\n| `docs/") == len(warned)
 
 
