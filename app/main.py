@@ -354,7 +354,7 @@ def _safe_validation_location(request: Request, error: dict[str, Any]) -> tuple[
 
 @app.exception_handler(RequestValidationError)
 async def render_validation_error(request: Request, exc: RequestValidationError) -> Response:
-    """Preserve FastAPI errors outside Bitbucket while redacting its credential routes."""
+    """Preserve FastAPI errors outside Bitbucket; redact workspace and webhook routes."""
     path = request.url.path
     segments = path.split("/")
     is_bitbucket_route = (
