@@ -46,10 +46,13 @@ colon) followed by `#N` or `OWNER/NAME#N` references separated by commas, `;`,
 `&`, `and` or blanks; `#N` counts for a pull request in the issue's own repo, the
 full form from any repo. Anything else is not recognised. Pull requests come from
 the issue's timeline (both repos, every page). A pull request names the parts
-found in its TITLE (`Part K`, `Ч.K`, `Ч. K`, case-insensitive, whole numbers);
-if the title names none, those in the first non-empty line of its `## What`
-section (the whole body when it has no `## What`). Lines in fenced code, HTML
-comments and quotes do not count.
+found in its TITLE (`Part K`, `Ч.K`, `Ч. K`, case-insensitive, whole numbers), all
+of them: a title that names several is deliberate. If the title names none, the
+FIRST part named in the first non-empty line of its `## What` section (the whole
+body when it has no `## What`): a later mention there is context ("Part 1, which
+this extends, is merged"), not scope. A pull request that ends up naming more than
+one part counts for each and adds a warning. Lines in fenced code, HTML comments
+and quotes do not count.
 
 Decisions, in this order: the issue is CLOSED -> stop; any OPEN blocker -> stop;
 parts not numbered 1..k -> stop; `--part K` must exist (exit 2) and is taken
@@ -607,9 +610,10 @@ def first_line(body: str) -> str:
 
 
 def parts_named(title: str, body: str) -> list[int]:
-    """The parts a PR names: those in its title, else those in the first line of
-    its What."""
-    return numbers_in(title) or numbers_in(first_line(body))
+    """The parts a PR names. In its title every part counts: a title that names
+    several is deliberate. In the first line of its What only the first part named
+    does, the rest is context ("Part 1, which this extends, is merged in #357")."""
+    return numbers_in(title) or numbers_in(first_line(body))[:1]
 
 
 def build_prs(timeline: list[dict[str, Any]], issue: tuple[str, int]) -> list[dict[str, Any]]:
@@ -721,6 +725,13 @@ def collect(repo: str, number: int, part: int | None) -> dict[str, Any]:
         warnings.append(
             "pull requests with Refs that name no part of this issue: " + listing(unnamed)
         )
+    for pr in prs if parts else []:
+        if len(pr["named"]) > 1:
+            named = ", ".join(str(n) for n in pr["named"])
+            warnings.append(
+                f"pull request {pr['ref']} names several parts in its title ({named}):"
+                " it counts for each of them"
+            )
 
     kickoff_lines = section_lines(body, is_kickoff, skip_quotes=False)
     kickoff_text = "\n".join(kickoff_lines or []).strip()

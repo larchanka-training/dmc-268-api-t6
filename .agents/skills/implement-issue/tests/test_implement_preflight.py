@@ -11,7 +11,7 @@ numbering, paging of blockers and of the timeline past one page, the Kickoff and
 board Status; the REF grammar, exit codes 2 and 3, and the argv and queries the script
 hands to `gh` (read-only, never a mutation).
 """
-# SYNC: mirrored in dmc-268-{ui,api}-t6/.agents/skills/implement-issue/tests/test_implement_preflight.py
+# SYNC: mirrored in dmc-268-{ui,api}-t6/.agents/skills/implement-issue/tests/test_implement_preflight.py  # noqa: E501
 
 from __future__ import annotations
 
@@ -206,6 +206,9 @@ TWO_PARTS = (
     "\n## Acceptance Criteria\n\n"
     "- [ ] Ч.1: first works\n- [ ] Ч.2: second works\n- [ ] common one\n"
 ) + KICKOFF
+
+
+THREE_PARTS = TWO_PARTS.replace("- Ч.2 (PR): second\n", "- Ч.2 (PR): second\n- Ч.3 (PR): third\n")
 
 
 def facts(
@@ -477,6 +480,20 @@ def test_visible_lines_skips_fences_comments_and_quotes() -> None:
 
 
 # ─── how a pull request names a part ────────────────────────────────────────
+# The real first lines of the `## What` of ui#177 (Part 1 of api#268) and api#358 (Part 2 of
+# #273): each also mentions another part, as context.
+UI_177_WHAT = (
+    "Part 1 of api#268: a deterministic script, "
+    "`.agents/skills/issue-graph/scripts/issue_graph.py`, that builds the dependency graph of a "
+    "sprint from GitHub native relations. It uses no LLM. The `SKILL.md` and publishing come in "
+    "part 2."
+)
+API_358_WHAT = (
+    "Part 2 of #273: the sprint start ritual. Part 1, the `## 9. Спринты` section this extends, "
+    "is merged in #357."
+)
+
+
 def named_in(tmp_path: Path, node: dict[str, Any], parts: int = 2) -> list[int]:
     scope = "".join(f"- Ч.{n} (PR): scope {n}\n" for n in range(1, parts + 1))
     response = issue_response(body=f"## Scope\n\n{scope}", timeline=[node])
@@ -505,6 +522,13 @@ def named_in(tmp_path: Path, node: dict[str, Any], parts: int = 2) -> list[int]:
         ("feat: y", "First line.\nPart 2 of #13: second line", []),  # first line only
         ("feat: y", "<!-- Part 2 -->\nPart 1 of #13: x", [1]),  # comments are not text
         ("feat: y", "```\nPart 2\n```\nPart 1 of #13: x", [1]),  # nor are fences
+        # What names only the first part it mentions: the rest is context
+        ("feat: y", UI_177_WHAT, [1]),
+        ("docs: y", API_358_WHAT, [2]),
+        ("feat: y", "Part 1 of #13: x. Part 2 comes later.", [1]),
+        ("feat: y", "Part 2 of #13: x. Part 1 is merged.", [2]),  # first by position, not smallest
+        ("feat: y", "SYNC copy of ui#1 (Part 2 of #13): y; Part 1 is merged", [2]),
+        ("Part 1 of #13", "Part 2 of #13: y", [1]),  # the title still wins
     ],
 )
 def test_naming_a_part(tmp_path: Path, title: str, what: str, expected: list[int]) -> None:
@@ -531,9 +555,49 @@ def test_part_1_is_not_part_12(tmp_path: Path) -> None:
         assert [p["n"] for p in doc["parts"] if p["prs"]] == [expected], title
 
 
-def test_a_pull_request_naming_two_parts_counts_for_both(tmp_path: Path) -> None:
+def test_a_title_naming_two_parts_counts_for_both_and_warns(tmp_path: Path) -> None:
     node = refs_pr(44, "x", title="Part 1 and Part 2 of #13")
     assert named_in(tmp_path, node) == [1, 2]
+    _, doc = facts(tmp_path, issue_response(body=TWO_PARTS, timeline=[node]))
+    assert doc["warnings"] == [
+        f"pull request {API}#44 names several parts in its title (1, 2): it counts for each of them"
+    ]
+
+
+def test_a_what_naming_two_parts_counts_for_the_first_and_does_not_warn(tmp_path: Path) -> None:
+    node = refs_pr(45, "Part 1 of #13: x. Part 2 comes later.")
+    _, doc = facts(tmp_path, issue_response(body=TWO_PARTS, timeline=[node]))
+    assert [n for n, part in parts_of(doc).items() if part["prs"]] == [1]
+    assert doc["warnings"] == []
+
+
+def test_a_merged_pull_request_that_mentions_the_next_part_does_not_finish_it(
+    tmp_path: Path,
+) -> None:
+    # ui#177 is Part 1 only, though its What also says "part 2": a two-part issue goes on to
+    # Part 2 (not "every part has a merged pull request"), a three-part one to Part 2 (not 3).
+    ui_177 = refs_pr(
+        177,
+        UI_177_WHAT,
+        title="feat(agents): add the issue-graph script",
+        refs=f"Refs {API}#13",
+        repo=UI,
+    )
+    for body in (TWO_PARTS, THREE_PARTS):
+        code, doc = facts(tmp_path, issue_response(body=body, timeline=[ui_177]))
+        assert (code, doc["selected"]) == (0, {"part": 2, "reason": "first-todo"})
+        assert [p["ref"] for p in parts_of(doc)[1]["prs"]] == [f"{UI}#177"]
+        assert parts_of(doc)[2]["status"] == "todo"
+        assert doc["warnings"] == []
+
+
+def test_a_pull_request_that_looks_back_at_part_1_is_part_2_only(tmp_path: Path) -> None:
+    # api#358: "Part 2 of #273: … Part 1, … is merged in #357." — Part 1 stays todo.
+    api_358 = refs_pr(358, API_358_WHAT, title="docs(contributing): the sprint start ritual")
+    code, doc = facts(tmp_path, issue_response(body=TWO_PARTS, timeline=[api_358]))
+    assert (code, doc["selected"]) == (0, {"part": 1, "reason": "first-todo"})
+    assert parts_of(doc)[1]["prs"] == [] and parts_of(doc)[2]["status"] == "done"
+    assert doc["warnings"] == []
 
 
 def test_a_pull_request_with_refs_that_names_no_part_is_a_warning(tmp_path: Path) -> None:
