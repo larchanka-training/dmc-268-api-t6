@@ -1,0 +1,78 @@
+{
+  "data": {
+    "repository": {
+      "issue": {
+        "title": "[agents][create-issue] Укрепите пакетный режим: повтор после сбоя доски, отказ без createdAt, параллельный запуск",
+        "url": "https://github.com/larchanka-training/dmc-268-api-t6/issues/287",
+        "state": "OPEN",
+        "body": "## Background\n\nПосле #262 Ч.2 (larchanka-training/dmc-268-ui-t6#179, #285) у `scripts/issue-batch.py` остались три слабых места, найденных на ревью и в живом прогоне. Ни одно не создаёт дубликатов, но каждое либо оставляет пакет в состоянии, из которого выходят только ручной правкой state-файла, либо вводит в заблуждение сообщением.\n\n## Scope\n\n- Сбой доски на повторе: записанный в state-файле `board: failed` выдаёт exit 6 при каждом повторе. Драйвер не перепроверяет доску, поэтому после ручного `gh project item-add` пункт остаётся «failed», пока его не исправят в state-файле руками (`references/batch.md` § 5). Нужна перепроверка: issue уже на доске 12 → запись обновляется, exit 6 больше не выдаётся\n- Отказ без `createdAt`: если у дубликата нет `createdAt` (или не читается `started_at`), `refusal()` говорит «it was created more than 120 s before this batch started» — для неизвестного времени это неправда. Нужна отдельная причина: время создания неизвестно\n- Параллельный запуск: два одновременных запуска одного пакета (`id`) не исключены, оба создают issue, защищает только поиск дубликатов. Нужна блокировка на время запуска: второй запуск — понятная ошибка до любого создания; блокировка, оставшаяся после аварийного завершения, не должна навсегда запирать пакет\n\n## Acceptance Criteria\n\n- [ ] Повтор пакета, у которого issue с записанным `board: failed` уже добавлен на доску 12, выходит с кодом 0, а запись в state-файле становится `board: added`; если issue на доске так и нет — по-прежнему exit 6 с подсказкой\n- [ ] Отказ принять дубликат без `createdAt` называет причину «время создания неизвестно», а не «создан раньше старта пакета»\n- [ ] Второй одновременный запуск того же `id` останавливается с понятной ошибкой и ничего не создаёт; после аварийного завершения первого запуска пакет продолжается повтором — без ручной правки или одной командой из сообщения\n- [ ] Офлайн-тесты на все три случая, без сети; копии скилла в ui и api совпадают (`diff -r` пуст)\n\n## Dependencies\n\n**Блокирующие:**\n\n- #262 — правки идут в код Ч.2 (larchanka-training/dmc-268-ui-t6#179, #285), который ещё не смёржен\n\n## DoD Checklist\n\n- [ ] Гейты CI зелёные в PR ui и api\n- [ ] `references/batch.md` обновлён\n- [ ] PR одобрены на текущей голове, все треды закрыты\n- [ ] Статус на доске 12 обновлён\n- [ ] SYNC-копии в ui и api совпадают (`diff -r` пуст)\n\n## References\n\n- #262 — пакетный режим и state-файл\n- larchanka-training/dmc-268-ui-t6#179 — PR Ч.2 (источник), #285 — копия в api\n- `.agents/skills/create-issue/references/batch.md` — § 5 «A rerun resumes», § 6 «Failures»\n\n## Kickoff — с чего начать\n\n**Репозиторий:** larchanka-training/dmc-268-ui-t6 первым (общий скилл), затем копия в larchanka-training/dmc-268-api-t6 (SYNC)\n\n**Ветка:** fix/<n>-batch-robustness в ui и api, `Refs larchanka-training/dmc-268-api-t6#<n>`; начинать после мержа larchanka-training/dmc-268-ui-t6#179 и #285\n\n**Форма проблемы:** Драйвер `issue-batch.py` пишет исход каждого пункта в state-файл и на повторе доверяет записи: `board: failed` не перепроверяется, потому что сам драйвер никогда не вызывает `gh` — все вызовы GitHub идут через `issue-create.sh` и `issue-link.sh` с их фикстурами. `refusal()` склеивает «время неизвестно» и «создан раньше старта». Запуск не берёт никакой блокировки на state-файл.\n\n**Что прочитать первым:**\n\n- `.agents/skills/create-issue/scripts/issue-batch.py` — `run()`, `refusal()`, `save_state()`\n- `.agents/skills/create-issue/references/batch.md` — § 5 и § 6\n- `.agents/skills/create-issue/tests/test_batch.py` и `tests/fake_issue_scripts.py` — seam `ISSUE_BATCH_SCRIPTS_DIR`\n\n**Перед тем как писать код:**\n\n- `uv run --no-project --with pytest pytest -p no:cacheprovider .agents/skills/create-issue/tests` в ui (в api — `uv run pytest .agents/skills/create-issue/tests`) — зелёная база\n\n**Мины:**\n\n- Драйвер не вызывает `gh` напрямую: тесты идут с `PATH=/usr/bin:/bin`, а настоящий `/usr/bin/gh` существует — проверка доски должна идти через скрипт с фикстурным seam, иначе тест сходит в сеть\n- `SKILL.md` уже 249 строк из ~250 — новое пишется в `references/batch.md`\n- Автоматизация доски «Item added to project» ставит Todo асинхронно — чтение статуса повторяется, как в `issue-create.sh`\n- Общий скилл: правка в ui, `cp` в api, `diff -r` пуст; lint-staged в ui переписывает .md — форматировать до копирования\n",
+        "assignees": {
+          "nodes": []
+        },
+        "projectItems": {
+          "pageInfo": {
+            "hasNextPage": false,
+            "endCursor": "MQ"
+          },
+          "nodes": [
+            {
+              "project": {
+                "number": 12,
+                "owner": {
+                  "__typename": "Organization",
+                  "login": "larchanka-training"
+                }
+              },
+              "fieldValueByName": {
+                "__typename": "ProjectV2ItemFieldSingleSelectValue",
+                "name": "Todo"
+              }
+            }
+          ]
+        },
+        "blockedBy": {
+          "pageInfo": {
+            "hasNextPage": false,
+            "endCursor": "MQ"
+          },
+          "nodes": [
+            {
+              "number": 262,
+              "title": "[agents][create-issue] Ставьте нативные связи и нарезку на части; переведите qa на create-issue",
+              "state": "CLOSED",
+              "repository": {
+                "nameWithOwner": "larchanka-training/dmc-268-api-t6"
+              }
+            }
+          ]
+        },
+        "timelineItems": {
+          "pageInfo": {
+            "hasNextPage": false,
+            "endCursor": "Y3Vyc29yOnYyOpPPAAABoYLWgBACqzE4MzY5NzUwNzg2"
+          },
+          "nodes": [
+            {
+              "__typename": "CrossReferencedEvent",
+              "source": {
+                "__typename": "Issue"
+              }
+            },
+            {
+              "__typename": "CrossReferencedEvent",
+              "source": {
+                "__typename": "Issue"
+              }
+            },
+            {
+              "__typename": "CrossReferencedEvent",
+              "source": {
+                "__typename": "Issue"
+              }
+            }
+          ]
+        }
+      }
+    }
+  }
+}

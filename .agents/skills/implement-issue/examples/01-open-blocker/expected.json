@@ -1,0 +1,77 @@
+{
+  "blockers": [
+    {
+      "ref": "larchanka-training/dmc-268-api-t6#262",
+      "state": "CLOSED",
+      "title": "[agents][create-issue] Ставьте нативные связи и нарезку на части; переведите qa на create-issue"
+    },
+    {
+      "ref": "larchanka-training/dmc-268-api-t6#265",
+      "state": "OPEN",
+      "title": "[agents] Уберите docs/plans из репозиториев: планы — локальные рабочие файлы"
+    },
+    {
+      "ref": "larchanka-training/dmc-268-api-t6#266",
+      "state": "OPEN",
+      "title": "[agents] Добавьте скилл приёмки задачи: AC Check с доказательствами и follow-up вне скоупа"
+    }
+  ],
+  "common_acceptance_criteria": [
+    "Золотые примеры лежат в `.agents/skills/<скилл>/examples/`: вход (issue) и ожидаемый результат. Детерминированные части скрипта — pytest рядом со скиллом, запуск как у create-issue (вне CI, `create-issue/SKILL.md:234-240`); вывод прогона автор прикладывает в PR. Поведение скилла автор PR прогоняет вручную в Claude Code и Codex и прикладывает вывод в описание PR",
+    "Новый скилл внесён в список в `AGENTS.md` и в sync map `.agents/README.md`"
+  ],
+  "issue": {
+    "assignees": [
+      "axyi"
+    ],
+    "board_status": "In Progress",
+    "number": 269,
+    "repo": "larchanka-training/dmc-268-api-t6",
+    "state": "OPEN",
+    "title": "[agents] Добавьте скилл реализации задачи: обёртка над planning, tdd, code-review и pull-request",
+    "url": "https://github.com/larchanka-training/dmc-268-api-t6/issues/269"
+  },
+  "kickoff": {
+    "present": true,
+    "text": "**Репозиторий:** larchanka-training/dmc-268-ui-t6 первым, затем larchanka-training/dmc-268-api-t6 (SYNC)\n\n**Ветка:** `feat/<n>-implement-issue` — части отдельными PR с `Refs larchanka-training/dmc-268-api-t6#<n>`\n\n**Форма проблемы:** Скиллы для каждого шага есть, но связки «взять задачу → довести одну часть до PR» нет: никто не проверяет блокеры, `agent-loop` выпускает один PR на весь todo, а в Codex ломается на субагентах. Обёртка задаёт порядок, границы и стоп-критерии, а работу отдаёт существующим скиллам.\n\n**Что прочитать первым:**\n\n- `.agents/skills/agent-loop/SKILL.md` — строки 49–90 (поток и публикация одного PR)\n- `.agents/README.md` — матрица харнессов (строка 23) и как запускать изолированный контекст (38–42)\n- `.agents/rules/git-workflow.md` — ветки и коммиты\n- `.agents/skills/pull-request/SKILL.md` — строки 28–33 (`git checkout -b`) и `.agents/agents/code-reviewer.md:11` (ревью не в контексте автора)\n\n**Перед тем как писать код:**\n\n- Сверить с готовыми скиллами (Matt Pocock, Addy Osmani, OpenSpec); в PR одной строкой — что взято, что нет и почему. Сверка со скиллами куратора (созвон 26.10) старт не блокирует; если материалы придут позже — строка сверки в ревью PR\n- Записать 3+ золотых примера «вход → ожидаемый результат» в `.agents/skills/<скилл>/examples/` до написания SKILL.md — по ним скилл и принимается\n\n**Мины:**\n\n- `agent-loop` публикует один PR на весь todo — для частей его поведение надо поменять или обойти; выбор записать в PR\n- `git push` и `gh pr create` в части харнессов требуют подтверждения человека: скилл останавливается и просит, а не обходит\n- Ruleset: ветка на текущем `main`, approve на текущей голове — после rebase approve слетает\n- Не опираться на определения `.agents/agents/*.md` (Codex их не грузит); изоляция шагов — по `.agents/README.md`, раздел про субагентов в харнессах (у Codex есть `spawn_agent`)\n- Шкалы P1–P3 в репо нет: `code-review` уровней не выдаёт, `code-reviewer` — critical/high/medium/low/info; стоп-критерий — по ней\n- gh 2.46 в этой org падает на `gh issue view` без `--json` и на `gh pr edit` (Projects classic) — только `--json` или `gh api`\n- Общий скилл правится в ui, затем `cp` в api и `diff -r` (`.agents/README.md:58-82`); SYNC-копия — та же Ч.N: второй PR в другом репо с тем же `Refs`, порядок — сначала ui, потом копия в api (`.agents/README.md:81`), отдельный sub-issue — только если часть меняет разный код в двух репо; `SKILL.md` — до ~250 строк, детали в `references/` (`.agents/README.md:92`); новый скилл — в список в `AGENTS.md`, в sync map `.agents/README.md` и в счёт скиллов `.agents/README.md:49` (сейчас «9 here»), в том же PR"
+  },
+  "parts": [
+    {
+      "acceptance_criteria": [
+        "на issue с открытым блокером скилл останавливается и называет блокер; на issue без «Ч.N» берёт задачу целиком"
+      ],
+      "boundary": null,
+      "done_when": null,
+      "label": "PR в ui → копия в api",
+      "n": 1,
+      "prs": [],
+      "scope": "предстарт — issue открыт; все blocked-by закрыты (иначе стоп с перечнем); выбрана часть «Ч.N» (первая невыполненная или указанная; нет частей — задача целиком); ветку создаёт скилл реализации по `.agents/rules/git-workflow.md`; правка `pull-request` (SYNC), чтобы он работал на уже созданной ветке, а не делал `git checkout -b` (`pull-request/SKILL.md:28-33`), — в скоупе; статус In Progress; Kickoff прочитан",
+      "status": "todo"
+    },
+    {
+      "acceptance_criteria": [
+        "один прогон — одна часть — один PR с `Refs #N` (для SYNC-части — PR в ui и копия в api с тем же `Refs`); в теле PR перечислены AC этой части",
+        "на золотой задаче прогоны в Claude Code и Codex (харнессы из матрицы `.agents/README.md`) доходят до PR; итоги (гейты, число итераций ревью) приложены к PR скилла",
+        "ревью в прогоне идёт в чистом контексте, не в контексте, который писал код",
+        "не больше 3 раундов ревью на часть; новый раунд — только по находкам critical/high (шкала `code-reviewer`); medium/low/info — списком в теле PR; после третьего раунда — стоп со списком открытых находок (добавлено 29.10, из закрытого #379)",
+        "обёртка вызывает существующие скиллы, а не копирует их текст"
+      ],
+      "boundary": null,
+      "done_when": null,
+      "label": "PR",
+      "n": 2,
+      "prs": [],
+      "scope": "цикл на одну часть — planning (локальный план, #265) → tdd → code-review по диффу в чистом контексте → pull-request с `Refs #N` → статус On Review. SYNC-копия — та же Ч.N: второй PR в другом репо с тем же `Refs`, сначала ui, потом копия в api (`.agents/README.md:81`). Критерии остановки: гейты зелёные, нет находок critical/high (шкала `code-reviewer`), AC части перечислены в PR. После последней части — передача в AC Check (скилл #266, режим «автор»); скилла нет — карточка в On Review и напоминание техлиду",
+      "status": "todo"
+    }
+  ],
+  "reasons": [
+    "blocked by larchanka-training/dmc-268-api-t6#265 — [agents] Уберите docs/plans из репозиториев: планы — локальные рабочие файлы",
+    "blocked by larchanka-training/dmc-268-api-t6#266 — [agents] Добавьте скилл приёмки задачи: AC Check с доказательствами и follow-up вне скоупа"
+  ],
+  "schema": 1,
+  "selected": null,
+  "task_prs": [],
+  "verdict": "stop",
+  "warnings": []
+}

@@ -1,0 +1,178 @@
+{
+  "data": {
+    "repository": {
+      "issue": {
+        "title": "[agents] Добавьте скилл реализации задачи: обёртка над planning, tdd, code-review и pull-request",
+        "url": "https://github.com/larchanka-training/dmc-268-api-t6/issues/269",
+        "state": "OPEN",
+        "body": "## Background\n\nРеализация сейчас идёт через `agent-loop`: planning → dev по TDD → code-reviewer → publisher, и на весь todo выходит один PR (`agent-loop/SKILL.md:49-90`). Нет шага, который проверяет, что задачу можно брать (блокеры закрыты, часть выбрана), и нет правила «одна часть — один PR с `Refs`». Codex не грузит `.agents/agents/` (`.agents/README.md:23`), поэтому определения `dev-loop` и `code-reviewer` в Codex не срабатывают (свои субагенты у Codex есть — `spawn_agent`, `.agents/README.md:38-40`).\n\nНужна обёртка «реализуй issue #N, часть K», которая одинаково работает в любом харнессе из матрицы `.agents/README.md`, в том числе со слабой моделью (GLM, Kimi, DeepSeek).\n\n## Scope\n\n- Ч.1 (PR в ui → копия в api): предстарт — issue открыт; все blocked-by закрыты (иначе стоп с перечнем); выбрана часть «Ч.N» (первая невыполненная или указанная; нет частей — задача целиком); ветку создаёт скилл реализации по `.agents/rules/git-workflow.md`; правка `pull-request` (SYNC), чтобы он работал на уже созданной ветке, а не делал `git checkout -b` (`pull-request/SKILL.md:28-33`), — в скоупе; статус In Progress; Kickoff прочитан\n- Ч.2 (PR): цикл на одну часть — planning (локальный план, #265) → tdd → code-review по диффу в чистом контексте → pull-request с `Refs #N` → статус On Review. SYNC-копия — та же Ч.N: второй PR в другом репо с тем же `Refs`, сначала ui, потом копия в api (`.agents/README.md:81`). Критерии остановки: гейты зелёные, нет находок critical/high (шкала `code-reviewer`), AC части перечислены в PR. После последней части — передача в AC Check (скилл #266, режим «автор»); скилла нет — карточка в On Review и напоминание техлиду\n- Модельная независимость: шаги, кроме ревью, выполняются в одном контексте; каждая ось ревью — в чистом контексте (субагент харнесса или свежая сессия `codex exec --ephemeral` / `claude -p`), никогда не в контексте, который писал код (`.agents/agents/code-reviewer.md:11`); на определения `.agents/agents/*.md` скилл не опирается\n\n## Acceptance Criteria\n\n- [ ] Ч.1: на issue с открытым блокером скилл останавливается и называет блокер; на issue без «Ч.N» берёт задачу целиком\n- [ ] Ч.2: один прогон — одна часть — один PR с `Refs #N` (для SYNC-части — PR в ui и копия в api с тем же `Refs`); в теле PR перечислены AC этой части\n- [ ] Ч.2: на золотой задаче прогоны в Claude Code и Codex (харнессы из матрицы `.agents/README.md`) доходят до PR; итоги (гейты, число итераций ревью) приложены к PR скилла\n- [ ] Ч.2: ревью в прогоне идёт в чистом контексте, не в контексте, который писал код\n- [ ] Ч.2: не больше 3 раундов ревью на часть; новый раунд — только по находкам critical/high (шкала `code-reviewer`); medium/low/info — списком в теле PR; после третьего раунда — стоп со списком открытых находок (добавлено 29.10, из закрытого #379)\n- [ ] Золотые примеры лежат в `.agents/skills/<скилл>/examples/`: вход (issue) и ожидаемый результат. Детерминированные части скрипта — pytest рядом со скиллом, запуск как у create-issue (вне CI, `create-issue/SKILL.md:234-240`); вывод прогона автор прикладывает в PR. Поведение скилла автор PR прогоняет вручную в Claude Code и Codex и прикладывает вывод в описание PR\n- [ ] Ч.2: обёртка вызывает существующие скиллы, а не копирует их текст\n- [ ] Новый скилл внесён в список в `AGENTS.md` и в sync map `.agents/README.md`\n\n## Dependencies\n\n**Блокирующие:**\n\n- #262 — формат частей «Ч.N» задаёт create-issue\n- #265 — где лежат планы\n- #266 — для Ч.2: передача в AC Check после последней части (скилла нет — On Review и напоминание техлиду)\n\n**Связано, не блокирует:**\n\n- #267 — ревью PR\n\n## DoD Checklist\n\n- [ ] Гейты CI зелёные во всех PR задачи\n- [ ] Документы обновлены\n- [ ] PR одобрены на текущей голове, все треды закрыты\n- [ ] Статус на доске 12 обновлён\n- [ ] SYNC-копии в ui и api совпадают (`diff -r` пуст)\n\n## References\n\n- `.agents/skills/agent-loop/SKILL.md`\n- `.agents/agents/dev-loop.md`\n- `.agents/README.md` — матрица харнессов\n\n## Kickoff — с чего начать\n\n**Репозиторий:** larchanka-training/dmc-268-ui-t6 первым, затем larchanka-training/dmc-268-api-t6 (SYNC)\n\n**Ветка:** `feat/<n>-implement-issue` — части отдельными PR с `Refs larchanka-training/dmc-268-api-t6#<n>`\n\n**Форма проблемы:** Скиллы для каждого шага есть, но связки «взять задачу → довести одну часть до PR» нет: никто не проверяет блокеры, `agent-loop` выпускает один PR на весь todo, а в Codex ломается на субагентах. Обёртка задаёт порядок, границы и стоп-критерии, а работу отдаёт существующим скиллам.\n\n**Что прочитать первым:**\n\n- `.agents/skills/agent-loop/SKILL.md` — строки 49–90 (поток и публикация одного PR)\n- `.agents/README.md` — матрица харнессов (строка 23) и как запускать изолированный контекст (38–42)\n- `.agents/rules/git-workflow.md` — ветки и коммиты\n- `.agents/skills/pull-request/SKILL.md` — строки 28–33 (`git checkout -b`) и `.agents/agents/code-reviewer.md:11` (ревью не в контексте автора)\n\n**Перед тем как писать код:**\n\n- Сверить с готовыми скиллами (Matt Pocock, Addy Osmani, OpenSpec); в PR одной строкой — что взято, что нет и почему. Сверка со скиллами куратора (созвон 26.10) старт не блокирует; если материалы придут позже — строка сверки в ревью PR\n- Записать 3+ золотых примера «вход → ожидаемый результат» в `.agents/skills/<скилл>/examples/` до написания SKILL.md — по ним скилл и принимается\n\n**Мины:**\n\n- `agent-loop` публикует один PR на весь todo — для частей его поведение надо поменять или обойти; выбор записать в PR\n- `git push` и `gh pr create` в части харнессов требуют подтверждения человека: скилл останавливается и просит, а не обходит\n- Ruleset: ветка на текущем `main`, approve на текущей голове — после rebase approve слетает\n- Не опираться на определения `.agents/agents/*.md` (Codex их не грузит); изоляция шагов — по `.agents/README.md`, раздел про субагентов в харнессах (у Codex есть `spawn_agent`)\n- Шкалы P1–P3 в репо нет: `code-review` уровней не выдаёт, `code-reviewer` — critical/high/medium/low/info; стоп-критерий — по ней\n- gh 2.46 в этой org падает на `gh issue view` без `--json` и на `gh pr edit` (Projects classic) — только `--json` или `gh api`\n- Общий скилл правится в ui, затем `cp` в api и `diff -r` (`.agents/README.md:58-82`); SYNC-копия — та же Ч.N: второй PR в другом репо с тем же `Refs`, порядок — сначала ui, потом копия в api (`.agents/README.md:81`), отдельный sub-issue — только если часть меняет разный код в двух репо; `SKILL.md` — до ~250 строк, детали в `references/` (`.agents/README.md:92`); новый скилл — в список в `AGENTS.md`, в sync map `.agents/README.md` и в счёт скиллов `.agents/README.md:49` (сейчас «9 here»), в том же PR\n\n\n\n",
+        "assignees": {
+          "nodes": [
+            {
+              "login": "axyi"
+            }
+          ]
+        },
+        "projectItems": {
+          "pageInfo": {
+            "hasNextPage": false,
+            "endCursor": "MQ"
+          },
+          "nodes": [
+            {
+              "project": {
+                "number": 12,
+                "owner": {
+                  "__typename": "Organization",
+                  "login": "larchanka-training"
+                }
+              },
+              "fieldValueByName": {
+                "__typename": "ProjectV2ItemFieldSingleSelectValue",
+                "name": "In Progress"
+              }
+            }
+          ]
+        },
+        "blockedBy": {
+          "pageInfo": {
+            "hasNextPage": false,
+            "endCursor": "Mw"
+          },
+          "nodes": [
+            {
+              "number": 266,
+              "title": "[agents] Добавьте скилл приёмки задачи: AC Check с доказательствами и follow-up вне скоупа",
+              "state": "OPEN",
+              "repository": {
+                "nameWithOwner": "larchanka-training/dmc-268-api-t6"
+              }
+            },
+            {
+              "number": 265,
+              "title": "[agents] Уберите docs/plans из репозиториев: планы — локальные рабочие файлы",
+              "state": "OPEN",
+              "repository": {
+                "nameWithOwner": "larchanka-training/dmc-268-api-t6"
+              }
+            },
+            {
+              "number": 262,
+              "title": "[agents][create-issue] Ставьте нативные связи и нарезку на части; переведите qa на create-issue",
+              "state": "CLOSED",
+              "repository": {
+                "nameWithOwner": "larchanka-training/dmc-268-api-t6"
+              }
+            }
+          ]
+        },
+        "timelineItems": {
+          "pageInfo": {
+            "hasNextPage": false,
+            "endCursor": "Y3Vyc29yOnYyOpPPAAABoYeAxnACqzE4NTczOTQ4NTY3"
+          },
+          "nodes": [
+            {
+              "__typename": "CrossReferencedEvent",
+              "source": {
+                "__typename": "Issue"
+              }
+            },
+            {
+              "__typename": "CrossReferencedEvent",
+              "source": {
+                "__typename": "Issue"
+              }
+            },
+            {
+              "__typename": "CrossReferencedEvent",
+              "source": {
+                "__typename": "Issue"
+              }
+            },
+            {
+              "__typename": "CrossReferencedEvent",
+              "source": {
+                "__typename": "Issue"
+              }
+            },
+            {
+              "__typename": "CrossReferencedEvent",
+              "source": {
+                "__typename": "Issue"
+              }
+            },
+            {
+              "__typename": "CrossReferencedEvent",
+              "source": {
+                "__typename": "Issue"
+              }
+            },
+            {
+              "__typename": "CrossReferencedEvent",
+              "source": {
+                "__typename": "PullRequest",
+                "number": 177,
+                "title": "feat(agents): add the issue-graph script for sprint dependency graphs",
+                "url": "https://github.com/larchanka-training/dmc-268-ui-t6/pull/177",
+                "body": "## What\n\nPart 1 of api#268: a deterministic script, `.agents/skills/issue-graph/scripts/issue_graph.py`, that builds the dependency graph of a sprint from GitHub native relations. It uses no LLM. The `SKILL.md` and publishing come in part 2.\n\n## Refs\n\nRefs larchanka-training/dmc-268-api-t6#268\n",
+                "state": "MERGED",
+                "repository": {
+                  "nameWithOwner": "larchanka-training/dmc-268-ui-t6"
+                }
+              }
+            },
+            {
+              "__typename": "CrossReferencedEvent",
+              "source": {
+                "__typename": "PullRequest",
+                "number": 179,
+                "title": "feat(create-issue): slice tasks into parts and file linked batches",
+                "url": "https://github.com/larchanka-training/dmc-268-ui-t6/pull/179",
+                "body": "## What\n\nPart 2 (Ч.2) of larchanka-training/dmc-268-api-t6#262: the shared `create-issue` skill slices a big task into PR-sized parts and files several linked issues as one batch with one confirmation.\n\n## Refs\n\n- Refs larchanka-training/dmc-268-api-t6#262 (part 2 of 3)\n- Part 1: larchanka-training/dmc-268-ui-t6#178 (merged); part 3: larchanka-training/dmc-268-ui-t6#180 (merged into this branch)\n- Mirror: larchanka-training/dmc-268-api-t6#285\n",
+                "state": "MERGED",
+                "repository": {
+                  "nameWithOwner": "larchanka-training/dmc-268-ui-t6"
+                }
+              }
+            },
+            {
+              "__typename": "CrossReferencedEvent",
+              "source": {
+                "__typename": "PullRequest",
+                "number": 285,
+                "title": "feat(create-issue): slice tasks into parts, file linked batches (#262)",
+                "url": "https://github.com/larchanka-training/dmc-268-api-t6/pull/285",
+                "body": "## What\n\nPart 2 (Ч.2) of #262, byte-identical mirror of larchanka-training/dmc-268-ui-t6#179 (source of truth): the shared `create-issue` skill slices a big task into PR-sized parts and files several linked issues as one batch with one confirmation.\n\n## Refs\n\n- Refs #262 (part 2 of 3)\n- Part 1: #278 (merged); part 3: #286 (merged into this branch)\n- Source of truth: larchanka-training/dmc-268-ui-t6#179\n",
+                "state": "MERGED",
+                "repository": {
+                  "nameWithOwner": "larchanka-training/dmc-268-api-t6"
+                }
+              }
+            },
+            {
+              "__typename": "CrossReferencedEvent",
+              "source": {
+                "__typename": "PullRequest",
+                "number": 184,
+                "title": "feat(agents): publish the issue graph and add the issue-graph skill",
+                "url": "https://github.com/larchanka-training/dmc-268-ui-t6/pull/184",
+                "body": "## What\n\nPart 2 of api#268: publishing and the skill around the part-1 script (ui#177).\n\n## Refs\n\nRefs larchanka-training/dmc-268-api-t6#268\n\nSYNC copy: larchanka-training/dmc-268-api-t6#296 (byte-identical `.agents/skills/issue-graph/`).\n",
+                "state": "MERGED",
+                "repository": {
+                  "nameWithOwner": "larchanka-training/dmc-268-ui-t6"
+                }
+              }
+            },
+            {
+              "__typename": "CrossReferencedEvent",
+              "source": {
+                "__typename": "Issue"
+              }
+            }
+          ]
+        }
+      }
+    }
+  }
+}
