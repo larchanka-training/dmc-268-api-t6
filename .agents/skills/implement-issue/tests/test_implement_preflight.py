@@ -1251,6 +1251,97 @@ sys.stdout.write(Path(os.environ["FAKE_DIR"], names[cursor] + ".json").read_text
 """
 
 
+def squash(text: str) -> str:
+    """Whitespace collapsed to single blanks: a re-indented query is the same query."""
+    return " ".join(text.split())
+
+
+def flat_query(argv: list[str]) -> str:
+    """The GraphQL text of one gh call."""
+    return squash(next(a for a in argv if a.startswith("query=")).removeprefix("query="))
+
+
+# The expected text of every query, written out: a field dropped from (or added to) a query
+# must fail here, not pass because the same word appears somewhere else in it.
+ISSUE_QUERY_TEXT = squash(
+    """
+    query($owner: String!, $name: String!, $number: Int!) {
+      repository(owner: $owner, name: $name) {
+        issue(number: $number) {
+          title url state body
+          assignees(first: 20) { nodes { login } }
+          projectItems(first: 100) {
+            pageInfo { hasNextPage endCursor }
+            nodes {
+              project {
+                number
+                owner { __typename ... on Organization { login } ... on User { login } }
+              }
+              fieldValueByName(name: "Status") {
+                __typename
+                ... on ProjectV2ItemFieldSingleSelectValue { name }
+              }
+            }
+          }
+          blockedBy(first: 100) {
+            pageInfo { hasNextPage endCursor }
+            nodes { number title state repository { nameWithOwner } }
+          }
+          timelineItems(first: 100, itemTypes: [CROSS_REFERENCED_EVENT]) {
+            pageInfo { hasNextPage endCursor }
+            nodes {
+              __typename
+              ... on CrossReferencedEvent {
+                source {
+                  __typename
+                  ... on PullRequest { number title url body state repository { nameWithOwner } }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+    """
+)
+BLOCKED_QUERY_TEXT = squash(
+    """
+    query($owner: String!, $name: String!, $number: Int!, $c: String) {
+      repository(owner: $owner, name: $name) {
+        issue(number: $number) {
+          blockedBy(first: 100, after: $c) {
+            pageInfo { hasNextPage endCursor }
+            nodes { number title state repository { nameWithOwner } }
+          }
+        }
+      }
+    }
+    """
+)
+TIMELINE_QUERY_TEXT = squash(
+    """
+    query($owner: String!, $name: String!, $number: Int!, $c: String) {
+      repository(owner: $owner, name: $name) {
+        issue(number: $number) {
+          timelineItems(first: 100, after: $c, itemTypes: [CROSS_REFERENCED_EVENT]) {
+            pageInfo { hasNextPage endCursor }
+            nodes {
+              __typename
+              ... on CrossReferencedEvent {
+                source {
+                  __typename
+                  ... on PullRequest { number title url body state repository { nameWithOwner } }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+    """
+)
+
+
 def test_argv_queries_and_paging_through_gh(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1277,27 +1368,13 @@ def test_argv_queries_and_paging_through_gh(
     first, second, third = calls
     assert not any(a.startswith("c=") for a in first)  # first page: no cursor
     assert "c=B1" in second and "c=B2" in third
-    # The query text itself: dropping any of these silently loses a fact.
-    query = next(a for a in first if a.startswith("query="))
-    for needle in (
-        "state",
-        "assignees(first: 20)",
-        "projectItems(first: 100)",
-        'fieldValueByName(name: "Status")',
-        "project {",
-        "number",
-        "blockedBy(first: 100)",
-        "timelineItems(first: 100, itemTypes: [CROSS_REFERENCED_EVENT])",
-        "... on PullRequest {",
-        "body",
-        "repository { nameWithOwner }",
-    ):
-        assert needle in query, needle
+    # The query text itself, token by token (whitespace aside): dropping or adding any field
+    # silently loses a fact, so the whole text is pinned, not a few needles.
+    query = flat_query(first)
+    assert query == ISSUE_QUERY_TEXT
     assert "timelineItems(last" not in query
     assert "CLOSED_EVENT" not in query  # the closing history is accept-issue's, not ours
-    blocked_query = next(a for a in second if a.startswith("query="))
-    assert "blockedBy(first: 100, after: $c)" in blocked_query
-    assert "state" in blocked_query and "repository { nameWithOwner }" in blocked_query
+    assert flat_query(second) == BLOCKED_QUERY_TEXT == flat_query(third)
     # Read-only: queries only, never a mutation, never a REST write.
     for argv in calls:
         assert "mutation" not in " ".join(argv)
@@ -1316,9 +1393,5 @@ def test_timeline_follow_up_query(tmp_path: Path, monkeypatch: pytest.MonkeyPatc
     assert r.returncode == 0, r.stderr
     calls = [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()]
     assert len(calls) == 2 and "c=T1" in calls[1]
-    query = next(a for a in calls[1] if a.startswith("query="))
-    assert "timelineItems(first: 100, after: $c, itemTypes: [CROSS_REFERENCED_EVENT])" in query
-    assert (
-        "... on PullRequest { number title url body state repository { nameWithOwner } }" in query
-    )
-    assert "mutation" not in query
+    assert flat_query(calls[1]) == TIMELINE_QUERY_TEXT
+    assert "mutation" not in flat_query(calls[1])

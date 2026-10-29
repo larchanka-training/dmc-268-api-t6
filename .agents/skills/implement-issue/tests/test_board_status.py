@@ -389,6 +389,61 @@ def query_of(argv: list[str]) -> str:
     return next(a for a in argv if a.startswith("query="))
 
 
+def squash(text: str) -> str:
+    """Whitespace collapsed to single blanks: a re-indented query is the same query."""
+    return " ".join(text.split())
+
+
+# The expected text of every query, written out: an id or a field dropped from (or added to)
+# a query must fail here, not pass because the fixtures still answer with it.
+BOARD_QUERY_TEXT = squash(
+    """
+    query($org: String!, $board: Int!) {
+      organization(login: $org) {
+        projectV2(number: $board) {
+          id
+          field(name: "Status") {
+            __typename
+            ... on ProjectV2SingleSelectField { id name options { id name } }
+          }
+        }
+      }
+    }
+    """
+)
+ITEM_QUERY_TEXT = squash(
+    """
+    query($owner: String!, $name: String!, $number: Int!) {
+      repository(owner: $owner, name: $name) {
+        issue(number: $number) {
+          projectItems(first: 100) {
+            pageInfo { hasNextPage endCursor }
+            nodes {
+              id
+              project { id }
+              fieldValueByName(name: "Status") {
+                __typename
+                ... on ProjectV2ItemFieldSingleSelectValue { name }
+              }
+            }
+          }
+        }
+      }
+    }
+    """
+)
+SET_QUERY_TEXT = squash(
+    """
+    mutation($project: ID!, $item: ID!, $field: ID!, $option: String!) {
+      updateProjectV2ItemFieldValue(input: {
+        projectId: $project, itemId: $item, fieldId: $field,
+        value: {singleSelectOptionId: $option}
+      }) { projectV2Item { id } }
+    }
+    """
+)
+
+
 def test_argv_queries_and_the_single_write(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     log = tmp_path / "gh.log"
     prepend_path(monkeypatch, fake_gh(tmp_path / "bin", GH_LOG_FAKE))
@@ -405,31 +460,18 @@ def test_argv_queries_and_the_single_write(tmp_path: Path, monkeypatch: pytest.M
     # exactly one write, and it is the field update on the existing item
     mutations = [a for a in calls if "mutation" in query_of(a)]
     assert mutations == [write_call]
-    assert "updateProjectV2ItemFieldValue" in query_of(write_call)
-    assert "singleSelectOptionId: $option" in query_of(write_call)
+    assert squash(query_of(write_call).removeprefix("query=")) == SET_QUERY_TEXT
     assert not any("addProjectV2ItemById" in " ".join(a) for a in calls)
     assert not any("deleteProjectV2Item" in " ".join(a) for a in calls)
     # the board is looked up by org and number (variables), the ids by name (from the answer)
     pairs = list(zip(board, board[1:], strict=False))
     assert ("-f", "org=larchanka-training") in pairs and ("-F", "board=12") in pairs
-    board_query = query_of(board)
-    for needle in (
-        "projectV2(number: $board)",
-        'field(name: "Status")',
-        "ProjectV2SingleSelectField",
-    ):
-        assert needle in board_query, needle
-    assert "options { id name }" in board_query
+    assert squash(query_of(board).removeprefix("query=")) == BOARD_QUERY_TEXT
     # the item is the issue's own, in its repo, paged by nothing but first: 100
     pairs = list(zip(item, item[1:], strict=False))
     assert ("-f", "owner=larchanka-training") in pairs and ("-f", "name=dmc-268-ui-t6") in pairs
     assert ("-F", "number=7") in pairs
-    for needle in (
-        "projectItems(first: 100)",
-        'fieldValueByName(name: "Status")',
-        "project { id }",
-    ):
-        assert needle in query_of(item), needle
+    assert squash(query_of(item).removeprefix("query=")) == ITEM_QUERY_TEXT
     assert query_of(readback) == query_of(item)
     # ids go with -f (strings, never reinterpreted) and come from the board response
     project = load("board")["data"]["organization"]["projectV2"]
