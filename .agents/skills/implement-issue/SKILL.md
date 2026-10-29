@@ -33,8 +33,8 @@ of api#269 and is not in this version.
 
 `implement-issue REF [--part K]` — `REF` is `api#N`, `ui#N`, `OWNER/NAME#N` or a bare `N` (api).
 Without `--part`, the first part with no merged pull request is taken (and the run stops if that
-part has an open one); with it, that part is taken as given, even when it already has a pull
-request (the script warns).
+part has an open one, or if an open pull request with `Refs` names no part); with it, that part is
+taken as given, even when it already has a pull request (the script warns).
 
 ## Scripts
 
@@ -122,8 +122,9 @@ Rules: `.agents/rules/git-workflow.md`. Work from a fresh `origin/main`.
 
 A **SYNC part** (shared files, `.agents/README.md` § Sync map) is two pull requests with the
 same `Refs`: ui first, then the copy in api (`cp`, then `diff -r` empty). This run starts in the
-repo the Kickoff names first (ui); the api copy comes after the ui change is final, on a branch
-with the same name.
+repo the Kickoff names first (ui); the api copy comes after the ui change is final, on the same
+branch name — run the Taken / Pick steps again in api, and if the name is taken there, use the
+next free one from the same sequence.
 
 ### 4. Board
 
