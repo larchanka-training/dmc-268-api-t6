@@ -51,12 +51,14 @@ def upgrade() -> None:
         sa.PrimaryKeyConstraint("workspace_id", "repository_uuid", "pr_number", "head_sha"),
         sa.ForeignKeyConstraint(["workspace_id"], ["workspaces.id"], ondelete="CASCADE"),
         sa.ForeignKeyConstraint(["run_id"], ["runs.id"], ondelete="CASCADE"),
-        sa.CheckConstraint("pr_number > 0", name="ck_bitbucket_status_pr_number"),
-        sa.CheckConstraint("generation >= 0", name="ck_bitbucket_status_generation"),
-        sa.CheckConstraint("desired_rank BETWEEN 0 AND 3", name="ck_bitbucket_status_rank"),
+        sa.CheckConstraint("pr_number > 0", name="ck_bitbucket_status_publications_pr_number"),
+        sa.CheckConstraint("generation >= 0", name="ck_bitbucket_status_publications_generation"),
+        sa.CheckConstraint(
+            "desired_rank BETWEEN 0 AND 3", name="ck_bitbucket_status_publications_rank"
+        ),
     )
     op.create_index(
-        "ix_bitbucket_status_replay",
+        "ix_bitbucket_status_publications_replay",
         "bitbucket_status_publications",
         ["lease_until", "run_id"],
     )
@@ -66,7 +68,9 @@ def downgrade() -> None:
     op.execute("LOCK TABLE bitbucket_status_publications IN ACCESS EXCLUSIVE MODE")
     if op.get_bind().scalar(sa.text("SELECT EXISTS (SELECT 1 FROM bitbucket_status_publications)")):
         raise RuntimeError("Bitbucket status intents must be removed before downgrade")
-    op.drop_index("ix_bitbucket_status_replay", table_name="bitbucket_status_publications")
+    op.drop_index(
+        "ix_bitbucket_status_publications_replay", table_name="bitbucket_status_publications"
+    )
     op.drop_table("bitbucket_status_publications")
     op.drop_constraint("uq_bitbucket_run_origins_order", "bitbucket_run_origins", type_="unique")
     op.drop_column("bitbucket_run_origins", "run_order")

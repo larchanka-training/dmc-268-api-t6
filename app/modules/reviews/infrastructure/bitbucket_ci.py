@@ -179,6 +179,10 @@ class BitbucketStatusLeaseLost(BitbucketStatusUnavailable):
     pass
 
 
+class BitbucketStatusUnpublishable(BitbucketStatusUnavailable):
+    """The provider no longer exposes a commit on which a terminal status can exist."""
+
+
 def _mapping(value: object) -> dict[str, object]:
     if not isinstance(value, dict):
         raise BitbucketStatusUnavailable("Bitbucket status response is malformed")
@@ -227,34 +231,37 @@ class BitbucketBuildStatusPublisher:
     ) -> object:
         if checkpoint is not None:
             await checkpoint()
-        async with client.stream(
-            method,
-            url,
-            json=body,
-            headers={"Authorization": f"Bearer {token}"},
-            follow_redirects=False,
-            timeout=10.0,
-        ) as response:
-            if missing_ok and response.status_code == 404:
-                return None
-            if response.status_code == 404:
-                raise BitbucketStatusUnavailable(
-                    "Bitbucket status resource is missing", reason=not_found_reason
-                )
-            if response.status_code == 429:
-                raise BitbucketStatusUnavailable(
-                    "Bitbucket status endpoint is rate limited",
-                    retry_after=parse_retry_after(response.headers.get("Retry-After"))
-                    or timedelta(hours=1),
-                )
-            chunks: list[bytes] = []
-            size = 0
-            async for chunk in response.aiter_bytes():
-                size += len(chunk)
-                if size > _MAX_BODY_BYTES:
-                    raise BitbucketStatusUnavailable("Bitbucket status response is too large")
-                chunks.append(chunk)
-            status = response.status_code
+        try:
+            async with client.stream(
+                method,
+                url,
+                json=body,
+                headers={"Authorization": f"Bearer {token}"},
+                follow_redirects=False,
+                timeout=10.0,
+            ) as response:
+                if missing_ok and response.status_code == 404:
+                    return None
+                if response.status_code == 404:
+                    raise BitbucketStatusUnavailable(
+                        "Bitbucket status resource is missing", reason=not_found_reason
+                    )
+                if response.status_code == 429:
+                    raise BitbucketStatusUnavailable(
+                        "Bitbucket status endpoint is rate limited",
+                        retry_after=parse_retry_after(response.headers.get("Retry-After"))
+                        or timedelta(hours=1),
+                    )
+                chunks: list[bytes] = []
+                size = 0
+                async for chunk in response.aiter_bytes():
+                    size += len(chunk)
+                    if size > _MAX_BODY_BYTES:
+                        raise BitbucketStatusUnavailable("Bitbucket status response is too large")
+                    chunks.append(chunk)
+                status = response.status_code
+        except httpx.HTTPError as error:
+            raise BitbucketStatusUnavailable("Bitbucket status transport unavailable") from error
         if status in {401, 403} or 300 <= status < 400:
             raise BitbucketStatusForbidden("Bitbucket status author or access denied")
         if status not in ({200} if method == "GET" else {200, 201}):
@@ -368,6 +375,9 @@ class BitbucketBuildStatusPublisher:
                     raise
                 except BitbucketStatusLeaseLost:
                     raise
+                except BitbucketStatusUnpublishable:
+                    await ledger.retire(intent.run_id)
+                    return
                 except BitbucketStatusUnavailable as error:
                     if error.retry_after is not None:
                         await self._ledger.defer_rate_limit(claim, error.retry_after)
@@ -390,6 +400,7 @@ class BitbucketBuildStatusPublisher:
                     intent.desired_state,
                 ):
                     return
+            await ledger.defer_failure(claim, "status_unavailable", timedelta(minutes=5))
             raise BitbucketStatusUnavailable("Bitbucket status changed too often")
         finally:
             heartbeat_task.cancel()
@@ -425,6 +436,15 @@ class BitbucketBuildStatusPublisher:
             )
             source = _mapping(pr.get("source"))
             destination = _mapping(pr.get("destination"))
+            if (
+                snapshot.state == "cancelled"
+                and pr.get("state") in {"DECLINED", "MERGED"}
+                and source.get("commit") is None
+                and pr.get("id") == snapshot.pr_number
+                and _uuid(_mapping(destination.get("repository")).get("uuid"))
+                == target.repository_uuid
+            ):
+                raise BitbucketStatusUnpublishable("Bitbucket closed PR no longer exposes its head")
             source_repo_uuid = _uuid(_mapping(source.get("repository")).get("uuid"))
             try:
                 prefix = pr_commit_hash(_mapping(source.get("commit")).get("hash"))
@@ -459,7 +479,8 @@ class BitbucketBuildStatusPublisher:
                 or head != snapshot.head_sha
                 or _mapping(source.get("branch")).get("name") != snapshot.source_branch
                 or (
-                    snapshot.target_branch is not None
+                    snapshot.state != "cancelled"
+                    and snapshot.target_branch is not None
                     and _mapping(destination.get("branch")).get("name") != snapshot.target_branch
                 )
             ):

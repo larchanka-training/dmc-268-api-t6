@@ -317,7 +317,7 @@ def test_status_uses_active_run_origin_and_no_db_transaction_over_http(
                     },
                 )
             ambiguous_terminal = True
-            with pytest.raises(httpx.ReadTimeout):
+            with pytest.raises(BitbucketStatusUnavailable, match="transport unavailable"):
                 await publisher.upsert(run_id, "https://review.example/runs/one")
             assert applied[-1] == "SUCCESSFUL"
             terminal_post = [request for request in requests if request.method == "POST"][-1]
@@ -326,6 +326,17 @@ def test_status_uses_active_run_origin_and_no_db_transaction_over_http(
             )
             await BitbucketStatusReconciler(ledger, publisher).tick()
             assert applied[-1] == "SUCCESSFUL"
+            assert len([request for request in requests if request.method == "POST"]) == 2
+            async with sessions.begin() as session:
+                await session.execute(
+                    text(
+                        "UPDATE bitbucket_status_publications SET next_check_at=now() "
+                        "WHERE workspace_id=:workspace AND repository_uuid=:repo "
+                        "AND pr_number=7 AND head_sha=:head"
+                    ),
+                    {"workspace": workspace, "repo": remote_repo, "head": HEAD},
+                )
+            await BitbucketStatusReconciler(ledger, publisher).tick()
             assert len([request for request in requests if request.method == "POST"]) == 3
             await BitbucketStatusReconciler(ledger, publisher).tick()
             assert len([request for request in requests if request.method == "POST"]) == 3
@@ -668,10 +679,24 @@ def test_status_uses_active_run_origin_and_no_db_transaction_over_http(
                     ),
                     {"id": installation2},
                 )
+                await session.execute(
+                    text(
+                        "UPDATE bitbucket_status_publications "
+                        "SET applied_run_id=:run,applied_state='succeeded' "
+                        "WHERE workspace_id=:workspace AND repository_uuid=:repo "
+                        "AND pr_number=7 AND head_sha=:head"
+                    ),
+                    {"run": run2, "workspace": workspace2, "repo": remote_repo, "head": HEAD},
+                )
+                await session.execute(
+                    text("UPDATE runs SET finished_at=now()-interval '2 hours' WHERE id=:run"),
+                    {"run": run2},
+                )
             rotated = await SqlAlchemyBitbucketStatusSource(sessions).current(run2)
             assert rotated is not None
             assert rotated.target.credential_generation == 2
-            await publisher.upsert(run2, "https://review.example/runs/other")
+            assert (run2, "https://review.example/runs/other") in await ledger.pending()
+            await publisher.replay(run2, "https://review.example/runs/other")
             assert len([request for request in requests if request.method == "POST"]) == 11
             async with sessions() as session:
                 recovery = (

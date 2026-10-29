@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import timedelta
 from typing import Protocol
 from uuid import UUID
@@ -23,6 +25,9 @@ from app.modules.reviews.application.run_failures import RunCancelled, RunFailur
 _ORIGIN = "https://api.bitbucket.org"
 _TOTAL_BYTES = 32 * 1024 * 1024
 _MAX_REQUESTS = 800
+# Context excerpts are optional. Leave half the attempt budget for the bounded
+# conventions tree, commit prefix and canonical checks that follow the context stage.
+_MAX_CONTEXT_REQUESTS = 400
 _TIMEOUT_SECONDS = 10.0
 
 
@@ -78,10 +83,20 @@ class BitbucketRunHttp:
         self._allowed = {target.repository_uuid}
         self._read_bytes = 0
         self._requests = 0
+        self._context_limit: int | None = None
 
     @property
     def request_count(self) -> int:
         return self._requests
+
+    @contextmanager
+    def optional_context_budget(self) -> Iterator[None]:
+        previous_limit = self._context_limit
+        self._context_limit = _MAX_CONTEXT_REQUESTS
+        try:
+            yield
+        finally:
+            self._context_limit = previous_limit
 
     def allow_source_repository(self, source: UUID) -> None:
         if type(source) is not UUID:
@@ -130,7 +145,7 @@ class BitbucketRunHttp:
             or not 0 < max_bytes <= _TOTAL_BYTES
         ):
             raise ValueError("invalid Bitbucket run path")
-        if self._requests >= _MAX_REQUESTS:
+        if self._requests >= min(_MAX_REQUESTS, self._context_limit or _MAX_REQUESTS):
             raise BitbucketRunHttpError("request_budget_exceeded")
         try:
             credential = await self._credentials.credential_for(self.target)

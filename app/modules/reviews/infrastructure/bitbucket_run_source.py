@@ -86,7 +86,11 @@ class BitbucketRunSource:
                 raw = await self._trees.read_file(known[0], max_bytes=131072)
                 content = raw.decode("utf-8")
             except BitbucketRunHttpError as error:
-                if error.kind in {"rate_limited", "request_budget_exceeded"}:
+                if error.kind in {
+                    "rate_limited",
+                    "request_budget_exceeded",
+                    "total_budget_exceeded",
+                }:
                     raise
                 continue
             except UnicodeDecodeError:

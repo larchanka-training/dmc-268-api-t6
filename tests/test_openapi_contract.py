@@ -2171,7 +2171,10 @@ def test_repository_update_rejects_invalid_review_settings(
     assert rejected.status_code == 422
     if name == "branch-filter-lone-surrogate":
         # The ASCII-escaped fallback body keeps FastAPI's default shape (app/main.py).
-        assert rejected.json()["detail"][0]["loc"] == ["body", "branchFilter"]
+        (detail,) = rejected.json()["detail"]
+        assert detail["loc"] == ["body", "branchFilter"]
+        assert detail["msg"] != "Invalid input"
+        assert detail["input"] == body["branchFilter"]
     assert (stored["branchFilter"], stored["severityThreshold"]) == ([], "all")
     assert (stored["ragEnabled"], stored["ragIndex"]["status"]) == (False, "disabled")
 
