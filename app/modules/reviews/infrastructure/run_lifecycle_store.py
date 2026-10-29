@@ -212,6 +212,7 @@ class SqlAlchemyRunLifecycleStore:
             engine=run.engine.value,
             prompt_version_id=run.prompt_version_id,
             rule_version_id=run.rule_version_id,
+            repository_id=repository.id,
         )
 
     async def claim(

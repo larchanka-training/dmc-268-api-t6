@@ -81,6 +81,7 @@ class RunGuardSnapshot:
     prompt_version_id: UUID
     rule_version_id: UUID
     origin_active: bool = True
+    repository_id: UUID | None = None
 
 
 @dataclass(frozen=True)
@@ -95,6 +96,7 @@ class ClaimedAttempt:
     prompt_version_id: UUID
     rule_version_id: UUID
     worker_id: str
+    repository_id: UUID | None = None
 
 
 class CheckRunReports(Protocol):
@@ -399,6 +401,7 @@ class HandleReviewRun:
                 prompt_version_id=snapshot.prompt_version_id,
                 rule_version_id=snapshot.rule_version_id,
                 worker_id=self._worker_id,
+                repository_id=snapshot.repository_id,
             ),
             execution,
         )

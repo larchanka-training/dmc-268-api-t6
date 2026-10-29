@@ -845,7 +845,9 @@ Legacy-путь ключует по ignore key попытки (NULL у run бе�
 | Разрешённые импорты | `(repository_id, revision_tree_sha, importer_blob_sha, resolver_version)` | TTL ≤7 дней; повторный policy guard обязателен |
 | Дерево | `(repository_id, revision_sha)` | TTL 1 час; фильтрация перед каждым использованием |
 | Конвенции | Полный ключ §4.2 | PG + Redis, TTL не заменяет проверку provenance |
+| Ответ модели ревью и верификатора | `review-result-v1`: operation (`review` или `verification`), `repository_id`, модель, версия промпта, версия выходной схемы, версия профиля, digest окончательных rendered messages и digest тела запроса без messages (`max_tokens`, sampling после `extra_body`, `response_format` целиком) | Существующий Redis, префикс `review-result:`; отдельный сервер не вводится; TTL 7 дней (`BLOB_CACHE_TTL`). Попадание пропускает вызов модели и `llm.call`, в трейсе — `llm.result_cache` с `source_run_id`, `source_call_id` и `source_manifest_id` принятого вызова; эти `call_id` и `manifest_id` отдаются как `accepted_call_id` и `manifest_id`. Промах, недоступность, испорченная запись и ответ, который проходит схему, но не проходит `check_answer` текущего manifest, — обычный вызов модели |
 
+Строка «Ответ модели ревью и верификатора» хранит принятый ответ модели, а не собранный контекст.
 Кэш собранного контекста v1 не вводится. Если появится, ключ включает policy,
 DiffMap, точные источники, budgets и версии сборки, а guard остаётся обязательным.
 Запрещено переносить результаты LLM между разными head/run только по findings hash.
