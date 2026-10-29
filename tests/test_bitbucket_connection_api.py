@@ -520,6 +520,38 @@ def test_connect_rejects_repository_uuid_mismatch_before_probing_or_persisting()
     assert fetched == [("team", "repo")]
 
 
+def test_connect_rejects_token_without_user_scope_before_persisting() -> None:
+    class MissingUserScopeProvider:
+        async def fetch_repository(self, **_kwargs: object) -> SimpleNamespace:
+            return SimpleNamespace(uuid=REPOSITORY, workspace_uuid=UUID(int=998))
+
+        async def probe_pull_request_read(self, **_kwargs: object) -> None:
+            return None
+
+        async def probe_current_user(self, **_kwargs: object) -> None:
+            raise BitbucketProviderError("repository_inaccessible")
+
+    manager = _manager_with_membership(member=True, provider=MissingUserScopeProvider())
+    app.dependency_overrides[get_auth_scope] = lambda: AuthScope(42, (WORKSPACE,))
+    app.dependency_overrides[get_bitbucket_workspace_scope] = lambda: AuthScope(42, (WORKSPACE,))
+    app.dependency_overrides[get_bitbucket_management] = lambda: manager
+    try:
+        response = TestClient(app).post(
+            f"/api/workspaces/{WORKSPACE}/bitbucket/connections",
+            json={
+                "bitbucketWorkspace": "team",
+                "repositorySlug": "repo",
+                "repositoryUuid": str(REPOSITORY),
+                "apiToken": "test-token",
+            },
+        )
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 422
+    assert response.json() == {"detail": "repository_inaccessible"}
+
+
 @pytest.mark.parametrize("code", ["invalid_slug", "invalid_credential"])
 def test_provider_rejection_has_explicit_http_code_and_sanitized_body(code: str) -> None:
     class RejectingProvider:

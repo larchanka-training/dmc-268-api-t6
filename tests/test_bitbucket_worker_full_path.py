@@ -407,6 +407,8 @@ def test_composed_bitbucket_review_uses_pinned_cloud_reads_and_writes(
         assert request.url.host == "api.bitbucket.org"
         assert request.headers["Authorization"] == "Bearer secret-token"
         path = request.url.path
+        if path == "/2.0/user":
+            return httpx.Response(200, json={"uuid": "{00000000-0000-4000-8000-000000000555}"})
         if path == f"{PREFIX}/pullrequests/7":
             return httpx.Response(200, json=_pr(head=HEAD[:12], base=BASE[:12]))
         if path == f"{PREFIX}/commit/{HEAD[:12]}":
@@ -522,7 +524,11 @@ def test_composed_bitbucket_review_uses_pinned_cloud_reads_and_writes(
             return httpx.Response(200, json={"values": comments})
         if path == f"{PREFIX}/pullrequests/7/comments" and request.method == "POST":
             payload = json.loads(request.content)
-            comment = {"id": 100 + len(comments), **payload}
+            comment = {
+                "id": 100 + len(comments),
+                "user": {"uuid": "{00000000-0000-4000-8000-000000000555}"},
+                **payload,
+            }
             comments.append(comment)
             return httpx.Response(201, json=comment)
         if path == f"{PREFIX}/commit/{HEAD}/statuses/build" and request.method == "POST":

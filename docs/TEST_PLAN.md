@@ -1019,9 +1019,10 @@ Bitbucket UI действие Apply для созданного предложе
 на итоговом diff.
 
 Проверки выполнять в выбранном portal workspace на приватном UUID locator; участник
-видит подключение, посторонний — нет. Runtime-токену нужны только
-`read:repository:bitbucket` и `read:pullrequest:bitbucket`: проверить их на private
-repo/PR GET, inline comment POST и commit-status POST/PUT. Без второго scope и connect,
+видит подключение, посторонний — нет. Runtime-токену нужны
+`read:repository:bitbucket`, `read:pullrequest:bitbucket` и `read:user:bitbucket`:
+проверить их на private repo/PR GET, GET /user, inline comment POST и commit-status POST/PUT.
+Токен с прежними правами перевыпустить и обновить в connection. Без второго scope и connect,
 и `PUT credential` возвращают 422; после неудачного PUT `credentialGeneration` не
 меняется. Проверить URL и имена защищённых staging-переменных, не раскрывая keyring;
 backend/UI должны быть развернуты с зафиксированными SHA и миграцией.

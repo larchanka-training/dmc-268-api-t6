@@ -27,6 +27,8 @@ _MAX_COMMENTS = 2000
 class BitbucketCommentPort(Protocol):
     async def checkpoint(self) -> None: ...
 
+    async def current_user(self) -> object: ...
+
     async def pull_request(self) -> object: ...
 
     async def source_commit(self, repository_uuid: UUID, head_sha: str) -> object: ...
@@ -187,8 +189,18 @@ class BitbucketPullRequestCommentGateway:
         raise PublishError("retryable", "Bitbucket comment pagination limit exceeded")
 
     @staticmethod
-    def _existing(comments: list[dict[str, object]], marker: str) -> tuple[int, str] | None:
+    def _existing(
+        comments: list[dict[str, object]], marker: str, author_uuid: UUID
+    ) -> tuple[int, str] | None:
         for comment in comments:
+            user = comment.get("user")
+            if not isinstance(user, dict):
+                continue
+            try:
+                if _uuid(user.get("uuid")) != author_uuid:
+                    continue
+            except PublishError:
+                continue
             raw = _raw_comment(comment)
             if raw is not None and marker in raw:
                 return _comment_id(comment), raw
@@ -217,11 +229,12 @@ class BitbucketPullRequestCommentGateway:
 
     async def submit_review(self, submission: ReviewSubmission) -> SubmittedReview:
         await self._current(submission)
+        author_uuid = _uuid(_mapping(await self._port.current_user()).get("uuid"))
         comments = await self._comments()
         posted: set[UUID] = set()
         for index, finding in enumerate(submission.findings):
             marker = self._marker(submission, finding)
-            if self._existing(comments, marker) is not None:
+            if self._existing(comments, marker, author_uuid) is not None:
                 if finding.finding_id is not None:
                     posted.add(finding.finding_id)
                 continue
@@ -263,12 +276,14 @@ class BitbucketPullRequestCommentGateway:
                         unposted=submission.findings[index:],
                     ) from exc
                 raise
-            comments.append({"id": comment_id, "content": {"raw": marker}})
+            comments.append(
+                {"id": comment_id, "user": {"uuid": str(author_uuid)}, "content": {"raw": marker}}
+            )
             if finding.finding_id is not None:
                 posted.add(finding.finding_id)
         summary_marker = self._marker(submission, None)
         summary_body = f"{submission.body}\n\n{summary_marker}"
-        existing_summary = self._existing(comments, summary_marker)
+        existing_summary = self._existing(comments, summary_marker, author_uuid)
         if existing_summary is None:
             summary_id = await self._post(submission, body=summary_body, inline=None)
         else:
