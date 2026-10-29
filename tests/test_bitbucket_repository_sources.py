@@ -67,7 +67,7 @@ def test_optional_context_byte_preflight_sends_no_request_when_reserve_is_needed
     async def scenario() -> None:
         async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
             http = BitbucketRunHttp(client, Credentials(), TARGET)
-            http._read_bytes = run_http._TOTAL_BYTES - 700
+            http._read_bytes = 33_554_432 - 700
             with http.optional_context_budget():
                 with pytest.raises(BitbucketRunHttpError) as error:
                     await http.get_bytes(DEST, f"src/{HEAD}/probe", max_bytes=5)
@@ -90,9 +90,7 @@ def test_optional_context_byte_boundary_allows_exact_size_only(body: bytes) -> N
     async def scenario() -> None:
         async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
             http = BitbucketRunHttp(client, Credentials(), TARGET)
-            http._read_bytes = run_http._TOTAL_BYTES - (
-                run_http._POST_CONTEXT_TAIL_RESERVE_BYTES + 2
-            )
+            http._read_bytes = 33_554_432 - (6_422_528 + 2)
             with http.optional_context_budget():
                 if body == b"ok":
                     assert await http.get_bytes(DEST, f"src/{HEAD}/probe", max_bytes=3) == body
