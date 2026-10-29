@@ -1,6 +1,6 @@
 ---
 name: pull-request
-description: This skill should be used when creating a new feature branch from the current git changes, committing them, pushing to the remote, and opening a GitHub pull request with the `gh` CLI.
+description: This skill should be used when committing the current git changes on a feature branch — a new one cut from `main`, or the one already checked out — pushing to the remote, and opening a GitHub pull request with the `gh` CLI.
 metadata:
   version: 1.0.0
   source: instructor-pack
@@ -30,7 +30,9 @@ metadata:
 
 2. **Create branch, commit, and push**:
    - On `main`: `git checkout -b <branch-name>`. Already on a feature branch (not `main`):
-     stay on it, no `git checkout -b`.
+     stay on it, no `git checkout -b`, but first check it has no merged pull request —
+     `gh pr list --head <branch> --state merged --json number` must print `[]`. If it lists
+     one, the branch belongs to finished work: stop and ask the user.
    - `git add <explicit paths>` for every new file of this change and `git add -u` for
      modified tracked files (never `git add .`).
    - Check `git status` before committing: no unrelated untracked files (`.env`, proof
