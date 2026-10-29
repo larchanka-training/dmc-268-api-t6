@@ -20,6 +20,7 @@ from app.bootstrap.bitbucket_reviews import (
     BitbucketAttemptBundle,
     BitbucketReviewWorkerResources,
 )
+from app.modules.integrations.bitbucket.infrastructure import run_http
 from app.modules.integrations.bitbucket.infrastructure.run_http import (
     BitbucketRunHttp,
     BitbucketRunHttpError,
@@ -369,14 +370,20 @@ def test_bitbucket_full_mocked_review_never_uses_github_or_gitlab(
 
 
 @pytest.mark.parametrize(
-    ("technical_only", "context_budget_exceeded", "context_byte_budget_exceeded"),
-    [(False, False, False), (True, False, False), (False, True, False), (False, False, True)],
+    ("technical_only", "context_budget_exceeded", "context_byte_case"),
+    [
+        (False, False, None),
+        (True, False, None),
+        (False, True, None),
+        (False, False, "tree"),
+        (False, False, "blob"),
+    ],
 )
 def test_composed_bitbucket_review_uses_pinned_cloud_reads_and_writes(
     monkeypatch: pytest.MonkeyPatch,
     technical_only: bool,
     context_budget_exceeded: bool,
-    context_byte_budget_exceeded: bool,
+    context_byte_case: str | None,
 ) -> None:
     """The worker's VCS, policy, source and context adapters share one pinned Cloud route."""
     source_bytes = b"def compute():\n    return 2\n"
@@ -569,10 +576,15 @@ def test_composed_bitbucket_review_uses_pinned_cloud_reads_and_writes(
             cache = InMemoryBlobCache()
 
             def context_builder(selected: RunVcsInput) -> BuildReviewContext:
-                if context_byte_budget_exceeded:
-                    # A prior large mandatory read left 1.1 KiB in this attempt.
-                    # The optional source read fits, but later required reads do not.
-                    http._read_bytes = 32 * 1024 * 1024 - 1100
+                if context_byte_case is not None:
+                    # At 700 remaining, even a short optional read can starve pr_meta.
+                    # The blob case leaves room for tree reads but not source text.
+                    remaining = (
+                        700
+                        if context_byte_case == "tree"
+                        else run_http._POST_CONTEXT_TAIL_RESERVE_BYTES + 650
+                    )
+                    http._read_bytes = 32 * 1024 * 1024 - remaining
                 return (RequestBudgetContext if context_budget_exceeded else BuildReviewContext)(
                     source=BitbucketRevisionSource(trees=trees, locator=selected.locator),
                     parser=Parser(),
@@ -859,7 +871,7 @@ def test_composed_bitbucket_review_uses_pinned_cloud_reads_and_writes(
             else:
                 assert agents_bytes.decode().strip() in prompt_text
                 assert "Check changed function behavior." in prompt_text
-                if context_budget_exceeded or context_byte_budget_exceeded:
+                if context_budget_exceeded or context_byte_case is not None:
                     assert stage.payload is not None
                     assert ContextLevel.L3 not in stage.payload.levels_present
                     assert "def compute():" in prompt_text
@@ -874,9 +886,14 @@ def test_composed_bitbucket_review_uses_pinned_cloud_reads_and_writes(
                         response for tool, _, response in trace.steps if tool == "context.build"
                     ]
                     assert len(context_steps) == 1
-                    assert context_steps[0]["reason"] == "tree_unavailable"
+                    expected_omission = (
+                        "source_read_failed" if context_byte_case == "blob" else "tree_unavailable"
+                    )
+                    assert context_steps[0]["reason"] == (
+                        None if context_byte_case == "blob" else "tree_unavailable"
+                    )
                     assert {item["reason"] for item in context_steps[0]["omissions"]} == {
-                        "tree_unavailable"
+                        expected_omission
                     }
                 else:
                     assert stage.payload is not None

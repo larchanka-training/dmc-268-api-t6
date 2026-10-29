@@ -20,15 +20,23 @@ from app.modules.integrations.bitbucket.application.request_credentials import (
     BoundBitbucketTarget,
 )
 from app.modules.integrations.bitbucket.infrastructure.retry_after import parse_retry_after
+from app.modules.reviews.application.commit_prefix_limits import (
+    COMMIT_PAGE_COUNT,
+    MAX_COMMIT_RESPONSE_BYTES,
+)
 from app.modules.reviews.application.run_failures import RunCancelled, RunFailure
 
 _ORIGIN = "https://api.bitbucket.org"
 _TOTAL_BYTES = 32 * 1024 * 1024
 _MAX_REQUESTS = 800
-# Context excerpts are optional. Leave half the attempt budget for the bounded
-# conventions tree, commit prefix and canonical checks that follow the context stage.
+# Context excerpts are optional. Leave half the attempt budget and enough bytes
+# for the bounded post-context reads: two 2 MiB canonical PR checks (the
+# conventions tree and commit prefix), two 1 MiB commit pages, and the 128 KiB
+# conventions file selection. Directory pagination is separately request-bound.
 _MAX_CONTEXT_REQUESTS = 400
-_MAX_CONTEXT_BYTES = _TOTAL_BYTES // 2
+_POST_CONTEXT_TAIL_RESERVE_BYTES = (
+    2 * 2 * 1024 * 1024 + COMMIT_PAGE_COUNT * MAX_COMMIT_RESPONSE_BYTES + 131072
+)
 _TIMEOUT_SECONDS = 10.0
 
 
@@ -94,18 +102,17 @@ class BitbucketRunHttp:
     @contextmanager
     def optional_context_budget(self) -> Iterator[None]:
         previous_limit = self._context_limit
-        previous_bytes_limit = self._context_bytes_limit
         self._context_limit = _MAX_CONTEXT_REQUESTS
         remaining = max(0, _TOTAL_BYTES - self._read_bytes)
-        self._context_bytes_limit = min(
-            previous_bytes_limit if previous_bytes_limit is not None else _TOTAL_BYTES,
-            self._read_bytes + min(_MAX_CONTEXT_BYTES, remaining // 2),
+        self._context_bytes_limit = self._read_bytes + min(
+            remaining // 2,
+            max(0, remaining - _POST_CONTEXT_TAIL_RESERVE_BYTES),
         )
         try:
             yield
         finally:
             self._context_limit = previous_limit
-            self._context_bytes_limit = previous_bytes_limit
+            self._context_bytes_limit = None
 
     def allow_source_repository(self, source: UUID) -> None:
         if type(source) is not UUID:

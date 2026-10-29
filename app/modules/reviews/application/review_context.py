@@ -616,7 +616,7 @@ class BuildReviewContext:
                     omissions.append(ContextOmission("budget", path))
         if truncated:
             return payload(
-                ContextStatus.REVIEW, None, tuple(blocks), stats=RagStats(reason="budget")
+                ContextStatus.REVIEW, "budget", tuple(blocks), stats=RagStats(reason="budget")
             )
 
         try:
