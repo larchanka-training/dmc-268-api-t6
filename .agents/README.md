@@ -46,7 +46,7 @@ Skills and agents here name Claude Code's sub-agent tools. The equivalent per ha
 ## Directory map
 
 - `rules/` — stack and workflow rules (`backend.md`, `git-workflow.md`).
-- `skills/` — agent skills, one `SKILL.md` per directory (9 here — no
+- `skills/` — agent skills, one `SKILL.md` per directory (10 here — no
   `manual-automation`).
 - `agents/` — agent definitions (`name`, `description`, `model` frontmatter).
 - `templates/backend/` — code/test templates with proof blocks. Fenced blocks
@@ -62,7 +62,7 @@ These files are byte-identical between the two repos, marked with a
 
 - `rules/git-workflow.md`
 - `skills/agent-loop/**`, `skills/code-review/**`, `skills/create-issue/**`,
-  `skills/issue-graph/**`, `skills/pull-request/**`,
+  `skills/implement-issue/**`, `skills/issue-graph/**`, `skills/pull-request/**`,
   `skills/planning-and-task-breakdown/**`, `skills/qa/**`
 - `agents/*.md`
 - outside `.agents/`: `.github/pull_request_template.md` (SYNC marker on its first line)
@@ -70,10 +70,11 @@ These files are byte-identical between the two repos, marked with a
 The marker takes the form the file type allows: `.md` — the `<!-- SYNC: … -->` line
 (after the H1 in a skill file); `.py` / `.sh` — a `# SYNC: …` comment after the shebang or
 the module docstring; golden files under `skills/{create-issue,issue-graph}/tests/golden/` and
-the `.md` files under `skills/create-issue/examples/` — the SYNC line, a blank line, then the
-body (the golden test drops exactly those two lines). JSON files under
-`skills/issue-graph/tests/fixtures/` and `skills/create-issue/examples/*/batch.json` carry no
-marker (JSON has no comments); the `diff -r` below covers them.
+the `.md` files under `skills/{create-issue,implement-issue}/examples/` — the SYNC line, a blank
+line, then the body (the golden test drops exactly those two lines). JSON files under
+`skills/issue-graph/tests/fixtures/`, `skills/implement-issue/{tests/fixtures,examples}/` and
+`skills/create-issue/examples/*/batch.json` carry no marker (JSON has no comments); the `diff -r`
+below covers them.
 
 Everything else (`rules/frontend.md` / `rules/backend.md`, stack-specific
 skills, `templates/`) is per-repo.
