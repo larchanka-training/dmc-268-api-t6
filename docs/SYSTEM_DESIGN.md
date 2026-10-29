@@ -1052,7 +1052,7 @@ GitHub поддерживает вебхуки, diff, блобы, check-run и `
 GitLab поддерживает durable MR receipts, проекцию, очередь, fast-анализ и discussions
 через отдельные адаптеры (§8.4); GitHub check-run для GitLab не вызывается.
 Bitbucket Cloud использует отдельный UUID-bound adapter для PR, diff, source,
-inline comments и commit statuses; детали и live-гейт — [план #333](plans/333-plan.md).
+inline comments и commit statuses; детали и live-гейт — [задача #333](https://github.com/larchanka-training/dmc-268-api-t6/issues/333) и [TEST_PLAN](TEST_PLAN.md#bitbucket-cloud-acceptance-333).
 Минимальная совместимая версия GitLab — 17.4.
 
 GitLab HTTP admission включается отдельно через `GITLAB_WEBHOOK_INTAKE_ENABLED`

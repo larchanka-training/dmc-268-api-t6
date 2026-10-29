@@ -175,7 +175,8 @@ def test_tree_walk_does_not_convert_request_budget_to_partial_listing(
     assert seen[-1] == f"{PREFIX}/src/{BASE}/"
 
 
-def test_policy_source_preserves_total_response_budget_code() -> None:
+@pytest.mark.parametrize("budget_kind", ["request", "response"])
+def test_policy_source_preserves_listing_budget_code(budget_kind: str) -> None:
     def respond(request: httpx.Request) -> httpx.Response:
         if request.url.path == f"{PREFIX}/pullrequests/7":
             return httpx.Response(200, json=_pr(source=DEST))
@@ -193,10 +194,58 @@ def test_policy_source_preserves_total_response_budget_code() -> None:
                 http=http, expected_input=INPUT, vcs=vcs, checkpoint=checkpoint
             )
             policy = BitbucketPolicyDocumentSource(trees=trees, policy_base_sha=BASE)
-            http._read_bytes = run_http._TOTAL_BYTES
+            if budget_kind == "request":
+                http._requests = run_http._MAX_REQUESTS
+            else:
+                http._read_bytes = run_http._TOTAL_BYTES
             with pytest.raises(BitbucketRunHttpError) as error:
                 await policy.list_entries(None)
-            assert error.value.error_code == "bitbucket_response_budget_exceeded"
+            assert error.value.error_code == f"bitbucket_{budget_kind}_budget_exceeded"
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("budget_kind", ["request", "response"])
+def test_policy_blob_read_preserves_budget_code(budget_kind: str) -> None:
+    def respond(request: httpx.Request) -> httpx.Response:
+        if request.url.path == f"{PREFIX}/pullrequests/7":
+            return httpx.Response(200, json=_pr(source=DEST))
+        if request.url.path == f"{PREFIX}/diffstat/{HEAD}..{BASE}":
+            return httpx.Response(200, json={"size": 0, "values": []})
+        if request.url.path == f"{PREFIX}/src/{BASE}/":
+            return httpx.Response(
+                200,
+                json={
+                    "values": [
+                        {
+                            "type": "commit_file",
+                            "path": "AGENTS.md",
+                            "size": 3,
+                            "commit": {"hash": BASE},
+                        }
+                    ]
+                },
+            )
+        if request.url.path == f"{PREFIX}/src/{BASE}/AGENTS.md":
+            return httpx.Response(200, content=b"uv\n")
+        raise AssertionError(request.url.path)
+
+    async def scenario() -> None:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+            http = BitbucketRunHttp(client, Credentials(), TARGET)
+            vcs = HttpBitbucketVcsProvider(http=http, locator=INPUT.locator)
+            trees = BitbucketRepositoryTree(
+                http=http, expected_input=INPUT, vcs=vcs, checkpoint=checkpoint
+            )
+            policy = BitbucketPolicyDocumentSource(trees=trees, policy_base_sha=BASE)
+            entry = (await policy.list_entries(None))["AGENTS.md"]
+            if budget_kind == "request":
+                http._requests = run_http._MAX_REQUESTS
+            else:
+                http._read_bytes = run_http._TOTAL_BYTES
+            with pytest.raises(BitbucketRunHttpError) as error:
+                await policy.read_blob(entry.oid)
+            assert error.value.error_code == f"bitbucket_{budget_kind}_budget_exceeded"
 
     asyncio.run(scenario())
 
@@ -294,7 +343,8 @@ def test_optional_file_429_stops_context_fetch() -> None:
     asyncio.run(scenario())
 
 
-def test_optional_file_total_budget_is_not_silently_omitted() -> None:
+@pytest.mark.parametrize("budget_kind", ["request", "response"])
+def test_optional_file_budget_is_not_silently_omitted(budget_kind: str) -> None:
     def respond(request: httpx.Request) -> httpx.Response:
         if request.url.path == f"{PREFIX}/pullrequests/7":
             return httpx.Response(200, json=_pr(source=DEST))
@@ -328,10 +378,13 @@ def test_optional_file_total_budget_is_not_silently_omitted() -> None:
             )
             source = BitbucketRunSource(trees=trees, vcs=vcs, run_id=RUN_ID)
             assert (await source.fetch_tree(INPUT.repository_id)).listing_complete
-            http._read_bytes = run_http._TOTAL_BYTES
+            if budget_kind == "request":
+                http._requests = run_http._MAX_REQUESTS
+            else:
+                http._read_bytes = run_http._TOTAL_BYTES
             with pytest.raises(BitbucketRunHttpError) as error:
                 await source.fetch_files(INPUT.repository_id, ("app.py",))
-            assert error.value.error_code == "bitbucket_response_budget_exceeded"
+            assert error.value.error_code == f"bitbucket_{budget_kind}_budget_exceeded"
 
     asyncio.run(scenario())
 
@@ -933,5 +986,14 @@ def test_commit_prefix_is_bounded_and_unavailable_source_fails_explicitly() -> N
             with pytest.raises(BitbucketRunHttpError) as exhausted:
                 await vcs.get_commit_messages(INPUT.locator, checkpoint=checkpoint)
             assert exhausted.value.error_code == "bitbucket_request_budget_exceeded"
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+            http = BitbucketRunHttp(client, Credentials(), TARGET)
+            vcs = HttpBitbucketVcsProvider(http=http, locator=INPUT.locator)
+            await vcs.get_pull_request(INPUT.locator, checkpoint=checkpoint)
+            http._read_bytes = run_http._TOTAL_BYTES
+            with pytest.raises(BitbucketRunHttpError) as exhausted:
+                await vcs.get_commit_messages(INPUT.locator, checkpoint=checkpoint)
+            assert exhausted.value.error_code == "bitbucket_response_budget_exceeded"
 
     asyncio.run(scenario())

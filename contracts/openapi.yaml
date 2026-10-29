@@ -527,7 +527,10 @@ paths:
         The supplied token must read the selected repository UUID. A second repository in the
         same Bitbucket workspace reuses the existing installation only when its token matches;
         token replacement requires explicit credential rotation. A new binding returns its
-        per-repository webhook secret once. No provider network call runs in a DB transaction.
+        per-repository webhook secret once. A new or reactivated binding requests its initial
+        .review/rules.md refresh in the same database transaction; getRulesStatus can return
+        pending until the webhook worker processes that request. No provider network call runs
+        in a DB transaction.
       x-service: portal-api
       requestBody:
         required: true
