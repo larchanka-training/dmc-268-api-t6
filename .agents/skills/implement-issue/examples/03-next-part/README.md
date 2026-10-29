@@ -30,5 +30,8 @@ pull requests cross-reference the issue:
 - The criterion without a prefix is `common_acceptance_criteria`; the five with «Ч.N:» are split
   between the parts.
 - No warnings: every pull request with `Refs` names a part.
-- Next: branch for Part 2 (the Kickoff names none, so `<type>/266-<kebab>`, with `-p2` if that
-  name is taken on origin), In Progress, loop.
+- Next (SKILL.md step 3): the Kickoff names no branch, so the candidate is `<type>/266-<kebab>`.
+  A name is taken if it exists locally, on origin, or has any pull request; the first free one of
+  `<name>`, `<name>-p2`, `<name>-2`, `<name>-3`, … is cut with
+  `git switch --no-track -c <name> origin/main`. Then In Progress, then the loop (Part 2 of
+  api#269).
