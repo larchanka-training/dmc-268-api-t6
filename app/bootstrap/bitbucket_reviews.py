@@ -313,6 +313,7 @@ class BitbucketReviewWorkerResources:
                         source_factory=policy_source,
                     ),
                     context_builder=context_builder,
+                    context_budget=http.optional_context_budget,
                     trace=trace,
                     payloads=trace,
                     builtin_excluded=is_generated_path,

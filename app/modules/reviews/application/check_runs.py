@@ -25,6 +25,9 @@ _ERROR_TEXTS = {
     "bitbucket_request_budget_exceeded": "Лимит запросов к Bitbucket для ревью исчерпан.",
     "bitbucket_invalid_response": "Bitbucket вернул некорректные данные для ревью.",
     "commit_messages_fetch_failed": "Не удалось получить сообщения коммитов PR из GitHub.",
+    "bitbucket_commit_messages_fetch_failed": (
+        "Не удалось получить сообщения коммитов PR из Bitbucket."
+    ),
     "github_forbidden": "У GitHub App нет доступа к репозиторию или PR.",
     "bitbucket_source_unavailable": "Нет доступа к исходному fork-репозиторию Bitbucket.",
     "bitbucket_review_limit_exceeded": "PR Bitbucket превышает лимит файлов для ревью.",
