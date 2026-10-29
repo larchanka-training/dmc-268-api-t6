@@ -49,6 +49,7 @@ RUN = UUID("00000000-0000-4000-8000-000000000333")
 SECOND_RUN = UUID("00000000-0000-4000-8000-000000000334")
 REPO = UUID("00000000-0000-4000-8000-000000000123")
 SOURCE = UUID("00000000-0000-4000-8000-000000000456")
+REVIEWER = UUID("00000000-0000-4000-8000-000000000555")
 HEAD = "a" * 40
 HASH = "f" * 64
 
@@ -101,6 +102,9 @@ class CommentsPort:
     async def checkpoint(self) -> None:
         self.checkpoints += 1
 
+    async def current_user(self) -> object:
+        return {"uuid": f"{{{REVIEWER}}}"}
+
     async def pull_request(self) -> object:
         return {
             "id": 7,
@@ -137,7 +141,7 @@ class CommentsPort:
 
     async def post_comment(self, payload: dict[str, object]) -> object:
         self.posts.append(payload)
-        comment = {"id": len(self.comments) + 10, **payload}
+        comment = {"id": len(self.comments) + 10, "user": {"uuid": f"{{{REVIEWER}}}"}, **payload}
         self.comments.append(comment)
         if self.fail_after_post:
             self.fail_after_post = False
@@ -195,6 +199,62 @@ async def test_inline_and_summary_replay_after_ambiguous_post() -> None:
     replay = await gateway.submit_review(submission)
     assert replay == result
     assert len(port.posts) == 2
+
+
+@sync_test
+async def test_foreign_comment_with_summary_marker_does_not_replace_own_summary() -> None:
+    port = CommentsPort()
+    marker = f"<!-- ai-review head={HEAD} summary -->"
+    port.comments.append(
+        {
+            "id": 7,
+            "user": {"uuid": "{00000000-0000-4000-8000-000000000999}"},
+            "content": {"raw": f"Unrelated comment\n\n{marker}"},
+        }
+    )
+
+    result = await BitbucketPullRequestCommentGateway(
+        port, run_id=RUN, repository_uuid=REPO
+    ).submit_review(_submission())
+
+    assert result.review_id == 11
+    assert len(port.posts) == 1
+    assert port.updates == []
+
+
+@sync_test
+async def test_foreign_copy_of_inline_comment_does_not_suppress_republication() -> None:
+    port = CommentsPort()
+    finding = _finding()
+    gateway = BitbucketPullRequestCommentGateway(port, run_id=RUN, repository_uuid=REPO)
+    await gateway.submit_review(_submission(finding))
+    copied = port.comments[0]
+    port.comments[0] = {
+        **copied,
+        "id": 77,
+        "user": {"uuid": "{00000000-0000-4000-8000-000000000999}"},
+    }
+
+    result = await gateway.submit_review(_submission(finding))
+
+    assert len(port.posts) == 3
+    assert port.posts[2]["inline"] == {"path": finding.path, "to": finding.line}
+    assert result.posted_inline_finding_ids == frozenset({finding.finding_id})
+
+
+@sync_test
+async def test_unknown_publication_identity_stops_before_comment() -> None:
+    port = CommentsPort()
+
+    async def missing_user() -> object:
+        return {}
+
+    port.current_user = missing_user  # type: ignore[method-assign]
+    gateway = BitbucketPullRequestCommentGateway(port, run_id=RUN, repository_uuid=REPO)
+
+    with pytest.raises(PublishError, match="identity"):
+        await gateway.submit_review(_submission())
+    assert port.posts == []
 
 
 @sync_test
@@ -468,6 +528,28 @@ async def test_publication_http_resolves_abbreviated_source_commit_by_uuid() -> 
     )
     assert seen[0].headers["Authorization"] == "Bearer canary-token"
     assert credentials.checks >= 1
+
+
+@sync_test
+async def test_publication_http_reads_current_user_from_fixed_origin() -> None:
+    target = BoundBitbucketTarget(RUN, RUN, RUN, REPO, 1)
+    credentials = Credentials()
+    seen: list[httpx.Request] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(200, json={"uuid": f"{{{REVIEWER}}}"})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+        http = BitbucketPublicationHttp(
+            client, credentials, target, pr_number=7, checkpoint=lambda: asyncio.sleep(0)
+        )
+        assert await http.current_user() == {"uuid": f"{{{REVIEWER}}}"}
+
+    assert len(seen) == 1
+    assert seen[0].method == "GET"
+    assert str(seen[0].url) == "https://api.bitbucket.org/2.0/user"
+    assert seen[0].headers["Authorization"] == "Bearer canary-token"
 
 
 @sync_test
