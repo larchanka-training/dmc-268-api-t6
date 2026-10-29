@@ -8,7 +8,11 @@ from typing import cast
 
 from sqlalchemy import CheckConstraint, Table
 
-from app.modules.integrations.bitbucket.infrastructure.models import BitbucketConnection
+from app.modules.integrations.bitbucket.infrastructure.models import (
+    BitbucketConnection,
+    BitbucketPublicationClaim,
+    BitbucketStatusPublication,
+)
 from app.modules.integrations.webhooks.infrastructure.models import WebhookEvent
 
 VERSIONS = Path(__file__).parents[1] / "alembic" / "versions"
@@ -60,3 +64,15 @@ def test_bitbucket_webhook_receipt_check_names_match_migration() -> None:
     assert {"ck_webhook_events_provider", "ck_webhook_events_provider_origin"} <= (
         orm_names & migration_names
     )
+
+
+def test_new_bitbucket_claim_and_status_names_use_full_table_prefix() -> None:
+    for model in (BitbucketPublicationClaim, BitbucketStatusPublication):
+        table = cast(Table, model.__table__)
+        for constraint in table.constraints:
+            if isinstance(constraint, CheckConstraint):
+                assert isinstance(constraint.name, str)
+                assert constraint.name.startswith(f"ck_{table.name}_")
+        for index in table.indexes:
+            assert index.name is not None
+            assert index.name.startswith(f"ix_{table.name}_")

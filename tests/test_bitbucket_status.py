@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 from dataclasses import replace
+from unittest.mock import patch
 from uuid import UUID, uuid4
 
 import httpx
@@ -148,11 +149,14 @@ def test_invalid_status_identity_is_rejected() -> None:
         )
 
 
-def test_status_429_exposes_retry_after() -> None:
+def test_status_429_exposes_retry_after_and_ignores_host_proxy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     from datetime import UTC, datetime, timedelta
     from email.utils import format_datetime
 
     retry_date = format_datetime(datetime.now(UTC) + timedelta(minutes=3), usegmt=True)
+    monkeypatch.setenv("HTTPS_PROXY", "http://127.0.0.1:9")
 
     async def scenario() -> None:
         run_id, installation, workspace, repository, remote = (uuid4() for _ in range(5))
@@ -182,8 +186,12 @@ def test_status_429_exposes_retry_after() -> None:
                 lambda _: httpx.Response(429, headers={"Retry-After": retry_date})
             ),
         )
-        with pytest.raises(BitbucketStatusUnavailable) as error:
+        with (
+            patch.object(httpx, "AsyncClient", wraps=httpx.AsyncClient) as client_factory,
+            pytest.raises(BitbucketStatusUnavailable) as error,
+        ):
             await publisher.upsert(run_id, RUN_URL)
+        assert client_factory.call_args.kwargs["trust_env"] is False
         assert error.value.retry_after is not None
         assert 170 <= error.value.retry_after.total_seconds() <= 180
 
@@ -275,7 +283,7 @@ def test_status_gateway_updates_one_key_after_ambiguous_write_and_checks_pr_head
         publisher = BitbucketBuildStatusPublisher(
             Source(), Credentials(), transport_factory=lambda: httpx.MockTransport(respond)
         )
-        with pytest.raises(httpx.RequestError):
+        with pytest.raises(BitbucketStatusUnavailable, match="transport unavailable"):
             await publisher.upsert(run_id, RUN_URL)
         snapshot = replace(snapshot, state="succeeded")
         await publisher.upsert(run_id, RUN_URL)
@@ -299,10 +307,14 @@ def test_status_gateway_updates_one_key_after_ambiguous_write_and_checks_pr_head
         assert statuses[-1]["key"] == statuses[0]["key"]
 
         remote_target_branch = "release"
+        snapshot = replace(snapshot, state="cancelled")
+        await publisher.upsert(run_id, RUN_URL)
+        assert statuses[-1]["state"] == "STOPPED"
+        assert statuses[-1]["key"] == statuses[0]["key"]
         snapshot = replace(snapshot, state="succeeded")
         with pytest.raises(BitbucketStatusUnavailable, match="head or identity changed"):
             await publisher.upsert(run_id, RUN_URL)
-        assert len(statuses) == 3
+        assert len(statuses) == 4
         remote_target_branch = "main"
 
         remote_head = "b" * 40
@@ -310,13 +322,13 @@ def test_status_gateway_updates_one_key_after_ambiguous_write_and_checks_pr_head
         snapshot = replace(snapshot, state="succeeded")
         with pytest.raises(BitbucketStatusUnavailable, match="head or identity changed"):
             await publisher.upsert(run_id, RUN_URL)
-        assert len(statuses) == 3
+        assert len(statuses) == 4
 
         remote_head = HEAD
         resolved_head = "c" * 40
         with pytest.raises(BitbucketStatusUnavailable, match="head is malformed"):
             await publisher.upsert(run_id, RUN_URL)
-        assert len(statuses) == 3
+        assert len(statuses) == 4
         resolved_head = HEAD
         post_status = 403
         with pytest.raises(BitbucketStatusForbidden):

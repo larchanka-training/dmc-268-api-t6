@@ -277,6 +277,8 @@ def snapshot_sources(
             return bitbucket_source_factory(repository)
         if repository.provider != "github":
             raise ValueError(f"the indexer has no snapshot source for {repository.provider}")
+        if not app_id or not private_key:
+            raise ValueError("GitHub App credentials are unavailable for this index job")
         # The raw provider: its failures map to the port's errors in the source. A cache
         # per job, so that each attempt exchanges a fresh token.
         tokens = GitHubAppInstallationAccessTokenProvider(

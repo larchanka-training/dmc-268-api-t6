@@ -257,7 +257,7 @@ class BitbucketPublicationClaim(Base):
     __tablename__ = "bitbucket_publication_claims"
     __table_args__ = (
         ForeignKeyConstraint(["run_id"], ["runs.id"], ondelete="CASCADE"),
-        CheckConstraint("generation > 0", name="ck_bitbucket_publication_claim_generation"),
+        CheckConstraint("generation > 0", name="ck_bitbucket_publication_claims_generation"),
     )
 
     run_id: Mapped[UUID] = mapped_column(Uuid, primary_key=True)
@@ -273,10 +273,12 @@ class BitbucketStatusPublication(Base):
     __table_args__ = (
         ForeignKeyConstraint(["workspace_id"], ["workspaces.id"], ondelete="CASCADE"),
         ForeignKeyConstraint(["run_id"], ["runs.id"], ondelete="CASCADE"),
-        Index("ix_bitbucket_status_replay", "lease_until", "run_id"),
-        CheckConstraint("pr_number > 0", name="ck_bitbucket_status_pr_number"),
-        CheckConstraint("generation >= 0", name="ck_bitbucket_status_generation"),
-        CheckConstraint("desired_rank BETWEEN 0 AND 3", name="ck_bitbucket_status_rank"),
+        Index("ix_bitbucket_status_publications_replay", "lease_until", "run_id"),
+        CheckConstraint("pr_number > 0", name="ck_bitbucket_status_publications_pr_number"),
+        CheckConstraint("generation >= 0", name="ck_bitbucket_status_publications_generation"),
+        CheckConstraint(
+            "desired_rank BETWEEN 0 AND 3", name="ck_bitbucket_status_publications_rank"
+        ),
     )
 
     workspace_id: Mapped[UUID] = mapped_column(Uuid, primary_key=True)

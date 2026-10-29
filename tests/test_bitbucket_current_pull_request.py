@@ -216,8 +216,8 @@ def test_resolves_private_fork_head_through_destination_pr_authority() -> None:
     asyncio.run(scenario())
 
 
-def test_private_fork_head_falls_back_to_last_destination_pr_commit() -> None:
-    """The PR commits endpoint is chronological; the last page carries the head."""
+def test_private_fork_head_uses_newest_destination_pr_commit() -> None:
+    """Bitbucket returns PR commits newest first, with an opaque next cursor."""
 
     async def scenario() -> None:
         requests: list[str] = []
@@ -250,13 +250,12 @@ def test_private_fork_head_falls_back_to_last_destination_pr_commit() -> None:
             if request.url.path.endswith("/commit/aaaaaaaaaaaa"):
                 return httpx.Response(404)
             if request.url.path == commits_path:
-                if request.url.params.get("page") == "2":
-                    return httpx.Response(200, json={"values": [{"hash": "a" * 40}]})
+                assert dict(request.url.params) == {"pagelen": "1"}
                 return httpx.Response(
                     200,
                     json={
-                        "values": [{"hash": "c" * 40}],
-                        "next": "https://api.bitbucket.org" + commits_path + "?pagelen=100&page=2",
+                        "values": [{"hash": "a" * 40}],
+                        "next": "https://api.bitbucket.org" + commits_path + "?pagelen=1&page=67Fg",
                     },
                 )
             return httpx.Response(
@@ -282,20 +281,15 @@ def test_private_fork_head_falls_back_to_last_destination_pr_commit() -> None:
             )
         assert current.head_sha == "a" * 40
         assert current.base_sha == "b" * 40
-        assert len(requests) == 5
-        assert requests[-2:] == [
-            "https://api.bitbucket.org" + commits_path + "?pagelen=100",
-            "https://api.bitbucket.org" + commits_path + "?pagelen=100&page=2",
-        ]
+        assert len(requests) == 4
+        assert requests[-1] == "https://api.bitbucket.org" + commits_path + "?pagelen=1"
         assert all(f"%7B{UUID(int=9)}%7D" not in path for path in requests)
 
     asyncio.run(scenario())
 
 
-@pytest.mark.parametrize(
-    "failure", ["host", "path", "blank_pagelen", "blank_key", "prefix", "empty", "page_limit"]
-)
-def test_pr_commits_fallback_rejects_untrusted_or_unbounded_pages(failure: str) -> None:
+@pytest.mark.parametrize("failure", ["prefix", "empty", "oversized"])
+def test_pr_commits_fallback_rejects_invalid_first_page(failure: str) -> None:
     async def scenario() -> None:
         requests: list[str] = []
         commits_path = "/2.0/repositories/team/repo/pullrequests/17/commits"
@@ -330,20 +324,7 @@ def test_pr_commits_fallback_rejects_untrusted_or_unbounded_pages(failure: str) 
                     return httpx.Response(200, json={"values": [{"hash": "c" * 40}]})
                 if failure == "empty":
                     return httpx.Response(200, json={"values": []})
-                if failure == "host":
-                    next_url = "https://evil.example" + commits_path + "?page=2"
-                elif failure == "path":
-                    next_url = "https://api.bitbucket.org/2.0/repositories/other?page=2"
-                elif failure == "blank_pagelen":
-                    next_url = "https://api.bitbucket.org" + commits_path + "?page=2&pagelen="
-                elif failure == "blank_key":
-                    next_url = "https://api.bitbucket.org" + commits_path + "?page=2&unknown="
-                else:
-                    page = int(request.url.params.get("page", "1"))
-                    next_url = (
-                        "https://api.bitbucket.org" + commits_path + f"?pagelen=100&page={page + 1}"
-                    )
-                return httpx.Response(200, json={"values": [{"hash": "c" * 40}], "next": next_url})
+                return httpx.Response(200, json={"values": [{"hash": "a" * 40}] * 2})
             return httpx.Response(
                 200,
                 json={
@@ -367,10 +348,7 @@ def test_pr_commits_fallback_rejects_untrusted_or_unbounded_pages(failure: str) 
                     TARGET, 17
                 )
         assert all(request.startswith("https://api.bitbucket.org/") for request in requests)
-        if failure in {"host", "path", "blank_pagelen", "blank_key", "prefix", "empty"}:
-            assert len(requests) == 4
-        else:
-            assert len(requests) == 23  # Repository, PR, short commit, then 20 bounded pages.
+        assert len(requests) == 4
 
     asyncio.run(scenario())
 

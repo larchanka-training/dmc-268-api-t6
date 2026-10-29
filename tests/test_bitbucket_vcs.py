@@ -25,6 +25,7 @@ from app.modules.reviews.application.run_failures import (
     RETRYABLE_ERROR_CODES,
     RunCancelled,
     RunFailure,
+    classify_failure,
 )
 from app.modules.reviews.application.vcs_diff import (
     FetchVcsReviewInput,
@@ -504,9 +505,11 @@ def test_exhausted_request_budget_on_required_blob_fails_review(
 
 def test_pinned_fork_diff_merge_base_and_blob_use_uuid_origin() -> None:
     seen: list[httpx.Request] = []
+    events: list[str] = []
 
     def respond(request: httpx.Request) -> httpx.Response:
         seen.append(request)
+        events.append("request")
         assert request.url.host == "api.bitbucket.org"
         assert request.headers["Authorization"] == "Bearer secret-token"
         if request.url.path == f"{PREFIX}/pullrequests/7":
@@ -538,11 +541,8 @@ def test_pinned_fork_diff_merge_base_and_blob_use_uuid_origin() -> None:
         raise AssertionError(f"unexpected Bitbucket path: {request.url.path}")
 
     async def scenario() -> None:
-        checkpoints = 0
-
         async def checkpoint() -> None:
-            nonlocal checkpoints
-            checkpoints += 1
+            events.append("checkpoint")
 
         async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
             http = BitbucketRunHttp(client, Credentials(), TARGET)
@@ -560,7 +560,14 @@ def test_pinned_fork_diff_merge_base_and_blob_use_uuid_origin() -> None:
             blob_id = result.files[0].blob_sha
             assert blob_id is not None
             assert await vcs.get_blob(_locator(), blob_id, checkpoint=checkpoint) == b"new\n"
-        assert checkpoints >= len(seen) * 2
+        assert sum(event == "request" for event in events) == len(seen)
+        for index, event in enumerate(events):
+            if event == "request":
+                assert events[index - 1 : index + 2] == [
+                    "checkpoint",
+                    "request",
+                    "checkpoint",
+                ]
         assert all("old-name" not in str(request.url) for request in seen)
 
     asyncio.run(scenario())
@@ -844,6 +851,15 @@ def test_run_request_cap_fails_before_an_extra_http_call(monkeypatch: pytest.Mon
 
     asyncio.run(scenario())
     assert calls == 1
+
+
+def test_bitbucket_budget_code_survives_external_failure_classification() -> None:
+    class ProviderBudgetError(Exception):
+        error_code = "bitbucket_request_budget_exceeded"
+
+    assert classify_failure(ProviderBudgetError()).error_code == (
+        "bitbucket_request_budget_exceeded"
+    )
 
 
 def test_run_http_failure_reports_bitbucket_source_instead_of_github_diff() -> None:

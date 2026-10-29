@@ -102,6 +102,7 @@ RETRYABLE_ERROR_CODES = (
             "llm_unavailable",
             "diff_fetch_failed",
             "bitbucket_fetch_failed",
+            "bitbucket_commit_messages_fetch_failed",
             "commit_messages_fetch_failed",
             "verification_unavailable",
             "internal_error",

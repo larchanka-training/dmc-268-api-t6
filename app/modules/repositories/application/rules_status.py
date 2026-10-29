@@ -104,10 +104,13 @@ _STATUS_TEXTS: dict[PolicyErrorCode, str] = {
 }
 _BITBUCKET_STATUS_TEXTS: dict[PolicyErrorCode, str] = {
     PolicyErrorCode.REVISION_UNAVAILABLE: (
-        "Ревизия default branch недоступна: источник не подтвердил, есть ли файл правил."
+        "The default branch revision is unavailable: the provider did not confirm whether"
+        " the rules file exists."
     ),
-    PolicyErrorCode.FETCH_TRANSIENT: "Не удалось прочитать документ правил из репозитория.",
-    PolicyErrorCode.RATE_LIMITED: "Источник ограничил частоту запросов при чтении правил.",
+    PolicyErrorCode.FETCH_TRANSIENT: "Could not read the rules documents from the provider.",
+    PolicyErrorCode.RATE_LIMITED: (
+        "The provider limited the request rate while reading the rules."
+    ),
 }
 
 

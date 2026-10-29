@@ -84,6 +84,16 @@ def test_connected_slug_bounds_are_in_http_schema_without_bounding_discovery() -
             ) == (1, 128)
     for field in ("workspaceSlug", "slug"):
         assert "maxLength" not in schemas["DiscoveredRepository"]["properties"][field]
+    for field in ("workspaceSlug", "slug", "name", "htmlUrl"):
+        assert schemas["DiscoveredRepository"]["properties"][field]["minLength"] == 1
+    assert schemas["WebhookSetup"]["properties"]["events"]["items"]["enum"] == [
+        "repo:push",
+        "pullrequest:created",
+        "pullrequest:updated",
+        "pullrequest:fulfilled",
+        "pullrequest:rejected",
+    ]
+    assert schemas["ConnectionList"]["properties"]["nextCursor"]["type"] == "null"
     for field in ("bitbucketWorkspace", "repositorySlug"):
         assert schemas["ConnectRequest"]["properties"][field]["maxLength"] == 128
 

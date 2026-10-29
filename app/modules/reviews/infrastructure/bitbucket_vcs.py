@@ -632,7 +632,7 @@ class HttpBitbucketVcsProvider:
             }:
                 raise
             raise RunFailure(
-                "commit_messages_fetch_failed",
+                "bitbucket_commit_messages_fetch_failed",
                 "Bitbucket PR commit messages are unavailable",
                 retry_after=getattr(error, "retry_after", None),
             ) from None

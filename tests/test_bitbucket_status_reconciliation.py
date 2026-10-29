@@ -27,6 +27,7 @@ from app.modules.reviews.infrastructure.bitbucket_ci import (
     BitbucketBuildStatusPublisher,
     BitbucketStatusLeaseLost,
     BitbucketStatusReconciler,
+    BitbucketStatusUnavailable,
 )
 
 
@@ -254,5 +255,60 @@ def test_reconciler_has_a_total_deadline() -> None:
         )
         await asyncio.wait_for(reconciler.tick(), timeout=0.2)
         assert publisher.called == [first[0]]
+
+    asyncio.run(scenario())
+
+
+def test_status_that_keeps_changing_is_deferred_before_next_tick() -> None:
+    run_id, installation, workspace, repository, remote_repo = (uuid4() for _ in range(5))
+    target = BoundBitbucketTarget(installation, workspace, repository, remote_repo, 1, 1)
+    snapshot = BitbucketStatusSnapshot(run_id, target, 7, "a" * 40, "feature/review", "running", 1)
+    claim = StatusClaim(status_key(snapshot), uuid4(), 1)
+    deferred: list[str] = []
+
+    class Source:
+        async def current(self, selected: UUID) -> BitbucketStatusSnapshot | None:
+            assert selected == run_id
+            return snapshot
+
+    class Credentials:
+        async def checkpoint(self, selected: BoundBitbucketTarget) -> None:
+            assert selected == target
+
+        async def credential_for(
+            self, selected: BoundBitbucketTarget
+        ) -> BitbucketRequestCredential:
+            raise AssertionError("the changing intent must not reach Bitbucket")
+
+    class Ledger:
+        async def register(self, current: BitbucketStatusSnapshot, url: str) -> None:
+            assert current == snapshot
+
+        async def acquire(self, key: object) -> StatusClaim | None:
+            assert key == claim.key
+            return claim
+
+        async def intent(self, selected: StatusClaim) -> StatusIntent | None:
+            assert selected == claim
+            return StatusIntent(
+                claim.key, run_id, "queued", "https://review.example/run", None, None
+            )
+
+        async def renew(self, selected: StatusClaim) -> bool:
+            assert selected == claim
+            return True
+
+        async def defer_failure(self, selected: StatusClaim, reason: str, delay: object) -> None:
+            assert selected == claim
+            deferred.append(reason)
+
+        async def release(self, selected: StatusClaim) -> None:
+            assert selected == claim
+
+    async def scenario() -> None:
+        publisher = BitbucketBuildStatusPublisher(Source(), Credentials(), ledger=Ledger())  # type: ignore[arg-type]
+        with pytest.raises(BitbucketStatusUnavailable, match="changed too often"):
+            await publisher.upsert(run_id, "https://review.example/run")
+        assert deferred == ["status_unavailable"]
 
     asyncio.run(scenario())

@@ -14,6 +14,7 @@ from app.modules.integrations.bitbucket.infrastructure.run_http import (
     BitbucketRunHttp,
     BitbucketRunHttpError,
 )
+from app.modules.reviews.application.check_runs import failure_reason
 from app.modules.reviews.application.diff_map import VcsProviderName, build_diff_map
 from app.modules.reviews.application.policy_documents import LoadPolicyDocuments, missing_document
 from app.modules.reviews.application.policy_errors import PolicyError, PolicyErrorCode
@@ -34,7 +35,11 @@ from app.modules.reviews.application.review_ignore import (
     apply_ignore,
     parse_review_ignore,
 )
-from app.modules.reviews.application.run_failures import RunCancelled, RunFailure
+from app.modules.reviews.application.run_failures import (
+    RETRYABLE_ERROR_CODES,
+    RunCancelled,
+    RunFailure,
+)
 from app.modules.reviews.application.vcs_diff import FetchVcsReviewInput
 from app.modules.reviews.infrastructure.bitbucket_policy_source import BitbucketPolicyDocumentSource
 from app.modules.reviews.infrastructure.bitbucket_repository_tree import BitbucketRepositoryTree
@@ -170,6 +175,32 @@ def test_tree_walk_does_not_convert_request_budget_to_partial_listing(
     assert seen[-1] == f"{PREFIX}/src/{BASE}/"
 
 
+def test_policy_source_preserves_total_response_budget_code() -> None:
+    def respond(request: httpx.Request) -> httpx.Response:
+        if request.url.path == f"{PREFIX}/pullrequests/7":
+            return httpx.Response(200, json=_pr(source=DEST))
+        if request.url.path == f"{PREFIX}/diffstat/{HEAD}..{BASE}":
+            return httpx.Response(200, json={"size": 0, "values": []})
+        if request.url.path == f"{PREFIX}/src/{BASE}/":
+            return httpx.Response(200, json={"size": 0, "values": []})
+        raise AssertionError(request.url.path)
+
+    async def scenario() -> None:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+            http = BitbucketRunHttp(client, Credentials(), TARGET)
+            vcs = HttpBitbucketVcsProvider(http=http, locator=INPUT.locator)
+            trees = BitbucketRepositoryTree(
+                http=http, expected_input=INPUT, vcs=vcs, checkpoint=checkpoint
+            )
+            policy = BitbucketPolicyDocumentSource(trees=trees, policy_base_sha=BASE)
+            http._read_bytes = run_http._TOTAL_BYTES
+            with pytest.raises(BitbucketRunHttpError) as error:
+                await policy.list_entries(None)
+            assert error.value.error_code == "bitbucket_response_budget_exceeded"
+
+    asyncio.run(scenario())
+
+
 def test_tree_context_skips_symlink_and_non_utf8_bytes() -> None:
     seen: list[str] = []
 
@@ -259,6 +290,48 @@ def test_optional_file_429_stops_context_fetch() -> None:
             with pytest.raises(RunFailure) as error:
                 await source.fetch_files(INPUT.repository_id, ("app.py",))
             assert error.value.retry_after == timedelta(hours=1)
+
+    asyncio.run(scenario())
+
+
+def test_optional_file_total_budget_is_not_silently_omitted() -> None:
+    def respond(request: httpx.Request) -> httpx.Response:
+        if request.url.path == f"{PREFIX}/pullrequests/7":
+            return httpx.Response(200, json=_pr(source=DEST))
+        if request.url.path == f"{PREFIX}/diffstat/{HEAD}..{BASE}":
+            return httpx.Response(200, json={"size": 0, "values": []})
+        if request.url.path == f"{PREFIX}/src/{BASE}/":
+            return httpx.Response(
+                200,
+                json={
+                    "size": 1,
+                    "values": [
+                        {
+                            "type": "commit_file",
+                            "path": "app.py",
+                            "size": 1,
+                            "commit": {"hash": BASE},
+                        }
+                    ],
+                },
+            )
+        if request.url.path == f"{PREFIX}/src/{BASE}/app.py":
+            return httpx.Response(200, content=b"x")
+        raise AssertionError(request.url.path)
+
+    async def scenario() -> None:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+            http = BitbucketRunHttp(client, Credentials(), TARGET)
+            vcs = HttpBitbucketVcsProvider(http=http, locator=INPUT.locator)
+            trees = BitbucketRepositoryTree(
+                http=http, expected_input=INPUT, vcs=vcs, checkpoint=checkpoint
+            )
+            source = BitbucketRunSource(trees=trees, vcs=vcs, run_id=RUN_ID)
+            assert (await source.fetch_tree(INPUT.repository_id)).listing_complete
+            http._read_bytes = run_http._TOTAL_BYTES
+            with pytest.raises(BitbucketRunHttpError) as error:
+                await source.fetch_files(INPUT.repository_id, ("app.py",))
+            assert error.value.error_code == "bitbucket_response_budget_exceeded"
 
     asyncio.run(scenario())
 
@@ -844,7 +917,21 @@ def test_commit_prefix_is_bounded_and_unavailable_source_fails_explicitly() -> N
             vcs = HttpBitbucketVcsProvider(
                 http=BitbucketRunHttp(client, Credentials(), TARGET), locator=INPUT.locator
             )
-            with pytest.raises(RunFailure, match="commit_messages_fetch_failed"):
+            with pytest.raises(RunFailure) as error:
                 await vcs.get_commit_messages(INPUT.locator, checkpoint=checkpoint)
+            assert error.value.error_code == "bitbucket_commit_messages_fetch_failed"
+            assert error.value.error_code in RETRYABLE_ERROR_CODES
+            assert failure_reason(error.value.error_code) == (
+                "Не удалось получить сообщения коммитов PR из Bitbucket."
+            )
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(unavailable)) as client:
+            http = BitbucketRunHttp(client, Credentials(), TARGET)
+            vcs = HttpBitbucketVcsProvider(http=http, locator=INPUT.locator)
+            await vcs.get_pull_request(INPUT.locator, checkpoint=checkpoint)
+            http._requests = run_http._MAX_REQUESTS
+            with pytest.raises(BitbucketRunHttpError) as exhausted:
+                await vcs.get_commit_messages(INPUT.locator, checkpoint=checkpoint)
+            assert exhausted.value.error_code == "bitbucket_request_budget_exceeded"
 
     asyncio.run(scenario())

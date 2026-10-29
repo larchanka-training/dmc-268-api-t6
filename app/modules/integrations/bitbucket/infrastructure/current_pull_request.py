@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import replace
 from datetime import UTC, datetime
 from typing import Protocol
-from urllib.parse import parse_qsl, urlsplit
+from urllib.parse import urlsplit
 from uuid import UUID
 
 import httpx
@@ -29,8 +29,6 @@ from app.modules.reviews.application.project_bitbucket_pull_request import (
 )
 
 _MAX_BODY_BYTES = 2 * 1024 * 1024
-_MAX_COMMIT_PAGES = 20
-_COMMIT_PAGE_SIZE = 100
 
 
 class _DestinationCommitMissing(BitbucketProviderError):
@@ -113,30 +111,15 @@ class BitbucketCurrentPullRequestProvider:
 
     async def _resolve_pr_head(self, pr_url: str, prefix: str, token: str) -> str:
         commits_path = urlsplit(pr_url).path + "/commits"
-        url: str | None = f"https://api.bitbucket.org{commits_path}?pagelen={_COMMIT_PAGE_SIZE}"
-        visited: set[str] = set()
-        last_hash: str | None = None
-        for _ in range(_MAX_COMMIT_PAGES):
-            if url is None or url in visited:
-                raise BitbucketProviderError("invalid_provider_response")
-            visited.add(url)
-            raw = await self._read_json(url, token)
-            if not isinstance(raw, dict):
-                raise ValueError("invalid_commit_page")
-            values = raw.get("values")
-            if not isinstance(values, list) or not values or len(values) > _COMMIT_PAGE_SIZE:
-                raise ValueError("invalid_commit_page")
-            for commit in values:
-                if not isinstance(commit, dict):
-                    raise ValueError("invalid_commit_page")
-                last_hash = resolved_commit_hash(commit.get("hash"), "")
-            next_url = raw.get("next")
-            if next_url is None:
-                if last_hash is None:
-                    raise BitbucketProviderError("invalid_provider_response")
-                return resolved_commit_hash(last_hash, prefix)
-            url = _validate_pr_commits_cursor(next_url, commits_path)
-        raise BitbucketProviderError("invalid_provider_response")
+        # The commits collection is newest first. One result is the PR head; a next
+        # cursor may be opaque, and following it would select an older commit.
+        raw = await self._read_json(f"https://api.bitbucket.org{commits_path}?pagelen=1", token)
+        if not isinstance(raw, dict):
+            raise ValueError("invalid_commit_page")
+        values = raw.get("values")
+        if not isinstance(values, list) or len(values) != 1 or not isinstance(values[0], dict):
+            raise ValueError("invalid_commit_page")
+        return resolved_commit_hash(values[0].get("hash"), prefix)
 
     async def _read_json(self, url: str, token: str, *, commit_lookup: bool = False) -> object:
         try:
@@ -159,46 +142,6 @@ class BitbucketCurrentPullRequestProvider:
             return httpx.Response(200, content=b"".join(chunks)).json()
         except httpx.RequestError:
             raise BitbucketProviderError("provider_unavailable") from None
-
-
-def _validate_pr_commits_cursor(value: object, commits_path: str) -> str:
-    if not isinstance(value, str) or len(value) > 2048 or not value.isascii():
-        raise BitbucketProviderError("invalid_provider_response")
-    parsed = urlsplit(value)
-    if (
-        parsed.scheme != "https"
-        or parsed.netloc != "api.bitbucket.org"
-        or parsed.path != commits_path
-        or not parsed.query
-        or parsed.fragment
-    ):
-        raise BitbucketProviderError("invalid_provider_response")
-    try:
-        pairs = parse_qsl(parsed.query, strict_parsing=True, keep_blank_values=True)
-    except ValueError:
-        raise BitbucketProviderError("invalid_provider_response") from None
-    params = dict(pairs)
-    if (
-        len(pairs) != len(params)
-        or any(not item for _, item in pairs)
-        or set(params) - {"page", "after", "pagelen"}
-        or ("page" in params) == ("after" in params)
-        or ("pagelen" in params and params["pagelen"] != str(_COMMIT_PAGE_SIZE))
-    ):
-        raise BitbucketProviderError("invalid_provider_response")
-    if "page" in params and (
-        not params["page"].isascii()
-        or not params["page"].isdecimal()
-        or not 1 <= int(params["page"]) <= 10000
-    ):
-        raise BitbucketProviderError("invalid_provider_response")
-    if "after" in params and (
-        not 1 <= len(params["after"]) <= 512
-        or not params["after"].isascii()
-        or any(ord(char) < 33 or ord(char) > 126 for char in params["after"])
-    ):
-        raise BitbucketProviderError("invalid_provider_response")
-    return value
 
 
 def _parse_pull_request(
