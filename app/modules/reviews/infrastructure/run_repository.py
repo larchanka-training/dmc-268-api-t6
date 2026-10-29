@@ -269,17 +269,10 @@ class SqlAlchemyRunRepository:
                         {run_id: head_sha},
                         {run_id: [item.severity.value for item in findings]},
                     )
-                )[run_id]
-            usage = (
-                await session.execute(
-                    select(
-                        func.count(UsageEvent.id),
-                        self._coalesced_usage_sum(UsageEvent.tokens_in),
-                        self._coalesced_usage_sum(UsageEvent.tokens_out),
-                        self._coalesced_usage_sum(UsageEvent.cost_usd),
-                    ).where(UsageEvent.run_id == run_id)
-                )
-            ).one()
+                ).get(run_id)
+            usage_calls = await session.scalar(
+                select(func.count(UsageEvent.id)).where(UsageEvent.run_id == run_id)
+            )
         return RunReview(
             author=pr.author_login,
             head_ref=pr.source_branch,
@@ -295,10 +288,10 @@ class SqlAlchemyRunRepository:
             ],
             summary=result.summary if result is not None else None,
             saved_result=result,
-            usage_calls=int(usage[0]),
-            tokens_in=int(usage[1]),
-            tokens_out=int(usage[2]),
-            cost_usd=Decimal(usage[3]),
+            usage_calls=int(usage_calls or 0),
+            tokens_in=0,
+            tokens_out=0,
+            cost_usd=Decimal(0),
         )
 
     async def get_published_comments(self, run_id: UUID) -> list[PublishedComment] | None:

@@ -7,6 +7,7 @@ import json
 import os
 import selectors
 from collections.abc import Iterator
+from dataclasses import replace
 from datetime import timedelta
 from uuid import UUID, uuid4
 
@@ -115,7 +116,7 @@ def _downgrade_and_upgrade(env: Env) -> None:
             connection.commit()
             config = Config("alembic.ini")
             config.attributes["connection"] = connection
-            command.downgrade(config, "-1")
+            command.downgrade(config, "20261026_0043")
             assert connection.scalar(text(_COLUMN)) == 0
             connection.commit()
             command.upgrade(config, "head")
@@ -167,6 +168,38 @@ def test_triggered_by_records_an_explicit_actor_or_the_push_author(
                     triggered_by=UNSET,
                     events=(("pull_request", "synchronize", None),),
                 )
+                await _insert_actor(
+                    session,
+                    head="6" * 40,
+                    triggered_by=UNSET,
+                    events=(
+                        (
+                            "push",
+                            None,
+                            {"sender": {"login": "real-pusher"}, "after": "6" * 40},
+                        ),
+                        (
+                            "pull_request",
+                            "opened",
+                            {"sender": {"login": "opened-author"}},
+                        ),
+                    ),
+                )
+                await _insert_actor(
+                    session,
+                    head="7" * 40,
+                    triggered_by=UNSET,
+                    events=(("pull_request", "opened", {"sender": {"login": "opened-author"}}),),
+                )
+                await _insert_actor(
+                    session,
+                    head="8" * 40,
+                    triggered_by=UNSET,
+                    provider="gitlab",
+                    events=(
+                        ("push", None, {"sender": {"login": "real-pusher"}, "after": "8" * 40}),
+                    ),
+                )
         finally:
             await engine.dispose()
 
@@ -181,7 +214,8 @@ async def _insert_actor(
     *,
     head: str,
     triggered_by: str | None | UnsetType,
-    events: tuple[tuple[str, str, dict[str, object] | None], ...],
+    events: tuple[tuple[str, str | None, dict[str, object] | None], ...],
+    provider: str = "github",
 ) -> None:
     await session.execute(
         text("UPDATE runs SET state = 'succeeded' WHERE code_change_id = :pr AND state = 'queued'"),
@@ -192,8 +226,9 @@ async def _insert_actor(
         {"head": head, "pr": PR_NEW},
     )
     store = SqlAlchemyWebhookRunStore(session)
-    candidate = await store.lock_candidate(PR_NEW)
-    assert isinstance(candidate, RunInsertCandidate)
+    locked = await store.lock_candidate(PR_NEW)
+    assert isinstance(locked, RunInsertCandidate)
+    candidate = locked if provider == "github" else replace(locked, provider=provider)
     for index, (event, action, body) in enumerate(events):
         await session.execute(
             text(
@@ -224,6 +259,9 @@ async def _insert_actor(
         "3" * 40: "pusher",
         "4" * 40: None,
         "5" * 40: None,
+        "6" * 40: "real-pusher",
+        "7" * 40: None,
+        "8" * 40: None,
     }[head]
     assert stored == expected
 

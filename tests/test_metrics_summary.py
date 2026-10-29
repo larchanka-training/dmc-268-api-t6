@@ -19,6 +19,8 @@ from app.modules.reviews.application.get_metrics_summary import (
     TerminalHead,
     WorkspaceSpend,
 )
+from app.modules.reviews.application.run_coverage import CoverageStatus, RunCoverage
+from app.modules.reviews.application.saved_review_result import SavedReviewResult
 from app.modules.reviews.infrastructure.metrics_summary import SqlAlchemyMetricsSummary
 
 _NOW = datetime(2026, 10, 28, 15, tzinfo=UTC)
@@ -42,6 +44,12 @@ def test_seven_day_summary_zero_fills_buckets_verdicts_and_pauses() -> None:
             terminal_heads=(
                 TerminalHead("succeeded", True, ()),
                 TerminalHead("succeeded", False, ("critical",)),
+                TerminalHead(
+                    "succeeded",
+                    False,
+                    (),
+                    SavedReviewResult("clean", RunCoverage(CoverageStatus.COMPLETE, 1), {}),
+                ),
             ),
             findings_by_severity={"critical": 1},
             findings_by_category={"security": 1},
@@ -106,7 +114,7 @@ def test_seven_day_summary_zero_fills_buckets_verdicts_and_pauses() -> None:
     assert verdicts.no_verdict == 1
     assert verdicts.blocking == 1
     assert verdicts.attention == 0
-    assert verdicts.clean == 0
+    assert verdicts.clean == 1
     assert summary.totals.findings_by_severity.critical == 1
     assert summary.totals.findings_by_severity.high == 0
     assert summary.totals.findings_by_category.security == 1

@@ -130,7 +130,7 @@ Done on `feat/310-runs-audit-metrics` (not committed). Head at implementation ti
 
 - [x] `uv run pytest tests/test_github_run_trigger.py tests/test_webhook_full_path.py tests/test_triggered_by_postgres.py`
 - [x] With `TEST_DATABASE_URL`, `uv run pytest -m integration -rs -k triggered_by` does not skip the new tests
-- [x] Manual check: open PRs touching `webhook_runs.py` were checked; a comment was left on any other PR before editing
+- [x] Manual check: #340 has the shared-file list and the migration order; #334 has the SYSTEM_DESIGN §12 Metrics note
 
 **Dependencies:** Task 4
 
