@@ -244,7 +244,7 @@ def test_a_too_large_change_takes_the_route_up_to_the_summary_only_threshold() -
         asyncio.run(summary.stage.run(RUN_ID))
     assert summary.builder.runs == []
     [response] = summary.steps("context.build")
-    assert response["coverage"]["status"] == "none"
+    assert response["coverage"]["status"] == "partial"
     assert response["status"] == "summary_only"
     assert response["reason"] == "diff_too_large"
     assert response["blocks"] == []

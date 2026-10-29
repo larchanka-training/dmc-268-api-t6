@@ -1367,7 +1367,7 @@ snapshot (§5, итог дефолтов и файла для прогона) в
 | Too_large/identity_unresolved/unsupported_change, отдельно и в смеси с ignored/binary при полном inventory | coverage=none, verdict=null, 0 LLM, succeeded/neutral; по CVS §2.2 |
 | Доказанный binary + анализируемый код; отдельно too_large + 50 анализируемых строк | Доказанный binary не снижает coverage, возможен complete/clean; too_large даёт partial, его строки не включают summary-only (§5.1, CVS §2.3) |
 | Неполный inventory/unknown relevant counters либо known missing-patch-only 4 000 строк | summary-only/partial, summaryOnly=true, 0 LLM; эти триггеры предшествуют всем прочим успешным маршрутам |
-| Только incomplete с возможными E/T, нет текста, полный inventory/known counters ≤3 000 | Backend partial, findings=[], verdict=null, summaryOnly=false; 0 LLM включая conventions/verifier, затем succeeded/neutral; pins/count=0 сохранены (CVS §2.2) |
+| Только incomplete с возможными E/T, нет текста, полный inventory/known counters ≤3 000 | Backend partial, findings=[], verdict=null, summaryOnly=false; 0 LLM включая conventions/verifier, затем succeeded/neutral; pins/count=0 сохранены (CVS §2.2). Пока маршрута no-text partial нет, этот набор публикуется как summary-only `no_reviewable_files`, coverage partial, 0 LLM |
 | Пустой added с полным proof CVS §9.2, mode 100644/100755; отдельно рядом с кодом | empty_file/E: skipped при E-only; complete/clean при полном ревью кода без supported warning/error |
 | Квалифицированный empty candidate (§5.1) без независимого regular-file proof: отсутствующий/неверный mode либо недоступный/неполный tree | missing_patch/incomplete, partial/null с кодом; «Нет подтверждения обычного пустого файла» только при сохранении всех условий квалификации |
 | Added с previous_filename/old path либо иным нарушением квалификации; removed image без binary proof; oversized непрочитанный blob | Не empty_file/E; соответствующая incomplete/technical причина, too_large/T для последнего; partial/null с кодом, полные тексты §5.1; обычный added missing patch не получает empty-текст |
@@ -1487,12 +1487,12 @@ fallback/null, тогда как ранее опубликованное GitHub-
 
 Нового публичного coverage DTO, LLM-полей, result_id или таблиц результата нет.
 Полный #107, общий run-owned file_omissions #130/#168 и zero-LLM lifecycle
-summary-only/no-text partial остаются целевыми, а не активированными #213.
+no-text partial остаются целевыми, а не активированными #213.
 Zero-LLM lifecycle none активен на snapshot path с #130 F5; legacy (≤ v3) для того же
 inventory по-прежнему вызывает модель.
-Текущий summary-only может вызывать модель, но все его findings отбрасываются
-как insufficient_context: нет inline, blocking/attention или дефектов из них;
-coverage partial, verdict null. Обещание zero-LLM относится к будущему lifecycle.
+Summary-only с нулём вызовов модели — текущий жизненный цикл, не будущий:
+стадия останавливается до RAG, conventions, ревью и verifier и публикует
+`NoModelAnswer`; coverage partial, verdict null.
 
 
 

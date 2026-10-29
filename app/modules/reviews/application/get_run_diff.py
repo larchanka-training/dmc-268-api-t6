@@ -126,6 +126,26 @@ class StoreDiffSnapshot:
         )
 
 
+def snapshots_after_summary_only_stop(snapshots: list[DiffSnapshot]) -> list[DiffSnapshot]:
+    """Rows after the summary-only stop flags model input and leaves withheld rows.
+
+    A policy-withheld row (no model patch, no omission) stays as stored, and so does a
+    proven empty file: ``summary_only`` would cancel that proof. A row that still has a
+    model patch, or another omission the stop must flag, becomes ``summary_only`` with
+    no model patch. A row the line threshold already flagged is left unchanged.
+    """
+    marked: list[DiffSnapshot] = []
+    for item in snapshots:
+        withheld = (
+            item.review_patch is None and item.omission_reason is None and not item.summary_only
+        )
+        if withheld or item.summary_only or item.omission_reason == "empty_file":
+            marked.append(item)
+        else:
+            marked.append(replace(item, summary_only=True, review_patch=None))
+    return marked
+
+
 def stored_review_patch(patch: str | None, omission_reason: str | None) -> str | None:
     """Model patch of a stored UI patch. A git header contributes only its hunk."""
     if patch is None or omission_reason is not None:

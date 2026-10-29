@@ -1328,8 +1328,10 @@ summary-only по оставшемуся scope; T не увеличивают п
 побеждают binary/too_large, но не недостоверную идентичность. Submodule и
 доказанный чистый rename/mode-only без поддерживаемого анализа — unsupported_change, T.
 При полном inventory, известных relevant counters ≤3 000 и только incomplete
-с возможными E/T, без анализируемого текста — backend partial, summaryOnly=false,
-findings=[], verdict=null; 0 LLM, затем succeeded/neutral. Анализируемый текст — разрешённые hunks вне E/T, включая сохранившиеся
+с возможными E/T, без анализируемого текста — целевой исход backend partial, summaryOnly=false,
+findings=[], verdict=null; 0 LLM, затем succeeded/neutral. Пока маршрута no-text partial нет,
+этот набор публикуется как summary-only `no_reviewable_files`, coverage partial, 0 LLM.
+Анализируемый текст — разрешённые hunks вне E/T, включая сохранившиеся
 hunks truncated в L1: обычное review/partial, blocking возможен; без hunks —
 no-text ветка. Relevant counters — additions/deletions вне E/T, включая
 incomplete; raw counters E/T — диагностика (пустой counted scope=0).

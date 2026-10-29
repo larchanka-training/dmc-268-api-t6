@@ -228,9 +228,9 @@ mode=100644/100755 и size=None/0; предел ответа — 1 500 000 сы�
 #107/#130/#168. Для четырёх retained случаев дополнительных запросов нет; для
 empty proof бюджет строго 1 500 000 metadata bytes / максимум один запрос,
 blob cap остаётся 1 048 576 байт, L2–L4 source cap 256 KiB независим.
-Текущая summary-only финализация отбрасывает все findings как insufficient_context:
-нет inline и blocking/attention из этих кандидатов, partial/null; обещание нуля
-LLM-вызовов остаётся целью lifecycle #107. Сохранённый полный allowed patch ещё
+Summary-only с нулём вызовов модели — текущий жизненный цикл: стадия останавливается
+до RAG, conventions, ревью и verifier и публикует `NoModelAnswer`; coverage partial,
+verdict null. Сохранённый полный allowed patch ещё
 не доказывает полного входа модели: omitted/prefix-truncated changed patches
 после fit_review_context дают review_input_incomplete/partial и уменьшают fully
 reviewed count, в том числе через обе reflection ветки. Технический unknown_path
@@ -490,7 +490,7 @@ Redis-кэши (кэш контекста и кэш токенов устано�
 | Доказанный binary-only/empty-only либо E + ignored/generated | skipped/`all_changes_ignored`, 0 LLM | `test_review_context_stage.py::test_change_of_builtin_excluded_files_only_is_skipped_before_the_context_build`, `::test_binary_files_count_as_exclusions_when_the_whole_change_is_excluded`; empty-only #213: `test_clean_without_text_context.py::test_exclusion_only_stage_skips_before_any_model_input` |
 | Too_large/identity_unresolved/unsupported_change при полном inventory | coverage none, verdict null, 0 LLM, succeeded/neutral | Snapshot path (v4), #130 F5: `test_coverage_none_classification.py::test_an_unresolved_identity_only_change_is_none_on_the_snapshot_path`, `test_coverage_none_route.py::test_a_technical_only_v4_change_records_its_context_and_ends_before_the_build`, `::test_a_too_large_change_takes_the_route_up_to_the_summary_only_threshold` (too_large сверх 3 000 строк — summary-only, #107/#175); результат и COMMENT — `test_coverage_none_publication.py`, `test_coverage_none_publication_postgres.py`. Legacy (≤ v3): too_large/unsupported_change — none с вызовом модели (с #283), identity_unresolved — partial |
 | Доказанный binary/empty_file + код; too_large + анализируемый код | E не снижает coverage; too_large даёт partial/null с причиной | #213 bounded projection: `test_clean_without_text_context.py`, `test_run_coverage.py`; полная архитектура coverage #107 остаётся будущей |
-| Неполный inventory / unknown counters / known missing-patch-only 4 000 строк | summary-only/partial, summaryOnly=true, 0 LLM | после остатка #130 (summary-only без LLM не реализован); что неполный список не даёт skipped — `test_review_context_stage.py::test_incomplete_file_list_does_not_prove_that_every_change_is_excluded` |
+| Неполный inventory / unknown counters / known missing-patch-only 4 000 строк | summary-only/partial, summaryOnly=true, 0 LLM | `tests/test_summary_only_no_llm.py` (v2 и v5: 3 001 строка, неполный список, только lock/binary/generated, неполный список из доказанных исключений); что неполный список не даёт skipped — `test_review_context_stage.py::test_incomplete_file_list_does_not_prove_that_every_change_is_excluded` |
 | Только incomplete без текста, полный inventory, counters ≤3 000 | Backend partial, findings=[], 0 LLM, succeeded/neutral | после остатка #130 |
 | Доказанный empty added с полным proof, mode 100644/100755; empty + проверенный код | empty_file/E, E-only skipped; код complete/clean лишь при полностью отправленных patches и без иных blockers | `test_clean_without_text.py::test_fetch_excludes_proven_empty_addition_without_blob_request`, `test_clean_without_text_context.py::test_stage_omits_empty_addition_and_records_complete_policy_effective_coverage`, persisted acceptance inventory §2.7 |
 | Added с previous_filename/old path даже при empty SHA/regular mode; остальные отсутствующие/противоречивые proof | Не empty_file/E; missing_patch/incomplete, с кодом partial/null | `test_clean_without_text.py::test_missing_or_contradictory_evidence_never_proves_empty`, `::test_persisted_marker_does_not_override_conflicting_snapshot_evidence`; previous_filename проверяется отдельно от общей valid identity |

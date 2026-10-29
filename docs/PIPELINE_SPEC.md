@@ -271,12 +271,15 @@ context.build → review.postprocess → github|gitlab.publish_review`, review �
 Legacy (≤ v3) по этому маршруту не идёт и вызывает conventions и ревью: unsupported_path и
 identity_unresolved там остаются incomplete (partial), too_large и unsupported_change дают
 none с вызовом модели, как с #283. Too_large сверх 3 000 counted строк остаётся summary-only
-(см. ниже).
+(см. ниже): пока строки T входят в счётчик 3 000, такой файл вместе с соседними строками
+кода останавливается как `diff_too_large`, coverage partial, а не ревью тех строк.
 Обычный missing patch или неполный inventory не разрешают эту ветку.
 Если нет анализируемого текста, есть incomplete (возможно E/T), inventory полный,
-relevant counters известны и counted allowed ≤3 000, сохраняется backend partial:
+relevant counters известны и counted allowed ≤3 000, целевой исход — backend partial:
 summaryOnly=false, findings=[], verdict=null, reviewed_changed_lines=0; исходная
-неизвестная статистика остаётся null. Затем T8/T14 → succeeded/neutral. Оба
+неизвестная статистика остаётся null. Пока маршрута no-text partial нет, этот набор
+публикуется как summary-only `no_reviewable_files`, coverage partial, 0 LLM. Затем
+T8/T14 → succeeded/neutral. Оба
 триггера summary-only имеют приоритет: unknown inventory/counters или >3 000
 counted allowed, в том числе missing-patch-only 4 000 строк. Все backend-ветки
 сохраняют pins и below_severity_threshold_count=0, обходят conventions/context/

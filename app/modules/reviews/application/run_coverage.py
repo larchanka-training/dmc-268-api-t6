@@ -51,7 +51,6 @@ from app.modules.reviews.application.diff_map import (
 from app.modules.reviews.application.get_run_diff import (
     DiffSnapshot,
     is_proven_empty_snapshot,
-    stored_review_patch,
 )
 from app.modules.reviews.application.review_ignore import IgnoreResult
 from app.modules.reviews.application.vcs_diff import VcsFile, is_empty_addition_candidate
@@ -227,26 +226,15 @@ def finalize_run_coverage(
     )
 
 
-def _snapshots_before_summary_only_mark(
-    snapshots: list[DiffSnapshot],
-) -> list[DiffSnapshot] | None:
-    """Rows as classified, before the stage's uniform summary-only write.
+def coverage_published_for_summary_only(coverage: RunCoverage) -> RunCoverage:
+    """A summary-only stop publishes ``partial``, including a too_large-only inventory.
 
-    That write sets ``summary_only`` and clears ``review_patch`` on every row after
-    coverage was hashed. The model patch is the hunk ``StoreDiffSnapshot`` stored.
+    ``too_large`` is a technical reason, so a file list of only those rows classifies
+    as ``none``. AC4 still publishes ``partial`` for every ``SummaryOnlyReview`` stop.
     """
-    if not snapshots or any(
-        not item.summary_only or item.review_patch is not None for item in snapshots
-    ):
-        return None
-    return [
-        replace(
-            item,
-            summary_only=False,
-            review_patch=stored_review_patch(item.patch, item.omission_reason),
-        )
-        for item in snapshots
-    ]
+    if coverage.status is CoverageStatus.PARTIAL or not coverage.reasons:
+        return coverage
+    return replace(coverage, status=CoverageStatus.PARTIAL)
 
 
 def snapshot_coverage_digest(snapshots: list[DiffSnapshot]) -> str:
@@ -351,6 +339,17 @@ def _project_run_coverage(
             exclusions.append(CoverageItem(path, reason, file.change_type.value))
         elif snapshot.omission_reason == "too_large":
             reasons.append(CoverageItem(path, "too_large", file.change_type.value))
+        elif summary_only and snapshot.omission_reason == "missing_patch":
+            # The stop flags this row so ``summaryOnly`` is true. The omission stays the
+            # coverage reason; the branch below would replace it.
+            reasons.append(
+                CoverageItem(
+                    path,
+                    "missing_patch",
+                    file.change_type.value,
+                    _empty_addition_candidate(snapshot),
+                )
+            )
         elif summary_only:
             reasons.append(CoverageItem(path, "summary_only", file.change_type.value))
         elif _proven_metadata_only(snapshot):
@@ -485,16 +484,6 @@ def restore_context_coverage(
             diff_map=diff_map,
             snapshot_digest=snapshot_digest,
         )
-        if restored is None and response.get("status") == "summary_only":
-            # Coverage is hashed before the stage sets the flag and clears review_patch.
-            before = _snapshots_before_summary_only_mark(snapshots)
-            if before is not None:
-                restored = _restore_run_coverage(
-                    response.get("coverage"),
-                    snapshots=before,
-                    diff_map=diff_map,
-                    snapshot_digest=snapshot_coverage_digest(before),
-                )
         if restored is not None:
             return restored
     if request is not None or response is not None:

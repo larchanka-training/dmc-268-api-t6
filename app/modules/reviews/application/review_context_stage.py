@@ -17,7 +17,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from hashlib import sha256
-from typing import Any
+from typing import Any, cast
 from uuid import UUID
 
 from app.modules.code_index.domain.enums import RagIndexStatus
@@ -32,7 +32,11 @@ from app.modules.reviews.application.diff_map import (
     diagnostic_text,
     is_supported_path,
 )
-from app.modules.reviews.application.get_run_diff import DiffSnapshot, over_max_diff_lines
+from app.modules.reviews.application.get_run_diff import (
+    DiffSnapshot,
+    over_max_diff_lines,
+    snapshots_after_summary_only_stop,
+)
 from app.modules.reviews.application.policy_errors import PolicyError, PolicyErrorCode
 from app.modules.reviews.application.policy_snapshot import PolicySnapshot, PromptBindings
 from app.modules.reviews.application.prepare_policy_snapshot import PreparePolicySnapshot
@@ -68,6 +72,7 @@ from app.modules.reviews.application.review_ignore import (
 from app.modules.reviews.application.review_path import ReviewBinding, snapshot_for_review
 from app.modules.reviews.application.run_coverage import (
     RunCoverage,
+    coverage_published_for_summary_only,
     project_run_coverage,
     snapshot_vcs_file,
 )
@@ -611,6 +616,10 @@ class ReviewContextStage:
         coverage = project_run_coverage(
             stored, diff_map, ignore=ignore, snapshot_path=self._snapshot_for_llm is not None
         )
+        # Coverage keeps this ignore. The deny-set below also names binary and generated
+        # files so an import of them is withheld; classifying with that set would report
+        # those files as ``ignored``.
+        classified_ignore = ignore
         # A file the service stored as binary or generated is an exclusion for every
         # consumer, also when an allowed file imports it: its names join the deny-set.
         ignore = replace(
@@ -665,22 +674,13 @@ class ReviewContextStage:
         reason = self._summary_only_reason(diff_map, stored, coverage, ignore)
         if reason is not None:
             # #313: incomplete inventory, the line flag, or residual no_reviewable_files.
-            # Recorded like coverage none, then published with NoModelAnswer. No RAG and
-            # no model call. T19 and the legacy technical-only path already returned.
-            response = await self._record_nothing_to_review(
-                run_id,
-                snapshot,
-                diff_map.head_sha,
-                ContextStatus.SUMMARY_ONLY,
-                digest=diff_map.digest,
-                files=len(diff_map.files),
-                coverage=coverage,
-                diff_map=diff_map,
-                ignored_files=sum(coverage.exclusion_counts.values()),
-                reason=reason,
+            # Coverage and its digest are the rows after the stop's flag, so a withheld
+            # file stays an exclusion and a later attempt classifies the same rows.
+            # No RAG and no model call. T19 and the legacy technical-only path already
+            # returned.
+            response = await self._commit_summary_only(
+                run_id, snapshot, diff_map, classified_ignore, stored, reason
             )
-            if self._payloads is not None:
-                await self._payloads.save_context_payload(run_id, response, mark_summary_only=True)
             raise SummaryOnlyReview
 
         rag = await self._open_rag(run_id, run.repository_id, snapshot.prompt_bindings)
@@ -793,6 +793,94 @@ class ReviewContextStage:
         pure_ignore = ignored > 0 and withheld == 0
         return not pure_ignore
 
+    async def _commit_summary_only(
+        self,
+        run_id: UUID,
+        snapshot: PolicySnapshot,
+        diff_map: DiffMap,
+        ignore: IgnoreResult,
+        stored: list[DiffSnapshot],
+        reason: str,
+    ) -> dict[str, Any]:
+        """Flag reviewable rows, then record coverage of those rows.
+
+        The durable mark and the ``context_payloads`` row share one transaction when the
+        store can reload the rows. Coverage is hashed from that reload, so publication
+        does not guess the pre-mark patch. A test double without the reload applies the
+        same mark after the trace.
+        """
+
+        def summarize(rows: list[DiffSnapshot]) -> dict[str, Any]:
+            marked = coverage_published_for_summary_only(
+                project_run_coverage(
+                    rows,
+                    diff_map,
+                    ignore=ignore,
+                    snapshot_path=self._snapshot_for_llm is not None,
+                )
+            )
+            return self._nothing_to_review_response(
+                ContextStatus.SUMMARY_ONLY,
+                digest=diff_map.digest,
+                files=len(diff_map.files),
+                coverage=marked,
+                diff_map=diff_map,
+                ignored_files=sum(marked.exclusion_counts.values()),
+                reason=reason,
+            )
+
+        save_stop = (
+            getattr(self._payloads, "save_summary_only_stop", None)
+            if self._payloads is not None
+            else None
+        )
+        if save_stop is not None:
+            response = cast("dict[str, Any]", await save_stop(run_id, summarize))
+        else:
+            response = summarize(snapshots_after_summary_only_stop(stored))
+        request = {"head_sha": diff_map.head_sha, "policy_snapshot_id": str(snapshot.snapshot_id)}
+        async with traced_step(self._trace, run_id, "context.build", request) as step:
+            step.response = response
+        if save_stop is None and self._payloads is not None:
+            await self._payloads.save_context_payload(run_id, response, mark_summary_only=True)
+        return response
+
+    def _nothing_to_review_response(
+        self,
+        status: ContextStatus,
+        *,
+        digest: str | None,
+        files: int,
+        coverage: RunCoverage | None = None,
+        diff_map: DiffMap | None = None,
+        ignored_files: int | None = None,
+        reason: str | None = None,
+    ) -> dict[str, Any]:
+        """``context.build`` for a change the context is not built for.
+
+        The skips (``no_changes``, ``all_changes_ignored``) keep ``{digest, files}`` and count
+        every file as ignored. A change without reviewable text (#130 F5) and a summary-only
+        stop (#313) pass ``diff_map``: the diff also names the old side and the inventory,
+        and ``ignored_files`` counts the exclusions. ``reason`` overrides ``status`` when the
+        summary-only stop is not the status word itself.
+        """
+        known: dict[str, Any] = {"digest": digest, "files": files}
+        if diff_map is not None:
+            known |= {
+                "diff_old_sha": diff_map.diff_old_sha,
+                "file_list_complete": diff_map.file_list_complete,
+            }
+        response: dict[str, Any] = {
+            "status": status.value,
+            "reason": status.value if reason is None else reason,
+            "diff": _with_live_base(known, self._pr_base_sha),
+            "ignored_files": files if ignored_files is None else ignored_files,
+            "blocks": [],
+        }
+        if coverage is not None:
+            response["coverage"] = coverage.to_json()
+        return response
+
     async def _record_nothing_to_review(
         self,
         run_id: UUID,
@@ -807,33 +895,19 @@ class ReviewContextStage:
         ignored_files: int | None = None,
         reason: str | None = None,
     ) -> dict[str, Any]:
-        """Record ``context.build`` for a change the context is not built for; return it.
-
-        The skips (``no_changes``, ``all_changes_ignored``) keep ``{digest, files}`` and count
-        every file as ignored. A change without reviewable text (#130 F5) and a summary-only
-        stop (#313) pass ``diff_map``: the diff also names the old side and the inventory,
-        and ``ignored_files`` counts the exclusions. ``reason`` overrides ``status`` when the
-        summary-only stop is not the status word itself.
-        """
-        known: dict[str, Any] = {"digest": digest, "files": files}
-        if diff_map is not None:
-            known |= {
-                "diff_old_sha": diff_map.diff_old_sha,
-                "file_list_complete": diff_map.file_list_complete,
-            }
-        diff = _with_live_base(known, self._pr_base_sha)
+        """Record ``context.build`` for a change the context is not built for; return it."""
+        response = self._nothing_to_review_response(
+            status,
+            digest=digest,
+            files=files,
+            coverage=coverage,
+            diff_map=diff_map,
+            ignored_files=ignored_files,
+            reason=reason,
+        )
         request = {"head_sha": head_sha, "policy_snapshot_id": str(snapshot.snapshot_id)}
         async with traced_step(self._trace, run_id, "context.build", request) as step:
-            step.response = {
-                "status": status.value,
-                "reason": status.value if reason is None else reason,
-                "diff": diff,
-                "ignored_files": files if ignored_files is None else ignored_files,
-                "blocks": [],
-            }
-            if coverage is not None:
-                step.response["coverage"] = coverage.to_json()
-        response: dict[str, Any] = step.response
+            step.response = response
         return response
 
     async def _open_rag(

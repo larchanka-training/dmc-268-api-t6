@@ -8,7 +8,10 @@ from uuid import UUID
 import pytest
 
 from app.modules.reviews.application.diff_map import DiffMap, VcsProviderName, build_diff_map
-from app.modules.reviews.application.get_run_diff import DiffSnapshot
+from app.modules.reviews.application.get_run_diff import (
+    DiffSnapshot,
+    snapshots_after_summary_only_stop,
+)
 from app.modules.reviews.application.prompt_builder import PullRequestMeta
 from app.modules.reviews.application.review_ignore import (
     IgnoreMatcher,
@@ -206,7 +209,7 @@ def test_compact_coverage_bounds_paths_but_retains_exact_counts() -> None:
     assert result["total_files"] == 26
 
 
-def test_flagged_rows_restore_coverage_recorded_before_the_summary_only_mark() -> None:
+def test_summary_only_rows_restore_the_coverage_recorded_after_the_mark() -> None:
     raw = code_snapshot()
     stored = replace(
         raw,
@@ -218,9 +221,17 @@ def test_flagged_rows_restore_coverage_recorded_before_the_summary_only_mark() -
             f"{raw.patch}"
         ),
     )
-    files = [stored, empty_snapshot()]
-    saved, diff = coverage_inputs(files, expected=3)
-    flagged = [replace(item, summary_only=True, review_patch=None) for item in files]
+    ignored = DiffSnapshot(
+        "generated/notes.py",
+        "@@ -1 +1 @@\n-a\n+b",
+        "e" * 40,
+        additions=1,
+        deletions=1,
+        changes=2,
+    )
+    rules = "```review-ignore\ngenerated/**\n```\n"
+    marked = snapshots_after_summary_only_stop([stored, ignored])
+    saved, diff = coverage_inputs(marked, expected=3, rules=rules)
 
     restored = restore_context_coverage(
         {"head_sha": "a" * 40},
@@ -230,14 +241,16 @@ def test_flagged_rows_restore_coverage_recorded_before_the_summary_only_mark() -
             "coverage": saved.to_json(),
             "diff": {"digest": diff.digest, "diff_old_sha": "c" * 40},
         },
-        snapshots=flagged,
+        snapshots=marked,
         diff_map=diff,
     )
 
     assert restored is not None
-    assert restored.reason_counts == {"diff_inventory_incomplete": 1}
-    assert restored.reviewed_files == 1
-    assert restored.exclusion_counts == {"empty_file": 1}
+    assert restored.status.value == "partial"
+    assert restored.reviewed_files == 0
+    assert restored.reason_counts == {"diff_inventory_incomplete": 1, "summary_only": 1}
+    assert restored.exclusion_counts == {"ignored": 1}
+    assert ignored.summary_only is False and marked[1].summary_only is False
 
 
 def test_durable_classification_digest_changes_without_altering_raw_diff_identity() -> None:

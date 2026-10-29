@@ -178,9 +178,9 @@ def test_actual_stage_persisted_empty_proof_controls_http_and_recovery_result(
                 assert classification["diff_digest"] == recorded["diff"]["digest"]
             assert len(classification["snapshot_digest"]) == 64
             assert classification["status"] == ("complete" if expected else "partial")
-            assert classification["reviewed_files"] == 1
+            assert classification["reviewed_files"] == (0 if not inventory_complete else 1)
             expected_reasons = (
-                {"diff_inventory_incomplete": 1}
+                {"diff_inventory_incomplete": 1, "summary_only": 1}
                 if not inventory_complete
                 else {}
                 if marker == "empty_file"
@@ -261,7 +261,7 @@ def test_actual_stage_persisted_empty_proof_controls_http_and_recovery_result(
                 if not inventory_complete:
                     assert "список изменённых файлов неполон" in run.review_body
                     assert result["coverage"]["file_list_complete"] is False
-                    assert result["coverage"]["reason_counts"] == {"diff_inventory_incomplete": 1}
+                    assert result["coverage"]["reason_counts"] == expected_reasons
                     assert result["summary"]["problem"] == (
                         "Построчное AI-ревью не выполнено: список изменённых файлов неполон."
                     )
@@ -289,9 +289,7 @@ def test_actual_stage_persisted_empty_proof_controls_http_and_recovery_result(
             assert detail.review.summary == report.saved_summary == result["summary"]
             if not inventory_complete:
                 assert detail.review.saved_result is not None
-                assert detail.review.saved_result.coverage.reason_counts == {
-                    "diff_inventory_incomplete": 1
-                }
+                assert detail.review.saved_result.coverage.reason_counts == expected_reasons
                 assert report.coverage_status == "partial"
             view = check_run_view(report)
             if not inventory_complete:

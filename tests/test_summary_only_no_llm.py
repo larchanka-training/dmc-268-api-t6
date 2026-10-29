@@ -9,11 +9,13 @@ verifier records ``llm.call`` and ``llm.verify``, if those paths run.
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from types import TracebackType
 from typing import Any, Self
 from uuid import UUID
+
+import pytest
 
 from app.modules.reviews.application.check_runs import (
     CheckRunReport,
@@ -35,7 +37,11 @@ from app.modules.reviews.application.conventions import (
 )
 from app.modules.reviews.application.execute_review import ExecuteReviewRun, ReviewPromptInput
 from app.modules.reviews.application.findings_post_processor import summary_from_result
-from app.modules.reviews.application.get_run_diff import DiffSnapshot, review_files_from_snapshots
+from app.modules.reviews.application.get_run_diff import (
+    DiffSnapshot,
+    review_files_from_snapshots,
+    snapshots_after_summary_only_stop,
+)
 from app.modules.reviews.application.handle_review_run import ClaimedAttempt, DeliveryOutcome
 from app.modules.reviews.application.policy_snapshot import CallManifest
 from app.modules.reviews.application.prepare_policy_snapshot import PreparePolicySnapshot
@@ -73,6 +79,7 @@ from tests.test_review_context_stage import (
     Vcs,
     _checkpoint,
 )
+from tests.test_review_path import _store
 from tests.test_review_run_worker import RUN as _WORKER_RUN
 from tests.test_review_run_worker import CheckRuns, FakeRun, handler
 from tests.trigger_uow import processing_uow
@@ -136,6 +143,7 @@ class Runs:
     """One run: the processor stores the fetcher's snapshot and the stage reads it back."""
 
     stored: list[DiffSnapshot] | None = None
+    version: str = "v2"
 
     async def get_run_diff_input(self, run_id: UUID) -> None:
         raise AssertionError("the VCS path reads the run locator")
@@ -153,7 +161,15 @@ class Runs:
         return snapshots
 
     async def get_run_conventions_input(self, run_id: UUID) -> RunConventionsInput:
-        return RunConventionsInput(_REPOSITORY, ActiveConventionsPrompt(UUID(int=7), "conventions"))
+        pinned = None
+        if self.version == "v5":
+            # The snapshot from ``_store("v5")`` names this conventions prompt.
+            pinned = ActiveConventionsPrompt(UUID(int=43), "conventions")
+        return RunConventionsInput(
+            _REPOSITORY,
+            ActiveConventionsPrompt(UUID(int=7), "conventions"),
+            pinned_conventions_prompt=pinned,
+        )
 
 
 class ConventionsSource:
@@ -309,9 +325,7 @@ class DiffFlag:
     ) -> None:
         if not mark_summary_only or self._runs.stored is None:
             return
-        self._runs.stored = [
-            replace(row, summary_only=True, review_patch=None) for row in self._runs.stored
-        ]
+        self._runs.stored = snapshots_after_summary_only_stop(self._runs.stored)
 
 
 @dataclass
@@ -340,22 +354,24 @@ def _run(
     blobs: dict[str, bytes] | None = None,
     attempts: int = 1,
     record_check_run: bool = False,
+    version: str = "v2",
 ) -> Outcome:
     trace = Trace()
-    runs = Runs()
+    runs = Runs(version=version)
     github = GitHub(
         files_changed=files_changed,
         files=files,
         blobs={_TEXT_BLOB: _SOURCE.encode(), **(blobs or {})},
     )
-    store = Store()
+    store = Store() if version == "v2" else _store(version)
     stage = ReviewContextStage(
         checkpoint=_checkpoint,
         runs=runs,
         vcs=github,
         merge_base=github,
         prepare_policy=PreparePolicySnapshot(
-            uow_factory=lambda: Uow(store), source_factory=lambda pins: Policy()
+            uow_factory=lambda: Uow(store),
+            source_factory=lambda pins: Policy(),
         ),
         context_builder=lambda run: BuildReviewContext(
             source=Repository(), parser=Parser(), counter=EstimatedTokenCounter()
@@ -504,8 +520,9 @@ def _assert_summary_only_trace(trace: Trace) -> None:
     ]
 
 
-def test_three_thousand_one_allowed_lines_make_no_model_call() -> None:
-    outcome = _run((_text(3_001),), files_changed=1)
+@pytest.mark.parametrize("version", ["v2", "v5"])
+def test_three_thousand_one_allowed_lines_make_no_model_call(version: str) -> None:
+    outcome = _run((_text(3_001),), files_changed=1, version=version)
     build = _context(outcome.trace)
 
     assert outcome.skipped is None
@@ -514,6 +531,7 @@ def test_three_thousand_one_allowed_lines_make_no_model_call() -> None:
     assert build["status"] == "summary_only"
     assert build["reason"] == "diff_too_large"
     assert build["coverage"]["status"] == "partial"
+    assert build["coverage"]["reviewed_files"] == 0
     assert outcome.stored and all(row.summary_only for row in outcome.stored)
     _assert_summary_only_trace(outcome.trace)
     _assert_no_model_call(outcome.trace)
@@ -521,8 +539,9 @@ def test_three_thousand_one_allowed_lines_make_no_model_call() -> None:
     _assert_named_summary(build["reason"])
 
 
-def test_incomplete_file_list_is_summary_only_without_a_model_call() -> None:
-    outcome = _run((_text(1),), files_changed=2)
+@pytest.mark.parametrize("version", ["v2", "v5"])
+def test_incomplete_file_list_is_summary_only_without_a_model_call(version: str) -> None:
+    outcome = _run((_text(1),), files_changed=2, version=version)
     build = _context(outcome.trace)
 
     assert outcome.skipped is None
@@ -531,6 +550,7 @@ def test_incomplete_file_list_is_summary_only_without_a_model_call() -> None:
     assert build["status"] == "summary_only"
     assert build["reason"] == "diff_inventory_incomplete"
     assert build["coverage"]["status"] == "partial"
+    assert build["coverage"]["reviewed_files"] == 0
     assert outcome.stored and all(row.summary_only for row in outcome.stored)
     assert all(row.review_patch is None and row.patch for row in outcome.stored)
     _assert_summary_only_trace(outcome.trace)
@@ -555,7 +575,8 @@ def test_incomplete_file_list_wins_over_the_line_threshold() -> None:
     _assert_named_summary(build["reason"])
 
 
-def test_lock_binary_and_generated_files_are_skipped_without_a_model_call() -> None:
+@pytest.mark.parametrize("version", ["v2", "v5"])
+def test_lock_binary_and_generated_files_are_skipped_without_a_model_call(version: str) -> None:
     files = (
         VcsFile(
             "package-lock.json",
@@ -570,7 +591,9 @@ def test_lock_binary_and_generated_files_are_skipped_without_a_model_call() -> N
         VcsFile("assets/logo.png", "modified", _PNG_BLOB, None, 0, 0, 0, None),
         VcsFile("dist/app.min.js", "modified", None, None, 2, 0, 2, "@@ -1 +1 @@\n-a\n+b"),
     )
-    outcome = _run(files, files_changed=3, blobs={_PNG_BLOB: _PNG}, record_check_run=True)
+    outcome = _run(
+        files, files_changed=3, blobs={_PNG_BLOB: _PNG}, record_check_run=True, version=version
+    )
     build = _context(outcome.trace)
 
     assert outcome.skipped is not None
@@ -634,6 +657,8 @@ def test_a_second_attempt_of_residual_files_keeps_no_reviewable_files() -> None:
     builds = _builds(outcome.trace)
 
     assert [item["reason"] for item in builds] == ["no_reviewable_files", "no_reviewable_files"]
+    assert builds[0]["coverage"] == builds[1]["coverage"]
+    assert builds[0]["coverage"]["reviewed_files"] == 0
     assert outcome.stored and all(row.summary_only for row in outcome.stored)
     assert len(outcome.published) == 2
     assert all(isinstance(item, NoModelAnswer) for item in outcome.published)
@@ -649,6 +674,8 @@ def test_a_second_attempt_of_an_incomplete_list_keeps_its_reason() -> None:
         "diff_inventory_incomplete",
         "diff_inventory_incomplete",
     ]
+    assert builds[0]["coverage"] == builds[1]["coverage"]
+    assert builds[0]["coverage"]["reviewed_files"] == 0
     assert outcome.stored and all(row.summary_only for row in outcome.stored)
     assert len(outcome.published) == 2
     _assert_no_model_call(outcome.trace)
@@ -660,6 +687,9 @@ def test_a_second_attempt_over_the_line_limit_stays_diff_too_large() -> None:
     builds = _builds(outcome.trace)
 
     assert [item["reason"] for item in builds] == ["diff_too_large", "diff_too_large"]
+    assert builds[0]["coverage"] == builds[1]["coverage"]
+    assert builds[0]["coverage"]["reviewed_files"] == 0
+    assert builds[0]["coverage"]["status"] == "partial"
     _assert_no_model_call(outcome.trace)
     _assert_named_summary("diff_too_large")
 
@@ -686,3 +716,63 @@ def test_residual_unreviewable_file_makes_no_model_call() -> None:
     _assert_no_model_call(outcome.trace)
     _assert_published_without_a_model(outcome.published)
     _assert_named_summary(build["reason"])
+
+
+@pytest.mark.parametrize("version", ["v2", "v5"])
+def test_proven_exclusions_in_an_incomplete_list_are_summary_only(version: str) -> None:
+    # files_changed is larger than the visible lock and binary, so the list is not a proof
+    # that every change is excluded and the stop must not become skipped.
+    files = (
+        VcsFile(
+            "package-lock.json",
+            "modified",
+            None,
+            None,
+            4,
+            0,
+            4,
+            "@@ -1 +1 @@\n-a\n+b",
+        ),
+        VcsFile("assets/logo.png", "modified", _PNG_BLOB, None, 0, 0, 0, None),
+    )
+    outcome = _run(files, files_changed=3, blobs={_PNG_BLOB: _PNG}, version=version)
+    build = _context(outcome.trace)
+
+    assert outcome.skipped is None
+    assert outcome.result is True
+    assert build["status"] == "summary_only"
+    assert build["reason"] == "diff_inventory_incomplete"
+    assert build["coverage"]["status"] == "partial"
+    assert build["coverage"]["reviewed_files"] == 0
+    assert build["coverage"]["reason_counts"] == {"diff_inventory_incomplete": 1}
+    assert build["coverage"]["exclusion_counts"] == {"generated": 1, "binary": 1}
+    _assert_no_model_call(outcome.trace)
+    _assert_published_without_a_model(outcome.published)
+
+
+def test_a_masked_text_file_stays_excluded_for_each_summary_only_reason() -> None:
+    masked = VcsFile("generated/notes.py", "added", _TEXT_BLOB, None, 1, 0, 1, _added_patch(1))
+    missing = VcsFile("src/note.txt", "modified", _TEXT_BLOB, None, 3, 0, 3, None)
+    cases = (
+        ((_text(3_001), masked), 2, "diff_too_large", {"summary_only": 1}),
+        (
+            (_text(1), masked),
+            3,
+            "diff_inventory_incomplete",
+            {"diff_inventory_incomplete": 1, "summary_only": 1},
+        ),
+        ((missing, masked), 2, "no_reviewable_files", {"missing_patch": 1}),
+    )
+    for files, files_changed, reason, reasons in cases:
+        outcome = _run(files, files_changed=files_changed)
+        build = _context(outcome.trace)
+        assert build["reason"] == reason, reason
+        assert build["coverage"]["status"] == "partial"
+        assert build["coverage"]["reviewed_files"] == 0
+        assert build["coverage"]["reason_counts"] == reasons
+        assert build["coverage"]["exclusion_counts"] == {"ignored": 1}
+        assert outcome.stored is not None
+        masked_row = next(row for row in outcome.stored if row.filename == "generated/notes.py")
+        assert masked_row.summary_only is False
+        assert masked_row.review_patch is None
+        _assert_no_model_call(outcome.trace)
