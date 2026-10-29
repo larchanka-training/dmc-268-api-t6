@@ -1007,12 +1007,60 @@ Recall — micro по ожидаемым находкам этих кейсов,
 
 Browser API сверяется с `contracts/openapi.yaml` в `tests/test_openapi_contract.py`; входящий provider webhook описан отдельно в [`BITBUCKET_WEBHOOK.md`](BITBUCKET_WEBHOOK.md). PostgreSQL/ASGI набор `tests/test_bitbucket_*` проверяет UUID и portal workspace изоляцию, private repo connect/disconnect, ключи и секреты, HMAC raw bytes, durable receipt/replay, один Run на PR/head, pinned diff/source, worker, RAG, inline/summary markers и commit status. `tests/test_deploy_staging_services.py` проверяет CI bundle → 0600 env-файлы → контейнеры/rollback. Запускать с реальным `TEST_DATABASE_URL`, иначе skipped PG тесты не являются доказательством. UI `pnpm test` проверяет выбор workspace и границу Zod; `pnpm --dir docs-site check-types && pnpm --dir docs-site build` проверяет публичную инструкцию.
 
-Отдельный live gate на disposable private Bitbucket Cloud repo/PR: зафиксировать URL PR, head SHA и deployed backend/UI SHA; подключить репозиторий к portal workspace, вручную настроить repository webhook с одноразовым секретом, доставить подписанные PR/push события, дождаться succeeded Run, проверить inline comments, ровно один summary, commit status и число публикаций после повтора доставки. Native applyable suggestion нужно подтвердить реальным API-запросом или явно согласовать текстовый fallback; mock не доказывает эту возможность. В отчёт записывать только санитизированные идентификаторы/счётчики, без токена и секрета. Полные backend/UI gates обязательны на итоговом diff.
+Отдельный live gate на disposable private Bitbucket Cloud repo/PR: зафиксировать URL PR,
+head SHA и deployed backend/UI SHA; подключить репозиторий к portal workspace, вручную
+настроить repository webhook с одноразовым секретом, доставить подписанные PR/push
+события, дождаться succeeded Run, проверить inline comments, ровно один summary,
+commit status и число публикаций после повтора доставки. Native применяемое
+предложение нужно подтвердить реальным API-запросом и записать, показывает ли
+Bitbucket UI действие Apply для созданного предложения: текстовый fenced patch остаётся
+ручным fallback и не закрывает AC4. В отчёт записывать только санитизированные
+идентификаторы/счётчики, без токена и секрета. Полные backend/UI gates обязательны
+на итоговом diff.
 
-Подробный [чеклист](plans/333-live-acceptance.md) отдельно проверяет приватный
-UUID locator, fork с ограниченным токеном назначения, rename+edit, пагинацию,
-merge-base, движение и смену целевой ветки, пять webhook-событий, статусы и
-merge checks, точные token scopes и 429/`Retry-After`. Публичные read-only
-UUID-пробы 2026-10-26 подтверждают только форму локатора; доступа к
-одноразовому приватному репозиторию и токену на 2026-10-28 нет. Локальные
-MockTransport/PostgreSQL тесты не отмечают этот live gate выполненным.
+Проверки выполнять в выбранном portal workspace на приватном UUID locator; участник
+видит подключение, посторонний — нет. Runtime-токену нужны только
+`read:repository:bitbucket` и `read:pullrequest:bitbucket`: проверить их на private
+repo/PR GET, inline comment POST и commit-status POST/PUT. Без второго scope и connect,
+и `PUT credential` возвращают 422; после неудачного PUT `credentialGeneration` не
+меняется. Проверить URL и имена защищённых staging-переменных, не раскрывая keyring;
+backend/UI должны быть развернуты с зафиксированными SHA и миграцией.
+
+До отключения репозитория провести следующие provider-пробы:
+
+- Подписать все пять событий `repo:push`, `pullrequest:created`, `updated`,
+  `fulfilled`, `rejected`. Неверная подпись не создаёт receipt/Run и не переводит
+  binding из `awaiting_webhook` в `active`; первая верная переводит. Реальные merge и
+  decline дают соответствующие receipts, закрывают PR и отменяют активный Run без
+  нового ревью. Пять wire events из ответов connect и ротации webhook secret должны
+  совпасть с настройкой webhook; старую трёхсобытийную настройку пересоздать.
+  Два signed update с одинаковым `updated_on`, но разными head не
+  теряют новый head; `diagnostics:ping` без `repository.uuid` отвечает 400 без receipt.
+- Повторить доставку до и после перезапуска worker: на PR/head остаются один Run,
+  прежние inline markers, одна summary и один tenant-scoped status key. Проверить
+  pinned source/destination SHA на private fork, недоступном runtime-токену напрямую;
+  после удаления fork branch (`source.commit=null`) merge/decline не запускают ревью.
+  При ротации токена смена автора статуса должна дать явную ошибку владения, а не
+  сменить ключ. Проверить детерминированный ключ `AI-REVIEW-` + 30 hex (≤40 символов)
+  и portal Run URL на закреплённом head. После disconnect новые доставки/очередная
+  работа отклоняются, соседняя привязка продолжает работать.
+- Rename+edit сохраняет old/new пути и inline координаты. Сверить отсутствующий
+  diffstat, несколько страниц diffstat/commits, merge-base и закреплённый base SHA
+  после движения destination tip. Ретаргет или новый source head не публикует
+  устаревшее ревью; после ретаргета старый `INPROGRESS` становится `STOPPED` под тем
+  же ключом на закреплённом head, в том числе после начатой попытки. Отдельно
+  проверить draft toggle, skipped/failed → `STOPPED`, description, portal target URL,
+  merge checks и 403 при попытке записать status в недоступный source fork. Принятое
+  ограничение P3 №52: `INPROGRESS` на вытесненном старом head не меняется на `STOPPED`.
+- Раздельно записать число запросов, `X-RateLimit-*` и 429/`Retry-After` для
+  `/src/{commit}/` и `/src/{commit}/{path}`, а также для обязательных diff/blob и
+  необязательных context-чтений. Исчерпание context оставляет diff-only ревью при
+  доступных обязательных данных; полный бюджет даёт явный код ошибки. Не создавать
+  нагрузку ради искусственного 429 на общем репозитории.
+
+В отчёте сохранить только URL одноразового PR, UUID, deployed SHA, статус/время
+доставок, Run ID, счётчики, координаты и санитизированную форму REST-пробы native
+suggestion; не сохранять токен, secret, signed payload или ciphertext. Публичные
+read-only UUID-пробы 2026-10-26 подтверждают лишь форму локатора; доступа к
+одноразовому приватному репозиторию и токену пока нет. Локальные
+MockTransport/PostgreSQL тесты не закрывают live gate.
