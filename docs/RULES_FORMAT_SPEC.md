@@ -427,8 +427,9 @@ reload проверяет durable поля и `previous_filename is None`; legac
 по SHA не повышается.
 
 Решения #213 по остальным случаям — канон в [CVS §2.2](CONTEXT_AND_VERIFICATION_SPEC.md#22-порядок-операций);
-тексты причин, метки сводки и квалификация empty-added — канон в
-[PIPELINE_SPEC §2](PIPELINE_SPEC.md#2-фазы-внутри-running-и-трейс-run_actions); здесь не дублируются.
+тексты причин #213 для summary/body/check-run, общие тексты `REASON_TEXT`, метки сводки, квалификация
+empty-added (в т.ч. GitLab без tree-proof), `reason_variant_counts`, условия tree-proof E=`empty_file`
+и нейтральный текст too_large — канон в [PIPELINE_SPEC §2](PIPELINE_SPEC.md#2-фазы-внутри-running-и-трейс-run_actions); здесь не дублируются.
 
 
 
@@ -1288,7 +1289,7 @@ snapshot (§5, итог дефолтов и файла для прогона) в
 | Только incomplete с возможными E/T, нет текста, полный inventory/known counters ≤3 000 | Backend partial, findings=[], verdict=null, summaryOnly=false; 0 LLM включая conventions/verifier, затем succeeded/neutral; pins/count=0 сохранены (CVS §2.2) |
 | Пустой added с полным proof CVS §9.2, mode 100644/100755; отдельно рядом с кодом | empty_file/E: skipped при E-only; complete/clean при полном ревью кода без supported warning/error |
 | Квалифицированный empty candidate (§5.1) без независимого regular-file proof: отсутствующий/неверный mode либо недоступный/неполный tree | missing_patch/incomplete, partial/null с кодом; «Нет подтверждения обычного пустого файла» только при сохранении всех условий квалификации |
-| Added с previous_filename/old path либо иным нарушением квалификации; removed image без binary proof; oversized непрочитанный blob | Не empty_file/E; соответствующая incomplete/technical причина, too_large/T для последнего; partial/null с кодом, полные тексты §5.1; обычный added missing patch не получает empty-текст |
+| Added с previous_filename/old path либо иным нарушением квалификации; removed image без binary proof; oversized непрочитанный blob | Не empty_file/E; соответствующая incomplete/technical причина, too_large/T для последнего; partial/null с кодом, полные тексты ([PIPELINE_SPEC §2](PIPELINE_SPEC.md#2-фазы-внутри-running-и-трейс-run_actions)); обычный added missing patch не получает empty-текст |
 | Tree response 1 500 000 / 1 500 001 байт; duplicate/mismatch/truncated/wrong revision; symlink/gitlink; retry marker | Только bounded valid exact pinned-head proof разрешает empty_file/E; остальные incomplete; не более одного metadata request, marker после reload проверяется |
 | Доказанный pure rename/mode-only рядом с кодом | T препятствует clean: partial/null с соответствующим полным текстом ([PIPELINE_SPEC §2](PIPELINE_SPEC.md#2-фазы-внутри-running-и-трейс-run_actions)); raw metadata-only без proof — incomplete (CVS §2.2) |
 | Достоверный ignored anchor без manifest; неизвестный mask-matching путь; allowed anchor с ignored evidence | ignored_file до видимости без самостоятельного partial; unknown_path/identity error с partial; evidence_source_disallowed с partial; guards сохраняются |
