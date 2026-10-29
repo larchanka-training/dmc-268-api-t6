@@ -136,8 +136,9 @@ Rules: `.agents/rules/git-workflow.md`. Work from a fresh `origin/main`.
 A **SYNC part** (shared files, `.agents/README.md` § Sync map) is two pull requests with the
 same `Refs`: ui first, then the copy in api (`cp`, then `diff -r` empty). This run starts in the
 repo the Kickoff names first (ui); the api copy comes after the ui change is final, in the api
-clone: repeat the clone check and the Taken / Pick steps there, on the same name, and if the name is
-taken in api use the next free one from the same sequence.
+clone: repeat step 1 against the api repo (there `origin` must name api, not ui) and the Taken /
+Pick steps, on the same name, and if the name is taken in api use the next free one from the same
+sequence.
 
 ### 4. Board
 
@@ -161,7 +162,8 @@ The next preflight finds this run's part only through its pull request, so:
 
 - The first line of `## What` starts `Part K of owner/repo#N: …` (`Part K of #N` in the same repo;
   in the other repo a bare `#N` is that repo's own issue, so write `api#N` or `owner/repo#N`).
-  A SYNC copy names the part too: `SYNC copy of owner/repo#M (Part K of #N): …`. Name the part
+  A SYNC copy names the part too: `SYNC copy of owner/repo#M (Part K of #N): …` (`owner/repo#N`
+  when the issue is in the other repo, e.g. the ui copy of an api issue). Name the part
   this PR is first: only the first part in that line counts, so "Part 1 is merged" after it is
   safe. The title may name it instead; if it does, the title wins.
 - `## Refs` has `Refs #N` (same repo) or `Refs owner/repo#N` — the full form in the ui copy of an

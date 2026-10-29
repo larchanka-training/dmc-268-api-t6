@@ -45,8 +45,9 @@ metadata:
    - Title: Conventional Commits, ≤72 characters.
    - Body has four sections, in this order: `What`, `Why`, `How to verify`, `Refs`.
    - When the PR is one part of an issue, the first line of `What` names it:
-     `Part K of owner/repo#N: …` (`Part K of #N` in the same repo; a copy in the other repo:
-     `SYNC copy of owner/repo#M (Part K of #N): …`).
+     `Part K of owner/repo#N: …` (`Part K of #N` when the issue is in the PR's own repo; a copy in
+     the other repo: `SYNC copy of owner/repo#M (Part K of #N): …`). A bare `#N` is always the
+     PR's own repo: write `owner/repo#N` when the issue is in the other repo.
    - Body follows `.github/pull_request_template.md`, including its Before merge checklist
      (`gh pr create --body` bypasses the template).
    - Ask the user whether the PR is ready for review. Not ready: add `--draft`. Ready: ask
