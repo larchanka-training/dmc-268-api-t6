@@ -752,16 +752,26 @@ def test_proven_exclusions_in_an_incomplete_list_are_summary_only(version: str) 
 
 def test_a_masked_text_file_stays_excluded_for_each_summary_only_reason() -> None:
     masked = VcsFile("generated/notes.py", "added", _TEXT_BLOB, None, 1, 0, 1, _added_patch(1))
+    lock = VcsFile(
+        "package-lock.json",
+        "modified",
+        None,
+        None,
+        4,
+        0,
+        4,
+        "@@ -1 +1 @@\n-a\n+b",
+    )
     missing = VcsFile("src/note.txt", "modified", _TEXT_BLOB, None, 3, 0, 3, None)
     cases = (
-        ((_text(3_001), masked), 2, "diff_too_large", {"summary_only": 1}),
+        ((_text(3_001), masked, lock), 3, "diff_too_large", {"summary_only": 1}),
         (
-            (_text(1), masked),
-            3,
+            (_text(1), masked, lock),
+            4,
             "diff_inventory_incomplete",
             {"diff_inventory_incomplete": 1, "summary_only": 1},
         ),
-        ((missing, masked), 2, "no_reviewable_files", {"missing_patch": 1}),
+        ((missing, masked, lock), 3, "no_reviewable_files", {"missing_patch": 1}),
     )
     for files, files_changed, reason, reasons in cases:
         outcome = _run(files, files_changed=files_changed)
@@ -770,9 +780,10 @@ def test_a_masked_text_file_stays_excluded_for_each_summary_only_reason() -> Non
         assert build["coverage"]["status"] == "partial"
         assert build["coverage"]["reviewed_files"] == 0
         assert build["coverage"]["reason_counts"] == reasons
-        assert build["coverage"]["exclusion_counts"] == {"ignored": 1}
+        assert build["coverage"]["exclusion_counts"] == {"ignored": 1, "generated": 1}
         assert outcome.stored is not None
         masked_row = next(row for row in outcome.stored if row.filename == "generated/notes.py")
         assert masked_row.summary_only is False
         assert masked_row.review_patch is None
         _assert_no_model_call(outcome.trace)
+        _assert_published_without_a_model(outcome.published)
