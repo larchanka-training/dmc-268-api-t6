@@ -52,6 +52,7 @@ from app.main import app, get_github_webhook_secret
 from app.modules.integrations.webhooks.infrastructure.github_installation_tree_provider import (
     StaticGitHubInstallationAccessTokenProvider,
 )
+from app.modules.reviews.application import review_ignore
 from app.modules.reviews.application.prompt_builder import file_block_id
 from app.modules.reviews.infrastructure.amqp import amqp_channels
 from app.worker import WorkerSettings, run_worker
@@ -707,6 +708,8 @@ class Outcome:
     # run_policy_snapshots rows of the run: a failed load stores none.
     snapshots: int
     policy_load: list[Any]
+    # Every run_actions row of the run, in order: (tool, response).
+    steps: list[tuple[str, Any]]
     tasks: list[str]
     bodies: list[str]
     reviews: list[dict[str, Any]]
@@ -880,6 +883,7 @@ async def _scenario(stack: Stack, github: FakeGitHub, llm: FakeLlm) -> Outcome:
         policy_digest=digest,
         snapshots=int(snapshots or 0),
         policy_load=[response for tool, _, response in actions if tool == "policy.load"],
+        steps=[(tool, response) for tool, _, response in actions],
         tasks=llm.tasks,
         bodies=llm.bodies,
         reviews=github.reviews,
@@ -1316,6 +1320,45 @@ def test_invalid_agents_md_fails_the_run_once_without_llm(
         len(VALID_RULES),
     )
     assert outcome.documents.get("AGENTS.md", (None,))[0] != "missing"
+
+
+@pytest.mark.integration
+def test_exhausted_match_budget_fails_the_run_once_without_llm(
+    stack: Stack, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # §3.3: the matcher budget per path, lowered to one transition, so matching the mask of
+    # the valid rules.md against a changed path exceeds it. With the real budget the same
+    # PR is reviewed (`test_review_ignore_keeps_the_ignored_file_out_of_every_llm_call`).
+    monkeypatch.setattr(review_ignore, "MAX_TRANSITIONS_PER_PATH", 1)
+    outcome = _review(stack, _github(VALID_RULES), Seed.V4)
+
+    # §9: failed, no retry, no LLM call, no review; the bot never blocks a merge.
+    assert (outcome.state, outcome.attempt, outcome.error_code) == (
+        "failed",
+        1,
+        "policy_match_budget_exceeded",
+    )
+    assert outcome.tasks == []
+    assert outcome.reviews == []
+    assert outcome.check_run["conclusion"] == "neutral"
+    # The policy itself loads; the error is the matcher's, traced in the step where it ran
+    # (§9: `vcs.fetch_diff` or `context.build`): here the first one, storing the diff.
+    assert _rules_load(outcome)["presence"] == "present"
+    failed = [
+        (tool, response)
+        for tool, response in outcome.steps
+        if isinstance(response, dict) and "error" in response
+    ]
+    assert [tool for tool, _ in failed] == ["vcs.fetch_diff"], outcome.steps
+    diagnostic = failed[0][1]["error"]["diagnostic"]
+    assert (diagnostic["code"], diagnostic["source_path"], diagnostic["policy_base_sha"]) == (
+        "policy_match_budget_exceeded",
+        RULES,
+        BASE,
+    )
+    # §9: `actual` is the counter that crossed the limit at the stop, a lower bound.
+    assert (diagnostic["limit"], diagnostic["actual_is_lower_bound"]) == (1, True)
+    assert diagnostic["actual"] > 1
 
 
 @pytest.mark.integration
