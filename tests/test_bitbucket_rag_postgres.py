@@ -99,7 +99,9 @@ from tests.test_prompt_builder import _metadata_context
 pytest_plugins = ("tests.test_bitbucket_connections_postgres",)
 
 _HEAD = "a" * 40
-_LIB = b"def target():\n    return 1\n"
+# The changed export was renamed, while user.py still imports its old name.
+# Its unchanged content has revision-bound Bitbucket pseudo blob IDs.
+_LIB = b"def renamed():\n    return 1\n"
 _USER = b"from lib import target\n\n\ndef use():\n    return target()\n"
 _OTHER_LIB = b"def other():\n    return 2\n"
 _OTHER_USER = b"from lib import other\n\n\ndef use():\n    return other()\n"
@@ -131,7 +133,7 @@ class _ModelHttp:
             }
         elif len(self.bodies) == 2:
             prompt = body["messages"][-1]["content"]
-            [rag] = re.findall(r'<excerpt block_id="([^"]+)" level="RAG"', prompt)
+            [rag] = re.findall(r'<excerpt block_id="([^"]+)" level="RAG" path="user.py"', prompt)
             answer = {
                 "findings": [
                     {
@@ -370,12 +372,14 @@ def test_two_portal_workspaces_index_same_remote_uuid_without_cross_tenant_reads
                     files=[
                         DiffSnapshot(
                             "lib.py",
-                            "@@ -1,2 +1,2 @@\n def target():\n-    return 0\n+    return 1",
+                            "@@ -1,2 +1,2 @@\n"
+                            "-def target():\n-    return 0\n"
+                            "+def renamed():\n+    return 1",
                             None,
                             "modified",
                             None,
-                            1,
-                            1,
+                            2,
+                            2,
                             2,
                         )
                     ],
@@ -430,8 +434,8 @@ def test_two_portal_workspaces_index_same_remote_uuid_without_cross_tenant_reads
                             "values": [
                                 {
                                     "status": "modified",
-                                    "lines_added": 1,
-                                    "lines_removed": 1,
+                                    "lines_added": 2,
+                                    "lines_removed": 2,
                                     "old": {"path": "lib.py"},
                                     "new": {"path": "lib.py", "size": len(lib)},
                                 }
@@ -557,10 +561,13 @@ def test_two_portal_workspaces_index_same_remote_uuid_without_cross_tenant_reads
                         await stage.begin(run_id)
                         payload = await stage.run(run_id)
                     assert payload is not None
+                    assert payload.retrieved, payload
                     # The complete Bitbucket diff proves user.py unchanged. Its
                     # revision-bound pseudo blob IDs differ, but base reads must
                     # reuse the head file instead of fetching the old raw path.
-                    assert any(f"/src/{_HEAD}/user.py" in path for path in raw_user_reads)
+                    assert any(f"/src/{_HEAD}/user.py" in path for path in raw_user_reads), (
+                        raw_user_reads
+                    )
                     assert not any(f"/src/{'b' * 40}/user.py" in path for path in raw_user_reads)
                     async with factory() as session:
                         first_payload = (
@@ -632,12 +639,17 @@ def test_two_portal_workspaces_index_same_remote_uuid_without_cross_tenant_reads
                     assert retried_rows[0][0] == 2
                     assert retried_rows[0][1] != {"stale": True}
                     assert retried_rows[0][1] == builds[-1]
-                    assert [block.source.path for block in payload.retrieved] == ["user.py"]
+                    assert [block.source.path for block in payload.retrieved] == [
+                        "user.py",
+                        "lib.py",
+                    ]
                     snapshot = stage.snapshot_for_llm
                     assert snapshot is not None
                     retrieved = tuple(snapshot_retrieved(block) for block in payload.retrieved)
+                    metadata = _metadata_context(head_sha=_HEAD)
                     presented = replace(
-                        _metadata_context(head_sha=_HEAD),
+                        metadata,
+                        pr_meta=replace(metadata.pr_meta, diff_old_sha="b" * 40),
                         policy_snapshot=snapshot,
                         retrieved=retrieved,
                         retrieved_section=True,
@@ -661,7 +673,7 @@ def test_two_portal_workspaces_index_same_remote_uuid_without_cross_tenant_reads
                         block.block_id
                         for block in manifest.blocks
                         if block.source_role is SourceRole.RETRIEVED_EXCERPT
-                    } == {retrieved[0].block_id}
+                    } == {block.block_id for block in retrieved}
                     verify_provenance_pre_send_guard(manifest, context=presented, snapshot=snapshot)
                     for bad_source, error_detail in (
                         (
@@ -744,7 +756,7 @@ def test_two_portal_workspaces_index_same_remote_uuid_without_cross_tenant_reads
                         for block in manifest_rows[1][1]
                         if block["source_role"] == "retrieved_excerpt"
                     ]
-                    assert len(review_rag) == 1
+                    assert len(review_rag) == 2
                     assert review_rag[0]["block_id"] == sent_rag_id
                     assert review_rag[0]["path"] == "user.py"
                     assert review_rag[0]["repository_id"] == str(ids[1])
@@ -752,8 +764,11 @@ def test_two_portal_workspaces_index_same_remote_uuid_without_cross_tenant_reads
                     assert review_rag[0]["side"] == "RIGHT"
                     assert review_rag[0]["shown_ranges"] == [[1, 1], [4, 5]]
                     assert review_rag[0]["index_commit_sha"] == _HEAD
-                    assert review_rag[0]["selection_reason"] == "rag_reverse_edge"
+                    assert review_rag[0]["selection_reason"] == "rag_broken_reference"
                     assert review_rag[0]["edge_kind"] == "uses_imported"
+                    assert review_rag[1]["path"] == "lib.py"
+                    assert review_rag[1]["revision"] == "b" * 40
+                    assert review_rag[1]["side"] == "LEFT"
                     verifier_rag = [
                         block
                         for block in manifest_rows[2][1]
@@ -762,7 +777,7 @@ def test_two_portal_workspaces_index_same_remote_uuid_without_cross_tenant_reads
                     assert verifier_rag == review_rag
                     assert re.findall(
                         r'<excerpt block_id="([^"]+)" level="RAG"', verifier_prompt
-                    ) == [sent_rag_id]
+                    ) == [block["block_id"] for block in review_rag]
                     shown_excerpt_ids = set(
                         re.findall(r'<excerpt block_id="([^"]+)"', verifier_prompt)
                     )
