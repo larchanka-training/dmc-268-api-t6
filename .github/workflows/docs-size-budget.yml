@@ -1,0 +1,70 @@
+name: Docs size budget
+
+# Non-blocking warning for a PR that grows a top-level docs/*.md file over the size budget (#380):
+# agents read the specs by section, and a spec that keeps growing past the budget outruns its
+# reading map. The job never fails on size and is not a required check of ruleset `main`.
+on:
+  pull_request:
+    paths:
+      - "docs/*.md"
+      - ".github/workflows/docs-size-budget.yml"
+
+permissions:
+  contents: read
+
+env:
+  DOCS_SIZE_BUDGET_BYTES: "81920"
+
+jobs:
+  docs-size-budget:
+    name: Docs size budget
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          # The PR merge commit and both parents: HEAD^1 is the base branch tip.
+          fetch-depth: 2
+          persist-credentials: false
+
+      - name: Compare top-level docs sizes
+        run: |
+          budget="${DOCS_SIZE_BUDGET_BYTES}"
+          # Added, modified and renamed files as NUL-separated records, so that a non-ASCII name is
+          # not quoted; they go through a file because a shell variable cannot hold NUL. A rename is
+          # checked under its new path and compared with the size of its old path; a deletion is
+          # not listed. A name with a control character (a newline would forge a workflow command
+          # in the annotation) is skipped.
+          diff_file="$(mktemp)"
+          trap 'rm -f "${diff_file}"' EXIT
+          git diff -M --diff-filter=AMR --name-status -z HEAD^1 HEAD > "${diff_file}"
+          rows=""
+          while IFS= read -r -d '' status; do
+            IFS= read -r -d '' old
+            path="${old}"
+            if [[ "${status}" == R* ]]; then
+              IFS= read -r -d '' path
+            fi
+            [[ "${path}" =~ ^docs/[^/[:cntrl:]]+\.md$ ]] || continue
+            after="$(git cat-file -s "HEAD:${path}")"
+            before=0
+            if [[ "${status}" != A ]]; then
+              before="$(git cat-file -s "HEAD^1:${old}")"
+            fi
+            if (( after > budget && after > before )); then
+              echo "::warning file=${path}::${path} grew from ${before} to ${after} bytes, over the ${budget}-byte budget (#380)"
+              rows+="| \`${path}\` | ${before} | ${after} | +$((after - before)) | ${budget} |"$'\n'
+            fi
+          done < "${diff_file}"
+          if [[ -n "${rows}" ]]; then
+            {
+              echo "### Top-level docs over the size budget"
+              echo
+              echo "| File | Before, bytes | After, bytes | Delta | Budget, bytes |"
+              echo "|---|---|---|---|---|"
+              printf '%s' "${rows}"
+            } >> "${GITHUB_STEP_SUMMARY}"
+          else
+            echo "No top-level docs/*.md file grew over the ${budget}-byte budget." >> "${GITHUB_STEP_SUMMARY}"
+          fi
