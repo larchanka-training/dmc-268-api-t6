@@ -57,6 +57,60 @@ async def checkpoint() -> None:
     return None
 
 
+def test_optional_context_byte_preflight_sends_no_request_when_reserve_is_needed() -> None:
+    seen: list[str] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        seen.append(request.url.path)
+        return httpx.Response(200, content=b"ready")
+
+    async def scenario() -> None:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+            http = BitbucketRunHttp(client, Credentials(), TARGET)
+            http._read_bytes = run_http._TOTAL_BYTES - 700
+            with http.optional_context_budget():
+                with pytest.raises(BitbucketRunHttpError) as error:
+                    await http.get_bytes(DEST, f"src/{HEAD}/probe", max_bytes=5)
+                assert error.value.error_code == "bitbucket_response_budget_exceeded"
+                assert http.request_count == 0
+            assert await http.get_bytes(DEST, f"src/{HEAD}/probe", max_bytes=5) == b"ready"
+
+    asyncio.run(scenario())
+    assert seen == [f"{PREFIX}/src/{HEAD}/probe"]
+
+
+@pytest.mark.parametrize("body", [b"ok", b"bad"])
+def test_optional_context_byte_boundary_allows_exact_size_only(body: bytes) -> None:
+    seen: list[str] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        seen.append(request.url.path)
+        return httpx.Response(200, content=body)
+
+    async def scenario() -> None:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+            http = BitbucketRunHttp(client, Credentials(), TARGET)
+            http._read_bytes = run_http._TOTAL_BYTES - (
+                run_http._POST_CONTEXT_TAIL_RESERVE_BYTES + 2
+            )
+            with http.optional_context_budget():
+                if body == b"ok":
+                    assert await http.get_bytes(DEST, f"src/{HEAD}/probe", max_bytes=3) == body
+                    assert http.request_count == 1
+                    with pytest.raises(BitbucketRunHttpError) as error:
+                        await http.get_bytes(DEST, f"src/{HEAD}/probe", max_bytes=3)
+                    assert error.value.error_code == "bitbucket_response_budget_exceeded"
+                    assert http.request_count == 1
+                else:
+                    with pytest.raises(BitbucketRunHttpError) as error:
+                        await http.get_bytes(DEST, f"src/{HEAD}/probe", max_bytes=3)
+                    assert error.value.error_code == "bitbucket_response_budget_exceeded"
+                    assert http.request_count == 1
+
+    asyncio.run(scenario())
+    assert seen == [f"{PREFIX}/src/{HEAD}/probe"]
+
+
 @pytest.mark.parametrize("file_count", [100, 200])
 def test_tree_walk_rechecks_pr_only_at_stage_boundary(file_count: int) -> None:
     pr_reads = 0
@@ -173,6 +227,32 @@ def test_tree_walk_does_not_convert_request_budget_to_partial_listing(
 
     asyncio.run(scenario())
     assert seen[-1] == f"{PREFIX}/src/{BASE}/"
+
+
+def test_tree_walk_does_not_hide_exhausted_response_budget_as_partial_listing() -> None:
+    def respond(request: httpx.Request) -> httpx.Response:
+        if request.url.path == f"{PREFIX}/pullrequests/7":
+            return httpx.Response(200, json=_pr(source=DEST))
+        if request.url.path == f"{PREFIX}/diffstat/{HEAD}..{BASE}":
+            return httpx.Response(200, json={"size": 0, "values": []})
+        if request.url.path == f"{PREFIX}/src/{BASE}/":
+            return httpx.Response(200, json={"size": 0, "values": []})
+        raise AssertionError(request.url.path)
+
+    async def scenario() -> None:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+            http = BitbucketRunHttp(client, Credentials(), TARGET)
+            vcs = HttpBitbucketVcsProvider(http=http, locator=INPUT.locator)
+            trees = BitbucketRepositoryTree(
+                http=http, expected_input=INPUT, vcs=vcs, checkpoint=checkpoint
+            )
+            await vcs.get_pull_request(INPUT.locator, checkpoint=checkpoint)
+            http._read_bytes = run_http._TOTAL_BYTES
+            with pytest.raises(BitbucketRunHttpError) as error:
+                await trees.walk(BASE)
+            assert error.value.error_code == "bitbucket_response_budget_exceeded"
+
+    asyncio.run(scenario())
 
 
 @pytest.mark.parametrize("budget_kind", ["request", "response"])
