@@ -22,6 +22,7 @@ from app.modules.repositories.infrastructure.models import ProviderInstallation,
 from app.modules.reviews.application.check_runs import (
     CheckRunReport,
     CheckRunTarget,
+    is_summary_only_stop,
     summary_only_reason_of,
 )
 from app.modules.reviews.application.get_run_diff import DiffSnapshot
@@ -421,7 +422,9 @@ class SqlAlchemyRunLifecycleStore:
             )
         findings = await self._published_findings(run_id)
         severities = [item.severity.value for item in findings]
-        summary_only = await self._session.scalar(
+        # A marked row is the historical flag. The stop is also summary-only when
+        # every visible file is withheld or empty, so no row matches the mark.
+        marked = await self._session.scalar(
             select(func.coalesce(func.bool_or(CodeChangeDiff.summary_only), False)).where(
                 CodeChangeDiff.run_id == run_id
             )
@@ -429,6 +432,7 @@ class SqlAlchemyRunLifecycleStore:
         context_summary = await self._session.scalar(
             select(ContextPayload.summary).where(ContextPayload.run_id == run_id)
         )
+        summary_only = bool(marked) or is_summary_only_stop(context_summary)
         below_threshold = await self._session.scalar(
             select(func.count())
             .select_from(Finding)

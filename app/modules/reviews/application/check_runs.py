@@ -163,6 +163,18 @@ def summary_only_reason_of(summary: object) -> str | None:
     return reason if isinstance(reason, str) else None
 
 
+def is_summary_only_stop(summary: object) -> bool:
+    """The stage stop, not a builder payload that still continues to the model.
+
+    Both record ``status == summary_only``. The builder always stores
+    ``reviewable_lines``; the stop payload does not. A legacy technical skip
+    keeps the model path, so that payload must not publish ``summaryOnly``.
+    """
+    if not isinstance(summary, dict) or summary.get("status") != "summary_only":
+        return False
+    return "reviewable_lines" not in summary
+
+
 def check_run_view(report: CheckRunReport) -> CheckRunView:
     link = f"\n\n{report.run_url}" if report.run_url else ""
     if report.state in {"queued", "running", "publishing"}:
