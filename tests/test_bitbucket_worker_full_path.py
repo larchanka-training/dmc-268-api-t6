@@ -20,6 +20,8 @@ from app.bootstrap.bitbucket_reviews import (
     BitbucketAttemptBundle,
     BitbucketReviewWorkerResources,
 )
+from app.modules.code_index.domain.enums import RagIndexStatus
+from app.modules.code_index.domain.rag_index import RagIndex
 from app.modules.integrations.bitbucket.infrastructure import run_http
 from app.modules.integrations.bitbucket.infrastructure.run_http import (
     BitbucketRunHttp,
@@ -39,6 +41,8 @@ from app.modules.reviews.application.publish_run_review import (
     PublishContext,
 )
 from app.modules.reviews.application.queue_messages import ReviewPublishPointer
+from app.modules.reviews.application.rag_context import CachedBlobSource
+from app.modules.reviews.application.rag_index import RagReadiness
 from app.modules.reviews.application.review_context import BuildReviewContext, ContextLevel
 from app.modules.reviews.application.review_context_stage import (
     EstimatedTokenCounter,
@@ -83,6 +87,7 @@ from tests.test_bitbucket_vcs import BASE, DEST, HEAD, PREFIX, TARGET, Credentia
 from tests.test_gateway_review_model import MAIN, SUMMARY, _finding, _profile
 from tests.test_gitlab_snapshot_path import Output, Runs, Tree, _checkpoint
 from tests.test_prepare_policy_snapshot import Source, Uow
+from tests.test_rag_context import BlobCacheUow, BlobStore, Graph, SharedBlobCache, _uses
 from tests.test_review_context_stage import Parser, Trace
 from tests.test_review_path import RecordingConventions, _binding, _store
 from tests.test_worker_reflection_pass import _Answers, _Manifests
@@ -377,6 +382,7 @@ def test_bitbucket_full_mocked_review_never_uses_github_or_gitlab(
         (False, True, None),
         (False, False, "tree"),
         (False, False, "blob"),
+        (False, False, "rag"),
     ],
 )
 def test_composed_bitbucket_review_uses_pinned_cloud_reads_and_writes(
@@ -387,6 +393,7 @@ def test_composed_bitbucket_review_uses_pinned_cloud_reads_and_writes(
 ) -> None:
     """The worker's VCS, policy, source and context adapters share one pinned Cloud route."""
     source_bytes = b"def compute():\n    return 2\n"
+    helper_bytes = b"from .app import compute\n\ndef use():\n    return compute()\n"
     file_path = "src/app.py"
     agents_bytes = b"Review Python changes with the repository rules.\n"
     rules_bytes = b"# Repository rules\n\nCheck changed function behavior.\n"
@@ -487,22 +494,31 @@ def test_composed_bitbucket_review_uses_pinned_cloud_reads_and_writes(
                 },
             )
         if path == f"{PREFIX}/src/{HEAD}/src/":
+            values = [
+                {
+                    "type": "commit_file",
+                    "path": "src/app.py",
+                    "size": len(source_bytes),
+                    "commit": {"hash": HEAD},
+                }
+            ]
+            if context_byte_case == "rag":
+                values.append(
+                    {
+                        "type": "commit_file",
+                        "path": "src/helper.py",
+                        "size": len(helper_bytes),
+                        "commit": {"hash": HEAD},
+                    }
+                )
             return httpx.Response(
                 200,
-                json={
-                    "size": 1,
-                    "values": [
-                        {
-                            "type": "commit_file",
-                            "path": "src/app.py",
-                            "size": len(source_bytes),
-                            "commit": {"hash": HEAD},
-                        }
-                    ],
-                },
+                json={"size": len(values), "values": values},
             )
         if path == f"{PREFIX}/src/{HEAD}/src/app.py":
             return httpx.Response(200, content=source_bytes)
+        if path == f"{PREFIX}/src/{HEAD}/src/helper.py":
+            return httpx.Response(200, content=helper_bytes)
         if path == f"{PREFIX}/pullrequests/7/comments" and request.method == "GET":
             return httpx.Response(200, json={"values": comments})
         if path == f"{PREFIX}/pullrequests/7/comments" and request.method == "POST":
@@ -570,10 +586,31 @@ def test_composed_bitbucket_review_uses_pinned_cloud_reads_and_writes(
                         conventions_id=UUID(int=43),
                         verifier_id=UUID(int=44),
                     ),
-                    review_system_version="v4",
+                    review_system_version="v5" if context_byte_case == "rag" else "v4",
                 ),
             )
             cache = InMemoryBlobCache()
+
+            class ReadyRag:
+                async def execute(self, repository_id: UUID) -> RagReadiness:
+                    assert repository_id == run.repository_id
+                    return RagReadiness(
+                        enabled=True,
+                        index=RagIndex(RagIndexStatus.READY, HEAD, datetime.now(UTC), 2, 2, None),
+                        default_head_sha=HEAD,
+                    )
+
+            graph = Graph({run.repository_id: (_uses("src/helper.py", "src/app.py", "compute"),)})
+            rag_store = BlobStore()
+            blob_budget_failures: list[str] = []
+
+            class ObservedRevisionSource(BitbucketRevisionSource):
+                async def read_blob(self, blob_sha: str) -> bytes:
+                    try:
+                        return await super().read_blob(blob_sha)
+                    except BitbucketRunHttpError as error:
+                        blob_budget_failures.append(error.kind)
+                        raise
 
             def context_builder(selected: RunVcsInput) -> BuildReviewContext:
                 if context_byte_case is not None:
@@ -582,13 +619,29 @@ def test_composed_bitbucket_review_uses_pinned_cloud_reads_and_writes(
                     remaining = (
                         700
                         if context_byte_case == "tree"
-                        else run_http._POST_CONTEXT_TAIL_RESERVE_BYTES + 650
+                        else run_http._POST_CONTEXT_TAIL_RESERVE_BYTES
+                        + (1200 if context_byte_case == "rag" else 650)
                     )
                     http._read_bytes = 32 * 1024 * 1024 - remaining
+                source_type = (
+                    ObservedRevisionSource
+                    if context_byte_case == "rag"
+                    else BitbucketRevisionSource
+                )
+                revision_source = source_type(trees=trees, locator=selected.locator)
                 return (RequestBudgetContext if context_budget_exceeded else BuildReviewContext)(
-                    source=BitbucketRevisionSource(trees=trees, locator=selected.locator),
+                    source=revision_source,
                     parser=Parser(),
                     counter=EstimatedTokenCounter(),
+                    retriever=graph if context_byte_case == "rag" else None,
+                    rag_blobs=CachedBlobSource(
+                        repository_id=selected.repository_id,
+                        source=revision_source,
+                        cache=SharedBlobCache(rag_store),
+                        uow_factory=lambda: BlobCacheUow(rag_store),
+                    )
+                    if context_byte_case == "rag"
+                    else None,
                 )
 
             stage = ReviewContextStage(
@@ -606,6 +659,7 @@ def test_composed_bitbucket_review_uses_pinned_cloud_reads_and_writes(
                 context_budget=http.optional_context_budget,
                 trace=trace,
                 payloads=trace,
+                rag=cast(Any, ReadyRag()) if context_byte_case == "rag" else None,
             )
             answers = _Answers(json.dumps({"findings": [_finding(1)], "summary": SUMMARY}))
             gateway = LlmGateway(
@@ -871,7 +925,7 @@ def test_composed_bitbucket_review_uses_pinned_cloud_reads_and_writes(
             else:
                 assert agents_bytes.decode().strip() in prompt_text
                 assert "Check changed function behavior." in prompt_text
-                if context_budget_exceeded or context_byte_case is not None:
+                if context_budget_exceeded or context_byte_case in {"tree", "blob"}:
                     assert stage.payload is not None
                     assert ContextLevel.L3 not in stage.payload.levels_present
                     assert "def compute():" in prompt_text
@@ -894,6 +948,34 @@ def test_composed_bitbucket_review_uses_pinned_cloud_reads_and_writes(
                     )
                     assert {item["reason"] for item in context_steps[0]["omissions"]} == {
                         expected_omission
+                    }
+                elif context_byte_case == "rag":
+                    assert stage.payload is not None
+                    assert ContextLevel.L3 in stage.payload.levels_present
+                    assert stage.payload.retrieved == ()
+                    assert stage.payload.rag is not None
+                    assert dict(stage.payload.rag.dropped)["source_read_failed"] >= 1
+                    assert blob_budget_failures == ["total_budget_exceeded"]
+                    assert any(
+                        item.reason == "source_read_failed" and item.path == "src/helper.py"
+                        for item in stage.payload.omissions
+                    )
+                    assert (
+                        sum(
+                            request.url.path == f"{PREFIX}/src/{HEAD}/src/helper.py"
+                            for request in seen
+                        )
+                        == 1
+                    )
+                    assert [step for step in trace.steps if step[0] == "context.rag"][0][2][
+                        "outcome"
+                    ] == "used"
+                    context_steps = [
+                        response for tool, _, response in trace.steps if tool == "context.build"
+                    ]
+                    assert context_steps[0]["reason"] is None
+                    assert {item["reason"] for item in context_steps[0]["omissions"]} == {
+                        "source_read_failed"
                     }
                 else:
                     assert stage.payload is not None
