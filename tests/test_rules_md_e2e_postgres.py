@@ -1154,6 +1154,8 @@ def test_all_changes_ignored_skips_the_run_without_llm_or_review(stack: Stack, s
     ("rules", "error_code"),
     [
         pytest.param(b"ok\n\xff\xfe", "policy_document_decode_error", id="decode"),
+        # U+D800 as UTF-8 bytes: an unpaired surrogate (§3.2 item 5).
+        pytest.param(b"ok\n\xed\xa0\x80", "policy_document_decode_error", id="surrogate"),
         # ESC (U+001B): only TAB, LF and CR are allowed below U+0020 (§3.2 item 5).
         pytest.param(b"\x1bfirst", "policy_document_control_character", id="control"),
         pytest.param(
