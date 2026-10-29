@@ -811,7 +811,7 @@ SHA256(canonical_json({
 ключа: при гонке принимается первая успешно сохранённая валидная запись.
 
 Как построено (#130, отклонение по решению техлида 25.10.2026, TL-7 в
-`docs/plans/130-snapshot-path-plan.md`). Snapshot-путь пишет в
+[`130-snapshot-path-plan.md`](https://github.com/larchanka-training/dmc-268-api-t6/blob/f1c1b9587f4edaecf784eefd5a0aed79488ec7fa/docs/plans/130-snapshot-path-plan.md)). Snapshot-путь пишет в
 `repo_conventions.policy_key` SHA-256 от канонического JSON: namespace
 `repo-conventions-v2`, ignore key попытки (`ignore_digest`, а если rename/copy
 скрыли пути без совпадения маски, — digest от него и этих путей; `ignore_digest`
@@ -1179,7 +1179,7 @@ verifier после начала review. Резерв verifier освобожд�
 Это явный failed, а не разрешение на пятый вызов или публикацию без проверки.
 На cache hit `R1 → R2 repair → V1 → V2 repair` допустим.
 
-Как построено (#130, решение техлида TL-2 в `docs/plans/130-snapshot-path-plan.md`;
+Как построено (#130, решение техлида TL-2 в [`130-snapshot-path-plan.md`](https://github.com/larchanka-training/dmc-268-api-t6/blob/f1c1b9587f4edaecf784eefd5a0aed79488ec7fa/docs/plans/130-snapshot-path-plan.md);
 только snapshot-путь, legacy-путь не изменён): задача держит слоты следующих
 стадий — `reserved_calls` ревью 1 (verifier), конвенций 2 (ревью и verifier),
 verifier 0. Пример с repair выше верен без fallback: при настроенном fallback
@@ -1243,7 +1243,7 @@ Timeout/5xx → повтор primary либо fallback по действующе
 вызов ревью оставляет verifier 100 с — его вызов 90 с и 10 с локального завершения;
 вызов конвенций оставляет вызов ревью с таймаутом движка и те же 100 с; verifier
 оставляет себе 10 с завершения. Денежного резерва verifier пока нет: это follow-up
-(TL-6 в `docs/plans/130-snapshot-path-plan.md`). На deep промах кэша конвенций
+(TL-6 в [`130-snapshot-path-plan.md`](https://github.com/larchanka-training/dmc-268-api-t6/blob/f1c1b9587f4edaecf784eefd5a0aed79488ec7fa/docs/plans/130-snapshot-path-plan.md)). На deep промах кэша конвенций
 отклоняется до вызова (#331).
 
 После принятого reviewer response сохраняются кандидаты/manifest checkpoint;

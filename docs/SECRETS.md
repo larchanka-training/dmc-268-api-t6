@@ -872,7 +872,7 @@ immutable release ref, а probe и up используют один провер
 Регрессии выполняют настоящий Python payload с multiline PEM, canaries и hostile names в обоих
 режимах, включая ошибки Docker exec. [Изолированный verifier](CICD.md#изолированная-проверка-двумя-образами)
 проверил работающие контейнеры двух образов, exact key lists и отсутствие каждого синтетического
-секрета/строки PEM во всём захваченном выводе. Его [redacted evidence](plans/110-verification.md)
+секрета/строки PEM во всём захваченном выводе. Его [redacted evidence](https://github.com/larchanka-training/dmc-268-api-t6/blob/f1c1b9587f4edaecf784eefd5a0aed79488ec7fa/docs/plans/110-verification.md)
 содержит только имена, ID, ревизии и хеши; значения и private transcripts не сохраняются в git.
 
 ---

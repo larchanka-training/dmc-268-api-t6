@@ -741,7 +741,7 @@ Every answer SHA-256/byte count matches the separate safe metadata, and the raw/
 manifests are byte-equal. Final corpus validation passed 24/24; two offline JSON
 reports are byte-identical with `warnings=[]`. Removing only validator diagnostics
 makes the offline report byte-identical to the live safe report. The full import
-hash audit is in [the #82 task evidence](../docs/plans/82-todo.md#task-6-complete-paid-raw-first-capture).
+hash audit is in [the #82 task evidence](https://github.com/larchanka-training/dmc-268-api-t6/blob/f1c1b9587f4edaecf784eefd5a0aed79488ec7fa/docs/plans/82-todo.md#task-6-complete-paid-raw-first-capture).
 No answer was normalized, repaired, selected from fallback or combined with an older
 capture.
 

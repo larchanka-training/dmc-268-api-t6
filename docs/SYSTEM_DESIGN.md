@@ -1694,7 +1694,7 @@ verifier. Исчерпание бюджета не разрешает публи
 defaults/conventions-prompt checksums, model/output-schema/selector/truncator/
 tokenizer profiles (точная формула — CONTEXT_AND_VERIFICATION_SPEC §4.2).
 Как построено (отклонение по решению техлида 25.10.2026, TL-7 в
-`docs/plans/130-snapshot-path-plan.md`): digest `repo-conventions-v2` в
+[`130-snapshot-path-plan.md`](https://github.com/larchanka-training/dmc-268-api-t6/blob/f1c1b9587f4edaecf784eefd5a0aed79488ec7fa/docs/plans/130-snapshot-path-plan.md)): digest `repo-conventions-v2` в
 `repo_conventions.policy_key` snapshot-пути покрывает namespace, ignore key
 попытки (вместе с путями rename/copy, которые она скрыла), digest текстов rules.md
 и AGENTS.md, `defaults_checksum`, id и checksum закреплённого conventions prompt и

@@ -660,7 +660,7 @@ readability — согласованность имён, архитектурн�
 но не навязывают стек любому репозиторию.
 
 Отступление как построено (решение техлида 26.10.2026, #130 F2; Q1 в
-`docs/plans/130-snapshot-switch-plan.md`):
+[`130-snapshot-switch-plan.md`](https://github.com/larchanka-training/dmc-268-api-t6/blob/f1c1b9587f4edaecf784eefd5a0aed79488ec7fa/docs/plans/130-snapshot-switch-plan.md)):
 `review.system.v4` оставляет порядок анализа v3 (security → correctness →
 performance → readability) в system message, и finding по этим стандартным
 критериям получает `rule_name: null`. `<service_defaults>` рендерит наборы правил

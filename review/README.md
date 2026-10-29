@@ -44,7 +44,7 @@ instructions, and its evidence rules: a retrieved excerpt is never the anchor, a
 LEFT one is evidence only. The manual gateway check in `app/bootstrap/llm_gateway.py`
 still defaults to `review.system.v3` and `review.conventions.v2`. The recorded replay and
 the eval baseline moved to v5 with the single paid eval re-shoot (#130, R15 in
-`docs/plans/130-snapshot-switch-plan.md`; #144): the
+[`130-snapshot-switch-plan.md`](https://github.com/larchanka-training/dmc-268-api-t6/blob/f1c1b9587f4edaecf784eefd5a0aed79488ec7fa/docs/plans/130-snapshot-switch-plan.md); #144): the
 [2026-10-28 capture](../test-prs-dataset/README.md#recorded-mistral-baseline--2026-10-28).
 `PromptBindings` dataclass defaults
 and snapshot test fixtures use v2 version labels; these are not universal
