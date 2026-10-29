@@ -639,9 +639,10 @@ Legacy marker `<!-- ai-review findings_hash=… -->` не используетс
 | `deadline_exceeded` | `failed` | время | нет | Прогон не уложился в лимит времени. |
 | `diff_fetch_failed` | `failed` | GitHub | да: прогон | Не удалось получить дифф из GitHub. |
 | `bitbucket_fetch_failed` | `failed` | Bitbucket Cloud, обязательное чтение | да: прогон, не более 3 попыток | Не удалось получить данные ревью из Bitbucket. |
-| `bitbucket_request_budget_exceeded` | `failed` | Bitbucket Cloud, лимит 800 HTTP-запросов на попытку | нет для обязательного чтения; в необязательном L2/L3/RAG контексте ревью продолжается по diff | Лимит запросов к Bitbucket для ревью исчерпан. |
+| `bitbucket_request_budget_exceeded` | `failed` | Bitbucket Cloud, лимит 800 HTTP-запросов на попытку; необязательный контекст ограничен первыми 400 запросами, остальные оставлены для конвенций и `pr_meta` | нет для обязательного чтения; при достижении лимита в необязательном L2/L3/RAG контексте ревью продолжается по diff | Лимит запросов к Bitbucket для ревью исчерпан. |
 | `bitbucket_invalid_response` | `failed` | Bitbucket Cloud, некорректный ответ при обязательном чтении | нет | Bitbucket вернул некорректные данные для ревью. |
 | `commit_messages_fetch_failed` | `failed` | GitHub | да: прогон | Не удалось получить сообщения коммитов PR из GitHub. |
+| `bitbucket_commit_messages_fetch_failed` | `failed` | Bitbucket Cloud | да: прогон, не более 3 попыток | Не удалось получить сообщения коммитов PR из Bitbucket. |
 | `pr_base_changed` | `failed` | GitHub | нет | Целевая ветка PR изменилась после запуска ревью. Перезапустите ревью из UI. |
 | `github_forbidden` | `failed` | GitHub | нет | У GitHub App нет доступа к репозиторию или PR. |
 | `github_publish_failed` | `failed` | GitHub | до 3 безопасных повторов §5.2; прогон — нет | Не удалось завершить публикацию ревью в GitHub. |

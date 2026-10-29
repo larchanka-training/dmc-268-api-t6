@@ -382,6 +382,8 @@ def test_two_portal_workspaces_index_same_remote_uuid_without_cross_tenant_reads
                 )
                 await work.commit()
 
+            raw_user_reads: list[str] = []
+
             def respond(request: httpx.Request) -> httpx.Response:
                 assert request.url.host == "api.bitbucket.org"
                 token = request.headers["Authorization"]
@@ -470,6 +472,7 @@ def test_two_portal_workspaces_index_same_remote_uuid_without_cross_tenant_reads
                         content=b"def target():\n    return 0\n" if revision != _HEAD else lib,
                     )
                 if path.endswith("/user.py"):
+                    raw_user_reads.append(path)
                     return httpx.Response(200, content=user)
                 raise AssertionError(path)
 
@@ -543,6 +546,7 @@ def test_two_portal_workspaces_index_same_remote_uuid_without_cross_tenant_reads
                         "bitbucket-rag-worker",
                     )
                     trace = TransactionalRunTrace(partial(SqlAlchemyRunTraceUnitOfWork, factory))
+                    raw_user_reads.clear()
                     async with resources.attempt(
                         claimed=claimed,
                         expected_input=expected_input,
@@ -553,6 +557,11 @@ def test_two_portal_workspaces_index_same_remote_uuid_without_cross_tenant_reads
                         await stage.begin(run_id)
                         payload = await stage.run(run_id)
                     assert payload is not None
+                    # The complete Bitbucket diff proves user.py unchanged. Its
+                    # revision-bound pseudo blob IDs differ, but base reads must
+                    # reuse the head file instead of fetching the old raw path.
+                    assert any(f"/src/{_HEAD}/user.py" in path for path in raw_user_reads)
+                    assert not any(f"/src/{'b' * 40}/user.py" in path for path in raw_user_reads)
                     async with factory() as session:
                         first_payload = (
                             await session.execute(

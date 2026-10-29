@@ -15,6 +15,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Path, Query, Request
 from fastapi.dependencies.models import Dependant
+from fastapi.encoders import jsonable_encoder
 from fastapi.exception_handlers import request_validation_exception_handler
 from fastapi.exceptions import RequestValidationError
 from fastapi.openapi.utils import get_openapi
@@ -370,7 +371,9 @@ async def render_validation_error(request: Request, exc: RequestValidationError)
             return await request_validation_exception_handler(request, exc)
         except UnicodeEncodeError:
             # JSONResponse cannot encode a lone surrogate in a rejected value (#149).
-            pass
+            # Keep FastAPI's error fields on other providers, with escaped JSON text.
+            content = json.dumps({"detail": jsonable_encoder(exc.errors())}, ensure_ascii=True)
+            return Response(content=content, status_code=422, media_type="application/json")
     detail = [
         {
             "type": error["type"],

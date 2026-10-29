@@ -14,6 +14,7 @@ import logging
 import time
 from collections import Counter
 from collections.abc import Callable
+from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from hashlib import sha256
@@ -372,6 +373,7 @@ class ReviewContextStage:
         merge_base: MergeBaseProvider,
         prepare_policy: PreparePolicySnapshot,
         context_builder: Callable[[RunVcsInput], BuildReviewContext],
+        context_budget: Callable[[], AbstractContextManager[None]] | None = None,
         trace: RunTrace | None = None,
         token_budget: int = FAST_CONTEXT_TOKEN_BUDGET,
         builtin_excluded: Callable[[str], bool] = lambda path: False,
@@ -384,6 +386,7 @@ class ReviewContextStage:
         self._merge_base = merge_base
         self._prepare_policy = prepare_policy
         self._context_builder = context_builder
+        self._context_budget = context_budget
         self._trace = trace
         self._token_budget = token_budget
         # Built-in exclusions of the service (generated files): part of the effective
@@ -667,14 +670,15 @@ class ReviewContextStage:
                     # composition's counter (four characters per token), so its numbers stay.
                     profile = self._snapshot_for_llm.execution_profile
                     builder = builder.with_counter(token_counter_for(profile.counter_version))
-                payload = await builder.execute(
-                    diff_map=diff_map,
-                    snapshot=snapshot,
-                    matcher=matcher,
-                    ignore=ignore,
-                    token_budget=self._token_budget,
-                    rag=None if rag is None else rag.plan,
-                )
+                with self._context_budget() if self._context_budget is not None else nullcontext():
+                    payload = await builder.execute(
+                        diff_map=diff_map,
+                        snapshot=snapshot,
+                        matcher=matcher,
+                        ignore=ignore,
+                        token_budget=self._token_budget,
+                        rag=None if rag is None else rag.plan,
+                    )
                 step.response = context_summary(
                     diff_map, payload, pr_base_sha=self._pr_base_sha
                 ) | {"coverage": coverage.to_json()}

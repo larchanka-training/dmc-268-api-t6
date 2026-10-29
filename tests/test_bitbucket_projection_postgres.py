@@ -536,8 +536,13 @@ def test_projection_current_head_metadata_push_and_disconnect(
                     return httpx.Response(404)
                 if request.url.path.endswith("/pullrequests/17/commits"):
                     pr_commit_reads.append(str(request.url))
+                    assert dict(request.url.params) == {"pagelen": "1"}
                     return httpx.Response(
-                        200, json={"values": [{"hash": "c" * 40}, {"hash": "d" * 40}]}
+                        200,
+                        json={
+                            "values": [{"hash": "d" * 40}],
+                            "next": str(request.url) + "&page=67Fg",
+                        },
                     )
                 if request.url.path.endswith(f"/commit/{remote_head[0][:12]}"):
                     if remote_head[0] == "d" * 40:

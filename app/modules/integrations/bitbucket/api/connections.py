@@ -28,7 +28,14 @@ router = APIRouter(
     dependencies=[Depends(get_auth_scope)],
 )
 
-_WEBHOOK_EVENTS = [
+WebhookEvent = Literal[
+    "repo:push",
+    "pullrequest:created",
+    "pullrequest:updated",
+    "pullrequest:fulfilled",
+    "pullrequest:rejected",
+]
+_WEBHOOK_EVENTS: list[WebhookEvent] = [
     "repo:push",
     "pullrequest:created",
     "pullrequest:updated",
@@ -94,11 +101,11 @@ class DiscoveryRequest(_WorkspaceTokenRequest):
 
 class DiscoveredRepository(ApiDto):
     uuid: UUID
-    workspace_slug: str
-    slug: str
-    name: str
+    workspace_slug: str = Field(min_length=1)
+    slug: str = Field(min_length=1)
+    name: str = Field(min_length=1)
     is_private: bool
-    html_url: str
+    html_url: str = Field(min_length=1)
 
 
 class DiscoveryResponse(ApiDto):
@@ -107,9 +114,9 @@ class DiscoveryResponse(ApiDto):
 
 
 class WebhookSetup(ApiDto):
-    url: str
-    events: list[str]
-    secret: str
+    url: str = Field(min_length=1)
+    events: list[WebhookEvent]
+    secret: str = Field(min_length=1)
 
 
 class ConnectResponse(ApiDto):
@@ -136,7 +143,7 @@ class ConnectionItem(ApiDto):
 
 class ConnectionList(ApiDto):
     connections: list[ConnectionItem]
-    next_cursor: str | None
+    next_cursor: None
 
 
 def _raise_management(error: BitbucketManagementError) -> NoReturn:

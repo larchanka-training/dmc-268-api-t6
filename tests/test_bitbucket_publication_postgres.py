@@ -36,6 +36,7 @@ from app.modules.reviews.application.vcs_diff import PullRequestLocator
 from app.modules.reviews.infrastructure.bitbucket_publication_resources import (
     BitbucketInstalledPublicationResources,
 )
+from app.modules.reviews.infrastructure.run_lifecycle_store import SqlAlchemyRunLifecycleStore
 from tests.test_bitbucket_connections_postgres import _config
 
 pytest_plugins = ("tests.test_bitbucket_connections_postgres",)
@@ -175,6 +176,13 @@ def test_installed_publication_checks_origin_and_releases_db_before_http(
                 )
             assert type(external_id) is int
             assert type(repository_external_id) is int
+            async with sessions() as session:
+                persisted_context = await SqlAlchemyRunLifecycleStore(session).publish_context(
+                    run_id
+                )
+            assert persisted_context is not None
+            assert persisted_context.vcs_input is not None
+            assert persisted_context.vcs_input.base_ref == "main"
             finding = PublishedFinding(
                 "src/app.py",
                 3,
