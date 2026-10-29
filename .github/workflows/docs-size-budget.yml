@@ -1,0 +1,57 @@
+name: Docs size budget
+
+# Non-blocking warning for a PR that grows a top-level docs/*.md file over the size budget (#380):
+# agents read the specs by section, and a spec that keeps growing past the budget outruns its
+# reading map. The job never fails on size and is not a required check of ruleset `main`.
+on:
+  pull_request:
+    paths:
+      - "docs/*.md"
+      - ".github/workflows/docs-size-budget.yml"
+
+permissions:
+  contents: read
+
+env:
+  DOCS_SIZE_BUDGET_BYTES: "81920"
+
+jobs:
+  docs-size-budget:
+    name: Docs size budget
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          # The PR merge commit and both parents: HEAD^1 is the base branch tip.
+          fetch-depth: 2
+
+      - name: Compare top-level docs sizes
+        run: |
+          budget="${DOCS_SIZE_BUDGET_BYTES}"
+          # Added or modified files only; a rename counts as a new file, a deletion is skipped.
+          changed="$(git diff --no-renames --diff-filter=AM --name-only HEAD^1 HEAD)"
+          rows=""
+          while IFS= read -r path; do
+            [[ "${path}" =~ ^docs/[^/]+\.md$ ]] || continue
+            after="$(git cat-file -s "HEAD:${path}")"
+            before=0
+            if git cat-file -e "HEAD^1:${path}" 2>/dev/null; then
+              before="$(git cat-file -s "HEAD^1:${path}")"
+            fi
+            if (( after > budget && after > before )); then
+              echo "::warning file=${path}::${path} grew from ${before} to ${after} bytes, over the ${budget}-byte budget (#380)"
+              rows+="| \`${path}\` | ${before} | ${after} | +$((after - before)) | ${budget} |"$'\n'
+            fi
+          done <<< "${changed}"
+          if [[ -n "${rows}" ]]; then
+            {
+              echo "### Top-level docs over the size budget"
+              echo
+              echo "| File | Before, bytes | After, bytes | Delta | Budget, bytes |"
+              echo "|---|---|---|---|---|"
+              printf '%s' "${rows}"
+            } >> "${GITHUB_STEP_SUMMARY}"
+          else
+            echo "No top-level docs/*.md file grew over the ${budget}-byte budget." >> "${GITHUB_STEP_SUMMARY}"
+          fi
