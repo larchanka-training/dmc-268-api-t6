@@ -132,6 +132,7 @@ def test_warns_for_top_level_docs_that_grew_over_the_budget(tmp_path: Path) -> N
         "docs/leaving.md": budget + 1,
         "docs/with space.md": budget - 100,
         "docs/\u00fcbersicht.md": budget - 900,
+        "docs/line\nbreak.md": budget - 900,
         "docs/deleted_over.md": budget + 1,
         "docs/sub/nested_over.md": budget - 900,
         "docs/big.txt": 10,
@@ -147,6 +148,7 @@ def test_warns_for_top_level_docs_that_grew_over_the_budget(tmp_path: Path) -> N
         _write(repo, "docs/new_over.md", budget + 100)
         _write(repo, "docs/with space.md", budget + 100)
         _write(repo, "docs/\u00fcbersicht.md", budget + 100)
+        _write(repo, "docs/line\nbreak.md", budget + 100)
         _write(repo, "docs/sub/nested_over.md", budget + 100)
         _write(repo, "docs/big.txt", budget + 100)
         _git(repo, "mv", "docs/rename_src.md", "docs/rename_dst.md")
@@ -160,8 +162,9 @@ def test_warns_for_top_level_docs_that_grew_over_the_budget(tmp_path: Path) -> N
     stdout, summary = _run(tmp_path, base, change)
 
     warned = re.findall(r"(?m)^::warning file=([^:]+)::", stdout)
-    # A pure rename (rename_dst), a same-size edit (same_size_over) and a move out of the top
-    # level (sub/leaving) stay silent; a rename that grew is compared with its old path.
+    # A pure rename (rename_dst), a same-size edit (same_size_over), a move out of the top level
+    # (sub/leaving) and a name with a newline (line\nbreak) stay silent; a rename that grew is
+    # compared with its old path.
     assert sorted(warned) == [
         "docs/cross.md",
         "docs/grow_over.md",
@@ -185,6 +188,8 @@ def test_warns_for_top_level_docs_that_grew_over_the_budget(tmp_path: Path) -> N
     for path, before in rows.items():
         after = budget + 100
         assert f"| `{path}` | {before} | {after} | +{after - before} | {budget} |" in summary
+    assert stdout.count("::warning") == len(warned)
+    assert "break.md" not in stdout + summary
     assert summary.count("\n| `docs/") == len(warned)
 
 

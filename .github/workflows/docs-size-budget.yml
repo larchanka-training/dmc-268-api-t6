@@ -34,7 +34,8 @@ jobs:
           # Added, modified and renamed files as NUL-separated records, so that a non-ASCII name is
           # not quoted; they go through a file because a shell variable cannot hold NUL. A rename is
           # checked under its new path and compared with the size of its old path; a deletion is
-          # not listed.
+          # not listed. A name with a control character (a newline would forge a workflow command
+          # in the annotation) is skipped.
           diff_file="$(mktemp)"
           trap 'rm -f "${diff_file}"' EXIT
           git diff -M --diff-filter=AMR --name-status -z HEAD^1 HEAD > "${diff_file}"
@@ -45,7 +46,7 @@ jobs:
             if [[ "${status}" == R* ]]; then
               IFS= read -r -d '' path
             fi
-            [[ "${path}" =~ ^docs/[^/]+\.md$ ]] || continue
+            [[ "${path}" =~ ^docs/[^/[:cntrl:]]+\.md$ ]] || continue
             after="$(git cat-file -s "HEAD:${path}")"
             before=0
             if [[ "${status}" != A ]]; then
