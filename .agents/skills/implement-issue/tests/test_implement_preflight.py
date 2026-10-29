@@ -11,7 +11,7 @@ numbering, paging of blockers and of the timeline past one page, the Kickoff and
 board Status; the REF grammar, exit codes 2 and 3, and the argv and queries the script
 hands to `gh` (read-only, never a mutation).
 """
-# SYNC: mirrored in dmc-268-{ui,api}-t6/.agents/skills/implement-issue/tests/test_preflight.py
+# SYNC: mirrored in dmc-268-{ui,api}-t6/.agents/skills/implement-issue/tests/test_implement_preflight.py
 
 from __future__ import annotations
 
