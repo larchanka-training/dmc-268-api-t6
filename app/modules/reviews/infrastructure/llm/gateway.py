@@ -76,7 +76,10 @@ from app.modules.reviews.application.review_result_cache import (
     ReviewResultIdentity,
     ReviewResultModel,
     ReviewResultOperation,
+    ReviewResultSource,
     review_result_cache_key,
+    review_result_entry,
+    stored_review_result,
 )
 from app.modules.reviews.application.run_failures import RunFailure
 
@@ -105,6 +108,7 @@ from app.modules.reviews.infrastructure.llm.transport import (
     TransportError,
     TransportPaidAnswerError,
     extract_text_content,
+    provider_request_options,
 )
 
 logger = logging.getLogger(__name__)
@@ -387,7 +391,14 @@ class LlmGateway:
             if last.output is not None:
                 # Ledger and llm.call of this primary, retry, or repair have returned.
                 # The key is still the original messages and the primary model.
-                await self._remember_review_result(cache_key, last.output)
+                call_id = None if manifest is None else manifest.call_id
+                await self._remember_review_result(
+                    cache_key,
+                    last.output,
+                    run_id=context.run_id,
+                    call_id=call_id,
+                    manifest_id=None if call_id is None else state.manifests.get(call_id),
+                )
                 return self._result(primary, last, state, manifest)
             assert last.error is not None
             rate_limit_hint = _longest_retry_after(rate_limit_hint, last)
@@ -568,6 +579,7 @@ class LlmGateway:
             output_schema_version=_output_schema_version(task),
             profile_version=_profile_version(task, primary),
             rendered_input_digest=rendered_messages_sha256(task.messages),
+            request_options_digest=_request_options_digest(primary, task.schema),
         )
         return review_result_cache_key(identity)
 
@@ -591,43 +603,98 @@ class LlmGateway:
             return None
         if not isinstance(stored, dict):
             return None
+        unpacked = stored_review_result(stored)
+        if unpacked is None:
+            self._reject_cached_entry(context, task, "envelope")
+            return None
+        answer, source = unpacked
         try:
-            validated = task.validate(json.dumps(stored, ensure_ascii=False))
+            validated = task.validate(json.dumps(answer, ensure_ascii=False))
         except Exception as error:
-            logger.warning(
-                "review result cache entry rejected error_type=%s",
-                type(error).__name__,
-                extra={"run_id": str(context.run_id), "operation": task.operation},
-            )
+            self._reject_cached_entry(context, task, type(error).__name__)
+            return None
+        if not self._cached_answer_passes_manifest(task, context, validated):
             return None
         try:
             await self._trace.record_result_cache_hit(
-                context.run_id, task.operation, started_at=self._clock.now()
+                context.run_id,
+                task.operation,
+                started_at=self._clock.now(),
+                source_run_id=source.run_id,
+                source_call_id=source.call_id,
+                source_manifest_id=source.manifest_id,
             )
         except Exception:
             logger.exception(
                 "llm.result_cache trace write failed",
                 extra={"run_id": str(context.run_id), "operation": task.operation},
             )
+        # The ids name the stored source call. The manifest object is this run's:
+        # attribution and the verifier guard check the current prompt, not a copy.
         return GatewayResult(
             output=validated,
             provider=primary.provider,
             model=primary.model,
             usage=(),
             calls=0,
-            accepted_call_id=None if task.base_manifest is None else task.base_manifest.call_id,
+            accepted_call_id=source.call_id,
             accepted_manifest=task.base_manifest,
-            accepted_manifest_id=None,
+            accepted_manifest_id=source.manifest_id,
+        )
+
+    def _cached_answer_passes_manifest(
+        self,
+        task: StructuredTask,
+        context: RunCallContext,
+        output: dict[str, object],
+    ) -> bool:
+        """False when ``check_answer`` rejects ``output`` against this run's manifest.
+
+        A rejection is a miss: the gateway calls the model, which can still repair.
+        """
+        if task.check_answer is None:
+            return True
+        assert task.base_manifest is not None
+        try:
+            errors = task.check_answer(output, task.base_manifest)
+        except Exception as error:
+            self._reject_cached_entry(context, task, type(error).__name__)
+            return False
+        if not errors:
+            return True
+        self._reject_cached_entry(context, task, "manifest_check")
+        return False
+
+    @staticmethod
+    def _reject_cached_entry(
+        context: RunCallContext, task: StructuredTask, error_type: str
+    ) -> None:
+        logger.warning(
+            "review result cache entry rejected error_type=%s",
+            error_type,
+            extra={"run_id": str(context.run_id), "operation": task.operation},
         )
 
     async def _remember_review_result(
-        self, cache_key: str | None, output: dict[str, object]
+        self,
+        cache_key: str | None,
+        output: dict[str, object],
+        *,
+        run_id: UUID,
+        call_id: UUID | None,
+        manifest_id: UUID | None,
     ) -> None:
-        """Store an accepted primary answer. A failed write does not fail the run."""
+        """Store an accepted primary answer and its source. A failed write does not fail the run."""
         if cache_key is None or self._result_cache is None:
             return
         try:
-            await self._result_cache.set(cache_key, cast(dict[str, Any], output))
+            await self._result_cache.set(
+                cache_key,
+                review_result_entry(
+                    cast(dict[str, Any], output),
+                    ReviewResultSource(run_id=run_id, call_id=call_id, manifest_id=manifest_id),
+                ),
+            )
         except Exception as error:
             logger.warning(
                 "review result cache set failed error_type=%s",
@@ -1365,6 +1432,17 @@ def _legacy_model_profile_version(profile: ModelProfile) -> str:
             "max_output_tokens": profile.max_output_tokens,
             "chars_per_token": profile.chars_per_token,
         },
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    )
+    return sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _request_options_digest(profile: ModelProfile, schema: ResponseSchema) -> str:
+    """SHA-256 of the provider body ``_request_body`` sends, without the messages."""
+    canonical = json.dumps(
+        provider_request_options(profile, schema),
         sort_keys=True,
         separators=(",", ":"),
         ensure_ascii=False,
