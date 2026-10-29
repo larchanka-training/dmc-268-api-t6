@@ -1,5 +1,6 @@
 """Bitbucket's published contracts describe the supported review path and settings."""
 
+import re
 from pathlib import Path
 
 from openapi_spec_validator.readers import read_from_filename
@@ -8,6 +9,7 @@ from app.modules.reviews.application.review_path import (
     SNAPSHOT_REVIEW_PROMPT_VERSIONS,
     SNAPSHOT_REVIEW_PROVIDERS,
 )
+from app.modules.reviews.application.run_failures import KNOWN_ERROR_CODES
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -99,3 +101,52 @@ def test_pipeline_trace_table_keeps_upstream_manifest_and_bitbucket_rows() -> No
     assert "| `context.manifest` — только snapshot-путь с закреплённым v4 или v5" in trace_table
     assert "| `bitbucket.publish_review`" in trace_table
     assert "на `main` — `{outcome: not_ready" not in trace_table
+
+
+def test_bitbucket_error_catalog_names_all_runtime_codes_and_byte_budget() -> None:
+    pipeline = (ROOT / "docs/PIPELINE_SPEC.md").read_text()
+    catalog = pipeline.split("## 6. Каталог `error_code`", 1)[1].split("## 6.1", 1)[0]
+    for code in KNOWN_ERROR_CODES:
+        if code.startswith("bitbucket_"):
+            assert f"| `{code}` |" in catalog
+    assert "32 MiB" in catalog
+    assert "необязательн" in catalog
+    assert "байт" in catalog
+
+
+def test_context_build_trace_documents_shared_reason_values() -> None:
+    pipeline = (ROOT / "docs/PIPELINE_SPEC.md").read_text()
+    trace_table = pipeline.split("| `tool` | `request`", 1)[1].split("\n\n", 1)[0]
+    context_row = next(
+        line for line in trace_table.splitlines() if line.startswith("| `context.build`")
+    )
+    assert "`tree_unavailable`" in context_row
+    assert "`budget`" in context_row
+    assert "GitHub, GitLab и Bitbucket" in context_row
+
+
+def test_bitbucket_downgrade_example_uses_existing_revisions() -> None:
+    cicd = (ROOT / "docs/CICD.md").read_text()
+    example = cicd.split("Например, ручной downgrade", 1)[1].split("полный актуальный состав", 1)[0]
+    listed = set(re.findall(r"\b2026\d{4}_00(?:4[4-9]|5[01])\b", example))
+    actual = {
+        path.stem[:13]
+        for path in (ROOT / "alembic/versions").glob("*.py")
+        if re.fullmatch(r"2026\d{4}_00(?:4[4-9]|5[01])", path.stem[:13])
+    }
+    assert listed == actual
+
+
+def test_bitbucket_live_acceptance_preserves_operator_probes() -> None:
+    plan = (
+        (ROOT / "docs/TEST_PLAN.md").read_text().split("## Bitbucket Cloud acceptance (#333)", 1)[1]
+    )
+    for expected in (
+        "HTTP-date",
+        "один бакет квот",
+        "недоступного fork",
+        "более новый Run того же head",
+        "migration head",
+        "public API origin",
+    ):
+        assert expected in plan
