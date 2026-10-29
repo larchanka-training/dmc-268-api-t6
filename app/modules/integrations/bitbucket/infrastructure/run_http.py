@@ -28,6 +28,7 @@ _MAX_REQUESTS = 800
 # Context excerpts are optional. Leave half the attempt budget for the bounded
 # conventions tree, commit prefix and canonical checks that follow the context stage.
 _MAX_CONTEXT_REQUESTS = 400
+_MAX_CONTEXT_BYTES = _TOTAL_BYTES // 2
 _TIMEOUT_SECONDS = 10.0
 
 
@@ -84,6 +85,7 @@ class BitbucketRunHttp:
         self._read_bytes = 0
         self._requests = 0
         self._context_limit: int | None = None
+        self._context_bytes_limit: int | None = None
 
     @property
     def request_count(self) -> int:
@@ -92,11 +94,18 @@ class BitbucketRunHttp:
     @contextmanager
     def optional_context_budget(self) -> Iterator[None]:
         previous_limit = self._context_limit
+        previous_bytes_limit = self._context_bytes_limit
         self._context_limit = _MAX_CONTEXT_REQUESTS
+        remaining = max(0, _TOTAL_BYTES - self._read_bytes)
+        self._context_bytes_limit = min(
+            previous_bytes_limit if previous_bytes_limit is not None else _TOTAL_BYTES,
+            self._read_bytes + min(_MAX_CONTEXT_BYTES, remaining // 2),
+        )
         try:
             yield
         finally:
             self._context_limit = previous_limit
+            self._context_bytes_limit = previous_bytes_limit
 
     def allow_source_repository(self, source: UUID) -> None:
         if type(source) is not UUID:
@@ -147,6 +156,8 @@ class BitbucketRunHttp:
             raise ValueError("invalid Bitbucket run path")
         if self._requests >= min(_MAX_REQUESTS, self._context_limit or _MAX_REQUESTS):
             raise BitbucketRunHttpError("request_budget_exceeded")
+        if self._context_bytes_limit is not None and self._read_bytes >= self._context_bytes_limit:
+            raise BitbucketRunHttpError("total_budget_exceeded")
         try:
             credential = await self._credentials.credential_for(self.target)
         except (
@@ -185,6 +196,11 @@ class BitbucketRunHttp:
                     if length > max_bytes:
                         raise BitbucketRunHttpError("body_too_large")
                     if self._read_bytes + length > _TOTAL_BYTES:
+                        raise BitbucketRunHttpError("total_budget_exceeded")
+                    if (
+                        self._context_bytes_limit is not None
+                        and self._read_bytes + length > self._context_bytes_limit
+                    ):
                         raise BitbucketRunHttpError("total_budget_exceeded")
                     chunks.append(chunk)
         except httpx.RequestError:
