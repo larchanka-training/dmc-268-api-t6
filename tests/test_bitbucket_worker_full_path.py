@@ -22,6 +22,7 @@ from app.bootstrap.bitbucket_reviews import (
 )
 from app.modules.integrations.bitbucket.infrastructure.run_http import (
     BitbucketRunHttp,
+    BitbucketRunHttpError,
 )
 from app.modules.reviews.application.bitbucket_status import BitbucketStatusSnapshot
 from app.modules.reviews.application.check_runs import RunProviderCheckpoint
@@ -49,7 +50,7 @@ from app.modules.reviews.application.review_output import (
 )
 from app.modules.reviews.application.review_path import ReviewBinding, require_served_provider
 from app.modules.reviews.application.run_coverage import restore_run_coverage
-from app.modules.reviews.application.run_failures import RunFailure
+from app.modules.reviews.application.run_failures import RunCancelled, RunFailure
 from app.modules.reviews.application.store_review_output import PublishingGuard
 from app.modules.reviews.application.vcs_diff import (
     PullRequestLocator,
@@ -130,6 +131,71 @@ def test_composed_bitbucket_attempt_ignores_proxy_environment(
             checkpoint=_checkpoint,
         ):
             pass
+
+    asyncio.run(scenario())
+
+
+def test_bootstrap_attempt_honors_pinned_target_and_context_byte_reserve(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The real resource assembly connects both guards to the same HTTP attempt."""
+    seen: list[str] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        seen.append(path)
+        if path == f"{PREFIX}/pullrequests/7":
+            return httpx.Response(200, json=_pr())
+        if path == f"{PREFIX}/diffstat/{HEAD}..{BASE}":
+            return httpx.Response(200, json={"size": 0, "values": []})
+        if path == f"{PREFIX}/src/{HEAD}/probe":
+            return httpx.Response(200, content=b"x" * 60)
+        raise AssertionError(path)
+
+    resources = BitbucketReviewWorkerResources.__new__(BitbucketReviewWorkerResources)
+    resources._sessions = cast(async_sessionmaker[AsyncSession], object())
+    resources._credentials = cast(Any, Credentials())
+    resources._profile = UNPINNED_EXECUTION_PROFILE
+    resources._redis = None
+    resources._transports = lambda: httpx.MockTransport(respond)
+
+    async def target(*_args: object) -> object:
+        return TARGET
+
+    monkeypatch.setattr(resources, "_target", target)
+    run = RunVcsInput(UUID(int=5), TARGET.repository_id, HEAD, BASE, _locator(), "release")
+
+    async def scenario() -> None:
+        async with resources.attempt(
+            claimed=ClaimedAttempt(
+                RUN_ID,
+                TARGET.workspace_id,
+                2,
+                "fast",
+                datetime.now(UTC) + timedelta(minutes=5),
+                UUID(int=41),
+                UUID(int=4),
+                "bitbucket-worker",
+            ),
+            expected_input=run,
+            checkpoint=_checkpoint,
+        ) as bundle:
+            with pytest.raises(RunCancelled) as cancelled:
+                await bundle.vcs.get_pull_request(run.locator, checkpoint=_checkpoint)
+            assert str(cancelled.value) == "superseded"
+            assert seen == [f"{PREFIX}/pullrequests/7"]
+
+            # Exercise the callback supplied to the real context stage. A response
+            # that fits the attempt's remaining 100 bytes must be stopped by its
+            # smaller optional-context reserve, then remain readable after it.
+            http = bundle.vcs._http
+            http._read_bytes = 32 * 1024 * 1024 - 100
+            context_budget = bundle.context_stage._context_budget
+            assert context_budget is not None
+            with context_budget(), pytest.raises(BitbucketRunHttpError) as exhausted:
+                await http.get_bytes(DEST, f"src/{HEAD}/probe", max_bytes=60)
+            assert exhausted.value.error_code == "bitbucket_response_budget_exceeded"
+            assert await http.get_bytes(DEST, f"src/{HEAD}/probe", max_bytes=60) == b"x" * 60
 
     asyncio.run(scenario())
 
@@ -303,11 +369,14 @@ def test_bitbucket_full_mocked_review_never_uses_github_or_gitlab(
 
 
 @pytest.mark.parametrize(
-    ("technical_only", "context_budget_exceeded"),
-    [(False, False), (True, False), (False, True)],
+    ("technical_only", "context_budget_exceeded", "context_byte_budget_exceeded"),
+    [(False, False, False), (True, False, False), (False, True, False), (False, False, True)],
 )
 def test_composed_bitbucket_review_uses_pinned_cloud_reads_and_writes(
-    monkeypatch: pytest.MonkeyPatch, technical_only: bool, context_budget_exceeded: bool
+    monkeypatch: pytest.MonkeyPatch,
+    technical_only: bool,
+    context_budget_exceeded: bool,
+    context_byte_budget_exceeded: bool,
 ) -> None:
     """The worker's VCS, policy, source and context adapters share one pinned Cloud route."""
     source_bytes = b"def compute():\n    return 2\n"
@@ -498,6 +567,18 @@ def test_composed_bitbucket_review_uses_pinned_cloud_reads_and_writes(
                 ),
             )
             cache = InMemoryBlobCache()
+
+            def context_builder(selected: RunVcsInput) -> BuildReviewContext:
+                if context_byte_budget_exceeded:
+                    # A prior large mandatory read left 1.1 KiB in this attempt.
+                    # The optional source read fits, but later required reads do not.
+                    http._read_bytes = 32 * 1024 * 1024 - 1100
+                return (RequestBudgetContext if context_budget_exceeded else BuildReviewContext)(
+                    source=BitbucketRevisionSource(trees=trees, locator=selected.locator),
+                    parser=Parser(),
+                    counter=EstimatedTokenCounter(),
+                )
+
             stage = ReviewContextStage(
                 runs=runs,
                 checkpoint=_checkpoint,
@@ -509,13 +590,7 @@ def test_composed_bitbucket_review_uses_pinned_cloud_reads_and_writes(
                         trees=trees, policy_base_sha=pins.policy_base_sha
                     ),
                 ),
-                context_builder=lambda selected: (
-                    RequestBudgetContext if context_budget_exceeded else BuildReviewContext
-                )(
-                    source=BitbucketRevisionSource(trees=trees, locator=selected.locator),
-                    parser=Parser(),
-                    counter=EstimatedTokenCounter(),
-                ),
+                context_builder=context_builder,
                 context_budget=http.optional_context_budget,
                 trace=trace,
                 payloads=trace,
@@ -784,16 +859,25 @@ def test_composed_bitbucket_review_uses_pinned_cloud_reads_and_writes(
             else:
                 assert agents_bytes.decode().strip() in prompt_text
                 assert "Check changed function behavior." in prompt_text
-                if context_budget_exceeded:
+                if context_budget_exceeded or context_byte_budget_exceeded:
                     assert stage.payload is not None
                     assert ContextLevel.L3 not in stage.payload.levels_present
                     assert "def compute():" in prompt_text
                     assert len(answers.requests) == 1
-                    assert http.request_count > 400
+                    if context_budget_exceeded:
+                        assert http.request_count > 400
                     assert http.request_count < 800
                     assert any(
                         request.url.path == f"{PREFIX}/pullrequests/7/commits" for request in seen
                     )
+                    context_steps = [
+                        response for tool, _, response in trace.steps if tool == "context.build"
+                    ]
+                    assert len(context_steps) == 1
+                    assert context_steps[0]["reason"] == "tree_unavailable"
+                    assert {item["reason"] for item in context_steps[0]["omissions"]} == {
+                        "tree_unavailable"
+                    }
                 else:
                     assert stage.payload is not None
                     assert ContextLevel.L3 in stage.payload.levels_present
