@@ -24,6 +24,7 @@ from app.modules.reviews.application.get_metrics_summary import (
 )
 from app.modules.reviews.infrastructure.models import CodeChange, Finding, Run
 from app.modules.reviews.infrastructure.run_repository import SqlAlchemyRunRepository
+from app.modules.reviews.infrastructure.saved_review_results import load_review_results
 from app.modules.workspaces.infrastructure.models import GitHubUserWorkspaceAccess, Workspace
 from app.modules.workspaces.infrastructure.repository_access import repository_access_predicate
 
@@ -117,7 +118,12 @@ class SqlAlchemyMetricsSummary:
     ) -> tuple[TerminalHead, ...]:
         latest = (
             self._visible(
-                (Run.id, Run.state, SqlAlchemyRunRepository._summary_only_projection()),
+                (
+                    Run.id,
+                    Run.state,
+                    Run.head_sha,
+                    SqlAlchemyRunRepository._summary_only_projection(),
+                ),
                 start,
                 end,
                 repo,
@@ -131,6 +137,7 @@ class SqlAlchemyMetricsSummary:
                 select(
                     latest.c.id,
                     latest.c.state,
+                    latest.c.head_sha,
                     latest.c.summary_only,
                     cast(Finding.severity, String),
                 )
@@ -145,17 +152,26 @@ class SqlAlchemyMetricsSummary:
                 )
             )
         ).all()
-        grouped: dict[UUID, tuple[str, bool, list[str]]] = {}
-        for run_id, state, summary_only, severity in rows:
+        grouped: dict[UUID, list[Any]] = {}
+        for run_id, state, head_sha, summary_only, severity in rows:
             head = grouped.get(run_id)
             if head is None:
-                head = (_state_name(state), bool(summary_only), [])
+                head = [_state_name(state), str(head_sha), bool(summary_only), []]
                 grouped[run_id] = head
             if severity is not None:
-                head[2].append(severity)
+                head[3].append(severity)
+        results = await load_review_results(
+            session,
+            {
+                run_id: item[1]
+                for run_id, item in grouped.items()
+                if item[0] == RunState.SUCCEEDED.value
+            },
+            {run_id: item[3] for run_id, item in grouped.items()},
+        )
         return tuple(
-            TerminalHead(status, summary_only, tuple(severities))
-            for status, summary_only, severities in grouped.values()
+            TerminalHead(item[0], item[2], tuple(item[3]), results.get(run_id))
+            for run_id, item in grouped.items()
         )
 
     async def _finding_counts(

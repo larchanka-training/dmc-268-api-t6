@@ -45,7 +45,12 @@ from app.modules.reviews.application.trigger_from_delivery import (
     RunTriggerOutcome,
     TriggerFromDelivery,
 )
-from app.modules.reviews.application.try_enqueue_webhook_run import EnqueueResult, EnqueueStatus
+from app.modules.reviews.application.try_enqueue_webhook_run import (
+    UNSET,
+    EnqueueResult,
+    EnqueueStatus,
+    UnsetType,
+)
 from tests.github_webhook_fixtures import load_github_webhook_fixture
 from tests.trigger_uow import targets_uow
 
@@ -152,6 +157,7 @@ def test_projected_pr_actions_recheck_current_head_only_on_synchronize(
             expected_head_sha: str,
             *,
             expected_installation_external_id: int | None = None,
+            triggered_by: str | None | UnsetType = UNSET,
         ) -> EnqueueResult:
             enqueued.append((code_change_id, expected_head_sha))
             return EnqueueResult(EnqueueStatus.ENQUEUED)

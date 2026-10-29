@@ -11,8 +11,10 @@ from uuid import UUID
 
 from app.common.application.unit_of_work import UnitOfWork
 from app.modules.reviews.application.try_enqueue_webhook_run import (
+    UNSET,
     EnqueueResult,
     EnqueueStatus,
+    UnsetType,
     describe_enqueue,
 )
 
@@ -39,7 +41,13 @@ class SweepNoCiUnitOfWork(UnitOfWork, Protocol):
 
 
 class WebhookRunEnqueuer(Protocol):
-    async def execute(self, code_change_id: UUID, expected_head_sha: str) -> EnqueueResult: ...
+    async def execute(
+        self,
+        code_change_id: UUID,
+        expected_head_sha: str,
+        *,
+        triggered_by: str | None | UnsetType = UNSET,
+    ) -> EnqueueResult: ...
 
 
 class SweepNoCi:

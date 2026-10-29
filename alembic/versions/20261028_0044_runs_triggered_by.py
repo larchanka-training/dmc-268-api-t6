@@ -18,7 +18,23 @@ depends_on = None
 
 def upgrade() -> None:
     op.add_column("runs", sa.Column("triggered_by", sa.String(length=255), nullable=True))
+    op.create_index(
+        "ix_webhook_events_pull_request_head",
+        "webhook_events",
+        ["installation_external_id", sa.text("(payload #>> '{pull_request,head,sha}')")],
+        postgresql_where=sa.text(
+            "event = 'pull_request' AND action = 'synchronize' AND payload IS NOT NULL"
+        ),
+    )
+    op.create_index(
+        "ix_webhook_events_push_after",
+        "webhook_events",
+        ["installation_external_id", sa.text("(payload #>> '{after}')")],
+        postgresql_where=sa.text("event = 'push' AND payload IS NOT NULL"),
+    )
 
 
 def downgrade() -> None:
+    op.drop_index("ix_webhook_events_push_after", table_name="webhook_events")
+    op.drop_index("ix_webhook_events_pull_request_head", table_name="webhook_events")
     op.drop_column("runs", "triggered_by")

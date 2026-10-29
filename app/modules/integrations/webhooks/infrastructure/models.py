@@ -51,6 +51,20 @@ class WebhookEvent(Base):
             name="ck_webhook_events_projection_attempt_count_nonnegative",
         ),
         Index(
+            "ix_webhook_events_pull_request_head",
+            "installation_external_id",
+            text("(payload #>> '{pull_request,head,sha}')"),
+            postgresql_where=text(
+                "event = 'pull_request' AND action = 'synchronize' AND payload IS NOT NULL"
+            ),
+        ),
+        Index(
+            "ix_webhook_events_push_after",
+            "installation_external_id",
+            text("(payload #>> '{after}')"),
+            postgresql_where=text("event = 'push' AND payload IS NOT NULL"),
+        ),
+        Index(
             "ix_webhook_events_pending_retry",
             "retry_after",
             "received_at",

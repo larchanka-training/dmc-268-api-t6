@@ -2,10 +2,9 @@
 
 from __future__ import annotations
 
-import inspect
-from collections.abc import Awaitable, Callable
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Protocol, cast
+from typing import Protocol
 from uuid import UUID
 
 from app.common.application.unit_of_work import UnitOfWork
@@ -67,6 +66,7 @@ class WebhookRunEnqueuer(Protocol):
         expected_head_sha: str,
         *,
         expected_installation_external_id: int,
+        triggered_by: str | None | UnsetType = UNSET,
     ) -> EnqueueResult: ...
 
 
@@ -135,13 +135,6 @@ class TriggerFromDelivery:
         )
 
 
-def _accepts_triggered_by(method: Callable[..., object]) -> bool:
-    parameters = inspect.signature(method).parameters
-    return "triggered_by" in parameters or any(
-        parameter.kind is inspect.Parameter.VAR_KEYWORD for parameter in parameters.values()
-    )
-
-
 async def _execute(
     enqueuer: WebhookRunEnqueuer,
     code_change_id: UUID,
@@ -150,17 +143,9 @@ async def _execute(
     *,
     triggered_by: str | None | UnsetType,
 ) -> EnqueueResult:
-    execute = enqueuer.execute
-    if triggered_by is not UNSET and _accepts_triggered_by(execute):
-        accepting = cast(Callable[..., Awaitable[EnqueueResult]], execute)
-        return await accepting(
-            code_change_id,
-            head_sha,
-            expected_installation_external_id=installation_external_id,
-            triggered_by=triggered_by,
-        )
-    return await execute(
+    return await enqueuer.execute(
         code_change_id,
         head_sha,
         expected_installation_external_id=installation_external_id,
+        triggered_by=triggered_by,
     )

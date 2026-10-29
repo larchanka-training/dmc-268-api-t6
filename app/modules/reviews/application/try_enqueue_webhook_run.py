@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import inspect
 import logging
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -326,13 +325,6 @@ class TryEnqueueWebhookRun:
         return True
 
 
-def _accepts_triggered_by(method: Callable[..., object]) -> bool:
-    parameters = inspect.signature(method).parameters
-    return "triggered_by" in parameters or any(
-        parameter.kind is inspect.Parameter.VAR_KEYWORD for parameter in parameters.values()
-    )
-
-
 async def _insert_webhook_run(
     store: WebhookRunStore,
     candidate: RunInsertCandidate,
@@ -340,10 +332,7 @@ async def _insert_webhook_run(
     *,
     triggered_by: str | None | UnsetType,
 ) -> PendingRunMessage | DuplicateReason | ActiveRunBlocker:
-    insert = store.insert_webhook_run
-    if _accepts_triggered_by(insert):
-        return await insert(candidate, now, triggered_by=triggered_by)
-    return await insert(candidate, now)
+    return await store.insert_webhook_run(candidate, now, triggered_by=triggered_by)
 
 
 def _consistent_identity(

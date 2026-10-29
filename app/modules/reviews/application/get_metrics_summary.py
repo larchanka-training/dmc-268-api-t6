@@ -11,6 +11,7 @@ from typing import Protocol
 from app.modules.auth.application.scope import AuthScope
 from app.modules.reviews.application.handle_review_run import FAST_RUN_COST_LIMIT
 from app.modules.reviews.application.list_pulls import run_verdict
+from app.modules.reviews.application.saved_review_result import SavedReviewResult
 from app.modules.reviews.application.verdict import SEVERITIES
 
 _RANGES = {"24h": timedelta(hours=24), "7d": timedelta(days=7), "30d": timedelta(days=30)}
@@ -99,6 +100,7 @@ class TerminalHead:
     status: str
     summary_only: bool
     severities: tuple[str, ...]
+    saved_result: SavedReviewResult | None = None
 
 
 @dataclass(frozen=True)
@@ -183,7 +185,7 @@ def _totals(read: MetricsRead) -> MetricsTotals:
     for head in read.terminal_heads:
         if head.status not in _TERMINAL:
             continue
-        bucket = run_verdict(head.status, head.summary_only, head.severities)
+        bucket = run_verdict(head.status, head.summary_only, head.severities, head.saved_result)
         verdicts["no_verdict" if bucket is None else bucket] += 1
     return MetricsTotals(
         runs_by_status=RunsByStatus(

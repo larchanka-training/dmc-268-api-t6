@@ -7,7 +7,7 @@ from datetime import datetime
 from hashlib import sha256
 from uuid import UUID, uuid4
 
-from sqlalchemy import and_, func, or_, select, update
+from sqlalchemy import and_, func, or_, select, union_all, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -290,22 +290,33 @@ class SqlAlchemyWebhookRunStore:
         return PendingRunMessage.from_candidate(inserted, candidate, now)
 
     async def _push_author(self, candidate: RunInsertCandidate) -> str | None:
-        login = await self._session.scalar(
-            select(WebhookEvent.payload["sender"]["login"].as_string())
-            .where(
-                WebhookEvent.event == "pull_request",
-                WebhookEvent.action == "synchronize",
-                WebhookEvent.payload.is_not(None),
-                WebhookEvent.installation_external_id == candidate.ci.installation_external_id,
-                WebhookEvent.payload["repository"]["id"].as_string()
-                == str(candidate.repository_external_id),
-                WebhookEvent.payload["pull_request"]["head"]["sha"].as_string()
-                == candidate.ci.head_sha,
-            )
-            .order_by(WebhookEvent.received_at.desc())
-            .limit(1)
+        if candidate.provider != "github":
+            return None
+        login = WebhookEvent.payload["sender"]["login"].as_string()
+        received = WebhookEvent.received_at
+        shared = (
+            WebhookEvent.payload.is_not(None),
+            WebhookEvent.installation_external_id == candidate.ci.installation_external_id,
+            WebhookEvent.payload["repository"]["id"].as_string()
+            == str(candidate.repository_external_id),
         )
-        return login if isinstance(login, str) else None
+        synchronize = select(login.label("login"), received.label("received_at")).where(
+            WebhookEvent.event == "pull_request",
+            WebhookEvent.action == "synchronize",
+            func.jsonb_extract_path_text(WebhookEvent.payload, "pull_request", "head", "sha")
+            == candidate.ci.head_sha,
+            *shared,
+        )
+        push = select(login.label("login"), received.label("received_at")).where(
+            WebhookEvent.event == "push",
+            func.jsonb_extract_path_text(WebhookEvent.payload, "after") == candidate.ci.head_sha,
+            *shared,
+        )
+        receipts = union_all(synchronize, push).subquery()
+        found = await self._session.scalar(
+            select(receipts.c.login).order_by(receipts.c.received_at.desc()).limit(1)
+        )
+        return found if isinstance(found, str) else None
 
     async def notify_run_updated(self, run_id: UUID, workspace_id: UUID, status: str) -> None:
         payload = json.dumps(

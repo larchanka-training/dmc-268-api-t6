@@ -1,4 +1,4 @@
-"""Run list and detail rows sum every usage event in the same SELECT."""
+"""Run list and detail budget share one sum of every usage event."""
 
 from __future__ import annotations
 
@@ -15,6 +15,7 @@ from sqlalchemy import event, text
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from app.modules.auth.application.scope import AuthScope
+from app.modules.reviews.application.get_run import GetRunDetail
 from app.modules.reviews.infrastructure.run_repository import SqlAlchemyRunRepository
 from tests.portal_postgres import NOW, RUN_ATTEMPTED, RUN_DONE, WS_A, Env, portal_schema
 
@@ -111,6 +112,16 @@ def test_run_usage_sums_both_attempts_without_an_extra_statement_per_run(usage_e
             assert quiet.usage.tokens_in == 0
             assert quiet.usage.tokens_out == 0
             assert quiet.usage.cost_usd == Decimal("0")
+            detail = await GetRunDetail(repository).execute(RUN_DONE)
+            assert detail is not None and detail.budget is not None
+            assert detail.budget.tokens_in == 3
+            assert detail.budget.tokens_out == 5
+            assert detail.budget.cost_usd == Decimal("0.375")
+            assert listed.usage.tokens_in == detail.budget.tokens_in
+            assert listed.usage.tokens_out == detail.budget.tokens_out
+            assert listed.usage.cost_usd == detail.budget.cost_usd
+            quiet_detail = await GetRunDetail(repository).execute(RUN_ATTEMPTED)
+            assert quiet_detail is not None and quiet_detail.budget is None
             assert len(one_run_statements) == len(three_run_statements)
             assert _selects(one_run_statements) == 1
             assert _selects(three_run_statements) == 1
