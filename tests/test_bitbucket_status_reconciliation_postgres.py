@@ -456,22 +456,36 @@ def test_terminal_retirement_keeps_unapplied_blocked_leased_and_nonterminal_rows
 ) -> None:
     db = bitbucket_connection_schema
     engine, workspace, _, _, run_id, remote_repo = _seed_status_run(db)
+    running_run = uuid4()
     db.execute(
         text(
             "UPDATE runs SET state='succeeded',finished_at=now()-interval '2 hours' WHERE id=:run"
         ),
         {"run": run_id},
     )
-    rows = (
-        (1, "succeeded", 3, run_id, "succeeded", None, None, None),
-        (2, "succeeded", 3, run_id, "succeeded", None, "status_unavailable", None),
-        (3, "publishing", 2, run_id, "publishing", None, None, None),
-        (4, "succeeded", 3, None, None, None, None, None),
-        (5, "succeeded", 3, run_id, "running", None, None, None),
-        (6, "succeeded", 3, run_id, "succeeded", 1, None, None),
-        (7, "succeeded", 3, run_id, "succeeded", None, None, uuid4()),
+    db.execute(
+        text(
+            "INSERT INTO runs (id,code_change_id,origin_provider_installation_id,"
+            "base_sha,base_ref,head_sha,state,trigger,idempotency_key,engine,"
+            "rule_version_id,prompt_version_id,available_at,created_at) "
+            "SELECT :id,code_change_id,origin_provider_installation_id,base_sha,base_ref,"
+            "head_sha,'running',trigger,:key,engine,rule_version_id,prompt_version_id,"
+            "now(),now()-interval '2 hours' FROM runs WHERE id=:run"
+        ),
+        {"id": running_run, "key": "e" * 64, "run": run_id},
     )
-    for pr, desired, rank, applied_run, applied, blocked, error, owner in rows:
+    rows = (
+        (1, run_id, "succeeded", 3, run_id, "succeeded", None, None, None),
+        (2, run_id, "succeeded", 3, run_id, "succeeded", None, "status_unavailable", None),
+        (3, run_id, "publishing", 2, run_id, "publishing", None, None, None),
+        (4, run_id, "succeeded", 3, None, None, None, None, None),
+        (5, run_id, "succeeded", 3, run_id, "running", None, None, None),
+        (6, run_id, "succeeded", 3, run_id, "succeeded", 1, None, None),
+        (7, run_id, "succeeded", 3, run_id, "succeeded", None, None, uuid4()),
+        (8, running_run, "running", 1, running_run, "running", None, None, None),
+        (9, run_id, "succeeded", 3, running_run, "succeeded", None, None, None),
+    )
+    for pr, row_run, desired, rank, applied_run, applied, blocked, error, owner in rows:
         db.execute(
             text(
                 "INSERT INTO bitbucket_status_publications "
@@ -488,7 +502,7 @@ def test_terminal_retirement_keeps_unapplied_blocked_leased_and_nonterminal_rows
                 "repo": remote_repo,
                 "pr": pr,
                 "head": f"{pr:040x}",
-                "run": run_id,
+                "run": row_run,
                 "desired": desired,
                 "rank": rank,
                 "applied_run": applied_run,
@@ -513,7 +527,7 @@ def test_terminal_retirement_keeps_unapplied_blocked_leased_and_nonterminal_rows
                         )
                     )
                 ).all()
-            assert remaining == [3, 4, 5, 6, 7]
+            assert remaining == [3, 4, 5, 6, 7, 8, 9]
             async with sessions.begin() as session:
                 await session.execute(
                     text(
@@ -528,6 +542,10 @@ def test_terminal_retirement_keeps_unapplied_blocked_leased_and_nonterminal_rows
                     )
                 )
                 await session.execute(
+                    text("UPDATE runs SET state='succeeded' WHERE id=:run"),
+                    {"run": running_run},
+                )
+                await session.execute(
                     text("UPDATE runs SET state='running' WHERE id=:run"), {"run": run_id}
                 )
             assert await ledger.retire_expired() == 0
@@ -537,6 +555,15 @@ def test_terminal_retirement_keeps_unapplied_blocked_leased_and_nonterminal_rows
                 )
             assert await ledger.retire_expired(limit=1) == 1
             assert await ledger.retire_expired() == 1
+            async with sessions() as session:
+                remaining = (
+                    await session.scalars(
+                        text(
+                            "SELECT pr_number FROM bitbucket_status_publications ORDER BY pr_number"
+                        )
+                    )
+                ).all()
+            assert remaining == [3, 4, 5, 8, 9]
         finally:
             await engine.dispose()
 
@@ -709,12 +736,26 @@ def test_status_failure_without_retry_after_is_deferred_and_not_selected_next_ti
     asyncio.run(scenario())
 
 
-def test_cancelled_fork_with_missing_head_retires_unpublishable_status(
+@pytest.mark.parametrize(
+    ("snapshot_state", "remote_state", "unpublishable"),
+    [
+        ("cancelled", "DECLINED", True),
+        ("cancelled", "OPEN", False),
+        ("failed", "DECLINED", False),
+    ],
+)
+def test_missing_fork_head_retires_only_cancelled_closed_status(
     bitbucket_connection_schema: Connection,
+    snapshot_state: str,
+    remote_state: str,
+    unpublishable: bool,
 ) -> None:
     db = bitbucket_connection_schema
     engine, workspace, installation, repository, run_id, remote_repo = _seed_status_run(db)
-    db.execute(text("UPDATE runs SET state='cancelled' WHERE id=:run"), {"run": run_id})
+    db.execute(
+        text("UPDATE runs SET state=:state WHERE id=:run"),
+        {"state": snapshot_state, "run": run_id},
+    )
     db.execute(
         text(
             "UPDATE code_changes SET state='closed' "
@@ -735,7 +776,7 @@ def test_cancelled_fork_with_missing_head_retires_unpublishable_status(
                 7,
                 "a" * 40,
                 "feature/review",
-                "cancelled",
+                snapshot_state,
                 1,
                 target_branch="main",
             )
@@ -762,7 +803,7 @@ def test_cancelled_fork_with_missing_head_retires_unpublishable_status(
                     200,
                     json={
                         "id": 7,
-                        "state": "DECLINED",
+                        "state": remote_state,
                         "source": {
                             "commit": None,
                             "branch": {"name": "feature/review"},
@@ -781,19 +822,18 @@ def test_cancelled_fork_with_missing_head_retires_unpublishable_status(
                 ledger=ledger,
                 transport_factory=lambda: httpx.MockTransport(respond),
             )
-            await publisher.upsert(run_id, "https://review.example/run")
+            if unpublishable:
+                await publisher.upsert(run_id, "https://review.example/run")
+            else:
+                with pytest.raises(BitbucketStatusUnavailable, match="head is malformed"):
+                    await publisher.upsert(run_id, "https://review.example/run")
             assert len(requests) == 1
             assert await ledger.pending() == []
             async with sessions() as session:
-                assert (
-                    await session.scalar(
-                        text(
-                            "SELECT count(*) FROM bitbucket_status_publications WHERE run_id=:run"
-                        ),
-                        {"run": run_id},
-                    )
-                    == 0
-                )
+                assert await session.scalar(
+                    text("SELECT count(*) FROM bitbucket_status_publications WHERE run_id=:run"),
+                    {"run": run_id},
+                ) == (0 if unpublishable else 1)
         finally:
             await engine.dispose()
 

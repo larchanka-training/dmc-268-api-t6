@@ -129,7 +129,7 @@ def test_installed_publication_checks_origin_and_releases_db_before_http(
                         "INSERT INTO code_changes "
                         "(id,repository_id,external_id,external_number,title,source_branch,"
                         "target_branch,base_sha,head_sha,state,web_url) VALUES "
-                        "(:id,:repo,7,7,'PR','feature','main',:base,:head,'open',:url)"
+                        "(:id,:repo,7,7,'PR','feature','release',:base,:head,'open',:url)"
                     ),
                     {
                         "id": change,
