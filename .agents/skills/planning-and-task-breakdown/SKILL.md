@@ -43,7 +43,8 @@ Before writing any code, operate in read-only mode:
 
 **Do NOT write code during planning.** The output is a plan document saved
 to `docs/plans/<issue>-plan.md` and a task list saved to
-`docs/plans/<issue>-todo.md`, not implementation.
+`docs/plans/<issue>-todo.md`, not implementation. Both are local working
+files and are never committed (see [Output Files](#output-files)).
 
 ### Step 2: Identify the Dependency Graph
 
@@ -173,6 +174,14 @@ performs best on S and M tasks.
 
 Create the `docs/plans/` directory if it does not exist. These are the paths
 the dev-loop agent and other downstream tooling expect.
+
+Plans are local working files, not documentation: `docs/plans/` is in
+`.gitignore`, and CI fails when anything under it is tracked. Never commit
+them (no `git add -f`), never include them in a pull request, and never link
+to them from tracked files: a relative or branch link is dead for everyone
+else (a SHA permalink to a plan committed before the removal stays valid). A
+decision or evidence that must outlive the branch goes into the PR
+description, the issue, or the tracked document it belongs to.
 
 ## Plan Document Template
 
