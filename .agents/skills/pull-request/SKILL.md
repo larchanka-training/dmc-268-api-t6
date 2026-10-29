@@ -22,21 +22,29 @@ metadata:
 1. **Analyze current changes**:
    - Run `git status`, `git diff`, and `git diff --staged` to inspect what changed.
    - Run `git remote -v` to confirm the project origin.
-   - Pick a branch name per `.agents/rules/git-workflow.md`, and a Conventional Commits
-     message — see `commit-message-instructions.md` in this skill for the full format.
+   - Run `git branch --show-current`. On `main`, pick a branch name per
+     `.agents/rules/git-workflow.md`; on a feature branch that already exists (the
+     implement-issue skill cuts one), keep its name.
+   - Pick a Conventional Commits message — see `commit-message-instructions.md` in this skill
+     for the full format.
 
 2. **Create branch, commit, and push**:
-   - `git checkout -b <branch-name>`, then `git add <explicit paths>` for every new file of
-     this change and `git add -u` for modified tracked files (never `git add .`).
+   - On `main`: `git checkout -b <branch-name>`. Already on a feature branch (not `main`):
+     stay on it, no `git checkout -b`.
+   - `git add <explicit paths>` for every new file of this change and `git add -u` for
+     modified tracked files (never `git add .`).
    - Check `git status` before committing: no unrelated untracked files (`.env`, proof
      scratch, logs).
-   - `git commit -m "<commit-message>" && git push -u origin <branch-name>`.
+   - `git commit -m "<commit-message>" && git push -u origin HEAD`.
    - Never `--no-verify`.
 
 3. **Create the pull request**:
    - `gh pr create --title "<type>(<scope>): <subject>" --body "<body>" --base main`.
    - Title: Conventional Commits, ≤72 characters.
    - Body has four sections, in this order: `What`, `Why`, `How to verify`, `Refs`.
+   - When the PR is one part of an issue, the first line of `What` names it:
+     `Part K of owner/repo#N: …` (`Part K of #N` in the same repo; a copy in the other repo:
+     `SYNC copy of owner/repo#M (Part K of #N): …`).
    - Body follows `.github/pull_request_template.md`, including its Before merge checklist
      (`gh pr create --body` bypasses the template).
    - Ask the user whether the PR is ready for review. Not ready: add `--draft`. Ready: ask
