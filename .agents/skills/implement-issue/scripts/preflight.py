@@ -48,13 +48,18 @@ colon) followed by `#N` or `OWNER/NAME#N` references separated by commas, `;`,
 full form from any repo. Anything else is not recognised. Pull requests come from
 the issue's timeline (both repos, every page). A pull request names the parts
 found in its TITLE (`Part K`, `Ч.K`, `Ч. K`, `Teil K`, and `Часть K` in any case form:
-`Части K`, `Частью K`; case-insensitive, whole numbers; a range such as `Parts 1–3`
-names nothing), all of them: a title that names several is deliberate. If the title
-names none, the FIRST part named in the first non-empty line of its `## What` section
-(the whole body when it has no `## What`): a later mention there is context ("Part 1,
-which this extends, is merged"), not scope. A pull request that ends up naming more
-than one part counts for each and adds a warning. Lines in fenced code, HTML comments
-and quotes do not count.
+`Части K`, `Частью K`; case-insensitive, whole numbers, any horizontal whitespace
+after the label), all of them: a title that names several is deliberate. A range
+(`Parts 1–3`, `Part 1-3`, `Части 1–3`: the dash is `-`, `–` or `—`, the upper end a
+whole number not followed by a letter, a digit or `-`) names no single part: a title
+with a range anywhere names none. If the title names none, the FIRST part named in the
+first non-empty line of its `## What` section (the whole body when it has no `## What`):
+a later mention there is context ("Part 1, which this extends, is merged"), not scope,
+and when that first mention is a range the line names no part. A pull request that
+ends up naming more than one part counts for each and adds a warning. Lines in fenced
+code and HTML comments never count. A quoted line never counts as a `Refs` line (it
+does not start with `Refs`), but quotes are not skipped for the first line of `## What`:
+a pull request that opens with a quote is read from the quote.
 
 Decisions, in this order: the issue is CLOSED -> stop; any OPEN blocker -> stop;
 parts not numbered 1..k -> stop; `--part K` must exist (exit 2) and is taken
@@ -124,11 +129,19 @@ REFS_TOKEN = re.compile(r"([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)?#([1-9][0-9]*)")
 # (ru), `Part K` (en), `Teil K` (de) — a whole number, so `Ч.1` is not `Ч.12`.
 _LABEL = r"(?:Ч\.[ \t]*|Part[ \t]+|Teil[ \t]+)"
 _PART = rf"{_LABEL}([0-9]+)(?![0-9])"
-# The same in a pull request's prose, which also says «Часть K» (in any case form:
-# «Части K», «Частью K»). A range («Parts 1–3», «Части 1–3», «Part 1-3») names no
-# single part and is not recognised. One alternation, so that "first" means first in the line.
-_NAMED = rf"(?:{_LABEL}|Част(?:ь|и|ью)[ \t]+)([0-9]+)(?![0-9])(?![ \t]*[-–—][ \t]*[0-9])"
-PART_NAMED = re.compile(rf"(?<!\w){_NAMED}", re.IGNORECASE)
+# The same in a pull request's prose: horizontal whitespace of any kind (a no-break space
+# included) after the label, and «Часть K» too (in any case form: «Части K», «Частью K»).
+# A range — «Parts 1–3», «Части 1–3», «Part 1-3», the dash `-`, `–` or `—` — is an alternative
+# of its own, with the plural labels, so that it is the match "first by position" lands on
+# and a later single mention cannot stand in for it. Its upper end is a whole number not
+# followed by a letter, a digit or `-`: «Part 1 – 2nd step» and «Part 1 — 2026-10-29» are
+# not ranges.
+_H = r"[^\S\r\n]"  # horizontal whitespace
+_SINGLE_LABEL = rf"(?:Ч\.{_H}*|(?:Part|Teil|Част(?:ь|и|ью)){_H}+)"
+_RANGE_LABEL = rf"(?:Ч\.{_H}*|(?:Parts?|Teil(?:e|en)?|Част(?:ь|и|ью|ей|ям|ями|ях)){_H}+)"
+_RANGE = rf"{_RANGE_LABEL}[0-9]+{_H}*[-–—]{_H}*[0-9]+(?![^\W_]|-)"
+_SINGLE = rf"{_SINGLE_LABEL}(?P<n>[0-9]+)(?![0-9])"
+PART_NAMED = re.compile(rf"(?<!\w)(?:(?P<range>{_RANGE})|{_SINGLE})", re.IGNORECASE)
 PART_START = re.compile(_PART, re.IGNORECASE)
 PART_BULLET = re.compile(rf"{_PART}[ \t]*(?:\((.*?)\))?[ \t]*:[ \t]*(.*)", re.IGNORECASE)
 PART_CRITERION = re.compile(rf"{_PART}[ \t]*:[ \t]*(.*)", re.IGNORECASE)
@@ -604,12 +617,28 @@ def names_issue(title: str, body: str, pr_repo: str, issue: tuple[str, int]) -> 
     return False
 
 
-def numbers_in(text: str) -> list[int]:
-    found: list[int] = []
-    for m in PART_NAMED.finditer(text):
-        if int(m.group(1)) not in found:
-            found.append(int(m.group(1)))
-    return found
+def mentions(text: str) -> list[int | None]:
+    """Every part mention of `text`, first by position: its number, None for a range."""
+    return [None if m.group("range") else int(m.group("n")) for m in PART_NAMED.finditer(text)]
+
+
+def title_parts(title: str) -> list[int]:
+    """Every part a title names. A range anywhere in it makes the title name no part:
+    «Parts 1–2 (Part 3 follows)» is not a title of Part 3."""
+    numbers: list[int] = []
+    for n in mentions(title):
+        if n is None:
+            return []
+        if n not in numbers:
+            numbers.append(n)
+    return numbers
+
+
+def what_parts(line: str) -> list[int]:
+    """The first part a line names. When that is a range the line names no part: a single
+    mention after it («Parts 1–2 of #13: both. Part 3 is next.») is context."""
+    found = mentions(line)
+    return [found[0]] if found and found[0] is not None else []
 
 
 def first_line(body: str) -> str:
@@ -622,9 +651,10 @@ def first_line(body: str) -> str:
 
 def parts_named(title: str, body: str) -> list[int]:
     """The parts a PR names. In its title every part counts: a title that names
-    several is deliberate. In the first line of its What only the first part named
-    does, the rest is context ("Part 1, which this extends, is merged in #357")."""
-    return numbers_in(title) or numbers_in(first_line(body))[:1]
+    several is deliberate (a title with a range names none). In the first line of its
+    What only the first part named does, the rest is context ("Part 1, which this
+    extends, is merged in #357"), and a range there names none."""
+    return title_parts(title) or what_parts(first_line(body))
 
 
 def build_prs(timeline: list[dict[str, Any]], issue: tuple[str, int]) -> list[dict[str, Any]]:

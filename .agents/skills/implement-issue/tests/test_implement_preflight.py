@@ -494,10 +494,12 @@ API_358_WHAT = (
 )
 
 
-def named_in(tmp_path: Path, node: dict[str, Any], parts: int = 2) -> list[int]:
+def named_in(
+    tmp_path: Path, node: dict[str, Any], parts: int = 2, ref: str = "api#13"
+) -> list[int]:
     scope = "".join(f"- Ч.{n} (PR): scope {n}\n" for n in range(1, parts + 1))
     response = issue_response(body=f"## Scope\n\n{scope}", timeline=[node])
-    _, doc = facts(tmp_path, response)
+    _, doc = facts(tmp_path, response, ref=ref)
     return [p["n"] for p in doc["parts"] if p["prs"]]
 
 
@@ -569,6 +571,91 @@ def named_in(tmp_path: Path, node: dict[str, Any], parts: int = 2) -> list[int]:
 )
 def test_naming_a_part(tmp_path: Path, title: str, what: str, expected: list[int]) -> None:
     assert named_in(tmp_path, refs_pr(40, what, title=title)) == expected
+
+
+# A range is its own alternative of the pattern: it is the match "first by position" lands
+# on, so a single mention after it never stands in for it. The upper end is a whole number
+# not followed by a letter, a digit or `-`, so «Part 1 – 2nd step» is not a range.
+@pytest.mark.parametrize(
+    ("title", "what", "expected"),
+    [
+        # a range anywhere in the title: the title names nothing, the first line of What decides
+        ("Parts 1–2 (Part 3 follows)", "", []),
+        ("Parts 1–2 (Part 3 follows)", "Part 2 of #13: y", [2]),
+        ("Part 3 follows (Parts 1–2)", "", []),
+        ("Part 1-2 and Part 3", "", []),
+        ("Ч.1–2, Ч.3 next", "", []),
+        # a range as the first mention of What: the line names nothing
+        ("feat: y", "Parts 1–2 of #13: both. Part 3 is next.", []),
+        ("feat: y", "Parts 1-2 of #13: x. Part 3 follows.", []),
+        ("feat: y", "Part 1–2 of #13: both. Part 3 is next.", []),
+        ("feat: y", "Parts 1 – 2 of #13: both. Part 3 is next.", []),
+        ("feat: y", "Parts 1\xa0–\xa02 of #13: both. Part 3 is next.", []),
+        ("feat: y", "Parts 1\t—\t2 of #13: both. Part 3 is next.", []),
+        ("feat: y", "Ч.1–2 of #13: both. Ч.3 is next.", []),
+        ("feat: y", "Части 1–2 из #13: обе. Часть 3 следующая.", []),
+        ("feat: y", "Частей 1–2 из #13: обе. Часть 3 следующая.", []),
+        ("feat: y", "Teile 1–2 von #13: beide. Teil 3 folgt.", []),
+        ("feat: y", "- Parts 1–2 of #13: both. Part 3 is next.", []),
+        # a range after the first single mention does not matter
+        ("feat: y", "Part 3 of #13: x. Parts 1–2 are merged.", [3]),
+        # not ranges: the upper end is followed by a letter or a `-`
+        ("Part 1 – 2nd step", "", [1]),
+        ("Part 1 — 2026-10-29", "", [1]),
+        ("Part 1-2nd step", "", [1]),
+        ("feat: y", "Part 1 – 2nd step. Part 3 comes later.", [1]),
+        ("feat: y", "Part 2 — 2026-10-29: x. Part 3 comes later.", [2]),
+        # any horizontal whitespace after the label, a no-break space included
+        ("Part\xa02", "", [2]),
+        ("Part\t2", "", [2]),
+        ("Part \xa02", "", [2]),
+        ("Ч.\xa02", "", [2]),
+        ("Teil\xa02", "", [2]),
+        ("Часть\xa02", "", [2]),
+        ("feat: y", "Part\xa02 of #13: x", [2]),
+    ],
+)
+def test_a_range_names_no_part_and_no_later_mention_stands_in(
+    tmp_path: Path, title: str, what: str, expected: list[int]
+) -> None:
+    assert named_in(tmp_path, refs_pr(60, what, title=title), parts=3) == expected
+
+
+def test_a_merged_range_does_not_finish_the_part_that_follows_it(tmp_path: Path) -> None:
+    # `Parts 1–2 of #13: both. Part 3 is next.` is a stray, not Part 3: the 3-part issue
+    # still starts at Part 1 and nothing is done.
+    node = refs_pr(61, "Parts 1–2 of #13: both. Part 3 is next.")
+    code, doc = facts(tmp_path, issue_response(body=THREE_PARTS, timeline=[node]))
+    assert (code, doc["selected"]) == (0, {"part": 1, "reason": "first-todo"})
+    assert [p["status"] for p in doc["parts"]] == ["todo", "todo", "todo"]
+    assert doc["warnings"] == [
+        f"pull requests with Refs that name no part of this issue: {API}#61 (MERGED)"
+    ]
+
+
+def test_an_open_range_stops_as_a_pull_request_that_names_no_part(tmp_path: Path) -> None:
+    node = refs_pr(62, "Parts 1-2 of #13: x. Part 3 follows.", state="OPEN")
+    code, doc = facts(tmp_path, issue_response(body=THREE_PARTS, timeline=[node]))
+    assert (code, doc["verdict"], doc["selected"]) == (1, "stop", None)
+    assert doc["reasons"] == [stray_reason(f"{API}#62 (OPEN)")]
+    assert [p["status"] for p in doc["parts"]] == ["todo", "todo", "todo"]
+
+
+def test_ui_203_is_a_stray_of_ui_186(tmp_path: Path) -> None:
+    # The real first line of the What of ui#203: `- Parts 1–3 of ui#186: …`.
+    what = (
+        "- Parts 1–3 of ui#186: a reason text for known limit and failure codes on the run "
+        "list and the run page, an audit log at `/audit`, and a quality dashboard at "
+        "`/analytics`.\n- Part 4 (new limit codes, task 24) is not in this PR."
+    )
+    node = refs_pr(203, what, title="feat(analytics): add limit reasons", refs="Refs #186", repo=UI)
+    assert named_in(tmp_path, node, parts=4, ref="ui#186") == []
+    node = {**node, "source": {**node["source"], "state": "OPEN"}}
+    scope = "".join(f"- Part {n} (PR): scope {n}\n" for n in range(1, 5))
+    response = issue_response(body=f"## Scope\n\n{scope}", timeline=[node])
+    code, doc = facts(tmp_path, response, ref="ui#186")
+    assert (code, doc["selected"]) == (1, None)
+    assert doc["reasons"] == [stray_reason(f"{UI}#203 (OPEN)")]
 
 
 def test_a_body_without_what_names_by_its_first_line(tmp_path: Path) -> None:

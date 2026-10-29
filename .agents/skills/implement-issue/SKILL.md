@@ -80,10 +80,13 @@ count). A pull request counts only with a `Refs` line naming this issue (`Refs #
 repo, `Refs owner/repo#N` from any repo). It names the parts in its title (every part named
 there counts, with a warning when there are several), else the **first** part named in the first
 line of its `## What` — a later "Part 1 is merged" in that line is context, not scope. The forms
-are `Part K`, `Ч.K`, `Teil K` and `Часть K` (also `Части K`, `Частью K`); a range such as
-"Parts 1–3" names no part. A pull request with `Refs` that names no part of the issue stops the
-run while it is OPEN (no `--part`), and is a warning when MERGED or CLOSED or when `--part` is
-given. Checkboxes play no part: the tech lead ticks them at acceptance.
+are `Part K`, `Ч.K`, `Teil K` and `Часть K` (also `Части K`, `Частью K`). A range (`Parts 1–3`,
+`Part 1-3`; the dash is `-`, `–` or `—`) names no part, and nothing after it stands in: a title
+with a range anywhere names none, a `What` line that starts with a range names none
+(`Parts 1–2 of #13: both. Part 3 is next.` is not Part 3). A pull request with `Refs` that names
+no part of the issue stops the run while it is OPEN (no `--part`), and is a warning when MERGED
+or CLOSED or when `--part` is given. Checkboxes play no part: the tech lead ticks them at
+acceptance.
 
 ### 2. Read the briefing
 
