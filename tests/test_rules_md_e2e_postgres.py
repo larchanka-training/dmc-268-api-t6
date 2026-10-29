@@ -406,19 +406,19 @@ def _github(
     *,
     head_rules: bytes | None | Literal["base"] = "base",
     fault: Fault | None = None,
-    symlink: bool = False,
+    symlink: str | None = None,
     agents: bytes | None = None,
 ) -> FakeGitHub:
     """PR 7 changes ``app/service.py`` and ``generated/client.py``; ``None`` is no rules file.
 
-    ``symlink`` lists the rules file of both revisions as a symlink to ``base_rules``;
-    ``agents`` is a root ``AGENTS.md`` the PR leaves unchanged.
+    ``symlink`` lists that policy document of both revisions as a symlink, its bytes the
+    target; ``agents`` is a root ``AGENTS.md`` the PR leaves unchanged.
     """
     head = base_rules if head_rules == "base" else head_rules
     common = {} if agents is None else {"AGENTS.md": agents}
     base_files = _BASE_FILES | common | ({} if base_rules is None else {RULES: base_rules})
     head_files = _HEAD_FILES | common | ({} if head is None else {RULES: head})
-    links = frozenset({RULES}) if symlink else frozenset()
+    links = frozenset() if symlink is None else frozenset({symlink})
     return FakeGitHub(Revision(base_files, links), Revision(head_files, links), fault)
 
 
@@ -1197,9 +1197,43 @@ def test_invalid_rules_md_fails_the_run_once_without_llm(
 @pytest.mark.integration
 def test_symlinked_rules_md_fails_the_run_once_without_llm(stack: Stack) -> None:
     # §3.1: a symlink is never dereferenced; the document must be a regular Git blob.
-    outcome = _review(stack, _github(b"../docs/rules.md", symlink=True), Seed.V4)
+    outcome = _review(stack, _github(b"../docs/rules.md", symlink=RULES), Seed.V4)
 
     _assert_failed_once(outcome, frozenset({"policy_document_type_unsupported"}))
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize(
+    ("agents", "symlink", "error_code"),
+    [
+        # 65 536 bytes is the limit of each document (§3.3); one more byte is over it.
+        pytest.param(b"a" * 65_537, None, "policy_document_too_large", id="too-large"),
+        # §3.1: the symlink is not dereferenced, its target never read as the document.
+        pytest.param(
+            b"docs/AGENTS.md", "AGENTS.md", "policy_document_type_unsupported", id="symlink"
+        ),
+        pytest.param(b"ok\n\xff\xfe", None, "policy_document_decode_error", id="decode"),
+        pytest.param(b"\x1bfirst", None, "policy_document_control_character", id="control"),
+    ],
+)
+def test_invalid_agents_md_fails_the_run_once_without_llm(
+    stack: Stack, agents: bytes, symlink: str | None, error_code: str
+) -> None:
+    # §9: an AGENTS.md error stops the review like a rules.md one: the document is optional
+    # only in that it may be absent. A valid rules.md beside it does not let the run go on.
+    outcome = _review(stack, _github(VALID_RULES, agents=agents, symlink=symlink), Seed.V4)
+
+    _assert_failed_once(outcome, frozenset({error_code}))
+    [load] = outcome.policy_load
+    # §9: the diagnostic names the document the error is about.
+    assert load["error"]["diagnostic"]["source_path"] == "AGENTS.md"
+    # §11, §7.2: rules.md, read first, stays staged; the failed AGENTS.md is never missing.
+    assert outcome.documents[RULES] == (
+        "present",
+        hashlib.sha256(VALID_RULES).hexdigest(),
+        len(VALID_RULES),
+    )
+    assert outcome.documents.get("AGENTS.md", (None,))[0] != "missing"
 
 
 @pytest.mark.integration
