@@ -61,10 +61,10 @@ def test_test_plan_keeps_v4_rules_fixture_historical_and_new_runs_on_v5() -> Non
     ) in plan
     assert "Snapshot-путь выбирается по закреплённому v4 или v5" in plan
     assert (
-        "С #130 F2 (PR #332) новые GitHub runs закрепляли `review.system` v4; "
-        "после #350 новые runs закрепляют общий v5."
+        "С #130 F2 (PR #332) новый run GitHub закрепляет активный `review.system` "
+        "(v4, с #350 — v5), если репозиторий не закрепил свой промпт"
     ) in plan
-    assert "таблица А проверяет это на историческом seed `[v4]`" in plan
+    assert "таблица А проверяет это на seed `[v4]`" in plan
     assert "с закреплённым `review.system:v4` или `review.system:v5`" in plan
     assert (
         "После F2 seed v4 был активен для новых runs; после #350 новые runs закрепляют общий v5."
