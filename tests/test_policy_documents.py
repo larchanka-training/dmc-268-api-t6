@@ -110,9 +110,17 @@ def test_bom_counts_toward_the_byte_limit() -> None:
     assert caught.value.code is PolicyErrorCode.DOCUMENT_TOO_LARGE
 
 
-def test_broken_utf8_is_rejected_without_replacement() -> None:
+@pytest.mark.parametrize(
+    "raw",
+    [
+        pytest.param(b"ok\n\xff\xfe", id="invalid-bytes"),
+        # U+D800 encoded as UTF-8: an unpaired surrogate is never valid UTF-8 (§3.2 item 5).
+        pytest.param(b"ok\n\xed\xa0\x80", id="surrogate"),
+    ],
+)
+def test_broken_utf8_is_rejected_without_replacement(raw: bytes) -> None:
     with pytest.raises(PolicyError) as caught:
-        normalize_document(_RULES, b"ok\n\xff\xfe", blob_oid=_OID)
+        normalize_document(_RULES, raw, blob_oid=_OID)
     assert caught.value.code is PolicyErrorCode.DOCUMENT_DECODE_ERROR
     assert "�" not in caught.value.message
 
