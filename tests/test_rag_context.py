@@ -18,6 +18,7 @@ import pytest
 
 from app.modules.code_index.domain.enums import EdgeKind, IndexStatus, RagIndexStatus
 from app.modules.code_index.domain.rag_index import rag_index
+from app.modules.integrations.bitbucket.infrastructure.run_http import BitbucketRunHttpError
 from app.modules.reviews.application.ast_resolution import (
     FileUnavailable,
     ImportResolution,
@@ -2810,6 +2811,27 @@ def test_a_failing_rag_slot_keeps_every_other_level_and_reports_the_error(
     assert [record.getMessage() for record in caplog.records] == [
         f"RAG slot failed head_sha={_HEAD}"
     ]
+
+
+def test_rag_blob_byte_exhaustion_omits_candidate_and_keeps_review_context() -> None:
+    repository, diff_map = _slot_repository(**{"pkg/app.py": _PY_USER})
+
+    class ExhaustedRagBlob(Repository):
+        async def read_blob(self, blob_sha: str) -> bytes:
+            if blob_sha == self.sha("pkg/app.py"):
+                raise BitbucketRunHttpError("total_budget_exceeded")
+            return await super().read_blob(blob_sha)
+
+    exhausted = ExhaustedRagBlob(repository.files)
+    payload = _build(exhausted, diff_map, _store_hints("pkg/app.py"))
+
+    assert payload.reason is None
+    assert payload.retrieved == ()
+    assert ContextLevel.L1 in payload.levels_present
+    assert ContextLevel.L3 in payload.levels_present
+    assert ContextOmission("source_read_failed", "pkg/app.py") in payload.omissions
+    assert payload.rag is not None
+    assert dict(payload.rag.dropped) == {"source_read_failed": 1}
 
 
 @pytest.mark.parametrize(

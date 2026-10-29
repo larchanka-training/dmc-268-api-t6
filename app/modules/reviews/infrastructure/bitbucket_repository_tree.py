@@ -253,7 +253,11 @@ class BitbucketRepositoryTree:
             if len(entries) > _MAX_ENTRIES:
                 raise BitbucketRunHttpError("budget_exhausted")
         except BitbucketRunHttpError as error:
-            if error.kind in {"rate_limited", "request_budget_exceeded"}:
+            if error.kind in {
+                "rate_limited",
+                "request_budget_exceeded",
+                "total_budget_exceeded",
+            }:
                 raise
             return BitbucketTreeListing(tuple(entries), False)
         await self._vcs.verify_current(checkpoint=self._checkpoint)
