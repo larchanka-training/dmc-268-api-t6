@@ -1,0 +1,56 @@
+{
+  "checkboxes": {
+    "ac": {
+      "checked": 2,
+      "items": [
+        {
+          "checked": true,
+          "text": "Каждый AC #56 проверен по фактам; в #56 есть итог с доказательствами. Выполненные AC отмечены, непроверенные остаются открытыми."
+        },
+        {
+          "checked": true,
+          "text": "Если работа не принята полностью, #56 переоткрыта с перечислением оставшихся пунктов; если принята — решение техлида о закрытии записано."
+        }
+      ],
+      "total": 2
+    },
+    "dod": {
+      "checked": 2,
+      "items": [
+        {
+          "checked": true,
+          "text": "Доказательства и решения зафиксированы в соответствующих issue; отмечены только подтверждённые AC."
+        },
+        {
+          "checked": true,
+          "text": "Техлид проверил результат; статус отражён в #106 и на доске 12."
+        }
+      ],
+      "total": 2
+    },
+    "outside": 0
+  },
+  "closing": {
+    "events": [
+      {
+        "actor": "axyi",
+        "at": "2026-10-19T18:24:03Z",
+        "closer": "manual",
+        "closer_ref": null,
+        "kind": "closed",
+        "state_reason": "COMPLETED"
+      }
+    ],
+    "ever_closed_by_merge": false,
+    "last_closer": "manual"
+  },
+  "issue": {
+    "ref": "larchanka-training/dmc-268-api-t6#117",
+    "state": "CLOSED",
+    "state_reason": "COMPLETED",
+    "title": "[process][106] Проведите приёмку автоматически закрытой задачи #56",
+    "url": "https://github.com/larchanka-training/dmc-268-api-t6/issues/117"
+  },
+  "prs": [],
+  "schema": 1
+}

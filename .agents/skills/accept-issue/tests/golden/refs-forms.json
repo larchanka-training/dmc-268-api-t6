@@ -1,0 +1,222 @@
+{
+  "checkboxes": {
+    "ac": {
+      "checked": 0,
+      "items": [],
+      "total": 0
+    },
+    "dod": {
+      "checked": 0,
+      "items": [],
+      "total": 0
+    },
+    "outside": 0
+  },
+  "closing": {
+    "events": [],
+    "ever_closed_by_merge": false,
+    "last_closer": null
+  },
+  "issue": {
+    "ref": "larchanka-training/dmc-268-api-t6#13",
+    "state": "CLOSED",
+    "state_reason": "COMPLETED",
+    "title": "Synthetic issue",
+    "url": "https://github.com/larchanka-training/dmc-268-api-t6/issues/13"
+  },
+  "prs": [
+    {
+      "ci": "SUCCESS",
+      "head_sha": "5050505050505050505050505050505050505050",
+      "merged_at": "2026-10-02T10:00:00Z",
+      "ref": "larchanka-training/dmc-268-api-t6#80",
+      "refs": true,
+      "state": "MERGED",
+      "title": "api multi",
+      "unresolved_threads": 0,
+      "url": "https://github.com/larchanka-training/dmc-268-api-t6/pull/80",
+      "will_close": false
+    },
+    {
+      "ci": "SUCCESS",
+      "head_sha": "5151515151515151515151515151515151515151",
+      "merged_at": "2026-10-02T10:00:00Z",
+      "ref": "larchanka-training/dmc-268-api-t6#81",
+      "refs": false,
+      "state": "MERGED",
+      "title": "api other",
+      "unresolved_threads": 0,
+      "url": "https://github.com/larchanka-training/dmc-268-api-t6/pull/81",
+      "will_close": false
+    },
+    {
+      "ci": "SUCCESS",
+      "head_sha": "5555555555555555555555555555555555555555",
+      "merged_at": "2026-10-02T10:00:00Z",
+      "ref": "larchanka-training/dmc-268-api-t6#85",
+      "refs": true,
+      "state": "MERGED",
+      "title": "Refs #13 in title",
+      "unresolved_threads": 0,
+      "url": "https://github.com/larchanka-training/dmc-268-api-t6/pull/85",
+      "will_close": false
+    },
+    {
+      "ci": "SUCCESS",
+      "head_sha": "5656565656565656565656565656565656565656",
+      "merged_at": "2026-10-02T10:00:00Z",
+      "ref": "larchanka-training/dmc-268-api-t6#86",
+      "refs": false,
+      "state": "MERGED",
+      "title": "api prose",
+      "unresolved_threads": 0,
+      "url": "https://github.com/larchanka-training/dmc-268-api-t6/pull/86",
+      "will_close": false
+    },
+    {
+      "ci": "SUCCESS",
+      "head_sha": "5757575757575757575757575757575757575757",
+      "merged_at": "2026-10-02T10:00:00Z",
+      "ref": "larchanka-training/dmc-268-api-t6#87",
+      "refs": true,
+      "state": "MERGED",
+      "title": "api lowercase colon",
+      "unresolved_threads": 0,
+      "url": "https://github.com/larchanka-training/dmc-268-api-t6/pull/87",
+      "will_close": false
+    },
+    {
+      "ci": "SUCCESS",
+      "head_sha": "5858585858585858585858585858585858585858",
+      "merged_at": "2026-10-02T10:00:00Z",
+      "ref": "larchanka-training/dmc-268-api-t6#88",
+      "refs": false,
+      "state": "MERGED",
+      "title": "api bold",
+      "unresolved_threads": 0,
+      "url": "https://github.com/larchanka-training/dmc-268-api-t6/pull/88",
+      "will_close": false
+    },
+    {
+      "ci": "SUCCESS",
+      "head_sha": "5959595959595959595959595959595959595959",
+      "merged_at": "2026-10-02T10:00:00Z",
+      "ref": "larchanka-training/dmc-268-api-t6#89",
+      "refs": false,
+      "state": "MERGED",
+      "title": "api link",
+      "unresolved_threads": 0,
+      "url": "https://github.com/larchanka-training/dmc-268-api-t6/pull/89",
+      "will_close": false
+    },
+    {
+      "ci": "SUCCESS",
+      "head_sha": "5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a",
+      "merged_at": "2026-10-02T10:00:00Z",
+      "ref": "larchanka-training/dmc-268-api-t6#90",
+      "refs": false,
+      "state": "MERGED",
+      "title": "api url",
+      "unresolved_threads": 0,
+      "url": "https://github.com/larchanka-training/dmc-268-api-t6/pull/90",
+      "will_close": false
+    },
+    {
+      "ci": "SUCCESS",
+      "head_sha": "5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b",
+      "merged_at": "2026-10-02T10:00:00Z",
+      "ref": "larchanka-training/dmc-268-api-t6#91",
+      "refs": false,
+      "state": "MERGED",
+      "title": "api split lines",
+      "unresolved_threads": 0,
+      "url": "https://github.com/larchanka-training/dmc-268-api-t6/pull/91",
+      "will_close": false
+    },
+    {
+      "ci": "SUCCESS",
+      "head_sha": "5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c",
+      "merged_at": "2026-10-02T10:00:00Z",
+      "ref": "larchanka-training/dmc-268-api-t6#92",
+      "refs": false,
+      "state": "MERGED",
+      "title": "api in fence",
+      "unresolved_threads": 0,
+      "url": "https://github.com/larchanka-training/dmc-268-api-t6/pull/92",
+      "will_close": false
+    },
+    {
+      "ci": "SUCCESS",
+      "head_sha": "5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d",
+      "merged_at": "2026-10-02T10:00:00Z",
+      "ref": "larchanka-training/dmc-268-api-t6#93",
+      "refs": false,
+      "state": "MERGED",
+      "title": "api in comment",
+      "unresolved_threads": 0,
+      "url": "https://github.com/larchanka-training/dmc-268-api-t6/pull/93",
+      "will_close": false
+    },
+    {
+      "ci": "SUCCESS",
+      "head_sha": "5252525252525252525252525252525252525252",
+      "merged_at": "2026-10-02T10:00:00Z",
+      "ref": "larchanka-training/dmc-268-ui-t6#82",
+      "refs": false,
+      "state": "MERGED",
+      "title": "ui bare",
+      "unresolved_threads": 0,
+      "url": "https://github.com/larchanka-training/dmc-268-ui-t6/pull/82",
+      "will_close": false
+    },
+    {
+      "ci": "SUCCESS",
+      "head_sha": "5353535353535353535353535353535353535353",
+      "merged_at": "2026-10-02T10:00:00Z",
+      "ref": "larchanka-training/dmc-268-ui-t6#83",
+      "refs": true,
+      "state": "MERGED",
+      "title": "ui full",
+      "unresolved_threads": 0,
+      "url": "https://github.com/larchanka-training/dmc-268-ui-t6/pull/83",
+      "will_close": false
+    },
+    {
+      "ci": "SUCCESS",
+      "head_sha": "5454545454545454545454545454545454545454",
+      "merged_at": "2026-10-02T10:00:00Z",
+      "ref": "larchanka-training/dmc-268-ui-t6#84",
+      "refs": true,
+      "state": "MERGED",
+      "title": "ui mixed",
+      "unresolved_threads": 0,
+      "url": "https://github.com/larchanka-training/dmc-268-ui-t6/pull/84",
+      "will_close": false
+    },
+    {
+      "ci": "SUCCESS",
+      "head_sha": "5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e",
+      "merged_at": "2026-10-02T10:00:00Z",
+      "ref": "larchanka-training/dmc-268-ui-t6#94",
+      "refs": true,
+      "state": "MERGED",
+      "title": "ui upper-case repo",
+      "unresolved_threads": 0,
+      "url": "https://github.com/larchanka-training/dmc-268-ui-t6/pull/94",
+      "will_close": false
+    },
+    {
+      "ci": "SUCCESS",
+      "head_sha": "9999999999999999999999999999999999999999",
+      "merged_at": "2026-10-02T10:00:00Z",
+      "ref": "someone/else-repo#9",
+      "refs": false,
+      "state": "MERGED",
+      "title": "foreign full",
+      "unresolved_threads": 0,
+      "url": "https://github.com/someone/else-repo/pull/9",
+      "will_close": false
+    }
+  ],
+  "schema": 1
+}

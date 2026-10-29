@@ -1,0 +1,581 @@
+{
+  "data": {
+    "repository": {
+      "issue": {
+        "title": "Synthetic issue",
+        "url": "https://github.com/larchanka-training/dmc-268-api-t6/issues/13",
+        "state": "CLOSED",
+        "stateReason": "COMPLETED",
+        "body": "",
+        "timelineItems": {
+          "pageInfo": {
+            "hasNextPage": false,
+            "endCursor": null
+          },
+          "nodes": [
+            {
+              "__typename": "CrossReferencedEvent",
+              "willCloseTarget": false,
+              "source": {
+                "__typename": "PullRequest",
+                "number": 80,
+                "title": "api multi",
+                "url": "https://github.com/larchanka-training/dmc-268-api-t6/pull/80",
+                "body": "Intro\n\nRefs #12, #13\n",
+                "state": "MERGED",
+                "mergedAt": "2026-10-02T10:00:00Z",
+                "headRefOid": "5050505050505050505050505050505050505050",
+                "repository": {
+                  "nameWithOwner": "larchanka-training/dmc-268-api-t6"
+                },
+                "commits": {
+                  "nodes": [
+                    {
+                      "commit": {
+                        "statusCheckRollup": {
+                          "state": "SUCCESS"
+                        }
+                      }
+                    }
+                  ]
+                },
+                "reviewThreads": {
+                  "pageInfo": {
+                    "hasNextPage": false,
+                    "endCursor": null
+                  },
+                  "nodes": []
+                }
+              }
+            },
+            {
+              "__typename": "CrossReferencedEvent",
+              "willCloseTarget": false,
+              "source": {
+                "__typename": "PullRequest",
+                "number": 81,
+                "title": "api other",
+                "url": "https://github.com/larchanka-training/dmc-268-api-t6/pull/81",
+                "body": "Refs #130",
+                "state": "MERGED",
+                "mergedAt": "2026-10-02T10:00:00Z",
+                "headRefOid": "5151515151515151515151515151515151515151",
+                "repository": {
+                  "nameWithOwner": "larchanka-training/dmc-268-api-t6"
+                },
+                "commits": {
+                  "nodes": [
+                    {
+                      "commit": {
+                        "statusCheckRollup": {
+                          "state": "SUCCESS"
+                        }
+                      }
+                    }
+                  ]
+                },
+                "reviewThreads": {
+                  "pageInfo": {
+                    "hasNextPage": false,
+                    "endCursor": null
+                  },
+                  "nodes": []
+                }
+              }
+            },
+            {
+              "__typename": "CrossReferencedEvent",
+              "willCloseTarget": false,
+              "source": {
+                "__typename": "PullRequest",
+                "number": 82,
+                "title": "ui bare",
+                "url": "https://github.com/larchanka-training/dmc-268-ui-t6/pull/82",
+                "body": "What\n\nRefs #13\n",
+                "state": "MERGED",
+                "mergedAt": "2026-10-02T10:00:00Z",
+                "headRefOid": "5252525252525252525252525252525252525252",
+                "repository": {
+                  "nameWithOwner": "larchanka-training/dmc-268-ui-t6"
+                },
+                "commits": {
+                  "nodes": [
+                    {
+                      "commit": {
+                        "statusCheckRollup": {
+                          "state": "SUCCESS"
+                        }
+                      }
+                    }
+                  ]
+                },
+                "reviewThreads": {
+                  "pageInfo": {
+                    "hasNextPage": false,
+                    "endCursor": null
+                  },
+                  "nodes": []
+                }
+              }
+            },
+            {
+              "__typename": "CrossReferencedEvent",
+              "willCloseTarget": false,
+              "source": {
+                "__typename": "PullRequest",
+                "number": 83,
+                "title": "ui full",
+                "url": "https://github.com/larchanka-training/dmc-268-ui-t6/pull/83",
+                "body": "Refs larchanka-training/dmc-268-api-t6#13",
+                "state": "MERGED",
+                "mergedAt": "2026-10-02T10:00:00Z",
+                "headRefOid": "5353535353535353535353535353535353535353",
+                "repository": {
+                  "nameWithOwner": "larchanka-training/dmc-268-ui-t6"
+                },
+                "commits": {
+                  "nodes": [
+                    {
+                      "commit": {
+                        "statusCheckRollup": {
+                          "state": "SUCCESS"
+                        }
+                      }
+                    }
+                  ]
+                },
+                "reviewThreads": {
+                  "pageInfo": {
+                    "hasNextPage": false,
+                    "endCursor": null
+                  },
+                  "nodes": []
+                }
+              }
+            },
+            {
+              "__typename": "CrossReferencedEvent",
+              "willCloseTarget": false,
+              "source": {
+                "__typename": "PullRequest",
+                "number": 84,
+                "title": "ui mixed",
+                "url": "https://github.com/larchanka-training/dmc-268-ui-t6/pull/84",
+                "body": "- Refs #13, larchanka-training/dmc-268-api-t6#13 and more words",
+                "state": "MERGED",
+                "mergedAt": "2026-10-02T10:00:00Z",
+                "headRefOid": "5454545454545454545454545454545454545454",
+                "repository": {
+                  "nameWithOwner": "larchanka-training/dmc-268-ui-t6"
+                },
+                "commits": {
+                  "nodes": [
+                    {
+                      "commit": {
+                        "statusCheckRollup": {
+                          "state": "SUCCESS"
+                        }
+                      }
+                    }
+                  ]
+                },
+                "reviewThreads": {
+                  "pageInfo": {
+                    "hasNextPage": false,
+                    "endCursor": null
+                  },
+                  "nodes": []
+                }
+              }
+            },
+            {
+              "__typename": "CrossReferencedEvent",
+              "willCloseTarget": false,
+              "source": {
+                "__typename": "PullRequest",
+                "number": 85,
+                "title": "Refs #13 in title",
+                "url": "https://github.com/larchanka-training/dmc-268-api-t6/pull/85",
+                "body": null,
+                "state": "MERGED",
+                "mergedAt": "2026-10-02T10:00:00Z",
+                "headRefOid": "5555555555555555555555555555555555555555",
+                "repository": {
+                  "nameWithOwner": "larchanka-training/dmc-268-api-t6"
+                },
+                "commits": {
+                  "nodes": [
+                    {
+                      "commit": {
+                        "statusCheckRollup": {
+                          "state": "SUCCESS"
+                        }
+                      }
+                    }
+                  ]
+                },
+                "reviewThreads": {
+                  "pageInfo": {
+                    "hasNextPage": false,
+                    "endCursor": null
+                  },
+                  "nodes": []
+                }
+              }
+            },
+            {
+              "__typename": "CrossReferencedEvent",
+              "willCloseTarget": false,
+              "source": {
+                "__typename": "PullRequest",
+                "number": 86,
+                "title": "api prose",
+                "url": "https://github.com/larchanka-training/dmc-268-api-t6/pull/86",
+                "body": "Fixes the thing, see Refs #13 for context",
+                "state": "MERGED",
+                "mergedAt": "2026-10-02T10:00:00Z",
+                "headRefOid": "5656565656565656565656565656565656565656",
+                "repository": {
+                  "nameWithOwner": "larchanka-training/dmc-268-api-t6"
+                },
+                "commits": {
+                  "nodes": [
+                    {
+                      "commit": {
+                        "statusCheckRollup": {
+                          "state": "SUCCESS"
+                        }
+                      }
+                    }
+                  ]
+                },
+                "reviewThreads": {
+                  "pageInfo": {
+                    "hasNextPage": false,
+                    "endCursor": null
+                  },
+                  "nodes": []
+                }
+              }
+            },
+            {
+              "__typename": "CrossReferencedEvent",
+              "willCloseTarget": false,
+              "source": {
+                "__typename": "PullRequest",
+                "number": 9,
+                "title": "foreign full",
+                "url": "https://github.com/someone/else-repo/pull/9",
+                "body": "refs someone/else-repo#13",
+                "state": "MERGED",
+                "mergedAt": "2026-10-02T10:00:00Z",
+                "headRefOid": "9999999999999999999999999999999999999999",
+                "repository": {
+                  "nameWithOwner": "someone/else-repo"
+                },
+                "commits": {
+                  "nodes": [
+                    {
+                      "commit": {
+                        "statusCheckRollup": {
+                          "state": "SUCCESS"
+                        }
+                      }
+                    }
+                  ]
+                },
+                "reviewThreads": {
+                  "pageInfo": {
+                    "hasNextPage": false,
+                    "endCursor": null
+                  },
+                  "nodes": []
+                }
+              }
+            },
+            {
+              "__typename": "CrossReferencedEvent",
+              "willCloseTarget": false,
+              "source": {
+                "__typename": "PullRequest",
+                "number": 87,
+                "title": "api lowercase colon",
+                "url": "https://github.com/larchanka-training/dmc-268-api-t6/pull/87",
+                "body": "refs: #13",
+                "state": "MERGED",
+                "mergedAt": "2026-10-02T10:00:00Z",
+                "headRefOid": "5757575757575757575757575757575757575757",
+                "repository": {
+                  "nameWithOwner": "larchanka-training/dmc-268-api-t6"
+                },
+                "commits": {
+                  "nodes": [
+                    {
+                      "commit": {
+                        "statusCheckRollup": {
+                          "state": "SUCCESS"
+                        }
+                      }
+                    }
+                  ]
+                },
+                "reviewThreads": {
+                  "pageInfo": {
+                    "hasNextPage": false,
+                    "endCursor": null
+                  },
+                  "nodes": []
+                }
+              }
+            },
+            {
+              "__typename": "CrossReferencedEvent",
+              "willCloseTarget": false,
+              "source": {
+                "__typename": "PullRequest",
+                "number": 88,
+                "title": "api bold",
+                "url": "https://github.com/larchanka-training/dmc-268-api-t6/pull/88",
+                "body": "**Refs** #13",
+                "state": "MERGED",
+                "mergedAt": "2026-10-02T10:00:00Z",
+                "headRefOid": "5858585858585858585858585858585858585858",
+                "repository": {
+                  "nameWithOwner": "larchanka-training/dmc-268-api-t6"
+                },
+                "commits": {
+                  "nodes": [
+                    {
+                      "commit": {
+                        "statusCheckRollup": {
+                          "state": "SUCCESS"
+                        }
+                      }
+                    }
+                  ]
+                },
+                "reviewThreads": {
+                  "pageInfo": {
+                    "hasNextPage": false,
+                    "endCursor": null
+                  },
+                  "nodes": []
+                }
+              }
+            },
+            {
+              "__typename": "CrossReferencedEvent",
+              "willCloseTarget": false,
+              "source": {
+                "__typename": "PullRequest",
+                "number": 89,
+                "title": "api link",
+                "url": "https://github.com/larchanka-training/dmc-268-api-t6/pull/89",
+                "body": "Refs: [#13](https://github.com/larchanka-training/dmc-268-api-t6/issues/13)",
+                "state": "MERGED",
+                "mergedAt": "2026-10-02T10:00:00Z",
+                "headRefOid": "5959595959595959595959595959595959595959",
+                "repository": {
+                  "nameWithOwner": "larchanka-training/dmc-268-api-t6"
+                },
+                "commits": {
+                  "nodes": [
+                    {
+                      "commit": {
+                        "statusCheckRollup": {
+                          "state": "SUCCESS"
+                        }
+                      }
+                    }
+                  ]
+                },
+                "reviewThreads": {
+                  "pageInfo": {
+                    "hasNextPage": false,
+                    "endCursor": null
+                  },
+                  "nodes": []
+                }
+              }
+            },
+            {
+              "__typename": "CrossReferencedEvent",
+              "willCloseTarget": false,
+              "source": {
+                "__typename": "PullRequest",
+                "number": 90,
+                "title": "api url",
+                "url": "https://github.com/larchanka-training/dmc-268-api-t6/pull/90",
+                "body": "Refs https://github.com/larchanka-training/dmc-268-api-t6/issues/13",
+                "state": "MERGED",
+                "mergedAt": "2026-10-02T10:00:00Z",
+                "headRefOid": "5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a",
+                "repository": {
+                  "nameWithOwner": "larchanka-training/dmc-268-api-t6"
+                },
+                "commits": {
+                  "nodes": [
+                    {
+                      "commit": {
+                        "statusCheckRollup": {
+                          "state": "SUCCESS"
+                        }
+                      }
+                    }
+                  ]
+                },
+                "reviewThreads": {
+                  "pageInfo": {
+                    "hasNextPage": false,
+                    "endCursor": null
+                  },
+                  "nodes": []
+                }
+              }
+            },
+            {
+              "__typename": "CrossReferencedEvent",
+              "willCloseTarget": false,
+              "source": {
+                "__typename": "PullRequest",
+                "number": 91,
+                "title": "api split lines",
+                "url": "https://github.com/larchanka-training/dmc-268-api-t6/pull/91",
+                "body": "Refs\n#13",
+                "state": "MERGED",
+                "mergedAt": "2026-10-02T10:00:00Z",
+                "headRefOid": "5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b",
+                "repository": {
+                  "nameWithOwner": "larchanka-training/dmc-268-api-t6"
+                },
+                "commits": {
+                  "nodes": [
+                    {
+                      "commit": {
+                        "statusCheckRollup": {
+                          "state": "SUCCESS"
+                        }
+                      }
+                    }
+                  ]
+                },
+                "reviewThreads": {
+                  "pageInfo": {
+                    "hasNextPage": false,
+                    "endCursor": null
+                  },
+                  "nodes": []
+                }
+              }
+            },
+            {
+              "__typename": "CrossReferencedEvent",
+              "willCloseTarget": false,
+              "source": {
+                "__typename": "PullRequest",
+                "number": 92,
+                "title": "api in fence",
+                "url": "https://github.com/larchanka-training/dmc-268-api-t6/pull/92",
+                "body": "Intro\n\n```\nRefs #13\n```\n",
+                "state": "MERGED",
+                "mergedAt": "2026-10-02T10:00:00Z",
+                "headRefOid": "5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c",
+                "repository": {
+                  "nameWithOwner": "larchanka-training/dmc-268-api-t6"
+                },
+                "commits": {
+                  "nodes": [
+                    {
+                      "commit": {
+                        "statusCheckRollup": {
+                          "state": "SUCCESS"
+                        }
+                      }
+                    }
+                  ]
+                },
+                "reviewThreads": {
+                  "pageInfo": {
+                    "hasNextPage": false,
+                    "endCursor": null
+                  },
+                  "nodes": []
+                }
+              }
+            },
+            {
+              "__typename": "CrossReferencedEvent",
+              "willCloseTarget": false,
+              "source": {
+                "__typename": "PullRequest",
+                "number": 93,
+                "title": "api in comment",
+                "url": "https://github.com/larchanka-training/dmc-268-api-t6/pull/93",
+                "body": "Intro\n\n<!--\nRefs #13\n-->\n<!-- Refs #13 -->\n",
+                "state": "MERGED",
+                "mergedAt": "2026-10-02T10:00:00Z",
+                "headRefOid": "5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d",
+                "repository": {
+                  "nameWithOwner": "larchanka-training/dmc-268-api-t6"
+                },
+                "commits": {
+                  "nodes": [
+                    {
+                      "commit": {
+                        "statusCheckRollup": {
+                          "state": "SUCCESS"
+                        }
+                      }
+                    }
+                  ]
+                },
+                "reviewThreads": {
+                  "pageInfo": {
+                    "hasNextPage": false,
+                    "endCursor": null
+                  },
+                  "nodes": []
+                }
+              }
+            },
+            {
+              "__typename": "CrossReferencedEvent",
+              "willCloseTarget": false,
+              "source": {
+                "__typename": "PullRequest",
+                "number": 94,
+                "title": "ui upper-case repo",
+                "url": "https://github.com/larchanka-training/dmc-268-ui-t6/pull/94",
+                "body": "Refs LARCHANKA-training/DMC-268-API-T6#13",
+                "state": "MERGED",
+                "mergedAt": "2026-10-02T10:00:00Z",
+                "headRefOid": "5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e",
+                "repository": {
+                  "nameWithOwner": "larchanka-training/dmc-268-ui-t6"
+                },
+                "commits": {
+                  "nodes": [
+                    {
+                      "commit": {
+                        "statusCheckRollup": {
+                          "state": "SUCCESS"
+                        }
+                      }
+                    }
+                  ]
+                },
+                "reviewThreads": {
+                  "pageInfo": {
+                    "hasNextPage": false,
+                    "endCursor": null
+                  },
+                  "nodes": []
+                }
+              }
+            }
+          ]
+        }
+      }
+    }
+  }
+}

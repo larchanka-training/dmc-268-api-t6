@@ -1,0 +1,52 @@
+{
+  "data": {
+    "repository": {
+      "issue": {
+        "title": "Synthetic issue, events out of order",
+        "url": "https://github.com/larchanka-training/dmc-268-api-t6/issues/13",
+        "state": "CLOSED",
+        "stateReason": "COMPLETED",
+        "body": "",
+        "timelineItems": {
+          "pageInfo": {
+            "hasNextPage": false,
+            "endCursor": null
+          },
+          "nodes": [
+            {
+              "__typename": "ClosedEvent",
+              "createdAt": "2026-10-03T11:00:00Z",
+              "actor": {
+                "login": "axyi"
+              },
+              "stateReason": "COMPLETED",
+              "closer": null
+            },
+            {
+              "__typename": "ClosedEvent",
+              "createdAt": "2026-10-03T09:00:00Z",
+              "actor": {
+                "login": "axyi"
+              },
+              "stateReason": "COMPLETED",
+              "closer": {
+                "__typename": "PullRequest",
+                "number": 70,
+                "repository": {
+                  "nameWithOwner": "larchanka-training/dmc-268-ui-t6"
+                }
+              }
+            },
+            {
+              "__typename": "ReopenedEvent",
+              "createdAt": "2026-10-03T10:00:00Z",
+              "actor": {
+                "login": "axyi"
+              }
+            }
+          ]
+        }
+      }
+    }
+  }
+}

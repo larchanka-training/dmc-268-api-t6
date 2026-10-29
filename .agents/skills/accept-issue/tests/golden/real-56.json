@@ -1,0 +1,190 @@
+{
+  "checkboxes": {
+    "ac": {
+      "checked": 8,
+      "items": [
+        {
+          "checked": true,
+          "text": "Часть 1 — правила приёмки: В `docs/CONTRIBUTING.md` есть правила закрытия задач и мержа из Scope; `.agents/rules/git-workflow.md` в обоих репозиториях ссылается на них"
+        },
+        {
+          "checked": true,
+          "text": "Часть 1 — правила приёмки: Решение по опции ruleset «Dismiss stale pull request approvals when new commits are pushed» записано: включена или отклонена с причиной"
+        },
+        {
+          "checked": true,
+          "text": "Часть 2 — доки и smoke: README содержит раздел про вебхук, webhook-worker и auth"
+        },
+        {
+          "checked": true,
+          "text": "Часть 2 — доки и smoke: В `docs/` одно имя флага лейбла; устаревшие пункты SD §7.3 и статус OQ-2 соответствуют факту"
+        },
+        {
+          "checked": true,
+          "text": "Часть 2 — доки и smoke: Скрипт отправляет подписанную доставку на локальный стек; CI-джоб поднимает контейнер и получает 202"
+        },
+        {
+          "checked": true,
+          "text": "Часть 2 — доки и smoke: Заглушка в e2e-skill заменена ссылкой на скрипт"
+        },
+        {
+          "checked": true,
+          "text": "Часть 2 — доки и smoke: PIPELINE_SPEC §15, строка 2 закрыта замером или обоснованием"
+        },
+        {
+          "checked": true,
+          "text": "Часть 2 — доки и smoke: `redocly lint contracts/openapi.yaml` без предупреждений (или они осознанно отключены в конфиге)"
+        }
+      ],
+      "total": 8
+    },
+    "dod": {
+      "checked": 5,
+      "items": [
+        {
+          "checked": true,
+          "text": "`uv run ruff check .`, `uv run ruff format --check .`, `uv run mypy .`, `uv run pytest` зелёные"
+        },
+        {
+          "checked": true,
+          "text": "Required check `Python lint / type / test` зелёный"
+        },
+        {
+          "checked": true,
+          "text": "PR по каждой части: 1 approve, все треды закрыты"
+        },
+        {
+          "checked": true,
+          "text": "Документация обновлена"
+        },
+        {
+          "checked": true,
+          "text": "Чекбоксы AC отмечены, issue закрыт техлидом после проверки всех частей"
+        }
+      ],
+      "total": 5
+    },
+    "outside": 0
+  },
+  "closing": {
+    "events": [
+      {
+        "actor": "axyi",
+        "at": "2026-10-05T09:15:22Z",
+        "closer": "merge",
+        "closer_ref": "larchanka-training/dmc-268-api-t6#60",
+        "kind": "closed",
+        "state_reason": "COMPLETED"
+      },
+      {
+        "actor": "axyi",
+        "at": "2026-10-19T18:22:47Z",
+        "kind": "reopened"
+      },
+      {
+        "actor": "axyi",
+        "at": "2026-10-19T18:23:13Z",
+        "closer": "manual",
+        "closer_ref": null,
+        "kind": "closed",
+        "state_reason": "COMPLETED"
+      }
+    ],
+    "ever_closed_by_merge": true,
+    "last_closer": "manual"
+  },
+  "issue": {
+    "ref": "larchanka-training/dmc-268-api-t6#56",
+    "state": "CLOSED",
+    "state_reason": "COMPLETED",
+    "title": "[process] Закрепить правила приёмки и актуализировать доки вебхука, auth и SD",
+    "url": "https://github.com/larchanka-training/dmc-268-api-t6/issues/56"
+  },
+  "prs": [
+    {
+      "ci": "SUCCESS",
+      "head_sha": "c253b142d1189df3ce8d4e7312c514905e5af86e",
+      "merged_at": "2026-10-05T11:54:07Z",
+      "ref": "larchanka-training/dmc-268-api-t6#59",
+      "refs": true,
+      "state": "MERGED",
+      "title": "docs(contributing): issue acceptance and merge rules (#56)",
+      "unresolved_threads": 0,
+      "url": "https://github.com/larchanka-training/dmc-268-api-t6/pull/59",
+      "will_close": false
+    },
+    {
+      "ci": "SUCCESS",
+      "head_sha": "97a335fd4b268858f464b4a90cc7d21f86bfb116",
+      "merged_at": "2026-10-05T09:15:20Z",
+      "ref": "larchanka-training/dmc-268-api-t6#60",
+      "refs": true,
+      "state": "MERGED",
+      "title": "docs: webhook and auth docs, SD drift, container smoke (#56)",
+      "unresolved_threads": 0,
+      "url": "https://github.com/larchanka-training/dmc-268-api-t6/pull/60",
+      "will_close": false
+    },
+    {
+      "ci": "SUCCESS",
+      "head_sha": "a0d1d4868c198c954a0867810536e82db1485e33",
+      "merged_at": "2026-10-05T19:31:07Z",
+      "ref": "larchanka-training/dmc-268-api-t6#64",
+      "refs": false,
+      "state": "MERGED",
+      "title": "fix(pipeline): assemble webhook to LLM review path (#52)",
+      "unresolved_threads": 0,
+      "url": "https://github.com/larchanka-training/dmc-268-api-t6/pull/64",
+      "will_close": false
+    },
+    {
+      "ci": "SUCCESS",
+      "head_sha": "a55303b79ee4c80ae252b256c749cd43af5031a0",
+      "merged_at": "2026-10-05T16:21:44Z",
+      "ref": "larchanka-training/dmc-268-api-t6#67",
+      "refs": false,
+      "state": "MERGED",
+      "title": "fix(llm): reassign OQ-2 models after the live run (#46)",
+      "unresolved_threads": 0,
+      "url": "https://github.com/larchanka-training/dmc-268-api-t6/pull/67",
+      "will_close": false
+    },
+    {
+      "ci": "SUCCESS",
+      "head_sha": "07390d0592eb59c690cbc7edc65c8022fb66d380",
+      "merged_at": "2026-10-07T14:19:23Z",
+      "ref": "larchanka-training/dmc-268-api-t6#69",
+      "refs": false,
+      "state": "MERGED",
+      "title": "fix(api): api hardening and legacy artifacts decision (#54)",
+      "unresolved_threads": 0,
+      "url": "https://github.com/larchanka-training/dmc-268-api-t6/pull/69",
+      "will_close": false
+    },
+    {
+      "ci": "SUCCESS",
+      "head_sha": "eb878f99543c147bc0c3df9f8beb6fc96a70d336",
+      "merged_at": "2026-10-19T17:50:30Z",
+      "ref": "larchanka-training/dmc-268-api-t6#148",
+      "refs": false,
+      "state": "MERGED",
+      "title": "feat(webhooks): share installation tokens through Redis (#62)",
+      "unresolved_threads": 0,
+      "url": "https://github.com/larchanka-training/dmc-268-api-t6/pull/148",
+      "will_close": false
+    },
+    {
+      "ci": "SUCCESS",
+      "head_sha": "c16e216c79abbb159bf6fe9fd3f372163d48abb3",
+      "merged_at": "2026-10-05T09:03:40Z",
+      "ref": "larchanka-training/dmc-268-ui-t6#68",
+      "refs": true,
+      "state": "MERGED",
+      "title": "docs(process): mirror the acceptance and merge rules",
+      "unresolved_threads": 0,
+      "url": "https://github.com/larchanka-training/dmc-268-ui-t6/pull/68",
+      "will_close": false
+    }
+  ],
+  "schema": 1
+}
