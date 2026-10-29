@@ -737,17 +737,20 @@ def test_status_failure_without_retry_after_is_deferred_and_not_selected_next_ti
 
 
 @pytest.mark.parametrize(
-    ("snapshot_state", "remote_state", "unpublishable"),
+    ("snapshot_state", "remote_state", "remote_pr_id", "unpublishable"),
     [
-        ("cancelled", "DECLINED", True),
-        ("cancelled", "OPEN", False),
-        ("failed", "DECLINED", False),
+        ("cancelled", "DECLINED", 7, True),
+        ("cancelled", "MERGED", 7, True),
+        ("cancelled", "OPEN", 7, False),
+        ("failed", "DECLINED", 7, False),
+        ("cancelled", "DECLINED", 8, False),
     ],
 )
 def test_missing_fork_head_retires_only_cancelled_closed_status(
     bitbucket_connection_schema: Connection,
     snapshot_state: str,
     remote_state: str,
+    remote_pr_id: int,
     unpublishable: bool,
 ) -> None:
     db = bitbucket_connection_schema
@@ -802,7 +805,7 @@ def test_missing_fork_head_retires_only_cancelled_closed_status(
                 return httpx.Response(
                     200,
                     json={
-                        "id": 7,
+                        "id": remote_pr_id,
                         "state": remote_state,
                         "source": {
                             "commit": None,
