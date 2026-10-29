@@ -678,6 +678,8 @@ def test_browser_connect_reuses_one_credential_and_disconnects_one_repository(
             "Bearer transferred-token",
             "Bearer repository-only-token",
         }
+        if request.url.path == "/2.0/user":
+            return httpx.Response(200, json={"uuid": "{00000000-0000-4000-8000-000000000555}"})
         if request.url.path.endswith("/pullrequests"):
             probe_requests.append(str(request.url))
             if request.headers["Authorization"] == "Bearer repository-only-token":

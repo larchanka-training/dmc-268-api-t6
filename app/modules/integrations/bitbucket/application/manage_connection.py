@@ -135,6 +135,8 @@ class RemoteRepositoryPage(Protocol):
 
 
 class BitbucketRepositoryProvider(Protocol):
+    async def probe_current_user(self, *, token: str) -> None: ...
+
     async def fetch_repository(
         self, *, workspace_slug: str, repository_slug: str, token: str
     ) -> RemoteRepository: ...
@@ -298,6 +300,7 @@ class ManageBitbucketConnection:
         await self._provider.probe_pull_request_read(
             workspace_uuid=remote.workspace_uuid, repository_uuid=remote.uuid, token=token
         )
+        await self._provider.probe_current_user(token=token)
         generated_secret: str | None = None
         async with self._uow_factory() as uow:
             store = uow.connections
@@ -474,6 +477,7 @@ class ManageBitbucketConnection:
             )
         if prior is None or not bindings:
             raise BitbucketManagementError("connection_not_found")
+        await self._provider.probe_current_user(token=token)
         refreshed: list[tuple[RepositoryBinding, RemoteRepository]] = []
         for binding in bindings:
             remote = await self._provider.fetch_repository_by_uuid(

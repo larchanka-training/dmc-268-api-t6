@@ -82,6 +82,24 @@ def test_pr_scope_probe_uses_immutable_repository_identity_and_maps_missing_scop
     ]
 
 
+def test_user_scope_probe_rejects_token_without_identity_access() -> None:
+    requested: list[str] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        requested.append(str(request.url))
+        assert request.headers["Authorization"] == "Bearer repository-only-token"
+        return httpx.Response(403, json={"error": {"message": "scope denied"}})
+
+    async def scenario() -> None:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+            provider = BitbucketCloudRepositoryProvider(client)
+            with pytest.raises(BitbucketProviderError, match="repository_inaccessible"):
+                await provider.probe_current_user(token="repository-only-token")
+
+    asyncio.run(scenario())
+    assert requested == ["https://api.bitbucket.org/2.0/user"]
+
+
 def test_rotate_lookup_uses_workspace_and_repository_uuid_after_slug_change() -> None:
     workspace = UUID("b2d0d95e-1f8d-4990-9fb2-f09f87ae5f60")
     repository = UUID("3791f4cc-f59a-4412-9a52-f34a7829ba1c")

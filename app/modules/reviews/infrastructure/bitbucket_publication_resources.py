@@ -190,6 +190,9 @@ class BitbucketPublicationHttp:
     async def pull_request(self) -> object:
         return await self._request("GET", f"{_ORIGIN}{self._root}")
 
+    async def current_user(self) -> object:
+        return await self._request("GET", f"{_ORIGIN}/2.0/user")
+
     async def source_commit(self, repository_uuid: UUID, head_sha: str) -> object:
         if type(repository_uuid) is not UUID or not isinstance(head_sha, str):
             raise PublishError("retryable", "Bitbucket fork source is unavailable")

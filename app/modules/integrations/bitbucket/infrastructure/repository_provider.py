@@ -135,6 +135,16 @@ class BitbucketCloudRepositoryProvider:
         if not isinstance(parsed, dict) or not isinstance(parsed.get("values"), list):
             raise BitbucketProviderError("invalid_provider_response")
 
+    async def probe_current_user(self, *, token: str) -> None:
+        response = await self._get(f"{_API_ORIGIN}/2.0/user", token)
+        try:
+            parsed = response.json()
+        except ValueError:
+            raise BitbucketProviderError("invalid_provider_response") from None
+        if not isinstance(parsed, dict):
+            raise BitbucketProviderError("invalid_provider_response")
+        _parse_uuid(parsed.get("uuid"))
+
     async def _get(self, url: str, token: str) -> httpx.Response:
         if not valid_bitbucket_token(token):
             raise BitbucketProviderError("invalid_credential")
