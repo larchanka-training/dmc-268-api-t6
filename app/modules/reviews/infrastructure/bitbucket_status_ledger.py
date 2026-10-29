@@ -25,7 +25,11 @@ from sqlalchemy.sql.elements import ColumnElement
 
 from app.common.infrastructure.db.enums import RunState
 from app.common.infrastructure.db.unit_of_work import SqlAlchemyUnitOfWork
-from app.modules.integrations.bitbucket.infrastructure.models import BitbucketStatusPublication
+from app.modules.integrations.bitbucket.infrastructure.models import (
+    BitbucketConnection,
+    BitbucketRunOrigin,
+    BitbucketStatusPublication,
+)
 from app.modules.reviews.application.bitbucket_status import BitbucketStatusSnapshot
 from app.modules.reviews.application.bitbucket_status_intents import (
     StatusClaim,
@@ -291,12 +295,12 @@ class SqlAlchemyBitbucketStatusLedger:
                 table.applied_run_id == table.run_id,
                 table.applied_state == table.desired_state,
                 table.blocked_generation.is_(None),
-                table.last_error.is_(None),
                 cast(Run.state, String(16)) == table.desired_state,
                 func.coalesce(Run.finished_at, Run.created_at) + _TERMINAL_WINDOW <= func.now(),
                 or_(table.owner_id.is_(None), table.lease_until <= func.now()),
             )
             .limit(limit)
+            .with_for_update(of=table, skip_locked=True)
         )
         result = await self._session.execute(
             delete(table)
@@ -314,15 +318,35 @@ class SqlAlchemyBitbucketStatusLedger:
 
     async def pending(self, *, limit: int = 100) -> list[tuple[UUID, str]]:
         table = BitbucketStatusPublication
+        rotated_credential = (
+            select(BitbucketRunOrigin.run_id)
+            .join(
+                BitbucketConnection,
+                and_(
+                    BitbucketConnection.provider_installation_id
+                    == BitbucketRunOrigin.provider_installation_id,
+                    BitbucketConnection.workspace_id == BitbucketRunOrigin.workspace_id,
+                ),
+            )
+            .where(
+                BitbucketRunOrigin.run_id == table.run_id,
+                BitbucketRunOrigin.workspace_id == table.workspace_id,
+                BitbucketRunOrigin.repository_uuid == table.repository_uuid,
+                BitbucketConnection.revoked_at.is_(None),
+                BitbucketConnection.credential_generation > table.blocked_generation,
+            )
+            .exists()
+        )
         rows = (
             await self._session.execute(
                 select(table.run_id, table.run_url)
                 .join(Run, Run.id == table.run_id)
                 .where(
-                    table.blocked_generation.is_(None),
+                    or_(table.blocked_generation.is_(None), rotated_credential),
                     table.next_check_at <= func.now(),
                     or_(table.owner_id.is_(None), table.lease_until <= func.now()),
                     or_(
+                        rotated_credential,
                         table.applied_run_id.is_(None),
                         table.applied_run_id != table.run_id,
                         table.applied_state.is_(None),

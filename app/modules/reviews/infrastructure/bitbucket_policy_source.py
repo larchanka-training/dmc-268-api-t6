@@ -67,7 +67,7 @@ class BitbucketPolicyDocumentSource:
             self._known_files.update(entry.oid for entry in entries if entry.kind == "file")
             return result
         except BitbucketRunHttpError as error:
-            if error.kind == "request_budget_exceeded":
+            if error.kind in {"request_budget_exceeded", "total_budget_exceeded"}:
                 raise
             raise self._error(error, listing=True) from None
 
@@ -77,6 +77,6 @@ class BitbucketPolicyDocumentSource:
                 raise BitbucketRunHttpError("invalid_response")
             return await self._trees.read_file(oid, max_bytes=MAX_DOCUMENT_BYTES)
         except BitbucketRunHttpError as error:
-            if error.kind == "request_budget_exceeded":
+            if error.kind in {"request_budget_exceeded", "total_budget_exceeded"}:
                 raise
             raise self._error(error, listing=False) from None

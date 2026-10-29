@@ -141,19 +141,20 @@ def test_unproven_absence_and_changed_binding_are_unavailable(source: FakeSource
         pytest.param(
             FakeSource(head_result=None),
             "policy_revision_unavailable",
-            "Ревизия default branch недоступна: источник не подтвердил, есть ли файл правил.",
+            "The default branch revision is unavailable: the provider did not confirm whether"
+            " the rules file exists.",
             id="no-head",
         ),
         pytest.param(
             FakeSource(head_error=VcsUnavailable("rate limited", rate_limited=True)),
             "policy_rate_limited",
-            "Источник ограничил частоту запросов при чтении правил.",
+            "The provider limited the request rate while reading the rules.",
             id="rate-limited",
         ),
         pytest.param(
             FakeSource(document_error=PolicyError(PolicyErrorCode.FETCH_TRANSIENT, "incomplete")),
             "policy_fetch_transient",
-            "Не удалось прочитать документ правил из репозитория.",
+            "Could not read the rules documents from the provider.",
             id="transient",
         ),
     ],

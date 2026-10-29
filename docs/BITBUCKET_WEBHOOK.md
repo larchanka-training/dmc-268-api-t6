@@ -29,6 +29,11 @@ The receiver caps the body at 256 KiB, rejects duplicate/malformed headers and
 verifies HMAC over raw bytes before parsing JSON. The payload repository UUID
 must match the active binding. The first valid signed receipt activates only
 that repository's webhook status; an invalid signature never activates it.
+The repository UUID is mandatory for every accepted event. A signed
+`diagnostics:ping` without `repository.uuid` gets 400 and creates no receipt.
+The payload's `updated_on` is informational: delivery identity comes from the
+hook and request UUID headers, and projection refetches the current PR before
+using its state and revision. A stale webhook timestamp does not roll the PR back.
 
 | HTTP | Meaning |
 | --- | --- |

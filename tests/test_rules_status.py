@@ -12,7 +12,7 @@ from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from hashlib import sha256
-from typing import Any, Self
+from typing import Any, Literal, Self
 from uuid import UUID
 
 import httpx
@@ -241,9 +241,12 @@ def test_bad_mask_diagnostic_is_english_and_carries_the_mask() -> None:
     assert diagnostic.message.endswith(", mask `src/a?.py`.")
 
 
+@pytest.mark.parametrize("provider", ["github", "bitbucket"])
 @pytest.mark.parametrize("code", list(PolicyErrorCode))
-def test_every_policy_code_has_an_english_status_text(code: PolicyErrorCode) -> None:
-    text = status_text(PolicyError(code, "technical"), provider="github")
+def test_every_policy_code_has_an_english_status_text(
+    code: PolicyErrorCode, provider: Literal["github", "bitbucket"]
+) -> None:
+    text = status_text(PolicyError(code, "technical"), provider=provider)
 
     assert text != code.value
     assert text.isascii()

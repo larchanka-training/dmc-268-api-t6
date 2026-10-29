@@ -16,10 +16,12 @@ import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 import app.worker as worker
-from app.bootstrap.bitbucket_reviews import BitbucketAttemptBundle
+from app.bootstrap.bitbucket_reviews import (
+    BitbucketAttemptBundle,
+    BitbucketReviewWorkerResources,
+)
 from app.modules.integrations.bitbucket.infrastructure.run_http import (
     BitbucketRunHttp,
-    BitbucketRunHttpError,
 )
 from app.modules.reviews.application.bitbucket_status import BitbucketStatusSnapshot
 from app.modules.reviews.application.check_runs import RunProviderCheckpoint
@@ -70,6 +72,9 @@ from app.modules.reviews.infrastructure.blob_cache import InMemoryBlobCache
 from app.modules.reviews.infrastructure.llm.gateway import LlmGateway
 from app.modules.reviews.infrastructure.llm.memory import InMemoryLlmCallTrace, InMemoryUsageLedger
 from app.modules.reviews.infrastructure.llm.settings import LlmSettings
+from app.modules.reviews.infrastructure.policy_snapshot_unit_of_work import (
+    UNPINNED_EXECUTION_PROFILE,
+)
 from tests.llm_fakes import context_checkpoint
 from tests.policy_snapshot_fakes import make_complete_prompt_bindings
 from tests.test_bitbucket_vcs import BASE, DEST, HEAD, PREFIX, TARGET, Credentials, _locator, _pr
@@ -85,6 +90,48 @@ RUN_ID = UUID(int=2)
 REPO_ID = UUID(int=1)
 LOCATOR = PullRequestLocator(0, "team/project", 7, "bitbucket", UUID(int=169), 19, DEST)
 RUN = RunVcsInput(UUID(int=5), REPO_ID, "a" * 40, "b" * 40, LOCATOR)
+
+
+def test_composed_bitbucket_attempt_ignores_proxy_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("HTTPS_PROXY", "http://proxy.example.test:8080")
+    monkeypatch.setenv("NO_PROXY", "")
+
+    def unexpected_proxy_lookup() -> dict[str, str]:
+        raise AssertionError("review client consulted environment proxy settings")
+
+    monkeypatch.setattr("httpx._client.get_environment_proxies", unexpected_proxy_lookup)
+    resources = BitbucketReviewWorkerResources.__new__(BitbucketReviewWorkerResources)
+    resources._sessions = cast(async_sessionmaker[AsyncSession], object())
+    resources._credentials = cast(Any, Credentials())
+    resources._profile = UNPINNED_EXECUTION_PROFILE
+    resources._redis = None
+    resources._transports = None
+
+    async def target(*_args: object) -> object:
+        return TARGET
+
+    monkeypatch.setattr(resources, "_target", target)
+
+    async def scenario() -> None:
+        async with resources.attempt(
+            claimed=ClaimedAttempt(
+                RUN_ID,
+                TARGET.workspace_id,
+                2,
+                "fast",
+                datetime.now(UTC) + timedelta(minutes=5),
+                UUID(int=41),
+                UUID(int=4),
+                "bitbucket-worker",
+            ),
+            expected_input=RunVcsInput(UUID(int=5), TARGET.repository_id, HEAD, BASE, _locator()),
+            checkpoint=_checkpoint,
+        ):
+            pass
+
+    asyncio.run(scenario())
 
 
 @pytest.mark.parametrize("provider", ["github", "gitlab", "bitbucket"])
@@ -407,14 +454,20 @@ def test_composed_bitbucket_review_uses_pinned_cloud_reads_and_writes(
                 await super().get_run_conventions_input(run_id), repository_id=TARGET.repository_id
             )
 
+    context_http: list[BitbucketRunHttp] = []
+
     class RequestBudgetContext(BuildReviewContext):
         async def execute(self, **kwargs: Any) -> Any:
-            raise BitbucketRunHttpError("request_budget_exceeded")
+            # The optional context performs a real HTTP read at its budget ceiling.
+            # Mandatory conventions and PR metadata must retain their request reserve.
+            context_http[0]._requests = 400
+            return await super().execute(**kwargs)
 
     async def scenario() -> None:
         credentials = CloudCredentials()
         async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
             http = BitbucketRunHttp(client, credentials, TARGET)
+            context_http.append(http)
             vcs = HttpBitbucketVcsProvider(http=http, locator=run.locator)
             trees = BitbucketRepositoryTree(
                 http=http, expected_input=run, vcs=vcs, checkpoint=_checkpoint
@@ -463,6 +516,7 @@ def test_composed_bitbucket_review_uses_pinned_cloud_reads_and_writes(
                     parser=Parser(),
                     counter=EstimatedTokenCounter(),
                 ),
+                context_budget=http.optional_context_budget,
                 trace=trace,
                 payloads=trace,
             )
@@ -731,13 +785,14 @@ def test_composed_bitbucket_review_uses_pinned_cloud_reads_and_writes(
                 assert agents_bytes.decode().strip() in prompt_text
                 assert "Check changed function behavior." in prompt_text
                 if context_budget_exceeded:
-                    assert stage.payload is None
+                    assert stage.payload is not None
+                    assert ContextLevel.L3 not in stage.payload.levels_present
                     assert "def compute():" in prompt_text
                     assert len(answers.requests) == 1
+                    assert http.request_count > 400
+                    assert http.request_count < 800
                     assert any(
-                        response.get("error", {}).get("type") == "BitbucketRunHttpError"
-                        for tool, _, response in trace.steps
-                        if tool == "context.build"
+                        request.url.path == f"{PREFIX}/pullrequests/7/commits" for request in seen
                     )
                 else:
                     assert stage.payload is not None

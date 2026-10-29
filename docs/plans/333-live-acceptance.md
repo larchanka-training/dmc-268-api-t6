@@ -39,6 +39,9 @@ raw signed payload or ciphertext into Git, chat, issue or PR.
 
 1. In the portal, explicitly select the intended portal workspace. Discover
    and connect the private Bitbucket repository using the scoped read token.
+   Probe a token without `read:pullrequest:bitbucket` on both connect and
+   `PUT credential`: each must return 422, and the existing connection's
+   `credentialGeneration` must remain unchanged.
    Record portal workspace ID, installation ID, portal repository ID and the
    returned Bitbucket repository UUID; never record the token or one-time
    webhook secret. Verify a member sees it in `/api/repos` and a nonmember does
@@ -46,6 +49,11 @@ raw signed payload or ciphertext into Git, chat, issue or PR.
 2. Set the repository webhook in Bitbucket to the one-time URL and secret from
    the connect response. Subscribe to `repo:push`, `pullrequest:created`,
    `pullrequest:updated`, `pullrequest:fulfilled` and `pullrequest:rejected`.
+   Recreate any test hook configured from an older three-event response before
+   exercising merge or decline. Merge and decline real disposable PRs, then
+   verify receipts named `pullrequest:fulfilled` and `pullrequest:rejected`,
+   respectively. Their `code_changes.state` must become merged/closed; an
+   active Run is cancelled with reason `closed`, with no new Run or publication.
    Compare those five wire response events from connect and secret rotation
    with the webhook configuration; a three-event response is a contract failure.
    The first valid signed delivery must switch that
@@ -95,7 +103,9 @@ raw signed payload or ciphertext into Git, chat, issue or PR.
   without changing its branch identity: the existing Run must retain its
   original base SHA. Retarget the PR to a different branch or advance the
   source head between diff fetch and publication: the old Run must not
-  publish comments or a successful status. Toggle draft with the same head
+  publish comments or a successful status. After a retarget, the cancelled
+  old Run must publish `STOPPED` under its pinned status key, replacing its
+  earlier `INPROGRESS`. Toggle draft with the same head
   and record the expected Run behavior.
 - **Webhook ordering and diagnostics (P3-14).** Deliver two signed PR updates
   with equal `updated_on` and distinct source heads; the newer head must not
@@ -105,6 +115,9 @@ raw signed payload or ciphertext into Git, chat, issue or PR.
 - **Limits and failure surfaces (R1-05, R4-02).** Observe the Bitbucket rate
   limit bucket and `Retry-After` on a disposable test request, including a
   missing or HTTP-date value if Bitbucket emits one. Record request counts for
+  `/src/{commit}/` directory listing and `/src/{commit}/{path}` raw file read
+  separately, including each response's `X-RateLimit-*` headers; establish
+  whether they spend the same quota bucket. Record request counts for
   required diff/blob reads and optional context separately. A 429 or exhausted
   request budget must report the correct retryable or terminal code; optional
   context exhaustion must leave a diff-only review when required data is
@@ -112,6 +125,8 @@ raw signed payload or ciphertext into Git, chat, issue or PR.
 - **Status and merge check (R1-03, R1-06, R1-31).** Confirm the ≤40-character
   deterministic status key and portal target URL on the pinned source SHA.
   Exercise a skipped/failed Run and inspect `STOPPED` plus its description and
+  exercise cancellation after a review attempt has started: that run must
+  publish `STOPPED`, rather than relying only on skipped/failed cases. Check
   the repository's actual merge-check interpretation. For a fork, verify
   whether the destination token can write status to the source commit; record
   403 without claiming success. Redelivery and worker restart must not create

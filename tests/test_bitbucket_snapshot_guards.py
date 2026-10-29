@@ -184,16 +184,23 @@ def test_remaining_budget_stops_before_oversized_second_file() -> None:
 
 
 @pytest.mark.parametrize("body", [b"\x00", b"x" * 1025, b"\xff"])
-def test_invalid_symlink_body_is_rejected(body: bytes) -> None:
+def test_invalid_symlink_body_is_skipped_without_losing_other_files(body: bytes) -> None:
     def handle(request: httpx.Request) -> httpx.Response:
         if request.url.path.endswith(f"/src/{SHA}/"):
-            return listing(file_entry("link", len(body), attributes=["link"]))
+            return listing(file_entry("link", len(body), attributes=["link"]), file_entry("ok.py"))
+        if request.url.path.endswith("/ok.py"):
+            return httpx.Response(200, content=b"x")
         return httpx.Response(200, content=body)
 
     async def run() -> None:
         async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
-            with pytest.raises(VcsUnavailable, match="invalid symbolic link"):
-                await source(client).archive(SHA, max_bytes=10000)
+            snapshot = source(client)
+            archive = await snapshot.archive(SHA, max_bytes=10000)
+            scan = await TarArchiveReader(IndexLimits()).scan(
+                archive, documents=set(), deadline=time.monotonic() + 5
+            )
+            assert set(scan.entries) == {"ok.py"}
+            assert archive.provider_skips == {"invalid_symlink": 1}
 
     asyncio.run(run())
 
@@ -266,6 +273,7 @@ def test_unrepresentable_and_subrepository_entries_are_skipped() -> None:
                 file_entry("x" * 1025),
                 file_entry("module", kind="commit_directory"),
                 file_entry("vendor", kind="commit_file", attributes=["subrepository"]),
+                file_entry("nested", kind="commit_subrepository"),
                 file_entry("ok.py"),
             )
         if request.url.path.endswith("/module/"):
@@ -281,7 +289,7 @@ def test_unrepresentable_and_subrepository_entries_are_skipped() -> None:
                 archive, documents=set(), deadline=time.monotonic() + 5
             )
             assert set(scan.entries) == {"ok.py"}
-            assert snapshot.skipped_entries == {"unrepresentable_path": 3, "subrepository": 1}
+            assert snapshot.skipped_entries == {"unrepresentable_path": 3, "subrepository": 2}
             assert archive.provider_skips == snapshot.skipped_entries
 
     asyncio.run(run())

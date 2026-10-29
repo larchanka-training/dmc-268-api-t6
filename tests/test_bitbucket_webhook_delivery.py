@@ -190,6 +190,21 @@ def test_deep_signed_json_returns_bad_request_instead_of_server_error() -> None:
         del app.state.bitbucket_webhook_resources
 
 
+def test_signed_diagnostics_ping_without_repository_uuid_is_not_accepted() -> None:
+    resources = FakeWebhookResources()
+    app.state.bitbucket_webhook_resources = resources
+    body = b'{"diagnostics":{"uuid":"ping"}}'
+    route = f"/webhooks/bitbucket/{INSTALLATION}/{REPOSITORY}"
+    try:
+        response = TestClient(app).post(
+            route, content=body, headers={**_headers(body), "X-Event-Key": "diagnostics:ping"}
+        )
+        assert response.status_code == 400
+        assert resources.receipts == []
+    finally:
+        del app.state.bitbucket_webhook_resources
+
+
 def test_webhook_secret_decrypt_failure_is_logged_without_ciphertext(
     caplog: pytest.LogCaptureFixture,
 ) -> None:

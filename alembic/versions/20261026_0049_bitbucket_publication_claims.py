@@ -25,7 +25,7 @@ def upgrade() -> None:
         sa.Column("lease_until", sa.DateTime(timezone=True), nullable=False),
         sa.PrimaryKeyConstraint("run_id"),
         sa.ForeignKeyConstraint(["run_id"], ["runs.id"], ondelete="CASCADE"),
-        sa.CheckConstraint("generation > 0", name="ck_bitbucket_publication_claim_generation"),
+        sa.CheckConstraint("generation > 0", name="ck_bitbucket_publication_claims_generation"),
     )
 
 

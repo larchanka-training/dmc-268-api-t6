@@ -672,8 +672,16 @@ class BitbucketRepositorySnapshotSource:
             total += len(body)
             if total > max_bytes:
                 raise IndexLimitExceeded("download_bytes")
-            if entry.symlink and (len(body) > 1024 or b"\x00" in body):
-                raise VcsUnavailable("Bitbucket returned an invalid symbolic link")
+            if entry.symlink:
+                try:
+                    valid_link = (
+                        len(body) <= 1024 and b"\x00" not in body and bool(body.decode("utf-8"))
+                    )
+                except UnicodeDecodeError:
+                    valid_link = False
+                if not valid_link:
+                    self._skip("invalid_symlink")
+                    continue
             contents.append((entry, body))
         await self._bound()
         content = await asyncio.to_thread(_tarball, sha, contents)
