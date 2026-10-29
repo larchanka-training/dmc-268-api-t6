@@ -3,7 +3,7 @@
 
 The pre-start check of the implement-issue skill. It collects what the skill needs
 before any branch is cut and states it as facts plus a verdict: the issue's state,
-its native blockers, its parts («Ч.N» / «Part N») with the pull requests that
+its native blockers, its parts («Ч.N» / «Part N» / «Teil N») with the pull requests that
 reference them, the Kickoff, the board Status, and the part a run should take.
 
 Usage
@@ -23,12 +23,13 @@ trailing newline), schema 1:
               sorted by ref. Only state OPEN blocks.
     parts     [{n, label, scope, boundary, done_when, acceptance_criteria, prs,
               status}] — top-level bullets under `## Scope` that start with
-              `Ч.N` / `Part N`, an optional `(label)`, then `:`. Bullets that
-              repeat a number are one part (scope lines joined by a newline).
-              The nested `Граница PR:` / `PR boundary:` and `Готово, когда:` /
-              `Done when:` bullets give boundary and done_when (null when
-              absent). acceptance_criteria: the items under `## Acceptance
-              Criteria` prefixed `Ч.N:` / `Part N:`, the prefix removed.
+              `Ч.N` / `Part N` / `Teil N`, an optional `(label)`, then `:`.
+              Bullets that repeat a number are one part (scope lines joined by a
+              newline). The nested `Граница PR:` / `PR boundary:` / `PR-Grenze:`
+              and `Готово, когда:` / `Done when:` / `Fertig, wenn:` bullets give
+              boundary and done_when (null when absent). acceptance_criteria: the
+              items under `## Acceptance Criteria` prefixed `Ч.N:` / `Part N:` /
+              `Teil N:`, the prefix removed.
               prs: [{ref, url, title, state}] of the pull requests that name
               the part. status: done (a MERGED pull request names it), else
               open_pr (an OPEN one does), else todo; CLOSED ones never count.
@@ -46,12 +47,13 @@ colon) followed by `#N` or `OWNER/NAME#N` references separated by commas, `;`,
 `&`, `and` or blanks; `#N` counts for a pull request in the issue's own repo, the
 full form from any repo. Anything else is not recognised. Pull requests come from
 the issue's timeline (both repos, every page). A pull request names the parts
-found in its TITLE (`Part K`, `Ч.K`, `Ч. K`, case-insensitive, whole numbers), all
-of them: a title that names several is deliberate. If the title names none, the
-FIRST part named in the first non-empty line of its `## What` section (the whole
-body when it has no `## What`): a later mention there is context ("Part 1, which
-this extends, is merged"), not scope. A pull request that ends up naming more than
-one part counts for each and adds a warning. Lines in fenced code, HTML comments
+found in its TITLE (`Part K`, `Ч.K`, `Ч. K`, `Teil K`, and `Часть K` in any case form:
+`Части K`, `Частью K`; case-insensitive, whole numbers; a range such as `Parts 1–3`
+names nothing), all of them: a title that names several is deliberate. If the title
+names none, the FIRST part named in the first non-empty line of its `## What` section
+(the whole body when it has no `## What`): a later mention there is context ("Part 1,
+which this extends, is merged"), not scope. A pull request that ends up naming more
+than one part counts for each and adds a warning. Lines in fenced code, HTML comments
 and quotes do not count.
 
 Decisions, in this order: the issue is CLOSED -> stop; any OPEN blocker -> stop;
@@ -115,17 +117,23 @@ REFS_LINE = re.compile(
 )
 REFS_TOKEN = re.compile(r"([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)?#([1-9][0-9]*)")
 
-# A part number: `Part K`, `Ч.K`, `Ч. K` — a whole number, so `Ч.1` is not `Ч.12`.
-_PART = r"(?:Ч\.[ \t]*|Part[ \t]+)([0-9]+)(?![0-9])"
-PART_NAMED = re.compile(rf"(?<!\w){_PART}", re.IGNORECASE)
+# A part number as the Scope bullets and the criteria of create-issue write it: `Ч.K`
+# (ru), `Part K` (en), `Teil K` (de) — a whole number, so `Ч.1` is not `Ч.12`.
+_LABEL = r"(?:Ч\.[ \t]*|Part[ \t]+|Teil[ \t]+)"
+_PART = rf"{_LABEL}([0-9]+)(?![0-9])"
+# The same in a pull request's prose, which also says «Часть K» (in any case form:
+# «Части K», «Частью K»). A range («Parts 1–3», «Части 1–3», «Part 1-3») names no
+# single part and is not recognised. One alternation, so that "first" means first in the line.
+_NAMED = rf"(?:{_LABEL}|Част(?:ь|и|ью)[ \t]+)([0-9]+)(?![0-9])(?![ \t]*[-–—][ \t]*[0-9])"
+PART_NAMED = re.compile(rf"(?<!\w){_NAMED}", re.IGNORECASE)
 PART_START = re.compile(_PART, re.IGNORECASE)
 PART_BULLET = re.compile(rf"{_PART}[ \t]*(?:\((.*?)\))?[ \t]*:[ \t]*(.*)", re.IGNORECASE)
 PART_CRITERION = re.compile(rf"{_PART}[ \t]*:[ \t]*(.*)", re.IGNORECASE)
 CHECKBOX_PREFIX = re.compile(r"\[[ xX]\][ \t]+")
 TOP_BULLET = re.compile(r"[-*+][ \t]+(.*)$")
 NESTED_BULLET = re.compile(r"[ \t]+[-*+][ \t]+(.*)$")
-BOUNDARY_LABELS = ("граница pr", "pr boundary")
-DONE_WHEN_LABELS = ("готово, когда", "done when")
+BOUNDARY_LABELS = ("граница pr", "pr boundary", "pr-grenze")
+DONE_WHEN_LABELS = ("готово, когда", "done when", "fertig, wenn")
 
 ISSUE_QUERY = """
 query($owner: String!, $name: String!, $number: Int!) {

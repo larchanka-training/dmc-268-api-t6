@@ -529,6 +529,42 @@ def named_in(tmp_path: Path, node: dict[str, Any], parts: int = 2) -> list[int]:
         ("feat: y", "Part 2 of #13: x. Part 1 is merged.", [2]),  # first by position, not smallest
         ("feat: y", "SYNC copy of ui#1 (Part 2 of #13): y; Part 1 is merged", [2]),
         ("Part 1 of #13", "Part 2 of #13: y", [1]),  # the title still wins
+        # create-issue's German label and the team's Russian prose, in any case form
+        ("Teil 2 von #13: y", "", [2]),
+        ("TEIL 2", "", [2]),
+        ("feat: y", "Teil 2 von #13: y. Teil 1 ist gemergt.", [2]),
+        ("Часть 2 из #13: y", "", [2]),
+        ("Спецификация Части 1", "", [1]),
+        ("Реализация Частью 2", "", [2]),
+        ("ЧАСТЬ 2", "", [2]),
+        ("часть 1", "", [1]),
+        ("Часть 1 и Часть 2", "", [1, 2]),
+        ("feat: y", "Спецификация Части 1 (#13): y", [1]),
+        ("feat: y", "Часть 2 из #13: y. Часть 1 влита.", [2]),
+        ("feat: y", "Часть 2 из #13: y; Part 1 is merged", [2]),  # first by position, across forms
+        ("feat: y", "Part 2 of #13: y; Часть 1 влита", [2]),
+        ("feat: y", "Teil 2 von #13: y; Ч.1 влита", [2]),
+        # words that merely contain a label are not labels
+        ("Particle 1", "", []),
+        ("department 2", "", []),
+        ("Anteil 2", "", []),
+        ("Teilnehmer 2", "", []),
+        ("Teil", "", []),
+        ("Частично 2", "", []),
+        ("Запчасть 2", "", []),
+        ("Участью 2", "", []),
+        ("Часть первая", "", []),
+        ("feat: y", "Anteil 2 of #13", []),
+        # a plural or a range names no single part, whatever the label
+        ("Parts 1–3", "", []),
+        ("Parts 1 and 2", "", []),
+        ("Части 1–3", "", []),
+        ("Части 1-3", "", []),
+        ("Ч.1–3: y", "", []),
+        ("Teile 1–3", "", []),
+        ("Teil 1 – 2", "", []),
+        ("Part 1—2", "", []),
+        ("feat: y", "Части 1–3 of #13: y", []),
     ],
 )
 def test_naming_a_part(tmp_path: Path, title: str, what: str, expected: list[int]) -> None:
@@ -549,7 +585,8 @@ def test_an_empty_what_names_nothing(tmp_path: Path) -> None:
 
 def test_part_1_is_not_part_12(tmp_path: Path) -> None:
     body = "## Scope\n\n" + "".join(f"- Ч.{n} (PR): scope {n}\n" for n in range(1, 13))
-    for title, expected in (("Ч.1: x", 1), ("Ч.12: x", 12), ("Part 1: x", 1), ("Part 12: x", 12)):
+    forms = ("Ч.", "Part ", "Teil ", "Часть ", "Части ")
+    for title, expected in [(f"{label}{n}: x", n) for label in forms for n in (1, 12)]:
         node = refs_pr(43, "x", title=title)
         _, doc = facts(tmp_path, issue_response(body=body, timeline=[node]))
         assert [p["n"] for p in doc["parts"] if p["prs"]] == [expected], title
@@ -799,6 +836,7 @@ def test_the_scope_heading_may_be_any_level(tmp_path: Path) -> None:
 @pytest.mark.parametrize(
     ("scope", "found"),
     [
+        ("- Teil 1: a\n- Teil 3: b\n", "1, 3"),
         ("- Ч.2: a\n- Ч.3: b\n", "2, 3"),
         ("- Ч.1: a\n- Ч.3: b\n", "1, 3"),
         ("- Ч.0: a\n- Ч.1: b\n", "0, 1"),
@@ -810,6 +848,34 @@ def test_malformed_numbering_stops_with_a_reason(tmp_path: Path, scope: str, fou
     assert code == 1
     assert doc["reasons"] == [f"parts in Scope are not numbered 1..k contiguously (found: {found})"]
     assert doc["parts"] == [] and doc["selected"] is None
+
+
+def test_german_parts_with_their_nested_labels_and_criteria(tmp_path: Path) -> None:
+    # What create-issue writes in `de`: Teil N (eigener PR), PR-Grenze, Fertig, wenn, Teil N:
+    body = (
+        "## Scope\n\n"
+        "- Teil 1 (eigener PR): erster\n"
+        "  - PR-Grenze: nur das Skript\n"
+        "  - Fertig, wenn: pytest grün\n"
+        "- Teil 2 (eigener PR): zweiter\n"
+        "\n## Acceptance Criteria\n\n"
+        "- [ ] Teil 1: eins\n- [ ] Teil 2: zwei\n- [ ] gemeinsam\n"
+    )
+    _, doc = facts(tmp_path, issue_response(body=body))
+    one, two = parts_of(doc)[1], parts_of(doc)[2]
+    assert (one["label"], one["scope"]) == ("eigener PR", "erster")
+    assert (one["boundary"], one["done_when"]) == ("nur das Skript", "pytest grün")
+    assert (two["boundary"], two["done_when"]) == (None, None)
+    assert (one["acceptance_criteria"], two["acceptance_criteria"]) == (["eins"], ["zwei"])
+    assert doc["common_acceptance_criteria"] == ["gemeinsam"]
+
+
+def test_the_three_labels_may_be_mixed_in_one_issue(tmp_path: Path) -> None:
+    scope = "- Ч.1: a\n- Part 2: b\n- Teil 3: c\n"
+    body = f"## Scope\n\n{scope}\n## Acceptance Criteria\n\n- [ ] teil 3: x\n"
+    _, doc = facts(tmp_path, issue_response(body=body))
+    assert [p["n"] for p in doc["parts"]] == [1, 2, 3]
+    assert parts_of(doc)[3]["acceptance_criteria"] == ["x"]
 
 
 def test_a_part_bullet_without_a_colon_stops_with_a_reason(tmp_path: Path) -> None:
