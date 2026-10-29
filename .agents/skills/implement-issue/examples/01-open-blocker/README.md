@@ -7,6 +7,11 @@ running `preflight.py` against GitHub and saving every response. The only edit: 
 cross-referencing pull request is reduced to the first line of its `## What` and its `## Refs`
 lines, the only parts the script reads.
 
+**A dated snapshot.** api#265 was closed later the same day, so the live api#269 now stops on
+api#266 alone (one line in `reasons`). The fixture and `expected.json` keep the state at the
+recording on purpose: the case is there to show a stop that names two blockers and skips a
+closed one. Do not re-record it to follow the live issue.
+
 ## Input
 
 ```sh
