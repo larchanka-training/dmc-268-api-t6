@@ -22,5 +22,5 @@ Both pull requests have `Refs #130` among several issues, but their part mention
 - One warning lists api#346 and api#353 as pull requests with `Refs` that name no part of this
   issue. Were either OPEN, the run would stop on it («say which part each covers, or pass
   --part»).
-- Before 1.1.0 the two pull requests counted for Ч.6 and Ч.4 of api#130 as well, which finished
+- Before 1.1.0 the two pull requests counted for Part 6 and Part 4 of api#130 as well, which finished
   parts that nobody had done.

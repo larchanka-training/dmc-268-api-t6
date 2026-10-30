@@ -20,7 +20,7 @@ preflight.py api#168
 ## Expected
 
 - `verdict: go`, exit code 0, `selected: {part: 1, reason: first-todo}`.
-- Ч.6 is `done` with api#346 and Ч.4 is `done` with api#353: with several issues in `Refs`, a part
+- Part 6 is `done` with api#346 and Part 4 is `done` with api#353: with several issues in `Refs`, a part
   counts for the issue it is tied to, and `#168 part 6` ties it to api#168. Parts 1, 2, 3 and 5 are
   `todo`. No warnings.
 - The forms that tie a part to an issue are `Part K of <ref>` and, in front of it, `<ref> part K`
