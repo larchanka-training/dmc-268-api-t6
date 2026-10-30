@@ -237,7 +237,8 @@ def load_snapshot(case_dir: Path) -> CaseSnapshot:
     """Read ``base/`` and ``diff.patch`` of ``case_dir``; the head tree is derived."""
     case_id = case_dir.name
     base = read_tree(case_dir / "base")
-    diff = (case_dir / "diff.patch").read_text(encoding="utf-8")
+    # Bytes, not ``read_text``: universal newlines would turn CRLF and a lone CR into LF.
+    diff = (case_dir / "diff.patch").read_bytes().decode("utf-8")
     head = apply_patch(base, diff)
     return CaseSnapshot(
         case_id,

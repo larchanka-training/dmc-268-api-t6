@@ -12,6 +12,8 @@ from typing import Any
 
 import pytest
 
+from review.scripts import validate_dataset
+
 ROOT = Path(__file__).resolve().parents[1]
 VALIDATOR = ROOT / "review" / "scripts" / "validate_dataset.py"
 PATCH = """diff --git a/app/example.py b/app/example.py
@@ -1488,3 +1490,104 @@ def test_main_corpus_report_keeps_its_fields_without_a_profile(tmp_path: Path) -
         "valid_case_count",
     ]
     assert sorted(data["class_counts"]) == ["clean", "logic", "resource", "security", "syntax"]
+
+
+def test_patch_check_ignores_a_git_work_tree_above_the_temp_dir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A context line the base does not have: ``git apply --check`` must reject it. Inside an
+    # outer work tree git applies only what the index tracks and exits 0 for the copy.
+    stale = PATCH.replace(" def f():", " def g():")
+    dataset = _case(tmp_path, _metadata(), patch=stale)
+    outer = tmp_path / "outer"
+    subprocess.run(["git", "init", "-q", str(outer)], env=_git_env(), check=True)
+    scratch = outer / "tmp"
+    scratch.mkdir()
+    monkeypatch.setenv("TMPDIR", str(scratch))
+
+    result = _run(dataset, "--case", "SEC-01")
+
+    assert result.returncode != 0, result.stdout + result.stderr
+    assert "patch_path" in result.stdout
+
+
+@pytest.mark.parametrize("separator", [" ", "\x0c", "\r"])
+def test_added_line_numbers_split_on_lf_only(tmp_path: Path, separator: str) -> None:
+    patch = tmp_path / "diff.patch"
+    patch.write_bytes(
+        (
+            "diff --git a/app/example.py b/app/example.py\n"
+            "--- a/app/example.py\n"
+            "+++ b/app/example.py\n"
+            "@@ -1,2 +1,5 @@\n"
+            " def f():\n"
+            f"+    a = 1{separator}+    b = 2\n"
+            f"+    c = 3{separator} d = 4\n"
+            "+    return 1\n"
+            "     pass\n"
+        ).encode()
+    )
+
+    assert validate_dataset._patch_added_lines(patch) == {"app/example.py": {2, 3, 4}}
+
+
+def test_changed_paths_split_on_lf_only(tmp_path: Path) -> None:
+    name = "app/a b.py"
+    patch = tmp_path / "diff.patch"
+    patch.write_bytes(
+        (
+            f"diff --git a/{name} b/{name}\n"
+            "new file mode 100644\n"
+            f"--- /dev/null\n+++ b/{name}\n"
+            "@@ -0,0 +1 @@\n+x\n"
+        ).encode()
+    )
+
+    assert validate_dataset._patch_changed_paths(patch) == [name]
+
+
+def test_helpers_read_a_crlf_patch_without_the_carriage_returns(tmp_path: Path) -> None:
+    patch = tmp_path / "diff.patch"
+    patch.write_bytes(
+        b"diff --git a/app/example.py b/app/example.py\r\n"
+        b"--- a/app/example.py\r\n"
+        b"+++ b/app/example.py\r\n"
+        b"@@ -1,2 +1,3 @@\r\n"
+        b" def f():\r\n"
+        b"+    return 1\r\n"
+        b"     pass\r\n"
+    )
+
+    assert validate_dataset._patch_added_lines(patch) == {"app/example.py": {2}}
+    assert validate_dataset._patch_changed_paths(patch) == ["app/example.py"]
+
+
+def test_helpers_skip_the_no_newline_marker(tmp_path: Path) -> None:
+    patch = tmp_path / "diff.patch"
+    patch.write_bytes(
+        b"diff --git a/app/example.py b/app/example.py\n"
+        b"--- a/app/example.py\n"
+        b"+++ b/app/example.py\n"
+        b"@@ -1,2 +1,3 @@\n"
+        b" def f():\n"
+        b"+    return 1\n"
+        b"-    pass\n"
+        b"\\ No newline at end of file\n"
+        b"+    pass\n"
+        b"\\ No newline at end of file\n"
+    )
+
+    assert validate_dataset._patch_added_lines(patch) == {"app/example.py": {2, 3}}
+    assert validate_dataset._patch_changed_paths(patch) == ["app/example.py"]
+
+
+def test_a_patch_that_is_not_utf8_is_an_error_not_a_pass(tmp_path: Path) -> None:
+    dataset = _case(tmp_path, _metadata())
+    (dataset / "cases" / "SEC-01" / "diff.patch").write_bytes(
+        PATCH.replace("return 1", "return 1  # ÿ").encode("latin-1")
+    )
+
+    result = _run(dataset, "--case", "SEC-01")
+
+    assert result.returncode != 0, result.stdout + result.stderr
+    assert "cannot read unified patch" in result.stdout
