@@ -79,6 +79,8 @@ flowchart TD
 
 **Deploy prod** — workflow `deploy-prod.yml` (#308): ручной запуск с `main`, обязательный однострочный `reason`, права `contents: read`, `packages: read`. Выкатывает digest, который был под `:staging` при запуске; если тег сдвинулся до того, как job получил lock `staging-deploy`, — отказ (`Refused: …`), запустить заново. Свой project (§8.1); откат и итог — §5, п. 6.
 
+**Live corpus evaluation** — ручной платный workflow `eval-live.yml` (`workflow_dispatch`, `contents: read`), не job `ci-cd.yml` и не required check: ключ — organization secret `AI_DMC268_T6` ([SECRETS.md](SECRETS.md)), группа concurrency `eval-live-eurouter` без отмены идущего прогона. Входы: `model`, `export_raw_responses`, `corpus` (`main`, `rules`, `rag`), `rag_arm` (`none` по умолчанию, `graph`), `policy_arm`, `review_prompt`. Для `corpus=rag` ([TEST_PLAN §3.5.1](TEST_PLAN.md#351-запись-replay-и-гейт-146)) шаг `Validate corpus` требует `policy_arm=none`, `review_prompt=v5` и `rag_arm` `none` или `graph` и до платных шагов запускает `validate_dataset.py --final --profile rag`; `rag_arm=graph` при `main` и `rules` отказывает. Артефакты: `eval-live-<corpus>-<arm>-<run id>-<attempt>` и при `export_raw_responses` `eval-live-raw-…`; `<arm>` — `policy_arm`, для `rag` — `<policy_arm>-<rag_arm>` (`none-none` — плечо A, `none-graph` — B). Пока корпуса `test-prs-dataset/rag/` нет, запуск с `corpus=rag` падает на копировании корпуса.
+
 ---
 
 ## 2. Инструкция по deployment
