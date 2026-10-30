@@ -106,6 +106,7 @@ from app.modules.reviews.application.prompt_builder import (  # noqa: E402
     PromptBuilder,
     PullRequestMeta,
     ReviewContext,
+    ReviewPrompt,
     ReviewRule,
     parse_unified_diff,
     review_rule_from_stored,
@@ -498,6 +499,15 @@ def _decimal_text(value: Decimal) -> str:
     return format(value.normalize(), "f")
 
 
+def model_prompt_budget(profile: ModelProfile, settings: LlmSettings, engine: EngineName) -> int:
+    """Tokens a prompt to ``profile`` may have: the window the gateway sends into
+    (``LlmGateway.max_prompt_tokens``) less the output reserve. One formula for the recorded
+    ``input_budget_tokens`` and for the fit of the RAG evidence, which a replay reads back."""
+    return min(profile.context_window, settings.policy.input_token_limit[engine]) - (
+        profile.max_output_tokens
+    )
+
+
 def _effective_profile(
     profile: ModelProfile, settings: LlmSettings, engine: EngineName
 ) -> dict[str, object]:
@@ -512,7 +522,6 @@ def _effective_profile(
         ).encode("utf-8")
     except (TypeError, ValueError) as exc:
         raise RecorderError("model extra_body must be JSON serializable") from exc
-    context_limit = min(profile.context_window, settings.policy.input_token_limit[engine])
     endpoint = _canonical_endpoint(profile.base_url).encode("utf-8")
     provider = profile.provider.encode("utf-8")
     return {
@@ -524,7 +533,7 @@ def _effective_profile(
         "endpoint_digest": "sha256-v1:" + hashlib.sha256(_ENDPOINT_MAGIC + endpoint).hexdigest(),
         "context_window": profile.context_window,
         "max_output_tokens": profile.max_output_tokens,
-        "input_budget_tokens": context_limit - profile.max_output_tokens,
+        "input_budget_tokens": model_prompt_budget(profile, settings, engine),
         "structured_output": profile.structured_output,
         "chars_per_token": profile.chars_per_token,
         "price_usd_per_mtok": {
@@ -753,40 +762,27 @@ def _prompt_digest(system: str, user: str) -> str:
     return "sha256-v1:" + hashlib.sha256(raw).hexdigest()
 
 
-def _rag_evidence(
-    case_id: str,
-    case: ReviewCase,
-    tap: _FirstRequestTap,
-    calls: tuple[LlmCallRecord, ...],
-    settings: LlmSettings,
-    engine: EngineName,
-) -> dict[str, Any] | None:
-    """The AC2 evidence of one RAG case, or ``None`` when no request was ever sent.
+def rag_prompt_evidence(
+    case: ReviewCase, *, model_max_prompt_tokens: int
+) -> tuple[ReviewPrompt, dict[str, Any]]:
+    """The prompt the gateway sends for a RAG ``case`` at a model's prompt budget, and its
+    evidence record (everything of ``rag_evidence[case]`` but the call flags).
 
-    The evidence is of the first request (the recorded answer's). Every later one (retry,
-    repair, fallback) must start with the same messages: a repair adds a turn, the others resend.
-
-    ``review_case`` does not return the manifest it sent: the gateway fits the context to the
-    model's prompt budget (the RAG places go after L3 and L2) and keeps the fitted one. It is
-    rebuilt here as the gateway builds it, from the case and the same budget, and must render
-    the very messages of the first request; if it does not, the evidence would describe another
-    prompt and the capture stops.
+    The gateway fits the context to the model's prompt budget (the RAG places go after L3 and
+    L2) and keeps the fitted one; ``review_case`` does not return it. It is rebuilt here as the
+    gateway builds it, from the case and the same budget
+    (``input_budget_tokens`` of ``effective_settings.primary``, which a replay reads back).
+    One construction for the recorder and for ``eval_replay``: the recorder checks it against
+    the request it sent, the replay against the evidence it recorded.
     """
-    if not tap.requests:
-        return None
-    first = tap.requests[0]
     snapshot = case.policy_snapshot
     if snapshot is None:
-        raise RecorderError(f"case {case_id}: a RAG case has no policy snapshot")
+        raise RecorderError("a RAG case has no policy snapshot")
     bindings = snapshot.prompt_bindings
     counter = token_counter_for(snapshot.execution_profile.counter_version)
-    primary = settings.primary
-    # ``LlmGateway.max_prompt_tokens`` then ``_fitted_review``'s ``send_budget_for``.
-    window = min(primary.context_window, settings.policy.input_token_limit[engine])
+    # ``_fitted_review``'s ``send_budget_for``.
     budget = send_budget_for(
-        snapshot.execution_profile,
-        stage="review",
-        model_max_prompt_tokens=window - primary.max_output_tokens,
+        snapshot.execution_profile, stage="review", model_max_prompt_tokens=model_max_prompt_tokens
     )
     context = ReviewContext(
         system=case.system,
@@ -806,17 +802,6 @@ def _rag_evidence(
     fitted = fit_review_context(context, max_prompt_tokens=budget, counter=counter)
     builder = PromptBuilder()
     prompt = builder.build_prompt(fitted)
-    if first != (("system", prompt.system), ("user", prompt.user)):
-        raise RecorderError(
-            f"case {case_id}: the prompt the gateway sent differs from the prompt rebuilt from "
-            "its context, so the evidence would describe another input"
-        )
-    for number, later in enumerate(tap.requests[1:], start=2):
-        if later[: len(first)] != first:
-            raise RecorderError(
-                f"case {case_id}: request {number} does not start with the recorded prompt, so "
-                "the evidence would not hold for every call of the case"
-            )
     manifest = builder.build_manifest(fitted, call_id=UUID(int=0), counter=counter)
     # The prompt with an empty RAG slot is what both arms must share, whatever was retrieved.
     without_rag = builder.build_prompt(replace(fitted, retrieved=()))
@@ -837,12 +822,52 @@ def _rag_evidence(
     # What the offline build chose, next to what was sent: a graph case whose RAG slot the
     # gateway fitted away is then visible instead of passing as a plain arm B.
     offline_ids = [block.block_id for block in case.retrieved]
-    return {
+    return prompt, {
         "prompt_digest": _prompt_digest(prompt.system, prompt.user),
         "non_rag_prompt_digest": _prompt_digest(without_rag.system, without_rag.user),
         "retrieved": retrieved,
         "offline_retrieved_ids": offline_ids,
         "trimmed": [item["block_id"] for item in retrieved] != offline_ids,
+    }
+
+
+def _rag_evidence(
+    case_id: str,
+    case: ReviewCase,
+    tap: _FirstRequestTap,
+    calls: tuple[LlmCallRecord, ...],
+    settings: LlmSettings,
+    engine: EngineName,
+) -> dict[str, Any] | None:
+    """The AC2 evidence of one RAG case, or ``None`` when no request was ever sent.
+
+    The evidence is of the first request (the recorded answer's). Every later one (retry,
+    repair, fallback) must start with the same messages: a repair adds a turn, the others resend.
+    The rebuilt prompt (``rag_prompt_evidence``) must render the very messages of the first
+    request; if it does not, the evidence would describe another prompt and the capture stops.
+    """
+    if not tap.requests:
+        return None
+    first = tap.requests[0]
+    try:
+        prompt, evidence = rag_prompt_evidence(
+            case, model_max_prompt_tokens=model_prompt_budget(settings.primary, settings, engine)
+        )
+    except RecorderError as exc:
+        raise RecorderError(f"case {case_id}: {exc}") from exc
+    if first != (("system", prompt.system), ("user", prompt.user)):
+        raise RecorderError(
+            f"case {case_id}: the prompt the gateway sent differs from the prompt rebuilt from "
+            "its context, so the evidence would describe another input"
+        )
+    for number, later in enumerate(tap.requests[1:], start=2):
+        if later[: len(first)] != first:
+            raise RecorderError(
+                f"case {case_id}: request {number} does not start with the recorded prompt, so "
+                "the evidence would not hold for every call of the case"
+            )
+    return {
+        **evidence,
         "fallback_called": any(call.kind is LlmCallKind.FALLBACK for call in calls),
         "repair_called": any(call.kind is LlmCallKind.REPAIR for call in calls),
     }
