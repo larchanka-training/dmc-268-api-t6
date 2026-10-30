@@ -49,7 +49,9 @@ metadata:
      modified tracked files (never `git add .`).
    - Check `git status` before committing: no unrelated untracked files (`.env`, proof
      scratch, logs).
-   - `git commit -m "<commit-message>" && git push -u origin HEAD`.
+   - Commit only when there is something to commit (`git status --porcelain` is not empty): a tree
+     that is already committed, as after the implement-issue loop, needs no new commit.
+     `git commit -m "<commit-message>"` when there is, then `git push -u origin HEAD`.
    - Never `--no-verify`.
 
 3. **Create the pull request**:
