@@ -1,0 +1,78 @@
+{
+  "after_table": [],
+  "apply": true,
+  "board": {
+    "action": "set",
+    "from": "AC Check",
+    "readback": "In Progress",
+    "to": "In Progress"
+  },
+  "comment": "<!-- accept-issue:returned v1 -->\n\n## Приёмка: возврат в In Progress\n\nIssue не закрыт. Таблица исполнителя: https://github.com/larchanka-training/dmc-268-api-t6/issues/500#issuecomment-4001.\n\n**Что осталось**\n\n- AC1 — `GET /health` отвечает 200 и версией сборки — доказательство не подтвердилось: версия в ответе не совпадает с тегом релиза\n- AC3 — Правило включено в ruleset ветки `main` — не выполнено\n\nДоработка — в том же issue: кодовый AC — новым PR с `Refs #500`, некодовый — действием и доказательством комментарием. Затем исполнитель дополняет таблицу новым комментарием и снова ставит AC Check.\n",
+  "followups": [],
+  "issue": "larchanka-training/dmc-268-api-t6#500",
+  "mode": "accepter",
+  "next": "The card goes back to In Progress; the executor reworks in the same issue and posts a new table.",
+  "readback": null,
+  "return_items": [
+    {
+      "id": "AC1",
+      "reason": "доказательство не подтвердилось: версия в ответе не совпадает с тегом релиза",
+      "text": "`GET /health` отвечает 200 и версией сборки"
+    },
+    {
+      "id": "AC3",
+      "reason": "не выполнено",
+      "text": "Правило включено в ruleset ветки `main`"
+    }
+  ],
+  "rework_rule": "Невыполненный AC или DoD доделывается в том же issue: кодовый — новым PR с `Refs #N`, некодовый — действием и доказательством (правило «Доработка — в том же issue», `docs/CONTRIBUTING.md`, «Приёмка задачи»).",
+  "rows": [
+    {
+      "evidence": "PR #901, тест `test_health_returns_version`",
+      "id": "AC1",
+      "kind": "ac",
+      "status": "done",
+      "text": "`GET /health` отвечает 200 и версией сборки"
+    },
+    {
+      "evidence": "PR #902, тест `test_repeated_idempotency_key_is_rejected`",
+      "id": "AC2",
+      "kind": "ac",
+      "status": "done",
+      "text": "Повтор запроса с тем же `Idempotency-Key` не создаёт вторую запись"
+    },
+    {
+      "evidence": "не выполнено",
+      "id": "AC3",
+      "kind": "ac",
+      "status": "not_done",
+      "text": "Правило включено в ruleset ветки `main`"
+    },
+    {
+      "evidence": "CI зелёный на голове PR #901 и PR #902",
+      "id": "DoD1",
+      "kind": "dod",
+      "status": "done",
+      "text": "Гейты CI зелёные"
+    },
+    {
+      "evidence": "approve на голове PR #901 и PR #902, треды закрыты",
+      "id": "DoD2",
+      "kind": "dod",
+      "status": "done",
+      "text": "PR одобрены на текущей голове, все треды закрыты"
+    }
+  ],
+  "schema": 1,
+  "stops": [],
+  "table": {
+    "author": "executor",
+    "comment_id": 4001,
+    "url": "https://github.com/larchanka-training/dmc-268-api-t6/issues/500#issuecomment-4001",
+    "via": "marker"
+  },
+  "tick": [],
+  "verdict": "return",
+  "viewer": "axyi",
+  "warnings": []
+}

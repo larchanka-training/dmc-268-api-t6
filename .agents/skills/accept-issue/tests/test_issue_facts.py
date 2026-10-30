@@ -312,6 +312,42 @@ def test_checkboxes_edge_cases() -> None:
     assert facts.build_checkboxes(body)["ac"]["total"] == 1
 
 
+def test_scan_checkboxes_reports_raw_line_positions() -> None:
+    body = (
+        "- [ ] before the sections\n"  # 0
+        "## Acceptance Criteria\n"  # 1
+        "\n"  # 2
+        "```\n"  # 3
+        "- [ ] in a fence\n"  # 4
+        "```\n"  # 5
+        "<!-- note\n"  # 6
+        "- [ ] in a comment\n"  # 7
+        "-->\n"  # 8
+        "> - [ ] in a quote\n"  # 9
+        "- [x] done <!-- hint --> item\n"  # 10
+        "- [ ] open\n"  # 11
+        "## DoD Checklist\n"  # 12
+        "* [X] gate\n"  # 13
+    )
+    assert list(facts.scan_checkboxes(body)) == [
+        (0, None, False, "before the sections"),
+        (10, "ac", True, "done  item"),
+        (11, "ac", False, "open"),
+        (13, "dod", True, "gate"),
+    ]
+    lines = body.splitlines()
+    assert lines[11] == "- [ ] open"
+
+
+def test_scan_checkboxes_positions_survive_crlf_and_agree_with_the_counts() -> None:
+    body = "## Acceptance Criteria\r\n\r\n- [x] a\r\n- [ ] b\r\n\r\n## Other\r\n- [ ] c\r\n"
+    found = list(facts.scan_checkboxes(body))
+    assert [(i, s) for i, s, _, _ in found] == [(2, "ac"), (3, "ac"), (6, None)]
+    boxes = facts.build_checkboxes(body)
+    assert boxes["ac"]["total"] == sum(1 for _, s, _, _ in found if s == "ac")
+    assert boxes["outside"] == sum(1 for _, s, _, _ in found if s is None)
+
+
 def ac_texts(body: str) -> list[str]:
     ac = facts.build_checkboxes("## Acceptance Criteria\n" + body)["ac"]
     return [i["text"] for i in ac["items"]]

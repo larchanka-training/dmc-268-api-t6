@@ -1,0 +1,28 @@
+{
+  "after_table": [],
+  "apply": true,
+  "board": {
+    "action": "none",
+    "from": null,
+    "readback": null,
+    "to": null
+  },
+  "comment": null,
+  "followups": [],
+  "issue": "larchanka-training/dmc-268-api-t6#500",
+  "mode": "accepter",
+  "next": "Do not close the issue; fix the stop reasons first.",
+  "readback": null,
+  "return_items": [],
+  "rework_rule": null,
+  "rows": [],
+  "schema": 1,
+  "stops": [
+    "issue larchanka-training/dmc-268-api-t6#500 is CLOSED and its last close was by merge (larchanka-training/dmc-268-api-t6#901), not a manual close: the tech lead reopens it (docs/CONTRIBUTING.md, «Приёмка задачи»); this script never reopens an issue"
+  ],
+  "table": null,
+  "tick": [],
+  "verdict": "stop",
+  "viewer": "axyi",
+  "warnings": []
+}

@@ -1,0 +1,18 @@
+{
+  "AC1": {
+    "status": "done",
+    "evidence": "скриншот: ![статус индексации](https://github.com/user-attachments/assets/00000000-0000-4000-8000-000000000001)"
+  },
+  "AC2": {
+    "status": "done",
+    "evidence": "комментарий исполнителя https://github.com/larchanka-training/dmc-268-api-t6/issues/500#issuecomment-2000: правило включено, вывод `gh api …/rulesets`"
+  },
+  "AC3": {
+    "status": "moved",
+    "to": "#285"
+  },
+  "DoD1": {
+    "status": "done",
+    "evidence": "комментарий исполнителя https://github.com/larchanka-training/dmc-268-api-t6/issues/500#issuecomment-2001: шаги проверки"
+  }
+}

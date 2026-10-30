@@ -1,0 +1,23 @@
+{
+  "ac_check": false,
+  "apply": false,
+  "board": {
+    "action": "none",
+    "from": null,
+    "readback": null,
+    "to": null
+  },
+  "comment": null,
+  "issue": "larchanka-training/dmc-268-api-t6#500",
+  "mode": "author",
+  "next": "Fix the stop reasons, then run table again.",
+  "rework_rule": null,
+  "rows": [],
+  "schema": 1,
+  "stops": [
+    "AC3: status moved needs «перенесён в #285» in the issue body item; the tech lead writes it, the executor cannot move an AC"
+  ],
+  "verdict": "stop",
+  "viewer": "executor",
+  "warnings": []
+}

@@ -72,7 +72,7 @@ modules hold only `infrastructure/` code and `app/entrypoints/` does not exist y
 - `.agents/rules/` — stack and git-workflow rules.
 - `.agents/skills/` — agent skills (agent-loop, code-review, tdd,
   pull-request, planning-and-task-breakdown, qa, e2e-test, create-issue,
-  issue-graph, implement-issue).
+  issue-graph, implement-issue, accept-issue).
 - `.agents/agents/` — agent definitions.
 - `.agents/templates/` — code/test templates with proof blocks.
 - `docs/BACKEND_ARCHITECTURE.md` — Clean Architecture layout in full.

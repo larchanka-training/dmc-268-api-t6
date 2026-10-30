@@ -1,0 +1,91 @@
+{
+  "after_table": [
+    {
+      "author": "axyi",
+      "excerpt": "Заметил: `/health` не покрыт метриками Prometheus — это вне AC, нужен follow-up.",
+      "id": 5002
+    }
+  ],
+  "apply": true,
+  "board": {
+    "action": "none",
+    "from": "AC Check",
+    "readback": null,
+    "to": null
+  },
+  "comment": "<!-- accept-issue:accepted v1 -->\n\n## Приёмка: issue закрыт\n\nТаблица исполнителя: https://github.com/larchanka-training/dmc-268-api-t6/issues/500#issuecomment-5001. Чекбоксы AC и DoD в теле issue отмечены.\n\n**Acceptance Criteria**\n\n- AC1 — `GET /health` отвечает 200 и версией сборки — выполнено\n- AC2 — Повтор запроса с тем же `Idempotency-Key` не создаёт вторую запись — выполнено\n- AC3 — Проверка обратной совместимости схемы — перенесён в #285 решением техлида\n\n**DoD Checklist**\n\n- DoD1 — Гейты CI зелёные — выполнено\n- DoD2 — PR одобрены на текущей голове, все треды закрыты — выполнено\n\nFollow-up вне AC (новый скоуп): #510\n",
+  "followups": [
+    {
+      "parent": "larchanka-training/dmc-268-api-t6#500",
+      "ref": "larchanka-training/dmc-268-api-t6#510"
+    }
+  ],
+  "issue": "larchanka-training/dmc-268-api-t6#500",
+  "mode": "accepter",
+  "next": "With --apply the issue is closed as completed; Done on the board is set by the workflow «Item closed», not by this script.",
+  "readback": {
+    "checked": 5,
+    "last_closer": "manual",
+    "state": "CLOSED",
+    "total": 5,
+    "unchecked": 0
+  },
+  "return_items": [],
+  "rework_rule": null,
+  "rows": [
+    {
+      "evidence": "PR #901, тест `test_health_returns_version`",
+      "id": "AC1",
+      "kind": "ac",
+      "status": "done",
+      "text": "`GET /health` отвечает 200 и версией сборки"
+    },
+    {
+      "evidence": "PR #902, тест `test_repeated_idempotency_key_is_rejected`",
+      "id": "AC2",
+      "kind": "ac",
+      "status": "done",
+      "text": "Повтор запроса с тем же `Idempotency-Key` не создаёт вторую запись"
+    },
+    {
+      "evidence": "перенесён в #285",
+      "id": "AC3",
+      "kind": "ac",
+      "status": "moved",
+      "text": "Проверка обратной совместимости схемы — перенесён в #285 решением техлида"
+    },
+    {
+      "evidence": "CI зелёный на голове PR #901 и PR #902",
+      "id": "DoD1",
+      "kind": "dod",
+      "status": "done",
+      "text": "Гейты CI зелёные"
+    },
+    {
+      "evidence": "approve на голове PR #901 и PR #902, треды закрыты",
+      "id": "DoD2",
+      "kind": "dod",
+      "status": "done",
+      "text": "PR одобрены на текущей голове, все треды закрыты"
+    }
+  ],
+  "schema": 1,
+  "stops": [],
+  "table": {
+    "author": "executor",
+    "comment_id": 5001,
+    "url": "https://github.com/larchanka-training/dmc-268-api-t6/issues/500#issuecomment-5001",
+    "via": "marker"
+  },
+  "tick": [
+    "AC1",
+    "AC2",
+    "DoD1",
+    "DoD2"
+  ],
+  "verdict": "accept",
+  "viewer": "axyi",
+  "warnings": [
+    "AC3 засчитан как перенесённый в #285 по пометке в теле issue: проверьте, что пометку дописал техлид — тело issue может править и исполнитель"
+  ]
+}
