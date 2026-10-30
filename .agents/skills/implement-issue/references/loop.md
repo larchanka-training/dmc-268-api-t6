@@ -56,7 +56,8 @@ You review a change in a clean context. You did not write it. You are read-only:
 - Issue: <owner/repo#N> — read it with `gh api repos/<owner>/<repo>/issues/<N> --jq .body`.
 - Part: <K> — scope: <scope>. Boundary (the PR stops here): <boundary or "none given">.
   Done when: <done_when or "none given">.
-- Acceptance criteria to verify: <the part's AC, one per line; a task without parts: the plain AC>.
+- Acceptance criteria to verify: <the part's `acceptance_criteria`, one per line; a task without
+  parts: `common_acceptance_criteria`>.
 - Diff: `git diff origin/main...HEAD` (commits: `git log origin/main..HEAD --oneline`).
 - Standards sources: `AGENTS.md`, the stack rules in `.agents/rules/`, `docs/CONTRIBUTING.md`.
 - Axis: <Standards: does the code follow the documented standards? | Spec: does it do what the
@@ -138,8 +139,9 @@ part again; a taken branch name is never reused (SKILL.md step 3).
 Follow `.github/pull_request_template.md` (`What`, `Why`, `How to verify`, `Refs`, then its
 checklist). In `What`, after the first line (`Part K of owner/repo#N: …`, SKILL.md):
 
-- **Acceptance criteria of the part**, one bullet each, as in the issue (a task without parts: the
-  plain AC). They are not ticked boxes: the tech lead accepts them.
+- **Acceptance criteria of the part** (`acceptance_criteria`; a task without parts:
+  `common_acceptance_criteria`), one bullet each, as in the issue. They are not ticked boxes: the
+  tech lead accepts them.
 - **Review:** `<n>` round(s), Standards and Spec in clean contexts; no critical or high open.
   Medium / low / info, not fixed here: the list, one line each (`path:line — title`).
 - Any `warnings` of the preflight, and the findings outside the part's boundary.
