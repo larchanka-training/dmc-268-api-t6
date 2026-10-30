@@ -34,9 +34,7 @@ from app.modules.reviews.application.policy_snapshot import (
     PINNED_PROMPT_CHECKSUMS,
     RULES_DOCUMENT_PATH,
     CallManifest,
-    ExecutionProfile,
     PolicySnapshot,
-    PromptBindings,
 )
 from app.modules.reviews.application.prepare_policy_snapshot import (
     RunPolicyPins,
@@ -69,6 +67,7 @@ from app.modules.reviews.application.review_ignore import (
 )
 from app.modules.reviews.application.vcs_diff import is_generated_path
 from app.modules.reviews.infrastructure.subprocess_source_parser import SubprocessSourceParser
+from review.scripts.eval_live import eval_execution_profile, eval_prompt_bindings
 from review.scripts.eval_rag_source import (
     REPOSITORY_ID,
     SnapshotRevisionSource,
@@ -78,6 +77,10 @@ from review.scripts.eval_rag_source import (
 from review.scripts.rag_snapshot import INDEX_FILE, FrozenGraphRetriever, parse_snapshot
 
 Arm = Literal["A", "B"]
+
+# The file of that prompt: what ``build_arm_input`` renders (``eval_live`` checks ``--system``
+# against it).
+SYSTEM_PROMPT_V5 = Path(__file__).resolve().parents[1] / "prompts" / "review.system.v5.md"
 
 # The pinned review prompt both arms run (Р-6, #82): v5, the only one with a retrieved section.
 _PROMPT_KEY = "review.system:v5"
@@ -140,9 +143,11 @@ def _policy_snapshot(system: bytes, review_model: str) -> PolicySnapshot:
     ``system`` is the file of the prompt, checked against its pin before it is bound
     (as ``eval_live._prompt_bindings`` does, by the SHA-256 of the bytes).
 
-    ``eval_live._policy_snapshot`` is private and reads policy files from the case tree; the
-    same shape is built here through the public builder. ``review_model`` is the model the
-    run will call: the snapshot pins it in its execution profile.
+    ``eval_live._policy_snapshot`` reads policy files from the case tree and numbers its
+    snapshots per case; this one is built through the public builder with fixed ids. The
+    prompt pins and the execution profile are ``eval_live``'s ``eval_prompt_bindings`` and
+    ``eval_execution_profile`` (one construction for every capture, covered by the static
+    digest of all of them). ``review_model`` is the model the run will call.
     """
     checksum = hashlib.sha256(system).hexdigest()
     if checksum != PINNED_PROMPT_CHECKSUMS[_PROMPT_KEY]:
@@ -150,29 +155,6 @@ def _policy_snapshot(system: bytes, review_model: str) -> PolicySnapshot:
             PolicyErrorCode.SNAPSHOT_INTEGRITY_ERROR,
             f"{_PROMPT_KEY} has checksum {checksum}, pinned {PINNED_PROMPT_CHECKSUMS[_PROMPT_KEY]}",
         )
-    ignore = parse_review_ignore(None)
-    bindings = PromptBindings(
-        review_system_checksum=checksum,
-        conventions_checksum=PINNED_PROMPT_CHECKSUMS["review.conventions:v2"],
-        verifier_checksum=PINNED_PROMPT_CHECKSUMS["review.verifier:v2"],
-        review_system_version="v5",
-        review_system_id=UUID(int=1),
-        conventions_id=UUID(int=2),
-        verifier_id=UUID(int=3),
-    )
-    profile = ExecutionProfile(
-        "fast",
-        review_model,
-        review_model,
-        max_input_tokens=60_000,
-        primary_provider_route="primary",
-        tokenizer_version="tokenizer/v1",
-        counter_version="counter/v2",
-        temperature="0.0",
-        response_schema_version="review-output/v2",
-        recovery_profile_version="recovery/v1",
-        budget_profile_version="budget/v1",
-    )
     return build_policy_snapshot(
         RunPolicyPins(
             UUID(int=2),
@@ -180,12 +162,12 @@ def _policy_snapshot(system: bytes, review_model: str) -> PolicySnapshot:
             "0" * 40,
             UUID(int=4),
             "2" * 64,
-            bindings,
-            profile,
+            eval_prompt_bindings(checksum, "v5"),
+            eval_execution_profile("fast", review_model),
         ),
         rules=missing_document(RULES_DOCUMENT_PATH),
         agents=missing_document(AGENTS_DOCUMENT_PATH),
-        ignore=ignore,
+        ignore=parse_review_ignore(None),
         snapshot_id=UUID(int=3),
     )
 
@@ -238,9 +220,7 @@ async def build_arm_input(case_dir: Path, arm: Arm, *, review_model: str) -> Arm
     )
     diff_map = snapshot_diff_map(case, meta)
 
-    system_bytes = (
-        Path(__file__).resolve().parents[1] / "prompts" / "review.system.v5.md"
-    ).read_bytes()
+    system_bytes = SYSTEM_PROMPT_V5.read_bytes()
     snapshot = _policy_snapshot(system_bytes, review_model)
     source = SnapshotRevisionSource({case.base_id: case.base, head_id: case.head})
     blobs = CachedBlobSource(

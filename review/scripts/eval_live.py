@@ -25,6 +25,14 @@ Every arm except ``legacy`` binds the version and SHA-256 of the --system prompt
 as production binds the pinned prompt row; a version with a pin must be the pinned file and
 must have a known answer schema. ``legacy`` refuses a snapshot-path prompt (v4/v5), which is
 only reviewed with a policy snapshot. All three checks run before the first call.
+
+--rag-arm (#146) records the RAG A/B over a root of RAG cases (``class: rag``): ``none`` is arm
+A, ``graph`` arm B. Both run the production context build offline (``eval_rag_context``) and
+review.system v5 with policy arm ``none`` on the fast engine; ``--system`` must be the pinned v5
+file. The manifest then also records, per case, the review call's latency and an evidence record
+of the prompt the gateway really sent (rebuilt from its context and checked byte for byte against
+the first request), and for the run the RAG arm, the digest of every ``index.json`` and the
+synthetic revision ids. Nothing of this is written for the other corpora.
 """
 
 from __future__ import annotations
@@ -36,16 +44,19 @@ import json
 import os
 import re
 import sys
-from collections.abc import Mapping
-from dataclasses import dataclass
+import time
+from collections.abc import AsyncIterator, Callable, Mapping
+from contextlib import asynccontextmanager
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from typing import Any
+from typing import Any, Literal
 from urllib.parse import urlsplit, urlunsplit
 from uuid import UUID, uuid5
 
+import httpx
 from jsonschema import Draft202012Validator
 
 if __package__ in (None, ""):
@@ -58,11 +69,14 @@ from app.bootstrap.llm_gateway import (  # noqa: E402
     review_case,
 )
 from app.modules.repositories.infrastructure.models import RuleVersion  # noqa: E402
+from app.modules.reviews.application.check_runs import RunProviderCheckpoint  # noqa: E402
 from app.modules.reviews.application.commit_prefix_limits import (  # noqa: E402
     CommitMessagePrefix,
 )
+from app.modules.reviews.application.context_provenance import SourceRole  # noqa: E402
 from app.modules.reviews.application.llm import (  # noqa: E402
     EngineName,
+    LlmCallKind,
     LlmCallRecord,
     LlmUsage,
 )
@@ -81,14 +95,22 @@ from app.modules.reviews.application.policy_snapshot import (  # noqa: E402
     PolicySnapshot,
     PromptBindings,
 )
+from app.modules.reviews.application.prompt_budget import (  # noqa: E402
+    fit_review_context,
+    send_budget_for,
+    token_counter_for,
+)
 from app.modules.reviews.application.prompt_builder import (  # noqa: E402
     DEFAULT_BACKEND_V1_CHECKSUM,
     DEFAULT_FRONTEND_V1_CHECKSUM,
+    PromptBuilder,
     PullRequestMeta,
+    ReviewContext,
     ReviewRule,
     parse_unified_diff,
     review_rule_from_stored,
 )
+from app.modules.reviews.application.rag_index import has_retrieved_section  # noqa: E402
 from app.modules.reviews.application.review_ignore import (  # noqa: E402
     BUILTIN_EXCLUSIONS_VERSION,
     LIMITS_VERSION,
@@ -110,7 +132,10 @@ from app.modules.reviews.infrastructure.llm.settings import (  # noqa: E402
     ModelProfile,
 )
 from app.modules.reviews.infrastructure.llm.transport import (  # noqa: E402
+    ChatRequest,
+    ChatResponse,
     ChatTransport,
+    OpenAICompatibleTransport,
     extract_text_content,
 )
 from review.scripts.commit_context import (  # noqa: E402
@@ -151,6 +176,8 @@ _SERVING_PROVIDER_MAGIC = b"review-eval-serving-provider-v1\0"
 _ENDPOINT_MAGIC = b"review-eval-endpoint-v1\0"
 # Fixed identities of the in-memory eval snapshots; none of them is rendered into the prompt.
 _EVAL_POLICY_NAMESPACE = UUID("6f1d2c43-1633-4d7e-9a35-163000000163")
+# The RAG arms of #146: ``none`` is arm A (no retrieved blocks), ``graph`` arm B.
+RAG_ARMS: dict[str, Literal["A", "B"]] = {"none": "A", "graph": "B"}
 _PUBLIC_PROVIDER_LABELS = frozenset({"eurouter", "self-hosted", "fake"})
 _PUBLIC_SERVING_PROVIDERS = frozenset(
     {
@@ -245,6 +272,43 @@ def _policy_document(path: Path, snapshot_path: str) -> PolicyDocument:
     return normalize_document(snapshot_path, raw, blob_oid=blob_oid)
 
 
+def eval_prompt_bindings(review_system_checksum: str, version: str) -> PromptBindings:
+    """The prompt pins of an eval snapshot: the checksum of the ``--system`` file bound under
+    ``version``, the pinned conventions and verifier prompts, fixed ids (none is rendered).
+
+    The one construction of every capture (main, rules and the RAG arm, which imports it from
+    here): it shapes what they send, and this file is in all static digests. Each caller
+    checks the pin of the system prompt itself, before it calls this.
+    """
+    return PromptBindings(
+        review_system_checksum=review_system_checksum,
+        conventions_checksum=PINNED_PROMPT_CHECKSUMS["review.conventions:v2"],
+        verifier_checksum=PINNED_PROMPT_CHECKSUMS["review.verifier:v2"],
+        review_system_version=version,
+        review_system_id=UUID(int=1),
+        conventions_id=UUID(int=2),
+        verifier_id=UUID(int=3),
+    )
+
+
+def eval_execution_profile(engine: EngineName, review_model: str) -> ExecutionProfile:
+    """The execution profile an eval snapshot pins for ``engine``; ``review_model`` is the
+    model the run will call (the verifier pins the same one)."""
+    return ExecutionProfile(
+        profile_name=engine,
+        review_model=review_model,
+        verifier_model=review_model,
+        max_input_tokens=150_000 if engine == "deep" else 60_000,
+        primary_provider_route="primary",
+        tokenizer_version="tokenizer/v1",
+        counter_version="counter/v2",
+        temperature="0.0",
+        response_schema_version="review-output/v2",
+        recovery_profile_version="recovery/v1",
+        budget_profile_version="budget/v1",
+    )
+
+
 def _policy_snapshot(
     case_dir: Path,
     record: Mapping[str, Any],
@@ -298,19 +362,7 @@ def _policy_snapshot(
         # Mirrors RuleVersion.checksum in production: the pin of the case's default rule file.
         defaults_checksum=defaults_checksum,
         prompt_bindings=prompt_bindings,
-        execution_profile=ExecutionProfile(
-            profile_name=engine,
-            review_model=settings.primary.model,
-            verifier_model=settings.primary.model,
-            max_input_tokens=150_000 if engine == "deep" else 60_000,
-            primary_provider_route="primary",
-            tokenizer_version="tokenizer/v1",
-            counter_version="counter/v2",
-            temperature="0.0",
-            response_schema_version="review-output/v2",
-            recovery_profile_version="recovery/v1",
-            budget_profile_version="budget/v1",
-        ),
+        execution_profile=eval_execution_profile(engine, settings.primary.model),
         policy_digest=hashlib.sha256(digest_input.encode("utf-8")).hexdigest(),
     )
 
@@ -343,15 +395,7 @@ def _prompt_bindings(inputs: _CaptureInputs, arm: str) -> PromptBindings | None:
             "policy arms need a review prompt with a known answer schema: "
             f"{inputs.prompt_path} has version {version}"
         ) from None
-    return PromptBindings(
-        review_system_checksum=inputs.prompt_sha,
-        conventions_checksum=PINNED_PROMPT_CHECKSUMS["review.conventions:v2"],
-        verifier_checksum=PINNED_PROMPT_CHECKSUMS["review.verifier:v2"],
-        review_system_version=version,
-        review_system_id=UUID(int=1),
-        conventions_id=UUID(int=2),
-        verifier_id=UUID(int=3),
-    )
+    return eval_prompt_bindings(inputs.prompt_sha, version)
 
 
 def _policy_arm_digest(
@@ -399,7 +443,9 @@ def _case_input(
     commit_prefix: CommitMessagePrefix,
     policy_snapshot: PolicySnapshot | None = None,
 ) -> ReviewCase:
-    diff = (case_dir / record["patch_path"]).read_text(encoding="utf-8")
+    # Bytes, not ``read_text``: universal newlines would turn CRLF and a lone CR into LF, so the
+    # model would see other lines than the validator and the offline RAG build do.
+    diff = (case_dir / record["patch_path"]).read_bytes().decode("utf-8")
     files = parse_unified_diff(diff)
     return ReviewCase(
         diff=diff,
@@ -566,11 +612,16 @@ def _input_digests(
     records: list[tuple[Path, dict[str, Any]]],
     relative_prompt: str,
     selected_rules: list[str],
+    *,
+    rag_code: bool,
 ) -> tuple[list[str], str, str]:
     """Return the static input paths, the static digest and the corpus digest."""
     try:
         static_inputs = static_input_paths(
-            relative_prompt, [*rule_json_paths(REPO_ROOT), *selected_rules], repo_root=REPO_ROOT
+            relative_prompt,
+            [*rule_json_paths(REPO_ROOT), *selected_rules],
+            repo_root=REPO_ROOT,
+            rag_code=rag_code,
         )
         static_digest = digest_files(REPO_ROOT, static_inputs)
         corpus_digest = digest_files(root, corpus_input_paths(root, records))
@@ -617,11 +668,16 @@ def _capture_inputs(
     recorded_at: datetime | None,
     engine: EngineName,
     pinned_defaults: bool,
+    rag_code: bool = False,
 ) -> _CaptureInputs:
     relative_prompt = _relative_input(system_prompt)
     rule_sets = _selected_rule_sets(records, backend_rules, frontend_rules)
     static_inputs, static_digest, corpus_digest = _input_digests(
-        root, records, relative_prompt, [_relative_input(path) for path, _, _ in rule_sets]
+        root,
+        records,
+        relative_prompt,
+        [_relative_input(path) for path, _, _ in rule_sets],
+        rag_code=rag_code,
     )
     prompt_bytes = system_prompt.read_bytes()
     system = prompt_bytes.decode("utf-8")
@@ -655,6 +711,244 @@ def _first_call_status(first: LlmCallRecord | None, content: str) -> str:
     return "answer" if content else "empty_answer"
 
 
+class _FirstRequestTap:
+    """A transport that remembers the messages of every request it was asked to send."""
+
+    def __init__(self, inner: ChatTransport | None) -> None:
+        self._inner = inner
+        self.requests: list[tuple[tuple[str, str], ...]] = []
+
+    async def complete(
+        self, request: ChatRequest, *, checkpoint: RunProviderCheckpoint
+    ) -> ChatResponse:
+        self.requests.append(tuple((item.role, item.content) for item in request.messages))
+        if self._inner is None:
+            raise RecorderError("the RAG arm needs a chat transport")
+        return await self._inner.complete(request, checkpoint=checkpoint)
+
+
+@asynccontextmanager
+async def _chat_transport(
+    transport: ChatTransport | None, *, tapped: bool
+) -> AsyncIterator[ChatTransport | None]:
+    """The transport a run sends through. A tapped run (RAG) needs one to wrap, so without an
+    injected one it owns the HTTP client the gateway would have created."""
+    if transport is not None or not tapped:
+        yield transport
+        return
+    async with httpx.AsyncClient() as client:
+        yield OpenAICompatibleTransport(client)
+
+
+@dataclass(frozen=True)
+class _RagRecord:
+    """What a RAG case adds to the manifest: its review call's latency and its evidence."""
+
+    latency_ms: int
+    evidence: dict[str, Any] | None
+
+
+def _prompt_digest(system: str, user: str) -> str:
+    raw = json.dumps([system, user]).encode("utf-8", errors="surrogatepass")
+    return "sha256-v1:" + hashlib.sha256(raw).hexdigest()
+
+
+def _rag_evidence(
+    case_id: str,
+    case: ReviewCase,
+    tap: _FirstRequestTap,
+    calls: tuple[LlmCallRecord, ...],
+    settings: LlmSettings,
+    engine: EngineName,
+) -> dict[str, Any] | None:
+    """The AC2 evidence of one RAG case, or ``None`` when no request was ever sent.
+
+    The evidence is of the first request (the recorded answer's). Every later one (retry,
+    repair, fallback) must start with the same messages: a repair adds a turn, the others resend.
+
+    ``review_case`` does not return the manifest it sent: the gateway fits the context to the
+    model's prompt budget (the RAG places go after L3 and L2) and keeps the fitted one. It is
+    rebuilt here as the gateway builds it, from the case and the same budget, and must render
+    the very messages of the first request; if it does not, the evidence would describe another
+    prompt and the capture stops.
+    """
+    if not tap.requests:
+        return None
+    first = tap.requests[0]
+    snapshot = case.policy_snapshot
+    if snapshot is None:
+        raise RecorderError(f"case {case_id}: a RAG case has no policy snapshot")
+    bindings = snapshot.prompt_bindings
+    counter = token_counter_for(snapshot.execution_profile.counter_version)
+    primary = settings.primary
+    # ``LlmGateway.max_prompt_tokens`` then ``_fitted_review``'s ``send_budget_for``.
+    window = min(primary.context_window, settings.policy.input_token_limit[engine])
+    budget = send_budget_for(
+        snapshot.execution_profile,
+        stage="review",
+        model_max_prompt_tokens=window - primary.max_output_tokens,
+    )
+    context = ReviewContext(
+        system=case.system,
+        rules=case.rules,
+        agents_md=case.agents_md,
+        conventions=case.conventions,
+        pr_meta=case.pr_meta,
+        changed_files=parse_unified_diff(case.diff),
+        omitted_files=(),
+        policy_snapshot=snapshot,
+        context_blocks=case.context_blocks,
+        retrieved=case.retrieved,
+        retrieved_section=has_retrieved_section(
+            bindings.review_system_key, bindings.review_system_version
+        ),
+    )
+    fitted = fit_review_context(context, max_prompt_tokens=budget, counter=counter)
+    builder = PromptBuilder()
+    prompt = builder.build_prompt(fitted)
+    if first != (("system", prompt.system), ("user", prompt.user)):
+        raise RecorderError(
+            f"case {case_id}: the prompt the gateway sent differs from the prompt rebuilt from "
+            "its context, so the evidence would describe another input"
+        )
+    for number, later in enumerate(tap.requests[1:], start=2):
+        if later[: len(first)] != first:
+            raise RecorderError(
+                f"case {case_id}: request {number} does not start with the recorded prompt, so "
+                "the evidence would not hold for every call of the case"
+            )
+    manifest = builder.build_manifest(fitted, call_id=UUID(int=0), counter=counter)
+    # The prompt with an empty RAG slot is what both arms must share, whatever was retrieved.
+    without_rag = builder.build_prompt(replace(fitted, retrieved=()))
+    retrieved = [
+        {
+            "block_id": block.block_id,
+            "path": block.path,
+            "side": block.side,
+            "start_line": block.start_line,
+            "end_line": block.end_line,
+            "tokens": block.tokens,
+            "index_commit_sha": block.index_commit_sha,
+            "edge_kind": block.edge_kind,
+        }
+        for block in manifest.blocks
+        if block.source_role is SourceRole.RETRIEVED_EXCERPT
+    ]
+    # What the offline build chose, next to what was sent: a graph case whose RAG slot the
+    # gateway fitted away is then visible instead of passing as a plain arm B.
+    offline_ids = [block.block_id for block in case.retrieved]
+    return {
+        "prompt_digest": _prompt_digest(prompt.system, prompt.user),
+        "non_rag_prompt_digest": _prompt_digest(without_rag.system, without_rag.user),
+        "retrieved": retrieved,
+        "offline_retrieved_ids": offline_ids,
+        "trimmed": [item["block_id"] for item in retrieved] != offline_ids,
+        "fallback_called": any(call.kind is LlmCallKind.FALLBACK for call in calls),
+        "repair_called": any(call.kind is LlmCallKind.REPAIR for call in calls),
+    }
+
+
+def _check_rag_corpus(
+    records: list[tuple[Path, dict[str, Any]]],
+    rag_arm: str | None,
+    policy_arm: str,
+    engine: EngineName,
+) -> str | None:
+    """The validated RAG arm of a RAG corpus, ``None`` for any other; refuse a wrong RAG
+    configuration before any call.
+
+    The offline build fixes what a RAG case sends: review.system v5 under policy arm ``none``
+    on the fast engine. Both arms must run exactly that, so anything else is an error here.
+    """
+    rag_ids = [record["id"] for _, record in records if record["class"] == "rag"]
+    if not rag_ids:
+        if rag_arm is not None:
+            raise RecorderError("--rag-arm needs a corpus of RAG cases: this one has no RAG cases")
+        return None
+    if len(rag_ids) != len(records):
+        raise RecorderError(
+            "the corpus mixes RAG cases with others: "
+            + ", ".join(record["id"] for _, record in records if record["class"] != "rag")
+        )
+    if rag_arm is None or rag_arm not in RAG_ARMS:
+        raise RecorderError("a RAG corpus needs --rag-arm none (arm A) or graph (arm B)")
+    if policy_arm != "none":
+        raise RecorderError(f"a RAG corpus runs --policy-arm none, not {policy_arm}")
+    if engine != "fast":
+        raise RecorderError(f"the RAG arms run the fast engine only, not {engine}")
+    return rag_arm
+
+
+def _check_rag_system(inputs: _CaptureInputs) -> None:
+    """``--system`` must be the very file the offline build renders, or ``prompt_sha`` of the
+    manifest would not be the prompt of the calls."""
+    from review.scripts.eval_rag_context import SYSTEM_PROMPT_V5
+
+    if inputs.prompt_sha != hashlib.sha256(SYSTEM_PROMPT_V5.read_bytes()).hexdigest():
+        raise RecorderError(
+            f"{inputs.prompt_path} differs from the prompt the RAG build sends "
+            f"({SYSTEM_PROMPT_V5.name}); use the pinned file"
+        )
+
+
+async def _rag_inputs(
+    records: list[tuple[Path, dict[str, Any]]],
+    rag_arm: str,
+    settings: LlmSettings,
+    commit_context: Mapping[str, CommitMessagePrefix],
+) -> dict[str, ReviewCase]:
+    """Build every RAG case's input offline, before the first call (any error stops the run)."""
+    # Imported here: the offline build loads the parser and the indexer, which the main and
+    # rules recordings never need.
+    from review.scripts.eval_rag_context import build_case_input
+
+    arm = RAG_ARMS[rag_arm]
+    inputs: dict[str, ReviewCase] = {}
+    for case_dir, record in records:
+        case_id = record["id"]
+        if commit_context[case_id].messages:
+            # The offline build sends no commit messages; a case that has some is mis-wired.
+            raise RecorderError(f"case {case_id}: a RAG case cannot carry commit messages")
+        try:
+            inputs[case_id] = await build_case_input(
+                case_dir, arm, review_model=settings.primary.model
+            )
+        except (OSError, ValueError, PolicyError) as exc:
+            raise RecorderError(f"invalid RAG case {case_id}: {exc}") from exc
+    return inputs
+
+
+def _rag_metadata(
+    root: Path,
+    records: list[tuple[Path, dict[str, Any]]],
+    rag_arm: str,
+    rag_records: Mapping[str, _RagRecord],
+) -> dict[str, Any]:
+    """The run-level RAG fields of the manifest (see the module docstring)."""
+    from review.scripts.eval_rag_source import commit_id
+    from review.scripts.rag_snapshot import INDEX_FILE
+
+    try:
+        index_digest = digest_files(
+            root, [(case_dir / INDEX_FILE).relative_to(root).as_posix() for case_dir, _ in records]
+        )
+    except DigestInputError as exc:
+        raise RecorderError(str(exc)) from exc
+    return {
+        "rag_arm": rag_arm,
+        "rag_index_digest": index_digest,
+        "snapshot_pseudo_revisions": {
+            record["id"]: {
+                "base": commit_id(record["id"], "base"),
+                "head": commit_id(record["id"], "head"),
+            }
+            for _, record in records
+        },
+        "latency_ms": {case_id: item.latency_ms for case_id, item in rag_records.items()},
+        "rag_evidence": {case_id: item.evidence for case_id, item in rag_records.items()},
+    }
+
+
 async def _record_case(
     case_dir: Path,
     record: dict[str, Any],
@@ -666,19 +960,32 @@ async def _record_case(
     staging_dir: Path,
     commit_prefix: CommitMessagePrefix,
     policy_snapshot: PolicySnapshot | None,
-) -> tuple[dict[str, str | bool | None], list[dict[str, object]]]:
-    """Stage one case's first-call text; return its redacted call status and usage."""
-    case = _case_input(
-        case_dir,
-        record,
-        system=inputs.system,
-        rules=inputs.rules_by_language[record["language"]].rules,
-        engine=engine,
-        commit_prefix=commit_prefix,
-        policy_snapshot=policy_snapshot,
+    rag_input: ReviewCase | None = None,
+    clock: Callable[[], float] = time.monotonic,
+) -> tuple[dict[str, str | bool | None], list[dict[str, object]], _RagRecord | None]:
+    """Stage one case's first-call text; return its redacted call status and usage.
+
+    ``rag_input`` is a RAG case's prebuilt ``ReviewCase``; with it the third value is the case's
+    latency and evidence record, else ``None``.
+    """
+    rag = rag_input is not None
+    tap = _FirstRequestTap(transport) if rag_input is not None else None
+    case = (
+        rag_input
+        if rag_input is not None
+        else _case_input(
+            case_dir,
+            record,
+            system=inputs.system,
+            rules=inputs.rules_by_language[record["language"]].rules,
+            engine=engine,
+            commit_prefix=commit_prefix,
+            policy_snapshot=policy_snapshot,
+        )
     )
+    started = clock() if rag else 0.0
     try:
-        result = await review_case(case, settings, transport=transport)
+        result = await review_case(case, settings, transport=tap or transport)
         calls = result.calls
         usage = result.usage
         gateway_status = "accepted"
@@ -694,6 +1001,12 @@ async def _record_case(
         calls = ()
         usage = ()
         gateway_status = failure.error_code
+    rag_record = None
+    if rag_input is not None and tap is not None:
+        # Failures have a latency too; ``ReviewCaseFailed`` carries none, so it is timed here.
+        latency_ms = round((clock() - started) * 1000)
+        evidence = _rag_evidence(record["id"], rag_input, tap, calls, settings, engine)
+        rag_record = _RagRecord(latency_ms, evidence)
     first = calls[0] if calls else None
     content = _first_text(first)
     provider_label, provider_digest = _first_serving_provider(first)
@@ -707,7 +1020,7 @@ async def _record_case(
         "gateway_status": gateway_status,
         "paid_metadata_error": any(call.paid_metadata_error for call in calls),
     }
-    return status, _usage_json(usage)
+    return status, _usage_json(usage), rag_record
 
 
 def _manifest(
@@ -720,6 +1033,7 @@ def _manifest(
     policy_arm: str,
     policy_arm_digest: str | None,
     usage: dict[str, list[dict[str, object]]],
+    rag_metadata: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     nonpublishable_ids = nonpublishable_case_ids(statuses)
     return {
@@ -742,6 +1056,8 @@ def _manifest(
             "policy_arm": policy_arm,
             "policy_arm_digest": policy_arm_digest,
             "usage": usage,
+            # Only a RAG capture carries these (#146); the other corpora keep their manifests.
+            **(rag_metadata or {}),
         },
         "responses": paths,
     }
@@ -774,14 +1090,21 @@ async def record_live(
     engine: EngineName = "fast",
     policy_arm: str = "legacy",
     responses_dir: Path | None = None,
+    rag_arm: str | None = None,
+    clock: Callable[[], float] = time.monotonic,
 ) -> dict[str, Any]:
     """Call ``review_case`` once per validated case and save only first-call text.
 
-    ``responses_dir`` defaults to ``<root>/responses``; it must be new or empty.
+    ``responses_dir`` defaults to ``<root>/responses``; it must be new or empty. ``rag_arm``
+    (``none`` or ``graph``) is required exactly for a root of RAG cases and records the extra
+    manifest fields of #146; ``clock`` times each RAG case's review call.
     """
     if policy_arm not in RECORDED_POLICY_ARMS:
         raise RecorderError(f"unknown policy arm: {policy_arm}")
-    records = _validated_cases(root)
+    # Off the loop: the per-case checks of a RAG case run their own (``asyncio.run``).
+    records = await asyncio.to_thread(_validated_cases, root)
+    rag_run = _check_rag_corpus(records, rag_arm, policy_arm, engine)
+    rag = rag_run is not None
     commit_context = _commit_context(records)
     if policy_arm == "legacy":
         # The legacy prompt shows no repository rules, so a policy-arm case would be scored
@@ -819,11 +1142,22 @@ async def record_live(
         engine=engine,
         # A policy-arm snapshot pins the default files, so an override must be one of them.
         pinned_defaults=policy_arm != "legacy",
+        rag_code=rag,
     )
+    if rag and inputs.prompt_version != "v5":
+        # The offline build always renders the v5 file (the only one with a retrieved section).
+        raise RecorderError(
+            f"the RAG arms run review.system.v5, not {inputs.prompt_path} ({inputs.prompt_version})"
+        )
+    if rag:
+        _check_rag_system(inputs)
     prompt_bindings = _prompt_bindings(inputs, policy_arm)
-    # The snapshot takes its pin from the entry that also supplies the case's rules.
+    # The snapshot takes its pin from the entry that also supplies the case's rules. A RAG case
+    # carries the one its offline build made: no policy file of its base tree is read here.
     snapshots = {
-        record["id"]: _policy_snapshot(
+        record["id"]: None
+        if rag
+        else _policy_snapshot(
             case_dir,
             record,
             policy_arm,
@@ -835,38 +1169,52 @@ async def record_live(
         for case_dir, record in records
     }
     policy_arm_digest = _policy_arm_digest(root, records, policy_arm)
+    rag_inputs = (
+        await _rag_inputs(records, rag_run, settings, commit_context) if rag_run is not None else {}
+    )
+    rag_records: dict[str, _RagRecord] = {}
     statuses: dict[str, dict[str, str | bool | None]] = {}
     usage: dict[str, list[dict[str, object]]] = {}
     paths: dict[str, str] = {}
     # Staged next to the target, so the final rename never crosses a filesystem.
     staging_parent = responses_dir.absolute().parent
-    with TemporaryDirectory(prefix=".responses-", dir=staging_parent) as staging_name:
-        staging_dir = Path(staging_name)
-        for case_dir, record in records:
-            case_id = record["id"]
-            statuses[case_id], usage[case_id] = await _record_case(
-                case_dir,
-                record,
+    async with _chat_transport(transport, tapped=rag) as chat_transport:
+        with TemporaryDirectory(prefix=".responses-", dir=staging_parent) as staging_name:
+            staging_dir = Path(staging_name)
+            for case_dir, record in records:
+                case_id = record["id"]
+                statuses[case_id], usage[case_id], rag_record = await _record_case(
+                    case_dir,
+                    record,
+                    inputs,
+                    settings,
+                    engine=engine,
+                    transport=chat_transport,
+                    staging_dir=staging_dir,
+                    commit_prefix=commit_context[case_id],
+                    policy_snapshot=snapshots[case_id],
+                    rag_input=rag_inputs.get(case_id),
+                    clock=clock,
+                )
+                if rag_record is not None:
+                    rag_records[case_id] = rag_record
+                paths[case_id] = f"responses/{case_id}.json"
+            manifest = _manifest(
                 inputs,
                 settings,
                 engine=engine,
-                transport=transport,
-                staging_dir=staging_dir,
-                commit_prefix=commit_context[case_id],
-                policy_snapshot=snapshots[case_id],
+                statuses=statuses,
+                paths=paths,
+                policy_arm=policy_arm,
+                policy_arm_digest=policy_arm_digest,
+                usage=usage,
+                rag_metadata=(
+                    _rag_metadata(root, records, rag_run, rag_records)
+                    if rag_run is not None
+                    else None
+                ),
             )
-            paths[case_id] = f"responses/{case_id}.json"
-        manifest = _manifest(
-            inputs,
-            settings,
-            engine=engine,
-            statuses=statuses,
-            paths=paths,
-            policy_arm=policy_arm,
-            policy_arm_digest=policy_arm_digest,
-            usage=usage,
-        )
-        _publish_capture(staging_dir, responses_dir, manifest)
+            _publish_capture(staging_dir, responses_dir, manifest)
     return manifest
 
 
@@ -903,6 +1251,7 @@ def main(
     parser.add_argument("--redacted-responses", type=Path, metavar="DIR")
     parser.add_argument("--policy-arm", choices=RECORDED_POLICY_ARMS, default="legacy")
     parser.add_argument("--responses-dir", type=Path, metavar="DIR")
+    parser.add_argument("--rag-arm", choices=tuple(RAG_ARMS), default=None)
     args = parser.parse_args(argv)
     responses_dir: Path = args.responses_dir or args.root / "responses"
     try:
@@ -938,6 +1287,7 @@ def main(
                 engine=args.engine,
                 policy_arm=args.policy_arm,
                 responses_dir=responses_dir,
+                rag_arm=args.rag_arm,
             )
         )
         report = replay(args.root, responses_dir=responses_dir)
