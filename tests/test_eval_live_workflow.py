@@ -183,11 +183,15 @@ def test_summary_uses_replay_metrics_without_model_diagnostics(tmp_path: Path) -
             "RUNNER_TEMP": str(tmp_path),
             "GITHUB_STEP_SUMMARY": str(summary),
             "EVAL_REVIEW_PROMPT": "v4",
+            "EVAL_CORPUS": "main",
+            "EVAL_RAG_ARM": "none",
         },
     )
     assert result.returncode == 0, result.stderr
     content = summary.read_text()
-    assert content.startswith("## Live corpus evaluation\n\nReview prompt: v4\n\n")
+    assert content.startswith(
+        "## Live corpus evaluation\n\nReview prompt: v4\n\nCorpus: main\n\nRAG arm: n/a\n\n"
+    )
     assert "Model: model&lt;test&gt;" in content
     assert "Validity: 66.7% (16/24)" in content
     assert "Precision=37.5% Recall=15.8%" in content
@@ -198,14 +202,16 @@ def test_summary_uses_replay_metrics_without_model_diagnostics(tmp_path: Path) -
 
 
 @pytest.mark.parametrize(
-    ("review_prompt", "heading"),
+    ("review_prompt", "corpus", "rag_arm", "heading"),
     [
-        ("v4", "## Live corpus evaluation\n\nReview prompt: v4\n\n"),
-        ("v5", "## Live corpus evaluation\n\nReview prompt: v5\n\n"),
+        ("v4", "main", "none", "Review prompt: v4\n\nCorpus: main\n\nRAG arm: n/a\n\n"),
+        ("v5", "rules", "none", "Review prompt: v5\n\nCorpus: rules\n\nRAG arm: n/a\n\n"),
+        ("v5", "rag", "none", "Review prompt: v5\n\nCorpus: rag\n\nRAG arm: none\n\n"),
+        ("v5", "rag", "graph", "Review prompt: v5\n\nCorpus: rag\n\nRAG arm: graph\n\n"),
     ],
 )
 def test_summary_names_the_selected_prompt_without_a_report(
-    tmp_path: Path, review_prompt: str, heading: str
+    tmp_path: Path, review_prompt: str, corpus: str, rag_arm: str, heading: str
 ) -> None:
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
@@ -223,11 +229,15 @@ def test_summary_names_the_selected_prompt_without_a_report(
             "RUNNER_TEMP": str(tmp_path),
             "GITHUB_STEP_SUMMARY": str(summary),
             "EVAL_REVIEW_PROMPT": review_prompt,
+            "EVAL_CORPUS": corpus,
+            "EVAL_RAG_ARM": rag_arm,
         },
     )
     assert result.returncode == 0, result.stderr
     assert summary.read_text() == (
-        heading + "No evaluation report was produced. See the failed step for details.\n"
+        "## Live corpus evaluation\n\n"
+        + heading
+        + "No evaluation report was produced. See the failed step for details.\n"
     )
 
 
@@ -270,18 +280,31 @@ def _assert_selection_contract(text: str) -> None:
     """Corpus and policy arm are closed choices that reach the shell only as variables."""
     assert (
         "      corpus:\n"
-        '        description: "Corpus: main (gold benchmark) or rules '
-        '(rules.md sub-corpus, #163)"\n'
+        '        description: "Corpus: main (gold benchmark), rules (rules.md sub-corpus, #163) '
+        'or rag (graph-RAG A/B corpus, #146)"\n'
         "        required: false\n"
         "        type: choice\n"
         "        options:\n"
         "          - main\n"
         "          - rules\n"
+        "          - rag\n"
         "        default: main\n"
     ) in text
     assert (
+        "      rag_arm:\n"
+        '        description: "RAG arm, corpus rag only: none (arm A, no retrieved block) or graph '
+        '(arm B)"\n'
+        "        required: false\n"
+        "        type: choice\n"
+        "        options:\n"
+        "          - none\n"
+        "          - graph\n"
+        "        default: none\n"
+    ) in text
+    assert (
         "      policy_arm:\n"
-        '        description: "Policy arm: legacy (no policy snapshot), none, valid or malicious"\n'
+        '        description: "Policy arm: legacy (no policy snapshot), none, valid or malicious '
+        '(corpus rag needs none)"\n'
         "        required: false\n"
         "        type: choice\n"
         "        options:\n"
@@ -295,7 +318,7 @@ def _assert_selection_contract(text: str) -> None:
     assert (
         "      review_prompt:\n"
         '        description: "Review prompt: v3, or v4 or v5 (snapshot path: needs policy_arm '
-        'none, or valid or malicious with corpus rules)"\n'
+        'none, or valid or malicious with corpus rules; corpus rag needs v5)"\n'
         "        required: false\n"
         "        type: choice\n"
         "        options:\n"
@@ -307,6 +330,7 @@ def _assert_selection_contract(text: str) -> None:
     assert "      EVAL_CORPUS: ${{ inputs.corpus || 'main' }}\n" in text
     assert "      EVAL_POLICY_ARM: ${{ inputs.policy_arm || 'legacy' }}\n" in text
     assert "      EVAL_REVIEW_PROMPT: ${{ inputs.review_prompt || 'v3' }}\n" in text
+    assert "      EVAL_RAG_ARM: ${{ inputs.rag_arm || 'none' }}\n" in text
     bodies = _run_bodies(text)
     assert len(bodies) == 7
     assert not [body for body in bodies if "${{" in body]
@@ -314,14 +338,27 @@ def _assert_selection_contract(text: str) -> None:
         'validate_dataset.py --root "$RUNNER_TEMP/eval-corpus" --final "${profile[@]}"\n'
     ) in text
     assert "            profile=(--profile rules)\n" in text
+    assert "            profile=(--profile rag)\n" in text
+    assert '            rag=(--rag-arm "$EVAL_RAG_ARM")\n' in text
+    assert "            rag) cases=test-prs-dataset/rag/cases ;;\n" in text
     assert (
         '            --system "review/prompts/review.system.$EVAL_REVIEW_PROMPT.md" \\\n'
         '            --policy-arm "$EVAL_POLICY_ARM" \\\n'
+        '            "${rag[@]}" \\\n'
     ) in text
     assert '              summary.write(f"Review prompt: {prompt}\\n\\n")\n' in text
+    assert '              summary.write(f"Corpus: {corpus}\\n\\n")\n' in text
+    assert '              summary.write(f"RAG arm: {rag_arm}\\n\\n")\n' in text
     # Artifacts of different corpora and arms stay apart in one repository's artifact list.
     run = "${{ github.run_id }}-${{ github.run_attempt }}"
-    selection = "${{ env.EVAL_CORPUS }}-${{ env.EVAL_POLICY_ARM }}"
+    selection = "${{ env.EVAL_CORPUS }}-${{ env.EVAL_ARTIFACT_ARM }}"
+    # main and rules keep the policy arm; a rag run (policy arm always none) carries
+    # policy-ragarm so arm A and arm B captures never share an artifact name.
+    assert (
+        "      EVAL_ARTIFACT_ARM: ${{ (inputs.corpus == 'rag' && "
+        "format('{0}-{1}', inputs.policy_arm, inputs.rag_arm)) "
+        "|| inputs.policy_arm || 'legacy' }}\n"
+    ) in text
     assert f"          name: eval-live-{selection}-{run}\n" in text
     assert f"          name: eval-live-raw-{selection}-{run}\n" in text
 
@@ -347,6 +384,13 @@ def test_manual_workflow_security_and_selection_contract() -> None:
         ("${{ inputs.model || vars.LLM_MODEL }}", "${{ vars.LLM_MODEL }}"),
         ("    env:\n", "    env:\n      EXTRA_KEY: ${{ secrets.AI_DMC268_T6 }}\n"),
         ("          - rules\n", ""),
+        ("          - rag\n", ""),
+        ("          - graph\n", ""),
+        ("        default: none\n", "        default: graph\n"),
+        ("${{ inputs.rag_arm || 'none' }}", "graph"),
+        ("            profile=(--profile rag)\n", "            profile=()\n"),
+        ('            rag=(--rag-arm "$EVAL_RAG_ARM")\n', "            rag=()\n"),
+        ("${{ inputs.rag_arm || 'none' }}", "${{ inputs.rag_arm }}"),
         ("          - malicious\n", ""),
         ("        default: main\n", "        default: rules\n"),
         ("        default: legacy\n", "        default: valid\n"),
@@ -369,6 +413,8 @@ def test_manual_workflow_security_and_selection_contract() -> None:
             '--system "review/prompts/review.system.${{ inputs.review_prompt }}.md"',
         ),
         ('summary.write(f"Review prompt: {prompt}\\n\\n")', ""),
+        ('summary.write(f"Corpus: {corpus}\\n\\n")', ""),
+        ('summary.write(f"RAG arm: {rag_arm}\\n\\n")', ""),
         ('--policy-arm "$EVAL_POLICY_ARM"', '--policy-arm "${{ inputs.policy_arm }}"'),
         (
             '"$RUNNER_TEMP/eval-corpus" --final "${profile[@]}"',
@@ -376,12 +422,20 @@ def test_manual_workflow_security_and_selection_contract() -> None:
         ),
         ("profile=(--profile rules)", "profile=()"),
         (
-            "eval-live-${{ env.EVAL_CORPUS }}-${{ env.EVAL_POLICY_ARM }}-${{ github.run_id }}",
+            "eval-live-${{ env.EVAL_CORPUS }}-${{ env.EVAL_ARTIFACT_ARM }}-${{ github.run_id }}",
             "eval-live-${{ env.EVAL_CORPUS }}-${{ github.run_id }}",
         ),
         (
+            "eval-live-raw-${{ env.EVAL_CORPUS }}-${{ env.EVAL_ARTIFACT_ARM }}-",
+            "eval-live-raw-${{ env.EVAL_ARTIFACT_ARM }}-",
+        ),
+        (
+            "eval-live-raw-${{ env.EVAL_CORPUS }}-${{ env.EVAL_ARTIFACT_ARM }}-",
             "eval-live-raw-${{ env.EVAL_CORPUS }}-${{ env.EVAL_POLICY_ARM }}-",
-            "eval-live-raw-${{ env.EVAL_POLICY_ARM }}-",
+        ),
+        (
+            "format('{0}-{1}', inputs.policy_arm, inputs.rag_arm)",
+            "inputs.policy_arm",
         ),
     ],
 )
@@ -650,3 +704,217 @@ def test_validate_refuses_the_rules_corpus_with_the_legacy_arm(tmp_path: Path) -
         "legacy shows no repository rules.\n"
     )
     assert not (tmp_path / "uv-called").exists()
+
+
+def _rag_dataset(root: Path) -> None:
+    dataset = root / "test-prs-dataset"
+    case = dataset / "rag/cases/RAG-01"
+    (case / "base/pkg").mkdir(parents=True)
+    (case / "base/pkg/mod.py").write_text("def f(): ...\n")
+    (case / "case.json").write_text("rag")
+    (case / "diff.patch").write_bytes(b"patch\n")
+    (case / "index.json").write_text("{}")
+    (dataset / "schema").mkdir(exist_ok=True)
+    (dataset / "schema/case.schema.json").write_text("{}")
+
+
+def test_prepare_copies_the_rag_cases_with_their_snapshot_under_the_same_names(
+    tmp_path: Path,
+) -> None:
+    _dataset_with_both_corpora(tmp_path)
+    _rag_dataset(tmp_path)
+    runner = tmp_path / "runner"
+    runner.mkdir()
+
+    result = _run(
+        "Prepare isolated corpus", tmp_path, {"RUNNER_TEMP": str(runner), "EVAL_CORPUS": "rag"}
+    )
+
+    assert result.returncode == 0, result.stderr
+    copied = runner / "eval-corpus"
+    assert sorted(path.name for path in copied.iterdir()) == ["cases", "schema"]
+    # The synthetic commit ids derive from the case ids: the directory names must survive.
+    assert sorted(path.name for path in (copied / "cases").iterdir()) == ["RAG-01"]
+    case = copied / "cases/RAG-01"
+    assert sorted(path.name for path in case.iterdir()) == [
+        "base",
+        "case.json",
+        "diff.patch",
+        "index.json",
+    ]
+    assert (case / "base/pkg/mod.py").read_text() == "def f(): ...\n"
+    assert (case / "diff.patch").read_bytes() == b"patch\n"
+    assert (case / "index.json").read_text() == "{}"
+
+
+def _validate(
+    tmp_path: Path, corpus: str, policy: str, prompt: str | None, arm: str | None
+) -> subprocess.CompletedProcess[str]:
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir(exist_ok=True)
+    shim = bin_dir / "uv"
+    shim.write_text('#!/bin/bash\nprintf "%s\\n" "$@" > "$RUNNER_TEMP/args"\n')
+    shim.chmod(0o755)
+    env = {
+        "PATH": str(bin_dir) + os.pathsep + os.environ["PATH"],
+        "RUNNER_TEMP": str(tmp_path),
+        "EVAL_CORPUS": corpus,
+        "EVAL_POLICY_ARM": policy,
+    }
+    if prompt is not None:
+        env["EVAL_REVIEW_PROMPT"] = prompt
+    if arm is not None:
+        env["EVAL_RAG_ARM"] = arm
+    return _run("Validate corpus", tmp_path, env)
+
+
+@pytest.mark.parametrize("arm", ["none", "graph"])
+def test_validate_runs_the_rag_profile_for_a_v5_policy_none_rag_run(
+    tmp_path: Path, arm: str
+) -> None:
+    result = _validate(tmp_path, "rag", "none", "v5", arm)
+
+    assert result.returncode == 0, result.stderr
+    assert (tmp_path / "args").read_text().splitlines() == [
+        "run",
+        "python",
+        "review/scripts/validate_dataset.py",
+        "--root",
+        str(tmp_path / "eval-corpus"),
+        "--final",
+        "--profile",
+        "rag",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("policy", "prompt", "arm", "message"),
+    [
+        ("none", "v3", "none", "review_prompt v5"),
+        ("none", "v4", "graph", "review_prompt v5"),
+        ("legacy", "v5", "none", "policy_arm none"),
+        ("valid", "v5", "graph", "policy_arm none"),
+        ("malicious", "v5", "none", "policy_arm none"),
+        ("none", "v5", "", "rag_arm none or graph"),
+        ("none", "v5", "everything", "rag_arm none or graph"),
+    ],
+)
+def test_validate_refuses_a_misconfigured_rag_run_before_any_tool_runs(
+    tmp_path: Path, policy: str, prompt: str, arm: str, message: str
+) -> None:
+    result = _validate(tmp_path, "rag", policy, prompt, arm)
+
+    assert result.returncode == 1
+    assert result.stderr == f"::error::corpus rag needs {message}.\n"
+    assert not (tmp_path / "args").exists()
+
+
+def test_validate_refuses_a_missing_rag_arm_and_prompt(tmp_path: Path) -> None:
+    unset_arm = _validate(tmp_path, "rag", "none", "v5", None)
+    assert unset_arm.returncode == 1
+    assert "rag_arm none or graph" in unset_arm.stderr
+    unset_prompt = _validate(tmp_path, "rag", "none", None, "none")
+    assert unset_prompt.returncode == 1
+    assert "review_prompt v5" in unset_prompt.stderr
+    assert not (tmp_path / "args").exists()
+
+
+@pytest.mark.parametrize("corpus", ["main", "rules"])
+def test_validate_refuses_the_graph_arm_on_a_corpus_without_rag_cases(
+    tmp_path: Path, corpus: str
+) -> None:
+    result = _validate(tmp_path, corpus, "none", "v5", "graph")
+
+    assert result.returncode == 1
+    assert result.stderr == f"::error::rag_arm graph needs corpus rag, not {corpus}.\n"
+    assert not (tmp_path / "args").exists()
+
+
+def test_the_default_rag_arm_is_harmless_on_the_other_corpora(tmp_path: Path) -> None:
+    result = _validate(tmp_path, "rules", "none", "v5", "none")
+
+    assert result.returncode == 0, result.stderr
+    assert (tmp_path / "args").read_text().splitlines()[-2:] == ["--profile", "rules"]
+
+
+def _evaluate_args(tmp_path: Path, env: dict[str, str]) -> list[str]:
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    shim = bin_dir / "uv"
+    shim.write_text('#!/bin/bash\nprintf "%s\\n" "$@" > "$RUNNER_TEMP/args"\n')
+    shim.chmod(0o755)
+    result = _run(
+        "Evaluate live corpus",
+        tmp_path,
+        {
+            "PATH": str(bin_dir) + os.pathsep + os.environ["PATH"],
+            "RUNNER_TEMP": str(tmp_path),
+            "LLM_API_KEYS": "test-key-not-a-real-credential",
+            **env,
+        },
+    )
+    assert result.returncode == 0, result.stderr
+    return (tmp_path / "args").read_text().splitlines()
+
+
+@pytest.mark.parametrize("arm", ["none", "graph"])
+def test_evaluate_a_rag_run_passes_the_arm_the_v5_prompt_and_policy_none(
+    tmp_path: Path, arm: str
+) -> None:
+    args = _evaluate_args(
+        tmp_path,
+        {
+            "EVAL_CORPUS": "rag",
+            "EVAL_POLICY_ARM": "none",
+            "EVAL_REVIEW_PROMPT": "v5",
+            "EVAL_RAG_ARM": arm,
+        },
+    )
+
+    assert args == [
+        "run",
+        "python",
+        "review/scripts/eval_live.py",
+        "--root",
+        str(tmp_path / "eval-corpus"),
+        "--system",
+        "review/prompts/review.system.v5.md",
+        "--policy-arm",
+        "none",
+        "--rag-arm",
+        arm,
+        "--report-json",
+        str(tmp_path / "eval-report.json"),
+        "--redacted-responses",
+        str(tmp_path / "eval-response-metadata"),
+    ]
+    assert "--engine" not in args
+
+
+@pytest.mark.parametrize("corpus", ["main", "rules"])
+def test_evaluate_the_other_corpora_never_pass_a_rag_arm(tmp_path: Path, corpus: str) -> None:
+    args = _evaluate_args(
+        tmp_path,
+        {
+            "EVAL_CORPUS": corpus,
+            "EVAL_POLICY_ARM": "none",
+            "EVAL_REVIEW_PROMPT": "v5",
+            "EVAL_RAG_ARM": "none",
+        },
+    )
+
+    assert args == [
+        "run",
+        "python",
+        "review/scripts/eval_live.py",
+        "--root",
+        str(tmp_path / "eval-corpus"),
+        "--system",
+        "review/prompts/review.system.v5.md",
+        "--policy-arm",
+        "none",
+        "--report-json",
+        str(tmp_path / "eval-report.json"),
+        "--redacted-responses",
+        str(tmp_path / "eval-response-metadata"),
+    ]
