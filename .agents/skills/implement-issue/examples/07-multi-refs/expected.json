@@ -1,0 +1,116 @@
+{
+  "blockers": [],
+  "common_acceptance_criteria": [],
+  "issue": {
+    "assignees": [
+      "axyi"
+    ],
+    "board_status": "In Progress",
+    "number": 168,
+    "repo": "larchanka-training/dmc-268-api-t6",
+    "state": "OPEN",
+    "title": "[reviews] Close the findings of the #130 acceptance: the excluded file, the Go resolver, the DiffMap base, the docs",
+    "url": "https://github.com/larchanka-training/dmc-268-api-t6/issues/168"
+  },
+  "kickoff": {
+    "present": true,
+    "text": "**Репозиторий:** larchanka-training/dmc-268-api-t6\n\n**Ветка:** `fix/<n>-review-context-findings`\n\n**Что прочитать первым:**\n\n- `docs/BACKEND_ARCHITECTURE.md`"
+  },
+  "parts": [
+    {
+      "acceptance_criteria": [
+        "an excluded file is in no prompt"
+      ],
+      "boundary": null,
+      "done_when": null,
+      "label": "PR",
+      "n": 1,
+      "prs": [],
+      "scope": "an excluded file must not reach the prompt",
+      "status": "todo"
+    },
+    {
+      "acceptance_criteria": [
+        "a parse failure forbids `resolved`"
+      ],
+      "boundary": null,
+      "done_when": null,
+      "label": "PR",
+      "n": 2,
+      "prs": [],
+      "scope": "the Go resolver and parse errors",
+      "status": "todo"
+    },
+    {
+      "acceptance_criteria": [
+        "the DiffMap base equals the pinned base"
+      ],
+      "boundary": null,
+      "done_when": null,
+      "label": "PR",
+      "n": 3,
+      "prs": [],
+      "scope": "the pinned base of the DiffMap",
+      "status": "todo"
+    },
+    {
+      "acceptance_criteria": [
+        "the docs describe the runtime"
+      ],
+      "boundary": null,
+      "done_when": null,
+      "label": "PR",
+      "n": 4,
+      "prs": [
+        {
+          "ref": "larchanka-training/dmc-268-api-t6#353",
+          "state": "MERGED",
+          "title": "docs: describe the runtime after F1–F5 and #168 part 4 (#130)",
+          "url": "https://github.com/larchanka-training/dmc-268-api-t6/pull/353"
+        }
+      ],
+      "scope": "documentation and the test strategy",
+      "status": "done"
+    },
+    {
+      "acceptance_criteria": [
+        "the staging run is linked"
+      ],
+      "boundary": null,
+      "done_when": null,
+      "label": null,
+      "n": 5,
+      "prs": [],
+      "scope": "the live check on staging",
+      "status": "todo"
+    },
+    {
+      "acceptance_criteria": [
+        "`context.build` is written once per attempt"
+      ],
+      "boundary": null,
+      "done_when": null,
+      "label": "PR",
+      "n": 6,
+      "prs": [
+        {
+          "ref": "larchanka-training/dmc-268-api-t6#346",
+          "state": "MERGED",
+          "title": "fix(reviews): record context.build once per attempt (#168)",
+          "url": "https://github.com/larchanka-training/dmc-268-api-t6/pull/346"
+        }
+      ],
+      "scope": "hardening and cleanup, including the trace",
+      "status": "done"
+    }
+  ],
+  "reasons": [],
+  "schema": 1,
+  "selected": {
+    "part": 1,
+    "reason": "first-todo"
+  },
+  "task_prs": [],
+  "verdict": "go",
+  "warnings": []
+}

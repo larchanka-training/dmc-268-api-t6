@@ -5,7 +5,9 @@
 **Source:** synthetic, built from the real api#266, recorded on 2026-10-29. Edits: its blocker
 api#272 is removed (the live issue is blocked, which would stop the run; the CLOSED api#262
 stays), and the body of each cross-referencing pull request is reduced to the first line of its
-`## What` and its `## Refs` lines.
+`## What` and its `## Refs` lines. Added in 1.1.0, when the query gained them: the `mergedAt` of
+each merged pull request (read from GitHub) and an empty `comments` page — api#266 had no
+accept-issue comment at the recording.
 
 ## Input
 
@@ -33,5 +35,5 @@ pull requests cross-reference the issue:
 - Next (SKILL.md step 3): the Kickoff names no branch, so the candidate is `<type>/266-<kebab>`.
   A name is taken if it exists locally, on origin, or has any pull request; the first free one of
   `<name>`, `<name>-p2`, `<name>-2`, `<name>-3`, … is cut with
-  `git switch --no-track -c <name> origin/main`. Then In Progress, then the loop (Part 2 of
-  api#269).
+  `git switch --no-track -c <name> origin/main`. Then In Progress, then the implementation loop
+  (`references/loop.md`).
