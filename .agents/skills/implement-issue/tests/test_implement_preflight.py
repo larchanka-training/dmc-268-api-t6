@@ -2630,3 +2630,27 @@ def test_the_branch_pattern_is_the_same_in_both_skills_and_git_agrees() -> None:
     for name in ("feat/x.lock", "fix/269-a.lock"):  # the reason for the `.lock` clause
         r = subprocess.run(["git", "check-ref-format", "--branch", name], capture_output=True)
         assert r.returncode != 0, name
+
+
+def test_the_runnable_branch_check_in_skill_md_agrees_with_the_pattern() -> None:
+    text = (SKILL / "SKILL.md").read_text(encoding="utf-8")
+    m = re.search(r"`python3 -c '(import re,sys; [^`]+?)' '<token>'`", text)
+    assert m, "SKILL.md has no `python3 -c '…' '<token>'` check"
+    code = m.group(1)
+    rx = re.compile(BRANCH_PATTERN.search(text).group(1))  # type: ignore[union-attr]
+    names = [
+        "feat/269-x",
+        "fix/a.b-c_d",
+        "docs/lock",
+        "feat/a.lock-b",
+        "feat/x.lock",
+        "feat/a..b",
+        "feat/A",
+        "wip/x",
+        "feat/x\n",  # `$` would let a trailing newline through; the check must not
+        "feat/",
+        "",
+    ]
+    for name in names:
+        r = subprocess.run([sys.executable, "-c", code, name], capture_output=True)
+        assert (r.returncode == 0) == bool(rx.match(name) and "\n" not in name), repr(name)
