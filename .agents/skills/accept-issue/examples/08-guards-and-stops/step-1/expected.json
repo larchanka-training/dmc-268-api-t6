@@ -1,0 +1,28 @@
+{
+  "after_table": [],
+  "apply": false,
+  "board": {
+    "action": "none",
+    "from": null,
+    "readback": null,
+    "to": null
+  },
+  "comment": null,
+  "followups": [],
+  "issue": "larchanka-training/dmc-268-api-t6#500",
+  "mode": "accepter",
+  "next": "Do not close the issue; fix the stop reasons first.",
+  "readback": null,
+  "return_items": [],
+  "rework_rule": null,
+  "rows": [],
+  "schema": 1,
+  "stops": [
+    "PR larchanka-training/dmc-268-api-t6#903 is OPEN and has a Refs line naming this issue: the task is not finished, acceptance waits for its merge"
+  ],
+  "table": null,
+  "tick": [],
+  "verdict": "stop",
+  "viewer": "axyi",
+  "warnings": []
+}

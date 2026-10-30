@@ -73,7 +73,7 @@ import os
 import re
 import subprocess
 import sys
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any, NoReturn
 
@@ -156,7 +156,18 @@ query($owner: String!, $name: String!, $number: Int!, $c: String) {
 """
 
 
+def no_note() -> str:
+    return ""
+
+
+# A caller that has already written something sets this to append what it wrote to every
+# exit-3 message (acceptance.py does); the default adds nothing.
+exit3_note: Callable[[], str] = no_note
+
+
 def fail(message: str, code: int) -> NoReturn:
+    if code == 3:
+        message += exit3_note()
     sys.stderr.write(json.dumps({"error": message}, ensure_ascii=False) + "\n")
     sys.exit(code)
 
@@ -268,13 +279,15 @@ def ref_str(repo: str, number: int) -> str:
 
 
 # ─── fetch ──────────────────────────────────────────────────────────────────
-def fetch_issue(repo: str, number: int) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+def fetch_issue(
+    repo: str, number: int, prefix: str = ""
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     """The issue's own fields (first page) and every timeline node, all pages."""
     issue: dict[str, Any] | None = None
     timeline: list[dict[str, Any]] = []
     cursor: str | None = None
     for page in range(1, MAX_PAGES + 1):
-        data = request(f"issue-p{page}", ISSUE_QUERY, repo, number, cursor)
+        data = request(f"{prefix}issue-p{page}", ISSUE_QUERY, repo, number, cursor)
         repository = data.get("repository")
         node = obj(repository, "repository") if repository is not None else {}
         raw_issue = node.get("issue")
@@ -291,12 +304,12 @@ def fetch_issue(repo: str, number: int) -> tuple[dict[str, Any], list[dict[str, 
     fail(f"issue timeline has more than {MAX_PAGES} pages", 3)
 
 
-def extra_unresolved(repo: str, number: int, cursor: str) -> int:
+def extra_unresolved(repo: str, number: int, cursor: str, prefix: str = "") -> int:
     """Unresolved review threads on the pages after the first, 100 per page."""
     count = 0
     after: str | None = cursor
     for page in range(2, MAX_PAGES + 2):
-        name = f"threads-{repo.replace('/', '_')}-{number}-p{page}"
+        name = f"{prefix}threads-{repo.replace('/', '_')}-{number}-p{page}"
         data = request(name, THREADS_QUERY, repo, number, after)
         repository = obj(data.get("repository"), "repository")
         pull = obj(repository.get("pullRequest"), "pullRequest")
@@ -363,9 +376,16 @@ def visible_lines(text: str, *, skip_quotes: bool) -> Iterator[str]:
     comments (single- and multi-line; the text around a comment stays) and, when
     `skip_quotes`, outside blockquotes. Shared by the checkbox scan and the
     `Refs` search so that both see the same text."""
+    for _, line in visible_indexed(text, skip_quotes=skip_quotes):
+        yield line
+
+
+def visible_indexed(text: str, *, skip_quotes: bool) -> Iterator[tuple[int, str]]:
+    """`visible_lines` with the index of each line's raw line in `text.splitlines()`,
+    for a caller that rewrites the raw line."""
     fence: str | None = None  # the opening run of the open fenced block
     in_comment = False
-    for raw in text.splitlines():
+    for index, raw in enumerate(text.splitlines()):
         if fence is not None:
             closer = FENCE_CLOSE.match(raw)
             if closer and closer.group(1)[0] == fence[0] and len(closer.group(1)) >= len(fence):
@@ -397,16 +417,16 @@ def visible_lines(text: str, *, skip_quotes: bool) -> Iterator[str]:
             continue
         if skip_quotes and line.lstrip().startswith(">"):
             continue
-        yield line
+        yield index, line
 
 
-def build_checkboxes(body: str) -> dict[str, Any]:
-    """AC / DoD checkboxes of the issue body, plus a count of the ones elsewhere."""
-    sections: dict[str, list[dict[str, Any]]] = {"ac": [], "dod": []}
-    outside = 0
+def scan_checkboxes(body: str) -> Iterator[tuple[int, str | None, bool, str]]:
+    """Every checkbox of the issue body as (raw line index in `body.splitlines()`,
+    section, checked, text); section is "ac" / "dod" inside the two sections, else
+    None."""
     current: str | None = None  # "ac" | "dod" | None
     level = 0  # heading level of the open section
-    for line in visible_lines(body, skip_quotes=True):
+    for index, line in visible_indexed(body, skip_quotes=True):
         heading = HEADING.match(line)
         if heading:
             depth = len(heading.group(1))
@@ -417,12 +437,19 @@ def build_checkboxes(body: str) -> dict[str, Any]:
                 current = None
             continue
         box = CHECKBOX.match(line)
-        if not box:
-            continue
-        if current is None:
+        if box:
+            yield index, current, box.group(1) != " ", box.group(2).strip()
+
+
+def build_checkboxes(body: str) -> dict[str, Any]:
+    """AC / DoD checkboxes of the issue body, plus a count of the ones elsewhere."""
+    sections: dict[str, list[dict[str, Any]]] = {"ac": [], "dod": []}
+    outside = 0
+    for _, section, checked, text in scan_checkboxes(body):
+        if section is None:
             outside += 1
         else:
-            sections[current].append({"checked": box.group(1) != " ", "text": box.group(2).strip()})
+            sections[section].append({"checked": checked, "text": text})
     return {
         "ac": section_facts(sections["ac"]),
         "dod": section_facts(sections["dod"]),
@@ -455,7 +482,9 @@ def names_issue(pr: dict[str, Any], pr_repo: str, issue: tuple[str, int]) -> boo
     return False
 
 
-def build_prs(timeline: list[dict[str, Any]], issue: tuple[str, int]) -> list[dict[str, Any]]:
+def build_prs(
+    timeline: list[dict[str, Any]], issue: tuple[str, int], prefix: str = ""
+) -> list[dict[str, Any]]:
     found: dict[tuple[str, int], dict[str, Any]] = {}
     for i, node in enumerate(timeline):
         if node.get("__typename") != "CrossReferencedEvent":
@@ -483,7 +512,7 @@ def build_prs(timeline: list[dict[str, Any]], issue: tuple[str, int]) -> list[di
         unresolved = sum(1 for t in threads if t.get("isResolved") is False)
         if more:
             assert cursor is not None
-            unresolved += extra_unresolved(pr_repo, pr_number, cursor)
+            unresolved += extra_unresolved(pr_repo, pr_number, cursor, prefix)
         found[key] = {
             "ref": ref_str(pr_repo, pr_number),
             "title": text_of(source, "title", f"{where}.source"),
@@ -520,8 +549,10 @@ def commit_nodes(pr: dict[str, Any], where: str) -> list[dict[str, Any]]:
 
 
 # ─── main ───────────────────────────────────────────────────────────────────
-def collect(repo: str, number: int) -> dict[str, Any]:
-    issue, timeline = fetch_issue(repo, number)
+def collect(repo: str, number: int, prefix: str = "") -> dict[str, Any]:
+    """The facts. `prefix` is prepended to every offline fixture name (the read-back
+    of a write uses `after-`); it changes nothing against live gh."""
+    issue, timeline = fetch_issue(repo, number, prefix)
     state = text_of(issue, "state", "issue")
     body = issue.get("body")
     if body is not None and not isinstance(body, str):
@@ -537,7 +568,7 @@ def collect(repo: str, number: int) -> dict[str, Any]:
         },
         "closing": build_closing(timeline, state),
         "checkboxes": build_checkboxes(body or ""),
-        "prs": build_prs(timeline, (repo, number)),
+        "prs": build_prs(timeline, (repo, number), prefix),
     }
 
 

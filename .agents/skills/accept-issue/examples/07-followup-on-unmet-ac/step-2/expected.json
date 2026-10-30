@@ -1,0 +1,73 @@
+{
+  "after_table": [],
+  "apply": false,
+  "board": {
+    "action": "none",
+    "from": "AC Check",
+    "readback": null,
+    "to": null
+  },
+  "comment": null,
+  "followups": [],
+  "issue": "larchanka-training/dmc-268-api-t6#500",
+  "mode": "accepter",
+  "next": "The table is not acceptable as it stands: run return (add --fail ID=reason for evidence that did not hold).",
+  "readback": null,
+  "return_items": [
+    {
+      "id": "AC2",
+      "reason": "не выполнено",
+      "text": "Повтор запроса с тем же `Idempotency-Key` не создаёт вторую запись"
+    }
+  ],
+  "rework_rule": "Невыполненный AC или DoD доделывается в том же issue: кодовый — новым PR с `Refs #N`, некодовый — действием и доказательством (правило «Доработка — в том же issue», `docs/CONTRIBUTING.md`, «Приёмка задачи»).",
+  "rows": [
+    {
+      "evidence": "PR #901, тест `test_health_returns_version`",
+      "id": "AC1",
+      "kind": "ac",
+      "status": "done",
+      "text": "`GET /health` отвечает 200 и версией сборки"
+    },
+    {
+      "evidence": "не выполнено",
+      "id": "AC2",
+      "kind": "ac",
+      "status": "not_done",
+      "text": "Повтор запроса с тем же `Idempotency-Key` не создаёт вторую запись"
+    },
+    {
+      "evidence": "комментарий исполнителя https://github.com/larchanka-training/dmc-268-api-t6/issues/500#issuecomment-7000",
+      "id": "AC3",
+      "kind": "ac",
+      "status": "done",
+      "text": "Правило включено в ruleset ветки `main`"
+    },
+    {
+      "evidence": "CI зелёный на голове PR #901",
+      "id": "DoD1",
+      "kind": "dod",
+      "status": "done",
+      "text": "Гейты CI зелёные"
+    },
+    {
+      "evidence": "approve на голове PR #901, треды закрыты",
+      "id": "DoD2",
+      "kind": "dod",
+      "status": "done",
+      "text": "PR одобрены на текущей голове, все треды закрыты"
+    }
+  ],
+  "schema": 1,
+  "stops": [],
+  "table": {
+    "author": "executor",
+    "comment_id": 7001,
+    "url": "https://github.com/larchanka-training/dmc-268-api-t6/issues/500#issuecomment-7001",
+    "via": "marker"
+  },
+  "tick": [],
+  "verdict": "return",
+  "viewer": "axyi",
+  "warnings": []
+}

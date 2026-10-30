@@ -1,0 +1,21 @@
+{
+  "AC1": {
+    "status": "done",
+    "evidence": "PR #901, тест `test_health_returns_version`"
+  },
+  "AC2": {
+    "status": "not_done"
+  },
+  "AC3": {
+    "status": "done",
+    "evidence": "комментарий исполнителя https://github.com/larchanka-training/dmc-268-api-t6/issues/500#issuecomment-1000"
+  },
+  "DoD1": {
+    "status": "done",
+    "evidence": "CI зелёный на голове PR #901"
+  },
+  "DoD2": {
+    "status": "done",
+    "evidence": "approve на голове PR #901, треды закрыты"
+  }
+}

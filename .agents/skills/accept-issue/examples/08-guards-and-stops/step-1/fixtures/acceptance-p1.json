@@ -1,0 +1,35 @@
+{
+  "data": {
+    "viewer": {
+      "login": "axyi"
+    },
+    "repository": {
+      "issue": {
+        "body": "## Background\n\nSynthetic issue for the accept-issue golden examples.\n\n## Acceptance Criteria\n\n- [ ] `GET /health` отвечает 200 и версией сборки\n- [ ] Повтор запроса с тем же `Idempotency-Key` не создаёт вторую запись\n- [x] Проверка обратной совместимости схемы — перенесён в #285 решением техлида\n\n## DoD Checklist\n\n- [ ] Гейты CI зелёные\n- [ ] PR одобрены на текущей голове, все треды закрыты\n",
+        "assignees": {
+          "nodes": [
+            {
+              "login": "executor"
+            }
+          ]
+        },
+        "comments": {
+          "pageInfo": {
+            "hasNextPage": false,
+            "endCursor": null
+          },
+          "nodes": [
+            {
+              "databaseId": 8001,
+              "author": {
+                "login": "executor"
+              },
+              "createdAt": "2026-10-30T10:05:00Z",
+              "body": "<!-- accept-issue:table v1 -->\n\n## Самопроверка: AC → доказательство\n\n| # | Пункт | Доказательство |\n| --- | --- | --- |\n| AC1 | `GET /health` отвечает 200 и версией сборки | PR #901, тест `test_health_returns_version` |\n| AC2 | Повтор запроса с тем же `Idempotency-Key` не создаёт вторую запись | PR #902, тест `test_repeated_idempotency_key_is_rejected` |\n| AC3 | Проверка обратной совместимости схемы — перенесён в #285 решением техлида | перенесён в #285 |\n| DoD1 | Гейты CI зелёные | CI зелёный на голове PR #901 и PR #902 |\n| DoD2 | PR одобрены на текущей голове, все треды закрыты | approve на голове PR #901 и PR #902, треды закрыты |\n\nИтог: «не выполнено» нет, ставлю AC Check.\n"
+            }
+          ]
+        }
+      }
+    }
+  }
+}
