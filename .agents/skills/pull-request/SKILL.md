@@ -36,10 +36,10 @@ metadata:
      `^(feat|fix|docs|chore)/[a-z0-9]+(?:[._-][a-z0-9]+)*(?<!\.lock)$` or
      `^deps-update-[0-9]{4}-[0-9]{2}-[0-9]{2}$`. Stay on it, no `git checkout -b`, and list its
      pull requests: `gh pr list --head <branch> --state all --json number,state,url`.
-     - `[]`: commit and push; step 3 opens the pull request.
+     - `[]`: commit if something is staged, then push; step 3 opens the pull request.
      - An `OPEN` one: this change updates that pull request. Ask the user before pushing — a
-       push that changes the diff dismisses its approve — then commit and push, and in step 3
-       do not run `gh pr create`.
+       push that changes the diff dismisses its approve — then commit if something is staged and
+       push, and in step 3 do not run `gh pr create`.
      - Only `MERGED` / `CLOSED` ones: the branch belongs to finished work — stop and ask the
        user.
    - Any other name (`staging`, `release`, a branch that predates the naming rule): stop and
