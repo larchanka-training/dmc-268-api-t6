@@ -66,9 +66,9 @@ Read `verdict`, `reasons`, `warnings`, `selected`.
   part of the issue (the user says which part it covers, or passes `--part`); the first
   unfinished part has an open pull request (finish it, or the user passes `--part`); every part
   has a merged pull request but one is still open; a task without parts has an open pull request
-  (a rework PR is the user's decision); the issue was **returned at acceptance** and nothing has
-  been merged since (the user passes `--part K` for the part to rework; a task without parts is
-  reworked by hand).
+  (a rework PR is the user's decision); the issue was **returned at acceptance** or its
+  **self-check found unmet AC** and nothing has been merged since (the user passes `--part K` for
+  the part to rework; a task without parts is reworked by hand).
 - **`accept` (exit 1):** not a stop and not a go — every part has a merged pull request (a task
   without parts: its pull request is merged) and none is open. Cut no branch, touch no board. Show
   the `warnings` (an "acceptance criterion names Part N, not in Scope" means parts the Scope does
@@ -246,9 +246,10 @@ collects them and ui has no Python in CI. Run them by hand whenever the skill ch
   read (the Kickoff may say it — read it).
 - The scripts are the preflight and the board Status. The loop (steps 5–6) is behaviour, not code:
   no offline test covers it; golden-task runs in Claude Code and Codex accept it.
-- An issue returned at acceptance stops the preflight until a pull request with `Refs` is merged
-  after the return. A returned part is reworked with `--part K`; the rework of a **task without
-  parts** is manual for now.
+- An issue returned at acceptance, or whose latest self-check table says «Итог: не выполнено»,
+  stops the preflight until a pull request with `Refs` is merged after that comment (a newer
+  table lifts it too). A part is reworked with `--part K`; a **task without parts** by hand.
 - `Part 3a` counts as Part 3: name the whole part only when it is done.
-- «Part 2 of the plan in #14» and «#14, part 2» are not tied to #14: with several issues in
-  `Refs` they name nothing.
+- With several issues in `Refs` a part counts only when tied (`Part K of <ref>`, `<ref> part K`).
+  Older pull requests written otherwise («Part 2 of the #163 …», «#52, часть N») are strays: a
+  merged one is a warning, so read the merged-stray warnings before taking the selected part.
