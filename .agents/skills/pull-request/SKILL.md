@@ -33,7 +33,7 @@ metadata:
    - Empty (detached HEAD): stop and ask the user — there is no branch to commit on.
    - `main`: `git checkout -b <branch-name>`.
    - A task branch — the name matches `.agents/rules/git-workflow.md`:
-     `^(feat|fix|docs|chore)/[a-z0-9]+(?:[._-][a-z0-9]+)*$` or
+     `^(feat|fix|docs|chore)/[a-z0-9]+(?:[._-][a-z0-9]+)*(?<!\.lock)$` or
      `^deps-update-[0-9]{4}-[0-9]{2}-[0-9]{2}$`. Stay on it, no `git checkout -b`, and list its
      pull requests: `gh pr list --head <branch> --state all --json number,state,url`.
      - `[]`: commit and push; step 3 opens the pull request.
