@@ -29,11 +29,11 @@ runtime-профиль требуют отдельной реализации; �
 | Р-2 | Один активный прогон на PR: ключ `(installation_id, repo_id, pr_number)`; новый пуш отменяет предыдущий прогон, побеждает последний `head_sha` | Иначе 10 пушей = 10 ревью и 10× цена. Разные PR, ветки, репозитории — параллельны |
 | Р-3 | Два движка за одним контрактом `ReviewOutput` (§5): **DiffEngine** (без диска, ≤ 40 с) и **SandboxEngine** (контейнер, ≤ 10 мин). v1 = DiffEngine | Движок будет меняться; всё ниже контракта об этом не знает |
 | Р-4 | Сандбокс: `--network=none`, без токенов внутри, клон монтирует контроллер снаружи | Промпт-инъекция в диффе — штатная ситуация |
-| Р-5 | GitHub: **один** review batch на run. Идентичность включает run/head/diff/final result и digest точного payload; после неоднозначной отправки — recovery без слепого POST. В тело допускаются только подтверждённые находки с существующим показанным якорем (§8.4) | Повтор доставки не создаёт новое ревью и не присваивает результат другого run; `findings_hash` недостаточен |
+| Р-5 | GitHub: **один** review batch на run для публикации новых замечаний и сводки (`POST /pulls/{n}/reviews`). Разрешение устаревших и исправленных замечаний выполняется best-effort фазой publisher после завершения T14 через GraphQL `resolveReviewThread` по правилам [`INCREMENTAL_REVIEW_AND_LIMITS_SPEC.md`](INCREMENTAL_REVIEW_AND_LIMITS_SPEC.md) (Ч.1). Идентичность включает run/head/diff/final result и digest точного payload; после неоднозначной отправки — recovery без слепого POST. В тело допускаются только подтверждённые находки с существующим показанным якорем (§8.4) | Повтор доставки не создаёт новое ревью и не присваивает результат другого run; `findings_hash` недостаточен; закрытие тредов не меняет тело опубликованных комментариев |
 | Р-6 | Неизменяемые `rule_version_id`, `prompt_version_id` и policy snapshot на run: оба base-документа, ignore, defaults, профили моделей/парсеров и checksums; настройки публикации severity_threshold/max_comments уже закреплены для новых legacy runs в Run и snapshot отдельно от policy_digest (#212, RFS §7). Retry использует те же pins; историческая NULL-пара читает текущие настройки Repository. Rerun закрепляет новую пару. Ревизия индекса RAG в снимок не входит: она только выбирает кандидатов, текст читается на ревизиях PR, показанное фиксирует manifest; новый блок контекста закрепляется новой версией промпта ([ADR 0001 §8.1](adr/0001-graph-rag-v1.md#81-правило-ревизий)) | Воспроизводимость правил, проверки и атрибуции |
 | Р-7 | Арендатор = **Workspace** (роль 6), к которому привязана `ProviderInstallation`; права на репозитории — из провайдера, не из своей таблицы ролей | Своя модель ролей разъедется с GitHub |
 | Р-8 | `usage_events` (токены, деньги, модель) — с первого вызова LLM, только вставка | Восстановить задним числом нельзя; основа для `CreditLedger` |
-| Р-9 | Бот односторонний: публикует, на комментарии не отвечает; **обязательно** игнорирует собственные события | Скорость запуска; защита от цикла «бот → CI → бот» |
+| Р-9 | Бот односторонний: публикует, на комментарии не отвечает; бот обязательно игнорирует собственные события (лейбл — §8.3; события тредов — задача FeedbackSignal после MVP по [`INCREMENTAL_REVIEW_AND_LIMITS_SPEC.md`](INCREMENTAL_REVIEW_AND_LIMITS_SPEC.md)) | Скорость запуска; защита от цикла «бот → CI → бот» |
 | Р-10 | Триггер — **конъюнкция двух событий в любом порядке**: на PR стоит лейбл `ai-review` ∧ CI успешен для текущего `head_sha`. Бота нельзя запросить ревьюером: GitHub отвечает 201 с пустым `requested_reviewers`, событие `review_requested` не приходит ([#37](https://github.com/larchanka-training/dmc-268-api-t6/issues/37#issuecomment-5874776355)). **После пуша — авто-повтор**, пока PR открыт и стоит лейбл (наш флаг `ai_review_labeled`): бот лейбл не снимает; флаг сверяется с текущими лейблами PR, поэтому его снимает `unlabeled` не от нашего бота, а закрытие PR флаг не трогает — новые Run для закрытого PR не создаются (решения техлида по #20, OQ-1, по #37 и #56). Условие «CI успешен» и sweep «2 мин без CI» — §6.1, [PIPELINE_SPEC](PIPELINE_SPEC.md) §8 | Решение мита; события независимы, порядок не гарантирован. Лейбл ставит только участник с правом triage и выше: внешний автор PR не запустит ревью и не потратит бюджет LLM |
 | Р-11 | Провайдер VCS — за портом `VcsProvider`. GitHub и установленный GitLab поддерживают приём, fast-анализ и публикацию; GitLab intake по умолчанию выключен, live-приёмка остаётся отдельным гейтом (§8.1). Bitbucket не реализован | Запись в GitLab — discussions, маркеры `findings_hash` и inline `position` по §9.5 (#171); ключи §10 / отдельные receipts операций — не реализованы |
 | Р-12 | Один monorepo и пять независимо собираемых сервисов (`portal-api`, `auth-api`, `webhook-api`, `worker`, `publisher`) с собственными зависимостями; у роли `webhook-api` второй процесс — `webhook-worker` (тот же образ, `python -m app.webhook_worker`, §4) | Изоляция релизов и зависимостей без потери единого lock-файла и локального окружения |
@@ -729,8 +729,8 @@ inline-комментарии на GitHub могут существовать. �
 ограничение; различение неизвестных/пустых comment IDs и расширение контракта
 идентичности квитанции не входят в этот PR.
 
-Существующие terminal Run state/payload, findings/comments/diff/context не
-переписываются; обычные diff/context записи, policy documents и policy snapshots
+Существующие terminal Run state/payload, findings/diff/context не
+переписываются; для `comments` авторские данные и координаты неизменяемы, а колонки жизненного цикла треда обновляются в соответствии с [`INCREMENTAL_REVIEW_AND_LIMITS_SPEC.md`](INCREMENTAL_REVIEW_AND_LIMITS_SPEC.md): `github_thread_id` (заполняется синхронным шагом `sync_review_threads_state` в `store_review_output.py` на фазе `running` до Pass 6b), `thread_status` (все обновления выполняются с оптимистической блокировкой `WHERE id = :id AND thread_status = :read_status`: `ACTIVE` при вставке в T14; `HUMAN_DISCUSSION` и `RESOLVED_BY_USER` — в `sync_review_threads_state` и при перепроверке `get_review_thread` в фазе чистки; `PERSISTING` — в атомарном переходе T14 `complete_publication`; `RESOLVED_BY_BOT` и `NOT_FOUND` — в `sync_review_threads_state` и в фазе чистки publisher), `pending_resolution_run_id` и `pending_resolution_outcome` (записываются в `store_review_output.py` при сохранении плана публикации вне `findings_hash` и digest T8), `resolved_at` и `resolved_by_commit` (заполняются при переходе в `RESOLVED_BY_BOT`), `resolved_by_actor` (заполняется значением `bot_key`), `last_seen_run_id` (обновляется в транзакции T14 `complete_publication`, читается диагностикой и UI/API истории прогонов PR); обычные diff/context записи, policy documents и policy snapshots
 требуют активного origin и RUNNING под атомарными блокировками. История и cache-only
 file/action routes по-прежнему авторизуются по текущей Repository и грантам; новый rerun использует новый origin.
 
@@ -1035,6 +1035,44 @@ UNCHANGED остаётся **2** запросами HEAD. В таблице уч
 ### 8.1 Порт `VcsProvider` (Р-11)
 
 ```python
+@dataclass(frozen=True)
+class ComparisonFile:
+    status: str
+    old_path: str
+    new_path: str
+    changes: int
+    patch: str | None
+    previous_filename: str | None = None
+    is_complete: bool = True
+
+@dataclass(frozen=True)
+class ComparisonResult:
+    base_sha: str
+    head_sha: str
+    is_ancestor: bool
+    is_complete: bool
+    files: list[ComparisonFile]
+
+@dataclass(frozen=True)
+class ReviewThread:
+    id: str
+    is_resolved: bool
+    resolved_by_login: str | None
+    first_comment_database_id: int | None
+    has_human_activity: bool  # вычисляется адаптером по правилу INCREMENTAL_REVIEW_AND_LIMITS_SPEC §4.3 п.4 с использованием bot_key из GET /app
+
+@dataclass(frozen=True)
+class ReviewThreadPage:
+    threads: list[ReviewThread]
+    has_next_page: bool
+    end_cursor: str | None
+
+@dataclass(frozen=True)
+class ThreadResolutionResult:
+    status: str  # SUCCESS, FORBIDDEN, NOT_FOUND, RATE_LIMITED, TRANSIENT_ERROR, UNSUPPORTED
+    thread_id: str
+    error_message: str | None = None
+
 class VcsProvider(Protocol):
     def verify_webhook(self, headers: Mapping[str, str], body: bytes) -> WebhookEvent: ...
     async def get_pull_request(self, repo: RepoRef, number: int) -> PullRequest: ...
@@ -1044,12 +1082,20 @@ class VcsProvider(Protocol):
     async def get_ci_status(self, repo: RepoRef, sha: str) -> CiStatus: ...
     async def upsert_check_run(self, repo: RepoRef, sha: str, status: CheckRun) -> str: ...
     async def post_review(self, repo: RepoRef, number: int, review: ReviewPayload) -> str: ...
+    async def compare_commits(self, repo: RepoRef, base_sha: str, head_sha: str) -> ComparisonResult: ...   # сравнение коммитов дельты (ancestry, previous_filename при rename, патчи, признак complete, Ч.1; ComparisonResult — расширенная модель сервиса публикации, в отличие от легковесного Comparison в code_index)
+    async def get_review_threads(self, repo: RepoRef, number: int, after_cursor: str | None = None) -> ReviewThreadPage: ...   # постраничное чтение тредов PR (GraphQL, цель #321 / Ч.1)
+    async def get_review_thread(self, repo: RepoRef, thread_id: str) -> ReviewThread: ...   # чтение одного треда (GraphQL, цель #321 / Ч.1)
+    async def resolve_review_thread(self, repo: RepoRef, thread_id: str) -> ThreadResolutionResult: ...   # закрытие треда (GraphQL resolveReviewThread, исходы SUCCESS/FORBIDDEN/NOT_FOUND/RATE_LIMITED/TRANSIENT_ERROR/UNSUPPORTED, цель #321 / Ч.1)
+    async def get_bot_key(self) -> str | None: ...   # нормализованный slug GitHub App из GET /app с App JWT (кешируется в памяти процесса; для GitLab — None, цель #321 / Ч.1)
     async def list_feedback(self, repo: RepoRef, number: int) -> list[FeedbackSignal]: ...   # после MVP
 ```
 
-GitHub поддерживает вебхуки, diff, блобы, check-run и `post_review`. Установленный
-GitLab поддерживает durable MR receipts, проекцию, очередь, fast-анализ и discussions
-через отдельные адаптеры (§8.4); GitHub check-run для GitLab не вызывается.
+GitHub поддерживает вебхуки, diff, блобы, check-run, `post_review`, чтение и закрытие
+тредов через GraphQL. Установленный GitLab поддерживает durable MR receipts, проекцию,
+очередь, fast-анализ и discussions через отдельные адаптеры (§8.4); GitHub check-run
+для GitLab не вызывается. Для GitLab адаптер `get_review_threads` возвращает пустую страницу,
+`resolve_review_thread` — `UNSUPPORTED`, а `compare_commits` — сравнение коммитов без
+патчей; инкрементальный реестр для GitLab работает с пустым списком тредов.
 `BitbucketProvider` не реализован. Минимальная совместимая версия GitLab — 17.4.
 
 GitLab HTTP admission включается отдельно через `GITLAB_WEBHOOK_INTAKE_ENABLED`
@@ -1096,11 +1142,11 @@ redelivery acceptance. Intake остаётся default-off; production rollout �
 | `pull_request` | `closed` | отмена активного Run; при `merged = true` и `base.ref`, равном `repository.default_branch` из payload, — запрос обновления индекса до `merge_commit_sha` (без него — только маркер пробуждения, §7.4) до раннего выхода проекции, то есть и у репозитория с приостановленными ревью; статус доставки не меняется, в detail добавляется `index=requested`; сбой запроса пишется в лог и доставку не роняет — проекция уже закоммичена, индекс догонит сверка с HEAD (§11); вызова GitHub нет (#143) |
 | `check_suite`, `workflow_run` | `completed` | для открытых PR с этим `head_sha` `check_suite` пишет `ci_status = {"event": "check_suite"}` (кэш для sweep, PIPELINE_SPEC §8.3), `workflow_run` `ci_status` не пишет → `try_enqueue`; «зелёный» = все suites для sha, **кроме suite самого App** и чужих `queued` suites без check run, завершены с `success` / `neutral` / `skipped` — проверяется REST-запросом в `try_enqueue` (§6.1) |
 | `status` | — | для репозиториев со сторонним CI через commit status; `ci_status = {"event": "status"}` (кэш) → `try_enqueue`; combined status `success` или пусто — часть условия «CI зелёный» |
-| `pull_request_review_thread` | `resolved`, `unresolved` | **после MVP**: `feedback_signals` |
+| `pull_request_review_thread` | `resolved`, `unresolved` | **после MVP** (задача FeedbackSignal): `feedback_signals`; события самого бота будет отбрасывать Р-9 (§8.3, [`INCREMENTAL_REVIEW_AND_LIMITS_SPEC.md`](INCREMENTAL_REVIEW_AND_LIMITS_SPEC.md)) |
 | `installation`, `installation_repositories` | `created`, `deleted`, `added`, `removed` | синхронизация `repositories`; при подключении — создание лейбла `ai-review` и запрос чтения `.review/rules.md` (§6.9); `deleted` и `removed` логически очищают индекс, а повторное подключение при включённом RAG заново включает его через leader-задачу сходимости (§6.9, §11; #143) |
 | `push` | — | только в default branch (`ref = refs/heads/<repository.default_branch>`): запрос перечитать `.review/rules.md` для статуса правил (#150, RULES_FORMAT_SPEC §10.1); другие ветки и теги отбрасываются. Файл меняют коммитом или merge в репозитории, а не в портале, поэтому без этого события сервис узнал бы об изменении только при следующем перечитывании. Тот же push в default branch запрашивает обновление индекса до `after` (#143, сверх Scope #143), независимо от статуса правил; статус доставки один, в detail добавляется `index=requested`. Push, удаливший ветку (`deleted` или нулевой `after`), обновления не запрашивает |
 
-Права App (repository): `pull_requests: write`, `checks: write`, `contents: read`, `metadata: read`, `issues: write` (создание лейбла `ai-review`, §6.9), `actions: read` (событие `workflow_run`), `statuses: read` (событие `status` и combined status в PIPELINE_SPEC §8.1). Подписка App на событие Push (Permissions & events → Subscribe to events) нужна статусу правил (#150) и обновлению индекса по push (#143) и включается вручную: это обязательный шаг настройки каждой App (staging, dev, sandbox), код его не делает. Без подписки триггер молча не срабатывает, и изменение `.review/rules.md` видно только по GET после порога в 10 минут (RULES_FORMAT_SPEC §10.1). Новых прав подписка не требует, файл читается с `contents: read`. Бот **не** имеет `contents: write`. Прав организации и аккаунта нет. События `labeled` / `unlabeled` приходят в подписке `pull_request`, поэтому триггер Р-10 новых прав не требует; лейбл `ai-review` App создаёт сам при подключении репозитория (§6.9), `POST /repos/{owner}/{repo}/labels` требует `issues: write`, а не `pull_requests: write` ([GitHub Docs](https://docs.github.com/en/rest/authentication/permissions-required-for-github-apps), OQ-8). Регистрация App и полный список настроек — #37.
+Права App (repository): `pull_requests: write` (ожидается, что хватает `pull_requests: write` для вызова GraphQL `resolveReviewThread` по [`INCREMENTAL_REVIEW_AND_LIMITS_SPEC.md`](INCREMENTAL_REVIEW_AND_LIMITS_SPEC.md); не подтверждено, OQ-9; при отказе FORBIDDEN бот прерывает фазу чистки без падения прогона), `checks: write`, `contents: read`, `metadata: read`, `issues: write` (создание лейбла `ai-review`, §6.9), `actions: read` (событие `workflow_run`), `statuses: read` (событие `status` и combined status в PIPELINE_SPEC §8.1). Подписка App на событие Push (Permissions & events → Subscribe to events) нужна статусу правил (#150) и обновлению индекса по push (#143) и включается вручную: это обязательный шаг настройки каждой App (staging, dev, sandbox), код его не делает. Без подписки триггер молча не срабатывает, и изменение `.review/rules.md` видно только по GET после порога в 10 минут (RULES_FORMAT_SPEC §10.1). Новых прав подписка не требует, файл читается с `contents: read`. Подписка на событие `pull_request_review_thread` будет обрабатываться в задаче FeedbackSignal (после MVP; в MVP приложение на него не подписано). Бот **не** имеет `contents: write`. Прав организации и аккаунта нет. События `labeled` / `unlabeled` приходят в подписке `pull_request`, поэтому триггер Р-10 новых прав не требует; лейбл `ai-review` App создаёт сам при подключении репозитория (§6.9), `POST /repos/{owner}/{repo}/labels` требует `issues: write`, а не `pull_requests: write` ([GitHub Docs](https://docs.github.com/en/rest/authentication/permissions-required-for-github-apps), OQ-8). Регистрация App и полный список настроек — #37.
 
 ### 8.3 Правила работы с API
 
@@ -1108,14 +1154,16 @@ redelivery acceptance. Intake остаётся default-off; production rollout �
 |---|---|
 | Ответ на вебхук < 500 мс | Проверка размера тела запроса (лимит 413 при превышении `MAX_WEBHOOK_PAYLOAD_BYTES = 10 MB` потоково до вычисления хэша, #54), затем проверка HMAC (`X-Hub-Signature-256`, `hmac.compare_digest`), заголовков и JSON, одна вставка квитанции в `webhook_events` — всё; никакой работы в обработчике: REST-вызовы и проекция — в `webhook-worker` после ответа (§6.1) |
 | Идемпотентность | `webhook_events.delivery_id UNIQUE` (`X-GitHub-Delivery`); GitHub **не** ретраит доставки сам — приёмник обязан быть доступен |
-| Игнор собственных событий (Р-9) | Маршрут по `sender` не фильтрует: квитанция сохраняется, ответ — 202. `webhook-worker` пропускает событие лейбла `ai-review` (`labeled` / `unlabeled`), если `sender.type == "Bot"` ∧ `sender.login` совпадает с `GITHUB_APP_BOT_LOGIN` без учёта регистра, и помечает квитанцию разобранной (`projected_at`). В событиях бота `sender` — пользователь `<slug>[bot]`, и его id не равен App ID (staging: App ID `5111033`, `dmc268-t6-reviewer[bot]` — `335108304`, #37). App ID остаётся в `iss` App JWT и в исключении своего check suite по `app.id` (PIPELINE_SPEC §8.1) |
+| Игнор собственных событий (Р-9) | Маршрут по `sender` не фильтрует: квитанция сохраняется, ответ — 202. `webhook-worker` пропускает событие лейбла `ai-review` (`labeled` / `unlabeled`), если `sender.type == "Bot"` ∧ `sender.login` совпадает с `GITHUB_APP_BOT_LOGIN` без учёта регистра, и помечает квитанцию разобранной (`projected_at`). Разбор событий тредов `pull_request_review_thread` (`resolved` / `unresolved`) планируется после MVP в рамках задачи сбора обратной связи FeedbackSignal с аналогичным фильтром по `sender` (в MVP приложение на эти события не подписано). В событиях бота `sender` — пользователь `<slug>[bot]`, и его id не равен App ID (staging: App ID `5111033`, `dmc268-t6-reviewer[bot]` — `335108304`, #37). App ID остаётся в `iss` App JWT и в исключении своего check suite по `app.id` (PIPELINE_SPEC §8.1) |
 | Installation-токен | живёт 1 ч; Redis `token:{installation_id}`, общий для `worker` и `webhook-worker`, TTL до `expires_at` минус 60 с; найденный в Redis токен имеет приоритет; ошибка чтения или отсутствие ключа (вытеснение, отклонённая запись) допускают локальную копию только до `expires_at` минус 60 с; без локальной копии или при достижении этой границы — cache miss; без `REDIS_URL` — в памяти процесса с той же границей срока; private key App — только в env `webhook-worker`/`worker`/`publisher` |
-| Rate limit | 5000 req/ч на installation; `X-RateLimit-Remaining` в метрики; `403/429` + `Retry-After` — повторы по PIPELINE_SPEC §5.2; вторичные лимиты — не более 1 мутации/сек |
+| Rate limit | 5000 req/ч на installation; `X-RateLimit-Remaining` в метрики; `403/429` + `Retry-After` — повторы по PIPELINE_SPEC §5.2; вторичные лимиты — не более 1 мутации/сек (не более 80 content-generating запросов в минуту и 500 в час); мутации `resolveReviewThread` квотируются до 30 на Run с паузой ≥ 1.2 с по [`INCREMENTAL_REVIEW_AND_LIMITS_SPEC.md`](INCREMENTAL_REVIEW_AND_LIMITS_SPEC.md); остаток переносится на последующие Run |
 | Дифф | `GET /pulls/{n}/files` с полной пагинацией и сверкой версии; для кандидатов empty_file (поддерживаемый канонический путь, added, previous_filename=None, нулевые additions/deletions/changes, точный empty blob SHA, size=None/0, исходный patch=None/пустая строка) — максимум один optional recursive tree read на fetched head_sha, cap 1 500 000 response bytes, unique exact path+SHA/type=blob/mode=100644\|100755/size None\|0 и nontruncated listing; без кандидатов ноль запросов, для доказанных кандидатов ноль добавленных blob-байт. Ошибка/cap/невалидный proof оставляют missing_patch/incomplete, отмена/дедлайн распространяются; отсутствие/усечение patch не считается нулевым diff. `DiffMap` различает complete/missing/truncated/malformed/binary/unsupported/metadata_only |
 | Файлы | Точный путь разрешается в дереве закреплённой ревизии, затем `GET /git/blobs/{sha}`; policy — base, RIGHT — head, LEFT — подтверждённый diff_old. Кэш 7 дней; текущая ветка не заменяет недоступный снимок |
 | Дерево | `GET /git/trees/{revision_sha}?recursive=1`; усечённый ответ не доказывает отсутствие пути. Требуется полный целевой обход; policy guard повторяется на каждом использовании |
-| Публикация (Р-5) | Один `POST /pulls/{n}/reviews` с сохранённым payload: `commit_id=head_sha`, `event`, `body`, `comments[{path,line,side:"RIGHT",start_line?,start_side?,body}]`. Диапазон должен целиком входить в один hunk одной стороны. В body — только supported general-only и находки сверх inline cap, без применяемой suggestion |
+| Публикация (Р-5) | Один `POST /pulls/{n}/reviews` с сохранённым payload: `commit_id=head_sha`, `event`, `body`, `comments[{path,line,side:"RIGHT",start_line?,start_side?,body}]`. Диапазон должен целиком входить в один hunk одной стороны. В body — только supported general-only и находки сверх inline cap (настройка `Repository.max_comments`), без применяемой suggestion. Чистка устаревших и решённых тредов выполняется best-effort шагом publisher после атомарного перехода T14 через GraphQL `resolveReviewThread` по [`INCREMENTAL_REVIEW_AND_LIMITS_SPEC.md`](INCREMENTAL_REVIEW_AND_LIMITS_SPEC.md) |
 | Check-run | `in_progress` при claim; `neutral` для succeeded/failed, `skipped` для исключённого scope, `cancelled` для отмены. `blocking`/`attention` определяются supported severity; `clean` допустим только при complete coverage. Partial/none без значимых findings и summary-only имеют `verdict=null` и явное сообщение о неполноте; API, review и check-run читают один сохранённый final result |
+| Сравнение дельты | `GET /repos/{owner}/{repo}/compare/{basehead}`: чтение дельты коммитов (список файлов возвращается только на первой странице ответа GitHub, не более 300 файлов; при `len(files) >= 300` дельта считается неполной `is_complete = False`) для сопоставления смещений строк и разрешения переименований (`compare_commits`, [`INCREMENTAL_REVIEW_AND_LIMITS_SPEC.md`](INCREMENTAL_REVIEW_AND_LIMITS_SPEC.md)); признак предка `is_ancestor` (`status ∈ {"ahead", "identical"}`) и полнота `is_complete` |
+| Треды и мутации GraphQL | `POST https://api.github.com/graphql`: пакетное чтение тредов PR (`GetPullRequestReviewThreads`, пагинация 100/стр) и мутация разрешения (`resolveReviewThread`, квота до 30 на Run с паузой ≥ 1.2 с, цель #321 по [`INCREMENTAL_REVIEW_AND_LIMITS_SPEC.md`](INCREMENTAL_REVIEW_AND_LIMITS_SPEC.md)) |
 | Обратная связь | **после MVP** (`FeedbackSignal`): `pull_request_review_thread.resolved` — вебхук; реакции — poll `GET /pulls/comments/{id}/reactions` раз в час по комментариям бота за 7 дней |
 
 ### 8.4 Координаты, GitLab и надёжная публикация (#107)
@@ -2063,6 +2111,10 @@ GitHub не предоставляет атомарного сравнения h
 он сохраняет remote IDs и отмечает run cancelled при устаревании, не объявляя
 новый head проверенным. Историческое решение 05.10.2026 не делать post-GET заменено
 этим правилом; запрет компенсирующего удаления/редактирования сохраняется.
+Закрытие устаревших и исправленных замечаний через GraphQL `resolveReviewThread` по
+[`INCREMENTAL_REVIEW_AND_LIMITS_SPEC.md`](INCREMENTAL_REVIEW_AND_LIMITS_SPEC.md) (Ч.1) не нарушает
+этот запрет: тело комментариев и квитанции остаются неизменными, мутация меняет только
+состояние треда (`isResolved`), сохраняя прозрачность истории для авторов PR.
 
 ---
 
@@ -2117,6 +2169,7 @@ flowchart TB
 | OQ-6 | Стековые PR (B на основе A): пуш в A меняет дифф B, событие приходит только по A | не решаем в v1, фиксируем как известный пробел | — |
 | OQ-7 | Шифрование `ProviderInstallation` at rest | в MVP не заявлено: токены App не сохраняются, в `metadata` — только JSON-описание установки; вернуться, если в `metadata` появятся секреты | техлид + роль 6 |
 | OQ-8 | Кто создаёт лейбл `ai-review` в подключённом репозитории | **закрыт** решением техлида: лейбл создаёт App при подключении репозитория (`installation.created`, `installation_repositories.added`, §6.9), ответ 422 на существующий лейбл — успех. `POST /repos/{owner}/{repo}/labels` требует `issues: write`, а не `pull_requests: write`: право добавлено App 03.10.2026 по #37 (§8.2, [GitHub Docs](https://docs.github.com/en/rest/authentication/permissions-required-for-github-apps)). Ограничение: лейбл, удалённый мейнтейнером, вернётся только при повторном подключении репозитория | техлид; реализация — #11 |
+| OQ-9 | Достаточность прав `pull_requests: write` для GraphQL-мутации `resolveReviewThread` | **открыт**: ожидается, что хватает `pull_requests: write`; не подтверждено, OQ-9 (в сообществе #44650 отмечались случаи потребности в `contents: write`). Проверка: живая проба на staging в тестовом PR (до мержа PR Ч.2 #321). При отказе `FORBIDDEN` бот прекращает фазу чистки без сбоя Run (запись в `run_actions` и warning в лог), fallback — проведение security review для запроса `contents: write` либо постоянное отключение через флаг конфигурации или удаление вызова фазы чистки | техлид (срок: до мержа PR Ч.2 #321) |
 
 **Граница исторических свидетельств.** Прогоны, цены и описание текущего cache
 ниже относятся к legacy review/conventions профилю #46/#53. Они сохраняются для
