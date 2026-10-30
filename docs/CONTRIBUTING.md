@@ -26,6 +26,7 @@
 ```mermaid
 flowchart TD
   take["1. Автор берёт issue"] --> pr["2. Автор открывает PR"]
+  take -->|некодовый AC, в том числе задача без PR| action["Автор: некодовый AC —<br/>действие и доказательство комментарием"]
   pr --> ready["3. Автор: Ready for review,<br/>назначает ревьюера"]
   ready --> review["4. Ревьюер: треды + вердикт"]
   review -->|Request changes| answer["5. Автор отвечает в каждом треде,<br/>Re-request review"]
@@ -35,9 +36,12 @@ flowchart TD
   review -->|замечаний нет| approve
   approve --> merge["7. Автор или техлид мержит"]
   merge --> selfcheck["8. Автор: самопроверка,<br/>таблица «AC → доказательство», AC Check"]
-  selfcheck -->|есть «не выполнено»: в том же issue новый PR или действие| pr
+  action --> selfcheck
+  selfcheck -->|не выполнен кодовый AC: новый PR в том же issue| pr
+  selfcheck -->|не выполнен некодовый AC| action
   selfcheck -->|всё выполнено: AC Check| accept["9. Техлид или назначенный принимающий:<br/>выборочно проверяет таблицу, закрывает issue"]
-  accept -->|не всё выполнено: In Progress,<br/>в том же issue новый PR или действие| pr
+  accept -->|не всё выполнено, In Progress:<br/>кодовый AC — новый PR в том же issue| pr
+  accept -->|не всё выполнено, In Progress:<br/>некодовый AC| action
 ```
 
 | # | Кто | Что делает | Статус issue на доске | Кому уходит уведомление |
