@@ -84,16 +84,17 @@ as is; no `--part`: an OPEN pull request with `Refs` that names no part of the
 issue stops (whichever part it belongs to is not known: "say which part it covers,
 or pass --part"), else the first part that is not done — open_pr stops, todo is
 taken; every part done and none with an OPEN pull request -> accept (acceptance is
-next), unless the issue was returned at acceptance (see below) -> stop; no parts: the
+next), unless the issue is held back at acceptance (see below) -> stop; no parts: the
 whole task, unless a pull request with `Refs` is OPEN (stop) or MERGED (accept, or
-stop when returned). With `--part K`, or when the pull request that names no part is
+stop when held back). With `--part K`, or when the pull request that names no part is
 MERGED or CLOSED, it is only a warning.
 
-Returned at acceptance: accept-issue marks its comments (`<!-- accept-issue:table v1 -->`,
+Held back at acceptance: accept-issue marks its comments (`<!-- accept-issue:table v1 -->`,
 `accepted v1`, `returned v1`, at the start of the comment). When the latest of those
-comments is `returned` and no pull request with `Refs` for this issue was merged after
-it, the issue is not ready for acceptance again: the verdict is stop, and the reason
-links the comment.
+comments is `returned`, or is a `table` with a line that starts `Итог: не выполнено` (the
+self-check found unmet AC), and no pull request with `Refs` for this issue was merged after
+it, the issue is not ready for acceptance: the verdict is stop, and the reason links the
+comment. A newer table (the rework is done) or a newer merged pull request lifts it.
 
 Exit 0 go; 1 stop or accept (the document is still on stdout); 2 usage, bad REF or a
 `--part` the issue does not have; 3 gh / API error (non-zero gh exit, timeout,
@@ -199,6 +200,9 @@ ACCEPT_MARKS = {
     "<!-- accept-issue:accepted v1 -->": "accepted",
     "<!-- accept-issue:returned v1 -->": "returned",
 }
+# The line of an author table (render_table in accept-issue/scripts/acceptance.py) that says
+# some row is unmet; the all-met line is «Итог: «не выполнено» нет, ...», which does not match.
+UNMET_LINE = "Итог: не выполнено"
 PART_START = re.compile(_PART, re.IGNORECASE)
 PART_BULLET = re.compile(rf"{_PART}[ \t]*(?:\((.*?)\))?[ \t]*:[ \t]*(.*)", re.IGNORECASE)
 PART_CRITERION = re.compile(rf"{_PART}[ \t]*:[ \t]*(.*)", re.IGNORECASE)
@@ -899,7 +903,8 @@ def listing(prs: list[dict[str, Any]]) -> str:
 # ─── the decision ───────────────────────────────────────────────────────────
 def acceptance_comments(nodes: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """The comments accept-issue wrote (a body that starts with one of its markers), in
-    the order of the issue, as {kind, url, created_at}."""
+    the order of the issue, as {kind, url, created_at, unmet}; `unmet` is true for a table
+    that has a line starting `Итог: не выполнено`."""
     out = []
     for i, node in enumerate(nodes):
         where = f"issue.comments[{i}]"
@@ -911,38 +916,45 @@ def acceptance_comments(nodes: list[dict[str, Any]]) -> list[dict[str, Any]]:
                     "kind": kind,
                     "url": text_of(node, "url", where),
                     "created_at": moment(text_of(node, "createdAt", where), f"{where}.createdAt"),
+                    "unmet": kind == "table"
+                    and any(line.startswith(UNMET_LINE) for line in body.splitlines()),
                 }
             )
     return out
 
 
-def returned_at_acceptance(
+def held_at_acceptance(
     comments: list[dict[str, Any]], prs: list[dict[str, Any]]
 ) -> dict[str, Any] | None:
-    """The latest accept-issue comment when it is `returned` and no pull request with
-    Refs was merged after it, else None."""
-    if not comments or comments[-1]["kind"] != "returned":
+    """The latest accept-issue comment when it holds the issue back - `returned`, or a
+    table with unmet rows - and no pull request with Refs was merged after it, else None."""
+    if not comments:
         return None
     latest = comments[-1]
+    if latest["kind"] != "returned" and not latest["unmet"]:
+        return None
     if any(pr["merged_at"] is not None and pr["merged_at"] > latest["created_at"] for pr in prs):
         return None
     return latest
 
 
 def acceptance_next(
-    reason: str, returned: dict[str, Any] | None, has_parts: bool
+    reason: str, held: dict[str, Any] | None, has_parts: bool
 ) -> tuple[None, list[str], str]:
     """The work is done: `accept` (acceptance is next), or `stop` when the issue came back
-    from acceptance and nothing has been merged since."""
-    if returned is None:
+    from acceptance, or its self-check found unmet AC, and nothing has been merged since."""
+    if held is None:
         return None, [reason], "accept"
-    back = (
-        f"the issue was returned at acceptance ({returned['url']}) and no pull request with "
-        "Refs has been merged since"
-    )
-    if has_parts:
-        return None, [f"{back} — rework a part with --part K"], "stop"
-    return None, [f"{back} — the rework of a task without parts is manual: ask the user"], "stop"
+    if held["kind"] == "returned":
+        back = f"the issue was returned at acceptance ({held['url']})"
+        by_part = "rework a part with --part K"
+        by_hand = "the rework of a task without parts is manual: ask the user"
+    else:
+        back = f"the self-check found unmet AC ({held['url']})"
+        by_part = "rework first: --part K for a part"
+        by_hand = "rework first, by hand: a task without parts has no --part, ask the user"
+    back += " and no pull request with Refs has been merged since"
+    return None, [f"{back} — {by_part if has_parts else by_hand}"], "stop"
 
 
 def decide(
@@ -950,12 +962,13 @@ def decide(
     part: int | None,
     numbering_error: str | None,
     stray_open: list[dict[str, Any]],
-    returned: dict[str, Any] | None,
+    held: dict[str, Any] | None,
 ) -> tuple[dict[str, Any] | None, list[str], str]:
     """(selected, reasons, verdict): the verdict is go, stop or accept; reasons non-empty
     means it is not a go. `stray_open` are the OPEN pull requests with `Refs` that name no
-    part of an issue that has parts; `returned` is the accept-issue comment that sent the
-    issue back, if no pull request was merged after it."""
+    part of an issue that has parts; `held` is the accept-issue comment that holds the issue
+    back from acceptance (returned, or a table with unmet rows), if no pull request was
+    merged after it."""
     if facts["issue"]["state"] == "CLOSED":
         return (
             None,
@@ -990,7 +1003,7 @@ def decide(
                 f"the task has no parts and its pull request with Refs is merged: {listing(live)}"
                 " — acceptance is next"
             )
-            return acceptance_next(reason, returned, has_parts=False)
+            return acceptance_next(reason, held, has_parts=False)
         return {"part": None, "reason": "whole-task"}, [], "go"
     if stray_open:
         return (
@@ -1028,7 +1041,7 @@ def decide(
             "stop",
         )
     reason = "every part has a merged pull request — acceptance is next"
-    return acceptance_next(reason, returned, has_parts=True)
+    return acceptance_next(reason, held, has_parts=True)
 
 
 def collect(repo: str, number: int, part: int | None) -> dict[str, Any]:
@@ -1085,8 +1098,8 @@ def collect(repo: str, number: int, part: int | None) -> dict[str, Any]:
         "kickoff": {"present": bool(kickoff_text), "text": kickoff_text},
     }
     stray_open = [pr for pr in unnamed if pr["state"] == "OPEN"]
-    returned = returned_at_acceptance(acceptance_comments(comments), prs)
-    selected, reasons, verdict = decide(facts, part, numbering_error, stray_open, returned)
+    held = held_at_acceptance(acceptance_comments(comments), prs)
+    selected, reasons, verdict = decide(facts, part, numbering_error, stray_open, held)
     if selected is not None and selected["reason"] == "explicit":
         chosen = next(p for p in parts if p["n"] == selected["part"])
         if chosen["status"] != "todo":

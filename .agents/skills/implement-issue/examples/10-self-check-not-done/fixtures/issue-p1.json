@@ -1,0 +1,209 @@
+{
+  "data": {
+    "repository": {
+      "issue": {
+        "title": "[agents] Добавьте скилл приёмки задачи: AC Check с доказательствами и follow-up вне скоупа",
+        "url": "https://github.com/larchanka-training/dmc-268-api-t6/issues/266",
+        "state": "OPEN",
+        "body": "## Background\n\nПриёмку по «Приёмке задачи» в `docs/CONTRIBUTING.md` делает один человек: отмечает AC и DoD, даёт доказательство на каждый AC, проверяет, что issue не закрылся мержем через панель Development. Это узкое место. Невыполненное после мержа уходит в отдельные «Хвосты приёмки #N» (17 открытых), хотя AC исходной задачи так и не выполнены.\n\nРешение команды (#272): автор сам проводит AC Check и кладёт в issue таблицу «AC → доказательство», техлид проверяет таблицу выборочно и закрывает. Невыполненный AC — новый PR в том же issue. Follow-up — только для находок вне AC.\n\n## Scope\n\n- Ч.1 (PR в ui → копия в api): скрипт фактов по issue без LLM: состояние и кто закрыл (`closer`, ловушка Development) — по всем `ClosedEvent` и `ReopenedEvent`, не только последнему, чекбоксы AC и DoD (всего и отмечено), PR со `Refs #N` из обоих репо (состояние, мерж, CI, открытые треды); выход — стабильный JSON\n- Ч.2 (PR): `SKILL.md`, два режима. «Автор»: по каждому AC и DoD — доказательство (PR, коммит, тест, прогон, скриншот) или «не выполнено»; комментарий-таблица в issue; статус AC Check, только если всё выполнено. «Принимающий»: проверка таблицы, отметка чекбоксов, закрывающий комментарий с каждым AC и закрытие — или возврат в In Progress со списком несделанного\n- Ч.2: доказательство — по возможности текстом (ответ API, текст страницы, вывод теста, ссылка на прогон CI); скриншот — только для визуальных AC (добавлено 29.10)\n- Ч.2: находка вне AC — follow-up через create-issue с исходным issue как родителем; невыполненный AC отдельным issue не заводится\n\n## Acceptance Criteria\n\n- [ ] Ч.1: скрипт различает закрытие по правилам и закрытие мержем (`closer`) на реальных примерах: #117 (вручную), история #35 (мерж #45 → reopen → вручную) и #56 (мерж #60 → reopen → вручную); офлайн-тесты на фикстурах\n- [ ] Ч.2: в `SKILL.md` сказано: доказательство по умолчанию текстом, скриншот — только для визуальных AC\n- [ ] Ч.2: режим «автор» на issue с невыполненным AC помечает этот AC «не выполнено» и не ставит AC Check\n- [ ] Ч.2: режим «принимающий» при всех AC и DoD с доказательствами закрывает issue комментарием, который называет каждый AC; иначе — In Progress и комментарий «что осталось», issue открыт\n- [ ] Ч.2: золотые примеры — «AC не выполнен → новый PR в том же issue» и «находка вне AC → follow-up с родителем» — лежат в `.agents/skills/<скилл>/examples/`: вход (issue/PR/фикстура) и ожидаемый результат. Детерминированные части скрипта — pytest рядом со скиллом, запуск как у create-issue (вне CI, `create-issue/SKILL.md:234-240`); вывод прогона автор прикладывает в PR. Поведение скилла автор PR прогоняет вручную в Claude Code и Codex и прикладывает вывод в описание PR\n- [ ] Скилл работает без субагентов: шаги последовательные, скрипт — CLI\n\n## Dependencies\n\n**Блокирующие:**\n\n- #262 — follow-up заводится с родителем через нативные связи create-issue\n- #272 — правила приёмки и статус AC Check в `docs/CONTRIBUTING.md`\n\n**Блокирует:**\n\n- #269 — Ч.2: передача в AC Check (без скилла — On Review и напоминание техлиду)\n\n**Связано, не блокирует:**\n\n- #267 — ревью PR\n\n## DoD Checklist\n\n- [ ] Гейты CI зелёные во всех PR задачи\n- [ ] Документы обновлены\n- [ ] PR одобрены на текущей голове, все треды закрыты\n- [ ] Статус на доске 12 обновлён\n- [ ] SYNC-копии в ui и api совпадают (`diff -r` пуст)\n\n## References\n\n- https://github.com/larchanka-training/dmc-268-api-t6/blob/main/docs/CONTRIBUTING.md#приёмка-задачи\n- #117 — приёмка задачи, закрытой мержем\n- #35 — первый случай ловушки Development (закрыт мержем #45, `docs/CONTRIBUTING.md:69`); #56 — закрыт мержем #60, переоткрыт и закрыт вручную\n\n## Kickoff — с чего начать\n\n**Репозиторий:** larchanka-training/dmc-268-ui-t6 первым, затем larchanka-training/dmc-268-api-t6 (SYNC)\n\n**Ветка:** `feat/<n>-accept-issue` — части отдельными PR с `Refs larchanka-training/dmc-268-api-t6#<n>`\n\n**Форма проблемы:** Правила приёмки есть, но проверяет их один человек и вручную: собирает PR по `Refs`, сверяет чекбоксы, ищет доказательства, проверяет `closer`. Механическую часть может сделать скрипт, сопоставление AC с доказательствами — автор. Принимающему остаётся проверить таблицу.\n\n**Что прочитать первым:**\n\n- `docs/CONTRIBUTING.md` — «Приёмка задачи» и команды-признаки 1–4 (их скрипт и автоматизирует)\n- `.agents/skills/create-issue/SKILL.md` — как заводить follow-up\n- #117 — как выглядела ручная приёмка\n\n**Перед тем как писать код:**\n\n- Сверить с готовыми скиллами (Matt Pocock, Addy Osmani, OpenSpec); в PR одной строкой — что взято, что нет и почему. Сверка со скиллами куратора (созвон 26.10) старт не блокирует; если материалы придут позже — строка сверки в ревью PR\n- Записать 3+ золотых примера «вход → ожидаемый результат» в `.agents/skills/<скилл>/examples/` до написания SKILL.md — по ним скилл и принимается\n\n**Мины:**\n\n- `closer` есть только в GraphQL (`ClosedEvent.closer`), REST его не отдаёт\n- `Refs #N` не создаёт `closingIssuesReferences`: ссылающиеся PR искать по timeline (`CROSS_REFERENCED_EVENT`) или поиском; из другого репо ссылка выглядит как `owner/repo#N`\n- Чекбоксы считать только в секциях AC и DoD, не в цитатах и блоках кода\n- Статус AC Check на доске 12 есть, в документах — нет (добавляет #272)\n- Скилл работает под аккаунтом человека: закрытие issue — от его имени, поэтому режим «автор» никогда не закрывает и не ставит галочки за принимающего\n- Не опираться на определения `.agents/agents/*.md` (Codex их не грузит); изоляция шагов — по `.agents/README.md`, раздел про субагентов в харнессах (у Codex есть `spawn_agent`)\n- Общего модуля GraphQL-запросов со скиллами #262 и #268 нет: каждый скилл самодостаточен (SYNC), дублирование запросов принято\n- gh 2.46 в этой org падает на `gh issue view` без `--json` и на `gh pr edit` (Projects classic) — только `--json` или `gh api`\n- Общий скилл правится в ui, затем `cp` в api и `diff -r` (`.agents/README.md:58-82`); SYNC-копия — та же Ч.N: второй PR в другом репо с тем же `Refs`, порядок — сначала ui, потом копия в api (`.agents/README.md:81`), отдельный sub-issue — только если часть меняет разный код в двух репо; `SKILL.md` — до ~250 строк, детали в `references/` (`.agents/README.md:92`); новый скилл — в список в `AGENTS.md`, в sync map `.agents/README.md` и в счёт скиллов `.agents/README.md:49` (сейчас «9 here»), в том же PR\n\n\n",
+        "assignees": {
+          "nodes": [
+            {
+              "login": "axyi"
+            }
+          ]
+        },
+        "projectItems": {
+          "pageInfo": {
+            "hasNextPage": false,
+            "endCursor": "MQ"
+          },
+          "nodes": [
+            {
+              "project": {
+                "number": 12,
+                "owner": {
+                  "__typename": "Organization",
+                  "login": "larchanka-training"
+                }
+              },
+              "fieldValueByName": {
+                "__typename": "ProjectV2ItemFieldSingleSelectValue",
+                "name": "In Progress"
+              }
+            }
+          ]
+        },
+        "blockedBy": {
+          "pageInfo": {
+            "hasNextPage": false,
+            "endCursor": "Mg"
+          },
+          "nodes": [
+            {
+              "number": 262,
+              "title": "[agents][create-issue] Ставьте нативные связи и нарезку на части; переведите qa на create-issue",
+              "state": "CLOSED",
+              "repository": {
+                "nameWithOwner": "larchanka-training/dmc-268-api-t6"
+              }
+            }
+          ]
+        },
+        "timelineItems": {
+          "pageInfo": {
+            "hasNextPage": false,
+            "endCursor": "Y3Vyc29yOnYyOpPPAAABoYe2FuACqzE4NTgzMzE1OTY1"
+          },
+          "nodes": [
+            {
+              "__typename": "CrossReferencedEvent",
+              "source": {
+                "__typename": "Issue"
+              }
+            },
+            {
+              "__typename": "CrossReferencedEvent",
+              "source": {
+                "__typename": "Issue"
+              }
+            },
+            {
+              "__typename": "CrossReferencedEvent",
+              "source": {
+                "__typename": "Issue"
+              }
+            },
+            {
+              "__typename": "CrossReferencedEvent",
+              "source": {
+                "__typename": "Issue"
+              }
+            },
+            {
+              "__typename": "CrossReferencedEvent",
+              "source": {
+                "__typename": "Issue"
+              }
+            },
+            {
+              "__typename": "CrossReferencedEvent",
+              "source": {
+                "__typename": "Issue"
+              }
+            },
+            {
+              "__typename": "CrossReferencedEvent",
+              "source": {
+                "__typename": "PullRequest",
+                "number": 177,
+                "title": "feat(agents): add the issue-graph script for sprint dependency graphs",
+                "url": "https://github.com/larchanka-training/dmc-268-ui-t6/pull/177",
+                "body": "## What\n\nPart 1 of api#268: a deterministic script, `.agents/skills/issue-graph/scripts/issue_graph.py`, that builds the dependency graph of a sprint from GitHub native relations. It uses no LLM. The `SKILL.md` and publishing come in part 2.\n\n## Refs\n\nRefs larchanka-training/dmc-268-api-t6#268\n",
+                "state": "MERGED",
+                "mergedAt": "2026-10-24T18:58:44Z",
+                "repository": {
+                  "nameWithOwner": "larchanka-training/dmc-268-ui-t6"
+                }
+              }
+            },
+            {
+              "__typename": "CrossReferencedEvent",
+              "source": {
+                "__typename": "Issue"
+              }
+            },
+            {
+              "__typename": "CrossReferencedEvent",
+              "source": {
+                "__typename": "PullRequest",
+                "number": 184,
+                "title": "feat(agents): publish the issue graph and add the issue-graph skill",
+                "url": "https://github.com/larchanka-training/dmc-268-ui-t6/pull/184",
+                "body": "## What\n\nPart 2 of api#268: publishing and the skill around the part-1 script (ui#177).\n\n## Refs\n\nRefs larchanka-training/dmc-268-api-t6#268\n\nSYNC copy: larchanka-training/dmc-268-api-t6#296 (byte-identical `.agents/skills/issue-graph/`).\n",
+                "state": "MERGED",
+                "mergedAt": "2026-10-25T14:08:31Z",
+                "repository": {
+                  "nameWithOwner": "larchanka-training/dmc-268-ui-t6"
+                }
+              }
+            },
+            {
+              "__typename": "CrossReferencedEvent",
+              "source": {
+                "__typename": "PullRequest",
+                "number": 213,
+                "title": "feat(agents): add the accept-issue facts script",
+                "url": "https://github.com/larchanka-training/dmc-268-ui-t6/pull/213",
+                "body": "## What\n\nPart 1 of larchanka-training/dmc-268-api-t6#266: `.agents/skills/accept-issue/scripts/issue_facts.py`, a stdlib CLI that prints the acceptance facts of one issue as stable JSON, plus offline tests.\n\n## Refs\n\nRefs larchanka-training/dmc-268-api-t6#266\n",
+                "state": "MERGED",
+                "mergedAt": "2026-10-29T15:50:44Z",
+                "repository": {
+                  "nameWithOwner": "larchanka-training/dmc-268-ui-t6"
+                }
+              }
+            },
+            {
+              "__typename": "CrossReferencedEvent",
+              "source": {
+                "__typename": "PullRequest",
+                "number": 382,
+                "title": "feat(agents): add the accept-issue facts script (#266)",
+                "url": "https://github.com/larchanka-training/dmc-268-api-t6/pull/382",
+                "body": "## What\n\nSYNC copy of larchanka-training/dmc-268-ui-t6#213 (Part 1 of #266): `.agents/skills/accept-issue/` byte-identical to the ui branch (`diff -r` empty) — the facts script and its offline tests. Merge after ui#213.\n\n## Refs\n\nRefs #266\n",
+                "state": "MERGED",
+                "mergedAt": "2026-10-29T15:51:22Z",
+                "repository": {
+                  "nameWithOwner": "larchanka-training/dmc-268-api-t6"
+                }
+              }
+            },
+            {
+              "__typename": "CrossReferencedEvent",
+              "source": {
+                "__typename": "PullRequest",
+                "number": 221,
+                "title": "feat(agents): add the accept-issue skill",
+                "url": "https://github.com/larchanka-training/dmc-268-ui-t6/pull/221",
+                "body": "## What\n\nPart 2 of larchanka-training/dmc-268-api-t6#266: the `accept-issue` skill on top of the Part 1 facts script.\n\n## Refs\n\nRefs larchanka-training/dmc-268-api-t6#266\n",
+                "state": "MERGED",
+                "mergedAt": "2026-10-30T21:34:58Z",
+                "repository": {
+                  "nameWithOwner": "larchanka-training/dmc-268-ui-t6"
+                }
+              }
+            },
+            {
+              "__typename": "CrossReferencedEvent",
+              "source": {
+                "__typename": "PullRequest",
+                "number": 405,
+                "title": "feat(agents): add the accept-issue skill (#266)",
+                "url": "https://github.com/larchanka-training/dmc-268-api-t6/pull/405",
+                "body": "## What\n\nSYNC copy of larchanka-training/dmc-268-ui-t6#221 (Part 2 of #266) — `.agents/skills/accept-issue/` byte-identical to the ui branch — plus the api registration (`AGENTS.md`, `.agents/README.md`: sync map, SYNC paragraph, skill count 10 → 11). Merge after the ui PR. The ui-only `.prettierignore` lines have no api counterpart.\n\n## Refs\n\nRefs #266\n",
+                "state": "MERGED",
+                "mergedAt": "2026-10-30T21:35:29Z",
+                "repository": {
+                  "nameWithOwner": "larchanka-training/dmc-268-api-t6"
+                }
+              }
+            }
+          ]
+        },
+        "comments": {
+          "pageInfo": {
+            "hasNextPage": false,
+            "endCursor": "MQ"
+          },
+          "nodes": [
+            {
+              "url": "https://github.com/larchanka-training/dmc-268-api-t6/issues/266#issuecomment-1000000011",
+              "createdAt": "2026-10-30T21:40:00Z",
+              "body": "<!-- accept-issue:table v1 -->\n\n## Самопроверка: AC → доказательство\n\n| # | Пункт | Доказательство |\n| --- | --- | --- |\n| AC1 | Ч.1: скрипт различает закрытие по правилам и закрытие мержем (`closer`) на реальных примерах: #117 (вручную), история #35 (мерж #45 → reopen → вручную) и #56 (мерж #60 → reopen → вручную); офлайн-тесты на фикстурах | ui#213 и api#382 (Ч.1), ui#221 и api#405 (Ч.2), смёржены |\n| AC2 | Ч.2: в `SKILL.md` сказано: доказательство по умолчанию текстом, скриншот — только для визуальных AC | не выполнено |\n\nИтог: не выполнено — AC2. AC Check не ставлю, доработка идёт в этом же issue.\n"
+            }
+          ]
+        }
+      }
+    }
+  }
+}

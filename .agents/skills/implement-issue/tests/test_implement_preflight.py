@@ -2226,6 +2226,134 @@ def test_a_returned_issue_with_an_open_rework_pull_request_waits_for_it(tmp_path
     ]
 
 
+# The table accept-issue's author mode posts (render_table in acceptance.py): its last line says
+# whether some row is «не выполнено».
+TABLE_HEAD = (
+    f"{TABLE}\n\n## Самопроверка: AC → доказательство\n\n"
+    "| # | Пункт | Доказательство |\n| --- | --- | --- |\n"
+)
+TABLE_MET = (
+    TABLE_HEAD
+    + "| AC1 | first | PR #1 |\n| AC2 | second | PR #2 |\n\n"
+    + "Итог: «не выполнено» нет, ставлю AC Check.\n"
+)
+TABLE_UNMET = (
+    TABLE_HEAD
+    + "| AC1 | first | PR #1 |\n| AC2 | second | не выполнено |\n\n"
+    + "Итог: не выполнено — AC2. AC Check не ставлю, доработка идёт в этом же issue.\n"
+)
+TABLE_UNMET_IN_AC_CHECK = TABLE_UNMET.replace(
+    "AC Check не ставлю, доработка",
+    "Карточка остаётся в AC Check: принимающий вернёт её в In Progress; доработка",
+)
+
+
+def selfcheck_reason(number: int, *, parts: bool = True) -> str:
+    rework = (
+        "rework first: --part K for a part"
+        if parts
+        else "rework first, by hand: a task without parts has no --part, ask the user"
+    )
+    return (
+        f"the self-check found unmet AC ({comment_url(number)}) and no pull request with Refs "
+        f"has been merged since — {rework}"
+    )
+
+
+@pytest.mark.parametrize("table", [TABLE_UNMET, TABLE_UNMET_IN_AC_CHECK])
+def test_a_table_with_unmet_rows_holds_acceptance_back(tmp_path: Path, table: str) -> None:
+    comments = [comment(table, number=2)]
+    response = issue_response(body=TWO_PARTS, timeline=merged_parts(), comments=comments)
+    code, doc = facts(tmp_path, response)
+    assert (code, doc["verdict"], doc["selected"]) == (1, "stop", None)
+    assert doc["reasons"] == [selfcheck_reason(2)]
+
+
+def test_a_table_with_every_row_met_is_accept(tmp_path: Path) -> None:
+    comments = [comment(TABLE_MET, number=2)]
+    response = issue_response(body=TWO_PARTS, timeline=merged_parts(), comments=comments)
+    code, doc = facts(tmp_path, response)
+    assert (code, doc["verdict"], doc["selected"]) == (1, "accept", None)
+
+
+def test_a_pull_request_merged_after_an_unmet_table_ends_the_hold(tmp_path: Path) -> None:
+    comments = [comment(TABLE_UNMET, "2026-10-21T09:00:00Z", 2)]
+    for at, verdict in (("2026-10-21T08:59:59Z", "stop"), ("2026-10-21T09:00:01Z", "accept")):
+        timeline = merged_parts(at=at)
+        response = issue_response(body=TWO_PARTS, timeline=timeline, comments=comments)
+        _, doc = facts(tmp_path, response)
+        assert doc["verdict"] == verdict, at
+
+
+def test_the_latest_marked_comment_decides_between_tables(tmp_path: Path) -> None:
+    met_after = [comment(TABLE_UNMET, number=1), comment(TABLE_MET, "2026-10-22T09:00:00Z", 2)]
+    unmet_after = [comment(TABLE_MET, number=1), comment(TABLE_UNMET, "2026-10-22T09:00:00Z", 2)]
+    for comments, verdict in ((met_after, "accept"), (unmet_after, "stop")):
+        response = issue_response(body=TWO_PARTS, timeline=merged_parts(), comments=comments)
+        _, doc = facts(tmp_path, response)
+        assert doc["verdict"] == verdict
+        if verdict == "stop":
+            assert doc["reasons"] == [selfcheck_reason(2)]
+    # a return after an unmet table is a return, and an accepted comment holds nothing back
+    later = [comment(TABLE_UNMET, number=1), comment(RETURNED, "2026-10-22T09:00:00Z", 2)]
+    response = issue_response(body=TWO_PARTS, timeline=merged_parts(), comments=later)
+    assert facts(tmp_path, response)[1]["reasons"] == [returned_reason(2)]
+    done = [comment(TABLE_UNMET, number=1), comment(ACCEPTED, "2026-10-22T09:00:00Z", 2)]
+    response = issue_response(body=TWO_PARTS, timeline=merged_parts(), comments=done)
+    assert facts(tmp_path, response)[1]["verdict"] == "accept"
+
+
+@pytest.mark.parametrize(
+    "summary",
+    [
+        "see: Итог: не выполнено — AC2",  # not at the start of the line
+        " Итог: не выполнено — AC2",  # indented
+        "ИТОГ: не выполнено — AC2",
+        "Итог: «не выполнено» нет, ставлю AC Check.",
+    ],
+)
+def test_only_a_line_that_starts_with_the_summary_counts(tmp_path: Path, summary: str) -> None:
+    body = TABLE_HEAD + "| AC2 | second | не выполнено |\n\n" + summary + "\n"
+    response = issue_response(
+        body=TWO_PARTS, timeline=merged_parts(), comments=[comment(body, number=2)]
+    )
+    assert facts(tmp_path, response)[1]["verdict"] == "accept"
+
+
+def test_an_unmet_table_on_a_task_without_parts_is_manual(tmp_path: Path) -> None:
+    comments = [comment(TABLE_UNMET, "2026-10-21T09:00:00Z", 2)]
+    response = issue_response(
+        body="## Scope\n\n- x\n", timeline=[refs_pr(50, "the thing")], comments=comments
+    )
+    code, doc = facts(tmp_path, response)
+    assert (code, doc["verdict"], doc["selected"]) == (1, "stop", None)
+    assert doc["reasons"] == [selfcheck_reason(2, parts=False)]
+    later = [refs_pr(50, "the thing"), refs_pr(51, "rework", merged_at="2026-10-22T09:00:00Z")]
+    response = issue_response(body="## Scope\n\n- x\n", timeline=later, comments=comments)
+    assert facts(tmp_path, response)[1]["verdict"] == "accept"
+
+
+def test_an_unmet_table_does_not_stop_the_next_part_or_an_explicit_part(tmp_path: Path) -> None:
+    comments = [comment(TABLE_UNMET, "2026-10-21T09:00:00Z", 2)]
+    timeline = [refs_pr(100, "Part 1 of #13: x")]
+    response = issue_response(body=TWO_PARTS, timeline=timeline, comments=comments)
+    code, doc = facts(tmp_path, response)
+    assert (code, doc["selected"]) == (0, {"part": 2, "reason": "first-todo"})
+    response = issue_response(body=TWO_PARTS, timeline=merged_parts(), comments=comments)
+    code, doc = facts(tmp_path, response, "--part", "1")
+    assert (code, doc["verdict"], doc["selected"]) == (0, "go", {"part": 1, "reason": "explicit"})
+
+
+def test_the_unmet_line_is_the_one_accept_issue_writes() -> None:
+    source = SKILL.parent / "accept-issue" / "scripts" / "acceptance.py"
+    if not source.is_file():
+        pytest.skip("accept-issue is not in this checkout")
+    text = source.read_text(encoding="utf-8")
+    assert text.count(f'f"{pf.UNMET_LINE} — {{') == 2  # the two variants with unmet rows
+    assert '"Итог: «не выполнено» нет' in text  # the all-met line
+    assert not "Итог: «не выполнено» нет".startswith(pf.UNMET_LINE)
+
+
 def test_the_markers_are_the_ones_accept_issue_writes() -> None:
     source = SKILL.parent / "accept-issue" / "scripts" / "acceptance.py"
     if not source.is_file():
