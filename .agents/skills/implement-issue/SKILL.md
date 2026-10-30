@@ -173,7 +173,7 @@ it. Templates, the severity scale, round bookkeeping and the stop report: `refer
    remain after the fixes — **at most 3 rounds per part**.
 6. **Stop criteria before the pull request:** the gates are green; no critical or high finding is
    open; the part's AC are listed (`acceptance_criteria` of the selected part in the preflight
-   JSON; a task without parts: the plain AC). Round 3 ends with critical or high still open:
+   JSON; a task without parts: `common_acceptance_criteria`). Round 3 ends with critical/high open:
    **stop, no pull request**, and report them (`references/loop.md` §5).
 7. **Pull request** (`pull-request`): `Refs`, the first line of `What` as in the next section, the
    AC list, the review summary (rounds, the medium / low / info list). A SYNC part is two pull
