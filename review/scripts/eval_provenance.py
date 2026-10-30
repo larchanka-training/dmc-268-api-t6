@@ -43,6 +43,41 @@ _REVIEW_CODE = (
     "review/scripts/eval_live.py",
     "review/scripts/commit_context.py",
 )
+# The code behind the RAG arm of the #146 eval, on top of ``_REVIEW_CODE``: the context build,
+# the frozen retriever and the extractor that made ``index.json``. A separate list: the main and
+# rules baselines were recorded without it, so their static digest must not move with it. A RAG
+# capture asks for it with ``rag_code=True``. The extractor settings (limits, parser profile) stay
+# out: they are frozen in the digested ``index.json``.
+_RAG_CODE = (
+    "app/modules/code_index/application/build_index.py",
+    "app/modules/code_index/application/exclusions.py",
+    "app/modules/code_index/application/index_resolution.py",
+    "app/modules/code_index/application/symbol_rows.py",
+    "app/modules/code_index/domain/rag_index.py",
+    "app/modules/code_index/infrastructure/tar_archive.py",
+    "app/modules/reviews/application/ast_resolution.py",
+    "app/modules/reviews/application/ast_symbols.py",
+    "app/modules/reviews/application/context_sources.py",
+    "app/modules/reviews/application/diff_map.py",
+    "app/modules/reviews/application/execute_review.py",
+    "app/modules/reviews/application/graph_retriever.py",
+    "app/modules/reviews/application/prepare_policy_snapshot.py",
+    "app/modules/reviews/application/rag_context.py",
+    "app/modules/reviews/application/review_context.py",
+    "app/modules/reviews/application/review_context_stage.py",
+    "app/modules/reviews/application/review_ignore.py",
+    "app/modules/reviews/application/unified_diff.py",
+    "app/modules/reviews/application/vcs_diff.py",
+    "app/modules/reviews/infrastructure/ast_worker.py",
+    "app/modules/reviews/infrastructure/subprocess_source_parser.py",
+    "app/modules/reviews/infrastructure/tree_sitter_facts.py",
+    "review/scripts/eval_rag_context.py",
+    "review/scripts/eval_rag_source.py",
+    "review/scripts/rag_snapshot.py",
+)
+# The frozen graph index next to ``base/`` in a RAG case (``rag_snapshot.INDEX_FILE``).
+_INDEX_FILE = "index.json"
+_RAG_CLASS = "rag"
 _CONVENTIONS_RENDERER = "app/modules/reviews/application/conventions_prompt.py"
 _RULE_SCHEMA_NAME = "schema.json"
 
@@ -146,17 +181,27 @@ def static_input_paths(
     *,
     conventions_prompt: str | None = None,
     repo_root: Path | None = None,
+    rag_code: bool = False,
 ) -> list[str]:
-    """List every checked-in file that can shape this runner's provider messages."""
+    """List every checked-in file that can shape this runner's provider messages.
+
+    ``rag_code`` adds the modules of the RAG arm (#146); without it the list is the one the
+    main and rules baselines were recorded with.
+    """
     identity_root = repo_root if repo_root is not None else Path(__file__).resolve().parents[2]
     paths = [system_prompt, *_REVIEW_CODE, *rule_paths, *canonical_identity_paths(identity_root)]
+    if rag_code:
+        paths.extend(_RAG_CODE)
     if conventions_prompt is not None:
         paths.extend((conventions_prompt, _CONVENTIONS_RENDERER))
     return sorted(set(paths))
 
 
 def corpus_input_paths(root: Path, records: Sequence[tuple[Path, Mapping[str, Any]]]) -> list[str]:
-    """List exact metadata, patch, and recursive pre-image files for active cases."""
+    """List exact metadata, patch, and recursive pre-image files for active cases.
+
+    A RAG case (``class`` ``rag``) also lists its frozen index, which must exist.
+    """
     paths: list[str] = []
     for case_dir, record in records:
         try:
@@ -165,7 +210,10 @@ def corpus_input_paths(root: Path, records: Sequence[tuple[Path, Mapping[str, An
             raise DigestInputError(f"unsafe case directory: {case_dir}") from exc
         if case_dir.is_symlink() or ".." in case.parts:
             raise DigestInputError(f"symlink or unsafe case directory: {case_dir}")
-        for name in ("case.json", record["patch_path"]):
+        names = ["case.json", record["patch_path"]]
+        if record.get("class") == _RAG_CLASS:
+            names.append(_INDEX_FILE)
+        for name in names:
             raw = (case / name).as_posix()
             _safe_file(root, raw)
             paths.append(raw)

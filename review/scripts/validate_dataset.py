@@ -6,10 +6,14 @@ Usage: uv run python review/scripts/validate_dataset.py --case SEC-01
        uv run python review/scripts/validate_dataset.py --final --report-json /tmp/report.json
        uv run python review/scripts/validate_dataset.py --root test-prs-dataset/rules \
            --final --profile rules
+       uv run python review/scripts/validate_dataset.py --root test-prs-dataset/rag \
+           --final --profile rag
 
 The optional --root is for isolated fixtures. Normal runs use test-prs-dataset/.
---profile rules checks the rules.md sub-corpus (#163) against its own distribution;
-per-case checks are the same in both profiles.
+--profile rules checks the rules.md sub-corpus (#163) and --profile rag the graph-RAG
+sub-corpus (#146) against their own distributions; per-case checks are the same in every
+profile. A case of class rag also gets its frozen index and its integrity checks verified
+(``rag_snapshot``, ``eval_rag_check``), wherever it is validated.
 """
 
 from __future__ import annotations
@@ -63,7 +67,13 @@ CLASS_PREFIX = {
     "clean": "CLEAN",
 }
 RULES_CLASS = "rules"
-ID_PREFIX = {**CLASS_PREFIX, RULES_CLASS: "RUL"}
+RAG_CLASS = "rag"
+ID_PREFIX = {**CLASS_PREFIX, RULES_CLASS: "RUL", RAG_CLASS: "RAG"}
+# The ADR corpus of #146: cases per rag.kind, and the reverse-edge cases whose defect is a
+# renamed or removed export (anchored on a RIGHT line).
+RAG_KIND_COUNTS = {"reverse_edge": 10, "control": 6, "depth2": 4, "injection": 2, "clean": 2}
+RAG_EXPORT_FORMS = ("renamed_export", "removed_export")
+RAG_EXPORT_CASES = 3
 POLICY_ARMS = ("none", "valid", "malicious")
 # The line window of eval_score.py: a prediction within this many lines matches an anchor.
 MATCH_WINDOW = 2
@@ -92,6 +102,14 @@ class RulesDistributionCounts(TypedDict):
     language_counts: dict[str, int]
     rule_truth_case_count: int
     exception_case_count: int
+
+
+class RagDistributionCounts(TypedDict):
+    valid_case_count: int
+    class_counts: dict[str, int]
+    kind_counts: dict[str, int]
+    export_defect_count: int
+    language_counts: dict[str, int]
 
 
 def _case_path(case_dir: Path, raw: str) -> Path | None:
@@ -527,7 +545,36 @@ def validate_case(
         errors.append("rules case: needs an origin rule truth or a must_not_flag anchor")
     errors.extend(_exception_errors(record, added))
     errors.extend(_policy_document_errors(base, record, changed))
+    if record["class"] == RAG_CLASS and not errors:
+        errors.extend(_rag_case_errors(case_dir, record))
     return errors, record if not errors else None
+
+
+def _rag_case_errors(case_dir: Path, record: dict[str, Any]) -> list[str]:
+    """The frozen index of a RAG case is present and current, and its integrity rules hold.
+
+    Imported here: both modules import this one, and the main and rules profiles then do
+    not load the parser and the indexer.
+    """
+    from review.scripts.eval_rag_check import check_case
+    from review.scripts.rag_snapshot import (
+        INDEX_FILE,
+        build_case_snapshot,
+        render_snapshot,
+    )
+
+    index = case_dir / INDEX_FILE
+    hint = "run build_rag_snapshot.py --write"
+    if index.is_symlink() or not index.is_file():
+        return [f"{INDEX_FILE}: missing; {hint}"]
+    try:
+        current = index.read_bytes() == render_snapshot(build_case_snapshot(case_dir))
+    except Exception as exc:  # one broken case must not stop the corpus loop
+        return [f"{INDEX_FILE}: cannot be checked: {exc}"]
+    if not current:
+        return [f"{INDEX_FILE}: stale; {hint}"]
+    # Each message already names the case and the rule: "<case>: <rule>: <detail>".
+    return [message.removeprefix(f"{case_dir.name}: ") for message in check_case(case_dir, record)]
 
 
 def _distribution_counts(records: list[dict[str, Any]]) -> DistributionCounts:
@@ -623,6 +670,55 @@ def _rules_distribution_errors(counts: RulesDistributionCounts) -> list[str]:
     return errors
 
 
+def _rag_profile_errors(records: list[dict[str, Any]]) -> list[str]:
+    """The main corpus and its paid baseline stay free of graph-RAG cases (#146)."""
+    return [
+        f"final corpus: {record['id']} is a rag case; validate it with --profile rag"
+        for record in records
+        if record["class"] == RAG_CLASS
+    ]
+
+
+def _rag_distribution_counts(records: list[dict[str, Any]]) -> RagDistributionCounts:
+    classes = Counter(record["class"] for record in records)
+    languages = Counter(record["language"] for record in records)
+    kinds = Counter(record["rag"]["kind"] for record in records if "rag" in record)
+    return {
+        "valid_case_count": len(records),
+        "class_counts": dict(sorted(classes.items())),
+        "kind_counts": {name: kinds[name] for name in RAG_KIND_COUNTS},
+        "export_defect_count": sum(
+            record["rag"]["kind"] == "reverse_edge"
+            and record["rag"].get("defect_form") in RAG_EXPORT_FORMS
+            for record in records
+            if "rag" in record
+        ),
+        "language_counts": {name: languages[name] for name in ("python", "typescript", "tsx")},
+    }
+
+
+def _rag_distribution_errors(counts: RagDistributionCounts) -> list[str]:
+    """The exact corpus of ADR 0001 §12; the sources are synthetic."""
+    errors: list[str] = []
+    other = sorted(name for name in counts["class_counts"] if name != RAG_CLASS)
+    if other:
+        errors.append(f"rag corpus: every case must be class rag, got {', '.join(other)}")
+    for kind, wanted in RAG_KIND_COUNTS.items():
+        count = counts["kind_counts"][kind]
+        if count != wanted:
+            errors.append(f"rag corpus: kind {kind} has {count} cases, needs exactly {wanted}")
+    exports = counts["export_defect_count"]
+    if exports != RAG_EXPORT_CASES:
+        errors.append(
+            f"rag corpus: needs exactly {RAG_EXPORT_CASES} renamed or removed export cases, "
+            f"got {exports}"
+        )
+    languages = counts["language_counts"]
+    if languages["python"] == 0 or (languages["typescript"] == 0 and languages["tsx"] == 0):
+        errors.append("rag corpus: needs Python and TypeScript/React cases")
+    return errors
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", type=Path, default=DEFAULT_ROOT, help="dataset root")
@@ -632,7 +728,7 @@ def main() -> int:
         "--report-json", type=Path, metavar="PATH", help="write final counts as JSON"
     )
     parser.add_argument(
-        "--profile", choices=(RULES_CLASS,), help="final distribution of a sub-corpus"
+        "--profile", choices=(RULES_CLASS, RAG_CLASS), help="final distribution of a sub-corpus"
     )
     args = parser.parse_args()
     if args.case and args.final:
@@ -674,14 +770,22 @@ def main() -> int:
             print(f"OK {case_dir.name}")
     if args.final:
         print(f"cases: {len(case_dirs)}; valid: {len(records)}")
-        counts: DistributionCounts | RulesDistributionCounts
+        counts: DistributionCounts | RulesDistributionCounts | RagDistributionCounts
         if args.profile == RULES_CLASS:
             counts = _rules_distribution_counts(records)
             distribution_errors = _rules_distribution_errors(counts)
             profile: dict[str, str] = {"profile": RULES_CLASS}
+        elif args.profile == RAG_CLASS:
+            counts = _rag_distribution_counts(records)
+            distribution_errors = _rag_distribution_errors(counts)
+            profile = {"profile": RAG_CLASS}
         else:
             counts = _distribution_counts(records)
-            distribution_errors = [*_distribution_errors(counts), *_rules_profile_errors(records)]
+            distribution_errors = [
+                *_distribution_errors(counts),
+                *_rules_profile_errors(records),
+                *_rag_profile_errors(records),
+            ]
             profile = {}
         for error in distribution_errors:
             print(error)
