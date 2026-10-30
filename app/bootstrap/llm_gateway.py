@@ -55,6 +55,7 @@ from app.modules.reviews.application.prompt_builder import (
     parse_unified_diff,
 )
 from app.modules.reviews.application.rag_index import has_retrieved_section
+from app.modules.reviews.application.review_context import ContextBlock, RetrievedBlock
 from app.modules.reviews.application.review_output import ReviewOutput, parse_review_output
 from app.modules.reviews.application.run_failures import FAST_ATTEMPT_DEADLINE, RunCancelled
 from app.modules.reviews.application.run_trace import TransactionalRunTrace
@@ -151,6 +152,12 @@ class ReviewCase:
     # With a snapshot the prompt carries the repository rules and AGENTS.md blocks instead
     # of ``agents_md`` (the A/B arms of the eval, #163); ``None`` keeps the legacy envelope.
     policy_snapshot: PolicySnapshot | None = None
+    # The excerpts a context build chose, mapped as ``ExecuteReviewRun`` maps them (#146):
+    # the changed-file context and the RAG slot. Both need the snapshot path, the second
+    # also a prompt with a retrieved section; ``review_case`` refuses a case that sets them
+    # without it. ``()`` keeps the envelope of every case that predates them.
+    context_blocks: tuple[ContextBlock, ...] = ()
+    retrieved: tuple[RetrievedBlock, ...] = ()
 
 
 # Attempt deadlines of docs/PIPELINE_SPEC.md §3: fast 8 min, deep (SandboxEngine) 10 min.
@@ -254,11 +261,18 @@ async def review_case(
     """
     retrieved_section = False
     if case.policy_snapshot is not None:
-        # As in ExecuteReviewRun, the section follows the bound prompt version; a case has
-        # no RAG index, so a prompt with the section shows it empty.
+        # As in ExecuteReviewRun, the section follows the bound prompt version; a case
+        # without ``retrieved`` shows it empty.
         bindings = case.policy_snapshot.prompt_bindings
         retrieved_section = has_retrieved_section(
             bindings.review_system_key, bindings.review_system_version
+        )
+    # Excerpts the prompt would not show are an error, not a silent arm A.
+    if case.context_blocks and case.policy_snapshot is None:
+        raise ValueError("context_blocks need a policy snapshot: the legacy prompt has no excerpts")
+    if case.retrieved and not retrieved_section:
+        raise ValueError(
+            "retrieved blocks need a policy snapshot bound to a prompt with the section"
         )
     context = ReviewContext(
         system=case.system,
@@ -269,6 +283,8 @@ async def review_case(
         changed_files=parse_unified_diff(case.diff),
         omitted_files=(),
         policy_snapshot=case.policy_snapshot,
+        context_blocks=case.context_blocks,
+        retrieved=case.retrieved,
         retrieved_section=retrieved_section,
     )
     result, _, calls, latency_ms = await _run_database_free_case(

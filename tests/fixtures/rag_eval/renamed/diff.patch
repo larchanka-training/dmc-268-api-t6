@@ -1,0 +1,11 @@
+diff --git a/pkg/store.py b/pkg/store.py
+index 44bc142..34f8713 100644
+--- a/pkg/store.py
++++ b/pkg/store.py
+@@ -3,5 +3,5 @@
+ _DATA = {"alpha": 1, "beta": 2}
+ 
+ 
+-def load(key: str) -> int:
++def fetch(key: str) -> int:
+     return _DATA[key]

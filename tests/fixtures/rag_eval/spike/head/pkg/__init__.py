@@ -1,1 +1,0 @@
-"""Spike fixture package."""
