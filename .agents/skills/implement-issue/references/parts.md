@@ -56,5 +56,8 @@ Part 3 is next.` is not Part 3). The upper end must be a whole number not follow
 
 accept-issue marks its comments at their start: `<!-- accept-issue:table v1 -->`,
 `<!-- accept-issue:accepted v1 -->`, `<!-- accept-issue:returned v1 -->`. When every part is
-merged, the latest of those comments decides: `returned`, and no pull request with `Refs` merged
-after it, is a **stop** (the reason links the comment); otherwise it is `accept`.
+merged, the latest of those comments decides. It holds the issue back when it is `returned`, or
+when it is a `table` with a line that starts `Итог: не выполнено` (the self-check found unmet AC;
+the all-met line is «Итог: «не выполнено» нет…»), and no pull request with `Refs` was merged after
+it. That is a **stop** (the reason links the comment); a newer table, or a pull request merged
+after the comment, lifts it, and the verdict is `accept`.
