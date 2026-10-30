@@ -235,6 +235,10 @@ def test_installed_publication_checks_origin_and_releases_db_before_http(
 
             async def respond(request: httpx.Request) -> httpx.Response:
                 seen.append(request)
+                if request.url.path == "/2.0/user":
+                    return httpx.Response(
+                        200, json={"uuid": "{00000000-0000-4000-8000-000000000555}"}
+                    )
                 assert request.url.host == "api.bitbucket.org"
                 assert request.headers["Authorization"] == "Bearer private-test-token"
                 async with engine.connect() as connection:
@@ -263,7 +267,11 @@ def test_installed_publication_checks_origin_and_releases_db_before_http(
                         post_entered.set()
                         await allow_post.wait()
                     payload = json.loads(request.content)
-                    result: dict[str, object] = {"id": len(comments) + 1, **payload}
+                    result: dict[str, object] = {
+                        "id": len(comments) + 1,
+                        "user": {"uuid": "{00000000-0000-4000-8000-000000000555}"},
+                        **payload,
+                    }
                     comments.append(result)
                     return httpx.Response(201, json=result)
                 if request.url.path.endswith("/pullrequests/7/comments/2"):
