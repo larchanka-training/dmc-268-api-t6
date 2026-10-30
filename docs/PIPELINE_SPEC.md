@@ -133,7 +133,7 @@ snapshot-путь (v4 и v5, `SNAPSHOT_REVIEW_PROMPT_VERSIONS`) описываю
 - snapshot-путь (v4, v5), cache miss: `policy.load` → `vcs.fetch_diff` → `context.build` → `context.rag` → `context.manifest` → `llm.call…` (conventions) → `llm.repo_conventions` → `context.manifest` → `llm.call…` (ревью) → `context.manifest` → `llm.call…` верификатора (`operation: verification`; только при непустом наборе кандидатов); затем в транзакции перехода в `publishing` (T8) — `llm.review_output` → `llm.verify` (только если verifier вызывался) → `review.postprocess`; затем `github.publish_review…` или `gitlab.publish_review…`. `context.rag` — при том же условии, что у legacy. `context.manifest` пишется перед каждым `llm.call`, кроме retry: retry переиспользует строку manifest своего вызова. Cache hit — без `context.manifest` и `llm.call…` conventions; retry с сохранённым diff — без `vcs.fetch_diff`.
 - snapshot-путь (v4, v5), backend none без вызовов модели (#130 F5, абзац о backend none ниже в этом разделе): `policy.load` → `vcs.fetch_diff` → `context.build` (`status: no_reviewable_text`) → `review.postprocess` → `github.publish_review…` или `gitlab.publish_review…`.
 - skip (`no_changes` / `all_changes_ignored`, включая доказанный empty-only/binary-only при полном inventory): попытка заканчивается на `context.build` до conventions, затем `skipped` (T19); если `all_changes_ignored` вернула сама сборка, а не проверка до неё, после `context.build` при том же условии ещё пишется `context.rag`.
-- summary-only (больше 3 000 разрешённых строк; `vcs.fetch_diff` пишет `summary_only: true`): отдельной ветки в worker нет, порядок тот же, что у обычной попытки, — модель вызывается для conventions при cache miss и для ревью. `context.build` до conventions обычно пишет `status: summary_only` с `reason: diff_too_large`; стадия считает только разрешённые файлы с полным patch, поэтому при файлах без patch возможны `reason: no_reviewable_files` или обычный `review` со сборкой блоков (при неполном inventory раньше срабатывает `diff_inventory_incomplete`, при сбое сборки — `{error, coverage, diff}`); попытку это не меняет; разрешённые файлы в trace не перечисляются: у `context.build` `blocks: []`, их строки — в `reviewable_lines`; `llm.repo_conventions` — `files: []`. Ноль LLM-вызовов остаётся целью #107. После #213 summary-only финализируется backend после модельного вызова: candidates получают insufficient_context, inline и supported risk из них не публикуются, итог partial/null.
+- summary-only (больше 3 000 разрешённых строк, неполный список файлов или нет проверяемых файлов): стадия останавливается до RAG, conventions, ревью и verifier. Trace: `policy.load` → `vcs.fetch_diff` → `context.build` (`status: summary_only`, `reason`: `diff_too_large` | `diff_inventory_incomplete` | `no_reviewable_files`, `blocks: []`, coverage `partial`) → `review.postprocess` → `github.publish_review…` или `gitlab.publish_review…`. Записей `llm.call` нет. Ровно 3 000 разрешённых строк при полном списке остаётся обычным ревью.
 - `tool` у `llm.call` стадию не различает: в пределах попытки `llm.call` до `llm.repo_conventions` — conventions, между ним и verifier — ревью, вызов verifier — `verification`. В `run.step` для `llm.call` дополнительно `llmOperation: conventions | review` (#170 ч.2); `verification` в SSE не попадает. В `request` той же записи — `operation`: `conventions | review | verification` (legacy `stage` в таблице ниже — цель #107). Записи `llm.call` best-effort: при сбое записи вызов остаётся без строки.
 - `attempt` в NOTIFY/SSE — `runs.attempt` в момент вставки строки (#170 ч.2). У `llm.call`, записанного в той же попытке, это совпадает с `request.attempt`: claim (T4) делает `attempt = attempt + 1 … RETURNING`, значение идёт через `ClaimedAttempt` и `RunCallContext(attempt=…)` в запись вызова. Поздняя запись действия предыдущей попытки после следующего claim берёт уже увеличенный `runs.attempt`. Каждую попытку открывает `policy.load`.
 - `try` у `github.publish_review` / `gitlab.publish_review` — счётчик цикла публикации, а не попытка Run.
@@ -226,29 +226,27 @@ fallback/null, тогда как ранее опубликованное GitHub-
 
 Нового публичного coverage DTO, LLM-полей, result_id или таблиц результата нет.
 Полный #107, общий run-owned file_omissions #130/#168 и zero-LLM lifecycle
-summary-only/no-text partial остаются целевыми, а не активированными #213.
+no-text partial остаются целевыми, а не активированными #213.
 Zero-LLM lifecycle none активен на snapshot path с #130 F5; legacy (≤ v3) для того же
 inventory по-прежнему вызывает модель.
-Текущий summary-only может вызывать модель, но все его findings отбрасываются
-как insufficient_context: нет inline, blocking/attention или дефектов из них;
-coverage partial, verdict null. Обещание zero-LLM относится к будущему lifecycle.
+Summary-only с нулём вызовов модели — текущий жизненный цикл, не будущий:
+стадия останавливается до RAG, conventions, ревью и verifier и публикует
+`NoModelAnswer`; coverage partial, verdict null.
 
 **Канон после #168 ч.6** (один `context.build`, до conventions): `policy.load → vcs.fetch_diff → context.build → [context.rag] → [llm.call… conventions] → llm.repo_conventions → llm.call… → llm.review_output, review.postprocess → github|gitlab.publish_review`.
 
 Существующие имена `llm.review_output`, `llm.repo_conventions` сохраняются. Принятый reviewer response — checkpoint для возобновления с verifier, но не разрешение на публикацию. Единственный источник нового публичного результата — сохранённый `FinalReviewResult`; retry публикации не вызывает модель. Снимки/manifest/result фиксируются короткими транзакциями с проверкой lease; ни одна транзакция не охватывает сеть.
 
 Summary-only определяется после ignore: **более 3 000 добавленных и удалённых
-разрешённых строк**; ровно 3 000 допускает обычное review. Неполный inventory/
-unknown relevant counters как отдельный zero-LLM trigger остаётся целью #107
-(в текущем context.build это reason diff_inventory_incomplete).
-Текущая попытка сохраняет обычный порядок вызовов модели, но changed patches
-не отправляются; все findings summary-only получают drop insufficient_context.
-Публикуемых findings и inline нет, blocking/attention из этих кандидатов не
-возникает. Backend пересобирает summary по фактическому scope: succeeded,
+разрешённых строк**; ровно 3 000 допускает обычное review. Неполный список
+файлов — `diff_inventory_incomplete`, остаток без проверяемых файлов —
+`no_reviewable_files`. Стадия останавливается до RAG, conventions, ревью и
+verifier. Trace: `policy.load` → `vcs.fetch_diff` → `context.build` →
+`review.postprocess` → `github.publish_review…` или `gitlab.publish_review…`.
+Записей `llm.call` нет. Итог succeeded,
 summaryOnly=true, coverage partial, verdict=null, check-run neutral. Исходный
-patch для UI сохраняется, review_patch=null. Целевой #107 полностью обходит
-conventions/review/verifier и формирует сводку с нулём LLM-вызовов. Это отличается
-от T19 с достоверно пустым/исключённым scope (CVS §2.3).
+patch для UI сохраняется, review_patch=null. Это отличается от T19 с достоверно
+пустым/исключённым scope (CVS §2.3).
 
 Канонические классификация и исходы —
 [CONTEXT_AND_VERIFICATION_SPEC §2.2](CONTEXT_AND_VERIFICATION_SPEC.md#22-порядок-операций),
@@ -273,12 +271,15 @@ context.build → review.postprocess → github|gitlab.publish_review`, review �
 Legacy (≤ v3) по этому маршруту не идёт и вызывает conventions и ревью: unsupported_path и
 identity_unresolved там остаются incomplete (partial), too_large и unsupported_change дают
 none с вызовом модели, как с #283. Too_large сверх 3 000 counted строк остаётся summary-only
-(см. ниже).
+(см. ниже): пока строки T входят в счётчик 3 000, такой файл вместе с соседними строками
+кода останавливается как `diff_too_large`, coverage partial, а не ревью тех строк.
 Обычный missing patch или неполный inventory не разрешают эту ветку.
 Если нет анализируемого текста, есть incomplete (возможно E/T), inventory полный,
-relevant counters известны и counted allowed ≤3 000, сохраняется backend partial:
+relevant counters известны и counted allowed ≤3 000, целевой исход — backend partial:
 summaryOnly=false, findings=[], verdict=null, reviewed_changed_lines=0; исходная
-неизвестная статистика остаётся null. Затем T8/T14 → succeeded/neutral. Оба
+неизвестная статистика остаётся null. Пока маршрута no-text partial нет, этот набор
+публикуется как summary-only `no_reviewable_files`, coverage partial, 0 LLM. Затем
+T8/T14 → succeeded/neutral. Оба
 триггера summary-only имеют приоритет: unknown inventory/counters или >3 000
 counted allowed, в том числе missing-patch-only 4 000 строк. Все backend-ветки
 сохраняют pins и below_severity_threshold_count=0, обходят conventions/context/
@@ -722,7 +723,7 @@ GitHub для этого нет.
 | Итог Run | `status` / `conclusion` | Заголовок | Summary |
 |---|---|---|---|
 | выполняется | `in_progress` | AI-ревью выполняется | попытка N из 3 |
-| `succeeded` | `completed` / `neutral` | AI-ревью: `blocking` / `attention` / `clean` (§11); partial с verdict null — реализованный в #213 заголовок «AI-ревью: проверка неполная»; summary-only — реализованный заголовок «AI-ревью: только сводка»; coverage none — реализованный в #213 заголовок «AI-ревью: нет доступных для анализа изменений» (на snapshot path — без вызовов модели, #130 F5; legacy вызывает модель) | сохранённые summary/counts/coverage и размещение из одного result/варианта (в #107 — FinalReviewResult, включая below_severity_threshold_count), ссылка на прогон; summary-only — превышен лимит либо неполон список diff, тоже со ссылкой на прогон; неполнота не называется clean; если порог severity репозитория отсёк N > 0 находок — строка `ниже порога severity: N` (§9) |
+| `succeeded` | `completed` / `neutral` | AI-ревью: `blocking` / `attention` / `clean` (§11); partial с verdict null — реализованный в #213 заголовок «AI-ревью: проверка неполная»; summary-only — реализованный заголовок «AI-ревью: только сводка»; coverage none — реализованный в #213 заголовок «AI-ревью: нет доступных для анализа изменений» (на snapshot path — без вызовов модели, #130 F5; legacy вызывает модель) | сохранённые summary/counts/coverage и размещение из одного result/варианта (в #107 — FinalReviewResult, включая below_severity_threshold_count), ссылка на прогон; summary-only — одна из трёх причин, тоже со ссылкой на прогон: `diff_too_large` — «Построчное AI-ревью не выполнено: превышен лимит diff»; `diff_inventory_incomplete` — «Построчное AI-ревью не выполнено: список изменённых файлов неполон»; `no_reviewable_files` — «Построчное AI-ревью не выполнено: нет проверяемых файлов»; неполнота не называется clean; если порог severity репозитория отсёк N > 0 находок — строка `ниже порога severity: N` (§9) |
 | `failed` | `completed` / `neutral` | AI-ревью не выполнено | текст §6 и ссылка; обычно `error_code`, для `llm_payment_required` код скрыт. При verification failure новых findings нет; при publication_outcome_unknown (цель #107, код пока не пишет) существование удалённой публикации не утверждается |
 | `cancelled` | `completed` / `cancelled` | AI-ревью отменено | причина §6; до первого claim check-run'а нет |
 | `skipped` | `completed` / `skipped` | AI-ревью пропущено | причина §6; T5 создаёт сразу завершённым (кроме repo_disabled), T19 завершает созданный при claim check-run; verdict null |

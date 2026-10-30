@@ -615,6 +615,8 @@ class FindingPostProcessingInput:
     allowed_v2_rules: frozenset[str] | None = None
     coverage: RunCoverage | None = None
     summary_only: bool = False
+    # ``context.build`` reason for a summary-only run; the saved summary names it.
+    summary_reason: str | None = None
 
 
 class ReviewOutputRepository(Protocol):

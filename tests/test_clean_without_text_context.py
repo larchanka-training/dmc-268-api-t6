@@ -11,7 +11,11 @@ import pytest
 from app.modules.reviews.application.get_run_diff import DiffSnapshot
 from app.modules.reviews.application.prepare_policy_snapshot import PreparePolicySnapshot
 from app.modules.reviews.application.process_run import RunVcsInput
-from app.modules.reviews.application.review_context import BuildReviewContext, ContextStatus
+from app.modules.reviews.application.review_context import (
+    BuildReviewContext,
+    ContextStatus,
+    SummaryOnlyReview,
+)
 from app.modules.reviews.application.review_context_stage import (
     EstimatedTokenCounter,
     ReviewContextStage,
@@ -113,7 +117,10 @@ def test_empty_marker_cannot_skip_invalid_identity_or_incomplete_inventory() -> 
     assert trace.steps[-1][2]["coverage"]["reason_counts"] == {"unsupported_path": 1}
 
     stage, trace = stage_for([empty_snapshot()], expected=2)
-    asyncio.run(stage.run(_RUN))
+    with pytest.raises(SummaryOnlyReview):
+        asyncio.run(stage.run(_RUN))
+    assert trace.steps[-1][2]["status"] == "summary_only"
+    assert trace.steps[-1][2]["reason"] == "diff_inventory_incomplete"
     assert trace.steps[-1][2]["coverage"]["status"] == "partial"
     assert trace.steps[-1][2]["coverage"]["reason_counts"] == {"diff_inventory_incomplete": 1}
 

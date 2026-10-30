@@ -19,7 +19,11 @@ from app.modules.reviews.application.get_run import GetRunDetail
 from app.modules.reviews.application.get_run_diff import StoreDiffSnapshot
 from app.modules.reviews.application.list_pulls import ListRepositoryPulls
 from app.modules.reviews.application.prepare_policy_snapshot import PreparePolicySnapshot
-from app.modules.reviews.application.review_context import BuildReviewContext, ContextStatus
+from app.modules.reviews.application.review_context import (
+    BuildReviewContext,
+    ContextStatus,
+    SummaryOnlyReview,
+)
 from app.modules.reviews.application.review_context_stage import (
     EstimatedTokenCounter,
     ReviewContextStage,
@@ -138,18 +142,19 @@ def test_actual_stage_persisted_empty_proof_controls_http_and_recovery_result(
                 trace=trace,
                 payloads=trace,
             )
-            payload = await stage.run(RUN_ATTEMPTED)
-            assert payload is not None
-            assert payload.status is (
-                ContextStatus.REVIEW if inventory_complete else ContextStatus.SUMMARY_ONLY
-            )
+            try:
+                payload = await stage.run(RUN_ATTEMPTED)
+            except SummaryOnlyReview:
+                # #313: an incomplete list is recorded and stops before the builder.
+                payload = None
             if inventory_complete:
+                assert payload is not None
+                assert payload.status is ContextStatus.REVIEW
                 assert payload.blocks and {block.source.path for block in payload.blocks} == {
                     "src/app.py"
                 }
             else:
-                assert payload.reason == "diff_inventory_incomplete"
-                assert payload.blocks == ()
+                assert payload is None
             async with factory() as session:
                 context = await session.scalar(
                     select(RunAction).where(
@@ -160,14 +165,22 @@ def test_actual_stage_persisted_empty_proof_controls_http_and_recovery_result(
                 recorded = context.response
             classification = recorded["coverage"]
             assert classification["head_sha"] == HEAD
-            assert (
-                classification["diff_digest"] == payload.diff_digest == recorded["diff"]["digest"]
-            )
+            if payload is not None:
+                assert (
+                    classification["diff_digest"]
+                    == payload.diff_digest
+                    == recorded["diff"]["digest"]
+                )
+            else:
+                assert recorded["status"] == "summary_only"
+                assert recorded["reason"] == "diff_inventory_incomplete"
+                assert recorded["blocks"] == []
+                assert classification["diff_digest"] == recorded["diff"]["digest"]
             assert len(classification["snapshot_digest"]) == 64
             assert classification["status"] == ("complete" if expected else "partial")
-            assert classification["reviewed_files"] == 1
+            assert classification["reviewed_files"] == (0 if not inventory_complete else 1)
             expected_reasons = (
-                {"diff_inventory_incomplete": 1}
+                {"diff_inventory_incomplete": 1, "summary_only": 1}
                 if not inventory_complete
                 else {}
                 if marker == "empty_file"
@@ -187,9 +200,13 @@ def test_actual_stage_persisted_empty_proof_controls_http_and_recovery_result(
                     CachedConventions(REPO_A, None, PROMPT, (), (), {}), None, True
                 ),
             )
-            assert prompt is not None and [item.path for item in prompt.changed_files] == [
-                "src/app.py"
-            ]
+            assert prompt is not None
+            if inventory_complete:
+                assert [item.path for item in prompt.changed_files] == ["src/app.py"]
+            else:
+                # The stop clears review_patch and sets the durable flag, so nothing is model input.
+                assert prompt.changed_files == ()
+                assert set(prompt.omitted_files) == {"src/app.py", candidate.filename}
             async with factory() as session:
                 contexts = (
                     await session.scalars(
@@ -238,19 +255,15 @@ def test_actual_stage_persisted_empty_proof_controls_http_and_recovery_result(
                     run.review_body is not None and result["summary"]["problem"] in run.review_body
                 )
                 assert ("**Verdict:** clean" in run.review_body) is bool(expected)
-                if expected is None:
+                if expected is None and inventory_complete:
                     assert "Проверка неполная" in run.review_body
-                    assert (
-                        "Нет подтверждения обычного пустого файла"
-                        if inventory_complete
-                        else "список изменённых файлов неполон"
-                    ) in run.review_body
+                    assert "Нет подтверждения обычного пустого файла" in run.review_body
                 if not inventory_complete:
+                    assert "список изменённых файлов неполон" in run.review_body
                     assert result["coverage"]["file_list_complete"] is False
-                    assert result["coverage"]["reason_counts"] == {"diff_inventory_incomplete": 1}
+                    assert result["coverage"]["reason_counts"] == expected_reasons
                     assert result["summary"]["problem"] == (
-                        "Подтверждённых замечаний нет; Проверка неполная: "
-                        "список изменённых файлов неполон (1)."
+                        "Построчное AI-ревью не выполнено: список изменённых файлов неполон."
                     )
                 run.lease_until = datetime.now(UTC) - timedelta(seconds=1)
             await engine.dispose()
@@ -276,12 +289,16 @@ def test_actual_stage_persisted_empty_proof_controls_http_and_recovery_result(
             assert detail.review.summary == report.saved_summary == result["summary"]
             if not inventory_complete:
                 assert detail.review.saved_result is not None
-                assert detail.review.saved_result.coverage.reason_counts == {
-                    "diff_inventory_incomplete": 1
-                }
+                assert detail.review.saved_result.coverage.reason_counts == expected_reasons
                 assert report.coverage_status == "partial"
             view = check_run_view(report)
-            assert view.title == ("AI-ревью: clean" if expected else "AI-ревью: проверка неполная")
+            if not inventory_complete:
+                assert view.title == "AI-ревью: только сводка"
+                assert view.conclusion == "neutral"
+            else:
+                assert view.title == (
+                    "AI-ревью: clean" if expected else "AI-ревью: проверка неполная"
+                )
             assert result["summary"]["problem"] in view.summary
             return result
         finally:
@@ -300,6 +317,5 @@ def test_actual_stage_persisted_empty_proof_controls_http_and_recovery_result(
         assert body["summary"]["doneWell"] == result["summary"]["done_well"]
         if not inventory_complete:
             assert body["summary"]["problem"] == (
-                "Подтверждённых замечаний нет; Проверка неполная: "
-                "список изменённых файлов неполон (1)."
+                "Построчное AI-ревью не выполнено: список изменённых файлов неполон."
             )

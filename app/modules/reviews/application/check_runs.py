@@ -10,6 +10,15 @@ from uuid import UUID
 from app.modules.reviews.application.run_failures import MAX_ATTEMPTS
 from app.modules.reviews.application.verdict import severity_count_phrase
 
+# Plan D-5. The size line is only ``diff_too_large``; the other two reasons never use it.
+SUMMARY_ONLY_LINES = {
+    "diff_too_large": "Построчное AI-ревью не выполнено: превышен лимит diff",
+    "diff_inventory_incomplete": (
+        "Построчное AI-ревью не выполнено: список изменённых файлов неполон"
+    ),
+    "no_reviewable_files": "Построчное AI-ревью не выполнено: нет проверяемых файлов",
+}
+
 # Author-facing texts of the §6 error_code catalog.
 _ERROR_TEXTS = {
     "llm_timeout": "Модель не ответила вовремя. Прогон можно перезапустить из UI.",
@@ -120,6 +129,8 @@ class CheckRunReport:
     # Findings stored with ``drop_reason = severity_threshold`` (PIPELINE_SPEC §7, §9).
     below_threshold_count: int = 0
     summary_only: bool = False
+    # ``context.build`` reason when the run is summary-only; None keeps the size line.
+    summary_reason: str | None = None
     run_url: str | None = None
     provider: str = "github"
     coverage_status: str | None = None
@@ -135,6 +146,33 @@ class CheckRunGateway(Protocol):
     async def upsert(
         self, target: CheckRunTarget, view: CheckRunView, *, checkpoint: RunProviderCheckpoint
     ) -> None: ...
+
+
+def summary_only_line(reason: str | None) -> str:
+    """Check-run line for a summary-only reason. An unnamed flag is the size limit."""
+    if reason is None:
+        return SUMMARY_ONLY_LINES["diff_too_large"]
+    return SUMMARY_ONLY_LINES.get(reason, SUMMARY_ONLY_LINES["diff_too_large"])
+
+
+def summary_only_reason_of(summary: object) -> str | None:
+    """The context.build reason of a summary-only payload, else None."""
+    if not isinstance(summary, dict) or summary.get("status") != "summary_only":
+        return None
+    reason = summary.get("reason")
+    return reason if isinstance(reason, str) else None
+
+
+def is_summary_only_stop(summary: object) -> bool:
+    """The stage stop, not a builder payload that still continues to the model.
+
+    Both record ``status == summary_only``. The builder always stores
+    ``reviewable_lines``; the stop payload does not. A legacy technical skip
+    keeps the model path, so that payload must not publish ``summaryOnly``.
+    """
+    if not isinstance(summary, dict) or summary.get("status") != "summary_only":
+        return False
+    return "reviewable_lines" not in summary
 
 
 def check_run_view(report: CheckRunReport) -> CheckRunView:
@@ -158,7 +196,7 @@ def check_run_view(report: CheckRunReport) -> CheckRunView:
                 "completed",
                 "neutral",
                 "AI-ревью: только сводка",
-                f"PR слишком большой: только сводка{explanation}{link}",
+                f"{summary_only_line(report.summary_reason)}{explanation}{link}",
                 details_url=report.run_url,
             )
         counts = severity_count_phrase(report.severity_counts)

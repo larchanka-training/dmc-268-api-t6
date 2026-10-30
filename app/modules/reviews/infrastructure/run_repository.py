@@ -23,6 +23,10 @@ from app.modules.repositories.infrastructure.models import (
     RuleVersion,
 )
 from app.modules.reviews.application.cancel_run import CancelRequestResult
+from app.modules.reviews.application.check_runs import (
+    is_summary_only_stop,
+    summary_only_reason_of,
+)
 from app.modules.reviews.application.conventions import ActiveConventionsPrompt
 from app.modules.reviews.application.diff_map import DiffMap, vcs_provider_name
 from app.modules.reviews.application.findings_post_processor import (
@@ -61,6 +65,7 @@ from app.modules.reviews.application.vcs_diff import PullRequestLocator
 from app.modules.reviews.infrastructure.models import (
     CodeChange,
     CodeChangeDiff,
+    ContextPayload,
     Finding,
     PromptVersion,
     Run,
@@ -73,6 +78,7 @@ from app.modules.reviews.infrastructure.run_origin import active_origin_conditio
 from app.modules.reviews.infrastructure.run_origin_locks import lock_run_origin_row
 from app.modules.reviews.infrastructure.saved_review_results import load_review_results
 from app.modules.reviews.infrastructure.severity_threshold import severity_threshold_value
+from app.modules.reviews.infrastructure.summary_only_stop import summary_only_stop_conditions
 from app.modules.workspaces.infrastructure.repository_access import repository_access_predicate
 
 
@@ -591,13 +597,22 @@ class SqlAlchemyRunRepository:
 
     @staticmethod
     def _summary_only_projection() -> ColumnElement[bool]:
-        summary_only = (
+        # A marked row, or the stage stop when every visible file stayed unmarked.
+        marked = (
             select(func.bool_or(CodeChangeDiff.summary_only))
             .select_from(CodeChangeDiff)
             .where(CodeChangeDiff.run_id == Run.id)
             .scalar_subquery()
         )
-        return func.coalesce(summary_only, False).label("summary_only")
+        stopped = (
+            select(ContextPayload.run_id)
+            .where(
+                ContextPayload.run_id == Run.id,
+                *summary_only_stop_conditions(ContextPayload.summary),
+            )
+            .exists()
+        )
+        return or_(func.coalesce(marked, False), stopped).label("summary_only")
 
     @staticmethod
     def _to_diff_snapshot(row: CodeChangeDiff) -> DiffSnapshot:
@@ -840,7 +855,10 @@ class SqlAlchemyReviewOutputRepository:
             severity_threshold=severity_threshold_value(severity_threshold),
             allowed_v2_rules=None,
             coverage=coverage,
-            summary_only=any(item.summary_only for item in durable),
+            summary_only=(
+                any(item.summary_only for item in durable) or is_summary_only_stop(response_value)
+            ),
+            summary_reason=summary_only_reason_of(response_value),
         )
 
     async def store_review_output(

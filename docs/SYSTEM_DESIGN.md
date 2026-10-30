@@ -1328,8 +1328,10 @@ summary-only по оставшемуся scope; T не увеличивают п
 побеждают binary/too_large, но не недостоверную идентичность. Submodule и
 доказанный чистый rename/mode-only без поддерживаемого анализа — unsupported_change, T.
 При полном inventory, известных relevant counters ≤3 000 и только incomplete
-с возможными E/T, без анализируемого текста — backend partial, summaryOnly=false,
-findings=[], verdict=null; 0 LLM, затем succeeded/neutral. Анализируемый текст — разрешённые hunks вне E/T, включая сохранившиеся
+с возможными E/T, без анализируемого текста — целевой исход backend partial, summaryOnly=false,
+findings=[], verdict=null; 0 LLM, затем succeeded/neutral. Пока маршрута no-text partial нет,
+этот набор публикуется как summary-only `no_reviewable_files`, coverage partial, 0 LLM.
+Анализируемый текст — разрешённые hunks вне E/T, включая сохранившиеся
 hunks truncated в L1: обычное review/partial, blocking возможен; без hunks —
 no-text ветка. Relevant counters — additions/deletions вне E/T, включая
 incomplete; raw counters E/T — диагностика (пустой counted scope=0).
@@ -1812,12 +1814,12 @@ fallback/null, тогда как ранее опубликованное GitHub-
 
 Нового публичного coverage DTO, LLM-полей, result_id или таблиц результата нет.
 Полный #107, общий run-owned file_omissions #130/#168 и zero-LLM lifecycle
-summary-only/no-text partial остаются целевыми, а не активированными #213.
+no-text partial остаются целевыми, а не активированными #213.
 Zero-LLM lifecycle none активен на snapshot path с #130 F5; legacy (≤ v3) для того же
 inventory по-прежнему вызывает модель.
-Текущий summary-only может вызывать модель, но все его findings отбрасываются
-как insufficient_context: нет inline, blocking/attention или дефектов из них;
-coverage partial, verdict null. Обещание zero-LLM относится к будущему lifecycle.
+Summary-only с нулём вызовов модели — текущий жизненный цикл, не будущий:
+стадия останавливается до RAG, conventions, ревью и verifier и публикует
+`NoModelAnswer`; coverage partial, verdict null.
 
 
 

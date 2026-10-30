@@ -4,7 +4,7 @@ CVS §2.2 row :154 and §11: a complete inventory with at least one T and otherw
 exclusions is published with a backend result, coverage none and no verdict, after
 ``context.build`` and before RAG, the context build, conventions, the review and the
 verifier (DD2-DD5). T19 (exclusions only) still comes first; a legacy (<= v3) run keeps its
-model calls; a summary-only change keeps its path.
+model calls; a summary-only change stops before the builder.
 """
 
 from __future__ import annotations
@@ -27,7 +27,11 @@ from app.modules.reviews.application.policy_errors import PolicyError, PolicyErr
 from app.modules.reviews.application.process_run import ReviewRunProcessor, RunVcsInput
 from app.modules.reviews.application.prompt_builder import ReviewContext
 from app.modules.reviews.application.rag_index import OpenReviewIndex, RagReadiness
-from app.modules.reviews.application.review_context import BuildReviewContext, NoReviewableText
+from app.modules.reviews.application.review_context import (
+    BuildReviewContext,
+    NoReviewableText,
+    SummaryOnlyReview,
+)
 from app.modules.reviews.application.review_context_stage import (
     EstimatedTokenCounter,
     ReviewContextStage,
@@ -234,22 +238,27 @@ def test_a_too_large_change_takes_the_route_up_to_the_summary_only_threshold() -
         asyncio.run(routed.stage.run(RUN_ID))
     assert routed.builder.runs == []
 
-    # Over the threshold the change keeps the summary-only path (#107/#175).
+    # Over the threshold the change stops before the builder (#313).
     summary = _stage(over)
-    payload = asyncio.run(summary.stage.run(RUN_ID))
-    assert payload is not None
-    assert len(summary.builder.runs) == 1
+    with pytest.raises(SummaryOnlyReview):
+        asyncio.run(summary.stage.run(RUN_ID))
+    assert summary.builder.runs == []
     [response] = summary.steps("context.build")
-    assert response["coverage"]["status"] == "none"
+    assert response["coverage"]["status"] == "partial"
     assert response["status"] == "summary_only"
+    assert response["reason"] == "diff_too_large"
+    assert response["blocks"] == []
 
 
-def test_a_summary_only_flag_alone_keeps_the_builder() -> None:
+def test_a_summary_only_flag_alone_does_not_choose_the_line_limit() -> None:
+    # The persisted flag is not order 2. This inventory is one line, so the builder runs.
     run = _stage([replace(unsupported_path(), summary_only=True)])
 
     assert asyncio.run(run.stage.run(RUN_ID)) is not None
 
     assert len(run.builder.runs) == 1
+    [response] = run.steps("context.build")
+    assert response["reason"] != "diff_too_large"
 
 
 def test_the_processor_lets_the_signal_through_before_the_conventions_call() -> None:

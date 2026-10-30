@@ -152,7 +152,7 @@ hunks; raw malformed patch не становится L1. Оба триггера
 | Достоверно пуст, предыдущие триггеры не сработали | skipped/no_changes, verdict=null, 0 LLM |
 | Только E, T/incomplete нет, inventory полный | skipped/all_changes_ignored, verdict=null, 0 LLM; check-run skipped |
 | Хотя бы один T, остальные только E/T, inventory полный и достоверный, incomplete нет | Backend FinalReviewResult: coverage=none, findings=[], verdict=null, 0 LLM; publishing → succeeded, check-run neutral; summaryOnly=false |
-| Нет анализируемого текста, есть incomplete (возможно E/T); inventory полный, relevant counters известны, counted allowed ≤3 000 | Backend FinalReviewResult: coverage=partial, findings=[], verdict=null, summaryOnly=false, 0 LLM; publishing → succeeded/neutral; это не none и не skipped |
+| Нет анализируемого текста, есть incomplete (возможно E/T); inventory полный, relevant counters известны, counted allowed ≤3 000 | Backend FinalReviewResult: coverage=partial, findings=[], verdict=null, summaryOnly=false, 0 LLM; publishing → succeeded/neutral; это не none и не skipped. Пока маршрута no-text partial нет, этот набор публикуется как summary-only `no_reviewable_files`, coverage partial, 0 LLM |
 | Есть анализируемый текст и T/incomplete (E могут быть), counted allowed ≤3 000 | Ревью доступного текста с partial |
 | Есть анализируемый текст, T/incomplete нет, inventory/counters полны, counted allowed ≤3 000 (E могут быть) | Обычное ревью, возможен complete/clean; доказанные binary/empty_file в excluded_files сами по себе не снижают coverage |
 
@@ -221,10 +221,7 @@ Ignore применяется до подсчёта: 4 000 исключённы�
 очищать UI-снимок. Роль `code` не может восстановить такой patch для LLM из БД.
 
 Целевой summary-only v1 формируется backend по разрешённой файловой статистике,
-**без LLM-вызовов**, L1–L4, кандидатов и inline-комментариев. В текущем #213
-zero-LLM lifecycle ещё не активирован: вызовы conventions/review возможны,
-но все findings summary-only отбрасываются как insufficient_context, без inline
-и blocking/attention из них; сохраняется partial/null. Это уточнение старого
+**без LLM-вызовов**, L1–L4, кандидатов и inline-комментариев. Это уточнение старого
 описания «сводка по списку файлов»: сводка не утверждает дефекты по названиям файлов.
 Итог `succeeded`, `coverage.status=partial`, `verdict=null`, check-run `neutral`:
 «Построчное AI-ревью не выполнено: превышен лимит diff» (либо неполный список).
@@ -1431,12 +1428,12 @@ fallback/null, тогда как ранее опубликованное GitHub-
 
 Нового публичного coverage DTO, LLM-полей, result_id или таблиц результата нет.
 Полный #107, общий run-owned file_omissions #130/#168 и zero-LLM lifecycle
-summary-only/no-text partial остаются целевыми, а не активированными #213.
+no-text partial остаются целевыми, а не активированными #213.
 Zero-LLM lifecycle none активен на snapshot path с #130 F5; legacy (≤ v3) для того же
 inventory по-прежнему вызывает модель.
-Текущий summary-only может вызывать модель, но все его findings отбрасываются
-как insufficient_context: нет inline, blocking/attention или дефектов из них;
-coverage partial, verdict null. Обещание zero-LLM относится к будущему lifecycle.
+Summary-only с нулём вызовов модели — текущий жизненный цикл, не будущий:
+стадия останавливается до RAG, conventions, ревью и verifier и публикует
+`NoModelAnswer`; coverage partial, verdict null.
 
 
 Уже существуют `run_policy_snapshots` вместе со staging `run_policy_documents`
@@ -2088,10 +2085,10 @@ review. Подтверждённый legacy-object связывается с run
 | Один путь unsupported, остальные изменения доступны | Файл отсутствует во всех LLM-источниках и inline; остальные проверяются, coverage partial; при пустых findings или только info verdict null |
 | Полный inventory: хотя бы один T, остальные только E/T (§2.2) | Каноническая ветка none: 0 LLM, пустые findings, verdict null; publishing → succeeded/neutral, без summaryOnly |
 | Доказанный binary-only; доказанный binary + код | E только по bounded evidence §9.2: skipped в первом случае; во втором возможны complete/clean |
-| Too_large-only; too_large >20 000 строк + 50 строк кода; маска assets/** + слишком большой assets/a.txt | Соответственно none; обычное ревью 50 строк с partial; skipped/ignored, так как маска побеждает too_large |
+| Too_large-only; too_large >20 000 строк + 50 строк кода; маска assets/** + слишком большой assets/a.txt | Соответственно none; обычное ревью 50 строк с partial; skipped/ignored, так как маска побеждает too_large. Пока строки T входят в счётчик 3 000, too_large больше 3 000 строк — summary-only `diff_too_large`, coverage partial: соседние строки не ревьюятся |
 | Identity_unresolved, submodule либо доказанный pure rename/mode-only, отдельно и с ignored, incomplete нет | T с каноническими исходами none/partial; отсутствие строк не превращается в clean |
 | Неполный inventory либо неизвестные relevant counters; отдельно missing-patch-only 4 000 known строк | Сначала summary-only/partial, summaryOnly=true, 0 LLM; none/skipped и no-text partial неприменимы |
-| Только incomplete без hunks (missing/malformed/truncated patch), а также I+E, I+T и I+E+T; полный inventory, known counters 0/3 000, текста нет | Backend partial, summaryOnly=false, findings=[], verdict=null, 0 LLM включая conventions/verifier; pins и below_severity_threshold_count=0 сохранены, reviewed_changed_lines=0, неизвестная статистика null; publishing → succeeded/neutral |
+| Только incomplete без hunks (missing/malformed/truncated patch), а также I+E, I+T и I+E+T; полный inventory, known counters 0/3 000, текста нет | Backend partial, summaryOnly=false, findings=[], verdict=null, 0 LLM включая conventions/verifier; pins и below_severity_threshold_count=0 сохранены, reviewed_changed_lines=0, неизвестная статистика null; publishing → succeeded/neutral. Пока маршрута no-text partial нет, этот набор публикуется как summary-only `no_reviewable_files`, coverage partial, 0 LLM |
 | Truncated-only с сохранившимися разрешёнными hunks вне E/T, также с E/T; полный inventory, known counted allowed ≤3 000 | Hunks поступают в L1: обычное ревью с partial, blocking возможен; ограничения координат incomplete сохраняются. Оба триггера summary-only проверяются раньше (§2.2/§2.3); без hunks — backend partial по предыдущей строке. |
 | Доказанный empty_file (`100644`/`100755`) + проверенный код; empty-only | Complete/clean без supported warning/error; соответственно skipped/all_changes_ignored, 0 LLM |
 | Пустое added без полного proof; удалённая картинка без blob/независимого binary evidence | missing_patch/incomplete; рядом с кодом partial/null с причиной; metadata_only не E/T |

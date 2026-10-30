@@ -51,6 +51,7 @@ from app.modules.reviews.application.review_context import (
     Representation,
     RetrievedBlock,
     ReviewContextPayload,
+    SummaryOnlyReview,
 )
 from app.modules.reviews.application.review_context_stage import (
     EstimatedTokenCounter,
@@ -201,7 +202,9 @@ class Payloads:
     rows: list[tuple[UUID, dict[str, Any]]] = field(default_factory=list)
     error: Exception | None = None
 
-    async def save_context_payload(self, run_id: UUID, summary: dict[str, Any]) -> None:
+    async def save_context_payload(
+        self, run_id: UUID, summary: dict[str, Any], *, mark_summary_only: bool = False
+    ) -> None:
         if self.error is not None:
             raise self.error
         self.rows.append((run_id, summary))
@@ -764,15 +767,14 @@ def test_binary_file_of_the_change_is_not_read_through_an_import() -> None:
 
 def test_incomplete_file_list_does_not_prove_that_every_change_is_excluded() -> None:
     # The pull request reports two files, one is known and it is ignored.
-    stage = _stage(Trace(), snapshots=[_snapshots()[1]])
+    trace = Trace()
+    stage = _stage(trace, snapshots=[_snapshots()[1]])
 
-    payload = asyncio.run(stage.run(_RUN))
+    with pytest.raises(SummaryOnlyReview):
+        asyncio.run(stage.run(_RUN))
 
-    assert payload is not None
-    assert (payload.status, payload.reason) == (
-        ContextStatus.SUMMARY_ONLY,
-        "diff_inventory_incomplete",
-    )
+    build = trace.steps[-1][2]
+    assert (build["status"], build["reason"]) == ("summary_only", "diff_inventory_incomplete")
 
 
 def test_source_of_a_copy_into_an_excluded_place_stays_reviewable() -> None:
@@ -810,8 +812,10 @@ def test_change_without_files_is_skipped_only_when_the_provider_counts_none() ->
     assert trace.steps[-1][2]["status"] == "no_changes"
 
     # The provider counts two files and none is known: that is not an empty change.
-    payload = asyncio.run(_stage(Trace(), snapshots=[], empty=True).run(_RUN))
-    assert payload is not None and payload.reason == "diff_inventory_incomplete"
+    trace = Trace()
+    with pytest.raises(SummaryOnlyReview):
+        asyncio.run(_stage(trace, snapshots=[], empty=True).run(_RUN))
+    assert trace.steps[-1][2]["reason"] == "diff_inventory_incomplete"
 
 
 def test_policy_error_while_the_context_is_built_stops_the_run() -> None:
@@ -854,7 +858,7 @@ def test_cache_identity_changes_when_a_rename_withholds_a_name_no_mask_matches()
         1,
         2,
     )
-    tainted = _stage(Trace(), snapshots=[*_snapshots(), moved])
+    tainted = _stage(Trace(), vcs=Vcs(files_changed=3), snapshots=[*_snapshots(), moved])
     asyncio.run(tainted.run(_RUN))
 
     assert tainted.excluded("src/moved.py") is True
@@ -881,6 +885,7 @@ def test_rename_out_of_a_builtin_exclusion_stays_withheld_after_the_whole_stage(
     stage = _stage(
         Trace(),
         policy=Policy(rules=None),
+        vcs=Vcs(files_changed=3),
         snapshots=[*_snapshots(), moved],
         builtin_excluded=_is_generated,
     )
@@ -2112,9 +2117,13 @@ def test_stage_saves_its_context_build_response_as_the_context_payload(
     else:
         stage = _stage(trace, payloads=payloads)
 
-    payload = asyncio.run(stage.run(_RUN))
+    if kind == "summary_only":
+        with pytest.raises(SummaryOnlyReview):
+            asyncio.run(stage.run(_RUN))
+    else:
+        payload = asyncio.run(stage.run(_RUN))
+        assert payload is not None and stage.payload is payload
 
-    assert payload is not None and stage.payload is payload
     (build,) = [response for tool, _, response in trace.steps if tool == "context.build"]
     # The one row of the attempt is the build's own trace response, key for key.
     assert payloads.rows == [(_RUN, build)]
@@ -2123,10 +2132,13 @@ def test_stage_saves_its_context_build_response_as_the_context_payload(
         "summary_only": ("summary_only", "diff_inventory_incomplete"),
         "rag": ("review", None),
     }[kind]
-    assert build["omissions"] == [
-        {"reason": "ignored", "path": None, "count": 1, "diagnostic_path": None}
-    ]
-    assert [block["level"] for block in build["blocks"]].count("RAG") == (kind == "rag")
+    if kind == "summary_only":
+        assert build["blocks"] == []
+    else:
+        assert build["omissions"] == [
+            {"reason": "ignored", "path": None, "count": 1, "diagnostic_path": None}
+        ]
+        assert [block["level"] for block in build["blocks"]].count("RAG") == (kind == "rag")
 
 
 @pytest.mark.parametrize(

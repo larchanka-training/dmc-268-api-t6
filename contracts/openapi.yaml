@@ -1075,8 +1075,11 @@ components:
         summaryOnly:
           type: boolean
           description: >-
-            The diff exceeded 3000 lines; `/diff` lists the files with `patch: null` and no
-            inline comments are published.
+            The run finished without a line-by-line model review because the diff exceeded
+            3000 lines (`diff_too_large`), the changed-file list was incomplete
+            (`diff_inventory_incomplete`), or nothing left was reviewable
+            (`no_reviewable_files`). `/diff` lists the files with `patch: null` and no
+            inline comments are published. The field stays a boolean.
         pullRequest:
           $ref: "#/components/schemas/PullRequestRef"
         actionCount:
@@ -1153,8 +1156,11 @@ components:
         summaryOnly:
           type: boolean
           description: >-
-            The diff exceeded 3000 lines; `/diff` lists the files with `patch: null` and no
-            inline comments are published.
+            The run finished without a line-by-line model review because the diff exceeded
+            3000 lines (`diff_too_large`), the changed-file list was incomplete
+            (`diff_inventory_incomplete`), or nothing left was reviewable
+            (`no_reviewable_files`). `/diff` lists the files with `patch: null` and no
+            inline comments are published. The field stays a boolean.
         pullRequest:
           $ref: "#/components/schemas/PullRequestRef"
         actionCount:
