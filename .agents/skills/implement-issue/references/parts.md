@@ -60,8 +60,9 @@ an OPEN one does, else **todo**. Closed-unmerged pull requests never count.
 `accept` is the verdict when **all** of this holds; any other state is a `stop` with its reason:
 
 - Every part has a merged pull request (a task without parts: its pull request) and none is open.
-- The issue has no sub-issues. One that has is an **epic**: stop, implement the sub-issues
-  (`issue.sub_issues` has the counts).
+- The issue is no epic. An **epic** has sub-issues and **no parts of its own** (no Scope parts):
+  stop, implement the sub-issues (`issue.sub_issues` has the counts). An issue with its own parts
+  and sub-issues is read by the parts rules; its sub-issues are not counted.
 - The card on board 12 is In Progress, On Review or AC Check (the statuses accept-issue sets AC
   Check from). In Todo, Done or on no Status the work was never started here: stop, the user takes
   the task.

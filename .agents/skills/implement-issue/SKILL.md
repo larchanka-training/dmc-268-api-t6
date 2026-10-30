@@ -22,8 +22,8 @@ model reads the answer; the loop is a numbered sequence with a stop criterion. I
 
 - `gh` authenticated with scopes `repo` and `project` (`gh auth status`); python3 ≥ 3.10
   (stdlib only). Run from the repo root; paths below are from it.
-- gh 2.46 in this org crashes on `gh issue view` without `--json` and on `gh pr edit`
-  (Projects classic): read issues through the scripts, or `gh api`.
+- gh 2.46 in this org crashes on `gh issue view` without `--json` and on `gh pr edit` (Projects
+  classic): read issues through the scripts, or `gh api`.
 - No tracked changes: `git status --porcelain --untracked-files=no` prints nothing. Any tracked
   change: stop and ask what to do with it. Untracked files do not block the run.
 
@@ -60,8 +60,8 @@ Read `verdict`, `reasons`, `warnings`, `selected`.
 
 - **`stop` (exit 1):** report `reasons` verbatim and end the run. Never work around a stop:
   do not pass `--part` to get past a blocker or an open pull request, do not edit the issue,
-  do not drop a blocker. The reasons are one of: the issue is CLOSED; an epic (it has
-  sub-issues: implement those); a native blocker is OPEN (`ref — title`; "closed" means
+  do not drop a blocker. The reasons are one of: the issue is CLOSED; an epic (sub-issues
+  and no parts of its own: implement those); a native blocker is OPEN (`ref — title`; "closed" means
   `state: CLOSED` literally, an issue in AC Check is still open); the parts are not numbered
   1..k; an OPEN pull request with `Refs` names no part of the issue (the user says which part it
   covers, or passes `--part`); the first unfinished part has an open pull request (finish it, or
@@ -71,12 +71,11 @@ Read `verdict`, `reasons`, `warnings`, `selected`.
   **returned at acceptance** or its **self-check found unmet AC** and nothing has been merged
   since (the user passes `--part K` for the part to rework; a task without parts: by hand).
 - **`accept` (exit 1):** not a stop and not a go. The script checked: every part has a merged
-  pull request (a task without parts: its pull request is merged) and none is open, no
-  sub-issues, the card is In Progress, On Review or AC Check, and no return or unmet self-check
-  is pending — say so to the user. Cut no branch, touch no board. Show the `warnings` (an
-  "acceptance criterion names Part N, not in Scope" means parts the Scope does not number: ask
-  first), run the **`accept-issue` skill in author mode** on the same REF (call it, never copy
-  it) and end.
+  pull request (a task without parts: its pull request) and none is open, it is no epic, the card
+  is In Progress, On Review or AC Check, and no return or unmet self-check is pending — say so.
+  Cut no branch, touch no board. Show the `warnings` (an "acceptance criterion names Part N, not
+  in Scope" means parts the Scope does not number: ask first), run the **`accept-issue` skill in
+  author mode** on the same REF (call it, never copy it) and end.
 - **exit 2 or 3:** report the error and end.
 - **`go` (exit 0):** state `selected.part` (null = the whole task) and why (`first-todo`,
   `explicit`, `whole-task`), show every `warnings` line, continue. A missing Kickoff is a
@@ -95,15 +94,13 @@ while OPEN (no `--part`) and is a warning when MERGED or CLOSED or with `--part`
 
 From the preflight JSON, not from memory:
 
-- `kickoff.text` and every file it lists under "read first" (Что прочитать первым / Read first).
-  Open only repo-relative paths that exist in this clone; skip an absolute path, a `..` path or a
-  URL and say so in the report. The "before writing code" items and the traps ("Мины" / Mines)
-  bind the whole run.
+- `kickoff.text` and every file it lists under "read first" (Что прочитать первым / Read first):
+  only repo-relative paths that exist in this clone; skip an absolute path, a `..` path or a URL
+  and say so. The "before writing code" items and the traps ("Мины" / Mines) bind the whole run.
 - The selected part: `scope`, `boundary` (where the PR stops), `done_when` (the stop criterion),
   `acceptance_criteria`, plus `common_acceptance_criteria`. `boundary` and `done_when` are null in
-  older issues, which have no «Граница PR» / «Готово, когда» bullets: say so in the report and
-  work from `scope` plus the part's acceptance criteria; do not invent a boundary. No parts: the
-  issue as a whole.
+  older issues, which have no «Граница PR» / «Готово, когда» bullets: say so and work from
+  `scope` plus the part's acceptance criteria; do not invent a boundary. No parts: the whole issue.
 - The parts that are not selected are out of this run — do not start them "while here".
 - `held` (not null): the issue came back from acceptance. Read that comment first (`returned`: its
   «Что осталось» list; `unmet_table`: the rows marked «не выполнено») with
@@ -145,7 +142,8 @@ Rules: `.agents/rules/git-workflow.md`. Work from a fresh `origin/main`.
 
 A **SYNC part** (`.agents/README.md` § Sync map) is two pull requests with the same `Refs`, ui
 first, then the copy in api once the ui change is final: this step again in the api clone (there
-`origin` must name api), on the same name or the next free one (`references/loop.md` §4).
+`origin` must name api), on the same name or the next free one; the copy is committed before its
+gates and review (`references/loop.md` §4).
 
 ### 4. Board
 
@@ -187,11 +185,13 @@ says the plan / seams are pre-approved counts as the answer.
    open; the part's AC are listed (`acceptance_criteria` of the selected part in the preflight
    JSON; a task without parts: `common_acceptance_criteria`). Round 3 ends with critical/high open:
    **stop, no pull request**, and report them (`references/loop.md` §5).
-7. **Pull request** (`pull-request`): first `git fetch origin && git rebase origin/main` (the gates
-   again if it changed anything). The work is committed already: commit only what is left. `Refs`,
-   the first line of `What` as in the next section, the AC list, the review summary (rounds, the
-   medium / low / info list). A SYNC part is two pull requests, ui first (`references/loop.md` §4).
-   Pushing and `gh pr create` may need the human's confirmation: ask, never bypass.
+7. **Pull request** (`pull-request`): first `git fetch origin && git rebase origin/main` (gates
+   again if it changed anything; on a conflict `git rebase --abort`, stop and ask — never
+   `--skip`, `-X` or a push of an unreviewed resolution). The work is committed already, a SYNC
+   copy too: commit only what is left. `Refs`, the first line of `What` as in the next section,
+   the AC list, the review summary (rounds, the medium / low / info list). A SYNC part is two pull
+   requests, ui first (`references/loop.md` §4). Pushing and `gh pr create` may need the human's
+   confirmation: ask, never bypass.
 
 ### 6. Hand-over
 
