@@ -775,8 +775,11 @@ jobs:
           immutable="${{ steps.tags.outputs.immutable }}"
           docker tag "${LOCAL_IMAGE}" "${immutable}"
           docker push "${immutable}"
-          image_ref="$(docker inspect --format='{{index .RepoDigests 0}}' "${immutable}")"
-          if [[ -z "${image_ref}" || "${image_ref}" == "<no value>" ]]; then
+          # The containerd image store also lists a digest for the loaded local name:
+          # keep only the pushed repository's entry.
+          image_ref="$(docker inspect --format='{{range .RepoDigests}}{{println .}}{{end}}' "${immutable}" \
+            | awk -v repository="${immutable%:*}" 'index($0, repository "@sha256:") == 1')"
+          if [[ ! "${image_ref}" =~ ^[^[:space:]]+@sha256:[a-f0-9]{64}$ ]]; then
             echo "failed to resolve pushed image digest for ${immutable}" >&2
             exit 1
           fi
