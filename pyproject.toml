@@ -54,6 +54,13 @@ strict = true
 # checked by an explicit command: see `.agents/skills/create-issue/SKILL.md`.
 files = ["app", "tests"]
 
+# The #146 eval test fixtures (tests/fixtures/rag_eval, the Task 1 spike) are repositories
+# under review: a case's defect is real code, so type errors in them are the point, not a
+# finding. This covers these fixtures only.
+[[tool.mypy.overrides]]
+module = "tests.fixtures.rag_eval.*"
+ignore_errors = true
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
