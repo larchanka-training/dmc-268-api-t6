@@ -19,7 +19,11 @@ from app.modules.integrations.gitlab.application.request_credentials import (
 )
 from app.modules.reviews.application.determine_ci_eligibility import WebhookRunIdentity
 from app.modules.reviews.application.project_github_pull_request import RunCancellationNotice
-from app.modules.reviews.application.try_enqueue_webhook_run import EnqueueResult
+from app.modules.reviews.application.try_enqueue_webhook_run import (
+    UNSET,
+    EnqueueResult,
+    UnsetType,
+)
 
 
 class GitLabMergeRequestAction(StrEnum):
@@ -293,6 +297,7 @@ class GitLabRunEnqueuer(Protocol):
         expected_head_sha: str,
         *,
         expected_identity: WebhookRunIdentity | None = None,
+        triggered_by: str | None | UnsetType = UNSET,
     ) -> EnqueueResult: ...
 
 

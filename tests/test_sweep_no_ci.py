@@ -12,8 +12,10 @@ import pytest
 
 from app.modules.reviews.application.sweep_no_ci import DueNoCiCandidate, SweepNoCi
 from app.modules.reviews.application.try_enqueue_webhook_run import (
+    UNSET,
     EnqueueResult,
     EnqueueStatus,
+    UnsetType,
 )
 from tests.trigger_uow import candidates_uow
 
@@ -40,7 +42,13 @@ class Enqueuer:
     result: EnqueueResult
     calls: list[DueNoCiCandidate] = field(default_factory=list)
 
-    async def execute(self, code_change_id: UUID, expected_head_sha: str) -> EnqueueResult:
+    async def execute(
+        self,
+        code_change_id: UUID,
+        expected_head_sha: str,
+        *,
+        triggered_by: str | None | UnsetType = UNSET,
+    ) -> EnqueueResult:
         self.calls.append(DueNoCiCandidate(code_change_id, expected_head_sha))
         return self.result
 

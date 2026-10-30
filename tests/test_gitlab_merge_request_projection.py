@@ -51,7 +51,12 @@ from app.modules.reviews.application.project_gitlab_merge_request import (
     LockedGitLabMergeRequest,
     ProjectGitLabMergeRequest,
 )
-from app.modules.reviews.application.try_enqueue_webhook_run import EnqueueResult, EnqueueStatus
+from app.modules.reviews.application.try_enqueue_webhook_run import (
+    UNSET,
+    EnqueueResult,
+    EnqueueStatus,
+    UnsetType,
+)
 
 TARGET = BoundGitLabTarget(UUID(int=1), UUID(int=2), UUID(int=3), "https://gitlab.example", 17, 1)
 COMMAND = GitLabMergeRequestCommand(UUID(int=1), 17, 901, 12, "open")
@@ -548,6 +553,7 @@ class Enqueuer:
         expected_head_sha: str,
         *,
         expected_identity: WebhookRunIdentity | None = None,
+        triggered_by: str | None | UnsetType = UNSET,
     ) -> EnqueueResult:
         assert not self.lock.active
         assert self.uow.commits > 0

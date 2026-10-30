@@ -44,6 +44,7 @@ const diff = await load('src/entities/diff/model/schemas.ts')
 const repository = await load('src/entities/repository/model/schemas.ts')
 const review = await load('src/entities/review/model/schemas.ts')
 const run = await load('src/entities/run/model/schemas.ts')
+const metrics = await load('src/entities/metrics/model/schemas.ts')
 const user = await load('src/entities/user/model/schemas.ts')
 
 const git = (...args) => execFileSync('git', ['-C', uiDir, ...args], { encoding: 'utf8' }).trim()
@@ -69,6 +70,7 @@ const sources = {
   fileSlice: diff.FileSliceSchema,
   authSession: user.AuthSessionSchema,
   me: user.MeSchema,
+  metricsSummary: metrics.MetricsSummarySchema,
 }
 
 const schemaNames = process.env.SCHEMA_NAMES?.split(',') ?? Object.keys(sources)

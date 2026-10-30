@@ -108,7 +108,11 @@ class GetRunDetail:
             severity_counts=severity_counts(severities),
             budget=(
                 RunBudget(
-                    review.tokens_in, review.tokens_out, review.cost_usd, token_limit, cost_limit
+                    run.usage.tokens_in,
+                    run.usage.tokens_out,
+                    run.usage.cost_usd,
+                    token_limit,
+                    cost_limit,
                 )
                 if review.usage_calls
                 else None

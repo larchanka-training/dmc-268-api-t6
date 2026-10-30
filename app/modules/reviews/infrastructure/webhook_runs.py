@@ -7,7 +7,7 @@ from datetime import datetime
 from hashlib import sha256
 from uuid import UUID, uuid4
 
-from sqlalchemy import and_, func, or_, select, update
+from sqlalchemy import and_, func, literal_column, or_, select, union_all, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -26,6 +26,7 @@ from app.modules.integrations.gitlab.infrastructure.models import (
 from app.modules.integrations.gitlab.infrastructure.request_credentials import (
     active_gitlab_target_metadata,
 )
+from app.modules.integrations.webhooks.infrastructure.models import WebhookEvent
 from app.modules.repositories.infrastructure.models import (
     ProviderInstallation,
     Repository,
@@ -38,11 +39,13 @@ from app.modules.reviews.application.determine_ci_eligibility import (
 )
 from app.modules.reviews.application.project_github_pull_request import PullRequestState
 from app.modules.reviews.application.try_enqueue_webhook_run import (
+    UNSET,
     ActiveRunBlocker,
     CandidateMiss,
     DuplicateReason,
     PendingRunMessage,
     RunInsertCandidate,
+    UnsetType,
 )
 from app.modules.reviews.infrastructure.gitlab_eligibility_candidates import (
     read_gitlab_eligibility_candidate,
@@ -229,7 +232,11 @@ class SqlAlchemyWebhookRunStore:
         return ci, pr, repository, installation
 
     async def insert_webhook_run(
-        self, candidate: RunInsertCandidate, now: datetime
+        self,
+        candidate: RunInsertCandidate,
+        now: datetime,
+        *,
+        triggered_by: str | None | UnsetType = UNSET,
     ) -> PendingRunMessage | DuplicateReason | ActiveRunBlocker:
         code_change_id = candidate.ci.code_change_id
         active = await self._session.scalar(
@@ -240,6 +247,7 @@ class SqlAlchemyWebhookRunStore:
         )
         if active is not None:
             return ActiveRunBlocker(active.head_sha, active.cancel_requested)
+        login = await self._push_author(candidate) if triggered_by is UNSET else triggered_by
         idempotency_key = sha256(
             f"webhook:{code_change_id}:{candidate.ci.head_sha}".encode()
         ).hexdigest()
@@ -268,6 +276,7 @@ class SqlAlchemyWebhookRunStore:
                 cancel_requested=False,
                 message_published_at=None,
                 created_at=now,
+                triggered_by=login,
             )
             # ``head_already_reviewed`` is inferred from any unique violation here. That is safe
             # only because the PR row lock and the active-Run pre-check above make
@@ -279,6 +288,40 @@ class SqlAlchemyWebhookRunStore:
         if inserted is None:
             return DuplicateReason.HEAD_ALREADY_REVIEWED
         return PendingRunMessage.from_candidate(inserted, candidate, now)
+
+    async def _push_author(self, candidate: RunInsertCandidate) -> str | None:
+        if candidate.provider != "github":
+            return None
+        login = WebhookEvent.payload["sender"]["login"].as_string()
+        received = WebhookEvent.received_at
+        shared = (
+            WebhookEvent.payload.is_not(None),
+            WebhookEvent.installation_external_id == candidate.ci.installation_external_id,
+            WebhookEvent.payload["repository"]["id"].as_string()
+            == str(candidate.repository_external_id),
+        )
+        # Fixed paths and event predicates must stay literal: the receipt indexes
+        # are partial expression indexes, including under a generic PostgreSQL plan.
+        pull_head = WebhookEvent.payload.op("#>>")(
+            literal_column("'{pull_request,head,sha}'::text[]")
+        )
+        push_after = WebhookEvent.payload.op("#>>")(literal_column("'{after}'::text[]"))
+        synchronize = select(login.label("login"), received.label("received_at")).where(
+            WebhookEvent.event == literal_column("'pull_request'"),
+            WebhookEvent.action == literal_column("'synchronize'"),
+            pull_head == candidate.ci.head_sha,
+            *shared,
+        )
+        push = select(login.label("login"), received.label("received_at")).where(
+            WebhookEvent.event == literal_column("'push'"),
+            push_after == candidate.ci.head_sha,
+            *shared,
+        )
+        receipts = union_all(synchronize, push).subquery()
+        found = await self._session.scalar(
+            select(receipts.c.login).order_by(receipts.c.received_at.desc()).limit(1)
+        )
+        return found if isinstance(found, str) else None
 
     async def notify_run_updated(self, run_id: UUID, workspace_id: UUID, status: str) -> None:
         payload = json.dumps(

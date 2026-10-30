@@ -50,6 +50,22 @@ class WebhookEvent(Base):
             "projection_attempt_count >= 0",
             name="ck_webhook_events_projection_attempt_count_nonnegative",
         ),
+        # Postgres deparses #>> with ::text[]. Alembic's compare keeps that cast,
+        # so the model expression has to include it or metadata compare drifts.
+        Index(
+            "ix_webhook_events_pull_request_head",
+            "installation_external_id",
+            text("(payload #>> '{pull_request,head,sha}'::text[])"),
+            postgresql_where=text(
+                "event = 'pull_request' AND action = 'synchronize' AND payload IS NOT NULL"
+            ),
+        ),
+        Index(
+            "ix_webhook_events_push_after",
+            "installation_external_id",
+            text("(payload #>> '{after}'::text[])"),
+            postgresql_where=text("event = 'push' AND payload IS NOT NULL"),
+        ),
         Index(
             "ix_webhook_events_pending_retry",
             "retry_after",
