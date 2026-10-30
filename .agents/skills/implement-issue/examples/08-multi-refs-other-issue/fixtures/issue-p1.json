@@ -1,0 +1,92 @@
+{
+  "data": {
+    "repository": {
+      "issue": {
+        "title": "[reviews] Pass the policy snapshot and the L1-L4 context to the prompt",
+        "url": "https://github.com/larchanka-training/dmc-268-api-t6/issues/130",
+        "state": "OPEN",
+        "body": "## Background\n\nThe findings of the acceptance of the review-context task, filed as six parts. (Synthetic skeleton: the structure of api#168, shortened and relabelled `Part N`.)\n\n## Scope\n\n- Part 1 (PR): an excluded file must not reach the prompt\n- Part 2 (PR): the Go resolver and parse errors\n- Part 3 (PR): the pinned base of the DiffMap\n- Part 4 (PR): documentation and the test strategy\n- Part 5: the live check on staging\n- Part 6 (PR): hardening and cleanup, including the trace\n\n## Acceptance Criteria\n\n- [ ] Part 1: an excluded file is in no prompt\n- [ ] Part 2: a parse failure forbids `resolved`\n- [ ] Part 3: the DiffMap base equals the pinned base\n- [ ] Part 4: the docs describe the runtime\n- [ ] Part 5: the staging run is linked\n- [ ] Part 6: `context.build` is written once per attempt\n\n## Kickoff — с чего начать\n\n**Репозиторий:** larchanka-training/dmc-268-api-t6\n\n**Ветка:** `fix/<n>-review-context-findings`\n\n**Что прочитать первым:**\n\n- `docs/BACKEND_ARCHITECTURE.md`\n",
+        "assignees": {
+          "nodes": [
+            {
+              "login": "axyi"
+            }
+          ]
+        },
+        "projectItems": {
+          "pageInfo": {
+            "hasNextPage": false,
+            "endCursor": "MQ"
+          },
+          "nodes": [
+            {
+              "project": {
+                "number": 12,
+                "owner": {
+                  "__typename": "Organization",
+                  "login": "larchanka-training"
+                }
+              },
+              "fieldValueByName": {
+                "__typename": "ProjectV2ItemFieldSingleSelectValue",
+                "name": "In Progress"
+              }
+            }
+          ]
+        },
+        "blockedBy": {
+          "pageInfo": {
+            "hasNextPage": false,
+            "endCursor": null
+          },
+          "nodes": []
+        },
+        "timelineItems": {
+          "pageInfo": {
+            "hasNextPage": false,
+            "endCursor": "MQ"
+          },
+          "nodes": [
+            {
+              "__typename": "CrossReferencedEvent",
+              "source": {
+                "__typename": "PullRequest",
+                "number": 346,
+                "title": "fix(reviews): record context.build once per attempt (#168)",
+                "url": "https://github.com/larchanka-training/dmc-268-api-t6/pull/346",
+                "body": "## What\n\nThe trace and output items of #168 part 6 (PR F3 of the #130 remainder). Four code commits after the plan commit:\n\n## Refs\n\nRefs #168\nRefs #130\nRefs larchanka-training/dmc-268-ui-t6#199\n",
+                "state": "MERGED",
+                "mergedAt": "2026-10-27T20:11:29Z",
+                "repository": {
+                  "nameWithOwner": "larchanka-training/dmc-268-api-t6"
+                }
+              }
+            },
+            {
+              "__typename": "CrossReferencedEvent",
+              "source": {
+                "__typename": "PullRequest",
+                "number": 353,
+                "title": "docs: describe the runtime after F1–F5 and #168 part 4 (#130)",
+                "url": "https://github.com/larchanka-training/dmc-268-api-t6/pull/353",
+                "body": "## What\n\nG2, the second docs PR of the #130 remainder. The docs now describe the runtime as built after F1–F5 (#328, #332, #346,\n\n## Refs\n\nRefs #130\nRefs #168\n",
+                "state": "MERGED",
+                "mergedAt": "2026-10-28T14:45:13Z",
+                "repository": {
+                  "nameWithOwner": "larchanka-training/dmc-268-api-t6"
+                }
+              }
+            }
+          ]
+        },
+        "comments": {
+          "pageInfo": {
+            "hasNextPage": false,
+            "endCursor": null
+          },
+          "nodes": []
+        }
+      }
+    }
+  }
+}

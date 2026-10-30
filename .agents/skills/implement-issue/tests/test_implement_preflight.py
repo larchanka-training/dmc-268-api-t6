@@ -6,10 +6,12 @@ seam (`IMPLEMENT_ISSUE_FIXTURE_DIR`) or a test's own fake is an error, never a c
 
 Covers: every `examples/*/` case (stdout byte-equal to `expected.json`, exit code from
 the verdict, the invocation read from the case's README); synthetic issues for the
-selection rules, the `Refs` matcher, the way a pull request names a part, malformed
-numbering, paging of blockers and of the timeline past one page, the Kickoff and the
-board Status; the REF grammar, exit codes 2 and 3, and the argv and queries the script
-hands to `gh` (read-only, never a mutation).
+selection rules, the `Refs` matcher, the way a pull request names a part (ranges, lists,
+`of <ref>`, the tie of a pull request with several issues, the `What` heading, numbers past
+nine digits), malformed numbering, paging of blockers, of the timeline and of the comments
+past one page, the Kickoff and the board Status; the third verdict, `accept`, and the issue
+returned at acceptance; the REF grammar, exit codes 2 and 3, and the argv and queries the
+script hands to `gh` (read-only, never a mutation); the branch pattern of the skill texts.
 """
 # SYNC: mirrored in dmc-268-{ui,api}-t6/.agents/skills/implement-issue/tests/test_implement_preflight.py  # noqa: E501
 
@@ -20,6 +22,7 @@ import json
 import os
 import re
 import shlex
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -116,6 +119,9 @@ def blocker(number: int, state: str = "OPEN", repo: str = API, title: str = "") 
     }
 
 
+MERGED_AT = "2026-10-20T12:00:00Z"
+
+
 def pr(
     number: int,
     *,
@@ -123,8 +129,10 @@ def pr(
     body: str = "",
     state: str = "MERGED",
     repo: str = API,
+    merged_at: str | None = MERGED_AT,
 ) -> dict[str, Any]:
-    """A CrossReferencedEvent whose source is a pull request."""
+    """A CrossReferencedEvent whose source is a pull request (`merged_at` only counts
+    for a MERGED one)."""
     return {
         "__typename": "CrossReferencedEvent",
         "source": {
@@ -134,6 +142,7 @@ def pr(
             "url": f"https://github.com/{repo}/pull/{number}",
             "body": body,
             "state": state,
+            "mergedAt": merged_at if state == "MERGED" else None,
             "repository": {"nameWithOwner": repo},
         },
     }
@@ -156,16 +165,26 @@ def project_item(
     }
 
 
+def comment(body: str, created_at: str = "2026-10-21T09:00:00Z", number: int = 1) -> dict[str, Any]:
+    return {
+        "url": f"https://github.com/{API}/issues/13#issuecomment-{number}",
+        "createdAt": created_at,
+        "body": body,
+    }
+
+
 def issue_response(
     *,
     body: str = "",
     state: str = "OPEN",
     blocked: list[dict[str, Any]] | None = None,
     timeline: list[dict[str, Any]] | None = None,
+    comments: list[dict[str, Any]] | None = None,
     items: list[dict[str, Any]] | None = None,
     assignees: tuple[str, ...] = ("axyi",),
     blocked_next: str | None = None,
     timeline_next: str | None = None,
+    comments_next: str | None = None,
 ) -> dict[str, Any]:
     return {
         "data": {
@@ -185,6 +204,10 @@ def issue_response(
                         "pageInfo": page_info(timeline_next),
                         "nodes": timeline or [],
                     },
+                    "comments": {
+                        "pageInfo": page_info(comments_next),
+                        "nodes": comments or [],
+                    },
                 }
             }
         }
@@ -196,6 +219,9 @@ def follow_up(field: str, nodes: list[dict[str, Any]], next_cursor: str | None) 
     return {"data": {"repository": {"issue": {field: connection}}}}
 
 
+TABLE = "<!-- accept-issue:table v1 -->"
+ACCEPTED = "<!-- accept-issue:accepted v1 -->"
+RETURNED = "<!-- accept-issue:returned v1 -->"
 KICKOFF = "\n## Kickoff — с чего начать\n\n**Ветка:** `feat/<n>-x`\n"
 TWO_PARTS = (
     "## Scope\n\n"
@@ -259,13 +285,14 @@ def test_example(case: str) -> None:
     assert r.returncode == (0 if json.loads(expected)["verdict"] == "go" else 1)
 
 
-def test_the_examples_cover_the_four_decisions() -> None:
+def test_the_examples_cover_every_decision() -> None:
     seen = set()
     for case in CASES:
         doc = json.loads((EXAMPLES / case / "expected.json").read_text(encoding="utf-8"))
         seen.add((doc["verdict"], (doc["selected"] or {}).get("reason")))
     assert {
         ("stop", None),
+        ("accept", None),
         ("go", "whole-task"),
         ("go", "first-todo"),
         ("go", "explicit"),
@@ -516,7 +543,7 @@ def named_in(
         ("ч.2: y", "", [2]),
         ("Ч. 2: y", "", [2]),
         ("Part 1 and Part 2", "", [1, 2]),
-        ("Parts 1 and 2", "", []),  # only `Part K` / `Ч.K` forms
+        ("Parts 1 and 2", "", [1, 2]),  # a plural label with a list names every part
         ("Part 2.5", "", [2]),
         ("Counterpart 2", "", []),
         ("Part 3 of #13: nonexistent", "", []),
@@ -555,9 +582,9 @@ def named_in(
         ("Участью 2", "", []),
         ("Часть первая", "", []),
         ("feat: y", "Anteil 2 of #13", []),
-        # a plural or a range names no single part, whatever the label
+        # a range names no single part, whatever the label
         ("Parts 1–3", "", []),
-        ("Parts 1 and 2", "", []),
+        ("Parts 1", "", []),  # a plural label alone is no mention
         ("Части 1–3", "", []),
         ("Части 1-3", "", []),
         ("Ч.1–3: y", "", []),
@@ -900,7 +927,7 @@ def test_a_merged_or_closed_pull_request_that_names_no_part_is_only_a_warning(
 
 @pytest.mark.parametrize(
     "title",
-    ["Part 3 of #13: no such part", "Parts 1–2 of #13", "Частей 1 и 2", "Части 1–2 of #13"],
+    ["Part 3 of #13: no such part", "Parts 1–2 of #13", "Частей 3 и 4", "Части 1–2 of #13"],
 )
 def test_an_open_pull_request_naming_a_part_the_issue_lacks_or_a_range_stops(
     tmp_path: Path, title: str
@@ -985,11 +1012,37 @@ def test_an_open_pull_request_on_a_later_part_does_not_skip_an_earlier_todo(
     assert (code, doc["selected"]) == (0, {"part": 1, "reason": "first-todo"})
 
 
-def test_every_part_done_stops(tmp_path: Path) -> None:
+def test_every_part_done_is_accept(tmp_path: Path) -> None:
     code, doc = two_part_run(tmp_path, {1: ["MERGED"], 2: ["MERGED"]})
-    assert code == 1
+    assert (code, doc["verdict"], doc["selected"]) == (1, "accept", None)
     assert doc["reasons"] == ["every part has a merged pull request — acceptance is next"]
-    assert doc["selected"] is None
+    assert [p["status"] for p in doc["parts"]] == ["done", "done"]
+
+
+def test_a_done_part_with_a_second_open_pull_request_is_not_accept(tmp_path: Path) -> None:
+    # status_of says `done` for MERGED + OPEN, but an open rework PR still has to land.
+    code, doc = two_part_run(tmp_path, {1: ["MERGED", "OPEN"], 2: ["MERGED"]})
+    assert (code, doc["verdict"], doc["selected"]) == (1, "stop", None)
+    assert doc["reasons"] == [
+        "every part has a merged pull request, but pull requests are still open: "
+        f"{API}#101 (OPEN) — finish them first"
+    ]
+    # ...once per pull request, however many parts it names
+    timeline = [
+        refs_pr(100, "x", title="Parts 1 and 2 of #13"),
+        refs_pr(101, "x", title="Part 1 and Part 2 of #13", state="OPEN"),
+    ]
+    code, doc = facts(tmp_path, issue_response(body=TWO_PARTS, timeline=timeline))
+    assert (code, doc["verdict"]) == (1, "stop")
+    assert doc["reasons"] == [
+        "every part has a merged pull request, but pull requests are still open: "
+        f"{API}#101 (OPEN) — finish them first"
+    ]
+
+
+def test_an_explicit_part_is_taken_when_acceptance_is_next(tmp_path: Path) -> None:
+    code, doc = two_part_run(tmp_path, {1: ["MERGED"], 2: ["MERGED"]}, "--part", "1")
+    assert (code, doc["verdict"], doc["selected"]) == (0, "go", {"part": 1, "reason": "explicit"})
 
 
 def test_an_explicit_part_is_always_taken(tmp_path: Path) -> None:
@@ -1045,16 +1098,36 @@ def test_no_parts_takes_the_whole_task(tmp_path: Path) -> None:
     assert doc["warnings"] == []
 
 
-@pytest.mark.parametrize("state", ["OPEN", "MERGED"])
-def test_no_parts_and_a_pull_request_with_refs_stops(tmp_path: Path, state: str) -> None:
-    timeline = [refs_pr(50, "the thing", state=state), refs_pr(51, "no refs", refs="-")]
+def test_no_parts_and_an_open_pull_request_with_refs_stops(tmp_path: Path) -> None:
+    timeline = [refs_pr(50, "the thing", state="OPEN"), refs_pr(51, "no refs", refs="-")]
     code, doc = facts(tmp_path, issue_response(body="## Scope\n\n- x\n", timeline=timeline))
-    assert code == 1
+    assert (code, doc["verdict"], doc["selected"]) == (1, "stop", None)
     assert doc["reasons"] == [
         "the task has no parts and already has a pull request with Refs: "
-        f"{API}#50 ({state}) — a rework PR is a human decision"
+        f"{API}#50 (OPEN) — a rework PR is a human decision"
     ]
     assert [p["ref"] for p in doc["task_prs"]] == [f"{API}#50"]
+
+
+def test_no_parts_and_a_merged_pull_request_with_refs_is_accept(tmp_path: Path) -> None:
+    timeline = [refs_pr(50, "the thing"), refs_pr(51, "no refs", refs="-")]
+    code, doc = facts(tmp_path, issue_response(body="## Scope\n\n- x\n", timeline=timeline))
+    assert (code, doc["verdict"], doc["selected"]) == (1, "accept", None)
+    assert doc["reasons"] == [
+        f"the task has no parts and its pull request with Refs is merged: {API}#50 (MERGED)"
+        " — acceptance is next"
+    ]
+    assert [p["ref"] for p in doc["task_prs"]] == [f"{API}#50"]
+
+
+def test_no_parts_with_a_merged_and_an_open_pull_request_stops(tmp_path: Path) -> None:
+    timeline = [refs_pr(50, "the thing"), refs_pr(52, "a rework", state="OPEN")]
+    code, doc = facts(tmp_path, issue_response(body="## Scope\n\n- x\n", timeline=timeline))
+    assert (code, doc["verdict"]) == (1, "stop")
+    assert doc["reasons"] == [
+        "the task has no parts and already has a pull request with Refs: "
+        f"{API}#50 (MERGED), {API}#52 (OPEN) — a rework PR is a human decision"
+    ]
 
 
 def test_no_parts_and_only_a_closed_pull_request_goes(tmp_path: Path) -> None:
@@ -1385,6 +1458,14 @@ def _corrupt(path: list[str | int], value: Any) -> dict[str, Any]:
         _corrupt(["timelineItems", "nodes", 0, "source", "number"], "1"),
         _corrupt(["timelineItems", "nodes", 0, "source", "title"], None),
         _corrupt(["timelineItems", "pageInfo"], {"hasNextPage": True, "endCursor": None}),
+        _corrupt(["comments"], None),
+        _corrupt(["comments", "nodes"], "not a list"),
+        _corrupt(["comments", "nodes"], [comment(RETURNED) | {"url": None}]),
+        _corrupt(["comments", "nodes"], [comment(RETURNED) | {"createdAt": "yesterday"}]),
+        _corrupt(["comments", "nodes"], [comment(RETURNED) | {"createdAt": None}]),
+        _corrupt(["timelineItems", "nodes", 0, "source", "mergedAt"], None),
+        _corrupt(["timelineItems", "nodes", 0, "source", "mergedAt"], "2026-10-20"),
+        _corrupt(["timelineItems", "nodes", 0, "source", "mergedAt"], 5),
     ],
     ids=[
         "state",
@@ -1398,6 +1479,14 @@ def _corrupt(path: list[str | int], value: Any) -> dict[str, Any]:
         "pr-number",
         "pr-title",
         "no-cursor",
+        "comments-missing",
+        "comments-nodes",
+        "comment-url",
+        "comment-created-at",
+        "comment-created-at-null",
+        "merged-at-null-for-a-merged-pr",
+        "merged-at-not-a-timestamp",
+        "merged-at-not-a-string",
     ],
 )
 def test_unexpected_shape_exits_3(tmp_path: Path, response: dict[str, Any]) -> None:
@@ -1416,12 +1505,14 @@ def test_a_board_item_list_with_a_second_page_exits_3(tmp_path: Path) -> None:
     assert "more than one page" in error_of(r)
 
 
-@pytest.mark.parametrize("name", ["blocked-p2", "timeline-p2"])
+@pytest.mark.parametrize("name", ["blocked-p2", "timeline-p2", "comments-p2"])
 def test_a_missing_second_page_exits_3(tmp_path: Path, name: str) -> None:
     if name.startswith("blocked"):
         response = issue_response(blocked_next="C1")
-    else:
+    elif name.startswith("timeline"):
         response = issue_response(timeline_next="C1")
+    else:
+        response = issue_response(comments_next="C1")
     write(tmp_path, "issue-p1", response)
     r = run("api#1", fixtures=tmp_path)
     assert r.returncode == 3
@@ -1438,7 +1529,14 @@ with open(os.environ["GH_LOG"], "a", encoding="utf-8") as log:
     log.write(json.dumps(argv) + "\\n")
 fields = dict(a.split("=", 1) for a in argv if "=" in a and not a.startswith("query="))
 cursor = fields.get("c")
-names = {None: "issue-p1", "B1": "blocked-p2", "B2": "blocked-p3", "T1": "timeline-p2"}
+names = {
+    None: "issue-p1",
+    "B1": "blocked-p2",
+    "B2": "blocked-p3",
+    "T1": "timeline-p2",
+    "M1": "comments-p2",
+    "M2": "comments-p3",
+}
 sys.stdout.write(Path(os.environ["FAKE_DIR"], names[cursor] + ".json").read_text(encoding="utf-8"))
 """
 
@@ -1486,10 +1584,16 @@ ISSUE_QUERY_TEXT = squash(
               ... on CrossReferencedEvent {
                 source {
                   __typename
-                  ... on PullRequest { number title url body state repository { nameWithOwner } }
+                  ... on PullRequest {
+                    number title url body state mergedAt repository { nameWithOwner }
+                  }
                 }
               }
             }
+          }
+          comments(first: 100) {
+            pageInfo { hasNextPage endCursor }
+            nodes { url createdAt body }
           }
         }
       }
@@ -1522,10 +1626,26 @@ TIMELINE_QUERY_TEXT = squash(
               ... on CrossReferencedEvent {
                 source {
                   __typename
-                  ... on PullRequest { number title url body state repository { nameWithOwner } }
+                  ... on PullRequest {
+                    number title url body state mergedAt repository { nameWithOwner }
+                  }
                 }
               }
             }
+          }
+        }
+      }
+    }
+    """
+)
+COMMENTS_QUERY_TEXT = squash(
+    """
+    query($owner: String!, $name: String!, $number: Int!, $c: String) {
+      repository(owner: $owner, name: $name) {
+        issue(number: $number) {
+          comments(first: 100, after: $c) {
+            pageInfo { hasNextPage endCursor }
+            nodes { url createdAt body }
           }
         }
       }
@@ -1587,3 +1707,560 @@ def test_timeline_follow_up_query(tmp_path: Path, monkeypatch: pytest.MonkeyPatc
     assert len(calls) == 2 and "c=T1" in calls[1]
     assert flat_query(calls[1]) == TIMELINE_QUERY_TEXT
     assert "mutation" not in flat_query(calls[1])
+
+
+def test_comments_follow_up_query_and_paging(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fx = tmp_path / "fx"
+    write(fx, "issue-p1", issue_response(comments=[comment("a")], comments_next="M1"))
+    write(fx, "comments-p2", follow_up("comments", [comment("b")], "M2"))
+    write(fx, "comments-p3", follow_up("comments", [comment(RETURNED + "\n\nback")], None))
+    log = tmp_path / "gh.log"
+    prepend_path(monkeypatch, fake_gh(tmp_path / "bin", GH_LOG_FAKE))
+    monkeypatch.setenv("GH_LOG", str(log))
+    monkeypatch.setenv("FAKE_DIR", str(fx))
+    r = run("api#13")
+    assert r.returncode == 0, r.stderr
+    calls = [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()]
+    assert len(calls) == 3 and "c=M1" in calls[1] and "c=M2" in calls[2]
+    assert flat_query(calls[1]) == COMMENTS_QUERY_TEXT == flat_query(calls[2])
+    for argv in calls:
+        assert "mutation" not in " ".join(argv)
+
+
+# ─── numbers read from text are bounded (7a) ────────────────────────────────
+HUGE = "9" * 5000  # `int()` raises on this; the script must not even try
+
+
+def _ok(
+    tmp_path: Path, response: dict[str, Any], *args: str, ref: str = "api#13"
+) -> dict[str, Any]:
+    """Run on a one-page issue: a clean exit 0 or 1 with a document, never a traceback."""
+    _, doc = facts(tmp_path, response, *args, ref=ref)
+    return doc
+
+
+@pytest.mark.parametrize(
+    ("title", "what", "refs", "expected"),
+    [
+        (f"Part {HUGE}: x", "", "Refs #13", []),
+        (f"Ч.{HUGE}: x", "", "Refs #13", []),
+        (f"Parts 1 and {HUGE}", "", "Refs #13", [1]),  # the number in range still counts
+        (f"Parts {HUGE}–{HUGE}", "", "Refs #13", []),
+        ("feat: y", f"Part {HUGE} of #13: x", "Refs #13", []),
+        # out of range, the ref names no issue: the part is not this issue's, tied or not
+        ("feat: y", f"Part 2 of #{HUGE}: x", "Refs #13", []),
+        ("feat: y", f"Part 2 of **#{HUGE}**: x", "Refs #13", []),
+        ("feat: y", f"Part 2 of [#{HUGE}](https://example.test/{HUGE}): x", "Refs #13", []),
+        ("feat: y", f"#{HUGE} part 2", "Refs #13, #14", []),
+        ("feat: y", f"Part 2 of api#{HUGE}", "Refs #13, #14", []),
+        # an out-of-range Refs token is no issue: two real ones remain, `Part 2` is untied
+        ("feat: y", "Part 2", f"Refs #13, #{HUGE}, #14", []),
+    ],
+)
+def test_a_huge_number_names_nothing_and_never_raises(
+    tmp_path: Path, title: str, what: str, refs: str, expected: list[int]
+) -> None:
+    node = refs_pr(40, what, title=title, refs=refs)
+    doc = _ok(tmp_path, issue_response(body=TWO_PARTS, timeline=[node]))
+    assert [p["n"] for p in doc["parts"] if p["prs"]] == expected
+    assert doc["verdict"] == "go"
+
+
+def test_a_huge_number_in_a_refs_line_is_no_issue(tmp_path: Path) -> None:
+    node = refs_pr(40, "the thing", refs=f"Refs #{HUGE}")
+    doc = _ok(tmp_path, issue_response(body="## Scope\n\n- x\n", timeline=[node]))
+    assert doc["task_prs"] == []
+    assert doc["selected"] == {"part": None, "reason": "whole-task"}
+    # one real issue and one out of range: a single-Refs pull request
+    node = refs_pr(41, "Part 2 of #13: x", refs=f"Refs #13, #{HUGE}")
+    doc = _ok(tmp_path, issue_response(body=TWO_PARTS, timeline=[node]))
+    assert [p["n"] for p in doc["parts"] if p["prs"]] == [2]
+
+
+def test_a_huge_number_in_the_issue_names_no_part(tmp_path: Path) -> None:
+    scope = f"## Scope\n\n- Ч.1 (PR): first\n- Ч.{HUGE} (PR): nowhere\n- Ч.2 (PR): second\n"
+    criteria = f"\n## Acceptance Criteria\n\n- [ ] Ч.{HUGE}: lost\n- [ ] Ч.1: kept\n"
+    doc = _ok(tmp_path, issue_response(body=scope + criteria + KICKOFF))
+    assert [p["n"] for p in doc["parts"]] == [1, 2]
+    assert doc["parts"][0]["acceptance_criteria"] == ["kept"]
+    assert doc["warnings"] == ["acceptance criterion names a part number out of range"]
+
+
+@pytest.mark.parametrize("ref", [f"api#{HUGE}", HUGE, f"{API}#{HUGE}", "api#1" + "0" * 9])
+def test_a_huge_ref_is_a_bad_ref_and_never_reaches_gh(ref: str) -> None:
+    r = run(ref)
+    assert r.returncode == 2
+    assert len(error_of(r)) < 200
+
+
+def test_a_huge_part_exits_2(tmp_path: Path) -> None:
+    write(tmp_path / "fx", "issue-p1", issue_response(body=TWO_PARTS))
+    r = run("api#13", "--part", HUGE, fixtures=tmp_path / "fx")
+    assert r.returncode == 2
+    error_of(r)
+
+
+def test_the_largest_number_is_still_a_number() -> None:
+    assert pf.parse_ref("api#999999999") == (API, 999999999)
+    assert pf.to_int("999999999") == 999999999
+    assert pf.to_int("0000000001") == 1
+    assert pf.to_int("1000000000") is None
+
+
+# ─── a range needs a lower end below the upper one (7c) ─────────────────────
+@pytest.mark.parametrize(
+    ("title", "what", "expected"),
+    [
+        ("Part 2 — 28.10 report", "", [2]),
+        ("Part 2 - 28.10", "", [2]),
+        ("Part 2 – 10:30", "", [2]),
+        ("Part 2 — 3/4", "", [2]),
+        ("Part 2 - 3 files", "", []),  # still a range: safe, it names nothing
+        ("Part 2 – 3.", "", []),  # a full stop that ends the sentence
+        ("Part 2 – 3: x", "", []),  # a colon that is no time
+        ("Part 3 - 2 files", "", [3]),
+        ("Part 2 — 2", "", [2]),
+        ("Part 1 — 2026-10-29", "", [1]),
+        ("Part 1 – 2nd step", "", [1]),
+        ("Parts 2 — 28.10", "", []),  # a plural label alone names nothing
+        ("feat: y", "Part 2 — 28.10: x. Part 3 comes later.", [2]),
+        ("feat: y", "Part 2 - 3 files. Part 3 is next.", []),
+        ("feat: y", "Part 3 - 2 files. Part 1 is merged.", [3]),
+    ],
+)
+def test_a_range_has_its_lower_end_below_its_upper_end(
+    tmp_path: Path, title: str, what: str, expected: list[int]
+) -> None:
+    assert named_in(tmp_path, refs_pr(70, what, title=title), parts=3) == expected
+
+
+# ─── a plural label with a list names every listed part (7d) ────────────────
+@pytest.mark.parametrize(
+    ("title", "what", "expected"),
+    [
+        ("Parts 2 and 3", "", [2, 3]),
+        ("Parts 2, 3", "", [2, 3]),
+        ("Parts 1, 2 and 3", "", [1, 2, 3]),
+        ("Parts 1, 2, and 3", "", [1, 2, 3]),
+        ("PARTS 2 AND 3", "", [2, 3]),
+        ("Parts 2 and 3 of #13: y", "", [2, 3]),
+        ("Parts 2 and 3 of #14: y", "", []),
+        ("Parts 2 and 2", "", [2]),
+        ("Parts 2 and 28.10", "", []),  # a date is no part, and `Parts 2` alone no mention
+        ("Parts 2 or 3", "", []),
+        ("Part 2 and 3", "", [2]),  # a singular label names one part
+        ("Parts 2 and Part 3", "", [3]),  # `Parts 2` alone is no mention
+        ("Части 2 и 3", "", [2, 3]),
+        ("Части 1, 2 и 3", "", [1, 2, 3]),
+        ("Частей 2 и 3", "", [2, 3]),
+        ("Частях 2 и 3 из #13", "", [2, 3]),
+        ("Teile 2 und 3", "", [2, 3]),
+        ("Teilen 2 und 3 von #13", "", [2, 3]),
+        ("Teile 2 and 3", "", [2, 3]),
+        ("Parts 1–2 and 3", "", []),  # a range comes first
+        ("feat: y", "Parts 2 and 3 of #13: x. Part 1 is merged.", [2, 3]),
+        ("feat: y", "Parts 2 and 3 of #14: x. Part 1 of #13 is merged.", []),
+        ("feat: y", "Parts 2, 3 of #13 (tails of #112): x", [2, 3]),
+        ("feat: y", "Parts 3 and 4 of #13: x. Part 2 is merged.", [3]),  # Part 4 does not exist
+    ],
+)
+def test_a_plural_label_with_a_list_names_every_part(
+    tmp_path: Path, title: str, what: str, expected: list[int]
+) -> None:
+    assert named_in(tmp_path, refs_pr(71, what, title=title), parts=3) == expected
+
+
+def test_a_list_in_what_warns_with_its_source(tmp_path: Path) -> None:
+    node = refs_pr(72, "Parts 1 and 2 of #13: x")
+    _, doc = facts(tmp_path, issue_response(body=TWO_PARTS, timeline=[node]))
+    assert [p["status"] for p in doc["parts"]] == ["done", "done"]
+    assert doc["warnings"] == [
+        f"pull request {API}#72 names several parts in its What (1, 2): it counts for each of them"
+    ]
+    node = refs_pr(73, "x", title="Parts 1 and 2 of #13")
+    _, doc = facts(tmp_path, issue_response(body=TWO_PARTS, timeline=[node]))
+    assert doc["warnings"] == [
+        f"pull request {API}#73 names several parts in its title (1, 2): it counts for each of them"
+    ]
+
+
+def test_api_193_names_parts_2_and_3_of_174(tmp_path: Path) -> None:
+    # The real first line of the What of api#193, and its Refs line.
+    what = "Parts 2 and 3 of #174 (acceptance tails of #112):"
+    refs = "Refs #174 (parts 2 and 3; part 1 follows after #159)"
+    node = refs_pr(193, what, title="test(api): guard UTC on all /api models", refs=refs)
+    assert named_in(tmp_path, node, parts=3, ref="api#174") == [2, 3]
+    assert named_in(tmp_path, node, parts=3, ref="api#112") == []
+
+
+# ─── the What section: `## What — Что изменено` and the like (7e) ───────────
+@pytest.mark.parametrize(
+    ("heading", "expected"),
+    [
+        ("## What", [2]),
+        ("## What — Что изменено", [2]),
+        ("## What - Что изменено", [2]),
+        ("## What – Что изменено", [2]),
+        ("## What—Что", [2]),
+        ("## What (Что изменено)", [2]),
+        ("### WHAT", [2]),
+        ("## Whatever", []),
+        ("## What's new", []),
+        ("## What: changes", []),
+        ("## Whatnot — x", []),
+        ("## Что изменено", []),
+    ],
+)
+def test_the_what_heading_may_be_followed_by_a_dash(
+    tmp_path: Path, heading: str, expected: list[int]
+) -> None:
+    body = f"{heading}\n\nPart 2 of #13: y\n\n## Refs\n\nRefs #13\n"
+    assert named_in(tmp_path, pr(74, body=body)) == expected
+
+
+def test_api_121_style_what_reads_the_first_line_of_its_section(tmp_path: Path) -> None:
+    body = "## What — Что изменено\n\nPart 1 of #13: Успешный CI-вебхук.\n\n## Why\n\nPart 2.\n"
+    node = pr(75, body=body + "\n## Refs\n\nRefs #13\n")
+    assert named_in(tmp_path, node) == [1]
+
+
+# ─── a pull request whose Refs name several issues ties its mentions (7b) ───
+def tied(
+    tmp_path: Path,
+    *,
+    title: str = "feat: y",
+    what: str = "",
+    refs: str,
+    ref: str = "api#13",
+    repo: str = API,
+    parts: int = 6,
+) -> list[int]:
+    return named_in(tmp_path, refs_pr(80, what, title=title, refs=refs, repo=repo), parts, ref)
+
+
+@pytest.mark.parametrize(
+    ("title", "what", "for_13", "for_14"),
+    [
+        # tied by `of <ref>`
+        ("Part 2 of #13: x", "", [2], []),
+        ("Part 2 of #14: x", "", [], [2]),
+        ("Part 2 of api#13", "", [2], []),
+        ("Part 2 of **#13**", "", [2], []),
+        ("Part 2 of `#13`", "", [2], []),
+        ("Part 2 of **api#14**", "", [], [2]),
+        ("Part 2 of [#13](https://example.test/issues/13)", "", [2], []),
+        ("Part 2 of [api#14](https://example.test/issues/14)", "", [], [2]),
+        (f"Part 2 of [{API}#13](https://example.test/13)", "", [2], []),
+        ("Teil 2 von **#13**", "", [2], []),
+        ("Часть 2 из `#14`", "", [], [2]),
+        # tied by the ref in front of it
+        ("#13 part 2", "", [2], []),
+        ("#14 part 2", "", [], [2]),
+        ("#13 Part 2", "", [2], []),
+        ("#13 Ч.2", "", [2], []),
+        ("#13 Ч. 2", "", [2], []),
+        ("#13 часть 2", "", [2], []),
+        ("#13 Teil 2", "", [2], []),
+        ("api#13 part 2", "", [2], []),
+        (f"{API}#13 part 2", "", [2], []),
+        ("**#13** part 2", "", [2], []),
+        ("`#13` part 2", "", [2], []),
+        ("**api#13** part 2", "", [2], []),
+        ("[#13](https://example.test/issues/13) part 2", "", [2], []),
+        ("(#14 part 2)", "", [], [2]),
+        ("fix: the items of #13 part 2 of the plan", "", [2], []),
+        ("#13 parts 2 and 3", "", [2, 3], []),
+        ("#13 part 2 and #14 part 3", "", [2], [3]),
+        ("#14 part 3 and #13 part 2", "", [2], [3]),
+        # `of <ref>` wins over a ref in front
+        ("#14 part 2 of #13", "", [2], []),
+        # untied: nothing
+        ("Part 2", "", [], []),
+        ("Part 2 of the plan", "", [], []),
+        ("Part 2 (#13)", "", [], []),
+        ("#13, part 2", "", [], []),
+        ("#13 and part 2", "", [], []),
+        ("#13: part 2", "", [], []),
+        ("part 2 #13", "", [], []),
+        ("x#13 part 2", "", [], []),
+        ("Parts 2 and 3", "", [], []),
+        # What: the first mention decides, and it must be tied
+        ("feat: y", "Part 2 of #13: x. Part 3 of #14 follows.", [2], []),
+        ("feat: y", "#14 part 3: x. Part 2 of #13 is merged.", [], [3]),
+        ("feat: y", "Part 2: x. Part 3 of #13 follows.", [], []),
+        ("feat: y", "Parts 2 and 3 of #13: x.", [2, 3], []),
+        # the title wins over What, as before; an untied title mention is skipped
+        ("Part 4 of #14", "Part 2 of #13: x", [2], [4]),
+        ("Part 4", "Part 2 of #13: x", [2], []),
+    ],
+)
+def test_a_pull_request_with_two_issues_ties_each_mention(
+    tmp_path: Path, title: str, what: str, for_13: list[int], for_14: list[int]
+) -> None:
+    refs = "Refs #13, #14"
+    assert tied(tmp_path, title=title, what=what, refs=refs) == for_13
+    assert tied(tmp_path, title=title, what=what, refs=refs, ref="api#14") == for_14
+
+
+def test_the_refs_of_several_lines_and_repos_count_together(tmp_path: Path) -> None:
+    # api#346: `Refs #168`, `Refs #130` and `Refs ui#199` on three lines.
+    refs = f"Refs #13\nRefs #14\nRefs {UI}#15"
+    what = "The items of #13 part 6 (of #14)"
+    assert tied(tmp_path, title="fix: x (#13)", what=what, refs=refs) == [6]
+    assert tied(tmp_path, what=what, refs=refs, ref="api#14") == []
+    ui_ref = "ui#15"
+    assert tied(tmp_path, what=what, refs=refs, ref=ui_ref) == []
+    # in the ui, a bare #15 in the PR's own repo is ui#15
+    node = refs_pr(81, "#15 part 2: x", refs=f"Refs #15, {API}#13", repo=UI)
+    assert named_in(tmp_path, node, parts=3, ref=ui_ref) == [2]
+    assert named_in(tmp_path, node, parts=3, ref="api#13") == []
+
+
+def test_api_346_and_api_353_name_a_part_of_168_only(tmp_path: Path) -> None:
+    # Real rows (merged in the #130 remainder). Both are `Refs #130` + `Refs #168`; the part
+    # is tied to #168 by `#168 part N`.
+    api_346 = refs_pr(
+        346,
+        "The trace and output items of #168 part 6 (PR F3 of the #130 remainder). Four code "
+        "commits after the plan commit:",
+        title="fix(reviews): record context.build once per attempt (#168)",
+        refs=f"Refs #168\nRefs #130\nRefs {UI}#199",
+    )
+    api_353 = refs_pr(
+        353,
+        "G2, the second docs PR of the #130 remainder. The PR also closes the docs part of "
+        "#168 part 4.",
+        title="docs: describe the runtime after F1–F5 and #168 part 4 (#130)",
+        refs="Refs #130\nRefs #168",
+    )
+    assert named_in(tmp_path, api_346, parts=6, ref="api#168") == [6]
+    assert named_in(tmp_path, api_346, parts=6, ref="api#130") == []
+    assert named_in(tmp_path, api_353, parts=6, ref="api#168") == [4]
+    assert named_in(tmp_path, api_353, parts=6, ref="api#130") == []
+
+
+def test_the_same_issue_in_two_forms_is_one_issue(tmp_path: Path) -> None:
+    for refs in ("Refs #13, #13", f"Refs #13\nRefs {API}#13", f"Refs #13, {API.upper()}#13"):
+        assert tied(tmp_path, title="Part 2", refs=refs) == [2], refs  # single-Refs: as before
+
+
+def test_a_single_refs_pull_request_keeps_the_untied_rule(tmp_path: Path) -> None:
+    assert tied(tmp_path, title="Part 2", refs="Refs #13") == [2]
+    assert tied(tmp_path, title="Part 2 (#14)", refs="Refs #13") == [2]
+    # a ref in front of a part ties only in a multi-Refs pull request
+    assert tied(tmp_path, title="#14 part 2", refs="Refs #13") == [2]
+    assert tied(tmp_path, title="#13 part 2", refs="Refs #13") == [2]
+    # `of <ref>` skips another issue's part, wrapped or not
+    assert tied(tmp_path, title="Part 2 of #14", refs="Refs #13") == []
+    assert tied(tmp_path, title="Part 2 of **#14**", refs="Refs #13") == []
+    assert tied(tmp_path, title="Part 2 of [#14](https://x.test/14)", refs="Refs #13") == []
+    assert tied(tmp_path, title="Part 2 of **#13**", refs="Refs #13") == [2]
+
+
+def test_an_untied_open_pull_request_with_two_issues_is_a_stray_for_both(tmp_path: Path) -> None:
+    node = refs_pr(82, "Part 2: x", refs="Refs #13, #14", state="OPEN")
+    for ref in ("api#13", "api#14"):
+        code, doc = facts(tmp_path, issue_response(body=TWO_PARTS, timeline=[node]), ref=ref)
+        assert (code, doc["selected"]) == (1, None)
+        assert doc["reasons"] == [stray_reason(f"{API}#82 (OPEN)")]
+    merged = refs_pr(82, "Part 2: x", refs="Refs #13, #14")
+    code, doc = facts(tmp_path, issue_response(body=TWO_PARTS, timeline=[merged]))
+    assert (code, doc["selected"]) == (0, {"part": 1, "reason": "first-todo"})
+    assert doc["warnings"] == [
+        f"pull requests with Refs that name no part of this issue: {API}#82 (MERGED)"
+    ]
+
+
+# ─── Part 3a counts as Part 3, by decision (7h) ─────────────────────────────
+@pytest.mark.parametrize("title", ["Part 3a: x", "Part 3a of #13", "Part 3b", "Part 3.1"])
+def test_part_3a_is_part_3(tmp_path: Path, title: str) -> None:
+    assert named_in(tmp_path, refs_pr(83, "", title=title), parts=3) == [3]
+
+
+# ─── accept: the work is done and acceptance is next ────────────────────────
+def merged_parts(*, at: str = MERGED_AT) -> list[dict[str, Any]]:
+    return [
+        refs_pr(100, "Part 1 of #13: x", merged_at=at),
+        refs_pr(200, "Part 2 of #13: x", merged_at=at),
+    ]
+
+
+def comment_url(number: int) -> str:
+    return f"https://github.com/{API}/issues/13#issuecomment-{number}"
+
+
+def returned_reason(number: int) -> str:
+    return (
+        f"the issue was returned at acceptance ({comment_url(number)}) and no pull request "
+        "with Refs has been merged since — rework a part with --part K"
+    )
+
+
+@pytest.mark.parametrize("marker", [TABLE, ACCEPTED])
+def test_a_table_or_an_accepted_comment_does_not_hold_acceptance_back(
+    tmp_path: Path, marker: str
+) -> None:
+    comments = [comment(RETURNED, number=1), comment(marker, "2026-10-22T09:00:00Z", 2)]
+    response = issue_response(body=TWO_PARTS, timeline=merged_parts(), comments=comments)
+    code, doc = facts(tmp_path, response)
+    assert (code, doc["verdict"], doc["selected"]) == (1, "accept", None)
+
+
+def test_a_returned_issue_stops_and_links_the_comment(tmp_path: Path) -> None:
+    comments = [comment(TABLE, number=1), comment(RETURNED + "\n\nwhat is left", number=2)]
+    response = issue_response(body=TWO_PARTS, timeline=merged_parts(), comments=comments)
+    code, doc = facts(tmp_path, response)
+    assert (code, doc["verdict"], doc["selected"]) == (1, "stop", None)
+    assert doc["reasons"] == [returned_reason(2)]
+
+
+def test_a_pull_request_merged_after_the_return_ends_it(tmp_path: Path) -> None:
+    comments = [comment(RETURNED, "2026-10-21T09:00:00Z", 2)]
+    before = merged_parts(at="2026-10-21T08:59:59Z")
+    after = merged_parts(at="2026-10-21T09:00:01Z")
+    code, doc = facts(tmp_path, issue_response(body=TWO_PARTS, timeline=before, comments=comments))
+    assert (code, doc["verdict"]) == (1, "stop")
+    code, doc = facts(tmp_path, issue_response(body=TWO_PARTS, timeline=after, comments=comments))
+    assert (code, doc["verdict"], doc["reasons"]) == (
+        1,
+        "accept",
+        ["every part has a merged pull request — acceptance is next"],
+    )
+    # the very second is not "after"
+    same = merged_parts(at="2026-10-21T09:00:00Z")
+    _, doc = facts(tmp_path, issue_response(body=TWO_PARTS, timeline=same, comments=comments))
+    assert doc["verdict"] == "stop"
+
+
+def test_any_pull_request_with_refs_merged_after_the_return_counts(tmp_path: Path) -> None:
+    comments = [comment(RETURNED, "2026-10-21T09:00:00Z", 2)]
+    late = {"merged_at": "2026-10-22T09:00:00Z"}
+    stray = refs_pr(300, "no part named", title="fix: tail", **late)  # names no part
+    other_repo = refs_pr(301, "x", refs=f"Refs {API}#13", repo=UI, **late)
+    for extra in (stray, other_repo):
+        timeline = [*merged_parts(), extra]
+        _, doc = facts(
+            tmp_path, issue_response(body=TWO_PARTS, timeline=timeline, comments=comments)
+        )
+        assert doc["verdict"] == "accept"
+    # a pull request that was closed without a merge, or is still open, ends nothing
+    closed = refs_pr(302, "no part named", state="CLOSED")
+    timeline = [*merged_parts(), closed]
+    _, doc = facts(tmp_path, issue_response(body=TWO_PARTS, timeline=timeline, comments=comments))
+    assert doc["verdict"] == "stop"
+
+
+def test_the_return_marker_must_open_the_comment(tmp_path: Path) -> None:
+    comments = [
+        comment(f"quoting {RETURNED} in a remark", number=1),
+        comment(f"> {RETURNED}", number=2),
+        comment(f"  \n\t{RETURNED}\nwhat is left", "2026-10-22T09:00:00Z", 3),  # leading blanks ok
+    ]
+    response = issue_response(body=TWO_PARTS, timeline=merged_parts(), comments=comments[:2])
+    _, doc = facts(tmp_path, response)
+    assert doc["verdict"] == "accept"
+    response = issue_response(body=TWO_PARTS, timeline=merged_parts(), comments=comments)
+    _, doc = facts(tmp_path, response)
+    assert (doc["verdict"], doc["reasons"]) == ("stop", [returned_reason(3)])
+
+
+def test_the_latest_comment_of_the_three_wins_across_comment_pages(tmp_path: Path) -> None:
+    fx = tmp_path / "fx"
+    response = issue_response(
+        body=TWO_PARTS,
+        timeline=merged_parts(),
+        comments=[comment(RETURNED, number=1)],
+        comments_next="M1",
+    )
+    write(fx, "issue-p1", response)
+    write(fx, "comments-p2", follow_up("comments", [comment("chatter", number=2)], "M2"))
+    write(fx, "comments-p3", follow_up("comments", [comment(TABLE, number=3)], None))
+    r = run("api#13", fixtures=fx)
+    assert (r.returncode, json.loads(r.stdout)["verdict"]) == (1, "accept")
+    write(fx, "comments-p3", follow_up("comments", [comment(RETURNED, number=3)], None))
+    r = run("api#13", fixtures=fx)
+    assert json.loads(r.stdout)["reasons"] == [returned_reason(3)]
+
+
+def test_a_returned_whole_task_is_manual(tmp_path: Path) -> None:
+    comments = [comment(RETURNED, "2026-10-21T09:00:00Z", 2)]
+    timeline = [refs_pr(50, "the thing")]
+    response = issue_response(body="## Scope\n\n- x\n", timeline=timeline, comments=comments)
+    code, doc = facts(tmp_path, response)
+    assert (code, doc["verdict"], doc["selected"]) == (1, "stop", None)
+    assert doc["reasons"] == [
+        f"the issue was returned at acceptance ({comment_url(2)}) and no pull request with "
+        "Refs has been merged since — the rework of a task without parts is manual: ask the user"
+    ]
+    later = [refs_pr(50, "the thing"), refs_pr(51, "rework", merged_at="2026-10-22T09:00:00Z")]
+    response = issue_response(body="## Scope\n\n- x\n", timeline=later, comments=comments)
+    _, doc = facts(tmp_path, response)
+    assert doc["verdict"] == "accept"
+
+
+def test_a_returned_issue_still_has_its_next_part_and_an_explicit_part(tmp_path: Path) -> None:
+    comments = [comment(RETURNED, "2026-10-21T09:00:00Z", 2)]
+    # an unfinished part is taken as ever: the return only matters when acceptance is next
+    timeline = [refs_pr(100, "Part 1 of #13: x")]
+    code, doc = facts(
+        tmp_path, issue_response(body=TWO_PARTS, timeline=timeline, comments=comments)
+    )
+    assert (code, doc["selected"]) == (0, {"part": 2, "reason": "first-todo"})
+    # `--part K` is how a returned part is reworked
+    response = issue_response(body=TWO_PARTS, timeline=merged_parts(), comments=comments)
+    code, doc = facts(tmp_path, response, "--part", "2")
+    assert (code, doc["verdict"], doc["selected"]) == (0, "go", {"part": 2, "reason": "explicit"})
+    assert doc["warnings"] == [f"Part 2 already has a merged pull request: {API}#200 (MERGED)"]
+
+
+def test_a_returned_issue_with_an_open_rework_pull_request_waits_for_it(tmp_path: Path) -> None:
+    comments = [comment(RETURNED, "2026-10-21T09:00:00Z", 2)]
+    timeline = [*merged_parts(), refs_pr(101, "Part 1 of #13: rework", state="OPEN")]
+    _, doc = facts(tmp_path, issue_response(body=TWO_PARTS, timeline=timeline, comments=comments))
+    assert doc["verdict"] == "stop"
+    assert doc["reasons"] == [
+        "every part has a merged pull request, but pull requests are still open: "
+        f"{API}#101 (OPEN) — finish them first"
+    ]
+
+
+def test_the_markers_are_the_ones_accept_issue_writes() -> None:
+    source = SKILL.parent / "accept-issue" / "scripts" / "acceptance.py"
+    if not source.is_file():
+        pytest.skip("accept-issue is not in this checkout")
+    text = source.read_text(encoding="utf-8")
+    written = {
+        kind: re.search(rf'^{name}_MARK = "(.*)"$', text, re.MULTILINE)
+        for kind, name in (("table", "TABLE"), ("accepted", "ACCEPTED"), ("returned", "RETURNED"))
+    }
+    assert all(written.values()), "accept-issue no longer defines its marker constants"
+    expected = {m.group(1): kind for kind, m in written.items() if m}
+    assert expected == pf.ACCEPT_MARKS
+    assert tuple(expected) == (TABLE, ACCEPTED, RETURNED)
+
+
+# ─── the branch pattern in the skill texts (7f) ─────────────────────────────
+BRANCH_PATTERN = re.compile(r"`(\^\(feat\|fix\|docs\|chore\)/[^`]+\$)`")
+
+
+def test_the_branch_pattern_is_the_same_in_both_skills_and_git_agrees() -> None:
+    texts = [SKILL / "SKILL.md", SKILL.parent / "pull-request" / "SKILL.md"]
+    found = {BRANCH_PATTERN.search(t.read_text(encoding="utf-8")) for t in texts}
+    assert None not in found
+    patterns = {m.group(1) for m in found if m}
+    assert len(patterns) == 1, patterns
+    rx = re.compile(patterns.pop())
+    good = ["feat/269-x", "fix/a.b-c_d", "docs/lock", "chore/a.lockx", "feat/a.lock-b"]
+    bad = ["feat/x.lock", "fix/269-a.lock", "feat/a..b", "feat/.a", "feat/a.", "feat/A", "wip/x"]
+    assert all(rx.match(n) for n in good)
+    assert not any(rx.match(n) for n in bad)
+    if shutil.which("git") is None:
+        pytest.skip("git is not installed")
+    for name in good:  # what the pattern lets through, git must accept
+        r = subprocess.run(["git", "check-ref-format", "--branch", name], capture_output=True)
+        assert r.returncode == 0, name
+    for name in ("feat/x.lock", "fix/269-a.lock"):  # the reason for the `.lock` clause
+        r = subprocess.run(["git", "check-ref-format", "--branch", name], capture_output=True)
+        assert r.returncode != 0, name
