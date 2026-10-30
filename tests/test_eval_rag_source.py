@@ -269,14 +269,14 @@ def test_the_snapshot_source_serves_trees_by_revision_and_blobs_by_oid() -> None
 
 
 def test_load_snapshot_derives_the_spike_head_from_its_patch() -> None:
-    """The hand-made ``head/`` of the Task 1 fixture is what the patch produces."""
     snapshot = load_snapshot(_SPIKE)
 
-    hand_made = {
-        path.relative_to(_SPIKE / "head").as_posix(): path.read_bytes()
-        for path in (_SPIKE / "head").rglob("*.py")
+    assert snapshot.base["pkg/store.py"].decode().count("dry_run") == 0
+    assert b"def save(item: Item, *, dry_run: bool) -> Item:" in snapshot.head["pkg/store.py"]
+    # Only the changed file differs; the rest of the head is the base, byte for byte.
+    assert {path for path in snapshot.head if snapshot.head[path] != snapshot.base[path]} == {
+        "pkg/store.py"
     }
-    assert snapshot.head == hand_made
     assert snapshot.base_id == commit_id("spike", "base")
     assert snapshot.head_id == commit_id("spike", "head")
     assert [(file.filename, file.status) for file in snapshot.files] == [
