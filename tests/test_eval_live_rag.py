@@ -668,3 +668,20 @@ def test_importing_the_recorder_does_not_load_the_rag_stack() -> None:
     )
 
     assert out.stdout.strip() == "[]"
+
+
+def test_the_recorded_budget_is_the_budget_the_evidence_fits_to() -> None:
+    """One formula (``eval_live.model_prompt_budget``) for ``effective_settings`` and for the
+    fit of the evidence, which a replay reads back from the former."""
+    configured = settings()
+    profile = configured.primary
+
+    budget = eval_live_module.model_prompt_budget(profile, configured, "fast")
+
+    assert (
+        budget
+        == min(profile.context_window, configured.policy.input_token_limit["fast"])
+        - profile.max_output_tokens
+    )
+    recorded = eval_live_module._effective_settings(configured, "fast")["primary"]
+    assert cast(dict[str, Any], recorded)["input_budget_tokens"] == budget
