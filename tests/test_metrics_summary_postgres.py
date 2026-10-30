@@ -392,6 +392,8 @@ def test_metrics_summary_filters_repo_and_pauses_on_the_worker_rule(metrics_env:
                     datetime(2026, 10, 26, 11, tzinfo=UTC),
                     "k" * 64,
                 )
+                await _finding(session, own, "medium", "correctness", published=True)
+                await _finding(session, extra_run, "critical", "security", published=True)
                 await session.execute(
                     text(
                         "INSERT INTO usage_events (id, run_id, workspace_id, provider, model, "
@@ -425,13 +427,28 @@ def test_metrics_summary_filters_repo_and_pauses_on_the_worker_rule(metrics_env:
 
         assert visible.totals.tokens_in == 10
         assert everything.totals.tokens_in == 1010
+        assert visible.totals.pulls_by_verdict.attention == 1
+        assert visible.totals.pulls_by_verdict.blocking == 0
+        assert visible.totals.findings_by_severity.medium == 1
+        assert visible.totals.findings_by_severity.critical == 0
+        assert visible.totals.findings_by_category.correctness == 1
+        assert visible.totals.findings_by_category.security == 0
+        assert everything.totals.pulls_by_verdict.attention == 1
+        assert everything.totals.pulls_by_verdict.blocking == 1
+        assert everything.totals.findings_by_severity.critical == 1
+        assert everything.totals.findings_by_category.security == 1
         assert [item.name for item in visible.workspaces] == ["alpha"]
         assert visible.workspaces[0].paused is True
         assert visible.workspaces[0].spent_today_usd == Decimal("0.510")
         for empty in (foreign, missing):
             assert empty.totals.tokens_in == 0
             assert empty.totals.runs_by_status.succeeded == 0
+            assert empty.totals.pulls_by_verdict.attention == 0
+            assert empty.totals.pulls_by_verdict.blocking == 0
+            assert empty.totals.findings_by_severity.medium == 0
             assert empty.totals.findings_by_severity.critical == 0
+            assert empty.totals.findings_by_category.correctness == 0
+            assert empty.totals.findings_by_category.security == 0
             assert all(day.run_count == 0 for day in empty.series)
             assert [item.name for item in empty.workspaces] == ["alpha"]
         assert unlimited.workspaces[0].paused is False

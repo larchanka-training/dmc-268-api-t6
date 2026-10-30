@@ -147,7 +147,6 @@ def test_invisible_repo_is_empty_and_omitted_repo_keeps_the_caller_workspace() -
     assert hidden.totals.cost_usd == Decimal("0")
     assert hidden.series[0].run_count == 0
     assert [item.name for item in hidden.workspaces] == ["mine"]
-    assert "other-user" not in [item.name for item in hidden.workspaces]
     assert visible.totals.runs_by_status.succeeded == 1
     assert [item.name for item in visible.workspaces] == ["mine"]
     assert source.calls[0][3] == "secret/other"
