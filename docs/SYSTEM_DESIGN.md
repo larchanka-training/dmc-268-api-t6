@@ -1418,79 +1418,9 @@ too_large; источник лимита в snapshots не сохранён. Д�
 deleted/oversized binary новых metadata/blob/compare-запросов нет. При partial
 пустые/info findings дают null, supported blocking/attention сохраняются.
 
-Канонические тексты причин #213 для summary/body/check-run (без завершающей
-точки; оформление сводки может добавить счётчик, разделитель и точку):
-
-| Случай | Полный текст причины |
-| --- | --- |
-| Доказанный pure rename, unsupported_change | Семантика переноса файла (включая импорты) не анализируется |
-| Rename без no-text proof, missing_patch | Отсутствующий patch не подтверждает неизменность содержимого переноса |
-| Доказанный mode-only, unsupported_change | Изменения прав доступа/типа файла не анализируются |
-| Mode-change metadata без mode-only proof, missing_patch | Отсутствующий patch не подтверждает изменение только прав доступа/типа файла |
-| Удаление без независимого binary proof | Удалённое содержимое недоступно для подтверждения binary |
-| too_large без сохранённого точного источника лимита | Превышен лимит размера, содержимое не проверено |
-| Квалифицированный кандидат empty-added без принятого ordinary-file proof | Нет подтверждения обычного пустого файла |
-| Фактически отправленный changed patch опущен или усечён, review_input_incomplete | модель получила не весь patch |
-| Технический drop unknown_path | не удалось сопоставить замечание с доступным diff |
-
-Общие тексты причин (точные значения `REASON_TEXT`; специализированные случаи
-выше имеют приоритет, счётчики и завершающая точка добавляются при оформлении):
-
-| Код | Общий текст причины |
-| --- | --- |
-| classification_unavailable | нет достоверного сохранённого покрытия |
-| diff_inventory_incomplete | список изменённых файлов неполон |
-| missing_patch | Отсутствует подтверждённый patch |
-| unsupported_change | семантика изменения метаданных не анализируется |
-| too_large | Превышен лимит размера, содержимое не проверено |
-| unsupported_path | неподдерживаемый путь |
-| identity_unresolved | не установлена идентичность файла |
-| patch_truncated | patch неполон |
-| patch_malformed | patch повреждён |
-| patch_unsupported | формат patch не поддерживается |
-| summary_only | краткий обзор без проверки всех строк |
-| review_input_incomplete | модель получила не весь patch |
-| unknown_path | не удалось сопоставить замечание с доступным diff |
-
-Метки оформления сводки и списка причин (не коды причин):
-
-| Условие | Точная метка |
-| --- | --- |
-| coverage=partial | Проверка неполная |
-| coverage=none | Текстовые изменения не проверены |
-| Остаток причин после пяти отображённых, n — их количество | Ещё причин: {n} |
-| Строчная метка verdict при partial без supported риска | проверка неполная |
-| summary.done_well; reviewed_files — проверенные текстовые файлы, excluded_files — сумма exclusions | Проанализировано файлов с текстовыми изменениями: {reviewed_files}; исключено файлов: {excluded_files}. |
-| Число проверенных текстовых файлов в partial/none overview | **Проверено файлов с текстовыми изменениями:** {reviewed_files} |
-| summary.problem при наличии findings; n — число оставшихся findings | Подтверждено замечаний: {n} |
-| Строка coverage в partial/none overview; summary_problem включает точку | **Coverage:** {status} — {summary_problem} |
-
-Текст «Нет подтверждения обычного пустого файла» выбирается только по
-доверенным backend-фактам квалифицированного кандидата: поддерживаемый
-канонический путь, status=added, `previous_filename is None` (логический
-`old_path=null`), additions=deletions=changes=0, точный Git empty-blob SHA и
-size=None/0. Исходный patch равен None или пустой строке; при reload допустима
-также точная сохранённая пустая обёртка `diff --git` / `---` / `+++` того же пути
-без иных строк. При этом принятого ordinary-file proof нет. Один added, пустые
-counters либо raw metadata_only недостаточны. Предыдущий путь, неподдерживаемый
-путь, неизвестные/ненулевые counters, неверный/неизвестный SHA, конфликт размера
-или иной patch не получают empty-текст: действует соответствующая общая причина,
-для обычного added без patch — «Отсутствует подтверждённый patch».
-У GitLab в этом потоке нет независимого tree-доказательства обычного файла:
-пустое добавление остаётся `missing_patch`/partial, даже при empty SHA и size=0.
-Квалификация переносится из durable фактов, не из model JSON. Новые сохранённые
-coverage с более чем 20 причинами могут содержать внутренний optional
-`reason_variant_counts`: не более шести фиксированных семантических ключей и
-числа, без путей. Это сохраняет канонический текст за окном первых 20
-диагностических путей без раскрытия новых имён. Restore проверяет суммы по
-reason_counts и доверенную snapshot capacity; legacy без агрегата не получает
-выдуманной квалификации за окном. Поле не добавляется в публичный DTO/LLM schema.
-Отсутствие proof не утверждает, что файл действительно обычный и пустой.
-Для исключения E=empty_file нужен независимый полный nontruncated tree на
-закреплённом head: уникальное точное совпадение path+SHA, type=blob,
-mode=100644/100755 и size=None/0; предел ответа — 1 500 000 сырых байт.
-Для too_large снимок не хранит источник лимита (blob bytes, patch bytes или
-строки), поэтому публичный текст нейтрален и не приписывает всем случаям binary/1 MiB.
+Тексты причин #213 для summary/body/check-run, общие тексты `REASON_TEXT`, метки сводки, квалификация
+empty-added (в т.ч. GitLab без tree-proof), `reason_variant_counts`, условия tree-proof E=`empty_file`
+и нейтральный текст too_large — канон в [PIPELINE_SPEC §2](PIPELINE_SPEC.md#2-фазы-внутри-running-и-трейс-run_actions); здесь не дублируются.
 
 Текущий built-in фильтр generated — `_is_generated` в
 [`vcs_diff.py`](../app/modules/reviews/application/vcs_diff.py): регистр пути игнорируется;
