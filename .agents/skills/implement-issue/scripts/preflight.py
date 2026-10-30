@@ -17,9 +17,10 @@ Contract
 stdout carries one JSON document (`sort_keys`, indent 2, no ASCII escaping, one
 trailing newline), schema 1:
 
-    issue     {repo, number, title, url, state, assignees, board_status}
+    issue     {repo, number, title, url, state, assignees, board_status, sub_issues}
               board_status: the Status of the issue on board 12 of
               larchanka-training, null when it is not on that board.
+              sub_issues: {total, open}; an issue with any is an epic.
     blockers  [{ref, title, state}] — the native `blockedBy` links, any repo,
               sorted by ref. Only state OPEN blocks.
     parts     [{n, label, scope, boundary, done_when, acceptance_criteria, prs,
@@ -40,6 +41,10 @@ trailing newline), schema 1:
               first-todo | explicit | whole-task.
     kickoff   {present, text} — the `## Kickoff…` section, fences and HTML
               comments left out.
+    held      {kind, url} or null: the accept-issue comment that holds the issue back
+              from acceptance (kind returned | unmet_table), set whenever such a comment
+              is the latest and no pull request with `Refs` was merged after it — also
+              on a go (`--part K`, a part still todo): the rework covers that comment.
     verdict   go | stop | accept; reasons: why it is not a go; warnings: what to
               know on a go.
 
@@ -59,8 +64,9 @@ after the label), all of them: a title that names several is deliberate. A range
 part when its lower end is below its upper end, and the upper end is a whole number
 not followed by a letter, a digit, `-`, or `.` / `:` / `/` and a digit (`Part 2 — 28.10`
 names Part 2, `Part 2 - 3 files` is a range): a title with a range anywhere names
-none. A plural label (`Parts`, `Teile`, `Части`) with `K, M` / `K and M` / `K и M` /
-`K und M` names every listed part. If the title names none, the FIRST mention in the
+none; a range whose end has more than 9 digits is one too. A plural label (`Parts`,
+`Teile`, `Части`) with `K, M` / `K and M` / `K и M` / `K und M` / `K & M` names every listed
+part. If the title names none, the FIRST mention in the
 first non-empty line of its `## What` section (a heading `What` followed by the end
 of the line, a blank or a dash; the whole body when it has no such section) names
 its parts: a later mention there is context ("Part 1, which this extends, is merged"),
@@ -78,15 +84,17 @@ comments never count. A quoted line never counts as a `Refs` line (it does not s
 with `Refs`), but quotes are not skipped for the first line of `## What`: a pull
 request that opens with a quote is read from the quote.
 
-Decisions, in this order: the issue is CLOSED -> stop; any OPEN blocker -> stop;
+Decisions, in this order: the issue is CLOSED -> stop; it has sub-issues (an epic) ->
+stop; any OPEN blocker -> stop;
 parts not numbered 1..k -> stop; `--part K` must exist (exit 2) and is taken
 as is; no `--part`: an OPEN pull request with `Refs` that names no part of the
 issue stops (whichever part it belongs to is not known: "say which part it covers,
 or pass --part"), else the first part that is not done — open_pr stops, todo is
 taken; every part done and none with an OPEN pull request -> accept (acceptance is
-next), unless the issue is held back at acceptance (see below) -> stop; no parts: the
+next), unless the card is not In Progress, On Review or AC Check (the work was never
+started here) or the issue is held back at acceptance (see below) -> stop; no parts: the
 whole task, unless a pull request with `Refs` is OPEN (stop) or MERGED (accept, or
-stop when held back). With `--part K`, or when the pull request that names no part is
+stop for the same two reasons). With `--part K`, or when the pull request that names no part is
 MERGED or CLOSED, it is only a warning.
 
 Held back at acceptance: accept-issue marks its comments (`<!-- accept-issue:table v1 -->`,
@@ -139,17 +147,21 @@ MAX_DIGITS = 9  # a number read from text is at most this long; a longer one nam
 REF = re.compile(r"(api|ui|[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)#([1-9][0-9]{0,8})")
 NUMBER = re.compile(r"[1-9][0-9]{0,8}")
 
-HEADING = re.compile(r"^ {0,3}(#{1,6})[ \t]+(.*?)[ \t]*#*[ \t]*$")
+# The closing sequence of a heading («## Name ##») is cut off in `heading_text`, not by a
+# lazy group here: `(.*?)[ \t]*#*[ \t]*$` is cubic on a heading that ends in many blanks.
+HEADING = re.compile(r"^ {0,3}(#{1,6})[ \t]+(.*)$")
 # CommonMark fences: at most 3 spaces of indent; a backtick opener's info string
 # has no backtick; a closer is the same character, at least as long, and bare.
 FENCE_OPEN = re.compile(r"^ {0,3}(`{3,}|~{3,})(.*)$")
 FENCE_CLOSE = re.compile(r"^ {0,3}(`{3,}|~{3,})[ \t]*$")
 
 # A `Refs` line: the keyword, then a list of references (`#12`, `owner/repo#12`)
-# separated by commas / `and` / `&` / blanks; text after the list is ignored.
+# separated by commas / `and` / `&` / blanks; text after the list is ignored. The separator is
+# one of two alternatives, never two adjacent `\s*` around an optional word: that is quadratic
+# on `Refs #1` followed by many blanks.
 _TOKEN = r"(?:[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)?#[1-9][0-9]*"
 REFS_LINE = re.compile(
-    rf"^\s*(?:[-*+]\s+)?Refs?\b:?\s*({_TOKEN}(?:\s*(?:,|;|&|\band\b)?\s*{_TOKEN})*)",
+    rf"^\s*(?:[-*+]\s+)?Refs?\b:?\s*({_TOKEN}(?:(?:\s*(?:,|;|&|\band\b)\s*|\s+){_TOKEN})*)",
     re.IGNORECASE,
 )
 REFS_TOKEN = re.compile(r"([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)?#([1-9][0-9]*)")
@@ -178,7 +190,7 @@ PLURAL_LABELS = {"parts", "teile", "teilen", "части", "частей", "ча
 _OPEN = r"(?:\*\*|`|\[)?"
 _CLOSE = r"(?:\*\*|`|\]\([^)\s]*\))?"
 _REPO = r"(?:[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+|api|ui)"
-_AND = rf"(?:and|и|und){_H}+"
+_AND = rf"(?:and|и|und|&){_H}+"
 LABEL_AT = re.compile(rf"(?<!\w)(?P<label>{_ANY_LABEL})(?P<k>[0-9]+)", re.IGNORECASE)
 RANGE_TAIL = re.compile(rf"{_H}*[-–—]{_H}*(?P<m>[0-9]+)(?![^\W_]|-)(?![.:/][0-9])", re.IGNORECASE)
 LIST_TAIL = re.compile(
@@ -203,8 +215,11 @@ ACCEPT_MARKS = {
 # The line of an author table (render_table in accept-issue/scripts/acceptance.py) that says
 # some row is unmet; the all-met line is «Итог: «не выполнено» нет, ...», which does not match.
 UNMET_LINE = "Итог: не выполнено"
+# The card statuses accept-issue sets AC Check from (accept_issue acceptance.py: «AC Check is
+# set from On Review, In Progress or AC Check»): `accept` needs one of them.
+ACCEPT_CARDS = ("In Progress", "On Review", "AC Check")
 PART_START = re.compile(_PART, re.IGNORECASE)
-PART_BULLET = re.compile(rf"{_PART}[ \t]*(?:\((.*?)\))?[ \t]*:[ \t]*(.*)", re.IGNORECASE)
+PART_BULLET = re.compile(rf"{_PART}[ \t]*(?:\((.*?)\)[ \t]*)?:[ \t]*(.*)", re.IGNORECASE)
 PART_CRITERION = re.compile(rf"{_PART}[ \t]*:[ \t]*(.*)", re.IGNORECASE)
 CHECKBOX_PREFIX = re.compile(r"\[[ xX]\][ \t]+")
 TOP_BULLET = re.compile(r"[-*+][ \t]+(.*)$")
@@ -218,6 +233,7 @@ query($owner: String!, $name: String!, $number: Int!) {
     issue(number: $number) {
       title url state body
       assignees(first: 20) { nodes { login } }
+      subIssuesSummary { total completed }
       projectItems(first: 100) {
         pageInfo { hasNextPage endCursor }
         nodes {
@@ -552,7 +568,7 @@ def section_lines(
             depth = len(heading.group(1))
             if inside and depth <= level:
                 inside = False
-            if lines is None and wanted(heading.group(2)):
+            if lines is None and wanted(heading.group(2).rstrip(" \t").rstrip("#").rstrip(" \t")):
                 inside, level, lines = True, depth, []
             continue
         if inside and lines is not None:
@@ -710,6 +726,15 @@ def board_status(item: dict[str, Any] | None) -> str | None:
     return text_of(value, "name", "issue.projectItems[].fieldValueByName")
 
 
+def sub_issues_of(issue: dict[str, Any]) -> dict[str, int]:
+    """{total, open} of the issue's sub-issues: an issue with any is an epic."""
+    summary = obj(issue.get("subIssuesSummary"), "issue.subIssuesSummary")
+    total, completed = summary.get("total"), summary.get("completed")
+    if not isinstance(total, int) or not isinstance(completed, int) or completed > total:
+        fail("unexpected shape: issue.subIssuesSummary has no integer total and completed", 3)
+    return {"total": total, "open": total - completed}
+
+
 def assignees_of(issue: dict[str, Any]) -> list[str]:
     nodes = obj(issue.get("assignees"), "issue.assignees").get("nodes")
     if not isinstance(nodes, list):
@@ -777,7 +802,7 @@ def mentions(
         tail = RANGE_TAIL.match(text, pos)
         if tail is not None:
             high = to_int(tail.group("m"))
-            if low is not None and high is not None and low < high:
+            if low is None or high is None or low < high:  # an end past 9 digits: still a range
                 found.append(("range", []))
                 pos = tail.end()
                 continue
@@ -939,10 +964,29 @@ def held_at_acceptance(
 
 
 def acceptance_next(
-    reason: str, held: dict[str, Any] | None, has_parts: bool
+    facts: dict[str, Any],
+    reason: str,
+    held: dict[str, Any] | None,
+    merged: list[dict[str, Any]],
+    has_parts: bool,
 ) -> tuple[None, list[str], str]:
-    """The work is done: `accept` (acceptance is next), or `stop` when the issue came back
-    from acceptance, or its self-check found unmet AC, and nothing has been merged since."""
+    """The work looks done: `accept` (acceptance is next), unless the card says the work was
+    never started here (not In Progress, On Review or AC Check: `merged` are the pull requests
+    that finished it), or the issue came back from acceptance, or its self-check found unmet
+    AC, and nothing has been merged since."""
+    card = facts["issue"]["board_status"]
+    if card not in ACCEPT_CARDS:
+        where = (
+            f"the card is in {card}" if card else f"the issue has no Status on board {BOARD_NUMBER}"
+        )
+        return (
+            None,
+            [
+                f"{where}: the work was never started here — the merged pull request(s) with "
+                f"Refs are {listing(merged)}; take the task with the user"
+            ],
+            "stop",
+        )
     if held is None:
         return None, [reason], "accept"
     if held["kind"] == "returned":
@@ -975,6 +1019,16 @@ def decide(
             [f"issue {facts['issue']['repo']}#{facts['issue']['number']} is CLOSED"],
             "stop",
         )
+    sub = facts["issue"]["sub_issues"]
+    if sub["total"]:  # an epic is not implemented: its sub-issues are
+        return (
+            None,
+            [
+                f"an epic: it has {sub['total']} sub-issues ({sub['open']} open) — "
+                "implement its sub-issues, not the epic"
+            ],
+            "stop",
+        )
     open_blockers = [b for b in facts["blockers"] if b["state"] == "OPEN"]
     if open_blockers:
         return None, [f"blocked by {b['ref']} — {b['title']}" for b in open_blockers], "stop"
@@ -1003,7 +1057,8 @@ def decide(
                 f"the task has no parts and its pull request with Refs is merged: {listing(live)}"
                 " — acceptance is next"
             )
-            return acceptance_next(reason, held, has_parts=False)
+            merged = [pr for pr in live if pr["state"] == "MERGED"]
+            return acceptance_next(facts, reason, held, merged, has_parts=False)
         return {"part": None, "reason": "whole-task"}, [], "go"
     if stray_open:
         return (
@@ -1041,7 +1096,10 @@ def decide(
             "stop",
         )
     reason = "every part has a merged pull request — acceptance is next"
-    return acceptance_next(reason, held, has_parts=True)
+    merged = list(
+        {pr["ref"]: pr for p in parts for pr in p["prs"] if pr["state"] == "MERGED"}.values()
+    )
+    return acceptance_next(facts, reason, held, merged, has_parts=True)
 
 
 def collect(repo: str, number: int, part: int | None) -> dict[str, Any]:
@@ -1090,6 +1148,7 @@ def collect(repo: str, number: int, part: int | None) -> dict[str, Any]:
             "state": text_of(issue, "state", "issue"),
             "assignees": assignees_of(issue),
             "board_status": board_status(item),
+            "sub_issues": sub_issues_of(issue),
         },
         "blockers": blockers_of(blocked),
         "parts": parts,
@@ -1107,6 +1166,14 @@ def collect(repo: str, number: int, part: int | None) -> dict[str, Any]:
             warnings.append(
                 f"Part {chosen['n']} already has {kind} pull request: {listing(chosen['prs'])}"
             )
+    facts["held"] = (
+        None
+        if held is None
+        else {
+            "kind": "returned" if held["kind"] == "returned" else "unmet_table",
+            "url": held["url"],
+        }
+    )
     facts["selected"] = selected
     facts["verdict"] = verdict
     facts["reasons"] = reasons

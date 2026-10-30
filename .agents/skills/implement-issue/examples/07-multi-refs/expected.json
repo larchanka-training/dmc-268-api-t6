@@ -1,6 +1,7 @@
 {
   "blockers": [],
   "common_acceptance_criteria": [],
+  "held": null,
   "issue": {
     "assignees": [
       "axyi"
@@ -9,6 +10,10 @@
     "number": 168,
     "repo": "larchanka-training/dmc-268-api-t6",
     "state": "OPEN",
+    "sub_issues": {
+      "open": 0,
+      "total": 0
+    },
     "title": "[reviews] Close the findings of the #130 acceptance: the excluded file, the Go resolver, the DiffMap base, the docs",
     "url": "https://github.com/larchanka-training/dmc-268-api-t6/issues/168"
   },

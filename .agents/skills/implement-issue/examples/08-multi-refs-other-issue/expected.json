@@ -1,6 +1,7 @@
 {
   "blockers": [],
   "common_acceptance_criteria": [],
+  "held": null,
   "issue": {
     "assignees": [
       "axyi"
@@ -9,6 +10,10 @@
     "number": 130,
     "repo": "larchanka-training/dmc-268-api-t6",
     "state": "OPEN",
+    "sub_issues": {
+      "open": 0,
+      "total": 0
+    },
     "title": "[reviews] Pass the policy snapshot and the L1-L4 context to the prompt",
     "url": "https://github.com/larchanka-training/dmc-268-api-t6/issues/130"
   },

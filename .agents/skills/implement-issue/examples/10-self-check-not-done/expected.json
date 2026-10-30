@@ -9,6 +9,10 @@
   "common_acceptance_criteria": [
     "Скилл работает без субагентов: шаги последовательные, скрипт — CLI"
   ],
+  "held": {
+    "kind": "unmet_table",
+    "url": "https://github.com/larchanka-training/dmc-268-api-t6/issues/266#issuecomment-1000000011"
+  },
   "issue": {
     "assignees": [
       "axyi"
@@ -17,6 +21,10 @@
     "number": 266,
     "repo": "larchanka-training/dmc-268-api-t6",
     "state": "OPEN",
+    "sub_issues": {
+      "open": 0,
+      "total": 0
+    },
     "title": "[agents] Добавьте скилл приёмки задачи: AC Check с доказательствами и follow-up вне скоупа",
     "url": "https://github.com/larchanka-training/dmc-268-api-t6/issues/266"
   },

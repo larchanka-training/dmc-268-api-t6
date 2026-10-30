@@ -25,6 +25,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 from types import ModuleType
 from typing import Any
@@ -185,6 +186,7 @@ def issue_response(
     blocked_next: str | None = None,
     timeline_next: str | None = None,
     comments_next: str | None = None,
+    sub_issues: tuple[int, int] = (0, 0),
 ) -> dict[str, Any]:
     return {
         "data": {
@@ -195,9 +197,10 @@ def issue_response(
                     "state": state,
                     "body": body,
                     "assignees": {"nodes": [{"login": a} for a in assignees]},
+                    "subIssuesSummary": {"total": sub_issues[0], "completed": sub_issues[1]},
                     "projectItems": {
                         "pageInfo": page_info(None),
-                        "nodes": [project_item("Todo")] if items is None else items,
+                        "nodes": [project_item("In Progress")] if items is None else items,
                     },
                     "blockedBy": {"pageInfo": page_info(blocked_next), "nodes": blocked or []},
                     "timelineItems": {
@@ -314,6 +317,7 @@ def test_output_is_stable_json(tmp_path: Path) -> None:
         "parts",
         "common_acceptance_criteria",
         "task_prs",
+        "held",
         "selected",
         "kickoff",
         "verdict",
@@ -328,6 +332,7 @@ def test_output_is_stable_json(tmp_path: Path) -> None:
         "state",
         "assignees",
         "board_status",
+        "sub_issues",
     }
     assert set(doc["parts"][0]) == {
         "n",
@@ -1316,7 +1321,8 @@ def test_issue_fields(tmp_path: Path) -> None:
         "url": "https://github.com/x/y/issues/13",
         "state": "OPEN",
         "assignees": ["a", "b"],
-        "board_status": "Todo",
+        "board_status": "In Progress",
+        "sub_issues": {"total": 0, "open": 0},
     }
 
 
@@ -1458,6 +1464,10 @@ def _corrupt(path: list[str | int], value: Any) -> dict[str, Any]:
         _corrupt(["timelineItems", "nodes", 0, "source", "number"], "1"),
         _corrupt(["timelineItems", "nodes", 0, "source", "title"], None),
         _corrupt(["timelineItems", "pageInfo"], {"hasNextPage": True, "endCursor": None}),
+        _corrupt(["subIssuesSummary"], None),
+        _corrupt(["subIssuesSummary", "total"], "3"),
+        _corrupt(["subIssuesSummary", "completed"], None),
+        _corrupt(["subIssuesSummary", "completed"], 5),
         _corrupt(["comments"], None),
         _corrupt(["comments", "nodes"], "not a list"),
         _corrupt(["comments", "nodes"], [comment(RETURNED) | {"url": None}]),
@@ -1479,6 +1489,10 @@ def _corrupt(path: list[str | int], value: Any) -> dict[str, Any]:
         "pr-number",
         "pr-title",
         "no-cursor",
+        "sub-issues-missing",
+        "sub-issues-total",
+        "sub-issues-completed-null",
+        "sub-issues-completed-above-total",
         "comments-missing",
         "comments-nodes",
         "comment-url",
@@ -1560,6 +1574,7 @@ ISSUE_QUERY_TEXT = squash(
         issue(number: $number) {
           title url state body
           assignees(first: 20) { nodes { login } }
+          subIssuesSummary { total completed }
           projectItems(first: 100) {
             pageInfo { hasNextPage endCursor }
             nodes {
@@ -2367,6 +2382,229 @@ def test_the_markers_are_the_ones_accept_issue_writes() -> None:
     expected = {m.group(1): kind for kind, m in written.items() if m}
     assert expected == pf.ACCEPT_MARKS
     assert tuple(expected) == (TABLE, ACCEPTED, RETURNED)
+
+
+# ─── accept needs a card that says the work was done here (H1) ──────────────
+# The reviewer's live cases, as offline rows: a whole task whose card is in Todo and whose
+# merged pull request(s) with Refs finished it before the issue was taken (api#362, #217,
+# #258, #282, #224), and an epic (api#139).
+LIVE_TODO_ROWS = [
+    (362, API, 364, "docs(report): record the rules.md A/B on review prompt v5 (#163)"),
+    (217, API, 364, "docs(report): record the rules.md A/B on review prompt v5 (#163)"),
+    (258, API, 230, "feat(reviews): guard, budget, summary and candidate dropping (#219)"),
+    (282, API, 284, "ci: split the Python job into unit and four integration shards (#281)"),
+    (224, UI, 109, "feat(repository): RAG toggle and index status (#102)"),
+]
+WHOLE_TASK = "## Scope\n\n- x\n" + KICKOFF
+
+
+@pytest.mark.parametrize(("issue", "pr_repo", "pr_number", "title"), LIVE_TODO_ROWS)
+def test_a_merged_pull_request_on_a_todo_card_is_a_stop_not_accept(
+    tmp_path: Path, issue: int, pr_repo: str, pr_number: int, title: str
+) -> None:
+    refs = f"Refs #{issue}" if pr_repo == API else f"Refs {API}#{issue}"
+    node = refs_pr(pr_number, "does a thing", title=title, refs=refs, repo=pr_repo)
+    response = issue_response(body=WHOLE_TASK, timeline=[node], items=[project_item("Todo")])
+    code, doc = facts(tmp_path, response, ref=f"api#{issue}")
+    assert (code, doc["verdict"], doc["selected"]) == (1, "stop", None)
+    assert doc["reasons"] == [
+        "the card is in Todo: the work was never started here — the merged pull request(s) "
+        f"with Refs are {pr_repo}#{pr_number} (MERGED); take the task with the user"
+    ]
+
+
+def test_an_epic_is_a_stop_before_anything_else(tmp_path: Path) -> None:
+    # api#139: nine sub-issues, seven closed, three merged pull requests with Refs, In Progress.
+    timeline = [refs_pr(n, "x", refs="Refs #139") for n in (157, 158, 161)]
+    response = issue_response(body=WHOLE_TASK, timeline=timeline, sub_issues=(9, 7))
+    code, doc = facts(tmp_path, response, ref="api#139")
+    assert (code, doc["verdict"], doc["selected"]) == (1, "stop", None)
+    assert doc["reasons"] == [
+        "an epic: it has 9 sub-issues (2 open) — implement its sub-issues, not the epic"
+    ]
+    assert doc["issue"]["sub_issues"] == {"total": 9, "open": 2}
+
+
+def test_an_epic_stops_before_a_blocker_a_part_and_a_bad_part(tmp_path: Path) -> None:
+    response = issue_response(body=TWO_PARTS, blocked=[blocker(5)], sub_issues=(3, 3))
+    for args in ((), ("--part", "1"), ("--part", "99")):  # 99: not an exit 2, the epic comes first
+        code, doc = facts(tmp_path, response, *args)
+        assert (code, doc["verdict"]) == (1, "stop"), args
+        assert doc["reasons"] == [
+            "an epic: it has 3 sub-issues (0 open) — implement its sub-issues, not the epic"
+        ]
+
+
+def test_a_closed_epic_issue_is_closed_first(tmp_path: Path) -> None:
+    response = issue_response(body=WHOLE_TASK, state="CLOSED", sub_issues=(2, 1))
+    _, doc = facts(tmp_path, response)
+    assert doc["reasons"] == [f"issue {API}#13 is CLOSED"]
+
+
+@pytest.mark.parametrize("card", ["In Progress", "On Review", "AC Check"])
+def test_accept_needs_a_card_in_progress_on_review_or_ac_check(tmp_path: Path, card: str) -> None:
+    items = [project_item(card)]
+    whole = issue_response(body=WHOLE_TASK, timeline=[refs_pr(50, "x")], items=items)
+    parts = issue_response(body=TWO_PARTS, timeline=merged_parts(), items=items)
+    for response in (whole, parts):
+        code, doc = facts(tmp_path, response)
+        assert (code, doc["verdict"], doc["selected"]) == (1, "accept", None)
+
+
+@pytest.mark.parametrize(
+    ("items", "where"),
+    [
+        ([project_item("Todo")], "the card is in Todo"),
+        ([project_item("Done")], "the card is in Done"),
+        ([project_item(None)], f"the issue has no Status on board {pf.BOARD_NUMBER}"),
+        ([], f"the issue has no Status on board {pf.BOARD_NUMBER}"),
+        (
+            [project_item("On Review", number=7)],
+            f"the issue has no Status on board {pf.BOARD_NUMBER}",
+        ),
+    ],
+)
+def test_any_other_card_is_a_stop_for_parts_and_for_a_whole_task(
+    tmp_path: Path, items: list[dict[str, Any]], where: str
+) -> None:
+    tail = ": the work was never started here — the merged pull request(s) with Refs are "
+    whole = issue_response(body=WHOLE_TASK, timeline=[refs_pr(50, "x")], items=items)
+    _, doc = facts(tmp_path, whole)
+    assert (doc["verdict"], doc["reasons"]) == (
+        "stop",
+        [f"{where}{tail}{API}#50 (MERGED); take the task with the user"],
+    )
+    parts = issue_response(body=TWO_PARTS, timeline=merged_parts(), items=items)
+    _, doc = facts(tmp_path, parts)
+    assert doc["verdict"] == "stop"
+    assert doc["reasons"] == [
+        f"{where}{tail}{API}#100 (MERGED), {API}#200 (MERGED); take the task with the user"
+    ]
+
+
+def test_the_card_matters_only_when_acceptance_would_be_next(tmp_path: Path) -> None:
+    todo = [project_item("Todo")]
+    # nothing merged: the whole task is taken from Todo, as ever
+    _, doc = facts(tmp_path, issue_response(body=WHOLE_TASK, items=todo))
+    assert doc["selected"] == {"part": None, "reason": "whole-task"}
+    # a part still open: the next part is taken from Todo, an explicit part too
+    one = [refs_pr(100, "Part 1 of #13: x")]
+    _, doc = facts(tmp_path, issue_response(body=TWO_PARTS, timeline=one, items=todo))
+    assert doc["selected"] == {"part": 2, "reason": "first-todo"}
+    response = issue_response(body=TWO_PARTS, timeline=merged_parts(), items=todo)
+    _, doc = facts(tmp_path, response, "--part", "2")
+    assert doc["selected"] == {"part": 2, "reason": "explicit"}
+    # the card is judged before the return: Todo + returned says the card
+    comments = [comment(RETURNED, "2026-10-21T09:00:00Z", 2)]
+    response = issue_response(
+        body=TWO_PARTS, timeline=merged_parts(), comments=comments, items=todo
+    )
+    _, doc = facts(tmp_path, response)
+    assert doc["reasons"][0].startswith("the card is in Todo: ")
+
+
+# ─── held: the comment the rework has to read (M1) ──────────────────────────
+def test_held_names_the_comment_on_a_stop_and_on_a_go(tmp_path: Path) -> None:
+    returned = [comment(RETURNED + "\n\nЧто осталось: AC2", "2026-10-21T09:00:00Z", 2)]
+    response = issue_response(body=TWO_PARTS, timeline=merged_parts(), comments=returned)
+    _, doc = facts(tmp_path, response)
+    assert (doc["verdict"], doc["held"]) == ("stop", {"kind": "returned", "url": comment_url(2)})
+    # --part K goes, and `held` is there for the run to read first
+    code, doc = facts(tmp_path, response, "--part", "2")
+    assert (code, doc["verdict"]) == (0, "go")
+    assert doc["held"] == {"kind": "returned", "url": comment_url(2)}
+    # a part still todo goes as ever, and `held` is there too
+    one = [refs_pr(100, "Part 1 of #13: x")]
+    response = issue_response(body=TWO_PARTS, timeline=one, comments=returned)
+    code, doc = facts(tmp_path, response)
+    assert (code, doc["selected"]) == (0, {"part": 2, "reason": "first-todo"})
+    assert doc["held"] == {"kind": "returned", "url": comment_url(2)}
+    # a table with unmet rows is `unmet_table`
+    table = [comment(TABLE_UNMET, "2026-10-21T09:00:00Z", 3)]
+    response = issue_response(body=TWO_PARTS, timeline=merged_parts(), comments=table)
+    _, doc = facts(tmp_path, response, "--part", "1")
+    assert doc["held"] == {"kind": "unmet_table", "url": comment_url(3)}
+
+
+def test_held_is_null_when_nothing_holds_the_issue_back(tmp_path: Path) -> None:
+    cases = {
+        "no comment": [],
+        "table met": [comment(TABLE_MET, "2026-10-21T09:00:00Z", 2)],
+        "accepted": [comment(ACCEPTED, "2026-10-21T09:00:00Z", 2)],
+        "merged after": [comment(RETURNED, "2026-10-19T09:00:00Z", 2)],  # merged_parts: 10-20
+    }
+    for name, comments in cases.items():
+        response = issue_response(body=TWO_PARTS, timeline=merged_parts(), comments=comments)
+        _, doc = facts(tmp_path, response)
+        assert doc["held"] is None, name
+        assert doc["verdict"] == "accept", name
+
+
+# ─── a line regex is linear (I1) ────────────────────────────────────────────
+@pytest.mark.parametrize(
+    "line",
+    [
+        "Refs #1" + " " * 65000 + "x",
+        "Refs #1" + " " * 65000 + ",",
+        "Refs #1" + " \t" * 32000 + "and",
+        "- " + " " * 65000 + "Refs #1",
+        "## Scope" + " " * 65000 + "x",
+        "- Part 1" + " " * 65000 + "x",
+        "- Part 1 (label" + " " * 65000 + ":",
+    ],
+)
+def test_the_line_regexes_are_linear(tmp_path: Path, line: str) -> None:
+    start = time.monotonic()
+    pf.REFS_LINE.match(line)
+    pf.HEADING.match(line)
+    pf.PART_BULLET.fullmatch(line.lstrip("- "))
+    assert time.monotonic() - start < 1
+    # ...and end to end: a pull request body and an issue body made of such lines
+    body = f"## What\n\nPart 2 of #13: x\n\n## Refs\n\n{line}\nRefs #13\n"
+    start = time.monotonic()
+    doc = _ok(
+        tmp_path,
+        issue_response(body=f"## Scope\n\n{line}\n" + TWO_PARTS, timeline=[pr(1, body=body)]),
+    )
+    assert time.monotonic() - start < 5
+    assert doc["schema"] == 1
+
+
+def test_a_heading_keeps_its_text_without_the_closing_sequence() -> None:
+    lines = ["## Scope", "## Scope ##", "## Scope  ##  ", "##\tScope\t#", "  ## Scope"]
+    for line in lines:
+        got = pf.section_lines(f"{line}\n- a\n## Next\n- b\n", named_scope, skip_quotes=False)
+        assert got == ["- a"], line
+    assert pf.section_lines("#### Scope\n- a\n", named_scope, skip_quotes=False) == ["- a"]
+    assert pf.section_lines("####### Scope\n- a\n", named_scope, skip_quotes=False) is None
+    assert pf.section_lines("    ## Scope\n- a\n", named_scope, skip_quotes=False) is None
+
+
+def named_scope(heading: str) -> bool:
+    return heading == "Scope"
+
+
+# ─── a range whose end does not parse names nothing; `&` joins a list (I2) ──
+@pytest.mark.parametrize(
+    ("title", "what", "expected"),
+    [
+        (f"Part 1-{'9' * 11}", "", []),
+        (f"Part 1 – {'9' * 5000}", "", []),
+        (f"Part {'9' * 11}-3", "", []),
+        ("feat: y", f"Part 1-{'9' * 11}: x. Part 2 is next.", []),
+        ("Parts 2 & 3", "", [2, 3]),
+        ("Parts 1, 2 & 3", "", [1, 2, 3]),
+        ("Parts 1 &amp; 2", "", []),
+        ("Parts 2 &3", "", []),
+        ("Part 2 & 3", "", [2]),  # a singular label names one part
+        ("Teile 2 & 3 von #13", "", [2, 3]),
+        ("feat: y", "Parts 2 & 3 of #13: x. Part 1 is merged.", [2, 3]),
+    ],
+)
+def test_an_unparsable_range_end_names_nothing_and_an_ampersand_lists(
+    tmp_path: Path, title: str, what: str, expected: list[int]
+) -> None:
+    assert named_in(tmp_path, refs_pr(90, what, title=title), parts=3) == expected
 
 
 # ─── the branch pattern in the skill texts (7f) ─────────────────────────────

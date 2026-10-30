@@ -19,6 +19,8 @@ preflight.py api#266
 - `verdict: stop`, exit code 1, `selected: null`, not `accept`.
 - One reason: the issue was returned at acceptance, with the link to the return comment, and no
   pull request with `Refs` has been merged since — «rework a part with --part K».
+- `held` is `{kind: returned, url: <the return comment>}`: the rework run reads that comment first
+  (the «Что осталось» list) and covers it, not the whole part again.
 - The skill reports the reason and ends. The user names the part to rework and runs it with
   `--part K`; once a pull request with `Refs` is merged after the comment, the verdict is `accept`
   again. An issue without parts that was returned has no `--part`: that rework is manual for now.

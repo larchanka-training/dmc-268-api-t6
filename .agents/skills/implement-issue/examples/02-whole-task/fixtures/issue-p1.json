@@ -9,6 +9,10 @@
         "assignees": {
           "nodes": []
         },
+        "subIssuesSummary": {
+          "total": 0,
+          "completed": 0
+        },
         "projectItems": {
           "pageInfo": {
             "hasNextPage": false,

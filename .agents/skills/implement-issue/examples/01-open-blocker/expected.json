@@ -20,6 +20,7 @@
     "Золотые примеры лежат в `.agents/skills/<скилл>/examples/`: вход (issue) и ожидаемый результат. Детерминированные части скрипта — pytest рядом со скиллом, запуск как у create-issue (вне CI, `create-issue/SKILL.md:234-240`); вывод прогона автор прикладывает в PR. Поведение скилла автор PR прогоняет вручную в Claude Code и Codex и прикладывает вывод в описание PR",
     "Новый скилл внесён в список в `AGENTS.md` и в sync map `.agents/README.md`"
   ],
+  "held": null,
   "issue": {
     "assignees": [
       "axyi"
@@ -28,6 +29,10 @@
     "number": 269,
     "repo": "larchanka-training/dmc-268-api-t6",
     "state": "OPEN",
+    "sub_issues": {
+      "open": 0,
+      "total": 0
+    },
     "title": "[agents] Добавьте скилл реализации задачи: обёртка над planning, tdd, code-review и pull-request",
     "url": "https://github.com/larchanka-training/dmc-268-api-t6/issues/269"
   },
