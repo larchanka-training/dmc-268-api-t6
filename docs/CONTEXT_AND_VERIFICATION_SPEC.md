@@ -1010,7 +1010,7 @@ API, хранения, hash/dedup и eval. Старые v1 findings не пол�
 | 4. Политика/дубли | Допущенные candidates, IgnorePolicy, закреплённый lint-filter и dedup keys | Defense guard разрешённых источников для evidence/general, чистый lint, точная дедупликация; порог severity здесь не применяется | Сохранённый набор; drop `lint_pattern`, `duplicate`; guard: изолируемый запрещённый evidence/general → `evidence_source_disallowed`/partial, неизолируемый источник либо нарушенная целостность → failed/`snapshot_integrity_error`; не переименовывает evidence-причины прохода 3 и не заменяет anchor-ignore прохода 2; pre-send guard не является проходом по ответу |
 | 5. Verifier | Замороженные candidates после прохода 4, policy/defaults, код и отдельный manifest | Обязательный смысловой batch по §7 | `supported` идёт дальше; `contradicted`, `insufficient_context` сохраняются без публикации; ошибки всего вызова — §8.4 |
 | 6. Порог и размещение | Только supported, закреплённый `severity_threshold`, `max_comments` | Порог после verifier (§7), затем сортировка и закреплённый inline cap | Drop `severity_threshold` с отдельным счётчиком; остальные — final findings с disposition inline/general; сверх cap — general, не drop |
-| 6b. Межпрогонный дедуп | Supported-кандидаты после Pass 5, реестр опубликованных комментариев PR (`comments` с `github_comment_id`), карта тредов `thread_map`, исходы `resolution_outcomes` | Межпрогонная дедупликация кандидатов внутри `findings_post_processor.py:process()` (Cross-Run Dedup по [`INCREMENTAL_REVIEW_AND_LIMITS_SPEC.md`](INCREMENTAL_REVIEW_AND_LIMITS_SPEC.md)); выполняется строго после восстановления атрибуции `_repair_attribution` и до сортировки и среза cap `Repository.max_comments`; подавленные дубли не сжигают inline cap | Повторные находки сохраняют `drop_reason IS NULL`, в полном объёме учитываются в severity counts, вердикте и check-run (`suppressed_count`), связываются с существующим `Comment` (`linked_comment_id`) и помечаются `publication_action = 'suppressed_duplicate'`; отсеянные проходами 2–6 получают `publication_action = 'dropped'`; не попадают в срез inline cap и не рендерятся в теле ревью; новые получают `publication_action = 'publish_inline'` (или `publish_body`); потребитель — `store_review_output.py` |
+| 6b. Межпрогонный дедуп | Supported-кандидаты после Pass 5, реестр опубликованных комментариев PR (`comments` с `github_comment_id`) и body-only находок последнего прошедшего T14 прогона (`registry`), карта тредов `thread_map: ReviewThreadMap`, исходы `resolution_outcomes` (чтение реестра и сетевые шаги `sync_review_threads_state` и `resolution_outcomes` выполняются в `store_review_output.py` после `get_post_processing_input` и до `process()`) | Межпрогонная дедупликация кандидатов внутри `findings_post_processor.py:process()` (Cross-Run Dedup по [`INCREMENTAL_REVIEW_AND_LIMITS_SPEC.md`](INCREMENTAL_REVIEW_AND_LIMITS_SPEC.md)); выполняется строго после восстановления атрибуции `_repair_attribution` и до сортировки и среза cap `Repository.max_comments`; подавленные дубли не сжигают inline cap | Повторные находки сохраняют `drop_reason IS NULL`, возвращаются в поле dataclass `ProcessedReviewOutput.suppressed`, в полном объёме учитываются в `kept` (`Verdict` и `Risk summary` тела ревью, `hashed_findings`), severity counts и check-run (`CheckRunReport.suppressed_count`), связываются с существующим `Comment` (`linked_comment_id`, либо `NULL` для body-only) и помечаются `publication_action = 'suppressed_duplicate'`; отсеянные проходами 2–6 получают `publication_action = 'dropped'`; подавленные дубли не попадают в срез inline cap и не рендерятся строками в списке тела ревью; новые получают `publication_action = 'publish_inline'` (или `'publish_body'`); потребители — `store_review_output.py` и `run_repository.py` |
 | 7. Публикация | FinalReviewResult и immutable publication plan (сформированный после прохода 6b), текущая идентичность VCS | Проверка допустимого адаптера, свежести head/diff; отправка review batch на GitHub (дискуссий на GitLab); чистка тредов publisher после перехода T14 | Новые inline-находки публикуются review batch; чистка устаревших/решённых тредов мутацией `resolveReviewThread` по квоте до 30; явный отказ публикации всего batch по §9–10: `superseded`, `pr_closed`, `publication_payload_too_large`, provider-specific ошибки, `publication_outcome_unknown`; без угадывания координат |
 
 `lint_pattern` и `duplicate` сохраняют действующие имена legacy-кодов;
@@ -2046,24 +2046,23 @@ comments/discussions обязательна; ошибка чтения или л
    со спецификацией [`INCREMENTAL_REVIEW_AND_LIMITS_SPEC.md`](INCREMENTAL_REVIEW_AND_LIMITS_SPEC.md)
    (Ч.1), после подтверждения успешности публикации review batch на GitHub, атомарного перехода
    T14 в `succeeded` (вместе с сохранением квитанций comments в единой транзакции) и обновления
-   Check Run в статус `completed` (`neutral` / `success`) publisher выполняет
+   Check Run в статус `completed / neutral` publisher выполняет
    фазу разрешения тредов (VCS Thread Clean-up) как best-effort шаг. Чистка запускается ТОЛЬКО если
-   `run.status == 'succeeded'`; если публикация review batch не состоялась или T14 завершился ошибкой,
+   `Run.state == RunState.SUCCEEDED` (`run.state == 'succeeded'`); если публикация review batch не состоялась или T14 завершился ошибкой,
    фаза чистки не запускается. Набор состояний Run (Р-14 / D5) не изменяется.
    Замечания, дефекты которых были устранены автором в новой ревизии (при подтверждённом
    полном анализе участка и отсутствии любых кандидатов с `drop_reason IS NOT NULL`, кроме `contradicted`)
    или файлы которых были удалены, переводятся в статус `RESOLVED_BY_BOT` с вызовом GraphQL-мутации
    `resolveReviewThread`. Эта операция изменяет состояние жизненного цикла треда (`isResolved`), не изменяя
    исходный текст комментария (`body`), payload digest и delivery receipts, сохраняя гарантии неизменяемости публикации.
-   Кандидаты на закрытие сохраняются в метаданных публикации (`run_review_pointers`) вне `findings_hash`.
+   Кандидаты на закрытие размечаются в `comments` (`pending_resolution_run_id`, `pending_resolution_outcome`) при сохранении плана публикации в `store_review_output.py` вне `findings_hash` и вне неизменяемого digest плана T8 (`publication_key`).
    Вызовы GraphQL выполняются строго вне транзакций БД со своим таймаутом и проверкой актуальности PR
-   (`provider_origin_active`, DB checkpoint и `_ensure_current_head`); мутации квотируются (до 30 на run)
+   (DB checkpoint `uow.runs.provider_origin_active(run_id)` и `_ensure_current_head`); мутации квотируются (до 30 на run)
    с соблюдением вторичных лимитов GitHub (интервал ≥ 1.2 с, общий бюджет фазы чистки 90 с); остаток свыше 30
    переходит на обработку в последующие Run.
    При поступлении нового коммита во время фазы чистки мутации немедленно прекращаются, Run сохраняет статус
    `succeeded`, а оставшиеся треды переносятся на следующий Run.
-   При ошибках GraphQL или нехватке прав треды остаются открытыми, инкрементируется метрика
-   `review_thread_cleanup_forbidden_total`, Run не прерывается и сохраняет статус `succeeded`.
+   При отказе по правам (`errors[].type == 'FORBIDDEN'` / `Resource not accessible by integration`), вторичном rate limit (HTTP 403/429 с `Retry-After`) или сетевом сбое треды остаются открытыми, в `run_actions` и лог записывается диагностика, Run не прерывается и сохраняет статус `succeeded`.
 
 Lease/уникальный ключ предотвращают обычную конкуренцию workers, но не дают
 атомарности с HTTP. После истечения lease с незавершённым запросом новый worker
