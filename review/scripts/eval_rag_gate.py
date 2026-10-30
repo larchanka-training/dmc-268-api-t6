@@ -255,7 +255,7 @@ def _ratio(numerator: int, denominator: int) -> Fraction | None:
     return Fraction(numerator, denominator) if denominator else None
 
 
-def _median(values: Sequence[int]) -> Fraction | None:
+def median(values: Sequence[int]) -> Fraction | None:
     if not values:
         return None
     ordered = sorted(values)
@@ -308,7 +308,7 @@ def _check_arm_structure(arms_and_ids: Sequence[tuple[str, str]]) -> None:
             raise GateInputError(f"need {RUNS_PER_ARM} {arm} runs, got {count}")
 
 
-def _check_corpus(corpus: Sequence[GateCase]) -> list[GateCase]:
+def check_corpus(corpus: Sequence[GateCase]) -> list[GateCase]:
     ids = [case.case_id for case in corpus]
     repeated = sorted(case_id for case_id, count in Counter(ids).items() if count > 1)
     if repeated:
@@ -503,7 +503,7 @@ def _arm_summary(
     """An arm's rows, means, pooled sensitivities, latency, tokens and USD; and its token median."""
     tokens = [item.tokens_in for run in runs for item in run.cases.values()]
     known_tokens = [value for value in tokens if value is not None]
-    median = _median(known_tokens) if len(known_tokens) == len(tokens) else None
+    token_median = median(known_tokens) if len(known_tokens) == len(tokens) else None
     latencies = [
         item.latency_ms
         for run in runs
@@ -522,7 +522,7 @@ def _arm_summary(
         },
         "tokens_in": {
             "n": len(known_tokens),
-            "median": _exact(median),
+            "median": _exact(token_median),
             "total": totals["tokens_in_total"],
         },
         "tokens_out_total": totals["tokens_out_total"],
@@ -530,7 +530,7 @@ def _arm_summary(
     }
     for name, value in means.items():
         summary[f"{name}_mean"] = {"exact": _exact(value), "value": _float(value)}
-    return summary, median
+    return summary, token_median
 
 
 def _condition(
@@ -646,7 +646,7 @@ def _conditions(
 def compute_gate(
     corpus: Sequence[GateCase], runs: Sequence[GateRun], oracle: Oracle | None
 ) -> dict[str, Any]:
-    reverse = _check_corpus(corpus)
+    reverse = check_corpus(corpus)
     _check_runs(corpus, runs)
     counts = {} if oracle is None else _oracle_counts(oracle, runs)
     by_arm = {arm: [run for run in runs if run.arm == arm] for arm in ARMS}
