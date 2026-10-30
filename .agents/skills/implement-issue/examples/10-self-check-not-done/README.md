@@ -22,6 +22,7 @@ last line is «Итог: «не выполнено» нет, ставлю AC Che
 - `verdict: stop`, exit code 1, `selected: null`, not `accept`.
 - One reason: the self-check found unmet AC, with the link to the table comment, and no pull
   request with `Refs` has been merged since — «rework first: --part K for a part».
+- `held` is `{kind: unmet_table, url: <the table comment>}`: the rework covers the unmet rows.
 - The skill reports the reason and ends. A code AC is reworked with a new pull request:
   `implement-issue api#266 --part K` for the part it belongs to (a task without parts: by hand).
   Once a pull request with `Refs` is merged after the table, or a newer table without unmet rows
