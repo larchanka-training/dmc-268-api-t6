@@ -7,7 +7,7 @@ from datetime import datetime
 from hashlib import sha256
 from uuid import UUID, uuid4
 
-from sqlalchemy import and_, func, or_, select, union_all, update
+from sqlalchemy import and_, func, literal_column, or_, select, union_all, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -300,16 +300,21 @@ class SqlAlchemyWebhookRunStore:
             WebhookEvent.payload["repository"]["id"].as_string()
             == str(candidate.repository_external_id),
         )
+        # Fixed paths and event predicates must stay literal: the receipt indexes
+        # are partial expression indexes, including under a generic PostgreSQL plan.
+        pull_head = WebhookEvent.payload.op("#>>")(
+            literal_column("'{pull_request,head,sha}'::text[]")
+        )
+        push_after = WebhookEvent.payload.op("#>>")(literal_column("'{after}'::text[]"))
         synchronize = select(login.label("login"), received.label("received_at")).where(
-            WebhookEvent.event == "pull_request",
-            WebhookEvent.action == "synchronize",
-            func.jsonb_extract_path_text(WebhookEvent.payload, "pull_request", "head", "sha")
-            == candidate.ci.head_sha,
+            WebhookEvent.event == literal_column("'pull_request'"),
+            WebhookEvent.action == literal_column("'synchronize'"),
+            pull_head == candidate.ci.head_sha,
             *shared,
         )
         push = select(login.label("login"), received.label("received_at")).where(
-            WebhookEvent.event == "push",
-            func.jsonb_extract_path_text(WebhookEvent.payload, "after") == candidate.ci.head_sha,
+            WebhookEvent.event == literal_column("'push'"),
+            push_after == candidate.ci.head_sha,
             *shared,
         )
         receipts = union_all(synchronize, push).subquery()

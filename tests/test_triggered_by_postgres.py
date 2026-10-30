@@ -9,11 +9,13 @@ import selectors
 from collections.abc import Iterator
 from dataclasses import replace
 from datetime import timedelta
+from typing import Any, cast
 from uuid import UUID, uuid4
 
 import pytest
 from alembic.config import Config
 from sqlalchemy import create_engine, text
+from sqlalchemy import event as sa_event
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from alembic import command
@@ -207,6 +209,145 @@ def test_triggered_by_records_an_explicit_actor_or_the_push_author(
         exercise(),
         loop_factory=lambda: asyncio.SelectorEventLoop(selectors.SelectSelector()),
     )
+
+
+def test_push_author_query_uses_both_sha_expression_indexes(triggered_by_env: Env) -> None:
+    async def exercise() -> None:
+        engine = triggered_by_env.engine()
+        factory = async_sessionmaker(engine, expire_on_commit=False)
+        captured: list[tuple[str, Any]] = []
+
+        def capture(
+            conn: object,
+            cursor: object,
+            statement: str,
+            parameters: Any,
+            context: object,
+            executemany: bool,
+        ) -> None:
+            del conn, cursor, context, executemany
+            if "FROM webhook_events" in statement and "UNION ALL" in statement:
+                captured.append((statement, parameters))
+
+        sa_event.listen(engine.sync_engine, "before_cursor_execute", capture)
+        try:
+            async with factory.begin() as session:
+                await session.execute(
+                    text("UPDATE runs SET state = 'succeeded' WHERE code_change_id = :pr"),
+                    {"pr": PR_NEW},
+                )
+                head = "9" * 40
+                await session.execute(
+                    text("UPDATE code_changes SET head_sha = :head WHERE id = :pr"),
+                    {"head": head, "pr": PR_NEW},
+                )
+                store = SqlAlchemyWebhookRunStore(session)
+                candidate = await store.lock_candidate(PR_NEW)
+                assert isinstance(candidate, RunInsertCandidate)
+                await session.execute(
+                    text(
+                        "INSERT INTO webhook_events (id, installation_external_id, delivery_id, "
+                        "event, action, payload, received_at) "
+                        "SELECT gen_random_uuid(), :installation, 'sync-noise-' || n, "
+                        "'pull_request', 'synchronize', jsonb_build_object("
+                        "'repository', jsonb_build_object('id', :repo), "
+                        "'pull_request', jsonb_build_object('head', jsonb_build_object("
+                        "'sha', lpad(n::text, 40, '0'))), "
+                        "'sender', jsonb_build_object('login', 'noise')), "
+                        "'2026-10-20T00:00:00Z'::timestamptz "
+                        "FROM generate_series(1, 6000) AS n"
+                    ),
+                    {
+                        "installation": candidate.ci.installation_external_id,
+                        "repo": candidate.repository_external_id,
+                    },
+                )
+                await session.execute(
+                    text(
+                        "INSERT INTO webhook_events (id, installation_external_id, delivery_id, "
+                        "event, payload, received_at) "
+                        "SELECT gen_random_uuid(), :installation, 'push-noise-' || n, "
+                        "'push', jsonb_build_object('repository', jsonb_build_object("
+                        "'id', :repo), 'after', lpad(n::text, 40, '0'), "
+                        "'sender', jsonb_build_object('login', 'noise')), "
+                        "'2026-10-20T00:00:00Z'::timestamptz "
+                        "FROM generate_series(1, 2000) AS n"
+                    ),
+                    {
+                        "installation": candidate.ci.installation_external_id,
+                        "repo": candidate.repository_external_id,
+                    },
+                )
+                for event_name, action, login in (
+                    ("pull_request", "synchronize", "sync-author"),
+                    ("push", None, "push-author"),
+                ):
+                    await session.execute(
+                        text(
+                            "INSERT INTO webhook_events (id, installation_external_id, "
+                            "delivery_id, event, action, payload, received_at) "
+                            "VALUES (:id, :installation, :delivery, :event, :action, "
+                            "CAST(:payload AS jsonb), :received)"
+                        ),
+                        {
+                            "id": uuid4(),
+                            "installation": candidate.ci.installation_external_id,
+                            "delivery": f"match-{event_name}",
+                            "event": event_name,
+                            "action": action,
+                            "payload": json.dumps(
+                                _delivery(
+                                    candidate,
+                                    head,
+                                    {"sender": {"login": login}, "after": head},
+                                )
+                            ),
+                            "received": NOW if event_name == "push" else NOW - timedelta(minutes=1),
+                        },
+                    )
+                message = await store.insert_webhook_run(candidate, NOW, triggered_by=UNSET)
+                assert isinstance(message, PendingRunMessage)
+                assert (
+                    await session.scalar(
+                        text("SELECT triggered_by FROM runs WHERE id = :id"),
+                        {"id": message.run_id},
+                    )
+                    == "push-author"
+                )
+                assert len(captured) == 1
+                sql, parameters = captured[0]
+                connection = await session.connection()
+                explained = await connection.exec_driver_sql(
+                    "EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) " + sql,
+                    cast(Any, parameters),
+                )
+                report = explained.scalar_one()[0]
+                plan = report["Plan"]
+                conditions = _index_conditions(plan)
+                for index_name in (
+                    "ix_webhook_events_pull_request_head",
+                    "ix_webhook_events_push_after",
+                ):
+                    assert index_name in conditions
+                    assert "#>>" in conditions[index_name]
+                    assert head in conditions[index_name]
+        finally:
+            sa_event.remove(engine.sync_engine, "before_cursor_execute", capture)
+            await engine.dispose()
+
+    asyncio.run(
+        exercise(),
+        loop_factory=lambda: asyncio.SelectorEventLoop(selectors.SelectSelector()),
+    )
+
+
+def _index_conditions(node: dict[str, Any]) -> dict[str, str]:
+    found = {}
+    if "Index Name" in node and "Index Cond" in node:
+        found[str(node["Index Name"])] = str(node["Index Cond"])
+    for child in node.get("Plans", []):
+        found.update(_index_conditions(child))
+    return found
 
 
 async def _insert_actor(
