@@ -1,0 +1,125 @@
+{
+  "schema_version": 1,
+  "indexed_commit_sha": "5d2e389c463f2fe6e869d75394c0e02c464c5d04",
+  "extractor": {
+    "limits_version": "limits/v1:fdf4e4d96f1a13a708d0af7b941297dc",
+    "parser_profile": "39409961245fa4d8e7284fe26c974a79dea7225e088d7bdbbd17c83384e1271a",
+    "exclusions_version": "index-exclusions/v2"
+  },
+  "file_count": 8,
+  "symbol_count": 8,
+  "files": [
+    {
+      "path": "lib/index.ts",
+      "blob_sha": "3767ce3e71ebaa64286241bcd3a8c30063880856"
+    },
+    {
+      "path": "lib/store.ts",
+      "blob_sha": "2b9b9ceed5b60baee2c4f9c0dbb4b3eb9ae2c74b"
+    },
+    {
+      "path": "lib/use.ts",
+      "blob_sha": "bfd9934332cff11c446a5104870f1cac0334f905"
+    },
+    {
+      "path": "pkg/__init__.py",
+      "blob_sha": "bafbd912d6910605e33cbc36189ae389d8827b34"
+    },
+    {
+      "path": "pkg/api.py",
+      "blob_sha": "3818b6d2dee01e4514136cbdd29afff2721172e0"
+    },
+    {
+      "path": "pkg/cli.py",
+      "blob_sha": "ae746362f607a09d2181479acaa8b6818a7ce5cc"
+    },
+    {
+      "path": "pkg/models.py",
+      "blob_sha": "bc0f4f9cb5603606ea897978ab99e3f201f3cd77"
+    },
+    {
+      "path": "pkg/store.py",
+      "blob_sha": "17cc44876cd44a4cd713282487b44aa1d4627416"
+    }
+  ],
+  "edges": [
+    {
+      "path": "lib/use.ts",
+      "kind": "imports",
+      "target_path": "lib/index.ts",
+      "target_name": ""
+    },
+    {
+      "path": "lib/use.ts",
+      "kind": "imports",
+      "target_path": "lib/store.ts",
+      "target_name": ""
+    },
+    {
+      "path": "lib/use.ts",
+      "kind": "uses_imported",
+      "target_path": "lib/index.ts",
+      "target_name": "persist"
+    },
+    {
+      "path": "lib/use.ts",
+      "kind": "uses_imported",
+      "target_path": "lib/store.ts",
+      "target_name": "save"
+    },
+    {
+      "path": "pkg/__init__.py",
+      "kind": "imports",
+      "target_path": "pkg/store.py",
+      "target_name": ""
+    },
+    {
+      "path": "pkg/api.py",
+      "kind": "imports",
+      "target_path": "pkg/models.py",
+      "target_name": ""
+    },
+    {
+      "path": "pkg/api.py",
+      "kind": "imports",
+      "target_path": "pkg/store.py",
+      "target_name": ""
+    },
+    {
+      "path": "pkg/api.py",
+      "kind": "uses_imported",
+      "target_path": "pkg/models.py",
+      "target_name": "Item"
+    },
+    {
+      "path": "pkg/api.py",
+      "kind": "uses_imported",
+      "target_path": "pkg/store.py",
+      "target_name": "save"
+    },
+    {
+      "path": "pkg/cli.py",
+      "kind": "imports",
+      "target_path": "pkg/__init__.py",
+      "target_name": ""
+    },
+    {
+      "path": "pkg/cli.py",
+      "kind": "uses_imported",
+      "target_path": "pkg/__init__.py",
+      "target_name": "save"
+    },
+    {
+      "path": "pkg/store.py",
+      "kind": "imports",
+      "target_path": "pkg/models.py",
+      "target_name": ""
+    },
+    {
+      "path": "pkg/store.py",
+      "kind": "uses_imported",
+      "target_path": "pkg/models.py",
+      "target_name": "Item"
+    }
+  ]
+}
