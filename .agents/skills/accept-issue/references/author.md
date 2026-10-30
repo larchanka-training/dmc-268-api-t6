@@ -67,10 +67,10 @@ line only after the user's explicit yes.
 
 ## 5. After `not_done`
 
-Rework stays in the same issue. Code AC: a new PR with `Refs #N`. (`implement-issue`'s
-pre-start stops today on a task whose parts are all merged or that already has a PR: a rework PR
-is the user's decision there, so tell the user and let them start it.) Non-code AC: the action and
-an evidence comment. When the
+Rework stays in the same issue. Code AC: a new PR with `Refs #N`. (`implement-issue` starts no
+rework by itself: after a `return` or a table with «не выполнено» its pre-start stops until a PR
+with `Refs` is merged; a part is reworked with `implement-issue REF --part K`, a task without
+parts by hand.) Non-code AC: the action and an evidence comment. When the
 PR is merged or the action done, post a **new full table** (the latest table comment wins) and
 the AC Check follows from the same command. No follow-up issue, no «Хвосты приёмки» — Rule 1.
 
