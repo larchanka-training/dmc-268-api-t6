@@ -45,6 +45,7 @@ from app.modules.reviews.application.review_ignore import (  # noqa: E402
     IgnorePolicy,
     parse_review_ignore,
 )
+from app.modules.reviews.application.unified_diff import split_lf  # noqa: E402
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_ROOT = REPO_ROOT / "test-prs-dataset"
@@ -111,6 +112,14 @@ def _git_env() -> dict[str, str]:
     return {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
 
 
+def _patch_lines(patch: Path) -> list[str]:
+    """The patch split on LF only, a CR before the LF dropped, as production reads a diff.
+
+    ``read_text`` would turn CRLF and a lone CR into LF, so the bytes are decoded instead.
+    """
+    return [line.removesuffix("\r") for line in split_lf(patch.read_bytes().decode("utf-8"))]
+
+
 def _patch_name(raw: str) -> str:
     """A path of a patch header line, decoded when git quoted it C-style."""
     if not raw.startswith('"'):
@@ -125,7 +134,7 @@ def _patch_added_lines(patch: Path) -> dict[str, set[int]]:
     added: dict[str, set[int]] = {}
     current_path: str | None = None
     new_line: int | None = None
-    for text in patch.read_text(encoding="utf-8").splitlines():
+    for text in _patch_lines(patch):
         if text.startswith("diff --git "):
             current_path = None
             new_line = None
@@ -173,7 +182,7 @@ def _patch_changed_paths(patch: Path) -> list[str]:
     """
     paths: dict[str, None] = {}
     in_header = True
-    for text in patch.read_text(encoding="utf-8").splitlines():
+    for text in _patch_lines(patch):
         if text.startswith("diff --git "):
             in_header = True
             if (path := _git_header_path(text)) is not None:
@@ -478,10 +487,13 @@ def validate_case(
         command = ["git", "apply", "--check"]
         if apply_directory is not None:
             command.append(f"--directory={apply_directory}")
+        # The ceiling keeps git from finding a repository above the temp dir (TMPDIR inside a
+        # work tree): there ``git apply`` applies only what the index tracks and exits 0.
+        env = {**_git_env(), "GIT_CEILING_DIRECTORIES": tmp}
         applied = subprocess.run(
             [*command, str(patch)],
             cwd=workdir,
-            env=_git_env(),
+            env=env,
             capture_output=True,
             text=True,
             check=False,

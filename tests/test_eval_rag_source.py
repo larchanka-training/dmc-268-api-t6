@@ -389,3 +389,13 @@ def test_added_lines_that_read_like_git_headers_are_content(tmp_path: Path) -> N
     assert [(file.filename, file.status, file.additions) for file in snapshot.files] == [
         ("pkg/doc.py", "added", 2)
     ]
+
+
+def test_load_snapshot_keeps_the_patch_byte_exact(tmp_path: Path) -> None:
+    # A lone CR inside an added line: reading the patch with universal newlines turns it into LF.
+    after = {**_BASE, "pkg/keep.py": b"VALUE = 2\rOTHER = 3\n"}
+
+    snapshot = _snapshot(tmp_path, after)
+
+    assert "VALUE = 2\rOTHER = 3\n" in snapshot.diff
+    assert snapshot.head["pkg/keep.py"] == after["pkg/keep.py"]
