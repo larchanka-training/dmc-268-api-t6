@@ -115,9 +115,9 @@ Rules: `.agents/rules/git-workflow.md`. Work from a fresh `origin/main`.
    clone to run in. Nothing is cut and no Status is set.
 2. `git fetch origin`.
 3. **Candidate.** If the Kickoff names a branch ("Ветка" / "Branch"), replace `<n>` in it with the
-   issue number and test that token against `^(feat|fix|docs|chore)/[a-z0-9]+(?:[._-][a-z0-9]+)*$`
+   issue number and test that token against `^(feat|fix|docs|chore)/[a-z0-9]+(?:[._-][a-z0-9]+)*(?<!\.lock)$`
    (runs of lowercase letters and digits joined by single `.`, `_` or `-`: no `..`, no leading or
-   trailing separator). Use only the token, never the prose around it. If it does not match, or the Kickoff names none, derive
+   trailing separator, no `.lock` suffix). Use only the token, never the prose around it. If it does not match, or the Kickoff names none, derive
    `<type>/<n>-<kebab-slug>`: `feat`, `fix`, `docs` or `chore` (`chore` also for refactor, test, ci,
    perf, style) and a slug of the title without its `[tags]` — a few words, lowercase ASCII letters,
    digits and hyphens only. A derived name must match the same pattern.
