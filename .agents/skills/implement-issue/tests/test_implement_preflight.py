@@ -2413,26 +2413,65 @@ def test_a_merged_pull_request_on_a_todo_card_is_a_stop_not_accept(
     ]
 
 
+def epic_reason(total: int, open_: int) -> str:
+    return (
+        f"an epic: it has {total} sub-issues ({open_} open) and no parts of its own — "
+        "implement its sub-issues, not the epic"
+    )
+
+
 def test_an_epic_is_a_stop_before_anything_else(tmp_path: Path) -> None:
-    # api#139: nine sub-issues, seven closed, three merged pull requests with Refs, In Progress.
+    # api#139: nine sub-issues, seven closed, three merged pull requests with Refs, In Progress,
+    # and no Scope parts of its own.
     timeline = [refs_pr(n, "x", refs="Refs #139") for n in (157, 158, 161)]
     response = issue_response(body=WHOLE_TASK, timeline=timeline, sub_issues=(9, 7))
     code, doc = facts(tmp_path, response, ref="api#139")
     assert (code, doc["verdict"], doc["selected"]) == (1, "stop", None)
-    assert doc["reasons"] == [
-        "an epic: it has 9 sub-issues (2 open) — implement its sub-issues, not the epic"
-    ]
+    assert doc["reasons"] == [epic_reason(9, 2)]
     assert doc["issue"]["sub_issues"] == {"total": 9, "open": 2}
 
 
-def test_an_epic_stops_before_a_blocker_a_part_and_a_bad_part(tmp_path: Path) -> None:
-    response = issue_response(body=TWO_PARTS, blocked=[blocker(5)], sub_issues=(3, 3))
-    for args in ((), ("--part", "1"), ("--part", "99")):  # 99: not an exit 2, the epic comes first
+def test_a_whole_task_with_sub_issues_is_an_epic_stop(tmp_path: Path) -> None:
+    for sub_issues in ((1, 0), (1, 1)):  # a closed sub-issue does not make it a task again
+        response = issue_response(body=WHOLE_TASK, sub_issues=sub_issues)
+        code, doc = facts(tmp_path, response)
+        assert (code, doc["verdict"], doc["selected"]) == (1, "stop", None)
+        assert doc["reasons"] == [epic_reason(sub_issues[0], sub_issues[0] - sub_issues[1])]
+
+
+def test_an_epic_stops_before_a_blocker_and_a_bad_part(tmp_path: Path) -> None:
+    response = issue_response(body=WHOLE_TASK, blocked=[blocker(5)], sub_issues=(3, 3))
+    for args in ((), ("--part", "99")):  # 99: not an exit 2, the epic comes first
         code, doc = facts(tmp_path, response, *args)
         assert (code, doc["verdict"]) == (1, "stop"), args
-        assert doc["reasons"] == [
-            "an epic: it has 3 sub-issues (0 open) — implement its sub-issues, not the epic"
-        ]
+        assert doc["reasons"] == [epic_reason(3, 0)]
+
+
+def test_an_issue_with_parts_and_sub_issues_is_read_by_the_parts_rules(tmp_path: Path) -> None:
+    # api#312, api#375, ui#187: Scope parts and sub-issues. Not an epic; the sub-issues are
+    # reported but not counted.
+    response = issue_response(body=TWO_PARTS, sub_issues=(3, 1))
+    code, doc = facts(tmp_path, response)
+    assert (code, doc["verdict"], doc["selected"]) == (0, "go", {"part": 1, "reason": "first-todo"})
+    assert doc["issue"]["sub_issues"] == {"total": 3, "open": 2}
+    code, doc = facts(tmp_path, response, "--part", "1")
+    assert (code, doc["verdict"], doc["selected"]) == (0, "go", {"part": 1, "reason": "explicit"})
+    one = [refs_pr(100, "Part 1 of #13: x")]
+    response = issue_response(body=TWO_PARTS, timeline=one, sub_issues=(3, 1))
+    code, doc = facts(tmp_path, response)
+    assert (code, doc["selected"]) == (0, {"part": 2, "reason": "first-todo"})
+    response = issue_response(body=TWO_PARTS, timeline=merged_parts(), sub_issues=(3, 1))
+    code, doc = facts(tmp_path, response)
+    assert (code, doc["verdict"]) == (1, "accept")  # the parts rules, the card In Progress
+
+
+def test_malformed_parts_with_sub_issues_are_the_numbering_stop_not_an_epic(
+    tmp_path: Path,
+) -> None:
+    body = "## Scope\n\n- Ч.1 (PR): first\n- Ч.3 (PR): third\n" + KICKOFF
+    _, doc = facts(tmp_path, issue_response(body=body, sub_issues=(2, 0)))
+    assert doc["verdict"] == "stop"
+    assert doc["reasons"] == ["parts in Scope are not numbered 1..k contiguously (found: 1, 3)"]
 
 
 def test_a_closed_epic_issue_is_closed_first(tmp_path: Path) -> None:
@@ -2455,7 +2494,6 @@ def test_accept_needs_a_card_in_progress_on_review_or_ac_check(tmp_path: Path, c
     ("items", "where"),
     [
         ([project_item("Todo")], "the card is in Todo"),
-        ([project_item("Done")], "the card is in Done"),
         ([project_item(None)], f"the issue has no Status on board {pf.BOARD_NUMBER}"),
         ([], f"the issue has no Status on board {pf.BOARD_NUMBER}"),
         (
@@ -2468,6 +2506,7 @@ def test_any_other_card_is_a_stop_for_parts_and_for_a_whole_task(
     tmp_path: Path, items: list[dict[str, Any]], where: str
 ) -> None:
     tail = ": the work was never started here — the merged pull request(s) with Refs are "
+    assert "Done" not in where
     whole = issue_response(body=WHOLE_TASK, timeline=[refs_pr(50, "x")], items=items)
     _, doc = facts(tmp_path, whole)
     assert (doc["verdict"], doc["reasons"]) == (
@@ -2480,6 +2519,25 @@ def test_any_other_card_is_a_stop_for_parts_and_for_a_whole_task(
     assert doc["reasons"] == [
         f"{where}{tail}{API}#100 (MERGED), {API}#200 (MERGED); take the task with the user"
     ]
+
+
+def test_a_card_in_done_has_its_own_wording(tmp_path: Path) -> None:
+    items = [project_item("Done")]
+    disagree = "the card is in Done but the issue is open: the board and the issue disagree"
+    whole = issue_response(body=WHOLE_TASK, timeline=[refs_pr(50, "x")], items=items)
+    _, doc = facts(tmp_path, whole)
+    assert (doc["verdict"], doc["reasons"]) == (
+        "stop",
+        [
+            f"{disagree} — the merged pull request(s) with Refs are {API}#50 (MERGED);"
+            " take the task with the user"
+        ],
+    )
+    parts = issue_response(body=TWO_PARTS, timeline=merged_parts(), items=items)
+    _, doc = facts(tmp_path, parts)
+    assert doc["verdict"] == "stop"
+    assert "never started" not in doc["reasons"][0]
+    assert doc["reasons"][0].startswith(disagree)
 
 
 def test_the_card_matters_only_when_acceptance_would_be_next(tmp_path: Path) -> None:

@@ -20,7 +20,7 @@ trailing newline), schema 1:
     issue     {repo, number, title, url, state, assignees, board_status, sub_issues}
               board_status: the Status of the issue on board 12 of
               larchanka-training, null when it is not on that board.
-              sub_issues: {total, open}; an issue with any is an epic.
+              sub_issues: {total, open}; an issue with any and no parts of its own is an epic.
     blockers  [{ref, title, state}] — the native `blockedBy` links, any repo,
               sorted by ref. Only state OPEN blocks.
     parts     [{n, label, scope, boundary, done_when, acceptance_criteria, prs,
@@ -84,8 +84,8 @@ comments never count. A quoted line never counts as a `Refs` line (it does not s
 with `Refs`), but quotes are not skipped for the first line of `## What`: a pull
 request that opens with a quote is read from the quote.
 
-Decisions, in this order: the issue is CLOSED -> stop; it has sub-issues (an epic) ->
-stop; any OPEN blocker -> stop;
+Decisions, in this order: the issue is CLOSED -> stop; it has sub-issues and no parts of
+its own (an epic) -> stop; any OPEN blocker -> stop;
 parts not numbered 1..k -> stop; `--part K` must exist (exit 2) and is taken
 as is; no `--part`: an OPEN pull request with `Refs` that names no part of the
 issue stops (whichever part it belongs to is not known: "say which part it covers,
@@ -147,7 +147,7 @@ MAX_DIGITS = 9  # a number read from text is at most this long; a longer one nam
 REF = re.compile(r"(api|ui|[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)#([1-9][0-9]{0,8})")
 NUMBER = re.compile(r"[1-9][0-9]{0,8}")
 
-# The closing sequence of a heading («## Name ##») is cut off in `heading_text`, not by a
+# The closing sequence of a heading («## Name ##») is cut off in `section_lines`, not by a
 # lazy group here: `(.*?)[ \t]*#*[ \t]*$` is cubic on a heading that ends in many blanks.
 HEADING = re.compile(r"^ {0,3}(#{1,6})[ \t]+(.*)$")
 # CommonMark fences: at most 3 spaces of indent; a backtick opener's info string
@@ -727,7 +727,8 @@ def board_status(item: dict[str, Any] | None) -> str | None:
 
 
 def sub_issues_of(issue: dict[str, Any]) -> dict[str, int]:
-    """{total, open} of the issue's sub-issues: an issue with any is an epic."""
+    """{total, open} of the issue's sub-issues (an issue with any and no parts of its own is
+    an epic; with parts of its own the parts rules decide and the sub-issues are not counted)."""
     summary = obj(issue.get("subIssuesSummary"), "issue.subIssuesSummary")
     total, completed = summary.get("total"), summary.get("completed")
     if not isinstance(total, int) or not isinstance(completed, int) or completed > total:
@@ -976,14 +977,19 @@ def acceptance_next(
     AC, and nothing has been merged since."""
     card = facts["issue"]["board_status"]
     if card not in ACCEPT_CARDS:
-        where = (
-            f"the card is in {card}" if card else f"the issue has no Status on board {BOARD_NUMBER}"
-        )
+        if card == "Done":
+            why = "the card is in Done but the issue is open: the board and the issue disagree"
+        elif card:
+            why = f"the card is in {card}: the work was never started here"
+        else:
+            why = (
+                f"the issue has no Status on board {BOARD_NUMBER}: the work was never started here"
+            )
         return (
             None,
             [
-                f"{where}: the work was never started here — the merged pull request(s) with "
-                f"Refs are {listing(merged)}; take the task with the user"
+                f"{why} — the merged pull request(s) with Refs are {listing(merged)};"
+                " take the task with the user"
             ],
             "stop",
         )
@@ -1020,12 +1026,12 @@ def decide(
             "stop",
         )
     sub = facts["issue"]["sub_issues"]
-    if sub["total"]:  # an epic is not implemented: its sub-issues are
+    if sub["total"] and not facts["parts"] and not numbering_error:  # an epic: its sub-issues are
         return (
             None,
             [
-                f"an epic: it has {sub['total']} sub-issues ({sub['open']} open) — "
-                "implement its sub-issues, not the epic"
+                f"an epic: it has {sub['total']} sub-issues ({sub['open']} open) and no parts of "
+                "its own — implement its sub-issues, not the epic"
             ],
             "stop",
         )
