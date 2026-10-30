@@ -33,6 +33,7 @@ from sqlalchemy.ext.asyncio import (
     create_async_engine,
 )
 
+from app.bootstrap.bitbucket_reviews import BitbucketReviewWorkerResources
 from app.bootstrap.code_index_worker import (
     CodeIndexSettings,
     index_consumer,
@@ -55,6 +56,10 @@ from app.common.infrastructure.heartbeat import beat, heartbeat_file, reset
 from app.modules.code_index.application.leader_tasks import CodeIndexLeaderTasks
 from app.modules.code_index.infrastructure.graph_retriever import SqlAlchemyGraphRetriever
 from app.modules.code_index.infrastructure.review_index import SqlAlchemyReviewIndexUnitOfWork
+from app.modules.integrations.bitbucket.infrastructure.credential_cipher import (
+    BitbucketCredentialCipher,
+    optional_bitbucket_cipher_from_environment,
+)
 from app.modules.integrations.gitlab.infrastructure.settings import (
     GitLabRuntimeSettings,
     GitLabSettingsError,
@@ -161,6 +166,7 @@ from app.modules.reviews.infrastructure.amqp import (
     handle_run_delivery,
 )
 from app.modules.reviews.infrastructure.amqp import run_queue as run_queue_name
+from app.modules.reviews.infrastructure.bitbucket_ci import BitbucketStatusReconciler
 from app.modules.reviews.infrastructure.blob_cache import SqlAlchemyBlobCache
 from app.modules.reviews.infrastructure.branch_selection_rule import (
     SqlAlchemyBranchSelectionRule,
@@ -493,6 +499,7 @@ class WorkerSettings:
     redis_url: str | None = None
     code_index: CodeIndexSettings = CodeIndexSettings()
     gitlab: GitLabRuntimeSettings | None = field(default=None, repr=False)
+    bitbucket_cipher: BitbucketCredentialCipher | None = field(default=None, repr=False)
 
     @property
     def github_app_configured(self) -> bool:
@@ -515,6 +522,10 @@ class WorkerSettings:
             gitlab = GitLabRuntimeSettings.optional_from_environment(env)
         except GitLabSettingsError:
             raise RuntimeError("GitLab review worker configuration is invalid") from None
+        try:
+            bitbucket_cipher = optional_bitbucket_cipher_from_environment(env)
+        except ValueError:
+            raise RuntimeError("Bitbucket review worker configuration is invalid") from None
 
         return cls(
             database_url=database_url,
@@ -528,6 +539,7 @@ class WorkerSettings:
             # Partly set LLM_* fails the start; none at all starts with a warning.
             llm=llm,
             gitlab=gitlab,
+            bitbucket_cipher=bitbucket_cipher,
             # Optional: the cache of AST facts and file trees of the context stage.
             redis_url=env.get("REDIS_URL") or None,
             code_index=CodeIndexSettings.from_environment(env),
@@ -809,6 +821,7 @@ class WorkerProcess:
     enqueue: TryEnqueueWebhookRun
     sweep: SweepNoCi | None
     index_tasks: CodeIndexLeaderTasks | None = None
+    bitbucket_status_reconciler: BitbucketStatusReconciler | None = None
 
     async def leader_tick(self) -> None:
         failure: Exception | None = None
@@ -823,6 +836,8 @@ class WorkerProcess:
         # cancellation is not an `Exception`: it ends the tick before the index tasks.
         if self.index_tasks is not None:
             await self.index_tasks.tick()
+        if self.bitbucket_status_reconciler is not None:
+            await self.bitbucket_status_reconciler.tick()
         if failure is not None:
             raise failure
 
@@ -835,6 +850,7 @@ def compose_worker_process(
     github: GitHubAdapters | None,
     gitlab_reviews: GitLabDiscussionGateway | None = None,
     gitlab: GitLabReviewWorkerResources | None = None,
+    bitbucket: BitbucketReviewWorkerResources | None = None,
     gateway: LlmGateway | None = None,
     provider_factory: ProviderFactory | None = None,
     delays: RetryDelays | None = None,
@@ -896,6 +912,19 @@ def compose_worker_process(
                 claimed=claimed, expected_input=expected, checkpoint=checkpoint, trace=trace
             ) as bundle:
                 return await execute(bundle.vcs, bundle.source, bundle.context_stage)
+        if expected.provider == "bitbucket":
+            if claimed.engine != "fast":
+                raise RunFailure(
+                    "bitbucket_engine_unsupported", "Bitbucket supports only the fast review engine"
+                )
+            if bitbucket is None:
+                raise RunFailure(
+                    "bitbucket_fetch_failed", "Bitbucket review capability is unavailable"
+                )
+            async with bitbucket.attempt(
+                claimed=claimed, expected_input=expected, checkpoint=checkpoint, trace=trace
+            ) as bb_bundle:
+                return await execute(bb_bundle.vcs, bb_bundle.source, bb_bundle.context_stage)
         if expected.provider != "github":
             raise RunFailure("diff_fetch_failed", "Review provider is unavailable")
         if github is None:
@@ -920,6 +949,7 @@ def compose_worker_process(
         pipeline=pipeline,
         retry_queue=queue,
         check_runs=github.check_runs if github is not None else None,
+        bitbucket_statuses=bitbucket.statuses if bitbucket is not None else None,
         worker_id=settings.worker_id,
         selection=SqlAlchemyBranchSelectionRule(session_factory),
         delays=delays,
@@ -938,6 +968,8 @@ def compose_worker_process(
             reviews=github.reviews if github is not None else None,
             gitlab_reviews=gitlab_reviews,
             gitlab_publications=gitlab.publications if gitlab is not None else None,
+            bitbucket_publications=bitbucket.publications if bitbucket is not None else None,
+            bitbucket_statuses=bitbucket.statuses if bitbucket is not None else None,
             check_runs=github.check_runs if github is not None else None,
             trace=trace,
             run_url=run_url,
@@ -953,6 +985,9 @@ def compose_worker_process(
             else None
         ),
         index_tasks=index_tasks,
+        bitbucket_status_reconciler=(
+            bitbucket.status_reconciler if bitbucket is not None else None
+        ),
     )
 
 
@@ -967,6 +1002,7 @@ async def run_worker(
     llm_transport: httpx.AsyncBaseTransport | None = None,
     fx_transport: httpx.AsyncBaseTransport | None = None,
     gitlab_transport_factory: Callable[[], httpx.AsyncBaseTransport] | None = None,
+    bitbucket_transport_factory: Callable[[], httpx.AsyncBaseTransport] | None = None,
 ) -> None:
     """Consume until cancelled or stopped; main owns the process signal deadline."""
     async with stop_during_startup(stop) as startup_complete:
@@ -981,6 +1017,7 @@ async def run_worker(
             llm_transport=llm_transport,
             fx_transport=fx_transport,
             gitlab_transport_factory=gitlab_transport_factory,
+            bitbucket_transport_factory=bitbucket_transport_factory,
         )
 
 
@@ -996,6 +1033,7 @@ async def _run_worker(
     llm_transport: httpx.AsyncBaseTransport | None = None,
     fx_transport: httpx.AsyncBaseTransport | None = None,
     gitlab_transport_factory: Callable[[], httpx.AsyncBaseTransport] | None = None,
+    bitbucket_transport_factory: Callable[[], httpx.AsyncBaseTransport] | None = None,
 ) -> None:
     """Consume until cancelled; the caller owns signal handling.
 
@@ -1039,8 +1077,8 @@ async def _run_worker(
             redis = Redis.from_url(settings.redis_url)
             stack.push_async_callback(redis.aclose)
         async with amqp_channels(settings.rabbitmq_url, delays or RetryDelays()) as channels:
-            # The index.repo consumer (#142): its own channels, parser and GitHub client;
-            # None without the GitHub App.
+            # The index.repo consumer (#142): its own channels and provider snapshot
+            # sources; None without a configured GitHub App or Bitbucket keyring.
             index = await stack.enter_async_context(
                 index_consumer(
                     settings,
@@ -1068,11 +1106,22 @@ async def _run_worker(
                     if settings.gitlab is not None
                     else None
                 ),
+                bitbucket=(
+                    BitbucketReviewWorkerResources(
+                        session_factory=session_factory,
+                        cipher=settings.bitbucket_cipher,
+                        redis=cast(RedisLike | None, redis),
+                        execution_profile=execution_profile_of(settings.llm),
+                        transport_factory=bitbucket_transport_factory,
+                    )
+                    if settings.bitbucket_cipher is not None
+                    else None
+                ),
                 gateway=gateway,
                 provider_factory=provider_factory,
                 delays=delays,
-                # Converge, GC and the TTL purge touch only the database: on without the
-                # GitHub App. The reconcile and the wake-up dispatch use the consumer.
+                # Converge, GC and TTL purge touch only the database. Reconcile and
+                # wake-up dispatch use the configured provider consumer.
                 index_tasks=index_leader_tasks(settings.code_index, session_factory, index),
             )
             run_queue = await channels.consumer_queue(run_queue_name("fast"))

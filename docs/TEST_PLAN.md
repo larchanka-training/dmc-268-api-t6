@@ -69,7 +69,7 @@ API baseline gates локально и в обязательном CI: `uv run r
 
 Проверять `state` в SPA до обмена code, `POST /api/auth/github/callback`, JWT access 15 мин в памяти и ротируемую refresh cookie 30 дней (`HttpOnly; Secure; SameSite=Strict; Path=/api/auth`), `refresh → me` при старте, logout и отзыв семейства при повторном использовании refresh. GitHub exchange failure не создаёт cookie/сессию. Все защищённые `/api/*` и SSE fetch-stream требуют Bearer; неверная подпись, истёкший токен, неверные `iss`/`aud`, отсутствующий или битый Workspace claim дают 401. **`workspaces: []` валиден:** `GET /api/repos` отвечает 200 с `[]`, `GET /api/runs` — 200 с `{items: [], nextCursor: null}`; UI показывает подключение, а не ошибку авторизации. Две установки/Workspace доказывают изоляцию списков и 404 для чужого Run. Контракт — [SD §12](SYSTEM_DESIGN.md#12-контракт-api--ui) и [OpenAPI](../contracts/openapi.yaml).
 
-`POST /api/runs/{id}/rerun` (T3) создаёт новый `queued` Run на текущем SHA с `trigger=rerun` без проверки лейбла/CI. Проверять четыре причины 409: активный Run, закрытый PR, пауза ревью репозитория и недоступная GitHub App. Для всех причин `detail` один: `the pull request has an active run or is closed, or repository reviews are paused or unavailable`; машиночитаемого кода причины нет. Порядок проверок и случай паузы без активной конфигурации — [PIPELINE_SPEC §6.1](PIPELINE_SPEC.md#61-http-отказы-rerun). Контрактные тесты проверяют оба тела 422 через схему rerunRun в [OpenAPI](../contracts/openapi.yaml): массив `detail` у `HTTPValidationError` для невалидного UUID и точное `{"detail": "the repository has no active rule or prompt version"}` у `ErrorResponse` для отсутствующей конфигурации. Нет авторизации — 401, чужой Workspace — 404. Клиент UI проверяет callback failure/state mismatch, один общий refresh при конкурентных 401 и ровно один retry исходных запросов, logout при неудачном refresh, восстановление сессии через refresh+me. Контракт Finding→ReviewComment проверяет однострочный и диапазонный D6-якорь, severity/category и состояния Run.
+`POST /api/runs/{id}/rerun` (T3) создаёт новый `queued` Run на текущем SHA с `trigger=rerun` без проверки лейбла/CI. Проверять четыре причины 409: активный Run, закрытый PR, пауза ревью репозитория и недоступная GitHub App. Для всех причин `detail` один: `the pull request has an active run or is closed, or repository reviews are paused or unavailable`; машиночитаемого кода причины нет. Порядок проверок и случай паузы без активной конфигурации — [PIPELINE_SPEC §6.1](PIPELINE_SPEC.md#61-http-отказы-rerun). Контрактные тесты проверяют оба тела 422 через схему rerunRun в [OpenAPI](../contracts/openapi.yaml): массив `detail` у `HTTPValidationError` для невалидного UUID и точное `{"detail": "the repository has no active rule or prompt version"}` у `ErrorResponse` для отсутствующей конфигурации. На маршрутах Bitbucket (`/api/workspaces/{id}/bitbucket...` и `/webhooks/bitbucket...`, включая ввод credential) каждый элемент массива 422 содержит только `type`, `loc`, `msg`: `input` и `ctx` удаляются, чтобы не раскрывать входные данные. На остальных маршрутах сохраняются стандартные детали FastAPI 422, включая `input` и `ctx`, если они были в ошибке. Нет авторизации — 401, чужой Workspace — 404. Клиент UI проверяет callback failure/state mismatch, один общий refresh при конкурентных 401 и ровно один retry исходных запросов, logout при неудачном refresh, восстановление сессии через refresh+me. Контракт Finding→ReviewComment проверяет однострочный и диапазонный D6-якорь, severity/category и состояния Run.
 
 При внедрении #107 RunDetail/RunSession/latestRun и UI используют один сохранённый result, его coverage, counts и verdict. Проверять partial без значимых supported findings → verdict null; неизвестные счётчики отображаются как неизвестные, а не 0. Исторический run получает `verification_mode=legacy`, `coverage=null`, без выдуманных evidence/подтверждения. Начатый legacy run завершается legacy-профилем; новый профиль включается только после совместимых schema/storage/API/UI, смешанный run запрещён. Rerun того же head создаёт свой policy/diff snapshot и публикационную identity.
 
@@ -169,9 +169,10 @@ drop также понижает coverage; benign lint/dedupe/severity drops —
 insufficient_context остаются за lifecycle #107/#130; их общее влияние на coverage
 не объявляется реализованным в #213.
 
-После #130 F1 worker собирает Reflection Pass, а после F2 seed активирует
-`review.system:v4` (с #350 — v5) для новых runs. Snapshot-путь выбирается
-только по закреплённому v4 или v5; runs с v3 или ниже, созданные до F2 seed либо с pins до 0039,
+После #130 F1 worker собирает Reflection Pass. F2 seed активировал
+`review.system:v4` для новых runs; после #350 новые runs закрепляют общий v5.
+Snapshot-путь выбирается по закреплённому v4 или v5; runs с v3 или ниже,
+созданные до F2 seed либо с pins до 0039,
 сохраняют legacy-путь без verifier. Адаптер ревью
 выполняет fit/guard/manifest один раз: snapshot-ответ `ReviewReply` несёт
 фактический fitted context и manifest принятого вызова, legacy — mapping.
@@ -345,7 +346,8 @@ Committed regression inventory #213 (наличие теста не заменя
    `test_context_provenance.py` (роль, ревизия, путь и диапазоны строк фрагмента); что каждая
    production-композиция стадии пишет строку `context_payloads`, стережёт
    `test_context_stage_wiring.py`.
-6. Snapshot-путь (v4): `test_review_path.py`, `test_snapshot_path_live_pin.py`,
+6. Snapshot-путь с закреплённым `review.system:v4` или `review.system:v5`:
+   `test_review_path.py`, `test_snapshot_path_live_pin.py`,
    `test_review_prompt_v4.py`, `test_review_context_blocks.py`,
    `test_reflection_pass_snapshot_path.py`, `test_gateway_verifier_snapshot_path.py`,
    `test_llm_gateway_snapshot_reserve.py`, `test_gateway_repair_envelope.py`,
@@ -828,7 +830,8 @@ lazy Reflection Pass; `ExecuteReviewRun` запускает его только 
 попыток суммарно, затем `failed` и `reviews.dlq`. Повреждённый snapshot
 по-прежнему даёт `policy_snapshot_integrity_error` без retry. Legacy без snapshot
 обходит verifier молча, без предупреждения в логе.
-После F2 seed активирует v4 (с #350 — v5) для новых runs; закреплённый v3 или ниже
+После F2 seed v4 был активен для новых runs; после #350 новые runs закрепляют общий v5.
+Закреплённый v3 или ниже
 сохраняет legacy-путь. Метки v2
 в dataclass/fixtures — не универсальные runtime-pins: Run сохраняет ID активных
 conventions/verifier DB-строк при создании, snapshot восстанавливает их версии
@@ -999,3 +1002,71 @@ Recall — micro по ожидаемым находкам этих кейсов,
 | Пропускная способность v1: 5 параллельных прогонов, масштаб репликами `worker` ([SD §13](SYSTEM_DESIGN.md#13-нефункциональные-требования)) | `scripts/parallel_runs_load.py` на отдельном локальном compose-проекте (`--project`, не `dmc-268-api-t6` и не проект по умолчанию клона) и только на локальном docker-демоне (адрес, который получит compose, — `DOCKER_HOST`, иначе текущий docker context — должен быть сокетом `unix://`, иначе отказ с кодом 2 до первой команды compose; удалённый buildx builder и `unix://`-сокет, проброшенный на удалённый хост, вне этой проверки): fake GitHub и fake LLM (`scripts/review_load_stub.py`), `--scale worker`, на каждый PR `labeled`-доставка и её дубль с новым delivery id | Ручной прогон, не CI gate. Вердикт: все Run `succeeded` с `attempt = 1` до `--timeout`; на каждый PR ровно один Run и одно опубликованное review, несмотря на дубль; вызовов `ReviewOutput` ровно столько, сколько PR (stub считает их общим счётчиком, не по PR); каждая доставка спроецирована; Run взяли все `--workers` воркеров; одновременно шло не меньше min(runs, workers) Run; ожидание в очереди (`started_at − created_at`) ≤ `--max-queue-wait-ms` (30 с); `reviews.dlq` пуст; stub не ответил 404 ни на один HTTP-запрос (маршрут, которого он не обслуживает; ответ 400 на вызов LLM с неизвестной схемой сюда не входит). Только в отчёте: ожидание проекции, время брокера, полное время Run, подъём стека, вызовы `RepoConventionsDraft`. С `--llm-delay-ms` меньше ~1000 проверка параллельности может не пройти по построению. Первая сборка тянет образы и пакеты из registry; `down -v` оставляет образы `<project>-*`, их удаляет `docker image rm $(docker image ls -q '<project>-*')`. |
 
 Существующий required CI запускает schema/apply и кодовые gates; legacy raw replay выполняется всегда: без закоммиченного response manifest job падает, а job summary называет причину. Некорректный набор или сломанный replay завершают job ошибкой, значения quality metrics только выводятся; расхождения текущих входов с manifest выводятся как warning и job не валят: SHA промпта (`Prompt SHA mismatch for …`), static digest (`Static input digest mismatch; …`, при смене набора static-файлов — `Static input path set changed; …`) и corpus digest (`Corpus input digest mismatch; …`). Integration suite в required CI (четыре шарда `Python integration (k/4)`) работает с реальными PostgreSQL и RabbitMQ и проверяет обработку сообщений: полный путь текущего Run `queued → running → publishing → succeeded` через worker с fake GitHub и fake ReviewModel, сквозную сборку `run_worker` с LLM gateway, где GitHub и модель подменены через `httpx.MockTransport` (`test_main_composition_reviews_through_the_llm_gateway`), retry-очереди и DLQ, восстановление Run реконсилером после падения worker (смоделировано отменой consumer-задач и истечением lease), отмену устаревшего Run новым push до вызова модели и во время публикации (новый `head_sha` записывается напрямую, без webhook), топологию очередей, а также публикацию rerun и сигнала cancel (`tests/test_worker_queue_postgres.py`, `tests/test_rerun_run_postgres.py`, `tests/test_cancel_run_postgres.py`). Эти существующие тесты не доказывают прохождение новых требований §2.7. Live eval — отдельный ручной job, результаты сохраняются с model/prompt provenance. Перед выпуском сверить этот план с критериями [api#30](https://github.com/larchanka-training/dmc-268-api-t6/issues/30), включая устаревшее там `review_requested`: действующий триггер задан Р-10 и [PIPELINE_SPEC §8](PIPELINE_SPEC.md#8-триггер-р-10-d2); формулировку issue нужно согласовать с владельцем.
+
+## Bitbucket Cloud acceptance (#333)
+
+Browser API сверяется с `contracts/openapi.yaml` в `tests/test_openapi_contract.py`; входящий provider webhook описан отдельно в [`BITBUCKET_WEBHOOK.md`](BITBUCKET_WEBHOOK.md). PostgreSQL/ASGI набор `tests/test_bitbucket_*` проверяет UUID и portal workspace изоляцию, private repo connect/disconnect, ключи и секреты, HMAC raw bytes, durable receipt/replay, один Run на PR/head, pinned diff/source, worker, RAG, inline/summary markers и commit status. `tests/test_deploy_staging_services.py` проверяет CI bundle → 0600 env-файлы → контейнеры/rollback. Запускать с реальным `TEST_DATABASE_URL`, иначе skipped PG тесты не являются доказательством. UI `pnpm test` проверяет выбор workspace и границу Zod; `pnpm --dir docs-site check-types && pnpm --dir docs-site build` проверяет публичную инструкцию.
+
+Отдельный live gate на disposable private Bitbucket Cloud repo/PR: зафиксировать URL PR,
+head SHA и deployed backend/UI SHA; подключить репозиторий к portal workspace, вручную
+настроить repository webhook с одноразовым секретом, доставить подписанные PR/push
+события, дождаться succeeded Run, проверить inline comments, ровно один summary,
+commit status и число публикаций после повтора доставки. Native применяемое
+предложение нужно подтвердить реальным API-запросом и записать, показывает ли
+Bitbucket UI действие Apply для созданного предложения: текстовый fenced patch остаётся
+ручным fallback и не закрывает AC4. В отчёт записывать только санитизированные
+идентификаторы/счётчики, без токена и секрета. Полные backend/UI gates обязательны
+на итоговом diff.
+
+Проверки выполнять в выбранном portal workspace на приватном UUID locator; участник
+видит подключение, посторонний — нет. Runtime-токену нужны
+`read:repository:bitbucket`, `read:pullrequest:bitbucket` и `read:user:bitbucket`:
+проверить их на private repo/PR GET, GET /user, inline comment POST и commit-status POST/PUT.
+Токен с прежними правами перевыпустить и обновить в connection. Без второго scope и connect,
+и `PUT credential` возвращают 422; после неудачного PUT `credentialGeneration` не
+меняется. Проверить URL и имена защищённых staging-переменных, не раскрывая keyring;
+backend/UI должны быть развернуты с зафиксированными SHA и миграцией.
+
+До отключения репозитория провести следующие provider-пробы:
+
+- Подписать все пять событий `repo:push`, `pullrequest:created`, `updated`,
+  `fulfilled`, `rejected`. Неверная подпись не создаёт receipt/Run и не переводит
+  binding из `awaiting_webhook` в `active`; первая верная переводит. Реальные merge и
+  decline дают соответствующие receipts, закрывают PR и отменяют активный Run без
+  нового ревью. Пять wire events из ответов connect и ротации webhook secret должны
+  совпасть с настройкой webhook; старую трёхсобытийную настройку пересоздать.
+  Два signed update с одинаковым `updated_on`, но разными head не
+  теряют новый head; `diagnostics:ping` без `repository.uuid` отвечает 400 без receipt.
+- Повторить доставку до и после перезапуска worker: на PR/head остаются один Run,
+  прежние inline markers, одна summary и один tenant-scoped status key. Проверить
+  pinned source/destination SHA на private fork, недоступном runtime-токену напрямую;
+  отдельный ограниченный отказ для недоступного fork допустим только тогда, когда API
+  репозитория назначения не может установить head источника. Повторная доставка или
+  рестарт не должны откатывать более новый Run того же head. После удаления fork
+  branch (`source.commit=null`) merge/decline не запускают ревью.
+  При ротации токена смена автора статуса должна дать явную ошибку владения, а не
+  сменить ключ. Проверить детерминированный ключ `AI-REVIEW-` + 30 hex (≤40 символов)
+  и portal Run URL на закреплённом head. После disconnect новые доставки/очередная
+  работа отклоняются, соседняя привязка продолжает работать.
+- Rename+edit сохраняет old/new пути и inline координаты. Сверить отсутствующий
+  diffstat, несколько страниц diffstat/commits, merge-base и закреплённый base SHA
+  после движения destination tip. Ретаргет или новый source head не публикует
+  устаревшее ревью; после ретаргета старый `INPROGRESS` становится `STOPPED` под тем
+  же ключом на закреплённом head, в том числе после начатой попытки. Отдельно
+  проверить draft toggle, skipped/failed → `STOPPED`, description, portal target URL,
+  merge checks и 403 при попытке записать status в недоступный source fork. Принятое
+  ограничение P3 №52: `INPROGRESS` на вытесненном старом head не меняется на `STOPPED`.
+- Раздельно записать число запросов, `X-RateLimit-*` и 429/`Retry-After` для
+  `/src/{commit}/` и `/src/{commit}/{path}`, а также для обязательных diff/blob и
+  необязательных context-чтений. Проверить, один бакет квот у listing/raw или разные,
+  и обе формы `Retry-After`: секунды и HTTP-date. Исчерпание context оставляет
+  diff-only ревью при доступных обязательных данных; полный бюджет даёт явный код
+  ошибки. Не создавать нагрузку ради искусственного 429 на общем репозитории.
+
+В таблице доказательств указать migration head и public API origin вместе с URL
+одноразового PR, UUID, deployed SHA, статусом/временем доставок, Run ID,
+счётчиками, координатами и санитизированной формой REST-пробы native
+suggestion; не сохранять токен, secret, signed payload или ciphertext. Публичные
+read-only UUID-пробы 2026-10-26 подтверждают лишь форму локатора; доступа к
+одноразовому приватному репозиторию и токену пока нет. Локальные
+MockTransport/PostgreSQL тесты не закрывают live gate.

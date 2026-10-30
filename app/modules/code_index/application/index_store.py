@@ -104,6 +104,7 @@ class IndexBuildStats:
     downloaded_bytes: int
     build_duration_ms: int
     github_request_count: int
+    http_status: int | None = None
 
 
 @dataclass(frozen=True)
@@ -133,6 +134,7 @@ class IndexState:
     profile: IndexProfile | None
     stats: IndexBuildStats
     updated_at: datetime
+    last_error_http_status: int | None = None
 
 
 class ClaimRefusal(StrEnum):
@@ -364,12 +366,15 @@ class CodeIndexStore(Protocol):
         *,
         last_error_code: str | None = None,
         stats: IndexBuildStats | None = None,
+        terminal_head_sha: str | None = None,
+        expected_target_sha: str | None = None,
     ) -> IndexStatus:
         """Spend the lease without publishing: `ready` with a publication, else `empty`.
 
         `stats` records the job's metrics; the file, symbol and edge counters and the
         stored bytes stay those of the visible publication. `None` keeps the previous
-        `last_error_code` or the recorded stats. Raises `IndexLeaseLost`.
+        `last_error_code` or the recorded stats. A terminal refusal records its observed
+        head only if the target has not moved since the claim. Raises `IndexLeaseLost`.
         """
         ...
 

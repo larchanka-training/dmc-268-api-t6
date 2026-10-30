@@ -58,6 +58,7 @@ def empty_review() -> RunReview:
 
 def make_item(value: int, created_at: datetime) -> RunListItem:
     return RunListItem(
+        provider="github",
         id=UUID(f"00000000-0000-0000-0000-{value:012d}"),
         status="succeeded",
         engine="fast",
@@ -92,6 +93,7 @@ def test_runs_list_uses_the_camel_case_contract() -> None:
         "items": [
             {
                 "id": str(item.id),
+                "provider": "github",
                 "status": "succeeded",
                 "engine": "fast",
                 "attempt": 0,
@@ -105,6 +107,7 @@ def test_runs_list_uses_the_camel_case_contract() -> None:
                 "actionCount": 2,
                 "summaryOnly": False,
                 "pullRequest": {
+                    "provider": "github",
                     "repo": "org/repo",
                     "number": 1,
                     "title": "PR 1",
@@ -215,6 +218,7 @@ def test_run_detail_returns_pr_data_latest_model_and_action_count() -> None:
 
     assert response.status_code == 200
     assert response.json()["pullRequest"] == {
+        "provider": "github",
         "repo": "org/repo",
         "number": 7,
         "title": "PR 7",

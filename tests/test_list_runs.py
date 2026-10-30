@@ -34,6 +34,7 @@ def test_list_runs_forwards_optional_filters_to_the_repository() -> None:
 def test_list_runs_builds_a_cursor_from_the_last_returned_item() -> None:
     created_at = datetime(2026, 9, 24, tzinfo=UTC)
     first = RunListItem(
+        provider="github",
         id=UUID("00000000-0000-0000-0000-000000000001"),
         status="succeeded",
         engine="fast",
@@ -53,6 +54,7 @@ def test_list_runs_builds_a_cursor_from_the_last_returned_item() -> None:
         trigger="webhook",
     )
     second = RunListItem(
+        provider="github",
         id=UUID("00000000-0000-0000-0000-000000000002"),
         status="queued",
         engine="deep",

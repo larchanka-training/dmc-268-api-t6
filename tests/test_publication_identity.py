@@ -106,3 +106,30 @@ def test_credential_availability_is_outside_immutable_payload_equality() -> None
     assert publication_matches(inactive, active)
     assert not publication_matches(active, replace(active, installation_id=72))
     assert not publication_matches(inactive, replace(inactive, workspace_id=UUID(int=3)))
+
+
+def test_active_bitbucket_publication_pins_repository_uuid_in_vcs_route() -> None:
+    inactive = context()
+    assert inactive.publication_identity is not None
+    active = replace(
+        inactive,
+        provider="bitbucket",
+        publication_identity=replace(inactive.publication_identity, origin_provider="bitbucket"),
+        origin_active=True,
+        installation_id=71,
+        workspace_id=UUID(int=3),
+        vcs_input=RunVcsInput(
+            UUID(int=5),
+            UUID(int=4),
+            "a" * 40,
+            "b" * 40,
+            PullRequestLocator(71, "group/project", 12, "bitbucket", UUID(int=2), 17, UUID(int=6)),
+        ),
+    )
+    assert publication_matches(active, active)
+    assert active.vcs_input is not None
+    changed_route = replace(
+        active.vcs_input,
+        locator=replace(active.vcs_input.locator, repository_uuid=UUID(int=7)),
+    )
+    assert not publication_matches(active, replace(active, vcs_input=changed_route))

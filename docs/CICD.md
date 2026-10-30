@@ -577,6 +577,14 @@ workflow до него уже меняет Compose-файлы и edge-прокс
 
 | Ревизия | Что удаляет downgrade | Что даёт повторный upgrade |
 |---|---|---|
+| `20261027_0051` (#333) | колонку `code_index_states.last_error_http_status`; HTTP-статус последней ошибки индекса теряется | колонка снова NULL, прежний статус не восстанавливается |
+| `20261027_0050` (#333) | **отказывает**, пока есть status intent; после его явного удаления удаляет `bitbucket_status_publications`, порядок `bitbucket_run_origins.run_order` и UNIQUE для него | пустая таблица status intents и новый порядок run origins; удалённые намерения, применённые состояния и прежний порядок не восстанавливаются |
+| `20261026_0049` (#333) | **отказывает**, пока есть publication claim; после его явного удаления удаляет `bitbucket_publication_claims` | пустая таблица; прежние claim/lease не восстанавливаются |
+| `20261026_0048` (#333) | **отказывает**, пока есть Bitbucket run origin; после его явного удаления удаляет `bitbucket_run_origins` и составной UNIQUE на `bitbucket_repository_identities` | пустая таблица; закреплённые source/head и credential/binding generations прежних Run не восстанавливаются |
+| `20261026_0047` (#333) | **отказывает**, пока есть Bitbucket webhook receipt; после его явного удаления убирает три Bitbucket-колонки и FK из `webhook_events`, возвращает CHECK только для GitHub/GitLab | nullable Bitbucket-колонки и CHECK появляются снова; удалённые receipts и их поколения не восстанавливаются |
+| `20261026_0046` (#333) | **отказывает**, пока есть Bitbucket webhook secret; после его явного удаления удаляет `bitbucket_repository_webhook_secrets` | пустая таблица; прежние секреты, поколения и подтверждение webhook не восстанавливаются |
+| `20261026_0045` (#333) | **отказывает**, пока есть Bitbucket connection, включая revoked; после её явного удаления удаляет `bitbucket_connections` | пустая таблица; credentials, их поколения и состояние intake не восстанавливаются |
+| `20261026_0044` (#333) | **отказывает**, пока есть Bitbucket installation/repository identity или provider installation; после явного удаления зависимых данных удаляет обе identity-таблицы, guard и sequence суррогатных ID | пустые identity-таблицы и sequence с начального значения; прежние UUID-привязки и значения суррогатных ID не восстанавливаются |
 | `20261026_0043` (#213) | переписывает `empty_file → missing_patch` в `code_change_diffs.omission_reason`; CHECK `ck_code_change_diffs_omission_reason` снова не допускает `empty_file`. Подтверждённый marker пустого файла для сохранённых run теряется | CHECK снова допускает `empty_file`, но переписанные строки остаются `missing_patch` и не повышаются заново; повторный upgrade не восстанавливает утраченный proof marker |
 | `20261026_0042` (#169) | Сначала берёт `ACCESS EXCLUSIVE` lock на `gitlab_connections` и `webhook_events`; **отказывает**, пока есть любая connection (включая revoked) или GitLab receipt. После отдельно согласованного явного удаления этих данных удаляет GitLab connection/binding structures (credentials, config, generation/reservations), external-ID sequence, provider/origin колонки receipt и связанные FK/CHECK/guards. GitHub receipts сохраняются | пустые GitLab connection/binding structures; sequence инициализируется по существующим положительным GitLab installation external IDs. Удалённые credentials/config/bindings/receipts не восстанавливаются |
 | `20261026_0041` (#169) | только composite UNIQUE `uq_provider_installations_owner` и `uq_repositories_owner`; строки installations/repositories остаются | оба ownership UNIQUE создаются заново; данные не пересоздаются |
@@ -605,7 +613,9 @@ installation_available`: `enabled=true` при `installation_available=false` с
 `20261014_0031`, `20261015_0032`, `20261016_0033`, `20261017_0034`, `20261018_0035`,
 `20261019_0036`, `20261020_0037`, `20261023_0038`, `20261024_0038` и
 `20261024_0039`, `20261025_0040`, `20261026_0041`, `20261026_0042` и
-`20261026_0043`; полный актуальный состав — таблица.
+`20261026_0043`, `20261026_0044`, `20261026_0045`, `20261026_0046`,
+`20261026_0047`, `20261026_0048`, `20261026_0049`, `20261027_0050` и
+`20261027_0051`; полный актуальный состав — таблица.
 
 Более глубокий downgrade **до `20261007_0028`** дополнительно откатывает
 policy/context #136: ревизии `20261012_0030` и `20261011_0029`, их потери перечислены в
@@ -919,3 +929,9 @@ Caddy (compose project `dmc-268-edge`, `/opt/dmc-268-edge`) принимает 8
 `staging-webhook` (то же решение). Хост остаётся зарезервированным под отдельный сервис приёма вебхуков и до его появления отвечает заглушкой 503. GitHub App шлёт вебхуки на `https://staging-api.<APP_DOMAIN>/webhooks/github`, их принимает API. Маршрут с этого хоста на API не заведён намеренно: вторая публичная точка входа для того же эндпоинта не нужна, а 503 в журнале доставок GitHub сразу показывает ошибочно настроенный URL.
 
 HSTS: `max-age=31536000` без `includeSubDomains` и `preload`. ACME email не задан.
+
+## Bitbucket Cloud staging (#333)
+
+Deployment передаёт keyring `BITBUCKET_CREDENTIAL_KEYS` (Environment secret) и `BITBUCKET_ACTIVE_KEY_ID` (Environment variable) в общий `bitbucket.env` для API, review worker и webhook worker. `BITBUCKET_WEBHOOK_BASE_URL` (Environment variable) попадает только в `api.env`. Для курсового VPS это публичный HTTPS origin `https://staging-api.<APP_DOMAIN>`; `staging-webhook` остаётся зарезервированной 503-заглушкой. Значения проходят CI bundle → `deploy/scripts/env-file.sh` → role-specific 0600 files; сам API token Bitbucket хранится на connection в БД и через CI не передаётся. Локальный Compose получает переменные из защищённого process env / локального `.env` по [SECRETS](SECRETS.md), без записи секретов в Git.
+
+После выката того же SHA с миграциями проверить, что все три контейнера видят **имена** ключей, API отдаёт webhook URL с ожидаемым origin, подписанная доставка принимается на публичном API host, а review worker публикует Run. Не выводить значения keyring, token или webhook secret. Rollback должен сохранить доступ к старым key IDs, иначе сохранённые ciphertext станут нечитаемыми. Тесты `tests/test_deploy_staging_services.py` проверяют CI bundle, recipient allowlist, 0600 files, deploy и rollback без реального VPS. Browser contract — [`contracts/openapi.yaml`](../contracts/openapi.yaml); входящий [webhook contract](BITBUCKET_WEBHOOK.md) отдельно.

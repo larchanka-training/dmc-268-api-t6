@@ -13,6 +13,10 @@ from typing import Any, Protocol
 from uuid import UUID
 
 from app.common.application.unit_of_work import UnitOfWork
+from app.modules.reviews.application.bitbucket_status import (
+    BitbucketStatusGateway,
+    update_bitbucket_status,
+)
 from app.modules.reviews.application.check_runs import (
     CheckRunGateway,
     CheckRunReport,
@@ -269,6 +273,7 @@ class HandleReviewRun:
         retry_queue: RunRetryQueue,
         check_runs: CheckRunGateway | None,
         worker_id: str,
+        bitbucket_statuses: BitbucketStatusGateway | None = None,
         selection: RunSelectionRule | None = None,
         delays: RetryDelays | None = None,
         attempt_deadline: timedelta = FAST_ATTEMPT_DEADLINE,
@@ -282,6 +287,7 @@ class HandleReviewRun:
         self._pipelines: set[asyncio.Future[bool]] = set()
         self._retry_queue = retry_queue
         self._check_runs = check_runs
+        self._bitbucket_statuses = bitbucket_statuses
         self._worker_id = worker_id
         self._selection = selection or MatchAllRuns()
         self._delays = delays or RetryDelays()
@@ -386,6 +392,10 @@ class HandleReviewRun:
                 reason != "repo_disabled" and (state == "skipped" or snapshot.attempt >= 1)
             ):
                 await self._update_check_run(run_id)
+            elif self._bitbucket_statuses is not None:
+                await update_bitbucket_status(
+                    self._bitbucket_statuses, run_id, self._run_url(run_id)
+                )
             return DeliveryOutcome.ACK
 
         await self._update_check_run(run_id)
@@ -561,6 +571,8 @@ class HandleReviewRun:
 
     async def _update_check_run(self, run_id: UUID) -> None:
         await update_check_run(self._uow_factory, self._check_runs, run_id, self._run_url)
+        if self._bitbucket_statuses is not None:
+            await update_bitbucket_status(self._bitbucket_statuses, run_id, self._run_url(run_id))
 
 
 async def update_check_run(

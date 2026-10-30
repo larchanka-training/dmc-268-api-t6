@@ -35,7 +35,7 @@ runtime-профиль требуют отдельной реализации; �
 | Р-8 | `usage_events` (токены, деньги, модель) — с первого вызова LLM, только вставка | Восстановить задним числом нельзя; основа для `CreditLedger` |
 | Р-9 | Бот односторонний: публикует, на комментарии не отвечает; **обязательно** игнорирует собственные события | Скорость запуска; защита от цикла «бот → CI → бот» |
 | Р-10 | Триггер — **конъюнкция двух событий в любом порядке**: на PR стоит лейбл `ai-review` ∧ CI успешен для текущего `head_sha`. Бота нельзя запросить ревьюером: GitHub отвечает 201 с пустым `requested_reviewers`, событие `review_requested` не приходит ([#37](https://github.com/larchanka-training/dmc-268-api-t6/issues/37#issuecomment-5874776355)). **После пуша — авто-повтор**, пока PR открыт и стоит лейбл (наш флаг `ai_review_labeled`): бот лейбл не снимает; флаг сверяется с текущими лейблами PR, поэтому его снимает `unlabeled` не от нашего бота, а закрытие PR флаг не трогает — новые Run для закрытого PR не создаются (решения техлида по #20, OQ-1, по #37 и #56). Условие «CI успешен» и sweep «2 мин без CI» — §6.1, [PIPELINE_SPEC](PIPELINE_SPEC.md) §8 | Решение мита; события независимы, порядок не гарантирован. Лейбл ставит только участник с правом triage и выше: внешний автор PR не запустит ревью и не потратит бюджет LLM |
-| Р-11 | Провайдер VCS — за портом `VcsProvider`. GitHub и установленный GitLab поддерживают приём, fast-анализ и публикацию; GitLab intake по умолчанию выключен, live-приёмка остаётся отдельным гейтом (§8.1). Bitbucket не реализован | Запись в GitLab — discussions, маркеры `findings_hash` и inline `position` по §9.5 (#171); ключи §10 / отдельные receipts операций — не реализованы |
+| Р-11 | Провайдер VCS — за портом `VcsProvider`. GitHub, установленный GitLab и Bitbucket Cloud имеют отдельные пути приёма, анализа и публикации; GitLab intake по умолчанию выключен, а Bitbucket live-приёмка #333 остаётся отдельным гейтом (§8.1) | Bitbucket привязывается по UUID репозитория и portal workspace, подписывает repository webhook отдельным секретом; нативная REST-suggestion ещё не подтверждена на реальном PR |
 | Р-12 | Один monorepo и пять независимо собираемых сервисов (`portal-api`, `auth-api`, `webhook-api`, `worker`, `publisher`) с собственными зависимостями; у роли `webhook-api` второй процесс — `webhook-worker` (тот же образ, `python -m app.webhook_worker`, §4) | Изоляция релизов и зависимостей без потери единого lock-файла и локального окружения |
 | Р-13 | **RAG v1 — граф символов репозитория с указателями** ([ADR 0001](adr/0001-graph-rag-v1.md)). Worker получает контекст через порт `ContextProvider`: детерминированный сборщик L0–L4 и `RagContextProvider`, возвращающий тот же `ContextPayload`; в коде провайдер реализован слотом RAG сборки `BuildReviewContext`, кандидатов которого выбирает `ReverseEdgeSelector`. Индекс RAG v1 хранит по репозиторию определения, ссылки и импорты символов и рёбра между ними с указателями — путь, диапазон строк, `blob_sha`, `indexed_commit_sha`; без embeddings и без текста кода. Индексируются только репозитории с включённым тумблером RAG (по умолчанию выключен). v2 (векторный поиск, embeddings) — только после гейта eval #146 | Граф даёт то, чего нет у L4: обратные рёбра — кто импортирует или использует изменённый символ. Нет затрат и рисков embeddings/vector DB, код клиента сверх 7-дневного кэша не хранится; LLM, post-processing и публикация не меняются. Решение #19 «RAG не в MVP» пересмотрено эпиком #139 |
 | Р-14 | Успешный прогон — статус **`succeeded`** везде: домен (`RunState.SUCCEEDED`), PG enum `run_state`, API, Zod фронтенда. Полный набор: `queued\|running\|publishing\|succeeded\|failed\|cancelled\|skipped` (§6.4); `completed` — только события и статусы GitHub (`check_suite`, `check_run`, `workflow_run`) | Одно имя от БД до UI без маппинга; код и миграция уже используют `succeeded` и `publishing` |
@@ -878,11 +878,12 @@ ID — UUID без префиксов, как в БД; `findings_hash` — 64 he
 ### 7.3 Реализация (#34): отступления
 
 Этот раздел фиксирует существующий runtime. С #130 F2 он двухпутный: путь выбирает
-закреплённый за run `review.system`; новый run закрепляет активную версию (v4, с #350 — v5), если
-репозиторий не переопределил review prompt, и идёт snapshot-путём, run на v3 или
-ниже остаётся на legacy-пути. Run на v4 или v5 на legacy-путь не откатывается: без
+закреплённый за run `review.system`; Bitbucket run закрепляет общую активную версию `review.system`
+так же, как GitHub/GitLab, если репозиторий не переопределил review prompt.
+После #350 активен общий v5; ранее закреплённые v4 сохраняют свой prompt. Оба идут
+snapshot-путём, run на v3 или ниже остаётся на legacy-пути. Run на v4 или v5 на legacy-путь не откатывается: без
 пригодного снимка политики или с провайдером вне `SNAPSHOT_REVIEW_PROVIDERS`
-(GitHub и GitLab) он падает с `policy_snapshot_integrity_error` до любого вызова
+(GitHub, GitLab и Bitbucket Cloud) он падает с `policy_snapshot_integrity_error` до любого вызова
 модели. В частности, публикация raw summary ниже — legacy, а не разрешённый
 вариант целевых контрактов §5, §9–11.
 
@@ -1050,7 +1051,9 @@ class VcsProvider(Protocol):
 GitHub поддерживает вебхуки, diff, блобы, check-run и `post_review`. Установленный
 GitLab поддерживает durable MR receipts, проекцию, очередь, fast-анализ и discussions
 через отдельные адаптеры (§8.4); GitHub check-run для GitLab не вызывается.
-`BitbucketProvider` не реализован. Минимальная совместимая версия GitLab — 17.4.
+Bitbucket Cloud использует отдельный UUID-bound adapter для PR, diff, source,
+inline comments и commit statuses; детали и live-гейт — [задача #333](https://github.com/larchanka-training/dmc-268-api-t6/issues/333) и [TEST_PLAN](TEST_PLAN.md#bitbucket-cloud-acceptance-333).
+Минимальная совместимая версия GitLab — 17.4.
 
 GitLab HTTP admission включается отдельно через `GITLAB_WEBHOOK_INTAKE_ENABLED`
 (по умолчанию false), а каждый connection — через проверяемый `gitlab_admin activate`
@@ -1070,7 +1073,7 @@ receiver отсутствует. Вебхук не создаёт installation �
 MR open/update/reopen читают текущее состояние, сериализуют проекцию и допускают
 запуск только bound enabled/available репозитория с `wait_for_ci=never`, активными
 rules/prompt и неизменным head. Close/merge отменяет активную работу. GitLab CI,
-no-CI sweep, deep/Sandbox, Graph/RAG и Bitbucket не поддерживаются; GitHub CI,
+no-CI sweep, deep/Sandbox и Graph/RAG для GitLab не поддерживаются; GitHub CI,
 sweep, index и cache сохраняют прежнее поведение.
 
 Diff закреплён за сохранённой версией MR с точными head/start/base и target/source
@@ -1140,8 +1143,12 @@ HTTP-запросом повторяется checkpoint claimed Run; кэшир�
 не заменяет разрешение. GitHub/LLM calls выполняются вне DB-транзакций. Существующие
 terminal payload и append-only audit сохраняются по правилам §6.9.
 
-Публикация обсуждений реализована для GitHub и GitLab (#97); installed GitLab
-intake и fast pipeline описаны в §8.1. Изменения #171 включены: DiffMap задаёт
+Публикация обсуждений реализована для GitHub, GitLab (#97) и Bitbucket Cloud
+(#333); installed GitLab intake и fast pipeline описаны в §8.1. Bitbucket
+публикует inline-комментарии и одну сводку через PR comments с устойчивыми
+маркерами Run. Блок `suggestion` в тексте Bitbucket-комментария пока даёт
+ручной патч, а не доказанную применяемую через UI подсказку; её native API
+возможность остаётся в живой приёмке #333. Изменения #171 включены: DiffMap задаёт
 диапазоны/rename/context позиции, placement хранится для каждого finding, а перед
 каждым POST проверяется текущий head; installed HTTP сохраняет исходную authority.
 
@@ -1231,6 +1238,44 @@ Timeout или неоднозначный 5xx после возможной от
 diff допускает один сохранённый body-only вариант тех же supported findings;
 произвольный 400/422, ошибка доступа, stale diff или unknown outcome его не разрешают.
 GitLab хранит receipt каждой discussion отдельно и не повторяет успешные операции.
+
+### 8.5 Bitbucket Cloud (#333)
+
+Browser connection принадлежит portal workspace и хранит immutable Bitbucket
+workspace/repository UUID, зашифрованный API token и отдельный webhook secret
+каждого репозитория. API проверяет scope чтения выбранного PR при подключении и
+ротации. Входящий repository webhook проверяет HMAC исходных байтов и binding/
+webhook generation, затем сохраняет durable receipt; worker проецирует текущий
+PR/head только после HTTP 202. `repo:push` переоценивает открытые PR, а события
+`pullrequest:fulfilled`/`pullrequest:rejected` закрывают их работу. Подробные
+форматы ответа и ошибки — [BITBUCKET_WEBHOOK.md](BITBUCKET_WEBHOOK.md).
+
+Review worker читает pinned source/diff/policy по UUID-bound адаптеру, с полными
+40-символьными SHA. Bitbucket индекс RAG доступен только при эффективном тумблере,
+готовом/отставшем индексе и закреплённом snapshot-промпте с секцией retrieved;
+с #350 это общий `review.system:v5`. Снимок индекса через `/src`
+ограничен 160 записями дерева, 160 каталогами, глубиной 16, пятью страницами на
+каталог и 160 запросами на сборку; превышение бюджета запросов даёт
+`limit_exceeded:provider_requests`, а превышение структуры —
+`limit_exceeded:archive_entries`. Raw файлы не скачиваются после preflight отказа.
+При доказанном полном diffstat инкрементальная сборка читает полное дерево путей,
+но загружает только изменённые файлы, затронутых импортёров, Go/Python target
+facts и `go.mod`; полный rebuild остаётся для неполного diffstat или смены профиля.
+Для Bitbucket `wait_for_ci=auto|always` не поддерживается: изменения этих
+настроек API отклоняет, а webhook eligibility безопасно пропускает не-`never`
+наследованные настройки. `review_event` не посылает отдельного approve/request
+changes действия: публикация состоит из inline comments и одной сводки;
+многострочный patch пока только текст для ручного применения.
+
+Статус прогона записывается как commit status на head исходной ветки под
+`AI-REVIEW-<30 hex>`; `queued`/`running`/`publishing` → `INPROGRESS`, `succeeded`
+→ `SUCCESSFUL`, `failed`/`cancelled`/`skipped` → `STOPPED` (§7.1 PIPELINE_SPEC).
+Журнал желаемого статуса переживает сбой между фиксацией Run и HTTP-записью;
+повторная публикация комментариев сверяет маркеры на всех страницах и не
+дублирует уже подтверждённые findings. Поведение fork, merge checks и native
+suggestion остаётся предметом disposable live-приёмки #333. Вводить UI #195
+следует только после мержа и выката аддитивного API #340 с обязательным
+`provider` в ответах существующих GitHub/GitLab маршрутов.
 
 ---
 
@@ -1772,9 +1817,9 @@ LLM ReviewOutput. Технический drop unknown_path
 verifier insufficient_context остаются за lifecycle #107/#130; их общее влияние
 на coverage не объявляется реализованным в #213.
 
-После #130 F1 worker собирает Reflection Pass, а после F2 seed активирует
-`review.system:v4` (с #350 — v5) для новых runs. Snapshot-путь выбирается
-только по закреплённому v4 или v5; runs с v3 или ниже, созданные до F2 seed либо с pins до 0039,
+После #130 F1 worker собирает Reflection Pass; F2 seed активировал
+`review.system:v4`, а после #350 новые runs закрепляют общий v5. Snapshot-путь выбирается по
+закреплённому v4 или v5; runs с v3 или ниже, созданные до F2 seed либо с pins до 0039,
 сохраняют legacy-путь без verifier. Адаптер ревью
 выполняет fit/guard/manifest один раз: snapshot-ответ `ReviewReply` несёт
 фактический fitted context и manifest принятого вызова, legacy — mapping.
@@ -1955,7 +2000,8 @@ lease, затем удаляет порции до первой неполной
 Итог задачи индексации пишется без новых колонок — статусом, `error_code` и
 `last_error_code` (`mark_failed`/`release`, сброс `last_error_code` публикацией —
 #142). Каждая задача, получившая lease (кроме LEASE_LOST), записывает метрики
-(`github_request_count`, `downloaded_bytes`, `build_duration_ms`) своего прогона;
+(`github_request_count` — историческое имя, также считает Bitbucket HTTP-запросы,
+`downloaded_bytes`, `build_duration_ms`) своего прогона;
 отказ по квоте при claim, где lease не выдаётся, тоже пишет нули, потому что задача не
 делала запросов к GitHub. Неожиданное исключение задачи пишет в `last_error_code`
 мягкий код `internal_error`, не в `error_code`; отмена кода не пишет (#145).
@@ -2010,6 +2056,21 @@ PATCH даёт 422. Шаблон `branchFilter` (синтаксис — §6.1) �
 шаблонов, без повторов. Zod-схема UI делает три поля ответа обязательными, поэтому
 API с ними выкатывается раньше, чем мёржится соответствующий PR UI.
 
+Для Bitbucket Cloud `waitForCi` поддерживает только `never`, а `reviewEvent` —
+только `COMMENT`. Попытка установить `auto`/`always` или `REQUEST_CHANGES`
+через `PATCH /api/repos/{id}` возвращает 422 с массивом `detail`, где элемент
+имеет `loc: ["body", "waitForCi"]` и `msg: "bitbucket_wait_for_ci_unsupported"`
+либо `loc: ["body", "reviewEvent"]` и
+`msg: "bitbucket_review_event_unsupported"`; `type` равен `value_error`.
+Для GitHub и GitLab эти настройки сохраняют прежнюю семантику.
+Bitbucket connect и connection-item ответы ограничивают `workspaceSlug` и
+`repositorySlug` длиной 1–128 символов, включая вложенные элементы списка;
+discovery имеет отдельную схему. Bitbucket-ошибки 422 скрывают входной секрет
+и контекст валидации; для остальных маршрутов GitHub/GitLab сохраняется
+стандартное тело FastAPI с `msg`, `input` и `ctx`, когда эти поля есть.
+`GET /api/repos/{id}/rules-status` и его описание OpenAPI относятся ко всем
+трём провайдерам, без умолчания `github` при отсутствии имени провайдера.
+
 **Тумблер и статус RAG [техлид, 16.10.2026, #145].** В `Repository` обязательны
 `ragEnabled` (boolean, эффективное значение, §6.9) и `ragIndex` (схема `RagIndex`,
 только чтение, закрыта): `status` (схема `RagIndexStatus`:
@@ -2020,6 +2081,10 @@ API с ними выкатывается раньше, чем мёржится �
 дают 422. Zod-схемы UI — ui#109 (снимок `tests/fixtures/ui_zod_contracts.json`;
 коммит ui, с которого он снят, — в `provenance.commit` и `UI_CONTRACT_COMMIT`); поля
 ответа там обязательны, поэтому API с ними выкатывается раньше мёржа PR UI.
+Для Bitbucket `Repository.enabled=false` оставляет review выключенным, но
+подписанный `repo:push` по default branch всё равно запрашивает обновление
+индекса, если `rag_enabled=true`, installation доступна и webhook binding
+подтверждён. Проверки tenant, UUID и поколения binding при этом сохраняются.
 
 **Контракт авторизации** (D4 — решение техлида по #20; хранение access в памяти, подпись в `auth-api` с проверкой публичным ключом и граница Workspace — дефолт по #20):
 
@@ -2262,7 +2327,7 @@ Configured цены/лимиты совпадают с предыдущими; a
 ## 17. Проверка DoD
 
 - [x] Компоненты, потоки данных, границы backend / frontend / LLM — §2, §3–§5
-- [x] Правила взаимодействия с VCS (GitHub и installed GitLab fast; GitLab live activation gated, Bitbucket нет) — §8
+- [x] Правила взаимодействия с VCS (GitHub, installed GitLab fast и Bitbucket Cloud #333; live acceptance отдельно) — §8
 - [x] Форматы очереди задач (RabbitMQ) — §7
 - [x] Стратегия кэширования контекстов — §10
 - [x] Сборщик контекста: структуры данных на 4 уровнях — §9

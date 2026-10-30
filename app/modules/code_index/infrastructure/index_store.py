@@ -140,12 +140,13 @@ def _failure(error_code: str) -> dict[str, Any]:
     }
 
 
-def _stats(stats: IndexBuildStats) -> dict[str, int]:
+def _stats(stats: IndexBuildStats) -> dict[str, int | None]:
     """The job metrics a failure, a release or a publication miss records."""
     return {
         "downloaded_bytes": stats.downloaded_bytes,
         "build_duration_ms": stats.build_duration_ms,
         "github_request_count": stats.github_request_count,
+        "last_error_http_status": stats.http_status,
     }
 
 
@@ -348,6 +349,7 @@ def _to_state(row: CodeIndexState) -> IndexState:
         purge_reason=row.purge_reason,
         error_code=row.error_code,
         last_error_code=row.last_error_code,
+        last_error_http_status=row.last_error_http_status,
         indexed_commit_sha=row.indexed_commit_sha,
         target_commit_sha=row.target_commit_sha,
         reserved_publication=row.reserved_publication,
@@ -366,6 +368,7 @@ def _to_state(row: CodeIndexState) -> IndexState:
             downloaded_bytes=row.downloaded_bytes,
             build_duration_ms=row.build_duration_ms,
             github_request_count=row.github_request_count,
+            http_status=row.last_error_http_status,
         ),
         updated_at=row.updated_at,
     )
@@ -540,6 +543,7 @@ class SqlAlchemyCodeIndexStore:
             published_at=None,
             error_code=None,
             last_error_code=None,
+            last_error_http_status=None,
             extractor_version=None,
             resolver_version=None,
             parser_profile_version=None,
@@ -582,6 +586,7 @@ class SqlAlchemyCodeIndexStore:
             # new one as drift.
             if target_commit_sha != state.target_commit_sha:
                 values["last_error_code"] = None
+                values["last_error_http_status"] = None
         await self._update_state(repository_id, **values)
         return True
 
@@ -630,6 +635,7 @@ class SqlAlchemyCodeIndexStore:
             # ADR §6.1: a new target clears the refusal of the older one, so a later pass
             # still finds this head new when the marker set here is lost.
             values["last_error_code"] = None
+            values["last_error_http_status"] = None
         if drifted:
             values["wake_requested_at"] = func.clock_timestamp()
         await self._update_state(repository_id, **values)
@@ -950,6 +956,7 @@ class SqlAlchemyCodeIndexStore:
             status=IndexStatus.READY,
             error_code=None,
             last_error_code=None,
+            last_error_http_status=None,
             indexed_commit_sha=commit_sha,
             published_at=func.now(),
             lease_token=None,
@@ -994,6 +1001,8 @@ class SqlAlchemyCodeIndexStore:
         *,
         last_error_code: str | None = None,
         stats: IndexBuildStats | None = None,
+        terminal_head_sha: str | None = None,
+        expected_target_sha: str | None = None,
     ) -> IndexStatus:
         state = await self._fenced(repository_id, fence, share=False)
         # The last publication stays readable; GC removes this attempt's rows. Its
@@ -1005,10 +1014,16 @@ class SqlAlchemyCodeIndexStore:
             "lease_expires_at": None,
             "pending_bytes": 0,
         }
-        if last_error_code is not None:
+        if last_error_code is not None and (
+            terminal_head_sha is None or state.target_commit_sha == expected_target_sha
+        ):
             values["last_error_code"] = last_error_code
+        if terminal_head_sha is not None and state.target_commit_sha == expected_target_sha:
+            values["target_commit_sha"] = terminal_head_sha
         if stats is not None:
             values |= _stats(stats)
+        if terminal_head_sha is not None and state.target_commit_sha != expected_target_sha:
+            values["last_error_http_status"] = state.last_error_http_status
         await self._update_state(repository_id, **values)
         return status
 

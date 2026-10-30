@@ -705,6 +705,7 @@ def test_tight_budget_keeps_the_diff_and_marks_a_cut_hunk() -> None:
 
     cut = _build(repository, diff_map, budget=12)
     assert [(block.level, block.truncated) for block in cut.blocks] == [(ContextLevel.L1, True)]
+    assert cut.reason == "budget"
     assert cut.blocks[0].tokens <= 12
     assert repository.read.count("pkg/models.py") == 1
 
@@ -964,6 +965,8 @@ def test_optional_source_failure_remains_an_omission(boundary: str) -> None:
     assert payload.status is ContextStatus.REVIEW
     reason = "tree_unavailable" if boundary == "tree" else "source_read_failed"
     assert any(item.reason == reason for item in payload.omissions)
+    if boundary == "tree":
+        assert payload.reason == "tree_unavailable"
 
 
 @pytest.mark.parametrize("boundary", ["tree", "blob"])
