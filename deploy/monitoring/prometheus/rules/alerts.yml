@@ -189,9 +189,10 @@ groups:
   # environment scraped here counts against one budget, while the environment label of the alert
   # stays the one of this Prometheus. The threshold dmc_llm_monthly_budget_usd is a node-exporter
   # textfile that deploy.sh writes from the repository variable LLM_MONTHLY_BUDGET_USD: without
-  # it, or at 0, both alerts stay silent. The warning stops below 100%, so at the budget only the
-  # critical alert fires; the warning sends its RESOLVED (no inhibit rules). $value is the percent;
-  # the summary queries the sum.
+  # it, or at 0, the two monthly alerts stay silent. The warning stops below 100%, so at the budget
+  # only the critical alert fires; the warning sends its RESOLVED (no inhibit rules). In the two
+  # monthly alerts $value is the percent; the summary queries the sum.
+  # The group also holds ReviewRunsBudgetPaused: the daily budget of a workspace, no threshold.
   - name: llm-budget
     rules:
       - alert: LlmMonthlyBudgetWarning
@@ -212,6 +213,19 @@ groups:
         annotations:
           summary: "LLM spend this month: {{ with query \"sum(dmc_llm_cost_month_usd)\" }}{{ . | first | value | printf \"%.2f\" }}{{ end }} USD, {{ $value | printf \"%.1f\" }}% of the monthly budget"
           description: "Spend in usage_events since the 1st of the month (UTC) has reached LLM_MONTHLY_BUDGET_USD; the alert pauses no reviews, they keep spending."
+
+      # Not the monthly budget above: the application itself skips the runs of a workspace whose
+      # daily budget is spent (error_code budget_paused). No `for`, like ReviewRunsFailed: the runs
+      # are already skipped. While runs keep being skipped the alert stays firing, and Alertmanager
+      # repeats it every 4 hours like any other.
+      - alert: ReviewRunsBudgetPaused
+        expr: sum(dmc_runs_budget_paused_15m_runs) > 0
+        labels:
+          severity: warning
+          kind: event
+        annotations:
+          summary: "{{ $value }} review run(s) skipped with budget_paused in the last 15 minutes"
+          description: "The daily budget left in a workspace is below the cost limit of a fast run, so its runs are skipped, not reviewed (docs/PIPELINE_SPEC.md §5.3, §6). The metric counts runs and names no workspace."
 
   - name: host
     rules:

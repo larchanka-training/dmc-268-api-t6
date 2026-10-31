@@ -181,6 +181,59 @@ tests:
         alertname: LlmMonthlyBudgetExceeded
         exp_alerts: []
 
+  # Runs skipped by the daily budget of a workspace: an event, gone when the window empties.
+  - interval: 1m
+    input_series:
+      - series: 'dmc_runs_budget_paused_15m_runs'
+        values: "0 0 2x5 0x20"
+    alert_rule_test:
+      - eval_time: 1m
+        alertname: ReviewRunsBudgetPaused
+        exp_alerts: []
+      - eval_time: 2m
+        alertname: ReviewRunsBudgetPaused
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              kind: event
+            exp_annotations:
+              summary: "2 review run(s) skipped with budget_paused in the last 15 minutes"
+              description: "The daily budget left in a workspace is below the cost limit of a fast run, so its runs are skipped, not reviewed (docs/PIPELINE_SPEC.md §5.3, §6). The metric counts runs and names no workspace."
+      - eval_time: 7m
+        alertname: ReviewRunsBudgetPaused
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              kind: event
+            exp_annotations:
+              summary: "2 review run(s) skipped with budget_paused in the last 15 minutes"
+              description: "The daily budget left in a workspace is below the cost limit of a fast run, so its runs are skipped, not reviewed (docs/PIPELINE_SPEC.md §5.3, §6). The metric counts runs and names no workspace."
+      - eval_time: 8m
+        alertname: ReviewRunsBudgetPaused
+        exp_alerts: []
+
+  # A single skipped run is enough.
+  - interval: 1m
+    input_series:
+      - series: 'dmc_runs_budget_paused_15m_runs'
+        values: "0 1x5 0x20"
+    alert_rule_test:
+      - eval_time: 0m
+        alertname: ReviewRunsBudgetPaused
+        exp_alerts: []
+      - eval_time: 1m
+        alertname: ReviewRunsBudgetPaused
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              kind: event
+            exp_annotations:
+              summary: "1 review run(s) skipped with budget_paused in the last 15 minutes"
+              description: "The daily budget left in a workspace is below the cost limit of a fast run, so its runs are skipped, not reviewed (docs/PIPELINE_SPEC.md §5.3, §6). The metric counts runs and names no workspace."
+      - eval_time: 7m
+        alertname: ReviewRunsBudgetPaused
+        exp_alerts: []
+
   # 5xx share per host, with a minimum of traffic; the metrics endpoint of Caddy (host _other) and
   # other hosts do not count.
   - interval: 1m

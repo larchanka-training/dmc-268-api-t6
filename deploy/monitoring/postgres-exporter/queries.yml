@@ -80,3 +80,18 @@ dmc_llm_cost_month:
     - usd:
         usage: GAUGE
         description: LLM cost in USD since the start of the month (UTC)
+
+# Runs skipped because the daily budget left in a workspace is below the cost limit of a fast run
+# (error_code budget_paused, docs/PIPELINE_SPEC.md §5.3, §6), in the last 15 minutes. A block of
+# its own rather than an error_code label on dmc_runs_finished_15m, whose other skip reasons are
+# routine. It reads state, error_code and finished_at only: the count names no workspace.
+dmc_runs_budget_paused_15m:
+  query: |
+    SELECT count(*)::float8 AS runs
+    FROM runs
+    WHERE state = 'skipped' AND error_code = 'budget_paused'
+      AND finished_at > now() - interval '15 minutes'
+  metrics:
+    - runs:
+        usage: GAUGE
+        description: Runs skipped with budget_paused in the last 15 minutes

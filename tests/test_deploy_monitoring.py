@@ -21,6 +21,7 @@ from typing import Any
 import pytest
 
 from app.modules.analytics.infrastructure.models import UsageEvent
+from app.modules.reviews.infrastructure.models import Run
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 MONITORING = REPO_ROOT / "deploy" / "monitoring"
@@ -282,7 +283,7 @@ def test_review_queries_and_grants_never_touch_review_content() -> None:
         if "rawSql" in target
     )
 
-    assert sql.count("SELECT") == 4
+    assert sql.count("SELECT") == 5
     assert dashboard_sql.count("SELECT") == 9
     assert {table for table, _ in grants} == {"runs", "run_actions", "usage_events"}
     granted = set().union(*grants.values())
@@ -330,6 +331,22 @@ def test_month_cost_query_sums_the_utc_month_from_cost_and_time_only() -> None:
         "cost_usd",
         "created_at",
     }
+
+
+def test_budget_paused_query_counts_skipped_runs_from_granted_columns() -> None:
+    block = _read(QUERIES).split("\ndmc_runs_budget_paused_15m:\n", 1)[1].split("\n\n", 1)[0]
+    sql = _query("dmc_runs_budget_paused_15m")
+    run_columns = {column.name for column in Run.__table__.columns}
+    read = {column for column in run_columns if re.search(rf"\b{column}\b", sql)}
+
+    # postgres-exporter names the series <block>_<column>: dmc_runs_budget_paused_15m_runs.
+    assert "SELECT count(*)::float8 AS runs" in sql
+    assert re.search(r"- runs:\n\s+usage: GAUGE\n", block)
+    assert "state = 'skipped' AND error_code = 'budget_paused'" in sql
+    assert "finished_at > now() - interval '15 minutes'" in sql
+    # No new grant: the exporter already reads these columns of runs.
+    assert read == {"state", "error_code", "finished_at"}
+    assert read <= _grants(_read(MONITORING / "deploy.sh"))[("runs", "metrics_exporter")]
 
 
 # --- dashboard -----------------------------------------------------------------------------
@@ -986,7 +1003,7 @@ def test_event_alerts_are_sent_once_and_never_as_resolved(tmp_path: Path) -> Non
     rules = _read(MONITORING / "prometheus" / "rules" / "alerts.yml")
     events = re.findall(r"- alert: (\w+)\n(?:        .*\n)*?          kind: event\n", rules)
 
-    assert events == ["ReviewRunsFailed", "ReviewDeadLetters"]
+    assert events == ["ReviewRunsFailed", "ReviewDeadLetters", "ReviewRunsBudgetPaused"]
     assert (
         '  routes:\n    - matchers: [kind="event"]\n      receiver: telegram-events\n'
         "      group_by: [environment]\n      group_wait: 90s\n"

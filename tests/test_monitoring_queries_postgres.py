@@ -18,7 +18,7 @@ import pytest
 from sqlalchemy import Connection, create_engine, text
 from sqlalchemy.pool import NullPool
 
-from tests.portal_postgres import RUN_DONE, WS_A, Env, portal_schema
+from tests.portal_postgres import PR_OPEN, PROMPT, RULE_A, RUN_DONE, WS_A, Env, portal_schema
 from tests.test_deploy_monitoring import MONITORING, _grants, _query, _read
 
 # UTC+14 all year: its calendar month starts 14 hours before the UTC one.
@@ -68,21 +68,47 @@ def _usage(connection: Connection, created_at: datetime, cost: str) -> None:
     )
 
 
+def _run(connection: Connection, state: str, error_code: str, finished_at: datetime) -> None:
+    connection.execute(
+        text(
+            "INSERT INTO runs (id, code_change_id, base_sha, base_ref, head_sha, state, trigger, "
+            "idempotency_key, engine, rule_version_id, prompt_version_id, available_at, attempt, "
+            "created_at, error_code, finished_at) VALUES (:id, :pr, :sha, 'main', :sha, :state, "
+            "'manual', :key, 'fast', :rule, :prompt, :at, 1, :at, :error_code, :at)"
+        ),
+        {
+            "id": uuid4(),
+            "pr": PR_OPEN,
+            "sha": "c" * 40,
+            "state": state,
+            "key": uuid4().hex * 2,
+            "rule": RULE_A,
+            "prompt": PROMPT,
+            "at": finished_at,
+            "error_code": error_code,
+        },
+    )
+
+
 def _metric(connection: Connection, name: str) -> list[dict[str, Any]]:
     return [dict(row._mapping) for row in connection.execute(text(_query(name)))]
 
 
 def _as_exporter(connection: Connection) -> None:
-    """Switch the transaction to a new role with exactly the exporter's grant on usage_events.
+    """Switch the transaction to a new role with exactly the exporter's column grants.
 
     Role names are cluster-wide: a unique one, created in the transaction and rolled back with it.
     """
     role = f"monitoring_probe_{uuid4().hex}"
     schema = connection.execute(text("SELECT current_schema()")).scalar_one()
-    grant = _grants(_read(MONITORING / "deploy.sh"))[("usage_events", "metrics_exporter")]
+    grants = _grants(_read(MONITORING / "deploy.sh"))
     connection.execute(text(f"CREATE ROLE {role}"))
     connection.execute(text(f'GRANT USAGE ON SCHEMA "{schema}" TO {role}'))
-    connection.execute(text(f"GRANT SELECT ({', '.join(sorted(grant))}) ON usage_events TO {role}"))
+    for (table, grantee), columns in sorted(grants.items()):
+        if grantee == "metrics_exporter":
+            connection.execute(
+                text(f"GRANT SELECT ({', '.join(sorted(columns))}) ON {table} TO {role}")
+            )
     connection.execute(text(f"SET LOCAL ROLE {role}"))
 
 
@@ -116,3 +142,26 @@ def test_month_cost_is_zero_before_the_first_call_of_the_month(connection: Conne
     _usage(connection, month_start - timedelta(microseconds=1), "7")
 
     assert _metric(connection, "dmc_llm_cost_month") == [{"usd": 0.0}]
+
+
+@pytest.mark.integration
+def test_budget_paused_counts_runs_skipped_by_the_budget_in_the_last_15_minutes(
+    connection: Connection,
+) -> None:
+    now = connection.execute(text("SELECT now()")).scalar_one()
+    window = timedelta(minutes=15)
+    # The window is open at its start: a run finished exactly 15 minutes ago is out.
+    _run(connection, "skipped", "budget_paused", now - window)
+
+    assert _metric(connection, "dmc_runs_budget_paused_15m") == [{"runs": 0.0}]
+
+    _run(connection, "skipped", "budget_paused", now - window + timedelta(seconds=1))
+    _run(connection, "skipped", "budget_paused", now)
+    # Another skip reason, and a failed run even with this code, do not count.
+    _run(connection, "skipped", "repo_disabled", now)
+    _run(connection, "failed", "budget_paused", now)
+
+    assert _metric(connection, "dmc_runs_budget_paused_15m") == [{"runs": 2.0}]
+    # The columns deploy.sh already grants to metrics_exporter are enough for the query.
+    _as_exporter(connection)
+    assert _metric(connection, "dmc_runs_budget_paused_15m") == [{"runs": 2.0}]
