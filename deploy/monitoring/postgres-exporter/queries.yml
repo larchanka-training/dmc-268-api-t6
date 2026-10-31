@@ -1,7 +1,8 @@
 # Review metrics of postgres-exporter (--extend.query-path), for the alert rules of
 # prometheus/rules/alerts.yml. The role metrics_exporter reads only the columns granted by
-# deploy/monitoring/deploy.sh: states, timestamps, tool names and durations, never review content.
-# Every query is bounded by a recent time window or an indexed state; one scrape per minute.
+# deploy/monitoring/deploy.sh: states, timestamps, tool names, durations and LLM cost, never review
+# content. One scrape per minute. The queries over runs and run_actions are bounded by a recent time
+# window or an indexed state; the month query of LLM cost reads all of usage_events (see its block).
 
 # Runs that reached a final state in the last 15 minutes, by state (docs/PIPELINE_SPEC.md §1).
 dmc_runs_finished_15m:
@@ -63,3 +64,19 @@ dmc_llm_calls_15m:
     - p95_seconds:
         usage: GAUGE
         description: 95th percentile LLM call duration over the last 15 minutes
+
+# LLM spend recorded in this database since the start of the calendar month in UTC (usage_events,
+# one row per provider call). The three-argument date_trunc ignores the session time zone; coalesce
+# keeps the series at 0 until the first call of the month. No index covers created_at alone and
+# nothing purges the ledger, so every scrape reads the whole usage_events history (about 50 ms per
+# 200 000 rows). Once the table grows, add a BRIN or btree index on created_at by a separate
+# migration. The budget alerts sum the series of every database this Prometheus scrapes.
+dmc_llm_cost_month:
+  query: |
+    SELECT coalesce(sum(cost_usd), 0)::float8 AS usd
+    FROM usage_events
+    WHERE created_at >= date_trunc('month', now(), 'UTC')
+  metrics:
+    - usd:
+        usage: GAUGE
+        description: LLM cost in USD since the start of the month (UTC)

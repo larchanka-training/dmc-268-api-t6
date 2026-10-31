@@ -20,6 +20,8 @@ from typing import Any
 
 import pytest
 
+from app.modules.analytics.infrastructure.models import UsageEvent
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 MONITORING = REPO_ROOT / "deploy" / "monitoring"
 WORKFLOW = REPO_ROOT / ".github" / "workflows" / "ci-cd.yml"
@@ -214,12 +216,64 @@ def test_grafana_has_its_own_host_and_prometheus_none() -> None:
 
 # --- review metrics and roles --------------------------------------------------------------
 
+QUERIES = MONITORING / "postgres-exporter" / "queries.yml"
+RUN_COLUMNS = {
+    "id",
+    "state",
+    "trigger",
+    "engine",
+    "attempt",
+    "error_code",
+    "available_at",
+    "created_at",
+    "started_at",
+    "finished_at",
+}
+RUN_ACTION_COLUMNS = {"run_id", "tool", "started_at", "duration_ms"}
+# The column grants of the read-only roles, by table and role: all they can read.
+METADATA_GRANTS = {
+    ("runs", "grafana_reader"): RUN_COLUMNS,
+    ("runs", "metrics_exporter"): RUN_COLUMNS,
+    ("run_actions", "grafana_reader"): RUN_ACTION_COLUMNS,
+    ("run_actions", "metrics_exporter"): RUN_ACTION_COLUMNS,
+    ("usage_events", "grafana_reader"): {
+        "provider",
+        "model",
+        "operation",
+        "tokens_in",
+        "tokens_out",
+        "cache_read_tokens",
+        "cost_usd",
+        "created_at",
+    },
+    ("usage_events", "metrics_exporter"): {"cost_usd", "created_at"},
+}
+
+
+def _query(name: str) -> str:
+    """The SQL of one postgres-exporter query block of queries.yml."""
+    block = re.search(rf"^{name}:\n  query: \|\n((?:    .*\n)+)", _read(QUERIES), re.M)
+    assert block is not None, name
+    return block.group(1)
+
+
+def _grants(sql: str) -> dict[tuple[str, str], set[str]]:
+    """Column grants by table and recipient role: GRANT SELECT (columns) ON table TO roles."""
+    statements = re.findall(r"GRANT SELECT \((.*?)\)\s+ON (\w+) TO ([^;]+);", sql, re.DOTALL)
+    assert len(statements) == sql.count("GRANT SELECT ("), "a column grant was not read"
+    grants: dict[tuple[str, str], set[str]] = {}
+    for columns, table, roles in statements:
+        for role in roles.split(","):
+            grants.setdefault((table, role.strip()), set()).update(
+                column.strip() for column in columns.split(",")
+            )
+    return grants
+
 
 def test_review_queries_and_grants_never_touch_review_content() -> None:
-    queries = _read(MONITORING / "postgres-exporter" / "queries.yml")
-    sql = "\n".join(re.findall(r"query: \|\n((?:    .*\n)+)", queries))
+    sql = "\n".join(re.findall(r"query: \|\n((?:    .*\n)+)", _read(QUERIES)))
     deploy = _read(MONITORING / "deploy.sh")
-    grants = re.findall(r"GRANT SELECT \((.*?)\)\s+ON (\w+)", deploy, re.DOTALL)
+    grants = _grants(deploy)
     dashboard = json.loads(_read(MONITORING / "grafana" / "dashboards" / "overview.json"))
     dashboard_sql = "\n".join(
         target["rawSql"]
@@ -228,10 +282,10 @@ def test_review_queries_and_grants_never_touch_review_content() -> None:
         if "rawSql" in target
     )
 
-    assert sql.count("SELECT") == 3
+    assert sql.count("SELECT") == 4
     assert dashboard_sql.count("SELECT") == 9
-    assert {table for _, table in grants} == {"runs", "run_actions", "usage_events"}
-    granted = {column.strip() for columns, _ in grants for column in columns.split(",")}
+    assert {table for table, _ in grants} == {"runs", "run_actions", "usage_events"}
+    granted = set().union(*grants.values())
     for column in CONTENT_COLUMNS:
         assert not re.search(rf"\b{column}\b", sql), column
         assert column not in granted, column
@@ -241,6 +295,41 @@ def test_review_queries_and_grants_never_touch_review_content() -> None:
         "REVOKE ALL ON ALL TABLES IN SCHEMA public FROM grafana_reader, metrics_exporter;" in deploy
     )
     assert deploy.count("SET default_transaction_read_only = on;") == 2
+
+
+def test_exporter_reads_only_the_cost_and_time_of_llm_usage() -> None:
+    deploy = _read(MONITORING / "deploy.sh")
+    statements = [
+        " ".join(statement.split())
+        for statement in re.findall(r"\bGRANT\b[^;]*;", deploy, re.IGNORECASE)
+        if re.search(r"\b(grafana_reader|metrics_exporter)\b", statement)
+    ]
+    column_grant = r"GRANT SELECT \([\w, ]+\) ON \w+ TO [\w, ]+;"
+
+    assert _grants(deploy) == METADATA_GRANTS
+    # Any other grant to the read-only roles opens no table: a table-wide SELECT, ALL or ON ALL
+    # TABLES would bypass the column lists above.
+    assert [statement for statement in statements if not re.fullmatch(column_grant, statement)] == [
+        "GRANT pg_monitor TO metrics_exporter;",
+        'GRANT CONNECT ON DATABASE "${POSTGRES_DB}" TO grafana_reader, metrics_exporter;',
+        "GRANT USAGE ON SCHEMA public TO grafana_reader, metrics_exporter;",
+    ]
+
+
+def test_month_cost_query_sums_the_utc_month_from_cost_and_time_only() -> None:
+    block = _read(QUERIES).split("\ndmc_llm_cost_month:\n", 1)[1].split("\n\n", 1)[0]
+    sql = _query("dmc_llm_cost_month")
+    usage_columns = {column.name for column in UsageEvent.__table__.columns}
+
+    # postgres-exporter names the series <block>_<column>: dmc_llm_cost_month_usd.
+    assert "coalesce(sum(cost_usd), 0)::float8 AS usd" in sql
+    assert re.search(r"- usd:\n\s+usage: GAUGE\n", block)
+    # The three-argument date_trunc ignores the time zone of the session.
+    assert "created_at >= date_trunc('month', now(), 'UTC')" in sql
+    assert {column for column in usage_columns if re.search(rf"\b{column}\b", sql)} == {
+        "cost_usd",
+        "created_at",
+    }
 
 
 # --- dashboard -----------------------------------------------------------------------------
@@ -930,6 +1019,18 @@ def test_backup_role_reads_everything_but_cannot_administer(host: Host) -> None:
     # The column grants of the metadata roles are rebuilt without touching the backup role.
     assert "FROM grafana_reader, metrics_exporter;" in sql
     assert "backup_agent;" not in sql.split("REVOKE", 1)[1].split("\n", 1)[0]
+
+
+def test_column_grants_reach_postgres_after_they_are_revoked(host: Host) -> None:
+    result = host.deploy()
+    sql = host.log("psql.log")
+    revoke = "REVOKE ALL ON ALL TABLES IN SCHEMA public FROM grafana_reader, metrics_exporter;"
+    exporter_cost = "GRANT SELECT (cost_usd, created_at) ON usage_events TO metrics_exporter;"
+
+    assert result.returncode == 0, result.stderr
+    assert _grants(sql) == METADATA_GRANTS
+    # A grant sent before the REVOKE would be dropped by it.
+    assert sql.index(revoke) < sql.index("GRANT SELECT (") < sql.index(exporter_cost)
 
 
 def test_backup_dirs_belong_to_the_backup_user(host: Host) -> None:

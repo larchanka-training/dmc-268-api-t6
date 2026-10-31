@@ -332,6 +332,8 @@ GRANT SELECT (id, state, trigger, engine, attempt, error_code, available_at, cre
 GRANT SELECT (run_id, tool, started_at, duration_ms) ON run_actions TO grafana_reader, metrics_exporter;
 GRANT SELECT (provider, model, operation, tokens_in, tokens_out, cache_read_tokens, cost_usd, created_at)
   ON usage_events TO grafana_reader;
+-- postgres-exporter: the month-to-date LLM cost only, without the provider, model or tokens.
+GRANT SELECT (cost_usd, created_at) ON usage_events TO metrics_exporter;
 -- pg-backup: reads everything for pg_dump; CREATEDB only for the scratch database of the restore
 -- check, which it creates, owns and drops. No superuser, no write access to the application data.
 ALTER ROLE backup_agent WITH LOGIN NOSUPERUSER CREATEDB NOCREATEROLE NOREPLICATION CONNECTION LIMIT 3;
