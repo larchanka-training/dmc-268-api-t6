@@ -10,7 +10,11 @@
 #   MONITORING_DIR             this stack's dir, default: the directory of this script
 #   GRAFANA_ROOT_URL           public Grafana URL in edge mode (https://grafana.<APP_DOMAIN>/)
 #   APP_DOMAIN                 base domain of the public names in edge mode: the blackbox exporter
-#                              probes staging-api.<APP_DOMAIN> and staging-ui.<APP_DOMAIN>
+#                              probes staging-api.<APP_DOMAIN>, staging-ui.<APP_DOMAIN> and the
+#                              production names of PROBE_PROD_HOSTS
+#   PROBE_PROD_HOSTS           production names probed in edge mode once they serve, out of api and
+#                              ui, separated by spaces; set, even empty: applied and kept in .env;
+#                              unset: keep the previous list (manual run)
 #   BACKUP_DIR                 host dir of the PostgreSQL dumps, default /var/backups/dmc-268/<project>
 #   GRAFANA_ADMIN_PASSWORD     set: the Grafana admin password (GitHub secret; GitHub never shows its
 #                              value, whoever sets it keeps a copy outside GitHub); empty or unset:
@@ -126,6 +130,22 @@ else
   GRAFANA_ROOT_URL="http://localhost:3000/"
   GRAFANA_COOKIE_SECURE=false
 fi
+
+# Production names to probe, validated before anything on the host changes; the value kept in .env
+# goes through the same check.
+if [[ -z "${PROBE_PROD_HOSTS+set}" ]]; then
+  PROBE_PROD_HOSTS="$(previous_setting PROBE_PROD_HOSTS)"
+fi
+if [[ ! "${PROBE_PROD_HOSTS}" =~ ^[[:space:]]*((api|ui)([[:space:]]+|$))*$ ]]; then
+  echo "PROBE_PROD_HOSTS must list production names out of: api ui (space-separated), got: ${PROBE_PROD_HOSTS}" >&2
+  exit 1
+fi
+# Each name once, in a fixed order, with the health path of its service.
+PROD_PROBES=()
+for probe in api/healthcheck ui/health; do
+  if [[ " ${PROBE_PROD_HOSTS//[[:space:]]/ } " == *" ${probe%%/*} "* ]]; then PROD_PROBES+=("${probe}"); fi
+done
+PROBE_PROD_HOSTS="${PROD_PROBES[*]%%/*}"
 
 API_NETWORK="${API_PROJECT}_default"
 if ! docker network inspect "${API_NETWORK}" >/dev/null 2>&1; then
@@ -375,11 +395,12 @@ fi
 chmod 644 "${CADDY_TARGETS}.tmp"
 mv -f "${CADDY_TARGETS}.tmp" "${CADDY_TARGETS}"
 # HTTPS probes of the public names behind the edge proxy, in edge mode only: each service name and
-# its health path. The name becomes the label host of the probe and of its alerts.
+# its health path, the staging names first. The name becomes the label host of the probe and of its
+# alerts.
 PROBE_TARGETS="${MONITORING_DIR}/prometheus/targets/probes.json"
 if [[ "${DEPLOY_MODE}" == "edge" ]]; then
   separator='['
-  for probe in staging-api/healthcheck staging-ui/health; do
+  for probe in staging-api/healthcheck staging-ui/health "${PROD_PROBES[@]}"; do
     probe_host="${probe%%/*}.${APP_DOMAIN}"
     printf '%s{"targets": ["https://%s/%s"], "labels": {"host": "%s"}}' \
       "${separator}" "${probe_host}" "${probe#*/}" "${probe_host}"
@@ -417,6 +438,7 @@ find "${MONITORING_DIR}/prometheus" "${MONITORING_DIR}/grafana" "${MONITORING_DI
   printf 'GRAFANA_COOKIE_SECURE=%s\n' "${GRAFANA_COOKIE_SECURE}"
   printf 'GRAFANA_ALIAS=%s\n' "$(escape_compose_value "${GRAFANA_ALIAS}")"
   printf 'TEXTFILE_DIR=%s\n' "$(escape_compose_value "${TEXTFILE_DIR:-${MONITORING_DIR}/textfile}")"
+  printf 'PROBE_PROD_HOSTS=%s\n' "${PROBE_PROD_HOSTS}"
   printf 'PROMETHEUS_CONFIG_DIGEST=%s\n' "$(config_digest prometheus)"
   printf 'ALERTMANAGER_CONFIG_DIGEST=%s\n' "$(config_digest alertmanager)"
   printf 'GRAFANA_CONFIG_DIGEST=%s\n' "$(config_digest grafana/provisioning)"

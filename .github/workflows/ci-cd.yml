@@ -1209,6 +1209,9 @@ jobs:
           GRAFANA_ROOT_URL: https://grafana.${{ vars.APP_DOMAIN }}/
           # The public names the blackbox exporter probes (staging-api., staging-ui.); unused in ports mode.
           APP_DOMAIN: ${{ vars.APP_DOMAIN }}
+          # Production names probed too: "api", "ui" or "api ui" (Environment variable, empty by default).
+          # Set once the name serves production, then re-run Deploy monitoring. Empty: staging names only.
+          PROBE_PROD_HOSTS: ${{ vars.PROBE_PROD_HOSTS }}
           # Alerts of the team channel (docs/SECRETS.md): Environment secret and variable. Both empty:
           # the stack runs and alerts are visible in Alertmanager, but nothing is delivered.
           ALERT_TELEGRAM_BOT_TOKEN: ${{ secrets.ALERT_TELEGRAM_BOT_TOKEN }}
@@ -1231,7 +1234,7 @@ jobs:
           password: ${{ needs.deploy-staging.outputs.mode == 'course' && secrets.VPS_DMC268_P || '' }}
           fingerprint: ${{ vars.STAGING_SSH_FINGERPRINT }}
           debug: false
-          envs: MONITORING_DIR,API_DIR,GRAFANA_ROOT_URL,APP_DOMAIN,ALERT_TELEGRAM_BOT_TOKEN,ALERT_TELEGRAM_CHAT_ID,BACKUP_S3_ENDPOINT,BACKUP_S3_BUCKET,BACKUP_S3_ACCESS_KEY_ID,BACKUP_S3_SECRET_ACCESS_KEY,BACKUP_ENCRYPTION_PASSPHRASE,GRAFANA_ADMIN_PASSWORD
+          envs: MONITORING_DIR,API_DIR,GRAFANA_ROOT_URL,APP_DOMAIN,PROBE_PROD_HOSTS,ALERT_TELEGRAM_BOT_TOKEN,ALERT_TELEGRAM_CHAT_ID,BACKUP_S3_ENDPOINT,BACKUP_S3_BUCKET,BACKUP_S3_ACCESS_KEY_ID,BACKUP_S3_SECRET_ACCESS_KEY,BACKUP_ENCRYPTION_PASSPHRASE,GRAFANA_ADMIN_PASSWORD
           script: |
             set -euo pipefail
             set +o xtrace

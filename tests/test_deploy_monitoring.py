@@ -276,6 +276,16 @@ def test_monitoring_deploy_gets_the_domain_of_the_probed_names() -> None:
     assert "APP_DOMAIN" in envs.group(1).split(",")
 
 
+def test_monitoring_deploy_gets_the_production_names_to_probe() -> None:
+    job = _job("deploy-monitoring")
+    envs = re.search(r"^          envs: (\S+)$", job, re.M)
+
+    assert "          PROBE_PROD_HOSTS: ${{ vars.PROBE_PROD_HOSTS }}\n" in job
+    assert envs is not None
+    assert "PROBE_PROD_HOSTS" in envs.group(1).split(",")
+    assert "PROBE_PROD_HOSTS" not in _job("deploy-staging")
+
+
 # --- deploy.sh on a fake host --------------------------------------------------------------
 
 FAKE_DOCKER = """\
@@ -334,6 +344,8 @@ class Host:
             "API_DIR": str(self.api_dir),
             "GRAFANA_ROOT_URL": "https://grafana.example.test/",
             "APP_DOMAIN": "example.test",
+            # An unset Environment variable reaches the host as an empty value.
+            "PROBE_PROD_HOSTS": "",
             "ALERT_TELEGRAM_BOT_TOKEN": TOKEN,
             "ALERT_TELEGRAM_CHAT_ID": CHAT_ID,
             "STUB_LOG": str(self.stubs / "docker.log"),
@@ -669,6 +681,88 @@ def test_failed_deploy_keeps_the_probe_targets_of_the_last_one(host: Host) -> No
         "staging-ui.example.test",
     ]
     assert not re.search(r"^\s+rm:", _job("deploy-monitoring"), re.M)
+
+
+def _probe(name: str, path: str) -> dict[str, object]:
+    probed = f"{name}.example.test"
+    return {"targets": [f"https://{probed}/{path}"], "labels": {"host": probed}}
+
+
+STAGING_PROBES = [_probe("staging-api", "healthcheck"), _probe("staging-ui", "health")]
+PROD_PROBES = [_probe("api", "healthcheck"), _probe("ui", "health")]
+
+
+def _probe_targets(host: Host) -> list[dict[str, object]]:
+    targets: list[dict[str, object]] = json.loads(
+        _read(host.monitoring_dir / "prometheus" / "targets" / "probes.json")
+    )
+    return targets
+
+
+@pytest.mark.parametrize(
+    ("names", "prod_probes"),
+    [
+        ("", []),
+        ("api", PROD_PROBES[:1]),
+        ("api ui", PROD_PROBES),
+        (" ui  api ui ", PROD_PROBES),
+    ],
+)
+def test_production_names_join_the_probes_by_a_variable(
+    host: Host, names: str, prod_probes: list[dict[str, object]]
+) -> None:
+    result = host.deploy(PROBE_PROD_HOSTS=names)
+
+    assert result.returncode == 0, result.stderr
+    # Each production name with the health path of its service, after the staging ones.
+    assert _probe_targets(host) == STAGING_PROBES + prod_probes
+
+
+def test_manual_run_keeps_and_an_empty_value_drops_the_production_names(host: Host) -> None:
+    assert host.deploy(PROBE_PROD_HOSTS="api ui").returncode == 0
+    stored = host.env()["PROBE_PROD_HOSTS"]
+    kept = host.deploy(unset=("PROBE_PROD_HOSTS",))
+    kept_targets = _probe_targets(host)
+    dropped = host.deploy(PROBE_PROD_HOSTS="")
+
+    assert stored == "api ui"
+    assert kept.returncode == 0, kept.stderr
+    assert kept_targets == STAGING_PROBES + PROD_PROBES
+    assert dropped.returncode == 0, dropped.stderr
+    assert _probe_targets(host) == STAGING_PROBES
+    assert host.env()["PROBE_PROD_HOSTS"] == ""
+
+
+@pytest.mark.parametrize("names", ["web", "API", "staging-api", "api,ui", "apiui", 'api"'])
+def test_unknown_production_names_fail_before_the_host_changes(host: Host, names: str) -> None:
+    result = host.deploy(PROBE_PROD_HOSTS=names)
+
+    assert result.returncode == 1
+    assert "PROBE_PROD_HOSTS must list production names out of: api ui" in result.stderr
+    assert not host.env_file.exists()
+    assert host.log("psql.log") == ""
+    assert " up " not in host.log("docker.log")
+    assert not (host.monitoring_dir / "prometheus" / "targets" / "probes.json").exists()
+
+
+def test_invalid_production_names_kept_in_env_fail_before_the_host_changes(host: Host) -> None:
+    host.env_file.write_text("PROBE_PROD_HOSTS=web\n", encoding="utf-8")
+    result = host.deploy(unset=("PROBE_PROD_HOSTS",))
+
+    assert result.returncode == 1
+    assert "PROBE_PROD_HOSTS must list production names out of: api ui" in result.stderr
+    assert _read(host.env_file) == "PROBE_PROD_HOSTS=web\n"
+    assert host.log("psql.log") == ""
+    assert " up " not in host.log("docker.log")
+
+
+def test_ports_mode_probes_no_production_name_either(host: Host) -> None:
+    env_file = host.api_dir / ".env"
+    env_file.write_text(_read(env_file).replace("DEPLOY_MODE=edge", "DEPLOY_MODE=ports"))
+    result = host.deploy(PROBE_PROD_HOSTS="api ui")
+
+    assert result.returncode == 0, result.stderr
+    assert _read(host.monitoring_dir / "prometheus" / "targets" / "probes.json") == "[]\n"
 
 
 def test_deploy_refuses_without_the_application_stack(host: Host) -> None:
