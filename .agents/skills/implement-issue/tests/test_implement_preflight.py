@@ -2665,6 +2665,107 @@ def test_an_unparsable_range_end_names_nothing_and_an_ampersand_lists(
     assert named_in(tmp_path, refs_pr(90, what, title=title), parts=3) == expected
 
 
+# ─── criteria that name parts the Scope does not number readably (R3-1) ─────
+# api#245 and api#298 write their Scope bullets in bold, api#397 as «Часть N —»; every criterion
+# is «Ч.N:»-prefixed. No part is parsed, so the issue is not a whole task.
+BOLD_SCOPE = (
+    "## Scope\n\n"
+    "- **Ч.1 (P2, тесты/CI). Флейк теста остановки.** Тест ждёт сообщение без опроса.\n"
+    "- **Ч.2 (P2, индекс). Подписка не восстанавливается.** Очередь берётся без регистрации.\n"
+    "- **Ч.3 (P3, публикация). `Retry-After`.** Парсер не защищён.\n"
+    "- Вне объёма: приёмка #171.\n"
+)
+CHASTI_SCOPE = (
+    "## Scope\n\n"
+    "- Часть 1 — `deploy/monitoring/acceptance.sh`: отделить stderr от stdout.\n"
+    "- Часть 2 — подписи панелей LLM.\n"
+    "- Часть 3 — тест прав ролей мониторинга.\n"
+)
+PREFIXED_AC = (
+    "\n## Acceptance Criteria\n\n"
+    "- [ ] Ч.1: тест ждёт возвращённое сообщение ограниченным опросом\n"
+    "- [ ] Ч.1: Monitoring acceptance на `main` после мержа\n"
+    "- [ ] Ч.2: очередь регистрируется для восстановления\n"
+    "- [ ] Ч.3: на пути публикации `Retry-After` не выходит исключением\n"
+)
+UNREADABLE = (
+    "the acceptance criteria name parts (1, 2, 3) but the Scope has no part bullets this script "
+    "can read — write the Scope parts as `- Ч.N (…): …` (create-issue format) or ask the user"
+)
+
+
+@pytest.mark.parametrize("scope", [BOLD_SCOPE, CHASTI_SCOPE], ids=["bold", "chasti"])
+def test_criteria_with_part_prefixes_and_no_readable_part_are_a_stop(
+    tmp_path: Path, scope: str
+) -> None:
+    response = issue_response(body=scope + PREFIXED_AC + KICKOFF)
+    code, doc = facts(tmp_path, response)
+    assert (code, doc["verdict"], doc["selected"]) == (1, "stop", None)
+    assert doc["reasons"] == [UNREADABLE]
+    assert doc["parts"] == []
+    assert len(doc["warnings"]) == 4  # the per-criterion warnings are still there
+
+
+@pytest.mark.parametrize(
+    ("prefix", "numbers"),
+    [("Part 2", "2"), ("Teil 4", "4"), ("Ч.7", "7"), (f"Part {HUGE}", "a number out of range")],
+)
+def test_any_one_prefixed_criterion_is_enough(tmp_path: Path, prefix: str, numbers: str) -> None:
+    body = "## Scope\n\n- one thing\n\n## Acceptance Criteria\n\n"
+    body += f"- [ ] plain one\n- [ ] {prefix}: the only prefixed one\n" + KICKOFF
+    _, doc = facts(tmp_path, issue_response(body=body))
+    assert doc["verdict"] == "stop"
+    assert doc["reasons"] == [UNREADABLE.replace("(1, 2, 3)", f"({numbers})")]
+
+
+def test_a_whole_task_whose_criteria_have_no_prefix_is_still_a_go(tmp_path: Path) -> None:
+    body = "## Scope\n\n- one thing\n\n## Acceptance Criteria\n\n- [ ] one\n- [ ] two\n" + KICKOFF
+    code, doc = facts(tmp_path, issue_response(body=body))
+    assert (code, doc["selected"]) == (0, {"part": None, "reason": "whole-task"})
+    assert doc["warnings"] == []
+
+
+def test_parsed_parts_leave_prefixed_criteria_alone(tmp_path: Path) -> None:
+    # TWO_PARTS has Ч.1 and Ч.2 bullets; a criterion for Ч.9 is only a warning, as before.
+    body = TWO_PARTS.replace("- [ ] common one\n", "- [ ] common one\n- [ ] Ч.9: stray\n")
+    code, doc = facts(tmp_path, issue_response(body=body))
+    assert (code, doc["selected"]) == (0, {"part": 1, "reason": "first-todo"})
+    assert doc["warnings"] == ["acceptance criterion names Part 9, not in Scope"]
+
+
+def test_the_unreadable_stop_comes_before_a_whole_task_go_and_before_accept(
+    tmp_path: Path,
+) -> None:
+    body = BOLD_SCOPE + PREFIXED_AC + KICKOFF
+    merged = [refs_pr(50, "the thing")]  # the old verdict here was accept
+    for timeline in ([], merged, [refs_pr(51, "x", state="OPEN")]):
+        _, doc = facts(tmp_path, issue_response(body=body, timeline=timeline))
+        assert (doc["verdict"], doc["reasons"]) == ("stop", [UNREADABLE])
+
+
+def test_the_unreadable_stop_comes_after_closed_epic_and_blockers(tmp_path: Path) -> None:
+    body = BOLD_SCOPE + PREFIXED_AC + KICKOFF
+    _, doc = facts(tmp_path, issue_response(body=body, state="CLOSED"))
+    assert doc["reasons"] == [f"issue {API}#13 is CLOSED"]
+    _, doc = facts(tmp_path, issue_response(body=body, sub_issues=(2, 1)))
+    assert doc["reasons"] == [epic_reason(2, 1)]
+    _, doc = facts(tmp_path, issue_response(body=body, blocked=[blocker(5)]))
+    assert doc["reasons"] == [f"blocked by {API}#5 — blocker 5"]
+
+
+def test_part_k_on_an_issue_with_unreadable_parts_is_still_exit_2(tmp_path: Path) -> None:
+    write(tmp_path / "fx", "issue-p1", issue_response(body=BOLD_SCOPE + PREFIXED_AC + KICKOFF))
+    r = run("api#13", "--part", "1", fixtures=tmp_path / "fx")
+    assert r.returncode == 2
+    assert error_of(r) == f"--part 1: issue {API}#13 has no parts"
+
+
+def test_malformed_numbering_is_still_the_numbering_stop(tmp_path: Path) -> None:
+    body = "## Scope\n\n- Ч.1 (PR): first\n- Ч.3 (PR): third\n" + PREFIXED_AC + KICKOFF
+    _, doc = facts(tmp_path, issue_response(body=body))
+    assert doc["reasons"] == ["parts in Scope are not numbered 1..k contiguously (found: 1, 3)"]
+
+
 # ─── the branch pattern in the skill texts (7f) ─────────────────────────────
 BRANCH_PATTERN = re.compile(r"`(\^\(feat\|fix\|docs\|chore\)/[^`]+\$)`")
 

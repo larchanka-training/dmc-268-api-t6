@@ -87,7 +87,9 @@ request that opens with a quote is read from the quote.
 Decisions, in this order: the issue is CLOSED -> stop; it has sub-issues and no parts of
 its own (an epic) -> stop; any OPEN blocker -> stop;
 parts not numbered 1..k -> stop; `--part K` must exist (exit 2) and is taken
-as is; no `--part`: an OPEN pull request with `Refs` that names no part of the
+as is; no parsed part but a prefixed criterion (`Ч.N:` / `Part N:` / `Teil N:`) under
+`## Acceptance Criteria` -> stop (the Scope parts are written in a way this script cannot
+read); no `--part`: an OPEN pull request with `Refs` that names no part of the
 issue stops (whichever part it belongs to is not known: "say which part it covers,
 or pass --part"), else the first part that is not done — open_pr stops, todo is
 taken; every part done and none with an OPEN pull request -> accept (acceptance is
@@ -666,10 +668,14 @@ def build_parts(body: str) -> tuple[list[dict[str, Any]], str | None]:
     return parts, None
 
 
-def build_criteria(body: str, parts: list[dict[str, Any]], warnings: list[str]) -> list[str]:
-    """Fill `acceptance_criteria` of each part; return the criteria without a prefix."""
+def build_criteria(
+    body: str, parts: list[dict[str, Any]], warnings: list[str]
+) -> tuple[list[str], list[int | None]]:
+    """Fill `acceptance_criteria` of each part; return the criteria without a prefix and the
+    part numbers (None: out of range) that prefixed criteria name outside the parsed parts."""
     by_number = {p["n"]: p for p in parts}
     common: list[str] = []
+    missing: list[int | None] = []
     section = section_lines(body, named("acceptance criteria"), skip_quotes=True)
     for item in bullets(section or []):
         text = CHECKBOX_PREFIX.sub("", item["text"], count=1)
@@ -680,11 +686,26 @@ def build_criteria(body: str, parts: list[dict[str, Any]], warnings: list[str]) 
         n = to_int(m.group(1))
         if n is None:
             warnings.append("acceptance criterion names a part number out of range")
+            missing.append(None)
         elif n in by_number:
             by_number[n]["acceptance_criteria"].append(m.group(2).strip())
         else:
             warnings.append(f"acceptance criterion names Part {n}, not in Scope")
-    return common
+            missing.append(n)
+    return common, missing
+
+
+def unreadable_parts(missing: list[int | None]) -> str:
+    """The stop reason for an issue whose criteria name parts that its Scope does not number
+    in a way `build_parts` can read («- **Ч.1 (P2). …**», «Часть 1 — …»)."""
+    named = [str(n) for n in sorted({n for n in missing if n is not None})]
+    if None in missing:
+        named.append("a number out of range")
+    return (
+        f"the acceptance criteria name parts ({', '.join(named)}) but the Scope has no part "
+        "bullets this script can read — write the Scope parts as `- Ч.N (…): …` "
+        "(create-issue format) or ask the user"
+    )
 
 
 def blockers_of(nodes: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -1011,14 +1032,16 @@ def decide(
     facts: dict[str, Any],
     part: int | None,
     numbering_error: str | None,
+    unreadable: str | None,
     stray_open: list[dict[str, Any]],
     held: dict[str, Any] | None,
 ) -> tuple[dict[str, Any] | None, list[str], str]:
     """(selected, reasons, verdict): the verdict is go, stop or accept; reasons non-empty
-    means it is not a go. `stray_open` are the OPEN pull requests with `Refs` that name no
-    part of an issue that has parts; `held` is the accept-issue comment that holds the issue
-    back from acceptance (returned, or a table with unmet rows), if no pull request was
-    merged after it."""
+    means it is not a go. `unreadable` is set when the criteria carry part prefixes but the
+    Scope has no part the script can read. `stray_open` are the OPEN pull requests with `Refs`
+    that name no part of an issue that has parts; `held` is the accept-issue comment that holds
+    the issue back from acceptance (returned, or a table with unmet rows), if no pull request
+    was merged after it."""
     if facts["issue"]["state"] == "CLOSED":
         return (
             None,
@@ -1047,6 +1070,8 @@ def decide(
             ref = f"{facts['issue']['repo']}#{facts['issue']['number']}"
             fail(f"--part {part}: issue {ref} has {have}", 2)
         return {"part": part, "reason": "explicit"}, [], "go"
+    if unreadable:  # not a whole task: its criteria say it has parts
+        return None, [unreadable], "stop"
     if not parts:
         live = [pr for pr in facts["task_prs"] if pr["state"] in ("OPEN", "MERGED")]
         if any(pr["state"] == "OPEN" for pr in live):
@@ -1117,7 +1142,10 @@ def collect(repo: str, number: int, part: int | None) -> dict[str, Any]:
     warnings: list[str] = []
 
     parts, numbering_error = build_parts(body)
-    common = build_criteria(body, parts, warnings)
+    common, missing = build_criteria(body, parts, warnings)
+    unreadable = (
+        unreadable_parts(missing) if missing and not parts and not numbering_error else None
+    )
     prs = build_prs(timeline, (repo, number))
     for p in parts:
         p["prs"] = [public(pr) for pr in prs if p["n"] in pr["named"]]
@@ -1164,7 +1192,7 @@ def collect(repo: str, number: int, part: int | None) -> dict[str, Any]:
     }
     stray_open = [pr for pr in unnamed if pr["state"] == "OPEN"]
     held = held_at_acceptance(acceptance_comments(comments), prs)
-    selected, reasons, verdict = decide(facts, part, numbering_error, stray_open, held)
+    selected, reasons, verdict = decide(facts, part, numbering_error, unreadable, stray_open, held)
     if selected is not None and selected["reason"] == "explicit":
         chosen = next(p for p in parts if p["n"] == selected["part"])
         if chosen["status"] != "todo":
