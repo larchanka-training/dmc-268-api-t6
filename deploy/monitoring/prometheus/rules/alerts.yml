@@ -52,6 +52,19 @@ groups:
           summary: "{{ $labels.host }}: {{ $value | humanizePercentage }} of requests end in 5xx"
           description: "More than 5% of requests to {{ $labels.host }} returned 5xx for 5 minutes."
 
+      # The probe is the request itself (blackbox job, once a minute), so no user traffic is needed.
+      # Any non-2xx final answer (redirects are followed) counts as down, 4xx and the 503 stub of the
+      # edge proxy included. When the exporter itself is down its series go stale and TargetDown
+      # (job blackbox) fires instead.
+      - alert: PublicEndpointDown
+        expr: probe_success{job="blackbox"} == 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "{{ $labels.host }} is down from outside"
+          description: "The HTTPS probe of {{ $labels.instance }} has failed for 5 minutes: a connection or TLS error or a non-2xx answer, the 503 stub included."
+
   - name: review-pipeline
     rules:
       # No `for`: the failure has already happened, waiting adds nothing.

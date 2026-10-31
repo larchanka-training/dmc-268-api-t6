@@ -156,6 +156,41 @@ tests:
               summary: "Host memory available: 5%"
               description: "Less than 10% of the VPS memory has been available for 10 minutes."
 
+  # External probes: a name that fails for 5 minutes pages without any Caddy series (no traffic
+  # needed); a name down 4.5 minutes at a time, then answering once, does not.
+  - interval: 1m
+    input_series:
+      - series: 'probe_success{job="blackbox", instance="https://api.example.test/healthcheck", host="api.example.test"}'
+        values: "1 0x10"
+      - series: 'probe_success{job="blackbox", instance="https://staging-ui.example.test/health", host="staging-ui.example.test"}'
+        values: "1 0x4 1 0x4 1"
+    alert_rule_test:
+      - eval_time: 5m30s
+        alertname: PublicEndpointDown
+        exp_alerts: []
+      - eval_time: 6m
+        alertname: PublicEndpointDown
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              job: blackbox
+              instance: https://api.example.test/healthcheck
+              host: api.example.test
+            exp_annotations:
+              summary: "api.example.test is down from outside"
+              description: "The HTTPS probe of https://api.example.test/healthcheck has failed for 5 minutes: a connection or TLS error or a non-2xx answer, the 503 stub included."
+      - eval_time: 7m
+        alertname: PublicEndpointDown
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              job: blackbox
+              instance: https://api.example.test/healthcheck
+              host: api.example.test
+            exp_annotations:
+              summary: "api.example.test is down from outside"
+              description: "The HTTPS probe of https://api.example.test/healthcheck has failed for 5 minutes: a connection or TLS error or a non-2xx answer, the 503 stub included."
+
   # Backups: a day-old dump is fine, 26 hours is stale; a failed attempt warns at once; no
   # status at all for 2 hours means the service is gone.
   - interval: 1m
