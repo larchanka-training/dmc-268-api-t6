@@ -327,6 +327,35 @@ jobs:
           chmod +x deploy/scripts/healthcheck.sh
           deploy/scripts/healthcheck.sh "${HEALTH_URL}"
 
+      # AC1 evidence, read-only, only while the release that passed its health check runs: after a
+      # rollback that stopped prod its stores are gone and the check could only say "not checked".
+      # The step never fails on the verdict (exit 1: a violation; 2: not checked, a store down or
+      # a docker query failed): it prints the exit code for the report step, which alone fails the
+      # job on a violation, so a finding never starts a rollback.
+      - name: Check storage isolation
+        id: isolation
+        if: steps.health.outcome == 'success'
+        continue-on-error: true
+        uses: appleboy/ssh-action@0ff4204d59e8e51228ff73bce53f80d53301dee2 # v1.2.5
+        env:
+          APP_DIR: ${{ steps.target.outputs.app_dir }}
+        with:
+          host: ${{ steps.target.outputs.host }}
+          port: ${{ steps.target.outputs.port }}
+          username: ${{ secrets.VPS_DMC268_U }}
+          password: ${{ secrets.VPS_DMC268_P }}
+          fingerprint: ${{ vars.STAGING_SSH_FINGERPRINT }}
+          debug: false
+          capture_stdout: true
+          envs: APP_DIR
+          script: |
+            set -euo pipefail
+            set +o xtrace
+            status=0
+            # stderr too: on exit 2 the reason is the only output.
+            "${APP_DIR}/check-isolation.sh" dmc-268-api-prod dmc-268-api-staging 2>&1 || status=$?
+            echo "check-isolation exit: ${status}"
+
       # AC3: back to the previous release of the prod dir; every compose call of rollback.sh is
       # scoped to the prod project, so staging is not touched.
       - name: Rollback on failed deploy or health check
@@ -376,3 +405,166 @@ jobs:
             exit 1
           fi
           exit 1
+
+      # AC3 evidence on every path that reached the host (deployed, rolled back, stopped): the prod
+      # release running now and the staging containers, which must be the ones Prepare host listed.
+      - name: Read prod release and staging containers
+        id: after
+        if: always() && steps.prepare.outcome == 'success'
+        continue-on-error: true
+        uses: appleboy/ssh-action@0ff4204d59e8e51228ff73bce53f80d53301dee2 # v1.2.5
+        env:
+          APP_DIR: ${{ steps.target.outputs.app_dir }}
+        with:
+          host: ${{ steps.target.outputs.host }}
+          port: ${{ steps.target.outputs.port }}
+          username: ${{ secrets.VPS_DMC268_U }}
+          password: ${{ secrets.VPS_DMC268_P }}
+          fingerprint: ${{ vars.STAGING_SSH_FINGERPRINT }}
+          debug: false
+          capture_stdout: true
+          envs: APP_DIR
+          script: |
+            set -euo pipefail
+            set +o xtrace
+            # A stop removes .deploy-state: no prod release runs and the edge proxy answers 503.
+            current=""
+            if [[ -f "${APP_DIR}/.deploy-state" ]]; then
+              current="$(awk -F= '/^current_image=/{print $2; exit}' "${APP_DIR}/.deploy-state")"
+            fi
+            echo "prod current image: ${current:-none}"
+            ids="$(docker ps -aq --no-trunc --filter label=com.docker.compose.project=dmc-268-api-staging)"
+            echo "staging containers after:${ids:+ ${ids//$'\n'/ }}"
+
+      # The run's evidence in the job summary, after a rollback too. Fails the job on an isolation
+      # violation, a check that could not run, or any change of the staging containers; missing
+      # evidence is only a warning.
+      - name: Report the prod run
+        if: always() && steps.prepare.outcome == 'success'
+        env:
+          DEPLOY_OUTCOME: ${{ steps.deploy.outcome }}
+          HEALTH_OUTCOME: ${{ steps.health.outcome }}
+          ROLLBACK_OUTCOME: ${{ steps.rollback.outcome }}
+          # As in the Fail step: deploy.sh of this run stopped before the release switch.
+          RELEASE_UNCHANGED: "${{ contains(steps.rollback.outputs.stdout, 'release unchanged: deploy run') }}"
+          ISOLATION_OUTCOME: ${{ steps.isolation.outcome }}
+          ISOLATION_STDOUT: ${{ steps.isolation.outputs.stdout }}
+          BEFORE_STDOUT: ${{ steps.prepare.outputs.stdout }}
+          AFTER_OUTCOME: ${{ steps.after.outcome }}
+          AFTER_STDOUT: ${{ steps.after.outputs.stdout }}
+        run: |
+          # drone-ssh appends its own banner to every captured stdout (a line of "=", a success
+          # line, a line of "="): values come only from lines with a known prefix, never the last.
+          # field TEXT PREFIX: the rest of the first line of TEXT starting with PREFIX; 1 if none.
+          field() {
+            printf '%s\n' "$1" | tr -d '\r' | awk -v prefix="$2" '
+              !found && index($0, prefix) == 1 { print substr($0, length(prefix) + 1); found = 1 }
+              END { exit !found }'
+          }
+          status=0
+
+          current="$(field "${AFTER_STDOUT}" 'prod current image: ')" || current=""
+          case "${current}" in
+            "") release="unknown (the host could not be read)" ;;
+            none) release="none (the prod stack is down)" ;;
+            *) release="\`${current}\`" ;;
+          esac
+          if [[ "${DEPLOY_OUTCOME}" == success && "${HEALTH_OUTCOME}" == success ]]; then
+            outcome="deployed"
+          elif [[ "${DEPLOY_OUTCOME}" == failure && "${ROLLBACK_OUTCOME}" == success && "${RELEASE_UNCHANGED}" == true ]]; then
+            outcome="deploy failed before the release switch; the running release was left unchanged"
+          elif [[ "${ROLLBACK_OUTCOME}" == success && "${current}" == none ]]; then
+            outcome="stopped: no earlier prod release, the edge proxy answers 503 for the prod API host"
+          elif [[ "${ROLLBACK_OUTCOME}" == success && -n "${current}" ]]; then
+            outcome="rolled back to the release that ran before this run"
+          elif [[ "${ROLLBACK_OUTCOME}" == success ]]; then
+            outcome="rolled back"
+          elif [[ "${ROLLBACK_OUTCOME}" == failure ]]; then
+            outcome="rollback failed"
+          else
+            outcome="not deployed"
+          fi
+
+          # Same IDs in any order: no staging container was recreated, removed or added (AC3).
+          if before="$(field "${BEFORE_STDOUT}" 'staging containers before:')" &&
+            after="$(field "${AFTER_STDOUT}" 'staging containers after:')"; then
+            read -r -a before_ids <<< "${before}"
+            read -r -a after_ids <<< "${after}"
+            if [[ "$(printf '%s\n' "${before_ids[@]}" | sort)" == "$(printf '%s\n' "${after_ids[@]}" | sort)" ]]; then
+              staging="unchanged: the same ${#before_ids[@]} container IDs before and after this run"
+            else
+              # comm -3: IDs in one list only; column 1 removed, column 2 (tab-indented) added.
+              diff="$(comm -3 <(printf '%s\n' "${before_ids[@]}" | sort) <(printf '%s\n' "${after_ids[@]}" | sort))"
+              removed="$(printf '%s\n' "${diff}" | awk -F'\t' '$1 != "" { printf "%s%s", sep, substr($1, 1, 12); sep = " " }')"
+              added="$(printf '%s\n' "${diff}" | awk -F'\t' '$2 != "" { printf "%s%s", sep, substr($2, 1, 12); sep = " " }')"
+              staging="CHANGED (AC3): ${#before_ids[@]} container IDs before, ${#after_ids[@]} after; removed: ${removed:-none}; added: ${added:-none}"
+              echo "::error::staging containers changed during the prod run; see the job summary"
+              status=1
+            fi
+          else
+            staging="not compared (host read: ${AFTER_OUTCOME:-skipped})"
+            echo "::warning::staging containers not compared: no container list after the run"
+          fi
+
+          table=""
+          details=""
+          if [[ "${ISOLATION_OUTCOME:-skipped}" == skipped ]]; then
+            isolation="not run: the check runs only after a passing health check"
+          else
+            code="$(field "${ISOLATION_STDOUT}" 'check-isolation exit: ')" || code=""
+            report="$(printf '%s\n' "${ISOLATION_STDOUT}" | tr -d '\r')"
+            table="$(printf '%s\n' "${report}" | sed -n '/^|/p')"
+            details="$(printf '%s\n' "${report}" | sed -nE '/^(isolation|check-isolation): /p')"
+            case "${code}" in
+              0) isolation="pass" ;;
+              1)
+                # Exit 1 is also what an unforeseen error under set -e gives: a violation only
+                # with the script's verdict line.
+                if [[ -n "$(printf '%s\n' "${details}" | sed -n '/^isolation: FAIL/p')" ]]; then
+                  isolation="FAIL"
+                  echo "::error::prod and staging stores are not isolated; see the job summary"
+                else
+                  isolation="check failed (exit 1)"
+                  table=""
+                  echo "::error::the storage isolation check failed to run (exit 1)"
+                fi
+                status=1
+                ;;
+              2)
+                isolation="not checked (exit 2)"
+                echo "::warning::storage isolation not checked: a store is not running or a docker query failed"
+                ;;
+              "")
+                isolation="not checked (no report)"
+                table=""
+                echo "::warning::storage isolation not checked: no report from the host (step ${ISOLATION_OUTCOME})"
+                ;;
+              *)
+                isolation="check failed (exit ${code})"
+                table=""
+                echo "::error::the storage isolation check failed to run (exit ${code})"
+                status=1
+                ;;
+            esac
+          fi
+
+          {
+            echo
+            echo "### Result"
+            echo
+            echo "- Outcome: ${outcome}"
+            echo "- Prod release now: ${release}"
+            echo "- Staging containers (dmc-268-api-staging): ${staging}"
+            echo "- Storage isolation (dmc-268-api-prod / dmc-268-api-staging): ${isolation}"
+            if [[ -n "${table}" ]]; then
+              echo
+              printf '%s\n' "${table}"
+            fi
+            if [[ -n "${details}" ]]; then
+              echo
+              echo '```text'
+              printf '%s\n' "${details}"
+              echo '```'
+            fi
+          } >> "${GITHUB_STEP_SUMMARY}"
+          exit "${status}"
