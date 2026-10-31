@@ -266,7 +266,10 @@ case "$1" in
         uv run python "${STUB_EXEC_HELPER}" "${action_args[@]}"
         ;;
       down) exit "${STUB_DOWN_STATUS:-0}" ;;
-      ps) [[ -z "${STUB_PS_OUTPUT:-}" ]] || printf '%s\\n' "${STUB_PS_OUTPUT}" ;;
+      ps)
+        [[ -z "${STUB_PS_OUTPUT:-}" ]] || printf '%s\\n' "${STUB_PS_OUTPUT}"
+        exit "${STUB_PS_STATUS:-0}"
+        ;;
     esac
     ;;
 esac
