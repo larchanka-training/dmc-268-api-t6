@@ -131,6 +131,9 @@ else
   GRAFANA_COOKIE_SECURE=false
 fi
 
+# The services behind the edge proxy that the blackbox exporter probes, each with its health path:
+# staging-<service> always, <service> once PROBE_PROD_HOSTS names it.
+PROBED_SERVICES=(api/healthcheck ui/health)
 # Production names to probe, validated before anything on the host changes; the value kept in .env
 # goes through the same check.
 if [[ -z "${PROBE_PROD_HOSTS+set}" ]]; then
@@ -140,9 +143,9 @@ if [[ ! "${PROBE_PROD_HOSTS}" =~ ^[[:space:]]*((api|ui)([[:space:]]+|$))*$ ]]; t
   echo "PROBE_PROD_HOSTS must list production names out of: api ui (space-separated), got: ${PROBE_PROD_HOSTS}" >&2
   exit 1
 fi
-# Each name once, in a fixed order, with the health path of its service.
+# Each name once, in the order of the services, with the health path of its service.
 PROD_PROBES=()
-for probe in api/healthcheck ui/health; do
+for probe in "${PROBED_SERVICES[@]}"; do
   if [[ " ${PROBE_PROD_HOSTS//[[:space:]]/ } " == *" ${probe%%/*} "* ]]; then PROD_PROBES+=("${probe}"); fi
 done
 PROBE_PROD_HOSTS="${PROD_PROBES[*]%%/*}"
@@ -400,7 +403,7 @@ mv -f "${CADDY_TARGETS}.tmp" "${CADDY_TARGETS}"
 PROBE_TARGETS="${MONITORING_DIR}/prometheus/targets/probes.json"
 if [[ "${DEPLOY_MODE}" == "edge" ]]; then
   separator='['
-  for probe in staging-api/healthcheck staging-ui/health "${PROD_PROBES[@]}"; do
+  for probe in "${PROBED_SERVICES[@]/#/staging-}" "${PROD_PROBES[@]}"; do
     probe_host="${probe%%/*}.${APP_DOMAIN}"
     printf '%s{"targets": ["https://%s/%s"], "labels": {"host": "%s"}}' \
       "${separator}" "${probe_host}" "${probe#*/}" "${probe_host}"
