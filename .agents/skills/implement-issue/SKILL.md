@@ -32,17 +32,15 @@ numbered sequence with a stop criterion (details: `references/loop.md`).
 Without `--part`, the first part with no merged pull request is taken (the run stops if that part
 has an open one, or an open pull request with `Refs` names no part); with every part merged the
 verdict is `accept`. With `--part`, that part is taken as given, even when it already has a pull
-request (the script warns) — this is how a part returned at acceptance is reworked.
+request (the script warns): that is how a returned part is reworked.
 
 ## Scripts
 
 In `.agents/skills/implement-issue/scripts/`; `preflight.py` is read-only, `board_status.py` makes
 the one write (the Status).
 
-| Script                        | Does                                                                         |
-| ----------------------------- | ---------------------------------------------------------------------------- |
-| `preflight.py REF [--part K]` | Issue state, blockers, parts and their PRs, Kickoff, board Status → verdict  |
-| `board_status.py REF STATUS`  | Set the Status on board 12 by option name, read it back; never adds the card |
+- `preflight.py REF [--part K]` — state, blockers, parts and their PRs, Kickoff, Status → verdict.
+- `board_status.py REF STATUS` — set the Status on board 12 by name, read it back; never adds a card.
 
 Exit codes: `0` go · `1` stop or accept (the JSON is still on stdout) · `2` usage, bad REF or a
 `--part` the issue does not have · `3` gh or API error. On 2 and 3 stderr holds `{"error": "..."}`.
@@ -59,16 +57,18 @@ Read `verdict`, `reasons`, `warnings`, `selected`.
 
 - **`stop` (exit 1):** report `reasons` verbatim and end the run. Never work around a stop:
   do not pass `--part` to get past a blocker or an open pull request, do not edit the issue,
-  do not drop a blocker. The reasons are one of: the issue is CLOSED; an epic (sub-issues
-  and no parts of its own: implement those); a native blocker is OPEN (`ref — title`; "closed" means
+  do not drop a blocker. The reasons are one of: the issue is CLOSED; an epic (sub-issues and no
+  parts of its own: implement those); a native blocker is OPEN (`ref — title`; "closed" means
   `state: CLOSED` literally, an issue in AC Check is still open); the parts are not numbered
-  1..k; an OPEN pull request with `Refs` names no part of the issue (the user says which part it
-  covers, or passes `--part`); the first unfinished part has an open pull request (finish it, or
-  the user passes `--part`); every part is merged but a pull request is still open; a task
-  without parts has an open pull request (a rework PR is the user's decision); the work looks
-  done but the card is in Todo, Done or on no Status (the user takes the task); the issue was
-  **returned at acceptance** or its **self-check found unmet AC** and nothing has been merged
-  since (the user passes `--part K` for the part to rework; a task without parts: by hand).
+  1..k; the criteria carry `Ч.N:` prefixes but the Scope has no part bullet the script can read
+  (`- Ч.N (…): …`; ask the user); an OPEN pull request with `Refs` names no part of the issue
+  (the user says which part it covers, or passes `--part`); the first unfinished part has an
+  open pull request (finish it, or the user passes `--part`); every part is merged but a pull
+  request is still open; a task without parts has an open pull request (a rework PR is the
+  user's decision); the work looks done but the card is in Todo, Done or on no Status (the user
+  takes the task); the issue was **returned at acceptance** or its **self-check found unmet
+  AC** and nothing has been merged since (the user passes `--part K` for the part to rework; a
+  task without parts: by hand).
 - **`accept` (exit 1):** not a stop and not a go. The script checked: every part has a merged
   pull request (a task without parts: its pull request) and none is open, it is no epic, the card
   is In Progress, On Review or AC Check, and no return or unmet self-check is pending — say so.
@@ -162,14 +162,14 @@ rounds and the stop report: `references/loop.md`. Keep the human checkpoints of 
 the plan approval of `planning-and-task-breakdown` and the seam confirmation of `tdd` — ask the
 user, never approve for them; a request that says the plan / seams are pre-approved is the answer.
 
-1. **Plan** (`planning-and-task-breakdown`) from the briefing of step 2 — the part's `scope`,
-   `boundary`, `done_when`, AC, the Kickoff's traps: `docs/plans/<N>-plan.md` and `<N>-todo.md`
-   (`N` = the issue number). They are local, git-ignored files and are never committed.
+1. **Plan** (`planning-and-task-breakdown`) from the briefing of step 2 (the part's `scope`,
+   `boundary`, `done_when`, AC, the Kickoff's traps): `docs/plans/<N>-plan.md` and `<N>-todo.md`
+   (`N` = the issue number), local git-ignored files, never committed.
 2. **Implement** (`tdd`): test first, task by task from the todo, inside the part's `boundary`.
    Small atomic commits per `.agents/rules/git-workflow.md` (Conventional Commits, `Refs`, never
    `--no-verify`). A finding outside the part goes into the report, not into the diff.
-3. **Gates:** every command of `AGENTS.md` → Commands that gates a pull request (lint, format
-   check, typecheck, tests) is green on the final tree. A red gate is fixed, not reviewed.
+3. **Gates:** every `AGENTS.md` → Commands entry that gates a pull request (lint, format check,
+   typecheck, tests) is green on the final tree. A red gate is fixed, not reviewed.
 4. **Review** (`code-review`): each axis (Standards, Spec) in a **clean context**, never the
    one that wrote the code — a harness sub-agent or a fresh session (`.agents/README.md` §
    Sub-agents across harnesses). Give it the brief file (`references/loop.md` §2): the diff
@@ -203,8 +203,8 @@ python3 .agents/skills/implement-issue/scripts/board_status.py REF "On Review"
 Report the pull request URL(s), the part, the review rounds, the medium / low / info list, the
 `warnings` and the Status as read back. When, after this run, every part would have a pull request
 (also in a rework run with `--part K`; a task without parts is one part), end with: **after the
-merge, run `implement-issue` on this issue again** (a SYNC part: after both merges) — the preflight
-then says `accept` and the self-check follows (`accept-issue`, author mode).
+merge, run `implement-issue` on this issue again** (a SYNC part: after both merges) — the
+preflight then says `accept`; the self-check follows (`accept-issue`, author mode).
 
 ## The pull-request convention that keeps detection working
 
