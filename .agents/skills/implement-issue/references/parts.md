@@ -12,6 +12,15 @@ correctly (the convention is in `SKILL.md`). The module docstring of the script 
 en / de), an optional `(label)` and a `:` are the parts; bullets that repeat a number are one part.
 The numbers must be 1..k. A number longer than 9 digits names nothing, here and everywhere below.
 
+**Unreadable parts.** The label must be the very start of the bullet: `- **Ч.1 (P2). Title.** …`
+(bold) and `- Часть 1 — …` parse no part. When no part is parsed but a criterion under
+`## Acceptance Criteria` starts `Ч.N:` / `Part N:` / `Teil N:`, the issue is not a whole task: it
+has parts the script cannot read, and implementing it as one would leave the criteria out. That is
+a **stop** (the reason lists the numbers): write the Scope parts as `- Ч.N (…): …` (the
+create-issue format), or ask the user. It comes after the closed, epic, blocker and numbering
+stops and before any whole-task `go` or `accept`; `--part K` there still exits 2. With parsed parts
+a criterion for a part the Scope lacks is only a warning.
+
 ## A pull request counts
 
 Only with a `Refs` line naming this issue: `Refs #N` in the same repo, `Refs owner/repo#N` from
