@@ -124,6 +124,31 @@ def test_probes_run_from_the_project_network_only() -> None:
     assert '"http://127.0.0.1:9115/-/healthy"]' in block
 
 
+def test_prometheus_probes_the_public_names_through_the_exporter_once_a_minute() -> None:
+    config = _read(MONITORING / "prometheus" / "prometheus.yml")
+    job = config[config.index("  - job_name: blackbox\n") :]
+    job = job[: job.index("\n\n")] if "\n\n" in job else job
+    module = re.search(
+        r"^  https_2xx:\n    prober: http\n    timeout: (\d+)s$",
+        _read(MONITORING / "blackbox" / "blackbox.yml"),
+        re.M,
+    )
+    scrape_timeout = re.search(r"^    scrape_timeout: (\d+)s$", job, re.M)
+
+    assert "    scrape_interval: 1m\n" in job
+    assert "    metrics_path: /probe\n" in job
+    assert "      module: [https_2xx]\n" in job
+    assert '      - files: ["/etc/prometheus/targets/probes.json"]' in job
+    # The probed URL becomes the target parameter and the instance; the exporter is scraped.
+    assert "      - source_labels: [__address__]\n        target_label: __param_target\n" in job
+    assert "      - source_labels: [__param_target]\n        target_label: instance\n" in job
+    assert "      - target_label: __address__\n        replacement: blackbox-exporter:9115" in job
+    # A slow name ends the probe as probe_success 0 before the scrape itself times out.
+    assert module is not None
+    assert scrape_timeout is not None
+    assert int(module.group(1)) < int(scrape_timeout.group(1))
+
+
 def test_config_changes_recreate_the_service_that_reads_them() -> None:
     blocks = _service_blocks(_read(MONITORING / "compose.yml"))
     digests = {
@@ -242,6 +267,15 @@ def test_monitoring_upload_and_secrets_reach_only_the_monitoring_dir() -> None:
     assert "ALERT_TELEGRAM" not in _job("deploy-staging")
 
 
+def test_monitoring_deploy_gets_the_domain_of_the_probed_names() -> None:
+    job = _job("deploy-monitoring")
+    envs = re.search(r"^          envs: (\S+)$", job, re.M)
+
+    assert "          APP_DOMAIN: ${{ vars.APP_DOMAIN }}\n" in job
+    assert envs is not None
+    assert "APP_DOMAIN" in envs.group(1).split(",")
+
+
 # --- deploy.sh on a fake host --------------------------------------------------------------
 
 FAKE_DOCKER = """\
@@ -299,6 +333,7 @@ class Host:
             "HOME": str(self.root),
             "API_DIR": str(self.api_dir),
             "GRAFANA_ROOT_URL": "https://grafana.example.test/",
+            "APP_DOMAIN": "example.test",
             "ALERT_TELEGRAM_BOT_TOKEN": TOKEN,
             "ALERT_TELEGRAM_CHAT_ID": CHAT_ID,
             "STUB_LOG": str(self.stubs / "docker.log"),
@@ -334,7 +369,7 @@ def host(tmp_path: Path) -> Host:
     )
     monitoring_dir = tmp_path / "opt" / "dmc-268-monitoring"
     subprocess.run(["cp", "-R", f"{MONITORING}/.", str(monitoring_dir)], check=True)
-    for generated in (".env", "alertmanager/alertmanager.yml"):
+    for generated in (".env", "alertmanager/alertmanager.yml", "prometheus/targets/probes.json"):
         (monitoring_dir / generated).unlink(missing_ok=True)
     subprocess.run(["rm", "-rf", str(monitoring_dir / "alertmanager" / "secrets")], check=True)
     (monitoring_dir / "env-file.sh").write_text(
@@ -567,6 +602,73 @@ def test_ports_mode_keeps_grafana_on_loopback_and_scrapes_no_proxy(host: Host) -
     assert host.env()["GRAFANA_ROOT_URL"] == "http://localhost:3000/"
     assert host.env()["GRAFANA_COOKIE_SECURE"] == "false"
     assert "-f " + str(host.monitoring_dir / "compose.ports.yml") in host.log("docker.log")
+
+
+def test_edge_mode_probes_the_public_staging_names(host: Host) -> None:
+    result = host.deploy()
+    probes = host.monitoring_dir / "prometheus" / "targets" / "probes.json"
+    targets = json.loads(_read(probes))
+
+    assert result.returncode == 0, result.stderr
+    # Written under umask 077, read by Prometheus as nobody.
+    assert stat.S_IMODE(probes.stat().st_mode) == 0o644
+    # The health path of each service behind the edge proxy; the name labels the alerts.
+    assert targets == [
+        {
+            "targets": ["https://staging-api.example.test/healthcheck"],
+            "labels": {"host": "staging-api.example.test"},
+        },
+        {
+            "targets": ["https://staging-ui.example.test/health"],
+            "labels": {"host": "staging-ui.example.test"},
+        },
+    ]
+
+
+def test_ports_mode_probes_no_public_name_and_needs_no_domain(host: Host) -> None:
+    assert host.deploy().returncode == 0
+    env_file = host.api_dir / ".env"
+    env_file.write_text(_read(env_file).replace("DEPLOY_MODE=edge", "DEPLOY_MODE=ports"))
+    result = host.deploy(unset=("APP_DOMAIN",))
+
+    assert result.returncode == 0, result.stderr
+    assert _read(host.monitoring_dir / "prometheus" / "targets" / "probes.json") == "[]\n"
+
+
+@pytest.mark.parametrize(
+    "domain", [None, "", "example", "Example.test", "example.test/x", 'example.test"']
+)
+def test_edge_mode_without_a_valid_domain_fails_before_the_host_changes(
+    host: Host, domain: str | None
+) -> None:
+    if domain is None:
+        result = host.deploy(unset=("APP_DOMAIN",))
+    else:
+        result = host.deploy(APP_DOMAIN=domain)
+
+    assert result.returncode == 1
+    assert "APP_DOMAIN must be the base domain of the public names in edge mode" in result.stderr
+    assert not host.env_file.exists()
+    assert host.log("psql.log") == ""
+    assert " up " not in host.log("docker.log")
+    assert not (host.monitoring_dir / "prometheus" / "targets" / "probes.json").exists()
+
+
+def test_failed_deploy_keeps_the_probe_targets_of_the_last_one(host: Host) -> None:
+    # The upload step extracts the stack over the host's dir without removing it, like cp; with no
+    # probes.json in the repository, a deploy that fails before writing the targets keeps the
+    # previous ones instead of leaving the public names unprobed and silent.
+    assert host.deploy().returncode == 0
+    subprocess.run(["cp", "-R", f"{MONITORING}/.", str(host.monitoring_dir)], check=True)
+    result = host.deploy(APP_DOMAIN="")
+    targets = json.loads(_read(host.monitoring_dir / "prometheus" / "targets" / "probes.json"))
+
+    assert result.returncode == 1
+    assert [group["labels"]["host"] for group in targets] == [
+        "staging-api.example.test",
+        "staging-ui.example.test",
+    ]
+    assert not re.search(r"^\s+rm:", _job("deploy-monitoring"), re.M)
 
 
 def test_deploy_refuses_without_the_application_stack(host: Host) -> None:

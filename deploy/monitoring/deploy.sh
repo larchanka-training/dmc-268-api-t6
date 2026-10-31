@@ -9,6 +9,8 @@
 #   API_DIR                    application dir with .env and env-file.sh (/opt/dmc-268-api-staging)
 #   MONITORING_DIR             this stack's dir, default: the directory of this script
 #   GRAFANA_ROOT_URL           public Grafana URL in edge mode (https://grafana.<APP_DOMAIN>/)
+#   APP_DOMAIN                 base domain of the public names in edge mode: the blackbox exporter
+#                              probes staging-api.<APP_DOMAIN> and staging-ui.<APP_DOMAIN>
 #   BACKUP_DIR                 host dir of the PostgreSQL dumps, default /var/backups/dmc-268/<project>
 #   GRAFANA_ADMIN_PASSWORD     set: the Grafana admin password (GitHub secret; GitHub never shows its
 #                              value, whoever sets it keeps a copy outside GitHub); empty or unset:
@@ -111,6 +113,11 @@ fi
 if [[ "${DEPLOY_MODE}" == "edge" ]]; then
   if [[ ! "${GRAFANA_ROOT_URL:-}" =~ ^https://[A-Za-z0-9.-]+/$ ]]; then
     echo "GRAFANA_ROOT_URL must be https://<host>/ in edge mode, got: ${GRAFANA_ROOT_URL:-}" >&2
+    exit 1
+  fi
+  # The same check as the application deploy: the probe targets are built from it.
+  if [[ ! "${APP_DOMAIN:-}" =~ ^[a-z0-9-]+(\.[a-z0-9-]+)+$ ]]; then
+    echo "APP_DOMAIN must be the base domain of the public names in edge mode, got: ${APP_DOMAIN:-}" >&2
     exit 1
   fi
   GRAFANA_COOKIE_SECURE=true
@@ -367,6 +374,23 @@ else
 fi
 chmod 644 "${CADDY_TARGETS}.tmp"
 mv -f "${CADDY_TARGETS}.tmp" "${CADDY_TARGETS}"
+# HTTPS probes of the public names behind the edge proxy, in edge mode only: each service name and
+# its health path. The name becomes the label host of the probe and of its alerts.
+PROBE_TARGETS="${MONITORING_DIR}/prometheus/targets/probes.json"
+if [[ "${DEPLOY_MODE}" == "edge" ]]; then
+  separator='['
+  for probe in staging-api/healthcheck staging-ui/health; do
+    probe_host="${probe%%/*}.${APP_DOMAIN}"
+    printf '%s{"targets": ["https://%s/%s"], "labels": {"host": "%s"}}' \
+      "${separator}" "${probe_host}" "${probe#*/}" "${probe_host}"
+    separator=$',\n '
+  done > "${PROBE_TARGETS}.tmp"
+  echo ']' >> "${PROBE_TARGETS}.tmp"
+else
+  echo '[]' > "${PROBE_TARGETS}.tmp"
+fi
+chmod 644 "${PROBE_TARGETS}.tmp"
+mv -f "${PROBE_TARGETS}.tmp" "${PROBE_TARGETS}"
 # Read by nobody (Prometheus, the blackbox exporter) and grafana (uid 472) through read-only mounts.
 find "${MONITORING_DIR}/prometheus" "${MONITORING_DIR}/grafana" "${MONITORING_DIR}/postgres-exporter" \
   "${MONITORING_DIR}/alertmanager/templates" "${MONITORING_DIR}/backup" "${MONITORING_DIR}/blackbox" \
