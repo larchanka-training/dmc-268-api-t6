@@ -546,6 +546,8 @@ class Host:
             "APP_DOMAIN": "example.test",
             # An unset Environment variable reaches the host as an empty value.
             "PROBE_PROD_HOSTS": "",
+            # So does an unset repository variable.
+            "LLM_MONTHLY_BUDGET_USD": "",
             "ALERT_TELEGRAM_BOT_TOKEN": TOKEN,
             "ALERT_TELEGRAM_CHAT_ID": CHAT_ID,
             "STUB_LOG": str(self.stubs / "docker.log"),
@@ -789,6 +791,130 @@ def test_invalid_telegram_settings_fail_before_the_host_changes(
     assert " up " not in host.log("docker.log")
     if token:
         assert token not in result.stdout + result.stderr
+
+
+BUDGET_SILENT = "LLM_MONTHLY_BUDGET_USD is not set; budget alerts are silent"
+# Without a locale where a range like [0-9] matches other digits too, such values prove nothing.
+OTHER_DIGITS = pytest.mark.skipif(
+    subprocess.run(
+        ["bash", "-c", "[[ ５ =~ ^[0-9]$ ]]"],
+        env={"PATH": os.environ["PATH"], "LC_ALL": "en_US.UTF-8"},
+        capture_output=True,
+        check=False,
+    ).returncode
+    != 0,
+    reason="no en_US.UTF-8 locale where [0-9] matches other digits",
+)
+
+
+def _budget_file(host: Host) -> Path:
+    return host.monitoring_dir / "textfile" / "llm_budget.prom"
+
+
+def test_monthly_llm_budget_reaches_node_exporter_kept_by_a_manual_run_dropped_when_empty(
+    host: Host,
+) -> None:
+    fresh = host.deploy(unset=("LLM_MONTHLY_BUDGET_USD",))
+    fresh_file = _budget_file(host).exists()
+    configured = host.deploy(LLM_MONTHLY_BUDGET_USD="250.50")
+    budget = _budget_file(host)
+    written = _read(budget)
+    mode = stat.S_IMODE(budget.stat().st_mode)
+    textfiles = sorted(path.name for path in budget.parent.iterdir())
+    kept = host.deploy(unset=("LLM_MONTHLY_BUDGET_USD",))
+    kept_content = _read(budget)
+    dropped = host.deploy(LLM_MONTHLY_BUDGET_USD="")
+
+    assert fresh.returncode == 0, fresh.stderr
+    assert not fresh_file
+    assert BUDGET_SILENT in fresh.stderr
+    assert configured.returncode == 0, configured.stderr
+    assert written == (
+        "# HELP dmc_llm_monthly_budget_usd Monthly LLM budget in US dollars"
+        " (LLM_MONTHLY_BUDGET_USD of the monitoring deploy).\n"
+        "# TYPE dmc_llm_monthly_budget_usd gauge\n"
+        "dmc_llm_monthly_budget_usd 250.50\n"
+    )
+    # node-exporter (nobody) reads it; the collector never sees a half-written *.prom.
+    assert mode == 0o644
+    assert textfiles == ["llm_budget.prom"]
+    assert list(host.monitoring_dir.glob(".llm_budget.*")) == []
+    assert BUDGET_SILENT not in configured.stderr
+    assert "budget: monthly LLM budget of 250.50 USD" in configured.stdout
+    assert kept.returncode == 0, kept.stderr
+    assert kept_content == written
+    assert BUDGET_SILENT not in kept.stderr
+    # Without the file the budget alerts stay silent instead of firing on an old threshold.
+    assert dropped.returncode == 0, dropped.stderr
+    assert not budget.exists()
+    assert BUDGET_SILENT in dropped.stderr
+
+
+@pytest.mark.parametrize("budget", ["0", "0.00"])
+def test_zero_budget_means_no_budget(host: Host, budget: str) -> None:
+    assert host.deploy(LLM_MONTHLY_BUDGET_USD="250.50").returncode == 0
+    result = host.deploy(LLM_MONTHLY_BUDGET_USD=budget)
+
+    assert result.returncode == 0, result.stderr
+    assert not _budget_file(host).exists()
+    assert BUDGET_SILENT in result.stderr
+
+
+def test_budget_file_is_written_through_a_root_owned_dir(host: Host) -> None:
+    # pg-backup writes the textfile dir too: a link it planted there must not lead the deploy to a
+    # file outside.
+    textfile = host.monitoring_dir / "textfile"
+    textfile.mkdir()
+    outside = host.root / "outside"
+    outside.mkdir()
+    (outside / "file").write_text("host file\n", encoding="utf-8")
+    (textfile / "llm_budget.prom.tmp").symlink_to(outside / "file")
+    (textfile / "llm_budget.prom").symlink_to(outside)
+    result = host.deploy(LLM_MONTHLY_BUDGET_USD="250.50")
+
+    assert result.returncode == 0, result.stderr
+    assert sorted(path.name for path in outside.iterdir()) == ["file"]
+    assert _read(outside / "file") == "host file\n"
+    assert not _budget_file(host).is_symlink()
+    assert "dmc_llm_monthly_budget_usd 250.50\n" in _read(_budget_file(host))
+
+
+def test_failed_budget_write_leaves_no_temporary_file(host: Host) -> None:
+    (host.monitoring_dir / "textfile" / "llm_budget.prom").mkdir(parents=True)
+    result = host.deploy(LLM_MONTHLY_BUDGET_USD="250.50")
+
+    assert result.returncode != 0
+    assert list(host.monitoring_dir.glob(".llm_budget.*")) == []
+    assert " up " not in host.log("docker.log")
+
+
+@pytest.mark.parametrize(
+    "budget",
+    [
+        "abc",
+        "-5",
+        "1e3",
+        "50\nx 1",
+        "1.234",
+        "050",
+        " 50",
+        pytest.param("５０", marks=OTHER_DIGITS),
+        pytest.param("٥٠", marks=OTHER_DIGITS),
+    ],
+)
+def test_invalid_budget_fails_before_the_host_changes(host: Host, budget: str) -> None:
+    # A UTF-8 locale, where a range like [0-9] matches other digits too.
+    result = host.deploy(LLM_MONTHLY_BUDGET_USD=budget, LC_ALL="en_US.UTF-8")
+
+    assert result.returncode == 1
+    assert (
+        "LLM_MONTHLY_BUDGET_USD must be a number of US dollars with at most two decimals"
+        in result.stderr
+    )
+    assert not host.env_file.exists()
+    assert host.log("psql.log") == ""
+    assert " up " not in host.log("docker.log")
+    assert not _budget_file(host).exists()
 
 
 def test_edge_mode_scrapes_caddy_and_needs_a_https_grafana_url(host: Host) -> None:
