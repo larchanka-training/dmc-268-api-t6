@@ -16,6 +16,7 @@ import stat
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -240,6 +241,89 @@ def test_review_queries_and_grants_never_touch_review_content() -> None:
         "REVOKE ALL ON ALL TABLES IN SCHEMA public FROM grafana_reader, metrics_exporter;" in deploy
     )
     assert deploy.count("SET default_transaction_read_only = on;") == 2
+
+
+# --- dashboard -----------------------------------------------------------------------------
+
+DASHBOARD = MONITORING / "grafana" / "dashboards" / "overview.json"
+PROMETHEUS = {"type": "prometheus", "uid": "prometheus"}
+
+
+def _panel_with(metric: str) -> Any:
+    dashboard = json.loads(_read(DASHBOARD))
+    return next(
+        (
+            panel
+            for panel in dashboard["panels"]
+            if any(metric in target.get("expr", "") for target in panel.get("targets", []))
+        ),
+        None,
+    )
+
+
+def test_dashboard_shows_whether_each_probed_name_is_up() -> None:
+    panel = _panel_with('probe_success{job="blackbox"}')
+
+    assert panel is not None
+    assert panel["datasource"] == PROMETHEUS
+    [target] = panel["targets"]
+    assert target["datasource"] == PROMETHEUS
+    assert target["expr"] == 'probe_success{job="blackbox"}'
+    assert target["legendFormat"] == "{{host}}"
+    # One value per name: the default text mode would hide which name it is.
+    assert panel["options"]["textMode"] == "value_and_name"
+    [mapping] = panel["fieldConfig"]["defaults"]["mappings"]
+    shown = {value: (text["text"], text["color"]) for value, text in mapping["options"].items()}
+    assert shown == {"0": ("DOWN", "red"), "1": ("UP", "green")}
+
+
+def test_dashboard_shows_certificate_days_coloured_where_the_alerts_fire() -> None:
+    panel = _panel_with('probe_ssl_earliest_cert_expiry{job="blackbox"}')
+    rules = _read(MONITORING / "prometheus" / "rules" / "alerts.yml")
+    days = {
+        alert: int(limit)
+        for alert, limit in re.findall(
+            r"- alert: (TlsCertificate\w+)\n        expr: .* < (\d+)\n", rules
+        )
+    }
+
+    assert days.keys() == {"TlsCertificateExpiresSoon", "TlsCertificateExpiring"}
+    assert days == {"TlsCertificateExpiresSoon": 14, "TlsCertificateExpiring": 3}
+    assert panel is not None
+    assert panel["datasource"] == PROMETHEUS
+    [target] = panel["targets"]
+    assert target["datasource"] == PROMETHEUS
+    # The same 10-minute hold as the alerts: a probe without a TLS answer does not blank it.
+    assert target["expr"] == (
+        '(last_over_time(probe_ssl_earliest_cert_expiry{job="blackbox"}[10m]) - time()) / 86400'
+    )
+    assert target["legendFormat"] == "{{host}}"
+    assert panel["options"]["textMode"] == "value_and_name"
+    defaults = panel["fieldConfig"]["defaults"]
+    # Grafana's own day unit shows 7 days and more as weeks; a plain suffix keeps days.
+    assert defaults["unit"] == "suffix:d"
+    # One decimal like the alert summaries: 2.6 days must not read as "3 d".
+    assert defaults["decimals"] == 1
+    assert [(step["color"], step["value"]) for step in defaults["thresholds"]["steps"]] == [
+        ("red", None),
+        ("orange", days["TlsCertificateExpiring"]),
+        ("green", days["TlsCertificateExpiresSoon"]),
+    ]
+
+
+def test_dashboard_panels_have_unique_ids_and_never_overlap() -> None:
+    panels = json.loads(_read(DASHBOARD))["panels"]
+    ids = [panel["id"] for panel in panels]
+    ids += [nested["id"] for panel in panels for nested in panel.get("panels", [])]
+    boxes = [
+        (panel["gridPos"]["x"], panel["gridPos"]["y"], panel["gridPos"]["w"], panel["gridPos"]["h"])
+        for panel in panels
+    ]
+
+    assert len(ids) == len(set(ids))
+    for i, (x, y, w, h) in enumerate(boxes):
+        for x2, y2, w2, h2 in boxes[i + 1 :]:
+            assert x + w <= x2 or x2 + w2 <= x or y + h <= y2 or y2 + h2 <= y, (ids[i], x2, y2)
 
 
 # --- workflow ------------------------------------------------------------------------------

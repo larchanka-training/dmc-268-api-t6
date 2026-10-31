@@ -108,7 +108,7 @@
     {
       "type": "stat",
       "title": "Requests per second",
-      "description": "All requests through the edge proxy to the API and UI hosts.",
+      "description": "All requests through the edge proxy to the API and UI hosts. Includes the external probes: one request a minute per probed name.",
       "id": 3,
       "datasource": {
         "type": "prometheus",
@@ -359,7 +359,7 @@
     {
       "type": "timeseries",
       "title": "Requests per second by host",
-      "description": "Edge proxy request rate per host (Caddy metrics).",
+      "description": "Edge proxy request rate per host (Caddy metrics). Includes the external probes: one request a minute per probed name.",
       "id": 7,
       "datasource": {
         "type": "prometheus",
@@ -893,7 +893,7 @@
     {
       "type": "timeseries",
       "title": "5xx share by host",
-      "description": "Share of 5xx responses; the alert ApiHigh5xxRate fires above 5%.",
+      "description": "Share of 5xx responses; the alert ApiHigh5xxRate fires above 5%. Includes the external probes: one request a minute per probed name.",
       "id": 18,
       "datasource": {
         "type": "prometheus",
@@ -951,7 +951,7 @@
     {
       "type": "timeseries",
       "title": "Response time p95 by host",
-      "description": "95th percentile of request duration at the edge proxy (SSE streams included).",
+      "description": "95th percentile of request duration at the edge proxy (SSE streams included). Includes the external probes: one request a minute per probed name.",
       "id": 19,
       "datasource": {
         "type": "prometheus",
@@ -1847,6 +1847,169 @@
         "w": 8,
         "x": 16,
         "y": 82
+      }
+    },
+    {
+      "type": "row",
+      "title": "External probes",
+      "id": 36,
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 87
+      },
+      "panels": []
+    },
+    {
+      "type": "stat",
+      "title": "Public names: probe",
+      "description": "HTTPS probe of each probed name once a minute from the monitoring host: UP is a 2xx answer after redirects; the alert PublicEndpointDown fires after 5 min DOWN.",
+      "id": 37,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "refId": "A",
+          "expr": "probe_success{job=\"blackbox\"}",
+          "legendFormat": "{{host}}",
+          "range": false,
+          "instant": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "0": {
+                  "text": "DOWN",
+                  "color": "red",
+                  "index": 0
+                },
+                "1": {
+                  "text": "UP",
+                  "color": "green",
+                  "index": 1
+                }
+              }
+            }
+          ],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
+            ]
+          },
+          "color": {
+            "mode": "thresholds"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "value",
+        "graphMode": "none",
+        "textMode": "value_and_name",
+        "justifyMode": "auto"
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 12,
+        "x": 0,
+        "y": 88
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Certificate expires in",
+      "description": "Days until the earliest certificate a probed name serves expires; the alerts TlsCertificateExpiresSoon and TlsCertificateExpiring fire below 14 and 3 days. A name with no TLS answer for 10 min drops out here and shows DOWN on the probe panel.",
+      "id": 38,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "refId": "A",
+          "expr": "(last_over_time(probe_ssl_earliest_cert_expiry{job=\"blackbox\"}[10m]) - time()) / 86400",
+          "legendFormat": "{{host}}",
+          "range": false,
+          "instant": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "suffix:d",
+          "decimals": 1,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 3
+              },
+              {
+                "color": "green",
+                "value": 14
+              }
+            ]
+          },
+          "color": {
+            "mode": "thresholds"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "value",
+        "graphMode": "none",
+        "textMode": "value_and_name",
+        "justifyMode": "auto"
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 12,
+        "x": 12,
+        "y": 88
       }
     }
   ]
