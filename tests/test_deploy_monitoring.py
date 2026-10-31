@@ -417,6 +417,65 @@ def test_dashboard_shows_certificate_days_coloured_where_the_alerts_fire() -> No
     ]
 
 
+def test_dashboard_shows_month_to_date_llm_spend_next_to_cost_per_hour() -> None:
+    panels = json.loads(_read(DASHBOARD))["panels"]
+    panel = _panel_with("dmc_llm_cost_month_usd")
+    cost_per_hour = next(other for other in panels if other["title"] == "LLM cost per hour")
+    rules = _read(MONITORING / "prometheus" / "rules" / "alerts.yml")
+    alerts = {
+        alert: (share, int(limit))
+        for alert, share, limit in re.findall(
+            r"- alert: (LlmMonthlyBudget\w+)\n        expr: (.*) >= (\d+)(?: < \d+)?\n", rules
+        )
+    }
+
+    assert alerts.keys() == {"LlmMonthlyBudgetWarning", "LlmMonthlyBudgetExceeded"}
+    assert {alert: limit for alert, (_, limit) in alerts.items()} == {
+        "LlmMonthlyBudgetWarning": 80,
+        "LlmMonthlyBudgetExceeded": 100,
+    }
+    [share] = {share for share, _ in alerts.values()}
+    # No budget (or 0) leaves the percentage empty instead of +Inf.
+    assert "(max(dmc_llm_monthly_budget_usd) > 0)" in share
+    assert panel is not None
+    assert panel["title"] == "LLM spend this month"
+    assert panel["type"] == "stat"
+    # On the row of LLM cost per hour, right next to it.
+    assert panel["gridPos"]["y"] == cost_per_hour["gridPos"]["y"]
+    assert panel["gridPos"]["h"] == cost_per_hour["gridPos"]["h"]
+    assert panel["gridPos"]["x"] == cost_per_hour["gridPos"]["x"] + cost_per_hour["gridPos"]["w"]
+    # Prometheus, not SQL: the same sum over all environments as the alerts.
+    assert panel["datasource"] == PROMETHEUS
+    targets = {target["refId"]: target for target in panel["targets"]}
+    assert targets.keys() == {"A", "B"}
+    for target in targets.values():
+        assert target["datasource"] == PROMETHEUS
+        assert "rawSql" not in target
+        assert "dmc_llm_cost_month_usd" in target["expr"]
+    # The current value, not the range: a stat shows the latest scrape.
+    assert all(target["instant"] and not target["range"] for target in targets.values())
+    assert panel["options"]["reduceOptions"]["calcs"] == ["lastNotNull"]
+    assert targets["A"]["expr"] == "sum(dmc_llm_cost_month_usd)"
+    assert targets["B"]["expr"] == share
+    # Two values in one panel: the default text mode would hide which one is which.
+    assert panel["options"]["textMode"] == "value_and_name"
+    defaults = panel["fieldConfig"]["defaults"]
+    assert defaults["unit"] == "currencyUSD"
+    # The budget colours belong to the percentage only: spend of 85 USD is not orange.
+    assert [step["value"] for step in defaults["thresholds"]["steps"]] == [None]
+    [override] = panel["fieldConfig"]["overrides"]
+    assert override["matcher"] == {"id": "byFrameRefID", "options": "B"}
+    percent = {prop["id"]: prop["value"] for prop in override["properties"]}
+    assert percent["unit"] == "percent"
+    # The rounding of the alert summaries (%.2f USD, %.1f %): 79.6 % must not read as 80 %.
+    assert (defaults["decimals"], percent["decimals"]) == (2, 1)
+    assert [(step["color"], step["value"]) for step in percent["thresholds"]["steps"]] == [
+        ("green", None),
+        ("orange", alerts["LlmMonthlyBudgetWarning"][1]),
+        ("red", alerts["LlmMonthlyBudgetExceeded"][1]),
+    ]
+
+
 def test_dashboard_panels_have_unique_ids_and_never_overlap() -> None:
     panels = json.loads(_read(DASHBOARD))["panels"]
     ids = [panel["id"] for panel in panels]
