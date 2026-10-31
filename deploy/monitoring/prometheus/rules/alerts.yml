@@ -65,6 +65,36 @@ groups:
           summary: "{{ $labels.host }} is down from outside"
           description: "The HTTPS probe of {{ $labels.instance }} has failed for 5 minutes: a connection or TLS error or a non-2xx answer, the 503 stub included."
 
+  # Certificates of the probed names. probe_ssl_earliest_cert_expiry is the earliest expiry of all
+  # the certificates a name serves (leaf and intermediates), one series per name; should a
+  # short-lived cross-sign ever be served, probe_ssl_last_chain_expiry_timestamp_seconds (the best
+  # verified chain) is the alternative. Caddy renews with about a third of the lifetime left:
+  # 30 d of 90, ~21 d of 64 (Let's Encrypt from Feb 2027), 15 d of 45 (from Feb 2028, 1 d above
+  # the warning). A probe without a TLS answer (connection error, timeout) has no expiry series:
+  # last_over_time keeps the last one for 10 minutes, so a probe failing for less than that
+  # neither restarts `for` nor resolves the alerts; a longer outage, an expired certificate
+  # included, resolves them and PublicEndpointDown carries it. Below 3 days both alerts fire
+  # (no inhibit rules).
+  - name: certificates
+    rules:
+      - alert: TlsCertificateExpiresSoon
+        expr: (last_over_time(probe_ssl_earliest_cert_expiry{job="blackbox"}[10m]) - time()) / 86400 < 14
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Certificate of {{ $labels.host }} expires in {{ $value | printf \"%.1f\" }} days"
+          description: "Caddy renews a certificate when about a third of its lifetime is left, so less than 14 days means the renewal has failed; see docker compose -p dmc-268-edge logs caddy."
+
+      - alert: TlsCertificateExpiring
+        expr: (last_over_time(probe_ssl_earliest_cert_expiry{job="blackbox"}[10m]) - time()) / 86400 < 3
+        for: 10m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Certificate of {{ $labels.host }} expires in {{ $value | printf \"%.1f\" }} days"
+          description: "When the certificate expires every client fails the TLS handshake with this name; see docker compose -p dmc-268-edge logs caddy."
+
   - name: review-pipeline
     rules:
       # No `for`: the failure has already happened, waiting adds nothing.
