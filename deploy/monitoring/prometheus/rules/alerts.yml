@@ -65,6 +65,35 @@ groups:
           summary: "{{ $labels.host }} is down from outside"
           description: "The HTTPS probe of {{ $labels.instance }} has failed for 5 minutes: a connection or TLS error or a non-2xx answer, the 503 stub included."
 
+      # webhook-worker consumes no queue (it listens to PostgreSQL NOTIFY and only publishes), so
+      # cAdvisor watches its container instead, per compose project of the app: staging, the
+      # Terraform host and prod alike. container_health_state is the Docker healthcheck (heartbeat
+      # file): 1 healthy, 0 starting or unhealthy, -1 no healthcheck; cAdvisor refreshes it at each
+      # housekeeping (30-60 s, up to 120 s for an idle container). A stopped container leaves
+      # cAdvisor at once and goes stale at the next scrape (track_timestamps_staleness,
+      # prometheus.yml): a project whose postgres runs without it counts as stopped. Both cases
+      # share one label set, so a crash loop does not restart `for`. A project down as a whole does
+      # not fire here: for the project the monitoring reads (API_NETWORK, staging) PostgresDown,
+      # TargetDown and PublicEndpointDown do; for dmc-268-api-prod only PublicEndpointDown, for the
+      # names in PROBE_PROD_HOSTS (the rest comes with the prod monitoring of #308).
+      - alert: WebhookWorkerDown
+        expr: |
+          max by (container_label_com_docker_compose_project) (
+            container_health_state{container_label_com_docker_compose_project=~"dmc-268-api.*", container_label_com_docker_compose_service="webhook-worker"}
+          ) == 0
+          or
+          (
+            max by (container_label_com_docker_compose_project) (container_last_seen{container_label_com_docker_compose_project=~"dmc-268-api.*", container_label_com_docker_compose_service="postgres"})
+            unless
+            max by (container_label_com_docker_compose_project) (container_last_seen{container_label_com_docker_compose_project=~"dmc-268-api.*", container_label_com_docker_compose_service="webhook-worker"})
+          )
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "webhook-worker of {{ $labels.container_label_com_docker_compose_project }} is stopped or unhealthy"
+          description: "GitHub deliveries are accepted and stored but not processed; see docker compose -p {{ $labels.container_label_com_docker_compose_project }} ps webhook-worker."
+
   # Certificates of the probed names. probe_ssl_earliest_cert_expiry is the earliest expiry of all
   # the certificates a name serves (leaf and intermediates), one series per name; should a
   # short-lived cross-sign ever be served, probe_ssl_last_chain_expiry_timestamp_seconds (the best

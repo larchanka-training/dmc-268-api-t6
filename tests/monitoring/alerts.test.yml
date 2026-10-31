@@ -191,6 +191,216 @@ tests:
               summary: "api.example.test is down from outside"
               description: "The HTTPS probe of https://api.example.test/healthcheck has failed for 5 minutes: a connection or TLS error or a non-2xx answer, the 503 stub included."
 
+  # webhook-worker unhealthy (health 0) from 1m pages at 6m, per project: staging and prod alike.
+  # A container without a healthcheck (-1, dmc-268-api) and the projects of other apps do not.
+  - interval: 30s
+    input_series:
+      - series: 'container_health_state{job="cadvisor", container_label_com_docker_compose_project="dmc-268-api-staging", container_label_com_docker_compose_service="webhook-worker", name="dmc-268-api-staging-webhook-worker-1"}'
+        values: "1 1 0x20"
+      - series: 'container_last_seen{job="cadvisor", container_label_com_docker_compose_project="dmc-268-api-staging", container_label_com_docker_compose_service="webhook-worker", name="dmc-268-api-staging-webhook-worker-1"}'
+        values: "0+30x22"
+      - series: 'container_last_seen{job="cadvisor", container_label_com_docker_compose_project="dmc-268-api-staging", container_label_com_docker_compose_service="postgres", name="dmc-268-api-staging-postgres-1"}'
+        values: "0+30x22"
+      - series: 'container_health_state{job="cadvisor", container_label_com_docker_compose_project="dmc-268-api-staging", container_label_com_docker_compose_service="postgres", name="dmc-268-api-staging-postgres-1"}'
+        values: "1x22"
+      - series: 'container_health_state{job="cadvisor", container_label_com_docker_compose_project="dmc-268-api-prod", container_label_com_docker_compose_service="webhook-worker", name="dmc-268-api-prod-webhook-worker-1"}'
+        values: "1 1 0x20"
+      - series: 'container_last_seen{job="cadvisor", container_label_com_docker_compose_project="dmc-268-api-prod", container_label_com_docker_compose_service="webhook-worker", name="dmc-268-api-prod-webhook-worker-1"}'
+        values: "0+30x22"
+      - series: 'container_last_seen{job="cadvisor", container_label_com_docker_compose_project="dmc-268-api-prod", container_label_com_docker_compose_service="postgres", name="dmc-268-api-prod-postgres-1"}'
+        values: "0+30x22"
+      - series: 'container_health_state{job="cadvisor", container_label_com_docker_compose_project="dmc-268-api", container_label_com_docker_compose_service="webhook-worker", name="dmc-268-api-webhook-worker-1"}'
+        values: "-1x22"
+      - series: 'container_last_seen{job="cadvisor", container_label_com_docker_compose_project="dmc-268-api", container_label_com_docker_compose_service="webhook-worker", name="dmc-268-api-webhook-worker-1"}'
+        values: "0+30x22"
+      - series: 'container_last_seen{job="cadvisor", container_label_com_docker_compose_project="dmc-268-api", container_label_com_docker_compose_service="postgres", name="dmc-268-api-postgres-1"}'
+        values: "0+30x22"
+      - series: 'container_health_state{job="cadvisor", container_label_com_docker_compose_project="other-app", container_label_com_docker_compose_service="webhook-worker", name="other-app-webhook-worker-1"}'
+        values: "0x22"
+      - series: 'container_last_seen{job="cadvisor", container_label_com_docker_compose_project="other-app", container_label_com_docker_compose_service="webhook-worker", name="other-app-webhook-worker-1"}'
+        values: "0+30x22"
+      - series: 'container_last_seen{job="cadvisor", container_label_com_docker_compose_project="other-app", container_label_com_docker_compose_service="postgres", name="other-app-postgres-1"}'
+        values: "0+30x22"
+      - series: 'container_last_seen{job="cadvisor", container_label_com_docker_compose_project="other-db", container_label_com_docker_compose_service="postgres", name="other-db-postgres-1"}'
+        values: "0+30x22"
+    alert_rule_test:
+      - eval_time: 5m30s
+        alertname: WebhookWorkerDown
+        exp_alerts: []
+      - eval_time: 6m
+        alertname: WebhookWorkerDown
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              container_label_com_docker_compose_project: dmc-268-api-staging
+            exp_annotations:
+              summary: "webhook-worker of dmc-268-api-staging is stopped or unhealthy"
+              description: "GitHub deliveries are accepted and stored but not processed; see docker compose -p dmc-268-api-staging ps webhook-worker."
+          - exp_labels:
+              severity: critical
+              container_label_com_docker_compose_project: dmc-268-api-prod
+            exp_annotations:
+              summary: "webhook-worker of dmc-268-api-prod is stopped or unhealthy"
+              description: "GitHub deliveries are accepted and stored but not processed; see docker compose -p dmc-268-api-prod ps webhook-worker."
+
+  # A webhook-worker stopped at 2m leaves cAdvisor at once and the cadvisor job marks its series
+  # stale at the next scrape (2m30s): staging fires 5 minutes later (7m30s). The dmc-268-api-prod
+  # series show a scrape without stale markers: the last samples stay for the 5 minutes of
+  # lookback and the alert comes that much later (12m). A project stopped as a whole
+  # (dmc-268-api, postgres a scrape later) does not page.
+  - interval: 30s
+    input_series:
+      - series: 'container_health_state{job="cadvisor", container_label_com_docker_compose_project="dmc-268-api-staging", container_label_com_docker_compose_service="webhook-worker", name="dmc-268-api-staging-webhook-worker-1"}'
+        values: "1x4 stale"
+      - series: 'container_last_seen{job="cadvisor", container_label_com_docker_compose_project="dmc-268-api-staging", container_label_com_docker_compose_service="webhook-worker", name="dmc-268-api-staging-webhook-worker-1"}'
+        values: "0+30x4 stale"
+      - series: 'container_last_seen{job="cadvisor", container_label_com_docker_compose_project="dmc-268-api-staging", container_label_com_docker_compose_service="postgres", name="dmc-268-api-staging-postgres-1"}'
+        values: "0+30x30"
+      - series: 'container_health_state{job="cadvisor", container_label_com_docker_compose_project="dmc-268-api-prod", container_label_com_docker_compose_service="webhook-worker", name="dmc-268-api-prod-webhook-worker-1"}'
+        values: "1x4"
+      - series: 'container_last_seen{job="cadvisor", container_label_com_docker_compose_project="dmc-268-api-prod", container_label_com_docker_compose_service="webhook-worker", name="dmc-268-api-prod-webhook-worker-1"}'
+        values: "0+30x4"
+      - series: 'container_last_seen{job="cadvisor", container_label_com_docker_compose_project="dmc-268-api-prod", container_label_com_docker_compose_service="postgres", name="dmc-268-api-prod-postgres-1"}'
+        values: "0+30x30"
+      - series: 'container_health_state{job="cadvisor", container_label_com_docker_compose_project="dmc-268-api", container_label_com_docker_compose_service="webhook-worker", name="dmc-268-api-webhook-worker-1"}'
+        values: "1x4 stale"
+      - series: 'container_last_seen{job="cadvisor", container_label_com_docker_compose_project="dmc-268-api", container_label_com_docker_compose_service="webhook-worker", name="dmc-268-api-webhook-worker-1"}'
+        values: "0+30x4 stale"
+      - series: 'container_last_seen{job="cadvisor", container_label_com_docker_compose_project="dmc-268-api", container_label_com_docker_compose_service="postgres", name="dmc-268-api-postgres-1"}'
+        values: "0+30x5 stale"
+    alert_rule_test:
+      - eval_time: 7m
+        alertname: WebhookWorkerDown
+        exp_alerts: []
+      - eval_time: 7m30s
+        alertname: WebhookWorkerDown
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              container_label_com_docker_compose_project: dmc-268-api-staging
+            exp_annotations:
+              summary: "webhook-worker of dmc-268-api-staging is stopped or unhealthy"
+              description: "GitHub deliveries are accepted and stored but not processed; see docker compose -p dmc-268-api-staging ps webhook-worker."
+      - eval_time: 11m30s
+        alertname: WebhookWorkerDown
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              container_label_com_docker_compose_project: dmc-268-api-staging
+            exp_annotations:
+              summary: "webhook-worker of dmc-268-api-staging is stopped or unhealthy"
+              description: "GitHub deliveries are accepted and stored but not processed; see docker compose -p dmc-268-api-staging ps webhook-worker."
+      - eval_time: 12m
+        alertname: WebhookWorkerDown
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              container_label_com_docker_compose_project: dmc-268-api-staging
+            exp_annotations:
+              summary: "webhook-worker of dmc-268-api-staging is stopped or unhealthy"
+              description: "GitHub deliveries are accepted and stored but not processed; see docker compose -p dmc-268-api-staging ps webhook-worker."
+          - exp_labels:
+              severity: critical
+              container_label_com_docker_compose_project: dmc-268-api-prod
+            exp_annotations:
+              summary: "webhook-worker of dmc-268-api-prod is stopped or unhealthy"
+              description: "GitHub deliveries are accepted and stored but not processed; see docker compose -p dmc-268-api-prod ps webhook-worker."
+
+  # postgres and webhook-worker stopped at 2m while api and rabbitmq still run: no page here
+  # (PostgresDown's case on staging), the rule anchors on postgres, not on any container.
+  - interval: 30s
+    input_series:
+      - series: 'container_health_state{job="cadvisor", container_label_com_docker_compose_project="dmc-268-api-staging", container_label_com_docker_compose_service="webhook-worker", name="dmc-268-api-staging-webhook-worker-1"}'
+        values: "1x4 stale"
+      - series: 'container_last_seen{job="cadvisor", container_label_com_docker_compose_project="dmc-268-api-staging", container_label_com_docker_compose_service="webhook-worker", name="dmc-268-api-staging-webhook-worker-1"}'
+        values: "0+30x4 stale"
+      - series: 'container_last_seen{job="cadvisor", container_label_com_docker_compose_project="dmc-268-api-staging", container_label_com_docker_compose_service="postgres", name="dmc-268-api-staging-postgres-1"}'
+        values: "0+30x4 stale"
+      - series: 'container_last_seen{job="cadvisor", container_label_com_docker_compose_project="dmc-268-api-staging", container_label_com_docker_compose_service="api", name="dmc-268-api-staging-api-1"}'
+        values: "0+30x30"
+      - series: 'container_last_seen{job="cadvisor", container_label_com_docker_compose_project="dmc-268-api-staging", container_label_com_docker_compose_service="rabbitmq", name="dmc-268-api-staging-rabbitmq-1"}'
+        values: "0+30x30"
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: WebhookWorkerDown
+        exp_alerts: []
+
+  # Restarts, each old container stale at the next scrape. Staging recreated twice (a deploy after
+  # a minute without a worker, then a rollback; each new container starting for a scrape) does
+  # not page. Prod in a crash loop (up and starting for a minute, then gone for 1.5 minutes) pages
+  # at 5m: health 0 and absence alternate under one label set, so `for` does not restart.
+  # dmc-268-api, unhealthy from 0, pages at 5m and resolves at the first healthy sample of its
+  # recreated container (6m30s).
+  - interval: 30s
+    input_series:
+      - series: 'container_health_state{job="cadvisor", container_label_com_docker_compose_project="dmc-268-api-staging", container_label_com_docker_compose_service="webhook-worker", name="dmc-268-api-staging-webhook-worker-1", id="/system.slice/docker-a.scope"}'
+        values: "1x4 stale"
+      - series: 'container_last_seen{job="cadvisor", container_label_com_docker_compose_project="dmc-268-api-staging", container_label_com_docker_compose_service="webhook-worker", name="dmc-268-api-staging-webhook-worker-1", id="/system.slice/docker-a.scope"}'
+        values: "0+30x4 stale"
+      - series: 'container_health_state{job="cadvisor", container_label_com_docker_compose_project="dmc-268-api-staging", container_label_com_docker_compose_service="webhook-worker", name="dmc-268-api-staging-webhook-worker-1", id="/system.slice/docker-b.scope"}'
+        values: "_x6 0 1 1 1 stale"
+      - series: 'container_last_seen{job="cadvisor", container_label_com_docker_compose_project="dmc-268-api-staging", container_label_com_docker_compose_service="webhook-worker", name="dmc-268-api-staging-webhook-worker-1", id="/system.slice/docker-b.scope"}'
+        values: "_x6 180+30x3 stale"
+      - series: 'container_health_state{job="cadvisor", container_label_com_docker_compose_project="dmc-268-api-staging", container_label_com_docker_compose_service="webhook-worker", name="dmc-268-api-staging-webhook-worker-1", id="/system.slice/docker-c.scope"}'
+        values: "_x10 0 1x13"
+      - series: 'container_last_seen{job="cadvisor", container_label_com_docker_compose_project="dmc-268-api-staging", container_label_com_docker_compose_service="webhook-worker", name="dmc-268-api-staging-webhook-worker-1", id="/system.slice/docker-c.scope"}'
+        values: "_x10 300+30x14"
+      - series: 'container_last_seen{job="cadvisor", container_label_com_docker_compose_project="dmc-268-api-staging", container_label_com_docker_compose_service="postgres", name="dmc-268-api-staging-postgres-1"}'
+        values: "0+30x24"
+      - series: 'container_health_state{job="cadvisor", container_label_com_docker_compose_project="dmc-268-api-prod", container_label_com_docker_compose_service="webhook-worker", name="dmc-268-api-prod-webhook-worker-1"}'
+        values: "0 0 stale _x2 0 0 stale _x2 0 0 stale _x2 0 0 stale _x2 0 0"
+      - series: 'container_last_seen{job="cadvisor", container_label_com_docker_compose_project="dmc-268-api-prod", container_label_com_docker_compose_service="webhook-worker", name="dmc-268-api-prod-webhook-worker-1"}'
+        values: "0 30 stale _x2 150 180 stale _x2 300 330 stale _x2 450 480 stale _x2 600 630"
+      - series: 'container_last_seen{job="cadvisor", container_label_com_docker_compose_project="dmc-268-api-prod", container_label_com_docker_compose_service="postgres", name="dmc-268-api-prod-postgres-1"}'
+        values: "0+30x24"
+      - series: 'container_health_state{job="cadvisor", container_label_com_docker_compose_project="dmc-268-api", container_label_com_docker_compose_service="webhook-worker", name="dmc-268-api-webhook-worker-1", id="/system.slice/docker-old.scope"}'
+        values: "0x12 stale"
+      - series: 'container_last_seen{job="cadvisor", container_label_com_docker_compose_project="dmc-268-api", container_label_com_docker_compose_service="webhook-worker", name="dmc-268-api-webhook-worker-1", id="/system.slice/docker-old.scope"}'
+        values: "0+30x12 stale"
+      - series: 'container_health_state{job="cadvisor", container_label_com_docker_compose_project="dmc-268-api", container_label_com_docker_compose_service="webhook-worker", name="dmc-268-api-webhook-worker-1", id="/system.slice/docker-new.scope"}'
+        values: "_x13 1x11"
+      - series: 'container_last_seen{job="cadvisor", container_label_com_docker_compose_project="dmc-268-api", container_label_com_docker_compose_service="webhook-worker", name="dmc-268-api-webhook-worker-1", id="/system.slice/docker-new.scope"}'
+        values: "_x13 390+30x11"
+      - series: 'container_last_seen{job="cadvisor", container_label_com_docker_compose_project="dmc-268-api", container_label_com_docker_compose_service="postgres", name="dmc-268-api-postgres-1"}'
+        values: "0+30x24"
+    alert_rule_test:
+      - eval_time: 4m30s
+        alertname: WebhookWorkerDown
+        exp_alerts: []
+      - eval_time: 5m
+        alertname: WebhookWorkerDown
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              container_label_com_docker_compose_project: dmc-268-api-prod
+            exp_annotations:
+              summary: "webhook-worker of dmc-268-api-prod is stopped or unhealthy"
+              description: "GitHub deliveries are accepted and stored but not processed; see docker compose -p dmc-268-api-prod ps webhook-worker."
+          - exp_labels:
+              severity: critical
+              container_label_com_docker_compose_project: dmc-268-api
+            exp_annotations:
+              summary: "webhook-worker of dmc-268-api is stopped or unhealthy"
+              description: "GitHub deliveries are accepted and stored but not processed; see docker compose -p dmc-268-api ps webhook-worker."
+      - eval_time: 6m30s
+        alertname: WebhookWorkerDown
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              container_label_com_docker_compose_project: dmc-268-api-prod
+            exp_annotations:
+              summary: "webhook-worker of dmc-268-api-prod is stopped or unhealthy"
+              description: "GitHub deliveries are accepted and stored but not processed; see docker compose -p dmc-268-api-prod ps webhook-worker."
+      - eval_time: 10m30s
+        alertname: WebhookWorkerDown
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              container_label_com_docker_compose_project: dmc-268-api-prod
+            exp_annotations:
+              summary: "webhook-worker of dmc-268-api-prod is stopped or unhealthy"
+              description: "GitHub deliveries are accepted and stored but not processed; see docker compose -p dmc-268-api-prod ps webhook-worker."
+
   # Certificates: at 10m (expiry = days left × 86400 + 600) 15 days left is quiet, 13 days warns,
   # 2 days warns and pages at once (no inhibit rules), each after its 10 minutes.
   - interval: 1m

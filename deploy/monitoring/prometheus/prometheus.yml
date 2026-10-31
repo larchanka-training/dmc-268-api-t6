@@ -34,6 +34,8 @@ scrape_configs:
       - targets: ["node-exporter:9100"]
 
   - job_name: cadvisor
+    # cAdvisor timestamps its samples: without this a stopped container lingers for 5 minutes.
+    track_timestamps_staleness: true
     static_configs:
       - targets: ["cadvisor:8080"]
     metric_relabel_configs:

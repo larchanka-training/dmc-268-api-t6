@@ -149,6 +149,16 @@ def test_prometheus_probes_the_public_names_through_the_exporter_once_a_minute()
     assert int(module.group(1)) < int(scrape_timeout.group(1))
 
 
+def test_prometheus_drops_a_stopped_container_at_the_next_scrape() -> None:
+    config = _read(MONITORING / "prometheus" / "prometheus.yml")
+    job = config[config.index("  - job_name: cadvisor\n") :]
+    job = job[: job.index("\n\n")]
+
+    # cAdvisor timestamps its samples: without stale markers a stopped container lingers 5 minutes.
+    assert "    track_timestamps_staleness: true\n" in job
+    assert "honor_timestamps: false" not in config
+
+
 def test_config_changes_recreate_the_service_that_reads_them() -> None:
     blocks = _service_blocks(_read(MONITORING / "compose.yml"))
     digests = {
