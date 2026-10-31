@@ -796,7 +796,7 @@ def test_manual_rollback_failure_keeps_followup_and_promotion_success_gated() ->
     assert "    if: github.ref == 'refs/heads/main'" in workflow
     assert "    needs: rollback" in workflow.split("  promote-staging:", 1)[1]
     assert "format('rollback-ignored-{0}', github.run_id)" in workflow
-    assert "  cancel-in-progress: false" in workflow
+    assert "  cancel-in-progress: false\n  queue: max\n" in workflow
 
 
 def _release_unchanged_literal() -> str:
