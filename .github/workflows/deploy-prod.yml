@@ -481,6 +481,11 @@ jobs:
             outcome="rolled back"
           elif [[ "${ROLLBACK_OUTCOME}" == failure ]]; then
             outcome="rollback failed"
+          elif [[ "${DEPLOY_OUTCOME}" == cancelled || "${HEALTH_OUTCOME}" == cancelled ]]; then
+            # The rollback reacts to failures only: a cancel or timeout leaves the host as it was
+            # stopped, .env possibly naming the new image while .deploy-state names the old one.
+            outcome="cancelled during the deploy; no rollback ran, prod may be half-switched"
+            echo "::warning::the prod deploy was cancelled; no rollback ran, check the prod release on the host"
           else
             outcome="not deployed"
           fi

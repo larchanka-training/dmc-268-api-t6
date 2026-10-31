@@ -871,6 +871,7 @@ STOPPED_OUTCOME = (
 UNCHANGED_OUTCOME = (
     "deploy failed before the release switch; the running release was left unchanged"
 )
+CANCELLED_OUTCOME = "cancelled during the deploy; no rollback ran, prod may be half-switched"
 
 
 def _listed(when: str, ids: Iterable[str]) -> str:
@@ -1204,6 +1205,15 @@ def test_a_missing_host_read_leaves_staging_not_compared(tmp_path: Path) -> None
             "not deployed",
             f"`{REF_B}`",
         ),
+        # A cancel or timeout starts no rollback (it reacts to failures only): .env may already
+        # name the new image while .deploy-state still names the old one.
+        (
+            {"DEPLOY_OUTCOME": "cancelled", "HEALTH_OUTCOME": "skipped"},
+            REF_A,
+            CANCELLED_OUTCOME,
+            f"`{REF_A}`",
+        ),
+        ({"HEALTH_OUTCOME": "cancelled"}, REF_B, CANCELLED_OUTCOME, f"`{REF_B}`"),
     ],
     ids=[
         "deployed",
@@ -1213,6 +1223,8 @@ def test_a_missing_host_read_leaves_staging_not_compared(tmp_path: Path) -> None
         "first-release-unchanged",
         "rollback-failed",
         "not-deployed",
+        "deploy-cancelled",
+        "health-cancelled",
     ],
 )
 def test_the_report_names_the_outcome_and_the_release_running_now(
@@ -1233,6 +1245,7 @@ def test_the_report_names_the_outcome_and_the_release_running_now(
     # The Fail step fails a rolled-back run; the report fails only on its own findings.
     assert result.returncode == 0, result.stdout
     assert f"- Outcome: {outcome}\n- Prod release now: {release}\n" in summary
+    assert ("::warning::" in result.stdout) is (outcome == CANCELLED_OUTCOME), result.stdout
     if not deployed:
         assert f"- Storage isolation ({PROD_PROJECT} / {STAGING}): {NOT_RUN}\n" in summary
 
