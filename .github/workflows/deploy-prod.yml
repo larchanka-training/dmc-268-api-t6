@@ -99,7 +99,7 @@ jobs:
     # The VPS lock of Deploy staging, Promote staging tag and Rollback staging (AC5 of #308): one
     # member at a time, FIFO, and a later push never cancels this pending job. A dispatch from
     # another branch gets a throwaway group, whatever the timing of the `if` above. No Environment
-    # until Part 2 adds production with its protection rules (D6).
+    # until Part 2 adds production with its protection rules.
     concurrency:
       group: ${{ github.ref == 'refs/heads/main' && 'staging-deploy' || format('deploy-prod-ignored-{0}', github.run_id) }}
       cancel-in-progress: false
@@ -220,3 +220,159 @@ jobs:
             echo "health_url=${health_url}"
           } >> "${GITHUB_OUTPUT}"
           echo "prod target: course VPS (${host}:${port}, ${base_url})"
+
+      # The deploy files come from this run's checkout (the dispatched main commit), like Rollback
+      # staging, so a :staging image older than these scripts still gets NO_PREVIOUS_RELEASE=stop.
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # The staging deploy files plus the isolation check; nothing of the edge proxy, which only
+      # Deploy staging and Rollback staging refresh (prod joins its network as api-prod).
+      - name: Upload deploy files
+        uses: appleboy/scp-action@ff85246acaad7bdce478db94a363cd2bf7c90345 # v1.0.0
+        with:
+          host: ${{ steps.target.outputs.host }}
+          port: ${{ steps.target.outputs.port }}
+          username: ${{ secrets.VPS_DMC268_U }}
+          password: ${{ secrets.VPS_DMC268_P }}
+          fingerprint: ${{ vars.STAGING_SSH_FINGERPRINT }}
+          source: "deploy/compose/staging.yml,deploy/compose/staging.ports.yml,deploy/compose/staging.edge.yml,deploy/scripts/provision.sh,deploy/scripts/deploy.sh,deploy/scripts/rollback.sh,deploy/scripts/check-rollback-revision.py,deploy/scripts/healthcheck.sh,deploy/scripts/env-file.sh,deploy/scripts/check-isolation.sh"
+          target: ${{ steps.target.outputs.app_dir }}
+          strip_components: 2
+
+      - name: Prepare host
+        id: prepare
+        uses: appleboy/ssh-action@0ff4204d59e8e51228ff73bce53f80d53301dee2 # v1.2.5
+        env:
+          APP_DIR: ${{ steps.target.outputs.app_dir }}
+          # Created only if missing; the edge proxy itself is left as staging deployed it.
+          EDGE_NETWORK: dmc268-edge
+        with:
+          host: ${{ steps.target.outputs.host }}
+          port: ${{ steps.target.outputs.port }}
+          username: ${{ secrets.VPS_DMC268_U }}
+          password: ${{ secrets.VPS_DMC268_P }}
+          fingerprint: ${{ vars.STAGING_SSH_FINGERPRINT }}
+          debug: false
+          capture_stdout: true
+          envs: APP_DIR,EDGE_NETWORK
+          script: |
+            set -euo pipefail
+            set +o xtrace
+            cd "${APP_DIR}"
+            mv staging.yml compose.yml
+            mv staging.ports.yml compose.ports.yml
+            mv staging.edge.yml compose.edge.yml
+            chmod +x provision.sh deploy.sh rollback.sh healthcheck.sh env-file.sh check-isolation.sh
+            ./provision.sh
+            # Staging containers before any prod change, on one line (none on a fresh VPS): the
+            # same list after the deploy shows staging was not recreated (AC3).
+            ids="$(docker ps -aq --no-trunc --filter label=com.docker.compose.project=dmc-268-api-staging)"
+            echo "staging containers before:${ids:+ ${ids//$'\n'/ }}"
+
+      - name: Wait for the edge certificate
+        env:
+          BASE_URL: ${{ steps.target.outputs.base_url }}
+        run: |
+          # On a first run Let's Encrypt issues certificates for every edge host, which can outlast the
+          # health check window; a failed health check would trigger an automatic rollback. Wait here,
+          # before any app change, until the TLS handshake succeeds (any HTTP status, 502 included).
+          deadline=$((SECONDS + 180))
+          until curl -s -o /dev/null --max-time 10 "${BASE_URL}/"; do
+            if (( SECONDS >= deadline )); then
+              echo "no valid TLS certificate for ${BASE_URL} after 180 s; check DNS and the edge proxy logs" >&2
+              curl -sS -o /dev/null --max-time 10 "${BASE_URL}/" || true
+              exit 1
+            fi
+            sleep 5
+          done
+          echo "TLS handshake with ${BASE_URL} succeeded"
+
+      # Only the digest checked above. No application secrets and no store settings until Part 2:
+      # deploy.sh generates the store passwords and leaves the role files empty. Without a
+      # previous prod release a failed one is only taken down (stop), so the edge proxy keeps
+      # answering 503 for the prod API host instead of a bootstrap nginx (AC4).
+      - name: Deploy image
+        id: deploy
+        uses: appleboy/ssh-action@0ff4204d59e8e51228ff73bce53f80d53301dee2 # v1.2.5
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GHCR_USER: ${{ github.actor }}
+          IMAGE: ${{ steps.digest.outputs.image }}
+          APP_DIR: ${{ steps.target.outputs.app_dir }}
+          DEPLOY_MODE: edge
+          EDGE_ALIAS: ${{ steps.target.outputs.edge_alias }}
+          NO_PREVIOUS_RELEASE: stop
+          DEPLOY_RUN: ${{ github.run_id }}-${{ github.run_attempt }}
+        with:
+          host: ${{ steps.target.outputs.host }}
+          port: ${{ steps.target.outputs.port }}
+          username: ${{ secrets.VPS_DMC268_U }}
+          password: ${{ secrets.VPS_DMC268_P }}
+          fingerprint: ${{ vars.STAGING_SSH_FINGERPRINT }}
+          debug: false
+          envs: GHCR_TOKEN,GHCR_USER,IMAGE,APP_DIR,DEPLOY_MODE,EDGE_ALIAS,NO_PREVIOUS_RELEASE,DEPLOY_RUN
+          script: |
+            set -euo pipefail
+            set +o xtrace
+            "${APP_DIR}/deploy.sh" "${IMAGE}"
+
+      - name: Health check
+        id: health
+        if: steps.deploy.outcome == 'success'
+        continue-on-error: true
+        env:
+          HEALTH_URL: ${{ steps.target.outputs.health_url }}
+        run: |
+          chmod +x deploy/scripts/healthcheck.sh
+          deploy/scripts/healthcheck.sh "${HEALTH_URL}"
+
+      # AC3: back to the previous release of the prod dir; every compose call of rollback.sh is
+      # scoped to the prod project, so staging is not touched.
+      - name: Rollback on failed deploy or health check
+        id: rollback
+        if: always() && (steps.deploy.outcome == 'failure' || steps.health.outcome == 'failure')
+        continue-on-error: true
+        uses: appleboy/ssh-action@0ff4204d59e8e51228ff73bce53f80d53301dee2 # v1.2.5
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GHCR_USER: ${{ github.actor }}
+          APP_DIR: ${{ steps.target.outputs.app_dir }}
+          DEPLOY_MODE: edge
+          EDGE_ALIAS: ${{ steps.target.outputs.edge_alias }}
+          NO_PREVIOUS_RELEASE: stop
+          DEPLOY_RUN: ${{ github.run_id }}-${{ github.run_attempt }}
+        with:
+          host: ${{ steps.target.outputs.host }}
+          port: ${{ steps.target.outputs.port }}
+          username: ${{ secrets.VPS_DMC268_U }}
+          password: ${{ secrets.VPS_DMC268_P }}
+          fingerprint: ${{ vars.STAGING_SSH_FINGERPRINT }}
+          debug: false
+          capture_stdout: true
+          envs: GHCR_TOKEN,GHCR_USER,APP_DIR,DEPLOY_MODE,EDGE_ALIAS,NO_PREVIOUS_RELEASE,DEPLOY_RUN
+          script: |
+            set -euo pipefail
+            set +o xtrace
+            ROLLBACK_MODE=auto "${APP_DIR}/rollback.sh"
+
+      - name: Fail the run after rollback
+        if: always() && (steps.deploy.outcome == 'failure' || steps.health.outcome == 'failure')
+        env:
+          DEPLOY_OUTCOME: ${{ steps.deploy.outcome }}
+          ROLLBACK_OUTCOME: ${{ steps.rollback.outcome }}
+          # rollback.sh prints this when deploy.sh of this run stopped before the release switch.
+          RELEASE_UNCHANGED: "${{ contains(steps.rollback.outputs.stdout, 'release unchanged: deploy run') }}"
+        run: |
+          if [[ "${DEPLOY_OUTCOME}" == "failure" && "${ROLLBACK_OUTCOME}" == "success" && "${RELEASE_UNCHANGED}" == "true" ]]; then
+            echo "prod deploy failed before the release switch; the running release was left unchanged"
+          elif [[ "${DEPLOY_OUTCOME}" == "failure" ]]; then
+            echo "prod deploy failed; rollback was triggered"
+          else
+            echo "prod health check failed; rollback was triggered"
+          fi
+          if [[ "${ROLLBACK_OUTCOME}" == "failure" ]]; then
+            echo "rollback failed" >&2
+            exit 1
+          fi
+          exit 1
