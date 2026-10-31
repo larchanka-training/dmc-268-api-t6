@@ -106,6 +106,81 @@ tests:
               summary: "LLM calls are slow: p95 1m 20s over 15 minutes"
               description: "The fast-engine call timeout is 90 s (docs/PIPELINE_SPEC.md §3)."
 
+  # The monthly LLM budget: the spend of every database counts (neither series reaches 80% alone),
+  # 79.8% is silent, 80% and 99.8% warn, 100% is critical at once and only.
+  - interval: 1m
+    input_series:
+      - series: 'dmc_llm_monthly_budget_usd{instance="node-exporter:9100", job="node"}'
+        values: "50x45"
+      - series: 'dmc_llm_cost_month_usd{environment="staging"}'
+        values: "24.9x9 25x9 29.9x9 30x15"
+      - series: 'dmc_llm_cost_month_usd{environment="prod"}'
+        values: "15x19 20x25"
+    alert_rule_test:
+      - eval_time: 9m
+        alertname: LlmMonthlyBudgetWarning
+        exp_alerts: []
+      - eval_time: 14m
+        alertname: LlmMonthlyBudgetWarning
+        exp_alerts: []
+      - eval_time: 15m
+        alertname: LlmMonthlyBudgetWarning
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: "LLM spend this month: 40.00 USD, 80.0% of the monthly budget"
+              description: "Spend in usage_events since the 1st of the month (UTC) is between 80% and 100% of LLM_MONTHLY_BUDGET_USD; at 100% LlmMonthlyBudgetExceeded takes over and this alert resolves; the alert pauses no reviews."
+      - eval_time: 15m
+        alertname: LlmMonthlyBudgetExceeded
+        exp_alerts: []
+      - eval_time: 29m
+        alertname: LlmMonthlyBudgetWarning
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: "LLM spend this month: 49.90 USD, 99.8% of the monthly budget"
+              description: "Spend in usage_events since the 1st of the month (UTC) is between 80% and 100% of LLM_MONTHLY_BUDGET_USD; at 100% LlmMonthlyBudgetExceeded takes over and this alert resolves; the alert pauses no reviews."
+      - eval_time: 29m
+        alertname: LlmMonthlyBudgetExceeded
+        exp_alerts: []
+      - eval_time: 29m30s
+        alertname: LlmMonthlyBudgetExceeded
+        exp_alerts: []
+      - eval_time: 30m
+        alertname: LlmMonthlyBudgetExceeded
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+            exp_annotations:
+              summary: "LLM spend this month: 50.00 USD, 100.0% of the monthly budget"
+              description: "Spend in usage_events since the 1st of the month (UTC) has reached LLM_MONTHLY_BUDGET_USD; the alert pauses no reviews, they keep spending."
+      - eval_time: 30m
+        alertname: LlmMonthlyBudgetWarning
+        exp_alerts: []
+
+  # No budget is set: no threshold series, then a 0 written by hand. Both alerts stay silent.
+  - interval: 1m
+    input_series:
+      - series: 'dmc_llm_monthly_budget_usd{instance="node-exporter:9100", job="node"}'
+        values: "_x14 0x15"
+      - series: 'dmc_llm_cost_month_usd{environment="staging"}'
+        values: "500x30"
+    alert_rule_test:
+      - eval_time: 14m
+        alertname: LlmMonthlyBudgetWarning
+        exp_alerts: []
+      - eval_time: 14m
+        alertname: LlmMonthlyBudgetExceeded
+        exp_alerts: []
+      - eval_time: 30m
+        alertname: LlmMonthlyBudgetWarning
+        exp_alerts: []
+      - eval_time: 30m
+        alertname: LlmMonthlyBudgetExceeded
+        exp_alerts: []
+
   # 5xx share per host, with a minimum of traffic; the metrics endpoint of Caddy (host _other) and
   # other hosts do not count.
   - interval: 1m
