@@ -41,6 +41,16 @@ The responses map must cover every case exactly once at responses/<case-id>.json
 directory (``--responses-dir``, one per arm and run) replays unchanged. ``policy_arm``,
 ``policy_arm_digest`` and ``usage`` are optional (absent in captures before #163): a missing
 arm is ``legacy`` and missing usage is reported as not recorded.
+
+A capture of RAG cases (#146, ``eval_live --rag-arm``) adds, all together, ``rag_arm``
+(``none`` or ``graph``), ``rag_index_digest``, ``snapshot_pseudo_revisions``, ``latency_ms``
+and ``rag_evidence`` (per case: the digest of the prompt sent, the digest of the same prompt
+with an empty RAG slot, the retrieved block records and ids, the fit flag, the call flags;
+``null`` where no request was sent) to ``run_metadata``. Replay then rebuilds every case
+offline from its frozen ``index.json`` and the recorded prompt budget
+(``effective_settings.primary.input_budget_tokens``) and fails, naming the cases, when the
+recorded prompt, retrieved or fit fields differ; it needs no network and no key. A RAG
+corpus replays only from such a capture, and such a capture only over RAG cases.
 Invalid recorded output contributes to scoring as invalid rather than being
 corrected or dropped. The answers of a snapshot-path ``prompt_version`` (v4/v5) are
 validated as ReviewOutput v2 (``validate_findings.py --schema v2``). Schema-v1
@@ -54,6 +64,7 @@ offline replay does not read the current model environment or detect env drift.
 from __future__ import annotations
 
 import argparse
+import asyncio
 import hashlib
 import json
 import re
@@ -61,13 +72,14 @@ import subprocess
 import sys
 from collections.abc import Mapping
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from jsonschema import Draft202012Validator
 
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
+from app.modules.reviews.application.policy_errors import PolicyError  # noqa: E402
 from app.modules.reviews.application.review_path import (  # noqa: E402
     SNAPSHOT_REVIEW_PROMPT_VERSIONS,
 )
@@ -99,6 +111,43 @@ RECORDED_POLICY_ARMS = ("legacy", *POLICY_ARMS)
 _DIGEST = re.compile(r"sha256-v1:[0-9a-f]{64}")
 _USD = re.compile(r"(?:0|[1-9][0-9]*)(?:\.[0-9]+)?")
 _USAGE_CALL_FIELDS = {"operation", "tokens_in", "tokens_out", "cache_read_tokens", "cost_usd"}
+# The two arms of the #146 eval (``eval_live --rag-arm``) and the label ``eval_ab`` demands of
+# a capture recorded with each.
+RAG_ARM_LABELS = {"none": "rag_off", "graph": "rag_on"}
+_RAG_KEYS = (
+    "rag_arm",
+    "rag_index_digest",
+    "snapshot_pseudo_revisions",
+    "latency_ms",
+    "rag_evidence",
+)
+_RAG_EVIDENCE_FIELDS = {
+    "prompt_digest",
+    "non_rag_prompt_digest",
+    "retrieved",
+    "offline_retrieved_ids",
+    "trimmed",
+    "fallback_called",
+    "repair_called",
+}
+_RAG_BLOCK_FIELDS = {
+    "block_id",
+    "path",
+    "side",
+    "start_line",
+    "end_line",
+    "tokens",
+    "index_commit_sha",
+    "edge_kind",
+}
+# What a replay re-derives from the case and compares with the recorded evidence.
+_RAG_DERIVED_FIELDS = (
+    "offline_retrieved_ids",
+    "retrieved",
+    "trimmed",
+    "non_rag_prompt_digest",
+    "prompt_digest",
+)
 
 
 class ReplayError(Exception):
@@ -169,6 +218,69 @@ def _policy_metadata(metadata: dict[str, Any], case_ids: set[str]) -> None:
         )
     ):
         raise ReplayError("response manifest run_metadata usage is invalid")
+
+
+def _rag_evidence_valid(item: object) -> bool:
+    return (
+        isinstance(item, dict)
+        and set(item) == _RAG_EVIDENCE_FIELDS
+        and all(
+            isinstance(item[name], str) and _DIGEST.fullmatch(item[name])
+            for name in ("prompt_digest", "non_rag_prompt_digest")
+        )
+        and all(
+            type(item[name]) is bool for name in ("trimmed", "fallback_called", "repair_called")
+        )
+        and isinstance(item["offline_retrieved_ids"], list)
+        and all(isinstance(block_id, str) for block_id in item["offline_retrieved_ids"])
+        and isinstance(item["retrieved"], list)
+        and all(
+            isinstance(block, dict) and set(block) == _RAG_BLOCK_FIELDS
+            for block in item["retrieved"]
+        )
+    )
+
+
+def _rag_metadata(metadata: dict[str, Any], case_ids: set[str]) -> None:
+    """Check the optional #146 fields of a RAG capture: they are all there or all absent."""
+    present = [name for name in _RAG_KEYS if name in metadata]
+    if not present:
+        return
+    if len(present) != len(_RAG_KEYS):
+        raise ReplayError("response manifest run_metadata has an incomplete set of RAG fields")
+    if metadata["rag_arm"] not in RAG_ARM_LABELS:
+        raise ReplayError("response manifest run_metadata rag_arm is unknown")
+    if metadata.get("policy_arm") != "none":
+        raise ReplayError("response manifest run_metadata: a RAG capture runs policy arm none")
+    digest = metadata["rag_index_digest"]
+    if not isinstance(digest, str) or not _DIGEST.fullmatch(digest):
+        raise ReplayError("response manifest run_metadata rag_index_digest must be a digest")
+    revisions = metadata["snapshot_pseudo_revisions"]
+    latency = metadata["latency_ms"]
+    evidence = metadata["rag_evidence"]
+    if (
+        not isinstance(revisions, dict)
+        or set(revisions) != case_ids
+        or not all(
+            isinstance(item, dict)
+            and set(item) == {"base", "head"}
+            and all(isinstance(value, str) for value in item.values())
+            for item in revisions.values()
+        )
+    ):
+        raise ReplayError("response manifest run_metadata snapshot_pseudo_revisions is invalid")
+    if (
+        not isinstance(latency, dict)
+        or set(latency) != case_ids
+        or not all(type(value) is int and value >= 0 for value in latency.values())
+    ):
+        raise ReplayError("response manifest run_metadata latency_ms is invalid")
+    if (
+        not isinstance(evidence, dict)
+        or set(evidence) != case_ids
+        or not all(item is None or _rag_evidence_valid(item) for item in evidence.values())
+    ):
+        raise ReplayError("response manifest run_metadata rag_evidence is invalid")
 
 
 def _manifest(responses_dir: Path) -> dict[str, Any]:
@@ -247,6 +359,7 @@ def _manifest(responses_dir: Path) -> dict[str, Any]:
     ):
         raise ReplayError("response manifest publishability conflicts with case statuses")
     _policy_metadata(metadata, set(data["responses"]))
+    _rag_metadata(metadata, set(data["responses"]))
     return data
 
 
@@ -379,6 +492,8 @@ def _digest_warnings(
     prompt_root: Path,
     root: Path,
     records: list[tuple[Path, dict[str, Any]]],
+    *,
+    rag_code: bool = False,
 ) -> list[str]:
     warnings: list[str] = []
     recorded_inputs = manifest["static_inputs"]
@@ -408,6 +523,7 @@ def _digest_warnings(
                 [*rules, *selected_custom_rules],
                 conventions_prompt=conventions_prompt,
                 repo_root=prompt_root,
+                rag_code=rag_code,
             )
             digest_files(prompt_root, current_inputs)
         except DigestInputMissing as exc:
@@ -431,6 +547,101 @@ def _digest_warnings(
     return warnings
 
 
+def _rag_corpus(records: list[tuple[Path, dict[str, Any]]], rag_arm: object) -> None:
+    """A RAG corpus is replayed from a RAG capture and only from one."""
+    rag_ids = [record["id"] for _, record in records if record["class"] == "rag"]
+    if rag_arm is None and rag_ids:
+        raise ReplayError(
+            "RAG cases need a capture recorded with a RAG arm (run_metadata.rag_arm): "
+            + ", ".join(rag_ids)
+        )
+    if rag_arm is not None and len(rag_ids) != len(records):
+        raise ReplayError(
+            f"a capture recorded with RAG arm {rag_arm} needs a corpus of RAG cases only, not: "
+            + ", ".join(record["id"] for _, record in records if record["class"] != "rag")
+        )
+
+
+def _rag_warnings(
+    manifest: dict[str, Any], root: Path, records: list[tuple[Path, dict[str, Any]]]
+) -> list[str]:
+    """Re-derive the recorded RAG evidence of every case offline and refuse a mismatch.
+
+    The frozen index of each case (``index.json``) and its tree are all the build needs: no
+    network, no key, no model settings but the recorded prompt budget. The build and the fit
+    are the recorder's (``eval_live.rag_prompt_evidence``), so a recorded field that the
+    replay does not reproduce means that the index, the case, the context code or the record
+    changed since the capture. A case with no recorded evidence (no request was ever sent)
+    must be one of the non-publishable cases.
+    """
+    # Imported here: the offline build loads the parser and the indexer, which replaying a
+    # main or rules capture never needs (``eval_live`` and ``eval_ab`` import this module).
+    from review.scripts.eval_live import rag_prompt_evidence
+    from review.scripts.eval_rag_context import build_arm_input
+    from review.scripts.eval_rag_source import commit_id
+    from review.scripts.rag_snapshot import INDEX_FILE
+
+    metadata = manifest["run_metadata"]
+    settings = metadata.get("effective_settings")
+    primary = settings.get("primary") if isinstance(settings, dict) else None
+    budget = primary.get("input_budget_tokens") if isinstance(primary, dict) else None
+    if type(budget) is not int or budget <= 0:
+        raise ReplayError(
+            "a RAG capture needs run_metadata.effective_settings.primary.input_budget_tokens: "
+            "the fit of its prompts cannot be reproduced without it"
+        )
+    revisions = metadata["snapshot_pseudo_revisions"]
+    wrong = sorted(
+        record["id"]
+        for _, record in records
+        if revisions[record["id"]]
+        != {"base": commit_id(record["id"], "base"), "head": commit_id(record["id"], "head")}
+    )
+    if wrong:
+        raise ReplayError("snapshot_pseudo_revisions differ from the case ids: " + ", ".join(wrong))
+    unrecorded = sorted(
+        case_id
+        for case_id, item in metadata["rag_evidence"].items()
+        if item is None and case_id not in metadata["nonpublishable_case_ids"]
+    )
+    if unrecorded:
+        raise ReplayError("RAG evidence is missing for publishable cases: " + ", ".join(unrecorded))
+
+    arm: Literal["A", "B"] = "B" if metadata["rag_arm"] == "graph" else "A"
+
+    async def derive(case_dir: Path) -> dict[str, Any]:
+        built = await build_arm_input(case_dir, arm, review_model=manifest["model_id"])
+        return rag_prompt_evidence(built.case, model_max_prompt_tokens=budget)[1]
+
+    problems = []
+    for case_dir, record in records:
+        case_id = record["id"]
+        recorded = metadata["rag_evidence"][case_id]
+        if recorded is None:
+            continue
+        try:
+            derived = asyncio.run(derive(case_dir))
+        except (OSError, ValueError, PolicyError) as exc:
+            raise ReplayError(f"RAG case {case_id}: the offline build failed: {exc}") from exc
+        differing = [name for name in _RAG_DERIVED_FIELDS if recorded[name] != derived[name]]
+        if differing:
+            problems.append(f"{case_id} ({', '.join(differing)})")
+    if problems:
+        raise ReplayError(
+            "recorded RAG evidence differs from the offline rebuild of the frozen snapshot: "
+            + "; ".join(problems)
+        )
+    try:
+        current = digest_files(
+            root, [(case_dir / INDEX_FILE).relative_to(root).as_posix() for case_dir, _ in records]
+        )
+    except DigestInputError as exc:
+        raise ReplayError(str(exc)) from exc
+    if current != metadata["rag_index_digest"]:
+        return ["RAG index digest mismatch; refresh the complete baseline"]
+    return []
+
+
 def replay(
     root: Path = DEFAULT_ROOT,
     *,
@@ -444,8 +655,12 @@ def replay(
     responses = root / "responses" if responses_dir is None else responses_dir
     records = _case_records(root)
     manifest = _manifest(responses)
+    rag_arm = manifest["run_metadata"].get("rag_arm")
+    _rag_corpus(records, rag_arm)
     warnings = _prompt_warnings(manifest, prompt_root)
-    warnings.extend(_digest_warnings(manifest, prompt_root, root, records))
+    warnings.extend(
+        _digest_warnings(manifest, prompt_root, root, records, rag_code=rag_arm is not None)
+    )
     if not manifest["run_metadata"]["baseline_publishable"]:
         warnings.append(
             "Recorded capture is not publishable: provider, infrastructure or policy failure"
@@ -462,6 +677,8 @@ def replay(
             pieces.append("unexpected " + ", ".join(extra))
         raise ReplayError("response manifest case IDs: " + "; ".join(pieces))
 
+    if rag_arm is not None:
+        warnings.extend(_rag_warnings(manifest, root, records))
     response_paths = _response_paths(responses, entries)
     usage = manifest["run_metadata"].get("usage")
     # A legacy capture saw no policy snapshot: score it on every truth, as before #163.
@@ -501,7 +718,13 @@ def replay(
         "schema_version": 1,
         "warnings": warnings,
         # The main --final refuses policy-arm cases and the rules profile requires them.
-        "corpus": ("rules" if any(uses_policy_arms(record) for _, record in records) else "main"),
+        "corpus": (
+            "rag"
+            if rag_arm is not None
+            else "rules"
+            if any(uses_policy_arms(record) for _, record in records)
+            else "main"
+        ),
         "provenance": {
             key: manifest[key]
             for key in (
@@ -535,6 +758,8 @@ def format_console(report: dict[str, Any]) -> str:
     if "policy_arm" in metadata:
         # Captures since #163 record their arm; older summaries keep their exact lines.
         lines.extend([f"Corpus: {report['corpus']}", f"Policy arm: {metadata['policy_arm']}"])
+    if "rag_arm" in metadata:
+        lines.append(f"RAG arm: {metadata['rag_arm']}")
     lines += [
         f"Model: {provenance['model_id']}",
         f"Prompt: {provenance['prompt_path']} (version {provenance['prompt_version']})",

@@ -69,6 +69,32 @@ _EXCERPT_LEVELS = frozenset({ContextLevel.L2, ContextLevel.L3, ContextLevel.L4})
 
 
 @dataclass(frozen=True)
+class SnapshotExcerpts:
+    """What a review prompt shows of a context payload."""
+
+    context_blocks: tuple[ContextBlock, ...]
+    retrieved: tuple[RetrievedBlock, ...]
+    excluded_files: int
+
+
+def snapshot_excerpts(
+    payload: ReviewContextPayload, *, retrieved_section: bool
+) -> SnapshotExcerpts:
+    """Map a payload to the prompt input: every excerpt by the id the prompt, the manifest
+    and the evidence share. The retrieved blocks follow the bound prompt version."""
+    return SnapshotExcerpts(
+        context_blocks=tuple(
+            snapshot_block(block) for block in payload.blocks if block.level in _EXCERPT_LEVELS
+        ),
+        retrieved=tuple(snapshot_retrieved(block) for block in payload.retrieved)
+        if retrieved_section
+        else (),
+        # P6-4: the ignored files stay counted, never named (RULES_FORMAT_SPEC §5.3).
+        excluded_files=payload.ignored_files,
+    )
+
+
+@dataclass(frozen=True)
 class ReviewPromptInput:
     """All persisted, revision-pinned data required for a model prompt."""
 
@@ -290,14 +316,10 @@ class ExecuteReviewRun:
                 bindings.review_system_key, bindings.review_system_version
             )
         if prompt_input.policy_snapshot is not None and payload is not None:
-            # Every excerpt by the id the prompt, the manifest and the evidence share.
-            context_blocks = tuple(
-                snapshot_block(block) for block in payload.blocks if block.level in _EXCERPT_LEVELS
-            )
-            if retrieved_section:
-                retrieved = tuple(snapshot_retrieved(block) for block in payload.retrieved)
-            # P6-4: the ignored files stay counted, never named (RULES_FORMAT_SPEC §5.3).
-            excluded_files = payload.ignored_files
+            excerpts = snapshot_excerpts(payload, retrieved_section=retrieved_section)
+            context_blocks = excerpts.context_blocks
+            retrieved = excerpts.retrieved
+            excluded_files = excerpts.excluded_files
         context = ReviewContext(
             system=prompt_input.system,
             rules=prompt_input.rules,

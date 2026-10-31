@@ -1,0 +1,11 @@
+diff --git a/pkg/store.py b/pkg/store.py
+index 4357146..2f6b146 100644
+--- a/pkg/store.py
++++ b/pkg/store.py
+@@ -4,5 +4,6 @@ from .models import Item
+ 
+ 
+ def save(item: Item) -> Item:
++    """Store the item."""
+     item.check()
+     return item

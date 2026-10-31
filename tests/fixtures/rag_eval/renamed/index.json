@@ -1,0 +1,39 @@
+{
+  "schema_version": 1,
+  "indexed_commit_sha": "2f69cce3154829d0afd8f430934f752b11336199",
+  "extractor": {
+    "limits_version": "limits/v1:fdf4e4d96f1a13a708d0af7b941297dc",
+    "parser_profile": "39409961245fa4d8e7284fe26c974a79dea7225e088d7bdbbd17c83384e1271a",
+    "exclusions_version": "index-exclusions/v2"
+  },
+  "file_count": 3,
+  "symbol_count": 3,
+  "files": [
+    {
+      "path": "pkg/__init__.py",
+      "blob_sha": "0dc5e74c1166ad4db5875c3e2027afef5f5f139b"
+    },
+    {
+      "path": "pkg/store.py",
+      "blob_sha": "44bc14278445432ea86de637154ad7b65d80c0ac"
+    },
+    {
+      "path": "pkg/view.py",
+      "blob_sha": "c04860aa5d6e9793e9c054cede8e46eecbfb5bd3"
+    }
+  ],
+  "edges": [
+    {
+      "path": "pkg/view.py",
+      "kind": "imports",
+      "target_path": "pkg/store.py",
+      "target_name": ""
+    },
+    {
+      "path": "pkg/view.py",
+      "kind": "uses_imported",
+      "target_path": "pkg/store.py",
+      "target_name": "load"
+    }
+  ]
+}
