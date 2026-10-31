@@ -486,6 +486,16 @@ def test_monitoring_deploy_gets_the_production_names_to_probe() -> None:
     assert "PROBE_PROD_HOSTS" not in _job("deploy-staging")
 
 
+def test_monitoring_deploy_gets_the_monthly_llm_budget() -> None:
+    job = _job("deploy-monitoring")
+    envs = re.search(r"^          envs: (\S+)$", job, re.M)
+
+    assert "          LLM_MONTHLY_BUDGET_USD: ${{ vars.LLM_MONTHLY_BUDGET_USD }}\n" in job
+    assert envs is not None
+    assert "LLM_MONTHLY_BUDGET_USD" in envs.group(1).split(",")
+    assert "LLM_MONTHLY_BUDGET_USD" not in _job("deploy-staging")
+
+
 # --- deploy.sh on a fake host --------------------------------------------------------------
 
 FAKE_DOCKER = """\
