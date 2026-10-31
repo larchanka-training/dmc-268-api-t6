@@ -74,18 +74,18 @@ flowchart LR
 | Роль | Кто | Права |
 |---|---|---|
 | `grafana_reader` | источник PostgreSQL в Grafana | `default_transaction_read_only`, `statement_timeout 30s`, `CONNECTION LIMIT 5`; `SELECT` только на колонки ниже |
-| `metrics_exporter` | `postgres-exporter` | `pg_monitor`, `default_transaction_read_only`, `statement_timeout 15s`, `CONNECTION LIMIT 3`; те же колонки `runs` и `run_actions` |
+| `metrics_exporter` | `postgres-exporter` | `pg_monitor`, `default_transaction_read_only`, `statement_timeout 15s`, `CONNECTION LIMIT 3`; те же колонки `runs` и `run_actions`, из `usage_events` — только `cost_usd` и `created_at` |
 | `backup_agent` | `pg-backup` | `pg_read_all_data` для `pg_dump` и `CREATEDB` для временной БД проверки; без суперпользователя и без записи в данные приложения |
 
 | Таблица | Открытые колонки |
 |---|---|
 | `runs` | `id`, `state`, `trigger`, `engine`, `attempt`, `error_code`, `available_at`, `created_at`, `started_at`, `finished_at` |
 | `run_actions` | `run_id`, `tool`, `started_at`, `duration_ms` |
-| `usage_events` (только `grafana_reader`) | `provider`, `model`, `operation`, `tokens_in`, `tokens_out`, `cache_read_tokens`, `cost_usd`, `created_at` |
+| `usage_events` | `grafana_reader`: `provider`, `model`, `operation`, `tokens_in`, `tokens_out`, `cache_read_tokens`, `cost_usd`, `created_at`; `metrics_exporter`: только `cost_usd`, `created_at` |
 
 Тела запросов и ответов (`run_actions.request/response`), `review_body`, `error_message`, диффы, находки и комментарии закрыты: каждый выкат делает `REVOKE ALL ON ALL TABLES` и выдаёт заново ровно этот список. Так соблюдается требование SD §13 о данных клиента: стек не видит кода и текстов ревью.
 
-Нагрузка: запросы ограничены окном времени, exporter опрашивается раз в минуту. У `run_actions` нет индекса по `started_at`; при 100 PR/день это тысячи строк в сутки, seq scan дешёвый. Если таблица вырастет до миллионов строк, нужен индекс `(tool, started_at)` отдельной миграцией.
+Нагрузка: запросы ограничены окном времени, exporter опрашивается раз в минуту. У `run_actions` нет индекса по `started_at`; при 100 PR/день это тысячи строк в сутки, seq scan дешёвый. Если таблица вырастет до миллионов строк, нужен индекс `(tool, started_at)` отдельной миграцией. Расход за месяц (§4) читает всю историю `usage_events` (около 50 мс на 200 тыс. строк): индекса по одному `created_at` нет, таблица не чистится; при её росте — BRIN- или btree-индекс по `created_at` отдельной миграцией.
 
 ## 4. Метрики ревью из PostgreSQL
 
@@ -96,6 +96,9 @@ flowchart LR
 | `dmc_runs_finished_15m_runs{state}` | прогоны, завершившиеся за 15 мин, по состоянию |
 | `dmc_runs_active_queued`, `…_in_progress`, `…_stale_queued` | незавершённые прогоны; `stale_queued` — `queued` дольше 10 мин после `available_at` (T18). Run, ждущий долгий `Retry-After`, попадает сюда до ближайшего прохода реконсилера, то есть до 5 мин ([PIPELINE_SPEC §4.2](PIPELINE_SPEC.md#42-задержки)) |
 | `dmc_llm_calls_15m_calls`, `…_p50_seconds`, `…_p95_seconds` | вызовы LLM за 15 мин и их длительность |
+| `dmc_llm_cost_month_usd` | расход LLM в USD по `usage_events` с 1-го числа месяца (UTC) |
+| `dmc_runs_budget_paused_15m_runs` | прогоны, пропущенные с `budget_paused` за 15 мин |
+| `dmc_llm_monthly_budget_usd` | не из `queries.yml`: месячный бюджет из `LLM_MONTHLY_BUDGET_USD`, textfile-метрика node-exporter `textfile/llm_budget.prom`, её пишет `deploy.sh` (§6) |
 
 ## 5. Алерты
 
@@ -117,6 +120,9 @@ flowchart LR
 | `ReviewQueueWithoutConsumer` | у `review.run.fast` или `review.publish` нет консьюмера 5 мин | critical |
 | `ReviewRunsStuckInQueue` | есть `stale_queued` 5 мин. Ожидание долгого `Retry-After` держит Run в `stale_queued` до 5 мин и может задеть это условие ([PIPELINE_SPEC §4.2](PIPELINE_SPEC.md#42-задержки)) | warning |
 | `LlmLatencyHigh` | p95 LLM > 60 с при ≥ 3 вызовах, 10 мин (таймаут fast — 90 с) | warning |
+| `LlmMonthlyBudgetWarning` | расход LLM за месяц ≥ 80 % и < 100 % бюджета `LLM_MONTHLY_BUDGET_USD`, 5 мин | warning |
+| `LlmMonthlyBudgetExceeded` | расход LLM за месяц ≥ 100 % бюджета, без ожидания | critical |
+| `ReviewRunsBudgetPaused` | хотя бы один прогон `skipped` с `budget_paused` за 15 мин; событие | warning |
 | `HostMemoryLow` / `HostDiskFull` / `HostCpuHigh` | < 10 % памяти 10 мин / < 15 % диска 10 мин / > 90 % CPU 15 мин | critical / critical / warning |
 | `ContainerOomKilled` | OOM-kill в контейнере compose за 10 мин | warning |
 | `PostgresBackupStale` | последнему проверенному дампу больше 26 ч | critical |
@@ -142,6 +148,10 @@ am silence add alertname=PublicEndpointDown host=staging-api.dmc268-t6.axyi.ru -
 am silence add alertname=ReviewQueueWithoutConsumer --duration=1h --comment=restore
 ```
 
+**Бюджет LLM.** Алерты бюджета делят сумму `dmc_llm_cost_month_usd` по всем БД, которые опрашивает этот Prometheus (метка `environment` у алерта всё равно `staging`), на `dmc_llm_monthly_budget_usd`; в сообщении — сумма в USD и доля бюджета, на дашборде — панель `LLM spend this month`. Порог — repository variable `LLM_MONTHLY_BUDGET_USD` (§6, [SECRETS.md](SECRETS.md)). Не задана в CI, пуста или `0` — оба алерта молчат, в логе job `Deploy monitoring` строка `budget: LLM_MONTHLY_BUDGET_USD is not set; budget alerts are silent`. Это алерты состояния: 1-го числа (UTC) сумма обнуляется и приходит RESOLVED. На 100 % warning приходит как RESOLVED, а critical — отдельным сообщением (inhibit-правил нет). Алерты не останавливают ревью. Сумма занижает счёт провайдера: `eval-live.yml` и `llm-live-run.yml` тратят тот же ключ `AI_DMC268_T6`, но в `usage_events` не пишут.
+
+`ReviewRunsBudgetPaused` — не месячный бюджет, а дневной бюджет каждого Workspace (PIPELINE_SPEC §5.3, §6): приложение пропускает прогоны Workspace, у которого остаток дневного бюджета меньше лимита стоимости прогона fast ($0.50). Алерт считает такие прогоны и не называет Workspace: `workspace_id` экспортеру не выдан. Как событие он приходит без RESOLVED, но, пока прогоны продолжают пропускаться, остаётся активным и повторяется раз в 4 ч и в каждом новом сообщении событий.
+
 **Подключение Telegram** (один раз):
 
 1. Создать бота у `@BotFather`, добавить его в командный чат.
@@ -161,11 +171,12 @@ Job `Deploy monitoring` в `ci-cd.yml` запускается после усп�
    - проверяет входы: в режиме edge `GRAFANA_ROOT_URL` и `APP_DOMAIN` (базовый домен проб, repository variable), всегда `PROBE_PROD_HOSTS` (variable Environment `staging`, по умолчанию пусто ([SECRETS.md](SECRETS.md)); prod-имена в пробах: `api`, `ui` или `api ui`; задана, даже пустой, — применяется и сохраняется в `.env` стека, не задана при ручном запуске — остаётся прежняя) и настройки Telegram. Неверное значение — выкат падает до изменений на хосте;
    - генерирует один раз пароли стека (`.env` 0600);
    - создаёт и пересобирает роли PostgreSQL (§3);
+   - пишет порог бюджета LLM (§5) из `LLM_MONTHLY_BUDGET_USD` в `textfile/llm_budget.prom` (0644). Пусто или `0` (в CI незаданная variable приходит пустой) — файл удаляется; не задана при ручном запуске — остаётся прежний; файла нет — строка в логе job. Не число долларов с не более чем двумя знаками после точки — выкат падает до изменений на хосте;
    - пишет конфиг Alertmanager и файл токена, цели Prometheus: Caddy и пробы (в режиме ports — пустые списки);
    - `docker compose -p dmc-268-monitoring up -d --wait`. Метка с хешем каталога конфигурации пересоздаёт сервис ровно тогда, когда его конфигурация изменилась;
    - синхронизирует пароль `admin` Grafana с `.env`.
 
-Файлы на хосте: `.env` (0600), `alertmanager/alertmanager.yml`, `alertmanager/secrets/telegram_bot_token` (0400), `prometheus/targets/caddy.json`, `prometheus/targets/probes.json` (его нет в репозитории: выкат, упавший до `deploy.sh`, оставляет прежние цели), `textfile/` (textfile-метрики node-exporter, пишут `pg-backup` и `backup-offsite`), дампы — `/var/backups/dmc-268/<project>/` (0700, §9). Тома: `prometheus-data`, `alertmanager-data`, `grafana-data`.
+Файлы на хосте: `.env` (0600), `alertmanager/alertmanager.yml`, `alertmanager/secrets/telegram_bot_token` (0400), `prometheus/targets/caddy.json`, `prometheus/targets/probes.json` (его нет в репозитории: выкат, упавший до `deploy.sh`, оставляет прежние цели), `textfile/` (textfile-метрики node-exporter, пишут `pg-backup` и `backup-offsite`; порог бюджета `llm_budget.prom` — `deploy.sh`), дампы — `/var/backups/dmc-268/<project>/` (0700, §9). Тома: `prometheus-data`, `alertmanager-data`, `grafana-data`.
 
 Откат приложения стек не трогает. Откатить сам мониторинг — перезапустить job `Deploy monitoring` на нужном коммите или выполнить `deploy.sh` из его checkout.
 
