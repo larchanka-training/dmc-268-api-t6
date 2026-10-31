@@ -1,7 +1,7 @@
 """The VPS deploy lock ``staging-deploy`` (AC5 of #308): one job at a time, in order, none dropped.
 
-Its members are the staging deploy and promotion jobs of ci-cd.yml and the Rollback staging
-workflow (and Deploy prod once it exists). With the default ``queue: single`` GitHub cancels the
+Its members are the staging deploy and promotion jobs of ci-cd.yml, the Rollback staging
+workflow and the deploy job of Deploy prod. With the default ``queue: single`` GitHub cancels the
 pending member when the next one joins the group, so a merge would replace a pending rollback or
 prod deploy. ``queue: max`` keeps up to 100 pending members in FIFO order; it is never mixed inside
 the group, and next to ``cancel-in-progress: true`` it is a validation error. Text contracts on the
@@ -46,9 +46,11 @@ def _lock_members() -> list[tuple[str, int, list[str]]]:
 def test_every_staging_deploy_member_queues_instead_of_replacing() -> None:
     members = _lock_members()
     files = [name for name, _, _ in members]
-    # Not vacuous: deploy-staging and promote-staging in ci-cd.yml, the whole Rollback staging run.
+    # Not vacuous: deploy-staging and promote-staging in ci-cd.yml, the whole Rollback staging run,
+    # the deploy-prod job (its dispatch-time resolve job stays outside the lock).
     assert files.count("ci-cd.yml") == 2, members
     assert files.count("rollback.yml") == 1, members
+    assert files.count("deploy-prod.yml") == 1, members
 
     unqueued = [
         (name, line, siblings)

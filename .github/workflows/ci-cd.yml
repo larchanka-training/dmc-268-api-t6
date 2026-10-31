@@ -793,8 +793,8 @@ jobs:
     needs: push-image
     # One staging-deploy member at a time, FIFO (AC5 of #308): with the default queue a pending
     # member is cancelled when the next joins, queue: max keeps it waiting. Every member (here,
-    # promote-staging, rollback.yml) uses it; never mix queue modes. The workflow-level group
-    # above still replaces a pending CI/CD run on main with the next push.
+    # promote-staging, rollback.yml, deploy-prod.yml) uses it; never mix queue modes. The
+    # workflow-level group above still replaces a pending CI/CD run on main with the next push.
     concurrency:
       group: staging-deploy
       cancel-in-progress: false
