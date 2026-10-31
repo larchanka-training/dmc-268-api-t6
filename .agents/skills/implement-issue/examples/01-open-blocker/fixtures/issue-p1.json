@@ -13,6 +13,10 @@
             }
           ]
         },
+        "subIssuesSummary": {
+          "total": 0,
+          "completed": 0
+        },
         "projectItems": {
           "pageInfo": {
             "hasNextPage": false,
@@ -117,6 +121,7 @@
                 "url": "https://github.com/larchanka-training/dmc-268-ui-t6/pull/177",
                 "body": "## What\n\nPart 1 of api#268: a deterministic script, `.agents/skills/issue-graph/scripts/issue_graph.py`, that builds the dependency graph of a sprint from GitHub native relations. It uses no LLM. The `SKILL.md` and publishing come in part 2.\n\n## Refs\n\nRefs larchanka-training/dmc-268-api-t6#268\n",
                 "state": "MERGED",
+                "mergedAt": "2026-10-24T18:58:44Z",
                 "repository": {
                   "nameWithOwner": "larchanka-training/dmc-268-ui-t6"
                 }
@@ -131,6 +136,7 @@
                 "url": "https://github.com/larchanka-training/dmc-268-ui-t6/pull/179",
                 "body": "## What\n\nPart 2 (Ч.2) of larchanka-training/dmc-268-api-t6#262: the shared `create-issue` skill slices a big task into PR-sized parts and files several linked issues as one batch with one confirmation.\n\n## Refs\n\n- Refs larchanka-training/dmc-268-api-t6#262 (part 2 of 3)\n- Part 1: larchanka-training/dmc-268-ui-t6#178 (merged); part 3: larchanka-training/dmc-268-ui-t6#180 (merged into this branch)\n- Mirror: larchanka-training/dmc-268-api-t6#285\n",
                 "state": "MERGED",
+                "mergedAt": "2026-10-25T15:21:20Z",
                 "repository": {
                   "nameWithOwner": "larchanka-training/dmc-268-ui-t6"
                 }
@@ -145,6 +151,7 @@
                 "url": "https://github.com/larchanka-training/dmc-268-api-t6/pull/285",
                 "body": "## What\n\nPart 2 (Ч.2) of #262, byte-identical mirror of larchanka-training/dmc-268-ui-t6#179 (source of truth): the shared `create-issue` skill slices a big task into PR-sized parts and files several linked issues as one batch with one confirmation.\n\n## Refs\n\n- Refs #262 (part 2 of 3)\n- Part 1: #278 (merged); part 3: #286 (merged into this branch)\n- Source of truth: larchanka-training/dmc-268-ui-t6#179\n",
                 "state": "MERGED",
+                "mergedAt": "2026-10-25T09:40:25Z",
                 "repository": {
                   "nameWithOwner": "larchanka-training/dmc-268-api-t6"
                 }
@@ -159,6 +166,7 @@
                 "url": "https://github.com/larchanka-training/dmc-268-ui-t6/pull/184",
                 "body": "## What\n\nPart 2 of api#268: publishing and the skill around the part-1 script (ui#177).\n\n## Refs\n\nRefs larchanka-training/dmc-268-api-t6#268\n\nSYNC copy: larchanka-training/dmc-268-api-t6#296 (byte-identical `.agents/skills/issue-graph/`).\n",
                 "state": "MERGED",
+                "mergedAt": "2026-10-25T14:08:31Z",
                 "repository": {
                   "nameWithOwner": "larchanka-training/dmc-268-ui-t6"
                 }
@@ -171,6 +179,13 @@
               }
             }
           ]
+        },
+        "comments": {
+          "pageInfo": {
+            "hasNextPage": false,
+            "endCursor": null
+          },
+          "nodes": []
         }
       }
     }

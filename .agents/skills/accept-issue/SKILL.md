@@ -38,8 +38,10 @@ So when the user says «заведи follow-up на AC2», «follow-up на не
 2. Say in the reply that the request differs from the rule, name the rule («Доработка — в том же
    issue»), and give the way forward: a new branch and PR with `Refs #N` per
    `.agents/rules/git-workflow.md` (code AC) or an action plus an evidence comment (non-code AC),
-   then a new table (author) or `return` (accepter). `implement-issue`'s pre-start may stop on a
-   finished task; then the user decides how to start the rework.
+   then a new table (author) or `return` (accepter). `implement-issue` does not start a rework by
+   itself: after a `return` or an author table with «не выполнено» its pre-start stops until a new
+   PR with `Refs` is merged; the rework of a part starts with `implement-issue REF --part K`, of a
+   task without parts by hand.
 3. Offer a follow-up only for a finding outside the AC.
 
 The sentence «ваша просьба расходится с правилом» belongs to this reply and is said **only when the
