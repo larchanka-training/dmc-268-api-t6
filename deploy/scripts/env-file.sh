@@ -60,7 +60,7 @@ escape_compose_value() {
 
 write_compose_env_file() {
   local file="$1" image="$2" pg_user="$3" pg_password="$4" pg_db="$5" deploy_mode="$6" edge_alias="$7"
-  local rabbitmq_user="$8" rabbitmq_password="$9" redis_password="${10}"
+  local rabbitmq_user="$8" rabbitmq_password="$9" redis_password="${10}" no_previous="${11:-}"
   umask 077
   {
     printf 'IMAGE=%s\n' "$(escape_compose_value "${image}")"
@@ -72,6 +72,7 @@ write_compose_env_file() {
     printf 'RABBITMQ_USER=%s\n' "$(escape_compose_value "${rabbitmq_user}")"
     printf 'RABBITMQ_PASSWORD=%s\n' "$(escape_compose_value "${rabbitmq_password}")"
     printf 'REDIS_PASSWORD=%s\n' "$(escape_compose_value "${redis_password}")"
+    printf 'NO_PREVIOUS_RELEASE=%s\n' "$(escape_compose_value "${no_previous}")"
   } > "${file}"
   chmod 600 "${file}"
 }

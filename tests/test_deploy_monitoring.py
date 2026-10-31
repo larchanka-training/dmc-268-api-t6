@@ -212,8 +212,8 @@ def test_monitoring_deploys_after_the_application_and_never_gates_it() -> None:
     assert "rollback" not in job.lower()
     # Promotion depends on the application deploy only.
     assert "deploy-monitoring" not in _job("promote-staging")
-    # Its own lock: in staging-deploy a pending monitoring job and promote-staging could cancel
-    # each other when the next merge queues its deploy.
+    # Its own group: in staging-deploy it would hold the VPS lock for the monitoring deploy and
+    # delay promote-staging and every queued member behind it; it only reads the app stack.
     assert re.findall(r"^      group: (\S+)$", job, re.M) == ["staging-monitoring"]
 
 

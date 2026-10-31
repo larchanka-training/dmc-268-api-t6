@@ -266,6 +266,10 @@ case "$1" in
         uv run python "${STUB_EXEC_HELPER}" "${action_args[@]}"
         ;;
       down) exit "${STUB_DOWN_STATUS:-0}" ;;
+      ps)
+        [[ -z "${STUB_PS_OUTPUT:-}" ]] || printf '%s\\n' "${STUB_PS_OUTPUT}"
+        exit "${STUB_PS_STATUS:-0}"
+        ;;
     esac
     ;;
 esac
@@ -365,13 +369,17 @@ def _mode(path: Path) -> int:
 
 @dataclass(frozen=True)
 class Host:
-    """A fake staging host: APP_DIR with the uploaded deploy files and a fake docker on PATH."""
+    """A fake host: APP_DIR with the uploaded deploy files and a fake docker on PATH.
+
+    The basename of APP_DIR is the compose project, as on the course VPS.
+    """
 
     app_dir: Path
     bin_dir: Path
     volumes: Path
     log: Path
     tmp: Path
+    project: str = PROJECT
 
     @property
     def env_file(self) -> Path:
@@ -384,7 +392,7 @@ class Host:
         return self.log.read_text(encoding="utf-8").splitlines() if self.log.exists() else []
 
     def add_volume(self, name: str) -> None:
-        (self.volumes / f"{PROJECT}_{name}").touch()
+        (self.volumes / f"{self.project}_{name}").touch()
 
     def run(
         self, script: str, *args: str, env: Mapping[str, str] | None = None
@@ -442,9 +450,8 @@ class Host:
         return self.run("deploy.sh", image, env={**ci_env, **(env or {})})
 
 
-@pytest.fixture
-def host(tmp_path: Path) -> Host:
-    app_dir = tmp_path / "opt" / PROJECT
+def make_host(tmp_path: Path, project: str = PROJECT) -> Host:
+    app_dir = tmp_path / "opt" / project
     app_dir.mkdir(parents=True)
     # The same renames as the "Prepare host" step.
     shutil.copy(STAGING_COMPOSE, app_dir / "compose.yml")
@@ -473,8 +480,18 @@ def host(tmp_path: Path) -> Host:
         )
     )
     return Host(
-        app_dir=app_dir, bin_dir=bin_dir, volumes=volumes, log=tmp_path / "docker.log", tmp=tmp
+        app_dir=app_dir,
+        bin_dir=bin_dir,
+        volumes=volumes,
+        log=tmp_path / "docker.log",
+        tmp=tmp,
+        project=project,
     )
+
+
+@pytest.fixture
+def host(tmp_path: Path) -> Host:
+    return make_host(tmp_path)
 
 
 def _ci_auto_rollback(
@@ -779,7 +796,7 @@ def test_manual_rollback_failure_keeps_followup_and_promotion_success_gated() ->
     assert "    if: github.ref == 'refs/heads/main'" in workflow
     assert "    needs: rollback" in workflow.split("  promote-staging:", 1)[1]
     assert "format('rollback-ignored-{0}', github.run_id)" in workflow
-    assert "  cancel-in-progress: false" in workflow
+    assert "  cancel-in-progress: false\n  queue: max\n" in workflow
 
 
 def _release_unchanged_literal() -> str:
@@ -1575,7 +1592,7 @@ def test_rollback_without_a_release_stops_the_stack_by_project_name(host: Host, 
 
     assert result.returncode == 0, result.stderr
     calls = host.calls()
-    down = calls.index(f"compose -p {PROJECT} down --remove-orphans")
+    down = calls.index(f"compose -p {host.project} down --remove-orphans")
     started = next(i for i, call in enumerate(calls) if call.startswith("run -d --name"))
     assert down < started
     assert "--network-alias api-staging" in calls[started]

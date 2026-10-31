@@ -64,6 +64,7 @@ if [[ -f "${ENV_FILE}" ]]; then
   RABBITMQ_USER="${RABBITMQ_USER:-$(read_compose_env_var RABBITMQ_USER "${ENV_FILE}")}"
   RABBITMQ_PASSWORD="${RABBITMQ_PASSWORD:-$(read_compose_env_var RABBITMQ_PASSWORD "${ENV_FILE}")}"
   REDIS_PASSWORD="${REDIS_PASSWORD:-$(read_compose_env_var REDIS_PASSWORD "${ENV_FILE}")}"
+  NO_PREVIOUS_RELEASE="${NO_PREVIOUS_RELEASE:-$(read_compose_env_var NO_PREVIOUS_RELEASE "${ENV_FILE}")}"
 fi
 
 # ports: publish the API on host port 80 (dedicated Terraform host).
@@ -75,6 +76,11 @@ if [[ "${DEPLOY_MODE}" != "ports" && "${DEPLOY_MODE}" != "edge" ]]; then
 fi
 if [[ "${DEPLOY_MODE}" == "edge" && ! "${EDGE_ALIAS:-}" =~ ^[a-z0-9]+(-[a-z0-9]+)+$ ]]; then
   echo "EDGE_ALIAS (<service>-<env>) is required in edge mode, got: ${EDGE_ALIAS:-}" >&2
+  exit 1
+fi
+# What rollback.sh puts in place of a release without a previous one (see there); kept in .env.
+if [[ -n "${NO_PREVIOUS_RELEASE:-}" && "${NO_PREVIOUS_RELEASE}" != "bootstrap" && "${NO_PREVIOUS_RELEASE}" != "stop" ]]; then
+  echo "NO_PREVIOUS_RELEASE must be bootstrap or stop, got: ${NO_PREVIOUS_RELEASE}" >&2
   exit 1
 fi
 COMPOSE=(docker compose -p "${COMPOSE_PROJECT}" -f "${COMPOSE_FILE}" -f "${APP_DIR}/compose.${DEPLOY_MODE}.yml" --env-file "${ENV_FILE}")
@@ -189,7 +195,8 @@ write_compose_env_file \
   "${EDGE_ALIAS:-}" \
   "${RABBITMQ_USER:-app}" \
   "${RABBITMQ_PASSWORD}" \
-  "${REDIS_PASSWORD}"
+  "${REDIS_PASSWORD}" \
+  "${NO_PREVIOUS_RELEASE:-}"
 
 if docker inspect "${BOOTSTRAP_NAME}" >/dev/null 2>&1; then
   docker rm -f "${BOOTSTRAP_NAME}" >/dev/null

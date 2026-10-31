@@ -20,6 +20,11 @@ EDGE_NETWORK="${EDGE_NETWORK:-dmc268-edge}"
 # auto: a failed deploy is being undone; the failed image must not become the rollback target.
 # manual: an operator rolls back a release; it becomes the previous release (mirrors :staging-previous).
 ROLLBACK_MODE="${ROLLBACK_MODE:-manual}"
+# What replaces a release that has no previous one to go back to:
+# bootstrap: a stock nginx under the API alias or port (as cloud-init's placeholder does);
+# stop: nothing, the stack is only taken down (prod: the edge proxy's own 503 for the API host is
+#   better than the nginx welcome page).
+# Set by the workflow and kept in the stack's .env (see below); empty means bootstrap.
 
 if [[ "${ROLLBACK_MODE}" != "auto" && "${ROLLBACK_MODE}" != "manual" ]]; then
   echo "ROLLBACK_MODE must be auto or manual, got: ${ROLLBACK_MODE}" >&2
@@ -153,6 +158,20 @@ PYTHON
 restore_bootstrap() {
   # By project name only, without compose.yml: an older .env may lack variables the current file
   # requires, and a stack left running would share the API alias with the bootstrap container.
+  if [[ "${NO_PREVIOUS_RELEASE}" == "stop" ]]; then
+    # Stopping is the whole rollback here: a failed down must not report success while the failed
+    # release keeps running, and an unreadable project counts as not stopped.
+    local remaining
+    if ! docker compose -p "${COMPOSE_PROJECT}" down --remove-orphans \
+      || ! remaining="$(docker compose -p "${COMPOSE_PROJECT}" ps -aq)" || [[ -n "${remaining}" ]]; then
+      echo "failed to stop compose project ${COMPOSE_PROJECT}; the failed release may still run" >&2
+      return 1
+    fi
+    docker rm -f "${BOOTSTRAP_NAME}" >/dev/null 2>&1 || true
+    rm -f "${STATE_FILE}" "${PREVIOUS_FILE}"
+    echo "stopped compose project ${COMPOSE_PROJECT}; no bootstrap container (NO_PREVIOUS_RELEASE=stop)"
+    return 0
+  fi
   if ! docker compose -p "${COMPOSE_PROJECT}" down --remove-orphans; then
     echo "compose down failed for project ${COMPOSE_PROJECT}; not starting the bootstrap container" >&2
     return 1
@@ -188,6 +207,13 @@ if [[ -f "${ENV_FILE}" ]]; then
   RABBITMQ_USER="${RABBITMQ_USER:-$(read_compose_env_var RABBITMQ_USER "${ENV_FILE}")}"
   RABBITMQ_PASSWORD="${RABBITMQ_PASSWORD:-$(read_compose_env_var RABBITMQ_PASSWORD "${ENV_FILE}")}"
   REDIS_PASSWORD="${REDIS_PASSWORD:-$(read_compose_env_var REDIS_PASSWORD "${ENV_FILE}")}"
+  NO_PREVIOUS_RELEASE="${NO_PREVIOUS_RELEASE:-$(read_compose_env_var NO_PREVIOUS_RELEASE "${ENV_FILE}")}"
+fi
+
+NO_PREVIOUS_RELEASE="${NO_PREVIOUS_RELEASE:-bootstrap}"
+if [[ "${NO_PREVIOUS_RELEASE}" != "bootstrap" && "${NO_PREVIOUS_RELEASE}" != "stop" ]]; then
+  echo "NO_PREVIOUS_RELEASE must be bootstrap or stop, got: ${NO_PREVIOUS_RELEASE}" >&2
+  exit 1
 fi
 
 # ports: publish the API on host port 80 (dedicated Terraform host).
@@ -208,7 +234,7 @@ if [[ -n "${REQUESTED_IMAGE}" ]]; then
 elif [[ -f "${PREVIOUS_FILE}" ]]; then
   IMAGE="$(awk -F= '/^current_image=/{print $2}' "${PREVIOUS_FILE}")"
 else
-  echo "no previous release; restoring bootstrap" >&2
+  echo "no previous release; NO_PREVIOUS_RELEASE=${NO_PREVIOUS_RELEASE}" >&2
   restore_bootstrap
   exit 0
 fi
@@ -258,7 +284,8 @@ write_compose_env_file \
   "${EDGE_ALIAS:-}" \
   "${RABBITMQ_USER:-app}" \
   "${RABBITMQ_PASSWORD}" \
-  "${REDIS_PASSWORD}"
+  "${REDIS_PASSWORD}" \
+  "${NO_PREVIOUS_RELEASE}"
 
 # App secrets are not tied to an image: the files of the last deploy stay as they are.
 ensure_app_env_files "${APP_DIR}"
