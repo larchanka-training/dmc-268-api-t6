@@ -1,0 +1,37 @@
+{
+  "blockers": [],
+  "common_acceptance_criteria": [],
+  "held": null,
+  "issue": {
+    "assignees": [
+      "axyi"
+    ],
+    "board_status": "In Progress",
+    "number": 245,
+    "repo": "larchanka-training/dmc-268-api-t6",
+    "state": "OPEN",
+    "sub_issues": {
+      "open": 0,
+      "total": 0
+    },
+    "title": "[tests] Закройте хвосты ревью: флейк остановки, подписка index.repo, Retry-After",
+    "url": "https://github.com/larchanka-training/dmc-268-api-t6/issues/245"
+  },
+  "kickoff": {
+    "present": true,
+    "text": "**Репозиторий:** larchanka-training/dmc-268-api-t6\n\n**Ветка:** `fix/<n>-review-tails`\n\n**Что прочитать первым:**\n\n- `docs/WORKER_SHUTDOWN.md`"
+  },
+  "parts": [],
+  "reasons": [
+    "the acceptance criteria name parts (1, 2, 3) but the Scope has no part bullets this script can read — write the Scope parts as `- Ч.N (…): …` (create-issue format) or ask the user"
+  ],
+  "schema": 1,
+  "selected": null,
+  "task_prs": [],
+  "verdict": "stop",
+  "warnings": [
+    "acceptance criterion names Part 1, not in Scope",
+    "acceptance criterion names Part 2, not in Scope",
+    "acceptance criterion names Part 3, not in Scope"
+  ]
+}
