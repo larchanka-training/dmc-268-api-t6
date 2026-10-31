@@ -59,7 +59,7 @@ def _job(name: str) -> str:
 def test_monitoring_images_are_pinned_by_digest() -> None:
     images = re.findall(r"^    image: (\S+)$", _read(MONITORING / "compose.yml"), re.M)
 
-    assert len(images) == 8
+    assert len(images) == 9
     for image in images:
         assert re.fullmatch(r"[a-z0-9./_-]+:v?[\d.]+(-alpine)?@sha256:[0-9a-f]{64}", image), image
 
@@ -110,6 +110,20 @@ def test_only_grafana_and_prometheus_join_the_edge_network() -> None:
     assert "          - ${GRAFANA_ALIAS:?GRAFANA_ALIAS is required}" in edge
 
 
+def test_probes_run_from_the_project_network_only() -> None:
+    # The probes reach the public names from outside: no store and no edge network, as nobody.
+    block = _service_blocks(_read(MONITORING / "compose.yml"))["blackbox-exporter"]
+
+    assert "networks:" not in block
+    for overlay in MONITORING.glob("compose.*.yml"):
+        assert "blackbox-exporter" not in _read(overlay), overlay.name
+    assert '    user: "65534:65534"\n' in block
+    assert re.search(r"^    mem_limit: \d+m$", block, re.M)
+    assert "      - ./blackbox:/etc/blackbox_exporter:ro\n" in block
+    assert "      - --config.file=/etc/blackbox_exporter/blackbox.yml\n" in block
+    assert '"http://127.0.0.1:9115/-/healthy"]' in block
+
+
 def test_config_changes_recreate_the_service_that_reads_them() -> None:
     blocks = _service_blocks(_read(MONITORING / "compose.yml"))
     digests = {
@@ -118,6 +132,7 @@ def test_config_changes_recreate_the_service_that_reads_them() -> None:
         "grafana": "GRAFANA_CONFIG_DIGEST",
         "postgres-exporter": "POSTGRES_EXPORTER_CONFIG_DIGEST",
         "pg-backup": "PG_BACKUP_CONFIG_DIGEST",
+        "blackbox-exporter": "BLACKBOX_CONFIG_DIGEST",
     }
     deploy = _read(MONITORING / "deploy.sh")
 
@@ -638,6 +653,17 @@ def test_backup_dirs_belong_to_the_backup_user(host: Host) -> None:
     assert f"70:70 {backup_dir}" in host.log("chown.log")
     assert f"70:70 {textfile}" in host.log("chown.log")
     assert host.env()["BACKUP_DIR"] == str(backup_dir)
+
+
+def test_probe_config_is_readable_by_the_exporter_user(host: Host) -> None:
+    config_dir = host.monitoring_dir / "blackbox"
+    config_dir.chmod(0o700)
+    (config_dir / "blackbox.yml").chmod(0o600)
+    result = host.deploy()
+
+    assert result.returncode == 0, result.stderr
+    assert stat.S_IMODE(config_dir.stat().st_mode) == 0o755
+    assert stat.S_IMODE((config_dir / "blackbox.yml").stat().st_mode) == 0o644
 
 
 # --- pg-backup.sh with fake PostgreSQL tools -----------------------------------------------

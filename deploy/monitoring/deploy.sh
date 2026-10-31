@@ -367,11 +367,13 @@ else
 fi
 chmod 644 "${CADDY_TARGETS}.tmp"
 mv -f "${CADDY_TARGETS}.tmp" "${CADDY_TARGETS}"
-# Read by nobody (Prometheus) and grafana (uid 472) through read-only mounts.
+# Read by nobody (Prometheus, the blackbox exporter) and grafana (uid 472) through read-only mounts.
 find "${MONITORING_DIR}/prometheus" "${MONITORING_DIR}/grafana" "${MONITORING_DIR}/postgres-exporter" \
-  "${MONITORING_DIR}/alertmanager/templates" "${MONITORING_DIR}/backup" -type d -exec chmod 755 {} +
+  "${MONITORING_DIR}/alertmanager/templates" "${MONITORING_DIR}/backup" "${MONITORING_DIR}/blackbox" \
+  -type d -exec chmod 755 {} +
 find "${MONITORING_DIR}/prometheus" "${MONITORING_DIR}/grafana" "${MONITORING_DIR}/postgres-exporter" \
-  "${MONITORING_DIR}/alertmanager/templates" "${MONITORING_DIR}/backup" -type f -exec chmod 644 {} +
+  "${MONITORING_DIR}/alertmanager/templates" "${MONITORING_DIR}/backup" "${MONITORING_DIR}/blackbox" \
+  -type f -exec chmod 644 {} +
 
 {
   printf 'API_NETWORK=%s\n' "$(escape_compose_value "${API_NETWORK}")"
@@ -396,6 +398,7 @@ find "${MONITORING_DIR}/prometheus" "${MONITORING_DIR}/grafana" "${MONITORING_DI
   printf 'GRAFANA_CONFIG_DIGEST=%s\n' "$(config_digest grafana/provisioning)"
   printf 'POSTGRES_EXPORTER_CONFIG_DIGEST=%s\n' "$(config_digest postgres-exporter)"
   printf 'PG_BACKUP_CONFIG_DIGEST=%s\n' "$(config_digest backup)"
+  printf 'BLACKBOX_CONFIG_DIGEST=%s\n' "$(config_digest blackbox)"
 } > "${ENV_FILE}.tmp"
 chmod 600 "${ENV_FILE}.tmp"
 mv -f "${ENV_FILE}.tmp" "${ENV_FILE}"

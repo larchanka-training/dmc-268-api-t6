@@ -19,6 +19,7 @@ image_of() {
 }
 prometheus_image="$(image_of prom/prometheus)"
 alertmanager_image="$(image_of prom/alertmanager)"
+blackbox_image="$(image_of prom/blackbox-exporter)"
 
 tmp="$(mktemp -d)"
 trap 'rm -rf "${tmp}"' EXIT
@@ -49,6 +50,10 @@ done
 docker run --rm --entrypoint amtool -v "${PWD}/${MONITORING}/alertmanager/templates:/t:ro" \
   "${alertmanager_image}" template render --template.glob='/t/*.tmpl' \
   --template.text='{{ template "dmc.telegram.message" . }}' >/dev/null
+
+echo "== blackbox config check"
+docker run --rm -v "${PWD}/${MONITORING}/blackbox:/etc/blackbox_exporter:ro" "${blackbox_image}" \
+  --config.file=/etc/blackbox_exporter/blackbox.yml --config.check
 
 echo "== docker compose config (edge and ports, with the off-host copy)"
 for mode in edge ports; do
