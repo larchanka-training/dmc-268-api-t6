@@ -17,7 +17,7 @@ import logging
 import os
 import sys
 from collections.abc import Iterator, Mapping, MutableMapping, Sequence
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from contextvars import ContextVar
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -33,6 +33,7 @@ from opentelemetry.sdk.trace.export import (
 )
 from opentelemetry.trace import Span, SpanKind, Status, StatusCode
 from opentelemetry.util.types import AttributeValue
+from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -67,11 +68,11 @@ ALLOWED_ATTRIBUTES = frozenset(
         "messaging.destination.name",
     }
 )
-# The ``exception`` event of ``Span.record_exception``: type, a bounded message and the stack.
+# The ``exception`` event of ``Span.record_exception``: the type and the frames of the stack. The
+# message stays out: it can quote a payload (it is ``runs.error_message``, closed to Grafana, §3).
 ALLOWED_EVENT_ATTRIBUTES = frozenset(
-    {"exception.type", "exception.message", "exception.stacktrace", "exception.escaped"}
+    {"exception.type", "exception.stacktrace", "exception.escaped"}
 )
-MESSAGE_LIMIT = 500
 
 _run_id: ContextVar[str | None] = ContextVar("run_id", default=None)
 
@@ -112,9 +113,11 @@ class JsonFormatter(logging.Formatter):
             "logger": record.name,
             "message": record.getMessage(),
         }
-        run_id = current_run_id()
+        # A delivery binds run_id; elsewhere a call site passes extra={"run_id": ...}. These two
+        # extras are the only ones read: any other extra may hold a body and stays out.
+        run_id = current_run_id() or record.__dict__.get(RUN_ID)
         if run_id is not None:
-            entry[RUN_ID] = run_id
+            entry[RUN_ID] = str(run_id)
         context = trace.get_current_span().get_span_context()
         if context.is_valid:
             entry["trace_id"] = format(context.trace_id, "032x")
@@ -122,10 +125,31 @@ class JsonFormatter(logging.Formatter):
         if record.exc_info and record.exc_info[0] is not None:
             entry["error_type"] = record.exc_info[0].__name__
             entry["exc_info"] = self.formatException(record.exc_info)
+        elif isinstance(record.__dict__.get("error_type"), str):
+            entry["error_type"] = record.__dict__["error_type"]
         return json.dumps(entry, ensure_ascii=False, default=str)
 
 
+class SpanErrorHandler(logging.Handler):
+    """Error tracking: an ERROR record with an exception marks the current span.
+
+    Most failures are caught and classified (a failed run, a redelivery) rather than raised, and
+    only logged; this puts each of them on the trace of the run, with the type and the stack.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(logging.ERROR)
+
+    def emit(self, record: logging.LogRecord) -> None:
+        if not record.exc_info or record.exc_info[1] is None:
+            return
+        span = trace.get_current_span()
+        if span.is_recording():
+            mark_error(span, record.exc_info[1])
+
+
 _HANDLER_NAME = "dmc-json"
+_SPAN_HANDLER_NAME = "dmc-span-errors"
 # uvicorn installs its own text handlers on these; they go through the root handler instead.
 _UVICORN_LOGGERS = ("uvicorn", "uvicorn.error", "uvicorn.access")
 
@@ -135,12 +159,16 @@ def configure_logging(service: str, *, level: int = logging.INFO) -> None:
     root = logging.getLogger()
     root.setLevel(level)
     for handler in list(root.handlers):
-        if handler.get_name() == _HANDLER_NAME or type(handler) is logging.StreamHandler:
+        name = handler.get_name()
+        if name in (_HANDLER_NAME, _SPAN_HANDLER_NAME) or type(handler) is logging.StreamHandler:
             root.removeHandler(handler)
     handler = logging.StreamHandler(sys.stderr)
     handler.set_name(_HANDLER_NAME)
     handler.setFormatter(JsonFormatter(service))
     root.addHandler(handler)
+    span_errors = SpanErrorHandler()
+    span_errors.set_name(_SPAN_HANDLER_NAME)
+    root.addHandler(span_errors)
     for name in _UVICORN_LOGGERS:
         uvicorn_logger = logging.getLogger(name)
         uvicorn_logger.handlers.clear()
@@ -150,6 +178,20 @@ def configure_logging(service: str, *, level: int = logging.INFO) -> None:
 # --- traces ---------------------------------------------------------------------------------
 
 
+def frames_only(stacktrace: str) -> str:
+    """The frames of a formatted traceback, without the ``Type: message`` lines.
+
+    The message of an exception (and of each chained cause) can quote a payload: a pydantic
+    ``input_value`` of the model output, a URL with its query. Frames are code locations.
+    """
+    lines = [
+        line
+        for line in stacktrace.splitlines()
+        if line.startswith(("Traceback (most recent call last)", "  "))
+    ]
+    return "\n".join(lines)
+
+
 def _allowed(
     attributes: Mapping[str, AttributeValue] | None, allowed: frozenset[str]
 ) -> dict[str, AttributeValue]:
@@ -157,8 +199,8 @@ def _allowed(
     for key, value in (attributes or {}).items():
         if key not in allowed:
             continue
-        if key == "exception.message" and isinstance(value, str):
-            value = value[:MESSAGE_LIMIT]
+        if key == "exception.stacktrace" and isinstance(value, str):
+            value = frames_only(value)
         kept[key] = value
     return kept
 
@@ -229,7 +271,16 @@ def shutdown_tracing(provider: TracerProvider | None) -> None:
         provider.shutdown()
 
 
+_RECORDED = "__dmc_span_recorded__"
+
+
 def mark_error(span: Span, error: BaseException) -> None:
+    """Status ``error``, ``error.type`` and one ``exception`` event per exception and span."""
+    marker = f"{span.get_span_context().span_id:016x}"
+    if getattr(error, _RECORDED, None) == marker:
+        return
+    with suppress(AttributeError):
+        setattr(error, _RECORDED, marker)
     span.record_exception(error)
     span.set_attribute(ERROR_TYPE, type(error).__name__)
     span.set_status(Status(StatusCode.ERROR, type(error).__name__))
@@ -245,16 +296,15 @@ def record_step_span(
     tool: str,
     index: int,
     attempt: int,
-    ok: bool,
-    response: Any,
+    error_type: str | None,
     started_at: datetime,
     duration_ms: int,
 ) -> None:
     """A finished span for one ``run_actions`` row, under the current span (the run).
 
     The row already holds the timing, so the span is written after the fact with the same start
-    and duration. Only the error type and class of a failed step leave the row: never its request
-    or response body.
+    and duration. ``error_type`` (None: the step succeeded) is all that leaves the row: never its
+    request or response body.
     """
     span = tracer().start_span(
         tool,
@@ -266,13 +316,9 @@ def record_step_span(
             ATTEMPT: attempt,
         },
     )
-    if not ok:
-        error = response.get("error") if isinstance(response, dict) else None
-        kind = "error"
-        if isinstance(error, dict):
-            kind = str(error.get("type") or error.get("class") or "error")
-        span.set_attribute(ERROR_TYPE, kind)
-        span.set_status(Status(StatusCode.ERROR, kind))
+    if error_type is not None:
+        span.set_attribute(ERROR_TYPE, error_type)
+        span.set_status(Status(StatusCode.ERROR, error_type))
     span.end(end_time=_ns(started_at + timedelta(milliseconds=duration_ms)))
 
 
@@ -287,15 +333,18 @@ def inject_headers(headers: MutableMapping[str, Any]) -> MutableMapping[str, Any
 
 @contextmanager
 def publish_span(queue: str, run_id: UUID) -> Iterator[None]:
-    with tracer().start_as_current_span(
-        f"{queue} publish",
-        kind=SpanKind.PRODUCER,
-        attributes={
-            RUN_ID: str(run_id),
-            "messaging.system": "rabbitmq",
-            "messaging.operation.type": "publish",
-            "messaging.destination.name": queue,
-        },
+    with (
+        bind_run_id(run_id),
+        tracer().start_as_current_span(
+            f"{queue} publish",
+            kind=SpanKind.PRODUCER,
+            attributes={
+                RUN_ID: str(run_id),
+                "messaging.system": "rabbitmq",
+                "messaging.operation.type": "publish",
+                "messaging.destination.name": queue,
+            },
+        ),
     ):
         yield
 
@@ -344,10 +393,10 @@ _UNTRACED_PATHS = frozenset({"/healthcheck"})
 class TracingMiddleware:
     """A server span per HTTP request: method, route template and status, never the URL."""
 
-    def __init__(self, app: Any) -> None:
+    def __init__(self, app: ASGIApp) -> None:
         self._app = app
 
-    async def __call__(self, scope: dict[str, Any], receive: Any, send: Any) -> None:
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] != "http" or scope.get("path") in _UNTRACED_PATHS:
             await self._app(scope, receive, send)
             return
@@ -359,9 +408,12 @@ class TracingMiddleware:
             record_exception=False,
             set_status_on_exception=False,
         ) as span:
+            started = False
 
-            async def traced_send(message: dict[str, Any]) -> None:
+            async def traced_send(message: Message) -> None:
+                nonlocal started
                 if message["type"] == "http.response.start":
+                    started = True
                     status = int(message["status"])
                     span.set_attribute("http.response.status_code", status)
                     if status >= 500:
@@ -371,6 +423,9 @@ class TracingMiddleware:
             try:
                 await self._app(scope, receive, traced_send)
             except Exception as error:
+                # ServerErrorMiddleware, outside this one, answers 500 through its own send.
+                if not started:
+                    span.set_attribute("http.response.status_code", 500)
                 mark_error(span, error)
                 raise
             finally:

@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import sys
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -37,10 +38,11 @@ from app.common.infrastructure.telemetry import (
     configure_tracing,
     record_step_span,
 )
-from app.modules.reviews.application.handle_review_run import DeliveryOutcome
+from app.modules.reviews.application.handle_review_run import ClaimedAttempt, DeliveryOutcome
 from app.modules.reviews.application.run_delivery import RunDeliveryPointer
 from app.modules.reviews.infrastructure.run_action_records import insert_run_action
 from tests.test_queue_messages import RUN, Delivery, pending
+from tests.test_review_run_worker import FakeRun, handler
 
 DIFF = "@@ -1 +1 @@\n-secret_old\n+secret_new"
 REVIEW_BODY = "Review body: the token leaks in line 3"
@@ -127,13 +129,14 @@ def test_the_exporter_drops_every_attribute_outside_the_allowlist(
         },
     ) as span:
         span.add_event("log", {"body": REVIEW_BODY, "exception.type": "ValueError"})
-        span.record_exception(ValueError("x" * 2000))
+        span.record_exception(ValueError(REVIEW_BODY))
 
     [exported] = spans.get_finished_spans()
     assert dict(exported.attributes or {}) == {"run_id": str(RUN), "dmc.tool": "llm.call"}
     assert dict(exported.events[0].attributes or {}) == {"exception.type": "ValueError"}
-    message = (exported.events[1].attributes or {})["exception.message"]
-    assert message == "x" * telemetry.MESSAGE_LIMIT
+    exception = exported.events[1].attributes or {}
+    assert exception["exception.type"] == "ValueError"
+    assert "exception.message" not in exception
     text = _texts(exported)
     for leaked in (DIFF, REVIEW_BODY, "token=x"):
         assert leaked not in text
@@ -236,8 +239,7 @@ def test_the_run_message_carries_the_trace_and_the_worker_continues_it(
             tool="context.build",
             index=0,
             attempt=1,
-            ok=True,
-            response=None,
+            error_type=None,
             started_at=STARTED,
             duration_ms=10,
         )
@@ -288,7 +290,7 @@ def test_an_exception_in_the_worker_is_an_error_span_with_the_run_id(
     assert (consumed.attributes or {})["error.type"] == "RuntimeError"
     [event] = consumed.events
     assert event.name == "exception"
-    assert (event.attributes or {})["exception.message"] == "provider exploded"
+    assert (event.attributes or {})["exception.type"] == "RuntimeError"
 
 
 def test_a_dead_lettered_run_is_an_error_span(spans: InMemorySpanExporter) -> None:
@@ -350,6 +352,7 @@ def test_the_api_span_has_the_route_template_and_status_not_the_url(
     assert str(RUN) not in _texts(ok) and "secret" not in _texts(ok)
     assert failed.status.status_code is StatusCode.ERROR
     assert (failed.attributes or {})["error.type"] == "RuntimeError"
+    assert (failed.attributes or {})["http.response.status_code"] == 500
 
 
 # --- JSON logs ------------------------------------------------------------------------------
@@ -386,7 +389,7 @@ def test_an_exception_log_line_names_the_error_type() -> None:
         raise ValueError("bad")
     except ValueError:
         record = _record("failed")
-        record.exc_info = __import__("sys").exc_info()
+        record.exc_info = sys.exc_info()
 
     entry = json.loads(formatter.format(record))
     assert entry["error_type"] == "ValueError"
@@ -410,3 +413,98 @@ def test_configure_logging_routes_uvicorn_through_one_json_handler() -> None:
         for handler in list(root.handlers):
             if handler not in before:
                 root.removeHandler(handler)
+
+
+# --- error tracking -------------------------------------------------------------------------
+
+
+@pytest.fixture
+def span_errors() -> Iterator[None]:
+    root = logging.getLogger()
+    tracked = telemetry.SpanErrorHandler()
+    root.addHandler(tracked)
+    yield
+    root.removeHandler(tracked)
+
+
+def test_a_caught_pipeline_exception_reaches_the_span_of_the_run(
+    spans: InMemorySpanExporter, span_errors: None
+) -> None:
+    """The handler classifies a pipeline error into a failed or retried run instead of raising."""
+
+    def failing(claimed: ClaimedAttempt) -> bool:
+        raise RuntimeError(f"postprocess failed on {REVIEW_BODY}")
+
+    async def deliver() -> None:
+        with telemetry.consume_span("review.run", {}, RUN):
+            await handler(FakeRun(), failing).execute(RUN)
+
+    asyncio.run(deliver())
+
+    [consumed] = spans.get_finished_spans()
+    assert consumed.status.status_code is StatusCode.ERROR
+    assert (consumed.attributes or {})["error.type"] == "RuntimeError"
+    [event] = consumed.events
+    exception = event.attributes or {}
+    assert exception["exception.type"] == "RuntimeError"
+    stack = str(exception["exception.stacktrace"])
+    assert stack.startswith("Traceback") and "in failing" in stack
+    assert "exception.message" not in exception
+    assert REVIEW_BODY not in stack
+
+
+def test_a_logged_exception_is_recorded_once_per_span(
+    spans: InMemorySpanExporter, span_errors: None
+) -> None:
+    log = logging.getLogger("app.test")
+    with telemetry.tracer().start_as_current_span("review.run") as span:
+        try:
+            raise ValueError("once")
+        except ValueError as error:
+            telemetry.mark_error(span, error)
+            log.exception("failed")
+        log.error("no exception here")
+
+    [exported] = spans.get_finished_spans()
+    assert [event.name for event in exported.events] == ["exception"]
+
+
+def test_the_stack_keeps_frames_and_drops_every_message() -> None:
+    try:
+        try:
+            raise KeyError(DIFF)
+        except KeyError as cause:
+            raise ValueError(REVIEW_BODY) from cause
+    except ValueError:
+        import traceback
+
+        text = traceback.format_exc()
+
+    frames = telemetry.frames_only(text)
+    assert frames.startswith("Traceback (most recent call last)")
+    assert 'File "' in frames
+    assert DIFF.splitlines()[-1] not in frames and REVIEW_BODY not in frames
+
+
+def test_run_id_from_the_call_site_reaches_api_and_webhook_worker_lines() -> None:
+    formatter = JsonFormatter("webhook-worker")
+    record = _record("Run publication remains pending", run_id=str(RUN), error_type="Timeout")
+
+    entry = json.loads(formatter.format(record))
+    assert entry["run_id"] == str(RUN)
+    assert entry["error_type"] == "Timeout"
+
+
+def test_a_publication_binds_the_run_id_for_its_log_lines(spans: InMemorySpanExporter) -> None:
+    seen: list[str | None] = []
+
+    class Recording(Exchange):
+        async def publish(self, message: aio_pika.Message, routing_key: str = "") -> None:
+            seen.append(telemetry.current_run_id())
+
+    publisher = amqp.AmqpQueuePublisher(
+        cast(AbstractExchange, Recording()), cast(AbstractExchange, Recording())
+    )
+    asyncio.run(publisher.publish_confirmed(pending()))
+
+    assert seen == [str(RUN)]

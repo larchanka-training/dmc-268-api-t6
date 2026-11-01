@@ -30,6 +30,16 @@ def step_succeeded(response: Any) -> bool:
     return not (isinstance(response, dict) and "error" in response)
 
 
+def step_error_type(response: Any) -> str | None:
+    """``type`` (an exception) or ``class`` (an LLM error) of a failed step; None on success."""
+    if step_succeeded(response):
+        return None
+    error = response["error"]
+    if isinstance(error, dict):
+        return str(error.get("type") or error.get("class") or "error")
+    return "error"
+
+
 async def insert_run_action(
     session: AsyncSession,
     *,
@@ -80,8 +90,7 @@ async def insert_run_action(
         tool=tool,
         index=index,
         attempt=run_attempt,
-        ok=ok,
-        response=response,
+        error_type=step_error_type(response),
         started_at=started_at,
         duration_ms=duration_ms,
     )

@@ -461,6 +461,14 @@ class HandleReviewRun:
             failure = RunFailure("deadline_exceeded", "the attempt watchdog stopped the run")
         except Exception as exc:
             failure = classify_failure(exc)
+            # Error tracking: the trace of the run gets the exception (docs/MONITORING.md §11).
+            _LOGGER.error(
+                "Run %s attempt failed: %s",
+                claimed.run_id,
+                failure.error_code,
+                exc_info=exc,
+                extra={"run_id": str(claimed.run_id)},
+            )
         return await self._fail(claimed, failure)
 
     async def _watch(self, claimed: ClaimedAttempt, execution: _Execution) -> bool:
