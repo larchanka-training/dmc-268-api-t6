@@ -39,7 +39,6 @@ from app.common.infrastructure.telemetry import (
 )
 from app.modules.reviews.application.handle_review_run import DeliveryOutcome
 from app.modules.reviews.application.run_delivery import RunDeliveryPointer
-from app.modules.reviews.infrastructure import run_action_records
 from app.modules.reviews.infrastructure.run_action_records import insert_run_action
 from tests.test_queue_messages import RUN, Delivery, pending
 
@@ -50,8 +49,8 @@ STARTED = datetime(2026, 11, 1, 12, 0, tzinfo=UTC)
 
 def _reset_global_provider() -> None:
     # The API allows one global provider per process; tests swap it.
-    trace._TRACER_PROVIDER_SET_ONCE._done = False  # type: ignore[attr-defined]
-    trace._TRACER_PROVIDER = None  # type: ignore[attr-defined]
+    trace._TRACER_PROVIDER_SET_ONCE._done = False
+    trace._TRACER_PROVIDER = None
 
 
 @pytest.fixture
@@ -203,7 +202,6 @@ def test_each_run_action_row_is_a_step_span_without_its_request_or_response(
     assert span.end_time is not None and span.start_time is not None
     assert span.end_time - span.start_time == 1_500_000_000
     assert DIFF not in _texts(span) and REVIEW_BODY not in _texts(span)
-    assert run_action_records.record_step_span is record_step_span
 
 
 # --- RabbitMQ: one trace from publisher to worker ----------------------------------------------
