@@ -9,6 +9,10 @@
         "assignees": {
           "nodes": []
         },
+        "subIssuesSummary": {
+          "total": 0,
+          "completed": 0
+        },
         "projectItems": {
           "pageInfo": {
             "hasNextPage": false,
@@ -71,6 +75,13 @@
               }
             }
           ]
+        },
+        "comments": {
+          "pageInfo": {
+            "hasNextPage": false,
+            "endCursor": null
+          },
+          "nodes": []
         }
       }
     }

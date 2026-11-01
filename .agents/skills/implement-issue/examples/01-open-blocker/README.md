@@ -5,7 +5,9 @@
 **Source:** a live snapshot of api#269 (this skill's own issue), recorded on 2026-10-29 by
 running `preflight.py` against GitHub and saving every response. The only edit: the body of each
 cross-referencing pull request is reduced to the first line of its `## What` and its `## Refs`
-lines, the only parts the script reads.
+lines, the only parts the script reads. Added in 1.1.0, when the query gained them: the `mergedAt`
+of each merged pull request (read from GitHub) and an empty `comments` page — no accept-issue
+comment existed at the recording.
 
 **A dated snapshot.** api#265 was closed later the same day, so the live api#269 now stops on
 api#266 alone (one line in `reasons`). The fixture and `expected.json` keep the state at the

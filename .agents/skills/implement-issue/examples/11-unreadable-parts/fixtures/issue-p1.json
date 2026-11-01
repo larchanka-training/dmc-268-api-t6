@@ -1,0 +1,65 @@
+{
+  "data": {
+    "repository": {
+      "issue": {
+        "title": "[tests] Закройте хвосты ревью: флейк остановки, подписка index.repo, Retry-After",
+        "url": "https://github.com/larchanka-training/dmc-268-api-t6/issues/245",
+        "state": "OPEN",
+        "body": "## Background\n\nХвосты приёмки: пять находок разной срочности. (Synthetic: the shape of the Scope and Acceptance Criteria of api#245, shortened.)\n\n## Scope\n\n- **Ч.1 (P2, тесты/CI). Флейк теста остановки в обязательном чеке.** Тест ждёт возвращённое сообщение без опроса.\n- **Ч.2 (P2, индекс). Подписка `index.repo` не восстанавливается после замены канала.** Очередь берётся без регистрации.\n- **Ч.3 (P3, публикация). `Retry-After` на пути публикации.** Парсер не защищён от длинных чисел.\n- Вне объёма: приёмка #171.\n\n## Acceptance Criteria\n\n- [ ] Ч.1: тест ждёт возвращённое сообщение ограниченным опросом\n- [ ] Ч.2: очередь `index.repo` регистрируется для восстановления после замены канала\n- [ ] Ч.3: `Retry-After` из 5000 цифр не выходит из классификатора исключением\n\n## Kickoff — с чего начать\n\n**Репозиторий:** larchanka-training/dmc-268-api-t6\n\n**Ветка:** `fix/<n>-review-tails`\n\n**Что прочитать первым:**\n\n- `docs/WORKER_SHUTDOWN.md`\n",
+        "assignees": {
+          "nodes": [
+            {
+              "login": "axyi"
+            }
+          ]
+        },
+        "subIssuesSummary": {
+          "total": 0,
+          "completed": 0
+        },
+        "projectItems": {
+          "pageInfo": {
+            "hasNextPage": false,
+            "endCursor": "MQ"
+          },
+          "nodes": [
+            {
+              "project": {
+                "number": 12,
+                "owner": {
+                  "__typename": "Organization",
+                  "login": "larchanka-training"
+                }
+              },
+              "fieldValueByName": {
+                "__typename": "ProjectV2ItemFieldSingleSelectValue",
+                "name": "In Progress"
+              }
+            }
+          ]
+        },
+        "blockedBy": {
+          "pageInfo": {
+            "hasNextPage": false,
+            "endCursor": null
+          },
+          "nodes": []
+        },
+        "timelineItems": {
+          "pageInfo": {
+            "hasNextPage": false,
+            "endCursor": null
+          },
+          "nodes": []
+        },
+        "comments": {
+          "pageInfo": {
+            "hasNextPage": false,
+            "endCursor": null
+          },
+          "nodes": []
+        }
+      }
+    }
+  }
+}

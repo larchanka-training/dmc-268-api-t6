@@ -237,7 +237,21 @@ def test_parse_ref(text: str, parsed: tuple[str, int]) -> None:
     assert bs.parse_ref(text) == parsed
 
 
-@pytest.mark.parametrize("text", ["", "api", "api#0", "#5", "web#5", "0", "a b#1"])
+@pytest.mark.parametrize(
+    "text",
+    [
+        "",
+        "api",
+        "api#0",
+        "#5",
+        "web#5",
+        "0",
+        "a b#1",
+        "api#1000000000",
+        "9" * 5000,
+        "api#" + "9" * 5000,
+    ],
+)
 def test_bad_ref_exits_2_and_never_reaches_gh(text: str) -> None:
     r = run(text, "In Progress")  # the guard gh would exit 97 and the exit would be 3
     assert r.returncode == 2

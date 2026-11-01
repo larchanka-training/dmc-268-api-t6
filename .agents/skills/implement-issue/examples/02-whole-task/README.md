@@ -2,8 +2,9 @@
 
 # 02 — an issue without parts: take the whole task
 
-**Source:** a real snapshot of api#287, recorded on 2026-10-29, unedited (no pull request
-cross-references it, so there was nothing to trim).
+**Source:** a real snapshot of api#287, recorded on 2026-10-29 (no pull request cross-references
+it, so there was nothing to trim). The one edit, made in 1.1.0 when the query gained the issue's
+comments: an empty `comments` page (api#287 has no accept-issue comment).
 
 ## Input
 

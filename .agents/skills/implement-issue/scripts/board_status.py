@@ -54,8 +54,9 @@ BOARD_NUMBER = 12
 FIXTURE_ENV = "IMPLEMENT_ISSUE_FIXTURE_DIR"
 GH_TIMEOUT = 120  # seconds per gh call
 
-REF = re.compile(r"(api|ui|[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)#([1-9][0-9]*)")
-NUMBER = re.compile(r"[1-9][0-9]*")
+# At most 9 digits: a longer number is a bad REF (exit 2), never a huge `int()`.
+REF = re.compile(r"(api|ui|[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)#([1-9][0-9]{0,8})")
+NUMBER = re.compile(r"[1-9][0-9]{0,8}")
 
 BOARD_QUERY = """
 query($org: String!, $board: Int!) {
@@ -109,7 +110,8 @@ def parse_ref(text: str) -> tuple[str, int]:
         return (ALIASES["api"], int(text))
     m = REF.fullmatch(text)
     if not m:
-        fail(f"bad REF {text!r}: expected api#N, ui#N, OWNER/NAME#N or N", 2)
+        shown = text if len(text) <= 60 else text[:60] + "…"
+        fail(f"bad REF {shown!r}: expected api#N, ui#N, OWNER/NAME#N or N", 2)
     return (ALIASES.get(m.group(1), m.group(1)), int(m.group(2)))
 
 
