@@ -339,7 +339,7 @@ API_DIR=/path/to/<project> deploy/monitoring/deploy.sh
 | GlitchTip | ~512m+ (web, worker, своя PostgreSQL и Redis) | ключ, пароль БД | нет: дороже Tempo по памяти |
 | self-hosted Sentry | 8+ ГБ | — | на общий VPS не помещается |
 
-Причина: Tempo встаёт в уже выкаченный стек одним сервисом, Grafana показывает трейсы рядом с метриками, а данные прогона не покидают VPS. Стек с Tempo — ~1,6 ГБ лимитов (+128m у `backup-offsite`). Трекинг ошибок — это span'ы со статусом `error` и событием `exception` (тип, сообщение до 500 символов, стек). Группировки и уведомлений, как в Sentry, нет. Об ошибках в канал по-прежнему сообщают алерты §5 (`ReviewRunsFailed`, `ReviewDeadLetters`), а причину ищут по `run_id` в Tempo.
+Причина: Tempo встаёт в уже выкаченный стек одним сервисом, Grafana показывает трейсы рядом с метриками, а данные прогона не покидают VPS. Стек с Tempo — ~1,6 ГБ лимитов (+128m у `backup-offsite`). Трекинг ошибок — это span'ы со статусом `error` и событием `exception`: тип и кадры стека, без текста сообщения (он может цитировать тело запроса и лежит в `runs.error_message`, закрытой от Grafana, §3). Группировки и уведомлений, как в Sentry, нет. Об ошибках в канал по-прежнему сообщают алерты §5 (`ReviewRunsFailed`, `ReviewDeadLetters`), а причину ищут по `run_id` в Tempo.
 
 ### Что пишет код
 
@@ -350,11 +350,13 @@ API_DIR=/path/to/<project> deploy/monitoring/deploy.sh
 | `<tool>` — `policy.load`, `vcs.fetch_diff`, `context.build`, `llm.call`, `review.postprocess`, `github.publish_review`, … | `insert_run_action`: каждая строка `run_actions` | `run_id`, `dmc.tool`, `dmc.step.index`, `dmc.attempt`; начало и длительность — те же, что в строке; сбой шага (`response.error`) — статус `error` и `error.type` (`type` или `class` ошибки) |
 | `<METHOD> <route>` (SERVER) | `TracingMiddleware` API, кроме `/healthcheck` | `http.request.method`, `http.route` (шаблон, не URL), `http.response.status_code`; 5xx и исключение — `error` |
 
+**Ошибки.** Обработчик прогона не пробрасывает исключение пайплайна, а превращает его в `failed` или повтор. Поэтому ошибки на трейс попадают через лог: запись уровня ERROR с исключением (`SpanErrorHandler`, его ставит `configure_logging`) отмечает текущий span — `review.run` у worker, span запроса у API. `HandleReviewRun` пишет такую запись на каждую упавшую попытку (`Run <id> attempt failed: <error_code>`). Одно исключение даёт на span одно событие.
+
 Diff → Context → LLM → DB на трейсе: `vcs.fetch_diff` → `context.build` → `llm.call` (каждый вызов провайдера) → `review.postprocess` (запись итога в PostgreSQL в той же транзакции, что и строка). Трейс webhook-worker или API и трейс worker — один: контекст переходит через RabbitMQ в `traceparent`, повтор после ошибки копирует заголовки сообщения.
 
 **Граница данных** — та же, что у ролей мониторинга (§3). В span не попадают тела `run_actions.request` и `response`, `runs.review_body`, диффы, URL с query, SQL. Экспортёр (`RedactingSpanExporter`) перед отправкой оставляет только атрибуты из `ALLOWED_ATTRIBUTES` (`app/common/infrastructure/telemetry.py`), поэтому новый атрибут или библиотека границу не расширят. Автоинструментации httpx и SQLAlchemy нет. Проверяет `tests/test_telemetry.py`.
 
-**Включение.** Export включён, только если задан `OTEL_EXPORTER_OTLP_ENDPOINT`. В `deploy/compose/staging.yml` у `api`, `worker` и `webhook-worker` это `http://tempo:4318`: Tempo в сети приложения (`API_NETWORK`), host-порта нет. Без переменной (или с пустой) OpenTelemetry остаётся no-op и ничего не отправляет. Если Tempo недоступен, теряются только span'ы: экспорт идёт фоном, таймаут 5 с, при остановке процесс ждёт не дольше него. Секретов нет. На хосте без стека мониторинга (prod, #308) переменную нужно оставить пустой, иначе экспортёр будет писать предупреждения о недоступном `tempo`.
+**Включение.** Export включён, только если задан `OTEL_EXPORTER_OTLP_ENDPOINT`. В `deploy/compose/staging.yml` у `api`, `worker` и `webhook-worker` это `http://tempo:4318`: Tempo в сети приложения (`API_NETWORK`), host-порта нет. Без переменной (или с пустой) OpenTelemetry остаётся no-op и ничего не отправляет. Если Tempo недоступен, теряются только span'ы: экспорт идёт фоном, таймаут 5 с, при остановке процесс ждёт не дольше него. Секретов нет. Prod — в «Ограничениях» ниже.
 
 ### Как найти прогон
 
@@ -376,9 +378,15 @@ Grafana → Explore → источник **Tempo** → TraceQL:
 {"ts": "2026-11-01T17:08:35.221+00:00", "level": "ERROR", "service": "worker", "logger": "app.modules.reviews.infrastructure.amqp", "message": "Message … handling failed (attempt 1/5); it is redelivered", "run_id": "489809f4-…", "trace_id": "65c1eeeb…", "span_id": "f1010322…", "error_type": "RuntimeError", "exc_info": "Traceback …"}
 ```
 
-`run_id` есть у записей внутри доставки `review.run` и `review.publish`, `trace_id` — у записей внутри span'а: по нему из лога открывается трейс. Поля `extra` записи в строку не попадают, только отформатированное сообщение. Поиск по прогону:
+`run_id` есть у записей внутри доставки `review.run` и `review.publish` и внутри публикации в очередь (так он попадает и в логи `api` и `webhook-worker`). Вне них его передаёт место вызова: `extra={"run_id": ...}`. `trace_id` есть у записей внутри span'а, по нему из лога открывается трейс. Из `extra` в строку попадают только `run_id` и `error_type`: остальные поля могут нести тело запроса. Поиск по прогону:
 
 ```bash
 docker compose -p dmc-268-api-staging logs worker --no-log-prefix | jq -c 'select(.run_id == "<run_id>")'
 ```
+
+### Ограничения
+
+- span шага пишется при вставке строки `run_actions`, до commit транзакции. Если транзакция откатится, в Tempo останется шаг, которого нет в `run_actions`.
+- `webhook-worker` даёт только span'ы публикации в очередь `review.run.*`; обработка доставок и их ошибки span'ов не имеют, видны в JSON-логах.
+- `OTEL_EXPORTER_OTLP_ENDPOINT` задан в `deploy/compose/staging.yml`, который prod получает как свой `compose.yml`. На prod без стека мониторинга экспортёр пишет предупреждения о недоступном `tempo`; вынести значение в переменную окружения — в #308.
 
