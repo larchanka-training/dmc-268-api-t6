@@ -129,7 +129,7 @@ flowchart LR
 
 ## 6. Выкат
 
-Job `Deploy monitoring` в `ci-cd.yml` запускается после успешного `Deploy staging` в своей группе concurrency `staging-monitoring` (не `staging-deploy`: там его ожидание отменяло бы `Promote staging tag` и наоборот; сбой мониторинга приложение не откатывает):
+Job `Deploy monitoring` в `ci-cd.yml` запускается после успешного `Deploy staging` в своей группе concurrency `staging-monitoring` (не `staging-deploy`: там он держал бы lock VPS на время своего выката и задерживал `Promote staging tag` и всех ждущих за ним; сбой мониторинга приложение не откатывает):
 
 1. `scp` содержимого `deploy/monitoring` и `deploy/scripts/env-file.sh` в `/opt/dmc-268-monitoring`.
 2. `deploy.sh`:
@@ -160,7 +160,7 @@ Grafana — на своём хосте `grafana.<APP_DOMAIN>` (A-запись н
 | Сквозной трейсинг (OpenTelemetry/Sentry), JSON-логи с `run_id` | отдельный PR после стабилизации пайплайна (договорённость команды). Нужен выбор бэкенда: Sentry SaaS (аккаунт и DSN), GlitchTip или Grafana Tempo; self-hosted Sentry на общий VPS не помещается |
 | Redis | бэкапить нечего: на staging он без тома и без персистентности (`save ""`, `appendonly no`), это кэш (SD §10) |
 | Метрики приложения (`/metrics` FastAPI, `X-RateLimit-Remaining` GitHub) | нужен код и зависимость; пока RPS и коды — с edge-прокси, пайплайн — из `run_actions` |
-| prod | prod-выката нет; `environment` в метках — `staging` |
+| prod | выкатывается вручную ([CICD.md](CICD.md) §5, п. 6); своих целей и алертов нет: запросы к `api.` (edge, `per_host`) и контейнеры prod (cAdvisor, алерт OOM) идут с `environment` = `staging` |
 | cAdvisor | читает состояние Docker через `/var/run` (сокеты Docker и containerd), что равносильно root на хосте; сетей, кроме сети проекта, и портов у него нет |
 
 ## 9. Бэкапы PostgreSQL

@@ -268,7 +268,7 @@ terraform -chdir=${STACK} destroy -var-file=environments/staging.tfvars
 | SSH | порт 22, пользователь и пароль из organization secrets `VPS_DMC268_U` / `VPS_DMC268_P`, хост — `VPS_DMC268_IP_T6` |
 | Docker | нет в исходном образе; ставит CI (`deploy/scripts/provision.sh`: `docker.io`, `docker-cli`, `docker-compose` из Debian, идемпотентно и с блокировкой для параллельных выкатов API и UI) |
 | Входящий трафик | edge-прокси Caddy на 80/443 (`/opt/dmc-268-edge`, project `dmc-268-edge`), остальные сервисы — только в docker-сети `dmc268-edge` |
-| Каталоги | `/opt/dmc-268-api-staging` (API staging), `/opt/dmc-268-edge` (прокси); UI — свои каталоги |
+| Каталоги | `/opt/dmc-268-api-staging` (API staging), `/opt/dmc-268-api-prod` (API prod, [CICD.md](CICD.md) §8.1), `/opt/dmc-268-edge` (прокси); UI — свои каталоги |
 
 Правила общего VPS:
 
