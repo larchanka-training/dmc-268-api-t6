@@ -188,7 +188,11 @@ class RerunRun:
                 await self._publisher.publish_confirmed(message)
             except Exception:
                 # The reconciler republishes a queued Run after 10 minutes (T18).
-                _LOGGER.exception("Rerun %s publication remains pending", message.run_id)
+                _LOGGER.exception(
+                    "Rerun %s publication remains pending",
+                    message.run_id,
+                    extra={"run_id": str(message.run_id)},
+                )
             else:
                 async with self._uow_factory() as uow:
                     await uow.runs.mark_rerun_published(message.run_id, self._now())
