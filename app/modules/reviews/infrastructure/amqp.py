@@ -24,9 +24,20 @@ from aio_pika.abc import (
 )
 from aio_pika.connection import make_url
 from jsonschema import Draft202012Validator
+from opentelemetry.trace import Status, StatusCode
 from pydantic import BaseModel
 
 from app.common.infrastructure.amqp_consumer import consume_queue
+from app.common.infrastructure.telemetry import (
+    ATTEMPT,
+    ENGINE,
+    OUTCOME,
+    TRIGGER,
+    consume_span,
+    inject_headers,
+    mark_error,
+    publish_span,
+)
 from app.modules.reviews.application.handle_review_run import DeliveryOutcome
 from app.modules.reviews.application.queue_messages import ReviewPublishPointer, message_trigger
 from app.modules.reviews.application.run_delivery import RunDeliveryPointer
@@ -150,12 +161,14 @@ class AmqpQueuePublisher:
 
     @staticmethod
     def _message(body: dict[str, Any], priority: int) -> aio_pika.Message:
+        """The ``traceparent`` header carries the trace of the publisher to the consumer."""
         return aio_pika.Message(
             json.dumps(body, separators=(",", ":")).encode(),
             content_type="application/json",
             delivery_mode=aio_pika.DeliveryMode.PERSISTENT,
             message_id=body["message_id"],
             priority=priority,
+            headers=dict(inject_headers({})),
         )
 
     async def publish_confirmed(
@@ -163,19 +176,21 @@ class AmqpQueuePublisher:
     ) -> None:
         rerun = message_trigger(message) == "rerun"
         priority = HIGH_PRIORITY if kind is not RunPublicationKind.QUEUED or rerun else 0
-        await self._reviews.publish(
-            self._message(run_message_body(message), priority), run_queue(message.engine)
-        )
+        queue = run_queue(message.engine)
+        with publish_span(queue, message.run_id):
+            await self._reviews.publish(self._message(run_message_body(message), priority), queue)
 
     async def publish_retry(self, message: PendingRunMessage, delay_key: str) -> None:
         priority = HIGH_PRIORITY if message_trigger(message) == "rerun" else 0
-        await self._retry.publish(
-            self._message(run_message_body(message), priority),
-            retry_queue(delay_key, message.engine),
-        )
+        queue = retry_queue(delay_key, message.engine)
+        with publish_span(queue, message.run_id):
+            await self._retry.publish(self._message(run_message_body(message), priority), queue)
 
     async def publish_review(self, pointer: ReviewPublishPointer) -> None:
-        await self._reviews.publish(self._message(publish_message_body(pointer), 0), PUBLISH_QUEUE)
+        with publish_span(PUBLISH_QUEUE, pointer.run_id):
+            await self._reviews.publish(
+                self._message(publish_message_body(pointer), 0), PUBLISH_QUEUE
+            )
 
     async def republish_after_error(
         self,
@@ -420,32 +435,41 @@ async def handle_run_delivery(
         _clear_delivery_attempts(_delivery_key(message))
         await message.nack(requeue=False)
         return
-    try:
-        outcome = await handler(
-            RunDeliveryPointer(
-                run_id=decoded.run_id,
-                provider=decoded.repo.provider,
-                workspace_id=decoded.workspace_id,
-                repository_id=decoded.repo.id,
-                repository_external_id=decoded.repo.external_id,
-                installation_id=decoded.installation_id,
-                pr_number=decoded.pr.number,
-                head_sha=decoded.pr.head_sha,
-                base_sha=decoded.pr.base_sha,
-                engine=decoded.engine,
-                rule_version_id=decoded.rule_version_id,
-                prompt_version_id=decoded.prompt_version_id,
-                trigger=decoded.trigger,
+    attributes = {
+        ENGINE: decoded.engine,
+        TRIGGER: decoded.trigger,
+        ATTEMPT: decoded.attempt,
+    }
+    with consume_span("review.run", message.headers, decoded.run_id, attributes) as span:
+        try:
+            outcome = await handler(
+                RunDeliveryPointer(
+                    run_id=decoded.run_id,
+                    provider=decoded.repo.provider,
+                    workspace_id=decoded.workspace_id,
+                    repository_id=decoded.repo.id,
+                    repository_external_id=decoded.repo.external_id,
+                    installation_id=decoded.installation_id,
+                    pr_number=decoded.pr.number,
+                    head_sha=decoded.pr.head_sha,
+                    base_sha=decoded.pr.base_sha,
+                    engine=decoded.engine,
+                    rule_version_id=decoded.rule_version_id,
+                    prompt_version_id=decoded.prompt_version_id,
+                    trigger=decoded.trigger,
+                )
             )
-        )
-    except Exception:
-        await _requeue_after_error(message, publisher)
-        return
-    _clear_delivery_attempts(_delivery_key(message))
-    if outcome is DeliveryOutcome.DEAD_LETTER:
-        await message.nack(requeue=False)
-    else:
-        await message.ack()
+        except Exception as error:
+            mark_error(span, error)
+            await _requeue_after_error(message, publisher)
+            return
+        span.set_attribute(OUTCOME, outcome.value)
+        _clear_delivery_attempts(_delivery_key(message))
+        if outcome is DeliveryOutcome.DEAD_LETTER:
+            span.set_status(Status(StatusCode.ERROR, outcome.value))
+            await message.nack(requeue=False)
+        else:
+            await message.ack()
 
 
 async def handle_publish_delivery(
@@ -458,13 +482,15 @@ async def handle_publish_delivery(
         _clear_delivery_attempts(_delivery_key(message))
         await message.nack(requeue=False)
         return
-    try:
-        await handler(decoded.to_pointer())
-    except Exception:
-        await _requeue_after_error(message, publisher)
-        return
-    _clear_delivery_attempts(_delivery_key(message))
-    await message.ack()
+    with consume_span("review.publish", message.headers, decoded.run_id) as span:
+        try:
+            await handler(decoded.to_pointer())
+        except Exception as error:
+            mark_error(span, error)
+            await _requeue_after_error(message, publisher)
+            return
+        _clear_delivery_attempts(_delivery_key(message))
+        await message.ack()
 
 
 async def consume(

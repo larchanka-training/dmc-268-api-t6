@@ -10,6 +10,7 @@ from uuid import UUID
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.common.infrastructure.telemetry import record_step_span
 from app.modules.reviews.application.run_events import utc_rfc3339
 from app.modules.reviews.infrastructure.llm.models import (
     CONVENTIONS_OPERATION,
@@ -73,6 +74,17 @@ async def insert_run_action(
         )
     )
     await session.flush()
+    # Only ids, timing and the error type reach the span: never the request or response.
+    record_step_span(
+        run_id=run_id,
+        tool=tool,
+        index=index,
+        attempt=run_attempt,
+        ok=ok,
+        response=response,
+        started_at=started_at,
+        duration_ms=duration_ms,
+    )
     notify: dict[str, object] = {
         "run_id": str(run_id),
         "tool": tool,

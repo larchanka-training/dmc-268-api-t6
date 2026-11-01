@@ -26,6 +26,11 @@ from app.bootstrap.gitlab import gitlab_webhook_replay_resources
 from app.bootstrap.reviews_api import ReviewsApiResources
 from app.bootstrap.webhook_work_listener import listen_forever
 from app.common.infrastructure.heartbeat import beat, heartbeat_file, reset
+from app.common.infrastructure.telemetry import (
+    configure_logging,
+    configure_tracing,
+    shutdown_tracing,
+)
 from app.modules.integrations.bitbucket.infrastructure.credential_cipher import (
     BitbucketCredentialCipher,
     optional_bitbucket_cipher_from_environment,
@@ -407,8 +412,12 @@ async def run_forever() -> None:
 
 
 def main() -> None:
-    logging.basicConfig(level=logging.INFO)
-    asyncio.run(run_forever())
+    configure_logging("webhook-worker")
+    tracing = configure_tracing("webhook-worker")
+    try:
+        asyncio.run(run_forever())
+    finally:
+        shutdown_tracing(tracing)
 
 
 if __name__ == "__main__":
