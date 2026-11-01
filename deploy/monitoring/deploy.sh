@@ -495,6 +495,7 @@ find "${MONITORING_DIR}/prometheus" "${MONITORING_DIR}/grafana" "${MONITORING_DI
   printf 'POSTGRES_EXPORTER_CONFIG_DIGEST=%s\n' "$(config_digest postgres-exporter)"
   printf 'PG_BACKUP_CONFIG_DIGEST=%s\n' "$(config_digest backup)"
   printf 'BLACKBOX_CONFIG_DIGEST=%s\n' "$(config_digest blackbox)"
+  printf 'TEMPO_CONFIG_DIGEST=%s\n' "$(config_digest tempo)"
 } > "${ENV_FILE}.tmp"
 chmod 600 "${ENV_FILE}.tmp"
 mv -f "${ENV_FILE}.tmp" "${ENV_FILE}"

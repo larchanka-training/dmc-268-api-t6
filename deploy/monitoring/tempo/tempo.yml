@@ -1,0 +1,35 @@
+# Grafana Tempo, single binary (docs/MONITORING.md §11): traces of api, worker and webhook-worker.
+# The OTLP/HTTP receiver listens only on the networks of the stack (no host port, docs/CICD.md §8);
+# Grafana reads it on 3200. Local disk, 72 h of traces: enough to look into a failed run.
+stream_over_http_enabled: true
+
+server:
+  http_listen_port: 3200
+  log_level: warn
+
+distributor:
+  receivers:
+    otlp:
+      protocols:
+        http:
+          endpoint: 0.0.0.0:4318
+
+ingester:
+  # Small blocks flushed often: less memory held per trace on the shared VPS.
+  max_block_duration: 5m
+  trace_idle_period: 10s
+
+compactor:
+  compaction:
+    block_retention: 72h
+
+storage:
+  trace:
+    backend: local
+    wal:
+      path: /var/tempo/wal
+    local:
+      path: /var/tempo/blocks
+
+usage_report:
+  reporting_enabled: false
