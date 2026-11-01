@@ -107,13 +107,14 @@ tests:
               description: "The fast-engine call timeout is 90 s (docs/PIPELINE_SPEC.md §3)."
 
   # The monthly LLM budget: the spend of every database counts (neither series reaches 80% alone),
-  # 79.8% is silent, 80% and 99.8% warn, 100% is critical at once and only.
+  # 79.8% is silent, 80% and 99.96% warn (two decimals: not "100.0%"), at 100% the critical fires
+  # at once and the warning resolves 5 minutes later.
   - interval: 1m
     input_series:
       - series: 'dmc_llm_monthly_budget_usd{instance="node-exporter:9100", job="node"}'
         values: "50x45"
       - series: 'dmc_llm_cost_month_usd{environment="staging"}'
-        values: "24.9x9 25x9 29.9x9 30x15"
+        values: "24.9x9 25x9 29.98x9 30x15"
       - series: 'dmc_llm_cost_month_usd{environment="prod"}'
         values: "15x19 20x25"
     alert_rule_test:
@@ -129,7 +130,7 @@ tests:
           - exp_labels:
               severity: warning
             exp_annotations:
-              summary: "LLM spend this month: 40.00 USD, 80.0% of the monthly budget"
+              summary: "LLM spend this month: 40.00 USD, 80.00% of the monthly budget"
               description: "Spend in usage_events since the 1st of the month (UTC) is between 80% and 100% of LLM_MONTHLY_BUDGET_USD; at 100% LlmMonthlyBudgetExceeded takes over and this alert resolves; the alert pauses no reviews."
       - eval_time: 15m
         alertname: LlmMonthlyBudgetExceeded
@@ -140,7 +141,7 @@ tests:
           - exp_labels:
               severity: warning
             exp_annotations:
-              summary: "LLM spend this month: 49.90 USD, 99.8% of the monthly budget"
+              summary: "LLM spend this month: 49.98 USD, 99.96% of the monthly budget"
               description: "Spend in usage_events since the 1st of the month (UTC) is between 80% and 100% of LLM_MONTHLY_BUDGET_USD; at 100% LlmMonthlyBudgetExceeded takes over and this alert resolves; the alert pauses no reviews."
       - eval_time: 29m
         alertname: LlmMonthlyBudgetExceeded
@@ -154,11 +155,44 @@ tests:
           - exp_labels:
               severity: critical
             exp_annotations:
-              summary: "LLM spend this month: 50.00 USD, 100.0% of the monthly budget"
+              summary: "LLM spend this month: 50.00 USD, 100.00% of the monthly budget"
               description: "Spend in usage_events since the 1st of the month (UTC) has reached LLM_MONTHLY_BUDGET_USD; the alert pauses no reviews, they keep spending."
-      - eval_time: 30m
+      - eval_time: 34m30s
+        alertname: LlmMonthlyBudgetWarning
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: "LLM spend this month: 49.98 USD, 99.96% of the monthly budget"
+              description: "Spend in usage_events since the 1st of the month (UTC) is between 80% and 100% of LLM_MONTHLY_BUDGET_USD; at 100% LlmMonthlyBudgetExceeded takes over and this alert resolves; the alert pauses no reviews."
+      - eval_time: 35m
         alertname: LlmMonthlyBudgetWarning
         exp_alerts: []
+
+  # A missed scrape of postgres-exporter marks the spend stale; neither alert resolves on it.
+  - interval: 1m
+    input_series:
+      - series: 'dmc_llm_monthly_budget_usd{instance="node-exporter:9100", job="node"}'
+        values: "50x30"
+      - series: 'dmc_llm_cost_month_usd{environment="staging"}'
+        values: "45x10 stale 45x3 55x5 stale 55x5"
+    alert_rule_test:
+      - eval_time: 11m30s
+        alertname: LlmMonthlyBudgetWarning
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: "LLM spend this month: 45.00 USD, 90.00% of the monthly budget"
+              description: "Spend in usage_events since the 1st of the month (UTC) is between 80% and 100% of LLM_MONTHLY_BUDGET_USD; at 100% LlmMonthlyBudgetExceeded takes over and this alert resolves; the alert pauses no reviews."
+      - eval_time: 22m30s
+        alertname: LlmMonthlyBudgetExceeded
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+            exp_annotations:
+              summary: "LLM spend this month: 55.00 USD, 110.00% of the monthly budget"
+              description: "Spend in usage_events since the 1st of the month (UTC) has reached LLM_MONTHLY_BUDGET_USD; the alert pauses no reviews, they keep spending."
 
   # No budget is set: no threshold series, then a 0 written by hand. Both alerts stay silent.
   - interval: 1m

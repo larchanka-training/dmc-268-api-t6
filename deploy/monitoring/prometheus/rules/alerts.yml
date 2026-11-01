@@ -190,28 +190,33 @@ groups:
   # stays the one of this Prometheus. The threshold dmc_llm_monthly_budget_usd is a node-exporter
   # textfile that deploy.sh writes from the repository variable LLM_MONTHLY_BUDGET_USD: without
   # it, or at 0, the two monthly alerts stay silent. The warning stops below 100%, so at the budget
-  # only the critical alert fires; the warning sends its RESOLVED (no inhibit rules). In the two
-  # monthly alerts $value is the percent; the summary queries the sum.
+  # the critical alert fires at once and the warning resolves 5 minutes later (no inhibit rules).
+  # keep_firing_for bridges a missed scrape of either exporter: a stale series empties the
+  # expression, and the alert would otherwise send RESOLVED and fire again. In the two monthly
+  # alerts $value is the percent, with two decimals so that 99.96% does not read as 100%; the
+  # summary queries the sum.
   # The group also holds ReviewRunsBudgetPaused: the daily budget of a workspace, no threshold.
   - name: llm-budget
     rules:
       - alert: LlmMonthlyBudgetWarning
         expr: 100 * sum(dmc_llm_cost_month_usd) / (max(dmc_llm_monthly_budget_usd) > 0) >= 80 < 100
         for: 5m
+        keep_firing_for: 5m
         labels:
           severity: warning
         annotations:
-          summary: "LLM spend this month: {{ with query \"sum(dmc_llm_cost_month_usd)\" }}{{ . | first | value | printf \"%.2f\" }}{{ end }} USD, {{ $value | printf \"%.1f\" }}% of the monthly budget"
+          summary: "LLM spend this month: {{ with query \"sum(dmc_llm_cost_month_usd)\" }}{{ . | first | value | printf \"%.2f\" }}{{ end }} USD, {{ $value | printf \"%.2f\" }}% of the monthly budget"
           description: "Spend in usage_events since the 1st of the month (UTC) is between 80% and 100% of LLM_MONTHLY_BUDGET_USD; at 100% LlmMonthlyBudgetExceeded takes over and this alert resolves; the alert pauses no reviews."
 
-      # No `for`: within a month the sum only grows and a scrape gap leaves no series, so waiting
-      # filters nothing and would only delay the critical message after the warning's RESOLVED.
+      # No `for`: within a month the sum only grows and a scrape gap leaves no series (bridged by
+      # keep_firing_for), so waiting filters nothing and would only delay the critical message.
       - alert: LlmMonthlyBudgetExceeded
         expr: 100 * sum(dmc_llm_cost_month_usd) / (max(dmc_llm_monthly_budget_usd) > 0) >= 100
+        keep_firing_for: 5m
         labels:
           severity: critical
         annotations:
-          summary: "LLM spend this month: {{ with query \"sum(dmc_llm_cost_month_usd)\" }}{{ . | first | value | printf \"%.2f\" }}{{ end }} USD, {{ $value | printf \"%.1f\" }}% of the monthly budget"
+          summary: "LLM spend this month: {{ with query \"sum(dmc_llm_cost_month_usd)\" }}{{ . | first | value | printf \"%.2f\" }}{{ end }} USD, {{ $value | printf \"%.2f\" }}% of the monthly budget"
           description: "Spend in usage_events since the 1st of the month (UTC) has reached LLM_MONTHLY_BUDGET_USD; the alert pauses no reviews, they keep spending."
 
       # Not the monthly budget above: the application itself skips the runs of a workspace whose

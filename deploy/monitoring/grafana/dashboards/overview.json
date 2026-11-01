@@ -822,7 +822,7 @@
     {
       "type": "stat",
       "title": "LLM spend this month",
-      "description": "Provider cost in usage_events since the 1st of the month (UTC), summed over all environments, and its share of LLM_MONTHLY_BUDGET_USD; the share turns orange and red where LlmMonthlyBudgetWarning and LlmMonthlyBudgetExceeded fire. Without a budget only the spend is shown.",
+      "description": "Provider cost in usage_events since the 1st of the month (UTC), summed over the databases this Prometheus scrapes, and its share of LLM_MONTHLY_BUDGET_USD; the share turns orange and red where LlmMonthlyBudgetWarning and LlmMonthlyBudgetExceeded fire. Without a budget only the spend is shown.",
       "id": 39,
       "datasource": {
         "type": "prometheus",
@@ -882,7 +882,7 @@
               },
               {
                 "id": "decimals",
-                "value": 1
+                "value": 2
               },
               {
                 "id": "thresholds",

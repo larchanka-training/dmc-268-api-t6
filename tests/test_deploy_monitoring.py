@@ -444,7 +444,7 @@ def test_dashboard_shows_month_to_date_llm_spend_next_to_cost_per_hour() -> None
     assert panel["gridPos"]["y"] == cost_per_hour["gridPos"]["y"]
     assert panel["gridPos"]["h"] == cost_per_hour["gridPos"]["h"]
     assert panel["gridPos"]["x"] == cost_per_hour["gridPos"]["x"] + cost_per_hour["gridPos"]["w"]
-    # Prometheus, not SQL: the same sum over all environments as the alerts.
+    # Prometheus, not SQL: the same sum over the scraped databases as the alerts.
     assert panel["datasource"] == PROMETHEUS
     targets = {target["refId"]: target for target in panel["targets"]}
     assert targets.keys() == {"A", "B"}
@@ -467,8 +467,8 @@ def test_dashboard_shows_month_to_date_llm_spend_next_to_cost_per_hour() -> None
     assert override["matcher"] == {"id": "byFrameRefID", "options": "B"}
     percent = {prop["id"]: prop["value"] for prop in override["properties"]}
     assert percent["unit"] == "percent"
-    # The rounding of the alert summaries (%.2f USD, %.1f %): 79.6 % must not read as 80 %.
-    assert (defaults["decimals"], percent["decimals"]) == (2, 1)
+    # The rounding of the alert summaries (%.2f USD, %.2f %): 99.96 % must not read as 100 %.
+    assert (defaults["decimals"], percent["decimals"]) == (2, 2)
     assert [(step["color"], step["value"]) for step in percent["thresholds"]["steps"]] == [
         ("green", None),
         ("orange", alerts["LlmMonthlyBudgetWarning"][1]),
