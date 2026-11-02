@@ -163,9 +163,7 @@ class BitbucketCloudRepositoryProvider:
                     if size > _MAX_JSON_BYTES:
                         raise BitbucketProviderError("invalid_provider_response")
                     chunks.append(chunk)
-                return httpx.Response(
-                    response.status_code, headers=response.headers, content=b"".join(chunks)
-                )
+                return httpx.Response(response.status_code, content=b"".join(chunks))
         except httpx.RequestError:
             raise BitbucketProviderError("provider_unavailable") from None
 

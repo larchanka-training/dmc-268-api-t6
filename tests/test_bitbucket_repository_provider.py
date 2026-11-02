@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import gzip
 from uuid import UUID
 
 import httpx
@@ -196,6 +197,24 @@ def test_discovery_lists_private_repositories_and_rejects_foreign_next_url() -> 
         "https://api.bitbucket.org/2.0/repositories/nvdovnar?pagelen=50",
         "https://api.bitbucket.org/2.0/repositories/nvdovnar?page=2",
     ]
+
+
+def test_discovery_reads_compressed_response() -> None:
+    def respond(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            headers={"Content-Encoding": "gzip", "Content-Type": "application/json"},
+            content=gzip.compress(b'{"values":[]}'),
+        )
+
+    async def scenario() -> None:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+            provider = BitbucketCloudRepositoryProvider(client)
+            page = await provider.discover(workspace_slug="nvdovnar", token="secret")
+            assert page.repositories == ()
+            assert page.next_cursor is None
+
+    asyncio.run(scenario())
 
 
 def test_provider_network_failure_has_sanitized_error() -> None:
