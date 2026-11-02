@@ -32,8 +32,10 @@ from app.modules.reviews.application.trigger_from_delivery import (
     TriggerFromDelivery,
 )
 from app.modules.reviews.application.try_enqueue_webhook_run import (
+    UNSET,
     EnqueueResult,
     TryEnqueueWebhookRun,
+    UnsetType,
 )
 from app.modules.reviews.infrastructure.ci_eligibility_candidates import (
     SqlAlchemyEligibilityCandidateStore,
@@ -140,6 +142,7 @@ class RebindingEnqueuer:
         expected_head_sha: str,
         *,
         expected_installation_external_id: int,
+        triggered_by: str | None | UnsetType = UNSET,
     ) -> EnqueueResult:
         self.origins.append(expected_installation_external_id)
         if self.pending_rebind:
@@ -154,6 +157,7 @@ class RebindingEnqueuer:
             code_change_id,
             expected_head_sha,
             expected_installation_external_id=expected_installation_external_id,
+            triggered_by=triggered_by,
         )
 
 

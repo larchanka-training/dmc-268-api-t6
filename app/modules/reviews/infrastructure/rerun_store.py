@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from app.common.infrastructure.db.enums import CodeChangeState, Engine, RunState, SeverityThreshold
 from app.common.infrastructure.db.unit_of_work import SqlAlchemyUnitOfWork
 from app.modules.auth.application.scope import AuthScope
+from app.modules.auth.infrastructure.models import GitHubUserProfile
 from app.modules.repositories.infrastructure.models import (
     ProviderInstallation,
     Repository,
@@ -141,6 +142,7 @@ class SqlAlchemyRerunStore:
         self, candidate: RunInsertCandidate, code_change_id: UUID, now: datetime
     ) -> PendingRunMessage:
         new_id = uuid4()
+        login = await self._portal_login()
         self._session.add(
             Run(
                 id=new_id,
@@ -164,12 +166,21 @@ class SqlAlchemyRerunStore:
                 cancel_requested=False,
                 message_published_at=None,
                 created_at=now,
+                triggered_by=login,
             )
         )
         await self._session.flush()
         await notify_run_state(self._session, new_id, RunState.QUEUED)
         pending = PendingRunMessage.from_candidate(new_id, candidate, now)
         return StoredRunMessage(**{**vars(pending), "trigger": "rerun"})
+
+    async def _portal_login(self) -> str | None:
+        if self._scope is None or self._allow_unscoped:
+            return None
+        login = await self._session.scalar(
+            select(GitHubUserProfile.login).where(GitHubUserProfile.id == self._scope.user_id)
+        )
+        return login if isinstance(login, str) else None
 
     async def mark_rerun_published(self, run_id: UUID, now: datetime) -> None:
         await self._session.execute(

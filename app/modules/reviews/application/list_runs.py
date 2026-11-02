@@ -5,8 +5,9 @@ from __future__ import annotations
 import base64
 import binascii
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
+from decimal import Decimal
 from typing import Protocol
 from uuid import UUID
 
@@ -44,6 +45,13 @@ class RunCursor:
 
 
 @dataclass(frozen=True)
+class RunUsage:
+    tokens_in: int = 0
+    tokens_out: int = 0
+    cost_usd: Decimal = Decimal(0)
+
+
+@dataclass(frozen=True)
 class RunListItem:
     id: UUID
     status: str
@@ -63,6 +71,8 @@ class RunListItem:
     created_at: datetime
     trigger: RunTrigger
     summary_only: bool = False
+    usage: RunUsage = field(default_factory=RunUsage)
+    triggered_by: str | None = None
 
 
 @dataclass(frozen=True)

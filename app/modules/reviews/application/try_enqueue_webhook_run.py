@@ -21,6 +21,14 @@ from app.modules.reviews.application.verdict import SeverityThresholdValue
 _LOGGER = logging.getLogger(__name__)
 
 
+class UnsetType:
+    def __repr__(self) -> str:
+        return "UNSET"
+
+
+UNSET = UnsetType()
+
+
 class EnqueueStatus(StrEnum):
     ENQUEUED = "enqueued"
     PUBLICATION_PENDING = "publication_pending"
@@ -186,7 +194,11 @@ class WebhookRunStore(Protocol):
     async def lock_candidate(self, code_change_id: UUID) -> RunInsertCandidate | CandidateMiss: ...
 
     async def insert_webhook_run(
-        self, candidate: RunInsertCandidate, now: datetime
+        self,
+        candidate: RunInsertCandidate,
+        now: datetime,
+        *,
+        triggered_by: str | None | UnsetType = UNSET,
     ) -> PendingRunMessage | DuplicateReason | ActiveRunBlocker: ...
 
     async def notify_run_updated(self, run_id: UUID, workspace_id: UUID, status: str) -> None: ...
@@ -236,6 +248,7 @@ class TryEnqueueWebhookRun:
         *,
         expected_installation_external_id: int | None = None,
         expected_identity: WebhookRunIdentity | None = None,
+        triggered_by: str | None | UnsetType = UNSET,
     ) -> EnqueueResult:
         # Receipt paths require their origin; current-state sweeps have no receipt expectation.
         decision = await self._eligibility.execute(
@@ -267,7 +280,9 @@ class TryEnqueueWebhookRun:
                 )
             ):
                 return EnqueueResult(EnqueueStatus.STALE, reason=STATE_CHANGED_REASON)
-            message = await uow.runs.insert_webhook_run(candidate, self._now())
+            message = await _insert_webhook_run(
+                uow.runs, candidate, self._now(), triggered_by=triggered_by
+            )
             if isinstance(message, ActiveRunBlocker):
                 status = (
                     EnqueueStatus.DEFERRED
@@ -308,6 +323,16 @@ class TryEnqueueWebhookRun:
             await uow.runs.mark_published(message.run_id, self._now())
             await uow.commit()
         return True
+
+
+async def _insert_webhook_run(
+    store: WebhookRunStore,
+    candidate: RunInsertCandidate,
+    now: datetime,
+    *,
+    triggered_by: str | None | UnsetType,
+) -> PendingRunMessage | DuplicateReason | ActiveRunBlocker:
+    return await store.insert_webhook_run(candidate, now, triggered_by=triggered_by)
 
 
 def _consistent_identity(

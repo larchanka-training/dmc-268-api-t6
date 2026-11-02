@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from typing import Annotated, Any
 from uuid import UUID
 
@@ -35,6 +35,12 @@ class PullRequestDto(ApiDto):
     head_sha: str
 
 
+class RunUsageDto(ApiDto):
+    tokens_in: int
+    tokens_out: int
+    cost_usd: float
+
+
 class RunSessionDto(ApiDto):
     id: UUID
     status: str
@@ -49,6 +55,8 @@ class RunSessionDto(ApiDto):
     model: str | None
     action_count: int
     summary_only: bool
+    usage: RunUsageDto
+    triggered_by: str | None
     pull_request: PullRequestDto
 
 
@@ -168,3 +176,60 @@ class PullRequestSummaryDto(ApiDto):
 class PullRequestPageDto(ApiDto):
     items: list[PullRequestSummaryDto]
     next_cursor: str | None
+
+
+class RunsByStatusDto(ApiDto):
+    queued: int
+    running: int
+    publishing: int
+    succeeded: int
+    failed: int
+    cancelled: int
+    skipped: int
+
+
+class PullsByVerdictDto(ApiDto):
+    blocking: int
+    attention: int
+    clean: int
+    no_verdict: int
+
+
+class FindingsByCategoryDto(ApiDto):
+    security: int
+    correctness: int
+    performance: int
+    readability: int
+
+
+class MetricsTotalsDto(ApiDto):
+    runs_by_status: RunsByStatusDto
+    pulls_by_verdict: PullsByVerdictDto
+    findings_by_severity: SeverityCountsDto
+    findings_by_category: FindingsByCategoryDto
+    succeeded_average_duration_seconds: float
+    tokens_in: int
+    tokens_out: int
+    cost_usd: float
+
+
+class MetricsDayDto(ApiDto):
+    day: date
+    findings_by_category: FindingsByCategoryDto
+    run_count: int
+    average_duration_seconds: float
+    cost_usd: float
+
+
+class WorkspaceDailyBudgetDto(ApiDto):
+    name: str
+    daily_budget_usd: float
+    spent_today_usd: float
+    paused: bool
+
+
+class MetricsSummaryDto(ApiDto):
+    range: str
+    totals: MetricsTotalsDto
+    series: list[MetricsDayDto]
+    workspaces: list[WorkspaceDailyBudgetDto]
