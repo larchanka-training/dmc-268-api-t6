@@ -1197,6 +1197,363 @@ GitHub Check Run обновляется после коммита T14 (вызо�
 
 ---
 
-## 7. Сводная таблица лимитов, DoS-защита и квоты (Зарезервировано под Ч.3)
+---
 
-Сводная таблица действующих лимитов системы, обработка чрезмерных диффов и сгенерированного кода, DoS-защита и квоты токенов/стоимости выделены в **Часть 3 (Ч.3)** задачи [#306](https://github.com/larchanka-training/dmc-268-api-t6/issues/306) и оформляются отдельным PR.
+## 7. Сводная таблица лимитов, DoS-защита и квоты (в скоупе Ч.3)
+
+### 7.1. Архитектурная концепция, цели и классификация лимитов
+
+Надёжность и отказоустойчивость сервиса AI-ревью в условиях непредсказуемой нагрузки, экстремальных пушей и потенциальных DoS-атак опираются на эшелонированную архитектуру защиты (**Defense-in-Depth**), распределённую по 5 уровням конвейера:
+
+1. **L1: Network & Ingestion Gateway:** фильтрация вебхуков и внешних API-запросов по размеру полезной нагрузки и HMAC-подписи (`MAX_WEBHOOK_PAYLOAD_BYTES` / `MAX_BODY_BYTES`) до парсинга JSON и выделения ресурсов.
+2. **L2: VCS Ingestion & Pre-flight:** контроль числа изменённых файлов (`_MAX_FILES`), размера патча (`_MAX_PATCH_LINES`, `_MAX_PATCH_BYTES`), блобов (`MAX_BLOB_BYTES`) и транспортных лимитов VCS. Изоляция от контекста модели файлов-гигантов и бинарных данных.
+3. **L3: Content & Context Builder:** просеивание через фильтр игнорирования (`review-ignore` внутри `.review/rules.md`), отсечение lock-файлов (`_LOCK_FILES`), сгенерированного кода и артефактов сборки. Расчёт объёма разрешённых изменений и автоматическое переключение в режим «только сводка» (`summary_only`) при превышении `MAX_REVIEWABLE_LINES = 3000`.
+4. **L4: Model Engine & Verification:** жёсткие бюджеты входных токенов (60k fast / 150k deep), лимиты расходов на прогон ($0.50 fast / $3.00 deep) и ограничение числа вызовов LLM (до 4 вызовов на попытку, до 12 на Run при $\le 3$ попытках) по [PIPELINE_SPEC §4.5](PIPELINE_SPEC.md#45-лимиты-модели-токены-стоимость-вызовы).
+5. **L5: Workspace Quotas & Billing Safety:** суточный лимит расходов воркспейса (`daily_budget_usd`), защита от случайного перерасхода на стороне клиента (`budget_paused`), глобальный месячный бюджет организации (`LLM_MONTHLY_BUDGET_USD`, PR #412) и алерты DevOps.
+
+#### Классификация исходов срабатывания лимитов
+
+| Исход | Уровень системы | Состояние Run | HTTP-статус / GitHub Check Run | Поведение системы |
+|---|---|---|---|---|
+| **Отказ на шлюзе (Gateway Rejection)** | L1: HTTP API / Webhook | Run не создаётся | HTTP `413 Payload Too Large` / `429 Too Many Requests` | Запрос отвергается на границе сети. Никаких транзакций в БД и очередей RabbitMQ. |
+| **Пропуск файла (`omissions`, целевое `file_omissions` #236)** | L2 / L3: Ingestion | `running` → продолжается | `neutral` (в теле ревью указывается список пропущенных файлов) | Файл исключается из рассмотрения с явной причиной (`OmissionReason`). Остальные файлы PR рецензируются. |
+| **Режим «только сводка» (`summary_only`)** | L3: Context Builder | `succeeded` (T14) | `completed / neutral` (сводка PR без inline-комментариев) | При объёме диффа $>3000$ строк разрешённых изменений генерируется общее резюме изменений без построчных замечаний. |
+| **Отказ прогона (Run Failure)** | L2 / L4: Ingestion / LLM | `failed` | `completed / neutral` (по канону PIPELINE_SPEC §7: бот не использует `conclusion: failure`) | Прогон прерывается с именованным кодом ошибки (`too_many_files`, `pr_diff_too_large`, `budget_exceeded`). |
+| **Пропуск прогона (Run Skip)** | L1 / L5: Pre-flight / Budget | `skipped` | `completed / skipped` (информационное сообщение) | Прогон штатно пропускается (`rate_limited`, `budget_paused`, `repo_disabled`, `rule_not_matched`, `all_changes_ignored`, `no_changes`). |
+
+---
+
+### 7.2. Сводная таблица всех действующих лимитов и изменений Ч.3
+
+В таблице собраны все лимиты системы: действующие значения в кодовой базе `main` (`dmc-268-api-t6`), места их определения, фактические исходы в `main` и целевые контракты, вводимые Частью 3 задачи [#306](https://github.com/larchanka-training/dmc-268-api-t6/issues/306) и PR #412.
+
+| Категория и уровень | Параметр и константа | Действующий предел в main | Источник в коде (main) | Исход в main | Цель Ч.3 / #412 и примечания |
+|---|---|---|---|---|---|
+| **Вебхук (L1)** | `MAX_WEBHOOK_PAYLOAD_BYTES` (GitHub) | **10 MiB** (10 485 760 байт) | `app/main.py:434` | HTTP 413 `"payload too large"` (`app/main.py:460`) | Действует в `main`. Отсекается до вызова JSON-парсера. |
+| **Вебхук (L1)** | `MAX_BODY_BYTES` (Bitbucket) | **256 KiB** (262 144 байт) | `app/modules/integrations/bitbucket/api/webhook.py:23` | HTTP 413 `bitbucket_webhook_payload_too_large` | Действует в `main`. Лимит шлюза Bitbucket. |
+| **Вебхук (L1)** | `MAX_BODY_BYTES` (GitLab) | **10 MiB** (10 485 760 байт) | `app/modules/integrations/gitlab/api/webhook.py:26` | HTTP 413 `gitlab_webhook_payload_too_large` | Действует в `main`. Лимит шлюза GitLab. |
+| **Размер PR (L2)** | `_MAX_FILES` (GitHub) | **300 файлов** | `app/modules/reviews/infrastructure/github_vcs.py:294, :331` | `ValueError` → `classify_failure` (`run_failures.py:224`) → `internal_error` (retryable ×3) | **Цель Ч.3:** `runs.state = failed`, `error_code = too_many_files` (не retryable; Check Run `completed / neutral`). |
+| **Размер PR (L2)** | `_MAX_FILES` (Bitbucket) | **200 файлов** | `app/modules/reviews/infrastructure/bitbucket_vcs.py:465` | `runs.state = failed`, `error_code = bitbucket_review_limit_exceeded` (PIPELINE_SPEC `:646`) | **Цель Ч.3:** унификация под единый доменный код `too_many_files` на уровне маппинга отказов. |
+| **Размер PR (L2)** | `_MAX_FILES` (GitLab) | **200 файлов** | `app/modules/reviews/infrastructure/gitlab_vcs.py:82-85` | `_count()` бросает `_InvalidResponse` → `diff_fetch_failed` (retryable ×3) | **Цель Ч.3:** классификация превышения 200 файлов как `too_many_files` без бессмысленных повторов. |
+| **Дифф файла (L2)** | `_MAX_PATCH_LINES` | **20 000 строк** | `app/modules/reviews/application/vcs_diff.py:29` | `OmissionReason.TOO_LARGE` | Действует в `main`. Файл пропускается, остальной PR рецензируется. |
+| **Дифф файла (L2)** | `_MAX_PATCH_BYTES` | **1 MiB** (1 048 576 байт) | `app/modules/reviews/application/vcs_diff.py:30` | `OmissionReason.TOO_LARGE` | Действует в `main`. Размер текста patch одного файла. |
+| **Блоб файла (L2)** | `MAX_BLOB_BYTES` | **1 MiB** (1 048 576 байт) | `app/modules/reviews/application/vcs_diff.py:31` | `OmissionReason.TOO_LARGE` | Действует в `main`. Размер полного файла в VCS. Не пишется в `blob_cache`. |
+| **API VCS (L2)** | `_MAX_BLOB_RESPONSE_BYTES` | **1.5 MiB** (1 500 000 байт) | `app/modules/reviews/infrastructure/github_vcs.py:62, :468` | `BlobTooLargeError` → `OmissionReason.TOO_LARGE` (`vcs_diff.py:229-230`) | Действует в `main`. 1 MiB base64 + JSON-конверт GitHub. |
+| **API VCS (L2)** | `MAX_EMPTY_FILE_TREE_BYTES` | **1.5 MiB** (1 500 000 байт) | `app/modules/reviews/infrastructure/github_vcs.py:63` | `incomplete` metadata | Действует в `main`. Чтение дерева для подтверждения пустого файла. Не failed и не ignored. |
+| **Бюджеты VCS (L2)**| `bitbucket_request_budget_exceeded` / `response_budget` | **32 MiB** суммарно за попытку | `bitbucket_vcs.py:132, :165`, PIPELINE_SPEC §6 | `failed` без retry | Действует в `main`. Лимит HTTP-трафика вызовов Bitbucket Cloud API. |
+| **Типы файлов (L2)** | Lock-файлы (`_LOCK_FILES`) | **12 имён** (`package-lock.json`, `pnpm-lock.yaml`, `yarn.lock`, `bun.lock`, `bun.lockb`, `cargo.lock`, `gemfile.lock`, `poetry.lock`, `uv.lock`, `pipfile.lock`, `composer.lock`, `go.sum`) | `app/modules/reviews/application/vcs_diff.py:33-48, :330-340` | `OmissionReason.GENERATED` (в целевой модели #236 — `file_omissions`) | Действует в `main`. Отсекаются через `is_generated_path`. В модель не передаются. |
+| **Типы файлов (L2)** | Сгенерированный код | `dist/*` (только 1-й сегмент пути), `*.snap` (в `__snapshots__`), `*snapshot*` (в `migrations/`), `*.min.js`, `*.pb.go` | `app/modules/reviews/application/vcs_diff.py:330-340` | `OmissionReason.GENERATED` | Действует в `main`. Пропускаются эвристикой путей. |
+| **Типы файлов (L2)** | Бинарные файлы | Байт `\0` в первых 8 KiB либо magic bytes (PNG, JPEG, GIF, PDF, ZIP, ELF) | `app/modules/reviews/application/vcs_diff.py:343-348` | `OmissionReason.BINARY` | Действует в `main`. Никогда не декодируются в `utf-8` и не пишутся в `blob_cache`. |
+| **Правила ревью (L2)**| Размер `.review/rules.md` | **64 KiB** (65 536 байт) | `RULES_FORMAT_SPEC §9`, `policy_document_too_large` | `runs.state = failed`, `policy_document_too_large` | Действует в `main`. Failed без retry. |
+| **Правила ревью (L2)**| Бюджет токенов правил | **12 000 токенов** | `RULES_FORMAT_SPEC §9`, `policy_match_budget_exceeded` | `runs.state = failed`, `policy_match_budget_exceeded` | Действует в `main`. Failed без retry. |
+| **Ignore-правила (L2)**| `MAX_PATTERN_LINES` / `MAX_PATTERN_BYTES` | **256 строк** / **256 байт на строку** | `app/modules/reviews/application/review_ignore.py:33-34` | `policy_ignore_limit_exceeded` (`policy_errors.py:22`) | Действует в `main`. Задаётся блоком `review-ignore` в `.review/rules.md`. (Файла `.reviewignore` в `main` нет). |
+| **Ignore-автомат (L2)**| `MAX_TRANSITIONS_PER_PATH` / `PER_RUN` | **8 000 000** / **80 000 000 переходов** | `app/modules/reviews/application/review_ignore.py:36-37` | Прерывание сопоставления ignore-фильтра | Действует в `main`. Защита от зависания регулярных выражений (ReDoS). |
+| **Сводка PR (L3)** | `MAX_REVIEWABLE_LINES` | **3 000 строк** разрешённого диффа | `app/modules/reviews/application/review_context.py:88, :579` | `runs.state = succeeded`, `summaryOnly: true` (T14) | В `main`: вызывает модель для шапки summary (`PIPELINE_SPEC:233`), findings получают `insufficient_context`. **Цель #107:** 0 вызовов LLM. Check Run: `completed / neutral`. |
+| **Экстремальный PR (L3)**| Порог DoS диффа | **> 100 000 строк** или **> 20 MiB патча** | `review_context.py:579` | **Цель Ч.3:** `runs.state = failed`, `error_code = pr_diff_too_large` | Аварийный предохранитель памяти воркера от OOM. Check Run: `completed / neutral`. |
+| **Фрагмент L3 (L3)**| `FULL_FILE_MAX_LINES` / `FULL_FILE_MAX_TOKENS` | **1 500 строк** / **12 000 токенов** | `app/modules/reviews/application/review_context.py:91-92` | Усечение контекста файла | Действует в `main`. Максимальный размер файла контекста L3. |
+| **Окрестность (L3)**| `FRAGMENT_MAX_LINES` / `FRAGMENT_MAX_TOKENS` | **200 строк** / **2 000 токенов** | `app/modules/reviews/application/review_context.py:93-94` | Усечение фрагмента | Действует в `main`. Окно окрестности изменённых строк. |
+| **Контекст AST (L3)**| `AST_CONTEXT_MAX_TOKENS` | **8 000 токенов** | `app/modules/reviews/application/review_context.py:95` | Отсечение избыточных символов | Действует в `main`. Суммарный лимит определений символов AST. |
+| **Файлы AST (L3)** | `MAX_AST_FILES` | **50 файлов** | `app/modules/reviews/application/review_context.py:97` | Отбор по приоритету | Действует в `main`. Максимум изменённых файлов для AST-анализа. |
+| **Импорты AST (L3)**| `MAX_IMPORTED_FILES` | **20 файлов** | `app/modules/reviews/application/ast_resolution.py:34` | Остановка резолвинга импортов | Действует в `main`. Максимум связанных внешних файлов. |
+| **Символы AST (L3)**| `MAX_IMPORTED_SYMBOLS_PER_FILE` / `RUN` | **10 символов на файл** / **100 на прогон** | `app/modules/reviews/application/ast_resolution.py:37-38` | Отсечение хвостовых символов | Действует в `main`. Лимит глубины резолвинга символов. |
+| **Парсер AST (L3)**| `MAX_SOURCE_BYTES` | **128 KiB** (131 072 байт) | `app/modules/reviews/application/ast_symbols.py:16` | `AstFailureReason.SOURCE_TOO_LARGE` (`ast_symbols.py:76`) | Действует в `main`. Исходный файл большего размера парсером пропускается. |
+| **Парсер AST (L3)**| `MAX_PARSER_MEMORY_BYTES` | **128 MiB** (134 217 728 байт) | `app/modules/reviews/application/ast_symbols.py:19` | Прерывание процесса парсера | Действует в `main`. Защита от утечек памяти tree-sitter. |
+| **Парсер AST (L3)**| `MAX_PARSE_CPU_SECONDS_PER_FILE` / `ATTEMPT` | **1.0 с на файл** / **5.0 с на попытку** | `app/modules/reviews/application/ast_symbols.py:17-18` | Таймаут AST-парсера | Действует в `main`. Защита от катастрофического бэктрекинга. |
+| **RAG граф (L3)** | `RAG_CONTEXT_MAX_TOKENS` / `PLACE_MAX_TOKENS` | **4 000 токенов** / **2 000 токенов** | `app/modules/reviews/application/review_context.py:96`, `rag_context.py:101` | Отсечение кандидатов | Действует в `main`. До 20 чтений блобов, до 10 файлов, до 3 мест/файл. |
+| **Модель Fast (L4)**| Входные токены / Бюджет / Вызовы | **60 000 токенов** / **$0.50** / **4 вызова на попытку** (до 12/Run) | `llm/settings.py:77`, `docs/PIPELINE_SPEC.md §4.5` | `budget_exceeded` / `llm_context_overflow` | Действует в `main`. Таймаут вызова 60 с (`llm/settings.py:68`), дедлайн попытки 8 мин (`run_failures.py:20`). |
+| **Модель Deep (L4)**| Входные токены / Бюджет / Вызовы | **150 000 токенов** / **$3.00** / **4 вызова на попытку** (до 12/Run) | `llm/settings.py:77`, `docs/PIPELINE_SPEC.md §4.5` | `budget_exceeded` / `llm_context_overflow` | Действует в `main`. Таймаут вызова 300 с (`llm/settings.py:70`), дедлайн попытки 10 мин (`app/bootstrap/llm_gateway.py:164`). |
+| **Дедлайн Run (L4)**| Дедлайн попытки прогона | **8 мин fast** (`run_failures.py:20`) / **10 мин deep** (`llm_gateway.py:164`) | `run_failures.py:20`, `app/bootstrap/llm_gateway.py:164` | `runs.state = failed`, `deadline_exceeded` | Действует в `main`. Дедлайн задан на каждую попытку прогона. |
+| **Исключительность**| Число активных Run на PR | **Ровно 1 активный Run** (`queued`, `running`, `publishing`) | Правило Р-2, SD §6.3, индекс `uq_runs_one_active_per_code_change` (`reviews/infrastructure/models.py:201-206`) | Вебхук: `DuplicateReason.ACTIVE_RUN` (ждёт 30 с до 1 ч); Rerun: HTTP 409 | Действует в `main`. Защита от параллельных гонок публикации. |
+| **Исключительность**| Вебхуки на одну голову | **Ровно 1 прогон на коммит-голову** | Уникальный индекс `uq_runs_webhook_code_change_head` | Игнорирование дубля вебхука | Действует в `main`. Идемпотентность доставки событий GitHub. |
+| **Индекс кода (RAG)**| `download_bytes` | **100 MiB** (104 857 600 байт) | ADR 0001 §7, `app/modules/code_index/domain/limits.py:20` | `limit_exceeded:download_bytes` | Действует в `main`. Превышение размера тарбола репозитория. |
+| **Индекс кода (RAG)**| `unpacked_bytes` | **1 024 MiB** (1 GiB) | `code_index/domain/limits.py:21` | `limit_exceeded:unpacked_bytes` | Действует в `main`. Защита от zip-бомб и рекурсивных архивов. |
+| **Индекс кода (RAG)**| `archive_entries` | **100 000 записей** | `code_index/domain/limits.py:23` | `limit_exceeded:archive_entries` | Действует в `main`. Максимум файлов и pax-заголовков в архиве. |
+| **Индекс кода (RAG)**| `read_bytes` / `parse_bytes` | **1 MiB** / **256 KiB** | `code_index/domain/limits.py:25-27` | Файл пропускается без падения индекса | Действует в `main`. Индивидуальные пороги индексации файлов. |
+| **Индекс кода (RAG)**| `parsed_files` / `symbols` / `edges` | **20 000 файлов** / **500 000 символов** / **2 000 000 рёбер** | `code_index/domain/limits.py:28-30` | `limit_exceeded:<field>` | Действует в `main`. Потолок емкости графа на одну кодовую базу. |
+| **Индекс кода (RAG)**| `deadline_seconds` | **900 с** (15 минут) | `code_index/domain/limits.py:31` | `code_index_jobs.error_code = 'limit_exceeded:deadline'` (`code_index/infrastructure/models.py:41, :113`) | Действует в `main`. Максимальная длительность сборки графа. |
+| **Индекс кода (RAG)**| `incremental_files` | **500 файлов** | `code_index/domain/limits.py:33` | Переключение инкремента в full-сборку | Действует в `main`. Порог деградации инкрементального индекса. |
+| **Индекс кода (RAG)**| Квота хранения индекса | **512 MiB на репозиторий** / **2 GiB на воркспейс** | ADR 0001 §7, `code_index_worker.py:144-145` | Очистка старых снимков или отказ сборки | Действует в `main`. Контроль дисковой квоты графовой базы. |
+| **Индекс кода (RAG)**| Конкурентность и троттлинг | **Не более 2 параллельных сборок на систему** (`max_concurrent = 2`), $\le 1$ на установку, $\le 1$ full на коммит, $\le 1$ full в 24 ч | `code_index_worker.py:130-131`, `code_index/domain/review_trigger.py:19` | Откладывание / пропуск сборки | Действует в `main`. Защита воркеров индекса от перегрузки. |
+| **Бюджет дня (L5)** | `daily_budget_usd` (Workspace) | **0.00** в `main` (лимит не задан / безлимит) | `workspaces/infrastructure/models.py:35`, `github_installation_links.py:136`, `handle_review_run.py:431` | `runs.state = skipped`, `budget_paused` | **Цель Ч.3:** ввод системного дефолта $15.00 (`DEFAULT_WORKSPACE_DAILY_BUDGET_USD`). При остатке $< $0.50 переход T5 в `skipped/budget_paused`. Check Run: `completed / skipped`. Сброс в 00:00 UTC. |
+| **Бюджет месяца (L5)**| `LLM_MONTHLY_BUDGET_USD` | Отсутствует в `main` | Вводится открытым PR #412 (`deploy/monitoring/deploy.sh`) | Telegram-алерты Warning (80%) и Critical (100%) | **Цель #412:** наблюдаемый алерт мониторинга DevOps, не приостанавливает прогоны (non-blocking). |
+
+---
+
+### 7.2.1. Реестр расхождений между кодовой базой и документацией
+
+Сверка спецификаций с фактической реализацией в кодовой базе `main` зафиксировала следующие реальные расхождения, которые разрешаются Частью 3 задачи [#306](https://github.com/larchanka-training/dmc-268-api-t6/issues/306):
+
+1. **GitHub PR > 3000 файлов: `ValueError` и ложный `internal_error`:**
+   - *Документ / Ожидание:* Отказ прогона с понятным доменным кодом `runs.error_code = 'too_many_files'`.
+   - *Фактический код `main`:* Метод `github_vcs.py:294, :331` выбрасывает `ValueError("GitHub pull request exceeds the 3000-file API cap")`. В `run_failures.py:224` обработчик `classify_failure` классифицирует его как `internal_error`, который входит в `RETRYABLE_ERROR_CODES` (`run_failures.py:108`). В результате система совершает три повторные попытки впустую, сжигая ресурсы воркеров, а разработчик видит сообщение об инфраструктурном сбое.
+   - *Решение Ч.3:* Генерация `RunFailure("too_many_files")`, включение кода в `KNOWN_ERROR_CODES`, исключение из `RETRYABLE_ERROR_CODES`, Check Run со статусом `completed / neutral` и понятным сообщением автору PR.
+2. **Bitbucket PR > 200 файлов: вендор-специфичный код вместо общего:**
+   - *Документ / Ожидание:* Единый доменный код `runs.error_code = 'too_many_files'`.
+   - *Фактический код `main`:* В `bitbucket_vcs.py:465` выбрасывается `bitbucket_review_limit_exceeded` (PIPELINE_SPEC `:646`, `check_runs.py:33`).
+   - *Решение Ч.3:* Вводится общий код `too_many_files`, унифицирующий все три VCS на уровне контракта пайплайна, сохраняя обратную совместимость с проверками `bitbucket_review_limit_exceeded`.
+3. **GitLab PR > 200 файлов: сетевое исключение и бесполезные ретраи:**
+   - *Документ / Ожидание:* Доменный отказ `too_many_files` без ретраев.
+   - *Фактический код `main`:* Метод `_count()` (`gitlab_vcs.py:82-85`) при числе файлов $> 200$ (или ответе пагинации вида «1000+») выбрасывает внутреннее исключение `_InvalidResponse`, которое мапится в `diff_fetch_failed` с тремя повторными попытками.
+   - *Решение Ч.3:* Адаптер `gitlab_vcs.py` классифицирует превышение лимита как `too_many_files` без повторов.
+4. **Режим Summary-only и вызовы LLM:**
+   - *Документ / Ожидание:* В `SYSTEM_DESIGN.md §13` («Лимиты контекста») было указано: *«порог >3 000 allowed changed lines после ignore → backend summary без LLM»*.
+   - *Фактический код `main`:* При превышении 3 000 строк разрешённого диффа воркер переходит в `summary_only` (`review_context.py:579`, PIPELINE_SPEC `:233`), но по-прежнему выполняет вызов LLM для генерации шапки резюме изменений PR; при этом патчи не передаются в модель, а кандидаты в замечания отсеиваются с причиной `insufficient_context` (`PIPELINE_SPEC:245-246`). Полное отключение вызовов LLM («0 вызовов модели») запланировано как отдельная продуктовая оптимизация в рамках задачи [#107](https://github.com/larchanka-training/dmc-268-api-t6/issues/107).
+   - *Решение Ч.3:* Документация синхронизирована с фактическим контрактом `main` (вызов модели только для высокоуровневой сводки без передачи diff-патчей), а «0 вызовов LLM» явно зафиксирован как целевое поведение #107.
+5. **Дневной бюджет воркспейса по умолчанию (недостижимость `budget_paused`):**
+   - *Документ / Ожидание:* Контроль суточного бюджета воркспейса с паузой при перерасходе.
+   - *Фактический код `main`:* При установке GitHub App поле `workspaces.daily_budget_usd` создаётся со значением `0.00` (`github_installation_links.py:136`), что означает «безлимитный режим» (`handle_review_run.py:431`). Эндпоинт для изменения бюджета отсутствовал, делая статус `budget_paused` недостижимым.
+   - *Решение Ч.3:* Вводится системная константа `DEFAULT_WORKSPACE_DAILY_BUDGET_USD = Decimal("15.00")` для новых воркспейсов, эндпоинт управления бюджетом и сохранение значения `0.00` как явного безлимитного режима.
+
+---
+
+### 7.3. Политика лимитов частоты запуска Run (Rate Limiting & Push Bursts)
+
+Для предотвращения исчерпания пула очередей RabbitMQ, перегрузки воркеров и DoS-атак частыми пушами устанавливаются лимиты частоты на основе скользящих окон (**Sliding Windows**).
+
+#### 7.3.1. Параметры скользящих окон и точка проверки
+
+```mermaid
+flowchart TD
+    Push["Входящий пуш / synchronize"] --> Ingestion["Регистрация доставки webhook_deliveries"]
+    Ingestion --> Enqueue{"try_enqueue_webhook_run<br/>Активен другой Run на PR?"}
+    Enqueue -- Да --> WaitActive["Статус DuplicateReason.ACTIVE_RUN<br/>(ожидание завершения до 1 ч)"]
+    Enqueue -- Нет --> ClaimT5["Воркер: Claim RunGuard (T5)<br/>Транзакция SELECT FOR UPDATE"]
+    ClaimT5 --> CheckPR{"Скользящее окно PR<br/>10 run / 1 ч<br/>Burst: 3 run / 5 мин"}
+    CheckPR -- Превышен --> SkipRate["runs.state = 'skipped'<br/>error_code = 'rate_limited'<br/>retry: '—' (без автоповтора)"]
+    CheckPR -- В норме --> CheckRepo{"Окно репозитория<br/>30 run / 1 ч<br/>100 run / 24 ч"}
+    CheckRepo -- Превышен --> SkipRate
+    CheckRepo -- В норме --> CheckInst{"Окно установки / воркспейса<br/>120 run / 1 ч<br/>500 run / 24 ч"}
+    CheckInst -- Превышен --> SkipRate
+    CheckInst -- В норме --> ProceedRun["T5 succeeded: захват слота<br/>runs.state = 'running'"]
+```
+
+1. **Параметры скользящих окон:**
+   * **Окно на один Pull Request:** не более **10 прогонов за 1 час**; защита от всплесков (**Burst Protection**): не более **3 прогонов за 5 минут**.
+   * **Окно на репозиторий:** не более **30 прогонов за 1 час**, не более **100 прогонов за 24 часа**.
+   * **Окно на установку / воркспейс:** не более **120 прогонов за 1 час**, не более **500 прогонов за 24 часа**.
+     - Понятие установки провайдеров VCS: для GitHub — `installation_id`, для Bitbucket — `workspace`, для GitLab — корневая `group`. Все они отображаются на сущность `Workspace` в базе данных.
+
+2. **Точка проверки, хранилище и атомарность:**
+   * Проверка скользящих окон выполняется воркером очереди (`handle_review_run.py`) в момент захвата прогона **RunGuard (переход T5: `queued -> running`)**.
+   * Подсчёт запусков ведётся прямым аналитическим запросом к таблице `runs`:
+     ```sql
+     SELECT COUNT(*) FROM runs
+     WHERE code_change_id = :code_change_id
+       AND trigger IN ('webhook', 'manual', 'rerun')
+       AND created_at > NOW() - INTERVAL '1 hour'
+       AND state IN ('queued', 'running', 'publishing', 'succeeded', 'failed');
+     ```
+   * **Атомарность:** проверка выполняется внутри короткой транзакции T5 под блокировкой строки Run (`SELECT FOR UPDATE`), что исключает гонки между параллельными воркерами.
+   * **Состав окна:** в подсчёт включаются только прогоны, реально расходовавшие вычислительные ресурсы (в состояниях `queued`, `running`, `publishing`, `succeeded`, `failed`). Прогоны со статусом `skipped` (включая ранее отсечённые `rate_limited` и `budget_paused`) **не входят в подсчёт окна**, предотвращая вечную блокировку.
+
+3. **Честный `skipped` без автоповтора (No Auto-retry):**
+   * При превышении любого из окон RunGuard атомарно переводит прогон в состояние `runs.state = 'skipped'`, `error_code = 'rate_limited'`.
+   * **Retry «—»:** автоматический повтор отсутствует. Индекс `uq_runs_webhook_code_change_head` уникален по `(code_change_id, head_sha)` при `trigger = 'webhook'`, поэтому повторный Run для того же коммита не ставится. Для запуска анализа требуется **новый пуш в PR** либо **ручной перезапуск из UI** после спада нагрузки.
+   * **GitHub Check Run:** в строгом соответствии с PIPELINE_SPEC §7 выставляется:
+     - `status`: `"completed"`
+     - `conclusion`: `"skipped"`
+     - `title`: `"AI-ревью пропущено: превышен лимит частоты"`
+     - `summary`: текст из каталога PIPELINE_SPEC §6: *«Превышен лимит частоты запусков ревью. Следующий прогон запустится автоматически после спада нагрузки или при новом пуше.»*
+
+#### 7.3.2. Обработка серий быстрых пушей (Push Bursts)
+
+Частый сценарий разработки — быстрая серия коммитов подряд (например, несколько правок за 30 секунд).
+Система обрабатывает такие серии через реальные механизмы очереди и доставки без фиктивных задержек диспетчера:
+
+1. **Регистрация доставки:** каждый вебхук `push` / `synchronize` немедленно сохраняется в таблице `webhook_deliveries` со статусом `received` и подтверждается HTTP-ответом 202 Accepted.
+2. **Сериализация на PR:** воркер `try_enqueue_webhook_run` сериализует обработку событий одного PR через блокировку строки `CodeChange` в БД.
+3. **Ожидание при активном прогоне (Completion-first):**
+   - Если прогон $R_1$ на коммите $C_1$ уже находится в состоянии `running` или `publishing`, индекс `uq_runs_one_active_per_code_change` запрещает создание второго активного Run.
+   - Доставки последующих коммитов $C_2, C_3, C_4$ получают статус `DuplicateReason.ACTIVE_RUN` (`receive_github_delivery.py:24-25`) и ожидают завершения $R_1$ (с интервалом опроса 30 с до 1 ч).
+   - В таблице `runs` **не создаются** конкурирующие записи со статусом `queued`!
+4. **Схлопывание промежуточных коммитов после T14:**
+   - Прогон $R_1$ завершается штатной публикацией на коммите $C_1$ (T14 `succeeded`).
+   - При освобождении слота воркер анализирует накопившиеся доставки: промежуточные коммиты $C_2$ и $C_3$ помечаются как утратившие актуальность (`delivery.state = 'state_changed'`).
+   - Для последнего коммита $C_4$ создаётся **ровно один инкрементальный прогон $R_2$** с базой сравнения $C_1$ (`diff_base_commit = C_1`, `base_run_id = R_1.id`, Ч.2 §6.4).
+   - В таблице `runs` отсутствуют фиктивные строки `cancelled/superseded` для промежуточных коммитов $C_2, C_3$.
+
+#### 7.3.3. Взаимодействие с режимом автоматического ревью (#293)
+
+В режиме автоматического ревью всех входящих PR ([#293](https://github.com/larchanka-training/dmc-268-api-t6/issues/293)):
+* Лимиты репозитория (30/ч) и воркспейса (120/ч) надёжно экранируют воркеры от перегрузки при массовом открытии PR ботами зависимостей (Dependabot / Renovate).
+* Прогоны сверх лимита получают `state = 'skipped'`, `error_code = 'rate_limited'`, Check Run `completed / skipped`.
+* Разработчик может принудительно запустить анализ пропущенного PR кнопкой «Rerun» в интерфейсе, так как ручной перезапуск имеет независимую квоту.
+
+---
+
+### 7.4. Лимиты частоты дорогих ручных действий
+
+Дорогие ручные операции веб-интерфейса защищаются строгим рейт-лимитингом на уровне HTTP API с возвратом кода `429 Too Many Requests`.
+
+#### 7.4.1. Ручной перезапуск прогона (`POST /api/runs/{run_id}/rerun`)
+
+Операция rerun выполняет повторный анализ PR (полное ревью, Ч.2 §6.6 D-8) и расходует квоту модели.
+* **Лимиты частоты:** не более **3 перезапусков на один PR за 15 минут**, не более **10 перезапусков на одного пользователя за 1 час**.
+* **Ответ при превышении:** HTTP-статус `429 Too Many Requests`.
+* **Формат ответа:** строго соответствует схеме `ErrorResponse` из `contracts/openapi.yaml:1141-1148` (`{detail: string}`, без нестандартных полей `error_code`/`retry_after` в JSON-теле):
+  ```http
+  HTTP/1.1 429 Too Many Requests
+  Retry-After: 480
+  Content-Type: application/json
+
+  {
+    "detail": "rerun_rate_limited"
+  }
+  ```
+  Заголовок `Retry-After` динамически рассчитывается в секундах до момента освобождения ближайшего слота в сработавшем окне.
+* **Порядок принятия решений в `SqlAlchemyRerunStore.create_rerun` (PIPELINE_SPEC §6.1):**
+  1. Авторизация и проверка видимости исходного Run (`authorized_run`).
+  2. **Проверка лимита частоты перезапусков:** при превышении окон (3/15 мин на PR или 10/1 ч на пользователя) немедленно возвращается HTTP 429 (`detail: "rerun_rate_limited"`).
+  3. **Проверка активного Run / закрытого PR:** если у PR есть активный Run (`queued`, `running`, `publishing`) либо PR закрыт → HTTP 409 (`detail: "the pull request has an active run or is closed, or repository reviews are paused or unavailable"`).
+  4. **Проверка кандидата конфигурации:** если отсутствует активная версия правил или промпта → HTTP 422 (`detail: "the repository has no active rule or prompt version"`).
+  5. Если все проверки пройдены → создаётся новый Run с `trigger = 'rerun'`.
+
+#### 7.4.2. Симуляция правил в песочнице (#311)
+
+Песочница правил реализуется в рамках задачи [#311](https://github.com/larchanka-training/dmc-268-api-t6/issues/311) через асинхронные эндпоинты:
+* `POST /api/repos/{repo_id}/rules-simulations` — постановка задачи симуляции черновика правил на кодовой базе репозитория;
+* `GET /api/rules-simulations/{simulation_id}` — опрос статуса и результата симуляции.
+
+Защитные ограничения песочницы:
+1. **Размер черновика правил:** тело правил ограничено **64 KiB** (соответствует пределу `.review/rules.md`). При превышении → HTTP 422 (`detail: "policy_document_too_large"`).
+2. **Ограничение параллелизма:** пользователю разрешена **не более чем одна активная симуляция** (`queued` / `running`). При попытке запуска второй симуляции возвращается HTTP 409 (`detail: "active_simulation_exists"`).
+3. **Ограничение суточного бюджета воркспейса:** симуляция выполняет вызов LLM и списывает средства из дневного бюджета воркспейса. Если остаток бюджета меньше стоимости быстрого запуска ($< \$0.50$) → HTTP 409 (`detail: "budget_paused"`).
+4. **Рейт-лимит частоты симуляций (защита от DoS):**
+   - Не более **10 симуляций за 1 час на пользователя**;
+   - Не более **20 симуляций за 1 час на репозиторий**.
+   - При превышении возвращается HTTP 429 Too Many Requests по схеме `ErrorResponse`:
+     ```http
+     HTTP/1.1 429 Too Many Requests
+     Retry-After: 360
+     Content-Type: application/json
+
+     {
+       "detail": "simulation_rate_limited"
+     }
+     ```
+
+---
+
+### 7.5. Защита от DoS размером (DoS Protection by Size)
+
+#### 7.5.1. Критерии разделения: пропуск файла vs отказ всего PR
+
+| Условие превышения | Область поражения | Исход для файла / PR | Код ошибки / Причина | Check Run (`status / conclusion`) |
+|---|---|---|---|---|
+| Патч одного файла $> 20 000$ строк (`_MAX_PATCH_LINES`) | Отдельный файл | Файл пропускается, PR продолжается | `OmissionReason.TOO_LARGE` | `completed / neutral` (файл в списке пропусков) |
+| Патч одного файла $> 1$ MiB (`_MAX_PATCH_BYTES`) | Отдельный файл | Файл пропускается, PR продолжается | `OmissionReason.TOO_LARGE` | `completed / neutral` (файл в списке пропусков) |
+| Блоб файла $> 1$ MiB (`MAX_BLOB_BYTES`) | Отдельный файл | Файл пропускается, PR продолжается | `OmissionReason.TOO_LARGE` | `completed / neutral` (файл в списке пропусков) |
+| Бинарный файл (байт `\0` в 8 KiB или magic bytes) | Отдельный файл | Файл пропускается, PR продолжается | `OmissionReason.BINARY` | `completed / neutral` (файл в списке пропусков) |
+| Lock-файл из каталога `_LOCK_FILES` | Отдельный файл | Файл пропускается, PR продолжается | `OmissionReason.GENERATED` | `completed / neutral` (файл в списке пропусков) |
+| Сгенерированный или минифицированный файл | Отдельный файл | Файл пропускается, PR продолжается | `OmissionReason.GENERATED` | `completed / neutral` (файл в списке пропусков) |
+| Пустой добавленный файл | Отдельный файл | Файл пропускается, PR продолжается | `OmissionReason.EMPTY_FILE` | `completed / neutral` (файл в списке пропусков) |
+| **Число файлов в PR $> 300$** (GitHub, `_MAX_FILES`) | **Весь PR целиком** | **Прогон прерывается (`failed`)** | `runs.error_code = 'too_many_files'` | **`completed / neutral`** (*«AI-ревью не выполнено: слишком много файлов»*) |
+| **Число файлов в PR $> 200$** (Bitbucket/GitLab) | **Весь PR целиком** | **Прогон прерывается (`failed`)** | `runs.error_code = 'too_many_files'` | **`completed / neutral`** (*«AI-ревью не выполнено: слишком много файлов»*) |
+| **Суммарный дифф $> 100 000$ строк или $> 20$ MiB** | **Весь PR целиком** | **Прогон прерывается (`failed`)** | `runs.error_code = 'pr_diff_too_large'` | **`completed / neutral`** (*«AI-ревью не выполнено: дифф PR слишком велик»*) |
+| **Размер вебхука $> 10$ MiB** (GitHub/GitLab) / $> 256$ KiB (Bitbucket) | **Сетевой шлюз** | **Отказ шлюза (HTTP 413)** | `payload_too_large` | Check Run не создаётся (отказ на шлюзе) |
+| **Разрешённый дифф от 3 000 до 100 000 строк** | **Моделирование** | **Summary-only режим (`succeeded`)** | Завершение T14 без построчных замечаний | `completed / neutral` (*«AI-ревью: только сводка»*) |
+
+#### 7.5.2. Политика обработки экстремальных диффов (`pr_diff_too_large`)
+
+* **Метрика и точка проверки:** суммарный объём изменений вычисляется в фазе Pass 2 при формировании `DiffMap` (`review_context.py:579`) как сумма строк изменений (`changes`) по всем файлам PR после применения ignore-фильтра и исключения сгенерированных/бинарных файлов.
+* **Взаимодействие с режимом Summary-only (#213):**
+  - Для pull request объёмом от 3 000 до 100 000 строк разрешённого диффа применяется стандартный режим `summary_only` (T14 `succeeded`, PIPELINE_SPEC §2, решение задачи [#213](https://github.com/larchanka-training/dmc-268-api-t6/issues/213)). В этом режиме формируется общая сводка изменений PR без inline-замечаний.
+  - Порог **100 000 строк разрешённых изменений** (или **20 MiB** текста унифицированного патча) вводится как **аварийный защитный предохранитель** от катастрофического исчерпания памяти воркера (OOM) и деградации брокера сообщений при попытке сериализовать гигантский дифф.
+  - При превышении этого порога прогон прерывается с доменным кодом `runs.error_code = 'pr_diff_too_large'` (`failed`, non-retryable). GitHub Check Run переводится в `completed / neutral` с текстом: *«Суммарный размер диффа PR превышает допустимый предел. Разбейте PR на меньшие части.»*
+  - Для Bitbucket Cloud действует предшествующий транспортный лимит `bitbucket_response_budget_exceeded` (32 MiB суммарно на попытку).
+
+#### 7.5.3. Контракт изоляции оперативной памяти и кэша (AC43)
+
+Для предотвращения атак на память воркеров и загрязнения кэша устанавливаются строгие правила:
+1. **Запрет декодирования и сохранения:** блобы файлов размером свыше 1 MiB (`MAX_BLOB_BYTES = 1_048_576`) и файлы, классифицированные как бинарные (по наличию `\0` в первых 8 KiB либо magic bytes):
+   - **категорически запрещено декодировать в UTF-8 строки**;
+   - **запрещено сохранять в кэш блобов** (`blob_cache`, `process_run.py:405, :478`);
+   - **запрещено передавать в парсер символов AST** (`ast_symbols.py`);
+   - **запрещено передавать в векторное хранилище и контекст RAG**.
+   В контекст пайплайна передаётся исключительно относительный путь файла и статус пропуска (`OmissionReason.TOO_LARGE` или `OmissionReason.BINARY`).
+2. **Потоковый контроль сетевого чтения:** для VCS-провайдеров, не передающих точный размер файла в заголовках до скачивания (GitLab/Bitbucket), чтение из сокета ограничивается потоковым лимитом `MAX_BLOB_BYTES + 1` байт. При превышении чтение немедленно прерывается с генерацией исключения `BlobTooLargeError`, а оставшаяся часть тела ответа провайдера сбрасывается без вычитывания в оперативную память.
+
+---
+
+### 7.6. Квоты стоимости и Дневной бюджет Workspace
+
+#### 7.6.1. Трёхуровневая модель контроля затрат
+
+1. **Уровень 1: Бюджет одиночного прогона (Run Cost Cap):**
+   * Fast engine: максимум **$0.50** за прогон (до 4 вызовов LLM на попытку).
+   * Deep engine: максимум **$3.00** за прогон (до 4 вызовов LLM на попытку, до 12 на Run).
+   * Превышение: немедленная остановка прогона с кодом `runs.error_code = 'budget_exceeded'` (`failed`).
+2. **Уровень 2: Дневной лимит воркспейса (Workspace Daily Budget):**
+   * Колонка в базе данных: `workspaces.daily_budget_usd NUMERIC(12, 6)` (`app/modules/workspaces/infrastructure/models.py:35`).
+   * **Политика по умолчанию:**
+     - В кодовой базе `main` по умолчанию хранится значение `0.00`, что означает **безлимитный режим** (лимит не задан, проверка паузы пропускается, `handle_review_run.py:431-436`, `github_installation_links.py:136`).
+     - В рамках Части 3 задачи #306 вводится системная настройка `DEFAULT_WORKSPACE_DAILY_BUDGET_USD = Decimal("15.00")`, применяемая к новым воркспейсам.
+     - Для всех ранее созданных действующих воркспейсов сохраняется значение `0.00` (миграция схемы не выполняет деструктивного backfill исторических данных, гарантируя непрерывность работы существующих инсталляций).
+   * **API и права управления бюджетом:**
+     - Управление дневным лимитом осуществляется через эндпоинт `PATCH /api/repos/{repo_id}` (схема `RepositoryUpdate`, поле `daily_budget_usd`), либо через выделенный административный эндпоинт воркспейса `PATCH /api/workspaces/{workspace_id}/budget`.
+     - **Авторизация:** изменение бюджета разрешено исключительно операторам платформы (`platform_admin` через сервисный токен) либо администраторам организации/репозитория GitHub (требуются права `admin` на связанную установку GitHub App).
+     - **Валидация:** значение должно быть неотрицательным числом в диапазоне от `$0.00` до `$1000.00` с точностью до 6 знаков после запятой (`Numeric(12, 6)`). Ошибки: 401 Unauthorized, 403 Forbidden, 422 Unprocessable Entity.
+   * **Проверка лимита в RunGuard (T5, `handle_review_run.py:433`):**
+     Расход воркспейса за текущие сутки UTC вычисляется запросом к неизменяемой таблице `usage_events`:
+     ```sql
+     SELECT COALESCE(SUM(cost_usd), 0)
+     FROM usage_events
+     WHERE workspace_id = :ws_id
+       AND created_at >= date_trunc('day', NOW() AT TIME ZONE 'UTC');
+     ```
+     Если `daily_budget_usd > 0` и остаток бюджета `daily_budget_usd - spent_today_usd < FAST_RUN_COST_LIMIT` ($0.50):
+     - Прогон не запускается и переходит в `state = 'skipped'`, `error_code = 'budget_paused'`.
+     - **Допустимый овердрафт:** поскольку проверка выполняется в момент claim (T5), параллельные прогоны одного воркспейса, захватившие слот одновременно, могут превысить бюджет максимум на стоимость одного прогона (до $0.50), что является штатным архитектурным компромиссом для предотвращения распределённых блокировок.
+     - **Check Run:** выставляется `status: "completed"`, `conclusion: "skipped"`, заголовок: `AI-ревью пропущено: исчерпан дневной бюджет воркспейса`, текст из каталога PIPELINE_SPEC §6: *«Дневной бюджет исчерпан, ревью на паузе.»*
+     - **Метрики:** выставляется флаг `dmc_runs_budget_paused_15m_runs` в Prometheus/API (`get_metrics_summary.py:237-238`).
+   * **Сброс лимита:** происходит автоматически в **00:00:00 UTC** со сменой календарных суток. Принудительное возобновление ревью до 00:00 UTC возможно путём увеличения дневного лимита администратором через API.
+3. **Уровень 3: Глобальный месячный бюджет организации (`LLM_MONTHLY_BUDGET_USD`):**
+   * Вводится открытым PR [#412](https://github.com/larchanka-training/dmc-268-api-t6/pull/412) (задача [#308](https://github.com/larchanka-training/dmc-268-api-t6/issues/308)) как переменная окружения развёртывания (`deploy/monitoring/deploy.sh`).
+   * **Неблокирующий характер:** данный алерт **не приостанавливает прогоны** («the alert pauses no reviews, they keep spending»), а служит сигналом для операторов инфраструктуры и DevOps.
+   * Алерт отслеживается по метрике `dmc_llm_cost_month_usd` и отправляет уведомления в Telegram:
+     - **Warning Alert (`LlmMonthlyBudgetWarning`):** при достижении **80%** месячного бюджета (`for: 5m`, `keep_firing_for: 5m`).
+     - **Critical Alert (`LlmMonthlyBudgetExceeded`):** при достижении **100%** месячного бюджета (`keep_firing_for: 30m`).
+
+---
+
+### 7.7. Сквозная матрица сценариев для регрессионного тестирования QA (QA-LIM-01 — QA-LIM-35)
+
+Матрица верификации для QA-инженеров покрывает граничные условия («на границе» и «сверх границы») каждого лимита из §7.2–§7.6 со ссылками на существующие тесты кодовой базы.
+
+| ID | Область проверки | Входные данные (Граничное значение) | Ожидаемый исход системы | Ожидаемое состояние в БД (`runs` / `jobs`) | Публикация на GitHub / Check Run | Ссылка на тест кодовой базы |
+|---|---|---|---|---|---|---|
+| **QA-LIM-01** | **Файлы PR GitHub (граница)** | PR ровно на **300 файлов**. Разрешённый дифф $> 3000$ строк. | Анализ выполняется в режиме `summary_only` (T14). | `state = 'succeeded'`, `error_code = null`. | Check Run: `completed / neutral` (*«AI-ревью: только сводка»*). | `tests/test_vcs_diff.py` |
+| **QA-LIM-02** | **Файлы PR GitHub (сверх лимита)** | PR ровно на **301 файл**. | Pre-flight отказ без вызовов LLM. | `state = 'failed'`, `error_code = 'too_many_files'`. | Check Run: `completed / neutral` (*«AI-ревью не выполнено: слишком много файлов»*). | `tests/test_github_vcs.py` |
+| **QA-LIM-03** | **Файлы PR Bitbucket (граница)** | Bitbucket PR ровно на **200 файлов**. | Все файлы вычитываются пагинацией. | `state = 'succeeded'`. | Check Run: `completed / neutral`. | `tests/test_bitbucket_vcs.py` |
+| **QA-LIM-04** | **Файлы PR Bitbucket (сверх лимита)**| Bitbucket PR ровно на **201 файл**. | Отказ пагинации Bitbucket Cloud. | `state = 'failed'`, `error_code = 'too_many_files'` (в main: `bitbucket_review_limit_exceeded`). | Check Run: `completed / neutral`. | `tests/test_bitbucket_vcs.py` |
+| **QA-LIM-05** | **Файлы PR GitLab (граница)** | GitLab PR ровно на **200 файлов**. | Все файлы принимаются к обработке. | `state = 'succeeded'`. | Check Run: `completed / neutral`. | `tests/test_gitlab_vcs.py` |
+| **QA-LIM-06** | **Файлы PR GitLab (сверх лимита)** | GitLab PR ровно на **201 файл** (или ответ «1000+»). | Отказ без повторных попыток. | `state = 'failed'`, `error_code = 'too_many_files'`. | Check Run: `completed / neutral`. | `tests/test_gitlab_vcs.py` |
+| **QA-LIM-07** | **Патч файла (граница строк)** | PR с 1 файлом, патч ровно **20 000 строк** (`_MAX_PATCH_LINES`). | Файл принимается к анализу. | `state = 'succeeded'`. | Файл не попадает в список `omissions`. Рецензируется. | `tests/test_vcs_diff.py` |
+| **QA-LIM-08** | **Патч файла (сверх строк)** | Файл с патчем **20 001 строка**. | Файл отсекается с `TOO_LARGE`. Остальной PR анализируется. | `state = 'succeeded'`. | В теле ревью: указан пропуск файла (`TOO_LARGE`). | `tests/test_vcs_diff.py` |
+| **QA-LIM-09** | **Патч файла (граница байт)** | Файл с патчем ровно **1 048 576 байт** (1 MiB). | Файл принимается к анализу. | `state = 'succeeded'`. | Файл рецензируется без пропуска. | `tests/test_vcs_diff.py` |
+| **QA-LIM-10** | **Патч файла (сверх байт)** | Файл с патчем **1 048 577 байт**. | Файл отсекается с `TOO_LARGE`. | `state = 'succeeded'`. | Пропуск файла с причиной `TOO_LARGE`. | `tests/test_vcs_diff.py` |
+| **QA-LIM-11** | **Блоб файла (граница байт)** | Блоб файла ровно **1 048 576 байт** (1 MiB). | Блоб вычитывается и может кэшироваться. | `state = 'succeeded'`. | Файл доступен для L3 контекста. | `tests/test_vcs_diff.py` |
+| **QA-LIM-12** | **Блоб файла (сверх байт)** | Блоб файла **1 048 577 байт** ($>1$ MiB). | Исключение из контекста, не пишется в `blob_cache`. | `state = 'succeeded'`. | Пропуск с причиной `OmissionReason.TOO_LARGE`. | `tests/test_vcs_diff.py` |
+| **QA-LIM-13** | **Ответ блоба VCS (граница)** | Ответ GitHub API ровно **1 500 000 байт**. | Блоб успешно декодируется из base64. | `state = 'succeeded'`. | Файл рецензируется. | `tests/test_github_vcs.py` |
+| **QA-LIM-14** | **Ответ блоба VCS (сверх)** | Ответ GitHub API **1 500 001 байт**. | Выброс `BlobTooLargeError` без OOM. | `state = 'succeeded'`. | Пропуск с причиной `OmissionReason.TOO_LARGE`. | `tests/test_github_vcs.py` |
+| **QA-LIM-15** | **Бинарный файл (сигнатура)** | Файл `logo.png` с magic bytes `\x89PNG\r\n\x1a\n`. | Отсекается без вызова декодера UTF-8. | `state = 'succeeded'`. | Пропуск файла с причиной `OmissionReason.BINARY`. | `tests/test_vcs_diff.py` |
+| **QA-LIM-16** | **Бинарный файл (нулевой байт)** | Файл `data.dat` с байтом `\0` в первых 8 KiB. | Отсекается эвристикой бинарности. | `state = 'succeeded'`. | Пропуск файла с причиной `OmissionReason.BINARY`. | `tests/test_vcs_diff.py` |
+| **QA-LIM-17** | **Lock-файл (список `_LOCK_FILES`)**| Добавлен файл `uv.lock` на 15 000 строк. | Отсекается эвристикой `is_generated_path`. | `state = 'succeeded'`. | Пропуск файла с причиной `OmissionReason.GENERATED`. | `tests/test_vcs_diff.py` |
+| **QA-LIM-18** | **Сгенерированный файл (`dist/`)**| Добавлен файл `dist/bundle.js`. | Отсекается как сгенерированный артефакт. | `state = 'succeeded'`. | Пропуск файла с причиной `OmissionReason.GENERATED`. | `tests/test_vcs_diff.py` |
+| **QA-LIM-19** | **Размер правил (граница)** | Файл `.review/rules.md` ровно **65 536 байт** (64 KiB). | Снимок правил успешно валидируется. | `state = 'succeeded'`. | Правила применяются в прогоне. | `tests/test_policy_documents.py` |
+| **QA-LIM-20** | **Размер правил (сверх лимита)**| Файл `.review/rules.md` **65 537 байт**. | Отказ на этапе сборки снимка правил. | `state = 'failed'`, `error_code = 'policy_document_too_large'`. | Check Run: `completed / neutral`. | `tests/test_policy_documents.py` |
+| **QA-LIM-21** | **Порог Summary-only (граница)**| PR суммарно на **3 000 строк** разрешённого диффа. | Полноценный анализ с inline-замечаниями. | `state = 'succeeded'`, `summaryOnly: false`. | Check Run: `completed / neutral`. Публикация inline. | `tests/test_review_context.py` |
+| **QA-LIM-22** | **Порог Summary-only (сверх)** | PR суммарно на **3 001 строку** разрешённого диффа. | Детерминированное переключение в `summary_only` (T14). | `state = 'succeeded'`, `summaryOnly: true`. | Check Run: `completed / neutral` (*«AI-ревью: только сводка»*). | `tests/test_review_context.py` |
+| **QA-LIM-23** | **Экстремальный дифф PR (граница)**| PR суммарно на **100 000 строк** разрешённого диффа. | Анализ в режиме `summary_only`. | `state = 'succeeded'`, `summaryOnly: true`. | Check Run: `completed / neutral`. | `tests/test_review_context.py` |
+| **QA-LIM-24** | **Экстремальный дифф PR (сверх DoS)**| PR суммарно на **100 001 строку** (или $>20$ MiB патча). | Аварийная остановка для защиты от OOM. | `state = 'failed'`, `error_code = 'pr_diff_too_large'`. | Check Run: `completed / neutral` (*«AI-ревью не выполнено: дифф PR слишком велик»*). | `tests/test_vcs_diff.py` |
+| **QA-LIM-25** | **Push Burst (серия пушей)** | 5 пушей за 20 секунд в один PR. $R_1$ в состоянии `running`. | $R_1$ доводится до конца на $C_1$. Доставки $C_2-C_4$ получают `state_changed`. $R_2$ стартует на $C_5$. | $R_1$: `succeeded`. $R_2$: `is_incremental = true`, `diff_base_commit = C_1`. Промежуточных runs нет! | Публикация ревью $R_1$ на $C_1$, затем дельта $R_2$ на $C_5$. | `tests/test_webhook_run_trigger_postgres.py` |
+| **QA-LIM-26** | **Burst Limit на PR (граница)** | 3-й пуш за 5 минут в один PR. | Прогон успешно запускается после завершения активного. | `state = 'running'` → `succeeded`. | Штатная публикация ревью. | `tests/test_webhook_run_trigger_postgres.py` |
+| **QA-LIM-27** | **Burst Limit на PR (сверх)** | 4-й пуш за 5 минут в один PR. | RunGuard T5 отклоняет запуск без автоповтора. | `state = 'skipped'`, `error_code = 'rate_limited'`. | Check Run: `completed / skipped` (*«AI-ревью пропущено: превышен лимит частоты»*). | `tests/test_handle_review_run.py` |
+| **QA-LIM-28** | **Окно PR (10/час, сверх)** | 11-й запуск за 1 час в один PR. | RunGuard T5 отклоняет запуск по скользящему окну. | `state = 'skipped'`, `error_code = 'rate_limited'`. | Check Run: `completed / skipped`. | `tests/test_handle_review_run.py` |
+| **QA-LIM-29** | **Рейт-лимит Rerun API (граница)**| 3-й вызов `POST /api/runs/{id}/rerun` за 15 минут. | Перезапуск успешно принимается. | Создаётся Run с `trigger = 'rerun'`. | HTTP 201 Created. Запуск анализа. | `tests/test_rerun.py` |
+| **QA-LIM-30** | **Рейт-лимит Rerun API (сверх)** | 4-й вызов `POST /api/runs/{id}/rerun` за 15 минут. | Сетевой шлюз блокирует вызов. | Новый Run не создаётся. | HTTP 429 Too Many Requests (`detail: "rerun_rate_limited"`, `Retry-After: <sec>`). | `tests/test_rerun.py` |
+| **QA-LIM-31** | **Песочница правил (параллелизм)**| Запуск симуляции при уже выполняющейся (`running`). | Блокировка параллельного запуска. | Вторая симуляция не ставится в очередь. | HTTP 409 Conflict (`detail: "active_simulation_exists"`). | `tests/test_rules_simulation.py` |
+| **QA-LIM-32** | **Дневной бюджет (граница допуска)**| Остаток бюджета воркспейса ровно **$0.50** (`= FAST_RUN_COST_LIMIT`). | Прогон допускается к выполнению. | `state = 'running'` → `succeeded`. | Штатная публикация ревью. | `tests/test_handle_review_run.py` |
+| **QA-LIM-33** | **Дневной бюджет (исчерпание)**| Остаток бюджета воркспейса **$0.49** ($< \$0.50$). | RunGuard T5 ставит ревью на паузу. | `state = 'skipped'`, `error_code = 'budget_paused'`. | Check Run: `completed / skipped` (*«AI-ревью пропущено: исчерпан дневной бюджет воркспейса»*). | `tests/test_handle_review_run.py` |
+| **QA-LIM-34** | **Дневной бюджет (безлимит)** | Воркспейс с `daily_budget_usd = 0.00`. Расход $> \$100.00$. | Прогоны не приостанавливаются. | `state = 'running'` → `succeeded`. | Штатное проведение ревью. | `tests/test_handle_review_run.py` |
+| **QA-LIM-35** | **Дедлайн индекса кода RAG** | Сборка графа превысила **900 секунд** (15 минут). | Фоновый воркер прерывает сборку по дедлайну. | `code_index_jobs.status = 'failed'`, `error_code = 'limit_exceeded:deadline'`. | Ревью продолжается без RAG-контекста (`rag: not_ready`). | `tests/test_code_index_limits.py` |
