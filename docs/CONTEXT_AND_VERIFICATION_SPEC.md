@@ -937,13 +937,13 @@ API, хранения, hash/dedup и eval. Старые v1 findings не пол�
 | Проход | Вход | Проверка | Выход и коды отказа |
 | --- | --- | --- | --- |
 | 1. Формат | Raw reviewer response, закреплённая schema v2/v3 | JSON, типы, обязательные поля, enum, max 10, диапазоны | Валидный ReviewOutput либо восстановление по §7; `llm_invalid_output` после исчерпания восстановления, не пустой успешный review |
-| 2. Координаты | Candidates, доверенный inventory/DiffMap, IgnorePolicy, manifest принятого review-call | Сначала достоверная идентичность (обе стороны rename/copy), затем ignore до проверки существования/стороны/видимости каждой строки; структурный deleted-file и предварительный LEFT-отказ (§9.3) | `inline_eligible` / `general_only` либо drop: `unknown_path`, `ignored_file`, `wrong_side`, `left_anchor_unsupported`, `line_absent`, `cross_hunk_range`, `range_gap`, `anchor_not_visible`, `incomplete_diff`, `unsupported_provider_anchor`; evidence-dependent LEFT-отказ только предварительный до прохода 3 |
+| 2. Координаты | Candidates, доверенный inventory/DiffMap, IgnorePolicy, manifest принятого review-call | Сначала достоверная идентичность (обе стороны rename/copy), затем ignore до проверки существования/стороны/видимости каждой строки; структурный deleted-file и предварительный LEFT-отказ (§9.3) | `inline_eligible` / `general_only` либо drop: `unknown_path`, `ignored_file`, `wrong_side`, `left_anchor_unsupported`, `line_absent`, `cross_hunk_range`, `range_gap`, `anchor_not_visible`, `out_of_incremental_diff_scope`, `incomplete_diff`, `unsupported_provider_anchor`; evidence-dependent LEFT-отказ только предварительный до прохода 3 |
 | 3. Доказательства | Candidates с допустимыми координатами и отдельно кандидаты с предварительным evidence-dependent LEFT-отказом; refs и manifest review-call | Все refs показаны, provenance/источники разрешены, ревизии совпадают; лишь затем финализировать LEFT-причину (§9.3) | Допущенные candidates; `evidence_not_shown`, `evidence_source_disallowed`, `revision_mismatch` — drop; предварительный LEFT не даёт eligibility, после валидных refs финализируется `left_anchor_unsupported` либо map-derived `wrong_side`/другая координатная причина |
 | 4. Политика/дубли | Допущенные candidates, IgnorePolicy, закреплённый lint-filter и dedup keys | Defense guard разрешённых источников для evidence/general, чистый lint, точная дедупликация; порог severity здесь не применяется | Сохранённый набор; drop `lint_pattern`, `duplicate`; guard: изолируемый запрещённый evidence/general → `evidence_source_disallowed`/partial, неизолируемый источник либо нарушенная целостность → failed/`snapshot_integrity_error`; не переименовывает evidence-причины прохода 3 и не заменяет anchor-ignore прохода 2; pre-send guard не является проходом по ответу |
 | 5. Verifier | Замороженные candidates после прохода 4, policy/defaults, код и отдельный manifest | Обязательный смысловой batch по §7 | `supported` идёт дальше; `contradicted`, `insufficient_context` сохраняются без публикации; ошибки всего вызова — §8.4 |
 | 6. Порог и размещение | Только supported, закреплённый `severity_threshold`, `max_comments` | Порог после verifier (§7), затем сортировка и закреплённый inline cap | Drop `severity_threshold` с отдельным счётчиком; остальные — final findings с disposition inline/general; сверх cap — general, не drop |
-| 6b. Межпрогонный дедуп | Supported-кандидаты после Pass 5, реестр опубликованных комментариев PR (`comments` с `github_comment_id`) и body-only находок последнего прошедшего T14 прогона (`registry`), карта тредов `thread_map: ReviewThreadMap`, исходы `resolution_outcomes` (сетевой шаг `sync_review_threads_state` с обновлением статусов тредов в `comments` и `resolution_outcomes`, а затем чтение актуализированного реестра выполняются в `store_review_output.py` после `get_post_processing_input` и до `process()`) | Межпрогонная дедупликация кандидатов внутри `findings_post_processor.py:process()` (Cross-Run Dedup по [`INCREMENTAL_REVIEW_AND_LIMITS_SPEC.md`](INCREMENTAL_REVIEW_AND_LIMITS_SPEC.md)); выполняется строго после восстановления атрибуции `_repair_attribution` и до сортировки и среза cap `Repository.max_comments`; подавленные дубли не сжигают inline cap | Повторные находки сохраняют `drop_reason IS NULL`, возвращаются в поле dataclass `ProcessedReviewOutput.suppressed`, в полном объёме учитываются в `kept` (`Verdict` и `Risk summary` тела ревью, `hashed_findings`), severity counts и check-run (`CheckRunReport.suppressed_count`), связываются с существующим `Comment` (`linked_comment_id`, либо `NULL` для body-only) и помечаются `publication_action = 'suppressed_duplicate'`; отсеянные проходами 2–6 получают `publication_action = 'dropped'`; подавленные дубли не попадают в срез inline cap и не рендерятся строками в списке тела ревью; новые получают `publication_action = 'publish_inline'` (или `'publish_body'`); потребители — `store_review_output.py` и `run_repository.py` |
-| 7. Публикация | FinalReviewResult и immutable publication plan (сформированный после прохода 6b), текущая идентичность VCS | Проверка допустимого адаптера, свежести head/diff; отправка review batch на GitHub (дискуссий на GitLab); чистка тредов publisher после перехода T14 | Новые inline-находки публикуются review batch; чистка устаревших/решённых тредов мутацией `resolveReviewThread` по квоте до 30; явный отказ публикации всего batch по §9–10: `superseded`, `pr_closed`, `publication_payload_too_large`, provider-specific ошибки, `publication_outcome_unknown`; без угадывания координат |
+| 6b. Межпрогонный дедуп | Supported-кандидаты после Pass 5, реестр опубликованных комментариев PR (`comments` с `github_comment_id`), body-only находок последнего прошедшего T14 прогона (`registry`) и активные подтверждённые находки базового Run (`findings` со статусом `publication_action IN ('publish_inline', 'publish_body', 'suppressed_duplicate') AND drop_reason IS NULL`), карта тредов `thread_map: ReviewThreadMap`, исходы `resolution_outcomes` (сетевой шаг `sync_review_threads_state` с обновлением статусов тредов в `comments` и `resolution_outcomes`, а затем чтение актуализированного реестра выполняются в `store_review_output.py` после `get_post_processing_input` и до `process()`) | Межпрогонная дедупликация кандидатов внутри `findings_post_processor.py:process()` (Cross-Run Dedup по [`INCREMENTAL_REVIEW_AND_LIMITS_SPEC.md`](INCREMENTAL_REVIEW_AND_LIMITS_SPEC.md)); выполняется строго после восстановления атрибуции `_repair_attribution` и до сортировки и среза cap `Repository.max_comments`; подавленные дубли не сжигают inline cap | Повторные находки сохраняют `drop_reason IS NULL`, возвращаются в поле dataclass `ProcessedReviewOutput.suppressed`, в полном объёме учитываются в `kept` (`Verdict` и `Risk summary` тела ревью, `hashed_findings`), severity counts и check-run (`CheckRunReport.suppressed_count`), связываются с существующим `Comment` (`linked_comment_id`, либо `NULL` для body-only) и помечаются `publication_action = 'suppressed_duplicate'`; отсеянные проходами 2–6 получают `publication_action = 'dropped'`; подавленные дубли не попадают в срез inline cap и не рендерятся строками в списке тела ревью; новые получают `publication_action = 'publish_inline'` (или `'publish_body'`); потребители — `store_review_output.py` и `run_repository.py` |
+| 7. Публикация | FinalReviewResult и immutable publication plan (сформированный после прохода 6b), текущая идентичность VCS | Проверка допустимого адаптера, отсутствия удаления коммита (422) и совпадения целевой ветки (проверенной до сохранения diff; при смене базы — `failed/pr_base_changed`); отправка review batch на GitHub (дискуссий на GitLab); чистка тредов publisher после перехода T14 | Новые inline-находки публикуются review batch; чистка устаревших/решённых тредов мутацией `resolveReviewThread` по квоте до 30; явный отказ публикации всего batch по §9–10: `commit_not_found`, `pr_closed`, `pr_base_changed`, `publication_payload_too_large`, provider-specific ошибки, `publication_outcome_unknown`; без угадывания координат |
 
 `lint_pattern` и `duplicate` сохраняют действующие имена legacy-кодов;
 переименование/миграция причин не вводится. `ignored_file` для якоря выдаёт проход 2
@@ -1017,6 +1017,8 @@ accepted_call_id и все решения фильтров. ID не вычисл
 После фильтров ID и содержимое заморожены. Ограничение количества inline применяется
 после verifier: поддержанные находки сверх cap идут в тело ревью, не исчезают
 из final findings или severity counts.
+
+Для инкрементального ревью (`run.is_incremental = true`) проход 2 (2. Координаты) проверяет привязку якоря к изменённым хункам коммит-дельты `diff_base_commit...head_sha`: если целевые строки кандидата лежат за пределами изменённых хунков инкрементального диффа (галлюцинация модели вне скоупа дельты), кандидат отсекается с `drop_reason = 'out_of_incremental_diff_scope'` и `publication_action = 'dropped'` ([`INCREMENTAL_REVIEW_AND_LIMITS_SPEC.md`](INCREMENTAL_REVIEW_AND_LIMITS_SPEC.md) §6.7).
 
 ## 7. Обязательный LLM-проверяющий
 
@@ -1285,6 +1287,12 @@ unsupported LEFT или недоступном расширении AST/импо
 Координатные drops `left_anchor_unsupported` и `wrong_side` оба дают partial;
 выбор кода не превращает непроверенного кандидата в clean (§9.3).
 
+Для инкрементального ревью (`run.is_incremental = true`) целевой `FinalReviewResult` формируется над объединённым множеством активных находок pull request:
+- `findings`: объединяет новые подтверждённые находки коммит-дельты (бакеты `inline` и `body_only`) и унаследованные сохраняющиеся дефекты предшествующих прогонов (`suppressed_duplicate`, персистируются с `published = false` до перехода T14, где получают `published = true` вместе с остальными строками); при summary-only по дельте (#365) модель не вызывается, унаследованные дефекты сохраняются как `suppressed_duplicate` и удерживают вердикт;
+- `severity_counts`: вычисляются по объединённому множеству активных находок $F_{\text{active}} = (F_{\text{persisting}} \setminus F_{\text{resolved}}) \cup F_{\text{new}}$, где $F_{\text{resolved}}$ рассчитывается по исходам Pass 6b текущего прогона (`RESOLVED_BY_FIX`, `RESOLVED_BY_DELETION`, `RESOLVED_MUTATED`);
+- `verdict`: рассчитывается по правилам §8.2 над $F_{\text{active}}$ и унаследованным статусом полноты `coverage`; если у базового прогона `coverage.status != 'complete'` (например, `partial` из-за пропусков файлов или превышения лимитов), инкрементальный прогон строго наследует статус `partial`, что исключает ложный вердикт `clean` при отсутствии замечаний в дельте (в этом случае вердикт становится `null` только если среди активных находок нет замечаний выше `info`; при наличии `medium`/`low` сохраняется `attention`, при `critical`/`high` — `blocking` по канонической таблице §8.2);
+- `result_digest`: рассчитывается от объединённого набора полей `FinalReviewResult`.
+
 ### 8.2. Вердикт и публичный текст
 
 | Условие окончательного набора | `verdict` |
@@ -1294,6 +1302,8 @@ unsupported LEFT или недоступном расширении AST/импо
 | Только info или пусто, coverage complete | `clean` |
 | Только info или пусто, coverage partial/none | `null` |
 | skipped/failed/cancelled или ещё не succeeded | API `null` |
+
+Для инкрементального ревью (`run.is_incremental = true`) вердикт PR и итоговые счетчики вычисляются над объединенным множеством активных находок: $F_{\text{active}} = (F_{\text{persisting}} \setminus F_{\text{resolved}}) \cup F_{\text{new}}$ ([`INCREMENTAL_REVIEW_AND_LIMITS_SPEC.md`](INCREMENTAL_REVIEW_AND_LIMITS_SPEC.md) §6.8). Если хотя бы одна сохраняющаяся активная находка имеет уровень critical или high, вердикт строго устанавливается в `blocking` (исход `clean` категорически запрещён даже при полном отсутствии новых дефектов в инкрементальной дельте); при срабатывании summary-only по дельте (#365) вердикт также удерживается сохраняющимися активными находками базы.
 
 Не вводится новый enum вердикта: отдельный `coverage.status` и причины позволяют
 UI отличить неполноту от незавершённого run. В списках и detail используется
@@ -1662,7 +1672,7 @@ GitHub для removed не даёт нового blob (`github_vcs.py`); уда�
 смысловую проверку для общего текста только при валидных разрешённых доказательствах.
 Дополнительные ограничения `general_only` заданы в §6.2. Причины сохраняются: `unknown_path`, `wrong_side`, `line_absent`, `cross_hunk_range`,
 `range_gap`, `anchor_not_visible`, `ignored_file`, `incomplete_diff`,
-`unsupported_provider_anchor`, `left_anchor_unsupported`.
+`unsupported_provider_anchor`, `left_anchor_unsupported`, `out_of_incremental_diff_scope`.
 В v2 модель не заявляет сторону, поэтому коды определяются наблюдаемыми данными:
 
 - `left_anchor_unsupported`: достоверная структурная идентичность удалённого файла
@@ -1910,16 +1920,16 @@ comments/discussions обязательна; ошибка чтения или л
    операции. Перед каждым новым POST проверяются run/cancel, открытость PR/MR,
    текущий head и идентичность diff у VCS; затем выполняется поиск уже отправленной
    операции. Все HTTP-вызовы — вне DB-транзакции.
-2. При смене head или версии diff новый POST запрещён, run получает
-   `cancelled/superseded`. Пересчёт координат для нового head не является retry.
+2. При смене целевой ветки/базы PR (проверенной до сохранения diff) новый POST запрещён, run получает отказ (`failed`, `pr_base_changed`). Сдвиг головы в PR сам по себе не прерывает отправку: ревью публикуется на исходном `commit_id`, а run успешно завершается (`succeeded`, T14) и формирует базу для последующего инкрементального ревью коммит-дельты ([`INCREMENTAL_REVIEW_AND_LIMITS_SPEC.md`](INCREMENTAL_REVIEW_AND_LIMITS_SPEC.md) §6.4).
 3. После подтверждённого ответа сохраняются review/discussion/note IDs и точное
    соответствие finding → comment по сохранённым marker/координатам и body.
    Порядок и равное число элементов в ответе недостаточны для восстановления.
 4. После POST повторно читается актуальность VCS и в короткой транзакции
    завершается run. Push между GET и POST возможен: удалённая публикация остаётся
-   привязана к исходному head, её IDs сохраняются, а run отмечается cancelled,
-   если устарел или отменён. Новый head не объявляется проверенным. Автоматическое
-   удаление опубликованного комментария для сокрытия гонки не выполняется.
+   привязана к исходному `commit_id`, её IDs сохраняются в `comments`, а run успешно
+   переходит в `succeeded` (T14), фиксируя базу инкремента; в `cancelled` (T15) run переходит
+   только если коммит исчез из VCS (HTTP 422 `commit_not_found`) либо PR был закрыт. Новый head не объявляется
+   проверенным. Автоматическое удаление опубликованного комментария для сокрытия гонки не выполняется.
 5. Разрешение устаревших и исправленных замечаний (VCS Write-back). В соответствии
    со спецификацией [`INCREMENTAL_REVIEW_AND_LIMITS_SPEC.md`](INCREMENTAL_REVIEW_AND_LIMITS_SPEC.md)
    (Ч.1), после подтверждения успешности публикации review batch на GitHub, атомарного перехода
@@ -1962,7 +1972,7 @@ GitHub v1 сохраняет один review batch на run. GitLab требуе
 | 401 | Одно обновление токена и повтор при подтверждённом отказе, затем access failure |
 | 403 без rate-limit признаков, 404 доступа/ресурса | Access/resource failure; не объявлять старый commit без соответствующего доказательства |
 | Явная ошибка недопустимых path/line/side/range/position при неизменном diff | `coordinates_rejected`; один сохранённый вариант body-only после подтверждённого отказа исходной операции |
-| Недопустимый commit/diff refs либо текущий head изменился | Сверить VCS; при подтверждении устаревания `cancelled/superseded`, без body-only обхода |
+| Недопустимый commit/diff refs либо удаление коммита (422) | Сверить VCS; при подтверждении исчезновения коммита `cancelled/commit_not_found`, без body-only обхода. При наличии нового коммита — публикация на исходном `commit_id`, run `succeeded` |
 | 400/422 по body/event/schema, spam/abuse, неизвестная validation error | Невосстановимая ошибка payload либо отдельная rate-limit классификация; не считать её ошибкой координат |
 
 GitHub документирует 422 и для validation, и для spam; одного HTTP-кода недостаточно
