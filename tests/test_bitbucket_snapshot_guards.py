@@ -150,11 +150,15 @@ def test_declared_listing_size_must_match_actual_entries() -> None:
 
 def test_repeated_source_page_stops_before_third_request() -> None:
     calls = 0
+    next_page = (
+        f"https://api.bitbucket.org/2.0/repositories/%7B%7D/%7B{REPO}%7D/"
+        f"src/{SHA}/?pagelen=100&page=2"
+    )
 
     def handle(request: httpx.Request) -> httpx.Response:
         nonlocal calls
         calls += 1
-        return listing(next_page=str(request.url))
+        return listing(next_page=next_page)
 
     async def run() -> None:
         async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
@@ -162,7 +166,7 @@ def test_repeated_source_page_stops_before_third_request() -> None:
                 await source(client).archive(SHA, max_bytes=10000)
 
     asyncio.run(run())
-    assert calls == 1
+    assert calls == 2
 
 
 def test_remaining_budget_stops_before_oversized_second_file() -> None:
