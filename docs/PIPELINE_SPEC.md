@@ -777,12 +777,26 @@ GitHub для этого нет.
 проходит те же lifecycle/retry/cancel guards без mint/update/close GitHub check-run;
 сигналы и реконсилер не дают GitLab GitHub authority.
 
-Один check-run на Run (`external_id = run_id`). Он создаётся при первом claim (T4), следующие попытки его обновляют. `conclusion: failure` не используется никогда: бот не блокирует merge.
+Один check-run на Run (`external_id = run_id`). Он создаётся при первом claim (T4), следующие попытки его обновляют.
+
+Итог `succeeded` выбирается по правилам сверху вниз (#320):
+
+| Условие | `conclusion` |
+|---|---|
+| summary-only — при любом вердикте и событии ревью (такой Run может получить `blocking` и `REQUEST_CHANGES`, §2) | `neutral` |
+| verdict null (partial или coverage none) | `neutral` |
+| `blocking` и ревью этого Run отправлено с событием `REQUEST_CHANGES` (§11) — даже если все находки подавлены как повторы и inline-комментариев в POST нет | `failure` |
+| `blocking` и событие `COMMENT` | `neutral` |
+| `clean` или `attention` | `success` |
+
+Событие берётся из сообщения `review.publish` (§12), с которым ушло ревью: в PG оно не хранится, и настройку `reviewEvent` репозитория при обновлении check-run никто не перечитывает, поэтому `failure` не расходится с ревью этого Run. Обновление check-run без события (любой путь, кроме завершения публикации) `failure` не даёт. `failed`, `cancelled` и `skipped` — сбой или отказ нашего сервиса — никогда не дают `failure`.
+
+`failure` красит PR, но merge блокирует, только если владелец отметил check `AI Review` обязательным в защите ветки; `neutral`, `success` и `skipped` обязательную проверку проходят. По умолчанию (`reviewEvent = COMMENT`) бот merge не блокирует, как раньше. Обязательный check ждёт PR без Run вечно: без лейбла `ai-review` Run и check-run не создаются (§8.1), пока авто-ревью всех PR (#293) не включено в репозитории. Свой check suite исключён из CI-гейта по `app.id` (§8.1), поэтому собственный `failure` бот не ждёт.
 
 | Итог Run | `status` / `conclusion` | Заголовок | Summary |
 |---|---|---|---|
 | выполняется | `in_progress` | AI-ревью выполняется | попытка N из 3 |
-| `succeeded` | `completed` / `neutral` | AI-ревью: `blocking` / `attention` / `clean` (§11); partial с verdict null — реализованный в #213 заголовок «AI-ревью: проверка неполная»; summary-only — реализованный заголовок «AI-ревью: только сводка»; coverage none — реализованный в #213 заголовок «AI-ревью: нет доступных для анализа изменений» (на snapshot path — без вызовов модели, #130 F5; legacy вызывает модель) | сохранённые summary/counts/coverage и размещение из одного result/варианта (в #107 — FinalReviewResult, включая below_severity_threshold_count), ссылка на прогон; summary-only — одна из трёх причин, тоже со ссылкой на прогон: `diff_too_large` — «Построчное AI-ревью не выполнено: превышен лимит diff»; `diff_inventory_incomplete` — «Построчное AI-ревью не выполнено: список изменённых файлов неполон»; `no_reviewable_files` — «Построчное AI-ревью не выполнено: нет проверяемых файлов»; неполнота не называется clean; если порог severity репозитория отсёк N > 0 находок — строка `ниже порога severity: N` (§9) |
+| `succeeded` | `completed` / `success`, `neutral` или `failure` по таблице выше | AI-ревью: `blocking` / `attention` / `clean` (§11); partial с verdict null — реализованный в #213 заголовок «AI-ревью: проверка неполная»; summary-only — реализованный заголовок «AI-ревью: только сводка»; coverage none — реализованный в #213 заголовок «AI-ревью: нет доступных для анализа изменений» (на snapshot path — без вызовов модели, #130 F5; legacy вызывает модель) | сохранённые summary/counts/coverage и размещение из одного result/варианта (в #107 — FinalReviewResult, включая below_severity_threshold_count), ссылка на прогон; summary-only — одна из трёх причин, тоже со ссылкой на прогон: `diff_too_large` — «Построчное AI-ревью не выполнено: превышен лимит diff»; `diff_inventory_incomplete` — «Построчное AI-ревью не выполнено: список изменённых файлов неполон»; `no_reviewable_files` — «Построчное AI-ревью не выполнено: нет проверяемых файлов»; неполнота не называется clean; если порог severity репозитория отсёк N > 0 находок — строка `ниже порога severity: N` (§9) |
 | `failed` | `completed` / `neutral` | AI-ревью не выполнено | текст §6 и ссылка; обычно `error_code`, для `llm_payment_required` код скрыт. При verification failure новых findings нет; при publication_outcome_unknown (цель #107, код пока не пишет) существование удалённой публикации не утверждается |
 | `cancelled` | `completed` / `cancelled` | AI-ревью отменено | причина §6; до первого claim check-run'а нет |
 | `skipped` | `completed` / `skipped` | AI-ревью пропущено | причина §6; T5 создаёт сразу завершённым (кроме repo_disabled), T19 завершает созданный при claim check-run; verdict null |
