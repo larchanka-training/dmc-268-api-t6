@@ -253,6 +253,31 @@ def test_tree_walk_does_not_hide_exhausted_response_budget_as_partial_listing() 
     asyncio.run(scenario())
 
 
+def test_policy_accepts_empty_base_tree_without_explicit_first_page() -> None:
+    def respond(request: httpx.Request) -> httpx.Response:
+        if request.url.path == f"{PREFIX}/pullrequests/7":
+            return httpx.Response(200, json=_pr(source=DEST))
+        if request.url.path == f"{PREFIX}/diffstat/{HEAD}..{BASE}":
+            return httpx.Response(200, json={"size": 0, "values": []})
+        if request.url.path == f"{PREFIX}/src/{BASE}/":
+            if "page" in request.url.params:
+                return httpx.Response(400, text="Invalid page")
+            return httpx.Response(200, json={"values": [], "pagelen": 100, "page": 1})
+        raise AssertionError(request.url.path)
+
+    async def scenario() -> None:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+            http = BitbucketRunHttp(client, Credentials(), TARGET)
+            vcs = HttpBitbucketVcsProvider(http=http, locator=INPUT.locator)
+            trees = BitbucketRepositoryTree(
+                http=http, expected_input=INPUT, vcs=vcs, checkpoint=checkpoint
+            )
+            policy = BitbucketPolicyDocumentSource(trees=trees, policy_base_sha=BASE)
+            assert await policy.list_entries(None) == {}
+
+    asyncio.run(scenario())
+
+
 @pytest.mark.parametrize("budget_kind", ["request", "response"])
 def test_policy_source_preserves_listing_budget_code(budget_kind: str) -> None:
     def respond(request: httpx.Request) -> httpx.Response:
@@ -964,7 +989,7 @@ def test_agents_policy_file_on_opaque_second_page_is_read() -> None:
                         ]
                     },
                 )
-            assert request.url.params.get("page") == "1"
+            assert request.url.params.get("page") is None
             return httpx.Response(
                 200,
                 json={
