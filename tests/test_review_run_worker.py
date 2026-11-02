@@ -922,7 +922,7 @@ def test_check_run_update_passes_the_run_url_to_the_view_as_details_url() -> Non
     [("REQUEST_CHANGES", "failure"), ("COMMENT", "neutral"), (None, "neutral")],
     ids=["request-changes", "comment", "no-event"],
 )
-def test_check_run_update_shows_the_review_event_it_was_given(
+def test_check_run_update_keeps_the_stored_review_event_on_every_render(
     review_event: str | None, conclusion: str
 ) -> None:
     class BlockingStore(FakeStore):
@@ -932,20 +932,16 @@ def test_check_run_update_shows_the_review_event_it_was_given(
                 "succeeded",
                 1,
                 verdict="blocking",
+                review_event=review_event,
             )
 
     check_runs = CheckRuns()
-    asyncio.run(
-        update_check_run(
-            lambda: FakeUow(BlockingStore(FakeRun())),
-            check_runs,
-            RUN,
-            lambda _: None,
-            review_event=review_event,
-        )
-    )
+    store = BlockingStore(FakeRun())
+    # The publisher's render and a later RunGuard re-render read the same stored report.
+    for _ in range(2):
+        asyncio.run(update_check_run(lambda: FakeUow(store), check_runs, RUN, lambda _: None))
 
-    assert [view.conclusion for view in check_runs.views] == [conclusion]
+    assert [view.conclusion for view in check_runs.views] == [conclusion, conclusion]
 
 
 def test_failed_commit_fetch_check_run_names_commit_messages() -> None:

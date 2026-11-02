@@ -347,16 +347,17 @@ def test_matching_review_event_publishes_the_saved_event() -> None:
     assert trace.records[0][1]["review_event"] == "REQUEST_CHANGES"
 
 
-def test_request_changes_review_of_a_blocking_run_fails_the_check_run() -> None:
+def test_request_changes_publication_traces_the_event_the_check_run_reads_back() -> None:
     store = Store(context())
     reviews = Reviews([SubmittedReview(501, (9001,))])
     pointer = replace(POINTER, review_event="REQUEST_CHANGES")
-    _, check_runs = run(store, reviews, pointer=pointer)
+    trace, _ = run(store, reviews, pointer=pointer)
 
     assert reviews.submissions[0].event == "REQUEST_CHANGES"
-    assert [(v.status, v.conclusion, v.title) for v in check_runs.views] == [
-        ("completed", "failure", "AI-ревью: blocking")
-    ]
+    # check_run_report reads the event of the accepted publication back (PS §7).
+    assert [
+        (tool, request["review_event"], response) for tool, request, response in trace.records
+    ] == [("github.publish_review", "REQUEST_CHANGES", {"github_review_id": 501})]
 
 
 def test_failed_request_changes_publication_never_fails_the_check_run() -> None:
