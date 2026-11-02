@@ -422,9 +422,11 @@ def test_dashboard_shows_month_to_date_llm_spend_next_to_cost_per_hour() -> None
     panel = _panel_with("dmc_llm_cost_month_usd")
     cost_per_hour = next(other for other in panels if other["title"] == "LLM cost per hour")
     rules = _read(MONITORING / "prometheus" / "rules" / "alerts.yml")
+    # No budget (or 0) leaves the percentage empty instead of +Inf.
+    share = "100 * sum(dmc_llm_cost_month_usd) / (max(dmc_llm_monthly_budget_usd) > 0)"
     alerts = {
-        alert: (share, int(limit))
-        for alert, share, limit in re.findall(
+        alert: (alert_share, int(limit))
+        for alert, alert_share, limit in re.findall(
             r"- alert: (LlmMonthlyBudget\w+)\n        expr: (.*) >= (\d+)(?: < \d+)?\n", rules
         )
     }
@@ -434,9 +436,10 @@ def test_dashboard_shows_month_to_date_llm_spend_next_to_cost_per_hour() -> None
         "LlmMonthlyBudgetWarning": 80,
         "LlmMonthlyBudgetExceeded": 100,
     }
-    [share] = {share for share, _ in alerts.values()}
-    # No budget (or 0) leaves the percentage empty instead of +Inf.
-    assert "(max(dmc_llm_monthly_budget_usd) > 0)" in share
+    assert {alert: alert_share for alert, (alert_share, _) in alerts.items()} == {
+        "LlmMonthlyBudgetWarning": share,
+        "LlmMonthlyBudgetExceeded": share,
+    }
     assert panel is not None
     assert panel["title"] == "LLM spend this month"
     assert panel["type"] == "stat"
