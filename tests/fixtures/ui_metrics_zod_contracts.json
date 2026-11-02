@@ -1,7 +1,7 @@
 {
   "provenance": {
     "repository": "https://github.com/larchanka-training/dmc-268-ui-t6",
-    "commit": "e09e40dfd508a3177a31447f391fdd5a5d29067e",
+    "commit": "4eadc8691cd3ac3f431998f1f5976e358fefe8df",
     "generator": "z.toJSONSchema (Zod 4)",
     "command": "DMC_268_UI_DIR=<ui checkout after pnpm install> SCHEMA_NAMES=runSession,runDetail,runListPage,metricsSummary OUTPUT_PATH=tests/fixtures/ui_metrics_zod_contracts.json node tests/generate_ui_zod_contracts.mjs"
   },
