@@ -48,8 +48,7 @@ def test_bitbucket_check_names_match_orm_models_and_migrations() -> None:
         if isinstance(constraint, CheckConstraint)
     }
     migration_names = set().union(
-        *(_upgrade_check_names(path) for path in VERSIONS.glob("20261026_004[4-9]*bitbucket*.py")),
-        _upgrade_check_names(VERSIONS / "20261027_0050_bitbucket_status_publications.py"),
+        *(_upgrade_check_names(path) for path in VERSIONS.glob("*bitbucket*.py"))
     )
     assert orm_names == {name for name in migration_names if name.startswith("ck_bitbucket_")}
 
@@ -60,7 +59,7 @@ def test_bitbucket_webhook_receipt_check_names_match_migration() -> None:
         for constraint in cast(Table, WebhookEvent.__table__).constraints
         if isinstance(constraint, CheckConstraint)
     }
-    migration_names = _upgrade_check_names(VERSIONS / "20261026_0047_bitbucket_webhook_receipts.py")
+    migration_names = _upgrade_check_names(VERSIONS / "20261026_0048_bitbucket_webhook_receipts.py")
     assert {"ck_webhook_events_provider", "ck_webhook_events_provider_origin"} <= (
         orm_names & migration_names
     )

@@ -1,7 +1,7 @@
 """Serialize Bitbucket review publication without holding a DB transaction over HTTP (#333).
 
-Revision ID: 20261026_0049
-Revises: 20261026_0048
+Revision ID: 20261026_0050
+Revises: 20261026_0049
 """
 
 from __future__ import annotations
@@ -10,8 +10,8 @@ import sqlalchemy as sa
 
 from alembic import op
 
-revision = "20261026_0049"
-down_revision = "20261026_0048"
+revision = "20261026_0050"
+down_revision = "20261026_0049"
 branch_labels = None
 depends_on = None
 

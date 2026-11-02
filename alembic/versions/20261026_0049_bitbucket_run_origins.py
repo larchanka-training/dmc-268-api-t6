@@ -1,7 +1,7 @@
 """Pin each Bitbucket run to its original repository binding (#333).
 
-Revision ID: 20261026_0048
-Revises: 20261026_0047
+Revision ID: 20261026_0049
+Revises: 20261026_0048
 """
 
 from __future__ import annotations
@@ -10,8 +10,8 @@ import sqlalchemy as sa
 
 from alembic import op
 
-revision = "20261026_0048"
-down_revision = "20261026_0047"
+revision = "20261026_0049"
+down_revision = "20261026_0048"
 branch_labels = None
 depends_on = None
 
