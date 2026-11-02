@@ -500,6 +500,70 @@ def test_check_run_view_follows_the_pipeline_spec_table(
     assert view.conclusion != "failure"
 
 
+def _succeeded(**change: object) -> CheckRunReport:
+    return replace(CheckRunReport(CheckRunTarget(1, "o/r", HEAD, RUN), "succeeded", 1), **change)
+
+
+@pytest.mark.parametrize(
+    ("report", "conclusion"),
+    [
+        (_succeeded(verdict="clean", coverage_status="complete"), "success"),
+        (_succeeded(verdict="attention", severity_counts={"medium": 1}), "success"),
+        (
+            _succeeded(verdict="attention", review_event="REQUEST_CHANGES"),
+            "success",
+        ),
+        (_succeeded(verdict="blocking", review_event="COMMENT"), "neutral"),
+        (_succeeded(verdict="blocking", review_event="REQUEST_CHANGES"), "failure"),
+        (_succeeded(verdict="blocking"), "neutral"),
+        (
+            # Every finding suppressed as a repeat: no inline comment, the verdict stays.
+            _succeeded(verdict="blocking", review_event="REQUEST_CHANGES", inline_count=0),
+            "failure",
+        ),
+        (
+            _succeeded(verdict="blocking", review_event="REQUEST_CHANGES", summary_only=True),
+            "neutral",
+        ),
+        (_succeeded(verdict=None, review_event="REQUEST_CHANGES"), "neutral"),
+        (_succeeded(verdict=None, coverage_status="none"), "neutral"),
+    ],
+    ids=[
+        "clean",
+        "attention",
+        "attention-request-changes",
+        "blocking-comment",
+        "blocking-request-changes",
+        "blocking-no-event",
+        "blocking-request-changes-no-inline",
+        "summary-only-blocking-request-changes",
+        "partial-request-changes",
+        "coverage-none",
+    ],
+)
+def test_succeeded_check_run_conclusion_follows_the_verdict_and_review_event(
+    report: CheckRunReport, conclusion: str
+) -> None:
+    view = check_run_view(report)
+    assert (view.status, view.conclusion) == ("completed", conclusion)
+
+
+@pytest.mark.parametrize(
+    "report",
+    [
+        CheckRunReport(CheckRunTarget(1, "o/r", HEAD, RUN), "failed", 3, "llm_timeout"),
+        CheckRunReport(CheckRunTarget(1, "o/r", HEAD, RUN), "cancelled", 1, "superseded"),
+        CheckRunReport(CheckRunTarget(1, "o/r", HEAD, RUN), "skipped", 0, "budget_paused"),
+    ],
+    ids=["failed", "cancelled", "skipped"],
+)
+def test_service_failure_never_fails_the_check_run_even_for_a_request_changes_repository(
+    report: CheckRunReport,
+) -> None:
+    view = check_run_view(replace(report, verdict="blocking", review_event="REQUEST_CHANGES"))
+    assert view.conclusion != "failure"
+
+
 @pytest.mark.parametrize(
     ("run_url", "details_url"),
     [("https://app.test/runs/1", "https://app.test/runs/1"), (None, None)],
@@ -851,6 +915,37 @@ def test_check_run_update_passes_the_run_url_to_the_view_as_details_url() -> Non
     assert [view.details_url for view in check_runs.views] == [
         "https://review.example/runs/11111111-1111-1111-1111-111111111111"
     ]
+
+
+@pytest.mark.parametrize(
+    ("review_event", "conclusion"),
+    [("REQUEST_CHANGES", "failure"), ("COMMENT", "neutral"), (None, "neutral")],
+    ids=["request-changes", "comment", "no-event"],
+)
+def test_check_run_update_shows_the_review_event_it_was_given(
+    review_event: str | None, conclusion: str
+) -> None:
+    class BlockingStore(FakeStore):
+        async def check_run_report(self, run_id: UUID) -> CheckRunReport | None:
+            return CheckRunReport(
+                CheckRunTarget(17, "octo/repo", HEAD, run_id),
+                "succeeded",
+                1,
+                verdict="blocking",
+            )
+
+    check_runs = CheckRuns()
+    asyncio.run(
+        update_check_run(
+            lambda: FakeUow(BlockingStore(FakeRun())),
+            check_runs,
+            RUN,
+            lambda _: None,
+            review_event=review_event,
+        )
+    )
+
+    assert [view.conclusion for view in check_runs.views] == [conclusion]
 
 
 def test_failed_commit_fetch_check_run_names_commit_messages() -> None:
