@@ -1,0 +1,25 @@
+diff --git a/fleetlog/labels.py b/fleetlog/labels.py
+index 3ad92f6..2d6f2ff 100644
+--- a/fleetlog/labels.py
++++ b/fleetlog/labels.py
+@@ -2,4 +2,5 @@
+ 
+ 
+ def plate_label(plate: str) -> str:
++    """Return the plate upper-cased without spaces, as printed on work orders."""
+     return plate.upper().replace(" ", "")
+diff --git a/fleetlog/service.py b/fleetlog/service.py
+index 68fa675..f2da7b9 100644
+--- a/fleetlog/service.py
++++ b/fleetlog/service.py
+@@ -3,6 +3,8 @@
+ from .vehicles import VEHICLES
+ 
+ 
+-def until_service(vehicle_id: str) -> int:
++def until_service(vehicle_id: str) -> tuple[int, int]:
+     vehicle = VEHICLES[vehicle_id]
+-    return vehicle.last_service_km + vehicle.interval_km - vehicle.odometer_km
++    km_left = vehicle.last_service_km + vehicle.interval_km - vehicle.odometer_km
++    days_left = vehicle.interval_days - vehicle.days_since_service
++    return km_left, days_left

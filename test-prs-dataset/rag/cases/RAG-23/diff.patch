@@ -1,0 +1,14 @@
+diff --git a/tally/ratios.py b/tally/ratios.py
+index c41c992..31c9b08 100644
+--- a/tally/ratios.py
++++ b/tally/ratios.py
+@@ -1,7 +1,7 @@
+ """Ratios shown in the reports."""
+ 
+ 
+-def percent(part: int, whole: int) -> float:
++def percent(part: int, whole: int, digits: int = 1) -> float:
+     if whole == 0:
+         return 0.0
+-    return round(100 * part / whole, 1)
++    return round(100 * part / whole, digits)
