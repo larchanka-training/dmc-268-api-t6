@@ -590,7 +590,11 @@ class PublishRunReview:
             await uow.commit()
         if completed and route.writes_check_run:
             await update_check_run(
-                self._uow_factory, self._check_runs, pointer.run_id, self._run_url
+                self._uow_factory,
+                self._check_runs,
+                pointer.run_id,
+                self._run_url,
+                review_event=submission.event,
             )
         if completed and route.bitbucket:
             await update_bitbucket_status(

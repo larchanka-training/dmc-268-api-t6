@@ -145,6 +145,8 @@ class CheckRunReport:
     provider: str = "github"
     coverage_status: str | None = None
     saved_summary: dict[str, str] | None = None
+    # The event this Run's review was posted with (``review.publish``); None never fails.
+    review_event: str | None = None
 
 
 type RunProviderCheckpoint = Callable[[], Awaitable[None]]
@@ -185,6 +187,15 @@ def is_summary_only_stop(summary: object) -> bool:
     return "reviewable_lines" not in summary
 
 
+def _succeeded_conclusion(verdict: str | None, review_event: str | None) -> str:
+    """§7: ``failure`` only for a blocking verdict whose review requested changes."""
+    if verdict is None:
+        return "neutral"
+    if verdict == "blocking":
+        return "failure" if review_event == "REQUEST_CHANGES" else "neutral"
+    return "success"
+
+
 def check_run_view(report: CheckRunReport) -> CheckRunView:
     link = f"\n\n{report.run_url}" if report.run_url else ""
     if report.state in {"queued", "running", "publishing"}:
@@ -222,7 +233,7 @@ def check_run_view(report: CheckRunReport) -> CheckRunView:
         )
         return CheckRunView(
             "completed",
-            "neutral",
+            _succeeded_conclusion(report.verdict, report.review_event),
             f"AI-ревью: {title}",
             f"{counts}\ninline: {report.inline_count}, в теле ревью: {report.body_count}"
             f"{explanation}{below}{link}",
