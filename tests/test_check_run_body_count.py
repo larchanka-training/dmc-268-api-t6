@@ -14,6 +14,8 @@ from app.modules.reviews.infrastructure.run_lifecycle_store import SqlAlchemyRun
 def _check_run_scalar(statement: object) -> bool | int | None:
     """Answer ``check_run_report`` scalars by the query, not by call order."""
     text = str(statement)
+    if "run_actions" in text:
+        return None
     if "summary_only" in text or "bool_or" in text:
         return False
     if "count" in text:
