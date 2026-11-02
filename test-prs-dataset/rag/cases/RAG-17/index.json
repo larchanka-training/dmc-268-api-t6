@@ -1,0 +1,99 @@
+{
+  "schema_version": 1,
+  "indexed_commit_sha": "b3345f5a017d8e37893a2ca8c0181299de67459e",
+  "extractor": {
+    "limits_version": "limits/v1:fdf4e4d96f1a13a708d0af7b941297dc",
+    "parser_profile": "39409961245fa4d8e7284fe26c974a79dea7225e088d7bdbbd17c83384e1271a",
+    "exclusions_version": "index-exclusions/v2"
+  },
+  "file_count": 6,
+  "symbol_count": 8,
+  "files": [
+    {
+      "path": "taskrunner/__init__.py",
+      "blob_sha": "b7a278405d28848913526193e99245d94cefe3e4"
+    },
+    {
+      "path": "taskrunner/backoff.py",
+      "blob_sha": "bfa34937903d973f8020624e1e85aaf90c99b63f"
+    },
+    {
+      "path": "taskrunner/handlers.py",
+      "blob_sha": "aa11e4fb6155cf5d08e5e648e1b8fe5291c61d6d"
+    },
+    {
+      "path": "taskrunner/models.py",
+      "blob_sha": "8dea9d5b3b889a26c0cc76195e5ee0e822e7975c"
+    },
+    {
+      "path": "taskrunner/scheduling.py",
+      "blob_sha": "3b90d05f2d6109b457468aaab7848ae6d0a1bf1e"
+    },
+    {
+      "path": "taskrunner/worker.py",
+      "blob_sha": "97dd321b9032062944639d775e2d269aa3c23f13"
+    }
+  ],
+  "edges": [
+    {
+      "path": "taskrunner/handlers.py",
+      "kind": "imports",
+      "target_path": "taskrunner/models.py",
+      "target_name": ""
+    },
+    {
+      "path": "taskrunner/handlers.py",
+      "kind": "uses_imported",
+      "target_path": "taskrunner/models.py",
+      "target_name": "Job"
+    },
+    {
+      "path": "taskrunner/scheduling.py",
+      "kind": "imports",
+      "target_path": "taskrunner/backoff.py",
+      "target_name": ""
+    },
+    {
+      "path": "taskrunner/scheduling.py",
+      "kind": "imports",
+      "target_path": "taskrunner/models.py",
+      "target_name": ""
+    },
+    {
+      "path": "taskrunner/scheduling.py",
+      "kind": "uses_imported",
+      "target_path": "taskrunner/backoff.py",
+      "target_name": "retry_delay"
+    },
+    {
+      "path": "taskrunner/scheduling.py",
+      "kind": "uses_imported",
+      "target_path": "taskrunner/models.py",
+      "target_name": "Job"
+    },
+    {
+      "path": "taskrunner/worker.py",
+      "kind": "imports",
+      "target_path": "taskrunner/models.py",
+      "target_name": ""
+    },
+    {
+      "path": "taskrunner/worker.py",
+      "kind": "imports",
+      "target_path": "taskrunner/scheduling.py",
+      "target_name": ""
+    },
+    {
+      "path": "taskrunner/worker.py",
+      "kind": "uses_imported",
+      "target_path": "taskrunner/models.py",
+      "target_name": "Job"
+    },
+    {
+      "path": "taskrunner/worker.py",
+      "kind": "uses_imported",
+      "target_path": "taskrunner/scheduling.py",
+      "target_name": "next_delay"
+    }
+  ]
+}

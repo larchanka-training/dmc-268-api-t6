@@ -1,0 +1,29 @@
+{
+  "id": "RAG-19",
+  "class": "rag",
+  "language": "python",
+  "source": {
+    "kind": "synthetic",
+    "attribution": "Synthetic, authored for api#146 (graph-RAG v1 eval)"
+  },
+  "base_path": "base",
+  "patch_path": "diff.patch",
+  "expected_verdict": "blocking",
+  "expected_findings": [
+    {
+      "path": "statements/ordering.py",
+      "start_line": null,
+      "line": 10,
+      "severity": "high",
+      "category": "correctness"
+    }
+  ],
+  "rag": {
+    "kind": "depth2",
+    "defect_form": "changed_return_shape",
+    "expected_retrieved": [],
+    "absent_from_context": [
+      "statements/balance.py"
+    ]
+  }
+}

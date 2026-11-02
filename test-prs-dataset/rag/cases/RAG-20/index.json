@@ -1,0 +1,99 @@
+{
+  "schema_version": 1,
+  "indexed_commit_sha": "60f004b9e5acf9aeb0c3ad4514e2f45461e836e8",
+  "extractor": {
+    "limits_version": "limits/v1:fdf4e4d96f1a13a708d0af7b941297dc",
+    "parser_profile": "39409961245fa4d8e7284fe26c974a79dea7225e088d7bdbbd17c83384e1271a",
+    "exclusions_version": "index-exclusions/v2"
+  },
+  "file_count": 6,
+  "symbol_count": 10,
+  "files": [
+    {
+      "path": "src/dates.ts",
+      "blob_sha": "4f7b11ed43e285dd5c0b8e1ebbd04bc006c750da"
+    },
+    {
+      "path": "src/format.ts",
+      "blob_sha": "a5f2434004fefb2f41c6ec442e95b61658fddc2e"
+    },
+    {
+      "path": "src/range.ts",
+      "blob_sha": "2b6f21005a7d564726550015c71478be0fb90ddd"
+    },
+    {
+      "path": "src/tariff.ts",
+      "blob_sha": "8b330a1d3cb06feb1489bf0173127224eabc8d5f"
+    },
+    {
+      "path": "src/types.ts",
+      "blob_sha": "451dfbcb8455fc4ef277967d57a0f7365e96359d"
+    },
+    {
+      "path": "src/usage.ts",
+      "blob_sha": "6b9f9cc94041c425ae8d3fe333bff4db9e7a4ae1"
+    }
+  ],
+  "edges": [
+    {
+      "path": "src/range.ts",
+      "kind": "imports",
+      "target_path": "src/dates.ts",
+      "target_name": ""
+    },
+    {
+      "path": "src/range.ts",
+      "kind": "uses_imported",
+      "target_path": "src/dates.ts",
+      "target_name": "endOfDay"
+    },
+    {
+      "path": "src/range.ts",
+      "kind": "uses_imported",
+      "target_path": "src/dates.ts",
+      "target_name": "startOfDay"
+    },
+    {
+      "path": "src/usage.ts",
+      "kind": "imports",
+      "target_path": "src/range.ts",
+      "target_name": ""
+    },
+    {
+      "path": "src/usage.ts",
+      "kind": "imports",
+      "target_path": "src/tariff.ts",
+      "target_name": ""
+    },
+    {
+      "path": "src/usage.ts",
+      "kind": "imports",
+      "target_path": "src/types.ts",
+      "target_name": ""
+    },
+    {
+      "path": "src/usage.ts",
+      "kind": "uses_imported",
+      "target_path": "src/range.ts",
+      "target_name": "rangeEnd"
+    },
+    {
+      "path": "src/usage.ts",
+      "kind": "uses_imported",
+      "target_path": "src/range.ts",
+      "target_name": "rangeStart"
+    },
+    {
+      "path": "src/usage.ts",
+      "kind": "uses_imported",
+      "target_path": "src/tariff.ts",
+      "target_name": "chargeCents"
+    },
+    {
+      "path": "src/usage.ts",
+      "kind": "uses_imported",
+      "target_path": "src/types.ts",
+      "target_name": "Reading"
+    }
+  ]
+}

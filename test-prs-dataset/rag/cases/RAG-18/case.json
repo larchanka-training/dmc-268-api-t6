@@ -1,0 +1,29 @@
+{
+  "id": "RAG-18",
+  "class": "rag",
+  "language": "python",
+  "source": {
+    "kind": "synthetic",
+    "attribution": "Synthetic, authored for api#146 (graph-RAG v1 eval)"
+  },
+  "base_path": "base",
+  "patch_path": "diff.patch",
+  "expected_verdict": "blocking",
+  "expected_findings": [
+    {
+      "path": "contacts/emails.py",
+      "start_line": null,
+      "line": 7,
+      "severity": "high",
+      "category": "correctness"
+    }
+  ],
+  "rag": {
+    "kind": "depth2",
+    "defect_form": "tightened_invariant",
+    "expected_retrieved": [],
+    "absent_from_context": [
+      "contacts/importer.py"
+    ]
+  }
+}

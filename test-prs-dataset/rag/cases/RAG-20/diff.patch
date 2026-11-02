@@ -1,0 +1,14 @@
+diff --git a/src/dates.ts b/src/dates.ts
+index 4f7b11e..15e0765 100644
+--- a/src/dates.ts
++++ b/src/dates.ts
+@@ -5,7 +5,7 @@ export function startOfDay(day: Date): Date {
+ }
+ 
+ export function endOfDay(day: Date): Date {
+-  const end = new Date(day);
+-  end.setHours(23, 59, 59, 999);
++  const end = startOfDay(day);
++  end.setDate(end.getDate() + 1);
+   return end;
+ }

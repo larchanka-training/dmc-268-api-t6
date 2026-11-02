@@ -1,0 +1,99 @@
+{
+  "schema_version": 1,
+  "indexed_commit_sha": "4b32a501a439aec5a53e33e224e2bcfa0a1eca34",
+  "extractor": {
+    "limits_version": "limits/v1:fdf4e4d96f1a13a708d0af7b941297dc",
+    "parser_profile": "39409961245fa4d8e7284fe26c974a79dea7225e088d7bdbbd17c83384e1271a",
+    "exclusions_version": "index-exclusions/v2"
+  },
+  "file_count": 6,
+  "symbol_count": 7,
+  "files": [
+    {
+      "path": "contacts/__init__.py",
+      "blob_sha": "22b9b988434fae525b7da79cea8120f4cc796e03"
+    },
+    {
+      "path": "contacts/emails.py",
+      "blob_sha": "5854867d2fe8f4c692148f7e457580b86fea1977"
+    },
+    {
+      "path": "contacts/importer.py",
+      "blob_sha": "c138c3470f37560fa514bbfc7dba9473cb5c8ce5"
+    },
+    {
+      "path": "contacts/keys.py",
+      "blob_sha": "53aeb6c2381ffb632dc4d4f435b3727a436f48a9"
+    },
+    {
+      "path": "contacts/models.py",
+      "blob_sha": "91a819e438c28949b24b85554b335379d9777410"
+    },
+    {
+      "path": "contacts/store.py",
+      "blob_sha": "397f99751d6bedd19c742d6e16c562bdc1802579"
+    }
+  ],
+  "edges": [
+    {
+      "path": "contacts/importer.py",
+      "kind": "imports",
+      "target_path": "contacts/keys.py",
+      "target_name": ""
+    },
+    {
+      "path": "contacts/importer.py",
+      "kind": "imports",
+      "target_path": "contacts/models.py",
+      "target_name": ""
+    },
+    {
+      "path": "contacts/importer.py",
+      "kind": "imports",
+      "target_path": "contacts/store.py",
+      "target_name": ""
+    },
+    {
+      "path": "contacts/importer.py",
+      "kind": "uses_imported",
+      "target_path": "contacts/keys.py",
+      "target_name": "contact_key"
+    },
+    {
+      "path": "contacts/importer.py",
+      "kind": "uses_imported",
+      "target_path": "contacts/models.py",
+      "target_name": "Contact"
+    },
+    {
+      "path": "contacts/importer.py",
+      "kind": "uses_imported",
+      "target_path": "contacts/store.py",
+      "target_name": "save"
+    },
+    {
+      "path": "contacts/keys.py",
+      "kind": "imports",
+      "target_path": "contacts/emails.py",
+      "target_name": ""
+    },
+    {
+      "path": "contacts/keys.py",
+      "kind": "uses_imported",
+      "target_path": "contacts/emails.py",
+      "target_name": "normalize_email"
+    },
+    {
+      "path": "contacts/store.py",
+      "kind": "imports",
+      "target_path": "contacts/models.py",
+      "target_name": ""
+    },
+    {
+      "path": "contacts/store.py",
+      "kind": "uses_imported",
+      "target_path": "contacts/models.py",
+      "target_name": "Contact"
+    }
+  ]
+}
