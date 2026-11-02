@@ -25,10 +25,14 @@ from app.bootstrap.bitbucket import bitbucket_webhook_replay_resources
 from app.bootstrap.gitlab import gitlab_webhook_replay_resources
 from app.bootstrap.reviews_api import ReviewsApiResources
 from app.bootstrap.webhook_work_listener import listen_forever
+from app.bootstrap.worker_shutdown import run_with_signals
 from app.common.infrastructure.heartbeat import beat, heartbeat_file, reset
 from app.common.infrastructure.telemetry import (
+    PROVIDER,
     configure_logging,
     configure_tracing,
+    job_span,
+    mark_error,
     shutdown_tracing,
 )
 from app.modules.integrations.bitbucket.infrastructure.credential_cipher import (
@@ -195,15 +199,19 @@ class WebhookReplayProvider:
 
 
 async def _scan_once(provider: WebhookReplayProvider) -> ReplayBatchResult | None:
-    try:
-        return await provider.receiver.replay_batch()
-    except Exception as error:
-        _LOGGER.error(
-            "%s webhook replay sweep failed",
-            {"github": "GitHub", "gitlab": "GitLab", "bitbucket": "Bitbucket"}[provider.provider],
-            extra={"provider": provider.provider, "error_type": type(error).__name__},
-        )
-        return None
+    with job_span("webhook.replay", {PROVIDER: provider.provider}) as span:
+        try:
+            return await provider.receiver.replay_batch()
+        except Exception as error:
+            mark_error(span, error)
+            _LOGGER.error(
+                "%s webhook replay sweep failed",
+                {"github": "GitHub", "gitlab": "GitLab", "bitbucket": "Bitbucket"}[
+                    provider.provider
+                ],
+                extra={"provider": provider.provider, "error_type": type(error).__name__},
+            )
+            return None
 
 
 async def sweep_once(receiver: ReceiveGitHubDelivery) -> int:
@@ -217,35 +225,41 @@ async def purge_once(
     *,
     provider: Literal["github", "gitlab", "bitbucket"],
 ) -> int:
-    try:
-        return await receiver.purge_finished()
-    except Exception as error:
-        _LOGGER.error(
-            "%s webhook receipt purge failed",
-            {"github": "GitHub", "gitlab": "GitLab", "bitbucket": "Bitbucket"}[provider],
-            extra={"provider": provider, "error_type": type(error).__name__},
-        )
-        return 0
+    with job_span("webhook.purge", {PROVIDER: provider}) as span:
+        try:
+            return await receiver.purge_finished()
+        except Exception as error:
+            mark_error(span, error)
+            _LOGGER.error(
+                "%s webhook receipt purge failed",
+                {"github": "GitHub", "gitlab": "GitLab", "bitbucket": "Bitbucket"}[provider],
+                extra={"provider": provider, "error_type": type(error).__name__},
+            )
+            return 0
 
 
 async def revive_once(reviver: ReviveDeferredInstallationDeliveries) -> int:
-    try:
-        return await reviver.execute()
-    except Exception as error:
-        _LOGGER.error(
-            "GitHub webhook deferred-delivery revival failed",
-            extra={"provider": "github", "error_type": type(error).__name__},
-        )
-        return 0
+    with job_span("webhook.revive", {PROVIDER: "github"}) as span:
+        try:
+            return await reviver.execute()
+        except Exception as error:
+            mark_error(span, error)
+            _LOGGER.error(
+                "GitHub webhook deferred-delivery revival failed",
+                extra={"provider": "github", "error_type": type(error).__name__},
+            )
+            return 0
 
 
 async def refresh_rules_once(refresher: RefreshRulesStatuses) -> int:
     """Answer pending rules status requests (#150); a failure waits for the next pass."""
-    try:
-        return await refresher.execute()
-    except Exception:
-        _LOGGER.exception("Rules status refresh sweep failed")
-        return 0
+    with job_span("rules.refresh") as span:
+        try:
+            return await refresher.execute()
+        except Exception as error:
+            mark_error(span, error)
+            _LOGGER.exception("Rules status refresh sweep failed")
+            return 0
 
 
 async def hourly_maintenance(
@@ -411,11 +425,26 @@ async def run_forever() -> None:
         await stack.__aexit__(*sys.exc_info())
 
 
+async def run_until_stopped(stop: asyncio.Event) -> None:
+    """``run_forever`` until SIGTERM / SIGINT sets ``stop``; then cancel it and return."""
+    forever = asyncio.create_task(run_forever())
+    stopped = asyncio.create_task(stop.wait())
+    await asyncio.wait({forever, stopped}, return_when=asyncio.FIRST_COMPLETED)
+    stopped.cancel()
+    if not forever.done():
+        forever.cancel()
+        with suppress(asyncio.CancelledError):
+            await forever
+        return
+    forever.result()
+
+
 def main() -> None:
     configure_logging("webhook-worker")
     tracing = configure_tracing("webhook-worker")
     try:
-        asyncio.run(run_forever())
+        # SIGTERM (docker stop) returns through here, so the queued spans are flushed.
+        run_with_signals(run_until_stopped)
     finally:
         shutdown_tracing(tracing)
 
