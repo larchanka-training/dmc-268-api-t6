@@ -1,6 +1,7 @@
 import asyncio
 from contextlib import AbstractAsyncContextManager
 from datetime import UTC, datetime
+from decimal import Decimal
 from types import SimpleNamespace
 from typing import Any, cast
 from uuid import UUID
@@ -112,7 +113,9 @@ def test_sqlalchemy_run_repository_filters_and_orders_with_a_tied_timestamp_curs
     code_change = SimpleNamespace(
         external_number=5, title="Review me", web_url="https://example.test/pull/5"
     )
-    session = FakeSession([(run, code_change, "org/repo", "gpt-test", 3, True, "github")])
+    session = FakeSession(
+        [(run, code_change, "org/repo", "gpt-test", 3, True, 12, 5, Decimal("0.25"), "github")]
+    )
     repository = SqlAlchemyRunRepository(
         cast(async_sessionmaker[AsyncSession], FakeSessionFactory(session)),
         allow_unscoped=True,
@@ -132,6 +135,9 @@ def test_sqlalchemy_run_repository_filters_and_orders_with_a_tied_timestamp_curs
     assert items[0].action_count == 3
     assert items[0].summary_only is True
     assert items[0].provider == "github"
+    assert items[0].usage.tokens_in == 12
+    assert items[0].usage.tokens_out == 5
+    assert items[0].usage.cost_usd == Decimal("0.25")
     assert items[0].head_sha == "a" * 40
     assert session.statement is not None
     compiled = session.statement.compile()
@@ -167,7 +173,7 @@ def test_sqlalchemy_run_repository_gets_detail_with_one_summary_query() -> None:
     code_change = SimpleNamespace(
         external_number=5, title="Review me", web_url="https://example.test/pull/5"
     )
-    session = FakeSession([(run, code_change, "org/repo", None, 4, False, "github")])
+    session = FakeSession([(run, code_change, "org/repo", None, 4, False, 0, 0, 0, "github")])
     repository = SqlAlchemyRunRepository(
         cast(async_sessionmaker[AsyncSession], FakeSessionFactory(session)),
         allow_unscoped=True,

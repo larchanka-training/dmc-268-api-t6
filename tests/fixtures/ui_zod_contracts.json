@@ -165,37 +165,6 @@
             "string",
             "null"
           ]
-        },
-        "usage": {
-          "type": "object",
-          "properties": {
-            "tokensIn": {
-              "type": "integer",
-              "minimum": 0,
-              "maximum": 9007199254740991
-            },
-            "tokensOut": {
-              "type": "integer",
-              "minimum": 0,
-              "maximum": 9007199254740991
-            },
-            "costUsd": {
-              "type": "number",
-              "minimum": 0
-            }
-          },
-          "required": [
-            "tokensIn",
-            "tokensOut",
-            "costUsd"
-          ],
-          "additionalProperties": false
-        },
-        "triggeredBy": {
-          "type": [
-            "string",
-            "null"
-          ]
         }
       },
       "required": [
@@ -213,9 +182,7 @@
         "summaryOnly",
         "pullRequest",
         "actionCount",
-        "errorCode",
-        "usage",
-        "triggeredBy"
+        "errorCode"
       ],
       "additionalProperties": false
     },
@@ -546,37 +513,6 @@
             "null"
           ]
         },
-        "usage": {
-          "type": "object",
-          "properties": {
-            "tokensIn": {
-              "type": "integer",
-              "minimum": 0,
-              "maximum": 9007199254740991
-            },
-            "tokensOut": {
-              "type": "integer",
-              "minimum": 0,
-              "maximum": 9007199254740991
-            },
-            "costUsd": {
-              "type": "number",
-              "minimum": 0
-            }
-          },
-          "required": [
-            "tokensIn",
-            "tokensOut",
-            "costUsd"
-          ],
-          "additionalProperties": false
-        },
-        "triggeredBy": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
         "findings": {
           "type": "array",
           "items": {
@@ -840,8 +776,6 @@
         "pullRequest",
         "actionCount",
         "errorCode",
-        "usage",
-        "triggeredBy",
         "findings",
         "summary",
         "verdict",
@@ -1129,37 +1063,6 @@
                   "string",
                   "null"
                 ]
-              },
-              "usage": {
-                "type": "object",
-                "properties": {
-                  "tokensIn": {
-                    "type": "integer",
-                    "minimum": 0,
-                    "maximum": 9007199254740991
-                  },
-                  "tokensOut": {
-                    "type": "integer",
-                    "minimum": 0,
-                    "maximum": 9007199254740991
-                  },
-                  "costUsd": {
-                    "type": "number",
-                    "minimum": 0
-                  }
-                },
-                "required": [
-                  "tokensIn",
-                  "tokensOut",
-                  "costUsd"
-                ],
-                "additionalProperties": false
-              },
-              "triggeredBy": {
-                "type": [
-                  "string",
-                  "null"
-                ]
               }
             },
             "required": [
@@ -1177,9 +1080,7 @@
               "summaryOnly",
               "pullRequest",
               "actionCount",
-              "errorCode",
-              "usage",
-              "triggeredBy"
+              "errorCode"
             ],
             "additionalProperties": false
           }

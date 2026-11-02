@@ -1,7 +1,7 @@
 """Store encrypted Bitbucket credential generations (#333).
 
-Revision ID: 20261026_0045
-Revises: 20261026_0044
+Revision ID: 20261026_0046
+Revises: 20261026_0045
 """
 
 from __future__ import annotations
@@ -10,8 +10,8 @@ import sqlalchemy as sa
 
 from alembic import op
 
-revision = "20261026_0045"
-down_revision = "20261026_0044"
+revision = "20261026_0046"
+down_revision = "20261026_0045"
 branch_labels = None
 depends_on = None
 

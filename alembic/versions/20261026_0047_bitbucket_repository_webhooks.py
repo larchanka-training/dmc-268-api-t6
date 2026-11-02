@@ -1,7 +1,7 @@
 """Store isolated encrypted Bitbucket repository hook secrets (#333).
 
-Revision ID: 20261026_0046
-Revises: 20261026_0045
+Revision ID: 20261026_0047
+Revises: 20261026_0046
 """
 
 from __future__ import annotations
@@ -10,8 +10,8 @@ import sqlalchemy as sa
 
 from alembic import op
 
-revision = "20261026_0046"
-down_revision = "20261026_0045"
+revision = "20261026_0047"
+down_revision = "20261026_0046"
 branch_labels = None
 depends_on = None
 
