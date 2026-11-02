@@ -1,0 +1,123 @@
+{
+  "schema_version": 1,
+  "indexed_commit_sha": "794ddf7225c8e4a8f3cd9084ae90160fd6a9841d",
+  "extractor": {
+    "limits_version": "limits/v1:fdf4e4d96f1a13a708d0af7b941297dc",
+    "parser_profile": "39409961245fa4d8e7284fe26c974a79dea7225e088d7bdbbd17c83384e1271a",
+    "exclusions_version": "index-exclusions/v2"
+  },
+  "file_count": 6,
+  "symbol_count": 8,
+  "files": [
+    {
+      "path": "src/calendar.ts",
+      "blob_sha": "ca3de43251dae8f89c0535f84b3930e2dae00848"
+    },
+    {
+      "path": "src/clock.ts",
+      "blob_sha": "47a1165adf9ce4b39e5cb5c07c2122241bdef62a"
+    },
+    {
+      "path": "src/rooms.ts",
+      "blob_sha": "0db3586ab929170692b8a76fae635f681257b5d8"
+    },
+    {
+      "path": "src/summary.ts",
+      "blob_sha": "4be2d91a5abea1d330a704e6f713bbfbdc5361ed"
+    },
+    {
+      "path": "src/turnover.ts",
+      "blob_sha": "c0b3e9e5992621c2bede4f720f35ecafda89eb0a"
+    },
+    {
+      "path": "src/types.ts",
+      "blob_sha": "9b3bf190caeb0fae24aca4d46ea3b446234ec5a8"
+    }
+  ],
+  "edges": [
+    {
+      "path": "src/calendar.ts",
+      "kind": "imports",
+      "target_path": "src/clock.ts",
+      "target_name": ""
+    },
+    {
+      "path": "src/calendar.ts",
+      "kind": "imports",
+      "target_path": "src/types.ts",
+      "target_name": ""
+    },
+    {
+      "path": "src/calendar.ts",
+      "kind": "uses_imported",
+      "target_path": "src/clock.ts",
+      "target_name": "addMinutes"
+    },
+    {
+      "path": "src/calendar.ts",
+      "kind": "uses_imported",
+      "target_path": "src/types.ts",
+      "target_name": "Booking"
+    },
+    {
+      "path": "src/calendar.ts",
+      "kind": "uses_imported",
+      "target_path": "src/types.ts",
+      "target_name": "Room"
+    },
+    {
+      "path": "src/rooms.ts",
+      "kind": "imports",
+      "target_path": "src/types.ts",
+      "target_name": ""
+    },
+    {
+      "path": "src/rooms.ts",
+      "kind": "uses_imported",
+      "target_path": "src/types.ts",
+      "target_name": "Room"
+    },
+    {
+      "path": "src/summary.ts",
+      "kind": "imports",
+      "target_path": "src/types.ts",
+      "target_name": ""
+    },
+    {
+      "path": "src/summary.ts",
+      "kind": "uses_imported",
+      "target_path": "src/types.ts",
+      "target_name": "Room"
+    },
+    {
+      "path": "src/turnover.ts",
+      "kind": "imports",
+      "target_path": "src/calendar.ts",
+      "target_name": ""
+    },
+    {
+      "path": "src/turnover.ts",
+      "kind": "imports",
+      "target_path": "src/types.ts",
+      "target_name": ""
+    },
+    {
+      "path": "src/turnover.ts",
+      "kind": "uses_imported",
+      "target_path": "src/calendar.ts",
+      "target_name": "bookSlot"
+    },
+    {
+      "path": "src/turnover.ts",
+      "kind": "uses_imported",
+      "target_path": "src/types.ts",
+      "target_name": "Booking"
+    },
+    {
+      "path": "src/turnover.ts",
+      "kind": "uses_imported",
+      "target_path": "src/types.ts",
+      "target_name": "Room"
+    }
+  ]
+}

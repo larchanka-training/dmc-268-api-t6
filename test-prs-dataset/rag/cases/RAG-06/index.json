@@ -1,0 +1,147 @@
+{
+  "schema_version": 1,
+  "indexed_commit_sha": "22f3caa6ff077a90efbe96ec5d2bf30e8483f5ca",
+  "extractor": {
+    "limits_version": "limits/v1:fdf4e4d96f1a13a708d0af7b941297dc",
+    "parser_profile": "39409961245fa4d8e7284fe26c974a79dea7225e088d7bdbbd17c83384e1271a",
+    "exclusions_version": "index-exclusions/v2"
+  },
+  "file_count": 6,
+  "symbol_count": 9,
+  "files": [
+    {
+      "path": "src/cart.ts",
+      "blob_sha": "fef69a8dc86296c060b54c0c21ebd11c3e9a36b2"
+    },
+    {
+      "path": "src/checkout.ts",
+      "blob_sha": "ef26eae78ae3e34687dcd9bb8ff3978022d28c40"
+    },
+    {
+      "path": "src/format.ts",
+      "blob_sha": "8a2fe74912b6bf750c66c5d8600d108261a68524"
+    },
+    {
+      "path": "src/rates.ts",
+      "blob_sha": "47c436ac891eda2599069e4b5bf0d2ca5d75c475"
+    },
+    {
+      "path": "src/shipping.ts",
+      "blob_sha": "ef7d65b496c7bf02ef178f622fb81e9300126c44"
+    },
+    {
+      "path": "src/types.ts",
+      "blob_sha": "ef2779267bfd8e4f64b1d415172f220b032b92cd"
+    }
+  ],
+  "edges": [
+    {
+      "path": "src/cart.ts",
+      "kind": "imports",
+      "target_path": "src/types.ts",
+      "target_name": ""
+    },
+    {
+      "path": "src/cart.ts",
+      "kind": "uses_imported",
+      "target_path": "src/types.ts",
+      "target_name": "CartLine"
+    },
+    {
+      "path": "src/checkout.ts",
+      "kind": "imports",
+      "target_path": "src/cart.ts",
+      "target_name": ""
+    },
+    {
+      "path": "src/checkout.ts",
+      "kind": "imports",
+      "target_path": "src/format.ts",
+      "target_name": ""
+    },
+    {
+      "path": "src/checkout.ts",
+      "kind": "imports",
+      "target_path": "src/shipping.ts",
+      "target_name": ""
+    },
+    {
+      "path": "src/checkout.ts",
+      "kind": "imports",
+      "target_path": "src/types.ts",
+      "target_name": ""
+    },
+    {
+      "path": "src/checkout.ts",
+      "kind": "uses_imported",
+      "target_path": "src/cart.ts",
+      "target_name": "subtotalCents"
+    },
+    {
+      "path": "src/checkout.ts",
+      "kind": "uses_imported",
+      "target_path": "src/cart.ts",
+      "target_name": "totalWeightKg"
+    },
+    {
+      "path": "src/checkout.ts",
+      "kind": "uses_imported",
+      "target_path": "src/format.ts",
+      "target_name": "formatCents"
+    },
+    {
+      "path": "src/checkout.ts",
+      "kind": "uses_imported",
+      "target_path": "src/shipping.ts",
+      "target_name": "shippingCents"
+    },
+    {
+      "path": "src/checkout.ts",
+      "kind": "uses_imported",
+      "target_path": "src/types.ts",
+      "target_name": "CartLine"
+    },
+    {
+      "path": "src/checkout.ts",
+      "kind": "uses_imported",
+      "target_path": "src/types.ts",
+      "target_name": "Zone"
+    },
+    {
+      "path": "src/rates.ts",
+      "kind": "imports",
+      "target_path": "src/types.ts",
+      "target_name": ""
+    },
+    {
+      "path": "src/rates.ts",
+      "kind": "uses_imported",
+      "target_path": "src/types.ts",
+      "target_name": "Zone"
+    },
+    {
+      "path": "src/shipping.ts",
+      "kind": "imports",
+      "target_path": "src/rates.ts",
+      "target_name": ""
+    },
+    {
+      "path": "src/shipping.ts",
+      "kind": "imports",
+      "target_path": "src/types.ts",
+      "target_name": ""
+    },
+    {
+      "path": "src/shipping.ts",
+      "kind": "uses_imported",
+      "target_path": "src/rates.ts",
+      "target_name": "ZONE_RATES"
+    },
+    {
+      "path": "src/shipping.ts",
+      "kind": "uses_imported",
+      "target_path": "src/types.ts",
+      "target_name": "Zone"
+    }
+  ]
+}

@@ -1,0 +1,16 @@
+diff --git a/src/calendar.ts b/src/calendar.ts
+index ca3de43..87e4510 100644
+--- a/src/calendar.ts
++++ b/src/calendar.ts
+@@ -1,7 +1,11 @@
+ import { addMinutes } from "./clock";
++import { SLOT_MINUTES } from "./rooms";
+ import type { Booking, Room } from "./types";
+ 
+ export function bookSlot(room: Room, start: Date, minutes: number): Booking {
++  if (minutes % SLOT_MINUTES !== 0) {
++    throw new RangeError(`Slots come in steps of ${SLOT_MINUTES} minutes`);
++  }
+   const end = addMinutes(start, minutes);
+   const clash = room.bookings.some((b) => b.start < end && start < b.end);
+   if (clash) {

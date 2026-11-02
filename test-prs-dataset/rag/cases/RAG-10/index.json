@@ -1,0 +1,123 @@
+{
+  "schema_version": 1,
+  "indexed_commit_sha": "cbe3da3914ffef9cd60f185eb13468f6948dbb4b",
+  "extractor": {
+    "limits_version": "limits/v1:fdf4e4d96f1a13a708d0af7b941297dc",
+    "parser_profile": "39409961245fa4d8e7284fe26c974a79dea7225e088d7bdbbd17c83384e1271a",
+    "exclusions_version": "index-exclusions/v2"
+  },
+  "file_count": 6,
+  "symbol_count": 8,
+  "files": [
+    {
+      "path": "src/alerts.ts",
+      "blob_sha": "3f77d1578674bf225960c9696233806dc5b03e3d"
+    },
+    {
+      "path": "src/config.ts",
+      "blob_sha": "640792ee2dc25e501c8ce29e908ff426fcf7cba6"
+    },
+    {
+      "path": "src/format.ts",
+      "blob_sha": "cc0220bd0244c85a110b891683452dfe426df222"
+    },
+    {
+      "path": "src/report.ts",
+      "blob_sha": "6ecdad5a98db481fa034bb816442ae743484a1c1"
+    },
+    {
+      "path": "src/sensors.ts",
+      "blob_sha": "178b05a4846e05748cc959c0d355f89d239bebcb"
+    },
+    {
+      "path": "src/types.ts",
+      "blob_sha": "44b5e1862e2097af4a038a62e3e82bc1d41bde38"
+    }
+  ],
+  "edges": [
+    {
+      "path": "src/alerts.ts",
+      "kind": "imports",
+      "target_path": "src/config.ts",
+      "target_name": ""
+    },
+    {
+      "path": "src/alerts.ts",
+      "kind": "imports",
+      "target_path": "src/sensors.ts",
+      "target_name": ""
+    },
+    {
+      "path": "src/alerts.ts",
+      "kind": "uses_imported",
+      "target_path": "src/config.ts",
+      "target_name": "LIMIT_CELSIUS"
+    },
+    {
+      "path": "src/alerts.ts",
+      "kind": "uses_imported",
+      "target_path": "src/sensors.ts",
+      "target_name": "readSensor"
+    },
+    {
+      "path": "src/config.ts",
+      "kind": "imports",
+      "target_path": "src/types.ts",
+      "target_name": ""
+    },
+    {
+      "path": "src/config.ts",
+      "kind": "uses_imported",
+      "target_path": "src/types.ts",
+      "target_name": "Sensor"
+    },
+    {
+      "path": "src/format.ts",
+      "kind": "imports",
+      "target_path": "src/types.ts",
+      "target_name": ""
+    },
+    {
+      "path": "src/format.ts",
+      "kind": "uses_imported",
+      "target_path": "src/types.ts",
+      "target_name": "Reading"
+    },
+    {
+      "path": "src/report.ts",
+      "kind": "imports",
+      "target_path": "src/config.ts",
+      "target_name": ""
+    },
+    {
+      "path": "src/report.ts",
+      "kind": "uses_imported",
+      "target_path": "src/config.ts",
+      "target_name": "SENSORS"
+    },
+    {
+      "path": "src/sensors.ts",
+      "kind": "imports",
+      "target_path": "src/config.ts",
+      "target_name": ""
+    },
+    {
+      "path": "src/sensors.ts",
+      "kind": "imports",
+      "target_path": "src/types.ts",
+      "target_name": ""
+    },
+    {
+      "path": "src/sensors.ts",
+      "kind": "uses_imported",
+      "target_path": "src/config.ts",
+      "target_name": "SENSORS"
+    },
+    {
+      "path": "src/sensors.ts",
+      "kind": "uses_imported",
+      "target_path": "src/types.ts",
+      "target_name": "Reading"
+    }
+  ]
+}

@@ -1,0 +1,34 @@
+diff --git a/src/rates.ts b/src/rates.ts
+index 47c436a..52d858d 100644
+--- a/src/rates.ts
++++ b/src/rates.ts
+@@ -1,7 +1,14 @@
+ import type { Zone } from "./types";
+ 
++export type Speed = "standard" | "express";
++
+ export const ZONE_RATES: Record<Zone, number> = {
+   domestic: 120,
+   europe: 340,
+   overseas: 910,
+ };
++
++export const SPEED_FACTOR: Record<Speed, number> = {
++  standard: 1,
++  express: 2,
++};
+diff --git a/src/shipping.ts b/src/shipping.ts
+index ef7d65b..3b8d5e8 100644
+--- a/src/shipping.ts
++++ b/src/shipping.ts
+@@ -1,7 +1,7 @@
+-import { ZONE_RATES } from "./rates";
++import { SPEED_FACTOR, ZONE_RATES, type Speed } from "./rates";
+ import type { Zone } from "./types";
+ 
+-export function shippingCents(weightKg: number, zone: Zone): number {
+-  const perKilo = ZONE_RATES[zone];
++export function shippingCents(weightKg: number, zone: Zone, speed: Speed): number {
++  const perKilo = ZONE_RATES[zone] * SPEED_FACTOR[speed];
+   return Math.ceil(weightKg) * perKilo;
+ }

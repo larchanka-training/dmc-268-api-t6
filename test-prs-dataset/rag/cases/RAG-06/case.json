@@ -1,0 +1,27 @@
+{
+  "id": "RAG-06",
+  "class": "rag",
+  "language": "typescript",
+  "source": {
+    "kind": "synthetic",
+    "attribution": "Synthetic, authored for api#146 (graph-RAG v1 eval)"
+  },
+  "base_path": "base",
+  "patch_path": "diff.patch",
+  "expected_verdict": "blocking",
+  "expected_findings": [
+    {
+      "path": "src/shipping.ts",
+      "start_line": null,
+      "line": 4,
+      "severity": "high",
+      "category": "correctness"
+    }
+  ],
+  "rag": {
+    "kind": "reverse_edge",
+    "defect_form": "new_required_param",
+    "expected_retrieved": ["src/checkout.ts"],
+    "absent_from_context": []
+  }
+}
