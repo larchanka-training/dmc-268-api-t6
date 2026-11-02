@@ -1,7 +1,7 @@
 {
   "provenance": {
     "repository": "https://github.com/larchanka-training/dmc-268-ui-t6",
-    "commit": "4eadc8691cd3ac3f431998f1f5976e358fefe8df",
+    "commit": "5393bafdbd4546c868514623429dce6eb84c9777",
     "generator": "z.toJSONSchema (Zod 4)",
     "command": "DMC_268_UI_DIR=<ui checkout after pnpm install> SCHEMA_NAMES=runSession,runDetail,runListPage,metricsSummary OUTPUT_PATH=tests/fixtures/ui_metrics_zod_contracts.json node tests/generate_ui_zod_contracts.mjs"
   },
@@ -14,6 +14,14 @@
           "type": "string",
           "format": "uuid",
           "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+        },
+        "provider": {
+          "type": "string",
+          "enum": [
+            "github",
+            "gitlab",
+            "bitbucket"
+          ]
         },
         "engine": {
           "type": "string",
@@ -92,6 +100,14 @@
         "pullRequest": {
           "type": "object",
           "properties": {
+            "provider": {
+              "type": "string",
+              "enum": [
+                "github",
+                "gitlab",
+                "bitbucket"
+              ]
+            },
             "repo": {
               "type": "string"
             },
@@ -130,6 +146,7 @@
             }
           },
           "required": [
+            "provider",
             "repo",
             "number",
             "title",
@@ -183,6 +200,7 @@
       },
       "required": [
         "id",
+        "provider",
         "engine",
         "model",
         "status",
@@ -209,6 +227,14 @@
           "type": "string",
           "format": "uuid",
           "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+        },
+        "provider": {
+          "type": "string",
+          "enum": [
+            "github",
+            "gitlab",
+            "bitbucket"
+          ]
         },
         "engine": {
           "type": "string",
@@ -287,6 +313,14 @@
         "pullRequest": {
           "type": "object",
           "properties": {
+            "provider": {
+              "type": "string",
+              "enum": [
+                "github",
+                "gitlab",
+                "bitbucket"
+              ]
+            },
             "repo": {
               "type": "string"
             },
@@ -325,6 +359,7 @@
             }
           },
           "required": [
+            "provider",
             "repo",
             "number",
             "title",
@@ -624,6 +659,7 @@
       },
       "required": [
         "id",
+        "provider",
         "engine",
         "model",
         "status",
@@ -660,6 +696,14 @@
                 "type": "string",
                 "format": "uuid",
                 "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+              },
+              "provider": {
+                "type": "string",
+                "enum": [
+                  "github",
+                  "gitlab",
+                  "bitbucket"
+                ]
               },
               "engine": {
                 "type": "string",
@@ -738,6 +782,14 @@
               "pullRequest": {
                 "type": "object",
                 "properties": {
+                  "provider": {
+                    "type": "string",
+                    "enum": [
+                      "github",
+                      "gitlab",
+                      "bitbucket"
+                    ]
+                  },
                   "repo": {
                     "type": "string"
                   },
@@ -776,6 +828,7 @@
                   }
                 },
                 "required": [
+                  "provider",
                   "repo",
                   "number",
                   "title",
@@ -829,6 +882,7 @@
             },
             "required": [
               "id",
+              "provider",
               "engine",
               "model",
               "status",
