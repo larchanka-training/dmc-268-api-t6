@@ -1,0 +1,12 @@
+diff --git a/weather/forecast.py b/weather/forecast.py
+index ce43d33..50b9140 100644
+--- a/weather/forecast.py
++++ b/weather/forecast.py
+@@ -4,6 +4,6 @@ from .models import Forecast
+ from .stations import read_station
+ 
+ 
+-def get_forecast(city: str) -> Forecast:
++def fetch_forecast(city: str) -> Forecast:
+     high, low = read_station(city)
+     return Forecast(city, high, low)

@@ -1,0 +1,17 @@
+diff --git a/clinic/schedule.py b/clinic/schedule.py
+index b559b0c..eec0ef6 100644
+--- a/clinic/schedule.py
++++ b/clinic/schedule.py
+@@ -11,5 +11,10 @@ _SLOTS: list[Slot] = [
+ ]
+ 
+ 
+-def open_slots(day: date) -> list[Slot]:
+-    return [slot for slot in _SLOTS if slot.day == day and not slot.taken]
++def open_slots(day: date) -> dict[str, list[Slot]]:
++    """Return the free slots of the day, grouped by doctor."""
++    by_doctor: dict[str, list[Slot]] = {}
++    for slot in _SLOTS:
++        if slot.day == day and not slot.taken:
++            by_doctor.setdefault(slot.doctor, []).append(slot)
++    return by_doctor

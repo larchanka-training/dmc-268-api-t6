@@ -1,0 +1,87 @@
+{
+  "schema_version": 1,
+  "indexed_commit_sha": "33d478988633f6066c7fe572e1325146766b6b29",
+  "extractor": {
+    "limits_version": "limits/v1:fdf4e4d96f1a13a708d0af7b941297dc",
+    "parser_profile": "39409961245fa4d8e7284fe26c974a79dea7225e088d7bdbbd17c83384e1271a",
+    "exclusions_version": "index-exclusions/v2"
+  },
+  "file_count": 6,
+  "symbol_count": 8,
+  "files": [
+    {
+      "path": "stockroom/__init__.py",
+      "blob_sha": "9957ea0bb8c1e82e0ca9225c173a2b0707f87d8c"
+    },
+    {
+      "path": "stockroom/catalog.py",
+      "blob_sha": "960abd9712a4468d32ef9e003179b0eef9a9c7f7"
+    },
+    {
+      "path": "stockroom/receiving.py",
+      "blob_sha": "eac4c0994cbda398d59589d43e97f7f15d709c0b"
+    },
+    {
+      "path": "stockroom/reports.py",
+      "blob_sha": "37216b5f22d570f787738ab504273900ddbe7840"
+    },
+    {
+      "path": "stockroom/shelves.py",
+      "blob_sha": "893d458c23b5630b1d45984739c73092d3709ca3"
+    },
+    {
+      "path": "stockroom/skus.py",
+      "blob_sha": "b6ba529e0b6ccb0f25d19589fd62a50601399404"
+    }
+  ],
+  "edges": [
+    {
+      "path": "stockroom/receiving.py",
+      "kind": "imports",
+      "target_path": "stockroom/catalog.py",
+      "target_name": ""
+    },
+    {
+      "path": "stockroom/receiving.py",
+      "kind": "imports",
+      "target_path": "stockroom/shelves.py",
+      "target_name": ""
+    },
+    {
+      "path": "stockroom/receiving.py",
+      "kind": "imports",
+      "target_path": "stockroom/skus.py",
+      "target_name": ""
+    },
+    {
+      "path": "stockroom/receiving.py",
+      "kind": "uses_imported",
+      "target_path": "stockroom/catalog.py",
+      "target_name": "describe"
+    },
+    {
+      "path": "stockroom/receiving.py",
+      "kind": "uses_imported",
+      "target_path": "stockroom/shelves.py",
+      "target_name": "assign_shelf"
+    },
+    {
+      "path": "stockroom/receiving.py",
+      "kind": "uses_imported",
+      "target_path": "stockroom/skus.py",
+      "target_name": "normalize_sku"
+    },
+    {
+      "path": "stockroom/reports.py",
+      "kind": "imports",
+      "target_path": "stockroom/catalog.py",
+      "target_name": ""
+    },
+    {
+      "path": "stockroom/reports.py",
+      "kind": "uses_imported",
+      "target_path": "stockroom/catalog.py",
+      "target_name": "describe"
+    }
+  ]
+}

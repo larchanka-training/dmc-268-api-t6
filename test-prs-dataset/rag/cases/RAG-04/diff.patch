@@ -1,0 +1,18 @@
+diff --git a/uploads/retention.py b/uploads/retention.py
+index 47fda99..5f6306c 100644
+--- a/uploads/retention.py
++++ b/uploads/retention.py
+@@ -2,9 +2,13 @@
+ 
+ from .storage import delete, list_older_than
+ 
++MIN_RETENTION_DAYS = 30
++
+ 
+ def purge_older_than(days: int) -> int:
+     """Delete uploads older than the given number of days and count them."""
++    if days < MIN_RETENTION_DAYS:
++        raise ValueError(f"retention below {MIN_RETENTION_DAYS} days is not allowed")
+     removed = 0
+     for name in list_older_than(days):
+         delete(name)

@@ -1,0 +1,27 @@
+{
+  "id": "RAG-01",
+  "class": "rag",
+  "language": "python",
+  "source": {
+    "kind": "synthetic",
+    "attribution": "Synthetic, authored for api#146 (graph-RAG v1 eval)"
+  },
+  "base_path": "base",
+  "patch_path": "diff.patch",
+  "expected_verdict": "blocking",
+  "expected_findings": [
+    {
+      "path": "ledger/recording.py",
+      "start_line": null,
+      "line": 7,
+      "severity": "critical",
+      "category": "correctness"
+    }
+  ],
+  "rag": {
+    "kind": "reverse_edge",
+    "defect_form": "new_required_param",
+    "expected_retrieved": ["ledger/webhooks.py"],
+    "absent_from_context": []
+  }
+}

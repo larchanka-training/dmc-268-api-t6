@@ -1,0 +1,65 @@
+{
+  "schema_version": 1,
+  "indexed_commit_sha": "1ce4e802cd8e511f3b6f0e1ffe1b9afb597d3922",
+  "extractor": {
+    "limits_version": "limits/v1:fdf4e4d96f1a13a708d0af7b941297dc",
+    "parser_profile": "39409961245fa4d8e7284fe26c974a79dea7225e088d7bdbbd17c83384e1271a",
+    "exclusions_version": "index-exclusions/v2"
+  },
+  "file_count": 5,
+  "symbol_count": 7,
+  "files": [
+    {
+      "path": "uploads/__init__.py",
+      "blob_sha": "084f3fdcd8d7a0dc023f866dba8661e3e0590634"
+    },
+    {
+      "path": "uploads/jobs.py",
+      "blob_sha": "8ce79fad0f60a2a23f14c6d9d2845955c61a3461"
+    },
+    {
+      "path": "uploads/quota.py",
+      "blob_sha": "3fce8182ed490b0518c1702286f13a4a51f99e2f"
+    },
+    {
+      "path": "uploads/retention.py",
+      "blob_sha": "47fda99ef3ef626ad7db6f7f23b6f41eafa3c5c8"
+    },
+    {
+      "path": "uploads/storage.py",
+      "blob_sha": "558715a01274be2e5c8a0d62ec168fdd29aec0ea"
+    }
+  ],
+  "edges": [
+    {
+      "path": "uploads/jobs.py",
+      "kind": "imports",
+      "target_path": "uploads/retention.py",
+      "target_name": ""
+    },
+    {
+      "path": "uploads/jobs.py",
+      "kind": "uses_imported",
+      "target_path": "uploads/retention.py",
+      "target_name": "purge_older_than"
+    },
+    {
+      "path": "uploads/retention.py",
+      "kind": "imports",
+      "target_path": "uploads/storage.py",
+      "target_name": ""
+    },
+    {
+      "path": "uploads/retention.py",
+      "kind": "uses_imported",
+      "target_path": "uploads/storage.py",
+      "target_name": "delete"
+    },
+    {
+      "path": "uploads/retention.py",
+      "kind": "uses_imported",
+      "target_path": "uploads/storage.py",
+      "target_name": "list_older_than"
+    }
+  ]
+}
