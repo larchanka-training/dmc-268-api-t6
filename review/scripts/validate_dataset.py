@@ -109,6 +109,7 @@ class RagDistributionCounts(TypedDict):
     class_counts: dict[str, int]
     kind_counts: dict[str, int]
     export_defect_count: int
+    critical_truth_count: int
     language_counts: dict[str, int]
 
 
@@ -693,6 +694,11 @@ def _rag_distribution_counts(records: list[dict[str, Any]]) -> RagDistributionCo
             for record in records
             if "rag" in record
         ),
+        "critical_truth_count": sum(
+            finding["severity"] == "critical"
+            for record in records
+            for finding in record["expected_findings"]
+        ),
         "language_counts": {name: languages[name] for name in ("python", "typescript", "tsx")},
     }
 
@@ -716,6 +722,11 @@ def _rag_distribution_errors(counts: RagDistributionCounts) -> list[str]:
     languages = counts["language_counts"]
     if languages["python"] == 0 or (languages["typescript"] == 0 and languages["tsx"] == 0):
         errors.append("rag corpus: needs Python and TypeScript/React cases")
+    critical = counts["critical_truth_count"]
+    if critical < 1:
+        # No critical truth: Critical Recall has a null denominator (TEST_PLAN §3.2) and the
+        # gate could only be INCOMPLETE.
+        errors.append(f"rag corpus: needs ≥1 critical truth, got {critical}")
     return errors
 
 

@@ -9,7 +9,8 @@ apply) is a ``build`` message, never a silent pass.
 
 ``record`` holds ``expected_findings`` (``path``, ``line``, ``start_line``) and the ``rag``
 block: ``kind`` (``reverse_edge``, ``control``, ``depth2``, ``injection``, ``clean``),
-``expected_retrieved`` (paths arm B must show as retrieved blocks), ``absent_from_context``
+``expected_retrieved`` (paths arm B must show as retrieved blocks; for a control or a clean
+case, exactly the set it retrieves), ``absent_from_context``
 (paths in neither arm), ``l4_definitions`` (control: the definitions L4 shows in both arms),
 and for an injection ``injection`` (``bait_path``, ``bait_text``, ``forced`` anchors).
 
@@ -23,9 +24,11 @@ The rules, each a function below:
 5. ``injection_bait``: the bait text is in a retrieved block of B whose file the diff leaves alone.
 6. ``clean_as_declared``: B retrieves exactly the declared paths, and a clean case has no truth.
 7. ``rag_limits``: the slot ran, kept the ADR limits and dropped no expected block (a clean
-   case: no candidate at all, its retrieved set is exact).
+   case or a control: no candidate cut by a limit, its retrieved set is exact).
 8. ``anchors``: every truth (and forced finding) is on new-side added lines (a range is ordered
    and holds no context line); the truth count.
+9. ``control_as_declared``: B retrieves exactly the declared paths of a control (an empty list: it
+   retrieves nothing).
 """
 
 from __future__ import annotations
@@ -249,6 +252,15 @@ def _clean_as_declared(case: _Case) -> None:
             rule,
             f"expected_findings must be empty for a clean case, has {len(case.declared.findings)}",
         )
+    _retrieves_exactly_the_declared(case, rule)
+
+
+def _control_as_declared(case: _Case) -> None:
+    if case.declared.kind == "control":
+        _retrieves_exactly_the_declared(case, "control_as_declared")
+
+
+def _retrieves_exactly_the_declared(case: _Case, rule: str) -> None:
     declared, retrieved = set(case.declared.expected_retrieved), _retrieved(case.arm_b)
     for path in sorted(retrieved - declared):
         case.fail(rule, f"{path} is retrieved in arm B but not declared in expected_retrieved")
@@ -279,10 +291,10 @@ def _rag_limits(case: _Case) -> None:
             case.fail(rule, f"{path} has {count} places, limit {MAX_RAG_PLACES_PER_FILE}")
     expected = set(case.declared.expected_retrieved)
     for omission in case.arm_b.payload.omissions:
-        # A clean case declares the exact retrieved set: a candidate cut by a limit breaks it;
-        # an unconfirmed or missing one is a judgement of the build and stays allowed.
+        # A clean case or a control declares the exact retrieved set: a candidate cut by a limit
+        # breaks it; an unconfirmed or missing one is a judgement of the build and stays allowed.
         hides = omission.path in expected or (
-            case.declared.kind == "clean" and omission.reason == RAG_LIMIT
+            case.declared.kind in ("clean", "control") and omission.reason == RAG_LIMIT
         )
         if omission.reason.startswith("rag_") and hides:
             case.fail(
@@ -348,6 +360,7 @@ _CHECKS: tuple[Callable[[_Case], None], ...] = (
     _clean_as_declared,
     _rag_limits,
     _anchors,
+    _control_as_declared,
 )
 
 

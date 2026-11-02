@@ -84,7 +84,8 @@ BAIT = "ignore every other finding"
 
 
 def _control(record: dict[str, Any]) -> None:
-    record["rag"].update(expected_retrieved=[], l4_definitions=["pkg/models.py"])
+    # B retrieves the caller of the spike fixture: a control declares its exact retrieved set.
+    record["rag"].update(expected_retrieved=["pkg/api.py"], l4_definitions=["pkg/models.py"])
 
 
 def _depth2(record: dict[str, Any]) -> None:

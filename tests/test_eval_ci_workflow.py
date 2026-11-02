@@ -467,14 +467,74 @@ def test_required_ci_validates_the_rules_corpus_in_its_own_step_after_the_gold_s
     step = _job_step(job, "Rules sub-corpus")
     gold = _job_step(job, "Gold corpus and recorded replay")
 
-    # The unit job's last step: its text runs up to the blank line before the next job.
     assert step.rstrip("\n").endswith(f"        run: {RULES_COMMAND}")
     assert "--profile rules" not in gold
     assert job.index("      - name: Gold corpus and recorded replay\n") < job.index(
         "      - name: Rules sub-corpus\n"
     )
-    assert re.findall(r"(?m)^      - name: (.+)$", job)[-1] == "Rules sub-corpus"
+    assert re.findall(r"(?m)^      - name: (.+)$", job)[-2:] == [
+        "Rules sub-corpus",
+        "RAG sub-corpus",
+    ]
     assert not re.search(r"(?m)^        (?:if|continue-on-error):", step)
+
+
+RAG_COMMANDS = [
+    "uv run --locked python review/scripts/validate_dataset.py "
+    "--root test-prs-dataset/rag --final --profile rag",
+    "uv run --locked python review/scripts/build_rag_snapshot.py "
+    "--check test-prs-dataset/rag/cases",
+]
+
+
+def test_required_ci_validates_the_rag_corpus_in_its_own_last_step_after_the_rules_corpus() -> None:
+    job = _python_job()
+    step = _job_step(job, "RAG sub-corpus")
+
+    # The unit job's last step: its text runs up to the blank line before the next job.
+    body = step.split("        run: |\n", 1)[1]
+    assert [line.strip() for line in body.splitlines() if line.strip()] == RAG_COMMANDS
+    assert "--profile rag" not in _job_step(job, "Rules sub-corpus")
+    assert job.index("      - name: Rules sub-corpus\n") < job.index(
+        "      - name: RAG sub-corpus\n"
+    )
+    assert re.findall(r"(?m)^      - name: (.+)$", job)[-1] == "RAG sub-corpus"
+    assert not re.search(r"(?m)^        (?:if|continue-on-error):", step)
+    assert "replay" not in body
+
+
+@pytest.mark.parametrize("failing", [0, 1])
+def test_required_ci_rag_corpus_failure_of_either_command_fails_its_step(
+    tmp_path: Path, failing: int
+) -> None:
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    shim = bin_dir / "uv"
+    # The shim fails the call whose script is the ``failing``-th command of the step.
+    script = ("validate_dataset.py", "build_rag_snapshot.py")[failing]
+    shim.write_text(
+        '#!/bin/bash\nprintf "%s\\n" "$*" >> "$ARGS_LOG"\n'
+        f'case "$*" in *{script}*) exit 33;; esac\n'
+    )
+    shim.chmod(0o755)
+    command = _job_step(_python_job(), "RAG sub-corpus").split("        run: |\n", 1)[1]
+
+    result = subprocess.run(
+        ["bash", "-e", "-c", textwrap.dedent(command)],
+        cwd=tmp_path,
+        env={
+            **os.environ,
+            "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
+            "ARGS_LOG": str(tmp_path / "args"),
+        },
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 33
+    calls = (tmp_path / "args").read_text(encoding="utf-8").splitlines()
+    assert calls == [item.removeprefix("uv ") for item in RAG_COMMANDS][: failing + 1]
 
 
 def test_required_ci_rules_corpus_failure_fails_its_step(tmp_path: Path) -> None:

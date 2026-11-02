@@ -365,6 +365,7 @@ def test_rag_profile_reports_its_own_distribution(tmp_path: Path) -> None:
         "class_counts": {"rag": 1},
         "kind_counts": {"reverse_edge": 1, "control": 0, "depth2": 0, "injection": 0, "clean": 0},
         "export_defect_count": 0,
+        "critical_truth_count": 0,
         "language_counts": {"python": 1, "typescript": 0, "tsx": 0},
         "passed": False,
         "errors": [
@@ -375,13 +376,26 @@ def test_rag_profile_reports_its_own_distribution(tmp_path: Path) -> None:
             "rag corpus: kind clean has 0 cases, needs exactly 2",
             "rag corpus: needs exactly 3 renamed or removed export cases, got 0",
             "rag corpus: needs Python and TypeScript/React cases",
+            "rag corpus: needs ≥1 critical truth, got 0",
         ],
     }
 
 
-def _rag_record(kind: str, language: str = "python", form: str | None = None) -> dict[str, Any]:
+def _rag_record(
+    kind: str,
+    language: str = "python",
+    form: str | None = None,
+    severity: str = "critical",
+) -> dict[str, Any]:
     rag = {"kind": kind, **({"defect_form": form} if form else {})}
-    return {"id": "RAG-00", "class": "rag", "language": language, "rag": rag}
+    findings = [{"path": "pkg/a.py", "line": 1, "category": "correctness", "severity": severity}]
+    return {
+        "id": "RAG-00",
+        "class": "rag",
+        "language": language,
+        "expected_findings": findings,
+        "rag": rag,
+    }
 
 
 def _rag_records(
@@ -434,6 +448,55 @@ def test_rag_distribution_refuses_a_corpus_that_misses_the_numbers(
     counts = validate_dataset._rag_distribution_counts(records)
 
     assert validate_dataset._rag_distribution_errors(counts) == [f"rag corpus: {diagnostic}"]
+
+
+def test_rag_distribution_counts_the_critical_truths() -> None:
+    records = _rag_records()
+    records[3] = _rag_record("reverse_edge", severity="high", form="new_required_param")
+
+    counts = validate_dataset._rag_distribution_counts(records)
+
+    assert counts["critical_truth_count"] == len(records) - 1
+
+
+def test_rag_distribution_accepts_exactly_one_critical_truth() -> None:
+    records = [
+        {**record, "expected_findings": [{**record["expected_findings"][0], "severity": "high"}]}
+        for record in _rag_records()
+    ]
+    records[0]["expected_findings"][0]["severity"] = "critical"
+
+    counts = validate_dataset._rag_distribution_counts(records)
+
+    assert counts["critical_truth_count"] == 1
+    assert validate_dataset._rag_distribution_errors(counts) == []
+
+
+def test_rag_distribution_counts_every_critical_finding_of_a_record() -> None:
+    record = _rag_record("reverse_edge", form="new_required_param")
+    record["expected_findings"] = [
+        {**record["expected_findings"][0], "line": line, "severity": severity}
+        for line, severity in ((1, "critical"), (2, "high"), (3, "critical"))
+    ]
+
+    counts = validate_dataset._rag_distribution_counts([record])
+
+    assert counts["critical_truth_count"] == 2
+
+
+def test_rag_distribution_refuses_a_corpus_without_a_critical_truth() -> None:
+    # Critical Recall has a null denominator (TEST_PLAN §3.2): the gate could only be INCOMPLETE.
+    records = [
+        {**record, "expected_findings": [{**record["expected_findings"][0], "severity": "high"}]}
+        for record in _rag_records()
+    ]
+
+    counts = validate_dataset._rag_distribution_counts(records)
+
+    assert counts["critical_truth_count"] == 0
+    assert validate_dataset._rag_distribution_errors(counts) == [
+        "rag corpus: needs ≥1 critical truth, got 0"
+    ]
 
 
 def test_a_defect_form_of_another_kind_does_not_count_as_an_export_case() -> None:

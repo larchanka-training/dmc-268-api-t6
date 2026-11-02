@@ -101,7 +101,12 @@ def _reindex(case: Path) -> None:
 
 def test_the_fixture_cases_pass_every_check() -> None:
     assert check_case(_SPIKE, _reverse()) == []
-    assert check_case(_SPIKE, _record("control", definitions=["pkg/models.py"])) == []
+    assert (
+        check_case(
+            _SPIKE, _record("control", definitions=["pkg/models.py"], retrieved=["pkg/api.py"])
+        )
+        == []
+    )
     assert check_case(_DEPTH2, _record("depth2", absent=["pkg/cli.py"])) == []
     assert check_case(_INJECTION, _injection(_BAIT_INJECTION)) == []
     assert check_case(_CLEAN, _record("clean", retrieved=["pkg/api.py"], findings=[])) == []
@@ -480,6 +485,77 @@ def test_check_8_a_forced_finding_of_the_bait_is_on_an_added_line_too() -> None:
     errors = _rule(check_case(_INJECTION, _injection({**bait, "forced": [off]})), "anchors")
 
     assert any("forced[0]" in error and "not a new-side added line" in error for error in errors)
+
+
+# --- check 9: a control retrieves exactly what it declares -----------------------------------
+
+
+def _control(retrieved: Sequence[str]) -> dict[str, Any]:
+    return _record("control", definitions=["pkg/models.py"], retrieved=retrieved)
+
+
+def test_check_9_arm_b_retrieves_what_the_control_declares() -> None:
+    errors = check_case(_SPIKE, _control(["pkg/api.py"]))
+
+    assert _rule(errors, "control_as_declared") == []
+
+
+def test_check_9_a_declared_empty_set_that_arm_b_fills_is_an_error() -> None:
+    errors = _rule(check_case(_SPIKE, _control([])), "control_as_declared")
+
+    assert any("pkg/api.py" in error and "not declared" in error for error in errors)
+
+
+def test_check_9_a_declared_path_that_arm_b_does_not_retrieve_is_an_error() -> None:
+    errors = _rule(
+        check_case(_SPIKE, _control(["pkg/api.py", "pkg/cli.py"])), "control_as_declared"
+    )
+
+    assert any("pkg/cli.py" in error and "not retrieved" in error for error in errors)
+
+
+def test_check_9_a_control_that_retrieves_nothing_declares_an_empty_set(tmp_path: Path) -> None:
+    case = _copy(tmp_path, _SPIKE)
+    (case / "base" / "pkg" / "api.py").unlink()
+    _reindex(case)
+
+    assert _rule(check_case(case, _control([])), "control_as_declared") == []
+    errors = _rule(check_case(case, _control(["pkg/api.py"])), "control_as_declared")
+    assert any("pkg/api.py" in error and "not retrieved" in error for error in errors)
+
+
+@pytest.mark.parametrize(
+    ("case", "record"),
+    [
+        (_SPIKE, _record("reverse_edge", retrieved=[])),  # B retrieves pkg/api.py: undeclared
+        (_SPIKE, _record("reverse_edge", retrieved=["pkg/api.py", "pkg/cli.py"])),  # extra path
+        (_DEPTH2, _record("depth2", absent=["pkg/cli.py"])),  # B retrieves pkg/api.py: undeclared
+        (_INJECTION, _record("injection", retrieved=[], injection=_BAIT_INJECTION)),
+    ],
+)
+def test_check_9_other_kinds_are_not_held_to_the_rule(case: Path, record: dict[str, Any]) -> None:
+    assert _rule(check_case(case, record), "control_as_declared") == []
+
+
+def test_check_9_a_candidate_the_limits_cut_breaks_a_controls_exact_set(tmp_path: Path) -> None:
+    case = _copy(tmp_path, _SPIKE)
+    callers = [f"pkg/c{n}.py" for n in range(11)]
+    for n, path in enumerate(callers):
+        (case / "base" / path).write_text(
+            f"from .models import Item\nfrom .store import save\n\n\ndef f{n}() -> Item:\n"
+            "    return save(Item('x'))\n",
+            encoding="utf-8",
+        )
+    _reindex(case)
+    arm_b = asyncio.run(build_arm_input(case, "B", review_model="m"))
+    kept = sorted(eval_rag_check._retrieved(arm_b))
+
+    errors = _rule(check_case(case, _control(kept)), "rag_limits")
+
+    # The exact set matches what B shows, but the build cut two candidates: it is not the
+    # set the control meant to declare, so the cut is named as in a clean case.
+    assert len(errors) == 2
+    assert all("rag_limit" in error for error in errors)
 
 
 # --- a check that cannot run is an error -----------------------------------------------------
