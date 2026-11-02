@@ -339,7 +339,7 @@ API_DIR=/path/to/<project> deploy/monitoring/deploy.sh
 | GlitchTip | ~512m+ (web, worker, своя PostgreSQL и Redis) | ключ, пароль БД | нет: дороже Tempo по памяти |
 | self-hosted Sentry | 8+ ГБ | — | на общий VPS не помещается |
 
-Причина: Tempo встаёт в уже выкаченный стек одним сервисом, Grafana показывает трейсы рядом с метриками, а данные прогона не покидают VPS. Стек с Tempo — ~1,6 ГБ лимитов (+128m у `backup-offsite`). Трекинг ошибок — это span'ы со статусом `error` и событием `exception`: тип и кадры стека, без текста сообщения (он может цитировать тело запроса и лежит в `runs.error_message`, закрытой от Grafana, §3). Группировки и уведомлений, как в Sentry, нет. Об ошибках в канал по-прежнему сообщают алерты §5 (`ReviewRunsFailed`, `ReviewDeadLetters`), а причину ищут по `run_id` в Tempo.
+Причина: Tempo встаёт в уже выкаченный стек одним сервисом, Grafana показывает трейсы рядом с метриками, а данные прогона не покидают VPS. Версия 2.10.x, а не 3.x: Tempo 3.0 меняет архитектуру и формат конфига, переход — отдельной задачей. Стек с Tempo — ~1,6 ГБ лимитов (+128m у `backup-offsite`). Трекинг ошибок — это span'ы со статусом `error` и событием `exception`: тип и кадры стека, без текста сообщения (он может цитировать тело запроса и лежит в `runs.error_message`, закрытой от Grafana, §3). Группировки и уведомлений, как в Sentry, нет. Об ошибках в канал по-прежнему сообщают алерты §5 (`ReviewRunsFailed`, `ReviewDeadLetters`), а причину ищут по `run_id` в Tempo.
 
 ### Что пишет код
 
@@ -347,16 +347,21 @@ API_DIR=/path/to/<project> deploy/monitoring/deploy.sh
 |---|---|---|
 | `review.run.<engine> publish`, `review.publish publish` (PRODUCER) | `AmqpQueuePublisher`: webhook-worker, API (rerun), реконсилер worker | `run_id`, `messaging.destination.name`; в заголовок сообщения идёт `traceparent` (W3C) |
 | `review.run`, `review.publish` (CONSUMER) | `handle_run_delivery`, `handle_publish_delivery` в worker | `run_id`, `dmc.engine`, `dmc.trigger`, `dmc.attempt`, `dmc.outcome` (`ack` / `dead_letter`); исключение обработчика и dead letter — статус `error` |
-| `<tool>` — `policy.load`, `vcs.fetch_diff`, `context.build`, `llm.call`, `review.postprocess`, `github.publish_review`, … | `insert_run_action`: каждая строка `run_actions` | `run_id`, `dmc.tool`, `dmc.step.index`, `dmc.attempt`; начало и длительность — те же, что в строке; сбой шага (`response.error`) — статус `error` и `error.type` (`type` или `class` ошибки) |
-| `<METHOD> <route>` (SERVER) | `TracingMiddleware` API, кроме `/healthcheck` | `http.request.method`, `http.route` (шаблон, не URL), `http.response.status_code`; 5xx и исключение — `error` |
+| `<tool>` — `policy.load`, `vcs.fetch_diff`, `context.build`, `llm.call`, `review.postprocess`, `github.publish_review`, `gitlab.publish_review`, `bitbucket.publish_review` | `insert_run_action`: каждая строка `run_actions` | `run_id`, `dmc.tool`, `dmc.step.index`, `dmc.attempt`; начало и длительность — те же, что в строке; сбой шага (`response.error`) — статус `error` и `error.type` (`type` или `class` ошибки) |
+| `<METHOD> <route>` (SERVER) | `TracingMiddleware` API, кроме `/healthcheck` | `http.request.method` (неизвестный метод — `_OTHER`), `http.route` (шаблон, не URL), `http.response.status_code`; 5xx и исключение — `error` |
+| `webhook.replay`, `webhook.purge`, `webhook.revive`, `rules.refresh` | проходы `webhook-worker` | `dmc.provider`; сбой прохода — `error`. Публикации прогона из прохода — его дочерние span'ы |
 
-**Ошибки.** Обработчик прогона не пробрасывает исключение пайплайна, а превращает его в `failed` или повтор. Поэтому ошибки на трейс попадают через лог: запись уровня ERROR с исключением (`SpanErrorHandler`, его ставит `configure_logging`) отмечает текущий span — `review.run` у worker, span запроса у API. `HandleReviewRun` пишет такую запись на каждую упавшую попытку (`Run <id> attempt failed: <error_code>`). Одно исключение даёт на span одно событие.
+**Ошибки.** Обработчик прогона не пробрасывает исключение пайплайна, а превращает его в `failed` или повтор. Поэтому ошибки на трейс попадают через лог: запись уровня ERROR с исключением (`SpanErrorHandler`, его ставит `configure_logging`) отмечает текущий span — `review.run` у worker, span запроса у API. `HandleReviewRun` пишет такую запись на каждую упавшую попытку (`Run <id> attempt failed: <error_code>`). Сбой без исключения (`deadline_exceeded` от watchdog) пишет запись с `extra={"error_type": ...}`, и span получает `error` с этим типом. Одно исключение даёт на span одно событие.
 
 Diff → Context → LLM → DB на трейсе: `vcs.fetch_diff` → `context.build` → `llm.call` (каждый вызов провайдера) → `review.postprocess` (запись итога в PostgreSQL в той же транзакции, что и строка). Трейс webhook-worker или API и трейс worker — один: контекст переходит через RabbitMQ в `traceparent`, повтор после ошибки копирует заголовки сообщения.
 
-**Граница данных** — та же, что у ролей мониторинга (§3). В span не попадают тела `run_actions.request` и `response`, `runs.review_body`, диффы, URL с query, SQL. Экспортёр (`RedactingSpanExporter`) перед отправкой оставляет только атрибуты из `ALLOWED_ATTRIBUTES` (`app/common/infrastructure/telemetry.py`), поэтому новый атрибут или библиотека границу не расширят. Автоинструментации httpx и SQLAlchemy нет. Проверяет `tests/test_telemetry.py`.
+**Граница данных** — та же, что у ролей мониторинга (§3). В span не попадают тела `run_actions.request` и `response`, `runs.review_body`, диффы, URL с query, SQL. Экспортёр (`RedactingSpanExporter`) перед отправкой оставляет только атрибуты из `ALLOWED_ATTRIBUTES` (`app/common/infrastructure/telemetry.py`), поэтому новый атрибут или библиотека границу не расширят. Описание статуса уходит только как имя типа. Исключение покидает процесс как типы и кадры стека (`safe_stack`): стек собирается по структуре исключения (`__cause__`, `__context__`, члены `ExceptionGroup`), а не фильтрацией текста, поэтому сообщение ошибки, строки pydantic `input_value` и многострочные сообщения не попадают ни в span, ни в лог. Стек, записанный не `mark_error` (например `record_exception` библиотеки), экспортёр отбрасывает. Автоинструментации httpx и SQLAlchemy нет. Проверяет `tests/test_telemetry.py`.
 
-**Включение.** Export включён, только если задан `OTEL_EXPORTER_OTLP_ENDPOINT`. В `deploy/compose/staging.yml` у `api`, `worker` и `webhook-worker` это `http://tempo:4318`: Tempo в сети приложения (`API_NETWORK`), host-порта нет. Без переменной (или с пустой) OpenTelemetry остаётся no-op и ничего не отправляет. Если Tempo недоступен, теряются только span'ы: экспорт идёт фоном, таймаут 5 с, при остановке процесс ждёт не дольше него. Секретов нет. Prod — в «Ограничениях» ниже.
+**Включение.** Export включён, только если задан `OTEL_EXPORTER_OTLP_ENDPOINT`. В `deploy/compose/staging.yml` у `api`, `worker` и `webhook-worker` это `http://tempo:4318`: Tempo в сети приложения (`API_NETWORK`), host-порта нет. Без переменной (или с пустой) OpenTelemetry остаётся no-op и ничего не отправляет. Если Tempo недоступен, теряются только span'ы: экспорт идёт фоном, таймаут 5 с, при остановке процесс ждёт не дольше него (SIGTERM у worker и webhook-worker завершает процесс штатно, очередь span'ов сбрасывается). Секретов нет. Prod — в «Ограничениях» ниже.
+
+- Читается только `OTEL_EXPORTER_OTLP_ENDPOINT` (путь `/v1/traces` дописывается, endpoint задаётся без него) и `OTEL_RESOURCE_ATTRIBUTES`. `OTEL_TRACES_EXPORTER` и `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` не поддерживаются: выключение — пустой endpoint.
+- Первый выкат: `Deploy monitoring` идёт после `Deploy staging`, span'ы до подъёма Tempo теряются. После `Deploy monitoring` проверить `docker compose logs tempo` (uid 10001 на новом томе `tempo-data`).
+- Порты Tempo: кроме приёма 4318 в `API_NETWORK` открыты query API 3200 (без аутентификации) и внутренние 9095 и 7946. Host-портов нет, но любой контейнер этой сети (postgres, rabbitmq, api) может читать трейсы через 3200.
 
 ### Как найти прогон
 
@@ -375,10 +380,10 @@ Grafana → Explore → источник **Tempo** → TraceQL:
 `api`, `worker` и `webhook-worker` пишут в stderr одну JSON-строку на запись (`configure_logging`). Логи uvicorn идут через тот же обработчик.
 
 ```json
-{"ts": "2026-11-01T17:08:35.221+00:00", "level": "ERROR", "service": "worker", "logger": "app.modules.reviews.infrastructure.amqp", "message": "Message … handling failed (attempt 1/5); it is redelivered", "run_id": "489809f4-…", "trace_id": "65c1eeeb…", "span_id": "f1010322…", "error_type": "RuntimeError", "exc_info": "Traceback …"}
+{"ts": "2026-11-01T17:08:35.221+00:00", "level": "ERROR", "service": "worker", "logger": "app.modules.reviews.infrastructure.amqp", "message": "Message … handling failed (attempt 1/5); it is redelivered", "run_id": "489809f4-…", "trace_id": "65c1eeeb…", "span_id": "f1010322…", "error_type": "RuntimeError", "exc_info": "Traceback (most recent call last):\n  File \"…/amqp.py\", line …, in handle_run_delivery\nRuntimeError"}
 ```
 
-`run_id` есть у записей внутри доставки `review.run` и `review.publish` и внутри публикации в очередь (так он попадает и в логи `api` и `webhook-worker`). Вне них его передаёт место вызова: `extra={"run_id": ...}`. `trace_id` есть у записей внутри span'а, по нему из лога открывается трейс. Из `extra` в строку попадают только `run_id` и `error_type`: остальные поля могут нести тело запроса. Поиск по прогону:
+`run_id` есть у записей внутри доставки `review.run` и `review.publish` и внутри публикации в очередь (так он попадает и в логи `api` и `webhook-worker`). Вне них его передаёт место вызова: `extra={"run_id": ...}`. `trace_id` есть у записей внутри span'а, по нему из лога открывается трейс. Из `extra` в строку попадают только `run_id` и `error_type`: остальные поля могут нести тело запроса. У записи с исключением `exc_info` — только типы и кадры (`safe_stack`), без текста сообщений; текст ошибки прогона — в `runs.error_message`. INFO от `httpx` и `httpcore` (строка на каждый HTTP-вызов, с URL) выключены. Поиск по прогону:
 
 ```bash
 docker compose -p dmc-268-api-staging logs worker --no-log-prefix | jq -c 'select(.run_id == "<run_id>")'
@@ -387,6 +392,6 @@ docker compose -p dmc-268-api-staging logs worker --no-log-prefix | jq -c 'selec
 ### Ограничения
 
 - span шага пишется при вставке строки `run_actions`, до commit транзакции. Если транзакция откатится, в Tempo останется шаг, которого нет в `run_actions`.
-- `webhook-worker` даёт только span'ы публикации в очередь `review.run.*`; обработка доставок и их ошибки span'ов не имеют, видны в JSON-логах.
-- `OTEL_EXPORTER_OTLP_ENDPOINT` задан в `deploy/compose/staging.yml`, который prod получает как свой `compose.yml`. На prod без стека мониторинга экспортёр пишет предупреждения о недоступном `tempo`; вынести значение в переменную окружения — в #308.
+- `webhook-worker` даёт span на проход, но не на каждую доставку внутри прохода: application-слой OpenTelemetry не импортирует. Ошибка отдельной доставки видна в JSON-логах.
+- `OTEL_EXPORTER_OTLP_ENDPOINT` и `OTEL_RESOURCE_ATTRIBUTES` (`deployment.environment.name=staging`) заданы в `deploy/compose/staging.yml`, который prod получает как свой `compose.yml`. На prod без стека мониторинга экспортёр пишет предупреждения о недоступном `tempo`, а окружение было бы подписано как staging. Вынести оба значения в переменные окружения — в #308.
 
