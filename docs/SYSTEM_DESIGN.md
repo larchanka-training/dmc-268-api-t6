@@ -1084,19 +1084,18 @@ class VcsProvider(Protocol):
     async def upsert_check_run(self, repo: RepoRef, sha: str, status: CheckRun) -> str: ...
     async def post_review(self, repo: RepoRef, number: int, review: ReviewPayload) -> str: ...
     async def compare_commits(self, repo: RepoRef, base_sha: str, head_sha: str) -> ComparisonResult: ...   # сравнение коммитов дельты (ancestry, previous_filename при rename, патчи, признак complete, Ч.1; ComparisonResult — расширенная модель сервиса публикации, в отличие от легковесного Comparison в code_index)
-    async def get_review_threads(self, repo: RepoRef, number: int, after_cursor: str | None = None) -> ReviewThreadPage: ...   # постраничное чтение тредов PR (GraphQL, цель #321 / Ч.1)
-    async def get_review_thread(self, repo: RepoRef, thread_id: str) -> ReviewThread: ...   # чтение одного треда (GraphQL, цель #321 / Ч.1)
+    async def get_review_threads(self, repo: RepoRef, number: int, after_cursor: str | None = None) -> ReviewThreadPage: ...   # постраничное чтение тредов PR (GraphQL, цель #321 / Ч.1; при непустом errors[] ответа GraphQL, в том числе при HTTP 200, адаптер поднимает исключение и частичный результат не возвращает)
+    async def get_review_thread(self, repo: RepoRef, thread_id: str) -> ReviewThread: ...   # чтение одного треда (GraphQL, цель #321 / Ч.1; при непустом errors[] ответа GraphQL, в том числе при HTTP 200, адаптер поднимает исключение)
     async def resolve_review_thread(self, repo: RepoRef, thread_id: str) -> ThreadResolutionResult: ...   # закрытие треда (GraphQL resolveReviewThread, исходы SUCCESS/FORBIDDEN/NOT_FOUND/RATE_LIMITED/TRANSIENT_ERROR/UNSUPPORTED, цель #321 / Ч.1)
     async def get_bot_key(self) -> str | None: ...   # нормализованный slug GitHub App из GET /app с App JWT (кешируется в памяти процесса; для GitLab — None, цель #321 / Ч.1)
     async def list_feedback(self, repo: RepoRef, number: int) -> list[FeedbackSignal]: ...   # после MVP
 ```
 
-GitHub поддерживает вебхуки, diff, блобы, check-run, post_review, чтение и закрытие
+GitHub поддерживает вебхуки, diff, блобы, check-run, `post_review`, чтение и закрытие
 тредов через GraphQL. Установленный GitLab поддерживает durable MR receipts, проекцию,
 очередь, fast-анализ и discussions через отдельные адаптеры (§8.4); GitHub check-run
-для GitLab не вызывается. Для GitLab адаптер get_review_threads возвращает пустую страницу,
-
-esolve_review_thread — UNSUPPORTED, а compare_commits — сравнение коммитов без
+для GitLab не вызывается. Для GitLab адаптер `get_review_threads` возвращает пустую страницу,
+`resolve_review_thread` — `UNSUPPORTED`, а `compare_commits` — сравнение коммитов без
 патчей; инкрементальный реестр для GitLab работает с пустым списком тредов.
 Bitbucket Cloud использует отдельный UUID-bound adapter для PR, diff, source,
 inline comments и commit statuses; детали и live-гейт — [задача #333](https://github.com/larchanka-training/dmc-268-api-t6/issues/333) и [TEST_PLAN](TEST_PLAN.md#bitbucket-cloud-acceptance-333).
