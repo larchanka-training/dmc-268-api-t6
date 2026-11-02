@@ -109,7 +109,8 @@ class StoreDiffSnapshot:
 
         An excluded file keeps its UI patch and gets no model patch. It does not count
         toward the summary-only threshold: 4 000 ignored lines next to 50 allowed ones
-        are an ordinary review of those 50.
+        are an ordinary review of those 50. A proven empty file is not flagged either:
+        ``summary_only`` would cancel that proof.
         """
         withheld = [excluded is not None and excluded(file) for file in files]
         summary_only = over_max_diff_lines(files, excluded=excluded)
@@ -118,7 +119,7 @@ class StoreDiffSnapshot:
             snapshot = _normalize_snapshot(file)
             if skip:
                 snapshot = replace(snapshot, review_patch=None)
-            elif summary_only:
+            elif summary_only and snapshot.omission_reason != "empty_file":
                 snapshot = replace(snapshot, review_patch=None, summary_only=True)
             snapshots.append(snapshot)
         return await self._repository.store_diff_snapshots(

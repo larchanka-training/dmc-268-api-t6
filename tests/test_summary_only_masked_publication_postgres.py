@@ -4,6 +4,7 @@ The stage uses the worker's built-in exclusions and ``TransactionalRunTrace``. C
 is the reload inside ``save_summary_only_stop``, then the publication input and the
 stored review result. Legacy ``review.system`` v2 and snapshot-path v5 both count the
 lock as ``ignored``: the worker withholds it before the generated-omission exclusion.
+A proven empty file stays unmarked, so the stop does not cancel that proof.
 """
 
 from __future__ import annotations
@@ -27,7 +28,7 @@ from app.modules.reviews.application.review_context_stage import (
 )
 from app.modules.reviews.application.run_trace import TransactionalRunTrace
 from app.modules.reviews.application.store_review_output import StoreReviewOutput
-from app.modules.reviews.application.vcs_diff import is_generated_path
+from app.modules.reviews.application.vcs_diff import GIT_EMPTY_BLOB_SHA, is_generated_path
 from app.modules.reviews.infrastructure.models import CodeChangeDiff, RunAction
 from app.modules.reviews.infrastructure.policy_snapshot_unit_of_work import (
     SqlAlchemyPolicySnapshotUnitOfWork,
@@ -54,7 +55,8 @@ from tests.test_severity_threshold_postgres import RecordingQueue
 
 _LINE = "@@ -1 +1 @@\n-old\n+new"
 # The worker withholds the lock, so both paths publish it as ignored, with the mask.
-_EXCLUSIONS = {"ignored": 2}
+# The proven empty file is an exclusion and is not a summary-only row.
+_EXCLUSIONS = {"ignored": 2, "empty_file": 1}
 
 
 def _code(lines: int) -> DiffSnapshot:
@@ -105,15 +107,30 @@ def _missing() -> DiffSnapshot:
     )
 
 
+def _empty() -> DiffSnapshot:
+    return DiffSnapshot(
+        "pkg/__init__.py",
+        None,
+        GIT_EMPTY_BLOB_SHA,
+        "added",
+        omission_reason="empty_file",
+    )
+
+
 _CASES = (
-    ("diff_too_large", (_code(3_001), _mask(), _lock()), 3, {"summary_only": 1}),
+    ("diff_too_large", (_code(3_001), _mask(), _lock(), _empty()), 4, {"summary_only": 1}),
     (
         "diff_inventory_incomplete",
-        (_code(1), _mask(), _lock()),
-        4,
+        (_code(1), _mask(), _lock(), _empty()),
+        5,
         {"diff_inventory_incomplete": 1, "summary_only": 1},
     ),
-    ("no_reviewable_files", (_missing(), _mask(), _lock()), 3, {"missing_patch": 1}),
+    (
+        "no_reviewable_files",
+        (_missing(), _mask(), _lock(), _empty()),
+        4,
+        {"missing_patch": 1},
+    ),
 )
 
 
@@ -147,7 +164,7 @@ def test_masked_file_and_lock_keep_published_coverage(env: Env, version: int) ->
                     run_id = await _insert(session)
                     await session.execute(
                         text(
-                            "UPDATE runs SET state='running', worker_id='worker', "
+                            "UPDATE runs SET state='running', worker_id='worker', attempt=1, "
                             "prompt_version_id=(SELECT id FROM prompt_versions "
                             "WHERE key='review.system' AND version=:version) WHERE id=:id"
                         ),
@@ -197,8 +214,14 @@ def test_masked_file_and_lock_keep_published_coverage(env: Env, version: int) ->
                             RunAction.run_id == run_id, RunAction.tool == "context.build"
                         )
                     )
-                masked = next(row for row in rows if row.filename == "generated/notes.py")
-                assert masked.summary_only is False and masked.review_patch is None
+                checked = "src/note.txt" if reason == "no_reviewable_files" else "src/app.py"
+                flags = {row.filename: (row.summary_only, row.review_patch is None) for row in rows}
+                assert flags == {
+                    checked: (True, True),
+                    "package-lock.json": (True, True),
+                    "generated/notes.py": (False, True),
+                    "pkg/__init__.py": (False, True),
+                }
                 assert isinstance(build, dict)
                 assert build["status"] == "summary_only"
                 assert build["reason"] == reason

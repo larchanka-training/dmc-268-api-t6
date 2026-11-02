@@ -22,6 +22,7 @@ from app.modules.reviews.application.process_run import (
     RunDiffProvider,
 )
 from app.modules.reviews.application.prompt_builder import DiffLine, FileStatus, ReviewRule
+from app.modules.reviews.application.vcs_diff import GIT_EMPTY_BLOB_SHA
 from tests.portal_test_client import authenticated_test_client as TestClient
 from tests.trigger_uow import processing_uow
 
@@ -157,6 +158,36 @@ def test_store_diff_snapshot_retains_ui_patches_when_model_summary_limit_is_exce
     changed, omitted = review_files_from_snapshots(repository.write_calls[0][2])
     assert changed == ()
     assert omitted == ("app/service.py", "logo.png", "generated.lock")
+
+
+def test_store_diff_snapshot_leaves_a_proven_empty_file_unmarked_over_the_line_limit() -> None:
+    repository = FakeDiffRepository([])
+    huge = "\n".join("+line" for _ in range(3001))
+
+    asyncio.run(
+        StoreDiffSnapshot(repository).execute(
+            run_id=UUID("00000000-0000-0000-0000-000000000100"),
+            code_change_id=UUID("00000000-0000-0000-0000-000000000200"),
+            head_sha="a" * 40,
+            files=[
+                DiffSnapshot(filename="src/app.py", patch=huge, additions=3001, changes=3001),
+                DiffSnapshot(
+                    filename="pkg/__init__.py",
+                    patch=None,
+                    blob_sha=GIT_EMPTY_BLOB_SHA,
+                    status="added",
+                    omission_reason="empty_file",
+                ),
+            ],
+        )
+    )
+
+    stored = repository.write_calls[0][2]
+    empty = next(item for item in stored if item.filename == "pkg/__init__.py")
+    assert empty.summary_only is False
+    assert empty.review_patch is None
+    assert empty.omission_reason == "empty_file"
+    assert stored[0].summary_only is True
 
 
 def test_store_diff_snapshot_keeps_full_diff_at_aggregate_limit() -> None:
