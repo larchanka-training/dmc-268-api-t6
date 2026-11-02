@@ -80,6 +80,7 @@ from app.modules.reviews.application.review_result_cache import (
     ReviewResultModel,
     ReviewResultOperation,
     review_result_cache_key,
+    stored_review_result,
 )
 from app.modules.reviews.infrastructure.llm.answers import InvalidAnswer, verifier_output_schema
 from app.modules.reviews.infrastructure.llm.gateway import (
@@ -219,6 +220,70 @@ def test_key_misses_when_model_prompt_schema_or_profile_changes() -> None:
     assert (
         len({base_key, model_key, provider_key, prompt_key, schema_key, profile_key, options_key})
         == 7
+    )
+
+
+_SOURCE_RUN = UUID("00000000-0000-4000-8000-000000000401")
+_SOURCE_CALL = UUID("00000000-0000-4000-8000-000000000402")
+_SOURCE_MANIFEST = UUID("00000000-0000-4000-8000-000000000403")
+
+
+def test_stored_review_result_reads_a_uuid_source_and_rejects_a_bad_one() -> None:
+    answer = {"n": 1}
+    unpacked = stored_review_result(
+        {
+            "answer": answer,
+            "source": {
+                "run_id": "00000000-0000-4000-8000-000000000401",
+                "call_id": "00000000-0000-4000-8000-000000000402",
+                "manifest_id": "00000000-0000-4000-8000-000000000403",
+            },
+        }
+    )
+    assert unpacked is not None
+    parsed, source = unpacked
+    assert parsed == {"n": 1}
+    assert source.run_id == _SOURCE_RUN
+    assert source.call_id == _SOURCE_CALL
+    assert source.manifest_id == _SOURCE_MANIFEST
+
+    assert (
+        stored_review_result({"answer": answer, "source": {"call_id": None, "manifest_id": None}})
+        is None
+    )
+    assert (
+        stored_review_result(
+            {"answer": answer, "source": {"run_id": None, "call_id": None, "manifest_id": None}}
+        )
+        is None
+    )
+    assert (
+        stored_review_result(
+            {"answer": answer, "source": {"run_id": 1, "call_id": None, "manifest_id": None}}
+        )
+        is None
+    )
+    assert (
+        stored_review_result(
+            {
+                "answer": answer,
+                "source": {"run_id": "not-a-uuid", "call_id": None, "manifest_id": None},
+            }
+        )
+        is None
+    )
+    assert (
+        stored_review_result(
+            {
+                "answer": answer,
+                "source": {
+                    "run_id": "00000000-0000-4000-8000-000000000401",
+                    "call_id": "not-a-uuid",
+                    "manifest_id": None,
+                },
+            }
+        )
+        is None
     )
 
 
@@ -1296,15 +1361,30 @@ async def _corrupt_and_unavailable() -> None:
     planted = _Rig()
     planted.transport.answers.extend(['{"n": 1}', '{"n": 2}', '{"n": 3}'])
     await planted.gateway(spec).generate(_task(spec), _context(spec))
+    # A well-formed envelope whose answer fails the current schema is a miss.
+    # A bare object is a different miss: it never reaches task.validate.
     if planted.cache.values:
-        planted.cache.values[next(iter(planted.cache.values))] = {"n": "corrupt"}
+        planted.cache.values[next(iter(planted.cache.values))] = {
+            "answer": {"n": "corrupt"},
+            "source": {
+                "run_id": "00000000-0000-4000-8000-000000000315",
+                "call_id": None,
+                "manifest_id": None,
+            },
+        }
     rejected = await planted.gateway(spec).generate(_task(spec), _context(spec))
     assert rejected.output == {"n": 2}
+    assert rejected.calls == 1
     replaced = await planted.gateway(spec).generate(_task(spec), _context(spec))
     assert replaced.output == {"n": 2}
     assert replaced.calls == 0
-    assert len(planted.transport.requests) == 2
-    assert len(planted.ledger.events) == 2
+    if planted.cache.values:
+        planted.cache.values[next(iter(planted.cache.values))] = {"n": "corrupt"}
+    not_envelope = await planted.gateway(spec).generate(_task(spec), _context(spec))
+    assert not_envelope.output == {"n": 3}
+    assert not_envelope.calls == 1
+    assert len(planted.transport.requests) == 3
+    assert len(planted.ledger.events) == 3
 
     down = _Rig(cache=_RaisingCache())
     down.transport.answers.append('{"n": 1}')
