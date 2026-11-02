@@ -106,6 +106,295 @@ tests:
               summary: "LLM calls are slow: p95 1m 20s over 15 minutes"
               description: "The fast-engine call timeout is 90 s (docs/PIPELINE_SPEC.md §3)."
 
+  # The monthly LLM budget: the spend of every database counts (neither series reaches 80% alone),
+  # 79.8% is silent, 80% and 99.96% warn (two decimals: not "100.0%"), at 100% the critical fires
+  # at once and the warning resolves 5 minutes later.
+  - interval: 1m
+    input_series:
+      - series: 'dmc_llm_monthly_budget_usd{instance="node-exporter:9100", job="node"}'
+        values: "50x45"
+      - series: 'dmc_llm_cost_month_usd{environment="staging"}'
+        values: "24.9x9 25x9 29.98x9 30x15"
+      - series: 'dmc_llm_cost_month_usd{environment="prod"}'
+        values: "15x19 20x25"
+    alert_rule_test:
+      - eval_time: 9m
+        alertname: LlmMonthlyBudgetWarning
+        exp_alerts: []
+      - eval_time: 14m
+        alertname: LlmMonthlyBudgetWarning
+        exp_alerts: []
+      - eval_time: 15m
+        alertname: LlmMonthlyBudgetWarning
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: "LLM spend this month: 40.00 USD, 80.00% of the monthly budget"
+              description: "Spend in usage_events since the 1st of the month (UTC) is between 80% and 100% of LLM_MONTHLY_BUDGET_USD; at 100% LlmMonthlyBudgetExceeded takes over and this alert resolves; the alert pauses no reviews."
+      - eval_time: 15m
+        alertname: LlmMonthlyBudgetExceeded
+        exp_alerts: []
+      - eval_time: 29m
+        alertname: LlmMonthlyBudgetWarning
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: "LLM spend this month: 49.98 USD, 99.96% of the monthly budget"
+              description: "Spend in usage_events since the 1st of the month (UTC) is between 80% and 100% of LLM_MONTHLY_BUDGET_USD; at 100% LlmMonthlyBudgetExceeded takes over and this alert resolves; the alert pauses no reviews."
+      - eval_time: 29m
+        alertname: LlmMonthlyBudgetExceeded
+        exp_alerts: []
+      - eval_time: 29m30s
+        alertname: LlmMonthlyBudgetExceeded
+        exp_alerts: []
+      - eval_time: 30m
+        alertname: LlmMonthlyBudgetExceeded
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+            exp_annotations:
+              summary: "LLM spend this month: 50.00 USD, 100.00% of the monthly budget"
+              description: "Spend in usage_events since the 1st of the month (UTC) has reached LLM_MONTHLY_BUDGET_USD; the alert pauses no reviews, they keep spending."
+      - eval_time: 34m30s
+        alertname: LlmMonthlyBudgetWarning
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: "LLM spend this month: 49.98 USD, 99.96% of the monthly budget"
+              description: "Spend in usage_events since the 1st of the month (UTC) is between 80% and 100% of LLM_MONTHLY_BUDGET_USD; at 100% LlmMonthlyBudgetExceeded takes over and this alert resolves; the alert pauses no reviews."
+      - eval_time: 35m
+        alertname: LlmMonthlyBudgetWarning
+        exp_alerts: []
+      - eval_time: 40m
+        alertname: LlmMonthlyBudgetWarning
+        exp_alerts: []
+      - eval_time: 40m
+        alertname: LlmMonthlyBudgetExceeded
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+            exp_annotations:
+              summary: "LLM spend this month: 50.00 USD, 100.00% of the monthly budget"
+              description: "Spend in usage_events since the 1st of the month (UTC) has reached LLM_MONTHLY_BUDGET_USD; the alert pauses no reviews, they keep spending."
+
+  # A missed scrape of postgres-exporter marks the spend stale; neither alert resolves on it.
+  - interval: 1m
+    input_series:
+      - series: 'dmc_llm_monthly_budget_usd{instance="node-exporter:9100", job="node"}'
+        values: "50x30"
+      - series: 'dmc_llm_cost_month_usd{environment="staging"}'
+        values: "45x10 stale 45x3 55x5 stale 55x5"
+    alert_rule_test:
+      - eval_time: 11m30s
+        alertname: LlmMonthlyBudgetWarning
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: "LLM spend this month: 45.00 USD, 90.00% of the monthly budget"
+              description: "Spend in usage_events since the 1st of the month (UTC) is between 80% and 100% of LLM_MONTHLY_BUDGET_USD; at 100% LlmMonthlyBudgetExceeded takes over and this alert resolves; the alert pauses no reviews."
+      - eval_time: 22m30s
+        alertname: LlmMonthlyBudgetExceeded
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+            exp_annotations:
+              summary: "LLM spend this month: 55.00 USD, 110.00% of the monthly budget"
+              description: "Spend in usage_events since the 1st of the month (UTC) has reached LLM_MONTHLY_BUDGET_USD; the alert pauses no reviews, they keep spending."
+
+  # An outage of postgres-exporter (TargetDown reports it): the critical holds for 30 minutes, so a
+  # 20-minute gap sends no RESOLVED, and a longer one resolves it 30 minutes after the last scrape.
+  - interval: 1m
+    input_series:
+      - series: 'dmc_llm_monthly_budget_usd{instance="node-exporter:9100", job="node"}'
+        values: "50x65"
+      - series: 'dmc_llm_cost_month_usd{environment="staging"}'
+        values: "55x5 stale _x19 55x5 stale"
+    alert_rule_test:
+      - eval_time: 16m
+        alertname: LlmMonthlyBudgetExceeded
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+            exp_annotations:
+              summary: "LLM spend this month: 55.00 USD, 110.00% of the monthly budget"
+              description: "Spend in usage_events since the 1st of the month (UTC) has reached LLM_MONTHLY_BUDGET_USD; the alert pauses no reviews, they keep spending."
+      - eval_time: 25m30s
+        alertname: LlmMonthlyBudgetExceeded
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+            exp_annotations:
+              summary: "LLM spend this month: 55.00 USD, 110.00% of the monthly budget"
+              description: "Spend in usage_events since the 1st of the month (UTC) has reached LLM_MONTHLY_BUDGET_USD; the alert pauses no reviews, they keep spending."
+      - eval_time: 61m30s
+        alertname: LlmMonthlyBudgetExceeded
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+            exp_annotations:
+              summary: "LLM spend this month: 55.00 USD, 110.00% of the monthly budget"
+              description: "Spend in usage_events since the 1st of the month (UTC) has reached LLM_MONTHLY_BUDGET_USD; the alert pauses no reviews, they keep spending."
+      - eval_time: 62m
+        alertname: LlmMonthlyBudgetExceeded
+        exp_alerts: []
+
+  # The month rolls over (the 1st, 00:00 UTC) and the spend starts again near 0: the critical
+  # resolves 30 minutes later.
+  - interval: 1m
+    input_series:
+      - series: 'dmc_llm_monthly_budget_usd{instance="node-exporter:9100", job="node"}'
+        values: "50x40"
+      - series: 'dmc_llm_cost_month_usd{environment="staging"}'
+        values: "55x5 0.5x35"
+    alert_rule_test:
+      - eval_time: 35m30s
+        alertname: LlmMonthlyBudgetExceeded
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+            exp_annotations:
+              summary: "LLM spend this month: 55.00 USD, 110.00% of the monthly budget"
+              description: "Spend in usage_events since the 1st of the month (UTC) has reached LLM_MONTHLY_BUDGET_USD; the alert pauses no reviews, they keep spending."
+      - eval_time: 36m
+        alertname: LlmMonthlyBudgetExceeded
+        exp_alerts: []
+
+  # No budget is set: no threshold series, then a 0 written by hand. Both alerts stay silent.
+  - interval: 1m
+    input_series:
+      - series: 'dmc_llm_monthly_budget_usd{instance="node-exporter:9100", job="node"}'
+        values: "_x14 0x15"
+      - series: 'dmc_llm_cost_month_usd{environment="staging"}'
+        values: "500x30"
+    alert_rule_test:
+      - eval_time: 14m
+        alertname: LlmMonthlyBudgetWarning
+        exp_alerts: []
+      - eval_time: 14m
+        alertname: LlmMonthlyBudgetExceeded
+        exp_alerts: []
+      - eval_time: 30m
+        alertname: LlmMonthlyBudgetWarning
+        exp_alerts: []
+      - eval_time: 30m
+        alertname: LlmMonthlyBudgetExceeded
+        exp_alerts: []
+
+  # Runs skipped by the daily budget of a workspace: an event, gone 1 hour after the window
+  # empties.
+  - interval: 1m
+    input_series:
+      - series: 'dmc_runs_budget_paused_15m_runs'
+        values: "0 0 2x5 0x70"
+    alert_rule_test:
+      - eval_time: 1m
+        alertname: ReviewRunsBudgetPaused
+        exp_alerts: []
+      - eval_time: 2m
+        alertname: ReviewRunsBudgetPaused
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              kind: event
+            exp_annotations:
+              summary: "2 review run(s) skipped with budget_paused in the last 15 minutes"
+              description: "The daily budget left in a workspace is below the cost limit of a fast run, so its runs are skipped, not reviewed (docs/PIPELINE_SPEC.md §5.3, §6). The metric counts runs and names no workspace."
+      - eval_time: 7m
+        alertname: ReviewRunsBudgetPaused
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              kind: event
+            exp_annotations:
+              summary: "2 review run(s) skipped with budget_paused in the last 15 minutes"
+              description: "The daily budget left in a workspace is below the cost limit of a fast run, so its runs are skipped, not reviewed (docs/PIPELINE_SPEC.md §5.3, §6). The metric counts runs and names no workspace."
+      - eval_time: 67m30s
+        alertname: ReviewRunsBudgetPaused
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              kind: event
+            exp_annotations:
+              summary: "2 review run(s) skipped with budget_paused in the last 15 minutes"
+              description: "The daily budget left in a workspace is below the cost limit of a fast run, so its runs are skipped, not reviewed (docs/PIPELINE_SPEC.md §5.3, §6). The metric counts runs and names no workspace."
+      - eval_time: 68m
+        alertname: ReviewRunsBudgetPaused
+        exp_alerts: []
+
+  # A single skipped run is enough.
+  - interval: 1m
+    input_series:
+      - series: 'dmc_runs_budget_paused_15m_runs'
+        values: "0 1x5 0x70"
+    alert_rule_test:
+      - eval_time: 0m
+        alertname: ReviewRunsBudgetPaused
+        exp_alerts: []
+      - eval_time: 1m
+        alertname: ReviewRunsBudgetPaused
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              kind: event
+            exp_annotations:
+              summary: "1 review run(s) skipped with budget_paused in the last 15 minutes"
+              description: "The daily budget left in a workspace is below the cost limit of a fast run, so its runs are skipped, not reviewed (docs/PIPELINE_SPEC.md §5.3, §6). The metric counts runs and names no workspace."
+      - eval_time: 67m
+        alertname: ReviewRunsBudgetPaused
+        exp_alerts: []
+
+  # Pushes into a paused workspace every 20 minutes: the window empties between the skips, yet the
+  # alert stays firing (one message, not one per skip) and is gone 1 hour after the last skip
+  # leaves the window.
+  - interval: 1m
+    input_series:
+      - series: 'dmc_runs_budget_paused_15m_runs'
+        values: "1x14 0x4 1x14 0x4 1x14 0x65"
+    alert_rule_test:
+      - eval_time: 0m
+        alertname: ReviewRunsBudgetPaused
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              kind: event
+            exp_annotations:
+              summary: "1 review run(s) skipped with budget_paused in the last 15 minutes"
+              description: "The daily budget left in a workspace is below the cost limit of a fast run, so its runs are skipped, not reviewed (docs/PIPELINE_SPEC.md §5.3, §6). The metric counts runs and names no workspace."
+      - eval_time: 17m
+        alertname: ReviewRunsBudgetPaused
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              kind: event
+            exp_annotations:
+              summary: "1 review run(s) skipped with budget_paused in the last 15 minutes"
+              description: "The daily budget left in a workspace is below the cost limit of a fast run, so its runs are skipped, not reviewed (docs/PIPELINE_SPEC.md §5.3, §6). The metric counts runs and names no workspace."
+      - eval_time: 37m
+        alertname: ReviewRunsBudgetPaused
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              kind: event
+            exp_annotations:
+              summary: "1 review run(s) skipped with budget_paused in the last 15 minutes"
+              description: "The daily budget left in a workspace is below the cost limit of a fast run, so its runs are skipped, not reviewed (docs/PIPELINE_SPEC.md §5.3, §6). The metric counts runs and names no workspace."
+      - eval_time: 114m30s
+        alertname: ReviewRunsBudgetPaused
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              kind: event
+            exp_annotations:
+              summary: "1 review run(s) skipped with budget_paused in the last 15 minutes"
+              description: "The daily budget left in a workspace is below the cost limit of a fast run, so its runs are skipped, not reviewed (docs/PIPELINE_SPEC.md §5.3, §6). The metric counts runs and names no workspace."
+      - eval_time: 115m
+        alertname: ReviewRunsBudgetPaused
+        exp_alerts: []
+
   # 5xx share per host, with a minimum of traffic; the metrics endpoint of Caddy (host _other) and
   # other hosts do not count.
   - interval: 1m

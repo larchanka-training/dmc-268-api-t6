@@ -21,6 +21,9 @@
 #                              keep the one in .env (generated on a fresh host, or an earlier secret)
 #   ALERT_TELEGRAM_BOT_TOKEN   } both set: alerts go to that Telegram chat; both empty: alerts are
 #   ALERT_TELEGRAM_CHAT_ID     } not delivered; unset: keep the previous alert config (manual run)
+#   LLM_MONTHLY_BUDGET_USD     monthly LLM budget in US dollars for the budget alerts, written for
+#                              node-exporter as dmc_llm_monthly_budget_usd; empty or 0: no budget,
+#                              the budget alerts are silent; unset: keep the previous one (manual run)
 #   BACKUP_S3_ENDPOINT, BACKUP_S3_BUCKET, BACKUP_S3_ACCESS_KEY_ID, BACKUP_S3_SECRET_ACCESS_KEY,
 #   BACKUP_ENCRYPTION_PASSPHRASE
 #                              all set: encrypted off-host copy of the dumps (compose.offsite.yml);
@@ -187,6 +190,21 @@ if [[ -n "${ALERT_TELEGRAM_BOT_TOKEN+set}" || -n "${ALERT_TELEGRAM_CHAT_ID+set}"
 fi
 unset ALERT_TELEGRAM_BOT_TOKEN
 
+# Monthly LLM budget, validated before anything on the host changes: it goes verbatim into a metrics
+# file, so dollars with at most two decimals and nothing else. Digits are listed, not ranges: under a
+# UTF-8 locale [0-9] matches other digits too.
+BUDGET_CONFIGURED=keep
+if [[ -n "${LLM_MONTHLY_BUDGET_USD+set}" ]]; then
+  if [[ -z "${LLM_MONTHLY_BUDGET_USD}" || "${LLM_MONTHLY_BUDGET_USD}" =~ ^0(\.0{1,2})?$ ]]; then
+    BUDGET_CONFIGURED=none
+  elif [[ "${LLM_MONTHLY_BUDGET_USD}" =~ ^(0|[123456789][0123456789]*)(\.[0123456789]{1,2})?$ ]]; then
+    BUDGET_CONFIGURED=threshold
+  else
+    echo "LLM_MONTHLY_BUDGET_USD must be a number of US dollars with at most two decimals, like 250 or 250.50" >&2
+    exit 1
+  fi
+fi
+
 # Off-host backup copy (docs/MONITORING.md §9), validated before anything on the host changes.
 OFFSITE_KEYS=(BACKUP_S3_ENDPOINT BACKUP_S3_BUCKET BACKUP_S3_ACCESS_KEY_ID BACKUP_S3_SECRET_ACCESS_KEY
   BACKUP_ENCRYPTION_PASSPHRASE)
@@ -332,6 +350,8 @@ GRANT SELECT (id, state, trigger, engine, attempt, error_code, available_at, cre
 GRANT SELECT (run_id, tool, started_at, duration_ms) ON run_actions TO grafana_reader, metrics_exporter;
 GRANT SELECT (provider, model, operation, tokens_in, tokens_out, cache_read_tokens, cost_usd, created_at)
   ON usage_events TO grafana_reader;
+-- postgres-exporter: the month-to-date LLM cost only, without the provider, model or tokens.
+GRANT SELECT (cost_usd, created_at) ON usage_events TO metrics_exporter;
 -- pg-backup: reads everything for pg_dump; CREATEDB only for the scratch database of the restore
 -- check, which it creates, owns and drops. No superuser, no write access to the application data.
 ALTER ROLE backup_agent WITH LOGIN NOSUPERUSER CREATEDB NOCREATEROLE NOREPLICATION CONNECTION LIMIT 3;
@@ -351,14 +371,41 @@ then
 fi
 
 umask 077
+TEXTFILE_DIR="${TEXTFILE_DIR:-${MONITORING_DIR}/textfile}"
 mkdir -p "${MONITORING_DIR}/alertmanager/secrets" "${MONITORING_DIR}/prometheus/targets" \
-  "${MONITORING_DIR}/textfile"
+  "${TEXTFILE_DIR}"
 # pg-backup writes its metrics here; node-exporter (nobody) reads them.
-chown "${POSTGRES_IMAGE_UID}:${POSTGRES_IMAGE_UID}" "${MONITORING_DIR}/textfile"
-chmod 755 "${MONITORING_DIR}/textfile"
+chown "${POSTGRES_IMAGE_UID}:${POSTGRES_IMAGE_UID}" "${TEXTFILE_DIR}"
+chmod 755 "${TEXTFILE_DIR}"
 mkdir -p "${BACKUP_DIR}"
 chown "${POSTGRES_IMAGE_UID}:${POSTGRES_IMAGE_UID}" "${BACKUP_DIR}"
 chmod 700 "${BACKUP_DIR}"
+
+# The threshold of the budget alerts, read by node-exporter: without the file they stay silent.
+# pg-backup writes the textfile dir too, so the file is prepared in this root-owned dir and renamed
+# over whatever is there (-T: a link to a dir is replaced, not entered); nothing there is followed.
+BUDGET_FILE="${TEXTFILE_DIR}/llm_budget.prom"
+case "${BUDGET_CONFIGURED}" in
+  threshold)
+    budget_tmp="$(mktemp "${MONITORING_DIR}/.llm_budget.XXXXXX")"
+    # Until the file is in place; the trap of the token file below replaces this one.
+    trap 'rm -f "${budget_tmp}"' EXIT
+    {
+      echo "# HELP dmc_llm_monthly_budget_usd Monthly LLM budget in US dollars (LLM_MONTHLY_BUDGET_USD of the monitoring deploy)."
+      echo "# TYPE dmc_llm_monthly_budget_usd gauge"
+      echo "dmc_llm_monthly_budget_usd ${LLM_MONTHLY_BUDGET_USD}"
+    } > "${budget_tmp}"
+    chmod 644 "${budget_tmp}"
+    mv -fT "${budget_tmp}" "${BUDGET_FILE}"
+    echo "budget: monthly LLM budget of ${LLM_MONTHLY_BUDGET_USD} USD"
+    ;;
+  none)
+    rm -f "${BUDGET_FILE}"
+    ;;
+esac
+if [[ ! -f "${BUDGET_FILE}" ]]; then
+  echo "budget: LLM_MONTHLY_BUDGET_USD is not set; budget alerts are silent" >&2
+fi
 
 TOKEN_FILE="${MONITORING_DIR}/alertmanager/secrets/telegram_bot_token"
 AM_CONFIG="${MONITORING_DIR}/alertmanager/alertmanager.yml"
@@ -440,7 +487,7 @@ find "${MONITORING_DIR}/prometheus" "${MONITORING_DIR}/grafana" "${MONITORING_DI
   printf 'GRAFANA_ROOT_URL=%s\n' "$(escape_compose_value "${GRAFANA_ROOT_URL}")"
   printf 'GRAFANA_COOKIE_SECURE=%s\n' "${GRAFANA_COOKIE_SECURE}"
   printf 'GRAFANA_ALIAS=%s\n' "$(escape_compose_value "${GRAFANA_ALIAS}")"
-  printf 'TEXTFILE_DIR=%s\n' "$(escape_compose_value "${TEXTFILE_DIR:-${MONITORING_DIR}/textfile}")"
+  printf 'TEXTFILE_DIR=%s\n' "$(escape_compose_value "${TEXTFILE_DIR}")"
   printf 'PROBE_PROD_HOSTS=%s\n' "${PROBE_PROD_HOSTS}"
   printf 'PROMETHEUS_CONFIG_DIGEST=%s\n' "$(config_digest prometheus)"
   printf 'ALERTMANAGER_CONFIG_DIGEST=%s\n' "$(config_digest alertmanager)"
