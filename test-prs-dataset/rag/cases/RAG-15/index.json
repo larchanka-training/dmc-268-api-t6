@@ -1,0 +1,75 @@
+{
+  "schema_version": 1,
+  "indexed_commit_sha": "69a4ffba7d04652a4c10da0a250ed8fbfac00f89",
+  "extractor": {
+    "limits_version": "limits/v1:fdf4e4d96f1a13a708d0af7b941297dc",
+    "parser_profile": "39409961245fa4d8e7284fe26c974a79dea7225e088d7bdbbd17c83384e1271a",
+    "exclusions_version": "index-exclusions/v2"
+  },
+  "file_count": 6,
+  "symbol_count": 6,
+  "files": [
+    {
+      "path": "src/bookings.ts",
+      "blob_sha": "d2faa86c396a91d0bdeed2457346cad374a079ff"
+    },
+    {
+      "path": "src/deposits.ts",
+      "blob_sha": "2769885aec26fa2df48011fab1fcf256abc94ca1"
+    },
+    {
+      "path": "src/format.ts",
+      "blob_sha": "c1e4375560c39f1fb37107137b77f8c6fece03ea"
+    },
+    {
+      "path": "src/money.ts",
+      "blob_sha": "21dbec882c5c13e69aa1037813fc626b5d8f0267"
+    },
+    {
+      "path": "src/schedule.ts",
+      "blob_sha": "0950089bcf749933b936fe2976b9f43ce334b021"
+    },
+    {
+      "path": "src/types.ts",
+      "blob_sha": "720bbae7b2838286e123a531084218a4051bf6dc"
+    }
+  ],
+  "edges": [
+    {
+      "path": "src/bookings.ts",
+      "kind": "imports",
+      "target_path": "src/types.ts",
+      "target_name": ""
+    },
+    {
+      "path": "src/bookings.ts",
+      "kind": "uses_imported",
+      "target_path": "src/types.ts",
+      "target_name": "Booking"
+    },
+    {
+      "path": "src/deposits.ts",
+      "kind": "imports",
+      "target_path": "src/bookings.ts",
+      "target_name": ""
+    },
+    {
+      "path": "src/deposits.ts",
+      "kind": "imports",
+      "target_path": "src/types.ts",
+      "target_name": ""
+    },
+    {
+      "path": "src/deposits.ts",
+      "kind": "uses_imported",
+      "target_path": "src/bookings.ts",
+      "target_name": "totalCents"
+    },
+    {
+      "path": "src/deposits.ts",
+      "kind": "uses_imported",
+      "target_path": "src/types.ts",
+      "target_name": "Booking"
+    }
+  ]
+}

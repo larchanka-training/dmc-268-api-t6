@@ -1,0 +1,85 @@
+{
+  "schema_version": 1,
+  "indexed_commit_sha": "4d3d0701c1515b4886d80f0fc1dce441675bcfd4",
+  "extractor": {
+    "limits_version": "limits/v1:fdf4e4d96f1a13a708d0af7b941297dc",
+    "parser_profile": "39409961245fa4d8e7284fe26c974a79dea7225e088d7bdbbd17c83384e1271a",
+    "exclusions_version": "index-exclusions/v2"
+  },
+  "file_count": 7,
+  "symbol_count": 11,
+  "files": [
+    {
+      "path": "erasure/__init__.py",
+      "blob_sha": "2df279ab8fc6be5af370c01a0510426454ae2306"
+    },
+    {
+      "path": "erasure/accounts.py",
+      "blob_sha": "a6d4c09299eaf2d21247189207268d85bc79bfb4"
+    },
+    {
+      "path": "erasure/audit.py",
+      "blob_sha": "586aac3ebb4012606d19261dd227b48ce4599274"
+    },
+    {
+      "path": "erasure/intake.py",
+      "blob_sha": "93b62bae07f85e0f379717331d7095893cfe36c6"
+    },
+    {
+      "path": "erasure/purge.py",
+      "blob_sha": "9bfb951986c41aed1263e68872e46c2545ecc68b"
+    },
+    {
+      "path": "erasure/requests.py",
+      "blob_sha": "ded698341be57b4fe4f00228f91b9e479122a756"
+    },
+    {
+      "path": "erasure/rows.py",
+      "blob_sha": "57df71ae75de2bc03794616ae6fb2a8543be2a25"
+    }
+  ],
+  "edges": [
+    {
+      "path": "erasure/intake.py",
+      "kind": "imports",
+      "target_path": "erasure/requests.py",
+      "target_name": ""
+    },
+    {
+      "path": "erasure/intake.py",
+      "kind": "uses_imported",
+      "target_path": "erasure/requests.py",
+      "target_name": "log_request"
+    },
+    {
+      "path": "erasure/purge.py",
+      "kind": "imports",
+      "target_path": "erasure/rows.py",
+      "target_name": ""
+    },
+    {
+      "path": "erasure/purge.py",
+      "kind": "uses_imported",
+      "target_path": "erasure/rows.py",
+      "target_name": "drop_rows"
+    },
+    {
+      "path": "erasure/purge.py",
+      "kind": "uses_imported",
+      "target_path": "erasure/rows.py",
+      "target_name": "rows_of"
+    },
+    {
+      "path": "erasure/requests.py",
+      "kind": "imports",
+      "target_path": "erasure/audit.py",
+      "target_name": ""
+    },
+    {
+      "path": "erasure/requests.py",
+      "kind": "uses_imported",
+      "target_path": "erasure/audit.py",
+      "target_name": "record"
+    }
+  ]
+}

@@ -1,0 +1,18 @@
+diff --git a/src/deposits.ts b/src/deposits.ts
+index 2769885..9ea975e 100644
+--- a/src/deposits.ts
++++ b/src/deposits.ts
+@@ -1,6 +1,13 @@
+ import { totalCents } from "./bookings";
++import { toCents } from "./money";
+ import type { Booking } from "./types";
+ 
+ export function balanceCents(booking: Booking, paidCents: number): number {
+   return totalCents(booking) - paidCents;
+ }
++
++export function depositCents(booking: Booking, percent: number): number {
++  const share = totalCents(booking) * (percent / 100);
++  const rounded = Math.round(share);
++  return toCents(rounded);
++}

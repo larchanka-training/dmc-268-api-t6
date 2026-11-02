@@ -1,0 +1,75 @@
+{
+  "schema_version": 1,
+  "indexed_commit_sha": "3ffb7faffd6ac0670b85532d1d326f891e6eb412",
+  "extractor": {
+    "limits_version": "limits/v1:fdf4e4d96f1a13a708d0af7b941297dc",
+    "parser_profile": "39409961245fa4d8e7284fe26c974a79dea7225e088d7bdbbd17c83384e1271a",
+    "exclusions_version": "index-exclusions/v2"
+  },
+  "file_count": 6,
+  "symbol_count": 7,
+  "files": [
+    {
+      "path": "pulse/__init__.py",
+      "blob_sha": "561c3bd9545a2049b4797e2cd3d652abf47e1641"
+    },
+    {
+      "path": "pulse/badges.py",
+      "blob_sha": "2c4f571374b175b0f7f7591019a2c7ddbb9dd342"
+    },
+    {
+      "path": "pulse/digest.py",
+      "blob_sha": "0e8472f7c79c754f45461a2e7109a0111360a627"
+    },
+    {
+      "path": "pulse/events.py",
+      "blob_sha": "69d1dcdb6753315f272cc040c0223cc201c41a94"
+    },
+    {
+      "path": "pulse/feed.py",
+      "blob_sha": "5c58915c3aaf802b89426ec74d42748bd4569f54"
+    },
+    {
+      "path": "pulse/labels.py",
+      "blob_sha": "e7b1f4deabf24c94b7b73c0f04b7b4d699400a42"
+    }
+  ],
+  "edges": [
+    {
+      "path": "pulse/digest.py",
+      "kind": "imports",
+      "target_path": "pulse/feed.py",
+      "target_name": ""
+    },
+    {
+      "path": "pulse/digest.py",
+      "kind": "imports",
+      "target_path": "pulse/labels.py",
+      "target_name": ""
+    },
+    {
+      "path": "pulse/digest.py",
+      "kind": "uses_imported",
+      "target_path": "pulse/feed.py",
+      "target_name": "recent"
+    },
+    {
+      "path": "pulse/digest.py",
+      "kind": "uses_imported",
+      "target_path": "pulse/labels.py",
+      "target_name": "kind_label"
+    },
+    {
+      "path": "pulse/feed.py",
+      "kind": "imports",
+      "target_path": "pulse/events.py",
+      "target_name": ""
+    },
+    {
+      "path": "pulse/feed.py",
+      "kind": "uses_imported",
+      "target_path": "pulse/events.py",
+      "target_name": "Event"
+    }
+  ]
+}

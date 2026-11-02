@@ -1,0 +1,51 @@
+{
+  "schema_version": 1,
+  "indexed_commit_sha": "196be6c37a0427dce26774f19af46fbcbd85034f",
+  "extractor": {
+    "limits_version": "limits/v1:fdf4e4d96f1a13a708d0af7b941297dc",
+    "parser_profile": "39409961245fa4d8e7284fe26c974a79dea7225e088d7bdbbd17c83384e1271a",
+    "exclusions_version": "index-exclusions/v2"
+  },
+  "file_count": 6,
+  "symbol_count": 8,
+  "files": [
+    {
+      "path": "fxdesk/__init__.py",
+      "blob_sha": "885bcd793fee190315a3eba2f9c11badbd13e7ce"
+    },
+    {
+      "path": "fxdesk/limits.py",
+      "blob_sha": "a7f3d13d7370531ba6d09dc43a78004785dfd055"
+    },
+    {
+      "path": "fxdesk/money.py",
+      "blob_sha": "3c5e63f321d5a282e9ed3513453f1e6f70f9dec5"
+    },
+    {
+      "path": "fxdesk/pairs.py",
+      "blob_sha": "b0e39fb32b5eb38f2655d6b311a4066ca59fdd44"
+    },
+    {
+      "path": "fxdesk/quotes.py",
+      "blob_sha": "6ac7ea8f8fcbd801a24415cc46d3ff78fda87aa3"
+    },
+    {
+      "path": "fxdesk/rates.py",
+      "blob_sha": "07d3ed2e0e5ba3961e824f3c1e44c9e2c7670f6a"
+    }
+  ],
+  "edges": [
+    {
+      "path": "fxdesk/quotes.py",
+      "kind": "imports",
+      "target_path": "fxdesk/money.py",
+      "target_name": ""
+    },
+    {
+      "path": "fxdesk/quotes.py",
+      "kind": "uses_imported",
+      "target_path": "fxdesk/money.py",
+      "target_name": "format_cents"
+    }
+  ]
+}

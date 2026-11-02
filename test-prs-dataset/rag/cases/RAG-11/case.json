@@ -1,0 +1,31 @@
+{
+  "id": "RAG-11",
+  "class": "rag",
+  "language": "python",
+  "source": {
+    "kind": "synthetic",
+    "attribution": "Synthetic, authored for api#146 (graph-RAG v1 eval)"
+  },
+  "base_path": "base",
+  "patch_path": "diff.patch",
+  "expected_verdict": "blocking",
+  "expected_findings": [
+    {
+      "path": "erasure/requests.py",
+      "start_line": null,
+      "line": 15,
+      "severity": "critical",
+      "category": "correctness"
+    }
+  ],
+  "rag": {
+    "kind": "control",
+    "expected_retrieved": [
+      "erasure/intake.py"
+    ],
+    "absent_from_context": [],
+    "l4_definitions": [
+      "erasure/purge.py"
+    ]
+  }
+}
