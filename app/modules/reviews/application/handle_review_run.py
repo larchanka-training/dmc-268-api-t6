@@ -597,21 +597,15 @@ async def update_check_run(
     gateway: CheckRunGateway | None,
     run_id: UUID,
     run_url: Callable[[UUID], str | None],
-    *,
-    review_event: str | None = None,
 ) -> None:
-    """Show the current Run state on its check-run; a GitHub error never changes the Run (§5.2).
-
-    ``review_event`` is the event the publisher posted this Run's review with; it is
-    never re-read from the repository settings, which may have changed since (§7).
-    """
+    """Show the current Run state on its check-run; a GitHub error never changes the Run (§5.2)."""
     if gateway is None:
         return
     async with uow_factory() as uow:
         report = await uow.runs.check_run_report(run_id)
     if report is None or report.provider != "github":
         return
-    report = replace(report, run_url=run_url(run_id), review_event=review_event)
+    report = replace(report, run_url=run_url(run_id))
 
     async def checkpoint() -> None:
         async with uow_factory() as uow:

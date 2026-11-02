@@ -53,6 +53,7 @@ from app.modules.reviews.infrastructure.models import (
     ContextPayload,
     Finding,
     Run,
+    RunAction,
 )
 from app.modules.reviews.infrastructure.publication_findings import published_finding_from_row
 from app.modules.reviews.infrastructure.run_action_records import insert_run_action
@@ -496,7 +497,27 @@ class SqlAlchemyRunLifecycleStore:
             summary_only=bool(summary_only),
             summary_reason=summary_only_reason_of(context_summary),
             provider=installation.provider,
+            review_event=await self._published_review_event(run_id),
         )
+
+    async def _published_review_event(self, run_id: UUID) -> str | None:
+        """The event GitHub accepted this Run's review with, from its publication trace (§7).
+
+        Read back from ``run_actions`` so every re-render, RunGuard's included, shows the
+        review that was posted, never the repository setting as it is now.
+        """
+        request = await self._session.scalar(
+            select(RunAction.request)
+            .where(
+                RunAction.run_id == run_id,
+                RunAction.tool == "github.publish_review",
+                RunAction.response.has_key("github_review_id"),
+            )
+            .order_by(RunAction.index.desc())
+            .limit(1)
+        )
+        event = None if request is None else request.get("review_event")
+        return event if isinstance(event, str) else None
 
     async def _publish_pointer(self, run: Run, repository: Repository) -> ReviewPublishPointer:
         findings = await self._published_findings(run.id)
