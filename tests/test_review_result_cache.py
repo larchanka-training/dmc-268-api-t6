@@ -41,7 +41,6 @@ from app.modules.reviews.application.execute_review import (
     ReviewPromptInput,
     ReviewReply,
 )
-from app.modules.reviews.application.get_run_file_lines import BLOB_CACHE_TTL
 from app.modules.reviews.application.handle_review_run import (
     ClaimedAttempt,
     DeliveryOutcome,
@@ -82,7 +81,7 @@ from app.modules.reviews.application.review_result_cache import (
     ReviewResultOperation,
     review_result_cache_key,
 )
-from app.modules.reviews.infrastructure.llm.answers import InvalidAnswer
+from app.modules.reviews.infrastructure.llm.answers import InvalidAnswer, verifier_output_schema
 from app.modules.reviews.infrastructure.llm.gateway import (
     GatewayResult,
     LlmGateway,
@@ -125,6 +124,7 @@ _REPO_A = UUID("11111111-1111-1111-1111-111111111111")
 _REPO_B = UUID("22222222-2222-2222-2222-222222222222")
 _MODEL = ReviewResultModel(provider="openai", model_id="gpt-test")
 _RENDERED_LITERAL = "a" * 64
+_OPTIONS_LITERAL = "b" * 64
 
 # Hand-written canonical JSON: sorted keys, compact separators, raw UTF-8.
 _EXACT_CANONICAL_JSON = (
@@ -133,7 +133,8 @@ _EXACT_CANONICAL_JSON = (
     '"output_schema_version":"review-output.schema.v2","profile_version":"profile-v1",'
     '"prompt_version":"ревью-v1",'
     '"rendered_input_digest":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",'
-    '"repository_id":"11111111-1111-1111-1111-111111111111"}'
+    '"repository_id":"11111111-1111-1111-1111-111111111111",'
+    '"request_options_digest":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}'
 )
 
 
@@ -155,6 +156,7 @@ def _identity(
     prompt_version: str = "prompt-v1",
     output_schema_version: str = "review-output.schema.v2",
     profile_version: str = "profile-v1",
+    request_options_digest: str = "c" * 64,
 ) -> ReviewResultIdentity:
     return ReviewResultIdentity(
         operation=operation,
@@ -164,6 +166,7 @@ def _identity(
         output_schema_version=output_schema_version,
         profile_version=profile_version,
         rendered_input_digest=rendered,
+        request_options_digest=request_options_digest,
     )
 
 
@@ -205,13 +208,18 @@ def test_key_misses_when_model_prompt_schema_or_profile_changes() -> None:
         _identity(rendered, output_schema_version="verifier-output.schema.v1")
     )
     profile_key = review_result_cache_key(_identity(rendered, profile_version="profile-v2"))
+    options_key = review_result_cache_key(_identity(rendered, request_options_digest="d" * 64))
 
     assert model_key != base_key
     assert provider_key != base_key
     assert prompt_key != base_key
     assert schema_key != base_key
     assert profile_key != base_key
-    assert len({base_key, model_key, provider_key, prompt_key, schema_key, profile_key}) == 6
+    assert options_key != base_key
+    assert (
+        len({base_key, model_key, provider_key, prompt_key, schema_key, profile_key, options_key})
+        == 7
+    )
 
 
 def test_same_input_in_two_repositories_does_not_share_a_key() -> None:
@@ -228,6 +236,7 @@ def test_same_input_in_two_repositories_does_not_share_a_key() -> None:
         _identity(
             _RENDERED_LITERAL,
             prompt_version="ревью-v1",
+            request_options_digest=_OPTIONS_LITERAL,
         )
     )
     expected = "review-result:" + sha256(_EXACT_CANONICAL_JSON.encode("utf-8")).hexdigest()
@@ -283,9 +292,7 @@ def test_entry_round_trips_with_blob_cache_ttl() -> None:
     asyncio.run(scenario())
     assert set(redis.values) == {key}
     recorded = redis.lifetimes[key]
-    assert isinstance(recorded, int)
-    assert recorded == int(BLOB_CACHE_TTL.total_seconds())
-    assert timedelta(seconds=recorded) <= BLOB_CACHE_TTL
+    assert recorded == 604800
 
 
 def test_miss_unavailable_redis_and_corrupt_entry_return_none(
@@ -875,16 +882,37 @@ class _Trace(InMemoryLlmCallTrace):
         await super().record_call(run_id, record)
 
     async def record_result_cache_hit(
-        self, run_id: UUID, operation: str, *, started_at: datetime
+        self,
+        run_id: UUID,
+        operation: str,
+        *,
+        started_at: datetime,
+        source_run_id: UUID,
+        source_call_id: UUID | None,
+        source_manifest_id: UUID | None,
     ) -> None:
         if self.log is not None:
             self.log.append("llm.result_cache")
-        await super().record_result_cache_hit(run_id, operation, started_at=started_at)
+        await super().record_result_cache_hit(
+            run_id,
+            operation,
+            started_at=started_at,
+            source_run_id=source_run_id,
+            source_call_id=source_call_id,
+            source_manifest_id=source_manifest_id,
+        )
 
 
 class _FailingHitTrace(InMemoryLlmCallTrace):
     async def record_result_cache_hit(
-        self, run_id: UUID, operation: str, *, started_at: datetime
+        self,
+        run_id: UUID,
+        operation: str,
+        *,
+        started_at: datetime,
+        source_run_id: UUID,
+        source_call_id: UUID | None,
+        source_manifest_id: UUID | None,
     ) -> None:
         raise RuntimeError("trace down")
 
@@ -915,6 +943,7 @@ class _Spec:
     operation: str = "review"
     route: Literal["review", "verifier"] = "review"
     verifier_model: str | None = None
+    extra_body: Mapping[str, object] = field(default_factory=dict)
 
 
 @dataclass
@@ -965,6 +994,7 @@ def _model(name: str, spec: _Spec) -> ModelProfile:
         price=price,
         chars_per_token=spec.chars_per_token,
         api_keys=("sk-test",),
+        extra_body=spec.extra_body,
     )
 
 
@@ -1078,6 +1108,7 @@ def test_each_key_part_is_a_miss_and_a_normal_call() -> None:
     _assert_miss(legacy, replace(legacy, context_window=50_000))
     _assert_miss(legacy, replace(legacy, max_output_tokens=2_000))
     _assert_miss(legacy, replace(legacy, provider="other-provider"))
+    _assert_miss(legacy, replace(legacy, extra_body={"reasoning": {"effort": "low"}}))
     _assert_miss(legacy, replace(legacy, repository_id=_REPO_B))
     # Price is not one of the profile fields that change the call.
     _assert_hit(legacy, replace(legacy, expensive=True))
@@ -1088,9 +1119,12 @@ def test_each_key_part_is_a_miss_and_a_normal_call() -> None:
     _assert_hit(
         pinned, replace(pinned, prompt_version_id=_PROMPT_B, snapshot=_cache_snapshot(_REPO_A))
     )
-    # The review schema version is the pinned profile field, not StructuredTask.schema.
-    _assert_hit(
+    # The name sent in response_format is part of the request body, not the pinned label.
+    _assert_miss(
         pinned, replace(pinned, schema_name="IgnoredName", snapshot=_cache_snapshot(_REPO_A))
+    )
+    _assert_miss(
+        pinned, replace(pinned, max_output_tokens=2_000, snapshot=_cache_snapshot(_REPO_A))
     )
     _assert_miss(pinned, replace(pinned, messages=_with_message(2, "other code")))
     _assert_miss(pinned, replace(pinned, model="other-model"))
@@ -1112,7 +1146,7 @@ def test_each_key_part_is_a_miss_and_a_normal_call() -> None:
         verifier_model="verifier-model",
     )
     _assert_hit(verifier, replace(verifier, snapshot=_cache_snapshot(_REPO_A)))
-    _assert_hit(
+    _assert_miss(
         verifier, replace(verifier, schema_name="OtherSchema", snapshot=_cache_snapshot(_REPO_A))
     )
     # response_schema_version is inside the pinned profile digest, so the verifier misses
@@ -1128,6 +1162,84 @@ def test_each_key_part_is_a_miss_and_a_normal_call() -> None:
         replace(verifier, snapshot=_cache_snapshot(_REPO_A, verifier_checksum="other-verifier")),
     )
     _assert_miss(verifier, replace(verifier, messages=_with_message(1, "other policy")))
+
+
+def test_verifier_schema_id_is_its_own_key_part(monkeypatch: pytest.MonkeyPatch) -> None:
+    asyncio.run(_verifier_schema_id_miss(monkeypatch))
+
+
+async def _verifier_schema_id_miss(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Only the verifier document ``$id`` changes. The provider schema name does not."""
+    spec = _Spec(
+        repository_id=_REPO_A,
+        snapshot=_cache_snapshot(_REPO_A),
+        operation="verification",
+        route="verifier",
+        verifier_model="verifier-model",
+    )
+    rig = _Rig()
+    rig.transport.answers.extend(['{"n": 1}', '{"n": 2}'])
+    document = verifier_output_schema()
+    first = await rig.gateway(spec).generate(_task(spec), _context(spec))
+
+    def shifted() -> dict[str, Any]:
+        copied = dict(document)
+        copied["$id"] = "https://example.test/verifier-output/v9"
+        return copied
+
+    monkeypatch.setattr(
+        "app.modules.reviews.infrastructure.llm.gateway.verifier_output_schema",
+        shifted,
+    )
+    second = await rig.gateway(spec).generate(_task(spec), _context(spec))
+    assert first.output == {"n": 1}
+    assert second.output == {"n": 2}
+    assert len(rig.transport.requests) == 2
+
+
+def test_cached_verifier_answer_that_fails_the_manifest_check_calls_the_model(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.WARNING)
+    asyncio.run(_manifest_check_is_a_miss())
+    assert "review result cache entry rejected error_type=manifest_check" in caplog.text
+
+
+async def _manifest_check_is_a_miss() -> None:
+    spec = _Spec(
+        repository_id=_REPO_A,
+        operation="verification",
+        route="verifier",
+        verifier_model="verifier-model",
+    )
+    rig = _Rig()
+    rig.transport.answers.extend(['{"n": 1}', '{"n": 2}'])
+    base = CallManifest(call_id=uuid4(), stage="verification", blocks=())
+
+    def accept(_output: dict[str, object], _manifest: CallManifest) -> list[str]:
+        return []
+
+    def reject_one(output: dict[str, object], _manifest: CallManifest) -> list[str]:
+        if output.get("n") == 1:
+            return ["n must not be 1"]
+        return []
+
+    await rig.gateway(spec).generate(
+        replace(_task(spec), base_manifest=base, check_answer=accept),
+        _context(spec),
+    )
+    second = await rig.gateway(spec).generate(
+        replace(
+            _task(spec),
+            base_manifest=replace(base, call_id=uuid4()),
+            check_answer=reject_one,
+        ),
+        _context(spec),
+    )
+    assert second.output == {"n": 2}
+    assert second.calls == 1
+    assert len(rig.transport.requests) == 2
+    assert len(rig.ledger.events) == 2
 
 
 def test_two_repositories_do_not_share_a_cached_answer() -> None:
@@ -1437,8 +1549,9 @@ async def _rerun_review_and_verifier() -> None:
     assert review.last_result is not None
     assert review.last_result.calls == 0
     assert review.last_result.usage == ()
+    assert review.last_result.accepted_call_id == first_review.manifest.call_id
     assert review.last_result.accepted_manifest == second_review.manifest
-    assert review.last_result.accepted_manifest_id is None
+    assert review.last_result.accepted_manifest_id is not None
     assert len(transport.requests) == 1
     assert len(ledger.events) == 1
     assert manifests.writes == 1
@@ -1481,15 +1594,25 @@ async def _rerun_review_and_verifier() -> None:
     assert isinstance(second_pass.output, dict)
     decisions = cast(list[dict[str, Any]], second_pass.output["decisions"])
     assert [item["candidate_id"] for item in decisions] == ids_b
-    assert second_pass.accepted_call_id == manifest_b.call_id
-    assert second_pass.manifest_id is None
+    assert second_pass.accepted_call_id == first_pass.accepted_call_id == manifest_a.call_id
+    assert second_pass.manifest_id == first_pass.manifest_id
+    assert second_pass.manifest_id is not None
     assert len(transport.requests) == 2
     assert len(ledger.events) == 2
     assert manifests.writes == 2
     assert len(trace.records) == 2
     assert [action[1] for action in trace.actions] == ["llm.result_cache", "llm.result_cache"]
-    assert trace.actions[0][2:] == ({"operation": "review", "cache": "hit"}, {})
-    assert trace.actions[1][2:] == ({"operation": "verification", "cache": "hit"}, {})
+    review_hit, verifier_hit = trace.actions[0][2], trace.actions[1][2]
+    assert review_hit["operation"] == "review"
+    assert review_hit["cache"] == "hit"
+    assert review_hit["source_run_id"] == str(_CACHE_RUN)
+    assert review_hit["source_call_id"] == str(first_review.manifest.call_id)
+    assert review_hit["source_manifest_id"] == str(review.last_result.accepted_manifest_id)
+    assert verifier_hit["operation"] == "verification"
+    assert verifier_hit["source_call_id"] == str(manifest_a.call_id)
+    assert verifier_hit["source_manifest_id"] == str(first_pass.manifest_id)
+    assert trace.actions[0][3] == {}
+    assert trace.actions[1][3] == {}
 
     ledger.blocked = True
     third_review = await review.draft_review(context=context)

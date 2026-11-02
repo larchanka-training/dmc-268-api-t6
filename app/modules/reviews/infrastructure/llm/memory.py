@@ -38,8 +38,25 @@ class InMemoryLlmCallTrace:
         self.records.append((run_id, record))
 
     async def record_result_cache_hit(
-        self, run_id: UUID, operation: str, *, started_at: datetime
+        self,
+        run_id: UUID,
+        operation: str,
+        *,
+        started_at: datetime,
+        source_run_id: UUID,
+        source_call_id: UUID | None,
+        source_manifest_id: UUID | None,
     ) -> None:
         self.actions.append(
-            (run_id, LLM_RESULT_CACHE_TOOL, result_cache_hit_request(operation), {})
+            (
+                run_id,
+                LLM_RESULT_CACHE_TOOL,
+                result_cache_hit_request(
+                    operation,
+                    source_run_id=source_run_id,
+                    source_call_id=source_call_id,
+                    source_manifest_id=source_manifest_id,
+                ),
+                {},
+            )
         )
