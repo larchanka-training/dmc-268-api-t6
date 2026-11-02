@@ -177,7 +177,7 @@ class BitbucketRepositoryTree:
         endpoint = f"/2.0/repositories/%7B%7D/%7B{repository}%7D/{suffix}"
         entries: list[BitbucketTreeEntry] = []
         total: int | None = None
-        params = {"pagelen": str(_PAGE_SIZE), "page": "1"}
+        params = {"pagelen": str(_PAGE_SIZE)}
         seen_params: set[tuple[tuple[str, str], ...]] = set()
         for _ in range(_MAX_PAGES):
             page_key = tuple(sorted(params.items()))

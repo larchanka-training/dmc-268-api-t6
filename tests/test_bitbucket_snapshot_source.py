@@ -983,6 +983,8 @@ def test_exhausted_total_source_budget_is_unavailable_not_invalid(
 def test_complete_empty_rules_listing_proves_missing() -> None:
     def handle(request: httpx.Request) -> httpx.Response:
         assert request.url.path.endswith(f"/src/{_SHA}/")
+        if "page" in request.url.params:
+            return httpx.Response(400, json={"type": "error", "error": {"message": "Invalid page"}})
         return httpx.Response(200, json={"values": [], "size": 0})
 
     async def exercise() -> DocumentPresence:

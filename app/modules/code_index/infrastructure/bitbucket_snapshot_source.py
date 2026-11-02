@@ -383,7 +383,7 @@ class BitbucketRepositorySnapshotSource:
         endpoint = f"/2.0/repositories/%7B%7D/%7B{target.repository_uuid}%7D/{suffix}"
         entries: list[_Entry] = []
         listed_count = 0
-        params = {"pagelen": str(_PAGE_SIZE), "page": "1"}
+        params = {"pagelen": str(_PAGE_SIZE)}
         seen_pages: set[tuple[tuple[str, str], ...]] = set()
         declared_size: int | None = None
         for _ in range(_MAX_PAGES_PER_DIRECTORY):
