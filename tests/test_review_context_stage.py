@@ -202,12 +202,27 @@ class Payloads:
     rows: list[tuple[UUID, dict[str, Any]]] = field(default_factory=list)
     error: Exception | None = None
 
-    async def save_context_payload(
-        self, run_id: UUID, summary: dict[str, Any], *, mark_summary_only: bool = False
-    ) -> None:
+    snapshots: list[DiffSnapshot] | None = None
+
+    async def save_context_payload(self, run_id: UUID, summary: dict[str, Any]) -> None:
         if self.error is not None:
             raise self.error
         self.rows.append((run_id, summary))
+
+    async def save_summary_only_stop(
+        self,
+        run_id: UUID,
+        summarize: Callable[[list[DiffSnapshot]], dict[str, Any]],
+    ) -> dict[str, Any]:
+        if self.error is not None:
+            raise self.error
+        if self.snapshots is None:
+            raise AssertionError("the summary-only stop reloads stored rows")
+        marked = _mark_summary_only_rows(self.snapshots)
+        self.snapshots[:] = marked
+        summary = summarize(self.snapshots)
+        self.rows.append((run_id, summary))
+        return summary
 
 
 def _stored(path: str, patch: str) -> str:
@@ -235,6 +250,24 @@ def _snapshots() -> list[DiffSnapshot]:
     ]
 
 
+def _mark_summary_only_rows(snapshots: list[DiffSnapshot]) -> list[DiffSnapshot]:
+    """In-memory stand-in for the store's summary-only UPDATE.
+
+    A withheld row (no model patch, no omission) and a proven empty file stay, and so
+    does a row the line threshold already flagged. Every other row loses its model patch.
+    """
+    marked: list[DiffSnapshot] = []
+    for item in snapshots:
+        withheld = (
+            item.review_patch is None and item.omission_reason is None and not item.summary_only
+        )
+        if withheld or item.summary_only or item.omission_reason == "empty_file":
+            marked.append(item)
+        else:
+            marked.append(replace(item, summary_only=True, review_patch=None))
+    return marked
+
+
 def _stage(
     trace: RunTrace,
     *,
@@ -251,9 +284,12 @@ def _stage(
 ) -> ReviewContextStage:
     shared = store or Store()
     provider = vcs or Vcs()
+    held = None if none else [] if empty else list(snapshots or _snapshots())
+    if isinstance(payloads, Payloads) and held is not None:
+        payloads.snapshots = held
     return ReviewContextStage(
         checkpoint=_checkpoint,
-        runs=Runs(None if none else [] if empty else (snapshots or _snapshots())),
+        runs=Runs(held),
         vcs=provider,
         merge_base=provider,
         prepare_policy=PreparePolicySnapshot(

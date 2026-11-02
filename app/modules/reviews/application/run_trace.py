@@ -42,9 +42,7 @@ class RunTraceStore(Protocol):
         duration_ms: int,
     ) -> None: ...
 
-    async def save_context_payload(
-        self, run_id: UUID, summary: dict[str, Any], *, mark_summary_only: bool = False
-    ) -> None: ...
+    async def save_context_payload(self, run_id: UUID, summary: dict[str, Any]) -> None: ...
 
     async def save_summary_only_stop(
         self,
@@ -77,13 +75,9 @@ class TransactionalRunTrace:
             await uow.trace.add_action(run_id, tool, request, response, started_at, duration_ms)
             await uow.commit()
 
-    async def save_context_payload(
-        self, run_id: UUID, summary: dict[str, Any], *, mark_summary_only: bool = False
-    ) -> None:
+    async def save_context_payload(self, run_id: UUID, summary: dict[str, Any]) -> None:
         async with self._uow_factory() as uow:
-            await uow.trace.save_context_payload(
-                run_id, summary, mark_summary_only=mark_summary_only
-            )
+            await uow.trace.save_context_payload(run_id, summary)
             await uow.commit()
 
     async def save_summary_only_stop(
@@ -145,9 +139,13 @@ async def traced_step(
 
 
 class ContextPayloadStore(Protocol):
-    async def save_context_payload(
-        self, run_id: UUID, summary: dict[str, Any], *, mark_summary_only: bool = False
-    ) -> None: ...
+    async def save_context_payload(self, run_id: UUID, summary: dict[str, Any]) -> None: ...
+
+    async def save_summary_only_stop(
+        self,
+        run_id: UUID,
+        summarize: Callable[[list[DiffSnapshot]], dict[str, Any]],
+    ) -> dict[str, Any]: ...
 
 
 class ContextTrace(RunTrace, ContextPayloadStore, Protocol):

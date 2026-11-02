@@ -17,7 +17,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from hashlib import sha256
-from typing import Any, cast
+from typing import Any
 from uuid import UUID
 
 from app.modules.code_index.domain.enums import RagIndexStatus
@@ -32,11 +32,7 @@ from app.modules.reviews.application.diff_map import (
     diagnostic_text,
     is_supported_path,
 )
-from app.modules.reviews.application.get_run_diff import (
-    DiffSnapshot,
-    over_max_diff_lines,
-    snapshots_after_summary_only_stop,
-)
+from app.modules.reviews.application.get_run_diff import DiffSnapshot, over_max_diff_lines
 from app.modules.reviews.application.policy_errors import PolicyError, PolicyErrorCode
 from app.modules.reviews.application.policy_snapshot import PolicySnapshot, PromptBindings
 from app.modules.reviews.application.prepare_policy_snapshot import PreparePolicySnapshot
@@ -802,12 +798,12 @@ class ReviewContextStage:
         stored: list[DiffSnapshot],
         reason: str,
     ) -> dict[str, Any]:
-        """Flag reviewable rows, then record coverage of those rows.
+        """Flag reviewable rows, then record coverage of the reloaded rows.
 
-        The durable mark and the ``context_payloads`` row share one transaction when the
-        store can reload the rows. Coverage is hashed from that reload, so publication
-        does not guess the pre-mark patch. A test double without the reload applies the
-        same mark after the trace.
+        The store marks, flushes, reloads and writes ``context_payloads`` in one
+        transaction. Coverage is hashed from that reload, so publication does not guess
+        the pre-mark patch. A stage with no payload store records the rows it already
+        holds and leaves them unmarked: nothing durable can be rewritten.
         """
 
         def summarize(rows: list[DiffSnapshot]) -> dict[str, Any]:
@@ -829,20 +825,13 @@ class ReviewContextStage:
                 reason=reason,
             )
 
-        save_stop = (
-            getattr(self._payloads, "save_summary_only_stop", None)
-            if self._payloads is not None
-            else None
-        )
-        if save_stop is not None:
-            response = cast("dict[str, Any]", await save_stop(run_id, summarize))
+        if self._payloads is None:
+            response = summarize(stored)
         else:
-            response = summarize(snapshots_after_summary_only_stop(stored))
+            response = await self._payloads.save_summary_only_stop(run_id, summarize)
         request = {"head_sha": diff_map.head_sha, "policy_snapshot_id": str(snapshot.snapshot_id)}
         async with traced_step(self._trace, run_id, "context.build", request) as step:
             step.response = response
-        if save_stop is None and self._payloads is not None:
-            await self._payloads.save_context_payload(run_id, response, mark_summary_only=True)
         return response
 
     def _nothing_to_review_response(

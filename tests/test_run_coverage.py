@@ -8,10 +8,7 @@ from uuid import UUID
 import pytest
 
 from app.modules.reviews.application.diff_map import DiffMap, VcsProviderName, build_diff_map
-from app.modules.reviews.application.get_run_diff import (
-    DiffSnapshot,
-    snapshots_after_summary_only_stop,
-)
+from app.modules.reviews.application.get_run_diff import DiffSnapshot
 from app.modules.reviews.application.prompt_builder import PullRequestMeta
 from app.modules.reviews.application.review_ignore import (
     IgnoreMatcher,
@@ -230,7 +227,8 @@ def test_summary_only_rows_restore_the_coverage_recorded_after_the_mark() -> Non
         changes=2,
     )
     rules = "```review-ignore\ngenerated/**\n```\n"
-    marked = snapshots_after_summary_only_stop([stored, ignored])
+    # The stop flags the code row and leaves the masked row: no model patch, no omission.
+    marked = [replace(stored, summary_only=True, review_patch=None), ignored]
     saved, diff = coverage_inputs(marked, expected=3, rules=rules)
 
     restored = restore_context_coverage(

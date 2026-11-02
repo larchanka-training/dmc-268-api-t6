@@ -776,9 +776,7 @@ class SqlAlchemyRunTraceStore:
             duration_ms=duration_ms,
         )
 
-    async def save_context_payload(
-        self, run_id: UUID, summary: dict[str, Any], *, mark_summary_only: bool = False
-    ) -> None:
+    async def save_context_payload(self, run_id: UUID, summary: dict[str, Any]) -> None:
         # Context is durable review input, not an append-only provider audit.
         await self._require_running_origin(run_id)
         # Schema 2: the response of the stage's context.build (#168 part 6); schema 1 rows
@@ -791,12 +789,6 @@ class SqlAlchemyRunTraceStore:
                 set_={"summary": summary, "schema_version": 2},
             )
         )
-        # Same short transaction as the context.build payload. The UI patch stays.
-        # Only the stage's summary-only stop sets the flag: a legacy technical-only
-        # build can also record status summary_only and must keep the model path.
-        # A policy-withheld row (no model patch and no omission) is not rewritten.
-        if mark_summary_only:
-            await self._mark_summary_only_rows(run_id)
 
     async def save_summary_only_stop(
         self,
@@ -842,7 +834,13 @@ class SqlAlchemyRunTraceStore:
             raise RunCancelled("run_inactive")
 
     async def _mark_summary_only_rows(self, run_id: UUID) -> None:
-        """Same predicate as ``snapshots_after_summary_only_stop``."""
+        """Flag model input. A withheld row and a proven empty file stay as stored.
+
+        A withheld row has no model patch and no omission (a mask, a built-in exclusion
+        that was not given an omission). ``empty_file`` stays too: ``summary_only`` would
+        cancel that proof. A row that still has a model patch, or another omission, loses
+        the model patch. A row the line threshold already flagged is left unchanged.
+        """
         await self._session.execute(
             update(CodeChangeDiff)
             .where(

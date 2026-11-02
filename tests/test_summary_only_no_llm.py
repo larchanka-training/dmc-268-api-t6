@@ -9,6 +9,7 @@ verifier records ``llm.call`` and ``llm.verify``, if those paths run.
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from types import TracebackType
@@ -37,11 +38,7 @@ from app.modules.reviews.application.conventions import (
 )
 from app.modules.reviews.application.execute_review import ExecuteReviewRun, ReviewPromptInput
 from app.modules.reviews.application.findings_post_processor import summary_from_result
-from app.modules.reviews.application.get_run_diff import (
-    DiffSnapshot,
-    review_files_from_snapshots,
-    snapshots_after_summary_only_stop,
-)
+from app.modules.reviews.application.get_run_diff import DiffSnapshot, review_files_from_snapshots
 from app.modules.reviews.application.handle_review_run import ClaimedAttempt, DeliveryOutcome
 from app.modules.reviews.application.policy_snapshot import CallManifest
 from app.modules.reviews.application.prepare_policy_snapshot import PreparePolicySnapshot
@@ -78,6 +75,7 @@ from tests.test_review_context_stage import (
     Trace,
     Vcs,
     _checkpoint,
+    _mark_summary_only_rows,
 )
 from tests.test_review_path import _store
 from tests.test_review_run_worker import RUN as _WORKER_RUN
@@ -320,12 +318,18 @@ class DiffFlag:
     def __init__(self, runs: Runs) -> None:
         self._runs = runs
 
-    async def save_context_payload(
-        self, run_id: UUID, summary: dict[str, Any], *, mark_summary_only: bool = False
-    ) -> None:
-        if not mark_summary_only or self._runs.stored is None:
-            return
-        self._runs.stored = snapshots_after_summary_only_stop(self._runs.stored)
+    async def save_context_payload(self, run_id: UUID, summary: dict[str, Any]) -> None:
+        return None
+
+    async def save_summary_only_stop(
+        self,
+        run_id: UUID,
+        summarize: Callable[[list[DiffSnapshot]], dict[str, Any]],
+    ) -> dict[str, Any]:
+        if self._runs.stored is None:
+            raise AssertionError("the summary-only stop reloads stored rows")
+        self._runs.stored = _mark_summary_only_rows(self._runs.stored)
+        return summarize(self._runs.stored)
 
 
 @dataclass
