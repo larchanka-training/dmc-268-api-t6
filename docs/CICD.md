@@ -17,7 +17,7 @@ flowchart TD
   pr["PR / push"] --> secrets["gitleaks"]
   pr --> tf["terraform fmt / validate\n(api + ui stacks)"]
   pr --> caddy["caddy validate\n(deploy/edge/Caddyfile)\n(required check)"]
-  pr --> mon["promtool / amtool / compose config\n(deploy/monitoring)"]
+  pr --> mon["promtool / amtool / blackbox / compose config\n(deploy/monitoring)"]
   pr --> lint["tflint + checkov"]
   pr --> unit["ruff check / format, mypy, replay,\npytest без integration, xdist"]
   pr --> integ["pytest -m integration:\n4 шарда pytest-split, свои PG и RabbitMQ"]
@@ -57,7 +57,7 @@ flowchart TD
 | `Secret scan` | PR и `main` | `contents: read` | Gitleaks с `.gitleaks.toml` и `--redact` (сканирует docs и examples) |
 | `Terraform fmt / validate` | PR и `main` | `contents: read` | `fmt -check`, `validate` для `api-staging` и `ui-staging` |
 | `Edge Caddyfile validate` | PR и `main` | `contents: read` | `caddy validate` для `deploy/edge/Caddyfile` с `APP_DOMAIN=example.test` — та же команда, что вручную (§8.2); образ caddy читается из `deploy/edge/compose.yml`, второго тега в workflow нет. Имя — required check в правилах `main`, менять только вместе с ними. Входит в `needs` у `Push Docker image`: Caddyfile с ошибкой не доходит до `caddy reload` при выкате |
-| `Monitoring config validate` | PR и `main` | `contents: read` | `scripts/validate_monitoring.sh`: `promtool check config` и `promtool test rules` (`tests/monitoring/alerts.test.yml`), `amtool check-config` обоих вариантов Alertmanager (Telegram и без получателя) и шаблона сообщения, `docker compose config` в режимах edge и ports, JSON дашбордов. Образы — из `deploy/monitoring/compose.yml` ([MONITORING.md](MONITORING.md)) |
+| `Monitoring config validate` | PR и `main` | `contents: read` | `scripts/validate_monitoring.sh`: `promtool check config` и `promtool test rules` (`tests/monitoring/alerts.test.yml`), `amtool check-config` обоих вариантов Alertmanager (Telegram и без получателя) и шаблона сообщения, `--config.check` blackbox exporter, `docker compose config` в режимах edge и ports, JSON дашбордов. Образы — из `deploy/monitoring/compose.yml` ([MONITORING.md](MONITORING.md)) |
 | `Terraform lint / security` | PR и `main` | `contents: read` | TFLint + Checkov (встроенные и custom policies `.checkov/policies`); отдельный шаг проверяет, что каждая custom policy падает на `.checkov/fixtures/bad` |
 | `Python lint / type / unit` | PR и `main` | `contents: read` | uv 0.12.11, Python 3.13, без service containers, до 20 мин: первый шаг после checkout падает, если в git есть файлы каталога `docs/plans` (`git ls-files docs/plans` не пуст: планы — локальные рабочие файлы и не коммитятся, #265), затем `uv sync --locked --all-groups`, `ruff check`, `ruff format --check` (Markdown исключён в `pyproject.toml`), `mypy`. Шаг «Unit tests (zero skips)» — `pytest -m "not integration" -n auto --strict-markers` (pytest-xdist) с гейтом покрытия 100% на `review_output` и `answers`; падает, если хоть один тест skipped (xfail не считается). Затем список `pytest --collect-only -q --strict-markers -m integration` выгружается для `Python lint / type / test` (artifact `collected-integration-tests`). Последний шаг «Gold corpus and recorded replay» запускает `validate_dataset.py --final` и `eval_replay.py` по закоммиченному baseline; без response manifest job падает |
 | `Python integration (k/4)` | PR и `main` | `contents: read` | matrix из четырёх шардов, `fail-fast: false`, до 20 мин. У каждого шарда свои service-контейнеры PostgreSQL 17 и RabbitMQ 4 (`TEST_DATABASE_URL`, `RABBITMQ_URL`): integration-тесты делят advisory-lock с фиксированными ключами, каналы NOTIFY и имена очередей, поэтому параллелятся раннерами, не xdist. `pytest -m integration --strict-markers --splits 4 --group k` (pytest-split) делит набор по закоммиченному `.test_durations`, без него — поровну по числу тестов, и перезаписывает файл длительностями выполненных в шарде тестов (`--store-durations --clean-durations`); junit шарда и эти длительности — artifact `integration-k`. Файл читается по пути pytest-split по умолчанию, внутри checkout: rootdir и конфиг `pyproject.toml` pytest выбирает до того, как плагины добавят `--durations-path`, поэтому существующий файл вне checkout сдвигает rootdir, и шард идёт без конфига; `--strict-markers` в этом случае валит сбор (маркер `integration` не зарегистрирован) |
@@ -530,6 +530,7 @@ GET /healthcheck
 управляет запуском новых контейнеров и не останавливает старые writers. Использовать env/compose текущего релиза. Для курсового VPS из `/opt/dmc-268-api-staging` выполнить
 `docker compose -p dmc-268-api-staging --env-file .env -f compose.yml -f compose.edge.yml stop api webhook-worker worker`
 (для Terraform-хоста использовать его APP_DIR, имя compose-проекта и `compose.ports.yml`),
+заглушить `WebhookWorkerDown`, `PublicEndpointDown` и `ReviewQueueWithoutConsumer` ([MONITORING.md §5](MONITORING.md#5-алерты)),
 проверить отсутствие других старых writers, затем выполнить выкат с новым образом.
 При успешном выкате после `bootstrap` возобновить только сервисы нового образа
 обычным `up -d --wait`.

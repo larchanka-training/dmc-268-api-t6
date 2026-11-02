@@ -3,4 +3,5 @@
 .env.tmp
 alertmanager/alertmanager.yml
 alertmanager/secrets/
+prometheus/targets/probes.json
 textfile/

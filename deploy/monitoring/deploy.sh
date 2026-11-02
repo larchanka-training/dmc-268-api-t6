@@ -9,6 +9,12 @@
 #   API_DIR                    application dir with .env and env-file.sh (/opt/dmc-268-api-staging)
 #   MONITORING_DIR             this stack's dir, default: the directory of this script
 #   GRAFANA_ROOT_URL           public Grafana URL in edge mode (https://grafana.<APP_DOMAIN>/)
+#   APP_DOMAIN                 base domain of the public names in edge mode: the blackbox exporter
+#                              probes staging-api.<APP_DOMAIN>, staging-ui.<APP_DOMAIN> and the
+#                              production names of PROBE_PROD_HOSTS
+#   PROBE_PROD_HOSTS           production names probed in edge mode once they serve, out of api and
+#                              ui, separated by spaces; set, even empty: applied and kept in .env;
+#                              unset: keep the previous list (manual run)
 #   BACKUP_DIR                 host dir of the PostgreSQL dumps, default /var/backups/dmc-268/<project>
 #   GRAFANA_ADMIN_PASSWORD     set: the Grafana admin password (GitHub secret; GitHub never shows its
 #                              value, whoever sets it keeps a copy outside GitHub); empty or unset:
@@ -113,12 +119,36 @@ if [[ "${DEPLOY_MODE}" == "edge" ]]; then
     echo "GRAFANA_ROOT_URL must be https://<host>/ in edge mode, got: ${GRAFANA_ROOT_URL:-}" >&2
     exit 1
   fi
+  # The same check as the application deploy: the probe targets are built from it.
+  if [[ ! "${APP_DOMAIN:-}" =~ ^[a-z0-9-]+(\.[a-z0-9-]+)+$ ]]; then
+    echo "APP_DOMAIN must be the base domain of the public names in edge mode, got: ${APP_DOMAIN:-}" >&2
+    exit 1
+  fi
   GRAFANA_COOKIE_SECURE=true
 else
   # Loopback only (compose.ports.yml), reached through an SSH tunnel.
   GRAFANA_ROOT_URL="http://localhost:3000/"
   GRAFANA_COOKIE_SECURE=false
 fi
+
+# The services behind the edge proxy that the blackbox exporter probes, each with its health path:
+# staging-<service> always, <service> once PROBE_PROD_HOSTS names it.
+PROBED_SERVICES=(api/healthcheck ui/health)
+# Production names to probe, validated before anything on the host changes; the value kept in .env
+# goes through the same check.
+if [[ -z "${PROBE_PROD_HOSTS+set}" ]]; then
+  PROBE_PROD_HOSTS="$(previous_setting PROBE_PROD_HOSTS)"
+fi
+if [[ ! "${PROBE_PROD_HOSTS}" =~ ^[[:space:]]*((api|ui)([[:space:]]+|$))*$ ]]; then
+  echo "PROBE_PROD_HOSTS must list production names out of: api ui (space-separated), got: ${PROBE_PROD_HOSTS}" >&2
+  exit 1
+fi
+# Each name once, in the order of the services, with the health path of its service.
+PROD_PROBES=()
+for probe in "${PROBED_SERVICES[@]}"; do
+  if [[ " ${PROBE_PROD_HOSTS//[[:space:]]/ } " == *" ${probe%%/*} "* ]]; then PROD_PROBES+=("${probe}"); fi
+done
+PROBE_PROD_HOSTS="${PROD_PROBES[*]%%/*}"
 
 API_NETWORK="${API_PROJECT}_default"
 if ! docker network inspect "${API_NETWORK}" >/dev/null 2>&1; then
@@ -367,11 +397,31 @@ else
 fi
 chmod 644 "${CADDY_TARGETS}.tmp"
 mv -f "${CADDY_TARGETS}.tmp" "${CADDY_TARGETS}"
-# Read by nobody (Prometheus) and grafana (uid 472) through read-only mounts.
+# HTTPS probes of the public names behind the edge proxy, in edge mode only: each service name and
+# its health path, the staging names first. The name becomes the label host of the probe and of its
+# alerts.
+PROBE_TARGETS="${MONITORING_DIR}/prometheus/targets/probes.json"
+if [[ "${DEPLOY_MODE}" == "edge" ]]; then
+  separator='['
+  for probe in "${PROBED_SERVICES[@]/#/staging-}" "${PROD_PROBES[@]}"; do
+    probe_host="${probe%%/*}.${APP_DOMAIN}"
+    printf '%s{"targets": ["https://%s/%s"], "labels": {"host": "%s"}}' \
+      "${separator}" "${probe_host}" "${probe#*/}" "${probe_host}"
+    separator=$',\n '
+  done > "${PROBE_TARGETS}.tmp"
+  echo ']' >> "${PROBE_TARGETS}.tmp"
+else
+  echo '[]' > "${PROBE_TARGETS}.tmp"
+fi
+chmod 644 "${PROBE_TARGETS}.tmp"
+mv -f "${PROBE_TARGETS}.tmp" "${PROBE_TARGETS}"
+# Read by nobody (Prometheus, the blackbox exporter) and grafana (uid 472) through read-only mounts.
 find "${MONITORING_DIR}/prometheus" "${MONITORING_DIR}/grafana" "${MONITORING_DIR}/postgres-exporter" \
-  "${MONITORING_DIR}/alertmanager/templates" "${MONITORING_DIR}/backup" -type d -exec chmod 755 {} +
+  "${MONITORING_DIR}/alertmanager/templates" "${MONITORING_DIR}/backup" "${MONITORING_DIR}/blackbox" \
+  -type d -exec chmod 755 {} +
 find "${MONITORING_DIR}/prometheus" "${MONITORING_DIR}/grafana" "${MONITORING_DIR}/postgres-exporter" \
-  "${MONITORING_DIR}/alertmanager/templates" "${MONITORING_DIR}/backup" -type f -exec chmod 644 {} +
+  "${MONITORING_DIR}/alertmanager/templates" "${MONITORING_DIR}/backup" "${MONITORING_DIR}/blackbox" \
+  -type f -exec chmod 644 {} +
 
 {
   printf 'API_NETWORK=%s\n' "$(escape_compose_value "${API_NETWORK}")"
@@ -391,11 +441,13 @@ find "${MONITORING_DIR}/prometheus" "${MONITORING_DIR}/grafana" "${MONITORING_DI
   printf 'GRAFANA_COOKIE_SECURE=%s\n' "${GRAFANA_COOKIE_SECURE}"
   printf 'GRAFANA_ALIAS=%s\n' "$(escape_compose_value "${GRAFANA_ALIAS}")"
   printf 'TEXTFILE_DIR=%s\n' "$(escape_compose_value "${TEXTFILE_DIR:-${MONITORING_DIR}/textfile}")"
+  printf 'PROBE_PROD_HOSTS=%s\n' "${PROBE_PROD_HOSTS}"
   printf 'PROMETHEUS_CONFIG_DIGEST=%s\n' "$(config_digest prometheus)"
   printf 'ALERTMANAGER_CONFIG_DIGEST=%s\n' "$(config_digest alertmanager)"
   printf 'GRAFANA_CONFIG_DIGEST=%s\n' "$(config_digest grafana/provisioning)"
   printf 'POSTGRES_EXPORTER_CONFIG_DIGEST=%s\n' "$(config_digest postgres-exporter)"
   printf 'PG_BACKUP_CONFIG_DIGEST=%s\n' "$(config_digest backup)"
+  printf 'BLACKBOX_CONFIG_DIGEST=%s\n' "$(config_digest blackbox)"
 } > "${ENV_FILE}.tmp"
 chmod 600 "${ENV_FILE}.tmp"
 mv -f "${ENV_FILE}.tmp" "${ENV_FILE}"
