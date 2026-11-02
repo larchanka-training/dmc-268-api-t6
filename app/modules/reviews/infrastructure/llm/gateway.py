@@ -39,7 +39,7 @@ from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from decimal import Decimal, DecimalException
 from hashlib import sha256
-from typing import TYPE_CHECKING, Literal, Protocol
+from typing import TYPE_CHECKING, Any, Literal, Protocol, cast
 from uuid import UUID, uuid4
 from xml.sax.saxutils import escape
 
@@ -65,16 +65,28 @@ from app.modules.reviews.application.policy_snapshot import (
     ManifestBlock,
     PolicySnapshot,
     SourceRole,
+    StageName,
 )
 from app.modules.reviews.application.prompt_budget import (
     TokenCounter,
     verify_provenance_pre_send_guard,
 )
+from app.modules.reviews.application.review_result_cache import (
+    ReviewResultCache,
+    ReviewResultIdentity,
+    ReviewResultModel,
+    ReviewResultOperation,
+    review_result_cache_key,
+)
 from app.modules.reviews.application.run_failures import RunFailure
 
 if TYPE_CHECKING:
     from app.modules.reviews.application.prompt_builder import ReviewContext
-from app.modules.reviews.infrastructure.llm.answers import InvalidAnswer, bounded_errors
+from app.modules.reviews.infrastructure.llm.answers import (
+    InvalidAnswer,
+    bounded_errors,
+    verifier_output_schema,
+)
 from app.modules.reviews.infrastructure.llm.ecb_fx import FxQuote, FxQuoteProvider, FxQuoteResult
 from app.modules.reviews.infrastructure.llm.settings import (
     LlmConfigError,
@@ -277,6 +289,7 @@ class LlmGateway:
         monotonic: Callable[[], float] = time.monotonic,
         fx_provider: FxQuoteProvider | None = None,
         manifest_store: ManifestStore | None = None,
+        result_cache: ReviewResultCache | None = None,
     ) -> None:
         self._settings = settings
         self._checkpoint = checkpoint
@@ -291,6 +304,8 @@ class LlmGateway:
         self._fx_provider = fx_provider
         # Snapshot-path tasks store each call's manifest before it; None stores nothing.
         self._manifests = manifest_store
+        # Accepted review and verifier answers. None leaves every call on the provider.
+        self._result_cache = result_cache
         # run_id -> calls of its current attempt; conventions and review share it.
         self._attempts: OrderedDict[UUID, _AttemptCalls] = OrderedDict()
 
@@ -333,6 +348,15 @@ class LlmGateway:
         )
         state = _AttemptState()
         attempt = self._attempt_calls(context)
+        # One cancellation check, then the result cache, before budget, FX, a call slot,
+        # the manifest, or the provider. A hit must not be refused for a call that will
+        # not happen.
+        await self._checkpoint(context)
+        cache_key = self._review_result_key(task, context, primary)
+        if cache_key is not None:
+            cached = await self._cached_review_result(task, context, primary, cache_key)
+            if cached is not None:
+                return cached
         # The slots this task may spend: the shared cap minus those kept for later stages.
         max_calls = policy.max_calls_per_attempt - task.reserved_calls
         if attempt.calls >= max_calls:
@@ -361,6 +385,9 @@ class LlmGateway:
             )
             previous = last
             if last.output is not None:
+                # Ledger and llm.call of this primary, retry, or repair have returned.
+                # The key is still the original messages and the primary model.
+                await self._remember_review_result(cache_key, last.output)
                 return self._result(primary, last, state, manifest)
             assert last.error is not None
             rate_limit_hint = _longest_retry_after(rate_limit_hint, last)
@@ -516,6 +543,97 @@ class LlmGateway:
             ):
                 raise
             raise self._failed(previous.error, previous.message, state) from refused
+
+    def _review_result_key(
+        self, task: StructuredTask, context: RunCallContext, primary: ModelProfile
+    ) -> str | None:
+        """The review-result key, or None when this call must not touch the cache."""
+        if self._result_cache is None or task.operation not in {
+            ReviewResultOperation.REVIEW,
+            ReviewResultOperation.VERIFICATION,
+        }:
+            return None
+        repository_id = (
+            task.policy_snapshot.repository_id
+            if task.policy_snapshot is not None
+            else context.repository_id
+        )
+        if repository_id is None:
+            return None
+        identity = ReviewResultIdentity(
+            operation=ReviewResultOperation(task.operation),
+            repository_id=repository_id,
+            model=ReviewResultModel(provider=primary.provider, model_id=primary.model),
+            prompt_version=_prompt_version(task, context),
+            output_schema_version=_output_schema_version(task),
+            profile_version=_profile_version(task, primary),
+            rendered_input_digest=rendered_messages_sha256(task.messages),
+        )
+        return review_result_cache_key(identity)
+
+    async def _cached_review_result(
+        self,
+        task: StructuredTask,
+        context: RunCallContext,
+        primary: ModelProfile,
+        cache_key: str,
+    ) -> GatewayResult | None:
+        """A re-validated hit, or None when the entry cannot be used."""
+        assert self._result_cache is not None
+        try:
+            stored = await self._result_cache.get(cache_key)
+        except Exception as error:
+            logger.warning(
+                "review result cache get failed error_type=%s",
+                type(error).__name__,
+                extra={"run_id": str(context.run_id), "operation": task.operation},
+            )
+            return None
+        if not isinstance(stored, dict):
+            return None
+        try:
+            validated = task.validate(json.dumps(stored, ensure_ascii=False))
+        except Exception as error:
+            logger.warning(
+                "review result cache entry rejected error_type=%s",
+                type(error).__name__,
+                extra={"run_id": str(context.run_id), "operation": task.operation},
+            )
+            return None
+        try:
+            await self._trace.record_result_cache_hit(
+                context.run_id, task.operation, started_at=self._clock.now()
+            )
+        except Exception:
+            logger.exception(
+                "llm.result_cache trace write failed",
+                extra={"run_id": str(context.run_id), "operation": task.operation},
+            )
+        return GatewayResult(
+            output=validated,
+            provider=primary.provider,
+            model=primary.model,
+            usage=(),
+            calls=0,
+            accepted_call_id=None if task.base_manifest is None else task.base_manifest.call_id,
+            accepted_manifest=task.base_manifest,
+            accepted_manifest_id=None,
+        )
+
+    async def _remember_review_result(
+        self, cache_key: str | None, output: dict[str, object]
+    ) -> None:
+        """Store an accepted primary answer. A failed write does not fail the run."""
+        if cache_key is None or self._result_cache is None:
+            return
+        try:
+            await self._result_cache.set(cache_key, cast(dict[str, Any], output))
+        except Exception as error:
+            logger.warning(
+                "review result cache set failed error_type=%s",
+                type(error).__name__,
+                extra={"error_type": type(error).__name__},
+            )
 
     def _attempt_calls(self, context: RunCallContext) -> _AttemptCalls:
         current = self._attempts.get(context.run_id)
@@ -1200,6 +1318,58 @@ def _validated(
         answer=answer,
         errors=errors,
     )
+
+
+def _prompt_version(task: StructuredTask, context: RunCallContext) -> str:
+    """Snapshot stage checksum, otherwise the run's prompt version id."""
+    snapshot = task.policy_snapshot
+    if snapshot is not None:
+        stage: StageName = "verification" if task.operation == "verification" else "review"
+        return stage_prompt_checksum(snapshot.prompt_bindings, stage)
+    if context.prompt_version_id is None:
+        return ""
+    return str(context.prompt_version_id)
+
+
+def _output_schema_version(task: StructuredTask) -> str:
+    """Pinned review schema, the verifier document ``$id``, or the legacy schema name."""
+    if task.operation == "verification":
+        schema_id = verifier_output_schema()["$id"]
+        if not isinstance(schema_id, str) or not schema_id:
+            raise TypeError("verifier output schema $id must be a non-empty string")
+        return schema_id
+    snapshot = task.policy_snapshot
+    if snapshot is not None:
+        return snapshot.execution_profile.response_schema_version or ""
+    return task.schema.name
+
+
+def _profile_version(task: StructuredTask, primary: ModelProfile) -> str:
+    """Pinned execution profile, otherwise the primary model's call-shaping fields."""
+    if task.policy_snapshot is not None:
+        return model_profile_version(task.policy_snapshot.execution_profile)
+    return _legacy_model_profile_version(primary)
+
+
+def _legacy_model_profile_version(profile: ModelProfile) -> str:
+    """SHA-256 of the primary ``ModelProfile`` fields that change the provider call.
+
+    ``model_profile_version`` hashes a pinned ``ExecutionProfile``. A legacy review
+    has none, so the digest covers the route fields the call actually uses.
+    """
+    canonical = json.dumps(
+        {
+            "provider": profile.provider,
+            "model": profile.model,
+            "context_window": profile.context_window,
+            "max_output_tokens": profile.max_output_tokens,
+            "chars_per_token": profile.chars_per_token,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    )
+    return sha256(canonical.encode("utf-8")).hexdigest()
 
 
 def rendered_messages_sha256(messages: tuple[ChatMessage, ...]) -> str:
