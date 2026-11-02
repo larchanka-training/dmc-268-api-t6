@@ -2,10 +2,17 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from decimal import Decimal
 from uuid import UUID
 
-from app.modules.reviews.application.llm import LlmCallRecord, LlmUsage, RunCallContext
+from app.modules.reviews.application.llm import (
+    LLM_RESULT_CACHE_TOOL,
+    LlmCallRecord,
+    LlmUsage,
+    RunCallContext,
+    result_cache_hit_request,
+)
 
 
 class InMemoryUsageLedger:
@@ -25,6 +32,31 @@ class InMemoryUsageLedger:
 class InMemoryLlmCallTrace:
     def __init__(self) -> None:
         self.records: list[tuple[UUID, LlmCallRecord]] = []
+        self.actions: list[tuple[UUID, str, dict[str, object], object]] = []
 
     async def record_call(self, run_id: UUID, record: LlmCallRecord) -> None:
         self.records.append((run_id, record))
+
+    async def record_result_cache_hit(
+        self,
+        run_id: UUID,
+        operation: str,
+        *,
+        started_at: datetime,
+        source_run_id: UUID,
+        source_call_id: UUID | None,
+        source_manifest_id: UUID | None,
+    ) -> None:
+        self.actions.append(
+            (
+                run_id,
+                LLM_RESULT_CACHE_TOOL,
+                result_cache_hit_request(
+                    operation,
+                    source_run_id=source_run_id,
+                    source_call_id=source_call_id,
+                    source_manifest_id=source_manifest_id,
+                ),
+                {},
+            )
+        )

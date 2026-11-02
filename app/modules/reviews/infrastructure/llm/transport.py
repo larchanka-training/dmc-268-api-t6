@@ -227,14 +227,15 @@ class OpenAICompatibleTransport:
             raise TransportUnavailable(f"connection failed ({type(error).__name__})") from None
 
 
-def _request_body(request: ChatRequest) -> dict[str, Any]:
-    """Defaults, then ``extra_body`` on top of them, then the fields config cannot change.
+def provider_request_options(
+    profile: ModelProfile, response_schema: ResponseSchema | None
+) -> dict[str, Any]:
+    """The provider body except ``messages``.
 
-    ``extra_body`` overrides sampling defaults (a reasoning model rejects
-    ``temperature: 0`` and wants ``max_completion_tokens``); a ``null`` value drops the
-    key. The model, the messages and strict ``response_format`` (D7) stay fixed.
+    Sampling defaults, then ``extra_body``, then the model and strict
+    ``response_format``, which config cannot replace. ``_request_body`` adds the
+    messages to a copy of this object, so a review-result key can hash it alone.
     """
-    profile = request.profile
     defaults: dict[str, Any] = {
         "max_tokens": profile.max_output_tokens,
         "temperature": 0,
@@ -242,18 +243,29 @@ def _request_body(request: ChatRequest) -> dict[str, Any]:
     merged = {**defaults, **profile.extra_body}
     body: dict[str, Any] = {key: value for key, value in merged.items() if value is not None}
     body["model"] = profile.model
-    body["messages"] = [
-        {"role": message.role, "content": message.content} for message in request.messages
-    ]
-    if request.response_schema is not None and profile.structured_output == "json_schema":
+    if response_schema is not None and profile.structured_output == "json_schema":
         body["response_format"] = {
             "type": "json_schema",
             "json_schema": {
-                "name": request.response_schema.name,
+                "name": response_schema.name,
                 "strict": True,
-                "schema": dict(request.response_schema.schema),
+                "schema": dict(response_schema.schema),
             },
         }
+    return body
+
+
+def _request_body(request: ChatRequest) -> dict[str, Any]:
+    """Defaults, then ``extra_body`` on top of them, then the fields config cannot change.
+
+    ``extra_body`` overrides sampling defaults (a reasoning model rejects
+    ``temperature: 0`` and wants ``max_completion_tokens``); a ``null`` value drops the
+    key. The model, the messages and strict ``response_format`` (D7) stay fixed.
+    """
+    body = provider_request_options(request.profile, request.response_schema)
+    body["messages"] = [
+        {"role": message.role, "content": message.content} for message in request.messages
+    ]
     return body
 
 

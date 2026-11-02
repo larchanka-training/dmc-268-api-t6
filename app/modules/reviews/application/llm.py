@@ -107,6 +107,7 @@ class RunCallContext:
     deadline: datetime
     prompt_version_id: UUID | None = None
     rule_version_id: UUID | None = None
+    repository_id: UUID | None = None
 
 
 @dataclass(frozen=True)
@@ -208,10 +209,50 @@ class UsageLedger(Protocol):
     async def record(self, context: RunCallContext, usage: LlmUsage) -> None: ...
 
 
+LLM_RESULT_CACHE_TOOL = "llm.result_cache"
+
+
+def result_cache_hit_request(
+    operation: str,
+    *,
+    source_run_id: UUID,
+    source_call_id: UUID | None,
+    source_manifest_id: UUID | None,
+) -> dict[str, object]:
+    """The ``llm.result_cache`` request. The model answer is not part of it.
+
+    The source ids name the run whose stored call produced the answer.
+    """
+    return {
+        "operation": operation,
+        "cache": "hit",
+        "source_run_id": str(source_run_id),
+        "source_call_id": None if source_call_id is None else str(source_call_id),
+        "source_manifest_id": None if source_manifest_id is None else str(source_manifest_id),
+    }
+
+
 class LlmCallTrace(Protocol):
     """Writes one ``llm.call`` run action per provider call, outside any call transaction."""
 
     async def record_call(self, run_id: UUID, record: LlmCallRecord) -> None: ...
+
+    async def record_result_cache_hit(
+        self,
+        run_id: UUID,
+        operation: str,
+        *,
+        started_at: datetime,
+        source_run_id: UUID,
+        source_call_id: UUID | None,
+        source_manifest_id: UUID | None,
+    ) -> None:
+        """One ``llm.result_cache`` hit in its own short transaction.
+
+        ``response`` is empty. A failure is the caller's to log; the cached answer
+        is still returned.
+        """
+        ...
 
 
 @dataclass(frozen=True)
