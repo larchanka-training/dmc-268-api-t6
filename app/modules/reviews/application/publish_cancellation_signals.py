@@ -63,7 +63,11 @@ class PublishCancellationSignals:
                     message, kind=RunPublicationKind.CANCELLATION
                 )
             except Exception:
-                _LOGGER.exception("Cancellation signal remains pending for run %s", message.run_id)
+                _LOGGER.exception(
+                    "Cancellation signal remains pending for run %s",
+                    message.run_id,
+                    extra={"run_id": str(message.run_id)},
+                )
                 continue
             async with self._uow_factory() as uow:
                 await uow.runs.mark_cancellation_signal_published(message.run_id, self._now())

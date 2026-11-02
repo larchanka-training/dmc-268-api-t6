@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import hmac
 import json
@@ -201,7 +202,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         async with _resources(app):
             yield
     finally:
-        shutdown_tracing(tracing)
+        # The flush waits for the collector (up to the exporter timeout): off the event loop.
+        await asyncio.to_thread(shutdown_tracing, tracing)
 
 
 @asynccontextmanager

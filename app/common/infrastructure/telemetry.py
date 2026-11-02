@@ -6,8 +6,9 @@ Export is off unless ``OTEL_EXPORTER_OTLP_ENDPOINT`` is set: then spans go over 
 Data boundary (the one the monitoring roles keep, docs/MONITORING.md §3): spans carry only the
 attributes of ``ALLOWED_ATTRIBUTES``. Request and response bodies of ``run_actions``, diffs and
 review texts never reach a span, and the exporter drops any other attribute before export, so a
-library or a later span cannot widen the boundary by accident. Log records carry the formatted
-message, never their ``extra`` fields.
+library or a later span cannot widen the boundary by accident. An exception leaves the process
+as its type and its frames only (``safe_stack``), on spans and in logs alike: its message can
+quote a payload. Log records carry the formatted message, never their ``extra`` fields.
 """
 
 from __future__ import annotations
@@ -15,7 +16,9 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import sys
+import traceback
 from collections.abc import Iterator, Mapping, MutableMapping, Sequence
 from contextlib import contextmanager, suppress
 from contextvars import ContextVar
@@ -48,6 +51,7 @@ ENGINE = "dmc.engine"
 TRIGGER = "dmc.trigger"
 OUTCOME = "dmc.outcome"
 ERROR_TYPE = "error.type"
+PROVIDER = "dmc.provider"
 
 # Everything a span may carry. Bodies, URLs, SQL and message payloads are not here.
 ALLOWED_ATTRIBUTES = frozenset(
@@ -60,6 +64,7 @@ ALLOWED_ATTRIBUTES = frozenset(
         TRIGGER,
         OUTCOME,
         ERROR_TYPE,
+        PROVIDER,
         "http.request.method",
         "http.route",
         "http.response.status_code",
@@ -68,11 +73,16 @@ ALLOWED_ATTRIBUTES = frozenset(
         "messaging.destination.name",
     }
 )
-# The ``exception`` event of ``Span.record_exception``: the type and the frames of the stack. The
-# message stays out: it can quote a payload (it is ``runs.error_message``, closed to Grafana, §3).
+# The ``exception`` event of ``mark_error``: the type and the frames of the stack. The message
+# stays out: it can quote a payload (it is ``runs.error_message``, closed to Grafana, §3).
 ALLOWED_EVENT_ATTRIBUTES = frozenset(
     {"exception.type", "exception.stacktrace", "exception.escaped"}
 )
+# Set only by ``mark_error`` next to a ``safe_stack``; a stack without it (``record_exception``
+# of the SDK or of a library) is text with messages and is dropped at export.
+_SAFE_STACK = "dmc.stack.safe"
+# A status description leaves only as a type name (``ValueError``, ``dead_letter``).
+_TYPE_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_.]{0,99}")
 
 _run_id: ContextVar[str | None] = ContextVar("run_id", default=None)
 
@@ -122,36 +132,46 @@ class JsonFormatter(logging.Formatter):
         if context.is_valid:
             entry["trace_id"] = format(context.trace_id, "032x")
             entry["span_id"] = format(context.span_id, "016x")
-        if record.exc_info and record.exc_info[0] is not None:
-            entry["error_type"] = record.exc_info[0].__name__
-            entry["exc_info"] = self.formatException(record.exc_info)
+        if record.exc_info and record.exc_info[1] is not None:
+            entry["error_type"] = type(record.exc_info[1]).__name__
+            entry["exc_info"] = safe_stack(record.exc_info[1])
         elif isinstance(record.__dict__.get("error_type"), str):
             entry["error_type"] = record.__dict__["error_type"]
         return json.dumps(entry, ensure_ascii=False, default=str)
 
 
 class SpanErrorHandler(logging.Handler):
-    """Error tracking: an ERROR record with an exception marks the current span.
+    """Error tracking: an ERROR record with an exception or an ``error_type`` marks the span.
 
     Most failures are caught and classified (a failed run, a redelivery) rather than raised, and
-    only logged; this puts each of them on the trace of the run, with the type and the stack.
+    only logged; this puts each of them on the trace of the run, with the type and the stack. A
+    failure that is no exception (the watchdog deadline) logs ``extra={"error_type": ...}``.
     """
 
     def __init__(self) -> None:
         super().__init__(logging.ERROR)
 
     def emit(self, record: logging.LogRecord) -> None:
-        if not record.exc_info or record.exc_info[1] is None:
-            return
         span = trace.get_current_span()
-        if span.is_recording():
+        if not span.is_recording():
+            return
+        if record.exc_info and record.exc_info[1] is not None:
             mark_error(span, record.exc_info[1])
+            return
+        error_type = record.__dict__.get("error_type")
+        if isinstance(error_type, str):
+            span.set_attribute(ERROR_TYPE, error_type)
+            span.set_status(Status(StatusCode.ERROR, error_type))
 
 
 _HANDLER_NAME = "dmc-json"
 _SPAN_HANDLER_NAME = "dmc-span-errors"
 # uvicorn installs its own text handlers on these; they go through the root handler instead.
 _UVICORN_LOGGERS = ("uvicorn", "uvicorn.error", "uvicorn.access")
+
+
+# INFO of these is one line per HTTP call, with the URL and its query.
+_QUIET_LOGGERS = ("httpx", "httpcore")
 
 
 def configure_logging(service: str, *, level: int = logging.INFO) -> None:
@@ -173,40 +193,72 @@ def configure_logging(service: str, *, level: int = logging.INFO) -> None:
         uvicorn_logger = logging.getLogger(name)
         uvicorn_logger.handlers.clear()
         uvicorn_logger.propagate = True
+    for name in _QUIET_LOGGERS:
+        logging.getLogger(name).setLevel(logging.WARNING)
 
 
 # --- traces ---------------------------------------------------------------------------------
 
 
-def frames_only(stacktrace: str) -> str:
-    """The frames of a formatted traceback, without the ``Type: message`` lines.
+def safe_stack(error: BaseException) -> str:
+    """The stack of ``error`` built from its structure: frames and type names, no messages.
 
-    The message of an exception (and of each chained cause) can quote a payload: a pydantic
-    ``input_value`` of the model output, a URL with its query. Frames are code locations.
+    A message (of the exception, of a chained cause, of a group member) can quote a payload: a
+    pydantic ``input_value`` of the model output, a diff line, a URL with its query. Frames are
+    code locations, so they and the type names are all that is kept.
     """
-    lines = [
-        line
-        for line in stacktrace.splitlines()
-        if line.startswith(("Traceback (most recent call last)", "  "))
-    ]
+    lines: list[str] = []
+    seen: set[int] = set()
+
+    def walk(exc: BaseException, indent: str) -> None:
+        if id(exc) in seen:
+            return
+        seen.add(id(exc))
+        if exc.__cause__ is not None:
+            walk(exc.__cause__, indent)
+            lines.append(f"{indent}The above exception was the direct cause of:")
+        elif exc.__context__ is not None and not exc.__suppress_context__:
+            walk(exc.__context__, indent)
+            lines.append(f"{indent}During handling of the above exception, another occurred:")
+        if exc.__traceback__ is not None:
+            lines.append(f"{indent}Traceback (most recent call last):")
+            lines.extend(
+                f'{indent}  File "{frame.filename}", line {frame.lineno}, in {frame.name}'
+                for frame in traceback.extract_tb(exc.__traceback__)
+            )
+        lines.append(f"{indent}{type(exc).__qualname__}")
+        if isinstance(exc, BaseExceptionGroup):
+            for number, member in enumerate(exc.exceptions, 1):
+                lines.append(f"{indent}+-- {number}")
+                walk(member, indent + "  | ")
+
+    walk(error, "")
     return "\n".join(lines)
 
 
 def _allowed(
     attributes: Mapping[str, AttributeValue] | None, allowed: frozenset[str]
 ) -> dict[str, AttributeValue]:
+    attributes = attributes or {}
     kept: dict[str, AttributeValue] = {}
-    for key, value in (attributes or {}).items():
+    for key, value in attributes.items():
         if key not in allowed:
             continue
-        if key == "exception.stacktrace" and isinstance(value, str):
-            value = frames_only(value)
+        if key == "exception.stacktrace" and attributes.get(_SAFE_STACK) is not True:
+            continue
         kept[key] = value
     return kept
 
 
+def _status(status: Status) -> Status:
+    description = status.description
+    if status.status_code is not StatusCode.ERROR or description is None:
+        return Status(status.status_code)
+    return Status(StatusCode.ERROR, description if _TYPE_NAME.fullmatch(description) else None)
+
+
 def redact(span: ReadableSpan) -> ReadableSpan:
-    """A copy of ``span`` with only the allowed attributes on it and its events."""
+    """A copy of ``span`` with only the allowed attributes, events and status description."""
     events = [
         Event(event.name, _allowed(event.attributes, ALLOWED_EVENT_ATTRIBUTES), event.timestamp)
         for event in span.events
@@ -220,7 +272,7 @@ def redact(span: ReadableSpan) -> ReadableSpan:
         events=events,
         links=(),
         kind=span.kind,
-        status=span.status,
+        status=_status(span.status),
         start_time=span.start_time,
         end_time=span.end_time,
         instrumentation_scope=span.instrumentation_scope,
@@ -281,7 +333,14 @@ def mark_error(span: Span, error: BaseException) -> None:
         return
     with suppress(AttributeError):
         setattr(error, _RECORDED, marker)
-    span.record_exception(error)
+    span.add_event(
+        "exception",
+        {
+            "exception.type": type(error).__qualname__,
+            "exception.stacktrace": safe_stack(error),
+            _SAFE_STACK: True,
+        },
+    )
     span.set_attribute(ERROR_TYPE, type(error).__name__)
     span.set_status(Status(StatusCode.ERROR, type(error).__name__))
 
@@ -332,6 +391,15 @@ def inject_headers(headers: MutableMapping[str, Any]) -> MutableMapping[str, Any
 
 
 @contextmanager
+def _marking_errors(span: Span) -> Iterator[Span]:
+    try:
+        yield span
+    except Exception as error:
+        mark_error(span, error)
+        raise
+
+
+@contextmanager
 def publish_span(queue: str, run_id: UUID) -> Iterator[None]:
     with (
         bind_run_id(run_id),
@@ -344,9 +412,31 @@ def publish_span(queue: str, run_id: UUID) -> Iterator[None]:
                 "messaging.operation.type": "publish",
                 "messaging.destination.name": queue,
             },
-        ),
+            record_exception=False,
+            set_status_on_exception=False,
+        ) as span,
+        _marking_errors(span),
     ):
         yield
+
+
+@contextmanager
+def job_span(name: str, attributes: Mapping[str, AttributeValue] | None = None) -> Iterator[Span]:
+    """The span of one pass of a background loop (webhook replay, purge, rules refresh).
+
+    A pass catches its own errors and logs them; it marks the span with ``mark_error`` so that
+    each error is on the trace too. An error that escapes is marked here.
+    """
+    with (
+        tracer().start_as_current_span(
+            name,
+            attributes=attributes,
+            record_exception=False,
+            set_status_on_exception=False,
+        ) as span,
+        _marking_errors(span) as marked,
+    ):
+        yield marked
 
 
 @contextmanager
@@ -377,17 +467,18 @@ def consume_span(
             record_exception=False,
             set_status_on_exception=False,
         ) as span,
+        _marking_errors(span) as marked,
     ):
-        try:
-            yield span
-        except Exception as error:
-            mark_error(span, error)
-            raise
+        yield marked
 
 
 # --- HTTP (API) -------------------------------------------------------------------------------
 
 _UNTRACED_PATHS = frozenset({"/healthcheck"})
+# A method outside this set is the client's free text: semconv names it ``_OTHER``.
+_KNOWN_METHODS = frozenset(
+    {"CONNECT", "DELETE", "GET", "HEAD", "OPTIONS", "PATCH", "POST", "PUT", "TRACE"}
+)
 
 
 class TracingMiddleware:
@@ -401,6 +492,8 @@ class TracingMiddleware:
             await self._app(scope, receive, send)
             return
         method = str(scope.get("method", "GET"))
+        if method not in _KNOWN_METHODS:
+            method = "_OTHER"
         with tracer().start_as_current_span(
             method,
             kind=SpanKind.SERVER,

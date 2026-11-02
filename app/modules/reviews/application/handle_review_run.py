@@ -459,6 +459,12 @@ class HandleReviewRun:
             return DeliveryOutcome.ACK
         except _DeadlineReached:
             failure = RunFailure("deadline_exceeded", "the attempt watchdog stopped the run")
+            _LOGGER.error(
+                "Run %s attempt failed: %s",
+                claimed.run_id,
+                failure.error_code,
+                extra={"run_id": str(claimed.run_id), "error_type": failure.error_code},
+            )
         except Exception as exc:
             failure = classify_failure(exc)
             # Error tracking: the trace of the run gets the exception (docs/MONITORING.md §11).
