@@ -101,6 +101,8 @@ RETRYABLE_ERROR_CODES = (
             "llm_rate_limited",
             "llm_unavailable",
             "diff_fetch_failed",
+            "bitbucket_fetch_failed",
+            "bitbucket_commit_messages_fetch_failed",
             "commit_messages_fetch_failed",
             "verification_unavailable",
             "internal_error",
@@ -122,6 +124,12 @@ KNOWN_ERROR_CODES = (
         "budget_exceeded",
         "deadline_exceeded",
         "github_forbidden",
+        "bitbucket_source_unavailable",
+        "bitbucket_review_limit_exceeded",
+        "bitbucket_request_budget_exceeded",
+        "bitbucket_invalid_response",
+        "bitbucket_response_budget_exceeded",
+        "bitbucket_engine_unsupported",
         "github_publish_failed",
         "pr_base_changed",
         "lease_expired",
@@ -142,12 +150,18 @@ class RunFailure(Exception):
     """An attempt error carrying a code; ``classify_failure`` checks external codes."""
 
     def __init__(
-        self, error_code: str, message: str = "", *, retry_after: timedelta | None = None
+        self,
+        error_code: str,
+        message: str = "",
+        *,
+        retry_after: timedelta | None = None,
+        rate_limited: bool = False,
     ) -> None:
         super().__init__(f"{error_code}: {message}" if message else error_code)
         self.error_code = error_code
         self.message = message or error_code
         self.retry_after = retry_after
+        self.rate_limited = rate_limited
 
 
 class RequiredSourceUnavailable(RunFailure):

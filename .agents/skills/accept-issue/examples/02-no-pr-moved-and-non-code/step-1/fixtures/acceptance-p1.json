@@ -1,0 +1,43 @@
+{
+  "data": {
+    "viewer": {
+      "login": "executor"
+    },
+    "repository": {
+      "issue": {
+        "body": "## Background\n\nSynthetic issue for the accept-issue golden examples.\n\n## Acceptance Criteria\n\n- [ ] Страница настроек показывает статус индексации (скриншот)\n- [ ] Правило включено в ruleset ветки `main` (живая проверка, не код)\n- [x] Проверка обратной совместимости схемы — перенесён в #285 решением техлида\n\n## DoD Checklist\n\n- [ ] В issue описаны шаги ручной проверки правила\n",
+        "assignees": {
+          "nodes": [
+            {
+              "login": "maintainer"
+            }
+          ]
+        },
+        "comments": {
+          "pageInfo": {
+            "hasNextPage": false,
+            "endCursor": null
+          },
+          "nodes": [
+            {
+              "databaseId": 2000,
+              "author": {
+                "login": "executor"
+              },
+              "createdAt": "2026-10-30T10:00:00Z",
+              "body": "Правило включено: `gh api repos/larchanka-training/dmc-268-api-t6/rulesets` → ruleset `main` активен."
+            },
+            {
+              "databaseId": 2001,
+              "author": {
+                "login": "executor"
+              },
+              "createdAt": "2026-10-30T10:01:00Z",
+              "body": "Шаги проверки: открыть Settings → Rules, найти ruleset `main`, убедиться, что он Active."
+            }
+          ]
+        }
+      }
+    }
+  }
+}

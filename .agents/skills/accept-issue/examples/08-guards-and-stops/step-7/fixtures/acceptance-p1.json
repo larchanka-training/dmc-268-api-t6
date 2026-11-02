@@ -1,0 +1,35 @@
+{
+  "data": {
+    "viewer": {
+      "login": "axyi"
+    },
+    "repository": {
+      "issue": {
+        "body": "## Background\n\nSynthetic issue for the accept-issue golden examples.\n\n## Acceptance Criteria\n\n- [ ] `GET /health` отвечает 200 и версией сборки\n- [ ] Повтор запроса с тем же `Idempotency-Key` не создаёт вторую запись\n- [x] Проверка обратной совместимости схемы — перенесён в #285 решением техлида\n\n## DoD Checklist\n\n- [ ] Гейты CI зелёные\n- [ ] PR одобрены на текущей голове, все треды закрыты\n",
+        "assignees": {
+          "nodes": [
+            {
+              "login": "executor"
+            }
+          ]
+        },
+        "comments": {
+          "pageInfo": {
+            "hasNextPage": false,
+            "endCursor": null
+          },
+          "nodes": [
+            {
+              "databaseId": 8002,
+              "author": {
+                "login": "executor"
+              },
+              "createdAt": "2026-10-30T10:05:00Z",
+              "body": "Готово, смотрите PR."
+            }
+          ]
+        }
+      }
+    }
+  }
+}

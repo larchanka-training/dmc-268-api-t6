@@ -7,7 +7,7 @@ from datetime import datetime
 from hashlib import sha256
 from uuid import UUID, uuid4
 
-from sqlalchemy import and_, func, or_, select, update
+from sqlalchemy import and_, func, literal_column, or_, select, union_all, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -18,6 +18,11 @@ from app.common.infrastructure.db.enums import (
     WaitForCi,
 )
 from app.common.infrastructure.db.unit_of_work import SqlAlchemyUnitOfWork
+from app.modules.integrations.bitbucket.infrastructure.models import (
+    BitbucketConnection,
+    BitbucketRepositoryWebhookSecret,
+    BitbucketRunOrigin,
+)
 from app.modules.integrations.gitlab.application.request_credentials import GitLabRequestUnavailable
 from app.modules.integrations.gitlab.infrastructure.models import (
     GitLabConnection,
@@ -26,6 +31,7 @@ from app.modules.integrations.gitlab.infrastructure.models import (
 from app.modules.integrations.gitlab.infrastructure.request_credentials import (
     active_gitlab_target_metadata,
 )
+from app.modules.integrations.webhooks.infrastructure.models import WebhookEvent
 from app.modules.repositories.infrastructure.models import (
     ProviderInstallation,
     Repository,
@@ -38,12 +44,18 @@ from app.modules.reviews.application.determine_ci_eligibility import (
 )
 from app.modules.reviews.application.project_github_pull_request import PullRequestState
 from app.modules.reviews.application.try_enqueue_webhook_run import (
+    UNSET,
     ActiveRunBlocker,
     CandidateMiss,
     DuplicateReason,
     PendingRunMessage,
     RunInsertCandidate,
+    UnsetType,
 )
+from app.modules.reviews.infrastructure.bitbucket_eligibility_candidates import (
+    read_bitbucket_eligibility_candidate,
+)
+from app.modules.reviews.infrastructure.bitbucket_run_origin import active_bitbucket_run_origin
 from app.modules.reviews.infrastructure.gitlab_eligibility_candidates import (
     read_gitlab_eligibility_candidate,
     read_gitlab_eligibility_target,
@@ -57,7 +69,9 @@ class SqlAlchemyWebhookRunStore:
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
 
-    async def lock_candidate(self, code_change_id: UUID) -> RunInsertCandidate | CandidateMiss:
+    async def lock_candidate(
+        self, code_change_id: UUID, *, allow_unconfirmed_bitbucket: bool = False
+    ) -> RunInsertCandidate | CandidateMiss:
         # A nonlocking provider route is advisory; each branch rechecks under locks.
         try:
             provider = await self._session.scalar(
@@ -68,7 +82,7 @@ class SqlAlchemyWebhookRunStore:
             )
         except Exception:
             raise GitLabRequestUnavailable() from None
-        gitlab_ci: EligibilityCandidate | None = None
+        provider_ci: EligibilityCandidate | None = None
         installation: ProviderInstallation | None
         pr: CodeChange | None
         repository: Repository | None
@@ -76,7 +90,14 @@ class SqlAlchemyWebhookRunStore:
             locked = await self._lock_gitlab(code_change_id)
             if isinstance(locked, CandidateMiss):
                 return locked
-            gitlab_ci, pr, repository, installation = locked
+            provider_ci, pr, repository, installation = locked
+        elif provider == "bitbucket":
+            locked = await self._lock_bitbucket(
+                code_change_id, allow_unconfirmed=allow_unconfirmed_bitbucket
+            )
+            if isinstance(locked, CandidateMiss):
+                return locked
+            provider_ci, pr, repository, installation = locked
         else:
             # Installation locks precede PR/Run locks, matching retirement and OAuth apply.
             installation = await self._session.scalar(
@@ -132,7 +153,7 @@ class SqlAlchemyWebhookRunStore:
             )
         )
         return RunInsertCandidate(
-            ci=gitlab_ci
+            ci=provider_ci
             or EligibilityCandidate(
                 code_change_id=pr.id,
                 installation_external_id=installation.external_id,
@@ -170,8 +191,55 @@ class SqlAlchemyWebhookRunStore:
             max_comments=repository.max_comments,
             conventions_prompt_version_id=conventions_prompt_version_id,
             verifier_prompt_version_id=verifier_prompt_version_id,
-            provider="gitlab" if gitlab_ci is not None else "github",
+            provider=provider if provider in {"gitlab", "bitbucket"} else "github",
         )
+
+    async def _lock_bitbucket(
+        self, code_change_id: UUID, *, allow_unconfirmed: bool = False
+    ) -> tuple[EligibilityCandidate, CodeChange, Repository, ProviderInstallation] | CandidateMiss:
+        preliminary = await read_bitbucket_eligibility_candidate(
+            self._session, code_change_id, require_confirmed_webhook=not allow_unconfirmed
+        )
+        if preliminary is None or preliminary.identity is None:
+            return CandidateMiss.MISSING_INSTALLATION
+        identity = preliminary.identity
+        levels = (
+            select(Workspace.id).where(Workspace.id == identity.workspace_id),
+            select(ProviderInstallation.id).where(
+                ProviderInstallation.id == identity.origin_provider_installation_id
+            ),
+            select(BitbucketConnection.provider_installation_id).where(
+                BitbucketConnection.provider_installation_id
+                == identity.origin_provider_installation_id
+            ),
+            select(Repository.id).where(Repository.id == identity.repository_id),
+            select(BitbucketRepositoryWebhookSecret.repository_id).where(
+                BitbucketRepositoryWebhookSecret.repository_id == identity.repository_id
+            ),
+        )
+        for statement in levels:
+            if await self._session.scalar(statement.with_for_update()) is None:
+                return CandidateMiss.MISSING_INSTALLATION
+        pr = await self._session.scalar(
+            select(CodeChange).where(CodeChange.id == code_change_id).with_for_update()
+        )
+        if pr is None:
+            return CandidateMiss.PULL_REQUEST_GONE
+        repository = await self._session.get(
+            Repository, identity.repository_id, populate_existing=True
+        )
+        installation = await self._session.get(
+            ProviderInstallation, identity.origin_provider_installation_id, populate_existing=True
+        )
+        candidate = await read_bitbucket_eligibility_candidate(
+            self._session,
+            code_change_id,
+            expected_identity=identity,
+            require_confirmed_webhook=not allow_unconfirmed,
+        )
+        if candidate is None or repository is None or installation is None:
+            return CandidateMiss.MISSING_INSTALLATION
+        return candidate, pr, repository, installation
 
     async def _lock_gitlab(
         self, code_change_id: UUID
@@ -229,7 +297,11 @@ class SqlAlchemyWebhookRunStore:
         return ci, pr, repository, installation
 
     async def insert_webhook_run(
-        self, candidate: RunInsertCandidate, now: datetime
+        self,
+        candidate: RunInsertCandidate,
+        now: datetime,
+        *,
+        triggered_by: str | None | UnsetType = UNSET,
     ) -> PendingRunMessage | DuplicateReason | ActiveRunBlocker:
         code_change_id = candidate.ci.code_change_id
         active = await self._session.scalar(
@@ -240,6 +312,7 @@ class SqlAlchemyWebhookRunStore:
         )
         if active is not None:
             return ActiveRunBlocker(active.head_sha, active.cancel_requested)
+        login = await self._push_author(candidate) if triggered_by is UNSET else triggered_by
         idempotency_key = sha256(
             f"webhook:{code_change_id}:{candidate.ci.head_sha}".encode()
         ).hexdigest()
@@ -268,6 +341,7 @@ class SqlAlchemyWebhookRunStore:
                 cancel_requested=False,
                 message_published_at=None,
                 created_at=now,
+                triggered_by=login,
             )
             # ``head_already_reviewed`` is inferred from any unique violation here. That is safe
             # only because the PR row lock and the active-Run pre-check above make
@@ -278,7 +352,61 @@ class SqlAlchemyWebhookRunStore:
         )
         if inserted is None:
             return DuplicateReason.HEAD_ALREADY_REVIEWED
+        if candidate.provider == "bitbucket":
+            identity = candidate.ci.identity
+            if identity is None or identity.repository_uuid is None:
+                raise ValueError("Bitbucket run identity is missing")
+            assert identity.binding_generation is not None
+            assert identity.credential_generation is not None
+            self._session.add(
+                BitbucketRunOrigin(
+                    run_id=inserted,
+                    workspace_id=identity.workspace_id,
+                    provider_installation_id=identity.origin_provider_installation_id,
+                    repository_id=identity.repository_id,
+                    repository_uuid=identity.repository_uuid,
+                    binding_generation=identity.binding_generation,
+                    credential_generation=identity.credential_generation,
+                    pr_number=candidate.pr_number,
+                    head_sha=candidate.ci.head_sha,
+                )
+            )
+            await self._session.flush()
         return PendingRunMessage.from_candidate(inserted, candidate, now)
+
+    async def _push_author(self, candidate: RunInsertCandidate) -> str | None:
+        if candidate.provider != "github":
+            return None
+        login = WebhookEvent.payload["sender"]["login"].as_string()
+        received = WebhookEvent.received_at
+        shared = (
+            WebhookEvent.payload.is_not(None),
+            WebhookEvent.installation_external_id == candidate.ci.installation_external_id,
+            WebhookEvent.payload["repository"]["id"].as_string()
+            == str(candidate.repository_external_id),
+        )
+        # Fixed paths and event predicates must stay literal: the receipt indexes
+        # are partial expression indexes, including under a generic PostgreSQL plan.
+        pull_head = WebhookEvent.payload.op("#>>")(
+            literal_column("'{pull_request,head,sha}'::text[]")
+        )
+        push_after = WebhookEvent.payload.op("#>>")(literal_column("'{after}'::text[]"))
+        synchronize = select(login.label("login"), received.label("received_at")).where(
+            WebhookEvent.event == literal_column("'pull_request'"),
+            WebhookEvent.action == literal_column("'synchronize'"),
+            pull_head == candidate.ci.head_sha,
+            *shared,
+        )
+        push = select(login.label("login"), received.label("received_at")).where(
+            WebhookEvent.event == literal_column("'push'"),
+            push_after == candidate.ci.head_sha,
+            *shared,
+        )
+        receipts = union_all(synchronize, push).subquery()
+        found = await self._session.scalar(
+            select(receipts.c.login).order_by(receipts.c.received_at.desc()).limit(1)
+        )
+        return found if isinstance(found, str) else None
 
     async def notify_run_updated(self, run_id: UUID, workspace_id: UUID, status: str) -> None:
         payload = json.dumps(
@@ -331,6 +459,11 @@ class SqlAlchemyWebhookRunStore:
                         and_(
                             ProviderInstallation.provider == "gitlab",
                             gitlab.c.origin_provider_installation_id.is_not(None),
+                            Repository.wait_for_ci == WaitForCi.NEVER,
+                        ),
+                        and_(
+                            ProviderInstallation.provider == "bitbucket",
+                            active_bitbucket_run_origin(),
                             Repository.wait_for_ci == WaitForCi.NEVER,
                         ),
                     ),

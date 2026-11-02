@@ -432,3 +432,112 @@ def test_public_builder_refuses_changed_original_authority_with_pool_one(
             assert bool(calls) is (mutation == "unchanged")
 
     asyncio.run(scenario())
+
+
+def test_public_worker_fails_a_gitlab_run_on_an_invalid_rules_md_without_llm(
+    worker_stack: tuple[tuple[str, str, UUID], str],
+) -> None:
+    # RULES_FORMAT_SPEC §9 on a GitLab merge request: a review-ignore block without its
+    # closing fence in the base `.review/rules.md` fails the run once in `policy.load`,
+    # before the conventions model, and nothing is published.
+    database, rabbit = worker_stack
+    url, schema, _ = database
+
+    async def scenario() -> None:
+        async with asyncio.timeout(40), rig(database) as fixture:
+            seeded = await pending_run(fixture)
+            async with fixture.sessions.begin() as session:
+                await session.execute(
+                    text(
+                        "UPDATE runs SET available_at=now(),created_at=now(),base_ref='main' "
+                        "WHERE id=:id"
+                    ),
+                    {"id": seeded.run_id},
+                )
+                # A servable conventions prompt: without the policy error the model is called.
+                await session.execute(
+                    text(
+                        "INSERT INTO prompt_versions (id,key,version,content,checksum,is_active) "
+                        "VALUES (:id,'review.conventions',1,'conventions',:checksum,true)"
+                    ),
+                    {"id": uuid4(), "checksum": "c" * 64},
+                )
+            source = SourceRouter()
+            source.vcs.canonical["source_project_id"] = 17
+            source.vcs.canonical["changes_count"] = "1"
+            source.vcs.files = [
+                {
+                    "old_path": "src/app.py",
+                    "new_path": "src/app.py",
+                    "new_file": False,
+                    "deleted_file": False,
+                    "renamed_file": False,
+                    "diff": "@@ -1 +1 @@\n-old\n+new\n",
+                }
+            ]
+            # The router's default rules.md without its closing fence.
+            source.files[".review/rules.md"] = ("2" * 40, b"```review-ignore\ngenerated/**\n")
+            writes: list[str] = []
+            gh_calls: list[str] = []
+            llm = FakeLlm()
+
+            async def external(request: httpx.Request) -> httpx.Response:
+                assert request.url.host == "gitlab.com"
+                if request.method != "GET":
+                    writes.append(f"{request.method} {request.url.path}")
+                return source.response(request)
+
+            def reject_github(request: httpx.Request) -> httpx.Response:
+                gh_calls.append(str(request.url))
+                raise AssertionError("GitLab must never call GitHub")
+
+            worker = asyncio.create_task(
+                run_worker(
+                    WorkerSettings.from_environment(
+                        runtime_env(f"{url}?options=-csearch_path%3D{schema}", rabbit)
+                    ),
+                    delays=SHORT_DELAYS,
+                    gitlab_transport_factory=lambda: httpx.MockTransport(external),
+                    github_transport=httpx.MockTransport(reject_github),
+                    llm_transport=httpx.MockTransport(llm),
+                )
+            )
+            try:
+                async with amqp_channels(rabbit, SHORT_DELAYS) as channels:
+                    await publish_run(channels, fixture.sessions, seeded.run_id)
+                state = await wait_for_state(fixture.sessions, seeded.run_id, "succeeded", "failed")
+                # §9: failed at once, no retry.
+                assert state == ("failed", 1, "policy_ignore_block_unclosed")
+                assert llm.tasks == []
+                assert writes == []
+                assert gh_calls == []
+                async with fixture.sessions() as session:
+                    loads = (
+                        await session.scalars(
+                            text(
+                                "SELECT response FROM run_actions "
+                                "WHERE run_id=:id AND tool='policy.load'"
+                            ),
+                            {"id": seeded.run_id},
+                        )
+                    ).all()
+                    snapshots = await session.scalar(
+                        text("SELECT count(*) FROM run_policy_snapshots WHERE run_id=:id"),
+                        {"id": seeded.run_id},
+                    )
+                # §9: the diagnostic is in the trace of `policy.load` and names the document
+                # and the pinned base; a failed load stores no snapshot.
+                [load] = loads
+                diagnostic = load["error"]["diagnostic"]
+                assert (
+                    diagnostic["code"],
+                    diagnostic["source_path"],
+                    diagnostic["policy_base_sha"],
+                ) == ("policy_ignore_block_unclosed", ".review/rules.md", "b" * 40)
+                assert snapshots == 0
+            finally:
+                worker.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await worker
+
+    asyncio.run(scenario())

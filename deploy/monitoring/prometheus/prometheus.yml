@@ -1,5 +1,6 @@
 # Prometheus of the monitoring stack (docs/MONITORING.md). Every target is a container name on a
-# docker network of the host; nothing is scraped over a public address.
+# docker network of the host; the public names are reached only by the probes of the blackbox
+# exporter, which Prometheus scrapes on the project network like the other exporters.
 global:
   scrape_interval: 30s
   evaluation_interval: 30s
@@ -33,6 +34,8 @@ scrape_configs:
       - targets: ["node-exporter:9100"]
 
   - job_name: cadvisor
+    # cAdvisor timestamps its samples: without this a stopped container lingers for 5 minutes.
+    track_timestamps_staleness: true
     static_configs:
       - targets: ["cadvisor:8080"]
     metric_relabel_configs:
@@ -69,3 +72,24 @@ scrape_configs:
   - job_name: caddy
     file_sd_configs:
       - files: ["/etc/prometheus/targets/caddy.json"]
+
+  # HTTPS probes of the public names through the edge proxy, once a minute: Prometheus asks the
+  # blackbox exporter to probe each URL of the file and labels the result with it. deploy.sh writes
+  # the names in edge mode only; on a host without the proxy the file is an empty list. The file is
+  # not in the repository: the upload would replace it, and a deploy failing before deploy.sh writes
+  # it would leave the names unprobed. Without the file (promtool warns) the job has no target.
+  - job_name: blackbox
+    scrape_interval: 1m
+    scrape_timeout: 20s
+    metrics_path: /probe
+    params:
+      module: [https_2xx]
+    file_sd_configs:
+      - files: ["/etc/prometheus/targets/probes.json"]
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: __param_target
+      - source_labels: [__param_target]
+        target_label: instance
+      - target_label: __address__
+        replacement: blackbox-exporter:9115

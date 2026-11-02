@@ -1,0 +1,51 @@
+{
+  "checkboxes": {
+    "ac": {
+      "checked": 0,
+      "items": [],
+      "total": 0
+    },
+    "dod": {
+      "checked": 0,
+      "items": [],
+      "total": 0
+    },
+    "outside": 0
+  },
+  "closing": {
+    "events": [
+      {
+        "actor": "axyi",
+        "at": "2026-10-03T09:00:00Z",
+        "closer": "merge",
+        "closer_ref": "larchanka-training/dmc-268-ui-t6#70",
+        "kind": "closed",
+        "state_reason": "COMPLETED"
+      },
+      {
+        "actor": "axyi",
+        "at": "2026-10-03T10:00:00Z",
+        "kind": "reopened"
+      },
+      {
+        "actor": "axyi",
+        "at": "2026-10-03T11:00:00Z",
+        "closer": "manual",
+        "closer_ref": null,
+        "kind": "closed",
+        "state_reason": "COMPLETED"
+      }
+    ],
+    "ever_closed_by_merge": true,
+    "last_closer": "manual"
+  },
+  "issue": {
+    "ref": "larchanka-training/dmc-268-api-t6#13",
+    "state": "CLOSED",
+    "state_reason": "COMPLETED",
+    "title": "Synthetic issue, events out of order",
+    "url": "https://github.com/larchanka-training/dmc-268-api-t6/issues/13"
+  },
+  "prs": [],
+  "schema": 1
+}

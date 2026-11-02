@@ -1,0 +1,60 @@
+{
+  "data": {
+    "repository": {
+      "issue": {
+        "title": "Synthetic: accept-issue golden example",
+        "url": "https://github.com/larchanka-training/dmc-268-api-t6/issues/500",
+        "state": "OPEN",
+        "stateReason": null,
+        "body": "## Background\n\nSynthetic issue for the accept-issue golden examples.\n\n## Acceptance Criteria\n\n- [ ] `GET /health` отвечает 200 и версией сборки\n- [ ] Повтор запроса с тем же `Idempotency-Key` не создаёт вторую запись\n- [ ] Правило включено в ruleset ветки `main`\n\n## DoD Checklist\n\n- [ ] Гейты CI зелёные\n- [ ] PR одобрены на текущей голове, все треды закрыты\n",
+        "timelineItems": {
+          "pageInfo": {
+            "hasNextPage": false,
+            "endCursor": null
+          },
+          "nodes": [
+            {
+              "__typename": "CrossReferencedEvent",
+              "willCloseTarget": false,
+              "source": {
+                "__typename": "PullRequest",
+                "number": 901,
+                "title": "feat(api): add GET /health with the build version",
+                "url": "https://github.com/larchanka-training/dmc-268-api-t6/pull/901",
+                "body": "## What\n\nAdds `GET /health` and the idempotency key (Part 1).\n\n## Refs\n\nRefs #500\n",
+                "state": "MERGED",
+                "mergedAt": "2026-10-29T12:00:00Z",
+                "headRefOid": "0000000000000000000000000000000000000385",
+                "repository": {
+                  "nameWithOwner": "larchanka-training/dmc-268-api-t6"
+                },
+                "commits": {
+                  "nodes": [
+                    {
+                      "commit": {
+                        "statusCheckRollup": {
+                          "state": "SUCCESS"
+                        }
+                      }
+                    }
+                  ]
+                },
+                "reviewThreads": {
+                  "pageInfo": {
+                    "hasNextPage": false,
+                    "endCursor": null
+                  },
+                  "nodes": [
+                    {
+                      "isResolved": true
+                    }
+                  ]
+                }
+              }
+            }
+          ]
+        }
+      }
+    }
+  }
+}

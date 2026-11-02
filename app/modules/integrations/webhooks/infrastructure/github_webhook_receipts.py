@@ -28,7 +28,7 @@ class SqlAlchemyWebhookReceiptOperations:
     """Provider-bound lease/retention mechanics, without provider-specific side effects."""
 
     def __init__(self, session: AsyncSession, *, provider: str) -> None:
-        if provider not in {"github", "gitlab"}:
+        if provider not in {"github", "gitlab", "bitbucket"}:
             raise ValueError("unsupported webhook provider")
         self._session = session
         self._provider = provider
@@ -57,6 +57,9 @@ class SqlAlchemyWebhookReceiptOperations:
                 WebhookEvent.payload,
                 WebhookEvent.provider,
                 WebhookEvent.provider_installation_id,
+                WebhookEvent.bitbucket_repository_id,
+                WebhookEvent.bitbucket_binding_generation,
+                WebhookEvent.bitbucket_webhook_generation,
             )
         )
         row = (await self._session.execute(statement)).one_or_none()
@@ -68,6 +71,9 @@ class SqlAlchemyWebhookReceiptOperations:
             payload_json=json.dumps(row[1]),
             provider=cast(str, row[2]),
             origin_provider_installation_id=cast(UUID | None, row[3]),
+            origin_repository_id=cast(UUID | None, row[4]),
+            origin_binding_generation=cast(int | None, row[5]),
+            origin_webhook_generation=cast(int | None, row[6]),
         )
 
     async def mark_projected(self, delivery_id: str, token: UUID, at: datetime) -> None:

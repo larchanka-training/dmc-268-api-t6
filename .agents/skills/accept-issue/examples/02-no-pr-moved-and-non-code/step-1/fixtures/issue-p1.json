@@ -1,0 +1,20 @@
+{
+  "data": {
+    "repository": {
+      "issue": {
+        "title": "Synthetic: accept-issue golden example",
+        "url": "https://github.com/larchanka-training/dmc-268-api-t6/issues/500",
+        "state": "OPEN",
+        "stateReason": null,
+        "body": "## Background\n\nSynthetic issue for the accept-issue golden examples.\n\n## Acceptance Criteria\n\n- [ ] Страница настроек показывает статус индексации (скриншот)\n- [ ] Правило включено в ruleset ветки `main` (живая проверка, не код)\n- [x] Проверка обратной совместимости схемы — перенесён в #285 решением техлида\n\n## DoD Checklist\n\n- [ ] В issue описаны шаги ручной проверки правила\n",
+        "timelineItems": {
+          "pageInfo": {
+            "hasNextPage": false,
+            "endCursor": null
+          },
+          "nodes": []
+        }
+      }
+    }
+  }
+}

@@ -82,7 +82,8 @@ jobs:
         uses: actions/checkout@v4
 
       # Prometheus config and alert rules (with their unit tests), both Alertmanager variants, the
-      # Telegram template, the compose files and the dashboards, with the images the host runs.
+      # Telegram template, the blackbox exporter config, the compose files and the dashboards, with
+      # the images the host runs.
       - name: Validate monitoring stack
         run: scripts/validate_monitoring.sh
 
@@ -142,6 +143,17 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Check docs/plans is untracked
+        # Plans are local working files (#265); a PR merged after their removal must not
+        # bring docs/plans/ back.
+        run: |
+          tracked="$(git ls-files docs/plans)"
+          if [ -n "$tracked" ]; then
+            echo "::error::docs/plans/ must stay untracked: plans are local working files (#265)"
+            printf '%s\n' "$tracked"
+            exit 1
+          fi
 
       - name: Setup uv
         uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
@@ -764,8 +776,11 @@ jobs:
           immutable="${{ steps.tags.outputs.immutable }}"
           docker tag "${LOCAL_IMAGE}" "${immutable}"
           docker push "${immutable}"
-          image_ref="$(docker inspect --format='{{index .RepoDigests 0}}' "${immutable}")"
-          if [[ -z "${image_ref}" || "${image_ref}" == "<no value>" ]]; then
+          # The containerd image store also lists a digest for the loaded local name:
+          # keep only the pushed repository's entry.
+          image_ref="$(docker inspect --format='{{range .RepoDigests}}{{println .}}{{end}}' "${immutable}" \
+            | awk -v repository="${immutable%:*}" 'index($0, repository "@sha256:") == 1')"
+          if [[ ! "${image_ref}" =~ ^[^[:space:]]+@sha256:[a-f0-9]{64}$ ]]; then
             echo "failed to resolve pushed image digest for ${immutable}" >&2
             exit 1
           fi
@@ -780,9 +795,14 @@ jobs:
       contents: read
       packages: read
     needs: push-image
+    # One staging-deploy member at a time, FIFO (AC5 of #308): with the default queue a pending
+    # member is cancelled when the next joins, queue: max keeps it waiting. Every member (here,
+    # promote-staging, rollback.yml, deploy-prod.yml) uses it; never mix queue modes. The
+    # workflow-level group above still replaces a pending CI/CD run on main with the next push.
     concurrency:
       group: staging-deploy
       cancel-in-progress: false
+      queue: max
     environment:
       name: staging
       url: ${{ steps.target.outputs.base_url }}
@@ -924,10 +944,13 @@ jobs:
           GITLAB_ALLOWED_ORIGINS: ${{ vars.GITLAB_ALLOWED_ORIGINS }}
           GITLAB_PRIVATE_ORIGINS: ${{ vars.GITLAB_PRIVATE_ORIGINS }}
           GITLAB_WEBHOOK_INTAKE_ENABLED: ${{ vars.GITLAB_WEBHOOK_INTAKE_ENABLED }}
+          BITBUCKET_CREDENTIAL_KEYS: ${{ secrets.BITBUCKET_CREDENTIAL_KEYS }}
+          BITBUCKET_ACTIVE_KEY_ID: ${{ vars.BITBUCKET_ACTIVE_KEY_ID }}
+          BITBUCKET_WEBHOOK_BASE_URL: ${{ vars.BITBUCKET_WEBHOOK_BASE_URL }}
         run: |
           # One opaque line of base64 so multi-line PEM values survive the SSH action and the shell;
           # deploy/scripts/env-file.sh decodes it on the host. Unset secrets are left out entirely.
-          names=(GITHUB_APP_ID GITHUB_APP_PRIVATE_KEY GITHUB_WEBHOOK_SECRET GITHUB_CLIENT_ID GITHUB_CLIENT_SECRET AUTH_JWT_PRIVATE_KEY AUTH_JWT_PUBLIC_KEY GITHUB_APP_BOT_LOGIN PORTAL_URL LLM_API_KEYS LLM_BASE_URL LLM_MODEL LLM_FALLBACK_MODEL LLM_VERIFIER_MODEL LLM_VERIFIER_FALLBACK_MODEL GITLAB_CREDENTIAL_KEYS GITLAB_ACTIVE_KEY_ID GITLAB_ALLOWED_ORIGINS GITLAB_PRIVATE_ORIGINS GITLAB_WEBHOOK_INTAKE_ENABLED)
+          names=(GITHUB_APP_ID GITHUB_APP_PRIVATE_KEY GITHUB_WEBHOOK_SECRET GITHUB_CLIENT_ID GITHUB_CLIENT_SECRET AUTH_JWT_PRIVATE_KEY AUTH_JWT_PUBLIC_KEY GITHUB_APP_BOT_LOGIN PORTAL_URL LLM_API_KEYS LLM_BASE_URL LLM_MODEL LLM_FALLBACK_MODEL LLM_VERIFIER_MODEL LLM_VERIFIER_FALLBACK_MODEL GITLAB_CREDENTIAL_KEYS GITLAB_ACTIVE_KEY_ID GITLAB_ALLOWED_ORIGINS GITLAB_PRIVATE_ORIGINS GITLAB_WEBHOOK_INTAKE_ENABLED BITBUCKET_CREDENTIAL_KEYS BITBUCKET_ACTIVE_KEY_ID BITBUCKET_WEBHOOK_BASE_URL)
           bundle="$(
             for name in "${names[@]}"; do
               if [[ -n "${!name}" ]]; then
@@ -1152,8 +1175,8 @@ jobs:
     permissions:
       contents: read
     needs: deploy-staging
-    # Its own group: in staging-deploy it would wait next to promote-staging, and the next merge's
-    # pending deploy would cancel whichever of the two was still pending. It only reads the app stack.
+    # Its own group: in staging-deploy it would hold the VPS lock for the monitoring deploy and
+    # delay promote-staging and every queued member behind it; it only reads the app stack.
     concurrency:
       group: staging-monitoring
       cancel-in-progress: false
@@ -1184,6 +1207,11 @@ jobs:
           API_DIR: ${{ needs.deploy-staging.outputs.app_dir }}
           # Grafana behind the edge proxy on its own host (deploy/edge/Caddyfile); unused in ports mode.
           GRAFANA_ROOT_URL: https://grafana.${{ vars.APP_DOMAIN }}/
+          # The public names the blackbox exporter probes (staging-api., staging-ui.); unused in ports mode.
+          APP_DOMAIN: ${{ vars.APP_DOMAIN }}
+          # Production names probed too: "api", "ui" or "api ui" (Environment variable, empty by default).
+          # Set once the name serves production, then re-run Deploy monitoring. Empty: staging names only.
+          PROBE_PROD_HOSTS: ${{ vars.PROBE_PROD_HOSTS }}
           # Alerts of the team channel (docs/SECRETS.md): Environment secret and variable. Both empty:
           # the stack runs and alerts are visible in Alertmanager, but nothing is delivered.
           ALERT_TELEGRAM_BOT_TOKEN: ${{ secrets.ALERT_TELEGRAM_BOT_TOKEN }}
@@ -1206,7 +1234,7 @@ jobs:
           password: ${{ needs.deploy-staging.outputs.mode == 'course' && secrets.VPS_DMC268_P || '' }}
           fingerprint: ${{ vars.STAGING_SSH_FINGERPRINT }}
           debug: false
-          envs: MONITORING_DIR,API_DIR,GRAFANA_ROOT_URL,ALERT_TELEGRAM_BOT_TOKEN,ALERT_TELEGRAM_CHAT_ID,BACKUP_S3_ENDPOINT,BACKUP_S3_BUCKET,BACKUP_S3_ACCESS_KEY_ID,BACKUP_S3_SECRET_ACCESS_KEY,BACKUP_ENCRYPTION_PASSPHRASE,GRAFANA_ADMIN_PASSWORD
+          envs: MONITORING_DIR,API_DIR,GRAFANA_ROOT_URL,APP_DOMAIN,PROBE_PROD_HOSTS,ALERT_TELEGRAM_BOT_TOKEN,ALERT_TELEGRAM_CHAT_ID,BACKUP_S3_ENDPOINT,BACKUP_S3_BUCKET,BACKUP_S3_ACCESS_KEY_ID,BACKUP_S3_SECRET_ACCESS_KEY,BACKUP_ENCRYPTION_PASSPHRASE,GRAFANA_ADMIN_PASSWORD
           script: |
             set -euo pipefail
             set +o xtrace
@@ -1224,10 +1252,11 @@ jobs:
       - push-image
       - deploy-staging
     # Same lock as deploy-staging and the rollback workflow: a manual rollback cannot run
-    # between the VM check below and the tag push.
+    # between the VM check below and the tag push. queue: max as in deploy-staging (AC5).
     concurrency:
       group: staging-deploy
       cancel-in-progress: false
+      queue: max
     # Terraform SSH host, port and key are scoped to the staging environment.
     environment:
       name: staging

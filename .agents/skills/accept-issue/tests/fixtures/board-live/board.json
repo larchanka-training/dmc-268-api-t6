@@ -1,0 +1,36 @@
+{
+  "data": {
+    "organization": {
+      "projectV2": {
+        "id": "PVT_kwDODlG58s4BibmC",
+        "field": {
+          "__typename": "ProjectV2SingleSelectField",
+          "id": "PVTSSF_lADODlG58s4BibmCzhhTr_8",
+          "name": "Status",
+          "options": [
+            {
+              "id": "f75ad846",
+              "name": "Todo"
+            },
+            {
+              "id": "47fc9ee4",
+              "name": "In Progress"
+            },
+            {
+              "id": "acf4cb6d",
+              "name": "On Review"
+            },
+            {
+              "id": "b6b56684",
+              "name": "AC Check"
+            },
+            {
+              "id": "98236657",
+              "name": "Done"
+            }
+          ]
+        }
+      }
+    }
+  }
+}

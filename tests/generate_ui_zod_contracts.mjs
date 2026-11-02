@@ -38,12 +38,21 @@ registerHooks({
 })
 
 const load = (path) => import(pathToFileURL(resolve(uiDir, path)).href)
+const requestedNames = process.env.SCHEMA_NAMES?.split(',')
 
 const { z } = await load('node_modules/zod/index.js')
+const bitbucket =
+  requestedNames === undefined || requestedNames.some((name) => name.startsWith('bitbucket'))
+    ? await load('src/features/bitbucket-connections/model/schemas.ts')
+    : null
 const diff = await load('src/entities/diff/model/schemas.ts')
 const repository = await load('src/entities/repository/model/schemas.ts')
 const review = await load('src/entities/review/model/schemas.ts')
 const run = await load('src/entities/run/model/schemas.ts')
+const metrics =
+  requestedNames === undefined || requestedNames.includes('metricsSummary')
+    ? await load('src/entities/metrics/model/schemas.ts')
+    : null
 const user = await load('src/entities/user/model/schemas.ts')
 
 const git = (...args) => execFileSync('git', ['-C', uiDir, ...args], { encoding: 'utf8' }).trim()
@@ -69,9 +78,24 @@ const sources = {
   fileSlice: diff.FileSliceSchema,
   authSession: user.AuthSessionSchema,
   me: user.MeSchema,
+  ...(metrics ? { metricsSummary: metrics.MetricsSummarySchema } : {}),
+  ...(bitbucket
+    ? {
+        bitbucketDiscoveryRequest: bitbucket.BitbucketDiscoveryRequestSchema,
+        bitbucketDiscoveredRepository: bitbucket.BitbucketDiscoveredRepositorySchema,
+        bitbucketDiscoveryResponse: bitbucket.BitbucketDiscoveryResponseSchema,
+        bitbucketConnectRequest: bitbucket.BitbucketConnectRequestSchema,
+        bitbucketWebhookSetup: bitbucket.BitbucketWebhookSetupSchema,
+        bitbucketConnectResponse: bitbucket.BitbucketConnectResponseSchema,
+        bitbucketConnectionItem: bitbucket.BitbucketConnectionItemSchema,
+        bitbucketConnectionList: bitbucket.BitbucketConnectionListSchema,
+        bitbucketCredentialRotateRequest: bitbucket.BitbucketCredentialRotateRequestSchema,
+        bitbucketCredentialRotateResponse: bitbucket.BitbucketCredentialRotateResponseSchema,
+      }
+    : {}),
 }
 
-const schemaNames = process.env.SCHEMA_NAMES?.split(',') ?? Object.keys(sources)
+const schemaNames = requestedNames ?? Object.keys(sources)
 if (schemaNames.some((name) => !Object.hasOwn(sources, name))) {
   throw new Error('SCHEMA_NAMES must contain known, nonempty snapshot names')
 }

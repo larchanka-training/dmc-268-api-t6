@@ -13,8 +13,10 @@ from app.modules.reviews.application.project_github_pull_request import (
     PullRequestLabelEvent,
 )
 from app.modules.reviews.application.try_enqueue_webhook_run import (
+    UNSET,
     EnqueueResult,
     EnqueueStatus,
+    UnsetType,
     describe_enqueue,
 )
 
@@ -64,6 +66,7 @@ class WebhookRunEnqueuer(Protocol):
         expected_head_sha: str,
         *,
         expected_installation_external_id: int,
+        triggered_by: str | None | UnsetType = UNSET,
     ) -> EnqueueResult: ...
 
 
@@ -85,7 +88,10 @@ class TriggerFromDelivery:
         if target is None:
             return RunTriggerOutcome(_NO_OPEN_PULL_REQUEST)
         return await self._enqueue(
-            target.code_change_id, target.head_sha, event.installation_external_id
+            target.code_change_id,
+            target.head_sha,
+            event.installation_external_id,
+            triggered_by=event.sender_login,
         )
 
     async def on_label(self, event: PullRequestLabelEvent) -> RunTriggerOutcome:
@@ -109,14 +115,37 @@ class TriggerFromDelivery:
         )
 
     async def _enqueue(
-        self, code_change_id: UUID, head_sha: str, installation_external_id: int
+        self,
+        code_change_id: UUID,
+        head_sha: str,
+        installation_external_id: int,
+        *,
+        triggered_by: str | None | UnsetType = UNSET,
     ) -> RunTriggerOutcome:
-        result = await self._enqueuer.execute(
+        result = await _execute(
+            self._enqueuer,
             code_change_id,
             head_sha,
-            expected_installation_external_id=installation_external_id,
+            installation_external_id,
+            triggered_by=triggered_by,
         )
         return RunTriggerOutcome(
             describe_enqueue(code_change_id, head_sha, result),
             retry_required=result.status == EnqueueStatus.DEFERRED,
         )
+
+
+async def _execute(
+    enqueuer: WebhookRunEnqueuer,
+    code_change_id: UUID,
+    head_sha: str,
+    installation_external_id: int,
+    *,
+    triggered_by: str | None | UnsetType,
+) -> EnqueueResult:
+    return await enqueuer.execute(
+        code_change_id,
+        head_sha,
+        expected_installation_external_id=installation_external_id,
+        triggered_by=triggered_by,
+    )

@@ -12,7 +12,7 @@ from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from hashlib import sha256
-from typing import Any, Self
+from typing import Any, Literal, Self
 from uuid import UUID
 
 import httpx
@@ -50,7 +50,7 @@ _REVIEW = "2" * 40
 _RULES = git_blob_oid(b"rules")
 _NOW = datetime(2026, 10, 18, 12, 0, tzinfo=UTC)
 _LEASE_END = _NOW + timedelta(minutes=5)
-_TARGET = RulesRefreshTarget(_REPOSITORY, 17, "octo/repo", "main", _NOW, _LEASE_END)
+_TARGET = RulesRefreshTarget(_REPOSITORY, 17, "octo/repo", "main", _NOW, _LEASE_END, "github")
 
 
 def _entry(path: str, sha: str, *, kind: str = "blob", size: int | None = 5) -> dict[str, Any]:
@@ -241,9 +241,12 @@ def test_bad_mask_diagnostic_is_english_and_carries_the_mask() -> None:
     assert diagnostic.message.endswith(", mask `src/a?.py`.")
 
 
+@pytest.mark.parametrize("provider", ["github", "bitbucket"])
 @pytest.mark.parametrize("code", list(PolicyErrorCode))
-def test_every_policy_code_has_an_english_status_text(code: PolicyErrorCode) -> None:
-    text = status_text(PolicyError(code, "technical"))
+def test_every_policy_code_has_an_english_status_text(
+    code: PolicyErrorCode, provider: Literal["github", "bitbucket"]
+) -> None:
+    text = status_text(PolicyError(code, "technical"), provider=provider)
 
     assert text != code.value
     assert text.isascii()
@@ -259,7 +262,9 @@ def test_status_text_never_shows_a_stopped_count_as_exact() -> None:
         actual_is_lower_bound=True,
     )
 
-    assert status_text(error).endswith("Where: actual more than 20, allowed 20 transitions.")
+    assert status_text(error, provider="github").endswith(
+        "Where: actual more than 20, allowed 20 transitions."
+    )
 
 
 def test_symlink_is_invalid() -> None:
@@ -701,7 +706,7 @@ class FakeReader:
 
 
 def test_refresh_saves_each_claimed_read_and_an_unexpected_failure_as_transient() -> None:
-    broken = RulesRefreshTarget(UUID(int=1), 17, "octo/broken", "main", _NOW, _LEASE_END)
+    broken = RulesRefreshTarget(UUID(int=1), 17, "octo/broken", "main", _NOW, _LEASE_END, "github")
     store = FakeRefreshStore((broken, _TARGET))
     missing = RulesReading(RulesStatusKind.MISSING, "main", _HEAD)
 

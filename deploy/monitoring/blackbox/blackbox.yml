@@ -1,0 +1,13 @@
+# Modules of the blackbox exporter (compose.yml, docs/MONITORING.md): Prometheus asks it to probe
+# a public name and reads the result from /probe.
+modules:
+  # HTTPS through the edge proxy: up only on a valid certificate and a 2xx answer.
+  https_2xx:
+    prober: http
+    timeout: 15s
+    http:
+      # The public names have A records only (docs/INFRASTRUCTURE.md §8.1).
+      preferred_ip_protocol: ip4
+      ip_protocol_fallback: false
+      fail_if_not_ssl: true
+      # valid_status_codes unset: 2xx only, so the 503 stub of the edge proxy counts as down.

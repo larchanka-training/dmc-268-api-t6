@@ -1,0 +1,193 @@
+{
+  "checkboxes": {
+    "ac": {
+      "checked": 6,
+      "items": [
+        {
+          "checked": true,
+          "text": "Ч.1: на фикстуре с циклом скрипт называет цикл и выходит с ненулевым кодом; на фикстуре без связей выдаёт список «без связей»"
+        },
+        {
+          "checked": true,
+          "text": "Ч.1: граф собирает узлы из ui и api по майлстоуну с одинаковым названием"
+        },
+        {
+          "checked": true,
+          "text": "Ч.1: офлайн-тесты на фикстурах GraphQL, в том числе фикстура, где sub-issues и blocked-by больше `first:N` — пагинация собирает все; живой прогон на эпике #139 приложен к PR, Mermaid рендерится"
+        },
+        {
+          "checked": true,
+          "text": "Ч.2: повторный запуск с `--publish-to <N>` обновляет тот же комментарий по маркеру, а не добавляет новый; без `--publish-to` ничего не публикуется"
+        },
+        {
+          "checked": true,
+          "text": "Ч.2: задача In Progress с открытым блокером помечена в отчёте"
+        },
+        {
+          "checked": true,
+          "text": "Ч.2: 3+ золотых примера лежат в `.agents/skills/<скилл>/examples/`; вывод ручного прогона скилла в Claude Code и Codex — в описании PR"
+        }
+      ],
+      "total": 6
+    },
+    "dod": {
+      "checked": 5,
+      "items": [
+        {
+          "checked": true,
+          "text": "Гейты CI зелёные во всех PR задачи"
+        },
+        {
+          "checked": true,
+          "text": "Документы обновлены"
+        },
+        {
+          "checked": true,
+          "text": "PR одобрены на текущей голове, все треды закрыты"
+        },
+        {
+          "checked": true,
+          "text": "Статус на доске 12 обновлён"
+        },
+        {
+          "checked": true,
+          "text": "SYNC-копии в ui и api совпадают (`diff -r` пуст)"
+        }
+      ],
+      "total": 5
+    },
+    "outside": 0
+  },
+  "closing": {
+    "events": [
+      {
+        "actor": "axyi",
+        "at": "2026-10-29T11:09:23Z",
+        "closer": "manual",
+        "closer_ref": null,
+        "kind": "closed",
+        "state_reason": "COMPLETED"
+      }
+    ],
+    "ever_closed_by_merge": false,
+    "last_closer": "manual"
+  },
+  "issue": {
+    "ref": "larchanka-training/dmc-268-api-t6#268",
+    "state": "CLOSED",
+    "state_reason": "COMPLETED",
+    "title": "[agents] Добавьте скилл графа зависимостей задач спринта",
+    "url": "https://github.com/larchanka-training/dmc-268-api-t6/issues/268"
+  },
+  "prs": [
+    {
+      "ci": "SUCCESS",
+      "head_sha": "6c18534823efe4f3382ec81178b778e164898aec",
+      "merged_at": "2026-10-24T22:04:32Z",
+      "ref": "larchanka-training/dmc-268-api-t6#275",
+      "refs": true,
+      "state": "MERGED",
+      "title": "feat(agents): add the shared issue-graph script (#268)",
+      "unresolved_threads": 0,
+      "url": "https://github.com/larchanka-training/dmc-268-api-t6/pull/275",
+      "will_close": false
+    },
+    {
+      "ci": "SUCCESS",
+      "head_sha": "d95e4dbedf7343991d69b1029063890013775ac3",
+      "merged_at": "2026-10-25T09:40:25Z",
+      "ref": "larchanka-training/dmc-268-api-t6#285",
+      "refs": false,
+      "state": "MERGED",
+      "title": "feat(create-issue): slice tasks into parts, file linked batches (#262)",
+      "unresolved_threads": 0,
+      "url": "https://github.com/larchanka-training/dmc-268-api-t6/pull/285",
+      "will_close": false
+    },
+    {
+      "ci": "SUCCESS",
+      "head_sha": "140b13de114b8827a1e0f997c0faee6f1003fd57",
+      "merged_at": "2026-10-25T11:40:49Z",
+      "ref": "larchanka-training/dmc-268-api-t6#290",
+      "refs": false,
+      "state": "MERGED",
+      "title": "feat(llm): route the verifier through the gateway (#130)",
+      "unresolved_threads": 0,
+      "url": "https://github.com/larchanka-training/dmc-268-api-t6/pull/290",
+      "will_close": false
+    },
+    {
+      "ci": "SUCCESS",
+      "head_sha": "b36750c1bfb75b451a5e2c6f770d3c561e34e803",
+      "merged_at": "2026-10-25T14:15:38Z",
+      "ref": "larchanka-training/dmc-268-api-t6#296",
+      "refs": true,
+      "state": "MERGED",
+      "title": "feat(agents): publish the issue graph and add the issue-graph skill",
+      "unresolved_threads": 0,
+      "url": "https://github.com/larchanka-training/dmc-268-api-t6/pull/296",
+      "will_close": false
+    },
+    {
+      "ci": "SUCCESS",
+      "head_sha": "82bec986906798207d09c9ac43b8757c16cb290b",
+      "merged_at": "2026-10-25T16:11:57Z",
+      "ref": "larchanka-training/dmc-268-api-t6#323",
+      "refs": true,
+      "state": "MERGED",
+      "title": "test(agents): page epic sub-issues past page 1 in issue-graph (#268)",
+      "unresolved_threads": 0,
+      "url": "https://github.com/larchanka-training/dmc-268-api-t6/pull/323",
+      "will_close": false
+    },
+    {
+      "ci": "SUCCESS",
+      "head_sha": "21f397492a7bed3cf40a23f09235dba7dab6df19",
+      "merged_at": "2026-10-28T16:53:57Z",
+      "ref": "larchanka-training/dmc-268-api-t6#358",
+      "refs": false,
+      "state": "MERGED",
+      "title": "docs(contributing): describe the sprint start graph ritual (#273)",
+      "unresolved_threads": 0,
+      "url": "https://github.com/larchanka-training/dmc-268-api-t6/pull/358",
+      "will_close": false
+    },
+    {
+      "ci": "SUCCESS",
+      "head_sha": "0696a8a1771b93a931251cd0d68cccc0de0c0835",
+      "merged_at": "2026-10-24T18:58:44Z",
+      "ref": "larchanka-training/dmc-268-ui-t6#177",
+      "refs": true,
+      "state": "MERGED",
+      "title": "feat(agents): add the issue-graph script for sprint dependency graphs",
+      "unresolved_threads": 0,
+      "url": "https://github.com/larchanka-training/dmc-268-ui-t6/pull/177",
+      "will_close": false
+    },
+    {
+      "ci": "SUCCESS",
+      "head_sha": "2d81cdbcbb2267bd2ff5232228c6d77180ecf5a2",
+      "merged_at": "2026-10-25T14:08:31Z",
+      "ref": "larchanka-training/dmc-268-ui-t6#184",
+      "refs": true,
+      "state": "MERGED",
+      "title": "feat(agents): publish the issue graph and add the issue-graph skill",
+      "unresolved_threads": 0,
+      "url": "https://github.com/larchanka-training/dmc-268-ui-t6/pull/184",
+      "will_close": false
+    },
+    {
+      "ci": "SUCCESS",
+      "head_sha": "2863cdbe95b561fa012bf8d70c9b5183feeb642f",
+      "merged_at": "2026-10-25T15:51:48Z",
+      "ref": "larchanka-training/dmc-268-ui-t6#188",
+      "refs": true,
+      "state": "MERGED",
+      "title": "test(agents): page epic sub-issues past page 1 in issue-graph",
+      "unresolved_threads": 0,
+      "url": "https://github.com/larchanka-training/dmc-268-ui-t6/pull/188",
+      "will_close": false
+    }
+  ],
+  "schema": 1
+}

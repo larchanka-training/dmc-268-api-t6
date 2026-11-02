@@ -120,10 +120,26 @@ VERIFIER_TIME_RESERVE_S = _VERIFIER_CALL_TIMEOUT_S + VERIFIER_COMPLETION_RESERVE
 # E-2: the top-level keys of a redacted provider body; none of them carries model text.
 _STORED_BODY_KEYS = ("id", "object", "created", "model", "provider", "system_fingerprint", "usage")
 _USD_QUANTUM = Decimal("0.000001")
+# What ``_call`` raises when it sends nothing: no time for the call (and the task's reserve), no
+# budget, no call slot, or no ECB quote to price it. A refusal at a later key, after an earlier
+# key's request went out, is a ``_RefusedAfterSendError``.
+_SEND_REFUSALS = frozenset(
+    {
+        LlmErrorCode.DEADLINE_EXCEEDED,
+        LlmErrorCode.VERIFICATION_DEADLINE_EXCEEDED,
+        LlmErrorCode.BUDGET_EXCEEDED,
+        LlmErrorCode.UNAVAILABLE,
+    }
+)
 
 
 class _CostMetadataError(ValueError):
     """The provider amount cannot be converted to USD for this paid answer."""
+
+
+class _RefusedAfterSendError(LlmCallFailed):
+    """A call refused at a later key's checkpoint, after an earlier key's request went out:
+    the call was made, so ``_recovery`` keeps its code (CVS §7.3)."""
 
 
 class Clock(Protocol):
@@ -182,8 +198,14 @@ class StructuredTask:
     # How a stored ``llm.call`` response shows the answer text (E-2: the verifier's
     # without ``decisions[].reason``); None stores the provider body as is.
     redact_answer: Callable[[str], str] | None = None
+    # The errors of an answer ``validate`` accepted, against the manifest of the call that
+    # produced it (CVS §5.2: the base, repair or fallback one); they earn the same recovery
+    # as the validator's. The verifier's reference checks; needs ``base_manifest``.
+    check_answer: Callable[[dict[str, object], CallManifest], list[str]] | None = None
 
     def __post_init__(self) -> None:
+        if self.check_answer is not None and self.base_manifest is None:
+            raise ValueError("check_answer needs a base_manifest to check against")
         if self.reserved_calls < 0:
             raise ValueError(f"reserved_calls must not be negative: {self.reserved_calls}")
         if self.reserved_seconds < 0:
@@ -327,11 +349,17 @@ class LlmGateway:
         manifest = task.base_manifest
         # A fallback 429 without the header must not shorten the primary's window (#247).
         rate_limit_hint: float | None = None
+        # The outcome the next call recovers from (None before the primary call).
+        previous: _Outcome | None = None
 
         while True:
-            last = await self._call(
-                primary, kind, messages, task, context, state, attempt, manifest
+            last = await self._recovery(
+                self._call(primary, kind, messages, task, context, state, attempt, manifest),
+                previous,
+                task,
+                state,
             )
+            previous = last
             if last.output is not None:
                 return self._result(primary, last, state, manifest)
             assert last.error is not None
@@ -442,15 +470,20 @@ class LlmGateway:
                     snapshot=task.policy_snapshot,
                 )
                 manifest = fallback_manifest
-            last = await self._call(
-                fallback,
-                LlmCallKind.FALLBACK,
-                task.messages,
+            last = await self._recovery(
+                self._call(
+                    fallback,
+                    LlmCallKind.FALLBACK,
+                    task.messages,
+                    task,
+                    context,
+                    state,
+                    attempt,
+                    manifest,
+                ),
+                last,
                 task,
-                context,
                 state,
-                attempt,
-                manifest,
             )
             if last.output is not None:
                 return self._result(fallback, last, state, manifest)
@@ -459,6 +492,30 @@ class LlmGateway:
         raise self._failed(
             last.error, last.message, state, retry_after_s=_final_hint(last, rate_limit_hint)
         )
+
+    async def _recovery(
+        self,
+        call: Awaitable[_Outcome],
+        previous: _Outcome | None,
+        task: StructuredTask,
+        state: _AttemptState,
+    ) -> _Outcome:
+        """``call``, which follows ``previous``. When ``previous`` is an invalid verifier answer
+        and ``call`` is refused before it sends any request, the invalid answer keeps its class
+        (CVS §7.3): ``verification_invalid_output``, never a deadline, budget or unavailable
+        code. A refusal after one of its requests went out keeps its own: that call was made."""
+        try:
+            return await call
+        except LlmCallFailed as refused:
+            if (
+                task.route != "verifier"
+                or previous is None
+                or previous.error is not LlmErrorCode.INVALID_OUTPUT
+                or refused.error_code not in _SEND_REFUSALS
+                or isinstance(refused, _RefusedAfterSendError)
+            ):
+                raise
+            raise self._failed(previous.error, previous.message, state) from refused
 
     def _attempt_calls(self, context: RunCallContext) -> _AttemptCalls:
         current = self._attempts.get(context.run_id)
@@ -588,11 +645,17 @@ class LlmGateway:
             redact_answer=task.redact_answer,
         )
 
+        # Whether the transport has sent this call's request on a key (CVS §7.3).
+        sent = False
+
         async def checkpoint() -> None:
+            nonlocal sent
             await self._checkpoint(context)
             remaining = self._seconds_left(context)
             if remaining < timeout_s + task.reserved_seconds:
-                raise self._out_of_time(task, remaining, timeout_s, state, ";")
+                raise self._out_of_time(task, remaining, timeout_s, state, ";", after_send=sent)
+            # The transport posts on its next key as soon as this returns.
+            sent = True
 
         try:
             response = await self._transport.complete(
@@ -703,7 +766,7 @@ class LlmGateway:
                 "duration_ms": duration_ms,
             },
         )
-        return _validated(response, task)
+        return _validated(response, task, manifest, context.run_id)
 
     async def _store_manifest(
         self,
@@ -907,6 +970,8 @@ class LlmGateway:
         timeout_s: float,
         state: _AttemptState,
         separator: str,
+        *,
+        after_send: bool = False,
     ) -> LlmCallFailed:
         """The refusal of a call short of its timeout plus the task's time reserve (E-7)."""
         message = (
@@ -922,8 +987,9 @@ class LlmGateway:
                 LlmErrorCode.VERIFICATION_DEADLINE_EXCEEDED,
                 f"{message} and {task.reserved_seconds:g} s are kept {kept_for}",
                 state,
+                after_send=after_send,
             )
-        return self._failed(LlmErrorCode.DEADLINE_EXCEEDED, message, state)
+        return self._failed(LlmErrorCode.DEADLINE_EXCEEDED, message, state, after_send=after_send)
 
     @staticmethod
     def _failed(
@@ -932,8 +998,10 @@ class LlmGateway:
         state: _AttemptState,
         *,
         retry_after_s: float | None = None,
+        after_send: bool = False,
     ) -> LlmCallFailed:
-        return LlmCallFailed(
+        failure = _RefusedAfterSendError if after_send else LlmCallFailed
+        return failure(
             code,
             message,
             usage=tuple(state.usage),
@@ -1079,7 +1147,9 @@ def _final_hint(last: _Outcome, rate_limit_hint: float | None) -> float | None:
     return rate_limit_hint if last.error is LlmErrorCode.RATE_LIMITED else last.retry_after_s
 
 
-def _validated(response: ChatResponse, task: StructuredTask) -> _Outcome:
+def _validated(
+    response: ChatResponse, task: StructuredTask, manifest: CallManifest | None, run_id: UUID
+) -> _Outcome:
     answer = response.content or ""
     if response.refusal is not None:
         # A refusal is not a format error: repeating it with validator errors is wasted.
@@ -1095,9 +1165,35 @@ def _validated(response: ChatResponse, task: StructuredTask) -> _Outcome:
         errors = ["the answer has no text content"]
     else:
         try:
-            return _Outcome(output=task.validate(answer))
+            output = task.validate(answer)
         except InvalidAnswer as error:
             errors = error.errors
+        else:
+            if task.check_answer is None:
+                return _Outcome(output=output)
+            # CONTRACT: a task with check_answer has a base manifest (__post_init__), and
+            # every repair and fallback manifest is derived from it.
+            assert manifest is not None
+            errors = task.check_answer(output, manifest)
+            if not errors:
+                return _Outcome(output=output)
+            # The checks carry counts, line numbers, our candidate ids and rule names, manifest
+            # roles and revisions, the PR's diff_old_sha, and block, check and candidate ids cut to
+            # 64 characters (model text only when such an id matched nothing in the manifest or
+            # the candidates), never `reason` or other answer text; the same caps as the repair
+            # envelope. The default formatter drops extras, so the message carries the errors
+            # too; json.dumps escapes newlines in model-supplied ids.
+            logged = bounded_errors(errors)
+            logger.info(
+                "llm answer failed the manifest check: %s",
+                json.dumps(logged),
+                extra={
+                    "run_id": str(run_id),
+                    "operation": task.operation,
+                    "call_id": str(manifest.call_id),
+                    "errors": logged,
+                },
+            )
     return _Outcome(
         error=LlmErrorCode.INVALID_OUTPUT,
         message="; ".join(errors)[:500],

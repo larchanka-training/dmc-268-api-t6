@@ -38,7 +38,7 @@ from app.modules.reviews.application.project_github_pull_request import (
     PullRequestLabelEvent,
     PullRequestState,
 )
-from app.modules.reviews.application.sweep_no_ci import SweepNoCi
+from app.modules.reviews.application.sweep_no_ci import DueNoCiCandidate, SweepNoCi
 from app.modules.reviews.application.trigger_from_delivery import (
     CiTriggerEvent,
     ProjectedPullRequestTarget,
@@ -46,6 +46,7 @@ from app.modules.reviews.application.trigger_from_delivery import (
     TriggerFromDelivery,
 )
 from app.modules.reviews.application.try_enqueue_webhook_run import (
+    UNSET,
     CandidateMiss,
     DuplicateReason,
     EnqueueResult,
@@ -54,6 +55,7 @@ from app.modules.reviews.application.try_enqueue_webhook_run import (
     RunInsertCandidate,
     RunPublicationKind,
     TryEnqueueWebhookRun,
+    UnsetType,
 )
 from app.modules.reviews.infrastructure.ci_eligibility_candidates import (
     SqlAlchemyEligibilityCandidateStore,
@@ -69,7 +71,7 @@ from app.modules.reviews.infrastructure.webhook_run_targets import (
     SqlAlchemyRunTriggerUnitOfWork,
 )
 from app.modules.reviews.infrastructure.webhook_runs import SqlAlchemyWebhookRunUnitOfWork
-from tests.trigger_uow import targets_uow
+from tests.trigger_uow import candidates_uow, targets_uow
 
 _PR = UUID("11111111-1111-1111-1111-111111111111")
 _RUN = UUID("22222222-2222-2222-2222-222222222222")
@@ -146,13 +148,19 @@ class Runs:
     duplicate: DuplicateReason = DuplicateReason.ACTIVE_RUN
     published: bool = False
     notifications: list[tuple[UUID, UUID, str]] = field(default_factory=list)
+    actors: list[str | None | UnsetType] = field(default_factory=list)
 
     async def lock_candidate(self, code_change_id: UUID) -> RunInsertCandidate | CandidateMiss:
         return self.candidate
 
     async def insert_webhook_run(
-        self, candidate: RunInsertCandidate, now: datetime
+        self,
+        candidate: RunInsertCandidate,
+        now: datetime,
+        *,
+        triggered_by: str | None | UnsetType = UNSET,
     ) -> PendingRunMessage | DuplicateReason:
+        self.actors.append(triggered_by)
         if self.pending is not None:
             return self.duplicate
         self.pending = PendingRunMessage.from_candidate(_RUN, candidate, now)
@@ -440,6 +448,7 @@ def test_ci_delivery_commits_unit_of_work_before_enqueue() -> None:
             expected_head_sha: str,
             *,
             expected_installation_external_id: int | None = None,
+            triggered_by: str | None | UnsetType = UNSET,
         ) -> EnqueueResult:
             assert self._trigger_uow.committed is True
             enqueued.append((code_change_id, expected_head_sha))
@@ -476,6 +485,7 @@ def test_delayed_label_enqueues_projected_head_instead_of_webhook_head() -> None
             expected_head_sha: str,
             *,
             expected_installation_external_id: int | None = None,
+            triggered_by: str | None | UnsetType = UNSET,
         ) -> EnqueueResult:
             observed.append((code_change_id, expected_head_sha))
             return EnqueueResult(EnqueueStatus.ENQUEUED)
@@ -550,6 +560,7 @@ class OutcomeEnqueuer:
         expected_head_sha: str,
         *,
         expected_installation_external_id: int | None = None,
+        triggered_by: str | None | UnsetType = UNSET,
     ) -> EnqueueResult:
         self.calls.append((code_change_id, expected_head_sha))
         return self.results.pop(0)
@@ -627,6 +638,93 @@ def test_a_pr_with_no_open_row_is_reported_without_enqueueing() -> None:
         trigger.on_label(PullRequestLabelEvent(_outcome_event(), "ai-review"))
     ) == RunTriggerOutcome("no open pull request")
     assert enqueuer.calls == []
+
+
+def test_qualifying_delivery_passes_the_sender_and_ci_does_not() -> None:
+    recorded: list[str | None | UnsetType] = []
+
+    class Enqueuer:
+        async def execute(
+            self,
+            code_change_id: UUID,
+            expected_head_sha: str,
+            *,
+            expected_installation_external_id: int | None = None,
+            triggered_by: str | None | UnsetType = UNSET,
+        ) -> EnqueueResult:
+            recorded.append(triggered_by)
+            return EnqueueResult(EnqueueStatus.ENQUEUED)
+
+    trigger = TriggerFromDelivery(uow_factory=targets_uow(OutcomeTargets()), enqueuer=Enqueuer())
+
+    asyncio.run(trigger.on_pr(replace(_outcome_event("synchronize"), sender_login="octocat")))
+    asyncio.run(trigger.on_pr(replace(_outcome_event("reopened"), sender_login="dependabot[bot]")))
+    asyncio.run(
+        trigger.on_label(
+            PullRequestLabelEvent(
+                replace(_outcome_event("labeled"), sender_login="labeler"), "ai-review"
+            )
+        )
+    )
+    asyncio.run(trigger.on_pr(replace(_outcome_event("synchronize"), sender_login=None)))
+    asyncio.run(trigger.on_ci(CiTriggerEvent(17, 101, _HEAD, "check_suite")))
+
+    assert recorded == ["octocat", "dependabot[bot]", "labeler", None, UNSET]
+
+
+def test_delivery_forwards_the_named_actor_into_the_run_store() -> None:
+    class Targets:
+        async def for_pr(self, event: PullRequestEvent) -> ProjectedPullRequestTarget:
+            return ProjectedPullRequestTarget(_PR, _HEAD)
+
+        async def for_ci(self, event: CiTriggerEvent) -> tuple[UUID, ...]:
+            return (_PR,)
+
+    store = Runs()
+    enqueue = TryEnqueueWebhookRun(
+        eligibility=Eligibility(),
+        uow_factory=lambda: Uow(store=store),
+        publisher=Publisher(Uow(store=store)),
+        now=lambda: _NOW,
+    )
+    trigger = TriggerFromDelivery(uow_factory=targets_uow(Targets()), enqueuer=enqueue)
+
+    asyncio.run(trigger.on_pr(replace(_outcome_event("synchronize"), sender_login="octocat")))
+    store.pending = None
+    asyncio.run(trigger.on_pr(replace(_outcome_event("reopened"), sender_login="dependabot[bot]")))
+    store.pending = None
+    asyncio.run(
+        trigger.on_label(
+            PullRequestLabelEvent(
+                replace(_outcome_event("labeled"), sender_login="labeler"), "ai-review"
+            )
+        )
+    )
+    store.pending = None
+    asyncio.run(trigger.on_pr(replace(_outcome_event("synchronize"), sender_login=None)))
+    store.pending = None
+    asyncio.run(trigger.on_ci(CiTriggerEvent(17, 101, _HEAD, "check_suite")))
+    store.pending = None
+
+    class Due:
+        async def list_due(self, now: datetime, limit: int) -> tuple[DueNoCiCandidate, ...]:
+            return (DueNoCiCandidate(_PR, _HEAD),)
+
+        async def exclude(self, candidate: DueNoCiCandidate) -> None:
+            return None
+
+    asyncio.run(
+        SweepNoCi(uow_factory=candidates_uow(Due()), enqueuer=enqueue, now=lambda: _NOW).execute()
+    )
+
+    assert store.actors == [
+        "octocat",
+        "dependabot[bot]",
+        "labeler",
+        None,
+        UNSET,
+        UNSET,
+    ]
 
 
 @pytest.mark.parametrize(
@@ -1257,6 +1355,7 @@ def test_postgres_no_ci_sweep_excludes_failed_candidate_until_state_changes(
             expected_head_sha: str,
             *,
             expected_installation_external_id: int | None = None,
+            triggered_by: str | None | UnsetType = UNSET,
         ) -> EnqueueResult:
             self.calls.append((code_change_id, expected_head_sha))
             return EnqueueResult(EnqueueStatus.INELIGIBLE)
@@ -1596,7 +1695,11 @@ def test_postgres_no_ci_exclusion_rechecks_active_github_after_detached_selectio
 
             class InterleavingEnqueuer:
                 async def execute(
-                    self, code_change_id: UUID, expected_head_sha: str
+                    self,
+                    code_change_id: UUID,
+                    expected_head_sha: str,
+                    *,
+                    triggered_by: str | None | UnsetType = UNSET,
                 ) -> EnqueueResult:
                     assert (code_change_id, expected_head_sha) == (_PR, _HEAD)
                     async with sessions.begin() as session:

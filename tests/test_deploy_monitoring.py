@@ -16,6 +16,7 @@ import stat
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -59,7 +60,7 @@ def _job(name: str) -> str:
 def test_monitoring_images_are_pinned_by_digest() -> None:
     images = re.findall(r"^    image: (\S+)$", _read(MONITORING / "compose.yml"), re.M)
 
-    assert len(images) == 8
+    assert len(images) == 9
     for image in images:
         assert re.fullmatch(r"[a-z0-9./_-]+:v?[\d.]+(-alpine)?@sha256:[0-9a-f]{64}", image), image
 
@@ -110,6 +111,55 @@ def test_only_grafana_and_prometheus_join_the_edge_network() -> None:
     assert "          - ${GRAFANA_ALIAS:?GRAFANA_ALIAS is required}" in edge
 
 
+def test_probes_run_from_the_project_network_only() -> None:
+    # The probes reach the public names from outside: no store and no edge network, as nobody.
+    block = _service_blocks(_read(MONITORING / "compose.yml"))["blackbox-exporter"]
+
+    assert "networks:" not in block
+    for overlay in MONITORING.glob("compose.*.yml"):
+        assert "blackbox-exporter" not in _read(overlay), overlay.name
+    assert '    user: "65534:65534"\n' in block
+    assert re.search(r"^    mem_limit: \d+m$", block, re.M)
+    assert "      - ./blackbox:/etc/blackbox_exporter:ro\n" in block
+    assert "      - --config.file=/etc/blackbox_exporter/blackbox.yml\n" in block
+    assert '"http://127.0.0.1:9115/-/healthy"]' in block
+
+
+def test_prometheus_probes_the_public_names_through_the_exporter_once_a_minute() -> None:
+    config = _read(MONITORING / "prometheus" / "prometheus.yml")
+    job = config[config.index("  - job_name: blackbox\n") :]
+    job = job[: job.index("\n\n")] if "\n\n" in job else job
+    module = re.search(
+        r"^  https_2xx:\n    prober: http\n    timeout: (\d+)s$",
+        _read(MONITORING / "blackbox" / "blackbox.yml"),
+        re.M,
+    )
+    scrape_timeout = re.search(r"^    scrape_timeout: (\d+)s$", job, re.M)
+
+    assert "    scrape_interval: 1m\n" in job
+    assert "    metrics_path: /probe\n" in job
+    assert "      module: [https_2xx]\n" in job
+    assert '      - files: ["/etc/prometheus/targets/probes.json"]' in job
+    # The probed URL becomes the target parameter and the instance; the exporter is scraped.
+    assert "      - source_labels: [__address__]\n        target_label: __param_target\n" in job
+    assert "      - source_labels: [__param_target]\n        target_label: instance\n" in job
+    assert "      - target_label: __address__\n        replacement: blackbox-exporter:9115" in job
+    # A slow name ends the probe as probe_success 0 before the scrape itself times out.
+    assert module is not None
+    assert scrape_timeout is not None
+    assert int(module.group(1)) < int(scrape_timeout.group(1))
+
+
+def test_prometheus_drops_a_stopped_container_at_the_next_scrape() -> None:
+    config = _read(MONITORING / "prometheus" / "prometheus.yml")
+    job = config[config.index("  - job_name: cadvisor\n") :]
+    job = job[: job.index("\n\n")]
+
+    # cAdvisor timestamps its samples: without stale markers a stopped container lingers 5 minutes.
+    assert "    track_timestamps_staleness: true\n" in job
+    assert "honor_timestamps: false" not in config
+
+
 def test_config_changes_recreate_the_service_that_reads_them() -> None:
     blocks = _service_blocks(_read(MONITORING / "compose.yml"))
     digests = {
@@ -118,6 +168,7 @@ def test_config_changes_recreate_the_service_that_reads_them() -> None:
         "grafana": "GRAFANA_CONFIG_DIGEST",
         "postgres-exporter": "POSTGRES_EXPORTER_CONFIG_DIGEST",
         "pg-backup": "PG_BACKUP_CONFIG_DIGEST",
+        "blackbox-exporter": "BLACKBOX_CONFIG_DIGEST",
     }
     deploy = _read(MONITORING / "deploy.sh")
 
@@ -192,6 +243,89 @@ def test_review_queries_and_grants_never_touch_review_content() -> None:
     assert deploy.count("SET default_transaction_read_only = on;") == 2
 
 
+# --- dashboard -----------------------------------------------------------------------------
+
+DASHBOARD = MONITORING / "grafana" / "dashboards" / "overview.json"
+PROMETHEUS = {"type": "prometheus", "uid": "prometheus"}
+
+
+def _panel_with(metric: str) -> Any:
+    dashboard = json.loads(_read(DASHBOARD))
+    return next(
+        (
+            panel
+            for panel in dashboard["panels"]
+            if any(metric in target.get("expr", "") for target in panel.get("targets", []))
+        ),
+        None,
+    )
+
+
+def test_dashboard_shows_whether_each_probed_name_is_up() -> None:
+    panel = _panel_with('probe_success{job="blackbox"}')
+
+    assert panel is not None
+    assert panel["datasource"] == PROMETHEUS
+    [target] = panel["targets"]
+    assert target["datasource"] == PROMETHEUS
+    assert target["expr"] == 'probe_success{job="blackbox"}'
+    assert target["legendFormat"] == "{{host}}"
+    # One value per name: the default text mode would hide which name it is.
+    assert panel["options"]["textMode"] == "value_and_name"
+    [mapping] = panel["fieldConfig"]["defaults"]["mappings"]
+    shown = {value: (text["text"], text["color"]) for value, text in mapping["options"].items()}
+    assert shown == {"0": ("DOWN", "red"), "1": ("UP", "green")}
+
+
+def test_dashboard_shows_certificate_days_coloured_where_the_alerts_fire() -> None:
+    panel = _panel_with('probe_ssl_earliest_cert_expiry{job="blackbox"}')
+    rules = _read(MONITORING / "prometheus" / "rules" / "alerts.yml")
+    days = {
+        alert: int(limit)
+        for alert, limit in re.findall(
+            r"- alert: (TlsCertificate\w+)\n        expr: .* < (\d+)\n", rules
+        )
+    }
+
+    assert days.keys() == {"TlsCertificateExpiresSoon", "TlsCertificateExpiring"}
+    assert days == {"TlsCertificateExpiresSoon": 14, "TlsCertificateExpiring": 3}
+    assert panel is not None
+    assert panel["datasource"] == PROMETHEUS
+    [target] = panel["targets"]
+    assert target["datasource"] == PROMETHEUS
+    # The same 10-minute hold as the alerts: a probe without a TLS answer does not blank it.
+    assert target["expr"] == (
+        '(last_over_time(probe_ssl_earliest_cert_expiry{job="blackbox"}[10m]) - time()) / 86400'
+    )
+    assert target["legendFormat"] == "{{host}}"
+    assert panel["options"]["textMode"] == "value_and_name"
+    defaults = panel["fieldConfig"]["defaults"]
+    # Grafana's own day unit shows 7 days and more as weeks; a plain suffix keeps days.
+    assert defaults["unit"] == "suffix:d"
+    # One decimal like the alert summaries: 2.6 days must not read as "3 d".
+    assert defaults["decimals"] == 1
+    assert [(step["color"], step["value"]) for step in defaults["thresholds"]["steps"]] == [
+        ("red", None),
+        ("orange", days["TlsCertificateExpiring"]),
+        ("green", days["TlsCertificateExpiresSoon"]),
+    ]
+
+
+def test_dashboard_panels_have_unique_ids_and_never_overlap() -> None:
+    panels = json.loads(_read(DASHBOARD))["panels"]
+    ids = [panel["id"] for panel in panels]
+    ids += [nested["id"] for panel in panels for nested in panel.get("panels", [])]
+    boxes = [
+        (panel["gridPos"]["x"], panel["gridPos"]["y"], panel["gridPos"]["w"], panel["gridPos"]["h"])
+        for panel in panels
+    ]
+
+    assert len(ids) == len(set(ids))
+    for i, (x, y, w, h) in enumerate(boxes):
+        for x2, y2, w2, h2 in boxes[i + 1 :]:
+            assert x + w <= x2 or x2 + w2 <= x or y + h <= y2 or y2 + h2 <= y, (ids[i], x2, y2)
+
+
 # --- workflow ------------------------------------------------------------------------------
 
 
@@ -212,8 +346,8 @@ def test_monitoring_deploys_after_the_application_and_never_gates_it() -> None:
     assert "rollback" not in job.lower()
     # Promotion depends on the application deploy only.
     assert "deploy-monitoring" not in _job("promote-staging")
-    # Its own lock: in staging-deploy a pending monitoring job and promote-staging could cancel
-    # each other when the next merge queues its deploy.
+    # Its own group: in staging-deploy it would hold the VPS lock for the monitoring deploy and
+    # delay promote-staging and every queued member behind it; it only reads the app stack.
     assert re.findall(r"^      group: (\S+)$", job, re.M) == ["staging-monitoring"]
 
 
@@ -225,6 +359,25 @@ def test_monitoring_upload_and_secrets_reach_only_the_monitoring_dir() -> None:
     assert "ALERT_TELEGRAM_BOT_TOKEN: ${{ secrets.ALERT_TELEGRAM_BOT_TOKEN }}" in job
     assert "ALERT_TELEGRAM_CHAT_ID: ${{ vars.ALERT_TELEGRAM_CHAT_ID }}" in job
     assert "ALERT_TELEGRAM" not in _job("deploy-staging")
+
+
+def test_monitoring_deploy_gets_the_domain_of_the_probed_names() -> None:
+    job = _job("deploy-monitoring")
+    envs = re.search(r"^          envs: (\S+)$", job, re.M)
+
+    assert "          APP_DOMAIN: ${{ vars.APP_DOMAIN }}\n" in job
+    assert envs is not None
+    assert "APP_DOMAIN" in envs.group(1).split(",")
+
+
+def test_monitoring_deploy_gets_the_production_names_to_probe() -> None:
+    job = _job("deploy-monitoring")
+    envs = re.search(r"^          envs: (\S+)$", job, re.M)
+
+    assert "          PROBE_PROD_HOSTS: ${{ vars.PROBE_PROD_HOSTS }}\n" in job
+    assert envs is not None
+    assert "PROBE_PROD_HOSTS" in envs.group(1).split(",")
+    assert "PROBE_PROD_HOSTS" not in _job("deploy-staging")
 
 
 # --- deploy.sh on a fake host --------------------------------------------------------------
@@ -284,6 +437,9 @@ class Host:
             "HOME": str(self.root),
             "API_DIR": str(self.api_dir),
             "GRAFANA_ROOT_URL": "https://grafana.example.test/",
+            "APP_DOMAIN": "example.test",
+            # An unset Environment variable reaches the host as an empty value.
+            "PROBE_PROD_HOSTS": "",
             "ALERT_TELEGRAM_BOT_TOKEN": TOKEN,
             "ALERT_TELEGRAM_CHAT_ID": CHAT_ID,
             "STUB_LOG": str(self.stubs / "docker.log"),
@@ -319,7 +475,7 @@ def host(tmp_path: Path) -> Host:
     )
     monitoring_dir = tmp_path / "opt" / "dmc-268-monitoring"
     subprocess.run(["cp", "-R", f"{MONITORING}/.", str(monitoring_dir)], check=True)
-    for generated in (".env", "alertmanager/alertmanager.yml"):
+    for generated in (".env", "alertmanager/alertmanager.yml", "prometheus/targets/probes.json"):
         (monitoring_dir / generated).unlink(missing_ok=True)
     subprocess.run(["rm", "-rf", str(monitoring_dir / "alertmanager" / "secrets")], check=True)
     (monitoring_dir / "env-file.sh").write_text(
@@ -554,6 +710,155 @@ def test_ports_mode_keeps_grafana_on_loopback_and_scrapes_no_proxy(host: Host) -
     assert "-f " + str(host.monitoring_dir / "compose.ports.yml") in host.log("docker.log")
 
 
+def test_edge_mode_probes_the_public_staging_names(host: Host) -> None:
+    result = host.deploy()
+    probes = host.monitoring_dir / "prometheus" / "targets" / "probes.json"
+    targets = json.loads(_read(probes))
+
+    assert result.returncode == 0, result.stderr
+    # Written under umask 077, read by Prometheus as nobody.
+    assert stat.S_IMODE(probes.stat().st_mode) == 0o644
+    # The health path of each service behind the edge proxy; the name labels the alerts.
+    assert targets == [
+        {
+            "targets": ["https://staging-api.example.test/healthcheck"],
+            "labels": {"host": "staging-api.example.test"},
+        },
+        {
+            "targets": ["https://staging-ui.example.test/health"],
+            "labels": {"host": "staging-ui.example.test"},
+        },
+    ]
+
+
+def test_ports_mode_probes_no_public_name_and_needs_no_domain(host: Host) -> None:
+    assert host.deploy().returncode == 0
+    env_file = host.api_dir / ".env"
+    env_file.write_text(_read(env_file).replace("DEPLOY_MODE=edge", "DEPLOY_MODE=ports"))
+    result = host.deploy(unset=("APP_DOMAIN",))
+
+    assert result.returncode == 0, result.stderr
+    assert _read(host.monitoring_dir / "prometheus" / "targets" / "probes.json") == "[]\n"
+
+
+@pytest.mark.parametrize(
+    "domain", [None, "", "example", "Example.test", "example.test/x", 'example.test"']
+)
+def test_edge_mode_without_a_valid_domain_fails_before_the_host_changes(
+    host: Host, domain: str | None
+) -> None:
+    if domain is None:
+        result = host.deploy(unset=("APP_DOMAIN",))
+    else:
+        result = host.deploy(APP_DOMAIN=domain)
+
+    assert result.returncode == 1
+    assert "APP_DOMAIN must be the base domain of the public names in edge mode" in result.stderr
+    assert not host.env_file.exists()
+    assert host.log("psql.log") == ""
+    assert " up " not in host.log("docker.log")
+    assert not (host.monitoring_dir / "prometheus" / "targets" / "probes.json").exists()
+
+
+def test_failed_deploy_keeps_the_probe_targets_of_the_last_one(host: Host) -> None:
+    # The upload step extracts the stack over the host's dir without removing it, like cp; with no
+    # probes.json in the repository, a deploy that fails before writing the targets keeps the
+    # previous ones instead of leaving the public names unprobed and silent.
+    assert host.deploy().returncode == 0
+    subprocess.run(["cp", "-R", f"{MONITORING}/.", str(host.monitoring_dir)], check=True)
+    result = host.deploy(APP_DOMAIN="")
+    targets = json.loads(_read(host.monitoring_dir / "prometheus" / "targets" / "probes.json"))
+
+    assert result.returncode == 1
+    assert [group["labels"]["host"] for group in targets] == [
+        "staging-api.example.test",
+        "staging-ui.example.test",
+    ]
+    assert not re.search(r"^\s+rm:", _job("deploy-monitoring"), re.M)
+
+
+def _probe(name: str, path: str) -> dict[str, object]:
+    probed = f"{name}.example.test"
+    return {"targets": [f"https://{probed}/{path}"], "labels": {"host": probed}}
+
+
+STAGING_PROBES = [_probe("staging-api", "healthcheck"), _probe("staging-ui", "health")]
+PROD_PROBES = [_probe("api", "healthcheck"), _probe("ui", "health")]
+
+
+def _probe_targets(host: Host) -> list[dict[str, object]]:
+    targets: list[dict[str, object]] = json.loads(
+        _read(host.monitoring_dir / "prometheus" / "targets" / "probes.json")
+    )
+    return targets
+
+
+@pytest.mark.parametrize(
+    ("names", "prod_probes"),
+    [
+        ("", []),
+        ("api", PROD_PROBES[:1]),
+        ("api ui", PROD_PROBES),
+        (" ui  api ui ", PROD_PROBES),
+    ],
+)
+def test_production_names_join_the_probes_by_a_variable(
+    host: Host, names: str, prod_probes: list[dict[str, object]]
+) -> None:
+    result = host.deploy(PROBE_PROD_HOSTS=names)
+
+    assert result.returncode == 0, result.stderr
+    # Each production name with the health path of its service, after the staging ones.
+    assert _probe_targets(host) == STAGING_PROBES + prod_probes
+
+
+def test_manual_run_keeps_and_an_empty_value_drops_the_production_names(host: Host) -> None:
+    assert host.deploy(PROBE_PROD_HOSTS="api ui").returncode == 0
+    stored = host.env()["PROBE_PROD_HOSTS"]
+    kept = host.deploy(unset=("PROBE_PROD_HOSTS",))
+    kept_targets = _probe_targets(host)
+    dropped = host.deploy(PROBE_PROD_HOSTS="")
+
+    assert stored == "api ui"
+    assert kept.returncode == 0, kept.stderr
+    assert kept_targets == STAGING_PROBES + PROD_PROBES
+    assert dropped.returncode == 0, dropped.stderr
+    assert _probe_targets(host) == STAGING_PROBES
+    assert host.env()["PROBE_PROD_HOSTS"] == ""
+
+
+@pytest.mark.parametrize("names", ["web", "API", "staging-api", "api,ui", "apiui", 'api"'])
+def test_unknown_production_names_fail_before_the_host_changes(host: Host, names: str) -> None:
+    result = host.deploy(PROBE_PROD_HOSTS=names)
+
+    assert result.returncode == 1
+    assert "PROBE_PROD_HOSTS must list production names out of: api ui" in result.stderr
+    assert not host.env_file.exists()
+    assert host.log("psql.log") == ""
+    assert " up " not in host.log("docker.log")
+    assert not (host.monitoring_dir / "prometheus" / "targets" / "probes.json").exists()
+
+
+def test_invalid_production_names_kept_in_env_fail_before_the_host_changes(host: Host) -> None:
+    host.env_file.write_text("PROBE_PROD_HOSTS=web\n", encoding="utf-8")
+    result = host.deploy(unset=("PROBE_PROD_HOSTS",))
+
+    assert result.returncode == 1
+    assert "PROBE_PROD_HOSTS must list production names out of: api ui" in result.stderr
+    assert _read(host.env_file) == "PROBE_PROD_HOSTS=web\n"
+    assert host.log("psql.log") == ""
+    assert " up " not in host.log("docker.log")
+
+
+def test_ports_mode_probes_no_production_name_either(host: Host) -> None:
+    env_file = host.api_dir / ".env"
+    env_file.write_text(_read(env_file).replace("DEPLOY_MODE=edge", "DEPLOY_MODE=ports"))
+    result = host.deploy(PROBE_PROD_HOSTS="api ui")
+
+    assert result.returncode == 0, result.stderr
+    assert _read(host.monitoring_dir / "prometheus" / "targets" / "probes.json") == "[]\n"
+
+
 def test_deploy_refuses_without_the_application_stack(host: Host) -> None:
     (host.api_dir / ".env").unlink()
     result = host.deploy()
@@ -638,6 +943,17 @@ def test_backup_dirs_belong_to_the_backup_user(host: Host) -> None:
     assert f"70:70 {backup_dir}" in host.log("chown.log")
     assert f"70:70 {textfile}" in host.log("chown.log")
     assert host.env()["BACKUP_DIR"] == str(backup_dir)
+
+
+def test_probe_config_is_readable_by_the_exporter_user(host: Host) -> None:
+    config_dir = host.monitoring_dir / "blackbox"
+    config_dir.chmod(0o700)
+    (config_dir / "blackbox.yml").chmod(0o600)
+    result = host.deploy()
+
+    assert result.returncode == 0, result.stderr
+    assert stat.S_IMODE(config_dir.stat().st_mode) == 0o755
+    assert stat.S_IMODE((config_dir / "blackbox.yml").stat().st_mode) == 0o644
 
 
 # --- pg-backup.sh with fake PostgreSQL tools -----------------------------------------------

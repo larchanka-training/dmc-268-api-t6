@@ -13,7 +13,7 @@ from collections.abc import AsyncIterator, Mapping, Set
 from dataclasses import dataclass, field
 from datetime import timedelta
 from enum import StrEnum
-from typing import Protocol
+from typing import Protocol, runtime_checkable
 
 from app.modules.code_index.domain.codes import FAILED_ERROR_CODES
 from app.modules.reviews.application.policy_errors import PolicyErrorCode
@@ -92,6 +92,8 @@ class SourceArchive:
 
     commit_sha: str
     content: bytes = field(repr=False)
+    # Provider entries intentionally omitted before archive construction.
+    provider_skips: Mapping[str, int] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -137,11 +139,17 @@ class VcsUnavailable(Exception):
     """
 
     def __init__(
-        self, message: str, *, rate_limited: bool = False, retry_after: timedelta | None = None
+        self,
+        message: str,
+        *,
+        rate_limited: bool = False,
+        retry_after: timedelta | None = None,
+        http_status: int | None = None,
     ) -> None:
         super().__init__(message)
         self.rate_limited = rate_limited
         self.retry_after = retry_after
+        self.http_status = http_status
         self.code = VCS_RATE_LIMITED if rate_limited else VCS_UNAVAILABLE
 
 
@@ -149,6 +157,13 @@ class VcsAccessDenied(Exception):
     """The repository or the installation can no longer be read."""
 
     code = VCS_ACCESS_DENIED
+
+    def __init__(
+        self, message: str, *, http_status: int | None = None, pin_head: bool = False
+    ) -> None:
+        super().__init__(message)
+        self.http_status = http_status
+        self.pin_head = pin_head
 
 
 class ArchiveUnsafe(Exception):
@@ -202,6 +217,17 @@ class RepositorySnapshotSource(Protocol):
         """The archive of `commit_sha`; more than `max_bytes` downloaded raises
         `IndexLimitExceeded("download_bytes")`."""
         ...
+
+
+@runtime_checkable
+class SparseRepositorySnapshotSource(RepositorySnapshotSource, Protocol):
+    """Optional pinned tree and selected-content port for complete incremental diffs."""
+
+    async def manifest(self, commit_sha: str) -> Mapping[str, ArchiveEntry]: ...
+
+    async def archive_paths(
+        self, commit_sha: str, paths: Set[str], *, max_bytes: int
+    ) -> SourceArchive: ...
 
 
 class ArchiveReader(Protocol):

@@ -1,6 +1,6 @@
 # Мониторинг и алерты — API (команда 6)
 
-Стек мониторинга staging: метрики хоста, контейнеров, очередей, хранилищ и пайплайна ревью, дашборд Grafana, алерты в командный Telegram-канал и ежедневный бэкап PostgreSQL с проверкой восстановления (§9). Это self-hosted стек, который SD §13 («Наблюдаемость») выносит в отдельную задачу. Сквозной трейсинг (OpenTelemetry/Sentry) и JSON-логи с `run_id` — следующий шаг (§8).
+Стек мониторинга staging: метрики хоста, контейнеров, очередей, хранилищ и пайплайна ревью, внешние пробы публичных имён и срок их сертификатов, дашборд Grafana, алерты в командный Telegram-канал и ежедневный бэкап PostgreSQL с проверкой восстановления (§9). Это self-hosted стек, который SD §13 («Наблюдаемость») выносит в отдельную задачу. Сквозной трейсинг (OpenTelemetry/Sentry) и JSON-логи с `run_id` — следующий шаг (§8).
 
 ## 1. Состав
 
@@ -14,6 +14,7 @@ flowchart LR
     cadv[cAdvisor]
     pgx[postgres-exporter]
     rx[redis-exporter]
+    bbx[blackbox-exporter]
     bk[pg-backup]
   end
   subgraph app["compose project dmc-268-api-staging"]
@@ -22,7 +23,8 @@ flowchart LR
     redis[(redis)]
   end
   caddy["edge Caddy :9180\n(dmc268-edge)"]
-  prom -->|scrape| node & cadv & pgx & rx & mq & caddy
+  prom -->|scrape| node & cadv & pgx & rx & mq & caddy & bbx
+  bbx -->|"HTTPS :443 по публичному имени"| caddy
   pgx -->|metrics_exporter| pg
   bk -->|"pg_dump, backup_agent"| pg
   bk -->|textfile| node
@@ -41,9 +43,10 @@ flowchart LR
 | `alertmanager` | `prom/alertmanager:v0.34.1` | 64m | группировка, повтор раз в 4 ч, сообщение о resolve, доставка в Telegram |
 | `grafana` | `grafana/grafana-oss:13.0.2` | 256m | дашборд `AI Code Reviewer — staging overview`, источники Prometheus и PostgreSQL |
 | `node-exporter` | `prom/node-exporter:v1.12.1` | 64m | CPU, память, диск, load хоста; textfile-метрики хостовых задач |
-| `cadvisor` | `gcr.io/cadvisor/cadvisor:v0.55.1` | 256m | CPU и память каждого контейнера (`api`, `worker`, `webhook-worker`, хранилища) |
+| `cadvisor` | `gcr.io/cadvisor/cadvisor:v0.55.1` | 256m | CPU, память и статус healthcheck каждого контейнера (`api`, `worker`, `webhook-worker`, хранилища) |
 | `postgres-exporter` | `quay.io/prometheuscommunity/postgres-exporter:v0.20.1` | 64m | `pg_up`, соединения, размер БД и метрики ревью (`queries.yml`, §4) |
 | `redis-exporter` | `oliver006/redis_exporter:v1.94.0` | 32m | память, hit ratio, `redis_up` |
+| `blackbox-exporter` | `prom/blackbox-exporter:v0.29.1` | 32m | HTTPS-проба публичных имён раз в минуту и срок их сертификатов (`blackbox/blackbox.yml`, §5) |
 | `pg-backup` | `postgres:17.11-alpine` — тот же digest, что у `postgres` staging | 128m | ежедневный `pg_dump` с проверкой восстановления (§9) |
 
 Длину очередей отдаёт сам RabbitMQ: плагин `rabbitmq_prometheus` включён в образе `rabbitmq:4.3.6-management-alpine`, порт 15692 внутри сети проекта. RPS и коды ответов отдаёт edge-прокси Caddy (`metrics { per_host }`, порт 9180 только в сети `dmc268-edge`, [CICD.md §8.2](CICD.md#82-edge-прокси)). Очередь ревью — RabbitMQ, не Redis: Redis только кэш (SD §10).
@@ -56,10 +59,11 @@ flowchart LR
 |---|---|---|
 | Latency LLM-запросов | `LLM call p95`, `LLM call latency` (p50/p95/max, 5 мин) | `run_actions` с `tool = 'llm.call'`: одна запись на фактический вызов провайдера, `duration_ms` (PIPELINE_SPEC §2). При промахе кэша conventions в выборку попадает и вызов conventions: вида вызова нет в колонках `run_actions`, доступных роли Grafana |
 | Размер очередей | `Messages waiting in review queues`, `Review queues: ready messages`, `… in work and consumers` | `rabbitmq_detailed_queue_messages_ready/unacked/consumers{queue}` |
-| RPS | `Requests per second`, `Requests per second by host` | `caddy_http_request_duration_seconds_count{host}` |
+| RPS | `Requests per second`, `Requests per second by host` | `caddy_http_request_duration_seconds_count{host}`; включает пробы (§5): по запросу в минуту на каждое пробуемое имя — они же попадают в долю 5xx и p95 по хосту |
 | Алерты об ошибках в командный канал | §5 | Prometheus → Alertmanager → Telegram |
-| Время каждого шага пайплайна | `Phase duration p95`, `Phases over the range` | `run_actions.tool` + `duration_ms`: `vcs.fetch_diff`, `context.build`, `llm.call`, `review.postprocess`, `github.publish_review`, …. `context.build` с #168 ч.6 пишется один раз за попытку (сборка контекста по диффу); попытки до выката, дошедшие до ревью, хранят две записи (ещё чтение входа промпта), поэтому на диапазоне через выкат счёт выше, а длительности смешивают два шага; `llm.call` смешивает conventions и ревью |
+| Время каждого шага пайплайна | `Phase duration p95`, `Phases over the range` | `run_actions.tool` + `duration_ms`: `vcs.fetch_diff`, `context.build`, `llm.call`, `review.postprocess`, `github.publish_review`, `gitlab.publish_review`, `bitbucket.publish_review`. `context.build` с #168 ч.6 пишется один раз за попытку (сборка контекста по диффу); попытки до выката, дошедшие до ревью, хранят две записи (ещё чтение входа промпта), поэтому на диапазоне через выкат счёт выше, а длительности смешивают два шага; `llm.call` смешивает conventions и ревью |
 | CPU / RAM серверов и воркеров | `Host CPU`, `Host memory`, `Container CPU`, `Container memory` | node-exporter, cAdvisor (метка `container_label_com_docker_compose_service`) |
+| Доступность публичных имён и срок TLS | строка `External probes`: `Public names: probe` (UP/DOWN по имени), `Certificate expires in` (дни, красный < 3, оранжевый < 14 — пороги алертов) | `probe_success{job="blackbox"}`, `probe_ssl_earliest_cert_expiry` (§5). В режиме ports проб нет, обе панели — «No data» |
 
 Ещё на дашборде: прогоны по итоговому состоянию, failed по `error_code`, стоимость и токены LLM в час (`usage_events`), доля 5xx и p95 ответа по хосту, соединения PostgreSQL, память и hit ratio Redis.
 
@@ -104,6 +108,9 @@ flowchart LR
 | `TargetDown` | цель не отвечает 5 мин | critical |
 | `PostgresDown` / `RedisDown` | `pg_up == 0` 2 мин / `redis_up == 0` 5 мин | critical / warning |
 | `ApiHigh5xxRate` | > 5 % ответов 5xx на `staging-api`/`staging-ui` 5 мин (при > 0.05 rps). `staging-webhook` не входит: это заглушка 503 без сервиса, вебхуки GitHub принимает `staging-api` (CICD.md §8.2) | critical |
+| `PublicEndpointDown` | HTTPS-проба имени (метка `host`) не проходит 5 мин: нет соединения, ошибка TLS или итоговый ответ не 2xx, 4xx и заглушка 503 тоже. Трафик пользователей не нужен | critical |
+| `WebhookWorkerDown` | в compose project `dmc-268-api*` 5 мин `webhook-worker` unhealthy или не запущен при запущенном `postgres` | critical |
+| `TlsCertificateExpiresSoon` / `TlsCertificateExpiring` | самому раннему сертификату имени осталось < 14 / < 3 дней, 10 мин | warning / critical |
 | `ReviewRunsFailed` | хотя бы один прогон `failed` за 15 мин; событие | warning |
 | `ReviewDeadLetters` | новые сообщения в `reviews.dlq` за 15 мин; событие. Размер DLQ (хранение 7 дней) — на панели `Review queues: ready messages` | critical |
 | `ReviewQueueBacklog` | > 20 готовых сообщений в `review.run.*`/`review.publish` 10 мин | warning |
@@ -118,6 +125,23 @@ flowchart LR
 | `PostgresBackupOffsiteStale` | копия в бакет не обновлялась 3 ч (только при включённой выгрузке) | critical |
 | `PostgresBackupOffsiteFailing` | все проходы выгрузки за час упали | warning |
 
+**Пробы.** Раз в минуту Prometheus (job `blackbox`, таймаут 20 с) просит `blackbox-exporter` (модуль `https_2xx`: только IPv4 и HTTPS, таймаут 15 с, редиректы проходятся) открыть `https://staging-api.<APP_DOMAIN>/healthcheck` и `https://staging-ui.<APP_DOMAIN>/health`. Prod-имена `https://api.<APP_DOMAIN>/healthcheck` и `https://ui.<APP_DOMAIN>/health` добавляет variable `PROBE_PROD_HOSTS` (§6), когда имя уже обслуживает prod: до выката оно отвечает заглушкой 503 и держало бы critical. Проба идёт как внешний клиент — публичный DNS, опубликованный порт 443 edge-прокси на том же VPS, сертификат и маршрут Caddy. Метка `host` — имя, как у `ApiHigh5xxRate`, `instance` — URL; метки prod-имён — §8.
+
+Inhibit-правил нет, и одна причина даёт несколько алертов: упавшее staging-имя при пользовательском трафике — `ApiHigh5xxRate` и `PublicEndpointDown` с тем же `host` (сами пробы, ~0.017 rps на имя, порог 0.05 rps не достают); упавший Caddy — `TargetDown{job="caddy"}` и `PublicEndpointDown` на каждое имя; ниже 3 дней — оба алерта сертификата. Упал сам экспортер — `TargetDown{job="blackbox"}`, а `PublicEndpointDown` молчит: серии проб устаревают.
+
+**Сертификаты.** `probe_ssl_earliest_cert_expiry` — самый ранний срок среди сертификатов, которые отдаёт имя (лист и промежуточные); если в цепочке появится короткоживущий cross-sign, замена — `probe_ssl_last_chain_expiry_timestamp_seconds` (лучшая проверенная цепочка). Caddy продлевает при остатке около трети срока: 30 д из 90, ≈ 21 д из 64 (Let's Encrypt с февраля 2027), 15 д из 45 (с февраля 2028), так что warning значит «продление не удалось»; у 45-дневных запас над 14 д — сутки, пороги пересмотреть до февраля 2028. Срок виден, пока проба получает TLS-ответ (заглушка 503 его даёт). Правила читают его через `last_over_time(…[10m])`: проба без TLS-ответа короче 10 мин не перезапускает `for` и не гасит алерты, а дольше, в том числе на просроченном сертификате (рукопожатие рвётся), — гасит (RESOLVED, срок в сообщении может быть «-0.0 days»), и падение дальше несёт `PublicEndpointDown`. Имя, убранное из `PROBE_PROD_HOSTS`, держит свои алерты сертификата до 10 мин.
+
+**`webhook-worker`.** Очереди у него нет (слушает `NOTIFY` PostgreSQL и только публикует), поэтому `WebhookWorkerDown` смотрит cAdvisor по compose project: `container_health_state` — Docker healthcheck по heartbeat-файлу (1 healthy, 0 starting или unhealthy, −1 без healthcheck — не алерт), или контейнера нет при запущенном `postgres` того же проекта. Остановка даёт алерт примерно через 6 мин: cAdvisor теряет контейнер сразу, серия устаревает на следующем скрейпе (`track_timestamps_staleness` у job `cadvisor`). Unhealthy — около 6 мин после отметки Docker, у простаивающего контейнера до 8 мин: cAdvisor обновляет статус раз в 30–60 с, у такого контейнера до 120 с. Сама отметка — около минуты после остановки heartbeat. Пересоздание при выкате короче 5 мин алерта не даёт, crash loop даёт, а медленный crash loop, где контейнер каждый раз успевает стать healthy, — нет: числа рестартов cAdvisor не отдаёт. Падение cAdvisor ложного алерта не даёт: все серии устаревают вместе, горит `TargetDown{job="cadvisor"}`. Проект целиком (вместе с `postgres`) здесь не алертит: у staging это `PostgresDown`, `TargetDown`, `PublicEndpointDown`, у prod — §8.
+
+**Плановая остановка.** Сервис, остановленный дольше 5 мин, даёт свой алерт: `webhook-worker` — `WebhookWorkerDown`, `api` — `PublicEndpointDown` для `staging-api.<APP_DOMAIN>` (staging: `staging-api.dmc268-t6.axyi.ru`), `worker` — `ReviewQueueWithoutConsumer`. Восстановление §9 и ручная остановка writers в [CICD.md](CICD.md) останавливают все три — на время работ алерты глушат; `silence add` печатает ID, снять раньше — `am silence expire <ID>`:
+
+```bash
+am() { docker compose -p dmc-268-monitoring exec -T alertmanager amtool --alertmanager.url=http://localhost:9093 "$@"; }
+am silence add alertname=WebhookWorkerDown container_label_com_docker_compose_project=dmc-268-api-staging --duration=1h --comment=restore
+am silence add alertname=PublicEndpointDown host=staging-api.dmc268-t6.axyi.ru --duration=1h --comment=restore
+am silence add alertname=ReviewQueueWithoutConsumer --duration=1h --comment=restore
+```
+
 **Подключение Telegram** (один раз):
 
 1. Создать бота у `@BotFather`, добавить его в командный чат.
@@ -129,18 +153,19 @@ flowchart LR
 
 ## 6. Выкат
 
-Job `Deploy monitoring` в `ci-cd.yml` запускается после успешного `Deploy staging` в своей группе concurrency `staging-monitoring` (не `staging-deploy`: там его ожидание отменяло бы `Promote staging tag` и наоборот; сбой мониторинга приложение не откатывает):
+Job `Deploy monitoring` в `ci-cd.yml` запускается после успешного `Deploy staging` в своей группе concurrency `staging-monitoring` (не `staging-deploy`: там он держал бы lock VPS на время своего выката и задерживал `Promote staging tag` и всех ждущих за ним; сбой мониторинга приложение не откатывает):
 
 1. `scp` содержимого `deploy/monitoring` и `deploy/scripts/env-file.sh` в `/opt/dmc-268-monitoring`.
 2. `deploy.sh`:
    - читает `<APP_DIR>/.env` приложения (пользователь и БД PostgreSQL, пароль Redis, режим edge/ports); проверяет сеть `<project>_default` и контейнер `postgres`;
-   - проверяет настройки Telegram, потом генерирует один раз пароли стека (`.env` 0600);
+   - проверяет входы: в режиме edge `GRAFANA_ROOT_URL` и `APP_DOMAIN` (базовый домен проб, repository variable), всегда `PROBE_PROD_HOSTS` (variable Environment `staging`, по умолчанию пусто ([SECRETS.md](SECRETS.md)); prod-имена в пробах: `api`, `ui` или `api ui`; задана, даже пустой, — применяется и сохраняется в `.env` стека, не задана при ручном запуске — остаётся прежняя) и настройки Telegram. Неверное значение — выкат падает до изменений на хосте;
+   - генерирует один раз пароли стека (`.env` 0600);
    - создаёт и пересобирает роли PostgreSQL (§3);
-   - пишет конфиг Alertmanager и файл токена, цель Caddy для Prometheus (только в режиме edge);
+   - пишет конфиг Alertmanager и файл токена, цели Prometheus: Caddy и пробы (в режиме ports — пустые списки);
    - `docker compose -p dmc-268-monitoring up -d --wait`. Метка с хешем каталога конфигурации пересоздаёт сервис ровно тогда, когда его конфигурация изменилась;
    - синхронизирует пароль `admin` Grafana с `.env`.
 
-Файлы на хосте: `.env` (0600), `alertmanager/alertmanager.yml`, `alertmanager/secrets/telegram_bot_token` (0400), `prometheus/targets/caddy.json`, `textfile/` (textfile-метрики node-exporter, пишут `pg-backup` и `backup-offsite`), дампы — `/var/backups/dmc-268/<project>/` (0700, §9). Тома: `prometheus-data`, `alertmanager-data`, `grafana-data`.
+Файлы на хосте: `.env` (0600), `alertmanager/alertmanager.yml`, `alertmanager/secrets/telegram_bot_token` (0400), `prometheus/targets/caddy.json`, `prometheus/targets/probes.json` (его нет в репозитории: выкат, упавший до `deploy.sh`, оставляет прежние цели), `textfile/` (textfile-метрики node-exporter, пишут `pg-backup` и `backup-offsite`), дампы — `/var/backups/dmc-268/<project>/` (0700, §9). Тома: `prometheus-data`, `alertmanager-data`, `grafana-data`.
 
 Откат приложения стек не трогает. Откатить сам мониторинг — перезапустить job `Deploy monitoring` на нужном коммите или выполнить `deploy.sh` из его checkout.
 
@@ -160,7 +185,8 @@ Grafana — на своём хосте `grafana.<APP_DOMAIN>` (A-запись н
 | Сквозной трейсинг (OpenTelemetry/Sentry), JSON-логи с `run_id` | отдельный PR после стабилизации пайплайна (договорённость команды). Нужен выбор бэкенда: Sentry SaaS (аккаунт и DSN), GlitchTip или Grafana Tempo; self-hosted Sentry на общий VPS не помещается |
 | Redis | бэкапить нечего: на staging он без тома и без персистентности (`save ""`, `appendonly no`), это кэш (SD §10) |
 | Метрики приложения (`/metrics` FastAPI, `X-RateLimit-Remaining` GitHub) | нужен код и зависимость; пока RPS и коды — с edge-прокси, пайплайн — из `run_actions` |
-| prod | prod-выката нет; `environment` в метках — `staging` |
+| prod | выкатывается вручную ([CICD.md](CICD.md) §5, п. 6); своих целей нет: запросы к `api.` (edge, `per_host`), контейнеры prod (cAdvisor; алерты OOM и `WebhookWorkerDown`) и пробы prod-имён из `PROBE_PROD_HOSTS` идут с `environment` = `staging`. Падение prod-проекта целиком видно только по этим пробам |
+| Пробы публичных имён | идут с того же VPS: падение VPS целиком или его сети они не видят — вместе с ними молчит весь стек; нужен внешний пробник |
 | cAdvisor | читает состояние Docker через `/var/run` (сокеты Docker и containerd), что равносильно root на хосте; сетей, кроме сети проекта, и портов у него нет |
 
 ## 9. Бэкапы PostgreSQL
@@ -185,7 +211,7 @@ Grafana — на своём хосте `grafana.<APP_DOMAIN>` (A-запись н
 
 Бэкап вне расписания: `docker compose -p dmc-268-monitoring exec pg-backup sh /opt/pg-backup/pg-backup.sh once`.
 
-**Восстановление** (проверено на дампе staging-схемы: та же ревизия, таблицы и данные, владелец `app`). Перед заменой рабочей БД — правила [CICD.md §5](CICD.md#5-rollback) «Действия при отказе»: окно обслуживания, остановка пишущих процессов, бэкап текущей БД.
+**Восстановление** (проверено на дампе staging-схемы: та же ревизия, таблицы и данные, владелец `app`). Перед заменой рабочей БД — правила [CICD.md §5](CICD.md#5-rollback) «Действия при отказе»: окно обслуживания, остановка пишущих процессов, бэкап текущей БД. Остановку дольше 5 мин заранее заглушить в Alertmanager (§5, «Плановая остановка»).
 
 ```bash
 cd /opt/dmc-268-api-staging
@@ -257,11 +283,11 @@ Redis не бэкапится: на staging он без тома и без пе�
 ## 10. Проверка
 
 ```bash
-scripts/validate_monitoring.sh   # promtool, amtool, compose config, JSON дашбордов (как в CI)
+scripts/validate_monitoring.sh   # promtool, amtool, конфиг blackbox, compose config, JSON дашбордов (как в CI)
 uv run pytest tests/test_deploy_monitoring.py
 ```
 
-Локально против `docker compose` из корня репозитория: каталог с `.env` приложения, где `DEPLOY_MODE=ports`, и `API_DIR`, указывающий на него. Имя каталога должно совпадать с compose project приложения (сеть `<project>_default`). В Docker Desktop cAdvisor не видит сокеты через `/var/run`: для локального запуска добавьте override с `/var/run/docker.sock` и `/run/containerd/containerd.sock`.
+Локально против `docker compose` из корня репозитория: каталог с `.env` приложения, где `DEPLOY_MODE=ports`, и `API_DIR`, указывающий на него. Имя каталога должно совпадать с compose project приложения (сеть `<project>_default`); проект `dmc-268-api*` с `postgres`, но без `webhook-worker`, даёт `WebhookWorkerDown`. В Docker Desktop cAdvisor не видит сокеты через `/var/run`: для локального запуска добавьте override с `/var/run/docker.sock` и `/run/containerd/containerd.sock`.
 
 ```bash
 API_DIR=/path/to/<project> deploy/monitoring/deploy.sh

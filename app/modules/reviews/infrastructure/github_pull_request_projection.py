@@ -32,6 +32,7 @@ from app.modules.reviews.application.project_github_pull_request import (
 )
 from app.modules.reviews.application.queue_messages import StoredRunMessage
 from app.modules.reviews.application.try_enqueue_webhook_run import PendingRunMessage
+from app.modules.reviews.infrastructure.bitbucket_run_origin import active_bitbucket_run_origin
 from app.modules.reviews.infrastructure.models import CodeChange, Run
 from app.modules.reviews.infrastructure.run_origin import active_origin_condition
 
@@ -292,6 +293,10 @@ class SqlAlchemyPullRequestRunCanceller:
                 and_(
                     ProviderInstallation.provider == "gitlab",
                     gitlab.c.origin_provider_installation_id.is_not(None),
+                ),
+                and_(
+                    ProviderInstallation.provider == "bitbucket",
+                    active_bitbucket_run_origin(),
                 ),
             ),
             active_origin_condition(),

@@ -76,6 +76,7 @@ from app.modules.code_index.application.vcs import (
     IndexLimitExceeded,
     RepositorySnapshotSource,
     SourceArchive,
+    SparseRepositorySnapshotSource,
     VcsAccessDenied,
     VcsUnavailable,
 )
@@ -217,12 +218,14 @@ class BuildOutcome:
 
     status: BuildStatus
     error_code: str | None = None
+    http_status: int | None = None
     retry_after: timedelta | None = None
     mode: BuildMode | None = None
     full_reason: FullBuildReason | None = None
     commit_sha: str | None = None
     # Files of this build per exclusion class.
     exclusions: Mapping[ExclusionClass, int] = field(default=_NO_EXCLUSIONS)
+    provider_skips: Mapping[str, int] = field(default_factory=dict)
     parsed_files: int = 0
     written_files: int = 0
     deleted_files: int = 0
@@ -313,6 +316,8 @@ def _admit(
     entries: Mapping[str, ArchiveEntry],
     paths: Sequence[str],
     deadline: float,
+    *,
+    count: bool = True,
 ) -> tuple[list[str], list[str]]:
     """The admitted files among `paths`, counting the excluded ones, and every Go file and
     package `__init__.py` of the archive that a resolved import may read."""
@@ -320,7 +325,12 @@ def _admit(
     for path in paths:
         _check_deadline(deadline)
         entry = entries[path]
-        if exclusions.admit_entry(path, symlink=entry.symlink, size=entry.size) is None:
+        excluded = (
+            exclusions.admit_entry(path, symlink=entry.symlink, size=entry.size)
+            if count
+            else exclusions.entry_class(path, symlink=entry.symlink, size=entry.size)
+        )
+        if excluded is None:
             admitted.append(path)
     languages = {language_for_path(path) for path in admitted}
     targets = []
@@ -442,10 +452,20 @@ async def _release_lease(
     fence: IndexFence,
     last_error_code: str | None,
     stats: IndexBuildStats,
+    *,
+    terminal_head_sha: str | None = None,
+    expected_target_sha: str | None = None,
 ) -> None:
     # A job that ends without a publication records its metrics too (#142).
     async with uow() as unit:
-        await unit.index.release(repository_id, fence, last_error_code=last_error_code, stats=stats)
+        await unit.index.release(
+            repository_id,
+            fence,
+            last_error_code=last_error_code,
+            stats=stats,
+            terminal_head_sha=terminal_head_sha,
+            expected_target_sha=expected_target_sha,
+        )
         await unit.commit()
 
 
@@ -482,9 +502,13 @@ def _log(repository_id: UUID, generation: int, outcome: BuildOutcome) -> None:
     skipped = ",".join(
         f"{exclusion.value}:{count}" for exclusion, count in outcome.exclusions.items() if count
     )
+    provider_skipped = ",".join(
+        f"{reason}:{count}" for reason, count in sorted(outcome.provider_skips.items()) if count
+    )
     _LOGGER.info(
         "code_index build repository_id=%s generation=%d status=%s mode=%s reason=%s "
-        "error=%s parsed=%d written=%d deleted=%d skipped=%s requests=%d "
+        "error=%s http_status=%s parsed=%d written=%d deleted=%d skipped=%s "
+        "provider_skipped=%s requests=%d "
         "downloaded_bytes=%d duration_ms=%d",
         repository_id,
         generation,
@@ -492,10 +516,12 @@ def _log(repository_id: UUID, generation: int, outcome: BuildOutcome) -> None:
         outcome.mode.value if outcome.mode else "-",
         outcome.full_reason.value if outcome.full_reason else "-",
         outcome.error_code or "-",
+        outcome.http_status if outcome.http_status is not None else "-",
         outcome.parsed_files,
         outcome.written_files,
         outcome.deleted_files,
         skipped or "-",
+        provider_skipped or "-",
         outcome.github_request_count,
         outcome.downloaded_bytes,
         outcome.duration_ms,
@@ -537,6 +563,9 @@ class _Job:
         self._full_reason: FullBuildReason | None = None
         self._commit_sha: str | None = None
         self._exclusions: IndexExclusions | None = None
+        self._provider_skips: Mapping[str, int] = {}
+        self._http_status: int | None = None
+        self._pin_terminal_head = False
         self._downloaded = 0
         # Every path this job parsed, in either pass: `parsed_files` bounds the work.
         self._parsed: set[str] = set()
@@ -551,10 +580,15 @@ class _Job:
         except (IndexLimitExceeded, ArchiveUnsafe) as error:
             return await self._fail(error.code)
         except VcsUnavailable as error:
+            self._http_status = error.http_status
             return await self._release(BuildStatus.TRANSIENT, error.code, error.retry_after)
         except VcsAccessDenied as error:
+            self._http_status = error.http_status
+            self._pin_terminal_head = error.pin_head
             return await self._release(BuildStatus.RELEASED, error.code)
         except PolicyError as error:
+            self._http_status = error.http_status
+            self._pin_terminal_head = error.pin_head
             return await self._release(BuildStatus.RELEASED, error.error_code)
         except BaseException as error:
             await self._abandon(_unexpected_error_code(error))
@@ -572,11 +606,13 @@ class _Job:
         return BuildOutcome(
             status,
             error_code=error_code,
+            http_status=self._http_status,
             retry_after=retry_after,
             mode=self._mode,
             full_reason=self._full_reason,
             commit_sha=self._commit_sha,
             exclusions=MappingProxyType(dict(exclusions.counts)) if exclusions else _NO_EXCLUSIONS,
+            provider_skips=MappingProxyType(dict(self._provider_skips)),
             parsed_files=len(self._parsed),
             written_files=self._written,
             deleted_files=self._deleted,
@@ -586,7 +622,10 @@ class _Job:
 
     def _stats(self) -> IndexBuildStats:
         return IndexBuildStats(
-            self._downloaded, _elapsed_ms(self._started), self._source.request_count
+            self._downloaded,
+            _elapsed_ms(self._started),
+            self._source.request_count,
+            http_status=self._http_status,
         )
 
     async def _fail(self, error_code: str) -> BuildOutcome:
@@ -606,11 +645,16 @@ class _Job:
     async def _release(
         self, status: BuildStatus, error_code: str, retry_after: timedelta | None = None
     ) -> BuildOutcome:
+        # A source may mark a refusal such as Bitbucket static-token 401 as final for
+        # the observed head. Other terminal refusals keep the original target discovery.
+        observed_head = (
+            self._commit_sha if status is BuildStatus.RELEASED and self._pin_terminal_head else None
+        )
         try:
-            await asyncio.shield(self._release_lease(error_code))
+            await asyncio.shield(self._release_lease(error_code, terminal_head_sha=observed_head))
             # A TRANSIENT message is retried and comes back to the target anyway.
             if status is BuildStatus.RELEASED:
-                await self._wake_if_the_target_moved()
+                await self._wake_if_the_target_moved(observed_head)
         except IndexLeaseLost:
             return self._outcome(BuildStatus.LEASE_LOST)
         return self._outcome(status, error_code, retry_after)
@@ -618,17 +662,27 @@ class _Job:
     async def _abandon(self, last_error_code: str | None) -> None:
         await _abandon(self._uow, self._id, self._fence, last_error_code, self._stats())
 
-    async def _release_lease(self, last_error_code: str | None) -> None:
-        await _release_lease(self._uow, self._id, self._fence, last_error_code, self._stats())
+    async def _release_lease(
+        self, last_error_code: str | None, *, terminal_head_sha: str | None = None
+    ) -> None:
+        await _release_lease(
+            self._uow,
+            self._id,
+            self._fence,
+            last_error_code,
+            self._stats(),
+            terminal_head_sha=terminal_head_sha,
+            expected_target_sha=self._claim.target_commit_sha,
+        )
 
     async def _wake(self) -> None:
         await self._wakeups.wake(self._id, self._fence.generation)
 
-    async def _wake_if_the_target_moved(self) -> None:
+    async def _wake_if_the_target_moved(self, observed_head: str | None = None) -> None:
         """ADR §6.2: a wake-up refused as LEASED while this job held the lease left its
         target on the state row; a target other than the claim snapshot wakes the job."""
         after = await self._state()
-        if after.target_commit_sha != self._claim.target_commit_sha:
+        if after.target_commit_sha != (observed_head or self._claim.target_commit_sha):
             await self._wake()
 
     # --- the build ----------------------------------------------------------------
@@ -659,13 +713,29 @@ class _Job:
         comparison = await self._comparison(state, head)
         document = await self._network(lambda: self._source.rules_document(head.commit_sha))
         policy = parse_review_ignore(document.text)
-        archive = await self._network(
-            lambda: self._source.archive(head.commit_sha, max_bytes=self._limits.download_bytes)
-        )
-        self._downloaded = len(archive.content)
-        scan = await self._archives.scan(archive, documents=_DOCUMENTS, deadline=self._deadline)
         exclusions = IndexExclusions(IgnoreMatcher(policy), self._limits)
         self._exclusions = exclusions
+        sparse = None
+        plan: _Plan | None = None
+        if (
+            comparison is not None
+            and state.profile is not None
+            and state.profile.exclusions_digest == policy.digest
+            and isinstance(self._source, SparseRepositorySnapshotSource)
+        ):
+            sparse = await self._sparse_inputs(
+                self._source, state, comparison, head.commit_sha, exclusions
+            )
+        if sparse is None:
+            archive = await self._network(
+                lambda: self._source.archive(head.commit_sha, max_bytes=self._limits.download_bytes)
+            )
+        else:
+            archive, scan, plan = sparse
+        self._provider_skips = archive.provider_skips
+        self._downloaded = len(archive.content)
+        if sparse is None:
+            scan = await self._archives.scan(archive, documents=_DOCUMENTS, deadline=self._deadline)
         if (
             comparison is not None
             and profile is not None
@@ -673,14 +743,19 @@ class _Job:
         ):
             self._full(FullBuildReason.EXCLUSIONS_CHANGED)
             comparison = None
-        go_module = _go_module(scan, self._limits)
-        plan = None
-        if comparison is not None:
-            plan = await self._incremental(state, comparison, scan, go_module)
-        if plan is None:
-            plan = _Plan(True, tuple(sorted(scan.entries)), frozenset(), IndexCounts(0, 0, 0))
+        if sparse is None:
+            go_module = _go_module(scan, self._limits)
+            plan = None
+            if comparison is not None:
+                plan = await self._incremental(state, comparison, scan, go_module)
+            if plan is None:
+                plan = _Plan(True, tuple(sorted(scan.entries)), frozenset(), IndexCounts(0, 0, 0))
+            else:
+                self._mode = BuildMode.INCREMENTAL
         else:
+            go_module = _go_module(scan, self._limits)
             self._mode = BuildMode.INCREMENTAL
+        assert plan is not None
         written = await self._index(archive, scan, exclusions, go_module, plan)
         deleted = tuple(sorted(plan.closes - written))
         self._written, self._deleted = len(written), len(deleted)
@@ -703,6 +778,95 @@ class _Job:
             return self._outcome(BuildStatus.REWAKE)
         await self._wake_if_the_target_moved()
         return self._outcome(BuildStatus.PUBLISHED)
+
+    async def _sparse_inputs(
+        self,
+        source: SparseRepositorySnapshotSource,
+        state: IndexState,
+        comparison: Comparison,
+        commit_sha: str,
+        exclusions: IndexExclusions,
+    ) -> tuple[SourceArchive, ArchiveScan, _Plan] | None:
+        """Build an incremental archive from a complete pinned manifest and changed blobs.
+
+        A complete diffstat proves unchanged files retain their blobs. The stored blob
+        IDs supply those unchanged paths to the resolver; selected paths are fetched
+        and hashed by the ordinary archive reader before any index row is written.
+        """
+        manifest = await self._network(lambda: source.manifest(commit_sha))
+        stored = await self._stored_files()
+        compared: set[str] = set()
+        delta: set[str] = set()
+        for item in comparison.files:
+            compared.add(item.path)
+            if item.previous_path:
+                compared.add(item.previous_path)
+                delta.add(item.previous_path)
+            if item.status not in _SAME_PATH:
+                delta.add(item.path)
+        changed = compared | (stored.keys() - manifest.keys())
+        for path in changed:
+            entry = manifest.get(path)
+            if entry is None or entry.symlink or path not in stored:
+                delta.add(path)
+        limit = self._limits.incremental_files
+        if len(changed) > limit:
+            self._full(FullBuildReason.TOO_MANY_CHANGES)
+            return None
+        module_paths = frozenset({"go.mod"} & manifest.keys())
+        module_archive = await self._network(
+            lambda: source.archive_paths(
+                commit_sha, module_paths, max_bytes=self._limits.download_bytes
+            )
+        )
+        module_scan = await self._archives.scan(
+            module_archive, documents=_DOCUMENTS, deadline=self._deadline
+        )
+        go_module = _go_module(module_scan, self._limits)
+        records = await self._stored_imports()
+        affected = await asyncio.to_thread(
+            affected_importers,
+            records,
+            delta=delta,
+            changed=changed,
+            go_module=go_module,
+            limit=limit,
+        )
+        if affected is None:
+            self._full(FullBuildReason.TOO_MANY_CHANGES)
+            return None
+        targets = changed | affected
+        closes = frozenset(targets & stored.keys())
+        async with self._uow() as uow:
+            closing = await uow.index.visible_counts(self._id, sorted(closes))
+        kept = IndexCounts(
+            state.file_count - closing.file_count,
+            state.symbol_count - closing.symbol_count,
+            state.edge_count - closing.edge_count,
+        )
+        plan = _Plan(False, tuple(sorted(targets & manifest.keys())), closes, kept)
+        provisional = {
+            path: replace(entry, blob_sha=stored.get(path)) for path, entry in manifest.items()
+        }
+        admitted, target_facts = await asyncio.to_thread(
+            _admit, exclusions, provisional, plan.paths, self._deadline, count=False
+        )
+        selected = frozenset(admitted) | frozenset(target_facts) | module_paths
+        archive = await self._network(
+            lambda: source.archive_paths(
+                commit_sha, selected, max_bytes=self._limits.download_bytes
+            )
+        )
+        sparse_scan = await self._archives.scan(
+            archive, documents=_DOCUMENTS, deadline=self._deadline
+        )
+        # Redirected selected blobs are omitted, just as in a full archive.
+        for path in selected:
+            provisional.pop(path, None)
+        provisional.update(sparse_scan.entries)
+        scan = replace(sparse_scan, entries=provisional)
+        plan = replace(plan, paths=tuple(path for path in plan.paths if path in provisional))
+        return archive, scan, plan
 
     async def _network[T](self, call: Callable[[], Awaitable[T]]) -> T:
         remaining = self._deadline - time.monotonic()

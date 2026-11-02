@@ -1,0 +1,28 @@
+{
+  "after_table": [],
+  "apply": false,
+  "board": {
+    "action": "none",
+    "from": null,
+    "readback": null,
+    "to": null
+  },
+  "comment": null,
+  "followups": [],
+  "issue": "larchanka-training/dmc-268-api-t6#500",
+  "mode": "accepter",
+  "next": "Do not close the issue; fix the stop reasons first.",
+  "readback": null,
+  "return_items": [],
+  "rework_rule": null,
+  "rows": [],
+  "schema": 1,
+  "stops": [
+    "no executor table found: no comment with the marker <!-- accept-issue:table v1 --> and no --table-comment ID; give the ID of a hand-written table with --table-comment"
+  ],
+  "table": null,
+  "tick": [],
+  "verdict": "stop",
+  "viewer": "axyi",
+  "warnings": []
+}

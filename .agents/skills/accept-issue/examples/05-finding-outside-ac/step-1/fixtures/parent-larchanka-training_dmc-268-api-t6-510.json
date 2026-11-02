@@ -1,0 +1,14 @@
+{
+  "data": {
+    "repository": {
+      "issue": {
+        "parent": {
+          "number": 500,
+          "repository": {
+            "nameWithOwner": "larchanka-training/dmc-268-api-t6"
+          }
+        }
+      }
+    }
+  }
+}

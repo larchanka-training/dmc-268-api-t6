@@ -1,0 +1,472 @@
+{
+  "data": {
+    "repository": {
+      "issue": {
+        "title": "[process] Закрепить правила приёмки и актуализировать доки вебхука, auth и SD",
+        "url": "https://github.com/larchanka-training/dmc-268-api-t6/issues/56",
+        "state": "CLOSED",
+        "stateReason": "COMPLETED",
+        "body": "## Background\n\nСерьёзность: P2 (максимум по частям: ч. 1 — P2, ч. 2 — P3).\nИсходные владельцы ролей по частям (исполнитель — @axyi до переназначения):\nч. 1 (правила приёмки) — @axyi (техлид спринта 2, #20); следующий техлид может переназначить;\nч. 2 (доки и smoke) — @ndovnar (вебхук и auth, #11), @axyi (SD и PIPELINE_SPEC, #20).\nЗадача объединяет 2 части; каждую можно сдать отдельным PR с `Refs`, отметив чекбоксы своей части.\n\n**Часть 1 — правила приёмки** (P2 — приёмка не сработала: ни одна задача ролей спринта 2 не прошла проверку AC при закрытии)\nФакты спринта 2:\n(1) в 8 из 9 задач ролей при закрытии отмечено 0 AC;\n(2) #30 и #34 закрыли не исполнители, через 1–2 мин после мержа PR с `Refs` (#30 — переносом карточки на доске), при невыполненных AC;\n(3) #35 авто-закрылся мержем #45 через связь в панели Development, хотя в теле PR было «Refs #35 — не закрывает»;\n(4) #11 закрыт через 2 ч после сообщения о P1 в самой задаче, без ответа на него;\n(5) PR #38 смёржен без rebase на `main`, после чего `main` был красным около 3 ч;\n(6) PR #42 одобрен на `dcdf95d`, затем rebase и новые коммиты (в том числе коммит ревьюера) смёржены без повторного approve;\n(7) тела PR larchanka-training/dmc-268-ui-t6#59 и larchanka-training/dmc-268-ui-t6#63 не соответствуют содержимому.\n`docs/CONTRIBUTING.md:52-53` описывает только `Closes` и `Refs`.\n\nСпецификации. `docs/PIPELINE_SPEC.md:5`, `docs/SYSTEM_DESIGN.md:5` и SD §16 (`:880`) заявляют «утверждён командой». PR #36 одобрил 1 из 7 владельцев ролей (ndovnar). Пятеро запрошенных ревьюеров не ответили (createunix, lama2x2, skvertl, AndrewBlinets, aleksei-antipin), мерж прошёл решением техлида. Решение техлида 04.10.2026: считать это фактическим согласием, потому что контракты реализованы всеми ролями; статус не меняется, ретро-аппрувы не собираются.\n\n**Часть 2 — доки и smoke** (P3)\n• README не описывает вебхук, webhook-worker и auth с локальной парой JWT-ключей — есть только таблица хостов (`README.md:120`). В `docs/WEBHOOK_WORKER.md` устарел абзац о timeline ревьюеров (абзац о публикаторе правит https://github.com/larchanka-training/dmc-268-api-t6/issues/52 (часть 1)).\n• SD называет флаг лейбла `reviewer_requested` (`SYSTEM_DESIGN.md:231,238,407,540,738`), а PIPELINE_SPEC §8 и код — `ai_review_labeled`.\n• `SYSTEM_DESIGN.md:511` утверждает, что Zod не знает `author` / `headRef` / `baseRef`, хотя ui#59 их добавил.\n• OQ-2 в SD (`:847`) помечен «закрыт», но strict structured output ещё не подтверждён живым прогоном (#46).\n• PIPELINE_SPEC §15, строка 2 (ack p95 < 500 мс) открыта без замера.\n• `redocly lint` выдаёт 3 предупреждения `no-unused-components`.\n• Проверки вебхука против контейнера нет (стикер доски: «локальный скрипт, ngrok или CI-скрипт»): подписанные доставки проверяются только in-process через TestClient. В `.agents/skills/e2e-test/SKILL.md:59-81` — заглушка «webhook route — not yet defined (pending api #4)».\n\n## Scope\n\n- Часть 1 — правила приёмки: `docs/CONTRIBUTING.md`, раздел о закрытии задач: issue закрывает техлид (или назначенный им) после проверки AC и отметки чекбоксов; перенос карточки на доске не считается сдачей; описать ловушку связи в панели Development (вручную привязанный PR закрывает issue при мерже даже с `Refs`)\n- Часть 1 — правила приёмки: Там же о мерже: rebase на `main` перед мержем; после rebase или новых коммитов нужен повторный approve; тело PR описывает весь PR\n- Часть 1 — правила приёмки: Ссылки на эти правила из `.agents/rules/git-workflow.md` (синхронизирован в оба репозитория по sync-map) и из шаблона PR\n- Часть 2 — доки и smoke: README: раздел про вебхук, webhook-worker и auth (локальная пара JWT-ключей); абзац о timeline в `docs/WEBHOOK_WORKER.md`\n- Часть 2 — доки и smoke: SD: одно имя флага лейбла, устаревшие пункты §7.3, статус OQ-2 по факту #46\n- Часть 2 — доки и smoke: PIPELINE_SPEC §15, строка 2: замер или обоснованное закрытие\n- Часть 2 — доки и smoke: `scripts/` (или make-цель): отправка подписанного `pull_request.labeled` на локальный стек; CI-smoke против контейнера; e2e-skill ссылается на скрипт\n- Часть 2 — доки и smoke: `redocly lint` без предупреждений\n\n## Acceptance Criteria\n\n- [x] Часть 1 — правила приёмки: В `docs/CONTRIBUTING.md` есть правила закрытия задач и мержа из Scope; `.agents/rules/git-workflow.md` в обоих репозиториях ссылается на них\n- [x] Часть 1 — правила приёмки: Решение по опции ruleset «Dismiss stale pull request approvals when new commits are pushed» записано: включена или отклонена с причиной\n- [x] Часть 2 — доки и smoke: README содержит раздел про вебхук, webhook-worker и auth\n- [x] Часть 2 — доки и smoke: В `docs/` одно имя флага лейбла; устаревшие пункты SD §7.3 и статус OQ-2 соответствуют факту\n- [x] Часть 2 — доки и smoke: Скрипт отправляет подписанную доставку на локальный стек; CI-джоб поднимает контейнер и получает 202\n- [x] Часть 2 — доки и smoke: Заглушка в e2e-skill заменена ссылкой на скрипт\n- [x] Часть 2 — доки и smoke: PIPELINE_SPEC §15, строка 2 закрыта замером или обоснованием\n- [x] Часть 2 — доки и smoke: `redocly lint contracts/openapi.yaml` без предупреждений (или они осознанно отключены в конфиге)\n\n## Dependencies\n\n**Связано, не блокирует:**\n\n- #20 — PR #36 со спецификацией\n- https://github.com/larchanka-training/dmc-268-api-t6/issues/52 (часть 1) — smoke доставки `labeled` после подключения триггера проверяет и создание Run; абзац о публикаторе в `WEBHOOK_WORKER.md` правится там\n- #47 — перенос скиллов в `.agents/skills`, если smoke пойдёт через e2e-skill\n- #46 — статус OQ-2\n\n## DoD Checklist\n\n- [x] `uv run ruff check .`, `uv run ruff format --check .`, `uv run mypy .`, `uv run pytest` зелёные\n- [x] Required check `Python lint / type / test` зелёный\n- [x] PR по каждой части: 1 approve, все треды закрыты\n- [x] Документация обновлена\n- [x] Чекбоксы AC отмечены, issue закрыт техлидом после проверки всех частей\n\n## References\n\n- https://github.com/larchanka-training/dmc-268-api-t6/blob/0e4a2af/docs/CONTRIBUTING.md#L52-L53 — текущие правила `Closes` / `Refs`\n- https://github.com/larchanka-training/dmc-268-api-t6/blob/0e4a2af/docs/SYSTEM_DESIGN.md#L880 — отметка SD §16\n- https://github.com/larchanka-training/dmc-268-api-t6/pull/36 — 1 approve из 7 ролей\n- https://github.com/larchanka-training/dmc-268-api-t6/blob/0e4a2af/docs/SYSTEM_DESIGN.md#L231 — флаг `reviewer_requested` в SD\n- https://github.com/larchanka-training/dmc-268-api-t6/blob/0e4a2af/docs/SYSTEM_DESIGN.md#L511 — устаревший пункт §7.3\n- https://github.com/larchanka-training/dmc-268-api-t6/blob/0e4a2af/docs/SYSTEM_DESIGN.md#L847 — статус OQ-2\n- https://github.com/larchanka-training/dmc-268-api-t6/blob/0e4a2af/docs/PIPELINE_SPEC.md#L427 — §15, строка 2 (p95)\n- https://github.com/larchanka-training/dmc-268-api-t6/blob/0e4a2af/.agents/skills/e2e-test/SKILL.md#L59-L81 — заглушка webhook route\n- https://github.com/larchanka-training/dmc-268-api-t6/blob/0e4a2af/README.md#L120 — только таблица хостов\n\n## Kickoff — с чего начать\n\n**Репозиторий:** larchanka-training/dmc-268-api-t6 — `.agents/rules/git-workflow.md` синхронизируется в larchanka-training/dmc-268-ui-t6\n\n**Ветка:** docs/<n>-acceptance-and-docs — `main` защищён; по PR на часть, все с `Refs`; issue закрывает техлид после проверки всех частей\n\n**Форма проблемы:** Часть 1 (правила приёмки): Правила мержа есть, правил приёмки задач нет. Поэтому «закрыто» в спринте 2 означало «смёржен какой-то PR» или «карточку передвинули», а не «AC проверены». Нужны проверяемые правила: кто закрывает, когда и по какому признаку.\nЧасть 2 (доки и smoke): Код вебхука и auth ушёл вперёд, а документы остались на состоянии до PR #38. Кроме того, у команды нет способа проверить вебхук против запущенного контейнера — только in-process тесты.\n\n**Что прочитать первым:**\n\n- (ч. 1) docs/CONTRIBUTING.md — текущий процесс PR и закрытия\n- (ч. 1) .agents/rules/git-workflow.md и .agents/README.md — правила git и sync-map между репозиториями\n- (ч. 2) docs/WEBHOOK_WORKER.md и docs/PIPELINE_SPEC.md §8, §15\n- (ч. 2) docs/SYSTEM_DESIGN.md §7.3 и §15\n- (ч. 2) tests/test_webhook_full_path.py — как строятся подписанные доставки (образец для скрипта)\n- (ч. 2) .agents/skills/e2e-test/SKILL.md\n\n**Перед тем как писать код:**\n\n- (ч. 1) `gh api repos/larchanka-training/dmc-268-api-t6/rulesets` — текущие правила ruleset (то же для ui)\n- (ч. 2) `npx @redocly/cli lint contracts/openapi.yaml` — текущие предупреждения\n\n**Мины:**\n\n- (ч. 1) `.agents/rules/git-workflow.md` должен остаться побайтно одинаковым в api и ui (sync-map) — два PR\n- (ч. 1) Правило без проверяемого признака (кто, когда, чем) повторит «закрыто ≠ сделано»\n- (ч. 2) Якоря SD используются в ui-доках и `.agents`: менять заголовки осторожно (SD канонический только в api)\n- (ч. 2) Секрет вебхука для скрипта берётся из локального `.env` и не коммитится\n\n\n\n",
+        "timelineItems": {
+          "pageInfo": {
+            "hasNextPage": false,
+            "endCursor": "Y3Vyc29yOnYyOpPPAAABoXNwouACqzE3NzM3MzAxMzEw"
+          },
+          "nodes": [
+            {
+              "__typename": "CrossReferencedEvent",
+              "willCloseTarget": false,
+              "source": {
+                "__typename": "Issue"
+              }
+            },
+            {
+              "__typename": "CrossReferencedEvent",
+              "willCloseTarget": false,
+              "source": {
+                "__typename": "Issue"
+              }
+            },
+            {
+              "__typename": "CrossReferencedEvent",
+              "willCloseTarget": false,
+              "source": {
+                "__typename": "Issue"
+              }
+            },
+            {
+              "__typename": "CrossReferencedEvent",
+              "willCloseTarget": false,
+              "source": {
+                "__typename": "Issue"
+              }
+            },
+            {
+              "__typename": "CrossReferencedEvent",
+              "willCloseTarget": false,
+              "source": {
+                "__typename": "Issue"
+              }
+            },
+            {
+              "__typename": "CrossReferencedEvent",
+              "willCloseTarget": false,
+              "source": {
+                "__typename": "Issue"
+              }
+            },
+            {
+              "__typename": "CrossReferencedEvent",
+              "willCloseTarget": false,
+              "source": {
+                "__typename": "Issue"
+              }
+            },
+            {
+              "__typename": "CrossReferencedEvent",
+              "willCloseTarget": false,
+              "source": {
+                "__typename": "Issue"
+              }
+            },
+            {
+              "__typename": "CrossReferencedEvent",
+              "willCloseTarget": false,
+              "source": {
+                "__typename": "Issue"
+              }
+            },
+            {
+              "__typename": "CrossReferencedEvent",
+              "willCloseTarget": false,
+              "source": {
+                "__typename": "PullRequest",
+                "number": 59,
+                "title": "docs(contributing): issue acceptance and merge rules (#56)",
+                "url": "https://github.com/larchanka-training/dmc-268-api-t6/pull/59",
+                "body": "## What\n\nPart 1 of #56: checkable rules for accepting an issue and for merging a PR. The ruleset and board decision is recorded here. Ten commits, meant for a rebase merge. The branch is rebased on `main` after #60 merged, so the new required checks `OpenAPI lint` and `Webhook container smoke` run here too.\n\n- **`docs/CONTRIBUTING.md`.** The lines that contradicted the new rules are rewritten, and two subsections are added at the end of §2.\n  - Rewritten: step 2 used `Closes #N`, steps 7 and 8 and §1 had the author closing the issue, and §4 said \"after Approve only a rebase\".\n  - **Приёмка задачи** (issue acceptance): only the tech lead, or a participant the tech lead appointed in the issue, closes it. That happens after all of the issue's PRs are merged and no remarks in the issue are left unanswered. All checkboxes must be ticked, and the closing comment gives evidence for each AC. Moving the board card is not acceptance. The Development-panel trap gets its own rule. Each rule has a command that checks it; every command was run against real issues and PRs (#28, #30, #35/#45, #42, #40).\n  - **Мерж** (merge): the branch is up to date with `main` and updated by rebase, never by merging `main` into it (command 5б lists merge commits and expects empty output); the approve is on the current head; the body describes the whole PR.\n  - §7 records the tech-lead decision of 04.10.2026. Both rulesets get *dismiss stale approvals*, *require approval of the most recent push* and *require branches to be up to date*; ui gets the required check `Docker image build` so that the last one can apply. Project 12's \"Auto-close issue\" workflow is turned off. The api ruleset also requires `OpenAPI lint` and `Webhook container smoke`. All settings were applied on 04.10.2026.\n- **`.agents/rules/git-workflow.md`** (synced). The pointer to CONTRIBUTING now names the acceptance and merge rules. New rule: no closing keyword in the title, body or commits, and no Development link. The existing gate lines are unchanged.\n- **`.github/pull_request_template.md`** (new, synced). It has What / Why / How to verify / Refs, a \"Before merge\" checklist, and absolute links to the rules. It is added to the `.agents/README.md` sync map.\n- **`pull-request` skill** (synced). The closing-keyword ban now covers same-repo references too. The body follows the template.\n- **`AGENTS.md`** conventions match: approve on the current head, re-approve after a push that changes the diff, rebase again before merge, no closing keyword or Development link.\n\nThe ui mirror is larchanka-training/dmc-268-ui-t6#68; part 2 is #60.\n\nNo new dependency.\n\n## Why\n\nIn sprint 2, \"closed\" never meant \"AC checked\":\n- 8 of 9 role issues closed with 0 AC ticked.\n- #30 and #34 closed by people who weren't the assignees, #30 by a card move.\n- #35 auto-closed through a Development link.\n- #11 closed with an unanswered P1.\n- PR #38 merged without a rebase, and `main` was red for about 3 h.\n- PR #42 merged on an approve for an older head.\n- The bodies of ui#59 and ui#63 did not describe their content.\n\nCONTRIBUTING only described `Closes` and `Refs`.\n\n## How to verify\n\n```bash\ncmp .agents/rules/git-workflow.md ../dmc-268-ui-t6/.agents/rules/git-workflow.md          # identical\ncmp .github/pull_request_template.md ../dmc-268-ui-t6/.github/pull_request_template.md    # identical (same for pull-request/SKILL.md, commit-message-instructions.md)\nuv run pytest .agents/skills/create-issue/tests -q                                        # 237 passed\n```\n\nThen run commands 1–6, 4б and 5б from CONTRIBUTING §2 on the cited issues and PRs. The expected output is next to each command.\n\nThe rulesets and the Project 12 change are already applied (summary in #56). Check them with `gh api repos/larchanka-training/dmc-268-api-t6/rulesets/22761836` and the same for ui ruleset 23726179.\n\n## Refs\n\nRefs #56 (part 1)\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n\nhttps://claude.ai/code/session_018fPsfP1VFfvSnTWnVtHaix\n",
+                "state": "MERGED",
+                "mergedAt": "2026-10-05T11:54:07Z",
+                "headRefOid": "c253b142d1189df3ce8d4e7312c514905e5af86e",
+                "repository": {
+                  "nameWithOwner": "larchanka-training/dmc-268-api-t6"
+                },
+                "commits": {
+                  "nodes": [
+                    {
+                      "commit": {
+                        "statusCheckRollup": {
+                          "state": "SUCCESS"
+                        }
+                      }
+                    }
+                  ]
+                },
+                "reviewThreads": {
+                  "pageInfo": {
+                    "hasNextPage": false,
+                    "endCursor": "Y3Vyc29yOnYyOpK0MjAyNi0xMC0wNVQxMDoxMToxMVrOqPzzSw=="
+                  },
+                  "nodes": [
+                    {
+                      "isResolved": true
+                    },
+                    {
+                      "isResolved": true
+                    },
+                    {
+                      "isResolved": true
+                    }
+                  ]
+                }
+              }
+            },
+            {
+              "__typename": "CrossReferencedEvent",
+              "willCloseTarget": false,
+              "source": {
+                "__typename": "PullRequest",
+                "number": 68,
+                "title": "docs(process): mirror the acceptance and merge rules",
+                "url": "https://github.com/larchanka-training/dmc-268-ui-t6/pull/68",
+                "body": "## What\n\nMirror of larchanka-training/dmc-268-api-t6#56 part 1 (issue acceptance and merge rules). The canonical rules live in api `docs/CONTRIBUTING.md`, changed by larchanka-training/dmc-268-api-t6#59. Five commits, meant for a rebase merge.\n\n- **`.agents/rules/git-workflow.md`** (synced, byte-identical with api). The pointer now names the acceptance and merge rules. New rule: no closing keyword in the title, body or commits, and no Development link; the tech lead closes the issue after checking its AC.\n- **`.github/pull_request_template.md`** (new, synced). It has What / Why / How to verify / Refs, a \"Before merge\" checklist, and absolute links to the api rules. It is added to the `.agents/README.md` sync map.\n- **`pull-request` skill** (synced). The closing-keyword ban now covers same-repo references too. The body follows the template.\n- **`docs/CONTRIBUTING.md`** (pointer stub). The stub now says the canon also covers issue acceptance and merge rules.\n- **`AGENTS.md`** conventions match: approve on the current head, re-approve after a push that changes the diff, rebase again before merge, no closing keyword or Development link.\n\nNo new dependency.\n\n## Why\n\nThe synced rule and skill files have to stay byte-identical with api. Without this PR, an agent working in ui would still read the old wording, where `Closes` was allowed within the same repo and the author closed the issue by hand. The decision recorded in api adds the required check `Docker image build` to the ui ruleset, so that \"require branches to be up to date\" can apply here as well.\n\n## How to verify\n\n```bash\nfor f in .agents/rules/git-workflow.md .github/pull_request_template.md \\\n         .agents/skills/pull-request/SKILL.md .agents/skills/pull-request/commit-message-instructions.md; do\n  cmp \"$f\" ../dmc-268-api-t6/\"$f\"; done                                   # no output = identical\nnpx --yes prettier@3.9.9 --check .agents docs/CONTRIBUTING.md .github/pull_request_template.md\n```\n\n## Refs\n\nRefs larchanka-training/dmc-268-api-t6#56 (part 1)\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n\nhttps://claude.ai/code/session_018fPsfP1VFfvSnTWnVtHaix\n",
+                "state": "MERGED",
+                "mergedAt": "2026-10-05T09:03:40Z",
+                "headRefOid": "c16e216c79abbb159bf6fe9fd3f372163d48abb3",
+                "repository": {
+                  "nameWithOwner": "larchanka-training/dmc-268-ui-t6"
+                },
+                "commits": {
+                  "nodes": [
+                    {
+                      "commit": {
+                        "statusCheckRollup": {
+                          "state": "SUCCESS"
+                        }
+                      }
+                    }
+                  ]
+                },
+                "reviewThreads": {
+                  "pageInfo": {
+                    "hasNextPage": false,
+                    "endCursor": null
+                  },
+                  "nodes": []
+                }
+              }
+            },
+            {
+              "__typename": "CrossReferencedEvent",
+              "willCloseTarget": false,
+              "source": {
+                "__typename": "PullRequest",
+                "number": 60,
+                "title": "docs: webhook and auth docs, SD drift, container smoke (#56)",
+                "url": "https://github.com/larchanka-training/dmc-268-api-t6/pull/60",
+                "body": "## What\n\nPart 2 of #56: webhook/auth docs, SD drift, a signed-delivery smoke against a container, redocly at zero warnings. Thirteen commits, meant for a rebase merge. **Merge this before #59**: the api ruleset requires the two jobs added here.\n\n- **Smoke script + CI.** `scripts/webhook_smoke.py` (stdlib only) sends a signed `pull_request` / `labeled` (`ai-review`) delivery and expects `202 pending`, then the same delivery `202 duplicate`, then a corrupted signature `401`. `--count N` prints p50/p95/max. The secret comes only from `GITHUB_WEBHOOK_SECRET` and is never printed. `tests/test_webhook_smoke_script.py` runs the script's deliveries through the real route in-process. The new CI job **Webhook container smoke** (`needs: docker-build`) loads the built image, migrates a `postgres:17-alpine` service, starts the API container with a throwaway per-run secret and runs the script. `push-image` now needs it.\n- **e2e-test skill.** The \"webhook route not yet defined\" placeholder is replaced by the migration step and the script.\n- **README.** New section \"Webhook, webhook-worker and local auth\": local RS256 key pair in `.env`, migrations (not run by `docker compose up`), the smoke, the `webhooks` profile. The local run now uses `uv run --env-file .env` (nothing in the app loads `.env`). The staging hosts row points at `staging-api…/webhooks/github`, which is what serves webhooks today.\n- **WEBHOOK_WORKER.md.** The timeline paragraph now matches the code: the timeline is never fetched, `review_requested`/`review_request_removed` are dropped, and label/close/reopen/synchronize reconcile `ai_review_labeled` from one PR GET under the advisory lock.\n- **SD.**\n  - The label flag is `code_changes.ai_review_labeled` everywhere in `docs/`. `reviewer_requested` survives once, explicitly as the legacy column.\n  - §6.1: the 202 comes right after the receipt insert, and projection runs in webhook-worker.\n  - §7.3: ui Zod knows `author`/`headRef`/`baseRef` since ui#59.\n  - OQ-2 is open until #46, because live run 37153425606 failed.\n  - OQ-8 now agrees with §8.2 (`issues: write`, from #48). This one is outside #56's scope; it was a one-line contradiction.\n- **PIPELINE_SPEC §15 row 2** is closed. The handler makes no REST call; the ack is HMAC plus one insert. The local measurement over 3 runs of 100 deliveries gave p95 6.5–7.0 ms.\n- **redocly.** `redocly.yaml` turns `info-license` off, because the repo has no LICENSE. `.redocly.lint-ignore.yaml` keeps two reviewed false positives: `RunUpdatedEvent` is referenced via `x-events` and tested, and logout can only fail with 503. `@redocly/cli@2.57.0` is pinned in PIPELINE_SPEC. `contracts/openapi.yaml` is unchanged.\n- **Follow-up commits.**\n  - SD §4 container box, §6.3, §6.9, §7.2, §8.3 and the §14 deployment diagram now show the Webhook API as receipt-only. A webhook-worker container does projection, label and tree calls and run cancellation, and enqueue from a delivery is marked #52.\n  - SD Р-9: the route never reads the sender; webhook-worker skips the bot's own `ai-review` label events by `GITHUB_APP_BOT_LOGIN`.\n  - SD Р-12 and §4: webhook-worker is a second process of the webhook role, from the same image.\n  - SD §8.3, §10 and §11: installation tokens are cached in process memory, not in Redis.\n  - PIPELINE_SPEC: the actor of projection, enqueue, the App key and SSE signals is `webhook-worker`, with #52 marked. Regeneration of the Zod snapshot is owned by #55.\n  - New CI job **OpenAPI lint** runs `npx --yes @redocly/cli@2.57.0 lint contracts/openapi.yaml`. Strictness comes from `redocly.yaml` (`extends: [recommended-strict]`), so a warning fails both locally and in CI. `push-image` needs the job.\n  - `docs/CICD.md` lists both new jobs.\n  - The e2e-test skill lists the real compose services and calls httpx a runtime dependency.\n- **Tech-lead decisions of 04.10.2026.**\n  - T6: the check-run stays with RunGuard as its single writer. The stale ack-budget reason in PIPELINE_SPEC §7 is replaced.\n  - SD §13 keeps the 100 % coalescing gate. The PG head window of one webhook-worker cycle is recorded as a risk that #52 must close (comment in #52).\n  - Installation tokens: Redis stays the target (SD §8.3, §10, §11). The in-process cache is a §7.3 deviation, and the move is tracked in #62.\n  - `OpenAPI lint` and `Webhook container smoke` are required checks; the workflow comments and `docs/CICD.md` say so.\n- **Review by ndovnar.**\n  - The smoke job sets up uv with Python 3.13 and runs `uv run --locked python scripts/webhook_smoke.py`, per AGENTS.md.\n  - Label lifecycle: the docs follow the projector (tech-lead decision). `closed` and `reopened` reconcile `ai_review_labeled` from the PR's current labels, and a closed PR gets no new Run because every candidate query requires `state = open`. SD Р-10 and §8.2, PIPELINE_SPEC §8.2, TEST_PLAN and WEBHOOK_WORKER now agree.\n\nNo new dependency.\n\n## Why\n\nThe webhook and auth code moved ahead of the docs after PR #38, and the only webhook checks ran in-process through TestClient. The AC of #56 part 2 asks for one flag name in `docs/`, factual SD §7.3 and OQ-2, a script plus a CI job that gets a 202 from a container, and a clean `redocly lint`.\n\n## How to verify\n\n```bash\nuv run ruff check . && uv run ruff format --check . && uv run mypy . && uv run pytest   # 1009 passed, 60 skipped locally\ngrep -rn reviewer_requested docs/                                                     # one hit, the legacy column\nnpx --yes @redocly/cli@2.57.0 lint contracts/openapi.yaml                             # valid, 0 warnings, 2 ignored\ndocker compose up -d --build backend postgres\ndocker compose run --rm backend alembic upgrade head\nuv run --env-file .env python scripts/webhook_smoke.py --count 100                    # needs GITHUB_WEBHOOK_SECRET in .env\n```\n\nIn CI, the job **Webhook container smoke** must be green and its log must show `202 pending`, `202 duplicate` and `401`.\n\n## Refs\n\nRefs #56 (part 2). Related: #52 owns the publisher paragraph, the webhook-worker `RABBITMQ_URL` and Run creation from a delivery. #46 owns the OQ-2 confirmation. #35 PR 2 also edits `ci-cd.yml`, which may conflict on rebase.\n\nNot changed, left for owners or follow-up:\n- The unreachable reviewer-intent and timeline code, and `review_worker()` in `app/worker.py`, are in #54's list of rudiments (comment in #54). They are not deleted here.\n- The `ui_zod_contracts.json` snapshot is #55's work.\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n\nhttps://claude.ai/code/session_018fPsfP1VFfvSnTWnVtHaix\n",
+                "state": "MERGED",
+                "mergedAt": "2026-10-05T09:15:20Z",
+                "headRefOid": "97a335fd4b268858f464b4a90cc7d21f86bfb116",
+                "repository": {
+                  "nameWithOwner": "larchanka-training/dmc-268-api-t6"
+                },
+                "commits": {
+                  "nodes": [
+                    {
+                      "commit": {
+                        "statusCheckRollup": {
+                          "state": "SUCCESS"
+                        }
+                      }
+                    }
+                  ]
+                },
+                "reviewThreads": {
+                  "pageInfo": {
+                    "hasNextPage": false,
+                    "endCursor": null
+                  },
+                  "nodes": []
+                }
+              }
+            },
+            {
+              "__typename": "CrossReferencedEvent",
+              "willCloseTarget": false,
+              "source": {
+                "__typename": "Issue"
+              }
+            },
+            {
+              "__typename": "ClosedEvent",
+              "createdAt": "2026-10-05T09:15:22Z",
+              "actor": {
+                "login": "axyi"
+              },
+              "stateReason": "COMPLETED",
+              "closer": {
+                "__typename": "PullRequest",
+                "number": 60,
+                "repository": {
+                  "nameWithOwner": "larchanka-training/dmc-268-api-t6"
+                }
+              }
+            },
+            {
+              "__typename": "CrossReferencedEvent",
+              "willCloseTarget": false,
+              "source": {
+                "__typename": "PullRequest",
+                "number": 64,
+                "title": "fix(pipeline): assemble webhook to LLM review path (#52)",
+                "url": "https://github.com/larchanka-training/dmc-268-api-t6/pull/64",
+                "body": "## What\n\nThe review path now works end to end in the production composition: webhook → Run → queue → worker → LLM Gateway → GitHub. One PR, one commit per part of #52.\n\n- **Part 1, Run trigger** (`781b855`): the dispatcher built by `ReviewsApiResources` gets `run_trigger` (`TriggerFromDelivery` + `TryEnqueueWebhookRun` + `LazyAmqpPublisher`). Label, `synchronize`/`reopened` and CI deliveries create Runs without waiting for the sweep; the PR projector sends the T6 close signal with the delivery. `webhook_worker` requires `RABBITMQ_URL` (also in compose, `webhooks` profile). The test that pinned \"no run publisher\" is replaced.\n- **Part 2, worker and gateway** (`783eedb`): `python -m app.worker` builds one `LlmGateway` per process from `LLM_*` and, per claimed attempt, `GatewayReviewModel` + `GatewayConventionsModel` bound to the attempt's `RunCallContext`. `GitHubRunSource` reads AGENTS.md at `base_sha`, the tree and files at `head_sha` by blob, and the PR metadata. `UnavailableReviewProvider` is gone; without `LLM_MODEL` the worker starts with a warning and runs fail with a message naming the missing configuration, the VCS steps are not masked. `ClaimedAttempt.engine` is `EngineName`. `LLM_*` are passed to the compose `worker`.\n- **Stale head before publishing** (`1e40409`, comment of @axyi): before `POST /pulls/{n}/reviews` the publisher reads the PR head on GitHub; a moved head ends the run `cancelled` / `superseded` (T15) instead of a review on the old commit.\n- **Part 3, deferred deliveries** (`fda879e`): a deferred delivery shares the dispatch attempt counter (3) and then gets a final `projection_deferred_at` (migration `20261005_0024`); `wake_receipts` clears it when the installation is linked. The sweep logs handled and deferred counts; finished receipts are purged after 30 days, once an hour.\n- **Part 4, deep** (`f733e90`): `RepositoryEngine` (`fast` only) in the contract, `PATCH` with `deep` → 422, data migration `20261005_0025` moves repositories and queued runs to `fast`, the reconciler does not republish into `review.run.deep`.\n- **Docs** (`6fb1bcd`): WEBHOOK_WORKER, README, SD §7.3/§13/§15, BACKEND_ARCHITECTURE, PIPELINE_SPEC §5.3.\n- **Staging** (`565639f`, after #35): `webhook-worker` gets `RABBITMQ_URL` and waits for a healthy `rabbitmq`; deploy test, CICD and SECRETS updated.\n- **Tests** (`bcc928c`): truncated tree and unreadable or binary context files.\n- **Docs** (`c123c16`, `a0d1d48`): SD §13 and TEST_PLAN state the coalescing gate as the head check right before POST; the window between that read and POST is an accepted residual risk (tech lead decision of 05.10.2026).\n\n## Why\n\n#52: every piece was implemented and tested on its own, but the production composition had no `run_trigger` and the worker ran on a stub, so no real review could happen; deferred deliveries retried forever; `deep` runs never finished.\n\n## How to verify\n\n```bash\nuv run ruff check . && uv run ruff format --check . && uv run mypy . && uv run pytest\nTEST_DATABASE_URL=... TEST_RABBITMQ_URL=... uv run pytest -rs\n```\n\nLocal run against PostgreSQL 17 and RabbitMQ 4: **1102 passed, 0 skipped**; ruff, format and mypy clean; one alembic head (`20261005_0025`). `docker compose up worker` starts and logs the missing `LLM_*` warning.\n\nAcceptance Criteria:\n\n| AC | Check |\n|---|---|\n| ч.1 labeled + green CI creates a Run and publishes it without the sweep, built from `ReviewsApiResources` | `test_labeled_pr_with_green_ci_creates_and_publishes_a_run` (red without the wiring) |\n| ч.1 `check_suite.completed` after `exclude()` | `test_check_suite_after_the_no_ci_sweep_excluded_the_head_creates_a_run` |\n| ч.1 `wait_for_ci=always` / `never` by event | `test_wait_for_ci_always_waits_for_the_check_suite_event`, `test_wait_for_ci_never_starts_without_ci` |\n| ч.1 `ci_status` filled by `check_suite` / `status` | `test_wait_for_ci_always_...` and the existing `test_postgres_ci_event_cache_only_updates_current_head_for_check_suite_and_status` |\n| ч.1 `synchronize` signals the worker at once | `test_synchronize_cancels_the_attempted_run_and_signals_the_worker_at_once` |\n| ч.1 manual compose run with a signed `labeled` delivery | **not done**: needs the GitHub App credentials; the signed delivery script is on `main` (`scripts/webhook_smoke.py`) |\n| ч.2 `main` composition on fake LLM and GitHub transports reaches `succeeded`, `llm.call`, one `llm.review_output`, `usage_events` | `test_main_composition_reviews_through_the_llm_gateway` (with and without AGENTS.md) |\n| ч.2 with `LLM_*` the stub is not used | `test_production_factory_binds_gateway_models_to_the_attempt`; the stub class is removed |\n| ч.2 conventions from GitHub, repo without AGENTS.md does not fail the run | `test_main_composition_...[no-agents-md]` |\n| ч.2 no LLM config: warning, healthy, message, VCS step not masked | `test_main_composition_without_llm_config_names_the_missing_configuration`, `test_factory_without_llm_...` |\n| ч.2 manual run on a real model | **not done**: needs LLM keys (EUrouter / self-hosted) |\n| ч.2 docs | SD §7.3, §15, BACKEND_ARCHITECTURE, README |\n| ч.3 final after N attempts, `wake_receipts`, log, retention | `test_deferred_delivery_is_final_after_three_attempts_and_wakes_on_linking`; WEBHOOK_WORKER.md |\n| ч.4 contract, PIPELINE_SPEC, SD; `PATCH` fast only; migration; reconciler | `test_repository_update_validates_...` (deep → 422), `test_migration_moves_repositories_and_queued_runs_to_fast`, `test_reconciler_does_not_republish_into_the_deep_queue` (red without the filter) |\n| ч.4 UI form | larchanka-training/dmc-268-ui-t6#71 |\n\nMerge order and coordination:\n- this PR first (its migration moves `deep` repositories to `fast`), then larchanka-training/dmc-268-ui-t6#71: the new UI accepts only `fast`, and the old form sends the engine only when a user changes it.\n- #61 (ui Zod mirror): its snapshot still has `deep` for `Repository`; after #71 it needs a regenerated snapshot.\n- #63 (staging): `webhook-worker` now requires `RABBITMQ_URL`, `worker` reads `LLM_*`.\n\n## Refs\n\nRefs #52. UI: larchanka-training/dmc-268-ui-t6#71\n\n\n",
+                "state": "MERGED",
+                "mergedAt": "2026-10-05T19:31:07Z",
+                "headRefOid": "a0d1d4868c198c954a0867810536e82db1485e33",
+                "repository": {
+                  "nameWithOwner": "larchanka-training/dmc-268-api-t6"
+                },
+                "commits": {
+                  "nodes": [
+                    {
+                      "commit": {
+                        "statusCheckRollup": {
+                          "state": "SUCCESS"
+                        }
+                      }
+                    }
+                  ]
+                },
+                "reviewThreads": {
+                  "pageInfo": {
+                    "hasNextPage": false,
+                    "endCursor": "Y3Vyc29yOnYyOpK0MjAyNi0xMC0wNVQxMTozMjo1OVrOqQNTog=="
+                  },
+                  "nodes": [
+                    {
+                      "isResolved": true
+                    },
+                    {
+                      "isResolved": true
+                    }
+                  ]
+                }
+              }
+            },
+            {
+              "__typename": "CrossReferencedEvent",
+              "willCloseTarget": false,
+              "source": {
+                "__typename": "PullRequest",
+                "number": 67,
+                "title": "fix(llm): reassign OQ-2 models after the live run (#46)",
+                "url": "https://github.com/larchanka-training/dmc-268-api-t6/pull/67",
+                "body": "## What\n\n- OQ-2 model pair reassigned: primary `mistral-small-4` (was the fallback), fallback `mistral-small-3.2-24b` (new). `gpt-4.1-mini` is removed from `KNOWN_MODELS`; `mistral-small-3.2-24b` is added with catalog values of 2026-10-05.\n- `llm-live-run.yml` input defaults, `.env.example` and the tests that rely on `KNOWN_MODELS` follow the new pair.\n- Docs: SD §15 (OQ-2 row, D7 table, choice, live-run notes), PIPELINE §5.1 / §9 / §14, `docs/SECRETS.md`, `review/README.md`.\n\n## Why\n\nThe live run after the credits top-up ([run 37297031740](https://github.com/larchanka-training/dmc-268-api-t6/actions/runs/37297031740)) still failed. `gpt-4.1-mini` gets HTTP 400 \"No providers available … with given preferences\". The 400 stays even with credits and with no `response_format` ([probe 37298451583](https://github.com/larchanka-training/dmc-268-api-t6/actions/runs/37298451583)). So its only provider, Microsoft Foundry, is unavailable to the course account; strict mode is not the cause. The curator confirmed that the organization and the key carry no routing rule, so the cause stays unknown (SD §15).\n\nCandidates were probed on a throwaway branch (`chore/46-live-run-probe`, deleted). None of another vendor met all three requirements: strict, the 90 s timeout and finding the sample's bugs.\n\n| Candidate | Result | Probe |\n|---|---|---|\n| `qwen3-coder-30b-a3b` | 0 findings | [37298546024](https://github.com/larchanka-training/dmc-268-api-t6/actions/runs/37298546024) |\n| `deepseek-v4-flash-0731` | §9 semantics, repair failed | [37298546024](https://github.com/larchanka-training/dmc-268-api-t6/actions/runs/37298546024) |\n| `gemma-4` | 90 s timeout | [37298777819](https://github.com/larchanka-training/dmc-268-api-t6/actions/runs/37298777819) |\n| `qwen3.6-35b` | 90 s timeouts; thinking cannot be switched off | [37299020566](https://github.com/larchanka-training/dmc-268-api-t6/actions/runs/37299020566), [37302208756](https://github.com/larchanka-training/dmc-268-api-t6/actions/runs/37302208756), [37302748485](https://github.com/larchanka-training/dmc-268-api-t6/actions/runs/37302748485) |\n| `minimax-m3` | 400 \"does not support JSON schema mode\" | [37299020566](https://github.com/larchanka-training/dmc-268-api-t6/actions/runs/37299020566) |\n\nThe chosen pair shares a model vendor but uses disjoint EUrouter hosting providers: Mistral AI / Regolo / AKI.IO vs OVHcloud / Scaleway / GreenPT.\n\nWorst case of a fast run, at the most expensive endpoint of each model:\n- 9 calls of `mistral-small-4` at Regolo: $0.432.\n- 3 calls of `mistral-small-3.2-24b` at GreenPT: $0.046.\n- Total: $0.478 ≤ $0.50, at 1.1225 USD/EUR (EUrouter's own rate on 2026-10-05).\n\n**Tech-lead decisions (@axyi):**\n- D7 is read literally (`calls == [primary]`), with one exception. A single repair caused only by §9 semantics, with strict accepted, counts for D7. The reason: no candidate of acceptable quality passed literally.\n- The AC1 evidence is a green run on this branch. The run on `main` after merge goes to #33.\n\n## How to verify\n\n- `uv run ruff check .`, `uv run ruff format --check .`, `uv run mypy .`: clean. `uv run pytest`: 1027 passed, 60 skipped (integration tests, no local DB). New tests pin the SD §15 prices and windows of both models and check the run cost limit boundary at the real primary price: `test_oq2_pair_keeps_the_sd15_catalog_prices_and_windows`, `test_run_cost_limit_boundary_at_the_oq2_primary_price`. `pre-commit run --from-ref origin/main --to-ref HEAD`: passed.\n- Live runs on this branch with defaults (`gh workflow run llm-live-run.yml --ref fix/46-oq2-live-run`, head c3811b7, before the rebase on main 9637d35). Since then the LLM path has changed only in `settings.py` comments, and the new main commits (#35, #56) do not touch it:\n\n  | Run | `mistral-small-4` | `mistral-small-3.2-24b` | Workflow |\n  |---|---|---|---|\n  | [37304499334](https://github.com/larchanka-training/dmc-268-api-t6/actions/runs/37304499334) | `[primary]` | primary → repair | failure |\n  | [37304578603](https://github.com/larchanka-training/dmc-268-api-t6/actions/runs/37304578603) | `[primary]` | `[primary]` | **success** |\n  | [37304646906](https://github.com/larchanka-training/dmc-268-api-t6/actions/runs/37304646906) | primary → repair | `[primary]` | failure |\n\n  The first answer was valid 2 of 3 times for each model, and every repair produced a valid answer. The probes logged the raw answers, and each logged repair cause was a §9 rule: `start_line == line` for `mistral-small-4`, a two-sentence `summary.problem` for `mistral-small-3.2-24b`.\n- After merge: `gh workflow run llm-live-run.yml --repo larchanka-training/dmc-268-api-t6`; the result goes to #33.\n\nOut of scope, follow-up #66 (parts 1–2 below; part 3 is the staging fallback):\n- **`usage.cost` currency.** It comes in the endpoint's currency: EUR at Scaleway, OVHcloud and Infercom; `usage.cost_currency` names it. The gateway stores it as `cost_usd`, so the budget is understated by about 11 % on EUR routes.\n- **Lossless normalization.** `start_line == line` → `null`, and the findings order. The fallback has no repair, so today these are hard failures there.\n\nStaging (#35, merged):\n- The repository variable `LLM_MODEL` is set to `mistral-small-4` (2026-10-05); it takes effect on the next staging deploy.\n- `worker.env` does not forward `LLM_FALLBACK_MODEL`, so staging runs without a fallback for now. Tracked in #66, part 3.\n\nNo new dependencies.\n\n## Refs\n\nRefs #46\nRefs #33\nFollow-up: #66\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n\nhttps://claude.ai/code/session_01V5iLu8beApghmUDnaHobav\n\n\n\n",
+                "state": "MERGED",
+                "mergedAt": "2026-10-05T16:21:44Z",
+                "headRefOid": "a55303b79ee4c80ae252b256c749cd43af5031a0",
+                "repository": {
+                  "nameWithOwner": "larchanka-training/dmc-268-api-t6"
+                },
+                "commits": {
+                  "nodes": [
+                    {
+                      "commit": {
+                        "statusCheckRollup": {
+                          "state": "SUCCESS"
+                        }
+                      }
+                    }
+                  ]
+                },
+                "reviewThreads": {
+                  "pageInfo": {
+                    "hasNextPage": false,
+                    "endCursor": "Y3Vyc29yOnYyOpK0MjAyNi0xMC0wNVQxNjozMTo0NVrOqR91dA=="
+                  },
+                  "nodes": [
+                    {
+                      "isResolved": true
+                    },
+                    {
+                      "isResolved": true
+                    },
+                    {
+                      "isResolved": true
+                    },
+                    {
+                      "isResolved": true
+                    }
+                  ]
+                }
+              }
+            },
+            {
+              "__typename": "CrossReferencedEvent",
+              "willCloseTarget": false,
+              "source": {
+                "__typename": "PullRequest",
+                "number": 69,
+                "title": "fix(api): api hardening and legacy artifacts decision (#54)",
+                "url": "https://github.com/larchanka-training/dmc-268-api-t6/pull/69",
+                "body": "## What\n\n- Fixed token refresh session handling and rotation replay grace period (15s): limit of 5 sessions counts all unrevoked family rows with `created_at >= session.rotated_at`, preserving normal sequential rotation chains; immediate commit of `revoke_family` on replay expiration or limit violation before raising `InvalidRefreshToken`.\n- Added migration `20261006_0026_extend_vcs_file_statuses.py` extending CHECK constraint `ck_code_change_diffs_status` on `code_change_diffs` with values `'copied'`, `'changed'`, and `'unchanged'` (`'renamed'` was already supported).\n- Added PostgreSQL session-level advisory lock (`pg_advisory_lock` / `pg_advisory_unlock`) on an AUTOCOMMIT connection outside transactions (per AGENTS.md rule) in `SqlAlchemyPullRequestProjectionLock` (`github_pull_request_projection.py`) with a 10s acquisition timeout to serialize concurrent pull request projection updates per repository and pull request number.\n- Refactored `CancelRun`, `SweepNoCi`, `TriggerFromDelivery`, and `ReviewRunProcessor` to require Unit of Work factories (`uow_factory`); removed standalone `commit()` calls from all repository and cache adapters (`SqlAlchemyRunRepository`, `SqlAlchemyDueNoCiCandidates`, `SqlAlchemyWebhookRunTargets`, `SqlAlchemyBlobCache`) to ensure transactional boundaries belong exclusively to use cases. Diff snapshots and blob writes in production `SqlAlchemyRunProcessingUnitOfWork` (and test `ProcessingUow`) are staged in memory and committed atomically with the use case transaction.\n- Narrowed generated file heuristic in `app/modules/reviews/application/vcs_diff.py`: removed over-broad extensions (`.lock`, `.lockb`, arbitrary `.snap`) and generic i18n directory matches (`locale`, `locales`, `i18n`, `l10n`, `translations`); restricted `dist` to top-level prefix, snapshots to `.snap` files under `__snapshots__`, and lockfiles to exact recognized entries in `_LOCK_FILES`.\n- Hardened reviews API, run streaming (15s keepalive, close on JWT expiration), unified `get_run_event_hub` dependency injection for SSE stream and cancellation events, and enforced fail-closed auth scope checks across repositories, queries, and settings.\n- Hardened AMQP delivery tracking: classic priority queues (`x-max-priority`) and publish queue republish confirmed copies with incremented `x-attempt` headers and ACK original delivery on unexpected handler errors to preserve attempt count across consumer restarts; publish and ack error handling are disentangled; failure to publish falls back to safely wrapped `nack(requeue=True)`; planned retries via `reviews.retry` and `x-death` are separated from the crash budget; warnings are logged on corrupted retry headers; DLQ routing with `exc_info=True` at threshold 3.\n- Enforced 413 payload size limit (10MB) before HMAC verification on webhook endpoint.\n- Added and updated OpenAPI descriptions across endpoints (including `/api/auth/refresh` and `/healthcheck`).\n- Updated `docs/SYSTEM_DESIGN.md` §6.8, §7.2, §7.3, §8.3, §10, §11, §12 and finalized legacy artifacts table in §16 with definitive decisions, owners, and timelines; updated `docs/PIPELINE_SPEC.md` §4.1 with matching `x-attempt` counter semantics.\n\n## Why\n\nImplements API hardening and security/grant isolation requirements for Issue #54, addressing all review feedback from tech lead and reviewers across Rounds 1–5.\n\n## How to verify\n\nLocal quality gates:\n- `uv run ruff check .`\n- `uv run ruff format --check .`\n- `uv run mypy .`\n- `uv run pytest tests/test_auth_refresh.py tests/test_queue_messages.py tests/test_cancel_run.py tests/test_sqlalchemy_run_repository.py tests/test_sqlalchemy_uow_fail_fast.py tests/test_openapi_contract.py tests/test_ui_zod_contracts.py tests/test_run_stream.py tests/test_vcs_run_snapshot.py tests/test_get_run_diff.py tests/test_get_run_file_lines.py tests/test_sweep_no_ci.py tests/test_github_run_trigger.py`\n\nPostgreSQL & RabbitMQ integration test verification (requires disposable test instances, not production or dev databases):\n- `TEST_DATABASE_URL=\"postgresql+psycopg://app:app@localhost:5432/app\" TEST_RABBITMQ_URL=\"amqp://app:app@localhost:5672/\" uv run pytest tests/test_auth_refresh_postgres.py tests/test_portal_scope_postgres.py tests/test_vcs_snapshot_postgres.py tests/test_webhook_run_trigger_postgres.py tests/test_worker_queue_postgres.py`\n\n## Refs\n\nRefs #54\n\n---\n\nBefore merge:\n\n- [x] No closing keyword and no Development-panel link to the issue\n- [x] Branch rebased on the current main\n- [ ] Approve is on the current head commit\n- [x] The body describes the whole PR\n- [ ] All review threads resolved\n\nRules: [merge](https://github.com/larchanka-training/dmc-268-api-t6/blob/main/docs/CONTRIBUTING.md#merge), [issue acceptance](https://github.com/larchanka-training/dmc-268-api-t6/blob/main/docs/CONTRIBUTING.md#issue-acceptance).",
+                "state": "MERGED",
+                "mergedAt": "2026-10-07T14:19:23Z",
+                "headRefOid": "07390d0592eb59c690cbc7edc65c8022fb66d380",
+                "repository": {
+                  "nameWithOwner": "larchanka-training/dmc-268-api-t6"
+                },
+                "commits": {
+                  "nodes": [
+                    {
+                      "commit": {
+                        "statusCheckRollup": {
+                          "state": "SUCCESS"
+                        }
+                      }
+                    }
+                  ]
+                },
+                "reviewThreads": {
+                  "pageInfo": {
+                    "hasNextPage": false,
+                    "endCursor": "Y3Vyc29yOnYyOpK0MjAyNi0xMC0wN1QxMDo1ODozN1rOqd7lKQ=="
+                  },
+                  "nodes": [
+                    {
+                      "isResolved": true
+                    },
+                    {
+                      "isResolved": true
+                    },
+                    {
+                      "isResolved": true
+                    },
+                    {
+                      "isResolved": true
+                    },
+                    {
+                      "isResolved": true
+                    },
+                    {
+                      "isResolved": true
+                    },
+                    {
+                      "isResolved": true
+                    },
+                    {
+                      "isResolved": true
+                    },
+                    {
+                      "isResolved": true
+                    },
+                    {
+                      "isResolved": true
+                    },
+                    {
+                      "isResolved": true
+                    },
+                    {
+                      "isResolved": true
+                    },
+                    {
+                      "isResolved": true
+                    }
+                  ]
+                }
+              }
+            },
+            {
+              "__typename": "CrossReferencedEvent",
+              "willCloseTarget": false,
+              "source": {
+                "__typename": "Issue"
+              }
+            },
+            {
+              "__typename": "CrossReferencedEvent",
+              "willCloseTarget": false,
+              "source": {
+                "__typename": "Issue"
+              }
+            },
+            {
+              "__typename": "CrossReferencedEvent",
+              "willCloseTarget": false,
+              "source": {
+                "__typename": "PullRequest",
+                "number": 148,
+                "title": "feat(webhooks): share installation tokens through Redis (#62)",
+                "url": "https://github.com/larchanka-training/dmc-268-api-t6/pull/148",
+                "body": "## What\n\nКэш installation-токенов GitHub App перенесён в Redis. `worker` и `webhook-worker` теперь используют один токен на установку.\n\nОпирается на #136 (там добавлены зависимость `redis` и клиент Redis в `worker`). #136 слит, ветка перенесена на `main`.\n\n- **Протокол кэша** (`github_installation_tree_provider.py`): `InstallationAccessTokenCache` стал async, провайдер токенов ждёт `get` и `set`. Кэш в памяти остался и работает как раньше.\n- **Redis-кэш** (`redis_installation_token_cache.py`): ключ `token:{installation_id}`, время жизни до `expires_at` минус 60 с, тот же запас, что у кэша в памяти. Дробное время округляется вниз, токен внутри запаса в Redis не пишется.\n- **Недоступный Redis**: каждый токен дополнительно хранится в памяти процесса. Если чтение из Redis падает, ответ берётся оттуда, поэтому сбой Redis не приводит к выпуску токена на каждый запрос к GitHub.\n- **Логи**: при ошибке Redis пишется номер установки и тип ошибки. Значение токена и traceback в лог не попадают.\n- **Подключение**: `worker` передаёт в кэш клиент Redis из #136. `webhook-worker` получил настройку `REDIS_URL` и свой клиент, который закрывается при остановке. Без `REDIS_URL` оба процесса работают на кэше в памяти.\n- **Compose**: `REDIS_URL` передан в `webhook-worker` в `docker-compose.yml` и `deploy/compose/staging.yml`, комментарии обновлены.\n- **Документация**: из SD §7.3 убран пункт об отступлении. В §8.3, §10 и таблице сущностей убрана оговорка «сейчас в памяти процесса», время жизни записано как в коде: до `expires_at` минус 60 с (раньше стояло 50 мин). Обновлены `docs/SECRETS.md` и `.env.example`.\n\nНовых зависимостей нет: `redis` добавлен в #136.\n\nЧего здесь нет и почему:\n\n- `review_worker` в `app/worker.py` оставлен на кэше в памяти. Приложение его не вызывает, только тесты, и настройки он читает прямо из окружения.\n- У клиента Redis нет таймаута сокета, так же как в #136. Если Redis перестанет отвечать, не разрывая соединение, запрос токена будет ждать. Отказ в соединении и неверный пароль обрабатываются сразу.\n\n## Why\n\nРешение техлида в #56: целевое место кэша installation-токенов это Redis (SD §8.3, §10). До этого каждый процесс выпускал свой токен и терял его при перезапуске, а SD §7.3 записывал это как отступление.\n\n## How to verify\n\n- Гейты: `uv run ruff check .`, `uv run ruff format --check .`, `uv run mypy .`, `uv run pytest` (2776 passed, 191 skipped; тесты с `TEST_DATABASE_URL` и `TEST_RABBITMQ_URL` локально не запускались).\n- `uv run pytest tests/test_redis_installation_token_cache.py`: два процесса с общим Redis выпускают один токен, без Redis у каждого свой, время жизни ключа, токен не попадает в лог, оба воркера получают `REDIS_URL` в обоих compose-файлах.\n- Проверено на настоящем Redis 8 (контейнер `redis:8-alpine`) двумя отдельными процессами ОС с настоящим клиентом `redis.asyncio`, GitHub подменён:\n  - первый процесс выпустил токен, второй выпустил 0 и получил тот же токен;\n  - в Redis один ключ `token:17`, TTL 3538 с;\n  - без `REDIS_URL` каждый процесс выпустил свой токен, ключ в Redis не появился;\n  - закрытый порт и неверный пароль: один выпуск на процесс, в логе только тип ошибки;\n  - URL с паролем, как на staging: токен общий.\n- Не проверено: сами `worker` и `webhook-worker` на staging. После выката в Redis должен появиться один ключ `token:{installation_id}` на установку.\n\n## Refs\n\nRefs #62\n\nСвязано: #136 (клиент Redis в `worker`), #56 (решение техлида), #35 (Redis на staging).\n\n---\n\nBefore merge:\n\n- [x] No closing keyword and no Development-panel link to the issue\n- [x] Branch rebased on the current `main`\n- [ ] Approve is on the current head commit\n- [x] The body describes the whole PR\n- [ ] All review threads resolved\n\nRules: [merge](https://github.com/larchanka-training/dmc-268-api-t6/blob/main/docs/CONTRIBUTING.md#мерж), [issue acceptance](https://github.com/larchanka-training/dmc-268-api-t6/blob/main/docs/CONTRIBUTING.md#приёмка-задачи).\n\n",
+                "state": "MERGED",
+                "mergedAt": "2026-10-19T17:50:30Z",
+                "headRefOid": "eb878f99543c147bc0c3df9f8beb6fc96a70d336",
+                "repository": {
+                  "nameWithOwner": "larchanka-training/dmc-268-api-t6"
+                },
+                "commits": {
+                  "nodes": [
+                    {
+                      "commit": {
+                        "statusCheckRollup": {
+                          "state": "SUCCESS"
+                        }
+                      }
+                    }
+                  ]
+                },
+                "reviewThreads": {
+                  "pageInfo": {
+                    "hasNextPage": false,
+                    "endCursor": null
+                  },
+                  "nodes": []
+                }
+              }
+            },
+            {
+              "__typename": "ReopenedEvent",
+              "createdAt": "2026-10-19T18:22:47Z",
+              "actor": {
+                "login": "axyi"
+              }
+            },
+            {
+              "__typename": "ClosedEvent",
+              "createdAt": "2026-10-19T18:23:13Z",
+              "actor": {
+                "login": "axyi"
+              },
+              "stateReason": "COMPLETED",
+              "closer": null
+            },
+            {
+              "__typename": "CrossReferencedEvent",
+              "willCloseTarget": false,
+              "source": {
+                "__typename": "Issue"
+              }
+            },
+            {
+              "__typename": "CrossReferencedEvent",
+              "willCloseTarget": false,
+              "source": {
+                "__typename": "Issue"
+              }
+            },
+            {
+              "__typename": "CrossReferencedEvent",
+              "willCloseTarget": false,
+              "source": {
+                "__typename": "Issue"
+              }
+            }
+          ]
+        }
+      }
+    }
+  }
+}

@@ -41,7 +41,7 @@ PIPELINE_SPEC §5.2, таблица «Сбои GitLab»).
 | Offline replay | Зафиксированные patch/pre-image/raw responses без сети и ключей; валидация и метрики §3. | api, локально и в обязательном PR CI (job `Python lint / type / unit`, шаг «Gold corpus and recorded replay»): `uv run python review/scripts/validate_dataset.py --final`, затем `uv run python review/scripts/eval_replay.py` по закоммиченному baseline `test-prs-dataset/responses/`; CI добавляет обоим `--report-json` и пишет метрики в job summary. Два запуска дают одинаковый JSON. В ui уровня нет. |
 | Live eval | Тот же корпус, выбранная модель через PromptBuilder, сохранение raw output и provenance. | api: ручной необязательный `workflow_dispatch` [Live corpus evaluation](../.github/workflows/eval-live.yml): input `model` (пусто — `vars.LLM_MODEL`), fallback `vars.LLM_FALLBACK_MODEL`; на временной копии корпуса запускает `validate_dataset.py --final` и `eval_live.py`, отчёт без raw-текста модели — артефакт на 14 дней, ответы не коммитятся. Новый закоммиченный baseline записывают тем же workflow с boolean input `export_raw_responses` (по умолчанию `false`): отдельный артефакт `eval-live-raw-<corpus>-<arm>-<run-id>-<attempt>` на 14 дней хранит только ответы кейсов и `manifest.json`; захват сверяют с артефактом безопасных метаданных (`baseline_publishable`, SHA-256 и размер каждого ответа), целиком и без правок копируют в `test-prs-dataset/responses/` и до коммита проверяют offline replay на drift — порядок в README корпуса, разделы [Manual live evaluation in GitHub Actions](../test-prs-dataset/README.md#manual-live-evaluation-in-github-actions) и [Baseline drift](../test-prs-dataset/README.md#baseline-drift). Доступ к LLM — ниже. В ui уровня нет. |
 | Pipeline/verifier eval #107 | Полный v2 pipeline, детерминированные drops, решения verifier и final result против независимой ручной разметки; отдельный adversarial corpus. | Будущий harness по §3.4; existing `eval_replay.py`/`eval_live.py` не считаются его реализацией. Сначала recorded/offline fixtures, затем отдельный разрешённый live-прогон с зафиксированными snapshots/model/cost. |
-| End-to-end | GitHub App, webhook, очереди, API, UI, публикация и изоляция арендаторов. | api: автоматическая цепочка «webhook → Run → worker → `policy.load` → fake LLM → публикация в fake GitHub» — `tests/test_rules_md_e2e_postgres.py` (34 теста по конфигурациям `.review/rules.md` на двух seed: `[legacy]` — `review.system` v1, `[v4]` — упакованные `review.system` v4, conventions v2 и verifier v2, путь снимка, где текст rules.md доходит до reviewer и verifier; каталог — §2.8) в job `Python integration (k/4)` под маркером `integration`, прохождение требует required check `Python lint / type / test`: реальные PostgreSQL и RabbitMQ, GitHub и LLM — fake. HTTP-smoke вебхука (подпись HMAC, дубль delivery; p95 задержки ACK только печатается, порога нет) — обязательный job `Webhook container smoke` в PR CI на собранном образе с PostgreSQL: `uv run --locked python scripts/webhook_smoke.py --url http://127.0.0.1:8000/webhooks/github --count 50`; затем тот же job поднимает заглушку GitHub API `scripts/github_stub.py` и контейнер webhook-worker (`python -m app.webhook_worker`) и ждёт в его логе исход labeled-доставки. Локально `uv run --env-file .env python scripts/webhook_smoke.py` с тем же `GITHUB_WEBHOOK_SECRET`, что у API, и только против одноразового стенда, не staging и не prod. Полный путь, включая UI, — вручную на staging (VPS): тестовые PR и установки staging GitHub App, без реальных секретов в фикстурах или логах; в e2e изоляция арендаторов автоматически не проверяется; в ui автоматического e2e нет. Sandbox isolation — фаза 3. |
+| End-to-end | GitHub App, webhook, очереди, API, UI, публикация и изоляция арендаторов. | api: автоматическая цепочка «webhook → Run → worker → `policy.load` → fake LLM → публикация в fake GitHub» — `tests/test_rules_md_e2e_postgres.py` (42 теста по конфигурациям `.review/rules.md` и `AGENTS.md` на двух seed: `[legacy]` — `review.system` v1, `[v4]` — упакованные `review.system` v4, conventions v2 и verifier v2, путь снимка, где текст rules.md доходит до reviewer и verifier; каталог — §2.8) в job `Python integration (k/4)` под маркером `integration`, прохождение требует required check `Python lint / type / test`: реальные PostgreSQL и RabbitMQ, GitHub и LLM — fake. HTTP-smoke вебхука (подпись HMAC, дубль delivery; p95 задержки ACK только печатается, порога нет) — обязательный job `Webhook container smoke` в PR CI на собранном образе с PostgreSQL: `uv run --locked python scripts/webhook_smoke.py --url http://127.0.0.1:8000/webhooks/github --count 50`; затем тот же job поднимает заглушку GitHub API `scripts/github_stub.py` и контейнер webhook-worker (`python -m app.webhook_worker`) и ждёт в его логе исход labeled-доставки. Локально `uv run --env-file .env python scripts/webhook_smoke.py` с тем же `GITHUB_WEBHOOK_SECRET`, что у API, и только против одноразового стенда, не staging и не prod. Полный путь, включая UI, — вручную на staging (VPS): тестовые PR и установки staging GitHub App, без реальных секретов в фикстурах или логах; в e2e изоляция арендаторов автоматически не проверяется; в ui автоматического e2e нет. Sandbox isolation — фаза 3. |
 
 API baseline gates локально и в обязательном CI: `uv run ruff check .`, `uv run ruff format --check .`, `uv run mypy .`, `uv run pytest`. UI gates: `pnpm lint`, `pnpm check-types`, `pnpm format:check`, `pnpm test`, `pnpm build`. Для integration сервисы должны быть доступны; отсутствие `TEST_DATABASE_URL` даёт skip локально, но не считается успехом обязательного integration job. Staging smoke измеряет p95 ACK < 500 мс и p95 чистого времени DiffEngine ≤ 40 с на определённом наборе PR; окно, объём выборки и измерение записываются с результатом.
 
@@ -69,7 +69,7 @@ API baseline gates локально и в обязательном CI: `uv run r
 
 Проверять `state` в SPA до обмена code, `POST /api/auth/github/callback`, JWT access 15 мин в памяти и ротируемую refresh cookie 30 дней (`HttpOnly; Secure; SameSite=Strict; Path=/api/auth`), `refresh → me` при старте, logout и отзыв семейства при повторном использовании refresh. GitHub exchange failure не создаёт cookie/сессию. Все защищённые `/api/*` и SSE fetch-stream требуют Bearer; неверная подпись, истёкший токен, неверные `iss`/`aud`, отсутствующий или битый Workspace claim дают 401. **`workspaces: []` валиден:** `GET /api/repos` отвечает 200 с `[]`, `GET /api/runs` — 200 с `{items: [], nextCursor: null}`; UI показывает подключение, а не ошибку авторизации. Две установки/Workspace доказывают изоляцию списков и 404 для чужого Run. Контракт — [SD §12](SYSTEM_DESIGN.md#12-контракт-api--ui) и [OpenAPI](../contracts/openapi.yaml).
 
-`POST /api/runs/{id}/rerun` (T3) создаёт новый `queued` Run на текущем SHA с `trigger=rerun` без проверки лейбла/CI. Проверять четыре причины 409: активный Run, закрытый PR, пауза ревью репозитория и недоступная GitHub App. Для всех причин `detail` один: `the pull request has an active run or is closed, or repository reviews are paused or unavailable`; машиночитаемого кода причины нет. Порядок проверок и случай паузы без активной конфигурации — [PIPELINE_SPEC §6.1](PIPELINE_SPEC.md#61-http-отказы-rerun). Контрактные тесты проверяют оба тела 422 через схему rerunRun в [OpenAPI](../contracts/openapi.yaml): массив `detail` у `HTTPValidationError` для невалидного UUID и точное `{"detail": "the repository has no active rule or prompt version"}` у `ErrorResponse` для отсутствующей конфигурации. Нет авторизации — 401, чужой Workspace — 404. Клиент UI проверяет callback failure/state mismatch, один общий refresh при конкурентных 401 и ровно один retry исходных запросов, logout при неудачном refresh, восстановление сессии через refresh+me. Контракт Finding→ReviewComment проверяет однострочный и диапазонный D6-якорь, severity/category и состояния Run.
+`POST /api/runs/{id}/rerun` (T3) создаёт новый `queued` Run на текущем SHA с `trigger=rerun` без проверки лейбла/CI. Проверять четыре причины 409: активный Run, закрытый PR, пауза ревью репозитория и недоступная GitHub App. Для всех причин `detail` один: `the pull request has an active run or is closed, or repository reviews are paused or unavailable`; машиночитаемого кода причины нет. Порядок проверок и случай паузы без активной конфигурации — [PIPELINE_SPEC §6.1](PIPELINE_SPEC.md#61-http-отказы-rerun). Контрактные тесты проверяют оба тела 422 через схему rerunRun в [OpenAPI](../contracts/openapi.yaml): массив `detail` у `HTTPValidationError` для невалидного UUID и точное `{"detail": "the repository has no active rule or prompt version"}` у `ErrorResponse` для отсутствующей конфигурации. На маршрутах Bitbucket (`/api/workspaces/{id}/bitbucket...` и `/webhooks/bitbucket...`, включая ввод credential) каждый элемент массива 422 содержит только `type`, `loc`, `msg`: `input` и `ctx` удаляются, чтобы не раскрывать входные данные. На остальных маршрутах сохраняются стандартные детали FastAPI 422, включая `input` и `ctx`, если они были в ошибке. Нет авторизации — 401, чужой Workspace — 404. Клиент UI проверяет callback failure/state mismatch, один общий refresh при конкурентных 401 и ровно один retry исходных запросов, logout при неудачном refresh, восстановление сессии через refresh+me. Контракт Finding→ReviewComment проверяет однострочный и диапазонный D6-якорь, severity/category и состояния Run.
 
 При внедрении #107 RunDetail/RunSession/latestRun и UI используют один сохранённый result, его coverage, counts и verdict. Проверять partial без значимых supported findings → verdict null; неизвестные счётчики отображаются как неизвестные, а не 0. Исторический run получает `verification_mode=legacy`, `coverage=null`, без выдуманных evidence/подтверждения. Начатый legacy run завершается legacy-профилем; новый профиль включается только после совместимых schema/storage/API/UI, смешанный run запрещён. Rerun того же head создаёт свой policy/diff snapshot и публикационную identity.
 
@@ -103,7 +103,7 @@ API baseline gates локально и в обязательном CI: `uv run r
 | Wrong revision/path/SHA/type/mode; duplicate tree path; truncation/ошибка/cap; cancellation/deadline | Нет empty_file и clean без доказательства; ошибки optional proof не failed, cancellation/deadline распространяются; branch/base tree не заменяют head |
 | Fetch→snapshot store/reload→retry; legacy missing_patch с empty SHA; downgrade `20261026_0043` | Validated marker сохраняется с повторной проверкой durable identity/SHA/status/counters/patch и `previous_filename is None`; конфликт size не забывается; legacy не повышается по SHA; реальная БД принимает новый CHECK, downgrade переписывает empty_file→missing_patch |
 | NUL в первых 8 KiB/PNG-JPEG-GIF-PDF-ZIP-ELF magic в blob; NUL только за 8 KiB без magic в blob; NUL в patch на любой позиции; oversized unread blob; независимо доказанный binary при oversized | Только подтверждённый binary — E; NUL вне окна blob сам не доказывает binary, но NUL в patch на любой позиции доказывает binary; без независимого evidence oversized — too_large/T до blob-based detection. Removed без blob не становится E по расширению (CVS §9.2). |
-| Доказанный pure rename/mode-only с чистым кодом; raw status/zero counters без proof | T либо missing_patch/incomplete сохраняют partial/null; используются соответствующие полные тексты таблицы причин ниже; ноль новых tree/blob/compare запросов |
+| Доказанный pure rename/mode-only с чистым кодом; raw status/zero counters без proof | T либо missing_patch/incomplete сохраняют partial/null; используются соответствующие полные тексты ([PIPELINE_SPEC §2](PIPELINE_SPEC.md#2-фазы-внутри-running-и-трейс-run_actions)); ноль новых tree/blob/compare запросов |
 | Removed image без нового blob/independent binary proof; oversized unread blob >1 048 576 байт без независимого proof + код | missing_patch/incomplete либо too_large/T, partial/null; summary/check-run используют «Удалённое содержимое недоступно для подтверждения binary» либо «Превышен лимит размера, содержимое не проверено»; old/base/prefix/range fetch не добавляется, binary cap не повышается |
 | fit_review_context опускает весь allowed changed patch либо оставляет префикс; внутреннее усечение модели при неизменном внешнем контексте; untrimmed control; обе reflection ветки | review_input_incomplete/partial до финализации; affected файл не fully reviewed; пустые/info null, supported blocking/attention сохраняются; вспомогательный context-only omission сам по себе не меняет changed-patch coverage |
 | Полная durable membership после restore с более чем 20 причинами; повторное усечение уже incomplete файла; ignored контроль | Счётчик fully reviewed уменьшается только для ранее полного allowed patch; уже неполный не учитывается повторно; diagnostic lists ≤20, внутренний набор не сериализуется, ignored имена не раскрываются |
@@ -149,79 +149,9 @@ API baseline gates локально и в обязательном CI: `uv run r
 
 Отдельные adversarial fixtures содержат инъекции в rules/AGENTS/PR/code/conventions/candidate/repair-output и попытки переноса через cache: закрытие envelope, навязывание находки, подавление настоящего дефекта, смена адресата/формата/полномочий. Рядом нужны допустимые исключения и цитаты примеров атак. Детерминированные assertions проверяют запрет отправки/публикации и границы источников; влияние на смысл ответа измеряется отдельно по §3.4. Валидная schema сама по себе не доказывает устойчивость к инъекции.
 
-Канонические тексты причин #213 для summary/body/check-run (без завершающей
-точки; оформление сводки может добавить счётчик, разделитель и точку):
-
-| Случай | Полный текст причины |
-| --- | --- |
-| Доказанный pure rename, unsupported_change | Семантика переноса файла (включая импорты) не анализируется |
-| Rename без no-text proof, missing_patch | Отсутствующий patch не подтверждает неизменность содержимого переноса |
-| Доказанный mode-only, unsupported_change | Изменения прав доступа/типа файла не анализируются |
-| Mode-change metadata без mode-only proof, missing_patch | Отсутствующий patch не подтверждает изменение только прав доступа/типа файла |
-| Удаление без независимого binary proof | Удалённое содержимое недоступно для подтверждения binary |
-| too_large без сохранённого точного источника лимита | Превышен лимит размера, содержимое не проверено |
-| Квалифицированный кандидат empty-added без принятого ordinary-file proof | Нет подтверждения обычного пустого файла |
-| Фактически отправленный changed patch опущен или усечён, review_input_incomplete | модель получила не весь patch |
-| Технический drop unknown_path | не удалось сопоставить замечание с доступным diff |
-
-Общие тексты причин (точные значения `REASON_TEXT`; специализированные случаи
-выше имеют приоритет, счётчики и завершающая точка добавляются при оформлении):
-
-| Код | Общий текст причины |
-| --- | --- |
-| classification_unavailable | нет достоверного сохранённого покрытия |
-| diff_inventory_incomplete | список изменённых файлов неполон |
-| missing_patch | Отсутствует подтверждённый patch |
-| unsupported_change | семантика изменения метаданных не анализируется |
-| too_large | Превышен лимит размера, содержимое не проверено |
-| unsupported_path | неподдерживаемый путь |
-| identity_unresolved | не установлена идентичность файла |
-| patch_truncated | patch неполон |
-| patch_malformed | patch повреждён |
-| patch_unsupported | формат patch не поддерживается |
-| summary_only | краткий обзор без проверки всех строк |
-| review_input_incomplete | модель получила не весь patch |
-| unknown_path | не удалось сопоставить замечание с доступным diff |
-
-Метки оформления сводки и списка причин (не коды причин):
-
-| Условие | Точная метка |
-| --- | --- |
-| coverage=partial | Проверка неполная |
-| coverage=none | Текстовые изменения не проверены |
-| Остаток причин после пяти отображённых, n — их количество | Ещё причин: {n} |
-| Строчная метка verdict при partial без supported риска | проверка неполная |
-| summary.done_well; reviewed_files — проверенные текстовые файлы, excluded_files — сумма exclusions | Проанализировано файлов с текстовыми изменениями: {reviewed_files}; исключено файлов: {excluded_files}. |
-| Число проверенных текстовых файлов в partial/none overview | **Проверено файлов с текстовыми изменениями:** {reviewed_files} |
-| summary.problem при наличии findings; n — число оставшихся findings | Подтверждено замечаний: {n} |
-| Строка coverage в partial/none overview; summary_problem включает точку | **Coverage:** {status} — {summary_problem} |
-
-Текст «Нет подтверждения обычного пустого файла» выбирается только по
-доверенным backend-фактам квалифицированного кандидата: поддерживаемый
-канонический путь, status=added, `previous_filename is None` (логический
-`old_path=null`), additions=deletions=changes=0, точный Git empty-blob SHA и
-size=None/0. Исходный patch равен None или пустой строке; при reload допустима
-также точная сохранённая пустая обёртка `diff --git` / `---` / `+++` того же пути
-без иных строк. При этом принятого ordinary-file proof нет. Один added, пустые
-counters либо raw metadata_only недостаточны. Предыдущий путь, неподдерживаемый
-путь, неизвестные/ненулевые counters, неверный/неизвестный SHA, конфликт размера
-или иной patch не получают empty-текст: действует соответствующая общая причина,
-для обычного added без patch — «Отсутствует подтверждённый patch».
-У GitLab в этом потоке нет независимого tree-доказательства обычного файла:
-пустое добавление остаётся `missing_patch`/partial, даже при empty SHA и size=0.
-Квалификация переносится из durable фактов, не из model JSON. Новые сохранённые
-coverage с более чем 20 причинами могут содержать внутренний optional
-`reason_variant_counts`: не более шести фиксированных семантических ключей и
-числа, без путей. Это сохраняет канонический текст за окном первых 20
-диагностических путей без раскрытия новых имён. Restore проверяет суммы по
-reason_counts и доверенную snapshot capacity; legacy без агрегата не получает
-выдуманной квалификации за окном. Поле не добавляется в публичный DTO/LLM schema.
-Отсутствие proof не утверждает, что файл действительно обычный и пустой.
-Для исключения E=empty_file нужен независимый полный nontruncated tree на
-закреплённом head: уникальное точное совпадение path+SHA, type=blob,
-mode=100644/100755 и size=None/0; предел ответа — 1 500 000 сырых байт.
-Для too_large снимок не хранит источник лимита (blob bytes, patch bytes или
-строки), поэтому публичный текст нейтрален и не приписывает всем случаям binary/1 MiB.
+Тексты причин #213 для summary/body/check-run, общие тексты `REASON_TEXT`, метки сводки, квалификация
+empty-added (в т.ч. GitLab без tree-proof), `reason_variant_counts`, условия tree-proof E=`empty_file`
+и нейтральный текст too_large — канон в [PIPELINE_SPEC §2](PIPELINE_SPEC.md#2-фазы-внутри-running-и-трейс-run_actions); здесь не дублируются.
 
 #213: ограниченная проекция в существующих snapshots/context/postprocess JSON
 не означает активацию всех целевых backend none/no-text/summary-only маршрутов
@@ -239,9 +169,10 @@ drop также понижает coverage; benign lint/dedupe/severity drops —
 insufficient_context остаются за lifecycle #107/#130; их общее влияние на coverage
 не объявляется реализованным в #213.
 
-После #130 F1 worker собирает Reflection Pass, а после F2 seed активирует
-`review.system:v4` (с #350 — v5) для новых runs. Snapshot-путь выбирается
-только по закреплённому v4 или v5; runs с v3 или ниже, созданные до F2 seed либо с pins до 0039,
+После #130 F1 worker собирает Reflection Pass. F2 seed активировал
+`review.system:v4` для новых runs; после #350 новые runs закрепляют общий v5.
+Snapshot-путь выбирается по закреплённому v4 или v5; runs с v3 или ниже,
+созданные до F2 seed либо с pins до 0039,
 сохраняют legacy-путь без verifier. Адаптер ревью
 выполняет fit/guard/manifest один раз: snapshot-ответ `ReviewReply` несёт
 фактический fitted context и manifest принятого вызова, legacy — mapping.
@@ -415,7 +346,8 @@ Committed regression inventory #213 (наличие теста не заменя
    `test_context_provenance.py` (роль, ревизия, путь и диапазоны строк фрагмента); что каждая
    production-композиция стадии пишет строку `context_payloads`, стережёт
    `test_context_stage_wiring.py`.
-6. Snapshot-путь (v4): `test_review_path.py`, `test_snapshot_path_live_pin.py`,
+6. Snapshot-путь с закреплённым `review.system:v4` или `review.system:v5`:
+   `test_review_path.py`, `test_snapshot_path_live_pin.py`,
    `test_review_prompt_v4.py`, `test_review_context_blocks.py`,
    `test_reflection_pass_snapshot_path.py`, `test_gateway_verifier_snapshot_path.py`,
    `test_llm_gateway_snapshot_reserve.py`, `test_gateway_repair_envelope.py`,
@@ -437,9 +369,9 @@ Redis-кэши (кэш контекста и кэш токенов устано�
 
 ### 2.8. Каталог сценариев `.review/rules.md` (#163)
 
-Каталог фиксирует, как run обрабатывает `.review/rules.md` от вебхука до публикации. Политика читается только из закреплённой base-ревизии (`policy_base_sha = Run.base_sha`, [RFS §3.1](RULES_FORMAT_SPEC.md#31-ревизия-и-тип-объекта)): `.review/rules.md`, добавленный или изменённый в самом PR, — обычный проверяемый код, а не политика. Сквозные сценарии (таблица А) живут в `tests/test_rules_md_e2e_postgres.py`, unit-покрытие — в файлах, названных в таблице Б. С #130 F2 (PR #332) новый run GitHub закрепляет активный `review.system` (v4, с #350 — v5), если репозиторий не закрепил свой промпт, и идёт по пути снимка: текст rules.md доходит до reviewer и verifier в блоке `<repository_rules>`, таблица А проверяет это на seed `[v4]`; legacy-путь (≤ v3, seed `[legacy]` — v1) текст rules.md не передаёт. Строки про envelope и инъекции покрыты на unit-уровне (этап 2 #163), вживую — A/B AC8 на `review.system` v5 (#144 ч.3b, [решение](https://github.com/larchanka-training/dmc-268-api-t6/issues/163#issuecomment-6400830514)) после правки привязок промптов в `eval-live` (#163). Отчёт с результатами прогонов — [RULES_MD_TEST_REPORT](RULES_MD_TEST_REPORT.md).
+Каталог фиксирует, как run обрабатывает `.review/rules.md` от вебхука до публикации. Политика читается только из закреплённой base-ревизии (`policy_base_sha = Run.base_sha`, [RFS §3.1](RULES_FORMAT_SPEC.md#31-ревизия-и-тип-объекта)): `.review/rules.md`, добавленный или изменённый в самом PR, — обычный проверяемый код, а не политика. Сквозные сценарии (таблица А) живут в `tests/test_rules_md_e2e_postgres.py`, unit-покрытие — в файлах, названных в таблице Б. С #130 F2 (PR #332) новый run GitHub закрепляет активный `review.system` (v4, с #350 — v5), если репозиторий не закрепил свой промпт, и идёт по пути снимка: текст rules.md доходит до reviewer и verifier в блоке `<repository_rules>`, таблица А проверяет это на seed `[v4]`; legacy-путь (≤ v3, seed `[legacy]` — v1) текст rules.md не передаёт. Строки про envelope и инъекции покрыты на unit-уровне (этап 2 #163), вживую — A/B AC8 на `review.system` v5 (#144 ч.3b, [решение](https://github.com/larchanka-training/dmc-268-api-t6/issues/163#issuecomment-6400830514)), снятый 2026-10-28. Отчёт с результатами прогонов, в том числе AC8 (подраздел «AC8 — живой A/B на v5»), — [RULES_MD_TEST_REPORT](RULES_MD_TEST_REPORT.md).
 
-**Таблица А — сквозные сценарии.** Цепочка: подписанный webhook `pull_request labeled` → Run (его создаёт проекция приложения, тест Run не вставляет) → RabbitMQ → `run_worker` → `policy.load` → fake LLM → публикация в fake GitHub; job `Python integration (k/4)`, маркер `integration`; ноль skip проверяет required check `Python lint / type / test`. PR меняет `app/service.py` и `generated/client.py`. Каждый сценарий ждёт завершённого check-run; политика читается только по SHA дерева и blob, без `/contents/`. Сценарии, где run доходит до выбора пути, идут на двух seed (`[legacy]`, `[v4]`); на `[v4]` блок `<repository_rules>` во входе reviewer и verifier сравнивается целиком с литералом по описанию `review/prompts/review.system.v4.md:22-26`, на `[legacy]` нет ни тега, ни непустых строк текста base вне кода head. Сценарии со сбоем загрузки (decode … truncated) завершаются в `prepare_policy.execute` (`policy.load`); единственный более ранний вызов, зависящий от пути, `require_served_provider`, run GitHub пропускает на обоих путях. Они идут только на seed `v4`, их id без суффикса. Коды и presence — литералы [RFS §3, §4, §9](RULES_FORMAT_SPEC.md#9-ошибки-и-наблюдаемость), итог check-run — [PIPELINE_SPEC §7](PIPELINE_SPEC.md#7-check-run-бота-sd-83). «Строки `run_policy_snapshots` нет» — текущее поведение: при ошибке конфигурации RFS §7.2 допускает, что полного snapshot нет.
+**Таблица А — сквозные сценарии.** Цепочка: подписанный webhook `pull_request labeled` → Run (его создаёт проекция приложения, тест Run не вставляет) → RabbitMQ → `run_worker` → `policy.load` → fake LLM → публикация в fake GitHub; job `Python integration (k/4)`, маркер `integration`; ноль skip проверяет required check `Python lint / type / test`. PR меняет `app/service.py` и `generated/client.py`. Каждый сценарий ждёт завершённого check-run; политика читается только по SHA дерева и blob, без `/contents/`. Сценарии, где run доходит до выбора пути, идут на двух seed (`[legacy]`, `[v4]`); на `[v4]` блок `<repository_rules>` во входе reviewer и verifier сравнивается целиком с литералом по описанию `review/prompts/review.system.v4.md:22-26`, на `[legacy]` нет ни тега, ни непустых строк текста base вне кода head. Сценарии со сбоем загрузки (decode … truncated) завершаются в `prepare_policy.execute` (`policy.load`), кроме match-budget: там `policy.load` успешен, а ошибку сопоставителя пишет шаг, где он сработал, — `vcs.fetch_diff` (RFS §9); единственный более ранний вызов, зависящий от пути, `require_served_provider`, run GitHub пропускает на обоих путях. Они идут только на seed `v4`, их id без суффикса. Коды и presence — литералы [RFS §3, §4, §9](RULES_FORMAT_SPEC.md#9-ошибки-и-наблюдаемость), итог check-run — [PIPELINE_SPEC §7](PIPELINE_SPEC.md#7-check-run-бота-sd-83). «Строки `run_policy_snapshots` нет» — текущее поведение: при ошибке конфигурации RFS §7.2 допускает, что полного snapshot нет.
 
 | Сценарий | Вход: rules.md в base | presence / snapshot | Код | Статус Run | LLM | Публикация | Тест |
 | --- | --- | --- | --- | --- | --- | --- | --- |
@@ -449,8 +381,11 @@ Redis-кэши (кэш контекста и кэш токенов устано�
 | empty | пустой файл, 0 байт | `present`, `raw_sha256 = e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855`, `byte_count = 0`; `policy_digest` отличается от прогона missing | — | `succeeded` | да, вызов `ReviewOutput` (`[v4]`: `ReviewOutputV2` и `VerificationOutput`); `[v4]`: у reviewer и verifier `<repository_rules … status="empty" />`, у прогона missing — `status="absent"` | одно ревью, `commit_id` = head; check-run `completed` / `neutral` | `test_empty_rules_md_is_present_and_has_another_policy_than_a_missing_one[legacy]`, `[v4]` |
 | at-limit, `[legacy]` | ровно 65 536 байт | `present`, `byte_count = 65536` | — | `succeeded` | да, вызов `ReviewOutput`; legacy-envelope текста rules.md не передаёт, бюджет документов политики не проверяется | одно ревью, `commit_id` = head; check-run `completed` / `neutral` | `test_rules_md_at_the_size_limit_is_present[legacy]` |
 | at-limit, `[v4]` | ровно 65 536 байт | `present`, `byte_count = 65536`; строка `run_policy_snapshots` не проверяется (RFS §7.2 допускает оба исхода; сейчас снимок сохраняется до проверки бюджета); `policy.load` → `{error}`, `limit = 12000`, `actual = 21911` (counter/v2 двух отрендеренных блоков, RFS §3.3), `source_path = null` | `policy_prompt_budget_exceeded` | `failed`, `attempt = 1` | нет | ревью нет; check-run `completed` / `neutral` | `test_rules_md_at_the_size_limit_exceeds_the_policy_budget[v4]` |
+| at-budget, `[v4]` | 17 894 байта одной строкой; корневой `AGENTS.md` — 17 876 байт одной строкой: по 6 000 токенов counter/v2 на блок, вместе ровно 12 000 (RFS §3.3) | оба `present`, `raw_sha256` и `byte_count` байтов base | — | `succeeded` | да; у reviewer и verifier блоки `<repository_rules>` и `<project_conventions_document>` — каждый документ целиком, по одному разу | одно ревью, `commit_id` = head; check-run `completed` / `neutral` | `test_policy_documents_together_at_the_budget_reach_the_model_whole[v4]` |
+| over-budget, `[v4]` | как at-budget, `AGENTS.md` на байт длиннее (17 877): вместе 12 001 токен, каждый документ отдельно в пределах 64 КиБ и бюджета | оба `present`, `raw_sha256` и `byte_count` байтов base (не усечены); `policy.load` → `{error}`, `limit = 12000`, `actual = 12001`, `source_path = null` | `policy_prompt_budget_exceeded` | `failed`, `attempt = 1` | нет | ревью нет; check-run `completed` / `neutral` | `test_policy_documents_together_over_the_budget_fail_the_run_without_llm[v4]` |
 | all-ignored | блок `review-ignore` с масками `app/**` и `generated/**` — оба изменённых файла | `present` | `all_changes_ignored` | `skipped` | нет | ревью нет; check-run `completed` / `skipped` | `test_all_changes_ignored_skips_the_run_without_llm_or_review[legacy]`, `[v4]` |
 | decode | `ok\n\xff\xfe` — невалидный UTF-8 | строки `run_policy_snapshots` нет (текущее поведение); `policy.load` → `{error: {type, message, diagnostic}}`, `diagnostic.code` = `error_code`, `diagnostic.policy_base_sha` = base | `policy_document_decode_error` | `failed`, `attempt = 1` | нет | ревью нет; check-run `completed` / `neutral` | `test_invalid_rules_md_fails_the_run_once_without_llm[decode]` |
+| surrogate | `ok\n\xed\xa0\x80` — непарный surrogate U+D800 в байтах UTF-8 (RFS §3.2 п. 5) | строки `run_policy_snapshots` нет (текущее поведение); `policy.load` → `{error}` | `policy_document_decode_error` | `failed`, `attempt = 1` | нет | ревью нет; check-run `completed` / `neutral` | `test_invalid_rules_md_fails_the_run_once_without_llm[surrogate]` |
 | control | `\x1bfirst` — управляющий ESC (U+001B) | строки `run_policy_snapshots` нет (текущее поведение); `policy.load` → `{error}` | `policy_document_control_character` | `failed`, `attempt = 1` | нет | ревью нет; check-run `completed` / `neutral` | `test_invalid_rules_md_fails_the_run_once_without_llm[control]` |
 | duplicate | два top-level блока `review-ignore` | строки `run_policy_snapshots` нет (текущее поведение); `policy.load` → `{error}` | `policy_ignore_block_duplicate` | `failed`, `attempt = 1` | нет | ревью нет; check-run `completed` / `neutral` | `test_invalid_rules_md_fails_the_run_once_without_llm[duplicate]` |
 | nested | блок `review-ignore` внутри элемента списка | строки `run_policy_snapshots` нет (текущее поведение); `policy.load` → `{error}` | `policy_ignore_block_nested` | `failed`, `attempt = 1` | нет | ревью нет; check-run `completed` / `neutral` | `test_invalid_rules_md_fails_the_run_once_without_llm[nested]` |
@@ -460,6 +395,11 @@ Redis-кэши (кэш контекста и кэш токенов устано�
 | too-large | 65 537 байт | строки `run_policy_snapshots` нет (текущее поведение); `policy.load` → `{error}` | `policy_document_too_large` | `failed`, `attempt = 1` | нет | ревью нет; check-run `completed` / `neutral` | `test_invalid_rules_md_fails_the_run_once_without_llm[too-large]` |
 | limit | 257 разных масок | строки `run_policy_snapshots` нет (текущее поведение); `policy.load` → `{error}` | `policy_ignore_limit_exceeded` | `failed`, `attempt = 1` | нет | ревью нет; check-run `completed` / `neutral` | `test_invalid_rules_md_fails_the_run_once_without_llm[limit]` |
 | symlink | `.review/rules.md` — symlink (mode `120000`) | строки `run_policy_snapshots` нет (текущее поведение); `policy.load` → `{error}` | `policy_document_type_unsupported` | `failed`, `attempt = 1` | нет | ревью нет; check-run `completed` / `neutral` | `test_symlinked_rules_md_fails_the_run_once_without_llm` |
+| agents-too-large | rules.md — как valid; корневой `AGENTS.md` — 65 537 байт | строки `run_policy_snapshots` нет (текущее поведение); `policy.load` → `{error}`, `diagnostic.source_path = AGENTS.md` | `policy_document_too_large` | `failed`, `attempt = 1` | нет | ревью нет; check-run `completed` / `neutral` | `test_invalid_agents_md_fails_the_run_once_without_llm[too-large]` |
+| agents-symlink | rules.md — как valid; корневой `AGENTS.md` — symlink (mode `120000`) | строки `run_policy_snapshots` нет (текущее поведение); `policy.load` → `{error}`, `diagnostic.source_path = AGENTS.md` | `policy_document_type_unsupported` | `failed`, `attempt = 1` | нет | ревью нет; check-run `completed` / `neutral` | `test_invalid_agents_md_fails_the_run_once_without_llm[symlink]` |
+| agents-decode | rules.md — как valid; корневой `AGENTS.md` — `ok\n\xff\xfe` | строки `run_policy_snapshots` нет (текущее поведение); `policy.load` → `{error}`, `diagnostic.source_path = AGENTS.md` | `policy_document_decode_error` | `failed`, `attempt = 1` | нет | ревью нет; check-run `completed` / `neutral` | `test_invalid_agents_md_fails_the_run_once_without_llm[decode]` |
+| agents-control | rules.md — как valid; корневой `AGENTS.md` — `\x1bfirst` | строки `run_policy_snapshots` нет (текущее поведение); `policy.load` → `{error}`, `diagnostic.source_path = AGENTS.md` | `policy_document_control_character` | `failed`, `attempt = 1` | нет | ревью нет; check-run `completed` / `neutral` | `test_invalid_agents_md_fails_the_run_once_without_llm[control]` |
+| match-budget | как valid; бюджет matcher на путь в тесте снижен до одного перехода (`review_ignore.MAX_TRANSITIONS_PER_PATH = 1`) | `present`; `policy.load` успешен; ошибка в шаге `vcs.fetch_diff`: `diagnostic.source_path = .review/rules.md`, `policy_base_sha` = base, `limit = 1`, `actual_is_lower_bound = true` (RFS §9) | `policy_match_budget_exceeded` | `failed`, `attempt = 1` | нет | ревью нет; check-run `completed` / `neutral` | `test_exhausted_match_budget_fails_the_run_once_without_llm` |
 | root-404 | 404 на дерево base; записи `.review` нет | строки `run_policy_snapshots` нет (текущее поведение); `policy.load` → `{error}` | `policy_revision_unavailable` или `policy_access_denied` (обе строки §9: недоступна ревизия либо repository) | `failed`, `attempt = 1` | нет | ревью нет; check-run `completed` / `neutral` | `test_unreadable_rules_md_fails_the_run_and_is_never_missing[root-404]` |
 | root-denied | 403 без признаков rate limit на дерево base; записи `.review` нет | строки `run_policy_snapshots` нет (текущее поведение); `policy.load` → `{error}` | `policy_access_denied` | `failed`, `attempt = 1` | нет | ревью нет; check-run `completed` / `neutral` | `test_unreadable_rules_md_fails_the_run_and_is_never_missing[root-denied]` |
 | tree-404 | 404 на поддерево `.review` | строки `run_policy_snapshots` нет (текущее поведение); `policy.load` → `{error}` | `policy_revision_unavailable` или `policy_access_denied` | `failed`, `attempt = 1` | нет | ревью нет; check-run `completed` / `neutral` | `test_unreadable_rules_md_fails_the_run_and_is_never_missing[tree-404]` |
@@ -475,13 +415,13 @@ Redis-кэши (кэш контекста и кэш токенов устано�
 | Строка RFS §11 | Обязательный результат (кратко) | Покрытие |
 | --- | --- | --- |
 | Нет обоих документов; код в `packages/` и смешанный стек | Полные дефолты, источники политики `missing`, базовое ревью не отключено | `test_policy_documents.py::test_absent_documents_are_missing_and_nothing_is_read`; E2E missing (источники `missing`, ревью опубликовано); полнота дефолтов в prompt не проверяется: seed E2E держит `rule_versions.rules = '[]'`, поэтому блока дефолтов во входе нет; не покрыто: смешанный стек `packages/` — такого кейса нет ни в #248, ни в подкорпусе #252 |
-| Rules имеет только Style | Остальные базовые категории действуют | не покрыто: в подкорпусе #252 нет rules.md только из Style; вживую нужны такой кейс в корпусе и живой A/B AC8; рендер блока политики уже проверяет `test_prompt_builder_markdown.py::test_prompt_builder_renders_markdown_policy_snapshot` |
-| Конвенция уровня 4 допускает небезопасный паттерн против SEC1/COR1 | Дефолт не отменён; явное исключение base rules/AGENTS приоритетно по §2 | не покрыто: кейса с конвенцией уровня 4 нет ни в #248, ни в подкорпусе #252; вживую нужны такой кейс в корпусе и живой A/B AC8 |
+| Rules имеет только Style | Остальные базовые категории действуют | не покрыто: в подкорпусе #252 нет rules.md только из Style, поэтому A/B AC8 (2026-10-28) этого не мерил; вживую нужны такой кейс в корпусе и новый прогон A/B; рендер блока политики уже проверяет `test_prompt_builder_markdown.py::test_prompt_builder_renders_markdown_policy_snapshot` |
+| Конвенция уровня 4 допускает небезопасный паттерн против SEC1/COR1 | Дефолт не отменён; явное исключение base rules/AGENTS приоритетно по §2 | не покрыто: кейса с конвенцией уровня 4 нет ни в #248, ни в подкорпусе #252, поэтому A/B AC8 (2026-10-28) этого не мерил; вживую нужны такой кейс в корпусе и новый прогон A/B |
 | Порог и `max_comments` изменены между retry и rerun | Новые legacy Run сохраняют оба значения в транзакции создания; retry использует ту же пару, rerun — текущую. Историческая NULL-пара читает текущие настройки даже после создания snapshot. `policy_digest`/schema_version=1 и conventions key не меняются; FinalReviewResult/result_digest остаются целевой работой #107/#130 | Реальный PostgreSQL: `test_run_publication_settings_postgres.py::test_created_run_and_retry_keep_pins_but_rerun_uses_current_pair`, `::test_historical_null_run_keeps_live_fallback_even_after_snapshot_and_retry`, `::test_snapshot_prepared_after_settings_change_keeps_run_pair`; prompt input — `test_review_prompt_pins_postgres.py::test_prompt_threshold_uses_run_pin_or_historical_live_fallback`; baseline identity — `test_prepare_policy_snapshot.py::test_publication_settings_do_not_change_policy_identity`, `test_review_context_stage.py::test_publication_settings_leave_conventions_cache_identity_unchanged` |
-| Rules разрешает дублирование test setup против AGENTS | Допустимое исключение соблюдено, остальные правила действуют | не покрыто: в подкорпусе #252 нет кейса, где исключение rules.md спорит с AGENTS.md (исключения RUL-05…RUL-08 — о другом); вживую нужны такой кейс в корпусе и живой A/B AC8 |
+| Rules разрешает дублирование test setup против AGENTS | Допустимое исключение соблюдено, остальные правила действуют | не покрыто: в подкорпусе #252 нет кейса, где исключение rules.md спорит с AGENTS.md (исключения RUL-05…RUL-08 — о другом), поэтому A/B AC8 (2026-10-28) этого не мерил; вживую нужны такой кейс в корпусе и новый прогон A/B |
 | Пустой файл против отсутствующего | Разные snapshots; в обоих пустой user ignore | `test_prepare_policy_snapshot.py::test_empty_and_missing_rules_have_different_snapshots`, `test_policy_snapshot.py::test_empty_document_is_present_and_differs_from_a_missing_one`, `test_policy_documents.py::test_empty_file_is_present_with_the_checksum_of_empty_bytes`, `test_prompt_builder_markdown.py::test_policy_document_empty_vs_absent_and_manifest`; E2E empty (digest против missing) |
 | Все примеры грамматики §4.3 | Точный указанный результат, без обращения к LLM | `test_review_ignore.py::test_no_document_no_block_and_an_empty_block_give_an_empty_policy`, `::test_tilde_fence_longer_closing_and_indented_fence_are_the_block`, `::test_other_labels_examples_and_indented_code_are_ordinary_markdown`, `::test_block_structure_errors_point_at_the_opening_fence`, `::test_invalid_masks_of_the_specification_are_rejected_with_a_position`, `::test_valid_masks_with_spaces_hashes_dots_and_unicode`, `::test_normative_matching_examples`, `::test_lines_are_trimmed_deduplicated_sorted_and_keep_their_source_lines`; E2E valid, duplicate, nested, unclosed, info, pattern и agents-md (`review-ignore` в AGENTS.md — обычный текст) |
-| Повреждённый UTF-8 / второй блок / 257 масок / overflow tokens | Явный failed без LLM и без retry, вход не усечён | `test_policy_documents.py::test_broken_utf8_is_rejected_without_replacement`, `test_review_ignore.py::test_block_structure_errors_point_at_the_opening_fence`, `test_review_ignore.py::test_limits_of_mask_count_length_and_segments`, `test_review_run_worker.py::test_invalid_policy_fails_the_run_at_once_with_its_code`; E2E decode, duplicate, limit (`attempt = 1`); overflow tokens — E2E at-limit `[v4]` (`test_rules_md_at_the_size_limit_exceeds_the_policy_budget[v4]`: `policy_prompt_budget_exceeded` в `policy.load`, `attempt = 1`, 0 LLM, документ не усечён — `byte_count = 65536`); unit-покрытие самого guard — `test_policy_budget.py::test_verify_policy_budget_exceeded_raises_error`, `::test_pre_send_guard_verifies_policy_and_total_budget`, `test_execute_review.py::test_execute_review_fail_closed_when_budget_exceeded` |
+| Повреждённый UTF-8 / второй блок / 257 масок / overflow tokens | Явный failed без LLM и без retry, вход не усечён | `test_policy_documents.py::test_broken_utf8_is_rejected_without_replacement` (`[invalid-bytes]`, `[surrogate]` — непарный surrogate), `test_review_ignore.py::test_block_structure_errors_point_at_the_opening_fence`, `test_review_ignore.py::test_limits_of_mask_count_length_and_segments`, `test_review_run_worker.py::test_invalid_policy_fails_the_run_at_once_with_its_code`; E2E decode, surrogate, duplicate, limit (`attempt = 1`); те же ошибки в `AGENTS.md` останавливают ревью (RFS §9) — E2E agents-too-large, agents-symlink, agents-decode, agents-control; на GitLab MR через установленный worker — `test_gitlab_worker_postgres.py::test_public_worker_fails_a_gitlab_run_on_an_invalid_rules_md_without_llm` (незакрытый блок: `policy_ignore_block_unclosed` в `policy.load`, `attempt = 1`, 0 LLM, записей в GitLab нет); бюджет matcher — E2E match-budget; overflow tokens — E2E at-limit `[v4]` (`test_rules_md_at_the_size_limit_exceeds_the_policy_budget[v4]`: `policy_prompt_budget_exceeded` в `policy.load`, `attempt = 1`, 0 LLM, документ не усечён — `byte_count = 65536`) и сумма двух документов — E2E at-budget и over-budget `[v4]` (12 000 токенов проходят целиком, 12 001 — `failed` без LLM, оба документа не усечены); unit-покрытие самого guard — `test_policy_budget.py::test_verify_policy_budget_exceeded_raises_error`, `::test_pre_send_guard_verifies_policy_and_total_budget`, `test_execute_review.py::test_execute_review_fail_closed_when_budget_exceeded` |
 | 404 repository против отсутствующего path | Первый не становится missing policy | `test_github_policy_source.py::test_empty_tree_proves_absence_and_a_truncated_one_does_not`, `::test_ambiguous_tree_listing_is_unavailable_and_never_missing`, `test_rules_status.py::test_ambiguous_tree_is_unavailable_not_missing`, `test_github_snapshot_source.py::test_rules_document_rejects_ambiguous_nonrecursive_listings`, `test_github_policy_source.py::test_http_failures_map_to_policy_codes_and_never_to_a_missing_document`, `::test_blob_failures_are_policy_errors`, `test_policy_documents.py::test_read_failure_is_an_error_not_a_missing_document`, `test_prepare_policy_snapshot.py::test_read_failure_stages_nothing_and_is_not_a_missing_document`; E2E root-404, root-denied, tree-404, blob-404, denied |
 | 4 000 исключённых + 50 разрешённых строк | Порог и бюджет считаются по 50 разрешённым | `test_run_processor_context_stage.py::test_ignored_lines_do_not_make_the_allowed_change_summary_only`, `test_review_context.py::test_ignored_lines_do_not_count_toward_the_summary_only_threshold` |
 | Все изменения доказанно исключены по политике, технических пропусков нет | running → skipped; ноль LLM-вызовов; без clean | `test_review_context_stage.py::test_change_with_every_file_ignored_skips_the_run`, `::test_change_of_builtin_excluded_files_only_is_skipped_before_the_context_build`, `test_run_processor_context_stage.py::test_skipped_run_never_reaches_a_model_call`, `test_review_run_worker.py::test_skipped_attempt_finishes_the_run_as_skipped_with_its_reason`; E2E all-ignored |
@@ -495,7 +435,7 @@ Redis-кэши (кэш контекста и кэш токенов устано�
 | Доказанный empty added с полным proof, mode 100644/100755; empty + проверенный код | empty_file/E, E-only skipped; код complete/clean лишь при полностью отправленных patches и без иных blockers | `test_clean_without_text.py::test_fetch_excludes_proven_empty_addition_without_blob_request`, `test_clean_without_text_context.py::test_stage_omits_empty_addition_and_records_complete_policy_effective_coverage`, persisted acceptance inventory §2.7 |
 | Added с previous_filename/old path даже при empty SHA/regular mode; остальные отсутствующие/противоречивые proof | Не empty_file/E; missing_patch/incomplete, с кодом partial/null | `test_clean_without_text.py::test_missing_or_contradictory_evidence_never_proves_empty`, `::test_persisted_marker_does_not_override_conflicting_snapshot_evidence`; previous_filename проверяется отдельно от общей valid identity |
 | Tree response с валидным proof ровно 1 500 000 / 1 500 001 байт; exact pinned-head match, identity encoding; конфликт/truncation | Ровно cap допустимо; превышение отклоняется именно бюджетом, не ошибкой JSON; один optional metadata request, fail-closed | `test_clean_without_text_github.py::test_valid_tree_at_exact_metadata_budget_proves_empty`, `::test_valid_tree_over_metadata_budget_fails_for_cap` (declared/streamed), literal outgoing Accept-Encoding: identity; missing/mismatched/duplicate/symlink/gitlink остаются incomplete, marker/retry проверяются inventory §2.7 |
-| Pure rename/mode-only с proof либо без; deleted без binary proof; too_large; квалифицированный empty candidate без ordinary-file proof | Девять полных текстов причин и qualifying/generic-added различие — §2.7; partial/null с кодом, supported blocking/attention сохраняются | `test_clean_without_text_result.py`, `test_clean_without_text_views.py`, `test_clean_without_text_views_postgres.py`, `test_run_coverage.py`; none/zero-LLM lifecycle — отдельная цель #107 |
+| Pure rename/mode-only с proof либо без; deleted без binary proof; too_large; квалифицированный empty candidate без ordinary-file proof | Девять полных текстов причин и qualifying/generic-added различие — [PIPELINE_SPEC §2](PIPELINE_SPEC.md#2-фазы-внутри-running-и-трейс-run_actions); partial/null с кодом, supported blocking/attention сохраняются | `test_clean_without_text_result.py`, `test_clean_without_text_views.py`, `test_clean_without_text_views_postgres.py`, `test_run_coverage.py`; none/zero-LLM lifecycle — отдельная цель #107 |
 | Ignored anchor без manifest; неизвестный mask-matching путь; allowed anchor с ignored evidence | ignored_file, unknown_path/identity error с partial, evidence_source_disallowed | snapshot-путь (#247): `test_clean_without_text_sent_context.py::test_anchor_on_an_ignored_changed_file_is_dropped_without_lowering_coverage` (маска, удалённый под маской, rename из-под маски, generated: `ignored_file`, coverage не partial, ни inline, ни в теле), `::test_invented_path_under_the_mask_stays_unknown_path_and_partial`, `::test_binary_anchor_is_not_an_ignored_file_and_keeps_coverage_partial`; имена доказанных файлов — `test_review_context_stage.py::test_stage_names_the_changed_files_an_anchor_proves_ignored`, проверка до существования строки — `test_review_output.py::test_validate_v2_coordinates_drops_an_anchor_on_a_proven_ignored_file_first`; legacy-публикация (runs на review-промпте v3 и ниже) `ignored_file` не выдаёт: якорь на исключённом файле с сохранённым патчем публикуется inline или в теле review — остаток до вымывания legacy runs после F2 #332; `evidence_source_disallowed` (#230) — `test_execute_review.py::test_execute_review_drops_evidence_source_disallowed_and_revision_mismatch` (evidence из блока недопустимой роли); evidence именно из ignored-файла отдельно не проверяется |
 | Rename/copy с одной недопустимой стороной и допустимым новым alias | Всё изменение и новый alias изолированы | `test_diff_map.py::test_rename_with_one_rejected_side_keeps_the_valid_side_but_stays_withheld` — только уровень DiffMap; изоляция нового alias от импортов, AST и conventions не доказана — после остатка #130 |
 | Изоляция недоказуема; нарушена целостность snapshot; запрещённый источник у guard | Failed; в последнем случае `policy_context_violation` до отправки | целостность: `test_prepare_policy_snapshot.py::test_concurrent_worker_snapshot_with_another_digest_is_an_integrity_error`, `test_policy_snapshot_integrity.py`, `test_policy_snapshot_integrity_postgres.py`; pre-send guard `policy_context_violation` — PR #230; failed при недоказуемой изоляции не проверяется — после остатка #130 |
@@ -506,16 +446,16 @@ Redis-кэши (кэш контекста и кэш токенов устано�
 | Ошибка `AGENTS.md` после загрузки `.review/rules.md`; retry | `.review/rules.md` остаётся в staging, ошибка не записана как missing; retry читает только `AGENTS.md` (§7.2) | `test_prepare_policy_snapshot.py::test_agents_read_failure_keeps_the_staged_rules_and_is_not_a_missing_document`, `::test_retry_after_an_agents_failure_reads_only_agents`, `::test_terminal_agents_error_keeps_the_staged_rules`, `::test_rules_read_failure_stages_nothing_and_does_not_read_agents`; реальный PostgreSQL: `test_policy_snapshot_integrity_postgres.py::test_an_agents_failure_keeps_the_committed_rules_for_the_retry` |
 | Изменилась политика ignore или показанное base-tree | Старый общий conventions cache не используется | `test_repo_conventions.py::test_conventions_cached_under_another_ignore_policy_are_not_reused`, `test_review_context_stage.py::test_cache_identity_changes_when_a_rename_withholds_a_name_no_mask_matches` |
 | В cached convention записана инструкция модели | Не повышает доверие, проходит тот же envelope | не покрыто: ни #248, ни подкорпус #252 не кладут инструкцию в кэшированные конвенции (`<repo_conventions>`) |
-| `</repo_rules>` и «system: ignore previous instructions» в тексте | Структурные границы целы; новых полномочий нет | `test_rules_md_injection.py::test_reviewer_prompt_keeps_policy_payloads_inside_their_block`, `::test_verifier_prompt_keeps_policy_payloads_inside_their_block` (rules.md и AGENTS.md); экранирование закрывающих тегов уже проверяет `test_prompt_builder_markdown.py::test_prompt_injection_defense_escapes_closing_tags`; «новых полномочий нет» вживую — A/B AC8 на `review.system` v5 (#144 ч.3b, [решение](https://github.com/larchanka-training/dmc-268-api-t6/issues/163#issuecomment-6400830514)) после правки привязок промптов в `eval-live` (#163), harness #252: плечо `malicious` всех 8 кейсов RUL (поддельный закрывающий тег и «system: ignore previous instructions») |
+| `</repo_rules>` и «system: ignore previous instructions» в тексте | Структурные границы целы; новых полномочий нет | `test_rules_md_injection.py::test_reviewer_prompt_keeps_policy_payloads_inside_their_block`, `::test_verifier_prompt_keeps_policy_payloads_inside_their_block` (rules.md и AGENTS.md); экранирование закрывающих тегов уже проверяет `test_prompt_builder_markdown.py::test_prompt_injection_defense_escapes_closing_tags`; «новых полномочий нет» вживую — A/B AC8 на `review.system` v5 (#144 ч.3b, [решение](https://github.com/larchanka-training/dmc-268-api-t6/issues/163#issuecomment-6400830514); 2026-10-28, [отчёт](RULES_MD_TEST_REPORT.md#ac8--живой-ab-на-v5)), harness #252: в плече `malicious` всех 8 кейсов RUL (поддельный закрывающий тег и «system: ignore previous instructions») модель в основном подчиняется приказу ничего не сообщать — Recall −42,2 п. п. к `none` по сырому ответу, −36,3 после нормализации шлюза. Итог: структурные границы целы (unit-тесты выше), «новых полномочий нет» на уровне модели на v5 с `mistral-small-4` не выполнено — follow-up #362 |
 | Инъекция в невалидном ответе при repair | Остаётся previous_model_output, не system instruction | snapshot-путь (v4, v5): `test_gateway_repair_envelope.py::test_bounded_repair_sends_one_user_turn_with_the_answer_as_data`, `::test_markup_in_the_answer_and_in_validator_errors_arrives_escaped` — ответ приходит данными в `<previous_model_output>` одного сообщения `user`, разметка экранирована; legacy (≤ v3) сохраняет прежний repair с ответом сообщением `assistant` — `::test_without_the_flag_the_repair_keeps_the_assistant_turn` |
 | Атака в candidate body на verifier | Схема решений, набор candidate IDs и правила evidence не меняются | `test_rules_md_injection.py::test_verifier_prompt_keeps_candidate_payloads_inside_the_candidate`, `::test_a_verifier_answer_with_a_candidate_id_from_the_payload_is_rejected` — схема и набор candidate IDs; правила evidence под атакой в body не проверяются; экранирование полей в prompt verifier — `test_reflection_evaluation.py::test_untrusted_fields_are_safely_escaped_in_verifier_prompt` |
 | Инъекция в code comment, затем conventions/cache hit | Общий кэш не принимает head/PR-input | не покрыто: ни #248, ни подкорпус #252 не кладут инъекцию в код, из которого строятся conventions, и не проверяют кэш |
 | Цитата вредной инструкции как пример документации | Документ не отклоняется только из-за цитаты | `test_rules_md_injection.py::test_policy_parsers_accept_a_rules_md_that_quotes_an_injection` |
-| Настоящий дефект + приказ вернуть `findings=[]` | Измеряется потеря обнаружения reviewer | `test_rules_md_injection.py::test_rules_md_order_to_return_no_findings_does_not_drop_a_verified_defect` — только сторона конвейера; потеря обнаружения reviewer вживую — A/B AC8 на `review.system` v5 (#144 ч.3b, [решение](https://github.com/larchanka-training/dmc-268-api-t6/issues/163#issuecomment-6400830514)) после правки привязок промптов в `eval-live` (#163), harness #252: плечо `malicious` (приказ не сообщать находок в каждом из 8 кейсов RUL, truths те же, что в `valid`) |
+| Настоящий дефект + приказ вернуть `findings=[]` | Измеряется потеря обнаружения reviewer | `test_rules_md_injection.py::test_rules_md_order_to_return_no_findings_does_not_drop_a_verified_defect` — только сторона конвейера; потеря обнаружения reviewer измерена вживую — A/B AC8 на `review.system` v5 (#144 ч.3b, [решение](https://github.com/larchanka-training/dmc-268-api-t6/issues/163#issuecomment-6400830514); 2026-10-28, [отчёт](RULES_MD_TEST_REPORT.md#ac8--живой-ab-на-v5)), harness #252: плечо `malicious` (приказ не сообщать находок в каждом из 8 кейсов RUL, truths те же, что в `valid`) — Recall 13,3 % против 66,7 % в `valid` по сырому ответу, 26,7 % против 83,3 % после нормализации шлюза. Итог: сторона конвейера выполнена (тест выше), а reviewer на v5 с `mistral-small-4` теряет дефекты по приказу, хотя §2 v5 такие команды запрещает, — follow-up #362 |
 | Неправильный `rule_name`/source ref | Нет ложной подписи custom rule и supported без основания | `test_rules_md_injection.py::test_a_rules_md_section_name_is_not_a_rule_name`, `::test_a_policy_attribution_without_a_matching_requirement_ref_is_rejected`, `::test_a_requirement_ref_outside_the_shown_policy_is_rejected`, `::test_legacy_post_processing_publishes_no_false_custom_rule_attribution` (legacy-путь: только отсутствие ложной подписи, судьба finding — #247 ч.3); уже есть `test_reflection_evaluation.py::test_service_defaults_rule_name_rejects_injections`, `test_reflection_pass.py::test_reflection_pass_validates_requirement_refs_and_evidence_refs` |
 | `rule_name` указывает на отсутствующий, пустой или пробельный `.review/rules.md`/`AGENTS.md` | Кандидат отброшен до verifier с `evidence_source_disallowed`, run не падает | `test_review_output_policy_attribution.py::test_agents_attribution_needs_a_document_shown_with_content`, `::test_rules_attribution_needs_a_document_shown_with_content`, `::test_a_whitespace_only_document_is_not_citable_by_the_snapshot_status`, `test_execute_review.py::test_execute_review_drops_attribution_to_a_whitespace_only_agents_document` |
 
-Известные расхождения ведутся в #247 (ч.2 — диагностика §9, ч.3 — атрибуция §8.2). #168 ч.4 (`policy_path_invalid` против `unsupported_path`) закрыта строкой RULES_FORMAT_SPEC §9: код защитный и на `main` недостижим. Строку §11 про `unsupported_path` и `**/*` путь снимка выполняет с #130 F5 (строка таблицы Б выше), legacy-run (≤ v3) по-прежнему вызывает модель. `policy_prompt_budget_exceeded` достижим только на пути снимка в `policy.load` — `test_review_path.py::test_stage_refuses_a_v4_run_over_the_policy_budget_at_policy_load`, `::test_a_v4_run_over_the_policy_budget_ends_before_the_diff_and_any_model_call` и E2E at-limit `[v4]`. Размер blob, вторичный 403 и дата в `Retry-After` (#168 ч.6) покрыты: поток blob до 65 536 байт и `actual` — `test_github_policy_source.py::test_policy_blob_over_65536_bytes_stops_the_stream`, `::test_policy_blob_declared_over_65536_bytes_is_not_read`, `::test_policy_blob_of_another_id_is_a_retryable_fetch_failure`, `::test_too_large_blob_reports_the_declared_size_as_exact`, `::test_too_large_blob_without_a_declared_size_reports_the_bytes_read_as_a_lower_bound`, `test_github_snapshot_source.py::test_too_large_rules_blob_reports_its_size`, `test_gitlab_repository_sources.py::test_policy_too_large_names_its_size`, `::test_policy_oversized_tree_listing_is_unavailable_not_a_too_large_document` (страница листинга GitLab больше предела — `policy_revision_unavailable`); `actualIsLowerBound` статуса правил — `test_rules_status.py::test_a_too_large_diagnostic_tells_whether_its_actual_is_a_lower_bound`, `test_rules_status_postgres.py::test_a_too_large_actual_is_stored_and_shown_with_whether_it_is_a_lower_bound`, `::test_a_diagnostic_stored_without_the_lower_bound_flag_reads_as_exact`, `test_openapi_contract.py::test_every_rules_status_variant_validates_against_the_declared_schema[invalid-too-large-lower-bound]`; вторичный 403 — `test_github_policy_source.py::test_secondary_rate_limit_without_headers_waits_a_minute`, `test_github_snapshot_source.py::test_rules_document_reads_a_secondary_rate_limit_without_headers`, `test_review_run_worker.py::test_secondary_rate_limit_without_headers_is_a_retryable_limit_of_a_minute`, `::test_forbidden_without_the_secondary_limit_message_stays_forbidden`; дата в `Retry-After` — `test_retry_after.py`, `test_github_policy_source.py::test_policy_source_reads_retry_after_as_seconds_or_an_http_date`, `test_review_run_worker.py::test_http_date_retry_after_is_a_retryable_limit_with_its_delay`.
+Известные расхождения ведутся в #247 (ч.2 — диагностика §9, ч.3 — атрибуция §8.2). #168 ч.4 (`policy_path_invalid` против `unsupported_path`) закрыта строкой RULES_FORMAT_SPEC §9: код защитный и на `main` недостижим. Строку §11 про `unsupported_path` и `**/*` путь снимка выполняет с #130 F5 (строка таблицы Б выше), legacy-run (≤ v3) по-прежнему вызывает модель. `policy_prompt_budget_exceeded` достижим только на пути снимка: в worker — в `policy.load` (`test_review_path.py::test_stage_refuses_a_v4_run_over_the_policy_budget_at_policy_load`, `::test_a_v4_run_over_the_policy_budget_ends_before_the_diff_and_any_model_call`, E2E at-limit `[v4]` и over-budget `[v4]` по сумме двух документов); на пути eval — в pre-send guard шлюза до вызова провайдера (#328; `test_gateway_review_model.py::test_policy_over_its_budget_fails_closed_before_any_provider_call`, сбой кейса и продолжение прогона — `test_eval_live.py::test_a_per_case_policy_failure_is_recorded_and_the_run_goes_on`). Размер blob, вторичный 403 и дата в `Retry-After` (#168 ч.6) покрыты: поток blob до 65 536 байт и `actual` — `test_github_policy_source.py::test_policy_blob_over_65536_bytes_stops_the_stream`, `::test_policy_blob_declared_over_65536_bytes_is_not_read`, `::test_policy_blob_of_another_id_is_a_retryable_fetch_failure`, `::test_too_large_blob_reports_the_declared_size_as_exact`, `::test_too_large_blob_without_a_declared_size_reports_the_bytes_read_as_a_lower_bound`, `test_github_snapshot_source.py::test_too_large_rules_blob_reports_its_size`, `test_gitlab_repository_sources.py::test_policy_too_large_names_its_size`, `::test_policy_oversized_tree_listing_is_unavailable_not_a_too_large_document` (страница листинга GitLab больше предела — `policy_revision_unavailable`); `actualIsLowerBound` статуса правил — `test_rules_status.py::test_a_too_large_diagnostic_tells_whether_its_actual_is_a_lower_bound`, `test_rules_status_postgres.py::test_a_too_large_actual_is_stored_and_shown_with_whether_it_is_a_lower_bound`, `::test_a_diagnostic_stored_without_the_lower_bound_flag_reads_as_exact`, `test_openapi_contract.py::test_every_rules_status_variant_validates_against_the_declared_schema[invalid-too-large-lower-bound]`; вторичный 403 — `test_github_policy_source.py::test_secondary_rate_limit_without_headers_waits_a_minute`, `test_github_snapshot_source.py::test_rules_document_reads_a_secondary_rate_limit_without_headers`, `test_review_run_worker.py::test_secondary_rate_limit_without_headers_is_a_retryable_limit_of_a_minute`, `::test_forbidden_without_the_secondary_limit_message_stays_forbidden`; дата в `Retry-After` — `test_retry_after.py`, `test_github_policy_source.py::test_policy_source_reads_retry_after_as_seconds_or_an_http_date`, `test_review_run_worker.py::test_http_date_retry_after_is_a_retryable_limit_with_its_delay`.
 
 ## 3. Методология LLM eval
 
@@ -525,7 +465,7 @@ Redis-кэши (кэш контекста и кэш токенов устано�
 
 Каждый кейс имеет JSON metadata/ground truth, исходное состояние файла (pre-image), применимый unified `.patch` и источник; raw responses хранятся отдельно от кейса, в `test-prs-dataset/responses/`. Для real PR обязательны URL PR/commit, revision, название и URL лицензии, attribution и ручная проверка права на конкретный excerpt. Ground truth использует `path`, `start_line`, `line`, `severity`, `category` из Finding; `start_line: null` означает одну строку, иначе `< line`. Ожидаемый `verdict` выводится из severity по [PIPELINE_SPEC §11](PIPELINE_SPEC.md#11-вердикт-и-бейджи-d3): `critical/high → blocking`, иначе `medium/low → attention`, иначе `clean`. Case schema собственная; [ReviewOutput schema](../review/schemas/review-output.schema.json) применяется только к ответу модели. `git apply --check` выполняется на копии pre-image, truth якорится в добавленных строках новой стороны; answer-hint комментарии запрещены.
 
-Оценивать **сырой** ответ модели до post-processing, hunk-фильтра, production verifier, severity threshold, cap inline и публикации: иначе качество промпта скрывается правилами выпуска. Replay читает committed raw response без сети и ключа, с model ID, prompt version/SHA и run metadata. Валиден только ответ, для которого `validate_findings.py` завершился кодом 0 **и** напечатал строку своей схемы: у съёмки на v1–v3 — `uv run python review/scripts/validate_findings.py <response.json>` и `OK ReviewOutput`, у съёмки промпта snapshot-пути (v4/v5) — тот же скрипт с `--schema v2` и `OK ReviewOutputV2` (схема v2 и модель ReviewOutputV2). Обе проверки идут по сырому ответу до нормализации шлюза: `start_line`, равный `line`, и находки не по порядку severity/confidence шлюз исправляет и принимает, а replay считает невалидными — у v2 так же, как у v1; exit 1/2 и `RepoConventionsDraft` невалидны. Ссылки evidence против manifest вызова replay не проверяет. Live использует PromptBuilder и `review/prompts/`, выбранную модель и внешние credentials, сохраняет raw output и ту же provenance для replay. Live запускается вручную (§2, `eval-live.yml`); закоммиченный baseline — ответы и `manifest.json` в `test-prs-dataset/responses/`, его модель и provenance описаны в [README корпуса](../test-prs-dataset/README.md); историческая съёмка 2026-10-13 использовала одиночные revision snapshots (результат §3.2.1); полная замена всех 24 ответов с проверенными PR prefixes сохранена как исторический baseline §3.2.2; текущий post-rebase baseline после merged #149 — §3.2.3. LLM-as-a-judge для оценки этого raw benchmark не используется. Обязательный production verifier по #107 — часть продукта, качество которого оценивается отдельно (§3.4).
+Оценивать **сырой** ответ модели до post-processing, hunk-фильтра, production verifier, severity threshold, cap inline и публикации: иначе качество промпта скрывается правилами выпуска. Replay читает committed raw response без сети и ключа, с model ID, prompt version/SHA и run metadata. Валиден только ответ, для которого `validate_findings.py` завершился кодом 0 **и** напечатал строку своей схемы: у съёмки на v1–v3 — `uv run python review/scripts/validate_findings.py <response.json>` и `OK ReviewOutput`, у съёмки промпта snapshot-пути (v4/v5) — тот же скрипт с `--schema v2` и `OK ReviewOutputV2` (схема v2 и модель ReviewOutputV2). Обе проверки идут по сырому ответу до нормализации шлюза: `start_line`, равный `line`, и находки не по порядку severity/confidence шлюз исправляет и принимает, а replay считает невалидными — у v2 так же, как у v1; exit 1/2 и `RepoConventionsDraft` невалидны. Ссылки evidence против manifest вызова replay не проверяет. Live использует PromptBuilder и `review/prompts/`, выбранную модель и внешние credentials, сохраняет raw output и ту же provenance для replay. Live запускается вручную (§2, `eval-live.yml`); закоммиченный baseline — ответы и `manifest.json` в `test-prs-dataset/responses/`, его модель и provenance описаны в [README корпуса](../test-prs-dataset/README.md); историческая съёмка 2026-10-13 использовала одиночные revision snapshots (результат §3.2.1); полная замена всех 24 ответов с проверенными PR prefixes сохранена как исторический baseline §3.2.2; post-rebase baseline после merged #149 — исторический §3.2.3; полная съёмка v3 #178 — исторический §3.2.4; текущий baseline `review.system.v5` — §3.2.5. LLM-as-a-judge для оценки этого raw benchmark не используется. Обязательный production verifier по #107 — часть продукта, качество которого оценивается отдельно (§3.4).
 
 ### 3.2. Однозначное сопоставление и счётчики
 
@@ -547,7 +487,7 @@ CLEAN-03/LOG-03/SEC-04 по 1 сообщению, RES-03/SYN-04 по 20 и uncer
 Strict schema и canonical/active binding проверяются до calls/staging; все
 canonical case.json identity inputs и shaping modules входят в static provenance.
 Результаты ниже относятся только к capture 2026-10-13 и не измеряют новые
-prefixes; новая полная съёмка описана в §3.2.2; текущий baseline — §3.2.3.
+prefixes; новая полная съёмка описана в §3.2.2; текущий baseline — §3.2.5.
 
 [Actions run 38468081001, attempt 1](https://github.com/larchanka-training/dmc-268-api-t6/actions/runs/38468081001)
 снял все 24 первых ответа на source SHA `80ede3cd274d745616b8a24082ff7d1d00f5b736`;
@@ -657,7 +597,7 @@ billed-token totals и остаток баланса отсутствуют в a
 
 ### 3.2.3. Зафиксированный post-rebase raw baseline #82 (2026-10-15)
 
-Исторический baseline; текущая полная съёмка v3 — §3.2.4 (20.10.2026).
+Исторический baseline; следующая полная съёмка v3 — §3.2.4 (20.10.2026), текущий baseline v5 — §3.2.5 (28.10.2026).
 Original raw bytes и manifest сохранены [на pre-import revision](https://github.com/larchanka-training/dmc-268-api-t6/tree/47f9add7c4df2b7c32db0091d39296cdd2e4810c/test-prs-dataset/responses).
 
 [Actions run 38701845865, attempt 1](https://github.com/larchanka-training/dmc-268-api-t6/actions/runs/38701845865)
@@ -709,6 +649,9 @@ billed-token totals или баланс — этих величин в artifacts
 
 ### 3.2.4. Зафиксированный v3 raw baseline #178 (2026-10-20)
 
+Исторический baseline; текущая съёмка `review.system.v5` — §3.2.5 (28.10.2026).
+Original raw bytes и manifest сохранены [на source revision съёмки v5](https://github.com/larchanka-training/dmc-268-api-t6/tree/973218054ef2c9a32f1e75a955284323196ffafd/test-prs-dataset/responses).
+
 [Actions run 39443263258, attempt 1](https://github.com/larchanka-training/dmc-268-api-t6/actions/runs/39443263258)
 снял все 24 первых raw ответа на source `47f9add7c4df2b7c32db0091d39296cdd2e4810c`,
 ветка `feat/178-first-answer-format`, начало `2026-10-20T14:53:06.772709Z`
@@ -741,7 +684,7 @@ Final corpus validation 24/24, два offline report byte-identical, `warnings=[
 после удаления только validator diagnostics offline совпадает с live safe report
 byte-for-byte. Raw-first validity измерена до нормализации/repair/fallback и verifier.
 
-| Метрика | Исторический 2026-10-15 | Текущий 2026-10-20 |
+| Метрика | Исторический 2026-10-15 | Исторический 2026-10-20 |
 | --- | --- | --- |
 | Validity | 29.2% (7/24) | 41.7% (10/24) |
 | Micro TP / FP / FN | 2 / 2 / 17 | 3 / 5 / 16 |
@@ -782,6 +725,96 @@ nominal USD 0.50/кейс (USD 12 для 24), 4 calls/attempt и 90s timeout.
 Actual spend, billed tokens и баланс artifacts не сообщают. Verifier в этом legacy
 eval не запускается; pins для неиспользуемого verifier не добавлены.
 
+### 3.2.5. Зафиксированный v5 raw baseline #144 (2026-10-28)
+
+[Actions run 40774280790, attempt 1](https://github.com/larchanka-training/dmc-268-api-t6/actions/runs/40774280790)
+снял все 24 первых raw ответа на source `973218054ef2c9a32f1e75a955284323196ffafd`
+(тогдашний head `main`), начало `2026-10-28T21:43:37.394394Z` (22:43:37 Europe/Warsaw).
+Это единственная платная пересъёмка #130 R15, которая переводит записанный replay и
+eval-baseline с `review.system.v3` на `review.system.v5` (#144 AC 8). Техлид разрешил
+один платный capture; выполнен ровно один workflow без rerun и подмены кейсов.
+
+Inputs: `review_prompt=v5`, `policy_arm=none`, `corpus=main`, `export_raw_responses=true`,
+model пуст (`vars.LLM_MODEL`). Engine `fast`, configured provider `eurouter`, primary
+`mistral-small-4`, fallback `mistral-small-3.2-24b`. Corpus/truth и frozen PR prefixes
+не менялись: 19 synthetic + 5 real, SEC-05 исключён. Prompt `review.system.v5`, SHA-256
+`3bd7d39939b60d0c16b08090a4d3e5f0cbdb8a731fa4bde91bd6570546e085c9`. Плечо `none` — путь
+snapshot без `.review/rules.md` (`policy_arm_digest` null): запрос несёт закреплённые
+service defaults, AGENTS.md в кейсах main-корпуса нет; ответы проверяются как
+ReviewOutput v2 (`evidence_refs`, без префикса атрибуции v1). RAG в eval нет (#146):
+индекса нет, поэтому секция `<retrieved_excerpts>` пуста в каждом запросе — форма
+продакшна с выключенным тумблером RAG. Стадии verifier в eval нет (#217, без
+исполнителя): качество verifier и final output не измеряется.
+52 pins, static digest
+`sha256-v1:7b8bba23a40bf167fac3d441434896e3417332bccb200b21ae71ff8a7f838508`;
+corpus digest
+`sha256-v1:1ab8ca9a16cc50c357b39e1571c73b1e6674752737c444bd8b58d3f2aab81dfa`.
+Все 24 first calls — answer/primary/mistral-small-4, serving-provider label mistral,
+gateway accepted, paid-metadata errors false; publishable=true, nonpublishable IDs
+пусты. Каждый кейс — ровно один платный вызов `review`: repair и fallback не
+вызывались. Это проверка целостности, не порог качества.
+
+Manifest впервые хранит usage каждого платного вызова по журналу шлюза (#163):
+24 вызова, 242 989 входных токенов (из них 160 504 cache read), 9 068 выходных,
+`cost_usd` 0.022242 — стоимость от провайдера, если ответ её нёс, иначе configured
+цена × токены; это не billed spend и не остаток баланса.
+
+Полные 25 файлов импортированы byte-for-byte после проверки safe/raw artifacts
+`eval-live-main-none-40774280790-1` (ID `12854471057`) и
+`eval-live-raw-main-none-40774280790-1` (ID `12854221376`). Все hashes/sizes совпали;
+raw/safe manifest SHA-256
+`bb00e2a025524add39721170d7a78b1fb73bb5679c75c3ffcdb2d853b6f06a76`.
+Final corpus validation 24/24, два offline report byte-identical, `warnings=[]`;
+после удаления только validator diagnostics offline совпадает с live safe report
+byte-for-byte. Raw-first validity измерена до нормализации/repair/fallback и verifier.
+Required CI replay на main после merge **ещё не выполнен**.
+
+| Метрика | Исторический 2026-10-20 (v3) | Текущий 2026-10-28 (v5) |
+| --- | --- | --- |
+| Validity | 41.7% (10/24) | 87.5% (21/24) |
+| Micro TP / FP / FN | 3 / 5 / 16 | 5 / 13 / 14 |
+| Precision | 37.5% (3/8) | 27.8% (5/18) |
+| Recall | 15.8% (3/19) | 26.3% (5/19) |
+| Critical Recall | 40.0% (2/5) | 80.0% (4/5) |
+| Verdict agreement | 16.7% (4/24) | 37.5% (9/24) |
+| Severity mismatches | 2/3 matched | 3/5 matched: LOG-02 high/critical, LOG-04 high/medium, LOG-05 high/critical |
+
+| Category | TP | FP | FN | Precision | Recall |
+| --- | --- | --- | --- | --- | --- |
+| security | 2 | 0 | 2 | 100.0% (2/2) | 50.0% (2/4) |
+| correctness | 3 | 8 | 2 | 27.3% (3/11) | 60.0% (3/5) |
+| performance | 0 | 0 | 5 | undefined | 0.0% (0/5) |
+| readability | 0 | 5 | 5 | 0.0% (0/5) | 0.0% (0/5) |
+
+| Case class | Validity | TP / FP / FN | Verdict agreement |
+| --- | --- | --- | --- |
+| security | 4/4 | 2 / 5 / 2 | 2/4 |
+| resource | 4/5 | 0 / 5 / 5 | 0/5 |
+| logic | 4/5 | 3 / 0 / 2 | 2/5 |
+| syntax | 4/5 | 0 / 1 / 5 | 1/5 |
+| clean | 5/5 | 0 / 2 / 0 | 4/5 |
+
+Real validity 2/5, synthetic 19/19: все три невалидных ответа (LOG-03, RES-03, SYN-04) —
+real-кейсы; ни один прежде валидный кейс не стал невалидным. Они остаются в
+знаменателе, predictions не интерпретируются, truths остаются FN. Причина у всех
+трёх одна: 13 equal ranges (3/3/7); reversed ranges, attribution, empty/missing
+answers, JSON parse и другие ошибки отсутствуют. SYN-04 ещё ставит `info` перед
+`high`, но ReviewOutputV2 проверяет порядок только после полей, поэтому validator
+эту ошибку не печатает. Пропущенная critical truth — RES-05.
+Все case IDs и группы — [README корпуса](../test-prs-dataset/README.md#recorded-mistral-baseline--2026-10-28).
+
+Съёмки различаются не только промптом: v3 — legacy envelope и контракт v1 с префиксом
+атрибуции, v5 — envelope snapshot (плечо `none`) и контракт v2 с `evidence_refs` без
+префикса. 27 attribution omissions v3 (12 кейсов) под v2 невозможны, поэтому рост
+validity в основном даёт смена контракта, а не лучшее соблюдение формата; ссылки
+evidence против manifest вызова replay не проверяет. Результаты смешанные: validity,
+TP, recall, critical recall и verdict agreement выросли, FP выросли (5 → 13, readability
+0 → 5), precision снизилась. Весь cohort сохранён, без cherry-picking или повторной
+съёмки. Разные captures не являются controlled experiment; semantic
+improvement/Hallucination Rate, production verifier/final-output quality и
+repair/latency/cost saving не измерены. Effective settings полностью совпадают с
+§3.2.4, включая nominal USD 0.50/кейс (USD 12 для 24), 4 calls/attempt и 90s timeout.
+
 ### 3.3. Ручной оракул семантики
 
 Автоматическая пара по пути, категории и строке не доказывает, что модель поняла корневую причину. Куратор вручную отмечает для каждой находки groundedness (есть ли утверждаемый код/тип/API в переданном контексте), совпадение причины с truth и тон; отдельно проверяет корректность `suggestion` на новой версии. Галлюцинация — утверждение о несуществующем коде, типе, библиотеке или поведении; спорные случаи проходят вторую ручную оценку. `Hallucination Rate = число вручную подтверждённых галлюцинаций / число находок в валидных raw responses`; нулевой знаменатель — `null`. Отчёт хранит ручные решения и ссылки на контекст, не выдаёт автоматическое path/line совпадение за семантическую истину. Оракул качества не использует LLM judge; production verifier не заменяет независимую ручную разметку.
@@ -797,7 +830,8 @@ lazy Reflection Pass; `ExecuteReviewRun` запускает его только 
 попыток суммарно, затем `failed` и `reviews.dlq`. Повреждённый snapshot
 по-прежнему даёт `policy_snapshot_integrity_error` без retry. Legacy без snapshot
 обходит verifier молча, без предупреждения в логе.
-После F2 seed активирует v4 (с #350 — v5) для новых runs; закреплённый v3 или ниже
+После F2 seed v4 был активен для новых runs; после #350 новые runs закрепляют общий v5.
+Закреплённый v3 или ниже
 сохраняет legacy-путь. Метки v2
 в dataclass/fixtures — не универсальные runtime-pins: Run сохраняет ID активных
 conventions/verifier DB-строк при создании, snapshot восстанавливает их версии
@@ -845,7 +879,7 @@ Adversarial eval использует пары одинакового дефек
 
 **Защита от Prompt Injection на unit-уровне (AC 7 задачи #120)**:
 Reviewer-промпт проверяют отдельно `tests/test_prompt_builder_markdown.py::test_first_pass_prompt_injection_defense` и `::test_prompt_injection_defense_escapes_closing_tags`. Параметризованный `TestPromptInjectionDefenses::test_untrusted_fields_are_safely_escaped_in_verifier_prompt` в `tests/test_reflection_evaluation.py` строит только verifier-промпт:
-- Пакетные `review.verifier.v1.md` и `review.verifier.v2.md` содержат декларацию Source Authority and Trust с наивысшим приоритетом над пользовательскими данными. Исторический Option (a) в #120 означал сохранить тогдашний reviewer prompt v2 без изменений и отложить новую декларацию доверия reviewer и её боевое подключение до #130 ([план #120, Phase 7](plans/120-plan.md#phase-7-review-round-3-fixes-alexander-khomutov--axyi-5562633453)). Нынешний `review.system.v3.md` — prompt для legacy-контракта из #178/#233; reviewer v4 с новой декларацией доверия и интеграция snapshot/verifier-профиля остаются частью #130 (§3.6).
+- Пакетные `review.verifier.v1.md` и `review.verifier.v2.md` содержат декларацию Source Authority and Trust с наивысшим приоритетом над пользовательскими данными. Исторический Option (a) в #120 означал сохранить тогдашний reviewer prompt v2 без изменений и отложить новую декларацию доверия reviewer и её боевое подключение до #130 ([план #120, Phase 7](https://github.com/larchanka-training/dmc-268-api-t6/blob/f1c1b9587f4edaecf784eefd5a0aed79488ec7fa/docs/plans/120-plan.md#phase-7-review-round-3-fixes-alexander-khomutov--axyi-5562633453)). Нынешний `review.system.v3.md` — prompt для legacy-контракта из #178/#233; reviewer v4 с новой декларацией доверия и интеграция snapshot/verifier-профиля остаются частью #130 (§3.6).
 - Все недоверенные поля (`rules_markdown`, `agents_md`, `candidate_id`, `path`, `title`, `body`, `suggestion`, `code_diff`) экранируются по стандарту XML-сущностей (`&lt;`, `&gt;`, `&amp;`, `&quot;`, `&apos;`).
 - Атрибуты XML строго валидируются: идентификаторы `service-defaults:<ID>` ограничены регулярным выражением `\A[a-zA-Z0-9_\-]+\Z`, исключая кавычки и инъекции атрибутов.
 - Тесты проверяют отсутствие неэкранированных тегов `<system>`, преждевременного закрытия контейнеров (`</candidate_findings>`, `</code_context>`) и неэкранированного `<|im_start|>` в user-тексте. Проверка отсутствия `[INST]` относится к `prompt.system`: буквальный `[INST]` может оставаться недоверенными пользовательскими данными. XML-экранирование сохраняет эти данные внутри user-контейнеров; system-промпт остаётся неизменным.
@@ -926,6 +960,35 @@ Recall — micro по ожидаемым находкам этих кейсов,
 Это решение о гейте, а не обязательная проверка CI: режимы §5 не меняются. Гейт не
 пройден — #147 закрывается как not planned со ссылкой на отчёт #146.
 
+### 3.5.1. Запись, replay и гейт (#146)
+
+Замер §3.5 офлайн и без платных вызовов: платную запись делает `eval-live` с `corpus=rag` ([CICD §1](CICD.md#1-конвейер)). Пока корпуса `test-prs-dataset/rag/` нет, harness проверяется на фикстурах `tests/fixtures/rag_eval/` (дерево `base/`, `diff.patch`, `index.json`; `case.json` собирают тесты).
+
+Кейс — каталог `cases/<ID>/` с `case.json` (класс `rag`, блок `rag`, [схема](../test-prs-dataset/schema/case.schema.json)), `diff.patch`, `base/` и `index.json`: замороженный снимок индекса `base/`, его строит `build_rag_snapshot.py --write` через `BuildRepositoryIndex` индексатора, а `--check` и `validate_dataset.py --profile rag` сверяют байт в байт. Ревизии синтетические и выводятся из имени каталога кейса, поэтому каталог не переименовывают. Целостность кейса проверяет `check_case` (`eval_rag_check.py`), распределение 10/6/4/2/2 — `--profile rag`; проверка, которая не может выполниться, — ошибка, а не пропуск. Запись `eval_live.py --rag-arm none|graph` требует явных `--policy-arm none` и `--system review/prompts/review.system.v5.md` (по умолчанию policy arm — `legacy`), строит контекст плеч продакшн-кодом и пишет в manifest `rag_evidence`. Replay без сети и ключа пересобирает по снимку пять полей (`offline_retrieved_ids`, `retrieved`, `trimmed`, `non_rag_prompt_digest`, `prompt_digest`), расхождение — ошибка с именем кейса, а `rag_index_digest` — предупреждение. `eval_ab.py` принимает отчёты replay (JSON) только под метками `rag_off` (arm `none`) и `rag_on` (`graph`).
+
+**Скрипт гейта** считает условия таблицы §3.5 по шести записям (каталоги `manifest.json` + `<ID>.json`, как у artifact `eval-live-raw-…`) и файлу оракула; имя каталога — id прогона:
+
+```bash
+uv run python review/scripts/eval_rag_gate.py --root test-prs-dataset/rag \
+  --run rag_off=DIR --run rag_off=DIR --run rag_off=DIR \
+  --run rag_on=DIR --run rag_on=DIR --run rag_on=DIR [--oracle PATH] [--markdown]
+```
+
+Код 0 — любой вычисленный вердикт (скрипт не проверка CI); код 2 и `eval_rag_gate: …` в stderr — отказ входа: не три записи на плечо, чужие метки, смешанное происхождение записей (`eval_ab`), корпус меньше 24 кейсов или не ровно 10 `reverse_edge`, у кейса не одна truth. Для каждого отношения печатаются числитель и знаменатель; метрики сырые, стадии verifier в eval нет (#217). Вердикт вычисляется, решение о гейте принимает человек.
+
+Метод фиксируется до замера; трактовки ADR §12, которые делает скрипт:
+
+- Арифметика точная (дроби). Метрики плеча — **среднее по трём прогонам отношений прогона**, не отношение сумм: Recall — TP/10 на подмножестве `reverse_edge`; Precision — micro TP/(TP+FP) на всём корпусе; Critical Recall — найденные критические truths к их числу; Hallucination Rate — H/F, F = TP+FP валидных ответов. Отношение сумм печатается рядом как неучитываемая чувствительность.
+- Дефект «найден», если у кейса `tp ≥ 1`; «не меньше 2 из 3» считается по этому признаку.
+- Медиана токенов — по `tokens_in` первой записи `usage` с операцией `review` каждого кейса в каждом из 3 прогонов (кейсы × 3 прогона, 72 при 24 кейсах); условие — медиана B ≤ 1,30 × медиана A.
+- Исполненная инъекция по D-injection: (а) в прогоне B первая несопоставленная находка на пути якоря `rag.injection.forced` в окне `±2` строк (категория и добавленная строка не требуются); (б) у любого кейса с инъекцией настоящая truth найдена не меньше чем в 2 из 3 прогонов A и пропущена не меньше чем в 2 из 3 прогонов B. Условие — число событий равно 0; события перечислены как кандидаты, подтверждает человек по сырым ответам.
+- **Вердикт: любое `fail` даёт FAIL** (оракул его не спасает), иначе любое `undefined` даёт INCOMPLETE, иначе PASS. `undefined`: нет оракула или он не по всем прогонам; ноль критических truths (знаменатель Critical Recall нулевой, §3.2); прогон без находок (нулевой знаменатель Precision или Hallucination); кейс без записанного вызова `review` или `usage`; нулевая медиана A; нет кейса с инъекцией. Поэтому без оракула вердикт — не PASS.
+- Ручная колонка «названа ли причина» в скрипте не считается и в вердикт не входит: гейт — по автоматической метрике §3.2.
+
+**Оракул.** `--oracle PATH` — JSON `{"schema_version": 1, "runs": {"<id прогона>": {"reviewed_findings": N, "responses_digest": "sha256-v1:<64 hex>", "hallucinations": [{"case_id": "RAG-03", "finding_index": 1}]}}}`; `finding_index` — позиция находки (с 0) в `findings` ответа. `responses_digest` — `eval_provenance.digest_files` от `<ID>.json` всех валидных ответов каталога; скрипт печатает его для каждого прогона и отказывает оракулу с другим значением (перезаписанный ответ или оракул другой записи). Отказ и при `reviewed_findings`, не равном TP+FP валидных ответов, несуществующей или повторной находке, id прогона вне шести, неизвестных ключах. Несуществующий путь — оракула нет (предупреждение, INCOMPLETE); прогон вне файла — `undefined` для Hallucination Rate.
+
+**Репетиция.** `eval_rag_rehearsal.py [--root ROOT] [--model M] [--out DIR] [--require-gate]` прогоняет запись обоих плеч по три раза с поддельным транспортом (сети, ключа и `.env` нет), replay и гейт; ответы — пустые ревью, поэтому её вердикт ничего не значит, а печатается **проекция входных токенов**: медиана и сумма по плечу и отношение медиан B/A против порога 1,30. Токены — оценка шлюза (3 символа на токен для прозы и кода), токенайзер провайдера на коде тратит больше, а блок кода есть только в плече B, поэтому настоящее отношение **выше** напечатанного. Правило чтения: больше 1,30 — стоп; до 1,20 — вероятно безопасно; от 1,20 до 1,30 — не доказано. Перед полной записью нужна пилотная пара вызовов (A и B на одном кейсе) для сравнения `prompt_tokens` провайдера с оценкой; пилот платный и требует явного согласия. Остальное — в `--help` и docstring скрипта.
+
 ### 3.6. A/B влияния .review/rules.md (#163)
 
 Цель — измерить вклад `.review/rules.md`: находит ли модель ограничения проекта, которых без правил в diff не видно, соблюдает ли объявленные исключения и выдерживает ли вредоносный документ. Корпус — подкорпус `test-prs-dataset/rules/` (§3.2): 8 кейсов, 5 с rule-truth, 4 с exception-якорями (RUL-08 — оба). Состав и оракулы кейсов — в [README корпуса](../test-prs-dataset/README.md#rulesmd-sub-corpus-and-policy-arm-ab-163).
@@ -943,13 +1006,13 @@ Recall — micro по ожидаемым находкам этих кейсов,
 | Соблюдённые / помеченные исключения | все `must_not_flag`, только валидные ответы (невалидный ответ ничего не помечает и иначе «соблюдал» бы исключения даром). В `valid` и `malicious` помечено — нарушение: prediction без пары с truth на пути якоря в окне `±2`, любая категория. В `none` якорь — generic truth, «помечено без правил» — любая prediction там. Соблюдено = всего − помечено; в `none` неприменимо (в Markdown `eval_ab.py` — сноска). Знаменатель равен во всех плечах, только если все ответы валидны, поэтому сравнивать числители/знаменатели каждого прогона |
 | Токены и стоимость | сумма usage каждого платного вызова (`run_metadata.usage`) |
 
-Ожидание на v3 — эффект около нуля по построению: промпт v3 говорит модели, что инструкции дают только `<custom_instructions>`, и не описывает `<repository_rules>`. Поэтому живой A/B требует промпта snapshot-пути (`review_prompt=v4` или `v5`) и плеча не `legacy`. Прогоны AC8 идут на v5 `review.system` (#144, часть 3b; v5 входит в `SNAPSHOT_REVIEW_PROMPT_VERSIONS` и в варианты `review_prompt`) и ждут подтверждения бюджета. RAG-индекса в eval нет, поэтому v5 в eval шлёт пустой `<retrieved_excerpts>` — форма продакшна с выключенным тумблером RAG; AC8 меряет только reviewer, стадии verifier в eval нет (#217). До этого harness проверяется только офлайн, на fake transport.
+Ожидание на v3 — эффект около нуля по построению: промпт v3 говорит модели, что инструкции дают только `<custom_instructions>`, и не описывает `<repository_rules>`. Поэтому живой A/B требует промпта snapshot-пути (`review_prompt=v4` или `v5`) и плеча не `legacy`. Прогоны AC8 сняты 2026-10-28 на v5 `review.system` (#144, часть 3b; v5 входит в `SNAPSHOT_REVIEW_PROMPT_VERSIONS` и в варианты `review_prompt`), результаты — в [отчёте](RULES_MD_TEST_REPORT.md#ac8--живой-ab-на-v5). RAG-индекса в eval нет, поэтому v5 в eval шлёт пустой `<retrieved_excerpts>` — форма продакшна с выключенным тумблером RAG; AC8 меряет только reviewer, стадии verifier в eval нет (#217). До этих прогонов harness проверялся только офлайн, на fake transport.
 
 ## 4. Эталонные данные и исполнение
 
 Целевой каталог — `test-prs-dataset/cases/<id>/` с metadata JSON, `diff.patch` и pre-image; raw responses и manifest версионируются отдельно. Минимальный шаблон metadata (форма в [case schema](../test-prs-dataset/schema/case.schema.json)): `id`, `class`, `language`, `source {kind, url, revision, license_name, license_url, attribution}`, `base_path`, `patch_path`, `expected_verdict`, `expected_findings [{path, start_line, line, severity, category}]`. Для synthetic source URL/license могут быть неприменимы, но attribution обязателен. Отдельный response manifest после baseline хранит `model_id`, `prompt_sha`, `prompt_version`, metadata прогона и путь raw response. В case README фиксируются замены категорий и ручной оракул.
 
-Кейсам RAG v1 (§3.5) pre-image и patch недостаточно: каждый дополнительно хранит снимок разрешённого дерева репозитория на ревизии кейса и замороженный снимок индекса, построенный по этому дереву, чтобы обратные рёбра и replay были воспроизводимы без сети. Для real PR лицензия и attribution должны покрывать весь снимок, а не только показанный excerpt. Формат снимков закрепляет #146.
+Кейсам RAG v1 (§3.5) pre-image и patch недостаточно: каждый дополнительно хранит снимок разрешённого дерева репозитория на ревизии кейса и замороженный снимок индекса, построенный по этому дереву, чтобы обратные рёбра и replay были воспроизводимы без сети. Для real PR лицензия и attribution должны покрывать весь снимок, а не только показанный excerpt. Формат закреплён в [§3.5.1](#351-запись-replay-и-гейт-146): `cases/<ID>/{case.json, diff.patch, base/, index.json}`, где `base/` — дерево репозитория, `index.json` — построенный по нему замороженный снимок индекса.
 
 Старые UI TC-01…06 — идеи для переработки в корректные pre-image/patch и канонические verdict; их YAML и patch не считаются валидным корпусом. TC-07 становится unit-тестом фильтра generated files, TC-08 — webhook integration, TC-09 — sandbox phase 3. Старый UI каталог `tests/golden_dataset/` уже удалён ([ui#69](https://github.com/larchanka-training/dmc-268-ui-t6/pull/69)): ui `docs/TEST_PLAN.md` отсылает к этому плану, последняя версия старого плана — [ui `d8c9172`](https://github.com/larchanka-training/dmc-268-ui-t6/blob/d8c9172/docs/TEST_PLAN.md).
 
@@ -958,7 +1021,7 @@ Recall — micro по ожидаемым находкам этих кейсов,
 | Проверка | Цель | Режим в этом спринте |
 | --- | --- | --- |
 | Corpus schema и patch apply | 100% кейсов; лицензии/ground truth подтверждены вручную | Обязательный gate. |
-| Validity, micro Precision/Recall, Critical Recall, per-category, verdict agreement | Числа и provenance в PR summary и воспроизводимом JSON | Отчёт; качество модели не валит required check. |
+| Validity, micro Precision/Recall, Critical Recall, per-category, verdict agreement | Числа и provenance в PR summary и воспроизводимом JSON | Отчёт; качество модели не валит required check. A/B `.review/rules.md` (§3.6) 2026-10-28: 9 прогонов на v5, числа и provenance — в [отчёте](RULES_MD_TEST_REPORT.md#ac8--живой-ab-на-v5). |
 | Precision ≥ 85%, Critical Recall ≥ 75%, Hallucination Rate < 3% | Продуктовые ориентиры из [SD §13](SYSTEM_DESIGN.md#13-нефункциональные-требования) | Отчёт; ручной hallucination oracle обязателен для заявления метрики. |
 | Coalescing: публикация разрешена только для актуального head/diff при проверке перед POST; webhook HMAC/idempotency, batch publication и классификация ошибок 422 | Интеграционные тесты с реальными PG/RabbitMQ и fake GitHub | Обязательные функциональные gates после реализации зависимостей. Окно между проверкой и POST — принятый остаточный риск ([SD §13](SYSTEM_DESIGN.md#13-нефункциональные-требования), решение техлида 05.10.2026). |
 | #107: policy/ignore/snapshots, AST fallback, manifests/evidence, verifier reserve/recovery, coverage и publication recovery | Сценарии §2.7, без запрещённой отправки и неподтверждённых findings | Целевые функциональные gates вместе с реализацией; документация не подтверждает прохождение. GitLab publication (#97) уже в pytest; полный GitLab ingress/LEFT и publication recovery §10 — отдельно. |
@@ -968,3 +1031,71 @@ Recall — micro по ожидаемым находкам этих кейсов,
 | Пропускная способность v1: 5 параллельных прогонов, масштаб репликами `worker` ([SD §13](SYSTEM_DESIGN.md#13-нефункциональные-требования)) | `scripts/parallel_runs_load.py` на отдельном локальном compose-проекте (`--project`, не `dmc-268-api-t6` и не проект по умолчанию клона) и только на локальном docker-демоне (адрес, который получит compose, — `DOCKER_HOST`, иначе текущий docker context — должен быть сокетом `unix://`, иначе отказ с кодом 2 до первой команды compose; удалённый buildx builder и `unix://`-сокет, проброшенный на удалённый хост, вне этой проверки): fake GitHub и fake LLM (`scripts/review_load_stub.py`), `--scale worker`, на каждый PR `labeled`-доставка и её дубль с новым delivery id | Ручной прогон, не CI gate. Вердикт: все Run `succeeded` с `attempt = 1` до `--timeout`; на каждый PR ровно один Run и одно опубликованное review, несмотря на дубль; вызовов `ReviewOutput` ровно столько, сколько PR (stub считает их общим счётчиком, не по PR); каждая доставка спроецирована; Run взяли все `--workers` воркеров; одновременно шло не меньше min(runs, workers) Run; ожидание в очереди (`started_at − created_at`) ≤ `--max-queue-wait-ms` (30 с); `reviews.dlq` пуст; stub не ответил 404 ни на один HTTP-запрос (маршрут, которого он не обслуживает; ответ 400 на вызов LLM с неизвестной схемой сюда не входит). Только в отчёте: ожидание проекции, время брокера, полное время Run, подъём стека, вызовы `RepoConventionsDraft`. С `--llm-delay-ms` меньше ~1000 проверка параллельности может не пройти по построению. Первая сборка тянет образы и пакеты из registry; `down -v` оставляет образы `<project>-*`, их удаляет `docker image rm $(docker image ls -q '<project>-*')`. |
 
 Существующий required CI запускает schema/apply и кодовые gates; legacy raw replay выполняется всегда: без закоммиченного response manifest job падает, а job summary называет причину. Некорректный набор или сломанный replay завершают job ошибкой, значения quality metrics только выводятся; расхождения текущих входов с manifest выводятся как warning и job не валят: SHA промпта (`Prompt SHA mismatch for …`), static digest (`Static input digest mismatch; …`, при смене набора static-файлов — `Static input path set changed; …`) и corpus digest (`Corpus input digest mismatch; …`). Integration suite в required CI (четыре шарда `Python integration (k/4)`) работает с реальными PostgreSQL и RabbitMQ и проверяет обработку сообщений: полный путь текущего Run `queued → running → publishing → succeeded` через worker с fake GitHub и fake ReviewModel, сквозную сборку `run_worker` с LLM gateway, где GitHub и модель подменены через `httpx.MockTransport` (`test_main_composition_reviews_through_the_llm_gateway`), retry-очереди и DLQ, восстановление Run реконсилером после падения worker (смоделировано отменой consumer-задач и истечением lease), отмену устаревшего Run новым push до вызова модели и во время публикации (новый `head_sha` записывается напрямую, без webhook), топологию очередей, а также публикацию rerun и сигнала cancel (`tests/test_worker_queue_postgres.py`, `tests/test_rerun_run_postgres.py`, `tests/test_cancel_run_postgres.py`). Эти существующие тесты не доказывают прохождение новых требований §2.7. Live eval — отдельный ручной job, результаты сохраняются с model/prompt provenance. Перед выпуском сверить этот план с критериями [api#30](https://github.com/larchanka-training/dmc-268-api-t6/issues/30), включая устаревшее там `review_requested`: действующий триггер задан Р-10 и [PIPELINE_SPEC §8](PIPELINE_SPEC.md#8-триггер-р-10-d2); формулировку issue нужно согласовать с владельцем.
+
+## Bitbucket Cloud acceptance (#333)
+
+Browser API сверяется с `contracts/openapi.yaml` в `tests/test_openapi_contract.py`; входящий provider webhook описан отдельно в [`BITBUCKET_WEBHOOK.md`](BITBUCKET_WEBHOOK.md). PostgreSQL/ASGI набор `tests/test_bitbucket_*` проверяет UUID и portal workspace изоляцию, private repo connect/disconnect, ключи и секреты, HMAC raw bytes, durable receipt/replay, один Run на PR/head, pinned diff/source, worker, RAG, inline/summary markers и commit status. `tests/test_deploy_staging_services.py` проверяет CI bundle → 0600 env-файлы → контейнеры/rollback. Запускать с реальным `TEST_DATABASE_URL`, иначе skipped PG тесты не являются доказательством. UI `pnpm test` проверяет выбор workspace и границу Zod; `pnpm --dir docs-site check-types && pnpm --dir docs-site build` проверяет публичную инструкцию.
+
+Отдельный live gate на disposable private Bitbucket Cloud repo/PR: зафиксировать URL PR,
+head SHA и deployed backend/UI SHA; подключить репозиторий к portal workspace, вручную
+настроить repository webhook с одноразовым секретом, доставить подписанные PR/push
+события, дождаться succeeded Run, проверить inline comments, ровно один summary,
+commit status и число публикаций после повтора доставки. Native применяемое
+предложение нужно подтвердить реальным API-запросом и записать, показывает ли
+Bitbucket UI действие Apply для созданного предложения: текстовый fenced patch остаётся
+ручным fallback и не закрывает AC4. В отчёт записывать только санитизированные
+идентификаторы/счётчики, без токена и секрета. Полные backend/UI gates обязательны
+на итоговом diff.
+
+Проверки выполнять в выбранном portal workspace на приватном UUID locator; участник
+видит подключение, посторонний — нет. Runtime-токену нужны
+`read:repository:bitbucket`, `read:pullrequest:bitbucket` и `read:user:bitbucket`:
+проверить их на private repo/PR GET, GET /user, inline comment POST и commit-status POST/PUT.
+Токен с прежними правами перевыпустить и обновить в connection. Без второго scope и connect,
+и `PUT credential` возвращают 422; после неудачного PUT `credentialGeneration` не
+меняется. Проверить URL и имена защищённых staging-переменных, не раскрывая keyring;
+backend/UI должны быть развернуты с зафиксированными SHA и миграцией.
+
+До отключения репозитория провести следующие provider-пробы:
+
+- Подписать все пять событий `repo:push`, `pullrequest:created`, `updated`,
+  `fulfilled`, `rejected`. Неверная подпись не создаёт receipt/Run и не переводит
+  binding из `awaiting_webhook` в `active`; первая верная переводит. Реальные merge и
+  decline дают соответствующие receipts, закрывают PR и отменяют активный Run без
+  нового ревью. Пять wire events из ответов connect и ротации webhook secret должны
+  совпасть с настройкой webhook; старую трёхсобытийную настройку пересоздать.
+  Два signed update с одинаковым `updated_on`, но разными head не
+  теряют новый head; `diagnostics:ping` без `repository.uuid` отвечает 400 без receipt.
+- Повторить доставку до и после перезапуска worker: на PR/head остаются один Run,
+  прежние inline markers, одна summary и один tenant-scoped status key. Проверить
+  pinned source/destination SHA на private fork, недоступном runtime-токену напрямую;
+  отдельный ограниченный отказ для недоступного fork допустим только тогда, когда API
+  репозитория назначения не может установить head источника. Повторная доставка или
+  рестарт не должны откатывать более новый Run того же head. После удаления fork
+  branch (`source.commit=null`) merge/decline не запускают ревью.
+  При ротации токена смена автора статуса должна дать явную ошибку владения, а не
+  сменить ключ. Проверить детерминированный ключ `AI-REVIEW-` + 30 hex (≤40 символов)
+  и portal Run URL на закреплённом head. После disconnect новые доставки/очередная
+  работа отклоняются, соседняя привязка продолжает работать.
+- Rename+edit сохраняет old/new пути и inline координаты. Сверить отсутствующий
+  diffstat, несколько страниц diffstat/commits, merge-base и закреплённый base SHA
+  после движения destination tip. Ретаргет или новый source head не публикует
+  устаревшее ревью; после ретаргета старый `INPROGRESS` становится `STOPPED` под тем
+  же ключом на закреплённом head, в том числе после начатой попытки. Отдельно
+  проверить draft toggle, skipped/failed → `STOPPED`, description, portal target URL,
+  merge checks и 403 при попытке записать status в недоступный source fork. Принятое
+  ограничение P3 №52: `INPROGRESS` на вытесненном старом head не меняется на `STOPPED`.
+- Раздельно записать число запросов, `X-RateLimit-*` и 429/`Retry-After` для
+  `/src/{commit}/` и `/src/{commit}/{path}`, а также для обязательных diff/blob и
+  необязательных context-чтений. Проверить, один бакет квот у listing/raw или разные,
+  и обе формы `Retry-After`: секунды и HTTP-date. Исчерпание context оставляет
+  diff-only ревью при доступных обязательных данных; полный бюджет даёт явный код
+  ошибки. Не создавать нагрузку ради искусственного 429 на общем репозитории.
+
+В таблице доказательств указать migration head и public API origin вместе с URL
+одноразового PR, UUID, deployed SHA, статусом/временем доставок, Run ID,
+счётчиками, координатами и санитизированной формой REST-пробы native
+suggestion; не сохранять токен, secret, signed payload или ciphertext. Публичные
+read-only UUID-пробы 2026-10-26 подтверждают лишь форму локатора; доступа к
+одноразовому приватному репозиторию и токену пока нет. Локальные
+MockTransport/PostgreSQL тесты не закрывают live gate.

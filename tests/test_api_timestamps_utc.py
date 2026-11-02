@@ -29,6 +29,7 @@ from app.modules.reviews.api.dtos import (
     ReviewCommentDto,
     RunActionDto,
     RunSessionDto,
+    RunUsageDto,
     UtcDatetime,
     _to_utc,
 )
@@ -45,6 +46,7 @@ def _json(dto: ApiDto) -> dict[str, Any]:
 
 def test_run_session_timestamps_are_serialized_in_utc() -> None:
     dto = RunSessionDto(
+        provider="github",
         id=ID,
         status="succeeded",
         engine="fast",
@@ -58,7 +60,10 @@ def test_run_session_timestamps_are_serialized_in_utc() -> None:
         model=None,
         action_count=0,
         summary_only=False,
+        usage=RunUsageDto(tokens_in=0, tokens_out=0, cost_usd=0.0),
+        triggered_by=None,
         pull_request=PullRequestDto(
+            provider="github",
             repo="org/repo",
             number=1,
             title="Title",

@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import Protocol
+from typing import Protocol, runtime_checkable
 from uuid import UUID
 
 from app.modules.reviews.application.check_runs import RunProviderCheckpoint
@@ -56,15 +56,23 @@ class PullRequestLocator:
     provider: str = "github"
     origin_provider_installation_id: UUID | None = None
     repository_external_id: int | None = None
+    repository_uuid: UUID | None = None
 
     def __post_init__(self) -> None:
-        if self.provider not in {"github", "gitlab"}:
+        if self.provider not in {"github", "gitlab", "bitbucket"}:
             raise ValueError("unsupported VCS provider")
         if self.provider == "gitlab":
             if self.origin_provider_installation_id is None:
                 raise ValueError("GitLab routing requires an immutable origin")
             if self.repository_external_id is None or self.repository_external_id <= 0:
                 raise ValueError("GitLab routing requires a positive project ID")
+        if self.provider == "bitbucket":
+            if type(self.origin_provider_installation_id) is not UUID:
+                raise ValueError("Bitbucket routing requires an immutable installation origin")
+            if self.repository_external_id is None or self.repository_external_id <= 0:
+                raise ValueError("Bitbucket routing requires a positive repository ID")
+            if type(self.repository_uuid) is not UUID:
+                raise ValueError("Bitbucket routing requires an immutable repository UUID")
 
 
 @dataclass(frozen=True)
@@ -130,6 +138,13 @@ class VcsProvider(Protocol):
     async def get_blob(
         self, locator: PullRequestLocator, sha: str, *, checkpoint: RunProviderCheckpoint
     ) -> bytes: ...
+
+
+@runtime_checkable
+class VcsStageVerifier(Protocol):
+    """A provider that rechecks mutable PR identity after pinned stage reads."""
+
+    async def verify_current(self, *, checkpoint: RunProviderCheckpoint) -> None: ...
 
 
 class VcsProviderSelector(Protocol):
@@ -216,7 +231,16 @@ class FetchVcsReviewInput:
                     except (RunCancelled, RequiredSourceUnavailable):
                         raise
                     except Exception as exc:
-                        if isinstance(exc, RunFailure) and exc.error_code == "deadline_exceeded":
+                        if (
+                            isinstance(exc, RunFailure)
+                            and exc.error_code
+                            in {
+                                "deadline_exceeded",
+                                "bitbucket_request_budget_exceeded",
+                                "bitbucket_response_budget_exceeded",
+                            }
+                            or (isinstance(exc, RunFailure) and exc.rate_limited)
+                        ):
                             raise
                         # Blob classification is best effort; retain this file as an omission.
                         _LOGGER.warning(
@@ -243,6 +267,8 @@ class FetchVcsReviewInput:
                 changed.append(parse_file_patch(file.filename, file.status, file.patch))
             else:
                 omitted.append(VcsFileOmission(file, reason))
+        if isinstance(self._provider, VcsStageVerifier):
+            await self._provider.verify_current(checkpoint=self._checkpoint)
         return FetchedVcsReviewInput(
             pull_request=pull_request,
             files=files,

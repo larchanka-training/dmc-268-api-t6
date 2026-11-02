@@ -5,8 +5,13 @@ Usage: uv run python review/scripts/eval_ab.py --run none=r1.json --run none=r2.
            --run valid=r3.json --run malicious=r4.json [--baseline none] [--markdown]
 
 Each ``--run LABEL=PATH`` names one report JSON written by ``eval_live.py --report-json``.
-Labels are free-form arm names, so another experiment can add its own arm (``rag``, #146);
-a label that is a recorded policy arm must match the arm the report was captured with.
+Labels are free-form arm names, so another experiment can add its own arm; a label that is
+a recorded policy arm must match the arm the report was captured with. A capture of the
+RAG corpus (#146) is labelled ``rag_off`` (recorded RAG arm ``none``) or ``rag_on``
+(``graph``), and those labels belong to no other capture. The RAG captures must also have
+been given the same input but the retrieved blocks: per case, one digest of the prompt with
+an empty RAG slot in every run of both arms, and no ``rag_on`` case whose retrieved blocks
+the gateway fitted away.
 All reports must share the model, prompt version, static-input digest and corpus digest,
 and the recorded engine, effective settings and fallback model; every capture must be
 publishable, and no report content may be given twice. Per arm the output gives each
@@ -30,7 +35,7 @@ from typing import Any
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from review.scripts.eval_replay import RECORDED_POLICY_ARMS  # noqa: E402
+from review.scripts.eval_replay import RAG_ARM_LABELS, RECORDED_POLICY_ARMS  # noqa: E402
 
 SAME_PROVENANCE = ("model_id", "prompt_version", "static_digest", "corpus_digest")
 SAME_RUN_METADATA = ("engine", "effective_settings", "fallback_model_id")
@@ -101,7 +106,93 @@ def _load(label: str, path: Path) -> tuple[dict[str, Any], str]:
         raise AbError(f"{path}: labelled {label} but captured with policy arm {recorded}")
     if publishable is not True:
         raise AbError(f"{path}: capture is not publishable; rerun the arm")
+    # After the publishable check: a case that never reached the provider has no evidence.
+    _check_rag_label(label, path, metadata)
     return report, hashlib.sha256(raw).hexdigest()
+
+
+def _rag_error(metadata: dict[str, Any], recorded: str) -> str | None:
+    """Why a RAG capture's evidence cannot be compared, or ``None``; the shape ``eval_replay``
+    already validated, but a report is only a file. ``trimmed`` and the arm's prompt are
+    derived fields, so they are checked against what they derive from."""
+    evidence = metadata.get("rag_evidence")
+    if not isinstance(evidence, dict):
+        return "run_metadata.rag_evidence must be an object"
+    for case_id, item in evidence.items():
+        if item is None:
+            return f"case {case_id} has no recorded evidence: no request was sent"
+        if not (
+            isinstance(item, dict)
+            and isinstance(item.get("prompt_digest"), str)
+            and isinstance(item.get("non_rag_prompt_digest"), str)
+            and isinstance(item.get("retrieved"), list)
+            and all(isinstance(block, dict) for block in item["retrieved"])
+            and isinstance(item.get("offline_retrieved_ids"), list)
+            and type(item.get("trimmed")) is bool
+        ):
+            return f"case {case_id} has malformed evidence"
+        sent = [block.get("block_id") for block in item["retrieved"]]
+        if item["trimmed"] != (sent != item["offline_retrieved_ids"]):
+            return f"the trimmed flag of case {case_id} contradicts its retrieved blocks"
+        if recorded == "none" and item["prompt_digest"] != item["non_rag_prompt_digest"]:
+            return f"the prompt of rag_off case {case_id} is not its non-RAG prompt"
+    return None
+
+
+def _check_rag_label(label: str, path: Path, metadata: dict[str, Any]) -> None:
+    """A RAG capture carries its arm's label and no other capture does."""
+    recorded = metadata.get("rag_arm")
+    if recorded is None:
+        if label in RAG_ARM_LABELS.values():
+            raise AbError(f"{path}: labelled {label} but captured without a RAG arm")
+        return
+    if not isinstance(recorded, str) or recorded not in RAG_ARM_LABELS:
+        raise AbError(f"{path}: unknown RAG arm {recorded}")
+    if label != RAG_ARM_LABELS[recorded]:
+        raise AbError(
+            f"{path}: captured with RAG arm {recorded}, so it is labelled "
+            f"{RAG_ARM_LABELS[recorded]}, not {label}"
+        )
+    reason = _rag_error(metadata, recorded)
+    if reason is None:
+        # rag_off sends no retrieved block; rag_on must not have had its blocks fitted away.
+        offending = sorted(
+            case_id
+            for case_id, item in metadata["rag_evidence"].items()
+            if (item["retrieved"] if recorded == "none" else item["trimmed"])
+        )
+        if offending:
+            reason = (
+                "arm rag_off sent retrieved blocks for "
+                if recorded == "none"
+                else "the retrieved blocks of the rag_on case were fitted away: "
+            ) + ", ".join(offending)
+    if reason is not None:
+        raise AbError(f"{path}: {reason}")
+
+
+def _check_rag_inputs(reports: list[tuple[str, Path, dict[str, Any]]]) -> None:
+    """Every RAG report covers the same cases, and each case was sent the same prompt but for
+    its retrieved blocks: one ``non_rag_prompt_digest`` over all runs of both arms."""
+    seen: dict[str, tuple[str, Path]] = {}
+    cases: tuple[set[str], Path] | None = None
+    for _, path, report in reports:
+        metadata = report["provenance"]["run_metadata"]
+        if "rag_arm" not in metadata:
+            continue
+        evidence = metadata["rag_evidence"]
+        if cases is None:
+            cases = (set(evidence), path)
+        elif set(evidence) != cases[0]:
+            raise AbError(f"{path}: covers other cases than {cases[1]}")
+        for case_id, item in evidence.items():
+            digest = item["non_rag_prompt_digest"]
+            if case_id in seen and seen[case_id][0] != digest:
+                raise AbError(
+                    f"{path}: case {case_id} was sent another non-RAG prompt than in "
+                    f"{seen[case_id][1]}"
+                )
+            seen.setdefault(case_id, (digest, path))
 
 
 def _is_count(value: object) -> bool:
@@ -153,6 +244,7 @@ def aggregate(runs: list[tuple[str, Path]], baseline: str | None = None) -> dict
             raise AbError(f"{path}: same report content as {seen[digest]}")
         seen[digest] = path
         reports.append((label, path, report))
+    _check_rag_inputs(reports)
     first = reports[0][2]["provenance"]
     for _, path, report in reports[1:]:
         for name in SAME_PROVENANCE:

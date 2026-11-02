@@ -426,92 +426,10 @@ Validated marker сохраняется в omission_reason через CHECK-ми
 reload проверяет durable поля и `previous_filename is None`; legacy missing_patch
 по SHA не повышается.
 
-Решения #213 по остальным случаям сохраняют блокировку clean рядом с кодом:
-доказанный pure rename/mode-only — unsupported_change/T; без no-text proof —
-missing_patch/incomplete, raw status и нулевые counters не доказывают тип.
-Удалённый binary без независимого proof остаётся missing_patch/incomplete;
-base/old blob не читается, расширение не доказательство. Blob >1 048 576 байт
-без предварительного независимого binary proof становится too_large до чтения:
-это известный проектный компромисс подтверждения binary при blob cap 1 MiB,
-а не универсальная публичная причина всех too_large. Prefix/range read и новый
-size-origin столбец не вводятся. Для этих четырёх случаев дополнительных
-tree/blob/compare-запросов нет; независимо доказанный binary остаётся E.
-При пустых/info findings mixed run имеет partial/null; фактические supported
-critical/high либо medium/low сохраняют blocking/attention при partial.
-
-Канонические тексты причин #213 для summary/body/check-run (без завершающей
-точки; оформление сводки может добавить счётчик, разделитель и точку):
-
-| Случай | Полный текст причины |
-| --- | --- |
-| Доказанный pure rename, unsupported_change | Семантика переноса файла (включая импорты) не анализируется |
-| Rename без no-text proof, missing_patch | Отсутствующий patch не подтверждает неизменность содержимого переноса |
-| Доказанный mode-only, unsupported_change | Изменения прав доступа/типа файла не анализируются |
-| Mode-change metadata без mode-only proof, missing_patch | Отсутствующий patch не подтверждает изменение только прав доступа/типа файла |
-| Удаление без независимого binary proof | Удалённое содержимое недоступно для подтверждения binary |
-| too_large без сохранённого точного источника лимита | Превышен лимит размера, содержимое не проверено |
-| Квалифицированный кандидат empty-added без принятого ordinary-file proof | Нет подтверждения обычного пустого файла |
-| Фактически отправленный changed patch опущен или усечён, review_input_incomplete | модель получила не весь patch |
-| Технический drop unknown_path | не удалось сопоставить замечание с доступным diff |
-
-Общие тексты причин (точные значения `REASON_TEXT`; специализированные случаи
-выше имеют приоритет, счётчики и завершающая точка добавляются при оформлении):
-
-| Код | Общий текст причины |
-| --- | --- |
-| classification_unavailable | нет достоверного сохранённого покрытия |
-| diff_inventory_incomplete | список изменённых файлов неполон |
-| missing_patch | Отсутствует подтверждённый patch |
-| unsupported_change | семантика изменения метаданных не анализируется |
-| too_large | Превышен лимит размера, содержимое не проверено |
-| unsupported_path | неподдерживаемый путь |
-| identity_unresolved | не установлена идентичность файла |
-| patch_truncated | patch неполон |
-| patch_malformed | patch повреждён |
-| patch_unsupported | формат patch не поддерживается |
-| summary_only | краткий обзор без проверки всех строк |
-| review_input_incomplete | модель получила не весь patch |
-| unknown_path | не удалось сопоставить замечание с доступным diff |
-
-Метки оформления сводки и списка причин (не коды причин):
-
-| Условие | Точная метка |
-| --- | --- |
-| coverage=partial | Проверка неполная |
-| coverage=none | Текстовые изменения не проверены |
-| Остаток причин после пяти отображённых, n — их количество | Ещё причин: {n} |
-| Строчная метка verdict при partial без supported риска | проверка неполная |
-| summary.done_well; reviewed_files — проверенные текстовые файлы, excluded_files — сумма exclusions | Проанализировано файлов с текстовыми изменениями: {reviewed_files}; исключено файлов: {excluded_files}. |
-| Число проверенных текстовых файлов в partial/none overview | **Проверено файлов с текстовыми изменениями:** {reviewed_files} |
-| summary.problem при наличии findings; n — число оставшихся findings | Подтверждено замечаний: {n} |
-| Строка coverage в partial/none overview; summary_problem включает точку | **Coverage:** {status} — {summary_problem} |
-
-Текст «Нет подтверждения обычного пустого файла» выбирается только по
-доверенным backend-фактам квалифицированного кандидата: поддерживаемый
-канонический путь, status=added, `previous_filename is None` (логический
-`old_path=null`), additions=deletions=changes=0, точный Git empty-blob SHA и
-size=None/0. Исходный patch равен None или пустой строке; при reload допустима
-также точная сохранённая пустая обёртка `diff --git` / `---` / `+++` того же пути
-без иных строк. При этом принятого ordinary-file proof нет. Один added, пустые
-counters либо raw metadata_only недостаточны. Предыдущий путь, неподдерживаемый
-путь, неизвестные/ненулевые counters, неверный/неизвестный SHA, конфликт размера
-или иной patch не получают empty-текст: действует соответствующая общая причина,
-для обычного added без patch — «Отсутствует подтверждённый patch».
-У GitLab в этом потоке нет независимого tree-доказательства обычного файла:
-пустое добавление остаётся `missing_patch`/partial, даже при empty SHA и size=0.
-Квалификация переносится из durable фактов, не из model JSON. Новые сохранённые
-coverage с более чем 20 причинами могут содержать внутренний optional
-`reason_variant_counts`: не более шести фиксированных семантических ключей и
-числа, без путей. Это сохраняет канонический текст за окном первых 20
-диагностических путей без раскрытия новых имён. Restore проверяет суммы по
-reason_counts и доверенную snapshot capacity; legacy без агрегата не получает
-выдуманной квалификации за окном. Поле не добавляется в публичный DTO/LLM schema.
-Отсутствие proof не утверждает, что файл действительно обычный и пустой.
-Для исключения E=empty_file нужен независимый полный nontruncated tree на
-закреплённом head: уникальное точное совпадение path+SHA, type=blob,
-mode=100644/100755 и size=None/0; предел ответа — 1 500 000 сырых байт.
-Для too_large снимок не хранит источник лимита (blob bytes, patch bytes или
-строки), поэтому публичный текст нейтрален и не приписывает всем случаям binary/1 MiB.
+Решения #213 по остальным случаям — канон в [CVS §2.2](CONTEXT_AND_VERIFICATION_SPEC.md#22-порядок-операций);
+тексты причин #213 для summary/body/check-run, общие тексты `REASON_TEXT`, метки сводки, квалификация
+empty-added (в т.ч. GitLab без tree-proof), `reason_variant_counts`, условия tree-proof E=`empty_file`
+и нейтральный текст too_large — канон в [PIPELINE_SPEC §2](PIPELINE_SPEC.md#2-фазы-внутри-running-и-трейс-run_actions); здесь не дублируются.
 
 
 
@@ -660,7 +578,7 @@ readability — согласованность имён, архитектурн�
 но не навязывают стек любому репозиторию.
 
 Отступление как построено (решение техлида 26.10.2026, #130 F2; Q1 в
-`docs/plans/130-snapshot-switch-plan.md`):
+[`130-snapshot-switch-plan.md`](https://github.com/larchanka-training/dmc-268-api-t6/blob/f1c1b9587f4edaecf784eefd5a0aed79488ec7fa/docs/plans/130-snapshot-switch-plan.md)):
 `review.system.v4` оставляет порядок анализа v3 (security → correctness →
 performance → readability) в system message, и finding по этим стандартным
 критериям получает `rule_name: null`. `<service_defaults>` рендерит наборы правил
@@ -921,25 +839,26 @@ format_version, не догадкой по структуре. Новый combin
 закреплённые версии/профили §7.1. Raw bytes сохраняются для воспроизводимости;
 в prompt передаётся нормализованный документ целиком, включая `review-ignore`.
 
-**Инженер 4 (#219)** предоставляет контракт и значения `prompt_bindings` и
-`execution_profile` для закрепления при создании run по §7.2: immutable
-ID/checksum промптов, версии моделей и профилей. Их хранение и миграции реализует
-инженер 3 по §7.1; инженер 4 не дописывает версии в готовый snapshot.
+Контракт и значения `prompt_bindings` и `execution_profile` закрепляются при
+создании run по §7.2: immutable ID/checksum промптов, версии моделей и профилей.
+Их хранение и миграции описаны в §7.1; LLM-пайплайн не дописывает версии в готовый
+snapshot.
 Как построено: prompt bindings закрепляются при создании run — `runs.prompt_version_id`
 и, с #130 D (миграция 0039), `runs.conventions_prompt_version_id` и
 `runs.verifier_prompt_version_id`; execution profile фиксирует первый сохранённый
 snapshot (принятое отклонение, §7.2).
 
-Инженер 4 использует готовый snapshot без повторной загрузки VCS и
-разбора `review-ignore`. Он реализует безопасный prompt envelope, атрибуцию и
-обязательный verifier по §8 и связанной спецификации. Смысл требований и их
+LLM-пайплайн (сборка промпта ревью, gateway и `ReflectionPass`) использует готовый
+snapshot без повторной загрузки VCS и разбора `review-ignore`. В нём реализованы
+безопасный prompt envelope, атрибуция и обязательный verifier по §8 и связанной
+спецификации. Смысл требований и их
 применимость определяют reviewer/verifier; backend проверяет структуру ответа
 и ссылки на исходные строки. Самостоятельные IDs для Markdown-пунктов не вводятся.
 
-Лимиты и профили §3.3 общие для загрузчика и LLM-пайплайна. Инженер 4 предоставляет
-версионированные renderer/counter для проверки rendered policy загрузчиком и
-отвечает за окончательную проверку бюджета, pre-send guard и manifest после
-финального rendering каждого вызова, включая repair/fallback. Готовый snapshot
+Лимиты и профили §3.3 общие для загрузчика и LLM-пайплайна. LLM-пайплайн
+предоставляет версионированные renderer/counter для проверки rendered policy
+загрузчиком; окончательную проверку бюджета, pre-send guard и manifest после
+финального rendering каждого вызова, включая repair/fallback, выполняет gateway. Готовый snapshot
 не заменяет эти проверки и не содержит одного универсального manifest для всех
 вызовов. Неготовый или невалидный snapshot не допускается к LLM.
 
@@ -1370,9 +1289,9 @@ snapshot (§5, итог дефолтов и файла для прогона) в
 | Только incomplete с возможными E/T, нет текста, полный inventory/known counters ≤3 000 | Backend partial, findings=[], verdict=null, summaryOnly=false; 0 LLM включая conventions/verifier, затем succeeded/neutral; pins/count=0 сохранены (CVS §2.2). Пока маршрута no-text partial нет, этот набор публикуется как summary-only `no_reviewable_files`, coverage partial, 0 LLM |
 | Пустой added с полным proof CVS §9.2, mode 100644/100755; отдельно рядом с кодом | empty_file/E: skipped при E-only; complete/clean при полном ревью кода без supported warning/error |
 | Квалифицированный empty candidate (§5.1) без независимого regular-file proof: отсутствующий/неверный mode либо недоступный/неполный tree | missing_patch/incomplete, partial/null с кодом; «Нет подтверждения обычного пустого файла» только при сохранении всех условий квалификации |
-| Added с previous_filename/old path либо иным нарушением квалификации; removed image без binary proof; oversized непрочитанный blob | Не empty_file/E; соответствующая incomplete/technical причина, too_large/T для последнего; partial/null с кодом, полные тексты §5.1; обычный added missing patch не получает empty-текст |
+| Added с previous_filename/old path либо иным нарушением квалификации; removed image без binary proof; oversized непрочитанный blob | Не empty_file/E; соответствующая incomplete/technical причина, too_large/T для последнего; partial/null с кодом, полные тексты ([PIPELINE_SPEC §2](PIPELINE_SPEC.md#2-фазы-внутри-running-и-трейс-run_actions)); обычный added missing patch не получает empty-текст |
 | Tree response 1 500 000 / 1 500 001 байт; duplicate/mismatch/truncated/wrong revision; symlink/gitlink; retry marker | Только bounded valid exact pinned-head proof разрешает empty_file/E; остальные incomplete; не более одного metadata request, marker после reload проверяется |
-| Доказанный pure rename/mode-only рядом с кодом | T препятствует clean: partial/null с соответствующим полным текстом §5.1; raw metadata-only без proof — incomplete (CVS §2.2) |
+| Доказанный pure rename/mode-only рядом с кодом | T препятствует clean: partial/null с соответствующим полным текстом ([PIPELINE_SPEC §2](PIPELINE_SPEC.md#2-фазы-внутри-running-и-трейс-run_actions)); raw metadata-only без proof — incomplete (CVS §2.2) |
 | Достоверный ignored anchor без manifest; неизвестный mask-matching путь; allowed anchor с ignored evidence | ignored_file до видимости без самостоятельного partial; unknown_path/identity error с partial; evidence_source_disallowed с partial; guards сохраняются |
 | Rename/copy с одной недопустимой стороной и допустимым новым alias | Всё изменение и новый alias изолированы, в том числе от импортов/AST/conventions/repair/fallback/метаданных |
 | Нельзя доказать изоляцию источника; нарушена целостность snapshot; запрещённый источник дошёл до guard | Failed; в последнем случае policy_context_violation до отправки, без продолжения с утечкой |

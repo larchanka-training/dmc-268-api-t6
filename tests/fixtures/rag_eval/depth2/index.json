@@ -1,0 +1,83 @@
+{
+  "schema_version": 1,
+  "indexed_commit_sha": "7b0ac7d12a30f563cdf62880d742811c5825d700",
+  "extractor": {
+    "limits_version": "limits/v1:fdf4e4d96f1a13a708d0af7b941297dc",
+    "parser_profile": "39409961245fa4d8e7284fe26c974a79dea7225e088d7bdbbd17c83384e1271a",
+    "exclusions_version": "index-exclusions/v2"
+  },
+  "file_count": 5,
+  "symbol_count": 6,
+  "files": [
+    {
+      "path": "pkg/__init__.py",
+      "blob_sha": "72445f66e64770de062898a91cf1a02987277295"
+    },
+    {
+      "path": "pkg/api.py",
+      "blob_sha": "07c3c46a43c1cb598f898befd56a4cc8468abbd6"
+    },
+    {
+      "path": "pkg/cli.py",
+      "blob_sha": "c22dabc8aa10ef0c944ba11d5657662605579b10"
+    },
+    {
+      "path": "pkg/models.py",
+      "blob_sha": "f084b4dd35d3971d1b030432d110de5c5135901d"
+    },
+    {
+      "path": "pkg/store.py",
+      "blob_sha": "435714630373c36e89e840c426e1876aa5d582a9"
+    }
+  ],
+  "edges": [
+    {
+      "path": "pkg/api.py",
+      "kind": "imports",
+      "target_path": "pkg/models.py",
+      "target_name": ""
+    },
+    {
+      "path": "pkg/api.py",
+      "kind": "imports",
+      "target_path": "pkg/store.py",
+      "target_name": ""
+    },
+    {
+      "path": "pkg/api.py",
+      "kind": "uses_imported",
+      "target_path": "pkg/models.py",
+      "target_name": "Item"
+    },
+    {
+      "path": "pkg/api.py",
+      "kind": "uses_imported",
+      "target_path": "pkg/store.py",
+      "target_name": "save"
+    },
+    {
+      "path": "pkg/cli.py",
+      "kind": "imports",
+      "target_path": "pkg/api.py",
+      "target_name": ""
+    },
+    {
+      "path": "pkg/cli.py",
+      "kind": "uses_imported",
+      "target_path": "pkg/api.py",
+      "target_name": "create"
+    },
+    {
+      "path": "pkg/store.py",
+      "kind": "imports",
+      "target_path": "pkg/models.py",
+      "target_name": ""
+    },
+    {
+      "path": "pkg/store.py",
+      "kind": "uses_imported",
+      "target_path": "pkg/models.py",
+      "target_name": "Item"
+    }
+  ]
+}

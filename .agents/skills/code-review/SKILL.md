@@ -46,7 +46,7 @@ Look for the originating spec, in this order:
 
 1. A path the user passed as an argument.
 2. Issue references in the commit messages (`#123`, `Closes #45`, etc.) — fetch via `gh issue view <n> --json title,body,comments`. If the commits reference several distinct issues, fetch all of them and name each in the Spec prompt.
-3. A PRD/spec file under `docs/` (including `docs/plans/`) or `specs/` matching the branch name or feature.
+3. A PRD/spec file under `docs/` or `specs/` matching the branch name or feature. A plan under `docs/plans/` counts too, but it is a local, uncommitted working file: read it only if it exists on this machine; its absence from the diff or the repository is neither a finding nor a sign that there is no spec.
 4. If nothing is found, ask the user where the spec is. If they say there isn't one, the **Spec** sub-agent will skip and report "no spec available".
 
 ### 3. Identify the standards sources

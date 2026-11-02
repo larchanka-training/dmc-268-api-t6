@@ -1,0 +1,21 @@
+{
+  "AC1": {
+    "status": "done",
+    "evidence": "PR #901, тест `test_health_returns_version`"
+  },
+  "AC2": {
+    "status": "done",
+    "evidence": "PR #902, тест `test_repeated_idempotency_key_is_rejected`"
+  },
+  "AC3": {
+    "status": "not_done"
+  },
+  "DoD1": {
+    "status": "done",
+    "evidence": "CI зелёный на голове PR #901 и PR #902"
+  },
+  "DoD2": {
+    "status": "done",
+    "evidence": "approve на голове PR #901 и PR #902, треды закрыты"
+  }
+}

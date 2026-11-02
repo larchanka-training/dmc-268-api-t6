@@ -624,7 +624,7 @@ class BuildReviewContext:
                     omissions.append(ContextOmission("budget", path))
         if truncated:
             return payload(
-                ContextStatus.REVIEW, None, tuple(blocks), stats=RagStats(reason="budget")
+                ContextStatus.REVIEW, "budget", tuple(blocks), stats=RagStats(reason="budget")
             )
 
         try:
@@ -639,7 +639,10 @@ class BuildReviewContext:
             )
             omissions.append(ContextOmission("tree_unavailable"))
             return payload(
-                ContextStatus.REVIEW, None, tuple(blocks), stats=RagStats(reason="tree_unavailable")
+                ContextStatus.REVIEW,
+                "tree_unavailable",
+                tuple(blocks),
+                stats=RagStats(reason="tree_unavailable"),
             )
         files = _Files(
             tree=tree, source=self._source, parser=self._parser, cache=self._cache, denied=denied

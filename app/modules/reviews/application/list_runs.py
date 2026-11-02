@@ -5,12 +5,15 @@ from __future__ import annotations
 import base64
 import binascii
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Protocol
+from decimal import Decimal
+from typing import Literal, Protocol
 from uuid import UUID
 
 from app.modules.reviews.application.run_trigger import RunTrigger
+
+type RunProvider = Literal["github", "gitlab", "bitbucket"]
 
 
 @dataclass(frozen=True)
@@ -44,6 +47,13 @@ class RunCursor:
 
 
 @dataclass(frozen=True)
+class RunUsage:
+    tokens_in: int = 0
+    tokens_out: int = 0
+    cost_usd: Decimal = Decimal(0)
+
+
+@dataclass(frozen=True)
 class RunListItem:
     id: UUID
     status: str
@@ -62,7 +72,10 @@ class RunListItem:
     head_sha: str
     created_at: datetime
     trigger: RunTrigger
+    provider: RunProvider
     summary_only: bool = False
+    usage: RunUsage = field(default_factory=RunUsage)
+    triggered_by: str | None = None
 
 
 @dataclass(frozen=True)

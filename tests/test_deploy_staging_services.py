@@ -44,6 +44,7 @@ STOPPED_BEFORE_SWITCH = (
 # GitHub rejects secret names starting with GITHUB_, so the App secrets are GH_* in the
 # Environment (comment of the tech lead in #35); the container keeps the names of .env.example.
 SECRET_SOURCES = {
+    "BITBUCKET_CREDENTIAL_KEYS": "BITBUCKET_CREDENTIAL_KEYS",
     "GITHUB_APP_ID": "GH_APP_ID",
     "GITHUB_APP_PRIVATE_KEY": "GH_APP_PRIVATE_KEY",
     "GITHUB_WEBHOOK_SECRET": "GH_WEBHOOK_SECRET",
@@ -60,6 +61,8 @@ SECRET_SOURCES = {
 # Environment variable of the same name overrides them), the portal URL is an Environment
 # variable, and the endpoint of the LLM gateway is an organization variable.
 VARIABLE_SOURCES = {
+    "BITBUCKET_ACTIVE_KEY_ID": "BITBUCKET_ACTIVE_KEY_ID",
+    "BITBUCKET_WEBHOOK_BASE_URL": "BITBUCKET_WEBHOOK_BASE_URL",
     "GITHUB_APP_BOT_LOGIN": "GH_APP_BOT_LOGIN",
     "PORTAL_URL": "PORTAL_URL",
     "LLM_BASE_URL": "AI_DMC268_URL",
@@ -75,6 +78,10 @@ VARIABLE_SOURCES = {
 # One env file per set of recipients (docs/SECRETS.md); its bash array in env-file.sh.
 ENV_FILES = {
     "app.env": ("APP_ENV_KEYS", {"GITHUB_APP_ID", "GITHUB_APP_PRIVATE_KEY"}),  # both workers
+    "bitbucket.env": (
+        "BITBUCKET_ENV_KEYS",
+        {"BITBUCKET_CREDENTIAL_KEYS", "BITBUCKET_ACTIVE_KEY_ID"},
+    ),
     "api.env": (
         "API_ENV_KEYS",
         {
@@ -84,6 +91,7 @@ ENV_FILES = {
             "AUTH_JWT_PRIVATE_KEY",
             "AUTH_JWT_PUBLIC_KEY",
             "GITLAB_WEBHOOK_INTAKE_ENABLED",
+            "BITBUCKET_WEBHOOK_BASE_URL",
         },
     ),
     "worker.env": (
@@ -114,6 +122,9 @@ BUNDLED = {**SECRET_SOURCES, **VARIABLE_SOURCES}
 # Multi-line like a PEM, with what a shell or Compose could rewrite: $, ${...} and backslashes.
 FAKE_PEM = "-----BEGIN TEST KEY-----\nAAAA$HOME/${PATH}\nBB\\nBB\\\\CC\n-----END TEST KEY-----"
 CI_SECRETS = {
+    "BITBUCKET_CREDENTIAL_KEYS": '{"test-key":"' + base64.b64encode(b"b" * 32).decode() + '"}',
+    "BITBUCKET_ACTIVE_KEY_ID": "test-key",
+    "BITBUCKET_WEBHOOK_BASE_URL": "https://staging-api.example.test",
     "GITHUB_APP_ID": "424242",
     "GITHUB_APP_PRIVATE_KEY": FAKE_PEM,
     "GITHUB_WEBHOOK_SECRET": "",  # not set in the Environment: GitHub yields an empty string
@@ -242,7 +253,7 @@ case "$1" in
         printf '%s\\n' "${IMAGE:-}" > "${STUB_UP_IMAGE}"
         # Like Compose: env_file paths resolve against the directory of the first compose file.
         # Every file must exist: deploy and rollback keep each role's file in place.
-        for name in app.env api.env worker.env webhook-worker.env gitlab.env; do
+        for name in app.env api.env worker.env webhook-worker.env gitlab.env bitbucket.env; do
           [[ -f "${project_dir}/${name}" ]] || { echo "env file ${name} not found" >&2; exit 1; }
         done
         if grep -qxF "IMAGE=${STUB_FAILING_IMAGE:-}" "${env_file}"; then
@@ -266,6 +277,10 @@ case "$1" in
         uv run python "${STUB_EXEC_HELPER}" "${action_args[@]}"
         ;;
       down) exit "${STUB_DOWN_STATUS:-0}" ;;
+      ps)
+        [[ -z "${STUB_PS_OUTPUT:-}" ]] || printf '%s\\n' "${STUB_PS_OUTPUT}"
+        exit "${STUB_PS_STATUS:-0}"
+        ;;
     esac
     ;;
 esac
@@ -365,13 +380,17 @@ def _mode(path: Path) -> int:
 
 @dataclass(frozen=True)
 class Host:
-    """A fake staging host: APP_DIR with the uploaded deploy files and a fake docker on PATH."""
+    """A fake host: APP_DIR with the uploaded deploy files and a fake docker on PATH.
+
+    The basename of APP_DIR is the compose project, as on the course VPS.
+    """
 
     app_dir: Path
     bin_dir: Path
     volumes: Path
     log: Path
     tmp: Path
+    project: str = PROJECT
 
     @property
     def env_file(self) -> Path:
@@ -384,7 +403,7 @@ class Host:
         return self.log.read_text(encoding="utf-8").splitlines() if self.log.exists() else []
 
     def add_volume(self, name: str) -> None:
-        (self.volumes / f"{PROJECT}_{name}").touch()
+        (self.volumes / f"{self.project}_{name}").touch()
 
     def run(
         self, script: str, *args: str, env: Mapping[str, str] | None = None
@@ -442,9 +461,8 @@ class Host:
         return self.run("deploy.sh", image, env={**ci_env, **(env or {})})
 
 
-@pytest.fixture
-def host(tmp_path: Path) -> Host:
-    app_dir = tmp_path / "opt" / PROJECT
+def make_host(tmp_path: Path, project: str = PROJECT) -> Host:
+    app_dir = tmp_path / "opt" / project
     app_dir.mkdir(parents=True)
     # The same renames as the "Prepare host" step.
     shutil.copy(STAGING_COMPOSE, app_dir / "compose.yml")
@@ -473,8 +491,18 @@ def host(tmp_path: Path) -> Host:
         )
     )
     return Host(
-        app_dir=app_dir, bin_dir=bin_dir, volumes=volumes, log=tmp_path / "docker.log", tmp=tmp
+        app_dir=app_dir,
+        bin_dir=bin_dir,
+        volumes=volumes,
+        log=tmp_path / "docker.log",
+        tmp=tmp,
+        project=project,
     )
+
+
+@pytest.fixture
+def host(tmp_path: Path) -> Host:
+    return make_host(tmp_path)
 
 
 def _ci_auto_rollback(
@@ -779,7 +807,7 @@ def test_manual_rollback_failure_keeps_followup_and_promotion_success_gated() ->
     assert "    if: github.ref == 'refs/heads/main'" in workflow
     assert "    needs: rollback" in workflow.split("  promote-staging:", 1)[1]
     assert "format('rollback-ignored-{0}', github.run_id)" in workflow
-    assert "  cancel-in-progress: false" in workflow
+    assert "  cancel-in-progress: false\n  queue: max\n" in workflow
 
 
 def _release_unchanged_literal() -> str:
@@ -951,7 +979,7 @@ def test_empty_value_in_the_bundle_is_left_out(host: Host) -> None:
     assert host.deploy(IMAGE_A, bundle=bundle).returncode == 0
 
     assert _read_env_file(host.app_dir / "app.env") == {"GITHUB_APP_ID": "7"}
-    for name in ("api.env", "worker.env", "webhook-worker.env"):
+    for name in ("api.env", "worker.env", "webhook-worker.env", "bitbucket.env"):
         assert _read_env_file(host.app_dir / name) == {}
 
 
@@ -1575,7 +1603,7 @@ def test_rollback_without_a_release_stops_the_stack_by_project_name(host: Host, 
 
     assert result.returncode == 0, result.stderr
     calls = host.calls()
-    down = calls.index(f"compose -p {PROJECT} down --remove-orphans")
+    down = calls.index(f"compose -p {host.project} down --remove-orphans")
     started = next(i for i, call in enumerate(calls) if call.startswith("run -d --name"))
     assert down < started
     assert "--network-alias api-staging" in calls[started]
@@ -1642,7 +1670,10 @@ def test_api_gets_only_its_own_env_file() -> None:
     env_files = api[api.index("    env_file:\n") : api.index("    environment:\n")]
 
     # The API reads no GitHub App credentials: app.env belongs to the workers.
-    assert re.findall(r"^      - (\S+)$", env_files, re.MULTILINE) == ["api.env"]
+    assert re.findall(r"^      - (\S+)$", env_files, re.MULTILINE) == [
+        "api.env",
+        "bitbucket.env",
+    ]
     assert "GITHUB_" not in api
     assert "AUTH_JWT_PRIVATE_KEY" not in api
 
@@ -1660,14 +1691,14 @@ def _list_under(block: str, key: str) -> list[str]:
         (
             "worker",
             "app.worker",
-            ["app.env", "gitlab.env", "worker.env"],
+            ["app.env", "gitlab.env", "worker.env", "bitbucket.env"],
             ["bootstrap", "postgres", "rabbitmq"],
         ),
         # The projection creates Runs and publishes them to the review queue (#52).
         (
             "webhook-worker",
             "app.webhook_worker",
-            ["app.env", "gitlab.env", "webhook-worker.env"],
+            ["app.env", "gitlab.env", "webhook-worker.env", "bitbucket.env"],
             ["bootstrap", "postgres", "rabbitmq"],
         ),
     ],
@@ -3022,7 +3053,8 @@ def test_host_stages_recipient_files_on_destination_filesystem(host: Host) -> No
     )
     assert result.returncode == 0, result.stderr
     paths = [Path(value) for value in sources.read_text().splitlines()]
-    assert len(paths) == 5
+    assert len(paths) == len(ENV_FILES)
+    assert {path.name for path in paths} == set(ENV_FILES)
     assert all(
         path.parent.parent == host.app_dir and path.parent.name.startswith(".stage.")
         for path in paths

@@ -16,6 +16,8 @@ from uuid import UUID
 
 import pytest
 
+from app.bootstrap.reviews_api import get_repository_settings
+from app.main import app
 from app.modules.code_index.domain.enums import PurgeReason, RagIndexStatus
 from app.modules.code_index.domain.rag_index import RagIndex
 from app.modules.repositories.application.repository_settings import (
@@ -23,9 +25,11 @@ from app.modules.repositories.application.repository_settings import (
     RepositorySettingsChange,
     UpdateRepository,
 )
+from tests.portal_test_client import authenticated_test_client
 
 REPOSITORY_ID = UUID("00000000-0000-4000-8000-0000000000a2")
 UPDATED = RepositorySettings(
+    provider="github",
     id=REPOSITORY_ID,
     full_name="octo/repo",
     url="https://github.com/octo/repo",
@@ -53,6 +57,7 @@ class FakeRepositories:
     found: bool = True
     # The effective `rag_enabled` the update reads back: the toggle AND the installation.
     rag_in_effect: bool = False
+    provider: str = "github"
     calls: list[str] = field(default_factory=list)
 
     @property
@@ -72,7 +77,7 @@ class FakeRepositories:
 
     async def get_repository(self, repository_id: UUID) -> RepositorySettings | None:
         self.calls.append(f"get {repository_id == REPOSITORY_ID}")
-        return REREAD
+        return replace(REREAD, provider=self.provider) if self.found else None
 
     async def update_repository(
         self, repository_id: UUID, change: RepositorySettingsChange
@@ -80,7 +85,7 @@ class FakeRepositories:
         self.calls.append(f"update {repository_id == REPOSITORY_ID}")
         if not self.found:
             return None
-        return replace(UPDATED, rag_enabled=self.rag_in_effect)
+        return replace(UPDATED, rag_enabled=self.rag_in_effect, provider=self.provider)
 
     async def purge(self, repository_id: UUID, reason: PurgeReason) -> None:
         self.calls.append(f"purge {repository_id == REPOSITORY_ID} {reason}")
@@ -155,3 +160,90 @@ def test_a_missing_repository_is_neither_purged_nor_committed() -> None:
 
     assert fake.calls == ["update True"]
     assert item is None
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        RepositorySettingsChange(wait_for_ci="auto"),
+        RepositorySettingsChange(wait_for_ci="always"),
+        RepositorySettingsChange(review_event="REQUEST_CHANGES"),
+    ],
+    ids=["ci-auto", "ci-always", "request-changes"],
+)
+def test_bitbucket_rejects_settings_it_cannot_honor_before_writing(
+    change: RepositorySettingsChange,
+) -> None:
+    fake = FakeRepositories(provider="bitbucket")
+
+    with pytest.raises(ValueError, match="bitbucket_.*_unsupported"):
+        _execute(fake, change)
+
+    assert fake.calls == ["get True"]
+
+
+@pytest.mark.parametrize("provider", ["github", "gitlab"])
+def test_other_providers_keep_ci_and_review_event_settings(provider: str) -> None:
+    fake = FakeRepositories(provider=provider)
+
+    item = _execute(
+        fake,
+        RepositorySettingsChange(wait_for_ci="always", review_event="REQUEST_CHANGES"),
+    )
+
+    assert item is not None and item.provider == provider
+    assert fake.calls == ["get True", "update True", "commit"]
+
+
+def test_unsupported_setting_on_missing_repository_does_not_expose_provider() -> None:
+    fake = FakeRepositories(found=False)
+
+    item = _execute(fake, RepositorySettingsChange(wait_for_ci="auto"))
+
+    assert item is None
+    assert fake.calls == ["get True"]
+
+
+@pytest.mark.parametrize(
+    ("body", "field", "code"),
+    [
+        ({"waitForCi": "auto"}, "waitForCi", "bitbucket_wait_for_ci_unsupported"),
+        ({"waitForCi": "always"}, "waitForCi", "bitbucket_wait_for_ci_unsupported"),
+        (
+            {"reviewEvent": "REQUEST_CHANGES"},
+            "reviewEvent",
+            "bitbucket_review_event_unsupported",
+        ),
+    ],
+)
+def test_patch_bitbucket_rejects_unsupported_settings_with_422(
+    body: dict[str, str], field: str, code: str
+) -> None:
+    fake = FakeRepositories(provider="bitbucket")
+    app.dependency_overrides[get_repository_settings] = lambda: lambda: fake
+    try:
+        response = authenticated_test_client(app).patch(f"/api/repos/{REPOSITORY_ID}", json=body)
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 422
+    assert response.json() == {
+        "detail": [{"loc": ["body", field], "msg": code, "type": "value_error"}]
+    }
+    assert fake.calls == ["get True"]
+
+
+@pytest.mark.parametrize("provider", ["github", "gitlab"])
+def test_patch_other_providers_keeps_existing_review_settings(provider: str) -> None:
+    fake = FakeRepositories(provider=provider)
+    app.dependency_overrides[get_repository_settings] = lambda: lambda: fake
+    try:
+        response = authenticated_test_client(app).patch(
+            f"/api/repos/{REPOSITORY_ID}",
+            json={"waitForCi": "always", "reviewEvent": "REQUEST_CHANGES"},
+        )
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    assert fake.calls == ["get True", "update True", "commit"]

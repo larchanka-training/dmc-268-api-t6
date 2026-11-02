@@ -15,6 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from app.common.infrastructure.db.enums import CodeChangeState, Engine, RunState
 from app.common.infrastructure.db.unit_of_work import SqlAlchemyUnitOfWork
 from app.modules.analytics.infrastructure.models import UsageEvent
+from app.modules.integrations.bitbucket.infrastructure.models import BitbucketRunOrigin
 from app.modules.integrations.gitlab.infrastructure.request_credentials import (
     active_gitlab_target_metadata,
 )
@@ -44,6 +45,7 @@ from app.modules.reviews.application.verdict import (
     review_event,
     severity_counts,
 )
+from app.modules.reviews.infrastructure.bitbucket_run_origin import active_bitbucket_run_origin
 from app.modules.reviews.infrastructure.models import (
     CodeChange,
     CodeChangeDiff,
@@ -109,8 +111,32 @@ def _pointer_rows() -> Select[tuple[Run, CodeChange, Repository, ProviderInstall
                     ProviderInstallation.provider == "gitlab",
                     gitlab.c.origin_provider_installation_id.is_not(None),
                 ),
+                and_(
+                    ProviderInstallation.provider == "bitbucket",
+                    active_bitbucket_run_origin(),
+                ),
             )
         )
+    )
+
+
+async def _origin_active(
+    session: AsyncSession,
+    run: Run,
+    repository: Repository,
+    installation: ProviderInstallation,
+) -> bool:
+    if not origin_active(run, repository, installation):
+        return False
+    if installation.provider != "bitbucket":
+        return True
+    return (
+        await session.scalar(
+            _joined(provider=True)
+            .with_only_columns(Run.id)
+            .where(Run.id == run.id, active_bitbucket_run_origin())
+        )
+        is not None
     )
 
 
@@ -216,7 +242,7 @@ class SqlAlchemyRunLifecycleStore:
             pr_head_sha=pr.head_sha,
             pr_open=pr.state == CodeChangeState.OPEN,
             repository_enabled=repository.enabled,
-            origin_active=origin_active(run, repository, installation),
+            origin_active=await _origin_active(self._session, run, repository, installation),
             daily_budget_usd=Decimal(daily_budget),
             spent_today_usd=Decimal(spent or 0),
             engine=run.engine.value,
@@ -296,7 +322,7 @@ class SqlAlchemyRunLifecycleStore:
             )
             if reason is not None:
                 state, error_code, error_message = "cancelled", reason, None
-        if not origin_active(row[0], row[2], row[3]):
+        if not await _origin_active(self._session, row[0], row[2], row[3]):
             state, error_code, error_message = (
                 "cancelled",
                 cancellation_reason(
@@ -350,7 +376,7 @@ class SqlAlchemyRunLifecycleStore:
         )
         if row is None:
             return False
-        if not origin_active(row[0], row[2], row[3]):
+        if not await _origin_active(self._session, row[0], row[2], row[3]):
             await self.finish(
                 run_id,
                 from_state="running",
@@ -375,7 +401,15 @@ class SqlAlchemyRunLifecycleStore:
     async def provider_origin_active(self, run_id: UUID) -> bool:
         return (
             await self._session.scalar(
-                _joined(provider=True).with_only_columns(Run.id).where(Run.id == run_id)
+                _joined(provider=True)
+                .with_only_columns(Run.id)
+                .where(
+                    Run.id == run_id,
+                    or_(
+                        ProviderInstallation.provider != "bitbucket",
+                        active_bitbucket_run_origin(),
+                    ),
+                )
             )
             is not None
         )
@@ -385,7 +419,7 @@ class SqlAlchemyRunLifecycleStore:
         if row is None:
             return None
         run, pr, repository, installation = row
-        if not origin_active(run, repository, installation):
+        if not await _origin_active(self._session, run, repository, installation):
             return "installation_unavailable"
         return cancellation_reason(
             pr_open=pr.state == CodeChangeState.OPEN,
@@ -495,7 +529,7 @@ class SqlAlchemyRunLifecycleStore:
         installation: ProviderInstallation,
         findings: list[Finding],
     ) -> PublishContext:
-        active = origin_active(run, repository, installation)
+        active = await _origin_active(self._session, run, repository, installation)
         original = installation if installation.id == run.origin_provider_installation_id else None
         if original is None and run.origin_provider_installation_id is not None:
             # Same owned SQL session; the locked callers already hold this ORIGINAL
@@ -519,8 +553,19 @@ class SqlAlchemyRunLifecycleStore:
             else None
         )
         provider = installation.provider
+        repository_uuid = (
+            await self._session.scalar(
+                select(BitbucketRunOrigin.repository_uuid).where(
+                    BitbucketRunOrigin.run_id == run.id
+                )
+            )
+            if provider == "bitbucket" and active
+            else None
+        )
         diff_map = (
-            await load_publication_diff_map(self._session, run.id) if provider == "gitlab" else None
+            await load_publication_diff_map(self._session, run.id)
+            if provider in {"gitlab", "bitbucket"}
+            else None
         )
         return PublishContext(
             run_id=run.id,
@@ -529,10 +574,8 @@ class SqlAlchemyRunLifecycleStore:
             head_sha=run.head_sha,
             pr_head_sha=pr.head_sha,
             pr_open=pr.state == CodeChangeState.OPEN,
-            origin_active=origin_active(run, repository, installation),
-            installation_id=installation.external_id
-            if origin_active(run, repository, installation)
-            else None,
+            origin_active=active,
+            installation_id=installation.external_id if active else None,
             repository_full_name=repository.full_name,
             pr_number=pr.external_number,
             review_body=run.review_body or "",
@@ -558,7 +601,9 @@ class SqlAlchemyRunLifecycleStore:
                     provider=installation.provider,
                     origin_provider_installation_id=run.origin_provider_installation_id,
                     repository_external_id=repository.external_id,
+                    repository_uuid=repository_uuid,
                 ),
+                base_ref=run.base_ref if installation.provider == "bitbucket" else None,
             )
             if active
             else None,
@@ -596,7 +641,7 @@ class SqlAlchemyRunLifecycleStore:
                 return None
             assert current.publication_identity is not None
             publication_workspace_id = current.publication_identity.origin_workspace_id
-        if not origin_active(run, repository, installation):
+        if not await _origin_active(self._session, run, repository, installation):
             run.state = RunState.CANCELLED
             run.error_code = (
                 cancellation_reason(
@@ -665,6 +710,10 @@ class SqlAlchemyRunLifecycleStore:
             Run.origin_provider_installation_id != Repository.provider_installation_id,
             ProviderInstallation.deleted_at.is_not(None),
             Repository.installation_available.is_(False),
+            and_(
+                ProviderInstallation.provider == "bitbucket",
+                ~active_bitbucket_run_origin(),
+            ),
         )
         candidates = await self._session.scalars(
             _joined()
@@ -687,7 +736,7 @@ class SqlAlchemyRunLifecycleStore:
             .where(Run.id == run_id, self._stale(now, available_before))
             .execution_options(populate_existing=True),
         )
-        if row is None or origin_active(row[0], row[2], row[3]):
+        if row is None or await _origin_active(self._session, row[0], row[2], row[3]):
             return False
         return await self.finish(
             run_id,
@@ -828,7 +877,7 @@ class SqlAlchemyRunTraceStore:
             run_id,
             _joined().where(Run.id == run_id).execution_options(populate_existing=True),
         )
-        if row is None or not origin_active(row[0], row[2], row[3]):
+        if row is None or not await _origin_active(self._session, row[0], row[2], row[3]):
             raise RunCancelled("installation_unavailable")
         if row[0].state != RunState.RUNNING:
             raise RunCancelled("run_inactive")

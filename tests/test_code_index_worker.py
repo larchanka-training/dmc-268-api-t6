@@ -10,6 +10,7 @@ App; with it, it also reconciles heads and dispatches wake-ups (#143).
 from __future__ import annotations
 
 import asyncio
+import base64
 import dataclasses
 import json
 import logging
@@ -62,10 +63,17 @@ from app.modules.code_index.infrastructure.amqp import (
     IndexRepoMessage,
     handle_index_delivery,
 )
+from app.modules.code_index.infrastructure.bitbucket_snapshot_source import (
+    BitbucketRepositorySnapshotSource,
+)
+from app.modules.integrations.bitbucket.infrastructure.credential_cipher import (
+    BitbucketCredentialCipher,
+)
 from app.modules.integrations.webhooks.infrastructure.github_installation_tree_provider import (
     InMemoryInstallationAccessTokenCache,
 )
 from app.modules.reviews.application.run_failures import RetryDelays
+from app.worker import WorkerSettings
 
 _MIB = 1_048_576
 _PEM = (
@@ -490,6 +498,7 @@ class Worker:
     github_app_id: str | None = "1"
     github_private_key: str | None = _PEM
     github_api_url: str = "https://api.github.test"
+    bitbucket_cipher: BitbucketCredentialCipher | None = None
 
 
 @dataclass
@@ -595,6 +604,83 @@ def test_without_the_github_app_the_topology_is_declared_and_nothing_consumes(
     assert len(declared) == 1 and len(connection.channels) == 1
     assert parsers == []
     assert "the index.repo consumer is disabled" in caplog.text
+
+
+def test_bitbucket_only_worker_composes_uuid_bound_snapshot_source(
+    composed: tuple[list[Parser], list[Any]],
+) -> None:
+    """A Bitbucket deployment can index even when no GitHub App is configured."""
+
+    async def scenario() -> None:
+        async with code_index_worker.index_consumer(
+            Worker(
+                github_app_id=None,
+                github_private_key=None,
+                bitbucket_cipher=BitbucketCredentialCipher(
+                    active_key_id="test", keys={"test": b"a" * 32}
+                ),
+            ),
+            cast(AbstractRobustConnection, FakeConnection()),
+            _SESSIONS,
+            RetryDelays(),
+        ) as consumer:
+            assert consumer is not None
+            source = consumer.sources()(IndexedRepository(uuid4(), "bitbucket", 7, "old/slug"))
+            assert isinstance(source, BitbucketRepositorySnapshotSource)
+
+    asyncio.run(scenario())
+
+
+def test_bitbucket_only_worker_rejects_github_index_job_without_app_credentials(
+    composed: tuple[list[Parser], list[Any]],
+) -> None:
+    """A stray GitHub queue row must not get a source with empty App credentials."""
+
+    async def scenario() -> None:
+        async with code_index_worker.index_consumer(
+            Worker(
+                github_app_id=None,
+                github_private_key=None,
+                bitbucket_cipher=BitbucketCredentialCipher(
+                    active_key_id="test", keys={"test": b"a" * 32}
+                ),
+            ),
+            cast(AbstractRobustConnection, FakeConnection()),
+            _SESSIONS,
+            RetryDelays(),
+        ) as consumer:
+            assert consumer is not None
+            github = IndexedRepository(uuid4(), "github", 7, "team/repo")
+            with pytest.raises(ValueError, match="GitHub App credentials"):
+                consumer.sources()(github)
+
+    asyncio.run(scenario())
+
+
+def test_bitbucket_cipher_from_worker_environment_reaches_index_consumer(
+    composed: tuple[list[Parser], list[Any]],
+) -> None:
+    settings = WorkerSettings.from_environment(
+        {
+            "DATABASE_URL": "postgresql+psycopg://localhost/test",
+            "RABBITMQ_URL": "amqp://localhost",
+            "BITBUCKET_ACTIVE_KEY_ID": "test",
+            "BITBUCKET_CREDENTIAL_KEYS": json.dumps({"test": base64.b64encode(b"a" * 32).decode()}),
+        }
+    )
+
+    async def scenario() -> None:
+        async with code_index_worker.index_consumer(
+            settings,
+            cast(AbstractRobustConnection, FakeConnection()),
+            _SESSIONS,
+            RetryDelays(),
+        ) as consumer:
+            assert consumer is not None
+            source = consumer.sources()(IndexedRepository(uuid4(), "bitbucket", 7, "team/repo"))
+            assert isinstance(source, BitbucketRepositorySnapshotSource)
+
+    asyncio.run(scenario())
 
 
 @pytest.mark.parametrize(
@@ -855,6 +941,43 @@ def test_an_error_before_any_settle_dead_letters_the_delivery_and_the_next_is_ha
     assert jobs.seen == [second.repository_id]
     [line] = _guard_lines(caplog)
     assert first.message_id in line
+
+
+def test_bitbucket_only_consumer_continues_after_stray_github_job(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    github, bitbucket = Wakeup(), Wakeup()
+    github.headers["x-attempt"] = 2  # Final retry reaches the DLQ.
+    deliveries = Deliveries([github, bitbucket])
+
+    async def scenario() -> list[UUID]:
+        async with httpx.AsyncClient() as client:
+            sources = snapshot_sources(
+                client,
+                app_id="",
+                private_key="",
+                bitbucket_source_factory=lambda _: cast(RepositorySnapshotSource, object()),
+            )
+
+            class ProviderJobs(Jobs):
+                async def execute(self, repository_id: UUID, generation: int) -> BuildOutcome:
+                    self.seen.append(repository_id)
+                    provider = "github" if repository_id == github.repository_id else "bitbucket"
+                    sources(IndexedRepository(repository_id, provider, 7, "team/repo"))
+                    return BuildOutcome(BuildStatus.PUBLISHED)
+
+            jobs = ProviderJobs()
+            await _consumer(deliveries, jobs).consume()
+            return jobs.seen
+
+    with caplog.at_level(logging.ERROR):
+        seen = asyncio.run(scenario())
+
+    assert seen == [github.repository_id, bitbucket.repository_id]
+    assert github.nacks == [False] and not github.acked
+    assert bitbucket.acked and bitbucket.nacks == []
+    assert deliveries.closed
+    assert github.message_id in caplog.text
 
 
 def test_an_error_after_the_ack_settles_nothing_more(

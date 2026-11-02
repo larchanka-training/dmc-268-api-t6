@@ -1,0 +1,23 @@
+{
+  "id": "metrics-for-health",
+  "items": [
+    {
+      "key": "metrics-for-health",
+      "repo": "larchanka-training/dmc-268-api-t6",
+      "type": "Task",
+      "lang": "ru",
+      "summary": "[api] Покрыть `GET /health` метриками Prometheus",
+      "parent": "#500",
+      "background": "При приёмке #500 замечено: `GET /health` не отдаёт метрик, по ним нельзя построить алерт на доступность. Находка лежит вне AC #500.",
+      "scope": [
+        "Счётчик запросов и гистограмма задержки для `GET /health`",
+        "Вне scope: алерты и дашборды"
+      ],
+      "acceptance_criteria": [
+        "`GET /metrics` содержит счётчик запросов `GET /health` и гистограмму задержки",
+        "Тест роута проверяет появление метрик после запроса к `/health`"
+      ],
+      "dependencies": "Нет"
+    }
+  ]
+}

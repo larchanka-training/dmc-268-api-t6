@@ -1,0 +1,69 @@
+{
+  "after_table": [],
+  "apply": false,
+  "board": {
+    "action": "none",
+    "from": null,
+    "readback": null,
+    "to": null
+  },
+  "comment": null,
+  "followups": [],
+  "issue": "larchanka-training/dmc-268-api-t6#500",
+  "mode": "accepter",
+  "next": "Do not close the issue; fix the stop reasons first.",
+  "readback": null,
+  "return_items": [],
+  "rework_rule": null,
+  "rows": [
+    {
+      "evidence": "PR #901, тест `test_health_returns_version`",
+      "id": "AC1",
+      "kind": "ac",
+      "status": "done",
+      "text": "`GET /health` отвечает 200 и версией сборки"
+    },
+    {
+      "evidence": "PR #902, тест `test_repeated_idempotency_key_is_rejected`",
+      "id": "AC2",
+      "kind": "ac",
+      "status": "done",
+      "text": "Повтор запроса с тем же `Idempotency-Key` не создаёт вторую запись"
+    },
+    {
+      "evidence": "перенесён в #285",
+      "id": "AC3",
+      "kind": "ac",
+      "status": "moved",
+      "text": "Проверка обратной совместимости схемы — перенесён в #285 решением техлида"
+    },
+    {
+      "evidence": "CI зелёный на голове PR #901 и PR #902",
+      "id": "DoD1",
+      "kind": "dod",
+      "status": "done",
+      "text": "Гейты CI зелёные"
+    },
+    {
+      "evidence": "approve на голове PR #901 и PR #902, треды закрыты",
+      "id": "DoD2",
+      "kind": "dod",
+      "status": "done",
+      "text": "PR одобрены на текущей голове, все треды закрыты"
+    }
+  ],
+  "schema": 1,
+  "stops": [
+    "таблица старше возврата #8003: исполнитель не выложил новую таблицу (таблицу, выложенную вручную после возврата, укажите через --table-comment ID)"
+  ],
+  "table": {
+    "author": "executor",
+    "comment_id": 8001,
+    "url": "https://github.com/larchanka-training/dmc-268-api-t6/issues/500#issuecomment-8001",
+    "via": "marker"
+  },
+  "tick": [],
+  "verdict": "stop",
+  "viewer": "axyi",
+  "warnings": []
+}

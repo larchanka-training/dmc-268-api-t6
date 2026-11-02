@@ -5,7 +5,7 @@
 # its lifecycle: a monitoring failure cannot fail or roll back an application deploy.
 # Images are pinned by digest like the stores of deploy/compose/staging.yml; the tag only names the
 # version, update tag and digest together.
-# Memory limits keep the stack under ~1.3 GB on the shared course VPS.
+# Memory limits keep the stack under ~1.4 GB on the shared course VPS.
 services:
   prometheus:
     image: prom/prometheus:v3.15.0@sha256:efd719c99d83b060d9daefdcf00360461adf279f45ef5391f8d111892118753e
@@ -168,6 +168,28 @@ services:
       api: {}
     restart: unless-stopped
     mem_limit: 32m
+    logging: *logging
+
+  # HTTPS probes of the public names (blackbox/blackbox.yml): Prometheus asks it at /probe. It goes
+  # out like any client, through the edge proxy, so it joins no network but the project one.
+  blackbox-exporter:
+    image: prom/blackbox-exporter:v0.29.1@sha256:ea1c7aa3ef3f307cd03e85f34abb604478ccb90b567fc690da0cd9776da76b13
+    command:
+      - --config.file=/etc/blackbox_exporter/blackbox.yml
+    # The image sets no user: nobody, like Prometheus.
+    user: "65534:65534"
+    labels:
+      dmc.config-digest: ${BLACKBOX_CONFIG_DIGEST:-none}
+    volumes:
+      - ./blackbox:/etc/blackbox_exporter:ro
+    restart: unless-stopped
+    mem_limit: 32m
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:9115/-/healthy"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
     logging: *logging
 
   # Scheduled PostgreSQL backup (backup/pg-backup.sh, docs/MONITORING.md §9). It lives here, not in

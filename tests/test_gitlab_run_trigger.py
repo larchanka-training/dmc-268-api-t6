@@ -23,6 +23,7 @@ from app.modules.reviews.application.determine_ci_eligibility import (
 )
 from app.modules.reviews.application.project_github_pull_request import PullRequestState
 from app.modules.reviews.application.try_enqueue_webhook_run import (
+    UNSET,
     DuplicateReason,
     EnqueueResult,
     EnqueueStatus,
@@ -30,6 +31,7 @@ from app.modules.reviews.application.try_enqueue_webhook_run import (
     RunInsertCandidate,
     RunPublicationKind,
     TryEnqueueWebhookRun,
+    UnsetType,
 )
 
 PR, RUN, ORIGIN, WS, REPO, RULE, PROMPT = (UUID(int=i) for i in range(1, 8))
@@ -142,6 +144,8 @@ class Runs:
         self,
         candidate: RunInsertCandidate,
         now: datetime,
+        *,
+        triggered_by: str | None | UnsetType = UNSET,
     ) -> PendingRunMessage | DuplicateReason:
         self.events.append("insert")
         if self.inserted is not None:

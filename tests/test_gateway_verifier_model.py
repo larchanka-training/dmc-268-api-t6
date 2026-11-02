@@ -3,7 +3,9 @@
 ``GatewayVerifierModel`` sends the verifier prompt through ``LlmGateway`` on the verifier
 route: its own model pair, the ``verification`` ledger operation, bounded repair and the
 strict ``review/schemas/verifier-output.schema.v1.json``. The candidate-ID and reference
-checks stay in ``ReflectionPass``. No network: provider answers come from
+checks of ``ReflectionPass`` run in the gateway on every schema-valid answer, against the
+manifest of its call: their errors earn the same repair and fallback within the attempt's
+slots (#130, tech lead 2026-10-28). No network: provider answers come from
 ``httpx.MockTransport``.
 """
 
@@ -11,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
@@ -22,6 +25,7 @@ import httpx
 import pytest
 
 import app.modules.reviews.infrastructure.llm.gateway as gateway_module
+from app.modules.reviews.application.check_runs import RunProviderCheckpoint
 from app.modules.reviews.application.llm import (
     LlmCallFailed,
     LlmErrorCode,
@@ -49,21 +53,35 @@ from app.modules.reviews.application.prompt_builder import (
 from app.modules.reviews.application.reflection_pass import (
     CandidateFindingItem,
     ReflectionPass,
+    VerificationInvalidOutputError,
     VerifierPromptBuilder,
     VerifierReply,
 )
 from app.modules.reviews.application.review_output import EvidenceRef, ReviewFindingV2
+from app.modules.reviews.application.run_failures import (
+    RETRYABLE_ERROR_CODES,
+    RunFailure,
+    classify_failure,
+)
 from app.modules.reviews.infrastructure.llm.answers import (
     InvalidAnswer,
     validate_verifier_answer,
 )
-from app.modules.reviews.infrastructure.llm.gateway import LlmGateway
+from app.modules.reviews.infrastructure.llm.ecb_fx import FxQuote, FxQuoteResult
+from app.modules.reviews.infrastructure.llm.gateway import LlmGateway, StructuredTask
 from app.modules.reviews.infrastructure.llm.models import (
     VERIFICATION_OPERATION,
     GatewayVerifierModel,
 )
 from app.modules.reviews.infrastructure.llm.settings import LlmSettings, ModelPrice, ModelProfile
-from tests.llm_fakes import FakeClock, ScriptedProvider, completion
+from app.modules.reviews.infrastructure.llm.transport import (
+    ChatMessage,
+    ChatRequest,
+    ChatResponse,
+    OpenAICompatibleTransport,
+    ResponseSchema,
+)
+from tests.llm_fakes import FakeClock, ScriptedProvider, completion, context_checkpoint
 from tests.policy_snapshot_fakes import (
     make_complete_execution_profile,
     make_complete_prompt_bindings,
@@ -498,3 +516,381 @@ def test_reflection_pass_verifies_two_candidates_through_the_gateway() -> None:
     assert provider.run(verify) == [("c-1", "supported"), ("c-2", "contradicted")]
     assert provider.models() == ["verifier-model"]
     assert [usage.operation for _, usage in provider.ledger.events] == ["verification"]
+
+
+# ---------- reference errors earn the bounded recovery (#130 hotfix, tech lead 28.10) ----------
+
+
+def _unshown(candidate_id: str) -> dict[str, Any]:
+    """A decision citing lines the diff block never showed (it shows line 10 only)."""
+    return dict(
+        _decision(candidate_id),
+        evidence_refs=[{"block_id": QUERY_BLOCK, "start_line": 22, "end_line": 24}],
+    )
+
+
+def _verify_one(context: ReviewContext | None = None) -> Callable[[LlmGateway], Awaitable[Any]]:
+    async def verify(gateway: LlmGateway) -> Any:
+        return await ReflectionPass(GatewayVerifierModel(gateway, RUN)).verify_recorded(
+            candidates=(_candidate("c-1"),),
+            context=_context(_snapshot()) if context is None else context,
+        )
+
+    return verify
+
+
+def test_reference_errors_earn_the_repair_then_the_fallback(guarded: _Guarded) -> None:
+    # PIPELINE_SPEC :632, TEST_PLAN :139: a range the manifest does not show, then a decision
+    # for an id that was never sent; the fallback's answer is accepted.
+    provider = _Provider(
+        [
+            completion(_answer(_unshown("c-1"))),
+            completion(_answer(_decision("c-9"))),
+            completion(_answer(_decision("c-1"))),
+        ]
+    )
+
+    record = provider.run(_verify_one())
+
+    assert provider.kinds() == ["primary", "repair", "fallback"]
+    assert provider.models() == ["verifier-model", "verifier-model", "verifier-fallback-model"]
+    assert [usage.operation for _, usage in provider.ledger.events] == ["verification"] * 3
+    assert [manifest.recovery_kind for manifest in guarded.manifests] == ["repair", "fallback"]
+    assert record.accepted_call_id == guarded.manifests[1].call_id
+    assert [(decision.candidate_id, decision.status) for decision in record.decisions] == [
+        ("c-1", "supported")
+    ]
+    # The repair turn quotes the reference error in the escaped, bounded validation errors.
+    repair_turn = provider.bodies()[1]["messages"][-1]["content"]
+    assert (
+        "<validation_errors>\n"
+        f"- Decision c-1 evidence_ref {QUERY_BLOCK}:22-24 is not shown in verifier manifest\n"
+        "</validation_errors>"
+    ) in repair_turn
+
+
+def test_the_repair_turn_names_the_missing_and_unknown_candidate_ids() -> None:
+    provider = _Provider(
+        [completion(_answer(_decision("c-9"))), completion(_answer(_decision("c-1")))]
+    )
+
+    record = provider.run(_verify_one())
+
+    assert provider.kinds() == ["primary", "repair"]
+    assert [decision.candidate_id for decision in record.decisions] == ["c-1"]
+    assert (
+        "<validation_errors>\n"
+        "- Verifier returned decisions for 1 items, expected 1: missing c-1; unknown c-9\n"
+        "</validation_errors>"
+    ) in provider.bodies()[1]["messages"][-1]["content"]
+
+
+def test_a_rule_finding_without_its_requirement_earns_the_repair() -> None:
+    # RULES_FORMAT_SPEC §8.2: a supported or contradicted finding with rule_name cites its rule.
+    contradicted = dict(_decision("c-1", status="contradicted"), requirement_refs=[])
+    provider = _Provider([completion(_answer(contradicted)), completion(_answer(_decision("c-1")))])
+
+    record = provider.run(_verify_one())
+
+    assert provider.kinds() == ["primary", "repair"]
+    assert [decision.status for decision in record.decisions] == ["supported"]
+    assert (
+        "- Decision c-1 for candidate with rule_name '.review/rules.md' requires at least one "
+        "matching requirement_ref for this rule\n"
+    ) in provider.bodies()[1]["messages"][-1]["content"]
+
+
+def test_three_invalid_references_fail_with_verification_invalid_output() -> None:
+    provider = _Provider([completion(_answer(_unshown("c-1"))) for _ in range(3)])
+
+    with pytest.raises(VerificationInvalidOutputError) as caught:
+        provider.run(_verify_one())
+
+    assert provider.kinds() == ["primary", "repair", "fallback"]
+    # Terminal: no run retry.
+    failure = classify_failure(caught.value)
+    assert failure.error_code == "verification_invalid_output"
+    assert failure.error_code not in RETRYABLE_ERROR_CODES
+
+
+def test_reference_errors_are_logged_without_the_answer_text(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    provider = _Provider(
+        [completion(_answer(_unshown("c-1"))), completion(_answer(_decision("c-1")))]
+    )
+
+    with caplog.at_level(logging.INFO, logger=gateway_module.__name__):
+        provider.run(_verify_one())
+
+    [record] = [
+        record
+        for record in caplog.records
+        if record.getMessage().startswith("llm answer failed the manifest check")
+    ]
+    errors = [f"Decision c-1 evidence_ref {QUERY_BLOCK}:22-24 is not shown in verifier manifest"]
+    assert record.levelno == logging.INFO
+    assert {key: record.__dict__[key] for key in ("run_id", "operation", "errors")} == {
+        "run_id": str(RUN_ID),
+        "operation": "verification",
+        "errors": errors,
+    }
+    # The default formatter drops extras: the message itself carries the errors.
+    assert json.dumps(errors) in record.getMessage()
+    # Ids and line numbers only: the answer's reason is in no log record.
+    reason = _decision("c-1")["reason"]
+    assert reason not in record.getMessage()
+    assert not any(reason in str(vars(record)) for record in caplog.records)
+
+
+def test_a_reference_error_without_a_free_slot_fails_without_recovery() -> None:
+    # C1 -> R1 -> R2 fallback -> V1: the verifier's primary is the attempt's fourth and last
+    # call (max_calls_per_attempt=4), so its invalid answer has no repair and no fallback.
+    spent = StructuredTask(
+        operation="review",
+        messages=(ChatMessage("user", "spend one slot"),),
+        schema=ResponseSchema("Spent", {"type": "object"}),
+        validate=lambda content: dict(json.loads(content)),
+    )
+    provider = _Provider(
+        [*(completion("{}") for _ in range(3)), completion(_answer(_unshown("c-1")))]
+    )
+
+    async def verify(gateway: LlmGateway) -> Any:
+        for _ in range(3):
+            await gateway.generate(spent, RUN)
+        return await _verify_one()(gateway)
+
+    with pytest.raises(VerificationInvalidOutputError) as caught:
+        provider.run(verify)
+
+    assert provider.kinds() == ["primary"] * 4
+    assert [usage.operation for _, usage in provider.ledger.events] == [
+        "review",
+        "review",
+        "review",
+        "verification",
+    ]
+    assert classify_failure(caught.value).error_code == "verification_invalid_output"
+
+
+def test_a_repair_answer_is_checked_against_the_repair_manifest() -> None:
+    # CVS §5.2: refs of a repair resolve against its own manifest, where the previous answer
+    # is a previous_output block and never code evidence. Without a verifier fallback the
+    # repair's own error ends the verification.
+    citing_previous = dict(
+        _decision("c-1"),
+        evidence_refs=[{"block_id": "previous-output", "start_line": 1, "end_line": 1}],
+    )
+    provider = _Provider(
+        [completion(_answer(_unshown("c-1"))), completion(_answer(citing_previous))]
+    )
+    settings = LlmSettings(primary=REVIEW, fallback=None, verifier=VERIFIER)
+
+    with pytest.raises(VerificationInvalidOutputError) as caught:
+        provider.run(_verify_one(), settings=settings)
+
+    assert provider.kinds() == ["primary", "repair"]
+    assert isinstance(caught.value.__cause__, LlmCallFailed)
+    assert str(caught.value.__cause__) == (
+        "llm_invalid_output: Decision c-1 evidence_ref previous-output has non-code role "
+        "'previous_output'"
+    )
+
+
+def _paid(content: str, *, completion_tokens: int) -> httpx.Response:
+    """An answer whose usage reports ``completion_tokens`` output tokens."""
+    return httpx.Response(
+        200,
+        json={
+            "model": "answering-model",
+            "choices": [{"message": {"role": "assistant", "content": content}}],
+            "usage": {"prompt_tokens": 10, "completion_tokens": completion_tokens},
+        },
+    )
+
+
+def test_a_reference_error_without_time_for_recovery_fails_as_invalid_output() -> None:
+    # CVS §7.3: when the verifier cannot recover, its last error keeps its class. The primary
+    # call takes 390 s of the 480 s attempt: 90 s are left, under the 90 s call and the 10 s
+    # of local completion, so no repair or fallback is sent.
+    clock = FakeClock(NOW)
+    provider = _Provider([completion(_answer(_unshown("c-1")))])
+
+    def slow(request: httpx.Request) -> httpx.Response:
+        clock.current += timedelta(seconds=390)
+        return provider.handle(request)
+
+    async def exercise() -> Any:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(slow)) as client:
+            return await _verify_one()(provider.gateway(SETTINGS, client, clock))
+
+    with pytest.raises(VerificationInvalidOutputError) as caught:
+        asyncio.run(exercise())
+
+    assert provider.kinds() == ["primary"]
+    assert classify_failure(caught.value).error_code == "verification_invalid_output"
+
+
+def test_a_repair_sent_on_a_rejected_key_keeps_its_deadline_class() -> None:
+    # CVS §7.3: the run keeps the class of the last call that was made. The repair's first
+    # key answers 429 after 390 s of the 480 s attempt; its request went out, so the refusal
+    # before the second key is the repair's own verification_deadline_exceeded.
+    clock = FakeClock(NOW)
+    rejected = httpx.Response(429, json={"error": {"message": "rate limited"}})
+    provider = _Provider([completion(_answer(_unshown("c-1"))), rejected])
+    settings = replace(SETTINGS, verifier=replace(VERIFIER, api_keys=("sk-a", "sk-b")))
+
+    def slow(request: httpx.Request) -> httpx.Response:
+        response = provider.handle(request)
+        if response is rejected:
+            clock.current += timedelta(seconds=390)
+        return response
+
+    async def exercise() -> Any:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(slow)) as client:
+            return await _verify_one()(provider.gateway(settings, client, clock))
+
+    with pytest.raises(RunFailure) as caught:
+        asyncio.run(exercise())
+
+    # The primary and the repair were both sent on the first key; the second never was.
+    assert [request.headers["Authorization"] for request in provider.requests] == [
+        "Bearer sk-a",
+        "Bearer sk-a",
+    ]
+    assert classify_failure(caught.value).error_code == "verification_deadline_exceeded"
+
+
+def test_a_repair_refused_before_its_first_key_keeps_the_invalid_answer_class() -> None:
+    # The same refusal at the transport's first checkpoint: nothing of the repair was sent.
+    clock = FakeClock(NOW)
+    provider = _Provider([completion(_answer(_unshown("c-1")))])
+    completes = 0
+
+    class _LateTransport(OpenAICompatibleTransport):
+        """Spends 390 s between the gateway's pre-send checks and the repair's first key."""
+
+        async def complete(
+            self, request: ChatRequest, *, checkpoint: RunProviderCheckpoint
+        ) -> ChatResponse:
+            nonlocal completes
+            completes += 1
+            if completes == 2:
+                clock.current += timedelta(seconds=390)
+            return await super().complete(request, checkpoint=checkpoint)
+
+    async def exercise() -> Any:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(provider.handle)) as client:
+            gateway = LlmGateway(
+                SETTINGS,
+                _LateTransport(client),
+                provider.ledger,
+                provider.trace,
+                checkpoint=context_checkpoint,
+                clock=clock,
+                sleep=clock.sleep,
+                jitter=lambda: 0.0,
+                monotonic=clock.monotonic,
+            )
+            return await _verify_one()(gateway)
+
+    with pytest.raises(VerificationInvalidOutputError) as caught:
+        asyncio.run(exercise())
+
+    assert (completes, len(provider.requests)) == (2, 1)
+    assert classify_failure(caught.value).error_code == "verification_invalid_output"
+
+
+def test_a_reference_error_without_budget_for_recovery_fails_as_invalid_output() -> None:
+    # 1 000 reserved output tokens at $250/M cost $0.25: $0.01 spent and the primary's $0.25
+    # leave no room for a repair under the $0.50 fast limit.
+    costly = replace(VERIFIER, price=ModelPrice(Decimal("0"), Decimal("250")))
+    spent = LlmUsage(
+        provider="router",
+        model="review-model",
+        operation="review",
+        tokens_in=10,
+        tokens_out=5,
+        cost_usd=Decimal("0.01"),
+        cache_read_tokens=0,
+    )
+    provider = _Provider([_paid(_answer(_unshown("c-1")), completion_tokens=1_000)])
+    provider.ledger.events.append((RUN, spent))
+
+    with pytest.raises(VerificationInvalidOutputError) as caught:
+        provider.run(_verify_one(), settings=replace(SETTINGS, verifier=costly))
+
+    assert provider.kinds() == ["primary"]
+    assert classify_failure(caught.value).error_code == "verification_invalid_output"
+
+
+class _QuoteOnce:
+    """The ECB quote of the primary call; no quote for any call after it."""
+
+    def __init__(self) -> None:
+        self.quotes = 0
+
+    async def get_quote(self) -> FxQuoteResult:
+        self.quotes += 1
+        if self.quotes > 1:
+            return FxQuoteResult(None, stale_cache=False)
+        quote = FxQuote(Decimal("1.1"), NOW.date(), "EXR.D.USD.EUR.SP00.A", NOW)
+        return FxQuoteResult(quote, stale_cache=False)
+
+
+def test_a_reference_error_without_an_ecb_quote_for_recovery_fails_as_invalid_output() -> None:
+    # An EUR-priced verifier route: the repair cannot be priced, so it is never sent, and the
+    # invalid answer keeps its class (CVS §7.3), not a retryable verification_unavailable.
+    eur = replace(VERIFIER, base_url="https://api.eurouter.ai/api/v1")
+    settings = replace(
+        SETTINGS, verifier=eur, verifier_fallback=replace(eur, model="verifier-fallback-model")
+    )
+    provider = _Provider([completion(_answer(_unshown("c-1")))])
+    fx = _QuoteOnce()
+
+    async def exercise() -> Any:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(provider.handle)) as client:
+            clock = FakeClock(NOW)
+            gateway = LlmGateway(
+                settings,
+                OpenAICompatibleTransport(client),
+                provider.ledger,
+                provider.trace,
+                checkpoint=context_checkpoint,
+                clock=clock,
+                sleep=clock.sleep,
+                jitter=lambda: 0.0,
+                monotonic=clock.monotonic,
+                fx_provider=fx,
+            )
+            return await _verify_one()(gateway)
+
+    with pytest.raises(VerificationInvalidOutputError) as caught:
+        asyncio.run(exercise())
+
+    assert provider.kinds() == ["primary"]
+    assert fx.quotes == 2
+    assert classify_failure(caught.value).error_code == "verification_invalid_output"
+
+
+def test_a_schema_error_without_time_for_recovery_fails_as_invalid_output() -> None:
+    # PIPELINE_SPEC §4.5, §5.1, CVS §7.3: the same for a schema error; before, a repair refused
+    # for lack of time failed with verification_deadline_exceeded.
+    clock = FakeClock(NOW)
+    provider = _Provider([completion(_answer(_without_reason("c-1")))])
+
+    def slow(request: httpx.Request) -> httpx.Response:
+        # 390 s of the 480 s attempt: under the 90 s call and the 10 s of local completion.
+        clock.current += timedelta(seconds=390)
+        return provider.handle(request)
+
+    async def exercise() -> Any:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(slow)) as client:
+            return await _verify_one()(provider.gateway(SETTINGS, client, clock))
+
+    with pytest.raises(VerificationInvalidOutputError) as caught:
+        asyncio.run(exercise())
+
+    assert provider.kinds() == ["primary"]
+    assert classify_failure(caught.value).error_code == "verification_invalid_output"

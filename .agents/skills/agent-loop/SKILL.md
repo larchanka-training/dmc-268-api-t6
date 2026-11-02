@@ -51,7 +51,8 @@ Sub-agents are spawned with the harness's sub-agent tool; for each harness see
 - **Spawn the `planning` subagent** to read the user request/specification and codebase
   structure.
 - The `planning` agent writes a plan file (architecture, design, tasks) and a todo list, for
-  example `docs/plans/<issue>-plan.md` and `docs/plans/<issue>-todo.md`.
+  example `docs/plans/<issue>-plan.md` and `docs/plans/<issue>-todo.md`. Both are local working
+  files: `docs/plans/` is git-ignored and never committed.
 - Once the plan is saved, present it to the user for feedback and approval.
 
 ### 2. Development Phase (Task Implementation)
@@ -62,7 +63,7 @@ Sub-agents are spawned with the harness's sub-agent tool; for each harness see
   - Operate incrementally, writing a failing unit test first.
   - Implement only enough code to pass the test.
   - Verify compile checks and execution results.
-  - Mark the task done in the todo list.
+  - Mark the task done in the local todo list.
 
 ### 3. Review Phase (Quality Gates)
 
@@ -84,7 +85,8 @@ Sub-agents are spawned with the harness's sub-agent tool; for each harness see
 - **Spawn the `publisher` subagent** to automate the integration and deployment lifecycle.
 - The `publisher` agent must:
   - Review `git status`, then stage per the pull-request skill (explicit paths for new files,
-    `git add -u` for tracked; never `git add .`).
+    `git add -u` for tracked; never `git add .`). Never stage the plan or the todo list:
+    `docs/plans/` stays out of every commit and of the pull request (no `git add -f`).
   - Commit files using the Conventional Commits syntax and push to origin.
   - Execute `gh pr create` with standard metadata titles/descriptions to open the pull request.
   - Return the direct URL link to the pull request.

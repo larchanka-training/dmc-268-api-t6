@@ -1,0 +1,64 @@
+{
+  "checkboxes": {
+    "ac": {
+      "checked": 0,
+      "items": [],
+      "total": 0
+    },
+    "dod": {
+      "checked": 0,
+      "items": [],
+      "total": 0
+    },
+    "outside": 0
+  },
+  "closing": {
+    "events": [
+      {
+        "actor": null,
+        "at": "2026-10-01T09:00:00Z",
+        "closer": "commit",
+        "closer_ref": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "kind": "closed",
+        "state_reason": "COMPLETED"
+      },
+      {
+        "actor": "axyi",
+        "at": "2026-10-01T09:30:00Z",
+        "kind": "reopened"
+      },
+      {
+        "actor": "axyi",
+        "at": "2026-10-01T10:00:00Z",
+        "closer": "project",
+        "closer_ref": null,
+        "kind": "closed",
+        "state_reason": "NOT_PLANNED"
+      },
+      {
+        "actor": "axyi",
+        "at": "2026-10-01T10:30:00Z",
+        "kind": "reopened"
+      },
+      {
+        "actor": "axyi",
+        "at": "2026-10-01T11:00:00Z",
+        "closer": "mystery",
+        "closer_ref": null,
+        "kind": "closed",
+        "state_reason": null
+      }
+    ],
+    "ever_closed_by_merge": true,
+    "last_closer": "mystery"
+  },
+  "issue": {
+    "ref": "larchanka-training/dmc-268-api-t6#13",
+    "state": "CLOSED",
+    "state_reason": "COMPLETED",
+    "title": "Synthetic issue",
+    "url": "https://github.com/larchanka-training/dmc-268-api-t6/issues/13"
+  },
+  "prs": [],
+  "schema": 1
+}

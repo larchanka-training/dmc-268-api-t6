@@ -25,7 +25,11 @@ REVIEW_SYSTEM_KEY = "review.system"
 SNAPSHOT_REVIEW_PROMPT_VERSIONS: frozenset[str] = frozenset({"v4", "v5"})
 # The context stage builds its diff map from the persisted origin provider.
 SNAPSHOT_REVIEW_PROVIDERS: frozenset[str] = frozenset(
-    {VcsProviderName.GITHUB.value, VcsProviderName.GITLAB.value}
+    {
+        VcsProviderName.GITHUB.value,
+        VcsProviderName.GITLAB.value,
+        VcsProviderName.BITBUCKET.value,
+    }
 )
 
 

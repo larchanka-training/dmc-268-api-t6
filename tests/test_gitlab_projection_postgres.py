@@ -80,11 +80,13 @@ from app.modules.reviews.application.project_gitlab_merge_request import (
     ProjectGitLabMergeRequest,
 )
 from app.modules.reviews.application.try_enqueue_webhook_run import (
+    UNSET,
     EnqueueResult,
     PendingRunMessage,
     RunMessagePublisher,
     RunPublicationKind,
     TryEnqueueWebhookRun,
+    UnsetType,
 )
 from app.modules.reviews.infrastructure.gitlab_eligibility_candidates import (
     SqlAlchemyGitLabEligibilityCandidateStore,
@@ -1777,6 +1779,7 @@ def test_automatic_handler_refuses_changed_authority_after_projection_commit_bef
                     expected_head_sha: str,
                     *,
                     expected_identity: WebhookRunIdentity | None = None,
+                    triggered_by: str | None | UnsetType = UNSET,
                 ) -> EnqueueResult:
                     # Public lock reacquisition proves projection hold has completed.
                     async with lock.hold(command_for(target)):

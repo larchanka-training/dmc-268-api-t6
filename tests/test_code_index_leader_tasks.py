@@ -900,9 +900,9 @@ _LISTED = datetime(2026, 10, 20, 9, 30, tzinfo=UTC)
 type _HeadOutcome = BranchHead | None | Exception | asyncio.Event
 
 
-def _candidate(repository_id: UUID, installation: int) -> HeadCandidate:
+def _candidate(repository_id: UUID, installation: int, provider: str = "github") -> HeadCandidate:
     return HeadCandidate(
-        IndexedRepository(repository_id, "github", installation, f"octo/r{repository_id.int}"),
+        IndexedRepository(repository_id, provider, installation, f"octo/r{repository_id.int}"),
         1,
         _LISTED,
     )
@@ -1041,6 +1041,27 @@ def test_a_rate_limit_skips_the_installation_for_the_run_and_another_installatio
         "reconcile r2 g1 main@c2 current",
         "head r3 run2",
         "reconcile r3 g1 main@c3 current",
+    ]
+
+
+def test_reconcile_rate_limit_is_scoped_by_provider_and_installation() -> None:
+    clock = Clock()
+    index = Index(
+        Tracker(),
+        clock,
+        candidates=[
+            _candidate(R1, 17, "bitbucket"),
+            _candidate(R2, 17, "bitbucket"),
+            _candidate(R3, 17, "github"),
+        ],
+    )
+    sources = Sources(index.tracker, clock, {R1: [_RATE_LIMITED]})
+
+    asyncio.run(_reconcile(index, clock, sources).run(10.0))
+
+    assert [entry for entry in index.tracker.log if entry.startswith("head ")] == [
+        "head r1 run1",
+        "head r3 run1",
     ]
 
 

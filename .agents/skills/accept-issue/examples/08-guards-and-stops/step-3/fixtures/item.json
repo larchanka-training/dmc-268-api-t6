@@ -1,0 +1,26 @@
+{
+  "data": {
+    "repository": {
+      "issue": {
+        "projectItems": {
+          "pageInfo": {
+            "hasNextPage": false,
+            "endCursor": "MQ"
+          },
+          "nodes": [
+            {
+              "id": "PVTI_lADODlG58s4BibmCzhDMtXw",
+              "project": {
+                "id": "PVT_kwDODlG58s4BibmC"
+              },
+              "fieldValueByName": {
+                "__typename": "ProjectV2ItemFieldSingleSelectValue",
+                "name": "On Review"
+              }
+            }
+          ]
+        }
+      }
+    }
+  }
+}

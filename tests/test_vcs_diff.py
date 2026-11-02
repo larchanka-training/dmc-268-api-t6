@@ -597,6 +597,59 @@ def test_ordinary_fetch_failure_stays_an_optional_blob_omission() -> None:
     assert result.failed_blob_shas == frozenset({"1" * 40})
 
 
+@pytest.mark.parametrize(
+    "failure",
+    [
+        RunFailure("bitbucket_request_budget_exceeded"),
+        RunFailure("bitbucket_fetch_failed", rate_limited=True),
+    ],
+)
+def test_bitbucket_blob_budget_and_rate_limit_escape_omission(failure: RunFailure) -> None:
+    class TwoFileProvider(_UnavailableBlobProvider):
+        async def get_diff(
+            self, pull_request: VcsPullRequest, *, checkpoint: RunProviderCheckpoint
+        ) -> tuple[VcsFile, ...]:
+            await checkpoint()
+            return (
+                VcsFile("src/app.py", "modified", "1" * 40, None, 1, 1, 2, None),
+                VcsFile("src/other.py", "modified", "2" * 40, None, 1, 1, 2, None),
+            )
+
+    provider = TwoFileProvider(failure)
+    with pytest.raises(RunFailure) as caught:
+        asyncio.run(
+            FetchVcsReviewInput(provider, checkpoint=provider_checkpoint).execute(_locator(), _HEAD)
+        )
+    assert caught.value is failure
+    assert provider.requested == ["1" * 40]
+
+
+def test_blob_stage_rechecks_provider_head_after_all_pinned_reads() -> None:
+    from app.modules.reviews.infrastructure.vcs_failures import ClassifiedVcsProvider
+
+    verified = 0
+
+    class Provider(_UnavailableBlobProvider):
+        async def get_blob(
+            self, locator: PullRequestLocator, sha: str, *, checkpoint: RunProviderCheckpoint
+        ) -> bytes:
+            return b"source bytes"
+
+        async def verify_current(self, *, checkpoint: RunProviderCheckpoint) -> None:
+            nonlocal verified
+            verified += 1
+            raise RunCancelled("superseded")
+
+    with pytest.raises(RunCancelled, match="superseded"):
+        asyncio.run(
+            FetchVcsReviewInput(
+                ClassifiedVcsProvider(cast(Any, Provider(RunFailure("diff_fetch_failed")))),
+                checkpoint=provider_checkpoint,
+            ).execute(_locator(), _HEAD)
+        )
+    assert verified == 1
+
+
 def test_task_cancellation_escapes_blob_classification() -> None:
     failure = asyncio.CancelledError()
     with pytest.raises(asyncio.CancelledError) as caught:

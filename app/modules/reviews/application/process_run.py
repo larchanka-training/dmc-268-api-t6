@@ -48,6 +48,7 @@ from app.modules.reviews.application.vcs_diff import (
     PullRequestLocator,
     VcsProvider,
     VcsProviderSelector,
+    VcsStageVerifier,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -79,6 +80,7 @@ class RunVcsInput:
     head_sha: str
     base_sha: str
     locator: PullRequestLocator
+    base_ref: str | None = None
 
     @property
     def provider(self) -> str:
@@ -435,7 +437,15 @@ class ReviewRunProcessor:
             except (RunCancelled, RequiredSourceUnavailable):
                 raise
             except Exception as exc:
-                if isinstance(exc, RunFailure) and exc.error_code == "deadline_exceeded":
+                if isinstance(exc, RunFailure) and (
+                    exc.rate_limited
+                    or exc.error_code
+                    in {
+                        "deadline_exceeded",
+                        "bitbucket_request_budget_exceeded",
+                        "bitbucket_response_budget_exceeded",
+                    }
+                ):
                     raise
                 # Blob cache is optional; a single unavailable file must not abort the Run.
                 _LOGGER.warning(
@@ -459,6 +469,8 @@ class ReviewRunProcessor:
                 continue
             blobs.append((key, content))
 
+        if isinstance(vcs_provider, VcsStageVerifier):
+            await vcs_provider.verify_current(checkpoint=self._provider_checkpoint(run_id, run))
         if blobs:
             async with self._uow_factory() as uow:
                 if uow.blob_cache is not None:

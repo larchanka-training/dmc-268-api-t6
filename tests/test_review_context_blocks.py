@@ -25,7 +25,11 @@ from app.modules.reviews.application import rag_index
 from app.modules.reviews.application.context_provenance import LineRange, SourceRef, SourceRole
 from app.modules.reviews.application.conventions import CachedConventions, GeneratedConventions
 from app.modules.reviews.application.diff_map import DiffSide
-from app.modules.reviews.application.execute_review import ExecuteReviewRun, ReviewPromptInput
+from app.modules.reviews.application.execute_review import (
+    ExecuteReviewRun,
+    ReviewPromptInput,
+    snapshot_excerpts,
+)
 from app.modules.reviews.application.policy_snapshot import (
     POLICY_SNAPSHOT_SCHEMA_VERSION,
     ManifestBlock,
@@ -774,3 +778,25 @@ def test_snapshot_review_names_a_rag_block_of_a_long_path_by_a_bounded_id() -> N
         EvidenceRef(block_id=LONG_USE.block_id, start_line=1, end_line=1)
     # The payload keeps the stage's ids (its trace and the legacy path).
     assert [block.block_id for block in payload.retrieved] == [f"RAG:{LONG_PATH}:1-1"] * 2
+
+
+@pytest.mark.parametrize("retrieved_section", [True, False])
+@pytest.mark.parametrize("ignored_files", [0, 3])
+def test_snapshot_excerpts_maps_the_l2_l4_blocks_the_retrieved_slot_and_the_ignored_count(
+    retrieved_section: bool, ignored_files: int
+) -> None:
+    """The mapping the use case and the #146 eval share: L1 and RAG-level payload blocks are
+    never excerpts, the retrieved slot follows the prompt, the count is the payload's."""
+    rag_level = replace(L2_WINDOW, block_id="RAG:payload", level=ContextLevel.RAG)
+    payload = replace(
+        _payload(ignored_files=ignored_files),
+        blocks=(L1_HUNK, L2_WINDOW, L3_FULL, L4_SIGNATURE, rag_level),
+    )
+
+    excerpts = snapshot_excerpts(payload, retrieved_section=retrieved_section)
+
+    assert excerpts.context_blocks == tuple(
+        snapshot_block(block) for block in (L2_WINDOW, L3_FULL, L4_SIGNATURE)
+    )
+    assert excerpts.retrieved == ((snapshot_retrieved(RETRIEVED),) if retrieved_section else ())
+    assert excerpts.excluded_files == ignored_files

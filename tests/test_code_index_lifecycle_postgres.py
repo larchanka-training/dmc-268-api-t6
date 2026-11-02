@@ -75,6 +75,7 @@ from app.modules.code_index.application.vcs import (
     Comparison,
     RepositorySnapshotSource,
     SourceArchive,
+    VcsAccessDenied,
 )
 from app.modules.code_index.domain.enums import IndexStatus, PurgeReason
 from app.modules.code_index.infrastructure.index_refresh import SqlAlchemyIndexRefreshUnitOfWork
@@ -109,6 +110,7 @@ from app.modules.repositories.infrastructure.repository_settings import (
     SqlAlchemyRepositorySettingsUnitOfWork,
 )
 from app.modules.reviews.application.ast_symbols import SourceParser
+from app.modules.reviews.application.policy_errors import PolicyError, PolicyErrorCode
 from app.modules.reviews.application.project_github_pull_request import (
     PullRequestEvent,
     PullRequestProjectionStatus,
@@ -1028,6 +1030,71 @@ def test_ac3_the_reconcile_rebuilds_a_policy_refusal_once_and_then_only_on_a_new
             fixed,
         )
         assert len(indexer.jobs) == 3
+
+    _race(fleet, scenario)
+
+
+@pytest.mark.integration
+def test_static_token_refusal_does_not_repeat_the_full_walk_on_later_reconciles(
+    fleet: _Fleet,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    async def scenario(indexer: _Indexer, database: _Database) -> None:
+        await _turn_on(fleet)
+        head = indexer.branch.push(_PACKAGE)
+        assert await _dispatch(fleet.index) == [(database.a, 1)]
+
+        async def deny_download() -> None:
+            raise VcsAccessDenied(
+                "Bitbucket source is not accessible (HTTP 401)", http_status=401, pin_head=True
+            )
+
+        indexer.on_download = deny_download
+        with caplog.at_level("INFO"):
+            first = await indexer.build(database.a)
+        assert (first.status, first.error_code) == (BuildStatus.RELEASED, "vcs_access_denied")
+        assert first.http_status == 401
+        assert "http_status=401" in caplog.text
+        first_reads = indexer.jobs[0].requests
+
+        # The terminal refusal records the observed head even when enable had no target.
+        for _ in range(3):
+            await _reconcile(fleet.index, indexer)
+            assert await _dispatch(fleet.index) == []
+        state = await indexer.state(database.a)
+        assert (state.target_commit_sha, state.last_error_code) == (head, "vcs_access_denied")
+        assert state.last_error_http_status == 401
+        assert len(indexer.jobs) == 1
+        assert indexer.jobs[0].requests == first_reads
+
+    _race(fleet, scenario)
+
+
+@pytest.mark.integration
+def test_rules_redirect_status_is_logged_and_persisted_as_terminal(
+    fleet: _Fleet, caplog: pytest.LogCaptureFixture
+) -> None:
+    async def scenario(indexer: _Indexer, database: _Database) -> None:
+        await _turn_on(fleet)
+        head = indexer.branch.push(_PACKAGE)
+        indexer.branch.policy_errors[head] = PolicyError(
+            PolicyErrorCode.DOCUMENT_TYPE_UNSUPPORTED,
+            "Bitbucket rules redirect to an unsupported blob (HTTP 302)",
+            http_status=302,
+        )
+        assert await _dispatch(fleet.index) == [(database.a, 1)]
+        with caplog.at_level("INFO"):
+            outcome = await indexer.build(database.a)
+        state = await indexer.state(database.a)
+
+        assert (outcome.status, outcome.error_code, outcome.http_status) == (
+            BuildStatus.RELEASED,
+            "policy_document_type_unsupported",
+            302,
+        )
+        assert "http_status=302" in caplog.text
+        assert state.last_error_code == "policy_document_type_unsupported"
+        assert state.last_error_http_status == 302
 
     _race(fleet, scenario)
 

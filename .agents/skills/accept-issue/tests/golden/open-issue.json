@@ -1,0 +1,56 @@
+{
+  "checkboxes": {
+    "ac": {
+      "checked": 0,
+      "items": [],
+      "total": 0
+    },
+    "dod": {
+      "checked": 0,
+      "items": [],
+      "total": 0
+    },
+    "outside": 0
+  },
+  "closing": {
+    "events": [
+      {
+        "actor": "axyi",
+        "at": "2026-10-01T09:00:00Z",
+        "closer": "merge",
+        "closer_ref": "larchanka-training/dmc-268-ui-t6#70",
+        "kind": "closed",
+        "state_reason": "COMPLETED"
+      },
+      {
+        "actor": "axyi",
+        "at": "2026-10-02T09:00:00Z",
+        "kind": "reopened"
+      }
+    ],
+    "ever_closed_by_merge": true,
+    "last_closer": null
+  },
+  "issue": {
+    "ref": "larchanka-training/dmc-268-api-t6#13",
+    "state": "OPEN",
+    "state_reason": "REOPENED",
+    "title": "Synthetic issue",
+    "url": "https://github.com/larchanka-training/dmc-268-api-t6/issues/13"
+  },
+  "prs": [
+    {
+      "ci": "PENDING",
+      "head_sha": "4747474747474747474747474747474747474747",
+      "merged_at": null,
+      "ref": "larchanka-training/dmc-268-api-t6#71",
+      "refs": false,
+      "state": "OPEN",
+      "title": "feat: wip",
+      "unresolved_threads": 1,
+      "url": "https://github.com/larchanka-training/dmc-268-api-t6/pull/71",
+      "will_close": true
+    }
+  ],
+  "schema": 1
+}

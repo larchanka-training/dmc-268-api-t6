@@ -52,6 +52,7 @@ from app.main import app, get_github_webhook_secret
 from app.modules.integrations.webhooks.infrastructure.github_installation_tree_provider import (
     StaticGitHubInstallationAccessTokenProvider,
 )
+from app.modules.reviews.application import review_ignore
 from app.modules.reviews.application.prompt_builder import file_block_id
 from app.modules.reviews.infrastructure.amqp import amqp_channels
 from app.worker import WorkerSettings, run_worker
@@ -406,19 +407,19 @@ def _github(
     *,
     head_rules: bytes | None | Literal["base"] = "base",
     fault: Fault | None = None,
-    symlink: bool = False,
+    symlink: str | None = None,
     agents: bytes | None = None,
 ) -> FakeGitHub:
     """PR 7 changes ``app/service.py`` and ``generated/client.py``; ``None`` is no rules file.
 
-    ``symlink`` lists the rules file of both revisions as a symlink to ``base_rules``;
-    ``agents`` is a root ``AGENTS.md`` the PR leaves unchanged.
+    ``symlink`` lists that policy document of both revisions as a symlink, its bytes the
+    target; ``agents`` is a root ``AGENTS.md`` the PR leaves unchanged.
     """
     head = base_rules if head_rules == "base" else head_rules
     common = {} if agents is None else {"AGENTS.md": agents}
     base_files = _BASE_FILES | common | ({} if base_rules is None else {RULES: base_rules})
     head_files = _HEAD_FILES | common | ({} if head is None else {RULES: head})
-    links = frozenset({RULES}) if symlink else frozenset()
+    links = frozenset() if symlink is None else frozenset({symlink})
     return FakeGitHub(Revision(base_files, links), Revision(head_files, links), fault)
 
 
@@ -707,6 +708,8 @@ class Outcome:
     # run_policy_snapshots rows of the run: a failed load stores none.
     snapshots: int
     policy_load: list[Any]
+    # Every run_actions row of the run, in order: (tool, response).
+    steps: list[tuple[str, Any]]
     tasks: list[str]
     bodies: list[str]
     reviews: list[dict[str, Any]]
@@ -880,6 +883,7 @@ async def _scenario(stack: Stack, github: FakeGitHub, llm: FakeLlm) -> Outcome:
         policy_digest=digest,
         snapshots=int(snapshots or 0),
         policy_load=[response for tool, _, response in actions if tool == "policy.load"],
+        steps=[(tool, response) for tool, _, response in actions],
         tasks=llm.tasks,
         bodies=llm.bodies,
         reviews=github.reviews,
@@ -1132,6 +1136,88 @@ def test_rules_md_at_the_size_limit_exceeds_the_policy_budget(stack: Stack, seed
     assert outcome.check_run["conclusion"] == "neutral"
 
 
+# §3.3 counts the two rendered blocks together, `(len + 2) // 3` per block by counter/v2
+# (§7.2). One line of letters each: the rules.md block adds 106 characters of markup to its
+# text and the AGENTS.md block 124, so these bytes render to 6 000 tokens each, 12 000
+# together. Either document alone is half the budget: only the sum can reach it.
+_RULES_HALF = b"r" * 17_894
+_AGENTS_HALF = b"g" * 17_876
+_RULES_HALF_BLOCK = (
+    '<repository_rules block_id="policy-rules" path=".review/rules.md">\n'
+    f'<line n="1">{_RULES_HALF.decode()}</line>\n'
+    "</repository_rules>"
+)
+_AGENTS_HALF_BLOCK = (
+    '<project_conventions_document block_id="policy-agents" path="AGENTS.md">\n'
+    f'<line n="1">{_AGENTS_HALF.decode()}</line>\n'
+    "</project_conventions_document>"
+)
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize("seed", [Seed.V4], ids=str)
+def test_policy_documents_together_at_the_budget_reach_the_model_whole(
+    stack: Stack, seed: Seed
+) -> None:
+    # §3.3: 12 000 tokens of the two blocks is the budget itself, so the run goes on and
+    # the model gets both documents whole.
+    outcome = _review(stack, _github(_RULES_HALF, agents=_AGENTS_HALF), seed)
+
+    _assert_published(outcome, seed)
+    assert outcome.documents[RULES] == (
+        "present",
+        hashlib.sha256(_RULES_HALF).hexdigest(),
+        len(_RULES_HALF),
+    )
+    assert outcome.documents["AGENTS.md"] == (
+        "present",
+        hashlib.sha256(_AGENTS_HALF).hexdigest(),
+        len(_AGENTS_HALF),
+    )
+    _assert_rules_shown(outcome, seed, _RULES_HALF, _RULES_HALF_BLOCK)
+    for task in (_REVIEW_TASK[seed], "VerificationOutput"):
+        for message in _user_messages(outcome, task):
+            assert message.count(_AGENTS_HALF_BLOCK) == 1, task
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize("seed", [Seed.V4], ids=str)
+def test_policy_documents_together_over_the_budget_fail_the_run_without_llm(
+    stack: Stack, seed: Seed
+) -> None:
+    # One byte more of AGENTS.md: 6 001 tokens, 12 001 together, each document still far
+    # under 64 KiB and under the budget alone. §3.3, §11: failed in `policy.load` before
+    # the conventions model, without retry, and neither document is truncated.
+    agents = _AGENTS_HALF + b"g"
+    outcome = _review(stack, _github(_RULES_HALF, agents=agents), seed)
+
+    assert (outcome.state, outcome.attempt) == ("failed", 1)
+    assert outcome.error_code == "policy_prompt_budget_exceeded"
+    assert outcome.documents[RULES] == (
+        "present",
+        hashlib.sha256(_RULES_HALF).hexdigest(),
+        len(_RULES_HALF),
+    )
+    assert outcome.documents["AGENTS.md"] == (
+        "present",
+        hashlib.sha256(agents).hexdigest(),
+        len(agents),
+    )
+    _assert_policy_load_failed(outcome)
+    [load] = outcome.policy_load
+    diagnostic = load["error"]["diagnostic"]
+    # §9: the budget of the two documents names neither of them.
+    assert (diagnostic["source_path"], diagnostic["limit"], diagnostic["actual"]) == (
+        None,
+        _MAX_POLICY_TOKENS,
+        12_001,
+    )
+    assert outcome.tasks == []
+    assert outcome.reviews == []
+    # PIPELINE_SPEC §7: `failed` → `completed` / `neutral`.
+    assert outcome.check_run["conclusion"] == "neutral"
+
+
 @pytest.mark.integration
 def test_all_changes_ignored_skips_the_run_without_llm_or_review(stack: Stack, seed: Seed) -> None:
     outcome = _review(stack, _github(ALL_IGNORED_RULES), seed)
@@ -1154,6 +1240,8 @@ def test_all_changes_ignored_skips_the_run_without_llm_or_review(stack: Stack, s
     ("rules", "error_code"),
     [
         pytest.param(b"ok\n\xff\xfe", "policy_document_decode_error", id="decode"),
+        # U+D800 as UTF-8 bytes: an unpaired surrogate (§3.2 item 5).
+        pytest.param(b"ok\n\xed\xa0\x80", "policy_document_decode_error", id="surrogate"),
         # ESC (U+001B): only TAB, LF and CR are allowed below U+0020 (§3.2 item 5).
         pytest.param(b"\x1bfirst", "policy_document_control_character", id="control"),
         pytest.param(
@@ -1195,9 +1283,82 @@ def test_invalid_rules_md_fails_the_run_once_without_llm(
 @pytest.mark.integration
 def test_symlinked_rules_md_fails_the_run_once_without_llm(stack: Stack) -> None:
     # §3.1: a symlink is never dereferenced; the document must be a regular Git blob.
-    outcome = _review(stack, _github(b"../docs/rules.md", symlink=True), Seed.V4)
+    outcome = _review(stack, _github(b"../docs/rules.md", symlink=RULES), Seed.V4)
 
     _assert_failed_once(outcome, frozenset({"policy_document_type_unsupported"}))
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize(
+    ("agents", "symlink", "error_code"),
+    [
+        # 65 536 bytes is the limit of each document (§3.3); one more byte is over it.
+        pytest.param(b"a" * 65_537, None, "policy_document_too_large", id="too-large"),
+        # §3.1: the symlink is not dereferenced, its target never read as the document.
+        pytest.param(
+            b"docs/AGENTS.md", "AGENTS.md", "policy_document_type_unsupported", id="symlink"
+        ),
+        pytest.param(b"ok\n\xff\xfe", None, "policy_document_decode_error", id="decode"),
+        pytest.param(b"\x1bfirst", None, "policy_document_control_character", id="control"),
+    ],
+)
+def test_invalid_agents_md_fails_the_run_once_without_llm(
+    stack: Stack, agents: bytes, symlink: str | None, error_code: str
+) -> None:
+    # §9: an AGENTS.md error stops the review like a rules.md one: the document is optional
+    # only in that it may be absent. A valid rules.md beside it does not let the run go on.
+    outcome = _review(stack, _github(VALID_RULES, agents=agents, symlink=symlink), Seed.V4)
+
+    _assert_failed_once(outcome, frozenset({error_code}))
+    [load] = outcome.policy_load
+    # §9: the diagnostic names the document the error is about.
+    assert load["error"]["diagnostic"]["source_path"] == "AGENTS.md"
+    # §11, §7.2: rules.md, read first, stays staged; the failed AGENTS.md is never missing.
+    assert outcome.documents[RULES] == (
+        "present",
+        hashlib.sha256(VALID_RULES).hexdigest(),
+        len(VALID_RULES),
+    )
+    assert outcome.documents.get("AGENTS.md", (None,))[0] != "missing"
+
+
+@pytest.mark.integration
+def test_exhausted_match_budget_fails_the_run_once_without_llm(
+    stack: Stack, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # §3.3: the matcher budget per path, lowered to one transition, so matching the mask of
+    # the valid rules.md against a changed path exceeds it. With the real budget the same
+    # PR is reviewed (`test_review_ignore_keeps_the_ignored_file_out_of_every_llm_call`).
+    monkeypatch.setattr(review_ignore, "MAX_TRANSITIONS_PER_PATH", 1)
+    outcome = _review(stack, _github(VALID_RULES), Seed.V4)
+
+    # §9: failed, no retry, no LLM call, no review; the bot never blocks a merge.
+    assert (outcome.state, outcome.attempt, outcome.error_code) == (
+        "failed",
+        1,
+        "policy_match_budget_exceeded",
+    )
+    assert outcome.tasks == []
+    assert outcome.reviews == []
+    assert outcome.check_run["conclusion"] == "neutral"
+    # The policy itself loads; the error is the matcher's, traced in the step where it ran
+    # (§9: `vcs.fetch_diff` or `context.build`): here the first one, storing the diff.
+    assert _rules_load(outcome)["presence"] == "present"
+    failed = [
+        (tool, response)
+        for tool, response in outcome.steps
+        if isinstance(response, dict) and "error" in response
+    ]
+    assert [tool for tool, _ in failed] == ["vcs.fetch_diff"], outcome.steps
+    diagnostic = failed[0][1]["error"]["diagnostic"]
+    assert (diagnostic["code"], diagnostic["source_path"], diagnostic["policy_base_sha"]) == (
+        "policy_match_budget_exceeded",
+        RULES,
+        BASE,
+    )
+    # §9: `actual` is the counter that crossed the limit at the stop, a lower bound.
+    assert (diagnostic["limit"], diagnostic["actual_is_lower_bound"]) == (1, True)
+    assert diagnostic["actual"] > 1
 
 
 @pytest.mark.integration

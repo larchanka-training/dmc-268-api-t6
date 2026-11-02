@@ -1,0 +1,30 @@
+{
+  "data": {
+    "repository": {
+      "issue": {
+        "title": "Synthetic issue",
+        "url": "https://github.com/larchanka-training/dmc-268-api-t6/issues/13",
+        "state": "CLOSED",
+        "stateReason": "COMPLETED",
+        "body": "## Background\n\n- [ ] outside before the sections (counts as outside)\n\n## Acceptance Criteria\n\n- [x] AC one is done\n- [ ] AC two is open\n* [X] AC three, star bullet, capital X\n  - [ ] AC four, nested\n> - [ ] AC quoted, skipped\n```\n- [ ] AC in a backtick fence, skipped\n```\n~~~\n- [x] AC in a tilde fence, skipped\n~~~\n\n### Notes under the criteria\n\n- [ ] AC five, under a deeper heading\n\n## Scope\n\n- [ ] a Scope item (outside)\n+ [x] another Scope item (outside)\n\n## DoD Checklist\n\n- [x] DoD one\n- [ ] DoD two\n\n#### Deeper\n\n- [x] DoD three, deeper heading\n\n# Top level heading\n\n- [ ] after a higher-level heading (outside)\n\n## Acceptance criteria\n\n- [ ] AC six, the heading repeats\n",
+        "timelineItems": {
+          "pageInfo": {
+            "hasNextPage": false,
+            "endCursor": null
+          },
+          "nodes": [
+            {
+              "__typename": "ClosedEvent",
+              "createdAt": "2026-10-01T09:00:00Z",
+              "actor": {
+                "login": "axyi"
+              },
+              "stateReason": "COMPLETED",
+              "closer": null
+            }
+          ]
+        }
+      }
+    }
+  }
+}

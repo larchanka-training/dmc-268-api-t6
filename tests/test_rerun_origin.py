@@ -75,6 +75,7 @@ def facts() -> RerunFacts:
         UUID(int=4),
         True,
         False,
+        True,
     )
 
 

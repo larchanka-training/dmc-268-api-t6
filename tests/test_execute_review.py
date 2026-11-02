@@ -3944,6 +3944,7 @@ def _publish_snapshot_candidates(
             user_prompt: str,
             manifest: CallManifest,
             context: ReviewContext,
+            **_: object,
         ) -> dict[str, object]:
             candidates = re.findall(
                 r'<candidate candidate_id="([^"]+)"[^>]*>\s*<title>([^<]+)</title>', user_prompt

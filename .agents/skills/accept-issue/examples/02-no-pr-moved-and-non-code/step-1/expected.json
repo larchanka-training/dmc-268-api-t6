@@ -1,0 +1,52 @@
+{
+  "ac_check": true,
+  "apply": false,
+  "board": {
+    "action": "set",
+    "from": "In Progress",
+    "readback": null,
+    "to": "AC Check"
+  },
+  "comment": "<!-- accept-issue:table v1 -->\n\n## Самопроверка: AC → доказательство\n\n| # | Пункт | Доказательство |\n| --- | --- | --- |\n| AC1 | Страница настроек показывает статус индексации (скриншот) | скриншот: ![статус индексации](https://github.com/user-attachments/assets/00000000-0000-4000-8000-000000000001) |\n| AC2 | Правило включено в ruleset ветки `main` (живая проверка, не код) | комментарий исполнителя https://github.com/larchanka-training/dmc-268-api-t6/issues/500#issuecomment-2000: правило включено, вывод `gh api …/rulesets` |\n| AC3 | Проверка обратной совместимости схемы — перенесён в #285 решением техлида | перенесён в #285 |\n| DoD1 | В issue описаны шаги ручной проверки правила | комментарий исполнителя https://github.com/larchanka-training/dmc-268-api-t6/issues/500#issuecomment-2001: шаги проверки |\n\nИтог: «не выполнено» нет, ставлю AC Check.\n",
+  "issue": "larchanka-training/dmc-268-api-t6#500",
+  "mode": "author",
+  "next": "The table is posted for the acceptor: the acceptor runs accept next.",
+  "rework_rule": null,
+  "rows": [
+    {
+      "evidence": "скриншот: ![статус индексации](https://github.com/user-attachments/assets/00000000-0000-4000-8000-000000000001)",
+      "id": "AC1",
+      "kind": "ac",
+      "status": "done",
+      "text": "Страница настроек показывает статус индексации (скриншот)"
+    },
+    {
+      "evidence": "комментарий исполнителя https://github.com/larchanka-training/dmc-268-api-t6/issues/500#issuecomment-2000: правило включено, вывод `gh api …/rulesets`",
+      "id": "AC2",
+      "kind": "ac",
+      "status": "done",
+      "text": "Правило включено в ruleset ветки `main` (живая проверка, не код)"
+    },
+    {
+      "evidence": "перенесён в #285",
+      "id": "AC3",
+      "kind": "ac",
+      "status": "moved",
+      "text": "Проверка обратной совместимости схемы — перенесён в #285 решением техлида"
+    },
+    {
+      "evidence": "комментарий исполнителя https://github.com/larchanka-training/dmc-268-api-t6/issues/500#issuecomment-2001: шаги проверки",
+      "id": "DoD1",
+      "kind": "dod",
+      "status": "done",
+      "text": "В issue описаны шаги ручной проверки правила"
+    }
+  ],
+  "schema": 1,
+  "stops": [],
+  "verdict": "ac_check",
+  "viewer": "executor",
+  "warnings": [
+    "viewer executor is not an assignee (assignees: maintainer)"
+  ]
+}

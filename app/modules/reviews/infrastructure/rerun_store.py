@@ -12,6 +12,8 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from app.common.infrastructure.db.enums import CodeChangeState, Engine, RunState, SeverityThreshold
 from app.common.infrastructure.db.unit_of_work import SqlAlchemyUnitOfWork
 from app.modules.auth.application.scope import AuthScope
+from app.modules.auth.infrastructure.models import GitHubUserProfile
+from app.modules.integrations.bitbucket.infrastructure.models import BitbucketRunOrigin
 from app.modules.repositories.infrastructure.models import (
     ProviderInstallation,
     Repository,
@@ -22,6 +24,9 @@ from app.modules.reviews.application.rerun_run import RerunFacts, RerunOriginFac
 from app.modules.reviews.application.try_enqueue_webhook_run import (
     PendingRunMessage,
     RunInsertCandidate,
+)
+from app.modules.reviews.infrastructure.bitbucket_run_origin import (
+    bitbucket_rerun_origin_continuous,
 )
 from app.modules.reviews.infrastructure.models import CodeChange, Run
 from app.modules.reviews.infrastructure.run_notifications import notify_run_state
@@ -87,7 +92,9 @@ class SqlAlchemyRerunStore:
             original_deleted_at,
         ) = original
         # Match webhook/projection source-before-PR ordering before the active-Run decision.
-        candidate = await SqlAlchemyWebhookRunStore(self._session).lock_candidate(code_change_id)
+        candidate = await SqlAlchemyWebhookRunStore(self._session).lock_candidate(
+            code_change_id, allow_unconfirmed_bitbucket=True
+        )
         pr_state = await self._session.scalar(
             select(CodeChange.state).where(CodeChange.id == code_change_id).with_for_update()
         )
@@ -135,12 +142,18 @@ class SqlAlchemyRerunStore:
             current_repository_id=current[0] if current is not None else None,
             pull_request_open=pr_state == CodeChangeState.OPEN,
             active_run=active is not None,
+            origin_active=(
+                await bitbucket_rerun_origin_continuous(self._session, run_id)
+                if original_provider == "bitbucket"
+                else True
+            ),
         )
 
     async def insert_rerun(
         self, candidate: RunInsertCandidate, code_change_id: UUID, now: datetime
     ) -> PendingRunMessage:
         new_id = uuid4()
+        login = await self._portal_login()
         self._session.add(
             Run(
                 id=new_id,
@@ -164,12 +177,44 @@ class SqlAlchemyRerunStore:
                 cancel_requested=False,
                 message_published_at=None,
                 created_at=now,
+                triggered_by=login,
             )
         )
         await self._session.flush()
+        if candidate.provider == "bitbucket":
+            identity = candidate.ci.identity
+            if (
+                identity is None
+                or identity.repository_uuid is None
+                or identity.binding_generation is None
+                or identity.credential_generation is None
+            ):
+                raise ValueError("Bitbucket rerun identity is missing")
+            self._session.add(
+                BitbucketRunOrigin(
+                    run_id=new_id,
+                    workspace_id=identity.workspace_id,
+                    provider_installation_id=identity.origin_provider_installation_id,
+                    repository_id=identity.repository_id,
+                    repository_uuid=identity.repository_uuid,
+                    binding_generation=identity.binding_generation,
+                    credential_generation=identity.credential_generation,
+                    pr_number=candidate.pr_number,
+                    head_sha=candidate.ci.head_sha,
+                )
+            )
+            await self._session.flush()
         await notify_run_state(self._session, new_id, RunState.QUEUED)
         pending = PendingRunMessage.from_candidate(new_id, candidate, now)
         return StoredRunMessage(**{**vars(pending), "trigger": "rerun"})
+
+    async def _portal_login(self) -> str | None:
+        if self._scope is None or self._allow_unscoped:
+            return None
+        login = await self._session.scalar(
+            select(GitHubUserProfile.login).where(GitHubUserProfile.id == self._scope.user_id)
+        )
+        return login if isinstance(login, str) else None
 
     async def mark_rerun_published(self, run_id: UUID, now: datetime) -> None:
         await self._session.execute(

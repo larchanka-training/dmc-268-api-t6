@@ -1,0 +1,74 @@
+{
+  "data": {
+    "repository": {
+      "issue": {
+        "title": "Synthetic issue",
+        "url": "https://github.com/larchanka-training/dmc-268-api-t6/issues/13",
+        "state": "CLOSED",
+        "stateReason": "COMPLETED",
+        "body": "",
+        "timelineItems": {
+          "pageInfo": {
+            "hasNextPage": false,
+            "endCursor": null
+          },
+          "nodes": [
+            {
+              "__typename": "ClosedEvent",
+              "createdAt": "2026-10-01T09:00:00Z",
+              "actor": null,
+              "stateReason": "COMPLETED",
+              "closer": {
+                "__typename": "Commit",
+                "oid": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+              }
+            },
+            {
+              "__typename": "ReopenedEvent",
+              "createdAt": "2026-10-01T09:30:00Z",
+              "actor": {
+                "login": "axyi"
+              }
+            },
+            {
+              "__typename": "ClosedEvent",
+              "createdAt": "2026-10-01T10:00:00Z",
+              "actor": {
+                "login": "axyi"
+              },
+              "stateReason": "NOT_PLANNED",
+              "closer": {
+                "__typename": "ProjectV2"
+              }
+            },
+            {
+              "__typename": "ReopenedEvent",
+              "createdAt": "2026-10-01T10:30:00Z",
+              "actor": {
+                "login": "axyi"
+              }
+            },
+            {
+              "__typename": "ClosedEvent",
+              "createdAt": "2026-10-01T11:00:00Z",
+              "actor": {
+                "login": "axyi"
+              },
+              "stateReason": null,
+              "closer": {
+                "__typename": "Mystery"
+              }
+            },
+            {
+              "__typename": "CrossReferencedEvent",
+              "willCloseTarget": false,
+              "source": {
+                "__typename": "Issue"
+              }
+            }
+          ]
+        }
+      }
+    }
+  }
+}

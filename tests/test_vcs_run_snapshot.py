@@ -25,7 +25,11 @@ from app.modules.reviews.application.process_run import (
     RunVcsInput,
 )
 from app.modules.reviews.application.prompt_builder import DiffLine, PullRequestMeta
-from app.modules.reviews.application.run_failures import RequiredSourceUnavailable, RunFailure
+from app.modules.reviews.application.run_failures import (
+    RequiredSourceUnavailable,
+    RunCancelled,
+    RunFailure,
+)
 from app.modules.reviews.application.vcs_diff import (
     PullRequestLocator,
     VcsFile,
@@ -477,7 +481,50 @@ def test_blob_cache_writes_are_committed_by_the_processor() -> None:
     assert asyncio.run(cache.get(BlobCacheKey(REPOSITORY_ID, "1" * 40))).content == "saved\n"
 
 
-@pytest.mark.parametrize("case", ["required_diff", "required_commits", "deadline", "optional"])
+def test_cached_snapshot_rechecks_head_after_prefetch_before_cache_write() -> None:
+    stored = [DiffSnapshot("src/a.py", None, blob_sha="1" * 40)]
+    fetched: list[str] = []
+    verified = 0
+
+    class Provider:
+        async def get_blob(
+            self, locator: PullRequestLocator, sha: str, *, checkpoint: RunProviderCheckpoint
+        ) -> bytes:
+            fetched.append(sha)
+            return b"saved\n"
+
+        async def verify_current(self, *, checkpoint: RunProviderCheckpoint) -> None:
+            nonlocal verified
+            verified += 1
+            raise RunCancelled("superseded")
+
+    class Repository:
+        async def get_run_vcs_input(self, run_id: UUID) -> RunVcsInput:
+            return RunVcsInput(CODE_CHANGE_ID, REPOSITORY_ID, HEAD, BASE, LOCATOR)
+
+        async def get_run_snapshots(self, run_id: UUID) -> list[DiffSnapshot]:
+            return stored
+
+    cache = InMemoryBlobCache()
+    repository = Repository()
+    processor = ReviewRunProcessor(
+        cast(Any, repository),
+        None,
+        blob_cache=cache,
+        vcs_provider=cast(Any, Provider()),
+        uow_factory=processing_uow(repository, cache),
+    )
+    with pytest.raises(RunCancelled, match="superseded"):
+        asyncio.run(processor.execute(RUN_ID))
+    assert fetched == ["1" * 40]
+    assert verified == 1
+    assert asyncio.run(cache.get(BlobCacheKey(REPOSITORY_ID, "1" * 40))).content is None
+
+
+@pytest.mark.parametrize(
+    "case",
+    ["required_diff", "required_commits", "deadline", "rate_limited", "request_budget", "optional"],
+)
 def test_cached_snapshot_distinguishes_required_authority_from_optional_blob_failure(
     case: str, caplog: pytest.LogCaptureFixture
 ) -> None:
@@ -489,6 +536,10 @@ def test_cached_snapshot_distinguishes_required_authority_from_optional_blob_fai
             "commit_messages_fetch_failed", retry_after=timedelta(seconds=180)
         ),
         "deadline": RunFailure("deadline_exceeded", "attempt deadline passed on a checkpoint"),
+        "rate_limited": RunFailure(
+            "bitbucket_fetch_failed", rate_limited=True, retry_after=timedelta(seconds=37)
+        ),
+        "request_budget": RunFailure("bitbucket_request_budget_exceeded"),
         "optional": RunFailure("diff_fetch_failed", "optional cache fill unavailable"),
     }[case]
     requested: list[str] = []
@@ -498,7 +549,7 @@ def test_cached_snapshot_distinguishes_required_authority_from_optional_blob_fai
             return RunVcsInput(CODE_CHANGE_ID, REPOSITORY_ID, HEAD, BASE, LOCATOR)
 
         async def get_run_snapshots(self, run_id: UUID) -> list[DiffSnapshot]:
-            return [
+            snapshots = [
                 DiffSnapshot(
                     "src/app.py",
                     "@@ -1 +1 @@\n-old\n+new",
@@ -506,6 +557,9 @@ def test_cached_snapshot_distinguishes_required_authority_from_optional_blob_fai
                     review_patch="@@ -1 +1 @@\n-old\n+new",
                 )
             ]
+            if case in {"rate_limited", "request_budget"}:
+                snapshots.append(DiffSnapshot("src/other.py", None, blob_sha="2" * 40))
+            return snapshots
 
         async def get_run_diff_input(self, run_id: UUID) -> None:
             raise AssertionError("stored VCS snapshot cannot use a legacy source")
@@ -576,9 +630,17 @@ def test_cached_snapshot_distinguishes_required_authority_from_optional_blob_fai
                 "required_diff": "diff_fetch_failed",
                 "required_commits": "commit_messages_fetch_failed",
                 "deadline": "deadline_exceeded",
+                "rate_limited": "bitbucket_fetch_failed",
+                "request_budget": "bitbucket_request_budget_exceeded",
             }[case]
         )
-        assert caught.value.retry_after == (None if case == "deadline" else timedelta(seconds=180))
+        assert caught.value.retry_after == (
+            timedelta(seconds=180)
+            if case in {"required_diff", "required_commits"}
+            else timedelta(seconds=37)
+            if case == "rate_limited"
+            else None
+        )
         assert "VCS blob cache fetch failed" not in caplog.text
     assert requested == ["1" * 40]
     assert asyncio.run(cache.get(BlobCacheKey(REPOSITORY_ID, "1" * 40))).content is None

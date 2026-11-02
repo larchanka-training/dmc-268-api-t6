@@ -461,6 +461,46 @@ async def test_reflection_pass_rejects_duplicate_candidate_decisions() -> None:
         await verifier_three.verify(candidates=(cand1, cand2), context=context)
 
 
+def _supported_decision(candidate_id: str) -> dict[str, Any]:
+    return {
+        "candidate_id": candidate_id,
+        "status": "supported",
+        "reason": "OK",
+        "evidence_refs": [
+            {"block_id": file_block_id("app/query.py"), "start_line": 10, "end_line": 10}
+        ],
+        "requirement_refs": [],
+    }
+
+
+@pytest.mark.anyio
+async def test_reflection_pass_names_the_missing_and_unknown_candidate_ids() -> None:
+    # The right count with the wrong id: the repair turn must say which id to fix.
+    verifier = ReflectionPass(FakeVerifierModel({"decisions": [_supported_decision("c-9")]}))
+
+    with pytest.raises(VerificationInvalidOutputError) as raised:
+        await verifier.verify(candidates=(make_candidate("c-1"),), context=_query_context())
+
+    assert str(raised.value) == (
+        "Verifier returned decisions for 1 items, expected 1: missing c-1; unknown c-9"
+    )
+
+
+@pytest.mark.anyio
+async def test_reflection_pass_names_the_duplicated_and_missing_candidate_ids() -> None:
+    response = {"decisions": [_supported_decision("c-1"), _supported_decision("c-1")]}
+    verifier = ReflectionPass(FakeVerifierModel(response))
+
+    with pytest.raises(VerificationInvalidOutputError) as raised:
+        await verifier.verify(
+            candidates=(make_candidate("c-1"), make_candidate("c-2")), context=_query_context()
+        )
+
+    assert str(raised.value) == (
+        "Verifier returned decisions for 2 items, expected 2: missing c-2; duplicated c-1"
+    )
+
+
 @pytest.mark.anyio
 async def test_reflection_pass_allows_evidence_from_other_diff_file() -> None:
     cand1 = make_candidate("c-1", path="app/query.py", rule_name=None)
@@ -2779,6 +2819,7 @@ class RecordingVerifierModel:
         user_prompt: str,
         manifest: CallManifest,
         context: ReviewContext,
+        **_: object,
     ) -> Any:
         self.manifests.append(manifest)
         self.contexts.append(context)

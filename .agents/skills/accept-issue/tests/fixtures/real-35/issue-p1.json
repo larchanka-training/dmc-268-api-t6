@@ -1,0 +1,840 @@
+{
+  "data": {
+    "repository": {
+      "issue": {
+        "title": "DevOps Инженер (Staging-окружение & сквозной CD)",
+        "url": "https://github.com/larchanka-training/dmc-268-api-t6/issues/35",
+        "state": "CLOSED",
+        "stateReason": "COMPLETED",
+        "body": "## Background\n\nЗадача роли DevOps Инженер на спринт 2 — текст куратора с доски курса, дословно: «Развертывание окружения на сервере и настройка сквозного CD-пайплайна. Применить Terraform-конфигурации, сконфигурировать базовый инстанс PostgreSQL и Redis. Настроить непрерывную доставку (CD): автоматический билд и деплой Docker-образов бэкенда, воркеров и статики фронтенда на сервер по пушу в main/develop. Развернуть и настроить безопасное хранилище секретов (Vault / Doppler / GitHub Encrypted Secrets) и пробросить их в рантайм контейнеров. Definition of Done (DoD): окружение доступно по доменному имени/IP; бэкенд, воркер и фронтенд автоматически деплоятся через CI/CD при мерже.»\n\nИсполнитель — aleksei-antipin. Работа — в larchanka-training/dmc-268-api-t6; larchanka-training/dmc-268-ui-t6 только проверяется, правок там задача не требует. Срок — конец спринта 2, 04.10.2026. _(обновлено по #20)_\n\nЧто уже есть на `main`. Staging работает на курсовом VPS с 24.09.2026 (PR #5): `.github/workflows/ci-cd.yml` по пушу в `main` гоняет gitleaks, проверки Terraform, сборку, Trivy, пушит образ в GHCR и выкатывает его по SSH (`deploy-staging`) с health check, авто-откатом и promote. `https://staging-api.dmc268-t6.axyi.ru/healthcheck` отвечает через edge-прокси Caddy из `deploy/edge`. На хосте `deploy/compose/staging.yml` поднимает три сервиса: `api`, одноразовый `bootstrap` (`alembic upgrade head` и сид промптов) и `postgres:17-alpine`. RabbitMQ, Redis и воркера нет ни на staging, ни в Terraform; `Dockerfile` собирает один образ с uvicorn.\n\nСекреты доходят не все. `deploy/scripts/env-file.sh` пишет в `.env` на хосте (0600) шесть ключей: `IMAGE`, `POSTGRES_*`, `DEPLOY_MODE`, `EDGE_ALIAS`. `GITHUB_WEBHOOK_SECRET`, `GITHUB_APP_ID`, `GITHUB_APP_PRIVATE_KEY` (из `.env.example`) и LLM-ключ `AI_DMC268_T6` в контейнер не попадают, поэтому диспетчер вебхуков GitHub на staging выключен (`app/bootstrap/reviews_api.py`). В Environment `staging` секретов сейчас нет; на уровне организации заданы `AI_DMC268_T6` и доступ к VPS.\n\nФронтенд уже выкатывается сам: `.github/workflows/ci-cd.yml` в larchanka-training/dmc-268-ui-t6 по пушу в `main` выкатывает статику на `https://staging-ui.dmc268-t6.axyi.ru` на тот же VPS через edge из этого репозитория.\n\nТермины куратора → канон (решения техлида 27.09.2026). «Применить Terraform»: стеки `terraform/` описывают Hetzner, токена Hetzner у команды нет, курс выдал VPS, которым Terraform не управляет. Окружение — курсовой VPS; стеки остаются задокументированной альтернативой, CI продолжает их проверять, apply не требуется. «PostgreSQL и Redis»: набор инфраструктуры MVP утверждён в #20 (D1) — PostgreSQL 17 (уже на staging), RabbitMQ как брокер очереди (SD Р-1) и Redis только как кэш (SD §10), не очередь; объектного хранилища нет. «По пушу в main/develop»: ветки `develop` нет, базовая ветка — `main`; `main` выкатывается на staging, prod вне задачи. «Хранилище секретов»: GitHub Encrypted Secrets (organization и Environment `staging`) → `.env` 0600 на хосте, как в SD §13 и `docs/SECRETS.md`. «Деплой воркеров»: образ один — воркер запускается из того же образа, что `api`, отдельной командой из #34; разделение на сервисы и per-service образы (#16) — позже, не в этом спринте. Эта задача добавляет RabbitMQ, Redis, проводку секретов, маршрут `/api/*` на edge и сервис воркера. _(обновлено по #20)_\n\n## Scope\n\n- RabbitMQ на staging: образ `rabbitmq:4-management-alpine`, как в `docker-compose.yml` из PR #36 по #20; сервис в `deploy/compose/staging.yml` во внутренней сети, данные в именованном томе, учётные данные из GitHub Secrets или сгенерированные на хосте в `.env` 0600 (как пароль PostgreSQL) _(обновлено по #20)_\n- Redis на staging как кэш по SD §10: образ `redis:8-alpine`, как в `docker-compose.yml` из PR #36 по #20; внутренняя сеть, пароль, без публикации портов _(обновлено по #20)_\n- Сервис `worker` на staging: тот же образ, что у `api`, с командой запуска из #34; выкатывается тем же циклом, что `api`, с тем же `.env` — после того как #34 даст AMQP-консьюмер и команду запуска _(обновлено по #20)_\n- Проводка секретов приложения: `GITHUB_WEBHOOK_SECRET`, `GITHUB_APP_ID`, `GITHUB_APP_PRIVATE_KEY`, LLM-ключи, адрес LLM API и модель (`AI_DMC268_T6` и остальные — под именами переменных из #33: ключи провайдера списком, base URL, модель), строки подключения к RabbitMQ и Redis — от Environment `staging` через `envs:` деплоя и `env-file.sh` до контейнеров `api` и `worker`; тот же набор сохраняется при откате (`deploy/scripts/rollback.sh`, `.github/workflows/rollback.yml` и шаг авто-отката в `.github/workflows/ci-cd.yml`) _(дополнено по карточке спринта)_\n- Секреты авторизации (D4, auth-api — в #11): client id и client secret GitHub App для user authorization, пара ключей подписи JWT (приватный подписывает, публичный проверяет) и домен cookie refresh (на staging — хост UI `staging-ui.dmc268-t6.axyi.ru`, через который идут `/api/auth/*`). Имена переменных — из #11, путь тот же: Environment `staging` → `envs:` деплоя → `env-file.sh`; только в контейнер `api`, воркеру они не нужны _(обновлено по #20)_\n- Пару ключей подписи JWT для staging генерирует эта задача: пара создаётся один раз, приватный и публичный ключи заводятся секретами Environment `staging` под именами из #11 и доходят до контейнера `api` тем же путём, что остальные секреты авторизации _(дополнено по карточке спринта)_\n- Один origin (решение техлида по #20): на хосте UI `staging-ui.dmc268-t6.axyi.ru` пути `/api/*`, включая `/api/auth/*` и SSE `/api/stream`, проксируются в одно приложение `api` — edge (Caddy, `deploy/edge/Caddyfile`) или nginx UI; portal-api, auth-api и webhook-api — роуты одного FastAPI-приложения `app/main.py`, остальные пути — статика ui. Так UI и API работают с одного origin, как требует `contracts/openapi.yaml` (CORS не нужен), и cookie refresh с `Path=/api/auth` доходит до API. Хост `staging-api.dmc268-t6.axyi.ru` остаётся для healthcheck и вебхуков GitHub _(обновлено по #20)_\n- Гейт тестов перед выкатом: `push-image` ждёт джоб `Python lint / type / test`\n- Документация: `docs/SECRETS.md`, `docs/CICD.md`, `docs/INFRASTRUCTURE.md` (позиция по Terraform, список сервисов staging), строка «сегодня на staging» в SD §14 — после мержа PR #36, который сейчас меняет `docs/SYSTEM_DESIGN.md` _(обновлено по #20)_\n- Фронтенд: только проверка, что выкат из larchanka-training/dmc-268-ui-t6 работает как есть\n- Вне задачи: prod-окружение и ветка `develop`; бэкапы PostgreSQL; мониторинг (SD §13 выносит его в отдельную задачу); MinIO/S3 (D1: объектного хранилища в MVP нет, S3 — после MVP); разделение на сервисы и per-service образы (#16, позже); регистрация GitHub App (#37: её делает техлид и сам заводит значения в Environment `staging`, см. Dependencies); изменения sshd, файрвола и Docker daemon на общем VPS; `terraform apply` _(обновлено по #20)_\n\n## Acceptance Criteria\n\n- [x] Мерж в `main` выкатывает staging без ручных шагов: прогон `CI/CD` зелёный вместе с `deploy-staging` и `promote-staging`, `https://staging-api.dmc268-t6.axyi.ru/healthcheck` отвечает `\"status\":\"ok\"`; ссылка на прогон — в PR\n- [x] RabbitMQ работает на staging только во внутренней сети compose: в `deploy/compose/staging*.yml` у него нет `ports:`, порты 5672 и 15672 снаружи VPS закрыты (вывод проверки — в PR)\n- [x] После `docker compose up -d --force-recreate` сервиса RabbitMQ durable-очереди и сообщения в них на месте (`rabbitmqctl list_queues` до и после — в PR)\n- [x] Redis работает на staging во внутренней сети, с паролем, без `ports:`; приложение не использует его как очередь\n- [x] После мержа #34 сервис `worker` из того же образа, что `api`, поднимается при каждом выкате из `main` и подключается к RabbitMQ; воркер, упавший при старте, валит выкат и запускает авто-откат так же, как `api`; у `worker` в `deploy/compose/staging.yml` свой healthcheck (или `healthcheck: disable: true` и другая проверка старта) вместо унаследованной HTTP-проверки образа, и `up --wait` проходит с ним _(дополнено по карточке спринта)_\n- [x] Секреты приложения из scope попадают в контейнеры `api` и `worker` (секреты авторизации — только в `api`) только через GitHub Secrets и `.env` 0600 на хосте; в git, образе и логах CI их нет, gitleaks зелёный; после авто-отката в `deploy-staging` и ручного `rollback.yml` на предыдущий образ они на месте (список имён из `docker compose exec api env` и `docker compose exec worker env` после отката, без значений — в PR) _(дополнено по карточке спринта)_\n- [x] Незаданный секрет отсутствует в окружении контейнера, а не приходит пустой строкой: список имён из `docker compose exec api env` (без значений) — в PR\n- [x] `https://staging-ui.dmc268-t6.axyi.ru/api/runs` отвечает JSON от приложения `api`, а не `index.html` фронтенда; `/api/auth/*` и `/api/stream` идут тем же маршрутом (вывод `curl -i` — в PR) _(обновлено по #20)_\n- [x] `docs/INFRASTRUCTURE.md` фиксирует, что окружение staging — курсовой VPS вне Terraform, и почему; стеки Hetzner описаны как альтернатива, джобы `terraform-fmt-validate` и `terraform-lint-security` остаются зелёными\n- [x] `push-image` не стартует, пока не прошёл `Python lint / type / test`\n- [x] `docs/SECRETS.md` перечисляет каждое новое имя: тип, уровень (organization / Environment), куда уходит; строка про `AI_DMC268_T6` обновлена; `docs/CICD.md` и SD §14 перечисляют сервисы staging\n- [x] Фронтенд: после мержа в `main` larchanka-training/dmc-268-ui-t6 `https://staging-ui.dmc268-t6.axyi.ru` обновляется сам; ссылка на зелёный прогон ui `CI/CD` — в комментарии при закрытии issue\n- [x] Набор инфраструктуры staging совпадает с утверждённым в #20 (D1, [комментарий-решение в #20](https://github.com/larchanka-training/dmc-268-api-t6/issues/20#issuecomment-5860133963)): PostgreSQL 17, RabbitMQ (`rabbitmq:4-management-alpine`), Redis (`redis:8-alpine`), объектного хранилища нет; фактические версии — в описании PR _(обновлено по #20)_\n\n## Dependencies\n\n**Блокирует часть работ:**\n\n- #34 — AMQP-консьюмер, команда запуска воркера и имена переменных подключения к RabbitMQ. AC про `worker` начинается после него; RabbitMQ, Redis и секреты — нет\n- #33 — имена переменных LLM-ключей (списком), адреса LLM API и модели в приложении; до него `AI_DMC268_T6` не пробрасывается _(дополнено по карточке спринта)_\n- #11 — имена переменных секретов авторизации (client id и client secret App, ключи JWT, домен cookie); до него секреты авторизации не пробрасываются _(обновлено по #20)_\n\n**Связано, не блокирует:**\n\n- #16 — разделение на сервисы и per-service образы; позже, не в этом спринте. До него образ один: `api` и `worker` запускаются из него разными командами _(обновлено по #20)_\n- #20 — набор инфраструктуры MVP утверждён ([комментарий-решение в #20](https://github.com/larchanka-training/dmc-268-api-t6/issues/20#issuecomment-5860133963), D1); таблица терминов куратора (включая хранилище секретов) — `docs/PIPELINE_SPEC.md` §13; `docker-compose.yml` с RabbitMQ и Redis и `contracts/openapi.yaml` — в PR #36; владелец DevOps — обязательный ревьюер этого PR _(обновлено по #20)_\n- #11 — обработчик вебхуков GitHub; на staging он заработает, когда здесь будут проведены секреты GitHub App и заданы их значения\n- #37 — регистрация GitHub App, делает техлид; #35 проводит значения. Staging App: права и события — по SD §8.2 с поправкой из #37, webhook URL — на хосте staging API, callback URL — только staging UI (для `http://localhost:5173` — отдельный dev App), setup URL — `/repositories` staging UI. Значения staging, в том числе client id и client secret для авторизации, техлид сам заводит секретами в Environment `staging`, а client id и slug для сборки UI — в variables репозитория ui. AC этой задачи от значений не зависят: они проверяются по именам и по AC про незаданный секрет, а воркер из #34 стартует и без секретов App _(обновлено по #20)_\n- #30 — добавляет `services: rabbitmq` в джоб `Python lint / type / test` того же `.github/workflows/ci-cd.yml`, где эта задача меняет `needs:` у `push-image` (#20, «Дополнения 28.09»); правки одного файла согласовать между PR _(обновлено по #20)_\n- larchanka-training/dmc-268-ui-t6 — выкат фронтенда (`.github/workflows/ci-cd.yml`); зависит от edge-сети `dmc268-edge` этого репозитория\n- larchanka-training/dmc-268-ui-t6#21 — задача DevOps спринта 1 (исходила из Hetzner), закрыта\n\n## DoD Checklist\n\n- [x] Прогон `CI/CD` на `main` после последнего мержа зелёный целиком, включая `deploy-staging` и `promote-staging`\n- [x] Required check `Python lint / type / test` зелёный; если менялся Python — гейты AGENTS.md зелёные\n- [x] Ни одного значения секрета в git, образе, логах CI и описании PR\n- [x] PR оформлены и прошли ревью по `docs/CONTRIBUTING.md`: заголовок ≤ 72 символов, тело What / Why / How to verify / Refs, ревьюер не автор, треды закрыты\n- [x] `docs/SECRETS.md`, `docs/CICD.md`, `docs/INFRASTRUCTURE.md` и SD §14 обновлены\n- [x] Смёржено до 04.10.2026; issue закрывается после мержа последнего PR (часть про воркер — после #34), а не переносом карточки на доске\n\n## References\n\n- Доска курса, страница «🗓️ Спринты команда-6»: карточка DevOps Инженера и «решения с мита» — https://www.tldraw.com/f/qdH9mHB7ezqaShpUBGvQC?d=v7074.-701.4403.3407.KHYM-i2adcX6hjGtz-H0K\n- `docs/SYSTEM_DESIGN.md`: Р-1 (RabbitMQ), §10 (Redis — кэш), §13 (секреты только через env из CI; PG, RabbitMQ, Redis — во внутренней сети), §14 (развёртывание v1)\n- `docs/CICD.md`, `docs/SECRETS.md`, `docs/INFRASTRUCTURE.md` §8 (курсовой VPS)\n- #34 — Инженер 5, очередь и воркер; #16 — uv-workspace монорепо сервисов\n\n## Kickoff — с чего начать\n\n**Репозиторий:** larchanka-training/dmc-268-api-t6 — larchanka-training/dmc-268-ui-t6 только для проверки выката фронтенда\n\n**Ветка:** chore/<N>-staging-services от `main` — `main` защищён, изменения только через PR; RabbitMQ, Redis и секреты можно выкатить сразу, воркер — отдельным PR после #34\n\n**Форма проблемы:** Выкат на staging работает, но везёт один процесс. CI собирает один образ, `deploy.sh` поднимает из `deploy/compose/staging.yml` `api`, одноразовый `bootstrap` и `postgres`, а `env-file.sh` пишет в `.env` на хосте шесть фиксированных ключей. Для пайплайна ревью не хватает брокера RabbitMQ и кэша Redis во внутренней сети, сервиса воркера, пути секретов приложения (GitHub App, авторизация, LLM) от GitHub Secrets до контейнеров и маршрута `/api/*` с хоста UI. Стеки `terraform/` описывают Hetzner и в живом выкате не участвуют: цель выбирает шаг «Resolve staging target», и сейчас это курсовой VPS. _(обновлено по #20)_\n\n**Что прочитать первым:**\n\n- `docs/CICD.md` — устройство пайплайна, две цели выката, §8 про курсовой VPS и edge\n- `docs/SECRETS.md` — перечень секретов и маршрут до хоста; новые имена добавляются сюда\n- `.github/workflows/ci-cd.yml` — джоб `deploy-staging`: список `envs:` и скрипт, который вызывает `deploy.sh`\n- `deploy/scripts/env-file.sh` и `deploy/scripts/deploy.sh` — запись `.env`, `docker compose up --wait`, авто-откат\n- `deploy/compose/staging.yml` и `deploy/compose/staging.edge.yml` — сервисы и сети\n- `deploy/edge/Caddyfile` — маршруты edge по хостам; сюда (или в nginx UI) добавляется `/api/*` на хосте UI _(обновлено по #20)_\n- `docker-compose.yml` в PR #36 по #20 — образы и healthcheck RabbitMQ и Redis для локальной разработки _(обновлено по #20)_\n- `app/bootstrap/reviews_api.py` — какие переменные включают диспетчер вебхуков\n- `docs/SYSTEM_DESIGN.md` Р-1, §10, §13, §14 — целевой набор контейнеров и правила секретов\n\n**Перед тем как писать код:**\n\n- `gh run list --repo larchanka-training/dmc-268-api-t6 --workflow ci-cd.yml --branch main --limit 5` — зелёны ли последние выкаты до изменений\n- `curl -fsS https://staging-api.dmc268-t6.axyi.ru/healthcheck` — staging жив до изменений\n- `gh api repos/larchanka-training/dmc-268-api-t6/environments/staging/secrets --jq '.secrets[].name'` — какие секреты уже заведены (на 27.09.2026 — ни одного); только имена\n\n**Мины:**\n\n- VPS общий для api и ui: sshd, файрвол и настройки Docker daemon не трогать. Edge (Caddy, `deploy/edge`) принадлежит этому репозиторию, выкат ui подключается к сети `dmc268-edge` — её не переименовывать\n- `ports:` в compose публикует порт на все интерфейсы в обход правил файрвола хоста. RabbitMQ и Redis — только во внутренней сети; панель управления RabbitMQ — через SSH-туннель\n- RabbitMQ хранит данные под именем узла, которое берётся из hostname контейнера. Без фиксированного `hostname:` каждое пересоздание — новый узел, и durable-очереди из тома пропадают\n- Compose подставляет незаданную `${VAR}` пустой строкой, а `app/bootstrap/reviews_api.py` проверяет `GITHUB_WEBHOOK_SECRET` через `is not None`: `GITHUB_WEBHOOK_SECRET=` включит приём вебхуков с HMAC по пустому ключу (читатели `GITHUB_APP_ID` проверяют значение на истинность) _(уточнено по ревью PR #45)_. Незаданный секрет не должен попадать в окружение контейнера вообще\n- `GITHUB_APP_PRIVATE_KEY` и приватный ключ подписи JWT — многострочные PEM. `env-file.sh` пишет строки `KEY=value` и экранирует только `$`, а путь идёт через `envs:` SSH-действия и shell. Проверить круговой путь на настоящем ключе _(обновлено по #20)_\n- `POSTGRES_PASSWORD` и учётные данные RabbitMQ по умолчанию применяются только при первом старте на пустом томе; смена значения в секретах потом ничего не меняет\n- Сейчас тесты выкат не гейтят: `needs` у `push-image` не включает `python-lint-type-test`, поэтому зелёный выкат не значит зелёные тесты\n- Откат (`deploy/scripts/rollback.sh`) меняет только образ, `alembic downgrade` не делается: откатанный `api` или `worker` может встретить более новую схему БД\n- `rollback.sh` заново пишет `.env` через `write_compose_env_file` и берёт из старого `.env` только `POSTGRES_*`, `DEPLOY_MODE` и `EDGE_ALIAS` (образ — из аргумента или файла предыдущего выката), а `rollback.yml` и шаг авто-отката в `deploy-staging` передают на хост только `GHCR_*`, `APP_DIR`, `DEPLOY_MODE` и `EDGE_ALIAS` (`rollback.yml` — ещё `IMAGE`). Ключ, добавленный только в `env-file.sh` и `deploy.sh`, после отката пропадёт из `.env` или станет пустым, и откатанные `api` и `worker` стартуют без секретов. Учётные данные, сгенерированные на хосте, при откате должны браться из старого `.env` так же, как `POSTGRES_PASSWORD` _(дополнено по карточке спринта)_\n- `Dockerfile` задаёт `HEALTHCHECK` по HTTP `127.0.0.1:8000/healthcheck`, и `worker` из того же образа его наследует. HTTP-сервера у воркера нет: контейнер станет `unhealthy`, `up --wait` в `deploy.sh` упадёт и запустит откат на каждом выкате. У `worker` в `deploy/compose/staging.yml` нужен свой `healthcheck` (или `disable: true` и проверка старта другим способом) и `depends_on` на успешно завершившийся `bootstrap` и здоровый RabbitMQ _(дополнено по карточке спринта)_\n- Образ один: `worker` — тот же образ, что `api`, с другой командой (#34); per-service образов в этом спринте нет, разделение на сервисы (#16) — позже _(обновлено по #20)_\n\n",
+        "timelineItems": {
+          "pageInfo": {
+            "hasNextPage": false,
+            "endCursor": "Y3Vyc29yOnYyOpPPAAABoYcIG9ACqzE4NTUzMTk0MTEy"
+          },
+          "nodes": [
+            {
+              "__typename": "CrossReferencedEvent",
+              "willCloseTarget": false,
+              "source": {
+                "__typename": "Issue"
+              }
+            },
+            {
+              "__typename": "CrossReferencedEvent",
+              "willCloseTarget": false,
+              "source": {
+                "__typename": "PullRequest",
+                "number": 36,
+                "title": "docs(spec): pin pipeline, API and LLM output contracts (#20)",
+                "url": "https://github.com/larchanka-training/dmc-268-api-t6/pull/36",
+                "body": "## What\n\nMachine-checked contracts for the review pipeline, per the decisions in [#20 (comment)](https://github.com/larchanka-training/dmc-268-api-t6/issues/20#issuecomment-5860133963):\n\n- `docs/PIPELINE_SPEC.md` — Run lifecycle (7 states, transitions with triggers), phases inside `running` as a `run_actions` tool catalog, per-phase timeouts, lease/heartbeat, one attempt counter, retry queues and DLQ, LLM failure classes with attempts / backoff / repair / fallback / final state / `error_code` / check-run / UI view, the Р-10 trigger with the no-CI sweep, finding anchor mapping, derived verdict, curator-term → canon table, decisions and open questions.\n- `contracts/openapi.yaml` (OpenAPI 3.1) — browser-facing API: runs, run detail (verdict, summary, findings), diff, files, comments, actions, rerun, cancel, repositories, pull requests, auth, SSE. Not-yet-implemented operations carry `x-status: planned` + the owning issue.\n- `review/schemas/review-output.schema.json` — JSON Schema (2020-12) for `ReviewOutput`, key-for-key with the Pydantic model; `review/scripts/validate_findings.py` validates the shape with `jsonschema` and keeps only the semantic rules.\n- `contracts/schemas/review.{run,publish}.v1.schema.json` + strict fixtures in `contracts/examples/` — replace the jsonc samples of SD §7.2 (UUID ids, `findings_hash` as 64 hex, 1-based `attempt`).\n- Tests (no database, part of the required check): `tests/test_openapi_contract.py` (OAS 3.1 validation, FastAPI routes ⇄ spec both ways, responses of implemented endpoints against the spec, enums pinned to the UI Zod fixture and the model), `tests/test_review_output_schema.py` (schema ⇄ Pydantic ⇄ script parity over a valid/invalid corpus), `tests/test_contract_schemas.py` (message fixtures and mutations); `tests/test_review_artifacts.py` drops its hand-written schema checker.\n- `docs/SYSTEM_DESIGN.md` and `review/README.md` aligned: Р-10 / OQ-1 / OQ-3 closed, OQ-2 owner and deadline, new flows (auth, UI reads + SSE, rerun, retry/DLQ, App installation), §12 through `openapi.yaml`, MVP infrastructure without object storage, sprint-1 debt. The draft markers of SYSTEM_DESIGN and PIPELINE_SPEC are removed in this PR: the merge needs the owners' approvals, so main shows «утверждён» only after the team has approved.\n- `docker-compose.yml` — RabbitMQ and Redis for local development; `Dockerfile` ships `review/schemas` for the LLM gateway (#33).\n\nNew dev dependencies: `openapi-spec-validator>=0.9.0` (0.9.0, 2026-05-20) and `openapi-schema-validator>=0.9.0` (0.9.0, 2026-04-27) — validate the OpenAPI document and its schemas in `tests/test_openapi_contract.py`.\n\nOverlap note: this PR edits `docs/SYSTEM_DESIGN.md`, `docker-compose.yml`, `pyproject.toml` and `uv.lock`, which open PR #10 also touches. By the tech lead's decision #10 is out of this sprint; its dependent work is redistributed to #11, #34 and #35. The overlap is announced in #10 ([comment](https://github.com/larchanka-training/dmc-268-api-t6/pull/10#issuecomment-5876643157)): `git merge-tree` shows one new content conflict for #10, `docker-compose.yml`.\n\n## Why\n\nThe pipeline, API and LLM-output contracts lived as prose in SYSTEM_DESIGN, `review/README.md`, the UI Zod schemas and PR comments, and the sprint-2 issues had started to drift from them and from each other. #20 turns them into one reviewed contract with schemas that the required check `Python lint / type / test` verifies, and adds the two missing pieces: phases inside a run and LLM failure handling. Issues #11, #30, #33, #34, #35, larchanka-training/dmc-268-ui-t6#50 and larchanka-training/dmc-268-ui-t6#57 were aligned to it.\n\n## How to verify\n\n```bash\nuv sync --locked --all-groups\nuv run ruff check . && uv run ruff format --check . && uv run mypy . && uv run pytest   # 320 passed, 7 skipped, 1 xfailed\nuv run python review/scripts/validate_findings.py review/examples/findings.sample.json  # OK ReviewOutput 5 items\nuv run pytest tests/test_openapi_contract.py tests/test_review_output_schema.py tests/test_contract_schemas.py -v\ndocker compose up -d --wait rabbitmq redis && docker compose down                         # both healthy\nnpx --yes @redocly/cli@latest lint contracts/openapi.yaml                                 # optional: 0 errors\n```\n\nThe one xfail is strict: `GET /api/runs/{id}` still returns a bare `RunSession` instead of `RunDetail` until #34 lands.\n\n## Required approvals\n\nOne approval per role; section numbers refer to `docs/PIPELINE_SPEC.md`.\n\n| Role | Reviewer | Issue | What to check first |\n|---|---|---|---|\n| Backend: webhook, VCS, auth-api | @ndovnar | #11 | trigger (§8), transitions T1 and T6 (§1), `/api/auth/*` in `contracts/openapi.yaml` |\n| Backend: queue and API | @createunix | #34 | transitions (§1), retry queues and DLQ (§4.3–§4.4), `RunDetail`, repositories and the pull request list in `contracts/openapi.yaml` |\n| LLM Gateway | @lama2x2 | #33 | LLM failure classes (§5.1), call limits (§4.5), `review/schemas/review-output.schema.json` and `suggestion` (§9) |\n| Frontend: auth and navigation | @skvertl | larchanka-training/dmc-268-ui-t6#50 | `/api/auth/*`, `Repository`, `/api/stream` |\n| Frontend: review screen | @AndrewBlinets | larchanka-training/dmc-268-ui-t6#57 | `RunDetail`, verdict and severity badges (§11), finding anchor (§10) |\n| QA | @ndovnar (QA is shared with the tech lead, who authored this PR) | #30 | LLM output schema and its checks (§9, §16), `error_code` catalog (§6) |\n| DevOps | @aleksei-antipin | #35 | MVP infrastructure (§14), single origin |\n\nMerge only after every reviewer in this table has approved. The review thread on `docs/PIPELINE_SPEC.md` line 5 is resolved last.\n\n## Refs\n\nCloses #20\nRefs #11, #30, #33, #34, #35, larchanka-training/dmc-268-ui-t6#50, larchanka-training/dmc-268-ui-t6#57, larchanka-training/dmc-268-ui-t6#58\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n\nhttps://claude.ai/code/session_01NSxdpMHa6QNDP4ZHCU11cw\n\n\n",
+                "state": "MERGED",
+                "mergedAt": "2026-09-29T11:58:38Z",
+                "headRefOid": "9dd0aeb8943b2322bce41dfbdb3115a54f73b288",
+                "repository": {
+                  "nameWithOwner": "larchanka-training/dmc-268-api-t6"
+                },
+                "commits": {
+                  "nodes": [
+                    {
+                      "commit": {
+                        "statusCheckRollup": {
+                          "state": "SUCCESS"
+                        }
+                      }
+                    }
+                  ]
+                },
+                "reviewThreads": {
+                  "pageInfo": {
+                    "hasNextPage": false,
+                    "endCursor": "Y3Vyc29yOnYyOpK0MjAyNi0wOS0yOFQxNzoxMDoyNVrOpsjSng=="
+                  },
+                  "nodes": [
+                    {
+                      "isResolved": true
+                    },
+                    {
+                      "isResolved": true
+                    },
+                    {
+                      "isResolved": true
+                    },
+                    {
+                      "isResolved": true
+                    },
+                    {
+                      "isResolved": true
+                    },
+                    {
+                      "isResolved": true
+                    },
+                    {
+                      "isResolved": true
+                    },
+                    {
+                      "isResolved": true
+                    },
+                    {
+                      "isResolved": true
+                    },
+                    {
+                      "isResolved": true
+                    },
+                    {
+                      "isResolved": true
+                    },
+                    {
+                      "isResolved": true
+                    },
+                    {
+                      "isResolved": true
+                    }
+                  ]
+                }
+              }
+            },
+            {
+              "__typename": "CrossReferencedEvent",
+              "willCloseTarget": false,
+              "source": {
+                "__typename": "Issue"
+              }
+            },
+            {
+              "__typename": "CrossReferencedEvent",
+              "willCloseTarget": false,
+              "source": {
+                "__typename": "Issue"
+              }
+            },
+            {
+              "__typename": "CrossReferencedEvent",
+              "willCloseTarget": false,
+              "source": {
+                "__typename": "Issue"
+              }
+            },
+            {
+              "__typename": "CrossReferencedEvent",
+              "willCloseTarget": false,
+              "source": {
+                "__typename": "Issue"
+              }
+            },
+            {
+              "__typename": "CrossReferencedEvent",
+              "willCloseTarget": false,
+              "source": {
+                "__typename": "Issue"
+              }
+            },
+            {
+              "__typename": "CrossReferencedEvent",
+              "willCloseTarget": false,
+              "source": {
+                "__typename": "PullRequest",
+                "number": 38,
+                "title": "feat: implement GitHub webhook reviews and portal auth (#11)",
+                "url": "https://github.com/larchanka-training/dmc-268-api-t6/pull/38",
+                "body": "## What\n\n- Добавлен PostgreSQL-порт выбора PR, у которых истекло двухминутное ожидание CI, и use case `SweepNoCi`, вызывающий существующий `TryEnqueueWebhookRun.execute` после короткой транзакции.\n- Кандидат: открытый PR с `ai_review_labeled`, включённым репозиторием, `wait_for_ci=auto`, пустым `ci_status`, без активного Run и без webhook Run для `(PR, head_sha)`.\n- `check_suite` и `status` для текущего head обновляют кэш `code_changes.ci_status`; не-`ENQUEUED` кандидат исключается до изменения head либо состояния лейбла.\n- Обновлён `PIPELINE_SPEC`: `ai_review_labeled`, guard webhook Run и граница #38/#34.\n\n## Why\n\nНужен запуск ревью без нового webhook после окна auto-CI, при сохранении окончательной REST-проверки GitHub и без повторных REST-вызовов на каждом sweep.\n\n## How to verify\n\nЛокально проверено:\n\n- `uv run ruff check .`\n- `uv run ruff format --check .`\n- `uv run mypy .`\n- `TEST_DATABASE_URL=postgresql+psycopg://app:app@127.0.0.1:5433/app uv run pytest` — 610 passed, 1 xfailed, без skipped.\n- PostgreSQL-интеграции с подменённым GitHub REST покрывают запуск после 2 минут без webhook, гонку с `check_suite.completed` (ровно один Run), повторный sweep без REST после Run, исключение неуспешного кандидата до изменения состояния, current-head кэш `check_suite`/`status` и `unlabeled`.\n\nЕщё зависит от #34 и staging:\n\n- #34 подключает `SweepNoCi` к leader-циклу worker с `pg_advisory_lock` и периодом 30 секунд; в #38 этот цикл намеренно не дублируется.\n- На staging нужно подтвердить реальный installation token, GitHub REST и публикацию worker-пути после интеграции #34.\n\n## Refs\n\nRefs #11, #34. Согласованная граница: https://github.com/larchanka-training/dmc-268-api-t6/issues/34#issuecomment-5906963924",
+                "state": "MERGED",
+                "mergedAt": "2026-10-01T08:11:23Z",
+                "headRefOid": "c5bf9d816378467e369cedf6c63fc50620b0f78b",
+                "repository": {
+                  "nameWithOwner": "larchanka-training/dmc-268-api-t6"
+                },
+                "commits": {
+                  "nodes": [
+                    {
+                      "commit": {
+                        "statusCheckRollup": {
+                          "state": "FAILURE"
+                        }
+                      }
+                    }
+                  ]
+                },
+                "reviewThreads": {
+                  "pageInfo": {
+                    "hasNextPage": false,
+                    "endCursor": "Y3Vyc29yOnYyOpK0MjAyNi0wOS0zMFQxMDoxNToyMFrOp3xfeQ=="
+                  },
+                  "nodes": [
+                    {
+                      "isResolved": true
+                    },
+                    {
+                      "isResolved": true
+                    },
+                    {
+                      "isResolved": true
+                    },
+                    {
+                      "isResolved": true
+                    },
+                    {
+                      "isResolved": true
+                    },
+                    {
+                      "isResolved": true
+                    },
+                    {
+                      "isResolved": true
+                    },
+                    {
+                      "isResolved": true
+                    },
+                    {
+                      "isResolved": true
+                    },
+                    {
+                      "isResolved": true
+                    },
+                    {
+                      "isResolved": true
+                    },
+                    {
+                      "isResolved": true
+                    }
+                  ]
+                }
+              }
+            },
+            {
+              "__typename": "CrossReferencedEvent",
+              "willCloseTarget": false,
+              "source": {
+                "__typename": "PullRequest",
+                "number": 10,
+                "title": "feat: restructure backend as microservices monorepo",
+                "url": "https://github.com/larchanka-training/dmc-268-api-t6/pull/10",
+                "body": "Closes #16\n",
+                "state": "CLOSED",
+                "mergedAt": null,
+                "headRefOid": "523d6dd4cec8d1138996299abd0da7001b403f35",
+                "repository": {
+                  "nameWithOwner": "larchanka-training/dmc-268-api-t6"
+                },
+                "commits": {
+                  "nodes": [
+                    {
+                      "commit": {
+                        "statusCheckRollup": null
+                      }
+                    }
+                  ]
+                },
+                "reviewThreads": {
+                  "pageInfo": {
+                    "hasNextPage": false,
+                    "endCursor": "Y3Vyc29yOnYyOpK0MjAyNi0wOS0yNVQwOToyNTo0NVrOpfFomg=="
+                  },
+                  "nodes": [
+                    {
+                      "isResolved": false
+                    },
+                    {
+                      "isResolved": false
+                    }
+                  ]
+                }
+              }
+            },
+            {
+              "__typename": "CrossReferencedEvent",
+              "willCloseTarget": false,
+              "source": {
+                "__typename": "PullRequest",
+                "number": 40,
+                "title": "feat(reviews): add LLM gateway with structured review output (#33)",
+                "url": "https://github.com/larchanka-training/dmc-268-api-t6/pull/40",
+                "body": "> **Правки техлида (@axyi), 03.10:** пункт про `pytest-cov` перенесён из «Spec changes» в «What», добавлена строка про §14, формулировка 429 выровнена с §5.1. Содержание не менялось.\n\n## What\n\n- **LLM Gateway** (`app/modules/reviews/infrastructure/llm/`) implements the `ReviewModel` and `ConventionsModel` ports on one OpenAI-compatible adapter. EUrouter and self-hosted (LM Studio, Ollama, vLLM) differ only by `LLM_*` config.\n  - Key rotation: several keys per provider; 401/403/429 moves to the next key and is not counted as a call.\n  - Failure policy per `docs/PIPELINE_SPEC.md` §3, §4.5, §5.1:\n    - timeout: 1 retry after 2 s + jitter, then fallback;\n    - 429: rotate keys, then one wait on `Retry-After` ≤ 30 s, then fallback;\n    - 5xx / connection: retries after 2 s and 8 s, then fallback;\n    - invalid answer: one repair call with the validator errors, then fallback;\n    - context overflow (pre-send count or HTTP 400): no retry, no fallback.\n  - At most 4 calls per run attempt, shared by the conventions and the review call (`call_no` runs through the attempt). Before every call the gateway checks the attempt deadline and the run cost (sum of `usage_events` over all attempts plus the estimate of the next call).\n  - Errors are normalized to `error_code` (§6).\n  - Every provider call is written as a `llm.call` run action and its usage as a `usage_events` row, each in its own short transaction after the call. `llm.review_output` is unchanged.\n- **Structured output**: `response_format` `json_schema` with `strict: true`, using `review/schemas/review-output.schema.json` itself (no fourth copy). The answer must pass the JSON Schema, then `parse_review_output`. The prompt-JSON path is dev/eval only and needs `LLM_ALLOW_PROMPT_JSON=1`. The choice is explained in `BACKEND_ARCHITECTURE.md`.\n- **Prompt assembly**:\n  - `PromptBuilder` renders the file `language` plus `head_sha` and `<commit_messages>` when they are passed, and splits the prompt into a system and a user message. The prefix (system, rules, conventions) does not depend on the diff.\n  - Token budgeting: the L1 context is fitted to `min(model window, SD §13 limit) − answer reserve` — file blocks cut with the README trailer, the rest listed in `<omitted_files>`.\n  - Few-shot: 3 pairs, one with no findings, in the new `review.system.v2.md` (Р-6: v1 is immutable).\n- **Port change** (#18): `ReviewModel.draft_review(*, context: ReviewContext)` replaces `draft_review(*, prompt: str)`. The gateway needs the context to fit the budget and to build separate messages. Run-attempt data (`RunCallContext`) is bound to the adapter by the worker at claim time (#34).\n- **OQ-2 closed on the EUrouter catalog**: primary `gpt-4.1-mini`, fallback `mistral-small-4` (SD §15). Strict `json_schema` on the EUrouter route is confirmed by the manual workflow `LLM live run` (`.github/workflows/llm-live-run.yml`, org secret `AI_DMC268_T6`), first run after the merge.\n- **Database-free entry point** `review_case` (for eval #30) and a manual live-run CLI — see README, \"LLM gateway\".\n- **CI**: `pytest --cov=app.modules.reviews.application.review_output --cov=app.modules.reviews.infrastructure.llm.answers --cov-branch --cov-fail-under=100` — the `ReviewOutput` schema and the gateway's answer parse path.\n\n- **New dev dependency**: `uv add --dev pytest-cov` (coverage gate of the `ReviewOutput` schema module; `uv.lock` committed).\n\n## Spec changes\n\nNormative text changed in this PR (review of #40; #20 left these cases open):\n\n- `docs/PIPELINE_SPEC.md` §4.5 — the 4-call limit counts every provider call of the attempt, conventions included; `call_no` runs through the attempt; with the limit used up the gateway starts no new generation (`llm_unavailable`, run retry).\n- §5.1, 429 — one retry after `Retry-After` ≤ 30 s, or 2 s + jitter when the header is missing (a negative, non-finite or non-numeric value counts as missing — `_retry_after`); `Retry-After` > 30 s → fallback at once. Key rotation happens first, then the wait.\n- §5.1, invalid JSON — the repair call is skipped when the repair conversation does not fit the context; the fallback gets the original request.\n- §5.1, general — no same-model backoff that would leave less than one call timeout before the deadline; no fallback whose window cannot hold the request (the primary error stays); the result of a mixed chain is the class of the last call; HTTP 413 is a context overflow.\n- §9 — the prompt is `review.system.v2.md` §7–§11; provider schema support is checked by the `LLM live run` workflow.\n- §14 — the OQ-2 row is reworded: closed on the EUrouter catalog; strict `json_schema` on the route is confirmed by the first `LLM live run` after merge (same wording in SD §15, `review/README.md`, SECRETS).\n\n\n## Why\n\nThe project had no LLM call: `ReviewModel` was declared but only implemented by test fakes. #33 delivers the real call behind that port, the failure policy and the limits agreed in #20, structured output that converges on `ReviewOutput`, and the model choice (OQ-2).\n\n## How to verify\n\n```bash\nuv sync --all-groups\nuv run ruff check . && uv run ruff format --check . && uv run mypy .\nuv run pytest --cov=app.modules.reviews.application.review_output --cov=app.modules.reviews.infrastructure.llm.answers --cov-branch --cov-fail-under=100\n```\n\nAll provider tests run on a fake HTTP transport (`httpx.MockTransport`), with no network and no keys:\n\n- `tests/test_llm_gateway.py` — config-only switching between EUrouter and self-hosted, key rotation, every failure class, the 4-call limit, repair, fallback, overflow, budget (the conventions call included), deadline, usage with the actual model, the `llm.call` trace, keys absent from logs and exceptions, and the end-to-end path `sample.diff → PromptBuilder → Gateway → ReviewOutput`.\n- `tests/test_gateway_answer_validation.py` — a negative test for every `ReviewOutput` constraint through the gateway's parse path (broken JSON, markdown fence, extra keys, and so on).\n- `tests/test_prompt_budget.py`, `tests/test_prompt_builder.py` — budgeting, metadata goldens with and without commit messages, and the stable prefix.\n- `tests/test_review_prompt_examples.py` — the few-shot answers are valid, and each `suggestion` is a drop-in replacement of the anchored lines.\n\n**Live run** (manual, not part of CI): `uv run python -m app.bootstrap.llm_gateway review/examples/sample.diff`\n\n| Run | Provider | Model | Calls | Tokens in / out | Cost | Time | Validator |\n|---|---|---|---|---|---|---|---|\n| self-hosted, Ollama 0.33.2, `json_schema` strict | self-hosted | `qwen3:1.7b` (`num_ctx` 16384) | `primary`, no repair | 7 511 / 379 | $0 | 61.6 s | `OK ReviewOutput 2 items` |\n| EUrouter, `gpt-4.1-mini` with fallback | — | — | — | — | — | — | after the merge: workflow `LLM live run` (run by the tech lead, link in #33) |\n| EUrouter, `mistral-small-4` alone | — | — | — | — | — | — | after the merge: same workflow run |\n\n`workflow_dispatch` runs only for a workflow file on `main`, so the EUrouter rows come from the first `LLM live run` after the merge; that run confirms `strict` on the EUrouter route (D7) and is linked in #33 and SD §15.\n\n## Refs\n\nRefs #33, #20, #18, #34, #30, #11\n\n- A `llm.call` response over 64 KB goes to `run_action_responses` through `place_response` (#34, PR #43).\n- Rebased on `main` after #34 (PR #42, #43), #41 and #11: the worker adapters implement `draft_review(context=...)`; the changes to other owners' files are listed in the PR comments.\n- Commit messages vs `head_sha` (question from #11 / #38): the gateway works with `head_sha` alone; commit messages are rendered only when the VCS client passes them.\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n\n\n\n",
+                "state": "MERGED",
+                "mergedAt": "2026-10-03T18:31:18Z",
+                "headRefOid": "50f667544a12ec11ac4cb4e0f42aea2eb2291f73",
+                "repository": {
+                  "nameWithOwner": "larchanka-training/dmc-268-api-t6"
+                },
+                "commits": {
+                  "nodes": [
+                    {
+                      "commit": {
+                        "statusCheckRollup": {
+                          "state": "SUCCESS"
+                        }
+                      }
+                    }
+                  ]
+                },
+                "reviewThreads": {
+                  "pageInfo": {
+                    "hasNextPage": false,
+                    "endCursor": "Y3Vyc29yOnYyOpK0MjAyNi0xMC0wM1QxNzowNjowOVrOqKbm3w=="
+                  },
+                  "nodes": [
+                    {
+                      "isResolved": true
+                    },
+                    {
+                      "isResolved": true
+                    },
+                    {
+                      "isResolved": true
+                    },
+                    {
+                      "isResolved": true
+                    },
+                    {
+                      "isResolved": true
+                    },
+                    {
+                      "isResolved": true
+                    },
+                    {
+                      "isResolved": true
+                    },
+                    {
+                      "isResolved": true
+                    },
+                    {
+                      "isResolved": true
+                    },
+                    {
+                      "isResolved": true
+                    },
+                    {
+                      "isResolved": true
+                    },
+                    {
+                      "isResolved": true
+                    },
+                    {
+                      "isResolved": true
+                    },
+                    {
+                      "isResolved": true
+                    },
+                    {
+                      "isResolved": true
+                    },
+                    {
+                      "isResolved": true
+                    }
+                  ]
+                }
+              }
+            },
+            {
+              "__typename": "CrossReferencedEvent",
+              "willCloseTarget": false,
+              "source": {
+                "__typename": "PullRequest",
+                "number": 45,
+                "title": "feat(deploy): add RabbitMQ, Redis and app secrets to staging (#35)",
+                "url": "https://github.com/larchanka-training/dmc-268-api-t6/pull/45",
+                "body": "## What\n\nПервая часть #35: брокер, кэш и секреты приложения на staging, один origin для UI и API, гейт тестов перед выкатом. `worker` и `webhook-worker` придут следующим PR ([состав — в #35](https://github.com/larchanka-training/dmc-268-api-t6/issues/35#issuecomment-5970540798)), LLM-ключи — после #33.\n\n**Сервисы staging** (`deploy/compose/staging.yml`)\n- RabbitMQ `rabbitmq:4-management-alpine`: только сеть проекта, без `ports:`. `hostname: rabbitmq` и том `rabbitmq-data` — durable-очереди переживают пересоздание контейнера.\n- Redis `redis:8-alpine` как кэш (SD §10): пароль через конфиг на tmpfs, не в argv; без тома и персистентности; `maxmemory 128mb` + `allkeys-lru`, потому что VPS общий.\n- `api` получает `RABBITMQ_URL`, `REDIS_URL` и фиксированные `AUTH_JWT_ISSUER` / `AUTH_JWT_AUDIENCE`. Зависит только от `bootstrap` и `postgres`: к брокеру API подключается при первой публикации, так что сбой брокера или кэша не мешает ему стартовать. `up --wait` по-прежнему ждёт healthcheck всех сервисов.\n\n**Пароли хранилищ** (`deploy/scripts/deploy.sh`, `rollback.sh`)\n- `RABBITMQ_PASSWORD` и `REDIS_PASSWORD` генерируются на хосте один раз и хранятся в `.env` (0600) рядом с `POSTGRES_PASSWORD`. Выкат и откат их переиспользуют. Если том RabbitMQ уже есть, а пароля в `.env` нет, новый не генерируется.\n\n**Секреты приложения** (`.github/workflows/ci-cd.yml`, `deploy/scripts/env-file.sh`)\n- Шаг «Bundle application secrets» берёт секреты Environment `staging` и сопоставляет имена: `GH_*` → `GITHUB_*` (GitHub не принимает имена секретов с префиксом `GITHUB_`, см. #37). Заданные секреты упаковываются в одну строку base64 `APP_SECRETS_B64`: она маскируется и уходит на хост через `envs:`, так что многострочные PEM не ломаются в SSH и shell.\n- На хосте `write_app_env_files` проверяет имена по allowlist и раскладывает значения в одинарных кавычках по двум файлам с правами 0600: `app.env` (ключ App для `worker` и `webhook-worker`) и `api.env` (`api`). К `api` подключён только `api.env`: процесс API ключ App не читает. Незаданный секрет в контейнере отсутствует, а не приходит пустой строкой. Бандл проверяется до любых изменений на хосте; в значениях нельзя `'` и `\\` в конце.\n- Откат файлы секретов не трогает: после авто-отката и ручного `rollback.yml` секреты на месте. Откат на хост без релиза снимает стек по имени проекта.\n\n**Edge и CI**\n- `deploy/edge/Caddyfile`: на `staging-ui` пути `/api/*`, включая `/api/auth/*` и SSE `/api/stream`, идут в `api-staging:8000`, остальное — в UI. Это один origin по решению в #20.\n- `push-image` ждёт `Python lint / type / test`: с красными тестами образ не пушится и staging не выкатывается.\n- `.env.example`: `REDIS_URL` и `REDIS_PASSWORD` (приложение `REDIS_URL` пока не читает).\n\n**Документация**\n- `docs/SECRETS.md`: каждое новое имя (тип, уровень, куда уходит), variable `GH_APP_BOT_LOGIN`, ограничение на значения секретов, обновлённая строка `AI_DMC268_T6`, команды для пары ключей JWT.\n- `docs/CICD.md`: сервисы staging, один origin, судьба квитанций вебхуков до `webhook-worker`.\n- `docs/INFRASTRUCTURE.md`: staging — курсовой VPS вне Terraform, и почему.\n- SD §14.\n\n**Тесты** — `tests/test_deploy_staging_services.py`, 30 тестов. Они исполняют скрипт шага «Bundle application secrets» из `ci-cd.yml` (включая маскирование бандла) и настоящие `deploy.sh` / `rollback.sh` с фальшивым `docker`.\n\nНовых зависимостей нет.\n\n### Отклонения от issue\n- Секреты App в Environment называются `GH_*` (комментарий в #35), в контейнере — `GITHUB_*` из `.env.example`.\n- Домен cookie refresh не настраивается: такой переменной в приложении нет. Cookie host-only с `Path=/api/auth` и работает за счёт одного origin.\n- Имена переменных контейнера снимаются через `os.environ`, а не `docker compose exec api env | cut -d= -f1`, как в AC: строки многострочного PEM не содержат `=` и вывелись бы целиком.\n- Авто-откат на staging специально не провоцируется. Его покрывают тест `test_rollbacks_keep_store_passwords_and_app_secrets` и локальный прогон; на staging проверяется ручной `rollback.yml`.\n- Ключ App уходит только воркерам, а не в `api`, как было в таблице issue: решение по ревью, минимальные права.\n- Сверх issue: лимит памяти Redis 128 MB.\n\n## Why\n\nНа `main` staging поднимает только `api`, `bootstrap` и `postgres`. Секреты приложения в контейнер не доходят, поэтому вебхуки и вход через GitHub на staging выключены. Брокера и кэша для пайплайна ревью нет. UI не может ходить в API с одного origin. Выкат не ждёт тестов. Задача — #35, с учётом решений техлида от 27.09 и #20 (D1, один origin).\n\n## How to verify\n\n```bash\nuv sync --locked --all-groups\nuv run ruff check . && uv run ruff format --check . && uv run mypy . && uv run pytest   # 772 passed, 57 skipped\nuv run pytest tests/test_deploy_staging_services.py -v                                  # 30 passed\n```\n\nМутационный прогон: каждую из 25 правдоподобных регрессий ловит хотя бы один тест. Среди них: убран `hostname`, перепутаны пароли в откате, секрет вебхука попал в `app.env`, бандл пишется после `.env`, удалён `::add-mask::`, `app.env` снова подключён к `api`, `/api/*` уходит в UI.\n\nВживую на локальном стенде (Docker Desktop, Compose 2.33.1, локальный registry вместо GHCR, тестовые ключи из `openssl`):\n- `deploy.sh` → `up --wait`: все сервисы healthy, повторный выкат проходит.\n- PEM в контейнере совпадают с исходными (завершающий перевод строки срезается, разбору PEM это безразлично), `$` в значениях сохраняется, незаданного `GITHUB_WEBHOOK_SECRET` в окружении контейнера нет.\n- 3 сообщения в durable-очереди на месте после `up -d --force-recreate rabbitmq`.\n- Ручной откат и авто-откат на падающий образ: секреты и пароли на месте. Хост без RabbitMQ/Redis переходит на новую схему, пароль Postgres не меняется.\n- Redis без пароля отвечает `NOAUTH`, пароля нет в argv, `CONFIG GET maxmemory` → `134217728`.\n- `/api/runs`, `/api/auth/*`, `/api/stream` на хосте UI отвечают JSON от `api`, остальные пути — UI.\n- Откат на хост без релиза со старым `.env`: стек снят по имени проекта, работает только заглушка nginx.\n\nНа VPS стоит Compose 2.26.1 (лог job Deploy staging, run 36918557843). По исходникам его dotenv-парсер читает многострочные значения в одинарных кавычках так же, как 2.33.1.\n\n### Перед мержем\n- [x] Пара ключей JWT заведена в Environment `staging` (`AUTH_JWT_PRIVATE_KEY`, `AUTH_JWT_PUBLIC_KEY`) — @axyi.\n- [x] Variable `GH_APP_BOT_LOGIN` заведена в Environment `staging` — @axyi.\n- [ ] Значения `GH_WEBHOOK_SECRET` и `GH_CLIENT_SECRET` без `'` и без `\\` в конце — @axyi.\n\n### После мержа — проверка AC на staging (вывод добавлю комментарием в этот PR)\n- [ ] Прогон CI/CD на `main` зелёный, включая `deploy-staging` и `promote-staging`: <ссылка на прогон>\n- [ ] `curl -fsS https://staging-api.dmc268-t6.axyi.ru/healthcheck` → `{\"status\":\"ok\"}`\n- [ ] Порты 5672 и 15672 снаружи VPS закрыты: `nc -zv -w 3 staging-api.dmc268-t6.axyi.ru 5672`, то же для 15672\n- [ ] `rabbitmqctl list_queues name durable messages` до и после `up -d --force-recreate rabbitmq`\n- [ ] Имена переменных `api` без значений (`exec -T api python -c \"import os; print(' '.join(sorted(os.environ)))\"`): незаданных секретов нет. То же после ручного `rollback.yml` на предыдущий образ\n- [ ] `curl -i https://staging-ui.dmc268-t6.axyi.ru/api/runs` → JSON от `api`, а не `index.html`; то же для `/api/auth/*` и `/api/stream`\n- [ ] Фактические версии: PostgreSQL `<…>`, RabbitMQ `<…>`, Redis `<…>`\n\n### Решения по ревью\n- Ключ App (`GITHUB_APP_ID`, `GITHUB_APP_PRIVATE_KEY`) получают только `worker` и `webhook-worker`; к `api` подключён только `api.env`.\n- Следующий PR по #35 поднимает из того же образа `worker` и `webhook-worker` (`app.env` + `GITHUB_APP_BOT_LOGIN` из variable `GH_APP_BOT_LOGIN`). До него квитанции вебхуков принимаются (202) и хранятся, но не разбираются.\n- Reconciler в `api`: пока в БД нет прогонов, он ничего не публикует, очередь durable — риска нет.\n\n## Refs\n\nRefs #35 — не закрывает: `worker` придёт следующим PR.\nRefs #20, #37, #34, #33, #11\n",
+                "state": "MERGED",
+                "mergedAt": "2026-10-03T21:30:20Z",
+                "headRefOid": "b2b0f1731aefd9198a8bebf454015c2457361dbf",
+                "repository": {
+                  "nameWithOwner": "larchanka-training/dmc-268-api-t6"
+                },
+                "commits": {
+                  "nodes": [
+                    {
+                      "commit": {
+                        "statusCheckRollup": {
+                          "state": "SUCCESS"
+                        }
+                      }
+                    }
+                  ]
+                },
+                "reviewThreads": {
+                  "pageInfo": {
+                    "hasNextPage": false,
+                    "endCursor": "Y3Vyc29yOnYyOpK0MjAyNi0xMC0wM1QxMzowNjowN1rOqJ9Xag=="
+                  },
+                  "nodes": [
+                    {
+                      "isResolved": true
+                    },
+                    {
+                      "isResolved": true
+                    },
+                    {
+                      "isResolved": true
+                    }
+                  ]
+                }
+              }
+            },
+            {
+              "__typename": "CrossReferencedEvent",
+              "willCloseTarget": false,
+              "source": {
+                "__typename": "Issue"
+              }
+            },
+            {
+              "__typename": "ClosedEvent",
+              "createdAt": "2026-10-03T21:30:22Z",
+              "actor": {
+                "login": "axyi"
+              },
+              "stateReason": "COMPLETED",
+              "closer": {
+                "__typename": "PullRequest",
+                "number": 45,
+                "repository": {
+                  "nameWithOwner": "larchanka-training/dmc-268-api-t6"
+                }
+              }
+            },
+            {
+              "__typename": "ReopenedEvent",
+              "createdAt": "2026-10-03T22:04:34Z",
+              "actor": {
+                "login": "axyi"
+              }
+            },
+            {
+              "__typename": "CrossReferencedEvent",
+              "willCloseTarget": false,
+              "source": {
+                "__typename": "Issue"
+              }
+            },
+            {
+              "__typename": "CrossReferencedEvent",
+              "willCloseTarget": false,
+              "source": {
+                "__typename": "Issue"
+              }
+            },
+            {
+              "__typename": "CrossReferencedEvent",
+              "willCloseTarget": false,
+              "source": {
+                "__typename": "Issue"
+              }
+            },
+            {
+              "__typename": "CrossReferencedEvent",
+              "willCloseTarget": false,
+              "source": {
+                "__typename": "Issue"
+              }
+            },
+            {
+              "__typename": "CrossReferencedEvent",
+              "willCloseTarget": false,
+              "source": {
+                "__typename": "Issue"
+              }
+            },
+            {
+              "__typename": "CrossReferencedEvent",
+              "willCloseTarget": false,
+              "source": {
+                "__typename": "PullRequest",
+                "number": 59,
+                "title": "docs(contributing): issue acceptance and merge rules (#56)",
+                "url": "https://github.com/larchanka-training/dmc-268-api-t6/pull/59",
+                "body": "## What\n\nPart 1 of #56: checkable rules for accepting an issue and for merging a PR. The ruleset and board decision is recorded here. Ten commits, meant for a rebase merge. The branch is rebased on `main` after #60 merged, so the new required checks `OpenAPI lint` and `Webhook container smoke` run here too.\n\n- **`docs/CONTRIBUTING.md`.** The lines that contradicted the new rules are rewritten, and two subsections are added at the end of §2.\n  - Rewritten: step 2 used `Closes #N`, steps 7 and 8 and §1 had the author closing the issue, and §4 said \"after Approve only a rebase\".\n  - **Приёмка задачи** (issue acceptance): only the tech lead, or a participant the tech lead appointed in the issue, closes it. That happens after all of the issue's PRs are merged and no remarks in the issue are left unanswered. All checkboxes must be ticked, and the closing comment gives evidence for each AC. Moving the board card is not acceptance. The Development-panel trap gets its own rule. Each rule has a command that checks it; every command was run against real issues and PRs (#28, #30, #35/#45, #42, #40).\n  - **Мерж** (merge): the branch is up to date with `main` and updated by rebase, never by merging `main` into it (command 5б lists merge commits and expects empty output); the approve is on the current head; the body describes the whole PR.\n  - §7 records the tech-lead decision of 04.10.2026. Both rulesets get *dismiss stale approvals*, *require approval of the most recent push* and *require branches to be up to date*; ui gets the required check `Docker image build` so that the last one can apply. Project 12's \"Auto-close issue\" workflow is turned off. The api ruleset also requires `OpenAPI lint` and `Webhook container smoke`. All settings were applied on 04.10.2026.\n- **`.agents/rules/git-workflow.md`** (synced). The pointer to CONTRIBUTING now names the acceptance and merge rules. New rule: no closing keyword in the title, body or commits, and no Development link. The existing gate lines are unchanged.\n- **`.github/pull_request_template.md`** (new, synced). It has What / Why / How to verify / Refs, a \"Before merge\" checklist, and absolute links to the rules. It is added to the `.agents/README.md` sync map.\n- **`pull-request` skill** (synced). The closing-keyword ban now covers same-repo references too. The body follows the template.\n- **`AGENTS.md`** conventions match: approve on the current head, re-approve after a push that changes the diff, rebase again before merge, no closing keyword or Development link.\n\nThe ui mirror is larchanka-training/dmc-268-ui-t6#68; part 2 is #60.\n\nNo new dependency.\n\n## Why\n\nIn sprint 2, \"closed\" never meant \"AC checked\":\n- 8 of 9 role issues closed with 0 AC ticked.\n- #30 and #34 closed by people who weren't the assignees, #30 by a card move.\n- #35 auto-closed through a Development link.\n- #11 closed with an unanswered P1.\n- PR #38 merged without a rebase, and `main` was red for about 3 h.\n- PR #42 merged on an approve for an older head.\n- The bodies of ui#59 and ui#63 did not describe their content.\n\nCONTRIBUTING only described `Closes` and `Refs`.\n\n## How to verify\n\n```bash\ncmp .agents/rules/git-workflow.md ../dmc-268-ui-t6/.agents/rules/git-workflow.md          # identical\ncmp .github/pull_request_template.md ../dmc-268-ui-t6/.github/pull_request_template.md    # identical (same for pull-request/SKILL.md, commit-message-instructions.md)\nuv run pytest .agents/skills/create-issue/tests -q                                        # 237 passed\n```\n\nThen run commands 1–6, 4б and 5б from CONTRIBUTING §2 on the cited issues and PRs. The expected output is next to each command.\n\nThe rulesets and the Project 12 change are already applied (summary in #56). Check them with `gh api repos/larchanka-training/dmc-268-api-t6/rulesets/22761836` and the same for ui ruleset 23726179.\n\n## Refs\n\nRefs #56 (part 1)\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n\nhttps://claude.ai/code/session_018fPsfP1VFfvSnTWnVtHaix\n",
+                "state": "MERGED",
+                "mergedAt": "2026-10-05T11:54:07Z",
+                "headRefOid": "c253b142d1189df3ce8d4e7312c514905e5af86e",
+                "repository": {
+                  "nameWithOwner": "larchanka-training/dmc-268-api-t6"
+                },
+                "commits": {
+                  "nodes": [
+                    {
+                      "commit": {
+                        "statusCheckRollup": {
+                          "state": "SUCCESS"
+                        }
+                      }
+                    }
+                  ]
+                },
+                "reviewThreads": {
+                  "pageInfo": {
+                    "hasNextPage": false,
+                    "endCursor": "Y3Vyc29yOnYyOpK0MjAyNi0xMC0wNVQxMDoxMToxMVrOqPzzSw=="
+                  },
+                  "nodes": [
+                    {
+                      "isResolved": true
+                    },
+                    {
+                      "isResolved": true
+                    },
+                    {
+                      "isResolved": true
+                    }
+                  ]
+                }
+              }
+            },
+            {
+              "__typename": "CrossReferencedEvent",
+              "willCloseTarget": false,
+              "source": {
+                "__typename": "PullRequest",
+                "number": 60,
+                "title": "docs: webhook and auth docs, SD drift, container smoke (#56)",
+                "url": "https://github.com/larchanka-training/dmc-268-api-t6/pull/60",
+                "body": "## What\n\nPart 2 of #56: webhook/auth docs, SD drift, a signed-delivery smoke against a container, redocly at zero warnings. Thirteen commits, meant for a rebase merge. **Merge this before #59**: the api ruleset requires the two jobs added here.\n\n- **Smoke script + CI.** `scripts/webhook_smoke.py` (stdlib only) sends a signed `pull_request` / `labeled` (`ai-review`) delivery and expects `202 pending`, then the same delivery `202 duplicate`, then a corrupted signature `401`. `--count N` prints p50/p95/max. The secret comes only from `GITHUB_WEBHOOK_SECRET` and is never printed. `tests/test_webhook_smoke_script.py` runs the script's deliveries through the real route in-process. The new CI job **Webhook container smoke** (`needs: docker-build`) loads the built image, migrates a `postgres:17-alpine` service, starts the API container with a throwaway per-run secret and runs the script. `push-image` now needs it.\n- **e2e-test skill.** The \"webhook route not yet defined\" placeholder is replaced by the migration step and the script.\n- **README.** New section \"Webhook, webhook-worker and local auth\": local RS256 key pair in `.env`, migrations (not run by `docker compose up`), the smoke, the `webhooks` profile. The local run now uses `uv run --env-file .env` (nothing in the app loads `.env`). The staging hosts row points at `staging-api…/webhooks/github`, which is what serves webhooks today.\n- **WEBHOOK_WORKER.md.** The timeline paragraph now matches the code: the timeline is never fetched, `review_requested`/`review_request_removed` are dropped, and label/close/reopen/synchronize reconcile `ai_review_labeled` from one PR GET under the advisory lock.\n- **SD.**\n  - The label flag is `code_changes.ai_review_labeled` everywhere in `docs/`. `reviewer_requested` survives once, explicitly as the legacy column.\n  - §6.1: the 202 comes right after the receipt insert, and projection runs in webhook-worker.\n  - §7.3: ui Zod knows `author`/`headRef`/`baseRef` since ui#59.\n  - OQ-2 is open until #46, because live run 37153425606 failed.\n  - OQ-8 now agrees with §8.2 (`issues: write`, from #48). This one is outside #56's scope; it was a one-line contradiction.\n- **PIPELINE_SPEC §15 row 2** is closed. The handler makes no REST call; the ack is HMAC plus one insert. The local measurement over 3 runs of 100 deliveries gave p95 6.5–7.0 ms.\n- **redocly.** `redocly.yaml` turns `info-license` off, because the repo has no LICENSE. `.redocly.lint-ignore.yaml` keeps two reviewed false positives: `RunUpdatedEvent` is referenced via `x-events` and tested, and logout can only fail with 503. `@redocly/cli@2.57.0` is pinned in PIPELINE_SPEC. `contracts/openapi.yaml` is unchanged.\n- **Follow-up commits.**\n  - SD §4 container box, §6.3, §6.9, §7.2, §8.3 and the §14 deployment diagram now show the Webhook API as receipt-only. A webhook-worker container does projection, label and tree calls and run cancellation, and enqueue from a delivery is marked #52.\n  - SD Р-9: the route never reads the sender; webhook-worker skips the bot's own `ai-review` label events by `GITHUB_APP_BOT_LOGIN`.\n  - SD Р-12 and §4: webhook-worker is a second process of the webhook role, from the same image.\n  - SD §8.3, §10 and §11: installation tokens are cached in process memory, not in Redis.\n  - PIPELINE_SPEC: the actor of projection, enqueue, the App key and SSE signals is `webhook-worker`, with #52 marked. Regeneration of the Zod snapshot is owned by #55.\n  - New CI job **OpenAPI lint** runs `npx --yes @redocly/cli@2.57.0 lint contracts/openapi.yaml`. Strictness comes from `redocly.yaml` (`extends: [recommended-strict]`), so a warning fails both locally and in CI. `push-image` needs the job.\n  - `docs/CICD.md` lists both new jobs.\n  - The e2e-test skill lists the real compose services and calls httpx a runtime dependency.\n- **Tech-lead decisions of 04.10.2026.**\n  - T6: the check-run stays with RunGuard as its single writer. The stale ack-budget reason in PIPELINE_SPEC §7 is replaced.\n  - SD §13 keeps the 100 % coalescing gate. The PG head window of one webhook-worker cycle is recorded as a risk that #52 must close (comment in #52).\n  - Installation tokens: Redis stays the target (SD §8.3, §10, §11). The in-process cache is a §7.3 deviation, and the move is tracked in #62.\n  - `OpenAPI lint` and `Webhook container smoke` are required checks; the workflow comments and `docs/CICD.md` say so.\n- **Review by ndovnar.**\n  - The smoke job sets up uv with Python 3.13 and runs `uv run --locked python scripts/webhook_smoke.py`, per AGENTS.md.\n  - Label lifecycle: the docs follow the projector (tech-lead decision). `closed` and `reopened` reconcile `ai_review_labeled` from the PR's current labels, and a closed PR gets no new Run because every candidate query requires `state = open`. SD Р-10 and §8.2, PIPELINE_SPEC §8.2, TEST_PLAN and WEBHOOK_WORKER now agree.\n\nNo new dependency.\n\n## Why\n\nThe webhook and auth code moved ahead of the docs after PR #38, and the only webhook checks ran in-process through TestClient. The AC of #56 part 2 asks for one flag name in `docs/`, factual SD §7.3 and OQ-2, a script plus a CI job that gets a 202 from a container, and a clean `redocly lint`.\n\n## How to verify\n\n```bash\nuv run ruff check . && uv run ruff format --check . && uv run mypy . && uv run pytest   # 1009 passed, 60 skipped locally\ngrep -rn reviewer_requested docs/                                                     # one hit, the legacy column\nnpx --yes @redocly/cli@2.57.0 lint contracts/openapi.yaml                             # valid, 0 warnings, 2 ignored\ndocker compose up -d --build backend postgres\ndocker compose run --rm backend alembic upgrade head\nuv run --env-file .env python scripts/webhook_smoke.py --count 100                    # needs GITHUB_WEBHOOK_SECRET in .env\n```\n\nIn CI, the job **Webhook container smoke** must be green and its log must show `202 pending`, `202 duplicate` and `401`.\n\n## Refs\n\nRefs #56 (part 2). Related: #52 owns the publisher paragraph, the webhook-worker `RABBITMQ_URL` and Run creation from a delivery. #46 owns the OQ-2 confirmation. #35 PR 2 also edits `ci-cd.yml`, which may conflict on rebase.\n\nNot changed, left for owners or follow-up:\n- The unreachable reviewer-intent and timeline code, and `review_worker()` in `app/worker.py`, are in #54's list of rudiments (comment in #54). They are not deleted here.\n- The `ui_zod_contracts.json` snapshot is #55's work.\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n\nhttps://claude.ai/code/session_018fPsfP1VFfvSnTWnVtHaix\n",
+                "state": "MERGED",
+                "mergedAt": "2026-10-05T09:15:20Z",
+                "headRefOid": "97a335fd4b268858f464b4a90cc7d21f86bfb116",
+                "repository": {
+                  "nameWithOwner": "larchanka-training/dmc-268-api-t6"
+                },
+                "commits": {
+                  "nodes": [
+                    {
+                      "commit": {
+                        "statusCheckRollup": {
+                          "state": "SUCCESS"
+                        }
+                      }
+                    }
+                  ]
+                },
+                "reviewThreads": {
+                  "pageInfo": {
+                    "hasNextPage": false,
+                    "endCursor": null
+                  },
+                  "nodes": []
+                }
+              }
+            },
+            {
+              "__typename": "CrossReferencedEvent",
+              "willCloseTarget": false,
+              "source": {
+                "__typename": "Issue"
+              }
+            },
+            {
+              "__typename": "CrossReferencedEvent",
+              "willCloseTarget": false,
+              "source": {
+                "__typename": "PullRequest",
+                "number": 63,
+                "title": "feat(deploy): run worker and webhook-worker on staging (#35)",
+                "url": "https://github.com/larchanka-training/dmc-268-api-t6/pull/63",
+                "body": "## What\n\nВторая часть #35: `worker` и `webhook-worker` на staging, LLM-конфигурация `worker` и раскладка секретов по получателям. Состав — по [PO-ревью](https://github.com/larchanka-training/dmc-268-api-t6/issues/35) и решениям техлида от 04.10.\n\n**Воркеры** (`deploy/compose/staging.yml`)\n- `worker` (`python -m app.worker`) и `webhook-worker` (`python -m app.webhook_worker`) запускаются из образа API. Оба ждут успешный `bootstrap` и здоровый `postgres`, `worker` ещё и здоровый `rabbitmq`: без брокера он не объявит топологию. Работают только в сети проекта, без `ports:` и вне edge, с `restart: unless-stopped` и ротацией логов, как у остальных сервисов.\n- `webhook-worker` **не получает `RABBITMQ_URL`**, хотя PO-ревью это предлагало: он проецирует квитанции только в PostgreSQL, а прогоны публикует reconciler процесса `api`. `compose_worker` собирает приёмник без публикатора, это закреплено тестом `test_worker_wires_receipt_projection_without_a_run_publisher`. Брокер ему не нужен, поэтому и доступ не выдаётся.\n\n**Healthcheck без HTTP** (`app/common/infrastructure/heartbeat.py`)\n- Если задан `WORKER_HEARTBEAT_FILE`, процесс трогает файл раз в 10 с. `worker` начинает только после подключения обоих консьюмеров. Устаревший файл предыдущего процесса удаляется при старте. Healthcheck `python -m app.common.infrastructure.heartbeat <файл> 30` заменяет HTTP-healthcheck образа.\n- Воркер, упавший на старте или с замороженным циклом событий, не становится healthy: `up --wait` падает, и `deploy.sh` откатывает выкат.\n- Ограничение: heartbeat показывает живость процесса, а не прогресс работы. Застрявшее ревью или проход, который каждый раз падает, контейнер не роняют. Это намеренно, подробности — в `docs/CICD.md` §3.\n- **Откат на образ до этого PR.** Откат берёт compose из checkout, а образ — предыдущий. В образе без модуля heartbeat healthcheck считает живой процесс здоровым, поэтому первый откат после мержа (авто или `rollback.yml`) проходит. Все новые образы проверяются строго.\n\n**Секреты по получателям** (`deploy/scripts/env-file.sh`, `.github/workflows/ci-cd.yml`)\n\n| Env-файл | Переменные | Контейнеры |\n|---|---|---|\n| `api.env` | вебхук, OAuth, JWT | `api` |\n| `app.env` | `GITHUB_APP_ID`, `GITHUB_APP_PRIVATE_KEY` | `worker`, `webhook-worker` |\n| `worker.env` | `LLM_API_KEYS` ← `AI_DMC268_T6`, `LLM_BASE_URL` ← `vars.AI_DMC268_URL` (organization variable), `LLM_MODEL` ← `vars.LLM_MODEL` | `worker` |\n| `webhook-worker.env` | `GITHUB_APP_BOT_LOGIN` ← `vars.GH_APP_BOT_LOGIN` | `webhook-worker` |\n\n- `LLM_MODEL` задаётся variable Environment `staging`, как и остальная несекретная конфигурация (`POSTGRES_USER`, `GH_APP_BOT_LOGIN`): модель меняется без коммита (SD §15). **Нужно завести** variable `LLM_MODEL` = `gpt-4.1-mini`. Без неё выкат не падает, `LLM_*` воркер начнёт читать в #52, часть 2.\n- `LLM_FALLBACK_MODEL` и `PORTAL_URL` в состав не входили, поэтому не проброшены.\n\n**Документация** — `docs/SECRETS.md` (таблица env-файлов, organization secret `AI_DMC268_T6` и organization variable `AI_DMC268_URL`, variable `LLM_MODEL`), `docs/CICD.md` §3 (воркеры, healthcheck, откат), `docs/INFRASTRUCTURE.md` (список сервисов staging), SD §14, `.env.example`.\n\nНовых зависимостей нет.\n\n## Why\n\nDoD #35: бэкенд, воркер и фронтенд деплоятся автоматически. До этого PR квитанции вебхуков на staging принимались (202), но не разбирались, а очереди ревью никто не читал. Новый срок — 07.10, PR блокирует приёмку #57.\n\n## How to verify\n\nЛокально:\n- `uv run ruff check .`, `uv run ruff format --check .`, `uv run mypy .`, `uv run pytest` — 1001 тест прошёл, 60 пропущено.\n- Интеграционные тесты воркера на одноразовых Postgres и RabbitMQ, 11 прошли, включая heartbeat запущенного воркера.\n- `tests/test_deploy_staging_services.py`, 35 тестов: маршрутизация в четыре файла, контракт воркеров в compose, healthcheck. Мутационная проверка: если перенести `LLM_MODEL` не в тот файл, падают 3 теста.\n\nВживую на Docker, staging-compose с локально собранным образом:\n- весь стек проходит `up --wait` и становится healthy примерно за 15 с;\n- имена переменных: `api` — без ключа App и LLM; `worker` — `GITHUB_APP_*`, `LLM_*`, без bot login; `webhook-worker` — `GITHUB_APP_*`, `GITHUB_APP_BOT_LOGIN`, без LLM и брокера;\n- `webhook-worker` без `GITHUB_APP_BOT_LOGIN` → `up --wait` падает за 13 с;\n- `docker kill -s SIGSTOP` на `worker` → unhealthy примерно через 50–60 с, после `SIGCONT` снова healthy;\n- новый образ → образ из `main` (`33a978b`, без heartbeat) → снова новый: все три `up --wait` проходят.\n\nПосле мержа соберу на staging вывод AC: прогон CI/CD, закрытые 5672/15672, `rabbitmqctl list_queues` до и после `--force-recreate`, имена переменных после выката, авто-отката и ручного `rollback.yml`, `curl -i` на `/api/runs`, `/api/auth/*`, `/api/stream`, версии PG, RabbitMQ и Redis.\n\n## Refs\n\nRefs #35 — **не закрывает**. Задачу закрывает техлид после проверки AC. PR не связан с #35 через панель Development.\n\n",
+                "state": "MERGED",
+                "mergedAt": "2026-10-05T11:58:38Z",
+                "headRefOid": "644c9d2f8b023237552686938a1ff9870c02d003",
+                "repository": {
+                  "nameWithOwner": "larchanka-training/dmc-268-api-t6"
+                },
+                "commits": {
+                  "nodes": [
+                    {
+                      "commit": {
+                        "statusCheckRollup": {
+                          "state": "SUCCESS"
+                        }
+                      }
+                    }
+                  ]
+                },
+                "reviewThreads": {
+                  "pageInfo": {
+                    "hasNextPage": false,
+                    "endCursor": "Y3Vyc29yOnYyOpK0MjAyNi0xMC0wNVQwOToyNjowMVrOqPlTWQ=="
+                  },
+                  "nodes": [
+                    {
+                      "isResolved": true
+                    },
+                    {
+                      "isResolved": true
+                    },
+                    {
+                      "isResolved": true
+                    },
+                    {
+                      "isResolved": true
+                    },
+                    {
+                      "isResolved": true
+                    }
+                  ]
+                }
+              }
+            },
+            {
+              "__typename": "CrossReferencedEvent",
+              "willCloseTarget": false,
+              "source": {
+                "__typename": "PullRequest",
+                "number": 67,
+                "title": "fix(llm): reassign OQ-2 models after the live run (#46)",
+                "url": "https://github.com/larchanka-training/dmc-268-api-t6/pull/67",
+                "body": "## What\n\n- OQ-2 model pair reassigned: primary `mistral-small-4` (was the fallback), fallback `mistral-small-3.2-24b` (new). `gpt-4.1-mini` is removed from `KNOWN_MODELS`; `mistral-small-3.2-24b` is added with catalog values of 2026-10-05.\n- `llm-live-run.yml` input defaults, `.env.example` and the tests that rely on `KNOWN_MODELS` follow the new pair.\n- Docs: SD §15 (OQ-2 row, D7 table, choice, live-run notes), PIPELINE §5.1 / §9 / §14, `docs/SECRETS.md`, `review/README.md`.\n\n## Why\n\nThe live run after the credits top-up ([run 37297031740](https://github.com/larchanka-training/dmc-268-api-t6/actions/runs/37297031740)) still failed. `gpt-4.1-mini` gets HTTP 400 \"No providers available … with given preferences\". The 400 stays even with credits and with no `response_format` ([probe 37298451583](https://github.com/larchanka-training/dmc-268-api-t6/actions/runs/37298451583)). So its only provider, Microsoft Foundry, is unavailable to the course account; strict mode is not the cause. The curator confirmed that the organization and the key carry no routing rule, so the cause stays unknown (SD §15).\n\nCandidates were probed on a throwaway branch (`chore/46-live-run-probe`, deleted). None of another vendor met all three requirements: strict, the 90 s timeout and finding the sample's bugs.\n\n| Candidate | Result | Probe |\n|---|---|---|\n| `qwen3-coder-30b-a3b` | 0 findings | [37298546024](https://github.com/larchanka-training/dmc-268-api-t6/actions/runs/37298546024) |\n| `deepseek-v4-flash-0731` | §9 semantics, repair failed | [37298546024](https://github.com/larchanka-training/dmc-268-api-t6/actions/runs/37298546024) |\n| `gemma-4` | 90 s timeout | [37298777819](https://github.com/larchanka-training/dmc-268-api-t6/actions/runs/37298777819) |\n| `qwen3.6-35b` | 90 s timeouts; thinking cannot be switched off | [37299020566](https://github.com/larchanka-training/dmc-268-api-t6/actions/runs/37299020566), [37302208756](https://github.com/larchanka-training/dmc-268-api-t6/actions/runs/37302208756), [37302748485](https://github.com/larchanka-training/dmc-268-api-t6/actions/runs/37302748485) |\n| `minimax-m3` | 400 \"does not support JSON schema mode\" | [37299020566](https://github.com/larchanka-training/dmc-268-api-t6/actions/runs/37299020566) |\n\nThe chosen pair shares a model vendor but uses disjoint EUrouter hosting providers: Mistral AI / Regolo / AKI.IO vs OVHcloud / Scaleway / GreenPT.\n\nWorst case of a fast run, at the most expensive endpoint of each model:\n- 9 calls of `mistral-small-4` at Regolo: $0.432.\n- 3 calls of `mistral-small-3.2-24b` at GreenPT: $0.046.\n- Total: $0.478 ≤ $0.50, at 1.1225 USD/EUR (EUrouter's own rate on 2026-10-05).\n\n**Tech-lead decisions (@axyi):**\n- D7 is read literally (`calls == [primary]`), with one exception. A single repair caused only by §9 semantics, with strict accepted, counts for D7. The reason: no candidate of acceptable quality passed literally.\n- The AC1 evidence is a green run on this branch. The run on `main` after merge goes to #33.\n\n## How to verify\n\n- `uv run ruff check .`, `uv run ruff format --check .`, `uv run mypy .`: clean. `uv run pytest`: 1027 passed, 60 skipped (integration tests, no local DB). New tests pin the SD §15 prices and windows of both models and check the run cost limit boundary at the real primary price: `test_oq2_pair_keeps_the_sd15_catalog_prices_and_windows`, `test_run_cost_limit_boundary_at_the_oq2_primary_price`. `pre-commit run --from-ref origin/main --to-ref HEAD`: passed.\n- Live runs on this branch with defaults (`gh workflow run llm-live-run.yml --ref fix/46-oq2-live-run`, head c3811b7, before the rebase on main 9637d35). Since then the LLM path has changed only in `settings.py` comments, and the new main commits (#35, #56) do not touch it:\n\n  | Run | `mistral-small-4` | `mistral-small-3.2-24b` | Workflow |\n  |---|---|---|---|\n  | [37304499334](https://github.com/larchanka-training/dmc-268-api-t6/actions/runs/37304499334) | `[primary]` | primary → repair | failure |\n  | [37304578603](https://github.com/larchanka-training/dmc-268-api-t6/actions/runs/37304578603) | `[primary]` | `[primary]` | **success** |\n  | [37304646906](https://github.com/larchanka-training/dmc-268-api-t6/actions/runs/37304646906) | primary → repair | `[primary]` | failure |\n\n  The first answer was valid 2 of 3 times for each model, and every repair produced a valid answer. The probes logged the raw answers, and each logged repair cause was a §9 rule: `start_line == line` for `mistral-small-4`, a two-sentence `summary.problem` for `mistral-small-3.2-24b`.\n- After merge: `gh workflow run llm-live-run.yml --repo larchanka-training/dmc-268-api-t6`; the result goes to #33.\n\nOut of scope, follow-up #66 (parts 1–2 below; part 3 is the staging fallback):\n- **`usage.cost` currency.** It comes in the endpoint's currency: EUR at Scaleway, OVHcloud and Infercom; `usage.cost_currency` names it. The gateway stores it as `cost_usd`, so the budget is understated by about 11 % on EUR routes.\n- **Lossless normalization.** `start_line == line` → `null`, and the findings order. The fallback has no repair, so today these are hard failures there.\n\nStaging (#35, merged):\n- The repository variable `LLM_MODEL` is set to `mistral-small-4` (2026-10-05); it takes effect on the next staging deploy.\n- `worker.env` does not forward `LLM_FALLBACK_MODEL`, so staging runs without a fallback for now. Tracked in #66, part 3.\n\nNo new dependencies.\n\n## Refs\n\nRefs #46\nRefs #33\nFollow-up: #66\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n\nhttps://claude.ai/code/session_01V5iLu8beApghmUDnaHobav\n\n\n\n",
+                "state": "MERGED",
+                "mergedAt": "2026-10-05T16:21:44Z",
+                "headRefOid": "a55303b79ee4c80ae252b256c749cd43af5031a0",
+                "repository": {
+                  "nameWithOwner": "larchanka-training/dmc-268-api-t6"
+                },
+                "commits": {
+                  "nodes": [
+                    {
+                      "commit": {
+                        "statusCheckRollup": {
+                          "state": "SUCCESS"
+                        }
+                      }
+                    }
+                  ]
+                },
+                "reviewThreads": {
+                  "pageInfo": {
+                    "hasNextPage": false,
+                    "endCursor": "Y3Vyc29yOnYyOpK0MjAyNi0xMC0wNVQxNjozMTo0NVrOqR91dA=="
+                  },
+                  "nodes": [
+                    {
+                      "isResolved": true
+                    },
+                    {
+                      "isResolved": true
+                    },
+                    {
+                      "isResolved": true
+                    },
+                    {
+                      "isResolved": true
+                    }
+                  ]
+                }
+              }
+            },
+            {
+              "__typename": "CrossReferencedEvent",
+              "willCloseTarget": false,
+              "source": {
+                "__typename": "PullRequest",
+                "number": 64,
+                "title": "fix(pipeline): assemble webhook to LLM review path (#52)",
+                "url": "https://github.com/larchanka-training/dmc-268-api-t6/pull/64",
+                "body": "## What\n\nThe review path now works end to end in the production composition: webhook → Run → queue → worker → LLM Gateway → GitHub. One PR, one commit per part of #52.\n\n- **Part 1, Run trigger** (`781b855`): the dispatcher built by `ReviewsApiResources` gets `run_trigger` (`TriggerFromDelivery` + `TryEnqueueWebhookRun` + `LazyAmqpPublisher`). Label, `synchronize`/`reopened` and CI deliveries create Runs without waiting for the sweep; the PR projector sends the T6 close signal with the delivery. `webhook_worker` requires `RABBITMQ_URL` (also in compose, `webhooks` profile). The test that pinned \"no run publisher\" is replaced.\n- **Part 2, worker and gateway** (`783eedb`): `python -m app.worker` builds one `LlmGateway` per process from `LLM_*` and, per claimed attempt, `GatewayReviewModel` + `GatewayConventionsModel` bound to the attempt's `RunCallContext`. `GitHubRunSource` reads AGENTS.md at `base_sha`, the tree and files at `head_sha` by blob, and the PR metadata. `UnavailableReviewProvider` is gone; without `LLM_MODEL` the worker starts with a warning and runs fail with a message naming the missing configuration, the VCS steps are not masked. `ClaimedAttempt.engine` is `EngineName`. `LLM_*` are passed to the compose `worker`.\n- **Stale head before publishing** (`1e40409`, comment of @axyi): before `POST /pulls/{n}/reviews` the publisher reads the PR head on GitHub; a moved head ends the run `cancelled` / `superseded` (T15) instead of a review on the old commit.\n- **Part 3, deferred deliveries** (`fda879e`): a deferred delivery shares the dispatch attempt counter (3) and then gets a final `projection_deferred_at` (migration `20261005_0024`); `wake_receipts` clears it when the installation is linked. The sweep logs handled and deferred counts; finished receipts are purged after 30 days, once an hour.\n- **Part 4, deep** (`f733e90`): `RepositoryEngine` (`fast` only) in the contract, `PATCH` with `deep` → 422, data migration `20261005_0025` moves repositories and queued runs to `fast`, the reconciler does not republish into `review.run.deep`.\n- **Docs** (`6fb1bcd`): WEBHOOK_WORKER, README, SD §7.3/§13/§15, BACKEND_ARCHITECTURE, PIPELINE_SPEC §5.3.\n- **Staging** (`565639f`, after #35): `webhook-worker` gets `RABBITMQ_URL` and waits for a healthy `rabbitmq`; deploy test, CICD and SECRETS updated.\n- **Tests** (`bcc928c`): truncated tree and unreadable or binary context files.\n- **Docs** (`c123c16`, `a0d1d48`): SD §13 and TEST_PLAN state the coalescing gate as the head check right before POST; the window between that read and POST is an accepted residual risk (tech lead decision of 05.10.2026).\n\n## Why\n\n#52: every piece was implemented and tested on its own, but the production composition had no `run_trigger` and the worker ran on a stub, so no real review could happen; deferred deliveries retried forever; `deep` runs never finished.\n\n## How to verify\n\n```bash\nuv run ruff check . && uv run ruff format --check . && uv run mypy . && uv run pytest\nTEST_DATABASE_URL=... TEST_RABBITMQ_URL=... uv run pytest -rs\n```\n\nLocal run against PostgreSQL 17 and RabbitMQ 4: **1102 passed, 0 skipped**; ruff, format and mypy clean; one alembic head (`20261005_0025`). `docker compose up worker` starts and logs the missing `LLM_*` warning.\n\nAcceptance Criteria:\n\n| AC | Check |\n|---|---|\n| ч.1 labeled + green CI creates a Run and publishes it without the sweep, built from `ReviewsApiResources` | `test_labeled_pr_with_green_ci_creates_and_publishes_a_run` (red without the wiring) |\n| ч.1 `check_suite.completed` after `exclude()` | `test_check_suite_after_the_no_ci_sweep_excluded_the_head_creates_a_run` |\n| ч.1 `wait_for_ci=always` / `never` by event | `test_wait_for_ci_always_waits_for_the_check_suite_event`, `test_wait_for_ci_never_starts_without_ci` |\n| ч.1 `ci_status` filled by `check_suite` / `status` | `test_wait_for_ci_always_...` and the existing `test_postgres_ci_event_cache_only_updates_current_head_for_check_suite_and_status` |\n| ч.1 `synchronize` signals the worker at once | `test_synchronize_cancels_the_attempted_run_and_signals_the_worker_at_once` |\n| ч.1 manual compose run with a signed `labeled` delivery | **not done**: needs the GitHub App credentials; the signed delivery script is on `main` (`scripts/webhook_smoke.py`) |\n| ч.2 `main` composition on fake LLM and GitHub transports reaches `succeeded`, `llm.call`, one `llm.review_output`, `usage_events` | `test_main_composition_reviews_through_the_llm_gateway` (with and without AGENTS.md) |\n| ч.2 with `LLM_*` the stub is not used | `test_production_factory_binds_gateway_models_to_the_attempt`; the stub class is removed |\n| ч.2 conventions from GitHub, repo without AGENTS.md does not fail the run | `test_main_composition_...[no-agents-md]` |\n| ч.2 no LLM config: warning, healthy, message, VCS step not masked | `test_main_composition_without_llm_config_names_the_missing_configuration`, `test_factory_without_llm_...` |\n| ч.2 manual run on a real model | **not done**: needs LLM keys (EUrouter / self-hosted) |\n| ч.2 docs | SD §7.3, §15, BACKEND_ARCHITECTURE, README |\n| ч.3 final after N attempts, `wake_receipts`, log, retention | `test_deferred_delivery_is_final_after_three_attempts_and_wakes_on_linking`; WEBHOOK_WORKER.md |\n| ч.4 contract, PIPELINE_SPEC, SD; `PATCH` fast only; migration; reconciler | `test_repository_update_validates_...` (deep → 422), `test_migration_moves_repositories_and_queued_runs_to_fast`, `test_reconciler_does_not_republish_into_the_deep_queue` (red without the filter) |\n| ч.4 UI form | larchanka-training/dmc-268-ui-t6#71 |\n\nMerge order and coordination:\n- this PR first (its migration moves `deep` repositories to `fast`), then larchanka-training/dmc-268-ui-t6#71: the new UI accepts only `fast`, and the old form sends the engine only when a user changes it.\n- #61 (ui Zod mirror): its snapshot still has `deep` for `Repository`; after #71 it needs a regenerated snapshot.\n- #63 (staging): `webhook-worker` now requires `RABBITMQ_URL`, `worker` reads `LLM_*`.\n\n## Refs\n\nRefs #52. UI: larchanka-training/dmc-268-ui-t6#71\n\n\n",
+                "state": "MERGED",
+                "mergedAt": "2026-10-05T19:31:07Z",
+                "headRefOid": "a0d1d4868c198c954a0867810536e82db1485e33",
+                "repository": {
+                  "nameWithOwner": "larchanka-training/dmc-268-api-t6"
+                },
+                "commits": {
+                  "nodes": [
+                    {
+                      "commit": {
+                        "statusCheckRollup": {
+                          "state": "SUCCESS"
+                        }
+                      }
+                    }
+                  ]
+                },
+                "reviewThreads": {
+                  "pageInfo": {
+                    "hasNextPage": false,
+                    "endCursor": "Y3Vyc29yOnYyOpK0MjAyNi0xMC0wNVQxMTozMjo1OVrOqQNTog=="
+                  },
+                  "nodes": [
+                    {
+                      "isResolved": true
+                    },
+                    {
+                      "isResolved": true
+                    }
+                  ]
+                }
+              }
+            },
+            {
+              "__typename": "CrossReferencedEvent",
+              "willCloseTarget": false,
+              "source": {
+                "__typename": "Issue"
+              }
+            },
+            {
+              "__typename": "ClosedEvent",
+              "createdAt": "2026-10-05T16:34:43Z",
+              "actor": {
+                "login": "axyi"
+              },
+              "stateReason": "COMPLETED",
+              "closer": null
+            },
+            {
+              "__typename": "CrossReferencedEvent",
+              "willCloseTarget": false,
+              "source": {
+                "__typename": "PullRequest",
+                "number": 148,
+                "title": "feat(webhooks): share installation tokens through Redis (#62)",
+                "url": "https://github.com/larchanka-training/dmc-268-api-t6/pull/148",
+                "body": "## What\n\nКэш installation-токенов GitHub App перенесён в Redis. `worker` и `webhook-worker` теперь используют один токен на установку.\n\nОпирается на #136 (там добавлены зависимость `redis` и клиент Redis в `worker`). #136 слит, ветка перенесена на `main`.\n\n- **Протокол кэша** (`github_installation_tree_provider.py`): `InstallationAccessTokenCache` стал async, провайдер токенов ждёт `get` и `set`. Кэш в памяти остался и работает как раньше.\n- **Redis-кэш** (`redis_installation_token_cache.py`): ключ `token:{installation_id}`, время жизни до `expires_at` минус 60 с, тот же запас, что у кэша в памяти. Дробное время округляется вниз, токен внутри запаса в Redis не пишется.\n- **Недоступный Redis**: каждый токен дополнительно хранится в памяти процесса. Если чтение из Redis падает, ответ берётся оттуда, поэтому сбой Redis не приводит к выпуску токена на каждый запрос к GitHub.\n- **Логи**: при ошибке Redis пишется номер установки и тип ошибки. Значение токена и traceback в лог не попадают.\n- **Подключение**: `worker` передаёт в кэш клиент Redis из #136. `webhook-worker` получил настройку `REDIS_URL` и свой клиент, который закрывается при остановке. Без `REDIS_URL` оба процесса работают на кэше в памяти.\n- **Compose**: `REDIS_URL` передан в `webhook-worker` в `docker-compose.yml` и `deploy/compose/staging.yml`, комментарии обновлены.\n- **Документация**: из SD §7.3 убран пункт об отступлении. В §8.3, §10 и таблице сущностей убрана оговорка «сейчас в памяти процесса», время жизни записано как в коде: до `expires_at` минус 60 с (раньше стояло 50 мин). Обновлены `docs/SECRETS.md` и `.env.example`.\n\nНовых зависимостей нет: `redis` добавлен в #136.\n\nЧего здесь нет и почему:\n\n- `review_worker` в `app/worker.py` оставлен на кэше в памяти. Приложение его не вызывает, только тесты, и настройки он читает прямо из окружения.\n- У клиента Redis нет таймаута сокета, так же как в #136. Если Redis перестанет отвечать, не разрывая соединение, запрос токена будет ждать. Отказ в соединении и неверный пароль обрабатываются сразу.\n\n## Why\n\nРешение техлида в #56: целевое место кэша installation-токенов это Redis (SD §8.3, §10). До этого каждый процесс выпускал свой токен и терял его при перезапуске, а SD §7.3 записывал это как отступление.\n\n## How to verify\n\n- Гейты: `uv run ruff check .`, `uv run ruff format --check .`, `uv run mypy .`, `uv run pytest` (2776 passed, 191 skipped; тесты с `TEST_DATABASE_URL` и `TEST_RABBITMQ_URL` локально не запускались).\n- `uv run pytest tests/test_redis_installation_token_cache.py`: два процесса с общим Redis выпускают один токен, без Redis у каждого свой, время жизни ключа, токен не попадает в лог, оба воркера получают `REDIS_URL` в обоих compose-файлах.\n- Проверено на настоящем Redis 8 (контейнер `redis:8-alpine`) двумя отдельными процессами ОС с настоящим клиентом `redis.asyncio`, GitHub подменён:\n  - первый процесс выпустил токен, второй выпустил 0 и получил тот же токен;\n  - в Redis один ключ `token:17`, TTL 3538 с;\n  - без `REDIS_URL` каждый процесс выпустил свой токен, ключ в Redis не появился;\n  - закрытый порт и неверный пароль: один выпуск на процесс, в логе только тип ошибки;\n  - URL с паролем, как на staging: токен общий.\n- Не проверено: сами `worker` и `webhook-worker` на staging. После выката в Redis должен появиться один ключ `token:{installation_id}` на установку.\n\n## Refs\n\nRefs #62\n\nСвязано: #136 (клиент Redis в `worker`), #56 (решение техлида), #35 (Redis на staging).\n\n---\n\nBefore merge:\n\n- [x] No closing keyword and no Development-panel link to the issue\n- [x] Branch rebased on the current `main`\n- [ ] Approve is on the current head commit\n- [x] The body describes the whole PR\n- [ ] All review threads resolved\n\nRules: [merge](https://github.com/larchanka-training/dmc-268-api-t6/blob/main/docs/CONTRIBUTING.md#мерж), [issue acceptance](https://github.com/larchanka-training/dmc-268-api-t6/blob/main/docs/CONTRIBUTING.md#приёмка-задачи).\n\n",
+                "state": "MERGED",
+                "mergedAt": "2026-10-19T17:50:30Z",
+                "headRefOid": "eb878f99543c147bc0c3df9f8beb6fc96a70d336",
+                "repository": {
+                  "nameWithOwner": "larchanka-training/dmc-268-api-t6"
+                },
+                "commits": {
+                  "nodes": [
+                    {
+                      "commit": {
+                        "statusCheckRollup": {
+                          "state": "SUCCESS"
+                        }
+                      }
+                    }
+                  ]
+                },
+                "reviewThreads": {
+                  "pageInfo": {
+                    "hasNextPage": false,
+                    "endCursor": null
+                  },
+                  "nodes": []
+                }
+              }
+            },
+            {
+              "__typename": "CrossReferencedEvent",
+              "willCloseTarget": false,
+              "source": {
+                "__typename": "Issue"
+              }
+            },
+            {
+              "__typename": "CrossReferencedEvent",
+              "willCloseTarget": false,
+              "source": {
+                "__typename": "PullRequest",
+                "number": 187,
+                "title": "feat(monitoring): add Prometheus, Grafana and Alertmanager stack",
+                "url": "https://github.com/larchanka-training/dmc-268-api-t6/pull/187",
+                "body": "## What\n\nPR 1 of 2 for #186 (monitoring and alerts; PostgreSQL backups follow in a PR stacked on this one). A monitoring stack for staging as its own compose project `dmc-268-monitoring` next to the application, plus CI to validate and deploy it. No application code changes: the pipeline timings already live in the run trace (`run_actions.tool`, `duration_ms`).\n\n- **Stack** (`deploy/monitoring/compose.yml`), every image pinned by digest, memory-limited (~1.3 GB in total on the shared VPS), no host ports:\n\n  | Service | Version | Gives |\n  |---|---|---|\n  | prometheus | v3.15.0 | scrape every 30 s, 15 d / 2 GB retention, alert rules |\n  | alertmanager | v0.34.1 | grouping, 4 h repeat, resolve message, Telegram delivery |\n  | grafana | 13.0.2 | provisioned dashboard `AI Code Reviewer — staging overview` |\n  | node-exporter | v1.12.1 | host CPU, memory, disk; textfile dir for host jobs |\n  | cadvisor | v0.55.1 | CPU / memory per compose service (api, worker, webhook-worker, stores) |\n  | postgres-exporter | v0.20.1 | `pg_up`, connections + review metrics (`queries.yml`) |\n  | redis-exporter | v1.94.0 | memory, hit ratio, `redis_up` |\n\n  Queue depth comes from RabbitMQ itself (`rabbitmq_prometheus` is enabled in the pinned image, port 15692); RPS and status codes from the edge proxy.\n- **Definition of Done → dashboard:**\n\n  | DoD item | Panel | Source |\n  |---|---|---|\n  | LLM request latency | `LLM call p95`, `LLM call latency` | `run_actions` where `tool = 'llm.call'` |\n  | Queue size | `Messages waiting in review queues`, per-queue ready / unacked / consumers | `rabbitmq_detailed_queue_*` |\n  | RPS | `Requests per second (by host)` | `caddy_http_request_duration_seconds_count` |\n  | Pipeline step timings | `Phase duration p95`, `Phases over the range` | `run_actions.tool`, `duration_ms` |\n  | CPU / RAM of servers and workers | host + per-container panels | node-exporter, cAdvisor |\n- **Data access.** `deploy.sh` keeps two PostgreSQL roles in sync on every deploy: `grafana_reader` and `metrics_exporter`, `default_transaction_read_only`, statement timeout, connection limit, and **column-level** `SELECT` on run state / timestamps / tool / duration / costs only. `REVOKE ALL` + re-grant each deploy, so `run_actions.request/response`, `review_body`, `error_message`, diffs and findings stay closed (SD §13, customer data).\n- **Alerts** (`prometheus/rules/alerts.yml`, unit tests in `tests/monitoring/alerts.test.yml`): `TargetDown`, `PostgresDown`, `RedisDown`, `ApiHigh5xxRate`, `ReviewRunsFailed`, `ReviewDeadLetters`, `ReviewQueueBacklog`, `ReviewQueueWithoutConsumer`, `ReviewRunsStuckInQueue`, `LlmLatencyHigh`, `HostMemoryLow`, `HostDiskFull`, `HostCpuHigh`, `ContainerOomKilled`. Alertmanager → Telegram; the bot token goes to a 0400 file read via `bot_token_file`, never into the config, `.env` or logs. Two kinds: **state** alerts repeat every 4 h and send RESOLVED; **event** alerts (`kind: event`: `ReviewRunsFailed`, `ReviewDeadLetters` on *new* dead letters in 15 min) are sent once, without RESOLVED, and grouped for 90 s so the failed run and the dead letter of one exhausted Run (PIPELINE_SPEC §4.4) come as one message.\n- **Edge proxy** (`deploy/edge/Caddyfile`): global `metrics { per_host }`; a plain-HTTP site `:9180` serves `/metrics` on the `dmc268-edge` network only (not published, admin API stays on localhost); new site `grafana.<APP_DOMAIN>` → `grafana-staging:3000`, with Grafana's unauthenticated `/metrics` answered 404 at the edge (Prometheus scrapes it inside the docker network). The A records `grafana`, `prometheus`, `victoria-metrics` exist; Prometheus deliberately gets no public site (no authentication, queried through Grafana), VictoriaMetrics is not used.\n- **CI** (`.github/workflows/ci-cd.yml`):\n  - `Monitoring config validate` (PR and `main`, gates `push-image`): `scripts/validate_monitoring.sh` — `promtool check config` + `promtool test rules`, `amtool check-config` for both Alertmanager variants and the template, `docker compose config` for edge/ports, dashboard JSON;\n  - `Deploy monitoring` (`main`, after a green `Deploy staging`, own concurrency group `staging-monitoring` so it can neither cancel nor be cancelled with `promote-staging`): uploads `deploy/monitoring` to `/opt/dmc-268-monitoring` and runs its `deploy.sh`. It is outside the rollback and promotion path: a red run never rolls the app back.\n- **Docs:** new `docs/MONITORING.md`; `docs/CICD.md` (pipeline, jobs, route table, local command), `docs/SECRETS.md` (new subsection, away from the lines #148 changes), `docs/INFRASTRUCTURE.md` (DNS names), `AGENTS.md` pointer.\n\nNo new Python dependency. New container images: the seven above.\n\n## Why\n\nCurator task of the DevOps role (#186): Grafana must show LLM latency, queue size and RPS, and error alerts must reach the team channel. SD §13 puts the self-hosted observability stack into a task of its own; #35 left it out of scope.\n\n## How to verify\n\n```bash\nscripts/validate_monitoring.sh          # promtool, amtool, compose config, dashboard JSON\nuv run pytest tests/test_deploy_monitoring.py tests/test_env_parity.py\nuv run ruff check . && uv run ruff format --check . && uv run mypy . && uv run pytest\n```\n\nDone locally against `docker compose` of this repo (Docker Desktop):\n- all 10 Prometheus targets `up`; all 14 rules healthy;\n- Grafana through the edge Caddy at its own host: both data sources `OK`, all dashboard queries run without errors as the real roles;\n- `grafana_reader`: `permission denied` on `run_actions.request`, `runs.review_body`, `runs.error_message`, `code_change_diffs`, `findings`; `CREATE TABLE` refused (read-only);\n- Alertmanager → a stand-in Telegram API: message reached chat `-100…` in HTML, token taken from the file;\n- redeploy keeps generated passwords; a config change recreates only the affected service.\n\nAfter merge, on staging: `Deploy monitoring` green, then https://grafana.dmc268-t6.axyi.ru/ (user `admin`, password in `/opt/dmc-268-monitoring/.env`).\n\n**Needs before alerts are delivered** (the stack runs without them, alerts stay in Alertmanager): Environment `staging` secret `ALERT_TELEGRAM_BOT_TOKEN` and variable `ALERT_TELEGRAM_CHAT_ID` — setup steps in `docs/MONITORING.md` §5.\n\nNot verified: the course VPS itself (free RAM unknown; cAdvisor reads `/var/run` as documented for Debian — on Docker Desktop it needed the sockets mounted explicitly).\n\n## Refs\n\nRefs #186\n\n---\n\nBefore merge:\n\n- [ ] No closing keyword and no Development-panel link to the issue\n- [ ] Branch rebased on the current `main`\n- [ ] Approve is on the current head commit\n- [ ] The body describes the whole PR\n- [ ] All review threads resolved\n\nRules: [merge](https://github.com/larchanka-training/dmc-268-api-t6/blob/main/docs/CONTRIBUTING.md#мерж), [issue acceptance](https://github.com/larchanka-training/dmc-268-api-t6/blob/main/docs/CONTRIBUTING.md#приёмка-задачи).\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n",
+                "state": "MERGED",
+                "mergedAt": "2026-10-19T16:19:31Z",
+                "headRefOid": "9df640596e07b98a7652289a4bc65c841ecefc54",
+                "repository": {
+                  "nameWithOwner": "larchanka-training/dmc-268-api-t6"
+                },
+                "commits": {
+                  "nodes": [
+                    {
+                      "commit": {
+                        "statusCheckRollup": {
+                          "state": "SUCCESS"
+                        }
+                      }
+                    }
+                  ]
+                },
+                "reviewThreads": {
+                  "pageInfo": {
+                    "hasNextPage": false,
+                    "endCursor": "Y3Vyc29yOnYyOpK0MjAyNi0xMC0xN1QxNTo0MDo1MFrOrYZhng=="
+                  },
+                  "nodes": [
+                    {
+                      "isResolved": true
+                    },
+                    {
+                      "isResolved": true
+                    },
+                    {
+                      "isResolved": true
+                    },
+                    {
+                      "isResolved": true
+                    },
+                    {
+                      "isResolved": true
+                    }
+                  ]
+                }
+              }
+            },
+            {
+              "__typename": "CrossReferencedEvent",
+              "willCloseTarget": false,
+              "source": {
+                "__typename": "Issue"
+              }
+            },
+            {
+              "__typename": "CrossReferencedEvent",
+              "willCloseTarget": false,
+              "source": {
+                "__typename": "PullRequest",
+                "number": 297,
+                "title": "test(deploy): cover rollback boundary and align runbook (#215)",
+                "url": "https://github.com/larchanka-training/dmc-268-api-t6/pull/297",
+                "body": "## What\n\nAdd a regression for a new-image pull failure after the release switch. The deploy and CI helper use the same `DEPLOY_RUN`; rollback restores the working release in `.env` and `.deploy-state`, records `rolled_back=true`, and uses the immutable image identity in the expected pull → revision probe → compose-up order.\n\nAlign the rollback runbook and manual workflow input description with existing behavior:\n\n- Automatic rollback depends on crossing the release switch; early CI skips print `release unchanged` with exit 0 while the deploy job remains failed. The diagram gives that path its own terminal node.\n- After completed application auto rollback or deploy registry-login refusal, empty manual `image` reapplies the running release. Successful staging-image pull makes promotion set `:staging-previous` to that same release; an explicit SHA/digest is required to go farther back. Without previous, rollback restores bootstrap and skips promotion.\n- Auto rollback uses Compose already uploaded by failed run N+1. Manual edge rollback refreshes Compose; ports/Terraform refreshes scripts and retains host Compose. Manual workflow uploads no application secrets bundle. TLS waits follow host preparation and precede application changes.\n- Correct early-refusal and manual missing-password guidance; add sorted webhook-worker `REDIS_URL`, qualify optional-key examples, and link no-diagnostics paths to the failure table.\n\nCondense the plan/checklist into durable scope and dated validation, with current-head verification linked to PR checks. The original 35-line regression remains the only test addition; pre-existing tests, runtime scripts and workflow execution are unchanged. No dependencies were added.\n\n## Why\n\nA marker written after the new-image pull could leave `.env` on the failed image while CI reports `release unchanged`. The regression detects that boundary error. The runbook also needed precise target-selection, bootstrap, promotion, early-refusal and Compose-provenance guidance for operators.\n\n## How to verify\n\n- Mutation proof: moving the complete marker-write block after the new-image pull makes only the new regression fail because CI reports `release unchanged` and leaves `.env` on image C. Restoring `deploy.sh` byte-for-byte makes it pass; existing #179 tests remain unchanged.\n- Review-follow-up genuine-Linux checkpoint: `uv run pytest tests/test_deploy_staging_services.py tests/test_rollback_revision.py tests/test_rollback_verifier.py -q` — **257 passed, zero skips in 81.10s**. Source/Git mounts remained read-only; no source or shell shim was used.\n- Review-follow-up exact static gates passed: `uv run ruff check .`; `uv run ruff format --check .` (**590 files already formatted**); `uv run mypy .` (**580 source files, no issues**).\n- Independent Standards and Spec reviews across the complete six-path PR delta: **zero actionable findings each**.\n- Required full current-head CI is **pending on `5ff5001`** after the conflict-free rebase onto current `main` (`0ed260a`): [PR checks](https://github.com/larchanka-training/dmc-268-api-t6/pull/297/checks). All three commits are unchanged in `git range-diff`, and the combined PR patch ID is identical. Earlier CI and reviews remain scoped to their respective heads; they do not certify this rebased head. Historical verification remains dated and scoped in `docs/plans/215-todo.md`.\n- Compare the prose with deploy/rollback scripts, workflow upload/prepare/promotion order, staging Compose and verifier environment allowlists. No shared-staging exercise was performed.\n\n## Refs\n\nRefs #215\n\n---\n\nBefore merge:\n\n- [x] No closing keyword and no Development-panel link to the issue\n- [x] Branch rebased on the current `main`\n- [ ] Approve is on the current head commit\n- [x] The body describes the whole PR\n- [ ] All review threads resolved\n\nRules: [merge](https://github.com/larchanka-training/dmc-268-api-t6/blob/main/docs/CONTRIBUTING.md#мерж), [issue acceptance](https://github.com/larchanka-training/dmc-268-api-t6/blob/main/docs/CONTRIBUTING.md#приёмка-задачи).\n\n\n",
+                "state": "MERGED",
+                "mergedAt": "2026-10-25T15:52:35Z",
+                "headRefOid": "c94401043b6b93f03bfc43f426604d5901beafcc",
+                "repository": {
+                  "nameWithOwner": "larchanka-training/dmc-268-api-t6"
+                },
+                "commits": {
+                  "nodes": [
+                    {
+                      "commit": {
+                        "statusCheckRollup": {
+                          "state": "SUCCESS"
+                        }
+                      }
+                    }
+                  ]
+                },
+                "reviewThreads": {
+                  "pageInfo": {
+                    "hasNextPage": false,
+                    "endCursor": "Y3Vyc29yOnYyOpK0MjAyNi0xMC0yNVQxMjowNzoxMFrOsASD-w=="
+                  },
+                  "nodes": [
+                    {
+                      "isResolved": true
+                    }
+                  ]
+                }
+              }
+            },
+            {
+              "__typename": "CrossReferencedEvent",
+              "willCloseTarget": false,
+              "source": {
+                "__typename": "Issue"
+              }
+            },
+            {
+              "__typename": "CrossReferencedEvent",
+              "willCloseTarget": false,
+              "source": {
+                "__typename": "Issue"
+              }
+            }
+          ]
+        }
+      }
+    }
+  }
+}

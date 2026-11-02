@@ -1,0 +1,14 @@
+diff --git a/pkg/store.py b/pkg/store.py
+index 4357146..9378405 100644
+--- a/pkg/store.py
++++ b/pkg/store.py
+@@ -3,6 +3,8 @@
+ from .models import Item
+ 
+ 
+-def save(item: Item) -> Item:
++def save(item: Item, *, dry_run: bool) -> Item:
+     item.check()
++    if dry_run:
++        return item
+     return item

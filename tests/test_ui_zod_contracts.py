@@ -7,7 +7,7 @@ from dataclasses import replace
 from datetime import UTC, datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 from uuid import UUID
 
 import pytest
@@ -21,13 +21,12 @@ from app.modules.reviews.application.list_runs import RunCursor, RunListItem
 from tests.portal_test_client import authenticated_test_client as TestClient
 
 CONTRACTS_PATH = Path(__file__).parent / "fixtures" / "ui_zod_contracts.json"
+METRICS_CONTRACTS_PATH = Path(__file__).parent / "fixtures" / "ui_metrics_zod_contracts.json"
 RUN_STEP_CONTRACTS_PATH = Path(__file__).parent / "fixtures" / "ui_run_step_zod_contracts.json"
 RUN_ID = UUID("11111111-1111-4111-8111-111111111111")
-# The base snapshot stays pinned until a single UI commit contains all shared contracts.
-UI_CONTRACT_COMMIT = "9bfb931d88fe66b15d77e636b32406374c76589a"
-# The base snapshot includes repository contracts from UI #102 that are not on UI main yet.
-# Keep that coverage; generate only the new event from ui#155
-# (RunStepEvent attempt + llmOperation, merged as 0c36c497).
+UI_CONTRACT_COMMIT = "6c635e7caf6d3a37eda5795c25ad1af5411b3024"
+UI_METRICS_CONTRACT_COMMIT = "00580e9067845aed0ed68f45beacb20c132f59c8"
+# The RunStepEvent supplement retains its separate UI #155 provenance.
 # SCHEMA_NAMES=runStepEvent OUTPUT_PATH=tests/fixtures/ui_run_step_zod_contracts.json \
 # DMC_268_UI_DIR=<ui checkout after pnpm install> node tests/generate_ui_zod_contracts.mjs
 UI_RUN_STEP_CONTRACT_COMMIT = "0c36c4976b9fae07e7b465f28dc0d196f5d61bdb"
@@ -63,6 +62,7 @@ class ContractRepository:
         if run_id != RUN_ID:
             return None
         item = RunListItem(
+            provider="github",
             id=RUN_ID,
             status="succeeded",
             engine="fast",
@@ -156,14 +156,42 @@ class ContractRepository:
         ]
 
 
+def _merge_additive_schema(left: Any, right: Any, path: str) -> Any:
+    if left == right:
+        return left
+    if path.endswith("/required") and isinstance(left, list) and isinstance(right, list):
+        return list(dict.fromkeys([*left, *right]))
+    if isinstance(left, dict) and isinstance(right, dict):
+        return {
+            key: _merge_additive_schema(left[key], right[key], f"{path}/{key}")
+            if key in left and key in right
+            else left.get(key, right.get(key))
+            for key in dict.fromkeys([*left, *right])
+        }
+    raise AssertionError(f"UI schema sources disagree at {path}")
+
+
 def _generated_schemas() -> dict[str, Any]:
     contracts = json.loads(CONTRACTS_PATH.read_text())
     assert contracts["provenance"]["commit"] == UI_CONTRACT_COMMIT
+    metrics_contracts = json.loads(METRICS_CONTRACTS_PATH.read_text())
+    assert metrics_contracts["provenance"]["commit"] == UI_METRICS_CONTRACT_COMMIT
+    assert metrics_contracts["schemas"].keys() == {
+        "runSession",
+        "runDetail",
+        "runListPage",
+        "metricsSummary",
+    }
     run_step_contracts = json.loads(RUN_STEP_CONTRACTS_PATH.read_text())
     assert run_step_contracts["provenance"]["commit"] == UI_RUN_STEP_CONTRACT_COMMIT
     assert run_step_contracts["schemas"].keys() == {"runStepEvent"}
     assert contracts["schemas"].keys().isdisjoint(run_step_contracts["schemas"])
-    return cast(dict[str, Any], contracts["schemas"] | run_step_contracts["schemas"])
+    schemas: dict[str, Any] = contracts["schemas"] | run_step_contracts["schemas"]
+    for name, schema in metrics_contracts["schemas"].items():
+        schemas[name] = (
+            _merge_additive_schema(schemas[name], schema, name) if name in schemas else schema
+        )
+    return schemas
 
 
 def test_api_responses_validate_against_json_schema_generated_from_ui_zod() -> None:
