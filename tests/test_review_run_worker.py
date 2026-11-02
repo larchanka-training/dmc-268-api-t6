@@ -8,7 +8,7 @@ from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from types import TracebackType
-from typing import Self, cast
+from typing import Any, Self, cast
 from uuid import UUID
 
 import httpx
@@ -722,7 +722,7 @@ def test_check_run_view_follows_the_pipeline_spec_table(
     assert view.conclusion != "failure"
 
 
-def _succeeded(**change: object) -> CheckRunReport:
+def _succeeded(**change: Any) -> CheckRunReport:
     return replace(CheckRunReport(CheckRunTarget(1, "o/r", HEAD, RUN), "succeeded", 1), **change)
 
 
