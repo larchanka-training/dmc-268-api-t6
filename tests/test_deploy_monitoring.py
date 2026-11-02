@@ -63,7 +63,7 @@ def _job(name: str) -> str:
 def test_monitoring_images_are_pinned_by_digest() -> None:
     images = re.findall(r"^    image: (\S+)$", _read(MONITORING / "compose.yml"), re.M)
 
-    assert len(images) == 9
+    assert len(images) == 10
     for image in images:
         assert re.fullmatch(r"[a-z0-9./_-]+:v?[\d.]+(-alpine)?@sha256:[0-9a-f]{64}", image), image
 
