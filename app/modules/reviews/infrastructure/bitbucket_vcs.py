@@ -573,7 +573,7 @@ class HttpBitbucketVcsProvider:
         current = self._current
         suffix = f"pullrequests/{locator.number}/commits"
         endpoint = f"/2.0/repositories/%7B%7D/%7B{self._http.target.repository_uuid}%7D/{suffix}"
-        params = {"pagelen": str(COMMIT_PAGE_SIZE), "page": "1"}
+        params = {"pagelen": str(COMMIT_PAGE_SIZE)}
         seen_pages: set[tuple[tuple[str, str], ...]] = set()
         seen_commits: set[str] = set()
         messages: list[str] = []

@@ -253,7 +253,7 @@ def test_tree_walk_does_not_hide_exhausted_response_budget_as_partial_listing() 
     asyncio.run(scenario())
 
 
-def test_policy_accepts_empty_base_tree_without_explicit_first_page() -> None:
+def test_policy_reads_nonempty_first_source_page_without_page_parameter() -> None:
     def respond(request: httpx.Request) -> httpx.Response:
         if request.url.path == f"{PREFIX}/pullrequests/7":
             return httpx.Response(200, json=_pr(source=DEST))
@@ -261,8 +261,24 @@ def test_policy_accepts_empty_base_tree_without_explicit_first_page() -> None:
             return httpx.Response(200, json={"size": 0, "values": []})
         if request.url.path == f"{PREFIX}/src/{BASE}/":
             if "page" in request.url.params:
-                return httpx.Response(400, text="Invalid page")
-            return httpx.Response(200, json={"values": [], "pagelen": 100, "page": 1})
+                return httpx.Response(
+                    400, json={"type": "error", "error": {"message": "Invalid page"}}
+                )
+            return httpx.Response(
+                200,
+                json={
+                    "values": [
+                        {
+                            "type": "commit_file",
+                            "path": "README.md",
+                            "size": 1,
+                            "commit": {"hash": BASE},
+                        }
+                    ],
+                    "pagelen": 100,
+                    "page": 1,
+                },
+            )
         raise AssertionError(request.url.path)
 
     async def scenario() -> None:
@@ -273,7 +289,7 @@ def test_policy_accepts_empty_base_tree_without_explicit_first_page() -> None:
                 http=http, expected_input=INPUT, vcs=vcs, checkpoint=checkpoint
             )
             policy = BitbucketPolicyDocumentSource(trees=trees, policy_base_sha=BASE)
-            assert await policy.list_entries(None) == {}
+            assert set(await policy.list_entries(None)) == {"README.md"}
 
     asyncio.run(scenario())
 
@@ -1020,6 +1036,31 @@ def test_agents_policy_file_on_opaque_second_page_is_read() -> None:
     asyncio.run(scenario())
 
 
+def test_commit_prefix_reads_first_page_without_page_parameter() -> None:
+    def respond(request: httpx.Request) -> httpx.Response:
+        if request.url.path == f"{PREFIX}/pullrequests/7":
+            return httpx.Response(200, json=_pr(source=DEST))
+        if request.url.path == f"{PREFIX}/diffstat/{HEAD}..{BASE}":
+            return httpx.Response(200, json={"size": 0, "values": []})
+        if request.url.path == f"{PREFIX}/pullrequests/7/commits":
+            if "page" in request.url.params:
+                return httpx.Response(
+                    400, json={"type": "error", "error": {"message": "Invalid page"}}
+                )
+            return httpx.Response(200, json={"values": [{"hash": HEAD, "message": "New code"}]})
+        raise AssertionError(request.url.path)
+
+    async def scenario() -> None:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+            vcs = HttpBitbucketVcsProvider(
+                http=BitbucketRunHttp(client, Credentials(), TARGET), locator=INPUT.locator
+            )
+            prefix = await vcs.get_commit_messages(INPUT.locator, checkpoint=checkpoint)
+            assert prefix.messages == ("New code",)
+
+    asyncio.run(scenario())
+
+
 def test_commit_prefix_is_bounded_and_unavailable_source_fails_explicitly() -> None:
     def page(start: int) -> list[dict[str, str]]:
         return [
@@ -1036,7 +1077,7 @@ def test_commit_prefix_is_bounded_and_unavailable_source_fails_explicitly() -> N
         if path == f"{PREFIX}/pullrequests/7/commits":
             if request.url.params.get("page") == "opaque/second":
                 return httpx.Response(200, json={"values": page(10)})
-            assert request.url.params.get("page") == "1"
+            assert request.url.params.get("page") is None
             return httpx.Response(
                 200,
                 json={

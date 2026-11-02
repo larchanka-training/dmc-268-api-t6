@@ -152,7 +152,7 @@ def test_repeated_source_page_stops_before_third_request() -> None:
     calls = 0
     next_page = (
         f"https://api.bitbucket.org/2.0/repositories/%7B%7D/%7B{REPO}%7D/"
-        f"src/{SHA}/?pagelen=100&page=2"
+        f"src/{SHA}/?pagelen=100&page=rXtr"
     )
 
     def handle(request: httpx.Request) -> httpx.Response:
