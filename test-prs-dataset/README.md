@@ -1171,7 +1171,7 @@ in arm `none` the rule and exception figures are found and flagged without rules
 other than `legacy`: v3 tells the model that only `<custom_instructions>` instruct it, so on
 v3 the effect is about zero by construction. The AC8 runs used `review_prompt=v5` (#144
 part 3b); their results are in
-[RULES_MD_TEST_REPORT](../docs/RULES_MD_TEST_REPORT.md#ac8--живой-ab-на-v5).
+[RULES_MD_TEST_REPORT](../docs/test-plan/RULES_MD_TEST_REPORT.md#ac8--живой-ab-на-v5).
 
 ### Service defaults in the policy arms
 
