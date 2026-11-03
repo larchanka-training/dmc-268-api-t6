@@ -360,7 +360,7 @@ Redis не бэкапится: на staging он без тома и без пе�
 
 ```bash
 scripts/validate_monitoring.sh   # promtool (в т.ч. запросы страницы статуса), amtool, конфиг blackbox, compose config, JSON дашбордов (как в CI)
-uv run pytest tests/test_deploy_monitoring.py tests/test_deploy_monitoring_prod.py tests/test_monitoring_acceptance.py tests/test_status_page.py
+uv run pytest tests/test_deploy_monitoring.py tests/test_deploy_monitoring_prod.py tests/test_monitoring_acceptance.py tests/test_monitoring_acceptance_status_page.py tests/test_status_page.py
 ```
 
 `tests/test_deploy_monitoring_prod.py` — prod-часть: метки `environment` по job'ам и серий (небольшой вычислитель relabel), сети и состав `compose.prod.yml`, конфиг ретранслятора, `deploy.sh` с prod на подменённом хосте (роли, пароли, цели, оверлей, проверка изоляции), job `Deploy monitoring` и переключатель дашборда; `validate_monitoring.sh` ещё рендерит оверлей и проверяет `nginx -t` для ретранслятора.
