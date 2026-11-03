@@ -670,3 +670,24 @@ def test_prod_source_reads_through_the_relay_as_grafana_reader() -> None:
             "${PROD_GRAFANA_DB_PASSWORD:?PROD_GRAFANA_DB_PASSWORD is required}"
         ),
     }
+
+
+def test_a_prod_grant_that_fails_before_prod_is_migrated_says_so(prod_host: Host) -> None:
+    # A migration that adds a column the grants name reaches staging first.
+    result = _deploy_with_prod(prod_host, STUB_EXEC_FAILS="pgcontainer-prod")
+
+    assert result.returncode == 1
+    assert "failed to grant the monitoring roles in the prod database" in result.stderr
+    assert "run Deploy prod, then re-run Deploy monitoring" in result.stderr
+    # Staging was synced before, and the stack itself was not touched.
+    assert _grants(_sql_of(prod_host, "pgcontainer")) == METADATA_GRANTS
+    assert not prod_host.env_file.exists()
+    assert " up " not in prod_host.log("docker.log")
+
+
+def test_a_staging_grant_that_fails_has_no_prod_hint(prod_host: Host) -> None:
+    result = _deploy_with_prod(prod_host, STUB_EXEC_FAILS="pgcontainer")
+
+    assert result.returncode == 1
+    assert "failed to grant the monitoring roles in the staging database" in result.stderr
+    assert "Deploy prod" not in result.stderr

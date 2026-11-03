@@ -371,9 +371,11 @@ unset BACKUP_ENCRYPTION_PASSPHRASE
 # closed. The statements carry no secret and run with visible errors.
 # sync_monitoring_roles <container> <user> <database> <1 with backup_agent, 0 without>
 #   <grafana_reader password> <metrics_exporter password> <backup_agent password>
+#   <name of the database for messages> [<hint when the grants fail>]
 sync_monitoring_roles() {
   local container="$1" pg_user="$2" database="$3" with_backup="$4"
   local grafana_password="$5" exporter_password="$6" backup_password="$7"
+  local label="$8" hint="${9:-}"
   psql_in() {
     docker exec -i "${container}" psql -X -q -v ON_ERROR_STOP=1 -U "${pg_user}" -d "${database}"
   }
@@ -424,7 +426,11 @@ GRANT pg_read_all_data TO backup_agent;
 GRANT CONNECT ON DATABASE "${database}" TO backup_agent;
 SQL
     fi
-  } | psql_in
+  } | psql_in || {
+    echo "failed to grant the monitoring roles in the ${label} database (${container})" >&2
+    if [[ -n "${hint}" ]]; then echo "${hint}" >&2; fi
+    exit 1
+  }
   # Passwords through stdin, never argv; output and errors are dropped because psql would echo the
   # failing statement, password included.
   if ! {
@@ -443,10 +449,12 @@ SQL
   fi
 }
 sync_monitoring_roles "${POSTGRES_CONTAINER}" "${POSTGRES_USER}" "${POSTGRES_DB}" 1 \
-  "${GRAFANA_DB_PASSWORD}" "${PG_EXPORTER_PASSWORD}" "${PG_BACKUP_PASSWORD}"
+  "${GRAFANA_DB_PASSWORD}" "${PG_EXPORTER_PASSWORD}" "${PG_BACKUP_PASSWORD}" staging
 if [[ -n "${PROD_API_DIR}" ]]; then
+  # A migration that adds a column the grants name reaches staging first: prod fails until Deploy prod.
   sync_monitoring_roles "${PROD_POSTGRES_CONTAINER}" "${PROD_POSTGRES_USER}" "${PROD_POSTGRES_DB}" 0 \
-    "${PROD_GRAFANA_DB_PASSWORD}" "${PROD_PG_EXPORTER_PASSWORD}" ""
+    "${PROD_GRAFANA_DB_PASSWORD}" "${PROD_PG_EXPORTER_PASSWORD}" "" prod \
+    "a grant may name a column that prod has not migrated yet: run Deploy prod, then re-run Deploy monitoring"
 fi
 
 umask 077

@@ -604,6 +604,7 @@ case "$1" in
   exec)
     printf -- '-- container %s\\n' "$3" >> "${STUB_PSQL_STDIN}"
     cat >> "${STUB_PSQL_STDIN}"; printf '\\n--\\n' >> "${STUB_PSQL_STDIN}"
+    if [[ "$3" == "${STUB_EXEC_FAILS:-none}" ]]; then exit 1; fi
     ;;
   compose)
     if [[ " $* " == *" exec "* ]]; then cat >> "${STUB_GRAFANA_STDIN}"; fi
