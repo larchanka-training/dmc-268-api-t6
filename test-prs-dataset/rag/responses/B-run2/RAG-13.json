@@ -1,0 +1,1 @@
+{"findings": [], "summary": {"problem": "No defect was found in this change.", "done_well": "The new helper `last_active_label` provides a user-friendly timestamp from recent events, and `kind_label` keeps the existing formatting utility.", "effort": "none"}}

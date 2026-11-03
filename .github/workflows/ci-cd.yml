@@ -362,11 +362,56 @@ jobs:
         run: uv run --locked python review/scripts/validate_dataset.py --root test-prs-dataset/rules --final --profile rules
 
       - name: RAG sub-corpus
-        # The graph-RAG sub-corpus (#146): its own profile and the index snapshots. No recorded
-        # captures exist until Part 3, which adds the recorded replay to this step.
+        # The graph-RAG sub-corpus (#146): its own profile, the index snapshots and the six recorded
+        # captures (arms A and B, three runs each) replayed offline, no key and no network. Each
+        # replay needs about 40 seconds of CPU, so the six run side by side; a failed one fails
+        # the step, and replay warnings (digest drift) surface as annotations.
+        shell: bash
         run: |
           uv run --locked python review/scripts/validate_dataset.py --root test-prs-dataset/rag --final --profile rag
           uv run --locked python review/scripts/build_rag_snapshot.py --check test-prs-dataset/rag/cases
+          rag_replays="${RUNNER_TEMP}/rag-replays"
+          mkdir -p "${rag_replays}"
+          captures=()
+          pids=()
+          for capture in test-prs-dataset/rag/responses/*/; do
+            name="$(basename "${capture}")"
+            uv run --locked python review/scripts/eval_replay.py --root test-prs-dataset/rag --responses-dir "${capture}" --report-json "${rag_replays}/${name}.json" > "${rag_replays}/${name}.log" 2>&1 &
+            captures+=("${name}")
+            pids+=("$!")
+          done
+          replay_status=0
+          for index in "${!pids[@]}"; do
+            wait "${pids[index]}" || {
+              replay_status=$?
+              echo "::error::RAG replay of ${captures[index]} failed (exit ${replay_status})"
+              cat "${rag_replays}/${captures[index]}.log"
+            }
+          done
+          RAG_REPLAYS="${rag_replays}" uv run --locked python - <<'PYTHON'
+          import json
+          import os
+          from pathlib import Path
+
+          reports = Path(os.environ["RAG_REPLAYS"])
+
+          with Path(os.environ["GITHUB_STEP_SUMMARY"]).open("a", encoding="utf-8") as summary:
+              summary.write("## RAG captures\n\n| Capture | Recall | Precision | Validity |\n|---|---|---|---|\n")
+              for capture in sorted(Path("test-prs-dataset/rag/responses").iterdir()):
+                  path = reports / f"{capture.name}.json"
+                  if not path.is_file():
+                      summary.write(f"| {capture.name} | replay failed, no report | | |\n")
+                      continue
+                  report = json.loads(path.read_text(encoding="utf-8"))
+                  micro = report["micro"]
+                  summary.write(
+                      f"| {capture.name} | {micro['recall']:.1%} | {micro['precision']:.1%} "
+                      f"| {report['validity']:.1%} |\n"
+                  )
+                  for warning in report["warnings"]:
+                      print(f"::warning::{capture.name}: {warning}")
+          PYTHON
+          exit "${replay_status}"
 
   python-integration:
     # Integration tests share advisory-lock keys, NOTIFY channels and RabbitMQ names, so they do not

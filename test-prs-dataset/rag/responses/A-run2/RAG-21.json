@@ -1,0 +1,1 @@
+{"findings": [], "summary": {"problem": "No defect was found in this change.", "done_well": "The `until_service` function now returns both kilometers and days remaining, and the plate label helper includes a clear docstring.", "effort": "none"}}
