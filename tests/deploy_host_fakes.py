@@ -22,6 +22,7 @@ WORKFLOW = REPO_ROOT / ".github" / "workflows" / "ci-cd.yml"
 
 STAGING_COMPOSE = REPO_ROOT / "deploy" / "compose" / "staging.yml"
 PROJECT = "dmc-268-api-staging"
+PROD_PROJECT = "dmc-268-api-prod"
 IMAGE_A = "ghcr.io/test/api@sha256:" + "a" * 64
 IMAGE_B = "ghcr.io/test/api@sha256:" + "b" * 64
 

@@ -19,13 +19,13 @@ import pytest
 from tests.deploy_host_fakes import (
     IMAGE_A,
     IMAGE_B,
+    PROD_PROJECT,
     REPO_ROOT,
     Host,
     _read_dotenv,
     make_host,
 )
 
-PROD_PROJECT = "dmc-268-api-prod"
 STOPPED = (
     f"stopped compose project {PROD_PROJECT}; no bootstrap container (NO_PREVIOUS_RELEASE=stop)"
 )
