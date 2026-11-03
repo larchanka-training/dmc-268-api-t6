@@ -369,16 +369,17 @@ unset BACKUP_ENCRYPTION_PASSPHRASE
 # privileges, so the list below is exactly what the roles can read. No column holds review
 # content: run_actions.request/response, runs.review_body/error_message, diffs and findings stay
 # closed. The statements carry no secret and run with visible errors.
-# sync_monitoring_roles <container> <user> <database> <1 with backup_agent, 0 without>
-#   <grafana_reader password> <metrics_exporter password> <backup_agent password>
+# psql_in <container> <user> <database>: the SQL on stdin, as the application user.
+psql_in() {
+  docker exec -i "$1" psql -X -q -v ON_ERROR_STOP=1 -U "$2" -d "$3"
+}
+# sync_monitoring_roles <container> <user> <database> <grafana_reader password>
+#   <metrics_exporter password> <backup_agent password, empty: no backup_agent>
 #   <name of the database for messages> [<hint when the grants fail>]
 sync_monitoring_roles() {
-  local container="$1" pg_user="$2" database="$3" with_backup="$4"
-  local grafana_password="$5" exporter_password="$6" backup_password="$7"
-  local label="$8" hint="${9:-}"
-  psql_in() {
-    docker exec -i "${container}" psql -X -q -v ON_ERROR_STOP=1 -U "${pg_user}" -d "${database}"
-  }
+  local container="$1" pg_user="$2" database="$3"
+  local grafana_password="$4" exporter_password="$5" backup_password="$6"
+  local label="$7" hint="${8:-}"
   {
     cat <<SQL
 SET client_min_messages = warning;
@@ -410,7 +411,7 @@ GRANT SELECT (provider, model, operation, tokens_in, tokens_out, cache_read_toke
 -- postgres-exporter: the month-to-date LLM cost only, without the provider, model or tokens.
 GRANT SELECT (cost_usd, created_at) ON usage_events TO metrics_exporter;
 SQL
-    if [[ "${with_backup}" == 1 ]]; then
+    if [[ -n "${backup_password}" ]]; then
       cat <<SQL
 DO \$\$
 BEGIN
@@ -426,7 +427,7 @@ GRANT pg_read_all_data TO backup_agent;
 GRANT CONNECT ON DATABASE "${database}" TO backup_agent;
 SQL
     fi
-  } | psql_in || {
+  } | psql_in "${container}" "${pg_user}" "${database}" || {
     echo "failed to grant the monitoring roles in the ${label} database (${container})" >&2
     if [[ -n "${hint}" ]]; then echo "${hint}" >&2; fi
     exit 1
@@ -438,21 +439,21 @@ SQL
 ALTER ROLE grafana_reader PASSWORD '${grafana_password}';
 ALTER ROLE metrics_exporter PASSWORD '${exporter_password}';
 SQL
-    if [[ "${with_backup}" == 1 ]]; then
+    if [[ -n "${backup_password}" ]]; then
       cat <<SQL
 ALTER ROLE backup_agent PASSWORD '${backup_password}';
 SQL
     fi
-  } | psql_in >/dev/null 2>&1; then
+  } | psql_in "${container}" "${pg_user}" "${database}" >/dev/null 2>&1; then
     echo "failed to set the passwords of the monitoring roles in PostgreSQL (${container})" >&2
     exit 1
   fi
 }
-sync_monitoring_roles "${POSTGRES_CONTAINER}" "${POSTGRES_USER}" "${POSTGRES_DB}" 1 \
+sync_monitoring_roles "${POSTGRES_CONTAINER}" "${POSTGRES_USER}" "${POSTGRES_DB}" \
   "${GRAFANA_DB_PASSWORD}" "${PG_EXPORTER_PASSWORD}" "${PG_BACKUP_PASSWORD}" staging
 if [[ -n "${PROD_API_DIR}" ]]; then
   # A migration that adds a column the grants name reaches staging first: prod fails until Deploy prod.
-  sync_monitoring_roles "${PROD_POSTGRES_CONTAINER}" "${PROD_POSTGRES_USER}" "${PROD_POSTGRES_DB}" 0 \
+  sync_monitoring_roles "${PROD_POSTGRES_CONTAINER}" "${PROD_POSTGRES_USER}" "${PROD_POSTGRES_DB}" \
     "${PROD_GRAFANA_DB_PASSWORD}" "${PROD_PG_EXPORTER_PASSWORD}" "" prod \
     "a grant may name a column that prod has not migrated yet: run Deploy prod, then re-run Deploy monitoring"
 fi

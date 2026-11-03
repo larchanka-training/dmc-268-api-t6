@@ -691,3 +691,19 @@ def test_a_staging_grant_that_fails_has_no_prod_hint(prod_host: Host) -> None:
     assert result.returncode == 1
     assert "failed to grant the monitoring roles in the staging database" in result.stderr
     assert "Deploy prod" not in result.stderr
+
+
+def test_deploy_script_defines_no_nested_functions() -> None:
+    script = (MONITORING / "deploy.sh").read_text(encoding="utf-8")
+
+    # A function defined inside another one only exists after the outer one has run.
+    assert re.findall(r"^[ \t]+(?:function\s+)?\w+\s*\(\)\s*\{", script, re.M) == []
+
+
+def test_the_backup_role_follows_the_backup_password(prod_host: Host) -> None:
+    result = _deploy_with_prod(prod_host)
+
+    assert result.returncode == 0, result.stderr
+    # Staging holds a backup password and gets the role, prod holds none and gets no role.
+    assert "ALTER ROLE backup_agent PASSWORD" in _sql_of(prod_host, "pgcontainer")
+    assert "backup_agent" not in _sql_of(prod_host, "pgcontainer-prod")
