@@ -78,6 +78,23 @@ previous_setting() {
 }
 
 # A password of this stack: kept from .env, generated once on a fresh host.
+# A path made absolute and normalised by text alone: no "//", ".", trailing "/", and ".." resolved
+# against the segment before it. No realpath: its -m is GNU only, and the dirs may not exist yet.
+normalize_path() {
+  local rest="$1" result="" segment
+  if [[ "${rest}" != /* ]]; then rest="${PWD}/${rest}"; fi
+  while [[ -n "${rest}" ]]; do
+    segment="${rest%%/*}"
+    if [[ "${rest}" == */* ]]; then rest="${rest#*/}"; else rest=""; fi
+    case "${segment}" in
+      "" | .) ;;
+      ..) result="${result%/*}" ;;
+      *) result="${result}/${segment}" ;;
+    esac
+  done
+  printf '%s' "${result:-/}"
+}
+
 stack_password() {
   local name="$1" value=""
   if [[ -f "${ENV_FILE}" ]]; then
@@ -335,6 +352,17 @@ fi
 BACKUP_DIR="${BACKUP_DIR:-/var/backups/dmc-268/${API_PROJECT}}"
 if [[ -n "${PROD_API_DIR}" ]]; then
   PROD_BACKUP_DIR="${PROD_BACKUP_DIR:-/var/backups/dmc-268/${PROD_API_PROJECT}}"
+  # Each service prunes and counts the dumps of its dir: one dir, or one inside the other, would
+  # mix the dumps and the off-host copies of the two databases. Compared normalised, before the
+  # host changes.
+  staging_dumps="$(normalize_path "${BACKUP_DIR}")"
+  prod_dumps="$(normalize_path "${PROD_BACKUP_DIR}")"
+  if [[ "${prod_dumps}" == "${staging_dumps}" || "${prod_dumps}" == "${staging_dumps%/}"/* \
+    || "${staging_dumps}" == "${prod_dumps%/}"/* ]]; then
+    echo "PROD_BACKUP_DIR must not be BACKUP_DIR nor inside it (or the other way round):" \
+      "${PROD_BACKUP_DIR} and ${BACKUP_DIR}" >&2
+    exit 1
+  fi
 fi
 
 # The crypt remote of rclone takes the passphrase in its obscured form. Obscuring is randomised, so
