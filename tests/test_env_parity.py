@@ -33,12 +33,16 @@ HOSTS_WITHOUT_UPSTREAM = (
     "apex",
     "www",
 )
-DEPLOYED_HOSTS = ("staging-api", "staging-ui", "grafana")
+DEPLOYED_HOSTS = ("staging-api", "staging-ui", "grafana", "status", "staging-status")
 # Upstreams of every host in route order, as in the route table of docs/CICD.md §8.2.
 UPSTREAMS = {
     "staging-api": ["api-staging:8000"],
     # Grafana of the monitoring stack (docs/MONITORING.md), deployed by this repository.
     "grafana": ["grafana-staging:3000"],
+    # Public status page of the monitoring stack (api#309): both names reach the one service, which
+    # shows the staging section only on staging-status.
+    "status": ["status-staging:8080"],
+    "staging-status": ["status-staging:8080"],
     "api": ["api-prod:8000"],
     "staging-webhook": ["webhook-staging:8000"],
     "webhook": ["webhook-prod:8000"],
@@ -186,6 +190,25 @@ def test_host_proxies_only_to_its_own_environment(host: str, upstreams: list[str
     assert re.findall(r"reverse_proxy (\S+)", site) == upstreams
     # A site-level respond would answer before any route.
     assert not re.search(r"^\trespond ", site, re.MULTILINE)
+
+
+def test_status_hosts_proxy_only_the_page_and_answer_404_to_everything_else() -> None:
+    site = _site("status")
+
+    # One block for both names: the service picks the sections by the Host it is handed.
+    assert _site("staging-status") == site
+    assert re.search(r"^\timport hsts$", site, re.MULTILINE)
+    # Only GET and HEAD of "/" go upstream: no path of Prometheus, Alertmanager or Grafana is
+    # routed, whatever the upstream would answer to it.
+    page = re.search(
+        r"^\t@page \{\n\t\tpath /\n\t\tmethod GET HEAD\n\t\}\n\thandle @page \{\n(.*?)\n\t\}\n"
+        r"\thandle \{\n\t\trespond 404\n\t\}\n$",
+        site,
+        re.M | re.S,
+    )
+    assert page is not None, site
+    assert page.group(1).strip() == "reverse_proxy status-staging:8080"
+    assert "not_deployed" not in site
 
 
 def test_stub_answers_503_only_when_the_upstream_is_unreachable() -> None:

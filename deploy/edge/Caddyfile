@@ -64,6 +64,25 @@ grafana.{$APP_DOMAIN} {
 	}
 }
 
+# Public status page of the monitoring stack (api#309): prod and staging on status.*, staging only on
+# staging-status.* (the service tells them apart by the Host it is handed). Only GET and HEAD of "/"
+# reach it; every other path is answered here, so no path of Prometheus, Alertmanager or Grafana
+# is routed, whatever the upstream would say to it. The service is rolled out by the monitoring
+# deploy, this route by the staging deploy: in between the route answers a bare 502.
+status.{$APP_DOMAIN}, staging-status.{$APP_DOMAIN} {
+	import hsts
+	@page {
+		path /
+		method GET HEAD
+	}
+	handle @page {
+		reverse_proxy status-staging:8080
+	}
+	handle {
+		respond 404
+	}
+}
+
 api.{$APP_DOMAIN} {
 	import hsts
 	import not_deployed
