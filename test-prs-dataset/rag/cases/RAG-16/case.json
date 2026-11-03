@@ -1,0 +1,29 @@
+{
+  "id": "RAG-16",
+  "class": "rag",
+  "language": "typescript",
+  "source": {
+    "kind": "synthetic",
+    "attribution": "Synthetic, authored for api#146 (graph-RAG v1 eval)"
+  },
+  "base_path": "base",
+  "patch_path": "diff.patch",
+  "expected_verdict": "blocking",
+  "expected_findings": [
+    {
+      "path": "src/listing.ts",
+      "start_line": null,
+      "line": 15,
+      "severity": "high",
+      "category": "correctness"
+    }
+  ],
+  "rag": {
+    "kind": "control",
+    "expected_retrieved": [],
+    "absent_from_context": [],
+    "l4_definitions": [
+      "src/paging.ts"
+    ]
+  }
+}

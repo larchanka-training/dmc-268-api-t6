@@ -1,0 +1,15 @@
+diff --git a/stockroom/skus.py b/stockroom/skus.py
+index b6ba529..24baffa 100644
+--- a/stockroom/skus.py
++++ b/stockroom/skus.py
+@@ -3,5 +3,8 @@
+ SKU_WIDTH = 8
+ 
+ 
+-def normalize_sku(sku: str | int) -> str:
+-    return str(sku).strip().upper().zfill(SKU_WIDTH)
++def normalize_sku(sku: str) -> str:
++    """Return the canonical form of a stock keeping unit code."""
++    if not isinstance(sku, str):
++        raise TypeError("sku must be a string")
++    return sku.strip().upper().zfill(SKU_WIDTH)

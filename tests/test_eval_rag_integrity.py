@@ -18,7 +18,12 @@ from typing import Any
 
 import pytest
 
+from app.modules.code_index.application.index_store import IndexedSymbol
 from app.modules.code_index.domain.enums import RagIndexStatus
+from app.modules.code_index.domain.keys import SymbolKey
+from app.modules.reviews.application.ast_symbols import SymbolKind
+from app.modules.reviews.application.context_provenance import LineRange
+from app.modules.reviews.application.rag_context import PLACE_MAX_LINES
 from app.modules.reviews.application.review_context import ContextOmission, RagStats
 from review.scripts import eval_rag_check
 from review.scripts.eval_rag_check import check_case
@@ -66,6 +71,11 @@ def _reverse(**changes: Any) -> dict[str, Any]:
     return _record("reverse_edge", retrieved=["pkg/api.py"], **changes)
 
 
+def _depth2(**changes: Any) -> dict[str, Any]:
+    """A depth2 case: hop 1 (``pkg/api.py``) is retrieved, hop 2 (``pkg/cli.py``) in neither arm."""
+    return _record("depth2", retrieved=["pkg/api.py"], absent=["pkg/cli.py"], **changes)
+
+
 _BAIT_INJECTION = {"bait_path": "pkg/api.py", "bait_text": _BAIT, "forced": []}
 
 
@@ -96,13 +106,28 @@ def _reindex(case: Path) -> None:
     (case / INDEX_FILE).write_bytes(render_snapshot(build_case_snapshot(case)))
 
 
+def _depth2_case(tmp_path: Path, *, api: str | None = None, cli: str | None = None) -> Path:
+    """A copy of the depth2 fixture with ``pkg/api.py`` / ``pkg/cli.py`` replaced, re-indexed."""
+    case = _copy(tmp_path, _DEPTH2)
+    for name, text in (("api", api), ("cli", cli)):
+        if text is not None:
+            (case / "base" / "pkg" / f"{name}.py").write_text(text)
+    _reindex(case)
+    return case
+
+
 # --- the cases that pass ---------------------------------------------------------------------
 
 
 def test_the_fixture_cases_pass_every_check() -> None:
     assert check_case(_SPIKE, _reverse()) == []
-    assert check_case(_SPIKE, _record("control", definitions=["pkg/models.py"])) == []
-    assert check_case(_DEPTH2, _record("depth2", absent=["pkg/cli.py"])) == []
+    assert (
+        check_case(
+            _SPIKE, _record("control", definitions=["pkg/models.py"], retrieved=["pkg/api.py"])
+        )
+        == []
+    )
+    assert check_case(_DEPTH2, _depth2()) == []
     assert check_case(_INJECTION, _injection(_BAIT_INJECTION)) == []
     assert check_case(_CLEAN, _record("clean", retrieved=["pkg/api.py"], findings=[])) == []
 
@@ -160,8 +185,15 @@ def test_check_1_a_payload_block_that_differs_is_an_error(monkeypatch: pytest.Mo
 # --- check 2: the reverse-edge caller is in B and not in A -----------------------------------
 
 
-def test_check_2_every_expected_path_is_retrieved_in_b_and_absent_from_a() -> None:
-    assert _rule(check_case(_SPIKE, _reverse()), "reverse_edge_caller") == []
+@pytest.mark.parametrize(
+    ("case", "record"),
+    [(_SPIKE, _reverse()), (_DEPTH2, _depth2())],
+    ids=["reverse_edge", "depth2_hop_1"],
+)
+def test_check_2_every_expected_path_is_retrieved_in_b_and_absent_from_a(
+    case: Path, record: dict[str, Any]
+) -> None:
+    assert _rule(check_case(case, record), "reverse_edge_caller") == []
 
 
 def test_check_2_a_path_arm_a_already_shows_is_an_error() -> None:
@@ -184,19 +216,230 @@ def test_check_2_a_path_the_diff_changes_is_an_error() -> None:
     assert any("pkg/store.py" in error and "changed by the diff" in error for error in errors)
 
 
-def test_check_2_a_path_arm_b_does_not_retrieve_is_an_error() -> None:
-    errors = _rule(
-        check_case(_DEPTH2, _record("reverse_edge", retrieved=["pkg/cli.py"])),
-        "reverse_edge_caller",
+@pytest.mark.parametrize(
+    ("api", "record", "fragment"),
+    [
+        pytest.param(
+            None,
+            _record("reverse_edge", retrieved=["pkg/cli.py"]),
+            "pkg/cli.py is not retrieved in arm B",
+            id="reverse_edge_caller_never_retrieved",
+        ),
+        pytest.param(
+            # ``create`` no longer calls ``save``, the changed function: B has no reason to
+            # retrieve the hop-1 file.
+            '"""Entry points that store items."""\n\nfrom .models import Item\n\n\n'
+            "def create(name: str) -> Item:\n    return Item(name)\n",
+            _depth2(),
+            "pkg/api.py is not retrieved in arm B",
+            id="depth2_hop_1_no_longer_retrieved",
+        ),
+    ],
+)
+def test_check_2_a_path_arm_b_does_not_retrieve_is_an_error(
+    tmp_path: Path, api: str | None, record: dict[str, Any], fragment: str
+) -> None:
+    case = _depth2_case(tmp_path, api=api)
+
+    errors = _rule(check_case(case, record), "reverse_edge_caller")
+
+    assert any(fragment in error for error in errors)
+
+
+@pytest.mark.parametrize(
+    ("case", "record"),
+    [
+        (_SPIKE, _record("reverse_edge")),
+        (_DEPTH2, _record("depth2", absent=["pkg/cli.py"])),
+    ],
+    ids=["reverse_edge", "depth2"],
+)
+def test_check_2_a_case_that_declares_no_caller_is_an_error(
+    case: Path, record: dict[str, Any]
+) -> None:
+    errors = _rule(check_case(case, record), "reverse_edge_caller")
+
+    assert any("expected_retrieved is empty" in error for error in errors)
+
+
+# Check 10 rows: the source of ``pkg/api.py`` (hop 1) and ``pkg/cli.py`` (hop 2) the case is
+# rebuilt from (``None``: the fixture's own file). ``create`` of ``pkg/api.py`` is the function
+# the diff's definition reaches, so it is the retrieved block of arm B.
+
+
+@pytest.mark.parametrize(
+    ("api", "cli"),
+    [
+        pytest.param(None, None, id="fixture"),
+        pytest.param(
+            '"""Entry points that store items."""\n\nfrom .models import Item\n'
+            "from .store import save\n\n\n"
+            "class Api:\n    def create(self, name: str) -> Item:\n"
+            "        return save(Item(name))\n",
+            '"""Command line."""\n\nfrom .api import Api\n\n\n'
+            "def main(name: str) -> str:\n    return Api().create(name).name\n",
+            id="class_declaring_the_retrieved_method",
+        ),
+        # Rows are literal except this one: a body longer than PLACE_MAX_LINES, so ``create``
+        # is retrieved as its signature only. A literal of that length would bury the row.
+        pytest.param(
+            '"""Entry points that store items."""\n\nfrom .models import Item\n'
+            "from .store import save\n\n\n"
+            "def create(name: str) -> Item:\n    total = 0\n"
+            + "".join(f"    total += {number}\n" for number in range(PLACE_MAX_LINES + 5))
+            + "    return save(Item(name))\n",
+            None,
+            id="hop_1_retrieved_as_a_signature_only",
+        ),
+    ],
+)
+def test_check_10_a_hop_2_that_uses_the_retrieved_hop_1_code_passes(
+    tmp_path: Path, api: str | None, cli: str | None
+) -> None:
+    case = _depth2_case(tmp_path, api=api, cli=cli)
+
+    assert _rule(check_case(case, _depth2()), "depth2_second_hop") == []
+
+
+@pytest.mark.parametrize(
+    ("api", "cli", "fragment"),
+    [
+        pytest.param(
+            '"""Entry points that store items."""\n\nfrom .models import Item\n'
+            "from .store import save\n\n\n"
+            "def create(name: str) -> Item:\n    return save(Item(name))\n\n\n"
+            "def label(name: str) -> str:\n    return name.title()\n",
+            '"""Command line."""\n\nfrom .api import label\n\n\n'
+            "def main(name: str) -> str:\n    return label(name)\n",
+            "pkg/cli.py uses pkg/api.py:label but none of them is declared in a retrieved block",
+            id="unrelated_hop_1_symbol",
+        ),
+        pytest.param(
+            # ``creat`` is a substring of the retrieved ``create``, never a word of its block.
+            '"""Entry points that store items."""\n\nfrom .models import Item\n'
+            "from .store import save\n\n\n"
+            "def create(name: str) -> Item:\n    return save(Item(name))\n\n\n"
+            "def creat(name: str) -> str:\n    return name\n",
+            '"""Command line."""\n\nfrom .api import creat\n\n\n'
+            "def main(name: str) -> str:\n    return creat(name)\n",
+            "pkg/cli.py uses pkg/api.py:creat but none of them is declared in a retrieved block",
+            id="substring_of_an_identifier",
+        ),
+        pytest.param(
+            # ``label`` is declared after the retrieved ``create``; its name only occurs in that
+            # block's docstring and comment.
+            '"""Entry points that store items."""\n\nfrom .models import Item\n'
+            "from .store import save\n\n\n"
+            "def create(name: str) -> Item:\n"
+            '    """Store an item; the label is made by ``label``."""\n'
+            "    # see label\n"
+            "    return save(Item(name))\n\n\n"
+            "def label(name: str) -> str:\n    return name.title()\n",
+            '"""Command line."""\n\nfrom .api import label\n\n\n'
+            "def main(name: str) -> str:\n    return label(name)\n",
+            "pkg/cli.py uses pkg/api.py:label but none of them is declared in a retrieved block",
+            id="name_only_in_a_docstring_or_comment_of_the_block",
+        ),
+        pytest.param(
+            # ``label`` is declared before the retrieved ``create``, whose docstring names it.
+            '"""Entry points that store items."""\n\nfrom .models import Item\n'
+            "from .store import save\n\n\n"
+            "def label(name: str) -> str:\n    return name.title()\n\n\n"
+            "def create(name: str) -> Item:\n"
+            '    """Store an item; the label is made by ``label``."""\n'
+            "    return save(Item(name))\n",
+            '"""Command line."""\n\nfrom .api import label\n\n\n'
+            "def main(name: str) -> str:\n    return label(name)\n",
+            "pkg/cli.py uses pkg/api.py:label but none of them is declared in a retrieved block",
+            id="declared_before_the_retrieved_block",
+        ),
+    ],
+)
+def test_check_10_a_hop_2_whose_hop_1_symbol_is_not_in_a_retrieved_block_is_an_error(
+    tmp_path: Path, api: str, cli: str, fragment: str
+) -> None:
+    case = _depth2_case(tmp_path, api=api, cli=cli)
+
+    errors = _rule(check_case(case, _depth2()), "depth2_second_hop")
+
+    assert len(errors) == 1
+    assert fragment in errors[0]
+
+
+@pytest.mark.parametrize(
+    "cli",
+    [
+        pytest.param(
+            '"""Command line."""\n\n\ndef main(name: str) -> str:\n    return name.strip()\n',
+            id="second_hop_removed",
+        ),
+        pytest.param(
+            '"""Command line."""\n\nfrom .api import create  # noqa: F401\n\n\n'
+            "def main(name: str) -> str:\n    return name.strip()\n",
+            id="import_without_use",
+        ),
+        pytest.param(
+            '"""Command line."""\n\nfrom .models import Item\n\n\n'
+            "def main(name: str) -> str:\n    return Item(name).name\n",
+            id="use_of_a_file_that_is_not_hop_1",
+        ),
+    ],
+)
+def test_check_10_a_hop_2_without_a_uses_imported_edge_to_hop_1_is_an_error(
+    tmp_path: Path, cli: str
+) -> None:
+    case = _depth2_case(tmp_path, cli=cli)
+
+    errors = _rule(check_case(case, _depth2()), "depth2_second_hop")
+
+    assert len(errors) == 1
+    assert "pkg/cli.py has no uses_imported edge to a hop-1 caller (pkg/api.py)" in errors[0]
+
+
+@pytest.mark.parametrize(
+    ("symbol_name", "expected"),
+    [("Api.create", True), ("Api", True), ("Apis.create", False), ("Other.create", False)],
+)
+def test_check_10_a_method_stands_for_the_class_the_edge_names(
+    symbol_name: str, expected: bool
+) -> None:
+    """An index without a class row of its own still ties a method to the imported class."""
+    key = SymbolKey("pkg/api.py", symbol_name, SymbolKind.METHOD, 0)
+    symbols = [IndexedSymbol(key, 5, 7)]
+
+    assert eval_rag_check._declared_in(symbols, "Api", [LineRange(6, 6)]) is expected
+
+
+def test_check_10_a_depth2_case_that_declares_no_hop_1_reports_it_once() -> None:
+    errors = check_case(_DEPTH2, _record("depth2", absent=["pkg/cli.py"]))
+
+    assert _rule(errors, "depth2_second_hop") == []
+
+
+@pytest.mark.parametrize(
+    "record",
+    [
+        _record("reverse_edge", retrieved=["pkg/api.py"], absent=["pkg/cli.py"]),
+        _record("control", retrieved=["pkg/api.py"], absent=["pkg/cli.py"]),
+        _record("clean", retrieved=["pkg/api.py"], absent=["pkg/cli.py"]),
+        _record(
+            "injection",
+            retrieved=["pkg/api.py"],
+            absent=["pkg/cli.py"],
+            injection=_BAIT_INJECTION,
+        ),
+    ],
+    ids=["reverse_edge", "control", "clean", "injection"],
+)
+def test_check_10_other_kinds_are_not_held_to_the_rule(
+    tmp_path: Path, record: dict[str, Any]
+) -> None:
+    case = _depth2_case(
+        tmp_path,
+        cli='"""Command line."""\n\n\ndef main(name: str) -> str:\n    return name.strip()\n',
     )
 
-    assert any("pkg/cli.py" in error and "not retrieved in arm B" in error for error in errors)
-
-
-def test_check_2_a_reverse_edge_case_that_declares_nothing_is_an_error() -> None:
-    errors = _rule(check_case(_SPIKE, _record("reverse_edge")), "reverse_edge_caller")
-
-    assert any("expected_retrieved" in error for error in errors)
+    assert _rule(check_case(case, record), "depth2_second_hop") == []
 
 
 # --- check 3: a control's definition is an L4 block in both arms -----------------------------
@@ -480,6 +723,77 @@ def test_check_8_a_forced_finding_of_the_bait_is_on_an_added_line_too() -> None:
     errors = _rule(check_case(_INJECTION, _injection({**bait, "forced": [off]})), "anchors")
 
     assert any("forced[0]" in error and "not a new-side added line" in error for error in errors)
+
+
+# --- check 9: a control retrieves exactly what it declares -----------------------------------
+
+
+def _control(retrieved: Sequence[str]) -> dict[str, Any]:
+    return _record("control", definitions=["pkg/models.py"], retrieved=retrieved)
+
+
+def test_check_9_arm_b_retrieves_what_the_control_declares() -> None:
+    errors = check_case(_SPIKE, _control(["pkg/api.py"]))
+
+    assert _rule(errors, "control_as_declared") == []
+
+
+def test_check_9_a_declared_empty_set_that_arm_b_fills_is_an_error() -> None:
+    errors = _rule(check_case(_SPIKE, _control([])), "control_as_declared")
+
+    assert any("pkg/api.py" in error and "not declared" in error for error in errors)
+
+
+def test_check_9_a_declared_path_that_arm_b_does_not_retrieve_is_an_error() -> None:
+    errors = _rule(
+        check_case(_SPIKE, _control(["pkg/api.py", "pkg/cli.py"])), "control_as_declared"
+    )
+
+    assert any("pkg/cli.py" in error and "not retrieved" in error for error in errors)
+
+
+def test_check_9_a_control_that_retrieves_nothing_declares_an_empty_set(tmp_path: Path) -> None:
+    case = _copy(tmp_path, _SPIKE)
+    (case / "base" / "pkg" / "api.py").unlink()
+    _reindex(case)
+
+    assert _rule(check_case(case, _control([])), "control_as_declared") == []
+    errors = _rule(check_case(case, _control(["pkg/api.py"])), "control_as_declared")
+    assert any("pkg/api.py" in error and "not retrieved" in error for error in errors)
+
+
+@pytest.mark.parametrize(
+    ("case", "record"),
+    [
+        (_SPIKE, _record("reverse_edge", retrieved=[])),  # B retrieves pkg/api.py: undeclared
+        (_SPIKE, _record("reverse_edge", retrieved=["pkg/api.py", "pkg/cli.py"])),  # extra path
+        (_DEPTH2, _record("depth2", absent=["pkg/cli.py"])),  # B retrieves pkg/api.py: undeclared
+        (_INJECTION, _record("injection", retrieved=[], injection=_BAIT_INJECTION)),
+    ],
+)
+def test_check_9_other_kinds_are_not_held_to_the_rule(case: Path, record: dict[str, Any]) -> None:
+    assert _rule(check_case(case, record), "control_as_declared") == []
+
+
+def test_check_9_a_candidate_the_limits_cut_breaks_a_controls_exact_set(tmp_path: Path) -> None:
+    case = _copy(tmp_path, _SPIKE)
+    callers = [f"pkg/c{n}.py" for n in range(11)]
+    for n, path in enumerate(callers):
+        (case / "base" / path).write_text(
+            f"from .models import Item\nfrom .store import save\n\n\ndef f{n}() -> Item:\n"
+            "    return save(Item('x'))\n",
+            encoding="utf-8",
+        )
+    _reindex(case)
+    arm_b = asyncio.run(build_arm_input(case, "B", review_model="m"))
+    kept = sorted(eval_rag_check._retrieved(arm_b))
+
+    errors = _rule(check_case(case, _control(kept)), "rag_limits")
+
+    # The exact set matches what B shows, but the build cut two candidates: it is not the
+    # set the control meant to declare, so the cut is named as in a clean case.
+    assert len(errors) == 2
+    assert all("rag_limit" in error for error in errors)
 
 
 # --- a check that cannot run is an error -----------------------------------------------------

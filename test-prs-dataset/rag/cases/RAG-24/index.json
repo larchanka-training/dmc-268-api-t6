@@ -1,0 +1,111 @@
+{
+  "schema_version": 1,
+  "indexed_commit_sha": "53e670551ad5aa46efeaaca06b5e3e6ddab9da11",
+  "extractor": {
+    "limits_version": "limits/v1:fdf4e4d96f1a13a708d0af7b941297dc",
+    "parser_profile": "39409961245fa4d8e7284fe26c974a79dea7225e088d7bdbbd17c83384e1271a",
+    "exclusions_version": "index-exclusions/v2"
+  },
+  "file_count": 6,
+  "symbol_count": 7,
+  "files": [
+    {
+      "path": "src/habits.ts",
+      "blob_sha": "43f102a8c60b9807ff786d1519afe1270833d2c7"
+    },
+    {
+      "path": "src/main.ts",
+      "blob_sha": "b19c23b71f0ffd51aae28446e6922fb2380f33f9"
+    },
+    {
+      "path": "src/render.ts",
+      "blob_sha": "3c076369efbb8abc2e61007f8180ae522bce297e"
+    },
+    {
+      "path": "src/store.ts",
+      "blob_sha": "42fd95a769559f59f09173a4764d24503bd241c5"
+    },
+    {
+      "path": "src/streaks.ts",
+      "blob_sha": "4a75ea178c3dfe3f70172dd7594262e4337eb811"
+    },
+    {
+      "path": "src/types.ts",
+      "blob_sha": "aff78d8d02f977a86997a94f562902505119abf1"
+    }
+  ],
+  "edges": [
+    {
+      "path": "src/main.ts",
+      "kind": "imports",
+      "target_path": "src/habits.ts",
+      "target_name": ""
+    },
+    {
+      "path": "src/main.ts",
+      "kind": "imports",
+      "target_path": "src/render.ts",
+      "target_name": ""
+    },
+    {
+      "path": "src/main.ts",
+      "kind": "imports",
+      "target_path": "src/store.ts",
+      "target_name": ""
+    },
+    {
+      "path": "src/main.ts",
+      "kind": "imports",
+      "target_path": "src/streaks.ts",
+      "target_name": ""
+    },
+    {
+      "path": "src/main.ts",
+      "kind": "uses_imported",
+      "target_path": "src/habits.ts",
+      "target_name": "HABITS"
+    },
+    {
+      "path": "src/main.ts",
+      "kind": "uses_imported",
+      "target_path": "src/render.ts",
+      "target_name": "renderLine"
+    },
+    {
+      "path": "src/main.ts",
+      "kind": "uses_imported",
+      "target_path": "src/store.ts",
+      "target_name": "loadEntries"
+    },
+    {
+      "path": "src/main.ts",
+      "kind": "uses_imported",
+      "target_path": "src/streaks.ts",
+      "target_name": "currentStreak"
+    },
+    {
+      "path": "src/store.ts",
+      "kind": "imports",
+      "target_path": "src/types.ts",
+      "target_name": ""
+    },
+    {
+      "path": "src/store.ts",
+      "kind": "uses_imported",
+      "target_path": "src/types.ts",
+      "target_name": "Entry"
+    },
+    {
+      "path": "src/streaks.ts",
+      "kind": "imports",
+      "target_path": "src/types.ts",
+      "target_name": ""
+    },
+    {
+      "path": "src/streaks.ts",
+      "kind": "uses_imported",
+      "target_path": "src/types.ts",
+      "target_name": "Entry"
+    }
+  ]
+}

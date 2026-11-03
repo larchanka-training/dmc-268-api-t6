@@ -1,0 +1,75 @@
+{
+  "schema_version": 1,
+  "indexed_commit_sha": "b048b467d0a3b44a2c4789bc2a34d905816b61e7",
+  "extractor": {
+    "limits_version": "limits/v1:fdf4e4d96f1a13a708d0af7b941297dc",
+    "parser_profile": "39409961245fa4d8e7284fe26c974a79dea7225e088d7bdbbd17c83384e1271a",
+    "exclusions_version": "index-exclusions/v2"
+  },
+  "file_count": 6,
+  "symbol_count": 8,
+  "files": [
+    {
+      "path": "fleetlog/__init__.py",
+      "blob_sha": "167060bf804a7a03f5158c33d6ea2b3c33eb0500"
+    },
+    {
+      "path": "fleetlog/labels.py",
+      "blob_sha": "3ad92f6755ae95cf886a8b9501aa98eedb617fc3"
+    },
+    {
+      "path": "fleetlog/planner.py",
+      "blob_sha": "02591b81a2e42e022156df986ba88a1ba8e538f7"
+    },
+    {
+      "path": "fleetlog/service.py",
+      "blob_sha": "68fa675825069ea7617f4a8e44010ab5c65d7e1c"
+    },
+    {
+      "path": "fleetlog/vehicles.py",
+      "blob_sha": "f7e86ac8508b91064d9210d1da90f288378161e4"
+    },
+    {
+      "path": "fleetlog/workshop.py",
+      "blob_sha": "a1c769514fc00edcdfb853d86a98f058af0acea0"
+    }
+  ],
+  "edges": [
+    {
+      "path": "fleetlog/planner.py",
+      "kind": "imports",
+      "target_path": "fleetlog/service.py",
+      "target_name": ""
+    },
+    {
+      "path": "fleetlog/planner.py",
+      "kind": "imports",
+      "target_path": "fleetlog/workshop.py",
+      "target_name": ""
+    },
+    {
+      "path": "fleetlog/planner.py",
+      "kind": "uses_imported",
+      "target_path": "fleetlog/service.py",
+      "target_name": "until_service"
+    },
+    {
+      "path": "fleetlog/planner.py",
+      "kind": "uses_imported",
+      "target_path": "fleetlog/workshop.py",
+      "target_name": "enqueue"
+    },
+    {
+      "path": "fleetlog/service.py",
+      "kind": "imports",
+      "target_path": "fleetlog/vehicles.py",
+      "target_name": ""
+    },
+    {
+      "path": "fleetlog/service.py",
+      "kind": "uses_imported",
+      "target_path": "fleetlog/vehicles.py",
+      "target_name": "VEHICLES"
+    }
+  ]
+}

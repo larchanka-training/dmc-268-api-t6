@@ -1,0 +1,22 @@
+diff --git a/fxdesk/quotes.py b/fxdesk/quotes.py
+index 6ac7ea8..94b9da7 100644
+--- a/fxdesk/quotes.py
++++ b/fxdesk/quotes.py
+@@ -1,7 +1,17 @@
+ """Quotes shown to clients."""
+ 
+ from .money import format_cents
++from .rates import fetch_rate
+ 
+ 
+ def quote_text(cents: int, currency: str) -> str:
+     return f"Quote: {format_cents(cents, currency)}"
++
++
++async def converted_cents(amount_cents: int, pair: str) -> int:
++    """Convert an amount in cents at the current rate of the pair.
++
++    The result is in cents of the quoted currency.
++    """
++    rate = fetch_rate(pair)
++    return round(amount_cents * rate)

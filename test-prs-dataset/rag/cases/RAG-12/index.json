@@ -1,0 +1,63 @@
+{
+  "schema_version": 1,
+  "indexed_commit_sha": "6ba6a93338bfffedd17e3b7a75e922bdefe90c7b",
+  "extractor": {
+    "limits_version": "limits/v1:fdf4e4d96f1a13a708d0af7b941297dc",
+    "parser_profile": "39409961245fa4d8e7284fe26c974a79dea7225e088d7bdbbd17c83384e1271a",
+    "exclusions_version": "index-exclusions/v2"
+  },
+  "file_count": 6,
+  "symbol_count": 7,
+  "files": [
+    {
+      "path": "promos/__init__.py",
+      "blob_sha": "d83ed171fc79f99cdd7a3bf58b6c85f3bb72fc8d"
+    },
+    {
+      "path": "promos/catalog.py",
+      "blob_sha": "55a14831aa475b399254af10f587a93ffa3d1053"
+    },
+    {
+      "path": "promos/coupons.py",
+      "blob_sha": "564ad41cf2de91dfb313c3a178dc617bc25cf079"
+    },
+    {
+      "path": "promos/pricing.py",
+      "blob_sha": "c4b98cc9c0bed63797fd347b3ab188cc5af5a76d"
+    },
+    {
+      "path": "promos/receipts.py",
+      "blob_sha": "94fe90e60bee92d1e12016de51669ef9fe075cc7"
+    },
+    {
+      "path": "promos/sales.py",
+      "blob_sha": "1563891f4cdd45ca70116623969bb79697b0a26d"
+    }
+  ],
+  "edges": [
+    {
+      "path": "promos/coupons.py",
+      "kind": "imports",
+      "target_path": "promos/pricing.py",
+      "target_name": ""
+    },
+    {
+      "path": "promos/coupons.py",
+      "kind": "uses_imported",
+      "target_path": "promos/pricing.py",
+      "target_name": "apply_discount"
+    },
+    {
+      "path": "promos/sales.py",
+      "kind": "imports",
+      "target_path": "promos/catalog.py",
+      "target_name": ""
+    },
+    {
+      "path": "promos/sales.py",
+      "kind": "uses_imported",
+      "target_path": "promos/catalog.py",
+      "target_name": "price_of"
+    }
+  ]
+}

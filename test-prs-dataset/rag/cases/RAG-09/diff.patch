@@ -1,0 +1,13 @@
+diff --git a/src/slug.ts b/src/slug.ts
+index e33c775..24a1816 100644
+--- a/src/slug.ts
++++ b/src/slug.ts
+@@ -1,7 +1,7 @@
+ import { isoDate } from "./dates";
+ import type { Post } from "./post";
+ 
+-export function slugify(title: string): string {
++function slugify(title: string): string {
+   return title.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
+ }
+ 

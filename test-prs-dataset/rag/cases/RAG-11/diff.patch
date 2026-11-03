@@ -1,0 +1,22 @@
+diff --git a/erasure/requests.py b/erasure/requests.py
+index ded6983..b27a0e5 100644
+--- a/erasure/requests.py
++++ b/erasure/requests.py
+@@ -1,7 +1,17 @@
+ """Intake of erasure requests."""
+ 
+ from .audit import record
++from .purge import purge_account
+ 
+ 
+ def log_request(account_id: str) -> None:
++    """Note in the audit trail that an erasure was requested."""
+     record("erasure_requested", account_id, 0)
++
++
++def run_erasure(account_id: str, confirmed: bool) -> int:
++    """Run one erasure request and return the number of rows involved."""
++    record("erasure_started", account_id, 0)
++    removed = purge_account(account_id, dry_run=confirmed)
++    record("erasure_run", account_id, removed)
++    return removed

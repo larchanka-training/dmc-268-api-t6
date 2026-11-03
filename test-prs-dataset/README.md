@@ -1036,6 +1036,7 @@ complete baseline`. Its metrics were unchanged.
 in a review. It shares [the case schema](schema/case.schema.json) but not the main
 corpus, its 24 cases, their `responses/` or the main `--final` distribution: the main
 `--final` rejects any case with policy-arm fields. `rules/` has no recorded capture yet.
+The graph-RAG sub-corpus (#146) is `rag/`, described in [rag/README.md](rag/README.md).
 
 ```text
 rules/cases/RUL-05/

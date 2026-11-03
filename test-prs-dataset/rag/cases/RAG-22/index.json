@@ -1,0 +1,75 @@
+{
+  "schema_version": 1,
+  "indexed_commit_sha": "8b17433c0119796e91197fbb72e8d11b39cbf77e",
+  "extractor": {
+    "limits_version": "limits/v1:fdf4e4d96f1a13a708d0af7b941297dc",
+    "parser_profile": "39409961245fa4d8e7284fe26c974a79dea7225e088d7bdbbd17c83384e1271a",
+    "exclusions_version": "index-exclusions/v2"
+  },
+  "file_count": 6,
+  "symbol_count": 8,
+  "files": [
+    {
+      "path": "dispatch/__init__.py",
+      "blob_sha": "8c2d91ae29779eb88b7d3f29278d4f3b2e709639"
+    },
+    {
+      "path": "dispatch/notify.py",
+      "blob_sha": "b948730ee0fdcf91e10334a467ed904bdadbf7bf"
+    },
+    {
+      "path": "dispatch/reminders.py",
+      "blob_sha": "77d23b64092f2d123de1f0e94d8fd71aa6e5a204"
+    },
+    {
+      "path": "dispatch/routes.py",
+      "blob_sha": "81f48aa865ee870203a965de4a499644f8af21d2"
+    },
+    {
+      "path": "dispatch/schedule.py",
+      "blob_sha": "3c880514055a8b35bd24e0e481abb8b5428dff27"
+    },
+    {
+      "path": "dispatch/windows.py",
+      "blob_sha": "efda453508340144ab22c42e32ea39d1d75b52dd"
+    }
+  ],
+  "edges": [
+    {
+      "path": "dispatch/reminders.py",
+      "kind": "imports",
+      "target_path": "dispatch/notify.py",
+      "target_name": ""
+    },
+    {
+      "path": "dispatch/reminders.py",
+      "kind": "imports",
+      "target_path": "dispatch/windows.py",
+      "target_name": ""
+    },
+    {
+      "path": "dispatch/reminders.py",
+      "kind": "uses_imported",
+      "target_path": "dispatch/notify.py",
+      "target_name": "send"
+    },
+    {
+      "path": "dispatch/reminders.py",
+      "kind": "uses_imported",
+      "target_path": "dispatch/windows.py",
+      "target_name": "book_slot"
+    },
+    {
+      "path": "dispatch/windows.py",
+      "kind": "imports",
+      "target_path": "dispatch/schedule.py",
+      "target_name": ""
+    },
+    {
+      "path": "dispatch/windows.py",
+      "kind": "uses_imported",
+      "target_path": "dispatch/schedule.py",
+      "target_name": "BOOKINGS"
+    }
+  ]
+}

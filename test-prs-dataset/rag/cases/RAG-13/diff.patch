@@ -1,0 +1,20 @@
+diff --git a/pulse/labels.py b/pulse/labels.py
+index e7b1f4d..13bc89d 100644
+--- a/pulse/labels.py
++++ b/pulse/labels.py
+@@ -1,5 +1,15 @@
+ """Short labels for the profile page."""
+ 
++from .feed import recent
++
+ 
+ def kind_label(kind: str) -> str:
++    """Readable form of an event kind, for example new_post as new post."""
+     return kind.replace("_", " ")
++
++
++def last_active_label(user_id: str) -> str:
++    events = recent(user_id)
++    if not events:
++        return "never active"
++    return f"last active {events[-1].at:%Y-%m-%d}"

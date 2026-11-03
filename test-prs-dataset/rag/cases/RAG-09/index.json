@@ -1,0 +1,123 @@
+{
+  "schema_version": 1,
+  "indexed_commit_sha": "aa07876ee69e0f1e6336995efbc7380e6aa0453b",
+  "extractor": {
+    "limits_version": "limits/v1:fdf4e4d96f1a13a708d0af7b941297dc",
+    "parser_profile": "39409961245fa4d8e7284fe26c974a79dea7225e088d7bdbbd17c83384e1271a",
+    "exclusions_version": "index-exclusions/v2"
+  },
+  "file_count": 6,
+  "symbol_count": 7,
+  "files": [
+    {
+      "path": "src/archive.ts",
+      "blob_sha": "c53eadec330d6728b609b9fbabd0dc1f230859c5"
+    },
+    {
+      "path": "src/dates.ts",
+      "blob_sha": "8b1b020248b58d99b909c2f01b5f8a01b1377c8f"
+    },
+    {
+      "path": "src/excerpt.ts",
+      "blob_sha": "973af4aaac073604e41be2f5ef5deec5258297b1"
+    },
+    {
+      "path": "src/feed.ts",
+      "blob_sha": "b59fa8fb13eb441214f8b71fe34458a8e620dca3"
+    },
+    {
+      "path": "src/post.ts",
+      "blob_sha": "8390d29099b2e0a8bf347bbc159eacde0ff9297c"
+    },
+    {
+      "path": "src/slug.ts",
+      "blob_sha": "e33c775395a625ba735c855ef4ffbaaf09834103"
+    }
+  ],
+  "edges": [
+    {
+      "path": "src/archive.ts",
+      "kind": "imports",
+      "target_path": "src/dates.ts",
+      "target_name": ""
+    },
+    {
+      "path": "src/archive.ts",
+      "kind": "imports",
+      "target_path": "src/post.ts",
+      "target_name": ""
+    },
+    {
+      "path": "src/archive.ts",
+      "kind": "uses_imported",
+      "target_path": "src/dates.ts",
+      "target_name": "isoDate"
+    },
+    {
+      "path": "src/archive.ts",
+      "kind": "uses_imported",
+      "target_path": "src/post.ts",
+      "target_name": "Post"
+    },
+    {
+      "path": "src/excerpt.ts",
+      "kind": "imports",
+      "target_path": "src/post.ts",
+      "target_name": ""
+    },
+    {
+      "path": "src/excerpt.ts",
+      "kind": "uses_imported",
+      "target_path": "src/post.ts",
+      "target_name": "Post"
+    },
+    {
+      "path": "src/feed.ts",
+      "kind": "imports",
+      "target_path": "src/post.ts",
+      "target_name": ""
+    },
+    {
+      "path": "src/feed.ts",
+      "kind": "imports",
+      "target_path": "src/slug.ts",
+      "target_name": ""
+    },
+    {
+      "path": "src/feed.ts",
+      "kind": "uses_imported",
+      "target_path": "src/post.ts",
+      "target_name": "Post"
+    },
+    {
+      "path": "src/feed.ts",
+      "kind": "uses_imported",
+      "target_path": "src/slug.ts",
+      "target_name": "slugify"
+    },
+    {
+      "path": "src/slug.ts",
+      "kind": "imports",
+      "target_path": "src/dates.ts",
+      "target_name": ""
+    },
+    {
+      "path": "src/slug.ts",
+      "kind": "imports",
+      "target_path": "src/post.ts",
+      "target_name": ""
+    },
+    {
+      "path": "src/slug.ts",
+      "kind": "uses_imported",
+      "target_path": "src/dates.ts",
+      "target_name": "isoDate"
+    },
+    {
+      "path": "src/slug.ts",
+      "kind": "uses_imported",
+      "target_path": "src/post.ts",
+      "target_name": "Post"
+    }
+  ]
+}

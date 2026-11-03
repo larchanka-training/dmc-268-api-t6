@@ -1,0 +1,13 @@
+diff --git a/contacts/emails.py b/contacts/emails.py
+index 5854867..dbd28df 100644
+--- a/contacts/emails.py
++++ b/contacts/emails.py
+@@ -3,4 +3,7 @@
+ 
+ def normalize_email(raw: str) -> str:
+     """Canonical form of an address, used as the contact key."""
+-    return raw.strip().lower()
++    cleaned = raw.strip().lower()
++    if "@" not in cleaned:
++        raise ValueError(f"not an email address: {raw!r}")
++    return cleaned

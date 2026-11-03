@@ -32,6 +32,7 @@ from app.bootstrap.code_index_worker import CodeIndexSettings, index_versions
 from app.modules.code_index.application.build_index import (
     BuildRepositoryIndex,
     BuildStatus,
+    IndexVersions,
 )
 from app.modules.code_index.application.exclusions import INDEX_EXCLUSIONS_VERSION
 from app.modules.code_index.application.index_store import (
@@ -302,11 +303,13 @@ class _Wakeups:
         return None
 
 
-async def build_snapshot(tree: Mapping[str, bytes], *, indexed_commit_sha: str) -> IndexSnapshot:
-    """The graph index of ``tree`` as ``BuildRepositoryIndex`` stores it at ``indexed_commit_sha``.
+async def _build_files(
+    tree: Mapping[str, bytes], *, indexed_commit_sha: str
+) -> tuple[list[IndexedFile], IndexVersions]:
+    """The rows ``BuildRepositoryIndex`` writes for ``tree``, by path, and the versions used.
 
     Raises ``SnapshotError`` unless the job publishes, so a limit or an unsafe tree never
-    yields a partial snapshot.
+    yields partial rows.
     """
     limits = SETTINGS.limits
     versions = index_versions(limits)
@@ -333,7 +336,16 @@ async def build_snapshot(tree: Mapping[str, bytes], *, indexed_commit_sha: str) 
             f"the index build ended as {outcome.status.value}"
             f" ({outcome.error_code or store.failure or 'no error code'})"
         )
-    files = sorted(store.files, key=lambda file: file.path)
+    return sorted(store.files, key=lambda file: file.path), versions
+
+
+async def build_snapshot(tree: Mapping[str, bytes], *, indexed_commit_sha: str) -> IndexSnapshot:
+    """The graph index of ``tree`` as ``BuildRepositoryIndex`` stores it at ``indexed_commit_sha``.
+
+    Raises ``SnapshotError`` unless the job publishes, so a limit or an unsafe tree never
+    yields a partial snapshot.
+    """
+    files, versions = await _build_files(tree, indexed_commit_sha=indexed_commit_sha)
     edges = sorted(
         {edge for file in files for edge in file.edges},
         key=_edge_order,
@@ -360,6 +372,17 @@ def build_case_snapshot(case_dir: Path) -> IndexSnapshot:
             read_tree(case_dir / "base"), indexed_commit_sha=commit_id(case_dir.name, "base")
         )
     )
+
+
+def build_case_files(case_dir: Path) -> tuple[IndexedFile, ...]:
+    """The rows of ``case_dir/base`` as the build stores them, symbols included (the
+    snapshot keeps only the files and edges), by path."""
+    files, _ = asyncio.run(
+        _build_files(
+            read_tree(case_dir / "base"), indexed_commit_sha=commit_id(case_dir.name, "base")
+        )
+    )
+    return tuple(files)
 
 
 # --- the bytes -----------------------------------------------------------------------------

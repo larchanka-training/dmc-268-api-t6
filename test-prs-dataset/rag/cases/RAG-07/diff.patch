@@ -1,0 +1,15 @@
+diff --git a/src/infusion.ts b/src/infusion.ts
+index e8dd24e..fcb9388 100644
+--- a/src/infusion.ts
++++ b/src/infusion.ts
+@@ -1,8 +1,8 @@
+-import { MIN_DURATION_MIN } from "./units";
++import { MIN_DURATION_MIN, MINUTES_PER_HOUR } from "./units";
+ 
+ export function infusionRate(volumeMl: number, durationMin: number): number {
+   const volume = Math.max(volumeMl, 0);
+   const minutes = Math.max(durationMin, MIN_DURATION_MIN);
+-  const rate = volume / minutes;
++  const rate = (volume / minutes) * MINUTES_PER_HOUR;
+   return Math.round(rate * 1000) / 1000;
+ }

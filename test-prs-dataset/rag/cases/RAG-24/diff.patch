@@ -1,0 +1,15 @@
+diff --git a/src/main.ts b/src/main.ts
+index b19c23b..b152a56 100644
+--- a/src/main.ts
++++ b/src/main.ts
+@@ -5,9 +5,6 @@ import { currentStreak } from "./streaks";
+ 
+ export function summary(): string {
+   const entries = loadEntries();
+-  const lines: string[] = [];
+-  for (const habit of HABITS) {
+-    lines.push(renderLine(habit, currentStreak(entries, habit)));
+-  }
++  const lines = HABITS.map((habit) => renderLine(habit, currentStreak(entries, habit)));
+   return lines.join("\n");
+ }

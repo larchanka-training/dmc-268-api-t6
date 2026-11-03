@@ -359,6 +359,13 @@ jobs:
         # The rules.md sub-corpus (#163): its own profile, no recorded capture yet.
         run: uv run --locked python review/scripts/validate_dataset.py --root test-prs-dataset/rules --final --profile rules
 
+      - name: RAG sub-corpus
+        # The graph-RAG sub-corpus (#146): its own profile and the index snapshots. No recorded
+        # captures exist until Part 3, which adds the recorded replay to this step.
+        run: |
+          uv run --locked python review/scripts/validate_dataset.py --root test-prs-dataset/rag --final --profile rag
+          uv run --locked python review/scripts/build_rag_snapshot.py --check test-prs-dataset/rag/cases
+
   python-integration:
     # Integration tests share advisory-lock keys, NOTIFY channels and RabbitMQ names, so they do not
     # run under xdist on one database; each shard gets its own runner, PostgreSQL and RabbitMQ.

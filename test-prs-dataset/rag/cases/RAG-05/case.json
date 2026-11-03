@@ -1,0 +1,29 @@
+{
+  "id": "RAG-05",
+  "class": "rag",
+  "language": "python",
+  "source": {
+    "kind": "synthetic",
+    "attribution": "Synthetic, authored for api#146 (graph-RAG v1 eval)"
+  },
+  "base_path": "base",
+  "patch_path": "diff.patch",
+  "expected_verdict": "blocking",
+  "expected_findings": [
+    {
+      "path": "weather/forecast.py",
+      "start_line": null,
+      "line": 7,
+      "severity": "high",
+      "category": "correctness"
+    }
+  ],
+  "rag": {
+    "kind": "reverse_edge",
+    "defect_form": "renamed_export",
+    "expected_retrieved": [
+      "weather/alerts.py"
+    ],
+    "absent_from_context": []
+  }
+}

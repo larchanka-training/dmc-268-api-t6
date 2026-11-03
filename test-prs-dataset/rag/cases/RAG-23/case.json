@@ -1,0 +1,18 @@
+{
+  "id": "RAG-23",
+  "class": "rag",
+  "language": "python",
+  "source": {
+    "kind": "synthetic",
+    "attribution": "Synthetic, authored for api#146 (graph-RAG v1 eval)"
+  },
+  "base_path": "base",
+  "patch_path": "diff.patch",
+  "expected_verdict": "clean",
+  "expected_findings": [],
+  "rag": {
+    "kind": "clean",
+    "expected_retrieved": ["tally/export.py", "tally/reports.py"],
+    "absent_from_context": []
+  }
+}

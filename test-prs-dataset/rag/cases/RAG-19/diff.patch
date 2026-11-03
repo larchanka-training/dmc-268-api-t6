@@ -1,0 +1,10 @@
+diff --git a/statements/ordering.py b/statements/ordering.py
+index b2dceee..991ef1a 100644
+--- a/statements/ordering.py
++++ b/statements/ordering.py
+@@ -7,4 +7,4 @@ from .models import Entry
+ 
+ def sort_entries(entries: Iterable[Entry]) -> list[Entry]:
+     """Postings of an account in the order the statement lists them."""
+-    return sorted(entries, key=lambda entry: entry.at)
++    return sorted(entries, key=lambda entry: entry.at, reverse=True)

@@ -1,0 +1,18 @@
+{
+  "id": "RAG-24",
+  "class": "rag",
+  "language": "typescript",
+  "source": {
+    "kind": "synthetic",
+    "attribution": "Synthetic, authored for api#146 (graph-RAG v1 eval)"
+  },
+  "base_path": "base",
+  "patch_path": "diff.patch",
+  "expected_verdict": "clean",
+  "expected_findings": [],
+  "rag": {
+    "kind": "clean",
+    "expected_retrieved": [],
+    "absent_from_context": []
+  }
+}

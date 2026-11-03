@@ -1,0 +1,93 @@
+{
+  "schema_version": 1,
+  "indexed_commit_sha": "1bee9c4061d73a4e17e5477302b69c68733182b1",
+  "extractor": {
+    "limits_version": "limits/v1:fdf4e4d96f1a13a708d0af7b941297dc",
+    "parser_profile": "39409961245fa4d8e7284fe26c974a79dea7225e088d7bdbbd17c83384e1271a",
+    "exclusions_version": "index-exclusions/v2"
+  },
+  "file_count": 6,
+  "symbol_count": 9,
+  "files": [
+    {
+      "path": "src/bags.ts",
+      "blob_sha": "3a3f743031226034e8bf3ef7615cbd4b37dea21e"
+    },
+    {
+      "path": "src/infusion.ts",
+      "blob_sha": "e8dd24e802423053a894a3340e7a6cd4b18c23c7"
+    },
+    {
+      "path": "src/label.ts",
+      "blob_sha": "42f503a7dad5aff26565e5c9c8b7731fe6c2b500"
+    },
+    {
+      "path": "src/pump.ts",
+      "blob_sha": "d41ca2c1c20ab5e9a17e1a88753206da683276d3"
+    },
+    {
+      "path": "src/types.ts",
+      "blob_sha": "75b214a76543215d8924123af641a2c35a86faae"
+    },
+    {
+      "path": "src/units.ts",
+      "blob_sha": "61097a5fd6fdc434f39b984d3b7f85d3b5b9f773"
+    }
+  ],
+  "edges": [
+    {
+      "path": "src/infusion.ts",
+      "kind": "imports",
+      "target_path": "src/units.ts",
+      "target_name": ""
+    },
+    {
+      "path": "src/infusion.ts",
+      "kind": "uses_imported",
+      "target_path": "src/units.ts",
+      "target_name": "MIN_DURATION_MIN"
+    },
+    {
+      "path": "src/label.ts",
+      "kind": "imports",
+      "target_path": "src/types.ts",
+      "target_name": ""
+    },
+    {
+      "path": "src/label.ts",
+      "kind": "uses_imported",
+      "target_path": "src/types.ts",
+      "target_name": "InfusionOrder"
+    },
+    {
+      "path": "src/pump.ts",
+      "kind": "imports",
+      "target_path": "src/infusion.ts",
+      "target_name": ""
+    },
+    {
+      "path": "src/pump.ts",
+      "kind": "imports",
+      "target_path": "src/types.ts",
+      "target_name": ""
+    },
+    {
+      "path": "src/pump.ts",
+      "kind": "uses_imported",
+      "target_path": "src/infusion.ts",
+      "target_name": "infusionRate"
+    },
+    {
+      "path": "src/pump.ts",
+      "kind": "uses_imported",
+      "target_path": "src/types.ts",
+      "target_name": "InfusionOrder"
+    },
+    {
+      "path": "src/pump.ts",
+      "kind": "uses_imported",
+      "target_path": "src/types.ts",
+      "target_name": "Pump"
+    }
+  ]
+}

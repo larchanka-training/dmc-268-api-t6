@@ -1,0 +1,123 @@
+{
+  "schema_version": 1,
+  "indexed_commit_sha": "4673b813ba9f2dbedbd4fe0c94ecde184aace4d7",
+  "extractor": {
+    "limits_version": "limits/v1:fdf4e4d96f1a13a708d0af7b941297dc",
+    "parser_profile": "39409961245fa4d8e7284fe26c974a79dea7225e088d7bdbbd17c83384e1271a",
+    "exclusions_version": "index-exclusions/v2"
+  },
+  "file_count": 6,
+  "symbol_count": 9,
+  "files": [
+    {
+      "path": "tally/__init__.py",
+      "blob_sha": "7eb88a4d0c61230ef2de756a8657215730ce2f22"
+    },
+    {
+      "path": "tally/areas.py",
+      "blob_sha": "2e0f9abecf46f5d47a403ccc39be55b8ecad2a13"
+    },
+    {
+      "path": "tally/counts.py",
+      "blob_sha": "847e7450d8f7255154c05b8380facdcbcd8e488e"
+    },
+    {
+      "path": "tally/export.py",
+      "blob_sha": "137bb2700934e661aa50ad36c417c33f319c0604"
+    },
+    {
+      "path": "tally/ratios.py",
+      "blob_sha": "c41c992d4f62c14c29e540dfa9ad99cdc220975d"
+    },
+    {
+      "path": "tally/reports.py",
+      "blob_sha": "a9446606837b852a2f03efb935ea26dedffedc2f"
+    }
+  ],
+  "edges": [
+    {
+      "path": "tally/export.py",
+      "kind": "imports",
+      "target_path": "tally/areas.py",
+      "target_name": ""
+    },
+    {
+      "path": "tally/export.py",
+      "kind": "imports",
+      "target_path": "tally/counts.py",
+      "target_name": ""
+    },
+    {
+      "path": "tally/export.py",
+      "kind": "imports",
+      "target_path": "tally/ratios.py",
+      "target_name": ""
+    },
+    {
+      "path": "tally/export.py",
+      "kind": "uses_imported",
+      "target_path": "tally/areas.py",
+      "target_name": "AREAS"
+    },
+    {
+      "path": "tally/export.py",
+      "kind": "uses_imported",
+      "target_path": "tally/counts.py",
+      "target_name": "done"
+    },
+    {
+      "path": "tally/export.py",
+      "kind": "uses_imported",
+      "target_path": "tally/counts.py",
+      "target_name": "planned"
+    },
+    {
+      "path": "tally/export.py",
+      "kind": "uses_imported",
+      "target_path": "tally/ratios.py",
+      "target_name": "percent"
+    },
+    {
+      "path": "tally/reports.py",
+      "kind": "imports",
+      "target_path": "tally/areas.py",
+      "target_name": ""
+    },
+    {
+      "path": "tally/reports.py",
+      "kind": "imports",
+      "target_path": "tally/counts.py",
+      "target_name": ""
+    },
+    {
+      "path": "tally/reports.py",
+      "kind": "imports",
+      "target_path": "tally/ratios.py",
+      "target_name": ""
+    },
+    {
+      "path": "tally/reports.py",
+      "kind": "uses_imported",
+      "target_path": "tally/areas.py",
+      "target_name": "AREAS"
+    },
+    {
+      "path": "tally/reports.py",
+      "kind": "uses_imported",
+      "target_path": "tally/counts.py",
+      "target_name": "done"
+    },
+    {
+      "path": "tally/reports.py",
+      "kind": "uses_imported",
+      "target_path": "tally/counts.py",
+      "target_name": "planned"
+    },
+    {
+      "path": "tally/reports.py",
+      "kind": "uses_imported",
+      "target_path": "tally/ratios.py",
+      "target_name": "percent"
+    }
+  ]
+}

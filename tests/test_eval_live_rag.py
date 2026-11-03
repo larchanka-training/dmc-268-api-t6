@@ -36,6 +36,7 @@ from app.modules.reviews.infrastructure.llm.transport import TransportTimeout, T
 from review.scripts.eval_provenance import static_input_paths
 from review.scripts.eval_rag_context import _policy_snapshot, build_arm_input
 from review.scripts.rag_snapshot import INDEX_FILE, build_case_snapshot, render_snapshot
+from tests.rag_case_fakes import _rag_metadata
 from tests.test_eval_live import (
     BACKEND_RULES,
     FRONTEND_RULES,
@@ -48,7 +49,6 @@ from tests.test_eval_live import (
     fixture_root,
     settings,
 )
-from tests.test_validate_dataset import _rag_metadata
 
 SYSTEM_V5 = REPO_ROOT / "review" / "prompts" / "review.system.v5.md"
 FIXTURES = REPO_ROOT / "tests" / "fixtures" / "rag_eval"

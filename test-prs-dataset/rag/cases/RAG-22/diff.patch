@@ -1,0 +1,23 @@
+diff --git a/dispatch/routes.py b/dispatch/routes.py
+index 81f48aa..f741d0b 100644
+--- a/dispatch/routes.py
++++ b/dispatch/routes.py
+@@ -1,4 +1,4 @@
+-"""Route lengths between depots."""
++"""Route lengths between depots, in minutes."""
+ 
+ ROUTE_MINUTES: dict[tuple[str, str], int] = {
+     ("north", "south"): 42,
+diff --git a/dispatch/windows.py b/dispatch/windows.py
+index efda453..adb0743 100644
+--- a/dispatch/windows.py
++++ b/dispatch/windows.py
+@@ -8,6 +8,8 @@ from .schedule import BOOKINGS
+ def book_slot(start: datetime, minutes: int) -> datetime:
+     if minutes <= 0:
+         raise ValueError("minutes must be positive")
++    if start.tzinfo is None:
++        raise ValueError("start must be timezone-aware")
+     end = start + timedelta(minutes=minutes)
+     BOOKINGS.append((start, end))
+     return end

@@ -1,0 +1,99 @@
+{
+  "schema_version": 1,
+  "indexed_commit_sha": "84331145eacb33c5f232bd252c77d3175d28acda",
+  "extractor": {
+    "limits_version": "limits/v1:fdf4e4d96f1a13a708d0af7b941297dc",
+    "parser_profile": "39409961245fa4d8e7284fe26c974a79dea7225e088d7bdbbd17c83384e1271a",
+    "exclusions_version": "index-exclusions/v2"
+  },
+  "file_count": 6,
+  "symbol_count": 7,
+  "files": [
+    {
+      "path": "weather/__init__.py",
+      "blob_sha": "47c8351c4bd2ae50a73e042ceb0a5c3b30494cd1"
+    },
+    {
+      "path": "weather/alerts.py",
+      "blob_sha": "de1fc5bddd7531e9c3ebfbc18ead4abd17383990"
+    },
+    {
+      "path": "weather/forecast.py",
+      "blob_sha": "ce43d33e048ec97661e35ccfb6ba66f0df2fb93f"
+    },
+    {
+      "path": "weather/formatting.py",
+      "blob_sha": "f3f693e12d21efb3ee0416a875458805f4eb6c14"
+    },
+    {
+      "path": "weather/models.py",
+      "blob_sha": "d2c27bcd457de9623016be53450d65ec0241a283"
+    },
+    {
+      "path": "weather/stations.py",
+      "blob_sha": "5df61a649f46de72b7f4ab26a453f82894e8fd78"
+    }
+  ],
+  "edges": [
+    {
+      "path": "weather/alerts.py",
+      "kind": "imports",
+      "target_path": "weather/forecast.py",
+      "target_name": ""
+    },
+    {
+      "path": "weather/alerts.py",
+      "kind": "imports",
+      "target_path": "weather/formatting.py",
+      "target_name": ""
+    },
+    {
+      "path": "weather/alerts.py",
+      "kind": "uses_imported",
+      "target_path": "weather/forecast.py",
+      "target_name": "get_forecast"
+    },
+    {
+      "path": "weather/alerts.py",
+      "kind": "uses_imported",
+      "target_path": "weather/formatting.py",
+      "target_name": "render"
+    },
+    {
+      "path": "weather/forecast.py",
+      "kind": "imports",
+      "target_path": "weather/models.py",
+      "target_name": ""
+    },
+    {
+      "path": "weather/forecast.py",
+      "kind": "imports",
+      "target_path": "weather/stations.py",
+      "target_name": ""
+    },
+    {
+      "path": "weather/forecast.py",
+      "kind": "uses_imported",
+      "target_path": "weather/models.py",
+      "target_name": "Forecast"
+    },
+    {
+      "path": "weather/forecast.py",
+      "kind": "uses_imported",
+      "target_path": "weather/stations.py",
+      "target_name": "read_station"
+    },
+    {
+      "path": "weather/formatting.py",
+      "kind": "imports",
+      "target_path": "weather/models.py",
+      "target_name": ""
+    },
+    {
+      "path": "weather/formatting.py",
+      "kind": "uses_imported",
+      "target_path": "weather/models.py",
+      "target_name": "Forecast"
+    }
+  ]
+}

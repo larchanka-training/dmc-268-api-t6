@@ -1,0 +1,71 @@
+{
+  "schema_version": 1,
+  "indexed_commit_sha": "48b01c5eae82b5604f635216f0e4e7d638e6485c",
+  "extractor": {
+    "limits_version": "limits/v1:fdf4e4d96f1a13a708d0af7b941297dc",
+    "parser_profile": "39409961245fa4d8e7284fe26c974a79dea7225e088d7bdbbd17c83384e1271a",
+    "exclusions_version": "index-exclusions/v2"
+  },
+  "file_count": 5,
+  "symbol_count": 6,
+  "files": [
+    {
+      "path": "clinic/__init__.py",
+      "blob_sha": "baeeb3daa1349f84e5d6f35f058e2bfb0c013758"
+    },
+    {
+      "path": "clinic/booking.py",
+      "blob_sha": "5cb2d2b942298726d86fba54697e2f6fdf42c144"
+    },
+    {
+      "path": "clinic/models.py",
+      "blob_sha": "ca5bbc79910d5082b9758637c6cfcaaca82b38fb"
+    },
+    {
+      "path": "clinic/schedule.py",
+      "blob_sha": "b559b0cbfd0dddb5dd511dd5226a968954b2b2f5"
+    },
+    {
+      "path": "clinic/waitlist.py",
+      "blob_sha": "393eb0ae67506549bdf3afac290fb71fd99f2d16"
+    }
+  ],
+  "edges": [
+    {
+      "path": "clinic/booking.py",
+      "kind": "imports",
+      "target_path": "clinic/schedule.py",
+      "target_name": ""
+    },
+    {
+      "path": "clinic/booking.py",
+      "kind": "imports",
+      "target_path": "clinic/waitlist.py",
+      "target_name": ""
+    },
+    {
+      "path": "clinic/booking.py",
+      "kind": "uses_imported",
+      "target_path": "clinic/schedule.py",
+      "target_name": "open_slots"
+    },
+    {
+      "path": "clinic/booking.py",
+      "kind": "uses_imported",
+      "target_path": "clinic/waitlist.py",
+      "target_name": "add_to_waitlist"
+    },
+    {
+      "path": "clinic/schedule.py",
+      "kind": "imports",
+      "target_path": "clinic/models.py",
+      "target_name": ""
+    },
+    {
+      "path": "clinic/schedule.py",
+      "kind": "uses_imported",
+      "target_path": "clinic/models.py",
+      "target_name": "Slot"
+    }
+  ]
+}

@@ -1,0 +1,20 @@
+diff --git a/promos/sales.py b/promos/sales.py
+index 1563891..0526dbd 100644
+--- a/promos/sales.py
++++ b/promos/sales.py
+@@ -1,7 +1,15 @@
+ """Sale prices."""
+ 
+ from .catalog import price_of
++from .pricing import apply_discount
+ 
+ 
+ def list_price_cents(sku: str) -> int:
+     return price_of(sku)
++
++
++def spring_price_cents(sku: str) -> int:
++    """Price of the item during the spring sale."""
++    base = list_price_cents(sku)
++    rate = 0.2
++    return apply_discount(base, rate)

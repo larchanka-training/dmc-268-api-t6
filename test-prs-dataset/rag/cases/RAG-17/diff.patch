@@ -1,0 +1,17 @@
+diff --git a/taskrunner/backoff.py b/taskrunner/backoff.py
+index bfa3493..32ce1ce 100644
+--- a/taskrunner/backoff.py
++++ b/taskrunner/backoff.py
+@@ -1,10 +1,10 @@
+ """Retry delays of the runner."""
+ 
+-BASE = 1
++BASE_MS = 250
+ MAX_STEP = 6
+ 
+ 
+ def retry_delay(attempt: int) -> int:
+     """Delay before the given retry, growing with every attempt."""
+     capped = min(attempt, MAX_STEP)
+-    return BASE * 2**capped
++    return BASE_MS * 2**capped
