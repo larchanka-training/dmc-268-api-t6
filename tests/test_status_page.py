@@ -8,14 +8,19 @@ rows and the page out. The module is loaded from its path, as it runs in the con
 from __future__ import annotations
 
 import importlib.util
+import json
 import re
 import sys
+import threading
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from types import ModuleType
 from typing import Any
+from urllib.parse import parse_qs, urlsplit
 
+import httpx
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -496,3 +501,356 @@ def test_every_component_has_a_presence_expression_for_each_environment(page: Mo
         assert set(component.coverage) == {"prod", "staging"}, component.key
         for expression in component.coverage.values():
             assert expression.strip(), component.key
+
+
+# --- S1: the HTTP surface, with a stub Prometheus -------------------------------------------
+
+
+class PrometheusStub:
+    """Answers the three kinds of query of the poller from a state the test sets."""
+
+    def __init__(self) -> None:
+        self.alerts: list[dict[str, Any]] = []
+        self.last_firing: list[dict[str, Any]] = []
+        self.uncovered: set[str] = set()
+        self.down = False
+        self.requests: list[tuple[str, str]] = []
+        self.last_firing_query = ""
+        self.coverage: dict[str, str] = {}  # expression -> "component/env", set by the fixture
+
+    def answer(self, path: str, query: str) -> tuple[int, object]:
+        self.requests.append((path, query))
+        if self.down:
+            return 503, {"status": "error"}
+        if path == "/api/v1/alerts":
+            return 200, _alerts_payload(*self.alerts)
+        if path == "/api/v1/query":
+            expression = parse_qs(query)["query"][0]
+            if expression == self.last_firing_query:
+                return 200, _last_firing_payload(*self.last_firing)
+            target = self.coverage.get(expression)
+            if target is None:
+                return 400, {"status": "error", "error": "unexpected expression"}
+            present = [] if target in self.uncovered else [{"metric": {}, "value": [1, "1"]}]
+            return 200, {"status": "success", "data": {"resultType": "vector", "result": present}}
+        return 404, {}
+
+
+@pytest.fixture
+def prometheus(page: ModuleType) -> Iterator[tuple[PrometheusStub, str]]:
+    stub = PrometheusStub()
+    stub.last_firing_query = page.LAST_FIRING_QUERY
+    stub.coverage = {
+        expression: f"{component.key}/{env}"
+        for component in page.COMPONENTS
+        for env, expression in component.coverage.items()
+    }
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:
+            parts = urlsplit(self.path)
+            status, payload = stub.answer(parts.path, parts.query)
+            body = json.dumps(payload).encode()
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, format: str, *args: object) -> None:
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, args=(0.01,), daemon=True)
+    thread.start()
+    try:
+        yield stub, f"http://127.0.0.1:{server.server_address[1]}"
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
+class Clock:
+    def __init__(self) -> None:
+        self.now = NOW
+
+    def __call__(self) -> datetime:
+        return self.now
+
+
+@pytest.fixture
+def site(
+    page: ModuleType, prometheus: tuple[PrometheusStub, str]
+) -> Iterator[tuple[str, Any, PrometheusStub, Clock]]:
+    stub, url = prometheus
+    clock = Clock()
+    poller = page.Poller(url, clock=clock)
+    server = page.make_server(poller, "127.0.0.1", 0)
+    thread = threading.Thread(target=server.serve_forever, args=(0.01,), daemon=True)
+    thread.start()
+    try:
+        yield f"http://127.0.0.1:{server.server_address[1]}", poller, stub, clock
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
+PROD_HOST = {"Host": "status.example.test"}
+STAGING_HOST = {"Host": "staging-status.example.test"}
+
+
+def _row_tags(html: str) -> list[tuple[str, str, str, str]]:
+    """(env, component, state, alerts) of every row, from the data attributes only."""
+    return re.findall(
+        r'<li class="row [a-z]+" data-env="([a-z]+)" data-component="([a-z]+)" '
+        r'data-state="([a-z]+)" data-alerts="([^"]*)">',
+        html,
+    )
+
+
+def _text(html: str) -> str:
+    return re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", html))
+
+
+def test_the_page_answers_get_and_head_with_the_security_headers(
+    site: tuple[str, Any, PrometheusStub, Clock],
+) -> None:
+    base, poller, _, _ = site
+    poller.refresh()
+
+    got = httpx.get(f"{base}/", headers=PROD_HOST)
+    head = httpx.head(f"{base}/", headers=PROD_HOST)
+
+    assert got.status_code == head.status_code == 200
+    assert got.headers["content-type"] == "text/html; charset=utf-8"
+    for response in (got, head):
+        assert response.headers["content-security-policy"] == (
+            "default-src 'none'; style-src 'unsafe-inline'"
+        )
+        assert response.headers["x-content-type-options"] == "nosniff"
+        assert response.headers["cache-control"] == "no-store"
+    assert head.content == b""
+    assert head.headers["content-length"] == got.headers["content-length"]
+    assert '<meta http-equiv="refresh" content="30">' in got.text
+    assert "<script" not in got.text
+
+
+def test_a_query_string_does_not_change_the_page(
+    site: tuple[str, Any, PrometheusStub, Clock],
+) -> None:
+    base, poller, _, _ = site
+    poller.refresh()
+
+    assert httpx.get(f"{base}/?utm=1", headers=PROD_HOST).status_code == 200
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/api/v1/query?query=up",
+        "/api/v1/alerts",
+        "/api/v2/alerts",
+        "/api/v2/silences",
+        "/-/ready",
+        "/metrics",
+        "/api/health",
+        "/login",
+        "/graph",
+        "/x",
+        "/index.html",
+    ],
+)
+def test_every_other_path_is_not_found(
+    site: tuple[str, Any, PrometheusStub, Clock], path: str
+) -> None:
+    base, poller, stub, _ = site
+    poller.refresh()
+    before = len(stub.requests)
+
+    response = httpx.get(f"{base}{path}", headers=PROD_HOST)
+
+    assert response.status_code == 404
+    # A public request never reaches Prometheus.
+    assert len(stub.requests) == before
+
+
+@pytest.mark.parametrize("method", ["POST", "PUT", "DELETE", "PATCH", "OPTIONS"])
+def test_a_method_other_than_get_and_head_is_405(
+    site: tuple[str, Any, PrometheusStub, Clock], method: str
+) -> None:
+    base, _, _, _ = site
+
+    response = httpx.request(method, f"{base}/", headers=PROD_HOST, content=b"x")
+
+    assert response.status_code == 405
+    assert response.headers["allow"] == "GET, HEAD"
+
+
+def test_the_host_chooses_the_sections(site: tuple[str, Any, PrometheusStub, Clock]) -> None:
+    base, poller, _, _ = site
+    poller.refresh()
+
+    everything = [
+        (env, key) for env in ("prod", "staging") for key in ("api", "ui", "review", "webhooks")
+    ]
+    staging = [("staging", key) for key in ("api", "ui", "review", "webhooks")]
+    for headers, expected in (
+        (PROD_HOST, everything),
+        (STAGING_HOST, staging),
+        ({"Host": "STAGING-STATUS.example.test:443"}, staging),
+        ({"Host": "127.0.0.1:8080"}, everything),
+    ):
+        tags = _row_tags(httpx.get(f"{base}/", headers=headers).text)
+        assert [(env, key) for env, key, _, _ in tags] == expected, headers
+
+
+def test_the_page_shows_a_down_component_with_the_name_of_the_alert_and_the_public_text(
+    site: tuple[str, Any, PrometheusStub, Clock],
+) -> None:
+    base, poller, stub, _ = site
+    stub.alerts = [
+        _alert("ReviewQueueWithoutConsumer", queue="review.run.fast"),
+        _alert("ReviewQueueWithoutConsumer", queue="review.publish", active_at=LATER_ACTIVE_AT),
+    ]
+    stub.last_firing = [_series("PublicEndpointDown", host="staging-api.example.test")]
+    poller.refresh()
+
+    html = httpx.get(f"{base}/", headers=STAGING_HOST).text
+
+    tags = {(env, key): (state, alerts) for env, key, state, alerts in _row_tags(html)}
+    assert tags[("staging", "review")] == ("down", "ReviewQueueWithoutConsumer")
+    assert tags[("staging", "api")] == ("up", "")
+    assert tags[("staging", "ui")] == ("up", "")
+    assert "Ревью PR" in html
+    text = _text(html)
+    assert "Ревью PR не работает с 2026-11-03 10:15 UTC" in text
+    assert "ReviewQueueWithoutConsumer: очередь ревью без обработчика" in text
+    # The last problem of the API ended at 10:00 UTC; the UI had none within a week.
+    assert "API работает с 2026-11-03 10:00 UTC" in text
+    assert "UI работает сбоев за 7 дн. не было" in text
+    assert "Обновлено: 2026-11-03 12:00 UTC" in text
+
+
+def test_nothing_prometheus_says_reaches_the_page(
+    site: tuple[str, Any, PrometheusStub, Clock],
+) -> None:
+    base, poller, stub, _ = site
+    stub.alerts = [
+        _alert(
+            "WebhookWorkerDown",
+            container_label_com_docker_compose_project="dmc-268-api-prod",
+            instance="https://leak.test/<script>",
+            host="staging-api.<b>evil</b>.test",
+        ),
+        _alert("TargetDown", job="rabbitmq", instance="secret-host:15692"),
+    ]
+    poller.refresh()
+
+    html = httpx.get(f"{base}/", headers=PROD_HOST).text
+
+    for secret in (
+        "SECRET",
+        "acme/secret-repo",
+        "ghp_",
+        "<script>",
+        "<b>",
+        "secret-host",
+        "leak.test",
+        "docker compose",
+        "dmc-268-api-prod",
+    ):
+        assert secret not in html, secret
+
+
+def test_an_unreachable_prometheus_means_no_data_not_working(
+    site: tuple[str, Any, PrometheusStub, Clock],
+) -> None:
+    base, poller, stub, _ = site
+    poller.refresh()
+    assert {state for _, _, state, _ in _row_tags(httpx.get(f"{base}/").text)} == {"up"}
+
+    stub.down = True
+    poller.refresh()
+    html = httpx.get(f"{base}/").text
+
+    assert {state for _, _, state, _ in _row_tags(html)} == {"unknown"}
+    assert "нет данных" in html
+    assert "Данные не получены" in html
+
+
+def test_before_the_first_poll_the_page_says_no_data(
+    site: tuple[str, Any, PrometheusStub, Clock],
+) -> None:
+    base, _, _, _ = site
+
+    html = httpx.get(f"{base}/").text
+
+    assert {state for _, _, state, _ in _row_tags(html)} == {"unknown"}
+    assert "Данные не получены" in html
+
+
+def test_a_snapshot_that_is_no_longer_refreshed_ages_into_no_data(
+    site: tuple[str, Any, PrometheusStub, Clock],
+) -> None:
+    base, poller, _, clock = site
+    poller.refresh()
+    clock.now = NOW + timedelta(minutes=2)
+    assert {state for _, _, state, _ in _row_tags(httpx.get(f"{base}/").text)} == {"up"}
+
+    clock.now = NOW + timedelta(minutes=2, seconds=1)
+    html = httpx.get(f"{base}/").text
+
+    assert {state for _, _, state, _ in _row_tags(html)} == {"unknown"}
+    assert "Данные устарели: последнее обновление 2026-11-03 12:00 UTC" in html
+
+
+def test_a_poll_sends_the_presence_and_last_firing_expressions_unchanged(
+    page: ModuleType, site: tuple[str, Any, PrometheusStub, Clock]
+) -> None:
+    _, poller, stub, _ = site
+
+    poller.refresh()
+
+    sent = [parse_qs(query)["query"][0] for path, query in stub.requests if path.endswith("query")]
+    expected = [page.LAST_FIRING_QUERY] + [
+        expression for component in page.COMPONENTS for expression in component.coverage.values()
+    ]
+    assert sorted(sent) == sorted(expected)
+    assert [path for path, _ in stub.requests].count("/api/v1/alerts") == 1
+
+
+def test_the_last_firing_query_asks_for_the_last_firing_sample_of_the_shown_alerts_in_a_week(
+    page: ModuleType,
+) -> None:
+    shown = sorted({rule.alert for component in page.COMPONENTS for rule in component.rules})
+
+    expected = (
+        'max_over_time(timestamp(ALERTS{alertstate="firing",alertname=~"'
+        + "|".join(shown)
+        + '"})[7d:1m])'
+    )
+    assert expected == page.LAST_FIRING_QUERY
+
+
+def test_the_poller_keeps_polling_until_it_is_stopped(
+    page: ModuleType, prometheus: tuple[PrometheusStub, str]
+) -> None:
+    stub, url = prometheus
+    poller = page.Poller(url)
+    stop = threading.Event()
+    thread = threading.Thread(target=poller.run, args=(stop, 0.01), daemon=True)
+
+    thread.start()
+    try:
+        deadline = datetime.now(UTC) + timedelta(seconds=5)
+        while [p for p, _ in stub.requests].count("/api/v1/alerts") < 3:
+            assert datetime.now(UTC) < deadline, "the poller does not poll"
+            stop.wait(0.01)
+    finally:
+        stop.set()
+        thread.join(timeout=5)
+
+    assert not thread.is_alive()
+    assert poller.snapshot() is not None

@@ -8,13 +8,26 @@ public texts of this table, never a label or an annotation (they carry commands,
 
 from __future__ import annotations
 
+import html
+import json
+import os
 import re
-from collections.abc import Mapping, Sequence
+import signal
+import threading
+import urllib.request
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from http.client import HTTPException
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import urlencode
 
 ENVIRONMENTS = ("prod", "staging")
+POLL_SECONDS = 30.0  # = evaluation_interval of prometheus.yml: nothing new appears faster
 STALE_AFTER = timedelta(minutes=2)
+MAX_ANSWER_BYTES = 4 * 1024 * 1024
+DEFAULT_PROMETHEUS_URL = "http://prometheus:9090"
+DEFAULT_PORT = 8080
 
 STATE_UP = "up"
 STATE_DOWN = "down"
@@ -171,6 +184,14 @@ COMPONENTS = (
         ),
         {"staging": _INTAKE_STAGING, "prod": _INTAKE_PROD},
     ),
+)
+
+# The last firing sample of the shown alerts within a week (Prometheus keeps 15 days). The series
+# are rare, so the subquery is cheap; tests/monitoring/status.test.yml runs this very text.
+LAST_FIRING_QUERY = (
+    'max_over_time(timestamp(ALERTS{alertstate="firing",alertname=~"'
+    + "|".join(sorted({rule.alert for component in COMPONENTS for rule in component.rules}))
+    + '"})[7d:1m])'
 )
 
 # Alerts of alerts.yml the page deliberately does not show; a test pins this list and the table
@@ -376,3 +397,234 @@ def build_status(snapshot: Snapshot | None, now: datetime) -> list[Row]:
             else:
                 rows.append(Row(env, component.key, component.name, STATE_UNKNOWN, None, ()))
     return rows
+
+
+# --- polling Prometheus --------------------------------------------------------------------
+
+
+def _utc_now() -> datetime:
+    return datetime.now(UTC)
+
+
+def _has_series(payload: object) -> bool:
+    data = _data(payload)
+    result = data.get("result")
+    if data.get("resultType") != "vector" or not isinstance(result, list):
+        raise StatusError("the answer is not a vector")
+    return bool(result)
+
+
+class Poller:
+    """Reads Prometheus and keeps the last snapshot; a public request never reaches Prometheus."""
+
+    def __init__(
+        self,
+        prometheus_url: str,
+        clock: Callable[[], datetime] = _utc_now,
+        timeout: float = 10.0,
+    ) -> None:
+        self._url = prometheus_url.rstrip("/")
+        self.clock = clock
+        self._timeout = timeout
+        self._lock = threading.Lock()
+        self._snapshot: Snapshot | None = None
+
+    def _get(self, path: str, params: Mapping[str, str] | None = None) -> object:
+        url = self._url + path + (f"?{urlencode(params)}" if params else "")
+        with urllib.request.urlopen(url, timeout=self._timeout) as answer:
+            body: bytes = answer.read(MAX_ANSWER_BYTES + 1)
+        if len(body) > MAX_ANSWER_BYTES:
+            raise StatusError("the answer is too large")
+        return json.loads(body)
+
+    def _query(self, expression: str) -> object:
+        return self._get("/api/v1/query", {"query": expression})
+
+    def refresh(self) -> None:
+        """One poll. Any failure leaves no snapshot: the page says no data, never working."""
+        try:
+            alerts = parse_alerts(self._get("/api/v1/alerts"))
+            last_firing = parse_last_firing(self._query(LAST_FIRING_QUERY))
+            covered = {
+                (component.key, env): _has_series(self._query(expression))
+                for component in COMPONENTS
+                for env, expression in component.coverage.items()
+            }
+            snapshot: Snapshot | None = Snapshot(self.clock(), alerts, last_firing, covered)
+        except (OSError, HTTPException, ValueError, StatusError):
+            snapshot = None
+        with self._lock:
+            self._snapshot = snapshot
+
+    def snapshot(self) -> Snapshot | None:
+        with self._lock:
+            return self._snapshot
+
+    def run(self, stop: threading.Event, interval: float = POLL_SECONDS) -> None:
+        while not stop.is_set():
+            self.refresh()
+            stop.wait(interval)
+
+
+# --- the page ------------------------------------------------------------------------------
+
+_STATE_TEXT = {STATE_UP: "работает", STATE_DOWN: "не работает", STATE_UNKNOWN: "нет данных"}
+_ENVIRONMENT_TITLE = {"prod": "prod", "staging": "staging"}
+
+_STYLE = """
+:root{color-scheme:light dark;--bg:#fff;--fg:#1b1f23;--muted:#59636e;--line:#d0d7de;
+--up:#1a7f37;--down:#cf222e;--unknown:#9a6700}
+@media (prefers-color-scheme:dark){:root{--bg:#0d1117;--fg:#e6edf3;--muted:#8b949e;
+--line:#30363d;--up:#3fb950;--down:#ff7b72;--unknown:#d29922}}
+body{margin:0;background:var(--bg);color:var(--fg);font:16px/1.5 system-ui,sans-serif}
+main{max-width:42rem;margin:0 auto;padding:1.5rem 1rem}
+h1{font-size:1.5rem;margin:0 0 .25rem}h2{font-size:1.1rem;margin:2rem 0 .5rem}
+p.updated{color:var(--muted);margin:0}
+ul{list-style:none;margin:0;padding:0}
+li.row{border-top:1px solid var(--line);padding:.6rem 0}
+.name{font-weight:600}.state{margin-left:.5rem;font-weight:600}
+.up .state{color:var(--up)}.down .state{color:var(--down)}.unknown .state{color:var(--unknown)}
+.since,.why{color:var(--muted);font-size:.9rem}
+.why{margin:.25rem 0 0 1rem;list-style:disc}
+"""
+
+
+def _stamp(moment: datetime) -> str:
+    return f"{moment.astimezone(UTC):%Y-%m-%d %H:%M} UTC"
+
+
+def _row_html(row: Row) -> str:
+    alerts = " ".join(finding.alert for finding in row.alerts)
+    if row.state == STATE_DOWN:
+        since = f"с {_stamp(row.since)}" if row.since else ""
+    elif row.state == STATE_UP:
+        since = f"с {_stamp(row.since)}" if row.since else "сбоев за 7 дн. не было"
+    else:
+        since = ""
+    reasons = "".join(
+        f"<li>{html.escape(finding.alert)}: {html.escape(finding.description)}</li>"
+        for finding in row.alerts
+    )
+    return (
+        f'<li class="row {row.state}" data-env="{html.escape(row.env)}" '
+        f'data-component="{html.escape(row.key)}" data-state="{row.state}" '
+        f'data-alerts="{html.escape(alerts)}">'
+        f'<span class="name">{html.escape(row.name)}</span>'
+        f'<span class="state">{_STATE_TEXT[row.state]}</span>'
+        + (f' <span class="since">{html.escape(since)}</span>' if since else "")
+        + (f'<ul class="why">{reasons}</ul>' if reasons else "")
+        + "</li>"
+    )
+
+
+def render_page(
+    rows: Sequence[Row],
+    snapshot: Snapshot | None,
+    now: datetime,
+    shown: Sequence[str] = ENVIRONMENTS,
+) -> str:
+    """The HTML of the page: only the texts of this module and times, nothing from Prometheus."""
+    if snapshot is None:
+        updated = "Данные не получены"
+    elif now - snapshot.taken_at > STALE_AFTER:
+        updated = f"Данные устарели: последнее обновление {_stamp(snapshot.taken_at)}"
+    else:
+        updated = f"Обновлено: {_stamp(snapshot.taken_at)}"
+    sections = "".join(
+        f'<section data-env="{env}"><h2>{_ENVIRONMENT_TITLE[env]}</h2><ul>'
+        + "".join(_row_html(row) for row in rows if row.env == env)
+        + "</ul></section>"
+        for env in ENVIRONMENTS
+        if env in shown
+    )
+    return (
+        '<!doctype html><html lang="ru"><head><meta charset="utf-8">'
+        '<meta name="viewport" content="width=device-width, initial-scale=1">'
+        '<meta http-equiv="refresh" content="30">'
+        f"<title>Статус сервиса</title><style>{_STYLE}</style></head>"
+        f'<body><main><h1>Статус сервиса</h1><p class="updated">{html.escape(updated)}</p>'
+        f"{sections}</main></body></html>"
+    )
+
+
+def visible_environments(host_header: str) -> tuple[str, ...]:
+    """``staging-status.<domain>`` shows staging only; any other name (a healthcheck) shows all."""
+    host = host_header.lower().split(":", 1)[0]
+    return ("staging",) if host.startswith("staging-status.") else ENVIRONMENTS
+
+
+# --- the server ----------------------------------------------------------------------------
+
+_HEADERS = (
+    ("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'"),
+    ("X-Content-Type-Options", "nosniff"),
+    ("Cache-Control", "no-store"),
+)
+
+
+def make_server(poller: Poller, bind: str, port: int) -> ThreadingHTTPServer:
+    """GET and HEAD on ``/`` answer the page, any other path 404, any other method 405."""
+
+    class Handler(BaseHTTPRequestHandler):
+        server_version = "status-page"
+        sys_version = ""
+        timeout = 10  # a stalled client does not hold a thread
+
+        def _reply(self, status: int, body: bytes, kind: str, head: bool = False) -> None:
+            self.send_response(status)
+            self.send_header("Content-Type", kind)
+            self.send_header("Content-Length", str(len(body)))
+            for name, value in _HEADERS:
+                self.send_header(name, value)
+            if status == 405:
+                self.send_header("Allow", "GET, HEAD")
+            self.end_headers()
+            if not head:
+                self.wfile.write(body)
+
+        def _page(self, head: bool) -> None:
+            if self.path.split("?", 1)[0] != "/":
+                self._reply(404, b"Not Found\n", "text/plain; charset=utf-8", head)
+                return
+            now = poller.clock()
+            snapshot = poller.snapshot()
+            page = render_page(
+                build_status(snapshot, now),
+                snapshot,
+                now,
+                visible_environments(self.headers.get("Host", "")),
+            )
+            self._reply(200, page.encode(), "text/html; charset=utf-8", head)
+
+        def do_GET(self) -> None:
+            self._page(head=False)
+
+        def do_HEAD(self) -> None:
+            self._page(head=True)
+
+        def _not_allowed(self) -> None:
+            self._reply(405, b"Method Not Allowed\n", "text/plain; charset=utf-8")
+
+        do_POST = do_PUT = do_DELETE = do_PATCH = do_OPTIONS = _not_allowed
+
+    return ThreadingHTTPServer((bind, port), Handler)
+
+
+def main() -> None:
+    poller = Poller(os.environ.get("PROMETHEUS_URL", DEFAULT_PROMETHEUS_URL))
+    server = make_server(poller, "0.0.0.0", int(os.environ.get("PORT", DEFAULT_PORT)))
+    stop = threading.Event()
+    threading.Thread(target=poller.run, args=(stop,), daemon=True).start()
+    # PID 1 of the container ignores SIGTERM by default: stop at once instead of after the kill.
+    signal.signal(
+        signal.SIGTERM, lambda *_: threading.Thread(target=server.shutdown, daemon=True).start()
+    )
+    try:
+        server.serve_forever()
+    finally:
+        stop.set()
+        server.server_close()
+
+
+if __name__ == "__main__":
+    main()
