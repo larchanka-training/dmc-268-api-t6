@@ -836,3 +836,21 @@ def test_a_webhook_run_whose_publication_failed_logs_its_run_id(
 
     [entry] = _pending_lines(caplog)
     assert entry["run_id"] == str(trigger._RUN)
+
+
+def test_a_failing_span_error_handler_never_breaks_the_logging_call(
+    spans: InMemorySpanExporter, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def broken(span: object, error: BaseException) -> None:
+        raise RecursionError("too deep")
+
+    monkeypatch.setattr(telemetry, "mark_error", broken)
+    monkeypatch.setattr(logging, "raiseExceptions", False)
+    handler = telemetry.SpanErrorHandler()
+    with telemetry.tracer().start_as_current_span("review.run"):
+        try:
+            raise ValueError("boom")
+        except ValueError:
+            record = _record("failed")
+            record.exc_info = sys.exc_info()
+            handler.handle(record)

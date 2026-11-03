@@ -75,9 +75,7 @@ ALLOWED_ATTRIBUTES = frozenset(
 )
 # The ``exception`` event of ``mark_error``: the type and the frames of the stack. The message
 # stays out: it can quote a payload (it is ``runs.error_message``, closed to Grafana, §3).
-ALLOWED_EVENT_ATTRIBUTES = frozenset(
-    {"exception.type", "exception.stacktrace", "exception.escaped"}
-)
+ALLOWED_EVENT_ATTRIBUTES = frozenset({"exception.type", "exception.stacktrace"})
 # Set only by ``mark_error`` next to a ``safe_stack``; a stack without it (``record_exception``
 # of the SDK or of a library) is text with messages and is dropped at export.
 _SAFE_STACK = "dmc.stack.safe"
@@ -152,16 +150,20 @@ class SpanErrorHandler(logging.Handler):
         super().__init__(logging.ERROR)
 
     def emit(self, record: logging.LogRecord) -> None:
-        span = trace.get_current_span()
-        if not span.is_recording():
-            return
-        if record.exc_info and record.exc_info[1] is not None:
-            mark_error(span, record.exc_info[1])
-            return
-        error_type = record.__dict__.get("error_type")
-        if isinstance(error_type, str):
-            span.set_attribute(ERROR_TYPE, error_type)
-            span.set_status(Status(StatusCode.ERROR, error_type))
+        # Error tracking never breaks the code it watches: ``Handler.handle`` does not catch.
+        try:
+            span = trace.get_current_span()
+            if not span.is_recording():
+                return
+            if record.exc_info and record.exc_info[1] is not None:
+                mark_error(span, record.exc_info[1])
+                return
+            error_type = record.__dict__.get("error_type")
+            if isinstance(error_type, str):
+                span.set_attribute(ERROR_TYPE, error_type)
+                span.set_status(Status(StatusCode.ERROR, error_type))
+        except Exception:
+            self.handleError(record)
 
 
 _HANDLER_NAME = "dmc-json"
