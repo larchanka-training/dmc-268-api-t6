@@ -42,6 +42,69 @@ BACKTICKED_TOOL = re.compile(r"`([a-z]+\.[a-z_]+)`")
 TOOL_POSITIONS = {"traced_step": 2, "record": 1, "add_action": 1, "PublicationRoute": 1}
 # A star argument on one of these can carry the tool past the scan.
 TOOL_WRITERS = frozenset(TOOL_POSITIONS) | {"insert_run_action", "RunAction"}
+_REVIEWS = "app/modules/reviews"
+# The exact places allowed to pass a tool that is not a name: (path, scope, callee, argument), no
+# line numbers. Each entry weakens the scan, so it says why it is safe. A new function that passes
+# its own tool parameter on also goes into TOOL_POSITIONS, or nothing reads its callers.
+TOOL_PASS_THROUGH = frozenset(
+    {
+        # The outer function is itself in TOOL_WRITERS, so the scan reads the name at its callers.
+        (f"{_REVIEWS}/application/run_trace.py", "traced_step", "record", "tool"),
+        (
+            f"{_REVIEWS}/application/run_trace.py",
+            "TransactionalRunTrace.record",
+            "add_action",
+            "tool",
+        ),
+        (
+            f"{_REVIEWS}/infrastructure/run_lifecycle_store.py",
+            "SqlAlchemyRunTraceStore.add_action",
+            "insert_run_action",
+            "tool",
+        ),
+        (
+            f"{_REVIEWS}/infrastructure/run_action_records.py",
+            "insert_run_action",
+            "RunAction",
+            "tool",
+        ),
+        # PublicationRoute is in TOOL_POSITIONS, so the scan reads the names where it is built.
+        (
+            f"{_REVIEWS}/application/publish_run_review.py",
+            "PublishRunReview._submit",
+            "record",
+            "route.tool",
+        ),
+        # These copy a name that is already stored or already scanned; no row is written.
+        (
+            f"{_REVIEWS}/infrastructure/run_action_records.py",
+            "insert_run_action",
+            "record_step_span",
+            "tool",
+        ),
+        ("app/bootstrap/run_step_listener.py", "_event", "RunStep", "tool"),
+        ("app/main.py", "to_run_action_dto", "RunActionDto", "item.tool"),
+        (
+            f"{_REVIEWS}/application/get_run_actions.py",
+            "GetRunActions._to_trace",
+            "RunActionTrace",
+            "action.tool",
+        ),
+        (
+            f"{_REVIEWS}/infrastructure/run_repository.py",
+            "SqlAlchemyRunRepository._to_run_action",
+            "RunActionProjection",
+            "action.tool",
+        ),
+        # UsageLedger.record(context, usage) shares the method name; it is not a trace.
+        (
+            f"{_REVIEWS}/infrastructure/llm/gateway.py",
+            "LlmGateway._record_paid_answer.write_once",
+            "record",
+            "usage",
+        ),
+    }
+)
 
 
 @dataclass(frozen=True, order=True)
@@ -53,6 +116,10 @@ class _ToolSite:
     scope: str
     callee: str
     argument: str
+
+    @property
+    def key(self) -> tuple[str, str, str, str]:
+        return self.path, self.scope, self.callee, self.argument
 
     def __str__(self) -> str:
         return f"{self.path}:{self.line} {self.scope} -> {self.callee}({self.argument})"
@@ -147,9 +214,14 @@ def _written_tools(source: str) -> set[str]:
 
 
 def _unread_tools(scans: list[_ToolScan]) -> list[_ToolSite]:
-    """The sites of ``scans`` that are neither a known ``*_TOOL`` constant nor vouched for."""
+    """The sites of ``scans`` that are neither a known ``*_TOOL`` constant nor in the allowlist."""
     constants = {constant for scan in scans for constant in scan.constants}
-    return sorted(site for scan in scans for site in scan.sites if site.argument not in constants)
+    return sorted(
+        site
+        for scan in scans
+        for site in scan.sites
+        if site.key not in TOOL_PASS_THROUGH and site.argument not in constants
+    )
 
 
 @pytest.mark.parametrize(
@@ -272,12 +344,54 @@ def _catalog_drift(side: str, found: set[str]) -> str:
     return f"{side} vs catalog: missing {missing}, unexpected {unexpected}"
 
 
-def test_run_action_tool_catalog_matches_the_tools_the_code_writes() -> None:
-    written: set[str] = set()
-    for path in sorted(APP_PATH.rglob("*.py")):
-        written |= _written_tools(path.read_text(encoding="utf-8"))
+def _scan_app() -> list[_ToolScan]:
+    return [
+        _scan_tool_writes(
+            path.read_text(encoding="utf-8"), path.relative_to(APP_PATH.parent).as_posix()
+        )
+        for path in sorted(APP_PATH.rglob("*.py"))
+    ]
 
+
+def test_run_action_tool_catalog_matches_the_tools_the_code_writes() -> None:
+    scans = _scan_app()
+
+    unread = "\n".join(str(site) for site in _unread_tools(scans))
+    assert not unread, (
+        "a tool name the scan cannot read: pass a literal or a module-level *_TOOL constant, or "
+        f"add the place to TOOL_PASS_THROUGH with why it is safe\n{unread}"
+    )
+    written = {name for scan in scans for name in scan.names}
     assert written == RUN_ACTION_TOOLS, _catalog_drift("code", written)
+
+
+def test_run_action_tool_pass_through_entries_match_a_call_in_the_code() -> None:
+    passed = {site.key for scan in _scan_app() for site in scan.sites}
+
+    stale = sorted(TOOL_PASS_THROUGH - passed)
+    assert not stale, f"remove the TOOL_PASS_THROUGH entries that match no call: {stale}"
+
+
+_RUN_TRACE = f"{_REVIEWS}/application/run_trace.py"
+_TRACED_STEP = "async def traced_step(trace, run_id, tool):\n    await trace.record(run_id, tool)\n"
+
+
+def test_run_action_tool_pass_through_vouches_for_its_exact_place() -> None:
+    assert _unread_tools([_scan_tool_writes(_TRACED_STEP, _RUN_TRACE)]) == []
+
+
+@pytest.mark.parametrize(
+    ("source", "path"),
+    [
+        (_TRACED_STEP, f"{_REVIEWS}/application/other.py"),
+        (_TRACED_STEP.replace("traced_step", "other_step"), _RUN_TRACE),
+        (_TRACED_STEP.replace("trace.record", "trace.add_action"), _RUN_TRACE),
+        (_TRACED_STEP.replace("record(run_id, tool)", "record(run_id, name)"), _RUN_TRACE),
+    ],
+    ids=["other-file", "other-function", "other-callee", "other-argument"],
+)
+def test_run_action_tool_pass_through_vouches_for_nothing_else(source: str, path: str) -> None:
+    assert len(_unread_tools([_scan_tool_writes(source, path)])) == 1
 
 
 @pytest.mark.parametrize(
