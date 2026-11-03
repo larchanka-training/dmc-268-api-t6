@@ -45,6 +45,20 @@ test: "What's the public interface, and which seams should we test?"
 - **Horizontal slicing** — all tests first, then all implementation. Work in
   **vertical slices**: one test → one implementation → repeat.
 
+## Size and duplication
+
+The limits of `.agents/rules/backend.md` §5, in short:
+
+- **One test per behavior.** Grep the feature's file prefix first: another input of
+  a behavior already tested is a `pytest.mark.parametrize` row of that test, not a
+  copy of it.
+- **Shared, not copied.** A fake, factory or DB setup two files need goes into the
+  topic's shared non-`test_` module under `tests/` (`tests/llm_fakes.py`,
+  `tests/portal_postgres.py`), never into a copy per file and never imported from a
+  `test_*.py` file.
+- **~60 KB per file.** A test file over ~60 KB is split by behavior at its next
+  edit, in a move-only commit before the behavior change.
+
 ## Rules of the loop
 
 - **Red before green.** Write the failing test first, then only enough code

@@ -40,11 +40,11 @@ adapter and the test fake both implement it independently.
 ## Fake ports over mocks
 
 When code is written against a port, prefer an in-memory fake (a `Protocol`
-implementation in the test module or a shared `tests/fakes.py`) over mocking
-each call with `unittest.mock`:
+implementation in the test module, or in the topic's shared `tests/<topic>_fakes.py`
+once two files need it) over mocking each call with `unittest.mock`:
 
 ```python
-# tests/fakes.py
+# tests/finding_fakes.py
 from app.modules.reviews.domain.ports import Finding  # illustrative path
 
 

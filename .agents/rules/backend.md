@@ -102,14 +102,29 @@ from a missing scope.
 - One feature per file prefix: `tests/test_<feature>.py`, or several
   `tests/test_<feature>_<aspect>.py` files sharing one prefix; PostgreSQL tests usually sit in
   `_postgres` files, as in the `test_clean_without_text_*` and `test_coverage_none_*` families.
+- A test file over ~60 KB (bytes: `wc -c`, `git ls-tree -l`) is split by behavior into
+  `tests/test_<feature>_<aspect>.py` files at its next edit. The split is a move-only commit
+  before the behavior change: `pytest --collect-only -q` collects as many tests as before, and
+  the docs that cite the old file (`git grep -n '<old name>' -- docs`) follow in that commit.
+  A file owned by another open PR waits for its merge or a comment there (`AGENTS.md`).
 - Plain `pytest`, no `pytest-asyncio` plugin — drive async code with `asyncio.run`.
 - Unit tests exercise use cases against fakes of the ports (Protocols), not real
   infrastructure.
+- Fakes, factories and DB setup that two test files need live in one shared module of
+  their topic: a non-`test_` module under `tests/`, as `tests/llm_fakes.py`,
+  `tests/policy_snapshot_fakes.py`, `tests/trigger_uow.py` and `tests/portal_postgres.py`.
+  They are imported, never copied into each file. A shared module never imports from a
+  `test_*.py` file: a helper another file needs moves out of its test file first.
 - Integration tests are marked `@pytest.mark.integration` (registered in
-  `pyproject.toml`) and skip when `TEST_DATABASE_URL` is unset; the skip lives in
-  each DB test file's fixture — there is no shared `conftest.py` yet.
+  `pyproject.toml`) and skip when `TEST_DATABASE_URL` is unset. Each DB test file keeps a
+  thin fixture that skips without the variable and enters the shared setup of its topic
+  (`with portal_schema(...)` in the `tests/portal_postgres.py` importers); there is no shared
+  `conftest.py`.
 - Assert literal values taken from the spec — never derive an expected value from
   the implementation under test.
+- One test per behavior. Before adding a test, grep the feature's file prefix for the
+  behavior: another input of a behavior already tested is a `pytest.mark.parametrize` row
+  of literal values in that test, not a copy of it; a new test is for a new behavior.
 
 ## 6. Review focus
 
