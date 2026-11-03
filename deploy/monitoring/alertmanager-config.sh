@@ -7,11 +7,12 @@
 
 TELEGRAM_TOKEN_FILE_IN_CONTAINER="/etc/alertmanager/secrets/telegram_bot_token"
 
-# The routing shared by both variants. A state alert: one message per alert name and environment,
-# a reminder every 4 hours while it fires, a message when it resolves. An event alert (label
-# kind="event", rules/alerts.yml): sent once and never as RESOLVED, because it resolves only by
-# leaving its time window; events of 90 seconds share one message, so the failed run and the dead
-# letter of one exhausted Run (docs/PIPELINE_SPEC.md §4.4) arrive together.
+# The routing shared by both variants. A state alert: one message per alert name and environment, a
+# reminder every 4 hours while it fires, a message when it resolves. An event alert (label
+# kind="event", rules/alerts.yml): never sent as RESOLVED, because it resolves only by leaving its
+# time window, and reminded every 4 hours like a state alert only while events keep coming; events
+# of 90 seconds share one message, so the failed run and the dead letter of one exhausted Run
+# (docs/PIPELINE_SPEC.md §4.4) arrive together.
 render_alertmanager_route() {
   local receiver="$1" events_receiver="$2"
   cat <<YAML

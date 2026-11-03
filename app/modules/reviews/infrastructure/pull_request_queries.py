@@ -12,8 +12,15 @@ from app.modules.auth.application.scope import AuthScope
 from app.modules.repositories.infrastructure.models import Repository
 from app.modules.reviews.application.list_pulls import LatestRunRow, PullRequestRow
 from app.modules.reviews.application.list_runs import RunCursor
-from app.modules.reviews.infrastructure.models import CodeChange, CodeChangeDiff, Finding, Run
+from app.modules.reviews.infrastructure.models import (
+    CodeChange,
+    CodeChangeDiff,
+    ContextPayload,
+    Finding,
+    Run,
+)
 from app.modules.reviews.infrastructure.saved_review_results import load_review_results
+from app.modules.reviews.infrastructure.summary_only_stop import summary_only_stop_conditions
 from app.modules.workspaces.infrastructure.repository_access import repository_access_predicate
 
 _STATES = {
@@ -104,13 +111,22 @@ class SqlAlchemyPullRequestQueries:
             )
         ):
             severities.setdefault(run_id, []).append(severity.value)
-        summary_only = set(
+        marked = set(
             await session.scalars(
                 select(CodeChangeDiff.run_id)
                 .where(CodeChangeDiff.run_id.in_(run_ids), CodeChangeDiff.summary_only.is_(True))
                 .distinct()
             )
         )
+        stopped = set(
+            await session.scalars(
+                select(ContextPayload.run_id).where(
+                    ContextPayload.run_id.in_(run_ids),
+                    *summary_only_stop_conditions(ContextPayload.summary),
+                )
+            )
+        )
+        summary_only = marked | stopped
         results = await load_review_results(
             session,
             {

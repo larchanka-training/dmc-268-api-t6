@@ -7,6 +7,7 @@ import logging
 import uuid
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
+from hashlib import sha256
 from typing import Protocol
 from uuid import UUID
 
@@ -44,6 +45,7 @@ from app.modules.reviews.application.review_context import (
     NoReviewableText,
     RetrievedBlock,
     ReviewContextPayload,
+    SummaryOnlyReview,
     snapshot_block,
     snapshot_retrieved,
 )
@@ -66,6 +68,18 @@ from app.modules.reviews.application.verdict import SeverityThresholdValue
 _LOGGER = logging.getLogger(__name__)
 # R2: the payload levels shown as excerpts; L1 is the changed files themselves.
 _EXCERPT_LEVELS = frozenset({ContextLevel.L2, ContextLevel.L3, ContextLevel.L4})
+
+
+def verifier_candidate_id(index: int, finding: ReviewFindingV2) -> str:
+    """SHA-256 hex of the raw-list index and the validated finding.
+
+    The verifier prompt prints this id, so the same findings render the same user
+    message. The hex digest is 64 characters, the schema maximum. ``call_id`` stays
+    a random uuid; it is not part of that message.
+    """
+    payload = {"index": index, "finding": finding.model_dump(mode="json")}
+    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    return sha256(canonical.encode("utf-8")).hexdigest()
 
 
 @dataclass(frozen=True)
@@ -263,9 +277,9 @@ class ExecuteReviewRun:
     async def execute(self, run_id: UUID) -> bool:
         try:
             conventions = await self._processor.prepare(run_id)
-        except NoReviewableText:
-            # CVS §2.2: the stage recorded a change of technical skips only. Nothing is shown
-            # to a model: the backend result (coverage none) is published (#130 F5).
+        except (NoReviewableText, SummaryOnlyReview):
+            # Nothing is shown to a model. Coverage none (#130 F5) and summary-only (#313)
+            # both publish the backend result.
             return await self._publisher.execute(run_id, NoModelAnswer())
         if not isinstance(conventions, GeneratedConventions):
             return False
@@ -469,7 +483,6 @@ class ExecuteReviewRun:
         candidates: list[CandidateFindingItem] = []
         cand_positions: dict[int, int] = {}
         for idx, item in enumerate(raw_findings):
-            cand_id = str(uuid.uuid4())
             try:
                 if isinstance(item, ReviewFindingV2):
                     finding = item
@@ -503,6 +516,8 @@ class ExecuteReviewRun:
                 raise InvalidReviewOutput(
                     f"Malformed candidate finding at index {idx}: {str(err)[:200]}"
                 ) from err
+
+            cand_id = verifier_candidate_id(idx, finding)
 
             # Pass 2: Coordinates validation against fitted context (CVS §6.2 :701)
             valid_coords, coord_err = validate_v2_coordinates(

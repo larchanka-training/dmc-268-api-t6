@@ -191,7 +191,16 @@ class StoreReviewOutput:
         if parsed is None:
             # No findings to process. The post-processor replaces this summary with its own
             # backend summary of the same result, the only one stored.
-            parsed = ReviewOutput(findings=[], summary=summary_from_result((), (), coverage))
+            parsed = ReviewOutput(
+                findings=[],
+                summary=summary_from_result(
+                    (),
+                    (),
+                    coverage,
+                    summary_reason=context.summary_reason if context.summary_only else None,
+                    name_summary_only=context.summary_only,
+                ),
+            )
         threshold_to_use = (
             effective_threshold if effective_threshold is not None else context.severity_threshold
         )
@@ -214,6 +223,7 @@ class StoreReviewOutput:
             incomplete_paths=(
                 raw_output.incomplete_paths if isinstance(raw_output, VerifiedReviewOutput) else ()
             ),
+            summary_reason=context.summary_reason,
         )
         coverage = processed.coverage
         if processed.summary is None:

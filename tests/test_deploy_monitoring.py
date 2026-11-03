@@ -20,6 +20,9 @@ from typing import Any
 
 import pytest
 
+from app.modules.analytics.infrastructure.models import UsageEvent
+from app.modules.reviews.infrastructure.models import Run
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 MONITORING = REPO_ROOT / "deploy" / "monitoring"
 WORKFLOW = REPO_ROOT / ".github" / "workflows" / "ci-cd.yml"
@@ -214,12 +217,64 @@ def test_grafana_has_its_own_host_and_prometheus_none() -> None:
 
 # --- review metrics and roles --------------------------------------------------------------
 
+QUERIES = MONITORING / "postgres-exporter" / "queries.yml"
+RUN_COLUMNS = {
+    "id",
+    "state",
+    "trigger",
+    "engine",
+    "attempt",
+    "error_code",
+    "available_at",
+    "created_at",
+    "started_at",
+    "finished_at",
+}
+RUN_ACTION_COLUMNS = {"run_id", "tool", "started_at", "duration_ms"}
+# The column grants of the read-only roles, by table and role: all they can read.
+METADATA_GRANTS = {
+    ("runs", "grafana_reader"): RUN_COLUMNS,
+    ("runs", "metrics_exporter"): RUN_COLUMNS,
+    ("run_actions", "grafana_reader"): RUN_ACTION_COLUMNS,
+    ("run_actions", "metrics_exporter"): RUN_ACTION_COLUMNS,
+    ("usage_events", "grafana_reader"): {
+        "provider",
+        "model",
+        "operation",
+        "tokens_in",
+        "tokens_out",
+        "cache_read_tokens",
+        "cost_usd",
+        "created_at",
+    },
+    ("usage_events", "metrics_exporter"): {"cost_usd", "created_at"},
+}
+
+
+def _query(name: str) -> str:
+    """The SQL of one postgres-exporter query block of queries.yml."""
+    block = re.search(rf"^{name}:\n  query: \|\n((?:    .*\n)+)", _read(QUERIES), re.M)
+    assert block is not None, name
+    return block.group(1)
+
+
+def _grants(sql: str) -> dict[tuple[str, str], set[str]]:
+    """Column grants by table and recipient role: GRANT SELECT (columns) ON table TO roles."""
+    statements = re.findall(r"GRANT SELECT \((.*?)\)\s+ON (\w+) TO ([^;]+);", sql, re.DOTALL)
+    assert len(statements) == sql.count("GRANT SELECT ("), "a column grant was not read"
+    grants: dict[tuple[str, str], set[str]] = {}
+    for columns, table, roles in statements:
+        for role in roles.split(","):
+            grants.setdefault((table, role.strip()), set()).update(
+                column.strip() for column in columns.split(",")
+            )
+    return grants
+
 
 def test_review_queries_and_grants_never_touch_review_content() -> None:
-    queries = _read(MONITORING / "postgres-exporter" / "queries.yml")
-    sql = "\n".join(re.findall(r"query: \|\n((?:    .*\n)+)", queries))
+    sql = "\n".join(re.findall(r"query: \|\n((?:    .*\n)+)", _read(QUERIES)))
     deploy = _read(MONITORING / "deploy.sh")
-    grants = re.findall(r"GRANT SELECT \((.*?)\)\s+ON (\w+)", deploy, re.DOTALL)
+    grants = _grants(deploy)
     dashboard = json.loads(_read(MONITORING / "grafana" / "dashboards" / "overview.json"))
     dashboard_sql = "\n".join(
         target["rawSql"]
@@ -228,10 +283,10 @@ def test_review_queries_and_grants_never_touch_review_content() -> None:
         if "rawSql" in target
     )
 
-    assert sql.count("SELECT") == 3
+    assert sql.count("SELECT") == 5
     assert dashboard_sql.count("SELECT") == 9
-    assert {table for _, table in grants} == {"runs", "run_actions", "usage_events"}
-    granted = {column.strip() for columns, _ in grants for column in columns.split(",")}
+    assert {table for table, _ in grants} == {"runs", "run_actions", "usage_events"}
+    granted = set().union(*grants.values())
     for column in CONTENT_COLUMNS:
         assert not re.search(rf"\b{column}\b", sql), column
         assert column not in granted, column
@@ -241,6 +296,57 @@ def test_review_queries_and_grants_never_touch_review_content() -> None:
         "REVOKE ALL ON ALL TABLES IN SCHEMA public FROM grafana_reader, metrics_exporter;" in deploy
     )
     assert deploy.count("SET default_transaction_read_only = on;") == 2
+
+
+def test_exporter_reads_only_the_cost_and_time_of_llm_usage() -> None:
+    deploy = _read(MONITORING / "deploy.sh")
+    statements = [
+        " ".join(statement.split())
+        for statement in re.findall(r"\bGRANT\b[^;]*;", deploy, re.IGNORECASE)
+        if re.search(r"\b(grafana_reader|metrics_exporter)\b", statement)
+    ]
+    column_grant = r"GRANT SELECT \([\w, ]+\) ON \w+ TO [\w, ]+;"
+
+    assert _grants(deploy) == METADATA_GRANTS
+    # Any other grant to the read-only roles opens no table: a table-wide SELECT, ALL or ON ALL
+    # TABLES would bypass the column lists above.
+    assert [statement for statement in statements if not re.fullmatch(column_grant, statement)] == [
+        "GRANT pg_monitor TO metrics_exporter;",
+        'GRANT CONNECT ON DATABASE "${POSTGRES_DB}" TO grafana_reader, metrics_exporter;',
+        "GRANT USAGE ON SCHEMA public TO grafana_reader, metrics_exporter;",
+    ]
+
+
+def test_month_cost_query_sums_the_utc_month_from_cost_and_time_only() -> None:
+    block = _read(QUERIES).split("\ndmc_llm_cost_month:\n", 1)[1].split("\n\n", 1)[0]
+    sql = _query("dmc_llm_cost_month")
+    usage_columns = {column.name for column in UsageEvent.__table__.columns}
+
+    # postgres-exporter names the series <block>_<column>: dmc_llm_cost_month_usd.
+    assert "coalesce(sum(cost_usd), 0)::float8 AS usd" in sql
+    assert re.search(r"- usd:\n\s+usage: GAUGE\n", block)
+    # The three-argument date_trunc ignores the time zone of the session.
+    assert "created_at >= date_trunc('month', now(), 'UTC')" in sql
+    assert {column for column in usage_columns if re.search(rf"\b{column}\b", sql)} == {
+        "cost_usd",
+        "created_at",
+    }
+
+
+def test_budget_paused_query_counts_skipped_runs_from_granted_columns() -> None:
+    block = _read(QUERIES).split("\ndmc_runs_budget_paused_15m:\n", 1)[1].split("\n\n", 1)[0]
+    sql = _query("dmc_runs_budget_paused_15m")
+    run_columns = {column.name for column in Run.__table__.columns}
+    read = {column for column in run_columns if re.search(rf"\b{column}\b", sql)}
+
+    # postgres-exporter names the series <block>_<column>: dmc_runs_budget_paused_15m_runs.
+    assert "SELECT count(*)::float8 AS runs" in sql
+    assert re.search(r"- runs:\n\s+usage: GAUGE\n", block)
+    assert "state = 'skipped' AND error_code = 'budget_paused'" in sql
+    assert "finished_at > now() - interval '15 minutes'" in sql
+    # No new grant: the exporter already reads these columns of runs.
+    assert read == {"state", "error_code", "finished_at"}
+    assert read <= _grants(_read(MONITORING / "deploy.sh"))[("runs", "metrics_exporter")]
 
 
 # --- dashboard -----------------------------------------------------------------------------
@@ -308,6 +414,68 @@ def test_dashboard_shows_certificate_days_coloured_where_the_alerts_fire() -> No
         ("red", None),
         ("orange", days["TlsCertificateExpiring"]),
         ("green", days["TlsCertificateExpiresSoon"]),
+    ]
+
+
+def test_dashboard_shows_month_to_date_llm_spend_next_to_cost_per_hour() -> None:
+    panels = json.loads(_read(DASHBOARD))["panels"]
+    panel = _panel_with("dmc_llm_cost_month_usd")
+    cost_per_hour = next(other for other in panels if other["title"] == "LLM cost per hour")
+    rules = _read(MONITORING / "prometheus" / "rules" / "alerts.yml")
+    # No budget (or 0) leaves the percentage empty instead of +Inf.
+    share = "100 * sum(dmc_llm_cost_month_usd) / (max(dmc_llm_monthly_budget_usd) > 0)"
+    alerts = {
+        alert: (alert_share, int(limit))
+        for alert, alert_share, limit in re.findall(
+            r"- alert: (LlmMonthlyBudget\w+)\n        expr: (.*) >= (\d+)(?: < \d+)?\n", rules
+        )
+    }
+
+    assert alerts.keys() == {"LlmMonthlyBudgetWarning", "LlmMonthlyBudgetExceeded"}
+    assert {alert: limit for alert, (_, limit) in alerts.items()} == {
+        "LlmMonthlyBudgetWarning": 80,
+        "LlmMonthlyBudgetExceeded": 100,
+    }
+    assert {alert: alert_share for alert, (alert_share, _) in alerts.items()} == {
+        "LlmMonthlyBudgetWarning": share,
+        "LlmMonthlyBudgetExceeded": share,
+    }
+    assert panel is not None
+    assert panel["title"] == "LLM spend this month"
+    assert panel["type"] == "stat"
+    # On the row of LLM cost per hour, right next to it.
+    assert panel["gridPos"]["y"] == cost_per_hour["gridPos"]["y"]
+    assert panel["gridPos"]["h"] == cost_per_hour["gridPos"]["h"]
+    assert panel["gridPos"]["x"] == cost_per_hour["gridPos"]["x"] + cost_per_hour["gridPos"]["w"]
+    # Prometheus, not SQL: the same sum over the scraped databases as the alerts.
+    assert panel["datasource"] == PROMETHEUS
+    targets = {target["refId"]: target for target in panel["targets"]}
+    assert targets.keys() == {"A", "B"}
+    for target in targets.values():
+        assert target["datasource"] == PROMETHEUS
+        assert "rawSql" not in target
+        assert "dmc_llm_cost_month_usd" in target["expr"]
+    # The current value, not the range: a stat shows the latest scrape.
+    assert all(target["instant"] and not target["range"] for target in targets.values())
+    assert panel["options"]["reduceOptions"]["calcs"] == ["lastNotNull"]
+    assert targets["A"]["expr"] == "sum(dmc_llm_cost_month_usd)"
+    assert targets["B"]["expr"] == share
+    # Two values in one panel: the default text mode would hide which one is which.
+    assert panel["options"]["textMode"] == "value_and_name"
+    defaults = panel["fieldConfig"]["defaults"]
+    assert defaults["unit"] == "currencyUSD"
+    # The budget colours belong to the percentage only: spend of 85 USD is not orange.
+    assert [step["value"] for step in defaults["thresholds"]["steps"]] == [None]
+    [override] = panel["fieldConfig"]["overrides"]
+    assert override["matcher"] == {"id": "byFrameRefID", "options": "B"}
+    percent = {prop["id"]: prop["value"] for prop in override["properties"]}
+    assert percent["unit"] == "percent"
+    # The rounding of the alert summaries (%.2f USD, %.2f %): 99.96 % must not read as 100 %.
+    assert (defaults["decimals"], percent["decimals"]) == (2, 2)
+    assert [(step["color"], step["value"]) for step in percent["thresholds"]["steps"]] == [
+        ("green", None),
+        ("orange", alerts["LlmMonthlyBudgetWarning"][1]),
+        ("red", alerts["LlmMonthlyBudgetExceeded"][1]),
     ]
 
 
@@ -380,6 +548,16 @@ def test_monitoring_deploy_gets_the_production_names_to_probe() -> None:
     assert "PROBE_PROD_HOSTS" not in _job("deploy-staging")
 
 
+def test_monitoring_deploy_gets_the_monthly_llm_budget() -> None:
+    job = _job("deploy-monitoring")
+    envs = re.search(r"^          envs: (\S+)$", job, re.M)
+
+    assert "          LLM_MONTHLY_BUDGET_USD: ${{ vars.LLM_MONTHLY_BUDGET_USD }}\n" in job
+    assert envs is not None
+    assert "LLM_MONTHLY_BUDGET_USD" in envs.group(1).split(",")
+    assert "LLM_MONTHLY_BUDGET_USD" not in _job("deploy-staging")
+
+
 # --- deploy.sh on a fake host --------------------------------------------------------------
 
 FAKE_DOCKER = """\
@@ -440,6 +618,8 @@ class Host:
             "APP_DOMAIN": "example.test",
             # An unset Environment variable reaches the host as an empty value.
             "PROBE_PROD_HOSTS": "",
+            # So does an unset repository variable.
+            "LLM_MONTHLY_BUDGET_USD": "",
             "ALERT_TELEGRAM_BOT_TOKEN": TOKEN,
             "ALERT_TELEGRAM_CHAT_ID": CHAT_ID,
             "STUB_LOG": str(self.stubs / "docker.log"),
@@ -685,6 +865,130 @@ def test_invalid_telegram_settings_fail_before_the_host_changes(
         assert token not in result.stdout + result.stderr
 
 
+BUDGET_SILENT = "LLM_MONTHLY_BUDGET_USD is not set; budget alerts are silent"
+# Without a locale where a range like [0-9] matches other digits too, such values prove nothing.
+OTHER_DIGITS = pytest.mark.skipif(
+    subprocess.run(
+        ["bash", "-c", "[[ ５ =~ ^[0-9]$ ]]"],
+        env={"PATH": os.environ["PATH"], "LC_ALL": "en_US.UTF-8"},
+        capture_output=True,
+        check=False,
+    ).returncode
+    != 0,
+    reason="no en_US.UTF-8 locale where [0-9] matches other digits",
+)
+
+
+def _budget_file(host: Host) -> Path:
+    return host.monitoring_dir / "textfile" / "llm_budget.prom"
+
+
+def test_monthly_llm_budget_reaches_node_exporter_kept_by_a_manual_run_dropped_when_empty(
+    host: Host,
+) -> None:
+    fresh = host.deploy(unset=("LLM_MONTHLY_BUDGET_USD",))
+    fresh_file = _budget_file(host).exists()
+    configured = host.deploy(LLM_MONTHLY_BUDGET_USD="250.50")
+    budget = _budget_file(host)
+    written = _read(budget)
+    mode = stat.S_IMODE(budget.stat().st_mode)
+    textfiles = sorted(path.name for path in budget.parent.iterdir())
+    kept = host.deploy(unset=("LLM_MONTHLY_BUDGET_USD",))
+    kept_content = _read(budget)
+    dropped = host.deploy(LLM_MONTHLY_BUDGET_USD="")
+
+    assert fresh.returncode == 0, fresh.stderr
+    assert not fresh_file
+    assert BUDGET_SILENT in fresh.stderr
+    assert configured.returncode == 0, configured.stderr
+    assert written == (
+        "# HELP dmc_llm_monthly_budget_usd Monthly LLM budget in US dollars"
+        " (LLM_MONTHLY_BUDGET_USD of the monitoring deploy).\n"
+        "# TYPE dmc_llm_monthly_budget_usd gauge\n"
+        "dmc_llm_monthly_budget_usd 250.50\n"
+    )
+    # node-exporter (nobody) reads it; the collector never sees a half-written *.prom.
+    assert mode == 0o644
+    assert textfiles == ["llm_budget.prom"]
+    assert list(host.monitoring_dir.glob(".llm_budget.*")) == []
+    assert BUDGET_SILENT not in configured.stderr
+    assert "budget: monthly LLM budget of 250.50 USD" in configured.stdout
+    assert kept.returncode == 0, kept.stderr
+    assert kept_content == written
+    assert BUDGET_SILENT not in kept.stderr
+    # Without the file the budget alerts stay silent instead of firing on an old threshold.
+    assert dropped.returncode == 0, dropped.stderr
+    assert not budget.exists()
+    assert BUDGET_SILENT in dropped.stderr
+
+
+@pytest.mark.parametrize("budget", ["0", "0.00"])
+def test_zero_budget_means_no_budget(host: Host, budget: str) -> None:
+    assert host.deploy(LLM_MONTHLY_BUDGET_USD="250.50").returncode == 0
+    result = host.deploy(LLM_MONTHLY_BUDGET_USD=budget)
+
+    assert result.returncode == 0, result.stderr
+    assert not _budget_file(host).exists()
+    assert BUDGET_SILENT in result.stderr
+
+
+def test_budget_file_is_written_through_a_root_owned_dir(host: Host) -> None:
+    # pg-backup writes the textfile dir too: a link it planted there must not lead the deploy to a
+    # file outside.
+    textfile = host.monitoring_dir / "textfile"
+    textfile.mkdir()
+    outside = host.root / "outside"
+    outside.mkdir()
+    (outside / "file").write_text("host file\n", encoding="utf-8")
+    (textfile / "llm_budget.prom.tmp").symlink_to(outside / "file")
+    (textfile / "llm_budget.prom").symlink_to(outside)
+    result = host.deploy(LLM_MONTHLY_BUDGET_USD="250.50")
+
+    assert result.returncode == 0, result.stderr
+    assert sorted(path.name for path in outside.iterdir()) == ["file"]
+    assert _read(outside / "file") == "host file\n"
+    assert not _budget_file(host).is_symlink()
+    assert "dmc_llm_monthly_budget_usd 250.50\n" in _read(_budget_file(host))
+
+
+def test_failed_budget_write_leaves_no_temporary_file(host: Host) -> None:
+    (host.monitoring_dir / "textfile" / "llm_budget.prom").mkdir(parents=True)
+    result = host.deploy(LLM_MONTHLY_BUDGET_USD="250.50")
+
+    assert result.returncode != 0
+    assert list(host.monitoring_dir.glob(".llm_budget.*")) == []
+    assert " up " not in host.log("docker.log")
+
+
+@pytest.mark.parametrize(
+    "budget",
+    [
+        "abc",
+        "-5",
+        "1e3",
+        "50\nx 1",
+        "1.234",
+        "050",
+        " 50",
+        pytest.param("５０", marks=OTHER_DIGITS),
+        pytest.param("٥٠", marks=OTHER_DIGITS),
+    ],
+)
+def test_invalid_budget_fails_before_the_host_changes(host: Host, budget: str) -> None:
+    # A UTF-8 locale, where a range like [0-9] matches other digits too.
+    result = host.deploy(LLM_MONTHLY_BUDGET_USD=budget, LC_ALL="en_US.UTF-8")
+
+    assert result.returncode == 1
+    assert (
+        "LLM_MONTHLY_BUDGET_USD must be a number of US dollars with at most two decimals"
+        in result.stderr
+    )
+    assert not host.env_file.exists()
+    assert host.log("psql.log") == ""
+    assert " up " not in host.log("docker.log")
+    assert not _budget_file(host).exists()
+
+
 def test_edge_mode_scrapes_caddy_and_needs_a_https_grafana_url(host: Host) -> None:
     result = host.deploy()
     targets = _read(host.monitoring_dir / "prometheus" / "targets" / "caddy.json")
@@ -897,7 +1201,7 @@ def test_event_alerts_are_sent_once_and_never_as_resolved(tmp_path: Path) -> Non
     rules = _read(MONITORING / "prometheus" / "rules" / "alerts.yml")
     events = re.findall(r"- alert: (\w+)\n(?:        .*\n)*?          kind: event\n", rules)
 
-    assert events == ["ReviewRunsFailed", "ReviewDeadLetters"]
+    assert events == ["ReviewRunsFailed", "ReviewDeadLetters", "ReviewRunsBudgetPaused"]
     assert (
         '  routes:\n    - matchers: [kind="event"]\n      receiver: telegram-events\n'
         "      group_by: [environment]\n      group_wait: 90s\n"
@@ -930,6 +1234,18 @@ def test_backup_role_reads_everything_but_cannot_administer(host: Host) -> None:
     # The column grants of the metadata roles are rebuilt without touching the backup role.
     assert "FROM grafana_reader, metrics_exporter;" in sql
     assert "backup_agent;" not in sql.split("REVOKE", 1)[1].split("\n", 1)[0]
+
+
+def test_column_grants_reach_postgres_after_they_are_revoked(host: Host) -> None:
+    result = host.deploy()
+    sql = host.log("psql.log")
+    revoke = "REVOKE ALL ON ALL TABLES IN SCHEMA public FROM grafana_reader, metrics_exporter;"
+    exporter_cost = "GRANT SELECT (cost_usd, created_at) ON usage_events TO metrics_exporter;"
+
+    assert result.returncode == 0, result.stderr
+    assert _grants(sql) == METADATA_GRANTS
+    # A grant sent before the REVOKE would be dropped by it.
+    assert sql.index(revoke) < sql.index("GRANT SELECT (") < sql.index(exporter_cost)
 
 
 def test_backup_dirs_belong_to_the_backup_user(host: Host) -> None:

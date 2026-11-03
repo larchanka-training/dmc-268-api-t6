@@ -611,7 +611,11 @@ def test_stage_v2_key_carries_the_taint_of_a_denied_rename() -> None:
         2,
     )
     plain = _context_stage(Trace(), store=_store())
-    tainted = _context_stage(Trace(), store=_store(), snapshots=[*_snapshots(), moved])
+    # The extra rename keeps the provider counter honest, so the list stays complete
+    # and the key is still computed on the model path (#313).
+    tainted = _context_stage(
+        Trace(), store=_store(), snapshots=[*_snapshots(), moved], vcs=Vcs(files_changed=3)
+    )
 
     asyncio.run(plain.run(RUN_ID))
     asyncio.run(tainted.run(RUN_ID))

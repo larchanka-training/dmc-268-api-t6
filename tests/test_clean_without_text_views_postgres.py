@@ -389,19 +389,19 @@ def test_summary_only_withholds_risk_candidates_and_keeps_every_projection_null(
             assert latest is not None
             assert detail.verdict is latest.verdict is report.verdict is None
             assert detail.review.findings == [] and report.inline_count == report.body_count == 0
+            # A durable summary_only flag with no context.build reason is the size line.
             assert (
                 detail.review.summary
                 == report.saved_summary
                 == saved["summary"]
                 == {
-                    "problem": "Подтверждённых замечаний нет; Проверка неполная: "
-                    "краткий обзор без проверки всех строк (2).",
+                    "problem": "Построчное AI-ревью не выполнено: превышен лимит diff.",
                     "done_well": "Проанализировано файлов с текстовыми изменениями: 0; "
                     "исключено файлов: 0.",
                     "effort": "none",
                 }
             )
-            assert "краткий обзор" in saved["summary"]["problem"]
+            assert "превышен лимит diff" in saved["summary"]["problem"]
             assert body is not None and saved["summary"]["problem"] in body
             assert "**Verdict:** blocking" not in body and "**Verdict:** attention" not in body
             assert "Unchecked authorization" not in body

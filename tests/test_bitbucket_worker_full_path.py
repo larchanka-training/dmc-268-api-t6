@@ -580,6 +580,11 @@ def test_composed_bitbucket_review_uses_pinned_cloud_reads_and_writes(
                     assert run_id == RUN_ID
                     self.payload_rows.append(summary)
 
+                async def save_summary_only_stop(
+                    self, run_id: UUID, summarize: Any
+                ) -> dict[str, Any]:
+                    raise AssertionError("these paths must not build review context")
+
             runs, store, trace = CloudRuns(), _store(), WorkerTrace()
             assert store.pins is not None
             store.pins = replace(

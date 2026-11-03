@@ -2,9 +2,14 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from uuid import UUID
 
-from app.modules.reviews.application.llm import LlmCallRecord
+from app.modules.reviews.application.llm import (
+    LLM_RESULT_CACHE_TOOL,
+    LlmCallRecord,
+    result_cache_hit_request,
+)
 from app.modules.reviews.application.run_trace import RunTrace
 
 LLM_CALL_TOOL = "llm.call"
@@ -29,4 +34,29 @@ class RunTraceLlmCalls:
             record.response_json(),
             record.started_at,
             record.duration_ms,
+        )
+
+    async def record_result_cache_hit(
+        self,
+        run_id: UUID,
+        operation: str,
+        *,
+        started_at: datetime,
+        source_run_id: UUID,
+        source_call_id: UUID | None,
+        source_manifest_id: UUID | None,
+    ) -> None:
+        """A cache hit. Its own short transaction, and it does not copy the answer."""
+        await self._trace.record(
+            run_id,
+            LLM_RESULT_CACHE_TOOL,
+            result_cache_hit_request(
+                operation,
+                source_run_id=source_run_id,
+                source_call_id=source_call_id,
+                source_manifest_id=source_manifest_id,
+            ),
+            {},
+            started_at,
+            0,
         )

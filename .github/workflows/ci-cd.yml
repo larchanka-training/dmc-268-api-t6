@@ -1216,6 +1216,9 @@ jobs:
           # the stack runs and alerts are visible in Alertmanager, but nothing is delivered.
           ALERT_TELEGRAM_BOT_TOKEN: ${{ secrets.ALERT_TELEGRAM_BOT_TOKEN }}
           ALERT_TELEGRAM_CHAT_ID: ${{ vars.ALERT_TELEGRAM_CHAT_ID }}
+          # Monthly LLM budget in US dollars for the budget alerts (repository variable: one LLM key
+          # for every environment). Empty or 0: no budget, the budget alerts stay silent.
+          LLM_MONTHLY_BUDGET_USD: ${{ vars.LLM_MONTHLY_BUDGET_USD }}
           # Encrypted off-host copy of the PostgreSQL dumps (docs/MONITORING.md §9, Cloudflare R2 on
           # staging): all five set, or none — then the dumps stay on the VPS only.
           BACKUP_S3_ENDPOINT: ${{ vars.BACKUP_S3_ENDPOINT }}
@@ -1234,7 +1237,7 @@ jobs:
           password: ${{ needs.deploy-staging.outputs.mode == 'course' && secrets.VPS_DMC268_P || '' }}
           fingerprint: ${{ vars.STAGING_SSH_FINGERPRINT }}
           debug: false
-          envs: MONITORING_DIR,API_DIR,GRAFANA_ROOT_URL,APP_DOMAIN,PROBE_PROD_HOSTS,ALERT_TELEGRAM_BOT_TOKEN,ALERT_TELEGRAM_CHAT_ID,BACKUP_S3_ENDPOINT,BACKUP_S3_BUCKET,BACKUP_S3_ACCESS_KEY_ID,BACKUP_S3_SECRET_ACCESS_KEY,BACKUP_ENCRYPTION_PASSPHRASE,GRAFANA_ADMIN_PASSWORD
+          envs: MONITORING_DIR,API_DIR,GRAFANA_ROOT_URL,APP_DOMAIN,PROBE_PROD_HOSTS,ALERT_TELEGRAM_BOT_TOKEN,ALERT_TELEGRAM_CHAT_ID,LLM_MONTHLY_BUDGET_USD,BACKUP_S3_ENDPOINT,BACKUP_S3_BUCKET,BACKUP_S3_ACCESS_KEY_ID,BACKUP_S3_SECRET_ACCESS_KEY,BACKUP_ENCRYPTION_PASSPHRASE,GRAFANA_ADMIN_PASSWORD
           script: |
             set -euo pipefail
             set +o xtrace

@@ -1421,8 +1421,10 @@ summary-only по оставшемуся scope; T не увеличивают п
 побеждают binary/too_large, но не недостоверную идентичность. Submodule и
 доказанный чистый rename/mode-only без поддерживаемого анализа — unsupported_change, T.
 При полном inventory, известных relevant counters ≤3 000 и только incomplete
-с возможными E/T, без анализируемого текста — backend partial, summaryOnly=false,
-findings=[], verdict=null; 0 LLM, затем succeeded/neutral. Анализируемый текст — разрешённые hunks вне E/T, включая сохранившиеся
+с возможными E/T, без анализируемого текста — целевой исход backend partial, summaryOnly=false,
+findings=[], verdict=null; 0 LLM, затем succeeded/neutral. Пока маршрута no-text partial нет,
+этот набор публикуется как summary-only `no_reviewable_files`, coverage partial, 0 LLM.
+Анализируемый текст — разрешённые hunks вне E/T, включая сохранившиеся
 hunks truncated в L1: обычное review/partial, blocking возможен; без hunks —
 no-text ветка. Relevant counters — additions/deletions вне E/T, включая
 incomplete; raw counters E/T — диагностика (пустой counted scope=0).
@@ -1707,7 +1709,8 @@ verifier. Исчерпание бюджета не разрешает публи
 | `RepoConventions` | Полный digest base-input/provenance, политика и версии (ниже) | PostgreSQL + Redis | immutable для ключа; TTL не заменяет provenance | старый head-influenced cache не переиспользуется |
 | Снимок диффа run (Р-15) | `(run_id, filename)` + diff_snapshot_id | PG: исходный доступный UI patch отдельно от review_patch/DiffMap | до удаления Workspace (каскад) | собственный снимок каждого run |
 | Контекст и доказательства | `call_id`/manifest_id + workspace-scoped content digest | PG: manifest и deduplicated точные excerpts; полный rendered prompt не обязателен | до удаления Workspace | аудит не зависит от TTL Redis |
-| Результат прогона | `run_id UNIQUE` + final result digest и snapshot bindings | PostgreSQL | immutable после publishing | retry доставки читает сохранённый итог; между head/run результаты не переносятся |
+| Результат прогона | `run_id UNIQUE` + final result digest и snapshot bindings | PostgreSQL | immutable после publishing | retry доставки читает сохранённый итог этого прогона; в другой head или run по findings hash не копируется (одинаковый окончательный вход модели — строка «Ответ модели ревью и верификатора») |
+| Ответ модели ревью и верификатора | `review-result-v1`: operation (`review` или `verification`), `repository_id`, модель, версия промпта, версия выходной схемы, версия профиля, digest окончательных rendered messages и digest тела запроса без messages (`max_tokens`, sampling после `extra_body`, `response_format` целиком) | Существующий Redis, префикс `review-result:`; отдельный сервер не вводится | 7 дней (`BLOB_CACHE_TTL`); попадание пропускает вызов модели и `llm.call`, в трейсе — `llm.result_cache` с источником принятого вызова (`source_run_id`, `source_call_id`, `source_manifest_id`); промах, недоступность, испорченная запись и ответ, не прошедший `check_answer` текущего manifest, — обычный вызов | тот же окончательный вход ревью или верификатора не вызывает модель снова |
 | Промпт у провайдера | стабильные версионированные блоки с раздельными source roles | prompt caching провайдера | зависит от provider profile | кэш не повышает доверие документа/конвенций |
 | Индекс графа RAG v1 (Р-13) | `repository_id` на каждой строке; символ — `(repository_id, path, qualified_name, kind, disambiguator)` | PostgreSQL, модуль `code_index`: `code_index_states`, файлы, символы, рёбра, записи импортов | `CODE_INDEX_TTL_DAYS` (30) дней с `last_used_at` (сдвигают чтение готового или отставшего индекса при ревью, не чаще раза в час, и постановка full; троттлинг full по запросу ревью — ниже), очищает leader-задача с перепроверкой под `FOR UPDATE` любой живой индекс, кроме `failed` (#143, ниже); немедленно нечитаем после `installation_repositories.removed`, `installation.deleted`, выключения тумблера; физическое удаление — сборкой мусора, цель — в пределах 1 ч (ниже) | обратные рёбра для кандидатов RAG; текст читается из кэша блобов на ревизии PR |
 
@@ -1731,8 +1734,8 @@ AGENTS или выбранных файлов недостаточно. Legacy c
 первая успешно сохранённая валидная запись. Собранный контекст v1 не кэшируется.
 
 Что **не** кэшируем: блобы клиента дольше 7 дней; текст кода, сигнатуры и
-docstrings в индексе RAG; ответы LLM между разными head/run по одному
-diff/findings hash; ничего в сандбоксе. Снимки политики/diff, manifests, excerpts
+docstrings в индексе RAG; перенос ответа LLM в другой head или run только по
+diff или findings hash; ничего в сандбоксе. Снимки политики/diff, manifests, excerpts
 и результаты — данные аудита run до удаления Workspace.
 
 **Индекс RAG v1 — производные метаданные кода** ([ADR 0001 §4](adr/0001-graph-rag-v1.md#4-хранение-очистка-и-изоляция)):
@@ -1905,12 +1908,12 @@ fallback/null, тогда как ранее опубликованное GitHub-
 
 Нового публичного coverage DTO, LLM-полей, result_id или таблиц результата нет.
 Полный #107, общий run-owned file_omissions #130/#168 и zero-LLM lifecycle
-summary-only/no-text partial остаются целевыми, а не активированными #213.
+no-text partial остаются целевыми, а не активированными #213.
 Zero-LLM lifecycle none активен на snapshot path с #130 F5; legacy (≤ v3) для того же
 inventory по-прежнему вызывает модель.
-Текущий summary-only может вызывать модель, но все его findings отбрасываются
-как insufficient_context: нет inline, blocking/attention или дефектов из них;
-coverage partial, verdict null. Обещание zero-LLM относится к будущему lifecycle.
+Summary-only с нулём вызовов модели — текущий жизненный цикл, не будущий:
+стадия останавливается до RAG, conventions, ревью и verifier и публикует
+`NoModelAnswer`; coverage partial, verdict null.
 
 
 
