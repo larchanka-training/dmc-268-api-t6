@@ -59,6 +59,7 @@ from app.modules.reviews.application.diff_map import (
     RowKind,
     is_supported_path,
 )
+from app.modules.reviews.application.get_run_diff import MAX_DIFF_LINES
 from app.modules.reviews.application.graph_retriever import GraphRetriever
 from app.modules.reviews.application.policy_errors import PolicyError
 from app.modules.reviews.application.policy_snapshot import PolicySnapshot
@@ -85,7 +86,6 @@ from app.modules.reviews.application.run_failures import (
 
 _LOGGER = logging.getLogger(__name__)
 
-MAX_REVIEWABLE_LINES = 3_000
 WINDOW_LINES = 30
 WIDE_WINDOW_LINES = 80
 FULL_FILE_MAX_LINES = 1_500
@@ -130,6 +130,14 @@ class NoReviewableText(Exception):
     and the attempt's ``context_payloads`` row; the use case then publishes the backend
     result without any model call (#130 F5). Only ``ExecuteReviewRun`` handles it, around
     ``ReviewRunProcessor.prepare``; elsewhere ``classify_failure`` makes it ``internal_error``.
+    """
+
+
+class SummaryOnlyReview(Exception):
+    """The attempt is summary-only and stops before conventions, review, and the verifier.
+
+    The context stage raises it after ``context.build`` (#313). ``ExecuteReviewRun``
+    publishes ``NoModelAnswer``, beside ``NoReviewableText``.
     """
 
 
@@ -576,7 +584,7 @@ class BuildReviewContext:
                 return payload(ContextStatus.ALL_CHANGES_IGNORED, "all_changes_ignored")
             # Nothing can be reviewed line by line, and it is not because of ignore.
             return payload(ContextStatus.SUMMARY_ONLY, "no_reviewable_files")
-        if reviewable > MAX_REVIEWABLE_LINES:
+        if reviewable > MAX_DIFF_LINES:
             return payload(ContextStatus.SUMMARY_ONLY, "diff_too_large")
 
         allowed.sort(key=lambda item: (-_file_priority(item[0], item[1], rules), item[1]))

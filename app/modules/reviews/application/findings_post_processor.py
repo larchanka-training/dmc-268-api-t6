@@ -10,6 +10,7 @@ from dataclasses import dataclass, field, replace
 from importlib.resources import files
 from typing import Literal
 
+from app.modules.reviews.application.check_runs import summary_only_line
 from app.modules.reviews.application.diff_anchor import Anchor, AnchorRejection, resolve_anchor
 from app.modules.reviews.application.diff_map import DiffMap, is_supported_path
 from app.modules.reviews.application.review_output import (
@@ -143,6 +144,7 @@ class FindingsPostProcessor:
         coverage: RunCoverage | None = None,
         summary_only: bool = False,
         incomplete_paths: tuple[str, ...] = (),
+        summary_reason: str | None = None,
     ) -> ProcessedReviewOutput:
         """Classify every finding once in the documented stage order.
 
@@ -229,6 +231,8 @@ class FindingsPostProcessor:
                     (item.finding.severity for item in kept),
                     (item.finding.category for item in kept),
                     coverage,
+                    summary_reason=summary_reason if summary_only else None,
+                    name_summary_only=summary_only,
                 )
             }
         )
@@ -373,19 +377,30 @@ def _quality(item: ProcessedFinding) -> tuple[int, float, int]:
 
 
 def summary_from_result(
-    severities: Iterable[str], categories: Iterable[str], coverage: RunCoverage
+    severities: Iterable[str],
+    categories: Iterable[str],
+    coverage: RunCoverage,
+    summary_reason: str | None = None,
+    *,
+    name_summary_only: bool = False,
 ) -> ReviewSummary:
     """One backend summary from the already filtered findings and actual scope."""
     counts = severity_counts(severities)
     category_counts = Counter(categories)
     count = sum(counts.values())
-    problem = f"Подтверждено замечаний: {count}" if count else "Подтверждённых замечаний нет"
-    if category_counts:
-        problem += (
-            " (" + ", ".join(f"{name}: {n}" for name, n in sorted(category_counts.items())) + ")"
-        )
-    if coverage.status is not CoverageStatus.COMPLETE:
-        problem += "; " + coverage.summary_problem().removesuffix(".")
+    if name_summary_only:
+        # Same line as the check-run, including the one fallback for an unknown reason.
+        problem = f"{summary_only_line(summary_reason)}."
+    else:
+        problem = f"Подтверждено замечаний: {count}" if count else "Подтверждённых замечаний нет"
+        if category_counts:
+            problem += (
+                " ("
+                + ", ".join(f"{name}: {n}" for name, n in sorted(category_counts.items()))
+                + ")"
+            )
+        if coverage.status is not CoverageStatus.COMPLETE:
+            problem += "; " + coverage.summary_problem().removesuffix(".")
     effort: Effort = (
         "large"
         if counts["critical"]
@@ -396,7 +411,7 @@ def summary_from_result(
         else "none"
     )
     return ReviewSummary(
-        problem=problem + ".",
+        problem=problem if name_summary_only else problem + ".",
         done_well=(
             f"Проанализировано файлов с текстовыми изменениями: {coverage.reviewed_files}; "
             f"исключено файлов: {sum(coverage.exclusion_counts.values())}."

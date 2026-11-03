@@ -182,6 +182,9 @@ class Store:
     async def save_context_payload(self, run_id: UUID, summary: dict[str, Any]) -> None:
         raise AssertionError("these paths must not build review context")
 
+    async def save_summary_only_stop(self, run_id: UUID, summarize: Any) -> dict[str, Any]:
+        raise AssertionError("these paths must not build review context")
+
 
 class Uow:
     def __init__(self, store: Store) -> None:

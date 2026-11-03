@@ -780,7 +780,7 @@ def test_finalize_stored_review_body_degrades_long_summary_instead_of_asserting(
     # for an unusually long backend summary, rather than republishing raw model prose.
     monkeypatch.setattr(
         "app.modules.reviews.application.findings_post_processor.summary_from_result",
-        lambda *_: parsed.summary,
+        lambda *_args, **_kwargs: parsed.summary,
     )
     processed = FindingsPostProcessor.from_default_patterns().process(
         parsed,

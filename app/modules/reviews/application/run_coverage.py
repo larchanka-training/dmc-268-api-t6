@@ -48,7 +48,10 @@ from app.modules.reviews.application.diff_map import (
     PatchState,
     is_supported_path,
 )
-from app.modules.reviews.application.get_run_diff import DiffSnapshot, is_proven_empty_snapshot
+from app.modules.reviews.application.get_run_diff import (
+    DiffSnapshot,
+    is_proven_empty_snapshot,
+)
 from app.modules.reviews.application.review_ignore import IgnoreResult
 from app.modules.reviews.application.vcs_diff import VcsFile, is_empty_addition_candidate
 
@@ -223,6 +226,17 @@ def finalize_run_coverage(
     )
 
 
+def coverage_published_for_summary_only(coverage: RunCoverage) -> RunCoverage:
+    """A summary-only stop publishes ``partial``, including a too_large-only inventory.
+
+    ``too_large`` is a technical reason, so a file list of only those rows classifies
+    as ``none``. AC4 still publishes ``partial`` for every ``SummaryOnlyReview`` stop.
+    """
+    if coverage.status is CoverageStatus.PARTIAL or not coverage.reasons:
+        return coverage
+    return replace(coverage, status=CoverageStatus.PARTIAL)
+
+
 def snapshot_coverage_digest(snapshots: list[DiffSnapshot]) -> str:
     """Tie effective-policy classification to the exact durable model/VCS inputs."""
     payload = json.dumps(
@@ -325,6 +339,17 @@ def _project_run_coverage(
             exclusions.append(CoverageItem(path, reason, file.change_type.value))
         elif snapshot.omission_reason == "too_large":
             reasons.append(CoverageItem(path, "too_large", file.change_type.value))
+        elif summary_only and snapshot.omission_reason == "missing_patch":
+            # The stop flags this row so ``summaryOnly`` is true. The omission stays the
+            # coverage reason; the branch below would replace it.
+            reasons.append(
+                CoverageItem(
+                    path,
+                    "missing_patch",
+                    file.change_type.value,
+                    _empty_addition_candidate(snapshot),
+                )
+            )
         elif summary_only:
             reasons.append(CoverageItem(path, "summary_only", file.change_type.value))
         elif _proven_metadata_only(snapshot):

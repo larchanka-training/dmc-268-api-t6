@@ -109,19 +109,17 @@ class StoreDiffSnapshot:
 
         An excluded file keeps its UI patch and gets no model patch. It does not count
         toward the summary-only threshold: 4 000 ignored lines next to 50 allowed ones
-        are an ordinary review of those 50.
+        are an ordinary review of those 50. A proven empty file is not flagged either:
+        ``summary_only`` would cancel that proof.
         """
         withheld = [excluded is not None and excluded(file) for file in files]
-        allowed = [file for file, skip in zip(files, withheld, strict=True) if not skip]
-        summary_only = (
-            _total_line_count(files) if excluded is None else _changed_line_count(allowed)
-        ) > MAX_DIFF_LINES
+        summary_only = over_max_diff_lines(files, excluded=excluded)
         snapshots = []
         for file, skip in zip(files, withheld, strict=True):
             snapshot = _normalize_snapshot(file)
             if skip:
                 snapshot = replace(snapshot, review_patch=None)
-            elif summary_only:
+            elif summary_only and snapshot.omission_reason != "empty_file":
                 snapshot = replace(snapshot, review_patch=None, summary_only=True)
             snapshots.append(snapshot)
         return await self._repository.store_diff_snapshots(
@@ -129,22 +127,27 @@ class StoreDiffSnapshot:
         )
 
 
+def stored_review_patch(patch: str | None, omission_reason: str | None) -> str | None:
+    """Model patch of a stored UI patch. A git header contributes only its hunk."""
+    if patch is None or omission_reason is not None:
+        return None
+    if patch.startswith("diff --git "):
+        hunk_start = patch.find("\n@@ ")
+        if hunk_start < 0:
+            return None
+        return patch[hunk_start + 1 :]
+    return patch
+
+
 def _normalize_snapshot(snapshot: DiffSnapshot) -> DiffSnapshot:
     if snapshot.patch is None:
         return snapshot
+    review_patch = stored_review_patch(snapshot.patch, snapshot.omission_reason)
     if snapshot.patch.startswith("diff --git "):
-        hunk_start = snapshot.patch.find("\n@@ ")
-        return replace(
-            snapshot,
-            review_patch=(
-                snapshot.patch[hunk_start + 1 :]
-                if hunk_start >= 0 and snapshot.omission_reason is None
-                else None
-            ),
-        )
+        return replace(snapshot, review_patch=review_patch)
     return replace(
         snapshot,
-        review_patch=snapshot.patch if snapshot.omission_reason is None else None,
+        review_patch=review_patch,
         patch=(
             f"diff --git a/{snapshot.filename} b/{snapshot.filename}\n"
             f"--- a/{snapshot.filename}\n"
@@ -157,6 +160,23 @@ def _normalize_snapshot(snapshot: DiffSnapshot) -> DiffSnapshot:
 # Binary and generated files are exclusions and add nothing to the threshold. A text file
 # whose patch is missing or too large is incompleteness: its lines still count.
 _UNCOUNTED_OMISSIONS = frozenset({"binary", "generated"})
+
+
+def over_max_diff_lines(
+    files: list[DiffSnapshot],
+    *,
+    excluded: Callable[[DiffSnapshot], bool] | None = None,
+) -> bool:
+    """Whether this change is over ``MAX_DIFF_LINES`` by the store's own counter.
+
+    With an exclusion predicate the counter is added and removed lines of the allowed
+    files. Without one it is the patch line count of files that have a patch. The
+    comparison is ``>``.
+    """
+    if excluded is None:
+        return _total_line_count(files) > MAX_DIFF_LINES
+    allowed = [file for file in files if not excluded(file)]
+    return _changed_line_count(allowed) > MAX_DIFF_LINES
 
 
 def _changed_line_count(files: list[DiffSnapshot]) -> int:
