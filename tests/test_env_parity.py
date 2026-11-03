@@ -5,7 +5,7 @@ hosts reach the staging landing and its docs, hosts without an upstream answer a
 a bare 502, and the staging stores are pinned by digest.
 
 Text contracts over the compose files and the Caddyfile, in the manner of
-test_deploy_staging_services.py: no Docker daemon and no Caddy binary are needed.
+test_deploy_staging_workflow.py: no Docker daemon and no Caddy binary are needed.
 """
 
 from __future__ import annotations

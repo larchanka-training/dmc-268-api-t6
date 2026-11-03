@@ -121,7 +121,7 @@ Fast delivery, header and process checks:
 ```sh
 uv run pytest tests/test_review_consumer_resilience.py tests/test_queue_messages.py tests/test_review_run_worker.py
 uv run pytest tests/test_worker_shutdown_process.py
-uv run pytest tests/test_deploy_staging_services.py -k worker_stop_grace
+uv run pytest tests/test_deploy_staging_workflow.py -k worker_stop_grace
 ```
 
 Set `TEST_DATABASE_URL` and `TEST_RABBITMQ_URL` to disposable local PostgreSQL and

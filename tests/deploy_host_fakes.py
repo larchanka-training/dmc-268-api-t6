@@ -7,11 +7,15 @@ import json
 import os
 import re
 import shutil
+import stat
 import subprocess
+import sys
 import textwrap
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
+
+import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW = REPO_ROOT / ".github" / "workflows" / "ci-cd.yml"
@@ -506,3 +510,166 @@ if os.environ.get('STUB_MOVE_TAG_AT_GITLAB') == 'true':
 assert args[-3:-1] == ['python', '-c']
 exec(compile(args[-1], '<target-gitlab-preflight>', 'exec'))
 """
+
+ROLLBACK_WORKFLOW = WORKFLOW.parent / "rollback.yml"
+
+IMAGE_C = "ghcr.io/test/api@sha256:" + "c" * 64
+
+IMAGE_BAD = "ghcr.io/test/api@sha256:" + "f" * 64
+
+
+def _read(*parts: str) -> str:
+    return REPO_ROOT.joinpath(*parts).read_text(encoding="utf-8")
+
+
+def _service_block(name: str) -> str:
+    compose = STAGING_COMPOSE.read_text(encoding="utf-8")
+    match = re.search(rf"^  {name}:\n((?:    .*\n|\n)*)", compose, re.MULTILINE)
+    assert match is not None, f"service {name} is missing"
+    return match.group(1)
+
+
+def _keyring(
+    *, key_id: str = "current", material: bytes = b"k" * 32, indent: int | None = None
+) -> str:
+    return json.dumps({key_id: base64.b64encode(material).decode()}, indent=indent)
+
+
+def _bundle(secrets: Mapping[str, str]) -> str:
+    lines = "".join(
+        f"{name}={base64.b64encode(value.encode()).decode()}\n" for name, value in secrets.items()
+    )
+    return base64.b64encode(lines.encode()).decode()
+
+
+def _mode(path: Path) -> int:
+    return stat.S_IMODE(path.stat().st_mode)
+
+
+@pytest.fixture
+def host(tmp_path: Path) -> Host:
+    return make_host(tmp_path)
+
+
+def _run_bundle_step(tmp_path: Path, secrets: Mapping[str, str]) -> tuple[str, str]:
+    """Run the step script as GitHub does (bash -eo pipefail); return (stdout, bundle output)."""
+    step = _workflow_step("Bundle application secrets")
+    script = tmp_path / "bundle-step.sh"
+    script.write_text(textwrap.dedent(step.split("        run: |\n", 1)[1]), encoding="utf-8")
+    output = tmp_path / "github-output"
+    result = subprocess.run(
+        ["bash", "--noprofile", "--norc", "-eo", "pipefail", str(script)],
+        env={"PATH": os.environ["PATH"], "GITHUB_OUTPUT": str(output), **secrets},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    (line,) = output.read_text(encoding="utf-8").splitlines()
+    assert line.startswith("bundle=")
+    return result.stdout, line.removeprefix("bundle=")
+
+
+CI_PREFLIGHT_DOCKER = """\
+#!__PYTHON__
+import base64
+import json
+import os
+import stat
+import subprocess
+import sys
+from pathlib import Path
+
+args = sys.argv[1:]
+record = {"argv": args, "docker_config": os.environ["DOCKER_CONFIG"]}
+if args[0] == "login":
+    record["token_stdin_correct"] = sys.stdin.read() == "REGISTRY_TOKEN_CANARY\\n"
+    Path(os.environ["DOCKER_CONFIG"], "config.json").write_text("auth fixture")
+if args[0] == "run":
+    path = Path(args[args.index("--env-file") + 1])
+    record["env_mode"] = stat.S_IMODE(path.stat().st_mode)
+    fields = dict(line.split("=", 1) for line in path.read_text().splitlines())
+    record["env_names"] = sorted(fields)
+    bundle = base64.b64decode(fields["GITLAB_DEPLOYMENT_BUNDLE"]).decode()
+    record["gitlab_names"] = sorted(line.split("=", 1)[0] for line in bundle.splitlines())
+    record["gitlab_values"] = {
+        name: base64.b64decode(value).decode()
+        for name, _, value in (line.partition("=") for line in bundle.splitlines())
+    }
+    record["allowed_names"] = fields.get("GITLAB_DEPLOYMENT_KEYS", "").split()
+    record["file_modes"] = [
+        stat.S_IMODE(candidate.stat().st_mode)
+        for candidate in path.parent.iterdir() if candidate.is_file()
+    ]
+with Path(os.environ["STUB_LOG"]).open("a") as log:
+    log.write(json.dumps(record) + "\\n")
+if os.environ.get("STUB_FAIL_STAGE") == args[0]:
+    print("synthetic docker failure", file=sys.stderr)
+    raise SystemExit(1)
+if args[0] == "run":
+    image_index = args.index(os.environ["STUB_EXPECTED_IMAGE"])
+    command = args[image_index + 1:]
+    assert command[:2] == ["python", "-c"]
+    if "STUB_PAYLOAD_OVERRIDE" in os.environ:
+        fields["GITLAB_DEPLOYMENT_BUNDLE"] = os.environ["STUB_PAYLOAD_OVERRIDE"]
+    result = subprocess.run([sys.executable, *command[1:]], env=fields, check=False)
+    raise SystemExit(result.returncode)
+"""
+
+
+def _run_ci_gitlab_pipeline(
+    tmp_path: Path, values: Mapping[str, str], *, fail_stage: str = ""
+) -> tuple[subprocess.CompletedProcess[str], list[str], list[dict[str, object]], Path]:
+    """Run actual deploy-job local shell; record remote actions instead of contacting a host."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    docker = bin_dir / "docker"
+    docker.write_text(CI_PREFLIGHT_DOCKER.replace("__PYTHON__", sys.executable))
+    docker.chmod(0o755)
+    temporary = tmp_path / "runner-temp"
+    temporary.mkdir()
+    output = tmp_path / "github-output"
+    log = tmp_path / "docker.jsonl"
+    environment = {
+        "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
+        "RUNNER_TEMP": str(temporary),
+        "GITHUB_OUTPUT": str(output),
+        "GHCR_TOKEN": "REGISTRY_TOKEN_CANARY",
+        "GHCR_USER": "fixture-user",
+        "REGISTRY": "ghcr.io",
+        "IMAGE": IMAGE_A,
+        "STUB_EXPECTED_IMAGE": IMAGE_A,
+        "STUB_LOG": str(log),
+        "STUB_FAIL_STAGE": fail_stage,
+        **values,
+    }
+    deploy_job = (
+        WORKFLOW.read_text()
+        .split("  deploy-staging:\n", 1)[1]
+        .split("\n  deploy-monitoring:", 1)[0]
+    )
+    mutations = []
+    result = subprocess.CompletedProcess[str]([], 0, "", "")
+    for chunk in deploy_job.split("\n      - name: ")[1:]:
+        name, _, step = chunk.partition("\n")
+        if "uses: appleboy/" in step:
+            mutations.append(name)
+        if name not in {
+            "Bundle application secrets",
+            "Validate application bundle and GitLab configuration",
+        }:
+            continue
+        result = subprocess.run(
+            ["bash", "--noprofile", "--norc", "-eo", "pipefail", "-c", _run_script(step)],
+            cwd=REPO_ROOT,
+            env=environment,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if result.returncode:
+            break
+        if name == "Bundle application secrets":
+            environment["APP_SECRETS_B64"] = output.read_text().strip().removeprefix("bundle=")
+    calls = [json.loads(line) for line in log.read_text().splitlines()] if log.exists() else []
+    return result, mutations, calls, temporary
