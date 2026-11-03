@@ -62,6 +62,12 @@ services:
     image: ${IMAGE:?IMAGE is required}
     command: ["python", "-m", "app.worker"]
     stop_grace_period: 40s
+    # Replicas from the per-Environment variable WORKER_REPLICAS (empty or absent: one). The
+    # deploy and rollback scripts check it (1..5) and keep it in .env; rollback restores the
+    # count of the release it goes back to. Any number is safe: the background leader loop
+    # holds a PostgreSQL advisory lock, runs and index jobs are claimed by lease.
+    deploy:
+      replicas: ${WORKER_REPLICAS:-1}
     # Also the index.repo consumer (#142). CODE_INDEX_* keep their code defaults here:
     # worker.env is rebuilt from the allowlist in deploy/scripts/env-file.sh, so a value
     # changes only under environment: below (or by adding it to that allowlist).
