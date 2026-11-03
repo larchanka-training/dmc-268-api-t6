@@ -1101,3 +1101,324 @@ def test_report_step_names_the_step_that_left_no_report(tmp_path: Path) -> None:
 
     assert code == 1
     assert "no report: upload failure, SSH step skipped" in summary
+
+
+# --- the public status page (#309) ----------------------------------------------------------
+
+STATUS_URL = "https://status.example.test"
+STAGING_STATUS_URL = "https://staging-status.example.test"
+PROMETHEUS_PATHS = (
+    "/api/v1/query?query=up",
+    "/api/v1/alerts",
+    "/api/v2/alerts",
+    "/api/v2/silences",
+    "/-/ready",
+    "/metrics",
+    "/api/health",
+    "/login",
+    "/graph",
+)
+PAGE_PROD_AND_STAGING = '<section data-env="prod"></section><section data-env="staging"></section>'
+PAGE_STAGING_ONLY = '<section data-env="staging"></section>'
+FAKE_CURL = """#!/usr/bin/env python3
+import json, os, sys
+config = json.load(open(os.environ["FAKE_CURL_CONFIG"]))
+url = sys.argv[-1]
+if "-w" in sys.argv:
+    print(config["codes"].get(url, config["default_code"]), end="")
+else:
+    counter = os.environ["FAKE_CURL_CONFIG"] + ".count"
+    count = int(open(counter).read()) if os.path.exists(counter) else 0
+    open(counter, "w").write(str(count + 1))
+    bodies = config["bodies"].get(url, [""])
+    print(bodies[min(count, len(bodies) - 1)], end="")
+"""
+
+
+def _status_step(
+    tmp_path: Path,
+    step: str,
+    codes: dict[str, str],
+    bodies: dict[str, list[str]],
+    **env: str,
+) -> tuple[subprocess.CompletedProcess[str], str, str]:
+    stubs = tmp_path / "stubs"
+    stubs.mkdir(exist_ok=True)
+    (stubs / "curl").write_text(FAKE_CURL, encoding="utf-8")
+    (stubs / "sleep").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    for stub in ("curl", "sleep"):
+        (stubs / stub).chmod(0o755)
+    config = tmp_path / "curl.json"
+    config.write_text(
+        json.dumps({"codes": codes, "default_code": "000", "bodies": bodies}), encoding="utf-8"
+    )
+    summary = tmp_path / "summary.md"
+    output = tmp_path / "output"
+    output.touch()
+    result = subprocess.run(
+        ["/bin/bash", "-e", "-c", _step(step)],
+        env={
+            "PATH": f"{stubs}:{os.environ['PATH']}",
+            "FAKE_CURL_CONFIG": str(config),
+            "GITHUB_STEP_SUMMARY": str(summary),
+            "GITHUB_OUTPUT": str(output),
+            "STATUS_URL": STATUS_URL,
+            "STAGING_STATUS_URL": STAGING_STATUS_URL,
+            **env,
+        },
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    written = summary.read_text(encoding="utf-8") if summary.exists() else ""
+    return result, written, output.read_text(encoding="utf-8")
+
+
+def _healthy_status_site() -> tuple[dict[str, str], dict[str, list[str]]]:
+    codes = {f"{base}/": "200" for base in (STATUS_URL, STAGING_STATUS_URL)}
+    for base in (STATUS_URL, STAGING_STATUS_URL):
+        codes.update({f"{base}{path}": "404" for path in PROMETHEUS_PATHS})
+    bodies = {
+        f"{STATUS_URL}/": [PAGE_PROD_AND_STAGING],
+        f"{STAGING_STATUS_URL}/": [PAGE_STAGING_ONLY],
+    }
+    return codes, bodies
+
+
+def test_status_step_passes_when_only_the_page_is_public_on_both_names(tmp_path: Path) -> None:
+    codes, bodies = _healthy_status_site()
+
+    result, summary, output = _status_step(tmp_path, "Public status page", codes, bodies)
+
+    assert result.returncode == 0, result.stderr
+    assert "result=ok" in output.splitlines()
+    # Every path of Prometheus, Alertmanager and Grafana is in the table, on both names.
+    for base in (STATUS_URL, STAGING_STATUS_URL):
+        for path in PROMETHEUS_PATHS:
+            assert f"| `{base}{path}` | 404 | 404 |" in summary
+        assert f"| `{base}/` | 200 | 200 |" in summary
+
+
+@pytest.mark.parametrize(
+    "leaking",
+    [f"{base}{path}" for base in (STATUS_URL, STAGING_STATUS_URL) for path in PROMETHEUS_PATHS],
+)
+def test_status_step_fails_on_any_prometheus_path_that_answers(
+    tmp_path: Path, leaking: str
+) -> None:
+    codes, bodies = _healthy_status_site()
+    codes[leaking] = "200"
+
+    result, summary, output = _status_step(tmp_path, "Public status page", codes, bodies)
+
+    # The result is decided in Report, so the host checks still run.
+    assert result.returncode == 0, result.stderr
+    assert "result=fail" in output.splitlines()
+    assert f"| `{leaking}` | 200 | 404 |" in summary
+
+
+@pytest.mark.parametrize(
+    ("prod_page", "staging_page"),
+    [
+        # staging-status.* must not show prod; status.* must show both.
+        (PAGE_PROD_AND_STAGING, PAGE_PROD_AND_STAGING),
+        (PAGE_STAGING_ONLY, PAGE_STAGING_ONLY),
+        ("", PAGE_STAGING_ONLY),
+    ],
+)
+def test_status_step_fails_on_the_wrong_sections(
+    tmp_path: Path, prod_page: str, staging_page: str
+) -> None:
+    codes, _ = _healthy_status_site()
+    bodies = {f"{STATUS_URL}/": [prod_page], f"{STAGING_STATUS_URL}/": [staging_page]}
+
+    result, _, output = _status_step(tmp_path, "Public status page", codes, bodies)
+
+    assert result.returncode == 0, result.stderr
+    assert "result=fail" in output.splitlines()
+
+
+def test_status_step_fails_when_a_name_does_not_connect(tmp_path: Path) -> None:
+    result, summary, output = _status_step(tmp_path, "Public status page", {}, {})
+
+    assert result.returncode == 0, result.stderr
+    assert "result=fail" in output.splitlines()
+    assert f"| `{STATUS_URL}/` | 000 | 200 |" in summary
+
+
+def test_status_step_runs_on_the_course_vps_only_and_report_fails_on_it(tmp_path: Path) -> None:
+    workflow = WORKFLOW.read_text(encoding="utf-8")
+    step = workflow[workflow.index("- name: Public status page") :]
+    step = step[: step.index("- name: Upload acceptance script")]
+
+    assert "if: steps.target.outputs.status_url != ''" in step
+    # After the Grafana step and before the host checks, which run whatever it finds.
+    assert workflow.index("- name: Public Grafana endpoints") < workflow.index(
+        "- name: Public status page"
+    )
+    assert "exit 1" not in step
+    code, _ = _report_step(tmp_path, "all checks passed\n" + DRONE_SSH_BANNER, STATUS="fail")
+    assert code == 1
+    code, _ = _report_step(tmp_path, "all checks passed\n" + DRONE_SSH_BANNER, STATUS="ok")
+    assert code == 0
+
+
+def test_target_step_resolves_the_status_names_of_the_course_vps_only(tmp_path: Path) -> None:
+    (tmp_path / "course").mkdir()
+    (tmp_path / "terraform").mkdir()
+    _, _, course = _target_step(tmp_path / "course", **COURSE_TARGET)
+    _, _, terraform = _target_step(tmp_path / "terraform", **TERRAFORM_TARGET)
+
+    assert f"status_url={STATUS_URL}" in course.splitlines()
+    assert f"staging_status_url={STAGING_STATUS_URL}" in course.splitlines()
+    assert "status_url=" in terraform.splitlines()
+    assert "staging_status_url=" in terraform.splitlines()
+
+
+def _outage_job() -> str:
+    workflow = WORKFLOW.read_text(encoding="utf-8")
+    return workflow[workflow.index("\n  worker-outage:\n") :]
+
+
+def test_worker_outage_is_an_opt_in_job_on_main_after_the_acceptance_job() -> None:
+    workflow = WORKFLOW.read_text(encoding="utf-8")
+    job = _outage_job()
+
+    assert (
+        "      stop_worker:\n"
+        '        description: "Stop the staging worker (~10 min without reviews)'
+    ) in workflow
+    inputs = workflow[workflow.index("      stop_worker:\n") :]
+    assert "        type: boolean\n        default: false\n" in inputs[:400]
+    assert "    needs: acceptance\n" in job
+    assert "github.ref == 'refs/heads/main'" in job
+    assert "inputs.stop_worker" in job
+    assert "      name: staging\n" in job
+    # It runs after a failed acceptance job too: the outage check is independent of it.
+    assert "!cancelled()" in job
+    assert "appleboy/ssh-action@0ff4204d59e8e51228ff73bce53f80d53301dee2" in job
+    assert "fingerprint: ${{ vars.STAGING_SSH_FINGERPRINT }}" in job
+
+
+def test_worker_outage_stops_only_the_worker_under_a_planned_silence() -> None:
+    job = _outage_job()
+    stop = job[job.index("- name: Silence the alerts and stop the worker") :]
+    stop = stop[: stop.index("- name: Wait for the page to show the outage")]
+
+    assert "alertname=ReviewQueueWithoutConsumer --duration=20m --comment=acceptance-309" in stop
+    assert "alertname=ReviewRunsStuckInQueue --duration=20m --comment=acceptance-309" in stop
+    assert 'docker compose -p "${project}" stop worker\n' in stop
+    for other in ("api", "webhook-worker", "postgres", "rabbitmq"):
+        assert f"stop {other}" not in stop
+    # The silences come first: no page to the team chat for a planned stop.
+    assert stop.index("silence add") < stop.index("stop worker")
+
+
+def test_worker_outage_always_starts_the_worker_and_lifts_the_silences_it_made() -> None:
+    job = _outage_job()
+    start = job[job.index("- name: Start the worker and lift the silences") :]
+    start = start[: start.index("- name: Wait for the page to show the worker again")]
+
+    assert "if: ${{ always() }}" in start
+    assert 'docker compose -p "${project}" start worker || status=1' in start
+    # Only the silences of this run, by their comment; a failed start still lifts them and fails
+    # the step afterwards, so a worker that stays down alerts.
+    assert "awk '/acceptance-309$/ { print $1 }'" in start
+    assert (
+        start.index("start worker")
+        < start.index("silence expire")
+        < start.index('exit "${status}"')
+    )
+
+
+def _outage_page(state: str, alerts: str) -> str:
+    return (
+        f'<li class="row {state}" data-env="staging" data-component="review" '
+        f'data-state="{state}" data-alerts="{alerts}">'
+    )
+
+
+def test_outage_step_passes_when_the_page_shows_the_review_component_down_in_time(
+    tmp_path: Path,
+) -> None:
+    url = f"{STATUS_URL}/"
+    pages = [
+        _outage_page("up", ""),
+        _outage_page("up", ""),
+        _outage_page("down", "ReviewQueueWithoutConsumer ReviewRunsStuckInQueue"),
+    ]
+
+    result, summary, output = _status_step(
+        tmp_path, "Wait for the page to show the outage", {}, {url: pages}
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "result=ok" in output.splitlines()
+    assert 'staging row "Ревью PR" down with ReviewQueueWithoutConsumer' in summary
+
+
+@pytest.mark.parametrize(
+    "page",
+    [
+        _outage_page("up", ""),
+        # Another alert of the row, another component, another environment: not the outage.
+        _outage_page("down", "PostgresDown"),
+        _outage_page("down", "ReviewQueueWithoutConsumer").replace("review", "api"),
+        _outage_page("down", "ReviewQueueWithoutConsumer").replace('"staging"', '"prod"'),
+        "",
+    ],
+)
+def test_outage_step_fails_when_the_page_never_shows_the_outage(tmp_path: Path, page: str) -> None:
+    result, summary, output = _status_step(
+        tmp_path,
+        "Wait for the page to show the outage",
+        {},
+        {f"{STATUS_URL}/": [page]},
+        WAIT_LIMIT_SECONDS="0",
+    )
+
+    assert result.returncode == 1
+    assert "result=fail" in output.splitlines()
+    assert "did not show the outage" in summary
+
+
+def test_outage_step_fails_when_the_page_is_too_slow(tmp_path: Path) -> None:
+    page = _outage_page("down", "ReviewQueueWithoutConsumer")
+
+    result, summary, output = _status_step(
+        tmp_path,
+        "Wait for the page to show the outage",
+        {},
+        {f"{STATUS_URL}/": [page]},
+        OUTAGE_LIMIT_SECONDS="-1",
+    )
+
+    assert result.returncode == 1
+    assert "result=fail" in output.splitlines()
+    assert "limit -1 s" in summary
+
+
+def test_recovery_step_reports_the_return_to_working(tmp_path: Path) -> None:
+    pages = [_outage_page("down", "ReviewQueueWithoutConsumer"), _outage_page("up", "")]
+
+    result, summary, _ = _status_step(
+        tmp_path, "Wait for the page to show the worker again", {}, {f"{STATUS_URL}/": pages}
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "is back to working" in summary
+
+
+def test_recovery_step_fails_when_the_component_stays_down(tmp_path: Path) -> None:
+    page = _outage_page("down", "ReviewQueueWithoutConsumer")
+
+    result, summary, _ = _status_step(
+        tmp_path,
+        "Wait for the page to show the worker again",
+        {},
+        {f"{STATUS_URL}/": [page]},
+        WAIT_LIMIT_SECONDS="0",
+    )
+
+    assert result.returncode == 1
+    assert "was not working again" in summary
