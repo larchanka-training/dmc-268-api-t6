@@ -103,8 +103,9 @@ jobs:
           LABEL: ${{ steps.size.outputs.label }}
         run: |
           # Exactly one size/* label: remove every other one, add this one if missing. Labels
-          # outside size/* stay, so no PUT (it replaces the whole set). Each row: name, URI form.
-          if ! current="$(gh api "repos/${REPO}/issues/${PR_NUMBER}/labels?per_page=100" \
+          # outside size/* stay, so no PUT (it replaces the whole set). Every page is read, so an
+          # old size/* past the first 100 labels goes too. Each row: name, URI form.
+          if ! current="$(gh api --paginate "repos/${REPO}/issues/${PR_NUMBER}/labels?per_page=100" \
             --jq '.[].name | [., @uri] | @tsv')"; then
             echo "::warning::Could not read the labels of PR #${PR_NUMBER}; ${LABEL} not set"
             exit 0

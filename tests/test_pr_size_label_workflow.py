@@ -261,11 +261,13 @@ def test_s_and_m_write_one_summary_line(tmp_path: Path) -> None:
 
 FAKE_GH = """#!/usr/bin/env bash
 # Logs "<METHOD> <path> [<field>]"; fails the method named in FAKE_GH_FAIL; GET answers
-# FAKE_GH_LABELS through the caller's --jq filter.
-method=GET path= field= jq_filter=
+# FAKE_GH_LABELS through the caller's --jq filter: the first page of 100 only, every page
+# with --paginate.
+method=GET path= field= jq_filter= last=100
 while (( $# )); do
   case "$1" in
     api) ;;
+    --paginate) last=null ;;
     -X) method="$2"; shift ;;
     -f) field="$2"; shift ;;
     --jq) jq_filter="$2"; shift ;;
@@ -279,7 +281,7 @@ if [[ "${method}" == "${FAKE_GH_FAIL:-}" ]]; then
   exit 1
 fi
 if [[ "${method}" == GET ]]; then
-  jq -r "${jq_filter}" <<< "${FAKE_GH_LABELS}"
+  jq -r ".[:${last}] | ${jq_filter}" <<< "${FAKE_GH_LABELS}"
 fi
 """
 
@@ -346,6 +348,17 @@ def test_a_label_already_set_makes_no_write(tmp_path: Path) -> None:
     calls, _ = _set_label(tmp_path, ["size/S", "bug"], "size/S")
 
     assert calls == ["GET repos/o/r/issues/7/labels?per_page=100 "]
+
+
+def test_an_old_size_label_past_the_first_100_is_removed(tmp_path: Path) -> None:
+    other = [f"area/{n}" for n in range(114)]
+    calls, _ = _set_label(tmp_path, [*other, "size/L"], "size/S")
+
+    assert calls == [
+        "GET repos/o/r/issues/7/labels?per_page=100 ",
+        "DELETE repos/o/r/issues/7/labels/size%2FL ",
+        "POST repos/o/r/issues/7/labels labels[]=size/S",
+    ]
 
 
 def test_a_pr_without_labels_gets_one(tmp_path: Path) -> None:
