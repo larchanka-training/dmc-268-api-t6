@@ -36,7 +36,7 @@ def test_review_queries_and_grants_never_touch_review_content() -> None:
         if "rawSql" in target
     )
 
-    assert sql.count("SELECT") == 5
+    assert sql.count("SELECT") == 6
     assert dashboard_sql.count("SELECT") == 9
     assert {table for table, _ in grants} == {"runs", "run_actions", "usage_events"}
     granted = set().union(*grants.values())
@@ -99,6 +99,26 @@ def test_budget_paused_query_counts_skipped_runs_from_granted_columns() -> None:
     assert "finished_at > now() - interval '15 minutes'" in sql
     # No new grant: the exporter already reads these columns of runs.
     assert read == {"state", "error_code", "finished_at"}
+    assert read <= _grants(_read(MONITORING / "deploy.sh"))[("runs", "metrics_exporter")]
+
+
+def test_review_time_query_measures_succeeded_fast_runs_from_granted_columns() -> None:
+    block = _read(QUERIES).split("\ndmc_review_time_1h:\n", 1)[1].split("\n\n", 1)[0]
+    sql = _query("dmc_review_time_1h")
+    run_columns = {column.name for column in Run.__table__.columns}
+    read = {column for column in run_columns if re.search(rf"\b{column}\b", sql)}
+
+    # postgres-exporter names the series <block>_<column>: dmc_review_time_1h_runs and
+    # dmc_review_time_1h_p95_seconds.
+    assert re.search(r"- runs:\n\s+usage: GAUGE\n", block)
+    assert re.search(r"- p95_seconds:\n\s+usage: GAUGE\n", block)
+    assert re.findall(r"^\s*(?:FROM|JOIN)\s+(\w+)", sql, re.M) == ["runs"]
+    assert "state = 'succeeded' AND engine = 'fast'" in sql
+    assert "finished_at > now() - interval '1 hour'" in sql
+    # The second bound lets ix_runs_state_created_id serve the scan.
+    assert "created_at > now() - interval '1 day'" in sql
+    # No new grant: the exporter already reads these columns of runs.
+    assert read == {"state", "engine", "finished_at", "created_at"}
     assert read <= _grants(_read(MONITORING / "deploy.sh"))[("runs", "metrics_exporter")]
 
 

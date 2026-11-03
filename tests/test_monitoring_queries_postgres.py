@@ -90,6 +90,35 @@ def _run(connection: Connection, state: str, error_code: str, finished_at: datet
     )
 
 
+def _review_run(
+    connection: Connection,
+    state: str,
+    engine: str,
+    created_at: datetime,
+    finished_at: datetime,
+) -> None:
+    connection.execute(
+        text(
+            "INSERT INTO runs (id, code_change_id, base_sha, base_ref, head_sha, state, trigger, "
+            "idempotency_key, engine, rule_version_id, prompt_version_id, available_at, attempt, "
+            "created_at, finished_at) VALUES (:id, :pr, :sha, 'main', :sha, :state, 'manual', "
+            ":key, :engine, :rule, :prompt, :created_at, 1, :created_at, :finished_at)"
+        ),
+        {
+            "id": uuid4(),
+            "pr": PR_OPEN,
+            "sha": "c" * 40,
+            "state": state,
+            "key": uuid4().hex * 2,
+            "engine": engine,
+            "rule": RULE_A,
+            "prompt": PROMPT,
+            "created_at": created_at,
+            "finished_at": finished_at,
+        },
+    )
+
+
 def _metric(connection: Connection, name: str) -> list[dict[str, Any]]:
     return [dict(row._mapping) for row in connection.execute(text(_query(name)))]
 
@@ -165,3 +194,43 @@ def test_budget_paused_counts_runs_skipped_by_the_budget_in_the_last_15_minutes(
     # The columns deploy.sh already grants to metrics_exporter are enough for the query.
     _as_exporter(connection)
     assert _metric(connection, "dmc_runs_budget_paused_15m") == [{"runs": 2.0}]
+
+
+@pytest.mark.integration
+def test_review_time_counts_succeeded_fast_runs_of_the_last_hour(connection: Connection) -> None:
+    now = connection.execute(text("SELECT now()")).scalar_one()
+    hour = timedelta(hours=1)
+
+    assert _metric(connection, "dmc_review_time_1h") == [{"runs": 0.0, "p95_seconds": 0.0}]
+
+    # Five reviews that took 60, 120, 180, 240 and 300 seconds: the 95th percentile lies 0.8 of the
+    # way from 240 to 300 seconds (rank 0.95 * 4 = 3.8), that is 288.
+    for seconds in (60, 120, 180, 240, 300):
+        finished = now - timedelta(minutes=10)
+        _review_run(
+            connection, "succeeded", "fast", finished - timedelta(seconds=seconds), finished
+        )
+    # Out: a finished hour ago exactly (the window is open at its start) and two hours ago.
+    _review_run(connection, "succeeded", "fast", now - hour - timedelta(minutes=5), now - hour)
+    _review_run(
+        connection,
+        "succeeded",
+        "fast",
+        now - 2 * hour,
+        now - 2 * hour + timedelta(hours=1, minutes=-1),
+    )
+    # Out: not a review that was delivered, or not the fast engine.
+    for state in ("failed", "skipped", "cancelled"):
+        _review_run(connection, state, "fast", now - timedelta(hours=2), now - timedelta(minutes=5))
+    _review_run(
+        connection, "succeeded", "deep", now - timedelta(hours=1), now - timedelta(minutes=5)
+    )
+    # Out: created more than a day ago, so a slow run could not skew the percentile.
+    _review_run(
+        connection, "succeeded", "fast", now - timedelta(days=2), now - timedelta(minutes=5)
+    )
+
+    assert _metric(connection, "dmc_review_time_1h") == [{"runs": 5.0, "p95_seconds": 288.0}]
+    # The columns deploy.sh already grants to metrics_exporter are enough for the query.
+    _as_exporter(connection)
+    assert _metric(connection, "dmc_review_time_1h") == [{"runs": 5.0, "p95_seconds": 288.0}]
