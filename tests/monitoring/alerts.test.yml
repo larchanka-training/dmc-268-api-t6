@@ -1449,6 +1449,113 @@ tests:
           - labels: '{environment="prod", host="api.example.test"}'
             value: 7320
 
+  # The window is the calendar month (UTC): the timeline starts on 31 January 1970 at 20:00, one
+  # hour of probes per 60 samples, and crosses into February (28 days, so the allowance is
+  # 0.005 * 86 400 * 28 = 12 096 s, not the 13 392 s of a month of 31 days). api fails from
+  # minute 1 to minute 240, which is 20:01 to 00:00 on 1 February: the hour that ends at 00:00 on
+  # the 1st belongs to January. In January, the 210 failed probes of 23:30 are 12 600 s (94.09 %,
+  # warning) and the 230 of 23:50 are 13 800 s (critical alert). From 00:00 on none of them counts:
+  # the downtime is 0 and both alerts are gone. It is up in minutes 241 to 269 and fails in
+  # minutes 270 to 299 (00:30 to 00:59): 1 probe, 60 s, at 00:30; 26 up to the 5-minute step of
+  # 00:55, 1 560 s; 30, 1 800 s, once the hour is over. The availability of February at 01:00 is
+  # 1 - 1800 / 3600 = 50 %.
+  - interval: 1m
+    start_timestamp: "1970-01-31T20:00:00Z"
+    input_series:
+      - series: 'probe_success{job="blackbox", environment="prod", host="api.example.test", instance="https://api.example.test/healthcheck"}'
+        values: "1 0x239 1x28 0x29 1x120"
+    alert_rule_test:
+      - eval_time: 3h30m
+        alertname: SlaAvailabilityAtRisk
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              environment: prod
+              host: api.example.test
+            exp_annotations:
+              summary: "api.example.test: 94.09% of the monthly downtime allowance is spent"
+              description: "Prod downtime of this month so far (failed probes, deploy blips and maintenance included) is more than half of the allowance of 0.5 %; at 100 % SlaAvailabilityBreached takes over and this alert resolves (docs/MONITORING.md §12)."
+      - eval_time: 3h30m
+        alertname: SlaAvailabilityBreached
+        exp_alerts: []
+      - eval_time: 3h50m
+        alertname: SlaAvailabilityBreached
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              environment: prod
+              host: api.example.test
+            exp_annotations:
+              summary: "api.example.test: the monthly downtime allowance is spent (103%)"
+              description: "Prod downtime of this month so far has reached the allowance of 0.5 % (availability 99.5 %); the alert stays until the month ends (docs/MONITORING.md §12)."
+      - eval_time: 4h5m
+        alertname: SlaAvailabilityBreached
+        exp_alerts: []
+      - eval_time: 4h5m
+        alertname: SlaAvailabilityAtRisk
+        exp_alerts: []
+    promql_expr_test:
+      - expr: sla:month_start_timestamp_seconds
+        eval_time: 3h30m
+        exp_samples:
+          - labels: 'sla:month_start_timestamp_seconds{environment="shared"}'
+            value: 0
+      - expr: sla:month_start_timestamp_seconds
+        eval_time: 5h
+        exp_samples:
+          - labels: 'sla:month_start_timestamp_seconds{environment="shared"}'
+            value: 2678400
+      - expr: sla:downtime_budget_seconds:month
+        eval_time: 3h30m
+        exp_samples:
+          - labels: 'sla:downtime_budget_seconds:month{environment="prod"}'
+            value: 13392
+      - expr: sla:downtime_budget_seconds:month
+        eval_time: 4h30m
+        exp_samples:
+          - labels: 'sla:downtime_budget_seconds:month{environment="prod"}'
+            value: 12096
+      - expr: round(sla:downtime_seconds:month)
+        eval_time: 3h30m
+        exp_samples:
+          - labels: '{environment="prod", host="api.example.test"}'
+            value: 12600
+      - expr: round(sla:downtime_seconds:month)
+        eval_time: 4h
+        exp_samples:
+          - labels: '{environment="prod", host="api.example.test"}'
+            value: 0
+      - expr: round(sla:downtime_seconds:month)
+        eval_time: 4h5m
+        exp_samples:
+          - labels: '{environment="prod", host="api.example.test"}'
+            value: 0
+      - expr: round(sla:downtime_seconds:month)
+        eval_time: 4h30m
+        exp_samples:
+          - labels: '{environment="prod", host="api.example.test"}'
+            value: 60
+      - expr: round(sla:downtime_seconds:month)
+        eval_time: 4h59m
+        exp_samples:
+          - labels: '{environment="prod", host="api.example.test"}'
+            value: 1560
+      - expr: round(sla:downtime_seconds:month)
+        eval_time: 5h
+        exp_samples:
+          - labels: '{environment="prod", host="api.example.test"}'
+            value: 1800
+      - expr: round(sla:downtime_seconds:month)
+        eval_time: 6h
+        exp_samples:
+          - labels: '{environment="prod", host="api.example.test"}'
+            value: 1800
+      - expr: round(1000 * sla:availability_ratio:month)
+        eval_time: 5h
+        exp_samples:
+          - labels: '{environment="prod", host="api.example.test"}'
+            value: 500
+
   # A prod name that is not probed has no series and raises nothing; when it joins the probes
   # (ui in PROBE_PROD_HOSTS; its first probe is in minute 121) and fails, the same rules alert for
   # it, with no change: 180 failed probes by hour 5, 240 by hour 6. Then it
