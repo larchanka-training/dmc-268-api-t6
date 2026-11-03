@@ -379,7 +379,8 @@ def test_rollback_checks_the_environment_of_every_worker_replica(host: Host) -> 
         "webhook-worker",
     ]
     assert result.stdout.count("environment keys:") == 3
-    assert [line.split(" ")[0] for line in result.stdout.splitlines()[:3]] == [
+    keys_lines = [line for line in result.stdout.splitlines() if "environment keys:" in line]
+    assert [line.split(" ")[0] for line in keys_lines] == [
         "api",
         "worker",
         "webhook-worker",

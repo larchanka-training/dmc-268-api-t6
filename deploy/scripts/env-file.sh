@@ -100,6 +100,16 @@ resolve_tracing_values() {
   fi
 }
 
+# One log line with the resolved values, so a run shows what the containers will get. Neither is
+# secret: the name is one of two words and the endpoint is an internal address.
+echo_tracing_values() {
+  if [[ -n "${OTEL_EXPORTER_OTLP_ENDPOINT}" ]]; then
+    echo "tracing: environment=${DEPLOY_ENVIRONMENT}, export to ${OTEL_EXPORTER_OTLP_ENDPOINT}"
+  else
+    echo "tracing: environment=${DEPLOY_ENVIRONMENT}, export off"
+  fi
+}
+
 escape_compose_value() {
   local value="$1"
   value="${value//\$/\$\$}"

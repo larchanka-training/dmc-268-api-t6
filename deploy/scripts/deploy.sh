@@ -93,6 +93,7 @@ require_worker_replicas "${WORKER_REPLICAS}" || exit 1
 echo "worker replicas: ${WORKER_REPLICAS}"
 # Tracing values: the CI value, else .env, else the staging default; a bad name stops here.
 resolve_tracing_values "${ENV_FILE}" || exit 1
+echo_tracing_values
 COMPOSE=(docker compose -p "${COMPOSE_PROJECT}" -f "${COMPOSE_FILE}" -f "${APP_DIR}/compose.${DEPLOY_MODE}.yml" --env-file "${ENV_FILE}")
 
 IMAGE="${REQUESTED_IMAGE}"

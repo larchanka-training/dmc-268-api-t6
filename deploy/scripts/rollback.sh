@@ -284,6 +284,7 @@ if [[ "${WORKER_REPLICAS}" != "${HOST_WORKER_REPLICAS:-1}" ]]; then
   echo "worker replicas: ${WORKER_REPLICAS} (was ${HOST_WORKER_REPLICAS:-1})"
 fi
 resolve_tracing_values "${ENV_FILE}" || exit 1
+echo_tracing_values
 
 for name in POSTGRES_PASSWORD RABBITMQ_PASSWORD REDIS_PASSWORD; do
   if [[ -z "${!name:-}" ]]; then

@@ -260,3 +260,39 @@ def test_rollback_refuses_an_invalid_environment_name_in_dotenv_before_the_host_
     assert "DEPLOY_ENVIRONMENT must be staging or prod, got: dev" in result.stderr
     assert host.files() == before
     assert set(host.calls()[calls_before:]) <= {"logout ghcr.io"}
+
+
+STAGING_LINE = "tracing: environment=staging, export to http://tempo:4318\n"
+PROD_LINE = "tracing: environment=prod, export off\n"
+
+
+def test_deploy_says_which_tracing_values_it_applies(host: Host) -> None:
+    default = _deploy(host, IMAGE_A)
+    prod = _deploy(host, IMAGE_B, DEPLOY_ENVIRONMENT="prod", OTEL_EXPORTER_OTLP_ENDPOINT="")
+
+    assert STAGING_LINE in default.stdout
+    assert PROD_LINE in prod.stdout
+    assert prod.stdout.count("tracing:") == 1
+
+
+@pytest.mark.parametrize("how", ["manual", "ci-auto"])
+@pytest.mark.parametrize(
+    ("settings", "line"),
+    [
+        pytest.param({}, STAGING_LINE, id="staging-default"),
+        pytest.param(
+            {"DEPLOY_ENVIRONMENT": "prod", "OTEL_EXPORTER_OTLP_ENDPOINT": ""}, PROD_LINE, id="prod"
+        ),
+    ],
+)
+def test_rollback_says_which_tracing_values_it_keeps(
+    host: Host, how: str, settings: dict[str, str], line: str
+) -> None:
+    assert _deploy(host, IMAGE_A, **settings).returncode == 0
+    assert _deploy(host, IMAGE_B, DEPLOY_RUN="102-1").returncode == 0
+
+    result = host.run("rollback.sh") if how == "manual" else _ci_auto_rollback(host, "102-1")
+
+    assert result.returncode == 0, result.stderr
+    assert line in result.stdout
+    assert result.stdout.count("tracing:") == 1
