@@ -546,7 +546,10 @@ def test_monitoring_deploys_after_the_application_and_never_gates_it() -> None:
 def test_monitoring_upload_and_secrets_reach_only_the_monitoring_dir() -> None:
     job = _job("deploy-monitoring")
 
-    assert 'source: "deploy/monitoring,deploy/scripts/env-file.sh"' in job
+    assert (
+        'source: "deploy/monitoring,deploy/scripts/env-file.sh,deploy/scripts/check-isolation.sh"'
+        in job
+    )
     assert "target: ${{ env.MONITORING_DIR }}" in job
     assert "ALERT_TELEGRAM_BOT_TOKEN: ${{ secrets.ALERT_TELEGRAM_BOT_TOKEN }}" in job
     assert "ALERT_TELEGRAM_CHAT_ID: ${{ vars.ALERT_TELEGRAM_CHAT_ID }}" in job

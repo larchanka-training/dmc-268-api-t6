@@ -1199,7 +1199,7 @@ jobs:
           key: ${{ needs.deploy-staging.outputs.mode == 'terraform' && secrets.STAGING_SSH_KEY || '' }}
           password: ${{ needs.deploy-staging.outputs.mode == 'course' && secrets.VPS_DMC268_P || '' }}
           fingerprint: ${{ vars.STAGING_SSH_FINGERPRINT }}
-          source: "deploy/monitoring,deploy/scripts/env-file.sh"
+          source: "deploy/monitoring,deploy/scripts/env-file.sh,deploy/scripts/check-isolation.sh"
           target: ${{ env.MONITORING_DIR }}
           strip_components: 2
 
@@ -1214,6 +1214,9 @@ jobs:
           # Production names probed too: "api", "ui" or "api ui" (Environment variable, empty by default).
           # Set once the name serves production, then re-run Deploy monitoring. Empty: staging names only.
           PROBE_PROD_HOSTS: ${{ vars.PROBE_PROD_HOSTS }}
+          # The prod application stack the monitoring scrapes too. Prod exists on the course VPS only,
+          # in the dir deploy-prod.yml uses; empty elsewhere: no prod.
+          PROD_API_DIR: ${{ needs.deploy-staging.outputs.mode == 'course' && '/opt/dmc-268-api-prod' || '' }}
           # Alerts of the team channel (docs/SECRETS.md): Environment secret and variable. Both empty:
           # the stack runs and alerts are visible in Alertmanager, but nothing is delivered.
           ALERT_TELEGRAM_BOT_TOKEN: ${{ secrets.ALERT_TELEGRAM_BOT_TOKEN }}
@@ -1239,7 +1242,7 @@ jobs:
           password: ${{ needs.deploy-staging.outputs.mode == 'course' && secrets.VPS_DMC268_P || '' }}
           fingerprint: ${{ vars.STAGING_SSH_FINGERPRINT }}
           debug: false
-          envs: MONITORING_DIR,API_DIR,GRAFANA_ROOT_URL,APP_DOMAIN,PROBE_PROD_HOSTS,ALERT_TELEGRAM_BOT_TOKEN,ALERT_TELEGRAM_CHAT_ID,LLM_MONTHLY_BUDGET_USD,BACKUP_S3_ENDPOINT,BACKUP_S3_BUCKET,BACKUP_S3_ACCESS_KEY_ID,BACKUP_S3_SECRET_ACCESS_KEY,BACKUP_ENCRYPTION_PASSPHRASE,GRAFANA_ADMIN_PASSWORD
+          envs: MONITORING_DIR,API_DIR,GRAFANA_ROOT_URL,APP_DOMAIN,PROBE_PROD_HOSTS,PROD_API_DIR,ALERT_TELEGRAM_BOT_TOKEN,ALERT_TELEGRAM_CHAT_ID,LLM_MONTHLY_BUDGET_USD,BACKUP_S3_ENDPOINT,BACKUP_S3_BUCKET,BACKUP_S3_ACCESS_KEY_ID,BACKUP_S3_SECRET_ACCESS_KEY,BACKUP_ENCRYPTION_PASSPHRASE,GRAFANA_ADMIN_PASSWORD
           script: |
             set -euo pipefail
             set +o xtrace

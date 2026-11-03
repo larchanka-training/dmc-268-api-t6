@@ -16,7 +16,13 @@ from typing import Any
 import pytest
 import yaml  # type: ignore[import-untyped]
 
-from tests.test_deploy_monitoring import METADATA_GRANTS, Host, _grants, host  # noqa: F401
+from tests.test_deploy_monitoring import (  # noqa: F401
+    METADATA_GRANTS,
+    Host,
+    _grants,
+    _job,
+    host,
+)
 
 ROOT = Path(__file__).resolve().parents[1]
 MONITORING = ROOT / "deploy" / "monitoring"
@@ -525,3 +531,17 @@ def test_an_unchecked_isolation_only_warns(prod_host: Host, exit_code: str) -> N
 
     assert result.returncode == 0, result.stderr
     assert "isolation not checked" in result.stderr
+
+
+def test_monitoring_deploy_gets_the_prod_dir_on_the_course_vps_only() -> None:
+    job = _job("deploy-monitoring")
+    envs = re.search(r"^          envs: (\S+)$", job, re.M)
+
+    # Prod runs on the course VPS only, in the dir deploy-prod.yml hardcodes.
+    assert (
+        "          PROD_API_DIR: ${{ needs.deploy-staging.outputs.mode == 'course'"
+        " && '/opt/dmc-268-api-prod' || '' }}\n"
+    ) in job
+    assert envs is not None
+    assert "PROD_API_DIR" in envs.group(1).split(",")
+    assert "PROD_API_DIR" not in _job("deploy-staging")
