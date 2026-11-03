@@ -18,8 +18,8 @@ import pytest
 from sqlalchemy import Connection, create_engine, text
 from sqlalchemy.pool import NullPool
 
+from tests.monitoring_deploy_host import MONITORING, _grants, _query, _read
 from tests.portal_postgres import PR_OPEN, PROMPT, RULE_A, RUN_DONE, WS_A, Env, portal_schema
-from tests.test_deploy_monitoring import MONITORING, _grants, _query, _read
 
 # UTC+14 all year: its calendar month starts 14 hours before the UTC one.
 FAR_EAST = "Pacific/Kiritimati"

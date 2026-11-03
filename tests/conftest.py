@@ -7,9 +7,12 @@ from collections.abc import Iterator
 
 import pytest
 
-# A shared module loaded with `pytest_plugins` is imported by its test files before pytest
-# loads it as a plugin: registered here, it keeps the assertion rewriting of a test file.
-pytest.register_assert_rewrite("tests.worker_queue_postgres", "tests.rules_md_e2e")
+# Shared modules that test files import before pytest loads them through `pytest_plugins`:
+# registered here, they keep the assertion rewriting and pytest does not warn that the module
+# was already imported.
+pytest.register_assert_rewrite(
+    "tests.worker_queue_postgres", "tests.rules_md_e2e", "tests.monitoring_deploy_host"
+)
 
 # ``configure_logging`` (the app lifespan, worker mains) changes these process-wide.
 _LOGGERS = ("", "uvicorn", "uvicorn.error", "uvicorn.access", "httpx", "httpcore")
