@@ -72,6 +72,29 @@ def test_every_alert_that_groups_by_environment_has_a_prod_case() -> None:
     assert grouping - prod_cases == set()
 
 
+def test_every_backup_alert_has_a_prod_case() -> None:
+    # The backup rules read the series as they are (no aggregation), so they fire for the
+    # environment of the series; each needs a case where only prod is faulty.
+    rules = _load(MONITORING / "prometheus" / "rules" / "alerts.yml")
+    reading_backups = {
+        rule["alert"]
+        for group in rules["groups"]
+        for rule in group["rules"]
+        if "dmc_pg_backup_" in rule.get("expr", "")
+    }
+    cases = _load(ROOT / "tests" / "monitoring" / "alerts.test.yml")
+    prod_cases = {
+        check["alertname"]
+        for case in cases["tests"]
+        for check in case.get("alert_rule_test", [])
+        for expected in check.get("exp_alerts") or []
+        if expected.get("exp_labels", {}).get("environment") == "prod"
+    }
+
+    assert len(reading_backups) == 5
+    assert reading_backups - prod_cases == set()
+
+
 PROMETHEUS_YML = MONITORING / "prometheus" / "prometheus.yml"
 RELABEL_FIELDS = {"source_labels", "regex", "target_label", "replacement", "action"}
 
