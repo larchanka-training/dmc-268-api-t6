@@ -27,6 +27,7 @@ services:
       # after a passphrase change, older copies are still listed and pruned by age.
       RCLONE_CONFIG_SECURE_PASSWORD: ${BACKUP_ENCRYPTION_PASSWORD_OBSCURED:?BACKUP_ENCRYPTION_PASSWORD_OBSCURED is required}
       RCLONE_CONFIG_SECURE_FILENAME_ENCRYPTION: "off"
+      BACKUP_ENVIRONMENT: staging
       BACKUP_OFFSITE_RETENTION_DAYS: ${BACKUP_OFFSITE_RETENTION_DAYS:-30}
     labels:
       dmc.config-digest: ${PG_BACKUP_CONFIG_DIGEST:-none}
