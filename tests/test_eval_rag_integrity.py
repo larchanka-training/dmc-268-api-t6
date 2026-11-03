@@ -237,6 +237,128 @@ def test_check_2_a_depth2_hop_1_that_arm_b_no_longer_retrieves_is_an_error(
     assert any("pkg/api.py is not retrieved in arm B" in error for error in errors)
 
 
+def _hop_2_without_a_use(tmp_path: Path, body: str) -> Path:
+    """A copy of the depth2 fixture whose hop-2 file (``pkg/cli.py``) is ``body``, re-indexed."""
+    case = _copy(tmp_path, _DEPTH2)
+    (case / "base" / "pkg" / "cli.py").write_text(body)
+    _reindex(case)
+    return case
+
+
+def test_check_10_a_depth2_hop_2_that_uses_its_hop_1_caller_passes() -> None:
+    assert _rule(check_case(_DEPTH2, _depth2()), "depth2_second_hop") == []
+
+
+def test_check_10_a_hop_2_that_no_longer_uses_hop_1_is_an_error(tmp_path: Path) -> None:
+    case = _hop_2_without_a_use(
+        tmp_path, '"""Command line."""\n\n\ndef main(name: str) -> str:\n    return name.strip()\n'
+    )
+
+    errors = _rule(check_case(case, _depth2()), "depth2_second_hop")
+
+    assert len(errors) == 1
+    assert "pkg/cli.py" in errors[0]
+    assert "pkg/api.py" in errors[0]
+    assert "no longer depth 2" in errors[0]
+
+
+def test_check_10_a_hop_2_that_only_imports_hop_1_is_an_error(tmp_path: Path) -> None:
+    case = _hop_2_without_a_use(
+        tmp_path,
+        '"""Command line."""\n\nfrom .api import create  # noqa: F401\n\n\n'
+        "def main(name: str) -> str:\n    return name.strip()\n",
+    )
+
+    errors = _rule(check_case(case, _depth2()), "depth2_second_hop")
+
+    assert any("pkg/cli.py" in error and "uses_imported" in error for error in errors)
+
+
+def test_check_10_a_hop_2_that_uses_only_an_unrelated_hop_1_symbol_is_an_error(
+    tmp_path: Path,
+) -> None:
+    case = _copy(tmp_path, _DEPTH2)
+    api = case / "base" / "pkg" / "api.py"
+    api.write_text(api.read_text() + "\n\ndef label(name: str) -> str:\n    return name.title()\n")
+    (case / "base" / "pkg" / "cli.py").write_text(
+        '"""Command line."""\n\nfrom .api import label\n\n\n'
+        "def main(name: str) -> str:\n    return label(name)\n"
+    )
+    _reindex(case)
+
+    errors = _rule(check_case(case, _depth2()), "depth2_second_hop")
+
+    assert len(errors) == 1
+    assert "pkg/cli.py" in errors[0]
+    assert "label" in errors[0]
+    assert "pkg/api.py" in errors[0]
+
+
+def test_check_10_a_hop_1_name_that_is_only_part_of_an_identifier_does_not_count(
+    tmp_path: Path,
+) -> None:
+    case = _copy(tmp_path, _DEPTH2)
+    api = case / "base" / "pkg" / "api.py"
+    # ``creat`` is a substring of the retrieved ``create``, never a word of its block.
+    api.write_text(api.read_text() + "\n\ndef creat(name: str) -> str:\n    return name\n")
+    (case / "base" / "pkg" / "cli.py").write_text(
+        '"""Command line."""\n\nfrom .api import creat\n\n\n'
+        "def main(name: str) -> str:\n    return creat(name)\n"
+    )
+    _reindex(case)
+
+    errors = _rule(check_case(case, _depth2()), "depth2_second_hop")
+
+    assert len(errors) == 1
+    assert "pkg/api.py:creat" in errors[0]
+    assert "none of them is in a retrieved block" in errors[0]
+
+
+def test_check_10_a_depth2_case_that_declares_no_hop_1_reports_it_once() -> None:
+    errors = check_case(_DEPTH2, _record("depth2", absent=["pkg/cli.py"]))
+
+    assert _rule(errors, "depth2_second_hop") == []
+
+
+def test_check_10_a_use_of_a_file_that_is_not_the_declared_hop_1_is_an_error(
+    tmp_path: Path,
+) -> None:
+    case = _hop_2_without_a_use(
+        tmp_path,
+        '"""Command line."""\n\nfrom .models import Item\n\n\n'
+        "def main(name: str) -> str:\n    return Item(name).name\n",
+    )
+
+    errors = _rule(check_case(case, _depth2()), "depth2_second_hop")
+
+    assert any("pkg/cli.py" in error for error in errors)
+
+
+@pytest.mark.parametrize(
+    "record",
+    [
+        _record("reverse_edge", retrieved=["pkg/api.py"], absent=["pkg/cli.py"]),
+        _record("control", retrieved=["pkg/api.py"], absent=["pkg/cli.py"]),
+        _record("clean", retrieved=["pkg/api.py"], absent=["pkg/cli.py"]),
+        _record(
+            "injection",
+            retrieved=["pkg/api.py"],
+            absent=["pkg/cli.py"],
+            injection=_BAIT_INJECTION,
+        ),
+    ],
+    ids=["reverse_edge", "control", "clean", "injection"],
+)
+def test_check_10_other_kinds_are_not_held_to_the_rule(
+    tmp_path: Path, record: dict[str, Any]
+) -> None:
+    case = _hop_2_without_a_use(
+        tmp_path, '"""Command line."""\n\n\ndef main(name: str) -> str:\n    return name.strip()\n'
+    )
+
+    assert _rule(check_case(case, record), "depth2_second_hop") == []
+
+
 # --- check 3: a control's definition is an L4 block in both arms -----------------------------
 
 
