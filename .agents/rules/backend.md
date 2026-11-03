@@ -121,8 +121,8 @@ from a missing scope.
 - Integration tests are marked `@pytest.mark.integration` (registered in
   `pyproject.toml`) and skip when `TEST_DATABASE_URL` is unset. Each DB test file keeps a
   thin fixture that skips without the variable and enters the shared setup of its topic
-  (`with portal_schema(...)` in the `tests/portal_postgres.py` importers); there is no shared
-  `conftest.py`.
+  where there is one (`with portal_schema(...)` in the files that build a portal schema);
+  there is no shared `conftest.py`.
 - Assert literal values taken from the spec — never derive an expected value from
   the implementation under test.
 - One test per behavior. Before adding a test, grep the feature's file prefix for the
