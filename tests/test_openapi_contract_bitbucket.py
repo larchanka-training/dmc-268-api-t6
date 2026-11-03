@@ -30,7 +30,7 @@ from app.modules.integrations.bitbucket.application.manage_connection import (
 from app.modules.integrations.bitbucket.infrastructure.repository_provider import (
     BitbucketProviderError,
 )
-from tests.test_openapi_contract import _components, _spec, _validator_at, _validator_for
+from tests.openapi_contract import _components, _spec, _validator_at, _validator_for
 from tests.test_ui_zod_contracts import (
     _generated_schemas,
 )

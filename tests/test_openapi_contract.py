@@ -9,8 +9,6 @@ from collections.abc import AsyncIterator, Callable, Iterator, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta, timezone
-from functools import cache
-from pathlib import Path
 from typing import Any, Self, get_args
 from uuid import UUID
 
@@ -18,13 +16,8 @@ import pytest
 from fastapi.testclient import TestClient
 from jsonschema import Draft202012Validator
 from jsonschema.exceptions import ValidationError
-from jsonschema.protocols import Validator
-from openapi_schema_validator import OAS31Validator
 from openapi_spec_validator import OpenAPIV31SpecValidator, validate
-from openapi_spec_validator.readers import read_from_filename
 from pydantic import ValidationError as PydanticValidationError
-from referencing import Registry
-from referencing.jsonschema import DRAFT202012
 
 from app.bootstrap.reviews_api import (
     get_cancel_run,
@@ -74,6 +67,15 @@ from app.modules.reviews.application.try_enqueue_webhook_run import (
     PendingRunMessage,
     RunInsertCandidate,
 )
+from tests.openapi_contract import (
+    SPEC_PATH,
+    _components,
+    _escape,
+    _load_spec,
+    _spec,
+    _validator_at,
+    _validator_for,
+)
 from tests.portal_test_client import authenticated_test_client
 from tests.test_branch_patterns import INVALID_BRANCH_PATTERNS
 from tests.test_rerun_origin import facts as rerun_facts
@@ -85,8 +87,6 @@ from tests.test_ui_zod_contracts import (
     run_origin_responses,
 )
 
-SPEC_PATH = Path(__file__).parents[1] / "contracts" / "openapi.yaml"
-APP_PATH = Path(__file__).parents[1] / "app"
 HTTP_METHODS = frozenset({"get", "put", "post", "delete", "options", "head", "patch", "trace"})
 # api#20 D9: the webhook receiver and the liveness probe are not part of the browser API.
 EXCLUDED_APP_PATHS = frozenset(
@@ -164,20 +164,6 @@ INVALID_REVIEW_SETTINGS: dict[str, dict[str, object]] = {
 }
 
 
-@cache
-def _load_spec() -> tuple[Mapping[str, Any], str]:
-    return read_from_filename(str(SPEC_PATH))
-
-
-def _spec() -> Mapping[str, Any]:
-    return _load_spec()[0]
-
-
-def _components() -> Mapping[str, Any]:
-    schemas: Mapping[str, Any] = _spec()["components"]["schemas"]
-    return schemas
-
-
 def _operations(paths: Mapping[str, Any]) -> dict[tuple[str, str], Mapping[str, Any]]:
     """Key operations by method and template path with parameter names erased."""
     return {
@@ -186,42 +172,6 @@ def _operations(paths: Mapping[str, Any]) -> dict[tuple[str, str], Mapping[str, 
         for method, operation in item.items()
         if method in HTTP_METHODS
     }
-
-
-def _escape(token: str) -> str:
-    return token.replace("~", "~0").replace("/", "~1")
-
-
-def _response_schema_pointer(method: str, path: str, status: str) -> str:
-    """Locate the declared JSON body schema, following a response-level ``$ref``."""
-    pointer = f"/paths/{_escape(path)}/{method}/responses/{status}"
-    reference = _spec()["paths"][path][method]["responses"][status].get("$ref")
-    if reference is not None:
-        pointer = str(reference).removeprefix("#")
-    return f"{pointer}/content/{_escape('application/json')}/schema"
-
-
-@cache
-def _registry() -> Registry[Any]:
-    spec, base_uri = _load_spec()
-    registry: Registry[Any] = Registry().with_resource(
-        base_uri, DRAFT202012.create_resource(dict(spec))
-    )
-    return registry
-
-
-def _validator_at(pointer: str) -> Validator:
-    """Validate against the schema at ``pointer``, resolving ``$ref`` inside the whole document."""
-    validator: Validator = OAS31Validator(
-        {"$ref": f"{_load_spec()[1]}#{pointer}"},
-        registry=_registry(),
-        format_checker=OAS31Validator.FORMAT_CHECKER,
-    )
-    return validator
-
-
-def _validator_for(method: str, path: str, status: str) -> Validator:
-    return _validator_at(_response_schema_pointer(method, path, status))
 
 
 class OpenApiContractRepository(ContractRepository):

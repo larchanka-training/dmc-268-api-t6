@@ -10,7 +10,7 @@ from typing import Any
 
 import pytest
 
-from tests.test_openapi_contract import APP_PATH, _components
+from tests.openapi_contract import APP_PATH, _components
 
 # api#165: every step name the code writes to run_actions (docs/PIPELINE_SPEC.md §2). The column
 # is free text, not an enum, so nothing else catches a tool missing from the contract.
