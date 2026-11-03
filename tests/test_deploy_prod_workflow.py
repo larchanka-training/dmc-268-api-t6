@@ -22,18 +22,7 @@ from typing import Any
 
 import pytest
 
-from tests.monitoring_acceptance_workflow import DRONE_SSH_BANNER
-from tests.test_check_isolation import (
-    FAKE_DOCKER,
-    INSPECT_FORMAT,
-    NETWORK_FORMAT,
-    STAGING,
-    _find,
-    _host,
-    _join,
-)
-from tests.test_deploy_prod import PROD_PROJECT, STOPPED, _assert_stopped
-from tests.test_deploy_staging_services import (
+from tests.deploy_host_fakes import (
     CI_SECRETS,
     ENV_FILES,
     IMAGE_A,
@@ -48,6 +37,17 @@ from tests.test_deploy_staging_services import (
     _workflow_step,
     make_host,
 )
+from tests.monitoring_acceptance_workflow import DRONE_SSH_BANNER
+from tests.test_check_isolation import (
+    FAKE_DOCKER,
+    INSPECT_FORMAT,
+    NETWORK_FORMAT,
+    STAGING,
+    _find,
+    _host,
+    _join,
+)
+from tests.test_deploy_prod import PROD_PROJECT, STOPPED, _assert_stopped
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW = REPO_ROOT / ".github" / "workflows" / "deploy-prod.yml"

@@ -16,7 +16,7 @@ from pathlib import Path
 
 import pytest
 
-from tests.test_deploy_staging_services import (
+from tests.deploy_host_fakes import (
     IMAGE_A,
     IMAGE_B,
     REPO_ROOT,
