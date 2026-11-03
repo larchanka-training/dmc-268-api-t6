@@ -51,6 +51,7 @@ from tests.test_monitoring_acceptance import DRONE_SSH_BANNER
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW = REPO_ROOT / ".github" / "workflows" / "deploy-prod.yml"
+SECRETS_DOC = REPO_ROOT / "docs" / "SECRETS.md"
 
 RECORD = "Record the dispatch"
 AT_DISPATCH = "Resolve the staging tag at dispatch"
@@ -632,6 +633,36 @@ def test_the_production_bundle_reaches_only_its_role_files(tmp_path: Path) -> No
     # The store password is the one generated on the host, not a value from GitHub.
     assert re.fullmatch(r"[0-9a-f]{48}", _read_dotenv(host.env_file)["POSTGRES_PASSWORD"])
     _assert_prod_only(host, bundle=bundle)
+
+
+# --- the documentation of Environment production ------------------------------------------------
+
+
+def _production_section() -> str:
+    """docs/SECRETS.md from the Environment production heading to the next ``### `` heading."""
+    text = SECRETS_DOC.read_text(encoding="utf-8")
+    head = "### GitHub Environment `production`"
+    assert text.count(head) == 1, "SECRETS.md needs exactly one Environment production section"
+    return re.split(r"(?m)^### ", text.split(head, 1)[1], maxsplit=1)[0]
+
+
+def test_every_name_deploy_prod_reads_is_documented_for_production() -> None:
+    job = _job("deploy-prod")
+    names = set(re.findall(r"(?<!\w)(?:secrets|vars)\.(\w+)", job))
+    assert {"GH_APP_PRIVATE_KEY", "GH_APP_BOT_LOGIN", "VPS_DMC268_U", "STAGING_HOST"} <= names
+    section = _production_section()
+
+    undocumented = sorted(name for name in names if f"`{name}`" not in section)
+
+    assert undocumented == []
+
+
+def test_every_production_secret_has_a_rotation_row() -> None:
+    rotation = _production_section().split("#### Ротация", 1)[1].split("\n#### ", 1)[0]
+    first_cells = [line.split("|")[1] for line in rotation.splitlines() if line.startswith("| `")]
+
+    for name in REQUIRED_SECRETS:
+        assert [cell for cell in first_cells if f"`{name}`" in cell], name
 
 
 # --- the deploy on the VPS: no edge refresh, no app secrets, auto rollback (AC2-AC4) ----------
