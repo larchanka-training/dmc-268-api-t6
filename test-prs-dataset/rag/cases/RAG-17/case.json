@@ -21,7 +21,9 @@
   "rag": {
     "kind": "depth2",
     "defect_form": "changed_return_shape",
-    "expected_retrieved": [],
+    "expected_retrieved": [
+      "taskrunner/scheduling.py"
+    ],
     "absent_from_context": [
       "taskrunner/worker.py"
     ]

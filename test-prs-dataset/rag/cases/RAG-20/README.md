@@ -15,8 +15,8 @@ Arm A shows no block of `src/usage.ts`, and arm B does not retrieve it either: t
 v1 graph slot follows one reverse edge only. Arm B retrieves `src/range.ts`
 through the `uses_imported` edge `src/range.ts` -> `src/dates.ts::endOfDay`, and that block is
 a one-line forward that looks fine. The case is expected to be missed by v1: `src/usage.ts` is
-declared in `rag.absent_from_context`, `rag.expected_retrieved` is empty (plan
-D1: none for depth2).
+declared in `rag.absent_from_context`, and `rag.expected_retrieved` names the hop-1
+caller `src/range.ts`.
 
 ## Ground truth
 

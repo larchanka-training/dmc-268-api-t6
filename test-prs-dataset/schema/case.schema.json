@@ -112,7 +112,7 @@
           "enum": ["new_required_param", "narrowed_type", "changed_return_shape", "tightened_invariant", "renamed_export", "removed_export"]
         },
         "expected_retrieved": {
-          "description": "Callers arm B must retrieve (reverse_edge, injection; none shown in arm A); for a control or a clean case the exact set B retrieves, which may be empty.",
+          "description": "Callers arm B must retrieve (reverse_edge, injection; none shown in arm A); for a depth2 case its hop-1 caller (the hop-2 file goes in absent_from_context); for a control or a clean case the exact set B retrieves, which may be empty.",
           "type": "array",
           "uniqueItems": true,
           "items": { "$ref": "#/$defs/repositoryPath" }

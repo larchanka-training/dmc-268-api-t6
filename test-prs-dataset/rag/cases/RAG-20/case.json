@@ -21,7 +21,9 @@
   "rag": {
     "kind": "depth2",
     "defect_form": "changed_return_shape",
-    "expected_retrieved": [],
+    "expected_retrieved": [
+      "src/range.ts"
+    ],
     "absent_from_context": [
       "src/usage.ts"
     ]

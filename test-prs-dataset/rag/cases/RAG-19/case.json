@@ -21,7 +21,9 @@
   "rag": {
     "kind": "depth2",
     "defect_form": "changed_return_shape",
-    "expected_retrieved": [],
+    "expected_retrieved": [
+      "statements/history.py"
+    ],
     "absent_from_context": [
       "statements/balance.py"
     ]

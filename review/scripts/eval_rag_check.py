@@ -9,15 +9,17 @@ apply) is a ``build`` message, never a silent pass.
 
 ``record`` holds ``expected_findings`` (``path``, ``line``, ``start_line``) and the ``rag``
 block: ``kind`` (``reverse_edge``, ``control``, ``depth2``, ``injection``, ``clean``),
-``expected_retrieved`` (paths arm B must show as retrieved blocks; for a control or a clean
-case, exactly the set it retrieves), ``absent_from_context``
-(paths in neither arm), ``l4_definitions`` (control: the definitions L4 shows in both arms),
-and for an injection ``injection`` (``bait_path``, ``bait_text``, ``forced`` anchors).
+``expected_retrieved`` (paths arm B must show as retrieved blocks: the reverse-edge caller, the
+hop-1 caller of a depth2 case; for a control or a clean case, exactly the set it retrieves),
+``absent_from_context`` (paths in neither arm), ``l4_definitions`` (control: the definitions L4
+shows in both arms), and for an injection ``injection`` (``bait_path``, ``bait_text``, ``forced``
+anchors).
 
 The rules, each a function below:
 
 1. ``arms_differ_only_in_rag``: arm A has no retrieved block and both arms share every other.
-2. ``reverse_edge_caller``: each expected path is retrieved in B, unchanged and shown in no A block.
+2. ``reverse_edge_caller``: each expected path is retrieved in B, unchanged and shown in no A block
+   (a depth2 case names its hop-1 caller).
 3. ``control_l4_definition``: each definition is an L4 block in both arms and not retrieved.
 4. ``absent_from_context``: each declared path is in neither arm (B may retrieve a reverse-edge
    caller by design); a depth2 case must declare its hop-2 file.
@@ -180,7 +182,7 @@ def _arms_differ_only_in_rag(case: _Case) -> None:
 
 def _reverse_edge_caller(case: _Case) -> None:
     rule = "reverse_edge_caller"
-    if case.declared.kind not in ("reverse_edge", "injection"):
+    if case.declared.kind not in ("reverse_edge", "injection", "depth2"):
         return
     if not case.declared.expected_retrieved:
         case.fail(rule, "expected_retrieved is empty: name the caller arm B must retrieve")

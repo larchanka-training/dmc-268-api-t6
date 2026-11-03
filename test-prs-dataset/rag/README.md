@@ -14,7 +14,7 @@ cases/RAG-01/
   index.json    # frozen graph-index snapshot of base/, generated, never edited by hand
 ```
 
-`expected_retrieved` is the caller set arm B must retrieve (reverse_edge, injection) and, for a control or a clean case, the exact set it retrieves. The per-case integrity checks (`review/scripts/eval_rag_check.py`) run inside the validator and compare these declarations with the context the production build gives both arms.
+`expected_retrieved` is the caller set arm B must retrieve (reverse_edge, injection), the hop-1 caller for a depth2 case, and, for a control or a clean case, the exact set it retrieves. The per-case integrity checks (`review/scripts/eval_rag_check.py`) run inside the validator and compare these declarations with the context the production build gives both arms.
 
 ## Cases
 

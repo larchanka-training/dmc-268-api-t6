@@ -89,7 +89,8 @@ def _control(record: dict[str, Any]) -> None:
 
 
 def _depth2(record: dict[str, Any]) -> None:
-    record["rag"].update(expected_retrieved=[], absent_from_context=["pkg/cli.py"])
+    # B retrieves the hop-1 caller; the hop-2 file is in neither arm.
+    record["rag"].update(expected_retrieved=["pkg/api.py"], absent_from_context=["pkg/cli.py"])
 
 
 def _injection(record: dict[str, Any]) -> None:

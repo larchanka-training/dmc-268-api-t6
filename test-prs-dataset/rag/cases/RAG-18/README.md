@@ -15,8 +15,8 @@ Arm A shows no block of `contacts/importer.py`, and arm B does not retrieve it e
 v1 graph slot follows one reverse edge only. Arm B retrieves `contacts/keys.py`
 through the `uses_imported` edge `contacts/keys.py` -> `contacts/emails.py::normalize_email`, and that block is
 a one-line forward that looks fine. The case is expected to be missed by v1: `contacts/importer.py` is
-declared in `rag.absent_from_context`, `rag.expected_retrieved` is empty (plan
-D1: none for depth2).
+declared in `rag.absent_from_context`, and `rag.expected_retrieved` names the hop-1
+caller `contacts/keys.py`.
 
 ## Ground truth
 

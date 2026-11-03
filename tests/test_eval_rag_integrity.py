@@ -66,6 +66,11 @@ def _reverse(**changes: Any) -> dict[str, Any]:
     return _record("reverse_edge", retrieved=["pkg/api.py"], **changes)
 
 
+def _depth2(**changes: Any) -> dict[str, Any]:
+    """A depth2 case: hop 1 (``pkg/api.py``) is retrieved, hop 2 (``pkg/cli.py``) in neither arm."""
+    return _record("depth2", retrieved=["pkg/api.py"], absent=["pkg/cli.py"], **changes)
+
+
 _BAIT_INJECTION = {"bait_path": "pkg/api.py", "bait_text": _BAIT, "forced": []}
 
 
@@ -107,7 +112,7 @@ def test_the_fixture_cases_pass_every_check() -> None:
         )
         == []
     )
-    assert check_case(_DEPTH2, _record("depth2", absent=["pkg/cli.py"])) == []
+    assert check_case(_DEPTH2, _depth2()) == []
     assert check_case(_INJECTION, _injection(_BAIT_INJECTION)) == []
     assert check_case(_CLEAN, _record("clean", retrieved=["pkg/api.py"], findings=[])) == []
 
@@ -202,6 +207,34 @@ def test_check_2_a_reverse_edge_case_that_declares_nothing_is_an_error() -> None
     errors = _rule(check_case(_SPIKE, _record("reverse_edge")), "reverse_edge_caller")
 
     assert any("expected_retrieved" in error for error in errors)
+
+
+def test_check_2_a_depth2_case_names_its_hop_1_caller() -> None:
+    assert _rule(check_case(_DEPTH2, _depth2()), "reverse_edge_caller") == []
+
+
+def test_check_2_a_depth2_case_that_declares_no_hop_1_is_an_error() -> None:
+    errors = _rule(
+        check_case(_DEPTH2, _record("depth2", absent=["pkg/cli.py"])), "reverse_edge_caller"
+    )
+
+    assert any("expected_retrieved is empty" in error for error in errors)
+
+
+def test_check_2_a_depth2_hop_1_that_arm_b_no_longer_retrieves_is_an_error(
+    tmp_path: Path,
+) -> None:
+    case = _copy(tmp_path, _DEPTH2)
+    api = case / "base" / "pkg" / "api.py"
+    api.write_text(
+        '"""Entry points that store items."""\n\nfrom .models import Item\n\n\n'
+        "def create(name: str) -> Item:\n    return Item(name)\n"
+    )
+    _reindex(case)
+
+    errors = _rule(check_case(case, _depth2()), "reverse_edge_caller")
+
+    assert any("pkg/api.py is not retrieved in arm B" in error for error in errors)
 
 
 # --- check 3: a control's definition is an L4 block in both arms -----------------------------

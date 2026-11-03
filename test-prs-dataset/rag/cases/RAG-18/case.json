@@ -21,7 +21,9 @@
   "rag": {
     "kind": "depth2",
     "defect_form": "tightened_invariant",
-    "expected_retrieved": [],
+    "expected_retrieved": [
+      "contacts/keys.py"
+    ],
     "absent_from_context": [
       "contacts/importer.py"
     ]
