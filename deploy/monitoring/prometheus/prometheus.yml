@@ -62,14 +62,14 @@ scrape_configs:
       - source_labels: [container_label_com_docker_compose_project]
         regex: ""
         action: drop
-      # A container belongs to the environment of its compose project; dmc-268-api is the project
-      # of the Terraform host. The monitoring and edge projects stay shared.
+      # A container belongs to the environment of its compose project; dmc-268-api and dmc-268-ui
+      # are the projects of the Terraform host. The monitoring and edge projects stay shared.
       - source_labels: [container_label_com_docker_compose_project]
         regex: .+-prod
         target_label: environment
         replacement: prod
       - source_labels: [container_label_com_docker_compose_project]
-        regex: .+-staging|dmc-268-api
+        regex: .+-staging|dmc-268-api|dmc-268-ui
         target_label: environment
         replacement: staging
 

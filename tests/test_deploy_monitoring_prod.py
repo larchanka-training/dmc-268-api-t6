@@ -125,6 +125,7 @@ def _series_environment(job: str, series: dict[str, str]) -> str | None:
     [
         ("dmc-268-api-staging", "staging"),
         ("dmc-268-api", "staging"),
+        ("dmc-268-ui", "staging"),
         ("dmc-268-ui-staging", "staging"),
         ("dmc-268-api-prod", "prod"),
         ("dmc-268-ui-prod", "prod"),
