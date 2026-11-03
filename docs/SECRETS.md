@@ -19,8 +19,8 @@
 | Имя | Тип | Зачем |
 |---|---|---|
 | `VPS_DMC268_IP_T6` | variable | IPv4 курсового VPS, SSH на порт 22 |
-| `VPS_DMC268_U` | secret | SSH-пользователь (`root`) |
-| `VPS_DMC268_P` | secret | SSH-пароль; уходит только на VPS, никогда на Terraform-хост |
+| `VPS_DMC268_U` | secret | SSH-пользователь (`root`); читают jobs с SSH на курсовой VPS, в том числе Deploy prod и `prod-webhook-outcome.yml` |
+| `VPS_DMC268_P` | secret | SSH-пароль; уходит только на VPS, никогда на Terraform-хост. Те же потребители, что у `VPS_DMC268_U` (в том числе `prod-webhook-outcome.yml`) |
 | `AI_DMC268_T6` | secret | LLM-ключ приложения (EUrouter): на staging — `LLM_API_KEYS` в контейнере `worker` (ниже); в CI — ещё ручные workflows `LLM live run` (`llm-live-run.yml`) и `Live corpus evaluation` (`eval-live.yml`), оба `workflow_dispatch`; required-проверки его не используют |
 | `AI_DMC268_URL` | variable | endpoint LLM-провайдера: на staging — `LLM_BASE_URL` в контейнере `worker` |
 
@@ -965,6 +965,8 @@ Workflow по умолчанию: `contents: read`. Расширение точ�
 | `promote-staging` (CI/CD) | `contents: read`, `packages: write` | `:staging-previous` ← `:staging`, `:staging` ← проверенный digest после health check; по SSH только читает `.deploy-state`, токен на VM не передаётся |
 | Rollback staging: `rollback` | `contents: read`, `packages: read` | pull образа на VM |
 | Rollback staging: `promote-staging` | `contents: read`, `packages: write` | синхронизировать `:staging` с откатанным образом |
+| Deploy prod: `resolve`, `deploy-prod` | `contents: read`, `packages: read` | чтение digest под `:staging` из реестра и pull образа на VM (одноразовый `GITHUB_TOKEN`); `deploy-prod` идёт в Environment `production` |
+| `prod-webhook-outcome.yml`: `lookup` | `contents: read` | только чтение логов по SSH; `GITHUB_TOKEN` на VM не передаётся, Environment нет |
 
 `security-events`, `id-token`, `pull-requests` не выдаются; `actions: read` есть только у `push-image`. `packages: write` — только у jobs `promote-staging`, на VM этот токен не уходит. `HCLOUD_TOKEN` в Actions нет — apply вне CI.
 

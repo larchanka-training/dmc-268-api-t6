@@ -691,6 +691,18 @@ def test_the_production_section_holds_the_registration_procedure() -> None:
     assert "Prod webhook outcome" in procedure
 
 
+def test_the_permissions_and_organization_tables_name_the_prod_workflows() -> None:
+    text = SECRETS_DOC.read_text(encoding="utf-8")
+    permissions = text.split("\n## 6. Permissions\n", 1)[1].split("\n## ", 1)[0]
+    rows = {line.split("|")[1].strip(): line for line in permissions.splitlines() if "|" in line}
+
+    assert "`contents: read`, `packages: read`" in rows["Deploy prod: `resolve`, `deploy-prod`"]
+    assert rows["`prod-webhook-outcome.yml`: `lookup`"].split("|")[2].strip() == "`contents: read`"
+    for name in ("VPS_DMC268_U", "VPS_DMC268_P"):
+        (row,) = [line for line in text.splitlines() if line.startswith(f"| `{name}` |")]
+        assert "prod-webhook-outcome.yml" in row, name
+
+
 # --- the deploy on the VPS: no edge refresh, bundled app secrets, auto rollback (AC2-AC4) -----
 
 CI_WORKFLOW = WORKFLOW.parent / "ci-cd.yml"
