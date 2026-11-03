@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
@@ -19,7 +20,13 @@ from app.modules.integrations.gitlab.infrastructure.request_credentials import (
     active_gitlab_target_metadata,
 )
 from app.modules.repositories.infrastructure.models import ProviderInstallation, Repository
-from app.modules.reviews.application.check_runs import CheckRunReport, CheckRunTarget
+from app.modules.reviews.application.check_runs import (
+    CheckRunReport,
+    CheckRunTarget,
+    is_summary_only_stop,
+    summary_only_reason_of,
+)
+from app.modules.reviews.application.get_run_diff import DiffSnapshot
 from app.modules.reviews.application.handle_review_run import RunGuardSnapshot
 from app.modules.reviews.application.policy_errors import policy_error_detail
 from app.modules.reviews.application.process_run import RunVcsInput
@@ -52,7 +59,10 @@ from app.modules.reviews.infrastructure.run_action_records import insert_run_act
 from app.modules.reviews.infrastructure.run_notifications import notify_run_state
 from app.modules.reviews.infrastructure.run_origin import active_origin_condition, origin_active
 from app.modules.reviews.infrastructure.run_origin_locks import lock_run_origin_row
-from app.modules.reviews.infrastructure.run_repository import load_publication_diff_map
+from app.modules.reviews.infrastructure.run_repository import (
+    diff_snapshot_from_code_change_diff,
+    load_publication_diff_map,
+)
 from app.modules.reviews.infrastructure.saved_review_results import load_review_results
 from app.modules.reviews.infrastructure.webhook_runs import SqlAlchemyWebhookRunStore
 from app.modules.workspaces.infrastructure.models import Workspace
@@ -447,11 +457,17 @@ class SqlAlchemyRunLifecycleStore:
             )
         findings = await self._published_findings(run_id)
         severities = [item.severity.value for item in findings]
-        summary_only = await self._session.scalar(
+        # A marked row is the historical flag. The stop is also summary-only when
+        # every visible file is withheld or empty, so no row matches the mark.
+        marked = await self._session.scalar(
             select(func.coalesce(func.bool_or(CodeChangeDiff.summary_only), False)).where(
                 CodeChangeDiff.run_id == run_id
             )
         )
+        context_summary = await self._session.scalar(
+            select(ContextPayload.summary).where(ContextPayload.run_id == run_id)
+        )
+        summary_only = bool(marked) or is_summary_only_stop(context_summary)
         below_threshold = await self._session.scalar(
             select(func.count())
             .select_from(Finding)
@@ -478,6 +494,7 @@ class SqlAlchemyRunLifecycleStore:
             body_count=body_count,
             below_threshold_count=below_threshold or 0,
             summary_only=bool(summary_only),
+            summary_reason=summary_only_reason_of(context_summary),
             provider=installation.provider,
         )
 
@@ -811,15 +828,7 @@ class SqlAlchemyRunTraceStore:
 
     async def save_context_payload(self, run_id: UUID, summary: dict[str, Any]) -> None:
         # Context is durable review input, not an append-only provider audit.
-        row = await lock_run_origin_row(
-            self._session,
-            run_id,
-            _joined().where(Run.id == run_id).execution_options(populate_existing=True),
-        )
-        if row is None or not await _origin_active(self._session, row[0], row[2], row[3]):
-            raise RunCancelled("installation_unavailable")
-        if row[0].state != RunState.RUNNING:
-            raise RunCancelled("run_inactive")
+        await self._require_running_origin(run_id)
         # Schema 2: the response of the stage's context.build (#168 part 6); schema 1 rows
         # hold the summary of the removed review prompt read. A retry rewrites both.
         await self._session.execute(
@@ -829,6 +838,73 @@ class SqlAlchemyRunTraceStore:
                 index_elements=[ContextPayload.run_id],
                 set_={"summary": summary, "schema_version": 2},
             )
+        )
+
+    async def save_summary_only_stop(
+        self,
+        run_id: UUID,
+        summarize: Callable[[list[DiffSnapshot]], dict[str, Any]],
+    ) -> dict[str, Any]:
+        """Flag the stop's rows, reload them, and store coverage of that reload.
+
+        The caller builds the payload from the reloaded rows inside this transaction,
+        so the digest matches the rows publication reads. No network call.
+        """
+        await self._require_running_origin(run_id)
+        await self._mark_summary_only_rows(run_id)
+        await self._session.flush()
+        rows = (
+            await self._session.scalars(
+                select(CodeChangeDiff)
+                .where(CodeChangeDiff.run_id == run_id)
+                .order_by(CodeChangeDiff.filename.asc())
+                .execution_options(populate_existing=True)
+            )
+        ).all()
+        summary = summarize([diff_snapshot_from_code_change_diff(row) for row in rows])
+        await self._session.execute(
+            insert(ContextPayload)
+            .values(run_id=run_id, schema_version=2, summary=summary, s3_ref=None)
+            .on_conflict_do_update(
+                index_elements=[ContextPayload.run_id],
+                set_={"summary": summary, "schema_version": 2},
+            )
+        )
+        return summary
+
+    async def _require_running_origin(self, run_id: UUID) -> None:
+        row = await lock_run_origin_row(
+            self._session,
+            run_id,
+            _joined().where(Run.id == run_id).execution_options(populate_existing=True),
+        )
+        if row is None or not await _origin_active(self._session, row[0], row[2], row[3]):
+            raise RunCancelled("installation_unavailable")
+        if row[0].state != RunState.RUNNING:
+            raise RunCancelled("run_inactive")
+
+    async def _mark_summary_only_rows(self, run_id: UUID) -> None:
+        """Flag model input. A withheld row and a proven empty file stay as stored.
+
+        A withheld row has no model patch and no omission (a mask, a built-in exclusion
+        that was not given an omission). ``empty_file`` stays too: ``summary_only`` would
+        cancel that proof. A row that still has a model patch, or another omission, loses
+        the model patch. A row the line threshold already flagged is left unchanged.
+        """
+        await self._session.execute(
+            update(CodeChangeDiff)
+            .where(
+                CodeChangeDiff.run_id == run_id,
+                CodeChangeDiff.summary_only.is_(False),
+                or_(
+                    CodeChangeDiff.review_patch.is_not(None),
+                    and_(
+                        CodeChangeDiff.omission_reason.is_not(None),
+                        CodeChangeDiff.omission_reason != "empty_file",
+                    ),
+                ),
+            )
+            .values(summary_only=True, review_patch=None)
         )
 
 
