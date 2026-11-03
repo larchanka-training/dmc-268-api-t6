@@ -581,6 +581,37 @@ SELECTED = 'environment="${environment:text}"'
 # Host-level panels and the budget across environments show everything the stack scrapes.
 UNFILTERED_PANELS = {"Host CPU", "Host memory", "Root filesystem used", "LLM spend this month"}
 CONTAINER_PANELS = {"Container CPU", "Container memory"}
+# Every other panel with a PromQL target filters on the selected environment.
+FILTERED_PANELS = {
+    "Requests per second",
+    "Messages waiting in review queues",
+    "Requests per second by host",
+    "Review queues: ready messages",
+    "Review queues: in work and consumers",
+    "5xx share by host",
+    "Response time p95 by host",
+    "PostgreSQL connections",
+    "Redis memory",
+    "Redis hit ratio",
+    "Last verified backup",
+    "Last attempt",
+    "Dumps kept",
+    "Last off-host copy",
+    "Dump size",
+    "Public names: probe",
+    "Certificate expires in",
+}
+SQL_PANELS = {
+    "LLM call p95",
+    "Failed runs",
+    "LLM call latency",
+    "Phase duration p95",
+    "Phases over the range",
+    "Finished runs per hour",
+    "Failed runs by error code",
+    "LLM cost per hour",
+    "LLM tokens per hour",
+}
 
 
 def _panels() -> list[dict[str, Any]]:
@@ -611,12 +642,17 @@ def test_dashboard_switches_between_environments() -> None:
 
 
 def test_prometheus_panels_read_the_selected_environment() -> None:
-    checked = 0
+    # A new panel fails here by name until it is sorted into one of the sets.
+    prometheus = {
+        panel["title"]
+        for panel in _panels()
+        if any("expr" in target for target in panel.get("targets", []))
+    }
+    assert prometheus == FILTERED_PANELS | UNFILTERED_PANELS | CONTAINER_PANELS
     for panel in _panels():
         for target in panel.get("targets", []):
             if "expr" not in target:
                 continue
-            checked += 1
             if panel["title"] in UNFILTERED_PANELS:
                 assert "environment" not in target["expr"], panel["title"]
             elif panel["title"] in CONTAINER_PANELS:
@@ -624,7 +660,6 @@ def test_prometheus_panels_read_the_selected_environment() -> None:
                 assert 'environment=~"${environment:text}|shared"' in target["expr"], panel["title"]
             else:
                 assert SELECTED in target["expr"], (panel["title"], target["expr"])
-    assert checked == 27
 
 
 def test_sql_panels_read_the_database_of_the_selected_environment() -> None:
@@ -641,7 +676,7 @@ def test_sql_panels_read_the_database_of_the_selected_environment() -> None:
     [variable] = json.loads(DASHBOARD.read_text(encoding="utf-8"))["templating"]["list"]
     values = {option.split(":")[1].strip() for option in variable["query"].split(",")}
 
-    assert len(sql_panels) == 9
+    assert {panel["title"] for panel in sql_panels} == SQL_PANELS
     for panel in sql_panels:
         assert panel["datasource"] == {
             "type": "grafana-postgresql-datasource",
