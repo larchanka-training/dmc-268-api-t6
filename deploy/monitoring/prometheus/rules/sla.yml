@@ -94,3 +94,18 @@ groups:
         annotations:
           summary: "{{ $labels.host }}: the monthly downtime allowance is spent ({{ $value | humanizePercentage }})"
           description: "Prod downtime of this month so far has reached the allowance of 0.5 % (availability 99.5 %); the alert stays until the month ends (docs/MONITORING.md §12)."
+
+      # Time to review of the fast engine (SD §13: p95 up to 4 minutes) from the runs table, see
+      # dmc_review_time_1h in postgres-exporter/queries.yml. The p95 of fewer than 5 runs in the hour
+      # is close to the maximum of a handful of runs, so below 5 the alert stays silent. Prod only,
+      # like the whole SLA. `for: 10m` on the one-hour p95.
+      - alert: SlaReviewTimeAtRisk
+        expr: >
+          max by (environment) (dmc_review_time_1h_p95_seconds{environment="prod"}) > 240
+          and max by (environment) (dmc_review_time_1h_runs{environment="prod"}) >= 5
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Time to review: p95 {{ $value | humanizeDuration }} over the last hour, the target is 4 minutes"
+          description: "The 95th percentile of the time from the creation of a fast run to its publication, over the runs that succeeded in the last hour (at least 5 of them), is above 4 minutes (docs/MONITORING.md §12)."
