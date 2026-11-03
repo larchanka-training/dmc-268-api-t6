@@ -234,7 +234,7 @@ def test_the_environment_of_an_alert_follows_host_then_compose_project_then_labe
     assert down(_alert("PostgresDown", environment="shared")) == {
         (env, key) for env in ("prod", "staging") for key in ("api", "review", "webhooks")
     }
-    # 4. no label at all: on main the rules without labels watch the stores of staging.
+    # 4. no label at all: the default is staging.
     assert down(_alert("PostgresDown")) == {
         ("staging", "api"),
         ("staging", "review"),

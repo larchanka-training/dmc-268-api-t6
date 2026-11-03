@@ -104,16 +104,17 @@ class Component:
 
 
 # Presence expressions; in a PromQL string two backslashes are one regex backslash. Probes exist per
-# public name. The consumers of the review queues carry no environment label on main, so
-# `environment!="prod"` matches them as staging. The webhook intake is seen through the postgres of
-# its compose project, not through the webhook-worker: the worker vanishing is the alert itself.
+# public name. The consumers of the review queues carry `environment` from their scrape target
+# (static for staging, `rabbitmq-prod.json` for prod). The webhook intake is seen through the
+# postgres of its compose project, not through the webhook-worker: the worker vanishing is the
+# alert itself.
 _API_STAGING = r'probe_success{job="blackbox",host=~"staging-api\\..+"}'
 _API_PROD = r'probe_success{job="blackbox",host=~"api\\..+"}'
 _UI_STAGING = r'probe_success{job="blackbox",host=~"staging-ui\\..+"}'
 _UI_PROD = r'probe_success{job="blackbox",host=~"ui\\..+"}'
 _QUEUES_STAGING = (
     r'rabbitmq_detailed_queue_consumers{queue=~"review\\.run\\.fast|review\\.publish",'
-    r'environment!="prod"}'
+    r'environment="staging"}'
 )
 _QUEUES_PROD = (
     r'rabbitmq_detailed_queue_consumers{queue=~"review\\.run\\.fast|review\\.publish",'
@@ -343,7 +344,8 @@ def environments(signal: Signal) -> tuple[str, ...]:
         return (signal.environment,)
     if signal.environment == "shared":
         return ENVIRONMENTS
-    # On main the rules without labels watch the stores of staging only.
+    # A series without any of the labels above (an old rule or a hand-made one): the stores of
+    # staging are the long-standing default.
     return ("staging",)
 
 
