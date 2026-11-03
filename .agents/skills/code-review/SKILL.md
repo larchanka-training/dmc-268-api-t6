@@ -11,7 +11,7 @@ metadata:
 
 <!-- SYNC: mirrored in dmc-268-{ui,api}-t6/.agents/skills/code-review/SKILL.md -->
 
-Two-axis review of the diff between `HEAD` and a fixed point the user supplies:
+Two-axis review of the diff between `HEAD` and a fixed point the user supplies, or of a pull request's diff (§1):
 
 - **Standards** — does the code conform to this repo's documented coding standards?
 - **Spec** — does the code faithfully implement the originating issue / PRD / spec?
@@ -40,6 +40,8 @@ Capture the diff command once: `git diff <fixed-point>...HEAD` (three-dot, so th
 
 Before going further, confirm the fixed point resolves (`git rev-parse <fixed-point>`) and the diff is non-empty. A bad ref or empty diff should fail here — not inside two parallel sub-agents.
 
+**A pull request instead of a fixed point** (the `pr-review` skill passes one: its number, base ref and head SHA, in the clone of its repo). Never check it out: `git fetch origin <base-ref> pull/<N>/head`, confirm `git cat-file -e <head-sha>^{commit}`, then the diff command is `git diff origin/<base-ref>...<head-sha>` and the commit list `git log origin/<base-ref>..<head-sha> --oneline`; a file at the head is `git show <head-sha>:<path>`. Use the head SHA the caller pinned, never `HEAD` or `FETCH_HEAD` (another session's fetch moves it).
+
 ### 2. Identify the spec source
 
 Look for the originating spec, in this order:
@@ -49,9 +51,11 @@ Look for the originating spec, in this order:
 3. A PRD/spec file under `docs/` or `specs/` matching the branch name or feature. A plan under `docs/plans/` counts too, but it is a local, uncommitted working file: read it only if it exists on this machine; its absence from the diff or the repository is neither a finding nor a sign that there is no spec.
 4. If nothing is found, ask the user where the spec is. If they say there isn't one, the **Spec** sub-agent will skip and report "no spec available".
 
+For a pull request the spec is the issues its `Refs` lines name, with the criteria `pr-review` selected for it; search no further.
+
 ### 3. Identify the standards sources
 
-The stack rules file in `.agents/rules/` and `AGENTS.md`, plus anything else the repo documents, such as `CONTRIBUTING.md`.
+The stack rules file in `.agents/rules/` and `AGENTS.md`, plus anything else the repo documents, such as `CONTRIBUTING.md`. For a pull request, read them as of its base: `git show origin/<base-ref>:<path>`.
 
 On top of whatever the repo documents, the Standards axis always carries the **smell baseline** below — a fixed set of Fowler code smells (_Refactoring_, ch.3) that applies even when a repo documents nothing. Two rules bind it:
 
