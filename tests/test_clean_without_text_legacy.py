@@ -18,8 +18,8 @@ from app.modules.reviews.application.review_output import (
     ReviewPublication,
 )
 from app.modules.reviews.application.run_coverage import RunCoverage
+from tests.review_output_fakes import RecordingFactory, RecordingProvider, RecordingRepository
 from tests.test_clean_without_text_result import answer
-from tests.test_review_output import RecordingFactory, RecordingProvider, RecordingRepository
 from tests.test_run_coverage import coverage
 
 
