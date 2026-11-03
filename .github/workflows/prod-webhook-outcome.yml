@@ -28,8 +28,8 @@ jobs:
         env:
           DELIVERY_ID: ${{ inputs.delivery_id }}
         run: |
-          # One lowercase GUID (as GitHub shows it) and nothing else: the id is matched against the log as a fixed string and
-          # printed into the step summary.
+          # One lowercase GUID (as GitHub shows it) and nothing else: the id is matched against the
+          # log as a fixed string and printed into the step summary.
           if [[ ! "${DELIVERY_ID}" =~ ^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$ ]]; then
             echo "::error::delivery_id must be one GUID (the X-GitHub-Delivery value of Recent Deliveries)" >&2
             exit 1
@@ -111,7 +111,8 @@ jobs:
           script: |
             set -euo pipefail
             set +o xtrace
-            # Checked again on the host: the id is never interpreted, only matched as a fixed string.
+            # Checked again on the host: the id is never interpreted, only matched as a fixed
+            # string.
             if [[ ! "${DELIVERY_ID}" =~ ^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$ ]]; then
               echo "delivery_id must be one GUID" >&2
               exit 1
