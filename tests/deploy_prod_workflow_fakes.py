@@ -155,8 +155,13 @@ def _forwarded(name: str, context: Mapping[str, str]) -> dict[str, str]:
     names = envs.group(1).split(",")
     # Like ssh-action, a name set in env: but missing from envs: never reaches the host.
     assert sorted(names) == sorted(env), name
+    # A literal empty string (`''`) is how a step sets a variable to empty.
     return {
-        key: re.sub(r"\$\{\{ (.+?) \}\}", lambda match: context[match.group(1)], env[key])
+        key: re.sub(
+            r"\$\{\{ (.+?) \}\}",
+            lambda match: context[match.group(1)],
+            "" if env[key] == "''" else env[key],
+        )
         for key in names
     }
 
@@ -170,19 +175,28 @@ def _host_context(host: Host, deploy_run: str) -> dict[str, str]:
         "github.run_attempt": attempt,
         "steps.target.outputs.app_dir": str(host.app_dir),
         "steps.target.outputs.edge_alias": "api-prod",
+        "vars.WORKER_REPLICAS || '1'": "1",
     }
 
 
 def _deploy_step(
-    host: Host, image: str, deploy_run: str, *, bundle: str = "", **stubs: str
+    host: Host,
+    image: str,
+    deploy_run: str,
+    *,
+    bundle: str = "",
+    worker_replicas: str = "1",
+    **stubs: str,
 ) -> subprocess.CompletedProcess[str]:
     """The "Deploy image" step of the run `deploy_run`; `image` is the resolved digest.
 
     `bundle` is the output of the bundle step; an unset Environment yields an empty string.
+    `worker_replicas` is what the expression on the WORKER_REPLICAS variable renders to.
     """
     assert _ssh_script(_step(DEPLOY)).endswith('\n"${APP_DIR}/deploy.sh" "${IMAGE}"')
     context = {
         **_host_context(host, deploy_run),
+        "vars.WORKER_REPLICAS || '1'": worker_replicas,
         "steps.digest.outputs.image": image,
         "steps.app_secrets.outputs.bundle": bundle,
     }

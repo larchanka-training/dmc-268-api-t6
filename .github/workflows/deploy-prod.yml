@@ -407,7 +407,9 @@ jobs:
       # deploy.sh generates the store passwords on the host and keeps them in the prod .env, and a
       # value from GitHub would override them. Without a previous prod release a failed release is
       # only taken down (stop), so the edge proxy keeps answering 503 for the prod API host
-      # instead of a bootstrap nginx.
+      # instead of a bootstrap nginx. The worker count is the variable of Environment production
+      # (one when unset); the tracing values are literals, since a GitHub variable cannot be empty:
+      # prod is its own deployment environment and has no Tempo, so the exporter stays off.
       - name: Deploy image
         id: deploy
         uses: appleboy/ssh-action@0ff4204d59e8e51228ff73bce53f80d53301dee2 # v1.2.5
@@ -421,6 +423,9 @@ jobs:
           EDGE_ALIAS: ${{ steps.target.outputs.edge_alias }}
           NO_PREVIOUS_RELEASE: stop
           DEPLOY_RUN: ${{ github.run_id }}-${{ github.run_attempt }}
+          WORKER_REPLICAS: ${{ vars.WORKER_REPLICAS || '1' }}
+          DEPLOY_ENVIRONMENT: prod
+          OTEL_EXPORTER_OTLP_ENDPOINT: ''
         with:
           host: ${{ steps.target.outputs.host }}
           port: ${{ steps.target.outputs.port }}
@@ -428,7 +433,7 @@ jobs:
           password: ${{ secrets.VPS_DMC268_P }}
           fingerprint: ${{ vars.STAGING_SSH_FINGERPRINT }}
           debug: false
-          envs: GHCR_TOKEN,GHCR_USER,IMAGE,APP_SECRETS_B64,APP_DIR,DEPLOY_MODE,EDGE_ALIAS,NO_PREVIOUS_RELEASE,DEPLOY_RUN
+          envs: GHCR_TOKEN,GHCR_USER,IMAGE,APP_SECRETS_B64,APP_DIR,DEPLOY_MODE,EDGE_ALIAS,NO_PREVIOUS_RELEASE,DEPLOY_RUN,WORKER_REPLICAS,DEPLOY_ENVIRONMENT,OTEL_EXPORTER_OTLP_ENDPOINT
           script: |
             set -euo pipefail
             set +o xtrace

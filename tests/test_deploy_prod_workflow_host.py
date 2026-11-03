@@ -44,6 +44,7 @@ from tests.deploy_prod_workflow_fakes import (
     UPLOAD,
     VALIDATE,
     VPS_LOGIN,
+    WORKFLOW,
     _assert_prod_only,
     _deploy_step,
     _docker_calls,
@@ -226,6 +227,7 @@ def test_prod_reads_the_production_bundle_and_no_store_settings() -> None:
         *SECRET_SOURCES.values(),
     }
     assert set(re.findall(r"vars\.(\w+)", text)) == {
+        "WORKER_REPLICAS",
         "STAGING_HOST",
         "VPS_DMC268_IP_T6",
         "APP_DOMAIN",
@@ -239,7 +241,11 @@ def test_prod_reads_the_production_bundle_and_no_store_settings() -> None:
     assert carriers == [VALIDATE, DEPLOY]
     assert "          APP_SECRETS_B64: ${{ steps.app_secrets.outputs.bundle }}\n" in _step(DEPLOY)
     shared = "APP_DIR,DEPLOY_MODE,EDGE_ALIAS,NO_PREVIOUS_RELEASE,DEPLOY_RUN"
-    assert f"          envs: GHCR_TOKEN,GHCR_USER,IMAGE,APP_SECRETS_B64,{shared}\n" in _step(DEPLOY)
+    deploy_only = "WORKER_REPLICAS,DEPLOY_ENVIRONMENT,OTEL_EXPORTER_OTLP_ENDPOINT"
+    assert (
+        f"          envs: GHCR_TOKEN,GHCR_USER,IMAGE,APP_SECRETS_B64,{shared},{deploy_only}\n"
+        in _step(DEPLOY)
+    )
     assert f"          envs: GHCR_TOKEN,GHCR_USER,{shared}\n" in _step(ROLLBACK)
     for name in (DEPLOY, ROLLBACK):
         step = _step(name)
@@ -357,3 +363,78 @@ def test_the_run_fails_after_a_rollback_and_says_why(
     assert result.stdout == message + "\n"
     assert ("rollback failed" in result.stderr) is (rollback == "failure")
     assert (output, summary) == ("", "")
+
+
+# --- worker replicas and tracing values reach the host (#308 Part 8) --------------------------
+
+REPLICAS_LINE = "          WORKER_REPLICAS: ${{ vars.WORKER_REPLICAS || '1' }}\n"
+ROLLBACK_STEPS = {
+    "ci-cd": lambda: _workflow_step(ROLLBACK, CI_WORKFLOW),
+    "deploy-prod": lambda: _step(ROLLBACK),
+    "rollback-staging": lambda: _workflow_step("Rollback", WORKFLOW.parent / "rollback.yml"),
+}
+DEPLOY_STEPS = {
+    "ci-cd": lambda: _workflow_step(DEPLOY, CI_WORKFLOW),
+    "deploy-prod": lambda: _step(DEPLOY),
+}
+
+
+@pytest.mark.parametrize("workflow", list(DEPLOY_STEPS))
+def test_deploy_steps_forward_the_replica_variable(workflow: str) -> None:
+    step = DEPLOY_STEPS[workflow]()
+    envs = re.search(r"(?m)^\s+envs: (\S+)$", step)
+
+    # Unset, the expression gives one; the scripts refuse anything outside 1..5.
+    assert REPLICAS_LINE in step
+    assert envs is not None
+    assert "WORKER_REPLICAS" in envs.group(1).split(",")
+
+
+@pytest.mark.parametrize("workflow", list(ROLLBACK_STEPS))
+def test_rollback_steps_leave_the_replica_count_and_tracing_to_the_host(workflow: str) -> None:
+    step = ROLLBACK_STEPS[workflow]()
+
+    for name in ("WORKER_REPLICAS", "DEPLOY_ENVIRONMENT", "OTEL_"):
+        assert name not in step, name
+
+
+def test_staging_deploy_forwards_no_tracing_values() -> None:
+    # Staging keeps the defaults of the compose file: no variable, nothing on the host to set.
+    step = _workflow_step(DEPLOY, CI_WORKFLOW)
+
+    for name in ("DEPLOY_ENVIRONMENT", "OTEL_"):
+        assert name not in step, name
+
+
+def test_prod_deploy_sets_its_tracing_values_literally() -> None:
+    # A GitHub variable cannot be empty, so prod writes both values in the step: its own name
+    # and an empty endpoint (the exporter is off until prod has a Tempo).
+    step = _step(DEPLOY)
+    envs = re.search(r"(?m)^\s+envs: (\S+)$", step)
+
+    assert "          DEPLOY_ENVIRONMENT: prod\n" in step
+    assert "          OTEL_EXPORTER_OTLP_ENDPOINT: ''\n" in step
+    assert envs is not None
+    assert {"DEPLOY_ENVIRONMENT", "OTEL_EXPORTER_OTLP_ENDPOINT"} <= set(envs.group(1).split(","))
+
+
+def test_prod_deploy_step_applies_the_replica_variable(tmp_path: Path) -> None:
+    host = make_host(tmp_path, project=PROD_PROJECT)
+
+    result = _deploy_step(host, IMAGE_A, "401-1", worker_replicas="2")
+
+    assert result.returncode == 0, result.stderr
+    assert "worker replicas: 2\n" in result.stdout
+    assert _read_dotenv(host.env_file)["WORKER_REPLICAS"] == "2"
+
+
+def test_prod_deploy_step_applies_the_tracing_values(tmp_path: Path) -> None:
+    host = make_host(tmp_path, project=PROD_PROJECT)
+
+    result = _deploy_step(host, IMAGE_A, "401-1")
+
+    assert result.returncode == 0, result.stderr
+    env = _read_dotenv(host.env_file)
+    assert (env["DEPLOY_ENVIRONMENT"], env["OTEL_EXPORTER_OTLP_ENDPOINT"]) == ("prod", "")
+    up = (host.log.parent / "up-tracing").read_text(encoding="utf-8").splitlines()
+    assert up == ["", "prod"]

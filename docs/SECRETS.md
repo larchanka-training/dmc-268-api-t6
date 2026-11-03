@@ -667,6 +667,7 @@ Prod-выкат (`deploy-prod.yml`, job `deploy-prod`) идёт в Environment `
 | `GH_CLIENT_ID`, `GH_CLIENT_SECRET` | secret | `api` | да |
 | `AUTH_JWT_PRIVATE_KEY`, `AUTH_JWT_PUBLIC_KEY` | secret, новая пара | `api` | да |
 | `PORTAL_URL` | variable, `https://ui.<APP_DOMAIN>` | `worker` | нет; ссылки работают, когда появится prod UI (ui#185) |
+| `WORKER_REPLICAS` | variable, целое 1..5 | `worker` (число реплик) | нет; без неё одна. Только в Environment: на уровне repository или organization её увидел бы и staging |
 | `GITLAB_CREDENTIAL_KEYS`, `GITLAB_ACTIVE_KEY_ID`, `GITLAB_ALLOWED_ORIGINS`, `GITLAB_PRIVATE_ORIGINS`, `GITLAB_WEBHOOK_INTAKE_ENABLED`, `BITBUCKET_CREDENTIAL_KEYS`, `BITBUCKET_ACTIVE_KEY_ID`, `BITBUCKET_WEBHOOK_BASE_URL` | secret и variables | как на staging | нет; на старте выключены. Те же имена, значения свои: значения staging не копировать (`BITBUCKET_WEBHOOK_BASE_URL=https://api.<APP_DOMAIN>`, свои keyring-и) |
 
 Ни одно имя `GH_*`, `AUTH_JWT_*`, `GITLAB_CREDENTIAL_KEYS`, `BITBUCKET_CREDENTIAL_KEYS` не должно существовать на уровне repository или organization: job `deploy-prod` унаследовал бы его.
