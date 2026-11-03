@@ -1823,97 +1823,16 @@ push и сверка с HEAD, а задание будит leader-рассылк
 восстановлением CHECK. Будущие run_diff_maps/classification/final_review_results
 ниже не становятся существующими таблицами из-за этой миграции.
 
-В #213 ограниченная внутренняя coverage хранится в существующих snapshots и JSON
-`context.build`/`review.postprocess`, с привязкой к head, raw DiffMap digest и
-snapshot digest; списки ограничены 20 безопасными элементами при точных counts.
-Точный fully reviewed count опирается на полный доверенный набор changed patches,
-а не на первые 20 элементов диагностики: повторный пропуск уже непроверенного
-файла не уменьшает count снова. Этот внутренний набор не сериализуется;
-диагностические списки остаются bounded, ignored имена не раскрываются.
-
-Внутренний `checked_paths` #170 — пути с сохранённым review_patch != null
-(пустая строка тоже входит). Этот набор обозначает доступные текстовые входы,
-а не доказывает fully reviewed coverage #213: её точный счётчик берётся из
-доверенного покрытия после fit. При partial путь доступного входа может быть
-перечислен, хотя fully reviewed count равен 0; coverage остаётся partial, а
-при пустых/info findings verdict=null. Supported blocking/attention сохраняются.
-Для списка путей overview сначала проверяется канонический поддерживаемый путь.
-При classification_unavailable либо наличии ignored exclusions все имена
-консервативно скрываются; иначе packer #170 выводит целые пути в бюджете 4 000
-Unicode-символов и строку «… и ещё N файл/файла/файлов». Это отдельный бюджет:
-ограничение 20 элементов относится к coverage diagnostics, а не к body path list.
-Перепаковка через run_url/overflow footer сохраняет backend summary, coverage и
-severity threshold; она не возвращает raw model summary и не делает partial clean.
-
-Закреплённый policy_base_sha (= Run.base_sha) не заменяется живым base; фактический diff_old_sha
-хранится отдельно и не подменяется policy_base_sha. Контекст и restore используют
-одну достоверную durable identity; восстановление — application-решение над
-реальными сохранёнными входами, без фиктивных provider locator/meta.
-Выбирается новейшая context.build с явной coverage classification; последующие
-prompt-only записи (их писали только попытки до #168 ч.6) её не заслоняют, невалидная
-новая classification не
-возвращает старый clean. Referenced response body принадлежит тому же run.
-
-Итог учитывает точный контекст после ignore и единственного fit_review_context
-в GatewayReviewModel перед отправкой провайдеру. Omitted или prefix-truncated
-разрешённый changed patch даёт
-review_input_incomplete/partial; такой файл исключается из fully reviewed count.
-Потеря только вспомогательного контекста не означает пропуск changed patch.
-Потеря changed patch на внутренней границе модели учитывается, даже если
-внешний контекст не изменился. Эти доверенные факты сохраняются через обе
-ветки возврата reflection до финализации и публикации без расширения
-LLM ReviewOutput. Технический drop unknown_path
-также понижает coverage до partial; lint/duplicate/severity drops сами по себе
-этого не делают. Остальные reflection coordinate drops, evidence_not_shown и
-verifier insufficient_context остаются за lifecycle #107/#130; их общее влияние
-на coverage не объявляется реализованным в #213.
-
-После #130 F1 worker собирает Reflection Pass; F2 seed активировал
-`review.system:v4`, а после #350 новые runs закрепляют общий v5. Snapshot-путь выбирается по
-закреплённому v4 или v5; runs с v3 или ниже, созданные до F2 seed либо с pins до 0039,
-сохраняют legacy-путь без verifier. Адаптер ревью
-выполняет fit/guard/manifest один раз: snapshot-ответ `ReviewReply` несёт
-фактический fitted context и manifest принятого вызова, legacy — mapping.
-В обоих ответах факт потери changed patch передаётся доверенным внутренним
-carrier, сохраняется после unwrap и обеих веток Reflection Pass; JSON/schema
-ответа модели не расширяются. Остальные технические drops из целевого lifecycle
-#107/#130 не объявляются реализованными этим стыком.
-Coverage понижается до summary/effort/verdict/body и сохранения
-postprocess outcome. Supported blocking/attention сохраняются при partial;
-пустые/info findings дают null. Complete допускается только без причин неполноты;
-оба читателя сохранённого результата/coverage проверяют этот инвариант.
-
-Старый action без достоверной classification использует unavailable/partial
-fallback: counts-only, без имён потенциально ignored файлов. Валидные ignored
-классификации также раскрывают только counts. Inline legacy без coverage
-получает unavailable/partial, не complete/clean. Прямой legacy-вызов
-FindingsPostProcessor.process с coverage=None также получает
-classification_unavailable/partial до summary/body, без clean по отсутствию данных.
-Повреждённый сохранённый JSON даёт warning с run_id без raw JSON, путей или
-секретов; ожидаемое отсутствие записи само по себе не предупреждение. Оба
-читателя используют общий валидатор status/count invariants; restore считает
-snapshot digest один раз. StoreReviewOutput явно отклоняет отсутствующий backend
-summary до записи/commit/очереди, независимо от Python -O.
-Для none тело review и check-run
-одинаково сообщают «нет доступных для анализа изменений».
-
-В публичных detail/latest-run для всех состояний кроме SUCCEEDED summary=None и
-saved_result=None; fallback не синтезируется заранее, latest-run batch читает
-результаты только succeeded. Это gate публичного caller, не общего loader:
-внутренний PUBLISHING recovery может читать доверенный finalized result для
-сохранения исходных event/body/verdict. Существующие nullable поля API не меняются.
-Для исторического succeeded без достоверного результата API может показать
-fallback/null, тогда как ранее опубликованное GitHub-тело остаётся прежним;
-историческая перепубликация не выполняется.
-
-Нового публичного coverage DTO, LLM-полей, result_id или таблиц результата нет.
-Полный #107, общий run-owned file_omissions #130/#168 и zero-LLM lifecycle
-no-text partial остаются целевыми, а не активированными #213.
-Zero-LLM lifecycle none активен на snapshot path с #130 F5; legacy (≤ v3) для того же
-inventory по-прежнему вызывает модель.
-Summary-only с нулём вызовов модели — текущий жизненный цикл, не будущий:
-стадия останавливается до RAG, conventions, ревью и verifier и публикует
-`NoModelAnswer`; coverage partial, verdict null.
+Текущий ограниченный контракт #213 — внутренняя coverage в существующих snapshots и JSON `context.build`/`review.postprocess`
+(привязка к head, raw DiffMap digest и snapshot digest; bounded-списки при точных counts; `checked_paths` #170 против
+fully reviewed count; список путей overview и repack через run_url/overflow footer; `policy_base_sha`/`diff_old_sha`;
+выбор `context.build` и restore по одной durable identity; потеря changed patch и `unknown_path`; маршрут snapshot по
+v4/v5 и legacy ≤ v3; инварианты complete/partial; fallback без classification, общий валидатор чтения, повреждённый JSON
+с warning по `run_id`, отказ `StoreReviewOutput` без backend summary; тексты none в body и check-run; публичный gate
+summary/saved_result, исторические succeeded без republish; zero-LLM `none` на snapshot path с #130 F5 (legacy ≤ v3
+вызывает модель), summary-only с `NoModelAnswer`) — канон в [PIPELINE_SPEC §2](PIPELINE_SPEC.md#2-фазы-внутри-running-и-трейс-run_actions);
+здесь не дублируется. Нового публичного coverage DTO, LLM-полей, `result_id` и таблиц нет; полный #107, run-owned
+`file_omissions` #130/#168 и zero-LLM no-text partial остаются целевыми.
 
 
 
