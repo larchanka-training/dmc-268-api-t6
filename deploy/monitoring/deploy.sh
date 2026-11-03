@@ -190,6 +190,7 @@ if [[ -n "${PROD_API_DIR}" ]]; then
   fi
   PROD_POSTGRES_USER="$(read_compose_env_var POSTGRES_USER "${PROD_API_ENV_FILE}" || true)"
   PROD_POSTGRES_DB="$(read_compose_env_var POSTGRES_DB "${PROD_API_ENV_FILE}" || true)"
+  PROD_REDIS_PASSWORD="$(read_compose_env_var REDIS_PASSWORD "${PROD_API_ENV_FILE}" || true)"
   PROD_POSTGRES_USER="${PROD_POSTGRES_USER:-app}"
   PROD_POSTGRES_DB="${PROD_POSTGRES_DB:-app}"
   for identifier in "${PROD_POSTGRES_USER}" "${PROD_POSTGRES_DB}"; do
@@ -542,13 +543,29 @@ else
 fi
 chmod 644 "${PROBE_TARGETS}.tmp"
 mv -f "${PROBE_TARGETS}.tmp" "${PROBE_TARGETS}"
-# Read by nobody (Prometheus, the blackbox exporter) and grafana (uid 472) through read-only mounts.
+# Targets of the prod scrapers (compose.prod.yml), read by the store jobs of Prometheus through
+# file_sd: the names are services of the overlay; an empty list without prod.
+write_prod_targets() {
+  local file="${MONITORING_DIR}/prometheus/targets/$1" target="$2"
+  if [[ -n "${PROD_API_DIR}" ]]; then
+    printf '[{"targets": ["%s"], "labels": {"environment": "prod"}}]\n' "${target}" > "${file}.tmp"
+  else
+    echo '[]' > "${file}.tmp"
+  fi
+  chmod 644 "${file}.tmp"
+  mv -f "${file}.tmp" "${file}"
+}
+write_prod_targets postgres-prod.json postgres-exporter-prod:9187
+write_prod_targets redis-prod.json redis-exporter-prod:9121
+write_prod_targets rabbitmq-prod.json relay-prod:15692
+# Read by nobody (Prometheus, the blackbox exporter), grafana (uid 472) and nginx (uid 101, the
+# prod relay) through read-only mounts.
 find "${MONITORING_DIR}/prometheus" "${MONITORING_DIR}/grafana" "${MONITORING_DIR}/postgres-exporter" \
   "${MONITORING_DIR}/alertmanager/templates" "${MONITORING_DIR}/backup" "${MONITORING_DIR}/blackbox" \
-  -type d -exec chmod 755 {} +
+  "${MONITORING_DIR}/relay" -type d -exec chmod 755 {} +
 find "${MONITORING_DIR}/prometheus" "${MONITORING_DIR}/grafana" "${MONITORING_DIR}/postgres-exporter" \
   "${MONITORING_DIR}/alertmanager/templates" "${MONITORING_DIR}/backup" "${MONITORING_DIR}/blackbox" \
-  -type f -exec chmod 644 {} +
+  "${MONITORING_DIR}/relay" -type f -exec chmod 644 {} +
 
 {
   printf 'API_NETWORK=%s\n' "$(escape_compose_value "${API_NETWORK}")"
@@ -575,6 +592,9 @@ find "${MONITORING_DIR}/prometheus" "${MONITORING_DIR}/grafana" "${MONITORING_DI
     printf 'PROD_POSTGRES_DB=%s\n' "${PROD_POSTGRES_DB}"
     printf 'PROD_GRAFANA_DB_PASSWORD=%s\n' "${PROD_GRAFANA_DB_PASSWORD}"
     printf 'PROD_PG_EXPORTER_PASSWORD=%s\n' "${PROD_PG_EXPORTER_PASSWORD}"
+    printf 'PROD_API_NETWORK=%s\n' "$(escape_compose_value "${PROD_API_NETWORK}")"
+    printf 'PROD_REDIS_PASSWORD=%s\n' "$(escape_compose_value "${PROD_REDIS_PASSWORD}")"
+    printf 'RELAY_CONFIG_DIGEST=%s\n' "$(config_digest relay)"
   fi
   printf 'PROMETHEUS_CONFIG_DIGEST=%s\n' "$(config_digest prometheus)"
   printf 'ALERTMANAGER_CONFIG_DIGEST=%s\n' "$(config_digest alertmanager)"
@@ -589,6 +609,10 @@ mv -f "${ENV_FILE}.tmp" "${ENV_FILE}"
 
 COMPOSE=(docker compose -p "${COMPOSE_PROJECT}" -f "${MONITORING_DIR}/compose.yml"
   -f "${MONITORING_DIR}/compose.${DEPLOY_MODE}.yml" --env-file "${ENV_FILE}")
+# Without prod the overlay is left out, and --remove-orphans removes the running scrapers.
+if [[ -n "${PROD_API_DIR}" ]]; then
+  COMPOSE+=(-f "${MONITORING_DIR}/compose.prod.yml")
+fi
 # Without the off-host settings the service is left out, and --remove-orphans removes a running one.
 if [[ "${OFFSITE_CONFIGURED}" == s3 ]]; then
   COMPOSE+=(-f "${MONITORING_DIR}/compose.offsite.yml")
@@ -602,6 +626,28 @@ if ! printf '%s' "${GRAFANA_ADMIN_PASSWORD}" \
     admin reset-admin-password --password-from-stdin >/dev/null 2>&1; then
   echo "failed to sync the Grafana admin password" >&2
   exit 1
+fi
+
+# The monitoring containers sit on the prod network next to its stores: prove that this joined no
+# store to the staging network or the other way round. Exit 1 is a violation and fails the deploy;
+# exit 2 or no script is no verdict (a store down, a failed docker query) and only warns, like
+# the prod deploy, which fails on a violation alone. The script is uploaded with the stack or sits
+# in the repository next to this directory.
+if [[ -n "${PROD_API_DIR}" ]]; then
+  isolation_script="${SCRIPT_DIR}/check-isolation.sh"
+  if [[ ! -f "${isolation_script}" ]]; then isolation_script="${SCRIPT_DIR}/../scripts/check-isolation.sh"; fi
+  if [[ -f "${isolation_script}" ]]; then
+    isolation_status=0
+    bash "${isolation_script}" "${PROD_API_PROJECT}" "${API_PROJECT}" || isolation_status=$?
+    if ((isolation_status == 1)); then
+      echo "check-isolation reports a violation between ${PROD_API_PROJECT} and ${API_PROJECT}: see the table above" >&2
+      exit 1
+    elif ((isolation_status != 0)); then
+      echo "check-isolation exited with ${isolation_status}: isolation not checked" >&2
+    fi
+  else
+    echo "check-isolation.sh not found: isolation not checked" >&2
+  fi
 fi
 
 echo "monitoring stack deployed: Grafana ${GRAFANA_ROOT_URL}"

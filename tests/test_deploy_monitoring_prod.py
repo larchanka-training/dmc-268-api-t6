@@ -6,6 +6,7 @@ here read the YAML files of deploy/monitoring and tests/monitoring.
 
 from __future__ import annotations
 
+import json
 import re
 import stat
 import subprocess
@@ -298,7 +299,8 @@ def _prod_dir(stack: Host) -> Path:
 def _deploy_with_prod(stack: Host, **overrides: str) -> subprocess.CompletedProcess[str]:
     env = {
         "PROD_API_DIR": str(_prod_dir(stack)),
-        "STUB_ISOLATION_LOG": str(stack.stubs / "isolation.log"),
+        # The stub logs into the docker log, so the order of the calls shows.
+        "STUB_ISOLATION_LOG": str(stack.stubs / "docker.log"),
         **overrides,
     }
     return stack.deploy(extra=env)
@@ -428,3 +430,98 @@ def test_without_prod_nothing_of_it_reaches_the_host(prod_host: Host) -> None:
     assert result.returncode == 0, result.stderr
     assert "pgcontainer-prod" not in prod_host.log("psql.log")
     assert not {key for key in prod_host.env() if key.startswith("PROD_")}
+
+
+TARGETS = {
+    "postgres-prod.json": "postgres-exporter-prod:9187",
+    "redis-prod.json": "redis-exporter-prod:9121",
+    "rabbitmq-prod.json": "relay-prod:15692",
+}
+
+
+def _targets(stack: Host, name: str) -> Any:
+    return json.loads((stack.monitoring_dir / "prometheus" / "targets" / name).read_text())
+
+
+def test_prod_targets_are_written_with_the_prod_label(prod_host: Host) -> None:
+    result = _deploy_with_prod(prod_host)
+
+    assert result.returncode == 0, result.stderr
+    for name, target in TARGETS.items():
+        path = prod_host.monitoring_dir / "prometheus" / "targets" / name
+        # Written under umask 077, read by Prometheus as nobody.
+        assert stat.S_IMODE(path.stat().st_mode) == 0o644, name
+        assert _targets(prod_host, name) == [
+            {"targets": [target], "labels": {"environment": "prod"}}
+        ]
+
+
+def test_without_prod_the_prod_targets_are_empty_and_the_overlay_is_left_out(
+    prod_host: Host,
+) -> None:
+    env_file = prod_host.api_dir / ".env"
+    env_file.write_text(env_file.read_text().replace("DEPLOY_MODE=edge", "DEPLOY_MODE=ports"))
+    result = prod_host.deploy(PROD_API_DIR="", unset=("APP_DOMAIN",))
+
+    assert result.returncode == 0, result.stderr
+    for name in TARGETS:
+        assert _targets(prod_host, name) == [], name
+    assert "compose.prod.yml" not in prod_host.log("docker.log")
+    assert "check-isolation" not in result.stdout + result.stderr
+
+
+def test_prod_settings_reach_compose_with_the_overlay(prod_host: Host) -> None:
+    result = _deploy_with_prod(prod_host)
+    env = prod_host.env()
+    up = next(line for line in prod_host.log("docker.log").splitlines() if " up " in line)
+
+    assert result.returncode == 0, result.stderr
+    assert f"-f {prod_host.monitoring_dir}/compose.prod.yml" in up
+    assert env["PROD_API_NETWORK"] == "dmc-268-api-prod_default"
+    # The Redis password of the prod application, escaped for compose like its own .env.
+    assert env["PROD_REDIS_PASSWORD"] == "prod-pa$$word"
+    assert env["PROD_POSTGRES_DB"] == "app"
+    assert re.fullmatch(r"[0-9a-f]{16}", env["RELAY_CONFIG_DIGEST"])
+
+
+def test_relay_config_is_readable_by_the_relay_user(prod_host: Host) -> None:
+    config_dir = prod_host.monitoring_dir / "relay"
+    config_dir.chmod(0o700)
+    (config_dir / "nginx.conf").chmod(0o600)
+    result = _deploy_with_prod(prod_host)
+
+    assert result.returncode == 0, result.stderr
+    # nginx runs as uid 101 behind a read-only bind mount.
+    assert stat.S_IMODE(config_dir.stat().st_mode) == 0o755
+    assert stat.S_IMODE((config_dir / "nginx.conf").stat().st_mode) == 0o644
+
+
+def test_isolation_of_staging_and_prod_is_checked_after_the_stack_starts(
+    prod_host: Host,
+) -> None:
+    result = _deploy_with_prod(prod_host)
+    calls = prod_host.log("docker.log").splitlines()
+
+    assert result.returncode == 0, result.stderr
+    assert calls.count("dmc-268-api-prod dmc-268-api-staging") == 1
+    after_up = calls.index("dmc-268-api-prod dmc-268-api-staging")
+    assert any(" up " in line for line in calls[:after_up])
+
+
+def test_an_isolation_violation_fails_the_deploy(prod_host: Host) -> None:
+    result = _deploy_with_prod(prod_host, STUB_ISOLATION_EXIT="1")
+
+    assert result.returncode == 1
+    assert "check-isolation reports a violation" in result.stderr
+
+
+@pytest.mark.parametrize("exit_code", ["2", "missing"])
+def test_an_unchecked_isolation_only_warns(prod_host: Host, exit_code: str) -> None:
+    if exit_code == "missing":
+        (prod_host.monitoring_dir / "check-isolation.sh").unlink()
+        result = _deploy_with_prod(prod_host)
+    else:
+        result = _deploy_with_prod(prod_host, STUB_ISOLATION_EXIT=exit_code)
+
+    assert result.returncode == 0, result.stderr
+    assert "isolation not checked" in result.stderr
