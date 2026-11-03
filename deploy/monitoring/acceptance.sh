@@ -102,7 +102,11 @@ COMPOSE=(docker compose -p "${COMPOSE_PROJECT}")
 COMPOSE_FILES=(-f "${MONITORING_DIR}/compose.yml" -f "${MONITORING_DIR}/compose.${DEPLOY_MODE}.yml")
 if [[ -n "${OFFSITE_BUCKET}" ]]; then COMPOSE_FILES+=(-f "${MONITORING_DIR}/compose.offsite.yml"); fi
 # deploy.sh writes the prod network to .env only with prod; then its scrapers must be running.
-if [[ -n "$(setting PROD_API_NETWORK)" ]]; then COMPOSE_FILES+=(-f "${MONITORING_DIR}/compose.prod.yml"); fi
+if [[ -n "$(setting PROD_API_NETWORK)" ]]; then
+  COMPOSE_FILES+=(-f "${MONITORING_DIR}/compose.prod.yml")
+  # The prod off-host copy needs both prod and the bucket, like the staging one the bucket.
+  if [[ -n "${OFFSITE_BUCKET}" ]]; then COMPOSE_FILES+=(-f "${MONITORING_DIR}/compose.offsite-prod.yml"); fi
+fi
 FAILED=()
 RESULTS=()
 # One line of the summary; a failed check fails the run at the end, after every other check ran.
