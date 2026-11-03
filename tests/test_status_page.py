@@ -38,6 +38,31 @@ ACTIVE_AT_PARSED = datetime(2026, 11, 3, 10, 15, 30, 123456, tzinfo=UTC)
 LATER_ACTIVE_AT = "2026-11-03T11:00:00Z"
 LAST_FIRING_AT = 1793700000.0  # 2026-11-03T10:00:00Z
 
+# The presence expression of each component and environment, as the spec (docs/MONITORING.md §5,
+# the label shapes of #423) reads, not taken from the module under test. In a PromQL string two
+# backslashes are one regex backslash. tests/monitoring/status.test.yml runs them under promtool.
+_CONSUMERS = r'rabbitmq_detailed_queue_consumers{queue=~"review\\.run\\.fast|review\\.publish",'
+_POSTGRES = 'container_last_seen{container_label_com_docker_compose_service="postgres",'
+PRESENCE = [
+    ("api", "staging", r'probe_success{job="blackbox",host=~"staging-api\\..+"}'),
+    ("api", "prod", r'probe_success{job="blackbox",host=~"api\\..+"}'),
+    ("ui", "staging", r'probe_success{job="blackbox",host=~"staging-ui\\..+"}'),
+    ("ui", "prod", r'probe_success{job="blackbox",host=~"ui\\..+"}'),
+    ("review", "staging", _CONSUMERS + 'environment="staging"}'),
+    ("review", "prod", _CONSUMERS + 'environment="prod"}'),
+    (
+        "webhooks",
+        "staging",
+        _POSTGRES + 'container_label_com_docker_compose_project=~"dmc-268-api.*",'
+        'container_label_com_docker_compose_project!~".*-prod"}',
+    ),
+    (
+        "webhooks",
+        "prod",
+        _POSTGRES + 'container_label_com_docker_compose_project="dmc-268-api-prod"}',
+    ),
+]
+
 
 @pytest.fixture(scope="module")
 def page() -> Iterator[ModuleType]:
@@ -505,6 +530,15 @@ def test_every_component_has_a_presence_expression_for_each_environment(page: Mo
             assert expression.strip(), component.key
 
 
+@pytest.mark.parametrize(("key", "env", "expression"), PRESENCE)
+def test_the_presence_expression_is_the_literal_selector_of_the_spec(
+    page: ModuleType, key: str, env: str, expression: str
+) -> None:
+    component = next(component for component in page.COMPONENTS if component.key == key)
+
+    assert component.coverage[env] == expression
+
+
 # --- S1: the HTTP surface, with a stub Prometheus -------------------------------------------
 
 
@@ -545,11 +579,7 @@ class PrometheusStub:
 def prometheus(page: ModuleType) -> Iterator[tuple[PrometheusStub, str]]:
     stub = PrometheusStub()
     stub.last_firing_query = page.LAST_FIRING_QUERY
-    stub.coverage = {
-        expression: f"{component.key}/{env}"
-        for component in page.COMPONENTS
-        for env, expression in component.coverage.items()
-    }
+    stub.coverage = {expression: f"{key}/{env}" for key, env, expression in PRESENCE}
 
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self) -> None:
@@ -865,9 +895,7 @@ def test_a_poll_sends_the_presence_and_last_firing_expressions_unchanged(
     poller.refresh()
 
     sent = [parse_qs(query)["query"][0] for path, query in stub.requests if path.endswith("query")]
-    expected = [page.LAST_FIRING_QUERY] + [
-        expression for component in page.COMPONENTS for expression in component.coverage.values()
-    ]
+    expected = [page.LAST_FIRING_QUERY] + [expression for _, _, expression in PRESENCE]
     assert sorted(sent) == sorted(expected)
     assert [path for path, _ in stub.requests].count("/api/v1/alerts") == 1
 
@@ -907,14 +935,18 @@ def test_the_poller_keeps_polling_until_it_is_stopped(
     assert poller.snapshot() is not None
 
 
-# --- S6: the last-firing query runs under promtool ------------------------------------------
+# --- S6: the page's queries run under promtool --------------------------------------------
 
 
-def test_promtool_runs_the_very_query_the_page_sends(page: ModuleType) -> None:
+def test_promtool_runs_the_very_queries_the_page_sends(page: ModuleType) -> None:
     tested = re.findall(r"^\s+- expr: '(.+)'$", PROMTOOL_TEST.read_text("utf-8"), re.M)
 
-    # status.test.yml holds the text of the constant, so what promtool proves is what is sent.
-    assert tested == [page.LAST_FIRING_QUERY]
+    # status.test.yml holds the text of the constants, so what promtool proves is what is sent:
+    # the last-firing query and the eight presence expressions, each once.
+    presence = [
+        expression for component in page.COMPONENTS for expression in component.coverage.values()
+    ]
+    assert sorted(tested) == sorted([page.LAST_FIRING_QUERY, *presence])
     assert "test rules tests/monitoring/status.test.yml" in " ".join(
         VALIDATE.read_text("utf-8").split()
     )
