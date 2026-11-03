@@ -15,8 +15,8 @@ services:
     command:
       - --config.file=/etc/prometheus/prometheus.yml
       - --storage.tsdb.path=/prometheus
-      - --storage.tsdb.retention.time=15d
-      - --storage.tsdb.retention.size=2GB
+      - --storage.tsdb.retention.time=65d
+      - --storage.tsdb.retention.size=6GB
     # The digest of the config dir (deploy.sh): compose recreates the container when it changes.
     labels:
       dmc.config-digest: ${PROMETHEUS_CONFIG_DIGEST:-none}
