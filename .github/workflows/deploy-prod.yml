@@ -225,6 +225,33 @@ jobs:
           } >> "${GITHUB_OUTPUT}"
           echo "prod target: course VPS (${host}:${port}, ${base_url})"
 
+      - name: Refuse missing production secrets
+        env:
+          HAS_GH_APP_ID: ${{ secrets.GH_APP_ID != '' }}
+          HAS_GH_APP_PRIVATE_KEY: ${{ secrets.GH_APP_PRIVATE_KEY != '' }}
+          HAS_GH_WEBHOOK_SECRET: ${{ secrets.GH_WEBHOOK_SECRET != '' }}
+          HAS_GH_CLIENT_ID: ${{ secrets.GH_CLIENT_ID != '' }}
+          HAS_GH_CLIENT_SECRET: ${{ secrets.GH_CLIENT_SECRET != '' }}
+          HAS_AUTH_JWT_PRIVATE_KEY: ${{ secrets.AUTH_JWT_PRIVATE_KEY != '' }}
+          HAS_AUTH_JWT_PUBLIC_KEY: ${{ secrets.AUTH_JWT_PUBLIC_KEY != '' }}
+          HAS_GH_APP_BOT_LOGIN: ${{ vars.GH_APP_BOT_LOGIN != '' }}
+        run: |
+          # Presence flags only: this step never sees a value. The App id, private key and bot login
+          # are all-or-nothing (a partial set stops the webhook worker at startup); the rest is what
+          # the api needs for webhooks, login and JWTs. The check runs before any host contact.
+          missing=()
+          for name in GH_APP_ID GH_APP_PRIVATE_KEY GH_WEBHOOK_SECRET GH_CLIENT_ID GH_CLIENT_SECRET AUTH_JWT_PRIVATE_KEY AUTH_JWT_PUBLIC_KEY GH_APP_BOT_LOGIN; do
+            flag="HAS_${name}"
+            if [[ "${!flag}" != "true" ]]; then
+              missing+=("${name}")
+            fi
+          done
+          if (( ${#missing[@]} > 0 )); then
+            list="$(IFS=,; echo "${missing[*]}")"
+            echo "::error::Environment production lacks required values: ${list//,/, }; see docs/SECRETS.md" >&2
+            exit 1
+          fi
+
       # The deploy files come from this run's checkout (the dispatched main commit), like Rollback
       # staging, so a :staging image older than these scripts still gets NO_PREVIOUS_RELEASE=stop.
       - name: Checkout

@@ -53,6 +53,7 @@ AT_DISPATCH = "Resolve the staging tag at dispatch"
 AT_JOB_START = "Re-resolve the staging tag at job start"
 REFUSE_MOVED = "Refuse a moved staging tag"
 TARGET = "Resolve prod target"
+REFUSE_SECRETS = "Refuse missing production secrets"
 CHECKOUT = "Checkout"
 UPLOAD = "Upload deploy files"
 PREPARE = "Prepare host"
@@ -508,6 +509,69 @@ def test_an_incomplete_or_foreign_target_is_refused(
     assert output == ""
 
 
+# --- the required production values -----------------------------------------------------------
+
+# GitHub names of what Environment production must hold before the host is touched: seven secrets
+# and the bot login variable. The three App values are all-or-nothing for the webhook worker.
+REQUIRED_SECRETS = [
+    "GH_APP_ID",
+    "GH_APP_PRIVATE_KEY",
+    "GH_WEBHOOK_SECRET",
+    "GH_CLIENT_ID",
+    "GH_CLIENT_SECRET",
+    "AUTH_JWT_PRIVATE_KEY",
+    "AUTH_JWT_PUBLIC_KEY",
+]
+REQUIRED_NAMES = [*REQUIRED_SECRETS, "GH_APP_BOT_LOGIN"]
+ALL_PRESENT = {f"HAS_{name}": "true" for name in REQUIRED_NAMES}
+
+
+def _refusal(names: str) -> str:
+    return f"::error::Environment production lacks required values: {names}; see docs/SECRETS.md\n"
+
+
+def test_the_refusal_reads_presence_not_values() -> None:
+    env = _step(REFUSE_SECRETS).split("        env:\n", 1)[1].split("        run: |\n", 1)[0]
+    expected = (
+        "".join(
+            f"          HAS_{name}: ${{{{ secrets.{name} != '' }}}}\n" for name in REQUIRED_SECRETS
+        )
+        + "          HAS_GH_APP_BOT_LOGIN: ${{ vars.GH_APP_BOT_LOGIN != '' }}\n"
+    )
+    assert env == expected
+
+
+def test_complete_production_secrets_pass(tmp_path: Path) -> None:
+    result, output, _ = _run(REFUSE_SECRETS, tmp_path, ALL_PRESENT)
+
+    assert result.returncode == 0, result.stderr
+    assert "::error::" not in result.stdout + result.stderr
+    assert output == ""
+
+
+@pytest.mark.parametrize("name", REQUIRED_NAMES)
+def test_a_missing_production_name_is_refused_before_the_host(tmp_path: Path, name: str) -> None:
+    result, output, _ = _run(REFUSE_SECRETS, tmp_path, {**ALL_PRESENT, f"HAS_{name}": "false"})
+
+    assert result.returncode == 1
+    assert result.stderr == _refusal(name)
+    assert output == ""
+    assert _docker_calls(tmp_path) == []
+
+
+def test_all_missing_names_are_listed_in_one_refusal(tmp_path: Path) -> None:
+    env = {f"HAS_{name}": "false" for name in REQUIRED_NAMES}
+
+    result, output, _ = _run(REFUSE_SECRETS, tmp_path, env)
+
+    assert result.returncode == 1
+    assert result.stderr == _refusal(
+        "GH_APP_ID, GH_APP_PRIVATE_KEY, GH_WEBHOOK_SECRET, GH_CLIENT_ID, GH_CLIENT_SECRET,"
+        " AUTH_JWT_PRIVATE_KEY, AUTH_JWT_PUBLIC_KEY, GH_APP_BOT_LOGIN"
+    )
+    assert output == ""
+
+
 # --- the deploy on the VPS: no edge refresh, no app secrets, auto rollback (AC2-AC4) ----------
 
 CI_WORKFLOW = WORKFLOW.parent / "ci-cd.yml"
@@ -605,7 +669,13 @@ def _assert_prod_only(host: Host) -> None:
 
 
 def test_the_deploy_job_changes_the_host_only_after_the_checks() -> None:
-    assert _step_names(_job("deploy-prod")) == [AT_JOB_START, REFUSE_MOVED, TARGET, *HOST_STEPS]
+    assert _step_names(_job("deploy-prod")) == [
+        AT_JOB_START,
+        REFUSE_MOVED,
+        TARGET,
+        REFUSE_SECRETS,
+        *HOST_STEPS,
+    ]
     assert "        uses: actions/checkout@v4\n" in _step(CHECKOUT)
 
 
@@ -730,12 +800,14 @@ def test_prod_gets_no_application_or_store_secrets() -> None:
         "GITHUB_TOKEN",
         "VPS_DMC268_U",
         "VPS_DMC268_P",
+        *REQUIRED_SECRETS,  # presence flags of the refusal step, never forwarded
     }
     assert set(re.findall(r"vars\.(\w+)", text)) == {
         "STAGING_HOST",
         "VPS_DMC268_IP_T6",
         "APP_DOMAIN",
         "STAGING_SSH_FINGERPRINT",
+        "GH_APP_BOT_LOGIN",
     }
     assert "APP_SECRETS_B64" not in text
     assert "POSTGRES_" not in text
