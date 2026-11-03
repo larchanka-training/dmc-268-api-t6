@@ -585,6 +585,83 @@ def test_prod_backup_dir_defaults_to_the_directory_of_the_prod_project() -> None
     assert 'BACKUP_DIR="${BACKUP_DIR:-/var/backups/dmc-268/${API_PROJECT}}"' in script
 
 
+@pytest.mark.parametrize(
+    ("backup_dir", "prod_backup_dir"),
+    [
+        ("backups", "backups"),
+        ("backups", "backups/"),
+        ("backups/", "backups//"),
+        ("backups", "backups/../backups"),
+        ("backups", "backups/prod"),
+        ("backups/staging", "backups"),
+    ],
+)
+def test_prod_and_staging_dumps_never_share_a_directory(
+    prod_host: Host, backup_dir: str, prod_backup_dir: str
+) -> None:
+    result = _deploy_with_prod(
+        prod_host,
+        BACKUP_DIR=str(prod_host.root / backup_dir),
+        PROD_BACKUP_DIR=str(prod_host.root / prod_backup_dir),
+    )
+
+    assert result.returncode == 1
+    assert "PROD_BACKUP_DIR must not be BACKUP_DIR nor inside it" in result.stderr
+    # Refused before anything on the host changed.
+    assert not prod_host.env_file.exists()
+    assert prod_host.log("psql.log") == ""
+    assert " up " not in prod_host.log("docker.log")
+    assert not (prod_host.root / "backups").exists()
+
+
+def test_a_sibling_directory_is_not_inside_the_other(prod_host: Host) -> None:
+    # "backups-prod" starts with "backups" but is another directory.
+    result = _deploy_with_prod(
+        prod_host,
+        BACKUP_DIR=str(prod_host.root / "backups"),
+        PROD_BACKUP_DIR=str(prod_host.root / "backups-prod"),
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+# BSD realpath has no -m: the check of the dump dirs must not depend on it.
+FAKE_BSD_REALPATH = """\
+#!/bin/sh
+echo "realpath: illegal option -- m" >&2
+exit 1
+"""
+
+
+@pytest.mark.parametrize(
+    ("backup_dir", "prod_backup_dir", "refused"),
+    [
+        ("backups", "backups-prod", False),
+        ("backups", "backups/prod", True),
+        ("backups", "backups/./", True),
+        ("backups/staging", "backups/staging/../../backups/staging", True),
+    ],
+)
+def test_the_dump_dir_check_needs_no_gnu_realpath(
+    prod_host: Host, backup_dir: str, prod_backup_dir: str, refused: bool
+) -> None:
+    (prod_host.stubs / "realpath").write_text(FAKE_BSD_REALPATH, encoding="utf-8")
+    (prod_host.stubs / "realpath").chmod(0o755)
+
+    result = _deploy_with_prod(
+        prod_host,
+        BACKUP_DIR=str(prod_host.root / backup_dir),
+        PROD_BACKUP_DIR=str(prod_host.root / prod_backup_dir),
+    )
+
+    assert "illegal option" not in result.stderr
+    if refused:
+        assert result.returncode == 1
+        assert "PROD_BACKUP_DIR must not be BACKUP_DIR nor inside it" in result.stderr
+    else:
+        assert result.returncode == 0, result.stderr
+
+
 def _up(stack: Host) -> str:
     return [line for line in stack.log("docker.log").splitlines() if " up " in line][-1]
 
