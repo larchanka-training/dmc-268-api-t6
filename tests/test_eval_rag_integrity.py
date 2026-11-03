@@ -18,7 +18,12 @@ from typing import Any
 
 import pytest
 
+from app.modules.code_index.application.index_store import IndexedSymbol
 from app.modules.code_index.domain.enums import RagIndexStatus
+from app.modules.code_index.domain.keys import SymbolKey
+from app.modules.reviews.application.ast_symbols import SymbolKind
+from app.modules.reviews.application.context_provenance import LineRange
+from app.modules.reviews.application.rag_context import PLACE_MAX_LINES
 from app.modules.reviews.application.review_context import ContextOmission, RagStats
 from review.scripts import eval_rag_check
 from review.scripts.eval_rag_check import check_case
@@ -294,6 +299,105 @@ def test_check_10_a_hop_2_that_uses_only_an_unrelated_hop_1_symbol_is_an_error(
     assert "pkg/api.py" in errors[0]
 
 
+def test_check_10_a_hop_1_name_that_only_a_docstring_or_comment_mentions_is_an_error(
+    tmp_path: Path,
+) -> None:
+    case = _copy(tmp_path, _DEPTH2)
+    api = case / "base" / "pkg" / "api.py"
+    # ``label`` is declared outside the retrieved ``create`` block; its name only occurs in
+    # that block's docstring and comment.
+    api.write_text(
+        '"""Entry points that store items."""\n\nfrom .models import Item\n'
+        "from .store import save\n\n\n"
+        "def create(name: str) -> Item:\n"
+        '    """Store an item; the label is made by ``label``."""\n'
+        "    # see label\n"
+        "    return save(Item(name))\n\n\n"
+        "def label(name: str) -> str:\n    return name.title()\n"
+    )
+    (case / "base" / "pkg" / "cli.py").write_text(
+        '"""Command line."""\n\nfrom .api import label\n\n\n'
+        "def main(name: str) -> str:\n    return label(name)\n"
+    )
+    _reindex(case)
+
+    errors = _rule(check_case(case, _depth2()), "depth2_second_hop")
+
+    assert len(errors) == 1
+    assert "pkg/api.py:label" in errors[0]
+    assert "declared in a retrieved block" in errors[0]
+
+
+def test_check_10_a_hop_1_symbol_declared_before_the_retrieved_block_is_an_error(
+    tmp_path: Path,
+) -> None:
+    case = _copy(tmp_path, _DEPTH2)
+    api = case / "base" / "pkg" / "api.py"
+    api.write_text(
+        '"""Entry points that store items."""\n\nfrom .models import Item\n'
+        "from .store import save\n\n\n"
+        "def label(name: str) -> str:\n    return name.title()\n\n\n"
+        "def create(name: str) -> Item:\n"
+        '    """Store an item; the label is made by ``label``."""\n'
+        "    return save(Item(name))\n"
+    )
+    (case / "base" / "pkg" / "cli.py").write_text(
+        '"""Command line."""\n\nfrom .api import label\n\n\n'
+        "def main(name: str) -> str:\n    return label(name)\n"
+    )
+    _reindex(case)
+
+    errors = _rule(check_case(case, _depth2()), "depth2_second_hop")
+
+    assert len(errors) == 1
+    assert "pkg/api.py:label" in errors[0]
+
+
+def test_check_10_a_hop_2_that_uses_the_class_declaring_the_retrieved_method_passes(
+    tmp_path: Path,
+) -> None:
+    case = _copy(tmp_path, _DEPTH2)
+    (case / "base" / "pkg" / "api.py").write_text(
+        '"""Entry points that store items."""\n\nfrom .models import Item\n'
+        "from .store import save\n\n\n"
+        "class Api:\n    def create(self, name: str) -> Item:\n        return save(Item(name))\n"
+    )
+    (case / "base" / "pkg" / "cli.py").write_text(
+        '"""Command line."""\n\nfrom .api import Api\n\n\n'
+        "def main(name: str) -> str:\n    return Api().create(name).name\n"
+    )
+    _reindex(case)
+
+    assert _rule(check_case(case, _depth2()), "depth2_second_hop") == []
+
+
+@pytest.mark.parametrize(
+    ("symbol_name", "expected"),
+    [("Api.create", True), ("Api", True), ("Apis.create", False), ("Other.create", False)],
+)
+def test_check_10_a_method_stands_for_the_class_the_edge_names(
+    symbol_name: str, expected: bool
+) -> None:
+    """An index without a class row of its own still ties a method to the imported class."""
+    key = SymbolKey("pkg/api.py", symbol_name, SymbolKind.METHOD, 0)
+    symbols = [IndexedSymbol(key, 5, 7)]
+
+    assert eval_rag_check._declared_in(symbols, "Api", [LineRange(6, 6)]) is expected
+
+
+def test_check_10_a_hop_1_retrieved_as_a_signature_only_block_passes(tmp_path: Path) -> None:
+    case = _copy(tmp_path, _DEPTH2)
+    body = "".join(f"    total += {number}\n" for number in range(PLACE_MAX_LINES + 5))
+    (case / "base" / "pkg" / "api.py").write_text(
+        '"""Entry points that store items."""\n\nfrom .models import Item\n'
+        "from .store import save\n\n\n"
+        f"def create(name: str) -> Item:\n    total = 0\n{body}    return save(Item(name))\n"
+    )
+    _reindex(case)
+
+    assert _rule(check_case(case, _depth2()), "depth2_second_hop") == []
+
+
 def test_check_10_a_hop_1_name_that_is_only_part_of_an_identifier_does_not_count(
     tmp_path: Path,
 ) -> None:
@@ -311,7 +415,7 @@ def test_check_10_a_hop_1_name_that_is_only_part_of_an_identifier_does_not_count
 
     assert len(errors) == 1
     assert "pkg/api.py:creat" in errors[0]
-    assert "none of them is in a retrieved block" in errors[0]
+    assert "declared in a retrieved block" in errors[0]
 
 
 def test_check_10_a_depth2_case_that_declares_no_hop_1_reports_it_once() -> None:

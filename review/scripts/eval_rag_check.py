@@ -32,25 +32,24 @@ The rules, each a function below:
 9. ``control_as_declared``: B retrieves exactly the declared paths of a control (an empty list: it
    retrieves nothing).
 10. ``depth2_second_hop``: each hop-2 file of a depth2 case has a ``uses_imported`` edge in the
-    frozen ``index.json`` to a hop-1 caller, and a name it uses (``target_name``) is a whole word
-    in a retrieved block of arm B of that caller: it still uses the hop-1 code that reads the
-    changed definition (``imports`` alone does not count: the retriever follows uses). The
-    name match against the block text is a heuristic: a name found only in a comment or a
-    signature passes.
+    frozen ``index.json`` to a hop-1 caller, and the symbol it names (or, for a class, a method it
+    declares) has lines (from the production index build) that overlap a retrieved block of arm B
+    of that caller: it still uses the hop-1 code that reads the changed definition (``imports``
+    alone does not count: the retriever follows uses).
 """
 
 from __future__ import annotations
 
 import asyncio
-import re
 from collections import Counter
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from app.modules.code_index.application.index_store import IndexedEdge
+from app.modules.code_index.application.index_store import IndexedEdge, IndexedSymbol
 from app.modules.code_index.domain.enums import EdgeKind, RagIndexStatus
+from app.modules.reviews.application.context_provenance import LineRange
 from app.modules.reviews.application.rag_context import (
     MAX_RAG_FILES,
     MAX_RAG_PLACES_PER_FILE,
@@ -58,7 +57,7 @@ from app.modules.reviews.application.rag_context import (
 )
 from app.modules.reviews.application.review_context import RAG_CONTEXT_MAX_TOKENS, ContextLevel
 from review.scripts.eval_rag_context import ArmInput, build_arm_input
-from review.scripts.rag_snapshot import INDEX_FILE, parse_snapshot
+from review.scripts.rag_snapshot import INDEX_FILE, build_case_files, parse_snapshot
 from review.scripts.validate_dataset import _patch_added_lines, _patch_changed_paths
 
 KINDS = ("reverse_edge", "control", "depth2", "injection", "clean")
@@ -86,8 +85,10 @@ class _Case:
     changed: frozenset[str]
     arm_a: ArmInput
     arm_b: ArmInput
-    # The edges of the frozen index.json.
+    # The edges of the frozen index.json, and (a depth2 case only) the symbols of a fresh
+    # production build of base/, by path.
     edges: tuple[IndexedEdge, ...]
+    symbols: Mapping[str, tuple[IndexedSymbol, ...]]
     errors: list[str] = field(default_factory=list)
 
     def fail(self, rule: str, detail: str) -> None:
@@ -364,22 +365,40 @@ def _anchors(case: _Case) -> None:
         _on_added_line(case, f"injection.forced[{index}]", anchor, ranged=False)
 
 
+def _declared_in(symbols: Sequence[IndexedSymbol], name: str, ranges: Sequence[LineRange]) -> bool:
+    """Whether a symbol the edge ``name`` stands for overlaps one of ``ranges``.
+
+    ``name`` is the imported name of an edge. It stands for the top-level symbol of that name
+    and, for a class, for the methods it declares (``name.method``): the block of a method
+    shows the class the hop-2 file uses. An edge names no member, so for a class this pins the
+    class, not the method hop-2 calls. Overlap, not containment: a declaration too long to
+    show whole is retrieved as its signature only. A declaration elsewhere in the file does
+    not overlap the block, whatever the block's text says. The hop-1 file is unchanged by the
+    diff (rule 2), so the base lines of the index are the new-side lines of the block.
+    """
+    return any(
+        (symbol.key.qualified_name == name or symbol.key.qualified_name.startswith(name + "."))
+        and any(r.start_line <= symbol.end_line and symbol.start_line <= r.end_line for r in ranges)
+        for symbol in symbols
+    )
+
+
 def _depth2_second_hop(case: _Case) -> None:
     rule = "depth2_second_hop"
     if case.declared.kind != "depth2" or not case.declared.expected_retrieved:
         return  # an empty hop 1 is reported once, by reverse_edge_caller
     hop_1 = sorted(set(case.declared.expected_retrieved))
-    texts: dict[str, list[str]] = {path: [] for path in hop_1}
+    ranges: dict[str, list[LineRange]] = {path: [] for path in hop_1}
     for block in case.arm_b.payload.retrieved:
-        if block.source.path in texts:
-            texts[block.source.path].append(block.text)
+        if block.source.path in ranges:
+            ranges[block.source.path].extend(block.source.ranges)
     for path in case.declared.absent_from_context:
         used = [
             edge
             for edge in case.edges
             if edge.path == path
             and edge.kind == EdgeKind.USES_IMPORTED
-            and edge.target_path in texts
+            and edge.target_path in ranges
         ]
         if not used:
             case.fail(
@@ -388,15 +407,16 @@ def _depth2_second_hop(case: _Case) -> None:
                 f"in {INDEX_FILE}: the case is no longer depth 2",
             )
         elif not any(
-            re.search(rf"\b{re.escape(edge.target_name)}\b", text)
+            _declared_in(
+                case.symbols.get(edge.target_path, ()), edge.target_name, ranges[edge.target_path]
+            )
             for edge in used
-            for text in texts[edge.target_path]
         ):
             names = ", ".join(sorted({f"{edge.target_path}:{edge.target_name}" for edge in used}))
             case.fail(
                 rule,
-                f"{path} uses {names} but none of them is in a retrieved block of arm B: "
-                "it no longer uses the hop-1 code that reads the changed definition",
+                f"{path} uses {names} but none of them is declared in a retrieved block of "
+                "arm B: it no longer uses the hop-1 code that reads the changed definition",
             )
 
 
@@ -434,11 +454,16 @@ def check_case(case_dir: Path, record: Mapping[str, Any]) -> list[str]:
         changed = frozenset(_patch_changed_paths(patch))
         arm_a, arm_b = asyncio.run(_build_arms(case_dir))
         edges = parse_snapshot((case_dir / INDEX_FILE).read_bytes()).edges
+        symbols = (
+            {file.path: file.symbols for file in build_case_files(case_dir)}
+            if declared.kind == "depth2"
+            else {}
+        )
     except Exception as error:  # one broken case must not abort a corpus loop
         # A missing or stale index.json, a patch that does not apply, a refused file kind,
         # any other failure: the arms cannot be built, so no rule could be checked.
         return [f"{name}: build: {type(error).__name__}: {error}"]
-    case = _Case(name, declared, added, changed, arm_a, arm_b, edges)
+    case = _Case(name, declared, added, changed, arm_a, arm_b, edges, symbols)
     for check in _CHECKS:
         check(case)
     return case.errors

@@ -118,7 +118,7 @@
           "items": { "$ref": "#/$defs/repositoryPath" }
         },
         "absent_from_context": {
-          "description": "Files shown in no block of arm A (and of B, except a retrieved reverse-edge caller): the hop-2 file of a depth2 case, which uses the code of its hop-1 caller that arm B retrieves (a uses_imported edge in index.json).",
+          "description": "Files shown in no block of arm A (and of B, except a retrieved reverse-edge caller): the hop-2 file of a depth2 case, which uses the hop-1 symbol whose declaration arm B retrieves (a uses_imported edge in index.json).",
           "type": "array",
           "uniqueItems": true,
           "items": { "$ref": "#/$defs/repositoryPath" }
