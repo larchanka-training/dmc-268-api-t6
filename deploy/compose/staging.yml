@@ -116,6 +116,8 @@ services:
   webhook-worker:
     image: ${IMAGE:?IMAGE is required}
     command: ["python", "-m", "app.webhook_worker"]
+    # SIGTERM: the pass is cancelled, resources close and queued spans flush (up to 5 s).
+    stop_grace_period: 20s
     # app.env: GitHub App credentials; webhook-worker.env: GITHUB_APP_BOT_LOGIN (docs/SECRETS.md).
     env_file:
       - app.env
