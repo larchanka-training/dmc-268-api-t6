@@ -172,3 +172,93 @@ def test_request_series_get_the_environment_of_their_host(host: str, environment
 )
 def test_node_series_get_their_environment(metric: str, environment: str) -> None:
     assert _series_environment("node", {"__name__": metric}) == environment
+
+
+# --- prod scrapers and the relay (compose.prod.yml) -----------------------------------------
+
+PROD_SCRAPERS = {"postgres-exporter-prod", "redis-exporter-prod", "relay-prod"}
+
+
+def _merged_services() -> dict[str, dict[str, Any]]:
+    """compose.yml, compose.edge.yml and compose.prod.yml merged by service, networks as maps."""
+    merged: dict[str, dict[str, Any]] = {}
+    for name in ("compose.yml", "compose.edge.yml", "compose.prod.yml"):
+        for service, config in _load(MONITORING / name)["services"].items():
+            known = merged.setdefault(service, {"networks": {}})
+            known.update({key: value for key, value in config.items() if key != "networks"})
+            networks = config.get("networks", {})
+            if isinstance(networks, list):
+                networks = dict.fromkeys(networks, {})
+            known["networks"].update(networks)
+    return merged
+
+
+def _members(network: str) -> set[str]:
+    return {name for name, config in _merged_services().items() if network in config["networks"]}
+
+
+def test_prod_scrapers_sit_on_the_prod_network_and_never_on_staging() -> None:
+    prod = _load(MONITORING / "compose.prod.yml")
+
+    assert _members("api-prod") == PROD_SCRAPERS
+    # check-isolation.sh fails a container on both application networks.
+    assert not PROD_SCRAPERS & _members("api")
+    assert not _members("api") & _members("api-prod")
+    assert prod["networks"]["api-prod"] == {
+        "name": "${PROD_API_NETWORK:?PROD_API_NETWORK is required}",
+        "external": True,
+    }
+
+
+def test_grafana_shares_no_network_with_the_exporters() -> None:
+    # The exporters answer multi-target requests (/probe, /scrape): whoever reaches them can make
+    # them connect to any host of the prod network. Grafana lets its admin add data sources, so it
+    # reaches the relay only, over a network of its own.
+    prod = _load(MONITORING / "compose.prod.yml")
+    services = _merged_services()
+    exporters = {"postgres-exporter-prod", "redis-exporter-prod"}
+    names_and_aliases = {
+        alias
+        for network in ("prod-metrics", "prod-sql")
+        for name in _members(network)
+        for alias in [name, *(services[name]["networks"][network] or {}).get("aliases", [])]
+    }
+
+    assert prod["networks"]["prod-metrics"] == {"internal": True}
+    assert prod["networks"]["prod-sql"] == {"internal": True}
+    assert _members("prod-metrics") == {"prometheus", "relay-prod"} | exporters
+    assert _members("prod-sql") == {"grafana", "relay-prod"}
+    for name in exporters:
+        assert not set(services[name]["networks"]) & set(services["grafana"]["networks"]), name
+    # The staging names keep resolving through the staging network only.
+    assert not names_and_aliases & {"postgres", "rabbitmq", "redis"}
+
+
+def test_prod_exporters_run_the_images_of_staging() -> None:
+    staging = _load(MONITORING / "compose.yml")["services"]
+    prod = _load(MONITORING / "compose.prod.yml")["services"]
+
+    assert prod["postgres-exporter-prod"]["image"] == staging["postgres-exporter"]["image"]
+    assert prod["redis-exporter-prod"]["image"] == staging["redis-exporter"]["image"]
+    assert re.fullmatch(r"nginx:1\.\d+-alpine@sha256:[0-9a-f]{64}", prod["relay-prod"]["image"])
+    for name in PROD_SCRAPERS:
+        assert re.fullmatch(r"\d+m", str(prod[name]["mem_limit"])), name
+        assert "ports" not in prod[name], name
+
+
+def test_relay_forwards_only_postgres_and_rabbitmq_metrics() -> None:
+    config = (MONITORING / "relay" / "nginx.conf").read_text()
+    servers = re.findall(r"\bserver\s*\{(.*?)\}", config, re.S)
+    forwarded = {}
+    for server in servers:
+        port = re.search(r"^\s*listen\s+(\d+);", server, re.M)
+        target = re.search(r"^\s*set\s+(\$\w+)\s+(\S+);", server, re.M)
+        passed = re.search(r"^\s*proxy_pass\s+(\$\w+);", server, re.M)
+        assert port and target and passed, server
+        # A variable makes nginx resolve the name per connection, so a recreated store is found.
+        assert passed.group(1) == target.group(1)
+        forwarded[int(port.group(1))] = target.group(2)
+
+    assert forwarded == {15692: "rabbitmq:15692", 5432: "postgres:5432"}
+    assert len(servers) == 2
+    assert re.search(r"^\s*resolver\s+127\.0\.0\.11\b", config, re.M)

@@ -8,18 +8,20 @@ set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 MONITORING=deploy/monitoring
 
+# image_of <compose file of the monitoring dir> <image>: the pinned image line of that file.
 image_of() {
   local images
-  images="$(sed -n "s|^    image: \($1:.*\)$|\1|p" "${MONITORING}/compose.yml")"
+  images="$(sed -n "s|^    image: \($2:.*\)$|\1|p" "${MONITORING}/$1")"
   if [[ -z "${images}" || "${images}" == *$'\n'* ]]; then
-    echo "${MONITORING}/compose.yml must name exactly one $1 image" >&2
+    echo "${MONITORING}/$1 must name exactly one $2 image" >&2
     return 1
   fi
   printf '%s' "${images}"
 }
-prometheus_image="$(image_of prom/prometheus)"
-alertmanager_image="$(image_of prom/alertmanager)"
-blackbox_image="$(image_of prom/blackbox-exporter)"
+prometheus_image="$(image_of compose.yml prom/prometheus)"
+alertmanager_image="$(image_of compose.yml prom/alertmanager)"
+blackbox_image="$(image_of compose.yml prom/blackbox-exporter)"
+relay_image="$(image_of compose.prod.yml nginx)"
 
 tmp="$(mktemp -d)"
 trap 'rm -rf "${tmp}"' EXIT
@@ -64,6 +66,19 @@ for mode in edge ports; do
     docker compose -p dmc-268-monitoring -f "${MONITORING}/compose.yml" \
     -f "${MONITORING}/compose.${mode}.yml" -f "${MONITORING}/compose.offsite.yml" config -q
 done
+
+echo "== docker compose config (prod scrapers)"
+for mode in edge ports; do
+  API_NETWORK=ci_default GRAFANA_ADMIN_PASSWORD=ci GRAFANA_DB_PASSWORD=ci PG_EXPORTER_PASSWORD=ci \
+    PG_BACKUP_PASSWORD=ci BACKUP_DIR=/var/backups/ci GRAFANA_ALIAS=grafana-staging \
+    PROD_API_NETWORK=ci_prod_default PROD_POSTGRES_DB=ci PROD_PG_EXPORTER_PASSWORD=ci \
+    docker compose -p dmc-268-monitoring -f "${MONITORING}/compose.yml" \
+    -f "${MONITORING}/compose.${mode}.yml" -f "${MONITORING}/compose.prod.yml" config -q
+done
+
+echo "== nginx config check (prod relay)"
+docker run --rm --entrypoint nginx -v "${PWD}/${MONITORING}/relay:/etc/nginx/relay:ro" \
+  "${relay_image}" -t -c /etc/nginx/relay/nginx.conf
 
 echo "== dashboards are JSON"
 for dashboard in "${MONITORING}"/grafana/dashboards/*.json; do
