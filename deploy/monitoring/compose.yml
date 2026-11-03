@@ -7,7 +7,8 @@
 # Images are pinned by digest like the stores of deploy/compose/staging.yml; the tag only names the
 # version, update tag and digest together.
 # Memory limits keep the stack under ~1.6 GB on the shared course VPS (about 1.75 GB with the prod
-# scrapers of compose.prod.yml, +128m with compose.offsite.yml).
+# scrapers of compose.prod.yml, about 1.9 GB with its pg-backup-prod, about 2.1 GB with the two
+# off-host copies of compose.offsite.yml and compose.offsite-prod.yml, 128m each).
 services:
   prometheus:
     image: prom/prometheus:v3.15.0@sha256:efd719c99d83b060d9daefdcf00360461adf279f45ef5391f8d111892118753e
