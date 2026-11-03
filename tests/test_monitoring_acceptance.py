@@ -99,8 +99,9 @@ case " $* " in
     printf 'prometheus\nalertmanager\ngrafana\npg-backup\n'
     if [[ " $* " == *compose.offsite.yml* ]]; then echo backup-offsite; fi
     if [[ " $* " == *compose.prod.yml* ]]; then
-      printf 'postgres-exporter-prod\nredis-exporter-prod\nrelay-prod\n'
+      printf 'postgres-exporter-prod\nredis-exporter-prod\nrelay-prod\npg-backup-prod\n'
     fi
+    if [[ " $* " == *compose.offsite-prod.yml* ]]; then echo backup-offsite-prod; fi
     ;;
   *" ps -a --format "*)
     if [[ -n "${STUB_PS_FAILS:-}" ]]; then
@@ -116,6 +117,12 @@ case " $* " in
     echo 'backup-offsite running healthy'
     if [[ -z "${STUB_PROD_MISSING:-}" ]]; then
       printf 'postgres-exporter-prod running \nredis-exporter-prod running \nrelay-prod running \n'
+      if [[ -z "${STUB_PG_BACKUP_PROD_EXITED:-}" ]]; then
+        echo 'pg-backup-prod running '
+      else
+        echo 'pg-backup-prod exited '
+      fi
+      if [[ -z "${STUB_OFFSITE_PROD_MISSING:-}" ]]; then echo 'backup-offsite-prod running '; fi
     fi
     ;;
   *" promtool query instant "*)
@@ -677,8 +684,10 @@ def test_with_prod_the_prod_scrapers_are_expected(tmp_path: Path) -> None:
 
     assert run.result.returncode == 0, run.report + run.result.stderr
     assert "-f " + str(tmp_path / "monitoring" / "compose.prod.yml") in "\n".join(run.calls)
-    # 4 services of the stack, the off-host copy and the three prod scrapers.
-    assert "8 expected services running" in run.line("stack services")
+    # 4 services of the stack, the off-host copy, the three prod scrapers and the prod backup
+    # with its off-host copy.
+    assert "10 expected services running" in run.line("stack services")
+    assert "-f " + str(tmp_path / "monitoring" / "compose.offsite-prod.yml") in "\n".join(run.calls)
 
 
 def test_a_missing_prod_scraper_fails_the_stack_check(tmp_path: Path) -> None:
@@ -687,6 +696,29 @@ def test_a_missing_prod_scraper_fails_the_stack_check(tmp_path: Path) -> None:
     _assert_only_failed(run, "stack services")
     for service in ("postgres-exporter-prod", "redis-exporter-prod", "relay-prod"):
         assert f"{service} missing" in run.line("stack services")
+
+
+def test_a_stopped_prod_backup_fails_the_stack_check(tmp_path: Path) -> None:
+    run = _run(tmp_path, prod=True, STUB_PG_BACKUP_PROD_EXITED="1")
+
+    _assert_only_failed(run, "stack services")
+    assert "pg-backup-prod exited" in run.line("stack services")
+
+
+def test_a_missing_prod_off_host_copy_fails_the_stack_check(tmp_path: Path) -> None:
+    run = _run(tmp_path, prod=True, STUB_OFFSITE_PROD_MISSING="1")
+
+    _assert_only_failed(run, "stack services")
+    assert "backup-offsite-prod missing" in run.line("stack services")
+
+
+def test_without_the_bucket_the_prod_off_host_copy_is_not_expected(tmp_path: Path) -> None:
+    run = _run(tmp_path, prod=True, offsite=False)
+
+    _assert_only_failed(run, "off-host copy (R2) < 3 h")
+    assert "compose.offsite-prod.yml" not in "\n".join(run.calls)
+    # 3 services of the stack, pg-backup, the three prod scrapers and pg-backup-prod.
+    assert "8 expected services running" in run.line("stack services")
 
 
 PROD_STORE_QUERY = 'up{environment="prod", job=~"postgres|redis|rabbitmq|rabbitmq-queues"}'
