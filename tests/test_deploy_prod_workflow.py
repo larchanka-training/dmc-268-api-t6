@@ -33,11 +33,15 @@ from tests.test_check_isolation import (
 )
 from tests.test_deploy_prod import PROD_PROJECT, STOPPED, _assert_stopped
 from tests.test_deploy_staging_services import (
+    CI_SECRETS,
     ENV_FILES,
     IMAGE_A,
     IMAGE_B,
+    SECRET_SOURCES,
+    VARIABLE_SOURCES,
     Host,
     _read_dotenv,
+    _read_env_file,
     _release_unchanged_literal,
     _run_script,
     _workflow_step,
@@ -55,6 +59,8 @@ REFUSE_MOVED = "Refuse a moved staging tag"
 TARGET = "Resolve prod target"
 REFUSE_SECRETS = "Refuse missing production secrets"
 CHECKOUT = "Checkout"
+BUNDLE = "Bundle application secrets"
+VALIDATE = "Validate application bundle and GitLab configuration"
 UPLOAD = "Upload deploy files"
 PREPARE = "Prepare host"
 WAIT_TLS = "Wait for the edge certificate"
@@ -572,11 +578,69 @@ def test_all_missing_names_are_listed_in_one_refusal(tmp_path: Path) -> None:
     assert output == ""
 
 
+# --- the production bundle: staging's steps, run in Environment production ---------------------
+
+
+def _env_entries(step: str) -> dict[str, str]:
+    """The ``NAME: expression`` entries of the step's env block (comments left out)."""
+    block = step.split("        env:\n", 1)[1].split("        run: |\n", 1)[0]
+    return dict(re.findall(r"(?m)^          ([A-Z_0-9]+): (.+)$", block))
+
+
+def test_prod_bundles_the_secrets_exactly_like_staging() -> None:
+    prod, staging = _step(BUNDLE), _workflow_step(BUNDLE, CI_WORKFLOW)
+
+    assert _run_script(prod) == _run_script(staging)
+    assert _env_entries(prod) == _env_entries(staging)
+    assert "        id: app_secrets\n        shell: bash\n" in prod
+
+
+def test_prod_validates_the_bundle_like_staging_before_any_host_step() -> None:
+    prod, staging = _step(VALIDATE), _workflow_step(VALIDATE, CI_WORKFLOW)
+
+    assert _run_script(prod) == _run_script(staging)
+    assert _env_entries(prod) == {
+        "GHCR_TOKEN": "${{ secrets.GITHUB_TOKEN }}",
+        "GHCR_USER": "${{ github.actor }}",
+        "IMAGE": "${{ steps.digest.outputs.image }}",
+        "APP_SECRETS_B64": "${{ steps.app_secrets.outputs.bundle }}",
+        "REGISTRY": "ghcr.io",
+    }
+    assert "        shell: bash\n" in prod
+    assert re.search(r"(?m)^        if:", prod) is None
+    names = _step_names(_job("deploy-prod"))
+    assert names.index(CHECKOUT) < names.index(BUNDLE) < names.index(VALIDATE) < names.index(UPLOAD)
+
+
+def test_the_production_bundle_reaches_only_its_role_files(tmp_path: Path) -> None:
+    runner = tmp_path / "runner"
+    runner.mkdir()
+    result, output, _ = _run(BUNDLE, runner, CI_SECRETS)
+    assert result.returncode == 0, result.stderr
+    (line,) = output.splitlines()
+    bundle = line.removeprefix("bundle=")
+    assert bundle
+    host = make_host(tmp_path, project=PROD_PROJECT)
+
+    deploy = _deploy_step(host, IMAGE_A, "401-1", bundle=bundle)
+
+    assert deploy.returncode == 0, deploy.stderr
+    for file_name, (_, keys) in ENV_FILES.items():
+        assert _read_env_file(host.app_dir / file_name) == {
+            name: CI_SECRETS[name] for name in keys if CI_SECRETS[name]
+        }, file_name
+    # The store password is the one generated on the host, not a value from GitHub.
+    assert re.fullmatch(r"[0-9a-f]{48}", _read_dotenv(host.env_file)["POSTGRES_PASSWORD"])
+    _assert_prod_only(host, bundle=bundle)
+
+
 # --- the deploy on the VPS: no edge refresh, no app secrets, auto rollback (AC2-AC4) ----------
 
 CI_WORKFLOW = WORKFLOW.parent / "ci-cd.yml"
 HOST_STEPS = [
     CHECKOUT,
+    BUNDLE,
+    VALIDATE,
     UPLOAD,
     PREPARE,
     WAIT_TLS,
@@ -634,11 +698,18 @@ def _host_context(host: Host, deploy_run: str) -> dict[str, str]:
 
 
 def _deploy_step(
-    host: Host, image: str, deploy_run: str, **stubs: str
+    host: Host, image: str, deploy_run: str, *, bundle: str = "", **stubs: str
 ) -> subprocess.CompletedProcess[str]:
-    """The "Deploy image" step of the run `deploy_run`; `image` is the resolved digest."""
+    """The "Deploy image" step of the run `deploy_run`; `image` is the resolved digest.
+
+    `bundle` is the output of the bundle step; an unset Environment yields an empty string.
+    """
     assert _ssh_script(_step(DEPLOY)).endswith('\n"${APP_DIR}/deploy.sh" "${IMAGE}"')
-    context = {**_host_context(host, deploy_run), "steps.digest.outputs.image": image}
+    context = {
+        **_host_context(host, deploy_run),
+        "steps.digest.outputs.image": image,
+        "steps.app_secrets.outputs.bundle": bundle,
+    }
     env = _forwarded(DEPLOY, context)
     return host.run("deploy.sh", env["IMAGE"], env={**env, **stubs})
 
@@ -651,7 +722,7 @@ def _rollback_step(host: Host, deploy_run: str) -> subprocess.CompletedProcess[s
     return host.run("rollback.sh", env={**env, "ROLLBACK_MODE": "auto"})
 
 
-def _assert_prod_only(host: Host) -> None:
+def _assert_prod_only(host: Host, *, bundle: str = "") -> None:
     calls = host.calls()
     assert not [call for call in calls if "api-staging" in call]  # project, volumes, alias
     compose = [call for call in calls if call.startswith("compose ")]
@@ -663,8 +734,8 @@ def _assert_prod_only(host: Host) -> None:
         "api-prod",
         "app",
     )
-    # No bundle reaches the host, so every role file stays empty until Part 2.
-    for name in ENV_FILES:
+    # Without a bundle every role file stays empty.
+    for name in ENV_FILES if not bundle else ():
         assert (host.app_dir / name).read_text(encoding="utf-8") == "", name
 
 
@@ -778,12 +849,14 @@ def test_the_deploy_gets_only_the_digest_resolved_at_job_start() -> None:
         "image: ${{ steps.digest.outputs.image }}",
         "DISPATCHED: ${{ needs.resolve.outputs.image }}",
         "CURRENT: ${{ steps.digest.outputs.image }}",
+        "IMAGE: ${{ steps.digest.outputs.image }}",  # the bundle preflight pulls it
         "IMAGE: ${{ steps.digest.outputs.image }}",
     ]
     deploy = _step(DEPLOY)
-    assert re.findall(r"(?m)^ +IMAGE:.*$", text) == [
-        "          IMAGE: ${{ steps.digest.outputs.image }}"
-    ]
+    assert (
+        re.findall(r"(?m)^ +IMAGE:.*$", text)
+        == ["          IMAGE: ${{ steps.digest.outputs.image }}"] * 2
+    )
     assert "          IMAGE: ${{ steps.digest.outputs.image }}\n" in deploy
     # No `if:`: a refused or unresolved digest has already failed the job.
     assert re.search(r"(?m)^        if:", deploy) is None
@@ -792,27 +865,31 @@ def test_the_deploy_gets_only_the_digest_resolved_at_job_start() -> None:
     )
 
 
-def test_prod_gets_no_application_or_store_secrets() -> None:
-    # No app bundle and nothing of staging's store settings until Part 2; deploy.sh generates
-    # the store passwords and creates empty role files (/api/* and webhooks answer 503).
+def test_prod_reads_the_production_bundle_and_no_store_settings() -> None:
+    # The application secrets come from Environment production, bundled like staging's; the store
+    # passwords stay on the host (deploy.sh generates them and creates the role files).
     text = _text()
-    assert set(re.findall(r"secrets\.(\w+)", text)) == {
+    assert set(re.findall(r"(?<!\w)secrets\.(\w+)", text)) == {
         "GITHUB_TOKEN",
         "VPS_DMC268_U",
         "VPS_DMC268_P",
-        *REQUIRED_SECRETS,  # presence flags of the refusal step, never forwarded
+        *SECRET_SOURCES.values(),
     }
     assert set(re.findall(r"vars\.(\w+)", text)) == {
         "STAGING_HOST",
         "VPS_DMC268_IP_T6",
         "APP_DOMAIN",
         "STAGING_SSH_FINGERPRINT",
-        "GH_APP_BOT_LOGIN",
+        *VARIABLE_SOURCES.values(),
     }
-    assert "APP_SECRETS_B64" not in text
     assert "POSTGRES_" not in text
+    carriers = [
+        name for name in _step_names(_job("deploy-prod")) if "APP_SECRETS_B64" in _step(name)
+    ]
+    assert carriers == [VALIDATE, DEPLOY]
+    assert "          APP_SECRETS_B64: ${{ steps.app_secrets.outputs.bundle }}\n" in _step(DEPLOY)
     shared = "APP_DIR,DEPLOY_MODE,EDGE_ALIAS,NO_PREVIOUS_RELEASE,DEPLOY_RUN"
-    assert f"          envs: GHCR_TOKEN,GHCR_USER,IMAGE,{shared}\n" in _step(DEPLOY)
+    assert f"          envs: GHCR_TOKEN,GHCR_USER,IMAGE,APP_SECRETS_B64,{shared}\n" in _step(DEPLOY)
     assert f"          envs: GHCR_TOKEN,GHCR_USER,{shared}\n" in _step(ROLLBACK)
     for name in (DEPLOY, ROLLBACK):
         step = _step(name)
