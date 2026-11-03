@@ -123,8 +123,19 @@ jobs:
               exit 1
             fi
             # The worker logs through the root logger to stderr; one line per processed delivery.
+            # grep exits 1 when the replica logged no such line: that is an empty result. A failing
+            # docker logs or grep (exit 2 and up) must not look like one.
             while read -r id; do
-              docker logs --since 168h "${id}" 2>&1 | grep -F -- "GitHub webhook delivery ${DELIVERY_ID} " || true
+              codes=(0 0)
+              docker logs --since 168h "${id}" 2>&1 | grep -F -- "GitHub webhook delivery ${DELIVERY_ID} " || codes=("${PIPESTATUS[@]}")
+              if [[ "${codes[0]}" -ne 0 ]]; then
+                echo "docker logs failed (exit ${codes[0]}) for container ${id}" >&2
+                exit 1
+              fi
+              if [[ "${codes[1]}" -gt 1 ]]; then
+                echo "grep failed (exit ${codes[1]}) on the log of container ${id}" >&2
+                exit 1
+              fi
             done <<< "${ids}"
 
       - name: Show the outcome

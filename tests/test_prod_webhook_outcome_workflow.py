@@ -40,12 +40,15 @@ LINE = (
     " detail=ok retry_at=none"
 )
 
-# Answers the two docker calls of the lookup. Logs go to stdout and stderr, as a container's do.
+# Answers the two docker calls of the lookup. Logs go to stdout and stderr, as a container's do;
+# STUB_LOGS_EXIT makes `docker logs` fail after printing, as a daemon error or a removed container.
 STUB_DOCKER = """#!/bin/bash
 printf '%s\\n' "$*" >> "${STUB_LOG}"
 case "$1" in
   ps) printf '%s' "${STUB_PS_OUTPUT:-}"; exit 0 ;;
-  logs) printf '%s\\n' "${STUB_LOG_STDOUT:-}"; printf '%s\\n' "${STUB_LOG_STDERR:-}" >&2; exit 0 ;;
+  logs)
+    printf '%s\\n' "${STUB_LOG_STDOUT:-}"; printf '%s\\n' "${STUB_LOG_STDERR:-}" >&2
+    exit "${STUB_LOGS_EXIT:-0}" ;;
 esac
 echo "unexpected docker call: $*" >&2
 exit 99
@@ -239,6 +242,36 @@ def test_a_delivery_without_an_outcome_prints_nothing_and_succeeds(tmp_path: Pat
 
     assert result.returncode == 0, result.stderr
     assert result.stdout == ""
+
+
+def test_a_failing_docker_logs_fails_the_lookup_and_names_the_container(tmp_path: Path) -> None:
+    result, calls = _lookup(tmp_path, STUB_PS_OUTPUT=f"{WORKER}\n", STUB_LOGS_EXIT="125")
+
+    assert result.returncode == 1
+    assert result.stdout == ""
+    assert f"docker logs failed (exit 125) for container {WORKER}" in result.stderr
+    assert calls[1:] == [f"logs --since 168h {WORKER}"]
+
+
+def test_a_failing_docker_logs_is_not_hidden_by_a_matching_line(tmp_path: Path) -> None:
+    result, _ = _lookup(
+        tmp_path, STUB_PS_OUTPUT=f"{WORKER}\n", STUB_LOG_STDERR=LINE, STUB_LOGS_EXIT="1"
+    )
+
+    assert result.returncode == 1
+    assert "docker logs failed (exit 1)" in result.stderr
+
+
+def test_a_failing_grep_fails_the_lookup_while_no_match_does_not(tmp_path: Path) -> None:
+    (tmp_path / "bin").mkdir()
+    grep = tmp_path / "bin" / "grep"
+    grep.write_text("#!/bin/bash\ncat >/dev/null\nexit 2\n")
+    grep.chmod(0o755)
+
+    result, _ = _lookup(tmp_path, STUB_PS_OUTPUT=f"{WORKER}\n", STUB_LOG_STDERR=LINE)
+
+    assert result.returncode == 1
+    assert f"grep failed (exit 2) on the log of container {WORKER}" in result.stderr
 
 
 def test_the_lookup_fails_when_prod_runs_no_webhook_worker(tmp_path: Path) -> None:
