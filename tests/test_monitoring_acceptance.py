@@ -138,11 +138,20 @@ case " $* " in
           echo "{host=\"${pair%%=*}\"} => ${pair#*=} @[1761300000]"
         done
         ;;
+      *'environment="prod"'*)
+        STAMP='@[1761300000]'
+        # One target per store job of prod; STUB_PROD_JOBS drops some, STUB_PROD_DOWN downs some.
+        for job in ${STUB_PROD_JOBS-postgres redis rabbitmq rabbitmq-queues}; do
+          value=1
+          if [[ " ${STUB_PROD_DOWN:-} " == *" ${job} "* ]]; then value=0; fi
+          echo "up{environment=\"prod\", instance=\"x:1\", job=\"${job}\"} => ${value} ${STAMP}"
+        done
+        ;;
       *)
         if [[ -n "${STUB_NO_TARGETS:-}" ]]; then exit 0; fi
-        pg_up="${STUB_POSTGRES_UP:-1}"
-        echo 'up{instance="prometheus:9090", job="prometheus"} => 1 @[1761300000]'
-        echo "up{instance=\"postgres-exporter:9187\", job=\"postgres\"} => ${pg_up} @[1761300000]"
+        pg_up="${STUB_POSTGRES_UP:-1}"; STAMP='@[1761300000]'
+        echo "up{environment=\"shared\", instance=\"prom:9090\", job=\"prometheus\"} => 1 ${STAMP}"
+        echo "up{environment=\"staging\", instance=\"x\", job=\"postgres\"} => ${pg_up} ${STAMP}"
         ;;
     esac
     ;;
@@ -598,7 +607,7 @@ def test_failed_first_request_with_a_successful_retry_is_a_delivery(tmp_path: Pa
         ({"dump_age_hours": 30}, "verified dump < 26 h", "last verified dump is 30h 00m old"),
         ({"offsite_age_minutes": 240}, "off-host copy (R2) < 3 h", "last successful copy 4h 00m"),
         ({"offsite_age_minutes": None}, "off-host copy (R2) < 3 h", "no successful copy yet"),
-        ({"STUB_POSTGRES_UP": "0"}, "prometheus targets", "down: postgres"),
+        ({"STUB_POSTGRES_UP": "0"}, "prometheus targets", "down: postgres (staging)"),
         ({"STUB_NO_TARGETS": "1"}, "prometheus targets", "query up returned nothing"),
         ({"STUB_PG_BACKUP_EXITED": "1"}, "stack services", "pg-backup exited"),
         ({"STUB_LLM": "0 0 0"}, "LLM latency (Grafana source)", "no llm.call in 24 h"),
@@ -667,11 +676,39 @@ def test_a_missing_prod_scraper_fails_the_stack_check(tmp_path: Path) -> None:
         assert f"{service} missing" in run.line("stack services")
 
 
+PROD_STORE_QUERY = 'up{environment="prod", job=~"postgres|redis|rabbitmq|rabbitmq-queues"}'
+
+
+@pytest.mark.parametrize(
+    ("knobs", "detail"),
+    [
+        ({"STUB_PROD_DOWN": "rabbitmq"}, "3 of 4 up (down: rabbitmq (prod))"),
+        ({"STUB_PROD_JOBS": "postgres redis rabbitmq"}, "3 of 4 up"),
+        ({"STUB_PROD_JOBS": ""}, "0 of 4 up"),
+    ],
+)
+def test_with_prod_all_four_store_targets_must_be_up(
+    tmp_path: Path, knobs: dict[str, str], detail: str
+) -> None:
+    run = _run(tmp_path, prod=True, **knobs)
+
+    _assert_only_failed(run, "prometheus targets")
+    assert f"prod stores: {detail}" in run.line("prometheus targets")
+
+
+def test_with_prod_the_store_targets_are_asked_for_by_environment(tmp_path: Path) -> None:
+    run = _run(tmp_path, prod=True)
+
+    assert run.result.returncode == 0, run.report + run.result.stderr
+    assert any(PROD_STORE_QUERY in call for call in run.calls)
+
+
 def test_without_prod_its_overlay_is_not_used(tmp_path: Path) -> None:
     run = _run(tmp_path)
 
     assert "compose.prod.yml" not in "\n".join(run.calls)
     assert "5 expected services running" in run.line("stack services")
+    assert not any('environment="prod"' in call for call in run.calls)
 
 
 def test_without_dumps_both_backup_checks_fail(tmp_path: Path) -> None:

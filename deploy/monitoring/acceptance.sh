@@ -241,14 +241,40 @@ else
 fi
 
 section "Prometheus targets"
+# The names of down targets with their environment: "postgres (staging)".
+down_targets() {
+  grep -E '=> 0 @' <<<"$1" \
+    | sed -E 's/.*environment="([^"]+)".*job="([^"]+)".*/\2 (\1)/; t; s/.*job="([^"]+)".*/\1/' \
+    | sort -u | paste -sd, - || true
+}
 if targets="$(promql 'up' 2>&1)"; then
   printf '%s\n' "${targets}"
-  down="$(grep -E '=> 0 @' <<<"${targets}" | sed -E 's/.*job="([^"]+)".*/\1/' | sort -u | paste -sd, - || true)"
+  down="$(down_targets "${targets}")"
   total="$(grep -cE '=> [01] @' <<<"${targets}" || true)"
+  # With prod the four store jobs must be there and up: a prod target missing from the file_sd
+  # lists would leave no series to be down.
+  prod_problem=""
+  if [[ -n "$(setting PROD_API_NETWORK)" ]]; then
+    prod_query='up{environment="prod", job=~"postgres|redis|rabbitmq|rabbitmq-queues"}'
+    if prod_targets="$(promql "${prod_query}" 2>&1)"; then
+      printf '%s\n' "${prod_targets}"
+      prod_up="$(grep -cE '=> 1 @' <<<"${prod_targets}" || true)"
+      prod_total="$(grep -cE '=> [01] @' <<<"${prod_targets}" || true)"
+      if ((prod_total != 4 || prod_up != 4)); then
+        prod_problem="prod stores: ${prod_up} of 4 up"
+        prod_down="$(down_targets "${prod_targets}")"
+        if [[ -n "${prod_down}" ]]; then prod_problem+=" (down: ${prod_down})"; fi
+      fi
+    else
+      prod_problem="promtool failed for the prod stores: $(error_line "${prod_targets}")"
+    fi
+  fi
   if [[ "${total}" -eq 0 ]]; then
     record FAIL "prometheus targets" "query up returned nothing"
   elif [[ -n "${down}" ]]; then
-    record FAIL "prometheus targets" "down: ${down}"
+    record FAIL "prometheus targets" "down: ${down}${prod_problem:+; ${prod_problem}}"
+  elif [[ -n "${prod_problem}" ]]; then
+    record FAIL "prometheus targets" "${prod_problem}"
   else
     record OK "prometheus targets" "${total} up"
   fi
