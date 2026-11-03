@@ -579,6 +579,8 @@ SELECTED = 'environment="${environment:text}"'
 # Host-level panels and the budget across environments show everything the stack scrapes.
 UNFILTERED_PANELS = {"Host CPU", "Host memory", "Root filesystem used", "LLM spend this month"}
 CONTAINER_PANELS = {"Container CPU", "Container memory"}
+# The SLA of prod is one fixed environment, whatever the Environment switch says.
+PROD_PANELS = {"SLA availability, month to date", "Downtime budget left", "Downtime budget spent"}
 # Every other panel with a PromQL target filters on the selected environment.
 FILTERED_PANELS = {
     "Requests per second",
@@ -646,13 +648,16 @@ def test_prometheus_panels_read_the_selected_environment() -> None:
         for panel in _panels()
         if any("expr" in target for target in panel.get("targets", []))
     }
-    assert prometheus == FILTERED_PANELS | UNFILTERED_PANELS | CONTAINER_PANELS
+    assert prometheus == FILTERED_PANELS | UNFILTERED_PANELS | CONTAINER_PANELS | PROD_PANELS
     for panel in _panels():
         for target in panel.get("targets", []):
             if "expr" not in target:
                 continue
             if panel["title"] in UNFILTERED_PANELS:
                 assert "environment" not in target["expr"], panel["title"]
+            elif panel["title"] in PROD_PANELS:
+                assert 'environment="prod"' in target["expr"], panel["title"]
+                assert "${environment" not in target["expr"], panel["title"]
             elif panel["title"] in CONTAINER_PANELS:
                 # Containers of the monitoring and edge projects are shared by both.
                 assert 'environment=~"${environment:text}|shared"' in target["expr"], panel["title"]

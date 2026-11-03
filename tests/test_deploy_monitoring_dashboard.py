@@ -191,6 +191,63 @@ def test_dashboard_shows_certificate_days_coloured_where_the_alerts_fire() -> No
     ]
 
 
+def _panel_titled(title: str) -> Any:
+    return next(
+        panel for panel in json.loads(_read(DASHBOARD))["panels"] if panel["title"] == title
+    )
+
+
+def test_sla_panels_show_each_prod_name_and_match_the_alert_thresholds() -> None:
+    rules = _read(MONITORING / "prometheus" / "rules" / "sla.yml")
+    thresholds = {
+        alert: (float(low), high)
+        for alert, low, high in re.findall(
+            r"- alert: (SlaAvailability\w+)\n        expr: sla:downtime_budget_spent:ratio"
+            r" (?:> |>= )([\d.]+)(?: < ([\d.]+))?\n",
+            rules,
+        )
+    }
+    availability = _panel_titled("SLA availability, month to date")
+    left = _panel_titled("Downtime budget left")
+    spent = _panel_titled("Downtime budget spent")
+
+    assert thresholds == {
+        "SlaAvailabilityAtRisk": (0.5, "1"),
+        "SlaAvailabilityBreached": (1.0, ""),
+    }
+    for panel in (availability, left, spent):
+        # Fixed to prod: the Environment switch does not move them, and the descriptions say so.
+        assert panel["type"] == "stat"
+        assert panel["datasource"] == PROMETHEUS
+        [target] = panel["targets"]
+        assert target["datasource"] == PROMETHEUS
+        assert target["instant"] is True
+        # One tile per probed prod name, none for a name that is not probed.
+        assert target["legendFormat"] == "{{host}}"
+        assert panel["options"]["textMode"] == "value_and_name"
+        assert "Environment" in panel["description"]
+    assert availability["targets"][0]["expr"] == 'sla:availability_ratio:month{environment="prod"}'
+    assert availability["fieldConfig"]["defaults"]["unit"] == "percentunit"
+    assert availability["fieldConfig"]["defaults"]["decimals"] == 3
+    # Not coloured: the share of the elapsed time reads badly red on the first day after a blip
+    # while the allowance is nearly whole.
+    assert availability["options"]["colorMode"] == "none"
+    assert left["targets"][0]["expr"] == (
+        'scalar(sla:downtime_budget_seconds:month) - sla:downtime_seconds:month{environment="prod"}'
+    )
+    assert left["fieldConfig"]["defaults"]["unit"] == "s"
+    assert spent["targets"][0]["expr"] == 'sla:downtime_budget_spent:ratio{environment="prod"}'
+    assert spent["fieldConfig"]["defaults"]["unit"] == "percentunit"
+    assert [
+        (step["color"], step["value"])
+        for step in spent["fieldConfig"]["defaults"]["thresholds"]["steps"]
+    ] == [
+        ("green", None),
+        ("orange", thresholds["SlaAvailabilityAtRisk"][0]),
+        ("red", thresholds["SlaAvailabilityBreached"][0]),
+    ]
+
+
 def test_dashboard_shows_month_to_date_llm_spend_next_to_cost_per_hour() -> None:
     panels = json.loads(_read(DASHBOARD))["panels"]
     panel = _panel_with("dmc_llm_cost_month_usd")
