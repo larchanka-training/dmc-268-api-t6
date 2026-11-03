@@ -88,7 +88,7 @@ gh secret set AUTH_JWT_PUBLIC_KEY --env staging -R larchanka-training/dmc-268-ap
 rm jwt.pem jwt.pub
 ```
 
-Смена пары разлогинивает всех: ранее выданные access JWT перестают проверяться.
+Смена пары не разлогинивает: ранее выданные access JWT перестают проверяться, а refresh-токен переживает смену (непрозрачный хеш в БД), и SPA обновляет токен по 401.
 
 ### Генерируются на хосте
 
@@ -687,7 +687,7 @@ Prod-выкат (`deploy-prod.yml`, job `deploy-prod`) идёт в Environment `
 | `GH_APP_ID`, `GH_CLIENT_ID` | не ротируются: меняются только вместе с новым App (новые ключ, client secret, webhook secret, bot login и переустановка) | | |
 | `GITLAB_CREDENTIAL_KEYS` | не заменять весь набор: добавить новый key ID к существующему JSON по процедуре keyring из «Installed GitLab» (`gh secret set GITLAB_CREDENTIAL_KEYS --env production -R larchanka-training/dmc-268-api-t6 < файл`) → сменить variable `GITLAB_ACTIVE_KEY_ID` на новый ID → Deploy prod. Старые key ID остаются, пока все их envelopes не перезаписаны ротацией токенов | `worker`, `webhook-worker` (`gitlab.env`), профиль `gitlab-admin` | без старого key ID расшифровка сохранённых токенов закрыта: установки GitLab перестают работать. Пока GitLab на prod выключен, строка нужна только при первом включении |
 | `BITBUCKET_CREDENTIAL_KEYS` | так же, по разделу «Bitbucket Cloud (#333)» с `--env production`: добавить новый ключ к keyring, сменить `BITBUCKET_ACTIVE_KEY_ID`, Deploy prod. Перешифровки старых connections нет: старый ключ не удалять, пока им зашифрована хоть одна запись | `api`, `worker`, `webhook-worker` (`bitbucket.env`) | без старого key ID записи, зашифрованные им, не читаются; образ после отката должен понимать текущие key ID |
-| `AUTH_JWT_PRIVATE_KEY` + `AUTH_JWT_PUBLIC_KEY` | парой: команды `openssl` из §1 с `--env production` → Deploy prod | `api` | выданные ранее access JWT (15 мин) дают 401; refresh-токены — непрозрачные хеши в БД, поэтому refresh переживает смену (проверить, что SPA обновляется по 401) |
+| `AUTH_JWT_PRIVATE_KEY` + `AUTH_JWT_PUBLIC_KEY` | парой: команды `openssl` из §1 с `--env production` → Deploy prod | `api` | выданный до выката access JWT (15 мин) один раз получит 401; refresh-токен переживает смену (непрозрачный хеш в БД), SPA обновляет токен и повторяет запрос один раз (UI-репозиторий `dmc-268-ui-t6`, `src/shared/api/client.ts`), пользователи остаются в сессии |
 
 `AI_DMC268_T6` меняет организация курса; в staging и prod он попадает только через Deploy staging и Deploy prod. Пароли хранилищ prod (хост, `.env`) CI не ротирует: нужен доступ к VPS, и `POSTGRES_*` в `production` задавать нельзя.
 

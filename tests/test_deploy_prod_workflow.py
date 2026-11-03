@@ -719,6 +719,17 @@ def test_the_lock_while_waiting_caveat_is_stated_once_and_pointed_to() -> None:
     assert "CICD.md" in _text()
 
 
+def test_the_docs_say_a_jwt_key_change_keeps_users_logged_in() -> None:
+    text = SECRETS_DOC.read_text(encoding="utf-8")
+    row = next(line for line in text.splitlines() if line.startswith("| `AUTH_JWT_PRIVATE_KEY` +"))
+
+    assert "разлогинивает всех" not in text
+    assert "проверить, что SPA" not in row
+    assert "src/shared/api/client.ts" in row
+    assert "один раз получит 401" in row
+    assert "refresh-токен переживает смену" in text
+
+
 # --- the deploy on the VPS: no edge refresh, bundled app secrets, auto rollback (AC2-AC4) -----
 
 CI_WORKFLOW = WORKFLOW.parent / "ci-cd.yml"
