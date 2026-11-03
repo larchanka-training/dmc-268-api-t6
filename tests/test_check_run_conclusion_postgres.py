@@ -123,6 +123,24 @@ def _publication(event: str, response: dict[str, Any]) -> tuple[dict[str, Any], 
         ),
         ([_publication("REQUEST_CHANGES", {"error": {"http_status": 502}})], "comment", "neutral"),
         ([], "request_changes", "neutral"),
+        (
+            # T17 after a lost lease: the posted review is found by its marker under the
+            # rebuilt pointer; GitHub keeps the event of the first accepted POST.
+            [
+                _publication("REQUEST_CHANGES", {"github_review_id": 501}),
+                _publication("COMMENT", {"github_review_id": 501}),
+            ],
+            "comment",
+            "failure",
+        ),
+        (
+            [
+                _publication("COMMENT", {"github_review_id": 501}),
+                _publication("REQUEST_CHANGES", {"github_review_id": 501}),
+            ],
+            "request_changes",
+            "neutral",
+        ),
     ],
     ids=[
         "request-changes-then-setting-changed",
@@ -130,6 +148,8 @@ def _publication(event: str, response: dict[str, Any]) -> tuple[dict[str, Any], 
         "request-changes-after-retry",
         "request-changes-never-accepted",
         "no-publication",
+        "request-changes-then-found-as-comment",
+        "comment-then-found-as-request-changes",
     ],
 )
 def test_succeeded_blocking_run_concludes_from_the_published_event_not_the_setting(
