@@ -672,6 +672,16 @@ def test_every_production_secret_has_a_rotation_row() -> None:
         assert [cell for cell in first_cells if f"`{name}`" in cell], name
 
 
+def test_every_rotation_row_says_what_restarts_and_what_breaks() -> None:
+    rotation = _production_section().split("#### Ротация", 1)[1].split("\n#### ", 1)[0]
+    rows = [line.split("|")[1:-1] for line in rotation.splitlines() if line.startswith("| `")]
+
+    assert rows
+    for name, _how, restarts, breaks in rows:
+        assert restarts.strip(), f"no restart cell: {name}"
+        assert breaks.strip(), f"no outage cell: {name}"
+
+
 def test_the_production_section_forbids_copying_staging_values() -> None:
     section = _production_section()
 
