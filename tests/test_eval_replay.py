@@ -1877,10 +1877,11 @@ def test_replaying_the_main_baseline_asks_for_no_rag_code_and_adds_no_rag_field(
     assert asked == [False]
     assert report["corpus"] == "main"
     assert set(report["provenance"]["run_metadata"]) & set(eval_replay_module._RAG_KEYS) == set()
-    # The static digest may drift (the warning says so), nothing else is a warning.
-    assert set(report["warnings"]) <= {
-        "Static input digest mismatch; refresh the complete baseline"
-    }
+    # The verifier pins changed both static path set and digest of this historical capture.
+    assert report["warnings"] == [
+        "Static input path set changed; refresh the complete baseline",
+        "Static input digest mismatch; refresh the complete baseline",
+    ]
 
 
 @pytest.mark.parametrize("budget", [0, -5, 1.5, "100", True, None])
