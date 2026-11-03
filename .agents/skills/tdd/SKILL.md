@@ -54,8 +54,8 @@ The limits of `.agents/rules/backend.md` §5, in short:
   copy of it.
 - **Shared, not copied.** A fake, factory or DB setup two files need goes into the
   topic's shared non-`test_` module under `tests/` (`tests/llm_fakes.py`,
-  `tests/portal_postgres.py`), never into a copy per file and never imported from a
-  `test_*.py` file.
+  `tests/portal_postgres.py`), not into a copy per file; a shared module does not
+  import from a `test_*.py` file.
 - **~60 KB per file.** A test file over ~60 KB is split by behavior at its next
   edit, in a move-only commit before the behavior change.
 

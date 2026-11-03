@@ -114,7 +114,10 @@ from a missing scope.
   their topic: a non-`test_` module under `tests/`, as `tests/llm_fakes.py`,
   `tests/policy_snapshot_fakes.py`, `tests/trigger_uow.py` and `tests/portal_postgres.py`.
   They are imported, never copied into each file. A shared module never imports from a
-  `test_*.py` file: a helper another file needs moves out of its test file first.
+  `test_*.py` file: a helper another file needs moves out of its test file first. Two still
+  do — `tests/portal_postgres.py` (`_reset_topology` of `test_worker_queue_postgres.py`) and
+  `tests/code_index_postgres.py` (the store helpers of `test_code_index_store_postgres.py`):
+  those helpers move out at their next edit.
 - Integration tests are marked `@pytest.mark.integration` (registered in
   `pyproject.toml`) and skip when `TEST_DATABASE_URL` is unset. Each DB test file keeps a
   thin fixture that skips without the variable and enters the shared setup of its topic
