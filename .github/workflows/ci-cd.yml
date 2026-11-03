@@ -296,8 +296,10 @@ jobs:
           RABBITMQ_DEFAULT_PASS: ci
         ports:
           - 5672:5672
+        # Ping only once the server wrote its own .erlang.cookie: a root probe on the fresh volume
+        # would create one the server cannot read (eacces, #257).
         options: >-
-          --health-cmd "rabbitmq-diagnostics -q ping"
+          --health-cmd "test -f /var/lib/rabbitmq/.erlang.cookie && rabbitmq-diagnostics -q ping"
           --health-interval 5s
           --health-timeout 10s
           --health-retries 12

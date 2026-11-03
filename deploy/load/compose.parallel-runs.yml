@@ -43,14 +43,6 @@ services:
       GITHUB_CLIENT_ID: ""
       GITHUB_CLIENT_SECRET: ""
 
-  rabbitmq:
-    # The base probe runs rabbitmq-diagnostics as root with HOME=/var/lib/rabbitmq. On a busy host
-    # it can run before the server and create a root-only .erlang.cookie on the fresh volume; the
-    # server (uid 100) then cannot read it and exits 1 (eacces). Probe only once the server wrote
-    # its own cookie; root can read that one.
-    healthcheck:
-      test: ["CMD-SHELL", "test -f /var/lib/rabbitmq/.erlang.cookie && rabbitmq-diagnostics -q ping"]
-
   worker:
     environment:
       GITHUB_APP_ID: "1"

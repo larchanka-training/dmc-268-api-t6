@@ -124,8 +124,10 @@ services:
       - rabbitmq-data:/var/lib/rabbitmq
     healthcheck:
       # backend and the workers wait for this check. The ping takes close to 10 s on a busy
-      # machine, hence the longer timeout; start_period as on staging.
-      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      # machine, hence the longer timeout; start_period as on staging. The probe runs as root and
+      # pings only once the server wrote its own .erlang.cookie: on a fresh volume a bare ping
+      # creates a root-only cookie the server cannot read, and it exits 1 (eacces, #257).
+      test: ["CMD-SHELL", "test -f /var/lib/rabbitmq/.erlang.cookie && rabbitmq-diagnostics -q ping"]
       interval: 10s
       timeout: 30s
       retries: 10
