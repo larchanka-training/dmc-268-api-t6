@@ -56,6 +56,18 @@ read_compose_env_var() {
   ' "${file}"
 }
 
+# The worker replica count (compose: deploy.replicas) is checked here, before any host change:
+# Compose accepts 0 (no queue consumers) and rejects other bad values only after the release switch.
+WORKER_REPLICAS_MAX=5
+
+require_worker_replicas() {
+  local value="$1"
+  if [[ ! "${value}" =~ ^[1-9][0-9]{0,2}$ ]] || (( value > WORKER_REPLICAS_MAX )); then
+    echo "WORKER_REPLICAS must be an integer from 1 to ${WORKER_REPLICAS_MAX}, got: ${value}" >&2
+    return 1
+  fi
+}
+
 escape_compose_value() {
   local value="$1"
   value="${value//\$/\$\$}"
@@ -65,6 +77,7 @@ escape_compose_value() {
 write_compose_env_file() {
   local file="$1" image="$2" pg_user="$3" pg_password="$4" pg_db="$5" deploy_mode="$6" edge_alias="$7"
   local rabbitmq_user="$8" rabbitmq_password="$9" redis_password="${10}" no_previous="${11:-}"
+  local worker_replicas="${12:-}"
   umask 077
   {
     printf 'IMAGE=%s\n' "$(escape_compose_value "${image}")"
@@ -77,6 +90,7 @@ write_compose_env_file() {
     printf 'RABBITMQ_PASSWORD=%s\n' "$(escape_compose_value "${rabbitmq_password}")"
     printf 'REDIS_PASSWORD=%s\n' "$(escape_compose_value "${redis_password}")"
     printf 'NO_PREVIOUS_RELEASE=%s\n' "$(escape_compose_value "${no_previous}")"
+    printf 'WORKER_REPLICAS=%s\n' "$(escape_compose_value "${worker_replicas}")"
   } > "${file}"
   chmod 600 "${file}"
 }
