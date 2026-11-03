@@ -71,12 +71,12 @@ for mode in edge ports; do
     -f "${MONITORING}/compose.${mode}.yml" -f "${MONITORING}/compose.offsite.yml" config -q
 done
 
-echo "== docker compose config (prod scrapers)"
+echo "== docker compose config (prod scrapers and backup)"
 for mode in edge ports; do
   API_NETWORK=ci_default GRAFANA_ADMIN_PASSWORD=ci GRAFANA_DB_PASSWORD=ci PG_EXPORTER_PASSWORD=ci \
     PG_BACKUP_PASSWORD=ci BACKUP_DIR=/var/backups/ci GRAFANA_ALIAS=grafana-staging \
     PROD_API_NETWORK=ci_prod_default PROD_POSTGRES_DB=ci PROD_PG_EXPORTER_PASSWORD=ci \
-    PROD_GRAFANA_DB_PASSWORD=ci \
+    PROD_GRAFANA_DB_PASSWORD=ci PROD_PG_BACKUP_PASSWORD=ci PROD_BACKUP_DIR=/var/backups/ci-prod \
     docker compose -p dmc-268-monitoring -f "${MONITORING}/compose.yml" \
     -f "${MONITORING}/compose.${mode}.yml" -f "${MONITORING}/compose.prod.yml" config -q
 done
