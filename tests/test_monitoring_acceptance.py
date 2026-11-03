@@ -690,7 +690,7 @@ PROD_STORE_QUERY = 'up{environment="prod", job=~"postgres|redis|rabbitmq|rabbitm
 def test_with_prod_all_four_store_targets_must_be_up(
     tmp_path: Path, knobs: dict[str, str], detail: str
 ) -> None:
-    run = _run(tmp_path, prod=True, **knobs)
+    run = _run(tmp_path, prod=True, extra=knobs)
 
     _assert_only_failed(run, "prometheus targets")
     assert f"prod stores: {detail}" in run.line("prometheus targets")
