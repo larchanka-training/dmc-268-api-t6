@@ -101,6 +101,8 @@ COMPOSE=(docker compose -p "${COMPOSE_PROJECT}")
 # The files deploy.sh starts the stack with: the expected services come from them.
 COMPOSE_FILES=(-f "${MONITORING_DIR}/compose.yml" -f "${MONITORING_DIR}/compose.${DEPLOY_MODE}.yml")
 if [[ -n "${OFFSITE_BUCKET}" ]]; then COMPOSE_FILES+=(-f "${MONITORING_DIR}/compose.offsite.yml"); fi
+# deploy.sh writes the prod network to .env only with prod; then its scrapers must be running.
+if [[ -n "$(setting PROD_API_NETWORK)" ]]; then COMPOSE_FILES+=(-f "${MONITORING_DIR}/compose.prod.yml"); fi
 FAILED=()
 RESULTS=()
 # One line of the summary; a failed check fails the run at the end, after every other check ran.

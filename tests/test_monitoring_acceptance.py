@@ -99,6 +99,9 @@ case " $* " in
     if [[ -n "${STUB_COMPOSE_FAILS:-}" ]]; then echo "Error: compose.yml not found" >&2; exit 1; fi
     printf 'prometheus\nalertmanager\ngrafana\npg-backup\n'
     if [[ " $* " == *compose.offsite.yml* ]]; then echo backup-offsite; fi
+    if [[ " $* " == *compose.prod.yml* ]]; then
+      printf 'postgres-exporter-prod\nredis-exporter-prod\nrelay-prod\n'
+    fi
     ;;
   *" ps -a --format "*)
     if [[ -n "${STUB_PS_FAILS:-}" ]]; then
@@ -112,6 +115,9 @@ case " $* " in
       echo 'pg-backup exited '
     fi
     echo 'backup-offsite running healthy'
+    if [[ -z "${STUB_PROD_MISSING:-}" ]]; then
+      printf 'postgres-exporter-prod running \nredis-exporter-prod running \nrelay-prod running \n'
+    fi
     ;;
   *" promtool query instant "*)
     if [[ -n "${STUB_PROMTOOL_FAILS:-}" ]]; then echo "Error: connection refused" >&2; exit 1; fi
@@ -274,6 +280,7 @@ def _run(
     dump_age_hours: float = 3,
     offsite_age_minutes: float | None = 10,
     offsite: bool = True,
+    prod: bool = False,
     dumps: bool = True,
     telegram: bool = True,
     deploy_mode: str = "edge",
@@ -321,6 +328,8 @@ def _run(
     ]
     if offsite:
         settings.append("BACKUP_S3_BUCKET=dmc268-t6-backup")
+    if prod:
+        settings.append("PROD_API_NETWORK=dmc-268-api-prod_default")
     (monitoring / ".env").write_text("\n".join(settings) + "\n", encoding="utf-8")
     stubs = tmp_path / "stubs"
     state = stubs / "state"
@@ -639,6 +648,30 @@ def test_without_the_off_host_copy_its_service_is_not_expected(tmp_path: Path) -
     _assert_only_failed(run, "off-host copy (R2) < 3 h")
     assert "BACKUP_S3_* are not set" in run.line("off-host copy (R2) < 3 h")
     assert "4 expected services running" in run.line("stack services")
+
+
+def test_with_prod_the_prod_scrapers_are_expected(tmp_path: Path) -> None:
+    run = _run(tmp_path, prod=True)
+
+    assert run.result.returncode == 0, run.report + run.result.stderr
+    assert "-f " + str(tmp_path / "monitoring" / "compose.prod.yml") in "\n".join(run.calls)
+    # 4 services of the stack, the off-host copy and the three prod scrapers.
+    assert "8 expected services running" in run.line("stack services")
+
+
+def test_a_missing_prod_scraper_fails_the_stack_check(tmp_path: Path) -> None:
+    run = _run(tmp_path, prod=True, STUB_PROD_MISSING="1")
+
+    _assert_only_failed(run, "stack services")
+    for service in ("postgres-exporter-prod", "redis-exporter-prod", "relay-prod"):
+        assert f"{service} missing" in run.line("stack services")
+
+
+def test_without_prod_its_overlay_is_not_used(tmp_path: Path) -> None:
+    run = _run(tmp_path)
+
+    assert "compose.prod.yml" not in "\n".join(run.calls)
+    assert "5 expected services running" in run.line("stack services")
 
 
 def test_without_dumps_both_backup_checks_fail(tmp_path: Path) -> None:
