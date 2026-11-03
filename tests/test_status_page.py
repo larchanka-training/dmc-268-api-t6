@@ -514,12 +514,15 @@ class PrometheusStub:
         self.last_firing: list[dict[str, Any]] = []
         self.uncovered: set[str] = set()
         self.down = False
+        self.raw: tuple[int, object] | None = None  # answers every request with this
         self.requests: list[tuple[str, str]] = []
         self.last_firing_query = ""
         self.coverage: dict[str, str] = {}  # expression -> "component/env", set by the fixture
 
     def answer(self, path: str, query: str) -> tuple[int, object]:
         self.requests.append((path, query))
+        if self.raw is not None:
+            return self.raw
         if self.down:
             return 503, {"status": "error"}
         if path == "/api/v1/alerts":
@@ -778,6 +781,52 @@ def test_an_unreachable_prometheus_means_no_data_not_working(
     assert {state for _, _, state, _ in _row_tags(html)} == {"unknown"}
     assert "нет данных" in html
     assert "Данные не получены" in html
+
+
+def test_a_failed_poll_writes_one_line_to_stderr_without_the_answer(
+    site: tuple[str, Any, PrometheusStub, Clock], capsys: pytest.CaptureFixture[str]
+) -> None:
+    _, poller, stub, _ = site
+    poller.refresh()
+    assert capsys.readouterr().err == ""
+
+    stub.down = True
+    poller.refresh()
+    assert capsys.readouterr().err == (
+        "status-page: poll failed: HTTPError: HTTP Error 503: Service Unavailable\n"
+    )
+
+    # An answer Prometheus got wrong: its text is not copied into the line.
+    stub.down = False
+    stub.raw = (200, {"status": "error", "error": "SECRET-ERROR acme/secret-repo\nforged line"})
+    poller.refresh()
+    err = capsys.readouterr().err
+    assert err == "status-page: poll failed: StatusError: status is not success\n"
+    stub.raw = (200, {"status": "success", "data": {"alerts": [{"labels": {"x": "SECRET"}}]}})
+    poller.refresh()
+    err = capsys.readouterr().err
+    assert err == "status-page: poll failed: StatusError: a series has no alertname\n"
+    assert "SECRET" not in err
+
+    # A recovered Prometheus: quiet again, the page is back.
+    stub.raw = None
+    poller.refresh()
+    assert capsys.readouterr().err == ""
+    assert poller.snapshot() is not None
+
+
+def test_a_line_of_a_failed_poll_never_carries_a_newline_from_the_error(
+    page: ModuleType, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # Nothing listens there: the OS error is logged as one line.
+    poller = page.Poller("http://127.0.0.1:9", timeout=1.0)
+
+    poller.refresh()
+
+    err = capsys.readouterr().err
+    assert err.startswith("status-page: poll failed: URLError: ")
+    assert err.count("\n") == 1
+    assert poller.snapshot() is None
 
 
 def test_before_the_first_poll_the_page_says_no_data(

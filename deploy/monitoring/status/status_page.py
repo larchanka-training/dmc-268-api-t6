@@ -13,6 +13,7 @@ import json
 import os
 import re
 import signal
+import sys
 import threading
 import urllib.request
 from collections.abc import Callable, Mapping, Sequence
@@ -443,8 +444,12 @@ class Poller:
                 for env, expression in component.coverage.items()
             }
             snapshot: Snapshot | None = Snapshot(self.clock(), alerts, last_firing, covered)
-        except (OSError, HTTPException, ValueError, StatusError):
+        except (OSError, HTTPException, ValueError, StatusError) as error:
             snapshot = None
+            # One line per failed poll, in the container log: the class and the message of the
+            # error (fixed texts of this module or of the HTTP stack), never the answer itself.
+            message = " ".join(str(error).split())
+            print(f"status-page: poll failed: {type(error).__name__}: {message}", file=sys.stderr)
         with self._lock:
             self._snapshot = snapshot
 
