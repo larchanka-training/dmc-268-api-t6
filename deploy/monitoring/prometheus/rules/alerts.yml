@@ -39,12 +39,12 @@ groups:
       - alert: ApiHigh5xxRate
         expr: |
           (
-            sum by (host) (rate(caddy_http_request_duration_seconds_count{host=~"staging-(api|ui)\\..+", code=~"5.."}[5m]))
+            sum by (environment, host) (rate(caddy_http_request_duration_seconds_count{host=~"staging-(api|ui)\\..+", code=~"5.."}[5m]))
             /
-            sum by (host) (rate(caddy_http_request_duration_seconds_count{host=~"staging-(api|ui)\\..+"}[5m]))
+            sum by (environment, host) (rate(caddy_http_request_duration_seconds_count{host=~"staging-(api|ui)\\..+"}[5m]))
           ) > 0.05
           and
-          sum by (host) (rate(caddy_http_request_duration_seconds_count{host=~"staging-(api|ui)\\..+"}[5m])) > 0.05
+          sum by (environment, host) (rate(caddy_http_request_duration_seconds_count{host=~"staging-(api|ui)\\..+"}[5m])) > 0.05
         for: 5m
         labels:
           severity: critical
@@ -73,19 +73,19 @@ groups:
       # cAdvisor at once and goes stale at the next scrape (track_timestamps_staleness,
       # prometheus.yml): a project whose postgres runs without it counts as stopped. Both cases
       # share one label set, so a crash loop does not restart `for`. A project down as a whole does
-      # not fire here: for the project the monitoring reads (API_NETWORK, staging) PostgresDown,
-      # TargetDown and PublicEndpointDown do; for dmc-268-api-prod only PublicEndpointDown, for the
-      # names in PROBE_PROD_HOSTS (the rest comes with the prod monitoring of #308).
+      # not fire here: PostgresDown, TargetDown and PublicEndpointDown do, for staging and prod
+      # alike (the environment label tells them apart). The alert keeps the environment of the
+      # project, which prometheus.yml derives from the compose project label.
       - alert: WebhookWorkerDown
         expr: |
-          max by (container_label_com_docker_compose_project) (
+          max by (environment, container_label_com_docker_compose_project) (
             container_health_state{container_label_com_docker_compose_project=~"dmc-268-api.*", container_label_com_docker_compose_service="webhook-worker"}
           ) == 0
           or
           (
-            max by (container_label_com_docker_compose_project) (container_last_seen{container_label_com_docker_compose_project=~"dmc-268-api.*", container_label_com_docker_compose_service="postgres"})
+            max by (environment, container_label_com_docker_compose_project) (container_last_seen{container_label_com_docker_compose_project=~"dmc-268-api.*", container_label_com_docker_compose_service="postgres"})
             unless
-            max by (container_label_com_docker_compose_project) (container_last_seen{container_label_com_docker_compose_project=~"dmc-268-api.*", container_label_com_docker_compose_service="webhook-worker"})
+            max by (environment, container_label_com_docker_compose_project) (container_last_seen{container_label_com_docker_compose_project=~"dmc-268-api.*", container_label_com_docker_compose_service="webhook-worker"})
           )
         for: 5m
         labels:
@@ -128,7 +128,7 @@ groups:
     rules:
       # No `for`: the failure has already happened, waiting adds nothing.
       - alert: ReviewRunsFailed
-        expr: sum(dmc_runs_finished_15m_runs{state="failed"}) > 0
+        expr: sum by (environment) (dmc_runs_finished_15m_runs{state="failed"}) > 0
         labels:
           severity: warning
           kind: event
@@ -140,7 +140,7 @@ groups:
       # it, so a size alert would repeat for a week and stay silent on the next failure. The size
       # stays on the dashboard (panel "Review queues: ready messages").
       - alert: ReviewDeadLetters
-        expr: sum(delta(rabbitmq_detailed_queue_messages{queue="reviews.dlq"}[15m])) > 0
+        expr: sum by (environment) (delta(rabbitmq_detailed_queue_messages{queue="reviews.dlq"}[15m])) > 0
         labels:
           severity: critical
           kind: event
@@ -149,7 +149,7 @@ groups:
           description: "Retries exhausted, an unknown schema or an unexpected error (docs/PIPELINE_SPEC.md §4.4); the operator reads the DLQ."
 
       - alert: ReviewQueueBacklog
-        expr: sum by (queue) (rabbitmq_detailed_queue_messages_ready{queue=~"review\\.run\\..+|review\\.publish"}) > 20
+        expr: sum by (environment, queue) (rabbitmq_detailed_queue_messages_ready{queue=~"review\\.run\\..+|review\\.publish"}) > 20
         for: 10m
         labels:
           severity: warning
@@ -158,7 +158,7 @@ groups:
           description: "The queue has held more than 20 ready messages for 10 minutes; workers do not keep up."
 
       - alert: ReviewQueueWithoutConsumer
-        expr: sum by (queue) (rabbitmq_detailed_queue_consumers{queue=~"review\\.run\\.fast|review\\.publish"}) == 0
+        expr: sum by (environment, queue) (rabbitmq_detailed_queue_consumers{queue=~"review\\.run\\.fast|review\\.publish"}) == 0
         for: 5m
         labels:
           severity: critical
@@ -167,7 +167,7 @@ groups:
           description: "The review worker is down or detached from the broker for 5 minutes."
 
       - alert: ReviewRunsStuckInQueue
-        expr: max(dmc_runs_active_stale_queued) > 0
+        expr: max by (environment) (dmc_runs_active_stale_queued) > 0
         for: 5m
         labels:
           severity: warning
@@ -176,7 +176,7 @@ groups:
           description: "Runs stay queued past available_at (T18 of docs/PIPELINE_SPEC.md §3)."
 
       - alert: LlmLatencyHigh
-        expr: max(dmc_llm_calls_15m_p95_seconds) > 60 and max(dmc_llm_calls_15m_calls) >= 3
+        expr: max by (environment) (dmc_llm_calls_15m_p95_seconds) > 60 and max by (environment) (dmc_llm_calls_15m_calls) >= 3
         for: 10m
         labels:
           severity: warning
@@ -186,8 +186,8 @@ groups:
 
   # The monthly LLM budget. dmc_llm_cost_month_usd is the spend recorded in usage_events since the
   # 1st of the month (UTC), one series per scraped database: the rules sum them all, so every
-  # environment scraped here counts against one budget, while the environment label of the alert
-  # stays the one of this Prometheus. The threshold dmc_llm_monthly_budget_usd is a node-exporter
+  # environment scraped here counts against one budget, so the two monthly alerts carry the
+  # environment label shared. The threshold dmc_llm_monthly_budget_usd is a node-exporter
   # textfile that deploy.sh writes from the repository variable LLM_MONTHLY_BUDGET_USD: without
   # it, or at 0, the two monthly alerts stay silent. The warning stops below 100%, so at the budget
   # the critical alert fires at once and the warning resolves 5 minutes later (no inhibit rules).
@@ -206,6 +206,7 @@ groups:
         keep_firing_for: 5m
         labels:
           severity: warning
+          environment: shared
         annotations:
           summary: "LLM spend this month: {{ with query \"sum(dmc_llm_cost_month_usd)\" }}{{ . | first | value | printf \"%.2f\" }}{{ end }} USD, {{ $value | printf \"%.2f\" }}% of the monthly budget"
           description: "Spend in usage_events since the 1st of the month (UTC) is between 80% and 100% of LLM_MONTHLY_BUDGET_USD; at 100% LlmMonthlyBudgetExceeded takes over and this alert resolves; the alert pauses no reviews."
@@ -220,6 +221,7 @@ groups:
         keep_firing_for: 30m
         labels:
           severity: critical
+          environment: shared
         annotations:
           summary: "LLM spend this month: {{ with query \"sum(dmc_llm_cost_month_usd)\" }}{{ . | first | value | printf \"%.2f\" }}{{ end }} USD, {{ $value | printf \"%.2f\" }}% of the monthly budget"
           description: "Spend in usage_events since the 1st of the month (UTC) has reached LLM_MONTHLY_BUDGET_USD; the alert pauses no reviews, they keep spending."
@@ -231,7 +233,7 @@ groups:
       # message, not one per skip. While it fires, Alertmanager repeats it every 4 hours like any
       # other.
       - alert: ReviewRunsBudgetPaused
-        expr: sum(dmc_runs_budget_paused_15m_runs) > 0
+        expr: sum by (environment) (dmc_runs_budget_paused_15m_runs) > 0
         keep_firing_for: 1h
         labels:
           severity: warning
@@ -263,7 +265,7 @@ groups:
           description: "Less than 15% of the root filesystem is free."
 
       - alert: HostCpuHigh
-        expr: 1 - avg(rate(node_cpu_seconds_total{mode="idle"}[5m])) > 0.90
+        expr: 1 - avg by (environment) (rate(node_cpu_seconds_total{mode="idle"}[5m])) > 0.90
         for: 15m
         labels:
           severity: warning
@@ -297,7 +299,7 @@ groups:
         expr: |
           time() - dmc_pg_backup_heartbeat_timestamp_seconds > 2 * 3600
           or
-          absent(dmc_pg_backup_heartbeat_timestamp_seconds)
+          absent(dmc_pg_backup_heartbeat_timestamp_seconds{environment="staging"})
         for: 10m
         labels:
           severity: critical

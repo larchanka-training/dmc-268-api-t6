@@ -11,13 +11,13 @@ tests:
   # its 2 messages for days; the alert fires on the growth and is gone 15 minutes later.
   - interval: 30s
     input_series:
-      - series: 'rabbitmq_detailed_queue_messages{queue="reviews.dlq", vhost="/"}'
+      - series: 'rabbitmq_detailed_queue_messages{environment="staging", queue="reviews.dlq", vhost="/"}'
         values: "0 0 2x40"
-      - series: 'rabbitmq_detailed_queue_consumers{queue="review.run.fast", vhost="/"}'
+      - series: 'rabbitmq_detailed_queue_consumers{environment="staging", queue="review.run.fast", vhost="/"}'
         values: "1 1 0x20"
-      - series: 'rabbitmq_detailed_queue_messages_ready{queue="review.run.fast", vhost="/"}'
+      - series: 'rabbitmq_detailed_queue_messages_ready{environment="staging", queue="review.run.fast", vhost="/"}'
         values: "25x30"
-      - series: 'rabbitmq_detailed_queue_messages_ready{queue="retry.30s.fast", vhost="/"}'
+      - series: 'rabbitmq_detailed_queue_messages_ready{environment="staging", queue="retry.30s.fast", vhost="/"}'
         values: "500x30"
     alert_rule_test:
       - eval_time: 30s
@@ -28,6 +28,7 @@ tests:
         exp_alerts:
           - exp_labels:
               severity: critical
+              environment: staging
               kind: event
             exp_annotations:
               summary: "2 new message(s) in reviews.dlq in the last 15 minutes"
@@ -40,6 +41,7 @@ tests:
         exp_alerts:
           - exp_labels:
               severity: critical
+              environment: staging
               queue: review.run.fast
             exp_annotations:
               summary: "No worker consumes review.run.fast"
@@ -50,6 +52,7 @@ tests:
         exp_alerts:
           - exp_labels:
               severity: warning
+              environment: staging
               queue: review.run.fast
             exp_annotations:
               summary: "25 message(s) wait in review.run.fast"
@@ -58,11 +61,11 @@ tests:
   # Failed and stuck runs from the PostgreSQL review metrics.
   - interval: 1m
     input_series:
-      - series: 'dmc_runs_finished_15m_runs{state="succeeded"}'
+      - series: 'dmc_runs_finished_15m_runs{environment="staging", state="succeeded"}'
         values: "4x10"
-      - series: 'dmc_runs_finished_15m_runs{state="failed"}'
+      - series: 'dmc_runs_finished_15m_runs{environment="staging", state="failed"}'
         values: "_ _ 1x8"
-      - series: 'dmc_runs_active_stale_queued'
+      - series: 'dmc_runs_active_stale_queued{environment="staging"}'
         values: "0 0 2x10"
     alert_rule_test:
       - eval_time: 1m
@@ -73,6 +76,7 @@ tests:
         exp_alerts:
           - exp_labels:
               severity: warning
+              environment: staging
               kind: event
             exp_annotations:
               summary: "1 review run(s) failed in the last 15 minutes"
@@ -82,6 +86,7 @@ tests:
         exp_alerts:
           - exp_labels:
               severity: warning
+              environment: staging
             exp_annotations:
               summary: "2 run(s) queued for more than 10 minutes"
               description: "Runs stay queued past available_at (T18 of docs/PIPELINE_SPEC.md §3)."
@@ -89,9 +94,9 @@ tests:
   # LLM latency needs both a slow p95 and enough calls: one slow call does not page.
   - interval: 1m
     input_series:
-      - series: 'dmc_llm_calls_15m_p95_seconds'
+      - series: 'dmc_llm_calls_15m_p95_seconds{environment="staging"}'
         values: "80x30"
-      - series: 'dmc_llm_calls_15m_calls'
+      - series: 'dmc_llm_calls_15m_calls{environment="staging"}'
         values: "1x10 5x20"
     alert_rule_test:
       - eval_time: 10m
@@ -102,6 +107,7 @@ tests:
         exp_alerts:
           - exp_labels:
               severity: warning
+              environment: staging
             exp_annotations:
               summary: "LLM calls are slow: p95 1m 20s over 15 minutes"
               description: "The fast-engine call timeout is 90 s (docs/PIPELINE_SPEC.md §3)."
@@ -111,7 +117,7 @@ tests:
   # at once and the warning resolves 5 minutes later.
   - interval: 1m
     input_series:
-      - series: 'dmc_llm_monthly_budget_usd{instance="node-exporter:9100", job="node"}'
+      - series: 'dmc_llm_monthly_budget_usd{environment="shared", instance="node-exporter:9100", job="node"}'
         values: "50x45"
       - series: 'dmc_llm_cost_month_usd{environment="staging"}'
         values: "24.9x9 25x9 29.98x9 30x15"
@@ -129,6 +135,7 @@ tests:
         exp_alerts:
           - exp_labels:
               severity: warning
+              environment: shared
             exp_annotations:
               summary: "LLM spend this month: 40.00 USD, 80.00% of the monthly budget"
               description: "Spend in usage_events since the 1st of the month (UTC) is between 80% and 100% of LLM_MONTHLY_BUDGET_USD; at 100% LlmMonthlyBudgetExceeded takes over and this alert resolves; the alert pauses no reviews."
@@ -140,6 +147,7 @@ tests:
         exp_alerts:
           - exp_labels:
               severity: warning
+              environment: shared
             exp_annotations:
               summary: "LLM spend this month: 49.98 USD, 99.96% of the monthly budget"
               description: "Spend in usage_events since the 1st of the month (UTC) is between 80% and 100% of LLM_MONTHLY_BUDGET_USD; at 100% LlmMonthlyBudgetExceeded takes over and this alert resolves; the alert pauses no reviews."
@@ -154,6 +162,7 @@ tests:
         exp_alerts:
           - exp_labels:
               severity: critical
+              environment: shared
             exp_annotations:
               summary: "LLM spend this month: 50.00 USD, 100.00% of the monthly budget"
               description: "Spend in usage_events since the 1st of the month (UTC) has reached LLM_MONTHLY_BUDGET_USD; the alert pauses no reviews, they keep spending."
@@ -162,6 +171,7 @@ tests:
         exp_alerts:
           - exp_labels:
               severity: warning
+              environment: shared
             exp_annotations:
               summary: "LLM spend this month: 49.98 USD, 99.96% of the monthly budget"
               description: "Spend in usage_events since the 1st of the month (UTC) is between 80% and 100% of LLM_MONTHLY_BUDGET_USD; at 100% LlmMonthlyBudgetExceeded takes over and this alert resolves; the alert pauses no reviews."
@@ -176,6 +186,7 @@ tests:
         exp_alerts:
           - exp_labels:
               severity: critical
+              environment: shared
             exp_annotations:
               summary: "LLM spend this month: 50.00 USD, 100.00% of the monthly budget"
               description: "Spend in usage_events since the 1st of the month (UTC) has reached LLM_MONTHLY_BUDGET_USD; the alert pauses no reviews, they keep spending."
@@ -183,7 +194,7 @@ tests:
   # A missed scrape of postgres-exporter marks the spend stale; neither alert resolves on it.
   - interval: 1m
     input_series:
-      - series: 'dmc_llm_monthly_budget_usd{instance="node-exporter:9100", job="node"}'
+      - series: 'dmc_llm_monthly_budget_usd{environment="shared", instance="node-exporter:9100", job="node"}'
         values: "50x30"
       - series: 'dmc_llm_cost_month_usd{environment="staging"}'
         values: "45x10 stale 45x3 55x5 stale 55x5"
@@ -193,6 +204,7 @@ tests:
         exp_alerts:
           - exp_labels:
               severity: warning
+              environment: shared
             exp_annotations:
               summary: "LLM spend this month: 45.00 USD, 90.00% of the monthly budget"
               description: "Spend in usage_events since the 1st of the month (UTC) is between 80% and 100% of LLM_MONTHLY_BUDGET_USD; at 100% LlmMonthlyBudgetExceeded takes over and this alert resolves; the alert pauses no reviews."
@@ -201,6 +213,7 @@ tests:
         exp_alerts:
           - exp_labels:
               severity: critical
+              environment: shared
             exp_annotations:
               summary: "LLM spend this month: 55.00 USD, 110.00% of the monthly budget"
               description: "Spend in usage_events since the 1st of the month (UTC) has reached LLM_MONTHLY_BUDGET_USD; the alert pauses no reviews, they keep spending."
@@ -209,7 +222,7 @@ tests:
   # 20-minute gap sends no RESOLVED, and a longer one resolves it 30 minutes after the last scrape.
   - interval: 1m
     input_series:
-      - series: 'dmc_llm_monthly_budget_usd{instance="node-exporter:9100", job="node"}'
+      - series: 'dmc_llm_monthly_budget_usd{environment="shared", instance="node-exporter:9100", job="node"}'
         values: "50x65"
       - series: 'dmc_llm_cost_month_usd{environment="staging"}'
         values: "55x5 stale _x19 55x5 stale"
@@ -219,6 +232,7 @@ tests:
         exp_alerts:
           - exp_labels:
               severity: critical
+              environment: shared
             exp_annotations:
               summary: "LLM spend this month: 55.00 USD, 110.00% of the monthly budget"
               description: "Spend in usage_events since the 1st of the month (UTC) has reached LLM_MONTHLY_BUDGET_USD; the alert pauses no reviews, they keep spending."
@@ -227,6 +241,7 @@ tests:
         exp_alerts:
           - exp_labels:
               severity: critical
+              environment: shared
             exp_annotations:
               summary: "LLM spend this month: 55.00 USD, 110.00% of the monthly budget"
               description: "Spend in usage_events since the 1st of the month (UTC) has reached LLM_MONTHLY_BUDGET_USD; the alert pauses no reviews, they keep spending."
@@ -235,6 +250,7 @@ tests:
         exp_alerts:
           - exp_labels:
               severity: critical
+              environment: shared
             exp_annotations:
               summary: "LLM spend this month: 55.00 USD, 110.00% of the monthly budget"
               description: "Spend in usage_events since the 1st of the month (UTC) has reached LLM_MONTHLY_BUDGET_USD; the alert pauses no reviews, they keep spending."
@@ -246,7 +262,7 @@ tests:
   # resolves 30 minutes later.
   - interval: 1m
     input_series:
-      - series: 'dmc_llm_monthly_budget_usd{instance="node-exporter:9100", job="node"}'
+      - series: 'dmc_llm_monthly_budget_usd{environment="shared", instance="node-exporter:9100", job="node"}'
         values: "50x40"
       - series: 'dmc_llm_cost_month_usd{environment="staging"}'
         values: "55x5 0.5x35"
@@ -256,6 +272,7 @@ tests:
         exp_alerts:
           - exp_labels:
               severity: critical
+              environment: shared
             exp_annotations:
               summary: "LLM spend this month: 55.00 USD, 110.00% of the monthly budget"
               description: "Spend in usage_events since the 1st of the month (UTC) has reached LLM_MONTHLY_BUDGET_USD; the alert pauses no reviews, they keep spending."
@@ -266,7 +283,7 @@ tests:
   # No budget is set: no threshold series, then a 0 written by hand. Both alerts stay silent.
   - interval: 1m
     input_series:
-      - series: 'dmc_llm_monthly_budget_usd{instance="node-exporter:9100", job="node"}'
+      - series: 'dmc_llm_monthly_budget_usd{environment="shared", instance="node-exporter:9100", job="node"}'
         values: "_x14 0x15"
       - series: 'dmc_llm_cost_month_usd{environment="staging"}'
         values: "500x30"
@@ -288,7 +305,7 @@ tests:
   # empties.
   - interval: 1m
     input_series:
-      - series: 'dmc_runs_budget_paused_15m_runs'
+      - series: 'dmc_runs_budget_paused_15m_runs{environment="staging"}'
         values: "0 0 2x5 0x70"
     alert_rule_test:
       - eval_time: 1m
@@ -299,6 +316,7 @@ tests:
         exp_alerts:
           - exp_labels:
               severity: warning
+              environment: staging
               kind: event
             exp_annotations:
               summary: "2 review run(s) skipped with budget_paused in the last 15 minutes"
@@ -308,6 +326,7 @@ tests:
         exp_alerts:
           - exp_labels:
               severity: warning
+              environment: staging
               kind: event
             exp_annotations:
               summary: "2 review run(s) skipped with budget_paused in the last 15 minutes"
@@ -317,6 +336,7 @@ tests:
         exp_alerts:
           - exp_labels:
               severity: warning
+              environment: staging
               kind: event
             exp_annotations:
               summary: "2 review run(s) skipped with budget_paused in the last 15 minutes"
@@ -328,7 +348,7 @@ tests:
   # A single skipped run is enough.
   - interval: 1m
     input_series:
-      - series: 'dmc_runs_budget_paused_15m_runs'
+      - series: 'dmc_runs_budget_paused_15m_runs{environment="staging"}'
         values: "0 1x5 0x70"
     alert_rule_test:
       - eval_time: 0m
@@ -339,6 +359,7 @@ tests:
         exp_alerts:
           - exp_labels:
               severity: warning
+              environment: staging
               kind: event
             exp_annotations:
               summary: "1 review run(s) skipped with budget_paused in the last 15 minutes"
@@ -352,7 +373,7 @@ tests:
   # leaves the window.
   - interval: 1m
     input_series:
-      - series: 'dmc_runs_budget_paused_15m_runs'
+      - series: 'dmc_runs_budget_paused_15m_runs{environment="staging"}'
         values: "1x14 0x4 1x14 0x4 1x14 0x65"
     alert_rule_test:
       - eval_time: 0m
@@ -360,6 +381,7 @@ tests:
         exp_alerts:
           - exp_labels:
               severity: warning
+              environment: staging
               kind: event
             exp_annotations:
               summary: "1 review run(s) skipped with budget_paused in the last 15 minutes"
@@ -369,6 +391,7 @@ tests:
         exp_alerts:
           - exp_labels:
               severity: warning
+              environment: staging
               kind: event
             exp_annotations:
               summary: "1 review run(s) skipped with budget_paused in the last 15 minutes"
@@ -378,6 +401,7 @@ tests:
         exp_alerts:
           - exp_labels:
               severity: warning
+              environment: staging
               kind: event
             exp_annotations:
               summary: "1 review run(s) skipped with budget_paused in the last 15 minutes"
@@ -387,6 +411,7 @@ tests:
         exp_alerts:
           - exp_labels:
               severity: warning
+              environment: staging
               kind: event
             exp_annotations:
               summary: "1 review run(s) skipped with budget_paused in the last 15 minutes"
@@ -399,11 +424,11 @@ tests:
   # other hosts do not count.
   - interval: 1m
     input_series:
-      - series: 'caddy_http_request_duration_seconds_count{host="staging-api.example.test", code="200"}'
+      - series: 'caddy_http_request_duration_seconds_count{environment="staging", host="staging-api.example.test", code="200"}'
         values: "0+60x20"
-      - series: 'caddy_http_request_duration_seconds_count{host="staging-api.example.test", code="502"}'
+      - series: 'caddy_http_request_duration_seconds_count{environment="staging", host="staging-api.example.test", code="502"}'
         values: "0+12x20"
-      - series: 'caddy_http_request_duration_seconds_count{host="api.example.test", code="503"}'
+      - series: 'caddy_http_request_duration_seconds_count{environment="prod", host="api.example.test", code="503"}'
         values: "0+60x20"
     alert_rule_test:
       - eval_time: 12m
@@ -411,6 +436,7 @@ tests:
         exp_alerts:
           - exp_labels:
               severity: critical
+              environment: staging
               host: staging-api.example.test
             exp_annotations:
               summary: "staging-api.example.test: 16.67% of requests end in 5xx"
@@ -418,11 +444,11 @@ tests:
 
   - interval: 1m
     input_series:
-      - series: 'up{job="rabbitmq", instance="rabbitmq:15692"}'
+      - series: 'up{environment="staging", job="rabbitmq", instance="rabbitmq:15692"}'
         values: "1 1 0x10"
-      - series: 'node_memory_MemAvailable_bytes{instance="node-exporter:9100"}'
+      - series: 'node_memory_MemAvailable_bytes{environment="shared", instance="node-exporter:9100"}'
         values: "50x20"
-      - series: 'node_memory_MemTotal_bytes{instance="node-exporter:9100"}'
+      - series: 'node_memory_MemTotal_bytes{environment="shared", instance="node-exporter:9100"}'
         values: "1000x20"
     alert_rule_test:
       - eval_time: 8m
@@ -430,6 +456,7 @@ tests:
         exp_alerts:
           - exp_labels:
               severity: critical
+              environment: staging
               job: rabbitmq
               instance: rabbitmq:15692
             exp_annotations:
@@ -440,6 +467,7 @@ tests:
         exp_alerts:
           - exp_labels:
               severity: critical
+              environment: shared
               instance: node-exporter:9100
             exp_annotations:
               summary: "Host memory available: 5%"
@@ -449,9 +477,9 @@ tests:
   # needed); a name down 4.5 minutes at a time, then answering once, does not.
   - interval: 1m
     input_series:
-      - series: 'probe_success{job="blackbox", instance="https://api.example.test/healthcheck", host="api.example.test"}'
+      - series: 'probe_success{environment="prod", job="blackbox", instance="https://api.example.test/healthcheck", host="api.example.test"}'
         values: "1 0x10"
-      - series: 'probe_success{job="blackbox", instance="https://staging-ui.example.test/health", host="staging-ui.example.test"}'
+      - series: 'probe_success{environment="staging", job="blackbox", instance="https://staging-ui.example.test/health", host="staging-ui.example.test"}'
         values: "1 0x4 1 0x4 1"
     alert_rule_test:
       - eval_time: 5m30s
@@ -462,6 +490,7 @@ tests:
         exp_alerts:
           - exp_labels:
               severity: critical
+              environment: prod
               job: blackbox
               instance: https://api.example.test/healthcheck
               host: api.example.test
@@ -473,6 +502,7 @@ tests:
         exp_alerts:
           - exp_labels:
               severity: critical
+              environment: prod
               job: blackbox
               instance: https://api.example.test/healthcheck
               host: api.example.test
@@ -484,33 +514,33 @@ tests:
   # A container without a healthcheck (-1, dmc-268-api) and the projects of other apps do not.
   - interval: 30s
     input_series:
-      - series: 'container_health_state{job="cadvisor", container_label_com_docker_compose_project="dmc-268-api-staging", container_label_com_docker_compose_service="webhook-worker", name="dmc-268-api-staging-webhook-worker-1"}'
+      - series: 'container_health_state{environment="staging", job="cadvisor", container_label_com_docker_compose_project="dmc-268-api-staging", container_label_com_docker_compose_service="webhook-worker", name="dmc-268-api-staging-webhook-worker-1"}'
         values: "1 1 0x20"
-      - series: 'container_last_seen{job="cadvisor", container_label_com_docker_compose_project="dmc-268-api-staging", container_label_com_docker_compose_service="webhook-worker", name="dmc-268-api-staging-webhook-worker-1"}'
+      - series: 'container_last_seen{environment="staging", job="cadvisor", container_label_com_docker_compose_project="dmc-268-api-staging", container_label_com_docker_compose_service="webhook-worker", name="dmc-268-api-staging-webhook-worker-1"}'
         values: "0+30x22"
-      - series: 'container_last_seen{job="cadvisor", container_label_com_docker_compose_project="dmc-268-api-staging", container_label_com_docker_compose_service="postgres", name="dmc-268-api-staging-postgres-1"}'
+      - series: 'container_last_seen{environment="staging", job="cadvisor", container_label_com_docker_compose_project="dmc-268-api-staging", container_label_com_docker_compose_service="postgres", name="dmc-268-api-staging-postgres-1"}'
         values: "0+30x22"
-      - series: 'container_health_state{job="cadvisor", container_label_com_docker_compose_project="dmc-268-api-staging", container_label_com_docker_compose_service="postgres", name="dmc-268-api-staging-postgres-1"}'
+      - series: 'container_health_state{environment="staging", job="cadvisor", container_label_com_docker_compose_project="dmc-268-api-staging", container_label_com_docker_compose_service="postgres", name="dmc-268-api-staging-postgres-1"}'
         values: "1x22"
-      - series: 'container_health_state{job="cadvisor", container_label_com_docker_compose_project="dmc-268-api-prod", container_label_com_docker_compose_service="webhook-worker", name="dmc-268-api-prod-webhook-worker-1"}'
+      - series: 'container_health_state{environment="prod", job="cadvisor", container_label_com_docker_compose_project="dmc-268-api-prod", container_label_com_docker_compose_service="webhook-worker", name="dmc-268-api-prod-webhook-worker-1"}'
         values: "1 1 0x20"
-      - series: 'container_last_seen{job="cadvisor", container_label_com_docker_compose_project="dmc-268-api-prod", container_label_com_docker_compose_service="webhook-worker", name="dmc-268-api-prod-webhook-worker-1"}'
+      - series: 'container_last_seen{environment="prod", job="cadvisor", container_label_com_docker_compose_project="dmc-268-api-prod", container_label_com_docker_compose_service="webhook-worker", name="dmc-268-api-prod-webhook-worker-1"}'
         values: "0+30x22"
-      - series: 'container_last_seen{job="cadvisor", container_label_com_docker_compose_project="dmc-268-api-prod", container_label_com_docker_compose_service="postgres", name="dmc-268-api-prod-postgres-1"}'
+      - series: 'container_last_seen{environment="prod", job="cadvisor", container_label_com_docker_compose_project="dmc-268-api-prod", container_label_com_docker_compose_service="postgres", name="dmc-268-api-prod-postgres-1"}'
         values: "0+30x22"
-      - series: 'container_health_state{job="cadvisor", container_label_com_docker_compose_project="dmc-268-api", container_label_com_docker_compose_service="webhook-worker", name="dmc-268-api-webhook-worker-1"}'
+      - series: 'container_health_state{environment="staging", job="cadvisor", container_label_com_docker_compose_project="dmc-268-api", container_label_com_docker_compose_service="webhook-worker", name="dmc-268-api-webhook-worker-1"}'
         values: "-1x22"
-      - series: 'container_last_seen{job="cadvisor", container_label_com_docker_compose_project="dmc-268-api", container_label_com_docker_compose_service="webhook-worker", name="dmc-268-api-webhook-worker-1"}'
+      - series: 'container_last_seen{environment="staging", job="cadvisor", container_label_com_docker_compose_project="dmc-268-api", container_label_com_docker_compose_service="webhook-worker", name="dmc-268-api-webhook-worker-1"}'
         values: "0+30x22"
-      - series: 'container_last_seen{job="cadvisor", container_label_com_docker_compose_project="dmc-268-api", container_label_com_docker_compose_service="postgres", name="dmc-268-api-postgres-1"}'
+      - series: 'container_last_seen{environment="staging", job="cadvisor", container_label_com_docker_compose_project="dmc-268-api", container_label_com_docker_compose_service="postgres", name="dmc-268-api-postgres-1"}'
         values: "0+30x22"
-      - series: 'container_health_state{job="cadvisor", container_label_com_docker_compose_project="other-app", container_label_com_docker_compose_service="webhook-worker", name="other-app-webhook-worker-1"}'
+      - series: 'container_health_state{environment="shared", job="cadvisor", container_label_com_docker_compose_project="other-app", container_label_com_docker_compose_service="webhook-worker", name="other-app-webhook-worker-1"}'
         values: "0x22"
-      - series: 'container_last_seen{job="cadvisor", container_label_com_docker_compose_project="other-app", container_label_com_docker_compose_service="webhook-worker", name="other-app-webhook-worker-1"}'
+      - series: 'container_last_seen{environment="shared", job="cadvisor", container_label_com_docker_compose_project="other-app", container_label_com_docker_compose_service="webhook-worker", name="other-app-webhook-worker-1"}'
         values: "0+30x22"
-      - series: 'container_last_seen{job="cadvisor", container_label_com_docker_compose_project="other-app", container_label_com_docker_compose_service="postgres", name="other-app-postgres-1"}'
+      - series: 'container_last_seen{environment="shared", job="cadvisor", container_label_com_docker_compose_project="other-app", container_label_com_docker_compose_service="postgres", name="other-app-postgres-1"}'
         values: "0+30x22"
-      - series: 'container_last_seen{job="cadvisor", container_label_com_docker_compose_project="other-db", container_label_com_docker_compose_service="postgres", name="other-db-postgres-1"}'
+      - series: 'container_last_seen{environment="shared", job="cadvisor", container_label_com_docker_compose_project="other-db", container_label_com_docker_compose_service="postgres", name="other-db-postgres-1"}'
         values: "0+30x22"
     alert_rule_test:
       - eval_time: 5m30s
@@ -521,12 +551,14 @@ tests:
         exp_alerts:
           - exp_labels:
               severity: critical
+              environment: staging
               container_label_com_docker_compose_project: dmc-268-api-staging
             exp_annotations:
               summary: "webhook-worker of dmc-268-api-staging is stopped or unhealthy"
               description: "GitHub deliveries are accepted and stored but not processed; see docker compose -p dmc-268-api-staging ps webhook-worker."
           - exp_labels:
               severity: critical
+              environment: prod
               container_label_com_docker_compose_project: dmc-268-api-prod
             exp_annotations:
               summary: "webhook-worker of dmc-268-api-prod is stopped or unhealthy"
@@ -539,23 +571,23 @@ tests:
   # (dmc-268-api, postgres a scrape later) does not page.
   - interval: 30s
     input_series:
-      - series: 'container_health_state{job="cadvisor", container_label_com_docker_compose_project="dmc-268-api-staging", container_label_com_docker_compose_service="webhook-worker", name="dmc-268-api-staging-webhook-worker-1"}'
+      - series: 'container_health_state{environment="staging", job="cadvisor", container_label_com_docker_compose_project="dmc-268-api-staging", container_label_com_docker_compose_service="webhook-worker", name="dmc-268-api-staging-webhook-worker-1"}'
         values: "1x4 stale"
-      - series: 'container_last_seen{job="cadvisor", container_label_com_docker_compose_project="dmc-268-api-staging", container_label_com_docker_compose_service="webhook-worker", name="dmc-268-api-staging-webhook-worker-1"}'
+      - series: 'container_last_seen{environment="staging", job="cadvisor", container_label_com_docker_compose_project="dmc-268-api-staging", container_label_com_docker_compose_service="webhook-worker", name="dmc-268-api-staging-webhook-worker-1"}'
         values: "0+30x4 stale"
-      - series: 'container_last_seen{job="cadvisor", container_label_com_docker_compose_project="dmc-268-api-staging", container_label_com_docker_compose_service="postgres", name="dmc-268-api-staging-postgres-1"}'
+      - series: 'container_last_seen{environment="staging", job="cadvisor", container_label_com_docker_compose_project="dmc-268-api-staging", container_label_com_docker_compose_service="postgres", name="dmc-268-api-staging-postgres-1"}'
         values: "0+30x30"
-      - series: 'container_health_state{job="cadvisor", container_label_com_docker_compose_project="dmc-268-api-prod", container_label_com_docker_compose_service="webhook-worker", name="dmc-268-api-prod-webhook-worker-1"}'
+      - series: 'container_health_state{environment="prod", job="cadvisor", container_label_com_docker_compose_project="dmc-268-api-prod", container_label_com_docker_compose_service="webhook-worker", name="dmc-268-api-prod-webhook-worker-1"}'
         values: "1x4"
-      - series: 'container_last_seen{job="cadvisor", container_label_com_docker_compose_project="dmc-268-api-prod", container_label_com_docker_compose_service="webhook-worker", name="dmc-268-api-prod-webhook-worker-1"}'
+      - series: 'container_last_seen{environment="prod", job="cadvisor", container_label_com_docker_compose_project="dmc-268-api-prod", container_label_com_docker_compose_service="webhook-worker", name="dmc-268-api-prod-webhook-worker-1"}'
         values: "0+30x4"
-      - series: 'container_last_seen{job="cadvisor", container_label_com_docker_compose_project="dmc-268-api-prod", container_label_com_docker_compose_service="postgres", name="dmc-268-api-prod-postgres-1"}'
+      - series: 'container_last_seen{environment="prod", job="cadvisor", container_label_com_docker_compose_project="dmc-268-api-prod", container_label_com_docker_compose_service="postgres", name="dmc-268-api-prod-postgres-1"}'
         values: "0+30x30"
-      - series: 'container_health_state{job="cadvisor", container_label_com_docker_compose_project="dmc-268-api", container_label_com_docker_compose_service="webhook-worker", name="dmc-268-api-webhook-worker-1"}'
+      - series: 'container_health_state{environment="staging", job="cadvisor", container_label_com_docker_compose_project="dmc-268-api", container_label_com_docker_compose_service="webhook-worker", name="dmc-268-api-webhook-worker-1"}'
         values: "1x4 stale"
-      - series: 'container_last_seen{job="cadvisor", container_label_com_docker_compose_project="dmc-268-api", container_label_com_docker_compose_service="webhook-worker", name="dmc-268-api-webhook-worker-1"}'
+      - series: 'container_last_seen{environment="staging", job="cadvisor", container_label_com_docker_compose_project="dmc-268-api", container_label_com_docker_compose_service="webhook-worker", name="dmc-268-api-webhook-worker-1"}'
         values: "0+30x4 stale"
-      - series: 'container_last_seen{job="cadvisor", container_label_com_docker_compose_project="dmc-268-api", container_label_com_docker_compose_service="postgres", name="dmc-268-api-postgres-1"}'
+      - series: 'container_last_seen{environment="staging", job="cadvisor", container_label_com_docker_compose_project="dmc-268-api", container_label_com_docker_compose_service="postgres", name="dmc-268-api-postgres-1"}'
         values: "0+30x5 stale"
     alert_rule_test:
       - eval_time: 7m
@@ -566,6 +598,7 @@ tests:
         exp_alerts:
           - exp_labels:
               severity: critical
+              environment: staging
               container_label_com_docker_compose_project: dmc-268-api-staging
             exp_annotations:
               summary: "webhook-worker of dmc-268-api-staging is stopped or unhealthy"
@@ -575,6 +608,7 @@ tests:
         exp_alerts:
           - exp_labels:
               severity: critical
+              environment: staging
               container_label_com_docker_compose_project: dmc-268-api-staging
             exp_annotations:
               summary: "webhook-worker of dmc-268-api-staging is stopped or unhealthy"
@@ -584,12 +618,14 @@ tests:
         exp_alerts:
           - exp_labels:
               severity: critical
+              environment: staging
               container_label_com_docker_compose_project: dmc-268-api-staging
             exp_annotations:
               summary: "webhook-worker of dmc-268-api-staging is stopped or unhealthy"
               description: "GitHub deliveries are accepted and stored but not processed; see docker compose -p dmc-268-api-staging ps webhook-worker."
           - exp_labels:
               severity: critical
+              environment: prod
               container_label_com_docker_compose_project: dmc-268-api-prod
             exp_annotations:
               summary: "webhook-worker of dmc-268-api-prod is stopped or unhealthy"
@@ -599,15 +635,15 @@ tests:
   # (PostgresDown's case on staging), the rule anchors on postgres, not on any container.
   - interval: 30s
     input_series:
-      - series: 'container_health_state{job="cadvisor", container_label_com_docker_compose_project="dmc-268-api-staging", container_label_com_docker_compose_service="webhook-worker", name="dmc-268-api-staging-webhook-worker-1"}'
+      - series: 'container_health_state{environment="staging", job="cadvisor", container_label_com_docker_compose_project="dmc-268-api-staging", container_label_com_docker_compose_service="webhook-worker", name="dmc-268-api-staging-webhook-worker-1"}'
         values: "1x4 stale"
-      - series: 'container_last_seen{job="cadvisor", container_label_com_docker_compose_project="dmc-268-api-staging", container_label_com_docker_compose_service="webhook-worker", name="dmc-268-api-staging-webhook-worker-1"}'
+      - series: 'container_last_seen{environment="staging", job="cadvisor", container_label_com_docker_compose_project="dmc-268-api-staging", container_label_com_docker_compose_service="webhook-worker", name="dmc-268-api-staging-webhook-worker-1"}'
         values: "0+30x4 stale"
-      - series: 'container_last_seen{job="cadvisor", container_label_com_docker_compose_project="dmc-268-api-staging", container_label_com_docker_compose_service="postgres", name="dmc-268-api-staging-postgres-1"}'
+      - series: 'container_last_seen{environment="staging", job="cadvisor", container_label_com_docker_compose_project="dmc-268-api-staging", container_label_com_docker_compose_service="postgres", name="dmc-268-api-staging-postgres-1"}'
         values: "0+30x4 stale"
-      - series: 'container_last_seen{job="cadvisor", container_label_com_docker_compose_project="dmc-268-api-staging", container_label_com_docker_compose_service="api", name="dmc-268-api-staging-api-1"}'
+      - series: 'container_last_seen{environment="staging", job="cadvisor", container_label_com_docker_compose_project="dmc-268-api-staging", container_label_com_docker_compose_service="api", name="dmc-268-api-staging-api-1"}'
         values: "0+30x30"
-      - series: 'container_last_seen{job="cadvisor", container_label_com_docker_compose_project="dmc-268-api-staging", container_label_com_docker_compose_service="rabbitmq", name="dmc-268-api-staging-rabbitmq-1"}'
+      - series: 'container_last_seen{environment="staging", job="cadvisor", container_label_com_docker_compose_project="dmc-268-api-staging", container_label_com_docker_compose_service="rabbitmq", name="dmc-268-api-staging-rabbitmq-1"}'
         values: "0+30x30"
     alert_rule_test:
       - eval_time: 15m
@@ -622,35 +658,35 @@ tests:
   # recreated container (6m30s).
   - interval: 30s
     input_series:
-      - series: 'container_health_state{job="cadvisor", container_label_com_docker_compose_project="dmc-268-api-staging", container_label_com_docker_compose_service="webhook-worker", name="dmc-268-api-staging-webhook-worker-1", id="/system.slice/docker-a.scope"}'
+      - series: 'container_health_state{environment="staging", job="cadvisor", container_label_com_docker_compose_project="dmc-268-api-staging", container_label_com_docker_compose_service="webhook-worker", name="dmc-268-api-staging-webhook-worker-1", id="/system.slice/docker-a.scope"}'
         values: "1x4 stale"
-      - series: 'container_last_seen{job="cadvisor", container_label_com_docker_compose_project="dmc-268-api-staging", container_label_com_docker_compose_service="webhook-worker", name="dmc-268-api-staging-webhook-worker-1", id="/system.slice/docker-a.scope"}'
+      - series: 'container_last_seen{environment="staging", job="cadvisor", container_label_com_docker_compose_project="dmc-268-api-staging", container_label_com_docker_compose_service="webhook-worker", name="dmc-268-api-staging-webhook-worker-1", id="/system.slice/docker-a.scope"}'
         values: "0+30x4 stale"
-      - series: 'container_health_state{job="cadvisor", container_label_com_docker_compose_project="dmc-268-api-staging", container_label_com_docker_compose_service="webhook-worker", name="dmc-268-api-staging-webhook-worker-1", id="/system.slice/docker-b.scope"}'
+      - series: 'container_health_state{environment="staging", job="cadvisor", container_label_com_docker_compose_project="dmc-268-api-staging", container_label_com_docker_compose_service="webhook-worker", name="dmc-268-api-staging-webhook-worker-1", id="/system.slice/docker-b.scope"}'
         values: "_x6 0 1 1 1 stale"
-      - series: 'container_last_seen{job="cadvisor", container_label_com_docker_compose_project="dmc-268-api-staging", container_label_com_docker_compose_service="webhook-worker", name="dmc-268-api-staging-webhook-worker-1", id="/system.slice/docker-b.scope"}'
+      - series: 'container_last_seen{environment="staging", job="cadvisor", container_label_com_docker_compose_project="dmc-268-api-staging", container_label_com_docker_compose_service="webhook-worker", name="dmc-268-api-staging-webhook-worker-1", id="/system.slice/docker-b.scope"}'
         values: "_x6 180+30x3 stale"
-      - series: 'container_health_state{job="cadvisor", container_label_com_docker_compose_project="dmc-268-api-staging", container_label_com_docker_compose_service="webhook-worker", name="dmc-268-api-staging-webhook-worker-1", id="/system.slice/docker-c.scope"}'
+      - series: 'container_health_state{environment="staging", job="cadvisor", container_label_com_docker_compose_project="dmc-268-api-staging", container_label_com_docker_compose_service="webhook-worker", name="dmc-268-api-staging-webhook-worker-1", id="/system.slice/docker-c.scope"}'
         values: "_x10 0 1x13"
-      - series: 'container_last_seen{job="cadvisor", container_label_com_docker_compose_project="dmc-268-api-staging", container_label_com_docker_compose_service="webhook-worker", name="dmc-268-api-staging-webhook-worker-1", id="/system.slice/docker-c.scope"}'
+      - series: 'container_last_seen{environment="staging", job="cadvisor", container_label_com_docker_compose_project="dmc-268-api-staging", container_label_com_docker_compose_service="webhook-worker", name="dmc-268-api-staging-webhook-worker-1", id="/system.slice/docker-c.scope"}'
         values: "_x10 300+30x14"
-      - series: 'container_last_seen{job="cadvisor", container_label_com_docker_compose_project="dmc-268-api-staging", container_label_com_docker_compose_service="postgres", name="dmc-268-api-staging-postgres-1"}'
+      - series: 'container_last_seen{environment="staging", job="cadvisor", container_label_com_docker_compose_project="dmc-268-api-staging", container_label_com_docker_compose_service="postgres", name="dmc-268-api-staging-postgres-1"}'
         values: "0+30x24"
-      - series: 'container_health_state{job="cadvisor", container_label_com_docker_compose_project="dmc-268-api-prod", container_label_com_docker_compose_service="webhook-worker", name="dmc-268-api-prod-webhook-worker-1"}'
+      - series: 'container_health_state{environment="prod", job="cadvisor", container_label_com_docker_compose_project="dmc-268-api-prod", container_label_com_docker_compose_service="webhook-worker", name="dmc-268-api-prod-webhook-worker-1"}'
         values: "0 0 stale _x2 0 0 stale _x2 0 0 stale _x2 0 0 stale _x2 0 0"
-      - series: 'container_last_seen{job="cadvisor", container_label_com_docker_compose_project="dmc-268-api-prod", container_label_com_docker_compose_service="webhook-worker", name="dmc-268-api-prod-webhook-worker-1"}'
+      - series: 'container_last_seen{environment="prod", job="cadvisor", container_label_com_docker_compose_project="dmc-268-api-prod", container_label_com_docker_compose_service="webhook-worker", name="dmc-268-api-prod-webhook-worker-1"}'
         values: "0 30 stale _x2 150 180 stale _x2 300 330 stale _x2 450 480 stale _x2 600 630"
-      - series: 'container_last_seen{job="cadvisor", container_label_com_docker_compose_project="dmc-268-api-prod", container_label_com_docker_compose_service="postgres", name="dmc-268-api-prod-postgres-1"}'
+      - series: 'container_last_seen{environment="prod", job="cadvisor", container_label_com_docker_compose_project="dmc-268-api-prod", container_label_com_docker_compose_service="postgres", name="dmc-268-api-prod-postgres-1"}'
         values: "0+30x24"
-      - series: 'container_health_state{job="cadvisor", container_label_com_docker_compose_project="dmc-268-api", container_label_com_docker_compose_service="webhook-worker", name="dmc-268-api-webhook-worker-1", id="/system.slice/docker-old.scope"}'
+      - series: 'container_health_state{environment="staging", job="cadvisor", container_label_com_docker_compose_project="dmc-268-api", container_label_com_docker_compose_service="webhook-worker", name="dmc-268-api-webhook-worker-1", id="/system.slice/docker-old.scope"}'
         values: "0x12 stale"
-      - series: 'container_last_seen{job="cadvisor", container_label_com_docker_compose_project="dmc-268-api", container_label_com_docker_compose_service="webhook-worker", name="dmc-268-api-webhook-worker-1", id="/system.slice/docker-old.scope"}'
+      - series: 'container_last_seen{environment="staging", job="cadvisor", container_label_com_docker_compose_project="dmc-268-api", container_label_com_docker_compose_service="webhook-worker", name="dmc-268-api-webhook-worker-1", id="/system.slice/docker-old.scope"}'
         values: "0+30x12 stale"
-      - series: 'container_health_state{job="cadvisor", container_label_com_docker_compose_project="dmc-268-api", container_label_com_docker_compose_service="webhook-worker", name="dmc-268-api-webhook-worker-1", id="/system.slice/docker-new.scope"}'
+      - series: 'container_health_state{environment="staging", job="cadvisor", container_label_com_docker_compose_project="dmc-268-api", container_label_com_docker_compose_service="webhook-worker", name="dmc-268-api-webhook-worker-1", id="/system.slice/docker-new.scope"}'
         values: "_x13 1x11"
-      - series: 'container_last_seen{job="cadvisor", container_label_com_docker_compose_project="dmc-268-api", container_label_com_docker_compose_service="webhook-worker", name="dmc-268-api-webhook-worker-1", id="/system.slice/docker-new.scope"}'
+      - series: 'container_last_seen{environment="staging", job="cadvisor", container_label_com_docker_compose_project="dmc-268-api", container_label_com_docker_compose_service="webhook-worker", name="dmc-268-api-webhook-worker-1", id="/system.slice/docker-new.scope"}'
         values: "_x13 390+30x11"
-      - series: 'container_last_seen{job="cadvisor", container_label_com_docker_compose_project="dmc-268-api", container_label_com_docker_compose_service="postgres", name="dmc-268-api-postgres-1"}'
+      - series: 'container_last_seen{environment="staging", job="cadvisor", container_label_com_docker_compose_project="dmc-268-api", container_label_com_docker_compose_service="postgres", name="dmc-268-api-postgres-1"}'
         values: "0+30x24"
     alert_rule_test:
       - eval_time: 4m30s
@@ -661,12 +697,14 @@ tests:
         exp_alerts:
           - exp_labels:
               severity: critical
+              environment: prod
               container_label_com_docker_compose_project: dmc-268-api-prod
             exp_annotations:
               summary: "webhook-worker of dmc-268-api-prod is stopped or unhealthy"
               description: "GitHub deliveries are accepted and stored but not processed; see docker compose -p dmc-268-api-prod ps webhook-worker."
           - exp_labels:
               severity: critical
+              environment: staging
               container_label_com_docker_compose_project: dmc-268-api
             exp_annotations:
               summary: "webhook-worker of dmc-268-api is stopped or unhealthy"
@@ -676,6 +714,7 @@ tests:
         exp_alerts:
           - exp_labels:
               severity: critical
+              environment: prod
               container_label_com_docker_compose_project: dmc-268-api-prod
             exp_annotations:
               summary: "webhook-worker of dmc-268-api-prod is stopped or unhealthy"
@@ -685,6 +724,7 @@ tests:
         exp_alerts:
           - exp_labels:
               severity: critical
+              environment: prod
               container_label_com_docker_compose_project: dmc-268-api-prod
             exp_annotations:
               summary: "webhook-worker of dmc-268-api-prod is stopped or unhealthy"
@@ -694,11 +734,11 @@ tests:
   # 2 days warns and pages at once (no inhibit rules), each after its 10 minutes.
   - interval: 1m
     input_series:
-      - series: 'probe_ssl_earliest_cert_expiry{job="blackbox", instance="https://staging-ui.example.test/health", host="staging-ui.example.test"}'
+      - series: 'probe_ssl_earliest_cert_expiry{environment="staging", job="blackbox", instance="https://staging-ui.example.test/health", host="staging-ui.example.test"}'
         values: "1296600x10"
-      - series: 'probe_ssl_earliest_cert_expiry{job="blackbox", instance="https://staging-api.example.test/healthcheck", host="staging-api.example.test"}'
+      - series: 'probe_ssl_earliest_cert_expiry{environment="staging", job="blackbox", instance="https://staging-api.example.test/healthcheck", host="staging-api.example.test"}'
         values: "1123800x10"
-      - series: 'probe_ssl_earliest_cert_expiry{job="blackbox", instance="https://api.example.test/healthcheck", host="api.example.test"}'
+      - series: 'probe_ssl_earliest_cert_expiry{environment="prod", job="blackbox", instance="https://api.example.test/healthcheck", host="api.example.test"}'
         values: "173400x10"
     alert_rule_test:
       - eval_time: 10m
@@ -706,6 +746,7 @@ tests:
         exp_alerts:
           - exp_labels:
               severity: warning
+              environment: staging
               job: blackbox
               instance: https://staging-api.example.test/healthcheck
               host: staging-api.example.test
@@ -714,6 +755,7 @@ tests:
               description: "Caddy renews a certificate when about a third of its lifetime is left, so less than 14 days means the renewal has failed; see docker compose -p dmc-268-edge logs caddy."
           - exp_labels:
               severity: warning
+              environment: prod
               job: blackbox
               instance: https://api.example.test/healthcheck
               host: api.example.test
@@ -725,6 +767,7 @@ tests:
         exp_alerts:
           - exp_labels:
               severity: critical
+              environment: prod
               job: blackbox
               instance: https://api.example.test/healthcheck
               host: api.example.test
@@ -737,9 +780,9 @@ tests:
   # summaries round up to 14.0 and 3.0.
   - interval: 1m
     input_series:
-      - series: 'probe_ssl_earliest_cert_expiry{job="blackbox", instance="https://staging-api.example.test/healthcheck", host="staging-api.example.test"}'
+      - series: 'probe_ssl_earliest_cert_expiry{environment="staging", job="blackbox", instance="https://staging-api.example.test/healthcheck", host="staging-api.example.test"}'
         values: "1210200x21"
-      - series: 'probe_ssl_earliest_cert_expiry{job="blackbox", instance="https://api.example.test/healthcheck", host="api.example.test"}'
+      - series: 'probe_ssl_earliest_cert_expiry{environment="prod", job="blackbox", instance="https://api.example.test/healthcheck", host="api.example.test"}'
         values: "259800x21"
     alert_rule_test:
       - eval_time: 20m
@@ -747,6 +790,7 @@ tests:
         exp_alerts:
           - exp_labels:
               severity: warning
+              environment: prod
               job: blackbox
               instance: https://api.example.test/healthcheck
               host: api.example.test
@@ -758,6 +802,7 @@ tests:
         exp_alerts:
           - exp_labels:
               severity: warning
+              environment: staging
               job: blackbox
               instance: https://staging-api.example.test/healthcheck
               host: staging-api.example.test
@@ -766,6 +811,7 @@ tests:
               description: "Caddy renews a certificate when about a third of its lifetime is left, so less than 14 days means the renewal has failed; see docker compose -p dmc-268-edge logs caddy."
           - exp_labels:
               severity: warning
+              environment: prod
               job: blackbox
               instance: https://api.example.test/healthcheck
               host: api.example.test
@@ -780,6 +826,7 @@ tests:
         exp_alerts:
           - exp_labels:
               severity: critical
+              environment: prod
               job: blackbox
               instance: https://api.example.test/healthcheck
               host: api.example.test
@@ -793,7 +840,7 @@ tests:
   # long is PublicEndpointDown's.
   - interval: 1m
     input_series:
-      - series: 'probe_ssl_earliest_cert_expiry{job="blackbox", instance="https://staging-ui.example.test/health", host="staging-ui.example.test"}'
+      - series: 'probe_ssl_earliest_cert_expiry{environment="staging", job="blackbox", instance="https://staging-ui.example.test/health", host="staging-ui.example.test"}'
         values: "172800x4 stale 172800x5 stale _x8 172800x8 stale"
     alert_rule_test:
       - eval_time: 10m
@@ -801,6 +848,7 @@ tests:
         exp_alerts:
           - exp_labels:
               severity: warning
+              environment: staging
               job: blackbox
               instance: https://staging-ui.example.test/health
               host: staging-ui.example.test
@@ -812,6 +860,7 @@ tests:
         exp_alerts:
           - exp_labels:
               severity: critical
+              environment: staging
               job: blackbox
               instance: https://staging-ui.example.test/health
               host: staging-ui.example.test
@@ -823,6 +872,7 @@ tests:
         exp_alerts:
           - exp_labels:
               severity: warning
+              environment: staging
               job: blackbox
               instance: https://staging-ui.example.test/health
               host: staging-ui.example.test
@@ -834,6 +884,7 @@ tests:
         exp_alerts:
           - exp_labels:
               severity: critical
+              environment: staging
               job: blackbox
               instance: https://staging-ui.example.test/health
               host: staging-ui.example.test
@@ -850,7 +901,7 @@ tests:
   # A renewed certificate (2 days, then 90 from 15m) resolves both alerts at the next probe.
   - interval: 1m
     input_series:
-      - series: 'probe_ssl_earliest_cert_expiry{job="blackbox", instance="https://staging-api.example.test/healthcheck", host="staging-api.example.test"}'
+      - series: 'probe_ssl_earliest_cert_expiry{environment="staging", job="blackbox", instance="https://staging-api.example.test/healthcheck", host="staging-api.example.test"}'
         values: "172800x14 7776000x10"
     alert_rule_test:
       - eval_time: 15m
@@ -863,7 +914,7 @@ tests:
   # A sudden drop (20 days, then 2 from 5m) counts from the drop: both alerts fire at 15m.
   - interval: 1m
     input_series:
-      - series: 'probe_ssl_earliest_cert_expiry{job="blackbox", instance="https://api.example.test/healthcheck", host="api.example.test"}'
+      - series: 'probe_ssl_earliest_cert_expiry{environment="prod", job="blackbox", instance="https://api.example.test/healthcheck", host="api.example.test"}'
         values: "1728000x4 172800x10"
     alert_rule_test:
       - eval_time: 15m
@@ -871,6 +922,7 @@ tests:
         exp_alerts:
           - exp_labels:
               severity: warning
+              environment: prod
               job: blackbox
               instance: https://api.example.test/healthcheck
               host: api.example.test
@@ -882,6 +934,7 @@ tests:
         exp_alerts:
           - exp_labels:
               severity: critical
+              environment: prod
               job: blackbox
               instance: https://api.example.test/healthcheck
               host: api.example.test
@@ -893,9 +946,9 @@ tests:
   # status at all for 2 hours means the service is gone.
   - interval: 1m
     input_series:
-      - series: 'dmc_pg_backup_last_success_timestamp_seconds{job="node", instance="node-exporter:9100"}'
+      - series: 'dmc_pg_backup_last_success_timestamp_seconds{environment="staging", job="node", instance="node-exporter:9100"}'
         values: "0x1700"
-      - series: 'dmc_pg_backup_last_run_success{job="node", instance="node-exporter:9100"}'
+      - series: 'dmc_pg_backup_last_run_success{environment="staging", job="node", instance="node-exporter:9100"}'
         values: "1x10 0x5 1x10"
     alert_rule_test:
       - eval_time: 24h
@@ -906,6 +959,7 @@ tests:
         exp_alerts:
           - exp_labels:
               severity: critical
+              environment: staging
               job: node
               instance: node-exporter:9100
             exp_annotations:
@@ -916,6 +970,7 @@ tests:
         exp_alerts:
           - exp_labels:
               severity: warning
+              environment: staging
               job: node
               instance: node-exporter:9100
             exp_annotations:
@@ -930,6 +985,7 @@ tests:
         exp_alerts:
           - exp_labels:
               severity: critical
+              environment: staging
             exp_annotations:
               summary: "The PostgreSQL backup service has not run for 2 hours"
               description: "pg-backup is stopped, removed or cannot write the textfile dir; see docker compose -p dmc-268-monitoring ps pg-backup."
@@ -938,7 +994,7 @@ tests:
   # is younger than 2 h, an alert 10 minutes after.
   - interval: 1m
     input_series:
-      - series: 'dmc_pg_backup_heartbeat_timestamp_seconds{job="node", instance="node-exporter:9100"}'
+      - series: 'dmc_pg_backup_heartbeat_timestamp_seconds{environment="staging", job="node", instance="node-exporter:9100"}'
         values: "0+60x30 1800x200"
     alert_rule_test:
       - eval_time: 2h
@@ -949,6 +1005,7 @@ tests:
         exp_alerts:
           - exp_labels:
               severity: critical
+              environment: staging
               job: node
               instance: node-exporter:9100
             exp_annotations:
@@ -959,9 +1016,9 @@ tests:
   # after an hour, also when no pass ever succeeded (no success timestamp at all).
   - interval: 1m
     input_series:
-      - series: 'dmc_pg_backup_offsite_last_success_timestamp_seconds{job="node", instance="node-exporter:9100"}'
+      - series: 'dmc_pg_backup_offsite_last_success_timestamp_seconds{environment="staging", job="node", instance="node-exporter:9100"}'
         values: "0x300"
-      - series: 'dmc_pg_backup_offsite_last_run_success{job="node", instance="node-exporter:9100"}'
+      - series: 'dmc_pg_backup_offsite_last_run_success{environment="staging", job="node", instance="node-exporter:9100"}'
         values: "0x90"
     alert_rule_test:
       - eval_time: 2h
@@ -972,6 +1029,7 @@ tests:
         exp_alerts:
           - exp_labels:
               severity: critical
+              environment: staging
               job: node
               instance: node-exporter:9100
             exp_annotations:
@@ -985,8 +1043,132 @@ tests:
         exp_alerts:
           - exp_labels:
               severity: warning
+              environment: staging
               job: node
               instance: node-exporter:9100
             exp_annotations:
               summary: "Off-host backup copy fails"
               description: "Every backup-offsite pass of the last hour failed (bucket, keys or network)."
+
+  # Staging and prod side by side: a fault of one environment fires for it alone. The prod worker
+  # leaves its queue at 1m and a prod run fails at 2m while staging stays healthy; summing over
+  # the environments would hide both.
+  - interval: 30s
+    input_series:
+      - series: 'rabbitmq_detailed_queue_consumers{environment="staging", queue="review.run.fast", vhost="/"}'
+        values: "1x20"
+      - series: 'rabbitmq_detailed_queue_consumers{environment="prod", queue="review.run.fast", vhost="/"}'
+        values: "1 1 0x20"
+      - series: 'dmc_runs_finished_15m_runs{environment="staging", state="failed"}'
+        values: "0x20"
+      - series: 'dmc_runs_finished_15m_runs{environment="prod", state="failed"}'
+        values: "_ _ 1x18"
+    alert_rule_test:
+      - eval_time: 7m
+        alertname: ReviewQueueWithoutConsumer
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              environment: prod
+              queue: review.run.fast
+            exp_annotations:
+              summary: "No worker consumes review.run.fast"
+              description: "The review worker is down or detached from the broker for 5 minutes."
+      - eval_time: 2m
+        alertname: ReviewRunsFailed
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              environment: prod
+              kind: event
+            exp_annotations:
+              summary: "1 review run(s) failed in the last 15 minutes"
+              description: "Open the runs with state failed in the portal or the Grafana dashboard for error_code."
+
+  # The stores of prod are down while those of staging answer: the exporters' own series name the
+  # environment.
+  - interval: 1m
+    input_series:
+      - series: 'pg_up{environment="staging", job="postgres", instance="postgres-exporter:9187"}'
+        values: "1x10"
+      - series: 'pg_up{environment="prod", job="postgres", instance="postgres-exporter-prod:9187"}'
+        values: "1 0x9"
+      - series: 'redis_up{environment="staging", job="redis", instance="redis-exporter:9121"}'
+        values: "1x10"
+      - series: 'redis_up{environment="prod", job="redis", instance="redis-exporter-prod:9121"}'
+        values: "1 0x9"
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: PostgresDown
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              environment: prod
+              job: postgres
+              instance: postgres-exporter-prod:9187
+            exp_annotations:
+              summary: "PostgreSQL is unreachable"
+              description: "postgres-exporter cannot connect to PostgreSQL for 2 minutes."
+      - eval_time: 8m
+        alertname: RedisDown
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              environment: prod
+              job: redis
+              instance: redis-exporter-prod:9121
+            exp_annotations:
+              summary: "Redis cache is unreachable"
+              description: "The review context runs without its cache (SD §10) until Redis is back."
+
+  # Host resources are shared by both environments: the alerts carry environment shared.
+  - interval: 1m
+    input_series:
+      - series: 'node_filesystem_avail_bytes{environment="shared", instance="node-exporter:9100", mountpoint="/", fstype="ext4"}'
+        values: "10x20"
+      - series: 'node_filesystem_size_bytes{environment="shared", instance="node-exporter:9100", mountpoint="/", fstype="ext4"}'
+        values: "100x20"
+      - series: 'node_cpu_seconds_total{environment="shared", instance="node-exporter:9100", cpu="0", mode="idle"}'
+        values: "0+3x40"
+    alert_rule_test:
+      - eval_time: 11m
+        alertname: HostDiskFull
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              environment: shared
+              instance: node-exporter:9100
+              mountpoint: /
+              fstype: ext4
+            exp_annotations:
+              summary: "Root filesystem free: 10%"
+              description: "Less than 15% of the root filesystem is free."
+      - eval_time: 25m
+        alertname: HostCpuHigh
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              environment: shared
+            exp_annotations:
+              summary: "Host CPU busy: 95%"
+              description: "The VPS has been more than 90% busy for 15 minutes."
+
+  # An OOM kill carries the environment of the project the container belongs to.
+  - interval: 1m
+    input_series:
+      - series: 'container_oom_events_total{environment="prod", job="cadvisor", container_label_com_docker_compose_project="dmc-268-api-prod", container_label_com_docker_compose_service="api", name="dmc-268-api-prod-api-1"}'
+        values: "0 0 1x10"
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: ContainerOomKilled
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              environment: prod
+              job: cadvisor
+              container_label_com_docker_compose_project: dmc-268-api-prod
+              container_label_com_docker_compose_service: api
+              name: dmc-268-api-prod-api-1
+            exp_annotations:
+              summary: "Container dmc-268-api-prod-api-1 was OOM-killed"
+              description: "The kernel killed a process of dmc-268-api-prod-api-1 for lack of memory in the last 10 minutes."
