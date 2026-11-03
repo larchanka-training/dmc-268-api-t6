@@ -81,4 +81,6 @@ for d in test-prs-dataset/rag/responses/*/; do
 done
 ```
 
+The recorded result and the computed gate verdict are in [the report](../../docs/test-plan/RAG_V1_CONTRIBUTION_REPORT.md); `reports/gate.json` is the gate script's output it quotes.
+
 A replay needs no network and no key; it rebuilds every case from its frozen `index.json` and takes about 40 seconds. The CI step "RAG sub-corpus" runs it for all six and fails on a non-zero exit; `tests/test_rag_captures.py` fails when a capture is missing, mislabelled or from a different model, prompt or corpus.
