@@ -680,6 +680,17 @@ def test_the_production_section_forbids_copying_staging_values() -> None:
     assert "на уровне repository или organization" in section
 
 
+def test_the_production_section_holds_the_registration_procedure() -> None:
+    section = _production_section()
+    assert "в теле PR" not in section
+    procedure = section.split("#### Регистрация и проверка", 1)[1].split("\n#### ", 1)[0]
+    steps = re.findall(r"(?m)^\d+\. ", procedure)
+
+    assert len(steps) == 5
+    assert len([line for line in procedure.splitlines() if line.strip()]) <= 10
+    assert "Prod webhook outcome" in procedure
+
+
 # --- the deploy on the VPS: no edge refresh, bundled app secrets, auto rollback (AC2-AC4) -----
 
 CI_WORKFLOW = WORKFLOW.parent / "ci-cd.yml"

@@ -695,7 +695,7 @@ Prod-выкат (`deploy-prod.yml`, job `deploy-prod`) идёт в Environment `
 
 #### Настройки prod App
 
-Приложение регистрирует техлид (владелец `axyi`); пошаговая инструкция и чек-лист доказательств — в теле PR части 2 api#308. Права и события те же, что у staging App.
+Приложение регистрирует техлид (владелец `axyi`); порядок — «Регистрация и проверка» ниже. Права и события те же, что у staging App.
 
 | Параметр | Значение |
 |---|---|
@@ -708,6 +708,14 @@ Prod-выкат (`deploy-prod.yml`, job `deploy-prod`) идёт в Environment `
 | Остальное | user authorization, setup URL, redirect on update и места установки — как у staging App |
 
 Не ставить prod App на репозиторий, где уже стоит staging App: два App-ревьюера на одном репозитории мешают CI-гейту друг друга.
+
+#### Регистрация и проверка
+
+1. Техлид регистрирует App по таблице выше и заводит secrets и variables из таблицы имён в Environment `production` (значения без `'` и trailing `\`; локальные `.pem` удалить).
+2. После merge и отдельного «да» техлида — dispatch Deploy prod; сначала проверить, куда указывает `:staging` (выкат ещё и промоушен). Approve ревьюера; ждать «Outcome: deployed».
+3. Установить prod App на репозиторий, где нет staging App.
+4. В Recent Deliveries App должна быть доставка `installation` со статусом 202.
+5. Её delivery id → workflow **Prod webhook outcome** ([CICD.md](CICD.md#1-конвейер)): строка `GitHub webhook delivery <id> event=… status=…`; для установки без Workspace (prod UI ещё нет) это отсрочка, а не проекция.
 
 ### Мониторинг (`deploy/monitoring`, [MONITORING.md](MONITORING.md))
 
