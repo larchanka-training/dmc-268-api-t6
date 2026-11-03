@@ -300,6 +300,7 @@ def _run(
     offsite_age_minutes: float | None = 10,
     offsite: bool = True,
     prod: bool = False,
+    labeled: bool = True,
     dumps: bool = True,
     telegram: bool = True,
     deploy_mode: str = "edge",
@@ -327,15 +328,21 @@ def _run(
     textfile = tmp_path / "textfile"
     textfile.mkdir(exist_ok=True)
     now = int(time.time())
+    # The backup scripts label every series with their environment; a file of an older version
+    # (written before the label) has none.
+    labels = '{environment="staging"}' if labeled else ""
     if dumps:
         (textfile / "pg_backup.prom").write_text(
-            f"dmc_pg_backup_last_success_timestamp_seconds {now - int(dump_age_hours * 3600)}\n"
-            "dmc_pg_backup_last_size_bytes 112640\n",
+            "# HELP dmc_pg_backup_last_success_timestamp_seconds Time of the newest dump.\n"
+            "# TYPE dmc_pg_backup_last_success_timestamp_seconds gauge\n"
+            f"dmc_pg_backup_last_success_timestamp_seconds{labels} "
+            f"{now - int(dump_age_hours * 3600)}\n"
+            f"dmc_pg_backup_last_size_bytes{labels} 112640\n",
             encoding="utf-8",
         )
     if offsite_age_minutes is not None:
         (textfile / "pg_backup_offsite.prom").write_text(
-            "dmc_pg_backup_offsite_last_success_timestamp_seconds "
+            f"dmc_pg_backup_offsite_last_success_timestamp_seconds{labels} "
             f"{now - int(offsite_age_minutes * 60)}\n",
             encoding="utf-8",
         )
@@ -696,6 +703,14 @@ def test_a_missing_prod_scraper_fails_the_stack_check(tmp_path: Path) -> None:
     _assert_only_failed(run, "stack services")
     for service in ("postgres-exporter-prod", "redis-exporter-prod", "relay-prod"):
         assert f"{service} missing" in run.line("stack services")
+
+
+def test_an_unlabeled_textfile_of_an_older_version_is_still_read(tmp_path: Path) -> None:
+    run = _run(tmp_path, labeled=False)
+
+    assert run.result.returncode == 0, run.report + run.result.stderr
+    assert run.status("verified dump < 26 h") == "OK"
+    assert run.status("off-host copy (R2) < 3 h") == "OK"
 
 
 def test_a_stopped_prod_backup_fails_the_stack_check(tmp_path: Path) -> None:

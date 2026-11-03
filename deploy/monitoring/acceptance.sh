@@ -183,7 +183,8 @@ promql() {
 textfile_metric() {
   local file="${TEXTFILE_DIR}/$1"
   [[ -f "${file}" ]] || return 0
-  awk -v name="$2" '$1 == name { printf "%d", $2 }' "${file}"
+  # The series carry the environment label of the backup script: name{environment="staging"} value.
+  awk -v name="$2" '{ split($1, series, "{") } series[1] == name { printf "%d", $2 }' "${file}"
 }
 age() {
   local seconds="$1"
