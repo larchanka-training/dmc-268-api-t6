@@ -63,7 +63,7 @@ def _job(name: str) -> str:
 def test_monitoring_images_are_pinned_by_digest() -> None:
     images = re.findall(r"^    image: (\S+)$", _read(MONITORING / "compose.yml"), re.M)
 
-    assert len(images) == 10
+    assert len(images) == 11
     for image in images:
         assert re.fullmatch(r"[a-z0-9./_-]+:v?[\d.]+(-alpine)?@sha256:[0-9a-f]{64}", image), image
 
@@ -115,10 +115,15 @@ def test_monitoring_reads_the_application_network_without_joining_its_project() 
         assert "networks:" not in blocks[name]
 
 
-def test_only_grafana_and_prometheus_join_the_edge_network() -> None:
+def test_only_grafana_prometheus_and_the_status_page_join_the_edge_network() -> None:
     edge = _read(MONITORING / "compose.edge.yml")
 
-    assert set(re.findall(r"^  ([a-z-]+):$", edge, re.M)) == {"grafana", "prometheus", "edge"}
+    assert set(re.findall(r"^  ([a-z-]+):$", edge, re.M)) == {
+        "grafana",
+        "prometheus",
+        "status-page",
+        "edge",
+    }
     assert "          - ${GRAFANA_ALIAS:?GRAFANA_ALIAS is required}" in edge
 
 
@@ -134,6 +139,33 @@ def test_probes_run_from_the_project_network_only() -> None:
     assert "      - ./blackbox:/etc/blackbox_exporter:ro\n" in block
     assert "      - --config.file=/etc/blackbox_exporter/blackbox.yml\n" in block
     assert '"http://127.0.0.1:9115/-/healthy"]' in block
+
+
+def test_the_status_page_is_a_hardened_stdlib_service_on_the_project_and_edge_networks() -> None:
+    # Public status page (api#309): the one monitoring service the internet reaches, through Caddy.
+    compose = _read(MONITORING / "compose.yml")
+    block = _service_blocks(compose)["status-page"]
+    edge = _service_blocks(_read(MONITORING / "compose.edge.yml") + "\nvolumes:\n")["status-page"]
+
+    # Pinned like the other images, a patch tag of the alpine variant: no build, no pip.
+    assert re.search(r"^    image: python:3\.13\.\d+-alpine@sha256:[0-9a-f]{64}$", block, re.M)
+    assert '    command: ["python", "/app/status_page.py"]\n' in block
+    assert "      - ./status:/app:ro\n" in block
+    assert "      PROMETHEUS_URL: http://prometheus:9090\n" in block
+    # Nobody, read-only root, no capability, no privilege gain: as the edge proxy.
+    assert '    user: "65534:65534"\n' in block
+    assert "    read_only: true\n" in block
+    assert "    cap_drop: [ALL]\n" in block
+    assert "    security_opt: [no-new-privileges:true]\n" in block
+    assert '      PYTHONDONTWRITEBYTECODE: "1"\n' in block
+    # It reads Prometheus on the project network and never the stores of the application.
+    assert "      default: {}\n" in block
+    assert "api: {}" not in block
+    assert "ports:" not in block
+    assert '"http://127.0.0.1:8080/"]' in block
+    # The edge overlay adds the network and the alias of the contract <service>-<env>.
+    assert "      default: {}\n      edge:\n        aliases:\n          - status-staging\n" in edge
+    assert "status-page" not in _read(MONITORING / "compose.ports.yml")
 
 
 def test_prometheus_probes_the_public_names_through_the_exporter_once_a_minute() -> None:
@@ -181,6 +213,7 @@ def test_config_changes_recreate_the_service_that_reads_them() -> None:
         "pg-backup": "PG_BACKUP_CONFIG_DIGEST",
         "blackbox-exporter": "BLACKBOX_CONFIG_DIGEST",
         "tempo": "TEMPO_CONFIG_DIGEST",
+        "status-page": "STATUS_CONFIG_DIGEST",
     }
     deploy = _read(MONITORING / "deploy.sh")
 
@@ -1314,6 +1347,18 @@ def test_probe_config_is_readable_by_the_exporter_user(host: Host) -> None:
     assert result.returncode == 0, result.stderr
     assert stat.S_IMODE(config_dir.stat().st_mode) == 0o755
     assert stat.S_IMODE((config_dir / "blackbox.yml").stat().st_mode) == 0o644
+
+
+def test_status_page_files_are_readable_by_its_user(host: Host) -> None:
+    config_dir = host.monitoring_dir / "status"
+    config_dir.chmod(0o700)
+    (config_dir / "status_page.py").chmod(0o600)
+    result = host.deploy()
+
+    assert result.returncode == 0, result.stderr
+    assert stat.S_IMODE(config_dir.stat().st_mode) == 0o755
+    assert stat.S_IMODE((config_dir / "status_page.py").stat().st_mode) == 0o644
+    assert re.fullmatch(r"[0-9a-f]{16}", host.env()["STATUS_CONFIG_DIGEST"])
 
 
 # --- pg-backup.sh with fake PostgreSQL tools -----------------------------------------------

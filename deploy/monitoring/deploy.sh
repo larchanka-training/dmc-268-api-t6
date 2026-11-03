@@ -567,14 +567,14 @@ write_prod_targets() {
 write_prod_targets postgres-prod.json postgres-exporter-prod:9187
 write_prod_targets redis-prod.json redis-exporter-prod:9121
 write_prod_targets rabbitmq-prod.json relay-prod:15692
-# Read by nobody (Prometheus, the blackbox exporter), grafana (uid 472) and nginx (uid 101, the
-# prod relay) through read-only mounts.
+# Read by nobody (Prometheus, the blackbox exporter, the status page), grafana (uid 472) and nginx
+# (uid 101, the prod relay) through read-only mounts.
 find "${MONITORING_DIR}/prometheus" "${MONITORING_DIR}/grafana" "${MONITORING_DIR}/postgres-exporter" \
   "${MONITORING_DIR}/alertmanager/templates" "${MONITORING_DIR}/backup" "${MONITORING_DIR}/blackbox" \
-  "${MONITORING_DIR}/relay" -type d -exec chmod 755 {} +
+  "${MONITORING_DIR}/relay" "${MONITORING_DIR}/status" -type d -exec chmod 755 {} +
 find "${MONITORING_DIR}/prometheus" "${MONITORING_DIR}/grafana" "${MONITORING_DIR}/postgres-exporter" \
   "${MONITORING_DIR}/alertmanager/templates" "${MONITORING_DIR}/backup" "${MONITORING_DIR}/blackbox" \
-  "${MONITORING_DIR}/relay" -type f -exec chmod 644 {} +
+  "${MONITORING_DIR}/relay" "${MONITORING_DIR}/status" -type f -exec chmod 644 {} +
 
 {
   printf 'API_NETWORK=%s\n' "$(escape_compose_value "${API_NETWORK}")"
@@ -612,6 +612,7 @@ find "${MONITORING_DIR}/prometheus" "${MONITORING_DIR}/grafana" "${MONITORING_DI
   printf 'PG_BACKUP_CONFIG_DIGEST=%s\n' "$(config_digest backup)"
   printf 'BLACKBOX_CONFIG_DIGEST=%s\n' "$(config_digest blackbox)"
   printf 'TEMPO_CONFIG_DIGEST=%s\n' "$(config_digest tempo)"
+  printf 'STATUS_CONFIG_DIGEST=%s\n' "$(config_digest status)"
 } > "${ENV_FILE}.tmp"
 chmod 600 "${ENV_FILE}.tmp"
 mv -f "${ENV_FILE}.tmp" "${ENV_FILE}"
