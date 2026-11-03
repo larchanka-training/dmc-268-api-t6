@@ -1356,16 +1356,32 @@ mode-proof; при reload повторно проверяются status/path/SH
 Legacy missing_patch нельзя повышать по одному empty SHA: противоречащий size
 не хранится в снимке и не должен забываться при retry.
 
-Текущий ограниченный контракт #213 — внутренняя coverage в существующих snapshots и JSON `context.build`/`review.postprocess`
-(привязка к head, raw DiffMap digest и snapshot digest; bounded-списки при точных counts; `checked_paths` #170 против
-fully reviewed count; список путей overview и repack через run_url/overflow footer; `policy_base_sha`/`diff_old_sha`;
-выбор `context.build` и restore по одной durable identity; потеря changed patch и `unknown_path`; маршрут snapshot по
-v4/v5 и legacy ≤ v3; инварианты complete/partial; fallback без classification, общий валидатор чтения, повреждённый JSON
-с warning по `run_id`, отказ `StoreReviewOutput` без backend summary; тексты none в body и check-run; публичный gate
-summary/saved_result, исторические succeeded без republish; zero-LLM `none` на snapshot path с #130 F5 (legacy ≤ v3
-вызывает модель), summary-only с `NoModelAnswer`) — канон в [PIPELINE_SPEC §2](PIPELINE_SPEC.md#2-фазы-внутри-running-и-трейс-run_actions);
-здесь не дублируется. Нового публичного coverage DTO, LLM-полей, `result_id` и таблиц нет; полный #107, run-owned
-`file_omissions` #130/#168 и zero-LLM no-text partial остаются целевыми.
+Текущий ограниченный контракт #213 — внутренняя coverage в существующих snapshots и JSON
+`context.build`/`review.postprocess`. Он охватывает:
+
+- привязку к head, raw DiffMap digest и snapshot digest; bounded-списки при точных counts;
+- `checked_paths` #170 против fully reviewed count;
+- список путей overview и его repack через run_url/overflow footer;
+- `policy_base_sha`/`diff_old_sha`, выбор `context.build`, restore по одной durable identity;
+- потерю changed patch и технический drop `unknown_path`;
+- маршрут snapshot по закреплённому v4/v5 и legacy-путь для v3 и ниже;
+- инварианты complete/partial;
+- fallback без достоверной classification, общий валидатор чтения, повреждённый JSON с warning по `run_id`,
+  отказ `StoreReviewOutput` без backend summary;
+- тексты none в body и check-run;
+- публичный gate summary/saved_result, исторические succeeded без republish;
+- zero-LLM `none` на snapshot path с #130 F5 (legacy ≤ v3 по-прежнему вызывает модель) и summary-only с `NoModelAnswer`.
+
+Не объявлено реализованным в #213:
+
+- нового публичного coverage DTO, LLM-полей, `result_id` или таблиц результата нет;
+- полный #107, общий run-owned `file_omissions` #130/#168 и zero-LLM lifecycle no-text partial остаются целевыми,
+  а не активированными #213;
+- остальные reflection coordinate drops (`line_absent`, `cross_hunk_range`, `anchor_not_visible`),
+  `evidence_not_shown` и verifier `insufficient_context` остаются за lifecycle #107/#130; их общее влияние на
+  coverage не объявляется реализованным в #213.
+
+Всё перечисленное — канон в [PIPELINE_SPEC §2](PIPELINE_SPEC.md#2-фазы-внутри-running-и-трейс-run_actions); здесь не дублируется.
 
 
 Уже существуют `run_policy_snapshots` вместе со staging `run_policy_documents`
