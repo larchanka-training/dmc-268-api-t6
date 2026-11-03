@@ -64,8 +64,16 @@ def _write(repo: Path, path: str, size: int, seed: str | None = None) -> None:
     (repo / path).write_bytes(_content(seed or path, size))
 
 
-def _run(tmp_path: Path, base: dict[str, int], change: Callable[[Path], None]) -> tuple[str, str]:
-    """Merge a PR branch with ``--no-ff`` as GitHub does, clone with depth 2, run the step."""
+def _run(
+    tmp_path: Path,
+    base: dict[str, int],
+    change: Callable[[Path], None],
+    step_env: dict[str, str] | None = None,
+) -> tuple[str, str]:
+    """Merge a PR branch with ``--no-ff`` as GitHub does, clone with depth 2, run the step.
+
+    ``step_env`` adds variables to the step's environment only, not to the repository setup.
+    """
     origin = tmp_path / "origin"
     origin.mkdir()
     _git(origin, "init", "-q", "--initial-branch=main")
@@ -92,6 +100,7 @@ def _run(tmp_path: Path, base: dict[str, int], change: Callable[[Path], None]) -
             **_git_env(),
             "DOCS_SIZE_BUDGET_BYTES": str(_budget()),
             "GITHUB_STEP_SUMMARY": str(summary),
+            **(step_env or {}),
         },
         capture_output=True,
         encoding="utf-8",
@@ -191,6 +200,75 @@ def test_warns_for_top_level_docs_that_grew_over_the_budget(tmp_path: Path) -> N
     assert stdout.count("::warning") == len(warned)
     assert "break.md" not in stdout + summary
     assert summary.count("\n| `docs/") == len(warned)
+
+
+def test_renames_are_paired_by_the_step_not_by_the_diff_renames_config(tmp_path: Path) -> None:
+    """``-M`` pairs the two paths of a rename; git's ``diff.renames`` default is no substitute."""
+    budget = _budget()
+    base = {"docs/pure_src.md": budget + 1, "docs/grow_src.md": budget - 900}
+
+    def change(repo: Path) -> None:
+        _git(repo, "mv", "docs/pure_src.md", "docs/pure_dst.md")
+        _git(repo, "mv", "docs/grow_src.md", "docs/grow_dst.md")
+        _write(repo, "docs/grow_dst.md", budget + 100, seed="docs/grow_src.md")
+
+    renames_off = {
+        "GIT_CONFIG_COUNT": "1",
+        "GIT_CONFIG_KEY_0": "diff.renames",
+        "GIT_CONFIG_VALUE_0": "false",
+    }
+    stdout, summary = _run(tmp_path, base, change, step_env=renames_off)
+
+    assert stdout.splitlines() == [
+        f"::warning file=docs/grow_dst.md::docs/grow_dst.md grew from {budget - 900} "
+        f"to {budget + 100} bytes, over the {budget}-byte budget (#380)"
+    ]
+    assert f"| `docs/grow_dst.md` | {budget - 900} | {budget + 100} | +1000 | {budget} |" in summary
+    assert "pure_dst" not in stdout + summary
+
+
+def test_only_names_ending_in_md_are_checked(tmp_path: Path) -> None:
+    budget = _budget()
+    names = ["docs/notes.mdx", "docs/a.md.orig", "docs/real.md"]
+
+    def change(repo: Path) -> None:
+        for name in names:
+            _write(repo, name, budget + 100)
+
+    stdout, summary = _run(tmp_path, {}, change)
+
+    assert re.findall(r"(?m)^::warning file=([^:]+)::", stdout) == ["docs/real.md"]
+    assert summary.count("\n| `docs/") == 1
+    assert "notes.mdx" not in stdout + summary
+    assert "a.md.orig" not in stdout + summary
+
+
+def test_names_are_escaped_for_the_annotation_and_the_summary_row(tmp_path: Path) -> None:
+    budget = _budget()
+    after = budget + 100
+    # path -> (annotation file= value, annotation message and summary cell). In the file= value
+    # `%`, `:` and `,` are escaped, in the message only `%`, in the cell only `|`.
+    names = {
+        "docs/a,b.md": ("docs/a%2Cb.md", "docs/a,b.md", "docs/a,b.md"),
+        "docs/a:b.md": ("docs/a%3Ab.md", "docs/a:b.md", "docs/a:b.md"),
+        "docs/x%0Ay.md": ("docs/x%250Ay.md", "docs/x%250Ay.md", "docs/x%0Ay.md"),
+        "docs/a|b.md": ("docs/a|b.md", "docs/a|b.md", "docs/a\\|b.md"),
+    }
+
+    def change(repo: Path) -> None:
+        for name in names:
+            _write(repo, name, after)
+
+    stdout, summary = _run(tmp_path, {}, change)
+
+    assert sorted(stdout.splitlines()) == sorted(
+        f"::warning file={prop}::{message} grew from 0 to {after} bytes, "
+        f"over the {budget}-byte budget (#380)"
+        for prop, message, _ in names.values()
+    )
+    for _, _, cell in names.values():
+        assert f"\n| `{cell}` | 0 | {after} | +{after} | {budget} |\n" in summary
+    assert summary.count("\n| `docs/") == len(names)
 
 
 def test_a_pr_without_a_tripped_top_level_doc_writes_one_summary_line(tmp_path: Path) -> None:
