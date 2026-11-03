@@ -1294,8 +1294,11 @@ def test_worker_outage_is_an_opt_in_job_on_main_after_the_acceptance_job() -> No
     assert "github.ref == 'refs/heads/main'" in job
     assert "inputs.stop_worker" in job
     assert "      name: staging\n" in job
-    # It runs after a failed acceptance job too: the outage check is independent of it.
-    assert "!cancelled()" in job
+    # Only after a passed acceptance: a stopped worker is not worth ten minutes of staging when the
+    # stack or the page already fails.
+    condition = next(line for line in job.splitlines() if line.startswith("    if: "))
+    assert "needs.acceptance.result == 'success'" in condition
+    assert "cancelled()" not in condition and "always()" not in condition
     assert "appleboy/ssh-action@0ff4204d59e8e51228ff73bce53f80d53301dee2" in job
     assert "fingerprint: ${{ vars.STAGING_SSH_FINGERPRINT }}" in job
 

@@ -293,12 +293,13 @@ jobs:
   # of the same name is not silenced, and the silence does not change the page, the component
   # really is down), stops the staging worker, waits for the page to show "Ревью PR" down because
   # of ReviewQueueWithoutConsumer (the alert needs 5 minutes) and always starts the worker again
-  # and lifts the silences. Staging runs without reviews for ~10 minutes,
-  # so it needs the go of the tech lead. Course VPS only: the Terraform host has no status page.
+  # and lifts the silences. Staging runs without reviews for ~10 minutes, so it needs the go of the
+  # tech lead and runs only after a passed acceptance job. Course VPS only: the Terraform host has
+  # no status page.
   worker-outage:
     name: Status page shows a stopped worker
     needs: acceptance
-    if: ${{ !cancelled() && github.ref == 'refs/heads/main' && inputs.stop_worker && needs.acceptance.outputs.status_url != '' }}
+    if: ${{ needs.acceptance.result == 'success' && github.ref == 'refs/heads/main' && inputs.stop_worker && needs.acceptance.outputs.status_url != '' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     environment:
