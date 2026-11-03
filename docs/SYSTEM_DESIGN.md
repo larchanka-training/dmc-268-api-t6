@@ -2189,7 +2189,7 @@ verifier #107. В новом профиле четыре слота делятс
 
 В оценке sidecar `review/eval/pr-commit-messages.json` хранит реальные API-order префиксы PR, чьи проверенные до/после чтения heads совпадают с `source.revision`: CLEAN-03, LOG-03, SEC-04 — по одному сообщению; RES-03, SYN-04 — по 20 с признаком хвоста. Остальные 19 synthetic-кейсов имеют пустую историю. Schema parsing отделён от corpus identity binding; весь sidecar, canonical cohort и выбранные активные real-привязки проверяются до LLM-вызова и staging. Custom synthetic subsets поддерживаются; новый real-кейс требует curator identity/prefix evidence. Live/replay не запрашивают GitHub. В static provenance входят модули, которые формируют промпт, запрос, захваченный ответ или его разбор в eval, общий модуль лимитов префикса `commit_prefix_limits.py`, sidecar и прочитанные canonical `case.json`. Production-чтение коммитов (`github_vcs.py`, `github_run_source.py`, `vcs_failures.py`) eval не импортирует, и с #177 оно не пинится: паритет лимитов держит общий модуль, обоснование — [README корпуса](../test-prs-dataset/README.md#frozen-commit-context-82). Корпус, patch/pre-image/truth не меняются.
 
-[Run 38468081001, attempt 1](https://github.com/larchanka-training/dmc-268-api-t6/actions/runs/38468081001) от 2026-10-13 использовал прежние одиночные source-revision snapshots; его raw-first метрики и original digests сохраняются как историческое свидетельство в [README корпуса](../test-prs-dataset/README.md#recorded-mistral-baseline--2026-10-13) и [TEST_PLAN §3.2.1](test-plan/eval-baselines.md#321-зафиксированный-raw-baseline-82-2026-10-13). Историческая PR-prefix съёмка [run 38560319651, attempt 1](https://github.com/larchanka-training/dmc-268-api-t6/actions/runs/38560319651) от 2026-10-14 сохраняет original raw bytes/digests и метрики в [README корпуса](../test-prs-dataset/README.md#recorded-mistral-baseline--2026-10-14) и [TEST_PLAN §3.2.2](test-plan/eval-baselines.md#322-зафиксированный-pr-prefix-raw-baseline-82-2026-10-14). Исторический baseline — [run 38701845865, attempt 1](https://github.com/larchanka-training/dmc-268-api-t6/actions/runs/38701845865) от 2026-10-15 на frozen source SHA `a1cc6229c6a6fdba65ecb640c60ca823e262a6aa`, после rebase на main с merged #149 (pinned parser/schema), primary `mistral-small-4`. Все 24 первых raw ответа с прежними проверенными PR-префиксами и manifest импортированы вместе byte-for-byte, без смешивания captures и подмены поздними repair/fallback ответами; prompt/corpus/truth не менялись. Final corpus — 24/24; два offline replay дали byte-identical JSON с `warnings=[]`, без static/corpus drift; redacted offline совпал с live safe report. Измерены validity 7/24, TP/FP/FN 2/2/17, precision 2/4, recall 2/19, critical recall 2/5, verdict agreement 5/24. Provenance и полные raw-first метрики — [README корпуса](../test-prs-dataset/README.md#recorded-mistral-baseline--2026-10-15) и [TEST_PLAN §3.2.3](test-plan/eval-baselines.md#323-зафиксированный-post-rebase-raw-baseline-82-2026-10-15); это не доказательство причинного улучшения или качества final pipeline.
+Raw baselines #82 (13–15.10.2026) и их provenance — [TEST_PLAN §3.2.1–3.2.3](test-plan/eval-baselines.md#321-зафиксированный-raw-baseline-82-2026-10-13); это не доказательство причинного улучшения или качества final pipeline.
 
 Аудит формата первого ответа (#178, 20.10.2026) — в [журнале](SYSTEM_DESIGN_LLM_LOG.md#аудит-формата-первого-ответа-178-20102026).
 
@@ -2204,53 +2204,10 @@ legacy-контракта**. V2 и его golden-фикстура остаютс
 соблюдение формата самой моделью. Цель — строгий первый сырой формат и явная
 атрибуция модели; production repair/latency/cost требуют отдельного измерения.
 Переход #130 на snapshot/evidence_refs без старого префикса требует отдельного
-порядка версий. Отдельно разрешённая полная съёмка 24 ответов выполнена ниже;
+порядка версий. Отдельно разрешённая полная съёмка 24 ответов — [TEST_PLAN §3.2.4](test-plan/eval-baselines.md#324-зафиксированный-v3-raw-baseline-178-2026-10-20);
 съёмки не смешивались.
 
-**Исторический raw baseline #178 (20.10.2026).**
-[Run 39443263258, attempt 1](https://github.com/larchanka-training/dmc-268-api-t6/actions/runs/39443263258)
-на source `47f9add7c4df2b7c32db0091d39296cdd2e4810c` снял все 24 первых ответа с
-`review.system.v3` (SHA-256 `eb851e7fc2329eb7bdff015ec0fda945c46111ec5c884934ed6f6d6803883452`),
-primary `mistral-small-4` / fallback `mistral-small-3.2-24b`, engine fast.
-После remote verification candidate пользователь явно разрешил «сделай 1 прогон»
-при nominal USD 12 / 24 кейса / raw export; выполнен ровно один workflow.
-#177 часть 2 и #133 вошли в source; пользователь осознанно выбрал запуск до
-pending pinned-изменений #230/#229/#227. Их последующий merge может дать drift;
-повторный платный прогон не разрешён автоматически.
-
-Все 24 raw ответа и manifest импортированы вместе byte-for-byte после safe/raw
-hash/size audit; manifest SHA-256
-`1a6a2c6aea7bdea6026c592ef9e59c62823aefec7eac0279f125ff09d0e161a2`.
-46 pins, static digest
-`sha256-v1:387834e02e34318527ee2c48e25e2fb63743b65a6b33a5739c25c7b877d8ca3a`,
-corpus/truth без изменений. Capture publishable, 24 first calls answer/primary,
-24 gateway accepted, paid-metadata errors отсутствуют. Final corpus validation
-24/24; два local replay byte-identical с `warnings=[]`, redacted offline report
-byte-identical live safe report. Required CI replay **на main после merge ещё
-ожидается** и локальными проверками не заменяется.
-
-Измерены strict raw validity **10/24** против 7/24, TP/FP/FN **3/5/16** против
-2/2/17, precision **3/8 (37.5%)** против 2/4, recall **3/19** против 2/19,
-critical recall **2/5** без изменения, verdict agreement **4/24** против 5/24.
-Результат смешанный: FP выросли, precision и verdict agreement снизились.
-Остаются 14 невалидных первых ответов: 12 кейсов/27 attribution omissions,
-4 кейса/14 equal ranges, один ordering case (причины пересекаются).
-Полные метрики, case IDs и provenance — [README корпуса](../test-prs-dataset/README.md#recorded-mistral-baseline--2026-10-20)
-и [TEST_PLAN §3.2.4](test-plan/eval-baselines.md#324-зафиксированный-v3-raw-baseline-178-2026-10-20).
-Весь cohort сохранён без retry/cherry-picking; причинное/семантическое улучшение,
-качество verifier/final pipeline, repair/latency/cost savings не установлены.
-Configured цены/лимиты совпадают с предыдущими; actual spend, billed tokens и
-баланс artifacts не сообщают.
-
-**Текущий raw baseline `review.system.v5` (28.10.2026, #144, #130 R15).**
-[Run 40774280790, attempt 1](https://github.com/larchanka-training/dmc-268-api-t6/actions/runs/40774280790)
-на source `973218054ef2c9a32f1e75a955284323196ffafd` снял все 24 первых ответа с v5,
-плечо `none`, без RAG (#146) и verifier (#217); один разрешённый техлидом платный
-прогон. Replay `warnings=[]`: validity **21/24**, TP/FP/FN **5/13/14**, critical recall
-**4/5**, verdict agreement **9/24**. Контракт ответа сменился с v1 на v2 (без префикса
-атрибуции), поэтому сравнение с v3 не прямое. Полные метрики и provenance —
-[README корпуса](../test-prs-dataset/README.md#recorded-mistral-baseline--2026-10-28)
-и [TEST_PLAN §3.2.5](test-plan/eval-baselines.md#325-зафиксированный-v5-raw-baseline-144-2026-10-28).
+Raw baselines `review.system.v3` (#178, 20.10.2026) и `review.system.v5` (#144, 28.10.2026; текущий) — [TEST_PLAN §3.2.4–3.2.5](test-plan/eval-baselines.md#324-зафиксированный-v3-raw-baseline-178-2026-10-20).
 
 `KNOWN_MODELS` хранит в USD нижнюю границу цены самой дорогой известной ветки: Regolo для основной, GreenPT для fallback, с историческим курсом 1.1225. На известном EUrouter endpoint эффективная цена — покомпонентный максимум каталожной USD-границы, EUR-цены самой дорогой ветки × полученный перед вызовом курс ЕЦБ и значения из env; меньшее значение env границу не ослабляет. Для другого endpoint явно заданная цена env применяется без этой границы.
 
