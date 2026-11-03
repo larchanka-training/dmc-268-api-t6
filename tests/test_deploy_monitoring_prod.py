@@ -394,12 +394,71 @@ def test_prod_backup_env_and_mounts_are_prod_only() -> None:
 def test_backup_textfile_names_do_not_collide() -> None:
     # node-exporter reads every *.prom of the dir; two writers of one file would overwrite each
     # other. Staging keeps the script defaults.
-    staging = {"/textfile/pg_backup.prom", "/textfile/pg_backup_heartbeat.prom"}
-    prod = _load(MONITORING / "compose.prod.yml")["services"]["pg-backup-prod"]["environment"]
-    prod_files = {prod["TEXTFILE"], prod["HEARTBEAT"]}
+    staging = [
+        "/textfile/pg_backup.prom",
+        "/textfile/pg_backup_heartbeat.prom",
+        "/textfile/pg_backup_offsite.prom",
+    ]
+    prod_backup = _load(MONITORING / "compose.prod.yml")["services"]["pg-backup-prod"][
+        "environment"
+    ]
+    prod_offsite = _load(MONITORING / "compose.offsite-prod.yml")["services"][
+        "backup-offsite-prod"
+    ]["environment"]
+    prod = [prod_backup["TEXTFILE"], prod_backup["HEARTBEAT"], prod_offsite["TEXTFILE"]]
 
-    assert len(prod_files) == 2
-    assert not staging & prod_files
+    assert len(set(prod)) == 3
+    assert not set(staging) & set(prod)
+
+
+def test_offsite_prod_copies_to_its_own_prefix() -> None:
+    staging = _load(MONITORING / "compose.offsite.yml")["services"]["backup-offsite"]["environment"]
+    prod = _load(MONITORING / "compose.offsite-prod.yml")["services"]["backup-offsite-prod"][
+        "environment"
+    ]
+    staging_remote = staging["RCLONE_CONFIG_SECURE_REMOTE"]
+    prod_remote = prod["RCLONE_CONFIG_SECURE_REMOTE"]
+
+    assert staging_remote == "store:${BACKUP_S3_BUCKET:?BACKUP_S3_BUCKET is required}/postgres"
+    assert prod_remote == "store:${BACKUP_S3_BUCKET:?BACKUP_S3_BUCKET is required}/postgres-prod"
+    # The delete of one pass may never reach the other's copies: neither prefix contains the other.
+    assert not prod_remote.startswith(staging_remote + "/")
+    assert not staging_remote.startswith(prod_remote + "/")
+    # One bucket, one set of keys and one passphrase for both (decision of the tech lead).
+    assert prod["RCLONE_CONFIG_SECURE_FILENAME_ENCRYPTION"] == "off"
+    differing = {key for key in staging.keys() | prod.keys() if staging.get(key) != prod.get(key)}
+    assert differing == {
+        "RCLONE_CONFIG_SECURE_REMOTE",
+        "BACKUP_ENVIRONMENT",
+        "TEXTFILE",
+    }
+
+
+def test_offsite_prod_reads_only_the_prod_dumps() -> None:
+    staging = _load(MONITORING / "compose.offsite.yml")["services"]["backup-offsite"]
+    prod = _load(MONITORING / "compose.offsite-prod.yml")["services"]["backup-offsite-prod"]
+
+    assert prod["image"] == staging["image"]
+    assert prod["entrypoint"] == staging["entrypoint"]
+    assert prod["command"] == ["loop"]
+    assert prod["user"] == "70:70"
+    assert re.fullmatch(r"\d+m", str(prod["mem_limit"]))
+    assert prod["environment"]["BACKUP_ENVIRONMENT"] == "prod"
+    assert prod["environment"]["TEXTFILE"] == "/textfile/pg_backup_offsite_prod.prom"
+    assert prod["volumes"] == [
+        "./backup:/opt/pg-backup:ro",
+        "${PROD_BACKUP_DIR:?PROD_BACKUP_DIR is required}:/backups:ro",
+        "${TEXTFILE_DIR:-./textfile}:/textfile",
+    ]
+    assert "${BACKUP_DIR" not in str(prod)
+    # Like the staging copy it needs the Internet only: no application network.
+    assert "networks" not in prod
+    assert prod["labels"] == {"dmc.config-digest": "${PG_BACKUP_CONFIG_DIGEST:-none}"}
+
+
+def test_the_prod_overlay_is_not_needed_without_prod() -> None:
+    # compose interpolates every service of a loaded file: the staging overlay must not need prod.
+    assert "PROD_" not in (MONITORING / "compose.offsite.yml").read_text()
 
 
 # --- deploy.sh with the prod stack ---------------------------------------------------------
