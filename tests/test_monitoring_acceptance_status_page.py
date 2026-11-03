@@ -333,7 +333,18 @@ def test_worker_outage_times_from_before_the_stop() -> None:
 
 @pytest.mark.parametrize(
     ("page", "code"),
-    [(_outage_page("up", ""), 0), (_outage_page("down", "PostgresDown"), 1), ("", 1)],
+    [
+        (_outage_page("up", ""), 0),
+        (_outage_page("down", "PostgresDown"), 1),
+        ("", 1),
+        # Only prod works: its row up, the staging row down or not on the page.
+        (_outage_page("up", "").replace('"staging"', '"prod"'), 1),
+        (
+            _outage_page("up", "").replace('"staging"', '"prod"')
+            + _outage_page("down", "ReviewQueueWithoutConsumer"),
+            1,
+        ),
+    ],
 )
 def test_the_worker_stays_up_unless_the_row_works(tmp_path: Path, page: str, code: int) -> None:
     run, _, _ = _status_step(

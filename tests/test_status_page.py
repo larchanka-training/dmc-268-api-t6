@@ -980,3 +980,25 @@ def test_the_workflow_pattern_of_the_outage_row_matches_the_rendered_page(page: 
     assert not matches(replace(down, state=page.STATE_UP, alerts=()))
     assert not matches(replace(down, env="prod"))
     assert not matches(replace(down, alerts=(page.Finding("PostgresDown", "x"),)))
+
+
+def test_the_workflow_precondition_pattern_needs_the_staging_review_row_up(
+    page: ModuleType,
+) -> None:
+    workflow = (REPO_ROOT / ".github" / "workflows" / "monitoring-acceptance.yml").read_text()
+    check = workflow.split("- name: Check that the page shows the review component working", 1)[1]
+    pattern = re.search(r"grep -Eq '([^']+)'", check.split("- name:", 1)[0])
+    assert pattern is not None
+
+    def matches(*rows: Any) -> bool:
+        html = page.render_page(list(rows), None, NOW)
+        grep = subprocess.run(["grep", "-Eq", pattern[1]], input=html, text=True, check=False)
+        return grep.returncode == 0
+
+    def row(env: str, state: str) -> Any:
+        return page.Row(env, "review", "Ревью PR", state, NOW, ())
+
+    assert matches(row("prod", page.STATE_UP), row("staging", page.STATE_UP))
+    assert not matches(row("prod", page.STATE_UP), row("staging", page.STATE_DOWN))
+    assert not matches(row("prod", page.STATE_UP), row("staging", page.STATE_UNKNOWN))
+    assert not matches(row("prod", page.STATE_UP))
