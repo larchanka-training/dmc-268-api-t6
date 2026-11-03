@@ -140,7 +140,7 @@ jobs:
             echo
             printf -- '- Delivery: `%s`\n' "${DELIVERY_ID}"
             if [[ -z "${lines}" ]]; then
-              echo "- No outcome line in the last 168 h of the webhook-worker log: not processed yet, deferred, or an unknown delivery id"
+              echo "- No outcome line in the last 168 h of the webhook-worker log: not processed yet, deferred, an unknown delivery id, or the container was recreated by a later deploy (its log is gone)"
             else
               printf -- '\n```text\n%s\n```\n' "${lines}"
             fi

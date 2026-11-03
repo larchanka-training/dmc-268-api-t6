@@ -278,6 +278,7 @@ def test_the_summary_says_when_there_is_no_outcome_line(tmp_path: Path) -> None:
     assert result.returncode == 0, result.stderr
     assert DELIVERY in summary
     assert "No outcome line" in summary
+    assert "recreated by a later deploy" in summary
     assert "```" not in summary
 
 
