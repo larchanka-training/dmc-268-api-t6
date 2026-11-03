@@ -230,9 +230,16 @@ def test_both_jobs_run_only_on_main_and_only_the_deploy_job_takes_the_lock() -> 
     ) in deploy
 
 
-def test_no_environment_until_part_2() -> None:
-    # No protection rules and no environment secrets until Part 2 adds Environment production.
-    assert re.search(r"(?m)^\s*environment:", _text()) is None
+def test_only_the_deploy_job_runs_in_environment_production() -> None:
+    # The Environment carries the reviewer approval and the production secrets; resolve stays
+    # outside it so the digest is read at dispatch, not after the approval.
+    assert (
+        "    environment:\n"
+        "      name: production\n"
+        "      url: ${{ steps.target.outputs.base_url }}\n"
+    ) in _job("deploy-prod")
+    assert "environment:" not in _job("resolve")
+    assert len(re.findall(r"(?m)^\s*environment:", _text())) == 1
 
 
 def test_the_resolve_job_records_the_dispatch_and_hands_on_only_the_digest() -> None:

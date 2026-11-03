@@ -98,12 +98,16 @@ jobs:
     runs-on: ubuntu-latest
     # The VPS lock of Deploy staging, Promote staging tag and Rollback staging (AC5 of #308): one
     # member at a time, FIFO, and a later push never cancels this pending job. A dispatch from
-    # another branch gets a throwaway group, whatever the timing of the `if` above. No Environment
-    # until Part 2 adds production with its protection rules.
+    # another branch gets a throwaway group, whatever the timing of the `if` above. The job waits
+    # for the reviewer of Environment production and may hold the lock while it waits (GitHub does
+    # not say; unverified), so approve or reject promptly: a rejection frees the lock.
     concurrency:
       group: ${{ github.ref == 'refs/heads/main' && 'staging-deploy' || format('deploy-prod-ignored-{0}', github.run_id) }}
       cancel-in-progress: false
       queue: max
+    environment:
+      name: production
+      url: ${{ steps.target.outputs.base_url }}
     steps:
       - name: Re-resolve the staging tag at job start
         id: digest
@@ -173,9 +177,9 @@ jobs:
           STAGING_SSH_FINGERPRINT: ${{ vars.STAGING_SSH_FINGERPRINT }}
         run: |
           # Prod runs only on the shared course VPS (password auth, port 22, API behind the edge proxy
-          # as api-prod). Only non-secret values go to the step outputs. Without an Environment this
-          # job sees STAGING_HOST only as a repository or organization variable, not one set on
-          # Environment staging alone.
+          # as api-prod). Only non-secret values go to the step outputs. STAGING_HOST comes from
+          # Environment production, the repository or the organization, never from Environment
+          # staging.
           if [[ -n "${STAGING_HOST}" ]]; then
             echo "prod deploy targets the course VPS only; GitHub variable STAGING_HOST (Terraform host) is set" >&2
             exit 1
