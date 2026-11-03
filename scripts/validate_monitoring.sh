@@ -36,6 +36,10 @@ echo "== promtool test rules"
 docker run --rm --entrypoint promtool -v "${PWD}:/w:ro" -w /w \
   "${prometheus_image}" test rules tests/monitoring/alerts.test.yml
 
+echo "== promtool test rules (last-firing query of the status page)"
+docker run --rm --entrypoint promtool -v "${PWD}:/w:ro" -w /w \
+  "${prometheus_image}" test rules tests/monitoring/status.test.yml
+
 echo "== amtool check-config (Telegram and no receiver)"
 # shellcheck source=../deploy/monitoring/alertmanager-config.sh
 source "${MONITORING}/alertmanager-config.sh"

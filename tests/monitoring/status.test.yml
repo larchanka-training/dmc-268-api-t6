@@ -1,0 +1,32 @@
+# Unit test of the last-firing query of the public status page (deploy/monitoring/status/
+# status_page.py, api#309), run by CI (job monitoring-validate) next to alerts.test.yml:
+#   docker run --rm --entrypoint promtool -v "$PWD:/w:ro" -w /w <prometheus image> \
+#     test rules tests/monitoring/status.test.yml
+# The expr below is LAST_FIRING_QUERY of status_page.py word for word; tests/test_status_page.py
+# keeps the two in step. The value is the timestamp of the last firing sample of each alert series
+# within a week: the page prints it as "works since" for a component that has had a problem.
+evaluation_interval: 1m
+
+tests:
+  - interval: 1m
+    input_series:
+      # Firing for ten minutes (the last sample at 9m), then resolved: Prometheus writes a stale
+      # marker, so the series is gone and the answer stays the time of the last firing sample.
+      - series: 'ALERTS{alertname="PublicEndpointDown", alertstate="firing", severity="critical", host="staging-api.example.test"}'
+        values: "1x9 stale"
+      # Still firing at the evaluation time.
+      - series: 'ALERTS{alertname="PostgresDown", alertstate="firing", severity="critical"}'
+        values: "1x30"
+      # Pending is not a problem of the page; neither is an alert it does not show.
+      - series: 'ALERTS{alertname="ReviewRunsStuckInQueue", alertstate="pending", severity="warning"}'
+        values: "1x25"
+      - series: 'ALERTS{alertname="HostCpuHigh", alertstate="firing", severity="warning"}'
+        values: "1x25"
+    promql_expr_test:
+      - expr: 'max_over_time(timestamp(ALERTS{alertstate="firing",alertname=~"ApiHigh5xxRate|LlmMonthlyBudgetExceeded|PostgresDown|PublicEndpointDown|ReviewQueueWithoutConsumer|ReviewRunsStuckInQueue|TargetDown|WebhookWorkerDown"})[7d:1m])'
+        eval_time: 30m
+        exp_samples:
+          - labels: '{alertname="PublicEndpointDown", alertstate="firing", severity="critical", host="staging-api.example.test"}'
+            value: 540
+          - labels: '{alertname="PostgresDown", alertstate="firing", severity="critical"}'
+            value: 1800

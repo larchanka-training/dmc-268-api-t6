@@ -26,6 +26,8 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parents[1]
 STATUS_PAGE = REPO_ROOT / "deploy" / "monitoring" / "status" / "status_page.py"
 ALERT_RULES = REPO_ROOT / "deploy" / "monitoring" / "prometheus" / "rules" / "alerts.yml"
+PROMTOOL_TEST = REPO_ROOT / "tests" / "monitoring" / "status.test.yml"
+VALIDATE = REPO_ROOT / "scripts" / "validate_monitoring.sh"
 
 NOW = datetime(2026, 11, 3, 12, 0, 0, tzinfo=UTC)
 # Prometheus writes activeAt as RFC 3339 with nanoseconds and a trailing Z.
@@ -854,3 +856,16 @@ def test_the_poller_keeps_polling_until_it_is_stopped(
 
     assert not thread.is_alive()
     assert poller.snapshot() is not None
+
+
+# --- S6: the last-firing query runs under promtool ------------------------------------------
+
+
+def test_promtool_runs_the_very_query_the_page_sends(page: ModuleType) -> None:
+    tested = re.findall(r"^\s+- expr: '(.+)'$", PROMTOOL_TEST.read_text("utf-8"), re.M)
+
+    # status.test.yml holds the text of the constant, so what promtool proves is what is sent.
+    assert tested == [page.LAST_FIRING_QUERY]
+    assert "test rules tests/monitoring/status.test.yml" in " ".join(
+        VALIDATE.read_text("utf-8").split()
+    )
