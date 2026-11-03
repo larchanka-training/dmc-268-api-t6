@@ -74,8 +74,7 @@ class Rule:
     """One alert of a component with the public text that explains it.
 
     The matchers are environment-agnostic: ``role`` is the host without a ``staging-`` prefix, the
-    environment of an alert is decided apart (``environments``). A ``shared`` row belongs to both
-    environments.
+    environment of an alert is decided apart (``environments``).
     """
 
     alert: str
@@ -83,7 +82,6 @@ class Rule:
     role: str = ""
     jobs: tuple[str, ...] = ()
     project_prefix: str = ""
-    shared: bool = False
 
     def matches(self, signal: Signal) -> bool:
         if signal.alertname != self.alert:
@@ -161,11 +159,6 @@ COMPONENTS = (
             Rule("ReviewQueueWithoutConsumer", "очередь ревью без обработчика"),
             Rule("ReviewRunsStuckInQueue", "запуски ревью не берутся в работу"),
             Rule("TargetDown", "брокер очередей недоступен", jobs=("rabbitmq", "rabbitmq-queues")),
-            Rule(
-                "LlmMonthlyBudgetExceeded",
-                "лимит расходов на LLM исчерпан, ревью приостановлены",
-                shared=True,
-            ),
             Rule("PostgresDown", _DATABASE_DOWN),
         ),
         {"staging": _QUEUES_STAGING, "prod": _QUEUES_PROD},
@@ -206,6 +199,7 @@ NOT_SHOWN = (
     "ReviewQueueBacklog",
     "LlmLatencyHigh",
     "LlmMonthlyBudgetWarning",
+    "LlmMonthlyBudgetExceeded",
     "HostMemoryLow",
     "HostDiskFull",
     "HostCpuHigh",
@@ -338,10 +332,8 @@ class Row:
     alerts: tuple[Finding, ...]
 
 
-def environments(signal: Signal, shared: bool = False) -> tuple[str, ...]:
+def environments(signal: Signal) -> tuple[str, ...]:
     """The environments an alert belongs to: the first rule that applies decides."""
-    if shared:
-        return ENVIRONMENTS
     if signal.host:
         return ("staging",) if signal.host.lower().startswith("staging-") else ("prod",)
     if signal.project:
@@ -355,7 +347,7 @@ def environments(signal: Signal, shared: bool = False) -> tuple[str, ...]:
 
 
 def _belongs(rule: Rule, signal: Signal, env: str) -> bool:
-    return rule.matches(signal) and env in environments(signal, rule.shared)
+    return rule.matches(signal) and env in environments(signal)
 
 
 def _row(component: Component, env: str, snapshot: Snapshot) -> Row:

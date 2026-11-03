@@ -23,7 +23,7 @@ tests:
       - series: 'ALERTS{alertname="HostCpuHigh", alertstate="firing", severity="warning"}'
         values: "1x25"
     promql_expr_test:
-      - expr: 'max_over_time(timestamp(ALERTS{alertstate="firing",alertname=~"ApiHigh5xxRate|LlmMonthlyBudgetExceeded|PostgresDown|PublicEndpointDown|ReviewQueueWithoutConsumer|ReviewRunsStuckInQueue|TargetDown|WebhookWorkerDown"})[7d:1m])'
+      - expr: 'max_over_time(timestamp(ALERTS{alertstate="firing",alertname=~"ApiHigh5xxRate|PostgresDown|PublicEndpointDown|ReviewQueueWithoutConsumer|ReviewRunsStuckInQueue|TargetDown|WebhookWorkerDown"})[7d:1m])'
         eval_time: 30m
         exp_samples:
           - labels: '{alertname="PublicEndpointDown", alertstate="firing", severity="critical", host="staging-api.example.test"}'

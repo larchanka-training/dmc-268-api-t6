@@ -242,15 +242,12 @@ def test_the_environment_of_an_alert_follows_host_then_compose_project_then_labe
     }
 
 
-def test_the_llm_budget_is_one_key_for_both_environments(page: ModuleType) -> None:
+def test_an_exceeded_llm_budget_is_not_an_outage(page: ModuleType) -> None:
+    # The alert pauses no reviews (alerts.yml): the service works, so the page stays quiet.
     rows = _rows(page, _snapshot(page, _alert("LlmMonthlyBudgetExceeded")))
 
-    assert _states(rows) == {
-        **_all("up"),
-        ("prod", "review"): "down",
-        ("staging", "review"): "down",
-    }
-    assert _alert_names(rows[("prod", "review")]) == ("LlmMonthlyBudgetExceeded",)
+    assert _states(rows) == _all("up")
+    assert "LlmMonthlyBudgetExceeded" in page.NOT_SHOWN
 
 
 def test_the_review_component_listens_to_the_queues_the_worker_and_the_broker(
@@ -299,10 +296,11 @@ def test_a_component_without_coverage_has_no_data_and_a_firing_alert_beats_that(
 
     rows = _rows(
         page,
-        _snapshot(page, _alert("LlmMonthlyBudgetExceeded"), uncovered=uncovered),
+        _snapshot(page, _alert("PostgresDown", environment="prod"), uncovered=uncovered),
     )
     assert rows[("prod", "review")].state == "down"
-    assert rows[("prod", "api")].state == "unknown"
+    assert rows[("prod", "api")].state == "down"
+    assert rows[("prod", "ui")].state == "up"
 
 
 def test_down_since_is_the_earliest_start_of_the_firing_alerts_of_the_component(
