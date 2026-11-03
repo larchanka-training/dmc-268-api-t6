@@ -141,6 +141,7 @@ Grafana не входит в `prod-metrics`, Prometheus — в `prod-sql`, и н
 | `dmc_llm_calls_15m_calls`, `…_p50_seconds`, `…_p95_seconds` | вызовы LLM за 15 мин и их длительность |
 | `dmc_llm_cost_month_usd` | расход LLM в USD по `usage_events` с 1-го числа месяца (UTC) |
 | `dmc_runs_budget_paused_15m_runs` | прогоны, пропущенные с `budget_paused` за 15 мин |
+| `dmc_review_time_1h_runs`, `…_p95_seconds` | успешные прогоны `fast` за час и 95-й перцентиль `finished_at − created_at` в секундах (время до ревью, §12): очередь, движок и публикация; время до создания Run не входит |
 | `dmc_llm_monthly_budget_usd` | не из `queries.yml`: месячный бюджет из `LLM_MONTHLY_BUDGET_USD`, textfile-метрика node-exporter `textfile/llm_budget.prom`, её пишет `deploy.sh` (§6) |
 
 ## 5. Алерты
