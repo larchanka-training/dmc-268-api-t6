@@ -32,6 +32,100 @@ jobs:
           docker run --rm -v "$PWD:/src:ro" ghcr.io/gitleaks/gitleaks:v8.28.0 \
             detect --source /src --config /src/.gitleaks.toml --no-banner --redact --exit-code 1 --log-opts=HEAD
 
+  pr-size:
+    # One size/* label per PR and, from 1000 changed lines, a warning (#378). The job only
+    # informs: it is not a required check of ruleset `main` and no job needs it.
+    name: PR size label
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: write
+    env:
+      # Lock and generated files, left out of the size: one git glob pathspec per line.
+      PR_SIZE_EXCLUDE: |
+        uv.lock
+        terraform/**/.terraform.lock.hcl
+        .test_durations
+        docs/erd/erd.svg
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          # The PR merge commit and both parents: HEAD^1 is the base branch tip.
+          fetch-depth: 2
+          persist-credentials: false
+
+      - name: Measure PR size
+        id: size
+        run: |
+          # Added plus deleted lines that the PR merge commit brings to the base tip, renames
+          # detected and the PR_SIZE_EXCLUDE paths left out; a binary file ("-") counts 0.
+          pathspecs=(.)
+          while IFS= read -r pattern; do
+            if [[ -n "${pattern}" ]]; then
+              pathspecs+=(":(exclude,glob)${pattern}")
+            fi
+          done <<< "${PR_SIZE_EXCLUDE}"
+          numstat="$(git diff --numstat -M HEAD^1 HEAD -- "${pathspecs[@]}")"
+          size="$(awk -F'\t' '$1 != "-" { total += $1 + $2 } END { print total + 0 }' <<< "${numstat}")"
+          if (( size < 300 )); then
+            label=size/S
+          elif (( size < 1000 )); then
+            label=size/M
+          elif (( size < 3000 )); then
+            label=size/L
+          else
+            label=size/XL
+          fi
+          echo "label=${label}" >> "${GITHUB_OUTPUT}"
+          echo "PR size: ${size} changed lines (\`${label}\`), lock and generated files excluded." >> "${GITHUB_STEP_SUMMARY}"
+          if (( size >= 1000 )); then
+            slicing="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/blob/main/.agents/skills/create-issue/references/slicing.md"
+            rule="https://github.com/larchanka-training/dmc-268-api-t6/blob/main/docs/CONTRIBUTING.md#размер-pr"
+            echo "::warning::PR size ${size} lines (${label}): slice it or explain in the PR body why it cannot be sliced (#378)"
+            {
+              echo
+              echo "### PR of 1000 changed lines or more"
+              echo
+              echo "Slice it into parts by the [slicing rule](${slicing}) or explain in the PR body why it cannot be sliced ([PR size rule](${rule}))."
+            } >> "${GITHUB_STEP_SUMMARY}"
+          fi
+
+      - name: Set size label
+        # A label API error (a fork PR gets a read-only token) is a warning, never a red CI.
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          LABEL: ${{ steps.size.outputs.label }}
+        run: |
+          # Exactly one size/* label: remove every other one, add this one if missing. Labels
+          # outside size/* stay, so no PUT (it replaces the whole set). Every page is read, so an
+          # old size/* past the first 100 labels goes too. Each row: name, URI form.
+          if ! current="$(gh api --paginate "repos/${REPO}/issues/${PR_NUMBER}/labels?per_page=100" \
+            --jq '.[].name | [., @uri] | @tsv')"; then
+            echo "::warning::Could not read the labels of PR #${PR_NUMBER}; ${LABEL} not set"
+            exit 0
+          fi
+          has_label=false
+          while IFS=$'\t' read -r name encoded; do
+            if [[ "${name}" == "${LABEL}" ]]; then
+              has_label=true
+            elif [[ "${name}" == size/* ]]; then
+              if ! gh api -X DELETE "repos/${REPO}/issues/${PR_NUMBER}/labels/${encoded}" > /dev/null; then
+                echo "::warning::Could not remove ${name} from PR #${PR_NUMBER}"
+              fi
+            fi
+          done <<< "${current}"
+          if [[ "${has_label}" == false ]]; then
+            if ! gh api -X POST "repos/${REPO}/issues/${PR_NUMBER}/labels" -f "labels[]=${LABEL}" > /dev/null; then
+              echo "::warning::Could not add ${LABEL} to PR #${PR_NUMBER}"
+            fi
+          fi
+
   terraform-fmt-validate:
     name: Terraform fmt / validate
     runs-on: ubuntu-latest
