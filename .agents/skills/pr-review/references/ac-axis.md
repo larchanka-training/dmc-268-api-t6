@@ -24,6 +24,8 @@ Standards and Spec do that.
 - The pull request body counts as proof only for a criterion about the pull request itself (an
   attached run, a linked graph): link the pull request.
 - A criterion about documentation needs the document, not a test.
+- A criterion whose work lives in the other repo is `can't tell`, not `not covered`: this clone
+  cannot see it. Say which repo holds its proof.
 
 ## Answer
 
