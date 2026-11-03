@@ -21,23 +21,29 @@ newline):
       "verdict": "go" | "stop",
       "reasons": [str],              # why the run stops; empty on go
       "warnings": [str],
+      "fence": "~~~~~~",             # the brief's data fence, longer than any `~` run
       "pr": {"repo", "number", "url", "title", "author", "draft",
              "state": "open" | "closed" | "merged",
              "base_ref", "base_sha", "head_ref", "head_sha", "body"},
       "issues": [{"ref": "owner/name#N", "url", "title", "state": "open" | "closed",
                   "parts": [K],      # the parts the pull request names for this issue
-                  "acceptance_criteria": [{"id": "AC<k>", "part": K | null, "text"}],
+                  "acceptance_criteria": [{"id": "AC<k>", "key": "<ref> AC<k>",
+                                           "part": K | null, "text"}],
                   "body"}]
     }
 
 The bodies are verbatim ("" when GitHub has none): the Spec axis reads the issue's Scope from
-them, and the AC axis the pull request's own claims.
+them, and the AC axis the pull request's own claims. The titles, bodies and criteria are
+untrusted: the brief pastes them only between two `fence` lines, a run of `~` one longer than the
+longest run in any title or body (at least six), so no line of them can close the block.
 
 The criteria are the checkboxes of the issue's `## Acceptance Criteria`, numbered AC1.. in
 the issue's order (the ids of accept-issue's table). When the pull request names parts of an
 issue — in its title, else in the first mention in the first line of its `## What`, as
 implement-issue reads it — only the criteria of those parts (`Ч.K:` / `Part K:`, the prefix
-cut off) and the criteria without a prefix are kept, with their ids.
+cut off) and the criteria without a prefix are kept, with their ids. `key` is the row of the
+AC table: the issue as `api#N` / `ui#N` (`owner/name#N` for any other repo) and the id, so the
+criteria of two issues never share one.
 
 `stop` (exit 1): no `Refs` line names an issue; a ref that is a pull request is skipped with a
 warning. Warnings: the pull request is merged or closed; an issue has no acceptance criteria;
@@ -69,6 +75,7 @@ import argparse
 import importlib.util
 import json
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -85,6 +92,9 @@ PR_FIELDS = (
     " base: {ref: .base.ref, sha: .base.sha}, head: {ref: .head.ref, sha: .head.sha}}"
 )
 ISSUE_FIELDS = "{number, title, body, state, html_url, pull_request: (.pull_request != null)}"
+
+MIN_FENCE = 6
+TILDES = re.compile(r"~+")
 
 MERGED = "the pull request is merged: the review reads its final head"
 CLOSED = "the pull request is closed without a merge"
@@ -112,6 +122,7 @@ def load(relative: str, name: str) -> ModuleType:
 
 preflight = load("implement-issue/scripts/preflight.py", "pr_review_preflight")
 issue_facts = load("accept-issue/scripts/issue_facts.py", "pr_review_issue_facts")
+SHORT = {repo: alias for alias, repo in preflight.ALIASES.items()}
 
 
 # ─── transport ──────────────────────────────────────────────────────────────
@@ -231,6 +242,12 @@ def select(
     return [c for c in criteria if c["part"] is None or c["part"] in parts]
 
 
+def fence_for(texts: list[str]) -> str:
+    """A `~` fence no line of these texts can close: longer than any `~` run in them."""
+    longest = max((len(m.group()) for text in texts for m in TILDES.finditer(text)), default=0)
+    return "~" * max(MIN_FENCE, longest + 1)
+
+
 # ─── the run ────────────────────────────────────────────────────────────────
 def collect(repo: str, number: int) -> dict[str, Any]:
     raw = fetch("pr", f"repos/{repo}/pulls/{number}", PR_FIELDS)
@@ -255,6 +272,9 @@ def collect(repo: str, number: int) -> dict[str, Any]:
         parts = sorted(set(named))
         issue_body = body_of(issue, ref)
         criteria = select(criteria_of(issue_body), parts, ref, warnings)
+        label = f"{SHORT.get(ref_repo, ref_repo)}#{ref_number}"
+        for criterion in criteria:
+            criterion["key"] = f"{label} {criterion['id']}"
         issues.append(
             {
                 "acceptance_criteria": criteria,
@@ -276,6 +296,7 @@ def collect(repo: str, number: int) -> dict[str, Any]:
             " name the spec"
         )
     return {
+        "fence": fence_for([title, body, *(i[k] for i in issues for k in ("title", "body"))]),
         "issues": issues,
         "pr": pr,
         "reasons": reasons,

@@ -1,64 +1,77 @@
 {
+  "fence": "~~~~~~",
   "issues": [
     {
       "acceptance_criteria": [
         {
           "id": "AC1",
+          "key": "api#54 AC1",
           "part": null,
           "text": "Часть 1 — гранты Workspace: После установки App на новый репозиторий он появляется в списке без ручного logout: тест api и смоук на staging в PR"
         },
         {
           "id": "AC2",
+          "key": "api#54 AC2",
           "part": null,
           "text": "Часть 1 — гранты Workspace: Отзыв доступа на GitHub отражается не позже следующего refresh (тест с двумя пользователями и отзывом)"
         },
         {
           "id": "AC3",
+          "key": "api#54 AC3",
           "part": null,
           "text": "Часть 1 — гранты Workspace: Подсказки в `RepositoryList` описывают реальный путь; есть тест ui на этот сценарий"
         },
         {
           "id": "AC4",
+          "key": "api#54 AC4",
           "part": null,
           "text": "Часть 1 — гранты Workspace: SD §6.9 описывает выбранный способ; `PORTAL_AUTH_HANDOFF.md` больше не вводит в заблуждение"
         },
         {
           "id": "AC5",
+          "key": "api#54 AC5",
           "part": null,
           "text": "Часть 2 — харднинг API: После N неожиданных ошибок сообщение уходит в DLQ с логом (тест)"
         },
         {
           "id": "AC6",
+          "key": "api#54 AC6",
           "part": null,
           "text": "Часть 2 — харднинг API: Тело вебхука больше лимита → 413; статусы `copied` / `changed` / `unchanged` не валят Run; эвристика generated сужена (тесты)"
         },
         {
           "id": "AC7",
+          "key": "api#54 AC7",
           "part": null,
           "text": "Часть 2 — харднинг API: `scope=None` без явного флага — ошибка; SSE-событие авторизуется лёгким запросом, поток закрывается по истечении JWT, keepalive есть (тесты)"
         },
         {
           "id": "AC8",
+          "key": "api#54 AC8",
           "part": null,
           "text": "Часть 2 — харднинг API: Два одновременных refresh одного семейства не выбрасывают пользователя; настоящий replay после окна по-прежнему отзывает семейство (тесты)"
         },
         {
           "id": "AC9",
+          "key": "api#54 AC9",
           "part": null,
           "text": "Часть 2 — харднинг API: 401-регрессия строится из `app.routes` и падает, если у маршрута `api_router` нет 401-кейса; есть тест `/api/repos` → `[]` при пустом claim"
         },
         {
           "id": "AC10",
+          "key": "api#54 AC10",
           "part": null,
           "text": "Часть 2 — харднинг API: Адаптеры делают только `flush()`, commit — в use case; advisory lock не держит соединение бессрочно"
         },
         {
           "id": "AC11",
+          "key": "api#54 AC11",
           "part": null,
           "text": "Часть 2 — харднинг API: `/openapi.json` содержит `securitySchemes: bearer`, описания операций и ответы 401 / 404 / 409 у защищённых операций"
         },
         {
           "id": "AC12",
+          "key": "api#54 AC12",
           "part": null,
           "text": "Часть 2 — харднинг API: Решения по `fetch_file_content`, `ReviewWorker`, `reviewer_requested` и `payload_s3_ref` записаны; удаление — только после решения"
         }

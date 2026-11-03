@@ -1,9 +1,11 @@
 {
+  "fence": "~~~~~~",
   "issues": [
     {
       "acceptance_criteria": [
         {
           "id": "AC4",
+          "key": "api#273 AC4",
           "part": 2,
           "text": "`docs/CONTRIBUTING.md` описывает старт спринта: задачи → граф (#268) → issue «Спринт N» → проверка блокеров; к PR приложен первый опубликованный граф"
         }

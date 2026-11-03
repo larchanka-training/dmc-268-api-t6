@@ -35,7 +35,8 @@ tied to a part.
 ## Expected
 
 - `verdict: go`, exit code 0, `reasons` empty.
-- One issue, api#54, `parts: []`, AC1–AC12 with `part: null`, the text whole (the prefix kept).
+- One issue, api#54, `parts: []`, AC1–AC12 with `part: null` (keys `api#54 AC1`…), the text
+  whole (the prefix kept).
 - One warning: the pull request is merged. No part warning: no criterion carries a part.
 
 ## Expected review
@@ -45,6 +46,6 @@ Written before the manual runs. Run in the ui clone; behaviour, as in 01.
 - **Standards** or **Spec** reports at least one of the three known defects at its line:
   `RepositoryList.tsx:285` or `:343`, `RepositoryList.test.tsx:7-13` or an assertion that uses the
   imported constants, or `RepositoryList.tsx:75-76`. Any severity: the human review ranked them P3.
-- **AC** has twelve rows. AC3 (the hints in `RepositoryList` describe the real path, and a ui test
-  covers it) links `RepositoryList.tsx` and `RepositoryList.test.tsx`. The other eleven are
-  `can't tell`: their proof is in the api repo, not in this clone.
+- **AC** has twelve rows, one per key. AC3 (the hints in `RepositoryList` describe the real path,
+  and a ui test covers it) links `RepositoryList.tsx` and `RepositoryList.test.tsx`. The other
+  eleven are `can't tell`: their proof is in the api repo, not in this clone.

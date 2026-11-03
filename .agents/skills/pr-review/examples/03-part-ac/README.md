@@ -19,8 +19,8 @@ prefixed `Ч.1:`, one prefixed `Ч.2:`, none without a prefix.
 ## Expected
 
 - `verdict: go`, exit code 0, `reasons` empty.
-- One issue, api#273, `parts: [2]`. Its criteria are AC4 alone, `part: 2`, the prefix cut off;
-  AC1–AC3 (Part 1) are not listed. The id keeps the issue's numbering.
+- One issue, api#273, `parts: [2]`. Its criteria are AC4 alone (key `api#273 AC4`), `part: 2`,
+  the prefix cut off; AC1–AC3 (Part 1) are not listed. The id keeps the issue's numbering.
 - One warning: the pull request is merged.
 
 ## Expected review

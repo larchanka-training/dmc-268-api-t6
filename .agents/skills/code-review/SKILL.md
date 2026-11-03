@@ -40,7 +40,7 @@ Capture the diff command once: `git diff <fixed-point>...HEAD` (three-dot, so th
 
 Before going further, confirm the fixed point resolves (`git rev-parse <fixed-point>`) and the diff is non-empty. A bad ref or empty diff should fail here — not inside two parallel sub-agents.
 
-**A pull request instead of a fixed point** (the `pr-review` skill passes one: its number, base ref and head SHA, in the clone of its repo). Never check it out: `git fetch origin <base-ref> pull/<N>/head`, confirm `git cat-file -e <head-sha>^{commit}`, then the diff command is `git diff origin/<base-ref>...<head-sha>` and the commit list `git log origin/<base-ref>..<head-sha> --oneline`; a file at the head is `git show <head-sha>:<path>`. Use the head SHA the caller pinned, never `HEAD` or `FETCH_HEAD` (another session's fetch moves it).
+**A pull request instead of a fixed point** (the `pr-review` skill passes one: its number, base ref, base SHA and head SHA, in the clone of its repo). Never check it out: `git fetch origin <base-ref> pull/<N>/head`, confirm `git cat-file -e <head-sha>^{commit}` and `git cat-file -e <base-sha>^{commit}` (a base SHA still missing after `git fetch origin <base-sha>`: stop and say the standards cannot be read at the base), then the diff command is `git diff origin/<base-ref>...<head-sha>` and the commit list `git log origin/<base-ref>..<head-sha> --oneline`; a file at the head is `git show <head-sha>:<path>`. Use the head SHA the caller pinned, never `HEAD` or `FETCH_HEAD` (another session's fetch moves it).
 
 ### 2. Identify the spec source
 
@@ -55,7 +55,7 @@ For a pull request the spec is the issues its `Refs` lines name, with the criter
 
 ### 3. Identify the standards sources
 
-The stack rules file in `.agents/rules/` and `AGENTS.md`, plus anything else the repo documents, such as `CONTRIBUTING.md`. For a pull request, read them as of its base: `git show origin/<base-ref>:<path>`.
+The stack rules file in `.agents/rules/` and `AGENTS.md`, plus anything else the repo documents, such as `CONTRIBUTING.md`. For a pull request, read them as of the base SHA it records: `git show <base-sha>:<path>`. Never `origin/<base-ref>`: it moves, and an older pull request would be held to rules written after it.
 
 On top of whatever the repo documents, the Standards axis always carries the **smell baseline** below — a fixed set of Fowler code smells (_Refactoring_, ch.3) that applies even when a repo documents nothing. Two rules bind it:
 

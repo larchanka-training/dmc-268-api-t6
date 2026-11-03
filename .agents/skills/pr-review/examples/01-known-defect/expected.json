@@ -1,19 +1,23 @@
 {
+  "fence": "~~~~~~",
   "issues": [
     {
       "acceptance_criteria": [
         {
           "id": "AC1",
+          "key": "ui#111 AC1",
           "part": null,
           "text": "FRONTEND_ARCHITECTURE.md описывает 409 rerun четырьмя причинами со ссылкой на openapi; утверждения, что rerun нет в endpoints.ts, не осталось."
         },
         {
           "id": "AC2",
+          "key": "ui#111 AC2",
           "part": null,
           "text": "`runMutationErrorMessage(error, 'cancel')` при 409 не говорит об активном прогоне или закрытом PR. Тесты в fetchRunActions.test.ts и RunControls.test.tsx проверяют выбранный текст литералом; литерал 409 для rerun из #105 не изменён."
         },
         {
           "id": "AC3",
+          "key": "ui#111 AC3",
           "part": null,
           "text": "Пройдены все gates UI из AGENTS.md."
         }

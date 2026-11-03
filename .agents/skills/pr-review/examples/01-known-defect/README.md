@@ -33,7 +33,8 @@ names no part. ui#111 has no parts in its Scope and three acceptance criteria.
 ## Expected
 
 - `verdict: go`, exit code 0, `reasons` empty.
-- One issue, ui#111, `parts: []`, AC1–AC3 with `part: null`, in the issue's order.
+- One issue, ui#111, `parts: []`, AC1–AC3 with `part: null` (keys `ui#111 AC1`…), in the
+  issue's order.
 - One warning: the pull request is merged.
 
 ## Expected review

@@ -8,11 +8,21 @@ Standards and Spec do that.
 
 ## Statuses
 
-| Status        | When                                                                                                                                                                             |
-| ------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `covered`     | The criterion holds at the head, and every claim in it has a link: the code or document that does it, plus the test that checks it when the claim is about behaviour.            |
-| `not covered` | Nothing at the head does it; or the behaviour is there but no test checks it; or the only test would pass without the change (it asserts what the code computes, not the spec).  |
-| `can't tell`  | The proof lives outside the repo at the head — a CI run, the board, an issue comment, a deploy, a manual run — or the criterion is too vague to check. Say what would settle it. |
+Decide each criterion in two steps, in this order:
+
+1. **Can this clone show it at all?** No — its work lives in the other repo (api and ui see each
+   other's code only in their own pull requests), or its proof is a CI run, the board, an issue
+   comment, a deploy or a manual run, or the criterion is too vague to check: `can't tell`, and say
+   where the proof lives or what would settle it. Stop there: never `not covered` for what this
+   clone cannot see. One exception: a criterion about the pull request itself (it attaches a run,
+   links a graph) is proved by its body, which the brief carries — go to step 2.
+2. **Otherwise read the head:** `covered` or `not covered` by the table.
+
+| Status        | When                                                                                                                                                                                                         |
+| ------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `covered`     | The criterion holds at the head, and every claim in it has a link: the code or document that does it, plus the test that checks it when the claim is about behaviour.                                        |
+| `not covered` | Nothing at the head does it; or the behaviour is there but no test checks it; or the only test would pass without the change (it asserts what the code computes, not the spec).                              |
+| `can't tell`  | Step 1: the work lives in the other repo, or the proof outside this repo (a CI run, the board, an issue comment, a deploy, a manual run), or the criterion is too vague to check. Say where the proof lives. |
 
 - A link is `path:line` of the file at the head (`git show <head_sha>:<path>`), or a test as
   `path:line` plus its name. Mark each `(diff)` when the pull request changes that line, `(base)`
@@ -24,21 +34,19 @@ Standards and Spec do that.
 - The pull request body counts as proof only for a criterion about the pull request itself (an
   attached run, a linked graph): link the pull request.
 - A criterion about documentation needs the document, not a test.
-- A criterion whose work lives in the other repo is `can't tell`, not `not covered`: this clone
-  cannot see it. Say which repo holds its proof.
 
 ## Answer
 
 The first line as every axis: `Reviewed: <n> files, <m> commits, head <sha>`. Then one row per
-criterion of the brief, in its order, with its id — none added, merged or dropped — and a totals
-line. No other text.
+criterion of the brief, in its order, with its key (`api#N ACk`: the issue and its id, so two
+issues' `AC1` stay apart) — none added, merged or dropped — and a totals line. No other text.
 
 ```markdown
-| AC  | Status      | Proof                                                                         |
-| --- | ----------- | ----------------------------------------------------------------------------- |
-| AC1 | covered     | `src/a.ts:12` (diff); test `src/a.test.ts:40` «rejects an empty name» (diff)  |
-| AC2 | not covered | `src/b.ts:30` (diff) sets the limit, but no test checks it                    |
-| AC3 | can't tell  | «all gates green» is a CI run, not in the repo: see the pull request's checks |
+| AC         | Status      | Proof                                                                         |
+| ---------- | ----------- | ----------------------------------------------------------------------------- |
+| ui#9 AC1   | covered     | `src/a.ts:12` (diff); test `src/a.test.ts:40` «rejects an empty name» (diff)  |
+| ui#9 AC2   | not covered | `src/b.ts:30` (diff) sets the limit, but no test checks it                    |
+| api#54 AC1 | can't tell  | «all gates green» is a CI run, not in the repo: see the pull request's checks |
 
 covered 1 · not covered 1 · can't tell 1
 ```
