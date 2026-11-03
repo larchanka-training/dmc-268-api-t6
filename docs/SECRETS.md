@@ -667,7 +667,9 @@ Prod-выкат (`deploy-prod.yml`, job `deploy-prod`) идёт в Environment `
 | `GH_CLIENT_ID`, `GH_CLIENT_SECRET` | secret | `api` | да |
 | `AUTH_JWT_PRIVATE_KEY`, `AUTH_JWT_PUBLIC_KEY` | secret, новая пара | `api` | да |
 | `PORTAL_URL` | variable, `https://ui.<APP_DOMAIN>` | `worker` | нет; ссылки работают, когда появится prod UI (ui#185) |
-| `GITLAB_CREDENTIAL_KEYS`, `GITLAB_ACTIVE_KEY_ID`, `GITLAB_ALLOWED_ORIGINS`, `GITLAB_PRIVATE_ORIGINS`, `GITLAB_WEBHOOK_INTAKE_ENABLED`, `BITBUCKET_CREDENTIAL_KEYS`, `BITBUCKET_ACTIVE_KEY_ID`, `BITBUCKET_WEBHOOK_BASE_URL` | secret и variables, как на staging | как на staging | нет; на старте выключены |
+| `GITLAB_CREDENTIAL_KEYS`, `GITLAB_ACTIVE_KEY_ID`, `GITLAB_ALLOWED_ORIGINS`, `GITLAB_PRIVATE_ORIGINS`, `GITLAB_WEBHOOK_INTAKE_ENABLED`, `BITBUCKET_CREDENTIAL_KEYS`, `BITBUCKET_ACTIVE_KEY_ID`, `BITBUCKET_WEBHOOK_BASE_URL` | secret и variables | как на staging | нет; на старте выключены. Те же имена, значения свои: значения staging не копировать (`BITBUCKET_WEBHOOK_BASE_URL=https://api.<APP_DOMAIN>`, свои keyring-и) |
+
+Ни одно имя `GH_*`, `AUTH_JWT_*`, `GITLAB_CREDENTIAL_KEYS`, `BITBUCKET_CREDENTIAL_KEYS` не должно существовать на уровне repository или organization: job `deploy-prod` унаследовал бы его.
 
 Наследуются с уровня organization и repository, в `production` не дублируются: `GITHUB_TOKEN` (выдаёт Actions), `AI_DMC268_T6` и `AI_DMC268_URL` (один ключ LLM-шлюза на все окружения, расход prod входит в суммарный бюджет), `LLM_MODEL`, `LLM_FALLBACK_MODEL`, `LLM_VERIFIER_MODEL`, `LLM_VERIFIER_FALLBACK_MODEL`, `VPS_DMC268_U`, `VPS_DMC268_P`, `VPS_DMC268_IP_T6`, `APP_DOMAIN`, `STAGING_SSH_FINGERPRINT`. `STAGING_HOST` в `production` не задавать: цель prod — всегда курсовой VPS.
 

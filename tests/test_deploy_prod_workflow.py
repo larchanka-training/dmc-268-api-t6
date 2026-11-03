@@ -672,6 +672,14 @@ def test_every_production_secret_has_a_rotation_row() -> None:
         assert [cell for cell in first_cells if f"`{name}`" in cell], name
 
 
+def test_the_production_section_forbids_copying_staging_values() -> None:
+    section = _production_section()
+
+    assert "значения staging не копировать" in section
+    assert "`BITBUCKET_WEBHOOK_BASE_URL=https://api.<APP_DOMAIN>`" in section
+    assert "на уровне repository или organization" in section
+
+
 # --- the deploy on the VPS: no edge refresh, bundled app secrets, auto rollback (AC2-AC4) -----
 
 CI_WORKFLOW = WORKFLOW.parent / "ci-cd.yml"
