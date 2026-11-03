@@ -37,7 +37,7 @@ from app.modules.code_index.infrastructure.review_index import SqlAlchemyReviewI
 from app.modules.reviews.application.ast_resolution import ImportResolution
 from app.modules.reviews.application.graph_retriever import GraphHint, GraphHints, GraphTarget
 from app.modules.reviews.application.rag_index import OpenReviewIndex
-from tests.test_code_index_store_postgres import (
+from tests.code_index_postgres import (
     C1,
     C2,
     _build,

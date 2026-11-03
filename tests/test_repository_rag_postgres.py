@@ -36,16 +36,19 @@ from app.modules.repositories.infrastructure.installation_repository_unit_of_wor
 from app.modules.repositories.infrastructure.repository_settings import (
     SqlAlchemyRepositorySettingsUnitOfWork,
 )
-from tests.code_index_postgres import GRAPH_ROWS, collect_garbage, graph_rows, publish_index
-from tests.portal_postgres import INSTALL_A, REPO_A, REPO_B, WS_A, Env, api, portal_schema, scalar
-from tests.test_code_index_store_postgres import (
+from tests.code_index_postgres import (
+    GRAPH_ROWS,
     _claim,
     _Index,
     _mark_failed,
     _marker,
     _purge,
     _state,
+    collect_garbage,
+    graph_rows,
+    publish_index,
 )
+from tests.portal_postgres import INSTALL_A, REPO_A, REPO_B, WS_A, Env, api, portal_schema, scalar
 
 _RAG_COLUMN = (
     "SELECT is_nullable, column_default FROM information_schema.columns "

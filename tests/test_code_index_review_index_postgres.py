@@ -43,7 +43,7 @@ from app.modules.code_index.infrastructure.review_index import (
     SqlAlchemyReviewIndexUnitOfWork,
 )
 from app.modules.reviews.application.rag_index import OpenReviewIndex, RagReadiness
-from tests.test_code_index_store_postgres import (
+from tests.code_index_postgres import (
     C1,
     C2,
     _build,

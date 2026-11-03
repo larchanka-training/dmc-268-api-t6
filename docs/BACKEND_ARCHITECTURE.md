@@ -587,11 +587,13 @@ ENUM, rename, partial indexes и data migrations. Перед применени�
 схему в тестовой БД и удаляют только её. Проверяют два цикла upgrade/downgrade,
 совпадение миграции с ORM metadata, удаление ENUM при downgrade и commit/rollback UoW.
 Модели `code_index` попадают в эту проверку через `app/bootstrap/db_metadata.py`.
-[`test_code_index_store_postgres.py`](../tests/test_code_index_store_postgres.py)
+[`test_code_index_schema_postgres.py`](../tests/test_code_index_schema_postgres.py)
 проверяет на PostgreSQL схему ревизии `20261015_0032` (колонки, натуральные PK,
-каскад от `repositories`, CHECK, ENUM, downgrade/upgrade) и поведение
-`SqlAlchemyCodeIndexStore`: изоляцию по `repository_id`, отказ записи и публикации с
-устаревшим fence, purge и сборку мусора, видимость публикаций.
+каскад от `repositories`, CHECK, ENUM, downgrade/upgrade), а файлы
+`tests/test_code_index_store_*_postgres.py` — поведение `SqlAlchemyCodeIndexStore`:
+изоляцию по `repository_id`, отказ записи и публикации с устаревшим fence, purge и
+сборку мусора, видимость публикаций, допуск и квоты, маркер пробуждения. Их фикстуры и
+харнесс стора — в [`code_index_postgres.py`](../tests/code_index_postgres.py).
 [`test_repository_rag_postgres.py`](../tests/test_repository_rag_postgres.py)
 проверяет ревизию `20261016_0033`, онбординг без включения RAG и статус индекса в
 `GET`/`PATCH /api/repos/{id}` по строкам `code_index_states`.
