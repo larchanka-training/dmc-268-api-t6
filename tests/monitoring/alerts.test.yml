@@ -1556,6 +1556,78 @@ tests:
           - labels: '{environment="prod", host="api.example.test"}'
             value: 500
 
+  # The thresholds of the two availability alerts, on the share of the allowance spent: exactly
+  # half is not more than half (silent), exactly the whole allowance is the critical alert and no
+  # longer the warning. The shares are fed as they are: with probes, a downtime of exactly 6 696 s
+  # or 13 392 s cannot be built (the allowance is no multiple of a probe window and the share of
+  # failed probes in a window is a float), so the probe cases below bracket the half.
+  - interval: 1m
+    input_series:
+      - series: 'sla:downtime_budget_spent:ratio{environment="prod", host="half.example.test"}'
+        values: "0.5x10"
+      - series: 'sla:downtime_budget_spent:ratio{environment="prod", host="above-half.example.test"}'
+        values: "0.5001x10"
+      - series: 'sla:downtime_budget_spent:ratio{environment="prod", host="below-whole.example.test"}'
+        values: "0.9999x10"
+      - series: 'sla:downtime_budget_spent:ratio{environment="prod", host="whole.example.test"}'
+        values: "1x10"
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: SlaAvailabilityAtRisk
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              environment: prod
+              host: above-half.example.test
+            exp_annotations:
+              summary: "above-half.example.test: 50.01% of the monthly downtime allowance is spent"
+              description: "Prod downtime of this month so far (failed probes, deploy blips and maintenance included) is more than half of the allowance of 0.5 %; at 100 % SlaAvailabilityBreached takes over and this alert resolves (docs/MONITORING.md §12)."
+          - exp_labels:
+              severity: warning
+              environment: prod
+              host: below-whole.example.test
+            exp_annotations:
+              summary: "below-whole.example.test: 99.99% of the monthly downtime allowance is spent"
+              description: "Prod downtime of this month so far (failed probes, deploy blips and maintenance included) is more than half of the allowance of 0.5 %; at 100 % SlaAvailabilityBreached takes over and this alert resolves (docs/MONITORING.md §12)."
+      - eval_time: 5m
+        alertname: SlaAvailabilityBreached
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              environment: prod
+              host: whole.example.test
+            exp_annotations:
+              summary: "whole.example.test: the monthly downtime allowance is spent (100%)"
+              description: "Prod downtime of this month so far has reached the allowance of 0.5 % (availability 99.5 %); the alert stays until the month ends (docs/MONITORING.md §12)."
+
+  # Around half of the allowance of 13 392 s (6 696 s) with probes: 111 failed probes are
+  # 6 660 s, silent; 112 are 6 720 s, 50.18 %, the warning.
+  - interval: 1m
+    input_series:
+      - series: 'probe_success{job="blackbox", environment="prod", host="api.example.test", instance="https://api.example.test/healthcheck"}'
+        values: "1x59 0x110 1x130"
+      - series: 'probe_success{job="blackbox", environment="prod", host="ui.example.test", instance="https://ui.example.test/"}'
+        values: "1x59 0x111 1x129"
+    alert_rule_test:
+      - eval_time: 4h
+        alertname: SlaAvailabilityAtRisk
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              environment: prod
+              host: ui.example.test
+            exp_annotations:
+              summary: "ui.example.test: 50.18% of the monthly downtime allowance is spent"
+              description: "Prod downtime of this month so far (failed probes, deploy blips and maintenance included) is more than half of the allowance of 0.5 %; at 100 % SlaAvailabilityBreached takes over and this alert resolves (docs/MONITORING.md §12)."
+    promql_expr_test:
+      - expr: round(sla:downtime_seconds:month)
+        eval_time: 4h
+        exp_samples:
+          - labels: '{environment="prod", host="api.example.test"}'
+            value: 6660
+          - labels: '{environment="prod", host="ui.example.test"}'
+            value: 6720
+
   # A prod name that is not probed has no series and raises nothing; when it joins the probes
   # (ui in PROBE_PROD_HOSTS; its first probe is in minute 121) and fails, the same rules alert for
   # it, with no change: 180 failed probes by hour 5, 240 by hour 6. Then it
@@ -1665,3 +1737,50 @@ tests:
       - eval_time: 30m
         alertname: SlaReviewTimeAtRisk
         exp_alerts: []
+
+  # One second above the 4 minutes fires; below 5 runs in the hour (4) stays silent and 5 is
+  # enough.
+  - interval: 1m
+    input_series:
+      - series: 'dmc_review_time_1h_p95_seconds{environment="prod"}'
+        values: "241x40"
+      - series: 'dmc_review_time_1h_runs{environment="prod"}'
+        values: "10x40"
+    alert_rule_test:
+      - eval_time: 12m
+        alertname: SlaReviewTimeAtRisk
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              environment: prod
+            exp_annotations:
+              summary: "Time to review: p95 4m 1s over the last hour, the target is 4 minutes"
+              description: "The 95th percentile of the time from the creation of a fast run to its publication, over the runs that succeeded in the last hour (at least 5 of them), is above 4 minutes (docs/MONITORING.md §12)."
+
+  - interval: 1m
+    input_series:
+      - series: 'dmc_review_time_1h_p95_seconds{environment="prod"}'
+        values: "300x40"
+      - series: 'dmc_review_time_1h_runs{environment="prod"}'
+        values: "4x40"
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: SlaReviewTimeAtRisk
+        exp_alerts: []
+
+  - interval: 1m
+    input_series:
+      - series: 'dmc_review_time_1h_p95_seconds{environment="prod"}'
+        values: "300x40"
+      - series: 'dmc_review_time_1h_runs{environment="prod"}'
+        values: "5x40"
+    alert_rule_test:
+      - eval_time: 12m
+        alertname: SlaReviewTimeAtRisk
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              environment: prod
+            exp_annotations:
+              summary: "Time to review: p95 5m 0s over the last hour, the target is 4 minutes"
+              description: "The 95th percentile of the time from the creation of a fast run to its publication, over the runs that succeeded in the last hour (at least 5 of them), is above 4 minutes (docs/MONITORING.md §12)."
