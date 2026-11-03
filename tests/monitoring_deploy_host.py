@@ -163,6 +163,7 @@ class Host:
             "STUB_PROD_POSTGRES_ID": "pgcontainer-prod",
             "STUB_OBSCURE_STDIN": str(self.stubs / "obscure.log"),
             "BACKUP_DIR": str(self.root / "backups"),
+            "PROD_BACKUP_DIR": str(self.root / "backups-prod"),
             **(extra or {}),
             **overrides,
         }
