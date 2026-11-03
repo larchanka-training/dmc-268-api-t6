@@ -7,11 +7,15 @@ here read the YAML files of deploy/monitoring and tests/monitoring.
 from __future__ import annotations
 
 import re
+import stat
+import subprocess
 from pathlib import Path
 from typing import Any
 
 import pytest
 import yaml  # type: ignore[import-untyped]
+
+from tests.test_deploy_monitoring import METADATA_GRANTS, Host, _grants, host  # noqa: F401
 
 ROOT = Path(__file__).resolve().parents[1]
 MONITORING = ROOT / "deploy" / "monitoring"
@@ -142,7 +146,7 @@ def test_container_series_get_the_environment_of_their_project(
 
 
 @pytest.mark.parametrize(
-    ("host", "environment"),
+    ("name", "environment"),
     [
         ("staging-api.x", "staging"),
         ("staging-ui.x", "staging"),
@@ -158,8 +162,8 @@ def test_container_series_get_the_environment_of_their_project(
         ("_other", "shared"),
     ],
 )
-def test_request_series_get_the_environment_of_their_host(host: str, environment: str) -> None:
-    assert _series_environment("caddy", {"host": host}) == environment
+def test_request_series_get_the_environment_of_their_host(name: str, environment: str) -> None:
+    assert _series_environment("caddy", {"host": name}) == environment
 
 
 @pytest.mark.parametrize(
@@ -262,3 +266,165 @@ def test_relay_forwards_only_postgres_and_rabbitmq_metrics() -> None:
     assert forwarded == {15692: "rabbitmq:15692", 5432: "postgres:5432"}
     assert len(servers) == 2
     assert re.search(r"^\s*resolver\s+127\.0\.0\.11\b", config, re.M)
+
+
+# --- deploy.sh with the prod stack ---------------------------------------------------------
+
+PROD_PROJECT = "dmc-268-api-prod"
+PROD_ENV = "POSTGRES_USER=app\nPOSTGRES_DB=app\nREDIS_PASSWORD=prod-pa$$word\nDEPLOY_MODE=edge\n"
+ISOLATION_STUB = """\
+#!/usr/bin/env bash
+printf '%s\\n' "$*" >> "${STUB_ISOLATION_LOG}"
+exit "${STUB_ISOLATION_EXIT:-0}"
+"""
+
+
+@pytest.fixture
+def prod_host(host: Host) -> Host:  # noqa: F811
+    """The host of the `host` fixture with a prod application stack next to the staging one."""
+    prod_dir = host.root / "opt" / PROD_PROJECT
+    prod_dir.mkdir(parents=True)
+    (prod_dir / ".env").write_text(PROD_ENV, encoding="utf-8")
+    stub = host.monitoring_dir / "check-isolation.sh"
+    stub.write_text(ISOLATION_STUB, encoding="utf-8")
+    stub.chmod(0o755)
+    return host
+
+
+def _prod_dir(stack: Host) -> Path:
+    return stack.root / "opt" / PROD_PROJECT
+
+
+def _deploy_with_prod(stack: Host, **overrides: str) -> subprocess.CompletedProcess[str]:
+    env = {
+        "PROD_API_DIR": str(_prod_dir(stack)),
+        "STUB_ISOLATION_LOG": str(stack.stubs / "isolation.log"),
+        **overrides,
+    }
+    return stack.deploy(extra=env)
+
+
+def _sql_of(stack: Host, container: str) -> str:
+    """What psql received in one container: the log holds a `-- container <id>` line per call."""
+    chunks = re.split(r"^-- container (\S+)\n", stack.log("psql.log"), flags=re.M)
+    return "".join(
+        sql for name, sql in zip(chunks[1::2], chunks[2::2], strict=True) if name == container
+    )
+
+
+def test_prod_roles_get_the_column_grants_of_staging(prod_host: Host) -> None:
+    result = _deploy_with_prod(prod_host)
+    sql = _sql_of(prod_host, "pgcontainer-prod")
+    revoke = "REVOKE ALL ON ALL TABLES IN SCHEMA public FROM grafana_reader, metrics_exporter;"
+
+    assert result.returncode == 0, result.stderr
+    assert _grants(sql) == METADATA_GRANTS
+    # A grant sent before the REVOKE would be dropped by it.
+    assert sql.index(revoke) < sql.index("GRANT SELECT (")
+    assert sql.count("SET default_transaction_read_only = on;") == 2
+    assert "exec -i pgcontainer-prod psql -X -q -v ON_ERROR_STOP=1 -U app -d app" in (
+        prod_host.log("docker.log")
+    )
+    # Staging keeps its own call.
+    assert _grants(_sql_of(prod_host, "pgcontainer")) == METADATA_GRANTS
+
+
+def test_prod_database_gets_no_backup_role(prod_host: Host) -> None:
+    result = _deploy_with_prod(prod_host)
+    sql = _sql_of(prod_host, "pgcontainer-prod")
+
+    assert result.returncode == 0, result.stderr
+    # The backup of prod comes with its own part: no unused high-privilege role in the database.
+    assert "backup_agent" not in sql
+    assert "pg_read_all_data" not in sql
+    assert "PROD_PG_BACKUP_PASSWORD" not in prod_host.env_file.read_text(encoding="utf-8")
+    # Staging is unchanged.
+    assert "GRANT pg_read_all_data TO backup_agent;" in _sql_of(prod_host, "pgcontainer")
+
+
+def test_prod_role_passwords_are_their_own_and_go_through_stdin(prod_host: Host) -> None:
+    result = _deploy_with_prod(prod_host)
+    env = prod_host.env()
+    prod_sql = _sql_of(prod_host, "pgcontainer-prod")
+    staging_sql = _sql_of(prod_host, "pgcontainer")
+    prod_passwords = {
+        "grafana_reader": env["PROD_GRAFANA_DB_PASSWORD"],
+        "metrics_exporter": env["PROD_PG_EXPORTER_PASSWORD"],
+    }
+
+    assert result.returncode == 0, result.stderr
+    for role, password in prod_passwords.items():
+        assert re.fullmatch(r"[0-9a-f]{48}", password), role
+        assert f"ALTER ROLE {role} PASSWORD '{password}';" in prod_sql
+        assert password not in staging_sql
+        assert password not in prod_host.log("docker.log")  # argv of every docker call
+        assert password not in result.stdout + result.stderr
+    assert env["PROD_GRAFANA_DB_PASSWORD"] != env["GRAFANA_DB_PASSWORD"]
+    assert env["PROD_PG_EXPORTER_PASSWORD"] != env["PG_EXPORTER_PASSWORD"]
+    assert env["GRAFANA_DB_PASSWORD"] not in prod_sql
+    assert env["PG_EXPORTER_PASSWORD"] not in prod_sql
+    assert env["PROD_POSTGRES_DB"] == "app"
+    assert env["PROD_API_DIR"] == str(_prod_dir(prod_host))
+    assert stat.S_IMODE(prod_host.env_file.stat().st_mode) == 0o600
+
+
+@pytest.mark.parametrize(
+    ("problem", "message"),
+    [
+        ("no env", "/.env not found: deploy the prod application stack first"),
+        ("no postgres", f"expected one running postgres container of project {PROD_PROJECT}"),
+        ("no network", f"network {PROD_PROJECT}_default of the prod application stack not found"),
+        ("same project", "PROD_API_DIR must be another compose project than API_DIR"),
+        ("bad database", "POSTGRES_USER and POSTGRES_DB of the prod stack must be lowercase"),
+    ],
+)
+def test_prod_stack_problems_fail_before_the_host_changes(
+    prod_host: Host, problem: str, message: str
+) -> None:
+    overrides: dict[str, str] = {}
+    prod_env = _prod_dir(prod_host) / ".env"
+    if problem == "no env":
+        prod_env.unlink()
+    elif problem == "no postgres":
+        overrides["STUB_PROD_POSTGRES_ID"] = ""
+    elif problem == "no network":
+        overrides["STUB_MISSING_NETWORK"] = f"{PROD_PROJECT}_default"
+    elif problem == "same project":
+        overrides["PROD_API_DIR"] = str(prod_host.api_dir)
+    else:
+        prod_env.write_text(PROD_ENV.replace("POSTGRES_DB=app", "POSTGRES_DB=App;x"))
+    before = prod_env.read_text() if prod_env.exists() else None
+
+    result = _deploy_with_prod(prod_host, **overrides)
+
+    assert result.returncode == 1
+    assert message in result.stderr
+    assert " up " not in prod_host.log("docker.log")
+    assert not prod_host.env_file.exists()
+    assert prod_host.log("psql.log") == ""
+    assert (prod_env.read_text() if prod_env.exists() else None) == before
+
+
+def test_manual_run_keeps_the_prod_dir_and_an_empty_value_drops_it(prod_host: Host) -> None:
+    assert _deploy_with_prod(prod_host).returncode == 0
+    kept = prod_host.deploy(unset=("PROD_API_DIR",))
+    kept_env = prod_host.env()
+    kept_sql = _sql_of(prod_host, "pgcontainer-prod")
+    dropped = prod_host.deploy(PROD_API_DIR="")
+
+    assert kept.returncode == 0, kept.stderr
+    assert kept_env["PROD_API_DIR"] == str(_prod_dir(prod_host))
+    assert kept_sql.count("REVOKE ALL ON ALL TABLES") == 2  # both deploys reached prod
+    assert dropped.returncode == 0, dropped.stderr
+    # Without prod its keys leave .env and the prod database is not touched again.
+    assert not {key for key in prod_host.env() if key.startswith("PROD_")}
+    assert _sql_of(prod_host, "pgcontainer-prod") == kept_sql
+
+
+def test_without_prod_nothing_of_it_reaches_the_host(prod_host: Host) -> None:
+    # The prod dir exists, but PROD_API_DIR is not given.
+    result = prod_host.deploy()
+
+    assert result.returncode == 0, result.stderr
+    assert "pgcontainer-prod" not in prod_host.log("psql.log")
+    assert not {key for key in prod_host.env() if key.startswith("PROD_")}

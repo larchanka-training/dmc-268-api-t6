@@ -3,7 +3,8 @@
 # Deploy the monitoring stack on the host (docs/MONITORING.md). Run as root after the application
 # deploy: it reads the application's .env and joins its network, and changes neither, except the
 # PostgreSQL roles it keeps in sync: grafana_reader and metrics_exporter (read-only, metadata
-# columns) and backup_agent (pg_read_all_data for pg_dump of the pg-backup service).
+# columns) in the staging and, with PROD_API_DIR, the prod database, and backup_agent
+# (pg_read_all_data for pg_dump of the pg-backup service) in the staging one.
 #
 # Inputs (environment):
 #   API_DIR                    application dir with .env and env-file.sh (/opt/dmc-268-api-staging)
@@ -15,6 +16,10 @@
 #   PROBE_PROD_HOSTS           production names probed in edge mode once they serve, out of api and
 #                              ui, separated by spaces; set, even empty: applied and kept in .env;
 #                              unset: keep the previous list (manual run)
+#   PROD_API_DIR               dir of the prod application stack (/opt/dmc-268-api-prod); set: prod is
+#                              monitored and must be up (its .env, network and one postgres), or the
+#                              deploy fails before the host changes; empty: no prod; unset: keep the
+#                              value in .env (manual run)
 #   BACKUP_DIR                 host dir of the PostgreSQL dumps, default /var/backups/dmc-268/<project>
 #   GRAFANA_ADMIN_PASSWORD     set: the Grafana admin password (GitHub secret; GitHub never shows its
 #                              value, whoever sets it keeps a copy outside GitHub); empty or unset:
@@ -166,6 +171,47 @@ if [[ -z "${POSTGRES_CONTAINER}" || "${POSTGRES_CONTAINER}" == *$'\n'* ]]; then
   exit 1
 fi
 
+# The prod application stack, validated like the staging one before anything on the host changes
+# (docs/MONITORING.md §6). Set: prod is required. Empty: no prod. Unset (manual run): the value
+# kept in .env.
+if [[ -z "${PROD_API_DIR+set}" ]]; then
+  PROD_API_DIR="$(previous_setting PROD_API_DIR)"
+fi
+if [[ -n "${PROD_API_DIR}" ]]; then
+  PROD_API_PROJECT="$(basename "${PROD_API_DIR}")"
+  PROD_API_ENV_FILE="${PROD_API_DIR}/.env"
+  if [[ "${PROD_API_PROJECT}" == "${API_PROJECT}" ]]; then
+    echo "PROD_API_DIR must be another compose project than API_DIR, both are ${API_PROJECT}" >&2
+    exit 1
+  fi
+  if [[ ! -f "${PROD_API_ENV_FILE}" ]]; then
+    echo "${PROD_API_ENV_FILE} not found: deploy the prod application stack first" >&2
+    exit 1
+  fi
+  PROD_POSTGRES_USER="$(read_compose_env_var POSTGRES_USER "${PROD_API_ENV_FILE}" || true)"
+  PROD_POSTGRES_DB="$(read_compose_env_var POSTGRES_DB "${PROD_API_ENV_FILE}" || true)"
+  PROD_POSTGRES_USER="${PROD_POSTGRES_USER:-app}"
+  PROD_POSTGRES_DB="${PROD_POSTGRES_DB:-app}"
+  for identifier in "${PROD_POSTGRES_USER}" "${PROD_POSTGRES_DB}"; do
+    if [[ ! "${identifier}" =~ ^[a-z_][a-z0-9_]*$ ]]; then
+      echo "POSTGRES_USER and POSTGRES_DB of the prod stack must be lowercase SQL identifiers" >&2
+      exit 1
+    fi
+  done
+  PROD_API_NETWORK="${PROD_API_PROJECT}_default"
+  if ! docker network inspect "${PROD_API_NETWORK}" >/dev/null 2>&1; then
+    echo "network ${PROD_API_NETWORK} of the prod application stack not found" >&2
+    exit 1
+  fi
+  PROD_POSTGRES_CONTAINER="$(docker ps -q \
+    --filter "label=com.docker.compose.project=${PROD_API_PROJECT}" \
+    --filter "label=com.docker.compose.service=postgres")"
+  if [[ -z "${PROD_POSTGRES_CONTAINER}" || "${PROD_POSTGRES_CONTAINER}" == *$'\n'* ]]; then
+    echo "expected one running postgres container of project ${PROD_API_PROJECT}" >&2
+    exit 1
+  fi
+fi
+
 # Telegram settings: validated before anything on the host changes.
 ALERTS_CONFIGURED=keep
 if [[ -n "${ALERT_TELEGRAM_BOT_TOKEN+set}" || -n "${ALERT_TELEGRAM_CHAT_ID+set}" ]]; then
@@ -274,6 +320,12 @@ fi
 GRAFANA_DB_PASSWORD="$(stack_password GRAFANA_DB_PASSWORD)"
 PG_EXPORTER_PASSWORD="$(stack_password PG_EXPORTER_PASSWORD)"
 PG_BACKUP_PASSWORD="$(stack_password PG_BACKUP_PASSWORD)"
+# The prod database has roles and passwords of its own: one leaked value opens one database. The
+# backup role of prod comes with the prod backup.
+if [[ -n "${PROD_API_DIR}" ]]; then
+  PROD_GRAFANA_DB_PASSWORD="$(stack_password PROD_GRAFANA_DB_PASSWORD)"
+  PROD_PG_EXPORTER_PASSWORD="$(stack_password PROD_PG_EXPORTER_PASSWORD)"
+fi
 # Dumps of the application database, outside every stack dir (docs/MONITORING.md §9).
 BACKUP_DIR="${BACKUP_DIR:-/var/backups/dmc-268/${API_PROJECT}}"
 
@@ -316,11 +368,16 @@ unset BACKUP_ENCRYPTION_PASSPHRASE
 # privileges, so the list below is exactly what the roles can read. No column holds review
 # content: run_actions.request/response, runs.review_body/error_message, diffs and findings stay
 # closed. The statements carry no secret and run with visible errors.
-run_psql() {
-  docker exec -i "${POSTGRES_CONTAINER}" \
-    psql -X -q -v ON_ERROR_STOP=1 -U "${POSTGRES_USER}" -d "${POSTGRES_DB}"
-}
-run_psql <<SQL
+# sync_monitoring_roles <container> <user> <database> <1 with backup_agent, 0 without>
+#   <grafana_reader password> <metrics_exporter password> <backup_agent password>
+sync_monitoring_roles() {
+  local container="$1" pg_user="$2" database="$3" with_backup="$4"
+  local grafana_password="$5" exporter_password="$6" backup_password="$7"
+  psql_in() {
+    docker exec -i "${container}" psql -X -q -v ON_ERROR_STOP=1 -U "${pg_user}" -d "${database}"
+  }
+  {
+    cat <<SQL
 SET client_min_messages = warning;
 DO \$\$
 BEGIN
@@ -329,9 +386,6 @@ BEGIN
   END IF;
   IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'metrics_exporter') THEN
     CREATE ROLE metrics_exporter LOGIN;
-  END IF;
-  IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'backup_agent') THEN
-    CREATE ROLE backup_agent LOGIN;
   END IF;
 END
 \$\$;
@@ -342,7 +396,7 @@ ALTER ROLE grafana_reader SET statement_timeout = '30s';
 ALTER ROLE metrics_exporter SET default_transaction_read_only = on;
 ALTER ROLE metrics_exporter SET statement_timeout = '15s';
 GRANT pg_monitor TO metrics_exporter;
-GRANT CONNECT ON DATABASE "${POSTGRES_DB}" TO grafana_reader, metrics_exporter;
+GRANT CONNECT ON DATABASE "${database}" TO grafana_reader, metrics_exporter;
 GRANT USAGE ON SCHEMA public TO grafana_reader, metrics_exporter;
 REVOKE ALL ON ALL TABLES IN SCHEMA public FROM grafana_reader, metrics_exporter;
 GRANT SELECT (id, state, trigger, engine, attempt, error_code, available_at, created_at, started_at, finished_at)
@@ -352,22 +406,46 @@ GRANT SELECT (provider, model, operation, tokens_in, tokens_out, cache_read_toke
   ON usage_events TO grafana_reader;
 -- postgres-exporter: the month-to-date LLM cost only, without the provider, model or tokens.
 GRANT SELECT (cost_usd, created_at) ON usage_events TO metrics_exporter;
+SQL
+    if [[ "${with_backup}" == 1 ]]; then
+      cat <<SQL
+DO \$\$
+BEGIN
+  IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'backup_agent') THEN
+    CREATE ROLE backup_agent LOGIN;
+  END IF;
+END
+\$\$;
 -- pg-backup: reads everything for pg_dump; CREATEDB only for the scratch database of the restore
 -- check, which it creates, owns and drops. No superuser, no write access to the application data.
 ALTER ROLE backup_agent WITH LOGIN NOSUPERUSER CREATEDB NOCREATEROLE NOREPLICATION CONNECTION LIMIT 3;
 GRANT pg_read_all_data TO backup_agent;
-GRANT CONNECT ON DATABASE "${POSTGRES_DB}" TO backup_agent;
+GRANT CONNECT ON DATABASE "${database}" TO backup_agent;
 SQL
-# Passwords through stdin, never argv; output and errors are dropped because psql would echo the
-# failing statement, password included.
-if ! run_psql >/dev/null 2>&1 <<SQL
-ALTER ROLE grafana_reader PASSWORD '${GRAFANA_DB_PASSWORD}';
-ALTER ROLE metrics_exporter PASSWORD '${PG_EXPORTER_PASSWORD}';
-ALTER ROLE backup_agent PASSWORD '${PG_BACKUP_PASSWORD}';
+    fi
+  } | psql_in
+  # Passwords through stdin, never argv; output and errors are dropped because psql would echo the
+  # failing statement, password included.
+  if ! {
+    cat <<SQL
+ALTER ROLE grafana_reader PASSWORD '${grafana_password}';
+ALTER ROLE metrics_exporter PASSWORD '${exporter_password}';
 SQL
-then
-  echo "failed to set the passwords of the monitoring roles in PostgreSQL" >&2
-  exit 1
+    if [[ "${with_backup}" == 1 ]]; then
+      cat <<SQL
+ALTER ROLE backup_agent PASSWORD '${backup_password}';
+SQL
+    fi
+  } | psql_in >/dev/null 2>&1; then
+    echo "failed to set the passwords of the monitoring roles in PostgreSQL (${container})" >&2
+    exit 1
+  fi
+}
+sync_monitoring_roles "${POSTGRES_CONTAINER}" "${POSTGRES_USER}" "${POSTGRES_DB}" 1 \
+  "${GRAFANA_DB_PASSWORD}" "${PG_EXPORTER_PASSWORD}" "${PG_BACKUP_PASSWORD}"
+if [[ -n "${PROD_API_DIR}" ]]; then
+  sync_monitoring_roles "${PROD_POSTGRES_CONTAINER}" "${PROD_POSTGRES_USER}" "${PROD_POSTGRES_DB}" 0 \
+    "${PROD_GRAFANA_DB_PASSWORD}" "${PROD_PG_EXPORTER_PASSWORD}" ""
 fi
 
 umask 077
@@ -491,6 +569,13 @@ find "${MONITORING_DIR}/prometheus" "${MONITORING_DIR}/grafana" "${MONITORING_DI
   printf 'GRAFANA_ALIAS=%s\n' "$(escape_compose_value "${GRAFANA_ALIAS}")"
   printf 'TEXTFILE_DIR=%s\n' "$(escape_compose_value "${TEXTFILE_DIR}")"
   printf 'PROBE_PROD_HOSTS=%s\n' "${PROBE_PROD_HOSTS}"
+  # The prod keys exist with prod only; an empty PROD_API_DIR drops them.
+  if [[ -n "${PROD_API_DIR}" ]]; then
+    printf 'PROD_API_DIR=%s\n' "$(escape_compose_value "${PROD_API_DIR}")"
+    printf 'PROD_POSTGRES_DB=%s\n' "${PROD_POSTGRES_DB}"
+    printf 'PROD_GRAFANA_DB_PASSWORD=%s\n' "${PROD_GRAFANA_DB_PASSWORD}"
+    printf 'PROD_PG_EXPORTER_PASSWORD=%s\n' "${PROD_PG_EXPORTER_PASSWORD}"
+  fi
   printf 'PROMETHEUS_CONFIG_DIGEST=%s\n' "$(config_digest prometheus)"
   printf 'ALERTMANAGER_CONFIG_DIGEST=%s\n' "$(config_digest alertmanager)"
   printf 'GRAFANA_CONFIG_DIGEST=%s\n' "$(config_digest grafana/provisioning)"

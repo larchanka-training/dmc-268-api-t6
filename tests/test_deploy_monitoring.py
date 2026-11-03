@@ -336,7 +336,7 @@ def test_exporter_reads_only_the_cost_and_time_of_llm_usage() -> None:
     # TABLES would bypass the column lists above.
     assert [statement for statement in statements if not re.fullmatch(column_grant, statement)] == [
         "GRANT pg_monitor TO metrics_exporter;",
-        'GRANT CONNECT ON DATABASE "${POSTGRES_DB}" TO grafana_reader, metrics_exporter;',
+        'GRANT CONNECT ON DATABASE "${database}" TO grafana_reader, metrics_exporter;',
         "GRANT USAGE ON SCHEMA public TO grafana_reader, metrics_exporter;",
     ]
 
@@ -589,10 +589,18 @@ FAKE_DOCKER = """\
 # Fake docker CLI: logs every call; psql, grafana and rclone obscure stdin go to their own logs.
 printf '%s\\n' "$*" >> "${STUB_LOG}"
 case "$1" in
-  network) exit 0 ;;
+  network) [[ " $* " == *" ${STUB_MISSING_NETWORK:-none} "* ]] && exit 1; exit 0 ;;
   run) cat >> "${STUB_OBSCURE_STDIN}"; echo "obscured_${RANDOM}${RANDOM}" ;;
-  ps) echo "${STUB_POSTGRES_ID}" ;;
-  exec) cat >> "${STUB_PSQL_STDIN}"; printf '\\n--\\n' >> "${STUB_PSQL_STDIN}" ;;
+  ps)
+    case "$*" in
+      *com.docker.compose.project=dmc-268-api-prod*) echo "${STUB_PROD_POSTGRES_ID}" ;;
+      *) echo "${STUB_POSTGRES_ID}" ;;
+    esac
+    ;;
+  exec)
+    printf -- '-- container %s\\n' "$3" >> "${STUB_PSQL_STDIN}"
+    cat >> "${STUB_PSQL_STDIN}"; printf '\\n--\\n' >> "${STUB_PSQL_STDIN}"
+    ;;
   compose)
     if [[ " $* " == *" exec "* ]]; then cat >> "${STUB_GRAFANA_STDIN}"; fi
     if [[ " $* " == *" up "* && -n "${STUB_UP_FAILS:-}" ]]; then exit 1; fi
@@ -651,6 +659,7 @@ class Host:
             "STUB_GRAFANA_STDIN": str(self.stubs / "grafana.log"),
             "STUB_CHOWN_LOG": str(self.stubs / "chown.log"),
             "STUB_POSTGRES_ID": "pgcontainer",
+            "STUB_PROD_POSTGRES_ID": "pgcontainer-prod",
             "STUB_OBSCURE_STDIN": str(self.stubs / "obscure.log"),
             "BACKUP_DIR": str(self.root / "backups"),
             **(extra or {}),
