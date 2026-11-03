@@ -98,12 +98,16 @@ jobs:
     runs-on: ubuntu-latest
     # The VPS lock of Deploy staging, Promote staging tag and Rollback staging (AC5 of #308): one
     # member at a time, FIFO, and a later push never cancels this pending job. A dispatch from
-    # another branch gets a throwaway group, whatever the timing of the `if` above. No Environment
-    # until Part 2 adds production with its protection rules.
+    # another branch gets a throwaway group, whatever the timing of the `if` above. The job waits
+    # for the reviewer of Environment production; approve or reject promptly (docs/CICD.md section
+    # 5 item 6 on the lock).
     concurrency:
       group: ${{ github.ref == 'refs/heads/main' && 'staging-deploy' || format('deploy-prod-ignored-{0}', github.run_id) }}
       cancel-in-progress: false
       queue: max
+    environment:
+      name: production
+      url: ${{ steps.target.outputs.base_url }}
     steps:
       - name: Re-resolve the staging tag at job start
         id: digest
@@ -173,9 +177,9 @@ jobs:
           STAGING_SSH_FINGERPRINT: ${{ vars.STAGING_SSH_FINGERPRINT }}
         run: |
           # Prod runs only on the shared course VPS (password auth, port 22, API behind the edge proxy
-          # as api-prod). Only non-secret values go to the step outputs. Without an Environment this
-          # job sees STAGING_HOST only as a repository or organization variable, not one set on
-          # Environment staging alone.
+          # as api-prod). Only non-secret values go to the step outputs. STAGING_HOST comes from
+          # Environment production, the repository or the organization, never from Environment
+          # staging.
           if [[ -n "${STAGING_HOST}" ]]; then
             echo "prod deploy targets the course VPS only; GitHub variable STAGING_HOST (Terraform host) is set" >&2
             exit 1
@@ -221,10 +225,120 @@ jobs:
           } >> "${GITHUB_OUTPUT}"
           echo "prod target: course VPS (${host}:${port}, ${base_url})"
 
+      - name: Refuse missing production secrets
+        env:
+          HAS_GH_APP_ID: ${{ secrets.GH_APP_ID != '' }}
+          HAS_GH_APP_PRIVATE_KEY: ${{ secrets.GH_APP_PRIVATE_KEY != '' }}
+          HAS_GH_WEBHOOK_SECRET: ${{ secrets.GH_WEBHOOK_SECRET != '' }}
+          HAS_GH_CLIENT_ID: ${{ secrets.GH_CLIENT_ID != '' }}
+          HAS_GH_CLIENT_SECRET: ${{ secrets.GH_CLIENT_SECRET != '' }}
+          HAS_AUTH_JWT_PRIVATE_KEY: ${{ secrets.AUTH_JWT_PRIVATE_KEY != '' }}
+          HAS_AUTH_JWT_PUBLIC_KEY: ${{ secrets.AUTH_JWT_PUBLIC_KEY != '' }}
+          HAS_GH_APP_BOT_LOGIN: ${{ vars.GH_APP_BOT_LOGIN != '' }}
+        run: |
+          # Presence flags only: this step never sees a value. The App id, private key and bot login
+          # are all-or-nothing (a partial set stops the webhook worker at startup); the rest is what
+          # the api needs for webhooks, login and JWTs. The check runs before any host contact.
+          missing=()
+          for name in GH_APP_ID GH_APP_PRIVATE_KEY GH_WEBHOOK_SECRET GH_CLIENT_ID GH_CLIENT_SECRET AUTH_JWT_PRIVATE_KEY AUTH_JWT_PUBLIC_KEY GH_APP_BOT_LOGIN; do
+            flag="HAS_${name}"
+            if [[ "${!flag}" != "true" ]]; then
+              missing+=("${name}")
+            fi
+          done
+          if (( ${#missing[@]} > 0 )); then
+            list="$(IFS=,; echo "${missing[*]}")"
+            echo "::error::Environment production lacks required values: ${list//,/, }; see docs/SECRETS.md" >&2
+            exit 1
+          fi
+
       # The deploy files come from this run's checkout (the dispatched main commit), like Rollback
       # staging, so a :staging image older than these scripts still gets NO_PREVIOUS_RELEASE=stop.
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Bundle application secrets
+        id: app_secrets
+        shell: bash
+        env:
+          # Environment production secrets (docs/SECRETS.md), the same names as staging. GitHub
+          # rejects secret names starting with GITHUB_, so the App secrets are GH_* here and
+          # GITHUB_* in the container.
+          GITHUB_APP_ID: ${{ secrets.GH_APP_ID }}
+          GITHUB_APP_PRIVATE_KEY: ${{ secrets.GH_APP_PRIVATE_KEY }}
+          GITHUB_WEBHOOK_SECRET: ${{ secrets.GH_WEBHOOK_SECRET }}
+          GITHUB_CLIENT_ID: ${{ secrets.GH_CLIENT_ID }}
+          GITHUB_CLIENT_SECRET: ${{ secrets.GH_CLIENT_SECRET }}
+          AUTH_JWT_PRIVATE_KEY: ${{ secrets.AUTH_JWT_PRIVATE_KEY }}
+          AUTH_JWT_PUBLIC_KEY: ${{ secrets.AUTH_JWT_PUBLIC_KEY }}
+          # Variable of the Environment: the prefix GITHUB_ is rejected for variables too.
+          GITHUB_APP_BOT_LOGIN: ${{ vars.GH_APP_BOT_LOGIN }}
+          # Public UI origin for links to individual Runs in review-worker check-run summaries.
+          PORTAL_URL: ${{ vars.PORTAL_URL }}
+          # LLM gateway of the worker: the organization secret and endpoint variable;
+          # models are repository variables (the Environment may override).
+          # The worker fetches ECB FX over outbound HTTPS at call time; no rate is bundled.
+          LLM_API_KEYS: ${{ secrets.AI_DMC268_T6 }}
+          LLM_BASE_URL: ${{ vars.AI_DMC268_URL }}
+          LLM_MODEL: ${{ vars.LLM_MODEL }}
+          LLM_FALLBACK_MODEL: ${{ vars.LLM_FALLBACK_MODEL }}
+          LLM_VERIFIER_MODEL: ${{ vars.LLM_VERIFIER_MODEL }}
+          LLM_VERIFIER_FALLBACK_MODEL: ${{ vars.LLM_VERIFIER_FALLBACK_MODEL }}
+          # Installed GitLab: keyring secret and non-secret configuration.
+          GITLAB_CREDENTIAL_KEYS: ${{ secrets.GITLAB_CREDENTIAL_KEYS }}
+          GITLAB_ACTIVE_KEY_ID: ${{ vars.GITLAB_ACTIVE_KEY_ID }}
+          GITLAB_ALLOWED_ORIGINS: ${{ vars.GITLAB_ALLOWED_ORIGINS }}
+          GITLAB_PRIVATE_ORIGINS: ${{ vars.GITLAB_PRIVATE_ORIGINS }}
+          GITLAB_WEBHOOK_INTAKE_ENABLED: ${{ vars.GITLAB_WEBHOOK_INTAKE_ENABLED }}
+          BITBUCKET_CREDENTIAL_KEYS: ${{ secrets.BITBUCKET_CREDENTIAL_KEYS }}
+          BITBUCKET_ACTIVE_KEY_ID: ${{ vars.BITBUCKET_ACTIVE_KEY_ID }}
+          BITBUCKET_WEBHOOK_BASE_URL: ${{ vars.BITBUCKET_WEBHOOK_BASE_URL }}
+        run: |
+          # One opaque line of base64 so multi-line PEM values survive the SSH action and the shell;
+          # deploy/scripts/env-file.sh decodes it on the host. Unset secrets are left out entirely.
+          names=(GITHUB_APP_ID GITHUB_APP_PRIVATE_KEY GITHUB_WEBHOOK_SECRET GITHUB_CLIENT_ID GITHUB_CLIENT_SECRET AUTH_JWT_PRIVATE_KEY AUTH_JWT_PUBLIC_KEY GITHUB_APP_BOT_LOGIN PORTAL_URL LLM_API_KEYS LLM_BASE_URL LLM_MODEL LLM_FALLBACK_MODEL LLM_VERIFIER_MODEL LLM_VERIFIER_FALLBACK_MODEL GITLAB_CREDENTIAL_KEYS GITLAB_ACTIVE_KEY_ID GITLAB_ALLOWED_ORIGINS GITLAB_PRIVATE_ORIGINS GITLAB_WEBHOOK_INTAKE_ENABLED BITBUCKET_CREDENTIAL_KEYS BITBUCKET_ACTIVE_KEY_ID BITBUCKET_WEBHOOK_BASE_URL)
+          bundle="$(
+            for name in "${names[@]}"; do
+              if [[ -n "${!name}" ]]; then
+                printf '%s=%s\n' "${name}" "$(printf '%s' "${!name}" | base64 | tr -d '\n')"
+              fi
+            done | base64 | tr -d '\n'
+          )"
+          if [[ -n "${bundle}" ]]; then
+            echo "::add-mask::${bundle}"
+          fi
+          echo "bundle=${bundle}" >> "${GITHUB_OUTPUT}"
+          for name in "${names[@]}"; do
+            [[ -n "${!name}" ]] && echo "set: ${name}" || echo "not set: ${name}"
+          done
+
+      - name: Validate application bundle and GitLab configuration
+        shell: bash
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GHCR_USER: ${{ github.actor }}
+          REGISTRY: ghcr.io
+          IMAGE: ${{ steps.digest.outputs.image }}
+          APP_SECRETS_B64: ${{ steps.app_secrets.outputs.bundle }}
+        run: |
+          set -euo pipefail
+          set +o xtrace
+          if [[ ! "${IMAGE}" =~ ^[^[:space:]]+@sha256:[a-f0-9]{64}$ ]]; then
+            echo "deployment preflight requires an immutable image digest" >&2
+            exit 1
+          fi
+          umask 077
+          preflight_dir="$(mktemp -d "${RUNNER_TEMP}/gitlab-preflight.XXXXXX")"
+          trap 'rm -rf "${preflight_dir}"' EXIT
+          export DOCKER_CONFIG="${preflight_dir}/docker"
+          mkdir "${DOCKER_CONFIG}"
+          if ! printf '%s\n' "${GHCR_TOKEN}" | docker login "${REGISTRY}" --username "${GHCR_USER}" --password-stdin > /dev/null 2>&1; then
+            echo "registry authentication failed" >&2
+            exit 1
+          fi
+          docker pull "${IMAGE}" > /dev/null
+          source deploy/scripts/env-file.sh
+          TMPDIR="${preflight_dir}" validate_gitlab_deployment "${IMAGE}" "${APP_SECRETS_B64}"
 
       # The staging deploy files plus the isolation check; nothing of the edge proxy, which only
       # Deploy staging and Rollback staging refresh (prod joins its network as api-prod).
@@ -288,10 +402,12 @@ jobs:
           done
           echo "TLS handshake with ${BASE_URL} succeeded"
 
-      # Only the digest checked above. No application secrets and no store settings until Part 2:
-      # deploy.sh generates the store passwords and leaves the role files empty. Without a
-      # previous prod release a failed one is only taken down (stop), so the edge proxy keeps
-      # answering 503 for the prod API host instead of a bootstrap nginx (AC4).
+      # The digest checked above and the application bundle of Environment production, which only
+      # this step forwards (Rollback keeps the role files, as on staging). No store settings:
+      # deploy.sh generates the store passwords on the host and keeps them in the prod .env, and a
+      # value from GitHub would override them. Without a previous prod release a failed release is
+      # only taken down (stop), so the edge proxy keeps answering 503 for the prod API host
+      # instead of a bootstrap nginx.
       - name: Deploy image
         id: deploy
         uses: appleboy/ssh-action@0ff4204d59e8e51228ff73bce53f80d53301dee2 # v1.2.5
@@ -299,6 +415,7 @@ jobs:
           GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GHCR_USER: ${{ github.actor }}
           IMAGE: ${{ steps.digest.outputs.image }}
+          APP_SECRETS_B64: ${{ steps.app_secrets.outputs.bundle }}
           APP_DIR: ${{ steps.target.outputs.app_dir }}
           DEPLOY_MODE: edge
           EDGE_ALIAS: ${{ steps.target.outputs.edge_alias }}
@@ -311,7 +428,7 @@ jobs:
           password: ${{ secrets.VPS_DMC268_P }}
           fingerprint: ${{ vars.STAGING_SSH_FINGERPRINT }}
           debug: false
-          envs: GHCR_TOKEN,GHCR_USER,IMAGE,APP_DIR,DEPLOY_MODE,EDGE_ALIAS,NO_PREVIOUS_RELEASE,DEPLOY_RUN
+          envs: GHCR_TOKEN,GHCR_USER,IMAGE,APP_SECRETS_B64,APP_DIR,DEPLOY_MODE,EDGE_ALIAS,NO_PREVIOUS_RELEASE,DEPLOY_RUN
           script: |
             set -euo pipefail
             set +o xtrace

@@ -6,7 +6,7 @@
 | Владелец | инфраструктура (роль 3) |
 | Связанные документы | [CICD.md](CICD.md), [INFRASTRUCTURE.md](INFRASTRUCTURE.md) |
 
-Секреты живут в GitHub (organization, repository, Environment `staging`) или в окружении оператора. В git, образ и логи CI они не попадают. Цель выката (курсовой VPS или Terraform-хост) выбирается автоматически — [CICD.md](CICD.md#8-курсовой-vps-и-edge-прокси).
+Секреты живут в GitHub (organization, repository, Environment `staging` и `production`) или в окружении оператора. В git, образ и логи CI они не попадают. Цель выката (курсовой VPS или Terraform-хост) выбирается автоматически — [CICD.md](CICD.md#8-курсовой-vps-и-edge-прокси).
 
 ---
 
@@ -19,8 +19,8 @@
 | Имя | Тип | Зачем |
 |---|---|---|
 | `VPS_DMC268_IP_T6` | variable | IPv4 курсового VPS, SSH на порт 22 |
-| `VPS_DMC268_U` | secret | SSH-пользователь (`root`) |
-| `VPS_DMC268_P` | secret | SSH-пароль; уходит только на VPS, никогда на Terraform-хост |
+| `VPS_DMC268_U` | secret | SSH-пользователь (`root`); читают jobs с SSH на курсовой VPS, в том числе Deploy prod и `prod-webhook-outcome.yml` |
+| `VPS_DMC268_P` | secret | SSH-пароль; уходит только на VPS, никогда на Terraform-хост. Те же потребители, что у `VPS_DMC268_U` (в том числе `prod-webhook-outcome.yml`) |
 | `AI_DMC268_T6` | secret | LLM-ключ приложения (EUrouter): на staging — `LLM_API_KEYS` в контейнере `worker` (ниже); в CI — ещё ручные workflows `LLM live run` (`llm-live-run.yml`) и `Live corpus evaluation` (`eval-live.yml`), оба `workflow_dispatch`; required-проверки его не используют |
 | `AI_DMC268_URL` | variable | endpoint LLM-провайдера: на staging — `LLM_BASE_URL` в контейнере `worker` |
 
@@ -88,7 +88,7 @@ gh secret set AUTH_JWT_PUBLIC_KEY --env staging -R larchanka-training/dmc-268-ap
 rm jwt.pem jwt.pub
 ```
 
-Смена пары разлогинивает всех: ранее выданные access JWT перестают проверяться.
+Смена пары не разлогинивает: ранее выданные access JWT перестают проверяться, а refresh-токен переживает смену (непрозрачный хеш в БД), и SPA обновляет токен по 401.
 
 ### Генерируются на хосте
 
@@ -653,6 +653,70 @@ if [[ -n "${operator_registry_config:-}" ]]; then
 fi
 ```
 
+### GitHub Environment `production` (#308)
+
+Prod-выкат (`deploy-prod.yml`, job `deploy-prod`) идёт в Environment `production`. Защита: required reviewer `axyi`, deployment branches — только `main`. Job ждёт approve ревьюера: одобрить или отклонить сразу (про lock `staging-deploy` — [CICD.md](CICD.md#5-rollback), §5 п. 6). Секреты и variables staging из Environment `staging` в этом job не видны.
+
+Приложение получает те же имена, что на staging (§1, «Environment `staging` — secrets»); путь тот же (§3): шаг «Bundle application secrets» → `APP_SECRETS_B64` → role-файлы на хосте. Значения свои: отдельный GitHub App, свои webhook secret, client secret и пара JWT. Без любого из обязательных имён шаг «Refuse missing production secrets» останавливает Deploy prod до обращения к хосту.
+
+| Имя | Тип | Контейнеры | Обязателен |
+|---|---|---|---|
+| `GH_APP_ID`, `GH_APP_PRIVATE_KEY` | secret | `worker`, `webhook-worker` | да; вместе с `GH_APP_BOT_LOGIN` — всё или ничего: частичный набор останавливает `webhook-worker` при старте |
+| `GH_APP_BOT_LOGIN` | variable, `<slug>[bot]` | `webhook-worker` | да |
+| `GH_WEBHOOK_SECRET` | secret | `api` | да |
+| `GH_CLIENT_ID`, `GH_CLIENT_SECRET` | secret | `api` | да |
+| `AUTH_JWT_PRIVATE_KEY`, `AUTH_JWT_PUBLIC_KEY` | secret, новая пара | `api` | да |
+| `PORTAL_URL` | variable, `https://ui.<APP_DOMAIN>` | `worker` | нет; ссылки работают, когда появится prod UI (ui#185) |
+| `GITLAB_CREDENTIAL_KEYS`, `GITLAB_ACTIVE_KEY_ID`, `GITLAB_ALLOWED_ORIGINS`, `GITLAB_PRIVATE_ORIGINS`, `GITLAB_WEBHOOK_INTAKE_ENABLED`, `BITBUCKET_CREDENTIAL_KEYS`, `BITBUCKET_ACTIVE_KEY_ID`, `BITBUCKET_WEBHOOK_BASE_URL` | secret и variables | как на staging | нет; на старте выключены. Те же имена, значения свои: значения staging не копировать (`BITBUCKET_WEBHOOK_BASE_URL=https://api.<APP_DOMAIN>`, свои keyring-и) |
+
+Ни одно имя `GH_*`, `AUTH_JWT_*`, `GITLAB_CREDENTIAL_KEYS`, `BITBUCKET_CREDENTIAL_KEYS` не должно существовать на уровне repository или organization: job `deploy-prod` унаследовал бы его.
+
+Наследуются с уровня organization и repository, в `production` не дублируются: `GITHUB_TOKEN` (выдаёт Actions), `AI_DMC268_T6` и `AI_DMC268_URL` (один ключ LLM-шлюза на все окружения, расход prod входит в суммарный бюджет), `LLM_MODEL`, `LLM_FALLBACK_MODEL`, `LLM_VERIFIER_MODEL`, `LLM_VERIFIER_FALLBACK_MODEL`, `VPS_DMC268_U`, `VPS_DMC268_P`, `VPS_DMC268_IP_T6`, `APP_DOMAIN`, `STAGING_SSH_FINGERPRINT`. `STAGING_HOST` в `production` не задавать: цель prod — всегда курсовой VPS.
+
+Никогда не задаются в `production`: `POSTGRES_*` и пароли RabbitMQ и Redis (их генерирует хост и хранит в `/opt/dmc-268-api-prod/.env`; значение из GitHub перекрыло бы его, и API потерял бы базу), `STAGING_*` для Terraform-хоста.
+
+#### Ротация
+
+Изменённый секрет вступает в силу только через Deploy prod, а он выкатывает то, что сейчас под `:staging`, возможно более новый образ, чем работающий на prod: ротация — это и промоушен, сначала проверьте `:staging`. Compose пересоздаёт только контейнеры, чей env-файл изменился, и все контейнеры приложения, если сменился digest.
+
+| Secret | Как ротировать | Что перезапускается | Что ломается на время |
+|---|---|---|---|
+| `GH_APP_PRIVATE_KEY` | создать новый ключ в App (действуют несколько ключей) → `gh secret set GH_APP_PRIVATE_KEY --env production -R larchanka-training/dmc-268-api-t6 < new.pem` → Deploy prod → после «deployed» удалить старый ключ | `worker`, `webhook-worker` | ничего; если сначала удалить старый ключ, installation token не выдаётся: доставки откладываются или падают, публикация не работает до выката |
+| `GH_WEBHOOK_SECRET` | один secret на App: `openssl rand -hex 32` → secret Environment → Deploy prod → после «deployed» вставить значение в webhook-настройки App → переотправить доставки с 401 | `api` | доставки между рестартом `api` и обновлением App получают 401 (без повтора со стороны GitHub), при пустом secret — 503; переотправить из Recent Deliveries |
+| `GH_CLIENT_SECRET` | создать новый client secret → задать → Deploy prod → удалить старый | `api` | ничего, пока старый действует |
+| `GH_APP_ID`, `GH_CLIENT_ID` | не ротируются: меняются только вместе с новым App (новые ключ, client secret, webhook secret, bot login и переустановка): задать все эти secrets и variable `GH_APP_BOT_LOGIN` → Deploy prod → в репозитории UI `dmc-268-ui-t6` задать variables `VITE_GITHUB_CLIENT_ID` и `VITE_GITHUB_APP_SLUG` нового App и пересобрать и выкатить UI (значения вшиваются в образ при сборке) → переустановить новый App и войти на prod UI, чтобы установки привязались | при полной замене App `api` (`GH_CLIENT_ID` → `GITHUB_CLIENT_ID`, `api.env`, и остальные секреты App), `worker` (`GH_APP_ID` → `GITHUB_APP_ID`, `app.env`) и `webhook-worker` (`app.env`, `GH_APP_BOT_LOGIN` в `webhook-worker.env`) | до перенастройки и повторной установки: установки старого App новому неизвестны, installation token для них не выдаётся — публикация и проекция доставок по старым репозиториям не работают; доставки от старого App получают 401 (webhook secret уже новый); вход не работает, пока UI собран со старым client id: `api` обменивает код с новым, а UI отправляет на вход старый App; пока новый App не установлен и вход не привязал установку, новые репозитории не подключаются |
+| `GITLAB_CREDENTIAL_KEYS` | не заменять весь набор: добавить новый key ID к существующему JSON по процедуре keyring из «Installed GitLab» (`gh secret set GITLAB_CREDENTIAL_KEYS --env production -R larchanka-training/dmc-268-api-t6 < файл`) → сменить variable `GITLAB_ACTIVE_KEY_ID` на новый ID → Deploy prod. Старые key ID остаются, пока все их envelopes не перезаписаны ротацией токенов | `worker`, `webhook-worker` (`gitlab.env`), профиль `gitlab-admin` | без старого key ID расшифровка сохранённых токенов закрыта: установки GitLab перестают работать. Пока GitLab на prod выключен, строка нужна только при первом включении |
+| `BITBUCKET_CREDENTIAL_KEYS` | так же, по разделу «Bitbucket Cloud (#333)» с `--env production`: добавить новый ключ к keyring, сменить `BITBUCKET_ACTIVE_KEY_ID`, Deploy prod. Перешифровки старых connections нет: старый ключ не удалять, пока им зашифрована хоть одна запись | `api`, `worker`, `webhook-worker` (`bitbucket.env`) | без старого key ID записи, зашифрованные им, не читаются; образ после отката должен понимать текущие key ID |
+| `AUTH_JWT_PRIVATE_KEY` + `AUTH_JWT_PUBLIC_KEY` | парой: команды `openssl` из §1 с `--env production` → Deploy prod | `api` | выданный до выката access JWT (15 мин) один раз получит 401; refresh-токен переживает смену (непрозрачный хеш в БД), SPA обновляет токен и повторяет запрос один раз (UI-репозиторий `dmc-268-ui-t6`, `src/shared/api/client.ts`), пользователи остаются в сессии |
+
+`AI_DMC268_T6` меняет организация курса; в staging и prod он попадает только через Deploy staging и Deploy prod. Пароли хранилищ prod (хост, `.env`) CI не ротирует: нужен доступ к VPS, и `POSTGRES_*` в `production` задавать нельзя.
+
+Неверное, но заданное значение (битый PEM, чужой App ID) уводит воркер в crash loop; rollback сохраняет role-файлы нового выката, поэтому предыдущий образ может тоже не подняться («rollback failed»). Исправьте secret и запустите Deploy prod снова: выкат перезаписывает role-файлы из бандла.
+
+#### Настройки prod App
+
+Приложение регистрирует техлид (владелец `axyi`); порядок — «Регистрация и проверка» ниже. Права и события те же, что у staging App.
+
+| Параметр | Значение |
+|---|---|
+| Имя / bot login | `dmc268-t6-reviewer-prod` / `dmc268-t6-reviewer-prod[bot]` |
+| Homepage | `https://ui.<APP_DOMAIN>` |
+| Callback URL | `https://ui.<APP_DOMAIN>/auth/callback` |
+| Webhook | active, `https://api.<APP_DOMAIN>/webhooks/github`, свой secret (`openssl rand -hex 32`), SSL verification включена |
+| Permissions | actions: read, checks: write, contents: read, issues: write, metadata: read, pull_requests: write, statuses: read |
+| Events | `check_suite`, `pull_request`, `push`, `status`, `workflow_run` |
+| Остальное | user authorization, setup URL, redirect on update и места установки — как у staging App |
+
+Не ставить prod App на репозиторий, где уже стоит staging App: два App-ревьюера на одном репозитории мешают CI-гейту друг друга.
+
+#### Регистрация и проверка
+
+1. Техлид регистрирует App по таблице выше и заводит secrets и variables из таблицы имён в Environment `production` (значения без `'` и trailing `\`; локальные `.pem` удалить).
+2. После merge и отдельного «да» техлида — dispatch Deploy prod; сначала проверить, куда указывает `:staging` (выкат ещё и промоушен). Approve ревьюера; ждать «Outcome: deployed».
+3. Установить prod App на репозиторий, где нет staging App. Доставка `installation` приходит сразу, но пока установка не привязана к Workspace, worker её не проецирует (`ignored_unknown_installation`, п. 5).
+4. Войти на prod UI `https://ui.<APP_DOMAIN>`: вход привязывает к Workspace установки, видимые токену пользователя, и будит неспроецированные доставки `installation` / `installation_repositories` и отложенные после последней попытки. Только они подключают репозитории установки: сам вход строки репозиториев не создаёт. Проверка требует развёрнутого prod UI (ui#185).
+5. Дождаться строки `status=onboarded` у доставки `installation` (после входа её повторно обработает worker), затем открыть или переоткрыть PR в этом репозитории: доставка `pull_request` должна закончиться `status=projected_pr`. Доказательство — HTTP 202 в Recent Deliveries **и** строки `GitHub webhook delivery <id> event=… status=…` из workflow **Prod webhook outcome** ([CICD.md](CICD.md#1-конвейер)): на каждую попытку обработки одного id приходит своя строка, судить нужно по **последней**, а `retry_at=none` значит последнюю попытку. Пройдено — `status=onboarded` или `status=projected_pr`; `ignored_unknown_repository` с `retry_at=<время>` и затем `projected_pr` — тоже пройдено. Сам 202 лишь значит, что доставка записана. `deferred_run_trigger` у `pull_request` — проекция уже сохранена, запуск Run повторяется каждые 30 с до часа: дождаться последней строки, зачётная — `projected_pr`. Последняя строка `ignored_unknown_installation` или `ignored_unknown_repository` — провал проверки: worker делает три попытки с интервалом 5 минут и оставляет доставку отложенной (`retry_at=none`), будит её только вход, привязывающий установку. `deferred_repository_details` (GitHub не отдал данные репозиториев) после последней попытки (`retry_at=none`) не доказательство: её оживляет почасовая задача для привязанных установок или новый вход. Redeliver в GitHub доставку не обработает заново: повтор с тем же delivery id записывается как `duplicate` и не доходит до worker; нужна новая доставка (новый PR, переустановка App).
+
 ### Мониторинг (`deploy/monitoring`, [MONITORING.md](MONITORING.md))
 
 Стек мониторинга — отдельный compose project `dmc-268-monitoring` в `/opt/dmc-268-monitoring`; выкатывает его job `Deploy monitoring` (`deploy/monitoring/deploy.sh`).
@@ -721,7 +785,7 @@ callback; в PostgreSQL хранится только хеш локальног�
    ssh-keyscan -p "${STAGING_SSH_PORT}" -H "${STAGING_HOST}" 2>/dev/null | ssh-keygen -lf - -E sha256
    ```
 4. Protection rules: **Deployment branches and tags** → только `main`. Workflow Rollback и сам пропускает jobs вне `refs/heads/main`, но branch policy закрывает доступ к secrets environment для любого другого workflow и ветки.
-   Required reviewers — решение при настройке environment. `deploy-staging`, `promote-staging` и `rollback` ссылаются на `staging`, поэтому каждый выкат запросит подтверждение дважды (deploy и promotion), а job, ожидающий подтверждения, возможно, держит группу `staging-deploy` и блокирует rollback (не проверено). Рекомендация для staging: без required reviewers; контроль — branch policy `main` и review PR.
+   Required reviewers — решение при настройке environment. `deploy-staging`, `promote-staging` и `rollback` ссылаются на `staging`, поэтому каждый выкат запросит подтверждение дважды (deploy и promotion), а job, ожидающий подтверждения, возможно, держит группу `staging-deploy` и блокирует rollback (не проверено). Рекомендация для staging: без required reviewers; контроль — branch policy `main` и review PR. Environment `production` устроен иначе: required reviewer `axyi`, branches — только `main`, ссылается на него один job — `deploy-prod`; про его lock `staging-deploy` во время ожидания approve — [CICD.md](CICD.md#5-rollback), §5 п. 6.
 5. Actions → General: **Allow GitHub Actions to create and approve pull requests** не нужен. Secret scanning и push protection — включить.
 
 Jobs `deploy-staging`, `promote-staging`, `deploy-monitoring` (CI/CD), workflow Rollback и ручные workflow `webhook-ack-load.yml` и `monitoring-acceptance.yml` ссылаются на `environment: staging`. Без значений environment пайплайн не выкатит стенд. `promote-staging` нужен environment ради SSH-чтения `.deploy-state` (про required reviewers — п. 4).
@@ -746,7 +810,7 @@ flowchart LR
   script --> logout["docker logout ghcr.io"]
 ```
 
-1. Runner забирает secret/var только в job с `environment: staging`. Bundle маскируется;
+1. Runner забирает secret/var только в job с `environment: staging` (Deploy prod — `environment: production`, тем же путём: шаги Bundle и Validate те же, значения свои). Bundle маскируется;
    шаг **Validate application bundle and GitLab configuration** сначала проверяет
    representation всего application bundle, затем GitLab config в exact immutable target
    image с `--network none` **до первого SCP/SSH изменения хоста**. Protected временный
@@ -901,6 +965,8 @@ Workflow по умолчанию: `contents: read`. Расширение точ�
 | `promote-staging` (CI/CD) | `contents: read`, `packages: write` | `:staging-previous` ← `:staging`, `:staging` ← проверенный digest после health check; по SSH только читает `.deploy-state`, токен на VM не передаётся |
 | Rollback staging: `rollback` | `contents: read`, `packages: read` | pull образа на VM |
 | Rollback staging: `promote-staging` | `contents: read`, `packages: write` | синхронизировать `:staging` с откатанным образом |
+| Deploy prod: `resolve`, `deploy-prod` | `contents: read`, `packages: read` | чтение digest под `:staging` из реестра и pull образа на VM (одноразовый `GITHUB_TOKEN`); `deploy-prod` идёт в Environment `production` |
+| `prod-webhook-outcome.yml`: `lookup` | `contents: read` | только чтение логов по SSH; `GITHUB_TOKEN` на VM не передаётся, Environment нет |
 
 `security-events`, `id-token`, `pull-requests` не выдаются; `actions: read` есть только у `push-image`. `packages: write` — только у jobs `promote-staging`, на VM этот токен не уходит. `HCLOUD_TOKEN` в Actions нет — apply вне CI.
 
