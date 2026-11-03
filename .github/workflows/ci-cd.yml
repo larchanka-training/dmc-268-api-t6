@@ -360,8 +360,8 @@ jobs:
         run: uv run --locked python review/scripts/validate_dataset.py --root test-prs-dataset/rules --final --profile rules
 
       - name: RAG sub-corpus
-        # The graph-RAG sub-corpus (#146): its own profile and the index snapshots; no recorded
-        # capture exists yet, so there is no replay in this step.
+        # The graph-RAG sub-corpus (#146): its own profile and the index snapshots. No recorded
+        # captures exist until Part 3, which adds the recorded replay to this step.
         run: |
           uv run --locked python review/scripts/validate_dataset.py --root test-prs-dataset/rag --final --profile rag
           uv run --locked python review/scripts/build_rag_snapshot.py --check test-prs-dataset/rag/cases
