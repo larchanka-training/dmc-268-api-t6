@@ -99,6 +99,9 @@ case " $* " in
     if [[ -n "${STUB_COMPOSE_FAILS:-}" ]]; then echo "Error: compose.yml not found" >&2; exit 1; fi
     printf 'prometheus\nalertmanager\ngrafana\npg-backup\n'
     if [[ " $* " == *compose.offsite.yml* ]]; then echo backup-offsite; fi
+    if [[ " $* " == *compose.prod.yml* ]]; then
+      printf 'postgres-exporter-prod\nredis-exporter-prod\nrelay-prod\n'
+    fi
     ;;
   *" ps -a --format "*)
     if [[ -n "${STUB_PS_FAILS:-}" ]]; then
@@ -112,6 +115,9 @@ case " $* " in
       echo 'pg-backup exited '
     fi
     echo 'backup-offsite running healthy'
+    if [[ -z "${STUB_PROD_MISSING:-}" ]]; then
+      printf 'postgres-exporter-prod running \nredis-exporter-prod running \nrelay-prod running \n'
+    fi
     ;;
   *" promtool query instant "*)
     if [[ -n "${STUB_PROMTOOL_FAILS:-}" ]]; then echo "Error: connection refused" >&2; exit 1; fi
@@ -132,11 +138,20 @@ case " $* " in
           echo "{host=\"${pair%%=*}\"} => ${pair#*=} @[1761300000]"
         done
         ;;
+      *'environment="prod"'*)
+        STAMP='@[1761300000]'
+        # One target per store job of prod; STUB_PROD_JOBS drops some, STUB_PROD_DOWN downs some.
+        for job in ${STUB_PROD_JOBS-postgres redis rabbitmq rabbitmq-queues}; do
+          value=1
+          if [[ " ${STUB_PROD_DOWN:-} " == *" ${job} "* ]]; then value=0; fi
+          echo "up{environment=\"prod\", instance=\"x:1\", job=\"${job}\"} => ${value} ${STAMP}"
+        done
+        ;;
       *)
         if [[ -n "${STUB_NO_TARGETS:-}" ]]; then exit 0; fi
-        pg_up="${STUB_POSTGRES_UP:-1}"
-        echo 'up{instance="prometheus:9090", job="prometheus"} => 1 @[1761300000]'
-        echo "up{instance=\"postgres-exporter:9187\", job=\"postgres\"} => ${pg_up} @[1761300000]"
+        pg_up="${STUB_POSTGRES_UP:-1}"; STAMP='@[1761300000]'
+        echo "up{environment=\"shared\", instance=\"prom:9090\", job=\"prometheus\"} => 1 ${STAMP}"
+        echo "up{environment=\"staging\", instance=\"x\", job=\"postgres\"} => ${pg_up} ${STAMP}"
         ;;
     esac
     ;;
@@ -243,6 +258,10 @@ if [[ -n "${STUB_TIMES_OUT:-}" && " $* " == *"${STUB_TIMES_OUT}"* ]]; then exit 
 exec "$@"
 """
 
+# The sed of macOS (BSD) rejects a script with a branch label such as `t;`: "undefined label".
+# Stands for any sed that fails on the script it is given, GNU or not.
+FAKE_BSD_SED = "#!/bin/sh\necho 'sed: 1: \"s/x/y/; t; s/z/w/\": undefined label' >&2\nexit 1\n"
+
 # A report must not name the machine it runs on: the run log is public.
 FAKE_HOSTNAME = f"#!/bin/sh\necho {SENTINEL_HOST}\n"
 
@@ -274,10 +293,12 @@ def _run(
     dump_age_hours: float = 3,
     offsite_age_minutes: float | None = 10,
     offsite: bool = True,
+    prod: bool = False,
     dumps: bool = True,
     telegram: bool = True,
     deploy_mode: str = "edge",
     send_test_alert: str = "1",
+    bsd_sed: bool = False,
     extra: dict[str, str] | None = None,
     **env: str,
 ) -> Run:
@@ -321,6 +342,8 @@ def _run(
     ]
     if offsite:
         settings.append("BACKUP_S3_BUCKET=dmc268-t6-backup")
+    if prod:
+        settings.append("PROD_API_NETWORK=dmc-268-api-prod_default")
     (monitoring / ".env").write_text("\n".join(settings) + "\n", encoding="utf-8")
     stubs = tmp_path / "stubs"
     state = stubs / "state"
@@ -330,6 +353,7 @@ def _run(
         ("timeout", FAKE_TIMEOUT),
         ("hostname", FAKE_HOSTNAME),
         ("uname", FAKE_HOSTNAME),
+        *((("sed", FAKE_BSD_SED),) if bsd_sed else ()),
     ):
         (stubs / name).write_text(body, encoding="utf-8")
         (stubs / name).chmod(0o755)
@@ -410,9 +434,10 @@ def test_the_dashboard_checks_use_the_selectors_and_range_of_the_dashboard(tmp_p
         for target in panel.get("targets", [])
         if "caddy_http_request_duration_seconds_count" in target.get("expr", "")
     ]
+    # The acceptance run checks staging: the environment the dashboard shows by default.
     [selector] = {
         m
-        for e in rps_exprs
+        for e in (expr.replace("${environment:text}", "staging") for expr in rps_exprs)
         for m in re.findall(r"caddy_http_request_duration_seconds_count\{[^}]*\}", e)
         if "code=" not in m
     }
@@ -588,7 +613,7 @@ def test_failed_first_request_with_a_successful_retry_is_a_delivery(tmp_path: Pa
         ({"dump_age_hours": 30}, "verified dump < 26 h", "last verified dump is 30h 00m old"),
         ({"offsite_age_minutes": 240}, "off-host copy (R2) < 3 h", "last successful copy 4h 00m"),
         ({"offsite_age_minutes": None}, "off-host copy (R2) < 3 h", "no successful copy yet"),
-        ({"STUB_POSTGRES_UP": "0"}, "prometheus targets", "down: postgres"),
+        ({"STUB_POSTGRES_UP": "0"}, "prometheus targets", "down: postgres (staging)"),
         ({"STUB_NO_TARGETS": "1"}, "prometheus targets", "query up returned nothing"),
         ({"STUB_PG_BACKUP_EXITED": "1"}, "stack services", "pg-backup exited"),
         ({"STUB_LLM": "0 0 0"}, "LLM latency (Grafana source)", "no llm.call in 24 h"),
@@ -632,12 +657,79 @@ def test_each_failure_fails_only_its_own_check(
     assert "scratch database restore_drill_acceptance dropped" in run.report
 
 
+def test_a_down_target_is_named_when_sed_rejects_its_script(tmp_path: Path) -> None:
+    # A parser that fails must never read as "nothing is down": no sed in the check at all.
+    run = _run(tmp_path, bsd_sed=True, STUB_POSTGRES_UP="0")
+
+    _assert_only_failed(run, "prometheus targets")
+    assert "down: postgres (staging)" in run.line("prometheus targets")
+
+
 def test_without_the_off_host_copy_its_service_is_not_expected(tmp_path: Path) -> None:
     run = _run(tmp_path, offsite=False)
 
     _assert_only_failed(run, "off-host copy (R2) < 3 h")
     assert "BACKUP_S3_* are not set" in run.line("off-host copy (R2) < 3 h")
     assert "4 expected services running" in run.line("stack services")
+
+
+def test_with_prod_the_prod_scrapers_are_expected(tmp_path: Path) -> None:
+    run = _run(tmp_path, prod=True)
+
+    assert run.result.returncode == 0, run.report + run.result.stderr
+    assert "-f " + str(tmp_path / "monitoring" / "compose.prod.yml") in "\n".join(run.calls)
+    # 4 services of the stack, the off-host copy and the three prod scrapers.
+    assert "8 expected services running" in run.line("stack services")
+
+
+def test_a_missing_prod_scraper_fails_the_stack_check(tmp_path: Path) -> None:
+    run = _run(tmp_path, prod=True, STUB_PROD_MISSING="1")
+
+    _assert_only_failed(run, "stack services")
+    for service in ("postgres-exporter-prod", "redis-exporter-prod", "relay-prod"):
+        assert f"{service} missing" in run.line("stack services")
+
+
+PROD_STORE_QUERY = 'up{environment="prod", job=~"postgres|redis|rabbitmq|rabbitmq-queues"}'
+
+
+@pytest.mark.parametrize(
+    ("knobs", "detail"),
+    [
+        ({"STUB_PROD_DOWN": "rabbitmq"}, "3 of 4 up (down: rabbitmq (prod))"),
+        ({"STUB_PROD_JOBS": "postgres redis rabbitmq"}, "3 of 4 up"),
+        ({"STUB_PROD_JOBS": ""}, "0 of 4 up"),
+    ],
+)
+def test_with_prod_all_four_store_targets_must_be_up(
+    tmp_path: Path, knobs: dict[str, str], detail: str
+) -> None:
+    run = _run(tmp_path, prod=True, extra=knobs)
+
+    _assert_only_failed(run, "prometheus targets")
+    assert f"prod stores: {detail}" in run.line("prometheus targets")
+
+
+def test_with_prod_a_down_store_is_named_when_sed_rejects_its_script(tmp_path: Path) -> None:
+    run = _run(tmp_path, prod=True, bsd_sed=True, extra={"STUB_PROD_DOWN": "rabbitmq"})
+
+    _assert_only_failed(run, "prometheus targets")
+    assert "prod stores: 3 of 4 up (down: rabbitmq (prod))" in run.line("prometheus targets")
+
+
+def test_with_prod_the_store_targets_are_asked_for_by_environment(tmp_path: Path) -> None:
+    run = _run(tmp_path, prod=True)
+
+    assert run.result.returncode == 0, run.report + run.result.stderr
+    assert any(PROD_STORE_QUERY in call for call in run.calls)
+
+
+def test_without_prod_its_overlay_is_not_used(tmp_path: Path) -> None:
+    run = _run(tmp_path)
+
+    assert "compose.prod.yml" not in "\n".join(run.calls)
+    assert "5 expected services running" in run.line("stack services")
+    assert not any('environment="prod"' in call for call in run.calls)
 
 
 def test_without_dumps_both_backup_checks_fail(tmp_path: Path) -> None:

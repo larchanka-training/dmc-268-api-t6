@@ -4,4 +4,5 @@
 alertmanager/alertmanager.yml
 alertmanager/secrets/
 prometheus/targets/probes.json
+prometheus/targets/*-prod.json
 textfile/

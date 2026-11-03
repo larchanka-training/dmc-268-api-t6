@@ -1,0 +1,100 @@
+# Scrapers of the prod application stack (docs/MONITORING.md §1), added by deploy.sh when
+# PROD_API_DIR is set. The overlay is left out without prod: on a host with no prod network
+# compose would fail on the external network, and --remove-orphans drops these services.
+#   docker compose -p dmc-268-monitoring -f compose.yml [-f compose.edge.yml] -f compose.prod.yml
+#
+# Isolation (deploy/scripts/check-isolation.sh): prod stores join no network but their own, and a
+# container on both application networks fails the check. Prometheus and Grafana already sit on
+# the staging network, so they cannot join the prod one. Instead the scrapers live on the prod
+# network and two internal networks (no outside route) reach them:
+#   prod-metrics  Prometheus, the two exporters and the relay;
+#   prod-sql      Grafana and the relay.
+# Grafana stays off prod-metrics: the exporters answer multi-target requests (/probe, /scrape), so
+# a Grafana admin who added a data source for them could make them connect to any host of the prod
+# network. Grafana reaches the relay only, and the relay forwards two fixed upstreams.
+# Nothing on either network is named or aliased postgres, rabbitmq or redis, so those names keep
+# resolving to the staging stores.
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+services:
+  prometheus:
+    networks:
+      prod-metrics: {}
+
+  # Read by grafana/provisioning/datasources: the read-only role of the prod database.
+  grafana:
+    environment:
+      PROD_POSTGRES_DB: ${PROD_POSTGRES_DB:?PROD_POSTGRES_DB is required}
+      PROD_GRAFANA_DB_PASSWORD: ${PROD_GRAFANA_DB_PASSWORD:?PROD_GRAFANA_DB_PASSWORD is required}
+    networks:
+      prod-sql: {}
+
+  # Same exporter, image and queries as staging, as the role metrics_exporter of the prod database.
+  postgres-exporter-prod:
+    image: quay.io/prometheuscommunity/postgres-exporter:v0.20.1@sha256:ac5ec343104fae0e2d84a27bb8d69b38430a11910c5382cad85d478d2bab713e
+    command:
+      - --extend.query-path=/etc/postgres-exporter/queries.yml
+      - --no-collector.stat_bgwriter
+    environment:
+      DATA_SOURCE_URI: postgres:5432/${PROD_POSTGRES_DB:?PROD_POSTGRES_DB is required}?sslmode=disable
+      DATA_SOURCE_USER: metrics_exporter
+      DATA_SOURCE_PASS: ${PROD_PG_EXPORTER_PASSWORD:?PROD_PG_EXPORTER_PASSWORD is required}
+    labels:
+      dmc.config-digest: ${POSTGRES_EXPORTER_CONFIG_DIGEST:-none}
+    volumes:
+      - ./postgres-exporter:/etc/postgres-exporter:ro
+    networks:
+      api-prod: {}
+      prod-metrics: {}
+    restart: unless-stopped
+    mem_limit: 64m
+    logging: *logging
+
+  redis-exporter-prod:
+    image: oliver006/redis_exporter:v1.94.0@sha256:0842ef7110e62b40bbde2d5c11f38c6fbd99f7100c75e3866637c1b335a1eff7
+    environment:
+      REDIS_ADDR: redis://redis:6379
+      REDIS_PASSWORD: ${PROD_REDIS_PASSWORD:-}
+    networks:
+      api-prod: {}
+      prod-metrics: {}
+    restart: unless-stopped
+    mem_limit: 32m
+    logging: *logging
+
+  # TCP relay of the RabbitMQ metrics port (for Prometheus) and of PostgreSQL (for Grafana,
+  # relay/nginx.conf); it is the one container on both internal networks. The entrypoint is
+  # nginx itself: the image's template scripts would write into the read-only root.
+  relay-prod:
+    image: nginx:1.30-alpine@sha256:0e52bd054126cdc040b1276c0af347aeb02a41b9cfe305d6094767ac30e97949
+    entrypoint: ["nginx"]
+    command: ["-c", "/etc/nginx/relay/nginx.conf", "-g", "daemon off;"]
+    user: "101:101"
+    read_only: true
+    tmpfs:
+      - /tmp
+    labels:
+      dmc.config-digest: ${RELAY_CONFIG_DIGEST:-none}
+    volumes:
+      - ./relay:/etc/nginx/relay:ro
+    networks:
+      api-prod: {}
+      prod-metrics: {}
+      prod-sql: {}
+    restart: unless-stopped
+    mem_limit: 32m
+    logging: *logging
+
+networks:
+  # The default network of the prod application project (<project>_default).
+  api-prod:
+    name: ${PROD_API_NETWORK:?PROD_API_NETWORK is required}
+    external: true
+  prod-metrics:
+    internal: true
+  prod-sql:
+    internal: true

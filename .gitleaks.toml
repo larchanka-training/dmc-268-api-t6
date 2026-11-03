@@ -20,4 +20,6 @@ regexes = [
   '''^24ab4f16f70b7124f9af6fd8e6000572622dc1f868f1980616b2519fd03c9821$''',
   # Exact synthetic operator-test canary; provider HTTP is mocked.
   '''^SYNTHETIC_PAT_CANARY_169$''',
+  # Compose network name of the prod app project (PROD_API_NETWORK), not a credential.
+  '''^dmc-268-api-prod_default$''',
 ]

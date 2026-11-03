@@ -1,9 +1,8 @@
 {
   "uid": "dmc-268-overview",
-  "title": "AI Code Reviewer — staging overview",
+  "title": "AI Code Reviewer — overview",
   "tags": [
-    "dmc-268",
-    "staging"
+    "dmc-268"
   ],
   "timezone": "browser",
   "schemaVersion": 41,
@@ -16,7 +15,35 @@
     "to": "now"
   },
   "templating": {
-    "list": []
+    "list": [
+      {
+        "type": "custom",
+        "name": "environment",
+        "label": "Environment",
+        "description": "Environment shown by the panels: its label in the series and its PostgreSQL data source.",
+        "query": "staging : postgres,prod : postgres-prod",
+        "current": {
+          "selected": true,
+          "text": "staging",
+          "value": "postgres"
+        },
+        "options": [
+          {
+            "selected": true,
+            "text": "staging",
+            "value": "postgres"
+          },
+          {
+            "selected": false,
+            "text": "prod",
+            "value": "postgres-prod"
+          }
+        ],
+        "multi": false,
+        "includeAll": false,
+        "hide": 0
+      }
+    ]
   },
   "annotations": {
     "list": []
@@ -43,13 +70,13 @@
       "id": 2,
       "datasource": {
         "type": "grafana-postgresql-datasource",
-        "uid": "postgres"
+        "uid": "${environment}"
       },
       "targets": [
         {
           "datasource": {
             "type": "grafana-postgresql-datasource",
-            "uid": "postgres"
+            "uid": "${environment}"
           },
           "refId": "A",
           "rawQuery": true,
@@ -121,7 +148,7 @@
             "uid": "prometheus"
           },
           "refId": "A",
-          "expr": "sum(rate(caddy_http_request_duration_seconds_count{host!=\"_other\"}[$__rate_interval]))",
+          "expr": "sum(rate(caddy_http_request_duration_seconds_count{host!=\"_other\", environment=\"${environment:text}\"}[$__rate_interval]))",
           "legendFormat": "rps",
           "range": true,
           "instant": false
@@ -182,7 +209,7 @@
             "uid": "prometheus"
           },
           "refId": "A",
-          "expr": "sum(rabbitmq_detailed_queue_messages_ready{queue=~\"review\\\\..+\"})",
+          "expr": "sum(rabbitmq_detailed_queue_messages_ready{queue=~\"review\\\\..+\", environment=\"${environment:text}\"})",
           "legendFormat": "ready",
           "range": true,
           "instant": false
@@ -241,13 +268,13 @@
       "id": 5,
       "datasource": {
         "type": "grafana-postgresql-datasource",
-        "uid": "postgres"
+        "uid": "${environment}"
       },
       "targets": [
         {
           "datasource": {
             "type": "grafana-postgresql-datasource",
-            "uid": "postgres"
+            "uid": "${environment}"
           },
           "refId": "A",
           "rawQuery": true,
@@ -305,13 +332,13 @@
       "id": 6,
       "datasource": {
         "type": "grafana-postgresql-datasource",
-        "uid": "postgres"
+        "uid": "${environment}"
       },
       "targets": [
         {
           "datasource": {
             "type": "grafana-postgresql-datasource",
-            "uid": "postgres"
+            "uid": "${environment}"
           },
           "refId": "A",
           "rawQuery": true,
@@ -372,7 +399,7 @@
             "uid": "prometheus"
           },
           "refId": "A",
-          "expr": "sum by (host) (rate(caddy_http_request_duration_seconds_count{host!=\"_other\"}[$__rate_interval]))",
+          "expr": "sum by (host) (rate(caddy_http_request_duration_seconds_count{host!=\"_other\", environment=\"${environment:text}\"}[$__rate_interval]))",
           "legendFormat": "{{host}}",
           "range": true,
           "instant": false
@@ -430,7 +457,7 @@
             "uid": "prometheus"
           },
           "refId": "A",
-          "expr": "sum by (queue) (rabbitmq_detailed_queue_messages_ready{queue=~\"review\\\\..+|reviews\\\\..+|retry\\\\..+\"})",
+          "expr": "sum by (queue) (rabbitmq_detailed_queue_messages_ready{queue=~\"review\\\\..+|reviews\\\\..+|retry\\\\..+\", environment=\"${environment:text}\"})",
           "legendFormat": "{{queue}}",
           "range": true,
           "instant": false
@@ -488,7 +515,7 @@
             "uid": "prometheus"
           },
           "refId": "A",
-          "expr": "sum by (queue) (rabbitmq_detailed_queue_messages_unacked{queue=~\"review\\\\..+\"})",
+          "expr": "sum by (queue) (rabbitmq_detailed_queue_messages_unacked{queue=~\"review\\\\..+\", environment=\"${environment:text}\"})",
           "legendFormat": "unacked {{queue}}",
           "range": true,
           "instant": false
@@ -499,7 +526,7 @@
             "uid": "prometheus"
           },
           "refId": "B",
-          "expr": "sum by (queue) (rabbitmq_detailed_queue_consumers{queue=~\"review\\\\..+\"})",
+          "expr": "sum by (queue) (rabbitmq_detailed_queue_consumers{queue=~\"review\\\\..+\", environment=\"${environment:text}\"})",
           "legendFormat": "consumers {{queue}}",
           "range": true,
           "instant": false
@@ -561,13 +588,13 @@
       "id": 11,
       "datasource": {
         "type": "grafana-postgresql-datasource",
-        "uid": "postgres"
+        "uid": "${environment}"
       },
       "targets": [
         {
           "datasource": {
             "type": "grafana-postgresql-datasource",
-            "uid": "postgres"
+            "uid": "${environment}"
           },
           "refId": "A",
           "rawQuery": true,
@@ -619,13 +646,13 @@
       "id": 12,
       "datasource": {
         "type": "grafana-postgresql-datasource",
-        "uid": "postgres"
+        "uid": "${environment}"
       },
       "targets": [
         {
           "datasource": {
             "type": "grafana-postgresql-datasource",
-            "uid": "postgres"
+            "uid": "${environment}"
           },
           "refId": "A",
           "rawQuery": true,
@@ -673,13 +700,13 @@
       "id": 13,
       "datasource": {
         "type": "grafana-postgresql-datasource",
-        "uid": "postgres"
+        "uid": "${environment}"
       },
       "targets": [
         {
           "datasource": {
             "type": "grafana-postgresql-datasource",
-            "uid": "postgres"
+            "uid": "${environment}"
           },
           "refId": "A",
           "rawQuery": true,
@@ -731,13 +758,13 @@
       "id": 14,
       "datasource": {
         "type": "grafana-postgresql-datasource",
-        "uid": "postgres"
+        "uid": "${environment}"
       },
       "targets": [
         {
           "datasource": {
             "type": "grafana-postgresql-datasource",
-            "uid": "postgres"
+            "uid": "${environment}"
           },
           "refId": "A",
           "rawQuery": true,
@@ -768,13 +795,13 @@
       "id": 15,
       "datasource": {
         "type": "grafana-postgresql-datasource",
-        "uid": "postgres"
+        "uid": "${environment}"
       },
       "targets": [
         {
           "datasource": {
             "type": "grafana-postgresql-datasource",
-            "uid": "postgres"
+            "uid": "${environment}"
           },
           "refId": "A",
           "rawQuery": true,
@@ -935,13 +962,13 @@
       "id": 16,
       "datasource": {
         "type": "grafana-postgresql-datasource",
-        "uid": "postgres"
+        "uid": "${environment}"
       },
       "targets": [
         {
           "datasource": {
             "type": "grafana-postgresql-datasource",
-            "uid": "postgres"
+            "uid": "${environment}"
           },
           "refId": "A",
           "rawQuery": true,
@@ -1015,7 +1042,7 @@
             "uid": "prometheus"
           },
           "refId": "A",
-          "expr": "sum by (host) (rate(caddy_http_request_duration_seconds_count{host!=\"_other\", code=~\"5..\"}[$__rate_interval]))\n/\nsum by (host) (rate(caddy_http_request_duration_seconds_count{host!=\"_other\"}[$__rate_interval]))",
+          "expr": "sum by (host) (rate(caddy_http_request_duration_seconds_count{host!=\"_other\", code=~\"5..\", environment=\"${environment:text}\"}[$__rate_interval]))\n/\nsum by (host) (rate(caddy_http_request_duration_seconds_count{host!=\"_other\", environment=\"${environment:text}\"}[$__rate_interval]))",
           "legendFormat": "{{host}}",
           "range": true,
           "instant": false
@@ -1073,7 +1100,7 @@
             "uid": "prometheus"
           },
           "refId": "A",
-          "expr": "histogram_quantile(0.95, sum by (host, le) (rate(caddy_http_request_duration_seconds_bucket{host!=\"_other\"}[$__rate_interval])))",
+          "expr": "histogram_quantile(0.95, sum by (host, le) (rate(caddy_http_request_duration_seconds_bucket{host!=\"_other\", environment=\"${environment:text}\"}[$__rate_interval])))",
           "legendFormat": "{{host}}",
           "range": true,
           "instant": false
@@ -1329,7 +1356,7 @@
             "uid": "prometheus"
           },
           "refId": "A",
-          "expr": "sum by (container_label_com_docker_compose_project, container_label_com_docker_compose_service) (rate(container_cpu_usage_seconds_total{container_label_com_docker_compose_service!=\"\"}[$__rate_interval]))",
+          "expr": "sum by (container_label_com_docker_compose_project, container_label_com_docker_compose_service) (rate(container_cpu_usage_seconds_total{container_label_com_docker_compose_service!=\"\", environment=~\"${environment:text}|shared\"}[$__rate_interval]))",
           "legendFormat": "{{container_label_com_docker_compose_project}}/{{container_label_com_docker_compose_service}}",
           "range": true,
           "instant": false
@@ -1387,7 +1414,7 @@
             "uid": "prometheus"
           },
           "refId": "A",
-          "expr": "sum by (container_label_com_docker_compose_project, container_label_com_docker_compose_service) (container_memory_working_set_bytes{container_label_com_docker_compose_service!=\"\"})",
+          "expr": "sum by (container_label_com_docker_compose_project, container_label_com_docker_compose_service) (container_memory_working_set_bytes{container_label_com_docker_compose_service!=\"\", environment=~\"${environment:text}|shared\"})",
           "legendFormat": "{{container_label_com_docker_compose_project}}/{{container_label_com_docker_compose_service}}",
           "range": true,
           "instant": false
@@ -1458,7 +1485,7 @@
             "uid": "prometheus"
           },
           "refId": "A",
-          "expr": "sum by (datname) (pg_stat_database_numbackends{datname!~\"template.*|postgres\"})",
+          "expr": "sum by (datname) (pg_stat_database_numbackends{datname!~\"template.*|postgres\", environment=\"${environment:text}\"})",
           "legendFormat": "{{datname}}",
           "range": true,
           "instant": false
@@ -1516,7 +1543,7 @@
             "uid": "prometheus"
           },
           "refId": "A",
-          "expr": "redis_memory_used_bytes",
+          "expr": "redis_memory_used_bytes{environment=\"${environment:text}\"}",
           "legendFormat": "used",
           "range": true,
           "instant": false
@@ -1527,7 +1554,7 @@
             "uid": "prometheus"
           },
           "refId": "B",
-          "expr": "redis_memory_max_bytes",
+          "expr": "redis_memory_max_bytes{environment=\"${environment:text}\"}",
           "legendFormat": "maxmemory",
           "range": true,
           "instant": false
@@ -1585,7 +1612,7 @@
             "uid": "prometheus"
           },
           "refId": "A",
-          "expr": "rate(redis_keyspace_hits_total[$__rate_interval]) / (rate(redis_keyspace_hits_total[$__rate_interval]) + rate(redis_keyspace_misses_total[$__rate_interval]))",
+          "expr": "rate(redis_keyspace_hits_total{environment=\"${environment:text}\"}[$__rate_interval]) / (rate(redis_keyspace_hits_total{environment=\"${environment:text}\"}[$__rate_interval]) + rate(redis_keyspace_misses_total{environment=\"${environment:text}\"}[$__rate_interval]))",
           "legendFormat": "hits",
           "range": true,
           "instant": false
@@ -1656,7 +1683,7 @@
             "uid": "prometheus"
           },
           "refId": "A",
-          "expr": "time() - max(dmc_pg_backup_last_success_timestamp_seconds)",
+          "expr": "time() - max(dmc_pg_backup_last_success_timestamp_seconds{environment=\"${environment:text}\"})",
           "legendFormat": "age",
           "range": false,
           "instant": true
@@ -1724,7 +1751,7 @@
             "uid": "prometheus"
           },
           "refId": "A",
-          "expr": "max(dmc_pg_backup_last_run_success)",
+          "expr": "max(dmc_pg_backup_last_run_success{environment=\"${environment:text}\"})",
           "legendFormat": "ok",
           "range": false,
           "instant": true
@@ -1788,7 +1815,7 @@
             "uid": "prometheus"
           },
           "refId": "A",
-          "expr": "max(dmc_pg_backup_files)",
+          "expr": "max(dmc_pg_backup_files{environment=\"${environment:text}\"})",
           "legendFormat": "files",
           "range": false,
           "instant": true
@@ -1848,7 +1875,7 @@
             "uid": "prometheus"
           },
           "refId": "A",
-          "expr": "time() - max(dmc_pg_backup_offsite_last_success_timestamp_seconds)",
+          "expr": "time() - max(dmc_pg_backup_offsite_last_success_timestamp_seconds{environment=\"${environment:text}\"})",
           "legendFormat": "age",
           "range": false,
           "instant": true
@@ -1916,7 +1943,7 @@
             "uid": "prometheus"
           },
           "refId": "A",
-          "expr": "max(dmc_pg_backup_last_size_bytes)",
+          "expr": "max(dmc_pg_backup_last_size_bytes{environment=\"${environment:text}\"})",
           "legendFormat": "size",
           "range": true,
           "instant": false
@@ -1987,7 +2014,7 @@
             "uid": "prometheus"
           },
           "refId": "A",
-          "expr": "probe_success{job=\"blackbox\"}",
+          "expr": "probe_success{job=\"blackbox\", environment=\"${environment:text}\"}",
           "legendFormat": "{{host}}",
           "range": false,
           "instant": true
@@ -2068,7 +2095,7 @@
             "uid": "prometheus"
           },
           "refId": "A",
-          "expr": "(last_over_time(probe_ssl_earliest_cert_expiry{job=\"blackbox\"}[10m]) - time()) / 86400",
+          "expr": "(last_over_time(probe_ssl_earliest_cert_expiry{job=\"blackbox\", environment=\"${environment:text}\"}[10m]) - time()) / 86400",
           "legendFormat": "{{host}}",
           "range": false,
           "instant": true

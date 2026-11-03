@@ -336,7 +336,7 @@ def test_exporter_reads_only_the_cost_and_time_of_llm_usage() -> None:
     # TABLES would bypass the column lists above.
     assert [statement for statement in statements if not re.fullmatch(column_grant, statement)] == [
         "GRANT pg_monitor TO metrics_exporter;",
-        'GRANT CONNECT ON DATABASE "${POSTGRES_DB}" TO grafana_reader, metrics_exporter;',
+        'GRANT CONNECT ON DATABASE "${database}" TO grafana_reader, metrics_exporter;',
         "GRANT USAGE ON SCHEMA public TO grafana_reader, metrics_exporter;",
     ]
 
@@ -392,13 +392,13 @@ def _panel_with(metric: str) -> Any:
 
 
 def test_dashboard_shows_whether_each_probed_name_is_up() -> None:
-    panel = _panel_with('probe_success{job="blackbox"}')
+    panel = _panel_with("probe_success{")
 
     assert panel is not None
     assert panel["datasource"] == PROMETHEUS
     [target] = panel["targets"]
     assert target["datasource"] == PROMETHEUS
-    assert target["expr"] == 'probe_success{job="blackbox"}'
+    assert target["expr"] == 'probe_success{job="blackbox", environment="${environment:text}"}'
     assert target["legendFormat"] == "{{host}}"
     # One value per name: the default text mode would hide which name it is.
     assert panel["options"]["textMode"] == "value_and_name"
@@ -408,7 +408,7 @@ def test_dashboard_shows_whether_each_probed_name_is_up() -> None:
 
 
 def test_dashboard_shows_certificate_days_coloured_where_the_alerts_fire() -> None:
-    panel = _panel_with('probe_ssl_earliest_cert_expiry{job="blackbox"}')
+    panel = _panel_with("probe_ssl_earliest_cert_expiry{")
     rules = _read(MONITORING / "prometheus" / "rules" / "alerts.yml")
     days = {
         alert: int(limit)
@@ -425,7 +425,8 @@ def test_dashboard_shows_certificate_days_coloured_where_the_alerts_fire() -> No
     assert target["datasource"] == PROMETHEUS
     # The same 10-minute hold as the alerts: a probe without a TLS answer does not blank it.
     assert target["expr"] == (
-        '(last_over_time(probe_ssl_earliest_cert_expiry{job="blackbox"}[10m]) - time()) / 86400'
+        "(last_over_time(probe_ssl_earliest_cert_expiry"
+        '{job="blackbox", environment="${environment:text}"}[10m]) - time()) / 86400'
     )
     assert target["legendFormat"] == "{{host}}"
     assert panel["options"]["textMode"] == "value_and_name"
@@ -546,7 +547,10 @@ def test_monitoring_deploys_after_the_application_and_never_gates_it() -> None:
 def test_monitoring_upload_and_secrets_reach_only_the_monitoring_dir() -> None:
     job = _job("deploy-monitoring")
 
-    assert 'source: "deploy/monitoring,deploy/scripts/env-file.sh"' in job
+    assert (
+        'source: "deploy/monitoring,deploy/scripts/env-file.sh,deploy/scripts/check-isolation.sh"'
+        in job
+    )
     assert "target: ${{ env.MONITORING_DIR }}" in job
     assert "ALERT_TELEGRAM_BOT_TOKEN: ${{ secrets.ALERT_TELEGRAM_BOT_TOKEN }}" in job
     assert "ALERT_TELEGRAM_CHAT_ID: ${{ vars.ALERT_TELEGRAM_CHAT_ID }}" in job
@@ -589,10 +593,19 @@ FAKE_DOCKER = """\
 # Fake docker CLI: logs every call; psql, grafana and rclone obscure stdin go to their own logs.
 printf '%s\\n' "$*" >> "${STUB_LOG}"
 case "$1" in
-  network) exit 0 ;;
+  network) [[ " $* " == *" ${STUB_MISSING_NETWORK:-none} "* ]] && exit 1; exit 0 ;;
   run) cat >> "${STUB_OBSCURE_STDIN}"; echo "obscured_${RANDOM}${RANDOM}" ;;
-  ps) echo "${STUB_POSTGRES_ID}" ;;
-  exec) cat >> "${STUB_PSQL_STDIN}"; printf '\\n--\\n' >> "${STUB_PSQL_STDIN}" ;;
+  ps)
+    case "$*" in
+      *com.docker.compose.project=dmc-268-api-prod*) echo "${STUB_PROD_POSTGRES_ID}" ;;
+      *) echo "${STUB_POSTGRES_ID}" ;;
+    esac
+    ;;
+  exec)
+    printf -- '-- container %s\\n' "$3" >> "${STUB_PSQL_STDIN}"
+    cat >> "${STUB_PSQL_STDIN}"; printf '\\n--\\n' >> "${STUB_PSQL_STDIN}"
+    if [[ "$3" == "${STUB_EXEC_FAILS:-none}" ]]; then exit 1; fi
+    ;;
   compose)
     if [[ " $* " == *" exec "* ]]; then cat >> "${STUB_GRAFANA_STDIN}"; fi
     if [[ " $* " == *" up "* && -n "${STUB_UP_FAILS:-}" ]]; then exit 1; fi
@@ -651,6 +664,7 @@ class Host:
             "STUB_GRAFANA_STDIN": str(self.stubs / "grafana.log"),
             "STUB_CHOWN_LOG": str(self.stubs / "chown.log"),
             "STUB_POSTGRES_ID": "pgcontainer",
+            "STUB_PROD_POSTGRES_ID": "pgcontainer-prod",
             "STUB_OBSCURE_STDIN": str(self.stubs / "obscure.log"),
             "BACKUP_DIR": str(self.root / "backups"),
             **(extra or {}),
@@ -1050,11 +1064,11 @@ def test_edge_mode_probes_the_public_staging_names(host: Host) -> None:
     assert targets == [
         {
             "targets": ["https://staging-api.example.test/healthcheck"],
-            "labels": {"host": "staging-api.example.test"},
+            "labels": {"host": "staging-api.example.test", "environment": "staging"},
         },
         {
             "targets": ["https://staging-ui.example.test/health"],
-            "labels": {"host": "staging-ui.example.test"},
+            "labels": {"host": "staging-ui.example.test", "environment": "staging"},
         },
     ]
 
@@ -1105,13 +1119,19 @@ def test_failed_deploy_keeps_the_probe_targets_of_the_last_one(host: Host) -> No
     assert not re.search(r"^\s+rm:", _job("deploy-monitoring"), re.M)
 
 
-def _probe(name: str, path: str) -> dict[str, object]:
+def _probe(name: str, path: str, environment: str) -> dict[str, object]:
     probed = f"{name}.example.test"
-    return {"targets": [f"https://{probed}/{path}"], "labels": {"host": probed}}
+    return {
+        "targets": [f"https://{probed}/{path}"],
+        "labels": {"host": probed, "environment": environment},
+    }
 
 
-STAGING_PROBES = [_probe("staging-api", "healthcheck"), _probe("staging-ui", "health")]
-PROD_PROBES = [_probe("api", "healthcheck"), _probe("ui", "health")]
+STAGING_PROBES = [
+    _probe("staging-api", "healthcheck", "staging"),
+    _probe("staging-ui", "health", "staging"),
+]
+PROD_PROBES = [_probe("api", "healthcheck", "prod"), _probe("ui", "health", "prod")]
 
 
 def _probe_targets(host: Host) -> list[dict[str, object]]:

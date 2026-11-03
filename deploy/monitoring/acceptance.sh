@@ -101,6 +101,8 @@ COMPOSE=(docker compose -p "${COMPOSE_PROJECT}")
 # The files deploy.sh starts the stack with: the expected services come from them.
 COMPOSE_FILES=(-f "${MONITORING_DIR}/compose.yml" -f "${MONITORING_DIR}/compose.${DEPLOY_MODE}.yml")
 if [[ -n "${OFFSITE_BUCKET}" ]]; then COMPOSE_FILES+=(-f "${MONITORING_DIR}/compose.offsite.yml"); fi
+# deploy.sh writes the prod network to .env only with prod; then its scrapers must be running.
+if [[ -n "$(setting PROD_API_NETWORK)" ]]; then COMPOSE_FILES+=(-f "${MONITORING_DIR}/compose.prod.yml"); fi
 FAILED=()
 RESULTS=()
 # One line of the summary; a failed check fails the run at the end, after every other check ran.
@@ -239,14 +241,48 @@ else
 fi
 
 section "Prometheus targets"
+# The names of down targets with their environment: "postgres (staging)". Parsed in bash: sed
+# branch labels and other GNU-only syntax fail on macOS, and a failed parser must never read as
+# "nothing is down".
+down_targets() {
+  local line job_re='job="([^"]+)"' environment_re='environment="([^"]+)"' name
+  local names=()
+  while IFS= read -r line; do
+    [[ "${line}" == *"=> 0 @"* ]] || continue
+    if [[ "${line}" =~ ${job_re} ]]; then name="${BASH_REMATCH[1]}"; else name="${line}"; fi
+    if [[ "${line}" =~ ${environment_re} ]]; then name+=" (${BASH_REMATCH[1]})"; fi
+    names+=("${name}")
+  done <<<"$1"
+  if ((${#names[@]} > 0)); then printf '%s\n' "${names[@]}" | sort -u | paste -sd, -; fi
+}
 if targets="$(promql 'up' 2>&1)"; then
   printf '%s\n' "${targets}"
-  down="$(grep -E '=> 0 @' <<<"${targets}" | sed -E 's/.*job="([^"]+)".*/\1/' | sort -u | paste -sd, - || true)"
+  down="$(down_targets "${targets}")"
   total="$(grep -cE '=> [01] @' <<<"${targets}" || true)"
+  # With prod the four store jobs must be there and up: a prod target missing from the file_sd
+  # lists would leave no series to be down.
+  prod_problem=""
+  if [[ -n "$(setting PROD_API_NETWORK)" ]]; then
+    prod_query='up{environment="prod", job=~"postgres|redis|rabbitmq|rabbitmq-queues"}'
+    if prod_targets="$(promql "${prod_query}" 2>&1)"; then
+      printf '%s\n' "${prod_targets}"
+      prod_up="$(grep -cE '=> 1 @' <<<"${prod_targets}" || true)"
+      prod_total="$(grep -cE '=> [01] @' <<<"${prod_targets}" || true)"
+      if ((prod_total != 4 || prod_up != 4)); then
+        prod_problem="prod stores: ${prod_up} of 4 up"
+        prod_down="$(down_targets "${prod_targets}")"
+        if [[ -n "${prod_down}" ]]; then prod_problem+=" (down: ${prod_down})"; fi
+      fi
+    else
+      prod_problem="promtool failed for the prod stores: $(error_line "${prod_targets}")"
+    fi
+  fi
   if [[ "${total}" -eq 0 ]]; then
     record FAIL "prometheus targets" "query up returned nothing"
   elif [[ -n "${down}" ]]; then
-    record FAIL "prometheus targets" "down: ${down}"
+    record FAIL "prometheus targets" "down: ${down}${prod_problem:+; ${prod_problem}}"
+  elif [[ -n "${prod_problem}" ]]; then
+    record FAIL "prometheus targets" "${prod_problem}"
   else
     record OK "prometheus targets" "${total} up"
   fi
@@ -276,8 +312,9 @@ else
   echo "LLM query as grafana_reader: $(error_line "${llm}")"
   record FAIL "LLM latency (Grafana source)" "query as grafana_reader failed"
 fi
-# The queues of the review pipeline, as in the queue alerts (alerts.yml).
-if queues="$(promql 'sum by (queue) (rabbitmq_detailed_queue_messages_ready{queue=~"review\\.run\\..+|review\\.publish"})' 2>&1)"; then
+# The queues of the review pipeline, as in the queue alerts (alerts.yml). The run checks staging,
+# the environment the dashboard opens with: prod series carry environment="prod".
+if queues="$(promql 'sum by (queue) (rabbitmq_detailed_queue_messages_ready{queue=~"review\\.run\\..+|review\\.publish", environment="staging"})' 2>&1)"; then
   printf 'Ready messages in the review queues:\n%s\n' "${queues}"
   if grep -q 'queue="review\.publish"' <<<"${queues}" && grep -q 'queue="review\.run\.' <<<"${queues}"; then
     record OK "queue size (RabbitMQ)" "$(grep -c 'queue=' <<<"${queues}") review queues reported"
@@ -290,8 +327,9 @@ fi
 if [[ "${DEPLOY_MODE}" != edge ]]; then
   record SKIP "RPS (edge proxy)" "no edge proxy in deploy mode ${DEPLOY_MODE}"
 # The selector of the RPS panels: per_host of Caddy puts requests with an unknown Host (scanners
-# hitting the IP) into _other, which the dashboard does not show.
-elif rps="$(promql 'sum by (host) (rate(caddy_http_request_duration_seconds_count{host!="_other"}[5m]))' 2>&1)"; then
+# hitting the IP) into _other, which the dashboard does not show; environment="staging" as in the
+# dashboard with its default environment.
+elif rps="$(promql 'sum by (host) (rate(caddy_http_request_duration_seconds_count{host!="_other", environment="staging"}[5m]))' 2>&1)"; then
   printf 'Requests per second by host (5m):\n%s\n' "${rps}"
   hosts="$(grep -c 'host=' <<<"${rps}" || true)"
   # Requests count only on the hosts of the application, as in ApiHigh5xxRate (alerts.yml): the
