@@ -55,7 +55,16 @@ def test_current_runtime_doc_rows_name_common_v5_and_historical_v4() -> None:
 
 
 def test_test_plan_keeps_v4_rules_fixture_historical_and_new_runs_on_v5() -> None:
-    plan = " ".join((ROOT / "docs/TEST_PLAN.md").read_text().split())
+    plan = " ".join(
+        " ".join(
+            (ROOT / "docs" / name).read_text()
+            for name in (
+                "TEST_PLAN.md",
+                "test-plan/acceptance-107.md",
+                "test-plan/rules-md-scenarios-163.md",
+            )
+        ).split()
+    )
 
     assert (
         "F2 seed активировал `review.system:v4` для новых runs; "
@@ -139,7 +148,9 @@ def test_bitbucket_downgrade_example_uses_existing_revisions() -> None:
 
 def test_bitbucket_live_acceptance_preserves_operator_probes() -> None:
     plan = (
-        (ROOT / "docs/TEST_PLAN.md").read_text().split("## Bitbucket Cloud acceptance (#333)", 1)[1]
+        (ROOT / "docs/test-plan/bitbucket-acceptance-333.md")
+        .read_text()
+        .split("## Bitbucket Cloud acceptance (#333)", 1)[1]
     )
     for expected in (
         "HTTP-date",
