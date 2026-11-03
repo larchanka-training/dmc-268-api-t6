@@ -102,14 +102,39 @@ from a missing scope.
 - One feature per file prefix: `tests/test_<feature>.py`, or several
   `tests/test_<feature>_<aspect>.py` files sharing one prefix; PostgreSQL tests usually sit in
   `_postgres` files, as in the `test_clean_without_text_*` and `test_coverage_none_*` families.
+- A test file over ~60 KB (bytes: `wc -c`, `git ls-tree -l`) is split by behavior into
+  `tests/test_<feature>_<aspect>.py` files at its next edit. The split is a move-only commit
+  before the behavior change: `pytest --collect-only -q` collects as many tests as before, and
+  the docs that cite the old file (`git grep -n '<old name>' -- docs`) follow in that commit.
+  A file owned by another open PR waits for its merge or a comment there (`AGENTS.md`).
 - Plain `pytest`, no `pytest-asyncio` plugin — drive async code with `asyncio.run`.
 - Unit tests exercise use cases against fakes of the ports (Protocols), not real
   infrastructure.
+- Fakes, factories, DB setup and DB fixtures that two test files need live in one shared
+  module of their topic: a non-`test_` module under `tests/`, as `tests/llm_fakes.py`,
+  `tests/policy_snapshot_fakes.py`, `tests/trigger_uow.py` and `tests/portal_postgres.py`.
+  They are imported, never copied into each file; a shared fixture reaches a test file
+  through `pytest_plugins = ("tests.<topic>",)`. A loaded plugin is active for the whole
+  run, so a shared module defines no autouse fixture. A shared module never imports from a
+  `test_*.py` file and no file loads one as a plugin: a helper another file needs moves out
+  of its test file first. Still not so — `tests/portal_postgres.py` (`_reset_topology` of
+  `test_worker_queue_postgres.py`), `tests/code_index_postgres.py` (the store helpers of
+  `test_code_index_store_postgres.py`) and the ten files that load
+  `tests.test_bitbucket_connections_postgres` as a plugin: those helpers move out at their
+  next edit.
 - Integration tests are marked `@pytest.mark.integration` (registered in
-  `pyproject.toml`) and skip when `TEST_DATABASE_URL` is unset; the skip lives in
-  each DB test file's fixture — there is no shared `conftest.py` yet.
+  `pyproject.toml`) and skip when `TEST_DATABASE_URL` is unset. The skip lives in the DB
+  fixture: the shared fixture of the topic when files share one, a local fixture only when
+  the file needs a setup of its own. A local fixture that only skips and enters the shared
+  setup (the files that enter `portal_schema(...)` from a local fixture today) is a copy:
+  it moves to a shared fixture of the topic at its file's next edit.
+  `tests/conftest.py` holds only suite-wide fixtures (`_restore_logging`): no DB fixture
+  and no DB setup.
 - Assert literal values taken from the spec — never derive an expected value from
   the implementation under test.
+- One test per behavior. Before adding a test, grep the feature's file prefix for the
+  behavior: another input of a behavior already tested is a `pytest.mark.parametrize` row
+  of literal values in that test, not a copy of it; a new test is for a new behavior.
 
 ## 6. Review focus
 
