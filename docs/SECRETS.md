@@ -655,7 +655,7 @@ fi
 
 ### GitHub Environment `production` (#308)
 
-Prod-выкат (`deploy-prod.yml`, job `deploy-prod`) идёт в Environment `production`. Защита: required reviewer `axyi`, deployment branches — только `main`. Job ждёт approve ревьюера и, возможно, уже держит lock `staging-deploy` (GitHub не документирует; не проверено): одобрить или отклонить сразу, отклонение освобождает lock. Секреты и variables staging из Environment `staging` в этом job не видны.
+Prod-выкат (`deploy-prod.yml`, job `deploy-prod`) идёт в Environment `production`. Защита: required reviewer `axyi`, deployment branches — только `main`. Job ждёт approve ревьюера: одобрить или отклонить сразу (про lock `staging-deploy` — [CICD.md](CICD.md#5-rollback), §5 п. 6). Секреты и variables staging из Environment `staging` в этом job не видны.
 
 Приложение получает те же имена, что на staging (§1, «Environment `staging` — secrets»); путь тот же (§3): шаг «Bundle application secrets» → `APP_SECRETS_B64` → role-файлы на хосте. Значения свои: отдельный GitHub App, свои webhook secret, client secret и пара JWT. Без любого из обязательных имён шаг «Refuse missing production secrets» останавливает Deploy prod до обращения к хосту.
 
@@ -785,7 +785,7 @@ callback; в PostgreSQL хранится только хеш локальног�
    ssh-keyscan -p "${STAGING_SSH_PORT}" -H "${STAGING_HOST}" 2>/dev/null | ssh-keygen -lf - -E sha256
    ```
 4. Protection rules: **Deployment branches and tags** → только `main`. Workflow Rollback и сам пропускает jobs вне `refs/heads/main`, но branch policy закрывает доступ к secrets environment для любого другого workflow и ветки.
-   Required reviewers — решение при настройке environment. `deploy-staging`, `promote-staging` и `rollback` ссылаются на `staging`, поэтому каждый выкат запросит подтверждение дважды (deploy и promotion), а job, ожидающий подтверждения, возможно, держит группу `staging-deploy` и блокирует rollback (не проверено). Рекомендация для staging: без required reviewers; контроль — branch policy `main` и review PR. Environment `production` устроен иначе: required reviewer `axyi`, branches — только `main`, ссылается на него один job — `deploy-prod`; удержание им lock `staging-deploy` во время ожидания approve тоже не проверено (раздел «GitHub Environment `production`»).
+   Required reviewers — решение при настройке environment. `deploy-staging`, `promote-staging` и `rollback` ссылаются на `staging`, поэтому каждый выкат запросит подтверждение дважды (deploy и promotion), а job, ожидающий подтверждения, возможно, держит группу `staging-deploy` и блокирует rollback (не проверено). Рекомендация для staging: без required reviewers; контроль — branch policy `main` и review PR. Environment `production` устроен иначе: required reviewer `axyi`, branches — только `main`, ссылается на него один job — `deploy-prod`; про его lock `staging-deploy` во время ожидания approve — [CICD.md](CICD.md#5-rollback), §5 п. 6.
 5. Actions → General: **Allow GitHub Actions to create and approve pull requests** не нужен. Secret scanning и push protection — включить.
 
 Jobs `deploy-staging`, `promote-staging`, `deploy-monitoring` (CI/CD), workflow Rollback и ручные workflow `webhook-ack-load.yml` и `monitoring-acceptance.yml` ссылаются на `environment: staging`. Без значений environment пайплайн не выкатит стенд. `promote-staging` нужен environment ради SSH-чтения `.deploy-state` (про required reviewers — п. 4).

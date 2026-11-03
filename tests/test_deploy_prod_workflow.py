@@ -703,6 +703,22 @@ def test_the_permissions_and_organization_tables_name_the_prod_workflows() -> No
         assert "prod-webhook-outcome.yml" in row, name
 
 
+def test_the_lock_while_waiting_caveat_is_stated_once_and_pointed_to() -> None:
+    # CICD.md section 5 item 6 holds the full statement; the other places only point to it.
+    cicd = (REPO_ROOT / "docs" / "CICD.md").read_text(encoding="utf-8")
+    secrets = SECRETS_DOC.read_text(encoding="utf-8")
+    prod_section = _production_section()
+    item_4 = secrets.split("Рекомендация для staging:", 1)[1].split("\n5. ", 1)[0]
+    full = [line for line in cicd.splitlines() if "не проверено" in line and "approve" in line]
+
+    assert len(full) == 1 and full[0].lstrip().startswith("- Job Deploy prod ждёт approve")
+    for text in (prod_section, item_4, _text()):
+        assert "не проверено" not in text and "unverified" not in text
+    for text in (prod_section, item_4):
+        assert "CICD.md" in text and "п. 6" in text
+    assert "CICD.md" in _text()
+
+
 # --- the deploy on the VPS: no edge refresh, bundled app secrets, auto rollback (AC2-AC4) -----
 
 CI_WORKFLOW = WORKFLOW.parent / "ci-cd.yml"

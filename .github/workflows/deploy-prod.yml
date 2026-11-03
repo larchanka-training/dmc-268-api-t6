@@ -99,8 +99,8 @@ jobs:
     # The VPS lock of Deploy staging, Promote staging tag and Rollback staging (AC5 of #308): one
     # member at a time, FIFO, and a later push never cancels this pending job. A dispatch from
     # another branch gets a throwaway group, whatever the timing of the `if` above. The job waits
-    # for the reviewer of Environment production and may hold the lock while it waits (GitHub does
-    # not say; unverified), so approve or reject promptly: a rejection frees the lock.
+    # for the reviewer of Environment production; approve or reject promptly (docs/CICD.md section
+    # 5 item 6 on the lock).
     concurrency:
       group: ${{ github.ref == 'refs/heads/main' && 'staging-deploy' || format('deploy-prod-ignored-{0}', github.run_id) }}
       cancel-in-progress: false
