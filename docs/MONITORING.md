@@ -1,6 +1,6 @@
 # Мониторинг и алерты — API (команда 6)
 
-Стек мониторинга staging: метрики хоста, контейнеров, очередей, хранилищ и пайплайна ревью, внешние пробы публичных имён и срок их сертификатов, дашборд Grafana, алерты в командный Telegram-канал и ежедневный бэкап PostgreSQL с проверкой восстановления (§9). Это self-hosted стек, который SD §13 («Наблюдаемость») выносит в отдельную задачу. Сквозной трейсинг (OpenTelemetry/Sentry) и JSON-логи с `run_id` — следующий шаг (§8).
+Стек мониторинга staging: метрики хоста, контейнеров, очередей, хранилищ и пайплайна ревью, внешние пробы публичных имён и срок их сертификатов, дашборд Grafana, алерты в командный Telegram-канал и ежедневный бэкап PostgreSQL с проверкой восстановления (§9). Это self-hosted стек, который SD §13 («Наблюдаемость») выносит в отдельную задачу. Трейсы пайплайна (OpenTelemetry → Grafana Tempo) и JSON-логи с `run_id` — §11.
 
 ## 1. Состав
 
@@ -16,11 +16,13 @@ flowchart LR
     rx[redis-exporter]
     bbx[blackbox-exporter]
     bk[pg-backup]
+    tempo[Tempo]
   end
   subgraph app["compose project dmc-268-api-staging"]
     pg[(postgres)]
     mq[(rabbitmq :15692)]
     redis[(redis)]
+    apps["api, worker, webhook-worker"]
   end
   caddy["edge Caddy :9180\n(dmc268-edge)"]
   prom -->|scrape| node & cadv & pgx & rx & mq & caddy & bbx
@@ -31,6 +33,8 @@ flowchart LR
   off[backup-offsite] -->|"rclone crypt, S3 API"| r2[("Cloudflare R2")]
   rx --> redis
   graf -->|PromQL| prom
+  apps -->|"OTLP/HTTP :4318"| tempo
+  graf -->|TraceQL| tempo
   graf -->|"SQL, grafana_reader"| pg
   prom -->|alerts| am
   am -->|Bot API| tg["Telegram-канал команды"]
@@ -48,6 +52,7 @@ flowchart LR
 | `redis-exporter` | `oliver006/redis_exporter:v1.94.0` | 32m | память, hit ratio, `redis_up` |
 | `blackbox-exporter` | `prom/blackbox-exporter:v0.29.1` | 32m | HTTPS-проба публичных имён раз в минуту и срок их сертификатов (`blackbox/blackbox.yml`, §5) |
 | `pg-backup` | `postgres:17.11-alpine` — тот же digest, что у `postgres` staging | 128m | ежедневный `pg_dump` с проверкой восстановления (§9) |
+| `tempo` | `grafana/tempo:2.10.10` | 256m | трейсы `api`, `worker`, `webhook-worker`: приём OTLP/HTTP на `:4318` внутри сети приложения, хранение 72 ч на локальном диске (§11) |
 
 Длину очередей отдаёт сам RabbitMQ: плагин `rabbitmq_prometheus` включён в образе `rabbitmq:4.3.6-management-alpine`, порт 15692 внутри сети проекта. RPS и коды ответов отдаёт edge-прокси Caddy (`metrics { per_host }`, порт 9180 только в сети `dmc268-edge`, [CICD.md §8.2](CICD.md#82-edge-прокси)). Очередь ревью — RabbitMQ, не Redis: Redis только кэш (SD §10).
 
@@ -62,6 +67,7 @@ flowchart LR
 | RPS | `Requests per second`, `Requests per second by host` | `caddy_http_request_duration_seconds_count{host}`; включает пробы (§5): по запросу в минуту на каждое пробуемое имя — они же попадают в долю 5xx и p95 по хосту |
 | Алерты об ошибках в командный канал | §5 | Prometheus → Alertmanager → Telegram |
 | Время каждого шага пайплайна | `Phase duration p95`, `Phases over the range` | `run_actions.tool` + `duration_ms`: `vcs.fetch_diff`, `context.build`, `llm.call`, `review.postprocess`, `github.publish_review`, `gitlab.publish_review`, `bitbucket.publish_review`. `context.build` с #168 ч.6 пишется один раз за попытку (сборка контекста по диффу); попытки до выката, дошедшие до ревью, хранят две записи (ещё чтение входа промпта), поэтому на диапазоне через выкат счёт выше, а длительности смешивают два шага; `llm.call` смешивает conventions и ревью |
+| Трейс прогона и ошибки (#395) | Explore → источник Tempo | span на доставку `review.run` и на каждую строку `run_actions`, поиск по `run_id` (§11) |
 | CPU / RAM серверов и воркеров | `Host CPU`, `Host memory`, `Container CPU`, `Container memory` | node-exporter, cAdvisor (метка `container_label_com_docker_compose_service`) |
 | Доступность публичных имён и срок TLS | строка `External probes`: `Public names: probe` (UP/DOWN по имени), `Certificate expires in` (дни, красный < 3, оранжевый < 14 — пороги алертов) | `probe_success{job="blackbox"}`, `probe_ssl_earliest_cert_expiry` (§5). В режиме ports проб нет, обе панели — «No data» |
 
@@ -176,7 +182,7 @@ Job `Deploy monitoring` в `ci-cd.yml` запускается после усп�
    - `docker compose -p dmc-268-monitoring up -d --wait`. Метка с хешем каталога конфигурации пересоздаёт сервис ровно тогда, когда его конфигурация изменилась;
    - синхронизирует пароль `admin` Grafana с `.env`.
 
-Файлы на хосте: `.env` (0600), `alertmanager/alertmanager.yml`, `alertmanager/secrets/telegram_bot_token` (0400), `prometheus/targets/caddy.json`, `prometheus/targets/probes.json` (его нет в репозитории: выкат, упавший до `deploy.sh`, оставляет прежние цели), `textfile/` (textfile-метрики node-exporter, пишут `pg-backup` и `backup-offsite`; порог бюджета `llm_budget.prom` — `deploy.sh`), дампы — `/var/backups/dmc-268/<project>/` (0700, §9). Тома: `prometheus-data`, `alertmanager-data`, `grafana-data`.
+Файлы на хосте: `.env` (0600), `alertmanager/alertmanager.yml`, `alertmanager/secrets/telegram_bot_token` (0400), `prometheus/targets/caddy.json`, `prometheus/targets/probes.json` (его нет в репозитории: выкат, упавший до `deploy.sh`, оставляет прежние цели), `textfile/` (textfile-метрики node-exporter, пишут `pg-backup` и `backup-offsite`; порог бюджета `llm_budget.prom` — `deploy.sh`), дампы — `/var/backups/dmc-268/<project>/` (0700, §9). Тома: `prometheus-data`, `alertmanager-data`, `grafana-data`, `tempo-data`.
 
 Откат приложения стек не трогает. Откатить сам мониторинг — перезапустить job `Deploy monitoring` на нужном коммите или выполнить `deploy.sh` из его checkout.
 
@@ -193,7 +199,7 @@ Grafana — на своём хосте `grafana.<APP_DOMAIN>` (A-запись н
 
 | Что | Статус |
 |---|---|
-| Сквозной трейсинг (OpenTelemetry/Sentry), JSON-логи с `run_id` | отдельный PR после стабилизации пайплайна (договорённость команды). Нужен выбор бэкенда: Sentry SaaS (аккаунт и DSN), GlitchTip или Grafana Tempo; self-hosted Sentry на общий VPS не помещается |
+| Сквозной трейсинг, трекинг ошибок, JSON-логи с `run_id` | сделано в #395: OpenTelemetry → Grafana Tempo, §11 |
 | Redis | бэкапить нечего: на staging он без тома и без персистентности (`save ""`, `appendonly no`), это кэш (SD §10) |
 | Метрики приложения (`/metrics` FastAPI, `X-RateLimit-Remaining` GitHub) | нужен код и зависимость; пока RPS и коды — с edge-прокси, пайплайн — из `run_actions` |
 | prod | выкатывается вручную ([CICD.md](CICD.md) §5, п. 6); своих целей нет: запросы к `api.` (edge, `per_host`), контейнеры prod (cAdvisor; алерты OOM и `WebhookWorkerDown`) и пробы prod-имён из `PROBE_PROD_HOSTS` идут с `environment` = `staging`. Падение prod-проекта целиком видно только по этим пробам |
@@ -319,3 +325,73 @@ API_DIR=/path/to/<project> deploy/monitoring/deploy.sh
 | Тестовый алерт | `amtool alert add MonitoringAcceptanceTest` с `kind=event` (одно сообщение без RESOLVED) и `run_id` прогона (иначе повтор только обновил бы прежний алерт). OK — после алерта Telegram принял какое-то уведомление: успешных запросов `alertmanager_notification_requests_total{integration="telegram"}` (за вычетом `…_requests_failed_total`) стало больше. `alertmanager_notifications_total` для этого не годится: он считает попытки до запроса. Ожидание до 6 мин — дольше `group_interval` (5 мин): маршрут событий группирует только по `environment`, поэтому группу держит любой event-алерт staging за последние 5 мин. Каждое чтение метрик печатается строкой (SSH-сессия не шлёт keepalive). Неудачное первое чтение — FAIL до отправки алерта, неудачные чтения во время ожидания считаются и пропускаются. Счётчик общий: чужое уведомление в том же окне тоже засчитается, поэтому доказательство AC — скриншот из канала. Отключается входом `send_test_alert` | алерт в канал |
 
 Все проверки выполняются до конца, даже если упал инструмент (`docker compose`, `promtool`, `wget`, `amtool`) или не найден контейнер postgres (тогда FAIL у проверок БД с причиной); упавшие перечислены в итоге. Каждый вызов клиента ограничен `timeout --kill-after=10` (coreutils): `promtool` 60 с, `wget` 30 с, `pg_restore` 300 с, остальные 60 с. Лимит урезается до остатка общего бюджета прогона `RUN_BUDGET_SECONDS` (15 мин), после него вызовы не выполняются и дают FAIL. Ожидание алерта тоже заканчивается вместе с бюджетом. За пределами бюджета идут только удаление временной БД и проверка, что её нет: не больше четырёх вызовов по 70 с. Поэтому при любом числе зависаний итог печатается раньше `command_timeout` (20 мин). После `command_timeout` ssh-action не записывает вывод, и отчёт теряется целиком. Итог решает шаг `Report` по последней строке отчёта (`all checks passed`) до баннера, который drone-ssh дописывает после вывода (строки из `=`), и по результату публичной Grafana. На хосте меняется только временная БД, в чат уходит одно сообщение. Группа concurrency своя (`staging-monitoring-acceptance`): в `staging-monitoring` ожидающий прогон вытеснял бы ожидающий `Deploy monitoring`. Если параллельно идёт выкат, проверки стека могут упасть — запустите ещё раз. Workflow рассчитан на курсовой VPS (режим `edge`, SSH-пользователь root): каталог бэкапов — `0700` пользователя postgres образа. На Terraform-хосте (режим `ports`) публичная Grafana и RPS пропускаются, а бэкапы читаются только от root. Пустые секреты SSH обеих целей workflow проверяет первым шагом, как `rollback.yml`.
+
+## 11. Трейсы и логи
+
+Задача #395 (часть 3 #186): трейс шагов Diff → Context → LLM → DB, трекинг ошибок с привязкой к `run_id` и JSON-логи (NFR SD §13).
+
+### Выбор бэкенда
+
+| Вариант | Память на VPS | Секреты | Итог |
+|---|---|---|---|
+| **OpenTelemetry + Grafana Tempo** | `mem_limit` 256m (в простое ~25 МБ), том `tempo-data` | нет: приём только внутри docker-сети | **выбран** |
+| Sentry SaaS | 0 | DSN, аккаунт вне курса; трейс и ошибки уходят третьей стороне | нет |
+| GlitchTip | ~512m+ (web, worker, своя PostgreSQL и Redis) | ключ, пароль БД | нет: дороже Tempo по памяти |
+| self-hosted Sentry | 8+ ГБ | — | на общий VPS не помещается |
+
+Причина: Tempo встаёт в уже выкаченный стек одним сервисом, Grafana показывает трейсы рядом с метриками, а данные прогона не покидают VPS. Версия 2.10.x, а не 3.x: Tempo 3.0 меняет архитектуру и формат конфига, переход — отдельной задачей. Стек с Tempo — ~1,6 ГБ лимитов (+128m у `backup-offsite`). Трекинг ошибок — это span'ы со статусом `error` и событием `exception`: тип и кадры стека, без текста сообщения (он может цитировать тело запроса и лежит в `runs.error_message`, закрытой от Grafana, §3). Группировки и уведомлений, как в Sentry, нет. Об ошибках в канал по-прежнему сообщают алерты §5 (`ReviewRunsFailed`, `ReviewDeadLetters`), а причину ищут по `run_id` в Tempo.
+
+### Что пишет код
+
+| Span | Где | Атрибуты |
+|---|---|---|
+| `review.run.<engine> publish`, `review.publish publish` (PRODUCER) | `AmqpQueuePublisher`: webhook-worker, API (rerun), реконсилер worker | `run_id`, `messaging.destination.name`; в заголовок сообщения идёт `traceparent` (W3C) |
+| `review.run`, `review.publish` (CONSUMER) | `handle_run_delivery`, `handle_publish_delivery` в worker | `run_id`, `dmc.engine`, `dmc.trigger`, `dmc.attempt`, `dmc.outcome` (`ack` / `dead_letter`); исключение обработчика и dead letter — статус `error` |
+| `<tool>` — `policy.load`, `vcs.fetch_diff`, `context.build`, `llm.call`, `review.postprocess`, `github.publish_review`, `gitlab.publish_review`, `bitbucket.publish_review` | `insert_run_action`: каждая строка `run_actions` | `run_id`, `dmc.tool`, `dmc.step.index`, `dmc.attempt`; начало и длительность — те же, что в строке; сбой шага (`response.error`) — статус `error` и `error.type` (`type` или `class` ошибки) |
+| `<METHOD> <route>` (SERVER) | `TracingMiddleware` API, кроме `/healthcheck` | `http.request.method` (неизвестный метод — `_OTHER`), `http.route` (шаблон, не URL), `http.response.status_code`; 5xx и исключение — `error` |
+| `webhook.replay`, `webhook.purge`, `webhook.revive`, `rules.refresh` | проходы `webhook-worker` | `dmc.provider` (кроме `rules.refresh`); сбой прохода — `error`. Публикации прогона из прохода — его дочерние span'ы |
+
+**Ошибки.** Обработчик прогона не пробрасывает исключение пайплайна, а превращает его в `failed` или повтор. Поэтому ошибки на трейс попадают через лог: запись уровня ERROR с исключением (`SpanErrorHandler`, его ставит `configure_logging`) отмечает текущий span — `review.run` у worker, span запроса у API. `HandleReviewRun` пишет такую запись на каждую упавшую попытку (`Run <id> attempt failed: <error_code>`). Сбой без исключения (`deadline_exceeded` от watchdog) пишет запись с `extra={"error_type": ...}`, и span получает `error` с этим типом. Одно исключение даёт на span одно событие.
+
+Diff → Context → LLM → DB на трейсе: `vcs.fetch_diff` → `context.build` → `llm.call` (каждый вызов провайдера) → `review.postprocess` (запись итога в PostgreSQL в той же транзакции, что и строка). Трейс webhook-worker или API и трейс worker — один: контекст переходит через RabbitMQ в `traceparent`, повтор после ошибки копирует заголовки сообщения.
+
+**Граница данных** — та же, что у ролей мониторинга (§3). В span не попадают тела `run_actions.request` и `response`, `runs.review_body`, диффы, URL с query, SQL. Экспортёр (`RedactingSpanExporter`) перед отправкой оставляет только атрибуты из `ALLOWED_ATTRIBUTES` (`app/common/infrastructure/telemetry.py`), поэтому новый атрибут или библиотека границу не расширят. Описание статуса уходит, только если это одно слово в форме имени типа (`ValueError`, `deadline_exceeded`); `error.type` и `error_type` в логах берутся из имени класса или из `error_code` места вызова, проверяется только их форма. Исключение покидает процесс как типы и кадры стека (`safe_stack`): стек собирается по структуре исключения (`__cause__`, `__context__`, члены `ExceptionGroup`), а не фильтрацией текста, поэтому сообщение ошибки, строки pydantic `input_value` и многострочные сообщения не попадают ни в span, ни в лог. Стек, записанный не `mark_error` (например `record_exception` библиотеки), экспортёр отбрасывает. Автоинструментации httpx и SQLAlchemy нет. Проверяет `tests/test_telemetry.py`.
+
+**Включение.** Export включён, только если задан `OTEL_EXPORTER_OTLP_ENDPOINT`. В `deploy/compose/staging.yml` у `api`, `worker` и `webhook-worker` это `http://tempo:4318`: Tempo в сети приложения (`API_NETWORK`), host-порта нет. Без переменной (или с пустой) OpenTelemetry остаётся no-op и ничего не отправляет. Если Tempo недоступен, теряются только span'ы: экспорт идёт фоном, таймаут 5 с, при остановке процесс ждёт не дольше него (SIGTERM у worker и webhook-worker завершает процесс штатно, очередь span'ов сбрасывается). Секретов нет. Prod — в «Ограничениях» ниже.
+
+- Читается только `OTEL_EXPORTER_OTLP_ENDPOINT` (путь `/v1/traces` дописывается, endpoint задаётся без него) и `OTEL_RESOURCE_ATTRIBUTES`. `OTEL_TRACES_EXPORTER` и `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` не поддерживаются: выключение — пустой endpoint.
+- Первый выкат: `Deploy monitoring` идёт после `Deploy staging`, span'ы до подъёма Tempo теряются. После `Deploy monitoring` проверить `docker compose logs tempo` (uid 10001 на новом томе `tempo-data`).
+- Порты Tempo: кроме приёма 4318 в `API_NETWORK` открыты query API 3200 (без аутентификации) и внутренние 9095 и 7946. Host-портов нет, но любой контейнер этой сети (postgres, rabbitmq, api) может читать трейсы через 3200.
+
+### Как найти прогон
+
+Grafana → Explore → источник **Tempo** → TraceQL:
+
+```text
+{ span.run_id = "<run_id>" }                       # трейс прогона: доставка и шаги
+{ span.run_id = "<run_id>" && status = error }     # что упало
+{ resource.service.name = "worker" && status = error }  # все ошибки worker
+```
+
+Трейсы хранятся 72 ч (`block_retention`). Метрик из трейсов (metrics-generator) нет: длительности шагов на дашборде по-прежнему из `run_actions` (§4).
+
+### JSON-логи
+
+`api`, `worker` и `webhook-worker` пишут в stderr одну JSON-строку на запись (`configure_logging`). Логи uvicorn идут через тот же обработчик.
+
+```json
+{"ts": "2026-11-01T17:08:35.221+00:00", "level": "ERROR", "service": "worker", "logger": "app.modules.reviews.infrastructure.amqp", "message": "Message … handling failed (attempt 1/5); it is redelivered", "run_id": "489809f4-…", "trace_id": "65c1eeeb…", "span_id": "f1010322…", "error_type": "RuntimeError", "exc_info": "Traceback (most recent call last):\n  File \"…/amqp.py\", line …, in handle_run_delivery\nRuntimeError"}
+```
+
+`run_id` есть у записей внутри доставки `review.run` и `review.publish` и внутри публикации в очередь (так он попадает и в логи `api` и `webhook-worker`). Вне них его передаёт место вызова: `extra={"run_id": ...}`. `trace_id` есть у записей внутри span'а, по нему из лога открывается трейс. Из `extra` в строку попадают только `run_id` и `error_type`: остальные поля могут нести тело запроса. У записи с исключением `exc_info` — только типы и кадры (`safe_stack`), без текста сообщений; текст ошибки прогона — в `runs.error_message`. INFO от `httpx` и `httpcore` (строка на каждый HTTP-вызов, с URL) выключены. Поиск по прогону:
+
+```bash
+docker compose -p dmc-268-api-staging logs worker --no-log-prefix | jq -c 'select(.run_id == "<run_id>")'
+```
+
+### Ограничения
+
+- span шага пишется при вставке строки `run_actions`, до commit транзакции. Если транзакция откатится, в Tempo останется шаг, которого нет в `run_actions`.
+- `webhook-worker` даёт span на проход, но не на каждую доставку внутри прохода: application-слой OpenTelemetry не импортирует. Ошибка отдельной доставки видна в JSON-логах и помечает span прохода; при нескольких ошибках за проход в `error.type` остаётся последняя.
+- `OTEL_EXPORTER_OTLP_ENDPOINT` и `OTEL_RESOURCE_ATTRIBUTES` (`deployment.environment.name=staging`) заданы в `deploy/compose/staging.yml`, который prod получает как свой `compose.yml`. На prod без стека мониторинга экспортёр пишет предупреждения о недоступном `tempo`, а окружение было бы подписано как staging. Вынести оба значения в переменные окружения — в #308.
+

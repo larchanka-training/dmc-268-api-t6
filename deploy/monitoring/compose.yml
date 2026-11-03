@@ -1,11 +1,12 @@
-# Monitoring stack of the API (docs/MONITORING.md): Prometheus, Alertmanager, Grafana and exporters.
+# Monitoring stack of the API (docs/MONITORING.md): Prometheus, Alertmanager, Grafana, Tempo and
+# exporters.
 # Its own compose project next to the application stack, deployed by deploy/monitoring/deploy.sh:
 #   docker compose -p dmc-268-monitoring -f compose.yml [-f compose.edge.yml | -f compose.ports.yml]
 # It reads the stores of the application over that stack's network (API_NETWORK) and never joins
 # its lifecycle: a monitoring failure cannot fail or roll back an application deploy.
 # Images are pinned by digest like the stores of deploy/compose/staging.yml; the tag only names the
 # version, update tag and digest together.
-# Memory limits keep the stack under ~1.4 GB on the shared course VPS.
+# Memory limits keep the stack under ~1.6 GB on the shared course VPS (+128m with compose.offsite.yml).
 services:
   prometheus:
     image: prom/prometheus:v3.15.0@sha256:efd719c99d83b060d9daefdcf00360461adf279f45ef5391f8d111892118753e
@@ -97,6 +98,24 @@ services:
       timeout: 5s
       retries: 5
       start_period: 30s
+    logging: *logging
+
+  # Traces of api, worker and webhook-worker (docs/MONITORING.md §11). The application sends OTLP/HTTP
+  # to tempo:4318 over API_NETWORK; no host port. A distroless image: no shell for a healthcheck,
+  # and nothing waits on it — a Tempo outage only drops spans, the application keeps running.
+  tempo:
+    image: grafana/tempo:2.10.10@sha256:12b0820f13ffa10ce956b6e9acc3b03f3cffded99109be6cc09d106fe56e5d38
+    command: ["-config.file=/etc/tempo/tempo.yml"]
+    labels:
+      dmc.config-digest: ${TEMPO_CONFIG_DIGEST:-none}
+    volumes:
+      - ./tempo:/etc/tempo:ro
+      - tempo-data:/var/tempo
+    networks:
+      default: {}
+      api: {}
+    restart: unless-stopped
+    mem_limit: 256m
     logging: *logging
 
   # Host CPU, memory, disk and load. Reads the host through read-only mounts; no host network.
@@ -227,6 +246,7 @@ volumes:
   prometheus-data:
   alertmanager-data:
   grafana-data:
+  tempo-data:
 
 networks:
   # The default network of the application project (<project>_default): postgres, rabbitmq, redis.

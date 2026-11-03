@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import hmac
 import json
@@ -48,6 +49,12 @@ from app.bootstrap.run_step_listener import run_step_listener
 from app.bootstrap.run_update_listener import run_update_listener
 from app.common.application.github_repository_name import REPOSITORY_FULL_NAME_MAX_LENGTH
 from app.common.infrastructure.db.enums import RunState
+from app.common.infrastructure.telemetry import (
+    TracingMiddleware,
+    configure_logging,
+    configure_tracing,
+    shutdown_tracing,
+)
 from app.modules.auth.api.router import auth_router
 from app.modules.auth.application.scope import AuthScope
 from app.modules.integrations.bitbucket.api.connections import (
@@ -189,6 +196,18 @@ run_step_hub = InMemoryRunStepHub()
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     """Process resources plus the NOTIFY bridges from worker processes into ``/api/stream``."""
+    configure_logging("api")
+    tracing = configure_tracing("api")
+    try:
+        async with _resources(app):
+            yield
+    finally:
+        # The flush waits for the collector (up to the exporter timeout): off the event loop.
+        await asyncio.to_thread(shutdown_tracing, tracing)
+
+
+@asynccontextmanager
+async def _resources(app: FastAPI) -> AsyncIterator[None]:
     gitlab_api = GitLabApiSettings.from_environment(os.environ)
     async with reviews_api_lifespan(app):
         resources = getattr(app.state, "reviews_api_resources", None)
@@ -211,6 +230,8 @@ REPLAY_OVERLAP_SECONDS = 30.0
 REPLAY_LIMIT = 500
 
 app = FastAPI(title="AI Code Reviewer browser API", lifespan=lifespan)
+# Outermost: the span covers every other middleware and the handler.
+app.add_middleware(TracingMiddleware)
 app.state.run_update_hub = run_update_hub
 app.state.run_step_hub = run_step_hub
 

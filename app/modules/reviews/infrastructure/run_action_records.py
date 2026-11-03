@@ -10,6 +10,7 @@ from uuid import UUID
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.common.infrastructure.telemetry import record_step_span
 from app.modules.reviews.application.run_events import utc_rfc3339
 from app.modules.reviews.infrastructure.llm.models import (
     CONVENTIONS_OPERATION,
@@ -27,6 +28,16 @@ CHANNEL = "run_step"
 def step_succeeded(response: Any) -> bool:
     """False only when the response object contains ``error``; null and other values are true."""
     return not (isinstance(response, dict) and "error" in response)
+
+
+def step_error_type(response: Any) -> str | None:
+    """``type`` (an exception) or ``class`` (an LLM error) of a failed step; None on success."""
+    if step_succeeded(response):
+        return None
+    error = response["error"]
+    if isinstance(error, dict):
+        return str(error.get("type") or error.get("class") or "error")
+    return "error"
 
 
 async def insert_run_action(
@@ -73,6 +84,16 @@ async def insert_run_action(
         )
     )
     await session.flush()
+    # Only ids, timing and the error type reach the span: never the request or response.
+    record_step_span(
+        run_id=run_id,
+        tool=tool,
+        index=index,
+        attempt=run_attempt,
+        error_type=step_error_type(response),
+        started_at=started_at,
+        duration_ms=duration_ms,
+    )
     notify: dict[str, object] = {
         "run_id": str(run_id),
         "tool": tool,

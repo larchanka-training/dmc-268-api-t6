@@ -317,7 +317,11 @@ class TryEnqueueWebhookRun:
         try:
             await self._publisher.publish_confirmed(message)
         except Exception:
-            _LOGGER.exception("Run publication remains pending for run %s", message.run_id)
+            _LOGGER.exception(
+                "Run publication remains pending for run %s",
+                message.run_id,
+                extra={"run_id": str(message.run_id)},
+            )
             return False
         async with self._uow_factory() as uow:
             await uow.runs.mark_published(message.run_id, self._now())

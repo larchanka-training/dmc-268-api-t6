@@ -674,6 +674,8 @@ fi
 | `BACKUP_ENCRYPTION_PASSPHRASE` | secret, Environment `staging` | на хосте в `.env` стека в форме `rclone obscure` (обратима `rclone reveal`, `.env` равносилен ключу) и SHA-256 | ключ шифрования дампов (rclone crypt) до выгрузки. Копия — у техлида вне GitHub, без неё бэкапы не расшифровать. Пять имён `BACKUP_*` задаются вместе или не задаются вовсе ([MONITORING.md](MONITORING.md) §9) |
 | `REDIS_PASSWORD` | копия из `<APP_DIR>/.env` | `.env` стека, контейнер `redis-exporter` | метрики Redis. Сменился пароль Redis — следующий выкат мониторинга (сразу после выката приложения) берёт новый |
 
+Трейсы (#395, [MONITORING.md](MONITORING.md) §11) секретов не требуют: Tempo принимает OTLP только внутри docker-сети приложения. `OTEL_EXPORTER_OTLP_ENDPOINT` (`http://tempo:4318`) и `OTEL_RESOURCE_ATTRIBUTES` — не secret и не variable GitHub, а значения в `environment:` сервисов `api`, `worker` и `webhook-worker` в `deploy/compose/staging.yml`; пустой `OTEL_EXPORTER_OTLP_ENDPOINT` выключает отправку.
+
 Пароли ролей PostgreSQL передаются в `psql` через stdin, не через argv; вывод этого вызова подавлен, потому что `psql` повторил бы упавший оператор вместе с паролем.
 
 ### Только локально у оператора

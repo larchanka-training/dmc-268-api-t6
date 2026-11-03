@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import logging
 import os
 import time
 from dataclasses import dataclass
@@ -133,22 +132,23 @@ def test_worker_returns_zero_when_receipt_sweep_fails() -> None:
     assert asyncio.run(sweep_once(cast(ReceiveGitHubDelivery, FailingReceiver()))) == 0
 
 
-def test_main_configures_info_logging_before_running_the_worker(
+def test_main_configures_json_logging_and_tracing_before_running_the_worker(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # caplog already installed a root handler, so a real basicConfig would be a no-op here.
     calls: list[str] = []
-
-    def basic_config(**kwargs: object) -> None:
-        assert kwargs == {"level": logging.INFO}
-        calls.append("basicConfig")
 
     async def worker() -> None:
         calls.append("run_forever")
 
-    monkeypatch.setattr(logging, "basicConfig", basic_config)
+    monkeypatch.setattr(
+        "app.webhook_worker.configure_logging", lambda service: calls.append(f"logs:{service}")
+    )
+    monkeypatch.setattr(
+        "app.webhook_worker.configure_tracing", lambda service: calls.append(f"traces:{service}")
+    )
+    monkeypatch.setattr("app.webhook_worker.shutdown_tracing", lambda _: calls.append("flush"))
     monkeypatch.setattr("app.webhook_worker.run_forever", worker)
 
     main()
 
-    assert calls == ["basicConfig", "run_forever"]
+    assert calls == ["logs:webhook-worker", "traces:webhook-worker", "run_forever", "flush"]

@@ -100,7 +100,11 @@ class ReconcileRuns:
             try:
                 await self._review_queue.publish_review(pointer)
             except Exception:
-                _LOGGER.exception("T17 republication failed for run %s", pointer.run_id)
+                _LOGGER.exception(
+                    "T17 republication failed for run %s",
+                    pointer.run_id,
+                    extra={"run_id": str(pointer.run_id)},
+                )
                 continue
             republished += 1
         for message in queued:
@@ -112,6 +116,10 @@ class ReconcileRuns:
         try:
             await self._run_publisher.publish_confirmed(message)
         except Exception:
-            _LOGGER.exception("Reconciler republication failed for run %s", message.run_id)
+            _LOGGER.exception(
+                "Reconciler republication failed for run %s",
+                message.run_id,
+                extra={"run_id": str(message.run_id)},
+            )
             return False
         return True

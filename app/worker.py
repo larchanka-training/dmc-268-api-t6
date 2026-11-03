@@ -53,6 +53,11 @@ from app.bootstrap.worker_shutdown import (
 )
 from app.common.infrastructure.db.leader import WORKER_LEADER_LOCK, run_as_leader
 from app.common.infrastructure.heartbeat import beat, heartbeat_file, reset
+from app.common.infrastructure.telemetry import (
+    configure_logging,
+    configure_tracing,
+    shutdown_tracing,
+)
 from app.modules.code_index.application.leader_tasks import CodeIndexLeaderTasks
 from app.modules.code_index.infrastructure.graph_retriever import SqlAlchemyGraphRetriever
 from app.modules.code_index.infrastructure.review_index import SqlAlchemyReviewIndexUnitOfWork
@@ -1210,10 +1215,14 @@ async def _run_worker(
 
 
 def main() -> None:
-    logging.basicConfig(level=logging.INFO)
-    run_with_signals(
-        lambda stop: run_worker(WorkerSettings.from_environment(os.environ), stop=stop)
-    )
+    configure_logging("worker")
+    tracing = configure_tracing("worker")
+    try:
+        run_with_signals(
+            lambda stop: run_worker(WorkerSettings.from_environment(os.environ), stop=stop)
+        )
+    finally:
+        shutdown_tracing(tracing)
 
 
 if __name__ == "__main__":

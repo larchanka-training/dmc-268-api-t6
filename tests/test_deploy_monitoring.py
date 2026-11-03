@@ -63,7 +63,7 @@ def _job(name: str) -> str:
 def test_monitoring_images_are_pinned_by_digest() -> None:
     images = re.findall(r"^    image: (\S+)$", _read(MONITORING / "compose.yml"), re.M)
 
-    assert len(images) == 9
+    assert len(images) == 10
     for image in images:
         assert re.fullmatch(r"[a-z0-9./_-]+:v?[\d.]+(-alpine)?@sha256:[0-9a-f]{64}", image), image
 
@@ -97,9 +97,17 @@ def test_monitoring_reads_the_application_network_without_joining_its_project() 
     blocks = _service_blocks(compose)
 
     assert "    name: ${API_NETWORK:?API_NETWORK is required}\n    external: true" in compose
-    # Only what talks to postgres, rabbitmq or redis joins the application network.
+    # Only what talks to postgres, rabbitmq or redis joins the application network, and Tempo,
+    # which the application sends its traces to.
     on_api = {name for name, block in blocks.items() if "      api: {}" in block}
-    assert on_api == {"prometheus", "grafana", "postgres-exporter", "redis-exporter", "pg-backup"}
+    assert on_api == {
+        "prometheus",
+        "grafana",
+        "postgres-exporter",
+        "redis-exporter",
+        "pg-backup",
+        "tempo",
+    }
     # The backup job needs PostgreSQL only.
     assert "default: {}" not in blocks["pg-backup"]
     # Host collectors never reach the stores or the edge.
@@ -172,12 +180,28 @@ def test_config_changes_recreate_the_service_that_reads_them() -> None:
         "postgres-exporter": "POSTGRES_EXPORTER_CONFIG_DIGEST",
         "pg-backup": "PG_BACKUP_CONFIG_DIGEST",
         "blackbox-exporter": "BLACKBOX_CONFIG_DIGEST",
+        "tempo": "TEMPO_CONFIG_DIGEST",
     }
     deploy = _read(MONITORING / "deploy.sh")
 
     for service, variable in digests.items():
         assert f"dmc.config-digest: ${{{variable}:-none}}" in blocks[service]
         assert f"printf '{variable}=%s\\n'" in deploy
+
+
+def test_the_application_sends_traces_to_tempo_inside_the_docker_network() -> None:
+    blocks = _service_blocks(_read(REPO_ROOT / "deploy/compose/staging.yml"))
+    tempo = _read(MONITORING / "tempo" / "tempo.yml")
+    datasources = _read(MONITORING / "grafana/provisioning/datasources/datasources.yml")
+
+    for service in ("api", "worker", "webhook-worker"):
+        assert "      OTEL_EXPORTER_OTLP_ENDPOINT: http://tempo:4318\n" in blocks[service], service
+    # OTLP/HTTP only; no gRPC receiver, no host port (test above), 72 h of traces.
+    assert "        http:\n          endpoint: 0.0.0.0:4318\n" in tempo
+    assert "grpc" not in tempo
+    assert "block_retention: 72h" in tempo
+    assert "  - name: Tempo\n    uid: tempo\n    type: tempo\n" in datasources
+    assert "    url: http://tempo:3200\n" in datasources
 
 
 # --- edge proxy ----------------------------------------------------------------------------

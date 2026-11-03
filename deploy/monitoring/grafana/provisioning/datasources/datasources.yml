@@ -33,3 +33,12 @@ datasources:
       maxIdleConns: 1
     secureJsonData:
       password: $GRAFANA_DB_PASSWORD
+
+  # Traces of the pipeline (docs/MONITORING.md §11): a span per run_actions row under the span of
+  # the delivery, searchable by run_id, e.g. { span.run_id = "<uuid>" && status = error }.
+  - name: Tempo
+    uid: tempo
+    type: tempo
+    access: proxy
+    url: http://tempo:3200
+    editable: false

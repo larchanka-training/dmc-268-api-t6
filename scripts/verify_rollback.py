@@ -458,7 +458,13 @@ class LiveVerifier:
                 "base image key names",
             ).stdout
         )
-        common = {"DATABASE_URL", "RABBITMQ_URL"}
+        # OTEL_*: traces to Tempo (#395), set for every application service.
+        common = {
+            "DATABASE_URL",
+            "RABBITMQ_URL",
+            "OTEL_EXPORTER_OTLP_ENDPOINT",
+            "OTEL_RESOURCE_ATTRIBUTES",
+        }
         app_keys = {"GITHUB_APP_ID", "GITHUB_APP_PRIVATE_KEY"}
         self.expected_keys = {
             "api": sorted(

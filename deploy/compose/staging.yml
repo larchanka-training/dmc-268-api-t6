@@ -21,6 +21,10 @@ services:
       REDIS_URL: redis://:${REDIS_PASSWORD:?REDIS_PASSWORD is required}@redis:6379/0
       AUTH_JWT_ISSUER: dmc-268-api
       AUTH_JWT_AUDIENCE: dmc-268-ui
+      # Traces to Tempo of the monitoring stack over this network (docs/MONITORING.md §11).
+      # Unreachable Tempo only drops spans; an empty value turns the export off.
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://tempo:4318
+      OTEL_RESOURCE_ATTRIBUTES: deployment.environment.name=staging
     # No dependency on RabbitMQ or Redis: the API connects to the broker on the first publication,
     # so a broker or cache outage must not keep a recreated API from starting. up --wait in
     # deploy.sh still waits for every healthcheck.
@@ -77,6 +81,10 @@ services:
       # of the review context stage; optional.
       REDIS_URL: redis://:${REDIS_PASSWORD:?REDIS_PASSWORD is required}@redis:6379/0
       WORKER_HEARTBEAT_FILE: /tmp/worker.heartbeat
+      # Traces to Tempo of the monitoring stack over this network (docs/MONITORING.md §11).
+      # Unreachable Tempo only drops spans; an empty value turns the export off.
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://tempo:4318
+      OTEL_RESOURCE_ATTRIBUTES: deployment.environment.name=staging
     # Unlike the API, the worker cannot start without the broker: it declares the topology first.
     depends_on:
       bootstrap:
@@ -108,6 +116,8 @@ services:
   webhook-worker:
     image: ${IMAGE:?IMAGE is required}
     command: ["python", "-m", "app.webhook_worker"]
+    # SIGTERM: the pass is cancelled, resources close and queued spans flush (up to 5 s).
+    stop_grace_period: 20s
     # app.env: GitHub App credentials; webhook-worker.env: GITHUB_APP_BOT_LOGIN (docs/SECRETS.md).
     env_file:
       - app.env
@@ -120,6 +130,10 @@ services:
       # Cache of installation tokens, shared with worker; optional.
       REDIS_URL: redis://:${REDIS_PASSWORD:?REDIS_PASSWORD is required}@redis:6379/0
       WORKER_HEARTBEAT_FILE: /tmp/webhook-worker.heartbeat
+      # Traces to Tempo of the monitoring stack over this network (docs/MONITORING.md §11).
+      # Unreachable Tempo only drops spans; an empty value turns the export off.
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://tempo:4318
+      OTEL_RESOURCE_ATTRIBUTES: deployment.environment.name=staging
     # The projection creates Runs and publishes them to the review queue (#52).
     depends_on:
       bootstrap:
