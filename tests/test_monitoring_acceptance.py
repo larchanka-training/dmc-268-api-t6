@@ -1305,8 +1305,15 @@ def test_worker_outage_stops_only_the_worker_under_a_planned_silence() -> None:
     stop = job[job.index("- name: Silence the alerts and stop the worker") :]
     stop = stop[: stop.index("- name: Wait for the page to show the outage")]
 
-    assert "alertname=ReviewQueueWithoutConsumer --duration=20m --comment=acceptance-309" in stop
-    assert "alertname=ReviewRunsStuckInQueue --duration=20m --comment=acceptance-309" in stop
+    # Both rules keep `environment` (sum by), so each silence carries it: a prod alert of the same
+    # name is never silenced by a test of staging.
+    adds = [line for line in stop.splitlines() if "silence add" in line]
+    assert len(adds) == 2
+    for line, rule in zip(
+        adds, ("ReviewQueueWithoutConsumer", "ReviewRunsStuckInQueue"), strict=True
+    ):
+        assert f"silence add alertname={rule} environment=staging --duration=20m" in line
+        assert line.endswith("--comment=acceptance-309")
     assert 'docker compose -p "${project}" stop worker\n' in stop
     for other in ("api", "webhook-worker", "postgres", "rabbitmq"):
         assert f"stop {other}" not in stop

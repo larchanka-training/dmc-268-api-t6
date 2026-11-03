@@ -289,10 +289,11 @@ jobs:
           exit "${status}"
 
   # Opt-in (input stop_worker): the page must show a worker that stopped (#309). It silences the two
-  # alerts of the stop like any planned stop (docs/MONITORING.md §5; the silence does not change the
-  # page, the component really is down), stops the staging worker, waits for the page to show
-  # "Ревью PR" down because of ReviewQueueWithoutConsumer (the alert needs 5 minutes) and always
-  # starts the worker again and lifts the silences. Staging runs without reviews for ~10 minutes,
+  # alerts of the stop like any planned stop, for staging only (docs/MONITORING.md §5; a prod alert
+  # of the same name is not silenced, and the silence does not change the page, the component
+  # really is down), stops the staging worker, waits for the page to show "Ревью PR" down because
+  # of ReviewQueueWithoutConsumer (the alert needs 5 minutes) and always starts the worker again
+  # and lifts the silences. Staging runs without reviews for ~10 minutes,
   # so it needs the go of the tech lead. Course VPS only: the Terraform host has no status page.
   worker-outage:
     name: Status page shows a stopped worker
@@ -324,8 +325,8 @@ jobs:
             set +o xtrace
             project="$(basename "${API_DIR}")"
             am() { docker compose -p dmc-268-monitoring exec -T alertmanager amtool --alertmanager.url=http://localhost:9093 "$@"; }
-            am silence add alertname=ReviewQueueWithoutConsumer --duration=20m --comment=acceptance-309
-            am silence add alertname=ReviewRunsStuckInQueue --duration=20m --comment=acceptance-309
+            am silence add alertname=ReviewQueueWithoutConsumer environment=staging --duration=20m --comment=acceptance-309
+            am silence add alertname=ReviewRunsStuckInQueue environment=staging --duration=20m --comment=acceptance-309
             docker compose -p "${project}" stop worker
 
       - name: Wait for the page to show the outage
