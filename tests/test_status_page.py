@@ -43,6 +43,21 @@ LAST_FIRING_AT = 1793700000.0  # 2026-11-03T10:00:00Z
 # backslashes are one regex backslash. tests/monitoring/status.test.yml runs them under promtool.
 _CONSUMERS = r'rabbitmq_detailed_queue_consumers{queue=~"review\\.run\\.fast|review\\.publish",'
 _POSTGRES = 'container_last_seen{container_label_com_docker_compose_service="postgres",'
+# The alerts the page shows (the table of docs/MONITORING.md §5) and the query of their last firing.
+SHOWN_ALERTS = {
+    "ApiHigh5xxRate",
+    "PostgresDown",
+    "PublicEndpointDown",
+    "ReviewQueueWithoutConsumer",
+    "ReviewRunsStuckInQueue",
+    "TargetDown",
+    "WebhookWorkerDown",
+}
+LAST_FIRING_QUERY = (
+    'max_over_time(timestamp(ALERTS{alertstate="firing",alertname=~"ApiHigh5xxRate|PostgresDown|'
+    "PublicEndpointDown|ReviewQueueWithoutConsumer|ReviewRunsStuckInQueue|TargetDown|"
+    'WebhookWorkerDown"})[7d:1m])'
+)
 PRESENCE = [
     ("api", "staging", r'probe_success{job="blackbox",host=~"staging-api\\..+"}'),
     ("api", "prod", r'probe_success{job="blackbox",host=~"api\\..+"}'),
@@ -120,9 +135,9 @@ def _snapshot(
     taken_at: datetime = NOW,
 ) -> Any:
     covered = {
-        (component.key, env): (component.key, env) not in uncovered
-        for component in page.COMPONENTS
-        for env in page.ENVIRONMENTS
+        (key, env): (key, env) not in uncovered
+        for key in ("api", "ui", "review", "webhooks")
+        for env in ("prod", "staging")
     }
     return page.Snapshot(
         taken_at=taken_at,
@@ -578,7 +593,7 @@ class PrometheusStub:
 @pytest.fixture
 def prometheus(page: ModuleType) -> Iterator[tuple[PrometheusStub, str]]:
     stub = PrometheusStub()
-    stub.last_firing_query = page.LAST_FIRING_QUERY
+    stub.last_firing_query = LAST_FIRING_QUERY
     stub.coverage = {expression: f"{key}/{env}" for key, env, expression in PRESENCE}
 
     class Handler(BaseHTTPRequestHandler):
@@ -895,7 +910,7 @@ def test_a_poll_sends_the_presence_and_last_firing_expressions_unchanged(
     poller.refresh()
 
     sent = [parse_qs(query)["query"][0] for path, query in stub.requests if path.endswith("query")]
-    expected = [page.LAST_FIRING_QUERY] + [expression for _, _, expression in PRESENCE]
+    expected = [LAST_FIRING_QUERY] + [expression for _, _, expression in PRESENCE]
     assert sorted(sent) == sorted(expected)
     assert [path for path, _ in stub.requests].count("/api/v1/alerts") == 1
 
@@ -903,14 +918,8 @@ def test_a_poll_sends_the_presence_and_last_firing_expressions_unchanged(
 def test_the_last_firing_query_asks_for_the_last_firing_sample_of_the_shown_alerts_in_a_week(
     page: ModuleType,
 ) -> None:
-    shown = sorted({rule.alert for component in page.COMPONENTS for rule in component.rules})
-
-    expected = (
-        'max_over_time(timestamp(ALERTS{alertstate="firing",alertname=~"'
-        + "|".join(shown)
-        + '"})[7d:1m])'
-    )
-    assert expected == page.LAST_FIRING_QUERY
+    assert {rule.alert for component in page.COMPONENTS for rule in component.rules} == SHOWN_ALERTS
+    assert page.LAST_FIRING_QUERY == LAST_FIRING_QUERY
 
 
 def test_the_poller_keeps_polling_until_it_is_stopped(
