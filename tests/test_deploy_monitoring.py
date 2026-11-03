@@ -1050,11 +1050,11 @@ def test_edge_mode_probes_the_public_staging_names(host: Host) -> None:
     assert targets == [
         {
             "targets": ["https://staging-api.example.test/healthcheck"],
-            "labels": {"host": "staging-api.example.test"},
+            "labels": {"host": "staging-api.example.test", "environment": "staging"},
         },
         {
             "targets": ["https://staging-ui.example.test/health"],
-            "labels": {"host": "staging-ui.example.test"},
+            "labels": {"host": "staging-ui.example.test", "environment": "staging"},
         },
     ]
 
@@ -1105,13 +1105,19 @@ def test_failed_deploy_keeps_the_probe_targets_of_the_last_one(host: Host) -> No
     assert not re.search(r"^\s+rm:", _job("deploy-monitoring"), re.M)
 
 
-def _probe(name: str, path: str) -> dict[str, object]:
+def _probe(name: str, path: str, environment: str) -> dict[str, object]:
     probed = f"{name}.example.test"
-    return {"targets": [f"https://{probed}/{path}"], "labels": {"host": probed}}
+    return {
+        "targets": [f"https://{probed}/{path}"],
+        "labels": {"host": probed, "environment": environment},
+    }
 
 
-STAGING_PROBES = [_probe("staging-api", "healthcheck"), _probe("staging-ui", "health")]
-PROD_PROBES = [_probe("api", "healthcheck"), _probe("ui", "health")]
+STAGING_PROBES = [
+    _probe("staging-api", "healthcheck", "staging"),
+    _probe("staging-ui", "health", "staging"),
+]
+PROD_PROBES = [_probe("api", "healthcheck", "prod"), _probe("ui", "health", "prod")]
 
 
 def _probe_targets(host: Host) -> list[dict[str, object]]:

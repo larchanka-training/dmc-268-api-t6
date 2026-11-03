@@ -4,9 +4,9 @@
 global:
   scrape_interval: 30s
   evaluation_interval: 30s
-  # Alerts and series carry the environment, so a shared Telegram channel tells staging from prod.
-  external_labels:
-    environment: staging
+  # No external_labels: the label environment (staging, prod or shared) is set per target and per
+  # series below, so a shared Telegram channel tells staging from prod and a rule can aggregate
+  # one environment without the other.
 
 rule_files:
   - /etc/prometheus/rules/*.yml
@@ -17,37 +17,73 @@ alerting:
         - targets: ["alertmanager:9093"]
 
 scrape_configs:
+  # Everything that belongs to the monitoring stack or the host, not to one application stack, is
+  # environment shared; the stores of an environment carry its name.
   - job_name: prometheus
     static_configs:
       - targets: ["localhost:9090"]
+        labels:
+          environment: shared
 
   - job_name: alertmanager
     static_configs:
       - targets: ["alertmanager:9093"]
+        labels:
+          environment: shared
 
   - job_name: grafana
     static_configs:
       - targets: ["grafana:3000"]
+        labels:
+          environment: shared
 
   - job_name: node
     static_configs:
       - targets: ["node-exporter:9100"]
+        labels:
+          environment: shared
+    metric_relabel_configs:
+      # The backup service writes its textfile series without a label and only for staging; the
+      # prod backup of #308 labels its own and replaces this rule.
+      - source_labels: [__name__]
+        regex: dmc_pg_backup_.+
+        target_label: environment
+        replacement: staging
 
   - job_name: cadvisor
     # cAdvisor timestamps its samples: without this a stopped container lingers for 5 minutes.
     track_timestamps_staleness: true
     static_configs:
       - targets: ["cadvisor:8080"]
+        labels:
+          environment: shared
     metric_relabel_configs:
       # Keep the containers of compose projects only: the cgroup hierarchy itself is noise.
       - source_labels: [container_label_com_docker_compose_project]
         regex: ""
         action: drop
+      # A container belongs to the environment of its compose project; dmc-268-api is the project
+      # of the Terraform host. The monitoring and edge projects stay shared.
+      - source_labels: [container_label_com_docker_compose_project]
+        regex: .+-prod
+        target_label: environment
+        replacement: prod
+      - source_labels: [container_label_com_docker_compose_project]
+        regex: .+-staging|dmc-268-api
+        target_label: environment
+        replacement: staging
 
   # The review queues (SD §7.1): aggregated node metrics and per-queue depth and consumers.
+  # The prod stores are reached by their own scrapers (compose.prod.yml); deploy.sh writes their
+  # targets to the *-prod.json files and an empty list without prod. The files are not in the
+  # repository (promtool warns about them, as about probes.json): the upload would replace them.
   - job_name: rabbitmq
     static_configs:
       - targets: ["rabbitmq:15692"]
+        labels:
+          environment: staging
+    file_sd_configs:
+      - files: ["/etc/prometheus/targets/rabbitmq-prod.json"]
 
   - job_name: rabbitmq-queues
     metrics_path: /metrics/detailed
@@ -55,6 +91,10 @@ scrape_configs:
       family: [queue_coarse_metrics, queue_consumer_count]
     static_configs:
       - targets: ["rabbitmq:15692"]
+        labels:
+          environment: staging
+    file_sd_configs:
+      - files: ["/etc/prometheus/targets/rabbitmq-prod.json"]
 
   # One scrape runs the review and LLM cost queries of postgres-exporter/queries.yml over runs,
   # run_actions and usage_events.
@@ -63,22 +103,46 @@ scrape_configs:
     scrape_timeout: 20s
     static_configs:
       - targets: ["postgres-exporter:9187"]
+        labels:
+          environment: staging
+    file_sd_configs:
+      - files: ["/etc/prometheus/targets/postgres-prod.json"]
 
   - job_name: redis
     static_configs:
       - targets: ["redis-exporter:9121"]
+        labels:
+          environment: staging
+    file_sd_configs:
+      - files: ["/etc/prometheus/targets/redis-prod.json"]
 
   # Request metrics of the edge proxy. deploy.sh writes the target in edge mode only; on a host
-  # without the proxy the file is an empty list and the job has no target.
+  # without the proxy the file is an empty list and the job has no target. The proxy serves both
+  # environments, so its own series (up) are shared and each request series takes the environment
+  # of its host: staging.* and staging-* names, api, ui and webhook names of prod; the apex,
+  # www, grafana and _other stay shared.
   - job_name: caddy
     file_sd_configs:
       - files: ["/etc/prometheus/targets/caddy.json"]
+    relabel_configs:
+      - target_label: environment
+        replacement: shared
+    metric_relabel_configs:
+      - source_labels: [host]
+        regex: staging[.-].+
+        target_label: environment
+        replacement: staging
+      - source_labels: [host]
+        regex: (api|ui|webhook)\..+
+        target_label: environment
+        replacement: prod
 
   # HTTPS probes of the public names through the edge proxy, once a minute: Prometheus asks the
   # blackbox exporter to probe each URL of the file and labels the result with it. deploy.sh writes
   # the names in edge mode only; on a host without the proxy the file is an empty list. The file is
   # not in the repository: the upload would replace it, and a deploy failing before deploy.sh writes
   # it would leave the names unprobed. Without the file (promtool warns) the job has no target.
+  # deploy.sh labels each name with its environment next to the host.
   - job_name: blackbox
     scrape_interval: 1m
     scrape_timeout: 20s

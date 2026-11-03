@@ -446,14 +446,16 @@ chmod 644 "${CADDY_TARGETS}.tmp"
 mv -f "${CADDY_TARGETS}.tmp" "${CADDY_TARGETS}"
 # HTTPS probes of the public names behind the edge proxy, in edge mode only: each service name and
 # its health path, the staging names first. The name becomes the label host of the probe and of its
-# alerts.
+# alerts; the environment label follows from the list the name comes from.
 PROBE_TARGETS="${MONITORING_DIR}/prometheus/targets/probes.json"
 if [[ "${DEPLOY_MODE}" == "edge" ]]; then
   separator='['
   for probe in "${PROBED_SERVICES[@]/#/staging-}" "${PROD_PROBES[@]}"; do
     probe_host="${probe%%/*}.${APP_DOMAIN}"
-    printf '%s{"targets": ["https://%s/%s"], "labels": {"host": "%s"}}' \
-      "${separator}" "${probe_host}" "${probe#*/}" "${probe_host}"
+    probe_environment=prod
+    if [[ "${probe}" == staging-* ]]; then probe_environment=staging; fi
+    printf '%s{"targets": ["https://%s/%s"], "labels": {"host": "%s", "environment": "%s"}}' \
+      "${separator}" "${probe_host}" "${probe#*/}" "${probe_host}" "${probe_environment}"
     separator=$',\n '
   done > "${PROBE_TARGETS}.tmp"
   echo ']' >> "${PROBE_TARGETS}.tmp"
