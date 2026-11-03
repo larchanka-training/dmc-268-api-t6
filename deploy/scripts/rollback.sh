@@ -20,6 +20,9 @@ EDGE_NETWORK="${EDGE_NETWORK:-dmc268-edge}"
 # auto: a failed deploy is being undone; the failed image must not become the rollback target.
 # manual: an operator rolls back a release; it becomes the previous release (mirrors :staging-previous).
 ROLLBACK_MODE="${ROLLBACK_MODE:-manual}"
+# The replica count is the target release's own, never a value inherited from the environment
+# (a deploy that started this rollback has its own, failed, count exported by CI).
+unset WORKER_REPLICAS
 # What replaces a release that has no previous one to go back to:
 # bootstrap: a stock nginx under the API alias or port (as cloud-init's placeholder does);
 # stop: nothing, the stack is only taken down (prod: the edge proxy's own 503 for the API host is
@@ -125,8 +128,11 @@ diagnostics_failed() {
   exit 1
 }
 
-print_environment_keys() {
-  local service keys output python_source key_list_pattern
+# Sets ENVIRONMENT_KEYS to the JSON list of environment names of one container. $1 names it in the
+# failure message; the rest are the arguments of `compose exec -T`, up to and including the service.
+read_environment_keys() {
+  local label="$1" output python_source key_list_pattern
+  shift
   key_list_pattern='^\[("[A-Za-z_][A-Za-z0-9_]*"(, "[A-Za-z_][A-Za-z0-9_]*")*)?\]$'
   python_source="$(cat <<'PYTHON'
 import json
@@ -135,23 +141,41 @@ import re
 print(json.dumps(sorted(name for name in os.environ.keys() if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name))))
 PYTHON
   )"
+  # Capture stdout only and retain its final newline; stderr is never part of the protocol.
+  if ! output="$(
+    "${COMPOSE[@]}" exec -T "$@" python -c "${python_source}" 2>/dev/null
+    status=$?
+    printf '.'
+    exit "${status}"
+  )"; then
+    diagnostics_failed "${label}"
+  fi
+  [[ "${output}" == *$'\n.' ]] || diagnostics_failed "${label}"
+  ENVIRONMENT_KEYS="${output%$'\n.'}"
+  # Never echo raw exec output: only a JSON list of validated ASCII names can reach the log.
+  if [[ ! "${ENVIRONMENT_KEYS}" =~ ${key_list_pattern} ]]; then
+    diagnostics_failed "${label}"
+  fi
+}
+
+print_environment_keys() {
+  local service replica first_keys
   for service in api worker webhook-worker; do
-    # Capture stdout only and retain its final newline; stderr is never part of the protocol.
-    if ! output="$(
-      "${COMPOSE[@]}" exec -T "${service}" python -c "${python_source}" 2>/dev/null
-      status=$?
-      printf '.'
-      exit "${status}"
-    )"; then
-      diagnostics_failed "${service}"
+    if [[ "${service}" == worker && "${WORKER_REPLICAS}" -gt 1 ]]; then
+      # exec reaches one replica per call: check each, and all must carry the same names.
+      for (( replica = 1; replica <= WORKER_REPLICAS; replica++ )); do
+        read_environment_keys "worker replica ${replica}" --index "${replica}" worker
+        if (( replica == 1 )); then
+          first_keys="${ENVIRONMENT_KEYS}"
+        elif [[ "${ENVIRONMENT_KEYS}" != "${first_keys}" ]]; then
+          diagnostics_failed "worker replica ${replica}"
+        fi
+      done
+      ENVIRONMENT_KEYS="${first_keys}"
+    else
+      read_environment_keys "${service}" "${service}"
     fi
-    [[ "${output}" == *$'\n.' ]] || diagnostics_failed "${service}"
-    keys="${output%$'\n.'}"
-    # Never echo raw exec output: only a JSON list of validated ASCII names can reach the log.
-    if [[ ! "${keys}" =~ ${key_list_pattern} ]]; then
-      diagnostics_failed "${service}"
-    fi
-    echo "${service} environment keys: ${keys}"
+    echo "${service} environment keys: ${ENVIRONMENT_KEYS}"
   done
 }
 
@@ -198,7 +222,9 @@ restore_bootstrap() {
   echo "restored bootstrap container (${BOOTSTRAP_IMAGE})"
 }
 
+HOST_WORKER_REPLICAS=""
 if [[ -f "${ENV_FILE}" ]]; then
+  HOST_WORKER_REPLICAS="$(read_compose_env_var WORKER_REPLICAS "${ENV_FILE}")"
   POSTGRES_USER="${POSTGRES_USER:-$(read_compose_env_var POSTGRES_USER "${ENV_FILE}")}"
   POSTGRES_PASSWORD="${POSTGRES_PASSWORD:-$(read_compose_env_var POSTGRES_PASSWORD "${ENV_FILE}")}"
   POSTGRES_DB="${POSTGRES_DB:-$(read_compose_env_var POSTGRES_DB "${ENV_FILE}")}"
@@ -229,10 +255,14 @@ if [[ "${DEPLOY_MODE}" == "edge" && ! "${EDGE_ALIAS:-}" =~ ^[a-z0-9]+(-[a-z0-9]+
 fi
 COMPOSE=(docker compose -p "${COMPOSE_PROJECT}" -f "${COMPOSE_FILE}" -f "${APP_DIR}/compose.${DEPLOY_MODE}.yml" --env-file "${ENV_FILE}")
 
+# The count the target ran with, as the deploy that replaced it recorded it next to its image.
+# A named image has no record, and a record-less host keeps the count in .env.
+RECORDED_WORKER_REPLICAS=""
 if [[ -n "${REQUESTED_IMAGE}" ]]; then
   IMAGE="${REQUESTED_IMAGE}"
 elif [[ -f "${PREVIOUS_FILE}" ]]; then
   IMAGE="$(awk -F= '/^current_image=/{print $2}' "${PREVIOUS_FILE}")"
+  RECORDED_WORKER_REPLICAS="$(awk -F= '/^worker_replicas=/{print $2; exit}' "${PREVIOUS_FILE}")"
 else
   echo "no previous release; NO_PREVIOUS_RELEASE=${NO_PREVIOUS_RELEASE}" >&2
   restore_bootstrap
@@ -242,6 +272,13 @@ fi
 if [[ -z "${IMAGE}" ]]; then
   echo "previous image reference is empty" >&2
   exit 1
+fi
+
+WORKER_REPLICAS="${RECORDED_WORKER_REPLICAS:-${HOST_WORKER_REPLICAS:-1}}"
+require_worker_replicas "${WORKER_REPLICAS}" || exit 1
+# Silent when unchanged, so the diagnostics output of a one-replica host stays as it was.
+if [[ "${WORKER_REPLICAS}" != "${HOST_WORKER_REPLICAS:-1}" ]]; then
+  echo "worker replicas: ${WORKER_REPLICAS} (was ${HOST_WORKER_REPLICAS:-1})"
 fi
 
 for name in POSTGRES_PASSWORD RABBITMQ_PASSWORD REDIS_PASSWORD; do
@@ -285,12 +322,13 @@ write_compose_env_file \
   "${RABBITMQ_USER:-app}" \
   "${RABBITMQ_PASSWORD}" \
   "${REDIS_PASSWORD}" \
-  "${NO_PREVIOUS_RELEASE}"
+  "${NO_PREVIOUS_RELEASE}" \
+  "${WORKER_REPLICAS}"
 
 # App secrets are not tied to an image: the files of the last deploy stay as they are.
 ensure_app_env_files "${APP_DIR}"
 
-IMAGE="${TARGET_IMAGE_ID}" "${COMPOSE[@]}" up --pull missing -d --remove-orphans --wait --wait-timeout 180
+IMAGE="${TARGET_IMAGE_ID}" WORKER_REPLICAS="${WORKER_REPLICAS}" "${COMPOSE[@]}" up --pull missing -d --remove-orphans --wait --wait-timeout 180
 
 # Shared root account: drop credentials after pinned-image startup with --pull missing.
 logout_registry
@@ -304,6 +342,7 @@ fi
   echo "current_image=${RELEASE_REF}"
   echo "deployed_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   echo "rolled_back=true"
+  echo "worker_replicas=${WORKER_REPLICAS}"
 } > "${STATE_FILE}"
 
 print_environment_keys
