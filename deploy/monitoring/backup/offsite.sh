@@ -66,6 +66,17 @@ write_metrics() {
   mv "${TEXTFILE}.tmp" "${TEXTFILE}"
 }
 
+# A textfile written before the series carried a label (an older version of this script) would sit
+# beside the labeled file of the other environment, one metric family with two label sets, until
+# the first pass ends. Idempotent: labeled lines do not match.
+label_old_textfile() {
+  [ -f "${TEXTFILE}" ] || return 0
+  grep -q '^dmc_pg_backup_offsite_[a-z_]* ' "${TEXTFILE}" || return 0
+  sed -e "s/^\\(dmc_pg_backup_offsite_[a-z_]*\\) /\\1${LABELS} /" "${TEXTFILE}" > "${TEXTFILE}.tmp"
+  chmod 644 "${TEXTFILE}.tmp"
+  mv "${TEXTFILE}.tmp" "${TEXTFILE}"
+}
+
 # Same rule as pg-backup.sh: never call attempt as a condition (if, while, ||, &&), or the shell
 # ignores set -e in the subshell and a failed copy would go on to the delete.
 # The newest dump is read before the copy starts: a dump finished while rclone runs may have been
@@ -99,6 +110,7 @@ case "${1:-loop}" in
   loop)
     trap 'log "stopping"; exit 0' TERM INT
     log "every ${POLL} s to ${REMOTE}, keep ${RETENTION_DAYS} days"
+    label_old_textfile
     while :; do
       attempt
       sleep "${POLL}" &
