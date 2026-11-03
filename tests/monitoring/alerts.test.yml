@@ -1191,3 +1191,85 @@ tests:
             exp_annotations:
               summary: "Container dmc-268-api-prod-api-1 was OOM-killed"
               description: "The kernel killed a process of dmc-268-api-prod-api-1 for lack of memory in the last 10 minutes."
+
+  # Dead letters and a backlog in prod while staging is quiet: each alert names prod alone.
+  - interval: 30s
+    input_series:
+      - series: 'rabbitmq_detailed_queue_messages{environment="staging", queue="reviews.dlq", vhost="/"}'
+        values: "0x40"
+      - series: 'rabbitmq_detailed_queue_messages{environment="prod", queue="reviews.dlq", vhost="/"}'
+        values: "0 0 2x40"
+      - series: 'rabbitmq_detailed_queue_messages_ready{environment="staging", queue="review.run.fast", vhost="/"}'
+        values: "5x30"
+      - series: 'rabbitmq_detailed_queue_messages_ready{environment="prod", queue="review.run.fast", vhost="/"}'
+        values: "25x30"
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: ReviewDeadLetters
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              environment: prod
+              kind: event
+            exp_annotations:
+              summary: "2 new message(s) in reviews.dlq in the last 15 minutes"
+              description: "Retries exhausted, an unknown schema or an unexpected error (docs/PIPELINE_SPEC.md §4.4); the operator reads the DLQ."
+      - eval_time: 11m
+        alertname: ReviewQueueBacklog
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              environment: prod
+              queue: review.run.fast
+            exp_annotations:
+              summary: "25 message(s) wait in review.run.fast"
+              description: "The queue has held more than 20 ready messages for 10 minutes; workers do not keep up."
+
+  # Stuck runs, slow LLM calls and runs skipped by the daily budget in prod only.
+  - interval: 1m
+    input_series:
+      - series: 'dmc_runs_active_stale_queued{environment="staging"}'
+        values: "0x12"
+      - series: 'dmc_runs_active_stale_queued{environment="prod"}'
+        values: "0 0 2x10"
+      - series: 'dmc_llm_calls_15m_p95_seconds{environment="staging"}'
+        values: "10x30"
+      - series: 'dmc_llm_calls_15m_calls{environment="staging"}'
+        values: "5x30"
+      - series: 'dmc_llm_calls_15m_p95_seconds{environment="prod"}'
+        values: "80x30"
+      - series: 'dmc_llm_calls_15m_calls{environment="prod"}'
+        values: "1x10 5x20"
+      - series: 'dmc_runs_budget_paused_15m_runs{environment="staging"}'
+        values: "0x12"
+      - series: 'dmc_runs_budget_paused_15m_runs{environment="prod"}'
+        values: "0 0 2x5 0x70"
+    alert_rule_test:
+      - eval_time: 8m
+        alertname: ReviewRunsStuckInQueue
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              environment: prod
+            exp_annotations:
+              summary: "2 run(s) queued for more than 10 minutes"
+              description: "Runs stay queued past available_at (T18 of docs/PIPELINE_SPEC.md §3)."
+      - eval_time: 21m
+        alertname: LlmLatencyHigh
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              environment: prod
+            exp_annotations:
+              summary: "LLM calls are slow: p95 1m 20s over 15 minutes"
+              description: "The fast-engine call timeout is 90 s (docs/PIPELINE_SPEC.md §3)."
+      - eval_time: 2m
+        alertname: ReviewRunsBudgetPaused
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              environment: prod
+              kind: event
+            exp_annotations:
+              summary: "2 review run(s) skipped with budget_paused in the last 15 minutes"
+              description: "The daily budget left in a workspace is below the cost limit of a fast run, so its runs are skipped, not reviewed (docs/PIPELINE_SPEC.md §5.3, §6). The metric counts runs and names no workspace."

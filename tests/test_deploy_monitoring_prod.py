@@ -50,6 +50,32 @@ def test_every_alert_has_a_case_that_checks_its_environment() -> None:
     assert alerts - with_environment == set()
 
 
+# The CPU of the host is one number for both environments: its alert is shared by design.
+SHARED_BY_DESIGN = {"HostCpuHigh"}
+
+
+def test_every_alert_that_groups_by_environment_has_a_prod_case() -> None:
+    rules = _load(MONITORING / "prometheus" / "rules" / "alerts.yml")
+    grouping = {
+        rule["alert"]
+        for group in rules["groups"]
+        for rule in group["rules"]
+        if re.search(r"\bby \(\s*environment\b", rule["expr"])
+    } - SHARED_BY_DESIGN
+    cases = _load(ROOT / "tests" / "monitoring" / "alerts.test.yml")
+    prod_cases = {
+        check["alertname"]
+        for case in cases["tests"]
+        for check in case.get("alert_rule_test", [])
+        for expected in check.get("exp_alerts") or []
+        if expected.get("exp_labels", {}).get("environment") == "prod"
+    }
+
+    # A rule that groups by environment can hide a fault of one environment behind the other
+    # one if it is changed: each needs a case where only prod is faulty.
+    assert grouping - prod_cases == set()
+
+
 PROMETHEUS_YML = MONITORING / "prometheus" / "prometheus.yml"
 RELABEL_FIELDS = {"source_labels", "regex", "target_label", "replacement", "action"}
 
