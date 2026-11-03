@@ -17,8 +17,8 @@ from app.modules.reviews.application.review_output import (
 )
 from app.modules.reviews.application.run_coverage import RunCoverage
 from app.modules.reviews.application.store_review_output import StoreReviewOutput
+from tests.review_output_fakes import RecordingFactory, RecordingProvider, RecordingRepository
 from tests.test_clean_without_text_result import Queue, Repository, Uow, answer
-from tests.test_review_output import RecordingFactory, RecordingProvider, RecordingRepository
 from tests.test_run_coverage import code_snapshot, coverage
 
 _RUN = UUID(int=213)

@@ -34,8 +34,8 @@ from app.modules.reviews.application.run_coverage import project_run_coverage, r
 from app.modules.reviews.application.saved_review_result import read_saved_review_result
 from app.modules.reviews.application.store_review_output import StoreReviewOutput
 from app.modules.reviews.infrastructure.llm.models import GatewayReviewModel
+from tests.execute_review_fakes import FakeVerifierModel, _make_test_snapshot, conventions
 from tests.test_clean_without_text_result import Queue, Repository, Uow, answer
-from tests.test_execute_review import FakeVerifierModel, _make_test_snapshot, conventions
 from tests.test_gateway_review_model import RUN, Transport, _gateway
 
 

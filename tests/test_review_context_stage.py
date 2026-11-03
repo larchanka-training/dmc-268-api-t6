@@ -1147,7 +1147,7 @@ def test_prepare_snapshot_and_stage_begin_raise_on_unknown_profile_version() -> 
     from unittest.mock import AsyncMock
 
     from app.modules.reviews.application.policy_errors import PolicyError, PolicyErrorCode
-    from tests.test_execute_review import _make_test_snapshot
+    from tests.execute_review_fakes import _make_test_snapshot
     from tests.test_prepare_policy_snapshot import _pins
 
     # 1. PreparePolicySnapshot.execute raises on unknown budget_profile_version in pins

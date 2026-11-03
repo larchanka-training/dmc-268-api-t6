@@ -33,8 +33,8 @@ from app.modules.reviews.application.review_context import ReviewContextPayload
 from app.modules.reviews.application.review_output import VerifiedReviewOutput
 from app.modules.reviews.application.store_review_output import StoreReviewOutput
 from app.modules.reviews.infrastructure.llm.models import GatewayReviewModel
+from tests.execute_review_fakes import FakeVerifierModel, _make_test_snapshot, conventions
 from tests.test_clean_without_text_result import Queue, Repository, Uow, answer, finalize
-from tests.test_execute_review import FakeVerifierModel, _make_test_snapshot, conventions
 from tests.test_gateway_review_model import RUN, Transport, _gateway
 from tests.test_run_coverage import code_snapshot, coverage
 
