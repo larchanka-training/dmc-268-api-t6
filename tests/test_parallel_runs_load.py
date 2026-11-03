@@ -868,17 +868,18 @@ def test_main_passes_loopback_port_values_and_numeric_ports(
     assert capsys.readouterr().err == ""
 
 
-def test_override_probes_rabbitmq_only_after_the_server_wrote_its_cookie() -> None:
+def test_override_keeps_the_base_probe_that_waits_for_the_rabbitmq_cookie() -> None:
     text = (REPO_ROOT / "deploy/load/compose.parallel-runs.yml").read_text()
     base = (REPO_ROOT / "docker-compose.yml").read_text()
+    rabbitmq = re.search(r"(?ms)^  rabbitmq:\n(.*?)(?=^  [a-z][a-z-]*:\n|\Z)", text)
 
-    # Without the guard, a root probe can create a cookie the server cannot read (eacces).
+    # Without the guard, a root probe can create a cookie the server cannot read (eacces). The
+    # base carries it since #257; a healthcheck here would replace it.
+    assert rabbitmq is None or "healthcheck:" not in rabbitmq.group(1)
     assert (
         '      test: ["CMD-SHELL", "test -f /var/lib/rabbitmq/.erlang.cookie'
         ' && rabbitmq-diagnostics -q ping"]\n'
-    ) in text.split("\n  rabbitmq:\n", 1)[1]
-    # Drift guard: a change of the base probe needs a new look at this override.
-    assert '      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]\n' in base
+    ) in base
 
 
 # --- the scenario on a fake stack ------------------------------------------------------------

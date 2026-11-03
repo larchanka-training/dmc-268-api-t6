@@ -227,7 +227,9 @@ services:
       - rabbitmq-data:/var/lib/rabbitmq
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      # The probe runs as root and pings only once the server wrote its own .erlang.cookie: on a
+      # fresh volume a bare ping creates a root-only cookie the server cannot read (eacces, #257).
+      test: ["CMD-SHELL", "test -f /var/lib/rabbitmq/.erlang.cookie && rabbitmq-diagnostics -q ping"]
       interval: 10s
       timeout: 10s
       retries: 10

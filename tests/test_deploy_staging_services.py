@@ -2138,6 +2138,19 @@ def test_worker_stop_grace_exceeds_the_application_shutdown_deadline(compose_pat
     assert '    command: ["python", "-m", "app.worker"]' in worker
 
 
+# The probe runs as root with HOME=/var/lib/rabbitmq. On a fresh volume a bare ping can create a
+# root-only .erlang.cookie before the server reads it; the server (uid 100) then exits 1 (eacces).
+RABBITMQ_PROBE = "test -f /var/lib/rabbitmq/.erlang.cookie && rabbitmq-diagnostics -q ping"
+
+
+@pytest.mark.parametrize("compose_path", ["docker-compose.yml", "deploy/compose/staging.yml"])
+def test_rabbitmq_probe_waits_for_the_cookie_of_the_server(compose_path: str) -> None:
+    compose = _read(compose_path)
+    match = re.search(r"(?ms)^  rabbitmq:\n(.*?)(?=^  [a-z][a-z-]*:\n|\Z)", compose)
+    assert match is not None
+    assert f'      test: ["CMD-SHELL", "{RABBITMQ_PROBE}"]\n' in match.group(1)
+
+
 # --- GitLab configuration recipients (#335) ---------------------------------------------------
 
 
