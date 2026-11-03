@@ -1,8 +1,9 @@
-# Unit tests of deploy/monitoring/prometheus/rules/alerts.yml, run by CI (job monitoring-validate):
+# Unit tests of deploy/monitoring/prometheus/rules/alerts.yml and sla.yml, run by CI (job monitoring-validate):
 #   docker run --rm --entrypoint promtool -v "$PWD:/w:ro" -w /w <prometheus image> \
 #     test rules tests/monitoring/alerts.test.yml
 rule_files:
   - ../../deploy/monitoring/prometheus/rules/alerts.yml
+  - ../../deploy/monitoring/prometheus/rules/sla.yml
 
 evaluation_interval: 30s
 
@@ -1273,3 +1274,187 @@ tests:
             exp_annotations:
               summary: "2 review run(s) skipped with budget_paused in the last 15 minutes"
               description: "The daily budget left in a workspace is below the cost limit of a fast run, so its runs are skipped, not reviewed (docs/PIPELINE_SPEC.md §5.3, §6). The metric counts runs and names no workspace."
+
+  # SLA availability of prod (docs/MONITORING.md §12). The timeline starts on 1 January 1970, a
+  # month of 31 days: the allowance is 0.5 % of 2 678 400 s = 13 392 s (223.2 minutes), half of it
+  # 6 696 s. Probes every minute; a failed probe counts 60 s of downtime. promtool compares floats
+  # exactly, so the recorded values are rounded.
+  # 100 minutes of downtime of api stay below half of the allowance; the other prod name, which
+  # never fails, and a staging probe that fails the whole time raise nothing and have no sla: series.
+  - interval: 1m
+    input_series:
+      - series: 'probe_success{job="blackbox", environment="prod", host="api.example.test", instance="https://api.example.test/healthcheck"}'
+        values: "1x59 0x99 1x200"
+      - series: 'probe_success{job="blackbox", environment="prod", host="ui.example.test", instance="https://ui.example.test/"}'
+        values: "1x300"
+      - series: 'probe_success{job="blackbox", environment="staging", host="staging-api.example.test", instance="https://staging-api.example.test/healthcheck"}'
+        values: "0x300"
+    alert_rule_test:
+      - eval_time: 4h
+        alertname: SlaAvailabilityAtRisk
+        exp_alerts: []
+      - eval_time: 4h
+        alertname: SlaAvailabilityBreached
+        exp_alerts: []
+    promql_expr_test:
+      - expr: round(sla:downtime_seconds:month)
+        eval_time: 4h
+        exp_samples:
+          - labels: '{environment="prod", host="api.example.test"}'
+            value: 6000
+          - labels: '{environment="prod", host="ui.example.test"}'
+            value: 0
+      - expr: sla:downtime_seconds:month{environment="staging"}
+        eval_time: 4h
+        exp_samples: []
+      - expr: sla:month_start_timestamp_seconds
+        eval_time: 4h
+        exp_samples:
+          - labels: 'sla:month_start_timestamp_seconds{environment="shared"}'
+            value: 0
+      - expr: sla:downtime_budget_seconds:month
+        eval_time: 4h
+        exp_samples:
+          - labels: 'sla:downtime_budget_seconds:month{environment="prod"}'
+            value: 13392
+
+  # 120 minutes of downtime are more than half of the allowance (7 200 s of 13 392 s, 53.76 %):
+  # the warning fires for api only, the critical alert does not. Before the second hour of
+  # downtime is over (60 minutes, 3 660 s) nothing fires. The availability of the month so far is
+  # 1 - 7200 / 14400 = 50 %, and 100 % for the name that never failed.
+  - interval: 1m
+    input_series:
+      - series: 'probe_success{job="blackbox", environment="prod", host="api.example.test", instance="https://api.example.test/healthcheck"}'
+        values: "1x59 0x119 1x200"
+      - series: 'probe_success{job="blackbox", environment="prod", host="ui.example.test", instance="https://ui.example.test/"}'
+        values: "1x300"
+    alert_rule_test:
+      - eval_time: 2h
+        alertname: SlaAvailabilityAtRisk
+        exp_alerts: []
+      - eval_time: 4h
+        alertname: SlaAvailabilityAtRisk
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              environment: prod
+              host: api.example.test
+            exp_annotations:
+              summary: "api.example.test: 53.76% of the monthly downtime allowance is spent"
+              description: "Prod downtime of this month so far (failed probes, deploy blips and maintenance included) is more than half of the allowance of 0.5 %; at 100 % SlaAvailabilityBreached takes over and this alert resolves (docs/MONITORING.md §12)."
+      - eval_time: 4h
+        alertname: SlaAvailabilityBreached
+        exp_alerts: []
+    promql_expr_test:
+      - expr: round(sla:downtime_seconds:month)
+        eval_time: 2h
+        exp_samples:
+          - labels: '{environment="prod", host="api.example.test"}'
+            value: 3660
+          - labels: '{environment="prod", host="ui.example.test"}'
+            value: 0
+      - expr: round(sla:downtime_seconds:month)
+        eval_time: 4h
+        exp_samples:
+          - labels: '{environment="prod", host="api.example.test"}'
+            value: 7200
+          - labels: '{environment="prod", host="ui.example.test"}'
+            value: 0
+      - expr: round(1000 * sla:availability_ratio:month)
+        eval_time: 4h
+        exp_samples:
+          - labels: '{environment="prod", host="api.example.test"}'
+            value: 500
+          - labels: '{environment="prod", host="ui.example.test"}'
+            value: 1000
+
+  # 240 minutes of downtime exhaust the allowance: the critical alert fires and the warning
+  # resolves, as with the monthly LLM budget. After 4 hours api has spent 10 860 s (81 %): the
+  # warning only.
+  - interval: 1m
+    input_series:
+      - series: 'probe_success{job="blackbox", environment="prod", host="api.example.test", instance="https://api.example.test/healthcheck"}'
+        values: "1x59 0x239 1x100"
+    alert_rule_test:
+      - eval_time: 4h
+        alertname: SlaAvailabilityAtRisk
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              environment: prod
+              host: api.example.test
+            exp_annotations:
+              summary: "api.example.test: 81.09% of the monthly downtime allowance is spent"
+              description: "Prod downtime of this month so far (failed probes, deploy blips and maintenance included) is more than half of the allowance of 0.5 %; at 100 % SlaAvailabilityBreached takes over and this alert resolves (docs/MONITORING.md §12)."
+      - eval_time: 4h
+        alertname: SlaAvailabilityBreached
+        exp_alerts: []
+      - eval_time: 6h
+        alertname: SlaAvailabilityBreached
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              environment: prod
+              host: api.example.test
+            exp_annotations:
+              summary: "api.example.test: the monthly downtime allowance is spent (107.5%)"
+              description: "Prod downtime of this month so far has reached the allowance of 0.5 % (availability 99.5 %); the alert stays until the month ends (docs/MONITORING.md §12)."
+      - eval_time: 6h
+        alertname: SlaAvailabilityAtRisk
+        exp_alerts: []
+
+  # A prod name that is not probed has no series and raises nothing; when it joins the probes
+  # (ui in PROBE_PROD_HOSTS; its first probe is in minute 121) and fails, the same rules alert for
+  # it, with no change: 180 failed probes by hour 5, 240 by hour 6. Then it
+  # leaves the probes (its series ends): the critical alert resolves within the 30 minutes that the
+  # rules look back for a probe sample, not at the end of the month.
+  - interval: 1m
+    input_series:
+      - series: 'probe_success{job="blackbox", environment="prod", host="api.example.test", instance="https://api.example.test/healthcheck"}'
+        values: "1x420"
+      - series: 'probe_success{job="blackbox", environment="prod", host="ui.example.test", instance="https://ui.example.test/"}'
+        values: "_x121 0x239 stale"
+    alert_rule_test:
+      - eval_time: 1h30m
+        alertname: SlaAvailabilityAtRisk
+        exp_alerts: []
+      - eval_time: 5h
+        alertname: SlaAvailabilityAtRisk
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              environment: prod
+              host: ui.example.test
+            exp_annotations:
+              summary: "ui.example.test: 80.65% of the monthly downtime allowance is spent"
+              description: "Prod downtime of this month so far (failed probes, deploy blips and maintenance included) is more than half of the allowance of 0.5 %; at 100 % SlaAvailabilityBreached takes over and this alert resolves (docs/MONITORING.md §12)."
+      - eval_time: 6h
+        alertname: SlaAvailabilityBreached
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              environment: prod
+              host: ui.example.test
+            exp_annotations:
+              summary: "ui.example.test: the monthly downtime allowance is spent (107.5%)"
+              description: "Prod downtime of this month so far has reached the allowance of 0.5 % (availability 99.5 %); the alert stays until the month ends (docs/MONITORING.md §12)."
+      - eval_time: 6h25m
+        alertname: SlaAvailabilityBreached
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              environment: prod
+              host: ui.example.test
+            exp_annotations:
+              summary: "ui.example.test: the monthly downtime allowance is spent (107.5%)"
+              description: "Prod downtime of this month so far has reached the allowance of 0.5 % (availability 99.5 %); the alert stays until the month ends (docs/MONITORING.md §12)."
+      - eval_time: 6h35m
+        alertname: SlaAvailabilityBreached
+        exp_alerts: []
+    promql_expr_test:
+      - expr: sla:downtime_seconds:month{host="ui.example.test"}
+        eval_time: 1h30m
+        exp_samples: []
+      - expr: sla:downtime_seconds:month{host="ui.example.test"}
+        eval_time: 6h35m
+        exp_samples: []
