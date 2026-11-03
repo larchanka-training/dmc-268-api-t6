@@ -2151,6 +2151,15 @@ def test_rabbitmq_probe_waits_for_the_cookie_of_the_server(compose_path: str) ->
     assert f'      test: ["CMD-SHELL", "{RABBITMQ_PROBE}"]\n' in match.group(1)
 
 
+def test_ci_rabbitmq_service_probe_waits_for_the_cookie_of_the_server() -> None:
+    # Every job gets a fresh anonymous volume. --health-cmd is already the shell form.
+    workflow = WORKFLOW.read_text(encoding="utf-8")
+    services = re.findall(r"(?m)^      rabbitmq:\n((?:        .*\n)+)", workflow)
+    assert services
+    for service in services:
+        assert f'          --health-cmd "{RABBITMQ_PROBE}"\n' in service
+
+
 # --- GitLab configuration recipients (#335) ---------------------------------------------------
 
 
