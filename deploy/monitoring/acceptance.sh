@@ -276,8 +276,9 @@ else
   echo "LLM query as grafana_reader: $(error_line "${llm}")"
   record FAIL "LLM latency (Grafana source)" "query as grafana_reader failed"
 fi
-# The queues of the review pipeline, as in the queue alerts (alerts.yml).
-if queues="$(promql 'sum by (queue) (rabbitmq_detailed_queue_messages_ready{queue=~"review\\.run\\..+|review\\.publish"})' 2>&1)"; then
+# The queues of the review pipeline, as in the queue alerts (alerts.yml). The run checks staging,
+# the environment the dashboard opens with: prod series carry environment="prod".
+if queues="$(promql 'sum by (queue) (rabbitmq_detailed_queue_messages_ready{queue=~"review\\.run\\..+|review\\.publish", environment="staging"})' 2>&1)"; then
   printf 'Ready messages in the review queues:\n%s\n' "${queues}"
   if grep -q 'queue="review\.publish"' <<<"${queues}" && grep -q 'queue="review\.run\.' <<<"${queues}"; then
     record OK "queue size (RabbitMQ)" "$(grep -c 'queue=' <<<"${queues}") review queues reported"
@@ -290,8 +291,9 @@ fi
 if [[ "${DEPLOY_MODE}" != edge ]]; then
   record SKIP "RPS (edge proxy)" "no edge proxy in deploy mode ${DEPLOY_MODE}"
 # The selector of the RPS panels: per_host of Caddy puts requests with an unknown Host (scanners
-# hitting the IP) into _other, which the dashboard does not show.
-elif rps="$(promql 'sum by (host) (rate(caddy_http_request_duration_seconds_count{host!="_other"}[5m]))' 2>&1)"; then
+# hitting the IP) into _other, which the dashboard does not show; environment="staging" as in the
+# dashboard with its default environment.
+elif rps="$(promql 'sum by (host) (rate(caddy_http_request_duration_seconds_count{host!="_other", environment="staging"}[5m]))' 2>&1)"; then
   printf 'Requests per second by host (5m):\n%s\n' "${rps}"
   hosts="$(grep -c 'host=' <<<"${rps}" || true)"
   # Requests count only on the hosts of the application, as in ApiHigh5xxRate (alerts.yml): the

@@ -25,7 +25,11 @@ services:
     networks:
       prod-metrics: {}
 
+  # Read by grafana/provisioning/datasources: the read-only role of the prod database.
   grafana:
+    environment:
+      PROD_POSTGRES_DB: ${PROD_POSTGRES_DB:?PROD_POSTGRES_DB is required}
+      PROD_GRAFANA_DB_PASSWORD: ${PROD_GRAFANA_DB_PASSWORD:?PROD_GRAFANA_DB_PASSWORD is required}
     networks:
       prod-sql: {}
 

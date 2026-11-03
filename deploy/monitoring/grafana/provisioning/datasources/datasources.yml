@@ -42,3 +42,23 @@ datasources:
     access: proxy
     url: http://tempo:3200
     editable: false
+
+  # The same read-only role in the prod database, reached through the TCP relay of compose.prod.yml
+  # on its own internal network (prod-sql), the only one Grafana shares with it. The dashboard
+  # variable environment picks this uid for prod. Without the prod overlay the environment
+  # variables are empty and the source does not connect.
+  - name: PostgreSQL prod
+    uid: postgres-prod
+    type: grafana-postgresql-datasource
+    access: proxy
+    url: relay-prod:5432
+    user: grafana_reader
+    editable: false
+    jsonData:
+      database: $PROD_POSTGRES_DB
+      sslmode: disable
+      postgresVersion: 1700
+      maxOpenConns: 2
+      maxIdleConns: 1
+    secureJsonData:
+      password: $PROD_GRAFANA_DB_PASSWORD

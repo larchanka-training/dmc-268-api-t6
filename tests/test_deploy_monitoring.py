@@ -392,13 +392,13 @@ def _panel_with(metric: str) -> Any:
 
 
 def test_dashboard_shows_whether_each_probed_name_is_up() -> None:
-    panel = _panel_with('probe_success{job="blackbox"}')
+    panel = _panel_with("probe_success{")
 
     assert panel is not None
     assert panel["datasource"] == PROMETHEUS
     [target] = panel["targets"]
     assert target["datasource"] == PROMETHEUS
-    assert target["expr"] == 'probe_success{job="blackbox"}'
+    assert target["expr"] == 'probe_success{job="blackbox", environment="${environment:text}"}'
     assert target["legendFormat"] == "{{host}}"
     # One value per name: the default text mode would hide which name it is.
     assert panel["options"]["textMode"] == "value_and_name"
@@ -408,7 +408,7 @@ def test_dashboard_shows_whether_each_probed_name_is_up() -> None:
 
 
 def test_dashboard_shows_certificate_days_coloured_where_the_alerts_fire() -> None:
-    panel = _panel_with('probe_ssl_earliest_cert_expiry{job="blackbox"}')
+    panel = _panel_with("probe_ssl_earliest_cert_expiry{")
     rules = _read(MONITORING / "prometheus" / "rules" / "alerts.yml")
     days = {
         alert: int(limit)
@@ -425,7 +425,8 @@ def test_dashboard_shows_certificate_days_coloured_where_the_alerts_fire() -> No
     assert target["datasource"] == PROMETHEUS
     # The same 10-minute hold as the alerts: a probe without a TLS answer does not blank it.
     assert target["expr"] == (
-        '(last_over_time(probe_ssl_earliest_cert_expiry{job="blackbox"}[10m]) - time()) / 86400'
+        "(last_over_time(probe_ssl_earliest_cert_expiry"
+        '{job="blackbox", environment="${environment:text}"}[10m]) - time()) / 86400'
     )
     assert target["legendFormat"] == "{{host}}"
     assert panel["options"]["textMode"] == "value_and_name"

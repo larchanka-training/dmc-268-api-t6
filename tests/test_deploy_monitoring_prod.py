@@ -545,3 +545,102 @@ def test_monitoring_deploy_gets_the_prod_dir_on_the_course_vps_only() -> None:
     assert envs is not None
     assert "PROD_API_DIR" in envs.group(1).split(",")
     assert "PROD_API_DIR" not in _job("deploy-staging")
+
+
+# --- dashboard and data sources -------------------------------------------------------------
+
+GRAFANA = MONITORING / "grafana"
+DASHBOARD = GRAFANA / "dashboards" / "overview.json"
+SELECTED = 'environment="${environment:text}"'
+# Host-level panels and the budget across environments show everything the stack scrapes.
+UNFILTERED_PANELS = {"Host CPU", "Host memory", "Root filesystem used", "LLM spend this month"}
+CONTAINER_PANELS = {"Container CPU", "Container memory"}
+
+
+def _panels() -> list[dict[str, Any]]:
+    panels: list[dict[str, Any]] = json.loads(DASHBOARD.read_text(encoding="utf-8"))["panels"]
+    return panels
+
+
+def _data_sources() -> dict[str, dict[str, Any]]:
+    config = _load(GRAFANA / "provisioning" / "datasources" / "datasources.yml")
+    return {source["uid"]: source for source in config["datasources"]}
+
+
+def test_dashboard_switches_between_environments() -> None:
+    dashboard = json.loads(DASHBOARD.read_text(encoding="utf-8"))
+    [variable] = dashboard["templating"]["list"]
+
+    assert variable["name"] == "environment"
+    assert variable["type"] == "custom"
+    # The text is the environment label, the value is the uid of its PostgreSQL data source.
+    assert variable["query"] == "staging : postgres,prod : postgres-prod"
+    assert variable["current"]["text"] == "staging"
+    assert variable["current"]["value"] == "postgres"
+    assert variable["multi"] is False
+    assert variable["includeAll"] is False
+    # The dashboard is no longer the staging one.
+    assert dashboard["title"] == "AI Code Reviewer — overview"
+    assert dashboard["tags"] == ["dmc-268"]
+
+
+def test_prometheus_panels_read_the_selected_environment() -> None:
+    checked = 0
+    for panel in _panels():
+        for target in panel.get("targets", []):
+            if "expr" not in target:
+                continue
+            checked += 1
+            if panel["title"] in UNFILTERED_PANELS:
+                assert "environment" not in target["expr"], panel["title"]
+            elif panel["title"] in CONTAINER_PANELS:
+                # Containers of the monitoring and edge projects are shared by both.
+                assert 'environment=~"${environment:text}|shared"' in target["expr"], panel["title"]
+            else:
+                assert SELECTED in target["expr"], (panel["title"], target["expr"])
+    assert checked == 27
+
+
+def test_sql_panels_read_the_database_of_the_selected_environment() -> None:
+    sql_panels = [
+        panel
+        for panel in _panels()
+        if any("rawSql" in target for target in panel.get("targets", []))
+    ]
+    postgres_uids = {
+        uid
+        for uid, source in _data_sources().items()
+        if source["type"].endswith("postgresql-datasource")
+    }
+    [variable] = json.loads(DASHBOARD.read_text(encoding="utf-8"))["templating"]["list"]
+    values = {option.split(":")[1].strip() for option in variable["query"].split(",")}
+
+    assert len(sql_panels) == 9
+    for panel in sql_panels:
+        assert panel["datasource"] == {
+            "type": "grafana-postgresql-datasource",
+            "uid": "${environment}",
+        }
+        for target in panel["targets"]:
+            assert target["datasource"] == panel["datasource"]
+    assert values == postgres_uids
+
+
+def test_prod_source_reads_through_the_relay_as_grafana_reader() -> None:
+    source = _data_sources()["postgres-prod"]
+    grafana = _load(MONITORING / "compose.prod.yml")["services"]["grafana"]
+
+    assert source["type"] == "grafana-postgresql-datasource"
+    assert source["url"] == "relay-prod:5432"
+    assert source["user"] == "grafana_reader"
+    assert source["jsonData"]["database"] == "$PROD_POSTGRES_DB"
+    assert source["secureJsonData"] == {"password": "$PROD_GRAFANA_DB_PASSWORD"}
+    assert source["editable"] is False
+    # Staging keeps its uid and name: a rename would clash under provisioning.
+    assert _data_sources()["postgres"]["name"] == "PostgreSQL"
+    assert grafana["environment"] == {
+        "PROD_POSTGRES_DB": "${PROD_POSTGRES_DB:?PROD_POSTGRES_DB is required}",
+        "PROD_GRAFANA_DB_PASSWORD": (
+            "${PROD_GRAFANA_DB_PASSWORD:?PROD_GRAFANA_DB_PASSWORD is required}"
+        ),
+    }

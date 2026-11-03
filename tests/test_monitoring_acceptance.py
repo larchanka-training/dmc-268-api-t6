@@ -410,9 +410,10 @@ def test_the_dashboard_checks_use_the_selectors_and_range_of_the_dashboard(tmp_p
         for target in panel.get("targets", [])
         if "caddy_http_request_duration_seconds_count" in target.get("expr", "")
     ]
+    # The acceptance run checks staging: the environment the dashboard shows by default.
     [selector] = {
         m
-        for e in rps_exprs
+        for e in (expr.replace("${environment:text}", "staging") for expr in rps_exprs)
         for m in re.findall(r"caddy_http_request_duration_seconds_count\{[^}]*\}", e)
         if "code=" not in m
     }
