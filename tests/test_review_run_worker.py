@@ -739,7 +739,7 @@ def _succeeded(**change: Any) -> CheckRunReport:
         (_succeeded(verdict="blocking", review_event="REQUEST_CHANGES"), "failure"),
         (_succeeded(verdict="blocking"), "neutral"),
         (
-            # Every finding suppressed as a repeat: no inline comment, the verdict stays.
+            # A review with findings only in its body: the event alone decides.
             _succeeded(verdict="blocking", review_event="REQUEST_CHANGES", inline_count=0),
             "failure",
         ),

@@ -32,6 +32,10 @@ _LOGGER = logging.getLogger(__name__)
 # Three in-process retries after the first try (§3): pauses 2 s, 8 s, 30 s.
 PUBLISH_RETRY_PAUSES = (timedelta(seconds=2), timedelta(seconds=8), timedelta(seconds=30))
 MAX_RETRY_AFTER = timedelta(seconds=60)
+# The GitHub publication trace is a contract: check_run_report reads the event back (§7).
+GITHUB_PUBLISH_TOOL = "github.publish_review"
+TRACE_REVIEW_EVENT = "review_event"
+TRACE_GITHUB_REVIEW_ID = "github_review_id"
 
 
 @dataclass(frozen=True)
@@ -281,7 +285,7 @@ def publication_route(provider: str, project_id: int) -> PublicationRoute | None
     if provider == "github":
         return PublicationRoute(
             gitlab=False,
-            tool="github.publish_review",
+            tool=GITHUB_PUBLISH_TOOL,
             error_prefix="github",
             writes_check_run=True,
             project_id=None,
@@ -630,7 +634,7 @@ class PublishRunReview:
         request = {
             "head_sha": submission.commit_sha,
             "findings_hash": submission.findings_hash,
-            "review_event": submission.event,
+            TRACE_REVIEW_EVENT: submission.event,
             "inline_count": len(submission.findings),
             "try": try_no,
         }
@@ -665,7 +669,7 @@ class PublishRunReview:
             else:
                 assert self._reviews is not None
                 result = await self._reviews.submit_review(submission, checkpoint=checkpoint)
-                response = {"github_review_id": result.review_id}
+                response = {TRACE_GITHUB_REVIEW_ID: result.review_id}
         except PublishError as exc:
             result = exc
             response = {"error": {"http_status": exc.http_status, "message": str(exc)[:1000]}}
