@@ -548,6 +548,8 @@ class BitbucketRepositorySnapshotSource:
         )
         if merge.get("hash") != base_sha:
             return Comparison(None, (), False)
+        # Bitbucket's diffstat spec is source..destination, unlike git diff base..head.
+        # https://developer.atlassian.com/cloud/bitbucket/rest/api-group-commits/#compare-two-commit-diff-stats
         suffix = f"diffstat/{head_sha}..{base_sha}"
         target = await self._bound()
         endpoint = f"/2.0/repositories/%7B%7D/%7B{target.repository_uuid}%7D/{suffix}"

@@ -902,6 +902,45 @@ def test_diffstat_without_declared_size_cannot_authorize_incremental_manifest() 
     asyncio.run(exercise())
 
 
+def test_compare_uses_bitbucket_source_then_destination_order() -> None:
+    base = "b" * 40
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith(f"/merge-base/{base}..{_SHA}"):
+            return httpx.Response(200, json={"hash": base})
+        if request.url.path.endswith(f"/diffstat/{_SHA}..{base}"):
+            return httpx.Response(
+                200,
+                json={
+                    "size": 3,
+                    "values": [
+                        {"status": "added", "old": None, "new": {"path": "refresh_probe.py"}},
+                        {"status": "removed", "old": {"path": "removed.py"}, "new": None},
+                        {
+                            "status": "renamed",
+                            "old": {"path": "before.py"},
+                            "new": {"path": "after.py"},
+                        },
+                    ],
+                },
+            )
+        raise AssertionError(request.url.path)
+
+    async def exercise() -> None:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
+            comparison = await _source(_Credentials(), client).compare(base, _SHA)
+            assert comparison is not None
+            assert comparison.ancestry is Ancestry.AHEAD
+            assert comparison.complete
+            assert [(item.path, item.status, item.previous_path) for item in comparison.files] == [
+                ("refresh_probe.py", ChangeStatus.ADDED, None),
+                ("removed.py", ChangeStatus.REMOVED, None),
+                ("after.py", ChangeStatus.RENAMED, "before.py"),
+            ]
+
+    asyncio.run(exercise())
+
+
 @pytest.mark.parametrize("unsafe_path", ["bad\\name.py", "bad\x01name.py", "x" * 1025])
 @pytest.mark.parametrize("status", ["added", "removed", "renamed"])
 def test_unsafe_diffstat_path_uses_full_snapshot(unsafe_path: str, status: str) -> None:
