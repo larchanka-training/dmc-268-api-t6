@@ -196,15 +196,40 @@ def test_request_series_get_the_environment_of_their_host(name: str, environment
 
 
 @pytest.mark.parametrize(
-    ("metric", "environment"),
+    ("series", "environment"),
     [
-        ("dmc_pg_backup_last_success_timestamp_seconds", "staging"),
-        ("dmc_llm_monthly_budget_usd", "shared"),
-        ("node_cpu_seconds_total", "shared"),
+        # The textfile series carry their environment, written by the backup scripts.
+        (
+            {
+                "__name__": "dmc_pg_backup_last_success_timestamp_seconds",
+                "environment": "staging",
+            },
+            "staging",
+        ),
+        (
+            {"__name__": "dmc_pg_backup_last_success_timestamp_seconds", "environment": "prod"},
+            "prod",
+        ),
+        ({"__name__": "dmc_pg_backup_offsite_last_run_success", "environment": "prod"}, "prod"),
+        # Unlabeled node and textfile series stay shared; no mapping by metric name any more.
+        ({"__name__": "dmc_llm_monthly_budget_usd"}, "shared"),
+        ({"__name__": "node_cpu_seconds_total"}, "shared"),
+        ({"__name__": "dmc_pg_backup_last_success_timestamp_seconds"}, "shared"),
     ],
 )
-def test_node_series_get_their_environment(metric: str, environment: str) -> None:
-    assert _series_environment("node", {"__name__": metric}) == environment
+def test_node_series_get_their_environment(series: dict[str, str], environment: str) -> None:
+    assert _series_environment("node", series) == environment
+
+
+def test_node_job_honors_the_labels_of_its_textfile_series() -> None:
+    # Without honor_labels Prometheus renames the exposed label to exported_environment and the
+    # job's own "shared" wins. _series_environment lets series labels win either way, so this
+    # direct assertion is the guard.
+    job = _jobs()["node"]
+
+    assert job["honor_labels"] is True
+    for rule in job.get("metric_relabel_configs", []):
+        assert "dmc_pg_backup" not in rule.get("regex", "")
 
 
 # --- prod scrapers and the relay (compose.prod.yml) -----------------------------------------

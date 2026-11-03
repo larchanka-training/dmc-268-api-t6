@@ -38,17 +38,14 @@ scrape_configs:
           environment: shared
 
   - job_name: node
+    # The backup scripts write their textfile series with their own environment label (staging or
+    # prod); honor_labels keeps it instead of renaming it to exported_environment. Every other
+    # node and textfile series carries none and stays shared.
+    honor_labels: true
     static_configs:
       - targets: ["node-exporter:9100"]
         labels:
           environment: shared
-    metric_relabel_configs:
-      # The backup service writes its textfile series without a label and only for staging; the
-      # prod backup of #308 labels its own and replaces this rule.
-      - source_labels: [__name__]
-        regex: dmc_pg_backup_.+
-        target_label: environment
-        replacement: staging
 
   - job_name: cadvisor
     # cAdvisor timestamps its samples: without this a stopped container lingers for 5 minutes.
