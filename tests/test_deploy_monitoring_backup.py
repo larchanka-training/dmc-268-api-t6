@@ -427,6 +427,8 @@ echo "rclone $*" >> "${STUB_RCLONE_LOG}"
 if [ "$1" = copy ] && [ -n "${STUB_PROMOTE_PARTIAL:-}" ]; then
   mv "${STUB_PROMOTE_PARTIAL}" "${STUB_PROMOTE_PARTIAL%.partial}"
 fi
+# A slow copy: the first pass is still running when the test stops the service.
+if [ "$1" = copy ] && [ -n "${STUB_COPY_SLEEP:-}" ]; then sleep "${STUB_COPY_SLEEP}"; fi
 if [ "$1" = copy ] && [ -n "${STUB_COPY_FAILS:-}" ]; then
   echo "Failed to copy: 403 Forbidden" >&2
   exit 1
@@ -435,7 +437,12 @@ fi
 
 
 def _run_offsite(
-    tmp_path: Path, *, unset: tuple[str, ...] = (), **env: str
+    tmp_path: Path,
+    *,
+    mode: str = "once",
+    prefix: tuple[str, ...] = (),
+    unset: tuple[str, ...] = (),
+    **env: str,
 ) -> tuple[subprocess.CompletedProcess[str], list[str], str]:
     tools = tmp_path / "rclonebin"
     tools.mkdir(exist_ok=True)
@@ -455,7 +462,7 @@ def _run_offsite(
         del environment[name]
     # /bin/sh, not PATH: a local sh wrapper first on PATH would run instead of the system shell.
     result = subprocess.run(
-        ["/bin/sh", str(MONITORING / "backup" / "offsite.sh"), "once"],
+        [*prefix, "/bin/sh", str(MONITORING / "backup" / "offsite.sh"), mode],
         env=environment,
         capture_output=True,
         text=True,
@@ -577,3 +584,33 @@ def test_both_environments_emit_the_same_help_and_type_lines(tmp_path: Path) -> 
     assert texts["staging"][1] == texts["prod"][1]
     assert len(texts["prod"][0]) == 12  # six families
     assert len(texts["prod"][1]) == 6  # three families
+
+
+def test_an_old_unlabeled_offsite_textfile_is_labeled_before_the_first_pass(
+    tmp_path: Path,
+) -> None:
+    # Until the first pass of the recreated service ends, the old file would sit beside the
+    # labeled one of the prod copy: one metric family with two label sets.
+    textfile = tmp_path / "pg_backup_offsite.prom"
+    text = (
+        "# HELP dmc_pg_backup_offsite_last_run_success 1 if the last copy pass succeeded.\n"
+        "# TYPE dmc_pg_backup_offsite_last_run_success gauge\n"
+        "dmc_pg_backup_offsite_last_run_success 1\n"
+        "# HELP dmc_pg_backup_offsite_last_success_timestamp_seconds Time of the last pass.\n"
+        "# TYPE dmc_pg_backup_offsite_last_success_timestamp_seconds gauge\n"
+        "dmc_pg_backup_offsite_last_success_timestamp_seconds 1793000000\n"
+    )
+    textfile.write_text(text, encoding="utf-8")
+    # SIGKILL while the slow first pass runs: only the start-up relabel can have touched the file.
+    stop = ("timeout", "-s", "KILL", "2")
+
+    _, _, first = _run_offsite(tmp_path, mode="loop", prefix=stop, STUB_COPY_SLEEP="3")
+    _, _, second = _run_offsite(tmp_path, mode="loop", prefix=stop, STUB_COPY_SLEEP="3")
+
+    assert 'dmc_pg_backup_offsite_last_run_success{environment="staging"} 1\n' in first
+    assert (
+        'dmc_pg_backup_offsite_last_success_timestamp_seconds{environment="staging"} 1793000000\n'
+        in first
+    )
+    assert "# TYPE dmc_pg_backup_offsite_last_run_success gauge\n" in first
+    assert second == first
