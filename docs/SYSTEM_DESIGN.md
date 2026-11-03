@@ -1844,8 +1844,7 @@ push и сверка с HEAD, а задание будит leader-рассылк
 - нового публичного coverage DTO, LLM-полей, `result_id` или таблиц результата нет;
 - полный #107, общий run-owned `file_omissions` #130/#168 и zero-LLM lifecycle no-text partial остаются целевыми,
   а не активированными #213;
-- остальные reflection coordinate drops (`line_absent`, `cross_hunk_range`, `anchor_not_visible`),
-  `evidence_not_shown` и verifier `insufficient_context` остаются за lifecycle #107/#130; их общее влияние на
+- остальные reflection coordinate drops, `evidence_not_shown` и verifier `insufficient_context` остаются за lifecycle #107/#130; их общее влияние на
   coverage не объявляется реализованным в #213.
 
 Всё перечисленное — канон в [PIPELINE_SPEC §2](PIPELINE_SPEC.md#2-фазы-внутри-running-и-трейс-run_actions); здесь не дублируется.
