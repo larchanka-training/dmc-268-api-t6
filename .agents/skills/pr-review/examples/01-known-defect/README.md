@@ -14,7 +14,12 @@ of a base component inside `src/shared/ui`. ui#139 (`4917c70a`, under ui#131) la
 **Not the target.** The same head drops the focus to the page when a cancel ends the run (§3b
 rule 3); ui#139 fixed that too. The pull request body declares it under «Known, not changed here»
 as present on `main` before the change, so the brief ranks it `info` at most. The first version of
-this case aimed at it; both manual runs passed it over, as the brief's rule says.
+this case aimed at it; neither manual run reported it, not even as `info`.
+
+**A limit of this case.** The same section of the body also names the line-41 defect («relies on
+antd's internal class … a guard belongs in `src/shared/ui`»), and the brief passes the body to the
+reviewers. So this case shows that a finding is tied to its line; example 04 shows a defect found
+in the code alone.
 
 ## Input
 
