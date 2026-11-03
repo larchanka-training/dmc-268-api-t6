@@ -17,6 +17,7 @@ import pytest
 import yaml  # type: ignore[import-untyped]
 
 from tests.monitoring_deploy_host import METADATA_GRANTS, Host, _grants, _job
+from tests.test_deploy_monitoring_backup import NO_OFFSITE, OFFSITE, PASSPHRASE
 
 pytest_plugins = ("tests.monitoring_deploy_host",)
 
@@ -523,17 +524,114 @@ def test_prod_roles_get_the_column_grants_of_staging(prod_host: Host) -> None:
     assert _grants(_sql_of(prod_host, "pgcontainer")) == METADATA_GRANTS
 
 
-def test_prod_database_gets_no_backup_role(prod_host: Host) -> None:
+def test_prod_database_gets_the_backup_role(prod_host: Host) -> None:
     result = _deploy_with_prod(prod_host)
     sql = _sql_of(prod_host, "pgcontainer-prod")
+    password = prod_host.env()["PROD_PG_BACKUP_PASSWORD"]
 
     assert result.returncode == 0, result.stderr
-    # The backup of prod comes with its own part: no unused high-privilege role in the database.
-    assert "backup_agent" not in sql
-    assert "pg_read_all_data" not in sql
-    assert "PROD_PG_BACKUP_PASSWORD" not in prod_host.env_file.read_text(encoding="utf-8")
-    # Staging is unchanged.
-    assert "GRANT pg_read_all_data TO backup_agent;" in _sql_of(prod_host, "pgcontainer")
+    assert "GRANT pg_read_all_data TO backup_agent;" in sql
+    assert (
+        "ALTER ROLE backup_agent WITH LOGIN NOSUPERUSER CREATEDB NOCREATEROLE NOREPLICATION "
+        "CONNECTION LIMIT 3;"
+    ) in sql
+    assert 'GRANT CONNECT ON DATABASE "app" TO backup_agent;' in sql
+    assert "pg_write_all_data" not in sql
+    # The grants of the metadata roles are unchanged, and the password is its own statement.
+    assert _grants(sql) == METADATA_GRANTS
+    assert sql.count(password) == 1
+    assert f"ALTER ROLE backup_agent PASSWORD '{password}';" in sql
+
+
+def test_prod_backup_password_is_its_own_stays_on_the_next_deploy_and_is_never_printed(
+    prod_host: Host,
+) -> None:
+    first = _deploy_with_prod(prod_host)
+    env = prod_host.env()
+    second = _deploy_with_prod(prod_host)
+    password = env["PROD_PG_BACKUP_PASSWORD"]
+
+    assert first.returncode == 0, first.stderr
+    assert re.fullmatch(r"[0-9a-f]{48}", password)
+    assert password != env["PG_BACKUP_PASSWORD"]
+    assert prod_host.env()["PROD_PG_BACKUP_PASSWORD"] == password
+    assert second.returncode == 0, second.stderr
+    assert "generated PROD_PG_BACKUP_PASSWORD" in first.stderr
+    assert "generated PROD_PG_BACKUP_PASSWORD" not in second.stderr
+    assert env["PG_BACKUP_PASSWORD"] not in _sql_of(prod_host, "pgcontainer-prod")
+    for output in (first.stdout + first.stderr, second.stdout + second.stderr):
+        assert password not in output
+    assert password not in prod_host.log("docker.log")  # argv of every docker call
+
+
+def test_prod_backup_dir_is_owned_by_the_backup_user(prod_host: Host) -> None:
+    result = _deploy_with_prod(prod_host)
+    prod_backups = prod_host.root / "backups-prod"
+    env = prod_host.env()
+
+    assert result.returncode == 0, result.stderr
+    assert stat.S_IMODE(prod_backups.stat().st_mode) == 0o700
+    assert f"70:70 {prod_backups}" in prod_host.log("chown.log")
+    assert env["PROD_BACKUP_DIR"] == str(prod_backups)
+    assert env["PROD_BACKUP_DIR"] != env["BACKUP_DIR"]
+
+
+def test_prod_backup_dir_defaults_to_the_directory_of_the_prod_project() -> None:
+    script = (MONITORING / "deploy.sh").read_text(encoding="utf-8")
+
+    assert (
+        'PROD_BACKUP_DIR="${PROD_BACKUP_DIR:-/var/backups/dmc-268/${PROD_API_PROJECT}}"' in script
+    )
+    assert 'BACKUP_DIR="${BACKUP_DIR:-/var/backups/dmc-268/${API_PROJECT}}"' in script
+
+
+def _up(stack: Host) -> str:
+    return [line for line in stack.log("docker.log").splitlines() if " up " in line][-1]
+
+
+def test_prod_backup_services_reach_compose_with_their_overlays(prod_host: Host) -> None:
+    result = _deploy_with_prod(prod_host, **OFFSITE)
+    up = _up(prod_host)
+    monitoring = prod_host.monitoring_dir
+
+    assert result.returncode == 0, result.stderr
+    assert f"-f {monitoring}/compose.prod.yml" in up
+    assert f"-f {monitoring}/compose.offsite.yml" in up
+    assert f"-f {monitoring}/compose.offsite-prod.yml" in up
+    assert PASSPHRASE not in prod_host.env_file.read_text(encoding="utf-8")
+
+
+def test_prod_offsite_overlay_needs_prod_and_the_offsite_settings(prod_host: Host) -> None:
+    no_offsite = _deploy_with_prod(prod_host, **NO_OFFSITE)
+    up_without_offsite = _up(prod_host)
+    # The prod backup itself does not need the bucket.
+    assert no_offsite.returncode == 0, no_offsite.stderr
+    assert f"-f {prod_host.monitoring_dir}/compose.prod.yml" in up_without_offsite
+    assert "compose.offsite" not in up_without_offsite
+
+    without_prod = prod_host.deploy(extra=OFFSITE, PROD_API_DIR="")
+    up_without_prod = _up(prod_host)
+    assert without_prod.returncode == 0, without_prod.stderr
+    assert f"-f {prod_host.monitoring_dir}/compose.offsite.yml" in up_without_prod
+    assert "compose.offsite-prod.yml" not in up_without_prod
+    assert "compose.prod.yml" not in up_without_prod
+
+
+def test_without_prod_nothing_of_the_prod_backup_reaches_the_host(prod_host: Host) -> None:
+    result = prod_host.deploy(extra=OFFSITE, PROD_API_DIR="")
+
+    assert result.returncode == 0, result.stderr
+    assert not {key for key in prod_host.env() if key.startswith("PROD_")}
+    assert "backup_agent" not in _sql_of(prod_host, "pgcontainer-prod")
+    assert not (prod_host.root / "backups-prod").exists()
+    assert "generated PROD_PG_BACKUP_PASSWORD" not in result.stderr
+
+
+def test_the_header_of_deploy_says_both_databases_get_the_backup_role() -> None:
+    header = "".join((MONITORING / "deploy.sh").read_text(encoding="utf-8").splitlines(True)[:8])
+
+    assert "backup_agent" in header
+    assert "in the staging one" not in header
 
 
 def test_prod_role_passwords_are_their_own_and_go_through_stdin(prod_host: Host) -> None:
@@ -897,8 +995,14 @@ def test_deploy_script_defines_no_nested_functions() -> None:
 
 def test_the_backup_role_follows_the_backup_password(prod_host: Host) -> None:
     result = _deploy_with_prod(prod_host)
+    env = prod_host.env()
 
     assert result.returncode == 0, result.stderr
-    # Staging holds a backup password and gets the role, prod holds none and gets no role.
-    assert "ALTER ROLE backup_agent PASSWORD" in _sql_of(prod_host, "pgcontainer")
-    assert "backup_agent" not in _sql_of(prod_host, "pgcontainer-prod")
+    # Each database holds its own backup password and gets the role with it.
+    assert f"ALTER ROLE backup_agent PASSWORD '{env['PG_BACKUP_PASSWORD']}';" in _sql_of(
+        prod_host, "pgcontainer"
+    )
+    assert f"ALTER ROLE backup_agent PASSWORD '{env['PROD_PG_BACKUP_PASSWORD']}';" in _sql_of(
+        prod_host, "pgcontainer-prod"
+    )
+    assert env["PROD_PG_BACKUP_PASSWORD"] != env["PG_BACKUP_PASSWORD"]
