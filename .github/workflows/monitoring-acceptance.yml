@@ -309,6 +309,12 @@ jobs:
       API_DIR: ${{ needs.acceptance.outputs.app_dir }}
       STATUS_URL: ${{ needs.acceptance.outputs.status_url }}
     steps:
+      # Taken on the runner right before the SSH step that stops the worker: the latency of that
+      # step counts against the 7 minutes, so a pass is honest.
+      - name: Note the time of the stop
+        run: |
+          echo "STOP_STARTED_AT=$(date +%s)" >> "${GITHUB_ENV}"
+
       - name: Silence the alerts and stop the worker
         id: stop
         uses: appleboy/ssh-action@0ff4204d59e8e51228ff73bce53f80d53301dee2 # v1.2.5
@@ -333,11 +339,12 @@ jobs:
       - name: Wait for the page to show the outage
         id: outage
         run: |
-          # From the stop to the staging row "Ревью PR" of the page down with the alert
-          # ReviewQueueWithoutConsumer, by the data attributes of the row. The alert fires 5 minutes
-          # after the consumers are gone, plus a scrape, an evaluation and a poll of the page: over
-          # 7 minutes is a failure, 8 minutes the end of waiting.
-          start="$(date +%s)"
+          # From the stop (STOP_STARTED_AT, taken before the SSH step) to the staging row "Ревью PR"
+          # of the page down with the alert ReviewQueueWithoutConsumer, by the data attributes of
+          # the row. The alert fires 5 minutes after the consumers are gone, plus a scrape, an
+          # evaluation and a poll of the page: over 7 minutes is a failure, 8 minutes the end of
+          # waiting.
+          start="${STOP_STARTED_AT:?the time of the stop is not set}"
           seen=no
           while :; do
             page="$(curl -sS --max-time 20 "${STATUS_URL}/" || true)"

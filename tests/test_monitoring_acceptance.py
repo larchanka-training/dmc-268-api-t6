@@ -1164,6 +1164,7 @@ def _status_step(
             "GITHUB_OUTPUT": str(output),
             "STATUS_URL": STATUS_URL,
             "STAGING_STATUS_URL": STAGING_STATUS_URL,
+            "STOP_STARTED_AT": str(int(time.time())),
             **env,
         },
         capture_output=True,
@@ -1339,6 +1340,43 @@ def test_worker_outage_always_starts_the_worker_and_lifts_the_silences_it_made()
         < start.index("silence expire")
         < start.index('exit "${status}"')
     )
+
+
+def test_worker_outage_takes_the_time_before_the_stop_and_waits_from_it(tmp_path: Path) -> None:
+    job = _outage_job()
+    names = re.findall(r"- name: (.+)", job)
+    clock = names.index("Note the time of the stop")
+    assert names[clock + 1] == "Silence the alerts and stop the worker"
+    waiting = job[job.index("- name: Wait for the page to show the outage") :]
+    waiting = waiting[: waiting.index("- name: Start the worker")]
+    assert 'start="$(date +%s)"' not in waiting and "STOP_STARTED_AT" in waiting
+    env_file = tmp_path / "env"
+    env_file.touch()
+    subprocess.run(
+        ["/bin/bash", "-e", "-c", _step("Note the time of the stop")],
+        env={"PATH": os.environ["PATH"], "GITHUB_ENV": str(env_file)},
+        check=True,
+    )
+    taken = re.fullmatch(r"STOP_STARTED_AT=(\d+)\n", env_file.read_text(encoding="utf-8"))
+    assert taken is not None and abs(int(taken[1]) - time.time()) < 60
+
+
+@pytest.mark.parametrize(("seconds_ago", "result"), [(100, "ok"), (500, "fail")])
+def test_outage_step_counts_the_limit_from_the_stop(
+    tmp_path: Path, seconds_ago: int, result: str
+) -> None:
+    run, summary, output = _status_step(
+        tmp_path,
+        "Wait for the page to show the outage",
+        {},
+        {f"{STATUS_URL}/": [_outage_page("down", "ReviewQueueWithoutConsumer")]},
+        STOP_STARTED_AT=str(int(time.time()) - seconds_ago),
+    )
+
+    assert run.returncode == (0 if result == "ok" else 1), run.stderr
+    assert f"result={result}" in output.splitlines()
+    shown = re.search(r"(\d+) s after the stop", summary)
+    assert shown is not None and int(shown[1]) >= seconds_ago
 
 
 def _outage_page(state: str, alerts: str) -> str:
