@@ -453,22 +453,6 @@ def test_replace_file_rejects_a_key_over_the_btree_bound_before_any_write(
 
 
 @pytest.mark.integration
-def test_replace_file_rejects_rows_that_belong_to_another_path(index: _Index) -> None:
-    async def scenario() -> None:
-        await _enable(index, index.a)
-        fence = await _claim(index, index.a)
-        stray = IndexedFile("a.py", "aa01", symbols=(_symbol("b.py", "foo", 1, 2),))
-        async with index.uow() as uow:
-            with pytest.raises(ValueError, match="must carry the file's path"):
-                await uow.index.replace_file(index.a, fence, stray)
-            await uow.commit()
-
-        assert await _rows(index, _COUNT_ROWS, repository=index.a) == [(0, 0, 0, 0)]
-
-    asyncio.run(scenario())
-
-
-@pytest.mark.integration
 def test_replace_file_collapses_duplicate_edges_and_imports_onto_their_keys(
     index: _Index,
 ) -> None:
@@ -594,6 +578,11 @@ def test_replace_file_writes_more_rows_than_one_insert_statement_can_bind(index:
             ),
             "only an imports edge has an empty target_name",
             id="uses-edge-without-name",
+        ),
+        pytest.param(
+            IndexedFile("a.py", "p1", symbols=(_symbol("b.py", "foo", 1, 2),)),
+            "must carry the file's path",
+            id="row-of-another-path",
         ),
     ],
 )

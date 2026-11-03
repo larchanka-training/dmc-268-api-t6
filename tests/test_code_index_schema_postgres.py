@@ -295,6 +295,15 @@ def test_index_tables_carry_the_named_checks_and_target_indexes(
     }
     assert checks == _CHECKS
     assert indexes == _INDEXES
+    assert [
+        tuple(row)
+        for row in code_index_database.execute(
+            text(
+                "SELECT indexrelid::regclass::text, pg_get_expr(indpred, indrelid) FROM pg_index "
+                "WHERE indrelid = 'code_index_files'::regclass AND NOT indisprimary"
+            )
+        )
+    ] == [("ix_code_index_files_closed", "(valid_to IS NOT NULL)")]
 
 
 @pytest.mark.integration
@@ -453,6 +462,14 @@ def test_state_row_defaults_to_an_empty_unpublished_index(
             "ck_code_index_states_wake_live",
             id="wake-marker-on-a-failed-index",
         ),
+        # A sha implies a time; a NULL target records only the time.
+        pytest.param(
+            "INSERT INTO code_index_states (repository_id, review_full_requested_sha) "
+            "VALUES (:repository, :sha)",
+            {"sha": C1},
+            "ck_code_index_states_review_full_sha_at",
+            id="review-full-sha-without-time",
+        ),
         pytest.param(
             _SYMBOL, {"start": 0, "end": 1}, "ck_code_index_symbols_lines", id="line-zero"
         ),
@@ -558,107 +575,70 @@ def test_a_live_index_accepts_a_wake_marker(code_index_database: Connection, sta
 
 
 @pytest.mark.integration
-def test_migration_0037_adds_the_wake_marker_and_its_downgrade_drops_it(
-    code_index_database: Connection,
-) -> None:
-    connection = code_index_database
-    config = _migration_config(connection)
-    marker = (
-        "SELECT (SELECT count(*) FROM information_schema.columns "
-        "WHERE table_schema = current_schema() AND table_name = 'code_index_states' "
-        "AND column_name = 'wake_requested_at'), "
-        "(SELECT count(*) FROM pg_constraint WHERE conname = 'ck_code_index_states_wake_live' "
-        "AND connamespace = current_schema()::regnamespace), "
-        "(SELECT count(*) FROM pg_indexes WHERE schemaname = current_schema() "
-        "AND indexname IN ('ix_code_index_states_wake_requested', 'ix_code_index_files_closed'))"
-    )
-    assert tuple(connection.execute(text(marker)).one()) == (1, 1, 2)
-    assert [
-        tuple(row)
-        for row in connection.execute(
-            text(
-                "SELECT indexrelid::regclass::text, pg_get_expr(indpred, indrelid) FROM pg_index "
-                "WHERE indrelid = 'code_index_files'::regclass AND NOT indisprimary"
-            )
-        )
-    ] == [("ix_code_index_files_closed", "(valid_to IS NOT NULL)")]
-    repository_id = _repository(connection)
-    connection.execute(
-        text(
+@pytest.mark.parametrize(
+    ("probe", "added", "down_revision", "state_row", "restored", "values"),
+    [
+        pytest.param(
+            "SELECT (SELECT count(*) FROM information_schema.columns "
+            "WHERE table_schema = current_schema() AND table_name = 'code_index_states' "
+            "AND column_name = 'wake_requested_at'), "
+            "(SELECT count(*) FROM pg_constraint WHERE conname = 'ck_code_index_states_wake_live' "
+            "AND connamespace = current_schema()::regnamespace), "
+            "(SELECT count(*) FROM pg_indexes WHERE schemaname = current_schema() "
+            "AND indexname IN ('ix_code_index_states_wake_requested', "
+            "'ix_code_index_files_closed'))",
+            (1, 1, 2),
+            "20261019_0036",
             "INSERT INTO code_index_states (repository_id, generation, wake_requested_at) "
-            "VALUES (:repository, 1, now())"
+            "VALUES (:repository, 1, now())",
+            "SELECT generation, wake_requested_at FROM code_index_states",
+            (1, None),
+            id="0037-wake-marker",
         ),
-        {"repository": repository_id},
-    )
-    connection.commit()
-
-    command.downgrade(config, "20261019_0036")
-    assert tuple(connection.execute(text(marker)).one()) == (0, 0, 0)
-    assert connection.scalar(text("SELECT version_num FROM alembic_version")) == "20261019_0036"
-    # The state row stays; only its pending wake-up request is lost.
-    assert connection.scalar(text("SELECT generation FROM code_index_states")) == 1
-    connection.commit()
-
-    command.upgrade(config, "head")
-    assert tuple(connection.execute(text(marker)).one()) == (1, 1, 2)
-    assert connection.execute(
-        text("SELECT generation, wake_requested_at FROM code_index_states")
-    ).one() == (1, None)
-    assert connection.scalar(text("SELECT version_num FROM alembic_version")) == "20261027_0052"
-
-
-@pytest.mark.integration
-def test_migration_0038_adds_the_review_throttle_and_its_downgrade_drops_it(
+        pytest.param(
+            "SELECT (SELECT count(*) FROM information_schema.columns "
+            "WHERE table_schema = current_schema() AND table_name = 'code_index_states' "
+            "AND column_name IN ('review_full_requested_at', 'review_full_requested_sha')), "
+            "(SELECT count(*) FROM pg_constraint "
+            "WHERE conname = 'ck_code_index_states_review_full_sha_at' "
+            "AND connamespace = current_schema()::regnamespace)",
+            (2, 1),
+            "20261020_0037",
+            "INSERT INTO code_index_states (repository_id, generation, review_full_requested_at) "
+            "VALUES (:repository, 1, now())",
+            "SELECT generation, review_full_requested_at, review_full_requested_sha "
+            "FROM code_index_states",
+            (1, None, None),
+            id="0038-review-throttle",
+        ),
+    ],
+)
+def test_a_migration_adds_its_columns_and_its_downgrade_drops_them_but_keeps_the_state_row(
     code_index_database: Connection,
+    probe: str,
+    added: tuple[int, ...],
+    down_revision: str,
+    state_row: str,
+    restored: str,
+    values: tuple[object, ...],
 ) -> None:
     connection = code_index_database
     config = _migration_config(connection)
-    throttle = (
-        "SELECT (SELECT count(*) FROM information_schema.columns "
-        "WHERE table_schema = current_schema() AND table_name = 'code_index_states' "
-        "AND column_name IN ('review_full_requested_at', 'review_full_requested_sha')), "
-        "(SELECT count(*) FROM pg_constraint "
-        "WHERE conname = 'ck_code_index_states_review_full_sha_at' "
-        "AND connamespace = current_schema()::regnamespace)"
-    )
-    assert tuple(connection.execute(text(throttle)).one()) == (2, 1)
+    assert tuple(connection.execute(text(probe)).one()) == added
     repository_id = _repository(connection)
-    # A sha implies a time; a NULL target records only the time.
-    with (
-        pytest.raises(IntegrityError, match="ck_code_index_states_review_full_sha_at"),
-        connection.begin_nested(),
-    ):
-        connection.execute(
-            text(
-                "INSERT INTO code_index_states (repository_id, review_full_requested_sha) "
-                "VALUES (:repository, :sha)"
-            ),
-            {"repository": repository_id, "sha": C1},
-        )
-    connection.execute(
-        text(
-            "INSERT INTO code_index_states (repository_id, generation, review_full_requested_at) "
-            "VALUES (:repository, 1, now())"
-        ),
-        {"repository": repository_id},
-    )
+    connection.execute(text(state_row), {"repository": repository_id})
     connection.commit()
 
-    command.downgrade(config, "20261020_0037")
-    assert tuple(connection.execute(text(throttle)).one()) == (0, 0)
-    assert connection.scalar(text("SELECT version_num FROM alembic_version")) == "20261020_0037"
-    # The state row stays; only the throttle of review-requested full builds is lost.
+    command.downgrade(config, down_revision)
+    assert set(connection.execute(text(probe)).one()) == {0}
+    assert connection.scalar(text("SELECT version_num FROM alembic_version")) == down_revision
+    # The state row stays; only the values of the dropped columns are lost.
     assert connection.scalar(text("SELECT generation FROM code_index_states")) == 1
     connection.commit()
 
     command.upgrade(config, "head")
-    assert tuple(connection.execute(text(throttle)).one()) == (2, 1)
-    assert connection.execute(
-        text(
-            "SELECT generation, review_full_requested_at, review_full_requested_sha "
-            "FROM code_index_states"
-        )
-    ).one() == (1, None, None)
+    assert tuple(connection.execute(text(probe)).one()) == added
+    assert tuple(connection.execute(text(restored)).one()) == values
     assert connection.scalar(text("SELECT version_num FROM alembic_version")) == "20261027_0052"
 
 
