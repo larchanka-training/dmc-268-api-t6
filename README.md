@@ -137,7 +137,7 @@ the smoke (`docker compose stop webhook-worker`; it runs only with `--profile we
 failed projections: the test deliveries name installation 17 and repository 101, so the worker's
 GitHub calls fail and it marks each delivery failed after three tries. To turn the same delivery
 into a queued Run locally, follow the recipe in
-[docs/WEBHOOK_WORKER.md](docs/WEBHOOK_WORKER.md#local-recipe-a-signed-labeled-delivery-creates-a-queued-run).
+[docs/WEBHOOK_WORKER.md](docs/WEBHOOK_WORKER.md#github-local-recipe-a-signed-labeled-delivery-creates-a-queued-run).
 
 ### webhook-worker
 
