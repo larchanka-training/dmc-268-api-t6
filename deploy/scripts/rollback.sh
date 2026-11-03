@@ -23,6 +23,9 @@ ROLLBACK_MODE="${ROLLBACK_MODE:-manual}"
 # The replica count is the target release's own, never a value inherited from the environment
 # (a deploy that started this rollback has its own, failed, count exported by CI).
 unset WORKER_REPLICAS
+# The tracing values are settings of the stack, not of a release: the .env keeps what the deploy
+# wrote, and a rollback leaves them as they are.
+unset OTEL_EXPORTER_OTLP_ENDPOINT DEPLOY_ENVIRONMENT
 # What replaces a release that has no previous one to go back to:
 # bootstrap: a stock nginx under the API alias or port (as cloud-init's placeholder does);
 # stop: nothing, the stack is only taken down (prod: the edge proxy's own 503 for the API host is
@@ -280,6 +283,7 @@ require_worker_replicas "${WORKER_REPLICAS}" || exit 1
 if [[ "${WORKER_REPLICAS}" != "${HOST_WORKER_REPLICAS:-1}" ]]; then
   echo "worker replicas: ${WORKER_REPLICAS} (was ${HOST_WORKER_REPLICAS:-1})"
 fi
+resolve_tracing_values "${ENV_FILE}" || exit 1
 
 for name in POSTGRES_PASSWORD RABBITMQ_PASSWORD REDIS_PASSWORD; do
   if [[ -z "${!name:-}" ]]; then
@@ -323,12 +327,14 @@ write_compose_env_file \
   "${RABBITMQ_PASSWORD}" \
   "${REDIS_PASSWORD}" \
   "${NO_PREVIOUS_RELEASE}" \
-  "${WORKER_REPLICAS}"
+  "${WORKER_REPLICAS}" \
+  "${OTEL_EXPORTER_OTLP_ENDPOINT}" \
+  "${DEPLOY_ENVIRONMENT}"
 
 # App secrets are not tied to an image: the files of the last deploy stay as they are.
 ensure_app_env_files "${APP_DIR}"
 
-IMAGE="${TARGET_IMAGE_ID}" WORKER_REPLICAS="${WORKER_REPLICAS}" "${COMPOSE[@]}" up --pull missing -d --remove-orphans --wait --wait-timeout 180
+IMAGE="${TARGET_IMAGE_ID}" WORKER_REPLICAS="${WORKER_REPLICAS}" OTEL_EXPORTER_OTLP_ENDPOINT="${OTEL_EXPORTER_OTLP_ENDPOINT}" DEPLOY_ENVIRONMENT="${DEPLOY_ENVIRONMENT}" "${COMPOSE[@]}" up --pull missing -d --remove-orphans --wait --wait-timeout 180
 
 # Shared root account: drop credentials after pinned-image startup with --pull missing.
 logout_registry

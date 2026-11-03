@@ -246,6 +246,9 @@ case "$1" in
         printf '%s\\n' "${IMAGE:-}" > "${STUB_UP_IMAGE}"
         # The replica count the scripts hand to Compose; the shell value beats --env-file there.
         printf '%s\\n' "${WORKER_REPLICAS-}" > "${STUB_UP_REPLICAS}"
+        # Likewise the tracing values: endpoint, then environment name ("unset" when absent).
+        printf '%s\\n%s\\n' "${OTEL_EXPORTER_OTLP_ENDPOINT-unset}" \\
+          "${DEPLOY_ENVIRONMENT-unset}" > "${STUB_UP_TRACING}"
         # Like Compose: env_file paths resolve against the directory of the first compose file.
         # Every file must exist: deploy and rollback keep each role's file in place.
         for name in app.env api.env worker.env webhook-worker.env gitlab.env bitbucket.env; do
@@ -386,6 +389,7 @@ class Host:
             "STUB_PROBE_ROLE": str(self.log.parent / "probe-role"),
             "STUB_UP_IMAGE": str(self.log.parent / "up-image"),
             "STUB_UP_REPLICAS": str(self.log.parent / "up-replicas"),
+            "STUB_UP_TRACING": str(self.log.parent / "up-tracing"),
             "STUB_TAG_MOVED": str(self.log.parent / "tag-moved"),
             "STUB_REF_A": IMAGE_A,
             "STUB_REF_B": IMAGE_B,

@@ -91,6 +91,8 @@ fi
 WORKER_REPLICAS="${WORKER_REPLICAS:-${HOST_WORKER_REPLICAS:-1}}"
 require_worker_replicas "${WORKER_REPLICAS}" || exit 1
 echo "worker replicas: ${WORKER_REPLICAS}"
+# Tracing values: the CI value, else .env, else the staging default; a bad name stops here.
+resolve_tracing_values "${ENV_FILE}" || exit 1
 COMPOSE=(docker compose -p "${COMPOSE_PROJECT}" -f "${COMPOSE_FILE}" -f "${APP_DIR}/compose.${DEPLOY_MODE}.yml" --env-file "${ENV_FILE}")
 
 IMAGE="${REQUESTED_IMAGE}"
@@ -210,7 +212,9 @@ write_compose_env_file \
   "${RABBITMQ_PASSWORD}" \
   "${REDIS_PASSWORD}" \
   "${NO_PREVIOUS_RELEASE:-}" \
-  "${WORKER_REPLICAS}"
+  "${WORKER_REPLICAS}" \
+  "${OTEL_EXPORTER_OTLP_ENDPOINT}" \
+  "${DEPLOY_ENVIRONMENT}"
 
 if docker inspect "${BOOTSTRAP_NAME}" >/dev/null 2>&1; then
   docker rm -f "${BOOTSTRAP_NAME}" >/dev/null
@@ -221,7 +225,7 @@ fi
 # in compose.yml.
 "${COMPOSE[@]}" rm -sf bootstrap >/dev/null 2>&1 || true
 
-if ! IMAGE="${TARGET_IMAGE_ID}" WORKER_REPLICAS="${WORKER_REPLICAS}" "${COMPOSE[@]}" up --pull missing -d --remove-orphans --wait --wait-timeout 180; then
+if ! IMAGE="${TARGET_IMAGE_ID}" WORKER_REPLICAS="${WORKER_REPLICAS}" OTEL_EXPORTER_OTLP_ENDPOINT="${OTEL_EXPORTER_OTLP_ENDPOINT}" DEPLOY_ENVIRONMENT="${DEPLOY_ENVIRONMENT}" "${COMPOSE[@]}" up --pull missing -d --remove-orphans --wait --wait-timeout 180; then
   echo "compose up failed; rolling back" >&2
   ROLLBACK_MODE=auto "${ROLLBACK_SCRIPT}"
   exit 1

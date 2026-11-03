@@ -192,7 +192,11 @@ def test_the_application_sends_traces_to_tempo_inside_the_docker_network() -> No
     datasources = _read(MONITORING / "grafana/provisioning/datasources/datasources.yml")
 
     for service in ("api", "worker", "webhook-worker"):
-        assert "      OTEL_EXPORTER_OTLP_ENDPOINT: http://tempo:4318\n" in blocks[service], service
+        # Staging's default; a stack sets its own in .env, and an empty one turns the export off.
+        endpoint = (
+            "      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT-http://tempo:4318}\n"
+        )
+        assert endpoint in blocks[service], service
     # OTLP/HTTP only; no gRPC receiver, no host port (test above), 72 h of traces.
     assert "        http:\n          endpoint: 0.0.0.0:4318\n" in tempo
     assert "grpc" not in tempo

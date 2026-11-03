@@ -22,9 +22,11 @@ services:
       AUTH_JWT_ISSUER: dmc-268-api
       AUTH_JWT_AUDIENCE: dmc-268-ui
       # Traces to Tempo of the monitoring stack over this network (docs/MONITORING.md §11).
-      # Unreachable Tempo only drops spans; an empty value turns the export off.
-      OTEL_EXPORTER_OTLP_ENDPOINT: http://tempo:4318
-      OTEL_RESOURCE_ATTRIBUTES: deployment.environment.name=staging
+      # Unreachable Tempo only drops spans; an empty value turns the export off, so only an
+      # absent variable gets the default (`-`, not `:-`). The deploy sets both values per stack
+      # and keeps them in .env: prod has no Tempo and sets the endpoint empty.
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT-http://tempo:4318}
+      OTEL_RESOURCE_ATTRIBUTES: deployment.environment.name=${DEPLOY_ENVIRONMENT:-staging}
     # No dependency on RabbitMQ or Redis: the API connects to the broker on the first publication,
     # so a broker or cache outage must not keep a recreated API from starting. up --wait in
     # deploy.sh still waits for every healthcheck.
@@ -89,8 +91,8 @@ services:
       WORKER_HEARTBEAT_FILE: /tmp/worker.heartbeat
       # Traces to Tempo of the monitoring stack over this network (docs/MONITORING.md §11).
       # Unreachable Tempo only drops spans; an empty value turns the export off.
-      OTEL_EXPORTER_OTLP_ENDPOINT: http://tempo:4318
-      OTEL_RESOURCE_ATTRIBUTES: deployment.environment.name=staging
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT-http://tempo:4318}
+      OTEL_RESOURCE_ATTRIBUTES: deployment.environment.name=${DEPLOY_ENVIRONMENT:-staging}
     # Unlike the API, the worker cannot start without the broker: it declares the topology first.
     depends_on:
       bootstrap:
@@ -138,8 +140,8 @@ services:
       WORKER_HEARTBEAT_FILE: /tmp/webhook-worker.heartbeat
       # Traces to Tempo of the monitoring stack over this network (docs/MONITORING.md §11).
       # Unreachable Tempo only drops spans; an empty value turns the export off.
-      OTEL_EXPORTER_OTLP_ENDPOINT: http://tempo:4318
-      OTEL_RESOURCE_ATTRIBUTES: deployment.environment.name=staging
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT-http://tempo:4318}
+      OTEL_RESOURCE_ATTRIBUTES: deployment.environment.name=${DEPLOY_ENVIRONMENT:-staging}
     # The projection creates Runs and publishes them to the review queue (#52).
     depends_on:
       bootstrap:
