@@ -281,9 +281,9 @@ def _members(network: str) -> set[str]:
 def test_prod_scrapers_sit_on_the_prod_network_and_never_on_staging() -> None:
     prod = _load(MONITORING / "compose.prod.yml")
 
-    assert _members("api-prod") == PROD_SCRAPERS
+    assert _members("api-prod") == PROD_SCRAPERS | {"pg-backup-prod"}
     # check-isolation.sh fails a container on both application networks.
-    assert not PROD_SCRAPERS & _members("api")
+    assert not (PROD_SCRAPERS | {"pg-backup-prod"}) & _members("api")
     assert not _members("api") & _members("api-prod")
     assert prod["networks"]["api-prod"] == {
         "name": "${PROD_API_NETWORK:?PROD_API_NETWORK is required}",
@@ -343,6 +343,63 @@ def test_relay_forwards_only_postgres_and_rabbitmq_metrics() -> None:
     assert forwarded == {15692: "rabbitmq:15692", 5432: "postgres:5432"}
     assert len(servers) == 2
     assert re.search(r"^\s*resolver\s+127\.0\.0\.11\b", config, re.M)
+
+
+def test_prod_backup_sits_on_the_prod_network_only() -> None:
+    # PGHOST=postgres must resolve to the prod store: the staging names live on the other network.
+    service = _merged_services()["pg-backup-prod"]
+
+    assert set(service["networks"]) == {"api-prod"}
+    assert "ports" not in service
+
+
+def test_prod_backup_runs_the_image_of_staging_backup() -> None:
+    # pg_dump must match the prod server, which runs the postgres image of staging.yml.
+    staging = _load(MONITORING / "compose.yml")["services"]["pg-backup"]
+    prod = _load(MONITORING / "compose.prod.yml")["services"]["pg-backup-prod"]
+
+    assert prod["image"] == staging["image"]
+    assert prod["entrypoint"] == staging["entrypoint"] == ["sh", "/opt/pg-backup/pg-backup.sh"]
+    assert prod["command"] == ["loop"]
+    assert prod["user"] == "70:70"
+    assert re.fullmatch(r"\d+m", str(prod["mem_limit"]))
+    assert prod["restart"] == "unless-stopped"
+    assert prod["labels"] == {"dmc.config-digest": "${PG_BACKUP_CONFIG_DIGEST:-none}"}
+
+
+def test_prod_backup_env_and_mounts_are_prod_only() -> None:
+    prod = _load(MONITORING / "compose.prod.yml")["services"]["pg-backup-prod"]
+    environment = prod["environment"]
+
+    assert environment["PGHOST"] == "postgres"
+    assert environment["PGUSER"] == "backup_agent"
+    assert environment["PGPASSWORD"] == (
+        "${PROD_PG_BACKUP_PASSWORD:?PROD_PG_BACKUP_PASSWORD is required}"
+    )
+    assert environment["PGDATABASE"] == "${PROD_POSTGRES_DB:?PROD_POSTGRES_DB is required}"
+    assert environment["BACKUP_ENVIRONMENT"] == "prod"
+    assert environment["TEXTFILE"] == "/textfile/pg_backup_prod.prom"
+    assert environment["HEARTBEAT"] == "/textfile/pg_backup_prod_heartbeat.prom"
+    assert prod["volumes"] == [
+        "./backup:/opt/pg-backup:ro",
+        "${PROD_BACKUP_DIR:?PROD_BACKUP_DIR is required}:/backups",
+        "${TEXTFILE_DIR:-./textfile}:/textfile",
+    ]
+    # Nothing of staging: not its password, database or dump dir.
+    assert "PG_BACKUP_PASSWORD" not in str(prod).replace("PROD_PG_BACKUP_PASSWORD", "")
+    assert "${BACKUP_DIR" not in str(prod)
+    assert "${POSTGRES_DB" not in str(prod)
+
+
+def test_backup_textfile_names_do_not_collide() -> None:
+    # node-exporter reads every *.prom of the dir; two writers of one file would overwrite each
+    # other. Staging keeps the script defaults.
+    staging = {"/textfile/pg_backup.prom", "/textfile/pg_backup_heartbeat.prom"}
+    prod = _load(MONITORING / "compose.prod.yml")["services"]["pg-backup-prod"]["environment"]
+    prod_files = {prod["TEXTFILE"], prod["HEARTBEAT"]}
+
+    assert len(prod_files) == 2
+    assert not staging & prod_files
 
 
 # --- deploy.sh with the prod stack ---------------------------------------------------------
