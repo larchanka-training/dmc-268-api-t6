@@ -5,6 +5,7 @@ from __future__ import annotations
 import ast
 import re
 from collections.abc import Mapping
+from dataclasses import dataclass, field
 from typing import Any
 
 import pytest
@@ -37,25 +38,70 @@ RUN_ACTION_TOOLS = frozenset(
 BACKTICKED_TOOL = re.compile(r"`([a-z]+\.[a-z_]+)`")
 
 
-def _string_constant(node: ast.expr | None) -> str | None:
+# The calls that take the tool by position, and where; any call can also take it as ``tool=``.
+TOOL_POSITIONS = {"traced_step": 2, "record": 1, "add_action": 1, "PublicationRoute": 1}
+# A star argument on one of these can carry the tool past the scan.
+TOOL_WRITERS = frozenset(TOOL_POSITIONS) | {"insert_run_action", "RunAction"}
+
+
+@dataclass(frozen=True, order=True)
+class _ToolSite:
+    """A place that passes a tool the scan cannot read as a name."""
+
+    path: str
+    line: int
+    scope: str
+    callee: str
+    argument: str
+
+    def __str__(self) -> str:
+        return f"{self.path}:{self.line} {self.scope} -> {self.callee}({self.argument})"
+
+
+@dataclass
+class _ToolScan:
+    names: set[str] = field(default_factory=set)
+    constants: set[str] = field(default_factory=set)
+    sites: set[_ToolSite] = field(default_factory=set)
+
+
+def _string_constant(node: ast.AST) -> str | None:
     return node.value if isinstance(node, ast.Constant) and isinstance(node.value, str) else None
 
 
-def _written_tools(source: str) -> set[str]:
-    """Collect the string-constant tool names from the shapes that write run_actions rows.
+def _callee(call: ast.Call) -> str:
+    func = call.func
+    if isinstance(func, ast.Name):
+        return func.id
+    return func.attr if isinstance(func, ast.Attribute) else ast.unparse(func)
 
-    The scanned shapes: a module-level ``NAME_TOOL = "..."`` assignment, the third positional
-    argument of a ``traced_step(...)`` call, the second positional argument of a ``record(...)``
-    call (the ``RunTrace.record(run_id, tool, ...)`` sink) and a ``tool=`` keyword of any call.
-    Only string constants count; a name or an attribute in these positions is skipped. A
-    ``tool=`` keyword and a literal second argument of ``record(...)`` are counted on any call,
-    whatever the receiver, so a ``tool="x.y"`` or a ``ledger.record(context, "x.y")`` that does not
-    write run_actions surfaces as unexpected and must be renamed or the scan taught to skip it. A
-    blanket ``"x.y"`` match would also pick up prompt names such as ``review.system``, which are
-    not tools.
+
+def _tool_arguments(call: ast.Call, callee: str) -> list[ast.expr | ast.keyword]:
+    found: list[ast.expr | ast.keyword] = [
+        keyword.value for keyword in call.keywords if keyword.arg == "tool"
+    ]
+    position = TOOL_POSITIONS.get(callee)
+    if position is not None and len(call.args) > position:
+        found.append(call.args[position])
+    if callee in TOOL_WRITERS:
+        found += [argument for argument in call.args if isinstance(argument, ast.Starred)]
+        found += [keyword for keyword in call.keywords if keyword.arg is None]
+    return found
+
+
+def _scan_tool_writes(source: str, path: str = "<source>") -> _ToolScan:
+    """Read the tool names of one module from the shapes that can reach run_actions.
+
+    The scanned shapes: a module-level ``NAME_TOOL = ...`` assignment, a slot of
+    ``TOOL_POSITIONS`` and a ``tool=`` keyword. A string constant there is a name. Anything else
+    becomes a site, which ``_unread_tools`` reports unless it can vouch for it. A ``tool=`` keyword
+    and a slot of ``record(...)`` count on any call, whatever the receiver, so a ``tool="x.y"`` or
+    a ``ledger.record(context, "x.y")`` that does not write run_actions surfaces as unexpected and
+    must be renamed or the scan taught to skip it. A blanket ``"x.y"`` match would also pick up
+    prompt names such as ``review.system``, which are not tools.
     """
     tree = ast.parse(source)
-    found: list[str | None] = []
+    scan = _ToolScan()
     targets: list[ast.expr]
     value: ast.expr | None
     for statement in tree.body:
@@ -65,22 +111,45 @@ def _written_tools(source: str) -> set[str]:
             targets, value = [statement.target], statement.value
         else:
             continue
-        if any(isinstance(target, ast.Name) and target.id.endswith("_TOOL") for target in targets):
-            found.append(_string_constant(value))
-    for node in ast.walk(tree):
+        for target in targets:
+            if value is None or not isinstance(target, ast.Name):
+                continue
+            if not target.id.endswith("_TOOL"):
+                continue
+            name = _string_constant(value)
+            if name is None:
+                site = _ToolSite(path, statement.lineno, "<module>", target.id, ast.unparse(value))
+                scan.sites.add(site)
+            else:
+                scan.names.add(name)
+                scan.constants.add(target.id)
+    pending: list[tuple[ast.AST, str]] = [(tree, "<module>")]
+    while pending:
+        node, scope = pending.pop()
+        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef):
+            scope = node.name if scope == "<module>" else f"{scope}.{node.name}"
+        pending += [(child, scope) for child in ast.iter_child_nodes(node)]
         if not isinstance(node, ast.Call):
             continue
-        func = node.func
-        callee = func.id if isinstance(func, ast.Name) else None
-        callee = func.attr if isinstance(func, ast.Attribute) else callee
-        if callee == "traced_step" and len(node.args) >= 3:
-            found.append(_string_constant(node.args[2]))
-        if callee == "record" and len(node.args) >= 2:
-            found.append(_string_constant(node.args[1]))
-        found += [
-            _string_constant(keyword.value) for keyword in node.keywords if keyword.arg == "tool"
-        ]
-    return {tool for tool in found if tool is not None}
+        callee = _callee(node)
+        for argument in _tool_arguments(node, callee):
+            name = _string_constant(argument)
+            if name is None:
+                site = _ToolSite(path, node.lineno, scope, callee, ast.unparse(argument))
+                scan.sites.add(site)
+            else:
+                scan.names.add(name)
+    return scan
+
+
+def _written_tools(source: str) -> set[str]:
+    return _scan_tool_writes(source).names
+
+
+def _unread_tools(scans: list[_ToolScan]) -> list[_ToolSite]:
+    """The sites of ``scans`` that are neither a known ``*_TOOL`` constant nor vouched for."""
+    constants = {constant for scan in scans for constant in scan.constants}
+    return sorted(site for scan in scans for site in scan.sites if site.argument not in constants)
 
 
 @pytest.mark.parametrize(
@@ -96,6 +165,8 @@ def _written_tools(source: str) -> set[str]:
         ('ledger.record(context, "x.y")', {"x.y"}),
         ('def record(self, run_id, tool="x.y"): ...', set()),
         ('prompts.load("review.system")', set()),
+        ('uow.trace.add_action(run_id, "i.j", {}, None, now, 0)', {"i.j"}),
+        ('PublicationRoute(False, "k.l", "x", False, None)', {"k.l"}),
     ],
     ids=[
         "traced_step-third-argument",
@@ -108,12 +179,92 @@ def _written_tools(source: str) -> set[str]:
         "record-any-receiver",
         "record-definition",
         "plain-string-literal",
+        "add_action-second-argument",
+        "publication-route-second-argument",
     ],
 )
 def test_written_tools_scan_picks_up_only_the_run_action_shapes(
     source: str, expected: set[str]
 ) -> None:
     assert _written_tools(source) == expected
+
+
+def _unread(*sources: str) -> list[str]:
+    return [
+        f"{site.callee}({site.argument})"
+        for site in _unread_tools([_scan_tool_writes(source) for source in sources])
+    ]
+
+
+@pytest.mark.parametrize(
+    ("source", "expected"),
+    [
+        ('traced_step(trace, run_id, f"a.{x}", {})', "traced_step(f'a.{x}')"),
+        ('trace.record(run_id, provider + ".x", {}, None, now, 0)', "record(provider + '.x')"),
+        (
+            'STEP_NAME = "a.b"\ninsert_run_action(session, tool=STEP_NAME)',
+            "insert_run_action(STEP_NAME)",
+        ),
+        ("uow.trace.add_action(run_id, name, {}, None, now, 0)", "add_action(name)"),
+        ('trace.record(run_id, "a" if flag else "b", {})', "record('a' if flag else 'b')"),
+        ('PublicationRoute(tool=f"{provider}.x")', "PublicationRoute(f'{provider}.x')"),
+        ('PublicationRoute(False, name, "x", False, None)', "PublicationRoute(name)"),
+        ("replace(route, tool=name)", "replace(name)"),
+        ("partial(insert_run_action, tool=name)", "partial(name)"),
+        ("insert(RunAction).values(tool=name)", "values(name)"),
+        ("factory()(tool=name)", "factory()(name)"),
+        ("insert_run_action(session, **params)", "insert_run_action(**params)"),
+        ("RunAction(**fields)", "RunAction(**fields)"),
+        ("traced_step(trace, *rest)", "traced_step(*rest)"),
+        ("trace.record(run_id, *rest)", "record(*rest)"),
+        ("X_TOOL = make()", "X_TOOL(make())"),
+        ('def f():\n    X_TOOL = "a.b"\n    record(run_id, X_TOOL)', "record(X_TOOL)"),
+        ('X_TOOL = "a.b"\nrecord(run_id, other.X_TOOL)', "record(other.X_TOOL)"),
+    ],
+    ids=[
+        "f-string",
+        "concatenation",
+        "constant-without-the-suffix",
+        "add_action-name",
+        "conditional",
+        "publication-route-keyword",
+        "publication-route-position",
+        "keyword-on-a-helper",
+        "keyword-on-a-partial",
+        "keyword-on-an-insert",
+        "keyword-on-a-computed-callee",
+        "double-star-on-the-sink",
+        "double-star-on-the-model",
+        "star-before-the-position",
+        "star-at-the-position",
+        "computed-constant",
+        "local-constant",
+        "attribute-of-a-constant",
+    ],
+)
+def test_written_tools_scan_reports_a_tool_it_cannot_read(source: str, expected: str) -> None:
+    assert _unread(source) == [expected]
+
+
+@pytest.mark.parametrize(
+    "sources",
+    [
+        ('X_TOOL = "a.b"\ntrace.record(run_id, X_TOOL, {})',),
+        ('X_TOOL: Final = "a.b"\ninsert_run_action(session, tool=X_TOOL)',),
+        ('X_TOOL = "a.b"', "trace.record(run_id, X_TOOL, {})"),
+    ],
+    ids=["same-module", "annotated", "imported"],
+)
+def test_written_tools_scan_reads_a_module_tool_constant(sources: tuple[str, ...]) -> None:
+    assert _unread(*sources) == []
+
+
+def test_written_tools_scan_names_the_file_and_the_line() -> None:
+    source = 'class Stage:\n    def run(self):\n        record(run_id, f"a.{x}")\n'
+
+    (site,) = _unread_tools([_scan_tool_writes(source, "app/stage.py")])
+
+    assert str(site) == "app/stage.py:3 Stage.run -> record(f'a.{x}')"
 
 
 def _catalog_drift(side: str, found: set[str]) -> str:
