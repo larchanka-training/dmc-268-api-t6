@@ -924,6 +924,7 @@ Caddy (compose project `dmc-268-edge`, `/opt/dmc-268-edge`) принимает 8
 | Hostname (`APP_DOMAIN` = `dmc268-t6.axyi.ru`) | Upstream в `dmc268-edge` | Статус |
 |---|---|---|
 | `staging-api.<APP_DOMAIN>` | `api-staging:8000` | выкатывается этим репозиторием |
+| `status.<APP_DOMAIN>`, `staging-status.<APP_DOMAIN>` | `status-staging:8080` | публичная страница статуса стека мониторинга (только `GET`/`HEAD` на `/`, остальное 404), выкатывает job `Deploy monitoring` ([MONITORING.md](MONITORING.md)); до него маршрут отвечает 502 |
 | `grafana.<APP_DOMAIN>` | `grafana-staging:3000` | Grafana стека мониторинга, выкатывает job `Deploy monitoring` ([MONITORING.md](MONITORING.md)); `prometheus.*` и `victoria-metrics.*` — A-записи без сайта |
 | `api.<APP_DOMAIN>` | `api-prod:8000` | выкатывает Deploy prod (§1); prod не запущен → заглушка 503 |
 | `staging-ui.<APP_DOMAIN>` | `/api/*` → `api-staging:8000`, остальное → `ui-staging:8080` | UI выкатывает репозиторий UI; `/api/*` — этот |
