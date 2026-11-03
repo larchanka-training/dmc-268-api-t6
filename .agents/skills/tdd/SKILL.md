@@ -52,10 +52,11 @@ The limits of `.agents/rules/backend.md` §5, in short:
 - **One test per behavior.** Grep the feature's file prefix first: another input of
   a behavior already tested is a `pytest.mark.parametrize` row of that test, not a
   copy of it.
-- **Shared, not copied.** A fake, factory or DB setup two files need goes into the
-  topic's shared non-`test_` module under `tests/` (`tests/llm_fakes.py`,
-  `tests/portal_postgres.py`), not into a copy per file; a shared module does not
-  import from a `test_*.py` file.
+- **Shared, not copied.** A fake, factory, DB setup or DB fixture two files need
+  goes into the topic's shared non-`test_` module under `tests/` (`tests/llm_fakes.py`,
+  `tests/portal_postgres.py`), not into a copy per file; a fixture reaches the file
+  through `pytest_plugins`. A local DB fixture stays only for a setup of the file's
+  own; a shared module does not import from a `test_*.py` file.
 - **~60 KB per file.** A test file over ~60 KB is split by behavior at its next
   edit, in a move-only commit before the behavior change.
 

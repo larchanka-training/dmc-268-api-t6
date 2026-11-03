@@ -110,18 +110,24 @@ from a missing scope.
 - Plain `pytest`, no `pytest-asyncio` plugin — drive async code with `asyncio.run`.
 - Unit tests exercise use cases against fakes of the ports (Protocols), not real
   infrastructure.
-- Fakes, factories and DB setup that two test files need live in one shared module of
-  their topic: a non-`test_` module under `tests/`, as `tests/llm_fakes.py`,
+- Fakes, factories, DB setup and DB fixtures that two test files need live in one shared
+  module of their topic: a non-`test_` module under `tests/`, as `tests/llm_fakes.py`,
   `tests/policy_snapshot_fakes.py`, `tests/trigger_uow.py` and `tests/portal_postgres.py`.
-  They are imported, never copied into each file. A shared module never imports from a
-  `test_*.py` file: a helper another file needs moves out of its test file first. Two still
-  do — `tests/portal_postgres.py` (`_reset_topology` of `test_worker_queue_postgres.py`) and
-  `tests/code_index_postgres.py` (the store helpers of `test_code_index_store_postgres.py`):
-  those helpers move out at their next edit.
+  They are imported, never copied into each file; a shared fixture reaches a test file
+  through `pytest_plugins = ("tests.<topic>",)`. A loaded plugin is active for the whole
+  run, so a shared module defines no autouse fixture. A shared module never imports from a
+  `test_*.py` file and no file loads one as a plugin: a helper another file needs moves out
+  of its test file first. Still not so — `tests/portal_postgres.py` (`_reset_topology` of
+  `test_worker_queue_postgres.py`), `tests/code_index_postgres.py` (the store helpers of
+  `test_code_index_store_postgres.py`) and the ten files that load
+  `tests.test_bitbucket_connections_postgres` as a plugin: those helpers move out at their
+  next edit.
 - Integration tests are marked `@pytest.mark.integration` (registered in
-  `pyproject.toml`) and skip when `TEST_DATABASE_URL` is unset. Each DB test file keeps a
-  thin fixture that skips without the variable and enters the shared setup of its topic
-  where there is one (`with portal_schema(...)` in the files that build a portal schema).
+  `pyproject.toml`) and skip when `TEST_DATABASE_URL` is unset. The skip lives in the DB
+  fixture: the shared fixture of the topic when files share one, a local fixture only when
+  the file needs a setup of its own. A local fixture that only skips and enters the shared
+  setup (the files that enter `portal_schema(...)` from a local fixture today) is a copy:
+  it moves to a shared fixture of the topic at its file's next edit.
   `tests/conftest.py` holds only suite-wide fixtures (`_restore_logging`): no DB fixture
   and no DB setup.
 - Assert literal values taken from the spec — never derive an expected value from
