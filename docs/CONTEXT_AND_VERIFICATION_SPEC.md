@@ -1399,9 +1399,10 @@ check-run используют «нет доступных для анализа
 Оригинальное модельное summary хранится только как raw diagnostic output.
 Никакой fallback к нему в API, теле ревью или check-run не допускается. Все три
 поверхности используют один `result_id` и согласованные counts/text. Check-run
-сохраняет PIPELINE_SPEC §7: `neutral` для succeeded (включая clean и partial) и
-failed, `skipped` для исключённого scope, `cancelled` для отменённого run.
-`failure` не используется; blocking — вердикт ревью, а не conclusion check-run.
+следует PIPELINE_SPEC §7: succeeded — `success` для clean и attention, `failure`
+для blocking, чьё ревью принято с `REQUEST_CHANGES`, иначе `neutral` (partial с
+verdict null, summary-only, blocking с `COMMENT`); `neutral` для failed, `skipped`
+для исключённого scope, `cancelled` для отменённого run.
 `reviewEvent=REQUEST_CHANGES` применяется только при blocking и соответствующей
 настройке репозитория; в остальных случаях `COMMENT`.
 
