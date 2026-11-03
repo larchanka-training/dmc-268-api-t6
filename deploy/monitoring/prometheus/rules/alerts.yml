@@ -34,17 +34,18 @@ groups:
           summary: "Redis cache is unreachable"
           description: "The review context runs without its cache (SD §10) until Redis is back."
 
-      # staging-webhook is not here: it is a reserved 503 stub without a service (docs/CICD.md §8.2),
-      # GitHub delivers webhooks to staging-api. Add it when the webhook service exists.
+      # The api and ui names of staging and prod. webhook and staging-webhook are not here: they are
+      # reserved 503 stubs without a service (docs/CICD.md §8.2), GitHub delivers webhooks to the
+      # api names. Add them when the webhook service exists.
       - alert: ApiHigh5xxRate
         expr: |
           (
-            sum by (environment, host) (rate(caddy_http_request_duration_seconds_count{host=~"staging-(api|ui)\\..+", code=~"5.."}[5m]))
+            sum by (environment, host) (rate(caddy_http_request_duration_seconds_count{host=~"(staging-)?(api|ui)\\..+", code=~"5.."}[5m]))
             /
-            sum by (environment, host) (rate(caddy_http_request_duration_seconds_count{host=~"staging-(api|ui)\\..+"}[5m]))
+            sum by (environment, host) (rate(caddy_http_request_duration_seconds_count{host=~"(staging-)?(api|ui)\\..+"}[5m]))
           ) > 0.05
           and
-          sum by (environment, host) (rate(caddy_http_request_duration_seconds_count{host=~"staging-(api|ui)\\..+"}[5m])) > 0.05
+          sum by (environment, host) (rate(caddy_http_request_duration_seconds_count{host=~"(staging-)?(api|ui)\\..+"}[5m])) > 0.05
         for: 5m
         labels:
           severity: critical

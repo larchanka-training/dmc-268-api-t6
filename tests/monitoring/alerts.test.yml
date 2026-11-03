@@ -421,7 +421,8 @@ tests:
         exp_alerts: []
 
   # 5xx share per host, with a minimum of traffic; the metrics endpoint of Caddy (host _other) and
-  # other hosts do not count.
+  # other hosts do not count. The api and ui names of staging and prod alert, each with its own
+  # environment; the webhook names are stubs without a service and stay out.
   - interval: 1m
     input_series:
       - series: 'caddy_http_request_duration_seconds_count{environment="staging", host="staging-api.example.test", code="200"}'
@@ -429,6 +430,10 @@ tests:
       - series: 'caddy_http_request_duration_seconds_count{environment="staging", host="staging-api.example.test", code="502"}'
         values: "0+12x20"
       - series: 'caddy_http_request_duration_seconds_count{environment="prod", host="api.example.test", code="503"}'
+        values: "0+60x20"
+      - series: 'caddy_http_request_duration_seconds_count{environment="prod", host="ui.example.test", code="500"}'
+        values: "0+60x20"
+      - series: 'caddy_http_request_duration_seconds_count{environment="prod", host="webhook.example.test", code="503"}'
         values: "0+60x20"
     alert_rule_test:
       - eval_time: 12m
@@ -441,6 +446,20 @@ tests:
             exp_annotations:
               summary: "staging-api.example.test: 16.67% of requests end in 5xx"
               description: "More than 5% of requests to staging-api.example.test returned 5xx for 5 minutes."
+          - exp_labels:
+              severity: critical
+              environment: prod
+              host: api.example.test
+            exp_annotations:
+              summary: "api.example.test: 100% of requests end in 5xx"
+              description: "More than 5% of requests to api.example.test returned 5xx for 5 minutes."
+          - exp_labels:
+              severity: critical
+              environment: prod
+              host: ui.example.test
+            exp_annotations:
+              summary: "ui.example.test: 100% of requests end in 5xx"
+              description: "More than 5% of requests to ui.example.test returned 5xx for 5 minutes."
 
   - interval: 1m
     input_series:
