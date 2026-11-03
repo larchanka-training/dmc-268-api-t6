@@ -12,6 +12,7 @@ from tests.monitoring_deploy_host import (
     METADATA_GRANTS,
     MONITORING,
     QUERIES,
+    REPO_ROOT,
     _grants,
     _query,
     _read,
@@ -120,6 +121,20 @@ def test_review_time_query_measures_succeeded_fast_runs_from_granted_columns() -
     # No new grant: the exporter already reads these columns of runs.
     assert read == {"state", "engine", "finished_at", "created_at"}
     assert read <= _grants(_read(MONITORING / "deploy.sh"))[("runs", "metrics_exporter")]
+
+
+def test_monitoring_doc_names_the_sla_alerts_and_series() -> None:
+    doc = _read(REPO_ROOT / "docs" / "MONITORING.md")
+    rules = _read(MONITORING / "prometheus" / "rules" / "sla.yml")
+    names = re.findall(r"^      - (?:alert|record): (\S+)$", rules, re.M)
+
+    assert len(names) == 9
+    for name in names:
+        assert f"`{name}`" in doc, name
+    assert "## 12. SLA prod" in doc
+    # The retention of §1 and §12 is the one of compose.yml.
+    assert "хранение 65 дней / 6 GB" in doc
+    assert "15 дней / 2 GB" not in doc
 
 
 # --- dashboard -----------------------------------------------------------------------------
