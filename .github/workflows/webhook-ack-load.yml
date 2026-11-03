@@ -99,7 +99,7 @@ jobs:
           echo "url=${base_url}/webhooks/github" >> "${GITHUB_OUTPUT}"
 
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           persist-credentials: false
 

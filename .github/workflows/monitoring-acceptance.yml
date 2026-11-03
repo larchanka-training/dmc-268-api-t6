@@ -38,7 +38,7 @@ jobs:
       MONITORING_DIR: /opt/dmc-268-monitoring
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Resolve staging target
         id: target

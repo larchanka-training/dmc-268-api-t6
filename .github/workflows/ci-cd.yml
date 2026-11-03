@@ -23,7 +23,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
@@ -51,7 +51,7 @@ jobs:
         docs/erd/erd.svg
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           # The PR merge commit and both parents: HEAD^1 is the base branch tip.
           fetch-depth: 2
@@ -131,7 +131,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v3
@@ -154,7 +154,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: caddy validate
         run: |
@@ -173,7 +173,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       # Prometheus config and alert rules (with their unit tests), both Alertmanager variants, the
       # Telegram template, the blackbox exporter config, the compose files and the dashboards, with
@@ -186,7 +186,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Setup TFLint
         uses: terraform-linters/setup-tflint@v4
@@ -236,7 +236,7 @@ jobs:
     timeout-minutes: 20
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Check docs/plans is untracked
         # Plans are local working files (#265); a PR merged after their removal must not
@@ -410,7 +410,7 @@ jobs:
       TEST_RABBITMQ_URL: amqp://ci:ci@127.0.0.1:5672/
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Setup uv
         uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
@@ -617,7 +617,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Redocly lint
         # docs/PIPELINE_SPEC.md §16; the same command as locally. The repo-root redocly.yaml
@@ -635,7 +635,7 @@ jobs:
       previous: ${{ steps.meta.outputs.previous }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Set image coordinates
         id: meta
@@ -731,7 +731,7 @@ jobs:
     steps:
       # Checkout first: its clean step would delete the downloaded artifact.
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Setup uv
         uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
@@ -1013,7 +1013,7 @@ jobs:
           echo "staging target: ${mode} (${host}:${port}, ${base_url})"
 
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Bundle application secrets
         id: app_secrets
@@ -1289,7 +1289,7 @@ jobs:
       MONITORING_DIR: /opt/dmc-268-monitoring
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Upload monitoring files
         uses: appleboy/scp-action@ff85246acaad7bdce478db94a363cd2bf7c90345 # v1.0.0

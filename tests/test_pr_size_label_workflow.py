@@ -141,7 +141,7 @@ def test_job_only_informs_on_pull_requests() -> None:
     assert workflow["permissions"] == {"contents": "read"}
     assert job["permissions"] == {"contents": "read", "pull-requests": "write"}
     checkout = _step("Checkout")
-    assert checkout["uses"] == "actions/checkout@v4"
+    assert checkout["uses"] == "actions/checkout@v7"
     assert checkout["with"] == {"fetch-depth": 2, "persist-credentials": False}
     # Lock and generated files are listed in one place.
     assert _job()["env"]["PR_SIZE_EXCLUDE"].split() == [
