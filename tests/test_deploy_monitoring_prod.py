@@ -38,11 +38,15 @@ def _load(path: Path) -> dict[str, Any]:
     return loaded
 
 
+def _rules() -> list[dict[str, Any]]:
+    """Every rule of every rule file of the Prometheus config (rule_files: rules/*.yml)."""
+    files = sorted((MONITORING / "prometheus" / "rules").glob("*.yml"))
+    assert files
+    return [rule for path in files for group in _load(path)["groups"] for rule in group["rules"]]
+
+
 def test_every_alert_has_a_case_that_checks_its_environment() -> None:
-    rules = _load(MONITORING / "prometheus" / "rules" / "alerts.yml")
-    alerts = {
-        rule["alert"] for group in rules["groups"] for rule in group["rules"] if "alert" in rule
-    }
+    alerts = {rule["alert"] for rule in _rules() if "alert" in rule}
     cases = _load(ROOT / "tests" / "monitoring" / "alerts.test.yml")
     with_environment = {
         check["alertname"]
@@ -59,12 +63,10 @@ SHARED_BY_DESIGN = {"HostCpuHigh"}
 
 
 def test_every_alert_that_groups_by_environment_has_a_prod_case() -> None:
-    rules = _load(MONITORING / "prometheus" / "rules" / "alerts.yml")
     grouping = {
         rule["alert"]
-        for group in rules["groups"]
-        for rule in group["rules"]
-        if re.search(r"\bby \(\s*environment\b", rule["expr"])
+        for rule in _rules()
+        if "alert" in rule and re.search(r"\bby \(\s*environment\b", rule["expr"])
     } - SHARED_BY_DESIGN
     cases = _load(ROOT / "tests" / "monitoring" / "alerts.test.yml")
     prod_cases = {
