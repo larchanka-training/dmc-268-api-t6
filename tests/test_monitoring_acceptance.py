@@ -258,6 +258,10 @@ if [[ -n "${STUB_TIMES_OUT:-}" && " $* " == *"${STUB_TIMES_OUT}"* ]]; then exit 
 exec "$@"
 """
 
+# The sed of macOS (BSD) rejects a script with a branch label such as `t;`: "undefined label".
+# Stands for any sed that fails on the script it is given, GNU or not.
+FAKE_BSD_SED = "#!/bin/sh\necho 'sed: 1: \"s/x/y/; t; s/z/w/\": undefined label' >&2\nexit 1\n"
+
 # A report must not name the machine it runs on: the run log is public.
 FAKE_HOSTNAME = f"#!/bin/sh\necho {SENTINEL_HOST}\n"
 
@@ -294,6 +298,7 @@ def _run(
     telegram: bool = True,
     deploy_mode: str = "edge",
     send_test_alert: str = "1",
+    bsd_sed: bool = False,
     extra: dict[str, str] | None = None,
     **env: str,
 ) -> Run:
@@ -348,6 +353,7 @@ def _run(
         ("timeout", FAKE_TIMEOUT),
         ("hostname", FAKE_HOSTNAME),
         ("uname", FAKE_HOSTNAME),
+        *((("sed", FAKE_BSD_SED),) if bsd_sed else ()),
     ):
         (stubs / name).write_text(body, encoding="utf-8")
         (stubs / name).chmod(0o755)
@@ -651,6 +657,14 @@ def test_each_failure_fails_only_its_own_check(
     assert "scratch database restore_drill_acceptance dropped" in run.report
 
 
+def test_a_down_target_is_named_when_sed_rejects_its_script(tmp_path: Path) -> None:
+    # A parser that fails must never read as "nothing is down": no sed in the check at all.
+    run = _run(tmp_path, bsd_sed=True, STUB_POSTGRES_UP="0")
+
+    _assert_only_failed(run, "prometheus targets")
+    assert "down: postgres (staging)" in run.line("prometheus targets")
+
+
 def test_without_the_off_host_copy_its_service_is_not_expected(tmp_path: Path) -> None:
     run = _run(tmp_path, offsite=False)
 
@@ -694,6 +708,13 @@ def test_with_prod_all_four_store_targets_must_be_up(
 
     _assert_only_failed(run, "prometheus targets")
     assert f"prod stores: {detail}" in run.line("prometheus targets")
+
+
+def test_with_prod_a_down_store_is_named_when_sed_rejects_its_script(tmp_path: Path) -> None:
+    run = _run(tmp_path, prod=True, bsd_sed=True, extra={"STUB_PROD_DOWN": "rabbitmq"})
+
+    _assert_only_failed(run, "prometheus targets")
+    assert "prod stores: 3 of 4 up (down: rabbitmq (prod))" in run.line("prometheus targets")
 
 
 def test_with_prod_the_store_targets_are_asked_for_by_environment(tmp_path: Path) -> None:

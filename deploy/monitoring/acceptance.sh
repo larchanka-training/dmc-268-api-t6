@@ -241,11 +241,19 @@ else
 fi
 
 section "Prometheus targets"
-# The names of down targets with their environment: "postgres (staging)".
+# The names of down targets with their environment: "postgres (staging)". Parsed in bash: sed
+# branch labels and other GNU-only syntax fail on macOS, and a failed parser must never read as
+# "nothing is down".
 down_targets() {
-  grep -E '=> 0 @' <<<"$1" \
-    | sed -E 's/.*environment="([^"]+)".*job="([^"]+)".*/\2 (\1)/; t; s/.*job="([^"]+)".*/\1/' \
-    | sort -u | paste -sd, - || true
+  local line job_re='job="([^"]+)"' environment_re='environment="([^"]+)"' name
+  local names=()
+  while IFS= read -r line; do
+    [[ "${line}" == *"=> 0 @"* ]] || continue
+    if [[ "${line}" =~ ${job_re} ]]; then name="${BASH_REMATCH[1]}"; else name="${line}"; fi
+    if [[ "${line}" =~ ${environment_re} ]]; then name+=" (${BASH_REMATCH[1]})"; fi
+    names+=("${name}")
+  done <<<"$1"
+  if ((${#names[@]} > 0)); then printf '%s\n' "${names[@]}" | sort -u | paste -sd, -; fi
 }
 if targets="$(promql 'up' 2>&1)"; then
   printf '%s\n' "${targets}"
