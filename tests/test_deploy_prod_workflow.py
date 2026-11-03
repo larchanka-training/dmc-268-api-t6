@@ -665,7 +665,7 @@ def test_every_production_secret_has_a_rotation_row() -> None:
         assert [cell for cell in first_cells if f"`{name}`" in cell], name
 
 
-# --- the deploy on the VPS: no edge refresh, no app secrets, auto rollback (AC2-AC4) ----------
+# --- the deploy on the VPS: no edge refresh, bundled app secrets, auto rollback (AC2-AC4) -----
 
 CI_WORKFLOW = WORKFLOW.parent / "ci-cd.yml"
 HOST_STEPS = [

@@ -146,6 +146,7 @@ def test_expressions_reach_the_shell_only_through_env() -> None:
     assert len(bodies) >= 3
     for body in bodies:
         assert "${{" not in body
+    assert "${{" not in _ssh_script(_step(LOOKUP))
     assert [line.strip() for line in text.splitlines() if "inputs." in line] == [
         "DELIVERY_ID: ${{ inputs.delivery_id }}",
     ] * 3
@@ -163,6 +164,7 @@ def test_expressions_reach_the_shell_only_through_env() -> None:
         "72d3162e-cc78-11e3-81ab-4c9367dc0958 extra",
         "$(id)",
         "72d3162e-cc78-11e3-81ab-4c9367dc095g",
+        DELIVERY.upper(),  # the log match is case-sensitive: an uppercase id would find nothing
     ],
 )
 def test_a_delivery_id_that_is_not_one_guid_is_refused(tmp_path: Path, delivery_id: str) -> None:
@@ -173,9 +175,8 @@ def test_a_delivery_id_that_is_not_one_guid_is_refused(tmp_path: Path, delivery_
     assert _docker_calls(tmp_path) == []
 
 
-@pytest.mark.parametrize("delivery_id", [DELIVERY, DELIVERY.upper()])
-def test_a_guid_is_accepted(tmp_path: Path, delivery_id: str) -> None:
-    result, _ = _bash(_script(VALIDATE), tmp_path, {"DELIVERY_ID": delivery_id})
+def test_a_guid_is_accepted(tmp_path: Path) -> None:
+    result, _ = _bash(_script(VALIDATE), tmp_path, {"DELIVERY_ID": DELIVERY})
 
     assert result.returncode == 0, result.stderr
 
