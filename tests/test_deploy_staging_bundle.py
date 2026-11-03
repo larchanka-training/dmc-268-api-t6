@@ -26,6 +26,7 @@ from tests.deploy_host_fakes import (
 )
 from tests.deploy_host_fakes import host as _host_fixture
 
+# Not a pytest_plugins entry: the monitoring tests have their own `host` and plugins are global.
 host = _host_fixture
 
 BUNDLED = {**SECRET_SOURCES, **VARIABLE_SOURCES}

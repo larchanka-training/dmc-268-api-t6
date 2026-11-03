@@ -7,11 +7,16 @@ from collections.abc import Iterator
 
 import pytest
 
-# Shared modules that test files import before pytest loads them through `pytest_plugins`:
-# registered here, they keep the assertion rewriting and pytest does not warn that the module
-# was already imported.
+# Shared test modules, rewritten before their first import to keep the assertion operand diff.
+# Two reasons: a module loaded with `pytest_plugins` is imported by its test files before pytest
+# loads it as a plugin (and pytest warns that it is already imported), and the deploy and
+# monitoring fakes are plain modules whose helpers assert.
 pytest.register_assert_rewrite(
-    "tests.worker_queue_postgres", "tests.rules_md_e2e", "tests.monitoring_deploy_host"
+    "tests.worker_queue_postgres",
+    "tests.rules_md_e2e",
+    "tests.deploy_host_fakes",
+    "tests.deploy_prod_workflow_fakes",
+    "tests.monitoring_deploy_host",
 )
 
 # ``configure_logging`` (the app lifespan, worker mains) changes these process-wide.
