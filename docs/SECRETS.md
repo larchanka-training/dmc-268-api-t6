@@ -713,9 +713,9 @@ Prod-выкат (`deploy-prod.yml`, job `deploy-prod`) идёт в Environment `
 
 1. Техлид регистрирует App по таблице выше и заводит secrets и variables из таблицы имён в Environment `production` (значения без `'` и trailing `\`; локальные `.pem` удалить).
 2. После merge и отдельного «да» техлида — dispatch Deploy prod; сначала проверить, куда указывает `:staging` (выкат ещё и промоушен). Approve ревьюера; ждать «Outcome: deployed».
-3. Установить prod App на репозиторий, где нет staging App.
-4. В Recent Deliveries App должна быть доставка `installation` со статусом 202.
-5. Её delivery id → workflow **Prod webhook outcome** ([CICD.md](CICD.md#1-конвейер)): строка `GitHub webhook delivery <id> event=… status=…`; для установки без Workspace (prod UI ещё нет) это отсрочка, а не проекция.
+3. Установить prod App на репозиторий, где нет staging App. Доставка `installation` приходит сразу, но пока установка не привязана к Workspace, worker её не проецирует (`ignored_unknown_installation`, п. 5).
+4. Войти на prod UI `https://ui.<APP_DOMAIN>`: вход привязывает к Workspace установки, видимые токену пользователя, и будит неспроецированные доставки `installation` / `installation_repositories` и отложенные после последней попытки. Только они подключают репозитории установки: сам вход строки репозиториев не создаёт. Prod UI не выкачен (503, ui#185): пока он не развёрнут, проверка пройти не может.
+5. Дождаться строки `status=onboarded` у доставки `installation` (после входа её повторно обработает worker), затем открыть или переоткрыть PR в этом репозитории: доставка `pull_request` должна закончиться `status=projected_pr`. Доказательство — HTTP 202 в Recent Deliveries **и** строка `GitHub webhook delivery <id> event=… status=…` из workflow **Prod webhook outcome** ([CICD.md](CICD.md#1-конвейер)) с одним из этих двух статусов; сам 202 лишь значит, что доставка записана. `ignored_unknown_installation` и `ignored_unknown_repository` — провал проверки: worker делает три попытки с интервалом 5 минут и оставляет доставку отложенной (`retry_at=none`), будит её только вход, привязывающий установку. Redeliver в GitHub доставку не обработает заново: повтор с тем же delivery id записывается как `duplicate` и не доходит до worker; нужна новая доставка (новый PR, переустановка App). `status=deferred_repository_details` (GitHub не отдал данные репозиториев) тоже не доказательство: ждать повторной попытки.
 
 ### Мониторинг (`deploy/monitoring`, [MONITORING.md](MONITORING.md))
 
