@@ -409,8 +409,10 @@ jobs:
             am() { docker compose -p dmc-268-monitoring exec -T alertmanager amtool --alertmanager.url=http://localhost:9093 "$@"; }
             status=0
             docker compose -p "${project}" start worker || status=1
+            # exec forwards stdin even with -T: without </dev/null the first expire would swallow the
+            # ids still queued in the pipe and leave the other silences active.
             am silence query -o extended | awk '/acceptance-309$/ { print $1 }' | while read -r id; do
-              am silence expire "${id}"
+              am silence expire "${id}" </dev/null
             done
             exit "${status}"
 

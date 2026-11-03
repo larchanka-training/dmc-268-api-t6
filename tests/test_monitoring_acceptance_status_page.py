@@ -12,6 +12,7 @@ import json
 import os
 import re
 import subprocess
+import textwrap
 import time
 from pathlib import Path
 
@@ -271,6 +272,48 @@ def test_worker_outage_always_starts_the_worker_and_lifts_the_silences_it_made()
         < start.index("silence expire")
         < start.index('exit "${status}"')
     )
+
+
+FAKE_COMPOSE_DOCKER = """#!/bin/bash
+echo "$*" >> "$DOCKER_LOG"
+case "$*" in
+  *"silence query"*)
+    echo "ID Matchers Ends At Created By Comment"
+    echo "id-one alertname=A 2026-11-03 amtool acceptance-309"
+    echo "id-two alertname=B 2026-11-03 amtool acceptance-309"
+    echo "id-other alertname=C 2026-11-03 amtool somebody-else" ;;
+  # docker compose exec forwards its stdin to the command, even with -T.
+  *"silence expire"*) cat > /dev/null ;;
+esac
+"""
+
+
+def test_the_start_step_expires_every_silence_of_the_run(tmp_path: Path) -> None:
+    job = _outage_job()
+    script = job[job.index("- name: Start the worker and lift the silences") :]
+    script = script.split("          script: |\n", 1)[1].split("\n      - name:", 1)[0]
+    stubs = tmp_path / "stubs"
+    stubs.mkdir()
+    (stubs / "docker").write_text(FAKE_COMPOSE_DOCKER, encoding="utf-8")
+    (stubs / "docker").chmod(0o755)
+    log = tmp_path / "docker.log"
+
+    run = subprocess.run(
+        ["/bin/bash", "-c", textwrap.dedent(script)],
+        env={
+            "PATH": f"{stubs}:{os.environ['PATH']}",
+            "API_DIR": "/opt/dmc-268-api-staging",
+            "DOCKER_LOG": str(log),
+        },
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    calls = log.read_text(encoding="utf-8").splitlines()
+    assert run.returncode == 0, run.stderr
+    assert any(call.endswith("start worker") for call in calls)
+    assert [call.split()[-1] for call in calls if "silence expire" in call] == ["id-one", "id-two"]
 
 
 def test_worker_outage_times_from_before_the_stop() -> None:
