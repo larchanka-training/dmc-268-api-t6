@@ -309,6 +309,17 @@ jobs:
       API_DIR: ${{ needs.acceptance.outputs.app_dir }}
       STATUS_URL: ${{ needs.acceptance.outputs.status_url }}
     steps:
+      # Nothing is stopped or silenced unless the staging row "Ревью PR" works now: a worker stopped
+      # under a row that is already down or unknown proves nothing and only costs reviews.
+      - name: Check that the page shows the review component working
+        run: |
+          page="$(curl -sS --max-time 20 "${STATUS_URL}/" || true)"
+          if ! grep -Eq 'data-env="staging" data-component="review" data-state="up"' <<<"${page}"; then
+            echo "- ${STATUS_URL}/ does not show the staging row \"Ревью PR\" working: the worker is not stopped" >> "${GITHUB_STEP_SUMMARY}"
+            echo "::error::the staging row of the review component is not working, the worker is not stopped"
+            exit 1
+          fi
+
       # Taken on the runner right before the SSH step that stops the worker: the latency of that
       # step counts against the 7 minutes, so a pass is honest.
       - name: Note the time of the stop
@@ -340,15 +351,17 @@ jobs:
         id: outage
         run: |
           # From the stop (STOP_STARTED_AT, taken before the SSH step) to the staging row "Ревью PR"
-          # of the page down with the alert ReviewQueueWithoutConsumer, by the data attributes of
-          # the row. The alert fires 5 minutes after the consumers are gone, plus a scrape, an
+          # of the page down with the alert ReviewQueueWithoutConsumer and the visible "since"
+          # (с YYYY-MM-DD HH:MM UTC) in the same row, as render_page lays it out (the span after the
+          # state). The alert fires 5 minutes after the consumers are gone, plus a scrape, an
           # evaluation and a poll of the page: over 7 minutes is a failure, 8 minutes the end of
           # waiting.
+          row='data-env="staging" data-component="review" data-state="down" data-alerts="[^"]*ReviewQueueWithoutConsumer[^"]*"><span class="name">[^<]*</span><span class="state">[^<]*</span> <span class="since">с [0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2} UTC</span>'
           start="${STOP_STARTED_AT:?the time of the stop is not set}"
           seen=no
           while :; do
             page="$(curl -sS --max-time 20 "${STATUS_URL}/" || true)"
-            if grep -Eq 'data-env="staging" data-component="review" data-state="down" data-alerts="[^"]*ReviewQueueWithoutConsumer' <<<"${page}"; then
+            if grep -Eq "${row}" <<<"${page}"; then
               seen=yes
               break
             fi
@@ -362,7 +375,7 @@ jobs:
             echo "## Status page and a stopped worker"
             echo
             if [[ "${seen}" == yes ]]; then
-              echo "- ${STATUS_URL}/ showed the staging row \"Ревью PR\" down with ReviewQueueWithoutConsumer ${elapsed} s after the stop (limit ${OUTAGE_LIMIT_SECONDS:-420} s): ${result}"
+              echo "- ${STATUS_URL}/ showed the staging row \"Ревью PR\" down with ReviewQueueWithoutConsumer and its start time ${elapsed} s after the stop (limit ${OUTAGE_LIMIT_SECONDS:-420} s): ${result}"
             else
               echo "- the row did not show the outage within ${elapsed} s: fail"
             fi
@@ -373,11 +386,12 @@ jobs:
             exit 1
           fi
 
-      # Whatever happened above: the worker runs again and the silences are gone. The silences are
-      # lifted after the start, and even when it fails, so that a worker that stays down alerts.
+      # Whatever happened above once the stop step ran: the worker runs again and the silences are
+      # gone. The silences are lifted after the start, and even when it fails, so that a worker
+      # that stays down alerts. A failed precondition stops nothing, so there is nothing to undo.
       - name: Start the worker and lift the silences
         id: start
-        if: ${{ always() }}
+        if: ${{ always() && steps.stop.conclusion != 'skipped' }}
         uses: appleboy/ssh-action@0ff4204d59e8e51228ff73bce53f80d53301dee2 # v1.2.5
         with:
           host: ${{ needs.acceptance.outputs.host }}

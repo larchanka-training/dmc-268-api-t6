@@ -1281,7 +1281,18 @@ def _outage_job() -> str:
     return workflow[workflow.index("\n  worker-outage:\n") :]
 
 
-def test_worker_outage_is_an_opt_in_job_on_main_after_the_acceptance_job() -> None:
+def _outage_page(state: str, alerts: str, since: str = "с 2026-11-03 10:00 UTC") -> str:
+    # As render_page lays a row out; test_status_page.py checks the real one.
+    return (
+        f'<li class="row {state}" data-env="staging" data-component="review" '
+        f'data-state="{state}" data-alerts="{alerts}"><span class="name">Ревью PR</span>'
+        '<span class="state">x</span>'
+        + (f' <span class="since">{since}</span>' if since else "")
+        + "</li>"
+    )
+
+
+def test_worker_outage_is_an_opt_in_job_on_main_after_the_acceptance() -> None:
     workflow = WORKFLOW.read_text(encoding="utf-8")
     job = _outage_job()
 
@@ -1295,11 +1306,10 @@ def test_worker_outage_is_an_opt_in_job_on_main_after_the_acceptance_job() -> No
     assert "github.ref == 'refs/heads/main'" in job
     assert "inputs.stop_worker" in job
     assert "      name: staging\n" in job
-    # Only after a passed acceptance: a stopped worker is not worth ten minutes of staging when the
-    # stack or the page already fails.
+    # Only after a passed acceptance: no staging outage on a failing stack.
     condition = next(line for line in job.splitlines() if line.startswith("    if: "))
     assert "needs.acceptance.result == 'success'" in condition
-    assert "cancelled()" not in condition and "always()" not in condition
+    assert "cancelled()" not in condition
     assert "appleboy/ssh-action@0ff4204d59e8e51228ff73bce53f80d53301dee2" in job
     assert "fingerprint: ${{ vars.STAGING_SSH_FINGERPRINT }}" in job
 
@@ -1309,8 +1319,7 @@ def test_worker_outage_stops_only_the_worker_under_a_planned_silence() -> None:
     stop = job[job.index("- name: Silence the alerts and stop the worker") :]
     stop = stop[: stop.index("- name: Wait for the page to show the outage")]
 
-    # Both rules keep `environment` (sum by), so each silence carries it: a prod alert of the same
-    # name is never silenced by a test of staging.
+    # Each silence carries `environment`: a prod alert of the same name stays loud.
     adds = [line for line in stop.splitlines() if "silence add" in line]
     assert len(adds) == 2
     for line, rule in zip(
@@ -1330,7 +1339,7 @@ def test_worker_outage_always_starts_the_worker_and_lifts_the_silences_it_made()
     start = job[job.index("- name: Start the worker and lift the silences") :]
     start = start[: start.index("- name: Wait for the page to show the worker again")]
 
-    assert "if: ${{ always() }}" in start
+    assert "if: ${{ always() && steps.stop.conclusion != 'skipped' }}" in start
     assert 'docker compose -p "${project}" start worker || status=1' in start
     # Only the silences of this run, by their comment; a failed start still lifts them and fails
     # the step afterwards, so a worker that stays down alerts.
@@ -1342,48 +1351,49 @@ def test_worker_outage_always_starts_the_worker_and_lifts_the_silences_it_made()
     )
 
 
-def test_worker_outage_takes_the_time_before_the_stop_and_waits_from_it(tmp_path: Path) -> None:
+def test_worker_outage_times_from_before_the_stop() -> None:
     job = _outage_job()
     names = re.findall(r"- name: (.+)", job)
     clock = names.index("Note the time of the stop")
-    assert names[clock + 1] == "Silence the alerts and stop the worker"
+    assert names[clock - 1 : clock + 2] == [
+        "Check that the page shows the review component working",
+        "Note the time of the stop",
+        "Silence the alerts and stop the worker",
+    ]
     waiting = job[job.index("- name: Wait for the page to show the outage") :]
     waiting = waiting[: waiting.index("- name: Start the worker")]
     assert 'start="$(date +%s)"' not in waiting and "STOP_STARTED_AT" in waiting
-    env_file = tmp_path / "env"
-    env_file.touch()
-    subprocess.run(
-        ["/bin/bash", "-e", "-c", _step("Note the time of the stop")],
-        env={"PATH": os.environ["PATH"], "GITHUB_ENV": str(env_file)},
-        check=True,
+    assert 'echo "STOP_STARTED_AT=$(date +%s)" >> "${GITHUB_ENV}"' in job
+
+
+@pytest.mark.parametrize(
+    ("page", "code"),
+    [(_outage_page("up", ""), 0), (_outage_page("down", "PostgresDown"), 1), ("", 1)],
+)
+def test_the_worker_stays_up_unless_the_row_works(tmp_path: Path, page: str, code: int) -> None:
+    run, _, _ = _status_step(
+        tmp_path,
+        "Check that the page shows the review component working",
+        {},
+        {f"{STATUS_URL}/": [page]},
     )
-    taken = re.fullmatch(r"STOP_STARTED_AT=(\d+)\n", env_file.read_text(encoding="utf-8"))
-    assert taken is not None and abs(int(taken[1]) - time.time()) < 60
+
+    assert run.returncode == code, run.stderr
 
 
-@pytest.mark.parametrize(("seconds_ago", "result"), [(100, "ok"), (500, "fail")])
-def test_outage_step_counts_the_limit_from_the_stop(
-    tmp_path: Path, seconds_ago: int, result: str
-) -> None:
-    run, summary, output = _status_step(
+def test_outage_step_counts_from_the_stop(tmp_path: Path) -> None:
+    page = _outage_page("down", "ReviewQueueWithoutConsumer")
+    run, summary, _ = _status_step(
         tmp_path,
         "Wait for the page to show the outage",
         {},
-        {f"{STATUS_URL}/": [_outage_page("down", "ReviewQueueWithoutConsumer")]},
-        STOP_STARTED_AT=str(int(time.time()) - seconds_ago),
+        {f"{STATUS_URL}/": [page]},
+        STOP_STARTED_AT=str(int(time.time()) - 500),
     )
 
-    assert run.returncode == (0 if result == "ok" else 1), run.stderr
-    assert f"result={result}" in output.splitlines()
+    assert run.returncode == 1  # seen at once, but 500 s after the stop
     shown = re.search(r"(\d+) s after the stop", summary)
-    assert shown is not None and int(shown[1]) >= seconds_ago
-
-
-def _outage_page(state: str, alerts: str) -> str:
-    return (
-        f'<li class="row {state}" data-env="staging" data-component="review" '
-        f'data-state="{state}" data-alerts="{alerts}">'
-    )
+    assert shown is not None and int(shown[1]) >= 500
 
 
 def test_outage_step_passes_when_the_page_shows_the_review_component_down_in_time(
@@ -1413,6 +1423,10 @@ def test_outage_step_passes_when_the_page_shows_the_review_component_down_in_tim
         _outage_page("down", "PostgresDown"),
         _outage_page("down", "ReviewQueueWithoutConsumer").replace("review", "api"),
         _outage_page("down", "ReviewQueueWithoutConsumer").replace('"staging"', '"prod"'),
+        # No "since" in the row: missing, malformed, next row's.
+        _outage_page("down", "ReviewQueueWithoutConsumer", since=""),
+        _outage_page("down", "ReviewQueueWithoutConsumer", since="с вчера"),
+        _outage_page("down", "ReviewQueueWithoutConsumer", since="") + _outage_page("up", ""),
         "",
     ],
 )

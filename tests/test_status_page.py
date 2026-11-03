@@ -10,9 +10,11 @@ from __future__ import annotations
 import importlib.util
 import json
 import re
+import subprocess
 import sys
 import threading
 from collections.abc import Iterator
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -916,3 +918,24 @@ def test_promtool_runs_the_very_query_the_page_sends(page: ModuleType) -> None:
     assert "test rules tests/monitoring/status.test.yml" in " ".join(
         VALIDATE.read_text("utf-8").split()
     )
+
+
+def test_the_workflow_pattern_of_the_outage_row_matches_the_rendered_page(page: ModuleType) -> None:
+    # The acceptance job waits for this row of the real renderer: down, the alert, the since text.
+    workflow = (REPO_ROOT / ".github" / "workflows" / "monitoring-acceptance.yml").read_text()
+    wait = workflow.split("- name: Wait for the page to show the outage", 1)[1]
+    pattern = re.search(r"\n\s+row='([^']+)'\n", wait.split("- name: Start", 1)[0])
+    assert pattern is not None
+
+    def matches(row: Any) -> bool:
+        html = page.render_page([row], None, NOW)
+        grep = subprocess.run(["grep", "-Eq", pattern[1]], input=html, text=True, check=False)
+        return grep.returncode == 0
+
+    alerts = (page.Finding("ReviewQueueWithoutConsumer", "x"),)
+    down = page.Row("staging", "review", "Ревью PR", page.STATE_DOWN, NOW, alerts)
+    assert matches(down)
+    assert not matches(replace(down, since=None))
+    assert not matches(replace(down, state=page.STATE_UP, alerts=()))
+    assert not matches(replace(down, env="prod"))
+    assert not matches(replace(down, alerts=(page.Finding("PostgresDown", "x"),)))
