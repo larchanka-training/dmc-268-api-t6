@@ -658,10 +658,17 @@ def test_every_name_deploy_prod_reads_is_documented_for_production() -> None:
 
 
 def test_every_production_secret_has_a_rotation_row() -> None:
-    rotation = _production_section().split("#### Ротация", 1)[1].split("\n#### ", 1)[0]
+    section = _production_section()
+    # The secrets the job reads, less the ones the section names as inherited from the
+    # organization or the repository: those are not rotated here.
+    inherited = next(p for p in section.split("\n\n") if p.startswith("Наследуются"))
+    secrets = set(re.findall(r"(?<!\w)secrets\.(\w+)", _job("deploy-prod")))
+    owned = {name for name in secrets if f"`{name}`" not in inherited}
+    assert owned >= {*REQUIRED_SECRETS, "GITLAB_CREDENTIAL_KEYS", "BITBUCKET_CREDENTIAL_KEYS"}
+    rotation = section.split("#### Ротация", 1)[1].split("\n#### ", 1)[0]
     first_cells = [line.split("|")[1] for line in rotation.splitlines() if line.startswith("| `")]
 
-    for name in REQUIRED_SECRETS:
+    for name in sorted(owned):
         assert [cell for cell in first_cells if f"`{name}`" in cell], name
 
 
