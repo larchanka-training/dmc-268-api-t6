@@ -20,7 +20,10 @@ nothing, here and everywhere below.
 that prefix (`Часть 1: x`, `Ч.1 — x`) or with a bold one: `**Ч.1.** x`, `**Часть 1:** x`, `**Ч.1**: x`,
 and `**Ч.1, state.** x`, whose qualifier stays (`state. x`). Everything else is common, which every
 part's run reads. So a criterion of several parts, `Ч.1, Ч.2: x` or `**Ч.1, Ч.2.** x`, stays common
-and never goes to the first part alone.
+and never goes to the first part alone. So does a bold prefix with a second number and no label, a
+range or a list (`**Ч.1–2.** x`, `**Ч.1, 2.** x`, `**Ч.1 и 2.** x`, `**Ч.1** – 2: x`); a qualifier
+that starts with a digit (`**Ч.1, 2FA.** x`) reads the same, which is safe. A number with no mark
+before it starts the text: `**Ч.1.** 2 теста` is Part 1, `2 теста`.
 
 **Unreadable parts.** The label must be the very start of the bullet: `- **Ч.1 (P2). Title.** …`
 (bold) parses no part. When no part is parsed but a criterion starts with a part number in any form

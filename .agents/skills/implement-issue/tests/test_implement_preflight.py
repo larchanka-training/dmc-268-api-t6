@@ -2728,6 +2728,8 @@ def test_held_is_null_when_nothing_holds_the_issue_back(tmp_path: Path) -> None:
         "- Часть 1 (label" + " " * 65000 + "—",
         "- **Ч.1" + " " * 65000 + "x",
         "- **Ч.1**" + " " * 65000 + "x",
+        "- **Ч.1 –" + " " * 65000 + "x**",
+        "- **Ч.1**" + " " * 65000 + "–" + " " * 65000 + "x",
         # An explicit id: pytest puts the id in the environment of `run`, and this one, escaped,
         # would be over the 128 KB limit of one variable.
         pytest.param("- **Ч.1, " + "Ч." * 30000 + "**", id="bold-many-labels"),
@@ -3031,6 +3033,13 @@ def with_criterion(item: str) -> str:
         ("**Part 2, foo.** x", 2, "foo. x"),
         ("**Ч.1: всё работает**", 1, "всё работает"),
         ("**Ч.2.** x **жирное** y", 2, "x **жирное** y"),
+        # A number that starts the text is not a second part.
+        ("**Ч.1.** 2 теста", 1, "2 теста"),
+        ("**Ч.1:** 2 теста", 1, "2 теста"),
+        ("**Ч.1**: 2 теста", 1, "2 теста"),
+        ("**Ч.1** 2 теста", 1, "2 теста"),
+        ("**Ч.1: 2 теста**", 1, "2 теста"),
+        ("**Ч.1. 2 теста**", 1, "2 теста"),
     ],
 )
 def test_a_bold_prefix_names_the_part(tmp_path: Path, item: str, part: int, text: str) -> None:
@@ -3040,7 +3049,33 @@ def test_a_bold_prefix_names_the_part(tmp_path: Path, item: str, part: int, text
     assert doc["warnings"] == []
 
 
-@pytest.mark.parametrize("item", ["Ч.1, Ч.2: x", "**Ч.1, Ч.2.** x", "**Часть 1, часть 2:** x"])
+@pytest.mark.parametrize(
+    "item",
+    [
+        "Ч.1, Ч.2: x",
+        "**Ч.1, Ч.2.** x",
+        "**Часть 1, часть 2:** x",
+        # A second number without a label: a range or a list (ui#258, api#481).
+        "**Ч.1–2.** x",
+        "**Ч.1 – 2.** x",
+        "**Ч.1—2.** x",
+        "**Ч.1-2.** x",
+        "**Ч.1 - 2.** x",
+        "**Часть 1–2:** x",
+        "**Part 1-2:** x",
+        "**Ч.1, 2.** x",
+        "**Ч.1,2.** x",
+        "**Ч.1 и 2.** x",
+        "**Part 1 and 2.** x",
+        "**Ч.1 & 2.** x",
+        "**Ч.1/2.** x",
+        "**Ч.1.2** x",
+        "**Ч.1** – 2: x",
+        "**Ч.1**, 2: x",
+        "**Ч.1** и 2: x",
+        "**Ч.1, 2FA.** x",  # a qualifier that starts with a digit: common, which is safe
+    ],
+)
 def test_a_criterion_of_several_parts_stays_common(tmp_path: Path, item: str) -> None:
     # api#378: the run of each part must see it, so it never goes to the first one alone.
     _, doc = facts(tmp_path, issue_response(body=with_criterion(item)))
@@ -3070,6 +3105,8 @@ def test_a_bold_start_without_a_part_is_a_plain_criterion(tmp_path: Path, item: 
         "__Ч.1__ x",
         "`Ч.1` x",
         "**Ч.1a.** x",
+        "**Ч.1–2.** x",
+        "**Ч.1, 2.** x",
         "Part 1 of the pipeline works",  # a false stop, and a safe one: none in the live issues
     ],
 )

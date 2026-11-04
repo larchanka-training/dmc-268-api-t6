@@ -234,6 +234,12 @@ PART_CRITERION = re.compile(rf"{_PART}[ \t]*{_SEP}[ \t]*(.*)", re.IGNORECASE)
 # A criterion whose prefix is bold: «**Ч.1.** …», «**Ч.1, state.** …», «**Часть 1:** …»,
 # «**Ч.1**: …». What the bold holds after the number is the start of the criterion.
 BOLD_CRITERION = re.compile(rf"\*\*{_PART}(?![^\W_])(.*?)\*\*[ \t]*:?[ \t]*(.*)", re.IGNORECASE)
+# A second number right after that one, with no label of its own: a range or a list, inside the
+# bold or just after it («**Ч.1–2.**», «**Ч.1, 2.**», «**Ч.1** и 2:», «**Ч.1.2**»). Without a mark
+# before it a number starts the text («**Ч.1.** 2 теста», «**Ч.1: 2 теста**»).
+BOLD_SECOND_NUMBER = re.compile(
+    r"[ \t]*(?:\.|(?:[,;/&+—–-]|(?:и|или|and|or|und|oder)(?![^\W_]))[ \t]*)[0-9]", re.IGNORECASE
+)
 # A criterion that starts with a part in a form the two above do not read («Ч.1. …»,
 # «Ч.1, Ч.2: …»).
 PART_LEAD = re.compile(rf"[*_`]*{_PART}", re.IGNORECASE)
@@ -688,13 +694,19 @@ def build_parts(body: str) -> tuple[list[dict[str, Any]], str | None]:
 
 def criterion_of(text: str) -> tuple[str, str] | None:
     """(the part's digits, the text without the prefix) of a criterion with a part prefix, plain
-    or bold. None when it has none, or when the bold names a second part: a criterion of several
-    parts stays common, so that the run of each of them sees it."""
+    or bold. None when it has none, or when the bold names a second part, with a label or as a
+    bare number: a criterion of several parts stays common, so that the run of each of them sees
+    it."""
     plain = PART_CRITERION.fullmatch(text)
     if plain:
         return plain.group(1), plain.group(2).strip()
     bold = BOLD_CRITERION.fullmatch(text)
-    if not bold or PART_START.search(bold.group(2)):
+    if (
+        not bold
+        or PART_START.search(bold.group(2))
+        or BOLD_SECOND_NUMBER.match(bold.group(2))
+        or BOLD_SECOND_NUMBER.match(bold.group(3))
+    ):
         return None
     head = bold.group(2).lstrip(" \t.,:—–")
     return bold.group(1), f"{head} {bold.group(3)}".strip()
