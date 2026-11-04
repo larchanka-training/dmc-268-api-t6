@@ -7,9 +7,10 @@ miss and the real retry handler, so a hop that drops the hint fails here.
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from datetime import timedelta
-from typing import cast
+from types import TracebackType
+from typing import Self, cast
 from urllib.parse import unquote
 from uuid import UUID
 
@@ -25,6 +26,9 @@ from app.modules.integrations.webhooks.infrastructure.github_installation_tree_p
 )
 from app.modules.reviews.application.conventions import (
     ActiveConventionsPrompt,
+    CachedConventions,
+    ConventionsFile,
+    ConventionsRequest,
     GenerateRepoConventions,
     PolicyFilteredConventionsSource,
     RepositoryConventionsSource,
@@ -48,7 +52,6 @@ from tests.gitlab_run_fakes import (
     reply,
 )
 from tests.review_run_worker_fakes import NOW, RUN, Clock, FakeRun, RetryQueue, handler
-from tests.test_repo_conventions import FakeModel, FakeStore, FakeUnitOfWorkFactory, draft
 
 RETRY_AFTER_900 = {"Retry-After": "900"}
 
@@ -56,12 +59,61 @@ type GitLabFault = Callable[[httpx.Request], httpx.Response | None]
 type GitHubAnswer = Callable[[httpx.Request], httpx.Response]
 
 
+class _EmptyCache:
+    """Nothing is cached, and a failed tree read reaches no write."""
+
+    async def get(
+        self,
+        repository_id: UUID,
+        agents_md_sha: str | None,
+        prompt_version_id: UUID,
+        policy_key: str | None = None,
+    ) -> CachedConventions | None:
+        return None
+
+    async def save_and_record_trace(
+        self,
+        run_id: UUID,
+        conventions: CachedConventions,
+        trace_files: tuple[ConventionsFile, ...],
+    ) -> CachedConventions:
+        raise AssertionError("a failed tree read writes nothing")
+
+
+class _EmptyCacheUnitOfWork:
+    conventions = _EmptyCache()
+
+    async def __aenter__(self) -> Self:
+        return self
+
+    async def __aexit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> None:
+        return None
+
+    async def commit(self) -> None:
+        raise AssertionError("a failed tree read commits nothing")
+
+    async def rollback(self) -> None:
+        return None
+
+
+class _UnreachedModel:
+    """The tree read fails before the model is asked."""
+
+    async def draft_conventions(self, *, request: ConventionsRequest) -> Mapping[str, object]:
+        raise AssertionError("a failed tree read asks no model")
+
+
 async def _cache_miss(source: RepositoryConventionsSource) -> None:
     """One conventions generation with nothing cached, behind the policy filter of a Run."""
     await GenerateRepoConventions(
         PolicyFilteredConventionsSource(source, lambda path: False),
-        FakeModel(draft()),
-        FakeUnitOfWorkFactory(FakeStore()),
+        _UnreachedModel(),
+        _EmptyCacheUnitOfWork,
     ).execute(
         repository_id=INPUT.repository_id,
         conventions_prompt=ActiveConventionsPrompt(UUID(int=19), "system"),
