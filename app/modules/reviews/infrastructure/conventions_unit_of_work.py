@@ -6,6 +6,7 @@ from datetime import UTC, datetime
 from uuid import UUID
 
 from sqlalchemy import select
+from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.common.infrastructure.db.unit_of_work import SqlAlchemyUnitOfWork
@@ -59,27 +60,33 @@ class SqlAlchemyRepositoryConventionsStore:
         conventions: CachedConventions,
         trace_files: tuple[ConventionsFile, ...],
     ) -> CachedConventions:
-        existing = await self.get(
+        key = (
             conventions.repository_id,
             conventions.agents_md_sha,
             conventions.prompt_version_id,
             conventions.policy_key,
         )
-        saved = existing
+        saved = await self.get(*key)
         if saved is None:
-            row = RepoConventions(
-                repository_id=conventions.repository_id,
-                agents_md_sha=conventions.agents_md_sha,
-                prompt_version_id=conventions.prompt_version_id,
-                policy_key=conventions.policy_key,
-                agents_md=None,
-                key_patterns=list(conventions.key_patterns),
-                recommendations=list(conventions.recommendations),
-                languages=conventions.languages,
+            # Another Run of this repository may have written the key since the read: its row
+            # wins, as if the read had found it. The insert waits for that Run's commit.
+            inserted = await self._session.scalar(
+                insert(RepoConventions)
+                .values(
+                    repository_id=conventions.repository_id,
+                    agents_md_sha=conventions.agents_md_sha,
+                    prompt_version_id=conventions.prompt_version_id,
+                    policy_key=conventions.policy_key,
+                    agents_md=None,
+                    key_patterns=list(conventions.key_patterns),
+                    recommendations=list(conventions.recommendations),
+                    languages=conventions.languages,
+                )
+                .on_conflict_do_nothing(constraint="uq_repo_conventions_snapshot")
+                .returning(RepoConventions.id)
             )
-            self._session.add(row)
-            await self._session.flush()
-            saved = conventions
+            winner = None if inserted is not None else await self.get(*key)
+            saved = winner or conventions
         await insert_run_action(
             self._session,
             run_id=run_id,

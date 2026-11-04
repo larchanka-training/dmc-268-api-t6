@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import hashlib
 import hmac
 import importlib.util
@@ -16,6 +17,7 @@ from collections.abc import Callable, Iterator, Mapping
 from pathlib import Path
 from types import ModuleType
 from typing import Any
+from uuid import UUID
 
 import httpx
 import pytest
@@ -24,10 +26,36 @@ from app.modules.integrations.webhooks.api.pull_request_dtos import parse_pull_r
 from app.modules.integrations.webhooks.infrastructure.github_pull_request_dtos import (
     parse_current_pull_request,
 )
+from app.modules.reviews.application.prompt_builder import (
+    PromptBuilder,
+    PullRequestMeta,
+    RepoConventions,
+    ReviewContext,
+    file_block_id,
+)
+from app.modules.reviews.application.reflection_pass import (
+    CandidateFindingItem,
+    VerificationOutput,
+    VerifierPromptBuilder,
+    verification_answer_errors,
+)
+from app.modules.reviews.application.review_output import (
+    EvidenceRef,
+    ReviewFindingV2,
+    parse_review_output_v2,
+    validate_v2_attribution,
+    validate_v2_coordinates,
+)
+from app.modules.reviews.application.review_path import SNAPSHOT_REVIEW_PROMPT_VERSIONS
+from app.modules.reviews.application.vcs_diff import parse_file_patch
 from app.modules.reviews.infrastructure.llm.answers import (
     conventions_answer_validator,
+    review_answer_contract,
     validate_review_answer,
+    validate_review_answer_v2,
+    validate_verifier_answer,
 )
+from tests.policy_snapshot_fakes import make_policy_snapshot
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = REPO_ROOT / "scripts"
@@ -249,7 +277,7 @@ _CHECKS = (
 _ROWS = [_row(1), _row(2), _row(3)]
 _GOOD: dict[str, Any] = {
     "review_posts": {"1": 1, "2": 1, "3": 1},
-    "llm_calls": {"RepoConventionsDraft": 3, "ReviewOutput": 3},
+    "llm_calls": {"RepoConventionsDraft": 3, "ReviewOutputV2": 3, "VerificationOutput": 3},
     "receipts": {"projected": 6},
     "dlq_depth": 0,
     "peak": 3,
@@ -269,7 +297,14 @@ _GOOD: dict[str, Any] = {
         ([*_ROWS, _row(3, worker_id="worker-3:1")], {}, 3, ["one_run_per_pr"]),
         (_ROWS, {"review_posts": {"1": 1, "2": 2, "3": 1}}, 3, ["one_review_per_pr"]),
         (_ROWS, {"review_posts": {"1": 1, "3": 1}}, 3, ["one_review_per_pr"]),
-        (_ROWS, {"llm_calls": {"ReviewOutput": 4}}, 3, ["one_review_call_per_run"]),
+        (_ROWS, {"llm_calls": {"ReviewOutputV2": 4}}, 3, ["one_review_call_per_run"]),
+        (_ROWS, {"llm_calls": {"ReviewOutput": 3}}, 3, ["one_review_call_per_run"]),
+        (
+            _ROWS,
+            {"llm_calls": {"ReviewOutputV2": 3, "ReviewOutput": 1}},
+            3,
+            ["one_review_call_per_run"],
+        ),
         (_ROWS, {"llm_calls": {}}, 3, ["one_review_call_per_run"]),
         (_ROWS, {"receipts": {"projected": 3}}, 3, ["every_delivery_projected"]),
         (_ROWS, {"receipts": {"projected": 5, "failed": 1}}, 3, ["every_delivery_projected"]),
@@ -293,6 +328,8 @@ _GOOD: dict[str, Any] = {
         "two-reviews",
         "missing-review",
         "extra-review-call",
+        "legacy-review-calls",
+        "legacy-next-to-snapshot-review-calls",
         "no-review-call",
         "duplicate-not-projected",
         "failed-receipt",
@@ -387,11 +424,16 @@ def test_delivery_is_signed_with_a_fresh_load_id(driver: ModuleType) -> None:
 
 # --- stub ------------------------------------------------------------------------------------
 
+_LLM_PATH = "/v1/chat/completions"
 
-def _chat(schema: str) -> bytes:
+
+def _chat(schema: str, prompt: str = "review") -> bytes:
     request = {
         "model": "load-stub-model",
-        "messages": [{"role": "user", "content": "review"}],
+        "messages": [
+            {"role": "system", "content": "Review carefully."},
+            {"role": "user", "content": prompt},
+        ],
         "response_format": {"type": "json_schema", "json_schema": {"name": schema}},
     }
     return json.dumps(request).encode()
@@ -441,6 +483,141 @@ def test_stub_rejects_an_unknown_schema_without_delay(stub: ModuleType) -> None:
     }
     assert delays == []
     assert state.stats()["llm_calls"] == {"VerifierOutput": 1}
+
+
+_CALL_ID = UUID("00000000-0000-0000-0000-000000000398")
+
+
+def _snapshot_context(stub: ModuleType) -> ReviewContext:
+    """A snapshot-path context over the diff the worker parses from the stub's own answer."""
+    status, files = stub.StubState(prs=1, llm_delay_ms=0).handle(
+        "GET", "/repos/load/parallel-runs/pulls/1/files", b""
+    )
+    assert status == 200
+    changed = parse_file_patch(files[0]["filename"], files[0]["status"], files[0]["patch"])
+    return ReviewContext(
+        system="Review carefully.",
+        rules=(),
+        agents_md=None,
+        conventions=RepoConventions((), ()),
+        pr_meta=PullRequestMeta(
+            "Load change 1", None, "load-author", "load-1", "main", (), 1, 1, 0, False, False
+        ),
+        changed_files=(changed,),
+        omitted_files=(),
+        policy_snapshot=make_policy_snapshot(),
+    )
+
+
+def test_stub_review_v2_answer_is_accepted_on_a_snapshot_prompt(stub: ModuleType) -> None:
+    context = _snapshot_context(stub)
+    prompt = PromptBuilder().build_prompt(context)
+    manifest = PromptBuilder().build_manifest(context, call_id=_CALL_ID)
+    state = stub.StubState(prs=1, llm_delay_ms=0)
+
+    content = _content(state.handle("POST", _LLM_PATH, _chat("ReviewOutputV2", prompt.user)))
+
+    findings = parse_review_output_v2(validate_review_answer_v2(content)).findings
+    assert [(item.path, item.line, item.start_line) for item in findings] == [
+        ("app/example.py", 11, None)
+    ]
+    assert validate_v2_coordinates(
+        findings[0], context.changed_files, original_files=context.changed_files
+    ) == (True, None)
+    assert validate_v2_attribution(findings[0], manifest) == (True, None)
+
+
+@pytest.mark.parametrize("start_line", [None, 10], ids=["single-line", "range"])
+def test_stub_verifier_answer_is_accepted_for_the_candidates_of_the_prompt(
+    stub: ModuleType, start_line: int | None
+) -> None:
+    context = _snapshot_context(stub)
+    block = file_block_id("app/example.py")
+    finding = ReviewFindingV2(
+        path="app/example.py",
+        line=11,
+        start_line=start_line,
+        severity="high",
+        category="correctness",
+        title="Inverted branch",
+        body="The new line inverts the branch.",
+        suggestion=None,
+        confidence=0.9,
+        rule_name=None,
+        evidence_refs=[EvidenceRef(block_id=block, start_line=11, end_line=11)],
+    )
+    # Ids the stub cannot know: a literal answer fails the 1:1 match with the candidates.
+    candidates = (
+        CandidateFindingItem(candidate_id="cand-a", finding=finding),
+        CandidateFindingItem(candidate_id="cand-b", finding=finding),
+    )
+    prompt, manifest = VerifierPromptBuilder().build_verifier_prompt(
+        candidates=candidates, context=context, call_id=_CALL_ID
+    )
+    state = stub.StubState(prs=1, llm_delay_ms=0)
+
+    content = _content(state.handle("POST", _LLM_PATH, _chat("VerificationOutput", prompt.user)))
+
+    output = VerificationOutput.model_validate(validate_verifier_answer(content))
+    assert [(item.candidate_id, item.status) for item in output.decisions] == [
+        ("cand-a", "supported"),
+        ("cand-b", "supported"),
+    ]
+    assert (
+        verification_answer_errors(
+            output, candidates=candidates, manifest=manifest, context=context, check_lines={}
+        )
+        == []
+    )
+
+
+@pytest.mark.parametrize(
+    "schema,message",
+    [
+        ("ReviewOutputV2", "the load stub found no file block for 'app/example.py' in the prompt"),
+        ("VerificationOutput", "the load stub found no candidate in the prompt"),
+    ],
+    ids=["review-without-file-block", "verifier-without-candidate"],
+)
+def test_stub_refuses_a_prompt_it_cannot_cite_without_delay(
+    stub: ModuleType, schema: str, message: str
+) -> None:
+    delays: list[float] = []
+    state = stub.StubState(prs=5, llm_delay_ms=3000, sleep=delays.append)
+
+    reply = state.handle("POST", _LLM_PATH, _chat(schema))
+
+    assert reply == (400, {"error": {"message": message}})
+    assert delays == []
+
+
+def _requested_schema_names() -> set[str]:
+    """The schemas `app/` can ask the model for, read from `app/` itself.
+
+    Every `ResponseSchema("…")` call plus `review_answer_contract`, the one source of the only
+    call site that passes a computed name. Another computed name fails here: nothing reads it.
+    """
+    names = {review_answer_contract(version).name for version in SNAPSHOT_REVIEW_PROMPT_VERSIONS}
+    for path in (REPO_ROOT / "app").rglob("*.py"):
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"), filename=str(path))):
+            if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Name):
+                continue
+            if node.func.id != "ResponseSchema":
+                continue
+            name = node.args[0]
+            if isinstance(name, ast.Constant):
+                names.add(str(name.value))
+            else:
+                assert ast.unparse(name) == "answer.name", f"{path}:{node.lineno}"
+    return names
+
+
+def test_stub_answers_every_schema_the_snapshot_path_requests(stub: ModuleType) -> None:
+    names = _requested_schema_names()
+
+    # Literal names of #398: a renamed `ResponseSchema` must not leave the scan empty.
+    assert names >= {"RepoConventionsDraft", "ReviewOutputV2", "VerificationOutput"}
+    assert names - set(stub.ANSWERS) == set()
 
 
 def _review(commit_id: str, comments: int) -> bytes:
@@ -588,6 +765,15 @@ def test_override_pins_every_llm_and_github_setting_of_the_worker() -> None:
     assert re.findall(r"\$\{(\w+)", override) == ["LOAD_GITHUB_APP_PRIVATE_KEY"]
     assert '      LLM_API_KEYS: ""\n' in override
     assert "      LLM_BASE_URL: http://stub:9999/v1\n" in override
+
+
+@pytest.mark.parametrize("service", ["worker", "webhook-worker"])
+def test_override_unsets_the_bitbucket_keyring_of_each_worker(service: str) -> None:
+    override = _service_env(REPO_ROOT / "deploy/load/compose.parallel-runs.yml", service)
+
+    # A key with no value: "" from the base file stops the worker at start.
+    for key in ("BITBUCKET_CREDENTIAL_KEYS", "BITBUCKET_ACTIVE_KEY_ID"):
+        assert re.search(rf"(?m)^      {key}:$", override), key
 
 
 def test_override_keeps_the_stub_on_loopback_and_points_every_github_client_at_it() -> None:
@@ -962,7 +1148,7 @@ class FakeStack:
     def stub_stats(self) -> dict[str, Any]:
         return {
             "review_posts": {"1": 1, "2": 1, "3": 1},
-            "llm_calls": {"RepoConventionsDraft": 3, "ReviewOutput": 3},
+            "llm_calls": {"RepoConventionsDraft": 3, "ReviewOutputV2": 3, "VerificationOutput": 3},
             "unhandled": list(self.unhandled),
         }
 

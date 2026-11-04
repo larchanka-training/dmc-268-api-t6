@@ -10,9 +10,11 @@ from app.modules.reviews.application.policy_documents import missing_document
 from app.modules.reviews.application.policy_snapshot import (
     DEFAULT_MAX_POLICY_TOKENS,
     PINNED_PROMPT_CHECKSUMS,
+    POLICY_SNAPSHOT_SCHEMA_VERSION,
     DocumentPresence,
     ExecutionProfile,
     PolicyDocument,
+    PolicySnapshot,
     PromptBindings,
 )
 
@@ -117,4 +119,30 @@ def make_complete_execution_profile(
         response_schema_version=response_schema_version,
         recovery_profile_version=recovery_profile_version,
         budget_profile_version=budget_profile_version,
+    )
+
+
+def make_policy_snapshot() -> PolicySnapshot:
+    """A complete fast-profile snapshot of a repository without `.review/rules.md` or AGENTS.md."""
+    return PolicySnapshot(
+        schema_version=POLICY_SNAPSHOT_SCHEMA_VERSION,
+        snapshot_id=UUID("00000000-0000-0000-0000-000000000011"),
+        run_id=UUID("00000000-0000-0000-0000-000000000012"),
+        repository_id=UUID("00000000-0000-0000-0000-000000000013"),
+        policy_base_sha="b" * 40,
+        rules=make_policy_document_missing(".review/rules.md"),
+        agents=make_policy_document_missing("AGENTS.md"),
+        ignore_patterns=(),
+        ignore_digest="0" * 64,
+        parser_profile="rules-markdown/v1",
+        parser_version="4.0.0",
+        matcher_version="review-ignore/v1",
+        limits_version="limits/v1",
+        builtin_exclusions_version="builtin-exclusions/v1",
+        priority_matcher_version="priority/v1",
+        service_defaults_rule_version_id=UUID("00000000-0000-0000-0000-000000000014"),
+        defaults_checksum="default-backend.v1",
+        prompt_bindings=make_complete_prompt_bindings(),
+        execution_profile=make_complete_execution_profile("fast"),
+        policy_digest="d" * 64,
     )

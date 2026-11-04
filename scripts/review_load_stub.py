@@ -9,8 +9,10 @@ repository 101):
   (GET/POST/PATCH), reviews (GET/POST) and review comments. Every PR changes `app/example.py` on
   its own head (`head_sha(n)`) over one shared base. Posted reviews and check-runs are kept, so a
   retried publication finds them as GitHub would;
-- `POST /v1/chat/completions` as an OpenAI-compatible model answering the `RepoConventionsDraft`
-  and `ReviewOutput` schemas, after `--llm-delay-ms`;
+- `POST /v1/chat/completions` as an OpenAI-compatible model answering the `RepoConventionsDraft`,
+  `ReviewOutput`, `ReviewOutputV2` and `VerificationOutput` schemas, after `--llm-delay-ms`. The
+  last two read the file blocks and candidates of the user message; a prompt without them gets a
+  400, like a schema with no answer;
 - `GET /_stats`: review POSTs per PR, LLM calls per schema and every unhandled request.
 
 Anything else gets 404 and is listed under `unhandled`. The stub checks no JWT or token.
@@ -34,6 +36,7 @@ import time
 from collections import Counter
 from collections.abc import Callable
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from typing import Any
 
 INSTALLATION_ID = 17
 REPOSITORY_ID = 101
@@ -48,8 +51,35 @@ PATCH = "@@ -10,2 +10,3 @@\n line10\n+line11\n line12"
 README_SHA = "c" * 40
 _REPO = f"/repos/{REPOSITORY}"
 _UNHANDLED_LIMIT = 100
+FINDING_LINE = 11
+FINDING: dict[str, object] = {
+    "path": FILE_PATH,
+    "line": FINDING_LINE,
+    "start_line": None,
+    "severity": "high",
+    "category": "correctness",
+    "title": "Inverted branch",
+    "body": "The new line inverts the branch.",
+    "suggestion": None,
+    "confidence": 0.9,
+    "rule_name": None,
+}
+SUMMARY: dict[str, object] = {
+    "problem": "The branch is inverted.",
+    "done_well": "The change is small.",
+    "effort": "small",
+}
+# What a snapshot-path prompt shows; the answers cite it instead of assuming ids.
+_FILE_BLOCK = re.compile(r'<file block_id="([^"]+)" path="([^"]+)"')
+_CANDIDATE = re.compile(
+    r'<candidate candidate_id="([^"]+)" path="([^"]+)" (?:start_line="\d+" )?line="(\d+)"'
+)
 
 type Reply = tuple[int, object]
+
+
+class UnanswerablePrompt(ValueError):
+    """The prompt lacks what the answer must cite: a 400 fails the Run, an empty answer may not."""
 
 
 def head_sha(number: int) -> str:
@@ -85,7 +115,7 @@ def pull_request(number: int) -> dict[str, object]:
     }
 
 
-def conventions_answer() -> dict[str, object]:
+def conventions_answer(_prompt: str) -> dict[str, object]:
     return {
         "files": [{"path": FILE_PATH, "relevance": "Changed module."}],
         "key_patterns": ["Pattern one.", "Pattern two.", "Pattern three."],
@@ -96,34 +126,66 @@ def conventions_answer() -> dict[str, object]:
     }
 
 
-def review_answer() -> dict[str, object]:
+def review_answer(_prompt: str) -> dict[str, object]:
+    return {"findings": [FINDING], "summary": SUMMARY}
+
+
+def _file_block(prompt: str, path: str) -> str:
+    """The block id the prompt shows ``path`` under; the stub never computes one."""
+    for block_id, shown in _FILE_BLOCK.findall(prompt):
+        if shown == path:
+            return str(block_id)
+    raise UnanswerablePrompt(f"the load stub found no file block for {path!r} in the prompt")
+
+
+def review_answer_v2(prompt: str) -> dict[str, object]:
+    evidence = {
+        "block_id": _file_block(prompt, FILE_PATH),
+        "start_line": FINDING_LINE,
+        "end_line": FINDING_LINE,
+    }
+    return {"findings": [{**FINDING, "evidence_refs": [evidence]}], "summary": SUMMARY}
+
+
+def verification_answer(prompt: str) -> dict[str, object]:
+    """One supported decision per candidate of the prompt, citing the line it stands on."""
+    candidates = _CANDIDATE.findall(prompt)
+    if not candidates:
+        raise UnanswerablePrompt("the load stub found no candidate in the prompt")
     return {
-        "findings": [
+        "decisions": [
             {
-                "path": FILE_PATH,
-                "line": 11,
-                "start_line": None,
-                "severity": "high",
-                "category": "correctness",
-                "title": "Inverted branch",
-                "body": "The new line inverts the branch.",
-                "suggestion": None,
-                "confidence": 0.9,
-                "rule_name": None,
+                "candidate_id": candidate_id,
+                "status": "supported",
+                "reason": "The new line inverts the branch.",
+                "evidence_refs": [
+                    {
+                        "block_id": _file_block(prompt, path),
+                        "start_line": int(line),
+                        "end_line": int(line),
+                    }
+                ],
+                "requirement_refs": [],
             }
-        ],
-        "summary": {
-            "problem": "The branch is inverted.",
-            "done_well": "The change is small.",
-            "effort": "small",
-        },
+            for candidate_id, path, line in candidates
+        ]
     }
 
 
-ANSWERS: dict[str, Callable[[], dict[str, object]]] = {
+ANSWERS: dict[str, Callable[[str], dict[str, object]]] = {
     "RepoConventionsDraft": conventions_answer,
     "ReviewOutput": review_answer,
+    "ReviewOutputV2": review_answer_v2,
+    "VerificationOutput": verification_answer,
 }
+
+
+def _user_prompt(request: dict[str, Any]) -> str:
+    """The last user message: the input envelope of the call."""
+    for message in reversed(request.get("messages", [])):
+        if message.get("role") == "user":
+            return str(message.get("content", ""))
+    return ""
 
 
 class StubState:
@@ -304,11 +366,15 @@ class StubState:
         answer = ANSWERS.get(schema)
         if answer is None:
             return 400, {"error": {"message": f"the load stub has no answer for schema {schema!r}"}}
+        try:
+            content = json.dumps(answer(_user_prompt(request)))
+        except UnanswerablePrompt as refused:
+            return 400, {"error": {"message": str(refused)}}
         if self.llm_delay_ms:
             self._sleep(self.llm_delay_ms / 1000)
         return 200, {
             "model": str(request.get("model", "load-stub-model")),
-            "choices": [{"message": {"content": json.dumps(answer())}, "finish_reason": "stop"}],
+            "choices": [{"message": {"content": content}, "finish_reason": "stop"}],
             "usage": {"prompt_tokens": 1200, "completion_tokens": 300},
         }
 
