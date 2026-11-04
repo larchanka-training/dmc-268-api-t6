@@ -790,20 +790,37 @@ def test_error_body_cut_short_keeps_the_status_verdict(status: int, code: Policy
 
 
 @pytest.mark.parametrize(
-    ("headers", "body", "delay"),
+    ("status", "headers", "body", "code", "delay"),
     [
-        ({}, _SECONDARY_LIMIT, timedelta(seconds=60)),
-        ({"Retry-After": "9" * 14}, _NO_ACCESS, timedelta(days=1)),
+        (403, {}, _SECONDARY_LIMIT, PolicyErrorCode.RATE_LIMITED, timedelta(seconds=60)),
         (
+            403,
+            {"Retry-After": "9" * 14},
+            _NO_ACCESS,
+            PolicyErrorCode.RATE_LIMITED,
+            timedelta(days=1),
+        ),
+        (
+            403,
+            {"X-RateLimit-Reset": "1793084700", "X-RateLimit-Remaining": "4999"},
+            _NO_ACCESS,
+            PolicyErrorCode.ACCESS_DENIED,
+            None,
+        ),
+        (403, {"X-RateLimit-Reset": "1793084700"}, _NO_ACCESS, PolicyErrorCode.ACCESS_DENIED, None),
+        (
+            403,
             {
                 "X-RateLimit-Remaining": "0",
                 "X-RateLimit-Reset": "1793084700",
                 "Date": "Tue, 27 Oct 2026 07:00:00 GMT",
             },
             _NO_ACCESS,
+            PolicyErrorCode.RATE_LIMITED,
             timedelta(minutes=5),
         ),
         (
+            403,
             {
                 "X-RateLimit-Remaining": "0",
                 "X-RateLimit-Reset": "1793084700",
@@ -811,13 +828,74 @@ def test_error_body_cut_short_keeps_the_status_verdict(status: int, code: Policy
                 "Date": "Tue, 27 Oct 2026 07:00:00 GMT",
             },
             _NO_ACCESS,
+            PolicyErrorCode.RATE_LIMITED,
+            timedelta(minutes=5),
+        ),
+        (
+            403,
+            {
+                "X-RateLimit-Remaining": "0",
+                "X-RateLimit-Reset": "1793084700",
+                "Retry-After": "600",
+                "Date": "Tue, 27 Oct 2026 07:00:00 GMT",
+            },
+            _NO_ACCESS,
+            PolicyErrorCode.RATE_LIMITED,
+            timedelta(minutes=10),
+        ),
+        (
+            403,
+            {"X-RateLimit-Remaining": "0", "X-RateLimit-Reset": "9" * 14},
+            _NO_ACCESS,
+            PolicyErrorCode.RATE_LIMITED,
+            timedelta(days=1),
+        ),
+        (
+            403,
+            {"X-RateLimit-Remaining": "0", "X-RateLimit-Reset": "9" * 5000},
+            _NO_ACCESS,
+            PolicyErrorCode.RATE_LIMITED,
+            timedelta(days=1),
+        ),
+        (
+            403,
+            {"X-RateLimit-Remaining": "0", "X-RateLimit-Reset": "1", "Date": "invalid-date"},
+            _NO_ACCESS,
+            PolicyErrorCode.RATE_LIMITED,
+            timedelta(0),
+        ),
+        (
+            502,
+            {
+                "X-RateLimit-Remaining": "0",
+                "X-RateLimit-Reset": "1793084700",
+                "Date": "Tue, 27 Oct 2026 07:00:00 GMT",
+            },
+            _NO_ACCESS,
+            PolicyErrorCode.FETCH_TRANSIENT,
             timedelta(minutes=5),
         ),
     ],
-    ids=["secondary-message", "oversized-retry-after", "primary-reset", "primary-reset-longer"],
+    ids=[
+        "secondary-message",
+        "oversized-retry-after",
+        "ordinary-403-remaining",
+        "ordinary-403-reset-only",
+        "primary-reset",
+        "primary-reset-longer",
+        "retry-after-longer",
+        "reset-14-digits",
+        "reset-5000-digits",
+        "invalid-date-past-reset",
+        "transient-with-reset",
+    ],
 )
 def test_default_branch_head_preserves_rate_limit_delay(
-    headers: dict[str, str], body: object, delay: timedelta
+    status: int,
+    headers: dict[str, str],
+    body: object,
+    code: PolicyErrorCode,
+    delay: timedelta | None,
 ) -> None:
     # The rules status resolves the head with plain requests; their body is read too.
     target = RulesRefreshTarget(
@@ -831,7 +909,7 @@ def test_default_branch_head_preserves_rate_limit_delay(
     )
 
     def respond(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(403, headers=headers, json=body)
+        return httpx.Response(status, headers=headers, json=body)
 
     async def resolve() -> Any:
         async with httpx.AsyncClient(
@@ -846,7 +924,7 @@ def test_default_branch_head_preserves_rate_limit_delay(
         asyncio.run(resolve())
 
     assert (caught.value.code, caught.value.retry_after) == (
-        PolicyErrorCode.RATE_LIMITED,
+        code,
         delay,
     )
     assert caught.value.policy_base_sha is None

@@ -296,8 +296,9 @@ Rules status reads (api#150). The worker also reads `.review/rules.md` of the de
 for the rules status page (`GET /api/repos/{repo_id}/rules-status`; the API process holds no App
 key, `docs/SECRETS.md`). A read is requested by a marker on the repository's
 `repository_rules_status` row: onboarding writes it in the sync transaction, a `push` to the
-default branch writes it while its receipt is dispatched, and the API writes it on a GET that
-finds no result, one older than 10 minutes, or a retryable failure older than 30 seconds. Each
+default branch writes it while its receipt is dispatched, GitHub App reinstall rebind writes
+it for each moved repository, and the API writes it on a GET that finds no result, one older
+than 10 minutes, or a retryable failure older than 30 seconds. Each
 writer sends `NOTIFY webhook_work_available` in the same transaction, so the hint wakes the same
 scan as a receipt. Every scan, the first one after startup included, then claims up to 20
 requests with a five-minute lease, reads each repository outside any transaction (the default
@@ -307,12 +308,15 @@ the read gets a new time on the claimed row, and the save clears only the claime
 request survives and is answered by the next scan. The save also checks that the claim is still
 its own (the lease end it wrote): a read whose lease ended and whose row another worker claimed
 is dropped with a warning instead of overwriting the newer result. A read that raises is stored
-as `unavailable` with `policy_fetch_transient`, so a GET asks again after 30 seconds; a rate
-limit, and a 5xx that sends `Retry-After`, use the longer of GitHub's `Retry-After` and,
-for a primary limit, the time until `X-RateLimit-Reset` if it exceeds 30 seconds (a secondary
-rate limit without either waits 60 seconds). The 10-minute age takes precedence, while the stored
-wait is capped at one day. A repository whose
-`installation_available` is false is never claimed; its GET answers `unavailable` with
+as `unavailable` with `policy_fetch_transient`, so a GET asks again after 30 seconds. For a rate
+limit or 5xx, a supplied `Retry-After` and, when `X-RateLimit-Remaining: 0`, a readable
+`X-RateLimit-Reset` set the stored diagnostic delay to the longer available value, even below
+30 seconds. The GET retry pause is at least 30 seconds.
+A 5xx remains `policy_fetch_transient`; a secondary rate limit without a readable
+`Retry-After` or `X-RateLimit-Remaining: 0` waits 60 seconds.
+The 10-minute age takes precedence, while the stored diagnostic delay is capped at one day.
+A repository whose `installation_available` is false is never claimed; its GET answers
+`unavailable` with
 `policy_access_denied` and requests nothing. A full batch of 20 runs the next scan at once, like
 100 deliveries. The reads run inside the scan, one after another, so while they last no receipt
 is claimed. A typical worst-case estimate for steady-state reads is 20 reads × 5 GitHub
