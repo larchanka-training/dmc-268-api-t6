@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, replace
+from datetime import timedelta
 from functools import partial
 from types import MappingProxyType
 from typing import Literal
@@ -37,6 +38,7 @@ class GitLabRepositoryListing:
     listing_complete: bool
     sizes_complete: bool
     incomplete_reasons: tuple[str, ...] = ()
+    retry_after: timedelta | None = None
 
 
 class GitLabRepositoryTree:
@@ -143,6 +145,7 @@ class GitLabRepositoryTree:
             return listing
         known_sizes = dict(listing.sizes)
         reasons: tuple[str, ...] = ()
+        retry_after: timedelta | None = None
         for entry in sorted(listing.entries, key=lambda entry: entry.path):
             if entry.kind != "file" or entry.path in known_sizes:
                 continue
@@ -155,6 +158,10 @@ class GitLabRepositoryTree:
                 if error.kind == "budget_exhausted":
                     reasons += ("budget_exhausted",)
                     break
+                if error.retry_after is not None:
+                    # The provider asked to wait: the rest of the sizes cannot be read now.
+                    retry_after = error.retry_after
+                    break
                 continue
             known_sizes[entry.path] = metadata.size
         complete_sizes = all(
@@ -165,6 +172,7 @@ class GitLabRepositoryTree:
             sizes=MappingProxyType(known_sizes),
             sizes_complete=complete_sizes,
             incomplete_reasons=reasons,
+            retry_after=retry_after,
         )
         self._listings[key] = listing
         return listing
