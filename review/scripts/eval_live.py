@@ -33,6 +33,10 @@ file. The manifest then also records, per case, the review call's latency and an
 of the prompt the gateway really sent (rebuilt from its context and checked byte for byte against
 the first request), and for the run the RAG arm, the digest of every ``index.json`` and the
 synthetic revision ids. Nothing of this is written for the other corpora.
+
+Every manifest records ``run_metadata.static_digest_without_prompt`` (#317): the prompt file is a
+static input, so two prompt versions never share ``static_digest``, and this digest of the other
+static inputs is what lets ``eval_ab.py`` prove that two captures differ only in the prompt.
 """
 
 from __future__ import annotations
@@ -588,6 +592,7 @@ class _CaptureInputs:
     system: str
     static_inputs: list[str]
     static_digest: str
+    static_digest_without_prompt: str
     corpus_digest: str
     rules_by_language: dict[str, _LanguageRules]
     effective_settings: dict[str, object]
@@ -623,8 +628,9 @@ def _input_digests(
     selected_rules: list[str],
     *,
     rag_code: bool,
-) -> tuple[list[str], str, str]:
-    """Return the static input paths, the static digest and the corpus digest."""
+) -> tuple[list[str], str, str, str]:
+    """Return the static input paths, the static digest, the same digest without the prompt
+    file and the corpus digest."""
     try:
         static_inputs = static_input_paths(
             relative_prompt,
@@ -633,10 +639,13 @@ def _input_digests(
             rag_code=rag_code,
         )
         static_digest = digest_files(REPO_ROOT, static_inputs)
+        without_prompt = digest_files(
+            REPO_ROOT, [path for path in static_inputs if path != relative_prompt]
+        )
         corpus_digest = digest_files(root, corpus_input_paths(root, records))
     except DigestInputError as exc:
         raise RecorderError(str(exc)) from exc
-    return static_inputs, static_digest, corpus_digest
+    return static_inputs, static_digest, without_prompt, corpus_digest
 
 
 def _rules_by_language(
@@ -681,7 +690,7 @@ def _capture_inputs(
 ) -> _CaptureInputs:
     relative_prompt = _relative_input(system_prompt)
     rule_sets = _selected_rule_sets(records, backend_rules, frontend_rules)
-    static_inputs, static_digest, corpus_digest = _input_digests(
+    static_inputs, static_digest, without_prompt, corpus_digest = _input_digests(
         root,
         records,
         relative_prompt,
@@ -705,6 +714,7 @@ def _capture_inputs(
         system=system,
         static_inputs=static_inputs,
         static_digest=static_digest,
+        static_digest_without_prompt=without_prompt,
         corpus_digest=corpus_digest,
         rules_by_language=rules_by_language,
         effective_settings=effective_settings,
@@ -1072,6 +1082,7 @@ def _manifest(
         "corpus_digest": inputs.corpus_digest,
         "run_metadata": {
             "recorded_at": inputs.recorded_at,
+            "static_digest_without_prompt": inputs.static_digest_without_prompt,
             "engine": engine,
             "fallback_model_id": settings.fallback.model if settings.fallback else None,
             "effective_settings": inputs.effective_settings,
