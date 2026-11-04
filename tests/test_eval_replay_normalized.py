@@ -178,11 +178,11 @@ def test_snapshot_path_keeps_the_documents_the_case_shows(tmp_path: Path) -> Non
 def test_a_strict_valid_answer_scores_the_same_in_both_columns(tmp_path: Path) -> None:
     report = replay(one_case_capture(tmp_path, answer(answer_finding())))
 
-    normalized = report["gateway_normalized"]
-    assert report["valid_response_count"] == normalized["valid_response_count"] == 1
-    assert report["micro"] == normalized["micro"]
-    assert report["critical"] == normalized["critical"]
-    assert report["verdict"] == normalized["verdict"]
+    for column in (report, report["gateway_normalized"]):
+        assert column["valid_response_count"] == 1
+        assert (column["micro"]["tp"], column["micro"]["fp"], column["micro"]["fn"]) == (1, 0, 0)
+        assert (column["critical"]["matched"], column["critical"]["total"]) == (1, 1)
+        assert (column["verdict"]["agreed"], column["verdict"]["total"]) == (1, 1)
 
 
 def rule_set_repo(tmp_path: Path, rule_set: str | None) -> Path:
