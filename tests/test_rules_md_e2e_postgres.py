@@ -182,6 +182,12 @@ def test_policy_documents_together_over_the_budget_fail_the_run_without_llm(
             "policy_ignore_limit_exceeded",
             id="limit",
         ),
+        # §3.1: an LFS pointer instead of the document is not dereferenced.
+        pytest.param(
+            b"version https://git-lfs.github.com/spec/v1\noid sha256:abc\nsize 12\n",
+            "policy_document_type_unsupported",
+            id="lfs-pointer",
+        ),
     ],
 )
 def test_invalid_rules_md_fails_the_run_once_without_llm(
@@ -193,11 +199,31 @@ def test_invalid_rules_md_fails_the_run_once_without_llm(
 
 
 @pytest.mark.integration
-def test_symlinked_rules_md_fails_the_run_once_without_llm(stack: Stack) -> None:
-    # §3.1: a symlink is never dereferenced; the document must be a regular Git blob.
-    outcome = _review(stack, _github(b"../docs/rules.md", symlink=RULES), Seed.V4)
+@pytest.mark.parametrize(
+    ("rules", "files", "symlink", "gitlink"),
+    [
+        pytest.param(b"../docs/rules.md", None, RULES, None, id="symlink"),
+        pytest.param(None, {f"{RULES}/nested.md": b"not a document\n"}, None, None, id="directory"),
+        pytest.param(None, None, None, RULES, id="submodule"),
+        # §3.1: the intermediate `.review` is checked too.
+        pytest.param(None, {".review": b"not a directory\n"}, None, None, id="review-file"),
+        pytest.param(None, None, None, ".review", id="review-submodule"),
+    ],
+)
+def test_rules_md_of_an_unsupported_type_fails_the_run_once_without_llm(
+    stack: Stack,
+    rules: bytes | None,
+    files: dict[str, bytes] | None,
+    symlink: str | None,
+    gitlink: str | None,
+) -> None:
+    # §3.1: nothing but a regular Git blob is read as the document, nothing is dereferenced.
+    outcome = _review(stack, _github(rules, files=files, symlink=symlink, gitlink=gitlink), Seed.V4)
 
     _assert_failed_once(outcome, frozenset({"policy_document_type_unsupported"}))
+    [load] = outcome.policy_load
+    # §9: the diagnostic names the document, also when the `.review` above it is the cause.
+    assert load["error"]["diagnostic"]["source_path"] == RULES
 
 
 @pytest.mark.integration

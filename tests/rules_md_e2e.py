@@ -155,11 +155,13 @@ class Revision:
     files: Mapping[str, bytes]
     # Paths listed with the symlink mode; the blob of a symlink is its target.
     symlinks: frozenset[str] = frozenset()
+    # Paths listed as a gitlink: mode 160000, type commit.
+    gitlinks: frozenset[str] = frozenset()
 
     def directories(self) -> set[str]:
         return {
             "/".join(parts[:depth])
-            for parts in (path.split("/") for path in self.files)
+            for parts in (path.split("/") for path in (*self.files, *self.gitlinks))
             for depth in range(1, len(parts))
         }
 
@@ -201,7 +203,17 @@ class Revision:
             for path, data in sorted(self.files.items())
             if listed(path)
         ]
-        return trees + blobs
+        gitlinks = [
+            {
+                "path": path[len(prefix) :],
+                "mode": "160000",
+                "type": "commit",
+                "sha": _blob_sha(path.encode()),
+            }
+            for path in sorted(self.gitlinks)
+            if listed(path)
+        ]
+        return trees + blobs + gitlinks
 
 
 def _changed_file(path: str, old: bytes | None, new: bytes) -> dict[str, Any]:
@@ -360,18 +372,24 @@ def _github(
     fault: Fault | None = None,
     symlink: str | None = None,
     agents: bytes | None = None,
+    files: Mapping[str, bytes] | None = None,
+    gitlink: str | None = None,
 ) -> FakeGitHub:
     """PR 7 changes ``app/service.py`` and ``generated/client.py``; ``None`` is no rules file.
 
     ``symlink`` lists that policy document of both revisions as a symlink, its bytes the
-    target; ``agents`` is a root ``AGENTS.md`` the PR leaves unchanged.
+    target; ``agents`` is a root ``AGENTS.md`` the PR leaves unchanged. ``files`` are more
+    paths of both revisions; ``gitlink`` lists that path of both revisions as a submodule.
     """
     head = base_rules if head_rules == "base" else head_rules
-    common = {} if agents is None else {"AGENTS.md": agents}
+    common = dict(files or {}) | ({} if agents is None else {"AGENTS.md": agents})
     base_files = _BASE_FILES | common | ({} if base_rules is None else {RULES: base_rules})
     head_files = _HEAD_FILES | common | ({} if head is None else {RULES: head})
     links = frozenset() if symlink is None else frozenset({symlink})
-    return FakeGitHub(Revision(base_files, links), Revision(head_files, links), fault)
+    gitlinks = frozenset() if gitlink is None else frozenset({gitlink})
+    return FakeGitHub(
+        Revision(base_files, links, gitlinks), Revision(head_files, links, gitlinks), fault
+    )
 
 
 class FakeLlm:
