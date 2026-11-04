@@ -84,14 +84,14 @@ class _LiveCapture(RehearsalTransport):
 
 
 def _live_requests(
-    root: Path, responses_dir: Path, arm: str, settings: LlmSettings
+    root: Path, responses_dir: Path, system_prompt: Path, arm: str, settings: LlmSettings
 ) -> list[ChatRequest]:
     capture = _LiveCapture()
     asyncio.run(
         record_live(
             root,
             settings,
-            system_prompt=V3,
+            system_prompt=system_prompt,
             backend_rules=BACKEND_RULES,
             frontend_rules=FRONTEND_RULES,
             transport=capture,
@@ -100,6 +100,14 @@ def _live_requests(
         )
     )
     return capture.requests
+
+
+def _recount(requests: list[ChatRequest], chars_per_token: float = 3.0) -> list[int]:
+    """The expected estimates: each request's messages, counted here by their length."""
+    return [
+        sum(math.ceil(len(message.content) / chars_per_token) for message in request.messages)
+        for request in requests
+    ]
 
 
 @pytest.mark.parametrize(
@@ -112,16 +120,13 @@ def test_the_estimate_counts_the_envelope_a_live_capture_of_the_arm_sends(
     default = rehearsal_settings(DEFAULT_MODEL)
     settings = LlmSettings(replace(default.primary, chars_per_token=chars_per_token), None)
 
-    requests = _live_requests(tiny_root, tmp_path / "live", arm, settings)
+    requests = _live_requests(tiny_root, tmp_path / "live", V3, arm, settings)
     measured = measure(tiny_root, V3, arm, settings)
 
     for request in requests:
         assert [message.role for message in request.messages] == ["system", "user"]
         assert ("<service_defaults" in request.messages[1].content) is snapshot
-    expected = [
-        sum(math.ceil(len(message.content) / chars_per_token) for message in request.messages)
-        for request in requests
-    ]
+    expected = _recount(requests, chars_per_token)
     assert measured.by_case == dict(zip(TINY, expected, strict=True))
     assert measured.total == sum(expected)
     assert measured.prompt_path == "review/prompts/review.system.v3.md"
@@ -129,16 +134,17 @@ def test_the_estimate_counts_the_envelope_a_live_capture_of_the_arm_sends(
 
 
 def test_the_command_prints_every_case_and_the_sum_with_no_key_and_no_network(
-    tiny_root: Path, offline: list[object], capsys: pytest.CaptureFixture[str]
+    tiny_root: Path, tmp_path: Path, offline: list[object], capsys: pytest.CaptureFixture[str]
 ) -> None:
-    measured = measure(tiny_root, V3, "legacy", rehearsal_settings(DEFAULT_MODEL))
+    settings = rehearsal_settings(DEFAULT_MODEL)
+    expected = _recount(_live_requests(tiny_root, tmp_path / "live", V3, "legacy", settings))
 
     assert main(["--root", str(tiny_root), "--system", str(V3)]) == 0
 
     stdout = capsys.readouterr().out
     assert _rows(stdout) == {
-        **{case_id: [str(tokens)] for case_id, tokens in measured.by_case.items()},
-        "total": [str(measured.total)],
+        **{case_id: [str(tokens)] for case_id, tokens in zip(TINY, expected, strict=True)},
+        "total": [str(sum(expected))],
     }
     assert "A: review/prompts/review.system.v3.md (v3)" in stdout
     assert "policy arm legacy" in stdout
@@ -244,22 +250,35 @@ def test_two_prompt_files_print_the_delta_of_each_case_and_of_the_total() -> Non
     ]
 
 
+def test_two_prompt_files_print_what_a_live_capture_of_each_sends(
+    tiny_root: Path, tmp_path: Path, offline: list[object], capsys: pytest.CaptureFixture[str]
+) -> None:
+    settings = rehearsal_settings(DEFAULT_MODEL)
+    older = _recount(_live_requests(tiny_root, tmp_path / "v3", V3, "none", settings))
+    newer = _recount(_live_requests(tiny_root, tmp_path / "v5", V5, "none", settings))
+    arguments = ["--root", str(tiny_root), "--policy-arm", "none"]
+
+    assert main([*arguments, "--system", str(V3), "--system", str(V5)]) == 0
+
+    rows = _rows(capsys.readouterr().out)
+    assert {case_id: cells[:2] for case_id, cells in rows.items()} == {
+        **{case_id: [str(a), str(b)] for case_id, a, b in zip(TINY, older, newer, strict=True)},
+        "total": [str(sum(older)), str(sum(newer))],
+    }
+    # v5 is the longer prompt, so every row grows.
+    assert all(cells[2].startswith("+") for cells in rows.values())
+    assert offline == []
+
+
 def test_two_runs_on_the_same_inputs_print_the_same_bytes(
     tiny_root: Path, offline: list[object], capsys: pytest.CaptureFixture[str]
 ) -> None:
-    arguments = ["--root", str(tiny_root), "--policy-arm", "none"]
-    arguments += ["--system", str(V3), "--system", str(V5)]
+    arguments = ["--root", str(tiny_root), "--policy-arm", "none", "--system", str(V5)]
 
     assert main(arguments) == 0
     first = capsys.readouterr().out
     assert main(arguments) == 0
-    second = capsys.readouterr().out
 
-    assert first == second
-    settings = rehearsal_settings(DEFAULT_MODEL)
-    older = measure(tiny_root, V3, "none", settings)
-    newer = measure(tiny_root, V5, "none", settings)
-    assert _rows(first)["total"][:2] == [str(older.total), str(newer.total)]
-    assert newer.total > older.total
-    assert _rows(first)["total"][2].startswith("+")
+    assert capsys.readouterr().out == first
+    assert first != ""
     assert offline == []
