@@ -1,4 +1,4 @@
-# TEST_PLAN §3.2.1–3.2.5: зафиксированные raw baselines
+# TEST_PLAN §3.2.1–3.2.6: зафиксированные raw baselines
 
 Вынесено из [TEST_PLAN §3.2.1–3.2.5](../TEST_PLAN.md#321-зафиксированный-raw-baseline-82-2026-10-13) в #380. Правила сопоставления и счётчики — в TEST_PLAN §3.2.
 
@@ -343,3 +343,17 @@ TP, recall, critical recall и verdict agreement выросли, FP выросл
 improvement/Hallucination Rate, production verifier/final-output quality и
 repair/latency/cost saving не измерены. Effective settings полностью совпадают с
 §3.2.4, включая nominal USD 0.50/кейс (USD 12 для 24), 4 calls/attempt и 90s timeout.
+
+## 3.2.6. Значения метрики после нормализации шлюза (#239)
+
+Определение и правило решения — в [TEST_PLAN §3.2.6](../TEST_PLAN.md#326-метрика-после-нормализации-шлюза-239). Значения посчитаны текущим `eval_replay.py` по байтам каждой съёмки, на первых ответах, до lint, dedupe, threshold, якорей и verifier; это не метрика опубликованного ревью.
+
+| Съёмка | Strict: validity; TP/FP/FN; critical; verdict | После нормализации: validity; TP/FP/FN; critical; verdict | Обнулено `rule_name` |
+| --- | --- | --- | --- |
+| v2, 2026-10-15 | 7/24; 2/2/17; 2/5; 5/24 | 24/24; 8/38/11; 4/5; 13/24 | 33 из 46 |
+| v3, 2026-10-20 | 10/24; 3/5/16; 2/5; 4/24 | 24/24; 6/42/13; 3/5; 8/24 | 27 из 48 |
+| v5, 2026-10-28 (текущая) | 21/24; 5/13/14; 4/5; 9/24 | 24/24; 5/29/14; 4/5; 11/24 | 0 из 34 |
+
+На v2 → v3 strict вырос, а колонка после нормализации упала. У v5 ответ идёт по контракту ReviewOutput v2 без префикса атрибуции: 31 находка из 34 несёт `service-defaults:<id>`, 3 без правила, поэтому потери нет. Это разные съёмки, а не контролируемый эксперимент.
+
+Воспроизведение исторической строки: `git archive <revision> test-prs-dataset/responses | tar -x -C <dir>`, затем `uv run python review/scripts/eval_replay.py --responses-dir <dir>/test-prs-dataset/responses`. Ревизии: 2026-10-15 — `47f9add7`, 2026-10-20 — `973218054ef2c9a32f1e75a955284323196ffafd`. Такой прогон печатает предупреждения о pinned-входах: байты старше текущего списка.

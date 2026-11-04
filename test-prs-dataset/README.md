@@ -216,6 +216,44 @@ until #168 and #219 changed pinned files and #163 added three policy modules to 
 ([Baseline drift](#baseline-drift)). The complete 2026-10-28 `review.system.v5` capture
 records the active 52 pins and replays with `warnings=[]`.
 
+## Replay metric columns (#239)
+
+Replay reports every capture in two columns over the same recorded first answers, offline and
+without a paid call.
+
+- **Strict raw-first** (the top-level report fields): the raw bytes against
+  `validate_findings.py`, before any normalization. It shows how well the model keeps the answer
+  format.
+- **After gateway normalization** (`gateway_normalized`): the same bytes through the production
+  check, `validate_review_answer`, or `validate_review_answer_v2` for a snapshot-path prompt. The
+  check sets an equal `start_line` to `null` and sorts the findings. An answer it refuses stays
+  invalid and adds only false negatives.
+
+The second column leaves out repair and fallback calls, lint, dedupe, the severity threshold, diff
+anchors, the inline cap and the verifier, so it is **not a metric of the published review**.
+
+`gateway_normalized.attribution_loss` gives `rule_name_nulled` of `findings`: the findings of
+accepted answers whose `rule_name` `FindingsPostProcessor._repair_attribution` would null, which
+publishes a finding under a custom rule as a standard one. The count uses the rule set of the
+case's language and, for a snapshot-path prompt, the documents the case shows.
+`findings_post_processor.py` is not a static input: the count follows the current code.
+
+| Capture | Strict: validity; TP/FP/FN; critical; verdict | After normalization: validity; TP/FP/FN; critical; verdict | `rule_name` nulled |
+| --- | --- | --- | --- |
+| v2, 2026-10-15 | 7/24; 2/2/17; 2/5; 5/24 | 24/24; 8/38/11; 4/5; 13/24 | 33 of 46 |
+| v3, 2026-10-20 | 10/24; 3/5/16; 2/5; 4/24 | 24/24; 6/42/13; 3/5; 8/24 | 27 of 48 |
+| v5, 2026-10-28 (current) | 21/24; 5/13/14; 4/5; 9/24 | 24/24; 5/29/14; 4/5; 11/24 | 0 of 34 |
+
+**Which metric decides.** A change of the prompt version is judged on the column after gateway
+normalization, which is closer to what the pipeline receives. Strict raw-first diagnoses the format
+of the first answer and does not decide on its own. The number of nulled `rule_name` must not grow.
+Both columns are always reported, and one capture per version limits any conclusion.
+
+To reproduce a historical row: `git archive <revision> test-prs-dataset/responses | tar -x -C <dir>`,
+then `uv run python review/scripts/eval_replay.py --responses-dir <dir>/test-prs-dataset/responses`.
+The revisions are `47f9add7` for 2026-10-15 and `973218054ef2c9a32f1e75a955284323196ffafd` for
+2026-10-20. Such a run prints the pinned-input warnings, because the bytes predate the current list.
+
 ## Recorded Mistral baseline — 2026-10-28
 
 [Actions run 40774280790, attempt 1](https://github.com/larchanka-training/dmc-268-api-t6/actions/runs/40774280790)
