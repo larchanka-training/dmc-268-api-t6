@@ -32,6 +32,7 @@
 | Новый метод порта или новый VCS-провайдер | [SD §8.1](SYSTEM_DESIGN.md#81-порт-vcsprovider-р-11), [CVS §9](CONTEXT_AND_VERIFICATION_SPEC.md#9-карта-diff-и-адаптеры-vcs) |
 | GitLab или Bitbucket | [SD §8.4](SYSTEM_DESIGN.md#84-координаты-gitlab-и-надёжная-публикация-107), [SD §8.5](SYSTEM_DESIGN.md#85-bitbucket-cloud-333), [CVS §9.5](CONTEXT_AND_VERIFICATION_SPEC.md#95-gitlab-целевой-контракт-отдельная-реализация), [PIPELINE §8.4](PIPELINE_SPEC.md#84-gitlab-mr-intake-169), [Bitbucket Cloud path (#333)](PIPELINE_SPEC.md#bitbucket-cloud-path-333) |
 | Публикация ревью: идемпотентность, гонки, восстановление | [CVS §10](CONTEXT_AND_VERIFICATION_SPEC.md#10-write-back-неизменяемая-публикация-и-восстановление), [CVS §9.4](CONTEXT_AND_VERIFICATION_SPEC.md#94-github), [SD §8.4](SYSTEM_DESIGN.md#84-координаты-gitlab-и-надёжная-публикация-107) |
+| Разрешение устаревших и исправленных review-тредов (VCS Thread Clean-up) | [CVS §10.2](CONTEXT_AND_VERIFICATION_SPEC.md#102-выполнение-и-гонки) |
 | Якорь находки, suggestion, карта diff | [CVS §9.3](CONTEXT_AND_VERIFICATION_SPEC.md#93-якорь-finding-диапазоны-и-suggestion), [CVS §9.2](CONTEXT_AND_VERIFICATION_SPEC.md#92-hunks-и-проход-по-строкам), [PIPELINE §10](PIPELINE_SPEC.md#10-якорь-находки-d6) |
 | Контекст ревью: уровни L0–L4, AST, бюджет | [CVS §3.2](CONTEXT_AND_VERIFICATION_SPEC.md#32-уровни-l0l4), [CVS §3.3](CONTEXT_AND_VERIFICATION_SPEC.md#33-ast-v1), [CVS §4](CONTEXT_AND_VERIFICATION_SPEC.md#4-бюджет-конвенции-и-кэш), [SD §9](SYSTEM_DESIGN.md#9-сборщик-контекста-4-уровня) |
 | RAG: граф символов и индекс | [CVS §3.5](CONTEXT_AND_VERIFICATION_SPEC.md#35-кандидаты-графа-символов-rag-v1), [SD §7.4](SYSTEM_DESIGN.md#74-очередь-indexrepo-142), [PIPELINE §4.6](PIPELINE_SPEC.md#46-очередь-indexrepo-142), [SD §11](SYSTEM_DESIGN.md#11-данные-согласование-с-erd-роли-6) |
@@ -181,7 +182,7 @@
 | ↳ [9.5. GitLab: целевой контракт, отдельная реализация](CONTEXT_AND_VERIFICATION_SPEC.md#95-gitlab-целевой-контракт-отдельная-реализация) | GitLab: целевой контракт |
 | [10. Write-back: неизменяемая публикация и восстановление](CONTEXT_AND_VERIFICATION_SPEC.md#10-write-back-неизменяемая-публикация-и-восстановление) | Публикация; открывать подраздел по теме |
 | ↳ [10.1. Payload и идентичность](CONTEXT_AND_VERIFICATION_SPEC.md#101-payload-и-идентичность) | Canonical JSON и идентичность публикации |
-| ↳ [10.2. Выполнение и гонки](CONTEXT_AND_VERIFICATION_SPEC.md#102-выполнение-и-гонки) | Lease публикации, проверки перед POST, гонки |
+| ↳ [10.2. Выполнение и гонки](CONTEXT_AND_VERIFICATION_SPEC.md#102-выполнение-и-гонки) | Lease публикации, проверки перед POST, гонки, разрешение review-тредов |
 | ↳ [10.3. Ошибки, timeout и fallback](CONTEXT_AND_VERIFICATION_SPEC.md#103-ошибки-timeout-и-fallback) | Исход ошибки или timeout, действие, fallback |
 | ↳ [10.4. Совместимость с существующими публикациями](CONTEXT_AND_VERIFICATION_SPEC.md#104-совместимость-с-существующими-публикациями) | Старый marker публикаций и совместимость с ним |
 | ↳ [10.5. Изменения текущей реализации](CONTEXT_AND_VERIFICATION_SPEC.md#105-изменения-текущей-реализации) | Какой текущий код меняется ради этой спеки |
