@@ -2422,7 +2422,10 @@ components:
           pending: "#/components/schemas/PendingRulesStatus"
     PresentRulesStatus:
       type: object
-      description: The file is there and was read; an empty file is present too.
+      description: >-
+        The file is there and was read; an empty file is present too. Present does not
+        check the run prompt budget (RULES_FORMAT_SPEC §3.3); a run may fail with
+        policy_prompt_budget_exceeded.
       required: [status, branch, path, sha, checkedAt, text, checksum, ignoreMasks, diagnostics]
       properties:
         status:

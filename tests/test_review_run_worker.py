@@ -731,7 +731,25 @@ def test_exhausted_match_budget_fails_the_run_naming_the_document_and_the_count(
     )
 
 
-def test_policy_rate_limit_retry_waits_out_a_long_retry_after() -> None:
+@pytest.mark.parametrize(
+    ("headers", "wait"),
+    [
+        ({"Retry-After": "900"}, timedelta(minutes=15)),
+        ({"Retry-After": "9" * 14}, timedelta(days=1)),
+        (
+            {
+                "X-RateLimit-Remaining": "0",
+                "X-RateLimit-Reset": "1793085300",
+                "Date": "Tue, 27 Oct 2026 07:00:00 GMT",
+            },
+            timedelta(minutes=15),
+        ),
+    ],
+    ids=["fifteen-minutes", "oversized", "primary-reset"],
+)
+def test_policy_rate_limit_retry_waits_out_a_long_provider_delay(
+    headers: dict[str, str], wait: timedelta
+) -> None:
     run = FakeRun()
     retry = RetryQueue()
     clock = Clock()
@@ -739,7 +757,7 @@ def test_policy_rate_limit_retry_waits_out_a_long_retry_after() -> None:
     limited = httpx.HTTPStatusError(
         "GitHub",
         request=request,
-        response=httpx.Response(429, headers={"Retry-After": "900"}, request=request),
+        response=httpx.Response(429, headers=headers, request=request),
     )
 
     def pipeline(claimed: ClaimedAttempt) -> bool:
@@ -750,8 +768,7 @@ def test_policy_rate_limit_retry_waits_out_a_long_retry_after() -> None:
     assert first is DeliveryOutcome.ACK
     assert (run.state, run.attempt) == ("queued", 1)
     assert retry.published == [("10m", 2)]
-    # Exactly Retry-After, not the ceiling and not the 10m bucket.
-    assert run.available_at == NOW + timedelta(minutes=15)
+    assert run.available_at == NOW + wait
     # The copy from the 10m queue comes early: RunGuard drops it without an attempt,
     # and T18 republishes the Run once available_at has passed (PIPELINE_SPEC §4.2).
     clock.value = NOW + timedelta(minutes=10)

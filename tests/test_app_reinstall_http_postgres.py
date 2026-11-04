@@ -33,6 +33,11 @@ from app.modules.auth.application.refresh_session import RefreshLocalSession
 from app.modules.integrations.webhooks.application.receive_github_delivery import (
     ReceiveGitHubDelivery,
 )
+from app.modules.repositories.infrastructure.models import ProviderInstallation
+from app.modules.workspaces.application.link_github_installations import GitHubInstallation
+from app.modules.workspaces.infrastructure.github_repository_rebinding import (
+    SqlAlchemyGitHubRepositoryRebinding,
+)
 from tests.portal_postgres import (
     HEAD,
     INSTALL_A,
@@ -64,6 +69,99 @@ _RULE = [{"name": "Custom", "include": ["**/*.py"], "exclude": [], "checks": ["P
 async def read(factory: async_sessionmaker[AsyncSession], sql: str, **values: Any) -> list[Any]:
     async with factory() as session:
         return list((await session.execute(text(sql), values)).all())
+
+
+@pytest.mark.integration
+def test_rebinding_requests_a_rules_read_for_the_moved_repository(reinstall_env: Env) -> None:
+    engine = reinstall_env.engine()
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    target_id = UUID(int=225)
+    skipped_id = UUID(int=226)
+
+    async def rebind() -> None:
+        async with factory.begin() as session:
+            await session.execute(
+                text(
+                    "UPDATE provider_installations SET account_external_id=700, "
+                    "deleted_at=clock_timestamp() WHERE id=:id"
+                ),
+                {"id": INSTALL_A},
+            )
+            await session.execute(
+                text(
+                    "INSERT INTO repositories (id, provider_installation_id, external_id, "
+                    "full_name, default_branch, web_url) "
+                    "VALUES (:id, :installation, 103, 'octo/skipped', 'main', "
+                    "'https://github.test/octo/skipped')"
+                ),
+                {"id": skipped_id, "installation": INSTALL_A},
+            )
+            session.add(
+                ProviderInstallation(
+                    id=target_id,
+                    workspace_id=WS_A,
+                    provider="github",
+                    external_id=29,
+                    account_external_id=700,
+                    provider_metadata={},
+                )
+            )
+            await session.flush()
+            target = await session.get(ProviderInstallation, target_id)
+            assert target is not None
+            await SqlAlchemyGitHubRepositoryRebinding(session).rebind(
+                target, GitHubInstallation(29, "octo", (101,), 700)
+            )
+
+    try:
+        assert (
+            asyncio.run(
+                read(
+                    factory,
+                    "SELECT refresh_requested_at FROM repository_rules_status "
+                    "WHERE repository_id=:id",
+                    id=REPO_A,
+                )
+            )
+            == []
+        )
+        asyncio.run(rebind())
+        assert asyncio.run(
+            read(
+                factory,
+                "SELECT provider_installation_id, installation_available "
+                "FROM repositories WHERE id=:id",
+                id=REPO_A,
+            )
+        ) == [(target_id, True)]
+        ((requested_at,),) = asyncio.run(
+            read(
+                factory,
+                "SELECT refresh_requested_at FROM repository_rules_status WHERE repository_id=:id",
+                id=REPO_A,
+            )
+        )
+        assert requested_at is not None
+        assert asyncio.run(
+            read(
+                factory,
+                "SELECT provider_installation_id FROM repositories WHERE id=:id",
+                id=skipped_id,
+            )
+        ) == [(INSTALL_A,)]
+        assert (
+            asyncio.run(
+                read(
+                    factory,
+                    "SELECT refresh_requested_at FROM repository_rules_status "
+                    "WHERE repository_id=:id",
+                    id=skipped_id,
+                )
+            )
+            == []
+        )
+    finally:
+        asyncio.run(engine.dispose())
 
 
 async def seed_custom(factory: async_sessionmaker[AsyncSession]) -> None:

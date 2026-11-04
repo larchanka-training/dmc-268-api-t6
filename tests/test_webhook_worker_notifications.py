@@ -310,12 +310,22 @@ def test_worker_starts_scan_and_heartbeat_before_listener_ready_and_awaits_clean
         clients: list[dict[str, object]] = []
         created_clients: list[httpx.AsyncClient] = []
         rules_calls: list[dict[str, object]] = []
+        created_rules: list[RefreshRulesStatuses] = []
+        swept_rules: list[RefreshRulesStatuses] = []
+        rules_swept = asyncio.Event()
         real_client = httpx.AsyncClient
         real_rules = ReviewsApiResources.rules_status_refresher
 
         def rules_refresher(self: ReviewsApiResources, **kwargs: object) -> RefreshRulesStatuses:
             rules_calls.append(kwargs)
-            return real_rules(self, **kwargs)  # type: ignore[arg-type]
+            refresher = real_rules(self, **kwargs)  # type: ignore[arg-type]
+            created_rules.append(refresher)
+            return refresher
+
+        async def refresh_rules(refresher: RefreshRulesStatuses) -> int:
+            swept_rules.append(refresher)
+            rules_swept.set()
+            return 0
 
         def http_client(**kwargs: object) -> httpx.AsyncClient:
             clients.append(kwargs)
@@ -325,6 +335,7 @@ def test_worker_starts_scan_and_heartbeat_before_listener_ready_and_awaits_clean
 
         monkeypatch.setattr(httpx, "AsyncClient", http_client)
         monkeypatch.setattr(ReviewsApiResources, "rules_status_refresher", rules_refresher)
+        monkeypatch.setattr(webhook_worker, "refresh_rules_once", refresh_rules)
         listener_connections: list[str] = []
         heartbeat = tmp_path / "webhook-worker.heartbeat"
         messages: asyncio.Queue[psycopg.Notify] = asyncio.Queue()
@@ -434,6 +445,8 @@ def test_worker_starts_scan_and_heartbeat_before_listener_ready_and_awaits_clean
         try:
             await asyncio.wait_for(listening.wait(), timeout=2)
             await asyncio.wait_for(database_attempted.wait(), timeout=2)
+            if provider != "gitlab":
+                await asyncio.wait_for(rules_swept.wait(), timeout=2)
             assert is_fresh(heartbeat, max_age=5, now=time.time()) is True
             assert task.done() is False
             register.set()
@@ -449,6 +462,11 @@ def test_worker_starts_scan_and_heartbeat_before_listener_ready_and_awaits_clean
                 await asyncio.wait_for(task, timeout=2)
             assert closed == [*expected_before_publisher, "publisher", "database"]
             assert len(clients) == {"github": 1, "gitlab": 1, "bitbucket": 2, "both": 3}[provider]
+            if provider == "gitlab":
+                assert created_rules == swept_rules == []
+            else:
+                assert len(created_rules) == 1
+                assert swept_rules and all(item is created_rules[0] for item in swept_rules)
             if provider == "gitlab":
                 assert "base_url" not in clients[0]  # no GitHub client/token/reviver composition
                 assert clients[0]["trust_env"] is False
