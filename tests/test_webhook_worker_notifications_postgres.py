@@ -298,7 +298,10 @@ def test_oauth_commit_wakes_worker_while_rollback_preserves_deferred_receipt(
         receipt_id = uuid4().hex
         try:
             await seed_deferred_receipt(factory, receipt_id)
-            async with worker(database) as running:
+            # The sweep purges receipts deferred over 30 days ago: without a fixed clock the
+            # seeded DEFERRED_AT outlives the retention and the row disappears mid-test.
+            clock = [datetime(2026, 10, 6, 12, tzinfo=UTC)]
+            async with worker(database, clock=clock) as running:
                 control = ReconciliationControl(rollback=rollback)
                 use_case = LinkGitHubInstallations(
                     github=LinkedInstallationGitHub(control),
