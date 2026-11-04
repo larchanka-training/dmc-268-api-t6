@@ -90,7 +90,9 @@ REPO_NAME = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
 REF = re.compile(r"(api|ui|[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)#([1-9][0-9]*)")
 NUMBER = re.compile(r"[1-9][0-9]*")
 
-HEADING = re.compile(r"^ {0,3}(#{1,6})[ \t]+(.*?)[ \t]*#*[ \t]*$")
+# The closing sequence of a heading («## Name ##») is cut off in `scan_checkboxes`, not by a
+# lazy group here: `(.*?)[ \t]*#*[ \t]*$` is cubic on a heading that ends in many blanks.
+HEADING = re.compile(r"^ {0,3}(#{1,6})[ \t]+(.*)$")
 # CommonMark fences: at most 3 spaces of indent; a backtick opener's info string
 # has no backtick; a closer is the same character, at least as long, and bare.
 FENCE_OPEN = re.compile(r"^ {0,3}(`{3,}|~{3,})(.*)$")
@@ -99,10 +101,12 @@ CHECKBOX = re.compile(r"^\s*[-*+] \[([ xX])\](.*)$")
 SECTIONS = {"acceptance criteria": "ac", "dod checklist": "dod"}
 
 # A `Refs` line: the keyword, then a list of references (`#12`, `owner/repo#12`)
-# separated by commas / `and` / `&` / blanks; text after the list is ignored.
+# separated by commas / `and` / `&` / blanks; text after the list is ignored. The separator is
+# one of two alternatives, never two adjacent `\s*` around an optional word: that is quadratic
+# on `Refs #1` followed by many blanks.
 _TOKEN = r"(?:[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)?#[1-9][0-9]*"
 REFS_LINE = re.compile(
-    rf"^\s*(?:[-*+]\s+)?Refs?\b:?\s*({_TOKEN}(?:\s*(?:,|;|&|\band\b)?\s*{_TOKEN})*)",
+    rf"^\s*(?:[-*+]\s+)?Refs?\b:?\s*({_TOKEN}(?:(?:\s*(?:,|;|&|\band\b)\s*|\s+){_TOKEN})*)",
     re.IGNORECASE,
 )
 REFS_TOKEN = re.compile(r"([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)?#([1-9][0-9]*)")
@@ -430,7 +434,7 @@ def scan_checkboxes(body: str) -> Iterator[tuple[int, str | None, bool, str]]:
         heading = HEADING.match(line)
         if heading:
             depth = len(heading.group(1))
-            name = SECTIONS.get(heading.group(2).strip().lower())
+            name = SECTIONS.get(heading.group(2).rstrip(" \t").rstrip("#").strip().lower())
             if name is not None:
                 current, level = name, depth
             elif current is not None and depth <= level:
