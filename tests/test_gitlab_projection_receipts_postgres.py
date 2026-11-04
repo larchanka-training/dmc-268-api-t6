@@ -50,8 +50,7 @@ from app.modules.reviews.application.try_enqueue_webhook_run import (
 from app.modules.reviews.infrastructure.gitlab_merge_request_projection import (
     SqlAlchemyGitLabMergeRequestProjectionUnitOfWork,
 )
-from tests import test_gitlab_projection_postgres as projection
-from tests.test_gitlab_projection_postgres import (
+from tests.gitlab_projection_support import (
     NOW,
     Clock,
     ConfirmedPointers,
@@ -68,8 +67,8 @@ from tests.test_gitlab_projection_postgres import (
     rig,
 )
 
+pytest_plugins = ("tests.gitlab_projection_support",)
 pytestmark = pytest.mark.integration
-authority_database = projection.authority_database
 _TOKEN = "synthetic-authority-PAT-canary"
 _ORIGIN = "https://gitlab.com"
 
