@@ -1,7 +1,7 @@
 """The production repository stores a backend result without ``llm.review_output`` (#130 F5).
 
-DD6 on PostgreSQL: a technical-only change is finalized through the common publishing
-transaction; only a model answer is recorded as ``llm.review_output``.
+DD6 on PostgreSQL: a technical-only change is finalized while running, before the
+publishing transition; only a model answer is recorded as ``llm.review_output``.
 """
 
 from __future__ import annotations
@@ -57,7 +57,11 @@ def test_postgres_backend_result_enters_publishing_without_a_model_answer(
 
             assert await store.execute(RUN_ATTEMPTED, NoModelAnswer()) is True
 
-            assert await _tools(factory) == {"context.build": 1, "review.finalize": 1}
+            assert await _tools(factory) == {
+                "context.build": 1,
+                "review.finalize": 1,
+                "review.publish_start": 1,
+            }
             async with factory() as session:
                 run = await session.get(Run, RUN_ATTEMPTED)
                 action = await session.scalar(
@@ -65,8 +69,15 @@ def test_postgres_backend_result_enters_publishing_without_a_model_answer(
                         RunAction.run_id == RUN_ATTEMPTED, RunAction.tool == "review.finalize"
                     )
                 )
-            assert run is not None and action is not None
+                marker = await session.scalar(
+                    select(RunAction).where(
+                        RunAction.run_id == RUN_ATTEMPTED,
+                        RunAction.tool == "review.publish_start",
+                    )
+                )
+            assert run is not None and action is not None and marker is not None
             assert run.state is RunState.PUBLISHING
+            assert action.index < marker.index
             assert run.review_body is not None
             assert "**Verdict:** нет доступных для анализа изменений" in run.review_body
             assert isinstance(action.response, dict)
@@ -77,7 +88,11 @@ def test_postgres_backend_result_enters_publishing_without_a_model_answer(
 
             # The T8 guard: the run is no longer running, nothing is added.
             assert await store.execute(RUN_ATTEMPTED, NoModelAnswer()) is False
-            assert await _tools(factory) == {"context.build": 1, "review.finalize": 1}
+            assert await _tools(factory) == {
+                "context.build": 1,
+                "review.finalize": 1,
+                "review.publish_start": 1,
+            }
             assert len(queue.pointers) == 1
         finally:
             await engine.dispose()
@@ -104,6 +119,7 @@ def test_postgres_model_answer_is_still_recorded_as_llm_review_output(result_env
                 "context.build": 1,
                 "llm.review_output": 1,
                 "review.finalize": 1,
+                "review.publish_start": 1,
             }
             async with factory() as session:
                 action = await session.scalar(
