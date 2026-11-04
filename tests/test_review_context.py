@@ -238,9 +238,173 @@ def _service_repository(**extra: str) -> Repository:
     )
 
 
-def test_changed_function_gets_diff_full_file_and_imported_signature() -> None:
-    repository = _service_repository()
-    diff_map = _diff_map(_vcs_file(repository, "pkg/service.py", _GREET_PATCH))
+_TS_SERVICE = """import { User } from "./models";
+import { token } from "./secret";
+
+export function unrelated(): number {
+  return 0;
+}
+
+export function greet(userId: number): string {
+  const user = new User(userId);
+  const extra = 1;
+  return "hi " + user.name;
+}
+"""
+_TS_MODELS = """/** A user of the system. */
+export class User {
+  name: string;
+
+  constructor(userId: number) {
+    this.name = String(userId);
+  }
+}
+"""
+_TS_PATCH = (
+    "@@ -8,3 +8,4 @@\n export function greet(userId: number): string {\n"
+    '   const user = new User(userId);\n+  const extra = 1;\n   return "hi " + user.name;'
+)
+_JS_SERVICE = """import { User } from "./models";
+import { token } from "./secret";
+
+export function unrelated() {
+  return 0;
+}
+
+export function greet(userId) {
+  const user = new User(userId);
+  const extra = 1;
+  return "hi " + user.name;
+}
+"""
+_JS_MODELS = """/** A user of the system. */
+export class User {
+  constructor(userId) {
+    this.name = String(userId);
+  }
+}
+"""
+_JS_PATCH = (
+    "@@ -8,3 +8,4 @@\n export function greet(userId) {\n"
+    '   const user = new User(userId);\n+  const extra = 1;\n   return "hi " + user.name;'
+)
+_TSX_SERVICE = """import { Badge } from "./Badge";
+import { token } from "./secret";
+
+export function Unrelated() {
+  return <hr />;
+}
+
+export function Greet(props: { id: number }) {
+  const extra = 1;
+  return <Badge id={props.id} />;
+}
+"""
+_TSX_BADGE = """/** Shows a badge. */
+export function Badge(props: { id: number }) {
+  return <span>{props.id}</span>;
+}
+"""
+_TSX_PATCH = (
+    "@@ -8,2 +8,3 @@\n export function Greet(props: { id: number }) {\n"
+    "+  const extra = 1;\n   return <Badge id={props.id} />;"
+)
+_JSX_SERVICE = _TSX_SERVICE.replace("(props: { id: number })", "(props)")
+_JSX_BADGE = _TSX_BADGE.replace("(props: { id: number })", "(props)")
+_JSX_PATCH = (
+    "@@ -8,2 +8,3 @@\n export function Greet(props) {\n"
+    "+  const extra = 1;\n   return <Badge id={props.id} />;"
+)
+
+
+@pytest.mark.parametrize(
+    (
+        "path",
+        "source",
+        "target",
+        "target_source",
+        "patch",
+        "added",
+        "diff_range",
+        "file_range",
+        "signature",
+    ),
+    [
+        pytest.param(
+            "pkg/service.py",
+            _SERVICE,
+            "pkg/models.py",
+            _MODELS,
+            _GREET_PATCH,
+            "+    extra = 1",
+            LineRange(9, 13),
+            LineRange(1, 13),
+            'class User:\n    """A user of the system."""',
+            id="py",
+        ),
+        pytest.param(
+            "src/service.ts",
+            _TS_SERVICE,
+            "src/models.ts",
+            _TS_MODELS,
+            _TS_PATCH,
+            "+  const extra = 1;",
+            LineRange(8, 11),
+            LineRange(1, 12),
+            "/** A user of the system. */\nexport class User {",
+            id="ts",
+        ),
+        pytest.param(
+            "src/service.js",
+            _JS_SERVICE,
+            "src/models.js",
+            _JS_MODELS,
+            _JS_PATCH,
+            "+  const extra = 1;",
+            LineRange(8, 11),
+            LineRange(1, 12),
+            "/** A user of the system. */\nexport class User {",
+            id="js",
+        ),
+        pytest.param(
+            "src/Greet.tsx",
+            _TSX_SERVICE,
+            "src/Badge.tsx",
+            _TSX_BADGE,
+            _TSX_PATCH,
+            "+  const extra = 1;",
+            LineRange(8, 10),
+            LineRange(1, 11),
+            "/** Shows a badge. */\nexport function Badge(props: { id: number }) {",
+            id="tsx",
+        ),
+        pytest.param(
+            "src/Greet.jsx",
+            _JSX_SERVICE,
+            "src/Badge.jsx",
+            _JSX_BADGE,
+            _JSX_PATCH,
+            "+  const extra = 1;",
+            LineRange(8, 10),
+            LineRange(1, 11),
+            "/** Shows a badge. */\nexport function Badge(props) {",
+            id="jsx",
+        ),
+    ],
+)
+def test_changed_function_gets_diff_full_file_and_imported_signature(
+    path: str,
+    source: str,
+    target: str,
+    target_source: str,
+    patch: str,
+    added: str,
+    diff_range: LineRange,
+    file_range: LineRange,
+    signature: str,
+) -> None:
+    repository = Repository({path: source, target: target_source})
+    diff_map = _diff_map(_vcs_file(repository, path, patch))
 
     payload = _build(repository, diff_map)
 
@@ -249,18 +413,15 @@ def test_changed_function_gets_diff_full_file_and_imported_signature() -> None:
     by_level = {block.level: block for block in payload.blocks}
     diff = by_level[ContextLevel.L1]
     assert diff.source.role is SourceRole.DIFF
-    assert diff.source.ranges == (LineRange(9, 13),)
-    assert "+    extra = 1" in diff.text
+    assert diff.source.ranges == (diff_range,)
+    assert added in diff.text
     full = by_level[ContextLevel.L3]
-    assert (full.source.ranges, full.source.reason) == ((LineRange(1, 13),), "full_file")
+    assert (full.source.ranges, full.source.reason) == ((file_range,), "full_file")
     imported = by_level[ContextLevel.L4]
     assert imported.source.role is SourceRole.AST_EXCERPT
-    assert (imported.source.path, imported.representation) == (
-        "pkg/models.py",
-        Representation.SIGNATURE,
-    )
-    # The signature and the docstring are shown, the body of the class is not.
-    assert imported.text == 'class User:\n    """A user of the system."""'
+    assert (imported.source.path, imported.representation) == (target, Representation.SIGNATURE)
+    # The signature and its documentation are shown, the body is not (CONTEXT §3).
+    assert imported.text == signature
     assert imported.source.ranges == (LineRange(1, 2),)
     assert payload.tokens_used == sum(block.tokens for block in payload.blocks)
     assert (payload.diff_digest, payload.policy_snapshot_id) == (diff_map.digest, UUID(int=3))
