@@ -316,10 +316,10 @@ class LinkedInstallationGitHub:
         return AuthenticatedGitHubInstallations(41, (GitHubInstallation(99, "octo", (101,)),))
 
 
-# Stay inside receipt retention while making revival eligible and retry not yet due.
+# Inside receipt retention, with the retry already due: only the deferred mark may stop a claim.
 _FIXTURE_NOW = datetime.now(UTC)
-DEFERRED_AT = _FIXTURE_NOW - timedelta(hours=1)
-RETRY_AT = _FIXTURE_NOW + timedelta(hours=1)
+DEFERRED_AT = _FIXTURE_NOW - timedelta(hours=2)
+RETRY_AT = _FIXTURE_NOW - timedelta(hours=1)
 
 
 async def seed_deferred_receipt(
