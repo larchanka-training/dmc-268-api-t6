@@ -286,6 +286,7 @@ def test_created_run_and_retry_keep_pins_but_rerun_uses_current_pair(env: Env) -
                 lambda: SqlAlchemyReviewOutputUnitOfWork(factory),
                 queue,
                 worker_id="worker",
+                expected_attempt=2,
                 run_url=lambda _: None,
             ).execute(run_id, _answer())
             assert len(queue.pointers) == 1 and queue.pointers[0].run_id == run_id

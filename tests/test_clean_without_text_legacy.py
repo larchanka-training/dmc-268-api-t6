@@ -18,9 +18,9 @@ from app.modules.reviews.application.review_output import (
     ReviewPublication,
 )
 from app.modules.reviews.application.run_coverage import RunCoverage
+from tests.clean_without_text_fakes import answer
 from tests.review_output_fakes import RecordingFactory, RecordingProvider, RecordingRepository
-from tests.test_clean_without_text_result import answer
-from tests.test_run_coverage import coverage
+from tests.run_coverage_fakes import coverage
 
 
 @pytest.mark.parametrize("no_text", [False, True])
@@ -72,7 +72,7 @@ def test_legacy_inline_default_unknown_and_none_have_matching_body_labels(no_tex
 def test_direct_postprocessor_without_coverage_withholds_clean() -> None:
     from app.modules.reviews.application.findings_post_processor import FindingsPostProcessor
     from app.modules.reviews.application.review_output import parse_review_output
-    from tests.test_run_coverage import code_snapshot
+    from tests.run_coverage_fakes import code_snapshot
 
     diff = diff_map_from_snapshots(
         repository_id=UUID(int=1),
@@ -106,8 +106,8 @@ def test_queue_store_rejects_missing_backend_summary_before_writes(
     from app.modules.reviews.application.findings_post_processor import FindingsPostProcessor
     from app.modules.reviews.application.review_output import InvalidReviewOutput
     from app.modules.reviews.application.store_review_output import StoreReviewOutput
-    from tests.test_clean_without_text_result import Queue, Repository, Uow
-    from tests.test_run_coverage import code_snapshot
+    from tests.clean_without_text_fakes import Queue, Repository, Uow
+    from tests.run_coverage_fakes import code_snapshot
 
     result = ProcessedReviewOutput(
         (), (), (), "body", summary=None, coverage=coverage([code_snapshot()])
@@ -117,7 +117,11 @@ def test_queue_store_rejects_missing_backend_summary_before_writes(
     committed: list[str] = []
     queue = Queue(committed)
     store = StoreReviewOutput(
-        lambda: Uow(repository, committed), queue, worker_id="worker", run_url=lambda _: None
+        lambda: Uow(repository, committed),
+        queue,
+        worker_id="worker",
+        expected_attempt=1,
+        run_url=lambda _: None,
     )
     with pytest.raises(InvalidReviewOutput, match="Missing backend summary for run_id="):
         asyncio.run(store.execute(UUID(int=213), answer()))

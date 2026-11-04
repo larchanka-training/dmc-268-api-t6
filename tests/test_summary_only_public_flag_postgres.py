@@ -35,12 +35,12 @@ from app.modules.reviews.infrastructure.run_processing_unit_of_work import (
     SqlAlchemyRunProcessingUnitOfWork,
 )
 from app.modules.reviews.infrastructure.run_repository import SqlAlchemyRunRepository
+from tests.clean_without_text_fakes import answer
 from tests.portal_postgres import HEAD, PR_NEW, REPO_A, RUN_ATTEMPTED, WS_A, Env, api
+from tests.run_coverage_fakes import empty_snapshot
 from tests.test_clean_without_text_acceptance_postgres import RevisionSource, checkpoint
-from tests.test_clean_without_text_result import answer
 from tests.test_clean_without_text_result_postgres import result_env as result_env
 from tests.test_review_context_stage import Parser, Policy, Vcs
-from tests.test_run_coverage import empty_snapshot
 from tests.test_severity_threshold_postgres import RecordingQueue
 
 _PATCH = "@@ -1 +1 @@\n-old\n+new"
@@ -145,6 +145,7 @@ def test_incomplete_withheld_files_publish_summary_only(
                 lambda: SqlAlchemyReviewOutputUnitOfWork(factory),
                 queue,
                 worker_id="worker",
+                expected_attempt=1,
                 run_url=lambda _: None,
             ).execute(RUN_ATTEMPTED, answer())
             async with SqlAlchemyReviewOutputUnitOfWork(factory) as uow:

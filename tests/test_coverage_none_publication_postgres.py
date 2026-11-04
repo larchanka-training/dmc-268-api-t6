@@ -19,8 +19,8 @@ from app.modules.reviews.infrastructure.models import Run, RunAction
 from app.modules.reviews.infrastructure.review_output_unit_of_work import (
     SqlAlchemyReviewOutputUnitOfWork,
 )
+from tests.clean_without_text_fakes import answer
 from tests.portal_postgres import RUN_ATTEMPTED, Env
-from tests.test_clean_without_text_result import answer
 from tests.test_clean_without_text_result_postgres import prepare_result
 from tests.test_clean_without_text_result_postgres import result_env as result_env
 from tests.test_severity_threshold_postgres import RecordingQueue
@@ -50,6 +50,7 @@ def test_postgres_backend_result_enters_publishing_without_a_model_answer(
             lambda: SqlAlchemyReviewOutputUnitOfWork(factory),
             queue,
             worker_id="worker",
+            expected_attempt=1,
             run_url=lambda _: None,
         )
         try:
@@ -112,6 +113,7 @@ def test_postgres_model_answer_is_still_recorded_as_llm_review_output(result_env
                 lambda: SqlAlchemyReviewOutputUnitOfWork(factory),
                 RecordingQueue(),
                 worker_id="worker",
+                expected_attempt=1,
                 run_url=lambda _: None,
             ).execute(RUN_ATTEMPTED, answer())
 

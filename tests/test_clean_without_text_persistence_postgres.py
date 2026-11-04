@@ -19,10 +19,10 @@ from app.modules.reviews.infrastructure.run_repository import (
     SqlAlchemyRunRepository,
 )
 from tests.portal_postgres import REPO_A, RUN_ATTEMPTED, RUN_B, Env
+from tests.run_coverage_fakes import code_snapshot, empty_snapshot
 from tests.test_clean_without_text_result_postgres import prepare_result
 from tests.test_clean_without_text_result_postgres import result_env as result_env
 from tests.test_clean_without_text_views_postgres import finalize_run
-from tests.test_run_coverage import code_snapshot, empty_snapshot
 
 
 @pytest.mark.integration

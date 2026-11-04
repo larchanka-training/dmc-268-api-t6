@@ -26,11 +26,11 @@ from app.modules.reviews.infrastructure.review_output_unit_of_work import (
 from app.modules.reviews.infrastructure.run_lifecycle_store import SqlAlchemyRunLifecycleStore
 from app.modules.reviews.infrastructure.run_repository import SqlAlchemyRunRepository
 from app.modules.reviews.infrastructure.saved_review_results import load_review_results
+from tests.clean_without_text_fakes import answer
 from tests.portal_postgres import HEAD, REPO_A, RUN_ATTEMPTED, Env
-from tests.test_clean_without_text_result import answer
+from tests.run_coverage_fakes import code_snapshot, empty_snapshot
 from tests.test_clean_without_text_result_postgres import prepare_result
 from tests.test_clean_without_text_result_postgres import result_env as result_env
-from tests.test_run_coverage import code_snapshot, empty_snapshot
 from tests.test_severity_threshold_postgres import RecordingQueue
 
 
@@ -49,6 +49,7 @@ async def finalize_run(
             lambda: SqlAlchemyReviewOutputUnitOfWork(factory),
             queue,
             worker_id="worker",
+            expected_attempt=1,
             run_url=lambda _: None,
         ).execute(RUN_ATTEMPTED, answer() if output is None else output)
 

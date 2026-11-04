@@ -53,7 +53,8 @@ default branch репозитория с включённым тумблером
    без изменения policy_digest, schema_version=1 и conventions key. Историческая
    NULL-пара без backfill сохраняет live fallback к Repository при каждой обработке
    и retry, даже если snapshot уже существует (PIPELINE_SPEC §9). Положение порога
-   после verifier и FinalReviewResult остаются целевым профилем #107/#130.
+   после verifier уже применяется на snapshot-пути, а #435 сохраняет приватный итог
+   и план перед публикацией; полный профиль FinalReviewResult ниже остаётся целью #107.
 2. Ignore применяется ко всем источникам всех LLM-вызовов, включая конвенции,
    AST, verifier, repair и fallback. Кэш не даёт разрешения на отправку источника.
 3. Карта diff доказывает допустимость якоря; manifest — видимость фрагмента;
@@ -1211,9 +1212,11 @@ retry при наличии checkpoint продолжает с verifier, не м
 сохранения успешного ответа может потребовать новый вызов в остатке лимитов;
 воспроизводимость снимка не означает детерминизм модели.
 
-В коде checkpoint кандидатов — сохранённый manifest каждого вызова snapshot-пути
-(`context_manifests`); возобновления с verifier ещё нет. Повторная попытка до
-принятого ответа заново выбирает RAG (§3.5): более новая публикация индекса даёт
+В коде #435 checkpoint кандидатов хранит принятый ответ, fitted context и manifest;
+повтор с восстановимым checkpoint продолжает с verifier без нового reviewer. Если
+показанный контекст или вход фильтрации не восстановить, новая попытка вызывает
+reviewer заново. Повторная попытка до принятого ответа заново выбирает RAG
+(§3.5): более новая публикация индекса даёт
 новый `index_commit_sha` в manifest её вызовов, а то же место остаётся под тем же
 `block_id`. Verifier принятой попытки показывает те же блоки RAG с тем же
 `index_commit_sha`, что её review (§5.2).
@@ -1444,8 +1447,9 @@ Legacy missing_patch нельзя повышать по одному empty SHA: 
 
 
 Уже существуют `run_policy_snapshots` вместе со staging `run_policy_documents`
-(миграция `20261011_0029`) и `context_manifests` (`20261025_0040`); остальные имена
-ниже — целевые таблицы/поля для будущих миграций, не существующая схема:
+(миграция `20261011_0029`), `context_manifests` (`20261025_0040`) и приватная
+`final_review_results` (#435). Остальные имена ниже — целевые таблицы/поля
+для будущих миграций, не существующая схема:
 
 | Данные | Контракт |
 | --- | --- |
@@ -1455,7 +1459,7 @@ Legacy missing_patch нельзя повышать по одному empty SHA: 
 | `context_evidence_blobs` | Workspace-scoped dedup по content hash, точные показанные excerpts |
 | `review_candidates` | Исходный finding v2/v3, digest, ID, accepted call, решения фильтров |
 | `verification_results` | Принятый call, ровно одно решение на candidate, resolved refs |
-| `final_review_results` | `run_id UNIQUE`, FinalReviewResult и digest, immutable после publishing |
+| `final_review_results` | #435: `run_id` PK, `source_attempt`, nullable accepted-call IDs, JSONB `result` и `publication_plan`, digest, `created_at`; результат сохраняется в `running` до T8 и остаётся immutable. Полный профиль #107 из §8.1, включая отдельные `version`, `result_id` и `below_severity_threshold_count`, ещё не реализован как контракт таблицы |
 | `publication_plans/items` | Сохранённые provider payloads, item keys, remote receipts, состояние доставки (§10) |
 
 Кандидаты и diagnostic drops не смешиваются с опубликованными findings. Поля

@@ -41,15 +41,14 @@ from app.modules.reviews.infrastructure.review_prompt_repository import (
 )
 from app.modules.reviews.infrastructure.run_lifecycle_store import SqlAlchemyRunLifecycleStore
 from app.modules.reviews.infrastructure.run_repository import SqlAlchemyRunRepository
+from tests.clean_without_text_fakes import answer, finding
 from tests.execute_review_fakes import _make_test_snapshot, conventions
 from tests.portal_postgres import HEAD, REPO_A, RUN_ATTEMPTED, WS_A, Env, api
-from tests.test_clean_without_text_result import answer
+from tests.run_coverage_fakes import code_snapshot
 from tests.test_clean_without_text_result_postgres import prepare_result
 from tests.test_clean_without_text_result_postgres import result_env as result_env
-from tests.test_clean_without_text_sent_context import finding
 from tests.test_gateway_review_model import RUN, Transport, _gateway
 from tests.test_review_prompt_pins_postgres import _bind_v4
-from tests.test_run_coverage import code_snapshot
 from tests.test_severity_threshold_postgres import RecordingQueue
 
 

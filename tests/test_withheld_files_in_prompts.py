@@ -56,6 +56,7 @@ from app.modules.reviews.application.review_context_stage import (
 )
 from app.modules.reviews.application.review_path import ReviewBinding
 from app.modules.reviews.application.vcs_diff import PullRequestLocator, VcsFile, VcsPullRequest
+from tests.execute_review_fakes import _AcceptingCheckpointPublisher
 from tests.llm_fakes import AbstainingVerifier
 from tests.policy_snapshot_fakes import (
     make_complete_execution_profile,
@@ -275,7 +276,7 @@ class Model:
         return self.answer
 
 
-class Publisher:
+class Publisher(_AcceptingCheckpointPublisher):
     async def execute(self, run_id: UUID, model_output: object) -> bool:
         return True
 

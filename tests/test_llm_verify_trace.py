@@ -34,6 +34,7 @@ from app.modules.reviews.application.store_review_output import (
     StoreReviewOutput,
 )
 from tests.execute_review_fakes import _AcceptingCheckpointPublisher
+from tests.review_output_fakes import InMemoryFinalization
 from tests.test_diff_anchor import _diff_map
 from tests.verifier_pipeline_fakes import (
     MAIN_BLOCK_ID,
@@ -181,7 +182,7 @@ def test_the_zero_candidate_bypass_writes_no_trace() -> None:
 # ---------- StoreReviewOutput passes it to enter_publishing ----------
 
 
-class _PublishingRepository:
+class _PublishingRepository(InMemoryFinalization):
     def __init__(self) -> None:
         self.entered: list[dict[str, Any]] = []
 
@@ -201,6 +202,7 @@ class _PublishingRepository:
             head_sha="head_sha_123",
             head_current=True,
             repository_review_event="APPROVE",
+            attempt=1,
         )
 
     async def store_review_output(
@@ -222,6 +224,7 @@ def _store(raw_output: Any) -> list[dict[str, Any]]:
         cast(Any, lambda: FakeUnitOfWork(reviews)),
         FakeQueue(),
         worker_id="test-worker",
+        expected_attempt=1,
         run_url=lambda _: None,
     )
     assert asyncio.run(store.execute(RUN_ID, raw_output)) is True

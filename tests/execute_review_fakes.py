@@ -15,6 +15,7 @@ from app.modules.reviews.application.policy_snapshot import (
     PromptBindings,
 )
 from app.modules.reviews.application.prompt_builder import file_block_id
+from app.modules.reviews.application.store_review_output import AcceptedReviewCheckpoint
 from tests.policy_snapshot_fakes import (
     make_complete_execution_profile,
     make_complete_prompt_bindings,
@@ -119,6 +120,12 @@ class FakeVerifierModel:
 
 class _AcceptingCheckpointPublisher:
     """Unit publisher fake for snapshot tests that exercise stages after checkpointing."""
+
+    async def resume_finalized(self, run_id: UUID) -> bool | None:
+        return None
+
+    async def load_accepted_output(self, run_id: UUID) -> AcceptedReviewCheckpoint | None:
+        return None
 
     async def checkpoint_candidates(self, *args: object, **kwargs: object) -> bool:
         return True

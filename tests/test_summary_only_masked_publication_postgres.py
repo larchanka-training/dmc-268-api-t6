@@ -51,10 +51,10 @@ from app.modules.reviews.infrastructure.run_processing_unit_of_work import (
     SqlAlchemyRunProcessingUnitOfWork,
 )
 from app.modules.reviews.infrastructure.run_repository import SqlAlchemyRunRepository
+from tests.clean_without_text_fakes import answer
 from tests.policy_snapshot_fakes import make_complete_execution_profile
 from tests.portal_postgres import PR_NEW, WS_A, Env, api, portal_schema
 from tests.test_clean_without_text_acceptance_postgres import RevisionSource, checkpoint
-from tests.test_clean_without_text_result import answer
 from tests.test_review_context_stage import Parser, Policy, Vcs
 from tests.test_run_prompt_pins_postgres import _packaged, _seed
 from tests.test_run_publication_settings_postgres import _insert, _ready
@@ -303,6 +303,7 @@ def test_masked_file_and_lock_keep_published_coverage(env: Env, version: int) ->
                     lambda: SqlAlchemyReviewOutputUnitOfWork(factory),
                     RecordingQueue(),
                     worker_id="worker",
+                    expected_attempt=1,
                     run_url=lambda _: None,
                 ).execute(run_id, answer())
                 async with factory() as session:

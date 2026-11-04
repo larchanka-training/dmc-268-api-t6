@@ -33,7 +33,7 @@ import base64
 import json
 import os
 import re
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from hashlib import sha256
@@ -42,8 +42,9 @@ from uuid import UUID
 
 import httpx
 import pytest
-from sqlalchemy import text
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlalchemy import create_engine, text
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.pool import NullPool
 
 from app.bootstrap.llm_gateway import build_gateway
 from app.modules.integrations.webhooks.infrastructure.github_installation_tree_provider import (
@@ -58,7 +59,10 @@ from app.modules.reviews.application.try_enqueue_webhook_run import (
 from app.modules.reviews.infrastructure.github_run_source import GitHubRunSource
 from app.modules.reviews.infrastructure.github_vcs import HttpGitHubVcsProvider
 from app.modules.reviews.infrastructure.llm.settings import LlmSettings
-from app.modules.reviews.infrastructure.run_repository import SqlAlchemyRunRepository
+from app.modules.reviews.infrastructure.run_repository import (
+    SqlAlchemyReviewOutputRepository,
+    SqlAlchemyRunRepository,
+)
 from app.modules.reviews.infrastructure.vcs_failures import ClassifiedVcsProvider
 from app.worker import (
     GitHubAdapters,
@@ -143,6 +147,7 @@ def env() -> Iterator[Env]:
 class Queue:
     published: list[ReviewPublishPointer] = field(default_factory=list)
     retries: list[str] = field(default_factory=list)
+    on_publish: Callable[[], None] | None = None
 
     async def publish_confirmed(
         self, message: PendingRunMessage, *, kind: RunPublicationKind = RunPublicationKind.QUEUED
@@ -153,6 +158,8 @@ class Queue:
         self.retries.append(delay_key)
 
     async def publish_review(self, pointer: ReviewPublishPointer) -> None:
+        if self.on_publish is not None:
+            self.on_publish()
         self.published.append(pointer)
 
 
@@ -174,11 +181,16 @@ class GitHubHttp:
     files: tuple[dict[str, Any], ...] | None = None
     # The caller of ``greet`` the head serves to a RAG read.
     caller: str = _USER
+    title: str = "Fix parser"
+    labels: tuple[str, ...] = ("backend",)
     calls: list[str] = field(default_factory=list)
+    transaction_probe: Callable[[str], None] | None = None
 
     def handle(self, request: httpx.Request) -> httpx.Response:
         path = request.url.path
         self.calls.append(f"{request.method} {path}")
+        if self.transaction_probe is not None:
+            self.transaction_probe("vcs" if "/git/" in path or "/pulls/" in path else "github")
         if path.endswith("/access_tokens"):
             return httpx.Response(
                 201, json={"token": "token", "expires_at": "2030-01-01T00:00:00Z"}
@@ -220,6 +232,8 @@ class GitHubHttp:
             changed = 2 if self.files is None else len(self.files)
             payload = _pull_payload(changed_files=changed, head_sha=_HEAD)
             payload["number"] = 3
+            payload["title"] = self.title
+            payload["labels"] = [{"name": label} for label in self.labels]
             return httpx.Response(200, json=payload)
         if path.endswith("/pulls/3/commits"):
             return httpx.Response(200, json=[])
@@ -257,6 +271,8 @@ class ModelHttp:
     kinds: list[str]
     bodies: list[dict[str, Any]] = field(default_factory=list)
     summaries: list[dict[str, Any]] = field(default_factory=list)
+    on_review: Callable[[], None] | None = None
+    transaction_probe: Callable[[str], None] | None = None
 
     def handle(self, request: httpx.Request) -> httpx.Response:
         body = json.loads(request.content)
@@ -268,6 +284,10 @@ class ModelHttp:
             return completion(json.dumps({"sentences": ["Adds an extra counter to a service."]}))
         self.bodies.append(body)
         kind = self.kinds.pop(0)
+        if self.transaction_probe is not None:
+            self.transaction_probe(kind)
+        if kind.startswith("review") and self.on_review is not None:
+            self.on_review()
         if kind == "unavailable":
             # One provider outage of the call. Within the slots E-1 keeps for the verifier the
             # primary gets no second try: the gateway goes to the fallback.
@@ -357,6 +377,9 @@ class Observed:
     bodies: list[dict[str, Any]]
     queue: Queue
     payloads: list[tuple[Any, ...]]
+    checkpoint_meta: list[dict[str, Any]]
+    checkpoint_attempts: list[int]
+    transaction_checks: list[str]
 
 
 async def _rows(
@@ -391,6 +414,12 @@ async def _scenario(
     verifier_kinds: tuple[str, ...] = ("verifier",),
     files: tuple[dict[str, Any], ...] | None = None,
     redeliveries: int = 0,
+    on_review: Callable[[UUID], None] | None = None,
+    prior_attempts: int = 0,
+    checkpoint_retry: bool = False,
+    missing_retrieved_on_retry: bool = False,
+    transaction_probe: Callable[[str], None] | None = None,
+    transaction_checks: list[str] | None = None,
 ) -> Observed:
     """``version``: the review.system version the run is bound to; v3 is the seeded live row.
     ``seeded_after``: the run is created under the seeded live row of ``version``, then the
@@ -404,6 +433,11 @@ async def _scenario(
     await _seed(factory, _live_assets() if seeded_after is None else _up_to(_packaged(), version))
     async with factory.begin() as session:
         run_id = await _insert(session)
+        if prior_attempts:
+            await session.execute(
+                text("UPDATE runs SET attempt=:attempt WHERE id=:id"),
+                {"id": run_id, "attempt": prior_attempts},
+            )
         await session.execute(
             text(
                 "UPDATE repositories SET enabled=true,installation_available=true,"
@@ -430,12 +464,20 @@ async def _scenario(
         await _BIND[version](factory, run_id)
     snapshot_path = version >= 4
     queue = Queue()
+    if transaction_probe is not None:
+        queue.on_publish = lambda: transaction_probe("publish")
     github_http = GitHubHttp(
-        files_unavailable=1 if retry and not rag else 0, rag=rag, files=files, caller=caller
+        files_unavailable=1 if retry and not rag and not checkpoint_retry else 0,
+        rag=rag,
+        files=files,
+        caller=caller,
     )
+    github_http.transaction_probe = transaction_probe
     if review_kind is None:
         review_kind = "review-v2" if snapshot_path else "review-v1"
-    if retry and rag:
+    if checkpoint_retry:
+        kinds = ["conventions", review_kind]
+    elif retry and rag:
         # The first attempt fails before any answer is accepted: the provider refuses its
         # review call on the primary and on the fallback model. The second attempt keeps the
         # conventions of the first.
@@ -443,7 +485,15 @@ async def _scenario(
     else:
         # On the retried attempt the provider refuses the review call once.
         kinds = ["conventions", *(["unavailable"] if retry else []), review_kind]
-    model_http = ModelHttp([*kinds, *(verifier_kinds if snapshot_path else [])])
+    if missing_retrieved_on_retry:
+        assert checkpoint_retry and len(verifier_kinds) == 3
+        model_kinds = [*kinds, *verifier_kinds[:2], review_kind, verifier_kinds[2]]
+    else:
+        model_kinds = [*kinds, *(verifier_kinds if snapshot_path else [])]
+    model_http = ModelHttp(model_kinds)
+    model_http.transaction_probe = transaction_probe
+    if on_review is not None:
+        model_http.on_review = lambda: on_review(run_id)
     outcomes: list[str] = []
     async with (
         httpx.AsyncClient(
@@ -496,10 +546,16 @@ async def _scenario(
             attempt_deadline=timedelta(minutes=10),
         )
         outcomes.append(await process.handle_run.execute(run_id))
-        if retry:
+        if retry or checkpoint_retry:
+            if checkpoint_retry:
+                github_http.title = "Fix parser (edited)"
+                github_http.labels = ("backend", "size/XL")
             if rag:
                 # A newer publication of the index, at C2, lands between the attempts.
-                await _build(index, REPO_A, C2, _user_file(), base=C1)
+                if missing_retrieved_on_retry:
+                    await _build(index, REPO_A, C2, base=C1)
+                else:
+                    await _build(index, REPO_A, C2, _user_file(), base=C1)
             async with factory.begin() as session:
                 if not rag:
                     # Newer conventions, review and verifier rows go live between the
@@ -610,6 +666,25 @@ async def _scenario(
         bodies=model_http.bodies,
         queue=queue,
         payloads=payloads,
+        checkpoint_meta=[
+            row[0]
+            for row in await _rows(
+                factory,
+                "SELECT fitted_context->'pr_meta' FROM review_candidate_checkpoints "
+                "WHERE run_id=:id ORDER BY attempt",
+                run_id,
+            )
+        ],
+        checkpoint_attempts=[
+            row[0]
+            for row in await _rows(
+                factory,
+                "SELECT attempt FROM review_candidate_checkpoints "
+                "WHERE run_id=:id ORDER BY attempt",
+                run_id,
+            )
+        ],
+        transaction_checks=[] if transaction_checks is None else transaction_checks,
     )
 
 
@@ -626,9 +701,41 @@ def _observe(
     verifier_kinds: tuple[str, ...] = ("verifier",),
     files: tuple[dict[str, Any], ...] | None = None,
     redeliveries: int = 0,
+    on_review: Callable[[UUID], None] | None = None,
+    prior_attempts: int = 0,
+    checkpoint_retry: bool = False,
+    missing_retrieved_on_retry: bool = False,
+    check_transactions: bool = False,
 ) -> Observed:
+    transaction_checks: list[str] = []
+    observer = create_engine(
+        env.database_url,
+        connect_args={"application_name": f"{env.schema}_observer"},
+        poolclass=NullPool,
+    )
+    worker_name = f"{env.schema}_worker"
+
+    def transaction_probe(stage: str) -> None:
+        with observer.connect() as connection:
+            open_transactions = connection.scalar(
+                text(
+                    "SELECT count(*) FROM pg_stat_activity WHERE datname=current_database() "
+                    "AND application_name=:name AND state LIKE 'idle in transaction%'"
+                ),
+                {"name": worker_name},
+            )
+        assert open_transactions == 0, f"open worker transaction during {stage}"
+        transaction_checks.append(stage)
+
     async def scenario() -> Observed:
-        engine = env.engine()
+        engine = create_async_engine(
+            env.database_url,
+            connect_args={
+                "options": f"-csearch_path={env.schema}",
+                "application_name": worker_name,
+            },
+            poolclass=NullPool,
+        )
         try:
             return await _scenario(
                 async_sessionmaker(engine, expire_on_commit=False),
@@ -642,11 +749,20 @@ def _observe(
                 verifier_kinds=verifier_kinds,
                 files=files,
                 redeliveries=redeliveries,
+                on_review=on_review,
+                prior_attempts=prior_attempts,
+                checkpoint_retry=checkpoint_retry,
+                missing_retrieved_on_retry=missing_retrieved_on_retry,
+                transaction_probe=transaction_probe if check_transactions else None,
+                transaction_checks=transaction_checks,
             )
         finally:
             await engine.dispose()
 
-    return asyncio.run(scenario())
+    try:
+        return asyncio.run(scenario())
+    finally:
+        observer.dispose()
 
 
 # The trace of a v4 attempt, as built (G aligns the canon, PIPELINE_SPEC §7, with it). The
@@ -839,6 +955,128 @@ def test_a_v4_run_takes_the_snapshot_path_through_the_worker_composition(env: En
     assert observed.outcomes == ["ack"]
     assert observed.queue.retries == []
     _assert_snapshot_path(observed, attempt=1)
+
+
+@pytest.mark.integration
+def test_snapshot_external_calls_and_publish_queue_run_without_worker_transaction(env: Env) -> None:
+    observed = _observe(env, version=4, check_transactions=True)
+
+    assert observed.state == ("publishing", None, 1)
+    assert {"vcs", "conventions", "review-v2", "verifier", "publish"} <= set(
+        observed.transaction_checks
+    )
+
+
+@pytest.mark.integration
+def test_snapshot_t8_uses_the_saved_plan_without_legacy_output_write(
+    env: Env, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def reject_legacy_write(self: SqlAlchemyReviewOutputRepository, *args: object) -> None:
+        raise AssertionError("legacy output write was called")
+
+    monkeypatch.setattr(
+        SqlAlchemyReviewOutputRepository, "store_review_output", reject_legacy_write
+    )
+    observed = _observe(env, version=4)
+    assert observed.state == ("publishing", None, 1)
+    assert len(observed.queue.published) == 1
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize("change", ["cancel", "head", "claim"])
+@pytest.mark.parametrize("prior_attempts", [0, 2])
+def test_review_checkpoint_rejection_cancels_the_claimed_run(
+    env: Env, change: str, prior_attempts: int
+) -> None:
+    def change_run_during_review(run_id: UUID) -> None:
+        engine = create_engine(
+            env.database_url, connect_args={"options": f"-csearch_path={env.schema}"}
+        )
+        try:
+            with engine.begin() as connection:
+                if change == "cancel":
+                    connection.execute(
+                        text("UPDATE runs SET cancel_requested=true WHERE id=:id"), {"id": run_id}
+                    )
+                elif change == "head":
+                    connection.execute(
+                        text(
+                            "UPDATE code_changes SET head_sha=:head WHERE id="
+                            "(SELECT code_change_id FROM runs WHERE id=:id)"
+                        ),
+                        {"id": run_id, "head": "a" * 40},
+                    )
+                else:
+                    connection.execute(
+                        text("UPDATE runs SET worker_id='another-worker' WHERE id=:id"),
+                        {"id": run_id},
+                    )
+        finally:
+            engine.dispose()
+
+    observed = _observe(
+        env,
+        version=4,
+        on_review=change_run_during_review,
+        prior_attempts=prior_attempts,
+    )
+    assert observed.outcomes == ["ack"]
+    expected = {
+        "cancel": ("cancelled", "cancelled_by_user", prior_attempts + 1),
+        "head": ("cancelled", "superseded", prior_attempts + 1),
+        "claim": ("running", None, prior_attempts + 1),
+    }
+    assert observed.state == expected[change]
+    assert observed.queue.retries == []
+    assert observed.queue.published == []
+    assert "llm.verify" not in observed.tools
+
+
+@pytest.mark.integration
+def test_verifier_retry_uses_the_accepted_review_metadata_after_pr_edit(env: Env) -> None:
+    observed = _observe(
+        env,
+        version=4,
+        checkpoint_retry=True,
+        verifier_kinds=("unavailable", "unavailable", "verifier"),
+    )
+
+    assert observed.outcomes == ["ack", "ack"]
+    assert observed.state == ("publishing", None, 2)
+    assert len(observed.queue.published) == 1
+    calls = [request["operation"] for request, _ in observed.actions["llm.call"]]
+    assert calls.count("review") == 1
+    assert observed.checkpoint_meta[0]["title"] == "Fix parser"
+    assert observed.checkpoint_meta[0]["labels"] == ["backend"]
+    assert (
+        observed.bodies[2]["messages"][1]["content"]
+        == observed.bodies[-1]["messages"][1]["content"]
+    )
+
+
+@pytest.mark.integration
+def test_verifier_retry_rereviews_when_a_saved_retrieved_block_disappears(env: Env) -> None:
+    observed = _observe(
+        env,
+        version=5,
+        rag=True,
+        checkpoint_retry=True,
+        missing_retrieved_on_retry=True,
+        verifier_kinds=("unavailable", "unavailable", "verifier"),
+    )
+
+    assert observed.outcomes == ["ack", "ack"]
+    assert observed.state == ("publishing", None, 2)
+    assert len(observed.queue.published) == 1
+    calls = [request["operation"] for request, _ in observed.actions["llm.call"]]
+    assert calls.count("review") == 2
+    assert len(observed.checkpoint_meta) == 2
+    assert observed.checkpoint_attempts == [1, 2]
+    assert [meta["title"] for meta in observed.checkpoint_meta] == [
+        "Fix parser",
+        "Fix parser (edited)",
+    ]
+    assert len(observed.actions["llm.review_output"]) == 2
 
 
 @pytest.mark.integration

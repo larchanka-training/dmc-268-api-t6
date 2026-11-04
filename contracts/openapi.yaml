@@ -1809,7 +1809,15 @@ components:
             per-attempt order and request/response metadata are in docs/PIPELINE_SPEC.md §2.
         request:
           type: object
-          description: Request metadata of the step.
+          description: >-
+            Request metadata of the step. For a snapshot-path `review.postprocess`,
+            `request.phase` is `candidate`: this records candidate filtering before the
+            verifier, not the final result. Historical final `review.postprocess` rows at
+            T8 have no `phase`; use this discriminator when reading old and new runs.
+            A retry resumed from verifier does not repeat `llm.review_output` or candidate
+            `review.postprocess`; a retry resumed after `review.finalize` writes only the
+            `review.publish_start` marker before provider publication. For `llm.call`, use
+            `request.operation` to distinguish conventions, review, and verification.
         response:
           description: >-
             Response body, any JSON value, inline when it is at most 64 KB; null when it is

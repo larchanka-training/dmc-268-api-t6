@@ -355,7 +355,8 @@ def test_gitlab_empty_added_blob_without_regular_file_proof_stays_missing_patch(
 
     from app.modules.integrations.gitlab.infrastructure.run_http import GitLabRunHttp
     from app.modules.reviews.infrastructure.gitlab_vcs import HttpGitLabVcsProvider
-    from tests.test_gitlab_run_http import INPUT, POLICY, Credentials, Stream
+    from tests.gitlab_http_fakes import Stream
+    from tests.test_gitlab_run_http import INPUT, POLICY, Credentials
     from tests.test_gitlab_vcs import Router
 
     async def scenario() -> None:

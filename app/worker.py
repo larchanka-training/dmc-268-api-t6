@@ -99,6 +99,7 @@ from app.modules.reviews.application.execute_review import (
     ReviewModel,
     ReviewPromptRepository,
     ReviewReply,
+    ReviewRunPublisher,
 )
 from app.modules.reviews.application.get_run_diff import DiffSnapshot
 from app.modules.reviews.application.handle_review_run import (
@@ -140,7 +141,6 @@ from app.modules.reviews.application.review_context_stage import (
 from app.modules.reviews.application.review_output import (
     PublishedFinding,
     PublishReviewOutput,
-    ReviewOutputHandler,
     ReviewProvider,
 )
 from app.modules.reviews.application.run_data_retention import PurgeExpiredRunData
@@ -153,7 +153,10 @@ from app.modules.reviews.application.run_failures import (
     RunFailure,
 )
 from app.modules.reviews.application.run_trace import ContextTrace, TransactionalRunTrace
-from app.modules.reviews.application.store_review_output import StoreReviewOutput
+from app.modules.reviews.application.store_review_output import (
+    AcceptedReviewCheckpoint,
+    StoreReviewOutput,
+)
 from app.modules.reviews.application.sweep_no_ci import SweepNoCi
 from app.modules.reviews.application.try_enqueue_webhook_run import (
     EligibilityChecker,
@@ -258,13 +261,32 @@ class ReviewWorkerProvider(
     """All provider calls required by the ordinary review-worker pipeline."""
 
 
+class InlineReviewPublisher:
+    """The legacy inline worker has no durable snapshot checkpoint or final plan."""
+
+    def __init__(self, publisher: PublishReviewOutput) -> None:
+        self._publisher = publisher
+
+    async def execute(self, run_id: UUID, raw_output: Mapping[str, object] | str | bytes) -> bool:
+        return await self._publisher.execute(run_id, raw_output)
+
+    async def resume_finalized(self, run_id: UUID) -> None:
+        return None
+
+    async def load_accepted_output(self, run_id: UUID) -> AcceptedReviewCheckpoint | None:
+        return None
+
+    async def checkpoint_candidates(self, *args: object, **kwargs: object) -> bool:
+        raise RunFailure("internal_error", "Inline review has no candidate checkpoint")
+
+
 async def process_review_run(
     run_id: UUID,
     provider: ReviewWorkerProvider,
     session_factory: async_sessionmaker[AsyncSession],
     vcs_provider: VcsProvider,
     *,
-    output: ReviewOutputHandler | None = None,
+    output: ReviewRunPublisher | None = None,
     trace: TransactionalRunTrace | None = None,
     context_stage: ReviewContextStage | None = None,
     reflection_pass: ReflectionPass | None = None,
@@ -303,8 +325,8 @@ async def process_review_run(
         uow_factory=lambda: SqlAlchemyRunProcessingUnitOfWork(session_factory),
         context_stage=context_stage,
     )
-    publisher = output or PublishReviewOutput(
-        lambda: SqlAlchemyReviewOutputUnitOfWork(session_factory), provider
+    publisher: ReviewRunPublisher = output or InlineReviewPublisher(
+        PublishReviewOutput(lambda: SqlAlchemyReviewOutputUnitOfWork(session_factory), provider)
     )
     prompts: ReviewPromptRepository = SqlAlchemyReviewPromptRepository(session_factory)
     if context_stage is None:
