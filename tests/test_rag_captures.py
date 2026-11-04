@@ -17,7 +17,7 @@ from typing import Any
 
 import pytest
 
-from review.scripts.eval_ab import SAME_RUN_METADATA
+from review.scripts.eval_ab import SAME_PROVENANCE, SAME_RUN_METADATA
 
 ROOT = Path(__file__).resolve().parents[1]
 CORPUS = ROOT / "test-prs-dataset" / "rag"
@@ -27,7 +27,7 @@ EXPECTED = {
     for run in (1, 2, 3)
     for arm, rag_arm in (("A", "none"), ("B", "graph"))
 }
-SHARED = ("model_id", "prompt_sha", "prompt_version", "corpus_digest")
+SHARED = (*SAME_PROVENANCE, "prompt_sha")
 
 
 def _case_ids() -> set[str]:
@@ -141,6 +141,11 @@ MUTATIONS: list[tuple[str, Callable[[Path], object], str]] = [
         "other corpus",
         lambda c: _rewrite(c / "B-run2", lambda m: m.update(corpus_digest="sha256-v1:" + "0" * 64)),
         "disagree on corpus_digest",
+    ),
+    (
+        "other static inputs",
+        lambda c: _rewrite(c / "A-run1", lambda m: m.update(static_digest="sha256-v1:" + "0" * 64)),
+        "disagree on static_digest",
     ),
     (
         "other engine",
