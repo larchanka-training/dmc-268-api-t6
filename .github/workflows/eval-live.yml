@@ -14,13 +14,14 @@ on:
         type: boolean
         default: false
       corpus:
-        description: "Corpus: main (gold benchmark), rules (rules.md sub-corpus, #163) or rag (graph-RAG A/B corpus, #146)"
+        description: "Corpus: main, rules, rag or verifier (#217)"
         required: false
         type: choice
         options:
           - main
           - rules
           - rag
+          - verifier
         default: main
       rag_arm:
         description: "RAG arm, corpus rag only: none (arm A, no retrieved block) or graph (arm B)"
@@ -53,6 +54,30 @@ on:
         description: "Review prompt file for an A/B of prompt versions: directly in review/prompts/, with key review.system; overrides review_prompt (not with corpus rag)"
         required: false
         type: string
+      verifier_model:
+        description: "Approved verifier primary model (must match configured route)"
+        required: false
+        type: string
+      verifier_fallback_model:
+        description: "Approved verifier fallback model, or none"
+        required: false
+        type: string
+      verifier_stop_threshold_usd:
+        description: "Approved verifier cost stop threshold in USD"
+        required: false
+        type: string
+      verifier_approved_overrun_usd:
+        description: "Approved verifier overrun allowance in USD"
+        required: false
+        type: string
+      verifier_window_end:
+        description: "Approved verifier window end, ISO 8601 with timezone"
+        required: false
+        type: string
+      verifier_approval_ref:
+        description: "Issue comment recording model, window and budget approval"
+        required: false
+        type: string
 
 permissions:
   contents: read
@@ -76,7 +101,15 @@ jobs:
       EVAL_POLICY_ARM: ${{ inputs.policy_arm || 'legacy' }}
       EVAL_REVIEW_PROMPT: ${{ inputs.review_prompt || 'v3' }}
       EVAL_REVIEW_PROMPT_FILE: ${{ inputs.review_prompt_file }}
+      EVAL_REVIEW_MODEL_INPUT: ${{ inputs.model }}
+      EVAL_EXPORT_RAW_RESPONSES: ${{ inputs.export_raw_responses }}
       EVAL_RAG_ARM: ${{ inputs.rag_arm || 'none' }}
+      EVAL_VERIFIER_MODEL: ${{ inputs.verifier_model }}
+      EVAL_VERIFIER_FALLBACK_MODEL: ${{ inputs.verifier_fallback_model }}
+      EVAL_VERIFIER_STOP_THRESHOLD_USD: ${{ inputs.verifier_stop_threshold_usd }}
+      EVAL_VERIFIER_APPROVED_OVERRUN_USD: ${{ inputs.verifier_approved_overrun_usd }}
+      EVAL_VERIFIER_WINDOW_END: ${{ inputs.verifier_window_end }}
+      EVAL_VERIFIER_APPROVAL_REF: ${{ inputs.verifier_approval_ref }}
       # Artifact-name part: the policy arm, and for corpus rag (policy arm always none) policy-ragarm,
       # so the arm A and arm B captures of one corpus never share a name.
       EVAL_ARTIFACT_ARM: ${{ (inputs.corpus == 'rag' && format('{0}-{1}', inputs.policy_arm, inputs.rag_arm)) || inputs.policy_arm || 'legacy' }}
@@ -95,7 +128,31 @@ jobs:
       - name: Install dependencies
         run: uv sync --locked --all-groups
 
+      - name: Validate verifier dispatch
+        if: ${{ inputs.corpus == 'verifier' }}
+        shell: bash
+        run: |
+          if [[ -n "${EVAL_REVIEW_MODEL_INPUT:-}" ||
+                "${EVAL_EXPORT_RAW_RESPONSES:-false}" != false ||
+                "${EVAL_POLICY_ARM:-legacy}" != legacy ||
+                "${EVAL_RAG_ARM:-none}" != none ||
+                "${EVAL_REVIEW_PROMPT:-v3}" != v3 ||
+                -n "${EVAL_REVIEW_PROMPT_FILE:-}" ]]; then
+            echo "::error::verifier dispatch rejects reviewer options and raw export." >&2
+            exit 1
+          fi
+          for name in EVAL_VERIFIER_MODEL EVAL_VERIFIER_FALLBACK_MODEL \
+                      EVAL_VERIFIER_STOP_THRESHOLD_USD EVAL_VERIFIER_APPROVED_OVERRUN_USD \
+                      EVAL_VERIFIER_WINDOW_END EVAL_VERIFIER_APPROVAL_REF; do
+            value="${!name:-}"
+            if [[ -z "${value//[[:space:]]/}" ]]; then
+              echo "::error::verifier dispatch requires six approved values." >&2
+              exit 1
+            fi
+          done
+
       - name: Validate review prompt file
+        if: ${{ inputs.corpus != 'verifier' }}
         shell: bash
         run: |
           # Only a checked-in review.system prompt reaches --system (#317). The input is free text:
@@ -124,6 +181,7 @@ jobs:
           fi
 
       - name: Prepare isolated corpus
+        if: ${{ inputs.corpus != 'verifier' }}
         shell: bash
         run: |
           case "$EVAL_CORPUS" in
@@ -138,6 +196,7 @@ jobs:
           cp -R "$cases" test-prs-dataset/schema "$RUNNER_TEMP/eval-corpus/"
 
       - name: Validate corpus
+        if: ${{ inputs.corpus != 'verifier' }}
         shell: bash
         run: |
           profile=()
@@ -171,6 +230,7 @@ jobs:
           uv run python review/scripts/validate_dataset.py --root "$RUNNER_TEMP/eval-corpus" --final "${profile[@]}"
 
       - name: Evaluate live corpus
+        if: ${{ inputs.corpus != 'verifier' }}
         shell: bash
         env:
           LLM_API_KEYS: ${{ secrets.AI_DMC268_T6 }}
@@ -195,8 +255,31 @@ jobs:
             --report-json "$RUNNER_TEMP/eval-report.json" \
             --redacted-responses "$RUNNER_TEMP/eval-response-metadata"
 
+      - name: Evaluate verifier corpus
+        if: ${{ inputs.corpus == 'verifier' }}
+        shell: bash
+        env:
+          LLM_VERIFIER_MODEL: ${{ vars.LLM_VERIFIER_MODEL }}
+          LLM_VERIFIER_FALLBACK_MODEL: ${{ vars.LLM_VERIFIER_FALLBACK_MODEL }}
+          LLM_API_KEYS: ${{ secrets.AI_DMC268_T6 }}
+        run: |
+          if [[ -z "$LLM_API_KEYS" ]]; then
+            echo "::error::Make the AI_DMC268_T6 organization secret available before dispatch." >&2
+            exit 1
+          fi
+          uv run python -m review.scripts.eval_verifier \
+            --allow-paid \
+            --corpus "test-prs-dataset/verifier/v1/cases.json" \
+            --output "$RUNNER_TEMP/verifier-report.json" \
+            --model "$EVAL_VERIFIER_MODEL" \
+            --fallback-model "$EVAL_VERIFIER_FALLBACK_MODEL" \
+            --stop-threshold-usd "$EVAL_VERIFIER_STOP_THRESHOLD_USD" \
+            --approved-overrun-usd "$EVAL_VERIFIER_APPROVED_OVERRUN_USD" \
+            --window-end "$EVAL_VERIFIER_WINDOW_END" \
+            --approval-ref "$EVAL_VERIFIER_APPROVAL_REF"
+
       - name: Export safe provenance
-        if: always()
+        if: ${{ always() && inputs.corpus != 'verifier' }}
         shell: bash
         run: |
           manifest="$RUNNER_TEMP/eval-corpus/responses/manifest.json"
@@ -206,7 +289,7 @@ jobs:
           fi
 
       - name: Summarize evaluation
-        if: always()
+        if: ${{ always() && inputs.corpus != 'verifier' }}
         shell: bash
         run: |
           uv run python - <<'PYTHON'
@@ -237,7 +320,7 @@ jobs:
 
       # Export metrics and per-case hashes/statuses, not raw model text or diagnostics.
       - name: Upload evaluation report
-        if: always()
+        if: ${{ always() && inputs.corpus != 'verifier' }}
         uses: actions/upload-artifact@v4
         with:
           name: eval-live-${{ env.EVAL_CORPUS }}-${{ env.EVAL_ARTIFACT_ARM }}-${{ github.run_id }}-${{ github.run_attempt }}
@@ -247,9 +330,18 @@ jobs:
           if-no-files-found: warn
           retention-days: 14
 
+      - name: Upload verifier evaluation report
+        if: ${{ always() && inputs.corpus == 'verifier' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: eval-live-verifier-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/verifier-report.json
+          if-no-files-found: warn
+          retention-days: 14
+
       - name: Stage raw responses
         id: raw_export
-        if: ${{ always() && inputs.export_raw_responses }}
+        if: ${{ always() && inputs.export_raw_responses && inputs.corpus != 'verifier' }}
         shell: bash
         run: |
           uv run python - <<'PYTHON'
@@ -278,7 +370,7 @@ jobs:
           PYTHON
 
       - name: Upload raw responses
-        if: ${{ always() && inputs.export_raw_responses && steps.raw_export.outcome == 'success' }}
+        if: ${{ always() && inputs.export_raw_responses && inputs.corpus != 'verifier' && steps.raw_export.outcome == 'success' }}
         uses: actions/upload-artifact@v4
         with:
           name: eval-live-raw-${{ env.EVAL_CORPUS }}-${{ env.EVAL_ARTIFACT_ARM }}-${{ github.run_id }}-${{ github.run_attempt }}
