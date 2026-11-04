@@ -28,10 +28,8 @@ from app.modules.reviews.infrastructure.gitlab_vcs import HttpGitLabVcsProvider
 from tests.gitlab_http_fakes import Stream
 from tests.gitlab_run_fakes import INPUT, POLICY, Credentials, refs, version_refs
 
-# Re-exported: other test modules still import these from here (backend.md §5).
+# Re-exports ("X as X"): other test modules still import these from here (backend.md §5).
 from tests.gitlab_run_fakes import Router as Router
-
-# Re-exported: other test modules still import these from here (backend.md §5).
 from tests.gitlab_run_fakes import reply as reply
 
 

@@ -20,17 +20,11 @@ from app.modules.integrations.gitlab.infrastructure.run_http import (
 )
 from tests.gitlab_http_fakes import Stream as Stream
 
-# Re-exported: other test modules still import these from here (backend.md §5).
+# Re-exports ("X as X"): other test modules still import these from here (backend.md §5).
 from tests.gitlab_run_fakes import INPUT as INPUT
-
-# Re-exported: other test modules still import these from here (backend.md §5).
 from tests.gitlab_run_fakes import POLICY as POLICY
 from tests.gitlab_run_fakes import TARGET, TOKEN
-
-# Re-exported: other test modules still import these from here (backend.md §5).
 from tests.gitlab_run_fakes import WORKSPACE as WORKSPACE
-
-# Re-exported: other test modules still import these from here (backend.md §5).
 from tests.gitlab_run_fakes import Credentials as Credentials
 
 

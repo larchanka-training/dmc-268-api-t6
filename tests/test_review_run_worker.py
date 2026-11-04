@@ -55,31 +55,15 @@ from app.modules.reviews.infrastructure.vcs_failures import (
 )
 from tests.review_run_worker_fakes import HEAD, Clock
 
-# Re-exported: other test modules still import these from here (backend.md §5).
+# Re-exports ("X as X"): other test modules still import these from here (backend.md §5).
 from tests.review_run_worker_fakes import NOW as NOW
-
-# Re-exported: other test modules still import these from here (backend.md §5).
 from tests.review_run_worker_fakes import RUN as RUN
-
-# Re-exported: other test modules still import these from here (backend.md §5).
 from tests.review_run_worker_fakes import CheckRuns as CheckRuns
-
-# Re-exported: other test modules still import these from here (backend.md §5).
 from tests.review_run_worker_fakes import FakeRun as FakeRun
-
-# Re-exported: other test modules still import these from here (backend.md §5).
 from tests.review_run_worker_fakes import FakeStore as FakeStore
-
-# Re-exported: other test modules still import these from here (backend.md §5).
 from tests.review_run_worker_fakes import FakeUow as FakeUow
-
-# Re-exported: other test modules still import these from here (backend.md §5).
 from tests.review_run_worker_fakes import RetryQueue as RetryQueue
-
-# Re-exported: other test modules still import these from here (backend.md §5).
 from tests.review_run_worker_fakes import Selection as Selection
-
-# Re-exported: other test modules still import these from here (backend.md §5).
 from tests.review_run_worker_fakes import handler as handler
 
 

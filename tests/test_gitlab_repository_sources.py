@@ -17,10 +17,8 @@ from app.modules.reviews.infrastructure.gitlab_run_source import GitLabRunSource
 from app.modules.reviews.infrastructure.gitlab_vcs import HttpGitLabVcsProvider
 from tests.gitlab_run_fakes import INPUT, POLICY, RUN_ID, Credentials, reply
 
-# Re-exported: other test modules still import these from here (backend.md §5).
+# Re-exports ("X as X"): other test modules still import these from here (backend.md §5).
 from tests.gitlab_run_fakes import SourceRouter as SourceRouter
-
-# Re-exported: other test modules still import these from here (backend.md §5).
 from tests.gitlab_run_fakes import checkpoint as checkpoint
 
 
