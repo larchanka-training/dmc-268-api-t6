@@ -1,9 +1,9 @@
 {
   "provenance": {
     "repository": "https://github.com/larchanka-training/dmc-268-ui-t6",
-    "commit": "6c635e7caf6d3a37eda5795c25ad1af5411b3024",
+    "commit": "5a90cce81efeb17a9f6a1dfa30236b09b65cfe55",
     "generator": "z.toJSONSchema (Zod 4)",
-    "command": "DMC_268_UI_DIR=<ui checkout after pnpm install> SCHEMA_NAMES=runSession,runAction,reviewComment,runDetail,findingView,runListPage,runUpdatedEvent,repository,repositoryUpdate,rawFileDiff,fileSlice,authSession,me,bitbucketDiscoveryRequest,bitbucketDiscoveredRepository,bitbucketDiscoveryResponse,bitbucketConnectRequest,bitbucketWebhookSetup,bitbucketConnectResponse,bitbucketConnectionItem,bitbucketConnectionList,bitbucketCredentialRotateRequest,bitbucketCredentialRotateResponse OUTPUT_PATH=tests/fixtures/ui_zod_contracts.json node tests/generate_ui_zod_contracts.mjs"
+    "command": "DMC_268_UI_DIR=<ui checkout after pnpm install> node tests/generate_ui_zod_contracts.mjs"
   },
   "schemas": {
     "runSession": {
@@ -165,6 +165,37 @@
             "string",
             "null"
           ]
+        },
+        "usage": {
+          "type": "object",
+          "properties": {
+            "tokensIn": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "tokensOut": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "costUsd": {
+              "type": "number",
+              "minimum": 0
+            }
+          },
+          "required": [
+            "tokensIn",
+            "tokensOut",
+            "costUsd"
+          ],
+          "additionalProperties": false
+        },
+        "triggeredBy": {
+          "type": [
+            "string",
+            "null"
+          ]
         }
       },
       "required": [
@@ -182,7 +213,9 @@
         "summaryOnly",
         "pullRequest",
         "actionCount",
-        "errorCode"
+        "errorCode",
+        "usage",
+        "triggeredBy"
       ],
       "additionalProperties": false
     },
@@ -513,6 +546,37 @@
             "null"
           ]
         },
+        "usage": {
+          "type": "object",
+          "properties": {
+            "tokensIn": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "tokensOut": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "costUsd": {
+              "type": "number",
+              "minimum": 0
+            }
+          },
+          "required": [
+            "tokensIn",
+            "tokensOut",
+            "costUsd"
+          ],
+          "additionalProperties": false
+        },
+        "triggeredBy": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "findings": {
           "type": "array",
           "items": {
@@ -776,6 +840,8 @@
         "pullRequest",
         "actionCount",
         "errorCode",
+        "usage",
+        "triggeredBy",
         "findings",
         "summary",
         "verdict",
@@ -1063,6 +1129,37 @@
                   "string",
                   "null"
                 ]
+              },
+              "usage": {
+                "type": "object",
+                "properties": {
+                  "tokensIn": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 9007199254740991
+                  },
+                  "tokensOut": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 9007199254740991
+                  },
+                  "costUsd": {
+                    "type": "number",
+                    "minimum": 0
+                  }
+                },
+                "required": [
+                  "tokensIn",
+                  "tokensOut",
+                  "costUsd"
+                ],
+                "additionalProperties": false
+              },
+              "triggeredBy": {
+                "type": [
+                  "string",
+                  "null"
+                ]
               }
             },
             "required": [
@@ -1080,7 +1177,9 @@
               "summaryOnly",
               "pullRequest",
               "actionCount",
-              "errorCode"
+              "errorCode",
+              "usage",
+              "triggeredBy"
             ],
             "additionalProperties": false
           }
@@ -1123,6 +1222,60 @@
       "required": [
         "runId",
         "status"
+      ],
+      "additionalProperties": false
+    },
+    "runStepEvent": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "runId": {
+          "type": "string",
+          "format": "uuid",
+          "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+        },
+        "tool": {
+          "type": "string"
+        },
+        "index": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "ok": {
+          "type": "boolean"
+        },
+        "startedAt": {
+          "type": "string",
+          "format": "date-time",
+          "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+        },
+        "durationMs": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "attempt": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "llmOperation": {
+          "type": "string",
+          "enum": [
+            "conventions",
+            "review"
+          ]
+        }
+      },
+      "required": [
+        "runId",
+        "tool",
+        "index",
+        "ok",
+        "startedAt",
+        "durationMs",
+        "attempt"
       ],
       "additionalProperties": false
     },
@@ -1535,6 +1688,308 @@
         "login",
         "name",
         "avatarUrl",
+        "workspaces"
+      ],
+      "additionalProperties": false
+    },
+    "metricsSummary": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "range": {
+          "type": "string",
+          "enum": [
+            "24h",
+            "7d",
+            "30d"
+          ]
+        },
+        "totals": {
+          "type": "object",
+          "properties": {
+            "runsByStatus": {
+              "type": "object",
+              "properties": {
+                "queued": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "running": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "publishing": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "succeeded": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "failed": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "cancelled": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "skipped": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                }
+              },
+              "required": [
+                "queued",
+                "running",
+                "publishing",
+                "succeeded",
+                "failed",
+                "cancelled",
+                "skipped"
+              ],
+              "additionalProperties": false
+            },
+            "pullsByVerdict": {
+              "type": "object",
+              "properties": {
+                "blocking": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "attention": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "clean": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "noVerdict": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                }
+              },
+              "required": [
+                "blocking",
+                "attention",
+                "clean",
+                "noVerdict"
+              ],
+              "additionalProperties": false
+            },
+            "findingsBySeverity": {
+              "type": "object",
+              "properties": {
+                "critical": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "high": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "medium": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "low": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "info": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                }
+              },
+              "required": [
+                "critical",
+                "high",
+                "medium",
+                "low",
+                "info"
+              ],
+              "additionalProperties": false
+            },
+            "findingsByCategory": {
+              "type": "object",
+              "properties": {
+                "security": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "correctness": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "performance": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "readability": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                }
+              },
+              "required": [
+                "security",
+                "correctness",
+                "performance",
+                "readability"
+              ],
+              "additionalProperties": false
+            },
+            "succeededAverageDurationSeconds": {
+              "type": "number",
+              "minimum": 0
+            },
+            "tokensIn": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "tokensOut": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "costUsd": {
+              "type": "number",
+              "minimum": 0
+            }
+          },
+          "required": [
+            "runsByStatus",
+            "pullsByVerdict",
+            "findingsBySeverity",
+            "findingsByCategory",
+            "succeededAverageDurationSeconds",
+            "tokensIn",
+            "tokensOut",
+            "costUsd"
+          ],
+          "additionalProperties": false
+        },
+        "series": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "day": {
+                "type": "string",
+                "format": "date",
+                "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))$"
+              },
+              "findingsByCategory": {
+                "type": "object",
+                "properties": {
+                  "security": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 9007199254740991
+                  },
+                  "correctness": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 9007199254740991
+                  },
+                  "performance": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 9007199254740991
+                  },
+                  "readability": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 9007199254740991
+                  }
+                },
+                "required": [
+                  "security",
+                  "correctness",
+                  "performance",
+                  "readability"
+                ],
+                "additionalProperties": false
+              },
+              "runCount": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "averageDurationSeconds": {
+                "type": "number",
+                "minimum": 0
+              },
+              "costUsd": {
+                "type": "number",
+                "minimum": 0
+              }
+            },
+            "required": [
+              "day",
+              "findingsByCategory",
+              "runCount",
+              "averageDurationSeconds",
+              "costUsd"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "workspaces": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "dailyBudgetUsd": {
+                "type": "number",
+                "minimum": 0
+              },
+              "spentTodayUsd": {
+                "type": "number",
+                "minimum": 0
+              },
+              "paused": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "name",
+              "dailyBudgetUsd",
+              "spentTodayUsd",
+              "paused"
+            ],
+            "additionalProperties": false
+          }
+        }
+      },
+      "required": [
+        "range",
+        "totals",
+        "series",
         "workspaces"
       ],
       "additionalProperties": false
