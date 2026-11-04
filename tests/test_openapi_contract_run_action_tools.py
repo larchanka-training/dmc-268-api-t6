@@ -5,11 +5,12 @@ from __future__ import annotations
 import ast
 import re
 from collections.abc import Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from typing import Any
 
 import pytest
 
+from app.modules.reviews.application.publish_run_review import PublicationRoute
 from tests.openapi_contract import APP_PATH, _components
 
 # api#165: every step name the code writes to run_actions (docs/PIPELINE_SPEC.md §2). The column
@@ -39,9 +40,10 @@ BACKTICKED_TOOL = re.compile(r"`([a-z]+\.[a-z_]+)`")
 
 
 # The calls that take the tool by position, and where; any call can also take it as ``tool=``.
-TOOL_POSITIONS = {"traced_step": 2, "record": 1, "add_action": 1, "PublicationRoute": 1}
-# A star argument on one of these can carry the tool past the scan.
-TOOL_WRITERS = frozenset(TOOL_POSITIONS) | {"insert_run_action", "RunAction"}
+TOOL_POSITIONS = {"traced_step": 2, "record": 1, "add_action": 1}
+# A star argument on one of these can carry the tool past the scan. PublicationRoute and RunAction
+# take fields by keyword only, however the class is spelled: ``cls(...)``, ``type(route)(...)``.
+TOOL_WRITERS = frozenset(TOOL_POSITIONS) | {"insert_run_action", "RunAction", "PublicationRoute"}
 # The callee of a site that names a writer without calling it.
 _REFERENCE = "<reference>"
 # The callee of a site that gives a mapping key or a variable named ``tool`` its value.
@@ -77,7 +79,7 @@ TOOL_PASS_THROUGH = frozenset(
             "RunAction",
             "tool",
         ),
-        # PublicationRoute is in TOOL_POSITIONS, so the scan reads the names where it is built.
+        # PublicationRoute takes ``tool=`` by keyword only, so the scan reads each name it gets.
         (
             f"{_REVIEWS}/application/publish_run_review.py",
             "PublishRunReview._submit",
@@ -437,7 +439,10 @@ def _unread_tools(scans: list[_ToolScan]) -> list[_ToolSite]:
         ('ledger.record(context, "x.y")', {"x.y"}),
         ('prompts.load("review.system")', set()),
         ('uow.trace.add_action(run_id, "i.j", {}, None, now, 0)', {"i.j"}),
-        ('PublicationRoute(False, "k.l", "x", False, None)', {"k.l"}),
+        ('PublicationRoute(gitlab=False, tool="k.l")', {"k.l"}),
+        ('cls(gitlab=False, tool="k.m")', {"k.m"}),
+        ('type(route)(gitlab=False, tool="k.n")', {"k.n"}),
+        ('route.__class__(gitlab=False, tool="k.o")', {"k.o"}),
         ('session.execute(statement.values({"tool": "probe.sql"}))', {"probe.sql"}),
         ('session.execute(statement, [{"tool": "probe.sql"}])', {"probe.sql"}),
         ('RunAction(**{"tool": "probe.x"})', {"probe.x"}),
@@ -461,7 +466,10 @@ def _unread_tools(scans: list[_ToolScan]) -> list[_ToolSite]:
         "record-any-receiver",
         "plain-string-literal",
         "add_action-second-argument",
-        "publication-route-second-argument",
+        "publication-route-keyword",
+        "publication-route-as-cls",
+        "publication-route-as-type-of",
+        "publication-route-as-dunder-class",
         "mapping-in-values",
         "mapping-in-execute-rows",
         "mapping-unpacked",
@@ -499,7 +507,6 @@ def _unread(*sources: str) -> list[str]:
         ("uow.trace.add_action(run_id, name, {}, None, now, 0)", "add_action(name)"),
         ('trace.record(run_id, "a" if flag else "b", {})', "record('a' if flag else 'b')"),
         ('PublicationRoute(tool=f"{provider}.x")', "PublicationRoute(f'{provider}.x')"),
-        ('PublicationRoute(False, name, "x", False, None)', "PublicationRoute(name)"),
         ("replace(route, tool=name)", "replace(name)"),
         ("partial(helper, tool=name)", "partial(name)"),
         ("statement.values(tool=name)", "values(name)"),
@@ -530,7 +537,6 @@ def _unread(*sources: str) -> list[str]:
         "add_action-name",
         "conditional",
         "publication-route-keyword",
-        "publication-route-position",
         "keyword-on-a-helper",
         "keyword-on-a-partial",
         "keyword-on-values",
@@ -902,6 +908,10 @@ def test_written_tools_scan_reports_a_local_tool_name_and_its_use() -> None:
     source = 'def f():\n    X_TOOL = "a.b"\n    record(run_id, X_TOOL)'
 
     assert _unread(source) == ["X_TOOL(rebound)", "record(X_TOOL)"]
+
+
+def test_publication_route_takes_the_tool_by_keyword_only() -> None:
+    assert all(item.kw_only for item in fields(PublicationRoute))
 
 
 def test_written_tools_scan_names_the_file_and_the_line() -> None:
