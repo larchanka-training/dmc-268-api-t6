@@ -28,6 +28,7 @@ _REVIEW_CODE = (
     "app/modules/reviews/application/prompt_budget.py",
     "app/modules/reviews/application/prompt_builder.py",
     "app/modules/reviews/application/rag_index.py",
+    "app/modules/reviews/application/reflection_pass.py",
     "app/modules/reviews/application/review_output.py",
     "app/modules/reviews/application/review_path.py",
     "app/modules/reviews/application/run_failures.py",
@@ -40,6 +41,9 @@ _REVIEW_CODE = (
     "review/eval/pr-commit-messages.json",
     "review/schemas/review-output.schema.json",
     "review/schemas/review-output.schema.v2.json",
+    "review/schemas/verifier-output.schema.v1.json",
+    "review/prompts/review.verifier.v1.md",
+    "review/prompts/review.verifier.v2.md",
     "review/scripts/eval_live.py",
     "review/scripts/commit_context.py",
 )
@@ -185,8 +189,8 @@ def static_input_paths(
 ) -> list[str]:
     """List every checked-in file that can shape this runner's provider messages.
 
-    ``rag_code`` adds the modules of the RAG arm (#146); without it the list is the one the
-    main and rules baselines were recorded with.
+    ``rag_code`` adds the modules of the RAG arm (#146). Changes to this list require a
+    complete new baseline capture; historical manifests retain their original path set.
     """
     identity_root = repo_root if repo_root is not None else Path(__file__).resolve().parents[2]
     paths = [system_prompt, *_REVIEW_CODE, *rule_paths, *canonical_identity_paths(identity_root)]
