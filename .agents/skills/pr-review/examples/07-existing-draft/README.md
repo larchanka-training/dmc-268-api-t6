@@ -17,3 +17,4 @@ The viewer already has a draft from an earlier run, with another summary and ver
 - No second `addPullRequestReview`: one pending review per user per pull request.
 - The thread already there is `exists` and not sent again; the new one is `created`.
 - `updatePullRequestReview` replaces the earlier summary, no `event`; the read-back holds the new one. The handwritten comment is not touched.
+- The earlier summary is known by the hidden checksum that ends it: a text changed by hand has no valid one and stops the run, with no write.

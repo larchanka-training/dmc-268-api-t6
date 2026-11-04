@@ -41,7 +41,7 @@ holds (step 6); the rest is a numbered sequence.
 its `Refs` lines name, their acceptance criteria as `AC1..` in the issue's order (the ids of
 accept-issue's table) with a `key` that names the issue too (`api#N AC1`). When the pull request
 names a part (its title, else the first line of its `## What`: `Part K of #N`), only that part's
-criteria (`Ч.K:` / `Part K:`) and the common ones are kept. The `Refs` and part rules are implement-issue's: the script loads them from
+criteria and the common ones are kept. The `Refs` and part rules are implement-issue's: the script loads them from
 `implement-issue/scripts/preflight.py`. The full contract is the script's docstring.
 
 `scripts/draft_review.py REF --findings FILE --diff FILE [--apply]` — without `--apply` read-only,

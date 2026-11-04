@@ -97,9 +97,13 @@ Checked live on 2026-11-04 (`examples/05-*` to `10-*` keep the shapes):
 - A review without `event` is pending: only its author sees it, on GitHub and through the API.
 - One pending review per user per pull request: a second create is refused (`UNPROCESSABLE`). So an
   existing draft is appended to, its own text and comments untouched, and threads go on the commit
-  of the draft: on another commit the script stops. Its text is replaced by the new summary when it
-  is empty or an earlier summary (it starts `Итог на`); text of its own stops the run, so nothing is
-  lost.
+  of the draft: on another commit the script stops. Its text is replaced by the new summary only when
+  it is empty or an earlier summary, unchanged. The script writes a hidden last line,
+  `<!-- pr-review <checksum> -->`, the first 16 hex digits of the SHA-256 of the summary; it comes
+  back byte for byte (ui#130), and any edit breaks the checksum. So a note added after the summary is
+  text of its own: it stops the run, the reason quotes it, as GitHub's pages do not show it, and
+  nothing is lost. `summary` in the output has no hidden line: that is the text to paste. GitHub has
+  no compare-and-swap, so a text changed during the write itself is not seen.
 - The web Submit window starts empty: it does not show the text of a pending review (seen by hand on
   ui#130). So the skill hands `summary` over in the chat, to paste there. Not checked, because checking
   publishes: whether a Submit with an empty field keeps or drops the draft's text.

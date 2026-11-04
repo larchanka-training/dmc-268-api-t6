@@ -10,7 +10,9 @@ Without `--apply` nothing is written: the output is the preview of what `--apply
 it the script checks the same things again, then creates the viewer's pending review and adds the
 threads. A pending review is visible to the viewer alone. The script has no way to submit it or to
 set a verdict: that stays with the reviewer, on GitHub. It never edits or removes a comment of a
-draft, and replaces a draft's text only when that is empty or an earlier summary of this script.
+draft, and replaces a draft's text only when that is empty or exactly an earlier summary of this
+script: what it writes ends in a hidden `<!-- pr-review <checksum> -->`, the first 16 hex digits of
+the SHA-256 of the summary, which any edit breaks.
 
 Input
 -----
@@ -57,8 +59,9 @@ stdout carries one JSON document (`sort_keys`, indent 2, no ASCII escaping, one 
       "pr": {"repo", "number", "state", "head_sha", "author", "viewer"},
       "review": {"id", "url", "state", "existing": bool} | null,
       "proposed_verdict": "Request changes" | "Comment" | "Approve" | null,
-      "summary": str,                # the review body; empty on a stop. GitHub's Submit
-                                     # window does not show it: the skill hands it over
+      "summary": str,                # the review body without its checksum; empty on a stop.
+                                     # GitHub's Submit window does not show the body: the
+                                     # skill hands this over
       "threads": [{"path", "line": int | null, "kind": "line" | "file", "body",
                    "status": "new" | "exists" | "created" | "failed",
                    "error": str}],   # `error` on `failed` only
@@ -67,7 +70,8 @@ stdout carries one JSON document (`sort_keys`, indent 2, no ASCII escaping, one 
 
 `applied` and `review` report the read-back after the writes, never what was sent. `stop` (exit 1,
 no write): the head moved past `head_sha`; the viewer's draft sits on another commit, has over 100
-comments or has text of its own; a finding out of scope has no decision. `partial` (exit 1): the
+comments or has text of its own (anything but an earlier summary, unchanged; the reason quotes it,
+as GitHub's pages do not show it); a finding out of scope has no decision. `partial` (exit 1): the
 read-back found a thread or the draft missing, another text, or the head or the draft on another
 commit than `head_sha`, or the draft could not be read back (its threads then stay `created`,
 unverified); run again, the threads already there are skipped.
@@ -88,6 +92,7 @@ but empty is an error. A write is first appended as a JSON line to $PR_REVIEW_WR
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -110,7 +115,7 @@ RECORD = {"accepted": "принято", "rejected": "отклонено"}
 FINDING_KEYS = ("body", "category", "decision", "line", "path", "scope", "severity", "title")
 HUNK = re.compile(r"@@ -\d+(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
 SAME_PATH = re.compile(r"diff --git a/(.+) b/\1")
-SUMMARY_START = "Итог на `"
+CHECKSUM_START = "\n\n<!-- pr-review "
 ISSUE_REF = re.compile(r"(?:api|ui|[\w.-]+/[\w.-]+)#\d+")
 
 READ = """
@@ -364,7 +369,7 @@ def summary_of(
     )
     statuses = ", ".join(f"{name} {sum(r['status'] == name for r in ac)}" for name in STATUSES)
     parts = [
-        f"{SUMMARY_START}{head_sha[:8]}`: {severities}. AC: {statuses}.",
+        f"Итог на `{head_sha[:8]}`: {severities}. AC: {statuses}.",
         f"Предложенный вердикт: {verdict}. Вердикт и Submit — решение ревьюера.",
     ]
     not_covered = [row["key"] for row in ac if row["status"] == "not covered"]
@@ -376,6 +381,17 @@ def summary_of(
     if without_thread:
         parts.append("Без треда:\n" + "\n".join(without_thread))
     return "\n\n".join(parts)
+
+
+def draft_text(summary: str) -> str:
+    """What a draft holds: the summary and, hidden when rendered, a checksum of it."""
+    checksum = hashlib.sha256(summary.encode("utf-8")).hexdigest()[:16]
+    return f"{summary}{CHECKSUM_START}{checksum} -->"
+
+
+def is_earlier_summary(body: str) -> bool:
+    """True for a text this script wrote and nobody changed since: only that may be replaced."""
+    return body == draft_text(body.rpartition(CHECKSUM_START)[0])
 
 
 # ─── the findings file ──────────────────────────────────────────────────────
@@ -522,10 +538,10 @@ def stop_reasons(state: dict[str, Any], plan: dict[str, Any]) -> list[str]:
             reasons.append(
                 "your draft review has over 100 comments: finish it on GitHub, then run again"
             )
-        if draft["body"] and not draft["body"].startswith(SUMMARY_START):
+        if draft["body"] and not is_earlier_summary(draft["body"]):
             reasons.append(
-                "your draft review has text of its own: submit or delete it on GitHub, "
-                "then run again"
+                "your draft review has text of its own: keep what you need of it, then submit "
+                f"or delete the draft on GitHub and run again. The text: {draft['body']}"
             )
     undecided = [
         f"{f['path']}:{f['line']}"
@@ -637,13 +653,13 @@ def new_document(repo: str, number: int, state: dict[str, Any]) -> dict[str, Any
     }
 
 
-def create_draft(state: dict[str, Any], summary: str) -> str:
+def create_draft(state: dict[str, Any], text: str) -> str:
     try:
         created = write(
             "create",
             CREATE,
             "addPullRequestReview",
-            {"pull": state["pull_id"], "commit": state["head_sha"], "body": summary},
+            {"pull": state["pull_id"], "commit": state["head_sha"], "body": text},
         )
     except GhError as exc:
         fail(str(exc), 3)
@@ -651,8 +667,8 @@ def create_draft(state: dict[str, Any], summary: str) -> str:
     return review_id
 
 
-def update_summary(doc: dict[str, Any], review_id: str, summary: str) -> None:
-    variables: dict[str, str | int] = {"review": review_id, "body": summary}
+def update_text(doc: dict[str, Any], review_id: str, text: str) -> None:
+    variables: dict[str, str | int] = {"review": review_id, "body": text}
     try:
         write("update-body", UPDATE_BODY, "updatePullRequestReview", variables)
     except GhError as exc:
@@ -680,6 +696,7 @@ def collect(
     remarks = threads or threads_in(draft)
     verdict = proposed_verdict(findings, ac, bool(remarks), state["author"] == state["viewer"])
     summary = summary_of(state["head_sha"], findings, ac, verdict, [body_line(f) for f in without])
+    text = draft_text(summary)
     doc.update(
         proposed_verdict=verdict,
         summary=summary,
@@ -688,17 +705,17 @@ def collect(
     )
     if draft is not None:
         doc["review"] = review_of(draft, True)
-        if draft["body"] and draft["body"] != summary:
+        if draft["body"] and draft["body"] != text:
             doc["warnings"].append("the summary replaces the one your draft holds")
     if not apply:
         return doc
 
     if draft is None:
-        review_id = create_draft(state, summary)
+        review_id = create_draft(state, text)
     else:
         review_id = draft["id"]
-        if draft["body"] != summary:
-            update_summary(doc, review_id, summary)
+        if draft["body"] != text:
+            update_text(doc, review_id, text)
     add_threads(threads, review_id)
     read_back(doc, repo, number, draft is not None, plan["head_sha"])
     return doc
@@ -722,7 +739,7 @@ def differences(state: dict[str, Any], head_sha: str, summary: str) -> list[str]
             f"the draft is on {draft['commit']['oid']}, not on the commit the review read, "
             f"{head_sha}; run the review again"
         )
-    if draft["body"] != summary:
+    if draft["body"] != draft_text(summary):
         reasons.append("the draft does not hold the summary after the write")
     return reasons
 

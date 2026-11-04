@@ -420,6 +420,10 @@ def state_with_draft(**changes: Any) -> dict[str, Any]:
     return state
 
 
+EARLIER = "Итог на `21b8d99b`: прежний итог."
+EARLIER_TEXT = f"{EARLIER}\n\n<!-- pr-review f0402fa3c9aed1e2 -->"
+
+
 # ─── stops ──────────────────────────────────────────────────────────────────
 @pytest.mark.parametrize(
     ("fixtures", "findings", "reason"),
@@ -436,12 +440,6 @@ def state_with_draft(**changes: Any) -> dict[str, Any]:
             None,
             "your draft review has over 100 comments: finish it on GitHub, then run again",
             id="a-draft-too-long-to-compare",
-        ),
-        pytest.param(
-            {"state": state_with_draft(body="Рукописный текст ревьюера")},
-            None,
-            "your draft review has text of its own: submit or delete it on GitHub, then run again",
-            id="a-draft-with-text-of-its-own",
         ),
         pytest.param(
             {},
@@ -469,6 +467,35 @@ def test_a_stop_writes_nothing(
     assert not log.exists()
 
 
+@pytest.mark.parametrize(
+    "body",
+    [
+        pytest.param("Рукописный текст ревьюера", id="handwritten"),
+        pytest.param(EARLIER, id="a-summary-without-its-checksum"),
+        pytest.param(f"{EARLIER}\n\nМоя заметка", id="a-note-without-the-checksum"),
+        pytest.param(f"{EARLIER_TEXT}\n\nМоя заметка", id="a-note-after-the-summary"),
+        pytest.param(f"Моя заметка\n\n{EARLIER_TEXT}", id="a-note-before-the-summary"),
+        pytest.param(EARLIER_TEXT.replace("прежний", "мой"), id="a-word-changed-in-the-summary"),
+    ],
+)
+@pytest.mark.parametrize("flags", [pytest.param([], id="preview"), pytest.param(None, id="apply")])
+def test_text_the_reviewer_changed_stops_the_run(
+    tmp_path: Path, body: str, flags: list[str] | None
+) -> None:
+    target, args = scenario(tmp_path, "07-existing-draft", state=state_with_draft(body=body))
+    log = tmp_path / "writes.jsonl"
+    r = run(*(args if flags is None else args[:-1]), fixtures=target, log=log)
+    assert r.returncode == 1
+    doc = doc_of(r)
+    assert doc["verdict"] == "stop"
+    assert doc["reasons"] == [
+        "your draft review has text of its own: keep what you need of it, then submit "
+        f"or delete the draft on GitHub and run again. The text: {body}"
+    ]
+    assert doc["summary"] == ""
+    assert not log.exists()
+
+
 def test_every_stop_reason_is_reported(tmp_path: Path) -> None:
     state = copy.deepcopy(example("06-new-draft", "state"))
     pull(state)["headRefOid"] = OTHER
@@ -485,7 +512,7 @@ def test_every_stop_reason_is_reported(tmp_path: Path) -> None:
     ("old", "expected"),
     [
         pytest.param("", 1, id="an-empty-text-takes-the-summary"),
-        pytest.param("Итог на `21b8d99b`: прежний итог.", 1, id="an-earlier-summary-is-replaced"),
+        pytest.param(EARLIER_TEXT, 1, id="an-earlier-summary-is-replaced"),
     ],
 )
 def test_a_rerun_brings_the_summary_of_the_draft_up_to_date(
@@ -499,7 +526,8 @@ def test_a_rerun_brings_the_summary_of_the_draft_up_to_date(
         "Предложенный вердикт: Request changes. Вердикт и Submit — решение ревьюера.\n\n"
         "Не покрыто (not covered): ui#111 AC1"
     )
-    readback = state_with_draft(body=summary)
+    text = f"{summary}\n\n<!-- pr-review 37cc3217cb96a7f0 -->"
+    readback = state_with_draft(body=text)
     target, args = scenario(
         tmp_path,
         "07-existing-draft",
@@ -510,9 +538,10 @@ def test_a_rerun_brings_the_summary_of_the_draft_up_to_date(
     log = tmp_path / "writes.jsonl"
     r = run(*args, fixtures=target, log=log)
     assert r.returncode == 0, r.stdout + r.stderr
+    assert doc_of(r)["summary"] == summary  # the text to paste at Submit has no hidden line
     writes = [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()]
     assert [w for w in writes if w["op"] == "updatePullRequestReview"] == [
-        {"body": summary, "op": "updatePullRequestReview", "pullRequestReviewId": RID}
+        {"body": text, "op": "updatePullRequestReview", "pullRequestReviewId": RID}
     ]
     assert len(writes) == expected
 
@@ -717,6 +746,15 @@ def moved_read_back(**changes: Any) -> dict[str, Any]:
             "the draft does not hold the summary after the write",
             id="another-text",
         ),
+        pytest.param(
+            {
+                "body": json.loads(
+                    (EXAMPLES / "06-new-draft" / "expected.json").read_text(encoding="utf-8")
+                )["summary"]
+            },
+            "the draft does not hold the summary after the write",
+            id="the-summary-without-its-checksum",
+        ),
     ],
 )
 def test_a_read_back_that_differs_from_the_review_is_partial(
@@ -744,12 +782,12 @@ def test_a_pull_request_that_only_deletes_previews_and_applies(tmp_path: Path) -
     node["comments"]["nodes"] = [
         {"path": "gone.py", "line": None, "subjectType": "FILE", "body": body}
     ]
-    summary = (
+    node["body"] = (
         "Итог на `21b8d99b`: critical 0, high 0, medium 0, low 1, info 0. "
         "AC: covered 0, not covered 0, can't tell 0.\n\n"
-        "Предложенный вердикт: Comment. Вердикт и Submit — решение ревьюера."
+        "Предложенный вердикт: Comment. Вердикт и Submit — решение ревьюера.\n\n"
+        "<!-- pr-review 322c44ad304eae88 -->"
     )
-    node["body"] = summary
     target, args = scenario(tmp_path, findings=plan_of(gone), readback=readback)
     diff = tmp_path / "deleted.diff"
     diff.write_text(DELETED_ONLY, encoding="utf-8")
@@ -1085,7 +1123,8 @@ def recording_gh(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, path: str = PA
     pull(readback)["reviews"]["nodes"][0]["body"] = (
         "Итог на `21b8d99b`: critical 0, high 1, medium 0, low 0, info 0. "
         "AC: covered 0, not covered 0, can't tell 0.\n\n"
-        "Предложенный вердикт: Request changes. Вердикт и Submit — решение ревьюера."
+        "Предложенный вердикт: Request changes. Вердикт и Submit — решение ревьюера.\n\n"
+        "<!-- pr-review 951da57666e7f846 -->"
     )
     (bin_dir / "readback.json").write_text(json.dumps(readback), encoding="utf-8")
     prepend_path(monkeypatch, bin_dir)

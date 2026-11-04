@@ -15,4 +15,5 @@ draft_review.py ui#130 --findings findings.json --diff ../ui130.diff --apply
 ## Expected
 
 - One `addPullRequestReview` (no `event`) with the head as `commitOID`, one `addPullRequestReviewThread` on the line, side `RIGHT`.
+- The body sent ends in a hidden `<!-- pr-review <checksum> -->`; `summary` in the output does not.
 - `applied: true`, `review.state: PENDING` from the read-back, the thread `created`.
