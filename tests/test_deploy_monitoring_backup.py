@@ -12,7 +12,15 @@ from pathlib import Path
 
 import pytest
 
-from tests.monitoring_deploy_host import MONITORING, Host, _job, _read
+from tests.monitoring_deploy_host import (
+    MONITORING,
+    NO_OFFSITE,
+    OFFSITE,
+    PASSPHRASE,
+    Host,
+    _job,
+    _read,
+)
 
 pytest_plugins = ("tests.monitoring_deploy_host",)
 
@@ -307,16 +315,6 @@ def test_an_old_unlabeled_textfile_is_labeled_at_start(tmp_path: Path) -> None:
 
 
 # --- off-host copy of the dumps ------------------------------------------------------------
-
-PASSPHRASE = "test-passphrase-with-enough-entropy-0123456789"
-OFFSITE = {
-    "BACKUP_S3_ENDPOINT": "https://0123456789abcdef.r2.cloudflarestorage.com",
-    "BACKUP_S3_BUCKET": "dmc268-t6-backups",
-    "BACKUP_S3_ACCESS_KEY_ID": "FAKE_TEST_KEY_ID_DO_NOT_USE",
-    "BACKUP_S3_SECRET_ACCESS_KEY": "FAKE_TEST_CREDENTIAL_DO_NOT_USE",
-    "BACKUP_ENCRYPTION_PASSPHRASE": PASSPHRASE,
-}
-NO_OFFSITE = dict.fromkeys(OFFSITE, "")
 
 
 def test_offsite_names_reach_only_the_monitoring_deploy() -> None:
