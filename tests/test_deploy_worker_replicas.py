@@ -21,8 +21,11 @@ from tests.deploy_host_fakes import (
     _read_dotenv,
     _rendered_services,
     _write_compose_env_file,
-    make_host,
 )
+from tests.deploy_host_fakes import host as _host_fixture
+
+# Not a pytest_plugins entry: the monitoring tests have their own `host` and plugins are global.
+host = _host_fixture
 
 
 @pytest.mark.parametrize(
@@ -53,11 +56,6 @@ def test_only_the_worker_is_replicated(tmp_path: Path) -> None:
         if isinstance(deploy, dict) and "replicas" in deploy:
             replicated.add(name)
     assert replicated == {"worker"}
-
-
-@pytest.fixture
-def host(tmp_path: Path) -> Host:
-    return make_host(tmp_path)
 
 
 def _up_replicas(host: Host) -> str:

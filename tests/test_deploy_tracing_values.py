@@ -21,8 +21,11 @@ from tests.deploy_host_fakes import (
     _read_dotenv,
     _rendered_services,
     _write_compose_env_file,
-    make_host,
 )
+from tests.deploy_host_fakes import host as _host_fixture
+
+# Not a pytest_plugins entry: the monitoring tests have their own `host` and plugins are global.
+host = _host_fixture
 
 TRACED_SERVICES = ("api", "worker", "webhook-worker")
 STAGING_ENDPOINT = "http://tempo:4318"
@@ -72,11 +75,6 @@ def test_compose_renders_the_tracing_values(
 
     for name in TRACED_SERVICES:
         assert _tracing_of(services, name) == (endpoint, attributes), name
-
-
-@pytest.fixture
-def host(tmp_path: Path) -> Host:
-    return make_host(tmp_path)
 
 
 def _up_tracing(host: Host) -> list[str]:
