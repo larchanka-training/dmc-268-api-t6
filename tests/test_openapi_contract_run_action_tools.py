@@ -48,8 +48,9 @@ TOOL_WRITERS = frozenset(TOOL_POSITIONS) | {"insert_run_action", "RunAction", "P
 _REFERENCE = "<reference>"
 # The callee of a site that gives a mapping key or a variable named ``tool`` its value.
 _TOOL_FIELD = "tool"
-# The calls that take the RunAction model to build a read. Any other use of it is a site: a write
-# through ``insert``, ``update`` or ``query`` can take the tool from anywhere later.
+# The calls that take the RunAction model to build a read; ``RunAction.column`` is one too. Any
+# other use of it is a site: a write through ``insert``, ``update`` or ``query`` can take the tool
+# from anywhere later.
 _MODEL_READS = frozenset({"select", "select_from", "join", "outerjoin"})
 # The calls that run code given as text, which no scan can read.
 _CODE_RUNNERS = frozenset({"eval", "exec"})
@@ -262,6 +263,7 @@ _NameBinding = (
     ast.Name
     | ast.Attribute
     | ast.arg
+    | ast.keyword
     | ast.alias
     | ast.ExceptHandler
     | ast.MatchAs
@@ -275,7 +277,7 @@ _NameBinding = (
 def _bound_name(node: _NameBinding) -> str | None:
     if isinstance(node, ast.Name | ast.Attribute):
         return _last_name(node) if isinstance(node.ctx, ast.Store) else None
-    if isinstance(node, ast.arg):
+    if isinstance(node, ast.arg | ast.keyword):
         return node.arg
     return (node.asname or node.name) if isinstance(node, ast.alias) else node.name
 
@@ -298,14 +300,20 @@ def _scan_tool_writes(source: str, path: str = "<source>") -> _ToolScan:
     receiver, so a ``tool="x.y"`` or a ``ledger.record(context, "x.y")`` that does not write
     run_actions surfaces as unexpected and must be renamed or the scan taught to skip it. A blanket
     ``"x.y"`` match would also pick up prompt names such as ``review.system``, which are not tools.
-    A writer named without calling it becomes a site, wherever it is called later. So does a
-    ``*_TOOL`` or ``tool`` name bound any other way than the above, except a plain ``tool``
-    parameter, whose caller is what gets read, and an import of a ``*_TOOL`` name, which becomes a
-    site with its source: ``_unread_tools`` vouches for it only if that module defines the name.
-    So does a star import, since it can bring in any of these names. So does text
-    spelling a writer, the ``tool`` column or the table, outside a docstring, and ``eval``: a name
-    can reach them that way through ``getattr``, ``setattr`` or raw SQL. Only text put together at
-    runtime stays out of sight.
+
+    These become sites too, wherever the code goes on from them:
+
+    - a writer named without calling it, and a star import, which can bring one in;
+    - a ``*_TOOL`` or ``tool`` name bound any other way than the above, except a plain ``tool``
+      parameter, whose caller is what gets read;
+    - an import of a ``*_TOOL`` name, which ``_unread_tools`` vouches for only if the module it
+      names defines it;
+    - text spelling a writer, ``tool``, a ``*_TOOL`` name or the table, outside a bare string
+      statement such as a docstring, and a call of ``eval`` or ``exec``: that is how a name reaches
+      them through ``getattr``, ``setattr`` or raw SQL.
+
+    An annotation is scanned for calls, but a name in it is no reference. What stays out of sight
+    is a name computed at runtime: ``"to" + "ol"`` or ``RunAction.tool.key``.
     """
     tree = ast.parse(source)
     scan = _ToolScan(_module_name(path))
@@ -342,10 +350,10 @@ def _scan_tool_writes(source: str, path: str = "<source>") -> _ToolScan:
         node, scope = pending.pop()
         if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef):
             scope = node.name if scope == "<module>" else f"{scope}.{node.name}"
-        annotations = getattr(node, "annotation", None), getattr(node, "returns", None)
-        pending += [
-            (child, scope) for child in ast.iter_child_nodes(node) if child not in annotations
-        ]
+        for annotation in getattr(node, "annotation", None), getattr(node, "returns", None):
+            if annotation is not None:
+                plain_uses.update(ast.walk(annotation))
+        pending += [(child, scope) for child in ast.iter_child_nodes(node)]
         if isinstance(node, ast.Assign | ast.AnnAssign | ast.NamedExpr):
             targets = node.targets if isinstance(node, ast.Assign) else [node.target]
             direct = [target for target in targets if _last_name(target) == "tool"]
@@ -364,9 +372,10 @@ def _scan_tool_writes(source: str, path: str = "<source>") -> _ToolScan:
         if isinstance(node, ast.Expr) and isinstance(node.value, ast.Constant):
             plain_uses.add(node.value)
         if isinstance(node, ast.Constant) and node not in plain_uses:
-            text = _string_constant(node)
-            if text is not None and _names_a_writer_as_text(text):
-                scan.sites.add(_ToolSite(path, node.lineno, scope, _REFERENCE, repr(text)))
+            literal = node.value
+            text = literal.decode("utf-8", "replace") if isinstance(literal, bytes) else literal
+            if isinstance(text, str) and _names_a_writer_as_text(text):
+                scan.sites.add(_ToolSite(path, node.lineno, scope, _REFERENCE, repr(literal)))
         if isinstance(node, ast.ImportFrom):
             source = "." * node.level + (node.module or "")
             for alias in node.names:
@@ -380,7 +389,8 @@ def _scan_tool_writes(source: str, path: str = "<source>") -> _ToolScan:
         if isinstance(node, _NameBinding) and node not in known_bindings:
             bound = _bound_name(node)
             if bound is not None and (
-                bound.endswith("_TOOL") or (bound == "tool" and not isinstance(node, ast.arg))
+                bound.endswith("_TOOL")
+                or (bound == "tool" and not isinstance(node, ast.arg | ast.keyword))
             ):
                 scan.sites.add(_ToolSite(path, node.lineno, scope, bound, "rebound"))
         if isinstance(node, ast.Name | ast.Attribute | ast.alias) and node not in plain_uses:
@@ -454,6 +464,9 @@ def _unread_tools(scans: list[_ToolScan]) -> list[_ToolSite]:
         ('def record(self, run_id, *, tool="s.t"): ...', {"s.t"}),
         ('def record(self, tool="u.v", /): ...', {"u.v"}),
         ('f = lambda tool="w.x": tool', {"w.x"}),
+        ('def f(row: RunAction(tool="a.c") = None): ...', {"a.c"}),
+        ('def f() -> RunAction(tool="a.d"): ...', {"a.d"}),
+        ('x: trace.record(run_id, "a.e", {}) = 1', {"a.e"}),
     ],
     ids=[
         "traced_step-third-argument",
@@ -481,6 +494,9 @@ def _unread_tools(scans: list[_ToolScan]) -> list[_ToolSite]:
         "keyword-only-default",
         "positional-only-default",
         "lambda-default",
+        "call-in-a-parameter-annotation",
+        "call-in-a-return-annotation",
+        "call-in-a-variable-annotation",
     ],
 )
 def test_written_tools_scan_picks_up_only_the_run_action_shapes(
@@ -593,6 +609,8 @@ def test_written_tools_scan_reads_a_module_tool_constant(sources: tuple[str, ...
         "tool: str",
         "def f(tool): ...",
         "def f(tool: str, /, *, other: int = 1): ...",
+        'x: Literal["tool", "record"] = make()',
+        'def f(a: "RunAction", b: traced_step) -> "run_actions": ...',
         "route.tool",
         "name == tool",
         '"""Insert one run_actions row, record its tool."""',
@@ -617,6 +635,8 @@ def test_written_tools_scan_reads_a_module_tool_constant(sources: tuple[str, ...
         "tool-field-without-a-value",
         "tool-parameter",
         "tool-parameter-with-other-defaults",
+        "text-in-a-variable-annotation",
+        "names-in-annotations",
         "tool-read",
         "tool-compared",
         "docstring-of-a-module",
@@ -754,6 +774,10 @@ _RAW_INSERT = "INSERT INTO run_actions (tool) VALUES ('probe.sql')"
             "<reference>('UPDATE run_actions SET x = ')",
         ),
         (
+            'conn.exec_driver_sql(b"DELETE FROM run_actions")',
+            "<reference>(b'DELETE FROM run_actions')",
+        ),
+        (
             'exec_driver_sql("insert into RUN_ACTIONS values (1)")',
             "<reference>('insert into RUN_ACTIONS values (1)')",
         ),
@@ -775,6 +799,7 @@ _RAW_INSERT = "INSERT INTO run_actions (tool) VALUES ('probe.sql')"
         "globals-of-a-constant",
         "raw-insert",
         "raw-update-in-an-f-string",
+        "raw-sql-in-bytes",
         "raw-sql-in-capitals",
         "table-by-name",
         "metadata-by-name",
@@ -811,6 +836,7 @@ def test_written_tools_scan_reports_an_alias_made_in_another_module() -> None:
         "def f[**LLM_CALL_TOOL](x):\n    record(run_id, LLM_CALL_TOOL)",
         "def f[*LLM_CALL_TOOL](x):\n    record(run_id, LLM_CALL_TOOL)",
         'import m\nm.LLM_CALL_TOOL = "probe.x"',
+        'vars(m).update(LLM_CALL_TOOL="probe.kw")',
     ],
     ids=[
         "local",
@@ -829,6 +855,7 @@ def test_written_tools_scan_reports_an_alias_made_in_another_module() -> None:
         "param-spec",
         "type-var-tuple",
         "attribute-of-a-module",
+        "keyword-of-a-call",
     ],
 )
 def test_written_tools_scan_reports_a_rebound_tool_constant(rebinding: str) -> None:
