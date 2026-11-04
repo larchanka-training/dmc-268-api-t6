@@ -117,8 +117,7 @@ from a missing scope.
   through `pytest_plugins = ("tests.<topic>",)`. A loaded plugin is active for the whole
   run, so a shared module defines no autouse fixture. A shared module never imports from a
   `test_*.py` file and no file loads one as a plugin: a helper another file needs moves out
-  of its test file first. Still not so — `tests/portal_postgres.py` (`_reset_topology` of
-  `test_worker_queue_postgres.py`), `tests/code_index_postgres.py` (the store helpers of
+  of its test file first. Still not so — `tests/code_index_postgres.py` (the store helpers of
   `test_code_index_store_postgres.py`) and the ten files that load
   `tests.test_bitbucket_connections_postgres` as a plugin: those helpers move out at their
   next edit.

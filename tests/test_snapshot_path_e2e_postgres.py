@@ -72,7 +72,7 @@ from tests.test_review_prompt_pins_postgres import _V4_CONTENT, _V5_CONTENT, _bi
 from tests.test_run_prompt_pins_postgres import _packaged, _seed
 from tests.test_run_publication_settings_postgres import _insert, _ready
 from tests.test_snapshot_path_live_pin import _live_assets
-from tests.test_worker_queue_postgres import SETTINGS, GitHub
+from tests.worker_queue_postgres import SETTINGS, GitHub
 
 _HEAD = "f" * 40  # the head of PR_NEW after ``_ready``
 _REVIEW_TREE = "1" * 40

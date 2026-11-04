@@ -216,29 +216,80 @@ export class Service {
 }
 """
 _JS_MODULE = _TS_MODULE.replace("(): number {", "() {")
+# The markup is what makes these two differ from the plain script modules.
+_TSX_MODULE = _TS_MODULE.replace("return 3;", "return <b>3</b>;")
+_JSX_MODULE = _JS_MODULE.replace("return 3;", "return <b>3</b>;")
+
+_GO_MODULE = """package app
+
+import "fmt"
+
+func first() int {
+\treturn 1
+}
+
+type Service struct{}
+
+func (s *Service) Run() int {
+\treturn 2
+}
+
+func (s *Service) Stop() int {
+\tfmt.Println("stop")
+\treturn 3
+}
+"""
+
+
+def _edits(source: str) -> tuple[str, str, str, str]:
+    return (
+        source.replace("    return 2;\n", "    const x = 1;\n    return 2;\n"),
+        "@@ -8,2 +8,3 @@\n   run() {\n+    const x = 1;\n     return 2;",
+        source.replace("}\n\nexport class", "}\n\nlog(1);\nexport class"),
+        "@@ -6,2 +6,3 @@\n \n+log(1);\n export class Service {",
+    )
 
 
 @pytest.mark.parametrize(
-    ("path", "source"),
+    ("path", "symbol", "in_method", "in_method_patch", "between", "between_patch", "between_added"),
     [
-        pytest.param("src/app.ts", _TS_MODULE, id="ts"),
-        pytest.param("src/app.js", _JS_MODULE, id="js"),
+        pytest.param("src/app.ts", "run", *_edits(_TS_MODULE), 1, id="ts"),
+        pytest.param("src/app.js", "run", *_edits(_JS_MODULE), 1, id="js"),
+        pytest.param("src/app.tsx", "run", *_edits(_TSX_MODULE), 1, id="tsx"),
+        pytest.param("src/app.jsx", "run", *_edits(_JSX_MODULE), 1, id="jsx"),
+        pytest.param(
+            "app.go",
+            "Run",
+            _GO_MODULE.replace("\treturn 2\n", "\tx := 1\n\treturn 2\n"),
+            "@@ -11,2 +11,3 @@\n func (s *Service) Run() int {\n+\tx := 1\n \treturn 2",
+            # Go has no top-level statement, and a comment that touches a declaration is its
+            # doc comment: this one is separated by a blank line.
+            _GO_MODULE.replace("type Service", "// note\n\ntype Service"),
+            "@@ -8,2 +8,4 @@\n \n+// note\n+\n type Service struct{}",
+            2,
+            id="go",
+        ),
     ],
 )
-def test_script_added_line_selects_the_method_and_a_statement_between_is_module_level(
-    path: str, source: str
+def test_added_line_selects_the_method_and_a_line_between_is_module_level(
+    path: str,
+    symbol: str,
+    in_method: str,
+    in_method_patch: str,
+    between: str,
+    between_patch: str,
+    between_added: int,
 ) -> None:
-    in_method = affected_symbols(
-        _facts(path, source.replace("    return 2;\n", "    const x = 1;\n    return 2;\n")),
-        _diff_file("@@ -8,2 +8,3 @@\n   run() {\n+    const x = 1;\n     return 2;", 1, 0, path),
-    )
-    between = affected_symbols(
-        _facts(path, source.replace("}\n\nexport class", "}\n\nlog(1);\nexport class")),
-        _diff_file("@@ -6,2 +6,3 @@\n \n+log(1);\n export class Service {", 1, 0, path),
+    method_edit = affected_symbols(_facts(path, in_method), _diff_file(in_method_patch, 1, 0, path))
+    line_between = affected_symbols(
+        _facts(path, between), _diff_file(between_patch, between_added, 0, path)
     )
 
-    assert ([item.name for item in in_method.symbols], in_method.module_level) == (["run"], False)
-    assert (between.symbols, between.module_level) == ((), True)
+    assert ([item.name for item in method_edit.symbols], method_edit.module_level) == (
+        [symbol],
+        False,
+    )
+    assert (line_between.symbols, line_between.module_level) == ((), True)
 
 
 def test_python_relative_import_resolves_the_used_name_only() -> None:
@@ -818,6 +869,8 @@ def test_excluded_python_target_is_reported_and_not_shown() -> None:
     [
         pytest.param("src/app.ts", "./models", "src/models.ts", id="ts"),
         pytest.param("src/app.js", "./models.js", "src/models.js", id="js"),
+        pytest.param("src/App.tsx", "./Button", "src/Button.tsx", id="tsx"),
+        pytest.param("src/App.jsx", "./Button", "src/Button.jsx", id="jsx"),
     ],
 )
 def test_excluded_script_target_is_reported_and_not_shown(
