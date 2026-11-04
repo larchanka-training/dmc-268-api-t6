@@ -6,7 +6,9 @@ import asyncio
 import base64
 import json
 import sys
+from collections.abc import Mapping
 from pathlib import Path
+from typing import Any
 
 from app.modules.reviews.application.ast_symbols import (
     MAX_PARSE_CPU_SECONDS_PER_ATTEMPT,
@@ -15,6 +17,9 @@ from app.modules.reviews.application.ast_symbols import (
     AstFacts,
     AstFailureReason,
     ParseRequest,
+    SuggestionRejectionReason,
+    SuggestionValidationRequest,
+    SuggestionValidationResult,
     facts_from_json,
 )
 
@@ -66,20 +71,22 @@ class SubprocessSourceParser:
             results[request.key] = await self._parse(request)
         return results
 
-    async def _parse(self, request: ParseRequest) -> AstFacts | AstFailureReason:
+    async def validate_suggestions(
+        self, requests: tuple[SuggestionValidationRequest, ...]
+    ) -> dict[str, SuggestionValidationResult]:
+        return {req.key: await self._validate_suggestion(req) for req in requests}
+
+    async def _roundtrip(
+        self, payload: Mapping[str, Any]
+    ) -> tuple[dict[str, Any] | None, str | None]:
         budget = self._attempt_cpu_seconds
         if budget is not None and self._cpu_spent >= budget:
-            return AstFailureReason.AST_TIMEOUT
+            return None, "timeout"
         first = self._process is None or self._process.returncode is not None
         if first:
             self._process = await self._start()
         process = self._process
         assert process is not None and process.stdin is not None and process.stdout is not None
-        payload = {
-            "key": request.key,
-            "language": request.language.value,
-            "source": base64.b64encode(request.source).decode("ascii"),
-        }
         wait = MAX_PARSE_CPU_SECONDS_PER_FILE + _WALL_SLACK_SECONDS
         try:
             process.stdin.write(json.dumps(payload).encode("utf-8") + b"\n")
@@ -90,15 +97,66 @@ class SubprocessSourceParser:
         except TimeoutError:
             await self.aclose()
             self._cpu_spent += MAX_PARSE_CPU_SECONDS_PER_FILE
-            return AstFailureReason.AST_TIMEOUT
+            return None, "timeout"
         except (BrokenPipeError, ConnectionResetError):
             line = b""
         if not line:
-            # The worker died on this file: the memory cap, the OS CPU cap or a parser crash.
             await self.aclose()
-            return AstFailureReason.AST_RESOURCE_LIMIT
-        answer = json.loads(line)
+            return None, "died"
+        answer: dict[str, Any] = json.loads(line)
         self._cpu_spent += float(answer.get("cpu", 0.0))
+        return answer, None
+
+    async def _validate_suggestion(
+        self, request: SuggestionValidationRequest
+    ) -> SuggestionValidationResult:
+        payload = {
+            "action": "validate_suggestion",
+            "key": request.key,
+            "language": request.language.value,
+            "source": base64.b64encode(request.source).decode("ascii"),
+            "start_line": request.start_line,
+            "line": request.line,
+            "suggestion": request.suggestion,
+        }
+        answer, failure = await self._roundtrip(payload)
+        if failure == "timeout":
+            exhausted = (
+                self._attempt_cpu_seconds is not None
+                and self._cpu_spent >= self._attempt_cpu_seconds
+            )
+            return SuggestionValidationResult(
+                is_valid=True,
+                reason=SuggestionRejectionReason.AST_TIMEOUT,
+                detail="Attempt parser CPU budget exhausted"
+                if exhausted
+                else "Parser subprocess timeout",
+            )
+        if failure == "died" or answer is None:
+            return SuggestionValidationResult(
+                is_valid=True,
+                reason=SuggestionRejectionReason.WORKER_ERROR,
+                detail="Parser subprocess died",
+            )
+        reason_raw = answer.get("reason")
+        reason = SuggestionRejectionReason(reason_raw) if reason_raw is not None else None
+        return SuggestionValidationResult(
+            is_valid=bool(answer.get("is_valid", True)),
+            reason=reason,
+            detail=answer.get("detail"),
+        )
+
+    async def _parse(self, request: ParseRequest) -> AstFacts | AstFailureReason:
+        payload = {
+            "key": request.key,
+            "language": request.language.value,
+            "source": base64.b64encode(request.source).decode("ascii"),
+        }
+        answer, failure = await self._roundtrip(payload)
+        if failure == "timeout":
+            return AstFailureReason.AST_TIMEOUT
+        if failure == "died" or answer is None:
+            return AstFailureReason.AST_RESOURCE_LIMIT
         if "facts" in answer:
             return facts_from_json(answer["facts"])
         return AstFailureReason(answer["error"])

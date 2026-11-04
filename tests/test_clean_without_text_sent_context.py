@@ -37,6 +37,7 @@ from tests.test_clean_without_text_result import Queue, Repository, Uow, answer,
 from tests.test_execute_review import FakeVerifierModel, _make_test_snapshot, conventions
 from tests.test_gateway_review_model import RUN, Transport, _gateway
 from tests.test_run_coverage import code_snapshot, coverage
+from tests.verifier_pipeline_fakes import NullSuggestionParser
 
 _RUN = UUID(int=213)
 
@@ -140,6 +141,7 @@ def _review_beside_withheld_files(anchor: str) -> Repository:
         Queue(committed),
         worker_id="worker",
         run_url=lambda _: None,
+        parser=NullSuggestionParser(),
     )
 
     class Processor:
@@ -244,7 +246,11 @@ def test_actual_budget_fit_flows_through_reflection_early_return_and_finalizatio
     committed: list[str] = []
     queue = Queue(committed)
     store = StoreReviewOutput(
-        lambda: Uow(repository, committed), queue, worker_id="worker", run_url=lambda _: None
+        lambda: Uow(repository, committed),
+        queue,
+        worker_id="worker",
+        run_url=lambda _: None,
+        parser=NullSuggestionParser(),
     )
 
     class Processor:
@@ -365,7 +371,11 @@ def test_model_boundary_loss_survives_both_reflection_returns_without_outer_fit_
     committed: list[str] = []
     queue = Queue(committed)
     store = StoreReviewOutput(
-        lambda: Uow(repository, committed), queue, worker_id="worker", run_url=lambda _: None
+        lambda: Uow(repository, committed),
+        queue,
+        worker_id="worker",
+        run_url=lambda _: None,
+        parser=NullSuggestionParser(),
     )
 
     class Processor:
@@ -459,7 +469,11 @@ def test_outer_context_loss_survives_both_reflection_returns_without_carrier_los
     committed: list[str] = []
     queue = Queue(committed)
     store = StoreReviewOutput(
-        lambda: Uow(repository, committed), queue, worker_id="worker", run_url=lambda _: None
+        lambda: Uow(repository, committed),
+        queue,
+        worker_id="worker",
+        run_url=lambda _: None,
+        parser=NullSuggestionParser(),
     )
 
     class Processor:

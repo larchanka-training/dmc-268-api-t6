@@ -29,6 +29,7 @@ from tests.test_execute_review import FakeVerifierModel, conventions
 from tests.test_gateway_review_model import RUN, Transport, _gateway, _snapshot
 from tests.test_llm_gateway import PRIMARY, Harness, completion
 from tests.test_run_coverage import code_snapshot, coverage
+from tests.verifier_pipeline_fakes import NullSuggestionParser
 
 
 def test_gateway_hidden_fit_marks_legacy_unverified_output_and_persisted_result_partial() -> None:
@@ -42,7 +43,11 @@ def test_gateway_hidden_fit_marks_legacy_unverified_output_and_persisted_result_
         committed: list[str] = []
         queue = Queue(committed)
         store = StoreReviewOutput(
-            lambda: Uow(repository, committed), queue, worker_id="worker", run_url=lambda _: None
+            lambda: Uow(repository, committed),
+            queue,
+            worker_id="worker",
+            run_url=lambda _: None,
+            parser=NullSuggestionParser(),
         )
         lines = tuple(DiffLine(i + 1, "added", f"line_{i} = '{'x' * 70}'") for i in range(400))
 
@@ -108,7 +113,11 @@ def test_snapshot_reply_fit_and_reflection_keep_the_final_coverage(
     committed: list[str] = []
     queue = Queue(committed)
     store = StoreReviewOutput(
-        lambda: Uow(repository, committed), queue, worker_id="worker", run_url=lambda _: None
+        lambda: Uow(repository, committed),
+        queue,
+        worker_id="worker",
+        run_url=lambda _: None,
+        parser=NullSuggestionParser(),
     )
     output = answer()
     if candidates != "empty":

@@ -38,6 +38,7 @@ from tests.portal_postgres import HEAD, PR_NEW, REPO_A, RUN_ATTEMPTED, Env, port
 from tests.test_clean_without_text_result import answer
 from tests.test_run_coverage import code_snapshot, empty_snapshot
 from tests.test_severity_threshold_postgres import RecordingQueue
+from tests.verifier_pipeline_fakes import NullSuggestionParser
 
 
 @pytest.fixture
@@ -134,6 +135,7 @@ def test_postgres_snapshot_reload_and_finalization_persist_matching_result_summa
                     queue,
                     worker_id="worker",
                     run_url=lambda _: None,
+                    parser=NullSuggestionParser(),
                 ).execute(RUN_ATTEMPTED, answer())
                 is True
             )
@@ -188,6 +190,7 @@ def test_postgres_finalization_reads_referenced_policy_effective_coverage_and_re
                 queue,
                 worker_id="worker",
                 run_url=lambda _: None,
+                parser=NullSuggestionParser(),
             ).execute(RUN_ATTEMPTED, answer())
             async with factory() as session:
                 action = await session.scalar(
@@ -234,6 +237,7 @@ def test_later_prompt_context_trace_does_not_erase_current_identity_valid_classi
                 queue,
                 worker_id="worker",
                 run_url=lambda _: None,
+                parser=NullSuggestionParser(),
             ).execute(RUN_ATTEMPTED, answer())
             async with factory() as session:
                 action = await session.scalar(

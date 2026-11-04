@@ -44,6 +44,7 @@ from tests.verifier_pipeline_fakes import (
     FakeQueue,
     FakeRepository,
     FakeUnitOfWork,
+    NullSuggestionParser,
 )
 
 ACCEPTED_CALL_ID = UUID("00000000-0000-0000-0000-000000013902")
@@ -218,6 +219,7 @@ def _store(raw_output: Any) -> list[dict[str, Any]]:
         FakeQueue(),
         worker_id="test-worker",
         run_url=lambda _: None,
+        parser=NullSuggestionParser(),
     )
     assert asyncio.run(store.execute(RUN_ID, raw_output)) is True
     return reviews.entered

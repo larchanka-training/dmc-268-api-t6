@@ -25,6 +25,7 @@ from app.modules.reviews.application.review_output import (
     parse_review_output,
 )
 from tests.test_findings_post_processor import _added_file_diff_map
+from tests.verifier_pipeline_fakes import NullSuggestionParser
 
 
 def valid_output() -> dict[str, object]:
@@ -147,6 +148,7 @@ class RecordingUnitOfWork:
     reviews: RecordingRepository
     commits: int = 0
     active: bool = False
+    blob_cache: None = None
 
     async def __aenter__(self) -> RecordingUnitOfWork:
         self.active = True
@@ -219,7 +221,14 @@ def test_publish_valid_json_text_preserves_the_raw_object(encoded: str) -> None:
     text = json.dumps(value, indent=1)
     raw: str | bytes = text if encoded == "str" else text.encode("utf-8")
 
-    assert asyncio.run(PublishReviewOutput(factory, provider).execute(RUN_ID, raw)) is True
+    assert (
+        asyncio.run(
+            PublishReviewOutput(factory, provider, parser=NullSuggestionParser()).execute(
+                RUN_ID, raw
+            )
+        )
+        is True
+    )
 
     assert repository.raw_objects == [value]
     stored_finding = cast(list[dict[str, object]], repository.raw_objects[0]["findings"])[0]
@@ -236,10 +245,30 @@ def test_publish_mapping_preserves_the_raw_object() -> None:
     provider = RecordingProvider(units=factory.units)
     value = valid_output()
 
-    assert asyncio.run(PublishReviewOutput(factory, provider).execute(RUN_ID, value))
+    assert asyncio.run(
+        PublishReviewOutput(factory, provider, parser=NullSuggestionParser()).execute(RUN_ID, value)
+    )
 
     assert repository.raw_objects == [value]
     assert provider.calls[0][0] == "a" * 40
+
+
+def test_publish_review_output_with_custom_parser() -> None:
+    repository = RecordingRepository(_context(), _publication())
+    factory = RecordingFactory(repository)
+    provider = RecordingProvider(units=factory.units)
+    value = valid_output()
+
+    class CustomParser:
+        async def validate_suggestions(self, requests: tuple[Any, ...]) -> dict[str, Any]:
+            return {}
+
+        async def aclose(self) -> None:
+            pass
+
+    publisher = PublishReviewOutput(factory, provider, parser=CustomParser())
+    assert asyncio.run(publisher.execute(RUN_ID, value)) is True
+    assert repository.raw_objects == [value]
 
 
 @pytest.mark.parametrize("raw", ('{"findings":', b'{"findings":'))
@@ -254,7 +283,12 @@ def test_publish_without_durable_context_returns_false() -> None:
     provider = RecordingProvider()
 
     assert (
-        asyncio.run(PublishReviewOutput(factory, provider).execute(RUN_ID, valid_output())) is False
+        asyncio.run(
+            PublishReviewOutput(factory, provider, parser=NullSuggestionParser()).execute(
+                RUN_ID, valid_output()
+            )
+        )
+        is False
     )
 
     assert repository.raw_objects == []
@@ -268,7 +302,12 @@ def test_publish_without_a_storable_result_returns_false() -> None:
     provider = RecordingProvider()
 
     assert (
-        asyncio.run(PublishReviewOutput(factory, provider).execute(RUN_ID, valid_output())) is False
+        asyncio.run(
+            PublishReviewOutput(factory, provider, parser=NullSuggestionParser()).execute(
+                RUN_ID, valid_output()
+            )
+        )
+        is False
     )
 
     assert repository.raw_objects == [valid_output()]
@@ -328,7 +367,14 @@ def test_publish_snapshot_run_preserves_v2_rule_attribution() -> None:
     value = valid_output()
     cast(list[dict[str, object]], value["findings"])[0]["rule_name"] = ".review/rules.md"
 
-    assert asyncio.run(PublishReviewOutput(factory, provider).execute(RUN_ID, value)) is True
+    assert (
+        asyncio.run(
+            PublishReviewOutput(factory, provider, parser=NullSuggestionParser()).execute(
+                RUN_ID, value
+            )
+        )
+        is True
+    )
     assert len(published_processed) == 1
     assert published_processed[0].inline[0].finding.rule_name == ".review/rules.md"
 
@@ -380,6 +426,7 @@ def test_store_review_output_preserves_allowed_v2_rules() -> None:
     class FakeUoW:
         def __init__(self) -> None:
             self.reviews = FakeReviewRepo()
+            self.blob_cache = None
 
         async def __aenter__(self) -> FakeUoW:
             return self
@@ -407,7 +454,11 @@ def test_store_review_output_preserves_allowed_v2_rules() -> None:
 
     queue = FakeQueue()
     store = StoreReviewOutput(
-        cast(Any, lambda: FakeUoW()), queue, worker_id="test-worker", run_url=lambda _: None
+        cast(Any, lambda: FakeUoW()),
+        queue,
+        worker_id="test-worker",
+        run_url=lambda _: None,
+        parser=NullSuggestionParser(),
     )
     value = valid_output()
     cast(list[dict[str, object]], value["findings"])[0]["rule_name"] = ".review/rules.md"
@@ -469,6 +520,7 @@ def test_store_review_output_persists_dropped_findings_from_reflection_pass() ->
     class FakeUoW:
         def __init__(self) -> None:
             self.reviews = FakeReviewRepo()
+            self.blob_cache = None
 
         async def __aenter__(self) -> FakeUoW:
             return self
@@ -501,7 +553,11 @@ def test_store_review_output_persists_dropped_findings_from_reflection_pass() ->
 
     queue = FakeQueue()
     store = StoreReviewOutput(
-        cast(Any, lambda: FakeUoW()), queue, worker_id="test-worker", run_url=lambda _: None
+        cast(Any, lambda: FakeUoW()),
+        queue,
+        worker_id="test-worker",
+        run_url=lambda _: None,
+        parser=NullSuggestionParser(),
     )
     value = VerifiedReviewOutput(
         valid_output(),
@@ -594,6 +650,7 @@ def test_store_review_output_appends_overflow_footer_with_run_url() -> None:
     class FakeUoW:
         def __init__(self) -> None:
             self.reviews = FakeReviewRepo()
+            self.blob_cache = None
 
         async def __aenter__(self) -> FakeUoW:
             return self
@@ -664,6 +721,7 @@ def test_store_review_output_appends_overflow_footer_with_run_url() -> None:
         FakeQueue(),
         worker_id="test-worker",
         run_url=lambda _: run_url,
+        parser=NullSuggestionParser(),
     )
     verified = VerifiedReviewOutput(
         payload,
@@ -747,6 +805,7 @@ def test_store_review_output_repacks_body_before_overflow_footer() -> None:
     class FakeUoW:
         def __init__(self) -> None:
             self.reviews = FakeReviewRepo()
+            self.blob_cache = None
 
         async def __aenter__(self) -> FakeUoW:
             return self
@@ -818,6 +877,7 @@ def test_store_review_output_repacks_body_before_overflow_footer() -> None:
         FakeQueue(),
         worker_id="test-worker",
         run_url=lambda _: run_url,
+        parser=NullSuggestionParser(),
     )
     verified = VerifiedReviewOutput(
         payload,
@@ -953,7 +1013,14 @@ def test_publish_review_output_repacks_overflow_with_verifier_threshold() -> Non
         severity_threshold="critical",
     )
 
-    assert asyncio.run(PublishReviewOutput(factory, provider).execute(RUN_ID, verified)) is True
+    assert (
+        asyncio.run(
+            PublishReviewOutput(factory, provider, parser=NullSuggestionParser()).execute(
+                RUN_ID, verified
+            )
+        )
+        is True
+    )
 
     assert len(stored_processed) == 1
     body = stored_processed[0].review_body
@@ -1018,6 +1085,7 @@ def test_store_review_output_marks_degraded_body_in_postprocess_response(
     class FakeUoW:
         def __init__(self) -> None:
             self.reviews = FakeReviewRepo()
+            self.blob_cache = None
 
         async def __aenter__(self) -> FakeUoW:
             return self
@@ -1086,6 +1154,7 @@ def test_store_review_output_marks_degraded_body_in_postprocess_response(
         FakeQueue(),
         worker_id="test-worker",
         run_url=lambda _: run_url,
+        parser=NullSuggestionParser(),
     )
 
     assert asyncio.run(store.execute(RUN_ID, payload)) is True
@@ -1144,6 +1213,7 @@ def test_store_review_output_persists_dropped_findings_coercion_tail() -> None:
     class FakeUoW:
         def __init__(self) -> None:
             self.reviews = FakeReviewRepo()
+            self.blob_cache = None
 
         async def __aenter__(self) -> FakeUoW:
             return self
@@ -1167,7 +1237,11 @@ def test_store_review_output_persists_dropped_findings_coercion_tail() -> None:
             pass
 
     store = StoreReviewOutput(
-        cast(Any, lambda: FakeUoW()), FakeQueue(), worker_id="test-worker", run_url=lambda _: None
+        cast(Any, lambda: FakeUoW()),
+        FakeQueue(),
+        worker_id="test-worker",
+        run_url=lambda _: None,
+        parser=NullSuggestionParser(),
     )
 
     # Corrupted drop record through store.execute raises InvalidReviewOutput with run_id
@@ -1283,7 +1357,14 @@ def test_publish_review_output_persists_dropped_findings() -> None:
     )
     assert len(value) == 2
     assert set(value) == {"findings", "summary"}
-    assert asyncio.run(PublishReviewOutput(factory, provider).execute(RUN_ID, value)) is True
+    assert (
+        asyncio.run(
+            PublishReviewOutput(factory, provider, parser=NullSuggestionParser()).execute(
+                RUN_ID, value
+            )
+        )
+        is True
+    )
     assert len(stored_processed) == 1
     assert len(stored_processed[0].dropped) == 2
     assert stored_processed[0].dropped[0].drop_reason == "evidence_not_shown"
@@ -1294,7 +1375,11 @@ def test_publish_review_output_persists_dropped_findings() -> None:
     raw_with_underscore = valid_output()
     raw_with_underscore["_dropped_findings"] = "not-a-list"
     with pytest.raises(InvalidReviewOutput):
-        asyncio.run(PublishReviewOutput(factory, provider).execute(RUN_ID, raw_with_underscore))
+        asyncio.run(
+            PublishReviewOutput(factory, provider, parser=NullSuggestionParser()).execute(
+                RUN_ID, raw_with_underscore
+            )
+        )
 
     # Corrupted drop record through PublishReviewOutput.execute
     # raises InvalidReviewOutput with run_id
@@ -1303,7 +1388,11 @@ def test_publish_review_output_persists_dropped_findings() -> None:
         dropped_findings=[{"finding": {"bad": 1}, "drop_reason": "x", "position": 0}],
     )
     with pytest.raises(InvalidReviewOutput) as exc_info:
-        asyncio.run(PublishReviewOutput(factory, provider).execute(RUN_ID, corrupted_publish_value))
+        asyncio.run(
+            PublishReviewOutput(factory, provider, parser=NullSuggestionParser()).execute(
+                RUN_ID, corrupted_publish_value
+            )
+        )
     assert str(RUN_ID) in str(exc_info.value)
 
 

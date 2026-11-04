@@ -24,6 +24,7 @@ from tests.test_clean_without_text_result import answer
 from tests.test_clean_without_text_result_postgres import prepare_result
 from tests.test_clean_without_text_result_postgres import result_env as result_env
 from tests.test_severity_threshold_postgres import RecordingQueue
+from tests.verifier_pipeline_fakes import NullSuggestionParser
 
 _TOO_LARGE = DiffSnapshot("large.txt", None, "d" * 40, omission_reason="too_large")
 
@@ -51,6 +52,7 @@ def test_postgres_backend_result_enters_publishing_without_a_model_answer(
             queue,
             worker_id="worker",
             run_url=lambda _: None,
+            parser=NullSuggestionParser(),
         )
         try:
             await prepare_result(factory, [_TOO_LARGE])
@@ -98,6 +100,7 @@ def test_postgres_model_answer_is_still_recorded_as_llm_review_output(result_env
                 RecordingQueue(),
                 worker_id="worker",
                 run_url=lambda _: None,
+                parser=NullSuggestionParser(),
             ).execute(RUN_ATTEMPTED, answer())
 
             assert await _tools(factory) == {

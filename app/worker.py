@@ -304,7 +304,9 @@ async def process_review_run(
         context_stage=context_stage,
     )
     publisher = output or PublishReviewOutput(
-        lambda: SqlAlchemyReviewOutputUnitOfWork(session_factory), provider
+        lambda: SqlAlchemyReviewOutputUnitOfWork(session_factory),
+        provider,
+        parser=SubprocessSourceParser(),
     )
     prompts: ReviewPromptRepository = SqlAlchemyReviewPromptRepository(session_factory)
     if context_stage is None:
@@ -915,6 +917,7 @@ def compose_worker_process(
             worker_id=claimed.worker_id,
             run_url=run_url,
             now=now,
+            parser=SubprocessSourceParser(),
         )
 
         async def execute(

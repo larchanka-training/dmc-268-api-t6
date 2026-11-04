@@ -152,12 +152,56 @@ class ParseRequest:
     source: bytes
 
 
+class SuggestionRejectionReason(StrEnum):
+    """Reason why a code suggestion was stripped or retained without check (#444)."""
+
+    # Stripped:
+    SYNTAX_ERROR = "syntax_error"
+    DUPLICATE_CONDITION = "duplicate_condition"
+    APPLICATION_FAILED = "application_failed"
+
+    # Retained without check (AC5):
+    FILE_UNAVAILABLE = "file_unavailable"
+    UNSUPPORTED_LANGUAGE = "unsupported_language"
+    NON_UTF8 = "non_utf8"
+    FILE_TOO_LARGE = "file_too_large"
+    AST_TIMEOUT = "ast_timeout"
+    WORKER_ERROR = "worker_error"
+
+
+@dataclass(frozen=True)
+class SuggestionValidationRequest:
+    key: str
+    language: AstLanguage
+    source: bytes
+    start_line: int | None
+    line: int
+    suggestion: str
+
+
+@dataclass(frozen=True)
+class SuggestionValidationResult:
+    is_valid: bool
+    reason: SuggestionRejectionReason | None = None
+    detail: str | None = None
+
+
 class SourceParser(Protocol):
     """Parses sources in an isolated worker; a file never fails the whole batch."""
 
     async def parse_many(
         self, requests: tuple[ParseRequest, ...]
     ) -> dict[str, AstFacts | AstFailureReason]: ...
+
+    async def aclose(self) -> None: ...
+
+
+class SuggestionParser(Protocol):
+    """Validates suggestions in an isolated worker."""
+
+    async def validate_suggestions(
+        self, requests: tuple[SuggestionValidationRequest, ...]
+    ) -> dict[str, SuggestionValidationResult]: ...
 
     async def aclose(self) -> None: ...
 

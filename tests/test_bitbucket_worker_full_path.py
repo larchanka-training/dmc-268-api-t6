@@ -806,6 +806,7 @@ def test_composed_bitbucket_review_uses_pinned_cloud_reads_and_writes(
             class MemoryUow:
                 runs = memory
                 reviews = memory
+                blob_cache = None
 
                 async def __aenter__(self) -> MemoryUow:
                     return self

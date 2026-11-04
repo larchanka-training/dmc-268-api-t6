@@ -20,6 +20,7 @@ from app.modules.reviews.application.store_review_output import StoreReviewOutpu
 from tests.test_clean_without_text_result import Queue, Repository, Uow, answer
 from tests.test_review_output import RecordingFactory, RecordingProvider, RecordingRepository
 from tests.test_run_coverage import code_snapshot, coverage
+from tests.verifier_pipeline_fakes import NullSuggestionParser
 
 _RUN = UUID(int=213)
 
@@ -71,7 +72,9 @@ def test_body_budget_preserves_partial_backend_result_and_accounts_for_all_findi
         repository = InlineRepository(context, None)
         provider = RecordingProvider()
         assert asyncio.run(
-            PublishReviewOutput(RecordingFactory(repository), provider).execute(UUID(int=1032), raw)
+            PublishReviewOutput(
+                RecordingFactory(repository), provider, parser=NullSuggestionParser()
+            ).execute(UUID(int=1032), raw)
         )
         result = stored[0]
         body = provider.calls[0][1]
@@ -94,7 +97,11 @@ def test_body_budget_preserves_partial_backend_result_and_accounts_for_all_findi
         commits: list[str] = []
         queue = Queue(commits)
         store = StoreReviewOutput(
-            lambda: Uow(queued, commits), queue, worker_id="worker", run_url=lambda _: run_url
+            lambda: Uow(queued, commits),
+            queue,
+            worker_id="worker",
+            run_url=lambda _: run_url,
+            parser=NullSuggestionParser(),
         )
         assert asyncio.run(store.execute(_RUN, raw))
         result = stored[0]

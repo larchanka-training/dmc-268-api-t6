@@ -31,6 +31,7 @@ from app.modules.reviews.application.verdict import SeverityThresholdValue
 from app.modules.reviews.infrastructure.run_repository import _to_published_finding
 from tests.test_findings_post_processor import _added_file_diff_map, _empty_diff_map
 from tests.test_publish_run_review import GitLabReviews, Store, gitlab_context, run
+from tests.verifier_pipeline_fakes import NullSuggestionParser
 
 RUN_ID = UUID("00000000-0000-0000-0000-000000000401")
 
@@ -116,6 +117,10 @@ class FakeUnitOfWork:
 
     async def commit(self) -> None:
         self.commits += 1
+
+    @property
+    def blob_cache(self) -> None:
+        return None
 
     async def rollback(self) -> None:
         return None
@@ -219,7 +224,14 @@ def test_valid_output_is_committed_before_network_publish_with_run_head_sha() ->
     factory = FakeUnitOfWorkFactory(repository, [])
     provider = FakeProvider([])
 
-    assert asyncio.run(PublishReviewOutput(factory, provider).execute(RUN_ID, output())) is True
+    assert (
+        asyncio.run(
+            PublishReviewOutput(factory, provider, parser=NullSuggestionParser()).execute(
+                RUN_ID, output()
+            )
+        )
+        is True
+    )
 
     assert len(repository.stored) == 1
     assert [unit.commits for unit in factory.units] == [0, 1, 1]
@@ -232,7 +244,7 @@ def test_crash_after_provider_call_retries_with_the_same_durable_idempotency_key
     )
     factory = FakeUnitOfWorkFactory(repository, [])
     provider = FakeProvider([], fail_after_first_call=True)
-    use_case = PublishReviewOutput(factory, provider)
+    use_case = PublishReviewOutput(factory, provider, parser=NullSuggestionParser())
 
     with pytest.raises(RuntimeError, match="worker crashed"):
         asyncio.run(use_case.execute(RUN_ID, output()))
@@ -252,7 +264,11 @@ def test_invalid_output_does_not_persist_or_publish() -> None:
     invalid["unexpected"] = True
 
     with pytest.raises(ValueError, match="invalid review output"):
-        asyncio.run(PublishReviewOutput(factory, provider).execute(RUN_ID, invalid))
+        asyncio.run(
+            PublishReviewOutput(factory, provider, parser=NullSuggestionParser()).execute(
+                RUN_ID, invalid
+            )
+        )
 
     assert repository.stored == []
     assert provider.calls == []
@@ -279,7 +295,11 @@ def test_publisher_receives_only_inline_findings_and_renders_body_only_findings(
     factory = FakeUnitOfWorkFactory(repository, [])  # type: ignore[arg-type]
     provider = FakeProvider([])
     assert (
-        asyncio.run(PublishReviewOutput(factory, provider).execute(RUN_ID, output_with_body_only()))
+        asyncio.run(
+            PublishReviewOutput(factory, provider, parser=NullSuggestionParser()).execute(
+                RUN_ID, output_with_body_only()
+            )
+        )
         is True
     )
 
@@ -313,7 +333,14 @@ def test_publisher_uses_durable_context_when_callers_do_not_supply_it() -> None:
     finding["rule_name"] = "Missing Rule"
     finding["body"] = "According to custom instructions in 'Missing Rule' (details): Unsafe use."
 
-    assert asyncio.run(PublishReviewOutput(factory, provider).execute(RUN_ID, value)) is True
+    assert (
+        asyncio.run(
+            PublishReviewOutput(factory, provider, parser=NullSuggestionParser()).execute(
+                RUN_ID, value
+            )
+        )
+        is True
+    )
 
     assert repository.processed is not None
     processed = repository.processed
@@ -337,7 +364,14 @@ def test_legacy_publisher_applies_the_repository_severity_threshold() -> None:
         {**findings[0], "title": "Medium follow-up", "severity": "medium"},
     ]
 
-    assert asyncio.run(PublishReviewOutput(factory, provider).execute(RUN_ID, value)) is True
+    assert (
+        asyncio.run(
+            PublishReviewOutput(factory, provider, parser=NullSuggestionParser()).execute(
+                RUN_ID, value
+            )
+        )
+        is True
+    )
 
     assert repository.processed is not None
     processed = repository.processed
@@ -360,7 +394,9 @@ def test_publisher_does_not_allow_callers_to_override_durable_anchor_context() -
         frozenset(),
         frozenset({"Model supplied rule"}),
     )
-    execute = cast(Any, PublishReviewOutput(factory, provider).execute)
+    execute = cast(
+        Any, PublishReviewOutput(factory, provider, parser=NullSuggestionParser()).execute
+    )
 
     with pytest.raises(TypeError):
         asyncio.run(
@@ -398,9 +434,9 @@ def test_gateway_json_text_is_parsed_and_stored_as_the_exact_object(
     text = json.dumps(output(), indent=1)
 
     published = asyncio.run(
-        PublishReviewOutput(FakeUnitOfWorkFactory(repository, []), provider).execute(
-            RUN_ID, encode(text)
-        )
+        PublishReviewOutput(
+            FakeUnitOfWorkFactory(repository, []), provider, parser=NullSuggestionParser()
+        ).execute(RUN_ID, encode(text))
     )
 
     assert published is True
@@ -431,7 +467,11 @@ def test_json_text_that_is_not_an_object_is_rejected_before_any_write() -> None:
     factory = FakeUnitOfWorkFactory(repository, [])
 
     with pytest.raises(InvalidReviewOutput):
-        asyncio.run(PublishReviewOutput(factory, FakeProvider([])).execute(RUN_ID, "[1]"))
+        asyncio.run(
+            PublishReviewOutput(factory, FakeProvider([]), parser=NullSuggestionParser()).execute(
+                RUN_ID, "[1]"
+            )
+        )
 
     assert factory.units == []
 
@@ -449,9 +489,9 @@ def test_run_without_post_processing_context_is_not_published() -> None:
 
     assert (
         asyncio.run(
-            PublishReviewOutput(FakeUnitOfWorkFactory(repository, []), provider).execute(
-                RUN_ID, output()
-            )
+            PublishReviewOutput(
+                FakeUnitOfWorkFactory(repository, []), provider, parser=NullSuggestionParser()
+            ).execute(RUN_ID, output())
         )
         is False
     )
@@ -463,7 +503,14 @@ def test_run_that_cannot_store_its_output_is_not_published() -> None:
     factory = FakeUnitOfWorkFactory(repository, [])
     provider = FakeProvider([])
 
-    assert asyncio.run(PublishReviewOutput(factory, provider).execute(RUN_ID, output())) is False
+    assert (
+        asyncio.run(
+            PublishReviewOutput(factory, provider, parser=NullSuggestionParser()).execute(
+                RUN_ID, output()
+            )
+        )
+        is False
+    )
     assert provider.calls == []
     assert [unit.commits for unit in factory.units] == [0, 0]
 
@@ -526,9 +573,9 @@ def test_unanchored_line_routes_to_body_for_github_and_gitlab() -> None:
     )
     provider = FakeProvider([])
     asyncio.run(
-        PublishReviewOutput(FakeUnitOfWorkFactory(repository, []), provider).execute(
-            RUN_ID, _output_with_unanchored_finding()
-        )
+        PublishReviewOutput(
+            FakeUnitOfWorkFactory(repository, []), provider, parser=NullSuggestionParser()
+        ).execute(RUN_ID, _output_with_unanchored_finding())
     )
     assert [item.title for item in provider.calls[0][2]] == ["Missing transaction boundary"]
     assert UNANCHORED_TITLE in provider.calls[0][1]

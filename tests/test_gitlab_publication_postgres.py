@@ -34,6 +34,7 @@ from tests.test_gitlab_projection_postgres import Rig, rig, seed_run
 from tests.test_gitlab_rerun_postgres import seed_change
 from tests.test_gitlab_run_http import Stream
 from tests.test_publish_run_review import Trace
+from tests.verifier_pipeline_fakes import NullSuggestionParser
 
 publication_database = projection.authority_database
 pytestmark = pytest.mark.integration
@@ -78,6 +79,7 @@ async def publishing(
         queue,
         worker_id="publication",
         run_url=lambda _run_id: None,
+        parser=NullSuggestionParser(),
     ).execute(
         run,
         {
