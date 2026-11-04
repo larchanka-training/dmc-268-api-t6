@@ -378,7 +378,8 @@ def verdict(
         "one_run_per_pr": sorted(m.pr for m in metrics) == list(range(1, runs + 1)),
         "one_review_per_pr": dict(observed.review_posts) == prs,
         # A new GitHub Run takes the snapshot path; a legacy `ReviewOutput` call would be a bug.
-        "one_review_call_per_run": observed.llm_calls.get("ReviewOutputV2") == runs,
+        "one_review_call_per_run": observed.llm_calls.get("ReviewOutputV2") == runs
+        and not observed.llm_calls.get("ReviewOutput"),
         # Each PR got two deliveries: the first and its duplicate.
         "every_delivery_projected": dict(observed.receipts) == {"projected": 2 * runs},
         "all_workers_used": len({m.worker_id for m in metrics if m.worker_id}) == workers,

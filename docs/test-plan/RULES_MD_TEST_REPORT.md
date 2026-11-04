@@ -319,12 +319,12 @@ AC9 #163: два нагрузочных теста, каждый запуска�
 
 #### Текущий результат: путь снимка (#398)
 
-С #332 каждый новый GitHub Run идёт по пути снимка: reviewer запрашивает `ReviewOutputV2`, verifier — `VerificationOutput`. Stub отвечает на обе схемы по самому запросу: `block_id` файла и `candidate_id` берёт из промпта. Вердикт считает вызовы `ReviewOutputV2` и не засчитывает legacy `ReviewOutput`. `deploy/load/compose.parallel-runs.yml` снимает `BITBUCKET_*` у `worker` и `webhook-worker`: с #333 базовый compose передаёт им пустые строки, и они падают при старте.
+С #332 каждый новый GitHub Run идёт по пути снимка: reviewer запрашивает `ReviewOutputV2`, verifier — `VerificationOutput`. Stub отвечает на обе схемы по самому запросу: `block_id` файла и `candidate_id` берёт из промпта. Вердикт требует столько вызовов `ReviewOutputV2`, сколько PR, и ни одного legacy `ReviewOutput`. `deploy/load/compose.parallel-runs.yml` снимает `BITBUCKET_*` у `worker` и `webhook-worker`: с #333 базовый compose передаёт им пустые строки, и они падают при старте.
 
 | Параметр | Значение |
 | --- | --- |
 | Дата | 2026-11-04, 09:07:40–09:09:11 UTC |
-| Код | `7dc2307c` — последний коммит кода ветки #398, после него только документация; база `main` `490fadb4` |
+| Код | `7dc2307c` — коммит ветки #398 с правкой гонки, база `main` `490fadb4`. Sha этого раздела — коммиты ветки на момент прогонов, до её ребейза: в `main` их нет. Проверка `one_review_call_per_run` ужесточена после прогонов: в них нет ни одного вызова legacy `ReviewOutput`, на вердикт это не влияет |
 | Docker | Engine 29.9.2, Compose v5.6.1; демон — `unix:///var/run/docker.sock` (context `default`) |
 | Образы | базовый `python:3.13-slim` (`Dockerfile`); `--build` собрал образы `dmc398load-*` из этого кода |
 | Хост | 16 CPU, load average 87,3 / 86,2 / 90,2 (1 / 5 / 15 мин) сразу после прогона, доступно около 6 ГБ памяти; параллельно шли тесты и сборки других сессий, контейнеры общего стенда `dmc-268-api-t6` и другого проекта |
