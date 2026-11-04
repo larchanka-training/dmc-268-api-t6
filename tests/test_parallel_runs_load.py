@@ -277,7 +277,7 @@ _CHECKS = (
 _ROWS = [_row(1), _row(2), _row(3)]
 _GOOD: dict[str, Any] = {
     "review_posts": {"1": 1, "2": 1, "3": 1},
-    "llm_calls": {"RepoConventionsDraft": 3, "ReviewOutput": 3},
+    "llm_calls": {"RepoConventionsDraft": 3, "ReviewOutputV2": 3, "VerificationOutput": 3},
     "receipts": {"projected": 6},
     "dlq_depth": 0,
     "peak": 3,
@@ -297,7 +297,8 @@ _GOOD: dict[str, Any] = {
         ([*_ROWS, _row(3, worker_id="worker-3:1")], {}, 3, ["one_run_per_pr"]),
         (_ROWS, {"review_posts": {"1": 1, "2": 2, "3": 1}}, 3, ["one_review_per_pr"]),
         (_ROWS, {"review_posts": {"1": 1, "3": 1}}, 3, ["one_review_per_pr"]),
-        (_ROWS, {"llm_calls": {"ReviewOutput": 4}}, 3, ["one_review_call_per_run"]),
+        (_ROWS, {"llm_calls": {"ReviewOutputV2": 4}}, 3, ["one_review_call_per_run"]),
+        (_ROWS, {"llm_calls": {"ReviewOutput": 3}}, 3, ["one_review_call_per_run"]),
         (_ROWS, {"llm_calls": {}}, 3, ["one_review_call_per_run"]),
         (_ROWS, {"receipts": {"projected": 3}}, 3, ["every_delivery_projected"]),
         (_ROWS, {"receipts": {"projected": 5, "failed": 1}}, 3, ["every_delivery_projected"]),
@@ -321,6 +322,7 @@ _GOOD: dict[str, Any] = {
         "two-reviews",
         "missing-review",
         "extra-review-call",
+        "legacy-review-calls",
         "no-review-call",
         "duplicate-not-projected",
         "failed-receipt",
@@ -758,6 +760,15 @@ def test_override_pins_every_llm_and_github_setting_of_the_worker() -> None:
     assert "      LLM_BASE_URL: http://stub:9999/v1\n" in override
 
 
+@pytest.mark.parametrize("service", ["worker", "webhook-worker"])
+def test_override_unsets_the_bitbucket_keyring_of_each_worker(service: str) -> None:
+    override = _service_env(REPO_ROOT / "deploy/load/compose.parallel-runs.yml", service)
+
+    # A key with no value: "" from the base file stops the worker at start.
+    for key in ("BITBUCKET_CREDENTIAL_KEYS", "BITBUCKET_ACTIVE_KEY_ID"):
+        assert re.search(rf"(?m)^      {key}:$", override), key
+
+
 def test_override_keeps_the_stub_on_loopback_and_points_every_github_client_at_it() -> None:
     text = (REPO_ROOT / "deploy/load/compose.parallel-runs.yml").read_text()
 
@@ -1130,7 +1141,7 @@ class FakeStack:
     def stub_stats(self) -> dict[str, Any]:
         return {
             "review_posts": {"1": 1, "2": 1, "3": 1},
-            "llm_calls": {"RepoConventionsDraft": 3, "ReviewOutput": 3},
+            "llm_calls": {"RepoConventionsDraft": 3, "ReviewOutputV2": 3, "VerificationOutput": 3},
             "unhandled": list(self.unhandled),
         }
 

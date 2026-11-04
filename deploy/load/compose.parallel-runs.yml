@@ -45,6 +45,9 @@ services:
 
   worker:
     environment:
+      # No value, so unset and Bitbucket stays off: the base file's "" stops the worker at start.
+      BITBUCKET_CREDENTIAL_KEYS:
+      BITBUCKET_ACTIVE_KEY_ID:
       GITHUB_APP_ID: "1"
       GITHUB_APP_PRIVATE_KEY: ${LOAD_GITHUB_APP_PRIVATE_KEY:?set by scripts/parallel_runs_load.py}
       GITHUB_API_URL: http://stub:9999
@@ -73,6 +76,9 @@ services:
 
   webhook-worker:
     environment:
+      # As in `worker`: unset, not the base file's "".
+      BITBUCKET_CREDENTIAL_KEYS:
+      BITBUCKET_ACTIVE_KEY_ID:
       GITHUB_APP_ID: "1"
       GITHUB_APP_PRIVATE_KEY: ${LOAD_GITHUB_APP_PRIVATE_KEY:?set by scripts/parallel_runs_load.py}
       GITHUB_APP_BOT_LOGIN: load-reviewer[bot]
