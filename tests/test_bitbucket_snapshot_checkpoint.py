@@ -418,10 +418,14 @@ def test_raw_reads_resume_after_rate_limit_without_refetching_completed_blobs() 
     assert raw_paths == ["f0.py", "f1.py", "f2.py", "f3.py", "f3.py", "f4.py", "f5.py"]
 
 
-def test_wrong_size_raw_response_is_not_persisted_for_next_worker() -> None:
+@pytest.mark.parametrize("saved_wrong_size", [False, True])
+def test_wrong_size_raw_response_or_checkpoint_does_not_poison_next_worker(
+    saved_wrong_size: bool,
+) -> None:
     class Raw:
         def __init__(self) -> None:
             self.saved: dict[str, bytes] = {}
+            self.clears = 0
 
         async def load_raw(self, target: BitbucketIndexTarget, sha: str, path: str) -> bytes | None:
             return self.saved.get(path)
@@ -429,12 +433,17 @@ def test_wrong_size_raw_response_is_not_persisted_for_next_worker() -> None:
         async def save_raw(
             self, target: BitbucketIndexTarget, sha: str, path: str, body: bytes
         ) -> None:
+            if path in self.saved and self.saved[path] != body:
+                raise VcsUnavailable("Bitbucket raw checkpoint changed")
             self.saved[path] = body
 
         async def clear(self, target: BitbucketIndexTarget, sha: str) -> None:
+            self.clears += 1
             self.saved.clear()
 
     raw = Raw()
+    if saved_wrong_size:
+        raw.saved["a.py"] = b"xx"
     reads = 0
 
     def handle(request: httpx.Request) -> httpx.Response:
@@ -456,22 +465,29 @@ def test_wrong_size_raw_response_is_not_persisted_for_next_worker() -> None:
             )
         assert request.url.path.endswith(f"/src/{_SHA}/a.py")
         reads += 1
-        return httpx.Response(200, content=b"xx" if reads == 1 else b"x")
+        return httpx.Response(200, content=b"xx" if reads == 1 and not saved_wrong_size else b"x")
 
     async def exercise() -> None:
         async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
-            with pytest.raises(VcsUnavailable, match="size differs"):
-                await _source(_Credentials(), client, raw_checkpoint=raw).archive(
-                    _SHA, max_bytes=100_000
-                )
-            assert raw.saved == {}
+            if not saved_wrong_size:
+                with pytest.raises(VcsUnavailable, match="size differs"):
+                    await _source(_Credentials(), client, raw_checkpoint=raw).archive(
+                        _SHA, max_bytes=100_000
+                    )
+                assert raw.saved == {}
             archive = await _source(_Credentials(), client, raw_checkpoint=raw).archive(
                 _SHA, max_bytes=100_000
             )
             assert archive.commit_sha == _SHA
+            if saved_wrong_size:
+                reused = await _source(_Credentials(), client, raw_checkpoint=raw).archive(
+                    _SHA, max_bytes=100_000
+                )
+                assert reused.commit_sha == _SHA
 
     asyncio.run(exercise())
-    assert reads == 2
+    assert reads == (1 if saved_wrong_size else 2)
+    assert raw.clears == int(saved_wrong_size)
     assert raw.saved == {"a.py": b"x"}
 
 

@@ -1,4 +1,4 @@
-"""Shared canonical Bitbucket projection test doubles."""
+"""Shared Bitbucket projection test doubles and PostgreSQL setup."""
 
 from __future__ import annotations
 
@@ -6,7 +6,18 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
+from sqlalchemy import text
+from sqlalchemy.ext.asyncio import AsyncSession
+
 from app.modules.integrations.bitbucket.application.request_credentials import BoundBitbucketTarget
+from app.modules.integrations.bitbucket.infrastructure.connection_store import (
+    SqlAlchemyBitbucketConnectionStore,
+)
+from app.modules.integrations.bitbucket.infrastructure.credential_cipher import (
+    BitbucketCredentialCipher,
+    CredentialContext,
+    CredentialPurpose,
+)
 from app.modules.reviews.application.determine_ci_eligibility import WebhookRunIdentity
 from app.modules.reviews.application.project_bitbucket_pull_request import (
     CanonicalBitbucketPullRequest,
@@ -19,6 +30,54 @@ from app.modules.reviews.application.try_enqueue_webhook_run import (
 )
 
 NOW = datetime(2026, 10, 26, 12, tzinfo=UTC)
+
+
+async def seed_confirmed_bitbucket_repository(
+    session: AsyncSession,
+    *,
+    workspace: UUID,
+    installation: UUID,
+    remote_workspace: UUID,
+    remote_repo: UUID,
+    cipher: BitbucketCredentialCipher,
+) -> UUID:
+    store = SqlAlchemyBitbucketConnectionStore(session)
+    await store.create_connection(
+        workspace_id=workspace,
+        installation_id=installation,
+        bitbucket_workspace_uuid=remote_workspace,
+        token=cipher.encrypt(
+            "test-token",
+            context=CredentialContext(installation, workspace),
+            purpose=CredentialPurpose.TOKEN,
+        ),
+    )
+    repository, _ = await store.bind_repository(
+        workspace_id=workspace,
+        installation_id=installation,
+        repository_uuid=remote_repo,
+        full_name="team/repo",
+        default_branch="main",
+        web_url="https://bitbucket.org/team/repo",
+    )
+    await store.set_repository_webhook_secret(
+        workspace_id=workspace,
+        installation_id=installation,
+        repository_id=repository,
+        secret=cipher.encrypt(
+            "s" * 40,
+            context=CredentialContext(installation, workspace, repository),
+            purpose=CredentialPurpose.WEBHOOK_SECRET,
+        ),
+    )
+    await session.execute(
+        text(
+            "UPDATE bitbucket_repository_webhook_secrets SET confirmed_at=now() "
+            "WHERE repository_id=:repository"
+        ),
+        {"repository": repository},
+    )
+    return repository
 
 
 @dataclass

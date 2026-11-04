@@ -12,6 +12,7 @@ import pytest
 
 from app.modules.integrations.bitbucket.application.provider_error import (
     BitbucketProviderError,
+    BitbucketPullRequestFetchError,
     BitbucketPullRequestResponseError,
 )
 from app.modules.integrations.bitbucket.application.request_credentials import (
@@ -356,7 +357,17 @@ def test_metadata_only_projection_does_not_create_a_new_run() -> None:
     asyncio.run(scenario())
 
 
-def test_push_keeps_scanning_after_one_invalid_pull_request() -> None:
+@pytest.mark.parametrize(
+    "candidate_error",
+    [
+        BitbucketPullRequestResponseError(),
+        BitbucketPullRequestFetchError("pull_request_missing"),
+        BitbucketPullRequestFetchError("pull_request_unavailable"),
+    ],
+)
+def test_push_keeps_scanning_after_one_bad_pull_request(
+    candidate_error: BitbucketProviderError,
+) -> None:
     class PageCandidates(PushCandidates):
         async def matching_open_pr_page(
             self,
@@ -379,7 +390,7 @@ def test_push_keeps_scanning_after_one_invalid_pull_request() -> None:
         ) -> CanonicalBitbucketPullRequest:
             self.calls.append(f"http:{number}")
             if number == 19 and self.invalid_19:
-                raise BitbucketPullRequestResponseError()
+                raise candidate_error
             return CanonicalBitbucketPullRequest(
                 repository_uuid=TARGET.repository_uuid,
                 number=number,
@@ -400,7 +411,7 @@ def test_push_keeps_scanning_after_one_invalid_pull_request() -> None:
         position_value: int | None = None
         deferred: list[tuple[int, str]] = field(default_factory=list)
         due: bool = True
-        untried: bool = False
+        another_due: bool = False
 
         async def position(self, *_: object) -> int | None:
             return self.position_value
@@ -437,10 +448,10 @@ def test_push_keeps_scanning_after_one_invalid_pull_request() -> None:
             completed: tuple[int, ...],
             deferred: tuple[tuple[int, str], ...],
         ) -> tuple[bool, bool, bool]:
-            if self.untried:
+            if self.another_due:
                 assert completed == ()
-                assert deferred == ((19, "invalid_provider_response"),)
-            return True, self.untried, False
+                assert deferred == ((19, candidate_error.code),)
+            return True, self.another_due, False
 
     class PushUow(Uow):
         def __init__(self, calls: list[str], continuation: Continuation) -> None:
@@ -478,16 +489,17 @@ def test_push_keeps_scanning_after_one_invalid_pull_request() -> None:
             with pytest.raises(BitbucketPushContinuationPending):
                 await use_case.push(*args)
         assert continuation.position_value == 519
-        assert continuation.deferred == [(19, "invalid_provider_response")]
+        assert continuation.deferred == [(19, candidate_error.code)]
         assert "http:519" in calls
         assert sum(call.startswith("http:") for call in calls) == 503
         with pytest.raises(BitbucketPushRetryPending):
             await use_case.push(*args)
         current.invalid_19 = False
-        with pytest.raises(BitbucketPushContinuationPending):
+        # One candidate completed, but the remaining queue is entirely future-due.
+        with pytest.raises(BitbucketPushRetryPending):
             await use_case.push(*args)
         current.invalid_19 = True
-        continuation.untried = True
+        continuation.another_due = True
         with pytest.raises(BitbucketPushContinuationPending):
             await use_case.push(*args)
         continuation.due = False

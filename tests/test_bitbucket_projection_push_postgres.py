@@ -75,7 +75,13 @@ from app.modules.reviews.infrastructure.run_lifecycle_store import SqlAlchemyRun
 from app.modules.reviews.infrastructure.run_repository import SqlAlchemyRunRepository
 from app.modules.reviews.infrastructure.webhook_runs import SqlAlchemyWebhookRunUnitOfWork
 from tests.bitbucket_connection_postgres_support import _config
-from tests.bitbucket_projection_support import NOW, Current, Enqueuer, Publisher
+from tests.bitbucket_projection_support import (
+    NOW,
+    Current,
+    Enqueuer,
+    Publisher,
+    seed_confirmed_bitbucket_repository,
+)
 
 pytest_plugins = ("tests.bitbucket_connection_postgres_support",)
 
@@ -103,25 +109,15 @@ def test_push_candidates_page_all_matching_open_prs_and_fork_sources(
     async def scenario() -> None:
         try:
             async with sessions.begin() as session:
+                repository = await seed_confirmed_bitbucket_repository(
+                    session,
+                    workspace=workspace,
+                    installation=installation,
+                    remote_workspace=remote_workspace,
+                    remote_repo=remote_repo,
+                    cipher=cipher,
+                )
                 store = SqlAlchemyBitbucketConnectionStore(session)
-                await store.create_connection(
-                    workspace_id=workspace,
-                    installation_id=installation,
-                    bitbucket_workspace_uuid=remote_workspace,
-                    token=cipher.encrypt(
-                        "test-token",
-                        context=CredentialContext(installation, workspace),
-                        purpose=CredentialPurpose.TOKEN,
-                    ),
-                )
-                repository, _ = await store.bind_repository(
-                    workspace_id=workspace,
-                    installation_id=installation,
-                    repository_uuid=remote_repo,
-                    full_name="team/repo",
-                    default_branch="main",
-                    web_url="https://bitbucket.org/team/repo",
-                )
                 sibling, _ = await store.bind_repository(
                     workspace_id=workspace,
                     installation_id=installation,
@@ -129,23 +125,6 @@ def test_push_candidates_page_all_matching_open_prs_and_fork_sources(
                     full_name="team/sibling",
                     default_branch="main",
                     web_url="https://bitbucket.org/team/sibling",
-                )
-                await store.set_repository_webhook_secret(
-                    workspace_id=workspace,
-                    installation_id=installation,
-                    repository_id=repository,
-                    secret=cipher.encrypt(
-                        "s" * 40,
-                        context=CredentialContext(installation, workspace, repository),
-                        purpose=CredentialPurpose.WEBHOOK_SECRET,
-                    ),
-                )
-                await session.execute(
-                    text(
-                        "UPDATE bitbucket_repository_webhook_secrets SET confirmed_at=now() "
-                        "WHERE repository_id=:id"
-                    ),
-                    {"id": repository},
                 )
                 rows = [
                     {

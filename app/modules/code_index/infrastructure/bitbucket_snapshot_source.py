@@ -613,6 +613,8 @@ class BitbucketRepositorySnapshotSource:
                     raise VcsUnavailable("Bitbucket diffstat is incomplete")
                 if len({item.path for item in files}) != len(files):
                     raise VcsUnavailable("Bitbucket repeated a diffstat path")
+                if not files:
+                    return Comparison(Ancestry.AHEAD, (), False)
                 return Comparison(Ancestry.AHEAD, tuple(files), True)
             params = next_params
         return Comparison(Ancestry.AHEAD, (), False)
@@ -848,13 +850,12 @@ class BitbucketRepositorySnapshotSource:
         if raw_checkpoint is not None:
             target = await self._bound()
             saved = await raw_checkpoint.load_raw(target, commit_sha, path)
+            if saved is not None and expected_size is not None and len(saved) != expected_size:
+                await raw_checkpoint.clear(target, commit_sha)
+                saved = None
             if saved is not None:
                 if len(saved) > max_bytes:
                     raise _ResponseTooLarge
-                if expected_size is not None and len(saved) != expected_size:
-                    raise VcsUnavailable(
-                        "Bitbucket source file size differs from the pinned listing"
-                    )
                 self._budget(
                     self._read_bytes + len(saved) > self._budgets.read_bytes,
                     limit="download_bytes",

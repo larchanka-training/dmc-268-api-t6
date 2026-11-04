@@ -17,3 +17,7 @@ class BitbucketPullRequestResponseError(BitbucketProviderError):
 
     def __init__(self) -> None:
         super().__init__("invalid_provider_response")
+
+
+class BitbucketPullRequestFetchError(BitbucketProviderError):
+    """A failed read after the repository resolved, scoped to one PR."""

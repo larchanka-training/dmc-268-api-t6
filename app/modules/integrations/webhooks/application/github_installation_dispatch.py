@@ -65,6 +65,7 @@ class InstallationDeliveryDispatchStatus(StrEnum):
     WAITING_PUSH_CANDIDATE = "waiting_push_candidate"
     WAITING_PUSH_PROVIDER = "waiting_push_provider"
     FAILED_PUSH_CANDIDATES = "failed_push_candidates"
+    FAILED_PUSH_PROVIDER = "failed_push_provider"
     REQUESTED_RULES_REFRESH = "requested_rules_refresh"
 
 

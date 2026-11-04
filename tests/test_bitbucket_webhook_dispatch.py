@@ -292,15 +292,19 @@ def test_push_rate_limit_preserves_provider_retry_delay() -> None:
 
 
 @pytest.mark.parametrize(
-    ("dispatch_result", "expected_delay"),
+    ("dispatch_result", "expected_delay", "expired"),
     [
-        (WebhookDispatchRetry(3600), timedelta(hours=1)),
-        (InstallationDeliveryDispatchResult(Status.CONTINUING_PUSH), timedelta(0)),
+        (WebhookDispatchRetry(120), timedelta(seconds=120), False),
+        (WebhookDispatchRetry(3600), timedelta(hours=1), False),
+        (WebhookDispatchRetry(30), timedelta(seconds=30), True),
+        (InstallationDeliveryDispatchResult(Status.CONTINUING_PUSH), timedelta(0), False),
     ],
 )
 def test_push_retry_keeps_receipt_attempts_and_due_time(
     dispatch_result: WebhookDispatchRetry | InstallationDeliveryDispatchResult,
     expected_delay: timedelta,
+    expired: bool,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     now = datetime(2026, 11, 4, tzinfo=UTC)
     delivery = receipt(
@@ -310,6 +314,7 @@ def test_push_retry_keeps_receipt_attempts_and_due_time(
     class ReceiptStore:
         retry_at: datetime | None = None
         failure_releases = 0
+        provider_retries = 0
 
         async def pending_ids(self, at: datetime, limit: int) -> tuple[str, ...]:
             assert at == now and limit == 1
@@ -327,6 +332,22 @@ def test_push_retry_keeps_receipt_attempts_and_due_time(
         ) -> None:
             assert delivery_id == delivery.delivery_id
             self.retry_at = retry_after
+
+        async def retry_push_provider(
+            self,
+            delivery_id: str,
+            token: UUID,
+            retry_after: datetime,
+            *,
+            now: datetime,
+            received_before: datetime,
+        ) -> bool:
+            assert delivery_id == delivery.delivery_id
+            assert now == datetime(2026, 11, 4, tzinfo=UTC)
+            assert received_before == datetime(2026, 11, 3, 18, tzinfo=UTC)
+            self.provider_retries += 1
+            self.retry_at = retry_after
+            return expired
 
         async def release_after_dispatch_failure(self, *_: object) -> bool:
             self.failure_releases += 1
@@ -364,5 +385,10 @@ def test_push_retry_keeps_receipt_attempts_and_due_time(
         assert (result.handled_count, result.error_count) == (1, 0)
         assert store.retry_at == now + expected_delay
         assert store.failure_releases == 0
+        assert store.provider_retries == int(isinstance(dispatch_result, WebhookDispatchRetry))
 
     asyncio.run(scenario())
+    assert (
+        any("reason=provider_retry_expired" in record.message for record in caplog.records)
+        is expired
+    )

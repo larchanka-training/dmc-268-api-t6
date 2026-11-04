@@ -13,7 +13,7 @@ complete active connection list with `nextCursor: null`. The internal
 and ID. Each page and its position are scoped to the portal workspace and,
 when supplied, the installation. Rotation drains all internal pages before
 validating the replacement token. There is no public connection cursor: the
-merged [UI #195](https://github.com/larchanka-training/dmc-268-ui-t6/pull/195)
+merged [UI #224](https://github.com/larchanka-training/dmc-268-ui-t6/pull/224)
 schema requires `nextCursor` to be null.
 
 The binding-page migration backfills `repositories.workspace_id` for existing
@@ -71,15 +71,25 @@ transaction-bound worker notification. Thus 503 candidates require 101 bounded
 passes without a fixed 30-second polling wait between pages. Actual completion
 time still depends on provider response time and rate limits.
 
-Deferred Run admission, stale canonical reads and a malformed individual PR
-response enter a receipt-owned retry queue while later PR pages continue.
+Deferred Run admission, stale canonical reads, malformed individual PR responses,
+and a PR or its commit returning 404, 5xx or a transport error after a successful
+repository lookup enter a receipt-owned retry queue while later PR pages continue.
+HTTP 403 remains a repository/credential error handled by ordinary failed-dispatch
+retries; it is not treated as a candidate-local response.
 Deferred Run admission is retried no earlier than 30 seconds, for up to one hour
 from receipt arrival. Other candidate failures wait at least five minutes
 between queued attempts and get up to three queued retries. Exhaustion records
-the reason and failure time, then fails the receipt. A provider-wide 429, 5xx
-or transport failure instead pauses at the saved cursor, honors `Retry-After`
-when present and does not consume receipt attempts. Revoking the origin
-terminalizes queued candidates.
+the reason and failure time, then fails the receipt. HTTP 429 at any stage, or
+5xx/transport failure during repository lookup, instead pauses at the saved cursor,
+honors `Retry-After` when present and does not consume ordinary receipt attempts.
+If a shared provider error recurs at or after six hours from receipt arrival,
+the receipt fails with `provider_retry_expired` in a WARNING log. A normal 429
+window inside that limit remains retryable. Parsed `Retry-After` hints are capped
+at 24 hours; a single window may extend beyond six hours, and the receipt is
+terminalized only if a shared provider retry recurs on its next attempt. When
+a retry page leaves more candidates already due, the next pass continues
+immediately; only future-due
+candidates wait. Revoking the origin terminalizes queued candidates.
 Continuing receipts are ordered by effective due time so older large pushes
 do not starve newer deliveries in a worker sweep.
 
@@ -108,15 +118,20 @@ archive entries, per-file size, and storage quotas.
 
 Completed pinned listing pages and size-verified raw blobs are checkpointed by
 repository, target SHA, binding generation and index generation. Raw checkpoint
-storage is bounded to 100 MiB per build. A worker restart reuses validated
-pages and blobs without sending those requests again. A partial page cannot
-yield a complete manifest or a ready index. A new target SHA, changed binding
-or purge invalidates the old checkpoint; successful manifest publication
-clears it. HTTP 429 and a preempting deadline release the build lease with a
-transient retry outcome, honoring provider `Retry-After` when present.
+storage has a hard 100 MiB cap per repository, outside repository and workspace
+storage quotas. A worker restart reuses validated pages and blobs without
+sending those requests again. A partial page cannot
+yield a complete manifest or a ready index. If a saved raw blob disagrees with
+the pinned listing size, the worker clears that target checkpoint and refetches
+the blob. A new target SHA, changed binding or purge invalidates the old
+checkpoint; successful manifest publication clears it. HTTP 429 and a
+preempting deadline release the build lease with a transient retry outcome,
+honoring provider `Retry-After` when present.
 Deterministic request, entry and byte limits instead produce a terminal
-`limit_exceeded:*` state. Neither path publishes a partial index. Build
-outcomes and logs count newly sent pinned listing, metadata and raw blob
+`limit_exceeded:*` state. Raw checkpoint data can remain after that terminal
+state until a target or binding change or repository purge. Neither path
+publishes a partial index. Build outcomes and logs count newly sent pinned
+listing, metadata and raw blob
 requests separately; restored pages do not count as new provider requests.
 
 After index publication, the worker stores the complete pinned manifest for
@@ -126,16 +141,18 @@ reuse the published manifest only with a verified `AHEAD` compare and complete
 diffstat. The source checks each changed path through pinned
 `GET /src/{commit}/{path}?format=meta`, validating its path, commit hash, type,
 size and attributes before deriving the target manifest. An incomplete or
-untrusted compare or metadata response falls back to a full listing. An
-unexpected empty diff for different SHAs also requires a full listing. Changed
-blobs are read as raw files; unchanged paths retain their published graph data.
+untrusted compare forces a full index rebuild. Untrusted metadata makes the
+source list the full target tree before a possible sparse update. An unexpected
+empty diff for different SHAs forces a full rebuild. Changed blobs are read as
+raw files; unchanged paths retain their published graph data.
 The metadata request budget also covers head and compare calls.
 
 In the 201-file MockTransport test, a full build sent 3 listings, 2 metadata
 requests and 201 raw reads. A verified one-file push in a new worker instance
 sent 0 listings, 5 metadata requests and 1 raw read. It wrote one changed file
-and published no path deletion. These are local test counts, not live private
-repository measurements.
+and published no path deletion. The same-size change with an empty diffstat at
+a different head SHA instead took the full-build path. These are local test
+counts, not live private repository measurements.
 
 ## Default rules, publication and status
 
@@ -146,17 +163,18 @@ copy so one onboarding cannot mutate another repository's defaults.
 The Bitbucket status publisher checks the Run's provider before sending a
 commit status. A GitHub or GitLab Run does not enter the Bitbucket status path.
 Publication still rechecks the pinned head and claim before writing each
-operation. A reviewer's local MockTransport probe with Bitbucket's 12-character
-`source.commit.hash` saw GET counts of 6, 8 and 22 for 0, 1 and 8 inline
-findings respectively (a `2N+6` slope); claim renewals were 2, 3 and 10.
-Those counts are a local probe, not a live private-repository measurement, and
-should not be described as an `N+4` GET bound for the live response shape.
+operation. The in-repo
+[`test_publication_request_and_claim_cost_is_bounded_by_findings`](../tests/test_bitbucket_publication_resources.py)
+uses Bitbucket's 12-character `source.commit.hash` and records GET counts of
+6, 8 and 22 for 0, 1 and 8 inline findings respectively (a `2N+6` slope);
+claim renewals were 2, 3 and 10. These are MockTransport counts, not a live
+private-repository measurement or an `N+4` GET bound for the live response shape.
 
 ## Contract and remaining proof
 
 The API's UI Zod fixture is pinned to the exact merged UI source commit
-[`7b18dcca46cc2edec88b482a70b1544c8e139651`](https://github.com/larchanka-training/dmc-268-ui-t6/commit/7b18dcca46cc2edec88b482a70b1544c8e139651)
-from [UI #195](https://github.com/larchanka-training/dmc-268-ui-t6/pull/195).
+[`5a90cce81efeb17a9f6a1dfa30236b09b65cfe55`](https://github.com/larchanka-training/dmc-268-ui-t6/commit/5a90cce81efeb17a9f6a1dfa30236b09b65cfe55)
+from [UI #224](https://github.com/larchanka-training/dmc-268-ui-t6/pull/224).
 Its `bitbucketConnectionList.nextCursor` remains null.
 
 A disposable private Bitbucket repository has not been available for a live

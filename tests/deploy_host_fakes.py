@@ -579,6 +579,29 @@ def _bundle(secrets: Mapping[str, str]) -> str:
     return base64.b64encode(lines.encode()).decode()
 
 
+def _write_application_bundle(directory: Path, values: Mapping[str, str]) -> None:
+    result = subprocess.run(
+        [
+            "bash",
+            "-eo",
+            "pipefail",
+            "-c",
+            'source "$ENV_HELPER"; write_app_env_files "$APP_DIR" "$APP_SECRETS_B64"',
+        ],
+        env={
+            "PATH": os.environ["PATH"],
+            "ENV_HELPER": str(REPO_ROOT / "deploy" / "scripts" / "env-file.sh"),
+            "APP_DIR": str(directory),
+            "APP_SECRETS_B64": _bundle(values),
+        },
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == ""
+
+
 def _mode(path: Path) -> int:
     return stat.S_IMODE(path.stat().st_mode)
 

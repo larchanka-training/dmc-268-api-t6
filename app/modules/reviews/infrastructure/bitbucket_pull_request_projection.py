@@ -416,14 +416,25 @@ class SqlAlchemyBitbucketPushContinuationStore:
                 BitbucketPushRetryCandidate.failed_at.is_(None),
             )
         )
-        untried = await self._session.scalar(
-            select(func.count())
-            .select_from(BitbucketPushRetryCandidate)
+        now = datetime.now(UTC)
+        due = await self._session.scalar(
+            select(BitbucketPushRetryCandidate.pr_number)
             .where(
                 BitbucketPushRetryCandidate.webhook_event_id == receipt.id,
-                BitbucketPushRetryCandidate.attempted_at.is_(None),
                 BitbucketPushRetryCandidate.failed_at.is_(None),
+                or_(
+                    BitbucketPushRetryCandidate.attempted_at.is_(None),
+                    and_(
+                        BitbucketPushRetryCandidate.reason == "run_admission_deferred",
+                        BitbucketPushRetryCandidate.attempted_at <= now - timedelta(seconds=30),
+                    ),
+                    and_(
+                        BitbucketPushRetryCandidate.reason != "run_admission_deferred",
+                        BitbucketPushRetryCandidate.attempted_at <= now - timedelta(minutes=5),
+                    ),
+                ),
             )
+            .limit(1)
         )
         failed = await self._session.scalar(
             select(func.count())
@@ -433,7 +444,7 @@ class SqlAlchemyBitbucketPushContinuationStore:
                 BitbucketPushRetryCandidate.failed_at.is_not(None),
             )
         )
-        return bool(remaining), bool(untried), bool(failed)
+        return bool(remaining), due is not None, bool(failed)
 
     async def _receipt(
         self,

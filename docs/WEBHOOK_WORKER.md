@@ -56,8 +56,9 @@ binding is inactive, or be deferred when a concurrent token rotation prevents
 a safe provider read. `credential_rotated` and `canonical_stale` are deferred
 reasons; `invalid_payload` and `identity_mismatch` are invalid-event reasons.
 Projection refetches the current PR, and close events cancel active work. A
-`repo:push` fan-out is bounded at 500 open PR candidates per branch; larger
-fan-out is a known limit requiring a separate scalable implementation. See
+`repo:push` fan-out advances through bounded five-PR pages and resumes on the
+saved receipt position; a shared provider pause fails visibly after six hours
+from receipt arrival. See
 [Bitbucket webhook](BITBUCKET_WEBHOOK.md) and [pipeline](PIPELINE_SPEC.md#bitbucket-cloud-path-333).
 
 ## Installed GitLab replay and activation

@@ -437,7 +437,10 @@ def test_sparse_incremental_build_does_not_fetch_unchanged_100_file_archive(
     assert world.store.publications[0]["full"] is False
 
 
-def test_bitbucket_201_file_build_then_one_file_push_reads_one_changed_blob() -> None:
+@pytest.mark.parametrize("empty_diffstat", [False, True])
+def test_bitbucket_201_file_push_uses_sparse_or_full_rebuild_for_diffstat(
+    empty_diffstat: bool,
+) -> None:
     files = {f"f{i:03}.py": b"value = 1\n" for i in range(201)}
     target = BoundBitbucketTarget(UUID(int=1), _REPO, UUID(int=2), UUID(int=3), 1, 1)
     head_sha = _OLD
@@ -498,8 +501,10 @@ def test_bitbucket_201_file_build_then_one_file_push_reads_one_changed_blob() ->
             return httpx.Response(
                 200,
                 json={
-                    "size": 1,
-                    "values": [
+                    "size": 0 if empty_diffstat else 1,
+                    "values": []
+                    if empty_diffstat
+                    else [
                         {
                             "status": "modified",
                             "old": {"path": "f000.py"},
@@ -588,20 +593,28 @@ def test_bitbucket_201_file_build_then_one_file_push_reads_one_changed_blob() ->
 
             update = await world.use_case().execute(_REPO, _GENERATION)
             assert update.status is BuildStatus.PUBLISHED
-            assert update.mode is BuildMode.INCREMENTAL
-            assert (update.written_files, update.deleted_files) == (1, 0)
-            assert (
-                update.listing_request_count,
-                update.metadata_request_count,
-                update.raw_read_count,
-            ) == (0, 5, 1)
-            assert (len(listing_requests), metadata_reads, raw_reads) == (
-                0,
-                ["f000.py"],
-                ["f000.py"],
-            )
-            assert world.written() == ["f000.py"]
-            assert world.store.publications[0]["full"] is False
+            if empty_diffstat:
+                assert update.mode is BuildMode.FULL
+                assert update.written_files == 201
+                assert len(raw_reads) == 201
+                changed = next(file for _, file in world.store.written if file.path == "f000.py")
+                assert changed.blob_sha == _blob(b"value = 2\n")
+                assert world.store.publications[0]["full"] is True
+            else:
+                assert update.mode is BuildMode.INCREMENTAL
+                assert (update.written_files, update.deleted_files) == (1, 0)
+                assert (
+                    update.listing_request_count,
+                    update.metadata_request_count,
+                    update.raw_read_count,
+                ) == (0, 5, 1)
+                assert (len(listing_requests), metadata_reads, raw_reads) == (
+                    0,
+                    ["f000.py"],
+                    ["f000.py"],
+                )
+                assert world.written() == ["f000.py"]
+                assert world.store.publications[0]["full"] is False
             assert world.store.publications[0]["deleted_paths"] == ()
 
     asyncio.run(scenario())

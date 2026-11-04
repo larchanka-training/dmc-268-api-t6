@@ -8,7 +8,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
-from typing import Protocol
+from typing import Protocol, cast
 from uuid import UUID, uuid4
 
 from app.common.application.log_token import log_token
@@ -24,6 +24,7 @@ _FAILURE_RETRY = timedelta(seconds=30)
 _RUN_TRIGGER_RETRY = timedelta(seconds=30)
 _PUSH_CONTINUATION_RETRY = timedelta(0)
 _PUSH_CANDIDATE_RETRY = timedelta(seconds=30)
+_PUSH_PROVIDER_MAX_WAIT = timedelta(hours=6)
 _RUN_TRIGGER_MAX_WAIT = timedelta(hours=1)
 _UNKNOWN_INSTALLATION_RETRY = timedelta(minutes=5)
 _MAX_DISPATCH_ATTEMPTS = 3
@@ -175,6 +176,20 @@ class GitHubWebhookReceiptStore(Protocol):
     async def pending_ids(self, now: datetime, limit: int) -> tuple[str, ...]: ...
 
 
+class PushProviderRetryReceiptStore(Protocol):
+    """Bitbucket provider retry disposition for receipts awaiting a push page."""
+
+    async def retry_push_provider(
+        self,
+        delivery_id: str,
+        token: UUID,
+        retry_after: datetime,
+        *,
+        now: datetime,
+        received_before: datetime,
+    ) -> bool: ...
+
+
 class GitHubWebhookReceiptUnitOfWork(UnitOfWork, Protocol):
     @property
     def receipts(self) -> GitHubWebhookReceiptStore: ...
@@ -318,10 +333,26 @@ class ReceiveWebhookDelivery:
                 dispatcher.execute(delivery), timeout=self._dispatch_timeout_seconds
             )
         except WebhookDispatchRetry as retry:
-            retry_at = self._now() + timedelta(seconds=retry.delay_seconds)
+            now = self._now()
+            retry_at = now + timedelta(seconds=retry.delay_seconds)
             async with self._uow_factory() as uow:
-                await uow.receipts.retry_push_continuation(delivery_id, token, retry_at)
+                expired = await cast(
+                    "PushProviderRetryReceiptStore", uow.receipts
+                ).retry_push_provider(
+                    delivery_id,
+                    token,
+                    retry_at,
+                    now=now,
+                    received_before=now - _PUSH_PROVIDER_MAX_WAIT,
+                )
                 await uow.commit()
+            if expired:
+                _LOGGER.warning(
+                    "%s webhook delivery %s failed reason=provider_retry_expired",
+                    self._provider_label,
+                    delivery_id,
+                )
+                return InstallationDeliveryDispatchStatus.FAILED_PUSH_PROVIDER, False
             _LOGGER.info(
                 "%s webhook delivery %s waiting %d seconds for provider retry",
                 self._provider_label,

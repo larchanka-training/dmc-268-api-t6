@@ -11,6 +11,7 @@ from uuid import UUID
 
 from app.common.application.unit_of_work import UnitOfWork
 from app.modules.integrations.bitbucket.application.provider_error import (
+    BitbucketPullRequestFetchError,
     BitbucketPullRequestResponseError,
 )
 from app.modules.integrations.bitbucket.application.request_credentials import (
@@ -412,7 +413,7 @@ class ProjectBitbucketPullRequest:
                 except BitbucketPullRequestStale:
                     deferred.append((number, "canonical_stale"))
                     continue
-                except BitbucketPullRequestResponseError as error:
+                except (BitbucketPullRequestResponseError, BitbucketPullRequestFetchError) as error:
                     deferred.append((number, error.code))
                     continue
                 if outcome is not None:
@@ -435,7 +436,7 @@ class ProjectBitbucketPullRequest:
             )
             async with self._uow_factory() as uow:
                 await uow.lock_target(target, webhook_generation)
-                remaining, untried, failed = await uow.push_continuation.settle_pending(
+                remaining, due, failed = await uow.push_continuation.settle_pending(
                     delivery_id,
                     repository_id,
                     binding_generation,
@@ -445,7 +446,7 @@ class ProjectBitbucketPullRequest:
                 )
                 await uow.commit()
             if remaining:
-                if untried or completed:
+                if due:
                     raise BitbucketPushContinuationPending()
                 raise BitbucketPushRetryPending()
             if failed:
@@ -466,7 +467,7 @@ class ProjectBitbucketPullRequest:
             except BitbucketPullRequestStale:
                 deferred_numbers.append((number, "canonical_stale"))
                 continue
-            except BitbucketPullRequestResponseError as error:
+            except (BitbucketPullRequestResponseError, BitbucketPullRequestFetchError) as error:
                 deferred_numbers.append((number, error.code))
                 continue
             if outcome is not None:

@@ -191,6 +191,41 @@ class SqlAlchemyWebhookReceiptOperations:
         if retry_after <= datetime.now(UTC):
             await notify_webhook_work(self._session)
 
+    async def retry_push_provider(
+        self,
+        delivery_id: str,
+        token: UUID,
+        retry_after: datetime,
+        *,
+        now: datetime,
+        received_before: datetime,
+    ) -> bool:
+        expired = WebhookEvent.received_at <= received_before
+        result = await self._session.execute(
+            update(WebhookEvent)
+            .where(
+                WebhookEvent.provider == "bitbucket",
+                WebhookEvent.event == "repo:push",
+                WebhookEvent.delivery_id == delivery_id,
+                WebhookEvent.projection_claim_token == token,
+                WebhookEvent.projected_at.is_(None),
+                WebhookEvent.projection_failed_at.is_(None),
+                WebhookEvent.projection_deferred_at.is_(None),
+            )
+            .values(
+                projection_claim_token=None,
+                projection_lease_until=None,
+                projection_attempt_count=0,
+                projection_failed_at=case((expired, now), else_=None),
+                retry_after=case((expired, None), else_=retry_after),
+            )
+            .returning(WebhookEvent.projection_failed_at)
+        )
+        row = result.one_or_none()
+        if row is None:
+            raise RuntimeError("webhook projection claim was lost")
+        return row[0] is not None
+
     async def fail_push_candidates(self, delivery_id: str, token: UUID, at: datetime) -> None:
         terminal = select(BitbucketPushRetryCandidate.webhook_event_id).where(
             BitbucketPushRetryCandidate.webhook_event_id == WebhookEvent.id,

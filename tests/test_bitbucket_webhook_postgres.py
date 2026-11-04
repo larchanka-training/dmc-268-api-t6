@@ -213,6 +213,226 @@ def test_push_deferred_candidate_waits_between_attempts_for_one_hour(
 
 
 @pytest.mark.integration
+@pytest.mark.parametrize(
+    ("receipt_age", "retry_delay", "terminal"),
+    [
+        (timedelta(hours=6), timedelta(seconds=120), True),
+        (timedelta(hours=5, minutes=59), timedelta(seconds=120), False),
+        (timedelta(hours=1), timedelta(hours=1), False),
+    ],
+)
+def test_shared_push_provider_pause_has_six_hour_receipt_ceiling(
+    bitbucket_connection_schema: Connection,
+    receipt_age: timedelta,
+    retry_delay: timedelta,
+    terminal: bool,
+) -> None:
+    db = bitbucket_connection_schema
+    command.upgrade(_config(db), "head")
+    workspace, installation, remote_workspace, remote_repo = (uuid4() for _ in range(4))
+    db.execute(
+        text("INSERT INTO workspaces (id,name,daily_budget_usd) VALUES (:id,'test',7)"),
+        {"id": workspace},
+    )
+    schema = str(db.scalar(text("SELECT current_schema()")))
+    db.commit()
+    url = make_url(os.environ["TEST_DATABASE_URL"]).set(drivername="postgresql+psycopg_async")
+    engine = create_async_engine(url, connect_args={"options": f"-csearch_path={schema}"})
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    cipher = BitbucketCredentialCipher(active_key_id="test", keys={"test": b"a" * 32})
+    delivery_id = "push-provider-pause-" + str(uuid4())
+    now = datetime.now(UTC)
+
+    async def scenario() -> None:
+        try:
+            async with sessions.begin() as session:
+                store = SqlAlchemyBitbucketConnectionStore(session)
+                await store.create_connection(
+                    workspace_id=workspace,
+                    installation_id=installation,
+                    bitbucket_workspace_uuid=remote_workspace,
+                    token=cipher.encrypt(
+                        "test-token",
+                        context=CredentialContext(installation, workspace),
+                        purpose=CredentialPurpose.TOKEN,
+                    ),
+                )
+                repository, _ = await store.bind_repository(
+                    workspace_id=workspace,
+                    installation_id=installation,
+                    repository_uuid=remote_repo,
+                    full_name="team/repo",
+                    default_branch="main",
+                    web_url="https://bitbucket.org/team/repo",
+                )
+                await session.execute(
+                    text(
+                        "INSERT INTO webhook_events "
+                        "(id,provider_installation_id,provider,bitbucket_repository_id,"
+                        "bitbucket_binding_generation,bitbucket_webhook_generation,"
+                        "delivery_id,event,payload,received_at) VALUES "
+                        "(:id,:installation,'bitbucket',:repository,1,1,:delivery,"
+                        "'repo:push','{}'::jsonb,:received_at)"
+                    ),
+                    {
+                        "id": uuid4(),
+                        "installation": installation,
+                        "repository": repository,
+                        "delivery": delivery_id,
+                        "received_at": now - receipt_age,
+                    },
+                )
+            token = uuid4()
+            async with sessions.begin() as session:
+                receipts = SqlAlchemyWebhookReceiptOperations(session, provider="bitbucket")
+                assert await receipts.claim(delivery_id, token, now, now + timedelta(minutes=5))
+            async with sessions.begin() as session:
+                receipts = SqlAlchemyWebhookReceiptOperations(session, provider="bitbucket")
+                assert (
+                    await receipts.retry_push_provider(
+                        delivery_id,
+                        token,
+                        now + retry_delay,
+                        now=now,
+                        received_before=now - timedelta(hours=6),
+                    )
+                    is terminal
+                )
+            async with sessions() as session:
+                row = (
+                    await session.execute(
+                        text(
+                            "SELECT projection_failed_at,retry_after,projection_attempt_count "
+                            "FROM webhook_events WHERE delivery_id=:delivery"
+                        ),
+                        {"delivery": delivery_id},
+                    )
+                ).one()
+            assert row.projection_failed_at == (now if terminal else None)
+            assert row.retry_after == (None if terminal else now + retry_delay)
+            assert row.projection_attempt_count == 0
+            async with sessions.begin() as session:
+                receipts = SqlAlchemyWebhookReceiptOperations(session, provider="bitbucket")
+                before_due = now + retry_delay - timedelta(seconds=1)
+                assert (
+                    await receipts.claim(
+                        delivery_id, uuid4(), before_due, before_due + timedelta(minutes=5)
+                    )
+                    is None
+                )
+            async with sessions.begin() as session:
+                receipts = SqlAlchemyWebhookReceiptOperations(session, provider="bitbucket")
+                due = now + retry_delay
+                assert (
+                    await receipts.claim(delivery_id, uuid4(), due, due + timedelta(minutes=5))
+                    is None
+                ) is terminal
+        finally:
+            await engine.dispose()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.integration
+def test_retry_page_continues_while_other_candidates_are_already_due(
+    bitbucket_connection_schema: Connection,
+) -> None:
+    db = bitbucket_connection_schema
+    command.upgrade(_config(db), "head")
+    workspace, installation, remote_workspace, remote_repo = (uuid4() for _ in range(4))
+    db.execute(
+        text("INSERT INTO workspaces (id,name,daily_budget_usd) VALUES (:id,'test',7)"),
+        {"id": workspace},
+    )
+    schema = str(db.scalar(text("SELECT current_schema()")))
+    db.commit()
+    url = make_url(os.environ["TEST_DATABASE_URL"]).set(drivername="postgresql+psycopg_async")
+    engine = create_async_engine(url, connect_args={"options": f"-csearch_path={schema}"})
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    cipher = BitbucketCredentialCipher(active_key_id="test", keys={"test": b"a" * 32})
+    receipt_id, delivery_id = uuid4(), "push-due-backlog-" + str(uuid4())
+
+    async def scenario() -> None:
+        try:
+            async with sessions.begin() as session:
+                store = SqlAlchemyBitbucketConnectionStore(session)
+                await store.create_connection(
+                    workspace_id=workspace,
+                    installation_id=installation,
+                    bitbucket_workspace_uuid=remote_workspace,
+                    token=cipher.encrypt(
+                        "test-token",
+                        context=CredentialContext(installation, workspace),
+                        purpose=CredentialPurpose.TOKEN,
+                    ),
+                )
+                repository, _ = await store.bind_repository(
+                    workspace_id=workspace,
+                    installation_id=installation,
+                    repository_uuid=remote_repo,
+                    full_name="team/repo",
+                    default_branch="main",
+                    web_url="https://bitbucket.org/team/repo",
+                )
+                await session.execute(
+                    text(
+                        "INSERT INTO webhook_events "
+                        "(id,provider_installation_id,provider,bitbucket_repository_id,"
+                        "bitbucket_binding_generation,bitbucket_webhook_generation,"
+                        "delivery_id,event,payload) VALUES "
+                        "(:id,:installation,'bitbucket',:repository,1,1,:delivery,"
+                        "'repo:push','{}'::jsonb)"
+                    ),
+                    {
+                        "id": receipt_id,
+                        "installation": installation,
+                        "repository": repository,
+                        "delivery": delivery_id,
+                    },
+                )
+                await session.execute(
+                    text(
+                        "INSERT INTO bitbucket_push_retry_candidates "
+                        "(webhook_event_id,pr_number,attempted_at,attempt_count,reason) "
+                        "VALUES (:receipt,:number,now()-interval '6 minutes',0,'canonical_stale')"
+                    ),
+                    [{"receipt": receipt_id, "number": number} for number in range(1, 61)],
+                )
+            async with SqlAlchemyBitbucketProjectionUnitOfWork(sessions) as uow:
+                first = await uow.push_continuation.pending_numbers(delivery_id, repository, 1, 1)
+                assert first == (1, 2, 3, 4, 5)
+                assert await uow.push_continuation.settle_pending(
+                    delivery_id,
+                    repository,
+                    1,
+                    1,
+                    (),
+                    tuple((number, "canonical_stale") for number in first),
+                ) == (True, True, False)
+                await uow.commit()
+            async with SqlAlchemyBitbucketProjectionUnitOfWork(sessions) as uow:
+                assert await uow.push_continuation.pending_numbers(
+                    delivery_id, repository, 1, 1
+                ) == (6, 7, 8, 9, 10)
+            async with sessions.begin() as session:
+                await session.execute(
+                    text(
+                        "UPDATE bitbucket_push_retry_candidates SET attempted_at=now() "
+                        "WHERE webhook_event_id=:receipt"
+                    ),
+                    {"receipt": receipt_id},
+                )
+            async with SqlAlchemyBitbucketProjectionUnitOfWork(sessions) as uow:
+                assert await uow.push_continuation.settle_pending(
+                    delivery_id, repository, 1, 1, (), ()
+                ) == (True, False, False)
+        finally:
+            await engine.dispose()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.integration
 # Imported fixture owns a disposable PostgreSQL schema.
 def test_bitbucket_signed_receipt_dedup_and_generation_fences(
     bitbucket_connection_schema: Connection,

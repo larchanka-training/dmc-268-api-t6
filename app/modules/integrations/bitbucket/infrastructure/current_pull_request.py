@@ -11,6 +11,7 @@ from uuid import UUID
 import httpx
 
 from app.modules.integrations.bitbucket.application.provider_error import (
+    BitbucketPullRequestFetchError,
     BitbucketPullRequestResponseError,
 )
 from app.modules.integrations.bitbucket.application.request_credentials import (
@@ -36,9 +37,9 @@ from app.modules.reviews.application.project_bitbucket_pull_request import (
 _MAX_BODY_BYTES = 2 * 1024 * 1024
 
 
-class _DestinationCommitMissing(BitbucketProviderError):
+class _DestinationCommitMissing(BitbucketPullRequestFetchError):
     def __init__(self) -> None:
-        super().__init__("repository_inaccessible")
+        super().__init__("pull_request_missing")
 
 
 class BitbucketTokenSource(Protocol):
@@ -138,6 +139,10 @@ class BitbucketCurrentPullRequestProvider:
             ) as response:
                 if commit_lookup and response.status_code == 404:
                     raise _DestinationCommitMissing()
+                if response.status_code == 404:
+                    raise BitbucketPullRequestFetchError("pull_request_missing")
+                if response.status_code >= 500:
+                    raise BitbucketPullRequestFetchError("pull_request_unavailable")
                 check_bitbucket_response(response)
                 chunks: list[bytes] = []
                 size = 0
@@ -148,7 +153,7 @@ class BitbucketCurrentPullRequestProvider:
                     chunks.append(chunk)
             return httpx.Response(200, content=b"".join(chunks)).json()
         except httpx.RequestError:
-            raise BitbucketProviderError("provider_unavailable") from None
+            raise BitbucketPullRequestFetchError("pull_request_unavailable") from None
 
 
 def _parse_pull_request(
