@@ -1207,6 +1207,11 @@ class SqlAlchemyReviewOutputRepository:
             "review_event": review_event,
             "findings_hash": findings_hash,
             "review_body": processed.review_body,
+            "finding_ids": [
+                str(row.id)
+                for row, item in zip(rows, records, strict=True)
+                if item.bucket != "dropped"
+            ],
             "findings": findings,
         }
         checkpoint = await self._session.scalar(

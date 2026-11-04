@@ -686,15 +686,25 @@ class SqlAlchemyRunLifecycleStore:
             return RunState.CANCELLED.value
         pr_head_sha, pr_state = pr.head_sha, pr.state
         inline = [item for item in findings if item.inline_comment]
+        publishable = findings
         saved = await self._session.get(FinalReviewResult, run_id)
         if saved is not None:
-            by_id = {item.id: item for item in inline}
+            by_id = {item.id: item for item in findings}
+            frozen_ids = [UUID(value) for value in saved.publication_plan["finding_ids"]]
             ordered_ids = [
                 UUID(str(item["finding_id"])) for item in saved.publication_plan["findings"]
             ]
-            if len(ordered_ids) != len(inline) or set(ordered_ids) != by_id.keys():
+            if (
+                len(frozen_ids) != len(set(frozen_ids))
+                or not set(frozen_ids) <= by_id.keys()
+                or len(ordered_ids) != len(set(ordered_ids))
+                or not set(ordered_ids) <= set(frozen_ids)
+            ):
                 return None
             inline = [by_id[finding_id] for finding_id in ordered_ids]
+            publishable = [by_id[finding_id] for finding_id in frozen_ids]
+            for item in inline:
+                item.inline_comment = True
         if moved_to_body_finding_ids:
             moved = frozenset(moved_to_body_finding_ids)
             for item in inline:
@@ -713,7 +723,7 @@ class SqlAlchemyRunLifecycleStore:
                     )
                     .on_conflict_do_nothing()
                 )
-        for item in findings:
+        for item in publishable:
             item.published = True
         reason = cancellation_reason(
             pr_open=pr_state == CodeChangeState.OPEN,

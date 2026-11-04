@@ -47,6 +47,7 @@ from app.modules.reviews.application.store_review_output import (
     PublishingGuard,
     StoreReviewOutput,
 )
+from tests.execute_review_fakes import _AcceptingCheckpointPublisher
 from tests.policy_snapshot_fakes import (
     make_complete_execution_profile,
     make_complete_prompt_bindings,
@@ -156,7 +157,7 @@ class _Model:
         return {"findings": self._findings, "summary": SUMMARY}
 
 
-class _Publisher:
+class _Publisher(_AcceptingCheckpointPublisher):
     def __init__(self) -> None:
         self.outputs: list[Any] = []
 

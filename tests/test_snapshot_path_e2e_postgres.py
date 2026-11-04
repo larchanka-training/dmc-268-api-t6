@@ -617,6 +617,7 @@ _SNAPSHOT_PATH_STEPS = [
     "llm.call",
     "llm.verify",
     "review.finalize",
+    "review.publish_start",
 ]
 _LEGACY_STEPS = [
     "policy.load",
@@ -627,6 +628,7 @@ _LEGACY_STEPS = [
     "llm.call",
     "llm.review_output",
     "review.finalize",
+    "review.publish_start",
 ]
 
 
