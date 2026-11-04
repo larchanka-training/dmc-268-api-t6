@@ -14,8 +14,10 @@ from tests.deploy_host_fakes import (
     IMAGE_B,
     PROD_PROJECT,
     SECRET_SOURCES,
+    STOPPED,
     VARIABLE_SOURCES,
     Host,
+    _assert_stopped,
     _read_dotenv,
     _release_unchanged_literal,
     _run_script,
@@ -54,7 +56,6 @@ from tests.deploy_prod_workflow_fakes import (
     _step_names,
     _text,
 )
-from tests.test_deploy_prod import STOPPED, _assert_stopped
 
 PREPARE = "Prepare host"
 WAIT_TLS = "Wait for the edge certificate"

@@ -23,6 +23,9 @@ WORKFLOW = REPO_ROOT / ".github" / "workflows" / "ci-cd.yml"
 STAGING_COMPOSE = REPO_ROOT / "deploy" / "compose" / "staging.yml"
 PROJECT = "dmc-268-api-staging"
 PROD_PROJECT = "dmc-268-api-prod"
+STOPPED = (
+    f"stopped compose project {PROD_PROJECT}; no bootstrap container (NO_PREVIOUS_RELEASE=stop)"
+)
 IMAGE_A = "ghcr.io/test/api@sha256:" + "a" * 64
 IMAGE_B = "ghcr.io/test/api@sha256:" + "b" * 64
 
@@ -443,6 +446,17 @@ def make_host(tmp_path: Path, project: str = PROJECT) -> Host:
         tmp=tmp,
         project=project,
     )
+
+
+def _assert_stopped(host: Host, calls: list[str]) -> None:
+    down = calls.index(f"compose -p {PROD_PROJECT} down --remove-orphans")
+    assert calls.index(f"compose -p {PROD_PROJECT} ps -aq") > down
+    # An nginx left by an earlier bootstrap-mode rollback would keep answering under the alias.
+    assert f"rm -f {PROD_PROJECT}-bootstrap" in calls
+    assert not any(call.startswith("run -d") for call in calls)
+    assert not any(call.startswith("pull nginx") for call in calls)
+    assert not (host.app_dir / ".deploy-state").exists()
+    assert not (host.app_dir / ".deploy-state.previous").exists()
 
 
 def _release_unchanged_literal() -> str:
