@@ -974,12 +974,12 @@ def test_the_row_constraints_refuse_an_incomplete_read(
         unavailable.rollback()
 
     # A 64 hex SHA is refused by the column length before the CHECK runs.
-    with pytest.raises(
-        (IntegrityError, DataError), match=constraint if constraint != "22001" else None
-    ) as caught:
+    with pytest.raises((IntegrityError, DataError)) as caught:
         connection.execute(insert, {"id": _REPOSITORY, **_VALID, **change})
-    if constraint == "22001":
-        assert getattr(caught.value.orig, "sqlstate", None) == "22001"
+    diagnostic = getattr(caught.value.orig, "diag", None)
+    assert (
+        getattr(diagnostic, "constraint_name", None) or getattr(caught.value.orig, "sqlstate", None)
+    ) == constraint
 
 
 def _seed_bitbucket_binding(factory: async_sessionmaker[Any]) -> None:

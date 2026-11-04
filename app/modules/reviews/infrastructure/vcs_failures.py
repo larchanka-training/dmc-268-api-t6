@@ -8,7 +8,6 @@ from __future__ import annotations
 import contextlib
 import json
 from datetime import UTC, datetime, timedelta
-from email.utils import parsedate_to_datetime
 from typing import Literal
 
 import httpx
@@ -17,6 +16,7 @@ from app.modules.reviews.application.check_runs import RunProviderCheckpoint
 from app.modules.reviews.application.run_failures import (
     RETRY_AFTER_CEILING,
     RunFailure,
+    parse_http_date,
     parse_retry_after,
 )
 from app.modules.reviews.application.vcs_diff import (
@@ -34,6 +34,8 @@ MAX_ERROR_BODY_BYTES = 4096
 # GitHub asks to wait at least a minute after a secondary rate limit that sends neither
 # Retry-After nor X-RateLimit-Remaining: 0.
 SECONDARY_RATE_LIMIT_DELAY = timedelta(seconds=60)
+# A 12-digit epoch value is beyond a one-day wait; no integer conversion is needed.
+_MAX_RESET_EPOCH_DIGITS = 11
 # GitHub documents that a secondary rate limit answers 403 or 429 with a message saying so,
 # not the exact text: only this phrase is looked for, in any case.
 _SECONDARY_RATE_LIMIT = "secondary rate limit"
@@ -120,15 +122,12 @@ def _rate_limit_reset_delay(response: httpx.Response) -> timedelta | None:
         return None
     digits = raw.lstrip("0") or "0"
     # Large timestamps are beyond the one-day wait without ever converting them to int.
-    if len(digits) > 11:
+    if len(digits) > _MAX_RESET_EPOCH_DIGITS:
         return RETRY_AFTER_CEILING
     date = response.headers.get("Date")
-    try:
-        reference = parsedate_to_datetime(date) if date else datetime.now(UTC)
-    except ValueError:
+    reference = parse_http_date(date) if date else None
+    if reference is None:
         reference = datetime.now(UTC)
-    if reference.tzinfo is None:
-        reference = reference.replace(tzinfo=UTC)
     seconds = max(int(digits) - int(reference.timestamp()), 0)
     return min(timedelta(seconds=seconds), RETRY_AFTER_CEILING)
 
