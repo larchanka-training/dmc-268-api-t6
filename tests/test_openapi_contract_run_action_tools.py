@@ -42,6 +42,24 @@ BACKTICKED_TOOL = re.compile(r"`([a-z]+\.[a-z_]+)`")
 TOOL_POSITIONS = {"traced_step": 2, "record": 1, "add_action": 1, "PublicationRoute": 1}
 # A star argument on one of these can carry the tool past the scan.
 TOOL_WRITERS = frozenset(TOOL_POSITIONS) | {"insert_run_action", "RunAction"}
+# The callee of a site that names a writer without calling it.
+_REFERENCE = "<reference>"
+# The calls that take the RunAction model to read it or build a query; none writes a row through it.
+_MODEL_QUERIES = frozenset(
+    {
+        "select",
+        "select_from",
+        "join",
+        "outerjoin",
+        "insert",
+        "update",
+        "delete",
+        "query",
+        "get",
+        "aliased",
+        "isinstance",
+    }
+)
 _REVIEWS = "app/modules/reviews"
 # The exact places allowed to pass a tool that is not a name: (path, scope, callee, argument), no
 # line numbers. Each entry weakens the scan, so it says why it is safe. A new function that passes
@@ -103,6 +121,38 @@ TOOL_PASS_THROUGH = frozenset(
             "record",
             "usage",
         ),
+        # A field named `record` on a locked row or an import item, not RunTrace.record: only read.
+        (
+            "app/modules/code_index/application/build_index.py",
+            "_Job._index",
+            _REFERENCE,
+            "item.record",
+        ),
+        (
+            f"{_REVIEWS}/application/project_github_pull_request.py",
+            "ProjectGitHubPullRequest._project_label_under_lock",
+            _REFERENCE,
+            "locked.record",
+        ),
+        (
+            f"{_REVIEWS}/application/project_github_pull_request.py",
+            "ProjectGitHubPullRequest._project",
+            _REFERENCE,
+            "locked.record",
+        ),
+        (
+            f"{_REVIEWS}/application/project_gitlab_merge_request.py",
+            "ProjectGitLabMergeRequest.execute",
+            _REFERENCE,
+            "locked.record",
+        ),
+        # The read model of get_run_actions, not the run_actions table: it writes no row.
+        (
+            f"{_REVIEWS}/infrastructure/run_repository.py",
+            "<module>",
+            _REFERENCE,
+            "RunAction as RunActionProjection",
+        ),
     }
 )
 
@@ -147,40 +197,18 @@ def _callee(call: ast.Call) -> str:
     return _last_name(call.func) or ast.unparse(call.func)
 
 
-def _writer_aliases(tree: ast.Module) -> dict[str, str]:
-    """The other names a module gives a writer, by import or assignment, in any of its scopes."""
-    aliases: dict[str, str] = {}
-    bindings: list[tuple[ast.expr, ast.expr]] = []
-    for node in ast.walk(tree):
-        if isinstance(node, ast.alias):
-            if node.asname and node.name in TOOL_WRITERS:
-                aliases[node.asname] = node.name
-        elif isinstance(node, ast.Assign):
-            bindings += [(target, node.value) for target in node.targets]
-        elif isinstance(node, ast.AnnAssign | ast.NamedExpr) and node.value is not None:
-            bindings.append((node.target, node.value))
-    known = -1
-    while known != len(aliases):
-        known = len(aliases)
-        for target, value in bindings:
-            alias, name = _last_name(target), _last_name(value)
-            if alias is not None and name is not None:
-                writer = aliases.get(name, name)
-                if writer in TOOL_WRITERS:
-                    aliases[alias] = writer
-    return aliases
+def _writer_reference(node: ast.Name | ast.Attribute | ast.alias) -> str | None:
+    """A writer named without calling it, since the scan cannot follow what happens to it next.
 
-
-def _passes_a_writer(argument: ast.expr, aliases: Mapping[str, str]) -> bool:
-    """A writer handed to another call, as in ``partial(trace.record, ...)``.
-
-    The scan cannot read what that call gives the writer. A variable named ``record`` and the
-    ``RunAction`` model are too common as arguments to count.
+    A bare ``record`` is a common local variable, so it does not count: binding the method to any
+    name has to read ``x.record`` first, and that does.
     """
-    name = _last_name(argument)
-    if name is None or (name == "record" and isinstance(argument, ast.Name)):
-        return False
-    return aliases.get(name, name) in TOOL_WRITERS - {"RunAction"}
+    if isinstance(node, ast.alias):
+        renamed = node.name in TOOL_WRITERS and node.asname not in (None, node.name)
+        return f"{node.name} as {node.asname}" if renamed else None
+    if not isinstance(node.ctx, ast.Load) or _last_name(node) not in TOOL_WRITERS:
+        return None
+    return None if isinstance(node, ast.Name) and node.id == "record" else ast.unparse(node)
 
 
 def _tool_arguments(call: ast.Call, callee: str) -> list[ast.expr | ast.keyword]:
@@ -227,14 +255,14 @@ def _scan_tool_writes(source: str, path: str = "<source>") -> _ToolScan:
     and a slot of ``record(...)`` count on any call, whatever the receiver, so a ``tool="x.y"`` or
     a ``ledger.record(context, "x.y")`` that does not write run_actions surfaces as unexpected and
     must be renamed or the scan taught to skip it. A blanket ``"x.y"`` match would also pick up
-    prompt names such as ``review.system``, which are not tools. A writer called under another name
-    is read as that writer, and a writer handed to another call becomes a site. So does a ``*_TOOL``
-    name bound any other way than as such an assignment: a module constant cannot vouch for it.
+    prompt names such as ``review.system``, which are not tools. A writer named without calling it
+    becomes a site, wherever it is called later. So does a ``*_TOOL`` name bound any other way than
+    as such an assignment: a module constant cannot vouch for it.
     """
     tree = ast.parse(source)
     scan = _ToolScan()
-    aliases = _writer_aliases(tree)
     module_constants: set[ast.AST] = set()
+    plain_uses: set[ast.AST] = set()
     targets: list[ast.expr]
     value: ast.expr | None
     for statement in tree.body:
@@ -262,25 +290,37 @@ def _scan_tool_writes(source: str, path: str = "<source>") -> _ToolScan:
         node, scope = pending.pop()
         if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef):
             scope = node.name if scope == "<module>" else f"{scope}.{node.name}"
-        pending += [(child, scope) for child in ast.iter_child_nodes(node)]
+        annotations = getattr(node, "annotation", None), getattr(node, "returns", None)
+        pending += [
+            (child, scope) for child in ast.iter_child_nodes(node) if child not in annotations
+        ]
         if isinstance(node, _NameBinding):
             bound = _bound_name(node)
             if bound is not None and bound.endswith("_TOOL") and node not in module_constants:
                 scan.sites.add(_ToolSite(path, node.lineno, scope, bound, "rebound"))
+        if isinstance(node, ast.Name | ast.Attribute | ast.alias) and node not in plain_uses:
+            reference = _writer_reference(node)
+            if reference is not None:
+                scan.sites.add(_ToolSite(path, node.lineno, scope, _REFERENCE, reference))
+        if (
+            isinstance(node, ast.Attribute)
+            and _last_name(node.value) == "RunAction"
+            and not node.attr.startswith("_")
+        ):
+            plain_uses.add(node.value)
         if not isinstance(node, ast.Call):
             continue
         callee = _callee(node)
-        for argument in _tool_arguments(node, aliases.get(callee, callee)):
+        plain_uses.add(node.func)
+        if callee in _MODEL_QUERIES:
+            plain_uses.update(arg for arg in node.args if _last_name(arg) == "RunAction")
+        for argument in _tool_arguments(node, callee):
             name = _string_constant(argument)
             if name is None:
                 site = _ToolSite(path, node.lineno, scope, callee, ast.unparse(argument))
                 scan.sites.add(site)
             else:
                 scan.names.add(name)
-        for passed in [*node.args, *(keyword.value for keyword in node.keywords)]:
-            if _passes_a_writer(passed, aliases):
-                site = _ToolSite(path, node.lineno, scope, callee, ast.unparse(passed))
-                scan.sites.add(site)
     return scan
 
 
@@ -314,13 +354,6 @@ def _unread_tools(scans: list[_ToolScan]) -> list[_ToolSite]:
         ('prompts.load("review.system")', set()),
         ('uow.trace.add_action(run_id, "i.j", {}, None, now, 0)', {"i.j"}),
         ('PublicationRoute(False, "k.l", "x", False, None)', {"k.l"}),
-        ('from m import traced_step as ts\nts(trace, run_id, "probe.alias", {})', {"probe.alias"}),
-        ('write = trace.record\nwrite(run_id, "probe.alias", {})', {"probe.alias"}),
-        ('write: Writer = trace.add_action\nwrite(run_id, "m.n", {})', {"m.n"}),
-        ('self._write = trace.record\nself._write(run_id, "o.p", {})', {"o.p"}),
-        ('(write := trace.record)\nwrite(run_id, "q.r", {})', {"q.r"}),
-        ('second = first\nfirst = trace.record\nsecond(run_id, "s.t", {})', {"s.t"}),
-        ('make = PublicationRoute\nmake(False, "u.v", "x", False, None)', {"u.v"}),
     ],
     ids=[
         "traced_step-third-argument",
@@ -335,13 +368,6 @@ def _unread_tools(scans: list[_ToolScan]) -> list[_ToolSite]:
         "plain-string-literal",
         "add_action-second-argument",
         "publication-route-second-argument",
-        "import-alias",
-        "method-alias",
-        "annotated-alias",
-        "attribute-alias",
-        "walrus-alias",
-        "alias-of-an-alias",
-        "class-alias",
     ],
 )
 def test_written_tools_scan_picks_up_only_the_run_action_shapes(
@@ -380,14 +406,6 @@ def _unread(*sources: str) -> list[str]:
         ("trace.record(run_id, *rest)", "record(*rest)"),
         ("X_TOOL = make()", "X_TOOL(make())"),
         ('X_TOOL = "a.b"\nrecord(run_id, other.X_TOOL)', "record(other.X_TOOL)"),
-        ('from m import traced_step as ts\nts(trace, run_id, f"a.{x}", {})', "ts(f'a.{x}')"),
-        ("write = trace.record\nwrite(run_id, name, {})", "write(name)"),
-        ("write = trace.record\nwrite(run_id, *rest)", "write(*rest)"),
-        ("make = RunAction\nmake(**fields)", "make(**fields)"),
-        ('partial(trace.record, run_id, "a.b")', "partial(trace.record)"),
-        ("partial(traced_step, trace, run_id)", "partial(traced_step)"),
-        ("schedule(writer=trace.add_action)", "schedule(trace.add_action)"),
-        ("write = trace.record\nschedule(write)", "schedule(write)"),
     ],
     ids=[
         "f-string",
@@ -407,14 +425,6 @@ def _unread(*sources: str) -> list[str]:
         "star-at-the-position",
         "computed-constant",
         "attribute-of-a-constant",
-        "import-alias",
-        "method-alias",
-        "star-on-a-method-alias",
-        "double-star-on-a-model-alias",
-        "partial-of-a-method",
-        "partial-of-a-function",
-        "method-as-a-keyword",
-        "alias-as-an-argument",
     ],
 )
 def test_written_tools_scan_reports_a_tool_it_cannot_read(source: str, expected: str) -> None:
@@ -439,14 +449,127 @@ def test_written_tools_scan_reads_a_module_tool_constant(sources: tuple[str, ...
     [
         "parse(record)",
         "select(RunAction)",
-        "record = locked.record\nrecord.external_id",
-        "index(((item.record, item.edges) for item in imports))",
-        "from m import RunAction as RunActionProjection\nRunActionProjection(id=1)",
+        "statement.select_from(RunAction).outerjoin(RunAction)",
+        "query.where(RunAction.run_id == run_id)",
+        "query.where(models.RunAction.run_id == run_id)",
+        "select(models.RunAction)",
+        "statement.join(RunAction)",
+        "update(RunAction)",
+        "delete(RunAction)",
+        "session.query(RunAction)",
+        "session.get(RunAction, action_id)",
+        "aliased(RunAction)",
+        "isinstance(value, RunAction)",
+        "from m import traced_step",
+        "from m import traced_step as traced_step",
+        "def f(route: PublicationRoute) -> PublicationRoute: ...",
+        "route: PublicationRoute = make()",
+        "self.record = value",
+        'trace.record(run_id, "a.b", {})',
     ],
-    ids=["variable", "model", "field", "field-in-a-tuple", "model-alias"],
+    ids=[
+        "variable",
+        "model-in-a-query",
+        "model-joined",
+        "model-column",
+        "model-column-of-a-module",
+        "model-of-a-module-in-a-query",
+        "model-in-a-join",
+        "model-in-an-update",
+        "model-in-a-delete",
+        "model-in-a-session-query",
+        "model-in-a-session-get",
+        "model-aliased-for-a-query",
+        "model-in-isinstance",
+        "plain-import",
+        "import-as-itself",
+        "annotations",
+        "annotated-variable",
+        "stored-field",
+        "direct-call",
+    ],
 )
 def test_written_tools_scan_leaves_common_uses_of_a_writer_name_alone(source: str) -> None:
     assert _unread(source) == []
+
+
+@pytest.mark.parametrize(
+    ("source", "reference"),
+    [
+        (
+            'from m import traced_step as ts\nts(trace, run_id, "probe.alias", {})',
+            "traced_step as ts",
+        ),
+        (
+            'from m import traced_step as record\ntrace.record(run_id, "a.b")',
+            "traced_step as record",
+        ),
+        ('write = trace.record\nwrite(run_id, "probe.alias", {})', "trace.record"),
+        ('write: Writer = trace.add_action\nwrite(run_id, "a.b", {})', "trace.add_action"),
+        ('self._write = trace.record\nself._write(run_id, "a.b", {})', "trace.record"),
+        ('(write := trace.record)\nwrite(run_id, "a.b", {})', "trace.record"),
+        ('first = trace.record\nsecond = first\nsecond(run_id, "a.b", {})', "trace.record"),
+        ('write, other = trace.record, 1\nwrite(run_id, "a.b", {})', "trace.record"),
+        ('write = trace.record if flag else None\nwrite(run_id, "a.b", {})', "trace.record"),
+        ('write = trace.record or noop\nwrite(run_id, "a.b", {})', "trace.record"),
+        ('def f(write=trace.record):\n    write(run_id, "a.b", {})', "trace.record"),
+        ('def f(*, write=traced_step):\n    write(trace, run_id, "a.b", {})', "traced_step"),
+        ('g = lambda write=trace.record: write(run_id, "a.b", {})', "trace.record"),
+        ('partial(trace.record, run_id, "a.b")', "trace.record"),
+        ("partial(traced_step, trace, run_id)", "traced_step"),
+        ("schedule(writer=trace.add_action)", "trace.add_action"),
+        ("writers = {'write': trace.record}", "trace.record"),
+        ("def f(trace):\n    return trace.record", "trace.record"),
+        ('trace.record.__call__(run_id, "a.b", {})', "trace.record"),
+        ('make = PublicationRoute\nmake(False, "a.b", "x", False, None)', "PublicationRoute"),
+        ('class R(PublicationRoute): ...\nR(False, "a.b", "x", False, None)', "PublicationRoute"),
+        ("make = RunAction\nmake(**fields)", "RunAction"),
+        ("class Row(RunAction): ...\nRow(**fields)", "RunAction"),
+        ("partial(RunAction, **fields)", "RunAction"),
+        ("RunAction.__call__(**fields)", "RunAction"),
+        ("RunAction.__init__(row, **fields)", "RunAction"),
+        ("record = locked.record\nrecord.external_id", "locked.record"),
+    ],
+    ids=[
+        "import-alias",
+        "import-alias-named-like-a-writer",
+        "method-alias",
+        "annotated-alias",
+        "attribute-alias",
+        "walrus-alias",
+        "alias-of-an-alias",
+        "tuple-alias",
+        "conditional-alias",
+        "or-alias",
+        "default-of-a-parameter",
+        "default-of-a-keyword-parameter",
+        "default-of-a-lambda",
+        "partial-of-a-method",
+        "partial-of-a-function",
+        "method-as-a-keyword",
+        "in-a-container",
+        "returned",
+        "dunder-call",
+        "class-alias",
+        "subclass",
+        "model-alias",
+        "model-subclass",
+        "model-in-a-partial",
+        "model-dunder-call",
+        "model-dunder-init",
+        "field-named-like-a-method",
+    ],
+)
+def test_written_tools_scan_reports_a_writer_used_other_than_by_a_call(
+    source: str, reference: str
+) -> None:
+    assert _unread(source) == [f"<reference>({reference})"]
+
+
+def test_written_tools_scan_reports_an_alias_made_in_another_module() -> None:
+    importer = 'from a import ts\nts(trace, run_id, "probe.cross", {})'
+
+    assert _unread("ts = traced_step", importer) == ["<reference>(traced_step)"]
 
 
 @pytest.mark.parametrize(
@@ -465,6 +588,8 @@ def test_written_tools_scan_leaves_common_uses_of_a_writer_name_alone(source: st
         "try:\n    pass\nexcept E as LLM_CALL_TOOL:\n    record(run_id, LLM_CALL_TOOL)",
         "match name:\n    case [*LLM_CALL_TOOL]:\n        record(run_id, LLM_CALL_TOOL)",
         "def f[LLM_CALL_TOOL](x):\n    record(run_id, LLM_CALL_TOOL)",
+        "def f[**LLM_CALL_TOOL](x):\n    record(run_id, LLM_CALL_TOOL)",
+        "def f[*LLM_CALL_TOOL](x):\n    record(run_id, LLM_CALL_TOOL)",
         'import m\nm.LLM_CALL_TOOL = "probe.x"',
     ],
     ids=[
@@ -481,6 +606,8 @@ def test_written_tools_scan_leaves_common_uses_of_a_writer_name_alone(source: st
         "except",
         "match-star",
         "type-parameter",
+        "param-spec",
+        "type-var-tuple",
         "attribute-of-a-module",
     ],
 )
