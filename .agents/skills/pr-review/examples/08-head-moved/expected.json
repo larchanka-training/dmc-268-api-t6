@@ -1,0 +1,24 @@
+{
+  "applied": false,
+  "in_body": [],
+  "pr": {
+    "author": "axyi",
+    "head_sha": "4c1d0f6a7e2b9385d6f1a0c47be93d1285fa6e07",
+    "number": 130,
+    "repo": "larchanka-training/dmc-268-ui-t6",
+    "state": "merged",
+    "viewer": "ndovnar"
+  },
+  "proposed_verdict": null,
+  "reasons": [
+    "the pull request's head moved to 4c1d0f6a7e2b9385d6f1a0c47be93d1285fa6e07: the findings are about 21b8d99b895956a7c0dcd2ee809b401552aad806; run the review again"
+  ],
+  "review": null,
+  "schema": 1,
+  "summary": "",
+  "threads": [],
+  "verdict": "stop",
+  "warnings": [
+    "the pull request is merged: the draft comments on its final head"
+  ]
+}

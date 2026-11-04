@@ -1,0 +1,43 @@
+{
+  "applied": true,
+  "in_body": [],
+  "pr": {
+    "author": "axyi",
+    "head_sha": "21b8d99b895956a7c0dcd2ee809b401552aad806",
+    "number": 130,
+    "repo": "larchanka-training/dmc-268-ui-t6",
+    "state": "merged",
+    "viewer": "ndovnar"
+  },
+  "proposed_verdict": "Request changes",
+  "reasons": [],
+  "review": {
+    "existing": true,
+    "id": "PRR_kwDOUOEIjs8AAAABV8_WIQ",
+    "state": "PENDING",
+    "url": "https://github.com/larchanka-training/dmc-268-ui-t6/pull/130#pullrequestreview-5768205857"
+  },
+  "schema": 1,
+  "summary": "Итог на `21b8d99b`: critical 0, high 1, medium 1, low 0, info 0. AC: covered 2, not covered 0, can't tell 1.\n\nПредложенный вердикт: Request changes. Вердикт и Submit — решение ревьюера.\n\nПроверить руками (can't tell): ui#111 AC3",
+  "threads": [
+    {
+      "body": "**P1 · high · correctness.** Кнопка рестайлится прямо на экране\n\n`className` копирует внутренний класс Ant Design. `AGENTS.md` запрещает менять базовый компонент на экране: исправить в `src/shared/ui`.",
+      "kind": "line",
+      "line": 41,
+      "path": "src/widgets/run-inspector/ui/RunControls.tsx",
+      "status": "exists"
+    },
+    {
+      "body": "**P2 · medium · correctness.** Ошибка отмены теряется\n\nСообщение не доходит до пользователя при 409.",
+      "kind": "line",
+      "line": 50,
+      "path": "src/widgets/run-inspector/ui/RunControls.tsx",
+      "status": "created"
+    }
+  ],
+  "verdict": "go",
+  "warnings": [
+    "the pull request is merged: the draft comments on its final head",
+    "the summary replaces the one your draft holds"
+  ]
+}

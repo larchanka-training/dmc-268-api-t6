@@ -1,0 +1,194 @@
+diff --git a/docs/FRONTEND_ARCHITECTURE.md b/docs/FRONTEND_ARCHITECTURE.md
+index a45d18a3..4b0ca85f 100644
+--- a/docs/FRONTEND_ARCHITECTURE.md
++++ b/docs/FRONTEND_ARCHITECTURE.md
+@@ -1059,9 +1059,13 @@ React, без `innerHTML`.
+ `startedAt` старше 10 минут (`STALE_RUNNING_MS`) — порог совпадает с порогом реконсилера в [SD §6.4][sd-6.4]
+ (`queued` старше 10 мин без сообщения → повтор публикации).
+ 
+-Хуки под cancel/retry в контракте уже есть, UI для них — вне спринта: `cancelRequested: boolean`
+-(флаг отмены до подтверждения бэкендом) и `attempt: number` (номер попытки при retry) на
+-`RunSession`.
++Отмена и повторный запуск — `RunControls` (`src/widgets/run-inspector/ui/RunControls.tsx`):
++«Отменить» на активном прогоне, «Перезапустить» на терминальном. На `running`/`publishing` отмена
++статус не меняет: API ставит `cancelRequested: true` на `RunSession`, пока воркер не остановится.
++Тогда та же кнопка становится неактивной «Отмена запрошена»: без `danger` — это уже не действие
++(DESIGN_SYSTEM §8), с `aria-disabled` и классом отключённой кнопки antd вместо `disabled`, чтобы
++фокус остался на ней (`.agents/rules/frontend.md` §3b п. 3). `attempt: number` (номер попытки при
++retry) `RunHeader` показывает в поле «Попытка».
+ 
+ ### Прогресс-бар (Refs ui#84)
+ 
+diff --git a/src/widgets/run-inspector/ui/RunControls.test.tsx b/src/widgets/run-inspector/ui/RunControls.test.tsx
+index 4d04837a..1e116ace 100644
+--- a/src/widgets/run-inspector/ui/RunControls.test.tsx
++++ b/src/widgets/run-inspector/ui/RunControls.test.tsx
+@@ -1,7 +1,7 @@
+ // @vitest-environment jsdom
+ import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+ import { afterEach, describe, expect, it, vi } from 'vitest'
+-import { createMemoryRouter, RouterProvider } from 'react-router'
++import { createMemoryRouter, MemoryRouter, RouterProvider } from 'react-router'
+ 
+ import type { RunSession } from '../../../entities/run'
+ import { ApiError } from '../../../shared/api/client'
+@@ -49,10 +49,7 @@ vi.mock('../../../entities/run', async (importOriginal) => {
+ })
+ 
+ function renderControls() {
+-  const router = createMemoryRouter([{ path: '/', element: <RunControls run={terminalRun} /> }], {
+-    initialEntries: ['/'],
+-  })
+-  return render(<RouterProvider router={router} />)
++  return renderControlsFor(terminalRun)
+ }
+ 
+ const activeRun: RunSession = {
+@@ -61,13 +58,17 @@ const activeRun: RunSession = {
+   finishedAt: null,
+ }
+ 
+-function renderActiveControls() {
+-  const router = createMemoryRouter([{ path: '/', element: <RunControls run={activeRun} /> }], {
++function renderControlsFor(run: RunSession) {
++  const router = createMemoryRouter([{ path: '/', element: <RunControls run={run} /> }], {
+     initialEntries: ['/'],
+   })
+   return render(<RouterProvider router={router} />)
+ }
+ 
++function renderActiveControls() {
++  return renderControlsFor(activeRun)
++}
++
+ afterEach(() => {
+   cleanup()
+   mockRerunMutate.mockReset()
+@@ -167,4 +168,72 @@ describe('RunControls', () => {
+     })
+     expect(screen.queryByText('run not found')).toBeNull()
+   })
++
++  it.each(['running', 'publishing'] as const)(
++    'shows an aria-disabled «Отмена запрошена» instead of «Отменить» on a %s run with a cancel request',
++    (status) => {
++      renderControlsFor({ ...activeRun, status, cancelRequested: true })
++
++      const button = screen.getByRole('button', { name: 'Отмена запрошена' })
++      // Not natively disabled: a disabled button cannot hold the focus (frontend.md §3b item 3).
++      expect(button.getAttribute('aria-disabled')).toBe('true')
++      expect((button as HTMLButtonElement).disabled).toBe(false)
++      // Ant Design's own disabled class gives its disabled look; the button stays a plain
++      // default one: no danger or primary style.
++      expect(button.className).toContain('ant-btn-disabled')
++      expect(button.className).toContain('ant-btn-color-default')
++      expect(button.className).not.toContain('ant-btn-color-dangerous')
++      fireEvent.click(button)
++      expect(mockCancelMutate).not.toHaveBeenCalled()
++      expect(screen.queryByText('Отменить')).toBeNull()
++    },
++  )
++
++  it('keeps the focus on the cancel button once a cancel is requested', () => {
++    const requestedRun: RunSession = { ...activeRun, cancelRequested: true }
++    const { rerender } = render(
++      <MemoryRouter>
++        <RunControls run={activeRun} />
++      </MemoryRouter>,
++    )
++    const cancelButton = screen.getByRole('button', { name: 'Отменить' })
++    cancelButton.focus()
++    expect(document.activeElement).toBe(cancelButton)
++
++    rerender(
++      <MemoryRouter>
++        <RunControls run={requestedRun} />
++      </MemoryRouter>,
++    )
++
++    const requestedButton = screen.getByRole('button', { name: 'Отмена запрошена' })
++    expect(requestedButton).toBe(cancelButton)
++    expect(document.activeElement).toBe(requestedButton)
++    // jsdom keeps the focus on a button that turns disabled; a real browser drops it.
++    expect((requestedButton as HTMLButtonElement).disabled).toBe(false)
++  })
++
++  it('shows only an enabled «Отменить» on an active run without a cancel request', () => {
++    renderActiveControls()
++
++    const button = screen.getByRole('button', { name: 'Отменить' })
++    expect((button as HTMLButtonElement).disabled).toBe(false)
++    expect(button.hasAttribute('aria-disabled')).toBe(false)
++    expect(button.className).toContain('ant-btn-color-dangerous')
++    expect(button.className).not.toContain('ant-btn-disabled')
++    expect(screen.queryByText('Отмена запрошена')).toBeNull()
++  })
++
++  it('shows no cancel-side button on a terminal run even when cancelRequested is true', () => {
++    renderControlsFor({
++      ...terminalRun,
++      status: 'cancelled',
++      finishedAt: '2026-09-18T11:55:12.000Z',
++      cancelRequested: true,
++    })
++
++    expect(screen.queryByText('Отмена запрошена')).toBeNull()
++    expect(screen.queryByText('Отменить')).toBeNull()
++    expect(screen.getByText('Перезапустить')).toBeTruthy()
++  })
+ })
+diff --git a/src/widgets/run-inspector/ui/RunControls.tsx b/src/widgets/run-inspector/ui/RunControls.tsx
+index 2d4e7bfc..a3e4e318 100644
+--- a/src/widgets/run-inspector/ui/RunControls.tsx
++++ b/src/widgets/run-inspector/ui/RunControls.tsx
+@@ -1,5 +1,5 @@
+-import type { JSX } from 'react'
+-import { Button, Space, message } from 'antd'
++import { useContext, type JSX } from 'react'
++import { Button, ConfigProvider, Space, message } from 'antd'
+ import { useNavigate } from 'react-router'
+ 
+ import {
+@@ -21,6 +21,7 @@ export function RunControls(props: RunControlsProps): JSX.Element {
+   const cancelMutation = useCancelRun(run.id)
+   const rerunMutation = useRerunRun(run.id)
+   const [messageApi, contextHolder] = message.useMessage()
++  const { getPrefixCls } = useContext(ConfigProvider.ConfigContext)
+ 
+   const canCancel = ACTIVE_RUN_STATUSES.some((status) => status === run.status)
+   const canRerun = TERMINAL_RUN_STATUSES.some((status) => status === run.status)
+@@ -34,18 +35,25 @@ export function RunControls(props: RunControlsProps): JSX.Element {
+       {contextHolder}
+       <Space wrap>
+         {canCancel ? (
++          // aria-disabled, not disabled: a natively disabled button would drop the focus.
+           <Button
+-            danger
++            aria-disabled={run.cancelRequested ? true : undefined}
++            className={run.cancelRequested ? `${getPrefixCls('btn')}-disabled` : undefined}
++            danger={!run.cancelRequested}
+             loading={cancelMutation.isPending}
+-            onClick={() => {
+-              cancelMutation.mutate(undefined, {
+-                onError: (error) => {
+-                  showError(error, 'cancel')
+-                },
+-              })
+-            }}
++            onClick={
++              run.cancelRequested
++                ? undefined
++                : () => {
++                    cancelMutation.mutate(undefined, {
++                      onError: (error) => {
++                        showError(error, 'cancel')
++                      },
++                    })
++                  }
++            }
+           >
+-            Отменить
++            {run.cancelRequested ? 'Отмена запрошена' : 'Отменить'}
+           </Button>
+         ) : null}
+         {canRerun ? (
