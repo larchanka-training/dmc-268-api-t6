@@ -1,0 +1,26 @@
+{
+  "fence": "~~~~~~",
+  "issues": [],
+  "pr": {
+    "author": "larchanka",
+    "base_ref": "main",
+    "base_sha": "5393bafdbd4546c868514623429dce6eb84c9777",
+    "body": "Add code review rules for security, architecture, reliability, code quality, and testing.\n\n<!-- SYNC: mirrored in dmc-268-{ui,api}-t6/.github/pull_request_template.md -->\n\n## What\n\n## Why\n\n## How to verify\n\n## Refs\n\n<!-- `Refs owner/repo#N` for an issue in the other repo. Never Closes/Fixes/Resolves. -->\n\nRefs #\n\n---\n\nBefore merge:\n\n- [ ] No closing keyword and no Development-panel link to the issue\n- [ ] Branch rebased on the current `main`\n- [ ] Approve is on the current head commit\n- [ ] The body describes the whole PR\n- [ ] All review threads resolved\n- [ ] User docs updated in `docs-site/content/docs/`, a follow-up issue linked, or not needed\n\nRules: [merge](https://github.com/larchanka-training/dmc-268-api-t6/blob/main/docs/CONTRIBUTING.md#мерж), [issue acceptance](https://github.com/larchanka-training/dmc-268-api-t6/blob/main/docs/CONTRIBUTING.md#приёмка-задачи), [user docs](https://github.com/larchanka-training/dmc-268-api-t6/blob/main/docs/CONTRIBUTING.md#8-пользовательская-документация).\n",
+    "draft": false,
+    "head_ref": "larchanka-patch-1",
+    "head_sha": "0ed1be12d438e5b827d6ab23bc04721e6b7747a6",
+    "number": 227,
+    "repo": "larchanka-training/dmc-268-ui-t6",
+    "state": "merged",
+    "title": "Create rules.md for code review guidelines",
+    "url": "https://github.com/larchanka-training/dmc-268-ui-t6/pull/227"
+  },
+  "reasons": [
+    "larchanka-training/dmc-268-ui-t6#227 has no `Refs` line naming an issue: the Spec and AC axes have nothing to check against. Add `Refs #N` (`Refs owner/repo#N` for an issue in the other repo) to the pull request body, or review the diff with `code-review` and name the spec"
+  ],
+  "schema": 1,
+  "verdict": "stop",
+  "warnings": [
+    "the pull request is merged: the review reads its final head"
+  ]
+}

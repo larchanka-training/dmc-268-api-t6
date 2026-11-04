@@ -1,0 +1,107 @@
+{
+  "fence": "~~~~~~",
+  "issues": [
+    {
+      "acceptance_criteria": [
+        {
+          "id": "AC1",
+          "key": "api#54 AC1",
+          "part": null,
+          "text": "Часть 1 — гранты Workspace: После установки App на новый репозиторий он появляется в списке без ручного logout: тест api и смоук на staging в PR"
+        },
+        {
+          "id": "AC2",
+          "key": "api#54 AC2",
+          "part": null,
+          "text": "Часть 1 — гранты Workspace: Отзыв доступа на GitHub отражается не позже следующего refresh (тест с двумя пользователями и отзывом)"
+        },
+        {
+          "id": "AC3",
+          "key": "api#54 AC3",
+          "part": null,
+          "text": "Часть 1 — гранты Workspace: Подсказки в `RepositoryList` описывают реальный путь; есть тест ui на этот сценарий"
+        },
+        {
+          "id": "AC4",
+          "key": "api#54 AC4",
+          "part": null,
+          "text": "Часть 1 — гранты Workspace: SD §6.9 описывает выбранный способ; `PORTAL_AUTH_HANDOFF.md` больше не вводит в заблуждение"
+        },
+        {
+          "id": "AC5",
+          "key": "api#54 AC5",
+          "part": null,
+          "text": "Часть 2 — харднинг API: После N неожиданных ошибок сообщение уходит в DLQ с логом (тест)"
+        },
+        {
+          "id": "AC6",
+          "key": "api#54 AC6",
+          "part": null,
+          "text": "Часть 2 — харднинг API: Тело вебхука больше лимита → 413; статусы `copied` / `changed` / `unchanged` не валят Run; эвристика generated сужена (тесты)"
+        },
+        {
+          "id": "AC7",
+          "key": "api#54 AC7",
+          "part": null,
+          "text": "Часть 2 — харднинг API: `scope=None` без явного флага — ошибка; SSE-событие авторизуется лёгким запросом, поток закрывается по истечении JWT, keepalive есть (тесты)"
+        },
+        {
+          "id": "AC8",
+          "key": "api#54 AC8",
+          "part": null,
+          "text": "Часть 2 — харднинг API: Два одновременных refresh одного семейства не выбрасывают пользователя; настоящий replay после окна по-прежнему отзывает семейство (тесты)"
+        },
+        {
+          "id": "AC9",
+          "key": "api#54 AC9",
+          "part": null,
+          "text": "Часть 2 — харднинг API: 401-регрессия строится из `app.routes` и падает, если у маршрута `api_router` нет 401-кейса; есть тест `/api/repos` → `[]` при пустом claim"
+        },
+        {
+          "id": "AC10",
+          "key": "api#54 AC10",
+          "part": null,
+          "text": "Часть 2 — харднинг API: Адаптеры делают только `flush()`, commit — в use case; advisory lock не держит соединение бессрочно"
+        },
+        {
+          "id": "AC11",
+          "key": "api#54 AC11",
+          "part": null,
+          "text": "Часть 2 — харднинг API: `/openapi.json` содержит `securitySchemes: bearer`, описания операций и ответы 401 / 404 / 409 у защищённых операций"
+        },
+        {
+          "id": "AC12",
+          "key": "api#54 AC12",
+          "part": null,
+          "text": "Часть 2 — харднинг API: Решения по `fetch_file_content`, `ReviewWorker`, `reviewer_requested` и `payload_s3_ref` записаны; удаление — только после решения"
+        }
+      ],
+      "body": "## Background\n\nСерьёзность: P2 (максимум по частям: ч. 1 — P2, ч. 2 — P3).\nИсходные владельцы ролей по частям (исполнитель — @axyi до переназначения):\nч. 1 (гранты Workspace) — @ndovnar (связывание установок и auth-api, #11), @skvertl (экран подключения, larchanka-training/dmc-268-ui-t6#50);\nч. 2 (харднинг API) — @createunix (очередь, REST, /docs — #34), @ndovnar (вебхук, VCS, auth — #11; 401-регрессия — QA, #30).\nЗадача объединяет 2 части; каждую можно сдать отдельным PR с `Refs`, отметив чекбоксы своей части.\n\n**Часть 1 — гранты Workspace** (P2 — подключение репозитория из UI не замкнуто, отзыв доступа запаздывает до 30 дней)\n\nИстория: как пользователь, который установил GitHub App на новый репозиторий, хочу увидеть репозиторий в списке после «Обновить» и потерять доступ, когда его отозвали на GitHub, чтобы подключение репозитория работало без выхода и повторного входа, а отозванный доступ не жил до конца refresh-сессии.\nСвязь «пользователь ↔ Workspace / репозиторий» пишется только в callback входа (`exchange_github_code.py:101` → `link_github_installations.py:75-131`). Refresh лишь читает сохранённые гранты (`app/modules/auth/infrastructure/sessions.py:99-115`), фильтр доступа — `repository_access.py:15-41`.\n\nСледствия:\n(1) после установки App новый репозиторий не появляется по кнопке «Обновить», хотя подсказка в UI (`RepositoryList.tsx:277`) обещает именно это — нужно выйти и войти заново;\n(2) доступ, отозванный на GitHub, живёт, пока продлевается refresh-токен (до 30 дней).\nСпособ «связывать при входе» выбран в #11 без обсуждения в треде PR, о котором просил техлид 27.09. SD §6.9 (`SYSTEM_DESIGN.md:465`) устарел, `docs/PORTAL_AUTH_HANDOFF.md` устарел, и на него никто не ссылается.\n\n**Часть 2 — харднинг API** (P3)\nОчередь. Любое исключение обработчика ведёт к `nack(requeue=True)` после паузы в 1 с, без счётчика (`amqp.py:190-194`). Детерминированная ошибка при prefetch 1 зациклит сообщение и заблокирует очередь fast.\n\nВебхук и VCS:\n• тело запроса читается целиком до проверки HMAC, без лимита размера (`app/main.py:173`);\n• статусы файлов `copied` / `changed` / `unchanged` из `/pulls/{n}/files` валят весь Run (`github_vcs.py:74`);\n• эвристика generated слишком широкая: любые `dist/`, `locale(s)/`, `i18n/`, `*.lock`, `*.snap` (`vcs_diff.py:24-39`);\n• `pg_advisory_lock` без таймаута держит соединение пула на время запросов к GitHub (`github_pull_request_projection.py:305-312`).\n\nАвторизация:\n• по умолчанию `scope=None` даёт `true()` (`run_repository.py:66-69`): новый портальный роут без scope откроет все данные;\n• SSE-поток переживает 15-минутный JWT, а на каждое событие и каждого подписчика выполняется полный `get_run` только ради проверки scope (`app/main.py:446`); keepalive нет;\n• одновременный refresh из нескольких вкладок отзывает всё семейство токенов (`refresh_session.py:101-102`), и пользователя выбрасывает;\n• 401-регрессия (`tests/test_portal_auth.py:55-64`) ведётся вручную и не включает `POST /api/runs/{id}/rerun` и `GET /api/repos`; нет теста «`/api/repos` при `workspaces: []` → `[]`».\n\nСлой. Адаптеры коммитят сами через `session_factory.begin()` (`blob_cache.py:75`, `run_repository.py:311`, `no_ci_sweep_candidates.py:36,60`, `webhook_run_targets.py:46`) — вопреки правилу AGENTS.md «репозитории только `flush()`, commit делает use case».\n\n/docs. `FastAPI(title=\"Backend\")` (`app/main.py:131`): описание есть у 1 операции из 20, нет Bearer `securitySchemes`, не описаны ответы 401 / 404 / 409.\n\nМёртвый код и рудименты (не удалять без решения): старый путь `fetch_file_content` (`process_run.py:39-46`), `ReviewWorker` / `review_worker` (`app/worker.py:180-245`, вызывается только из `tests/test_worker.py`), колонка `reviewer_requested` (ведётся по `review_requested`, которые диспетчер отбрасывает), `payload_s3_ref` (стал nullable, миграция 0012).\n\n## Scope\n\n- Часть 1 — гранты Workspace: Решение техлида, записать в SD §6.9. Варианты: пересчёт грантов на refresh; пересчёт по вебхукам `installation` / `installation_repositories`; флаг App «Request user authorization (OAuth) during installation» и Setup URL → `/auth/callback`\n- Часть 1 — гранты Workspace: api: реализация выбранного варианта; отзыв доступа отражается не позже следующего refresh\n- Часть 1 — гранты Workspace: ui (отдельный PR с `Refs`): кнопка и подсказка в `RepositoryList` описывают реальный путь. При варианте с повторной авторизацией кнопка «Обновить доступ» вызывает `loginWithGitHub()`\n- Часть 1 — гранты Workspace: `docs/PORTAL_AUTH_HANDOFF.md` удалить или слить с актуальными документами\n- Часть 2 — харднинг API: Очередь: лимит повторов неожиданных ошибок, затем DLQ с логом\n- Часть 2 — харднинг API: Вебхук и VCS: лимит тела до HMAC (413), статусы `copied` / `changed` / `unchanged`, сужение эвристики generated, таймаут advisory lock или блокировка вне пула\n- Часть 2 — харднинг API: Авторизация: fail-closed для `scope=None`; лёгкая проверка scope и keepalive в SSE, закрытие потока по истечении JWT; окно допуска для одновременного refresh (или Web Locks в UI — решение записать); генерируемая 401-регрессия\n- Часть 2 — харднинг API: Слой: перенести commit из адаптеров в use case\n- Часть 2 — харднинг API: /docs: title, описания операций, Bearer `securitySchemes`, ответы 401 / 404 / 409\n- Часть 2 — харднинг API: Решения по мёртвому коду и рудиментам из Background\n\n## Acceptance Criteria\n\n- [x] Часть 1 — гранты Workspace: После установки App на новый репозиторий он появляется в списке без ручного logout: тест api и смоук на staging в PR\n- [x] Часть 1 — гранты Workspace: Отзыв доступа на GitHub отражается не позже следующего refresh (тест с двумя пользователями и отзывом)\n- [x] Часть 1 — гранты Workspace: Подсказки в `RepositoryList` описывают реальный путь; есть тест ui на этот сценарий\n- [x] Часть 1 — гранты Workspace: SD §6.9 описывает выбранный способ; `PORTAL_AUTH_HANDOFF.md` больше не вводит в заблуждение\n- [x] Часть 2 — харднинг API: После N неожиданных ошибок сообщение уходит в DLQ с логом (тест)\n- [x] Часть 2 — харднинг API: Тело вебхука больше лимита → 413; статусы `copied` / `changed` / `unchanged` не валят Run; эвристика generated сужена (тесты)\n- [x] Часть 2 — харднинг API: `scope=None` без явного флага — ошибка; SSE-событие авторизуется лёгким запросом, поток закрывается по истечении JWT, keepalive есть (тесты)\n- [x] Часть 2 — харднинг API: Два одновременных refresh одного семейства не выбрасывают пользователя; настоящий replay после окна по-прежнему отзывает семейство (тесты)\n- [x] Часть 2 — харднинг API: 401-регрессия строится из `app.routes` и падает, если у маршрута `api_router` нет 401-кейса; есть тест `/api/repos` → `[]` при пустом claim\n- [x] Часть 2 — харднинг API: Адаптеры делают только `flush()`, commit — в use case; advisory lock не держит соединение бессрочно\n- [x] Часть 2 — харднинг API: `/openapi.json` содержит `securitySchemes: bearer`, описания операций и ответы 401 / 404 / 409 у защищённых операций\n- [x] Часть 2 — харднинг API: Решения по `fetch_file_content`, `ReviewWorker`, `reviewer_requested` и `payload_s3_ref` записаны; удаление — только после решения\n\n## Dependencies\n\n**Связано, не блокирует:**\n\n- #37 — настройки GitHub App (флаг авторизации при установке, Setup URL), если для части 1 выбран этот вариант\n- #35 — смоук части 1 на staging требует PR2 (воркер онбордит репозитории)\n- larchanka-training/dmc-268-ui-t6#50 — экран подключения\n- https://github.com/larchanka-training/dmc-268-api-t6/issues/52 (часть 1) — штатная сборка webhook-worker\n- https://github.com/larchanka-training/dmc-268-ui-t6/issues/65 (часть 2) — у SSE появится потребитель в UI\n- https://github.com/larchanka-training/dmc-268-api-t6/issues/56 (часть 2) — имя флага лейбла в SD (колонка `reviewer_requested`)\n\n## DoD Checklist\n\n- [x] `uv run ruff check .`, `uv run ruff format --check .`, `uv run mypy .`, `uv run pytest` зелёные\n- [x] ui (часть 1): `pnpm lint`, `pnpm check-types`, `pnpm format:check`, `pnpm test`, `pnpm build` зелёные\n- [x] Required check `Python lint / type / test` зелёный\n- [x] PR по каждой части: 1 approve, все треды закрыты\n- [x] Документация обновлена\n- [x] Чекбоксы AC отмечены, issue закрыт техлидом после проверки всех частей\n\n## References\n\n- https://github.com/larchanka-training/dmc-268-api-t6/blob/0e4a2af/app/modules/auth/application/exchange_github_code.py#L101 — связывание только при входе\n- https://github.com/larchanka-training/dmc-268-api-t6/blob/0e4a2af/app/modules/workspaces/application/link_github_installations.py#L75-L131 — запись грантов\n- https://github.com/larchanka-training/dmc-268-api-t6/blob/0e4a2af/app/modules/auth/infrastructure/sessions.py#L99-L115 — refresh читает сохранённые гранты\n- https://github.com/larchanka-training/dmc-268-api-t6/blob/0e4a2af/app/modules/workspaces/infrastructure/repository_access.py#L15-L41 — фильтр доступа\n- https://github.com/larchanka-training/dmc-268-ui-t6/blob/d8c9172/src/widgets/repository-list/ui/RepositoryList.tsx#L277 — подсказка «нажмите «Обновить»»\n- https://github.com/larchanka-training/dmc-268-api-t6/blob/0e4a2af/docs/SYSTEM_DESIGN.md#L465 — SD §6.9\n- https://github.com/larchanka-training/dmc-268-api-t6/blob/0e4a2af/app/modules/reviews/infrastructure/amqp.py#L190-L194 — `nack(requeue=True)` без счётчика\n- https://github.com/larchanka-training/dmc-268-api-t6/blob/0e4a2af/app/main.py#L173 — чтение тела до HMAC\n- https://github.com/larchanka-training/dmc-268-api-t6/blob/0e4a2af/app/main.py#L446 — полный `get_run` на каждое SSE-событие\n- https://github.com/larchanka-training/dmc-268-api-t6/blob/0e4a2af/app/modules/reviews/infrastructure/run_repository.py#L66-L69 — `scope=None` → `true()`\n- https://github.com/larchanka-training/dmc-268-api-t6/blob/0e4a2af/app/modules/auth/application/refresh_session.py#L101-L102 — отзыв семейства при повторе\n- https://github.com/larchanka-training/dmc-268-api-t6/blob/0e4a2af/tests/test_portal_auth.py#L55-L64 — ручной список 401-маршрутов\n- https://github.com/larchanka-training/dmc-268-api-t6/blob/0e4a2af/app/modules/reviews/infrastructure/blob_cache.py#L75 — адаптер с собственным commit\n- https://github.com/larchanka-training/dmc-268-api-t6/blob/0e4a2af/app/main.py#L131 — `FastAPI(title=\"Backend\")`\n\n## Kickoff — с чего начать\n\n**Репозиторий:** larchanka-training/dmc-268-api-t6 — плюс larchanka-training/dmc-268-ui-t6 для подсказки (часть 1, отдельный PR с `Refs`)\n\n**Ветка:** fix/<n>-access-and-hardening — `main` защищён; по PR на часть, все с `Refs`; issue закрывает техлид после проверки всех частей\n\n**Форма проблемы:** Часть 1 (гранты Workspace): Гранты пользователя — снимок на момент входа. Всё, что меняется на GitHub после входа (новая установка App, новые репозитории в установке, отзыв доступа), портал не видит до следующего полного входа. Нужен механизм обновления и решение, когда он срабатывает.\nЧасть 2 (харднинг API): Пакет независимых мелких дефектов надёжности и безопасности, найденных при приёмке спринта 2. По отдельности ни один не блокирует, но каждый — либо скрытая петля (очередь, доставка), либо открытая по умолчанию граница (scope, тело запроса, SSE).\n\n**Что прочитать первым:**\n\n- (ч. 1) app/modules/workspaces/application/link_github_installations.py — как гранты пишутся сейчас\n- (ч. 1) app/modules/auth/application/refresh_session.py и app/modules/auth/infrastructure/sessions.py — что делает refresh\n- (ч. 1) app/modules/workspaces/infrastructure/github_user_installations.py — запрос `GET /user/installations`\n- (ч. 1) docs/SYSTEM_DESIGN.md §6.9 и §12 — контракт авторизации и Р-7\n- (ч. 2) AGENTS.md — раздел «What NOT to do» (commit только в use case, транзакции без сетевых вызовов)\n- (ч. 2) app/modules/reviews/infrastructure/amqp.py — обработка сообщений\n- (ч. 2) app/main.py — приём вебхука, SSE, конфигурация FastAPI\n- (ч. 2) app/modules/auth/application/refresh_session.py — ротация и отзыв refresh\n- (ч. 2) tests/test_portal_auth.py — 401-регрессия\n\n**Перед тем как писать код:**\n\n- (ч. 1) `uv run pytest tests/test_auth_refresh.py tests/test_portal_scope_postgres.py` — текущее поведение refresh и scope\n- (ч. 2) `uv run pytest tests/test_portal_auth.py tests/test_github_webhook_delivery.py -q`\n\n**Мины:**\n\n- (ч. 1) Refresh вызывается на каждый 401 и из нескольких вкладок: вызов GitHub в refresh добавит задержку и расход rate limit; вызов GitHub — вне транзакции (AGENTS.md)\n- (ч. 1) Пустой список Workspace валиден (`workspaces: []` → 200 и пустые списки) — не превращать его в 401\n- (ч. 2) Перенос commit из адаптера в use case меняет границы транзакций — не втянуть в транзакцию вызов GitHub\n- (ч. 2) Окно допуска для refresh ослабляет обнаружение replay — держать его коротким (секунды) и покрыть тестом\n",
+      "parts": [],
+      "ref": "larchanka-training/dmc-268-api-t6#54",
+      "state": "closed",
+      "title": "[auth] Обновлять гранты Workspace без перелогина и закрыть P3-харднинг API",
+      "url": "https://github.com/larchanka-training/dmc-268-api-t6/issues/54"
+    }
+  ],
+  "pr": {
+    "author": "skvertl",
+    "base_ref": "main",
+    "base_sha": "f3b15bc1ed1e3051b7a7317576a69d1f247a06ad",
+    "body": "## What\n\n- Added 'Обновить доступ' button in the repository list header and empty state triggering GitHub re-authorization to link newly installed workspaces.\n- Updated installation tooltips and grant refresh feedback in Repositories UI to accurately describe both actions (Refresh existing installation vs Re-authorize for new installation).\n- All 5 gates passing: lint, check-types, format:check, test (256 tests across 45 files), build.\n\n## Why\n\nImplements UI workspace grants management and manual permissions sync corresponding to backend Issue #54.\n\n## How to verify\n\n- pnpm lint\n- pnpm check-types\n- pnpm format:check\n- pnpm test\n- pnpm build\n\nManual scenario: Install GitHub App in another tab -> return to portal -> click «Обновить доступ» -> return to /repositories -> newly granted repositories appear in the list.\n\n## Refs\n\nRefs larchanka-training/dmc-268-api-t6#54\n\n---\n\nBefore merge:\n\n- [x] No closing keyword and no Development-panel link to the issue\n- [x] Branch rebased on the current main\n- [x] Approve is on the current head commit\n- [x] The body describes the whole PR\n- [x] All review threads resolved\n\nRules: [merge](https://github.com/larchanka-training/dmc-268-ui-t6/blob/main/docs/CONTRIBUTING.md#мерж), [issue acceptance](https://github.com/larchanka-training/dmc-268-ui-t6/blob/main/docs/CONTRIBUTING.md#приёмка-задачи).",
+    "draft": false,
+    "head_ref": "fix/54-workspace-grants-ui",
+    "head_sha": "02b0758a20821690ede586a70945d7734b4ebf33",
+    "number": 72,
+    "repo": "larchanka-training/dmc-268-ui-t6",
+    "state": "merged",
+    "title": "fix(repositories): sync workspace grants and update install tooltips",
+    "url": "https://github.com/larchanka-training/dmc-268-ui-t6/pull/72"
+  },
+  "reasons": [],
+  "schema": 1,
+  "verdict": "go",
+  "warnings": [
+    "the pull request is merged: the review reads its final head"
+  ]
+}
