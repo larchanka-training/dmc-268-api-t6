@@ -248,8 +248,8 @@ ACK сервера.
 временную БД и тестовый алерт в Telegram. Запускается только через `workflow_dispatch`; job
 идёт лишь для `main`, в `environment: staging`, с правами `contents: read` и своей группой
 concurrency `staging-monitoring-acceptance`. Рассчитан на курсовой VPS (режим `edge`,
-SSH-пользователь root). Состав проверок — [MONITORING.md](MONITORING.md) §10 «Приёмка на
-staging».
+SSH-пользователь root). Состав проверок — «Приёмка на staging» в
+[test-plan/monitoring-checks.md](test-plan/monitoring-checks.md#приёмка-на-staging).
 
 ---
 
