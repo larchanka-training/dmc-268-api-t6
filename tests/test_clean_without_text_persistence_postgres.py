@@ -210,7 +210,7 @@ def test_referenced_result_and_raw_response_cannot_read_another_runs_body(result
             async with factory.begin() as session:
                 action = await session.scalar(
                     select(RunAction).where(
-                        RunAction.run_id == RUN_ATTEMPTED, RunAction.tool == "review.postprocess"
+                        RunAction.run_id == RUN_ATTEMPTED, RunAction.tool == "review.finalize"
                     )
                 )
                 assert action is not None

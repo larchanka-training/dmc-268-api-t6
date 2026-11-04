@@ -16,6 +16,7 @@ from app.modules.reviews.application.conventions import GeneratedConventions
 from app.modules.reviews.application.execute_review import (
     ExecuteReviewRun,
     ReviewPromptInput,
+    ReviewReply,
 )
 from app.modules.reviews.application.policy_errors import (
     PolicyError,
@@ -53,6 +54,7 @@ from tests.execute_review_fakes import (
     MAIN_BLOCK_ID,
     RUN_ID,
     FakeVerifierModel,
+    _AcceptingCheckpointPublisher,
     _make_test_snapshot,
     conventions,
 )
@@ -116,7 +118,7 @@ def test_execute_review_empty_after_filters_verifier_call_count_zero() -> None:
                 "summary": {"problem": "p", "done_well": "d", "effort": "none"},
             }
 
-    class Publisher:
+    class Publisher(_AcceptingCheckpointPublisher):
         async def execute(self, run_id: UUID, raw_output: Any) -> bool:
             return True
 
@@ -191,7 +193,7 @@ def test_execute_review_retrieved_excerpt_accepted_by_reviewer_and_verifier() ->
                 "summary": {"problem": "p", "done_well": "d", "effort": "none"},
             }
 
-    class Publisher:
+    class Publisher(_AcceptingCheckpointPublisher):
         async def execute(self, run_id: UUID, raw_output: Any) -> bool:
             nonlocal published
             published = dict(raw_output)
@@ -351,7 +353,7 @@ def test_execute_review_drops_evidence_source_disallowed_and_revision_mismatch()
                 "summary": {"problem": "p", "done_well": "d", "effort": "none"},
             }
 
-    class Publisher:
+    class Publisher(_AcceptingCheckpointPublisher):
         async def execute(self, run_id: UUID, raw_output: Any) -> bool:
             nonlocal published
             published = raw_output
@@ -509,7 +511,7 @@ def test_execute_review_drops_attribution_to_a_whitespace_only_agents_document()
                 "summary": {"problem": "p", "done_well": "d", "effort": "none"},
             }
 
-    class Publisher:
+    class Publisher(_AcceptingCheckpointPublisher):
         async def execute(self, run_id: UUID, raw_output: Any) -> bool:
             nonlocal published
             published = raw_output
@@ -616,7 +618,7 @@ def test_execute_review_run_multiple_files_snapshot_fits_without_overflow() -> N
 
     published_output: dict[str, Any] = {}
 
-    class Publisher:
+    class Publisher(_AcceptingCheckpointPublisher):
         async def execute(self, run_id: UUID, raw_output: Any) -> bool:
             nonlocal published_output
             published_output = dict(raw_output) if isinstance(raw_output, Mapping) else {}
@@ -670,7 +672,7 @@ def test_execute_review_verifier_mandatory_budget_exceeded_aborts_before_draft_r
             draft_calls += 1
             return {"findings": [], "summary": {"problem": "p", "done_well": "d", "effort": "none"}}
 
-    class Publisher:
+    class Publisher(_AcceptingCheckpointPublisher):
         async def execute(self, run_id: UUID, raw_output: Any) -> bool:
             return True
 
@@ -754,7 +756,7 @@ def test_execute_review_counter_version_and_diff_old_sha_propagation() -> None:
             captured_diff_old_sha.append(context.pr_meta.diff_old_sha)
             return {"findings": [], "summary": {"problem": "p", "done_well": "d", "effort": "none"}}
 
-    class Publisher:
+    class Publisher(_AcceptingCheckpointPublisher):
         async def execute(self, run_id: UUID, raw_output: Any) -> bool:
             return True
 
@@ -839,7 +841,7 @@ class _StageSnapshot:
         return False
 
 
-class _BoundPipeline:
+class _BoundPipeline(_AcceptingCheckpointPublisher):
     """Processor, prompt source, model and publisher of a run bound to ``binding``."""
 
     def __init__(self, binding: ReviewBinding) -> None:
@@ -1051,7 +1053,7 @@ class _F18Model:
         }
 
 
-class _F18Publisher:
+class _F18Publisher(_AcceptingCheckpointPublisher):
     def __init__(self) -> None:
         self.outputs: list[Any] = []
 
@@ -1280,7 +1282,7 @@ def _publish_snapshot_candidates(
                 ]
             }
 
-    class Publisher:
+    class Publisher(_AcceptingCheckpointPublisher):
         async def execute(
             self, run_id: UUID, raw_output: Mapping[str, object] | str | bytes
         ) -> bool:
@@ -1501,3 +1503,74 @@ def test_execute_review_snapshot_warning_keeps_supported_low_and_drops_info() ->
         ),
         "effort": "small",
     }
+
+
+def test_snapshot_review_fails_closed_without_candidate_checkpoint() -> None:
+    class Processor:
+        async def prepare(self, run_id: UUID) -> GeneratedConventions:
+            return conventions()
+
+    class Repository:
+        async def get_review_prompt_input(
+            self, run_id: UUID, saved: GeneratedConventions
+        ) -> ReviewPromptInput:
+            return ReviewPromptInput(
+                system="Review carefully.",
+                rules=(),
+                agents_md=None,
+                conventions=RepoConventions((), ()),
+                changed_files=(
+                    ChangedFile("app/main.py", "modified", (DiffLine(10, "added", "query = ..."),)),
+                ),
+                omitted_files=(),
+                policy_snapshot=_make_test_snapshot(),
+            )
+
+    class Model:
+        async def get_pull_request_meta(self, run_id: UUID) -> PullRequestMeta:
+            return PullRequestMeta(
+                "Title", None, "author", "feature", "main", (), 1, 1, 0, False, False
+            )
+
+        async def draft_review(self, *, context: ReviewContext) -> ReviewReply:
+            output = {
+                "findings": [
+                    {
+                        "path": "app/main.py",
+                        "line": 10,
+                        "start_line": None,
+                        "severity": "high",
+                        "category": "security",
+                        "title": "SQL injection",
+                        "body": "Raw query concatenation",
+                        "suggestion": None,
+                        "confidence": 0.9,
+                        "rule_name": None,
+                        "evidence_refs": [
+                            {"block_id": MAIN_BLOCK_ID, "start_line": 10, "end_line": 10}
+                        ],
+                    }
+                ],
+                "summary": {"problem": "A bug.", "done_well": "Small change.", "effort": "small"},
+            }
+            return ReviewReply(
+                output,
+                context,
+                PromptBuilder().build_manifest(context, call_id=UUID(int=435), stage="review"),
+            )
+
+    class Publisher:
+        async def execute(self, run_id: UUID, raw_output: object) -> bool:
+            raise AssertionError("publication must not run without a checkpoint")
+
+    class Verifier:
+        async def verify(
+            self, *, system_prompt: str, user_prompt: str, **_: object
+        ) -> Mapping[str, Any]:
+            raise AssertionError("verifier must not run without a checkpoint")
+
+    pipeline = ExecuteReviewRun(
+        Processor(), Repository(), Model(), Publisher(), reflection_pass=ReflectionPass(Verifier())
+    )
+    with pytest.raises(RunFailure, match="checkpoint"):
+        asyncio.run(pipeline.execute(RUN_ID))

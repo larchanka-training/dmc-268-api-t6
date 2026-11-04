@@ -25,7 +25,7 @@ from app.modules.reviews.application.store_review_output import StoreReviewOutpu
 from app.modules.reviews.infrastructure.llm.models import GatewayReviewModel
 from tests.execute_review_fakes import FakeVerifierModel, conventions
 from tests.test_clean_without_text_result import Queue, Repository, Uow, answer
-from tests.test_clean_without_text_sent_context import finding
+from tests.test_clean_without_text_sent_context import _CheckpointRepository, finding
 from tests.test_gateway_review_model import RUN, Transport, _gateway, _snapshot
 from tests.test_llm_gateway import PRIMARY, Harness, completion
 from tests.test_run_coverage import code_snapshot, coverage
@@ -104,11 +104,15 @@ def test_snapshot_reply_fit_and_reflection_keep_the_final_coverage(
     lines = tuple(DiffLine(i, "added", f"line_{i} = '{'x' * 70}'") for i in range(1, 401))
     files = (ChangedFile("src/app.py", "added", lines if fit else lines[:1]),)
     saved = code_snapshot()
-    repository = Repository(coverage([saved]))
+    repository = _CheckpointRepository(coverage([saved]))
     committed: list[str] = []
     queue = Queue(committed)
     store = StoreReviewOutput(
-        lambda: Uow(repository, committed), queue, worker_id="worker", run_url=lambda _: None
+        lambda: Uow(repository, committed),
+        queue,
+        worker_id="worker",
+        expected_attempt=1,
+        run_url=lambda _: None,
     )
     output = answer()
     if candidates != "empty":

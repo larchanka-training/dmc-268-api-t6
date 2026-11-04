@@ -28,6 +28,8 @@ RUN_ACTION_TOOLS = frozenset(
         "llm.review_output",
         "llm.verify",
         "review.postprocess",
+        "review.finalize",
+        "review.publish_start",
         "github.publish_review",
         "gitlab.publish_review",
         "bitbucket.publish_review",

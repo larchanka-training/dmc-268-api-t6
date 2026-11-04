@@ -71,7 +71,7 @@ async def finalize_run(
     async with factory() as session:
         action = await session.scalar(
             select(RunAction).where(
-                RunAction.run_id == RUN_ATTEMPTED, RunAction.tool == "review.postprocess"
+                RunAction.run_id == RUN_ATTEMPTED, RunAction.tool == "review.finalize"
             )
         )
         assert action is not None and isinstance(action.response, dict)
@@ -178,7 +178,7 @@ def test_views_use_referenced_body_and_conservatively_replace_stale_or_legacy_su
             async with factory.begin() as session:
                 action = await session.scalar(
                     select(RunAction).where(
-                        RunAction.run_id == RUN_ATTEMPTED, RunAction.tool == "review.postprocess"
+                        RunAction.run_id == RUN_ATTEMPTED, RunAction.tool == "review.finalize"
                     )
                 )
                 assert action is not None
@@ -193,10 +193,17 @@ def test_views_use_referenced_body_and_conservatively_replace_stale_or_legacy_su
                         "coverage": saved["coverage"] | {"head_sha": "0" * 40}
                     }
                 elif kind == "newer_invalid":
+                    latest_index = await session.scalar(
+                        select(RunAction.index)
+                        .where(RunAction.run_id == RUN_ATTEMPTED)
+                        .order_by(RunAction.index.desc())
+                        .limit(1)
+                    )
+                    assert latest_index is not None
                     session.add(
                         RunAction(
                             run_id=RUN_ATTEMPTED,
-                            index=action.index + 1,
+                            index=latest_index + 1,
                             tool="review.postprocess",
                             request={},
                             response={"coverage": {"version": 99}},

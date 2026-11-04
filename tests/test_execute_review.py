@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import re
 from collections.abc import Mapping
+from dataclasses import replace
 from typing import Any
 from uuid import UUID
 
@@ -15,6 +16,7 @@ from app.modules.reviews.application.conventions import GeneratedConventions
 from app.modules.reviews.application.execute_review import (
     ExecuteReviewRun,
     ReviewPromptInput,
+    ReviewReply,
 )
 from app.modules.reviews.application.policy_errors import (
     PolicyError,
@@ -40,12 +42,14 @@ from app.modules.reviews.application.reflection_pass import (
 from app.modules.reviews.application.review_context import ReviewContextPayload
 from app.modules.reviews.application.review_output import (
     InvalidReviewOutput,
+    VerifiedReviewOutput,
 )
 from app.modules.reviews.application.run_failures import RunFailure, classify_failure
 from tests.execute_review_fakes import (
     MAIN_BLOCK_ID,
     RUN_ID,
     FakeVerifierModel,
+    _AcceptingCheckpointPublisher,
     _make_test_snapshot,
     conventions,
 )
@@ -93,7 +97,7 @@ def test_execute_review_run_builds_prompt_then_publishes_model_output() -> None:
             calls.append("model")
             return {"summary": "raw"}
 
-    class Publisher:
+    class Publisher(_AcceptingCheckpointPublisher):
         async def execute(self, run_id: UUID, raw_output: dict[str, object]) -> bool:
             assert run_id == RUN_ID
             assert raw_output == {"summary": "raw"}
@@ -122,7 +126,7 @@ def test_execute_review_run_does_not_call_model_when_processing_fails() -> None:
         async def draft_review(self, *, context: ReviewContext) -> dict[str, object]:
             raise AssertionError("no provider call after failed processing")
 
-    class Publisher:
+    class Publisher(_AcceptingCheckpointPublisher):
         async def execute(self, run_id: UUID, raw_output: dict[str, object]) -> bool:
             raise AssertionError("no publication after failed processing")
 
@@ -132,6 +136,8 @@ def test_execute_review_run_does_not_call_model_when_processing_fails() -> None:
 
 
 def test_execute_review_run_with_reflection_pass_filters_unsupported_findings() -> None:
+    model_calls = 0
+
     class Processor:
         async def prepare(self, run_id: UUID) -> GeneratedConventions:
             return conventions()
@@ -147,6 +153,7 @@ def test_execute_review_run_with_reflection_pass_filters_unsupported_findings() 
                 conventions=RepoConventions(("Use services.",), ("Test paths.",)),
                 changed_files=(
                     ChangedFile("app/main.py", "modified", (DiffLine(10, "added", "query = ..."),)),
+                    ChangedFile("app/omitted.py", "modified", (DiffLine(3, "added", "x = 1"),)),
                 ),
                 omitted_files=(),
                 policy_snapshot=_make_test_snapshot(),
@@ -158,8 +165,10 @@ def test_execute_review_run_with_reflection_pass_filters_unsupported_findings() 
                 "Title", None, "author", "feature", "main", (), 1, 1, 0, False, False
             )
 
-        async def draft_review(self, *, context: ReviewContext) -> dict[str, Any]:
-            return {
+        async def draft_review(self, *, context: ReviewContext) -> ReviewReply:
+            nonlocal model_calls
+            model_calls += 1
+            answer = {
                 "findings": [
                     {
                         "path": "app/main.py",
@@ -198,18 +207,91 @@ def test_execute_review_run_with_reflection_pass_filters_unsupported_findings() 
                     "effort": "small",
                 },
             }
+            fitted = replace(
+                context,
+                changed_files=context.changed_files[:1],
+                omitted_files=("app/omitted.py",),
+            )
+            return ReviewReply(
+                VerifiedReviewOutput(answer, incomplete_paths=("app/omitted.py",)),
+                fitted,
+                PromptBuilder().build_manifest(fitted, call_id=UUID(int=435), stage="review"),
+            )
+
+    from app.modules.reviews.application.store_review_output import AcceptedReviewCheckpoint
 
     published_output: dict[str, Any] = {}
+    checkpointed_candidates: list[str] = []
+    checkpointed_output: dict[str, object] | None = None
+    checkpointed_fitted_context: dict[str, object] | None = None
+    accepted_call_id: UUID | None = None
+    verifier_attempts = 0
+    publish_calls = 0
 
     class Publisher:
+        async def checkpoint_candidates(
+            self,
+            run_id: UUID,
+            raw_output: Mapping[str, object],
+            candidate_ids: tuple[str, ...],
+            **_: object,
+        ) -> bool:
+            nonlocal checkpointed_output, checkpointed_fitted_context, accepted_call_id
+            assert run_id == RUN_ID
+            assert len(raw_output["findings"]) == 2  # type: ignore[arg-type]
+            if checkpointed_output is None:
+                checkpointed_output = dict(raw_output)
+                fitted_context = _["fitted_context"]
+                assert isinstance(fitted_context, dict)
+                checkpointed_fitted_context = fitted_context
+                call_id = _["accepted_call_id"]
+                assert isinstance(call_id, UUID)
+                accepted_call_id = call_id
+                checkpointed_candidates.extend(candidate_ids)
+            else:
+                assert candidate_ids == tuple(checkpointed_candidates)
+                assert _["fitted_context"] == checkpointed_fitted_context
+                assert _["incomplete_paths"] == ("app/omitted.py",)
+            return True
+
+        async def load_accepted_output(self, run_id: UUID) -> AcceptedReviewCheckpoint | None:
+            if checkpointed_output is None:
+                return None
+            return AcceptedReviewCheckpoint(
+                checkpointed_output,
+                accepted_call_id,
+                None,
+                ("app/omitted.py",),
+                1,
+                checkpointed_fitted_context,
+            )
+
         async def execute(
             self, run_id: UUID, raw_output: Mapping[str, object] | str | bytes
         ) -> bool:
-            nonlocal published_output
+            nonlocal published_output, publish_calls
+            publish_calls += 1
             published_output = dict(raw_output) if isinstance(raw_output, Mapping) else {}
             return True
 
-    fake_verifier_model = FakeVerifierModel(
+    class CheckpointVerifierModel(FakeVerifierModel):
+        async def verify(
+            self, *, system_prompt: str, user_prompt: str, **kwargs: object
+        ) -> Mapping[str, Any]:
+            nonlocal verifier_attempts
+            verifier_attempts += 1
+            assert len(checkpointed_candidates) == 2
+            fitted = kwargs["context"]
+            assert isinstance(fitted, ReviewContext)
+            assert [file.path for file in fitted.changed_files] == ["app/main.py"]
+            assert fitted.omitted_files == ("app/omitted.py",)
+            if verifier_attempts == 1:
+                raise VerificationUnavailableError("verifier unavailable")
+            return await super().verify(
+                system_prompt=system_prompt, user_prompt=user_prompt, **kwargs
+            )
+
+    fake_verifier_model = CheckpointVerifierModel(
         {
             "decisions": [
                 {
@@ -242,9 +324,14 @@ def test_execute_review_run_with_reflection_pass_filters_unsupported_findings() 
         reflection_pass=reflection_pass,
     )
 
+    with pytest.raises(VerificationUnavailableError, match="verifier unavailable"):
+        asyncio.run(pipeline.execute(RUN_ID))
+    assert publish_calls == 0
     success = asyncio.run(pipeline.execute(RUN_ID))
     assert success is True
-    assert fake_verifier_model.call_count == 1
+    assert model_calls == 1
+    assert verifier_attempts == 2
+    assert publish_calls == 1
 
     # Only supported candidate (SQL injection) is published!
     published_findings = published_output["findings"]
@@ -291,7 +378,7 @@ def test_execute_review_run_with_reflection_pass_zero_findings_skips_verifier() 
 
     published_output: dict[str, Any] = {}
 
-    class Publisher:
+    class Publisher(_AcceptingCheckpointPublisher):
         async def execute(
             self, run_id: UUID, raw_output: Mapping[str, object] | str | bytes
         ) -> bool:
@@ -406,7 +493,7 @@ def test_execute_review_run_excluded_file_does_not_reach_verifier() -> None:
                 "summary": {"problem": "Issue", "done_well": "OK", "effort": "small"},
             }
 
-    class Publisher:
+    class Publisher(_AcceptingCheckpointPublisher):
         async def execute(self, run_id: UUID, raw_output: Any) -> bool:
             return True
 
@@ -459,7 +546,7 @@ def test_execute_review_fail_closed_when_snapshot_present_without_reflection_pas
             self.draft_calls += 1
             return {"findings": [], "summary": {"problem": "p", "done_well": "d", "effort": "none"}}
 
-    class Publisher:
+    class Publisher(_AcceptingCheckpointPublisher):
         def __init__(self) -> None:
             self.publish_calls = 0
 
@@ -520,7 +607,7 @@ def test_execute_review_fail_closed_when_snapshot_not_ready() -> None:
             self.draft_calls += 1
             return {"findings": [], "summary": {"problem": "p", "done_well": "d", "effort": "none"}}
 
-    class Publisher:
+    class Publisher(_AcceptingCheckpointPublisher):
         def __init__(self) -> None:
             self.publish_calls = 0
 
@@ -604,7 +691,7 @@ def test_execute_review_summary_cleansed_when_all_candidates_rejected() -> None:
 
     published_output: dict[str, Any] = {}
 
-    class Publisher:
+    class Publisher(_AcceptingCheckpointPublisher):
         async def execute(self, run_id: UUID, raw_output: Any) -> bool:
             nonlocal published_output
             published_output = dict(raw_output)
@@ -700,7 +787,7 @@ def test_execute_review_json_rules_compatibility_with_reflection_pass() -> None:
 
     published_output: dict[str, Any] = {}
 
-    class Publisher:
+    class Publisher(_AcceptingCheckpointPublisher):
         async def execute(self, run_id: UUID, raw_output: Any) -> bool:
             nonlocal published_output
             published_output = dict(raw_output)
@@ -797,7 +884,7 @@ def test_execute_review_verifier_failure_prevents_publication(verifier_exc: Exce
 
     publish_called = False
 
-    class Publisher:
+    class Publisher(_AcceptingCheckpointPublisher):
         async def execute(self, run_id: UUID, raw_output: Any) -> bool:
             nonlocal publish_called
             publish_called = True
@@ -870,7 +957,7 @@ def test_execute_review_candidate_count_limit() -> None:
 
     publish_called = False
 
-    class Publisher:
+    class Publisher(_AcceptingCheckpointPublisher):
         async def execute(self, run_id: UUID, raw_output: Any) -> bool:
             nonlocal publish_called
             publish_called = True
@@ -958,7 +1045,7 @@ def test_execute_review_summary_cleansed_when_partially_rejected() -> None:
 
     published_output: dict[str, Any] = {}
 
-    class Publisher:
+    class Publisher(_AcceptingCheckpointPublisher):
         async def execute(self, run_id: UUID, raw_output: Any) -> bool:
             nonlocal published_output
             published_output = dict(raw_output)
@@ -1065,7 +1152,7 @@ def test_execute_review_wraps_candidate_validation_error_in_invalid_review_outpu
                 "summary": {"problem": "Issue.", "done_well": "OK.", "effort": "small"},
             }
 
-    class Publisher:
+    class Publisher(_AcceptingCheckpointPublisher):
         async def execute(self, run_id: UUID, raw_output: Any) -> bool:
             return True
 
@@ -1178,7 +1265,7 @@ def test_execute_review_summary_cleansing_effort_categories_and_plural(
 
     published_output: dict[str, Any] = {}
 
-    class Publisher:
+    class Publisher(_AcceptingCheckpointPublisher):
         async def execute(self, run_id: UUID, raw_output: Any) -> bool:
             nonlocal published_output
             published_output = dict(raw_output)
@@ -1277,7 +1364,7 @@ def test_execute_review_missing_evidence_refs_not_double_wrapped() -> None:
                 "summary": {"problem": "p", "done_well": "d", "effort": "none"},
             }
 
-    class Publisher:
+    class Publisher(_AcceptingCheckpointPublisher):
         async def execute(self, run_id: UUID, raw_output: Any) -> bool:
             return True
 

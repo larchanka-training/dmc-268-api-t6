@@ -55,7 +55,10 @@ from app.modules.reviews.application.review_output import (
 from app.modules.reviews.application.review_path import ReviewBinding, require_served_provider
 from app.modules.reviews.application.run_coverage import restore_run_coverage
 from app.modules.reviews.application.run_failures import RunCancelled, RunFailure
-from app.modules.reviews.application.store_review_output import PublishingGuard
+from app.modules.reviews.application.store_review_output import (
+    FinalizedReviewPlan,
+    PublishingGuard,
+)
 from app.modules.reviews.application.vcs_diff import (
     PullRequestLocator,
     VcsFile,
@@ -230,6 +233,11 @@ class BitbucketRuns(Runs):
         )
 
 
+class CheckpointOutput(Output):
+    async def checkpoint_candidates(self, *args: object, **kwargs: object) -> bool:
+        return True
+
+
 class BitbucketVcs:
     def __init__(self) -> None:
         self.locators: list[PullRequestLocator] = []
@@ -289,7 +297,7 @@ def test_bitbucket_full_mocked_review_never_uses_github_or_gitlab(
     monkeypatch: pytest.MonkeyPatch, with_verifier: bool
 ) -> None:
     runs, vcs, forbidden = BitbucketRuns(), BitbucketVcs(), ForbiddenOtherVcs()
-    store, trace, output = _store(), Trace(), Output()
+    store, trace, output = _store(), Trace(), CheckpointOutput()
     assert store.pins is not None
     store.pins = replace(
         store.pins,
@@ -695,6 +703,24 @@ def test_composed_bitbucket_review_uses_pinned_cloud_reads_and_writes(
                 findings_hash = ""
                 review_body = "Review summary"
                 coverage_status: str | None = None
+                finalized_plan: FinalizedReviewPlan | None = None
+
+                async def load_finalized_plan(self, run_id: UUID) -> FinalizedReviewPlan | None:
+                    assert run_id == RUN_ID
+                    return self.finalized_plan
+
+                async def load_review_checkpoint(self, run_id: UUID) -> None:
+                    assert run_id == RUN_ID
+                    return None
+
+                async def checkpoint_review_candidates(self, run_id: UUID, **kwargs: Any) -> None:
+                    assert run_id == RUN_ID
+
+                async def finalize_review(self, run_id: UUID, **kwargs: Any) -> None:
+                    assert run_id == RUN_ID
+                    self.finalized_plan = FinalizedReviewPlan(
+                        HEAD, kwargs["findings_hash"], kwargs["review_event"]
+                    )
 
                 async def cancellation_reason(self, run_id: UUID) -> None:
                     assert run_id == RUN_ID
@@ -732,7 +758,7 @@ def test_composed_bitbucket_review_uses_pinned_cloud_reads_and_writes(
                 async def lock_for_publishing(self, run_id: UUID) -> PublishingGuard:
                     assert run_id == RUN_ID
                     return PublishingGuard(
-                        "running", claimed.worker_id, False, HEAD, True, "COMMENT"
+                        "running", claimed.worker_id, False, HEAD, True, "COMMENT", claimed.attempt
                     )
 
                 async def store_review_output(

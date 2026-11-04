@@ -57,12 +57,12 @@ def test_postgres_backend_result_enters_publishing_without_a_model_answer(
 
             assert await store.execute(RUN_ATTEMPTED, NoModelAnswer()) is True
 
-            assert await _tools(factory) == {"context.build": 1, "review.postprocess": 1}
+            assert await _tools(factory) == {"context.build": 1, "review.finalize": 1}
             async with factory() as session:
                 run = await session.get(Run, RUN_ATTEMPTED)
                 action = await session.scalar(
                     select(RunAction).where(
-                        RunAction.run_id == RUN_ATTEMPTED, RunAction.tool == "review.postprocess"
+                        RunAction.run_id == RUN_ATTEMPTED, RunAction.tool == "review.finalize"
                     )
                 )
             assert run is not None and action is not None
@@ -77,7 +77,7 @@ def test_postgres_backend_result_enters_publishing_without_a_model_answer(
 
             # The T8 guard: the run is no longer running, nothing is added.
             assert await store.execute(RUN_ATTEMPTED, NoModelAnswer()) is False
-            assert await _tools(factory) == {"context.build": 1, "review.postprocess": 1}
+            assert await _tools(factory) == {"context.build": 1, "review.finalize": 1}
             assert len(queue.pointers) == 1
         finally:
             await engine.dispose()
@@ -103,7 +103,7 @@ def test_postgres_model_answer_is_still_recorded_as_llm_review_output(result_env
             assert await _tools(factory) == {
                 "context.build": 1,
                 "llm.review_output": 1,
-                "review.postprocess": 1,
+                "review.finalize": 1,
             }
             async with factory() as session:
                 action = await session.scalar(

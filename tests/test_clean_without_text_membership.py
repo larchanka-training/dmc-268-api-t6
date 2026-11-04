@@ -36,6 +36,7 @@ from app.modules.reviews.application.store_review_output import StoreReviewOutpu
 from app.modules.reviews.infrastructure.llm.models import GatewayReviewModel
 from tests.execute_review_fakes import FakeVerifierModel, _make_test_snapshot, conventions
 from tests.test_clean_without_text_result import Queue, Repository, Uow, answer
+from tests.test_clean_without_text_sent_context import _CheckpointRepository
 from tests.test_gateway_review_model import RUN, Transport, _gateway
 
 
@@ -91,7 +92,7 @@ def test_restore_bounded_classification_then_actual_fit_reduces_only_full_allowe
     restored = restore_run_coverage(serialized, snapshots=snapshots, diff_map=diff)
     assert restored is not None
 
-    class Results(Repository):
+    class Results(_CheckpointRepository):
         async def get_post_processing_input(self, run_id: UUID) -> FindingPostProcessingInput:
             return FindingPostProcessingInput(
                 diff,
@@ -104,7 +105,11 @@ def test_restore_bounded_classification_then_actual_fit_reduces_only_full_allowe
     committed: list[str] = []
     queue = Queue(committed)
     store = StoreReviewOutput(
-        lambda: Uow(repository, committed), queue, worker_id="worker", run_url=lambda _: None
+        lambda: Uow(repository, committed),
+        queue,
+        worker_id="worker",
+        expected_attempt=1,
+        run_url=lambda _: None,
     )
     changed, omitted = review_files_from_snapshots(snapshots)
 

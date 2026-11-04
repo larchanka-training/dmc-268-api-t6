@@ -193,6 +193,7 @@ def test_actual_execution_partial_result_survives_postgres_http_checkrun_and_rec
                     lambda: SqlAlchemyReviewOutputUnitOfWork(factory),
                     queue,
                     worker_id="worker",
+                    expected_attempt=1,
                     run_url=lambda _: None,
                 ),
                 reflection_pass=ReflectionPass(Verifier()),
@@ -200,9 +201,10 @@ def test_actual_execution_partial_result_survives_postgres_http_checkrun_and_rec
             reason = "unknown_path" if case == "unknown_path" else "review_input_incomplete"
             async with factory.begin() as session:
                 action = await session.scalar(
-                    select(RunAction).where(
-                        RunAction.run_id == RUN_ATTEMPTED, RunAction.tool == "review.postprocess"
-                    )
+                    select(RunAction)
+                    .where(RunAction.run_id == RUN_ATTEMPTED, RunAction.tool == "review.finalize")
+                    .order_by(RunAction.index.desc())
+                    .limit(1)
                 )
                 run = await session.get(Run, RUN_ATTEMPTED)
                 assert action is not None and isinstance(action.response, dict) and run is not None
@@ -216,10 +218,17 @@ def test_actual_execution_partial_result_survives_postgres_http_checkrun_and_rec
                     ).all()
                 )
                 verifies = [item for item in actions if item.tool == "llm.verify"]
+                candidate_action = next(
+                    item
+                    for item in actions
+                    if item.tool == "review.postprocess"
+                    and item.request.get("phase") == "candidate"
+                )
+                assert candidate_action.index < action.index
                 if case in {"budget_info", "model_fit_info"}:
                     assert len(verifies) == 1
                     verified = verifies[0]
-                    assert verified.index < action.index
+                    assert candidate_action.index < verified.index < action.index
                     assert isinstance(verified.request, dict)
                     assert verified.request["accepted_call_id"] == str(UUID(int=130213))
                     assert verified.request["manifest_id"] is None

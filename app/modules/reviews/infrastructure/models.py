@@ -503,6 +503,44 @@ class RunActionResponseBody(Base):
     created_at: Mapped[datetime] = timestamp_column()
 
 
+class ReviewCandidateCheckpoint(Base):
+    """Private, untruncated accepted answer and candidate data for one claim attempt."""
+
+    __tablename__ = "review_candidate_checkpoints"
+    __table_args__ = (
+        UniqueConstraint("run_id", "attempt", name="uq_review_candidate_checkpoints_run_attempt"),
+    )
+
+    id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
+    run_id: Mapped[UUID] = mapped_column(ForeignKey("runs.id", ondelete="CASCADE"), nullable=False)
+    attempt: Mapped[int] = mapped_column(INTEGER, nullable=False)
+    accepted_output: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    fitted_context: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    candidates: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, nullable=False)
+    dropped: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, nullable=False)
+    incomplete_paths: Mapped[list[str]] = mapped_column(JSONB, nullable=False)
+    accepted_call_id: Mapped[UUID | None] = mapped_column(Uuid)
+    payload_sha256: Mapped[str] = mapped_column(CHAR(64), nullable=False)
+    created_at: Mapped[datetime] = timestamp_column()
+
+
+class FinalReviewResult(Base):
+    """Immutable final analysis and the exact publication plan prepared before T8."""
+
+    __tablename__ = "final_review_results"
+
+    run_id: Mapped[UUID] = mapped_column(
+        ForeignKey("runs.id", ondelete="CASCADE"), primary_key=True
+    )
+    source_attempt: Mapped[int] = mapped_column(INTEGER, nullable=False)
+    accepted_review_call_id: Mapped[UUID | None] = mapped_column(Uuid)
+    accepted_verifier_call_id: Mapped[UUID | None] = mapped_column(Uuid)
+    result: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    publication_plan: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    digest: Mapped[str] = mapped_column(CHAR(64), nullable=False)
+    created_at: Mapped[datetime] = timestamp_column()
+
+
 class ContextManifest(Base):
     """The exact blocks one snapshot-path provider call was shown (CVS §5, #130 F1-6).
 

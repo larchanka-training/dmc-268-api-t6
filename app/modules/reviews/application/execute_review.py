@@ -8,7 +8,7 @@ import uuid
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 from hashlib import sha256
-from typing import Protocol
+from typing import Protocol, cast
 from uuid import UUID
 
 from pydantic import ValidationError
@@ -31,6 +31,9 @@ from app.modules.reviews.application.prompt_budget import (
 )
 from app.modules.reviews.application.prompt_builder import (
     ChangedFile,
+    DiffLine,
+    FileStatus,
+    LineType,
     PromptBuilder,
     PullRequestMeta,
     RepoConventions,
@@ -260,7 +263,7 @@ class ExecuteReviewRun:
     """Finish an ordinary run after its diff and conventions have been saved.
 
     Database reads are short-lived and every model/provider call occurs after
-    they complete. ``PublishReviewOutput`` owns its own two write transactions.
+    they complete. The publisher commits checkpoints and finalization before T8.
     """
 
     def __init__(
@@ -282,6 +285,11 @@ class ExecuteReviewRun:
         self._change_summary = change_summary
 
     async def execute(self, run_id: UUID) -> bool:
+        resume = getattr(self._publisher, "resume_finalized", None)
+        if resume is not None:
+            resumed = await resume(run_id)
+            if resumed is not None:
+                return cast(bool, resumed)
         try:
             conventions = await self._processor.prepare(run_id)
         except (NoReviewableText, SummaryOnlyReview):
@@ -381,12 +389,31 @@ class ExecuteReviewRun:
             # R10: the review model fits, guards and manifests the call once; its reply
             # carries the fitted context and the accepted call's manifest.
 
-        reply = await self._model.draft_review(context=context)
+        checkpoint_reader = getattr(self._publisher, "load_accepted_output", None)
+        saved = (
+            await checkpoint_reader(run_id)
+            if checkpoint_reader is not None and context.policy_snapshot is not None
+            else None
+        )
+        reply = None if saved is not None else await self._model.draft_review(context=context)
         reviewer_manifest: CallManifest | None = None
         model_output: Mapping[str, object] | str | bytes
-        if isinstance(reply, ReviewReply):
+        if saved is not None:
+            if saved.fitted_context is None:
+                raise RunFailure(
+                    "internal_error", "Accepted review checkpoint has no fitted context"
+                )
+            context = _restore_fitted_context(context, saved.fitted_context)
+            model_output = VerifiedReviewOutput(
+                saved.output, incomplete_paths=saved.incomplete_paths
+            )
+            reviewer_manifest = saved.manifest or PromptBuilder().build_manifest(
+                context, call_id=saved.accepted_call_id or uuid.uuid4(), stage="review"
+            )
+        elif isinstance(reply, ReviewReply):
             context, reviewer_manifest, model_output = reply.context, reply.manifest, reply.output
         else:
+            assert reply is not None
             # The legacy answer. On the snapshot path only a test fake answers so (the
             # gateway adapter always replies with ReviewReply): its fit and pre-send guards
             # did not run, and attribution checks a manifest built from the given context.
@@ -638,6 +665,15 @@ class ExecuteReviewRun:
 
         # If empty (0 raw candidates or 0 after filters), bypass verifier (0 calls)
         if not filtered_candidates:
+            await self._checkpoint_candidates(
+                run_id,
+                context,
+                data,
+                (),
+                _dropped_findings,
+                reviewer_manifest.call_id,
+                incomplete_review_paths(original_files, context.changed_files),
+            )
             data["findings"] = []
             data["summary"] = build_deterministic_summary(
                 (),
@@ -671,6 +707,16 @@ class ExecuteReviewRun:
             cand_positions[id(repaired)] = position
             repaired_candidates.append(CandidateFindingItem(cand.candidate_id, repaired))
         filtered_candidates = repaired_candidates
+
+        await self._checkpoint_candidates(
+            run_id,
+            context,
+            data,
+            tuple(filtered_candidates),
+            _dropped_findings,
+            reviewer_manifest.call_id,
+            incomplete_review_paths(original_files, context.changed_files),
+        )
 
         # Pass 5: Verifier invocation
         record = await self._reflection_pass.verify_recorded(
@@ -759,3 +805,114 @@ class ExecuteReviewRun:
                 if id(finding) in rule_lines_by_finding
             },
         )
+
+    async def _checkpoint_candidates(
+        self,
+        run_id: UUID,
+        context: ReviewContext,
+        output: dict[str, object],
+        candidates: tuple[CandidateFindingItem, ...],
+        dropped: list[DroppedCandidateRecord],
+        accepted_call_id: UUID,
+        incomplete_paths: tuple[str, ...],
+    ) -> None:
+        checkpoint = getattr(self._publisher, "checkpoint_candidates", None)
+        if checkpoint is None:
+            raise RunFailure("internal_error", "Snapshot review requires a candidate checkpoint")
+        saved = await checkpoint(
+            run_id,
+            output,
+            tuple(candidate.candidate_id for candidate in candidates),
+            candidates=[candidate.finding.model_dump(mode="json") for candidate in candidates],
+            dropped=[
+                {
+                    "finding": (
+                        dict(item.finding)
+                        if isinstance(item.finding, Mapping)
+                        else item.finding.model_dump(mode="json")
+                    ),
+                    "drop_reason": item.drop_reason,
+                    "position": item.position,
+                }
+                for item in dropped
+            ],
+            accepted_call_id=accepted_call_id,
+            incomplete_paths=incomplete_paths,
+            fitted_context=_fitted_context_checkpoint(context),
+        )
+        if not saved:
+            raise RunFailure("internal_error", "Could not save the accepted review checkpoint")
+
+
+def _prompt_sha256(context: ReviewContext) -> str:
+    prompt = PromptBuilder().build_prompt(context)
+    payload = json.dumps([prompt.system, prompt.user], ensure_ascii=False, separators=(",", ":"))
+    return sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _fitted_context_checkpoint(context: ReviewContext) -> dict[str, object]:
+    return {
+        "changed_files": [
+            {
+                "path": file.path,
+                "status": file.status,
+                "lines": [[line.number, line.type, line.content] for line in file.lines],
+                "total_lines": file.total_lines,
+            }
+            for file in context.changed_files
+        ],
+        "omitted_files": list(context.omitted_files),
+        "context_block_ids": [block.block_id for block in context.context_blocks],
+        "retrieved_ids": [block.block_id for block in context.retrieved],
+        "prompt_sha256": _prompt_sha256(context),
+    }
+
+
+def _restore_fitted_context(context: ReviewContext, checkpoint: dict[str, object]) -> ReviewContext:
+    try:
+        raw_files = checkpoint["changed_files"]
+        omitted = checkpoint["omitted_files"]
+        context_ids = checkpoint["context_block_ids"]
+        retrieved_ids = checkpoint["retrieved_ids"]
+        expected_digest = checkpoint["prompt_sha256"]
+        if not (
+            isinstance(raw_files, list)
+            and isinstance(omitted, list)
+            and all(isinstance(path, str) for path in omitted)
+            and isinstance(context_ids, list)
+            and isinstance(retrieved_ids, list)
+            and isinstance(expected_digest, str)
+        ):
+            raise ValueError("invalid fitted context shape")
+        files = []
+        for value in raw_files:
+            if not isinstance(value, dict) or not isinstance(value.get("lines"), list):
+                raise ValueError("invalid fitted file")
+            lines = tuple(
+                DiffLine(number, cast(LineType, kind), content)
+                for number, kind, content in value["lines"]
+            )
+            files.append(
+                ChangedFile(
+                    path=value["path"],
+                    status=cast(FileStatus, value["status"]),
+                    lines=lines,
+                    total_lines=value["total_lines"],
+                )
+            )
+        available_context = {block.block_id: block for block in context.context_blocks}
+        available_retrieved = {block.block_id: block for block in context.retrieved}
+        fitted = replace(
+            context,
+            changed_files=tuple(files),
+            omitted_files=tuple(omitted),
+            context_blocks=tuple(available_context[block_id] for block_id in context_ids),
+            retrieved=tuple(available_retrieved[block_id] for block_id in retrieved_ids),
+        )
+        if _prompt_sha256(fitted) != expected_digest:
+            raise ValueError("fitted prompt changed")
+        return fitted
+    except (KeyError, TypeError, ValueError) as exc:
+        raise RunFailure(
+            "internal_error", "Accepted review fitted context cannot be restored"
+        ) from exc

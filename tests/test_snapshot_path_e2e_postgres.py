@@ -651,8 +651,8 @@ def _observe(
 
 # The trace of a v4 attempt, as built (G aligns the canon, PIPELINE_SPEC §7, with it). The
 # stage's ``context.build`` is the attempt's only one (#168 part 6); the change summary
-# agent's ``llm.call`` (#316) follows the verifier's without a manifest; ``llm.verify`` sits
-# in the publishing transaction right before ``review.postprocess``.
+# agent's ``llm.call`` (#316) follows the verifier's without a manifest; finalization
+# follows the committed candidate checkpoint and verifier while still running.
 _SNAPSHOT_PATH_STEPS = [
     "policy.load",
     "vcs.fetch_diff",
@@ -662,12 +662,13 @@ _SNAPSHOT_PATH_STEPS = [
     "llm.repo_conventions",
     "context.manifest",
     "llm.call",
+    "llm.review_output",
+    "review.postprocess",
     "context.manifest",
     "llm.call",
     "llm.call",
-    "llm.review_output",
     "llm.verify",
-    "review.postprocess",
+    "review.finalize",
 ]
 _LEGACY_STEPS = [
     "policy.load",
@@ -677,7 +678,7 @@ _LEGACY_STEPS = [
     "llm.repo_conventions",
     "llm.call",
     "llm.review_output",
-    "review.postprocess",
+    "review.finalize",
 ]
 
 
@@ -811,7 +812,7 @@ def _assert_snapshot_path(
             ],
         )
     ]
-    [(_, postprocess)] = observed.actions["review.postprocess"]
+    [(_, postprocess)] = observed.actions["review.finalize"]
     assert postprocess["inline"] == 1
     assert postprocess["change_summary"] == (
         {"status": "shown", "received": 1, "shown": 1}
@@ -1203,7 +1204,7 @@ def test_an_invalid_verifier_reference_earns_the_bounded_recovery(
     else:
         # The fallback gets the original verifier prompt.
         assert recovery_body["messages"] == first_body["messages"]
-    [(_, postprocess)] = observed.actions["review.postprocess"]
+    [(_, postprocess)] = observed.actions["review.finalize"]
     assert postprocess["inline"] == 1
     assert [pointer.run_id for pointer in observed.queue.published] == [observed.run_id]
 
