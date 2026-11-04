@@ -34,7 +34,7 @@
 | Публикация ревью: идемпотентность, гонки, восстановление | [CVS §10](CONTEXT_AND_VERIFICATION_SPEC.md#10-write-back-неизменяемая-публикация-и-восстановление), [CVS §9.4](CONTEXT_AND_VERIFICATION_SPEC.md#94-github), [SD §8.4](SYSTEM_DESIGN.md#84-координаты-gitlab-и-надёжная-публикация-107) |
 | Якорь находки, suggestion, карта diff | [CVS §9.3](CONTEXT_AND_VERIFICATION_SPEC.md#93-якорь-finding-диапазоны-и-suggestion), [CVS §9.2](CONTEXT_AND_VERIFICATION_SPEC.md#92-hunks-и-проход-по-строкам), [PIPELINE §10](PIPELINE_SPEC.md#10-якорь-находки-d6) |
 | Контекст ревью: уровни L0–L4, AST, бюджет | [CVS §3.2](CONTEXT_AND_VERIFICATION_SPEC.md#32-уровни-l0l4), [CVS §3.3](CONTEXT_AND_VERIFICATION_SPEC.md#33-ast-v1), [CVS §4](CONTEXT_AND_VERIFICATION_SPEC.md#4-бюджет-конвенции-и-кэш), [SD §9](SYSTEM_DESIGN.md#9-сборщик-контекста-4-уровня) |
-| RAG: граф символов и индекс | [CVS §3.5](CONTEXT_AND_VERIFICATION_SPEC.md#35-кандидаты-графа-символов-rag-v1), [SD §7.4](SYSTEM_DESIGN.md#74-очередь-indexrepo-142), [SD §11](SYSTEM_DESIGN.md#11-данные-согласование-с-erd-роли-6) |
+| RAG: граф символов и индекс | [CVS §3.5](CONTEXT_AND_VERIFICATION_SPEC.md#35-кандидаты-графа-символов-rag-v1), [SD §7.4](SYSTEM_DESIGN.md#74-очередь-indexrepo-142), [PIPELINE §4.6](PIPELINE_SPEC.md#46-очередь-indexrepo-142), [SD §11](SYSTEM_DESIGN.md#11-данные-согласование-с-erd-роли-6) |
 | Схема ответа LLM, `ReviewOutput` | [PIPELINE §9](PIPELINE_SPEC.md#9-выход-llm-reviewoutput), [CVS §6.1](CONTEXT_AND_VERIFICATION_SPEC.md#61-версии-ответа-и-evidence) |
 | Verifier, детерминированные проходы, причины отказа | [CVS §7](CONTEXT_AND_VERIFICATION_SPEC.md#7-обязательный-llm-проверяющий), [CVS §6.2](CONTEXT_AND_VERIFICATION_SPEC.md#62-проходы-и-причины-отказа), [PIPELINE §2](PIPELINE_SPEC.md#2-фазы-внутри-running-и-трейс-run_actions) |
 | Итоговый результат, вердикт, coverage, summary-only | [CVS §8](CONTEXT_AND_VERIFICATION_SPEC.md#8-итоговый-результат-coverage-и-хранение), [CVS §2.3](CONTEXT_AND_VERIFICATION_SPEC.md#23-summary-only-и-исходный-diff), [PIPELINE §11](PIPELINE_SPEC.md#11-вердикт-и-бейджи-d3) |
@@ -115,12 +115,19 @@
 | ↳ ориентир `Метки оформления сводки` | Метки сводки и списка причин |
 | ↳ ориентир `**Размер` | Предел размера `response` |
 | [3. Таймауты](PIPELINE_SPEC.md#3-таймауты) | Значения таймаутов и исход при превышении |
-| [4. Retry и backoff](PIPELINE_SPEC.md#4-retry-и-backoff) | Счётчик попыток, задержки, retry-очередь, DLQ, лимиты вызовов и стоимости |
+| [4. Retry и backoff](PIPELINE_SPEC.md#4-retry-и-backoff) | Повторы и лимиты; открывать подраздел по теме |
+| ↳ [4.1 Доменный счётчик и AMQP x-attempt (D13 [дефолт])](PIPELINE_SPEC.md#41-доменный-счётчик-и-amqp-x-attempt-d13-дефолт) | `runs.attempt` и `x-attempt`: кто считает попытки |
+| ↳ [4.2 Задержки](PIPELINE_SPEC.md#42-задержки) | Задержки и очереди retry по ситуациям |
+| ↳ [4.3 Возврат из retry-очереди — требование к топологии SD §7.1 (реализует #34)](PIPELINE_SPEC.md#43-возврат-из-retry-очереди--требование-к-топологии-sd-71-реализует-34) | Возврат сообщения из retry-очереди: настройки очередей |
+| ↳ [4.4 DLQ](PIPELINE_SPEC.md#44-dlq) | Что попадает в DLQ |
+| ↳ [4.5 Лимиты вызовов и стоимости](PIPELINE_SPEC.md#45-лимиты-вызовов-и-стоимости) | Лимиты generation-вызовов и стоимости Run |
+| ↳ [4.6 Очередь index.repo (#142)](PIPELINE_SPEC.md#46-очередь-indexrepo-142) | Retry и исходы заданий индекса `index.repo` |
 | [5. Сбои и деградация](PIPELINE_SPEC.md#5-сбои-и-деградация) | Поведение при сбое; открывать подраздел по источнику |
 | ↳ [5.1 Классы сбоев LLM](PIPELINE_SPEC.md#51-классы-сбоев-llm) | Сбои LLM и fallback-модель |
 | ↳ [5.2 Сбои GitHub](PIPELINE_SPEC.md#52-сбои-github) | Сбои GitHub: итог Run, `error_code`, что видят автор PR и UI |
 | ↳ [5.3 Деградация deep → fast (SD §13)](PIPELINE_SPEC.md#53-деградация-deep--fast-sd-13) | Деградация deep → fast |
-| [6. Каталог error_code](PIPELINE_SPEC.md#6-каталог-error_code) | Каталог `error_code`, HTTP-отказы rerun |
+| [6. Каталог error_code](PIPELINE_SPEC.md#6-каталог-error_code) | Каталог `error_code` |
+| ↳ [6.1 HTTP-отказы rerun](PIPELINE_SPEC.md#61-http-отказы-rerun) | Почему `POST /api/runs/{id}/rerun` отвечает 409 |
 | [7. Check-run бота (SD §8.3)](PIPELINE_SPEC.md#7-check-run-бота-sd-83) | Check-run бота, статус Bitbucket |
 | [8. Триггер (Р-10, D2)](PIPELINE_SPEC.md#8-триггер-р-10-d2) | Условия запуска ревью, повторное ревью после пуша, sweep, GitLab intake |
 | [9. Выход LLM: ReviewOutput](PIPELINE_SPEC.md#9-выход-llm-reviewoutput) | Схема ответа LLM `ReviewOutput` |
@@ -138,25 +145,46 @@
 | Раздел | Когда открывать |
 | --- | --- |
 | [1. Область и инварианты](CONTEXT_AND_VERIFICATION_SPEC.md#1-область-и-инварианты) | Область спецификации и инварианты; читать первым при работе с этой спекой |
-| [2. Снимок и последовательность run](CONTEXT_AND_VERIFICATION_SPEC.md#2-снимок-и-последовательность-run) | Ревизии снимка, порядок операций run, summary-only |
+| [2. Снимок и последовательность run](CONTEXT_AND_VERIFICATION_SPEC.md#2-снимок-и-последовательность-run) | Снимок и порядок run; открывать подраздел по теме |
+| ↳ [2.1. Раздельные ревизии](CONTEXT_AND_VERIFICATION_SPEC.md#21-раздельные-ревизии) | Раздельные ревизии снимка: какое поле что значит |
+| ↳ [2.2. Порядок операций](CONTEXT_AND_VERIFICATION_SPEC.md#22-порядок-операций) | Порядок операций от claim run до конца |
+| ↳ [2.3. Summary-only и исходный diff](CONTEXT_AND_VERIFICATION_SPEC.md#23-summary-only-и-исходный-diff) | Порог summary-only и исходный diff |
 | [3. Архитектура расширенного контекста](CONTEXT_AND_VERIFICATION_SPEC.md#3-архитектура-расширенного-контекста) | Расширенный контекст; открывать подраздел по теме |
 | ↳ [3.1. Порты и происхождение](CONTEXT_AND_VERIFICATION_SPEC.md#31-порты-и-происхождение) | Порты `ContextProvider` и `DiffMap`, происхождение данных |
 | ↳ [3.2. Уровни L0–L4](CONTEXT_AND_VERIFICATION_SPEC.md#32-уровни-l0l4) | Что входит в уровни L0–L4 |
 | ↳ [3.3. AST v1](CONTEXT_AND_VERIFICATION_SPEC.md#33-ast-v1) | AST v1: языки, grammar, извлекаемые объявления |
 | ↳ [3.4. Лимиты и fallback](CONTEXT_AND_VERIFICATION_SPEC.md#34-лимиты-и-fallback) | Лимиты AST и контекста, исход превышения |
 | ↳ [3.5. Кандидаты графа символов (RAG v1)](CONTEXT_AND_VERIFICATION_SPEC.md#35-кандидаты-графа-символов-rag-v1) | Кандидаты графа символов (RAG v1) |
-| [4. Бюджет, конвенции и кэш](CONTEXT_AND_VERIFICATION_SPEC.md#4-бюджет-конвенции-и-кэш) | Распределение бюджета контекста, конвенции, кэши файлов и AST |
+| [4. Бюджет, конвенции и кэш](CONTEXT_AND_VERIFICATION_SPEC.md#4-бюджет-конвенции-и-кэш) | Бюджет контекста, конвенции и кэши; открывать подраздел по теме |
+| ↳ [4.1. Распределение контекста](CONTEXT_AND_VERIFICATION_SPEC.md#41-распределение-контекста) | Лимит токенов на вызов и распределение контекста |
+| ↳ [4.2. Общие конвенции](CONTEXT_AND_VERIFICATION_SPEC.md#42-общие-конвенции) | Как отбираются файлы для общих конвенций |
+| ↳ [4.3. Кэши файлов и AST](CONTEXT_AND_VERIFICATION_SPEC.md#43-кэши-файлов-и-ast) | Ключи и хранение кэшей файлов и AST |
 | [5. Manifest фактически отправленного контекста](CONTEXT_AND_VERIFICATION_SPEC.md#5-manifest-фактически-отправленного-контекста) | Manifest отправленного контекста и guard перед вызовом |
-| [6. Кандидаты и детерминированные проходы](CONTEXT_AND_VERIFICATION_SPEC.md#6-кандидаты-и-детерминированные-проходы) | `ReviewOutput` v2, evidence, детерминированные проходы и коды отказа |
-| [7. Обязательный LLM-проверяющий](CONTEXT_AND_VERIFICATION_SPEC.md#7-обязательный-llm-проверяющий) | LLM-проверяющий: профиль, ответ, резерв вызовов, стоимость |
-| [8. Итоговый результат, coverage и хранение](CONTEXT_AND_VERIFICATION_SPEC.md#8-итоговый-результат-coverage-и-хранение) | Итоговый результат, вердикт, публичный текст, хранение, ошибки |
+| [6. Кандидаты и детерминированные проходы](CONTEXT_AND_VERIFICATION_SPEC.md#6-кандидаты-и-детерминированные-проходы) | Кандидаты и детерминированные проходы; открывать подраздел по теме |
+| ↳ [6.1. Версии ответа и evidence](CONTEXT_AND_VERIFICATION_SPEC.md#61-версии-ответа-и-evidence) | `ReviewOutput` v2, версии ответа, evidence |
+| ↳ [6.2. Проходы и причины отказа](CONTEXT_AND_VERIFICATION_SPEC.md#62-проходы-и-причины-отказа) | Проходы, их проверки и коды отказа |
+| [7. Обязательный LLM-проверяющий](CONTEXT_AND_VERIFICATION_SPEC.md#7-обязательный-llm-проверяющий) | LLM-проверяющий; открывать подраздел по теме |
+| ↳ [7.1. Профиль и вход](CONTEXT_AND_VERIFICATION_SPEC.md#71-профиль-и-вход) | Профиль `verification-v1` и вход проверки |
+| ↳ [7.2. Ответ](CONTEXT_AND_VERIFICATION_SPEC.md#72-ответ) | Формат ответа проверяющего |
+| ↳ [7.3. Четыре вызова и резерв](CONTEXT_AND_VERIFICATION_SPEC.md#73-четыре-вызова-и-резерв) | Лимит generation-вызовов и резерв |
+| ↳ [7.4. Стоимость, дедлайн и checkpoint](CONTEXT_AND_VERIFICATION_SPEC.md#74-стоимость-дедлайн-и-checkpoint) | Лимит стоимости run, дедлайн, checkpoint |
+| [8. Итоговый результат, coverage и хранение](CONTEXT_AND_VERIFICATION_SPEC.md#8-итоговый-результат-coverage-и-хранение) | Итоговый результат; открывать подраздел по теме |
+| ↳ [8.1. Единый результат](CONTEXT_AND_VERIFICATION_SPEC.md#81-единый-результат) | Структура `FinalReviewResult` |
+| ↳ [8.2. Вердикт и публичный текст](CONTEXT_AND_VERIFICATION_SPEC.md#82-вердикт-и-публичный-текст) | Условия вердикта и публичный текст |
+| ↳ [8.3. Хранилище и миграция](CONTEXT_AND_VERIFICATION_SPEC.md#83-хранилище-и-миграция) | Хранение результата и миграция |
+| ↳ [8.4. Ошибки](CONTEXT_AND_VERIFICATION_SPEC.md#84-ошибки) | Коды ошибок, исход и retry |
 | [9. Карта diff и адаптеры VCS](CONTEXT_AND_VERIFICATION_SPEC.md#9-карта-diff-и-адаптеры-vcs) | Карта diff и адаптеры VCS; открывать подраздел по теме |
 | ↳ [9.1. Идентичность снимка и файлов](CONTEXT_AND_VERIFICATION_SPEC.md#91-идентичность-снимка-и-файлов) | Состав `DiffMap/v1`, идентичность снимка и файлов |
 | ↳ [9.2. Hunks и проход по строкам](CONTEXT_AND_VERIFICATION_SPEC.md#92-hunks-и-проход-по-строкам) | Hunks и проход по строкам |
 | ↳ [9.3. Якорь finding, диапазоны и suggestion](CONTEXT_AND_VERIFICATION_SPEC.md#93-якорь-finding-диапазоны-и-suggestion) | Якорь finding, диапазоны, suggestion |
 | ↳ [9.4. GitHub](CONTEXT_AND_VERIFICATION_SPEC.md#94-github) | Публикация на GitHub |
 | ↳ [9.5. GitLab: целевой контракт, отдельная реализация](CONTEXT_AND_VERIFICATION_SPEC.md#95-gitlab-целевой-контракт-отдельная-реализация) | GitLab: целевой контракт |
-| [10. Write-back: неизменяемая публикация и восстановление](CONTEXT_AND_VERIFICATION_SPEC.md#10-write-back-неизменяемая-публикация-и-восстановление) | Публикация: payload и идентичность, гонки, timeout и fallback, совместимость |
+| [10. Write-back: неизменяемая публикация и восстановление](CONTEXT_AND_VERIFICATION_SPEC.md#10-write-back-неизменяемая-публикация-и-восстановление) | Публикация; открывать подраздел по теме |
+| ↳ [10.1. Payload и идентичность](CONTEXT_AND_VERIFICATION_SPEC.md#101-payload-и-идентичность) | Canonical JSON и идентичность публикации |
+| ↳ [10.2. Выполнение и гонки](CONTEXT_AND_VERIFICATION_SPEC.md#102-выполнение-и-гонки) | Lease публикации, проверки перед POST, гонки |
+| ↳ [10.3. Ошибки, timeout и fallback](CONTEXT_AND_VERIFICATION_SPEC.md#103-ошибки-timeout-и-fallback) | Исход ошибки или timeout, действие, fallback |
+| ↳ [10.4. Совместимость с существующими публикациями](CONTEXT_AND_VERIFICATION_SPEC.md#104-совместимость-с-существующими-публикациями) | Старый marker публикаций и совместимость с ним |
+| ↳ [10.5. Изменения текущей реализации](CONTEXT_AND_VERIFICATION_SPEC.md#105-изменения-текущей-реализации) | Какой текущий код меняется ради этой спеки |
 | [11. Приёмочные сценарии и оценка качества](CONTEXT_AND_VERIFICATION_SPEC.md#11-приёмочные-сценарии-и-оценка-качества) | Приёмочные сценарии и оценка качества |
 | [12. Согласование контрактов и порядок внедрения](CONTEXT_AND_VERIFICATION_SPEC.md#12-согласование-контрактов-и-порядок-внедрения) | Что спека меняет в существующих контрактах, порядок внедрения |
 
