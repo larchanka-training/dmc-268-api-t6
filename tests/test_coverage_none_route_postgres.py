@@ -94,6 +94,7 @@ def test_a_technical_only_v4_run_is_published_without_any_model_call(
         "vcs.fetch_diff",
         "context.build",
         "review.finalize",
+        "review.publish_start",
     ]
     assert observed.manifests == []
     assert observed.bodies == []
