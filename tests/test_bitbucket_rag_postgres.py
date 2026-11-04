@@ -179,6 +179,12 @@ class _ModelHttp:
 
 
 class _AcceptedOutput:
+    async def checkpoint_candidates(
+        self, run_id: UUID, raw_output: object, candidate_ids: tuple[str, ...], **kwargs: object
+    ) -> bool:
+        assert candidate_ids
+        return True
+
     async def execute(self, run_id: UUID, raw_output: object) -> bool:
         assert raw_output is not None
         return True

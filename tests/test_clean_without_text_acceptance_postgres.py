@@ -244,7 +244,7 @@ def test_actual_stage_persisted_empty_proof_controls_http_and_recovery_result(
                 run = await session.get(Run, RUN_ATTEMPTED)
                 saved = await session.scalar(
                     select(RunAction).where(
-                        RunAction.run_id == RUN_ATTEMPTED, RunAction.tool == "review.postprocess"
+                        RunAction.run_id == RUN_ATTEMPTED, RunAction.tool == "review.finalize"
                     )
                 )
                 assert run is not None and run.state.value == "publishing"

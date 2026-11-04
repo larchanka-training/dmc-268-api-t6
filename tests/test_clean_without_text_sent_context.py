@@ -31,7 +31,12 @@ from app.modules.reviews.application.prompt_builder import (
 from app.modules.reviews.application.reflection_pass import ReflectionPass
 from app.modules.reviews.application.review_context import ReviewContextPayload
 from app.modules.reviews.application.review_output import VerifiedReviewOutput
-from app.modules.reviews.application.store_review_output import StoreReviewOutput
+from app.modules.reviews.application.store_review_output import (
+    AcceptedReviewCheckpoint,
+    FinalizedReviewPlan,
+    PublishingGuard,
+    StoreReviewOutput,
+)
 from app.modules.reviews.infrastructure.llm.models import GatewayReviewModel
 from tests.execute_review_fakes import FakeVerifierModel, _make_test_snapshot, conventions
 from tests.test_clean_without_text_result import Queue, Repository, Uow, answer, finalize
@@ -54,6 +59,37 @@ def finding(path: str, severity: str = "high") -> dict[str, object]:
         "confidence": 0.9,
         "rule_name": None,
     }
+
+
+class _CheckpointRepository(Repository):
+    """Shared unit adapter for a claimed snapshot run's short storage stages."""
+
+    _finalized_plan: FinalizedReviewPlan | None = None
+
+    async def load_finalized_plan(self, run_id: UUID) -> FinalizedReviewPlan | None:
+        return self._finalized_plan
+
+    async def load_review_checkpoint(self, run_id: UUID) -> AcceptedReviewCheckpoint | None:
+        return None
+
+    async def checkpoint_review_candidates(self, run_id: UUID, **kwargs: object) -> None:
+        return None
+
+    async def finalize_review(self, run_id: UUID, **kwargs: object) -> None:
+        guard = await self.lock_for_publishing(run_id)
+        self._finalized_plan = FinalizedReviewPlan(
+            guard.head_sha,
+            str(kwargs["findings_hash"]),
+            str(kwargs["review_event"]),
+        )
+
+    async def lock_for_publishing(self, run_id: UUID) -> PublishingGuard:
+        return replace(await super().lock_for_publishing(run_id), attempt=1)
+
+
+class _AcceptingCheckpointPublisher:
+    async def checkpoint_candidates(self, *args: object, **kwargs: object) -> bool:
+        return True
 
 
 @pytest.mark.parametrize("severity", [None, "info", "high", "medium"])
@@ -115,7 +151,7 @@ class _Withheld:
 
 def _review_beside_withheld_files(anchor: str) -> Repository:
     """Run a snapshot-path review whose only candidate is anchored on ``anchor``."""
-    repository = Repository(
+    repository = _CheckpointRepository(
         coverage(
             [
                 code_snapshot(),
@@ -139,6 +175,7 @@ def _review_beside_withheld_files(anchor: str) -> Repository:
         lambda: Uow(repository, committed),
         Queue(committed),
         worker_id="worker",
+        expected_attempt=1,
         run_url=lambda _: None,
     )
 
@@ -240,11 +277,15 @@ def test_actual_budget_fit_flows_through_reflection_early_return_and_finalizatio
         deletions=0,
         changes=400,
     )
-    repository = Repository(coverage([snapshot]))
+    repository = _CheckpointRepository(coverage([snapshot]))
     committed: list[str] = []
     queue = Queue(committed)
     store = StoreReviewOutput(
-        lambda: Uow(repository, committed), queue, worker_id="worker", run_url=lambda _: None
+        lambda: Uow(repository, committed),
+        queue,
+        worker_id="worker",
+        expected_attempt=1,
+        run_url=lambda _: None,
     )
 
     class Processor:
@@ -270,7 +311,7 @@ def test_actual_budget_fit_flows_through_reflection_early_return_and_finalizatio
     transport = Transport(json.dumps(answer()))
     model = GatewayReviewModel(_gateway(transport), RUN, Model())
 
-    class Publisher:
+    class Publisher(_AcceptingCheckpointPublisher):
         async def execute(
             self, run_id: UUID, raw_output: Mapping[str, object] | str | bytes
         ) -> bool:
@@ -334,7 +375,7 @@ def test_actual_fit_marks_whole_allowed_omission_but_not_auxiliary_omitted_names
     transport = Transport(json.dumps(answer()))
     model = GatewayReviewModel(_gateway(transport), RUN, Model())
 
-    class Publisher:
+    class Publisher(_AcceptingCheckpointPublisher):
         async def execute(self, run_id: UUID, raw_output: Any) -> bool:
             assert isinstance(raw_output, VerifiedReviewOutput)
             captured.append(raw_output)
@@ -361,11 +402,15 @@ def test_model_boundary_loss_survives_both_reflection_returns_without_outer_fit_
     supported: bool,
     reply_kind: str,
 ) -> None:
-    repository = Repository(coverage([code_snapshot()]))
+    repository = _CheckpointRepository(coverage([code_snapshot()]))
     committed: list[str] = []
     queue = Queue(committed)
     store = StoreReviewOutput(
-        lambda: Uow(repository, committed), queue, worker_id="worker", run_url=lambda _: None
+        lambda: Uow(repository, committed),
+        queue,
+        worker_id="worker",
+        expected_attempt=1,
+        run_url=lambda _: None,
     )
 
     class Processor:
@@ -453,13 +498,17 @@ def test_model_boundary_loss_survives_both_reflection_returns_without_outer_fit_
 def test_outer_context_loss_survives_both_reflection_returns_without_carrier_loss(
     supported: bool,
 ) -> None:
-    repository = Repository(
+    repository = _CheckpointRepository(
         coverage([code_snapshot(), replace(code_snapshot(), filename="src/lost.py")])
     )
     committed: list[str] = []
     queue = Queue(committed)
     store = StoreReviewOutput(
-        lambda: Uow(repository, committed), queue, worker_id="worker", run_url=lambda _: None
+        lambda: Uow(repository, committed),
+        queue,
+        worker_id="worker",
+        expected_attempt=1,
+        run_url=lambda _: None,
     )
 
     class Processor:

@@ -115,3 +115,10 @@ class FakeVerifierModel:
                 new_decisions.append(d_copy)
             payload["decisions"] = new_decisions
         return payload
+
+
+class _AcceptingCheckpointPublisher:
+    """Unit publisher fake for snapshot tests that exercise stages after checkpointing."""
+
+    async def checkpoint_candidates(self, *args: object, **kwargs: object) -> bool:
+        return True

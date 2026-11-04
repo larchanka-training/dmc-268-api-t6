@@ -35,6 +35,7 @@ from tests.execute_review_fakes import (
     MAIN_BLOCK_ID,
     RUN_ID,
     FakeVerifierModel,
+    _AcceptingCheckpointPublisher,
     _make_test_snapshot,
     conventions,
 )
@@ -113,7 +114,7 @@ def test_execute_review_supports_model_dump_candidate_item() -> None:
                 ]
             }
 
-    class Publisher:
+    class Publisher(_AcceptingCheckpointPublisher):
         def __init__(self) -> None:
             self.output: Any = None
 
@@ -154,7 +155,7 @@ def test_execute_review_malformed_json_and_non_dict_draft_output() -> None:
                 policy_snapshot=_make_test_snapshot(),
             )
 
-    class Publisher:
+    class Publisher(_AcceptingCheckpointPublisher):
         async def execute(self, run_id: UUID, raw_output: Any) -> bool:
             return True
 
@@ -262,7 +263,7 @@ def test_execute_review_rejects_finding_with_invalid_attribution() -> None:
 
     published_output: dict[str, Any] = {}
 
-    class Publisher:
+    class Publisher(_AcceptingCheckpointPublisher):
         async def execute(self, run_id: UUID, raw_output: Any) -> bool:
             nonlocal published_output
             published_output = dict(raw_output)
@@ -315,7 +316,7 @@ def test_execute_review_legacy_run_with_reflection_pass_logs_no_warning(
         async def draft_review(self, *, context: ReviewContext) -> dict[str, Any]:
             return {"findings": [], "summary": {"problem": "p", "done_well": "d", "effort": "none"}}
 
-    class Publisher:
+    class Publisher(_AcceptingCheckpointPublisher):
         async def execute(self, run_id: UUID, raw_output: Any) -> bool:
             return True
 
@@ -401,7 +402,7 @@ def test_execute_review_reflection_pass_logs_run_id_call_id_and_counters(
                 "summary": {"problem": "Issue.", "done_well": "Fine.", "effort": "none"},
             }
 
-    class Publisher:
+    class Publisher(_AcceptingCheckpointPublisher):
         async def execute(self, run_id: UUID, raw_output: Any) -> bool:
             return True
 
@@ -499,13 +500,13 @@ def test_execute_review_validates_candidate_rule_name_against_manifest() -> None
                 "summary": {"problem": "p.", "done_well": "d.", "effort": "none"},
             }
 
-    class Publisher:
+    class Publisher(_AcceptingCheckpointPublisher):
         async def execute(self, run_id: UUID, raw_output: Any) -> bool:
             return True
 
     published1: dict[str, Any] = {}
 
-    class Publisher1:
+    class Publisher1(_AcceptingCheckpointPublisher):
         async def execute(self, run_id: UUID, raw_output: Any) -> bool:
             nonlocal published1
             published1 = dict(raw_output)
@@ -550,7 +551,7 @@ def test_execute_review_validates_candidate_rule_name_against_manifest() -> None
 
     published2: dict[str, Any] = {}
 
-    class Publisher2:
+    class Publisher2(_AcceptingCheckpointPublisher):
         async def execute(self, run_id: UUID, raw_output: Any) -> bool:
             nonlocal published2
             published2 = dict(raw_output)
@@ -570,7 +571,7 @@ def test_execute_review_validates_candidate_rule_name_against_manifest() -> None
     # -> dropped per candidate
     published3: dict[str, Any] = {}
 
-    class Publisher3:
+    class Publisher3(_AcceptingCheckpointPublisher):
         async def execute(self, run_id: UUID, raw_output: Any) -> bool:
             nonlocal published3
             published3 = dict(raw_output)
@@ -696,7 +697,7 @@ def test_execute_review_run_snapshot_zero_findings_deterministic_summary() -> No
 
     published_output: dict[str, Any] = {}
 
-    class Publisher:
+    class Publisher(_AcceptingCheckpointPublisher):
         async def execute(
             self, run_id: UUID, raw_output: Mapping[str, object] | str | bytes
         ) -> bool:
@@ -821,7 +822,7 @@ def test_execute_review_run_severity_threshold_critical_drops_medium_clean_summa
 
     published_output: Any = None
 
-    class Publisher:
+    class Publisher(_AcceptingCheckpointPublisher):
         async def execute(
             self, run_id: UUID, raw_output: Mapping[str, object] | str | bytes
         ) -> bool:
@@ -937,7 +938,7 @@ def test_execute_review_multi_files_snapshot_path_no_overflow() -> None:
                 "summary": {"problem": "p", "done_well": "d", "effort": "none"},
             }
 
-    class Publisher:
+    class Publisher(_AcceptingCheckpointPublisher):
         async def execute(self, run_id: UUID, raw_output: Any) -> bool:
             return True
 
@@ -1012,7 +1013,7 @@ def test_execute_review_all_supported_never_publishes_raw_summary() -> None:
                 },
             }
 
-    class Publisher:
+    class Publisher(_AcceptingCheckpointPublisher):
         async def execute(self, run_id: UUID, raw_output: Any) -> bool:
             nonlocal published
             published = dict(raw_output)
@@ -1141,7 +1142,7 @@ def test_execute_review_two_candidates_one_invalid_ref_valid_reaches_verifier() 
                 "summary": {"problem": "p", "done_well": "d", "effort": "none"},
             }
 
-    class Publisher:
+    class Publisher(_AcceptingCheckpointPublisher):
         async def execute(self, run_id: UUID, raw_output: Any) -> bool:
             nonlocal published
             published = raw_output
@@ -1326,7 +1327,7 @@ def test_execute_review_verifier_input_free_of_lint_duplicates_and_unknown_path(
                 "summary": {"problem": "p", "done_well": "d", "effort": "none"},
             }
 
-    class Publisher:
+    class Publisher(_AcceptingCheckpointPublisher):
         async def execute(self, run_id: UUID, raw_output: Any) -> bool:
             nonlocal published
             published = raw_output

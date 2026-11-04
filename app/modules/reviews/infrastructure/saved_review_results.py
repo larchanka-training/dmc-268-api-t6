@@ -40,7 +40,10 @@ async def load_review_results(
                     cast(RunActionResponseBody.id, String) == RunAction.response_ref,
                 ),
             )
-            .where(RunAction.run_id.in_(heads), RunAction.tool == "review.postprocess")
+            .where(
+                RunAction.run_id.in_(heads),
+                RunAction.tool.in_(("review.finalize", "review.postprocess")),
+            )
             .order_by(RunAction.run_id, RunAction.index.desc())
             .distinct(RunAction.run_id)
         )

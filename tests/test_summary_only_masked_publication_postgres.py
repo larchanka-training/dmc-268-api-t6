@@ -244,7 +244,7 @@ def test_masked_file_and_lock_keep_published_coverage(env: Env, version: int) ->
                 async with factory() as session:
                     saved = await session.scalar(
                         select(RunAction.response).where(
-                            RunAction.run_id == run_id, RunAction.tool == "review.postprocess"
+                            RunAction.run_id == run_id, RunAction.tool == "review.finalize"
                         )
                     )
                 assert isinstance(saved, dict)

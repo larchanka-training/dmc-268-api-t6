@@ -22,6 +22,7 @@ from app.modules.reviews.application.review_output import (
     ReviewPublication,
     comment_body,
     parse_review_output,
+    parse_review_output_v2,
 )
 from tests.review_output_fakes import (
     RUN_ID,
@@ -336,6 +337,166 @@ def test_store_review_output_preserves_allowed_v2_rules() -> None:
     assert len(stored_processed) == 1
     assert stored_processed[0].inline[0].finding.rule_name == ".review/rules.md"
     assert len(queue.published) == 1
+
+
+@pytest.mark.parametrize(
+    "fail_at_publication_start, claimed_attempt",
+    [(False, 1), (True, 1), (False, 2)],
+    ids=["publish", "fail-before-t8", "stale-claim"],
+)
+def test_store_review_output_commits_accepted_output_before_t8(
+    fail_at_publication_start: bool,
+    claimed_attempt: int,
+) -> None:
+    from app.modules.reviews.application.store_review_output import (
+        FinalizedReviewPlan,
+        PublishingGuard,
+        StoreReviewOutput,
+    )
+
+    committed_state = "running"
+    committed_outputs = 0
+    committed_finalized = 0
+    committed_plan: FinalizedReviewPlan | None = None
+    commits: list[tuple[str, int]] = []
+    accepted_output = valid_output()
+    cast(list[dict[str, object]], accepted_output["findings"])[0]["evidence_refs"] = [
+        {"block_id": "b1", "start_line": 10, "end_line": 12}
+    ]
+
+    class FakeUoW:
+        def __init__(self) -> None:
+            self.reviews = self
+            self.pending_state = committed_state
+            self.pending_outputs = 0
+            self.pending_finalized = 0
+            self.pending_plan: FinalizedReviewPlan | None = None
+
+        async def __aenter__(self) -> FakeUoW:
+            return self
+
+        async def __aexit__(
+            self,
+            exc_type: type[BaseException] | None,
+            exc: BaseException | None,
+            tb: TracebackType | None,
+        ) -> None:
+            await self.rollback()
+
+        async def commit(self) -> None:
+            nonlocal committed_state, committed_outputs, committed_finalized, committed_plan
+            committed_state = self.pending_state
+            committed_outputs += self.pending_outputs
+            committed_finalized += self.pending_finalized
+            if self.pending_plan is not None:
+                committed_plan = self.pending_plan
+            commits.append((committed_state, committed_outputs))
+
+        async def rollback(self) -> None:
+            self.pending_state = committed_state
+            self.pending_outputs = 0
+            self.pending_finalized = 0
+            self.pending_plan = None
+
+        async def get_post_processing_input(self, run_id: UUID) -> FindingPostProcessingInput:
+            return FindingPostProcessingInput(
+                diff_map=_added_file_diff_map("app/example.py", 14),
+                checked_paths=frozenset({"app/example.py"}),
+                rule_names=frozenset(),
+            )
+
+        async def lock_for_publishing(self, run_id: UUID) -> PublishingGuard:
+            return PublishingGuard(
+                state=committed_state,
+                worker_id="test-worker",
+                cancel_requested=False,
+                head_sha="head_sha_123",
+                head_current=True,
+                repository_review_event="COMMENT",
+                attempt=claimed_attempt,
+            )
+
+        async def store_review_output(
+            self,
+            run_id: UUID,
+            answer: dict[str, Any],
+            parsed: ReviewOutput,
+            processed: ProcessedReviewOutput,
+        ) -> ReviewPublication:
+            assert committed_outputs == 1
+            assert committed_finalized == 1
+            assert parsed.summary == processed.summary
+            assert [item.finding.title for item in processed.inline] == [
+                "Missing transaction boundary"
+            ]
+            return ReviewPublication(
+                head_sha="head_sha_123",
+                findings=(),
+                review_body=processed.review_body,
+            )
+
+        async def checkpoint_review_candidates(self, run_id: UUID, **kwargs: Any) -> None:
+            assert run_id == RUN_ID
+            assert kwargs["model_output"] == parse_review_output_v2(accepted_output).model_dump(
+                mode="json"
+            )
+            self.pending_outputs += 1
+
+        async def finalize_review(self, run_id: UUID, **kwargs: Any) -> None:
+            assert run_id == RUN_ID
+            assert kwargs["result"]["findings"][0]["title"] == "Missing transaction boundary"
+            self.pending_finalized += 1
+            self.pending_plan = FinalizedReviewPlan(
+                "head_sha_123", kwargs["findings_hash"], kwargs["review_event"]
+            )
+
+        async def load_finalized_plan(self, run_id: UUID) -> FinalizedReviewPlan | None:
+            return committed_plan
+
+        async def enter_publishing(self, run_id: UUID, **kwargs: Any) -> None:
+            if fail_at_publication_start:
+                raise RuntimeError("publication transition failed")
+            self.pending_state = "publishing"
+
+    class FakeQueue:
+        async def publish_review(self, pointer: Any) -> None:
+            assert (committed_state, committed_outputs) == ("publishing", 1)
+
+    store = StoreReviewOutput(
+        cast(Any, FakeUoW),
+        FakeQueue(),
+        worker_id="test-worker",
+        expected_attempt=1,
+        run_url=lambda _: None,
+    )
+
+    async def scenario() -> bool:
+        checkpointed = await store.checkpoint_candidates(
+            RUN_ID,
+            accepted_output,
+            ("candidate-1",),
+            candidates=[cast(list[dict[str, object]], accepted_output["findings"])[0]],
+            dropped=[],
+            accepted_call_id=None,
+        )
+        if claimed_attempt != 1:
+            return checkpointed
+        assert checkpointed
+        return await store.execute(RUN_ID, valid_output())
+
+    if claimed_attempt != 1:
+        assert asyncio.run(scenario()) is False
+        assert commits == []
+        assert committed_outputs == 0
+    elif fail_at_publication_start:
+        with pytest.raises(RuntimeError, match="publication transition failed"):
+            asyncio.run(scenario())
+        assert commits == [("running", 1), ("running", 1)]
+        assert (committed_state, committed_outputs) == ("running", 1)
+        assert committed_finalized == 1
+    else:
+        assert asyncio.run(scenario()) is True
+        assert commits == [("running", 1), ("running", 1), ("publishing", 1)]
 
 
 def test_store_review_output_persists_dropped_findings_from_reflection_pass() -> None:
