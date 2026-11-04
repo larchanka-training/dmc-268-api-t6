@@ -155,7 +155,11 @@ class _CostMetadataError(ValueError):
 
 class _RefusedAfterSendError(LlmCallFailed):
     """A call refused at a later key's checkpoint, after an earlier key's request went out:
-    the call was made, so ``_recovery`` keeps its code (CVS §7.3)."""
+    the call was made, so ``_recovery`` keeps its code (CVS §7.3) and ``_call`` traces it."""
+
+    def __init__(self, error_code: LlmErrorCode, message: str, **failure: Any) -> None:
+        super().__init__(error_code, message, **failure)
+        self.message = message
 
 
 class Clock(Protocol):
@@ -885,6 +889,16 @@ class LlmGateway:
                 context, state, record, duration_ms, paid_response, usage, paid_metadata_error=True
             )
             raise self._failed(LlmErrorCode.INVALID_OUTPUT, error.message, state) from None
+        except _RefusedAfterSendError as refused:
+            # An earlier key's request went out: the call was made and keeps its row (§2).
+            await self._record_trace(
+                context,
+                record.finish(
+                    _elapsed_ms(started, self._monotonic()),
+                    error=LlmCallError(refused.error_code, None, refused.message),
+                ),
+            )
+            raise
         except TransportError as error:
             duration_ms = _elapsed_ms(started, self._monotonic())
             await self._record_trace(
