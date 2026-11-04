@@ -6,9 +6,9 @@ import pytest
 from sqlalchemy import Connection, inspect
 
 from alembic import command
-from tests.test_bitbucket_connections_postgres import _config
+from tests.bitbucket_connection_postgres_support import _config
 
-pytest_plugins = ("tests.test_bitbucket_connections_postgres",)
+pytest_plugins = ("tests.bitbucket_connection_postgres_support",)
 
 
 @pytest.mark.integration

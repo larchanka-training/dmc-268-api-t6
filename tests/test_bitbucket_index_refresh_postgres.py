@@ -32,10 +32,10 @@ from app.modules.integrations.bitbucket.infrastructure.credential_cipher import 
 from app.modules.integrations.bitbucket.infrastructure.models import BitbucketConnection
 from app.modules.repositories.infrastructure.models import ProviderInstallation, Repository
 from app.modules.workspaces.infrastructure.models import Workspace
+from tests.bitbucket_connection_postgres_support import _config
 from tests.test_app_reinstall_postgres import wait_for_blocked_backend
-from tests.test_bitbucket_connections_postgres import _config
 
-pytest_plugins = ("tests.test_bitbucket_connections_postgres",)
+pytest_plugins = ("tests.bitbucket_connection_postgres_support",)
 
 
 @pytest.mark.integration

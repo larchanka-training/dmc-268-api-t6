@@ -37,9 +37,9 @@ from app.modules.reviews.infrastructure.bitbucket_publication_resources import (
     BitbucketInstalledPublicationResources,
 )
 from app.modules.reviews.infrastructure.run_lifecycle_store import SqlAlchemyRunLifecycleStore
-from tests.test_bitbucket_connections_postgres import _config
+from tests.bitbucket_connection_postgres_support import _config
 
-pytest_plugins = ("tests.test_bitbucket_connections_postgres",)
+pytest_plugins = ("tests.bitbucket_connection_postgres_support",)
 pytestmark = pytest.mark.integration
 HEAD = "a" * 40
 BASE = "b" * 40

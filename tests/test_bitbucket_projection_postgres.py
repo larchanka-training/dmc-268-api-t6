@@ -69,9 +69,9 @@ from app.modules.reviews.infrastructure.run_delivery import SqlAlchemyRunDeliver
 from app.modules.reviews.infrastructure.run_lifecycle_store import SqlAlchemyRunLifecycleStore
 from app.modules.reviews.infrastructure.run_repository import SqlAlchemyRunRepository
 from app.modules.reviews.infrastructure.webhook_runs import SqlAlchemyWebhookRunUnitOfWork
-from tests.test_bitbucket_connections_postgres import _config
+from tests.bitbucket_connection_postgres_support import _config
 
-pytest_plugins = ("tests.test_bitbucket_connections_postgres",)
+pytest_plugins = ("tests.bitbucket_connection_postgres_support",)
 NOW = datetime(2026, 10, 26, 12, tzinfo=UTC)
 
 
