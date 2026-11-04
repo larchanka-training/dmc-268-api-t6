@@ -576,7 +576,7 @@ def test_a_live_index_accepts_a_wake_marker(code_index_database: Connection, sta
 
 @pytest.mark.integration
 @pytest.mark.parametrize(
-    ("probe", "added", "down_revision", "state_row", "restored", "values"),
+    ("probe", "added", "dropped", "down_revision", "state_row", "restored", "values"),
     [
         pytest.param(
             "SELECT (SELECT count(*) FROM information_schema.columns "
@@ -588,6 +588,7 @@ def test_a_live_index_accepts_a_wake_marker(code_index_database: Connection, sta
             "AND indexname IN ('ix_code_index_states_wake_requested', "
             "'ix_code_index_files_closed'))",
             (1, 1, 2),
+            (0, 0, 0),
             "20261019_0036",
             "INSERT INTO code_index_states (repository_id, generation, wake_requested_at) "
             "VALUES (:repository, 1, now())",
@@ -603,6 +604,7 @@ def test_a_live_index_accepts_a_wake_marker(code_index_database: Connection, sta
             "WHERE conname = 'ck_code_index_states_review_full_sha_at' "
             "AND connamespace = current_schema()::regnamespace)",
             (2, 1),
+            (0, 0),
             "20261020_0037",
             "INSERT INTO code_index_states (repository_id, generation, review_full_requested_at) "
             "VALUES (:repository, 1, now())",
@@ -617,6 +619,7 @@ def test_a_migration_adds_its_columns_and_its_downgrade_drops_them_but_keeps_the
     code_index_database: Connection,
     probe: str,
     added: tuple[int, ...],
+    dropped: tuple[int, ...],
     down_revision: str,
     state_row: str,
     restored: str,
@@ -630,7 +633,7 @@ def test_a_migration_adds_its_columns_and_its_downgrade_drops_them_but_keeps_the
     connection.commit()
 
     command.downgrade(config, down_revision)
-    assert set(connection.execute(text(probe)).one()) == {0}
+    assert tuple(connection.execute(text(probe)).one()) == dropped
     assert connection.scalar(text("SELECT version_num FROM alembic_version")) == down_revision
     # The state row stays; only the values of the dropped columns are lost.
     assert connection.scalar(text("SELECT generation FROM code_index_states")) == 1
