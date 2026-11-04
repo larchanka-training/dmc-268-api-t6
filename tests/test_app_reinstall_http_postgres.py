@@ -72,11 +72,12 @@ async def read(factory: async_sessionmaker[AsyncSession], sql: str, **values: An
 
 
 @pytest.mark.integration
-def test_rebinding_requests_a_rules_read_for_the_moved_repository(reinstall_env: Env) -> None:
+def test_rebinding_requests_rules_reads_for_each_moved_repository(reinstall_env: Env) -> None:
     engine = reinstall_env.engine()
     factory = async_sessionmaker(engine, expire_on_commit=False)
     target_id = UUID(int=225)
     skipped_id = UUID(int=226)
+    second_moved_id = UUID(int=227)
 
     async def rebind() -> None:
         async with factory.begin() as session:
@@ -96,6 +97,15 @@ def test_rebinding_requests_a_rules_read_for_the_moved_repository(reinstall_env:
                 ),
                 {"id": skipped_id, "installation": INSTALL_A},
             )
+            await session.execute(
+                text(
+                    "INSERT INTO repositories (id, provider_installation_id, external_id, "
+                    "full_name, default_branch, web_url) "
+                    "VALUES (:id, :installation, 104, 'octo/second', 'main', "
+                    "'https://github.test/octo/second')"
+                ),
+                {"id": second_moved_id, "installation": INSTALL_A},
+            )
             session.add(
                 ProviderInstallation(
                     id=target_id,
@@ -110,7 +120,7 @@ def test_rebinding_requests_a_rules_read_for_the_moved_repository(reinstall_env:
             target = await session.get(ProviderInstallation, target_id)
             assert target is not None
             await SqlAlchemyGitHubRepositoryRebinding(session).rebind(
-                target, GitHubInstallation(29, "octo", (101,), 700)
+                target, GitHubInstallation(29, "octo", (101, 104), 700)
             )
 
     try:
@@ -126,22 +136,24 @@ def test_rebinding_requests_a_rules_read_for_the_moved_repository(reinstall_env:
             == []
         )
         asyncio.run(rebind())
-        assert asyncio.run(
-            read(
-                factory,
-                "SELECT provider_installation_id, installation_available "
-                "FROM repositories WHERE id=:id",
-                id=REPO_A,
+        for moved_id in (REPO_A, second_moved_id):
+            assert asyncio.run(
+                read(
+                    factory,
+                    "SELECT provider_installation_id, installation_available "
+                    "FROM repositories WHERE id=:id",
+                    id=moved_id,
+                )
+            ) == [(target_id, True)]
+            ((requested_at,),) = asyncio.run(
+                read(
+                    factory,
+                    "SELECT refresh_requested_at FROM repository_rules_status "
+                    "WHERE repository_id=:id",
+                    id=moved_id,
+                )
             )
-        ) == [(target_id, True)]
-        ((requested_at,),) = asyncio.run(
-            read(
-                factory,
-                "SELECT refresh_requested_at FROM repository_rules_status WHERE repository_id=:id",
-                id=REPO_A,
-            )
-        )
-        assert requested_at is not None
+            assert requested_at is not None
         assert asyncio.run(
             read(
                 factory,
