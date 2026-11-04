@@ -157,6 +157,7 @@ The manifest also stores sorted `static_inputs`, `static_digest`, and `corpus_di
 | `app/modules/reviews/application/rag_index.py` | `has_retrieved_section` decides which bound review prompt versions (v5, v7) show the `<retrieved_excerpts>` section; eval has no RAG index, so it is empty. |
 | `app/modules/reviews/application/review_output.py` | Parses and validates review output; a failure triggers repair. |
 | `app/modules/reviews/application/review_path.py` | `SNAPSHOT_REVIEW_PROMPT_VERSIONS` decides which bound review prompt versions get the ReviewOutput v2 schema. |
+| `app/modules/reviews/application/reflection_pass.py` | Builds the production verifier prompt and checks decisions against shown context and source authority. |
 | `app/modules/reviews/application/run_failures.py` | Deliberately wide. Only `FAST_ATTEMPT_DEADLINE` (`run_failures.py:17`) shapes the eval, through `CASE_DEADLINE["fast"]` (`llm_gateway.py:147`): the gateway refuses a call with less than one call timeout left (`gateway.py:334-341`) and skips a same-model retry that would leave less (`gateway.py:278-281`). `llm.py:17` also imports `RETRYABLE_ERROR_CODES` for `LlmCallFailed.run_retryable`, which the eval never calls. The rest is worker retry, lease and failure-code policy: its edits do not shape the eval but still cause static drift. |
 | `app/common/infrastructure/github_link_header.py` | `has_next_relation` decides a sidecar page's tail, hence the omission marker. |
 | `app/modules/reviews/infrastructure/llm/answers.py` | Builds the provider schema, validates answers and prepares repair feedback. |
@@ -168,6 +169,9 @@ The manifest also stores sorted `static_inputs`, `static_digest`, and `corpus_di
 | `review/eval/pr-commit-messages.json` | Supplies verified bounded PR prefixes and tail evidence. |
 | `review/schemas/review-output.schema.json` | Defines strict response format and validation. |
 | `review/schemas/review-output.schema.v2.json` | Defines the response format and validation of a snapshot-path prompt (v4/v5). |
+| `review/schemas/verifier-output.schema.v1.json` | Defines the verifier decision response format. |
+| `review/prompts/review.verifier.v1.md` | Pins the historical verifier prompt for provenance. |
+| `review/prompts/review.verifier.v2.md` | Pins the active verifier prompt used by the fixed #217 corpus. |
 | `review/scripts/eval_live.py` | Assembles each case request and selects first-call raw content. |
 | `review/scripts/commit_context.py` | Validates prefix schema and binds cohort/active identities. |
 | `test-prs-dataset/cases/*/case.json` (each canonical file) | Supplies the complete cohort identity used by sidecar binding, including subset captures. |
@@ -1071,6 +1075,17 @@ on `70261a1c0f39af25903d40d35b294d638b9fbd19` with no `Warning:` line. The 2026-
 Later changes to fingerprinted inputs require another complete separately authorized
 capture. Preserve each original capture's provenance rather than editing a digest
 to hide drift; refresh the entire response set and manifest together.
+
+**#217 verifier pins.** `static_input_paths` now also includes both verifier prompts,
+`verifier-output.schema.v1.json` and `reflection_pass.py`; the ReviewOutput v2 schema
+was already pinned. This changes the static path set and digest of the existing 24-case
+reviewer baseline. Its previous `responses/manifest.json` and historical raw responses
+remain evidence of their original capture. Coordinate #178 to recapture the **complete**
+active 24-case reviewer response set and manifest once against the final path set, model
+and prompt; never patch only a digest or mix old and new responses. That capture requires
+separate paid-run authorization. After it is merged, run the required offline reviewer
+replay on `main` and require no static or corpus drift before claiming #217's replay AC.
+Until then, path-set drift is expected and the replay AC remains open.
 
 Before the 2026-10-28 replacement, `main` replayed the 2026-10-20 capture with `Static input
 digest mismatch; refresh the complete baseline`: #168 changed the pinned `app/modules/reviews/application/prompt_builder.py`,
