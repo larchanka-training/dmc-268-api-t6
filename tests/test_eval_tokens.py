@@ -20,12 +20,19 @@ import pytest
 from app.modules.reviews.application.check_runs import RunProviderCheckpoint
 from app.modules.reviews.infrastructure.llm.settings import LlmSettings
 from app.modules.reviews.infrastructure.llm.transport import ChatRequest, ChatResponse
-from review.scripts.eval_live import BACKEND_RULES, FRONTEND_RULES, REPO_ROOT, record_live
+from review.scripts.eval_live import (
+    BACKEND_RULES,
+    FRONTEND_RULES,
+    REPO_ROOT,
+    RecorderError,
+    record_live,
+)
 from review.scripts.eval_rag_rehearsal import DEFAULT_MODEL, RehearsalTransport, rehearsal_settings
 from review.scripts.eval_tokens import main, measure
 from review.scripts.validate_dataset import DEFAULT_ROOT
 
 V3 = REPO_ROOT / "review/prompts/review.system.v3.md"
+V5 = REPO_ROOT / "review/prompts/review.system.v5.md"
 TINY = ("CLEAN-01", "SEC-01")
 
 
@@ -136,3 +143,57 @@ def test_the_command_prints_every_case_and_the_sum_with_no_key_and_no_network(
     assert "A: review/prompts/review.system.v3.md (v3)" in stdout
     assert "policy arm legacy" in stdout
     assert offline == []
+
+
+@pytest.mark.parametrize(
+    ("system", "refusal"),
+    [
+        (V5, "--policy-arm legacy renders no policy snapshot, which review prompt v5 needs"),
+        (Path("/etc/hostname"), "static input must be inside the repository"),
+        (REPO_ROOT / "review/prompts/no-such-prompt.md", "missing digest file"),
+    ],
+)
+def test_a_recorder_refusal_is_exit_1_with_no_table(
+    tiny_root: Path, capsys: pytest.CaptureFixture[str], system: Path, refusal: str
+) -> None:
+    assert main(["--root", str(tiny_root), "--system", str(system)]) == 1
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert refusal in captured.err
+
+
+def test_a_case_that_cannot_fit_the_window_is_refused_not_counted_as_zero(tiny_root: Path) -> None:
+    default = rehearsal_settings(DEFAULT_MODEL).primary
+    tiny_window = replace(default, context_window=default.max_output_tokens + 10)
+
+    with pytest.raises(RecorderError, match="CLEAN-01.*SEC-01"):
+        measure(tiny_root, V3, "legacy", LlmSettings(tiny_window, None))
+
+
+def test_a_case_that_needed_a_repair_call_is_refused_not_counted_twice(
+    tiny_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    honest = RehearsalTransport.complete
+    calls = 0
+
+    async def invalid_first_answer(
+        self: RehearsalTransport, request: ChatRequest, *, checkpoint: RunProviderCheckpoint
+    ) -> ChatResponse:
+        nonlocal calls
+        calls += 1
+        response = await honest(self, request, checkpoint=checkpoint)
+        return replace(response, content='{"findings":[]}') if calls == 1 else response
+
+    monkeypatch.setattr(RehearsalTransport, "complete", invalid_first_answer)
+
+    with pytest.raises(RecorderError, match=r"CLEAN-01 \(accepted, 2 calls\)") as refused:
+        measure(tiny_root, V3, "legacy", rehearsal_settings(DEFAULT_MODEL))
+    assert "SEC-01" not in str(refused.value)
+
+
+@pytest.mark.parametrize("arm", ["valid", "malicious"])
+def test_an_arm_the_gold_corpus_cannot_run_is_an_argument_error(arm: str) -> None:
+    with pytest.raises(SystemExit) as refused:
+        main(["--system", str(V3), "--policy-arm", arm])
+    assert refused.value.code == 2

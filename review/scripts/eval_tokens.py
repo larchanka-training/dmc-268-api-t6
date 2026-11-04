@@ -27,6 +27,7 @@ from app.modules.reviews.infrastructure.llm.transport import (  # noqa: E402
 from review.scripts.eval_live import (  # noqa: E402
     BACKEND_RULES,
     FRONTEND_RULES,
+    RecorderError,
     record_live,
 )
 from review.scripts.eval_rag_rehearsal import (  # noqa: E402
@@ -75,7 +76,11 @@ def _estimate(request: ChatRequest) -> int:
 def measure(
     root: Path, system_prompt: Path, policy_arm: str, settings: LlmSettings
 ) -> PromptTokens:
-    """Run the live capture's own path over the corpus with an in-process transport."""
+    """Run the live capture's own path over the corpus with an in-process transport.
+
+    Raises ``RecorderError`` for what the recorder refuses and for a case that did not make exactly
+    one accepted review call: an overflow sends nothing, a repair call adds a second request.
+    """
     tap = _RequestTap()
     with tempfile.TemporaryDirectory(prefix="eval-tokens-") as scratch:
         manifest = asyncio.run(
@@ -91,6 +96,16 @@ def measure(
             )
         )
     cases = manifest["run_metadata"]["cases"]
+    usage = manifest["run_metadata"]["usage"]
+    unmeasured = [
+        f"{case_id} ({status['gateway_status']}, {len(usage[case_id])} calls)"
+        for case_id, status in cases.items()
+        if status["gateway_status"] != "accepted" or len(usage[case_id]) != 1
+    ]
+    if unmeasured:
+        raise RecorderError(
+            "cases without exactly one accepted review call: " + ", ".join(unmeasured)
+        )
     return PromptTokens(
         prompt_path=manifest["prompt_path"],
         prompt_version=manifest["prompt_version"],
@@ -141,7 +156,11 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
     settings = rehearsal_settings(DEFAULT_MODEL)
-    result = measure(args.root, args.system, args.policy_arm, settings)
+    try:
+        result = measure(args.root, args.system, args.policy_arm, settings)
+    except (RecorderError, OSError, ValueError) as exc:
+        print(f"eval_tokens: {exc}", file=sys.stderr)
+        return 1
     print(format_table(result, root=args.root, policy_arm=args.policy_arm, settings=settings))
     return 0
 
