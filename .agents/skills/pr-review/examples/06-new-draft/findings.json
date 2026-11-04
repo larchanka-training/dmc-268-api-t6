@@ -1,0 +1,30 @@
+{
+  "ac": [
+    {
+      "key": "ui#111 AC1",
+      "status": "covered"
+    },
+    {
+      "key": "ui#111 AC2",
+      "status": "covered"
+    },
+    {
+      "key": "ui#111 AC3",
+      "status": "can't tell"
+    }
+  ],
+  "findings": [
+    {
+      "body": "`className` копирует внутренний класс Ant Design. `AGENTS.md` запрещает менять базовый компонент на экране: исправить в `src/shared/ui`.",
+      "category": "correctness",
+      "decision": null,
+      "line": 41,
+      "path": "src/widgets/run-inspector/ui/RunControls.tsx",
+      "scope": "in",
+      "severity": "high",
+      "title": "Кнопка рестайлится прямо на экране"
+    }
+  ],
+  "head_sha": "21b8d99b895956a7c0dcd2ee809b401552aad806",
+  "schema": 1
+}

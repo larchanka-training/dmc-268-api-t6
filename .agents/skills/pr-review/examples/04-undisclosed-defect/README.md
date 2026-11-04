@@ -29,15 +29,14 @@ pr_context.py ui#72
 
 ui#72 is merged, head `02b0758a20821690ede586a70945d7734b4ebf33`. Its body has
 `Refs larchanka-training/dmc-268-api-t6#54`, an issue of the other repo, and names no part. api#54
-has twelve acceptance criteria prefixed «Часть 1 —» / «Часть 2 —»: not the `Ч.K:` form, so none is
-tied to a part.
+has twelve acceptance criteria prefixed «Часть 1 —» / «Часть 2 —», each tied to its part.
 
 ## Expected
 
 - `verdict: go`, exit code 0, `reasons` empty.
-- One issue, api#54, `parts: []`, AC1–AC12 with `part: null` (keys `api#54 AC1`…), the text
-  whole (the prefix kept).
-- One warning: the pull request is merged. No part warning: no criterion carries a part.
+- One issue, api#54, `parts: []` (the pull request names none), AC1–AC12 each with its `part` (keys
+  `api#54 AC1`…), the text without the prefix.
+- Two warnings: the pull request is merged; it names no part of api#54, so every criterion is listed.
 
 ## Expected review
 

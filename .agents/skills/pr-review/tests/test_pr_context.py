@@ -28,6 +28,9 @@ from typing import Any
 import pytest
 
 HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(HERE))
+from gh_fakes import fake_gh, prepend_path, refuse_live_gh  # noqa: E402
+
 SKILL = HERE.parent
 SCRIPT = SKILL / "scripts" / "pr_context.py"
 EXAMPLES = SKILL / "examples"
@@ -36,27 +39,10 @@ UI = "larchanka-training/dmc-268-ui-t6"
 SEAM = "PR_REVIEW_FIXTURE_DIR"
 
 
-def fake_gh(bin_dir: Path, body: str) -> Path:
-    """Write an executable `gh` (a Python script) into bin_dir."""
-    bin_dir.mkdir(parents=True, exist_ok=True)
-    gh = bin_dir / "gh"
-    gh.write_text(f"#!{sys.executable}\n{body}", encoding="utf-8")
-    gh.chmod(0o755)
-    return bin_dir
-
-
-def prepend_path(monkeypatch: pytest.MonkeyPatch, bin_dir: Path) -> None:
-    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}")
-
-
 @pytest.fixture(autouse=True)
 def no_live_gh(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Every test starts with a `gh` that refuses to run and no fixture dir."""
-    guard = fake_gh(
-        tmp_path / "guard-bin",
-        'import sys\nsys.stderr.write("unexpected gh call\\n")\nsys.exit(97)\n',
-    )
-    prepend_path(monkeypatch, guard)
+    refuse_live_gh(tmp_path, monkeypatch)
     monkeypatch.delenv(SEAM, raising=False)
 
 
@@ -91,7 +77,12 @@ def error_of(r: subprocess.CompletedProcess[str]) -> str:
 
 
 # ─── the examples ───────────────────────────────────────────────────────────
-CASES = sorted(p.name for p in EXAMPLES.iterdir() if p.is_dir())
+# The other examples are of draft_review.py (test_draft_review.py).
+CASES = sorted(
+    p.parent.name
+    for p in EXAMPLES.glob("*/README.md")
+    if "\npr_context.py " in p.read_text(encoding="utf-8")
+)
 
 
 def invocation(case: str) -> list[str]:

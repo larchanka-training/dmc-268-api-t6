@@ -1,0 +1,19 @@
+{
+  "ac": [
+    {
+      "key": "ui#111 AC1",
+      "status": "covered"
+    },
+    {
+      "key": "ui#111 AC2",
+      "status": "covered"
+    },
+    {
+      "key": "ui#111 AC3",
+      "status": "covered"
+    }
+  ],
+  "findings": [],
+  "head_sha": "21b8d99b895956a7c0dcd2ee809b401552aad806",
+  "schema": 1
+}

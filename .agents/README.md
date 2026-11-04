@@ -75,7 +75,7 @@ line, then the body. The golden tests of `create-issue` and `issue-graph` drop e
 lines; the `implement-issue`, `accept-issue` and `pr-review` tests compare only the JSON output (and the write log)
 and check that each example README starts with them. JSON files under `skills/issue-graph/tests/fixtures/`,
 `skills/implement-issue/{tests/fixtures,examples}/`, `skills/accept-issue/{tests/golden,tests/fixtures,examples}/`,
-`skills/pr-review/examples/` and `skills/create-issue/examples/*/batch.json`
+`skills/pr-review/examples/` (also its `.jsonl` and `.diff`) and `skills/create-issue/examples/*/batch.json`
 carry no marker (JSON has no comments); the `diff -r` below covers them.
 
 Everything else (`rules/frontend.md` / `rules/backend.md`, stack-specific

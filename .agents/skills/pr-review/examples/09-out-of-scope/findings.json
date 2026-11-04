@@ -1,0 +1,79 @@
+{
+  "ac": [],
+  "findings": [
+    {
+      "body": "Чтение можно вынести.",
+      "category": "correctness",
+      "decision": {
+        "kind": "follow-up",
+        "ref": "api#500"
+      },
+      "line": 24,
+      "path": "src/widgets/run-inspector/ui/RunControls.tsx",
+      "scope": "out",
+      "severity": "info",
+      "title": "Контекст читается дважды"
+    },
+    {
+      "body": "Было до этого PR.",
+      "category": "correctness",
+      "decision": {
+        "kind": "rejected",
+        "why": "не трогаем в этой задаче."
+      },
+      "line": 41,
+      "path": "src/widgets/run-inspector/ui/RunControls.tsx",
+      "scope": "out",
+      "severity": "medium",
+      "title": "Старая проблема рядом"
+    },
+    {
+      "body": "Строка не менялась.",
+      "category": "readability",
+      "decision": {
+        "kind": "accepted",
+        "why": "поправит автор отдельным коммитом."
+      },
+      "line": 10,
+      "path": "src/widgets/run-inspector/ui/RunControls.tsx",
+      "scope": "out",
+      "severity": "low",
+      "title": "Длинный импорт"
+    },
+    {
+      "body": "Файл вне этого PR.",
+      "category": "readability",
+      "decision": {
+        "kind": "rejected",
+        "why": "не относится к задаче."
+      },
+      "line": 3,
+      "path": "package.json",
+      "scope": "out",
+      "severity": "low",
+      "title": "Лишний скрипт"
+    },
+    {
+      "body": "Можно короче.",
+      "category": "readability",
+      "decision": null,
+      "line": 50,
+      "path": "src/widgets/run-inspector/ui/RunControls.tsx",
+      "scope": "in",
+      "severity": "low",
+      "title": "Имя переменной"
+    },
+    {
+      "body": "Ошибка не показана.",
+      "category": "correctness",
+      "decision": null,
+      "line": 36,
+      "path": "src/widgets/run-inspector/ui/RunControls.tsx",
+      "scope": "in",
+      "severity": "medium",
+      "title": "Нет обработки 409"
+    }
+  ],
+  "head_sha": "21b8d99b895956a7c0dcd2ee809b401552aad806",
+  "schema": 1
+}

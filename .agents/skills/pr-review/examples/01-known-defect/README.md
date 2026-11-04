@@ -46,7 +46,8 @@ Code and Codex are attached to the pull request that added the skill.
 - **Standards** reports the known defect at `src/widgets/run-inspector/ui/RunControls.tsx:41` (the
   `ConfigContext` read at `:24` may be named with it) and cites `.agents/rules/frontend.md` §3a or
   the `AGENTS.md` rule against restyling a base component on a screen. Severity medium or higher.
-  The focus drop may show up as `info`; it is not required.
+  The focus drop may show up as `info`; it is not required. The diff adds that line, so the finding
+  is `scope: in`, and with the draft of step 6 it is a thread on that line, without `nit:`.
 - **AC** has one row per criterion, AC1–AC3, each `covered`, `not covered` or `can't tell` with a
   `path:line` at the head or a reason. AC3 (the gates) is `can't tell`: a CI run is not in the
   diff. No row is `covered` without a link.

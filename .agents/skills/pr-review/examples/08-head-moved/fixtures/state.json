@@ -1,0 +1,21 @@
+{
+  "data": {
+    "repository": {
+      "pullRequest": {
+        "author": {
+          "login": "axyi"
+        },
+        "headRefOid": "4c1d0f6a7e2b9385d6f1a0c47be93d1285fa6e07",
+        "id": "PR_kwDOUOEIjs8AAAABJEh7OQ",
+        "number": 130,
+        "reviews": {
+          "nodes": []
+        },
+        "state": "MERGED"
+      }
+    },
+    "viewer": {
+      "login": "ndovnar"
+    }
+  }
+}

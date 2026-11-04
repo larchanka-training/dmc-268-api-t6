@@ -40,8 +40,9 @@ longest run in any title or body (at least six), so no line of them can close th
 The criteria are the checkboxes of the issue's `## Acceptance Criteria`, numbered AC1.. in
 the issue's order (the ids of accept-issue's table). When the pull request names parts of an
 issue — in its title, else in the first mention in the first line of its `## What`, as
-implement-issue reads it — only the criteria of those parts (`Ч.K:` / `Part K:`, the prefix
-cut off) and the criteria without a prefix are kept, with their ids. `key` is the row of the
+implement-issue reads it — only the criteria of those parts (in the forms of its
+`references/parts.md`, the prefix cut off) and the criteria without a prefix are kept, with
+their ids. `key` is the row of the
 AC table: the issue as `api#N` / `ui#N` (`owner/name#N` for any other repo) and the id, so the
 criteria of two issues never share one.
 
