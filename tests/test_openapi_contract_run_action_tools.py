@@ -196,6 +196,28 @@ def _tool_arguments(call: ast.Call, callee: str) -> list[ast.expr | ast.keyword]
     return found
 
 
+_NameBinding = (
+    ast.Name
+    | ast.Attribute
+    | ast.arg
+    | ast.alias
+    | ast.ExceptHandler
+    | ast.MatchAs
+    | ast.MatchStar
+    | ast.TypeVar
+    | ast.ParamSpec
+    | ast.TypeVarTuple
+)
+
+
+def _bound_name(node: _NameBinding) -> str | None:
+    if isinstance(node, ast.Name | ast.Attribute):
+        return _last_name(node) if isinstance(node.ctx, ast.Store) else None
+    if isinstance(node, ast.arg):
+        return node.arg
+    return node.asname if isinstance(node, ast.alias) else node.name
+
+
 def _scan_tool_writes(source: str, path: str = "<source>") -> _ToolScan:
     """Read the tool names of one module from the shapes that can reach run_actions.
 
@@ -206,11 +228,13 @@ def _scan_tool_writes(source: str, path: str = "<source>") -> _ToolScan:
     a ``ledger.record(context, "x.y")`` that does not write run_actions surfaces as unexpected and
     must be renamed or the scan taught to skip it. A blanket ``"x.y"`` match would also pick up
     prompt names such as ``review.system``, which are not tools. A writer called under another name
-    is read as that writer, and a writer handed to another call becomes a site.
+    is read as that writer, and a writer handed to another call becomes a site. So does a ``*_TOOL``
+    name bound any other way than as such an assignment: a module constant cannot vouch for it.
     """
     tree = ast.parse(source)
     scan = _ToolScan()
     aliases = _writer_aliases(tree)
+    module_constants: set[ast.AST] = set()
     targets: list[ast.expr]
     value: ast.expr | None
     for statement in tree.body:
@@ -225,6 +249,7 @@ def _scan_tool_writes(source: str, path: str = "<source>") -> _ToolScan:
                 continue
             if not target.id.endswith("_TOOL"):
                 continue
+            module_constants.add(target)
             name = _string_constant(value)
             if name is None:
                 site = _ToolSite(path, statement.lineno, "<module>", target.id, ast.unparse(value))
@@ -238,6 +263,10 @@ def _scan_tool_writes(source: str, path: str = "<source>") -> _ToolScan:
         if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef):
             scope = node.name if scope == "<module>" else f"{scope}.{node.name}"
         pending += [(child, scope) for child in ast.iter_child_nodes(node)]
+        if isinstance(node, _NameBinding):
+            bound = _bound_name(node)
+            if bound is not None and bound.endswith("_TOOL") and node not in module_constants:
+                scan.sites.add(_ToolSite(path, node.lineno, scope, bound, "rebound"))
         if not isinstance(node, ast.Call):
             continue
         callee = _callee(node)
@@ -350,7 +379,6 @@ def _unread(*sources: str) -> list[str]:
         ("traced_step(trace, *rest)", "traced_step(*rest)"),
         ("trace.record(run_id, *rest)", "record(*rest)"),
         ("X_TOOL = make()", "X_TOOL(make())"),
-        ('def f():\n    X_TOOL = "a.b"\n    record(run_id, X_TOOL)', "record(X_TOOL)"),
         ('X_TOOL = "a.b"\nrecord(run_id, other.X_TOOL)', "record(other.X_TOOL)"),
         ('from m import traced_step as ts\nts(trace, run_id, f"a.{x}", {})', "ts(f'a.{x}')"),
         ("write = trace.record\nwrite(run_id, name, {})", "write(name)"),
@@ -378,7 +406,6 @@ def _unread(*sources: str) -> list[str]:
         "star-before-the-position",
         "star-at-the-position",
         "computed-constant",
-        "local-constant",
         "attribute-of-a-constant",
         "import-alias",
         "method-alias",
@@ -399,7 +426,7 @@ def test_written_tools_scan_reports_a_tool_it_cannot_read(source: str, expected:
     [
         ('X_TOOL = "a.b"\ntrace.record(run_id, X_TOOL, {})',),
         ('X_TOOL: Final = "a.b"\ninsert_run_action(session, tool=X_TOOL)',),
-        ('X_TOOL = "a.b"', "trace.record(run_id, X_TOOL, {})"),
+        ('X_TOOL = "a.b"', "from m import X_TOOL\ntrace.record(run_id, X_TOOL, {})"),
     ],
     ids=["same-module", "annotated", "imported"],
 )
@@ -420,6 +447,51 @@ def test_written_tools_scan_reads_a_module_tool_constant(sources: tuple[str, ...
 )
 def test_written_tools_scan_leaves_common_uses_of_a_writer_name_alone(source: str) -> None:
     assert _unread(source) == []
+
+
+@pytest.mark.parametrize(
+    "rebinding",
+    [
+        'def f():\n    LLM_CALL_TOOL = "probe.shadow"\n    record(run_id, LLM_CALL_TOOL, {})',
+        "def f(LLM_CALL_TOOL):\n    record(run_id, LLM_CALL_TOOL)",
+        "for LLM_CALL_TOOL in names:\n    record(run_id, LLM_CALL_TOOL)",
+        "with make() as LLM_CALL_TOOL:\n    record(run_id, LLM_CALL_TOOL)",
+        "if (LLM_CALL_TOOL := make()):\n    record(run_id, LLM_CALL_TOOL)",
+        "match name:\n    case LLM_CALL_TOOL:\n        record(run_id, LLM_CALL_TOOL)",
+        "from m import NAME as LLM_CALL_TOOL\nrecord(run_id, LLM_CALL_TOOL)",
+        "if flag:\n    LLM_CALL_TOOL = make()\nrecord(run_id, LLM_CALL_TOOL)",
+        'class Stage:\n    LLM_CALL_TOOL = "probe.shadow"\n    record(run_id, LLM_CALL_TOOL)',
+        "def f():\n    global LLM_CALL_TOOL\n    LLM_CALL_TOOL = make()",
+        "try:\n    pass\nexcept E as LLM_CALL_TOOL:\n    record(run_id, LLM_CALL_TOOL)",
+        "match name:\n    case [*LLM_CALL_TOOL]:\n        record(run_id, LLM_CALL_TOOL)",
+        "def f[LLM_CALL_TOOL](x):\n    record(run_id, LLM_CALL_TOOL)",
+        'import m\nm.LLM_CALL_TOOL = "probe.x"',
+    ],
+    ids=[
+        "local",
+        "parameter",
+        "loop",
+        "with",
+        "walrus",
+        "match",
+        "import-alias",
+        "conditional",
+        "class",
+        "global",
+        "except",
+        "match-star",
+        "type-parameter",
+        "attribute-of-a-module",
+    ],
+)
+def test_written_tools_scan_reports_a_rebound_tool_constant(rebinding: str) -> None:
+    assert _unread('LLM_CALL_TOOL = "llm.call"', rebinding) == ["LLM_CALL_TOOL(rebound)"]
+
+
+def test_written_tools_scan_reports_a_local_tool_name_and_its_use() -> None:
+    source = 'def f():\n    X_TOOL = "a.b"\n    record(run_id, X_TOOL)'
+
+    assert _unread(source) == ["X_TOOL(rebound)", "record(X_TOOL)"]
 
 
 def test_written_tools_scan_names_the_file_and_the_line() -> None:
