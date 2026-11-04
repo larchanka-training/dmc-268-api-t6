@@ -187,6 +187,7 @@ from app.modules.reviews.infrastructure.branch_selection_rule import (
 from app.modules.reviews.infrastructure.ci_eligibility_candidates import (
     SqlAlchemyEligibilityCandidateStore,
 )
+from app.modules.reviews.infrastructure.claim_syntax import TreeSitterClaimSyntaxInspector
 from app.modules.reviews.infrastructure.conventions_unit_of_work import (
     SqlAlchemyRepositoryConventionsUnitOfWork,
 )
@@ -331,6 +332,7 @@ async def process_review_run(
         PublishReviewOutput(lambda: SqlAlchemyReviewOutputUnitOfWork(session_factory), provider)
     )
     prompts: ReviewPromptRepository = SqlAlchemyReviewPromptRepository(session_factory)
+    claim_syntax = TreeSitterClaimSyntaxInspector()
     if context_stage is None:
         # A caller without GitHub App adapters: the run is composed without the stage.
         return await ExecuteReviewRun(
@@ -340,6 +342,7 @@ async def process_review_run(
             publisher,
             reflection_pass=reflection_pass,
             change_summary=change_summary,
+            claim_syntax=claim_syntax,
         ).execute(run_id)
     return await ExecuteReviewRun(
         processor,
@@ -349,6 +352,7 @@ async def process_review_run(
         context_filter=context_stage,
         reflection_pass=reflection_pass,
         change_summary=change_summary,
+        claim_syntax=claim_syntax,
     ).execute(run_id)
 
 
