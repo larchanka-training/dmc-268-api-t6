@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.common.infrastructure.db.enums import RunState
 from app.modules.repositories.infrastructure.models import ProviderInstallation, Repository
+from app.modules.repositories.infrastructure.rules_status import request_rules_refresh
 from app.modules.reviews.infrastructure.models import CodeChange, Run
 from app.modules.reviews.infrastructure.run_notifications import notify_run_state
 from app.modules.workspaces.application.link_github_installations import GitHubInstallation
@@ -155,4 +156,5 @@ class SqlAlchemyGitHubRepositoryRebinding:
                     installation_available=True,
                 )
             )
+            await request_rules_refresh(self._session, repository.id)
         await self._session.flush()

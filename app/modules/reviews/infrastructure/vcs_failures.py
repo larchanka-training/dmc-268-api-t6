@@ -7,13 +7,18 @@ from __future__ import annotations
 
 import contextlib
 import json
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
+from email.utils import parsedate_to_datetime
 from typing import Literal
 
 import httpx
 
 from app.modules.reviews.application.check_runs import RunProviderCheckpoint
-from app.modules.reviews.application.run_failures import RunFailure, parse_retry_after
+from app.modules.reviews.application.run_failures import (
+    RETRY_AFTER_CEILING,
+    RunFailure,
+    parse_retry_after,
+)
 from app.modules.reviews.application.vcs_diff import (
     CommitMessagePrefix,
     PullRequestLocator,
@@ -86,6 +91,7 @@ def github_rate_limit(
     """Whether a failed GitHub answer is a rate limit, and the wait it asks for.
 
     ``Retry-After`` (seconds or an HTTP-date) and ``X-RateLimit-Remaining: 0`` decide first.
+    A primary limit also waits until ``X-RateLimit-Reset`` when it is later.
     Without them, a 403 or 429 whose JSON ``message`` names a secondary rate limit is one,
     with ``SECONDARY_RATE_LIMIT_DELAY``. ``body`` is that of a plain request; a stream hands
     its own with a ``StreamedStatusError``.
@@ -94,6 +100,10 @@ def github_rate_limit(
     delay = parse_retry_after(
         response.headers.get("Retry-After"), date=response.headers.get("Date")
     )
+    if response.headers.get("X-RateLimit-Remaining") == "0":
+        reset_delay = _rate_limit_reset_delay(response)
+        if reset_delay is not None:
+            delay = max(delay or timedelta(0), reset_delay)
     # A date already past is a 0 s delay and still a limit, so test for None.
     if response.headers.get("X-RateLimit-Remaining") == "0" or delay is not None:
         return True, delay
@@ -102,6 +112,25 @@ def github_rate_limit(
     if response.status_code in {403, 429} and _names_secondary_rate_limit(body):
         return True, SECONDARY_RATE_LIMIT_DELAY
     return False, None
+
+
+def _rate_limit_reset_delay(response: httpx.Response) -> timedelta | None:
+    raw = response.headers.get("X-RateLimit-Reset")
+    if raw is None or not raw.isascii() or not raw.isdecimal():
+        return None
+    digits = raw.lstrip("0") or "0"
+    # Large timestamps are beyond the one-day wait without ever converting them to int.
+    if len(digits) > 11:
+        return RETRY_AFTER_CEILING
+    date = response.headers.get("Date")
+    try:
+        reference = parsedate_to_datetime(date) if date else datetime.now(UTC)
+    except ValueError:
+        reference = datetime.now(UTC)
+    if reference.tzinfo is None:
+        reference = reference.replace(tzinfo=UTC)
+    seconds = max(int(digits) - int(reference.timestamp()), 0)
+    return min(timedelta(seconds=seconds), RETRY_AFTER_CEILING)
 
 
 def _names_secondary_rate_limit(body: bytes) -> bool:

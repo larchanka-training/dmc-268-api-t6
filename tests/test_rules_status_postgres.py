@@ -37,6 +37,7 @@ from app.modules.integrations.bitbucket.infrastructure.credential_cipher import 
     CredentialContext,
     CredentialPurpose,
 )
+from app.modules.integrations.webhooks.api.receipt import VerifiedGitHubDelivery
 from app.modules.integrations.webhooks.infrastructure.github_installation_tree_provider import (
     StaticGitHubInstallationAccessTokenProvider,
 )
@@ -549,6 +550,23 @@ def test_a_claimed_request_is_taken_again_only_after_its_lease(
 
 
 @pytest.mark.integration
+def test_a_disconnected_repository_keeps_its_rules_read_request(
+    factory: async_sessionmaker[Any],
+) -> None:
+    asyncio.run(_request(factory))
+    _execute(
+        factory, "UPDATE repositories SET installation_available = false WHERE id = :id", id=REPO_A
+    )
+    reader = FixedReader(RulesReading(RulesStatusKind.MISSING, "main", _HEAD))
+
+    refreshed = _refresh(factory, reader)
+
+    assert refreshed == 0
+    assert reader.targets == []
+    assert _row(factory, REPO_A).refresh_requested_at is not None
+
+
+@pytest.mark.integration
 def test_a_read_whose_lease_ended_cannot_overwrite_the_newer_read(
     factory: async_sessionmaker[Any],
 ) -> None:
@@ -678,6 +696,42 @@ def test_a_push_requests_a_read_only_for_a_connected_repository(
         "WHERE refresh_requested_at IS NOT NULL",
     )
     assert rows.ids == [REPO_A]
+
+
+@pytest.mark.integration
+def test_composed_dispatcher_requests_rules_read_on_default_branch_push(
+    env: Env, factory: async_sessionmaker[Any]
+) -> None:
+    engine = env.engine()
+
+    async def dispatch() -> str:
+        async with httpx.AsyncClient(base_url="https://api.github.test") as client:
+            dispatcher = ReviewsApiResources(
+                engine, factory
+            ).github_installation_delivery_dispatcher(
+                client=client,
+                token_provider=StaticGitHubInstallationAccessTokenProvider("token"),
+            )
+            delivery = VerifiedGitHubDelivery(
+                "push-rules-status",
+                "push",
+                {
+                    "ref": "refs/heads/main",
+                    "installation": {"id": 17},
+                    "repository": {"id": 101, "default_branch": "main"},
+                },
+            )
+            return (await dispatcher.execute(delivery.to_receipt())).status
+
+    try:
+        status = asyncio.run(dispatch())
+        requested = _row(factory, REPO_A)
+    finally:
+        asyncio.run(engine.dispose())
+
+    assert status == "requested_rules_refresh"
+    assert requested.status is None
+    assert requested.refresh_requested_at is not None
 
 
 @pytest.mark.integration
@@ -857,7 +911,7 @@ _DIAGNOSTIC = '[{"code": "policy_fetch_transient", "message": "m", "retryable": 
         ({"checked_at": None}, "ck_repository_rules_status_read_complete"),
         ({"sha": "a" * 39}, "ck_repository_rules_status_sha"),
         ({"sha": "A" * 40}, "ck_repository_rules_status_sha"),
-        ({"sha": "a" * 64}, "value too long"),
+        ({"sha": "a" * 64}, "22001"),
         ({"checksum": "a" * 63 + "g"}, "ck_repository_rules_status_checksum"),
         ({"ignore_masks": None}, "ck_repository_rules_status_present"),
         ({"status": "missing"}, "ck_repository_rules_status_missing"),
@@ -902,8 +956,12 @@ def test_the_row_constraints_refuse_an_incomplete_read(
         unavailable.rollback()
 
     # A 64 hex SHA is refused by the column length before the CHECK runs.
-    with pytest.raises((IntegrityError, DataError), match=constraint):
+    with pytest.raises(
+        (IntegrityError, DataError), match=constraint if constraint != "22001" else None
+    ) as caught:
         connection.execute(insert, {"id": _REPOSITORY, **_VALID, **change})
+    if constraint == "22001":
+        assert getattr(caught.value.orig, "sqlstate", None) == "22001"
 
 
 def _seed_bitbucket_binding(factory: async_sessionmaker[Any]) -> None:
