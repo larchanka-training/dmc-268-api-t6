@@ -28,7 +28,7 @@ from review.scripts.eval_live import (
     record_live,
 )
 from review.scripts.eval_rag_rehearsal import DEFAULT_MODEL, RehearsalTransport, rehearsal_settings
-from review.scripts.eval_tokens import main, measure
+from review.scripts.eval_tokens import PromptTokens, format_table, main, measure
 from review.scripts.validate_dataset import DEFAULT_ROOT
 
 V3 = REPO_ROOT / "review/prompts/review.system.v3.md"
@@ -192,8 +192,74 @@ def test_a_case_that_needed_a_repair_call_is_refused_not_counted_twice(
     assert "SEC-01" not in str(refused.value)
 
 
-@pytest.mark.parametrize("arm", ["valid", "malicious"])
-def test_an_arm_the_gold_corpus_cannot_run_is_an_argument_error(arm: str) -> None:
+@pytest.mark.parametrize("arm", ["legacy", "none"])
+def test_the_gold_corpus_prints_its_24_cases_and_their_sum(
+    arm: str, offline: list[object], capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert main(["--system", str(V3), "--policy-arm", arm]) == 0
+
+    stdout = capsys.readouterr().out
+    # Relative, so the output of two clones of the repository is the same.
+    assert f"eval_tokens: root test-prs-dataset, policy arm {arm}," in stdout
+    rows = _rows(stdout)
+    total = rows.pop("total")
+    assert len(rows) == 24
+    assert total == [str(sum(int(cells[0]) for cells in rows.values()))]
+    assert offline == []
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        ["--system", str(V3), "--policy-arm", "valid"],
+        ["--system", str(V3), "--policy-arm", "malicious"],
+        ["--system", str(V3), "--system", str(V3), "--system", str(V3)],
+    ],
+)
+def test_what_the_command_cannot_measure_is_an_argument_error(arguments: list[str]) -> None:
     with pytest.raises(SystemExit) as refused:
-        main(["--system", str(V3), "--policy-arm", arm])
+        main(arguments)
     assert refused.value.code == 2
+
+
+def test_two_prompt_files_print_the_delta_of_each_case_and_of_the_total() -> None:
+    first = PromptTokens("p/a.md", "v3", {"CASE-1": 1000, "CASE-2": 200})
+    second = PromptTokens("p/b.md", "v5", {"CASE-1": 1215, "CASE-2": 160})
+
+    table = format_table(
+        [first, second],
+        root=Path("corpus"),
+        policy_arm="none",
+        settings=rehearsal_settings(DEFAULT_MODEL),
+    )
+
+    assert table.splitlines() == [
+        "eval_tokens: root corpus, policy arm none, model mistral-small-4, chars_per_token 3.0",
+        "A: p/a.md (v3)",
+        "B: p/b.md (v5)",
+        "case       A     B  B vs A",
+        "CASE-1  1000  1215  +21.5%",
+        "CASE-2   200   160  -20.0%",
+        "total   1200  1375  +14.6%",
+    ]
+
+
+def test_two_runs_on_the_same_inputs_print_the_same_bytes(
+    tiny_root: Path, offline: list[object], capsys: pytest.CaptureFixture[str]
+) -> None:
+    arguments = ["--root", str(tiny_root), "--policy-arm", "none"]
+    arguments += ["--system", str(V3), "--system", str(V5)]
+
+    assert main(arguments) == 0
+    first = capsys.readouterr().out
+    assert main(arguments) == 0
+    second = capsys.readouterr().out
+
+    assert first == second
+    settings = rehearsal_settings(DEFAULT_MODEL)
+    older = measure(tiny_root, V3, "none", settings)
+    newer = measure(tiny_root, V5, "none", settings)
+    assert _rows(first)["total"][:2] == [str(older.total), str(newer.total)]
+    assert newer.total > older.total
+    assert _rows(first)["total"][2].startswith("+")
+    assert offline == []

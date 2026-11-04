@@ -3,6 +3,15 @@
 
 Usage: uv run python review/scripts/eval_tokens.py --system FILE [--system FILE] \\
            [--policy-arm legacy|none] [--root DIR]
+
+No key, no network, no paid call. ``record_live`` runs with a transport that stays in this process
+and writes its capture to a temporary directory, so the envelope and the fit to the window are
+those of a live capture of the same arm; nothing is rendered a second time here. The output is
+the estimate per case and the sum, and for two prompt files the change of B against A in percent.
+
+The exit code is 0 on success, 1 when the recorder refuses the inputs or a case did not make
+exactly one accepted review call, 2 on bad arguments. How to read the figures:
+test-prs-dataset/README.md, "Offline token estimate".
 """
 
 from __future__ import annotations
@@ -11,7 +20,9 @@ import argparse
 import asyncio
 import sys
 import tempfile
+from collections.abc import Sequence
 from dataclasses import dataclass
+from fractions import Fraction
 from pathlib import Path
 
 if __package__ in (None, ""):
@@ -27,6 +38,7 @@ from app.modules.reviews.infrastructure.llm.transport import (  # noqa: E402
 from review.scripts.eval_live import (  # noqa: E402
     BACKEND_RULES,
     FRONTEND_RULES,
+    REPO_ROOT,
     RecorderError,
     record_live,
 )
@@ -39,6 +51,7 @@ from review.scripts.validate_dataset import DEFAULT_ROOT  # noqa: E402
 
 # The arms a corpus without policy-arm fields can run: ``valid`` and ``malicious`` need them.
 POLICY_ARMS = ("legacy", "none")
+LABELS = ("A", "B")
 
 
 class _RequestTap(RehearsalTransport):
@@ -68,7 +81,10 @@ class PromptTokens:
 
 
 def _estimate(request: ChatRequest) -> int:
-    """The gateway's pre-send estimate of the request: every message at ``chars_per_token``."""
+    """The gateway's pre-send estimate of the request: every message at ``chars_per_token``.
+
+    The snapshot path counts with counter/v2, the same figure at 3.0 (test_gateway_counter_parity).
+    """
     counter = HeuristicTokenCounter(request.profile.chars_per_token)
     return sum(counter.count(message.content) for message in request.messages)
 
@@ -116,21 +132,39 @@ def measure(
     )
 
 
+def _row(name: str, tokens: Sequence[int]) -> list[str]:
+    cells = [name, *(str(value) for value in tokens)]
+    if len(tokens) == 2:
+        # The base is never 0: the system message holds at least the prompt's version line.
+        cells.append(f"{float(Fraction(tokens[1] - tokens[0], tokens[0]) * 100):+.1f}%")
+    return cells
+
+
 def format_table(
-    result: PromptTokens, *, root: Path, policy_arm: str, settings: LlmSettings
+    results: Sequence[PromptTokens], *, root: Path, policy_arm: str, settings: LlmSettings
 ) -> str:
+    """The run's inputs, then the estimates by case and their sum; two files add ``B vs A``."""
     profile = settings.primary
+    # Relative inside the repository, so the output of two clones is the same.
+    shown_root = root.relative_to(REPO_ROOT) if root.is_relative_to(REPO_ROOT) else root
+    labelled = list(zip(LABELS, results, strict=False))
     rows = [
-        ["case", "A"],
-        *([case_id, str(tokens)] for case_id, tokens in result.by_case.items()),
-        ["total", str(result.total)],
+        ["case", *(label for label, _ in labelled), *(["B vs A"] if len(results) == 2 else [])],
+        *(
+            _row(case_id, [result.by_case[case_id] for result in results])
+            for case_id in results[0].by_case
+        ),
+        _row("total", [result.total for result in results]),
     ]
-    widths = [max(len(row[column]) for row in rows) for column in range(len(rows[0]))]
+    widths = [max(len(cell) for cell in column) for column in zip(*rows, strict=True)]
     return "\n".join(
         [
-            f"eval_tokens: root {root}, policy arm {policy_arm}, model {profile.model}, "
+            f"eval_tokens: root {shown_root}, policy arm {policy_arm}, model {profile.model}, "
             f"chars_per_token {profile.chars_per_token}",
-            f"A: {result.prompt_path} ({result.prompt_version})",
+            *(
+                f"{label}: {result.prompt_path} ({result.prompt_version})"
+                for label, result in labelled
+            ),
             *(
                 "  ".join(
                     [
@@ -150,18 +184,27 @@ def format_table(
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0] if __doc__ else None)
     parser.add_argument("--root", type=Path, default=DEFAULT_ROOT, help="dataset root")
-    parser.add_argument("--system", type=Path, required=True, metavar="FILE", help="review prompt")
+    parser.add_argument(
+        "--system",
+        type=Path,
+        action="append",
+        required=True,
+        metavar="FILE",
+        help="review prompt inside the repository; give it twice to compare two files",
+    )
     parser.add_argument(
         "--policy-arm", choices=POLICY_ARMS, default="legacy", help="as in eval_live.py"
     )
     args = parser.parse_args(argv)
+    if len(args.system) > len(LABELS):
+        parser.error("--system takes one prompt file, or two to compare")
     settings = rehearsal_settings(DEFAULT_MODEL)
     try:
-        result = measure(args.root, args.system, args.policy_arm, settings)
+        results = [measure(args.root, path, args.policy_arm, settings) for path in args.system]
     except (RecorderError, OSError, ValueError) as exc:
         print(f"eval_tokens: {exc}", file=sys.stderr)
         return 1
-    print(format_table(result, root=args.root, policy_arm=args.policy_arm, settings=settings))
+    print(format_table(results, root=args.root, policy_arm=args.policy_arm, settings=settings))
     return 0
 
 
