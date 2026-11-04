@@ -23,7 +23,7 @@
   },
   "parts": [],
   "reasons": [
-    "the acceptance criteria name parts (1, 2, 3) but the Scope has no part bullets this script can read — write the Scope parts as `- Ч.N (…): …` (create-issue format) or ask the user"
+    "the acceptance criteria name parts (1, 2, 3) but the Scope has no part bullets this script can read — the issue's author or the tech lead rewrites them as `- Ч.N (…): …` (create-issue format), numbered from 1; this run does not edit the issue"
   ],
   "schema": 1,
   "selected": null,

@@ -8,18 +8,36 @@ correctly (the convention is in `SKILL.md`). The module docstring of the script 
 
 ## The parts of the issue
 
-`## Scope` bullets that start `Ч.N` / `Part N` / `Teil N` (the labels create-issue writes in ru /
-en / de), an optional `(label)` and a `:` are the parts; bullets that repeat a number are one part.
-The numbers must be 1..k. A number longer than 9 digits names nothing, here and everywhere below.
+`## Scope` bullets that start `Ч.N` / `Часть N` / `Part N` / `Teil N` (`Ч.N`, `Part N` and `Teil N`
+are what create-issue writes in ru / en / de; `Часть N` is what people write by hand) are the parts;
+bullets that repeat a number are one part. An optional `(label)` follows, then `:` or a long dash
+(`—`, `–`) with whitespace on both sides. A digit right after the dash is a range (`Часть 1 – 2: …`)
+and the ASCII hyphen is no separator: such a bullet is a stop. Only the singular `Часть` is a label:
+«Части 1–2 правят …» is prose. The numbers must be 1..k. A number longer than 9 digits names
+nothing, here and everywhere below.
+
+**The criteria.** A criterion under `## Acceptance Criteria` belongs to a part when it starts with
+that prefix (`Часть 1: x`, `Ч.1 — x`) or with a bold one: `**Ч.1.** x`, `**Часть 1:** x`, `**Ч.1**: x`,
+and `**Ч.1, state.** x`, whose qualifier stays (`state. x`). Everything else is common, which every
+part's run reads. So a criterion of several parts, `Ч.1, Ч.2: x` or `**Ч.1, Ч.2.** x`, stays common
+and never goes to the first part alone. So does a bold prefix with a second number and no label, a
+range or a list (`**Ч.1–2.** x`, `**Ч.1, 2.** x`, `**Ч.1 и 2.** x`, `**Ч.1** – 2: x`); a qualifier
+that starts with a digit (`**Ч.1, 2FA.** x`) reads the same, which is safe. A number with no mark
+before it starts the text: `**Ч.1.** 2 теста` is Part 1, `2 теста`.
 
 **Unreadable parts.** The label must be the very start of the bullet: `- **Ч.1 (P2). Title.** …`
-(bold) and `- Часть 1 — …` parse no part. When no part is parsed but a criterion under
-`## Acceptance Criteria` starts `Ч.N:` / `Part N:` / `Teil N:`, the issue is not a whole task: it
-has parts the script cannot read, and implementing it as one would leave the criteria out. That is
-a **stop** (the reason lists the numbers): write the Scope parts as `- Ч.N (…): …` (the
-create-issue format), or ask the user. It comes after the closed, epic, blocker and numbering
-stops and before any whole-task `go` or `accept`; `--part K` there still exits 2. With parsed parts
-a criterion for a part the Scope lacks is only a warning.
+(bold) parses no part. When no part is parsed but a criterion starts with a part number in any form
+(the ones above, or one the script does not read: `Ч.1. x`, `*Ч.1* x`, `Part 1 of …`), the issue is
+not a whole task: it has parts the script cannot read, and implementing it as one would leave the
+criteria out. That is a **stop** (the reason lists the numbers): the issue's author or the tech lead
+rewrites the Scope parts as `- Ч.N (…): …` (the create-issue format), numbered from 1; the run never
+edits the issue. It comes after the closed, epic, blocker, numbering and board stops and before any
+whole-task `go` or `accept`; `--part K` there still exits 2. With parsed parts a criterion for a part
+the Scope lacks is only a warning.
+
+**Not on board 12.** A **stop**: a person adds the card, and the run never does. It comes after the
+closed, epic, blocker and numbering stops and before `--part K`, whole-task `go` and `accept`, so
+that no branch is cut for a Status step that cannot work. A card without a Status is on the board.
 
 ## A pull request counts
 
@@ -69,9 +87,13 @@ an OPEN one does, else **todo**. Closed-unmerged pull requests never count.
 `accept` is the verdict when **all** of this holds; any other state is a `stop` with its reason:
 
 - Every part has a merged pull request (a task without parts: its pull request) and none is open.
-- The issue is no epic. An **epic** has sub-issues and **no parts of its own** (no Scope parts):
-  stop, implement the sub-issues (`issue.sub_issues` has the counts). An issue with its own parts
-  and sub-issues is read by the parts rules; its sub-issues are not counted.
+- The issue is no epic. An **epic** has sub-issues, **no parts of its own** (no Scope parts) and a
+  marker: the word `Эпик` / `Epic` in its title, or a Scope bullet that starts with an issue
+  (`- #140 — …`, `- ui#102 — …`): stop, implement the sub-issues (`issue.sub_issues` has the counts).
+  Sub-issues alone do not make one: accept-issue files a follow-up as a sub-issue of its task. With
+  no marker the issue is read as one task, with a warning that may mean an epic without the marker.
+  An issue with its own parts and sub-issues is read by the parts rules; its sub-issues are not
+  counted.
 - The card on board 12 is In Progress, On Review or AC Check (the statuses accept-issue sets AC
   Check from). In Todo, Done or on no Status the work was never started here: stop, the user takes
   the task.

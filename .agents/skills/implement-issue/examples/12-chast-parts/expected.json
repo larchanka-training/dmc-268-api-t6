@@ -1,0 +1,59 @@
+{
+  "blockers": [],
+  "common_acceptance_criteria": [
+    "Новых ревизий Alembic нет"
+  ],
+  "held": null,
+  "issue": {
+    "assignees": [],
+    "board_status": "Todo",
+    "number": 238,
+    "repo": "larchanka-training/dmc-268-api-t6",
+    "state": "OPEN",
+    "sub_issues": {
+      "open": 0,
+      "total": 0
+    },
+    "title": "[runs] Закройте хвосты контракта: CHECK триггера и OpenAPI",
+    "url": "https://github.com/larchanka-training/dmc-268-api-t6/issues/238"
+  },
+  "kickoff": {
+    "present": true,
+    "text": "**Репозиторий:** larchanka-training/dmc-268-api-t6\n\n**Ветка:** `chore/<n>-run-contract-tails`"
+  },
+  "parts": [
+    {
+      "acceptance_criteria": [
+        "PG-тест падает, если `RunTrigger` и `ck_runs_trigger` разошлись"
+      ],
+      "boundary": null,
+      "done_when": null,
+      "label": "P3, tests",
+      "n": 1,
+      "prs": [],
+      "scope": "тест сверяет значения CHECK `ck_runs_trigger` в БД с `RunTrigger`",
+      "status": "todo"
+    },
+    {
+      "acceptance_criteria": [
+        "`GET /openapi.json` отдаёт `status` и `engine` у `RunSessionDto`"
+      ],
+      "boundary": null,
+      "done_when": null,
+      "label": "P3, api",
+      "n": 2,
+      "prs": [],
+      "scope": "runtime OpenAPI объявляет `status` и `engine` в `RunSessionDto`",
+      "status": "todo"
+    }
+  ],
+  "reasons": [],
+  "schema": 1,
+  "selected": {
+    "part": 1,
+    "reason": "first-todo"
+  },
+  "task_prs": [],
+  "verdict": "go",
+  "warnings": []
+}

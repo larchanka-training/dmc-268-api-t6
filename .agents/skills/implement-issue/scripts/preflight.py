@@ -3,7 +3,7 @@
 
 The pre-start check of the implement-issue skill. It collects what the skill needs
 before any branch is cut and states it as facts plus a verdict: the issue's state,
-its native blockers, its parts («Ч.N» / «Part N» / «Teil N») with the pull requests that
+its native blockers, its parts («Ч.N» / «Часть N» / «Part N» / «Teil N») with the pull requests that
 reference them, the Kickoff, the board Status, and the part a run should take — or that
 the work is done and acceptance is next.
 
@@ -20,22 +20,25 @@ trailing newline), schema 1:
     issue     {repo, number, title, url, state, assignees, board_status, sub_issues}
               board_status: the Status of the issue on board 12 of
               larchanka-training, null when it is not on that board.
-              sub_issues: {total, open}; an issue with any and no parts of its own is an epic.
+              sub_issues: {total, open}; for the epic rule see the decisions below.
     blockers  [{ref, title, state}] — the native `blockedBy` links, any repo,
               sorted by ref. Only state OPEN blocks.
     parts     [{n, label, scope, boundary, done_when, acceptance_criteria, prs,
               status}] — top-level bullets under `## Scope` that start with
-              `Ч.N` / `Part N` / `Teil N`, an optional `(label)`, then `:`.
+              `Ч.N` / `Часть N` / `Part N` / `Teil N`, an optional `(label)`, then
+              `:` or a long dash (`—`, `–`) with whitespace on both sides and no digit after.
               Bullets that repeat a number are one part (scope lines joined by a
               newline). The nested `Граница PR:` / `PR boundary:` / `PR-Grenze:`
               and `Готово, когда:` / `Done when:` / `Fertig, wenn:` bullets give
               boundary and done_when (null when absent). acceptance_criteria: the
-              items under `## Acceptance Criteria` prefixed `Ч.N:` / `Part N:` /
-              `Teil N:`, the prefix removed.
+              items under `## Acceptance Criteria` prefixed the same way, or in bold
+              (`**Ч.N.** x`, `**Ч.N:** x`, `**Ч.N**: x`, `**Ч.N, state.** x`), the prefix
+              removed and a bold qualifier kept.
               prs: [{ref, url, title, state}] of the pull requests that name
               the part. status: done (a MERGED pull request names it), else
               open_pr (an OPEN one does), else todo; CLOSED ones never count.
-    common_acceptance_criteria  the criteria without a part prefix.
+    common_acceptance_criteria  the criteria without a part prefix, and those a prefix cannot tie
+              to one part (`Ч.1, Ч.2: x`, `**Ч.1, Ч.2.** x`, `Ч.1. x`).
     task_prs  the pull requests with `Refs` when the issue has no parts, else [].
     selected  {part, reason} or null. part is null for the whole task; reason is
               first-todo | explicit | whole-task.
@@ -84,14 +87,15 @@ comments never count. A quoted line never counts as a `Refs` line (it does not s
 with `Refs`), but quotes are not skipped for the first line of `## What`: a pull
 request that opens with a quote is read from the quote.
 
-Decisions, in this order: the issue is CLOSED -> stop; it has sub-issues and no parts of
-its own (an epic) -> stop; any OPEN blocker -> stop;
-parts not numbered 1..k -> stop; `--part K` must exist (exit 2) and is taken
-as is; no parsed part but a prefixed criterion (`Ч.N:` / `Part N:` / `Teil N:`) under
-`## Acceptance Criteria` -> stop (the Scope parts are written in a way this script cannot
-read); no `--part`: an OPEN pull request with `Refs` that names no part of the
-issue stops (whichever part it belongs to is not known: "say which part it covers,
-or pass --part"), else the first part that is not done — open_pr stops, todo is
+Decisions, in this order: the issue is CLOSED -> stop; it has sub-issues, no parts of
+its own and says it is an epic (the word `Эпик` / `Epic` in its title, or a Scope bullet that
+starts with an issue) -> stop; sub-issues without that are a warning, and the issue is read as
+one task; any OPEN blocker -> stop; parts not numbered 1..k -> stop; not on board 12 -> stop;
+`--part K` must exist (exit 2) and is taken as is; no parsed part but a criterion under
+`## Acceptance Criteria` that starts with a part number in any form -> stop (the Scope parts are
+written in a way this script cannot read); no `--part`: an OPEN pull request with `Refs` that
+names no part of the issue stops (whichever part it belongs to is not known: "say which part it
+covers, or pass --part"), else the first part that is not done — open_pr stops, todo is
 taken; every part done and none with an OPEN pull request -> accept (acceptance is
 next), unless the card is not In Progress, On Review or AC Check (the work was never
 started here) or the issue is held back at acceptance (see below) -> stop; no parts: the
@@ -173,7 +177,7 @@ REFS_TOKEN = re.compile(r"([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)?#([1-9][0-9]*)")
 # matched whole (`[0-9]+`) and turned into numbers by `to_int`, which returns None past
 # MAX_DIGITS: a regex that capped the run would let `Part 2 of #<5000 digits>` fall back to an
 # untied `Part 2`.
-_LABEL = r"(?:Ч\.[ \t]*|Part[ \t]+|Teil[ \t]+)"
+_LABEL = r"(?:Ч\.[ \t]*|Part[ \t]+|Teil[ \t]+|Часть[ \t]+)"
 _PART = rf"{_LABEL}([0-9]+)(?![0-9])"
 # The same in a pull request's prose: horizontal whitespace of any kind (a no-break space
 # included) after the label, and «Часть K» too (in any case form: «Части K», «Частью K»).
@@ -221,8 +225,28 @@ UNMET_LINE = "Итог: не выполнено"
 # set from On Review, In Progress or AC Check»): `accept` needs one of them.
 ACCEPT_CARDS = ("In Progress", "On Review", "AC Check")
 PART_START = re.compile(_PART, re.IGNORECASE)
-PART_BULLET = re.compile(rf"{_PART}[ \t]*(?:\((.*?)\)[ \t]*)?:[ \t]*(.*)", re.IGNORECASE)
-PART_CRITERION = re.compile(rf"{_PART}[ \t]*:[ \t]*(.*)", re.IGNORECASE)
+# What ends a part prefix: `:`, or a long dash with whitespace on both sides and no digit after it
+# («Часть 1 – 2: …» is a range). The lookahead sits right after the dash, so that `[ \t]+` cannot
+# give whitespace back to pass it.
+_SEP = r"(?::|(?<=[ \t])[—–](?![ \t]*[0-9])[ \t]+)"
+PART_BULLET = re.compile(rf"{_PART}[ \t]*(?:\((.*?)\)[ \t]*)?{_SEP}[ \t]*(.*)", re.IGNORECASE)
+PART_CRITERION = re.compile(rf"{_PART}[ \t]*{_SEP}[ \t]*(.*)", re.IGNORECASE)
+# A criterion whose prefix is bold: «**Ч.1.** …», «**Ч.1, state.** …», «**Часть 1:** …»,
+# «**Ч.1**: …». What the bold holds after the number is the start of the criterion.
+BOLD_CRITERION = re.compile(rf"\*\*{_PART}(?![^\W_])(.*?)\*\*[ \t]*:?[ \t]*(.*)", re.IGNORECASE)
+# A second number right after that one, with no label of its own: a range or a list, inside the
+# bold or just after it («**Ч.1–2.**», «**Ч.1, 2.**», «**Ч.1** и 2:», «**Ч.1.2**»). Without a mark
+# before it a number starts the text («**Ч.1.** 2 теста», «**Ч.1: 2 теста**»).
+BOLD_SECOND_NUMBER = re.compile(
+    r"[ \t]*(?:\.|(?:[,;/&+—–-]|(?:и|или|and|or|und|oder)(?![^\W_]))[ \t]*)[0-9]", re.IGNORECASE
+)
+# A criterion that starts with a part in a form the two above do not read («Ч.1. …»,
+# «Ч.1, Ч.2: …»).
+PART_LEAD = re.compile(rf"[*_`]*{_PART}", re.IGNORECASE)
+# What makes an issue with sub-issues and no parts an epic: the word in its title (the word itself:
+# «Хвосты эпика #139» is a task), or a Scope bullet that starts with an issue (`- #140 — …`).
+EPIC_TITLE = re.compile(r"(?<!\w)(?:эпик|epic)(?!\w)", re.IGNORECASE)
+ISSUE_BULLET = re.compile(rf"{_OPEN}(?:{_REPO})?#[1-9]", re.IGNORECASE)
 CHECKBOX_PREFIX = re.compile(r"\[[ xX]\][ \t]+")
 TOP_BULLET = re.compile(r"[-*+][ \t]+(.*)$")
 NESTED_BULLET = re.compile(r"[ \t]+[-*+][ \t]+(.*)$")
@@ -668,43 +692,67 @@ def build_parts(body: str) -> tuple[list[dict[str, Any]], str | None]:
     return parts, None
 
 
+def criterion_of(text: str) -> tuple[str, str] | None:
+    """(the part's digits, the text without the prefix) of a criterion with a part prefix, plain
+    or bold. None when it has none, or when the bold names a second part, with a label or as a
+    bare number: a criterion of several parts stays common, so that the run of each of them sees
+    it."""
+    plain = PART_CRITERION.fullmatch(text)
+    if plain:
+        return plain.group(1), plain.group(2).strip()
+    bold = BOLD_CRITERION.fullmatch(text)
+    if (
+        not bold
+        or PART_START.search(bold.group(2))
+        or BOLD_SECOND_NUMBER.match(bold.group(2))
+        or BOLD_SECOND_NUMBER.match(bold.group(3))
+    ):
+        return None
+    head = bold.group(2).lstrip(" \t.,:—–")
+    return bold.group(1), f"{head} {bold.group(3)}".strip()
+
+
 def build_criteria(
     body: str, parts: list[dict[str, Any]], warnings: list[str]
 ) -> tuple[list[str], list[int | None]]:
-    """Fill `acceptance_criteria` of each part; return the criteria without a prefix and the
-    part numbers (None: out of range) that prefixed criteria name outside the parsed parts."""
+    """Fill `acceptance_criteria` of each part; return the common criteria and the part numbers
+    (None: out of range) that criteria name outside the parsed parts. A criterion that starts
+    with a part in a form `criterion_of` does not read is common, and still names that part."""
     by_number = {p["n"]: p for p in parts}
     common: list[str] = []
     missing: list[int | None] = []
     section = section_lines(body, named("acceptance criteria"), skip_quotes=True)
     for item in bullets(section or []):
         text = CHECKBOX_PREFIX.sub("", item["text"], count=1)
-        m = PART_CRITERION.fullmatch(text)
-        if not m:
+        found = criterion_of(text)
+        if found is None:
             common.append(text)
+        lead = PART_LEAD.match(text)
+        digits = found[0] if found else lead.group(1) if lead else None
+        if digits is None:
             continue
-        n = to_int(m.group(1))
+        n = to_int(digits)
         if n is None:
             warnings.append("acceptance criterion names a part number out of range")
             missing.append(None)
-        elif n in by_number:
-            by_number[n]["acceptance_criteria"].append(m.group(2).strip())
-        else:
+        elif n not in by_number:
             warnings.append(f"acceptance criterion names Part {n}, not in Scope")
             missing.append(n)
+        elif found:
+            by_number[n]["acceptance_criteria"].append(found[1])
     return common, missing
 
 
 def unreadable_parts(missing: list[int | None]) -> str:
     """The stop reason for an issue whose criteria name parts that its Scope does not number
-    in a way `build_parts` can read («- **Ч.1 (P2). …**», «Часть 1 — …»)."""
+    in a way `build_parts` can read («- **Ч.1 (P2). …**»)."""
     named = [str(n) for n in sorted({n for n in missing if n is not None})]
     if None in missing:
         named.append("a number out of range")
     return (
         f"the acceptance criteria name parts ({', '.join(named)}) but the Scope has no part "
-        "bullets this script can read — write the Scope parts as `- Ч.N (…): …` "
-        "(create-issue format) or ask the user"
+        "bullets this script can read — the issue's author or the tech lead rewrites them as "
+        "`- Ч.N (…): …` (create-issue format), numbered from 1; this run does not edit the issue"
     )
 
 
@@ -748,13 +796,25 @@ def board_status(item: dict[str, Any] | None) -> str | None:
 
 
 def sub_issues_of(issue: dict[str, Any]) -> dict[str, int]:
-    """{total, open} of the issue's sub-issues (an issue with any and no parts of its own is
-    an epic; with parts of its own the parts rules decide and the sub-issues are not counted)."""
+    """{total, open} of the issue's sub-issues (with parts of its own the parts rules decide and
+    the sub-issues are not counted; without them see `is_epic`)."""
     summary = obj(issue.get("subIssuesSummary"), "issue.subIssuesSummary")
     total, completed = summary.get("total"), summary.get("completed")
     if not isinstance(total, int) or not isinstance(completed, int) or completed > total:
         fail("unexpected shape: issue.subIssuesSummary has no integer total and completed", 3)
     return {"total": total, "open": total - completed}
+
+
+def is_epic(title: str, body: str) -> bool:
+    """Whether an issue with sub-issues and no parts says it is an epic. Sub-issues alone do not:
+    accept-issue files a follow-up as a sub-issue of the task it came from."""
+    if EPIC_TITLE.search(title):
+        return True
+    scope = section_lines(body, named("scope"), skip_quotes=True)
+    return any(
+        ISSUE_BULLET.match(CHECKBOX_PREFIX.sub("", item["text"], count=1))
+        for item in bullets(scope or [])
+    )
 
 
 def assignees_of(issue: dict[str, Any]) -> list[str]:
@@ -1035,13 +1095,16 @@ def decide(
     unreadable: str | None,
     stray_open: list[dict[str, Any]],
     held: dict[str, Any] | None,
+    on_board: bool,
+    epic: bool,
 ) -> tuple[dict[str, Any] | None, list[str], str]:
     """(selected, reasons, verdict): the verdict is go, stop or accept; reasons non-empty
     means it is not a go. `unreadable` is set when the criteria carry part prefixes but the
     Scope has no part the script can read. `stray_open` are the OPEN pull requests with `Refs`
     that name no part of an issue that has parts; `held` is the accept-issue comment that holds
     the issue back from acceptance (returned, or a table with unmet rows), if no pull request
-    was merged after it."""
+    was merged after it. `on_board`: the issue has a card on board 12, Status or none. `epic`:
+    it has sub-issues, no parts and says it is an epic (`is_epic`)."""
     if facts["issue"]["state"] == "CLOSED":
         return (
             None,
@@ -1049,7 +1112,7 @@ def decide(
             "stop",
         )
     sub = facts["issue"]["sub_issues"]
-    if sub["total"] and not facts["parts"] and not numbering_error:  # an epic: its sub-issues are
+    if epic:  # its sub-issues are the work
         return (
             None,
             [
@@ -1063,6 +1126,15 @@ def decide(
         return None, [f"blocked by {b['ref']} — {b['title']}" for b in open_blockers], "stop"
     if numbering_error:
         return None, [numbering_error], "stop"
+    if not on_board:
+        return (
+            None,
+            [
+                f"the issue is not on board {BOARD_NUMBER}: a person adds the card, then run "
+                "again (this run never adds it)"
+            ],
+            "stop",
+        )
     parts = facts["parts"]
     if part is not None:
         if not any(p["n"] == part for p in parts):
@@ -1169,20 +1241,29 @@ def collect(repo: str, number: int, part: int | None) -> dict[str, Any]:
     if not kickoff_text:
         warnings.append("the issue has no Kickoff section: read its Background and References")
     item = board_item(issue)
-    if item is None:
-        warnings.append(f"the issue is not on board {BOARD_NUMBER}: the Status step will fail")
+    title = text_of(issue, "title", "issue")
+    sub_issues = sub_issues_of(issue)
+    epic = False
+    if sub_issues["total"] and not parts and not numbering_error:
+        epic = is_epic(title, body)
+        if not epic:
+            warnings.append(
+                f"the issue has {sub_issues['total']} sub-issues ({sub_issues['open']} open) and "
+                "no parts, and nothing marks it as an epic (`Эпик` / `Epic` in the title, a Scope "
+                "bullet that starts with an issue): it is read as one task"
+            )
 
     facts: dict[str, Any] = {
         "schema": SCHEMA,
         "issue": {
             "repo": repo,
             "number": number,
-            "title": text_of(issue, "title", "issue"),
+            "title": title,
             "url": text_of(issue, "url", "issue"),
             "state": text_of(issue, "state", "issue"),
             "assignees": assignees_of(issue),
             "board_status": board_status(item),
-            "sub_issues": sub_issues_of(issue),
+            "sub_issues": sub_issues,
         },
         "blockers": blockers_of(blocked),
         "parts": parts,
@@ -1192,7 +1273,9 @@ def collect(repo: str, number: int, part: int | None) -> dict[str, Any]:
     }
     stray_open = [pr for pr in unnamed if pr["state"] == "OPEN"]
     held = held_at_acceptance(acceptance_comments(comments), prs)
-    selected, reasons, verdict = decide(facts, part, numbering_error, unreadable, stray_open, held)
+    selected, reasons, verdict = decide(
+        facts, part, numbering_error, unreadable, stray_open, held, item is not None, epic
+    )
     if selected is not None and selected["reason"] == "explicit":
         chosen = next(p for p in parts if p["n"] == selected["part"])
         if chosen["status"] != "todo":
