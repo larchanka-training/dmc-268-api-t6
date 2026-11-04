@@ -28,6 +28,7 @@ import app.modules.reviews.infrastructure.llm.gateway as gateway_module
 from app.modules.reviews.application.check_runs import RunProviderCheckpoint
 from app.modules.reviews.application.llm import (
     LlmCallFailed,
+    LlmCallRecord,
     LlmErrorCode,
     LlmUsage,
     RunCallContext,
@@ -69,6 +70,7 @@ from app.modules.reviews.infrastructure.llm.answers import (
 )
 from app.modules.reviews.infrastructure.llm.ecb_fx import FxQuote, FxQuoteResult
 from app.modules.reviews.infrastructure.llm.gateway import LlmGateway, StructuredTask
+from app.modules.reviews.infrastructure.llm.memory import InMemoryLlmCallTrace
 from app.modules.reviews.infrastructure.llm.models import (
     VERIFICATION_OPERATION,
     GatewayVerifierModel,
@@ -799,7 +801,142 @@ def test_a_repair_refused_before_its_first_key_keeps_the_invalid_answer_class() 
         asyncio.run(exercise())
 
     assert (completes, len(provider.requests)) == (2, 1)
+    assert provider.kinds() == ["primary"]
     assert classify_failure(caught.value).error_code == "verification_invalid_output"
+
+
+TWO_KEYS = ("sk-a", "sk-b")
+# What a verifier call refused at 90 s left says (90 s call timeout, 10 s of local completion).
+VERIFIER_REFUSAL = (
+    "90 s left before the attempt deadline; a call needs 90 s and 10 s are kept to complete "
+    "the verification"
+)
+
+
+def _after_a_rejection_that_takes_390_s(
+    provider: _Provider,
+    rejected: httpx.Response,
+    settings: LlmSettings,
+    call: Callable[[LlmGateway], Awaitable[Any]],
+) -> Exception:
+    """The failure of ``call`` when the answer ``rejected`` takes 390 s of the 480 s attempt."""
+    clock = FakeClock(NOW)
+
+    def slow(request: httpx.Request) -> httpx.Response:
+        response = provider.handle(request)
+        if response is rejected:
+            clock.current += timedelta(seconds=390)
+        return response
+
+    async def exercise() -> Any:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(slow)) as client:
+            return await call(provider.gateway(settings, client, clock))
+
+    with pytest.raises(Exception) as caught:
+        asyncio.run(exercise())
+    return caught.value
+
+
+@pytest.mark.parametrize(
+    ("status", "kind", "call_no"),
+    [
+        pytest.param(401, "repair", 2, id="repair-401"),
+        pytest.param(403, "repair", 2, id="repair-403"),
+        pytest.param(429, "repair", 2, id="repair-429"),
+        pytest.param(429, "fallback", 3, id="fallback-429"),
+    ],
+)
+def test_a_call_refused_after_its_rejected_key_keeps_its_row(
+    status: int, kind: str, call_no: int
+) -> None:
+    # #391: the call's request went out on the first key; the refusal before the second key
+    # leaves the llm.call row of the rejected call, with the refusal as its error and no usage.
+    rejected = httpx.Response(status, json={"error": {"message": "rejected"}})
+    invalid = completion(_answer(_unshown("c-1")))
+    provider = _Provider([*[invalid] * (call_no - 1), rejected])
+    settings = replace(
+        SETTINGS,
+        verifier=replace(VERIFIER, api_keys=TWO_KEYS),
+        verifier_fallback=replace(VERIFIER_FALLBACK, api_keys=TWO_KEYS),
+    )
+
+    failure = _after_a_rejection_that_takes_390_s(provider, rejected, settings, _verify_one())
+
+    assert provider.kinds() == ["primary", "repair", "fallback"][:call_no]
+    record = provider.trace.records[-1][1]
+    metadata = record.request_json()
+    assert (
+        metadata["kind"],
+        metadata["operation"],
+        metadata["stage"],
+        metadata["call_no"],
+    ) == (kind, "verification", "verification", call_no)
+    assert isinstance(metadata["input_tokens_estimate"], int)
+    assert metadata["input_tokens_estimate"] > 0
+    assert record.response_json() == {
+        "error": {
+            "class": "verification_deadline_exceeded",
+            "http_status": None,
+            "message": VERIFIER_REFUSAL,
+        }
+    }
+    assert record.duration_ms == 390_000
+    # The rejected key is not billed: the ledger holds the answered calls' usage only.
+    assert len(provider.ledger.events) == call_no - 1
+    assert classify_failure(failure).error_code == "verification_deadline_exceeded"
+    assert [request.headers["Authorization"] for request in provider.requests] == [
+        "Bearer sk-a"
+    ] * call_no
+
+
+def test_a_review_call_refused_after_its_rejected_key_keeps_its_row() -> None:
+    # The review route has no time reserve: a refusal after the rejected key is a plain
+    # deadline_exceeded, whichever route made the call.
+    rejected = httpx.Response(429, json={"error": {"message": "rate limited"}})
+    provider = _Provider([rejected])
+    settings = replace(SETTINGS, primary=replace(REVIEW, api_keys=TWO_KEYS))
+    task = StructuredTask(
+        operation="review",
+        messages=(ChatMessage("user", "Review this change."),),
+        schema=ResponseSchema("ReviewOutput", {"type": "object"}),
+        validate=json.loads,
+    )
+
+    async def generate(gateway: LlmGateway) -> Any:
+        return await gateway.generate(task, replace(RUN, deadline=NOW + timedelta(seconds=470)))
+
+    failure = _after_a_rejection_that_takes_390_s(provider, rejected, settings, generate)
+
+    assert isinstance(failure, LlmCallFailed)
+    assert failure.error_code is LlmErrorCode.DEADLINE_EXCEEDED
+    ((_, record),) = provider.trace.records
+    assert record.request_json()["operation"] == "review"
+    assert record.response_json() == {
+        "error": {
+            "class": "deadline_exceeded",
+            "http_status": None,
+            "message": "80 s left before the attempt deadline; a call needs 90 s",
+        }
+    }
+    assert provider.ledger.events == []
+
+
+def test_a_failed_trace_write_of_the_refused_call_keeps_the_run_code() -> None:
+    written: list[int] = []
+
+    class BrokenTrace(InMemoryLlmCallTrace):
+        async def record_call(self, run_id: UUID, record: LlmCallRecord) -> None:
+            written.append(record.call_no)
+            raise RuntimeError("database is down")
+
+    rejected = httpx.Response(429, json={"error": {"message": "rate limited"}})
+    provider = _Provider([completion(_answer(_unshown("c-1"))), rejected], trace=BrokenTrace())
+    settings = replace(SETTINGS, verifier=replace(VERIFIER, api_keys=TWO_KEYS))
+
+    failure = _after_a_rejection_that_takes_390_s(provider, rejected, settings, _verify_one())
+
+    assert written == [1, 2]
+    assert classify_failure(failure).error_code == "verification_deadline_exceeded"
 
 
 def test_a_reference_error_without_budget_for_recovery_fails_as_invalid_output() -> None:
