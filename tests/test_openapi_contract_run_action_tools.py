@@ -49,6 +49,8 @@ _TOOL_FIELD = "tool"
 # The calls that take the RunAction model to build a read. Any other use of it is a site: a write
 # through ``insert``, ``update`` or ``query`` can take the tool from anywhere later.
 _MODEL_READS = frozenset({"select", "select_from", "join", "outerjoin"})
+# The calls that run code given as text, which no scan can read.
+_CODE_RUNNERS = frozenset({"eval", "exec"})
 _REVIEWS = "app/modules/reviews"
 # The exact places allowed to pass a tool that is not a name: (path, scope, callee, argument), no
 # line numbers. Each entry weakens the scan, so it says why it is safe. A new function that passes
@@ -158,6 +160,15 @@ TOOL_PASS_THROUGH = frozenset(
         ),
         ("app/bootstrap/run_step_listener.py", "_event", _TOOL_FIELD, "str(data['tool'])"),
         ("app/main.py", "_run_step_frame", _TOOL_FIELD, "step.tool"),
+        ("app/bootstrap/run_step_listener.py", "_event", _REFERENCE, "'tool'"),
+        # The table's own name and a constraint named after it, in the model that defines them.
+        (f"{_REVIEWS}/infrastructure/models.py", "RunAction", _REFERENCE, "'run_actions'"),
+        (
+            f"{_REVIEWS}/infrastructure/models.py",
+            "RunAction",
+            _REFERENCE,
+            "'ck_run_actions_response_location'",
+        ),
     }
 )
 
@@ -216,6 +227,16 @@ def _writer_reference(node: ast.Name | ast.Attribute | ast.alias) -> str | None:
     return None if isinstance(node, ast.Name) and node.id == "record" else ast.unparse(node)
 
 
+def _names_a_writer_as_text(text: str) -> bool:
+    """Text that can reach a writer, the column or the table without naming them in code."""
+    return (
+        text in TOOL_WRITERS
+        or text == "tool"
+        or text.endswith("_TOOL")
+        or "run_actions" in text.lower()
+    )
+
+
 def _tool_arguments(call: ast.Call, callee: str) -> list[ast.expr | ast.keyword]:
     found: list[ast.expr | ast.keyword] = [
         keyword.value for keyword in call.keywords if keyword.arg == "tool"
@@ -271,7 +292,10 @@ def _scan_tool_writes(source: str, path: str = "<source>") -> _ToolScan:
     ``"x.y"`` match would also pick up prompt names such as ``review.system``, which are not tools.
     A writer named without calling it becomes a site, wherever it is called later. So does a
     ``*_TOOL`` or ``tool`` name bound any other way than the above, except a plain ``tool``
-    parameter, whose caller is what gets read: a module constant cannot vouch for it.
+    parameter, whose caller is what gets read: a module constant cannot vouch for it. So does text
+    spelling a writer, the ``tool`` column or the table, outside a docstring, and ``eval``: a name
+    can reach them that way through ``getattr``, ``setattr`` or raw SQL. Only text put together at
+    runtime stays out of sight.
     """
     tree = ast.parse(source)
     scan = _ToolScan()
@@ -325,7 +349,14 @@ def _scan_tool_writes(source: str, path: str = "<source>") -> _ToolScan:
         if isinstance(node, ast.Dict):
             for key, item in zip(node.keys, node.values, strict=True):
                 if key is not None and _string_constant(key) == "tool":
+                    plain_uses.add(key)
                     read(item, _TOOL_FIELD, key.lineno, scope)
+        if isinstance(node, ast.Expr) and isinstance(node.value, ast.Constant):
+            plain_uses.add(node.value)
+        if isinstance(node, ast.Constant) and node not in plain_uses:
+            text = _string_constant(node)
+            if text is not None and _names_a_writer_as_text(text):
+                scan.sites.add(_ToolSite(path, node.lineno, scope, _REFERENCE, repr(text)))
         if isinstance(node, _NameBinding) and node not in known_bindings:
             bound = _bound_name(node)
             if bound is not None and (
@@ -346,6 +377,8 @@ def _scan_tool_writes(source: str, path: str = "<source>") -> _ToolScan:
             continue
         callee = _callee(node)
         plain_uses.add(node.func)
+        if callee in _CODE_RUNNERS:
+            scan.sites.add(_ToolSite(path, node.lineno, scope, callee, "<code>"))
         if callee in _MODEL_READS:
             plain_uses.update(arg for arg in node.args if _last_name(arg) == "RunAction")
         for argument in _tool_arguments(node, callee):
@@ -532,6 +565,10 @@ def test_written_tools_scan_reads_a_module_tool_constant(sources: tuple[str, ...
         "def f(tool: str, /, *, other: int = 1): ...",
         "route.tool",
         "name == tool",
+        '"""Insert one run_actions row, record its tool."""',
+        'def f():\n    """record"""',
+        'label = "records of a toolbox"',
+        "compile(pattern)",
         "from m import traced_step",
         "from m import traced_step as traced_step",
         "def f(route: PublicationRoute) -> PublicationRoute: ...",
@@ -552,6 +589,10 @@ def test_written_tools_scan_reads_a_module_tool_constant(sources: tuple[str, ...
         "tool-parameter-with-other-defaults",
         "tool-read",
         "tool-compared",
+        "docstring-of-a-module",
+        "docstring-of-a-function",
+        "text-that-only-contains-a-writer-name",
+        "compile-is-not-a-code-runner",
         "plain-import",
         "import-as-itself",
         "annotations",
@@ -659,6 +700,60 @@ def test_written_tools_scan_reports_a_writer_used_other_than_by_a_call(
     source: str, reference: str
 ) -> None:
     assert _unread(source) == [f"<reference>({reference})"]
+
+
+_RAW_INSERT = "INSERT INTO run_actions (tool) VALUES ('probe.sql')"
+
+
+@pytest.mark.parametrize(
+    ("source", "expected"),
+    [
+        ('getattr(trace, "record")(run_id, "a.b", {})', "<reference>('record')"),
+        ('methodcaller("record", run_id, "a.b", {})(trace)', "<reference>('record')"),
+        ('globals()["traced_step"](trace, run_id, "a.b", {})', "<reference>('traced_step')"),
+        ('getattr(models, "RunAction")(**fields)', "<reference>('RunAction')"),
+        ('name = "record"\ngetattr(trace, name)', "<reference>('record')"),
+        ('setattr(row, "tool", name)', "<reference>('tool')"),
+        ('row.__dict__["tool"] = name', "<reference>('tool')"),
+        ('column("tool")', "<reference>('tool')"),
+        ('setattr(module, "LLM_CALL_TOOL", "a.b")', "<reference>('LLM_CALL_TOOL')"),
+        ('globals()["LLM_CALL_TOOL"] = "a.b"', "<reference>('LLM_CALL_TOOL')"),
+        (f'session.execute(text("{_RAW_INSERT}"))', f"<reference>({_RAW_INSERT!r})"),
+        (
+            'text(f"UPDATE run_actions SET x = {name}")',
+            "<reference>('UPDATE run_actions SET x = ')",
+        ),
+        (
+            'exec_driver_sql("insert into RUN_ACTIONS values (1)")',
+            "<reference>('insert into RUN_ACTIONS values (1)')",
+        ),
+        ('table("run_actions", column_of_tool)', "<reference>('run_actions')"),
+        ('Base.metadata.tables["run_actions"].insert()', "<reference>('run_actions')"),
+        ('eval("trace.record(run_id, name, {})")', "eval(<code>)"),
+        ("exec(source)", "exec(<code>)"),
+    ],
+    ids=[
+        "getattr-of-a-method",
+        "methodcaller",
+        "globals-of-a-function",
+        "getattr-of-the-model",
+        "name-in-a-variable",
+        "setattr-of-the-column",
+        "dict-of-a-row",
+        "column-by-name",
+        "setattr-of-a-constant",
+        "globals-of-a-constant",
+        "raw-insert",
+        "raw-update-in-an-f-string",
+        "raw-sql-in-capitals",
+        "table-by-name",
+        "metadata-by-name",
+        "eval",
+        "exec",
+    ],
+)
+def test_written_tools_scan_reports_a_name_given_as_text(source: str, expected: str) -> None:
+    assert _unread(source) == [expected]
 
 
 def test_written_tools_scan_reports_an_alias_made_in_another_module() -> None:
