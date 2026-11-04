@@ -136,11 +136,51 @@ def _string_constant(node: ast.AST) -> str | None:
     return node.value if isinstance(node, ast.Constant) and isinstance(node.value, str) else None
 
 
+def _last_name(node: ast.AST) -> str | None:
+    """The name an expression ends in: ``a`` for both ``a`` and ``x.a``."""
+    if isinstance(node, ast.Name):
+        return node.id
+    return node.attr if isinstance(node, ast.Attribute) else None
+
+
 def _callee(call: ast.Call) -> str:
-    func = call.func
-    if isinstance(func, ast.Name):
-        return func.id
-    return func.attr if isinstance(func, ast.Attribute) else ast.unparse(func)
+    return _last_name(call.func) or ast.unparse(call.func)
+
+
+def _writer_aliases(tree: ast.Module) -> dict[str, str]:
+    """The other names a module gives a writer, by import or assignment, in any of its scopes."""
+    aliases: dict[str, str] = {}
+    bindings: list[tuple[ast.expr, ast.expr]] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.alias):
+            if node.asname and node.name in TOOL_WRITERS:
+                aliases[node.asname] = node.name
+        elif isinstance(node, ast.Assign):
+            bindings += [(target, node.value) for target in node.targets]
+        elif isinstance(node, ast.AnnAssign | ast.NamedExpr) and node.value is not None:
+            bindings.append((node.target, node.value))
+    known = -1
+    while known != len(aliases):
+        known = len(aliases)
+        for target, value in bindings:
+            alias, name = _last_name(target), _last_name(value)
+            if alias is not None and name is not None:
+                writer = aliases.get(name, name)
+                if writer in TOOL_WRITERS:
+                    aliases[alias] = writer
+    return aliases
+
+
+def _passes_a_writer(argument: ast.expr, aliases: Mapping[str, str]) -> bool:
+    """A writer handed to another call, as in ``partial(trace.record, ...)``.
+
+    The scan cannot read what that call gives the writer. A variable named ``record`` and the
+    ``RunAction`` model are too common as arguments to count.
+    """
+    name = _last_name(argument)
+    if name is None or (name == "record" and isinstance(argument, ast.Name)):
+        return False
+    return aliases.get(name, name) in TOOL_WRITERS - {"RunAction"}
 
 
 def _tool_arguments(call: ast.Call, callee: str) -> list[ast.expr | ast.keyword]:
@@ -165,10 +205,12 @@ def _scan_tool_writes(source: str, path: str = "<source>") -> _ToolScan:
     and a slot of ``record(...)`` count on any call, whatever the receiver, so a ``tool="x.y"`` or
     a ``ledger.record(context, "x.y")`` that does not write run_actions surfaces as unexpected and
     must be renamed or the scan taught to skip it. A blanket ``"x.y"`` match would also pick up
-    prompt names such as ``review.system``, which are not tools.
+    prompt names such as ``review.system``, which are not tools. A writer called under another name
+    is read as that writer, and a writer handed to another call becomes a site.
     """
     tree = ast.parse(source)
     scan = _ToolScan()
+    aliases = _writer_aliases(tree)
     targets: list[ast.expr]
     value: ast.expr | None
     for statement in tree.body:
@@ -199,13 +241,17 @@ def _scan_tool_writes(source: str, path: str = "<source>") -> _ToolScan:
         if not isinstance(node, ast.Call):
             continue
         callee = _callee(node)
-        for argument in _tool_arguments(node, callee):
+        for argument in _tool_arguments(node, aliases.get(callee, callee)):
             name = _string_constant(argument)
             if name is None:
                 site = _ToolSite(path, node.lineno, scope, callee, ast.unparse(argument))
                 scan.sites.add(site)
             else:
                 scan.names.add(name)
+        for passed in [*node.args, *(keyword.value for keyword in node.keywords)]:
+            if _passes_a_writer(passed, aliases):
+                site = _ToolSite(path, node.lineno, scope, callee, ast.unparse(passed))
+                scan.sites.add(site)
     return scan
 
 
@@ -239,6 +285,13 @@ def _unread_tools(scans: list[_ToolScan]) -> list[_ToolSite]:
         ('prompts.load("review.system")', set()),
         ('uow.trace.add_action(run_id, "i.j", {}, None, now, 0)', {"i.j"}),
         ('PublicationRoute(False, "k.l", "x", False, None)', {"k.l"}),
+        ('from m import traced_step as ts\nts(trace, run_id, "probe.alias", {})', {"probe.alias"}),
+        ('write = trace.record\nwrite(run_id, "probe.alias", {})', {"probe.alias"}),
+        ('write: Writer = trace.add_action\nwrite(run_id, "m.n", {})', {"m.n"}),
+        ('self._write = trace.record\nself._write(run_id, "o.p", {})', {"o.p"}),
+        ('(write := trace.record)\nwrite(run_id, "q.r", {})', {"q.r"}),
+        ('second = first\nfirst = trace.record\nsecond(run_id, "s.t", {})', {"s.t"}),
+        ('make = PublicationRoute\nmake(False, "u.v", "x", False, None)', {"u.v"}),
     ],
     ids=[
         "traced_step-third-argument",
@@ -253,6 +306,13 @@ def _unread_tools(scans: list[_ToolScan]) -> list[_ToolSite]:
         "plain-string-literal",
         "add_action-second-argument",
         "publication-route-second-argument",
+        "import-alias",
+        "method-alias",
+        "annotated-alias",
+        "attribute-alias",
+        "walrus-alias",
+        "alias-of-an-alias",
+        "class-alias",
     ],
 )
 def test_written_tools_scan_picks_up_only_the_run_action_shapes(
@@ -282,7 +342,7 @@ def _unread(*sources: str) -> list[str]:
         ('PublicationRoute(tool=f"{provider}.x")', "PublicationRoute(f'{provider}.x')"),
         ('PublicationRoute(False, name, "x", False, None)', "PublicationRoute(name)"),
         ("replace(route, tool=name)", "replace(name)"),
-        ("partial(insert_run_action, tool=name)", "partial(name)"),
+        ("partial(helper, tool=name)", "partial(name)"),
         ("insert(RunAction).values(tool=name)", "values(name)"),
         ("factory()(tool=name)", "factory()(name)"),
         ("insert_run_action(session, **params)", "insert_run_action(**params)"),
@@ -292,6 +352,14 @@ def _unread(*sources: str) -> list[str]:
         ("X_TOOL = make()", "X_TOOL(make())"),
         ('def f():\n    X_TOOL = "a.b"\n    record(run_id, X_TOOL)', "record(X_TOOL)"),
         ('X_TOOL = "a.b"\nrecord(run_id, other.X_TOOL)', "record(other.X_TOOL)"),
+        ('from m import traced_step as ts\nts(trace, run_id, f"a.{x}", {})', "ts(f'a.{x}')"),
+        ("write = trace.record\nwrite(run_id, name, {})", "write(name)"),
+        ("write = trace.record\nwrite(run_id, *rest)", "write(*rest)"),
+        ("make = RunAction\nmake(**fields)", "make(**fields)"),
+        ('partial(trace.record, run_id, "a.b")', "partial(trace.record)"),
+        ("partial(traced_step, trace, run_id)", "partial(traced_step)"),
+        ("schedule(writer=trace.add_action)", "schedule(trace.add_action)"),
+        ("write = trace.record\nschedule(write)", "schedule(write)"),
     ],
     ids=[
         "f-string",
@@ -312,6 +380,14 @@ def _unread(*sources: str) -> list[str]:
         "computed-constant",
         "local-constant",
         "attribute-of-a-constant",
+        "import-alias",
+        "method-alias",
+        "star-on-a-method-alias",
+        "double-star-on-a-model-alias",
+        "partial-of-a-method",
+        "partial-of-a-function",
+        "method-as-a-keyword",
+        "alias-as-an-argument",
     ],
 )
 def test_written_tools_scan_reports_a_tool_it_cannot_read(source: str, expected: str) -> None:
@@ -329,6 +405,21 @@ def test_written_tools_scan_reports_a_tool_it_cannot_read(source: str, expected:
 )
 def test_written_tools_scan_reads_a_module_tool_constant(sources: tuple[str, ...]) -> None:
     assert _unread(*sources) == []
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "parse(record)",
+        "select(RunAction)",
+        "record = locked.record\nrecord.external_id",
+        "index(((item.record, item.edges) for item in imports))",
+        "from m import RunAction as RunActionProjection\nRunActionProjection(id=1)",
+    ],
+    ids=["variable", "model", "field", "field-in-a-tuple", "model-alias"],
+)
+def test_written_tools_scan_leaves_common_uses_of_a_writer_name_alone(source: str) -> None:
+    assert _unread(source) == []
 
 
 def test_written_tools_scan_names_the_file_and_the_line() -> None:
@@ -358,8 +449,8 @@ def test_run_action_tool_catalog_matches_the_tools_the_code_writes() -> None:
 
     unread = "\n".join(str(site) for site in _unread_tools(scans))
     assert not unread, (
-        "a tool name the scan cannot read: pass a literal or a module-level *_TOOL constant, or "
-        f"add the place to TOOL_PASS_THROUGH with why it is safe\n{unread}"
+        "a tool name the scan cannot read: pass a literal or a module-level *_TOOL constant, call "
+        f"the writer directly, or add the place to TOOL_PASS_THROUGH with why it is safe\n{unread}"
     )
     written = {name for scan in scans for name in scan.names}
     assert written == RUN_ACTION_TOOLS, _catalog_drift("code", written)
