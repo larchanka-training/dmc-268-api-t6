@@ -17,6 +17,8 @@ from typing import Any
 
 import pytest
 
+from review.scripts.eval_ab import SAME_RUN_METADATA
+
 ROOT = Path(__file__).resolve().parents[1]
 CORPUS = ROOT / "test-prs-dataset" / "rag"
 CAPTURES = CORPUS / "responses"
@@ -75,6 +77,10 @@ def _problems(captures: Path, case_ids: set[str]) -> list[str]:
         values = {json.dumps(manifest[key]) for manifest in manifests.values()}
         if len(values) > 1:
             problems.append(f"captures disagree on {key}")
+    for name in SAME_RUN_METADATA:
+        values = {json.dumps(manifest["run_metadata"][name]) for manifest in manifests.values()}
+        if len(values) > 1:
+            problems.append(f"captures disagree on run_metadata.{name}")
     prompt_versions = {manifest["prompt_version"] for manifest in manifests.values()}
     if prompt_versions - {"v5"}:
         problems.append(f"prompt_version {sorted(prompt_versions)}, not v5")
@@ -135,6 +141,25 @@ MUTATIONS: list[tuple[str, Callable[[Path], object], str]] = [
         "other corpus",
         lambda c: _rewrite(c / "B-run2", lambda m: m.update(corpus_digest="sha256-v1:" + "0" * 64)),
         "disagree on corpus_digest",
+    ),
+    (
+        "other engine",
+        lambda c: _rewrite(c / "B-run1", lambda m: m["run_metadata"].update(engine="deep")),
+        "disagree on run_metadata.engine",
+    ),
+    (
+        "other effective settings",
+        lambda c: _rewrite(
+            c / "A-run2", lambda m: m["run_metadata"].update(effective_settings={"policy": {}})
+        ),
+        "disagree on run_metadata.effective_settings",
+    ),
+    (
+        "other fallback model",
+        lambda c: _rewrite(
+            c / "B-run3", lambda m: m["run_metadata"].update(fallback_model_id="other-fallback")
+        ),
+        "disagree on run_metadata.fallback_model_id",
     ),
     ("prompt not v5 everywhere", lambda c: _set_all(c, prompt_version="v4"), "not v5"),
     ("extra file", lambda c: (c / "A-run1" / "notes.txt").write_text("x"), "A-run1: files on disk"),
