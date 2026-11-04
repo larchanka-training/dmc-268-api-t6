@@ -4,7 +4,7 @@
 
 ## Этап 1 — сквозной E2E
 
-**Что проверяется.** `tests/test_rules_md_e2e_postgres.py`: подписанный webhook `pull_request labeled` проходит через ASGI-приложение, настоящий receiver проецирует его, и приложение само создаёт Run и публикует его в RabbitMQ; настоящий `run_worker` загружает политику закреплённой base-ревизии (`policy.load`), анализирует diff с fake LLM и публикует ревью в fake GitHub. Тест не вставляет Run. Ожидаемые значения — литералы [RULES_FORMAT_SPEC](../RULES_FORMAT_SPEC.md) §3, §4, §9 и §11.
+**Что проверяется.** `tests/test_rules_md_e2e_postgres.py` и `tests/test_rules_md_e2e_applied_postgres.py`: подписанный webhook `pull_request labeled` проходит через ASGI-приложение, настоящий receiver проецирует его, и приложение само создаёт Run и публикует его в RabbitMQ; настоящий `run_worker` загружает политику закреплённой base-ревизии (`policy.load`), анализирует diff с fake LLM и публикует ревью в fake GitHub. Тест не вставляет Run. Ожидаемые значения — литералы [RULES_FORMAT_SPEC](../RULES_FORMAT_SPEC.md) §3, §4, §9 и §11.
 
 **Окружение.**
 

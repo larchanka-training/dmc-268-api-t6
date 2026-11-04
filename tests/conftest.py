@@ -9,7 +9,7 @@ import pytest
 
 # A shared module loaded with `pytest_plugins` is imported by its test files before pytest
 # loads it as a plugin: registered here, it keeps the assertion rewriting of a test file.
-pytest.register_assert_rewrite("tests.worker_queue_postgres")
+pytest.register_assert_rewrite("tests.worker_queue_postgres", "tests.rules_md_e2e")
 
 # ``configure_logging`` (the app lifespan, worker mains) changes these process-wide.
 _LOGGERS = ("", "uvicorn", "uvicorn.error", "uvicorn.access", "httpx", "httpcore")
