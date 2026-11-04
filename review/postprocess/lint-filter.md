@@ -11,6 +11,9 @@ model call, no network. The backend owns the implementation; this file owns the 
 
 - `ReviewOutput` as returned by the model and already parsed and schema-checked by the
   backend (`findings[]`, `summary`). A malformed answer never reaches this filter.
+  Before reaching `process()`, suggestions are validated against syntax errors and duplicate
+  conditions via `validate_review_suggestions()`: invalid suggestions have their `suggestion`
+  field cleared to `null` while retaining the finding and its comment body.
   Attribution consistency (a prefix that names no rule, or a `rule_name` the body does not
   quote) is not a schema error: it reaches step 7 and is repaired there.
   `scripts/validate_findings.py` rejects the same case deliberately — it is the strict gate
@@ -39,7 +42,9 @@ Three buckets that together contain every input finding exactly once:
   `duplicate`, `severity_threshold`, `unknown_path`.
 
 The filter never edits `title`, `severity`, `category`, `confidence` or `suggestion`, and
-edits `body` in one case only: step 7 strips a prefix that names no rule. Otherwise it may
+edits `body` in one case only: step 7 strips a prefix that names no rule. (Invalid suggestions
+introducing syntax errors or duplicate conditions are already validated and stripped to `null`
+before `FindingsPostProcessor.process()` is called). Otherwise it may
 only move a finding between buckets, set `drop_reason`, clear `rule_name` (step 7) and
 clear `start_line` (step 5).
 

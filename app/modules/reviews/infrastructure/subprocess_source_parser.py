@@ -15,6 +15,9 @@ from app.modules.reviews.application.ast_symbols import (
     AstFacts,
     AstFailureReason,
     ParseRequest,
+    SuggestionRejectionReason,
+    SuggestionValidationRequest,
+    SuggestionValidationResult,
     facts_from_json,
 )
 
@@ -65,6 +68,88 @@ class SubprocessSourceParser:
                 continue
             results[request.key] = await self._parse(request)
         return results
+
+    async def validate_suggestions(
+        self, requests: tuple[SuggestionValidationRequest, ...]
+    ) -> dict[str, SuggestionValidationResult]:
+        results: dict[str, SuggestionValidationResult] = {}
+        for request in requests:
+            if len(request.source) > MAX_SOURCE_BYTES:
+                results[request.key] = SuggestionValidationResult(
+                    is_valid=True,
+                    reason=SuggestionRejectionReason.FILE_TOO_LARGE,
+                    detail="File exceeds MAX_SOURCE_BYTES",
+                )
+                continue
+            try:
+                request.source.decode("utf-8", errors="strict")
+            except UnicodeDecodeError:
+                results[request.key] = SuggestionValidationResult(
+                    is_valid=True,
+                    reason=SuggestionRejectionReason.NON_UTF8,
+                    detail="Source cannot be decoded as utf-8",
+                )
+                continue
+            results[request.key] = await self._validate_suggestion(request)
+        return results
+
+    async def _validate_suggestion(
+        self, request: SuggestionValidationRequest
+    ) -> SuggestionValidationResult:
+        budget = self._attempt_cpu_seconds
+        if budget is not None and self._cpu_spent >= budget:
+            return SuggestionValidationResult(
+                is_valid=True,
+                reason=SuggestionRejectionReason.AST_TIMEOUT,
+                detail="Attempt parser CPU budget exhausted",
+            )
+        first = self._process is None or self._process.returncode is not None
+        if first:
+            self._process = await self._start()
+        process = self._process
+        assert process is not None and process.stdin is not None and process.stdout is not None
+        payload = {
+            "action": "validate_suggestion",
+            "key": request.key,
+            "language": request.language.value,
+            "source": base64.b64encode(request.source).decode("ascii"),
+            "start_line": request.start_line,
+            "line": request.line,
+            "suggestion": request.suggestion,
+        }
+        wait = MAX_PARSE_CPU_SECONDS_PER_FILE + _WALL_SLACK_SECONDS
+        try:
+            process.stdin.write(json.dumps(payload).encode("utf-8") + b"\n")
+            await process.stdin.drain()
+            line = await asyncio.wait_for(
+                process.stdout.readline(), wait + (_STARTUP_SECONDS if first else 0.0)
+            )
+        except TimeoutError:
+            await self.aclose()
+            self._cpu_spent += MAX_PARSE_CPU_SECONDS_PER_FILE
+            return SuggestionValidationResult(
+                is_valid=True,
+                reason=SuggestionRejectionReason.AST_TIMEOUT,
+                detail="Parser subprocess timeout",
+            )
+        except (BrokenPipeError, ConnectionResetError):
+            line = b""
+        if not line:
+            await self.aclose()
+            return SuggestionValidationResult(
+                is_valid=True,
+                reason=SuggestionRejectionReason.WORKER_ERROR,
+                detail="Parser subprocess died",
+            )
+        answer = json.loads(line)
+        self._cpu_spent += float(answer.get("cpu", 0.0))
+        reason_raw = answer.get("reason")
+        reason = SuggestionRejectionReason(reason_raw) if reason_raw is not None else None
+        return SuggestionValidationResult(
+            is_valid=bool(answer.get("is_valid", True)),
+            reason=reason,
+            detail=answer.get("detail"),
+        )
 
     async def _parse(self, request: ParseRequest) -> AstFacts | AstFailureReason:
         budget = self._attempt_cpu_seconds

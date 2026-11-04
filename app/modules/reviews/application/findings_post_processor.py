@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 from collections import Counter
 from collections.abc import Iterable, Sequence
@@ -62,6 +63,7 @@ _CHECKED_FILES_WITHHELD = "(список не показывается: имен
 
 _ATTRIBUTION_PREFIX = "According to custom instructions in '"
 _ATTRIBUTION_RE = re.compile(r"^According to custom instructions in '(?P<name>[^']+)' \([^)]*\): ")
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -194,6 +196,7 @@ class FindingsPostProcessor:
                 continue
             if finding.confidence < self._patterns.min_confidence:
                 bucket = "body_only"
+
             prepared.append(ProcessedFinding(finding, item.position, bucket))
 
         inline_candidates = [item for item in prepared if item.bucket == "inline"]
