@@ -55,6 +55,7 @@ from app.common.infrastructure.telemetry import (
     configure_tracing,
     shutdown_tracing,
 )
+from app.common.strict_json import StrictJsonRoute
 from app.modules.auth.api.router import auth_router
 from app.modules.auth.application.scope import AuthScope
 from app.modules.integrations.bitbucket.api.connections import (
@@ -186,7 +187,9 @@ from app.modules.reviews.application.run_events import (
 )
 from app.modules.reviews.application.try_enqueue_webhook_run import RunMessagePublisher
 
-api_router = APIRouter(prefix="/api", dependencies=[Depends(get_auth_scope)])
+api_router = APIRouter(
+    prefix="/api", dependencies=[Depends(get_auth_scope)], route_class=StrictJsonRoute
+)
 github_webhook_router = APIRouter(prefix="/webhooks/github")
 
 run_update_hub = InMemoryRunUpdateHub()

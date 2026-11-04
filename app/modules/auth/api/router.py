@@ -16,6 +16,7 @@ from app.bootstrap.auth_api import (
     get_refresh_local_session,
 )
 from app.bootstrap.portal_auth import get_auth_scope
+from app.common.strict_json import StrictJsonRoute
 from app.modules.auth.application.exchange_github_code import (
     REFRESH_TOKEN_LIFETIME,
     ExchangedSession,
@@ -31,7 +32,7 @@ from app.modules.auth.application.refresh_session import (
 )
 from app.modules.auth.application.scope import AuthScope
 
-auth_router = APIRouter(prefix="/api/auth", tags=["auth"])
+auth_router = APIRouter(prefix="/api/auth", tags=["auth"], route_class=StrictJsonRoute)
 
 
 class AuthCallbackRequestDto(BaseModel):
