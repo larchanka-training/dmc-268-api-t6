@@ -483,6 +483,24 @@ def test_a_rate_limit_waits_for_its_retry_after_before_a_new_read(env: Env) -> N
     assert after_pause is not None
 
 
+@pytest.mark.integration
+def test_oversized_retry_after_is_capped_in_the_saved_rules_status(env: Env) -> None:
+    github = FakeGitHub(
+        rules=b"x",
+        failures={f"/git/trees/{_HEAD}": 429},
+        headers={"Retry-After": "1" * 5000},
+    )
+    with api(env, _SCOPE) as (client, factory):
+        client.get(f"/api/repos/{REPO_A}/rules-status")
+        refreshed = _refresh(factory, GitHubReader(github))
+        stored = _row(factory, REPO_A)
+
+    assert refreshed == 1
+    assert stored.status == "unavailable"
+    assert stored.diagnostics[0]["code"] == "policy_rate_limited"
+    assert stored.diagnostics[0]["retry_after_seconds"] == 86400
+
+
 async def _request(factory: async_sessionmaker[Any]) -> None:
     async with factory() as session:
         await request_rules_refresh(session, REPO_A)
