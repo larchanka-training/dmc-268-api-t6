@@ -117,8 +117,7 @@ from a missing scope.
   through `pytest_plugins = ("tests.<topic>",)`. A loaded plugin is active for the whole
   run, so a shared module defines no autouse fixture. A shared module never imports from a
   `test_*.py` file and no file loads one as a plugin: a helper another file needs moves out
-  of its test file first. Still not so — `tests/code_index_postgres.py` (the store helpers of
-  `test_code_index_store_postgres.py`) and the ten files that load
+  of its test file first. Still not so — the ten files that load
   `tests.test_bitbucket_connections_postgres` as a plugin: those helpers move out at their
   next edit.
 - Integration tests are marked `@pytest.mark.integration` (registered in
@@ -128,7 +127,12 @@ from a missing scope.
   setup (the files that enter `portal_schema(...)` from a local fixture today) is a copy:
   it moves to a shared fixture of the topic at its file's next edit.
   `tests/conftest.py` holds only suite-wide fixtures (`_restore_logging`): no DB fixture
-  and no DB setup.
+  and no DB setup. One exception: the `pytest.register_assert_rewrite` call, which keeps
+  the asserts of a shared module rewritten. It takes a module that its test files import
+  before pytest loads it as a plugin, or a plain module whose helpers assert (today
+  `tests.worker_queue_postgres`, `tests.rules_md_e2e`, `tests.deploy_host_fakes`,
+  `tests.deploy_prod_workflow_fakes`, `tests.monitoring_deploy_host` and
+  `tests.code_index_postgres`).
 - Assert literal values taken from the spec — never derive an expected value from
   the implementation under test.
 - One test per behavior. Before adding a test, grep the feature's file prefix for the

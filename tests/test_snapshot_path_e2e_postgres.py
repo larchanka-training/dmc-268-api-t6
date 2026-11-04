@@ -60,8 +60,8 @@ from app.worker import (
     execution_profile_of,
     review_context_stage_factory,
 )
+from tests.code_index_postgres import C1, C2, _build, _enable, _Index
 from tests.portal_postgres import REPO_A, REPO_B, Env, portal_schema
-from tests.test_code_index_store_postgres import C1, C2, _build, _enable, _Index
 from tests.test_github_vcs_provider import _pull_payload
 from tests.test_llm_gateway import FALLBACK, PRIMARY, completion
 from tests.test_prompt_seeding import _up_to

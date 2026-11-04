@@ -56,7 +56,7 @@ from app.modules.code_index.infrastructure.index_store import SqlAlchemyCodeInde
 from app.modules.code_index.infrastructure.maintenance import (
     SqlAlchemyCodeIndexMaintenanceUnitOfWork,
 )
-from tests.test_code_index_store_postgres import (
+from tests.code_index_postgres import (
     _COUNT_ROWS,
     _TTL,
     C1,

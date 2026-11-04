@@ -34,7 +34,7 @@ from review.scripts.rag_snapshot import (
     parse_snapshot,
     render_snapshot,
 )
-from tests.test_code_index_store_postgres import (
+from tests.code_index_postgres import (
     C1,
     _build,
     _enable,
