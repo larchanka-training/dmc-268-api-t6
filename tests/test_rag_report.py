@@ -2,7 +2,8 @@
 
 ``docs/test-plan/RAG_V1_CONTRIBUTION_REPORT.md`` is the report and
 ``test-prs-dataset/rag/reports/gate.json`` the stdout of ``eval_rag_gate.py`` over the six
-committed captures (no oracle). Each number is looked up in the table row that carries it, so a
+committed captures and the committed hallucination oracle
+(``oracle/hallucination.json``). Each number is looked up in the table row that carries it, so a
 value moved to another row or arm fails. Recomputing the gate takes six replays (minutes) and
 stays with CI's capture replay.
 """
@@ -10,6 +11,7 @@ stays with CI's capture replay.
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -23,6 +25,7 @@ ROOT = Path(__file__).resolve().parents[1]
 GATE = ROOT / "test-prs-dataset" / "rag" / "reports" / "gate.json"
 REPORT = ROOT / "docs" / "test-plan" / "RAG_V1_CONTRIBUTION_REPORT.md"
 CAPTURES = ROOT / "test-prs-dataset" / "rag" / "responses"
+ORACLE = ROOT / "test-prs-dataset" / "rag" / "oracle" / "hallucination.json"
 RUN_IDS = {  # test-prs-dataset/rag/README.md "Captures"
     "A-run1": "41720614606",
     "A-run2": "41724358586",
@@ -31,11 +34,13 @@ RUN_IDS = {  # test-prs-dataset/rag/README.md "Captures"
     "B-run2": "41724449009",
     "B-run3": "41725470313",
 }
-RUN_METRICS = ("recall", "precision", "critical_recall", "validity")
+RUN_METRICS = ("recall", "precision", "hallucination", "critical_recall", "validity")
 ARM_ROWS: dict[str, Callable[[dict[str, Any]], str]] = {  # report row label -> arm value text
     "| Recall, среднее": lambda arm: str(arm["recall_mean"]["exact"]),
     "| Precision, среднее": lambda arm: str(arm["precision_mean"]["exact"]),
     "| Precision, pooled": lambda arm: _ratio(arm["precision_pooled"]),
+    "| Hallucination Rate, среднее": lambda arm: str(arm["hallucination_mean"]["exact"]),
+    "| Hallucination Rate, pooled": lambda arm: _ratio(arm["hallucination_pooled"]),
     "| Входные токены, медиана": lambda arm: str(arm["tokens_in"]["median"]),
     "| Входные токены, сумма": lambda arm: str(arm["tokens_in"]["total"]),
     "| Выходные токены": lambda arm: str(arm["tokens_out_total"]),
@@ -67,6 +72,10 @@ def _rows(prefix: str) -> list[str]:
 def _assert_row(prefix: str, cells: list[str]) -> None:
     rows = _rows(prefix)
     assert any(all(cell in row for cell in cells) for row in rows), (prefix, cells, rows)
+
+
+def _gated_runs() -> list[dict[str, Any]]:
+    return [run for arm in _gate()["arms"].values() for run in arm["runs"]]
 
 
 def _ratio(counts: dict[str, int]) -> str:
@@ -142,8 +151,12 @@ def test_each_injection_row_carries_its_finding_and_anchor() -> None:
         (("conditions", "precision", "exact"), "-2575/459"),
         (("conditions", "tokens", "exact"), "4316/4239"),
         (("conditions", "injections", "exact"), "3"),
-        (("conditions", "hallucination", "status"), "undefined"),
-        (("oracle", "present"), False),
+        (("conditions", "hallucination", "exact"), "1375/459"),
+        (("conditions", "hallucination", "status"), "fail"),
+        (("oracle", "present"), True),
+        (("oracle", "runs_covered"), 6),
+        (("arms", "rag_off", "hallucination_mean", "exact"), "13/108"),
+        (("arms", "rag_on", "hallucination_mean", "exact"), "23/153"),
         (("warnings",), []),
         (("arms", "rag_off", "recall_mean", "exact"), "1/30"),
         (("arms", "rag_on", "recall_mean", "exact"), "7/30"),
@@ -190,3 +203,56 @@ def test_the_report_provenance_is_that_of_the_capture_manifests() -> None:
         _assert_row("| Корпус", [manifest["corpus_digest"]])
         _assert_row("| Статика", [manifest["static_digest"]])
         _assert_row("| Индекс RAG", [manifest["run_metadata"]["rag_index_digest"]])
+
+
+def _confirmed_hallucinations() -> list[tuple[str, str, int, str]]:
+    """``(run, case, finding index, "path:line")`` of every entry of the committed oracle."""
+    oracle = json.loads(ORACLE.read_text(encoding="utf-8"))
+    confirmed = []
+    for run_id, entry in oracle["runs"].items():
+        for item in entry["hallucinations"]:
+            answer = json.loads(
+                (CAPTURES / run_id / f"{item['case_id']}.json").read_text(encoding="utf-8")
+            )
+            finding = answer["findings"][item["finding_index"]]
+            anchor = f"{finding['path']}:{finding['line']}"
+            confirmed.append((run_id, item["case_id"], item["finding_index"], anchor))
+    return confirmed
+
+
+def test_each_oracle_entry_is_a_finding_of_a_valid_answer() -> None:
+    oracle = json.loads(ORACLE.read_text(encoding="utf-8"))
+
+    for run_id, entry in oracle["runs"].items():
+        valid = _valid_answers(CAPTURES / run_id)
+        for item in entry["hallucinations"]:
+            assert f"{item['case_id']}.json" in valid, (run_id, item)
+            answer = json.loads(
+                (CAPTURES / run_id / f"{item['case_id']}.json").read_text(encoding="utf-8")
+            )
+            assert 0 <= item["finding_index"] < len(answer["findings"]), (run_id, item)
+
+
+def test_the_gate_numerators_are_the_oracle_entry_counts_per_run() -> None:
+    oracle = json.loads(ORACLE.read_text(encoding="utf-8"))
+
+    assert {run["run_id"]: run["hallucination"]["numerator"] for run in _gated_runs()} == {
+        run_id: len(entry["hallucinations"]) for run_id, entry in oracle["runs"].items()
+    }
+
+
+def test_the_report_lists_each_confirmed_hallucination_with_its_anchor_and_no_other() -> None:
+    confirmed = _confirmed_hallucinations()
+
+    for run_id, case_id, index, anchor in confirmed:
+        _assert_row(f"| {run_id} | {case_id} #{index} |", [f"`{anchor}`"])
+    listed = [
+        row
+        for row in REPORT.read_text(encoding="utf-8").splitlines()
+        if re.match(r"\| [AB]-run\d \| RAG-\d+ #\d+ \|", row)
+    ]
+    assert (
+        len(listed)
+        == len(confirmed)
+        == sum(run["hallucination"]["numerator"] for run in _gated_runs())
+    )
