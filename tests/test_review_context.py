@@ -437,6 +437,75 @@ def test_import_not_used_by_the_changed_function_is_not_read() -> None:
     assert "pkg/secret.py" not in repository.read
 
 
+@pytest.mark.parametrize(
+    ("importer", "source", "patch", "others", "rules_text", "expected"),
+    [
+        pytest.param(
+            "src/Greet.tsx",
+            _TSX_SERVICE,
+            _TSX_PATCH,
+            {"src/Badge.tsx": _TSX_BADGE},
+            "```review-ignore\nsrc/Badge.tsx\n```\n",
+            ("./Badge", ImportResolution.EXCLUDED, "excluded"),
+            id="excluded-tsx",
+        ),
+        pytest.param(
+            "src/Greet.jsx",
+            _JSX_SERVICE,
+            _JSX_PATCH,
+            {"src/Badge.jsx": _JSX_BADGE},
+            "```review-ignore\nsrc/Badge.jsx\n```\n",
+            ("./Badge", ImportResolution.EXCLUDED, "excluded"),
+            id="excluded-jsx",
+        ),
+        pytest.param(
+            "src/service.js",
+            _JS_SERVICE,
+            _JS_PATCH,
+            {"src/models.js": _JS_MODELS, "src/models.mjs": _JS_MODELS},
+            None,
+            ("./models", ImportResolution.AMBIGUOUS, "several_candidates"),
+            id="ambiguous-js",
+        ),
+        pytest.param(
+            "src/Greet.tsx",
+            _TSX_SERVICE,
+            _TSX_PATCH,
+            {"src/Badge.tsx": _TSX_BADGE, "src/Badge.ts": _TSX_BADGE},
+            None,
+            ("./Badge", ImportResolution.AMBIGUOUS, "several_candidates"),
+            id="ambiguous-tsx",
+        ),
+        pytest.param(
+            "src/Greet.jsx",
+            _JSX_SERVICE,
+            _JSX_PATCH,
+            {"src/Badge.jsx": _JSX_BADGE, "src/Badge.js": _JSX_BADGE},
+            None,
+            ("./Badge", ImportResolution.AMBIGUOUS, "several_candidates"),
+            id="ambiguous-jsx",
+        ),
+    ],
+)
+def test_script_import_not_resolved_stays_at_l1_to_l3_with_its_reason(
+    importer: str,
+    source: str,
+    patch: str,
+    others: dict[str, str],
+    rules_text: str | None,
+    expected: tuple[str, ImportResolution, str],
+) -> None:
+    repository = Repository({importer: source, **others})
+    diff_map = _diff_map(_vcs_file(repository, importer, patch))
+
+    payload = _build(repository, diff_map, rules_text=rules_text)
+
+    assert payload.status is ContextStatus.REVIEW
+    assert payload.levels_present == (ContextLevel.L1, ContextLevel.L3)
+    assert [(ref.module, ref.resolution, ref.reason) for ref in payload.imports] == [expected]
+    assert repository.read == [importer]
+
+
 def test_ignored_file_is_counted_not_named_and_never_read_through_an_import() -> None:
     repository = _service_repository()
     repository.files["generated/client.py"] = "x = 1\n"

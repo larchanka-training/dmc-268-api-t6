@@ -869,6 +869,8 @@ def test_excluded_python_target_is_reported_and_not_shown() -> None:
     [
         pytest.param("src/app.ts", "./models", "src/models.ts", id="ts"),
         pytest.param("src/app.js", "./models.js", "src/models.js", id="js"),
+        pytest.param("src/App.tsx", "./Button", "src/Button.tsx", id="tsx"),
+        pytest.param("src/App.jsx", "./Button", "src/Button.jsx", id="jsx"),
     ],
 )
 def test_excluded_script_target_is_reported_and_not_shown(
