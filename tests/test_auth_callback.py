@@ -301,6 +301,59 @@ def test_callback_http_contract_sets_refresh_cookie_and_accepts_zero_installatio
     assert claims["workspaces"] == []
 
 
+@pytest.mark.parametrize("constant", ["NaN", "Infinity", "-Infinity", "1e999", "-1e999"])
+def test_callback_rejects_nonfinite_json_without_authorization(
+    constant: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    app.dependency_overrides[auth_api.get_exchange_github_code] = lambda: None
+    try:
+        response = TestClient(app).post(
+            "/api/auth/github/callback",
+            content=f'{{"code": {constant}}}',
+            headers={"Content-Type": "application/json"},
+        )
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 422
+    assert response.headers["content-type"] == "application/json"
+    assert response.json()["detail"][0]["type"] == "json_invalid"
+    assert response.json()["detail"][0]["input"] == {}
+    json.loads(response.content, parse_constant=lambda _: pytest.fail("nonfinite response JSON"))
+    assert "Traceback" not in caplog.text
+    assert "set-cookie" not in response.headers
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        b'{"code": "valid", "bogus": NaN, "private": "secret-value"}',
+        b'{"code": NaN, "private": "secret-value"}',
+    ],
+)
+def test_callback_nonfinite_extra_or_invalid_field_does_not_echo_input(
+    body: bytes, caplog: pytest.LogCaptureFixture
+) -> None:
+    app.dependency_overrides[auth_api.get_exchange_github_code] = lambda: None
+    try:
+        response = TestClient(app).post(
+            "/api/auth/github/callback",
+            content=body,
+            headers={"Content-Type": "application/json"},
+        )
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 422
+    assert response.headers["content-type"] == "application/json"
+    assert response.json()["detail"][0]["type"] == "json_invalid"
+    json.loads(response.content, parse_constant=lambda _: pytest.fail("nonfinite response JSON"))
+    assert "secret-value" not in response.text
+    assert "secret-value" not in caplog.text
+    assert "Traceback" not in caplog.text
+    assert "set-cookie" not in response.headers
+
+
 def test_github_oauth_adapter_posts_credentials_off_url_and_reads_profile() -> None:
     requests: list[httpx.Request] = []
 

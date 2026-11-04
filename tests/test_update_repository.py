@@ -9,6 +9,7 @@ the same way, but only when the re-read shows RAG in effect (an available reposi
 from __future__ import annotations
 
 import asyncio
+import json
 from dataclasses import dataclass, field, replace
 from types import TracebackType
 from typing import Self
@@ -247,3 +248,62 @@ def test_patch_other_providers_keeps_existing_review_settings(provider: str) -> 
 
     assert response.status_code == 200
     assert fake.calls == ["get True", "update True", "commit"]
+
+
+@pytest.mark.parametrize("constant", ["NaN", "Infinity", "-Infinity", "1e999", "-1e999"])
+def test_patch_rejects_nonfinite_json_without_changing_repository(constant: str) -> None:
+    fake = FakeRepositories()
+    app.dependency_overrides[get_repository_settings] = lambda: lambda: fake
+    try:
+        client = authenticated_test_client(app)
+        path = f"/api/repos/{REPOSITORY_ID}"
+        before = client.get(path).json()
+        response = client.patch(
+            path,
+            content=f'{{"maxComments": {constant}}}',
+            headers={"Content-Type": "application/json"},
+        )
+        after = client.get(path).json()
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 422
+    assert response.headers["content-type"] == "application/json"
+    assert response.json()["detail"][0]["type"] == "json_invalid"
+    json.loads(response.content, parse_constant=lambda _: pytest.fail("nonfinite response JSON"))
+    assert after == before
+    assert fake.calls == ["get True", "get True"]
+
+
+@pytest.mark.parametrize(
+    ("path", "body"),
+    [
+        (f"/api/repos/{REPOSITORY_ID}", b'{"maxComments": 3, "bogus": NaN}'),
+        (f"/api/repos/{REPOSITORY_ID}", b'{"maxComments": NaN, "bogus": "secret-value"}'),
+        ("/api/repos/00000000-0000-4000-8000-0000000000ff", b'{"maxComments": NaN}'),
+        ("/api/repos/not-a-uuid", b'{"maxComments": NaN}'),
+    ],
+)
+def test_patch_nonfinite_json_in_other_fields_or_paths_is_safe(
+    path: str, body: bytes, caplog: pytest.LogCaptureFixture
+) -> None:
+    fake = FakeRepositories()
+    app.dependency_overrides[get_repository_settings] = lambda: lambda: fake
+    try:
+        client = authenticated_test_client(app)
+        repository_path = f"/api/repos/{REPOSITORY_ID}"
+        before = client.get(repository_path).json()
+        response = client.patch(path, content=body, headers={"Content-Type": "application/json"})
+        after = client.get(repository_path).json()
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code in (422, 404)
+    assert response.headers["content-type"] == "application/json"
+    assert "detail" in response.json()
+    json.loads(response.content, parse_constant=lambda _: pytest.fail("nonfinite response JSON"))
+    assert "secret-value" not in response.text
+    assert "secret-value" not in caplog.text
+    assert "Traceback" not in caplog.text
+    assert after == before
+    assert fake.calls == ["get True", "get True"]
