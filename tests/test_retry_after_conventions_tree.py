@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Callable
 from datetime import timedelta
+from typing import cast
 from urllib.parse import unquote
 from uuid import UUID
 
@@ -19,6 +20,9 @@ from app.modules.integrations.gitlab.infrastructure.run_http import (
     GitLabMergeRequestResource,
     GitLabRunHttp,
 )
+from app.modules.integrations.webhooks.infrastructure.github_installation_tree_provider import (
+    StaticGitHubInstallationAccessTokenProvider,
+)
 from app.modules.reviews.application.conventions import (
     ActiveConventionsPrompt,
     GenerateRepoConventions,
@@ -27,9 +31,13 @@ from app.modules.reviews.application.conventions import (
 )
 from app.modules.reviews.application.handle_review_run import DeliveryOutcome
 from app.modules.reviews.application.run_failures import RetryDelays, RunFailure
+from app.modules.reviews.application.vcs_diff import VcsMetadataProvider
+from app.modules.reviews.infrastructure.github_run_source import GitHubRunSource
+from app.modules.reviews.infrastructure.github_vcs import InstallationTokenProvider
 from app.modules.reviews.infrastructure.gitlab_repository_tree import GitLabRepositoryTree
 from app.modules.reviews.infrastructure.gitlab_run_source import GitLabRunSource
 from app.modules.reviews.infrastructure.gitlab_vcs import HttpGitLabVcsProvider
+from tests.test_github_run_source import Blobs, Runs
 from tests.test_gitlab_repository_sources import RUN_ID, SourceRouter, checkpoint
 from tests.test_gitlab_run_http import INPUT, POLICY, Credentials
 from tests.test_gitlab_vcs import reply
@@ -39,6 +47,7 @@ from tests.test_review_run_worker import NOW, RUN, Clock, FakeRun, RetryQueue, h
 RETRY_AFTER_900 = {"Retry-After": "900"}
 
 type GitLabFault = Callable[[httpx.Request], httpx.Response | None]
+type GitHubAnswer = Callable[[httpx.Request], httpx.Response]
 
 
 async def _cache_miss(source: RepositoryConventionsSource) -> None:
@@ -55,9 +64,8 @@ async def _cache_miss(source: RepositoryConventionsSource) -> None:
     )
 
 
-def _assert_parks_for_15_minutes(failure: RunFailure) -> None:
-    assert failure.retry_after == timedelta(seconds=900)
-    assert RetryDelays().for_failure(1, failure) == ("10m", timedelta(minutes=15))
+def _handled(failure: RunFailure) -> tuple[FakeRun, RetryQueue]:
+    """The Run and its retry queue after the attempt ended with this failure."""
     run = FakeRun()
     retry = RetryQueue()
 
@@ -67,6 +75,13 @@ def _assert_parks_for_15_minutes(failure: RunFailure) -> None:
     outcome = asyncio.run(handler(run, pipeline, retry=retry, clock=Clock()).execute(RUN))
 
     assert outcome is DeliveryOutcome.ACK
+    return run, retry
+
+
+def _assert_parks_for_15_minutes(failure: RunFailure) -> None:
+    assert failure.retry_after == timedelta(seconds=900)
+    assert RetryDelays().for_failure(1, failure) == ("10m", timedelta(minutes=15))
+    run, retry = _handled(failure)
     assert (run.state, run.attempt) == ("queued", 1)
     assert retry.published == [("10m", 2)]
     assert run.available_at == NOW + timedelta(minutes=15)
@@ -163,3 +178,112 @@ def test_gitlab_budget_exhausted_tree_stays_a_failure_without_a_hint() -> None:
 
     assert failure.error_code == "diff_fetch_failed"
     _assert_repeats_as_without_a_hint(failure)
+
+
+def _tree_answer(
+    status: int,
+    headers: dict[str, str] | None = None,
+    *,
+    message: str | None = None,
+    recursive: bool = True,
+) -> GitHubAnswer:
+    """One failing tree read: of the conventions tree, or of the AGENTS.md lookup before it."""
+
+    def github(request: httpx.Request) -> httpx.Response:
+        if (request.url.params.get("recursive") == "1") is recursive:
+            return httpx.Response(
+                status, headers=headers, json=None if message is None else {"message": message}
+            )
+        return httpx.Response(200, json={"tree": []})
+
+    return github
+
+
+def _no_connection(request: httpx.Request) -> httpx.Response:
+    raise httpx.ConnectError("no route", request=request)
+
+
+def _github_failure(
+    answer: GitHubAnswer, *, tokens: InstallationTokenProvider | None = None
+) -> RunFailure:
+    source = GitHubRunSource(
+        client=httpx.AsyncClient(
+            base_url="https://api.github.test", transport=httpx.MockTransport(answer)
+        ),
+        token_provider=tokens or StaticGitHubInstallationAccessTokenProvider("token"),
+        vcs=cast(VcsMetadataProvider, Blobs()),
+        runs=Runs(),
+        run_id=RUN_ID,
+    )
+
+    async def scenario() -> RunFailure:
+        with pytest.raises(RunFailure) as error:
+            await _cache_miss(source)
+        return error.value
+
+    return asyncio.run(scenario())
+
+
+@pytest.mark.parametrize(
+    ("status", "recursive"),
+    [
+        pytest.param(429, True, id="tree-429"),
+        pytest.param(403, True, id="tree-limit-403"),
+        pytest.param(429, False, id="agents-md-lookup-429"),
+    ],
+)
+def test_github_tree_retry_after_parks_the_run(status: int, recursive: bool) -> None:
+    failure = _github_failure(_tree_answer(status, RETRY_AFTER_900, recursive=recursive))
+
+    assert failure.error_code == "diff_fetch_failed"
+    _assert_parks_for_15_minutes(failure)
+
+
+def test_github_token_read_of_the_tree_keeps_its_retry_after() -> None:
+    class LimitedTokens:
+        async def get_installation_access_token(self, installation_external_id: int) -> str:
+            request = httpx.Request("POST", "https://api.github.test/app/installations/17/tokens")
+            raise httpx.HTTPStatusError(
+                "limited",
+                request=request,
+                response=httpx.Response(429, headers=RETRY_AFTER_900, request=request),
+            )
+
+    failure = _github_failure(_tree_answer(200), tokens=LimitedTokens())
+
+    assert failure.error_code == "diff_fetch_failed"
+    _assert_parks_for_15_minutes(failure)
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        pytest.param(_tree_answer(502), id="502"),
+        pytest.param(_tree_answer(403, {"X-RateLimit-Remaining": "0"}), id="spent-limit-403"),
+        pytest.param(_no_connection, id="transport"),
+    ],
+)
+def test_github_tree_failure_without_retry_after_repeats_as_before(answer: GitHubAnswer) -> None:
+    failure = _github_failure(answer)
+
+    assert failure.error_code == "diff_fetch_failed"
+    _assert_repeats_as_without_a_hint(failure)
+
+
+def test_github_tree_secondary_rate_limit_named_in_the_body_waits_a_minute() -> None:
+    failure = _github_failure(
+        _tree_answer(403, message="You have exceeded a secondary rate limit.")
+    )
+
+    assert failure.error_code == "diff_fetch_failed"
+    assert failure.retry_after == timedelta(seconds=60)
+    assert RetryDelays().for_failure(1, failure) == ("2m", timedelta(minutes=2))
+
+
+@pytest.mark.parametrize("status", [404, 403])
+def test_github_tree_without_access_fails_at_once(status: int) -> None:
+    failure = _github_failure(_tree_answer(status))
+
+    assert failure.error_code == "github_forbidden"
+    run, retry = _handled(failure)
+    assert (run.state, retry.published) == ("failed", [])

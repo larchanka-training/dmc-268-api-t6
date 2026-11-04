@@ -25,7 +25,7 @@ from app.modules.reviews.infrastructure.github_vcs import (
     _headers,
     _repository_prefix,
 )
-from app.modules.reviews.infrastructure.vcs_failures import classify_vcs_error
+from app.modules.reviews.infrastructure.vcs_failures import classify_vcs_error, plain_error_body
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -70,18 +70,22 @@ class GitHubRunSource:
 
     async def _tree(self, run: RunVcsInput, sha: str, *, recursive: bool) -> list[dict[str, Any]]:
         path = f"{_repository_prefix(run.locator)}/git/trees/{commit_sha_segment(sha)}"
-        await self._checkpoint()
-        token = await self._tokens.get_installation_access_token(
-            run.locator.installation_external_id
-        )
-        await self._checkpoint()
-        response = await self._client.get(
-            path,
-            params={"recursive": "1"} if recursive else None,
-            headers=_headers(token),
-            timeout=_REQUEST_TIMEOUT,
-        )
-        response.raise_for_status()
+        try:
+            await self._checkpoint()
+            token = await self._tokens.get_installation_access_token(
+                run.locator.installation_external_id
+            )
+            await self._checkpoint()
+            response = await self._client.get(
+                path,
+                params={"recursive": "1"} if recursive else None,
+                headers=_headers(token),
+                timeout=_REQUEST_TIMEOUT,
+            )
+            response.raise_for_status()
+        except httpx.HTTPError as exc:
+            # The same codes and Retry-After as the diff reads (PIPELINE_SPEC §5.2).
+            raise classify_vcs_error(exc, body=plain_error_body(exc)) from None
         payload = response.json()
         if payload.get("truncated"):
             # A huge monorepo: conventions use the part of the tree GitHub returned.
