@@ -22,7 +22,7 @@ jobs:
     timeout-minutes: 5
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           # The PR merge commit and both parents: HEAD^1 is the base branch tip.
           fetch-depth: 2
@@ -53,8 +53,13 @@ jobs:
               before="$(git cat-file -s "HEAD^1:${old}")"
             fi
             if (( after > budget && after > before )); then
-              echo "::warning file=${path}::${path} grew from ${before} to ${after} bytes, over the ${budget}-byte budget (#380)"
-              rows+="| \`${path}\` | ${before} | ${after} | +$((after - before)) | ${budget} |"$'\n'
+              # Workflow-command escaping: % in the message, also : and , in the file= value; a |
+              # would split the summary table cell.
+              message_path="${path//\%/%25}"
+              file_value="${message_path//:/%3A}"
+              file_value="${file_value//,/%2C}"
+              echo "::warning file=${file_value}::${message_path} grew from ${before} to ${after} bytes, over the ${budget}-byte budget (#380)"
+              rows+="| \`${path//|/\\|}\` | ${before} | ${after} | +$((after - before)) | ${budget} |"$'\n'
             fi
           done < "${diff_file}"
           if [[ -n "${rows}" ]]; then

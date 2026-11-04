@@ -853,7 +853,7 @@ def test_the_deploy_job_changes_the_host_only_after_the_checks() -> None:
         REFUSE_SECRETS,
         *HOST_STEPS,
     ]
-    assert "        uses: actions/checkout@v4\n" in _step(CHECKOUT)
+    assert "        uses: actions/checkout@v7\n" in _step(CHECKOUT)
 
 
 def test_no_step_refreshes_the_edge_proxy() -> None:

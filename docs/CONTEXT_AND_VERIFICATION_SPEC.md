@@ -869,8 +869,8 @@ verifier недействителен). Блок `retrieved_excerpt` без
 policy-документов и репозитория кодового блока (его `repository_id` должен совпасть с
 репозиторием snapshot) требуют policy snapshot. После #130 F1 worker передаёт snapshot
 только для run с закреплённым `review.system` v4 или v5, выполняя guard в адаптере после
-единственного fit; legacy остаётся без snapshot и verifier. После F2 seed активирует
-v4 (с #350 — v5) для новых runs; закреплённый v3 или ниже сохраняет legacy-путь. Полный guard выше остаётся целевым контрактом
+единственного fit; legacy остаётся без snapshot и verifier. F2 seed активировал
+v4, а после #350 новые runs закрепляют v5; закреплённый v3 или ниже сохраняет legacy-путь. Полный guard выше остаётся целевым контрактом
 #107; наличие функций не означает внедрения всего нового lifecycle (§12).
 
 Raw response записывается с `call_id`, `manifest_id`, content digest и outcome.
@@ -2128,7 +2128,7 @@ quality gates не объявляются достигнутыми без baseli
 | PIPELINE_SPEC §1: нет running → skipped для ignore | §2.2: добавить переход/уведомление all_changes_ignored |
 | PIPELINE_SPEC §4–6: общий budget/recovery без verifier | §7–8: slots/cost/time reserve, новые ошибки, checkpoints |
 | PIPELINE_SPEC §9–11 / review-output schema | v2 evidence_refs и новая attribution, coverage-aware verdict; v3 side отдельно |
-| TEST_PLAN §3.4: после #133 есть схемы ReviewOutput v2/verifier, исторический prompt `review.verifier.v1.md` (#133) и `review.verifier.v2.md` (#219, текущий pin по умолчанию), unit-сценарии; #130 F1 подключает Reflection Pass в worker только для закреплённого v4 или v5, после F2 seed активирует v4 (с #350 — v5) для новых runs, v3 или ниже сохраняет legacy | §7/§11: v4 активирован F2, v5 — #350, полный lifecycle и quality baseline остаются целевыми; raw eval и независимый ручной oracle сохраняются |
+| TEST_PLAN §3.4: после #133 есть схемы ReviewOutput v2/verifier, исторический prompt `review.verifier.v1.md` (#133) и `review.verifier.v2.md` (#219, текущий pin по умолчанию), unit-сценарии; #130 F1 подключает Reflection Pass в worker только для закреплённого v4 или v5, F2 seed активировал v4, а после #350 новые runs закрепляют v5; v3 или ниже сохраняет legacy | §7/§11: v4 активирован F2, v5 — #350, полный lifecycle и quality baseline остаются целевыми; raw eval и независимый ручной oracle сохраняются |
 | API RunDetail/RunSession/latestRun и UI | Добавить coverage, resultVersion/verificationMode; null verdict при partial без значимых supported findings |
 | Legacy review/postprocess/lint-filter.md, порог severity | В #107 перенести severity threshold за verifier (§6.2), сохранить код lint_pattern; legacy-порядок PS §9 отдельно |
 | Postprocess/lint-filter, prompt fixtures и review README | Версии evidence/атрибуции и фильтров; не восстанавливать raw summary |

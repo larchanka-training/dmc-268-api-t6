@@ -140,7 +140,7 @@ jobs:
           echo "previous=${image}:staging-previous" >> "${GITHUB_OUTPUT}"
 
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Resolve image
         id: image

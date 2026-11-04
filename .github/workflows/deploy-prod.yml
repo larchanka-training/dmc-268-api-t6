@@ -255,7 +255,7 @@ jobs:
       # The deploy files come from this run's checkout (the dispatched main commit), like Rollback
       # staging, so a :staging image older than these scripts still gets NO_PREVIOUS_RELEASE=stop.
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Bundle application secrets
         id: app_secrets

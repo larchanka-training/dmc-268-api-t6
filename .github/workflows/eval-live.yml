@@ -77,7 +77,7 @@ jobs:
       EVAL_ARTIFACT_ARM: ${{ (inputs.corpus == 'rag' && format('{0}-{1}', inputs.policy_arm, inputs.rag_arm)) || inputs.policy_arm || 'legacy' }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           persist-credentials: false
 
