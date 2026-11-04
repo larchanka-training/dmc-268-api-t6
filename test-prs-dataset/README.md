@@ -234,9 +234,17 @@ anchors, the inline cap and the verifier, so it is **not a metric of the publish
 
 `gateway_normalized.attribution_loss` gives `rule_name_nulled` of `findings`: the findings of
 accepted answers whose `rule_name` `FindingsPostProcessor._repair_attribution` would null, which
-publishes a finding under a custom rule as a standard one. The count uses the rule set of the
-case's language and, for a snapshot-path prompt, the documents the case shows.
+publishes a finding under a custom rule as a standard one. The count uses the default rule set of
+the case's language and, for a snapshot-path prompt, the documents the case shows.
 `findings_post_processor.py` is not a static input: the count follows the current code.
+
+`eval_live.py` binds a `--backend-rules` or `--frontend-rules` file to a language by the flag alone
+and records only its path, and recording the binding means editing a pinned file. So a capture that
+pins any rule set other than the two defaults has no count: `rule_name_nulled` is `null` and
+`custom_rule_sets` lists those files, instead of a guess. Two limits follow. Every
+`review/rules/*.json` is pinned, selected or not, so a new default file gives `null` until replay's
+`_RULE_SET_BY_LANGUAGE` follows the recorder. The two defaults swapped between the flags leave no
+trace in the manifest and are counted as if not swapped.
 
 | Capture | Strict: validity; TP/FP/FN; critical; verdict | After normalization: validity; TP/FP/FN; critical; verdict | `rule_name` nulled |
 | --- | --- | --- | --- |

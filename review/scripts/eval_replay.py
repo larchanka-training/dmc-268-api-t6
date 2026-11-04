@@ -65,7 +65,9 @@ production check (``validate_review_answer`` or ``_v2``), which repairs only an 
 ``start_line`` and the finding order. It takes no repair or fallback call and comes before lint,
 dedupe, threshold, anchors and verifier, so it is not a metric of the published review.
 ``attribution_loss`` counts the findings of those answers whose ``rule_name``
-``FindingsPostProcessor`` would null. The strict fields above it do not change.
+``FindingsPostProcessor`` would null. A capture that pins a rule set other than the defaults has
+no count (null) and lists those files in ``custom_rule_sets``: the manifest does not say which
+language each one served. The strict fields above it do not change.
 """
 
 from __future__ import annotations
@@ -581,6 +583,28 @@ def _is_rule_set(path: Path) -> bool:
     return isinstance(value, dict) and isinstance(value.get("rules"), list)
 
 
+def _custom_rule_sets(static_inputs: list[str], prompt_root: Path) -> list[str]:
+    """The recorded rule files other than the defaults, which replay cannot count against.
+
+    eval_live binds a rule file to a language by its flag alone and records only the path; it never
+    reads the file's ``stack``, so that proves nothing. Recording the binding means editing
+    eval_live.py, a static input. Since every review/rules/*.json is pinned, a new default lands
+    here until _RULE_SET_BY_LANGUAGE follows eval_live. The defaults swapped between the two flags
+    leave no trace in the manifest.
+    """
+    custom = []
+    for path in static_inputs:
+        if path in _RULE_SET_BY_LANGUAGE.values():
+            continue
+        try:
+            digest_files(prompt_root, [path])  # The path check _is_rule_set relies on.
+        except DigestInputError:
+            continue  # _digest_warnings already reported a missing file or stopped the replay.
+        if _is_rule_set(prompt_root / path):
+            custom.append(path)
+    return custom
+
+
 def _digest_warnings(
     manifest: dict[str, Any],
     prompt_root: Path,
@@ -826,6 +850,7 @@ def replay(
         )
     normalized_scores = score_cases(normalized_cases)
     del normalized_scores["usage"]  # The usage of the same calls as the strict column.
+    custom_rule_sets = _custom_rule_sets(manifest["static_inputs"], prompt_root)
     return {
         "schema_version": 1,
         "warnings": warnings,
@@ -853,7 +878,11 @@ def replay(
         **score_cases(cases),
         "gateway_normalized": {
             **normalized_scores,
-            "attribution_loss": {"findings": finding_count, "rule_name_nulled": nulled_count},
+            "attribution_loss": {
+                "findings": finding_count,
+                "rule_name_nulled": None if custom_rule_sets else nulled_count,
+                "custom_rule_sets": custom_rule_sets,
+            },
         },
         "responses": statuses,
     }
@@ -932,15 +961,20 @@ def format_console(report: dict[str, Any]) -> str:
     normalized = report.get("gateway_normalized")
     if normalized is not None:
         loss = normalized["attribution_loss"]
+        nulled = "unknown" if loss["rule_name_nulled"] is None else loss["rule_name_nulled"]
         lines.append(
             "After gateway normalization, before lint, dedupe, threshold, anchors and verifier "
             "(not the published review):"
         )
         lines.extend(f"  {line}" for line in _quality_lines(normalized))
         lines.append(
-            f"  rule_name nulled by the post-processor: "
-            f"{loss['rule_name_nulled']}/{loss['findings']} findings"
+            f"  rule_name nulled by the post-processor: {nulled}/{loss['findings']} findings"
         )
+        if loss["custom_rule_sets"]:
+            lines.append(
+                "  not counted: the manifest does not tie these rule sets to a language: "
+                + ", ".join(loss["custom_rule_sets"])
+            )
     for warning in report["warnings"]:
         lines.append(f"Warning: {warning}")
     return "\n".join(lines)

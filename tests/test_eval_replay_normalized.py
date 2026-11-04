@@ -11,7 +11,8 @@ import pytest
 
 from review.scripts.eval_replay import ReplayError, format_console, replay
 
-DATASET_ROOT = Path(__file__).resolve().parents[1] / "test-prs-dataset"
+REPO_ROOT = Path(__file__).resolve().parents[1]
+DATASET_ROOT = REPO_ROOT / "test-prs-dataset"
 
 
 def attributed(rule: str) -> str:
@@ -98,7 +99,11 @@ def test_a_real_error_is_invalid_in_both_columns(tmp_path: Path) -> None:
     normalized = report["gateway_normalized"]
     assert normalized["valid_response_count"] == 0
     assert normalized["micro"]["fn"] == 1
-    assert normalized["attribution_loss"] == {"findings": 0, "rule_name_nulled": 0}
+    assert normalized["attribution_loss"] == {
+        "findings": 0,
+        "rule_name_nulled": 0,
+        "custom_rule_sets": [],
+    }
 
 
 def test_attribution_loss_counts_what_the_post_processor_would_null(tmp_path: Path) -> None:
@@ -117,6 +122,7 @@ def test_attribution_loss_counts_what_the_post_processor_would_null(tmp_path: Pa
     assert report["gateway_normalized"]["attribution_loss"] == {
         "findings": 6,
         "rule_name_nulled": 4,
+        "custom_rule_sets": [],
     }
 
 
@@ -134,6 +140,7 @@ def test_attribution_loss_uses_the_rule_set_of_the_case_language(tmp_path: Path)
     assert report["gateway_normalized"]["attribution_loss"] == {
         "findings": 2,
         "rule_name_nulled": 1,
+        "custom_rule_sets": [],
     }
 
 
@@ -160,6 +167,7 @@ def test_snapshot_path_keeps_service_defaults_and_nulls_absent_documents(tmp_pat
     assert report["gateway_normalized"]["attribution_loss"] == {
         "findings": 4,
         "rule_name_nulled": 2,
+        "custom_rule_sets": [],
     }
 
 
@@ -172,6 +180,7 @@ def test_snapshot_path_keeps_the_documents_the_case_shows(tmp_path: Path) -> Non
     assert report["gateway_normalized"]["attribution_loss"] == {
         "findings": 4,
         "rule_name_nulled": 0,
+        "custom_rule_sets": [],
     }
 
 
@@ -226,7 +235,91 @@ def test_a_missing_rule_set_is_a_warning_and_counts_every_attribution_as_lost(
     assert report["gateway_normalized"]["attribution_loss"] == {
         "findings": 1,
         "rule_name_nulled": 1,
+        "custom_rule_sets": [],
     }
+
+
+def pin_rule_sets(tmp_path: Path, root: Path, rule_sets: dict[str, str]) -> Path:
+    """Add these rule files to the capture's static inputs; return a prompt root that holds them."""
+    manifest_path = root / "responses/manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["static_inputs"] = sorted({*manifest["static_inputs"], *rule_sets})
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    repo = tmp_path / "repo"
+    (repo / "review/rules").mkdir(parents=True)
+    for default in ("default-backend.v1.json", "default-frontend.v1.json"):
+        shutil.copy2(REPO_ROOT / "review/rules" / default, repo / "review/rules" / default)
+    for path, text in rule_sets.items():
+        (repo / path).parent.mkdir(parents=True, exist_ok=True)
+        (repo / path).write_text(text, encoding="utf-8")
+    return repo
+
+
+CUSTOM_RULE_SET = json.dumps(
+    {"version": 1, "stack": "backend", "rules": [{"name": "Custom Source Review"}]}
+)
+CUSTOM_ATTRIBUTION = answer(
+    answer_finding(rule_name="Custom Source Review", body=attributed("Custom Source Review"))
+)
+
+
+# eval_live pins a --backend-rules or --frontend-rules path in static_inputs and nothing tells
+# which flag chose it: test_selected_custom_rules_outside_default_rule_glob_are_hashed.
+@pytest.mark.parametrize(
+    "paths",
+    [
+        pytest.param(["config/custom.json"], id="outside-the-rule-directory"),
+        pytest.param(["config/backend.json", "config/frontend.json"], id="both-flags"),
+        pytest.param(["config/custom.rules"], id="any-file-name"),
+        pytest.param(["review/rules/default-backend.v2.json"], id="inside-the-rule-directory"),
+    ],
+)
+def test_a_custom_rule_set_leaves_the_attribution_loss_uncounted_instead_of_guessing(
+    tmp_path: Path, paths: list[str]
+) -> None:
+    root = one_case_capture(tmp_path, CUSTOM_ATTRIBUTION)
+    repo = pin_rule_sets(tmp_path, root, dict.fromkeys(paths, CUSTOM_RULE_SET))
+
+    report = replay(root, prompt_root=repo)
+
+    assert report["gateway_normalized"]["attribution_loss"] == {
+        "findings": 1,
+        "rule_name_nulled": None,
+        "custom_rule_sets": paths,
+    }
+    assert report["gateway_normalized"]["valid_response_count"] == 1
+    assert report["valid_response_count"] == 1
+
+
+def test_a_pinned_json_without_rules_is_not_a_rule_set(tmp_path: Path) -> None:
+    root = one_case_capture(
+        tmp_path,
+        answer(
+            answer_finding(rule_name="Naming Consistency", body=attributed("Naming Consistency"))
+        ),
+    )
+    schema = (REPO_ROOT / "review/rules/schema.json").read_text(encoding="utf-8")
+    repo = pin_rule_sets(tmp_path, root, {"review/rules/schema.json": schema})
+
+    report = replay(root, prompt_root=repo)
+
+    assert report["gateway_normalized"]["attribution_loss"] == {
+        "findings": 1,
+        "rule_name_nulled": 0,
+        "custom_rule_sets": [],
+    }
+
+
+def test_console_says_why_the_attribution_loss_is_not_counted(tmp_path: Path) -> None:
+    root = one_case_capture(tmp_path, CUSTOM_ATTRIBUTION)
+    repo = pin_rule_sets(tmp_path, root, {"config/custom.json": CUSTOM_RULE_SET})
+
+    lines = format_console(replay(root, prompt_root=repo)).splitlines()
+
+    start = lines.index("  rule_name nulled by the post-processor: unknown/1 findings")
+    assert lines[start + 1] == (
+        "  not counted: the manifest does not tie these rule sets to a language: config/custom.json"
+    )
 
 
 def test_console_shows_the_second_column_as_a_block_not_the_published_review(
