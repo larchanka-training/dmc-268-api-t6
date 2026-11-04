@@ -14,11 +14,18 @@ an empty RAG slot in every run of both arms, and no ``rag_on`` case whose retrie
 the gateway fitted away.
 All reports must share the model, prompt version, static-input digest and corpus digest,
 and the recorded engine, effective settings and fallback model; every capture must be
-publishable, and no report content may be given twice. Per arm the output gives each
-metric's mean, min and max over the runs, with every run's numerator and denominator, and
-the delta of each mean against the baseline arm (default: the first label). An arm whose
-runs carry usage only in part gets a warning: its token and cost spread covers those runs
-only. Without --markdown the output is JSON.
+publishable, and no report content may be given twice.
+
+Arms may differ in the prompt file alone (#317). The prompt is a static input, so its version
+and the static digest stay the same inside an arm but may differ between arms when every report
+records one ``run_metadata.static_digest_without_prompt`` and one policy arm: that proves the
+other static inputs are equal. The output then names each arm's prompt instead of one prompt and
+one static digest.
+
+Per arm the output gives each metric's mean, min and max over the runs, with every run's
+numerator and denominator, and the delta of each mean against the baseline arm (default: the
+first label). An arm whose runs carry usage only in part gets a warning: its token and cost
+spread covers those runs only. Without --markdown the output is JSON.
 """
 
 from __future__ import annotations
@@ -26,6 +33,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import re
 import sys
 from collections.abc import Callable
 from decimal import Decimal, InvalidOperation
@@ -38,6 +46,10 @@ if __package__ in (None, ""):
 from review.scripts.eval_replay import RAG_ARM_LABELS, RECORDED_POLICY_ARMS  # noqa: E402
 
 SAME_PROVENANCE = ("model_id", "prompt_version", "static_digest", "corpus_digest")
+# What arms may differ in when they compare prompt files (#317), and runs of one arm never do.
+PROMPT_PROVENANCE = ("prompt_version", "static_digest")
+WITHOUT_PROMPT = "static_digest_without_prompt"
+_DIGEST = re.compile(r"sha256-v1:[0-9a-f]{64}")
 SAME_RUN_METADATA = ("engine", "effective_settings", "fallback_model_id")
 type Ratio = tuple[int, int]
 RATIOS: tuple[tuple[str, str, Callable[[dict[str, Any]], Ratio]], ...] = (
@@ -195,6 +207,55 @@ def _check_rag_inputs(reports: list[tuple[str, Path, dict[str, Any]]]) -> None:
             seen.setdefault(case_id, (digest, path))
 
 
+def _check_one_experiment(reports: list[tuple[str, Path, dict[str, Any]]]) -> bool:
+    """Refuse reports that are not one experiment; ``True`` when the arms compare prompt files."""
+    first_path, first = reports[0][1], reports[0][2]["provenance"]
+    arm_starts: dict[str, tuple[Path, dict[str, Any]]] = {}
+    for label, path, report in reports:
+        provenance = report["provenance"]
+        for name in SAME_PROVENANCE:
+            if name not in PROMPT_PROVENANCE and provenance[name] != first[name]:
+                raise AbError(f"{path}: {name} differs from {first_path}")
+        for name in SAME_RUN_METADATA:
+            if provenance["run_metadata"][name] != first["run_metadata"][name]:
+                raise AbError(f"{path}: run_metadata.{name} differs from {first_path}")
+        arm_path, arm = arm_starts.setdefault(label, (path, provenance))
+        for name in PROMPT_PROVENANCE:
+            if provenance[name] != arm[name]:
+                raise AbError(f"{path}: {name} differs from {arm_path}")
+    if all(
+        report["provenance"][name] == first[name]
+        for _, _, report in reports
+        for name in PROMPT_PROVENANCE
+    ):
+        return False
+    for _, path, report in reports:
+        provenance = report["provenance"]
+        metadata = provenance["run_metadata"]
+        digest = metadata.get(WITHOUT_PROMPT)
+        if (
+            not isinstance(digest, str)
+            or _DIGEST.fullmatch(digest) is None
+            or metadata.get("policy_arm") not in RECORDED_POLICY_ARMS
+            or not isinstance(provenance.get("prompt_path"), str)
+            or not isinstance(provenance.get("prompt_sha"), str)
+        ):
+            raise AbError(
+                f"{path}: the arms differ in prompt_version or static_digest, and this report "
+                "lacks a valid prompt_path, prompt_sha, run_metadata.policy_arm or "
+                f"run_metadata.{WITHOUT_PROMPT} to prove that only the prompt differs; "
+                "capture both arms again"
+            )
+        if digest != first["run_metadata"][WITHOUT_PROMPT]:
+            raise AbError(
+                f"{path}: static inputs other than the prompt differ from {first_path}; "
+                "capture both arms from one ref"
+            )
+        if metadata["policy_arm"] != first["run_metadata"]["policy_arm"]:
+            raise AbError(f"{path}: run_metadata.policy_arm differs from {first_path}")
+    return True
+
+
 def _is_count(value: object) -> bool:
     # CONTRACT: bool is an int subclass; a JSON true/false is not a count.
     return type(value) is int and value >= 0
@@ -246,13 +307,7 @@ def aggregate(runs: list[tuple[str, Path]], baseline: str | None = None) -> dict
         reports.append((label, path, report))
     _check_rag_inputs(reports)
     first = reports[0][2]["provenance"]
-    for _, path, report in reports[1:]:
-        for name in SAME_PROVENANCE:
-            if report["provenance"][name] != first[name]:
-                raise AbError(f"{path}: {name} differs from {reports[0][1]}")
-        for name in SAME_RUN_METADATA:
-            if report["provenance"]["run_metadata"][name] != first["run_metadata"][name]:
-                raise AbError(f"{path}: run_metadata.{name} differs from {reports[0][1]}")
+    compares_prompts = _check_one_experiment(reports)
     labels = list(dict.fromkeys(label for label, _, _ in reports))
     chosen = baseline if baseline is not None else labels[0]
     if chosen not in labels:
@@ -299,6 +354,10 @@ def aggregate(runs: list[tuple[str, Path]], baseline: str | None = None) -> dict
             {
                 "label": label,
                 "policy_arms": sorted(recorded),
+                **{
+                    name: members[0][1]["provenance"].get(name)
+                    for name in ("prompt_path", "prompt_version", "prompt_sha")
+                },
                 "runs": run_rows,
                 "summary": summary,
             }
@@ -316,7 +375,14 @@ def aggregate(runs: list[tuple[str, Path]], baseline: str | None = None) -> dict
     return {
         "schema_version": 1,
         "provenance": {
-            **{name: first[name] for name in SAME_PROVENANCE},
+            **(
+                {
+                    **{n: first[n] for n in SAME_PROVENANCE if n not in PROMPT_PROVENANCE},
+                    WITHOUT_PROMPT: first["run_metadata"][WITHOUT_PROMPT],
+                }
+                if compares_prompts
+                else {name: first[name] for name in SAME_PROVENANCE}
+            ),
             "run_metadata": {name: first["run_metadata"][name] for name in SAME_RUN_METADATA},
         },
         "baseline": chosen,
@@ -338,9 +404,25 @@ def _number(name: str, value: float | None) -> str:
 def format_markdown(result: dict[str, Any]) -> str:
     """One row per arm: mean (min–max) and each run's numerator/denominator; then deltas."""
     provenance = result["provenance"]
+    heading = (
+        [
+            f"Model `{provenance['model_id']}`, static inputs without the prompt "
+            f"`{provenance[WITHOUT_PROMPT]}`, corpus `{provenance['corpus_digest']}`.",
+            "",
+            *(
+                f"- Arm `{arm['label']}`: prompt {arm['prompt_version']}, "
+                f"`{arm['prompt_path']}`, SHA-256 `{arm['prompt_sha']}`."
+                for arm in result["arms"]
+            ),
+        ]
+        if WITHOUT_PROMPT in provenance
+        else [
+            f"Model `{provenance['model_id']}`, prompt {provenance['prompt_version']}, "
+            f"static `{provenance['static_digest']}`, corpus `{provenance['corpus_digest']}`.",
+        ]
+    )
     lines = [
-        f"Model `{provenance['model_id']}`, prompt {provenance['prompt_version']}, "
-        f"static `{provenance['static_digest']}`, corpus `{provenance['corpus_digest']}`.",
+        *heading,
         "",
         "| Arm | Runs | "
         + " | ".join(title for _, title, _ in RATIOS)

@@ -2,17 +2,27 @@
 
 from __future__ import annotations
 
+import asyncio
 import copy
 import json
+import re
+import shutil
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
 import pytest
 
+from review.scripts import eval_live
 from review.scripts.eval_ab import AbError, aggregate, format_markdown, main
+from review.scripts.eval_live import BACKEND_RULES, FRONTEND_RULES, REPO_ROOT, record_live
+from review.scripts.eval_rag_rehearsal import DEFAULT_MODEL, RehearsalTransport, rehearsal_settings
 from review.scripts.eval_replay import replay
+from review.scripts.validate_dataset import DEFAULT_ROOT
 from tests.test_eval_live_rag import rag_root, record_rag, valid_answers, window_without_rag
 
+SYSTEM_V3 = REPO_ROOT / "review/prompts/review.system.v3.md"
+SYSTEM_V5 = REPO_ROOT / "review/prompts/review.system.v5.md"
 PROVENANCE = {
     "model_id": "model-a",
     "prompt_version": "v3",
@@ -780,3 +790,342 @@ def test_a_nonpublishable_rag_capture_is_reported_as_such(
 
     with pytest.raises(AbError, match="not publishable"):
         aggregate([("rag_on", path)])
+
+
+def _capture(
+    root: Path, directory: Path, system: Path, *, repo: Path = REPO_ROOT
+) -> dict[str, Any]:
+    """The report of one real capture, offline: record with the rehearsal's transport, replay."""
+    directory.mkdir(parents=True)
+    responses = directory / "responses"
+    asyncio.run(
+        record_live(
+            root,
+            rehearsal_settings(DEFAULT_MODEL),
+            system_prompt=system,
+            backend_rules=repo / BACKEND_RULES.relative_to(REPO_ROOT),
+            frontend_rules=repo / FRONTEND_RULES.relative_to(REPO_ROOT),
+            transport=RehearsalTransport(),
+            policy_arm="none",
+            responses_dir=responses,
+        )
+    )
+    return replay(root, responses_dir=responses)
+
+
+@pytest.fixture(scope="module")
+def prompt_root(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """One gold case: what the prompt A/B chain needs, at a fraction of the corpus's time."""
+    root = tmp_path_factory.mktemp("prompt-ab") / "dataset"
+    shutil.copytree(DEFAULT_ROOT / "cases" / "CLEAN-01", root / "cases" / "CLEAN-01")
+    return root
+
+
+@pytest.fixture(scope="module")
+def prompt_reports(
+    tmp_path_factory: pytest.TempPathFactory, prompt_root: Path
+) -> dict[str, dict[str, Any]]:
+    directory = tmp_path_factory.mktemp("prompt-ab-captures")
+    return {
+        "v3": _capture(prompt_root, directory / "v3", SYSTEM_V3),
+        "v5": _capture(prompt_root, directory / "v5", SYSTEM_V5),
+    }
+
+
+def test_captures_of_two_prompts_record_one_digest_of_the_other_static_inputs(
+    prompt_reports: dict[str, dict[str, Any]],
+) -> None:
+    """That digest moves with the other inputs: the one-byte test below shows it."""
+    older = prompt_reports["v3"]["provenance"]
+    newer = prompt_reports["v5"]["provenance"]
+    digest = older["run_metadata"]["static_digest_without_prompt"]
+
+    assert re.fullmatch(r"sha256-v1:[0-9a-f]{64}", digest)
+    assert newer["run_metadata"]["static_digest_without_prompt"] == digest
+    assert older["static_digest"] != newer["static_digest"]
+    assert digest not in (older["static_digest"], newer["static_digest"])
+
+
+def test_captures_that_differ_only_in_the_prompt_give_one_table_with_tokens_and_deltas(
+    tmp_path: Path, prompt_reports: dict[str, dict[str, Any]]
+) -> None:
+    older, newer = prompt_reports["v3"], prompt_reports["v5"]
+    assert older["provenance"]["static_digest"] != newer["provenance"]["static_digest"]
+
+    result = aggregate(
+        [
+            ("v3", _write(tmp_path, "v3", older)),
+            ("v5", _write(tmp_path, "v5", newer)),
+        ]
+    )
+
+    assert result["baseline"] == "v3"
+    assert [(arm["prompt_version"], arm["prompt_path"]) for arm in result["arms"]] == [
+        ("v3", "review/prompts/review.system.v3.md"),
+        ("v5", "review/prompts/review.system.v5.md"),
+    ]
+    assert [arm["prompt_sha"] for arm in result["arms"]] == [
+        older["provenance"]["prompt_sha"],
+        newer["provenance"]["prompt_sha"],
+    ]
+    growth = newer["usage"]["tokens_in"] - older["usage"]["tokens_in"]
+    assert growth > 0
+    assert result["arms"][0]["delta"]["tokens_in"] == 0.0
+    assert result["arms"][1]["delta"]["tokens_in"] == growth
+
+    # No single prompt or static digest describes the experiment; each arm names its own.
+    assert "prompt_version" not in result["provenance"]
+    assert "static_digest" not in result["provenance"]
+    digest = older["provenance"]["run_metadata"]["static_digest_without_prompt"]
+    assert result["provenance"]["static_digest_without_prompt"] == digest
+    table = format_markdown(result)
+    assert f"static inputs without the prompt `{digest}`" in table
+    assert older["provenance"]["static_digest"] not in table
+    assert (
+        "- Arm `v5`: prompt v5, `review/prompts/review.system.v5.md`, "
+        f"SHA-256 `{newer['provenance']['prompt_sha']}`."
+    ) in table
+    assert "Tokens in" in table
+    assert f"+{growth} " in table
+
+
+REST_OF_THE_INPUTS = "sha256-v1:" + "d" * 64
+
+
+def _prompt_report(
+    version: str,
+    *,
+    tokens: int = 1000,
+    arm: str = "none",
+    provenance: dict[str, str] | None = None,
+    run_metadata: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """A report of a prompt A/B: the prompt's fields follow ``version``, the rest is shared."""
+    return _report(
+        arm,
+        tp=2,
+        fp=2,
+        fn=6,
+        usage=_usage(tokens, "0.01"),
+        provenance={
+            "prompt_path": f"review/prompts/review.system.{version}.md",
+            "prompt_sha": version * 32,
+            "prompt_version": version,
+            "static_digest": f"sha256-v1:{version}",
+            **(provenance or {}),
+        },
+        run_metadata={"static_digest_without_prompt": REST_OF_THE_INPUTS, **(run_metadata or {})},
+    )
+
+
+def test_the_command_prints_a_prompt_ab_with_the_spread_of_tokens_and_their_delta(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    arguments = ["--markdown", "--baseline", "v3"]
+    for number, (label, tokens) in enumerate(
+        [("v3", 1000), ("v3", 3000), ("v5", 2500), ("v5", 3500)]
+    ):
+        path = _write(tmp_path, f"run-{number}", _prompt_report(label, tokens=tokens))
+        arguments += ["--run", f"{label}={path}"]
+
+    assert main(arguments) == 0
+
+    table = capsys.readouterr().out
+    assert "2000 (1000–3000)" in table
+    assert "3000 (2500–3500)" in table
+    assert "| v3 | +0.0 pp |" in table
+    assert "| +1000 | +0 | +0.000000 |" in table
+    assert "- Arm `v3`: prompt v3, `review/prompts/review.system.v3.md`, SHA-256 " in table
+    assert f"static inputs without the prompt `{REST_OF_THE_INPUTS}`" in table
+
+
+def test_two_files_of_one_version_compare_by_their_bytes(tmp_path: Path) -> None:
+    result = aggregate(
+        [
+            ("draft-a", _write(tmp_path, "a", _prompt_report("v6"))),
+            (
+                "draft-b",
+                _write(
+                    tmp_path,
+                    "b",
+                    _prompt_report(
+                        "v6", provenance={"prompt_sha": "e" * 64, "static_digest": "other"}
+                    ),
+                ),
+            ),
+        ]
+    )
+
+    assert [arm["prompt_version"] for arm in result["arms"]] == ["v6", "v6"]
+    assert [arm["prompt_sha"] for arm in result["arms"]] == ["v6" * 32, "e" * 64]
+
+
+def test_one_prompt_keeps_its_output_when_the_reports_carry_the_new_digest(tmp_path: Path) -> None:
+    """Policy arms of one prompt: they may differ in the arm, and one prompt describes them."""
+    result = aggregate(
+        [
+            ("none", _write(tmp_path, "none", _prompt_report("v5", arm="none"))),
+            ("valid", _write(tmp_path, "valid", _prompt_report("v5", arm="valid"))),
+        ]
+    )
+
+    assert result["provenance"]["prompt_version"] == "v5"
+    assert result["provenance"]["static_digest"] == "sha256-v1:v5"
+    assert "static_digest_without_prompt" not in result["provenance"]
+    assert "prompt v5, static `sha256-v1:v5`" in format_markdown(result)
+
+
+@pytest.mark.parametrize(
+    ("field", "provenance"),
+    [
+        ("prompt_version", {"prompt_version": "v5", "static_digest": "sha256-v1:v5"}),
+        # One version, other bytes: only the static digest tells them apart.
+        ("static_digest", {"static_digest": "sha256-v1:edited", "prompt_sha": "e" * 64}),
+    ],
+)
+def test_an_arm_that_mixes_prompts_is_refused(
+    tmp_path: Path, field: str, provenance: dict[str, str]
+) -> None:
+    first = _write(tmp_path, "first", _prompt_report("v3"))
+    mixed = _write(tmp_path, "mixed", _prompt_report("v3", provenance=provenance))
+    other = _write(tmp_path, "other", _prompt_report("v5"))
+
+    with pytest.raises(AbError) as raised:
+        aggregate([("v3", first), ("v3", mixed), ("v5", other)])
+
+    assert str(raised.value) == f"{mixed}: {field} differs from {first}"
+
+
+@pytest.mark.parametrize("positions", [(0,), (1,), (0, 1)])
+@pytest.mark.parametrize(
+    "broken",
+    [
+        lambda report: report["provenance"]["run_metadata"].pop("static_digest_without_prompt"),
+        lambda report: report["provenance"]["run_metadata"].update(
+            static_digest_without_prompt=None
+        ),
+        lambda report: report["provenance"]["run_metadata"].update(
+            static_digest_without_prompt="sha256-v1:short"
+        ),
+        lambda report: report["provenance"]["run_metadata"].pop("policy_arm"),
+        lambda report: report["provenance"]["run_metadata"].update(policy_arm="unknown"),
+        lambda report: report["provenance"].pop("prompt_path"),
+        lambda report: report["provenance"].pop("prompt_sha"),
+    ],
+)
+def test_a_prompt_ab_without_the_proof_is_refused(
+    tmp_path: Path, broken: Callable[[dict[str, Any]], object], positions: tuple[int, ...]
+) -> None:
+    reports = [_prompt_report("v3"), _prompt_report("v5")]
+    for position in positions:
+        broken(reports[position])
+    runs = [
+        ("v3", _write(tmp_path, "v3", reports[0])),
+        ("v5", _write(tmp_path, "v5", reports[1])),
+    ]
+
+    with pytest.raises(AbError) as raised:
+        aggregate(runs)
+
+    assert str(raised.value) == (
+        f"{runs[positions[0]][1]}: the arms differ in prompt_version or static_digest, and this "
+        "report lacks a valid prompt_path, prompt_sha, run_metadata.policy_arm or "
+        "run_metadata.static_digest_without_prompt to prove that only the prompt differs; "
+        "capture both arms again"
+    )
+
+
+def test_a_prompt_ab_with_another_digest_of_the_rest_is_refused(tmp_path: Path) -> None:
+    first = _write(tmp_path, "v3", _prompt_report("v3"))
+    other = _write(
+        tmp_path,
+        "v5",
+        _prompt_report(
+            "v5", run_metadata={"static_digest_without_prompt": "sha256-v1:" + "f" * 64}
+        ),
+    )
+
+    with pytest.raises(AbError) as raised:
+        aggregate([("v3", first), ("v5", other)])
+
+    assert str(raised.value) == (
+        f"{other}: static inputs other than the prompt differ from {first}; "
+        "capture both arms from one ref"
+    )
+
+
+def test_a_prompt_ab_across_policy_arms_is_refused(tmp_path: Path) -> None:
+    first = _write(tmp_path, "v3", _prompt_report("v3", arm="legacy"))
+    other = _write(tmp_path, "v5", _prompt_report("v5", arm="none"))
+
+    with pytest.raises(AbError) as raised:
+        aggregate([("v3", first), ("v5", other)])
+
+    assert str(raised.value) == f"{other}: run_metadata.policy_arm differs from {first}"
+
+
+@pytest.mark.parametrize(
+    ("field", "provenance", "run_metadata"),
+    [
+        ("model_id", {"model_id": "model-b"}, {}),
+        ("corpus_digest", {"corpus_digest": "other"}, {}),
+        ("run_metadata.engine", {}, {"engine": "deep"}),
+        ("run_metadata.effective_settings", {}, {"effective_settings": {"temperature": 1}}),
+        ("run_metadata.fallback_model_id", {}, {"fallback_model_id": "model-c"}),
+    ],
+)
+def test_a_prompt_ab_keeps_the_other_inputs_of_the_experiment_equal(
+    tmp_path: Path, field: str, provenance: dict[str, str], run_metadata: dict[str, Any]
+) -> None:
+    first = _write(tmp_path, "v3", _prompt_report("v3"))
+    other = _write(
+        tmp_path, "v5", _prompt_report("v5", provenance=provenance, run_metadata=run_metadata)
+    )
+
+    with pytest.raises(AbError) as raised:
+        aggregate([("v3", first), ("v5", other)])
+
+    assert str(raised.value) == f"{other}: {field} differs from {first}"
+
+
+@pytest.mark.parametrize("one_byte_changed", [False, True])
+def test_a_capture_with_another_static_input_changed_is_refused(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    prompt_root: Path,
+    prompt_reports: dict[str, dict[str, Any]],
+    one_byte_changed: bool,
+) -> None:
+    """The same second arm from a copy of the repository: the copy passes, one byte does not."""
+    repo = tmp_path / "repo"
+    for relative in [
+        *prompt_reports["v5"]["provenance"]["static_inputs"],
+        "review/eval/pr-commit-messages.json",
+    ]:
+        destination = repo / relative
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(REPO_ROOT / relative, destination)
+    if one_byte_changed:
+        changed = repo / "app/bootstrap/llm_gateway.py"
+        changed.write_bytes(changed.read_bytes() + b"\n")
+    monkeypatch.setattr(eval_live, "REPO_ROOT", repo)
+    second = _capture(
+        prompt_root,
+        tmp_path / "second",
+        repo / SYSTEM_V5.relative_to(REPO_ROOT),
+        repo=repo,
+    )
+    runs = [
+        ("v3", _write(tmp_path, "v3", prompt_reports["v3"])),
+        ("v5", _write(tmp_path, "v5", second)),
+    ]
+
+    if not one_byte_changed:
+        assert [arm["label"] for arm in aggregate(runs)["arms"]] == ["v3", "v5"]
+        return
+    with pytest.raises(AbError) as raised:
+        aggregate(runs)
+    assert str(raised.value) == (
+        f"{runs[1][1]}: static inputs other than the prompt differ from {runs[0][1]}; "
+        "capture both arms from one ref"
+    )

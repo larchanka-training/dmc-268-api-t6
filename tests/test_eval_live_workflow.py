@@ -202,16 +202,31 @@ def test_summary_uses_replay_metrics_without_model_diagnostics(tmp_path: Path) -
 
 
 @pytest.mark.parametrize(
-    ("review_prompt", "corpus", "rag_arm", "heading"),
+    ("review_prompt", "prompt_file", "corpus", "rag_arm", "heading"),
     [
-        ("v4", "main", "none", "Review prompt: v4\n\nCorpus: main\n\nRAG arm: n/a\n\n"),
-        ("v5", "rules", "none", "Review prompt: v5\n\nCorpus: rules\n\nRAG arm: n/a\n\n"),
-        ("v5", "rag", "none", "Review prompt: v5\n\nCorpus: rag\n\nRAG arm: none\n\n"),
-        ("v5", "rag", "graph", "Review prompt: v5\n\nCorpus: rag\n\nRAG arm: graph\n\n"),
+        ("v4", "", "main", "none", "Review prompt: v4\n\nCorpus: main\n\nRAG arm: n/a\n\n"),
+        ("v5", "", "rules", "none", "Review prompt: v5\n\nCorpus: rules\n\nRAG arm: n/a\n\n"),
+        ("v5", "", "rag", "none", "Review prompt: v5\n\nCorpus: rag\n\nRAG arm: none\n\n"),
+        ("v5", "", "rag", "graph", "Review prompt: v5\n\nCorpus: rag\n\nRAG arm: graph\n\n"),
+        (
+            "v3",
+            "review/prompts/review.system.v6.md",
+            "main",
+            "none",
+            "Review prompt: review/prompts/review.system.v6.md\n\nCorpus: main\n\nRAG arm: n/a\n\n",
+        ),
+        # The summary runs after a refused input too, so the free text must stay inert.
+        (
+            "v3",
+            "<b>.md",
+            "main",
+            "none",
+            "Review prompt: &lt;b&gt;.md\n\nCorpus: main\n\nRAG arm: n/a\n\n",
+        ),
     ],
 )
 def test_summary_names_the_selected_prompt_without_a_report(
-    tmp_path: Path, review_prompt: str, corpus: str, rag_arm: str, heading: str
+    tmp_path: Path, review_prompt: str, prompt_file: str, corpus: str, rag_arm: str, heading: str
 ) -> None:
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
@@ -229,6 +244,7 @@ def test_summary_names_the_selected_prompt_without_a_report(
             "RUNNER_TEMP": str(tmp_path),
             "GITHUB_STEP_SUMMARY": str(summary),
             "EVAL_REVIEW_PROMPT": review_prompt,
+            "EVAL_REVIEW_PROMPT_FILE": prompt_file,
             "EVAL_CORPUS": corpus,
             "EVAL_RAG_ARM": rag_arm,
         },
@@ -331,8 +347,32 @@ def _assert_selection_contract(text: str) -> None:
     assert "      EVAL_POLICY_ARM: ${{ inputs.policy_arm || 'legacy' }}\n" in text
     assert "      EVAL_REVIEW_PROMPT: ${{ inputs.review_prompt || 'v3' }}\n" in text
     assert "      EVAL_RAG_ARM: ${{ inputs.rag_arm || 'none' }}\n" in text
+    # A free-text path, so it is checked in the shell before anything costs money (#317).
+    assert (
+        "      review_prompt_file:\n"
+        '        description: "Review prompt file for an A/B of prompt versions: directly in '
+        'review/prompts/, with key review.system; overrides review_prompt (not with corpus rag)"\n'
+        "        required: false\n"
+        "        type: string\n"
+        "\n"
+        "permissions:\n"
+    ) in text
+    assert "      EVAL_REVIEW_PROMPT_FILE: ${{ inputs.review_prompt_file }}\n" in text
+    assert (
+        "      - name: Install dependencies\n"
+        "        run: uv sync --locked --all-groups\n\n"
+        "      - name: Validate review prompt file\n"
+        "        shell: bash\n"
+    ) in text
+    assert (
+        '          if [[ ! "$file" =~ ^review/prompts/[A-Za-z0-9][A-Za-z0-9._-]*\\.md$ ]]; then\n'
+    ) in text
+    assert '          if [[ -L "$file" || ! -f "$file" ]]; then\n' in text
+    assert '          if [[ "$key" != review.system ]]; then\n' in text
+    assert '          if [[ "${EVAL_CORPUS:-}" == rag ]]; then\n' in text
+    assert '            system="$EVAL_REVIEW_PROMPT_FILE"\n' in text
     bodies = _run_bodies(text)
-    assert len(bodies) == 7
+    assert len(bodies) == 8
     assert not [body for body in bodies if "${{" in body]
     assert (
         'validate_dataset.py --root "$RUNNER_TEMP/eval-corpus" --final "${profile[@]}"\n'
@@ -341,8 +381,9 @@ def _assert_selection_contract(text: str) -> None:
     assert "            profile=(--profile rag)\n" in text
     assert '            rag=(--rag-arm "$EVAL_RAG_ARM")\n' in text
     assert "            rag) cases=test-prs-dataset/rag/cases ;;\n" in text
+    assert '          system="review/prompts/review.system.$EVAL_REVIEW_PROMPT.md"\n' in text
     assert (
-        '            --system "review/prompts/review.system.$EVAL_REVIEW_PROMPT.md" \\\n'
+        '            --system "$system" \\\n'
         '            --policy-arm "$EVAL_POLICY_ARM" \\\n'
         '            "${rag[@]}" \\\n'
     ) in text
@@ -407,11 +448,24 @@ def test_manual_workflow_security_and_selection_contract() -> None:
             "    type: string\n        options:\n          - v3",
         ),
         ("${{ inputs.review_prompt || 'v3' }}", "v3"),
-        ('            --system "review/prompts/review.system.$EVAL_REVIEW_PROMPT.md" \\\n', ""),
+        ('            --system "$system" \\\n', ""),
         (
-            '--system "review/prompts/review.system.$EVAL_REVIEW_PROMPT.md"',
-            '--system "review/prompts/review.system.${{ inputs.review_prompt }}.md"',
+            'system="review/prompts/review.system.$EVAL_REVIEW_PROMPT.md"',
+            'system="review/prompts/review.system.${{ inputs.review_prompt }}.md"',
         ),
+        ("      review_prompt_file:\n", "      prompt_file:\n"),
+        (
+            "        type: string\n\npermissions:",
+            "        type: string\n        default: review/prompts/review.system.v5.md\n\n"
+            "permissions:",
+        ),
+        ("${{ inputs.review_prompt_file }}", "review/prompts/review.system.v5.md"),
+        ('system="$EVAL_REVIEW_PROMPT_FILE"', 'system="${{ inputs.review_prompt_file }}"'),
+        ("      - name: Validate review prompt file\n", "      - name: Check prompt\n"),
+        ("^review/prompts/[A-Za-z0-9][A-Za-z0-9._-]*", "^[A-Za-z0-9/][A-Za-z0-9._/-]*"),
+        ('if [[ -L "$file" || ! -f "$file" ]]; then', 'if [[ ! -f "$file" ]]; then'),
+        ('if [[ "$key" != review.system ]]; then', 'if [[ -z "$key" ]]; then'),
+        ('if [[ "${EVAL_CORPUS:-}" == rag ]]; then', 'if [[ "${EVAL_CORPUS:-}" == none ]]; then'),
         ('summary.write(f"Review prompt: {prompt}\\n\\n")', ""),
         ('summary.write(f"Corpus: {corpus}\\n\\n")', ""),
         ('summary.write(f"RAG arm: {rag_arm}\\n\\n")', ""),
@@ -889,6 +943,130 @@ def test_evaluate_a_rag_run_passes_the_arm_the_v5_prompt_and_policy_none(
         str(tmp_path / "eval-response-metadata"),
     ]
     assert "--engine" not in args
+
+
+def _selection(prompt_file: str | None) -> dict[str, str]:
+    file = {} if prompt_file is None else {"EVAL_REVIEW_PROMPT_FILE": prompt_file}
+    return {
+        "EVAL_CORPUS": "main",
+        "EVAL_POLICY_ARM": "none",
+        "EVAL_REVIEW_PROMPT": "v4",
+        "EVAL_RAG_ARM": "none",
+        **file,
+    }
+
+
+def test_evaluate_sends_the_review_prompt_file_instead_of_the_chosen_prompt(tmp_path: Path) -> None:
+    args = _evaluate_args(tmp_path, _selection("review/prompts/review.system.v6.md"))
+
+    assert args.count("--system") == 1
+    assert args[args.index("--system") + 1] == "review/prompts/review.system.v6.md"
+
+
+@pytest.mark.parametrize("prompt_file", [None, ""])
+def test_evaluate_without_the_input_keeps_the_chosen_prompt(
+    tmp_path: Path, prompt_file: str | None
+) -> None:
+    args = _evaluate_args(tmp_path, _selection(prompt_file))
+
+    assert args[args.index("--system") + 1] == "review/prompts/review.system.v4.md"
+
+
+def _prompt_tree(root: Path) -> None:
+    prompts = root / "review/prompts"
+    (prompts / "drafts").mkdir(parents=True)
+    (root / "other").mkdir()
+    system = "---\nkey: review.system\nversion: 6\n---\nBody\n"
+    (prompts / "review.system.v6.md").write_text(system)
+    # The key need not come first; repository rules only demand that it is in the front matter.
+    (prompts / "key-last.md").write_text("---\nversion: 6\nkey: review.system\n---\nBody\n")
+    (prompts / "drafts/review.system.v6.md").write_text(system)
+    (root / "other/review.system.v6.md").write_text(system)
+    (prompts / "review.conventions.v2.md").write_text("---\nkey: review.conventions\n---\nBody\n")
+    (prompts / "review.verifier.v2.md").write_text("---\nkey: review.verifier\n---\nBody\n")
+    (prompts / "no-front-matter.md").write_text("key: review.system\n")
+    (prompts / "key-in-the-body.md").write_text("---\nversion: 6\n---\nkey: review.system\n")
+    (prompts / "link.md").symlink_to("review.system.v6.md")
+
+
+@pytest.mark.parametrize(
+    "prompt_file", ["", "review/prompts/review.system.v6.md", "review/prompts/key-last.md"]
+)
+def test_validate_accepts_a_review_system_prompt_or_no_input(
+    tmp_path: Path, prompt_file: str
+) -> None:
+    _prompt_tree(tmp_path)
+
+    result = _run(
+        "Validate review prompt file",
+        tmp_path,
+        {"EVAL_CORPUS": "main", "EVAL_REVIEW_PROMPT_FILE": prompt_file},
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize(
+    ("prompt_file", "refusal"),
+    [
+        ("/etc/passwd", "directly in review/prompts/"),
+        ("../review/prompts/review.system.v6.md", "directly in review/prompts/"),
+        ("review/prompts/../prompts/review.system.v6.md", "directly in review/prompts/"),
+        ("review/prompts/drafts/review.system.v6.md", "directly in review/prompts/"),
+        ("other/review.system.v6.md", "directly in review/prompts/"),
+        ("review/prompts/review.system.v6.txt", "directly in review/prompts/"),
+        ("review/prompts/review.system.v6.md\n--root=/x", "directly in review/prompts/"),
+        ("review/prompts/x.md\n::error::forged", "directly in review/prompts/"),
+        ("review/prompts/missing.md", "regular file"),
+        ("review/prompts/link.md", "regular file"),
+        ("review/prompts/review.conventions.v2.md", "key review.system"),
+        ("review/prompts/review.verifier.v2.md", "key review.system"),
+        ("review/prompts/no-front-matter.md", "key review.system"),
+        ("review/prompts/key-in-the-body.md", "key review.system"),
+    ],
+)
+def test_validate_refuses_anything_but_a_review_system_prompt_file(
+    tmp_path: Path, prompt_file: str, refusal: str
+) -> None:
+    _prompt_tree(tmp_path)
+
+    result = _run(
+        "Validate review prompt file",
+        tmp_path,
+        {"EVAL_CORPUS": "main", "EVAL_REVIEW_PROMPT_FILE": prompt_file},
+    )
+
+    assert result.returncode == 1
+    assert refusal in result.stderr
+    # Free text in a workflow command could forge an annotation: no error quotes the input.
+    assert prompt_file not in result.stderr
+
+
+@pytest.mark.parametrize(
+    "prompt", sorted(path.name for path in (REPO_ROOT / "review/prompts").glob("*.md"))
+)
+def test_validate_tells_the_checked_in_prompts_apart_by_their_key(prompt: str) -> None:
+    result = _run(
+        "Validate review prompt file",
+        REPO_ROOT,
+        {"EVAL_CORPUS": "main", "EVAL_REVIEW_PROMPT_FILE": f"review/prompts/{prompt}"},
+    )
+
+    assert result.returncode == (0 if prompt.startswith("review.system.") else 1), result.stderr
+
+
+def test_validate_refuses_the_file_input_on_the_rag_corpus(tmp_path: Path) -> None:
+    """The guard of the corpus step reads review_prompt only, and the RAG arms fix v5."""
+    _prompt_tree(tmp_path)
+
+    result = _run(
+        "Validate review prompt file",
+        tmp_path,
+        {"EVAL_CORPUS": "rag", "EVAL_REVIEW_PROMPT_FILE": "review/prompts/review.system.v6.md"},
+    )
+
+    assert result.returncode == 1
+    assert "corpus rag fixes review_prompt v5" in result.stderr
 
 
 @pytest.mark.parametrize("corpus", ["main", "rules"])

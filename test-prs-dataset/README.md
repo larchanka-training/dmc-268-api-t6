@@ -1191,7 +1191,8 @@ uv run python review/scripts/eval_ab.py --baseline none --markdown \
 numerator and denominator, and the delta of each mean against the baseline arm. Labels
 are free-form, so another experiment can add an arm (`rag`, #146); a label that is a
 policy arm must match the arm the report was captured with. It refuses reports that
-differ in model, prompt version, static or corpus digest, recorded engine, effective
+differ in model, prompt version or static digest (unless the arms
+[compare prompts](#ab-of-prompt-versions-317)), corpus digest, recorded engine, effective
 settings or fallback model, a capture that is not publishable, a report without these
 fields or with non-integer counts or malformed usage, and the same report content given
 twice; it warns when only some runs of an arm carry usage, and notes under the table that
@@ -1201,6 +1202,61 @@ other than `legacy`: v3 tells the model that only `<custom_instructions>` instru
 v3 the effect is about zero by construction. The AC8 runs used `review_prompt=v5` (#144
 part 3b); their results are in
 [RULES_MD_TEST_REPORT](../docs/test-plan/RULES_MD_TEST_REPORT.md#ac8--живой-ab-на-v5).
+
+### A/B of prompt versions (#317)
+
+An A/B of two `review.system` prompts changes the prompt file and nothing else. Run it in the
+manual workflow:
+
+1. Put every prompt file on one branch and capture **both arms from that one ref**. The other
+   static inputs, `eval_live.py` among them, must be the same in both arms.
+2. Dispatch **three runs per arm**, one at a time, with the same `corpus`, `model` and
+   `policy_arm`. **Both arms take the same `policy_arm`.** On the gold corpus that is `legacy` or
+   `none`; `valid` and `malicious` need a corpus with policy arms. The table below says which
+   prompt each arm takes.
+3. Select the prompt with `review_prompt`, or with `review_prompt_file` for a file the choice does
+   not list. That input takes a file directly in `review/prompts/` with `key: review.system`. It
+   overrides `review_prompt` and is refused with corpus `rag`, whose arms fix v5. Left empty, it
+   changes nothing.
+4. Aggregate the downloaded reports. Name the arms after the prompts: a label that is a policy
+   arm must match the arm the report was captured with.
+
+The recorder decides by the `version:` line of the file, before any call:
+
+| `version:` of the file | `legacy` | `none` |
+| ---------------------- | -------- | ------ |
+| v1, v3 (no pin) | any bytes | any bytes |
+| v2 (pinned) | any bytes | the pinned bytes only |
+| v4, v5 (pinned, snapshot path) | refused | the pinned bytes only |
+| any other, such as a draft v6 | taken, with the legacy envelope and answer schema | refused: no known answer schema |
+
+So a draft cannot be measured on the snapshot path yet: an edited v5 fails its pin and a new version
+has no answer schema under `none`, and `legacy` shows it no snapshot. It needs its pin and answer
+schema in the code first (`PINNED_PROMPT_CHECKSUMS`, `SNAPSHOT_REVIEW_PROMPT_VERSIONS`), which is
+separate work.
+
+```sh
+uv run python review/scripts/eval_ab.py --baseline v3 --markdown \
+  --run v3=r1.json --run v3=r2.json --run v3=r3.json \
+  --run v5=r4.json --run v5=r5.json --run v5=r6.json
+```
+
+The prompt file is itself a static input, so `static_digest` always differs between two prompts.
+What proves the rest equal is `run_metadata.static_digest_without_prompt`, the digest of the paths
+and bytes of every other static input, which every capture has recorded since #317. The output
+names each arm's prompt version, path and SHA-256 instead of one prompt and one static digest; its
+tables are the usual ones, with Tokens in and the delta against the baseline arm. `eval_ab.py`
+refuses a report without that digest (a capture from before #317: capture both arms again) or
+without a recorded `policy_arm`, another digest, another `policy_arm`, the differences listed above
+other than the prompt's, and an arm whose runs mix prompts.
+
+With 24 cases and a few TPs, one capture against another is noise: compare the min and max over the
+repeated captures, not only the means.
+
+Recording the digest changed `review/scripts/eval_live.py`, which is a static input. Replay of the
+committed baseline therefore still prints `Static input digest mismatch; refresh the complete
+baseline`, as `main` did before this change, with the same metrics and no path-set warning. The
+committed manifest stays as recorded and has no such digest; the next complete capture will.
 
 ### Service defaults in the policy arms
 
