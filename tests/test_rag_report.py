@@ -25,6 +25,7 @@ ROOT = Path(__file__).resolve().parents[1]
 GATE = ROOT / "test-prs-dataset" / "rag" / "reports" / "gate.json"
 REPORT = ROOT / "docs" / "test-plan" / "RAG_V1_CONTRIBUTION_REPORT.md"
 CAPTURES = ROOT / "test-prs-dataset" / "rag" / "responses"
+CASES = ROOT / "test-prs-dataset" / "rag" / "cases"
 ORACLE = ROOT / "test-prs-dataset" / "rag" / "oracle" / "hallucination.json"
 RUN_IDS = {  # test-prs-dataset/rag/README.md "Captures"
     "A-run1": "41720614606",
@@ -34,6 +35,9 @@ RUN_IDS = {  # test-prs-dataset/rag/README.md "Captures"
     "B-run2": "41724449009",
     "B-run3": "41725470313",
 }
+STATIC_DRIFT_WARNINGS = [  # two static inputs changed on main after the recording (report §1)
+    f"{run}: Static input digest mismatch; refresh the complete baseline" for run in RUN_IDS
+]
 RUN_METRICS = ("recall", "precision", "hallucination", "critical_recall", "validity")
 ARM_ROWS: dict[str, Callable[[dict[str, Any]], str]] = {  # report row label -> arm value text
     "| Recall, среднее": lambda arm: str(arm["recall_mean"]["exact"]),
@@ -151,13 +155,13 @@ def test_each_injection_row_carries_its_finding_and_anchor() -> None:
         (("conditions", "precision", "exact"), "-2575/459"),
         (("conditions", "tokens", "exact"), "4316/4239"),
         (("conditions", "injections", "exact"), "3"),
-        (("conditions", "hallucination", "exact"), "1375/459"),
-        (("conditions", "hallucination", "status"), "fail"),
+        (("conditions", "hallucination", "exact"), "-125/51"),
+        (("conditions", "hallucination", "status"), "pass"),
         (("oracle", "present"), True),
         (("oracle", "runs_covered"), 6),
-        (("arms", "rag_off", "hallucination_mean", "exact"), "13/108"),
-        (("arms", "rag_on", "hallucination_mean", "exact"), "23/153"),
-        (("warnings",), []),
+        (("arms", "rag_off", "hallucination_mean", "exact"), "35/108"),
+        (("arms", "rag_on", "hallucination_mean", "exact"), "275/918"),
+        (("warnings",), STATIC_DRIFT_WARNINGS),
         (("arms", "rag_off", "recall_mean", "exact"), "1/30"),
         (("arms", "rag_on", "recall_mean", "exact"), "7/30"),
     ],
@@ -205,8 +209,8 @@ def test_the_report_provenance_is_that_of_the_capture_manifests() -> None:
         _assert_row("| Индекс RAG", [manifest["run_metadata"]["rag_index_digest"]])
 
 
-def _confirmed_hallucinations() -> list[tuple[str, str, int, str]]:
-    """``(run, case, finding index, "path:line")`` of every entry of the committed oracle."""
+def _confirmed_hallucinations() -> list[tuple[str, str, int, str, str]]:
+    """``(run, case, finding index, "path:line", title)`` of every entry of the committed oracle."""
     oracle = json.loads(ORACLE.read_text(encoding="utf-8"))
     confirmed = []
     for run_id, entry in oracle["runs"].items():
@@ -216,7 +220,9 @@ def _confirmed_hallucinations() -> list[tuple[str, str, int, str]]:
             )
             finding = answer["findings"][item["finding_index"]]
             anchor = f"{finding['path']}:{finding['line']}"
-            confirmed.append((run_id, item["case_id"], item["finding_index"], anchor))
+            confirmed.append(
+                (run_id, item["case_id"], item["finding_index"], anchor, finding["title"])
+            )
     return confirmed
 
 
@@ -244,8 +250,16 @@ def test_the_gate_numerators_are_the_oracle_entry_counts_per_run() -> None:
 def test_the_report_lists_each_confirmed_hallucination_with_its_anchor_and_no_other() -> None:
     confirmed = _confirmed_hallucinations()
 
-    for run_id, case_id, index, anchor in confirmed:
-        _assert_row(f"| {run_id} | {case_id} #{index} |", [f"`{anchor}`"])
+    for run_id, case_id, index, anchor, title in confirmed:
+        assert (CASES / case_id).is_dir(), case_id
+        _assert_row(
+            f"| {run_id} | {case_id} #{index} |",
+            [
+                f"`{anchor}`",
+                title.replace("|", "\\|"),
+                f"](../../test-prs-dataset/rag/cases/{case_id}/)",
+            ],
+        )
     listed = [
         row
         for row in REPORT.read_text(encoding="utf-8").splitlines()
