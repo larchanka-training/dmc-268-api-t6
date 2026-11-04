@@ -1,5 +1,7 @@
 """What the contract says a null `RawFileDiff.patch` means (#222)."""
 
+from __future__ import annotations
+
 from pathlib import Path
 
 from openapi_spec_validator.readers import read_from_filename
