@@ -104,7 +104,13 @@ def test_cli_captures_default_v3_and_explicit_v2_prompt_provenance(
     assert manifest["prompt_version"] == expected_version
     assert manifest["prompt_sha"] == expected_sha
     prompt_pins = [path for path in manifest["static_inputs"] if path.startswith("review/prompts/")]
-    assert prompt_pins == [expected_path]
+    assert prompt_pins == sorted(
+        [
+            expected_path,
+            "review/prompts/review.verifier.v1.md",
+            "review/prompts/review.verifier.v2.md",
+        ]
+    )
     assert len(transport.requests) == 1
     assert (
         transport.requests[0].messages[0].content
