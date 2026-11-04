@@ -1,8 +1,60 @@
-"""Move-only baseline BuildRepositoryIndex tests."""
+"""Use case `BuildRepositoryIndex` against fakes of its ports (#142).
+
+AC5: every mode decision. AC7: no transaction is open during a VCS call. AC8: every code,
+and an empty repository without an error. AC12: a CAS miss, a lost lease, the soft cutoff
+and a target change. AC3: the skip counters equal literals.
+"""
 
 from __future__ import annotations
 
-from tests.build_repository_index_base_support import (
+import asyncio
+from collections.abc import AsyncIterator, Mapping, Set
+from dataclasses import dataclass, field, replace
+from typing import cast
+from uuid import UUID
+
+import httpx
+import pytest
+
+from app.modules.code_index.application import build_index
+from app.modules.code_index.application.build_index import (
+    BuildMode,
+    BuildStatus,
+    FullBuildReason,
+    limits_profile_version,
+    parser_profile_version,
+)
+from app.modules.code_index.application.exclusions import ExclusionClass
+from app.modules.code_index.application.index_store import (
+    ClaimRefusal,
+    ClaimRefused,
+    ImportRecord,
+    IndexBuildStats,
+    IndexState,
+)
+from app.modules.code_index.application.vcs import (
+    Ancestry,
+    ArchiveEntry,
+    ArchiveScan,
+    ChangedPath,
+    ChangeStatus,
+    Comparison,
+    SourceArchive,
+)
+from app.modules.code_index.infrastructure.bitbucket_snapshot_source import (
+    BitbucketRepositorySnapshotSource,
+)
+from app.modules.code_index.infrastructure.tar_archive import TarArchiveReader
+from app.modules.integrations.bitbucket.application.request_credentials import (
+    BitbucketRequestCredential,
+    BoundBitbucketTarget,
+)
+from app.modules.reviews.application.ast_resolution import ImportResolution
+from app.modules.reviews.application.review_ignore import (
+    IgnoreMatcher,
+    IgnorePolicy,
+)
+from tests.build_repository_index_fakes import (
     _ADMISSION,
     _CLI,
     _DIGEST,
@@ -21,47 +73,18 @@ from tests.build_repository_index_base_support import (
     _TREE,
     _VERSIONS,
     _VIEWS,
-    Ancestry,
-    ArchiveEntry,
     Archives,
-    ArchiveScan,
-    AsyncIterator,
-    BuildMode,
-    BuildStatus,
-    ChangeStatus,
-    ClaimRefusal,
-    ClaimRefused,
-    Comparison,
-    ExclusionClass,
-    FullBuildReason,
-    IgnoreMatcher,
-    IgnorePolicy,
-    ImportRecord,
-    ImportResolution,
-    IndexBuildStats,
-    IndexState,
     Link,
-    Mapping,
     Repositories,
-    Set,
     Source,
-    SourceArchive,
     Tree,
     _blob,
     _changed,
     _comparison,
-    _go_mod,
     _incremental_world,
     _indexed,
     _state,
     _world,
-    build_index,
-    dataclass,
-    field,
-    limits_profile_version,
-    parser_profile_version,
-    pytest,
-    replace,
 )
 
 
@@ -169,6 +192,14 @@ def test_a_full_build_over_a_published_index_passes_the_indexed_commit_as_its_ba
     assert (outcome.mode, outcome.full_reason) == (BuildMode.FULL, FullBuildReason.PROFILE_CHANGED)
     assert world.store.publications[0]["base_commit_sha"] == _OLD
     assert world.network() == ["head", "archive"]
+
+
+def _go_mod(
+    path: str = "go.mod",
+    status: ChangeStatus = ChangeStatus.MODIFIED,
+    previous_path: str | None = None,
+) -> ChangedPath:
+    return ChangedPath(path, status, previous_path)
 
 
 @pytest.mark.parametrize(
@@ -406,6 +437,176 @@ def test_sparse_incremental_build_does_not_fetch_unchanged_100_file_archive(
     assert world.store.publications[0]["full"] is False
 
 
+def test_bitbucket_201_file_build_then_one_file_push_reads_one_changed_blob() -> None:
+    files = {f"f{i:03}.py": b"value = 1\n" for i in range(201)}
+    target = BoundBitbucketTarget(UUID(int=1), _REPO, UUID(int=2), UUID(int=3), 1, 1)
+    head_sha = _OLD
+    listing_requests: list[str] = []
+    raw_reads: list[str] = []
+    metadata_reads: list[str] = []
+
+    class Published:
+        manifest: dict[str, ArchiveEntry] | None = None
+        sha: str | None = None
+
+        async def load(
+            self, bound: BoundBitbucketTarget, base_sha: str
+        ) -> Mapping[str, ArchiveEntry] | None:
+            assert bound == target
+            return self.manifest if self.sha == base_sha else None
+
+        async def save(
+            self,
+            bound: BoundBitbucketTarget,
+            commit_sha: str,
+            entries: Mapping[str, ArchiveEntry],
+        ) -> bool:
+            assert bound == target
+            self.sha = commit_sha
+            self.manifest = dict(entries)
+            return True
+
+    published = Published()
+
+    class Credentials:
+        async def credential_for(self, bound: BoundBitbucketTarget) -> BitbucketRequestCredential:
+            assert bound == target
+            return BitbucketRequestCredential(bound, "test-token")
+
+        async def checkpoint(self, bound: BoundBitbucketTarget) -> None:
+            assert bound == target
+
+    async def resolve_target() -> BoundBitbucketTarget:
+        return target
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        assert request.url.host == "api.bitbucket.org"
+        if path.endswith(f"{{{target.repository_uuid}}}/"):
+            return httpx.Response(
+                200,
+                json={
+                    "uuid": "{" + str(target.repository_uuid) + "}",
+                    "mainbranch": {"name": "main"},
+                },
+            )
+        if path.endswith("/refs/branches/main"):
+            return httpx.Response(200, json={"target": {"hash": head_sha}})
+        if path.endswith(f"/merge-base/{_OLD}..{_HEAD}"):
+            return httpx.Response(200, json={"hash": _OLD})
+        if path.endswith(f"/diffstat/{_OLD}..{_HEAD}"):
+            return httpx.Response(
+                200,
+                json={
+                    "size": 1,
+                    "values": [
+                        {
+                            "status": "modified",
+                            "old": {"path": "f000.py"},
+                            "new": {"path": "f000.py"},
+                        }
+                    ],
+                },
+            )
+        if path.endswith(f"/src/{head_sha}/"):
+            listing_requests.append(path)
+            page = int(request.url.params.get("page", "1"))
+            names = sorted(files)[(page - 1) * 100 : page * 100]
+            payload: dict[str, object] = {
+                "size": 201,
+                "values": [
+                    {
+                        "path": name,
+                        "type": "commit_file",
+                        "size": len(files[name]),
+                        "commit": {"hash": head_sha},
+                    }
+                    for name in names
+                ],
+            }
+            if page < 3:
+                payload["next"] = f"https://api.bitbucket.org{path}?pagelen=100&page={page + 1}"
+            return httpx.Response(200, json=payload)
+        if request.url.params.get("format") == "meta":
+            name = path.rsplit("/", 1)[-1]
+            metadata_reads.append(name)
+            return httpx.Response(
+                200,
+                json={
+                    "path": name,
+                    "type": "commit_file",
+                    "size": len(files[name]),
+                    "commit": {"hash": head_sha},
+                    "attributes": [],
+                },
+            )
+        if f"/src/{head_sha}/" in path:
+            name = path.rsplit("/", 1)[-1]
+            raw_reads.append(name)
+            return httpx.Response(200, content=files[name])
+        raise AssertionError(path)
+
+    async def scenario() -> None:
+        nonlocal head_sha
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
+            world = _world(files)
+            world.archives = cast(Archives, TarArchiveReader(_LIMITS))
+
+            def source() -> BitbucketRepositorySnapshotSource:
+                return BitbucketRepositorySnapshotSource(
+                    client=client,
+                    target_for_repository=resolve_target,
+                    credentials=Credentials(),
+                    limits=_LIMITS,
+                    published_manifest=published,
+                )
+
+            world.source = cast(Source, source())
+            full = await world.use_case().execute(_REPO, _GENERATION)
+            assert full.status is BuildStatus.PUBLISHED
+            assert full.mode is BuildMode.FULL
+            assert full.written_files == 201
+            assert (
+                full.listing_request_count,
+                full.metadata_request_count,
+                full.raw_read_count,
+            ) == (3, 2, 201)
+            assert (len(listing_requests), len(raw_reads)) == (3, 201)
+            assert published.sha == _OLD
+            assert published.manifest is not None and len(published.manifest) == 201
+
+            world.store.files = {file.path: file.blob_sha for _, file in world.store.written}
+            world.store.state = _state(indexed_commit_sha=_OLD, file_count=201)
+            world.store.written.clear()
+            world.store.publications.clear()
+            files["f000.py"] = b"value = 2\n"
+            head_sha = _HEAD
+            listing_requests.clear()
+            raw_reads.clear()
+            metadata_reads.clear()
+            world.source = cast(Source, source())
+
+            update = await world.use_case().execute(_REPO, _GENERATION)
+            assert update.status is BuildStatus.PUBLISHED
+            assert update.mode is BuildMode.INCREMENTAL
+            assert (update.written_files, update.deleted_files) == (1, 0)
+            assert (
+                update.listing_request_count,
+                update.metadata_request_count,
+                update.raw_read_count,
+            ) == (0, 5, 1)
+            assert (len(listing_requests), metadata_reads, raw_reads) == (
+                0,
+                ["f000.py"],
+                ["f000.py"],
+            )
+            assert world.written() == ["f000.py"]
+            assert world.store.publications[0]["full"] is False
+            assert world.store.publications[0]["deleted_paths"] == ()
+
+    asyncio.run(scenario())
+
+
 def test_an_incremental_build_also_rewrites_a_stored_file_whose_blob_differs() -> None:
     stored = {**_indexed(_HEAD_TREE), "app/views.py": "f" * 40}
     world = _world(
@@ -565,3 +766,7 @@ def test_a_publication_miss_wakes_the_repository() -> None:
     assert outcome.status is BuildStatus.REWAKE
     assert world.wakeups.woken == [(_REPO, _GENERATION)]
     assert world.store.releases == []
+
+
+# The target of the claim snapshot, the target on the state row at the end, and whether
+# it moved: only a row that differs from the snapshot wakes the repository.

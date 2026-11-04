@@ -146,6 +146,14 @@ class ReceiptStore:
         row.projected = True
         row.claim_token = None
 
+    async def retry_push_continuation(
+        self, delivery_id: str, token: UUID, retry_after: datetime
+    ) -> None:
+        raise AssertionError("GitHub full path must not continue a Bitbucket push")
+
+    async def fail_push_candidates(self, delivery_id: str, token: UUID, at: datetime) -> None:
+        raise AssertionError("GitHub full path must not fail Bitbucket push candidates")
+
     async def retry_run_trigger(
         self,
         delivery_id: str,

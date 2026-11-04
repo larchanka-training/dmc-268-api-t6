@@ -1,36 +1,63 @@
-"""Move-only baseline GitHub webhook tests."""
+"""Verified GitHub webhook receipts are durable before projection."""
 
 from __future__ import annotations
 
-from tests.github_webhook_base_support import (
+import asyncio
+import logging
+import os
+from collections.abc import Iterator
+from dataclasses import FrozenInstanceError
+from datetime import UTC, datetime, timedelta
+from uuid import UUID, uuid4
+
+import pytest
+from alembic.config import Config
+from sqlalchemy import Connection, create_engine, text
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+from sqlalchemy.schema import CreateSchema, DropSchema
+
+from alembic import command
+from app.modules.integrations.webhooks.application.github_installation_dispatch import (
+    InstallationDeliveryDispatchResult,
+    InstallationDeliveryDispatchStatus,
+)
+from app.modules.integrations.webhooks.application.receive_github_delivery import (
+    ReceiveGitHubDelivery,
+    ReplayBatchResult,
+    WebhookReceipt,
+)
+from app.modules.integrations.webhooks.infrastructure.github_webhook_receipts import (
+    SqlAlchemyGitHubWebhookReceiptUnitOfWork,
+)
+from tests.github_webhook_fakes import (
     _DELIVERY_LOGGER,
-    UTC,
-    UUID,
-    Config,
-    Connection,
     FakeClaimedReceipt,
     FakeDispatcher,
     FakeReceiptUnitOfWork,
-    FrozenInstanceError,
-    InstallationDeliveryDispatchResult,
-    InstallationDeliveryDispatchStatus,
-    ReceiveGitHubDelivery,
-    ReplayBatchResult,
-    SqlAlchemyGitHubWebhookReceiptUnitOfWork,
-    WebhookReceipt,
-    async_sessionmaker,
-    asyncio,
-    command,
-    create_async_engine,
-    datetime,
-    logging,
-    pytest,
-    text,
-    timedelta,
-    uuid4,
 )
 
-pytest_plugins = ("tests.github_webhook_base_support",)
+
+@pytest.fixture
+def isolated_webhook_database() -> Iterator[tuple[Connection, str, str]]:
+    database_url = os.environ.get("TEST_DATABASE_URL")
+    if database_url is None:
+        pytest.skip("set TEST_DATABASE_URL to run PostgreSQL integration tests")
+    schema = f"test_webhook_receipts_{uuid4().hex}"
+    engine = create_engine(database_url)
+    try:
+        with engine.connect() as connection:
+            connection.execute(CreateSchema(schema))
+            connection.execute(text(f'SET search_path TO "{schema}"'))
+            connection.commit()
+            try:
+                yield connection, database_url, schema
+            finally:
+                connection.rollback()
+                connection.execute(text("SET search_path TO public"))
+                connection.execute(DropSchema(schema, cascade=True))
+                connection.commit()
+    finally:
+        engine.dispose()
 
 
 def test_sweep_summary_counts_only_ordinary_final_deferral_as_deferred_for_good(

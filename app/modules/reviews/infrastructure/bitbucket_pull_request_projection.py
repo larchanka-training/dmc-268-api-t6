@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
-from sqlalchemy import select
+from sqlalchemy import case, delete, func, select, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -23,8 +23,13 @@ from app.modules.integrations.bitbucket.infrastructure.models import (
     BitbucketRepositoryIdentity,
     BitbucketRepositoryWebhookSecret,
 )
+from app.modules.integrations.webhooks.infrastructure.models import (
+    BitbucketPushRetryCandidate,
+    WebhookEvent,
+)
 from app.modules.repositories.infrastructure.models import ProviderInstallation, Repository
 from app.modules.reviews.application.project_bitbucket_pull_request import (
+    BITBUCKET_PUSH_BATCH_SIZE,
     BitbucketPullRequestCommand,
     BitbucketPullRequestIdentityMismatch,
     BitbucketPullRequestStale,
@@ -149,7 +154,7 @@ class SqlAlchemyBitbucketPushCandidateReader:
     def __init__(self, sessions: async_sessionmaker[AsyncSession]) -> None:
         self._sessions = sessions
 
-    async def matching_open_pr_numbers(
+    async def matching_open_pr_page(
         self,
         installation_id: UUID,
         repository_id: UUID,
@@ -157,6 +162,7 @@ class SqlAlchemyBitbucketPushCandidateReader:
         binding_generation: int,
         webhook_generation: int,
         branches: frozenset[str],
+        after_number: int | None,
     ) -> tuple[int, ...]:
         if not branches:
             return ()
@@ -171,8 +177,46 @@ class SqlAlchemyBitbucketPushCandidateReader:
                 raise BitbucketTargetInactive()
             if row[2] != binding_generation or row[3] != webhook_generation:
                 raise BitbucketBindingGenerationChanged()
-            numbers = tuple(
-                await session.scalars(
+            query = (
+                select(CodeChange.external_number)
+                .where(
+                    CodeChange.repository_id == repository_id,
+                    CodeChange.state == CodeChangeState.OPEN,
+                    CodeChange.source_branch.in_(branches),
+                )
+                .order_by(CodeChange.external_number)
+                .limit(BITBUCKET_PUSH_BATCH_SIZE)
+            )
+            if after_number is not None:
+                query = query.where(CodeChange.external_number > after_number)
+            return tuple(await session.scalars(query))
+
+    async def matching_open_pr_numbers(
+        self,
+        installation_id: UUID,
+        repository_id: UUID,
+        repository_uuid: UUID,
+        binding_generation: int,
+        webhook_generation: int,
+        branches: frozenset[str],
+    ) -> tuple[int, ...]:
+        if not branches:
+            return ()
+        async with self._sessions() as session:
+            numbers: list[int] = []
+            last_number: int | None = None
+            while True:
+                row = await _active_target(
+                    session,
+                    installation_id=installation_id,
+                    repository_id=repository_id,
+                    repository_uuid=repository_uuid,
+                )
+                if row is None:
+                    raise BitbucketTargetInactive()
+                if row[2] != binding_generation or row[3] != webhook_generation:
+                    raise BitbucketBindingGenerationChanged()
+                query = (
                     select(CodeChange.external_number)
                     .where(
                         CodeChange.repository_id == repository_id,
@@ -180,12 +224,198 @@ class SqlAlchemyBitbucketPushCandidateReader:
                         CodeChange.source_branch.in_(branches),
                     )
                     .order_by(CodeChange.external_number)
-                    .limit(501)
+                    .limit(500)
+                )
+                if last_number is not None:
+                    query = query.where(CodeChange.external_number > last_number)
+                page = tuple(await session.scalars(query))
+                numbers.extend(page)
+                if len(page) < 500:
+                    break
+                last_number = page[-1]
+        return tuple(numbers)
+
+
+class SqlAlchemyBitbucketPushContinuationStore:
+    def __init__(self, session: AsyncSession) -> None:
+        self._session = session
+
+    async def position(
+        self,
+        delivery_id: str,
+        repository_id: UUID,
+        binding_generation: int,
+        webhook_generation: int,
+    ) -> int | None:
+        receipt = await self._receipt(
+            delivery_id, repository_id, binding_generation, webhook_generation
+        )
+        return receipt.bitbucket_push_after_pr_number
+
+    async def advance(
+        self,
+        delivery_id: str,
+        repository_id: UUID,
+        binding_generation: int,
+        webhook_generation: int,
+        expected: int | None,
+        next_number: int,
+        deferred_numbers: tuple[tuple[int, str], ...],
+    ) -> None:
+        receipt = await self._receipt(
+            delivery_id, repository_id, binding_generation, webhook_generation, lock=True
+        )
+        if receipt.bitbucket_push_after_pr_number != expected or (
+            expected is not None and next_number <= expected
+        ):
+            raise RuntimeError("Bitbucket push continuation changed")
+        receipt.bitbucket_push_after_pr_number = next_number
+        if deferred_numbers:
+            await self._session.execute(
+                insert(BitbucketPushRetryCandidate)
+                .values(
+                    [
+                        {"webhook_event_id": receipt.id, "pr_number": number, "reason": reason}
+                        for number, reason in deferred_numbers
+                    ]
+                )
+                .on_conflict_do_nothing()
+            )
+        await self._session.flush()
+
+    async def pending_numbers(
+        self,
+        delivery_id: str,
+        repository_id: UUID,
+        binding_generation: int,
+        webhook_generation: int,
+    ) -> tuple[int, ...]:
+        receipt = await self._receipt(
+            delivery_id, repository_id, binding_generation, webhook_generation
+        )
+        return tuple(
+            await self._session.scalars(
+                select(BitbucketPushRetryCandidate.pr_number)
+                .where(
+                    BitbucketPushRetryCandidate.webhook_event_id == receipt.id,
+                    BitbucketPushRetryCandidate.failed_at.is_(None),
+                )
+                .order_by(
+                    BitbucketPushRetryCandidate.attempted_at.asc().nulls_first(),
+                    BitbucketPushRetryCandidate.pr_number,
+                )
+                .limit(BITBUCKET_PUSH_BATCH_SIZE)
+            )
+        )
+
+    async def has_failed(
+        self,
+        delivery_id: str,
+        repository_id: UUID,
+        binding_generation: int,
+        webhook_generation: int,
+    ) -> bool:
+        receipt = await self._receipt(
+            delivery_id, repository_id, binding_generation, webhook_generation
+        )
+        return (
+            await self._session.scalar(
+                select(BitbucketPushRetryCandidate.pr_number)
+                .where(
+                    BitbucketPushRetryCandidate.webhook_event_id == receipt.id,
+                    BitbucketPushRetryCandidate.failed_at.is_not(None),
+                )
+                .limit(1)
+            )
+            is not None
+        )
+
+    async def settle_pending(
+        self,
+        delivery_id: str,
+        repository_id: UUID,
+        binding_generation: int,
+        webhook_generation: int,
+        completed: tuple[int, ...],
+        deferred: tuple[tuple[int, str], ...],
+    ) -> tuple[bool, bool, bool]:
+        receipt = await self._receipt(
+            delivery_id, repository_id, binding_generation, webhook_generation, lock=True
+        )
+        if completed:
+            await self._session.execute(
+                delete(BitbucketPushRetryCandidate).where(
+                    BitbucketPushRetryCandidate.webhook_event_id == receipt.id,
+                    BitbucketPushRetryCandidate.pr_number.in_(completed),
                 )
             )
-        if len(numbers) > 500:
-            raise RuntimeError("bitbucket_push_candidate_limit")
-        return numbers
+        for number, reason in deferred:
+            next_attempt = BitbucketPushRetryCandidate.attempt_count + 1
+            now = datetime.now(UTC)
+            await self._session.execute(
+                update(BitbucketPushRetryCandidate)
+                .where(
+                    BitbucketPushRetryCandidate.webhook_event_id == receipt.id,
+                    BitbucketPushRetryCandidate.pr_number == number,
+                    BitbucketPushRetryCandidate.failed_at.is_(None),
+                )
+                .values(
+                    attempted_at=now,
+                    attempt_count=next_attempt,
+                    reason=reason,
+                    failed_at=case((next_attempt >= 3, now), else_=None),
+                )
+            )
+        remaining = await self._session.scalar(
+            select(func.count())
+            .select_from(BitbucketPushRetryCandidate)
+            .where(
+                BitbucketPushRetryCandidate.webhook_event_id == receipt.id,
+                BitbucketPushRetryCandidate.failed_at.is_(None),
+            )
+        )
+        untried = await self._session.scalar(
+            select(func.count())
+            .select_from(BitbucketPushRetryCandidate)
+            .where(
+                BitbucketPushRetryCandidate.webhook_event_id == receipt.id,
+                BitbucketPushRetryCandidate.attempted_at.is_(None),
+                BitbucketPushRetryCandidate.failed_at.is_(None),
+            )
+        )
+        failed = await self._session.scalar(
+            select(func.count())
+            .select_from(BitbucketPushRetryCandidate)
+            .where(
+                BitbucketPushRetryCandidate.webhook_event_id == receipt.id,
+                BitbucketPushRetryCandidate.failed_at.is_not(None),
+            )
+        )
+        return bool(remaining), bool(untried), bool(failed)
+
+    async def _receipt(
+        self,
+        delivery_id: str,
+        repository_id: UUID,
+        binding_generation: int,
+        webhook_generation: int,
+        *,
+        lock: bool = False,
+    ) -> WebhookEvent:
+        query = select(WebhookEvent).where(
+            WebhookEvent.delivery_id == delivery_id,
+            WebhookEvent.provider == "bitbucket",
+            WebhookEvent.event == "repo:push",
+            WebhookEvent.bitbucket_repository_id == repository_id,
+            WebhookEvent.bitbucket_binding_generation == binding_generation,
+            WebhookEvent.bitbucket_webhook_generation == webhook_generation,
+        )
+        if lock:
+            query = query.with_for_update()
+        receipt = await self._session.scalar(query)
+        if receipt is None:
+            raise BitbucketTargetInactive()
+        return receipt
 
 
 class SqlAlchemyBitbucketPullRequestProjectionStore:
@@ -329,6 +559,10 @@ class SqlAlchemyBitbucketProjectionUnitOfWork(SqlAlchemyUnitOfWork):
     @property
     def pull_requests(self) -> SqlAlchemyBitbucketPullRequestProjectionStore:
         return SqlAlchemyBitbucketPullRequestProjectionStore(self.session)
+
+    @property
+    def push_continuation(self) -> SqlAlchemyBitbucketPushContinuationStore:
+        return SqlAlchemyBitbucketPushContinuationStore(self.session)
 
     async def lock_target(self, target: BoundBitbucketTarget, webhook_generation: int) -> None:
         # Management locks workspace, installation, credential, repository, binding.

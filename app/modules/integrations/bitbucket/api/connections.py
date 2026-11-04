@@ -17,6 +17,7 @@ from app.modules.integrations.bitbucket.application.credential_input import (
 )
 from app.modules.integrations.bitbucket.application.manage_connection import (
     BitbucketManagementError,
+    BitbucketRotationProbeError,
     ManageBitbucketConnection,
 )
 from app.modules.integrations.bitbucket.application.provider_error import BitbucketProviderError
@@ -162,7 +163,12 @@ def _raise_management(error: BitbucketManagementError) -> NoReturn:
         "repository_not_found": 404,
         "connection_not_found": 404,
     }.get(error.code, 409)
-    raise HTTPException(status_code=status, detail=error.code) from None
+    headers = (
+        {"X-Bitbucket-Repository-UUID": str(error.repository_uuid)}
+        if error.repository_uuid is not None
+        else None
+    )
+    raise HTTPException(status_code=status, detail=error.code, headers=headers) from None
 
 
 def _raise_provider(error: BitbucketProviderError) -> NoReturn:
@@ -173,12 +179,12 @@ def _raise_provider(error: BitbucketProviderError) -> NoReturn:
         "repository_inaccessible": 422,
         "provider_rate_limited": 429,
     }.get(error.code, 502)
-    headers = (
-        {"Retry-After": str(error.retry_after)}
-        if error.code == "provider_rate_limited" and error.retry_after is not None
-        else None
-    )
-    raise HTTPException(status_code=status, detail=error.code, headers=headers) from None
+    headers = {}
+    if error.code == "provider_rate_limited" and error.retry_after is not None:
+        headers["Retry-After"] = str(error.retry_after)
+    if isinstance(error, BitbucketRotationProbeError) and error.repository_uuid is not None:
+        headers["X-Bitbucket-Repository-UUID"] = str(error.repository_uuid)
+    raise HTTPException(status_code=status, detail=error.code, headers=headers or None) from None
 
 
 @router.post("/discovery", response_model=DiscoveryResponse)

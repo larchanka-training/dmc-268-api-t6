@@ -65,6 +65,7 @@ from app.modules.code_index.infrastructure.amqp import (
 )
 from app.modules.code_index.infrastructure.bitbucket_snapshot_source import (
     BitbucketRepositorySnapshotSource,
+    BitbucketSourceBudgets,
 )
 from app.modules.integrations.bitbucket.infrastructure.credential_cipher import (
     BitbucketCredentialCipher,
@@ -139,6 +140,12 @@ def test_every_variable_sets_its_value() -> None:
             "CODE_INDEX_MAX_SYMBOLS": "60",
             "CODE_INDEX_MAX_EDGES": "70",
             "CODE_INDEX_MAX_INCREMENTAL_FILES": "80",
+            "CODE_INDEX_BITBUCKET_LISTING_REQUESTS": "3",
+            "CODE_INDEX_BITBUCKET_METADATA_REQUESTS": "8",
+            "CODE_INDEX_BITBUCKET_RAW_REQUESTS": "4",
+            "CODE_INDEX_BITBUCKET_ENTRIES": "5",
+            "CODE_INDEX_BITBUCKET_READ_BYTES": "6000",
+            "CODE_INDEX_BITBUCKET_DEADLINE_SECONDS": "7",
             "CODE_INDEX_MAX_REPOSITORY_STORAGE_BYTES": "90",
             "CODE_INDEX_MAX_WORKSPACE_STORAGE_BYTES": "100",
             "CODE_INDEX_TTL_DAYS": "7",
@@ -168,6 +175,7 @@ def test_every_variable_sets_its_value() -> None:
         soft_cutoff_seconds=200,
         discard_batch_rows=500,
     )
+    assert settings.bitbucket_budgets == BitbucketSourceBudgets(3, 8, 4, 5, 6000, 7)
     assert (
         settings.ttl_days,
         settings.ttl_interval_seconds,
@@ -182,6 +190,13 @@ def test_an_empty_variable_keeps_the_default() -> None:
     settings = CodeIndexSettings.from_environment({"CODE_INDEX_DEADLINE_SECONDS": ""})
 
     assert settings.limits.deadline_seconds == 900
+
+
+def test_github_only_short_deadline_keeps_valid_settings() -> None:
+    settings = CodeIndexSettings(deadline_seconds=600, soft_cutoff_seconds=300)
+
+    assert settings.limits.deadline_seconds == 600
+    assert settings.bitbucket_budgets.deadline_seconds == 600
 
 
 @pytest.mark.parametrize(

@@ -1,41 +1,25 @@
-"""Use case `BuildRepositoryIndex` against fakes of its ports (#142).
-
-AC5: every mode decision. AC7: no transaction is open during a VCS call. AC8: every code,
-and an empty repository without an error. AC12: a CAS miss, a lost lease, the soft cutoff
-and a target change. AC3: the skip counters equal literals.
-"""
+"""Shared BuildRepositoryIndex test fakes and fixtures."""
 
 from __future__ import annotations
 
 import asyncio
 import hashlib
-import logging
-import time
 from collections.abc import AsyncIterator, Mapping, Sequence, Set
 from dataclasses import dataclass, field, replace
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from types import TracebackType
 from typing import Any, Self, cast
 from uuid import UUID
 
-import pytest
-
-from app.modules.code_index.application import build_index
 from app.modules.code_index.application.build_index import (
-    BuildMode,
     BuildOutcome,
     BuildRepositoryIndex,
-    BuildStatus,
-    FullBuildReason,
     IndexBuildSettings,
     IndexVersions,
     limits_profile_version,
-    parser_profile_version,
 )
-from app.modules.code_index.application.exclusions import ExclusionClass
 from app.modules.code_index.application.index_resolution import INDEX_RESOLVER_VERSION
 from app.modules.code_index.application.index_store import (
-    ClaimRefusal,
     ClaimRefused,
     CodeIndexStore,
     ImportRecord,
@@ -43,7 +27,6 @@ from app.modules.code_index.application.index_store import (
     IndexBuildStats,
     IndexCounts,
     IndexedFile,
-    IndexedSymbol,
     IndexFence,
     IndexLeaseLost,
     IndexState,
@@ -51,21 +34,16 @@ from app.modules.code_index.application.index_store import (
     LeaseClaim,
 )
 from app.modules.code_index.application.ports import IndexedRepository
-from app.modules.code_index.application.symbol_rows import file_rows, symbol_rows
 from app.modules.code_index.application.vcs import (
     Ancestry,
     ArchiveCounters,
     ArchiveEntry,
     ArchiveScan,
-    ArchiveUnsafe,
     BranchHead,
     ChangedPath,
     ChangeStatus,
     Comparison,
-    IndexLimitExceeded,
     SourceArchive,
-    VcsAccessDenied,
-    VcsUnavailable,
 )
 from app.modules.code_index.domain.enums import IndexStatus
 from app.modules.code_index.domain.limits import IndexLimits
@@ -79,8 +57,6 @@ from app.modules.reviews.application.policy_documents import missing_document, n
 from app.modules.reviews.application.policy_errors import PolicyError, PolicyErrorCode
 from app.modules.reviews.application.policy_snapshot import PolicyDocument
 from app.modules.reviews.application.review_ignore import (
-    IgnoreMatcher,
-    IgnorePolicy,
     parse_review_ignore,
 )
 from app.modules.reviews.infrastructure.tree_sitter_facts import extract_facts
@@ -618,213 +594,3 @@ def _incremental_world(**store: Any) -> World:
         imports=list(_OLD_IMPORTS),
         **store,
     )
-
-
-def _go_mod(
-    path: str = "go.mod",
-    status: ChangeStatus = ChangeStatus.MODIFIED,
-    previous_path: str | None = None,
-) -> ChangedPath:
-    return ChangedPath(path, status, previous_path)
-
-
-# The target of the claim snapshot, the target on the state row at the end, and whether
-# it moved: only a row that differs from the snapshot wakes the repository.
-_TARGETS = [
-    pytest.param(None, "d" * 40, True, id="none-then-a-target"),
-    pytest.param(None, None, False, id="none-then-none"),
-    pytest.param("d" * 40, "d" * 40, False, id="same-target"),
-    pytest.param("d" * 40, "e" * 40, True, id="another-target"),
-]
-
-
-def _unsafe_archive(world: World) -> None:
-    world.archives.error = ArchiveUnsafe("unsafe")
-
-
-def _unavailable_head(world: World) -> None:
-    world.source.errors["head"] = VcsUnavailable("down")
-
-
-def _crashing_parser(world: World) -> None:
-    world.parser.error = RuntimeError("parser crashed")
-
-
-def _unchanged(world: World) -> None:
-    world.store.state = _state(indexed_commit_sha=_HEAD)
-
-
-def _empty(world: World) -> None:
-    world.source.head_value = None
-
-
-def _access_denied(world: World) -> None:
-    world.source.errors["head"] = VcsAccessDenied("gone")
-
-
-def _lost_lease(world: World) -> None:
-    world.store.lose_lease_at = "replace_file"
-
-
-def _fail_at_archive(world: World, error: BaseException) -> None:
-    world.source.errors["archive"] = error
-
-
-def _fail_at_scan(world: World, error: BaseException) -> None:
-    world.archives.error = error
-
-
-# Two exported top-level functions per file: each summary holds 2 symbols.
-_GO_A = b"package m\n\nfunc A() {}\n\nfunc B() {}\n"
-_GO_B = b"package m\n\nfunc C() {}\n\nfunc D() {}\n"
-_GO_OLD: Tree = {"a.go": _GO_A, "b.go": _GO_B, "c.go": b"package m\n\nfunc E() {}\n"}
-_GO_HEAD: Tree = {**_GO_OLD, "c.go": b"package m\n\nfunc F() {}\n"}
-
-
-def _go_world(mode: BuildMode) -> World:
-    if mode is BuildMode.FULL:
-        return _world(_GO_HEAD)
-    # The index holds the 3 files of the base; HEAD changes `c.go` only.
-    return _world(
-        _GO_HEAD,
-        state=_state(file_count=3),
-        comparison=_comparison(_changed("c.go")),
-        files=_indexed(_GO_OLD),
-    )
-
-
-def _unfinished_discard(world: World) -> None:
-    world.store.discards = [2]
-
-
-def _policy_error(world: World) -> None:
-    world.source.policy_tree = {_RULES: b"```review-ignore\nlegacy/**\n"}
-
-
-def _unavailable_archive(world: World) -> None:
-    world.source.errors["archive"] = VcsUnavailable("down")
-
-
-def _failing_source_factory(world: World) -> None:
-    world.source_error = RuntimeError("no source for this repository")
-
-
-def _parked_parse(world: World) -> asyncio.Event:
-    world.parser.hang = True
-    return world.parser.entered
-
-
-def _parked_claim_exit(world: World) -> asyncio.Event:
-    world.store.hold = "claim_exit"
-    return world.store.held
-
-
-def _file(world: World, path: str) -> IndexedFile:
-    return next(file for _, file in world.store.written if file.path == path)
-
-
-__all__ = (
-    "Ancestry",
-    "Any",
-    "ArchiveEntry",
-    "ArchiveScan",
-    "ArchiveUnsafe",
-    "Archives",
-    "AstFacts",
-    "AsyncIterator",
-    "BuildMode",
-    "BuildStatus",
-    "ChangeStatus",
-    "ClaimRefusal",
-    "ClaimRefused",
-    "Comparison",
-    "ExclusionClass",
-    "FullBuildReason",
-    "IgnoreMatcher",
-    "IgnorePolicy",
-    "ImportRecord",
-    "ImportResolution",
-    "IndexAdmission",
-    "IndexBuildStats",
-    "IndexLimitExceeded",
-    "IndexLimits",
-    "IndexState",
-    "IndexedFile",
-    "IndexedSymbol",
-    "LeaseClaim",
-    "Link",
-    "Mapping",
-    "PolicyError",
-    "PolicyErrorCode",
-    "Repositories",
-    "Set",
-    "Source",
-    "SourceArchive",
-    "Tree",
-    "VcsAccessDenied",
-    "VcsUnavailable",
-    "_ADMISSION",
-    "_CLI",
-    "_DIGEST",
-    "_FENCE",
-    "_GENERATION",
-    "_GO_A",
-    "_GO_B",
-    "_HEAD",
-    "_HEAD_TREE",
-    "_INCREMENTAL",
-    "_LIMITS",
-    "_MIB",
-    "_MODELS",
-    "_NO_INDEX",
-    "_OLD",
-    "_OLD_IMPORTS",
-    "_OLD_TREE",
-    "_PROFILE",
-    "_REPO",
-    "_RULES",
-    "_SETTINGS",
-    "_TARGETS",
-    "_TREE",
-    "_VERSIONS",
-    "_VIEWS",
-    "_access_denied",
-    "_blob",
-    "_changed",
-    "_comparison",
-    "_crashing_parser",
-    "_empty",
-    "_fail_at_archive",
-    "_fail_at_scan",
-    "_failing_source_factory",
-    "_file",
-    "_go_mod",
-    "_go_world",
-    "_incremental_world",
-    "_indexed",
-    "_lost_lease",
-    "_parked_claim_exit",
-    "_parked_parse",
-    "_policy_error",
-    "_state",
-    "_unavailable_archive",
-    "_unavailable_head",
-    "_unchanged",
-    "_unfinished_discard",
-    "_unsafe_archive",
-    "_world",
-    "asyncio",
-    "build_index",
-    "dataclass",
-    "field",
-    "file_rows",
-    "limits_profile_version",
-    "logging",
-    "parse_review_ignore",
-    "parser_profile_version",
-    "pytest",
-    "replace",
-    "symbol_rows",
-    "time",
-    "timedelta",
-)

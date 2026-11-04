@@ -8,6 +8,7 @@ from hashlib import sha256
 from urllib.parse import parse_qs, quote, unquote, urlsplit
 from uuid import UUID
 
+from app.modules.integrations.bitbucket.infrastructure.provider_validation import bitbucket_path
 from app.modules.integrations.bitbucket.infrastructure.run_http import (
     BitbucketRunHttp,
     BitbucketRunHttpError,
@@ -15,7 +16,7 @@ from app.modules.integrations.bitbucket.infrastructure.run_http import (
 from app.modules.reviews.application.check_runs import RunProviderCheckpoint
 from app.modules.reviews.application.process_run import RunVcsInput
 from app.modules.reviews.application.run_failures import RunCancelled
-from app.modules.reviews.infrastructure.bitbucket_vcs import HttpBitbucketVcsProvider, _path
+from app.modules.reviews.infrastructure.bitbucket_vcs import HttpBitbucketVcsProvider
 
 _SHA = re.compile(r"[0-9a-f]{40}\Z")
 _PAGE_SIZE = 100
@@ -99,7 +100,7 @@ class BitbucketRepositoryTree:
         if not isinstance(path, str) or not isinstance(commit, dict):
             raise BitbucketRunHttpError("invalid_response")
         try:
-            path = _path(path)
+            path = bitbucket_path(path)
         except ValueError:
             raise BitbucketRunHttpError("invalid_response") from None
         if (
@@ -168,7 +169,7 @@ class BitbucketRepositoryTree:
     async def directory(self, revision: str, path: str = "") -> tuple[BitbucketTreeEntry, ...]:
         if path:
             try:
-                path = _path(path)
+                path = bitbucket_path(path)
             except ValueError:
                 raise BitbucketRunHttpError("invalid_response") from None
         repository = await self._repository(revision)

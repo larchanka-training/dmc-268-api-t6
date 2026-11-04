@@ -20,6 +20,9 @@ from app.modules.reviews.application.project_bitbucket_pull_request import (
     BitbucketPullRequestIdentityMismatch,
     BitbucketPullRequestStale,
     BitbucketPullRequestUntrackedClosed,
+    BitbucketPushCandidatesFailed,
+    BitbucketPushContinuationPending,
+    BitbucketPushRetryPending,
 )
 from app.modules.reviews.application.try_enqueue_webhook_run import EnqueueResult, EnqueueStatus
 
@@ -43,6 +46,7 @@ class BitbucketWebhookHandler(Protocol):
         branches: frozenset[str],
         binding_generation: int,
         webhook_generation: int,
+        delivery_id: str,
     ) -> tuple[EnqueueResult, ...]: ...
 
 
@@ -101,7 +105,13 @@ class BitbucketWebhookDispatchAdapter:
         try:
             if delivery.event_name == "repo:push":
                 outcomes = await self._handler.push(
-                    installation, repository, repository_uuid, branches, binding, webhook
+                    installation,
+                    repository,
+                    repository_uuid,
+                    branches,
+                    binding,
+                    webhook,
+                    delivery.delivery_id,
                 )
             else:
                 outcome = await self._handler.pull_request(
@@ -119,6 +129,18 @@ class BitbucketWebhookDispatchAdapter:
         except BitbucketPullRequestStale:
             return InstallationDeliveryDispatchResult(
                 InstallationDeliveryDispatchStatus.DEFERRED_KNOWN_EVENT, "canonical_stale"
+            )
+        except BitbucketPushContinuationPending:
+            return InstallationDeliveryDispatchResult(
+                InstallationDeliveryDispatchStatus.CONTINUING_PUSH
+            )
+        except BitbucketPushRetryPending:
+            return InstallationDeliveryDispatchResult(
+                InstallationDeliveryDispatchStatus.WAITING_PUSH_CANDIDATE
+            )
+        except BitbucketPushCandidatesFailed:
+            return InstallationDeliveryDispatchResult(
+                InstallationDeliveryDispatchStatus.FAILED_PUSH_CANDIDATES
             )
         except BitbucketPullRequestUntrackedClosed:
             return InstallationDeliveryDispatchResult(

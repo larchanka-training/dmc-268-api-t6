@@ -16,6 +16,7 @@ from app.bootstrap import reviews_api
 from app.bootstrap.reviews_api import ReviewsApiResources
 from app.modules.integrations.bitbucket.api.connections import CredentialRotateRequest
 from app.modules.integrations.bitbucket.application.credential_input import valid_bitbucket_token
+from app.modules.integrations.bitbucket.application.provider_error import BitbucketProviderError
 from app.modules.integrations.bitbucket.application.request_credentials import (
     BitbucketRequestCredential,
     BoundBitbucketTarget,
@@ -27,6 +28,11 @@ from app.modules.integrations.bitbucket.infrastructure.commit_hash import (
 )
 from app.modules.integrations.bitbucket.infrastructure.credential_cipher import (
     BitbucketCredentialCipher,
+)
+from app.modules.integrations.bitbucket.infrastructure.provider_validation import (
+    bitbucket_path,
+    check_bitbucket_response,
+    parse_bitbucket_uuid,
 )
 from app.modules.integrations.bitbucket.infrastructure.retry_after import parse_retry_after
 from app.modules.repositories.application.rules_status import RulesRefreshTarget, RulesStatusKind
@@ -82,6 +88,35 @@ def test_bitbucket_pr_hash_prefix_requires_a_matching_full_sha() -> None:
         pr_commit_hash("A" * 12)
     with pytest.raises(ValueError):
         pr_commit_hash("a" * 13)
+
+
+def test_shared_bitbucket_path_accepts_unicode_within_utf8_byte_limit() -> None:
+    assert bitbucket_path("src/é.py") == "src/é.py"
+    assert bitbucket_path("é" * 512) == "é" * 512
+    for invalid in ("é" * 513, "a//b", "a/../b", "a\\b", "/a", "a\x7fb", "a\ud800b"):
+        with pytest.raises(ValueError):
+            bitbucket_path(invalid)
+
+
+def test_shared_bitbucket_uuid_requires_braced_provider_value() -> None:
+    value = "11111111-1111-4111-8111-111111111111"
+    assert parse_bitbucket_uuid(f"{{{value}}}") == UUID(value)
+    for invalid in (value, f"{{{value[:-1]}}}", "{not-a-uuid}", None):
+        with pytest.raises(BitbucketProviderError, match="invalid_provider_response"):
+            parse_bitbucket_uuid(invalid)
+
+
+def test_shared_bitbucket_response_preserves_status_and_retry_contract() -> None:
+    check_bitbucket_response(httpx.Response(200))
+    for status in (401, 403, 404):
+        with pytest.raises(BitbucketProviderError, match="repository_inaccessible"):
+            check_bitbucket_response(httpx.Response(status))
+    with pytest.raises(BitbucketProviderError, match="provider_rate_limited") as rate_limited:
+        check_bitbucket_response(httpx.Response(429, headers={"Retry-After": "4200"}))
+    assert rate_limited.value.retry_after == 3600
+    for status in (301, 302, 500):
+        with pytest.raises(BitbucketProviderError, match="provider_unavailable"):
+            check_bitbucket_response(httpx.Response(status))
 
 
 def test_composed_bitbucket_rules_read_uses_its_separate_http_client(

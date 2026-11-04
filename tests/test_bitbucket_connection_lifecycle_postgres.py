@@ -1,50 +1,59 @@
-"""Move-only baseline Bitbucket connection tests."""
+"""Bitbucket credential rows keep secret and tenant authority isolated (#333)."""
 
 from __future__ import annotations
 
-from tests.bitbucket_connection_postgres_support import (
-    UUID,
-    AsyncSession,
-    AuthScope,
-    BitbucketBindingGenerationChanged,
-    BitbucketCredentialCipher,
-    BitbucketCredentialCodecAdapter,
-    BitbucketCredentialGenerationChanged,
-    BitbucketHttpClient,
-    BitbucketRepositoryIdentity,
+import asyncio
+import os
+from typing import cast
+from uuid import UUID, uuid4
+
+import httpx
+import pytest
+from fastapi.testclient import TestClient
+from sqlalchemy import Connection, select, text
+from sqlalchemy.engine import make_url
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+
+from alembic import command
+from app.bootstrap.bitbucket import get_bitbucket_management
+from app.bootstrap.portal_auth import get_auth_scope
+from app.bootstrap.reviews_api import ReviewsApiResources
+from app.main import app
+from app.modules.auth.application.scope import AuthScope
+from app.modules.integrations.bitbucket.application.manage_connection import (
     BitbucketRepositoryProvider,
-    BitbucketRepositoryWebhookSecret,
-    BitbucketRequestCredentials,
-    BitbucketTargetInactive,
-    Connection,
-    CredentialContext,
-    CredentialPurpose,
-    IntegrityError,
     ManageBitbucketConnection,
-    Repository,
-    ReviewsApiResources,
+)
+from app.modules.integrations.bitbucket.application.request_credentials import (
+    BitbucketBindingGenerationChanged,
+    BitbucketCredentialGenerationChanged,
+    BitbucketTargetInactive,
+)
+from app.modules.integrations.bitbucket.infrastructure.connection_store import (
     SqlAlchemyBitbucketConnectionStore,
     SqlAlchemyBitbucketManagementUnitOfWork,
-    SqlAlchemyBitbucketTargetReader,
-    TestClient,
-    _config,
-    app,
-    async_sessionmaker,
-    asyncio,
-    bitbucket_repository_external_id_seq,
-    cast,
-    command,
-    create_async_engine,
-    get_auth_scope,
-    get_bitbucket_management,
-    httpx,
-    make_url,
-    os,
-    pytest,
-    select,
-    text,
-    uuid4,
 )
+from app.modules.integrations.bitbucket.infrastructure.credential_cipher import (
+    BitbucketCredentialCipher,
+    CredentialContext,
+    CredentialPurpose,
+)
+from app.modules.integrations.bitbucket.infrastructure.credential_codec import (
+    BitbucketCredentialCodecAdapter,
+)
+from app.modules.integrations.bitbucket.infrastructure.models import (
+    BitbucketRepositoryIdentity,
+    BitbucketRepositoryWebhookSecret,
+    bitbucket_repository_external_id_seq,
+)
+from app.modules.integrations.bitbucket.infrastructure.request_credentials import (
+    BitbucketHttpClient,
+    BitbucketRequestCredentials,
+    SqlAlchemyBitbucketTargetReader,
+)
+from app.modules.repositories.infrastructure.models import Repository
+from tests.bitbucket_connection_postgres_support import _config
 
 pytest_plugins = ("tests.bitbucket_connection_postgres_support",)
 
@@ -173,8 +182,17 @@ def test_two_workspace_credentials_rotate_and_revoke_independently(
                                 purpose=CredentialPurpose.TOKEN,
                             ),
                         )
-                    assert not await store.revoke_connection(
-                        workspace_id=first_workspace, installation_id=second_installation
+                    assert not await store.disconnect_repository(
+                        workspace_id=first_workspace,
+                        installation_id=second_installation,
+                        repository_id=second_bindings[0].repository_id,
+                    )
+                    await session.execute(
+                        text(
+                            "UPDATE bitbucket_connections SET intake_enabled=true "
+                            "WHERE provider_installation_id=:id"
+                        ),
+                        {"id": first_installation},
                     )
                     assert (
                         await store.rotate_token(
@@ -189,14 +207,24 @@ def test_two_workspace_credentials_rotate_and_revoke_independently(
                         == 2
                     )
                     await session.commit()
-                    assert await store.revoke_connection(
-                        workspace_id=first_workspace, installation_id=first_installation
+                    assert await session.scalar(
+                        text(
+                            "SELECT intake_enabled FROM bitbucket_connections "
+                            "WHERE provider_installation_id=:id"
+                        ),
+                        {"id": first_installation},
+                    )
+                    assert await store.disconnect_repository(
+                        workspace_id=first_workspace,
+                        installation_id=first_installation,
+                        repository_id=first_bindings[0].repository_id,
                     )
                     await session.commit()
                     first = (
                         await session.execute(
                             text(
-                                "SELECT credential_generation, token_ciphertext, revoked_at "
+                                "SELECT credential_generation, token_ciphertext, revoked_at, "
+                                "intake_enabled "
                                 "FROM bitbucket_connections "
                                 "WHERE provider_installation_id=:id"
                             ),
@@ -214,6 +242,7 @@ def test_two_workspace_credentials_rotate_and_revoke_independently(
                         )
                     ).one()
                     assert first[0] == 3 and first[1] is None and first[2] is not None
+                    assert first[3] is False
                     assert second[0] == 1 and second[1] is not None and second[2] is None
         finally:
             await engine.dispose()
@@ -326,6 +355,12 @@ def test_two_repositories_share_credential_and_disconnect_independently(
                         )
                     ).all()
                     assert {row[0]: row[1] for row in rows} == {first: False, second: True}
+                    assert (
+                        await session.scalar(
+                            select(Repository.workspace_id).where(Repository.id == first)
+                        )
+                        == workspace
+                    )
                     await reader.checkpoint(second_target)
                     with pytest.raises(BitbucketTargetInactive):
                         await reader.checkpoint(first_target)
@@ -338,6 +373,12 @@ def test_two_repositories_share_credential_and_disconnect_independently(
                         web_url="https://bitbucket.org/nvdovnar/first",
                     )
                     assert rebound == first and newly_active
+                    assert (
+                        await session.scalar(
+                            select(Repository.workspace_id).where(Repository.id == first)
+                        )
+                        == workspace
+                    )
                     await store.set_repository_webhook_secret(
                         workspace_id=workspace,
                         installation_id=installation,
@@ -672,8 +713,10 @@ def test_request_target_is_fenced_after_rotation_and_revocation(
                     )
                     assert (await authority.credential_for(fresh)).token == "rotated-token"
                     assert not connection.in_transaction()
-                    await store.revoke_connection(
-                        workspace_id=workspace, installation_id=installation
+                    assert await store.disconnect_repository(
+                        workspace_id=workspace,
+                        installation_id=installation,
+                        repository_id=repository_id,
                     )
                     await session.commit()
                     with pytest.raises(BitbucketTargetInactive):

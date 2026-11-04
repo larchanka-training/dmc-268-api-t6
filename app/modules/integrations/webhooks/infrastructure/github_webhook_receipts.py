@@ -7,7 +7,7 @@ from datetime import datetime
 from typing import Any, cast
 from uuid import UUID
 
-from sqlalchemy import case, delete, or_, select, update
+from sqlalchemy import case, delete, func, or_, select, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -15,6 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.common.infrastructure.db.unit_of_work import SqlAlchemyUnitOfWork
 from app.modules.integrations.webhooks.application.receive_github_delivery import WebhookReceipt
 from app.modules.integrations.webhooks.infrastructure.models import (
+    BitbucketPushRetryCandidate,
     GitHubInstallationRemovalEffect,
     WebhookEvent,
 )
@@ -77,6 +78,30 @@ class SqlAlchemyWebhookReceiptOperations:
         )
 
     async def mark_projected(self, delivery_id: str, token: UUID, at: datetime) -> None:
+        if self._provider == "bitbucket":
+            receipt_id = await self._session.scalar(
+                select(WebhookEvent.id)
+                .where(
+                    WebhookEvent.provider == "bitbucket",
+                    WebhookEvent.delivery_id == delivery_id,
+                    WebhookEvent.projection_claim_token == token,
+                    WebhookEvent.projected_at.is_(None),
+                )
+                .with_for_update()
+            )
+            if receipt_id is None:
+                raise RuntimeError("webhook projection claim was lost")
+            failed_candidate = await self._session.scalar(
+                select(BitbucketPushRetryCandidate.pr_number)
+                .where(
+                    BitbucketPushRetryCandidate.webhook_event_id == receipt_id,
+                    BitbucketPushRetryCandidate.failed_at.is_not(None),
+                )
+                .limit(1)
+            )
+            if failed_candidate is not None:
+                await self.fail_push_candidates(delivery_id, token, at)
+                return
         statement = (
             update(WebhookEvent)
             .where(
@@ -94,8 +119,15 @@ class SqlAlchemyWebhookReceiptOperations:
             .returning(WebhookEvent.id)
         )
         result = await self._session.execute(statement)
-        if result.scalar_one_or_none() is None:
+        receipt_id = result.scalar_one_or_none()
+        if receipt_id is None:
             raise RuntimeError("webhook projection claim was lost")
+        if self._provider == "bitbucket":
+            await self._session.execute(
+                delete(BitbucketPushRetryCandidate).where(
+                    BitbucketPushRetryCandidate.webhook_event_id == receipt_id
+                )
+            )
 
     async def retry_run_trigger(
         self,
@@ -131,6 +163,58 @@ class SqlAlchemyWebhookReceiptOperations:
         if row is None:
             raise RuntimeError("webhook projection claim was lost")
         return row[0] is not None
+
+    async def retry_push_continuation(
+        self, delivery_id: str, token: UUID, retry_after: datetime
+    ) -> None:
+        result = await self._session.execute(
+            update(WebhookEvent)
+            .where(
+                WebhookEvent.provider == "bitbucket",
+                WebhookEvent.event == "repo:push",
+                WebhookEvent.delivery_id == delivery_id,
+                WebhookEvent.projection_claim_token == token,
+                WebhookEvent.projected_at.is_(None),
+                WebhookEvent.projection_failed_at.is_(None),
+                WebhookEvent.projection_deferred_at.is_(None),
+            )
+            .values(
+                projection_claim_token=None,
+                projection_lease_until=None,
+                projection_attempt_count=0,
+                retry_after=retry_after,
+            )
+            .returning(WebhookEvent.id)
+        )
+        if result.scalar_one_or_none() is None:
+            raise RuntimeError("webhook projection claim was lost")
+
+    async def fail_push_candidates(self, delivery_id: str, token: UUID, at: datetime) -> None:
+        terminal = select(BitbucketPushRetryCandidate.webhook_event_id).where(
+            BitbucketPushRetryCandidate.webhook_event_id == WebhookEvent.id,
+            BitbucketPushRetryCandidate.failed_at.is_not(None),
+        )
+        result = await self._session.execute(
+            update(WebhookEvent)
+            .where(
+                WebhookEvent.provider == "bitbucket",
+                WebhookEvent.event == "repo:push",
+                WebhookEvent.delivery_id == delivery_id,
+                WebhookEvent.projection_claim_token == token,
+                WebhookEvent.projected_at.is_(None),
+                WebhookEvent.projection_failed_at.is_(None),
+                terminal.exists(),
+            )
+            .values(
+                projection_claim_token=None,
+                projection_lease_until=None,
+                projection_failed_at=at,
+                retry_after=None,
+            )
+            .returning(WebhookEvent.id)
+        )
+        if result.scalar_one_or_none() is None:
+            raise RuntimeError("webhook projection claim was lost")
 
     async def release(
         self,
@@ -225,7 +309,12 @@ class SqlAlchemyWebhookReceiptOperations:
                 ),
                 or_(WebhookEvent.retry_after.is_(None), WebhookEvent.retry_after <= now),
             )
-            .order_by(WebhookEvent.received_at, WebhookEvent.id)
+            .order_by(
+                func.coalesce(WebhookEvent.retry_after, WebhookEvent.received_at)
+                if self._provider == "bitbucket"
+                else WebhookEvent.received_at,
+                WebhookEvent.id,
+            )
             .limit(limit)
         )
         return tuple((await self._session.scalars(statement)).all())

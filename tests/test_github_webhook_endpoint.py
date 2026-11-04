@@ -1,44 +1,46 @@
-"""Move-only baseline GitHub webhook tests."""
+"""Verified GitHub webhook receipts are durable before projection."""
 
 from __future__ import annotations
 
-from tests.github_webhook_base_support import (
+import asyncio
+import json
+import logging
+from datetime import UTC, datetime, timedelta
+from uuid import UUID, uuid4
+
+import pytest
+from alembic.config import Config
+from sqlalchemy import Connection, text
+from sqlalchemy.exc import DatabaseError
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+from starlette.types import Message, Scope
+
+from alembic import command
+from app.bootstrap.reviews_api import get_github_webhook_receipt_uow_factory
+from app.main import (
+    _has_valid_github_signature,
+    _is_github_delivery_id,
+    app,
+    get_github_webhook_secret,
+)
+from app.modules.integrations.webhooks.api.receipt import VerifiedGitHubDelivery
+from app.modules.integrations.webhooks.application.github_installation_dispatch import (
+    InstallationDeliveryDispatchResult,
+)
+from app.modules.integrations.webhooks.application.receive_github_delivery import (
+    ReceiveGitHubDelivery,
+    WebhookReceipt,
+)
+from app.modules.integrations.webhooks.infrastructure.github_webhook_receipts import (
+    SqlAlchemyGitHubWebhookReceiptUnitOfWork,
+)
+from tests.github_webhook_fakes import (
     _DELIVERY_LOGGER,
     _SECRET,
-    UTC,
-    UUID,
-    Config,
-    Connection,
-    DatabaseError,
     FakeReceiptUnitOfWork,
-    InstallationDeliveryDispatchResult,
-    Message,
-    ReceiveGitHubDelivery,
-    Scope,
-    SqlAlchemyGitHubWebhookReceiptUnitOfWork,
-    VerifiedGitHubDelivery,
-    WebhookReceipt,
-    _has_valid_github_signature,
     _headers,
-    _is_github_delivery_id,
     _post,
-    app,
-    async_sessionmaker,
-    asyncio,
-    command,
-    create_async_engine,
-    datetime,
-    get_github_webhook_receipt_uow_factory,
-    get_github_webhook_secret,
-    json,
-    logging,
-    pytest,
-    text,
-    timedelta,
-    uuid4,
 )
-
-pytest_plugins = ("tests.github_webhook_base_support",)
 
 
 def test_signed_delivery_is_saved_once_and_http_never_dispatches() -> None:

@@ -15,6 +15,7 @@ from app.modules.integrations.bitbucket.application.request_credentials import (
 from app.modules.reviews.application.determine_ci_eligibility import WebhookRunIdentity
 from app.modules.reviews.application.project_bitbucket_pull_request import (
     BitbucketPullRequestCommand,
+    BitbucketPushContinuationStore,
     CanonicalBitbucketPullRequest,
     ProjectBitbucketPullRequest,
     ProjectedBitbucketPullRequest,
@@ -85,6 +86,18 @@ class Store:
 
 @dataclass
 class PushCandidates:
+    async def matching_open_pr_page(
+        self,
+        installation_id: UUID,
+        repository_id: UUID,
+        repository_uuid: UUID,
+        binding_generation: int,
+        webhook_generation: int,
+        branches: frozenset[str],
+        after_number: int | None,
+    ) -> tuple[int, ...]:
+        raise AssertionError("legacy push test must not read a receipt page")
+
     async def matching_open_pr_numbers(
         self,
         installation_id: UUID,
@@ -148,6 +161,18 @@ class FailingIndexRefresh:
 @dataclass
 class NoCandidates:
     calls: list[str]
+
+    async def matching_open_pr_page(
+        self,
+        installation_id: UUID,
+        repository_id: UUID,
+        repository_uuid: UUID,
+        binding_generation: int,
+        webhook_generation: int,
+        branches: frozenset[str],
+        after_number: int | None,
+    ) -> tuple[int, ...]:
+        raise AssertionError("legacy push test must not read a receipt page")
 
     async def matching_open_pr_numbers(
         self,
@@ -231,6 +256,10 @@ def test_push_rechecks_pull_requests_when_index_refresh_fails(
 class Uow:
     calls: list[str]
     pull_requests: Store
+
+    @property
+    def push_continuation(self) -> BitbucketPushContinuationStore:
+        raise AssertionError("legacy push test must not read a receipt continuation")
 
     async def __aenter__(self) -> Uow:
         return self

@@ -30,6 +30,44 @@ HEAD = "a" * 40
 RUN_URL = "https://review.example/runs/one"
 
 
+@pytest.mark.parametrize(
+    ("provider", "expected_reads"),
+    [("github", 0), ("gitlab", 0), ("bitbucket", 1)],
+)
+def test_status_gateway_reads_bitbucket_source_only_for_bitbucket_runs(
+    provider: str, expected_reads: int
+) -> None:
+    async def scenario() -> None:
+        run_id = uuid4()
+        reads: list[UUID] = []
+
+        class Source:
+            async def current(self, selected: UUID) -> BitbucketStatusSnapshot | None:
+                reads.append(selected)
+                return None
+
+        class Credentials:
+            async def checkpoint(self, selected: BoundBitbucketTarget) -> None:
+                raise AssertionError("unexpected credential check")
+
+            async def credential_for(
+                self, selected: BoundBitbucketTarget
+            ) -> BitbucketRequestCredential:
+                raise AssertionError("unexpected credential read")
+
+        async def run_provider(selected: UUID) -> str:
+            assert selected == run_id
+            return provider
+
+        publisher = BitbucketBuildStatusPublisher(
+            Source(), Credentials(), run_provider=run_provider
+        )
+        await update_bitbucket_status(publisher, run_id, RUN_URL)
+        assert reads == [run_id] * expected_reads
+
+    asyncio.run(scenario())
+
+
 def test_status_key_has_the_bitbucket_cloud_length_and_stable_literal() -> None:
     payload = bitbucket_status_payload(
         workspace_id=UUID("11111111-1111-4111-8111-111111111111"),

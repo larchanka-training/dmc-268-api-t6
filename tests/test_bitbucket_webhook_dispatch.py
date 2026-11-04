@@ -18,6 +18,9 @@ from app.modules.integrations.webhooks.application.github_installation_dispatch 
 from app.modules.integrations.webhooks.application.receive_github_delivery import WebhookReceipt
 from app.modules.reviews.application.project_bitbucket_pull_request import (
     BitbucketPullRequestUntrackedClosed,
+    BitbucketPushCandidatesFailed,
+    BitbucketPushContinuationPending,
+    BitbucketPushRetryPending,
 )
 from app.modules.reviews.application.try_enqueue_webhook_run import EnqueueResult, EnqueueStatus
 
@@ -42,7 +45,9 @@ def receipt(event: str, payload: dict[str, object]) -> WebhookReceipt:
 @dataclass
 class Handler:
     pull_requests: list[tuple[UUID, UUID, UUID, int, int, int]] = field(default_factory=list)
-    pushes: list[tuple[UUID, UUID, UUID, frozenset[str], int, int]] = field(default_factory=list)
+    pushes: list[tuple[UUID, UUID, UUID, frozenset[str], int, int, str]] = field(
+        default_factory=list
+    )
 
     async def pull_request(
         self,
@@ -73,6 +78,7 @@ class Handler:
         branches: frozenset[str],
         binding_generation: int,
         webhook_generation: int,
+        delivery_id: str,
     ) -> tuple[EnqueueResult, ...]:
         self.pushes.append(
             (
@@ -82,6 +88,7 @@ class Handler:
                 branches,
                 binding_generation,
                 webhook_generation,
+                delivery_id,
             )
         )
         return ()
@@ -115,9 +122,81 @@ def test_dispatches_pr_and_relevant_branch_push_with_bound_origin() -> None:
             )
         )
         assert push.status == Status.PROJECTED_PR
-        assert handler.pushes == [(INSTALLATION, REPOSITORY, REMOTE, frozenset({"feature"}), 2, 3)]
+        assert handler.pushes == [
+            (
+                INSTALLATION,
+                REPOSITORY,
+                REMOTE,
+                frozenset({"feature"}),
+                2,
+                3,
+                receipt("repo:push", {}).delivery_id,
+            )
+        ]
 
     asyncio.run(scenario())
+
+
+def test_push_page_requests_another_worker_pass() -> None:
+    class ContinuingHandler(Handler):
+        async def push(
+            self,
+            installation_id: UUID,
+            repository_id: UUID,
+            repository_uuid: UUID,
+            branches: frozenset[str],
+            binding_generation: int,
+            webhook_generation: int,
+            delivery_id: str,
+        ) -> tuple[EnqueueResult, ...]:
+            raise BitbucketPushContinuationPending()
+
+    result = asyncio.run(
+        BitbucketWebhookDispatchAdapter(ContinuingHandler()).execute(
+            receipt("repo:push", {"push": {"changes": [{"new": {"type": "branch", "name": "x"}}]}})
+        )
+    )
+    assert result.status == Status.CONTINUING_PUSH
+
+    class WaitingHandler(ContinuingHandler):
+        async def push(
+            self,
+            installation_id: UUID,
+            repository_id: UUID,
+            repository_uuid: UUID,
+            branches: frozenset[str],
+            binding_generation: int,
+            webhook_generation: int,
+            delivery_id: str,
+        ) -> tuple[EnqueueResult, ...]:
+            raise BitbucketPushRetryPending()
+
+    waiting = asyncio.run(
+        BitbucketWebhookDispatchAdapter(WaitingHandler()).execute(
+            receipt("repo:push", {"push": {"changes": [{"new": {"type": "branch", "name": "x"}}]}})
+        )
+    )
+    assert waiting.status == Status.WAITING_PUSH_CANDIDATE
+
+    class FailedHandler(ContinuingHandler):
+        async def push(
+            self,
+            installation_id: UUID,
+            repository_id: UUID,
+            repository_uuid: UUID,
+            branches: frozenset[str],
+            binding_generation: int,
+            webhook_generation: int,
+            delivery_id: str,
+        ) -> tuple[EnqueueResult, ...]:
+            raise BitbucketPushCandidatesFailed()
+
+    failed = asyncio.run(
+        BitbucketWebhookDispatchAdapter(FailedHandler()).execute(
+            receipt("repo:push", {"push": {"changes": [{"new": {"type": "branch", "name": "x"}}]}})
+        )
+    )
+    assert failed.status == Status.FAILED_PUSH_CANDIDATES
 
 
 def test_dispatch_rejects_invalid_identity_and_ignores_unrelated_event() -> None:

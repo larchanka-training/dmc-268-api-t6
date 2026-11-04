@@ -10,6 +10,7 @@ from __future__ import annotations
 from enum import StrEnum
 
 import pytest
+from alembic.script import ScriptDirectory
 from sqlalchemy import Connection, inspect, text
 from sqlalchemy.exc import IntegrityError
 
@@ -642,7 +643,9 @@ def test_a_migration_adds_its_columns_and_its_downgrade_drops_them_but_keeps_the
     command.upgrade(config, "head")
     assert tuple(connection.execute(text(probe)).one()) == added
     assert tuple(connection.execute(text(restored)).one()) == values
-    assert connection.scalar(text("SELECT version_num FROM alembic_version")) == "20261027_0052"
+    assert connection.scalar(text("SELECT version_num FROM alembic_version")) == (
+        ScriptDirectory.from_config(config).get_current_head()
+    )
 
 
 @pytest.mark.integration
@@ -667,7 +670,9 @@ def test_downgrade_drops_index_tables_and_types_and_upgrade_restores_them(
         "code_index_edge_kind",
         "code_index_import_resolution",
     }
-    assert connection.scalar(text("SELECT version_num FROM alembic_version")) == "20261027_0052"
+    assert connection.scalar(text("SELECT version_num FROM alembic_version")) == (
+        ScriptDirectory.from_config(config).get_current_head()
+    )
 
 
 # ADR 0001 §7: only a limit or an unsafe archive fails an index.
@@ -798,4 +803,6 @@ def test_downgrade_to_0033_drops_the_indexer_columns_and_upgrade_resets_profiles
         )
     ).one() == ("ready", C1, *(None,) * 6, 0, 0)
     assert _state_schema(connection) == (head_columns, _CHECKS["code_index_states"], _STATE_INDEXES)
-    assert connection.scalar(text("SELECT version_num FROM alembic_version")) == "20261027_0052"
+    assert connection.scalar(text("SELECT version_num FROM alembic_version")) == (
+        ScriptDirectory.from_config(config).get_current_head()
+    )

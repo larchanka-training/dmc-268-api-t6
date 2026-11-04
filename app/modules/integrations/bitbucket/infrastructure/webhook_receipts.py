@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from uuid import UUID
 
-from sqlalchemy import Text, cast, func, literal, select
+from sqlalchemy import Text, cast, func, literal, select, update
 from sqlalchemy.dialects.postgresql import JSONB, insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -23,7 +23,10 @@ from app.modules.integrations.webhooks.application.receive_github_delivery impor
 from app.modules.integrations.webhooks.infrastructure.github_webhook_receipts import (
     SqlAlchemyWebhookReceiptOperations,
 )
-from app.modules.integrations.webhooks.infrastructure.models import WebhookEvent
+from app.modules.integrations.webhooks.infrastructure.models import (
+    BitbucketPushRetryCandidate,
+    WebhookEvent,
+)
 from app.modules.integrations.webhooks.infrastructure.webhook_notifications import (
     notify_webhook_work,
 )
@@ -213,7 +216,27 @@ class SqlAlchemyBitbucketWebhookReceiptStore(SqlAlchemyWebhookReceiptOperations)
         active = await self._active_origin(candidate) is not None
         claimed = await super().claim(delivery_id, token, now, until)
         if claimed is not None and not active:
-            await self.mark_projected(delivery_id, token, now)
+            receipt_id = stored.id
+            await self._session.execute(
+                update(BitbucketPushRetryCandidate)
+                .where(
+                    BitbucketPushRetryCandidate.webhook_event_id == receipt_id,
+                    BitbucketPushRetryCandidate.failed_at.is_(None),
+                )
+                .values(failed_at=now, reason="origin_inactive")
+            )
+            failed_candidate = await self._session.scalar(
+                select(BitbucketPushRetryCandidate.pr_number)
+                .where(
+                    BitbucketPushRetryCandidate.webhook_event_id == receipt_id,
+                    BitbucketPushRetryCandidate.failed_at.is_not(None),
+                )
+                .limit(1)
+            )
+            if failed_candidate is not None:
+                await self.fail_push_candidates(delivery_id, token, now)
+            else:
+                await self.mark_projected(delivery_id, token, now)
             return None
         return candidate if claimed is not None else None
 

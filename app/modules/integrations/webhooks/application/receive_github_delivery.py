@@ -22,6 +22,8 @@ _LEASE = timedelta(minutes=5)
 _DISPATCH_TIMEOUT_SECONDS = 240.0
 _FAILURE_RETRY = timedelta(seconds=30)
 _RUN_TRIGGER_RETRY = timedelta(seconds=30)
+_PUSH_CONTINUATION_RETRY = timedelta(seconds=1)
+_PUSH_CANDIDATE_RETRY = timedelta(seconds=30)
 _RUN_TRIGGER_MAX_WAIT = timedelta(hours=1)
 _UNKNOWN_INSTALLATION_RETRY = timedelta(minutes=5)
 _MAX_DISPATCH_ATTEMPTS = 3
@@ -109,6 +111,12 @@ class GitHubWebhookReceiptStore(Protocol):
     ) -> WebhookReceipt | None: ...
 
     async def mark_projected(self, delivery_id: str, token: UUID, at: datetime) -> None: ...
+
+    async def fail_push_candidates(self, delivery_id: str, token: UUID, at: datetime) -> None: ...
+
+    async def retry_push_continuation(
+        self, delivery_id: str, token: UUID, retry_after: datetime
+    ) -> None: ...
 
     async def retry_run_trigger(
         self,
@@ -250,6 +258,8 @@ class ReceiveWebhookDelivery:
                 deferred += (
                     status in _DEFERRED
                     or status == InstallationDeliveryDispatchStatus.DEFERRED_RUN_TRIGGER
+                    or status == InstallationDeliveryDispatchStatus.CONTINUING_PUSH
+                    or status == InstallationDeliveryDispatchStatus.WAITING_PUSH_CANDIDATE
                 )
                 final += last_attempt
         if delivery_ids:
@@ -326,7 +336,9 @@ class ReceiveWebhookDelivery:
         wait_expired = False
         try:
             async with self._uow_factory() as uow:
-                if result.status == InstallationDeliveryDispatchStatus.DEFERRED_RUN_TRIGGER:
+                if result.status == InstallationDeliveryDispatchStatus.FAILED_PUSH_CANDIDATES:
+                    await uow.receipts.fail_push_candidates(delivery_id, token, self._now())
+                elif result.status == InstallationDeliveryDispatchStatus.DEFERRED_RUN_TRIGGER:
                     now = self._now()
                     retry_at = now + _RUN_TRIGGER_RETRY
                     wait_expired = await uow.receipts.retry_run_trigger(
@@ -337,6 +349,19 @@ class ReceiveWebhookDelivery:
                         received_before=now - _RUN_TRIGGER_MAX_WAIT,
                     )
                     retry_note = f" retry_at={'none' if wait_expired else retry_at.isoformat()}"
+                elif result.status in (
+                    InstallationDeliveryDispatchStatus.CONTINUING_PUSH,
+                    InstallationDeliveryDispatchStatus.WAITING_PUSH_CANDIDATE,
+                ):
+                    now = self._now()
+                    waiting = (
+                        result.status == InstallationDeliveryDispatchStatus.WAITING_PUSH_CANDIDATE
+                    )
+                    retry_at = now + (
+                        _PUSH_CANDIDATE_RETRY if waiting else _PUSH_CONTINUATION_RETRY
+                    )
+                    await uow.receipts.retry_push_continuation(delivery_id, token, retry_at)
+                    retry_note = f" retry_at={retry_at.isoformat()}"
                 elif result.status in _DEFERRED:
                     now = self._now()
                     retry_at = now + _UNKNOWN_INSTALLATION_RETRY

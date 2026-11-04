@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
+import shutil
 from dataclasses import dataclass
 from hashlib import sha256
 from pathlib import Path
@@ -32,6 +34,80 @@ def test_load_default_rule_sets_reads_backend_and_frontend_assets() -> None:
     assert rule_sets["backend"].version == 1
     assert rule_sets["frontend"].version == 1
     assert rule_sets["backend"].rules[0]["name"] == "Naming Consistency"
+
+
+def test_unchanged_default_rule_assets_are_read_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    rules_dir = tmp_path / "rules"
+    shutil.copytree("review/rules", rules_dir)
+    original_read_text = Path.read_text
+    reads: list[Path] = []
+
+    def counted_read_text(
+        path: Path, encoding: str | None = None, errors: str | None = None
+    ) -> str:
+        reads.append(path)
+        return original_read_text(path, encoding=encoding, errors=errors)
+
+    monkeypatch.setattr(Path, "read_text", counted_read_text)
+
+    first = load_default_rule_sets(rules_dir)
+    second = load_default_rule_sets(rules_dir)
+
+    assert second == first
+    assert sorted(path.name for path in reads) == [
+        "default-backend.v1.json",
+        "default-frontend.v1.json",
+        "schema.json",
+    ]
+
+
+def test_caller_mutation_does_not_change_cached_default_rules(tmp_path: Path) -> None:
+    rules_dir = tmp_path / "rules"
+    shutil.copytree("review/rules", rules_dir)
+
+    first = load_default_rule_sets(rules_dir)
+    first["backend"].rules[0]["name"] = "Corrupted"
+    cast(list[str], first["backend"].rules[0]["checks"]).append("Corrupted check")
+
+    second = load_default_rule_sets(rules_dir)
+
+    assert second["backend"].rules[0]["name"] == "Naming Consistency"
+    assert "Corrupted check" not in cast(list[str], second["backend"].rules[0]["checks"])
+
+
+def test_changed_default_asset_refreshes_cache_and_invalid_replacement_fails(
+    tmp_path: Path,
+) -> None:
+    rules_dir = tmp_path / "rules"
+    shutil.copytree("review/rules", rules_dir)
+    backend_path = rules_dir / "default-backend.v1.json"
+    first = load_default_rule_sets(rules_dir)
+
+    before = backend_path.stat()
+    replacement = rules_dir / "replacement.json"
+    replacement.write_text(
+        backend_path.read_text(encoding="utf-8").replace(
+            "Naming Consistency", "Taming Consistency", 1
+        ),
+        encoding="utf-8",
+    )
+    os.utime(replacement, ns=(before.st_atime_ns, before.st_mtime_ns))
+    assert replacement.stat().st_size == before.st_size
+    assert replacement.stat().st_mtime_ns == before.st_mtime_ns
+    replacement.replace(backend_path)
+
+    second = load_default_rule_sets(rules_dir)
+    assert first["backend"].rules[0]["name"] == "Naming Consistency"
+    assert second["backend"].rules[0]["name"] == "Taming Consistency"
+
+    backend = json.loads(backend_path.read_text(encoding="utf-8"))
+    backend["rules"][0]["unknown"] = True
+    backend_path.write_text(json.dumps(backend), encoding="utf-8")
+
+    with pytest.raises(RuleSetValidationError, match="unexpected"):
+        load_default_rule_sets(rules_dir)
 
 
 @pytest.mark.parametrize(

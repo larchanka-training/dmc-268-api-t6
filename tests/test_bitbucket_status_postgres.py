@@ -39,6 +39,7 @@ from app.modules.reviews.infrastructure.bitbucket_ci import (
     BitbucketStatusReconciler,
     BitbucketStatusUnavailable,
     SqlAlchemyBitbucketStatusSource,
+    SqlAlchemyRunProvider,
 )
 from app.modules.reviews.infrastructure.bitbucket_status_ledger import (
     SqlAlchemyBitbucketStatusUnitOfWork,
@@ -176,6 +177,8 @@ def test_status_uses_active_run_origin_and_no_db_transaction_over_http(
                     },
                 )
             reader = SqlAlchemyBitbucketTargetReader(sessions)
+            run_provider = SqlAlchemyRunProvider(sessions)
+            assert await run_provider(run_id) == "bitbucket"
             requests: list[httpx.Request] = []
             applied: list[str] = []
             hold_running = False
@@ -229,6 +232,7 @@ def test_status_uses_active_run_origin_and_no_db_transaction_over_http(
                 BitbucketRequestCredentials(reader, cipher),
                 transport_factory=lambda: httpx.MockTransport(respond),
                 ledger=ledger,
+                run_provider=run_provider,
             )
             await publisher.upsert(run_id, "https://review.example/runs/one")
             assert len([request for request in requests if request.method == "POST"]) == 1

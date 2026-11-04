@@ -1,44 +1,45 @@
-"""Move-only baseline GitHub webhook tests."""
+"""Verified GitHub webhook receipts are durable before projection."""
 
 from __future__ import annotations
 
-from tests.github_webhook_base_support import (
-    UTC,
-    UUID,
-    CiTriggerEvent,
-    FakeClaimedReceipt,
-    FakeDispatcher,
-    FakeReceiptUnitOfWork,
+import asyncio
+import json
+import logging
+from dataclasses import dataclass, field
+from datetime import UTC, datetime, timedelta
+from typing import cast
+from uuid import UUID, uuid4
+
+import pytest
+
+from app.modules.integrations.webhooks.api.dispatch import GitHubWebhookDispatchAdapter
+from app.modules.integrations.webhooks.api.receipt import VerifiedGitHubDelivery
+from app.modules.integrations.webhooks.application import receive_github_delivery as receipt_engine
+from app.modules.integrations.webhooks.application.github_installation_dispatch import (
     GitHubInstallationDeliveryDispatcher,
     GitHubInstallationResolver,
-    GitHubWebhookDispatchAdapter,
     InstallationDeliveryDispatchResult,
     InstallationDeliveryDispatchStatus,
     InstallationOnboardingHandler,
+    PullRequestLabelIntentHandler,
+)
+from app.modules.integrations.webhooks.application.receive_github_delivery import (
+    ReceiveGitHubDelivery,
+    WebhookReceipt,
+)
+from app.modules.reviews.application.project_github_pull_request import (
     PullRequestEvent,
     PullRequestLabelEvent,
-    PullRequestLabelIntentHandler,
     PullRequestProjectionStatus,
-    ReceiveGitHubDelivery,
-    RunTriggerOutcome,
-    VerifiedGitHubDelivery,
-    WebhookReceipt,
+)
+from app.modules.reviews.application.trigger_from_delivery import CiTriggerEvent, RunTriggerOutcome
+from tests.github_webhook_fakes import (
+    FakeClaimedReceipt,
+    FakeDispatcher,
+    FakeReceiptUnitOfWork,
     _headers,
     _post,
-    asyncio,
-    cast,
-    dataclass,
-    datetime,
-    field,
-    json,
-    logging,
-    pytest,
-    receipt_engine,
-    timedelta,
-    uuid4,
 )
-
-pytest_plugins = ("tests.github_webhook_base_support",)
 
 
 def test_receipt_defaults_to_github_and_hides_raw_payload_from_repr() -> None:
@@ -223,6 +224,65 @@ def test_receipt_sweep_hides_other_boundary_exception_messages(
         assert asyncio.run(receiver.replay_pending()) == 0
     assert "canary" not in caplog.text
     assert all(record.exc_info is None for record in caplog.records)
+
+
+def test_bitbucket_push_continuation_retries_without_terminalizing_long_fanout() -> None:
+    clock = [datetime(2026, 10, 9, tzinfo=UTC)]
+    uow = FakeReceiptUnitOfWork()
+    delivery = WebhookReceipt(
+        "bitbucket-push-many",
+        "repo:push",
+        "{}",
+        "bitbucket",
+        UUID(int=1),
+        UUID(int=2),
+        1,
+        2,
+    )
+
+    @dataclass
+    class Dispatcher:
+        calls: int = 0
+
+        async def execute(self, delivery: WebhookReceipt) -> InstallationDeliveryDispatchResult:
+            self.calls += 1
+            return InstallationDeliveryDispatchResult(
+                InstallationDeliveryDispatchStatus.CONTINUING_PUSH
+                if self.calls <= 100
+                else InstallationDeliveryDispatchStatus.WAITING_PUSH_CANDIDATE
+                if self.calls <= 103
+                else InstallationDeliveryDispatchStatus.FAILED_PUSH_CANDIDATES
+            )
+
+    dispatcher = Dispatcher()
+    receiver = receipt_engine.ReceiveWebhookDelivery(
+        provider="bitbucket",
+        uow_factory=lambda: uow,
+        dispatcher=dispatcher,
+        now=lambda: clock[0],
+    )
+    assert asyncio.run(receiver.execute(delivery)) == InstallationDeliveryDispatchStatus.PENDING
+    uow.rows[delivery.delivery_id].received_at = clock[0] - timedelta(hours=2)
+    for _ in range(100):
+        assert asyncio.run(receiver.replay_pending()) == 1
+        row = uow.rows[delivery.delivery_id]
+        assert not row.projected
+        assert row.projection_failed_at is None
+        assert row.projection_deferred_at is None
+        assert row.projection_attempt_count == 0
+        clock[0] += timedelta(seconds=2)
+    for _ in range(3):
+        assert asyncio.run(receiver.replay_pending()) == 1
+        row = uow.rows[delivery.delivery_id]
+        assert not row.projected
+        assert row.projection_failed_at is None
+        assert row.projection_deferred_at is None
+        assert row.projection_attempt_count == 0
+        clock[0] += timedelta(seconds=31)
+    assert asyncio.run(receiver.replay_pending()) == 1
+    assert not uow.rows[delivery.delivery_id].projected
+    assert uow.rows[delivery.delivery_id].projection_failed_at == clock[0]
+    assert dispatcher.calls == 104
 
 
 def test_failed_dispatch_is_replayed_once_after_retry_delay() -> None:

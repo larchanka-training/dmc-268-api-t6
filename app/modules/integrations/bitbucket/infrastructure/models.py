@@ -120,7 +120,7 @@ class BitbucketRepositoryIdentity(Base):
 
 
 class BitbucketConnection(Base):
-    """One shared API credential; intake_enabled records any signed hook since token rotation."""
+    """One shared API credential; intake_enabled records a signed hook for this connection."""
 
     __tablename__ = "bitbucket_connections"
     __table_args__ = (

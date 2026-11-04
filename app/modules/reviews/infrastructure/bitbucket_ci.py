@@ -54,6 +54,22 @@ class BitbucketStatusSource(Protocol):
     async def current(self, run_id: UUID) -> BitbucketStatusSnapshot | None: ...
 
 
+class SqlAlchemyRunProvider:
+    """Read only a Run's provider before entering the Bitbucket status path."""
+
+    def __init__(self, sessions: async_sessionmaker[AsyncSession]) -> None:
+        self._sessions = sessions
+
+    async def __call__(self, run_id: UUID) -> str | None:
+        async with self._sessions() as session:
+            provider = await session.scalar(
+                select(ProviderInstallation.provider)
+                .join(Run, Run.origin_provider_installation_id == ProviderInstallation.id)
+                .where(Run.id == run_id)
+            )
+        return provider if isinstance(provider, str) else None
+
+
 class SqlAlchemyBitbucketStatusSource:
     """Detach a validated Run snapshot before any provider request."""
 
@@ -208,6 +224,7 @@ class BitbucketBuildStatusPublisher:
         *,
         transport_factory: Callable[[], httpx.AsyncBaseTransport] | None = None,
         ledger: BitbucketStatusIntents | None = None,
+        run_provider: Callable[[UUID], Awaitable[str | None]] | None = None,
         heartbeat_interval_seconds: float = 20.0,
     ) -> None:
         if heartbeat_interval_seconds <= 0:
@@ -216,6 +233,7 @@ class BitbucketBuildStatusPublisher:
         self._credentials = credentials
         self._transports = transport_factory
         self._ledger = ledger
+        self._run_provider = run_provider
         self._heartbeat_interval_seconds = heartbeat_interval_seconds
 
     @staticmethod
@@ -272,6 +290,8 @@ class BitbucketBuildStatusPublisher:
             raise BitbucketStatusUnavailable("Bitbucket status response is malformed") from None
 
     async def upsert(self, run_id: UUID, run_url: str | None) -> None:
+        if self._run_provider is not None and await self._run_provider(run_id) != "bitbucket":
+            return
         snapshot = await self._source.current(run_id)
         if snapshot is None or run_url is None:
             return

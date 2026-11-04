@@ -12,6 +12,7 @@ from app.modules.integrations.bitbucket.infrastructure.commit_hash import (
     pr_commit_hash,
     resolved_commit_hash,
 )
+from app.modules.integrations.bitbucket.infrastructure.provider_validation import bitbucket_path
 from app.modules.integrations.bitbucket.infrastructure.run_http import (
     BitbucketRunHttp,
     BitbucketRunHttpError,
@@ -106,19 +107,6 @@ def _uuid(value: object) -> UUID:
         return UUID(text.strip("{}"))
     except ValueError:
         raise ValueError("invalid Bitbucket repository UUID") from None
-
-
-def _path(value: object) -> str:
-    path = _string(value, 1024)
-    if (
-        len(path.encode("utf-8")) > 1024
-        or "\\" in path
-        or path.startswith("/")
-        or any(part in {"", ".", ".."} for part in path.split("/"))
-        or any(ord(char) < 32 or ord(char) == 127 for char in path)
-    ):
-        raise ValueError("invalid Bitbucket path")
-    return path
 
 
 def _count(value: object) -> int:
@@ -372,8 +360,8 @@ class HttpBitbucketVcsProvider:
         if status not in {"added", "modified", "removed", "renamed", "copied"}:
             raise ValueError("invalid Bitbucket diff status")
         old_raw, new_raw = data.get("old"), data.get("new")
-        old = _path(_object(old_raw).get("path")) if old_raw is not None else None
-        new = _path(_object(new_raw).get("path")) if new_raw is not None else None
+        old = bitbucket_path(_object(old_raw).get("path")) if old_raw is not None else None
+        new = bitbucket_path(_object(new_raw).get("path")) if new_raw is not None else None
         if status == "added":
             if new is None:
                 raise ValueError("missing added path")

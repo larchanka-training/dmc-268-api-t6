@@ -18,11 +18,13 @@ from app.modules.integrations.bitbucket.infrastructure.commit_hash import (
     pr_commit_hash,
     resolved_commit_hash,
 )
+from app.modules.integrations.bitbucket.infrastructure.provider_validation import (
+    check_bitbucket_response,
+    parse_bitbucket_uuid,
+)
 from app.modules.integrations.bitbucket.infrastructure.repository_provider import (
     BitbucketCloudRepositoryProvider,
     BitbucketProviderError,
-    _check_response,
-    _parse_uuid,
 )
 from app.modules.reviews.application.project_bitbucket_pull_request import (
     CanonicalBitbucketPullRequest,
@@ -131,7 +133,7 @@ class BitbucketCurrentPullRequestProvider:
             ) as response:
                 if commit_lookup and response.status_code == 404:
                     raise _DestinationCommitMissing()
-                _check_response(response)
+                check_bitbucket_response(response)
                 chunks: list[bytes] = []
                 size = 0
                 async for chunk in response.aiter_bytes():
@@ -155,7 +157,7 @@ def _parse_pull_request(
         raise ValueError("invalid_refs")
     destination_repository = destination.get("repository")
     if not isinstance(destination_repository, dict) or (
-        _parse_uuid(destination_repository.get("uuid")) != repository_uuid
+        parse_bitbucket_uuid(destination_repository.get("uuid")) != repository_uuid
     ):
         raise ValueError("invalid_origin")
     state = raw.get("state")

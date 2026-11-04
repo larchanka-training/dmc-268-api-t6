@@ -1,14 +1,52 @@
-"""Move-only baseline BuildRepositoryIndex tests."""
+"""BuildRepositoryIndex failure, release, and policy behavior."""
 
 from __future__ import annotations
 
-from tests.build_repository_index_base_support import (
+import asyncio
+import logging
+import time
+from dataclasses import replace
+from datetime import timedelta
+from typing import Any
+
+import pytest
+
+from app.modules.code_index.application import build_index
+from app.modules.code_index.application.build_index import (
+    BuildMode,
+    BuildStatus,
+    FullBuildReason,
+    limits_profile_version,
+)
+from app.modules.code_index.application.exclusions import ExclusionClass
+from app.modules.code_index.application.index_store import (
+    IndexAdmission,
+    IndexBuildStats,
+    IndexedFile,
+    IndexedSymbol,
+    LeaseClaim,
+)
+from app.modules.code_index.application.symbol_rows import file_rows, symbol_rows
+from app.modules.code_index.application.vcs import (
+    ArchiveUnsafe,
+    IndexLimitExceeded,
+    VcsAccessDenied,
+    VcsUnavailable,
+)
+from app.modules.code_index.domain.limits import IndexLimits
+from app.modules.reviews.application.ast_resolution import ImportResolution
+from app.modules.reviews.application.ast_symbols import (
+    AstFacts,
+)
+from app.modules.reviews.application.policy_errors import PolicyError, PolicyErrorCode
+from app.modules.reviews.application.review_ignore import (
+    parse_review_ignore,
+)
+from tests.build_repository_index_fakes import (
     _ADMISSION,
     _DIGEST,
     _FENCE,
     _GENERATION,
-    _GO_A,
-    _GO_B,
     _HEAD,
     _LIMITS,
     _MIB,
@@ -20,64 +58,25 @@ from tests.build_repository_index_base_support import (
     _REPO,
     _RULES,
     _SETTINGS,
-    _TARGETS,
     _TREE,
-    Any,
-    ArchiveUnsafe,
-    AstFacts,
-    BuildMode,
-    BuildStatus,
-    ExclusionClass,
-    FullBuildReason,
-    ImportResolution,
-    IndexAdmission,
-    IndexBuildStats,
-    IndexedFile,
-    IndexedSymbol,
-    IndexLimitExceeded,
-    IndexLimits,
-    LeaseClaim,
     Link,
-    PolicyError,
-    PolicyErrorCode,
     Tree,
-    VcsAccessDenied,
-    VcsUnavailable,
-    _access_denied,
+    World,
     _blob,
     _changed,
     _comparison,
-    _crashing_parser,
-    _empty,
-    _fail_at_archive,
-    _fail_at_scan,
-    _failing_source_factory,
-    _file,
-    _go_world,
     _incremental_world,
-    _lost_lease,
-    _parked_claim_exit,
-    _parked_parse,
-    _policy_error,
+    _indexed,
     _state,
-    _unavailable_archive,
-    _unavailable_head,
-    _unchanged,
-    _unfinished_discard,
-    _unsafe_archive,
     _world,
-    asyncio,
-    build_index,
-    file_rows,
-    limits_profile_version,
-    logging,
-    parse_review_ignore,
-    pytest,
-    replace,
-    symbol_rows,
-    time,
-    timedelta,
 )
+
+_TARGETS = [
+    pytest.param(None, "d" * 40, True, id="none-then-a-target"),
+    pytest.param(None, None, False, id="none-then-none"),
+    pytest.param("d" * 40, "d" * 40, False, id="same-target"),
+    pytest.param("d" * 40, "e" * 40, True, id="another-target"),
+]
 
 
 @pytest.mark.parametrize(("claimed", "target", "moved"), _TARGETS)
@@ -94,6 +93,30 @@ def test_a_target_that_moved_during_the_build_wakes_the_repository(
     assert outcome.status is BuildStatus.PUBLISHED
     assert world.wakeups.woken == ([(_REPO, _GENERATION)] if moved else [])
     assert world.tracker.log[-2:] == (["get_state", "wake"] if moved else ["commit", "get_state"])
+
+
+def _unsafe_archive(world: World) -> None:
+    world.archives.error = ArchiveUnsafe("unsafe")
+
+
+def _unavailable_head(world: World) -> None:
+    world.source.errors["head"] = VcsUnavailable("down")
+
+
+def _crashing_parser(world: World) -> None:
+    world.parser.error = RuntimeError("parser crashed")
+
+
+def _unchanged(world: World) -> None:
+    world.store.state = _state(indexed_commit_sha=_HEAD)
+
+
+def _empty(world: World) -> None:
+    world.source.head_value = None
+
+
+def _access_denied(world: World) -> None:
+    world.source.errors["head"] = VcsAccessDenied("gone")
 
 
 @pytest.mark.parametrize(
@@ -123,6 +146,10 @@ def test_a_target_that_moved_before_a_release_wakes_the_repository(
     assert world.wakeups.woken == ([(_REPO, _GENERATION)] if moved else [])
     expected = ["release", "commit", "get_state", *(["wake"] if moved else [])]
     assert world.tracker.log[-len(expected) :] == expected
+
+
+def _lost_lease(world: World) -> None:
+    world.store.lose_lease_at = "replace_file"
 
 
 @pytest.mark.parametrize(
@@ -166,6 +193,14 @@ def test_a_lost_lease_while_failing_is_still_a_lost_lease() -> None:
     world.archives.error = ArchiveUnsafe("unsafe")
 
     assert world.run().status is BuildStatus.LEASE_LOST
+
+
+def _fail_at_archive(world: World, error: BaseException) -> None:
+    world.source.errors["archive"] = error
+
+
+def _fail_at_scan(world: World, error: BaseException) -> None:
+    world.archives.error = error
 
 
 @pytest.mark.parametrize(
@@ -270,6 +305,13 @@ def test_the_incremental_limits_count_the_rows_the_build_keeps(limit: str, total
     assert (outcome.status, outcome.error_code) == (BuildStatus.FAILED, f"limit_exceeded:{limit}")
 
 
+# Two exported top-level functions per file: each summary holds 2 symbols.
+_GO_A = b"package m\n\nfunc A() {}\n\nfunc B() {}\n"
+_GO_B = b"package m\n\nfunc C() {}\n\nfunc D() {}\n"
+_GO_OLD: Tree = {"a.go": _GO_A, "b.go": _GO_B, "c.go": b"package m\n\nfunc E() {}\n"}
+_GO_HEAD: Tree = {**_GO_OLD, "c.go": b"package m\n\nfunc F() {}\n"}
+
+
 def test_the_target_pass_stops_before_a_parse_over_the_parsed_files_limit() -> None:
     # Every Go file is a target: `b.go` is the second path this job would parse.
     world = _world({"a.go": _GO_A, "b.go": _GO_B})
@@ -330,6 +372,18 @@ def test_held_symbols_accumulate_across_target_batches() -> None:
     assert (outcome.status, outcome.error_code) == (BuildStatus.FAILED, "limit_exceeded:symbols")
     assert world.parser.parsed == ["a.go", "b.go"]
     assert world.written() == []
+
+
+def _go_world(mode: BuildMode) -> World:
+    if mode is BuildMode.FULL:
+        return _world(_GO_HEAD)
+    # The index holds the 3 files of the base; HEAD changes `c.go` only.
+    return _world(
+        _GO_HEAD,
+        state=_state(file_count=3),
+        comparison=_comparison(_changed("c.go")),
+        files=_indexed(_GO_OLD),
+    )
 
 
 @pytest.mark.parametrize(
@@ -640,6 +694,22 @@ def test_a_base_exception_that_is_not_an_exception_releases_the_lease_without_a_
     assert world.store.failures == []
 
 
+def _unfinished_discard(world: World) -> None:
+    world.store.discards = [2]
+
+
+def _policy_error(world: World) -> None:
+    world.source.policy_tree = {_RULES: b"```review-ignore\nlegacy/**\n"}
+
+
+def _unavailable_archive(world: World) -> None:
+    world.source.errors["archive"] = VcsUnavailable("down")
+
+
+def _failing_source_factory(world: World) -> None:
+    world.source_error = RuntimeError("no source for this repository")
+
+
 @pytest.mark.parametrize(
     ("arrange", "status", "downloaded", "requests"),
     [
@@ -707,6 +777,16 @@ def test_a_cancellation_during_the_closing_write_does_not_cut_it(
     assert [code for code, _ in world.store.failures] == failures
     assert world.store.releases == releases
     assert world.tracker.log[-2:] == [held, "commit"]
+
+
+def _parked_parse(world: World) -> asyncio.Event:
+    world.parser.hang = True
+    return world.parser.entered
+
+
+def _parked_claim_exit(world: World) -> asyncio.Event:
+    world.store.hold = "claim_exit"
+    return world.store.held
 
 
 @pytest.mark.parametrize(
@@ -825,6 +905,10 @@ def test_one_log_line_ends_the_job_without_paths_or_content(
     assert str(_REPO) in message
     for path in _OLD_TREE:
         assert path not in message
+
+
+def _file(world: World, path: str) -> IndexedFile:
+    return next(file for _, file in world.store.written if file.path == path)
 
 
 def test_targets_later_in_the_archive_resolve_through_their_fact_summaries() -> None:

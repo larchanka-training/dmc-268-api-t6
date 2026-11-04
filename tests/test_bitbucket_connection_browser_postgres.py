@@ -1,41 +1,53 @@
-"""Move-only baseline Bitbucket connection tests."""
+"""Bitbucket credential rows keep secret and tenant authority isolated (#333)."""
 
 from __future__ import annotations
 
-from tests.bitbucket_connection_postgres_support import (
-    UUID,
-    AuthScope,
-    BitbucketCloudRepositoryProvider,
-    BitbucketCredentialCipher,
-    BitbucketCredentialCodecAdapter,
-    BitbucketRepositorySnapshot,
-    BitbucketTargetInactive,
-    Connection,
-    CredentialContext,
-    CredentialPurpose,
+import asyncio
+import os
+from pathlib import Path
+from uuid import UUID, uuid4
+
+import httpx
+import pytest
+from fastapi.testclient import TestClient
+from sqlalchemy import Connection, text
+from sqlalchemy.engine import make_url
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+from alembic import command
+from app.bootstrap.bitbucket import get_bitbucket_management
+from app.bootstrap.portal_auth import get_auth_scope
+from app.bootstrap.reviews_api import ReviewsApiResources
+from app.main import app
+from app.modules.auth.application.scope import AuthScope
+from app.modules.integrations.bitbucket.application.manage_connection import (
     ManageBitbucketConnection,
-    Path,
-    ReviewsApiResources,
+)
+from app.modules.integrations.bitbucket.application.provider_error import BitbucketProviderError
+from app.modules.integrations.bitbucket.application.request_credentials import (
+    BitbucketTargetInactive,
+)
+from app.modules.integrations.bitbucket.infrastructure.connection_store import (
     SqlAlchemyBitbucketConnectionStore,
     SqlAlchemyBitbucketManagementUnitOfWork,
-    SqlAlchemyBitbucketTargetReader,
-    TestClient,
-    _config,
-    app,
-    async_sessionmaker,
-    asyncio,
-    command,
-    create_async_engine,
-    get_auth_scope,
-    get_bitbucket_management,
-    httpx,
-    load_default_rule_sets,
-    make_url,
-    os,
-    pytest,
-    text,
-    uuid4,
 )
+from app.modules.integrations.bitbucket.infrastructure.credential_cipher import (
+    BitbucketCredentialCipher,
+    CredentialContext,
+    CredentialPurpose,
+)
+from app.modules.integrations.bitbucket.infrastructure.credential_codec import (
+    BitbucketCredentialCodecAdapter,
+)
+from app.modules.integrations.bitbucket.infrastructure.repository_provider import (
+    BitbucketCloudRepositoryProvider,
+    BitbucketRepositorySnapshot,
+)
+from app.modules.integrations.bitbucket.infrastructure.request_credentials import (
+    SqlAlchemyBitbucketTargetReader,
+)
+from app.modules.repositories.application.onboard_repository import load_default_rule_sets
+from tests.bitbucket_connection_postgres_support import _config
 
 pytest_plugins = ("tests.bitbucket_connection_postgres_support",)
 
@@ -160,10 +172,14 @@ def test_browser_connect_reuses_one_credential_and_disconnects_one_repository(
 
     class RacingProvider(BitbucketCloudRepositoryProvider):
         race_target: tuple[UUID, UUID] | None = None
+        fail_uuid: UUID | None = None
 
         async def fetch_repository_by_uuid(
             self, *, repository_uuid: UUID, token: str, workspace_uuid: UUID | None = None
         ) -> BitbucketRepositorySnapshot:
+            if self.fail_uuid == repository_uuid:
+                self.fail_uuid = None
+                raise BitbucketProviderError("provider_unavailable")
             if self.race_target is not None:
                 installation_id, repository_id = self.race_target
                 self.race_target = None
@@ -214,6 +230,33 @@ def test_browser_connect_reuses_one_credential_and_disconnects_one_repository(
     app.state.reviews_api_resources = ReviewsApiResources(engine, factory)
     app.dependency_overrides[get_auth_scope] = lambda: AuthScope(42, (workspace,))
     app.dependency_overrides[get_bitbucket_management] = lambda: manager
+
+    def rotation_state() -> tuple[tuple[object, ...], tuple[tuple[object, ...], ...]]:
+        state = (
+            tuple(
+                db.execute(
+                    text(
+                        "SELECT credential_generation, token_key_id, token_ciphertext, "
+                        "intake_enabled FROM bitbucket_connections "
+                        "WHERE provider_installation_id=:id"
+                    ),
+                    {"id": installation_id},
+                ).one()
+            ),
+            tuple(
+                tuple(row)
+                for row in db.execute(
+                    text(
+                        "SELECT full_name, default_branch, web_url FROM repositories "
+                        "WHERE provider_installation_id=:id ORDER BY id"
+                    ),
+                    {"id": installation_id},
+                ).all()
+            ),
+        )
+        db.commit()
+        return state
+
     try:
         client = TestClient(app)
         url = f"/api/workspaces/{workspace}/bitbucket/connections"
@@ -272,12 +315,23 @@ def test_browser_connect_reuses_one_credential_and_disconnects_one_repository(
         assert len(client.get(url).json()["connections"]) == 2
         assert len(probe_requests) == 4
         assert all("pullrequests?pagelen=1" in request for request in probe_requests)
+        installation_id = first.json()["id"]
+        db.execute(
+            text(
+                "UPDATE bitbucket_connections SET intake_enabled=true "
+                "WHERE provider_installation_id=:id"
+            ),
+            {"id": installation_id},
+        )
+        db.commit()
+        before_failed_rotation = rotation_state()
         missing_pr_scope = client.put(
             f"{url}/{first.json()['id']}/credential",
             json={"apiToken": "repository-only-token"},
         )
         assert missing_pr_scope.status_code == 422
         assert missing_pr_scope.json() == {"detail": "repository_inaccessible"}
+        assert rotation_state() == before_failed_rotation
         assert client.get(url).json()["connections"][0]["credentialGeneration"] == 1
         transferred = client.put(
             f"{url}/{first.json()['id']}/credential",
@@ -285,6 +339,7 @@ def test_browser_connect_reuses_one_credential_and_disconnects_one_repository(
         )
         assert transferred.status_code == 409
         assert transferred.json() == {"detail": "repository_uuid_conflict"}
+        assert rotation_state() == before_failed_rotation
         assert client.get(url).json()["connections"][0]["credentialGeneration"] == 1
         assert second.json()["id"] == first.json()["id"]
         assert second.json()["webhook"]["secret"]
@@ -333,12 +388,24 @@ def test_browser_connect_reuses_one_credential_and_disconnects_one_repository(
         )
         assert stale_rotation.status_code == 409
         assert stale_rotation.json()["detail"] == "connection_changed"
+        assert rotation_state() == before_failed_rotation
+        racing_provider.fail_uuid = second_uuid
+        failed_rotation = client.put(
+            f"{url}/{first.json()['id']}/credential",
+            json={"apiToken": "rotated-token"},
+        )
+        assert failed_rotation.status_code == 502
+        assert failed_rotation.json() == {"detail": "provider_unavailable"}
+        assert failed_rotation.headers["X-Bitbucket-Repository-UUID"] == str(second_uuid)
+        assert "rotated-token" not in failed_rotation.text
+        assert rotation_state() == before_failed_rotation
         rotated_credential = client.put(
             f"{url}/{first.json()['id']}/credential",
             json={"apiToken": "rotated-token"},
         )
         assert rotated_credential.status_code == 200
         assert rotated_credential.json()["credentialGeneration"] == 2
+        assert rotation_state()[0][3] is True
         assert set(rotated_repositories) == {"first-renamed", "second-renamed"}
         assert {item["repositorySlug"] for item in client.get(url).json()["connections"]} == {
             "first-renamed",

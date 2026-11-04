@@ -2,10 +2,7 @@
 
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass
-from datetime import UTC, datetime
-from email.utils import parsedate_to_datetime
 from typing import Any
 from urllib.parse import parse_qsl, urlsplit
 from uuid import UUID
@@ -18,6 +15,10 @@ from app.modules.integrations.bitbucket.application.credential_input import (
 )
 from app.modules.integrations.bitbucket.application.provider_error import (
     BitbucketProviderError as BitbucketProviderError,
+)
+from app.modules.integrations.bitbucket.infrastructure.provider_validation import (
+    check_bitbucket_response,
+    parse_bitbucket_uuid,
 )
 
 _API_ORIGIN = "https://api.bitbucket.org"
@@ -58,7 +59,7 @@ class BitbucketCloudRepositoryProvider:
             else f"{_API_ORIGIN}/2.0/repositories/{workspace_slug}?pagelen=50"
         )
         response = await self._get(url, token)
-        _check_response(response)
+        check_bitbucket_response(response)
         try:
             parsed = response.json()
         except ValueError:
@@ -87,7 +88,7 @@ class BitbucketCloudRepositoryProvider:
         response = await self._get(
             f"{_API_ORIGIN}/2.0/repositories/{workspace_slug}/{repository_slug}", token
         )
-        _check_response(response)
+        check_bitbucket_response(response)
         try:
             parsed = response.json()
         except ValueError:
@@ -102,7 +103,7 @@ class BitbucketCloudRepositoryProvider:
             f"{_API_ORIGIN}/2.0/repositories/{workspace_locator}/%7B{repository_uuid}%7D",
             token,
         )
-        _check_response(response)
+        check_bitbucket_response(response)
         try:
             parsed = response.json()
         except ValueError:
@@ -143,7 +144,7 @@ class BitbucketCloudRepositoryProvider:
             raise BitbucketProviderError("invalid_provider_response") from None
         if not isinstance(parsed, dict):
             raise BitbucketProviderError("invalid_provider_response")
-        _parse_uuid(parsed.get("uuid"))
+        parse_bitbucket_uuid(parsed.get("uuid"))
 
     async def _get(self, url: str, token: str) -> httpx.Response:
         if not valid_bitbucket_token(token):
@@ -155,7 +156,7 @@ class BitbucketCloudRepositoryProvider:
                 headers={"Authorization": f"Bearer {token}"},
                 follow_redirects=False,
             ) as response:
-                _check_response(response)
+                check_bitbucket_response(response)
                 chunks: list[bytes] = []
                 size = 0
                 async for chunk in response.aiter_bytes():
@@ -217,15 +218,6 @@ def _validate_cursor(value: object, workspace_slug: str) -> str:
     return value
 
 
-def _parse_uuid(value: object) -> UUID:
-    if not isinstance(value, str) or re.fullmatch(r"\{[0-9a-fA-F-]{36}\}", value) is None:
-        raise BitbucketProviderError("invalid_provider_response")
-    try:
-        return UUID(value[1:-1])
-    except ValueError:
-        raise BitbucketProviderError("invalid_provider_response") from None
-
-
 def _parse_repository(
     raw: object, workspace_slug: str, repository_slug: str
 ) -> BitbucketRepositorySnapshot:
@@ -263,8 +255,8 @@ def _parse_repository(
     ):
         raise BitbucketProviderError("invalid_provider_response")
     return BitbucketRepositorySnapshot(
-        uuid=_parse_uuid(data.get("uuid")),
-        workspace_uuid=_parse_uuid(workspace.get("uuid")),
+        uuid=parse_bitbucket_uuid(data.get("uuid")),
+        workspace_uuid=parse_bitbucket_uuid(workspace.get("uuid")),
         workspace_slug=workspace["slug"],
         slug=data["slug"],
         name=name,
@@ -274,29 +266,3 @@ def _parse_repository(
         default_branch=default_branch,
         language=language,
     )
-
-
-def _check_response(response: httpx.Response) -> None:
-    if response.status_code == 200:
-        return
-    if response.status_code in (401, 403, 404):
-        raise BitbucketProviderError("repository_inaccessible")
-    if response.status_code == 429:
-        raise BitbucketProviderError(
-            "provider_rate_limited", retry_after=_retry_after(response.headers.get("Retry-After"))
-        )
-    raise BitbucketProviderError("provider_unavailable")
-
-
-def _retry_after(value: str | None) -> int | None:
-    if value is None or len(value) > 64 or not value.isascii():
-        return None
-    if value.isdecimal():
-        return min(int(value), 3600)
-    try:
-        parsed = parsedate_to_datetime(value)
-        if parsed.tzinfo is None:
-            return None
-        return min(max(int((parsed - datetime.now(UTC)).total_seconds()), 0), 3600)
-    except (TypeError, ValueError, OverflowError):
-        return None

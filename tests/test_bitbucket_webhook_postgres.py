@@ -18,6 +18,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from alembic import command
 from app.bootstrap.bitbucket import BitbucketWebhookResources, get_bitbucket_webhook_resources
 from app.main import app
+from app.modules.integrations.bitbucket.api.dispatch import BitbucketWebhookDispatchAdapter
 from app.modules.integrations.bitbucket.application.webhook_receipts import (
     BitbucketReceiptError,
     prepare_bitbucket_receipt,
@@ -46,6 +47,11 @@ from app.modules.integrations.webhooks.infrastructure.github_webhook_receipts im
     SqlAlchemyWebhookReceiptOperations,
 )
 from app.modules.integrations.webhooks.infrastructure.models import WebhookEvent
+from app.modules.reviews.application.try_enqueue_webhook_run import EnqueueResult
+from app.modules.reviews.infrastructure.bitbucket_pull_request_projection import (
+    SqlAlchemyBitbucketProjectionUnitOfWork,
+    SqlAlchemyBitbucketPushCandidateReader,
+)
 from tests.bitbucket_connection_postgres_support import _config
 
 pytest_plugins = ("tests.bitbucket_connection_postgres_support",)
@@ -219,6 +225,49 @@ def test_bitbucket_signed_receipt_dedup_and_generation_fences(
             payload_json=push_body,
         )
         assert await receiver.execute(push_receipt) == InstallationDeliveryDispatchStatus.PENDING
+        push_claim = uuid4()
+        push_now = datetime.now(UTC)
+        async with SqlAlchemyBitbucketWebhookReceiptUnitOfWork(factory) as uow:
+            assert (
+                await uow.receipts.claim(
+                    push_receipt.delivery_id,
+                    push_claim,
+                    push_now,
+                    push_now + timedelta(minutes=5),
+                )
+                is not None
+            )
+            await uow.commit()
+        async with SqlAlchemyBitbucketWebhookReceiptUnitOfWork(factory) as uow:
+            await uow.receipts.retry_push_continuation(
+                push_receipt.delivery_id, push_claim, push_now + timedelta(seconds=1)
+            )
+            await uow.commit()
+        async with factory() as session:
+            row = (
+                await session.execute(
+                    text(
+                        "SELECT projection_claim_token,projection_attempt_count,retry_after "
+                        "FROM webhook_events WHERE delivery_id=:delivery"
+                    ),
+                    {"delivery": push_receipt.delivery_id},
+                )
+            ).one()
+            assert row.projection_claim_token is None
+            assert row.projection_attempt_count == 0
+            assert row.retry_after == push_now + timedelta(seconds=1)
+        resumed_push_claim = uuid4()
+        async with SqlAlchemyBitbucketWebhookReceiptUnitOfWork(factory) as uow:
+            assert (
+                await uow.receipts.claim(
+                    push_receipt.delivery_id,
+                    resumed_push_claim,
+                    push_now + timedelta(seconds=2),
+                    push_now + timedelta(minutes=5, seconds=2),
+                )
+                is not None
+            )
+            await uow.commit()
         async with factory() as session:
             assert (
                 await session.scalar(
@@ -234,6 +283,33 @@ def test_bitbucket_signed_receipt_dedup_and_generation_fences(
                     workspace_id=workspace
                 )
             } == {first: True, second: False}
+        async with factory.begin() as session:
+            await session.execute(
+                text(
+                    "INSERT INTO bitbucket_push_retry_candidates "
+                    "(webhook_event_id,pr_number,reason) "
+                    "SELECT id,17,'run_admission_deferred' FROM webhook_events "
+                    "WHERE delivery_id=:delivery"
+                ),
+                {"delivery": push_receipt.delivery_id},
+            )
+        async with SqlAlchemyBitbucketWebhookReceiptUnitOfWork(factory) as uow:
+            await uow.receipts.mark_projected(
+                push_receipt.delivery_id, resumed_push_claim, push_now + timedelta(seconds=3)
+            )
+            await uow.commit()
+        async with factory() as session:
+            assert (
+                await session.scalar(
+                    text(
+                        "SELECT count(*) FROM bitbucket_push_retry_candidates AS retry "
+                        "JOIN webhook_events AS receipt ON receipt.id=retry.webhook_event_id "
+                        "WHERE receipt.delivery_id=:delivery"
+                    ),
+                    {"delivery": push_receipt.delivery_id},
+                )
+                == 0
+            )
         fresh_receipt = prepare_bitbucket_receipt(
             origin=stale_origin,
             event_name="pullrequest:created",
@@ -307,6 +383,72 @@ def test_bitbucket_signed_receipt_dedup_and_generation_fences(
             signature=sibling_sig,
         )
         assert sibling is not None
+        failed_push = prepare_bitbucket_receipt(
+            origin=stale_origin,
+            event_name="repo:push",
+            hook_uuid=hook,
+            request_uuid=uuid4(),
+            payload_json=push_body,
+        )
+        assert await receiver.execute(failed_push) == InstallationDeliveryDispatchStatus.PENDING
+        failed_push_now = datetime.now(UTC)
+        failed_push_claim = uuid4()
+        async with SqlAlchemyBitbucketWebhookReceiptUnitOfWork(factory) as uow:
+            assert (
+                await uow.receipts.claim(
+                    failed_push.delivery_id,
+                    failed_push_claim,
+                    failed_push_now,
+                    failed_push_now + timedelta(minutes=5),
+                )
+                is not None
+            )
+            await uow.commit()
+        async with factory.begin() as session:
+            await session.execute(
+                text(
+                    "INSERT INTO bitbucket_push_retry_candidates "
+                    "(webhook_event_id,pr_number,reason,attempt_count) "
+                    "SELECT id,17,'canonical_stale',2 FROM webhook_events "
+                    "WHERE delivery_id=:delivery"
+                ),
+                {"delivery": failed_push.delivery_id},
+            )
+        # Candidate settlement commits, then the worker dies before failing the receipt.
+        async with SqlAlchemyBitbucketProjectionUnitOfWork(factory) as projection_uow:
+            assert await projection_uow.push_continuation.settle_pending(
+                failed_push.delivery_id, first, 1, 2, (), ((17, "canonical_stale"),)
+            ) == (False, False, True)
+            await projection_uow.commit()
+        racing_push = prepare_bitbucket_receipt(
+            origin=stale_origin,
+            event_name="repo:push",
+            hook_uuid=hook,
+            request_uuid=uuid4(),
+            payload_json=push_body,
+        )
+        assert await receiver.execute(racing_push) == InstallationDeliveryDispatchStatus.PENDING
+        racing_claim_token = uuid4()
+        racing_claimed_at = datetime.now(UTC)
+        async with SqlAlchemyBitbucketWebhookReceiptUnitOfWork(factory) as uow:
+            claimed_racing_push = await uow.receipts.claim(
+                racing_push.delivery_id,
+                racing_claim_token,
+                racing_claimed_at,
+                racing_claimed_at + timedelta(minutes=5),
+            )
+            assert claimed_racing_push is not None
+            await uow.commit()
+        async with factory.begin() as session:
+            await session.execute(
+                text(
+                    "INSERT INTO bitbucket_push_retry_candidates "
+                    "(webhook_event_id,pr_number,reason,attempt_count,failed_at) "
+                    "SELECT id,19,'canonical_stale',3,now() FROM webhook_events "
+                    "WHERE delivery_id=:delivery"
+                ),
+                {"delivery": racing_push.delivery_id},
+            )
         async with factory.begin() as session:
             store = SqlAlchemyBitbucketConnectionStore(session)
             await store.set_repository_webhook_secret(
@@ -319,6 +461,103 @@ def test_bitbucket_signed_receipt_dedup_and_generation_fences(
                     purpose=CredentialPurpose.WEBHOOK_SECRET,
                 ),
             )
+
+        class ReaderHandler:
+            async def push(
+                self,
+                installation_id: UUID,
+                repository_id: UUID,
+                repository_uuid: UUID,
+                branches: frozenset[str],
+                binding_generation: int,
+                webhook_generation: int,
+                delivery_id: str,
+            ) -> tuple[EnqueueResult, ...]:
+                await SqlAlchemyBitbucketPushCandidateReader(factory).matching_open_pr_page(
+                    installation_id,
+                    repository_id,
+                    repository_uuid,
+                    binding_generation,
+                    webhook_generation,
+                    branches,
+                    None,
+                )
+                return ()
+
+            async def pull_request(
+                self,
+                installation_id: UUID,
+                repository_id: UUID,
+                repository_uuid: UUID,
+                number: int,
+                binding_generation: int,
+                webhook_generation: int,
+            ) -> EnqueueResult | None:
+                raise AssertionError("push receipt must not dispatch a pull request")
+
+        # Claim was active, but the binding rotated before the provider-free dispatch.
+        racing_result = await BitbucketWebhookDispatchAdapter(ReaderHandler()).execute(
+            claimed_racing_push
+        )
+        assert racing_result.status == InstallationDeliveryDispatchStatus.IGNORED_IRRELEVANT_EVENT
+        assert racing_result.detail == "inactive_origin"
+        racing_finalized_at = datetime.now(UTC)
+        async with SqlAlchemyBitbucketWebhookReceiptUnitOfWork(factory) as uow:
+            await uow.receipts.mark_projected(
+                racing_push.delivery_id, racing_claim_token, racing_finalized_at
+            )
+            await uow.commit()
+        async with factory() as session:
+            racing_failure = (
+                await session.execute(
+                    text(
+                        "SELECT receipt.projected_at,receipt.projection_failed_at,"
+                        "retry.reason,retry.attempt_count,retry.failed_at "
+                        "FROM webhook_events AS receipt "
+                        "JOIN bitbucket_push_retry_candidates AS retry "
+                        "ON retry.webhook_event_id=receipt.id "
+                        "WHERE receipt.delivery_id=:delivery"
+                    ),
+                    {"delivery": racing_push.delivery_id},
+                )
+            ).one()
+            assert racing_failure.projected_at is None
+            assert racing_failure.projection_failed_at == racing_finalized_at
+            assert (racing_failure.reason, racing_failure.attempt_count) == (
+                "canonical_stale",
+                3,
+            )
+            assert racing_failure.failed_at is not None
+        reclaim_at = failed_push_now + timedelta(minutes=6)
+        async with SqlAlchemyBitbucketWebhookReceiptUnitOfWork(factory) as uow:
+            assert (
+                await uow.receipts.claim(
+                    failed_push.delivery_id,
+                    uuid4(),
+                    reclaim_at,
+                    reclaim_at + timedelta(minutes=5),
+                )
+                is None
+            )
+            await uow.commit()
+        async with factory() as session:
+            failure = (
+                await session.execute(
+                    text(
+                        "SELECT receipt.projected_at,receipt.projection_failed_at,"
+                        "retry.reason,retry.attempt_count,retry.failed_at "
+                        "FROM webhook_events AS receipt "
+                        "JOIN bitbucket_push_retry_candidates AS retry "
+                        "ON retry.webhook_event_id=receipt.id "
+                        "WHERE receipt.delivery_id=:delivery"
+                    ),
+                    {"delivery": failed_push.delivery_id},
+                )
+            ).one()
+            assert failure.projected_at is None
+            assert failure.projection_failed_at == reclaim_at
+            assert (failure.reason, failure.attempt_count) == ("canonical_stale", 3)
+            assert failure.failed_at is not None
         stale_receipt = prepare_bitbucket_receipt(
             origin=stale_origin,
             event_name="pullrequest:created",
@@ -354,7 +593,7 @@ def test_bitbucket_signed_receipt_dedup_and_generation_fences(
                 await session.scalar(
                     text("SELECT count(*) FROM webhook_events WHERE provider='bitbucket'")
                 )
-                == 4
+                == 6
             )
             assert {
                 binding.repository_id: binding.confirmed_at is not None
@@ -421,6 +660,55 @@ def test_bitbucket_signed_receipt_dedup_and_generation_fences(
                 )
                 is not None
             )
+
+        fairness_now = datetime.now(UTC)
+        fresh_delivery = "bitbucket-fresh-" + str(uuid4())
+        async with factory.begin() as session:
+            await session.execute(
+                text("UPDATE webhook_events SET projected_at=:now WHERE provider='bitbucket'"),
+                {"now": fairness_now},
+            )
+            await session.execute(
+                text(
+                    "INSERT INTO webhook_events "
+                    "(id,provider_installation_id,provider,bitbucket_repository_id,"
+                    "bitbucket_binding_generation,bitbucket_webhook_generation,"
+                    "bitbucket_push_after_pr_number,delivery_id,event,payload,received_at,"
+                    "retry_after) VALUES (:id,:installation,'bitbucket',:repository,1,2,5,"
+                    ":delivery,'repo:push','{}'::jsonb,:received,:retry)"
+                ),
+                [
+                    {
+                        "id": uuid4(),
+                        "installation": installation,
+                        "repository": second,
+                        "delivery": f"bitbucket-old-{uuid4()}",
+                        "received": fairness_now - timedelta(hours=1),
+                        "retry": fairness_now + timedelta(seconds=1),
+                    }
+                    for _ in range(100)
+                ],
+            )
+            await session.execute(
+                text(
+                    "INSERT INTO webhook_events "
+                    "(id,provider_installation_id,provider,bitbucket_repository_id,"
+                    "bitbucket_binding_generation,bitbucket_webhook_generation,delivery_id,"
+                    "event,payload,received_at) VALUES "
+                    "(:id,:installation,'bitbucket',:repository,1,2,:delivery,"
+                    "'pullrequest:updated','{}'::jsonb,:received)"
+                ),
+                {
+                    "id": uuid4(),
+                    "installation": installation,
+                    "repository": second,
+                    "delivery": fresh_delivery,
+                    "received": fairness_now,
+                },
+            )
+        async with SqlAlchemyBitbucketWebhookReceiptUnitOfWork(factory) as uow:
+            pending = await uow.receipts.pending_ids(fairness_now + timedelta(seconds=2), 100)
+            assert fresh_delivery in pending
 
     try:
         asyncio.run(assert_fences())

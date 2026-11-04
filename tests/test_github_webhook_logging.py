@@ -1,67 +1,64 @@
-"""Move-only baseline GitHub webhook tests."""
+"""Verified GitHub webhook receipts are durable before projection."""
 
 from __future__ import annotations
 
-from tests.github_webhook_base_support import (
-    _DELIVERY_LOGGER,
-    _DISPATCH_LOGGER,
-    _EVENT_NAMES_AS_LOGGED,
-    _NOW,
-    _PAYLOAD_SENTINEL,
-    _SECRET,
-    _SECRET_IN_MESSAGE,
-    UTC,
-    UUID,
-    CiTriggerEvent,
-    FailingTypedDispatcher,
+import asyncio
+import json
+import logging
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
+from types import TracebackType
+from typing import cast
+from uuid import UUID
+
+import httpx
+import psycopg
+import pytest
+from fastapi.testclient import TestClient
+from pydantic import ValidationError
+from sqlalchemy.exc import OperationalError
+from sqlalchemy.exc import TimeoutError as PoolTimeoutError
+
+from app.bootstrap.reviews_api import get_github_webhook_receipt_uow_factory
+from app.main import (
+    app,
+    get_github_webhook_secret,
+)
+from app.modules.integrations.webhooks.api.dispatch import GitHubWebhookDispatchAdapter, action_of
+from app.modules.integrations.webhooks.api.receipt import VerifiedGitHubDelivery
+from app.modules.integrations.webhooks.application.github_installation_dispatch import (
+    GitHubDispatchEvent,
+    InstallationDeliveryDispatchResult,
+    InstallationDeliveryDispatchStatus,
+)
+from app.modules.integrations.webhooks.application.receive_github_delivery import (
     FailureCategory,
+    ReceiveGitHubDelivery,
+    WebhookReceipt,
+)
+from app.modules.integrations.webhooks.infrastructure.failure_category import classify_failure
+from app.modules.reviews.application.project_github_pull_request import (
+    PullRequestLabelEvent,
+)
+from app.modules.reviews.application.trigger_from_delivery import CiTriggerEvent
+from tests.github_webhook_fakes import (
+    _DELIVERY_LOGGER,
+    _SECRET,
     FakeClaimedReceipt,
     FakeDispatcher,
     FakeReceiptUnitOfWork,
-    GitHubWebhookDispatchAdapter,
-    InstallationDeliveryDispatchResult,
-    InstallationDeliveryDispatchStatus,
-    Mapping,
-    OperationalError,
-    PoolTimeoutError,
-    PullRequestLabelEvent,
-    ReceiveGitHubDelivery,
-    TestClient,
-    TracebackType,
-    ValidationError,
-    VerifiedGitHubDelivery,
-    WebhookReceipt,
-    _dispatch_failure_run,
-    _failure_lines,
-    _fallback_records,
     _headers,
-    _http_status_error,
-    _mismatched_number,
-    _outcome_lines,
-    _pull_request_receipt,
-    _replay_invalid_receipt,
-    _sweep_failure_records,
-    _synchronize_with_unparsable_number,
-    _warning_and_error_records,
-    _without_label,
-    action_of,
-    app,
-    asyncio,
-    cast,
-    classify_failure,
-    dataclass,
-    datetime,
-    get_github_webhook_receipt_uow_factory,
-    get_github_webhook_secret,
-    httpx,
-    json,
-    logging,
-    psycopg,
-    pytest,
-    timedelta,
 )
 
-pytest_plugins = ("tests.github_webhook_base_support",)
+
+def _outcome_lines(caplog: pytest.LogCaptureFixture) -> list[str]:
+    return [
+        record.getMessage()
+        for record in caplog.records
+        if record.levelno == logging.INFO
+        and record.getMessage().startswith("GitHub webhook delivery ")
+    ]
 
 
 def test_projected_delivery_logs_one_outcome_line_with_its_detail(
@@ -166,6 +163,98 @@ def test_known_event_without_a_handler_logs_that_it_is_tried_again(
         "detail=action=synchronize retry_at=2026-09-28T00:05:00+00:00"
     ]
     assert uow.rows["known-1"].projected is False
+
+
+_SECRET_IN_MESSAGE = "ghs_t72_sentinel"
+_NOW = datetime(2026, 9, 28, tzinfo=UTC)
+
+
+def _pull_request_receipt(delivery_id: str, action: str = "labeled") -> WebhookReceipt:
+    payload: dict[str, object] = {
+        "action": action,
+        "installation": {"id": 17},
+        "repository": {"id": 101, "full_name": "octo/repo"},
+        "pull_request": {
+            "id": 901,
+            "number": 7,
+            "title": "Review parser",
+            "html_url": "https://github.com/octo/repo/pull/7",
+            "user": {"login": "alice"},
+            "head": {"ref": "feature", "sha": "a" * 40},
+            "base": {"ref": "main", "sha": "b" * 40},
+            "state": "open",
+            "updated_at": "2026-09-28T11:59:00Z",
+        },
+    }
+    if action in {"labeled", "unlabeled"}:
+        payload["label"] = {"name": "ai-review"}
+    return VerifiedGitHubDelivery(delivery_id, "pull_request", payload).to_receipt()
+
+
+@dataclass
+class FailingTypedDispatcher:
+    """The typed dispatcher behind the real adapter: it raises ``error`` or hangs."""
+
+    error: BaseException | None = None
+
+    async def execute(self, delivery: GitHubDispatchEvent) -> InstallationDeliveryDispatchResult:
+        if self.error is not None:
+            raise self.error
+        await asyncio.sleep(10)
+        raise AssertionError("the dispatch timeout did not cancel the dispatcher")
+
+
+def _failure_lines(caplog: pytest.LogCaptureFixture) -> list[str]:
+    return [
+        record.getMessage()
+        for record in caplog.records
+        if record.levelno == logging.WARNING
+        and record.getMessage().startswith("GitHub webhook delivery ")
+        and " failed stage=" in record.getMessage()
+    ]
+
+
+def _sweep_failure_records(caplog: pytest.LogCaptureFixture) -> list[logging.LogRecord]:
+    return [record for record in caplog.records if record.levelno == logging.ERROR]
+
+
+def _fallback_records(caplog: pytest.LogCaptureFixture) -> list[logging.LogRecord]:
+    return [
+        record
+        for record in caplog.records
+        if record.levelno == logging.WARNING and " failure line: " in record.getMessage()
+    ]
+
+
+def _dispatch_failure_run(
+    receipt: WebhookReceipt,
+    typed: FailingTypedDispatcher,
+    caplog: pytest.LogCaptureFixture,
+    *,
+    dispatch_timeout_seconds: float = 1.0,
+    reader: Callable[[WebhookReceipt], str | None] = action_of,
+    classifier: Callable[[BaseException], FailureCategory] | None = classify_failure,
+) -> FakeReceiptUnitOfWork:
+    uow = FakeReceiptUnitOfWork()
+    receiver = ReceiveGitHubDelivery(
+        uow_factory=lambda: uow,
+        dispatcher=GitHubWebhookDispatchAdapter(typed),
+        now=lambda: _NOW,
+        dispatch_timeout_seconds=dispatch_timeout_seconds,
+        action_of=reader,
+        classify_failure=classifier,
+    )
+    asyncio.run(receiver.execute(receipt))
+    with caplog.at_level(logging.INFO, logger=_DELIVERY_LOGGER):
+        assert asyncio.run(receiver.replay_pending()) == 0
+    return uow
+
+
+def _http_status_error() -> httpx.HTTPStatusError:
+    request = httpx.Request("GET", f"https://api.github.test/pulls/7?t={_SECRET_IN_MESSAGE}")
+    return httpx.HTTPStatusError(
+        f"Server error for {_SECRET_IN_MESSAGE}", request=request, response=httpx.Response(500)
+    )
 
 
 @pytest.mark.parametrize(
@@ -310,6 +399,14 @@ def test_failure_line_survives_a_failing_release_of_the_receipt(
     (sweep_record,) = _sweep_failure_records(caplog)
     assert sweep_record.exc_info is None
     assert vars(sweep_record)["error_type"] == OperationalError.__name__
+
+
+def _warning_and_error_records(caplog: pytest.LogCaptureFixture) -> list[tuple[int, str]]:
+    return [
+        (record.levelno, record.getMessage())
+        for record in caplog.records
+        if record.name == _DELIVERY_LOGGER and record.levelno >= logging.WARNING
+    ]
 
 
 def test_only_the_last_failed_attempt_logs_that_the_delivery_failed(
@@ -580,6 +677,32 @@ def test_an_undecodable_payload_is_logged_as_a_reader_fallback_not_as_no_action(
     assert row.retry_after == _NOW + timedelta(seconds=30)
 
 
+_PAYLOAD_SENTINEL = "SENTINEL-t72-payload-value"
+_DISPATCH_LOGGER = "app.modules.integrations.webhooks.api.dispatch"
+
+
+class UnreachableTypedDispatcher:
+    """The typed dispatcher behind the real adapter: an invalid payload never reaches it."""
+
+    async def execute(self, delivery: GitHubDispatchEvent) -> InstallationDeliveryDispatchResult:
+        raise AssertionError("an invalid payload reached typed dispatch")
+
+
+def _replay_invalid_receipt(
+    receipt: WebhookReceipt, caplog: pytest.LogCaptureFixture
+) -> FakeReceiptUnitOfWork:
+    uow = FakeReceiptUnitOfWork()
+    receiver = ReceiveGitHubDelivery(
+        uow_factory=lambda: uow,
+        dispatcher=GitHubWebhookDispatchAdapter(UnreachableTypedDispatcher()),
+        now=lambda: _NOW,
+    )
+    asyncio.run(receiver.execute(receipt))
+    with caplog.at_level(logging.INFO, logger=_DELIVERY_LOGGER):
+        assert asyncio.run(receiver.replay_pending()) == 1
+    return uow
+
+
 def test_invalid_labeled_payload_logs_its_action_and_reason_without_payload_values(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
@@ -602,6 +725,13 @@ def test_invalid_labeled_payload_logs_its_action_and_reason_without_payload_valu
     assert row.projected is True
     assert row.retry_after is None
     assert row.projection_attempt_count == 0
+
+
+def _synchronize_with_unparsable_number() -> str:
+    """A ``synchronize`` payload that is valid except for a string ``pull_request.number``."""
+    payload = json.loads(_pull_request_receipt("payload", "synchronize").payload_json)
+    payload["pull_request"]["number"] = _PAYLOAD_SENTINEL
+    return json.dumps(payload)
 
 
 @pytest.mark.parametrize(
@@ -637,6 +767,22 @@ def test_every_invalid_payload_logs_the_invalid_payload_reason(
     assert row.projected is True
     assert row.retry_after is None
     assert row.projection_attempt_count == 0
+
+
+def _pull_request_payload(action: str = "labeled") -> dict[str, object]:
+    payload = json.loads(_pull_request_receipt("payload", action).payload_json)
+    assert isinstance(payload, dict)
+    return payload
+
+
+def _without_label() -> dict[str, object]:
+    payload = _pull_request_payload()
+    del payload["label"]
+    return payload
+
+
+def _mismatched_number() -> dict[str, object]:
+    return {**_pull_request_payload(), "number": 8}
 
 
 @pytest.mark.parametrize(
@@ -831,6 +977,13 @@ def test_invalid_installation_payload_logs_the_reason_next_to_the_field_warning(
     assert row.projected is True
     assert row.retry_after is None
     assert row.projection_attempt_count == 0
+
+
+_EVENT_NAMES_AS_LOGGED = [
+    ("pull_request", "pull_request"),
+    ("pull_request\nx", "-"),
+    ("Pull Request", "-"),
+]
 
 
 @pytest.mark.parametrize(("event_name", "logged"), _EVENT_NAMES_AS_LOGGED)

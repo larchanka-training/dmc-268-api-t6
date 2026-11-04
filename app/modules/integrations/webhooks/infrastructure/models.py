@@ -61,6 +61,12 @@ class WebhookEvent(Base):
             "projection_attempt_count >= 0",
             name="ck_webhook_events_projection_attempt_count_nonnegative",
         ),
+        CheckConstraint(
+            "bitbucket_push_after_pr_number IS NULL OR "
+            "(provider = 'bitbucket' AND event = 'repo:push' "
+            "AND bitbucket_push_after_pr_number > 0)",
+            name="ck_webhook_events_bitbucket_push_position",
+        ),
         # Postgres deparses #>> with ::text[]. Alembic's compare keeps that cast,
         # so the model expression has to include it or metadata compare drifts.
         Index(
@@ -86,6 +92,16 @@ class WebhookEvent(Base):
                 "AND projection_deferred_at IS NULL AND payload IS NOT NULL"
             ),
         ),
+        Index(
+            "ix_webhook_events_bitbucket_pending_due",
+            text("COALESCE(retry_after, received_at)"),
+            "id",
+            postgresql_where=text(
+                "provider = 'bitbucket' AND payload IS NOT NULL "
+                "AND projected_at IS NULL AND projection_failed_at IS NULL "
+                "AND projection_deferred_at IS NULL"
+            ),
+        ),
     )
 
     id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
@@ -101,6 +117,7 @@ class WebhookEvent(Base):
     )
     bitbucket_binding_generation: Mapped[int | None] = mapped_column(BIGINT, nullable=True)
     bitbucket_webhook_generation: Mapped[int | None] = mapped_column(BIGINT, nullable=True)
+    bitbucket_push_after_pr_number: Mapped[int | None] = mapped_column(BIGINT, nullable=True)
     installation_external_id: Mapped[int | None] = mapped_column(BIGINT, nullable=True)
     delivery_id: Mapped[str] = mapped_column(String(255), nullable=False, unique=True)
     event: Mapped[str] = mapped_column(String(100), nullable=False)
@@ -134,3 +151,30 @@ class GitHubInstallationRemovalEffect(Base):
     delivery_id: Mapped[str] = mapped_column(String(255), primary_key=True)
 
     created_at: Mapped[datetime] = timestamp_column()
+
+
+class BitbucketPushRetryCandidate(Base):
+    """PRs whose run admission needs another attempt after the push scan advances."""
+
+    __tablename__ = "bitbucket_push_retry_candidates"
+    __table_args__ = (
+        CheckConstraint("pr_number > 0", name="ck_bitbucket_push_retry_candidates_pr_number"),
+        CheckConstraint(
+            "attempt_count >= 0", name="ck_bitbucket_push_retry_candidates_attempt_count"
+        ),
+        Index(
+            "ix_bitbucket_push_retry_candidates_attempt",
+            "webhook_event_id",
+            "attempted_at",
+            "pr_number",
+        ),
+    )
+
+    webhook_event_id: Mapped[UUID] = mapped_column(
+        Uuid, ForeignKey("webhook_events.id", ondelete="CASCADE"), primary_key=True
+    )
+    pr_number: Mapped[int] = mapped_column(BIGINT, primary_key=True)
+    attempted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    attempt_count: Mapped[int] = mapped_column(default=0, server_default=text("0"))
+    reason: Mapped[str] = mapped_column(String(64), nullable=False)
+    failed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

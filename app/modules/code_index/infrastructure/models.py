@@ -13,6 +13,7 @@ from uuid import UUID
 
 from sqlalchemy import (
     BIGINT,
+    BOOLEAN,
     INTEGER,
     CheckConstraint,
     DateTime,
@@ -23,6 +24,7 @@ from sqlalchemy import (
     func,
     text,
 )
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.common.infrastructure.db.base import Base
@@ -151,6 +153,53 @@ class CodeIndexState(Base):
     # was requested and for which target; `purge()` keeps both.
     review_full_requested_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     review_full_requested_sha: Mapped[str | None] = mapped_column(String(64))
+
+
+class BitbucketTreeCheckpointPage(Base):
+    """Validated directory pages, bounded by the source listing budget."""
+
+    __tablename__ = "bitbucket_tree_checkpoint_pages"
+    __table_args__ = (
+        CheckConstraint(
+            "binding_generation > 0 AND index_generation >= 0 AND bytes_read >= 0 AND attempts > 0",
+            name="ck_bitbucket_tree_checkpoint_pages_budget",
+        ),
+    )
+
+    repository_id: Mapped[UUID] = mapped_column(
+        ForeignKey("code_index_states.repository_id", ondelete="CASCADE"), primary_key=True
+    )
+    directory_key: Mapped[str] = mapped_column(String(64), primary_key=True)
+    cursor_key: Mapped[str] = mapped_column(String(64), primary_key=True)
+    target_sha: Mapped[str] = mapped_column(String(40), nullable=False)
+    binding_generation: Mapped[int] = mapped_column(BIGINT, nullable=False)
+    index_generation: Mapped[int] = mapped_column(BIGINT, nullable=False)
+    directory: Mapped[str] = mapped_column(String(1024), nullable=False)
+    cursor: Mapped[dict[str, str]] = mapped_column(JSONB, nullable=False)
+    payload: Mapped[dict[str, object]] = mapped_column(JSONB, nullable=False)
+    bytes_read: Mapped[int] = mapped_column(INTEGER, nullable=False)
+    attempts: Mapped[int] = mapped_column(INTEGER, nullable=False)
+    complete: Mapped[bool] = mapped_column(BOOLEAN, nullable=False)
+
+
+class BitbucketPublishedManifest(Base):
+    """Complete file metadata for one successfully published Bitbucket commit."""
+
+    __tablename__ = "bitbucket_published_manifests"
+    __table_args__ = (
+        CheckConstraint(
+            "binding_generation > 0 AND index_generation >= 0",
+            name="ck_bitbucket_published_manifests_generation",
+        ),
+    )
+
+    repository_id: Mapped[UUID] = mapped_column(
+        ForeignKey("code_index_states.repository_id", ondelete="CASCADE"), primary_key=True
+    )
+    commit_sha: Mapped[str] = mapped_column(String(40), nullable=False)
+    binding_generation: Mapped[int] = mapped_column(BIGINT, nullable=False)
+    index_generation: Mapped[int] = mapped_column(BIGINT, nullable=False)
+    entries: Mapped[list[dict[str, object]]] = mapped_column(JSONB, nullable=False)
 
 
 class CodeIndexFile(Base):

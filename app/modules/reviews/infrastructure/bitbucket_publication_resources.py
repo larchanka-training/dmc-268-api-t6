@@ -70,6 +70,8 @@ class BitbucketPublicationHttp:
         *,
         pr_number: int,
         checkpoint: RunProviderCheckpoint,
+        write_checkpoint: RunProviderCheckpoint | None = None,
+        final_write_fence: Callable[[], None] | None = None,
     ) -> None:
         if type(pr_number) is not int or pr_number <= 0:
             raise ValueError("invalid Bitbucket PR number")
@@ -77,6 +79,8 @@ class BitbucketPublicationHttp:
         self._credentials = credentials
         self._target = target
         self._checkpoint = checkpoint
+        self._write_checkpoint = write_checkpoint or checkpoint
+        self._final_write_fence = final_write_fence
         self._root = (
             f"/2.0/repositories/%7B%7D/%7B{target.repository_uuid}%7D/pullrequests/{pr_number}"
         )
@@ -134,7 +138,10 @@ class BitbucketPublicationHttp:
             raise RunCancelled("installation_unavailable") from None
         # Credentials are short lived; the final fence is immediately before the write.
         if method in {"POST", "PUT"}:
+            await self._write_checkpoint()
             await self.checkpoint()
+            if self._final_write_fence is not None:
+                self._final_write_fence()
         try:
             async with self._client.stream(
                 method,
@@ -293,15 +300,23 @@ class BitbucketInstalledPublicationResources:
         claim = await self._claims.acquire(context.run_id)
         lost = asyncio.Event()
 
-        async def claim_checkpoint() -> None:
+        def claim_fence() -> None:
             if lost.is_set():
                 raise ObsoletePublication
+
+        async def claim_checkpoint() -> None:
+            claim_fence()
             await checkpoint()
+
+        async def claim_write_checkpoint() -> None:
+            await claim_checkpoint()
             try:
                 await self._claims.renew(claim)
             except ObsoletePublication:
                 lost.set()
                 raise
+            if lost.is_set():
+                raise ObsoletePublication
 
         async def heartbeat() -> None:
             while True:
@@ -317,7 +332,7 @@ class BitbucketInstalledPublicationResources:
 
         heartbeat_task = asyncio.create_task(heartbeat())
         try:
-            await claim_checkpoint()
+            await claim_write_checkpoint()
             try:
                 await self._reader.checkpoint(target)
             except (
@@ -338,6 +353,8 @@ class BitbucketInstalledPublicationResources:
                     target,
                     pr_number=context.pr_number,
                     checkpoint=claim_checkpoint,
+                    write_checkpoint=claim_write_checkpoint,
+                    final_write_fence=claim_fence,
                 )
                 yield BitbucketPullRequestCommentGateway(
                     port,
