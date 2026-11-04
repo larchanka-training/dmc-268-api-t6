@@ -996,7 +996,7 @@ def test_an_arm_that_mixes_prompts_is_refused(
     assert str(raised.value) == f"{mixed}: {field} differs from {first}"
 
 
-@pytest.mark.parametrize("position", [0, 1])
+@pytest.mark.parametrize("positions", [(0,), (1,), (0, 1)])
 @pytest.mark.parametrize(
     "broken",
     [
@@ -1007,15 +1007,18 @@ def test_an_arm_that_mixes_prompts_is_refused(
         lambda report: report["provenance"]["run_metadata"].update(
             static_digest_without_prompt="sha256-v1:short"
         ),
+        lambda report: report["provenance"]["run_metadata"].pop("policy_arm"),
+        lambda report: report["provenance"]["run_metadata"].update(policy_arm="unknown"),
         lambda report: report["provenance"].pop("prompt_path"),
         lambda report: report["provenance"].pop("prompt_sha"),
     ],
 )
 def test_a_prompt_ab_without_the_proof_is_refused(
-    tmp_path: Path, broken: Callable[[dict[str, Any]], object], position: int
+    tmp_path: Path, broken: Callable[[dict[str, Any]], object], positions: tuple[int, ...]
 ) -> None:
     reports = [_prompt_report("v3"), _prompt_report("v5")]
-    broken(reports[position])
+    for position in positions:
+        broken(reports[position])
     runs = [
         ("v3", _write(tmp_path, "v3", reports[0])),
         ("v5", _write(tmp_path, "v5", reports[1])),
@@ -1025,8 +1028,8 @@ def test_a_prompt_ab_without_the_proof_is_refused(
         aggregate(runs)
 
     assert str(raised.value) == (
-        f"{runs[position][1]}: the arms differ in prompt_version or static_digest, and this "
-        "report lacks a valid prompt_path, prompt_sha or "
+        f"{runs[positions[0]][1]}: the arms differ in prompt_version or static_digest, and this "
+        "report lacks a valid prompt_path, prompt_sha, run_metadata.policy_arm or "
         "run_metadata.static_digest_without_prompt to prove that only the prompt differs; "
         "capture both arms again"
     )

@@ -236,22 +236,22 @@ def _check_one_experiment(reports: list[tuple[str, Path, dict[str, Any]]]) -> bo
         if (
             not isinstance(digest, str)
             or _DIGEST.fullmatch(digest) is None
+            or metadata.get("policy_arm") not in RECORDED_POLICY_ARMS
             or not isinstance(provenance.get("prompt_path"), str)
             or not isinstance(provenance.get("prompt_sha"), str)
         ):
             raise AbError(
                 f"{path}: the arms differ in prompt_version or static_digest, and this report "
-                f"lacks a valid prompt_path, prompt_sha or run_metadata.{WITHOUT_PROMPT} to prove "
-                "that only the prompt differs; capture both arms again"
+                "lacks a valid prompt_path, prompt_sha, run_metadata.policy_arm or "
+                f"run_metadata.{WITHOUT_PROMPT} to prove that only the prompt differs; "
+                "capture both arms again"
             )
         if digest != first["run_metadata"][WITHOUT_PROMPT]:
             raise AbError(
                 f"{path}: static inputs other than the prompt differ from {first_path}; "
                 "capture both arms from one ref"
             )
-        if metadata.get("policy_arm", "legacy") != first["run_metadata"].get(
-            "policy_arm", "legacy"
-        ):
+        if metadata["policy_arm"] != first["run_metadata"]["policy_arm"]:
             raise AbError(f"{path}: run_metadata.policy_arm differs from {first_path}")
     return True
 

@@ -1246,9 +1246,9 @@ What proves the rest equal is `run_metadata.static_digest_without_prompt`, the d
 and bytes of every other static input, which every capture has recorded since #317. The output
 names each arm's prompt version, path and SHA-256 instead of one prompt and one static digest; its
 tables are the usual ones, with Tokens in and the delta against the baseline arm. `eval_ab.py`
-refuses a report without that digest (a capture from before #317: capture both arms again), another
-digest, another `policy_arm`, the differences listed above other than the prompt's, and an arm whose
-runs mix prompts.
+refuses a report without that digest (a capture from before #317: capture both arms again) or
+without a recorded `policy_arm`, another digest, another `policy_arm`, the differences listed above
+other than the prompt's, and an arm whose runs mix prompts.
 
 With 24 cases and a few TPs, one capture against another is noise: compare the min and max over the
 repeated captures, not only the means.
