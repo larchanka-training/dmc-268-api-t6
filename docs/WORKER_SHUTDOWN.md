@@ -129,7 +129,7 @@ RabbitMQ services before real-stack verification. The fixtures migrate isolated
 schemas and may delete/redeclare review broker topology; use test services.
 
 ```sh
-uv run pytest tests/test_review_shutdown.py tests/test_worker_shutdown.py tests/test_worker_queue_postgres.py
+uv run pytest tests/test_review_shutdown.py tests/test_worker_shutdown.py tests/test_worker_queue_postgres.py tests/test_worker_queue_main_postgres.py tests/test_worker_queue_delivery_postgres.py
 ```
 
 With the URLs unset, integration fixtures skip and do not establish broker or

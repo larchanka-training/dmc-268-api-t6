@@ -30,7 +30,7 @@ from app.main import app
 from app.modules.auth.application.scope import AuthScope
 from app.modules.reviews.application.run_failures import RetryDelays
 from app.modules.reviews.infrastructure.amqp import LazyAmqpPublisher, amqp_channels, run_queue
-from tests.test_worker_queue_postgres import _reset_topology
+from tests.worker_queue_postgres import _reset_topology
 
 WS_A = UUID("00000000-0000-4000-8000-00000000000a")
 WS_B = UUID("00000000-0000-4000-8000-00000000000b")

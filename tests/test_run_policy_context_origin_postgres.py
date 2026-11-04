@@ -45,7 +45,7 @@ from tests.test_retired_installation_postgres import DiscardTokenCache
 from tests.test_review_context import _GREET_PATCH, _MODELS, _SERVICE
 from tests.test_run_origin_guard_postgres import prepare
 from tests.test_run_publication_origin_postgres import retire
-from tests.test_worker_queue_postgres import (
+from tests.worker_queue_postgres import (
     SETTINGS,
     GitHub,
     Model,

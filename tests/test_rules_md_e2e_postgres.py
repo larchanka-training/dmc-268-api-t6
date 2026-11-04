@@ -57,7 +57,7 @@ from app.modules.reviews.application.prompt_builder import file_block_id
 from app.modules.reviews.infrastructure.amqp import amqp_channels
 from app.worker import WorkerSettings, run_worker
 from tests.github_raw_blobs import blob_answer
-from tests.test_worker_queue_postgres import (
+from tests.worker_queue_postgres import (
     _APP_PEM,
     LLM_ENV,
     SHORT_DELAYS,

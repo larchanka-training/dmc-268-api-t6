@@ -27,7 +27,7 @@ from tests import test_gitlab_projection_postgres as projection
 from tests.test_gitlab_projection_postgres import rig
 from tests.test_gitlab_repository_sources import SourceRouter
 from tests.test_gitlab_worker_outbox_postgres import pending_run
-from tests.test_worker_queue_postgres import (
+from tests.worker_queue_postgres import (
     LLM_ENV,
     SHORT_DELAYS,
     FakeLlm,
@@ -243,7 +243,7 @@ def test_public_worker_installed_gitlab_run_uses_shared_models_and_publisher(
             if not model_configured:
                 env = {key: value for key, value in env.items() if not key.startswith("LLM_")}
             if github_configured:
-                from tests.test_worker_queue_postgres import _APP_PEM
+                from tests.worker_queue_postgres import _APP_PEM
 
                 env.update({"GITHUB_APP_ID": "1", "GITHUB_APP_PRIVATE_KEY": _APP_PEM})
             worker = asyncio.create_task(
