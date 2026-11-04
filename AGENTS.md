@@ -51,6 +51,28 @@ Clean Architecture, module-first. Target layout (`docs/BACKEND_ARCHITECTURE.md`)
 modules hold only `infrastructure/` code and `app/entrypoints/` does not exist yet; details in
 `.agents/rules/backend.md`.
 
+## Terraform and deploy
+
+- CI never applies Terraform: `terraform/` only goes through fmt, validate, TFLint and
+  Checkov, and no workflow runs `terraform plan` or `apply`. Editing it changes no stand.
+- Staging runs on the course VPS, outside Terraform (`docs/INFRASTRUCTURE.md` §8).
+- Hetzner + Terraform is a working alternative: only an operator applies it, by hand
+  (`docs/INFRASTRUCTURE.md` §3). With `STAGING_HOST` set, CI deploys the app to that
+  existing host; it still creates no infrastructure.
+- Deploys run on scripts: `deploy/scripts/`, through the `deploy-staging` job in
+  `.github/workflows/ci-cd.yml`.
+
+## Context discipline
+
+- Never read a `docs/*.md` over 80 KB whole: `docs/READING_MAP.md`, then
+  `grep -n '^## ' <file>`, then only that section by line range (offset/limit or `sed -n`).
+- A survey of more than one file or folder goes to a sub-agent (`.agents/README.md` §
+  Sub-agents across harnesses); only a summary comes back. A skill that forbids sub-agents
+  wins for its own steps.
+- One task type per session (implementation, review, acceptance); on a switch, a short
+  handoff and a new session.
+- Screenshots only for visual acceptance criteria.
+
 ## Conventions
 
 - Branches: `feat/<slug>`, `fix/<slug>`, `docs/<slug>`, `chore/<slug>` (also for
@@ -77,6 +99,7 @@ modules hold only `infrastructure/` code and `app/entrypoints/` does not exist y
 - `.agents/templates/` — code/test templates with proof blocks.
 - `docs/BACKEND_ARCHITECTURE.md` — Clean Architecture layout in full.
 - `docs/SYSTEM_DESIGN.md` — product architecture (this repo, `main`).
+- `docs/READING_MAP.md` — which section of the three large specs to open for a task.
 - [docs/TEST_PLAN.md](docs/TEST_PLAN.md) — canonical API/UI test strategy and benchmark methodology.
 - `docs/MONITORING.md` — monitoring stack (Prometheus, Grafana, Alertmanager), alerts and their roles.
 - `review/` — the AI reviewer product's own prompts and rule sets, not covered here.
