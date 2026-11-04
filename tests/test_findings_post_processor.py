@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+from dataclasses import replace
 from pathlib import Path
 from typing import cast
 from uuid import UUID
@@ -13,20 +14,34 @@ import pytest
 from app.modules.reviews.application.diff_map import DiffMap, VcsProviderName, build_diff_map
 from app.modules.reviews.application.findings_post_processor import (
     FindingsPostProcessor,
+    ProcessedReviewOutput,
     _format_checked_files,
     finalize_stored_review_body,
     format_body_only_overflow_footer,
     format_body_only_overflow_footer_without_url,
 )
+from app.modules.reviews.application.get_run_diff import DiffSnapshot
 from app.modules.reviews.application.prompt_builder import PullRequestMeta
 from app.modules.reviews.application.publish_run_review import move_inline_to_body
+from app.modules.reviews.application.review_ignore import (
+    IgnoreMatcher,
+    apply_ignore,
+    parse_review_ignore,
+)
 from app.modules.reviews.application.review_output import (
     PublishedFinding,
     ReviewFinding,
     ReviewOutput,
     ReviewSummary,
 )
-from app.modules.reviews.application.run_coverage import CoverageItem, CoverageStatus, RunCoverage
+from app.modules.reviews.application.run_coverage import (
+    CoverageItem,
+    CoverageStatus,
+    RunCoverage,
+    project_run_coverage,
+    restore_run_coverage,
+    snapshot_vcs_file,
+)
 from app.modules.reviews.application.vcs_diff import PullRequestLocator, VcsFile, VcsPullRequest
 from app.modules.reviews.application.verdict import SeverityThresholdValue
 from tests.test_diff_anchor import _diff_map
@@ -179,6 +194,11 @@ def _count_listed_additional_findings(review_body: str) -> int:
     if footer_at >= 0:
         tail = tail[:footer_at]
     return sum(1 for line in tail.splitlines() if line.startswith("- **"))
+
+
+def _review_summary_section(review_body: str) -> str:
+    """The body from ``## Review summary``, past the Executive summary block."""
+    return review_body[review_body.index("## Review summary") :]
 
 
 def _parse_body_only_overflow_footer_count(review_body: str) -> int:
@@ -356,12 +376,12 @@ def test_review_body_starts_with_verdict_risk_summary_and_checked_paths() -> Non
         checked_paths=frozenset({"app/example.py", "z/last.py"}),
     )
 
-    assert result.review_body.startswith(
+    assert "**Verdict:** blocking · **Risk Score:** High" in result.review_body
+    assert _review_summary_section(result.review_body).startswith(
         "\n".join(
             (
                 "## Review summary",
                 "",
-                "**Verdict:** blocking",
                 "**Risk summary:** critical: 0, high: 1, medium: 0, low: 0, info: 1",
                 "**Coverage:** partial — Проверка неполная: "
                 "не удалось сопоставить замечание с доступным diff (1).",
@@ -553,9 +573,12 @@ def test_checked_files_are_none_when_the_diff_has_no_paths() -> None:
 
     assert result.review_body == "\n".join(
         (
+            "## Executive summary",
+            "",
+            "**Verdict:** проверка неполная · **Risk Score:** Medium",
+            "",
             "## Review summary",
             "",
-            "**Verdict:** проверка неполная",
             "**Risk summary:** critical: 0, high: 0, medium: 0, low: 0, info: 0",
             "**Coverage:** partial — Проверка неполная: "
             "не удалось сопоставить замечание с доступным diff (1).",
@@ -649,12 +672,12 @@ def test_character_cap_drops_only_additional_findings() -> None:
         for number in range(1, 7)
     )
     capped = process(finding(title="Blocking defect", severity="high"), *notes)
-    assert capped.review_body.startswith(
+    assert "**Verdict:** blocking · **Risk Score:** High" in capped.review_body
+    assert _review_summary_section(capped.review_body).startswith(
         "\n".join(
             (
                 "## Review summary",
                 "",
-                "**Verdict:** blocking",
                 "**Risk summary:** critical: 0, high: 1, medium: 0, low: 6, info: 0",
                 "**Checked files:**",
                 "- app/example.py",
@@ -885,7 +908,9 @@ def test_critical_threshold_drops_medium_low_and_info_and_turns_attention_into_c
     control = process(*findings)
     result = process(*findings, severity_threshold="critical")
 
-    assert control.review_body.startswith("## Review summary\n\n**Verdict:** attention\n")
+    assert control.review_body.startswith(
+        "## Executive summary\n\n**Verdict:** attention · **Risk Score:** Medium\n"
+    )
     assert "Below severity threshold" not in control.review_body
     assert result.inline == ()
     assert result.body_only == ()
@@ -896,9 +921,12 @@ def test_critical_threshold_drops_medium_low_and_info_and_turns_attention_into_c
     ]
     assert result.review_body == "\n".join(
         (
+            "## Executive summary",
+            "",
+            "**Verdict:** clean · **Risk Score:** Low",
+            "",
             "## Review summary",
             "",
-            "**Verdict:** clean",
             "**Risk summary:** critical: 0, high: 0, medium: 0, low: 0, info: 0",
             "**Below severity threshold (critical):** 3",
             "**Checked files:**",
@@ -962,12 +990,12 @@ def test_risk_summary_counts_only_findings_that_pass_the_threshold() -> None:
         severity_threshold="warning",
     )
 
-    assert result.review_body.startswith(
+    assert "**Verdict:** blocking · **Risk Score:** High" in result.review_body
+    assert _review_summary_section(result.review_body).startswith(
         "\n".join(
             (
                 "## Review summary",
                 "",
-                "**Verdict:** blocking",
                 "**Risk summary:** critical: 0, high: 1, medium: 0, low: 1, info: 0",
                 "**Below severity threshold (warning):** 1",
                 "**Checked files:**",
@@ -1074,12 +1102,12 @@ def test_all_threshold_keeps_the_ten_findings_fixture_result(
     assert [item.finding.line for item in result.inline] == list(range(10, 18))
     assert [item.finding.line for item in result.body_only] == [18, 19]
     assert result.dropped == ()
-    assert result.review_body.startswith(
+    assert "**Verdict:** attention · **Risk Score:** Medium" in result.review_body
+    assert _review_summary_section(result.review_body).startswith(
         "\n".join(
             (
                 "## Review summary",
                 "",
-                "**Verdict:** attention",
                 "**Risk summary:** critical: 0, high: 0, medium: 10, low: 0, info: 0",
                 "**Checked files:**",
                 "- app/modules/billing/application/charge.py",
@@ -1389,3 +1417,160 @@ def test_findings_post_processor_v2_preserves_attribution_for_body_only_findings
     assert len(legacy_result.body_only) == 2
     assert legacy_result.body_only[0].finding.rule_name is None
     assert legacy_result.body_only[1].finding.rule_name is None
+
+
+_EXECUTIVE_PATCH = "@@ -1 +1 @@\n-old\n+new"
+
+
+def _text_change(path: str = "app/example.py") -> DiffSnapshot:
+    """A reviewed text change; ``replace`` turns it into one kind of omission."""
+    return DiffSnapshot(
+        path,
+        _EXECUTIVE_PATCH,
+        "d" * 40,
+        additions=1,
+        deletions=1,
+        changes=2,
+        review_patch=_EXECUTIVE_PATCH,
+    )
+
+
+def _truncated_change(path: str = "src/cut.py") -> DiffSnapshot:
+    return replace(_text_change(path), additions=2, changes=3)
+
+
+def _binary_change(path: str = "assets/logo.png") -> DiffSnapshot:
+    return DiffSnapshot(path, None, "d" * 40, omission_reason="binary")
+
+
+def _too_large_change(path: str = "src/huge.py") -> DiffSnapshot:
+    return DiffSnapshot(path, None, "d" * 40, omission_reason="too_large")
+
+
+def _process_snapshots(
+    snapshots: list[DiffSnapshot],
+    *findings: dict[str, object],
+    rules: str = "",
+    summary_only: bool = False,
+) -> ProcessedReviewOutput:
+    """Process as a run does: coverage projected under the policy, saved and read back."""
+    diff_map = _diff_map_from_vcs(*(snapshot_vcs_file(item) for item in snapshots))
+    ignore = apply_ignore(IgnoreMatcher(parse_review_ignore(rules)), diff_map)
+    saved = project_run_coverage(snapshots, diff_map, ignore=ignore).to_json()
+    coverage = restore_run_coverage(saved, snapshots=snapshots, diff_map=diff_map)
+    assert coverage is not None
+    return FindingsPostProcessor.from_default_patterns().process(
+        output(*findings),
+        diff_map=diff_map,
+        checked_paths=frozenset(
+            item.filename for item in snapshots if item.review_patch is not None
+        ),
+        rule_names=frozenset(),
+        coverage=coverage,
+        summary_only=summary_only,
+    )
+
+
+@pytest.mark.parametrize(
+    ("snapshots", "findings", "summary_only", "verdict_line"),
+    [
+        pytest.param(
+            [_text_change()],
+            [finding(severity="high")],
+            False,
+            "**Verdict:** blocking · **Risk Score:** High",
+            id="blocking",
+        ),
+        pytest.param(
+            [_text_change()],
+            [finding(severity="medium")],
+            False,
+            "**Verdict:** attention · **Risk Score:** Medium",
+            id="attention",
+        ),
+        pytest.param(
+            [_text_change()],
+            [],
+            False,
+            "**Verdict:** clean · **Risk Score:** Low",
+            id="clean-all-reviewed",
+        ),
+        pytest.param(
+            [_text_change(), _truncated_change()],
+            [],
+            False,
+            "**Verdict:** проверка неполная · **Risk Score:** Medium",
+            id="clean-with-truncated-file",
+        ),
+        pytest.param(
+            [replace(_text_change(), summary_only=True)],
+            [],
+            True,
+            "**Verdict:** проверка неполная · **Risk Score:** Medium",
+            id="summary-only",
+        ),
+        pytest.param(
+            [_text_change(), _binary_change()],
+            [],
+            False,
+            "**Verdict:** clean · **Risk Score:** Low",
+            id="clean-with-binary-file",
+        ),
+        pytest.param(
+            [_binary_change()],
+            [],
+            False,
+            "**Verdict:** нет доступных для анализа изменений · **Risk Score:** Low",
+            id="binary-file-only",
+        ),
+        pytest.param(
+            [_too_large_change()],
+            [],
+            False,
+            "**Verdict:** нет доступных для анализа изменений · **Risk Score:** Medium",
+            id="too-large-file-only",
+        ),
+        pytest.param(
+            [_text_change()],
+            [finding(path="not/in/diff.py")],
+            False,
+            "**Verdict:** проверка неполная · **Risk Score:** Medium",
+            id="null-verdict-without-a-file-reason",
+        ),
+    ],
+)
+def test_executive_risk_score_table(
+    snapshots: list[DiffSnapshot],
+    findings: list[dict[str, object]],
+    summary_only: bool,
+    verdict_line: str,
+) -> None:
+    result = _process_snapshots(snapshots, *findings, summary_only=summary_only)
+
+    assert result.review_body.startswith(f"## Executive summary\n\n{verdict_line}\n")
+    assert result.review_body.count("**Verdict:**") == 1
+
+
+def test_executive_block_opens_the_body_and_leaves_the_review_summary_as_it_was() -> None:
+    result = _process_snapshots([_text_change()])
+
+    assert result.review_body == "\n".join(
+        (
+            "## Executive summary",
+            "",
+            "**Verdict:** clean · **Risk Score:** Low",
+            "",
+            "## Review summary",
+            "",
+            "**Risk summary:** critical: 0, high: 0, medium: 0, low: 0, info: 0",
+            "**Checked files:**",
+            "- app/example.py",
+            "",
+            "**Main issue:** Подтверждённых замечаний нет.",
+            "",
+            "**Done well:** Проанализировано файлов с текстовыми изменениями: 1; "
+            "исключено файлов: 0.",
+            "",
+            "**Effort:** none",
+        )
+    )
