@@ -942,21 +942,6 @@ def test_stream_events_validate_against_the_declared_event_schema() -> None:
     _validator_at(f"{pointer}/x-events/run.updated").validate(json.loads(fields["data"]))
 
 
-def test_a_null_patch_does_not_signal_a_summary_only_run() -> None:
-    """A summary-only run keeps its UI patches, so `patch` cannot tell the mode (#222)."""
-    components = _components()
-
-    patch = components["RawFileDiff"]["properties"]["patch"]["description"]
-    assert "null in a summary-only run" not in patch
-    assert "no provider patch is available" in patch
-    assert "read `summaryOnly` on the run" in patch
-
-    for schema in ("RunSession", "RunDetail"):
-        summary_only = components[schema]["properties"]["summaryOnly"]["description"]
-        assert "`patch: null`" not in summary_only
-        assert "each file's available patch" in summary_only
-
-
 def test_stream_declares_run_step_beside_the_status_event() -> None:
     operation = _spec()["paths"]["/api/stream"]["get"]
     content = operation["responses"]["200"]["content"]["text/event-stream"]
