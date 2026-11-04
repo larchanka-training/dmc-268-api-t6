@@ -586,7 +586,7 @@ def test_replace_file_writes_more_rows_than_one_insert_statement_can_bind(index:
         ),
     ],
 )
-def test_replace_file_rejects_rows_the_schema_would_refuse_before_any_write(
+def test_replace_file_rejects_invalid_rows_before_any_write(
     index: _Index, invalid: IndexedFile, message: str
 ) -> None:
     async def scenario() -> None:
