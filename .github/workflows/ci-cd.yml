@@ -35,6 +35,8 @@ jobs:
   pr-size:
     # One size/* label per PR and, from 1000 changed lines, a warning (#378). The job only
     # informs: it is not a required check of ruleset `main` and no job needs it.
+    # SYNC: the same job as `pr-size` in dmc-268-ui-t6 .github/workflows/ci-cd.yml; change both
+    # together. They differ only in PR_SIZE_EXCLUDE, the checkout pin and `api#378` there.
     name: PR size label
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
