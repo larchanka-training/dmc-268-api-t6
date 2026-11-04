@@ -44,6 +44,16 @@ def test_every_rules_status_variant_validates_against_the_declared_schema(name: 
     _validator_for("get", "/api/repos/{repo_id}/rules-status", "200").validate(body)
 
 
+def test_rules_status_discriminator_maps_each_status_to_its_const_schema() -> None:
+    schemas = _spec()["components"]["schemas"]
+    mapping = schemas["RulesStatus"]["discriminator"]["mapping"]
+
+    for status, reference in mapping.items():
+        schema_name = reference.removeprefix("#/components/schemas/")
+        assert reference == f"#/components/schemas/{schema_name}"
+        assert schemas[schema_name]["properties"]["status"]["const"] == status
+
+
 @pytest.mark.parametrize(
     ("variant", "change"),
     [
@@ -54,6 +64,7 @@ def test_every_rules_status_variant_validates_against_the_declared_schema(name: 
         ("unavailable", {"sha": "A" * 40}),
         ("present", {"sha": "a" * 64}),
         ("missing", {"sha": "a" * 39}),
+        ("invalid", {"sha": "a" * 64}),
         ("pending", {"checkedAt": "2026-10-18T09:00:00Z"}),
     ],
 )
@@ -74,7 +85,7 @@ def test_rules_status_validation_rejects_drift(variant: str, change: dict[str, A
 
 
 @pytest.mark.parametrize("sha", ["a" * 64, "A" * 40, "a" * 39], ids=["sha-256", "upper", "short"])
-@pytest.mark.parametrize("variant", ["present", "missing", "invalid"])
+@pytest.mark.parametrize("variant", ["present", "missing", "invalid", "unavailable"])
 def test_the_rules_status_dto_takes_a_40_hex_sha_only(variant: str, sha: str) -> None:
     stored = RULES_STATUSES[variant]
     assert stored is not None

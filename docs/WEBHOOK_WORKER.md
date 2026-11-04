@@ -308,16 +308,20 @@ request survives and is answered by the next scan. The save also checks that the
 its own (the lease end it wrote): a read whose lease ended and whose row another worker claimed
 is dropped with a warning instead of overwriting the newer result. A read that raises is stored
 as `unavailable` with `policy_fetch_transient`, so a GET asks again after 30 seconds; a rate
-limit, and a 5xx that sends `Retry-After`, wait for GitHub's `Retry-After` when it is longer
-than 30 seconds (a secondary rate limit without one waits 60 seconds), but no longer than
-the 10-minute age (the stored value is capped at one day). A repository whose
+limit, and a 5xx that sends `Retry-After`, use the longer of GitHub's `Retry-After` and,
+for a primary limit, the time until `X-RateLimit-Reset` if it exceeds 30 seconds (a secondary
+rate limit without either waits 60 seconds). The 10-minute age takes precedence, while the stored
+wait is capped at one day. A repository whose
 `installation_available` is false is never claimed; its GET answers `unavailable` with
 `policy_access_denied` and requests nothing. A full batch of 20 runs the next scan at once, like
 100 deliveries. The reads run inside the scan, one after another, so while they last no receipt
-is claimed. Worst case: 20 reads × 5 GitHub requests (repository, commit SHA, root tree,
-`.review` tree, blob) × the 10-second request timeout, about 17 minutes for one batch. This is
-accepted for the MVP with one replica; a slow batch also outlives the five-minute lease, which
-is harmless there because no other worker takes the claims over. One line per read is logged: `Rules status of repository <id>: <status>
+is claimed. A typical worst-case estimate for steady-state reads is 20 reads × 5 GitHub
+requests (repository, commit SHA, root tree, `.review` tree, blob) × the 10-second request
+timeout, about 17 minutes for one batch. This is
+not an overall deadline: httpx applies the 10-second timeout to each request phase, and a cold
+installation-token POST adds another request. This is accepted for the MVP with one replica;
+a slow batch also outlives the five-minute lease, which is harmless there because no other
+worker takes the claims over. One line per read is logged: `Rules status of repository <id>: <status>
 [<code>]`, never the text. A `push` to another branch or a tag is `ignored_irrelevant_event` with
 detail `not_default_branch`; a push to a repository that is not connected is
 `ignored_irrelevant_event` with detail `unknown_repository` and is not deferred, because

@@ -789,7 +789,36 @@ def test_error_body_cut_short_keeps_the_status_verdict(status: int, code: Policy
     assert (caught.value.code, caught.value.retry_after) == (code, None)
 
 
-def test_default_branch_head_reads_a_secondary_rate_limit_without_headers() -> None:
+@pytest.mark.parametrize(
+    ("headers", "body", "delay"),
+    [
+        ({}, _SECONDARY_LIMIT, timedelta(seconds=60)),
+        ({"Retry-After": "9" * 14}, _NO_ACCESS, timedelta(days=1)),
+        (
+            {
+                "X-RateLimit-Remaining": "0",
+                "X-RateLimit-Reset": "1793084700",
+                "Date": "Tue, 27 Oct 2026 07:00:00 GMT",
+            },
+            _NO_ACCESS,
+            timedelta(minutes=5),
+        ),
+        (
+            {
+                "X-RateLimit-Remaining": "0",
+                "X-RateLimit-Reset": "1793084700",
+                "Retry-After": "30",
+                "Date": "Tue, 27 Oct 2026 07:00:00 GMT",
+            },
+            _NO_ACCESS,
+            timedelta(minutes=5),
+        ),
+    ],
+    ids=["secondary-message", "oversized-retry-after", "primary-reset", "primary-reset-longer"],
+)
+def test_default_branch_head_preserves_rate_limit_delay(
+    headers: dict[str, str], body: object, delay: timedelta
+) -> None:
     # The rules status resolves the head with plain requests; their body is read too.
     target = RulesRefreshTarget(
         UUID(int=1),
@@ -802,7 +831,7 @@ def test_default_branch_head_reads_a_secondary_rate_limit_without_headers() -> N
     )
 
     def respond(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(403, json=_SECONDARY_LIMIT)
+        return httpx.Response(403, headers=headers, json=body)
 
     async def resolve() -> Any:
         async with httpx.AsyncClient(
@@ -818,6 +847,6 @@ def test_default_branch_head_reads_a_secondary_rate_limit_without_headers() -> N
 
     assert (caught.value.code, caught.value.retry_after) == (
         PolicyErrorCode.RATE_LIMITED,
-        timedelta(seconds=60),
+        delay,
     )
     assert caught.value.policy_base_sha is None
