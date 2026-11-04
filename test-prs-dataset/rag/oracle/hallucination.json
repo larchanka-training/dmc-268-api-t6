@@ -6,6 +6,10 @@
       "responses_digest": "sha256-v1:ad35383be91e792b1effe0004abaa98fc24a8de3ccf6819cfa698b35be153ac1",
       "hallucinations": [
         {
+          "case_id": "RAG-12",
+          "finding_index": 0
+        },
+        {
           "case_id": "RAG-20",
           "finding_index": 1
         }
@@ -14,14 +18,35 @@
     "A-run2": {
       "reviewed_findings": 8,
       "responses_digest": "sha256-v1:2b3084ce0c482e3b32b59f37a70ba3199d479c2475cdd0c285ac686595b59380",
-      "hallucinations": []
+      "hallucinations": [
+        {
+          "case_id": "RAG-12",
+          "finding_index": 0
+        },
+        {
+          "case_id": "RAG-15",
+          "finding_index": 0
+        }
+      ]
     },
     "A-run3": {
       "reviewed_findings": 12,
       "responses_digest": "sha256-v1:247c75b56933131c9975380e9838a1ca46c67ae211cd5b7ccdd4a5f48cf48632",
       "hallucinations": [
         {
+          "case_id": "RAG-08",
+          "finding_index": 0
+        },
+        {
           "case_id": "RAG-10",
+          "finding_index": 0
+        },
+        {
+          "case_id": "RAG-12",
+          "finding_index": 0
+        },
+        {
+          "case_id": "RAG-14",
           "finding_index": 0
         },
         {
@@ -40,14 +65,30 @@
       "hallucinations": [
         {
           "case_id": "RAG-01",
+          "finding_index": 0
+        },
+        {
+          "case_id": "RAG-01",
           "finding_index": 1
+        },
+        {
+          "case_id": "RAG-04",
+          "finding_index": 0
         },
         {
           "case_id": "RAG-04",
           "finding_index": 1
         },
         {
+          "case_id": "RAG-15",
+          "finding_index": 0
+        },
+        {
           "case_id": "RAG-18",
+          "finding_index": 1
+        },
+        {
+          "case_id": "RAG-21",
           "finding_index": 1
         }
       ]
@@ -56,6 +97,10 @@
       "reviewed_findings": 17,
       "responses_digest": "sha256-v1:96469b74aaac5f1a672456c23d6e72d99ec4c5e33f84bb8bfa1fd0e647687044",
       "hallucinations": [
+        {
+          "case_id": "RAG-01",
+          "finding_index": 0
+        },
         {
           "case_id": "RAG-04",
           "finding_index": 1
@@ -70,6 +115,14 @@
       "reviewed_findings": 12,
       "responses_digest": "sha256-v1:763ef7873874dd2ced32446928aa2ddb62fbb4eff61ed5a231c2174e2e0ab2ea",
       "hallucinations": [
+        {
+          "case_id": "RAG-12",
+          "finding_index": 0
+        },
+        {
+          "case_id": "RAG-14",
+          "finding_index": 0
+        },
         {
           "case_id": "RAG-14",
           "finding_index": 1
