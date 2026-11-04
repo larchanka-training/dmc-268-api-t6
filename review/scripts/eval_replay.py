@@ -59,6 +59,13 @@ with per-case statuses, so replay cannot silently skip drift or terminal provide
 failures. Recorded run_metadata, including any effective settings snapshot, is
 returned as provenance;
 offline replay does not read the current model environment or detect env drift.
+
+``gateway_normalized`` is the second metric column (#239): the same first answers after the
+production check (``validate_review_answer`` or ``_v2``), which repairs only an equal
+``start_line`` and the finding order. It takes no repair or fallback call and comes before lint,
+dedupe, threshold, anchors and verifier, so it is not a metric of the published review.
+``attribution_loss`` counts the findings of those answers whose ``rule_name``
+``FindingsPostProcessor`` would null. The strict fields above it do not change.
 """
 
 from __future__ import annotations
@@ -70,7 +77,8 @@ import json
 import re
 import subprocess
 import sys
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, Literal
 
@@ -79,9 +87,27 @@ from jsonschema import Draft202012Validator
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
+from app.modules.reviews.application.findings_post_processor import (  # noqa: E402
+    FindingsPostProcessor,
+    ProcessedFinding,
+)
 from app.modules.reviews.application.policy_errors import PolicyError  # noqa: E402
+from app.modules.reviews.application.policy_snapshot import (  # noqa: E402
+    AGENTS_DOCUMENT_PATH,
+    RULES_DOCUMENT_PATH,
+)
+from app.modules.reviews.application.review_output import (  # noqa: E402
+    ReviewFinding,
+    ReviewFindingV2,
+    parse_review_output,
+    parse_review_output_v2,
+)
 from app.modules.reviews.application.review_path import (  # noqa: E402
     SNAPSHOT_REVIEW_PROMPT_VERSIONS,
+)
+from app.modules.reviews.infrastructure.llm.answers import (  # noqa: E402
+    validate_review_answer,
+    validate_review_answer_v2,
 )
 from review.scripts.eval_provenance import (  # noqa: E402
     DigestInputError,
@@ -121,6 +147,12 @@ _RAG_KEYS = (
     "latency_ms",
     "rag_evidence",
 )
+# The rule set a case of each language shows the model, as eval_live selects it.
+_RULE_SET_BY_LANGUAGE = {
+    "python": "review/rules/default-backend.v1.json",
+    "typescript": "review/rules/default-frontend.v1.json",
+    "tsx": "review/rules/default-frontend.v1.json",
+}
 _RAG_EVIDENCE_FIELDS = {
     "prompt_digest",
     "non_rag_prompt_digest",
@@ -458,6 +490,65 @@ def _validated_raw(path: Path, *, v2: bool) -> tuple[object, bool, int, str]:
     return raw, True, result.returncode, output
 
 
+def _normalized_answer(path: Path, *, v2: bool) -> dict[str, object] | None:
+    """The first answer as the gateway accepts it, or None where the gateway would refuse it.
+
+    Only the lossless normalization of the production check: no repair and no fallback call.
+    """
+    validate = validate_review_answer_v2 if v2 else validate_review_answer
+    try:
+        return validate(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, RecursionError):
+        # InvalidAnswer and UnicodeError are ValueErrors. The v1 decoder also lets too deep a
+        # nesting and an integer past the digit limit through; here they only make it invalid.
+        return None
+
+
+def _rule_names(prompt_root: Path, language: str) -> frozenset[str]:
+    """The rule names of a case's language; none when its rule file cannot be read.
+
+    Such a file is already a digest warning, and without names every attribution counts as lost.
+    """
+    try:
+        path = prompt_root / _RULE_SET_BY_LANGUAGE[language]
+        rules = json.loads(path.read_text(encoding="utf-8"))["rules"]
+        return frozenset(rule["name"] for rule in rules)
+    except (OSError, ValueError, KeyError, TypeError):
+        return frozenset()
+
+
+def _allowed_v2_rules(base: Path, arm: str) -> frozenset[str]:
+    """The documents a snapshot-path run may attribute to, as execute_review derives them."""
+    allowed = set()
+    if arm in ("valid", "malicious"):
+        allowed.add(RULES_DOCUMENT_PATH)
+    if (base / AGENTS_DOCUMENT_PATH).is_file():
+        allowed.add(AGENTS_DOCUMENT_PATH)
+    return frozenset(allowed)
+
+
+def _attribution_loss(
+    answer: dict[str, object],
+    *,
+    v2: bool,
+    rule_names: frozenset[str],
+    allowed_v2_rules: frozenset[str] | None,
+) -> tuple[int, int]:
+    """Count an accepted answer's findings and those whose ``rule_name`` publication would null."""
+    findings: Sequence[ReviewFinding | ReviewFindingV2] = (
+        parse_review_output_v2(answer).findings if v2 else parse_review_output(answer).findings
+    )
+    nulled = 0
+    for position, finding in enumerate(findings):
+        repaired = FindingsPostProcessor._repair_attribution(
+            ProcessedFinding(finding, position, "inline"),
+            rule_names,
+            allowed_v2_rules=allowed_v2_rules,
+        ).finding
+        nulled += finding.rule_name is not None and repaired.rule_name is None
+    return len(findings), nulled
+
+
 def _prompt_warnings(manifest: dict[str, Any], prompt_root: Path) -> list[str]:
     relative = Path(manifest["prompt_path"])
     if relative.is_absolute() or ".." in relative.parts:
@@ -687,24 +778,40 @@ def replay(
     # A snapshot-path prompt (v4/v5) answers in ReviewOutput v2, as the gateway required.
     v2 = manifest["prompt_version"] in SNAPSHOT_REVIEW_PROMPT_VERSIONS
     cases = []
+    normalized_cases = []
+    finding_count = nulled_count = 0
     statuses = []
     for case_dir, record in records:
         case_id = record["id"]
         response_path = response_paths[case_id]
         raw, valid, exit_code, validator_output = _validated_raw(response_path, v2=v2)
-        cases.append(
-            ScoringCase(
-                case_id=case_id,
-                truths=tuple(record["expected_findings"]),
-                expected_verdict=record["expected_verdict"],
-                added_lines=_patch_added_lines(case_dir / record["patch_path"]),
-                raw_response=raw,
-                response_valid=valid,
-                usage=None if usage is None else tuple(usage[case_id]),
-                arm=scoring_arm,
-                must_not_flag=tuple(record.get("must_not_flag", ())),
-            )
+        case = ScoringCase(
+            case_id=case_id,
+            truths=tuple(record["expected_findings"]),
+            expected_verdict=record["expected_verdict"],
+            added_lines=_patch_added_lines(case_dir / record["patch_path"]),
+            raw_response=raw,
+            response_valid=valid,
+            usage=None if usage is None else tuple(usage[case_id]),
+            arm=scoring_arm,
+            must_not_flag=tuple(record.get("must_not_flag", ())),
         )
+        cases.append(case)
+        answer = _normalized_answer(response_path, v2=v2)
+        normalized_cases.append(
+            replace(case, raw_response=answer, response_valid=answer is not None)
+        )
+        if answer is not None:
+            findings, nulled = _attribution_loss(
+                answer,
+                v2=v2,
+                rule_names=_rule_names(prompt_root, record["language"]),
+                allowed_v2_rules=(
+                    _allowed_v2_rules(case_dir / record["base_path"], recorded_arm) if v2 else None
+                ),
+            )
+            finding_count += findings
+            nulled_count += nulled
         statuses.append(
             {
                 "case_id": case_id,
@@ -714,6 +821,8 @@ def replay(
                 "validator_output": validator_output,
             }
         )
+    normalized_scores = score_cases(normalized_cases)
+    del normalized_scores["usage"]  # The usage of the same calls as the strict column.
     return {
         "schema_version": 1,
         "warnings": warnings,
@@ -739,6 +848,10 @@ def replay(
             )
         },
         **score_cases(cases),
+        "gateway_normalized": {
+            **normalized_scores,
+            "attribution_loss": {"findings": finding_count, "rule_name_nulled": nulled_count},
+        },
         "responses": statuses,
     }
 
@@ -747,12 +860,25 @@ def _percent(value: float | None) -> str:
     return "undefined" if value is None else f"{value * 100:.1f}%"
 
 
+def _quality_lines(scored: dict[str, Any]) -> list[str]:
+    micro = scored["micro"]
+    critical = scored["critical"]
+    verdict = scored["verdict"]
+    return [
+        f"Validity: {_percent(scored['validity'])} "
+        f"({scored['valid_response_count']}/{scored['case_count']})",
+        f"Micro: TP={micro['tp']} FP={micro['fp']} FN={micro['fn']} "
+        f"Precision={_percent(micro['precision'])} Recall={_percent(micro['recall'])}",
+        f"Critical Recall: {_percent(critical['recall'])} "
+        f"({critical['matched']}/{critical['total']})",
+        f"Verdict agreement: {_percent(verdict['agreement'])} "
+        f"({verdict['agreed']}/{verdict['total']})",
+    ]
+
+
 def format_console(report: dict[str, Any]) -> str:
     """Human-readable summary using the same counts as the JSON report."""
     provenance = report["provenance"]
-    micro = report["micro"]
-    critical = report["critical"]
-    verdict = report["verdict"]
     lines = [f"Cases: {report['case_count']}"]
     metadata = provenance.get("run_metadata", {})
     if "policy_arm" in metadata:
@@ -766,14 +892,7 @@ def format_console(report: dict[str, Any]) -> str:
         f"Prompt SHA: {provenance['prompt_sha']}",
         f"Static digest: {provenance['static_digest']}",
         f"Corpus digest: {provenance['corpus_digest']}",
-        f"Validity: {_percent(report['validity'])} "
-        f"({report['valid_response_count']}/{report['case_count']})",
-        f"Micro: TP={micro['tp']} FP={micro['fp']} FN={micro['fn']} "
-        f"Precision={_percent(micro['precision'])} Recall={_percent(micro['recall'])}",
-        f"Critical Recall: {_percent(critical['recall'])} "
-        f"({critical['matched']}/{critical['total']})",
-        f"Verdict agreement: {_percent(verdict['agreement'])} "
-        f"({verdict['agreed']}/{verdict['total']})",
+        *_quality_lines(report),
         "Per category:",
     ]
     for name, counts in report["per_category"].items():
@@ -806,6 +925,18 @@ def format_console(report: dict[str, Any]) -> str:
         lines.append(
             f"Usage: calls={usage['calls']} tokens_in={usage['tokens_in']} "
             f"tokens_out={usage['tokens_out']} cost_usd={usage['cost_usd']}"
+        )
+    normalized = report.get("gateway_normalized")
+    if normalized is not None:
+        loss = normalized["attribution_loss"]
+        lines.append(
+            "After gateway normalization, before lint, dedupe, threshold, anchors and verifier "
+            "(not the published review):"
+        )
+        lines.extend(f"  {line}" for line in _quality_lines(normalized))
+        lines.append(
+            f"  rule_name nulled by the post-processor: "
+            f"{loss['rule_name_nulled']}/{loss['findings']} findings"
         )
     for warning in report["warnings"]:
         lines.append(f"Warning: {warning}")
