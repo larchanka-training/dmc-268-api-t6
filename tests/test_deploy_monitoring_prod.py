@@ -16,8 +16,15 @@ from typing import Any
 import pytest
 import yaml  # type: ignore[import-untyped]
 
-from tests.monitoring_deploy_host import METADATA_GRANTS, Host, _grants, _job
-from tests.test_deploy_monitoring_backup import NO_OFFSITE, OFFSITE, PASSPHRASE
+from tests.monitoring_deploy_host import (
+    METADATA_GRANTS,
+    NO_OFFSITE,
+    OFFSITE,
+    PASSPHRASE,
+    Host,
+    _grants,
+    _job,
+)
 
 pytest_plugins = ("tests.monitoring_deploy_host",)
 
