@@ -27,8 +27,8 @@ ATTACK_LOCATIONS = frozenset(
 
 
 def _require_keys(value: Any, keys: set[str], label: str) -> None:
-    if not isinstance(value, dict) or not keys <= value.keys():
-        raise ValueError(f"{label} must contain {', '.join(sorted(keys))}")
+    if not isinstance(value, dict) or value.keys() != keys:
+        raise ValueError(f"{label} must contain exactly {', '.join(sorted(keys))}")
 
 
 def _attack_value(case: dict[str, Any], location: str) -> Any:
@@ -80,9 +80,12 @@ def _validate_expected_refs(case: dict[str, Any]) -> None:
 
 def validate_dataset(dataset: dict[str, Any]) -> None:
     """Reject incomplete or unpaired cases before they influence measured rates."""
-    _require_keys(dataset, {"schema_version", "cases"}, "dataset")
+    _require_keys(dataset, {"schema_version", "source", "cases"}, "dataset")
     if dataset["schema_version"] != 1 or not isinstance(dataset["cases"], list):
         raise ValueError("unsupported verifier dataset version or cases")
+    _require_keys(dataset["source"], {"kind", "attribution", "oracle"}, "source")
+    if dataset["source"]["kind"] != "synthetic":
+        raise ValueError("unknown source kind")
 
     cases: dict[str, dict[str, Any]] = {}
     classes: set[str] = set()
@@ -101,6 +104,8 @@ def validate_dataset(dataset: dict[str, Any]) -> None:
             raise ValueError("input code needs shown lines")
         for line in code["lines"]:
             _require_keys(line, {"number", "kind", "text"}, "input code line")
+            if line["kind"] not in {"added", "removed", "context"}:
+                raise ValueError("unknown line kind")
         _require_keys(case["input"]["policy"], {".review/rules.md", "AGENTS.md"}, "input policy")
         candidate = case["input"]["candidate"]
         if case["class"] == "empty_candidates":
@@ -130,16 +135,50 @@ def validate_dataset(dataset: dict[str, Any]) -> None:
             )
             if candidate["candidate_id"] != verifier_candidate_id(0, finding):
                 raise ValueError("candidate_id must match the production finding digest")
+            shown = {line["number"] for line in code["lines"] if line["kind"] != "removed"}
+            code_block = file_block_id(code["path"])
+            if (
+                finding.path != code["path"]
+                or finding.line not in shown
+                or (
+                    finding.start_line is not None
+                    and not set(range(finding.start_line, finding.line + 1)) <= shown
+                )
+                or any(
+                    ref.block_id != code_block
+                    or not set(range(ref.start_line, ref.end_line + 1)) <= shown
+                    for ref in finding.evidence_refs
+                )
+            ):
+                raise ValueError("candidate anchor is outside shown code")
         _require_keys(case["expected"], {"status", "evidence_refs", "requirement_refs"}, "expected")
         status = case["expected"]["status"]
         if status not in {"supported", "contradicted", "insufficient_context", None}:
             raise ValueError("unknown expected status")
         if (status is None) != (candidate is None):
             raise ValueError("expected status must match candidate presence")
+        statuses_by_class: dict[str, set[str | None]] = {
+            "proven": {"supported"},
+            "invented": {"contradicted"},
+            "inapplicable_rule": {"contradicted", "insufficient_context"},
+            "insufficient_context": {"insufficient_context"},
+            "empty_candidates": {None},
+        }
+        if status not in statuses_by_class[case["class"]]:
+            raise ValueError("case class and status must agree")
         if not isinstance(case["expected"]["evidence_refs"], list) or not isinstance(
             case["expected"]["requirement_refs"], list
         ):
             raise ValueError("expected references must be lists")
+        evidence_refs = case["expected"]["evidence_refs"]
+        requirement_refs = case["expected"]["requirement_refs"]
+        if status in {"supported", "contradicted"}:
+            if not evidence_refs:
+                raise ValueError("decisive status requires evidence references")
+            if candidate["rule_name"] is not None and not requirement_refs:
+                raise ValueError("policy-linked status requires requirement references")
+        elif evidence_refs or requirement_refs:
+            raise ValueError("nondecisive status must have no references")
         _validate_expected_refs(case)
         classes.add(case["class"])
         cases[case["id"]] = case

@@ -1002,6 +1002,13 @@ baseline and updated denominators.
 
 ### Manual live evaluation in GitHub Actions
 
+The model selection, isolated `cases/` and `schema/` copy, offline-replay summary,
+`eval-report.json`, and raw-export instructions below apply to the reviewer
+corpora `main`, `rules`, and `rag`. For `corpus=verifier`, follow the separate
+[#217 verifier instructions in TEST_PLAN §3.4](../docs/TEST_PLAN.md#34-независимая-оценка-production-pipeline-и-verifier-107):
+explicit model-pair and budget/window approval, a safe decision report, and no
+raw-response export.
+
 [Live corpus evaluation](../.github/workflows/eval-live.yml) is a manual
 `workflow_dispatch` workflow, separate from required offline replay. It uses the
 team EUrouter account: repository variables `LLM_MODEL` and `LLM_FALLBACK_MODEL`
@@ -1080,12 +1087,17 @@ to hide drift; refresh the entire response set and manifest together.
 `verifier-output.schema.v1.json` and `reflection_pass.py`; the ReviewOutput v2 schema
 was already pinned. This changes the static path set and digest of the existing 24-case
 reviewer baseline. Its previous `responses/manifest.json` and historical raw responses
-remain evidence of their original capture. Coordinate #178 to recapture the **complete**
-active 24-case reviewer response set and manifest once against the final path set, model
-and prompt; never patch only a digest or mix old and new responses. That capture requires
-separate paid-run authorization. After it is merged, run the required offline reviewer
-replay on `main` and require no static or corpus drift before claiming #217's replay AC.
-Until then, path-set drift is expected and the replay AC remains open.
+remain evidence of their original capture. The 52-pin count above belongs to that
+historical 2026-10-28 capture; record the actual new count only from a new manifest.
+PR #438 owns one **complete** recapture of all 24 active reviewer responses and the
+manifest against the final path set, model and prompt; closed #178 does not own it.
+Before that capture, resolve #442's shared pin changes and obtain a tech-lead decision
+whether its six RAG recordings are recaptured or accepted with documented drift.
+Reviewer recapture needs its own model, window and budget approval, separate from the
+verifier run. Never patch only a digest or mix old and new responses. After the new
+capture is merged, run the required offline reviewer replay on `main` with no static
+or corpus drift before claiming #217's replay AC. Until then, path-set drift is
+expected and the replay AC remains open.
 
 Before the 2026-10-28 replacement, `main` replayed the 2026-10-20 capture with `Static input
 digest mismatch; refresh the complete baseline`: #168 changed the pinned `app/modules/reviews/application/prompt_builder.py`,

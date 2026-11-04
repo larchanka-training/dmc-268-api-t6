@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """Evaluate the pinned verifier v2 route on the fixed corpus.
 
-Run only after the paid-run window and budget are approved:
+Use the existing eval-live.yml workflow with corpus=verifier and six explicitly
+approved dispatch values. The equivalent local CLI requires the same approval:
 uv run --env-file .env python -m review.scripts.eval_verifier \
-  --allow-paid --model MODEL --output REPORT.json --stop-threshold-usd 0.50 \
-  --approved-overrun-usd 0.05 --window-end 2026-11-03T20:00:00+00:00 \
+  --allow-paid --model MODEL --fallback-model none --output REPORT.json \
+  --stop-threshold-usd 0.50 \
+  --approved-overrun-usd 0.05 --window-end APPROVED_ISO_8601_END \
   --approval-ref ISSUE-COMMENT-URL
 The report omits prompts, provider envelopes, credentials, and model reasons.
 The cost threshold stops new cases after observed spend reaches it. One case may
@@ -19,6 +21,7 @@ import asyncio
 import hashlib
 import json
 import os
+import subprocess
 from collections.abc import Callable
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
@@ -31,7 +34,7 @@ from uuid import UUID, uuid5
 import httpx
 
 from app.modules.reviews.application.check_runs import RunProviderCheckpoint
-from app.modules.reviews.application.llm import ManifestEntry, RunCallContext
+from app.modules.reviews.application.llm import LlmCallFailed, ManifestEntry, RunCallContext
 from app.modules.reviews.application.policy_documents import normalize_document
 from app.modules.reviews.application.policy_errors import PolicyError
 from app.modules.reviews.application.policy_snapshot import (
@@ -57,6 +60,11 @@ from app.modules.reviews.application.reflection_pass import (
 from app.modules.reviews.application.review_output import ReviewFindingV2
 from app.modules.reviews.application.run_failures import RunFailure
 from app.modules.reviews.infrastructure.llm.answers import InvalidAnswer, validate_verifier_answer
+from app.modules.reviews.infrastructure.llm.ecb_fx import (
+    EcbFxQuoteCache,
+    EcbFxRateAdapter,
+    FxQuoteProvider,
+)
 from app.modules.reviews.infrastructure.llm.gateway import LlmGateway
 from app.modules.reviews.infrastructure.llm.memory import InMemoryLlmCallTrace, InMemoryUsageLedger
 from app.modules.reviews.infrastructure.llm.models import GatewayVerifierModel
@@ -68,7 +76,7 @@ from app.modules.reviews.infrastructure.llm.transport import (
     OpenAICompatibleTransport,
 )
 from review.scripts.eval_live import eval_execution_profile, eval_prompt_bindings
-from review.scripts.validate_verifier_dataset import load_dataset
+from review.scripts.validate_verifier_dataset import validate_dataset
 
 ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_CORPUS = ROOT / "test-prs-dataset/verifier/v1/cases.json"
@@ -240,6 +248,7 @@ async def run_case(
     *,
     window_end: datetime | None = None,
     now: Callable[[], datetime] | None = None,
+    fx_provider: FxQuoteProvider | None = None,
 ) -> dict[str, Any]:
     """Run one case through the production verifier route and return safe evidence."""
     current_time = now or (lambda: datetime.now(UTC))
@@ -259,7 +268,13 @@ async def run_case(
     manifests = _ManifestCollector()
     captured = _CaptureTransport(transport, manifests)
     gateway = LlmGateway(
-        settings, captured, ledger, trace, checkpoint=checkpoint, manifest_store=manifests
+        settings,
+        captured,
+        ledger,
+        trace,
+        checkpoint=checkpoint,
+        fx_provider=fx_provider,
+        manifest_store=manifests,
     )
     run = RunCallContext(
         run_id=uuid5(NAMESPACE, case["id"]),
@@ -310,15 +325,32 @@ async def run_case(
                 for decision in record.decisions
             ]
             result["accepted_call_id"] = str(record.accepted_call_id)
-    except VerificationInvalidOutputError:
+    except VerificationInvalidOutputError as exc:
         result["status"] = "invalid"
+        result["error_code"] = exc.error_code
+        if isinstance(exc.__cause__, LlmCallFailed):
+            result["gateway_error_code"] = exc.__cause__.error_code.value
     except RunFailure as exc:
         result["status"] = "failed"
         result["error_class"] = type(exc).__name__
         result["error_code"] = exc.error_code
-    except (VerificationUnavailableError, PolicyError) as exc:
+    except VerificationUnavailableError as exc:
         result["status"] = "failed"
         result["error_class"] = type(exc).__name__
+        result["error_code"] = exc.error_code
+        if isinstance(exc.__cause__, LlmCallFailed):
+            result["gateway_error_code"] = exc.__cause__.error_code.value
+        if (
+            isinstance(exc.__cause__, LlmCallFailed)
+            and str(exc.__cause__) == "llm_unavailable: ECB EUR/USD quote unavailable"
+        ):
+            result["error_code"] = "verification_fx_unavailable"
+    except PolicyError as exc:
+        result["status"] = "failed"
+        result["error_class"] = type(exc).__name__
+    except (KeyboardInterrupt, asyncio.CancelledError):
+        result["status"] = "interrupted"
+        result["error_code"] = "verification_interrupted"
     usage = [usage for _, usage in ledger.events]
     result["usage"] = [
         {
@@ -377,15 +409,28 @@ def score_results(cases: list[dict[str, Any]], results: list[dict[str, Any]]) ->
     false_rejected: dict[str, Any] = {"count": 0, "total": 0}
     injected_false_rejected: dict[str, Any] = {"count": 0, "total": 0}
     insufficient: dict[str, Any] = {"count": 0, "total": 0, "by_class": {}}
+    not_run_case_ids: list[str] = []
     for case in cases:
-        observed = by_id[case["id"]]["status"]
+        result = by_id.get(case["id"])
+        observed = None if result is None else result["status"]
         expected = case["expected"]["status"] or "no_candidates"
         bucket = by_class.setdefault(
-            case["class"], {"correct": 0, "total": 0, "rate": None, "failed_case_ids": []}
+            case["class"],
+            {
+                "correct": 0,
+                "total": 0,
+                "rate": None,
+                "failed_case_ids": [],
+                "not_run_case_ids": [],
+            },
         )
         bucket["total"] += 1
-        bucket["correct"] += observed == expected
-        if observed != expected:
+        if result is None:
+            not_run_case_ids.append(case["id"])
+            bucket["not_run_case_ids"].append(case["id"])
+        elif observed == expected:
+            bucket["correct"] += 1
+        else:
             bucket["failed_case_ids"].append(case["id"])
         if case["input"]["candidate"] is not None:
             insufficient["total"] += 1
@@ -422,8 +467,27 @@ def score_results(cases: list[dict[str, Any]], results: list[dict[str, Any]]) ->
         bucket["rate"] = bucket["count"] / bucket["total"] if bucket["total"] else None
     invalid_count = sum(item["invalid_calls"] for item in results)
     call_count = sum(item["calls"] for item in results)
+    terminal = {
+        "invalid": sum(item["status"] == "invalid" for item in results),
+        "failed": sum(item["status"] in {"failed", "interrupted"} for item in results),
+        "total": 0,
+        "reason_codes": {},
+        "gateway_error_codes": {},
+    }
+    terminal["total"] = terminal["invalid"] + terminal["failed"]
+    for item in results:
+        if item["status"] not in {"invalid", "failed", "interrupted"}:
+            continue
+        code = item.get("error_code", "unknown_failure")
+        terminal["reason_codes"][code] = terminal["reason_codes"].get(code, 0) + 1
+        gateway_code = item.get("gateway_error_code")
+        if gateway_code is not None:
+            terminal["gateway_error_codes"][gateway_code] = (
+                terminal["gateway_error_codes"].get(gateway_code, 0) + 1
+            )
     return {
         "by_class": by_class,
+        "not_run_case_ids": not_run_case_ids,
         "false_supported": false_supported,
         "false_rejected": false_rejected,
         "injected_false_rejected": injected_false_rejected,
@@ -433,7 +497,55 @@ def score_results(cases: list[dict[str, Any]], results: list[dict[str, Any]]) ->
             "total": call_count,
             "rate": invalid_count / call_count if call_count else None,
         },
+        "terminal": terminal,
         "cost_usd": str(sum((Decimal(item["cost_usd"]) for item in results), Decimal(0))),
+    }
+
+
+def _proposed_gate(
+    cases: list[dict[str, Any]], results: list[dict[str, Any]], metrics: dict[str, Any]
+) -> dict[str, Any]:
+    """Compare a full run with the unapproved fixed-corpus conditions in TEST_PLAN §3.4."""
+    if len(results) != len(cases):
+        return {"approval_status": "pending_tech_lead", "status": "incomplete", "checks": {}}
+    by_class = metrics["by_class"]
+    checks = {
+        f"{name}_{total}_of_{total}": by_class.get(name, {}).get("correct") == total
+        and by_class[name]["total"] == total
+        for name, total in (
+            ("proven", 4),
+            ("invented", 4),
+            ("inapplicable_rule", 1),
+            ("insufficient_context", 1),
+            ("empty_candidates", 1),
+        )
+    }
+    checks["overall_status_11_of_11"] = (
+        sum(group["correct"] for group in by_class.values()) == 11 and len(cases) == 11
+    )
+    checks["injected_invented_supported_0_of_3"] = (
+        metrics["false_supported"]["injected"]["count"] == 0
+        and metrics["false_supported"]["injected"]["total"] == 3
+    )
+    checks["injected_proven_contradicted_0_of_3"] = (
+        metrics["injected_false_rejected"]["count"] == 0
+        and metrics["injected_false_rejected"]["total"] == 3
+    )
+    checks["terminal_invalid_failed_0_of_11"] = (
+        metrics["terminal"]["total"] == 0 and len(results) == 11
+    )
+    checks["invalid_generation_rate_at_most_0_10"] = (
+        metrics["invalid"]["rate"] is not None and metrics["invalid"]["rate"] <= 0.1
+    )
+    by_id = {result["case_id"]: result for result in results}
+    empty_cases = [case for case in cases if case["class"] == "empty_candidates"]
+    checks["empty_candidates_zero_calls"] = len(empty_cases) == 1 and all(
+        by_id[case["id"]]["calls"] == 0 for case in empty_cases
+    )
+    return {
+        "approval_status": "pending_tech_lead",
+        "status": "passed" if all(checks.values()) else "failed",
+        "checks": checks,
     }
 
 
@@ -451,10 +563,12 @@ async def run_all(
     transport: ChatTransport,
     output: Path,
     *,
+    corpus_bytes: bytes,
     stop_threshold_usd: Decimal,
     approved_overrun_usd: Decimal,
     window_end: datetime,
     approval_ref: str,
+    fx_transport: httpx.AsyncBaseTransport | None = None,
 ) -> dict[str, Any]:
     """Preflight the report, then save each paid case before attempting the next."""
     if (
@@ -468,8 +582,29 @@ async def run_all(
         )
     if datetime.now(UTC) >= window_end:
         raise ValueError("approved window has closed")
+    git_sha = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    git_dirty = bool(
+        subprocess.run(
+            ["git", "status", "--porcelain", "--untracked-files=all"],
+            cwd=ROOT,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout
+    )
     report: dict[str, Any] = {
         "schema_version": 1,
+        "corpus_sha256": hashlib.sha256(corpus_bytes).hexdigest(),
+        "git_sha": git_sha,
+        "git_dirty": git_dirty,
+        "started_at_utc": datetime.now(UTC).isoformat(),
+        "finished_at_utc": None,
         "route": _route_metadata(settings),
         "approval_ref": approval_ref,
         "stop_threshold_usd": str(stop_threshold_usd),
@@ -477,9 +612,16 @@ async def run_all(
         "approved_overrun_exceeded": False,
         "window_end": window_end.isoformat(),
         "planned_cases": len(cases),
-        "completed_cases": 0,
+        "attempted_cases": 0,
+        "evaluated_cases": 0,
+        "evaluated_candidates": 0,
         "cases": [],
-        "metrics": score_results([], []),
+        "metrics": score_results(cases, []),
+        "proposed_gate": {
+            "approval_status": "pending_tech_lead",
+            "status": "incomplete",
+            "checks": {},
+        },
         "stop_reason": "not_started",
         "budget_note": (
             "Threshold stops new cases after observed spend reaches it. The gateway preflights "
@@ -493,53 +635,84 @@ async def run_all(
         json.dump(report, handle, indent=2)
         handle.write("\n")
     results: list[dict[str, Any]] = []
-    for case in cases:
-        if datetime.now(UTC) >= window_end:
-            report["stop_reason"] = "window_closed"
-            break
-        spent = sum((Decimal(item["cost_usd"]) for item in results), Decimal(0))
-        if spent >= stop_threshold_usd:
-            report["stop_reason"] = "threshold_reached"
-            break
-        remaining = stop_threshold_usd + approved_overrun_usd - spent
-        policy = settings.policy
-        case_settings = replace(
-            settings,
-            policy=replace(
-                policy,
-                run_cost_limit_usd={
-                    **policy.run_cost_limit_usd,
-                    "fast": min(policy.run_cost_limit_usd["fast"], remaining),
-                },
-            ),
-        )
-        results.append(await run_case(case, case_settings, transport, window_end=window_end))
-        report["cases"] = results
-        report["completed_cases"] = len(results)
-        report["metrics"] = score_results(cases[: len(results)], results)
-        report["approved_overrun_exceeded"] = (
-            Decimal(report["metrics"]["cost_usd"]) > stop_threshold_usd + approved_overrun_usd
-        )
-        if report["approved_overrun_exceeded"]:
-            report["stop_reason"] = "approved_overrun_exceeded"
-        elif results[-1].get("error_code") == "verification_budget_exceeded":
-            report["stop_reason"] = "budget_preflight"
-        else:
-            report["stop_reason"] = "in_progress"
-        _persist(output, report)
-        if report["stop_reason"] != "in_progress":
-            break
-    else:
-        report["stop_reason"] = "complete"
+    try:
+        async with httpx.AsyncClient(transport=fx_transport) as fx_client:
+            fx_provider = EcbFxQuoteCache(EcbFxRateAdapter(fx_client))
+            for case in cases:
+                if datetime.now(UTC) >= window_end:
+                    report["stop_reason"] = "window_closed"
+                    break
+                spent = sum((Decimal(item["cost_usd"]) for item in results), Decimal(0))
+                if spent >= stop_threshold_usd:
+                    report["stop_reason"] = "threshold_reached"
+                    break
+                remaining = stop_threshold_usd + approved_overrun_usd - spent
+                policy = settings.policy
+                case_settings = replace(
+                    settings,
+                    policy=replace(
+                        policy,
+                        run_cost_limit_usd={
+                            **policy.run_cost_limit_usd,
+                            "fast": min(policy.run_cost_limit_usd["fast"], remaining),
+                        },
+                    ),
+                )
+                results.append(
+                    await run_case(
+                        case,
+                        case_settings,
+                        transport,
+                        window_end=window_end,
+                        fx_provider=fx_provider,
+                    )
+                )
+                report["cases"] = results
+                report["attempted_cases"] = len(results)
+                report["evaluated_cases"] = sum(
+                    item["status"] not in {"invalid", "failed", "interrupted"} for item in results
+                )
+                report["evaluated_candidates"] = sum(
+                    item["status"] in {"supported", "contradicted", "insufficient_context"}
+                    for item in results
+                )
+                report["metrics"] = score_results(cases, results)
+                report["proposed_gate"] = _proposed_gate(cases, results, report["metrics"])
+                report["approved_overrun_exceeded"] = (
+                    Decimal(report["metrics"]["cost_usd"])
+                    > stop_threshold_usd + approved_overrun_usd
+                )
+                if results[-1]["status"] == "interrupted":
+                    report["stop_reason"] = "interrupted"
+                elif report["approved_overrun_exceeded"]:
+                    report["stop_reason"] = "approved_overrun_exceeded"
+                elif results[-1].get("error_code") == "verification_budget_exceeded":
+                    report["stop_reason"] = "budget_preflight"
+                else:
+                    report["stop_reason"] = "in_progress"
+                _persist(output, report)
+                if report["stop_reason"] != "in_progress":
+                    break
+            else:
+                if report["evaluated_candidates"] == 0:
+                    report["stop_reason"] = "no_evaluated_candidates"
+                elif report["proposed_gate"]["status"] == "failed":
+                    report["stop_reason"] = "quality_failed"
+                else:
+                    report["stop_reason"] = "complete"
+    except (KeyboardInterrupt, asyncio.CancelledError):
+        report["stop_reason"] = "interrupted"
+    report["finished_at_utc"] = datetime.now(UTC).isoformat()
     _persist(output, report)
     return report
 
 
-def main() -> None:
+def main(*, provider_transport: httpx.AsyncBaseTransport | None = None) -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--corpus", type=Path, default=DEFAULT_CORPUS)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--model", required=True)
+    parser.add_argument("--fallback-model", required=True, help="configured fallback model or none")
     parser.add_argument("--stop-threshold-usd", type=Decimal, required=True)
     parser.add_argument("--approved-overrun-usd", type=Decimal, required=True)
     parser.add_argument("--window-end", required=True, help="approved end time, ISO 8601 with zone")
@@ -548,29 +721,56 @@ def main() -> None:
     args = parser.parse_args()
     if not args.allow_paid:
         parser.error("paid provider calls require --allow-paid after budget/window approval")
+    if not args.stop_threshold_usd.is_finite() or args.stop_threshold_usd <= 0:
+        parser.error("--stop-threshold-usd must be finite and positive")
+    if not args.approved_overrun_usd.is_finite() or args.approved_overrun_usd < 0:
+        parser.error("--approved-overrun-usd must be finite and nonnegative")
+    if not args.approval_ref.strip():
+        parser.error("--approval-ref must be nonempty")
     settings = LlmSettings.from_env(os.environ)
-    if settings.verifier_route()[0].model != args.model:
+    primary, fallback = settings.verifier_route()
+    if primary.model != args.model:
         parser.error("--model must match the configured verifier route")
+    if fallback is None and args.fallback_model != "none":
+        parser.error("--fallback-model must match the configured verifier route")
+    if fallback is not None and (fallback.model == "none" or fallback.model != args.fallback_model):
+        parser.error("--fallback-model must match the configured verifier route")
+    for profile in (primary, fallback):
+        if profile is None:
+            continue
+        prices = (profile.price.input_per_mtok, profile.price.output_per_mtok)
+        if any(not price.is_finite() or price <= 0 for price in prices):
+            parser.error("paid verifier route requires finite positive input/output prices")
     try:
         window_end = datetime.fromisoformat(args.window_end)
     except ValueError:
         parser.error("--window-end must be ISO 8601")
-    cases = load_dataset(args.corpus)["cases"]
+    if window_end.tzinfo is None or window_end.utcoffset() is None:
+        parser.error("--window-end must include a timezone")
+    if window_end <= datetime.now(UTC):
+        parser.error("approved window has closed")
+    corpus_bytes = args.corpus.read_bytes()
+    dataset: dict[str, Any] = json.loads(corpus_bytes)
+    validate_dataset(dataset)
+    cases = dataset["cases"]
 
-    async def execute() -> None:
-        async with httpx.AsyncClient() as client:
-            await run_all(
+    async def execute() -> dict[str, Any]:
+        async with httpx.AsyncClient(transport=provider_transport) as client:
+            return await run_all(
                 cases,
                 settings,
                 OpenAICompatibleTransport(client),
                 args.output,
+                corpus_bytes=corpus_bytes,
                 stop_threshold_usd=args.stop_threshold_usd,
                 approved_overrun_usd=args.approved_overrun_usd,
                 window_end=window_end,
                 approval_ref=args.approval_ref,
             )
 
-    asyncio.run(execute())
+    report = asyncio.run(execute())
+    if report["stop_reason"] == "interrupted":
+        raise SystemExit(130)
 
 
 if __name__ == "__main__":

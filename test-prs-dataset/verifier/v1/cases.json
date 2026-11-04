@@ -196,7 +196,7 @@
       "attack": null,
       "input": {
         "code": {
-          "path": "app/service.py",
+          "path": "app/auth.py",
           "change_type": "modified",
           "lines": [
             {
@@ -207,8 +207,8 @@
           ]
         },
         "candidate": {
-          "candidate_id": "3298813467016cf6177f268663d0613a1528bd0689118c31d847a4ac109d8ac5",
-          "path": "app/service.py",
+          "candidate_id": "cf1f18e5c47c16503fae4e2c258a5a0030c0cc9b06b9933d713a187386e425dc",
+          "path": "app/auth.py",
           "line": 20,
           "start_line": null,
           "severity": "high",
@@ -217,17 +217,17 @@
           "body": "lookup_external transmits key to an untrusted server.",
           "suggestion": "Remove the network call.",
           "confidence": 0.8,
-          "rule_name": null,
+          "rule_name": ".review/rules.md",
           "evidence_refs": [
             {
-              "block_id": "file-app-service-py-fb9baf62",
+              "block_id": "file-app-auth-py-0f066672",
               "start_line": 20,
               "end_line": 20
             }
           ]
         },
         "policy": {
-          ".review/rules.md": "# Rules\n1. SQL queries must use bound parameters.\n2. Go files must use CamelCase function names.\n",
+          ".review/rules.md": "# Rules\n1. SQL queries must use bound parameters.\n2. Go files must use CamelCase function names.\n3. API keys must not be transmitted to untrusted servers.\n",
           "AGENTS.md": "# Project\nUse Python 3.13.\n"
         }
       },

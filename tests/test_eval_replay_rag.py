@@ -29,7 +29,9 @@ from tests.eval_live_fakes import settings as rag_settings
 from tests.eval_replay_fakes import (
     DATASET_ROOT,
     REPO_ROOT,
+    _record_with_digests,
     edit_manifest,
+    fixture_root,
 )
 from tests.test_eval_live_rag import (
     CASES,
@@ -355,11 +357,21 @@ def test_the_labels_of_the_two_rag_arms_are_the_arms_the_recorder_knows() -> Non
     assert set(eval_replay_module.RAG_ARM_LABELS) == set(eval_live_module.RAG_ARMS)
 
 
+@pytest.mark.parametrize("manifest_shape", ["historical", "recaptured"])
 def test_replaying_the_main_baseline_asks_for_no_rag_code_and_adds_no_rag_field(
-    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, manifest_shape: str
 ) -> None:
     """A capture without ``rag_arm`` replays as it did before #146: the main static path set,
     the main corpus label, and none of the RAG keys in its report."""
+    if manifest_shape == "recaptured":
+        root = fixture_root(tmp_path)
+        repo = tmp_path / "repo"
+        _record_with_digests(root, repo)
+        response = root / "responses/SEC-01.json"
+        recorded_response = response.read_bytes()
+    else:
+        root = DATASET_ROOT
+        repo = REPO_ROOT
     asked: list[Any] = []
     original = static_input_paths
 
@@ -369,16 +381,19 @@ def test_replaying_the_main_baseline_asks_for_no_rag_code_and_adds_no_rag_field(
 
     monkeypatch.setattr(eval_replay_module, "static_input_paths", spy)
 
-    report = replay(DATASET_ROOT)
+    report = replay(root, prompt_root=repo)
 
     assert asked == [False]
     assert report["corpus"] == "main"
     assert set(report["provenance"]["run_metadata"]) & set(eval_replay_module._RAG_KEYS) == set()
-    # The verifier pins changed both static path set and digest of this historical capture.
-    assert report["warnings"] == [
+    allowed_drift = {
         "Static input path set changed; refresh the complete baseline",
         "Static input digest mismatch; refresh the complete baseline",
-    ]
+    }
+    assert set(report["warnings"]) <= allowed_drift
+    if manifest_shape == "recaptured":
+        assert report["warnings"] == []
+        assert response.read_bytes() == recorded_response
 
 
 @pytest.mark.parametrize("budget", [0, -5, 1.5, "100", True, None])

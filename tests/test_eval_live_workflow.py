@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import textwrap
@@ -28,7 +29,7 @@ def _step(name: str) -> str:
 
 def _run(name: str, root: Path, env: dict[str, str]) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
-        ["/bin/bash", "-euo", "pipefail", "-c", _step(name)],
+        [shutil.which("bash") or "/bin/bash", "-euo", "pipefail", "-c", _step(name)],
         cwd=root,
         env={**os.environ, **env},
         capture_output=True,
@@ -145,6 +146,196 @@ def test_missing_key_fails_before_provider_call(tmp_path: Path) -> None:
     )
     assert control.returncode == 42
     assert (tmp_path / "uv-called").exists()
+
+
+def _verifier_env(root: Path) -> dict[str, str]:
+    return {
+        "RUNNER_TEMP": str(root),
+        "EVAL_CORPUS": "verifier",
+        "EVAL_REVIEW_MODEL_INPUT": "",
+        "EVAL_EXPORT_RAW_RESPONSES": "false",
+        "EVAL_POLICY_ARM": "legacy",
+        "EVAL_RAG_ARM": "none",
+        "EVAL_REVIEW_PROMPT": "v3",
+        "EVAL_REVIEW_PROMPT_FILE": "",
+        "EVAL_VERIFIER_MODEL": "approved-primary",
+        "EVAL_VERIFIER_FALLBACK_MODEL": "none",
+        "EVAL_VERIFIER_STOP_THRESHOLD_USD": "0.50",
+        "EVAL_VERIFIER_APPROVED_OVERRUN_USD": "0.05",
+        "EVAL_VERIFIER_WINDOW_END": "2999-01-01T00:00:00+00:00",
+        "EVAL_VERIFIER_APPROVAL_REF": "issue comment 123",
+    }
+
+
+@pytest.mark.parametrize(
+    ("name", "value"),
+    [
+        ("EVAL_REVIEW_MODEL_INPUT", "reviewer-override"),
+        ("EVAL_EXPORT_RAW_RESPONSES", "true"),
+        ("EVAL_POLICY_ARM", "none"),
+        ("EVAL_RAG_ARM", "graph"),
+        ("EVAL_REVIEW_PROMPT", "v5"),
+        ("EVAL_REVIEW_PROMPT_FILE", "review/prompts/review.system.v5.md"),
+    ],
+)
+def test_verifier_dispatch_rejects_reviewer_options_before_key(
+    tmp_path: Path, name: str, value: str
+) -> None:
+    env = _verifier_env(tmp_path)
+    env[name] = value
+    result = _run("Validate verifier dispatch", tmp_path, env)
+    assert result.returncode == 1
+    assert "verifier dispatch rejects reviewer options and raw export" in result.stderr
+    assert "issue comment 123" not in result.stdout + result.stderr
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "EVAL_VERIFIER_MODEL",
+        "EVAL_VERIFIER_FALLBACK_MODEL",
+        "EVAL_VERIFIER_STOP_THRESHOLD_USD",
+        "EVAL_VERIFIER_APPROVED_OVERRUN_USD",
+        "EVAL_VERIFIER_WINDOW_END",
+        "EVAL_VERIFIER_APPROVAL_REF",
+    ],
+)
+def test_verifier_dispatch_requires_all_six_approvals(tmp_path: Path, name: str) -> None:
+    env = _verifier_env(tmp_path)
+    env[name] = ""
+    result = _run("Validate verifier dispatch", tmp_path, env)
+    assert result.returncode == 1
+    assert "verifier dispatch requires six approved values" in result.stderr
+
+
+def test_verifier_dispatch_passes_approved_values_as_literal_arguments(tmp_path: Path) -> None:
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    shim = bin_dir / "uv"
+    shim.write_text('#!/bin/bash\nprintf "%s\\n" "$@" > "$RUNNER_TEMP/args"\n')
+    shim.chmod(0o755)
+    env = _verifier_env(tmp_path)
+    env.update(
+        {
+            "PATH": str(bin_dir) + os.pathsep + os.environ["PATH"],
+            "LLM_API_KEYS": "test-key-not-a-real-credential",
+            "EVAL_VERIFIER_APPROVAL_REF": "issue $(touch SHOULD_NOT_EXIST) 123",
+        }
+    )
+    assert _run("Validate verifier dispatch", tmp_path, env).returncode == 0
+    result = _run("Evaluate verifier corpus", tmp_path, env)
+    assert result.returncode == 0, result.stderr
+    assert (tmp_path / "args").read_text().splitlines() == [
+        "run",
+        "python",
+        "-m",
+        "review.scripts.eval_verifier",
+        "--allow-paid",
+        "--corpus",
+        "test-prs-dataset/verifier/v1/cases.json",
+        "--output",
+        str(tmp_path / "verifier-report.json"),
+        "--model",
+        "approved-primary",
+        "--fallback-model",
+        "none",
+        "--stop-threshold-usd",
+        "0.50",
+        "--approved-overrun-usd",
+        "0.05",
+        "--window-end",
+        "2999-01-01T00:00:00+00:00",
+        "--approval-ref",
+        "issue $(touch SHOULD_NOT_EXIST) 123",
+    ]
+    assert not (tmp_path / "SHOULD_NOT_EXIST").exists()
+    assert "test-key-not-a-real-credential" not in result.stdout + result.stderr
+
+
+def test_verifier_missing_key_fails_before_runner(tmp_path: Path) -> None:
+    shim = tmp_path / "uv"
+    shim.write_text('#!/bin/bash\n: > "$RUNNER_TEMP/uv-called"\n')
+    shim.chmod(0o755)
+    env = _verifier_env(tmp_path)
+    env.update({"PATH": str(tmp_path), "LLM_API_KEYS": ""})
+    result = _run("Evaluate verifier corpus", tmp_path, env)
+    assert result.returncode == 1
+    assert "AI_DMC268_T6" in result.stderr
+    assert not (tmp_path / "uv-called").exists()
+
+
+def test_verifier_workflow_contract_is_safe_and_keeps_legacy_selection() -> None:
+    text = WORKFLOW.read_text()
+    trigger = text.split("\non:\n", 1)[1].split("\npermissions:", 1)[0]
+    assert len(re.findall(r"^      [a-z_]+:", trigger, re.M)) == 13
+    assert "          - verifier\n" in trigger
+    for name in (
+        "verifier_model",
+        "verifier_fallback_model",
+        "verifier_stop_threshold_usd",
+        "verifier_approved_overrun_usd",
+        "verifier_window_end",
+        "verifier_approval_ref",
+    ):
+        assert f"      {name}:\n" in trigger
+    job_env = text.split("    env:\n", 1)[1].split("\n    steps:", 1)[0]
+    assert "LLM_VERIFIER_MODEL:" not in job_env
+    assert "LLM_VERIFIER_FALLBACK_MODEL:" not in job_env
+    assert "EVAL_REVIEW_MODEL_INPUT: ${{ inputs.model }}" in text
+    assert "EVAL_EXPORT_RAW_RESPONSES: ${{ inputs.export_raw_responses }}" in text
+    for name in (
+        "MODEL",
+        "FALLBACK_MODEL",
+        "STOP_THRESHOLD_USD",
+        "APPROVED_OVERRUN_USD",
+        "WINDOW_END",
+        "APPROVAL_REF",
+    ):
+        input_name = "verifier_" + name.lower()
+        assert f"EVAL_VERIFIER_{name}: ${{{{ inputs.{input_name} }}}}" in text
+    assert text.index("      - name: Validate verifier dispatch\n") < text.index(
+        "      - name: Evaluate verifier corpus\n"
+    )
+    guard = text.split("      - name: Validate verifier dispatch\n", 1)[1].split(
+        "\n      - name:", 1
+    )[0]
+    assert "${{ secrets." not in guard
+    assert "${{ inputs." not in "\n".join(_run_bodies(text))
+    verifier = text.split("      - name: Evaluate verifier corpus\n", 1)[1].split(
+        "\n      - name:", 1
+    )[0]
+    assert "LLM_VERIFIER_MODEL: ${{ vars.LLM_VERIFIER_MODEL }}" in verifier
+    assert "LLM_VERIFIER_FALLBACK_MODEL: ${{ vars.LLM_VERIFIER_FALLBACK_MODEL }}" in verifier
+    assert "LLM_API_KEYS: ${{ secrets.AI_DMC268_T6 }}" in verifier
+    assert "${{ inputs." not in verifier.split("        run: |", 1)[1]
+    reviewer = text.split("      - name: Evaluate live corpus\n", 1)[1].split("\n      - name:", 1)[
+        0
+    ]
+    assert "LLM_VERIFIER_MODEL:" not in reviewer
+    assert "LLM_VERIFIER_FALLBACK_MODEL:" not in reviewer
+    for name in (
+        "Validate review prompt file",
+        "Prepare isolated corpus",
+        "Validate corpus",
+        "Evaluate live corpus",
+    ):
+        assert f"      - name: {name}\n        if: ${{{{ inputs.corpus != 'verifier' }}}}\n" in text
+    raw_stage = text.split("      - name: Stage raw responses\n", 1)[1].split("\n      - name:", 1)[
+        0
+    ]
+    assert "id: raw_export" in raw_stage
+    assert "inputs.export_raw_responses && inputs.corpus != 'verifier'" in raw_stage
+    raw_upload = text.split("      - name: Upload raw responses\n", 1)[1]
+    assert "inputs.corpus != 'verifier' && steps.raw_export.outcome == 'success'" in raw_upload
+    upload = text.split("      - name: Upload verifier evaluation report\n", 1)[1].split(
+        "\n      - name:", 1
+    )[0]
+    assert "if: ${{ always() && inputs.corpus == 'verifier' }}" in upload
+    assert "name: eval-live-verifier-${{ github.run_id }}-${{ github.run_attempt }}" in upload
+    assert "path: ${{ runner.temp }}/verifier-report.json" in upload
+    assert "eval-raw-responses" not in upload
+    assert "retention-days: 14" in upload
+    _assert_workflow_contract(text)
 
 
 def test_summary_uses_replay_metrics_without_model_diagnostics(tmp_path: Path) -> None:
@@ -268,14 +459,17 @@ def _assert_workflow_contract(text: str) -> None:
     assert "        type: string\n" in trigger
     assert "permissions:\n  contents: read\n\n" in text
     assert "LLM_MODEL: ${{ inputs.model || vars.LLM_MODEL }}" in text
-    assert text.count("${{ secrets.") == 1
+    assert text.count("${{ secrets.") == 2
     evaluate = text.split("      - name: Evaluate live corpus\n")[1].split("\n      - name:")[0]
     assert "${{ inputs.model" not in evaluate
     assert "          LLM_API_KEYS: ${{ secrets.AI_DMC268_T6 }}" in evaluate
     assert 'validate_dataset.py --root "$RUNNER_TEMP/eval-corpus" --final' in text
     _assert_selection_contract(text)
     for name in ("Export safe provenance", "Summarize evaluation", "Upload evaluation report"):
-        assert f"      - name: {name}\n        if: always()\n" in text
+        assert (
+            f"      - name: {name}\n"
+            "        if: ${{ always() && inputs.corpus != 'verifier' }}\n"
+        ) in text
     upload = text.split("      - name: Upload evaluation report\n")[1]
     paths = upload.split("          path: |\n")[1].split("          if-no-files-found:")[0]
     assert paths.splitlines() == [
@@ -298,14 +492,14 @@ def _assert_selection_contract(text: str) -> None:
     """Corpus and policy arm are closed choices that reach the shell only as variables."""
     assert (
         "      corpus:\n"
-        '        description: "Corpus: main (gold benchmark), rules (rules.md sub-corpus, #163) '
-        'or rag (graph-RAG A/B corpus, #146)"\n'
+        '        description: "Corpus: main, rules, rag or verifier (#217)"\n'
         "        required: false\n"
         "        type: choice\n"
         "        options:\n"
         "          - main\n"
         "          - rules\n"
         "          - rag\n"
+        "          - verifier\n"
         "        default: main\n"
     ) in text
     assert (
@@ -357,14 +551,17 @@ def _assert_selection_contract(text: str) -> None:
         'review/prompts/, with key review.system; overrides review_prompt (not with corpus rag)"\n'
         "        required: false\n"
         "        type: string\n"
-        "\n"
-        "permissions:\n"
+        "      verifier_model:\n"
     ) in text
     assert "      EVAL_REVIEW_PROMPT_FILE: ${{ inputs.review_prompt_file }}\n" in text
     assert (
         "      - name: Install dependencies\n"
         "        run: uv sync --locked --all-groups\n\n"
+        "      - name: Validate verifier dispatch\n"
+    ) in text
+    assert (
         "      - name: Validate review prompt file\n"
+        "        if: ${{ inputs.corpus != 'verifier' }}\n"
         "        shell: bash\n"
     ) in text
     assert (
@@ -375,7 +572,7 @@ def _assert_selection_contract(text: str) -> None:
     assert '          if [[ "${EVAL_CORPUS:-}" == rag ]]; then\n' in text
     assert '            system="$EVAL_REVIEW_PROMPT_FILE"\n' in text
     bodies = _run_bodies(text)
-    assert len(bodies) == 8
+    assert len(bodies) == 10
     assert not [body for body in bodies if "${{" in body]
     assert (
         'validate_dataset.py --root "$RUNNER_TEMP/eval-corpus" --final "${profile[@]}"\n'
@@ -421,7 +618,10 @@ def test_manual_workflow_security_and_selection_contract() -> None:
         (" && steps.raw_export.outcome == 'success'", ""),
         ("path: ${{ runner.temp }}/eval-raw-responses/", "path: ${{ runner.temp }}/"),
         ("contents: read", "contents: write"),
-        ("if: always()", "if: success()"),
+        (
+            "if: ${{ always() && inputs.corpus != 'verifier' }}",
+            "if: success()",
+        ),
         ("retention-days: 14", "retention-days: 90"),
         ("/eval-response-metadata/", "/eval-corpus/"),
         ('--root "$RUNNER_TEMP/eval-corpus" --final', "--final"),
@@ -459,9 +659,9 @@ def test_manual_workflow_security_and_selection_contract() -> None:
         ),
         ("      review_prompt_file:\n", "      prompt_file:\n"),
         (
-            "        type: string\n\npermissions:",
-            "        type: string\n        default: review/prompts/review.system.v5.md\n\n"
-            "permissions:",
+            "        type: string\n      verifier_model:",
+            "        type: string\n        default: review/prompts/review.system.v5.md\n"
+            "      verifier_model:",
         ),
         ("${{ inputs.review_prompt_file }}", "review/prompts/review.system.v5.md"),
         ('system="$EVAL_REVIEW_PROMPT_FILE"', 'system="${{ inputs.review_prompt_file }}"'),
@@ -540,21 +740,21 @@ def _assert_raw_export_contract(text: str) -> None:
         "        type: boolean\n"
         "        default: false\n"
     ) in text
-    assert (
-        "      - name: Stage raw responses\n"
-        "        id: raw_export\n"
-        "        if: ${{ always() && inputs.export_raw_responses }}\n"
-    ) in text
+    raw_stage = text.split("      - name: Stage raw responses\n", 1)[1].split("\n      - name:", 1)[
+        0
+    ]
+    assert "        id: raw_export\n" in raw_stage
+    assert "inputs.export_raw_responses && inputs.corpus != 'verifier'" in raw_stage
     assert (
         "      - name: Upload raw responses\n"
         "        if: ${{ always() && inputs.export_raw_responses"
-        " && steps.raw_export.outcome == 'success' }}\n"
+        " && inputs.corpus != 'verifier' && steps.raw_export.outcome == 'success' }}\n"
     ) in text
     upload = text.split("      - name: Upload raw responses\n", 1)[1]
     assert "          path: ${{ runner.temp }}/eval-raw-responses/\n" in upload
     assert "          retention-days: 14\n" in upload
     assert "          if-no-files-found: error\n" in upload
-    assert text.count("uses: actions/upload-artifact@") == 2
+    assert text.count("uses: actions/upload-artifact@") == 3
 
 
 def _raw_capture(root: Path) -> Path:
