@@ -50,6 +50,7 @@ from app.modules.reviews.infrastructure.llm.gateway import (
     LlmGateway,
 )
 from app.worker import attempt_model_provider
+from tests.execute_review_fakes import _AcceptingCheckpointPublisher
 from tests.policy_snapshot_fakes import (
     make_complete_execution_profile,
     make_complete_prompt_bindings,
@@ -165,7 +166,7 @@ class _Model:
         return {"findings": self._findings, "summary": {"problem": "A bug.", "effort": "small"}}
 
 
-class _Publisher:
+class _Publisher(_AcceptingCheckpointPublisher):
     async def execute(self, run_id: UUID, raw_output: object) -> bool:
         return True
 

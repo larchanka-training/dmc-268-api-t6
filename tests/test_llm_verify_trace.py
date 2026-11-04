@@ -33,6 +33,7 @@ from app.modules.reviews.application.store_review_output import (
     PublishingGuard,
     StoreReviewOutput,
 )
+from tests.execute_review_fakes import _AcceptingCheckpointPublisher
 from tests.test_diff_anchor import _diff_map
 from tests.verifier_pipeline_fakes import (
     MAIN_BLOCK_ID,
@@ -48,6 +49,10 @@ from tests.verifier_pipeline_fakes import (
 
 ACCEPTED_CALL_ID = UUID("00000000-0000-0000-0000-000000013902")
 ACCEPTED_MANIFEST_ID = UUID("00000000-0000-0000-0000-000000013903")
+
+
+class _Publisher(_AcceptingCheckpointPublisher, FakePublisher):
+    pass
 
 
 def _finding(line: int, title: str) -> dict[str, Any]:
@@ -93,7 +98,7 @@ class _ReplyVerifier:
 
 
 def _execute(findings: list[dict[str, Any]], verifier: _ReplyVerifier) -> VerifiedReviewOutput:
-    publisher = FakePublisher()
+    publisher = _Publisher()
     pipeline = ExecuteReviewRun(
         FakeProcessor(),
         FakeRepository(),

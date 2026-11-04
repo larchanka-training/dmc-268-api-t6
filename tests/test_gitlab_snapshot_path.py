@@ -35,6 +35,7 @@ from app.modules.reviews.infrastructure.blob_cache import InMemoryBlobCache
 from app.modules.reviews.infrastructure.llm.gateway import LlmGateway
 from app.modules.reviews.infrastructure.llm.memory import InMemoryLlmCallTrace, InMemoryUsageLedger
 from app.modules.reviews.infrastructure.llm.settings import LlmSettings
+from tests.execute_review_fakes import _AcceptingCheckpointPublisher
 from tests.llm_fakes import context_checkpoint
 from tests.policy_snapshot_fakes import make_complete_prompt_bindings
 from tests.test_gateway_review_model import MAIN, SUMMARY, _finding, _profile
@@ -156,7 +157,7 @@ class Tree:
         return b"x = 1\n"
 
 
-class Output:
+class Output(_AcceptingCheckpointPublisher):
     def __init__(self) -> None:
         self.outputs: list[object] = []
 

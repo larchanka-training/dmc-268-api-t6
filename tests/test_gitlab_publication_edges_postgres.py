@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 from datetime import UTC, datetime
+from functools import partial
 from hashlib import sha256
 from uuid import UUID, uuid4
 
@@ -21,23 +22,219 @@ from app.modules.reviews.infrastructure.run_lifecycle_store import (
     SqlAlchemyRunLifecycleUnitOfWork,
 )
 from app.modules.reviews.infrastructure.run_repository import SqlAlchemyRunRepository
-from tests import test_gitlab_projection_postgres as projection
-from tests.test_gitlab_projection_postgres import NOW, rig
-from tests.test_gitlab_publication_postgres import installed, publishing, versions, wire
+from tests.gitlab_projection_support import NOW, rig, seed_run
+from tests.gitlab_publication_support import installed, versions, wire
+from tests.gitlab_publication_support import publishing as seed_publishing
 from tests.test_gitlab_run_trigger_postgres import HEAD, Publisher, enqueue, expected, seed_change
 from tests.test_publish_run_review import Trace
 
-rebase_database = projection.authority_database
-publication_database = rebase_database
+publishing = partial(seed_publishing, seed_run=seed_run)
+pytest_plugins = ("tests.gitlab_projection_support",)
 pytestmark = pytest.mark.integration
+
+
+def test_installed_publication_uses_saved_inline_plan_after_raw_rows_change(
+    authority_database: tuple[str, str, UUID],
+) -> None:
+    async def scenario() -> None:
+        async with rig(authority_database) as fixture:
+            pointer = await publishing(
+                fixture,
+                historical=False,
+                diff_patch=(
+                    "@@ -10,3 +10,4 @@\n before()\n-old_value()\n"
+                    "+new_value()\n+validate()\n after()"
+                ),
+                answer={
+                    "findings": [
+                        {
+                            "path": "a.py",
+                            "line": 13,
+                            "severity": "high",
+                            "category": "correctness",
+                            "title": "Saved finding",
+                            "body": "Saved finding body",
+                            "confidence": 0.9,
+                            "start_line": None,
+                            "suggestion": None,
+                            "rule_name": None,
+                        },
+                        {
+                            "path": "a.py",
+                            "line": 12,
+                            "severity": "high",
+                            "category": "correctness",
+                            "title": "Body finding",
+                            "body": "Body finding body",
+                            "confidence": 0.8,
+                            "start_line": None,
+                            "suggestion": None,
+                            "rule_name": None,
+                        },
+                        {
+                            "path": "a.py",
+                            "line": 12,
+                            "severity": "info",
+                            "category": "correctness",
+                            "title": "Dropped finding",
+                            "body": "Informational only",
+                            "confidence": 0.9,
+                            "start_line": None,
+                            "suggestion": None,
+                            "rule_name": None,
+                        },
+                    ],
+                    "summary": {
+                        "problem": "Saved summary.",
+                        "done_well": "Saved praise.",
+                        "effort": "small",
+                    },
+                },
+            )
+            async with fixture.sessions.begin() as session:
+                plan = await session.scalar(
+                    text("SELECT publication_plan FROM final_review_results WHERE run_id=:id"),
+                    {"id": pointer.run_id},
+                )
+                assert plan is not None and len(plan["findings"]) == 1
+                saved = plan["findings"][0]
+                assert saved["title"] == "Saved finding"
+                assert saved["path"] == "a.py" and saved["line"] == 13
+                assert saved["gitlab_old_path"] is None
+                body_id = await session.scalar(
+                    text(
+                        "SELECT id FROM findings WHERE run_id=:id AND title='Body finding' "
+                        "AND drop_reason IS NULL AND inline_comment=false"
+                    ),
+                    {"id": pointer.run_id},
+                )
+                assert body_id is not None
+                assert plan["finding_ids"] == [saved["finding_id"], str(body_id)]
+                dropped = (
+                    await session.execute(
+                        text(
+                            "SELECT title,drop_reason,published FROM findings "
+                            "WHERE run_id=:id AND drop_reason IS NOT NULL"
+                        ),
+                        {"id": pointer.run_id},
+                    )
+                ).all()
+                assert [tuple(row) for row in dropped] == [
+                    ("Dropped finding", "severity_threshold", False)
+                ]
+                await session.execute(
+                    text("UPDATE runs SET review_body='later unsaved body' WHERE id=:id"),
+                    {"id": pointer.run_id},
+                )
+                await session.execute(
+                    text(
+                        "UPDATE findings SET title='later unsaved title', body='later unsaved "
+                        "finding body', line_start=99, inline_comment=false WHERE id=:id"
+                    ),
+                    {"id": UUID(saved["finding_id"])},
+                )
+                late_id = uuid4()
+                await session.execute(
+                    text(
+                        "INSERT INTO findings (id,run_id,file_path,line_start,severity,confidence,"
+                        "category,title,body,published,inline_comment) VALUES "
+                        "(:id,:run,'a.py',13,'high',0.9,'correctness','Late finding',"
+                        "'Late body',false,true)"
+                    ),
+                    {"id": late_id, "run": pointer.run_id},
+                )
+            posts: list[dict[str, object]] = []
+
+            async def external(request: httpx.Request) -> httpx.Response:
+                if request.url.path.endswith("/versions"):
+                    return wire(200, versions())
+                if request.method == "GET":
+                    return wire(200, [])
+                posts.append(json.loads(request.content))
+                return wire(201, {"notes": [{"id": 701}]})
+
+            publisher = PublishRunReview(
+                uow_factory=lambda: SqlAlchemyRunLifecycleUnitOfWork(fixture.sessions),
+                reviews=None,
+                check_runs=None,
+                trace=Trace(),
+                gitlab_publications=installed(fixture, external),
+            )
+            await publisher.execute(pointer)
+            async with fixture.sessions() as session:
+                state = (
+                    await session.execute(
+                        text("SELECT state::text,error_code FROM runs WHERE id=:id"),
+                        {"id": pointer.run_id},
+                    )
+                ).one()
+            assert state == ("succeeded", None), (state, posts)
+            await publisher.execute(pointer)
+            assert len(posts) == 2
+            assert posts[0]["position"] == {
+                "position_type": "text",
+                "base_sha": "b" * 40,
+                "start_sha": "b" * 40,
+                "head_sha": "a" * 40,
+                "old_path": "a.py",
+                "new_path": "a.py",
+                "old_line": 12,
+                "new_line": 13,
+            }
+            assert "Saved finding" in str(posts[0]["body"])
+            assert "later unsaved title" not in str(posts[0]["body"])
+            assert "position" not in posts[1]
+            assert str(posts[1]["body"]).startswith(plan["review_body"])
+            assert "later unsaved body" not in str(posts[1]["body"])
+            async with fixture.sessions() as session:
+                assert (
+                    await session.scalar(
+                        text("SELECT state::text FROM runs WHERE id=:id"),
+                        {"id": pointer.run_id},
+                    )
+                    == "succeeded"
+                )
+                assert (
+                    await session.scalar(
+                        text("SELECT inline_comment FROM findings WHERE id=:id"),
+                        {"id": UUID(saved["finding_id"])},
+                    )
+                    is True
+                )
+                assert (
+                    await session.scalar(
+                        text("SELECT published FROM findings WHERE id=:id"),
+                        {"id": late_id},
+                    )
+                    is False
+                )
+                assert (
+                    await session.scalar(
+                        text("SELECT published FROM findings WHERE id=:id"),
+                        {"id": body_id},
+                    )
+                    is True
+                )
+                assert (
+                    await session.scalar(
+                        text(
+                            "SELECT published FROM findings WHERE run_id=:id "
+                            "AND title='Dropped finding'"
+                        ),
+                        {"id": pointer.run_id},
+                    )
+                    is False
+                )
+
+    asyncio.run(asyncio.wait_for(scenario(), 25))
 
 
 @pytest.mark.parametrize("move_head", [False, True])
 def test_installed_publication_preserves_stored_coordinates_placement_and_head_fence(
-    rebase_database: tuple[str, str, UUID], move_head: bool
+    authority_database: tuple[str, str, UUID], move_head: bool
 ) -> None:
     async def scenario() -> None:
-        async with rig(rebase_database) as fixture:
+        async with rig(authority_database) as fixture:
             pointer = await publishing(fixture)
             context_id, range_id, pending_id = UUID(int=1), UUID(int=2), UUID(int=3)
             async with fixture.sessions.begin() as session:
@@ -186,10 +383,10 @@ def test_installed_publication_preserves_stored_coordinates_placement_and_head_f
 
 
 def test_gitlab_enqueue_and_rerun_capture_current_publication_and_prompt_pins(
-    rebase_database: tuple[str, str, UUID],
+    authority_database: tuple[str, str, UUID],
 ) -> None:
     async def scenario() -> None:
-        async with rig(rebase_database) as fixture:
+        async with rig(authority_database) as fixture:
             target = await fixture.seed()
             change = await seed_change(fixture, target)
             conventions, verifier = uuid4(), uuid4()
@@ -283,13 +480,13 @@ def test_gitlab_enqueue_and_rerun_capture_current_publication_and_prompt_pins(
 
 @pytest.mark.parametrize("changed", ["findings", "head"])
 def test_stale_installed_pointer_before_initial_inactive_snapshot_is_noop(
-    publication_database: tuple[str, str, UUID],
+    authority_database: tuple[str, str, UUID],
     changed: str,
 ) -> None:
     import psycopg
 
     async def scenario() -> None:
-        async with rig(publication_database) as fixture:
+        async with rig(authority_database) as fixture:
             pointer = await publishing(fixture)
             async with fixture.sessions() as session:
                 initial = await SqlAlchemyRunLifecycleStore(session).publish_context(pointer.run_id)
@@ -335,7 +532,7 @@ def test_stale_installed_pointer_before_initial_inactive_snapshot_is_noop(
 
             trace = Trace()
             with psycopg.connect(
-                publication_database[0].replace("postgresql+psycopg://", "postgresql://"),
+                authority_database[0].replace("postgresql+psycopg://", "postgresql://"),
                 autocommit=True,
                 application_name="dmc169-t14-stale-listener",
             ) as listener:
@@ -369,12 +566,12 @@ def test_stale_installed_pointer_before_initial_inactive_snapshot_is_noop(
 @pytest.mark.parametrize("method", ["finish", "complete"])
 @pytest.mark.parametrize("facts", ["closed", "head", "user"])
 def test_legacy_inactive_default_keeps_installation_unavailable(
-    publication_database: tuple[str, str, UUID],
+    authority_database: tuple[str, str, UUID],
     method: str,
     facts: str,
 ) -> None:
     async def scenario() -> None:
-        async with rig(publication_database) as fixture:
+        async with rig(authority_database) as fixture:
             pointer = await publishing(fixture)
             async with fixture.sessions() as session:
                 context = await SqlAlchemyRunLifecycleStore(session).publish_context(pointer.run_id)
