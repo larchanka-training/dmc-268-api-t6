@@ -72,6 +72,7 @@ _COLUMNS = {
         "exclusions_digest": ("varchar", True, 64),
         "stored_bytes": ("int8", False, None),
         "pending_bytes": ("int8", False, None),
+        "raw_checkpoint_bytes": ("int8", False, None),
         "wake_requested_at": ("timestamptz", True, None),
         "review_full_requested_at": ("timestamptz", True, None),
         "review_full_requested_sha": ("varchar", True, 64),
@@ -146,6 +147,7 @@ _CHECKS = {
         "ck_code_index_states_failed_code",
         "ck_code_index_states_wake_live",
         "ck_code_index_states_review_full_sha_at",
+        "ck_code_index_states_raw_checkpoint_bytes",
     },
     "code_index_files": set(),
     "code_index_symbols": {"ck_code_index_symbols_lines"},
@@ -754,12 +756,13 @@ def test_downgrade_to_0033_drops_the_indexer_columns_and_upgrade_resets_profiles
     config = _migration_config(connection)
     head_columns = set(_COLUMNS["code_index_states"])
     # 0034 adds the indexer columns; 0037 (#143) adds the wake-up marker; 0038 (#144) adds
-    # the review full-build throttle.
+    # the review full-build throttle; 0058 (#360) adds raw checkpoint accounting.
     new_columns = {
         "indexed_default_branch",
         "exclusions_digest",
         "stored_bytes",
         "pending_bytes",
+        "raw_checkpoint_bytes",
         "wake_requested_at",
         "review_full_requested_at",
         "review_full_requested_sha",
