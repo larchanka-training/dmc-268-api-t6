@@ -266,8 +266,10 @@ Every raw SHA-256/byte count matches safe metadata. Final corpus validation pass
 24/24. Two offline replay JSONs are byte-identical with `warnings=[]`; removing
 only validator diagnostics makes offline replay byte-identical to the live safe
 report. No raw answer was edited, normalized, replaced by repair/fallback, mixed
-with another capture or excluded from the denominator. Required CI replay **on main
-after merge remains pending**. The 2026-10-20 bytes and manifest remain at
+with another capture or excluded from the denominator. Required CI replay on main after
+merge ran in [run 40783827466, job 123151914272](https://github.com/larchanka-training/dmc-268-api-t6/actions/runs/40783827466/job/123151914272)
+on `70261a1c0f39af25903d40d35b294d638b9fbd19`: 24 cases and no `Warning:` line in the step
+`Gold corpus and recorded replay`. The 2026-10-20 bytes and manifest remain at
 [the capture source revision](https://github.com/larchanka-training/dmc-268-api-t6/tree/973218054ef2c9a32f1e75a955284323196ffafd/test-prs-dataset/responses).
 
 | Metric | Historical 2026-10-20 (v3) | Current 2026-10-28 (v5) |
@@ -351,8 +353,10 @@ based on main `2326273e6ab7fcea89d1cf3b94b88a4be66ca5e9`. The user knowingly cho
 to capture now while #230/#229/#227 still proposed pinned-input changes. Those
 later merges can cause drift; this ordering decision does not authorize another
 paid run. #130/#217 verifier work is outside this legacy eval path; no verifier
-quality is measured. Required CI replay **on main after merge remains pending**;
-the local replay evidence below does not satisfy that acceptance criterion.
+quality is measured. Required CI replay on main after merge ran in
+[run 39594593880, job 119203652386](https://github.com/larchanka-training/dmc-268-api-t6/actions/runs/39594593880/job/119203652386)
+on `8a621798d01bd72a5ce6c343addc0d00661af724`: 24 cases and no `Warning:` line in the step
+`Gold corpus and recorded replay`.
 
 Engine `fast`, configured provider `eurouter`, primary `mistral-small-4`, fallback
 `mistral-small-3.2-24b`, `model=mistral-small-4`, `export_raw_responses=true`.
@@ -610,7 +614,9 @@ anchors, and final severity/confidence ordering. Do not invent rule provenance
 in backend normalization. The objective is better first raw format and explicit
 model attribution; repair, latency and cost effects require separate measurements.
 The separately authorized complete 24-answer v3 capture is recorded above under
-2026-10-20. Required post-merge replay on main remains pending.
+2026-10-20. Required post-merge replay on main ran in
+[run 39594593880, job 119203652386](https://github.com/larchanka-training/dmc-268-api-t6/actions/runs/39594593880/job/119203652386)
+on `8a621798d01bd72a5ce6c343addc0d00661af724`.
 
 The [2026-10-14 PR-prefix capture](#recorded-mistral-baseline--2026-10-14) and
 [2026-10-13 snapshot capture](#recorded-mistral-baseline--2026-10-13) remain historical
@@ -1012,7 +1018,9 @@ v5 replacement (#144, #130 R15) records 52 pins: the 46 without `review.system.v
 `review.system.v5.md`, `review-output.schema.v2.json`, `policy_documents.py`,
 `policy_snapshot.py`, `context_provenance.py`, `rag_index.py` and `review_path.py`. It
 replays locally with `warnings=[]` on its source `973218054ef2c9a32f1e75a955284323196ffafd`;
-required replay on main after merge remains pending. The 2026-10-20, 2026-10-15,
+required replay on main after merge ran in
+[run 40783827466, job 123151914272](https://github.com/larchanka-training/dmc-268-api-t6/actions/runs/40783827466/job/123151914272)
+on `70261a1c0f39af25903d40d35b294d638b9fbd19` with no `Warning:` line. The 2026-10-20, 2026-10-15,
 2026-10-14 PR-prefix, 2026-10-13 snapshot and 2026-10-07 captures remain historical.
 Later changes to fingerprinted inputs require another complete separately authorized
 capture. Preserve each original capture's provenance rather than editing a digest

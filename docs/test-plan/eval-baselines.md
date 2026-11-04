@@ -187,7 +187,9 @@ Source включает merged #184 (#177 часть 2) и #133, main на мо�
 `2326273e6ab7fcea89d1cf3b94b88a4be66ca5e9`. Пользователь осознанно выбрал запуск
 до pending pinned-изменений #230/#229/#227; их последующий merge может дать drift,
 новый платный прогон этим решением не разрешён. Required CI replay на main после
-merge **ещё не выполнен**; локальный replay не закрывает эту часть AC3.
+merge выполнен: [run 39594593880, job 119203652386](https://github.com/larchanka-training/dmc-268-api-t6/actions/runs/39594593880/job/119203652386)
+на `8a621798d01bd72a5ce6c343addc0d00661af724`, шаг «Gold corpus and recorded replay»:
+24 кейса, строк `Warning:` нет.
 
 Engine `fast`, configured provider `eurouter`, primary `mistral-small-4`, fallback
 `mistral-small-3.2-24b`, raw export включён. Corpus/truth и frozen PR prefixes не
@@ -292,7 +294,9 @@ raw/safe manifest SHA-256
 Final corpus validation 24/24, два offline report byte-identical, `warnings=[]`;
 после удаления только validator diagnostics offline совпадает с live safe report
 byte-for-byte. Raw-first validity измерена до нормализации/repair/fallback и verifier.
-Required CI replay на main после merge **ещё не выполнен**.
+Required CI replay на main после merge выполнен: [run 40783827466, job 123151914272](https://github.com/larchanka-training/dmc-268-api-t6/actions/runs/40783827466/job/123151914272)
+на `70261a1c0f39af25903d40d35b294d638b9fbd19`, шаг «Gold corpus and recorded replay»:
+24 кейса, строк `Warning:` нет.
 
 | Метрика | Исторический 2026-10-20 (v3) | Текущий 2026-10-28 (v5) |
 | --- | --- | --- |
