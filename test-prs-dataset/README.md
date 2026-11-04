@@ -216,6 +216,52 @@ until #168 and #219 changed pinned files and #163 added three policy modules to 
 ([Baseline drift](#baseline-drift)). The complete 2026-10-28 `review.system.v5` capture
 records the active 52 pins and replays with `warnings=[]`.
 
+## Replay metric columns (#239)
+
+Replay reports every capture in two columns over the same recorded first answers, offline and
+without a paid call.
+
+- **Strict raw-first** (the top-level report fields): the raw bytes against
+  `validate_findings.py`, before any normalization. It shows how well the model keeps the answer
+  format.
+- **After gateway normalization** (`gateway_normalized`): the same bytes through the production
+  check, `validate_review_answer`, or `validate_review_answer_v2` for a snapshot-path prompt. The
+  check sets an equal `start_line` to `null` and sorts the findings. An answer it refuses stays
+  invalid and adds only false negatives.
+
+The second column leaves out repair and fallback calls, lint, dedupe, the severity threshold, diff
+anchors, the inline cap and the verifier, so it is **not a metric of the published review**.
+
+`gateway_normalized.attribution_loss` gives `rule_name_nulled` of `findings`: the findings of
+accepted answers whose `rule_name` `FindingsPostProcessor._repair_attribution` would null, which
+publishes a finding under a custom rule as a standard one. The count uses the default rule set of
+the case's language and, for a snapshot-path prompt, the documents the case shows.
+`findings_post_processor.py` is not a static input: the count follows the current code.
+
+`eval_live.py` binds a `--backend-rules` or `--frontend-rules` file to a language by the flag alone
+and records only its path, and recording the binding means editing a pinned file. So a capture that
+pins any rule set other than the two defaults has no count: `rule_name_nulled` is `null` and
+`custom_rule_sets` lists those files, instead of a guess. Two limits follow. Every
+`review/rules/*.json` is pinned, selected or not, so a new default file gives `null` until replay's
+`_RULE_SET_BY_LANGUAGE` follows the recorder. The two defaults swapped between the flags leave no
+trace in the manifest and are counted as if not swapped.
+
+| Capture | Strict: validity; TP/FP/FN; critical; verdict | After normalization: validity; TP/FP/FN; critical; verdict | `rule_name` nulled |
+| --- | --- | --- | --- |
+| v2, 2026-10-15 | 7/24; 2/2/17; 2/5; 5/24 | 24/24; 8/38/11; 4/5; 13/24 | 33 of 46 |
+| v3, 2026-10-20 | 10/24; 3/5/16; 2/5; 4/24 | 24/24; 6/42/13; 3/5; 8/24 | 27 of 48 |
+| v5, 2026-10-28 (current) | 21/24; 5/13/14; 4/5; 9/24 | 24/24; 5/29/14; 4/5; 11/24 | 0 of 34 |
+
+**Which metric decides.** A change of the prompt version is judged on the column after gateway
+normalization, which is closer to what the pipeline receives. Strict raw-first diagnoses the format
+of the first answer and does not decide on its own. The number of nulled `rule_name` must not grow.
+Both columns are always reported, and one capture per version limits any conclusion.
+
+To reproduce a historical row: `git archive <revision> test-prs-dataset/responses | tar -x -C <dir>`,
+then `uv run python review/scripts/eval_replay.py --responses-dir <dir>/test-prs-dataset/responses`.
+The revisions are `47f9add7` for 2026-10-15 and `973218054ef2c9a32f1e75a955284323196ffafd` for
+2026-10-20. Such a run prints the pinned-input warnings, because the bytes predate the current list.
+
 ## Recorded Mistral baseline — 2026-10-28
 
 [Actions run 40774280790, attempt 1](https://github.com/larchanka-training/dmc-268-api-t6/actions/runs/40774280790)
@@ -266,8 +312,10 @@ Every raw SHA-256/byte count matches safe metadata. Final corpus validation pass
 24/24. Two offline replay JSONs are byte-identical with `warnings=[]`; removing
 only validator diagnostics makes offline replay byte-identical to the live safe
 report. No raw answer was edited, normalized, replaced by repair/fallback, mixed
-with another capture or excluded from the denominator. Required CI replay **on main
-after merge remains pending**. The 2026-10-20 bytes and manifest remain at
+with another capture or excluded from the denominator. Required CI replay on main after
+merge ran in [run 40783827466, job 123151914272](https://github.com/larchanka-training/dmc-268-api-t6/actions/runs/40783827466/job/123151914272)
+on `70261a1c0f39af25903d40d35b294d638b9fbd19`: 24 cases and no `Warning:` line in the step
+`Gold corpus and recorded replay`. The 2026-10-20 bytes and manifest remain at
 [the capture source revision](https://github.com/larchanka-training/dmc-268-api-t6/tree/973218054ef2c9a32f1e75a955284323196ffafd/test-prs-dataset/responses).
 
 | Metric | Historical 2026-10-20 (v3) | Current 2026-10-28 (v5) |
@@ -351,8 +399,10 @@ based on main `2326273e6ab7fcea89d1cf3b94b88a4be66ca5e9`. The user knowingly cho
 to capture now while #230/#229/#227 still proposed pinned-input changes. Those
 later merges can cause drift; this ordering decision does not authorize another
 paid run. #130/#217 verifier work is outside this legacy eval path; no verifier
-quality is measured. Required CI replay **on main after merge remains pending**;
-the local replay evidence below does not satisfy that acceptance criterion.
+quality is measured. Required CI replay on main after merge ran in
+[run 39594593880, job 119203652386](https://github.com/larchanka-training/dmc-268-api-t6/actions/runs/39594593880/job/119203652386)
+on `8a621798d01bd72a5ce6c343addc0d00661af724`: 24 cases and no `Warning:` line in the step
+`Gold corpus and recorded replay`.
 
 Engine `fast`, configured provider `eurouter`, primary `mistral-small-4`, fallback
 `mistral-small-3.2-24b`, `model=mistral-small-4`, `export_raw_responses=true`.
@@ -610,7 +660,9 @@ anchors, and final severity/confidence ordering. Do not invent rule provenance
 in backend normalization. The objective is better first raw format and explicit
 model attribution; repair, latency and cost effects require separate measurements.
 The separately authorized complete 24-answer v3 capture is recorded above under
-2026-10-20. Required post-merge replay on main remains pending.
+2026-10-20. Required post-merge replay on main ran in
+[run 39594593880, job 119203652386](https://github.com/larchanka-training/dmc-268-api-t6/actions/runs/39594593880/job/119203652386)
+on `8a621798d01bd72a5ce6c343addc0d00661af724`.
 
 The [2026-10-14 PR-prefix capture](#recorded-mistral-baseline--2026-10-14) and
 [2026-10-13 snapshot capture](#recorded-mistral-baseline--2026-10-13) remain historical
@@ -1012,7 +1064,9 @@ v5 replacement (#144, #130 R15) records 52 pins: the 46 without `review.system.v
 `review.system.v5.md`, `review-output.schema.v2.json`, `policy_documents.py`,
 `policy_snapshot.py`, `context_provenance.py`, `rag_index.py` and `review_path.py`. It
 replays locally with `warnings=[]` on its source `973218054ef2c9a32f1e75a955284323196ffafd`;
-required replay on main after merge remains pending. The 2026-10-20, 2026-10-15,
+required replay on main after merge ran in
+[run 40783827466, job 123151914272](https://github.com/larchanka-training/dmc-268-api-t6/actions/runs/40783827466/job/123151914272)
+on `70261a1c0f39af25903d40d35b294d638b9fbd19` with no `Warning:` line. The 2026-10-20, 2026-10-15,
 2026-10-14 PR-prefix, 2026-10-13 snapshot and 2026-10-07 captures remain historical.
 Later changes to fingerprinted inputs require another complete separately authorized
 capture. Preserve each original capture's provenance rather than editing a digest
