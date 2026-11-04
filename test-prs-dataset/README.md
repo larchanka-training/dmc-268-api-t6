@@ -1030,6 +1030,34 @@ replayed with two expected warnings until the 2026-10-28 capture: `Static input 
 changed; refresh the complete baseline` and `Static input digest mismatch; refresh the
 complete baseline`. Its metrics were unchanged.
 
+### Offline token estimate (#317)
+
+[`eval_tokens.py`](../review/scripts/eval_tokens.py) shows what a prompt file costs in input
+tokens before any paid run. It needs no key and no network and spends nothing:
+
+```sh
+uv run python review/scripts/eval_tokens.py --system review/prompts/review.system.v3.md
+uv run python review/scripts/eval_tokens.py --policy-arm none \
+  --system review/prompts/review.system.v3.md --system review/prompts/review.system.v5.md
+```
+
+It prints the estimate per case and the sum; with two files, also the change of B against A in
+percent, per case and on the sum. The figure is the gateway's pre-send estimate
+(`chars_per_token` of the model profile, 3.0 for `mistral-small-4`) of the system and user
+messages of the review call. The command runs the recorder of `eval_live.py` with a transport
+that stays in the process, so the envelope and the fit to the window are those of a live
+capture of the same [arm](#policy-arms-captures-and-ab-aggregation): `legacy` (the default)
+renders no policy snapshot, `none` a snapshot without `rules.md`. `valid` and `malicious` are
+not offered, because gold cases have no policy arms. As in a live capture, `legacy` refuses v4
+and v5, and the prompt file must be inside the repository. A case that does not make exactly
+one accepted review call (an overflow, a repair) fails the command instead of being counted.
+
+Read the change, not the absolute figure: the estimate counts 3 characters per token for prose
+and code alike, which is not the provider's tokenizer. Measured on 2026-11-04 for v5 in arm
+`none`, it gives 296,264 where the 2026-10-28 baseline recorded 242,989 provider input tokens,
+about 22% more. The command measures size only: whether a prompt reviews better takes a live
+A/B.
+
 ## rules.md sub-corpus and policy-arm A/B (#163)
 
 `rules/` is a separate corpus for measuring what a repository `.review/rules.md` changes
