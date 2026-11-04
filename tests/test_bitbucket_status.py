@@ -261,6 +261,7 @@ def test_status_gateway_updates_one_key_after_ambiguous_write_and_checks_pr_head
         requests: list[httpx.Request] = []
         ambiguous = True
         source_uuid = remote
+        source_uuid_braced = True
         remote_pr_id = 7
         remote_source_branch = "feature/review"
         remote_head = HEAD
@@ -304,7 +305,11 @@ def test_status_gateway_updates_one_key_after_ambiguous_write_and_checks_pr_head
                         "source": {
                             "commit": {"hash": remote_head[:12]},
                             "branch": {"name": remote_source_branch},
-                            "repository": {"uuid": f"{{{source_uuid}}}"},
+                            "repository": {
+                                "uuid": f"{{{source_uuid}}}"
+                                if source_uuid_braced
+                                else str(source_uuid)
+                            },
                         },
                         "destination": {
                             "branch": {"name": remote_target_branch},
@@ -364,6 +369,10 @@ def test_status_gateway_updates_one_key_after_ambiguous_write_and_checks_pr_head
             await publisher.upsert(run_id, RUN_URL)
         assert len(statuses) == 4
         remote_target_branch = "main"
+        source_uuid_braced = False
+        with pytest.raises(BitbucketStatusUnavailable, match="malformed"):
+            await publisher.upsert(run_id, RUN_URL)
+        source_uuid_braced = True
 
         snapshot = replace(snapshot, state="cancelled")
         remote_pr_id = 8

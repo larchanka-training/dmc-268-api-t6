@@ -93,7 +93,7 @@ def test_bitbucket_pr_hash_prefix_requires_a_matching_full_sha() -> None:
 def test_shared_bitbucket_path_accepts_unicode_within_utf8_byte_limit() -> None:
     assert bitbucket_path("src/é.py") == "src/é.py"
     assert bitbucket_path("é" * 512) == "é" * 512
-    for invalid in ("é" * 513, "a//b", "a/../b", "a\\b", "/a", "a\x7fb", "a\ud800b"):
+    for invalid in (None, 7, "", "é" * 513, "a//b", "a/../b", "a\\b", "/a", "a\x7fb", "a\ud800b"):
         with pytest.raises(ValueError):
             bitbucket_path(invalid)
 
@@ -113,7 +113,10 @@ def test_shared_bitbucket_response_preserves_status_and_retry_contract() -> None
             check_bitbucket_response(httpx.Response(status))
     with pytest.raises(BitbucketProviderError, match="provider_rate_limited") as rate_limited:
         check_bitbucket_response(httpx.Response(429, headers={"Retry-After": "4200"}))
-    assert rate_limited.value.retry_after == 3600
+    assert rate_limited.value.retry_after == 4200
+    with pytest.raises(BitbucketProviderError, match="provider_rate_limited") as oversized_hint:
+        check_bitbucket_response(httpx.Response(429, headers={"Retry-After": "1" * 65}))
+    assert oversized_hint.value.retry_after is None
     for status in (301, 302, 500):
         with pytest.raises(BitbucketProviderError, match="provider_unavailable"):
             check_bitbucket_response(httpx.Response(status))

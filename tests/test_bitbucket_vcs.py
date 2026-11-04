@@ -880,11 +880,17 @@ def test_run_http_failure_reports_bitbucket_source_instead_of_github_diff() -> N
     asyncio.run(scenario())
 
 
-@pytest.mark.parametrize("malformed_kind", ["pr", "commit", "diffstat", "json"])
+@pytest.mark.parametrize("malformed_kind", ["pr", "commit", "diffstat", "json", "uuid"])
 def test_malformed_bitbucket_response_is_terminal(malformed_kind: str) -> None:
     malformed = _pr(head=HEAD[:12] if malformed_kind == "commit" else HEAD)
     if malformed_kind == "pr":
         malformed["author"] = {}
+    if malformed_kind == "uuid":
+        source = malformed["source"]
+        assert isinstance(source, dict)
+        repository = source["repository"]
+        assert isinstance(repository, dict)
+        repository["uuid"] = str(SOURCE)
 
     def respond(request: httpx.Request) -> httpx.Response:
         if request.url.path == f"{PREFIX}/pullrequests/7":

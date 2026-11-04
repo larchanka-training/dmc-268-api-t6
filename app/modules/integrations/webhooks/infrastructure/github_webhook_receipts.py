@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any, cast
 from uuid import UUID
 
@@ -188,6 +188,8 @@ class SqlAlchemyWebhookReceiptOperations:
         )
         if result.scalar_one_or_none() is None:
             raise RuntimeError("webhook projection claim was lost")
+        if retry_after <= datetime.now(UTC):
+            await notify_webhook_work(self._session)
 
     async def fail_push_candidates(self, delivery_id: str, token: UUID, at: datetime) -> None:
         terminal = select(BitbucketPushRetryCandidate.webhook_event_id).where(

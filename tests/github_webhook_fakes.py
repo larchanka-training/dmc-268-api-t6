@@ -4,14 +4,18 @@ from __future__ import annotations
 
 import hashlib
 import hmac
-from collections.abc import Mapping
+import os
+from collections.abc import Iterator, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from types import TracebackType
 from typing import Self
-from uuid import UUID
+from uuid import UUID, uuid4
 
+import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy import Connection, create_engine, text
+from sqlalchemy.schema import CreateSchema, DropSchema
 
 from app.bootstrap.reviews_api import get_github_webhook_receipt_uow_factory
 from app.main import app, get_github_webhook_secret
@@ -216,3 +220,26 @@ def _post(
         return response.status_code, response.json()
     finally:
         app.dependency_overrides.clear()
+
+
+@pytest.fixture
+def isolated_webhook_database() -> Iterator[tuple[Connection, str, str]]:
+    database_url = os.environ.get("TEST_DATABASE_URL")
+    if database_url is None:
+        pytest.skip("set TEST_DATABASE_URL to run PostgreSQL integration tests")
+    schema = f"test_webhook_receipts_{uuid4().hex}"
+    engine = create_engine(database_url)
+    try:
+        with engine.connect() as connection:
+            connection.execute(CreateSchema(schema))
+            connection.execute(text(f'SET search_path TO "{schema}"'))
+            connection.commit()
+            try:
+                yield connection, database_url, schema
+            finally:
+                connection.rollback()
+                connection.execute(text("SET search_path TO public"))
+                connection.execute(DropSchema(schema, cascade=True))
+                connection.commit()
+    finally:
+        engine.dispose()

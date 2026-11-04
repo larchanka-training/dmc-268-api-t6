@@ -225,6 +225,36 @@ def test_push_candidates_page_all_matching_open_prs_and_fork_sources(
             assert [page[2] for page in pages] == [500, 3]
             assert all("LIMIT" in page[0] and 500 in page[1] for page in pages)
             assert "code_changes.external_number >" in pages[1][0]
+            # The index stores the source branch, but no source repository identity.
+            # A different fork's PR with the same branch name is an extra candidate.
+            async with sessions.begin() as session:
+                await session.execute(
+                    text(
+                        "UPDATE code_changes SET source_branch='feature' "
+                        "WHERE repository_id=:repository AND external_number=504"
+                    ),
+                    {"repository": repository},
+                )
+            collision = await SqlAlchemyBitbucketPushCandidateReader(
+                sessions
+            ).matching_open_pr_page(
+                installation,
+                repository,
+                remote_repo,
+                1,
+                2,
+                frozenset({"feature"}),
+                503,
+            )
+            assert collision == (504,)
+            async with sessions.begin() as session:
+                await session.execute(
+                    text(
+                        "UPDATE code_changes SET source_branch='other' "
+                        "WHERE repository_id=:repository AND external_number=504"
+                    ),
+                    {"repository": repository},
+                )
 
             delivery_id = "bitbucket-push-continuation-" + str(uuid4())
             async with sessions.begin() as session:
@@ -434,9 +464,11 @@ def test_push_candidates_page_all_matching_open_prs_and_fork_sources(
                 enqueuer=fork_enqueuer,
             )
             blocked_args = (*push_args[:-1], blocked_delivery)
-            for _ in range(101):
+            for _ in range(100):
                 with pytest.raises(BitbucketPushContinuationPending):
                     await blocked_projector.push(*blocked_args)
+            with pytest.raises(BitbucketPushRetryPending):
+                await blocked_projector.push(*blocked_args)
             assert blocked_projector.seen == list(range(1, 504))
             async with sessions() as session:
                 assert (
@@ -449,7 +481,18 @@ def test_push_candidates_page_all_matching_open_prs_and_fork_sources(
                     )
                     == 503
                 )
+            with pytest.raises(BitbucketPushRetryPending):
+                await blocked_projector.push(*blocked_args)
+            assert blocked_projector.seen == list(range(1, 504))
             for _ in range(2):
+                async with sessions.begin() as session:
+                    await session.execute(
+                        text(
+                            "UPDATE bitbucket_push_retry_candidates "
+                            "SET attempted_at=now()-interval '5 minutes 1 second' "
+                            "WHERE pr_number=2"
+                        )
+                    )
                 with pytest.raises(BitbucketPushRetryPending):
                     await blocked_projector.push(*blocked_args)
             async with sessions() as session:
@@ -463,6 +506,14 @@ def test_push_candidates_page_all_matching_open_prs_and_fork_sources(
                         {"delivery": blocked_delivery},
                     )
                     == 1
+                )
+            async with sessions.begin() as session:
+                await session.execute(
+                    text(
+                        "UPDATE bitbucket_push_retry_candidates "
+                        "SET attempted_at=now()-interval '5 minutes 1 second' "
+                        "WHERE pr_number=2"
+                    )
                 )
             with pytest.raises(BitbucketPushCandidatesFailed):
                 await blocked_projector.push(*blocked_args)

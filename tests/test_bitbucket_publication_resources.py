@@ -145,9 +145,23 @@ async def _checkpoint() -> None:
     return None
 
 
-@pytest.mark.parametrize("finding_count", [0, 1, 8])
+@pytest.mark.parametrize(
+    ("finding_count", "hash_width", "expected_gets", "expected_renewals"),
+    [
+        (0, 40, 4, 2),
+        (1, 40, 5, 3),
+        (8, 40, 12, 10),
+        (0, 12, 6, 2),
+        (1, 12, 8, 3),
+        (8, 12, 22, 10),
+    ],
+)
 def test_publication_request_and_claim_cost_is_bounded_by_findings(
-    monkeypatch: pytest.MonkeyPatch, finding_count: int
+    monkeypatch: pytest.MonkeyPatch,
+    finding_count: int,
+    hash_width: int,
+    expected_gets: int,
+    expected_renewals: int,
 ) -> None:
     claims = _Claims()
     resources = _resources(monkeypatch, claims, heartbeat_interval_seconds=3600)
@@ -167,6 +181,9 @@ def test_publication_request_and_claim_cost_is_bounded_by_findings(
             return httpx.Response(200, json={"uuid": f"{{{RUN}}}"})
         if request.method == "GET" and request.url.path.endswith("/comments"):
             return httpx.Response(200, json={"values": list(comments)})
+        if request.method == "GET" and "/commit/" in request.url.path:
+            assert request.url.path.endswith(f"/commit/{HEAD[:hash_width]}")
+            return httpx.Response(200, json={"hash": HEAD})
         if request.method == "GET":
             return httpx.Response(
                 200,
@@ -174,7 +191,7 @@ def test_publication_request_and_claim_cost_is_bounded_by_findings(
                     "id": 7,
                     "state": "OPEN",
                     "source": {
-                        "commit": {"hash": HEAD},
+                        "commit": {"hash": HEAD[:hash_width]},
                         "repository": {"uuid": f"{{{REMOTE_REPOSITORY}}}"},
                     },
                     "destination": {
@@ -220,7 +237,7 @@ def test_publication_request_and_claim_cost_is_bounded_by_findings(
             assert result.review_id == finding_count + 1
 
     asyncio.run(scenario())
-    assert [request.method for request in requests].count("GET") == finding_count + 4
+    assert [request.method for request in requests].count("GET") == expected_gets
     assert (
         sum(
             request.method == "GET" and request.url.path.endswith("/comments")
@@ -230,7 +247,7 @@ def test_publication_request_and_claim_cost_is_bounded_by_findings(
     )
     assert [request.method for request in requests].count("POST") == finding_count + 1
     assert [request.method for request in requests].count("PUT") == 0
-    assert claims.renewals <= finding_count + 2
+    assert claims.renewals == expected_renewals
     assert claims.released
 
     first_attempt_requests = len(requests)
@@ -247,7 +264,9 @@ def test_publication_request_and_claim_cost_is_bounded_by_findings(
 
     asyncio.run(update_summary())
     updated_requests = requests[first_attempt_requests:]
-    assert [request.method for request in updated_requests].count("GET") == 4
+    assert [request.method for request in updated_requests].count("GET") == (
+        6 if hash_width == 12 else 4
+    )
     assert (
         sum(
             request.method == "GET" and request.url.path.endswith("/comments")
@@ -257,7 +276,7 @@ def test_publication_request_and_claim_cost_is_bounded_by_findings(
     )
     assert [request.method for request in updated_requests].count("POST") == 0
     assert [request.method for request in updated_requests].count("PUT") == 1
-    assert claims.renewals - first_attempt_renewals <= 2
+    assert claims.renewals - first_attempt_renewals == 2
 
 
 def test_lost_claim_after_comment_listing_blocks_first_write(

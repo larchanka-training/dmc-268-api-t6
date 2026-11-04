@@ -68,6 +68,7 @@ from app.modules.code_index.infrastructure.bitbucket_snapshot_source import (
 )
 from app.modules.code_index.infrastructure.bitbucket_tree_checkpoint import (
     SqlAlchemyBitbucketPublishedManifest,
+    SqlAlchemyBitbucketRawCheckpoint,
     SqlAlchemyBitbucketTreeCheckpoint,
 )
 from app.modules.code_index.infrastructure.github_snapshot_source import (
@@ -479,6 +480,7 @@ async def index_consumer(
             reader = SqlAlchemyBitbucketTargetReader(session_factory)
             credentials = BitbucketRequestCredentials(reader, bitbucket_cipher)
             checkpoint = SqlAlchemyBitbucketTreeCheckpoint(session_factory)
+            raw_checkpoint = SqlAlchemyBitbucketRawCheckpoint(session_factory)
             published_manifest = SqlAlchemyBitbucketPublishedManifest(session_factory)
 
             def bitbucket_factory(repository: IndexedRepository) -> RepositorySnapshotSource:
@@ -491,6 +493,7 @@ async def index_consumer(
                     limits=code_index.limits,
                     budgets=code_index.bitbucket_budgets,
                     checkpoint=checkpoint,
+                    raw_checkpoint=raw_checkpoint,
                     published_manifest=published_manifest,
                 )
 

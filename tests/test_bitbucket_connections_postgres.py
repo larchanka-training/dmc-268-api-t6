@@ -247,6 +247,199 @@ def test_binding_pages_keep_database_collation_order(
 
 
 @pytest.mark.integration
+def test_binding_pages_break_equal_names_by_repository_id(
+    bitbucket_connection_schema: Connection,
+) -> None:
+    db = bitbucket_connection_schema
+    command.upgrade(_config(db), "head")
+    workspace_id, installation_id = uuid4(), uuid4()
+    db.execute(
+        text("INSERT INTO workspaces (id, name, daily_budget_usd) VALUES (:id, 'test', 7)"),
+        {"id": workspace_id},
+    )
+    schema = str(db.scalar(text("SELECT current_schema()")))
+    db.commit()
+    cipher = BitbucketCredentialCipher(active_key_id="test", keys={"test": b"a" * 32})
+
+    async def scenario() -> None:
+        engine = create_async_engine(
+            make_url(os.environ["TEST_DATABASE_URL"]).set(drivername="postgresql+psycopg_async")
+        )
+        try:
+            async with engine.connect() as connection:
+                await connection.execute(text(f'SET search_path TO "{schema}"'))
+                await connection.commit()
+                async with AsyncSession(bind=connection) as session:
+                    store = SqlAlchemyBitbucketConnectionStore(session)
+                    await store.create_connection(
+                        workspace_id=workspace_id,
+                        installation_id=installation_id,
+                        bitbucket_workspace_uuid=uuid4(),
+                        token=cipher.encrypt(
+                            "token",
+                            context=CredentialContext(installation_id, workspace_id),
+                            purpose=CredentialPurpose.TOKEN,
+                        ),
+                    )
+                    duplicate_ids = [
+                        (
+                            await store.bind_repository(
+                                workspace_id=workspace_id,
+                                installation_id=installation_id,
+                                repository_uuid=uuid4(),
+                                full_name="team/same",
+                                default_branch="main",
+                                web_url="https://bitbucket.org/team/same",
+                            )
+                        )[0]
+                        for _ in range(3)
+                    ]
+                    tail_id, _ = await store.bind_repository(
+                        workspace_id=workspace_id,
+                        installation_id=installation_id,
+                        repository_uuid=uuid4(),
+                        full_name="team/z",
+                        default_branch="main",
+                        web_url="https://bitbucket.org/team/z",
+                    )
+                    await session.commit()
+                    seen: list[UUID] = []
+                    after: BindingPosition | None = None
+                    for _ in range(4):
+                        page = await store.list_bindings_page(
+                            workspace_id=workspace_id,
+                            installation_id=installation_id,
+                            after=after,
+                            limit=1,
+                        )
+                        assert page
+                        seen.append(page[0].repository_id)
+                        after = BindingPosition(
+                            workspace_id,
+                            installation_id,
+                            page[0].full_name,
+                            page[0].repository_id,
+                        )
+                    assert seen == [*sorted(duplicate_ids), tail_id]
+                    assert (
+                        await store.list_bindings_page(
+                            workspace_id=workspace_id,
+                            installation_id=installation_id,
+                            after=after,
+                            limit=1,
+                        )
+                        == ()
+                    )
+        finally:
+            await engine.dispose()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.integration
+def test_webhook_confirmation_lookup_is_scoped_to_one_active_binding(
+    bitbucket_connection_schema: Connection,
+) -> None:
+    db = bitbucket_connection_schema
+    command.upgrade(_config(db), "head")
+    workspace_id, other_workspace_id = uuid4(), uuid4()
+    for tenant in (workspace_id, other_workspace_id):
+        db.execute(
+            text("INSERT INTO workspaces (id, name, daily_budget_usd) VALUES (:id, 'test', 7)"),
+            {"id": tenant},
+        )
+    schema = str(db.scalar(text("SELECT current_schema()")))
+    db.commit()
+    installation_id, other_installation_id = uuid4(), uuid4()
+    cipher = BitbucketCredentialCipher(active_key_id="test", keys={"test": b"a" * 32})
+
+    async def scenario() -> None:
+        engine = create_async_engine(
+            make_url(os.environ["TEST_DATABASE_URL"]).set(drivername="postgresql+psycopg_async")
+        )
+        try:
+            async with engine.connect() as connection:
+                await connection.execute(text(f'SET search_path TO "{schema}"'))
+                await connection.commit()
+                async with AsyncSession(bind=connection) as session:
+                    store = SqlAlchemyBitbucketConnectionStore(session)
+                    repository_ids = []
+                    for tenant, installation in (
+                        (workspace_id, installation_id),
+                        (other_workspace_id, other_installation_id),
+                    ):
+                        await store.create_connection(
+                            workspace_id=tenant,
+                            installation_id=installation,
+                            bitbucket_workspace_uuid=uuid4(),
+                            token=cipher.encrypt(
+                                "token",
+                                context=CredentialContext(installation, tenant),
+                                purpose=CredentialPurpose.TOKEN,
+                            ),
+                        )
+                        repository_id, _ = await store.bind_repository(
+                            workspace_id=tenant,
+                            installation_id=installation,
+                            repository_uuid=uuid4(),
+                            full_name="team/same",
+                            default_branch="main",
+                            web_url="https://bitbucket.org/team/same",
+                        )
+                        repository_ids.append(repository_id)
+                    await store.set_repository_webhook_secret(
+                        workspace_id=workspace_id,
+                        installation_id=installation_id,
+                        repository_id=repository_ids[0],
+                        secret=cipher.encrypt(
+                            "h" * 40,
+                            context=CredentialContext(
+                                installation_id, workspace_id, repository_ids[0]
+                            ),
+                            purpose=CredentialPurpose.WEBHOOK_SECRET,
+                        ),
+                    )
+                    await session.execute(
+                        text(
+                            "UPDATE bitbucket_repository_webhook_secrets "
+                            "SET confirmed_at=now() WHERE repository_id=:id"
+                        ),
+                        {"id": repository_ids[0]},
+                    )
+                    await session.commit()
+                    assert await store.is_webhook_confirmed(
+                        workspace_id=workspace_id,
+                        installation_id=installation_id,
+                        repository_id=repository_ids[0],
+                    )
+                    for tenant, installation, repository in (
+                        (other_workspace_id, installation_id, repository_ids[0]),
+                        (workspace_id, other_installation_id, repository_ids[0]),
+                        (workspace_id, installation_id, repository_ids[1]),
+                        (other_workspace_id, other_installation_id, repository_ids[1]),
+                    ):
+                        assert not await store.is_webhook_confirmed(
+                            workspace_id=tenant,
+                            installation_id=installation,
+                            repository_id=repository,
+                        )
+                    await store.disconnect_repository(
+                        workspace_id=workspace_id,
+                        installation_id=installation_id,
+                        repository_id=repository_ids[0],
+                    )
+                    assert not await store.is_webhook_confirmed(
+                        workspace_id=workspace_id,
+                        installation_id=installation_id,
+                        repository_id=repository_ids[0],
+                    )
+        finally:
+            await engine.dispose()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.integration
 def test_binding_pages_are_scoped_and_stable_across_writes(
     bitbucket_connection_schema: Connection,
 ) -> None:

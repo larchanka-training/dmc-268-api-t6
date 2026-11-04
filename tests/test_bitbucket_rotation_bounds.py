@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from dataclasses import dataclass, field
 from types import SimpleNamespace
 from typing import Self, cast
@@ -140,6 +141,7 @@ class _Provider:
         self.peak = 0
         self.fetch_calls = 0
         self.pr_probes = 0
+        self.cancelled = 0
 
     async def probe_current_user(self, *, token: str) -> None:
         assert not self.state.in_transaction
@@ -166,6 +168,9 @@ class _Provider:
                 default_branch="main",
                 html_url=f"https://bitbucket.org/team/repo-{repository_uuid.int}",
             )
+        except asyncio.CancelledError:
+            self.cancelled += 1
+            raise
         finally:
             self.active -= 1
 
@@ -244,7 +249,7 @@ def test_rotation_deadline_covers_all_batches_and_drains_pending_probes(
         _rotate(_manager(state, provider))
 
     assert failure.value.code == "provider_unavailable"
-    assert failure.value.repository_uuid in blocked_uuids
+    assert failure.value.repository_uuid is None
     assert provider.fetch_calls == 8
     assert provider.pr_probes == 4
     assert provider.peak <= 4
@@ -252,7 +257,45 @@ def test_rotation_deadline_covers_all_batches_and_drains_pending_probes(
     assert (state.commits, state.generation, state.metadata_updates) == (0, 1, [])
 
 
-def test_one_slow_repository_is_identified_after_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_all_slow_rotation_drains_cancellation_before_returning(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state = _state(8)
+    provider = _Provider(
+        state,
+        delay=0,
+        blocked_uuids=frozenset(binding.repository_uuid for binding in state.bindings),
+    )
+    monkeypatch.setattr(management, "_ROTATION_DEADLINE_SECONDS", 0.05)
+
+    async def scenario() -> None:
+        with pytest.raises(BitbucketRotationProbeError) as failure:
+            await asyncio.wait_for(
+                _manager(state, provider).rotate_token(
+                    scope=SCOPE,
+                    workspace_id=WORKSPACE,
+                    installation_id=INSTALLATION,
+                    token="new-secret",
+                ),
+                timeout=2,
+            )
+        assert failure.value.code == "provider_unavailable"
+        assert failure.value.repository_uuid is None
+        assert provider.fetch_calls == 4
+        assert provider.cancelled == 4
+        assert provider.active == 0
+        calls_at_response = (provider.fetch_calls, provider.pr_probes)
+        await asyncio.sleep(0.1)
+        assert (provider.fetch_calls, provider.pr_probes) == calls_at_response
+        assert provider.active == 0
+
+    asyncio.run(scenario())
+    assert (state.commits, state.generation, state.metadata_updates) == (0, 1, [])
+
+
+def test_one_slow_repository_is_not_blamed_for_global_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     state = _state(4)
     slow_uuid = state.bindings[2].repository_uuid
     provider = _Provider(state, delay=0, slow_uuid=slow_uuid)
@@ -262,19 +305,49 @@ def test_one_slow_repository_is_identified_after_timeout(monkeypatch: pytest.Mon
         _rotate(_manager(state, provider))
 
     assert failure.value.code == "provider_unavailable"
-    assert failure.value.repository_uuid == slow_uuid
+    assert failure.value.repository_uuid is None
     assert provider.pr_probes == 3
     assert provider.peak <= 4
     assert provider.active == 0
     assert state.commits == 0
 
 
-def test_rotation_failure_names_repository_without_exposing_credential() -> None:
+def test_timeout_with_multiple_healthy_inflight_repositories_has_no_uuid_or_secrets(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    state = _state(12)
+    provider = _Provider(state, delay=0.45)
+    monkeypatch.setattr(management, "_ROTATION_DEADLINE_SECONDS", 1)
+
+    with (
+        caplog.at_level(logging.WARNING, logger=management.__name__),
+        pytest.raises(BitbucketRotationProbeError) as failure,
+    ):
+        _rotate(_manager(state, provider))
+
+    assert failure.value.code == "provider_unavailable"
+    assert failure.value.repository_uuid is None
+    assert provider.fetch_calls == 12
+    assert provider.active == 0
+    logs = [record.getMessage() for record in caplog.records if record.name == management.__name__]
+    assert logs == [
+        "Bitbucket token rotation failed repository_uuid=unknown code=provider_unavailable"
+    ]
+    assert "new-secret" not in logs[0]
+    assert "bitbucket.org" not in logs[0]
+
+
+def test_rotation_failure_names_repository_without_exposing_credential(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     state = _state()
     failing_uuid = state.bindings[1].repository_uuid
     provider = _Provider(state, delay=0.03, fail_uuid=failing_uuid)
 
-    with pytest.raises(BitbucketRotationProbeError) as failure:
+    with (
+        caplog.at_level(logging.WARNING, logger=management.__name__),
+        pytest.raises(BitbucketRotationProbeError) as failure,
+    ):
         _rotate(_manager(state, provider))
 
     assert failure.value.code == "repository_inaccessible"
@@ -285,3 +358,10 @@ def test_rotation_failure_names_repository_without_exposing_credential() -> None
     assert provider.peak <= 4
     assert provider.active == 0
     assert (state.commits, state.generation, state.metadata_updates) == (0, 1, [])
+    logs = [record.getMessage() for record in caplog.records if record.name == management.__name__]
+    assert logs == [
+        f"Bitbucket token rotation failed repository_uuid={failing_uuid} "
+        "code=repository_inaccessible"
+    ]
+    assert "new-secret" not in logs[0]
+    assert "bitbucket.org" not in logs[0]

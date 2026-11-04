@@ -190,8 +190,9 @@ def test_incremental_metadata_requests_are_bounded_by_changed_paths() -> None:
                 budgets=BitbucketSourceBudgets(metadata_requests=1),
                 published_manifest=Published(),
             )
-            with pytest.raises(VcsUnavailable, match="work budget exhausted"):
+            with pytest.raises(IndexLimitExceeded) as error:
                 await exhausted.prepare_incremental_manifest(base, _SHA, comparison)
+            assert error.value.code == "limit_exceeded:provider_requests"
             assert exhausted.metadata_request_count == 1
 
     asyncio.run(exercise())
@@ -256,8 +257,18 @@ def test_more_than_160_entries_complete_with_separate_listing_and_raw_budgets() 
     assert (listings, raw_reads) == (2, 161)
 
 
-@pytest.mark.parametrize("budget", ["listing_requests", "raw_requests", "entries", "read_bytes"])
-def test_source_budget_exhaustion_is_retryable_and_returns_no_archive(budget: str) -> None:
+@pytest.mark.parametrize(
+    ("budget", "limit"),
+    [
+        ("listing_requests", "provider_requests"),
+        ("raw_requests", "provider_requests"),
+        ("entries", "archive_entries"),
+        ("read_bytes", "download_bytes"),
+    ],
+)
+def test_source_budget_exhaustion_fails_with_stable_code_without_archive(
+    budget: str, limit: str
+) -> None:
     calls = 0
 
     def handle(request: httpx.Request) -> httpx.Response:
@@ -298,9 +309,9 @@ def test_source_budget_exhaustion_is_retryable_and_returns_no_archive(budget: st
             }
             values[budget] = 1
             source = _source(_Credentials(), client, budgets=BitbucketSourceBudgets(**values))
-            with pytest.raises(VcsUnavailable) as error:
+            with pytest.raises(IndexLimitExceeded) as error:
                 await source.archive(_SHA, max_bytes=100_000)
-            assert error.value.retry_after is not None
+            assert error.value.code == f"limit_exceeded:{limit}"
 
     asyncio.run(exercise())
     assert calls <= 2
@@ -537,8 +548,9 @@ def test_archive_preflights_remaining_raw_read_budget() -> None:
     async def exercise() -> None:
         async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
             source = _source(_Credentials(), client, budgets=BitbucketSourceBudgets(raw_requests=1))
-            with pytest.raises(VcsUnavailable, match="budget"):
+            with pytest.raises(IndexLimitExceeded) as error:
                 await source.archive(_SHA, max_bytes=100_000)
+            assert error.value.code == "limit_exceeded:provider_requests"
 
     asyncio.run(exercise())
     assert raw_reads == 0
@@ -553,7 +565,7 @@ def test_changed_head_large_repository_stops_before_raw_downloads() -> None:
         paths.append(request.url.path)
         if request.url.path.endswith(f"/merge-base/{base}..{_SHA}"):
             return httpx.Response(200, json={"hash": base})
-        if request.url.path.endswith(f"/diffstat/{base}..{_SHA}"):
+        if request.url.path.endswith(f"/diffstat/{_SHA}..{base}"):
             return httpx.Response(
                 200,
                 json={
@@ -630,7 +642,7 @@ def test_changed_head_supported_repository_has_measurable_full_snapshot_budget()
         paths.append(path)
         if path.endswith(f"/merge-base/{base}..{_SHA}"):
             return httpx.Response(200, json={"hash": base})
-        if path.endswith(f"/diffstat/{base}..{_SHA}"):
+        if path.endswith(f"/diffstat/{_SHA}..{base}"):
             return httpx.Response(
                 200,
                 json={
@@ -840,7 +852,7 @@ def test_compare_requires_merge_base_proof_before_incremental_files() -> None:
         seen.append(request.url.path)
         if request.url.path.endswith(f"/merge-base/{base}..{_SHA}"):
             return httpx.Response(200, json={"hash": base})
-        if request.url.path.endswith(f"/diffstat/{base}..{_SHA}"):
+        if request.url.path.endswith(f"/diffstat/{_SHA}..{base}"):
             return httpx.Response(
                 200,
                 json={
@@ -871,7 +883,7 @@ def test_diffstat_without_declared_size_cannot_authorize_incremental_manifest() 
     def handle(request: httpx.Request) -> httpx.Response:
         if request.url.path.endswith(f"/merge-base/{base}..{_SHA}"):
             return httpx.Response(200, json={"hash": base})
-        assert request.url.path.endswith(f"/diffstat/{base}..{_SHA}")
+        assert request.url.path.endswith(f"/diffstat/{_SHA}..{base}")
         return httpx.Response(
             200,
             json={
@@ -898,7 +910,7 @@ def test_unsafe_diffstat_path_uses_full_snapshot(unsafe_path: str, status: str) 
     def handle(request: httpx.Request) -> httpx.Response:
         if request.url.path.endswith(f"/merge-base/{base}..{_SHA}"):
             return httpx.Response(200, json={"hash": base})
-        if request.url.path.endswith(f"/diffstat/{base}..{_SHA}"):
+        if request.url.path.endswith(f"/diffstat/{_SHA}..{base}"):
             return httpx.Response(
                 200,
                 json={
@@ -932,7 +944,7 @@ def test_unsafe_diffstat_path_can_fall_back_to_skip_safe_full_walk() -> None:
         path = request.url.path
         if path.endswith(f"/merge-base/{base}..{_SHA}"):
             return httpx.Response(200, json={"hash": base})
-        if path.endswith(f"/diffstat/{base}..{_SHA}"):
+        if path.endswith(f"/diffstat/{_SHA}..{base}"):
             return httpx.Response(
                 200,
                 json={"size": 1, "values": [{"status": "added", "new": {"path": "bad\\x"}}]},
@@ -1239,17 +1251,58 @@ def test_oversized_source_listing_is_unavailable_not_an_invalid_rules_file() -> 
     assert error.retryable is True
 
 
-def test_exhausted_total_source_budget_is_unavailable_not_invalid() -> None:
-    async def exercise() -> PolicyError:
+def test_exhausted_total_source_budget_is_terminal_during_rules_listing() -> None:
+    async def exercise() -> IndexLimitExceeded:
         transport = httpx.MockTransport(lambda _: httpx.Response(200, json={"values": []}))
         async with httpx.AsyncClient(transport=transport) as client:
-            with pytest.raises(PolicyError) as caught:
+            with pytest.raises(IndexLimitExceeded) as caught:
                 await _source(
                     _Credentials(), client, budgets=BitbucketSourceBudgets(read_bytes=10)
                 ).rules_document(_SHA)
         return caught.value
 
-    assert asyncio.run(exercise()).code is PolicyErrorCode.FETCH_TRANSIENT
+    assert asyncio.run(exercise()).limit == "download_bytes"
+
+
+def test_small_rules_file_over_aggregate_source_budget_is_terminal() -> None:
+    root = httpx.Response(
+        200,
+        json={
+            "values": [{"path": ".review", "type": "commit_directory", "commit": {"hash": _SHA}}]
+        },
+    )
+    review = httpx.Response(
+        200,
+        json={
+            "values": [
+                {
+                    "path": ".review/rules.md",
+                    "type": "commit_file",
+                    "size": 1,
+                    "commit": {"hash": _SHA},
+                }
+            ]
+        },
+    )
+    budget = len(root.content) + len(review.content)
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith(f"/src/{_SHA}/"):
+            return root
+        if request.url.path.endswith(f"/src/{_SHA}/.review/"):
+            return review
+        assert request.url.path.endswith(f"/src/{_SHA}/.review/rules.md")
+        return httpx.Response(200, content=b"#")
+
+    async def exercise() -> IndexLimitExceeded:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
+            with pytest.raises(IndexLimitExceeded) as caught:
+                await _source(
+                    _Credentials(), client, budgets=BitbucketSourceBudgets(read_bytes=budget)
+                ).rules_document(_SHA)
+        return caught.value
+
+    assert asyncio.run(exercise()).limit == "download_bytes"
 
 
 def test_complete_empty_rules_listing_proves_missing() -> None:
@@ -1417,3 +1470,31 @@ def test_rules_file_size_mismatch_is_unavailable(declared_size: int, body: bytes
         return caught.value
 
     assert asyncio.run(exercise()).code is PolicyErrorCode.FETCH_TRANSIENT
+
+
+def test_empty_ahead_diff_cannot_reuse_published_manifest() -> None:
+    base = "b" * 40
+
+    class Published:
+        async def load(
+            self, target: BoundBitbucketTarget, base_sha: str
+        ) -> Mapping[str, ArchiveEntry] | None:
+            assert target == _TARGET and base_sha == base
+            return {"a.py": ArchiveEntry("a.py", 1)}
+
+        async def save(
+            self,
+            target: BoundBitbucketTarget,
+            commit_sha: str,
+            entries: Mapping[str, ArchiveEntry],
+        ) -> bool:
+            raise AssertionError("An unproven manifest must not be published")
+
+    async def exercise() -> None:
+        async with httpx.AsyncClient() as client:
+            source = _source(_Credentials(), client, published_manifest=Published())
+            assert not await source.prepare_incremental_manifest(
+                base, _SHA, Comparison(Ancestry.AHEAD, (), True)
+            )
+
+    asyncio.run(exercise())

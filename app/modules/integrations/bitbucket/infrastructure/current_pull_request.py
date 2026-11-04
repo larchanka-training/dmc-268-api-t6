@@ -10,6 +10,9 @@ from uuid import UUID
 
 import httpx
 
+from app.modules.integrations.bitbucket.application.provider_error import (
+    BitbucketPullRequestResponseError,
+)
 from app.modules.integrations.bitbucket.application.request_credentials import (
     BitbucketRequestCredential,
     BoundBitbucketTarget,
@@ -92,10 +95,12 @@ class BitbucketCurrentPullRequestProvider:
                 credential.token,
             )
             return replace(current, head_sha=head, base_sha=base)
-        except BitbucketProviderError:
+        except BitbucketProviderError as error:
+            if error.code == "invalid_provider_response":
+                raise BitbucketPullRequestResponseError() from None
             raise
         except (ValueError, TypeError, KeyError, OverflowError):
-            raise BitbucketProviderError("invalid_provider_response") from None
+            raise BitbucketPullRequestResponseError() from None
 
     async def _resolve_commit(
         self, workspace: UUID, repository_uuid: UUID, prefix: str, token: str

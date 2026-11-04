@@ -10,6 +10,9 @@ from typing import Protocol
 from uuid import UUID
 
 from app.common.application.unit_of_work import UnitOfWork
+from app.modules.integrations.bitbucket.application.provider_error import (
+    BitbucketPullRequestResponseError,
+)
 from app.modules.integrations.bitbucket.application.request_credentials import (
     BoundBitbucketTarget,
 )
@@ -198,6 +201,14 @@ class BitbucketPushContinuationStore(Protocol):
         webhook_generation: int,
     ) -> tuple[int, ...]: ...
 
+    async def has_pending(
+        self,
+        delivery_id: str,
+        repository_id: UUID,
+        binding_generation: int,
+        webhook_generation: int,
+    ) -> bool: ...
+
     async def has_failed(
         self,
         delivery_id: str,
@@ -374,9 +385,14 @@ class ProjectBitbucketPullRequest:
                 )
             if not pending:
                 async with self._uow_factory() as uow:
+                    waiting = await uow.push_continuation.has_pending(
+                        delivery_id, repository_id, binding_generation, webhook_generation
+                    )
                     failed = await uow.push_continuation.has_failed(
                         delivery_id, repository_id, binding_generation, webhook_generation
                     )
+                if waiting:
+                    raise BitbucketPushRetryPending()
                 if failed:
                     raise BitbucketPushCandidatesFailed()
                 return ()
@@ -395,6 +411,9 @@ class ProjectBitbucketPullRequest:
                     )
                 except BitbucketPullRequestStale:
                     deferred.append((number, "canonical_stale"))
+                    continue
+                except BitbucketPullRequestResponseError as error:
+                    deferred.append((number, error.code))
                     continue
                 if outcome is not None:
                     retry_outcomes.append(outcome)
@@ -447,6 +466,9 @@ class ProjectBitbucketPullRequest:
             except BitbucketPullRequestStale:
                 deferred_numbers.append((number, "canonical_stale"))
                 continue
+            except BitbucketPullRequestResponseError as error:
+                deferred_numbers.append((number, error.code))
+                continue
             if outcome is not None:
                 page_outcomes.append(outcome)
                 if outcome.status == EnqueueStatus.DEFERRED:
@@ -477,10 +499,13 @@ class ProjectBitbucketPullRequest:
                 tuple(deferred_numbers),
             )
             await uow.commit()
-        if len(numbers) == BITBUCKET_PUSH_BATCH_SIZE or deferred_numbers:
+        if len(numbers) == BITBUCKET_PUSH_BATCH_SIZE:
             raise BitbucketPushContinuationPending()
         async with self._uow_factory() as uow:
             pending = await uow.push_continuation.pending_numbers(
+                delivery_id, repository_id, binding_generation, webhook_generation
+            )
+            waiting = await uow.push_continuation.has_pending(
                 delivery_id, repository_id, binding_generation, webhook_generation
             )
             failed = await uow.push_continuation.has_failed(
@@ -488,6 +513,8 @@ class ProjectBitbucketPullRequest:
             )
         if pending:
             raise BitbucketPushContinuationPending()
+        if waiting:
+            raise BitbucketPushRetryPending()
         if failed:
             raise BitbucketPushCandidatesFailed()
         return tuple(page_outcomes)

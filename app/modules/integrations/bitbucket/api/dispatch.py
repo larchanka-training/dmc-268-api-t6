@@ -6,6 +6,7 @@ import json
 from typing import Protocol, cast
 from uuid import UUID
 
+from app.modules.integrations.bitbucket.application.provider_error import BitbucketProviderError
 from app.modules.integrations.bitbucket.application.request_credentials import (
     BitbucketBindingGenerationChanged,
     BitbucketCredentialGenerationChanged,
@@ -15,7 +16,10 @@ from app.modules.integrations.webhooks.application.github_installation_dispatch 
     InstallationDeliveryDispatchResult,
     InstallationDeliveryDispatchStatus,
 )
-from app.modules.integrations.webhooks.application.receive_github_delivery import WebhookReceipt
+from app.modules.integrations.webhooks.application.receive_github_delivery import (
+    WebhookDispatchRetry,
+    WebhookReceipt,
+)
 from app.modules.reviews.application.project_bitbucket_pull_request import (
     BitbucketPullRequestIdentityMismatch,
     BitbucketPullRequestStale,
@@ -118,7 +122,12 @@ class BitbucketWebhookDispatchAdapter:
                     installation, repository, repository_uuid, cast(int, number), binding, webhook
                 )
                 outcomes = (outcome,) if outcome is not None else ()
-        except (BitbucketTargetInactive, BitbucketBindingGenerationChanged):
+        except BitbucketBindingGenerationChanged:
+            return InstallationDeliveryDispatchResult(
+                InstallationDeliveryDispatchStatus.IGNORED_IRRELEVANT_EVENT,
+                "binding_generation_changed",
+            )
+        except BitbucketTargetInactive:
             return InstallationDeliveryDispatchResult(
                 InstallationDeliveryDispatchStatus.IGNORED_IRRELEVANT_EVENT, "inactive_origin"
             )
@@ -150,6 +159,13 @@ class BitbucketWebhookDispatchAdapter:
             return InstallationDeliveryDispatchResult(
                 InstallationDeliveryDispatchStatus.IGNORED_INVALID_EVENT, "identity_mismatch"
             )
+        except BitbucketProviderError as error:
+            if delivery.event_name != "repo:push" or error.code not in {
+                "provider_rate_limited",
+                "provider_unavailable",
+            }:
+                raise
+            raise WebhookDispatchRetry(error.retry_after or 30) from error
         if any(outcome.status == EnqueueStatus.DEFERRED for outcome in outcomes):
             return InstallationDeliveryDispatchResult(
                 InstallationDeliveryDispatchStatus.DEFERRED_RUN_TRIGGER,

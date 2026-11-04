@@ -494,7 +494,7 @@ def test_bitbucket_201_file_build_then_one_file_push_reads_one_changed_blob() ->
             return httpx.Response(200, json={"target": {"hash": head_sha}})
         if path.endswith(f"/merge-base/{_OLD}..{_HEAD}"):
             return httpx.Response(200, json={"hash": _OLD})
-        if path.endswith(f"/diffstat/{_OLD}..{_HEAD}"):
+        if path.endswith(f"/diffstat/{_HEAD}..{_OLD}"):
             return httpx.Response(
                 200,
                 json={

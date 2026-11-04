@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
 
-from sqlalchemy import case, delete, func, select, update
+from sqlalchemy import and_, case, delete, func, or_, select, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -275,7 +275,12 @@ class SqlAlchemyBitbucketPushContinuationStore:
                 insert(BitbucketPushRetryCandidate)
                 .values(
                     [
-                        {"webhook_event_id": receipt.id, "pr_number": number, "reason": reason}
+                        {
+                            "webhook_event_id": receipt.id,
+                            "pr_number": number,
+                            "reason": reason,
+                            "attempted_at": datetime.now(UTC),
+                        }
                         for number, reason in deferred_numbers
                     ]
                 )
@@ -293,12 +298,24 @@ class SqlAlchemyBitbucketPushContinuationStore:
         receipt = await self._receipt(
             delivery_id, repository_id, binding_generation, webhook_generation
         )
+        now = datetime.now(UTC)
         return tuple(
             await self._session.scalars(
                 select(BitbucketPushRetryCandidate.pr_number)
                 .where(
                     BitbucketPushRetryCandidate.webhook_event_id == receipt.id,
                     BitbucketPushRetryCandidate.failed_at.is_(None),
+                    or_(
+                        BitbucketPushRetryCandidate.attempted_at.is_(None),
+                        and_(
+                            BitbucketPushRetryCandidate.reason == "run_admission_deferred",
+                            BitbucketPushRetryCandidate.attempted_at <= now - timedelta(seconds=30),
+                        ),
+                        and_(
+                            BitbucketPushRetryCandidate.reason != "run_admission_deferred",
+                            BitbucketPushRetryCandidate.attempted_at <= now - timedelta(minutes=5),
+                        ),
+                    ),
                 )
                 .order_by(
                     BitbucketPushRetryCandidate.attempted_at.asc().nulls_first(),
@@ -306,6 +323,28 @@ class SqlAlchemyBitbucketPushContinuationStore:
                 )
                 .limit(BITBUCKET_PUSH_BATCH_SIZE)
             )
+        )
+
+    async def has_pending(
+        self,
+        delivery_id: str,
+        repository_id: UUID,
+        binding_generation: int,
+        webhook_generation: int,
+    ) -> bool:
+        receipt = await self._receipt(
+            delivery_id, repository_id, binding_generation, webhook_generation
+        )
+        return (
+            await self._session.scalar(
+                select(BitbucketPushRetryCandidate.pr_number)
+                .where(
+                    BitbucketPushRetryCandidate.webhook_event_id == receipt.id,
+                    BitbucketPushRetryCandidate.failed_at.is_(None),
+                )
+                .limit(1)
+            )
+            is not None
         )
 
     async def has_failed(
@@ -352,6 +391,7 @@ class SqlAlchemyBitbucketPushContinuationStore:
         for number, reason in deferred:
             next_attempt = BitbucketPushRetryCandidate.attempt_count + 1
             now = datetime.now(UTC)
+            expired = receipt.received_at <= now - timedelta(hours=1)
             await self._session.execute(
                 update(BitbucketPushRetryCandidate)
                 .where(
@@ -363,7 +403,9 @@ class SqlAlchemyBitbucketPushContinuationStore:
                     attempted_at=now,
                     attempt_count=next_attempt,
                     reason=reason,
-                    failed_at=case((next_attempt >= 3, now), else_=None),
+                    failed_at=(now if expired else None)
+                    if reason == "run_admission_deferred"
+                    else case((next_attempt >= 3, now), else_=None),
                 )
             )
         remaining = await self._session.scalar(

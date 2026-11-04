@@ -25,6 +25,7 @@ from urllib.parse import parse_qs, quote, unquote, urlsplit
 import httpx
 
 from app.modules.code_index.application.bitbucket_persistence import (
+    RawBlobCheckpoint,
     SourceListingCheckpoint,
     SourceListingPage,
 )
@@ -91,6 +92,13 @@ class _FileRedirect(Exception):
     def __init__(self, status: int) -> None:
         super().__init__(f"HTTP {status}")
         self.status = status
+
+
+class _ResponseTooLarge(IndexLimitExceeded):
+    """One provider response exceeded its own byte limit."""
+
+    def __init__(self) -> None:
+        super().__init__("download_bytes")
 
 
 @dataclass(frozen=True)
@@ -197,6 +205,7 @@ class BitbucketRepositorySnapshotSource:
         limits: IndexLimits | None = None,
         budgets: BitbucketSourceBudgets | None = None,
         checkpoint: SourceListingCheckpoint | None = None,
+        raw_checkpoint: RawBlobCheckpoint | None = None,
         published_manifest: PublishedManifestStore | None = None,
     ) -> None:
         self._client = client
@@ -205,12 +214,17 @@ class BitbucketRepositorySnapshotSource:
         self._limits = limits or IndexLimits()
         self._budgets = budgets or BitbucketSourceBudgets()
         self._checkpoint = checkpoint
+        self._raw_checkpoint = raw_checkpoint
         self._published_manifest = published_manifest
         self._derived_sha: str | None = None
         self._checkpoint_sha: str | None = None
         self._checkpoint_pages: dict[
             tuple[str, tuple[tuple[str, str], ...]], SourceListingPage
         ] = {}
+        self._restored_page_keys: set[tuple[str, tuple[tuple[str, str], ...]]] = set()
+        self._restored_listing_requests = 0
+        self._restored_listed_entries = 0
+        self._restored_read_bytes = 0
         self._deadline = time.monotonic() + self._budgets.deadline_seconds
         self._target: BoundBitbucketTarget | None = None
         self._requests = 0
@@ -262,7 +276,11 @@ class BitbucketRepositorySnapshotSource:
     ) -> bool:
         """Apply a verified diff to a complete published base without walking the head tree."""
         base, head = _sha(base_sha), _sha(head_sha)
-        if comparison.ancestry is not Ancestry.AHEAD or not comparison.complete:
+        if (
+            comparison.ancestry is not Ancestry.AHEAD
+            or not comparison.complete
+            or not comparison.files
+        ):
             return False
         store = self._published_manifest
         if store is None:
@@ -317,7 +335,7 @@ class BitbucketRepositorySnapshotSource:
                 entries.pop(item.path, None)
             else:
                 entries[item.path] = metadata
-        self._budget(len(entries) > self._budgets.entries)
+        self._budget(len(entries) > self._budgets.entries, limit="archive_entries")
         if len(entries) > self._limits.archive_entries:
             raise IndexLimitExceeded("archive_entries")
         self._tree_cache[head] = entries
@@ -377,13 +395,16 @@ class BitbucketRepositorySnapshotSource:
             for path, entry in entries.items()
             if not entry.directory
         }
-        await store.save(target, commit_sha, manifest)
+        if await store.save(target, commit_sha, manifest) and self._raw_checkpoint is not None:
+            await self._raw_checkpoint.clear(target, commit_sha)
 
-    def _budget(self, spent: bool) -> None:
-        if spent or time.monotonic() >= self._deadline:
+    def _budget(self, spent: bool, *, limit: str = "provider_requests") -> None:
+        if time.monotonic() >= self._deadline:
             raise VcsUnavailable(
-                "Bitbucket source work budget exhausted", retry_after=timedelta(minutes=1)
+                "Bitbucket source deadline exhausted", retry_after=timedelta(minutes=1)
             )
+        if spent:
+            raise IndexLimitExceeded(limit)
 
     async def _bound(self) -> BoundBitbucketTarget:
         if self._target is None:
@@ -447,17 +468,21 @@ class BitbucketRepositorySnapshotSource:
                     raise _status_error(response)
                 declared = response.headers.get("Content-Length")
                 if declared and declared.isdecimal() and int(declared) > max_bytes:
-                    raise IndexLimitExceeded("download_bytes")
+                    raise _ResponseTooLarge
                 if declared and declared.isdecimal():
-                    self._budget(self._read_bytes + int(declared) > self._budgets.read_bytes)
+                    self._budget(
+                        self._read_bytes + int(declared) > self._budgets.read_bytes,
+                        limit="download_bytes",
+                    )
                 body = bytearray()
                 async for chunk in response.aiter_bytes():
                     received += len(chunk)
                     self._budget(False)
                     if len(body) + len(chunk) > max_bytes:
-                        raise IndexLimitExceeded("download_bytes")
+                        raise _ResponseTooLarge
                     self._budget(
-                        self._read_bytes + len(body) + len(chunk) > self._budgets.read_bytes
+                        self._read_bytes + len(body) + len(chunk) > self._budgets.read_bytes,
+                        limit="download_bytes",
                     )
                     body.extend(chunk)
         except httpx.RequestError:
@@ -523,7 +548,7 @@ class BitbucketRepositorySnapshotSource:
         )
         if merge.get("hash") != base_sha:
             return Comparison(None, (), False)
-        suffix = f"diffstat/{base_sha}..{head_sha}"
+        suffix = f"diffstat/{head_sha}..{base_sha}"
         target = await self._bound()
         endpoint = f"/2.0/repositories/%7B%7D/%7B{target.repository_uuid}%7D/{suffix}"
         params = {"pagelen": str(_PAGE_SIZE), "page": "1"}
@@ -592,7 +617,9 @@ class BitbucketRepositorySnapshotSource:
             params = next_params
         return Comparison(Ancestry.AHEAD, (), False)
 
-    async def _directory(self, commit_sha: str, path: str) -> tuple[_Entry, ...]:
+    async def _directory(
+        self, commit_sha: str, path: str, *, retry_expired_cursor: bool = True
+    ) -> tuple[_Entry, ...]:
         key = (commit_sha, path)
         if key in self._directory_cache:
             await self._bound()
@@ -605,18 +632,20 @@ class BitbucketRepositorySnapshotSource:
                 for page in pages
                 if page.complete
             }
+            self._restored_page_keys = set(self._checkpoint_pages)
             self._checkpoint_sha = commit_sha
-            self._listing_requests += sum(page.attempts for page in pages)
+            self._restored_listing_requests = sum(page.complete for page in pages)
+            self._listing_requests += self._restored_listing_requests
             for page in pages:
                 values = page.payload.get("values") if page.complete else None
                 if isinstance(values, list):
-                    self._listed_entries += len(values)
-            self._read_bytes += sum(page.bytes_read for page in pages)
-            self._budget(
-                self._listing_requests > self._budgets.listing_requests
-                or self._listed_entries > self._budgets.entries
-                or self._read_bytes > self._budgets.read_bytes
-            )
+                    self._restored_listed_entries += len(values)
+            self._listed_entries += self._restored_listed_entries
+            self._restored_read_bytes = sum(page.bytes_read for page in pages if page.complete)
+            self._read_bytes += self._restored_read_bytes
+            self._budget(self._listing_requests > self._budgets.listing_requests)
+            self._budget(self._listed_entries > self._budgets.entries, limit="archive_entries")
+            self._budget(self._read_bytes > self._budgets.read_bytes, limit="download_bytes")
         suffix = f"src/{commit_sha}/" + (f"{quote(path, safe='/')}/" if path else "")
         endpoint = f"/2.0/repositories/%7B%7D/%7B{target.repository_uuid}%7D/{suffix}"
         entries: list[_Entry] = []
@@ -624,6 +653,7 @@ class BitbucketRepositorySnapshotSource:
         params = {"pagelen": str(_PAGE_SIZE)}
         seen_pages: set[tuple[tuple[str, str], ...]] = set()
         declared_size: int | None = None
+        restored_cursor = False
         for _ in range(self._budgets.listing_requests):
             page_key = tuple(sorted(params.items()))
             if page_key in seen_pages:
@@ -635,17 +665,39 @@ class BitbucketRepositorySnapshotSource:
                 if checkpoint is not None:
                     await checkpoint.charge(target, commit_sha, path, params)
 
-                body = await self._read(
-                    suffix,
-                    max_bytes=_MAX_LIST_BODY,
-                    params=params,
-                    kind="listing",
-                    bytes_received=(
-                        partial(checkpoint.add_bytes, target, commit_sha, path, params.copy())
-                        if checkpoint is not None
-                        else None
-                    ),
-                )
+                try:
+                    body = await self._read(
+                        suffix,
+                        max_bytes=_MAX_LIST_BODY,
+                        params=params,
+                        kind="listing",
+                        bytes_received=(
+                            partial(checkpoint.add_bytes, target, commit_sha, path, params.copy())
+                            if checkpoint is not None
+                            else None
+                        ),
+                    )
+                except (VcsUnavailable, VcsAccessDenied) as error:
+                    if (
+                        checkpoint is None
+                        or not retry_expired_cursor
+                        or not restored_cursor
+                        or error.http_status not in {400, 404}
+                    ):
+                        raise
+                    await checkpoint.invalidate(target, commit_sha)
+                    self._listing_requests -= self._restored_listing_requests
+                    self._listed_entries -= self._restored_listed_entries
+                    self._read_bytes -= self._restored_read_bytes
+                    self._restored_listing_requests = 0
+                    self._restored_listed_entries = 0
+                    self._restored_read_bytes = 0
+                    self._checkpoint_sha = None
+                    self._checkpoint_pages.clear()
+                    self._restored_page_keys.clear()
+                    self._directory_cache.clear()
+                    self._tree_cache.pop(commit_sha, None)
+                    return await self._directory(commit_sha, path, retry_expired_cursor=False)
                 try:
                     raw = json.loads(body)
                 except (ValueError, RecursionError):
@@ -661,7 +713,7 @@ class BitbucketRepositorySnapshotSource:
             if size is not None:
                 if type(size) is not int or size < 0:
                     raise VcsUnavailable("Bitbucket returned an invalid source listing")
-                self._budget(size > self._budgets.entries)
+                self._budget(size > self._budgets.entries, limit="archive_entries")
                 if size > self._limits.archive_entries:
                     raise IndexLimitExceeded("archive_entries")
                 if declared_size is None:
@@ -674,7 +726,9 @@ class BitbucketRepositorySnapshotSource:
                 listed_count += 1
                 if saved is None:
                     self._listed_entries += 1
-                    self._budget(self._listed_entries > self._budgets.entries)
+                    self._budget(
+                        self._listed_entries > self._budgets.entries, limit="archive_entries"
+                    )
                 if listed_count > self._limits.archive_entries:
                     raise IndexLimitExceeded("archive_entries")
                 try:
@@ -734,6 +788,7 @@ class BitbucketRepositorySnapshotSource:
                 self._checkpoint_pages[(path, page_key)] = page
             if next_params is None:
                 break
+            restored_cursor = (path, page_key) in self._restored_page_keys
             params = next_params
         else:
             self._budget(True)
@@ -755,7 +810,7 @@ class BitbucketRepositorySnapshotSource:
             if directory.count("/") + bool(directory) > _MAX_DEPTH:
                 raise IndexLimitExceeded("archive_entries")
             directories += 1
-            self._budget(directories > self._budgets.entries + 1)
+            self._budget(directories > self._budgets.entries + 1, limit="archive_entries")
             for entry in await self._directory(commit_sha, directory):
                 if entry.path in found:
                     raise VcsUnavailable("Bitbucket repeated a source path")
@@ -768,15 +823,45 @@ class BitbucketRepositorySnapshotSource:
         return found
 
     async def _file(
-        self, commit_sha: str, path: str, *, max_bytes: int, skip_redirect: bool = False
+        self,
+        commit_sha: str,
+        path: str,
+        *,
+        max_bytes: int,
+        expected_size: int | None,
+        skip_redirect: bool = False,
     ) -> bytes | _FileRedirect:
         key = (commit_sha, path)
         if key in self._file_cache:
             await self._bound()
             cached = self._file_cache[key]
             if isinstance(cached, bytes) and len(cached) > max_bytes:
-                raise IndexLimitExceeded("download_bytes")
+                raise _ResponseTooLarge
+            if (
+                isinstance(cached, bytes)
+                and expected_size is not None
+                and len(cached) != expected_size
+            ):
+                raise VcsUnavailable("Bitbucket source file size differs from the pinned listing")
             return cached
+        raw_checkpoint = self._raw_checkpoint
+        if raw_checkpoint is not None:
+            target = await self._bound()
+            saved = await raw_checkpoint.load_raw(target, commit_sha, path)
+            if saved is not None:
+                if len(saved) > max_bytes:
+                    raise _ResponseTooLarge
+                if expected_size is not None and len(saved) != expected_size:
+                    raise VcsUnavailable(
+                        "Bitbucket source file size differs from the pinned listing"
+                    )
+                self._budget(
+                    self._read_bytes + len(saved) > self._budgets.read_bytes,
+                    limit="download_bytes",
+                )
+                self._read_bytes += len(saved)
+                self._file_cache[key] = saved
+                return saved
         body: bytes | _FileRedirect
         try:
             body = await self._read(
@@ -787,6 +872,11 @@ class BitbucketRepositorySnapshotSource:
             )
         except _FileRedirect as error:
             body = error
+        if isinstance(body, bytes) and expected_size is not None and len(body) != expected_size:
+            raise VcsUnavailable("Bitbucket source file size differs from the pinned listing")
+        if isinstance(body, bytes) and raw_checkpoint is not None:
+            target = await self._bound()
+            await raw_checkpoint.save_raw(target, commit_sha, path, body)
         self._file_cache[key] = body
         return body
 
@@ -838,7 +928,11 @@ class BitbucketRepositorySnapshotSource:
                 )
             reading_file = True
             raw = await self._file(
-                sha, RULES_DOCUMENT_PATH, max_bytes=MAX_DOCUMENT_BYTES, skip_redirect=True
+                sha,
+                RULES_DOCUMENT_PATH,
+                max_bytes=MAX_DOCUMENT_BYTES,
+                expected_size=rules.size,
+                skip_redirect=True,
             )
             if isinstance(raw, _FileRedirect):
                 raise PolicyError(
@@ -848,13 +942,9 @@ class BitbucketRepositorySnapshotSource:
                     source_path=RULES_DOCUMENT_PATH,
                     http_status=raw.status,
                 )
-            if len(raw) != rules.size:
-                raise VcsUnavailable("Bitbucket rules file size differs from the pinned listing")
             oid = sha256(f"{sha}:{RULES_DOCUMENT_PATH}".encode()).hexdigest()
             return normalize_document(RULES_DOCUMENT_PATH, raw, blob_oid=oid, policy_base_sha=sha)
-        except IndexLimitExceeded as error:
-            if error.limit != "download_bytes":
-                raise
+        except _ResponseTooLarge:
             raise PolicyError(
                 (
                     PolicyErrorCode.DOCUMENT_TOO_LARGE
@@ -936,7 +1026,11 @@ class BitbucketRepositorySnapshotSource:
                 raise IndexLimitExceeded("download_bytes")
             remaining = max_bytes - total
             body = await self._file(
-                sha, entry.path, max_bytes=max(1, remaining), skip_redirect=True
+                sha,
+                entry.path,
+                max_bytes=max(1, remaining),
+                expected_size=entry.size,
+                skip_redirect=True,
             )
             if isinstance(body, _FileRedirect):
                 key = (sha, entry.path)
@@ -944,8 +1038,6 @@ class BitbucketRepositorySnapshotSource:
                     self._redirect_skips.add(key)
                     self._skip("redirect")
                 continue
-            if len(body) != entry.size:
-                raise VcsUnavailable("Bitbucket source file size differs from the pinned listing")
             total += len(body)
             if total > max_bytes:
                 raise IndexLimitExceeded("download_bytes")

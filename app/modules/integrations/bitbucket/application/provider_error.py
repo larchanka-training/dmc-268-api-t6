@@ -10,3 +10,10 @@ class BitbucketProviderError(ValueError):
         self.code = code
         self.retry_after = retry_after
         super().__init__(code)
+
+
+class BitbucketPullRequestResponseError(BitbucketProviderError):
+    """Malformed response scoped to one PR, safe for a push page to skip."""
+
+    def __init__(self) -> None:
+        super().__init__("invalid_provider_response")

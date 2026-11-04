@@ -13,6 +13,7 @@ import pytest
 from app.modules.code_index.application.bitbucket_persistence import (
     BitbucketIndexTarget,
     PersistBitbucketPublishedManifest,
+    PersistBitbucketRawCheckpoint,
     PersistBitbucketTreeCheckpoint,
     SourceListingPage,
 )
@@ -26,6 +27,9 @@ _PAGE = SourceListingPage("a" * 40, "", {"pagelen": "100"}, {"values": []}, 12)
 @dataclass
 class _TreeStore:
     calls: list[str]
+
+    async def invalidate(self, target: BitbucketIndexTarget, sha: str) -> None:
+        self.calls.append("invalidate")
 
     async def charge(
         self, target: BitbucketIndexTarget, sha: str, directory: str, params: dict[str, str]
@@ -65,6 +69,23 @@ class _ManifestStore:
 
 
 @dataclass
+class _RawStore:
+    calls: list[str]
+
+    async def load_raw(self, target: BitbucketIndexTarget, sha: str, path: str) -> bytes | None:
+        self.calls.append("raw_load")
+        return b"x"
+
+    async def save_raw(
+        self, target: BitbucketIndexTarget, sha: str, path: str, body: bytes
+    ) -> None:
+        self.calls.append("raw_save")
+
+    async def clear(self, target: BitbucketIndexTarget, sha: str) -> None:
+        self.calls.append("raw_clear")
+
+
+@dataclass
 class _Uow:
     calls: list[str] = field(default_factory=list)
 
@@ -75,6 +96,10 @@ class _Uow:
     @property
     def manifest(self) -> _ManifestStore:
         return _ManifestStore(self.calls)
+
+    @property
+    def raw(self) -> _RawStore:
+        return _RawStore(self.calls)
 
     async def __aenter__(self) -> Self:
         self.calls.append("enter")
@@ -100,6 +125,9 @@ def test_application_commits_checkpoint_and_manifest_writes_after_store_returns(
         await pages.save(_TARGET, _PAGE)
         assert uow.calls == ["enter", "save", "commit", "exit"]
         uow.calls.clear()
+        await pages.invalidate(_TARGET, _PAGE.target_sha)
+        assert uow.calls == ["enter", "invalidate", "commit", "exit"]
+        uow.calls.clear()
         manifest = PersistBitbucketPublishedManifest(lambda: uow)
         assert await manifest.save(_TARGET, _PAGE.target_sha, {"a.py": ArchiveEntry("a.py", 1)})
         assert uow.calls == ["enter", "manifest", "commit", "exit"]
@@ -123,5 +151,21 @@ def test_application_does_not_commit_a_failed_checkpoint_write() -> None:
         with pytest.raises(RuntimeError, match="store failed"):
             await PersistBitbucketTreeCheckpoint(lambda: uow).save(_TARGET, _PAGE)
         assert uow.calls == ["enter", "save", "exit"]
+
+    asyncio.run(scenario())
+
+
+def test_application_commits_raw_checkpoint_after_store_returns() -> None:
+    async def scenario() -> None:
+        uow = _Uow()
+        raw = PersistBitbucketRawCheckpoint(lambda: uow)
+        await raw.save_raw(_TARGET, _PAGE.target_sha, "a.py", b"x")
+        assert uow.calls == ["enter", "raw_save", "commit", "exit"]
+        uow.calls.clear()
+        await raw.clear(_TARGET, _PAGE.target_sha)
+        assert uow.calls == ["enter", "raw_clear", "commit", "exit"]
+        uow.calls.clear()
+        assert await raw.load_raw(_TARGET, _PAGE.target_sha, "a.py") == b"x"
+        assert uow.calls == ["enter", "raw_load", "exit"]
 
     asyncio.run(scenario())

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import hmac
+import logging
 import secrets
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
@@ -38,6 +39,7 @@ class BitbucketRotationProbeError(BitbucketProviderError):
 
 _ROTATION_DEADLINE_SECONDS = 30
 _ROTATION_PROBE_CONCURRENCY = 4
+_LOGGER = logging.getLogger(__name__)
 
 
 class EncryptedCredentialLike(Protocol):
@@ -253,6 +255,10 @@ class BitbucketManagementStore(RepositoryRuleVersionStore, Protocol):
         self, *, workspace_id: UUID, installation_id: UUID | None = None
     ) -> tuple[RepositoryBinding, ...]: ...
 
+    async def is_webhook_confirmed(
+        self, *, workspace_id: UUID, installation_id: UUID, repository_id: UUID
+    ) -> bool: ...
+
     async def rotate_token(
         self,
         *,
@@ -391,12 +397,11 @@ class ManageBitbucketConnection:
                         repository_id=repository_id,
                     ),
                 )
-            confirmed = False
-            if not newly_active:
-                confirmed = any(
-                    binding.repository_id == repository_id and binding.confirmed_at is not None
-                    for binding in await store.list_bindings(workspace_id=workspace_id)
-                )
+            confirmed = not newly_active and await store.is_webhook_confirmed(
+                workspace_id=workspace_id,
+                installation_id=installation_id,
+                repository_id=repository_id,
+            )
             current = await store.installation_for_remote_workspace(
                 workspace_id=workspace_id, bitbucket_workspace_uuid=remote.workspace_uuid
             )
@@ -502,7 +507,6 @@ class ManageBitbucketConnection:
         if prior is None or not bindings:
             raise BitbucketManagementError("connection_not_found")
         refreshed: list[tuple[RepositoryBinding, RemoteRepository]] = []
-        cancelled_repositories: set[UUID] = set()
 
         async def probe(binding: RepositoryBinding) -> tuple[RepositoryBinding, RemoteRepository]:
             try:
@@ -527,9 +531,6 @@ class ManageBitbucketConnection:
                     repository_uuid=binding.repository_uuid,
                     retry_after=error.retry_after,
                 ) from None
-            except asyncio.CancelledError:
-                cancelled_repositories.add(binding.repository_uuid)
-                raise
 
         try:
             async with asyncio.timeout(_ROTATION_DEADLINE_SECONDS):
@@ -544,10 +545,31 @@ class ManageBitbucketConnection:
                             task.cancel()
                         await asyncio.gather(*tasks, return_exceptions=True)
                         raise
+        except BitbucketRotationProbeError as error:
+            _LOGGER.warning(
+                "Bitbucket token rotation failed repository_uuid=%s code=%s",
+                error.repository_uuid,
+                error.code,
+            )
+            raise
+        except BitbucketManagementError as error:
+            _LOGGER.warning(
+                "Bitbucket token rotation failed repository_uuid=%s code=%s",
+                error.repository_uuid,
+                error.code,
+            )
+            raise
+        except BitbucketProviderError as error:
+            _LOGGER.warning(
+                "Bitbucket token rotation failed repository_uuid=unknown code=%s", error.code
+            )
+            raise
         except TimeoutError:
-            repository_uuid = min(cancelled_repositories, key=str, default=None)
+            _LOGGER.warning(
+                "Bitbucket token rotation failed repository_uuid=unknown code=provider_unavailable"
+            )
             raise BitbucketRotationProbeError(
-                "provider_unavailable", repository_uuid=repository_uuid
+                "provider_unavailable", repository_uuid=None
             ) from None
         async with self._uow_factory() as uow:
             await self._require_member(uow.connections, scope, workspace_id, lock=True)

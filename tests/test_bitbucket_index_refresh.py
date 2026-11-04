@@ -197,22 +197,30 @@ class _BuildCredentials:
 
 
 @pytest.mark.parametrize(
-    ("response", "budgets", "code", "retry_after"),
+    ("response", "budgets", "status", "code", "retry_after"),
     [
-        (httpx.Response(429, headers={"Retry-After": "120"}), None, "vcs_rate_limited", 120),
+        (
+            httpx.Response(429, headers={"Retry-After": "120"}),
+            None,
+            BuildStatus.TRANSIENT,
+            "vcs_rate_limited",
+            120,
+        ),
         (
             httpx.Response(200, json={"uuid": "{11111111-1111-4111-8111-111111111111}"}),
             BitbucketSourceBudgets(read_bytes=1),
-            "vcs_unavailable",
-            60,
+            BuildStatus.FAILED,
+            "limit_exceeded:download_bytes",
+            None,
         ),
     ],
 )
-def test_bitbucket_quota_exhaustion_releases_index_instead_of_failing(
+def test_bitbucket_quota_exhaustion_distinguishes_429_from_terminal_byte_budget(
     response: httpx.Response,
     budgets: BitbucketSourceBudgets | None,
+    status: BuildStatus,
     code: str,
-    retry_after: int,
+    retry_after: int | None,
 ) -> None:
     target = BoundBitbucketTarget(
         INSTALLATION,
@@ -252,10 +260,13 @@ def test_bitbucket_quota_exhaustion_releases_index_instead_of_failing(
                 settings=settings.build,
             )
             outcome = await build.execute(REPOSITORY, 1)
-            assert outcome.status is BuildStatus.TRANSIENT
+            assert outcome.status is status
             assert outcome.error_code == code
-            assert outcome.retry_after == timedelta(seconds=retry_after)
-            assert index.released == [code]
+            assert outcome.retry_after == (
+                timedelta(seconds=retry_after) if retry_after is not None else None
+            )
+            assert index.released == ([code] if status is BuildStatus.TRANSIENT else [])
+            assert index.failed == ([code] if status is BuildStatus.FAILED else [])
 
     asyncio.run(scenario())
 

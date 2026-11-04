@@ -63,6 +63,7 @@ class InstallationDeliveryDispatchStatus(StrEnum):
     DEFERRED_RUN_TRIGGER = "deferred_run_trigger"
     CONTINUING_PUSH = "continuing_push"
     WAITING_PUSH_CANDIDATE = "waiting_push_candidate"
+    WAITING_PUSH_PROVIDER = "waiting_push_provider"
     FAILED_PUSH_CANDIDATES = "failed_push_candidates"
     REQUESTED_RULES_REFRESH = "requested_rules_refresh"
 

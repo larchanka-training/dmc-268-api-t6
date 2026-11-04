@@ -39,6 +39,8 @@ class SourceListingCheckpoint(Protocol):
 
     async def save(self, target: BitbucketIndexTarget, page: SourceListingPage) -> None: ...
 
+    async def invalidate(self, target: BitbucketIndexTarget, sha: str) -> None: ...
+
     async def charge(
         self, target: BitbucketIndexTarget, sha: str, directory: str, params: dict[str, str]
     ) -> None: ...
@@ -51,6 +53,18 @@ class SourceListingCheckpoint(Protocol):
         params: dict[str, str],
         count: int,
     ) -> None: ...
+
+
+class RawBlobCheckpoint(Protocol):
+    """Verified raw blobs retained across transient source retries."""
+
+    async def load_raw(self, target: BitbucketIndexTarget, sha: str, path: str) -> bytes | None: ...
+
+    async def save_raw(
+        self, target: BitbucketIndexTarget, sha: str, path: str, body: bytes
+    ) -> None: ...
+
+    async def clear(self, target: BitbucketIndexTarget, sha: str) -> None: ...
 
 
 class PublishedManifestStore(Protocol):
@@ -66,6 +80,9 @@ class PublishedManifestStore(Protocol):
 class BitbucketPersistenceUnitOfWork(Protocol):
     @property
     def pages(self) -> SourceListingCheckpoint: ...
+
+    @property
+    def raw(self) -> RawBlobCheckpoint: ...
 
     @property
     def manifest(self) -> PublishedManifestStore: ...
@@ -105,6 +122,11 @@ class PersistBitbucketTreeCheckpoint:
             await uow.pages.save(target, page)
             await uow.commit()
 
+    async def invalidate(self, target: BitbucketIndexTarget, sha: str) -> None:
+        async with self._uow() as uow:
+            await uow.pages.invalidate(target, sha)
+            await uow.commit()
+
     async def add_bytes(
         self,
         target: BitbucketIndexTarget,
@@ -115,6 +137,27 @@ class PersistBitbucketTreeCheckpoint:
     ) -> None:
         async with self._uow() as uow:
             await uow.pages.add_bytes(target, sha, directory, params, count)
+            await uow.commit()
+
+
+class PersistBitbucketRawCheckpoint:
+    def __init__(self, uow: Callable[[], BitbucketPersistenceUnitOfWork]) -> None:
+        self._uow = uow
+
+    async def load_raw(self, target: BitbucketIndexTarget, sha: str, path: str) -> bytes | None:
+        async with self._uow() as uow:
+            return await uow.raw.load_raw(target, sha, path)
+
+    async def save_raw(
+        self, target: BitbucketIndexTarget, sha: str, path: str, body: bytes
+    ) -> None:
+        async with self._uow() as uow:
+            await uow.raw.save_raw(target, sha, path, body)
+            await uow.commit()
+
+    async def clear(self, target: BitbucketIndexTarget, sha: str) -> None:
+        async with self._uow() as uow:
+            await uow.raw.clear(target, sha)
             await uow.commit()
 
 

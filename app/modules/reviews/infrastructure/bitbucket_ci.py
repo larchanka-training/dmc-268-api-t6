@@ -17,6 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import aliased
 
 from app.common.infrastructure.db.enums import CodeChangeState, RunState
+from app.modules.integrations.bitbucket.application.provider_error import BitbucketProviderError
 from app.modules.integrations.bitbucket.application.request_credentials import (
     BitbucketRequestAuthority,
     BoundBitbucketTarget,
@@ -28,6 +29,9 @@ from app.modules.integrations.bitbucket.infrastructure.commit_hash import (
 from app.modules.integrations.bitbucket.infrastructure.models import (
     BitbucketConnection,
     BitbucketRunOrigin,
+)
+from app.modules.integrations.bitbucket.infrastructure.provider_validation import (
+    parse_bitbucket_uuid,
 )
 from app.modules.integrations.bitbucket.infrastructure.retry_after import parse_retry_after
 from app.modules.repositories.infrastructure.models import ProviderInstallation, Repository
@@ -206,11 +210,9 @@ def _mapping(value: object) -> dict[str, object]:
 
 
 def _uuid(value: object) -> UUID:
-    if not isinstance(value, str):
-        raise BitbucketStatusUnavailable("Bitbucket PR repository identity is malformed")
     try:
-        return UUID(value.strip("{}"))
-    except ValueError:
+        return parse_bitbucket_uuid(value)
+    except BitbucketProviderError:
         raise BitbucketStatusUnavailable("Bitbucket PR repository identity is malformed") from None
 
 

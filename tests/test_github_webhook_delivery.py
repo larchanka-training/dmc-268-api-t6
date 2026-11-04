@@ -226,13 +226,15 @@ def test_receipt_sweep_hides_other_boundary_exception_messages(
     assert all(record.exc_info is None for record in caplog.records)
 
 
-def test_bitbucket_push_continuation_retries_without_terminalizing_long_fanout() -> None:
+def test_bitbucket_push_continuation_retries_without_terminalizing_long_fanout(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     clock = [datetime(2026, 10, 9, tzinfo=UTC)]
     uow = FakeReceiptUnitOfWork()
     delivery = WebhookReceipt(
         "bitbucket-push-many",
         "repo:push",
-        "{}",
+        '{"secret":"payload-secret-canary"}',
         "bitbucket",
         UUID(int=1),
         UUID(int=2),
@@ -283,6 +285,42 @@ def test_bitbucket_push_continuation_retries_without_terminalizing_long_fanout()
     assert not uow.rows[delivery.delivery_id].projected
     assert uow.rows[delivery.delivery_id].projection_failed_at == clock[0]
     assert dispatcher.calls == 104
+    assert "candidate_exhausted" in caplog.text
+    assert "payload-secret-canary" not in caplog.text
+
+
+def test_bitbucket_generation_change_logs_safe_terminal_reason(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    delivery = WebhookReceipt(
+        "bitbucket-generation-change",
+        "repo:push",
+        '{"secret":"generation-secret-canary"}',
+        "bitbucket",
+        UUID(int=1),
+        UUID(int=2),
+        1,
+        2,
+    )
+    uow = FakeReceiptUnitOfWork()
+
+    class ChangedDispatcher:
+        async def execute(self, delivery: WebhookReceipt) -> InstallationDeliveryDispatchResult:
+            return InstallationDeliveryDispatchResult(
+                InstallationDeliveryDispatchStatus.IGNORED_IRRELEVANT_EVENT,
+                "binding_generation_changed",
+            )
+
+    receiver = receipt_engine.ReceiveWebhookDelivery(
+        provider="bitbucket",
+        uow_factory=lambda: uow,
+        dispatcher=ChangedDispatcher(),
+    )
+    assert asyncio.run(receiver.execute(delivery)) == InstallationDeliveryDispatchStatus.PENDING
+    assert asyncio.run(receiver.replay_pending()) == 1
+    assert uow.rows[delivery.delivery_id].projected
+    assert "binding_generation_changed" in caplog.text
+    assert "generation-secret-canary" not in caplog.text
 
 
 def test_failed_dispatch_is_replayed_once_after_retry_delay() -> None:

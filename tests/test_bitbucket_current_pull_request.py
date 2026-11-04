@@ -9,6 +9,9 @@ from uuid import UUID
 import httpx
 import pytest
 
+from app.modules.integrations.bitbucket.application.provider_error import (
+    BitbucketPullRequestResponseError,
+)
 from app.modules.integrations.bitbucket.application.request_credentials import (
     BitbucketRequestCredential,
     BoundBitbucketTarget,
@@ -39,6 +42,50 @@ class Credentials:
         assert target == TARGET
         self.calls += 1
         return BitbucketRequestCredential(target, "test-token")
+
+
+@pytest.mark.parametrize(
+    ("malformed_stage", "pr_local"),
+    [("repository", False), ("pull_request", True)],
+)
+def test_malformed_shared_repository_response_is_not_a_pr_local_error(
+    malformed_stage: str, pr_local: bool
+) -> None:
+    async def scenario() -> None:
+        paths: list[str] = []
+
+        def respond(request: httpx.Request) -> httpx.Response:
+            paths.append(request.url.path)
+            if "/pullrequests/" in request.url.path:
+                return httpx.Response(200, json={"id": 17})
+            if malformed_stage == "repository":
+                return httpx.Response(200, json={"uuid": "invalid"})
+            return httpx.Response(
+                200,
+                json={
+                    "uuid": "{" + str(TARGET.repository_uuid) + "}",
+                    "workspace": {
+                        "uuid": "{" + str(TARGET.bitbucket_workspace_uuid) + "}",
+                        "slug": "team",
+                    },
+                    "slug": "repo",
+                    "full_name": "team/repo",
+                    "name": "Repo",
+                    "is_private": True,
+                    "mainbranch": {"name": "main"},
+                    "links": {"html": {"href": "https://bitbucket.org/team/repo"}},
+                },
+            )
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+            with pytest.raises(BitbucketProviderError) as error:
+                await BitbucketCurrentPullRequestProvider(client, Credentials()).get_current(
+                    TARGET, 17
+                )
+        assert isinstance(error.value, BitbucketPullRequestResponseError) is pr_local
+        assert len(paths) == (2 if pr_local else 1)
+
+    asyncio.run(scenario())
 
 
 def test_reads_current_pr_after_uuid_lookup_and_rejects_redirects() -> None:

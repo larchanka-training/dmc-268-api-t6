@@ -43,6 +43,7 @@ from app.modules.integrations.gitlab.infrastructure.settings import DatabaseSett
 
 Kind = Literal["bitbucket_tokens", "bitbucket_webhook_secrets", "gitlab_tokens"]
 KINDS: tuple[Kind, ...] = ("bitbucket_tokens", "bitbucket_webhook_secrets", "gitlab_tokens")
+_MAX_FAILURE_DETAILS = 100
 
 
 @dataclass(frozen=True)
@@ -66,6 +67,7 @@ _SELECT: dict[Kind, str] = {
         "revoked_at AS revoked_at "
         "FROM bitbucket_connections WHERE token_key_id IS NOT NULL "
         "AND token_key_id <> :active AND revoked_at IS NULL "
+        "AND provider_installation_id > :after "
         "ORDER BY provider_installation_id LIMIT :limit"
     ),
     "bitbucket_webhook_secrets": (
@@ -76,7 +78,8 @@ _SELECT: dict[Kind, str] = {
         "FROM bitbucket_repository_webhook_secrets s "
         "JOIN bitbucket_repository_identities i ON i.repository_id = s.repository_id "
         "WHERE s.secret_key_id IS NOT NULL AND s.secret_key_id <> :active "
-        "AND s.revoked_at IS NULL ORDER BY s.repository_id LIMIT :limit"
+        "AND s.revoked_at IS NULL AND s.repository_id > :after "
+        "ORDER BY s.repository_id LIMIT :limit"
     ),
     "gitlab_tokens": (
         "SELECT provider_installation_id AS id, provider_installation_id AS installation, "
@@ -84,7 +87,7 @@ _SELECT: dict[Kind, str] = {
         "credential_generation AS generation, NULL AS binding_generation, "
         "credential_key_id AS key_id, token_ciphertext AS ciphertext, revoked_at AS revoked_at "
         "FROM gitlab_connections WHERE credential_key_id IS NOT NULL "
-        "AND credential_key_id <> :active "
+        "AND credential_key_id <> :active AND provider_installation_id > :after "
         "ORDER BY provider_installation_id LIMIT :limit"
     ),
 }
@@ -146,6 +149,9 @@ class KeyRotation:
             "bitbucket_webhook_secrets": bitbucket_active,
             "gitlab_tokens": gitlab_active,
         }
+        self._after: dict[Kind, UUID] = dict.fromkeys(KINDS, UUID(int=0))
+        self.failures: list[dict[str, str]] = []
+        self.failure_count = 0
 
     async def counts(self) -> dict[Kind, dict[str, int]]:
         """Read key-ID counts only; no envelope is selected or emitted."""
@@ -167,46 +173,66 @@ class KeyRotation:
         active = self._active[kind]
         async with self._engine.connect() as db:
             selected = (
-                (await db.execute(text(_SELECT[kind]), {"active": active, "limit": batch_size}))
+                (
+                    await db.execute(
+                        text(_SELECT[kind]),
+                        {"active": active, "after": self._after[kind], "limit": batch_size},
+                    )
+                )
                 .mappings()
                 .all()
             )
         rows = [_Row(**row) for row in selected]
+        if rows:
+            self._after[kind] = rows[-1].id
         updated = 0
         for row in rows:
-            if kind == "gitlab_tokens":
-                if row.origin is None:
-                    raise ValueError("credential_context_invalid")
-                gl_context = GitLabContext(row.installation, row.workspace, row.origin)
-                plaintext = self._gitlab.decrypt(
-                    GitLabEncrypted(row.key_id, row.ciphertext), context=gl_context
-                )
-                gl_encrypted = self._gitlab.encrypt(plaintext, context=gl_context)
-                new_ciphertext = gl_encrypted.token_ciphertext
-                new_key_id = gl_encrypted.key_id
-            else:
-                bb_context = BitbucketContext(
-                    row.installation,
-                    row.workspace,
-                    row.id if kind == "bitbucket_webhook_secrets" else None,
-                )
-                purpose = (
-                    CredentialPurpose.WEBHOOK_SECRET
-                    if kind == "bitbucket_webhook_secrets"
-                    else CredentialPurpose.TOKEN
-                )
-                plaintext = self._bitbucket.decrypt(
-                    BitbucketEncrypted(row.key_id, row.ciphertext),
-                    context=bb_context,
-                    purpose=purpose,
-                )
-                bb_encrypted = self._bitbucket.encrypt(
-                    plaintext, context=bb_context, purpose=purpose
-                )
-                new_ciphertext = bb_encrypted.ciphertext
-                new_key_id = bb_encrypted.key_id
-            if new_key_id != active:
-                raise ValueError("active_key_mismatch")
+            try:
+                if kind == "gitlab_tokens":
+                    if row.origin is None:
+                        raise ValueError("credential_context_invalid")
+                    gl_context = GitLabContext(row.installation, row.workspace, row.origin)
+                    plaintext = self._gitlab.decrypt(
+                        GitLabEncrypted(row.key_id, row.ciphertext), context=gl_context
+                    )
+                    gl_encrypted = self._gitlab.encrypt(plaintext, context=gl_context)
+                    new_ciphertext = gl_encrypted.token_ciphertext
+                    new_key_id = gl_encrypted.key_id
+                else:
+                    bb_context = BitbucketContext(
+                        row.installation,
+                        row.workspace,
+                        row.id if kind == "bitbucket_webhook_secrets" else None,
+                    )
+                    purpose = (
+                        CredentialPurpose.WEBHOOK_SECRET
+                        if kind == "bitbucket_webhook_secrets"
+                        else CredentialPurpose.TOKEN
+                    )
+                    plaintext = self._bitbucket.decrypt(
+                        BitbucketEncrypted(row.key_id, row.ciphertext),
+                        context=bb_context,
+                        purpose=purpose,
+                    )
+                    bb_encrypted = self._bitbucket.encrypt(
+                        plaintext, context=bb_context, purpose=purpose
+                    )
+                    new_ciphertext = bb_encrypted.ciphertext
+                    new_key_id = bb_encrypted.key_id
+                if new_key_id != active:
+                    raise ValueError("active_key_mismatch")
+            except (KeyError, ValueError) as exc:
+                self.failure_count += 1
+                if len(self.failures) < _MAX_FAILURE_DETAILS:
+                    self.failures.append(
+                        {
+                            "kind": kind,
+                            "id": str(row.id),
+                            "key_id": row.key_id,
+                            "error": type(exc).__name__,
+                        }
+                    )
+                continue
             async with self._engine.begin() as db:
                 changed = await db.execute(
                     text(_UPDATE[kind]),
@@ -275,6 +301,21 @@ async def execute(
             bitbucket_active=bb_active,
             gitlab_active=gl_active,
         )
+        if args.command == "dry-run":
+            counts = await operator.counts()
+            bitbucket_keys = set(json.loads(env["BITBUCKET_CREDENTIAL_KEYS"]))
+            gitlab_keys = set(json.loads(env["GITLAB_CREDENTIAL_KEYS"]))
+            missing = {
+                kind: sorted(
+                    set(counts[kind]) - (gitlab_keys if kind == "gitlab_tokens" else bitbucket_keys)
+                )
+                for kind in KINDS
+            }
+            missing = {kind: ids for kind, ids in missing.items() if ids}
+            result: dict[str, object] = {"counts": counts}
+            if missing:
+                result["missing_key_ids"] = missing
+            return result, not missing
         updated: dict[Kind, int] = dict.fromkeys(KINDS, 0)
         if args.command == "run":
             for _ in range(args.max_batches):
@@ -283,7 +324,11 @@ async def execute(
         counts = await operator.counts()
         ready = all(all(key == operator._active[kind] for key in counts[kind]) for kind in KINDS)
         if args.command == "run":
-            return {"updated": updated, "counts": counts, "ready": ready}, True
+            result = {"updated": updated, "counts": counts, "ready": ready}
+            if operator.failure_count:
+                result["failure_count"] = operator.failure_count
+                result["failed_rows"] = operator.failures
+            return result, operator.failure_count == 0
         return {"counts": counts}, args.command != "verify" or ready
     finally:
         await engine.dispose()

@@ -719,10 +719,11 @@ def test_discovery_propagates_sanitized_retry_after() -> None:
             429,
         ),
         (BitbucketRotationProbeError("provider_unavailable", repository_uuid=REPOSITORY), 502),
+        (BitbucketRotationProbeError("provider_unavailable", repository_uuid=None), 502),
         (BitbucketManagementError("repository_uuid_conflict", repository_uuid=REPOSITORY), 409),
     ],
 )
-def test_rotation_failure_reports_only_repository_uuid_and_safe_code(
+def test_rotation_failure_reports_only_safe_code_and_optional_repository_uuid(
     error: BitbucketManagementError | BitbucketRotationProbeError, status: int
 ) -> None:
     class FailingManager:
@@ -742,7 +743,10 @@ def test_rotation_failure_reports_only_repository_uuid_and_safe_code(
 
     assert response.status_code == status
     assert response.json() == {"detail": error.code}
-    assert response.headers["X-Bitbucket-Repository-UUID"] == str(REPOSITORY)
+    if error.repository_uuid is None:
+        assert "X-Bitbucket-Repository-UUID" not in response.headers
+    else:
+        assert response.headers["X-Bitbucket-Repository-UUID"] == str(REPOSITORY)
     if status == 429:
         assert response.headers["Retry-After"] == "37"
     assert "private-token" not in response.text

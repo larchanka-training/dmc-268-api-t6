@@ -22,7 +22,9 @@ from app.modules.code_index.infrastructure.bitbucket_snapshot_source import (
     BitbucketSourceBudgets,
 )
 from app.modules.code_index.infrastructure.bitbucket_tree_checkpoint import (
+    SqlAlchemyBitbucketPersistenceUnitOfWork,
     SqlAlchemyBitbucketPublishedManifest,
+    SqlAlchemyBitbucketRawCheckpoint,
     SqlAlchemyBitbucketTreeCheckpoint,
 )
 from app.modules.code_index.infrastructure.index_store import SqlAlchemyCodeIndexStore
@@ -30,17 +32,58 @@ from app.modules.integrations.bitbucket.application.request_credentials import (
     BitbucketRequestCredential,
     BoundBitbucketTarget,
 )
-from tests.test_code_index_store_postgres import _repository
 
-pytest_plugins = ("tests.test_code_index_store_postgres",)
+pytest_plugins = ("tests.bitbucket_checkpoint_postgres",)
+
+
+@pytest.mark.integration
+def test_checkpoint_charge_needs_uow_commit_and_invalidate_clears_rows(
+    code_index_database: Connection,
+    checkpoint_repository: UUID,
+) -> None:
+    db = code_index_database
+    repository_id = checkpoint_repository
+    db.execute(
+        text("INSERT INTO code_index_states (repository_id) VALUES (:id)"),
+        {"id": repository_id},
+    )
+    schema = str(db.scalar(text("SELECT current_schema()")))
+    db.commit()
+    target = BoundBitbucketTarget(uuid4(), uuid4(), repository_id, uuid4(), 1, 3)
+    sha = "a" * 40
+    url = make_url(os.environ["TEST_DATABASE_URL"]).set(drivername="postgresql+psycopg_async")
+    engine = create_async_engine(url, connect_args={"options": f"-csearch_path={schema}"})
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    count = text("SELECT count(*) FROM bitbucket_tree_checkpoint_pages WHERE repository_id=:id")
+
+    async def exercise() -> None:
+        try:
+            async with SqlAlchemyBitbucketPersistenceUnitOfWork(sessions) as uow:
+                await uow.pages.charge(target, sha, "", {"pagelen": "100"})
+                await uow.session.flush()
+                assert await uow.session.scalar(count, {"id": repository_id}) == 1
+            async with sessions() as session:
+                assert await session.scalar(count, {"id": repository_id}) == 0
+            checkpoint = SqlAlchemyBitbucketTreeCheckpoint(sessions)
+            await checkpoint.charge(target, sha, "", {"pagelen": "100"})
+            async with sessions() as session:
+                assert await session.scalar(count, {"id": repository_id}) == 1
+            await checkpoint.invalidate(target, sha)
+            async with sessions() as session:
+                assert await session.scalar(count, {"id": repository_id}) == 0
+        finally:
+            await engine.dispose()
+
+    asyncio.run(exercise())
 
 
 @pytest.mark.integration
 def test_published_manifest_requires_matching_publication_binding_and_generation(
     code_index_database: Connection,
+    checkpoint_repository: UUID,
 ) -> None:
     db = code_index_database
-    repository_id = UUID(_repository(db))
+    repository_id = checkpoint_repository
     db.execute(
         text(
             "INSERT INTO code_index_states "
@@ -98,9 +141,10 @@ def test_published_manifest_requires_matching_publication_binding_and_generation
 @pytest.mark.integration
 def test_checkpoint_survives_restart_and_invalidates_on_binding_sha_and_purge(
     code_index_database: Connection,
+    checkpoint_repository: UUID,
 ) -> None:
     db = code_index_database
-    repository_id = UUID(_repository(db))
+    repository_id = checkpoint_repository
     db.execute(
         text("INSERT INTO code_index_states (repository_id) VALUES (:id)"),
         {"id": repository_id},
@@ -172,9 +216,10 @@ def test_checkpoint_survives_restart_and_invalidates_on_binding_sha_and_purge(
 @pytest.mark.integration
 def test_partial_stream_bytes_bound_a_restarted_snapshot(
     code_index_database: Connection,
+    checkpoint_repository: UUID,
 ) -> None:
     db = code_index_database
-    repository_id = UUID(_repository(db))
+    repository_id = checkpoint_repository
     db.execute(
         text("INSERT INTO code_index_states (repository_id) VALUES (:id)"),
         {"id": repository_id},
@@ -232,10 +277,84 @@ def test_partial_stream_bytes_bound_a_restarted_snapshot(
                 stored = await checkpoint.load(target, "a" * 40)
                 assert len(stored) == 1
                 assert stored[0].bytes_read == 25 and not stored[0].complete
-                with pytest.raises(VcsUnavailable, match="work budget exhausted"):
-                    await source().archive("a" * 40, max_bytes=100_000)
+                archive = await source().archive("a" * 40, max_bytes=100_000)
+                assert archive.commit_sha == "a" * 40
+                stored = await checkpoint.load(target, "a" * 40)
+                assert stored[0].bytes_read == len(partial) + len(complete)
+                assert stored[0].complete
+                assert requests == 2
         finally:
             await engine.dispose()
 
     asyncio.run(exercise())
     assert requests == 2
+
+
+@pytest.mark.integration
+def test_raw_checkpoint_survives_restart_and_clears_after_publish_or_purge(
+    code_index_database: Connection,
+    checkpoint_repository: UUID,
+) -> None:
+    db = code_index_database
+    repository_id = checkpoint_repository
+    db.execute(
+        text("INSERT INTO code_index_states (repository_id) VALUES (:id)"),
+        {"id": repository_id},
+    )
+    schema = str(db.scalar(text("SELECT current_schema()")))
+    db.commit()
+    target = BoundBitbucketTarget(uuid4(), uuid4(), repository_id, uuid4(), 1, 3)
+    sha = "a" * 40
+    url = make_url(os.environ["TEST_DATABASE_URL"]).set(drivername="postgresql+psycopg_async")
+    engine = create_async_engine(url, connect_args={"options": f"-csearch_path={schema}"})
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+
+    async def exercise() -> None:
+        try:
+            raw = SqlAlchemyBitbucketRawCheckpoint(sessions)
+            await raw.save_raw(target, sha, "f0.py", b"old")
+            restarted = SqlAlchemyBitbucketRawCheckpoint(sessions)
+            assert await restarted.load_raw(target, sha, "f0.py") == b"old"
+            assert (
+                await restarted.load_raw(replace(target, binding_generation=4), sha, "f0.py")
+                is None
+            )
+            await raw.save_raw(replace(target, binding_generation=4), sha, "f0.py", b"new")
+            assert await restarted.load_raw(target, sha, "f0.py") is None
+            assert (
+                await restarted.load_raw(replace(target, binding_generation=4), sha, "f0.py")
+                == b"new"
+            )
+            pages = SqlAlchemyBitbucketTreeCheckpoint(sessions)
+            await pages.charge(replace(target, binding_generation=4), sha, "", {"pagelen": "100"})
+            await raw.clear(replace(target, binding_generation=4), sha)
+            assert (
+                await restarted.load_raw(replace(target, binding_generation=4), sha, "f0.py")
+                is None
+            )
+            assert await pages.load(replace(target, binding_generation=4), sha) == ()
+            await raw.save_raw(replace(target, binding_generation=4), sha, "f0.py", b"x")
+            async with sessions.begin() as session:
+                await SqlAlchemyCodeIndexStore(session).purge(repository_id, PurgeReason.DISABLED)
+            assert (
+                await restarted.load_raw(replace(target, binding_generation=4), sha, "f0.py")
+                is None
+            )
+        finally:
+            await engine.dispose()
+
+    asyncio.run(exercise())
+    assert (
+        db.scalar(
+            text("SELECT raw_checkpoint_bytes FROM code_index_states WHERE repository_id=:id"),
+            {"id": repository_id},
+        )
+        == 0
+    )
+    assert (
+        db.scalar(
+            text("SELECT count(*) FROM bitbucket_raw_checkpoint_blobs WHERE repository_id=:id"),
+            {"id": repository_id},
+        )
+        == 0
+    )

@@ -3,13 +3,12 @@
 from __future__ import annotations
 
 import re
-from datetime import UTC, datetime
-from email.utils import parsedate_to_datetime
 from uuid import UUID
 
 import httpx
 
 from app.modules.integrations.bitbucket.application.provider_error import BitbucketProviderError
+from app.modules.integrations.bitbucket.infrastructure.retry_after import parse_retry_after
 
 
 def bitbucket_path(value: object) -> str:
@@ -53,14 +52,5 @@ def check_bitbucket_response(response: httpx.Response) -> None:
 
 
 def _retry_after(value: str | None) -> int | None:
-    if value is None or len(value) > 64 or not value.isascii():
-        return None
-    if value.isdecimal():
-        return min(int(value), 3600)
-    try:
-        parsed = parsedate_to_datetime(value)
-        if parsed.tzinfo is None:
-            return None
-        return min(max(int((parsed - datetime.now(UTC)).total_seconds()), 0), 3600)
-    except (TypeError, ValueError, OverflowError):
-        return None
+    delay = parse_retry_after(value)
+    return int(delay.total_seconds()) if delay is not None else None

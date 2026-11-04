@@ -14,15 +14,18 @@ from app.common.infrastructure.db.unit_of_work import SqlAlchemyUnitOfWork
 from app.modules.code_index.application.bitbucket_persistence import (
     BitbucketIndexTarget,
     PersistBitbucketPublishedManifest,
+    PersistBitbucketRawCheckpoint,
     PersistBitbucketTreeCheckpoint,
     PublishedManifestStore,
+    RawBlobCheckpoint,
     SourceListingCheckpoint,
     SourceListingPage,
 )
-from app.modules.code_index.application.vcs import ArchiveEntry, VcsUnavailable
+from app.modules.code_index.application.vcs import ArchiveEntry, IndexLimitExceeded, VcsUnavailable
 from app.modules.code_index.domain.enums import IndexStatus
 from app.modules.code_index.infrastructure.models import (
     BitbucketPublishedManifest,
+    BitbucketRawCheckpointBlob,
     BitbucketTreeCheckpointPage,
     CodeIndexState,
 )
@@ -83,6 +86,20 @@ class _TreeCheckpointRepository:
                 row.complete,
             )
             for row in rows
+        )
+
+    async def invalidate(self, target: BitbucketIndexTarget, sha: str) -> None:
+        session = self._session
+        state = await session.get(CodeIndexState, target.repository_id, with_for_update=True)
+        if state is None:
+            return
+        await session.execute(
+            delete(BitbucketTreeCheckpointPage).where(
+                BitbucketTreeCheckpointPage.repository_id == target.repository_id,
+                BitbucketTreeCheckpointPage.target_sha == sha,
+                BitbucketTreeCheckpointPage.binding_generation == target.binding_generation,
+                BitbucketTreeCheckpointPage.index_generation == state.generation,
+            )
         )
 
     async def charge(
@@ -180,6 +197,113 @@ class _TreeCheckpointRepository:
         existing.bytes_read += count
 
 
+class _RawCheckpointRepository:
+    """Session-bound raw writes, fenced to one target and capped at 100 MiB."""
+
+    def __init__(self, session: AsyncSession) -> None:
+        self._session = session
+
+    async def load_raw(self, target: BitbucketIndexTarget, sha: str, path: str) -> bytes | None:
+        session = self._session
+        state = await session.get(CodeIndexState, target.repository_id)
+        if state is None or state.purge_reason is not None:
+            return None
+        row = await session.get(BitbucketRawCheckpointBlob, (target.repository_id, _key(path)))
+        if (
+            row is None
+            or row.target_sha != sha
+            or row.binding_generation != target.binding_generation
+            or row.index_generation != state.generation
+            or row.path != path
+        ):
+            return None
+        return bytes(row.body)
+
+    async def save_raw(
+        self, target: BitbucketIndexTarget, sha: str, path: str, body: bytes
+    ) -> None:
+        if len(body) > 100 * 1024 * 1024:
+            raise IndexLimitExceeded("download_bytes")
+        session = self._session
+        state = await session.get(CodeIndexState, target.repository_id, with_for_update=True)
+        if state is None or state.purge_reason is not None:
+            raise VcsUnavailable("Bitbucket raw checkpoint lost its repository")
+        first = await session.scalar(
+            select(BitbucketRawCheckpointBlob)
+            .where(BitbucketRawCheckpointBlob.repository_id == target.repository_id)
+            .limit(1)
+        )
+        if first is not None and (
+            first.target_sha != sha
+            or first.binding_generation != target.binding_generation
+            or first.index_generation != state.generation
+        ):
+            await session.execute(
+                delete(BitbucketRawCheckpointBlob).where(
+                    BitbucketRawCheckpointBlob.repository_id == target.repository_id
+                )
+            )
+            state.raw_checkpoint_bytes = 0
+            first = None
+        if first is None and state.raw_checkpoint_bytes:
+            state.raw_checkpoint_bytes = 0
+        existing = await session.get(BitbucketRawCheckpointBlob, (target.repository_id, _key(path)))
+        if existing is not None:
+            if (
+                existing.target_sha != sha
+                or existing.binding_generation != target.binding_generation
+                or existing.index_generation != state.generation
+                or existing.path != path
+                or bytes(existing.body) != body
+            ):
+                raise VcsUnavailable("Bitbucket raw checkpoint changed")
+            return
+        if state.raw_checkpoint_bytes + len(body) > 100 * 1024 * 1024:
+            raise IndexLimitExceeded("download_bytes")
+        session.add(
+            BitbucketRawCheckpointBlob(
+                repository_id=target.repository_id,
+                path_key=_key(path),
+                target_sha=sha,
+                binding_generation=target.binding_generation,
+                index_generation=state.generation,
+                path=path,
+                body=body,
+            )
+        )
+        state.raw_checkpoint_bytes += len(body)
+
+    async def clear(self, target: BitbucketIndexTarget, sha: str) -> None:
+        session = self._session
+        state = await session.get(CodeIndexState, target.repository_id, with_for_update=True)
+        if state is None:
+            return
+        first = await session.scalar(
+            select(BitbucketRawCheckpointBlob)
+            .where(BitbucketRawCheckpointBlob.repository_id == target.repository_id)
+            .limit(1)
+        )
+        if first is not None and (
+            first.target_sha == sha
+            and first.binding_generation == target.binding_generation
+            and first.index_generation == state.generation
+        ):
+            await session.execute(
+                delete(BitbucketRawCheckpointBlob).where(
+                    BitbucketRawCheckpointBlob.repository_id == target.repository_id
+                )
+            )
+            state.raw_checkpoint_bytes = 0
+        await session.execute(
+            delete(BitbucketTreeCheckpointPage).where(
+                BitbucketTreeCheckpointPage.repository_id == target.repository_id,
+                BitbucketTreeCheckpointPage.target_sha == sha,
+                BitbucketTreeCheckpointPage.binding_generation == target.binding_generation,
+                BitbucketTreeCheckpointPage.index_generation == state.generation,
+            )
+        )
+
+
 class _PublishedManifestRepository:
     """Session-bound published manifest writes; the application use case commits."""
 
@@ -266,11 +390,20 @@ class SqlAlchemyBitbucketPersistenceUnitOfWork(SqlAlchemyUnitOfWork):
         return _TreeCheckpointRepository(self.session)
 
     @property
+    def raw(self) -> RawBlobCheckpoint:
+        return _RawCheckpointRepository(self.session)
+
+    @property
     def manifest(self) -> PublishedManifestStore:
         return _PublishedManifestRepository(self.session)
 
 
 class SqlAlchemyBitbucketTreeCheckpoint(PersistBitbucketTreeCheckpoint):
+    def __init__(self, sessions: async_sessionmaker[AsyncSession]) -> None:
+        super().__init__(partial(SqlAlchemyBitbucketPersistenceUnitOfWork, sessions))
+
+
+class SqlAlchemyBitbucketRawCheckpoint(PersistBitbucketRawCheckpoint):
     def __init__(self, sessions: async_sessionmaker[AsyncSession]) -> None:
         super().__init__(partial(SqlAlchemyBitbucketPersistenceUnitOfWork, sessions))
 

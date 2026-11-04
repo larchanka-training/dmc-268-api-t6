@@ -42,6 +42,8 @@ from tests.github_webhook_fakes import (
     _post,
 )
 
+pytest_plugins = ("tests.github_webhook_fakes",)
+
 
 def test_signed_delivery_is_saved_once_and_http_never_dispatches() -> None:
     body = json.dumps({"action": "added", "installation": {"id": 17}}).encode()

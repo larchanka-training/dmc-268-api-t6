@@ -8,11 +8,15 @@ from hashlib import sha256
 from urllib.parse import parse_qs, quote, unquote, urlsplit
 from uuid import UUID
 
+from app.modules.integrations.bitbucket.application.provider_error import BitbucketProviderError
 from app.modules.integrations.bitbucket.infrastructure.commit_hash import (
     pr_commit_hash,
     resolved_commit_hash,
 )
-from app.modules.integrations.bitbucket.infrastructure.provider_validation import bitbucket_path
+from app.modules.integrations.bitbucket.infrastructure.provider_validation import (
+    bitbucket_path,
+    parse_bitbucket_uuid,
+)
 from app.modules.integrations.bitbucket.infrastructure.run_http import (
     BitbucketRunHttp,
     BitbucketRunHttpError,
@@ -102,10 +106,9 @@ def _sha(value: object) -> str:
 
 
 def _uuid(value: object) -> UUID:
-    text = _string(value, 40)
     try:
-        return UUID(text.strip("{}"))
-    except ValueError:
+        return parse_bitbucket_uuid(value)
+    except BitbucketProviderError:
         raise ValueError("invalid Bitbucket repository UUID") from None
 
 

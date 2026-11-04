@@ -19,6 +19,7 @@ from sqlalchemy import (
     DateTime,
     ForeignKey,
     Index,
+    LargeBinary,
     String,
     Uuid,
     func,
@@ -58,6 +59,10 @@ class CodeIndexState(Base):
         ),
         CheckConstraint(
             "stored_bytes >= 0 AND pending_bytes >= 0", name="ck_code_index_states_bytes"
+        ),
+        CheckConstraint(
+            "raw_checkpoint_bytes >= 0 AND raw_checkpoint_bytes <= 104857600",
+            name="ck_code_index_states_raw_checkpoint_bytes",
         ),
         CheckConstraint(
             "pending_bytes = 0 OR lease_token IS NOT NULL",
@@ -146,6 +151,9 @@ class CodeIndexState(Base):
     # attempt's rows: the storage quotas of ADR §7.
     stored_bytes: Mapped[int] = mapped_column(BIGINT, nullable=False, server_default=text("0"))
     pending_bytes: Mapped[int] = mapped_column(BIGINT, nullable=False, server_default=text("0"))
+    raw_checkpoint_bytes: Mapped[int] = mapped_column(
+        BIGINT, nullable=False, server_default=text("0")
+    )
     # The outbox of index wake-ups (#143): a trigger sets it in its own transaction, and
     # the worker leader wakes the job after the commit and clears it with a compare-and-set.
     wake_requested_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
@@ -180,6 +188,28 @@ class BitbucketTreeCheckpointPage(Base):
     bytes_read: Mapped[int] = mapped_column(INTEGER, nullable=False)
     attempts: Mapped[int] = mapped_column(INTEGER, nullable=False)
     complete: Mapped[bool] = mapped_column(BOOLEAN, nullable=False)
+
+
+class BitbucketRawCheckpointBlob(Base):
+    """Bounded raw file bytes for a pinned, incomplete Bitbucket index build."""
+
+    __tablename__ = "bitbucket_raw_checkpoint_blobs"
+    __table_args__ = (
+        CheckConstraint(
+            "binding_generation > 0 AND index_generation >= 0 AND octet_length(body) <= 104857600",
+            name="ck_bitbucket_raw_checkpoint_blobs_budget",
+        ),
+    )
+
+    repository_id: Mapped[UUID] = mapped_column(
+        ForeignKey("code_index_states.repository_id", ondelete="CASCADE"), primary_key=True
+    )
+    path_key: Mapped[str] = mapped_column(String(64), primary_key=True)
+    target_sha: Mapped[str] = mapped_column(String(40), nullable=False)
+    binding_generation: Mapped[int] = mapped_column(BIGINT, nullable=False)
+    index_generation: Mapped[int] = mapped_column(BIGINT, nullable=False)
+    path: Mapped[str] = mapped_column(String(1024), nullable=False)
+    body: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
 
 
 class BitbucketPublishedManifest(Base):

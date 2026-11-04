@@ -5,17 +5,24 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from typing import cast
 from uuid import UUID
 
 import pytest
 
+from app.modules.integrations.bitbucket.application.provider_error import (
+    BitbucketProviderError,
+    BitbucketPullRequestResponseError,
+)
 from app.modules.integrations.bitbucket.application.request_credentials import (
     BoundBitbucketTarget,
 )
 from app.modules.reviews.application.determine_ci_eligibility import WebhookRunIdentity
 from app.modules.reviews.application.project_bitbucket_pull_request import (
     BitbucketPullRequestCommand,
+    BitbucketPushContinuationPending,
     BitbucketPushContinuationStore,
+    BitbucketPushRetryPending,
     CanonicalBitbucketPullRequest,
     ProjectBitbucketPullRequest,
     ProjectedBitbucketPullRequest,
@@ -345,5 +352,227 @@ def test_metadata_only_projection_does_not_create_a_new_run() -> None:
         )
         assert calls == ["resolve", "http", "checkpoint", "lock", "project", "commit"]
         assert outcome.enqueue is None
+
+    asyncio.run(scenario())
+
+
+def test_push_keeps_scanning_after_one_invalid_pull_request() -> None:
+    class PageCandidates(PushCandidates):
+        async def matching_open_pr_page(
+            self,
+            installation_id: UUID,
+            repository_id: UUID,
+            repository_uuid: UUID,
+            binding_generation: int,
+            webhook_generation: int,
+            branches: frozenset[str],
+            after_number: int | None,
+        ) -> tuple[int, ...]:
+            first = 17 if after_number is None else after_number + 1
+            return tuple(range(first, min(first + 5, 520)))
+
+    class CurrentWithOneInvalid(Current):
+        invalid_19 = True
+
+        async def get_current(
+            self, target: BoundBitbucketTarget, number: int
+        ) -> CanonicalBitbucketPullRequest:
+            self.calls.append(f"http:{number}")
+            if number == 19 and self.invalid_19:
+                raise BitbucketPullRequestResponseError()
+            return CanonicalBitbucketPullRequest(
+                repository_uuid=TARGET.repository_uuid,
+                number=number,
+                state="open",
+                title="Change",
+                description=None,
+                author_login="reviewer",
+                source_branch="feature",
+                target_branch="main",
+                base_sha="b" * 40,
+                head_sha="a" * 40,
+                provider_updated_at=NOW,
+                web_url=f"https://bitbucket.org/team/repo/pull-requests/{number}",
+            )
+
+    @dataclass
+    class Continuation:
+        position_value: int | None = None
+        deferred: list[tuple[int, str]] = field(default_factory=list)
+        due: bool = True
+        untried: bool = False
+
+        async def position(self, *_: object) -> int | None:
+            return self.position_value
+
+        async def advance(
+            self,
+            delivery_id: str,
+            repository_id: UUID,
+            binding_generation: int,
+            webhook_generation: int,
+            expected: int | None,
+            next_number: int,
+            deferred_numbers: tuple[tuple[int, str], ...],
+        ) -> None:
+            assert self.position_value == expected
+            self.position_value = next_number
+            self.deferred.extend(deferred_numbers)
+
+        async def pending_numbers(self, *_: object) -> tuple[int, ...]:
+            return (19,) if self.due else ()
+
+        async def has_failed(self, *_: object) -> bool:
+            return False
+
+        async def has_pending(self, *_: object) -> bool:
+            return True
+
+        async def settle_pending(
+            self,
+            delivery_id: str,
+            repository_id: UUID,
+            binding_generation: int,
+            webhook_generation: int,
+            completed: tuple[int, ...],
+            deferred: tuple[tuple[int, str], ...],
+        ) -> tuple[bool, bool, bool]:
+            if self.untried:
+                assert completed == ()
+                assert deferred == ((19, "invalid_provider_response"),)
+            return True, self.untried, False
+
+    class PushUow(Uow):
+        def __init__(self, calls: list[str], continuation: Continuation) -> None:
+            super().__init__(calls, Store(calls))
+            self._continuation = continuation
+
+        @property
+        def push_continuation(self) -> BitbucketPushContinuationStore:
+            return cast(BitbucketPushContinuationStore, self._continuation)
+
+        async def __aenter__(self) -> PushUow:
+            return self
+
+    async def scenario() -> None:
+        calls: list[str] = []
+        continuation = Continuation()
+        current = CurrentWithOneInvalid(calls)
+        use_case = ProjectBitbucketPullRequest(
+            authority=Authority(calls),
+            current=current,
+            uow_factory=lambda: PushUow(calls, continuation),
+            push_candidates=PageCandidates(),
+            enqueuer=Enqueuer(calls),
+        )
+        args = (
+            TARGET.installation_id,
+            TARGET.repository_id,
+            TARGET.repository_uuid,
+            frozenset({"feature"}),
+            6,
+            7,
+            "receipt-1",
+        )
+        for _ in range(101):
+            with pytest.raises(BitbucketPushContinuationPending):
+                await use_case.push(*args)
+        assert continuation.position_value == 519
+        assert continuation.deferred == [(19, "invalid_provider_response")]
+        assert "http:519" in calls
+        assert sum(call.startswith("http:") for call in calls) == 503
+        with pytest.raises(BitbucketPushRetryPending):
+            await use_case.push(*args)
+        current.invalid_19 = False
+        with pytest.raises(BitbucketPushContinuationPending):
+            await use_case.push(*args)
+        current.invalid_19 = True
+        continuation.untried = True
+        with pytest.raises(BitbucketPushContinuationPending):
+            await use_case.push(*args)
+        continuation.due = False
+        with pytest.raises(BitbucketPushRetryPending):
+            await use_case.push(*args)
+        assert continuation.position_value == 519
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize(
+    "provider_error",
+    [
+        BitbucketProviderError("provider_rate_limited", retry_after=3600),
+        BitbucketProviderError("invalid_provider_response"),
+    ],
+)
+def test_push_shared_provider_failure_replays_only_the_uncommitted_page(
+    provider_error: BitbucketProviderError,
+) -> None:
+    class PageCandidates(PushCandidates):
+        async def matching_open_pr_page(
+            self,
+            installation_id: UUID,
+            repository_id: UUID,
+            repository_uuid: UUID,
+            binding_generation: int,
+            webhook_generation: int,
+            branches: frozenset[str],
+            after_number: int | None,
+        ) -> tuple[int, ...]:
+            assert after_number is None
+            return (17, 19)
+
+    class RateLimitedCurrent(Current):
+        async def get_current(
+            self, target: BoundBitbucketTarget, number: int
+        ) -> CanonicalBitbucketPullRequest:
+            if number == 19:
+                raise provider_error
+            return await super().get_current(target, number)
+
+    class Continuation:
+        advances = 0
+
+        async def position(self, *_: object) -> int | None:
+            return None
+
+        async def advance(self, *_: object) -> None:
+            self.advances += 1
+
+    class PushUow(Uow):
+        def __init__(self, calls: list[str], continuation: Continuation) -> None:
+            super().__init__(calls, Store(calls))
+            self._continuation = continuation
+
+        @property
+        def push_continuation(self) -> BitbucketPushContinuationStore:
+            return cast(BitbucketPushContinuationStore, self._continuation)
+
+        async def __aenter__(self) -> PushUow:
+            return self
+
+    async def scenario() -> None:
+        calls: list[str] = []
+        continuation = Continuation()
+        use_case = ProjectBitbucketPullRequest(
+            authority=Authority(calls),
+            current=RateLimitedCurrent(calls),
+            uow_factory=lambda: PushUow(calls, continuation),
+            push_candidates=PageCandidates(),
+            enqueuer=Enqueuer(calls),
+        )
+        with pytest.raises(BitbucketProviderError) as error:
+            await use_case.push(
+                TARGET.installation_id,
+                TARGET.repository_id,
+                TARGET.repository_uuid,
+                frozenset({"feature"}),
+                6,
+                7,
+                "receipt-2",
+            )
+        assert error.value is provider_error
+        assert continuation.advances == 0
+        assert "enqueue" in calls
 
     asyncio.run(scenario())

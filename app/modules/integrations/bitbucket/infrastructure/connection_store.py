@@ -313,6 +313,45 @@ class SqlAlchemyBitbucketConnectionStore:
                 last.repository_id,
             )
 
+    async def is_webhook_confirmed(
+        self, *, workspace_id: UUID, installation_id: UUID, repository_id: UUID
+    ) -> bool:
+        confirmed_id = await self._session.scalar(
+            select(BitbucketRepositoryWebhookSecret.repository_id)
+            .join(
+                Repository,
+                Repository.id == BitbucketRepositoryWebhookSecret.repository_id,
+            )
+            .join(
+                BitbucketRepositoryIdentity,
+                BitbucketRepositoryIdentity.repository_id == Repository.id,
+            )
+            .join(
+                ProviderInstallation,
+                ProviderInstallation.id == Repository.provider_installation_id,
+            )
+            .join(
+                BitbucketConnection,
+                BitbucketConnection.provider_installation_id == ProviderInstallation.id,
+            )
+            .where(
+                Repository.id == repository_id,
+                Repository.workspace_id == workspace_id,
+                Repository.provider_installation_id == installation_id,
+                Repository.installation_available.is_(True),
+                BitbucketRepositoryIdentity.workspace_id == workspace_id,
+                BitbucketRepositoryIdentity.provider_installation_id == installation_id,
+                BitbucketRepositoryWebhookSecret.confirmed_at.is_not(None),
+                ProviderInstallation.id == installation_id,
+                ProviderInstallation.workspace_id == workspace_id,
+                ProviderInstallation.provider == "bitbucket",
+                ProviderInstallation.deleted_at.is_(None),
+                BitbucketConnection.workspace_id == workspace_id,
+                BitbucketConnection.revoked_at.is_(None),
+            )
+        )
+        return confirmed_id is not None
+
     async def create_connection(
         self,
         *,

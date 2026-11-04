@@ -6,7 +6,10 @@ from uuid import UUID
 
 import httpx
 
-from app.modules.code_index.application.bitbucket_persistence import SourceListingCheckpoint
+from app.modules.code_index.application.bitbucket_persistence import (
+    RawBlobCheckpoint,
+    SourceListingCheckpoint,
+)
 from app.modules.code_index.domain.limits import IndexLimits
 from app.modules.code_index.infrastructure.bitbucket_snapshot_source import (
     BitbucketRepositorySnapshotSource,
@@ -55,6 +58,7 @@ def _source(
     limits: IndexLimits | None = None,
     budgets: BitbucketSourceBudgets | None = None,
     checkpoint: SourceListingCheckpoint | None = None,
+    raw_checkpoint: RawBlobCheckpoint | None = None,
     published_manifest: PublishedManifestStore | None = None,
 ) -> BitbucketRepositorySnapshotSource:
     async def target() -> BoundBitbucketTarget:
@@ -67,5 +71,6 @@ def _source(
         limits=limits,
         budgets=budgets,
         checkpoint=checkpoint,
+        raw_checkpoint=raw_checkpoint,
         published_manifest=published_manifest,
     )
