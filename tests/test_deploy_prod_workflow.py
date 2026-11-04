@@ -22,6 +22,7 @@ from typing import Any
 
 import pytest
 
+from tests.monitoring_acceptance_workflow import DRONE_SSH_BANNER
 from tests.test_check_isolation import (
     FAKE_DOCKER,
     INSPECT_FORMAT,
@@ -47,7 +48,6 @@ from tests.test_deploy_staging_services import (
     _workflow_step,
     make_host,
 )
-from tests.test_monitoring_acceptance import DRONE_SSH_BANNER
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW = REPO_ROOT / ".github" / "workflows" / "deploy-prod.yml"

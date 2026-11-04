@@ -1,0 +1,120 @@
+# Unit tests of the queries of the public status page (deploy/monitoring/status/status_page.py,
+# api#309), run by CI (job monitoring-validate) next to alerts.test.yml:
+#   docker run --rm --entrypoint promtool -v "$PWD:/w:ro" -w /w <prometheus image> \
+#     test rules tests/monitoring/status.test.yml
+# Every expr below is a query of status_page.py word for word; tests/test_status_page.py keeps the
+# two in step. First group: LAST_FIRING_QUERY, the timestamp of the last firing sample of each alert
+# series within a week, which the page prints as "works since" for a component that has had a
+# problem. Second group: the eight presence expressions ("is the component observed at all"), on
+# series shaped like main after #423 (environment from the target or by relabeling); each one
+# answers with the series of its own environment only.
+evaluation_interval: 1m
+
+tests:
+  - interval: 1m
+    input_series:
+      # Firing for ten minutes (the last sample at 9m), then resolved: Prometheus writes a stale
+      # marker, so the series is gone and the answer stays the time of the last firing sample.
+      - series: 'ALERTS{alertname="PublicEndpointDown", alertstate="firing", severity="critical", host="staging-api.example.test"}'
+        values: "1x9 stale"
+      # Still firing at the evaluation time.
+      - series: 'ALERTS{alertname="PostgresDown", alertstate="firing", severity="critical"}'
+        values: "1x30"
+      # Pending is not a problem of the page; neither is an alert it does not show.
+      - series: 'ALERTS{alertname="ReviewRunsStuckInQueue", alertstate="pending", severity="warning"}'
+        values: "1x25"
+      - series: 'ALERTS{alertname="HostCpuHigh", alertstate="firing", severity="warning"}'
+        values: "1x25"
+    promql_expr_test:
+      - expr: 'max_over_time(timestamp(ALERTS{alertstate="firing",alertname=~"ApiHigh5xxRate|PostgresDown|PublicEndpointDown|ReviewQueueWithoutConsumer|ReviewRunsStuckInQueue|TargetDown|WebhookWorkerDown"})[7d:1m])'
+        eval_time: 30m
+        exp_samples:
+          - labels: '{alertname="PublicEndpointDown", alertstate="firing", severity="critical", host="staging-api.example.test"}'
+            value: 540
+          - labels: '{alertname="PostgresDown", alertstate="firing", severity="critical"}'
+            value: 1800
+
+  - interval: 1m
+    input_series:
+      # Probes: one per public name, the environment next to the host (probes.json).
+      - series: 'probe_success{job="blackbox", host="staging-api.example.test", environment="staging"}'
+        values: "1x10"
+      - series: 'probe_success{job="blackbox", host="api.example.test", environment="prod"}'
+        values: "1x10"
+      - series: 'probe_success{job="blackbox", host="staging-ui.example.test", environment="staging"}'
+        values: "1x10"
+      - series: 'probe_success{job="blackbox", host="ui.example.test", environment="prod"}'
+        values: "1x10"
+      # Another name of the blackbox job is neither API nor UI.
+      - series: 'probe_success{job="blackbox", host="grafana.example.test", environment="shared"}'
+        values: "1x10"
+      # Consumers of the review queues: staging by the static label of the job, prod by the
+      # file_sd target (rabbitmq-prod.json) with the same job and queue names. A queue the page does
+      # not watch is not a consumer of the review.
+      - series: 'rabbitmq_detailed_queue_consumers{job="rabbitmq-queues", queue="review.run.fast", environment="staging"}'
+        values: "1x10"
+      - series: 'rabbitmq_detailed_queue_consumers{job="rabbitmq-queues", queue="review.publish", environment="staging"}'
+        values: "1x10"
+      - series: 'rabbitmq_detailed_queue_consumers{job="rabbitmq-queues", queue="review.run.fast", environment="prod"}'
+        values: "1x10"
+      - series: 'rabbitmq_detailed_queue_consumers{job="rabbitmq-queues", queue="review.publish", environment="prod"}'
+        values: "1x10"
+      - series: 'rabbitmq_detailed_queue_consumers{job="rabbitmq-queues", queue="review.run.deep", environment="staging"}'
+        values: "1x10"
+      # cAdvisor: the postgres of the compose project of each environment; another service of the
+      # project is not the intake.
+      - series: 'container_last_seen{container_label_com_docker_compose_service="postgres", container_label_com_docker_compose_project="dmc-268-api", environment="staging"}'
+        values: "1x10"
+      - series: 'container_last_seen{container_label_com_docker_compose_service="postgres", container_label_com_docker_compose_project="dmc-268-api-staging", environment="staging"}'
+        values: "1x10"
+      - series: 'container_last_seen{container_label_com_docker_compose_service="postgres", container_label_com_docker_compose_project="dmc-268-api-prod", environment="prod"}'
+        values: "1x10"
+      - series: 'container_last_seen{container_label_com_docker_compose_service="worker", container_label_com_docker_compose_project="dmc-268-api", environment="staging"}'
+        values: "1x10"
+    promql_expr_test:
+      - expr: 'probe_success{job="blackbox",host=~"staging-api\\..+"}'
+        eval_time: 5m
+        exp_samples:
+          - labels: 'probe_success{job="blackbox", host="staging-api.example.test", environment="staging"}'
+            value: 1
+      - expr: 'probe_success{job="blackbox",host=~"api\\..+"}'
+        eval_time: 5m
+        exp_samples:
+          - labels: 'probe_success{job="blackbox", host="api.example.test", environment="prod"}'
+            value: 1
+      - expr: 'probe_success{job="blackbox",host=~"staging-ui\\..+"}'
+        eval_time: 5m
+        exp_samples:
+          - labels: 'probe_success{job="blackbox", host="staging-ui.example.test", environment="staging"}'
+            value: 1
+      - expr: 'probe_success{job="blackbox",host=~"ui\\..+"}'
+        eval_time: 5m
+        exp_samples:
+          - labels: 'probe_success{job="blackbox", host="ui.example.test", environment="prod"}'
+            value: 1
+      - expr: 'rabbitmq_detailed_queue_consumers{queue=~"review\\.run\\.fast|review\\.publish",environment="staging"}'
+        eval_time: 5m
+        exp_samples:
+          - labels: 'rabbitmq_detailed_queue_consumers{job="rabbitmq-queues", queue="review.run.fast", environment="staging"}'
+            value: 1
+          - labels: 'rabbitmq_detailed_queue_consumers{job="rabbitmq-queues", queue="review.publish", environment="staging"}'
+            value: 1
+      - expr: 'rabbitmq_detailed_queue_consumers{queue=~"review\\.run\\.fast|review\\.publish",environment="prod"}'
+        eval_time: 5m
+        exp_samples:
+          - labels: 'rabbitmq_detailed_queue_consumers{job="rabbitmq-queues", queue="review.run.fast", environment="prod"}'
+            value: 1
+          - labels: 'rabbitmq_detailed_queue_consumers{job="rabbitmq-queues", queue="review.publish", environment="prod"}'
+            value: 1
+      - expr: 'container_last_seen{container_label_com_docker_compose_service="postgres",container_label_com_docker_compose_project=~"dmc-268-api.*",container_label_com_docker_compose_project!~".*-prod"}'
+        eval_time: 5m
+        exp_samples:
+          - labels: 'container_last_seen{container_label_com_docker_compose_service="postgres", container_label_com_docker_compose_project="dmc-268-api", environment="staging"}'
+            value: 1
+          - labels: 'container_last_seen{container_label_com_docker_compose_service="postgres", container_label_com_docker_compose_project="dmc-268-api-staging", environment="staging"}'
+            value: 1
+      - expr: 'container_last_seen{container_label_com_docker_compose_service="postgres",container_label_com_docker_compose_project="dmc-268-api-prod"}'
+        eval_time: 5m
+        exp_samples:
+          - labels: 'container_last_seen{container_label_com_docker_compose_service="postgres", container_label_com_docker_compose_project="dmc-268-api-prod", environment="prod"}'
+            value: 1

@@ -7,6 +7,9 @@ name: Monitoring acceptance
 # report goes to the job summary and the last step decides the result. Meant for the course VPS
 # (edge mode, root SSH user); on a Terraform host the public Grafana check and RPS are skipped (no
 # domain, no edge proxy) and the backup dir needs root.
+# The public status page (#309) is checked by the acceptance job on every run (paths and sections);
+# the opt-in job worker-outage stops the staging worker for about ten minutes and times how long the
+# page takes to show it.
 on:
   workflow_dispatch:
     inputs:
@@ -15,6 +18,11 @@ on:
         required: false
         type: boolean
         default: true
+      stop_worker:
+        description: "Stop the staging worker (~10 min without reviews) and time the status page showing it"
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -36,6 +44,13 @@ jobs:
       name: staging
     env:
       MONITORING_DIR: /opt/dmc-268-monitoring
+    # The target for worker-outage, which runs after this job.
+    outputs:
+      host: ${{ steps.target.outputs.host }}
+      port: ${{ steps.target.outputs.port }}
+      mode: ${{ steps.target.outputs.mode }}
+      app_dir: ${{ steps.target.outputs.app_dir }}
+      status_url: ${{ steps.target.outputs.status_url }}
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -66,6 +81,8 @@ jobs:
             fi
             app_dir=/opt/dmc-268-api
             grafana_url=""
+            status_url=""
+            staging_status_url=""
           elif [[ -n "${VPS_HOST}" ]]; then
             mode=course
             host="${VPS_HOST}"
@@ -80,6 +97,8 @@ jobs:
               exit 1
             fi
             grafana_url="https://grafana.${APP_DOMAIN}"
+            status_url="https://status.${APP_DOMAIN}"
+            staging_status_url="https://staging-status.${APP_DOMAIN}"
           else
             echo "No staging target: set STAGING_HOST or organization variable VPS_DMC268_IP_T6" >&2
             exit 1
@@ -99,6 +118,8 @@ jobs:
             echo "port=${port}"
             echo "app_dir=${app_dir}"
             echo "grafana_url=${grafana_url}"
+            echo "status_url=${status_url}"
+            echo "staging_status_url=${staging_status_url}"
           } >> "${GITHUB_OUTPUT}"
 
       - name: Public Grafana endpoints
@@ -128,6 +149,62 @@ jobs:
           else
             echo "result=fail" >> "${GITHUB_OUTPUT}"
             echo "::error::Grafana: /api/health ${health}, /login ${login}, /metrics ${metrics}"
+          fi
+
+      - name: Public status page
+        id: status
+        if: steps.target.outputs.status_url != ''
+        env:
+          STATUS_URL: ${{ steps.target.outputs.status_url }}
+          STAGING_STATUS_URL: ${{ steps.target.outputs.staging_status_url }}
+        run: |
+          # Both names serve the page at "/" and nothing else: every path of Prometheus, Alertmanager
+          # and Grafana is answered 404 at the edge (deploy/edge/Caddyfile). The names differ in the
+          # sections: status.* shows prod and staging, staging-status.* staging only. A failed
+          # connection is reported as 000; the result is decided in Report, so the host checks still
+          # run.
+          code() { curl -sS -o /dev/null -w '%{http_code}' --max-time 20 "$1" || true; }
+          body() { curl -sS --max-time 20 "$1" || true; }
+          result=ok
+          rows=""
+          check() {
+            local actual
+            actual="$(code "$1$2")"
+            rows+="| \`$1$2\` | ${actual} | $3 |"$'\n'
+            if [[ "${actual}" != "$3" ]]; then result=fail; fi
+          }
+          for base in "${STATUS_URL}" "${STAGING_STATUS_URL}"; do
+            check "${base}" / 200
+            for path in "/api/v1/query?query=up" /api/v1/alerts /api/v2/alerts /api/v2/silences \
+              /-/ready /metrics /api/health /login /graph; do
+              check "${base}" "${path}" 404
+            done
+          done
+          prod_page="$(body "${STATUS_URL}/")"
+          staging_page="$(body "${STAGING_STATUS_URL}/")"
+          prod_sections=no
+          if [[ "${prod_page}" == *'<section data-env="prod">'* && "${prod_page}" == *'<section data-env="staging">'* ]]; then
+            prod_sections=yes
+          fi
+          staging_sections=no
+          if [[ "${staging_page}" == *'<section data-env="staging">'* && "${staging_page}" != *'<section data-env="prod">'* ]]; then
+            staging_sections=yes
+          fi
+          if [[ "${prod_sections}" != yes || "${staging_sections}" != yes ]]; then result=fail; fi
+          {
+            echo "## Public status page (${STATUS_URL}, ${STAGING_STATUS_URL})"
+            echo
+            echo "| URL | Status | Expected |"
+            echo "|---|---|---|"
+            printf '%s' "${rows}"
+            echo
+            echo "- prod and staging sections on status.*: ${prod_sections}"
+            echo "- staging section only on staging-status.*: ${staging_sections}"
+            echo
+          } >> "${GITHUB_STEP_SUMMARY}"
+          echo "result=${result}" >> "${GITHUB_OUTPUT}"
+          if [[ "${result}" != ok ]]; then
+            echo "::error::status page: see the job summary"
           fi
 
       - name: Upload acceptance script
@@ -179,6 +256,7 @@ jobs:
           UPLOAD: ${{ steps.upload.outcome }}
           CHECKS: ${{ steps.checks.outcome }}
           GRAFANA: ${{ steps.grafana.outputs.result || 'skipped' }}
+          STATUS: ${{ steps.status.outputs.result || 'skipped' }}
         run: |
           # drone-ssh v1.8.2 (plugin.go) prints its own banner after the output of a session: a line
           # of "=", a success line, a line of "=". acceptance.sh prints no line of "=" only, so the
@@ -204,4 +282,160 @@ jobs:
             echo "::error::public Grafana endpoints failed, see the job summary"
             status=1
           fi
+          if [[ "${STATUS}" == fail ]]; then
+            echo "::error::public status page failed, see the job summary"
+            status=1
+          fi
           exit "${status}"
+
+  # Opt-in (input stop_worker): the page must show a worker that stopped (#309). It silences the two
+  # alerts of the stop like any planned stop, for staging only (docs/MONITORING.md §5; a prod alert
+  # of the same name is not silenced, and the silence does not change the page, the component
+  # really is down), stops the staging worker, waits for the page to show "Ревью PR" down because
+  # of ReviewQueueWithoutConsumer (the alert needs 5 minutes) and always starts the worker again
+  # and lifts the silences. Staging runs without reviews for ~10 minutes, so it needs the go of the
+  # tech lead and runs only after a passed acceptance job. Course VPS only: the Terraform host has
+  # no status page.
+  worker-outage:
+    name: Status page shows a stopped worker
+    needs: acceptance
+    if: ${{ needs.acceptance.result == 'success' && github.ref == 'refs/heads/main' && inputs.stop_worker && needs.acceptance.outputs.status_url != '' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment:
+      name: staging
+    env:
+      MONITORING_DIR: /opt/dmc-268-monitoring
+      API_DIR: ${{ needs.acceptance.outputs.app_dir }}
+      STATUS_URL: ${{ needs.acceptance.outputs.status_url }}
+    steps:
+      # Nothing is stopped or silenced unless the staging row "Ревью PR" works now: a worker stopped
+      # under a row that is already down or unknown proves nothing and only costs reviews.
+      - name: Check that the page shows the review component working
+        run: |
+          page="$(curl -sS --max-time 20 "${STATUS_URL}/" || true)"
+          if ! grep -Eq 'data-env="staging" data-component="review" data-state="up"' <<<"${page}"; then
+            echo "- ${STATUS_URL}/ does not show the staging row \"Ревью PR\" working: the worker is not stopped" >> "${GITHUB_STEP_SUMMARY}"
+            echo "::error::the staging row of the review component is not working, the worker is not stopped"
+            exit 1
+          fi
+
+      # Taken on the runner right before the SSH step that stops the worker: the latency of that
+      # step counts against the 7 minutes, so a pass is honest.
+      - name: Note the time of the stop
+        run: |
+          echo "STOP_STARTED_AT=$(date +%s)" >> "${GITHUB_ENV}"
+
+      - name: Silence the alerts and stop the worker
+        id: stop
+        uses: appleboy/ssh-action@0ff4204d59e8e51228ff73bce53f80d53301dee2 # v1.2.5
+        with:
+          host: ${{ needs.acceptance.outputs.host }}
+          port: ${{ needs.acceptance.outputs.port }}
+          username: ${{ secrets.VPS_DMC268_U }}
+          password: ${{ secrets.VPS_DMC268_P }}
+          fingerprint: ${{ vars.STAGING_SSH_FINGERPRINT }}
+          debug: false
+          command_timeout: 5m
+          envs: API_DIR
+          script: |
+            set -euo pipefail
+            set +o xtrace
+            project="$(basename "${API_DIR}")"
+            am() { docker compose -p dmc-268-monitoring exec -T alertmanager amtool --alertmanager.url=http://localhost:9093 "$@"; }
+            am silence add alertname=ReviewQueueWithoutConsumer environment=staging --duration=20m --comment=acceptance-309
+            am silence add alertname=ReviewRunsStuckInQueue environment=staging --duration=20m --comment=acceptance-309
+            docker compose -p "${project}" stop worker
+
+      - name: Wait for the page to show the outage
+        id: outage
+        run: |
+          # From the stop (STOP_STARTED_AT, taken before the SSH step) to the staging row "Ревью PR"
+          # of the page down with the alert ReviewQueueWithoutConsumer and the visible "since"
+          # (с YYYY-MM-DD HH:MM UTC) in the same row, as render_page lays it out (the span after the
+          # state). The alert fires 5 minutes after the consumers are gone, plus a scrape, an
+          # evaluation and a poll of the page: over 7 minutes is a failure, 8 minutes the end of
+          # waiting.
+          row='data-env="staging" data-component="review" data-state="down" data-alerts="[^"]*ReviewQueueWithoutConsumer[^"]*"><span class="name">[^<]*</span><span class="state">[^<]*</span> <span class="since">с [0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2} UTC</span>'
+          start="${STOP_STARTED_AT:?the time of the stop is not set}"
+          seen=no
+          while :; do
+            page="$(curl -sS --max-time 20 "${STATUS_URL}/" || true)"
+            if grep -Eq "${row}" <<<"${page}"; then
+              seen=yes
+              break
+            fi
+            if (( $(date +%s) - start >= ${WAIT_LIMIT_SECONDS:-480} )); then break; fi
+            sleep "${POLL_INTERVAL_SECONDS:-15}"
+          done
+          elapsed=$(( $(date +%s) - start ))
+          result=fail
+          if [[ "${seen}" == yes && "${elapsed}" -le "${OUTAGE_LIMIT_SECONDS:-420}" ]]; then result=ok; fi
+          {
+            echo "## Status page and a stopped worker"
+            echo
+            if [[ "${seen}" == yes ]]; then
+              echo "- ${STATUS_URL}/ showed the staging row \"Ревью PR\" down with ReviewQueueWithoutConsumer and its start time ${elapsed} s after the stop (limit ${OUTAGE_LIMIT_SECONDS:-420} s): ${result}"
+            else
+              echo "- the row did not show the outage within ${elapsed} s: fail"
+            fi
+          } >> "${GITHUB_STEP_SUMMARY}"
+          echo "result=${result}" >> "${GITHUB_OUTPUT}"
+          if [[ "${result}" != ok ]]; then
+            echo "::error::the status page did not show the stopped worker in time"
+            exit 1
+          fi
+
+      # Whatever happened above once the stop step ran: the worker runs again and the silences are
+      # gone. The silences are lifted after the start, and even when it fails, so that a worker
+      # that stays down alerts. A failed precondition stops nothing, so there is nothing to undo.
+      - name: Start the worker and lift the silences
+        id: start
+        if: ${{ always() && steps.stop.conclusion != 'skipped' }}
+        uses: appleboy/ssh-action@0ff4204d59e8e51228ff73bce53f80d53301dee2 # v1.2.5
+        with:
+          host: ${{ needs.acceptance.outputs.host }}
+          port: ${{ needs.acceptance.outputs.port }}
+          username: ${{ secrets.VPS_DMC268_U }}
+          password: ${{ secrets.VPS_DMC268_P }}
+          fingerprint: ${{ vars.STAGING_SSH_FINGERPRINT }}
+          debug: false
+          command_timeout: 5m
+          envs: API_DIR
+          script: |
+            set -euo pipefail
+            set +o xtrace
+            project="$(basename "${API_DIR}")"
+            am() { docker compose -p dmc-268-monitoring exec -T alertmanager amtool --alertmanager.url=http://localhost:9093 "$@"; }
+            status=0
+            docker compose -p "${project}" start worker || status=1
+            # exec forwards stdin even with -T: without </dev/null the first expire would swallow the
+            # ids still queued in the pipe and leave the other silences active.
+            am silence query -o extended | awk '/acceptance-309$/ { print $1 }' | while read -r id; do
+              am silence expire "${id}" </dev/null
+            done
+            exit "${status}"
+
+      - name: Wait for the page to show the worker again
+        if: ${{ always() && steps.start.outcome == 'success' }}
+        run: |
+          # In the report; the component must not stay down once the worker consumes again.
+          start="$(date +%s)"
+          seen=no
+          while :; do
+            page="$(curl -sS --max-time 20 "${STATUS_URL}/" || true)"
+            if grep -Eq 'data-env="staging" data-component="review" data-state="up"' <<<"${page}"; then
+              seen=yes
+              break
+            fi
+            if (( $(date +%s) - start >= ${WAIT_LIMIT_SECONDS:-180} )); then break; fi
+            sleep "${POLL_INTERVAL_SECONDS:-15}"
+          done
+          elapsed=$(( $(date +%s) - start ))
+          if [[ "${seen}" == yes ]]; then
+            echo "- the staging row \"Ревью PR\" is back to working ${elapsed} s after the start" >> "${GITHUB_STEP_SUMMARY}"
+          else
+            echo "- the staging row \"Ревью PR\" was not working again within ${elapsed} s: fail" >> "${GITHUB_STEP_SUMMARY}"
+            echo "::error::the status page still shows the review component down"
+            exit 1
+          fi

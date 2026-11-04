@@ -289,6 +289,7 @@ terraform -chdir=${STACK} destroy -var-file=environments/staging.tfvars
 | `ui`, `staging-ui` | A |
 | `webhook`, `staging-webhook` | A |
 | `grafana` | A — Grafana стека мониторинга ([MONITORING.md](MONITORING.md)) |
+| `status`, `staging-status` | A — публичная страница статуса ([MONITORING.md](MONITORING.md) §5) |
 | `prometheus`, `victoria-metrics` | A — заведены, сайта в Caddyfile нет |
 
 AAAA-записи добавлять только после проверки, что VPS принимает IPv6 на 443: иначе клиенты с IPv6 и выпуск сертификата по AAAA будут падать. Caddy выпускает сертификаты для всех имён из Caddyfile сразу после старта и сам их продлевает. Имя без A-записи сертификат не получит (Caddy повторяет попытки), остальные имена работают.

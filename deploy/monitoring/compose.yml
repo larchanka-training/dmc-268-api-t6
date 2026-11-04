@@ -212,6 +212,39 @@ services:
       start_period: 10s
     logging: *logging
 
+  # Public status page (status/status_page.py, docs/MONITORING.md): reads Prometheus on the project
+  # network every 30 s and serves four components per environment as HTML; Caddy proxies only GET /
+  # of status.<APP_DOMAIN> and staging-status.<APP_DOMAIN> (compose.edge.yml). The one service of this
+  # stack the internet reaches, so it runs as the edge proxy does: no capability, no privilege gain,
+  # a read-only root. The script is mounted, not built: an upstream image, stdlib only. The image
+  # sets no user: nobody, like Prometheus.
+  status-page:
+    image: python:3.13.18-alpine@sha256:7984cf56ceaddebe4fefeb75d64000b9f45d8b77b11a09b24524da6cdc3af0c8
+    command: ["python", "/app/status_page.py"]
+    environment:
+      PROMETHEUS_URL: http://prometheus:9090
+      # The root is read-only: no bytecode cache next to the mounted script.
+      PYTHONDONTWRITEBYTECODE: "1"
+    user: "65534:65534"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    labels:
+      dmc.config-digest: ${STATUS_CONFIG_DIGEST:-none}
+    volumes:
+      - ./status:/app:ro
+    networks:
+      default: {}
+    restart: unless-stopped
+    mem_limit: 32m
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    logging: *logging
+
   # Scheduled PostgreSQL backup (backup/pg-backup.sh, docs/MONITORING.md §9). It lives here, not in
   # the application project, for the same reason as the monitoring: it reads that stack and must
   # never fail or roll back its deploy. The image is the postgres of deploy/compose/staging.yml by
