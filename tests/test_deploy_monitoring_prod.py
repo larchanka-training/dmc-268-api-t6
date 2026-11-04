@@ -16,13 +16,9 @@ from typing import Any
 import pytest
 import yaml  # type: ignore[import-untyped]
 
-from tests.test_deploy_monitoring import (  # noqa: F401
-    METADATA_GRANTS,
-    Host,
-    _grants,
-    _job,
-    host,
-)
+from tests.monitoring_deploy_host import METADATA_GRANTS, Host, _grants, _job
+
+pytest_plugins = ("tests.monitoring_deploy_host",)
 
 ROOT = Path(__file__).resolve().parents[1]
 MONITORING = ROOT / "deploy" / "monitoring"

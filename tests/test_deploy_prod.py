@@ -16,19 +16,18 @@ from pathlib import Path
 
 import pytest
 
-from tests.test_deploy_staging_services import (
+from tests.deploy_host_fakes import (
     IMAGE_A,
     IMAGE_B,
+    PROD_PROJECT,
     REPO_ROOT,
+    STOPPED,
     Host,
+    _assert_stopped,
     _read_dotenv,
     make_host,
 )
 
-PROD_PROJECT = "dmc-268-api-prod"
-STOPPED = (
-    f"stopped compose project {PROD_PROJECT}; no bootstrap container (NO_PREVIOUS_RELEASE=stop)"
-)
 INVALID = "NO_PREVIOUS_RELEASE must be bootstrap or stop, got: nginx"
 # The variables the prod "Deploy image" step hands to deploy.sh: no bundle, no POSTGRES_*.
 PROD_DEPLOY_ENV = {"DEPLOY_MODE": "edge", "EDGE_ALIAS": "api-prod", "NO_PREVIOUS_RELEASE": "stop"}
@@ -61,17 +60,6 @@ def _ci_rollback(
     if forward_no_previous:
         env["NO_PREVIOUS_RELEASE"] = "stop"
     return host.run("rollback.sh", env=env)
-
-
-def _assert_stopped(host: Host, calls: list[str]) -> None:
-    down = calls.index(f"compose -p {PROD_PROJECT} down --remove-orphans")
-    assert calls.index(f"compose -p {PROD_PROJECT} ps -aq") > down
-    # An nginx left by an earlier bootstrap-mode rollback would keep answering under the alias.
-    assert f"rm -f {PROD_PROJECT}-bootstrap" in calls
-    assert not any(call.startswith("run -d") for call in calls)
-    assert not any(call.startswith("pull nginx") for call in calls)
-    assert not (host.app_dir / ".deploy-state").exists()
-    assert not (host.app_dir / ".deploy-state.previous").exists()
 
 
 def _write_compose_env_file(path: Path, *args: str) -> None:

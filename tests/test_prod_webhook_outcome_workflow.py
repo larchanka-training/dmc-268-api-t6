@@ -16,15 +16,15 @@ from pathlib import Path
 
 import pytest
 
-from tests.monitoring_acceptance_workflow import DRONE_SSH_BANNER
-from tests.test_deploy_prod_workflow import (
+from tests.deploy_host_fakes import _run_script, _workflow_step
+from tests.deploy_prod_workflow_fakes import (
     VPS_LOGIN,
     _ssh_script,
 )
-from tests.test_deploy_prod_workflow import (
+from tests.deploy_prod_workflow_fakes import (
     WORKFLOW as DEPLOY_PROD,
 )
-from tests.test_deploy_staging_services import _run_script, _workflow_step
+from tests.monitoring_acceptance_workflow import DRONE_SSH_BANNER
 
 WORKFLOW = DEPLOY_PROD.parent / "prod-webhook-outcome.yml"
 
