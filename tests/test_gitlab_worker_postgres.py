@@ -297,8 +297,9 @@ def test_public_worker_installed_gitlab_run_uses_shared_models_and_publisher(
                     if model_configured:
                         assert isinstance(body, str)
                         assert body == (
+                            "## Executive summary\n\n"
+                            "**Verdict:** clean · **Risk Score:** Low\n\n"
                             "## Review summary\n\n"
-                            "**Verdict:** clean\n"
                             "**Risk summary:** critical: 0, high: 0, medium: 0, low: 0, info: 0\n"
                             "**Checked files:**\n- src/app.py\n\n"
                             "**Main issue:** Подтверждённых замечаний нет.\n\n"

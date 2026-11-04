@@ -32,6 +32,7 @@ from app.modules.reviews.application.run_coverage import (
 from app.modules.reviews.application.verdict import (
     PUBLISHED_SEVERITIES,
     SeverityThresholdValue,
+    Verdict,
     coverage_verdict,
     severity_count_phrase,
     severity_counts,
@@ -55,6 +56,7 @@ DropReason = (
     | str
 )
 Bucket = Literal["inline", "body_only", "dropped"]
+RiskScore = Literal["High", "Medium", "Low"]
 
 REVIEW_BODY_CHAR_BUDGET = 4000
 _ADDITIONAL_FINDINGS_HEADING = "## Additional findings"
@@ -107,6 +109,8 @@ class ProcessedReviewOutput:
     review_body_budget_degraded: bool = False
     summary: ReviewSummary | None = None
     coverage: RunCoverage = field(kw_only=True)
+    # Rendered once by ``process``: a store-time repack has no diff map to build it from.
+    executive_block: str = field(default="", kw_only=True)
 
     @property
     def buckets(self) -> tuple[tuple[ProcessedFinding, ...], ...]:
@@ -237,6 +241,7 @@ class FindingsPostProcessor:
                 )
             }
         )
+        executive_block = _executive_block(kept, coverage, summary_only=summary_only)
         review_body, omitted_body_only_count = _pack_review_body(
             final_output,
             kept,
@@ -245,6 +250,7 @@ class FindingsPostProcessor:
             severity_threshold,
             total_below_threshold,
             coverage=coverage,
+            executive_block=executive_block,
         )
         return ProcessedReviewOutput(
             inline=tuple(inline),
@@ -254,6 +260,7 @@ class FindingsPostProcessor:
             omitted_body_only_count=omitted_body_only_count,
             summary=final_output.summary,
             coverage=coverage,
+            executive_block=executive_block,
         )
 
     def _drop_lint_patterns(
@@ -451,6 +458,39 @@ def _ru_cardinal(count: int, one: str, few: str, many: str) -> str:
     return f"{count} {word}"
 
 
+def _risk_score(
+    run_verdict: Verdict | None, coverage: RunCoverage, *, summary_only: bool
+) -> RiskScore:
+    """The verdict read with the completeness of the review (PIPELINE_SPEC §11)."""
+    if run_verdict == "blocking":
+        return "High"
+    if run_verdict == "attention" or summary_only:
+        return "Medium"
+    # Exclusions are not incompleteness: a change of only binary or ignored files stays Low.
+    if coverage.status is CoverageStatus.PARTIAL or coverage.reason_counts:
+        return "Medium"
+    return "Low"
+
+
+def _executive_block(
+    kept: tuple[ProcessedFinding, ...],
+    coverage: RunCoverage,
+    *,
+    summary_only: bool,
+) -> str:
+    run_verdict = coverage_verdict((item.finding.severity for item in kept), coverage.status)
+    unavailable_label = (
+        "нет доступных для анализа изменений"
+        if coverage.status is CoverageStatus.NONE
+        else "проверка неполная"
+    )
+    risk = _risk_score(run_verdict, coverage, summary_only=summary_only)
+    return (
+        "## Executive summary\n\n"
+        f"**Verdict:** {run_verdict or unavailable_label} · **Risk Score:** {risk}"
+    )
+
+
 def _overview_block(
     kept: tuple[ProcessedFinding, ...],
     checked_files_text: str,
@@ -459,10 +499,8 @@ def _overview_block(
     *,
     coverage: RunCoverage,
 ) -> str:
-    severities = [item.finding.severity for item in kept]
-    counts = severity_counts(severities)
+    counts = severity_counts(item.finding.severity for item in kept)
     count_text = severity_count_phrase(counts)
-    run_verdict = coverage_verdict(severities, coverage.status)
     coverage_lines = (
         ()
         if coverage.status is CoverageStatus.COMPLETE
@@ -481,14 +519,8 @@ def _overview_block(
         if below_threshold
         else ()
     )
-    unavailable_label = (
-        "нет доступных для анализа изменений"
-        if coverage.status is CoverageStatus.NONE
-        else "проверка неполная"
-    )
     return "\n".join(
         (
-            f"**Verdict:** {run_verdict or unavailable_label}",
             f"**Risk summary:** {count_text}",
             *below,
             *coverage_lines,
@@ -542,6 +574,7 @@ def finalize_stored_review_body(
             below_threshold,
             char_budget=char_budget,
             coverage=processed.coverage,
+            executive_block=processed.executive_block,
         )
 
     body = processed.review_body
@@ -580,6 +613,7 @@ def _pack_review_body(
     *,
     char_budget: int = REVIEW_BODY_CHAR_BUDGET,
     coverage: RunCoverage,
+    executive_block: str,
 ) -> tuple[str, int]:
     prose = render_review_body(output.summary)
     heading, separator, rest = prose.partition("\n\n")
@@ -604,7 +638,8 @@ def _pack_review_body(
         overview = _overview_block(
             kept, checked, severity_threshold, below_threshold, coverage=coverage
         )
-        prefix = f"{heading}{separator}{overview}\n\n{rest}"
+        lead = f"{executive_block}\n\n" if executive_block else ""
+        prefix = f"{lead}{heading}{separator}{overview}\n\n{rest}"
         if finding_count == 0:
             return prefix
         lines = [prefix, "", _ADDITIONAL_FINDINGS_HEADING, *finding_lines[:finding_count]]
