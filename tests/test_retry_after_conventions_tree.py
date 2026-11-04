@@ -37,12 +37,18 @@ from app.modules.reviews.infrastructure.github_vcs import InstallationTokenProvi
 from app.modules.reviews.infrastructure.gitlab_repository_tree import GitLabRepositoryTree
 from app.modules.reviews.infrastructure.gitlab_run_source import GitLabRunSource
 from app.modules.reviews.infrastructure.gitlab_vcs import HttpGitLabVcsProvider
-from tests.test_github_run_source import Blobs, Runs
-from tests.test_gitlab_repository_sources import RUN_ID, SourceRouter, checkpoint
-from tests.test_gitlab_run_http import INPUT, POLICY, Credentials
-from tests.test_gitlab_vcs import reply
+from tests.github_run_source_fakes import Blobs, Runs
+from tests.gitlab_run_fakes import (
+    INPUT,
+    POLICY,
+    RUN_ID,
+    Credentials,
+    SourceRouter,
+    checkpoint,
+    reply,
+)
+from tests.review_run_worker_fakes import NOW, RUN, Clock, FakeRun, RetryQueue, handler
 from tests.test_repo_conventions import FakeModel, FakeStore, FakeUnitOfWorkFactory, draft
-from tests.test_review_run_worker import NOW, RUN, Clock, FakeRun, RetryQueue, handler
 
 RETRY_AFTER_900 = {"Retry-After": "900"}
 

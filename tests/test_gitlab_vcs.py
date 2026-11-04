@@ -3,11 +3,8 @@
 from __future__ import annotations
 
 import asyncio
-import json
-from dataclasses import dataclass, field
 from datetime import timedelta
 from typing import Any
-from urllib.parse import unquote
 
 import httpx
 import pytest
@@ -28,104 +25,18 @@ from app.modules.reviews.application.vcs_diff import (
     VcsPullRequest,
 )
 from app.modules.reviews.infrastructure.gitlab_vcs import HttpGitLabVcsProvider
-from tests.test_gitlab_run_http import INPUT, POLICY, Credentials, Stream
+from tests.gitlab_http_fakes import Stream
+from tests.gitlab_run_fakes import INPUT, POLICY, Credentials, refs, version_refs
+
+# Re-exported: other test modules still import these from here (backend.md §5).
+from tests.gitlab_run_fakes import Router as Router
+
+# Re-exported: other test modules still import these from here (backend.md §5).
+from tests.gitlab_run_fakes import reply as reply
 
 
 async def checkpoint() -> None:
     pass
-
-
-def refs() -> dict[str, str]:
-    return {"head_sha": "a" * 40, "start_sha": "b" * 40, "base_sha": "c" * 40}
-
-
-def version_refs() -> dict[str, str]:
-    return {"head_commit_sha": "a" * 40, "start_commit_sha": "b" * 40, "base_commit_sha": "c" * 40}
-
-
-@dataclass
-class Router:
-    requests: list[httpx.Request] = field(default_factory=list)
-    canonical: dict[str, Any] = field(
-        default_factory=lambda: {
-            "id": 901,
-            "iid": 12,
-            "project_id": 17,
-            "target_project_id": 17,
-            "source_project_id": 29,
-            "state": "opened",
-            "diff_refs": refs(),
-            "changes_count": "2",
-            "title": "Title",
-            "description": "Description",
-            "author": {"username": "author"},
-            "source_branch": "feature",
-            "target_branch": "main",
-            "labels": ["review"],
-            "draft": False,
-        }
-    )
-    files: list[dict[str, Any]] = field(
-        default_factory=lambda: [
-            {
-                "old_path": "src/old.py",
-                "new_path": "src/new.py",
-                "new_file": False,
-                "deleted_file": False,
-                "renamed_file": True,
-                "diff": "@@ -1 +1 @@\n-old\n+new\n",
-            },
-            {
-                "old_path": "asset.dat",
-                "new_path": "asset.dat",
-                "new_file": False,
-                "deleted_file": False,
-                "renamed_file": False,
-                "diff": "",
-            },
-        ]
-    )
-    streams: list[Stream] = field(default_factory=list)
-
-    def response(self, request: httpx.Request) -> httpx.Response:
-        self.requests.append(request)
-        path = request.url.path
-        headers: dict[str, str] = {"Content-Type": "application/json"}
-        status = 200
-        data: Any = {}
-        raw: bytes | None = None
-        if path.endswith("/merge_requests/12"):
-            data = self.canonical
-        elif path.endswith("/versions"):
-            data = [{"id": 9, **version_refs()}]
-            headers["X-Next-Page"] = ""
-        elif path.endswith("/versions/9"):
-            data = {
-                "id": 9,
-                **version_refs(),
-                "state": "collected",
-                "real_size": str(len(self.files)),
-                "diffs": self.files,
-            }
-        elif "/repository/files/" in path:
-            name = unquote(path.split("/repository/files/")[1])
-            oid = "d" * 40 if name == "src/new.py" else "e" * 40
-            headers = {
-                "X-Gitlab-Blob-Id": oid,
-                "X-Gitlab-Size": "3",
-                "X-Gitlab-Ref": request.url.params["ref"],
-            }
-            raw = b""
-        elif "/repository/blobs/" in path:
-            raw = b"\x00xy" if "/" + "e" * 40 + "/" in path else b"new"
-        elif path.endswith("/commits"):
-            data = [{"id": "f" * 40, "message": "Subject"}]
-            headers["X-Next-Page"] = ""
-        else:
-            status = 501
-        stream = Stream((raw if raw is not None else json.dumps(data).encode(),))
-        self.streams.append(stream)
-        return httpx.Response(status, headers=headers, stream=stream)
 
 
 def test_shared_fetch_legacy_rename_binary_uses_pinned_version_and_fork_oids() -> None:
@@ -160,20 +71,6 @@ def test_shared_fetch_legacy_rename_binary_uses_pinned_version_and_fork_oids() -
         assert all(stream.closed for stream in router.streams)
 
     asyncio.run(scenario())
-
-
-def reply(
-    data: Any = None,
-    *,
-    status: int = 200,
-    headers: dict[str, str] | None = None,
-    raw: bytes | None = None,
-) -> httpx.Response:
-    return httpx.Response(
-        status,
-        headers={"Content-Type": "application/json", **(headers or {})},
-        stream=Stream((json.dumps(data).encode() if raw is None else raw,)),
-    )
 
 
 def detail(router: Router, **changes: Any) -> dict[str, Any]:
@@ -714,7 +611,7 @@ def test_target_merge_base_provenance_and_lower_absolute_byte_ceiling() -> None:
 @pytest.mark.parametrize("method", ["diff", "commits"])
 def test_public_worker_retries_real_gitlab_rate_fault_then_dead_letters(method: str) -> None:
     from app.modules.reviews.application.handle_review_run import ClaimedAttempt, DeliveryOutcome
-    from tests.test_review_run_worker import RUN, Clock, FakeRun, RetryQueue, handler
+    from tests.review_run_worker_fakes import RUN, Clock, FakeRun, RetryQueue, handler
 
     run = FakeRun()
     retry = RetryQueue()
