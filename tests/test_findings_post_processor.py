@@ -26,7 +26,7 @@ from app.modules.reviews.application.review_output import (
     ReviewOutput,
     ReviewSummary,
 )
-from app.modules.reviews.application.run_coverage import CoverageStatus, RunCoverage
+from app.modules.reviews.application.run_coverage import CoverageItem, CoverageStatus, RunCoverage
 from app.modules.reviews.application.vcs_diff import PullRequestLocator, VcsFile, VcsPullRequest
 from app.modules.reviews.application.verdict import SeverityThresholdValue
 from tests.test_diff_anchor import _diff_map
@@ -575,6 +575,56 @@ def test_checked_files_are_none_when_the_diff_has_no_paths() -> None:
     )
 
 
+@pytest.mark.parametrize(
+    ("coverage", "summary_only", "summary_reason"),
+    [
+        pytest.param(
+            RunCoverage(
+                CoverageStatus.NONE,
+                0,
+                exclusions=(CoverageItem("private/secret.py", "ignored"),),
+                total_files=1,
+                file_list_complete=True,
+            ),
+            False,
+            None,
+            id="ignored",
+        ),
+        pytest.param(None, False, None, id="unknown"),
+        pytest.param(
+            RunCoverage(
+                CoverageStatus.PARTIAL,
+                0,
+                exclusions=(CoverageItem("private/secret.py", "ignored"),),
+                reasons=(CoverageItem("src/app.py", "summary_only", "modified"),),
+                total_files=2,
+                file_list_complete=True,
+            ),
+            True,
+            "diff_too_large",
+            id="summary-only",
+        ),
+    ],
+)
+def test_checked_files_stay_none_when_no_name_is_hidden(
+    coverage: RunCoverage | None, summary_only: bool, summary_reason: str | None
+) -> None:
+    if coverage is not None:
+        assert coverage.reviewed_files == 0
+    result = FindingsPostProcessor.from_default_patterns().process(
+        output(finding(severity="high")),
+        diff_map=_empty_diff_map(),
+        checked_paths=frozenset(),
+        rule_names=frozenset(),
+        coverage=coverage,
+        summary_only=summary_only,
+        summary_reason=summary_reason,
+    )
+
+    assert "**Checked files:**\n(none)\n\n" in result.review_body
+    assert "private/secret.py" not in result.review_body
+
+
 def test_overflow_phrases_agree_with_russian_cardinals() -> None:
     assert format_body_only_overflow_footer_without_url(1).endswith("**Ещё 1 находка**")
     assert format_body_only_overflow_footer(3, "https://ui.test/runs/x").endswith(
@@ -588,6 +638,9 @@ def test_overflow_phrases_agree_with_russian_cardinals() -> None:
     assert _format_checked_files(paths, 1).endswith("… и ещё 3 файла")
     assert _format_checked_files(paths[:2], 1).endswith("… и ещё 1 файл")
     assert _format_checked_files(("a.py",) * 6, 1).endswith("… и ещё 5 файлов")
+    assert _format_checked_files(paths, 1, withheld=True) == (
+        "(список не показывается: имена файлов в этом ревью скрыты)"
+    )
 
 
 def test_character_cap_drops_only_additional_findings() -> None:

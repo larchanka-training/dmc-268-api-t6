@@ -58,6 +58,7 @@ Bucket = Literal["inline", "body_only", "dropped"]
 
 REVIEW_BODY_CHAR_BUDGET = 4000
 _ADDITIONAL_FINDINGS_HEADING = "## Additional findings"
+_CHECKED_FILES_WITHHELD = "(список не показывается: имена файлов в этом ревью скрыты)"
 
 _ATTRIBUTION_PREFIX = "According to custom instructions in '"
 _ATTRIBUTION_RE = re.compile(r"^According to custom instructions in '(?P<name>[^']+)' \([^)]*\): ")
@@ -420,7 +421,11 @@ def summary_from_result(
     )
 
 
-def _format_checked_files(sorted_paths: tuple[str, ...], listed_count: int) -> str:
+def _format_checked_files(
+    sorted_paths: tuple[str, ...], listed_count: int, *, withheld: bool = False
+) -> str:
+    if withheld:
+        return _CHECKED_FILES_WITHHELD
     if not sorted_paths:
         return "(none)"
     lines = [f"- {path}" for path in sorted_paths[:listed_count]]
@@ -580,19 +585,22 @@ def _pack_review_body(
     heading, separator, rest = prose.partition("\n\n")
     # Checked paths describe durable text inputs (#170), not fully reviewed
     # allocations (#213). An unknown policy or any ignored allocation withholds
-    # names conservatively because bounded coverage diagnostics hide ignored paths.
+    # names conservatively because bounded coverage diagnostics hide ignored paths;
+    # the section then says the list is withheld instead of reading as empty.
     allowed = frozenset(path for path in checked_paths if is_supported_path(path))
-    if (
-        coverage.exclusion_counts.get("ignored", 0)
-        or "classification_unavailable" in coverage.reason_counts
-    ):
-        allowed = frozenset()
-    sorted_paths = tuple(sorted(allowed))
+    names_withheld = bool(
+        allowed
+        and (
+            coverage.exclusion_counts.get("ignored", 0)
+            or "classification_unavailable" in coverage.reason_counts
+        )
+    )
+    sorted_paths = () if names_withheld else tuple(sorted(allowed))
     finding_lines = [_render_body_only_finding(item) for item in body_only]
     path_count = len(sorted_paths)
 
     def assemble(listed_paths: int, finding_count: int) -> str:
-        checked = _format_checked_files(sorted_paths, listed_paths)
+        checked = _format_checked_files(sorted_paths, listed_paths, withheld=names_withheld)
         overview = _overview_block(
             kept, checked, severity_threshold, below_threshold, coverage=coverage
         )
