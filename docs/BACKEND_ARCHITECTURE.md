@@ -241,6 +241,7 @@ app/
       errors.py                # только базовые технические ошибки
       ids.py                   # UUID/value types, не доменные сущности
       events.py                # межмодульные event contracts
+      run_enums.py             # общие значения статуса и движка Run
     infrastructure/
       db/                      # Base, session factory и DB helpers; не модели модулей
       messaging/               # RabbitMQ connection и consumer/publisher helpers

@@ -2,10 +2,10 @@ from __future__ import annotations
 
 from enum import StrEnum
 
+from app.common.domain.run_enums import Engine as Engine
+from app.common.domain.run_enums import RunStatus
 
-class Engine(StrEnum):
-    FAST = "fast"
-    DEEP = "deep"
+RunState = RunStatus
 
 
 class WaitForCi(StrEnum):
@@ -29,16 +29,6 @@ class CodeChangeState(StrEnum):
     OPEN = "open"
     CLOSED = "closed"
     MERGED = "merged"
-
-
-class RunState(StrEnum):
-    QUEUED = "queued"
-    RUNNING = "running"
-    PUBLISHING = "publishing"
-    SUCCEEDED = "succeeded"
-    FAILED = "failed"
-    CANCELLED = "cancelled"
-    SKIPPED = "skipped"
 
 
 class FindingSeverity(StrEnum):

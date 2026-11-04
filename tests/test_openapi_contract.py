@@ -28,6 +28,7 @@ from app.bootstrap.reviews_api import (
     get_run_publisher,
 )
 from app.common.application.github_repository_name import REPOSITORY_FULL_NAME_MAX_LENGTH
+from app.common.infrastructure.db.enums import Engine, RunState
 from app.main import (
     app,
     get_file_blob_cache,
@@ -1230,7 +1231,6 @@ def test_enums_match_the_ui_contract_and_the_review_output_model() -> None:
     components = _components()
 
     assert components["RunStatus"]["enum"] == zod["runSession"]["properties"]["status"]["enum"]
-    assert len(components["RunStatus"]["enum"]) == 7
     assert components["RunTrigger"]["enum"] == zod["runSession"]["properties"]["trigger"]["enum"]
     queue_schema = json.loads((SPEC_PATH.parent / "schemas/review.run.v1.schema.json").read_text())
     queue_run = queue_schema["$defs"]["ReviewRunV1"]
@@ -1250,13 +1250,25 @@ def test_enums_match_the_ui_contract_and_the_review_output_model() -> None:
     ]
 
 
-def test_runtime_run_dtos_declare_the_trigger_enum_of_the_spec() -> None:
-    runtime = app.openapi()["components"]["schemas"]
-    trigger_ref = {"$ref": "#/components/schemas/RunTrigger"}
+@pytest.mark.parametrize(
+    ("field", "component", "python_values"),
+    [
+        ("status", "RunStatus", [state.value for state in RunState]),
+        ("engine", "Engine", [engine.value for engine in Engine]),
+        ("trigger", "RunTrigger", list(get_args(RunTrigger.__value__))),
+    ],
+)
+def test_runtime_run_dtos_declare_the_enums_of_the_spec(
+    field: str, component: str, python_values: list[str]
+) -> None:
+    response = TestClient(app).get("/openapi.json")
+    assert response.status_code == 200
+    runtime = response.json()["components"]["schemas"]
+    enum_ref = {"$ref": f"#/components/schemas/{component}"}
 
-    assert runtime["RunSessionDto"]["properties"]["trigger"] == trigger_ref
-    assert runtime["RunDetailDto"]["properties"]["trigger"] == trigger_ref
-    assert runtime["RunTrigger"]["enum"] == _components()["RunTrigger"]["enum"]
+    for dto in ("RunSessionDto", "RunDetailDto"):
+        assert runtime[dto]["properties"][field] == enum_ref
+    assert runtime[component]["enum"] == _components()[component]["enum"] == python_values
 
 
 @pytest.mark.parametrize(
