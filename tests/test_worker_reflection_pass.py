@@ -33,6 +33,7 @@ from app.modules.reviews.application.prompt_builder import file_block_id
 from app.modules.reviews.application.reflection_pass import ReflectionPass
 from app.modules.reviews.application.review_output import VerifiedReviewOutput
 from app.modules.reviews.application.vcs_diff import PullRequestLocator
+from app.modules.reviews.infrastructure.claim_syntax import TreeSitterClaimSyntaxInspector
 from app.modules.reviews.infrastructure.github_run_source import GitHubRunSource
 from app.modules.reviews.infrastructure.llm.gateway import LlmGateway
 from app.modules.reviews.infrastructure.llm.memory import InMemoryLlmCallTrace, InMemoryUsageLedger
@@ -254,6 +255,38 @@ def test_process_review_run_gives_the_reflection_pass_and_the_change_summary_to_
     assert len(captured) == 1
     assert captured[0]["reflection_pass"] is reflection
     assert captured[0]["change_summary"] is change_summary
+    assert isinstance(captured[0]["claim_syntax"], TreeSitterClaimSyntaxInspector)
+
+
+@pytest.mark.parametrize("with_stage", [False, True], ids=["no-stage", "stage"])
+def test_process_review_run_wires_tree_sitter_claim_syntax_inspector_to_execute_review_run(
+    monkeypatch: pytest.MonkeyPatch, with_stage: bool
+) -> None:
+    captured: list[dict[str, Any]] = []
+
+    class RecordingRun:
+        def __init__(self, *args: object, **kwargs: Any) -> None:
+            captured.append(kwargs)
+
+        async def execute(self, run_id: UUID) -> bool:
+            return True
+
+    monkeypatch.setattr(worker, "ExecuteReviewRun", RecordingRun)
+    stage = SimpleNamespace(excluded=lambda path: False) if with_stage else None
+
+    assert asyncio.run(
+        worker.process_review_run(
+            CLAIMED.run_id,
+            cast(Any, object()),
+            cast(async_sessionmaker[AsyncSession], object()),
+            cast(Any, object()),
+            context_stage=cast(Any, stage),
+        )
+    )
+
+    assert len(captured) == 1
+    inspector = captured[0].get("claim_syntax")
+    assert isinstance(inspector, TreeSitterClaimSyntaxInspector)
 
 
 # ---------- a v4-bound review through the gateway ----------

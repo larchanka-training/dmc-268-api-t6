@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import uuid
 from collections import Counter
 from collections.abc import Callable, Mapping
@@ -16,10 +17,19 @@ from datetime import timedelta
 from functools import cached_property
 from hashlib import sha256
 from importlib.resources import files
-from typing import TYPE_CHECKING, Annotated, Any, Literal, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Annotated, Any, Protocol, runtime_checkable
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
+from app.modules.reviews.application.claim_verifier import (
+    ClaimSyntaxInspector,
+    audit_candidate_claim,
+    collect_context_blocks,
+    extract_full_source_bytes,
+)
+from app.modules.reviews.application.claim_verifier import (
+    VerificationStatus as VerificationStatus,
+)
 from app.modules.reviews.application.context_provenance import SourceRole
 from app.modules.reviews.application.policy_errors import PolicyError, PolicyErrorCode
 from app.modules.reviews.application.policy_snapshot import (
@@ -59,8 +69,7 @@ from app.modules.reviews.application.run_failures import RunCancelled, RunFailur
 if TYPE_CHECKING:
     from app.modules.reviews.application.review_context import ContextBlock, RetrievedBlock
 
-type VerificationStatus = Literal["supported", "contradicted", "insufficient_context"]
-
+_LOGGER = logging.getLogger(__name__)
 _STRICT = ConfigDict(extra="forbid", strict=True)
 # The longest provider Retry-After a verifier failure carries: one day, as the other
 # Retry-After caps (code_index, rules-status).
@@ -1161,16 +1170,54 @@ def filter_verified_candidates(
     *,
     candidates: tuple[CandidateFindingItem, ...],
     decisions: tuple[VerificationDecision, ...],
+    context: ReviewContext | None = None,
+    claim_syntax: ClaimSyntaxInspector | None = None,
 ) -> tuple[list[CandidateFindingItem], list[tuple[CandidateFindingItem, VerificationStatus, str]]]:
-    """Filter candidates, returning only supported ones for publication."""
+    """Filter candidates, returning only supported ones for publication.
+
+    Evaluates candidates in two stages:
+    1. Verifier LLM decisions (Pass 5).
+    2. Deterministic claim auditing against full source context (issue #445):
+       - missing-import claims against parsed runtime imports (TS/JS/Python),
+       - missing try/catch claims against AST try body containment,
+       - cross-file comparative claims against cited external evidence blocks.
+
+    Candidates failing either stage are rejected with their status and audit reason.
+    """
     decision_map = {d.candidate_id: d for d in decisions}
+    context_blocks = collect_context_blocks(context) if context is not None else None
+    source_cache: dict[str, bytes | None] = {}
     supported: list[CandidateFindingItem] = []
     rejected: list[tuple[CandidateFindingItem, VerificationStatus, str]] = []
 
     for cand in candidates:
         dec = decision_map.get(cand.candidate_id)
         if dec is not None and dec.status == "supported":
-            supported.append(cand)
+            source_bytes: bytes | None = None
+            if context is not None:
+                path = cand.finding.path
+                if path not in source_cache:
+                    source_cache[path] = extract_full_source_bytes(context, path)
+                source_bytes = source_cache[path]
+
+            audit = audit_candidate_claim(
+                cand.finding,
+                source_bytes,
+                claim_syntax=claim_syntax,
+                context_blocks=context_blocks,
+            )
+            if audit.status != "supported":
+                _LOGGER.info(
+                    "Candidate %s dropped by claim audit (%s): %s",
+                    cand.candidate_id,
+                    audit.status,
+                    audit.reason,
+                )
+                rejected.append(
+                    (cand, audit.status, audit.reason or "Candidate claim contradicted")
+                )
+            else:
+                supported.append(cand)
         else:
             status = dec.status if dec is not None else "insufficient_context"
             reason = dec.reason if dec is not None else "Missing verifier decision"

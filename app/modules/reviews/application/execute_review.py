@@ -17,6 +17,7 @@ from app.modules.reviews.application.change_summary import (
     ChangeSummaryModel,
     ChangeSummaryRequest,
 )
+from app.modules.reviews.application.claim_verifier import ClaimSyntaxInspector
 from app.modules.reviews.application.conventions import GeneratedConventions
 from app.modules.reviews.application.findings_post_processor import (
     FindingsPostProcessor,
@@ -272,6 +273,7 @@ class ExecuteReviewRun:
         context_filter: ReviewContextFilter | None = None,
         reflection_pass: ReflectionPass | None = None,
         change_summary: ChangeSummaryModel | None = None,
+        claim_syntax: ClaimSyntaxInspector | None = None,
     ) -> None:
         self._processor = processor
         self._repository = repository
@@ -280,6 +282,7 @@ class ExecuteReviewRun:
         self._context_filter = context_filter
         self._reflection_pass = reflection_pass
         self._change_summary = change_summary
+        self._claim_syntax = claim_syntax
 
     async def execute(self, run_id: UUID) -> bool:
         try:
@@ -678,9 +681,18 @@ class ExecuteReviewRun:
         )
         decisions = record.decisions
         supported, rejected = filter_verified_candidates(
-            candidates=tuple(filtered_candidates), decisions=decisions
+            candidates=tuple(filtered_candidates),
+            decisions=decisions,
+            context=context,
+            claim_syntax=self._claim_syntax,
         )
-        for cand, status, _reason in rejected:
+        for cand, status, reason in rejected:
+            _LOGGER.info(
+                "Candidate %s dropped during reflection pass (status=%s): %s",
+                cand.candidate_id,
+                status,
+                reason,
+            )
             _dropped_findings.append(
                 DroppedCandidateRecord(
                     finding=cand.finding,
