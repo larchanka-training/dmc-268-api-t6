@@ -19,12 +19,13 @@ import pytest
 from tests.deploy_host_fakes import (
     IMAGE_A,
     IMAGE_B,
+    LEGACY_VALUES,
     PROD_PROJECT,
-    REPO_ROOT,
     STOPPED,
     Host,
     _assert_stopped,
     _read_dotenv,
+    _write_compose_env_file,
     make_host,
 )
 
@@ -60,26 +61,6 @@ def _ci_rollback(
     if forward_no_previous:
         env["NO_PREVIOUS_RELEASE"] = "stop"
     return host.run("rollback.sh", env=env)
-
-
-def _write_compose_env_file(path: Path, *args: str) -> None:
-    subprocess.run(
-        [
-            "bash",
-            "-c",
-            'source "$1"; shift; write_compose_env_file "$@"',
-            "env-file",
-            str(REPO_ROOT / "deploy" / "scripts" / "env-file.sh"),
-            str(path),
-            *args,
-        ],
-        check=True,
-    )
-
-
-# With the file first, the ten arguments of a caller from before NO_PREVIOUS_RELEASE
-# (scripts/verify_rollback.py).
-LEGACY_VALUES = (IMAGE_A, "app", "pg", "app", "edge", "api-prod", "app", "mq", "redis")
 
 
 def test_failed_first_deploy_in_stop_mode_only_takes_the_stack_down(prod_host: Host) -> None:

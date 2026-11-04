@@ -710,3 +710,88 @@ def _run_ci_gitlab_pipeline(
             environment["APP_SECRETS_B64"] = output.read_text().strip().removeprefix("bundle=")
     calls = [json.loads(line) for line in log.read_text().splitlines()] if log.exists() else []
     return result, mutations, calls, temporary
+
+
+def _ci_auto_rollback(
+    host: Host,
+    deploy_run: str,
+    *,
+    deploy_mode: str = "edge",
+    stubs: Mapping[str, str] | None = None,
+) -> subprocess.CompletedProcess[str]:
+    """The CI "Rollback on failed deploy or health check" step of the run `deploy_run`.
+
+    Like ssh-action, only the names in the step's ``envs:`` reach the host.
+    """
+    step = _workflow_step("Rollback on failed deploy or health check")
+    envs = re.search(r"^\s+envs: (\S+)$", step, re.MULTILINE)
+    assert envs is not None
+    assert 'ROLLBACK_MODE=auto "${APP_DIR}/rollback.sh"' in step
+    values = {
+        "GHCR_TOKEN": "test-ghcr-token",
+        "GHCR_USER": "github",
+        "APP_DIR": str(host.app_dir),
+        "DEPLOY_MODE": deploy_mode,
+        "EDGE_ALIAS": "api-staging",
+        "DEPLOY_RUN": deploy_run,
+    }
+    forwarded = {name: values[name] for name in envs.group(1).split(",")}
+    return host.run("rollback.sh", env={**forwarded, "ROLLBACK_MODE": "auto", **(stubs or {})})
+
+
+def _write_compose_env_file(path: Path, *args: str) -> None:
+    subprocess.run(
+        [
+            "bash",
+            "-c",
+            'source "$1"; shift; write_compose_env_file "$@"',
+            "env-file",
+            str(REPO_ROOT / "deploy" / "scripts" / "env-file.sh"),
+            str(path),
+            *args,
+        ],
+        check=True,
+    )
+
+
+# With the file first, the ten arguments of a caller from before NO_PREVIOUS_RELEASE
+# (scripts/verify_rollback.py).
+LEGACY_VALUES = (IMAGE_A, "app", "pg", "app", "edge", "api-prod", "app", "mq", "redis")
+
+
+ROLE_FILES = (
+    "api.env",
+    "app.env",
+    "worker.env",
+    "webhook-worker.env",
+    "gitlab.env",
+    "bitbucket.env",
+)
+REQUIRED = {
+    "IMAGE": "example.test/api:x",
+    "POSTGRES_PASSWORD": "x",
+    "RABBITMQ_PASSWORD": "x",
+    "REDIS_PASSWORD": "x",
+}
+
+
+def _rendered_services(
+    tmp_path: Path, *, dotenv: dict[str, str] | None = None, shell: dict[str, str] | None = None
+) -> dict[str, dict[str, object]]:
+    if shutil.which("docker") is None:
+        pytest.skip("Docker Compose CLI is required for rendering")
+    shutil.copy(STAGING_COMPOSE, tmp_path / "compose.yml")
+    for name in ROLE_FILES:
+        (tmp_path / name).touch()
+    lines = {**REQUIRED, **(dotenv or {})}
+    (tmp_path / ".env").write_text("".join(f"{k}={v}\n" for k, v in lines.items()))
+    result = subprocess.run(
+        ["docker", "compose", "--project-directory", str(tmp_path), "config", "--format", "json"],
+        env={"PATH": os.environ["PATH"], "HOME": os.environ["HOME"], **(shell or {})},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    services: dict[str, dict[str, object]] = json.loads(result.stdout)["services"]
+    return services

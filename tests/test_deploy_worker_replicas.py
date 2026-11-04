@@ -7,60 +7,22 @@ host of the staging deploy tests, which records the replica value `up` receives.
 from __future__ import annotations
 
 import json
-import os
-import shutil
 import subprocess
 from pathlib import Path
 
 import pytest
 
-from tests.test_deploy_prod import LEGACY_VALUES, _write_compose_env_file
-from tests.test_deploy_staging_services import (
+from tests.deploy_host_fakes import (
     IMAGE_A,
     IMAGE_B,
-    STAGING_COMPOSE,
+    LEGACY_VALUES,
     Host,
     _ci_auto_rollback,
     _read_dotenv,
+    _rendered_services,
+    _write_compose_env_file,
     make_host,
 )
-
-ROLE_FILES = (
-    "api.env",
-    "app.env",
-    "worker.env",
-    "webhook-worker.env",
-    "gitlab.env",
-    "bitbucket.env",
-)
-REQUIRED = {
-    "IMAGE": "example.test/api:x",
-    "POSTGRES_PASSWORD": "x",
-    "RABBITMQ_PASSWORD": "x",
-    "REDIS_PASSWORD": "x",
-}
-
-
-def _rendered_services(
-    tmp_path: Path, *, dotenv: dict[str, str] | None = None, shell: dict[str, str] | None = None
-) -> dict[str, dict[str, object]]:
-    if shutil.which("docker") is None:
-        pytest.skip("Docker Compose CLI is required for rendering")
-    shutil.copy(STAGING_COMPOSE, tmp_path / "compose.yml")
-    for name in ROLE_FILES:
-        (tmp_path / name).touch()
-    lines = {**REQUIRED, **(dotenv or {})}
-    (tmp_path / ".env").write_text("".join(f"{k}={v}\n" for k, v in lines.items()))
-    result = subprocess.run(
-        ["docker", "compose", "--project-directory", str(tmp_path), "config", "--format", "json"],
-        env={"PATH": os.environ["PATH"], "HOME": os.environ["HOME"], **(shell or {})},
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    assert result.returncode == 0, result.stderr
-    services: dict[str, dict[str, object]] = json.loads(result.stdout)["services"]
-    return services
 
 
 @pytest.mark.parametrize(

@@ -12,16 +12,17 @@ from pathlib import Path
 
 import pytest
 
-from tests.test_deploy_prod import LEGACY_VALUES, _write_compose_env_file
-from tests.test_deploy_staging_services import (
+from tests.deploy_host_fakes import (
     IMAGE_A,
     IMAGE_B,
+    LEGACY_VALUES,
     Host,
     _ci_auto_rollback,
     _read_dotenv,
+    _rendered_services,
+    _write_compose_env_file,
     make_host,
 )
-from tests.test_deploy_worker_replicas import _rendered_services
 
 TRACED_SERVICES = ("api", "worker", "webhook-worker")
 STAGING_ENDPOINT = "http://tempo:4318"
