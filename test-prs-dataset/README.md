@@ -1211,15 +1211,29 @@ manual workflow:
 1. Put every prompt file on one branch and capture **both arms from that one ref**. The other
    static inputs, `eval_live.py` among them, must be the same in both arms.
 2. Dispatch **three runs per arm**, one at a time, with the same `corpus`, `model` and
-   `policy_arm`. **Both arms take the same `policy_arm`.** On the gold corpus `legacy` takes v1
-   to v3 and `none` takes v1 to v5, so a pair with v4 or v5 runs under `none`; `valid` and
-   `malicious` need a corpus with policy arms.
-3. Select the prompt with `review_prompt`, or with `review_prompt_file` for one the choice does
-   not list, such as a draft on the branch. That input takes a file directly in
-   `review/prompts/` with `key: review.system`. It overrides `review_prompt` and is refused with
-   corpus `rag`, whose arms fix v5. Left empty, it changes nothing.
+   `policy_arm`. **Both arms take the same `policy_arm`.** On the gold corpus that is `legacy` or
+   `none`; `valid` and `malicious` need a corpus with policy arms. The table below says which
+   prompt each arm takes.
+3. Select the prompt with `review_prompt`, or with `review_prompt_file` for a file the choice does
+   not list. That input takes a file directly in `review/prompts/` with `key: review.system`. It
+   overrides `review_prompt` and is refused with corpus `rag`, whose arms fix v5. Left empty, it
+   changes nothing.
 4. Aggregate the downloaded reports. Name the arms after the prompts: a label that is a policy
    arm must match the arm the report was captured with.
+
+The recorder decides by the `version:` line of the file, before any call:
+
+| `version:` of the file | `legacy` | `none` |
+| ---------------------- | -------- | ------ |
+| v1, v3 (no pin) | any bytes | any bytes |
+| v2 (pinned) | any bytes | the pinned bytes only |
+| v4, v5 (pinned, snapshot path) | refused | the pinned bytes only |
+| any other, such as a draft v6 | taken, with the legacy envelope and answer schema | refused: no known answer schema |
+
+So a draft cannot be measured on the snapshot path yet: an edited v5 fails its pin and a new version
+has no answer schema under `none`, and `legacy` shows it no snapshot. It needs its pin and answer
+schema in the code first (`PINNED_PROMPT_CHECKSUMS`, `SNAPSHOT_REVIEW_PROMPT_VERSIONS`), which is
+separate work.
 
 ```sh
 uv run python review/scripts/eval_ab.py --baseline v3 --markdown \
