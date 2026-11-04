@@ -193,9 +193,15 @@ class _ToolSite:
 
 @dataclass
 class _ToolScan:
+    module: str
     names: set[str] = field(default_factory=set)
     constants: set[str] = field(default_factory=set)
+    imported: set[str] = field(default_factory=set)
     sites: set[_ToolSite] = field(default_factory=set)
+
+
+def _module_name(path: str) -> str:
+    return path.removesuffix(".py").removesuffix("/__init__").replace("/", ".")
 
 
 def _string_constant(node: ast.AST) -> str | None:
@@ -269,7 +275,7 @@ def _bound_name(node: _NameBinding) -> str | None:
         return _last_name(node) if isinstance(node.ctx, ast.Store) else None
     if isinstance(node, ast.arg):
         return node.arg
-    return node.asname if isinstance(node, ast.alias) else node.name
+    return (node.asname or node.name) if isinstance(node, ast.alias) else node.name
 
 
 def _parameter_defaults(parameters: ast.arguments) -> list[tuple[ast.arg, ast.expr]]:
@@ -292,13 +298,15 @@ def _scan_tool_writes(source: str, path: str = "<source>") -> _ToolScan:
     ``"x.y"`` match would also pick up prompt names such as ``review.system``, which are not tools.
     A writer named without calling it becomes a site, wherever it is called later. So does a
     ``*_TOOL`` or ``tool`` name bound any other way than the above, except a plain ``tool``
-    parameter, whose caller is what gets read: a module constant cannot vouch for it. So does text
+    parameter, whose caller is what gets read, and an import of a ``*_TOOL`` name, which becomes a
+    site with its source: ``_unread_tools`` vouches for it only if that module defines the name.
+    So does a star import, since it can bring in any of these names. So does text
     spelling a writer, the ``tool`` column or the table, outside a docstring, and ``eval``: a name
     can reach them that way through ``getattr``, ``setattr`` or raw SQL. Only text put together at
     runtime stays out of sight.
     """
     tree = ast.parse(source)
-    scan = _ToolScan()
+    scan = _ToolScan(_module_name(path))
     known_bindings: set[ast.AST] = set()
     plain_uses: set[ast.AST] = set()
     targets: list[ast.expr]
@@ -357,6 +365,16 @@ def _scan_tool_writes(source: str, path: str = "<source>") -> _ToolScan:
             text = _string_constant(node)
             if text is not None and _names_a_writer_as_text(text):
                 scan.sites.add(_ToolSite(path, node.lineno, scope, _REFERENCE, repr(text)))
+        if isinstance(node, ast.ImportFrom):
+            source = "." * node.level + (node.module or "")
+            for alias in node.names:
+                if alias.name == "*":
+                    scan.sites.add(_ToolSite(path, node.lineno, scope, _REFERENCE, f"{source}.*"))
+                elif alias.name.endswith("_TOOL") and alias.asname is None:
+                    known_bindings.add(alias)
+                    scan.imported.add(alias.name)
+                    origin = f"{source}.{alias.name}"
+                    scan.sites.add(_ToolSite(path, node.lineno, scope, alias.name, origin))
         if isinstance(node, _NameBinding) and node not in known_bindings:
             bound = _bound_name(node)
             if bound is not None and (
@@ -391,13 +409,18 @@ def _written_tools(source: str) -> set[str]:
 
 
 def _unread_tools(scans: list[_ToolScan]) -> list[_ToolSite]:
-    """The sites of ``scans`` that are neither a known ``*_TOOL`` constant nor in the allowlist."""
-    constants = {constant for scan in scans for constant in scan.constants}
+    """The sites of ``scans`` that are not in the allowlist and do not resolve to a constant.
+
+    A bare ``*_TOOL`` name resolves in its own module only, to a constant defined or imported
+    there. An import is a site of its own, and resolves if the module it names defines the constant.
+    """
+    defined = {f"{scan.module}.{constant}" for scan in scans for constant in scan.constants}
     return sorted(
         site
         for scan in scans
         for site in scan.sites
-        if site.key not in TOOL_PASS_THROUGH and site.argument not in constants
+        if site.key not in TOOL_PASS_THROUGH
+        and site.argument not in defined | scan.constants | scan.imported
     )
 
 
@@ -459,10 +482,9 @@ def test_written_tools_scan_picks_up_only_the_run_action_shapes(
 
 
 def _unread(*sources: str) -> list[str]:
-    return [
-        f"{site.callee}({site.argument})"
-        for site in _unread_tools([_scan_tool_writes(source) for source in sources])
-    ]
+    """Scan the sources as the modules ``m0``, ``m1``, ... and list what stays unread."""
+    scans = [_scan_tool_writes(source, f"m{index}.py") for index, source in enumerate(sources)]
+    return [f"{site.callee}({site.argument})" for site in _unread_tools(scans)]
 
 
 @pytest.mark.parametrize(
@@ -542,9 +564,11 @@ def test_written_tools_scan_reports_a_tool_it_cannot_read(source: str, expected:
     [
         ('X_TOOL = "a.b"\ntrace.record(run_id, X_TOOL, {})',),
         ('X_TOOL: Final = "a.b"\ninsert_run_action(session, tool=X_TOOL)',),
-        ('X_TOOL = "a.b"', "from m import X_TOOL\ntrace.record(run_id, X_TOOL, {})"),
+        ('X_TOOL = "a.b"', "from m0 import X_TOOL\ntrace.record(run_id, X_TOOL, {})"),
+        ('X_TOOL = "a.b"', "def f():\n    from m0 import X_TOOL\n    record(run_id, X_TOOL)"),
+        ('X_TOOL = "a.b"', "import m0\nrecord(run_id, m0.X_TOOL)"),
     ],
-    ids=["same-module", "annotated", "imported"],
+    ids=["same-module", "annotated", "imported", "imported-in-a-function", "attribute-of-a-module"],
 )
 def test_written_tools_scan_reads_a_module_tool_constant(sources: tuple[str, ...]) -> None:
     assert _unread(*sources) == []
@@ -802,7 +826,76 @@ def test_written_tools_scan_reports_an_alias_made_in_another_module() -> None:
     ],
 )
 def test_written_tools_scan_reports_a_rebound_tool_constant(rebinding: str) -> None:
-    assert _unread('LLM_CALL_TOOL = "llm.call"', rebinding) == ["LLM_CALL_TOOL(rebound)"]
+    assert "LLM_CALL_TOOL(rebound)" in _unread('LLM_CALL_TOOL = "llm.call"', rebinding)
+
+
+_USE = "record(run_id, LLM_CALL_TOOL, {})"
+
+
+@pytest.mark.parametrize(
+    ("source", "expected"),
+    [
+        (
+            f"from external_tools import LLM_CALL_TOOL\n{_USE}",
+            ["LLM_CALL_TOOL(external_tools.LLM_CALL_TOOL)"],
+        ),
+        (f"from m9 import LLM_CALL_TOOL\n{_USE}", ["LLM_CALL_TOOL(m9.LLM_CALL_TOOL)"]),
+        (f"from .m0 import LLM_CALL_TOOL\n{_USE}", ["LLM_CALL_TOOL(.m0.LLM_CALL_TOOL)"]),
+        (f"from . import LLM_CALL_TOOL\n{_USE}", ["LLM_CALL_TOOL(..LLM_CALL_TOOL)"]),
+        (
+            f"def f():\n    from external_tools import LLM_CALL_TOOL\n    {_USE}",
+            ["LLM_CALL_TOOL(external_tools.LLM_CALL_TOOL)"],
+        ),
+        (
+            f"from m0 import LLM_CALL_TOOL\nfrom external_tools import LLM_CALL_TOOL\n{_USE}",
+            ["LLM_CALL_TOOL(external_tools.LLM_CALL_TOOL)"],
+        ),
+        (
+            f"from external_tools import *\n{_USE}",
+            ["<reference>(external_tools.*)", "record(LLM_CALL_TOOL)"],
+        ),
+        (f"from m0 import *\n{_USE}", ["<reference>(m0.*)", "record(LLM_CALL_TOOL)"]),
+        (f"import LLM_CALL_TOOL\n{_USE}", ["LLM_CALL_TOOL(rebound)", "record(LLM_CALL_TOOL)"]),
+        ("from m0 import tool\nrecord(run_id, tool, {})", ["tool(rebound)", "record(tool)"]),
+        (_USE, ["record(LLM_CALL_TOOL)"]),
+    ],
+    ids=[
+        "other-package",
+        "other-module",
+        "relative",
+        "relative-package",
+        "inside-a-function",
+        "second-import-over-a-good-one",
+        "star",
+        "star-from-a-known-module",
+        "plain-import",
+        "tool-variable-imported",
+        "never-bound",
+    ],
+)
+def test_written_tools_scan_reports_a_tool_constant_from_elsewhere(
+    source: str, expected: list[str]
+) -> None:
+    assert _unread('LLM_CALL_TOOL = "llm.call"', source) == expected
+
+
+def test_written_tools_scan_reports_an_import_of_a_reexported_tool_constant() -> None:
+    sources = 'X_TOOL = "a.b"', "from m0 import X_TOOL", "from m1 import X_TOOL"
+
+    assert _unread(*sources) == ["X_TOOL(m1.X_TOOL)"]
+
+
+def test_written_tools_scan_reports_an_import_of_a_computed_tool_constant() -> None:
+    sources = "X_TOOL = make()", "from m0 import X_TOOL"
+
+    assert _unread(*sources) == ["X_TOOL(make())", "X_TOOL(m0.X_TOOL)"]
+
+
+def test_written_tools_scan_resolves_a_tool_constant_in_a_package_module() -> None:
+    package = _scan_tool_writes('X_TOOL = "a.b"', "app/x/__init__.py")
+    importer = _scan_tool_writes("from app.x import X_TOOL", "app/y.py")
+
+    assert _unread_tools([package, importer]) == []
 
 
 def test_written_tools_scan_reports_a_local_tool_name_and_its_use() -> None:
