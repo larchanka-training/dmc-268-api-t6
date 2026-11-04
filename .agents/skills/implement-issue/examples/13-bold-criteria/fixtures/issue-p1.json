@@ -1,0 +1,65 @@
+{
+  "data": {
+    "repository": {
+      "issue": {
+        "title": "[deploy] Закройте хвосты отката: stop-режим и зависимость шагов",
+        "url": "https://github.com/larchanka-training/dmc-268-ui-t6/issues/171",
+        "state": "OPEN",
+        "body": "## Scope\n\n- **Часть 1 (P3, код) — края stop-режима `deploy/scripts/rollback.sh`.**\n  - **Упавший образ остаётся в `.deploy-state`.** Неудачная остановка не чистит состояние.\n- **Часть 2 (P3, docs) — повторный запуск после сбоя лендинга, `docs/CICD.md`.**\n- Вне объёма: кэш слоя `apk` образа лендинга\n\n## Acceptance Criteria\n\n- [ ] **Ч.1, state.** После неудачной остановки следующий выкат другого образа проходит.\n- [ ] **Ч.2.** `docs/CICD.md` §2 описывает откат UI на N-1.\n- [ ] `shellcheck -x deploy/scripts/*.sh` чистый.\n\n## Kickoff — с чего начать\n\n**Репозиторий:** larchanka-training/dmc-268-ui-t6\n\n**Ветка:** `fix/<n>-rollback-tails`\n",
+        "assignees": {
+          "nodes": [
+            {
+              "login": "axyi"
+            }
+          ]
+        },
+        "subIssuesSummary": {
+          "total": 0,
+          "completed": 0
+        },
+        "projectItems": {
+          "pageInfo": {
+            "hasNextPage": false,
+            "endCursor": "MQ"
+          },
+          "nodes": [
+            {
+              "project": {
+                "number": 12,
+                "owner": {
+                  "__typename": "Organization",
+                  "login": "larchanka-training"
+                }
+              },
+              "fieldValueByName": {
+                "__typename": "ProjectV2ItemFieldSingleSelectValue",
+                "name": "In Progress"
+              }
+            }
+          ]
+        },
+        "blockedBy": {
+          "pageInfo": {
+            "hasNextPage": false,
+            "endCursor": null
+          },
+          "nodes": []
+        },
+        "timelineItems": {
+          "pageInfo": {
+            "hasNextPage": false,
+            "endCursor": null
+          },
+          "nodes": []
+        },
+        "comments": {
+          "pageInfo": {
+            "hasNextPage": false,
+            "endCursor": null
+          },
+          "nodes": []
+        }
+      }
+    }
+  }
+}

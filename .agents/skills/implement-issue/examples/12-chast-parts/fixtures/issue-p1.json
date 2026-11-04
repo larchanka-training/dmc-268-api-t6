@@ -1,0 +1,61 @@
+{
+  "data": {
+    "repository": {
+      "issue": {
+        "title": "[runs] Закройте хвосты контракта: CHECK триггера и OpenAPI",
+        "url": "https://github.com/larchanka-training/dmc-268-api-t6/issues/238",
+        "state": "OPEN",
+        "body": "## Scope\n\n- Часть 1 (P3, tests): тест сверяет значения CHECK `ck_runs_trigger` в БД с `RunTrigger`\n- Часть 2 (P3, api): runtime OpenAPI объявляет `status` и `engine` в `RunSessionDto`\n- Вне объёма: новые значения `trigger`, `status`, `engine`\n\n## Acceptance Criteria\n\n- [ ] Часть 1: PG-тест падает, если `RunTrigger` и `ck_runs_trigger` разошлись\n- [ ] Часть 2: `GET /openapi.json` отдаёт `status` и `engine` у `RunSessionDto`\n- [ ] Новых ревизий Alembic нет\n\n## Kickoff — с чего начать\n\n**Репозиторий:** larchanka-training/dmc-268-api-t6\n\n**Ветка:** `chore/<n>-run-contract-tails`\n",
+        "assignees": {
+          "nodes": []
+        },
+        "subIssuesSummary": {
+          "total": 0,
+          "completed": 0
+        },
+        "projectItems": {
+          "pageInfo": {
+            "hasNextPage": false,
+            "endCursor": "MQ"
+          },
+          "nodes": [
+            {
+              "project": {
+                "number": 12,
+                "owner": {
+                  "__typename": "Organization",
+                  "login": "larchanka-training"
+                }
+              },
+              "fieldValueByName": {
+                "__typename": "ProjectV2ItemFieldSingleSelectValue",
+                "name": "Todo"
+              }
+            }
+          ]
+        },
+        "blockedBy": {
+          "pageInfo": {
+            "hasNextPage": false,
+            "endCursor": null
+          },
+          "nodes": []
+        },
+        "timelineItems": {
+          "pageInfo": {
+            "hasNextPage": false,
+            "endCursor": null
+          },
+          "nodes": []
+        },
+        "comments": {
+          "pageInfo": {
+            "hasNextPage": false,
+            "endCursor": null
+          },
+          "nodes": []
+        }
+      }
+    }
+  }
+}

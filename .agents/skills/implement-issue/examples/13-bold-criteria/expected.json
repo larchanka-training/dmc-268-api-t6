@@ -1,0 +1,38 @@
+{
+  "blockers": [],
+  "common_acceptance_criteria": [
+    "`shellcheck -x deploy/scripts/*.sh` чистый."
+  ],
+  "held": null,
+  "issue": {
+    "assignees": [
+      "axyi"
+    ],
+    "board_status": "In Progress",
+    "number": 171,
+    "repo": "larchanka-training/dmc-268-ui-t6",
+    "state": "OPEN",
+    "sub_issues": {
+      "open": 0,
+      "total": 0
+    },
+    "title": "[deploy] Закройте хвосты отката: stop-режим и зависимость шагов",
+    "url": "https://github.com/larchanka-training/dmc-268-ui-t6/issues/171"
+  },
+  "kickoff": {
+    "present": true,
+    "text": "**Репозиторий:** larchanka-training/dmc-268-ui-t6\n\n**Ветка:** `fix/<n>-rollback-tails`"
+  },
+  "parts": [],
+  "reasons": [
+    "the acceptance criteria name parts (1, 2) but the Scope has no part bullets this script can read — the issue's author or the tech lead rewrites them as `- Ч.N (…): …` (create-issue format), numbered from 1; this run does not edit the issue"
+  ],
+  "schema": 1,
+  "selected": null,
+  "task_prs": [],
+  "verdict": "stop",
+  "warnings": [
+    "acceptance criterion names Part 1, not in Scope",
+    "acceptance criterion names Part 2, not in Scope"
+  ]
+}

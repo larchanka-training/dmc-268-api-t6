@@ -57,11 +57,13 @@ Read `verdict`, `reasons`, `warnings`, `selected`.
 
 - **`stop` (exit 1):** report `reasons` verbatim and end the run. Never work around a stop:
   do not pass `--part` to get past a blocker or an open pull request, do not edit the issue,
-  do not drop a blocker. The reasons are one of: the issue is CLOSED; an epic (sub-issues and no
-  parts of its own: implement those); a native blocker is OPEN (`ref — title`; "closed" means
-  `state: CLOSED` literally, an issue in AC Check is still open); the parts are not numbered
-  1..k; the criteria carry `Ч.N:` prefixes but the Scope has no part bullet the script can read
-  (`- Ч.N (…): …`; ask the user); an OPEN pull request with `Refs` names no part of the issue
+  do not drop a blocker. The reasons are one of: the issue is CLOSED; an epic (sub-issues, no
+  parts of its own, and `Эпик` / `Epic` in the title or a Scope bullet that starts with an issue:
+  implement those); a native blocker is OPEN (`ref — title`; "closed" means `state: CLOSED`
+  literally, an issue in AC Check is still open); the parts are not numbered 1..k; the issue is
+  not on board 12 (a person adds the card); the criteria name parts but the Scope has no part
+  bullet the script can read (the issue's author or the tech lead rewrites it as `- Ч.N (…): …`,
+  numbered from 1: ask the user); an OPEN pull request with `Refs` names no part of the issue
   (the user says which part it covers, or passes `--part`); the first unfinished part has an
   open pull request (finish it, or the user passes `--part`); every part is merged but a pull
   request is still open; a task without parts has an open pull request (a rework PR is the
@@ -80,12 +82,13 @@ Read `verdict`, `reasons`, `warnings`, `selected`.
   `explicit`, `whole-task`), show every `warnings` line, continue. A missing Kickoff is a
   warning, not a stop: older issues have none. A warning that a **MERGED** pull request with
   `Refs` names no part may mean it already covered the selected part: show it and ask the user
-  before going on.
+  before going on. So may a warning that the issue has sub-issues and nothing marks it as an epic
+  mean an epic without the marker: show it and ask.
 
 How the parts are found (full rules: `references/parts.md`): `## Scope` bullets that start
-`Ч.N` / `Part N` / `Teil N` are the parts. A part is **done** if a MERGED pull request names it,
-**open_pr** if an OPEN one does, else **todo** (closed-unmerged ones never count). A pull request
-counts only with a `Refs` line naming this issue; it names its parts in its title, else in the
+`Ч.N` / `Часть N` / `Part N` / `Teil N` are the parts. A part is **done** if a MERGED pull request
+names it, **open_pr** if an OPEN one does, else **todo** (closed-unmerged ones never count). A pull
+request counts only with a `Refs` line naming this issue; it names its parts in its title, else in the
 **first mention** in the first line of its `## What`. One with `Refs` naming no part stops the run
 while OPEN (no `--part`) and is a warning when MERGED or CLOSED or with `--part`.
 
