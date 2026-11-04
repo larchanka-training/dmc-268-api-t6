@@ -380,6 +380,37 @@ def test_prepare_expected_keys_match_real_compose_runtime_environment(
     assert verifier.expected_keys[role] == sorted(runtime_keys)
 
 
+@pytest.mark.parametrize("role", ["api", "worker", "webhook-worker"])
+def test_secrets_example_lists_the_keys_the_verifier_expects(
+    prepared_verifier: Callable[[object, bool], Any], role: str
+) -> None:
+    verifier = prepared_verifier(
+        {
+            "heads": ["20261010_0110"],
+            "revisions": ["20261010_0110", "20300101_0099"],
+            "parents": {"20261010_0110": "20300101_0099"},
+        },
+        False,
+    )
+    verifier.prepare()
+    secrets = (VERIFIER.parents[1] / "docs/SECRETS.md").read_text(encoding="utf-8")
+    line = re.search(rf"^{role} environment keys: (\[.*\])$", secrets, re.M)
+    assert line is not None
+    # The example shows a real image; the fixture image has only PATH and PYTHON_VERSION.
+    image_keys = {
+        "GPG_KEY",
+        "HOME",
+        "HOSTNAME",
+        "LC_CTYPE",
+        "PYTHONDONTWRITEBYTECODE",
+        "PYTHONUNBUFFERED",
+        "PYTHON_SHA256",
+        "UV_COMPILE_BYTECODE",
+        "UV_LINK_MODE",
+    }
+    assert json.loads(line[1]) == sorted({*verifier.expected_keys[role], *image_keys})
+
+
 @pytest.mark.parametrize("user_plugin", [False, True])
 def test_prepare_accepts_b_child_and_exposes_only_user_config_plugin(
     prepared_verifier: Callable[[object, bool], Any], tmp_path: Path, user_plugin: bool
