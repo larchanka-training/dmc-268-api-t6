@@ -1,7 +1,7 @@
 {
   "provenance": {
     "repository": "https://github.com/larchanka-training/dmc-268-ui-t6",
-    "commit": "6c635e7caf6d3a37eda5795c25ad1af5411b3024",
+    "commit": "5a90cce81efeb17a9f6a1dfa30236b09b65cfe55",
     "generator": "z.toJSONSchema (Zod 4)",
     "command": "DMC_268_UI_DIR=<ui checkout after pnpm install> SCHEMA_NAMES=runSession,runAction,reviewComment,runDetail,findingView,runListPage,runUpdatedEvent,repository,repositoryUpdate,rawFileDiff,fileSlice,authSession,me,bitbucketDiscoveryRequest,bitbucketDiscoveredRepository,bitbucketDiscoveryResponse,bitbucketConnectRequest,bitbucketWebhookSetup,bitbucketConnectResponse,bitbucketConnectionItem,bitbucketConnectionList,bitbucketCredentialRotateRequest,bitbucketCredentialRotateResponse OUTPUT_PATH=tests/fixtures/ui_zod_contracts.json node tests/generate_ui_zod_contracts.mjs"
   },
@@ -165,6 +165,37 @@
             "string",
             "null"
           ]
+        },
+        "usage": {
+          "type": "object",
+          "properties": {
+            "tokensIn": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "tokensOut": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "costUsd": {
+              "type": "number",
+              "minimum": 0
+            }
+          },
+          "required": [
+            "tokensIn",
+            "tokensOut",
+            "costUsd"
+          ],
+          "additionalProperties": false
+        },
+        "triggeredBy": {
+          "type": [
+            "string",
+            "null"
+          ]
         }
       },
       "required": [
@@ -182,7 +213,9 @@
         "summaryOnly",
         "pullRequest",
         "actionCount",
-        "errorCode"
+        "errorCode",
+        "usage",
+        "triggeredBy"
       ],
       "additionalProperties": false
     },
@@ -513,6 +546,37 @@
             "null"
           ]
         },
+        "usage": {
+          "type": "object",
+          "properties": {
+            "tokensIn": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "tokensOut": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "costUsd": {
+              "type": "number",
+              "minimum": 0
+            }
+          },
+          "required": [
+            "tokensIn",
+            "tokensOut",
+            "costUsd"
+          ],
+          "additionalProperties": false
+        },
+        "triggeredBy": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "findings": {
           "type": "array",
           "items": {
@@ -776,6 +840,8 @@
         "pullRequest",
         "actionCount",
         "errorCode",
+        "usage",
+        "triggeredBy",
         "findings",
         "summary",
         "verdict",
@@ -1063,6 +1129,37 @@
                   "string",
                   "null"
                 ]
+              },
+              "usage": {
+                "type": "object",
+                "properties": {
+                  "tokensIn": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 9007199254740991
+                  },
+                  "tokensOut": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 9007199254740991
+                  },
+                  "costUsd": {
+                    "type": "number",
+                    "minimum": 0
+                  }
+                },
+                "required": [
+                  "tokensIn",
+                  "tokensOut",
+                  "costUsd"
+                ],
+                "additionalProperties": false
+              },
+              "triggeredBy": {
+                "type": [
+                  "string",
+                  "null"
+                ]
               }
             },
             "required": [
@@ -1080,7 +1177,9 @@
               "summaryOnly",
               "pullRequest",
               "actionCount",
-              "errorCode"
+              "errorCode",
+              "usage",
+              "triggeredBy"
             ],
             "additionalProperties": false
           }

@@ -24,7 +24,7 @@ CONTRACTS_PATH = Path(__file__).parent / "fixtures" / "ui_zod_contracts.json"
 METRICS_CONTRACTS_PATH = Path(__file__).parent / "fixtures" / "ui_metrics_zod_contracts.json"
 RUN_STEP_CONTRACTS_PATH = Path(__file__).parent / "fixtures" / "ui_run_step_zod_contracts.json"
 RUN_ID = UUID("11111111-1111-4111-8111-111111111111")
-UI_CONTRACT_COMMIT = "6c635e7caf6d3a37eda5795c25ad1af5411b3024"
+UI_CONTRACT_COMMIT = "5a90cce81efeb17a9f6a1dfa30236b09b65cfe55"
 UI_METRICS_CONTRACT_COMMIT = "5393bafdbd4546c868514623429dce6eb84c9777"
 # The RunStepEvent supplement retains its separate UI #155 provenance.
 # SCHEMA_NAMES=runStepEvent OUTPUT_PATH=tests/fixtures/ui_run_step_zod_contracts.json \
