@@ -20,6 +20,7 @@ from pydantic import (
 from starlette.routing import BaseRoute
 
 import app.main  # registers every DTO of the composed app; its routes feed the response walk
+from app.common.domain.run_enums import Engine, RunStatus
 from app.modules.auth.api.router import AuthSessionDto
 from app.modules.repositories.api.dtos import RagIndexDto
 from app.modules.reviews.api.dtos import (
@@ -48,8 +49,8 @@ def test_run_session_timestamps_are_serialized_in_utc() -> None:
     dto = RunSessionDto(
         provider="github",
         id=ID,
-        status="succeeded",
-        engine="fast",
+        status=RunStatus.SUCCEEDED,
+        engine=Engine.FAST,
         attempt=1,
         cancel_requested=False,
         trigger="webhook",

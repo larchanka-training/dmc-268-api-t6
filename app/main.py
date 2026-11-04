@@ -48,7 +48,7 @@ from app.bootstrap.reviews_api import (
 from app.bootstrap.run_step_listener import run_step_listener
 from app.bootstrap.run_update_listener import run_update_listener
 from app.common.application.github_repository_name import REPOSITORY_FULL_NAME_MAX_LENGTH
-from app.common.infrastructure.db.enums import RunState
+from app.common.domain.run_enums import Engine, RunStatus
 from app.common.infrastructure.telemetry import (
     TracingMiddleware,
     configure_logging,
@@ -570,8 +570,8 @@ def to_run_session_dto(item: RunListItem) -> RunSessionDto:
     return RunSessionDto(
         id=item.id,
         provider=item.provider,
-        status=item.status,
-        engine=item.engine,
+        status=RunStatus(item.status),
+        engine=Engine(item.engine),
         attempt=item.attempt,
         cancel_requested=item.cancel_requested,
         trigger=item.trigger,
@@ -819,7 +819,7 @@ def to_file_lines_dto(item: FileLinesPage) -> FileLinesDto:
 )
 async def list_runs(
     repository: Annotated[RunRepository, Depends(get_run_repository)],
-    status: RunState | None = None,
+    status: RunStatus | None = None,
     repo: Annotated[
         str | None, Query(min_length=1, max_length=REPOSITORY_FULL_NAME_MAX_LENGTH)
     ] = None,

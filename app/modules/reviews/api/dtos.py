@@ -6,6 +6,7 @@ from uuid import UUID
 
 from pydantic import AfterValidator, BaseModel, ConfigDict
 
+from app.common.domain.run_enums import Engine, RunStatus
 from app.modules.reviews.application.run_trigger import RunTrigger
 
 
@@ -45,8 +46,8 @@ class RunUsageDto(ApiDto):
 class RunSessionDto(ApiDto):
     id: UUID
     provider: Literal["github", "gitlab", "bitbucket"]
-    status: str
-    engine: str
+    status: RunStatus
+    engine: Engine
     attempt: int
     cancel_requested: bool
     trigger: RunTrigger

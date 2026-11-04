@@ -1,6 +1,7 @@
 from datetime import UTC, datetime, timedelta, timezone
 from uuid import UUID
 
+from app.common.domain.run_enums import Engine, RunStatus
 from app.modules.reviews.api.dtos import PullRequestDto, RunSessionDto, RunUsageDto
 
 
@@ -8,8 +9,8 @@ def test_run_session_serializes_the_frontend_camel_case_contract() -> None:
     dto = RunSessionDto(
         provider="github",
         id=UUID("00000000-0000-0000-0000-000000000001"),
-        status="succeeded",
-        engine="fast",
+        status=RunStatus.SUCCEEDED,
+        engine=Engine.FAST,
         attempt=0,
         cancel_requested=False,
         trigger="rerun",
@@ -50,8 +51,8 @@ def test_run_session_serializes_created_at_in_utc_whatever_its_zone() -> None:
     dto = RunSessionDto(
         provider="github",
         id=UUID("00000000-0000-0000-0000-000000000001"),
-        status="queued",
-        engine="fast",
+        status=RunStatus.QUEUED,
+        engine=Engine.FAST,
         attempt=0,
         cancel_requested=False,
         trigger="webhook",

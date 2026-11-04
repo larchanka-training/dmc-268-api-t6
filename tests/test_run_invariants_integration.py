@@ -3,17 +3,27 @@
 from __future__ import annotations
 
 import os
+import re
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
-from typing import cast
+from typing import cast, get_args
 from uuid import UUID, uuid4
 
 import pytest
 from alembic.config import Config
-from sqlalchemy import Connection, Table, create_engine, insert, select, text, update
+from sqlalchemy import (
+    CheckConstraint,
+    Connection,
+    Table,
+    create_engine,
+    insert,
+    select,
+    text,
+    update,
+)
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.schema import CreateSchema, DropSchema
 
@@ -24,6 +34,7 @@ from app.modules.repositories.infrastructure.models import (
     Repository,
     RuleVersion,
 )
+from app.modules.reviews.application.run_trigger import RunTrigger
 from app.modules.reviews.infrastructure.models import CodeChange, PromptVersion, Run
 from app.modules.workspaces.infrastructure.models import Workspace
 
@@ -362,7 +373,34 @@ def test_foreign_key_chain_rejects_orphans(
     )
 
 
-@pytest.mark.parametrize("trigger", ["webhook", "manual", "rerun", "dry_run"])
+def test_run_trigger_check_matches_python_type_and_model(migrated_connection: Connection) -> None:
+    with migrated_connection.begin():
+        definition = migrated_connection.scalar(
+            text(
+                "SELECT pg_get_constraintdef(c.oid) FROM pg_constraint AS c "
+                "JOIN pg_class AS t ON t.oid = c.conrelid "
+                "WHERE c.conname = 'ck_runs_trigger' AND c.contype = 'c' "
+                "AND t.relname = 'runs' AND t.relnamespace = current_schema()::regnamespace"
+            )
+        )
+        assert isinstance(definition, str)
+        database_values = set(re.findall(r"'([^']+)'", definition))
+        assert database_values == set(get_args(RunTrigger.__value__))
+
+        model_check = next(
+            constraint
+            for constraint in RUN_TABLE.constraints
+            if isinstance(constraint, CheckConstraint) and constraint.name == "ck_runs_trigger"
+        )
+        expected_check = (
+            "trigger IN ("
+            + ", ".join(f"'{trigger}'" for trigger in get_args(RunTrigger.__value__))
+            + ")"
+        )
+        assert str(model_check.sqltext) == expected_check
+
+
+@pytest.mark.parametrize("trigger", get_args(RunTrigger.__value__))
 def test_run_trigger_accepts_each_value_of_the_spec(
     seeded_connection: tuple[Connection, ParentIds], trigger: str
 ) -> None:
