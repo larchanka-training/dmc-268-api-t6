@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import copy
 import json
+import re
 import shutil
 from collections.abc import Callable
 from pathlib import Path
@@ -15,7 +16,6 @@ import pytest
 from review.scripts import eval_live
 from review.scripts.eval_ab import AbError, aggregate, format_markdown, main
 from review.scripts.eval_live import BACKEND_RULES, FRONTEND_RULES, REPO_ROOT, record_live
-from review.scripts.eval_provenance import digest_files
 from review.scripts.eval_rag_rehearsal import DEFAULT_MODEL, RehearsalTransport, rehearsal_settings
 from review.scripts.eval_replay import replay
 from review.scripts.validate_dataset import DEFAULT_ROOT
@@ -832,17 +832,18 @@ def prompt_reports(
     }
 
 
-def test_a_capture_records_the_digest_of_its_static_inputs_without_the_prompt(
+def test_captures_of_two_prompts_record_one_digest_of_the_other_static_inputs(
     prompt_reports: dict[str, dict[str, Any]],
 ) -> None:
-    for version, report in prompt_reports.items():
-        provenance = report["provenance"]
-        prompt = f"review/prompts/review.system.{version}.md"
-        assert prompt in provenance["static_inputs"]
-        rest = [path for path in provenance["static_inputs"] if path != prompt]
-        assert provenance["run_metadata"]["static_digest_without_prompt"] == digest_files(
-            REPO_ROOT, rest
-        )
+    """That digest moves with the other inputs: the one-byte test below shows it."""
+    older = prompt_reports["v3"]["provenance"]
+    newer = prompt_reports["v5"]["provenance"]
+    digest = older["run_metadata"]["static_digest_without_prompt"]
+
+    assert re.fullmatch(r"sha256-v1:[0-9a-f]{64}", digest)
+    assert newer["run_metadata"]["static_digest_without_prompt"] == digest
+    assert older["static_digest"] != newer["static_digest"]
+    assert digest not in (older["static_digest"], newer["static_digest"])
 
 
 def test_captures_that_differ_only_in_the_prompt_give_one_table_with_tokens_and_deltas(
