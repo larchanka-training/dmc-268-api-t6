@@ -11,6 +11,7 @@ from importlib.resources import files
 from typing import Literal
 
 from app.modules.reviews.application.check_runs import summary_only_line
+from app.modules.reviews.application.coverage_schema import REASON_TEXT
 from app.modules.reviews.application.diff_anchor import Anchor, AnchorRejection, resolve_anchor
 from app.modules.reviews.application.diff_map import DiffMap, is_supported_path
 from app.modules.reviews.application.review_output import (
@@ -62,6 +63,33 @@ REVIEW_BODY_CHAR_BUDGET = 4000
 _ADDITIONAL_FINDINGS_HEADING = "## Additional findings"
 _CHECKED_FILES_WITHHELD = "(список не показывается: имена файлов в этом ревью скрыты)"
 
+_EXECUTIVE_BLOCK_CHAR_LIMIT = 1500
+# Names on one checklist line, the first that keeps the block within its limit.
+_CHECKLIST_NAME_LIMITS = (5, 3, 1, 0)
+_DISPLAYED_NAME_CHARS = 120
+# CVS §8.2: such a name is unusable or unproven, so only its reason and count are public.
+_COUNT_ONLY_REASONS = frozenset({"unsupported_path", "identity_unresolved"})
+_SENSITIVE_FILES = (
+    (
+        "Изменённые миграции",
+        re.compile(r"(?:^|/)(?:migrations|alembic/versions|db/migrate)/"),
+    ),
+    (
+        "Изменённые CI-workflows",
+        re.compile(
+            r"^(?:\.github/workflows/|\.circleci/|\.gitlab-ci\.yml$|bitbucket-pipelines\.yml$)"
+        ),
+    ),
+    (
+        "Изменённые манифесты зависимостей",
+        re.compile(
+            r"(?:^|/)(?:pyproject\.toml|requirements[^/]*\.txt|setup\.py|setup\.cfg|Pipfile"
+            r"|package\.json|go\.mod|Cargo\.toml|pom\.xml|build\.gradle(?:\.kts)?|Gemfile"
+            r"|composer\.json)$"
+        ),
+    ),
+)
+
 _ATTRIBUTION_PREFIX = "According to custom instructions in '"
 _ATTRIBUTION_RE = re.compile(r"^According to custom instructions in '(?P<name>[^']+)' \([^)]*\): ")
 
@@ -111,6 +139,8 @@ class ProcessedReviewOutput:
     coverage: RunCoverage = field(kw_only=True)
     # Rendered once by ``process``: a store-time repack has no diff map to build it from.
     executive_block: str = field(default="", kw_only=True)
+    # Canonical names of files with an omission reason, never listed in the body (CVS §8.2).
+    unnamed_paths: frozenset[str] = field(default=frozenset(), kw_only=True)
 
     @property
     def buckets(self) -> tuple[tuple[ProcessedFinding, ...], ...]:
@@ -241,7 +271,14 @@ class FindingsPostProcessor:
                 )
             }
         )
-        executive_block = _executive_block(kept, coverage, summary_only=summary_only)
+        executive_block = _executive_block(kept, coverage, diff_map, summary_only=summary_only)
+        unnamed_paths = frozenset(
+            name
+            for file in diff_map.files
+            if file.omission_reason is not None
+            for name in (file.new_path, file.old_path)
+            if name
+        )
         review_body, omitted_body_only_count = _pack_review_body(
             final_output,
             kept,
@@ -251,6 +288,7 @@ class FindingsPostProcessor:
             total_below_threshold,
             coverage=coverage,
             executive_block=executive_block,
+            unnamed_paths=unnamed_paths,
         )
         return ProcessedReviewOutput(
             inline=tuple(inline),
@@ -261,6 +299,7 @@ class FindingsPostProcessor:
             summary=final_output.summary,
             coverage=coverage,
             executive_block=executive_block,
+            unnamed_paths=unnamed_paths,
         )
 
     def _drop_lint_patterns(
@@ -472,9 +511,93 @@ def _risk_score(
     return "Low"
 
 
+def _names_withheld(coverage: RunCoverage) -> bool:
+    """An unknown policy or any ignored allocation: a name from the diff may be a private one.
+
+    Bounded coverage diagnostics hide ignored paths, so they cannot be told apart.
+    """
+    return bool(
+        coverage.exclusion_counts.get("ignored", 0)
+        or "classification_unavailable" in coverage.reason_counts
+    )
+
+
+def _inline_code(text: str) -> str:
+    """Bound a name and fence it, so that a backtick in it cannot end the code span."""
+    display = text[:_DISPLAYED_NAME_CHARS]
+    runs = re.findall(r"`+", display)
+    if not runs:
+        return f"`{display}`"
+    fence = "`" * (1 + max(len(run) for run in runs))
+    return f"{fence} {display} {fence}"
+
+
+def _checklist_line(label: str, count: int, names: Sequence[str], limit: int) -> str:
+    listed = names[:limit]
+    if not listed:
+        return f"- {label} ({count})"
+    remaining = count - len(listed)
+    return f"- {label} ({count}): {', '.join(listed)}" + (
+        f" и ещё {remaining}" if remaining > 0 else ""
+    )
+
+
+def _unreviewed_file_lines(coverage: RunCoverage, limit: int) -> list[str]:
+    """One line per reason of the coverage: the classification of the diff under its policy.
+
+    ``reason_counts`` stays exact when the saved ``reasons`` are bounded.
+    """
+    names: dict[str, list[str]] = {}
+    for item in coverage.reasons:
+        if item.path is not None and item.reason not in _COUNT_ONLY_REASONS:
+            names.setdefault(item.reason, []).append(_inline_code(item.path))
+    return [
+        _checklist_line(
+            f"Не проверено — {REASON_TEXT.get(reason, reason)}",
+            count,
+            sorted(names.get(reason, ())),
+            limit,
+        )
+        for reason, count in sorted(coverage.reason_counts.items())
+    ]
+
+
+def _blocking_finding_lines(kept: tuple[ProcessedFinding, ...], limit: int) -> list[str]:
+    blocking = sorted(
+        (item.finding for item in kept if item.finding.severity in {"critical", "high"}),
+        key=lambda finding: (finding.severity, finding.path, finding.line, finding.title),
+    )
+    if not blocking:
+        return []
+    names = [
+        f"**{finding.title}** ({_inline_code(f'{finding.path}:{finding.line}')})"
+        for finding in blocking
+    ]
+    return [_checklist_line("Подтвердите находки critical/high", len(names), names, limit)]
+
+
+def _sensitive_file_lines(diff_map: DiffMap, coverage: RunCoverage, limit: int) -> list[str]:
+    """Changed migrations, CI workflows and dependency manifests, reviewed or not.
+
+    A file with an omission reason has no usable name and is already on its reason's line.
+    """
+    lines = []
+    for label, pattern in _SENSITIVE_FILES:
+        paths = []
+        for file in diff_map.files:
+            names = [name for name in (file.new_path, file.old_path) if name]
+            if file.omission_reason is None and any(pattern.search(name) for name in names):
+                paths.append(_inline_code(names[0]))
+        if paths:
+            shown = 0 if _names_withheld(coverage) else limit
+            lines.append(_checklist_line(label, len(paths), sorted(paths), shown))
+    return lines
+
+
 def _executive_block(
     kept: tuple[ProcessedFinding, ...],
     coverage: RunCoverage,
+    diff_map: DiffMap,
     *,
     summary_only: bool,
 ) -> str:
@@ -485,10 +608,21 @@ def _executive_block(
         else "проверка неполная"
     )
     risk = _risk_score(run_verdict, coverage, summary_only=summary_only)
-    return (
+    header = (
         "## Executive summary\n\n"
         f"**Verdict:** {run_verdict or unavailable_label} · **Risk Score:** {risk}"
     )
+    block = header
+    for limit in _CHECKLIST_NAME_LIMITS:
+        lines = (
+            *_unreviewed_file_lines(coverage, limit),
+            *_blocking_finding_lines(kept, limit),
+            *_sensitive_file_lines(diff_map, coverage, limit),
+        )
+        block = "\n".join((f"{header}\n\n**What to check:**", *lines)) if lines else header
+        if len(block) <= _EXECUTIVE_BLOCK_CHAR_LIMIT:
+            break
+    return block
 
 
 def _overview_block(
@@ -575,6 +709,7 @@ def finalize_stored_review_body(
             char_budget=char_budget,
             coverage=processed.coverage,
             executive_block=processed.executive_block,
+            unnamed_paths=processed.unnamed_paths,
         )
 
     body = processed.review_body
@@ -614,6 +749,7 @@ def _pack_review_body(
     char_budget: int = REVIEW_BODY_CHAR_BUDGET,
     coverage: RunCoverage,
     executive_block: str,
+    unnamed_paths: frozenset[str],
 ) -> tuple[str, int]:
     prose = render_review_body(output.summary)
     heading, separator, rest = prose.partition("\n\n")
@@ -621,14 +757,8 @@ def _pack_review_body(
     # allocations (#213). An unknown policy or any ignored allocation withholds
     # names conservatively because bounded coverage diagnostics hide ignored paths;
     # the section then says the list is withheld instead of reading as empty.
-    allowed = frozenset(path for path in checked_paths if is_supported_path(path))
-    names_withheld = bool(
-        allowed
-        and (
-            coverage.exclusion_counts.get("ignored", 0)
-            or "classification_unavailable" in coverage.reason_counts
-        )
-    )
+    allowed = frozenset(path for path in checked_paths if is_supported_path(path)) - unnamed_paths
+    names_withheld = bool(allowed and _names_withheld(coverage))
     sorted_paths = () if names_withheld else tuple(sorted(allowed))
     finding_lines = [_render_body_only_finding(item) for item in body_only]
     path_count = len(sorted_paths)

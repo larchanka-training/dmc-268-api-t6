@@ -42,8 +42,13 @@ from app.modules.reviews.application.run_coverage import (
     restore_run_coverage,
     snapshot_vcs_file,
 )
+from app.modules.reviews.application.store_review_output import hashed_findings
 from app.modules.reviews.application.vcs_diff import PullRequestLocator, VcsFile, VcsPullRequest
-from app.modules.reviews.application.verdict import SeverityThresholdValue
+from app.modules.reviews.application.verdict import (
+    SeverityThresholdValue,
+    findings_hash,
+    publish_message_id,
+)
 from tests.test_diff_anchor import _diff_map
 from tests.test_diff_anchor import _file as anchor_file
 
@@ -576,6 +581,9 @@ def test_checked_files_are_none_when_the_diff_has_no_paths() -> None:
             "## Executive summary",
             "",
             "**Verdict:** проверка неполная · **Risk Score:** Medium",
+            "",
+            "**What to check:**",
+            "- Не проверено — не удалось сопоставить замечание с доступным diff (1)",
             "",
             "## Review summary",
             "",
@@ -1420,6 +1428,9 @@ def test_findings_post_processor_v2_preserves_attribution_for_body_only_findings
 
 
 _EXECUTIVE_PATCH = "@@ -1 +1 @@\n-old\n+new"
+_IGNORE_PRIVATE = "```review-ignore\nprivate/**\n```\n"
+_INCOMPLETE = "проверка неполная"
+_NOTHING = "нет доступных для анализа изменений"
 
 
 def _text_change(path: str = "app/example.py") -> DiffSnapshot:
@@ -1439,12 +1450,17 @@ def _truncated_change(path: str = "src/cut.py") -> DiffSnapshot:
     return replace(_text_change(path), additions=2, changes=3)
 
 
-def _binary_change(path: str = "assets/logo.png") -> DiffSnapshot:
-    return DiffSnapshot(path, None, "d" * 40, omission_reason="binary")
+def _binary_change() -> DiffSnapshot:
+    return DiffSnapshot("assets/logo.png", None, "d" * 40, omission_reason="binary")
 
 
 def _too_large_change(path: str = "src/huge.py") -> DiffSnapshot:
     return DiffSnapshot(path, None, "d" * 40, omission_reason="too_large")
+
+
+def _unresolved_rename(path: str = "src/moved.py") -> DiffSnapshot:
+    """A rename with a patch, sent by the provider without its previous name."""
+    return replace(_text_change(path), status="renamed", previous_filename=None)
 
 
 def _process_snapshots(
@@ -1471,87 +1487,42 @@ def _process_snapshots(
     )
 
 
+def _what_to_check(result: ProcessedReviewOutput) -> list[str]:
+    head = result.review_body[: result.review_body.index("\n\n## Review summary")]
+    _, marker, lines = head.partition("**What to check:**\n")
+    return lines.splitlines() if marker else []
+
+
 @pytest.mark.parametrize(
-    ("snapshots", "findings", "summary_only", "verdict_line"),
+    ("snapshots", "findings", "summary_only", "verdict", "risk"),
     [
-        pytest.param(
-            [_text_change()],
-            [finding(severity="high")],
-            False,
-            "**Verdict:** blocking · **Risk Score:** High",
-            id="blocking",
-        ),
-        pytest.param(
-            [_text_change()],
-            [finding(severity="medium")],
-            False,
-            "**Verdict:** attention · **Risk Score:** Medium",
-            id="attention",
-        ),
-        pytest.param(
-            [_text_change()],
-            [],
-            False,
-            "**Verdict:** clean · **Risk Score:** Low",
-            id="clean-all-reviewed",
-        ),
-        pytest.param(
-            [_text_change(), _truncated_change()],
-            [],
-            False,
-            "**Verdict:** проверка неполная · **Risk Score:** Medium",
-            id="clean-with-truncated-file",
-        ),
-        pytest.param(
-            [replace(_text_change(), summary_only=True)],
-            [],
-            True,
-            "**Verdict:** проверка неполная · **Risk Score:** Medium",
-            id="summary-only",
-        ),
-        pytest.param(
-            [_text_change(), _binary_change()],
-            [],
-            False,
-            "**Verdict:** clean · **Risk Score:** Low",
-            id="clean-with-binary-file",
-        ),
-        pytest.param(
-            [_binary_change()],
-            [],
-            False,
-            "**Verdict:** нет доступных для анализа изменений · **Risk Score:** Low",
-            id="binary-file-only",
-        ),
-        pytest.param(
-            [_too_large_change()],
-            [],
-            False,
-            "**Verdict:** нет доступных для анализа изменений · **Risk Score:** Medium",
-            id="too-large-file-only",
-        ),
-        pytest.param(
-            [_text_change()],
-            [finding(path="not/in/diff.py")],
-            False,
-            "**Verdict:** проверка неполная · **Risk Score:** Medium",
-            id="null-verdict-without-a-file-reason",
-        ),
+        ([_text_change()], [finding(severity="high")], False, "blocking", "High"),
+        ([_text_change()], [finding(severity="medium")], False, "attention", "Medium"),
+        ([_text_change()], [], False, "clean", "Low"),
+        ([_text_change(), _truncated_change()], [], False, _INCOMPLETE, "Medium"),
+        ([replace(_text_change(), summary_only=True)], [], True, _INCOMPLETE, "Medium"),
+        ([_text_change(), _binary_change()], [], False, "clean", "Low"),
+        ([_binary_change()], [], False, _NOTHING, "Low"),
+        ([_too_large_change()], [], False, _NOTHING, "Medium"),
+        ([_text_change()], [finding(path="not/in/diff.py")], False, _INCOMPLETE, "Medium"),
     ],
 )
 def test_executive_risk_score_table(
     snapshots: list[DiffSnapshot],
     findings: list[dict[str, object]],
     summary_only: bool,
-    verdict_line: str,
+    verdict: str,
+    risk: str,
 ) -> None:
     result = _process_snapshots(snapshots, *findings, summary_only=summary_only)
 
-    assert result.review_body.startswith(f"## Executive summary\n\n{verdict_line}\n")
+    assert result.review_body.startswith(
+        f"## Executive summary\n\n**Verdict:** {verdict} · **Risk Score:** {risk}\n"
+    )
     assert result.review_body.count("**Verdict:**") == 1
 
 
-def test_executive_block_opens_the_body_and_leaves_the_review_summary_as_it_was() -> None:
+def test_executive_block_without_a_checklist_opens_the_unchanged_review_summary() -> None:
     result = _process_snapshots([_text_change()])
 
     assert result.review_body == "\n".join(
@@ -1573,4 +1544,208 @@ def test_executive_block_opens_the_body_and_leaves_the_review_summary_as_it_was(
             "",
             "**Effort:** none",
         )
+    )
+
+
+def test_executive_checklist_names_unreviewed_files_by_reason() -> None:
+    result = _process_snapshots(
+        [
+            _text_change(),
+            _truncated_change(),
+            replace(_text_change("src/broken.py"), patch="@@ -1 +1 @@\n?invalid"),
+            DiffSnapshot("src/run.sh", None, "d" * 40, "changed"),
+            _too_large_change(),
+            replace(_text_change("src/partial.py"), review_patch="@@ -1 +1 @@\n-old\n+partial"),
+            _text_change("src\\bad.py"),
+            _unresolved_rename(),
+            _binary_change(),
+        ]
+    )
+
+    assert _what_to_check(result) == [
+        "- Не проверено — не установлена идентичность файла (1)",
+        "- Не проверено — Отсутствует подтверждённый patch (1): `src/run.sh`",
+        "- Не проверено — patch повреждён (1): `src/broken.py`",
+        "- Не проверено — patch неполон (1): `src/cut.py`",
+        "- Не проверено — модель получила не весь patch (1): `src/partial.py`",
+        "- Не проверено — Превышен лимит размера, содержимое не проверено (1): `src/huge.py`",
+        "- Не проверено — неподдерживаемый путь (1)",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("file_count", "tail"),
+    [
+        (5, ""),
+        # The saved coverage keeps 20 items of the 25: the count stays exact.
+        (25, " и ещё 20"),
+    ],
+)
+def test_executive_checklist_folds_a_long_list(file_count: int, tail: str) -> None:
+    snapshots = [_truncated_change(f"c{n:02}.py") for n in range(file_count)]
+
+    assert _what_to_check(_process_snapshots([_text_change(), *snapshots])) == [
+        f"- Не проверено — patch неполон ({file_count}): "
+        f"`c00.py`, `c01.py`, `c02.py`, `c03.py`, `c04.py`{tail}"
+    ]
+
+
+def test_executive_checklist_asks_to_confirm_critical_and_high_findings() -> None:
+    result = _process_snapshots(
+        [_text_change()],
+        finding(severity="high", title="Race"),
+        finding(severity="critical", title="Leak"),
+        finding(severity="medium", title="Weak check"),
+    )
+
+    assert _what_to_check(result) == [
+        "- Подтвердите находки critical/high (2): **Leak** (`app/example.py:12`), "
+        "**Race** (`app/example.py:12`)",
+    ]
+
+
+def test_executive_checklist_names_changed_migrations_ci_and_manifests() -> None:
+    paths = (
+        "alembic/versions/0040_x.py",
+        "backend/db/migrate/1_add.rb",
+        "migrations/0001.sql",
+        ".github/workflows/ci.yml",
+        ".gitlab-ci.yml",
+        "web/package.json",
+        "pyproject.toml",
+        "requirements-dev.txt",
+        # Lookalikes.
+        "docs/migrations.md",
+        ".github/README.md",
+        "ci.yml",
+        "src/package.json.md",
+    )
+
+    assert _what_to_check(_process_snapshots([_text_change(path) for path in paths])) == [
+        "- Изменённые миграции (3): `alembic/versions/0040_x.py`, `backend/db/migrate/1_add.rb`, "
+        "`migrations/0001.sql`",
+        "- Изменённые CI-workflows (2): `.github/workflows/ci.yml`, `.gitlab-ci.yml`",
+        "- Изменённые манифесты зависимостей (3): `pyproject.toml`, `requirements-dev.txt`, "
+        "`web/package.json`",
+    ]
+
+
+def test_executive_checklist_only_counts_sensitive_files_when_the_policy_hides_names() -> None:
+    migration = "alembic/versions/1.py"
+    result = _process_snapshots(
+        [_text_change(), _text_change(migration), _text_change("private/2.py")],
+        rules=_IGNORE_PRIVATE,
+    )
+
+    assert _what_to_check(result) == ["- Изменённые миграции (1)"]
+    assert migration not in result.review_body
+
+    unknown_policy = FindingsPostProcessor.from_default_patterns().process(
+        output(),
+        diff_map=_diff_map_from_vcs(snapshot_vcs_file(_text_change(migration))),
+        checked_paths=frozenset({migration}),
+        rule_names=frozenset(),
+    )
+
+    assert _what_to_check(unknown_policy) == [
+        "- Не проверено — нет достоверного сохранённого покрытия (1)",
+        "- Изменённые миграции (1)",
+    ]
+    assert migration not in unknown_policy.review_body
+
+
+def test_executive_ignored_file_neither_raises_the_risk_nor_shows_its_name() -> None:
+    result = _process_snapshots(
+        [_text_change(), _truncated_change("private/cut.py")], rules=_IGNORE_PRIVATE
+    )
+
+    assert result.review_body.startswith(
+        "## Executive summary\n\n**Verdict:** clean · **Risk Score:** Low\n"
+    )
+    assert "private/cut.py" not in result.review_body
+
+
+@pytest.mark.parametrize(
+    ("snapshot", "reason"),
+    [
+        (_text_change("src\\moved.py"), "неподдерживаемый путь"),
+        (_unresolved_rename(), "не установлена идентичность файла"),
+        (_unresolved_rename("alembic/versions/moved.py"), "не установлена идентичность файла"),
+    ],
+)
+def test_executive_unusable_names_appear_only_as_a_number(
+    snapshot: DiffSnapshot, reason: str
+) -> None:
+    result = _process_snapshots([_text_change(), snapshot])
+
+    assert _what_to_check(result) == [f"- Не проверено — {reason} (1)"]
+    assert "moved.py" not in result.review_body
+
+
+def test_executive_block_stays_within_its_limit_with_every_kind_of_line() -> None:
+    names = [f"{'d' * 180}{n}" for n in range(6)]
+    snapshots = [
+        _text_change(),
+        *(_truncated_change(f"src/{name}.py") for name in names),
+        *(_too_large_change(f"big/{name}.py") for name in names),
+        *(DiffSnapshot(f"gone/{name}.py", None, "d" * 40, "changed") for name in names),
+        *(_text_change(f"alembic/versions/{name}.py") for name in names),
+        *(_text_change(f".github/workflows/{name}.yml") for name in names),
+        *(_text_change(f"{name}/pyproject.toml") for name in names),
+    ]
+    findings = (finding(severity="high", title="T" * 70 + str(n)) for n in range(6))
+
+    result = _process_snapshots(snapshots, *findings)
+
+    assert len(result.executive_block) <= 1500
+    assert len(_what_to_check(result)) == 7
+    assert "- Не проверено — patch неполон (6)" in result.executive_block
+    assert "- Подтвердите находки critical/high (6)" in result.executive_block
+
+
+def test_executive_block_keeps_a_backtick_in_a_name_inside_its_code_span() -> None:
+    result = _process_snapshots([_text_change(), _truncated_change("src/a`b.py")])
+
+    assert _what_to_check(result) == ["- Не проверено — patch неполон (1): `` src/a`b.py ``"]
+
+
+def test_executive_block_survives_the_store_time_repack_within_the_body_budget() -> None:
+    findings = tuple(finding(title=f"Note {n}", confidence=0.4, body="x" * 600) for n in range(10))
+    snapshots = [_text_change(), *(_truncated_change(f"src/cut{n}.py") for n in range(8))]
+    processed = _process_snapshots(snapshots, *findings)
+    assert processed.omitted_body_only_count > 0
+
+    final = finalize_stored_review_body(
+        output(*findings),
+        processed,
+        checked_paths=frozenset({"app/example.py"}),
+        severity_threshold="all",
+        below_threshold=0,
+        run_url="https://example.test/runs/1",
+    )
+
+    assert final.review_body.startswith(f"{processed.executive_block}\n\n## Review summary\n")
+    assert final.review_body.count("**Verdict:**") == 1
+    assert len(final.review_body) <= 4000
+    assert _body_only_accounted_in_review_body(final.review_body) == 10
+
+
+def test_executive_block_changes_neither_the_findings_hash_nor_the_publish_message() -> None:
+    findings = (finding(severity="high"),)
+    plain = _process_snapshots([_text_change()], *findings)
+    busy = [_text_change(), _truncated_change(), _text_change("pyproject.toml")]
+    with_checklist = _process_snapshots(busy, *findings)
+    assert plain.review_body != with_checklist.review_body
+
+    plain_hash = findings_hash(hashed_findings(plain))
+    assert findings_hash(hashed_findings(with_checklist)) == plain_hash
+    run_id = UUID(int=7)
+    assert publish_message_id(run_id, "c" * 40, plain_hash) == publish_message_id(
+        run_id, "c" * 40, findings_hash(hashed_findings(with_checklist))
+    )
+    # The stored body is compared on republish, so the same inputs give the same bytes.
+    assert with_checklist.review_body == _process_snapshots(busy, *findings).review_body
+    assert (
+        _process_snapshots(list(reversed(busy)), *findings).executive_block
+        == with_checklist.executive_block
     )
