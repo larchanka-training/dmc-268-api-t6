@@ -256,7 +256,7 @@ class ReviewPublicationUnitOfWork(UnitOfWork, Protocol):
     def runs(self) -> ReviewPublicationStore: ...
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, kw_only=True)
 class PublicationRoute:
     """One provider's gateway, trace name, error-code prefix, and check-run policy."""
 

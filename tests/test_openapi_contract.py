@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import ast
 import copy
 import json
 import re
@@ -10,9 +9,6 @@ from collections.abc import AsyncIterator, Callable, Iterator, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta, timezone
-from functools import cache
-from pathlib import Path
-from types import SimpleNamespace
 from typing import Any, Self, get_args
 from uuid import UUID
 
@@ -20,16 +16,9 @@ import pytest
 from fastapi.testclient import TestClient
 from jsonschema import Draft202012Validator
 from jsonschema.exceptions import ValidationError
-from jsonschema.protocols import Validator
-from openapi_schema_validator import OAS31Validator
 from openapi_spec_validator import OpenAPIV31SpecValidator, validate
-from openapi_spec_validator.readers import read_from_filename
 from pydantic import ValidationError as PydanticValidationError
-from referencing import Registry
-from referencing.jsonschema import DRAFT202012
 
-from app.bootstrap.bitbucket import get_bitbucket_management, get_bitbucket_workspace_scope
-from app.bootstrap.portal_auth import get_auth_scope
 from app.bootstrap.reviews_api import (
     get_cancel_run,
     get_pull_requests,
@@ -46,18 +35,8 @@ from app.main import (
     get_run_repository,
     to_rules_status_dto,
 )
-from app.modules.auth.application.scope import AuthScope
 from app.modules.code_index.domain.enums import PurgeReason, RagIndexStatus
 from app.modules.code_index.domain.rag_index import RagIndex
-from app.modules.integrations.bitbucket.api.connections import ConnectionItem, ConnectResponse
-from app.modules.integrations.bitbucket.application.manage_connection import (
-    BitbucketManagementError,
-    ConnectResult,
-    RepositoryBinding,
-)
-from app.modules.integrations.bitbucket.infrastructure.repository_provider import (
-    BitbucketProviderError,
-)
 from app.modules.repositories.application.repository_settings import (
     RepositorySettings,
     RepositorySettingsChange,
@@ -88,6 +67,15 @@ from app.modules.reviews.application.try_enqueue_webhook_run import (
     PendingRunMessage,
     RunInsertCandidate,
 )
+from tests.openapi_contract import (
+    SPEC_PATH,
+    _components,
+    _escape,
+    _load_spec,
+    _spec,
+    _validator_at,
+    _validator_for,
+)
 from tests.portal_test_client import authenticated_test_client
 from tests.test_branch_patterns import INVALID_BRANCH_PATTERNS
 from tests.test_rerun_origin import facts as rerun_facts
@@ -99,8 +87,6 @@ from tests.test_ui_zod_contracts import (
     run_origin_responses,
 )
 
-SPEC_PATH = Path(__file__).parents[1] / "contracts" / "openapi.yaml"
-APP_PATH = Path(__file__).parents[1] / "app"
 HTTP_METHODS = frozenset({"get", "put", "post", "delete", "options", "head", "patch", "trace"})
 # api#20 D9: the webhook receiver and the liveness probe are not part of the browser API.
 EXCLUDED_APP_PATHS = frozenset(
@@ -143,28 +129,6 @@ UI_ZOD_COMPONENTS = {
 ZOD_SAFE_INTEGER = 2**53 - 1
 # Keywords that make a schema typed; a schema with none of them accepts any JSON value, null too.
 TYPED_KEYWORDS = frozenset({"type", "properties", "items", "enum", "const", "anyOf", "oneOf"})
-# api#165: every step name the code writes to run_actions (docs/PIPELINE_SPEC.md §2). The column
-# is free text, not an enum, so nothing else catches a tool missing from the contract.
-RUN_ACTION_TOOLS = frozenset(
-    {
-        "policy.load",
-        "vcs.fetch_diff",
-        "context.build",
-        "context.rag",
-        "context.manifest",
-        "llm.repo_conventions",
-        "llm.call",
-        "llm.result_cache",
-        "llm.review_output",
-        "llm.verify",
-        "review.postprocess",
-        "github.publish_review",
-        "gitlab.publish_review",
-        "bitbucket.publish_review",
-    }
-)
-# A backticked `<lower>.<lower_snake>` token; state names and docs/ paths do not match.
-BACKTICKED_TOOL = re.compile(r"`([a-z]+\.[a-z_]+)`")
 UNKNOWN_RUN_ID = UUID("99999999-9999-4999-8999-999999999999")
 EXPIRED_PATH = "expired.py"
 RUN_URL = f"/api/runs/{RUN_ID}"
@@ -200,20 +164,6 @@ INVALID_REVIEW_SETTINGS: dict[str, dict[str, object]] = {
 }
 
 
-@cache
-def _load_spec() -> tuple[Mapping[str, Any], str]:
-    return read_from_filename(str(SPEC_PATH))
-
-
-def _spec() -> Mapping[str, Any]:
-    return _load_spec()[0]
-
-
-def _components() -> Mapping[str, Any]:
-    schemas: Mapping[str, Any] = _spec()["components"]["schemas"]
-    return schemas
-
-
 def _operations(paths: Mapping[str, Any]) -> dict[tuple[str, str], Mapping[str, Any]]:
     """Key operations by method and template path with parameter names erased."""
     return {
@@ -222,42 +172,6 @@ def _operations(paths: Mapping[str, Any]) -> dict[tuple[str, str], Mapping[str, 
         for method, operation in item.items()
         if method in HTTP_METHODS
     }
-
-
-def _escape(token: str) -> str:
-    return token.replace("~", "~0").replace("/", "~1")
-
-
-def _response_schema_pointer(method: str, path: str, status: str) -> str:
-    """Locate the declared JSON body schema, following a response-level ``$ref``."""
-    pointer = f"/paths/{_escape(path)}/{method}/responses/{status}"
-    reference = _spec()["paths"][path][method]["responses"][status].get("$ref")
-    if reference is not None:
-        pointer = str(reference).removeprefix("#")
-    return f"{pointer}/content/{_escape('application/json')}/schema"
-
-
-@cache
-def _registry() -> Registry[Any]:
-    spec, base_uri = _load_spec()
-    registry: Registry[Any] = Registry().with_resource(
-        base_uri, DRAFT202012.create_resource(dict(spec))
-    )
-    return registry
-
-
-def _validator_at(pointer: str) -> Validator:
-    """Validate against the schema at ``pointer``, resolving ``$ref`` inside the whole document."""
-    validator: Validator = OAS31Validator(
-        {"$ref": f"{_load_spec()[1]}#{pointer}"},
-        registry=_registry(),
-        format_checker=OAS31Validator.FORMAT_CHECKER,
-    )
-    return validator
-
-
-def _validator_for(method: str, path: str, status: str) -> Validator:
-    return _validator_at(_response_schema_pointer(method, path, status))
 
 
 class OpenApiContractRepository(ContractRepository):
@@ -756,58 +670,6 @@ def test_rerun_invalid_uuid_response_validates_against_declared_schema(client: T
     _validator_for("post", "/api/runs/{run_id}/rerun", "422").validate(response.json())
 
 
-@pytest.mark.parametrize(
-    ("schema_name", "body"),
-    [
-        ("BitbucketDiscoveryRequest", {"bitbucketWorkspace": "team"}),
-        (
-            "BitbucketConnectRequest",
-            {
-                "bitbucketWorkspace": "team",
-                "repositorySlug": "repo",
-                "repositoryUuid": "00000000-0000-4000-8000-000000000334",
-            },
-        ),
-        ("BitbucketCredentialRotateRequest", {}),
-    ],
-)
-def test_bitbucket_token_request_contract_matches_printable_ascii_limit(
-    schema_name: str, body: dict[str, str]
-) -> None:
-    validator = _validator_at(f"/components/schemas/{schema_name}")
-    for token in ("a", "x" * 4096):
-        validator.validate({**body, "apiToken": token})
-    for token in ("", "has space", "bad\nline", "secret\n", "bad\u00a0char", "x" * 4097):
-        with pytest.raises(ValidationError):
-            validator.validate({**body, "apiToken": token})
-
-
-@pytest.mark.parametrize(
-    ("generated_name", "checked_name", "fields"),
-    [
-        ("DiscoveryRequest", "BitbucketDiscoveryRequest", ("apiToken", "bitbucketWorkspace")),
-        (
-            "ConnectRequest",
-            "BitbucketConnectRequest",
-            ("apiToken", "bitbucketWorkspace", "repositorySlug"),
-        ),
-        ("CredentialRotateRequest", "BitbucketCredentialRotateRequest", ("apiToken",)),
-    ],
-)
-def test_bitbucket_request_constraints_match_generated_openapi(
-    generated_name: str, checked_name: str, fields: tuple[str, ...]
-) -> None:
-    generated = app.openapi()["components"]["schemas"][generated_name]["properties"]
-    checked = _spec()["components"]["schemas"][checked_name]["properties"]
-    for field in fields:
-        for constraint in ("type", "minLength", "maxLength", "pattern", "writeOnly"):
-            assert generated[field].get(constraint) == checked[field].get(constraint), (
-                generated_name,
-                field,
-                constraint,
-            )
-
-
 @pytest.mark.parametrize("name", RULES_STATUSES)
 def test_every_rules_status_variant_validates_against_the_declared_schema(name: str) -> None:
     store = ContractRulesStatus(RULES_STATUSES[name])
@@ -1200,64 +1062,6 @@ def test_ui_zod_snapshot_covers_the_shared_dtos() -> None:
     assert len(UI_ZOD_COMPONENTS) >= 12
 
 
-@pytest.mark.parametrize(
-    "component",
-    [
-        "BitbucketDiscoveryRequest",
-        "BitbucketConnectRequest",
-        "BitbucketCredentialRotateRequest",
-    ],
-)
-def test_bitbucket_api_token_schema_accepts_only_printable_ascii_up_to_4096(
-    component: str,
-) -> None:
-    token_schema = _components()[component]["properties"]["apiToken"]
-    validator = Draft202012Validator(token_schema)
-
-    assert token_schema["writeOnly"] is True
-    assert validator.is_valid("A" * 4096)
-    for invalid in ("", "A" * 4097, "A token", "A\n", "A\x7f", "Aé"):
-        assert not validator.is_valid(invalid)
-
-
-@pytest.mark.parametrize(
-    ("zod_name", "component"),
-    [
-        ("bitbucketDiscoveryRequest", "BitbucketDiscoveryRequest"),
-        ("bitbucketConnectRequest", "BitbucketConnectRequest"),
-        ("bitbucketCredentialRotateRequest", "BitbucketCredentialRotateRequest"),
-    ],
-)
-def test_bitbucket_api_token_patterns_match_the_printable_ascii_contract(
-    zod_name: str, component: str
-) -> None:
-    spec_token = _components()[component]["properties"]["apiToken"]
-    ui_token = _generated_schemas()[zod_name]["properties"]["apiToken"]
-    values = [
-        "",
-        *(chr(codepoint) for codepoint in range(128)),
-        "é",
-        "Ａ",
-        "A\n",
-        "A A",
-        "A" * 4096,
-        "A" * 4097,
-    ]
-
-    for source, schema in (("OpenAPI", spec_token), ("UI Zod", ui_token)):
-        assert schema["type"] == "string", source
-        assert (schema["minLength"], schema["maxLength"]) == (1, 4096), source
-        pattern = schema["pattern"]
-        assert pattern.startswith("^"), source
-        assert pattern.endswith(("$", r"(?![\s\S])")), source
-        for value in values:
-            expected = 1 <= len(value) <= 4096 and all(
-                33 <= ord(character) <= 126 for character in value
-            )
-            actual = 1 <= len(value) <= 4096 and re.fullmatch(pattern, value) is not None
-            assert actual == expected, (source, component, repr(value[:20]))
-
-
 def test_contract_mirror_distinguishes_null_only_from_nullable_string() -> None:
     assert _contract_mismatches({"type": "null"}, {"type": "null"}, {}, "cursor") == []
     assert _contract_mismatches({"type": ["null"]}, {"type": "null"}, {}, "cursor") == []
@@ -1463,566 +1267,6 @@ def test_runtime_provider_is_required_without_a_github_default(name: str) -> Non
     schema = app.openapi()["components"]["schemas"][name]
     assert "provider" in schema["required"]
     assert "default" not in schema["properties"]["provider"]
-
-
-@pytest.mark.parametrize(
-    ("method", "path"),
-    [
-        ("post", "/api/workspaces/{workspace_id}/bitbucket/discovery"),
-        ("post", "/api/workspaces/{workspace_id}/bitbucket/connections"),
-        (
-            "put",
-            "/api/workspaces/{workspace_id}/bitbucket/connections/{installation_id}/credential",
-        ),
-    ],
-)
-def test_bitbucket_error_contract_accepts_safe_application_and_request_validation(
-    method: str, path: str
-) -> None:
-    operation = _spec()["paths"][path][method]
-    _validator_for(method, path, "422").validate({"detail": "repository_inaccessible"})
-    _validator_for(method, path, "422").validate(
-        {"detail": [{"loc": ["body", "apiToken"], "msg": "Invalid value", "type": "value_error"}]}
-    )
-    assert operation["responses"]["429"] == {"$ref": "#/components/responses/BitbucketRateLimited"}
-    assert "Retry-After" in _spec()["components"]["responses"]["BitbucketRateLimited"]["headers"]
-
-
-_BITBUCKET_WORKSPACE = UUID(int=333)
-_BITBUCKET_INSTALLATION = UUID(int=334)
-_BITBUCKET_REPOSITORY = UUID(int=335)
-_BITBUCKET_PREFIX = f"/api/workspaces/{_BITBUCKET_WORKSPACE}/bitbucket"
-_BITBUCKET_CONNECTIONS = "/api/workspaces/{workspace_id}/bitbucket/connections"
-_BITBUCKET_CREDENTIAL = f"{_BITBUCKET_CONNECTIONS}/{{installation_id}}/credential"
-_BITBUCKET_REPOSITORY_PATH = (
-    f"{_BITBUCKET_CONNECTIONS}/{{installation_id}}/repositories/{{repository_id}}"
-)
-
-
-class _BitbucketContractManager:
-    def webhook_url(self, installation_id: UUID, repository_id: UUID) -> str:
-        return f"https://example.test/webhooks/bitbucket/{installation_id}/{repository_id}"
-
-    async def discover(self, **_kwargs: object) -> SimpleNamespace:
-        return SimpleNamespace(
-            repositories=(
-                SimpleNamespace(
-                    uuid=_BITBUCKET_REPOSITORY,
-                    workspace_slug="team",
-                    slug="repo",
-                    name="Repo",
-                    is_private=True,
-                    html_url="https://bitbucket.org/team/repo",
-                ),
-            ),
-            next_cursor=None,
-        )
-
-    async def list_connections(self, **_kwargs: object) -> tuple[RepositoryBinding, ...]:
-        return (
-            RepositoryBinding(
-                installation_id=_BITBUCKET_INSTALLATION,
-                repository_id=_BITBUCKET_REPOSITORY,
-                repository_uuid=_BITBUCKET_REPOSITORY,
-                full_name="team/repo",
-                web_url="https://bitbucket.org/team/repo",
-                credential_generation=1,
-                binding_generation=1,
-                confirmed_at=datetime(2026, 10, 1, tzinfo=UTC),
-            ),
-        )
-
-    async def connect(self, **_kwargs: object) -> ConnectResult:
-        return ConnectResult(
-            installation_id=_BITBUCKET_INSTALLATION,
-            repository_id=_BITBUCKET_REPOSITORY,
-            repository_uuid=_BITBUCKET_REPOSITORY,
-            workspace_slug="team",
-            repository_slug="repo",
-            credential_generation=1,
-            webhook_secret="one-time-secret",
-            confirmed=False,
-        )
-
-    async def rotate_token(self, **_kwargs: object) -> SimpleNamespace:
-        return SimpleNamespace(installation_id=_BITBUCKET_INSTALLATION, generation=2)
-
-    async def disconnect(self, **_kwargs: object) -> None:
-        return None
-
-    async def rotate_webhook_secret(self, **_kwargs: object) -> SimpleNamespace:
-        return SimpleNamespace(
-            url=self.webhook_url(_BITBUCKET_INSTALLATION, _BITBUCKET_REPOSITORY),
-            secret="new-one-time-secret",
-        )
-
-
-@pytest.fixture
-def bitbucket_contract_client() -> Iterator[TestClient]:
-    app.dependency_overrides[get_auth_scope] = lambda: AuthScope(42, (_BITBUCKET_WORKSPACE,))
-    app.dependency_overrides[get_bitbucket_workspace_scope] = lambda: AuthScope(
-        42, (_BITBUCKET_WORKSPACE,)
-    )
-    app.dependency_overrides[get_bitbucket_management] = _BitbucketContractManager
-    try:
-        yield TestClient(app)
-    finally:
-        app.dependency_overrides.clear()
-
-
-@pytest.mark.parametrize(
-    ("method", "path", "suffix", "body", "status"),
-    [
-        (
-            "post",
-            f"{_BITBUCKET_PREFIX}/discovery",
-            "/discovery",
-            {"bitbucketWorkspace": "team", "apiToken": "token"},
-            "200",
-        ),
-        ("get", _BITBUCKET_CONNECTIONS, "/connections", None, "200"),
-        (
-            "post",
-            _BITBUCKET_CONNECTIONS,
-            "/connections",
-            {
-                "bitbucketWorkspace": "team",
-                "repositorySlug": "repo",
-                "repositoryUuid": str(_BITBUCKET_REPOSITORY),
-                "apiToken": "token",
-            },
-            "201",
-        ),
-        (
-            "put",
-            _BITBUCKET_CREDENTIAL,
-            f"/connections/{_BITBUCKET_INSTALLATION}/credential",
-            {"apiToken": "token"},
-            "200",
-        ),
-        (
-            "delete",
-            _BITBUCKET_REPOSITORY_PATH,
-            f"/connections/{_BITBUCKET_INSTALLATION}/repositories/{_BITBUCKET_REPOSITORY}",
-            None,
-            "204",
-        ),
-        (
-            "post",
-            f"{_BITBUCKET_REPOSITORY_PATH}/webhook-secret",
-            f"/connections/{_BITBUCKET_INSTALLATION}/repositories/{_BITBUCKET_REPOSITORY}/webhook-secret",
-            None,
-            "200",
-        ),
-    ],
-)
-def test_bitbucket_operation_response_matches_spec(
-    bitbucket_contract_client: TestClient,
-    method: str,
-    path: str,
-    suffix: str,
-    body: dict[str, str] | None,
-    status: str,
-) -> None:
-    spec_path = path.replace(str(_BITBUCKET_WORKSPACE), "{workspace_id}")
-    response = bitbucket_contract_client.request(
-        method.upper(), f"{_BITBUCKET_PREFIX}{suffix}", json=body
-    )
-    assert response.status_code == int(status)
-    if status == "204":
-        assert response.content == b""
-        assert "content" not in _spec()["paths"][spec_path][method]["responses"][status]
-        return
-    payload = response.json()
-    _validator_for(method, spec_path, status).validate(payload)
-    if method == "post" and suffix == "/connections":
-        with pytest.raises(ValidationError):
-            _validator_for(method, spec_path, status).validate(
-                {key: value for key, value in payload.items() if key != "webhook"}
-            )
-        with pytest.raises(ValidationError):
-            _validator_for(method, spec_path, status).validate({**payload, "status": "bogus"})
-
-
-def test_bitbucket_connect_and_secret_rotation_return_all_five_webhook_events(
-    bitbucket_contract_client: TestClient,
-) -> None:
-    events = [
-        "repo:push",
-        "pullrequest:created",
-        "pullrequest:updated",
-        "pullrequest:fulfilled",
-        "pullrequest:rejected",
-    ]
-    connected = bitbucket_contract_client.post(
-        _BITBUCKET_CONNECTIONS.replace("{workspace_id}", str(_BITBUCKET_WORKSPACE)),
-        json={
-            "bitbucketWorkspace": "team",
-            "repositorySlug": "repo",
-            "repositoryUuid": str(_BITBUCKET_REPOSITORY),
-            "apiToken": "token",
-        },
-    )
-    rotated = bitbucket_contract_client.post(
-        f"{_BITBUCKET_PREFIX}/connections/{_BITBUCKET_INSTALLATION}"
-        f"/repositories/{_BITBUCKET_REPOSITORY}/webhook-secret"
-    )
-
-    assert connected.status_code == 201
-    assert rotated.status_code == 200
-    assert connected.json()["webhook"]["events"] == events
-    assert rotated.json()["events"] == events
-    assert _components()["BitbucketWebhookSetup"]["properties"]["events"]["items"]["enum"] == events
-
-
-@pytest.mark.parametrize(
-    ("method", "path", "suffix", "body"),
-    [
-        (
-            "post",
-            "/api/workspaces/{workspace_id}/bitbucket/discovery",
-            "/discovery",
-            {"bitbucketWorkspace": "team", "apiToken": "token"},
-        ),
-        ("get", _BITBUCKET_CONNECTIONS, "/connections", None),
-        (
-            "post",
-            _BITBUCKET_CONNECTIONS,
-            "/connections",
-            {
-                "bitbucketWorkspace": "team",
-                "repositorySlug": "repo",
-                "repositoryUuid": str(_BITBUCKET_REPOSITORY),
-                "apiToken": "token",
-            },
-        ),
-        (
-            "put",
-            _BITBUCKET_CREDENTIAL,
-            f"/connections/{_BITBUCKET_INSTALLATION}/credential",
-            {"apiToken": "token"},
-        ),
-        (
-            "delete",
-            _BITBUCKET_REPOSITORY_PATH,
-            f"/connections/{_BITBUCKET_INSTALLATION}/repositories/{_BITBUCKET_REPOSITORY}",
-            None,
-        ),
-        (
-            "post",
-            f"{_BITBUCKET_REPOSITORY_PATH}/webhook-secret",
-            f"/connections/{_BITBUCKET_INSTALLATION}/repositories/{_BITBUCKET_REPOSITORY}/webhook-secret",
-            None,
-        ),
-    ],
-)
-def test_bitbucket_operation_not_found_body_matches_spec(
-    bitbucket_contract_client: TestClient,
-    method: str,
-    path: str,
-    suffix: str,
-    body: dict[str, str] | None,
-) -> None:
-    class MissingManager:
-        def __getattr__(self, _name: str) -> Any:
-            async def missing(**_kwargs: object) -> None:
-                raise BitbucketManagementError("workspace_not_found")
-
-            return missing
-
-    app.dependency_overrides[get_bitbucket_management] = MissingManager
-    response = bitbucket_contract_client.request(
-        method.upper(), f"{_BITBUCKET_PREFIX}{suffix}", json=body
-    )
-    assert response.status_code == 404
-    _validator_for(method, path, "404").validate(response.json())
-
-
-@pytest.mark.parametrize(
-    "code,status",
-    [
-        ("invalid_credential", "400"),
-        ("repository_inaccessible", "422"),
-        ("provider_rate_limited", "429"),
-    ],
-)
-def test_bitbucket_provider_error_body_matches_spec(
-    bitbucket_contract_client: TestClient, code: str, status: str
-) -> None:
-    class FailingManager(_BitbucketContractManager):
-        async def discover(self, **_kwargs: object) -> SimpleNamespace:
-            raise BitbucketProviderError(code, retry_after=37 if status == "429" else None)
-
-    app.dependency_overrides[get_bitbucket_management] = FailingManager
-    response = bitbucket_contract_client.post(
-        f"{_BITBUCKET_PREFIX}/discovery", json={"bitbucketWorkspace": "team", "apiToken": "token"}
-    )
-    assert response.status_code == int(status)
-    _validator_for("post", "/api/workspaces/{workspace_id}/bitbucket/discovery", status).validate(
-        response.json()
-    )
-    if status == "429":
-        assert response.headers["Retry-After"] == "37"
-
-
-def test_bitbucket_rotate_invalid_credential_response_matches_spec(
-    bitbucket_contract_client: TestClient,
-) -> None:
-    class FailingManager(_BitbucketContractManager):
-        async def rotate_token(self, **_kwargs: object) -> SimpleNamespace:
-            raise BitbucketManagementError("invalid_credential")
-
-    app.dependency_overrides[get_bitbucket_management] = FailingManager
-    response = bitbucket_contract_client.put(
-        f"{_BITBUCKET_PREFIX}/connections/{_BITBUCKET_INSTALLATION}/credential",
-        json={"apiToken": "token"},
-    )
-    assert response.status_code == 400
-    _validator_for("put", _BITBUCKET_CREDENTIAL, "400").validate(response.json())
-
-
-@pytest.mark.parametrize(
-    ("method", "path", "suffix", "body"),
-    [
-        (
-            "post",
-            "/api/workspaces/{workspace_id}/bitbucket/discovery",
-            "/discovery",
-            {"bitbucketWorkspace": "team", "apiToken": "bad token"},
-        ),
-        (
-            "post",
-            _BITBUCKET_CONNECTIONS,
-            "/connections",
-            {
-                "bitbucketWorkspace": "team",
-                "repositorySlug": "repo",
-                "repositoryUuid": str(_BITBUCKET_REPOSITORY),
-                "apiToken": "bad token",
-            },
-        ),
-        (
-            "put",
-            _BITBUCKET_CREDENTIAL,
-            f"/connections/{_BITBUCKET_INSTALLATION}/credential",
-            {"apiToken": "bad token"},
-        ),
-    ],
-)
-def test_bitbucket_request_validation_response_matches_spec_without_token_echo(
-    bitbucket_contract_client: TestClient,
-    method: str,
-    path: str,
-    suffix: str,
-    body: dict[str, str],
-) -> None:
-    response = bitbucket_contract_client.request(
-        method.upper(), f"{_BITBUCKET_PREFIX}{suffix}", json=body
-    )
-    assert response.status_code == 422
-    assert body["apiToken"] not in response.text
-    _validator_for(method, path, "422").validate(response.json())
-
-
-@pytest.mark.parametrize(
-    ("method", "path", "suffix"),
-    [
-        ("get", _BITBUCKET_CONNECTIONS, "/connections"),
-        ("delete", _BITBUCKET_REPOSITORY_PATH, "/connections/not-a-uuid/repositories/not-a-uuid"),
-        (
-            "post",
-            f"{_BITBUCKET_REPOSITORY_PATH}/webhook-secret",
-            "/connections/not-a-uuid/repositories/not-a-uuid/webhook-secret",
-        ),
-    ],
-)
-def test_bitbucket_malformed_uuid_response_matches_spec(
-    bitbucket_contract_client: TestClient, method: str, path: str, suffix: str
-) -> None:
-    if method == "get":
-        url = "/api/workspaces/not-a-uuid/bitbucket/connections"
-    else:
-        url = f"{_BITBUCKET_PREFIX}{suffix}"
-    response = bitbucket_contract_client.request(method.upper(), url)
-    assert response.status_code == 422
-    _validator_for(method, path, "422").validate(response.json())
-
-
-@pytest.mark.parametrize(
-    ("code", "status"),
-    [
-        ("bitbucket_connection_inactive", "409"),
-        ("credential_unavailable", "503"),
-    ],
-)
-def test_bitbucket_webhook_secret_error_body_matches_spec(
-    bitbucket_contract_client: TestClient, code: str, status: str
-) -> None:
-    class FailingManager(_BitbucketContractManager):
-        async def rotate_webhook_secret(self, **_kwargs: object) -> SimpleNamespace:
-            raise BitbucketManagementError(code)
-
-    app.dependency_overrides[get_bitbucket_management] = FailingManager
-    path = f"{_BITBUCKET_REPOSITORY_PATH}/webhook-secret"
-    response = bitbucket_contract_client.post(
-        f"{_BITBUCKET_PREFIX}/connections/{_BITBUCKET_INSTALLATION}"
-        f"/repositories/{_BITBUCKET_REPOSITORY}/webhook-secret"
-    )
-    assert response.status_code == int(status)
-    _validator_for("post", path, status).validate(response.json())
-
-
-def test_bitbucket_provider_failure_body_matches_spec(
-    bitbucket_contract_client: TestClient,
-) -> None:
-    class FailingManager(_BitbucketContractManager):
-        async def discover(self, **_kwargs: object) -> SimpleNamespace:
-            raise BitbucketProviderError("provider_unavailable")
-
-    app.dependency_overrides[get_bitbucket_management] = FailingManager
-    response = bitbucket_contract_client.post(
-        f"{_BITBUCKET_PREFIX}/discovery", json={"bitbucketWorkspace": "team", "apiToken": "token"}
-    )
-    assert response.status_code == 502
-    _validator_for("post", "/api/workspaces/{workspace_id}/bitbucket/discovery", "502").validate(
-        response.json()
-    )
-
-
-@pytest.mark.parametrize("field", ["workspaceSlug", "repositorySlug"])
-def test_bitbucket_response_slug_bounds_match_runtime_and_contract(
-    bitbucket_contract_client: TestClient, field: str
-) -> None:
-    response = bitbucket_contract_client.post(
-        _BITBUCKET_CONNECTIONS.replace("{workspace_id}", str(_BITBUCKET_WORKSPACE)),
-        json={
-            "bitbucketWorkspace": "team",
-            "repositorySlug": "repo",
-            "repositoryUuid": str(_BITBUCKET_REPOSITORY),
-            "apiToken": "token",
-        },
-    )
-    assert response.status_code == 201
-    bad = {**response.json(), field: "x" * 129}
-    with pytest.raises(PydanticValidationError):
-        ConnectResponse.model_validate(bad)
-    with pytest.raises(ValidationError):
-        _validator_at("/components/schemas/BitbucketConnectResponse").validate(bad)
-
-    listed = bitbucket_contract_client.get(
-        _BITBUCKET_CONNECTIONS.replace("{workspace_id}", str(_BITBUCKET_WORKSPACE))
-    )
-    assert listed.status_code == 200
-    bad_item = {**listed.json()["connections"][0], field: "x" * 129}
-    with pytest.raises(PydanticValidationError):
-        ConnectionItem.model_validate(bad_item)
-    with pytest.raises(ValidationError):
-        _validator_at("/components/schemas/BitbucketConnectionItem").validate(bad_item)
-
-
-def _string_constant(node: ast.expr | None) -> str | None:
-    return node.value if isinstance(node, ast.Constant) and isinstance(node.value, str) else None
-
-
-def _written_tools(source: str) -> set[str]:
-    """Collect the string-constant tool names from the shapes that write run_actions rows.
-
-    The scanned shapes: a module-level ``NAME_TOOL = "..."`` assignment, the third positional
-    argument of a ``traced_step(...)`` call, the second positional argument of a ``record(...)``
-    call (the ``RunTrace.record(run_id, tool, ...)`` sink) and a ``tool=`` keyword of any call.
-    Only string constants count; a name or an attribute in these positions is skipped. A
-    ``tool=`` keyword and a literal second argument of ``record(...)`` are counted on any call,
-    whatever the receiver, so a ``tool="x.y"`` or a ``ledger.record(context, "x.y")`` that does not
-    write run_actions surfaces as unexpected and must be renamed or the scan taught to skip it. A
-    blanket ``"x.y"`` match would also pick up prompt names such as ``review.system``, which are
-    not tools.
-    """
-    tree = ast.parse(source)
-    found: list[str | None] = []
-    targets: list[ast.expr]
-    value: ast.expr | None
-    for statement in tree.body:
-        if isinstance(statement, ast.Assign):
-            targets, value = statement.targets, statement.value
-        elif isinstance(statement, ast.AnnAssign):
-            targets, value = [statement.target], statement.value
-        else:
-            continue
-        if any(isinstance(target, ast.Name) and target.id.endswith("_TOOL") for target in targets):
-            found.append(_string_constant(value))
-    for node in ast.walk(tree):
-        if not isinstance(node, ast.Call):
-            continue
-        func = node.func
-        callee = func.id if isinstance(func, ast.Name) else None
-        callee = func.attr if isinstance(func, ast.Attribute) else callee
-        if callee == "traced_step" and len(node.args) >= 3:
-            found.append(_string_constant(node.args[2]))
-        if callee == "record" and len(node.args) >= 2:
-            found.append(_string_constant(node.args[1]))
-        found += [
-            _string_constant(keyword.value) for keyword in node.keywords if keyword.arg == "tool"
-        ]
-    return {tool for tool in found if tool is not None}
-
-
-@pytest.mark.parametrize(
-    ("source", "expected"),
-    [
-        ('traced_step(trace, run_id, "a.b", {})', {"a.b"}),
-        ('trace.record(run_id, "x.y", {}, None, now, 0)', {"x.y"}),
-        ("ledger.record(context, usage)", set()),
-        ("self._trace.record(pointer.run_id, route.tool, {})", set()),
-        ('Route(tool="c.d")', {"c.d"}),
-        ('LLM_CALL_TOOL = "e.f"', {"e.f"}),
-        ('X_TOOL: Final = "g.h"', {"g.h"}),
-        ('ledger.record(context, "x.y")', {"x.y"}),
-        ('def record(self, run_id, tool="x.y"): ...', set()),
-        ('prompts.load("review.system")', set()),
-    ],
-    ids=[
-        "traced_step-third-argument",
-        "record-second-argument",
-        "record-without-tool-argument",
-        "record-attribute-argument",
-        "tool-keyword",
-        "module-constant",
-        "module-annotated-constant",
-        "record-any-receiver",
-        "record-definition",
-        "plain-string-literal",
-    ],
-)
-def test_written_tools_scan_picks_up_only_the_run_action_shapes(
-    source: str, expected: set[str]
-) -> None:
-    assert _written_tools(source) == expected
-
-
-def _catalog_drift(side: str, found: set[str]) -> str:
-    missing, unexpected = sorted(RUN_ACTION_TOOLS - found), sorted(found - RUN_ACTION_TOOLS)
-    return f"{side} vs catalog: missing {missing}, unexpected {unexpected}"
-
-
-def test_run_action_tool_catalog_matches_the_tools_the_code_writes() -> None:
-    written: set[str] = set()
-    for path in sorted(APP_PATH.rglob("*.py")):
-        written |= _written_tools(path.read_text(encoding="utf-8"))
-
-    assert written == RUN_ACTION_TOOLS, _catalog_drift("code", written)
-
-
-@pytest.mark.parametrize(
-    "location", [("RunAction", "properties", "tool"), ("RunStatus",)], ids=".".join
-)
-def test_run_action_tool_descriptions_list_the_catalog(location: tuple[str, ...]) -> None:
-    schema: Mapping[str, Any] = _components()
-    for key in location:
-        schema = schema[key]
-
-    listed = set(BACKTICKED_TOOL.findall(schema["description"]))
-
-    assert listed == RUN_ACTION_TOOLS, _catalog_drift(f"{'.'.join(location)} description", listed)
 
 
 def test_runs_repo_filter_bounds_match_the_repository_name_constant() -> None:
