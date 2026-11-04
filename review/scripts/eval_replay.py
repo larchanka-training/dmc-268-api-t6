@@ -507,14 +507,17 @@ def _normalized_answer(path: Path, *, v2: bool) -> dict[str, object] | None:
 def _rule_names(prompt_root: Path, language: str) -> frozenset[str]:
     """The rule names of a case's language; none when its rule file cannot be read.
 
-    Such a file is already a digest warning, and without names every attribution counts as lost.
+    An unreadable file is already a static input warning, and without names every attribution
+    counts as lost. A malformed one stops the replay: no warning would explain that count.
     """
+    relative = _RULE_SET_BY_LANGUAGE[language]
     try:
-        path = prompt_root / _RULE_SET_BY_LANGUAGE[language]
-        rules = json.loads(path.read_text(encoding="utf-8"))["rules"]
+        rules = json.loads((prompt_root / relative).read_text(encoding="utf-8"))["rules"]
         return frozenset(rule["name"] for rule in rules)
-    except (OSError, ValueError, KeyError, TypeError):
+    except OSError:
         return frozenset()
+    except (ValueError, KeyError, TypeError) as exc:
+        raise ReplayError(f"rule set {relative} is malformed: {exc}") from exc
 
 
 def _allowed_v2_rules(base: Path, arm: str) -> frozenset[str]:

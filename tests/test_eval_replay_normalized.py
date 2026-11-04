@@ -7,7 +7,9 @@ import shutil
 from pathlib import Path
 from typing import Any
 
-from review.scripts.eval_replay import format_console, replay
+import pytest
+
+from review.scripts.eval_replay import ReplayError, format_console, replay
 
 DATASET_ROOT = Path(__file__).resolve().parents[1] / "test-prs-dataset"
 
@@ -181,6 +183,50 @@ def test_a_strict_valid_answer_scores_the_same_in_both_columns(tmp_path: Path) -
     assert report["micro"] == normalized["micro"]
     assert report["critical"] == normalized["critical"]
     assert report["verdict"] == normalized["verdict"]
+
+
+def rule_set_repo(tmp_path: Path, rule_set: str | None) -> Path:
+    """A prompt root whose backend rule set is this text; ``None`` leaves the file missing."""
+    repo = tmp_path / "repo"
+    (repo / "review/rules").mkdir(parents=True)
+    if rule_set is not None:
+        (repo / "review/rules/default-backend.v1.json").write_text(rule_set, encoding="utf-8")
+    return repo
+
+
+@pytest.mark.parametrize(
+    "rule_set",
+    [
+        pytest.param("{not json", id="not-json"),
+        pytest.param('{"rules": "Naming Consistency"}', id="rules-not-a-list"),
+        pytest.param('{"rules": [{"title": "No name"}]}', id="rule-without-a-name"),
+    ],
+)
+def test_a_malformed_rule_set_stops_the_replay_instead_of_inflating_the_count(
+    tmp_path: Path, rule_set: str
+) -> None:
+    root = one_case_capture(tmp_path, answer(answer_finding()))
+
+    with pytest.raises(ReplayError, match="default-backend.v1.json"):
+        replay(root, prompt_root=rule_set_repo(tmp_path, rule_set))
+
+
+def test_a_missing_rule_set_is_a_warning_and_counts_every_attribution_as_lost(
+    tmp_path: Path,
+) -> None:
+    known_rule = answer(
+        answer_finding(rule_name="Naming Consistency", body=attributed("Naming Consistency"))
+    )
+
+    report = replay(
+        one_case_capture(tmp_path, known_rule), prompt_root=rule_set_repo(tmp_path, None)
+    )
+
+    assert any(warning.startswith("Static input") for warning in report["warnings"])
+    assert report["gateway_normalized"]["attribution_loss"] == {
+        "findings": 1,
+        "rule_name_nulled": 1,
+    }
 
 
 def test_console_shows_the_second_column_as_a_block_not_the_published_review(
