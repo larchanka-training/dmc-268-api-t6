@@ -4,16 +4,12 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncIterator
-from dataclasses import dataclass
 from typing import Self
-from uuid import UUID
 
 import httpx
 import pytest
 
-from app.modules.integrations.gitlab.application.manage_connection import GitLabOriginPolicy
 from app.modules.integrations.gitlab.application.request_credentials import (
-    BoundGitLabTarget,
     GitLabRequestCredential,
 )
 from app.modules.integrations.gitlab.infrastructure.run_credentials import FetchCode
@@ -22,59 +18,14 @@ from app.modules.integrations.gitlab.infrastructure.run_http import (
     GitLabRunHttp,
     GitLabRunHttpError,
 )
-from app.modules.reviews.application.process_run import RunVcsInput
-from app.modules.reviews.application.vcs_diff import PullRequestLocator
+from tests.gitlab_http_fakes import Stream as Stream
 
-ORIGIN = "https://gitlab.com"
-IDENTITY = UUID("10000000-0000-0000-0000-000000000001")
-WORKSPACE = UUID("10000000-0000-0000-0000-000000000002")
-REPOSITORY = UUID("10000000-0000-0000-0000-000000000003")
-INPUT = RunVcsInput(
-    IDENTITY,
-    REPOSITORY,
-    "a" * 40,
-    "b" * 40,
-    PullRequestLocator(71, "team/project", 12, "gitlab", IDENTITY, 17),
-)
-TARGET = BoundGitLabTarget(IDENTITY, WORKSPACE, REPOSITORY, ORIGIN, 17, 1)
-POLICY = GitLabOriginPolicy(frozenset({ORIGIN}))
-TOKEN = "synthetic-run-PAT-canary"
-
-
-@dataclass
-class Credentials:
-    expected_input: RunVcsInput = INPUT
-    target: BoundGitLabTarget = TARGET
-    admitted: int = 0
-    checks: int = 0
-    failure: Exception | None = None
-
-    async def bind(self, *, error_code: FetchCode = "diff_fetch_failed") -> BoundGitLabTarget:
-        return self.target
-
-    async def credential_for_request(
-        self, *, error_code: FetchCode = "diff_fetch_failed"
-    ) -> GitLabRequestCredential:
-        self.admitted += 1
-        return GitLabRequestCredential(self.target, TOKEN)
-
-    async def checkpoint(self, *, error_code: FetchCode = "diff_fetch_failed") -> None:
-        self.checks += 1
-        if self.failure is not None:
-            raise self.failure
-
-
-@dataclass
-class Stream(httpx.AsyncByteStream):
-    chunks: tuple[bytes, ...]
-    closed: bool = False
-
-    async def __aiter__(self) -> AsyncIterator[bytes]:
-        for value in self.chunks:
-            yield value
-
-    async def aclose(self) -> None:
-        self.closed = True
+# Re-exports ("X as X"): other test modules still import these from here (backend.md §5).
+from tests.gitlab_run_fakes import INPUT as INPUT
+from tests.gitlab_run_fakes import POLICY as POLICY
+from tests.gitlab_run_fakes import TARGET, TOKEN
+from tests.gitlab_run_fakes import WORKSPACE as WORKSPACE
+from tests.gitlab_run_fakes import Credentials as Credentials
 
 
 def test_duplicate_json_is_rejected_and_response_closes() -> None:
@@ -698,7 +649,7 @@ def test_raw_utf8_header_octets_exceeding_budget_close_and_recheck(operation: st
 
 def test_tree_page_registers_only_actual_pinned_fork_entries_for_raw_and_directory_reads() -> None:
     from app.modules.integrations.gitlab.infrastructure.run_http import GitLabTreeResource
-    from tests.test_gitlab_vcs import Router, reply
+    from tests.gitlab_run_fakes import Router, reply
 
     async def scenario() -> None:
         router = Router()
@@ -757,7 +708,7 @@ def test_tree_page_registers_only_actual_pinned_fork_entries_for_raw_and_directo
 )
 def test_owned_tree_rejects_invalid_entries_before_any_blob_authorization(fault: str) -> None:
     from app.modules.integrations.gitlab.infrastructure.run_http import GitLabTreeResource
-    from tests.test_gitlab_vcs import Router, reply
+    from tests.gitlab_run_fakes import Router, reply
 
     async def scenario() -> None:
         router = Router()

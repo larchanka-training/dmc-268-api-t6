@@ -79,6 +79,7 @@ class GitLabRunSource:
                 False,
                 False,
                 ("budget_exhausted" if error.kind == "budget_exhausted" else "source_unavailable",),
+                retry_after=error.retry_after,
             )
         self._files = {
             entry.path: (entry.oid, listing.sizes[entry.path])
@@ -90,6 +91,7 @@ class GitLabRunSource:
             listing.listing_complete,
             listing.sizes_complete,
             listing.incomplete_reasons,
+            retry_after=listing.retry_after,
         )
 
     async def fetch_files(

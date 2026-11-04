@@ -6,6 +6,7 @@ import json
 import re
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field, replace
+from datetime import timedelta
 from hashlib import sha256
 from pathlib import PurePosixPath
 from typing import Annotated, Protocol
@@ -75,6 +76,8 @@ class RepositoryTreeResult:
     listing_complete: bool
     sizes_complete: bool
     incomplete_reasons: tuple[str, ...] = ()
+    # The provider's wait on a failed read; the next attempt comes no earlier.
+    retry_after: timedelta | None = None
 
 
 type RepositoryTreeInput = tuple[RepositoryFile, ...] | RepositoryTreeResult
@@ -465,7 +468,7 @@ class GenerateRepoConventions:
 
         discovery = normalize_repository_tree(await self._source.fetch_tree(repository_id))
         if not discovery.listing_complete or not discovery.sizes_complete:
-            raise RequiredSourceUnavailable("diff_fetch_failed")
+            raise RequiredSourceUnavailable("diff_fetch_failed", retry_after=discovery.retry_after)
         tree = discovery.files
         languages = classify_languages(tree)
         selected = select_context_files(tree)
