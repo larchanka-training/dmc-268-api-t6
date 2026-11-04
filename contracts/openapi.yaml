@@ -1380,7 +1380,7 @@ components:
             The run finished without a line-by-line model review because the diff exceeded
             3000 lines (`diff_too_large`), the changed-file list was incomplete
             (`diff_inventory_incomplete`), or nothing left was reviewable
-            (`no_reviewable_files`). `/diff` lists the files with `patch: null` and no
+            (`no_reviewable_files`). `/diff` still returns each file's available patch, and no
             inline comments are published. The field stays a boolean.
         pullRequest:
           $ref: "#/components/schemas/PullRequestRef"
@@ -1472,7 +1472,7 @@ components:
             The run finished without a line-by-line model review because the diff exceeded
             3000 lines (`diff_too_large`), the changed-file list was incomplete
             (`diff_inventory_incomplete`), or nothing left was reviewable
-            (`no_reviewable_files`). `/diff` lists the files with `patch: null` and no
+            (`no_reviewable_files`). `/diff` still returns each file's available patch, and no
             inline comments are published. The field stays a boolean.
         pullRequest:
           $ref: "#/components/schemas/PullRequestRef"
@@ -1764,8 +1764,11 @@ components:
         patch:
           type: [string, "null"]
           description: >-
-            `git diff` output for the file, starting with `diff --git a/<path> b/<path>`; null
-            in a summary-only run.
+            `git diff` output for the file, starting with `diff --git a/<path> b/<path>`. Kept
+            for display in every run, including a summary-only run and an ignored file, so a
+            non-null `patch` does not mean the model reviewed the file. Null when no provider
+            patch is available for the file (for example a binary or oversized file), in any
+            run. `patch` does not tell a summary-only run apart: read `summaryOnly` on the run.
       additionalProperties: false
     FileSlice:
       type: object
