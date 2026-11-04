@@ -26,7 +26,7 @@ from app.modules.integrations.webhooks.application.revive_deferred_installation_
 )
 from app.modules.reviews.application.try_enqueue_webhook_run import RunMessagePublisher
 from app.webhook_worker import WorkerConfig, revive_once, sweep_forever
-from tests import test_gitlab_projection_postgres as projection
+from tests import gitlab_projection_support as projection
 
 
 class BatchReceiver:

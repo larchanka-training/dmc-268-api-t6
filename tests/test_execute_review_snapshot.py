@@ -1505,7 +1505,7 @@ def test_execute_review_snapshot_warning_keeps_supported_low_and_drops_info() ->
     }
 
 
-def test_snapshot_review_fails_closed_without_candidate_checkpoint() -> None:
+def test_snapshot_review_returns_false_when_candidate_checkpoint_rejects_claim() -> None:
     class Processor:
         async def prepare(self, run_id: UUID) -> GeneratedConventions:
             return conventions()
@@ -1559,9 +1559,12 @@ def test_snapshot_review_fails_closed_without_candidate_checkpoint() -> None:
                 PromptBuilder().build_manifest(context, call_id=UUID(int=435), stage="review"),
             )
 
-    class Publisher:
+    class Publisher(_AcceptingCheckpointPublisher):
+        async def checkpoint_candidates(self, *args: object, **kwargs: object) -> bool:
+            return False
+
         async def execute(self, run_id: UUID, raw_output: object) -> bool:
-            raise AssertionError("publication must not run without a checkpoint")
+            raise AssertionError("publication must not run after a rejected checkpoint")
 
     class Verifier:
         async def verify(
@@ -1572,5 +1575,4 @@ def test_snapshot_review_fails_closed_without_candidate_checkpoint() -> None:
     pipeline = ExecuteReviewRun(
         Processor(), Repository(), Model(), Publisher(), reflection_pass=ReflectionPass(Verifier())
     )
-    with pytest.raises(RunFailure, match="checkpoint"):
-        asyncio.run(pipeline.execute(RUN_ID))
+    assert asyncio.run(pipeline.execute(RUN_ID)) is False

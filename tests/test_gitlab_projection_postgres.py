@@ -35,70 +35,18 @@ from app.modules.reviews.infrastructure.gitlab_merge_request_projection import (
     SqlAlchemyGitLabMergeRequestProjectionUnitOfWork,
 )
 from tests.gitlab_projection_support import (
-    _ORIGIN as _ORIGIN,
-)
-from tests.gitlab_projection_support import (
-    _TOKEN as _TOKEN,
-)
-from tests.gitlab_projection_support import (
-    NOW as NOW,
-)
-from tests.gitlab_projection_support import (
-    Body as Body,
-)
-from tests.gitlab_projection_support import (
-    Clock as Clock,
-)
-from tests.gitlab_projection_support import (
-    ConfirmedPointers as ConfirmedPointers,
-)
-from tests.gitlab_projection_support import (
-    Projects as Projects,
-)
-from tests.gitlab_projection_support import (
-    Rig as Rig,
-)
-from tests.gitlab_projection_support import (
-    assert_no_sql_transaction as assert_no_sql_transaction,
-)
-from tests.gitlab_projection_support import (
-    authority_database as authority_database,
-)
-from tests.gitlab_projection_support import (
-    automatic_enqueuer as automatic_enqueuer,
-)
-from tests.gitlab_projection_support import (
-    automatic_response as automatic_response,
-)
-from tests.gitlab_projection_support import (
-    canonical as canonical,
-)
-from tests.gitlab_projection_support import (
-    command_for as command_for,
-)
-from tests.gitlab_projection_support import (
-    lock_for as lock_for,
-)
-from tests.gitlab_projection_support import (
-    project as project,
-)
-from tests.gitlab_projection_support import (
-    receipt_for as receipt_for,
-)
-from tests.gitlab_projection_support import (
-    receiver as receiver,
-)
-from tests.gitlab_projection_support import (
-    response as response,
-)
-from tests.gitlab_projection_support import (
-    rig as rig,
-)
-from tests.gitlab_projection_support import (
-    run_json as run_json,
-)
-from tests.gitlab_projection_support import (
-    seed_run as seed_run,
+    _ORIGIN,
+    _TOKEN,
+    NOW,
+    assert_no_sql_transaction,
+    canonical,
+    command_for,
+    lock_for,
+    project,
+    response,
+    rig,
+    run_json,
+    seed_run,
 )
 
 pytest_plugins = ("tests.gitlab_projection_support",)

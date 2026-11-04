@@ -135,8 +135,12 @@ def test_execute_review_run_does_not_call_model_when_processing_fails() -> None:
     assert asyncio.run(pipeline.execute(RUN_ID)) is False
 
 
-def test_execute_review_run_with_reflection_pass_filters_unsupported_findings() -> None:
+@pytest.mark.parametrize("change_hidden_input", [False, True])
+def test_execute_review_run_with_reflection_pass_filters_unsupported_findings(
+    change_hidden_input: bool,
+) -> None:
     model_calls = 0
+    hidden_line = "x = 1"
 
     class Processor:
         async def prepare(self, run_id: UUID) -> GeneratedConventions:
@@ -153,7 +157,7 @@ def test_execute_review_run_with_reflection_pass_filters_unsupported_findings() 
                 conventions=RepoConventions(("Use services.",), ("Test paths.",)),
                 changed_files=(
                     ChangedFile("app/main.py", "modified", (DiffLine(10, "added", "query = ..."),)),
-                    ChangedFile("app/omitted.py", "modified", (DiffLine(3, "added", "x = 1"),)),
+                    ChangedFile("app/omitted.py", "modified", (DiffLine(3, "added", hidden_line),)),
                 ),
                 omitted_files=(),
                 policy_snapshot=_make_test_snapshot(),
@@ -229,6 +233,9 @@ def test_execute_review_run_with_reflection_pass_filters_unsupported_findings() 
     publish_calls = 0
 
     class Publisher:
+        async def resume_finalized(self, run_id: UUID) -> bool | None:
+            return None
+
         async def checkpoint_candidates(
             self,
             run_id: UUID,
@@ -250,13 +257,17 @@ def test_execute_review_run_with_reflection_pass_filters_unsupported_findings() 
                 checkpointed_candidates.extend(candidate_ids)
             else:
                 assert candidate_ids == tuple(checkpointed_candidates)
-                assert _["fitted_context"] == checkpointed_fitted_context
+                if change_hidden_input:
+                    assert _["fitted_context"] != checkpointed_fitted_context
+                else:
+                    assert _["fitted_context"] == checkpointed_fitted_context
                 assert _["incomplete_paths"] == ("app/omitted.py",)
             return True
 
         async def load_accepted_output(self, run_id: UUID) -> AcceptedReviewCheckpoint | None:
             if checkpointed_output is None:
                 return None
+            assert checkpointed_fitted_context is not None
             return AcceptedReviewCheckpoint(
                 checkpointed_output,
                 accepted_call_id,
@@ -327,9 +338,11 @@ def test_execute_review_run_with_reflection_pass_filters_unsupported_findings() 
     with pytest.raises(VerificationUnavailableError, match="verifier unavailable"):
         asyncio.run(pipeline.execute(RUN_ID))
     assert publish_calls == 0
+    if change_hidden_input:
+        hidden_line = "x = 2"
     success = asyncio.run(pipeline.execute(RUN_ID))
     assert success is True
-    assert model_calls == 1
+    assert model_calls == (2 if change_hidden_input else 1)
     assert verifier_attempts == 2
     assert publish_calls == 1
 

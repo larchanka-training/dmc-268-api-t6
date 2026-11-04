@@ -26,8 +26,6 @@ from app.modules.reviews.application.review_output import (
     FindingPostProcessingInput,
     InvalidReviewOutput,
     PublishReviewOutput,
-    ReviewOutput,
-    ReviewPublication,
     VerifiedReviewOutput,
 )
 from app.modules.reviews.application.run_coverage import RunCoverage
@@ -37,7 +35,8 @@ from app.modules.reviews.application.store_review_output import (
     PublishingGuard,
     StoreReviewOutput,
 )
-from tests.test_clean_without_text_result import answer
+from tests.clean_without_text_fakes import answer
+from tests.review_output_fakes import InMemoryFinalization
 from tests.test_coverage_none_classification import project, unsupported_path
 
 _RUN = UUID(int=213)
@@ -45,7 +44,7 @@ _TOO_LARGE = DiffSnapshot("large.txt", None, "d" * 40, omission_reason="too_larg
 
 
 @dataclass
-class Repository:
+class Repository(InMemoryFinalization):
     """The publishing boundary: every answer it was asked to store, and the last result."""
 
     snapshots: list[DiffSnapshot]
@@ -72,33 +71,50 @@ class Repository:
         )
 
     async def lock_for_publishing(self, run_id: UUID) -> PublishingGuard:
-        return PublishingGuard(self.state, "worker", False, "a" * 40, True, self.review_event)
+        return PublishingGuard(
+            self.state, "worker", False, "a" * 40, True, self.review_event, attempt=1
+        )
 
-    async def store_review_output(
+    async def finalize_review(
         self,
         run_id: UUID,
+        *,
         model_output: dict[str, object] | None,
-        parsed: ReviewOutput,
         processed: ProcessedReviewOutput,
-    ) -> ReviewPublication:
+        result: dict[str, Any],
+        review_event: str,
+        findings_hash: str,
+        verify_request: dict[str, Any] | None,
+        verify_response: dict[str, Any] | None,
+        started_at: datetime,
+        duration_ms: int,
+    ) -> None:
+        await super().finalize_review(
+            run_id,
+            model_output=model_output,
+            processed=processed,
+            result=result,
+            review_event=review_event,
+            findings_hash=findings_hash,
+            verify_request=verify_request,
+            verify_response=verify_response,
+            started_at=started_at,
+            duration_ms=duration_ms,
+        )
         self.answers.append(model_output)
         self.body = processed.review_body
-        self.state = "publishing"
-        return ReviewPublication("a" * 40, (), self.body)
+        self.response = result
 
-    async def enter_publishing(
+    async def enter_publishing_from_final(
         self,
         run_id: UUID,
         *,
         lease_until: datetime,
-        postprocess_request: dict[str, Any],
-        postprocess_response: dict[str, Any],
-        started_at: datetime,
-        duration_ms: int,
-        verify_request: dict[str, Any] | None = None,
-        verify_response: dict[str, Any] | None = None,
-    ) -> None:
-        self.response = postprocess_response
+    ) -> bool:
+        if self.state != "running":
+            return False
+        self.state = "publishing"
+        return True
 
     async def mark_review_published(self, run_id: UUID) -> None:
         raise AssertionError("finalization only queues publication")
@@ -137,7 +153,11 @@ class Queue:
 
 def _store(repository: Repository, queue: Queue, committed: list[str]) -> StoreReviewOutput:
     return StoreReviewOutput(
-        lambda: Uow(repository, committed), queue, worker_id="worker", run_url=lambda _: None
+        lambda: Uow(repository, committed),
+        queue,
+        worker_id="worker",
+        expected_attempt=1,
+        run_url=lambda _: None,
     )
 
 
@@ -183,7 +203,7 @@ def test_a_backend_result_is_stored_with_the_backend_summary_and_no_model_answer
     assert "**Verdict:** нет доступных для анализа изменений" in repository.body
     # No llm.review_output: the repository is given no model answer to record.
     assert repository.answers == [None]
-    assert committed == ["commit"]
+    assert committed == ["commit", "commit"]
     assert len(queue.pointers) == 1
 
 

@@ -85,6 +85,7 @@ from app.modules.reviews.infrastructure.run_processing_unit_of_work import (
 )
 from app.modules.reviews.infrastructure.run_repository import SqlAlchemyRunRepository
 from app.worker import process_review_run
+from tests.execute_review_fakes import _AcceptingCheckpointPublisher
 from tests.policy_snapshot_fakes import make_complete_execution_profile
 from tests.portal_postgres import NOW, REPO_A, RULE_A, WS_A, Env, portal_schema
 from tests.test_llm_gateway import FALLBACK, PRIMARY, completion
@@ -229,7 +230,7 @@ class Provider:
 
 
 @dataclass
-class Output:
+class Output(_AcceptingCheckpointPublisher):
     answers: list[object]
 
     async def execute(self, run_id: UUID, model_output: object) -> bool:

@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import datetime
 from types import TracebackType
+from typing import Any
 from uuid import UUID
 
 from app.modules.reviews.application.findings_post_processor import ProcessedReviewOutput
@@ -13,8 +15,70 @@ from app.modules.reviews.application.review_output import (
     ReviewOutput,
     ReviewPublication,
 )
+from app.modules.reviews.application.store_review_output import (
+    AcceptedReviewCheckpoint,
+    FinalizedReviewPlan,
+    PublishingGuard,
+)
 
 RUN_ID = UUID("00000000-0000-0000-0000-000000000408")
+
+
+class InMemoryFinalization:
+    """Keep a fake finalized plan available across short units of work."""
+
+    _finalized_plan: FinalizedReviewPlan | None = None
+    finalized_processed: ProcessedReviewOutput | None = None
+    finalized_result: dict[str, Any] | None = None
+    finalized_model_output: dict[str, object] | None = None
+
+    async def lock_for_publishing(self, run_id: UUID) -> PublishingGuard:
+        raise NotImplementedError
+
+    async def load_review_checkpoint(self, run_id: UUID) -> AcceptedReviewCheckpoint | None:
+        return None
+
+    async def checkpoint_review_candidates(
+        self,
+        run_id: UUID,
+        *,
+        model_output: dict[str, object],
+        candidates: list[dict[str, object]],
+        dropped: list[dict[str, object]],
+        accepted_call_id: UUID | None,
+        expected_attempt: int,
+        incomplete_paths: tuple[str, ...],
+        fitted_context: dict[str, object],
+        started_at: datetime,
+        duration_ms: int,
+    ) -> None:
+        raise AssertionError("candidate checkpoint is outside this fake's scenario")
+
+    async def finalize_review(
+        self,
+        run_id: UUID,
+        *,
+        model_output: dict[str, object] | None,
+        processed: ProcessedReviewOutput,
+        result: dict[str, Any],
+        review_event: str,
+        findings_hash: str,
+        verify_request: dict[str, Any] | None,
+        verify_response: dict[str, Any] | None,
+        started_at: datetime,
+        duration_ms: int,
+    ) -> None:
+        guard = await self.lock_for_publishing(run_id)
+        self._finalized_plan = FinalizedReviewPlan(guard.head_sha, findings_hash, review_event)
+        self.finalized_processed = processed
+        self.finalized_result = result
+        self.finalized_model_output = model_output
+
+    async def load_finalized_plan(self, run_id: UUID) -> FinalizedReviewPlan | None:
+        return self._finalized_plan
+
+    async def enter_publishing_from_final(self, run_id: UUID, *, lease_until: datetime) -> bool:
+        return True
 
 
 @dataclass

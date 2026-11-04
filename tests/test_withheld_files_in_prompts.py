@@ -43,6 +43,7 @@ from app.modules.reviews.application.review_context_stage import (
     ReviewContextStage,
 )
 from app.modules.reviews.application.vcs_diff import PullRequestLocator, VcsFile, VcsPullRequest
+from tests.execute_review_fakes import _AcceptingCheckpointPublisher
 from tests.test_prepare_policy_snapshot import Store, Uow
 from tests.test_review_context_stage import (
     _BASE,
@@ -227,7 +228,7 @@ class Model:
         return {}
 
 
-class Publisher:
+class Publisher(_AcceptingCheckpointPublisher):
     async def execute(self, run_id: UUID, model_output: object) -> bool:
         return True
 

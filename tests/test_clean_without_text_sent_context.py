@@ -31,65 +31,27 @@ from app.modules.reviews.application.prompt_builder import (
 from app.modules.reviews.application.reflection_pass import ReflectionPass
 from app.modules.reviews.application.review_context import ReviewContextPayload
 from app.modules.reviews.application.review_output import VerifiedReviewOutput
-from app.modules.reviews.application.store_review_output import (
-    AcceptedReviewCheckpoint,
-    FinalizedReviewPlan,
-    PublishingGuard,
-    StoreReviewOutput,
-)
+from app.modules.reviews.application.store_review_output import StoreReviewOutput
 from app.modules.reviews.infrastructure.llm.models import GatewayReviewModel
-from tests.execute_review_fakes import FakeVerifierModel, _make_test_snapshot, conventions
-from tests.test_clean_without_text_result import Queue, Repository, Uow, answer, finalize
+from tests.clean_without_text_fakes import (
+    Queue,
+    Repository,
+    Uow,
+    _CheckpointRepository,
+    answer,
+    finalize,
+    finding,
+)
+from tests.execute_review_fakes import (
+    FakeVerifierModel,
+    _AcceptingCheckpointPublisher,
+    _make_test_snapshot,
+    conventions,
+)
+from tests.run_coverage_fakes import code_snapshot, coverage
 from tests.test_gateway_review_model import RUN, Transport, _gateway
-from tests.test_run_coverage import code_snapshot, coverage
 
 _RUN = UUID(int=213)
-
-
-def finding(path: str, severity: str = "high") -> dict[str, object]:
-    return {
-        "path": path,
-        "line": 1,
-        "start_line": None,
-        "severity": severity,
-        "category": "security",
-        "title": "Unchecked authorization",
-        "body": "A remote caller can bypass the permission check.",
-        "suggestion": None,
-        "confidence": 0.9,
-        "rule_name": None,
-    }
-
-
-class _CheckpointRepository(Repository):
-    """Shared unit adapter for a claimed snapshot run's short storage stages."""
-
-    _finalized_plan: FinalizedReviewPlan | None = None
-
-    async def load_finalized_plan(self, run_id: UUID) -> FinalizedReviewPlan | None:
-        return self._finalized_plan
-
-    async def load_review_checkpoint(self, run_id: UUID) -> AcceptedReviewCheckpoint | None:
-        return None
-
-    async def checkpoint_review_candidates(self, run_id: UUID, **kwargs: object) -> None:
-        return None
-
-    async def finalize_review(self, run_id: UUID, **kwargs: object) -> None:
-        guard = await self.lock_for_publishing(run_id)
-        self._finalized_plan = FinalizedReviewPlan(
-            guard.head_sha,
-            str(kwargs["findings_hash"]),
-            str(kwargs["review_event"]),
-        )
-
-    async def lock_for_publishing(self, run_id: UUID) -> PublishingGuard:
-        return replace(await super().lock_for_publishing(run_id), attempt=1)
-
-
-class _AcceptingCheckpointPublisher:
-    async def checkpoint_candidates(self, *args: object, **kwargs: object) -> bool:
-        return True
 
 
 @pytest.mark.parametrize("severity", [None, "info", "high", "medium"])

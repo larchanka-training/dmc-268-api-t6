@@ -596,28 +596,26 @@ def test_primary_body_fault_survives_response_and_transport_close_faults(
     authority_database: tuple[str, str, UUID],
     primary: str,
 ) -> None:
-    from collections.abc import AsyncIterator
-
     async def scenario() -> None:
         async with rig(authority_database) as fixture:
             pointer = await publishing(fixture)
             closed: list[str] = []
 
-            class Body(httpx.AsyncByteStream):
-                async def __aiter__(self) -> AsyncIterator[bytes]:
-                    if primary == "cancel":
-                        raise asyncio.CancelledError("primary cancellation")
-                    raise RuntimeError("primary programmer fault")
-                    yield b""  # pragma: no cover
-
-                async def aclose(self) -> None:
-                    closed.append("response")
-                    raise ValueError("secondary response close")
-
             class Transport(httpx.AsyncBaseTransport):
                 async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
                     return httpx.Response(
-                        200, headers={"Content-Type": "application/json"}, stream=Body()
+                        200,
+                        headers={"Content-Type": "application/json"},
+                        stream=Stream(
+                            (),
+                            failure=(
+                                asyncio.CancelledError("primary cancellation")
+                                if primary == "cancel"
+                                else RuntimeError("primary programmer fault")
+                            ),
+                            close_error=ValueError("secondary response close"),
+                            on_close=lambda: closed.append("response"),
+                        ),
                     )
 
                 async def aclose(self) -> None:

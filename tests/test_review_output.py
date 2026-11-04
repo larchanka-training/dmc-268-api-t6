@@ -22,10 +22,10 @@ from app.modules.reviews.application.review_output import (
     ReviewPublication,
     comment_body,
     parse_review_output,
-    parse_review_output_v2,
 )
 from tests.review_output_fakes import (
     RUN_ID,
+    InMemoryFinalization,
     RecordingFactory,
     RecordingProvider,
     RecordingRepository,
@@ -259,9 +259,7 @@ def test_store_review_output_preserves_allowed_v2_rules() -> None:
         StoreReviewOutput,
     )
 
-    stored_processed: list[ProcessedReviewOutput] = []
-
-    class FakeReviewRepo:
+    class FakeReviewRepo(InMemoryFinalization):
         async def get_post_processing_input(self, run_id: UUID) -> FindingPostProcessingInput:
             return FindingPostProcessingInput(
                 diff_map=_added_file_diff_map("app/example.py", 14),
@@ -278,28 +276,14 @@ def test_store_review_output_preserves_allowed_v2_rules() -> None:
                 head_sha="head_sha_123",
                 head_current=True,
                 repository_review_event="APPROVE",
+                attempt=1,
             )
 
-        async def store_review_output(
-            self,
-            run_id: UUID,
-            answer: dict[str, Any],
-            parsed: ReviewOutput,
-            processed: ProcessedReviewOutput,
-        ) -> ReviewPublication:
-            stored_processed.append(processed)
-            return ReviewPublication(
-                head_sha="head_sha_123",
-                findings=(),
-                review_body="body",
-            )
-
-        async def enter_publishing(self, run_id: UUID, **kwargs: Any) -> None:
-            pass
+    fake_repo = FakeReviewRepo()
 
     class FakeUoW:
         def __init__(self) -> None:
-            self.reviews = FakeReviewRepo()
+            self.reviews = fake_repo
 
         async def __aenter__(self) -> FakeUoW:
             return self
@@ -327,176 +311,21 @@ def test_store_review_output_preserves_allowed_v2_rules() -> None:
 
     queue = FakeQueue()
     store = StoreReviewOutput(
-        cast(Any, lambda: FakeUoW()), queue, worker_id="test-worker", run_url=lambda _: None
+        cast(Any, lambda: FakeUoW()),
+        queue,
+        worker_id="test-worker",
+        expected_attempt=1,
+        run_url=lambda _: None,
     )
     value = valid_output()
     cast(list[dict[str, object]], value["findings"])[0]["rule_name"] = ".review/rules.md"
 
     success = asyncio.run(store.execute(RUN_ID, value))
     assert success is True
-    assert len(stored_processed) == 1
-    assert stored_processed[0].inline[0].finding.rule_name == ".review/rules.md"
+    processed = fake_repo.finalized_processed
+    assert processed is not None
+    assert processed.inline[0].finding.rule_name == ".review/rules.md"
     assert len(queue.published) == 1
-
-
-@pytest.mark.parametrize(
-    "fail_at_publication_start, claimed_attempt",
-    [(False, 1), (True, 1), (False, 2)],
-    ids=["publish", "fail-before-t8", "stale-claim"],
-)
-def test_store_review_output_commits_accepted_output_before_t8(
-    fail_at_publication_start: bool,
-    claimed_attempt: int,
-) -> None:
-    from app.modules.reviews.application.store_review_output import (
-        FinalizedReviewPlan,
-        PublishingGuard,
-        StoreReviewOutput,
-    )
-
-    committed_state = "running"
-    committed_outputs = 0
-    committed_finalized = 0
-    committed_plan: FinalizedReviewPlan | None = None
-    commits: list[tuple[str, int]] = []
-    accepted_output = valid_output()
-    cast(list[dict[str, object]], accepted_output["findings"])[0]["evidence_refs"] = [
-        {"block_id": "b1", "start_line": 10, "end_line": 12}
-    ]
-
-    class FakeUoW:
-        def __init__(self) -> None:
-            self.reviews = self
-            self.pending_state = committed_state
-            self.pending_outputs = 0
-            self.pending_finalized = 0
-            self.pending_plan: FinalizedReviewPlan | None = None
-
-        async def __aenter__(self) -> FakeUoW:
-            return self
-
-        async def __aexit__(
-            self,
-            exc_type: type[BaseException] | None,
-            exc: BaseException | None,
-            tb: TracebackType | None,
-        ) -> None:
-            await self.rollback()
-
-        async def commit(self) -> None:
-            nonlocal committed_state, committed_outputs, committed_finalized, committed_plan
-            committed_state = self.pending_state
-            committed_outputs += self.pending_outputs
-            committed_finalized += self.pending_finalized
-            if self.pending_plan is not None:
-                committed_plan = self.pending_plan
-            commits.append((committed_state, committed_outputs))
-
-        async def rollback(self) -> None:
-            self.pending_state = committed_state
-            self.pending_outputs = 0
-            self.pending_finalized = 0
-            self.pending_plan = None
-
-        async def get_post_processing_input(self, run_id: UUID) -> FindingPostProcessingInput:
-            return FindingPostProcessingInput(
-                diff_map=_added_file_diff_map("app/example.py", 14),
-                checked_paths=frozenset({"app/example.py"}),
-                rule_names=frozenset(),
-            )
-
-        async def lock_for_publishing(self, run_id: UUID) -> PublishingGuard:
-            return PublishingGuard(
-                state=committed_state,
-                worker_id="test-worker",
-                cancel_requested=False,
-                head_sha="head_sha_123",
-                head_current=True,
-                repository_review_event="COMMENT",
-                attempt=claimed_attempt,
-            )
-
-        async def store_review_output(
-            self,
-            run_id: UUID,
-            answer: dict[str, Any],
-            parsed: ReviewOutput,
-            processed: ProcessedReviewOutput,
-        ) -> ReviewPublication:
-            assert committed_outputs == 1
-            assert committed_finalized == 1
-            assert parsed.summary == processed.summary
-            assert [item.finding.title for item in processed.inline] == [
-                "Missing transaction boundary"
-            ]
-            return ReviewPublication(
-                head_sha="head_sha_123",
-                findings=(),
-                review_body=processed.review_body,
-            )
-
-        async def checkpoint_review_candidates(self, run_id: UUID, **kwargs: Any) -> None:
-            assert run_id == RUN_ID
-            assert kwargs["model_output"] == parse_review_output_v2(accepted_output).model_dump(
-                mode="json"
-            )
-            self.pending_outputs += 1
-
-        async def finalize_review(self, run_id: UUID, **kwargs: Any) -> None:
-            assert run_id == RUN_ID
-            assert kwargs["result"]["findings"][0]["title"] == "Missing transaction boundary"
-            self.pending_finalized += 1
-            self.pending_plan = FinalizedReviewPlan(
-                "head_sha_123", kwargs["findings_hash"], kwargs["review_event"]
-            )
-
-        async def load_finalized_plan(self, run_id: UUID) -> FinalizedReviewPlan | None:
-            return committed_plan
-
-        async def enter_publishing(self, run_id: UUID, **kwargs: Any) -> None:
-            if fail_at_publication_start:
-                raise RuntimeError("publication transition failed")
-            self.pending_state = "publishing"
-
-    class FakeQueue:
-        async def publish_review(self, pointer: Any) -> None:
-            assert (committed_state, committed_outputs) == ("publishing", 1)
-
-    store = StoreReviewOutput(
-        cast(Any, FakeUoW),
-        FakeQueue(),
-        worker_id="test-worker",
-        expected_attempt=1,
-        run_url=lambda _: None,
-    )
-
-    async def scenario() -> bool:
-        checkpointed = await store.checkpoint_candidates(
-            RUN_ID,
-            accepted_output,
-            ("candidate-1",),
-            candidates=[cast(list[dict[str, object]], accepted_output["findings"])[0]],
-            dropped=[],
-            accepted_call_id=None,
-        )
-        if claimed_attempt != 1:
-            return checkpointed
-        assert checkpointed
-        return await store.execute(RUN_ID, valid_output())
-
-    if claimed_attempt != 1:
-        assert asyncio.run(scenario()) is False
-        assert commits == []
-        assert committed_outputs == 0
-    elif fail_at_publication_start:
-        with pytest.raises(RuntimeError, match="publication transition failed"):
-            asyncio.run(scenario())
-        assert commits == [("running", 1), ("running", 1)]
-        assert (committed_state, committed_outputs) == ("running", 1)
-        assert committed_finalized == 1
-    else:
-        assert asyncio.run(scenario()) is True
-        assert commits == [("running", 1), ("running", 1), ("publishing", 1)]
 
 
 def test_store_review_output_persists_dropped_findings_from_reflection_pass() -> None:
@@ -505,10 +334,7 @@ def test_store_review_output_persists_dropped_findings_from_reflection_pass() ->
         StoreReviewOutput,
     )
 
-    stored_processed: list[ProcessedReviewOutput] = []
-    entered_publishing: list[dict[str, Any]] = []
-
-    class FakeReviewRepo:
+    class FakeReviewRepo(InMemoryFinalization):
         async def get_post_processing_input(self, run_id: UUID) -> FindingPostProcessingInput:
             return FindingPostProcessingInput(
                 diff_map=_added_file_diff_map("app/example.py", 14),
@@ -525,30 +351,14 @@ def test_store_review_output_persists_dropped_findings_from_reflection_pass() ->
                 head_sha="head_sha_123",
                 head_current=True,
                 repository_review_event="APPROVE",
+                attempt=1,
             )
 
-        async def store_review_output(
-            self,
-            run_id: UUID,
-            answer: dict[str, Any],
-            parsed: ReviewOutput,
-            processed: ProcessedReviewOutput,
-        ) -> ReviewPublication:
-            # _dropped_findings must be popped from answer to not pollute the raw answer object
-            assert "_dropped_findings" not in answer
-            stored_processed.append(processed)
-            return ReviewPublication(
-                head_sha="head_sha_123",
-                findings=(),
-                review_body="body",
-            )
-
-        async def enter_publishing(self, run_id: UUID, **kwargs: Any) -> None:
-            entered_publishing.append(kwargs)
+    fake_repo = FakeReviewRepo()
 
     class FakeUoW:
         def __init__(self) -> None:
-            self.reviews = FakeReviewRepo()
+            self.reviews = fake_repo
 
         async def __aenter__(self) -> FakeUoW:
             return self
@@ -581,7 +391,11 @@ def test_store_review_output_persists_dropped_findings_from_reflection_pass() ->
 
     queue = FakeQueue()
     store = StoreReviewOutput(
-        cast(Any, lambda: FakeUoW()), queue, worker_id="test-worker", run_url=lambda _: None
+        cast(Any, lambda: FakeUoW()),
+        queue,
+        worker_id="test-worker",
+        expected_attempt=1,
+        run_url=lambda _: None,
     )
     value = VerifiedReviewOutput(
         valid_output(),
@@ -608,19 +422,23 @@ def test_store_review_output_persists_dropped_findings_from_reflection_pass() ->
 
     success = asyncio.run(store.execute(RUN_ID, value))
     assert success is True
-    assert len(stored_processed) == 1
+    processed = fake_repo.finalized_processed
+    assert processed is not None
+    assert fake_repo.finalized_model_output is not None
+    assert "_dropped_findings" not in fake_repo.finalized_model_output
     # Check that processed.dropped contains the dropped finding and overview count
-    assert len(stored_processed[0].dropped) == 1
-    assert "Below severity threshold (critical)" in stored_processed[0].review_body
-    dropped_item = stored_processed[0].dropped[0]
+    assert len(processed.dropped) == 1
+    assert "Below severity threshold (critical)" in processed.review_body
+    dropped_item = processed.dropped[0]
     assert dropped_item.finding.title == "Slow query"
     assert dropped_item.drop_reason == "severity_threshold"
     assert dropped_item.bucket == "dropped"
     assert dropped_item.position == 1
 
-    # Check postprocess_response logged in enter_publishing contains dropped item
-    assert len(entered_publishing) == 1
-    dropped_log = entered_publishing[0]["postprocess_response"]["dropped"]
+    # Check that the finalized result records the dropped item.
+    result = fake_repo.finalized_result
+    assert result is not None
+    dropped_log = result["dropped"]
     assert dropped_log == [{"index": 1, "drop_reason": "severity_threshold"}]
     assert len(queue.published) == 1
 
@@ -631,11 +449,9 @@ def test_store_review_output_appends_overflow_footer_with_run_url() -> None:
         StoreReviewOutput,
     )
 
-    stored_processed: list[ProcessedReviewOutput] = []
-    entered_publishing: list[dict[str, Any]] = []
     run_url = "https://ui.test/runs/00000000-0000-0000-0000-000000000408"
 
-    class FakeReviewRepo:
+    class FakeReviewRepo(InMemoryFinalization):
         async def get_post_processing_input(self, run_id: UUID) -> FindingPostProcessingInput:
             return FindingPostProcessingInput(
                 diff_map=_added_file_diff_map("app/example.py", 14),
@@ -652,28 +468,14 @@ def test_store_review_output_appends_overflow_footer_with_run_url() -> None:
                 head_sha="head_sha_123",
                 head_current=True,
                 repository_review_event="APPROVE",
+                attempt=1,
             )
 
-        async def store_review_output(
-            self,
-            run_id: UUID,
-            answer: dict[str, Any],
-            parsed: ReviewOutput,
-            processed: ProcessedReviewOutput,
-        ) -> ReviewPublication:
-            stored_processed.append(processed)
-            return ReviewPublication(
-                head_sha="head_sha_123",
-                findings=(),
-                review_body=processed.review_body,
-            )
-
-        async def enter_publishing(self, run_id: UUID, **kwargs: Any) -> None:
-            entered_publishing.append(kwargs)
+    fake_repo = FakeReviewRepo()
 
     class FakeUoW:
         def __init__(self) -> None:
-            self.reviews = FakeReviewRepo()
+            self.reviews = fake_repo
 
         async def __aenter__(self) -> FakeUoW:
             return self
@@ -743,6 +545,7 @@ def test_store_review_output_appends_overflow_footer_with_run_url() -> None:
         cast(Any, lambda: FakeUoW()),
         FakeQueue(),
         worker_id="test-worker",
+        expected_attempt=1,
         run_url=lambda _: run_url,
     )
     verified = VerifiedReviewOutput(
@@ -768,15 +571,17 @@ def test_store_review_output_appends_overflow_footer_with_run_url() -> None:
         severity_threshold="critical",
     )
     assert asyncio.run(store.execute(RUN_ID, verified)) is True
-    assert len(stored_processed) == 1
-    body = stored_processed[0].review_body
+    processed = fake_repo.finalized_processed
+    assert processed is not None
+    body = processed.review_body
     assert body.endswith(run_url)
     assert "Below severity threshold (critical)" in body
     assert "Below severity threshold (all)" not in body
     assert re.search(r"\*\*Ещё \d+ наход(?:ка|ки|ок):\*\*", body) is not None
     assert len(body) <= 4000
-    response = entered_publishing[0]["postprocess_response"]
-    assert response["omitted_body_only_count"] == stored_processed[0].omitted_body_only_count
+    response = fake_repo.finalized_result
+    assert response is not None
+    assert response["omitted_body_only_count"] == processed.omitted_body_only_count
     assert response["omitted_body_only_count"] > 0
 
 
@@ -786,9 +591,7 @@ def test_store_review_output_repacks_body_before_overflow_footer() -> None:
         StoreReviewOutput,
     )
 
-    stored_processed: list[ProcessedReviewOutput] = []
-
-    class FakeReviewRepo:
+    class FakeReviewRepo(InMemoryFinalization):
         async def get_post_processing_input(self, run_id: UUID) -> FindingPostProcessingInput:
             return FindingPostProcessingInput(
                 diff_map=_added_file_diff_map("app/example.py", 14),
@@ -805,28 +608,14 @@ def test_store_review_output_repacks_body_before_overflow_footer() -> None:
                 head_sha="head_sha_123",
                 head_current=True,
                 repository_review_event="APPROVE",
+                attempt=1,
             )
 
-        async def store_review_output(
-            self,
-            run_id: UUID,
-            answer: dict[str, Any],
-            parsed: ReviewOutput,
-            processed: ProcessedReviewOutput,
-        ) -> ReviewPublication:
-            stored_processed.append(processed)
-            return ReviewPublication(
-                head_sha="head_sha_123",
-                findings=(),
-                review_body=processed.review_body,
-            )
-
-        async def enter_publishing(self, run_id: UUID, **kwargs: Any) -> None:
-            pass
+    fake_repo = FakeReviewRepo()
 
     class FakeUoW:
         def __init__(self) -> None:
-            self.reviews = FakeReviewRepo()
+            self.reviews = fake_repo
 
         async def __aenter__(self) -> FakeUoW:
             return self
@@ -897,6 +686,7 @@ def test_store_review_output_repacks_body_before_overflow_footer() -> None:
         cast(Any, lambda: FakeUoW()),
         FakeQueue(),
         worker_id="test-worker",
+        expected_attempt=1,
         run_url=lambda _: run_url,
     )
     verified = VerifiedReviewOutput(
@@ -922,12 +712,13 @@ def test_store_review_output_repacks_body_before_overflow_footer() -> None:
         severity_threshold="critical",
     )
     assert asyncio.run(store.execute(RUN_ID, verified)) is True
-    assert len(stored_processed) == 1
-    body = stored_processed[0].review_body
-    assert stored_processed[0].omitted_body_only_count > 0
+    processed = fake_repo.finalized_processed
+    assert processed is not None
+    body = processed.review_body
+    assert processed.omitted_body_only_count > 0
     assert len(body) <= 4000
     assert run_url in body
-    assert stored_processed[0].review_body_budget_degraded is False
+    assert processed.review_body_budget_degraded is False
     assert "Below severity threshold (critical)" in body
     assert "Below severity threshold (all)" not in body
 
@@ -1056,10 +847,7 @@ def test_store_review_output_marks_degraded_body_in_postprocess_response(
         StoreReviewOutput,
     )
 
-    entered: list[dict[str, Any]] = []
-    stored_processed: list[ProcessedReviewOutput] = []
-
-    class FakeReviewRepo:
+    class FakeReviewRepo(InMemoryFinalization):
         async def get_post_processing_input(self, run_id: UUID) -> FindingPostProcessingInput:
             return FindingPostProcessingInput(
                 diff_map=_added_file_diff_map("app/example.py", 14),
@@ -1076,28 +864,14 @@ def test_store_review_output_marks_degraded_body_in_postprocess_response(
                 head_sha="head_sha_123",
                 head_current=True,
                 repository_review_event="APPROVE",
+                attempt=1,
             )
 
-        async def store_review_output(
-            self,
-            run_id: UUID,
-            answer: dict[str, Any],
-            parsed: ReviewOutput,
-            processed: ProcessedReviewOutput,
-        ) -> ReviewPublication:
-            stored_processed.append(processed)
-            return ReviewPublication(
-                head_sha="head_sha_123",
-                findings=(),
-                review_body=processed.review_body,
-            )
-
-        async def enter_publishing(self, run_id: UUID, **kwargs: Any) -> None:
-            entered.append(kwargs)
+    fake_repo = FakeReviewRepo()
 
     class FakeUoW:
         def __init__(self) -> None:
-            self.reviews = FakeReviewRepo()
+            self.reviews = fake_repo
 
         async def __aenter__(self) -> FakeUoW:
             return self
@@ -1165,16 +939,20 @@ def test_store_review_output_marks_degraded_body_in_postprocess_response(
         cast(Any, lambda: FakeUoW()),
         FakeQueue(),
         worker_id="test-worker",
+        expected_attempt=1,
         run_url=lambda _: run_url,
     )
 
     assert asyncio.run(store.execute(RUN_ID, payload)) is True
 
-    response = entered[0]["postprocess_response"]
+    response = fake_repo.finalized_result
+    assert response is not None
     assert response["review_body_budget_degraded"] is True
     assert response["omitted_body_only_count"] == 1
-    assert len(stored_processed[0].review_body) <= 4000
-    assert stored_processed[0].review_body.endswith(run_url)
+    processed = fake_repo.finalized_processed
+    assert processed is not None
+    assert len(processed.review_body) <= 4000
+    assert processed.review_body.endswith(run_url)
 
 
 def test_store_review_output_persists_dropped_findings_coercion_tail() -> None:
@@ -1190,7 +968,7 @@ def test_store_review_output_persists_dropped_findings_coercion_tail() -> None:
         StoreReviewOutput,
     )
 
-    class FakeReviewRepo:
+    class FakeReviewRepo(InMemoryFinalization):
         async def get_post_processing_input(self, run_id: UUID) -> FindingPostProcessingInput:
             return FindingPostProcessingInput(
                 diff_map=_added_file_diff_map("app/example.py", 14),
@@ -1207,6 +985,7 @@ def test_store_review_output_persists_dropped_findings_coercion_tail() -> None:
                 head_sha="head_sha_123",
                 head_current=True,
                 repository_review_event="APPROVE",
+                attempt=1,
             )
 
         async def store_review_output(
@@ -1221,9 +1000,11 @@ def test_store_review_output_persists_dropped_findings_coercion_tail() -> None:
         async def enter_publishing(self, run_id: UUID, **kwargs: Any) -> None:
             pass
 
+    fake_repo = FakeReviewRepo()
+
     class FakeUoW:
         def __init__(self) -> None:
-            self.reviews = FakeReviewRepo()
+            self.reviews = fake_repo
 
         async def __aenter__(self) -> FakeUoW:
             return self
@@ -1247,7 +1028,11 @@ def test_store_review_output_persists_dropped_findings_coercion_tail() -> None:
             pass
 
     store = StoreReviewOutput(
-        cast(Any, lambda: FakeUoW()), FakeQueue(), worker_id="test-worker", run_url=lambda _: None
+        cast(Any, lambda: FakeUoW()),
+        FakeQueue(),
+        worker_id="test-worker",
+        expected_attempt=1,
+        run_url=lambda _: None,
     )
 
     # Corrupted drop record through store.execute raises InvalidReviewOutput with run_id

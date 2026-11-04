@@ -11,6 +11,7 @@ from typing import Any
 from uuid import UUID
 
 import pytest
+from pydantic import ValidationError
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -57,10 +58,9 @@ from app.modules.reviews.infrastructure.run_repository import (
     SqlAlchemyReviewOutputRepository,
     SqlAlchemyRunRepository,
 )
+from tests.clean_without_text_fakes import answer, finding
 from tests.portal_postgres import HEAD, PR_NEW, REPO_A, RUN_ATTEMPTED, Env, portal_schema
-from tests.test_clean_without_text_result import answer
-from tests.test_clean_without_text_sent_context import finding
-from tests.test_run_coverage import code_snapshot, empty_snapshot
+from tests.run_coverage_fakes import code_snapshot, empty_snapshot
 from tests.test_severity_threshold_postgres import RecordingQueue
 
 
@@ -157,6 +157,7 @@ def test_postgres_snapshot_reload_and_finalization_persist_matching_result_summa
                     lambda: SqlAlchemyReviewOutputUnitOfWork(factory),
                     queue,
                     worker_id="worker",
+                    expected_attempt=1,
                     run_url=lambda _: None,
                 ).execute(RUN_ATTEMPTED, answer())
                 is True
@@ -193,7 +194,8 @@ def test_final_result_commits_in_running_before_publication_transition(
     async def fail_t8(self: SqlAlchemyReviewOutputRepository, run_id: Any, **_: Any) -> None:
         raise RuntimeError("T8 unavailable")
 
-    monkeypatch.setattr(SqlAlchemyReviewOutputRepository, "enter_publishing", fail_t8)
+    real_enter = SqlAlchemyReviewOutputRepository.enter_publishing_from_final
+    monkeypatch.setattr(SqlAlchemyReviewOutputRepository, "enter_publishing_from_final", fail_t8)
 
     async def scenario() -> tuple[str, list[str], dict[str, Any] | None, FinalReviewResult]:
         engine = result_env.engine()
@@ -210,8 +212,8 @@ def test_final_result_commits_in_running_before_publication_transition(
                         run_url=lambda _: None,
                     ).execute(RUN_ATTEMPTED, NoModelAnswer() if backend_only else answer())
             async with SqlAlchemyReviewOutputUnitOfWork(factory) as uow:
-                await uow.reviews.enter_publishing_from_final(
-                    RUN_ATTEMPTED, lease_until=datetime.now(UTC) + timedelta(minutes=5)
+                await real_enter(
+                    uow.reviews, RUN_ATTEMPTED, lease_until=datetime.now(UTC) + timedelta(minutes=5)
                 )
                 await uow.rollback()
             async with factory() as session:
@@ -252,6 +254,47 @@ def test_final_result_commits_in_running_before_publication_transition(
     assert final_result.result["findings"] == []
     assert final_result.publication_plan["findings"] == []
     assert final_result.publication_plan["review_body"]
+
+
+@pytest.mark.integration
+def test_malformed_saved_plan_cannot_resume_or_supply_publication_context(result_env: Env) -> None:
+    async def scenario() -> None:
+        engine = result_env.engine()
+        factory = async_sessionmaker(engine, expire_on_commit=False)
+        try:
+            await prepare_result(factory, [code_snapshot()])
+            store = StoreReviewOutput(
+                lambda: SqlAlchemyReviewOutputUnitOfWork(factory),
+                RecordingQueue(),
+                worker_id="worker",
+                expected_attempt=1,
+                run_url=lambda _: None,
+            )
+            assert await store.execute(RUN_ATTEMPTED, answer()) is True
+            async with factory.begin() as session:
+                await session.execute(
+                    text("UPDATE runs SET state='running' WHERE id=:run"),
+                    {"run": RUN_ATTEMPTED},
+                )
+                await session.execute(
+                    text(
+                        "UPDATE final_review_results SET publication_plan = "
+                        "publication_plan - 'review_body' WHERE run_id=:run"
+                    ),
+                    {"run": RUN_ATTEMPTED},
+                )
+            with pytest.raises(ValidationError):
+                await store.resume_finalized(RUN_ATTEMPTED)
+            async with SqlAlchemyRunLifecycleUnitOfWork(factory) as uow:
+                with pytest.raises(ValidationError):
+                    await uow.runs.publish_context(RUN_ATTEMPTED)
+            async with factory() as session:
+                run = await session.get(Run, RUN_ATTEMPTED)
+                assert run is not None and run.state.value == "running"
+        finally:
+            await engine.dispose()
+
+    asyncio.run(scenario())
 
 
 @pytest.mark.integration
@@ -347,6 +390,8 @@ def test_final_result_and_plan_contain_only_supported_findings(result_env: Env) 
                 candidates=[supported, rejected],
                 dropped=[],
                 accepted_call_id=UUID(int=435),
+                incomplete_paths=(),
+                fitted_context={},
             )
             output = VerifiedReviewOutput(
                 {"findings": [supported], "summary": answer()["summary"]},
@@ -670,6 +715,7 @@ def test_postgres_finalization_reads_referenced_policy_effective_coverage_and_re
                 lambda: SqlAlchemyReviewOutputUnitOfWork(factory),
                 queue,
                 worker_id="worker",
+                expected_attempt=1,
                 run_url=lambda _: None,
             ).execute(RUN_ATTEMPTED, answer())
             async with factory() as session:
@@ -716,6 +762,7 @@ def test_later_prompt_context_trace_does_not_erase_current_identity_valid_classi
                 lambda: SqlAlchemyReviewOutputUnitOfWork(factory),
                 queue,
                 worker_id="worker",
+                expected_attempt=1,
                 run_url=lambda _: None,
             ).execute(RUN_ATTEMPTED, answer())
             async with factory() as session:

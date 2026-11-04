@@ -95,6 +95,7 @@ from app.modules.reviews.infrastructure.models import (
     RunActionResponseBody,
 )
 from app.modules.reviews.infrastructure.publication_findings import published_finding_from_row
+from app.modules.reviews.infrastructure.publication_plan import SavedPublicationPlan
 from app.modules.reviews.infrastructure.run_action_records import insert_run_action
 from app.modules.reviews.infrastructure.run_notifications import notify_run_state
 from app.modules.reviews.infrastructure.run_origin import active_origin_condition, origin_active
@@ -858,29 +859,23 @@ class SqlAlchemyReviewOutputRepository:
         saved = await self._session.get(FinalReviewResult, run_id)
         if saved is None:
             return None
-        plan = saved.publication_plan
-        head = plan.get("head_sha")
-        hash_ = plan.get("findings_hash")
-        event = plan.get("review_event")
-        if not isinstance(head, str) or not isinstance(hash_, str) or not isinstance(event, str):
-            raise ValueError("saved publication plan is incomplete")
-        return FinalizedReviewPlan(head, hash_, event)
+        plan = SavedPublicationPlan.from_json(saved.publication_plan)
+        return FinalizedReviewPlan(plan.head_sha, plan.findings_hash, plan.review_event)
 
-    async def enter_publishing_from_final(self, run_id: UUID, *, lease_until: datetime) -> None:
+    async def enter_publishing_from_final(self, run_id: UUID, *, lease_until: datetime) -> bool:
         run = await self._session.scalar(select(Run).where(Run.id == run_id).with_for_update())
         saved = await self._session.get(FinalReviewResult, run_id)
         if run is None or saved is None or run.state is not RunState.RUNNING:
-            raise ValueError("finalized publication requires a running Run and saved plan")
-        if (
-            saved.publication_plan.get("head_sha") != run.head_sha
-            or saved.publication_plan.get("idempotency_key") != run.idempotency_key
-        ):
-            raise ValueError("saved publication plan does not match the Run")
+            return False
+        plan = SavedPublicationPlan.from_json(saved.publication_plan)
+        if plan.head_sha != run.head_sha or plan.idempotency_key != run.idempotency_key:
+            return False
         await self._record_publish_start(run, saved)
         run.state = RunState.PUBLISHING
         run.lease_until = lease_until
         await self._session.flush()
         await notify_run_state(self._session, run_id, RunState.PUBLISHING)
+        return True
 
     async def _record_publish_start(self, run: Run, saved: FinalReviewResult) -> None:
         existing = await self._session.scalar(
@@ -892,7 +887,7 @@ class SqlAlchemyReviewOutputRepository:
         )
         if existing is not None:
             return
-        plan = saved.publication_plan
+        plan = SavedPublicationPlan.from_json(saved.publication_plan)
         await insert_run_action(
             self._session,
             run_id=run.id,
@@ -904,9 +899,9 @@ class SqlAlchemyReviewOutputRepository:
                 "digest": saved.digest,
             },
             response={
-                "head_sha": plan["head_sha"],
-                "findings_hash": plan["findings_hash"],
-                "review_event": plan["review_event"],
+                "head_sha": plan.head_sha,
+                "findings_hash": plan.findings_hash,
+                "review_event": plan.review_event,
             },
             started_at=datetime.now(UTC),
             duration_ms=0,
@@ -973,8 +968,7 @@ class SqlAlchemyReviewOutputRepository:
     ) -> None:
         """Persist the full private checkpoint and its bounded diagnostic actions."""
         run = await self._session.scalar(select(Run).where(Run.id == run_id).with_for_update())
-        if run is None or run.state is not RunState.RUNNING or run.attempt != expected_attempt:
-            raise ValueError("candidate checkpoint requires a running Run")
+        assert run is not None and run.state is RunState.RUNNING and run.attempt == expected_attempt
         existing = await self._session.scalar(
             select(ReviewCandidateCheckpoint)
             .where(ReviewCandidateCheckpoint.run_id == run_id)
@@ -982,16 +976,18 @@ class SqlAlchemyReviewOutputRepository:
             .limit(1)
         )
         if existing is not None:
-            if (
+            changed = (
                 existing.accepted_output != model_output
                 or existing.fitted_context != fitted_context
                 or existing.candidates != candidates
                 or existing.dropped != dropped
                 or existing.incomplete_paths != list(incomplete_paths)
                 or existing.accepted_call_id != accepted_call_id
-            ):
-                raise ValueError("accepted review checkpoint changed across attempts")
-            return
+            )
+            if existing.attempt == expected_attempt and changed:
+                raise ValueError("accepted review checkpoint changed within attempt")
+            if not changed:
+                return
         payload = {
             "accepted_output": model_output,
             "fitted_context": fitted_context,
@@ -1165,15 +1161,15 @@ class SqlAlchemyReviewOutputRepository:
     ) -> None:
         """Commit one immutable result and publication plan while the Run is running."""
         run = await self._session.scalar(select(Run).where(Run.id == run_id).with_for_update())
-        if run is None or run.state is not RunState.RUNNING:
-            raise ValueError("finalization requires a running Run")
+        assert run is not None and run.state is RunState.RUNNING
         existing = await self._session.get(FinalReviewResult, run_id)
         if existing is not None:
+            saved_plan = SavedPublicationPlan.from_json(existing.publication_plan)
             if (
                 existing.result != result
-                or existing.publication_plan["review_event"] != review_event
-                or existing.publication_plan["findings_hash"] != findings_hash
-                or existing.publication_plan["review_body"] != processed.review_body
+                or saved_plan.review_event != review_event
+                or saved_plan.findings_hash != findings_hash
+                or saved_plan.review_body != processed.review_body
             ):
                 raise ValueError("final review result changed on replay")
             return
@@ -1201,19 +1197,22 @@ class SqlAlchemyReviewOutputRepository:
             finding = asdict(published_finding_from_row(row, diff_map, provider=provider))
             finding["finding_id"] = str(row.id)
             findings.append(finding)
-        plan = {
-            "head_sha": run.head_sha,
-            "idempotency_key": run.idempotency_key,
-            "review_event": review_event,
-            "findings_hash": findings_hash,
-            "review_body": processed.review_body,
-            "finding_ids": [
-                str(row.id)
-                for row, item in zip(rows, records, strict=True)
-                if item.bucket != "dropped"
-            ],
-            "findings": findings,
-        }
+        plan = SavedPublicationPlan.from_json(
+            {
+                "head_sha": run.head_sha,
+                "idempotency_key": run.idempotency_key,
+                "review_event": review_event,
+                "findings_hash": findings_hash,
+                "review_body": processed.review_body,
+                "finding_ids": [
+                    str(row.id)
+                    for row, item in zip(rows, records, strict=True)
+                    if item.bucket != "dropped"
+                ],
+                "findings": findings,
+            }
+        )
+        plan_json = plan.to_json()
         checkpoint = await self._session.scalar(
             select(ReviewCandidateCheckpoint)
             .where(ReviewCandidateCheckpoint.run_id == run_id)
@@ -1225,7 +1224,7 @@ class SqlAlchemyReviewOutputRepository:
         verifier_call_id = UUID(verifier_value) if isinstance(verifier_value, str) else None
         digest = sha256(
             json.dumps(
-                {"result": result, "publication_plan": plan},
+                {"result": result, "publication_plan": plan_json},
                 ensure_ascii=False,
                 sort_keys=True,
                 separators=(",", ":"),
@@ -1238,7 +1237,7 @@ class SqlAlchemyReviewOutputRepository:
                 accepted_review_call_id=review_call_id,
                 accepted_verifier_call_id=verifier_call_id,
                 result=result,
-                publication_plan=plan,
+                publication_plan=plan_json,
                 digest=digest,
             )
         )
@@ -1403,8 +1402,7 @@ class SqlAlchemyReviewOutputRepository:
         finalized = await self._session.get(FinalReviewResult, run_id)
         if finalized is not None:
             run = await self._session.scalar(select(Run).where(Run.id == run_id).with_for_update())
-            if run is None or run.state is not RunState.PUBLISHING:
-                raise ValueError("finalized publication requires a publishing Run")
+            assert run is not None and run.state is RunState.PUBLISHING
             await self._record_publish_start(run, finalized)
         if finalized is None and verify_request is not None:
             existing = await self._session.scalar(

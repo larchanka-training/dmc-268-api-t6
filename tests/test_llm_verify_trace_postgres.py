@@ -62,9 +62,9 @@ from app.modules.reviews.infrastructure.review_output_unit_of_work import (
 from app.modules.reviews.infrastructure.run_repository import SqlAlchemyReviewOutputRepository
 from tests.execute_review_fakes import FakeVerifierModel, _make_test_snapshot, conventions
 from tests.portal_postgres import HEAD, NOW, REPO_A, RUN_ATTEMPTED, Env, portal_schema
+from tests.run_coverage_fakes import code_snapshot
 from tests.test_clean_without_text_result_postgres import prepare_result
 from tests.test_context_manifests_postgres import INSERT_POLICY_SNAPSHOT, policy_snapshot_values
-from tests.test_run_coverage import code_snapshot
 from tests.test_run_step_postgres import allow_run_steps
 from tests.test_run_stream_postgres import insert_queued_run
 
@@ -221,7 +221,20 @@ def test_candidate_checkpoint_commits_in_running_and_reuses_across_attempts(env:
                 candidates=[{"title": "Accepted candidate"}],
                 dropped=[],
                 accepted_call_id=UUID(int=435),
+                incomplete_paths=(),
+                fitted_context={"test": "candidate"},
             )
+            with pytest.raises(ValueError, match="changed within attempt"):
+                await store.checkpoint_candidates(
+                    run_id,
+                    _model_output(),
+                    ("candidate-1",),
+                    candidates=[{"title": "Changed candidate"}],
+                    dropped=[],
+                    accepted_call_id=UUID(int=435),
+                    incomplete_paths=(),
+                    fitted_context={"test": "candidate"},
+                )
             async with factory() as session, session.begin():
                 run = await session.get(Run, run_id)
                 assert run is not None
@@ -234,6 +247,8 @@ def test_candidate_checkpoint_commits_in_running_and_reuses_across_attempts(env:
                 candidates=[{"title": "Accepted candidate"}],
                 dropped=[],
                 accepted_call_id=UUID(int=435),
+                incomplete_paths=(),
+                fitted_context={"test": "candidate"},
             )
             retry_store = StoreReviewOutput(
                 lambda: SqlAlchemyReviewOutputUnitOfWork(factory),
@@ -249,6 +264,8 @@ def test_candidate_checkpoint_commits_in_running_and_reuses_across_attempts(env:
                 candidates=[{"title": "Accepted candidate"}],
                 dropped=[],
                 accepted_call_id=UUID(int=435),
+                incomplete_paths=(),
+                fitted_context={"test": "candidate"},
             )
             saved = await retry_store.load_accepted_output(run_id)
             assert saved is not None
@@ -328,6 +345,7 @@ def test_large_accepted_checkpoint_reloads_without_exposing_fitted_diff(env: Env
                 candidates=[],
                 dropped=[],
                 accepted_call_id=None,
+                incomplete_paths=(),
                 fitted_context={"changed_files": [{"lines": [[1, "added", private_line]]}]},
             )
             saved = await store.load_accepted_output(run_id)
@@ -651,9 +669,9 @@ def test_retry_after_final_commit_skips_reviewer_and_verifier(
             self.pointers.append(pointer)
 
     queue = Queue()
-    original_t8 = SqlAlchemyReviewOutputRepository.enter_publishing
+    original_t8 = SqlAlchemyReviewOutputRepository.enter_publishing_from_final
 
-    async def fail_t8(self: SqlAlchemyReviewOutputRepository, run_id: UUID, **_: Any) -> None:
+    async def fail_t8(self: SqlAlchemyReviewOutputRepository, run_id: UUID, **_: Any) -> bool:
         raise RuntimeError("T8 unavailable")
 
     async def scenario() -> tuple[str, list[str], FinalReviewResult, dict[str, Any]]:
@@ -675,7 +693,9 @@ def test_retry_after_final_commit_skips_reviewer_and_verifier(
                     reflection_pass=ReflectionPass(verifier),
                 )
 
-            monkeypatch.setattr(SqlAlchemyReviewOutputRepository, "enter_publishing", fail_t8)
+            monkeypatch.setattr(
+                SqlAlchemyReviewOutputRepository, "enter_publishing_from_final", fail_t8
+            )
             with pytest.raises(RuntimeError, match="T8 unavailable"):
                 await pipeline(1).execute(RUN_ATTEMPTED)
             assert "review.publish_start" not in [
@@ -686,7 +706,22 @@ def test_retry_after_final_commit_skips_reviewer_and_verifier(
                 assert run is not None and run.state is RunState.RUNNING
                 run.attempt = 2
             assert not await pipeline(1).execute(RUN_ATTEMPTED)
-            monkeypatch.setattr(SqlAlchemyReviewOutputRepository, "enter_publishing", original_t8)
+            monkeypatch.setattr(
+                SqlAlchemyReviewOutputRepository, "enter_publishing_from_final", original_t8
+            )
+            async with factory.begin() as session:
+                final = await session.get(FinalReviewResult, RUN_ATTEMPTED)
+                assert final is not None
+                saved_plan = final.publication_plan
+                final.publication_plan = {**saved_plan, "head_sha": "0" * 40}
+            assert not await pipeline(2).execute(RUN_ATTEMPTED)
+            assert "review.publish_start" not in [
+                tool for _, tool, _, _ in await _actions(factory, RUN_ATTEMPTED)
+            ]
+            async with factory.begin() as session:
+                final = await session.get(FinalReviewResult, RUN_ATTEMPTED)
+                assert final is not None
+                final.publication_plan = saved_plan
             assert await pipeline(2).execute(RUN_ATTEMPTED)
             assert not await pipeline(2).execute(RUN_ATTEMPTED)
             async with factory() as session:

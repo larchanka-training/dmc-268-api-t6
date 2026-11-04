@@ -34,9 +34,8 @@ from app.modules.reviews.application.run_coverage import project_run_coverage, r
 from app.modules.reviews.application.saved_review_result import read_saved_review_result
 from app.modules.reviews.application.store_review_output import StoreReviewOutput
 from app.modules.reviews.infrastructure.llm.models import GatewayReviewModel
+from tests.clean_without_text_fakes import Queue, Repository, Uow, _CheckpointRepository, answer
 from tests.execute_review_fakes import FakeVerifierModel, _make_test_snapshot, conventions
-from tests.test_clean_without_text_result import Queue, Repository, Uow, answer
-from tests.test_clean_without_text_sent_context import _CheckpointRepository
 from tests.test_gateway_review_model import RUN, Transport, _gateway
 
 
@@ -199,7 +198,7 @@ def test_unknown_membership_withholds_counts_without_inventing_reviewed_files(
     known_count: bool,
 ) -> None:
     from app.modules.reviews.application.review_output import VerifiedReviewOutput
-    from tests.test_run_coverage import code_snapshot, coverage
+    from tests.run_coverage_fakes import code_snapshot, coverage
 
     source = (
         replace(coverage([code_snapshot()]), durable_reviewable_paths=None) if known_count else None
@@ -210,6 +209,7 @@ def test_unknown_membership_withholds_counts_without_inventing_reviewed_files(
         lambda: Uow(repository, committed),
         Queue(committed),
         worker_id="worker",
+        expected_attempt=1,
         run_url=lambda _: None,
     )
     assert asyncio.run(

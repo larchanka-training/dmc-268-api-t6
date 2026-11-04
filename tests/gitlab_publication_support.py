@@ -103,6 +103,7 @@ async def publishing(
         lambda: SqlAlchemyReviewOutputUnitOfWork(fixture.sessions),
         queue,
         worker_id="publication",
+        expected_attempt=1,
         run_url=lambda _run_id: None,
     ).execute(
         run,

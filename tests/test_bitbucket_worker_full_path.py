@@ -50,7 +50,6 @@ from app.modules.reviews.application.review_context_stage import (
 )
 from app.modules.reviews.application.review_output import (
     FindingPostProcessingInput,
-    ReviewPublication,
 )
 from app.modules.reviews.application.review_path import ReviewBinding, require_served_provider
 from app.modules.reviews.application.run_coverage import restore_run_coverage
@@ -718,6 +717,11 @@ def test_composed_bitbucket_review_uses_pinned_cloud_reads_and_writes(
 
                 async def finalize_review(self, run_id: UUID, **kwargs: Any) -> None:
                     assert run_id == RUN_ID
+                    processed: ProcessedReviewOutput = kwargs["processed"]
+                    assert processed.inline == ()
+                    self.review_body = processed.review_body
+                    self.coverage_status = processed.coverage.status.value
+                    self.findings_hash = kwargs["findings_hash"]
                     self.finalized_plan = FinalizedReviewPlan(
                         HEAD, kwargs["findings_hash"], kwargs["review_event"]
                     )
@@ -761,23 +765,13 @@ def test_composed_bitbucket_review_uses_pinned_cloud_reads_and_writes(
                         "running", claimed.worker_id, False, HEAD, True, "COMMENT", claimed.attempt
                     )
 
-                async def store_review_output(
-                    self,
-                    run_id: UUID,
-                    answer: object,
-                    parsed: object,
-                    processed: ProcessedReviewOutput,
-                ) -> ReviewPublication:
+                async def enter_publishing_from_final(
+                    self, run_id: UUID, *, lease_until: datetime
+                ) -> bool:
                     assert run_id == RUN_ID
-                    assert processed.inline == ()
-                    self.review_body = processed.review_body
-                    self.coverage_status = processed.coverage.status.value
-                    return ReviewPublication(HEAD, (), self.review_body)
-
-                async def enter_publishing(self, run_id: UUID, **kwargs: Any) -> None:
-                    assert run_id == RUN_ID
+                    assert self.finalized_plan is not None
                     self.state = "publishing"
-                    self.findings_hash = kwargs["postprocess_response"]["findings_hash"]
+                    return True
 
                 async def publish_context(self, run_id: UUID) -> PublishContext:
                     assert run_id == RUN_ID

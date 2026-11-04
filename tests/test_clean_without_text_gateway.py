@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from collections.abc import Mapping
 from dataclasses import replace
 from typing import Any
 from uuid import UUID
@@ -21,14 +22,23 @@ from app.modules.reviews.application.prompt_builder import (
 )
 from app.modules.reviews.application.reflection_pass import ReflectionPass
 from app.modules.reviews.application.review_output import VerifiedReviewOutput
-from app.modules.reviews.application.store_review_output import StoreReviewOutput
+from app.modules.reviews.application.store_review_output import (
+    AcceptedReviewCheckpoint,
+    StoreReviewOutput,
+)
 from app.modules.reviews.infrastructure.llm.models import GatewayReviewModel
+from tests.clean_without_text_fakes import (
+    Queue,
+    Repository,
+    Uow,
+    _CheckpointRepository,
+    answer,
+    finding,
+)
 from tests.execute_review_fakes import FakeVerifierModel, conventions
-from tests.test_clean_without_text_result import Queue, Repository, Uow, answer
-from tests.test_clean_without_text_sent_context import _CheckpointRepository, finding
+from tests.run_coverage_fakes import code_snapshot, coverage
 from tests.test_gateway_review_model import RUN, Transport, _gateway, _snapshot
 from tests.test_llm_gateway import PRIMARY, Harness, completion
-from tests.test_run_coverage import code_snapshot, coverage
 
 
 def test_gateway_hidden_fit_marks_legacy_unverified_output_and_persisted_result_partial() -> None:
@@ -42,7 +52,11 @@ def test_gateway_hidden_fit_marks_legacy_unverified_output_and_persisted_result_
         committed: list[str] = []
         queue = Queue(committed)
         store = StoreReviewOutput(
-            lambda: Uow(repository, committed), queue, worker_id="worker", run_url=lambda _: None
+            lambda: Uow(repository, committed),
+            queue,
+            worker_id="worker",
+            expected_attempt=1,
+            run_url=lambda _: None,
         )
         lines = tuple(DiffLine(i + 1, "added", f"line_{i} = '{'x' * 70}'") for i in range(400))
 
@@ -66,6 +80,35 @@ def test_gateway_hidden_fit_marks_legacy_unverified_output_and_persisted_result_
                 return PullRequestMeta("PR", None, "u", "b", "m", (), 1, 400, 0, False, False)
 
         class Publisher:
+            async def resume_finalized(self, run_id: UUID) -> bool | None:
+                return await store.resume_finalized(run_id)
+
+            async def load_accepted_output(self, run_id: UUID) -> AcceptedReviewCheckpoint | None:
+                return await store.load_accepted_output(run_id)
+
+            async def checkpoint_candidates(
+                self,
+                run_id: UUID,
+                raw_output: Mapping[str, object],
+                candidate_ids: tuple[str, ...],
+                *,
+                candidates: list[dict[str, object]],
+                dropped: list[dict[str, object]],
+                accepted_call_id: UUID | None,
+                incomplete_paths: tuple[str, ...],
+                fitted_context: dict[str, object],
+            ) -> bool:
+                return await store.checkpoint_candidates(
+                    run_id,
+                    raw_output,
+                    candidate_ids,
+                    candidates=candidates,
+                    dropped=dropped,
+                    accepted_call_id=accepted_call_id,
+                    incomplete_paths=incomplete_paths,
+                    fitted_context=fitted_context,
+                )
+
             async def execute(self, run_id: UUID, raw_output: Any) -> bool:
                 assert isinstance(raw_output, VerifiedReviewOutput)
                 assert raw_output.incomplete_paths == ("src/app.py",)

@@ -79,6 +79,7 @@ from app.modules.reviews.infrastructure.gitlab_merge_request_projection import (
     SqlAlchemyGitLabMergeRequestProjectionUnitOfWork,
 )
 from app.modules.reviews.infrastructure.webhook_runs import SqlAlchemyWebhookRunUnitOfWork
+from tests.gitlab_http_fakes import Stream
 
 _TOKEN = "synthetic-authority-PAT-canary"
 
@@ -264,16 +265,12 @@ def canonical(
     }
 
 
-class Body(httpx.AsyncByteStream):
-    def __init__(self, data: dict[str, Any]) -> None:
-        self.data = json.dumps(data).encode()
-
-    async def __aiter__(self) -> AsyncIterator[bytes]:
-        yield self.data
-
-
 def response(data: dict[str, Any]) -> httpx.Response:
-    return httpx.Response(200, headers={"Content-Type": "application/json"}, stream=Body(data))
+    return httpx.Response(
+        200,
+        headers={"Content-Type": "application/json"},
+        stream=Stream((json.dumps(data).encode(),)),
+    )
 
 
 def project(
