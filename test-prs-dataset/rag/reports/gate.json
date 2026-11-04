@@ -7,10 +7,13 @@
         "value": 0.0
       },
       "hallucination_mean": {
-        "exact": null,
-        "value": null
+        "exact": "13/108",
+        "value": 0.12037037037037036
       },
-      "hallucination_pooled": null,
+      "hallucination_pooled": {
+        "denominator": 29,
+        "numerator": 4
+      },
       "latency_ms": {
         "n": 72,
         "p50": 1608,
@@ -34,7 +37,10 @@
             "denominator": 3,
             "numerator": 0
           },
-          "hallucination": null,
+          "hallucination": {
+            "denominator": 9,
+            "numerator": 1
+          },
           "precision": {
             "denominator": 9,
             "numerator": 4
@@ -55,7 +61,10 @@
             "denominator": 3,
             "numerator": 0
           },
-          "hallucination": null,
+          "hallucination": {
+            "denominator": 8,
+            "numerator": 0
+          },
           "precision": {
             "denominator": 8,
             "numerator": 4
@@ -76,7 +85,10 @@
             "denominator": 3,
             "numerator": 0
           },
-          "hallucination": null,
+          "hallucination": {
+            "denominator": 12,
+            "numerator": 3
+          },
           "precision": {
             "denominator": 12,
             "numerator": 6
@@ -107,10 +119,13 @@
         "value": 0.0
       },
       "hallucination_mean": {
-        "exact": null,
-        "value": null
+        "exact": "23/153",
+        "value": 0.1503267973856209
       },
-      "hallucination_pooled": null,
+      "hallucination_pooled": {
+        "denominator": 47,
+        "numerator": 7
+      },
       "latency_ms": {
         "n": 72,
         "p50": 1694,
@@ -134,7 +149,10 @@
             "denominator": 3,
             "numerator": 0
           },
-          "hallucination": null,
+          "hallucination": {
+            "denominator": 18,
+            "numerator": 3
+          },
           "precision": {
             "denominator": 18,
             "numerator": 9
@@ -155,7 +173,10 @@
             "denominator": 3,
             "numerator": 0
           },
-          "hallucination": null,
+          "hallucination": {
+            "denominator": 17,
+            "numerator": 2
+          },
           "precision": {
             "denominator": 17,
             "numerator": 9
@@ -176,7 +197,10 @@
             "denominator": 3,
             "numerator": 0
           },
-          "hallucination": null,
+          "hallucination": {
+            "denominator": 12,
+            "numerator": 2
+          },
           "precision": {
             "denominator": 12,
             "numerator": 7
@@ -221,13 +245,13 @@
       "value": 20.0
     },
     "hallucination": {
-      "a": null,
-      "b": null,
-      "exact": null,
+      "a": "13/108",
+      "b": "23/153",
+      "exact": "1375/459",
       "name": "Hallucination Rate rise B - A (pp)",
-      "status": "undefined",
+      "status": "fail",
       "threshold": "<= 2 pp",
-      "value": null
+      "value": 2.9956427015250546
     },
     "injections": {
       "exact": "3",
@@ -332,8 +356,8 @@
   },
   "note": "The verdict is computed from the thresholds declared in ADR 0001 section 12; it is not the gate decision, which is the tech lead's. The metrics are raw: the eval has no verifier stage, so no final metrics exist.",
   "oracle": {
-    "present": false,
-    "runs_covered": 0,
+    "present": true,
+    "runs_covered": 6,
     "runs_total": 6
   },
   "reverse_edge": {
