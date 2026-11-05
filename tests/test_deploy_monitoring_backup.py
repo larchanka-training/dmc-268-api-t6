@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import re
+import signal
 import stat
 import subprocess
 import time
@@ -95,11 +96,44 @@ def _metric_values(text: str) -> dict[str, str]:
     return values
 
 
+def _run_script(
+    name: str,
+    mode: str,
+    environment: dict[str, str],
+    *,
+    stop: tuple[float, signal.Signals] | None = None,
+    timeout: float | None = None,
+) -> subprocess.CompletedProcess[str]:
+    """Run a backup script; `stop` sends the signal after that many seconds if it still runs."""
+    # /bin/sh, not PATH: a local sh wrapper first on PATH would run instead of the system shell.
+    command = ["/bin/sh", str(MONITORING / "backup" / name), mode]
+    if stop is None:
+        return subprocess.run(
+            command, env=environment, capture_output=True, text=True, check=False, timeout=timeout
+        )
+    seconds, sig = stop
+    process = subprocess.Popen(
+        command,
+        env=environment,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        start_new_session=True,
+    )
+    try:
+        stdout, stderr = process.communicate(timeout=seconds)
+    except subprocess.TimeoutExpired:
+        # The whole group, as GNU timeout does: no stub sleep stays behind with the pipes open.
+        os.killpg(process.pid, sig)
+        stdout, stderr = process.communicate(timeout=10)
+    return subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
+
+
 def _run_backup(
     tmp_path: Path,
     *,
     mode: str = "once",
-    prefix: tuple[str, ...] = (),
+    stop: tuple[float, signal.Signals] | None = None,
     unset: tuple[str, ...] = (),
     **env: str,
 ) -> BackupRun:
@@ -128,15 +162,7 @@ def _run_backup(
     }
     for name in unset:
         del environment[name]
-    # /bin/sh, not PATH: a local sh wrapper first on PATH would run instead of the system shell.
-    result = subprocess.run(
-        [*prefix, "/bin/sh", str(MONITORING / "backup" / "pg-backup.sh"), mode],
-        env=environment,
-        capture_output=True,
-        text=True,
-        check=False,
-        timeout=60,
-    )
+    result = _run_script("pg-backup.sh", mode, environment, stop=stop, timeout=60)
     text = _read(textfile) if textfile.exists() else ""
     calls = _read(log).splitlines() if log.exists() else []
     return BackupRun(
@@ -270,7 +296,7 @@ def test_heartbeat_carries_the_environment_label(tmp_path: Path, environment: st
     run = _run_backup(
         tmp_path,
         mode="loop",
-        prefix=("timeout", "--preserve-status", "2"),
+        stop=(2, signal.SIGTERM),
         BACKUP_ENVIRONMENT=environment,
         BACKUP_POLL_SECONDS="1",
     )
@@ -298,13 +324,11 @@ def test_an_old_unlabeled_textfile_is_labeled_at_start(tmp_path: Path) -> None:
         "dmc_pg_backup_files 4\n",
         encoding="utf-8",
     )
-    stop_after_two_seconds = ("timeout", "--preserve-status", "2")
+    stop_after_two_seconds = (2, signal.SIGTERM)
 
-    first = _run_backup(
-        tmp_path, mode="loop", prefix=stop_after_two_seconds, BACKUP_POLL_SECONDS="1"
-    )
+    first = _run_backup(tmp_path, mode="loop", stop=stop_after_two_seconds, BACKUP_POLL_SECONDS="1")
     second = _run_backup(
-        tmp_path, mode="loop", prefix=stop_after_two_seconds, BACKUP_POLL_SECONDS="1"
+        tmp_path, mode="loop", stop=stop_after_two_seconds, BACKUP_POLL_SECONDS="1"
     )
 
     assert first.result.returncode == 0, first.result.stderr
@@ -438,7 +462,7 @@ def _run_offsite(
     tmp_path: Path,
     *,
     mode: str = "once",
-    prefix: tuple[str, ...] = (),
+    stop: tuple[float, signal.Signals] | None = None,
     unset: tuple[str, ...] = (),
     **env: str,
 ) -> tuple[subprocess.CompletedProcess[str], list[str], str]:
@@ -458,14 +482,7 @@ def _run_offsite(
     }
     for name in unset:
         del environment[name]
-    # /bin/sh, not PATH: a local sh wrapper first on PATH would run instead of the system shell.
-    result = subprocess.run(
-        [*prefix, "/bin/sh", str(MONITORING / "backup" / "offsite.sh"), mode],
-        env=environment,
-        capture_output=True,
-        text=True,
-        check=False,
-    )
+    result = _run_script("offsite.sh", mode, environment, stop=stop)
     calls = _read(log).splitlines() if log.exists() else []
     return result, calls, _read(textfile) if textfile.exists() else ""
 
@@ -600,10 +617,10 @@ def test_an_old_unlabeled_offsite_textfile_is_labeled_before_the_first_pass(
     )
     textfile.write_text(text, encoding="utf-8")
     # SIGKILL while the slow first pass runs: only the start-up relabel can have touched the file.
-    stop = ("timeout", "-s", "KILL", "2")
+    stop = (2, signal.SIGKILL)
 
-    _, _, first = _run_offsite(tmp_path, mode="loop", prefix=stop, STUB_COPY_SLEEP="3")
-    _, _, second = _run_offsite(tmp_path, mode="loop", prefix=stop, STUB_COPY_SLEEP="3")
+    _, _, first = _run_offsite(tmp_path, mode="loop", stop=stop, STUB_COPY_SLEEP="3")
+    _, _, second = _run_offsite(tmp_path, mode="loop", stop=stop, STUB_COPY_SLEEP="3")
 
     assert 'dmc_pg_backup_offsite_last_run_success{environment="staging"} 1\n' in first
     assert (
