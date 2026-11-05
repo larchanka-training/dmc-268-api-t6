@@ -24,6 +24,14 @@ response is valid (compare the per-run numerators and denominators):
   rules". ``respected`` is ``total - flagged``.
 
 ``arm=None`` (legacy captures) scores every truth and no exception, exactly as before.
+
+- ``suggestions``: counts findings with a string ``suggestion``. Suggestions checked against
+  the target PR-head file (supported language, UTF-8, within ``MAX_SOURCE_BYTES``, integer line
+  numbers, tree-sitter validation executed) enter the denominator (``total``) and increment
+  ``valid`` when ``validate_suggestion_tree`` passes. Suggestions whose target file is missing
+  from ``file_contents``, uses an unsupported extension, exceeds size bounds, or hits non-UTF-8
+  / parser errors are counted separately in ``unchecked`` outside ``total`` so they neither
+  inflate nor depress ``share`` (``valid / total``).
 """
 
 from __future__ import annotations
@@ -32,10 +40,17 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from decimal import Decimal
 from functools import cache
-from typing import Any
+from typing import Any, Literal
+
+from app.modules.reviews.application.ast_symbols import (
+    MAX_SOURCE_BYTES,
+    SuggestionRejectionReason,
+    language_for_path,
+)
 
 CATEGORIES = ("security", "correctness", "performance", "readability")
 SEVERITIES = ("critical", "high", "medium", "low", "info")
+type _SuggestionVerdict = Literal["valid", "invalid", "unchecked"]
 
 
 @dataclass(frozen=True)
@@ -50,6 +65,48 @@ class ScoringCase:
     usage: tuple[Mapping[str, Any], ...] | None = None
     arm: str | None = None
     must_not_flag: tuple[dict[str, Any], ...] = ()
+    file_contents: Mapping[str, bytes | str] | None = None
+
+
+def _classify_suggestion(
+    prediction: Mapping[str, Any],
+    file_contents: Mapping[str, bytes | str] | None,
+) -> _SuggestionVerdict:
+    """Classify a string suggestion as ``valid``, ``invalid``, or ``unchecked``."""
+    if file_contents is None:
+        return "unchecked"
+    path = prediction.get("path")
+    if not isinstance(path, str) or path not in file_contents:
+        return "unchecked"
+    line = prediction.get("line")
+    start_line = prediction.get("start_line")
+    if not isinstance(line, int) or isinstance(line, bool):
+        return "unchecked"
+    if start_line is not None and (not isinstance(start_line, int) or isinstance(start_line, bool)):
+        return "unchecked"
+    suggestion = str(prediction["suggestion"])
+    lang = language_for_path(path)
+    if lang is None:
+        return "unchecked"
+    raw_val = file_contents[path]
+    try:
+        file_bytes = raw_val.encode("utf-8") if isinstance(raw_val, str) else raw_val
+    except UnicodeEncodeError:
+        return "unchecked"
+    if len(file_bytes) > MAX_SOURCE_BYTES:
+        return "unchecked"
+
+    # Deferred so importing eval_score / eval_replay does not load tree_sitter unless
+    # a scored finding actually carries a suggestion (test_importing_the_replay_loads_no_rag_stack).
+    from app.modules.reviews.infrastructure.suggestion_ast import validate_suggestion_tree
+
+    result = validate_suggestion_tree(lang, file_bytes, start_line, line, suggestion)
+    if result.reason in {
+        SuggestionRejectionReason.NON_UTF8,
+        SuggestionRejectionReason.WORKER_ERROR,
+    }:
+        return "unchecked"
+    return "valid" if result.is_valid else "invalid"
 
 
 def _in_arm(item: Mapping[str, Any], arm: str | None) -> bool:
@@ -179,6 +236,7 @@ def score_cases(cases: Sequence[ScoringCase]) -> dict[str, Any]:
     valid_count = verdict_agreed = 0
     rule_total = rule_found = rule_expected = 0
     exceptions_total = exceptions_exempt = exceptions_flagged = 0
+    suggestions_total = suggestions_valid = suggestions_unchecked = 0
 
     for case in cases:
         # Positions in case.truths, so reported indices stay those of case.json.
@@ -220,12 +278,31 @@ def score_cases(cases: Sequence[ScoringCase]) -> dict[str, Any]:
         case_rule_found = sum(_rule_made(truths[index]) for index in matched_truths) + len(
             _matches(unexpected_rules, unmatched, case.added_lines)
         )
-        rule_total += case_rule_expected + len(unexpected_rules)
+        case_rule_total = case_rule_expected + len(unexpected_rules)
+        rule_total += case_rule_total
         rule_expected += case_rule_expected
         rule_found += case_rule_found
         exceptions_total += len(anchors)
         exceptions_exempt += len(exempt)
         exceptions_flagged += case_flagged
+
+        case_sugg_total = 0
+        case_sugg_valid = 0
+        case_sugg_unchecked = 0
+        if valid:
+            assert predictions is not None
+            for p in predictions:
+                if isinstance(p.get("suggestion"), str):
+                    verdict = _classify_suggestion(p, case.file_contents)
+                    if verdict == "unchecked":
+                        case_sugg_unchecked += 1
+                    else:
+                        case_sugg_total += 1
+                        if verdict == "valid":
+                            case_sugg_valid += 1
+        suggestions_total += case_sugg_total
+        suggestions_valid += case_sugg_valid
+        suggestions_unchecked += case_sugg_unchecked
 
         for truth_index, truth in enumerate(truths):
             if truth["severity"] == "critical":
@@ -276,6 +353,12 @@ def score_cases(cases: Sequence[ScoringCase]) -> dict[str, Any]:
                 "rule_found": case_rule_found,
                 "exceptions": len(anchors),
                 "exceptions_flagged": case_flagged,
+                "suggestions": {
+                    "total": case_sugg_total,
+                    "valid": case_sugg_valid,
+                    "unchecked": case_sugg_unchecked,
+                    "share": _ratio(case_sugg_valid, case_sugg_total),
+                },
             }
         )
 
@@ -322,6 +405,12 @@ def score_cases(cases: Sequence[ScoringCase]) -> dict[str, Any]:
             "flagged": exceptions_flagged,
             "respected": exceptions_total - exceptions_flagged,
             "share": _ratio(exceptions_total - exceptions_flagged, exceptions_total),
+        },
+        "suggestions": {
+            "total": suggestions_total,
+            "valid": suggestions_valid,
+            "unchecked": suggestions_unchecked,
+            "share": _ratio(suggestions_valid, suggestions_total),
         },
         "usage": _usage_totals(cases),
         "cases": case_reports,
