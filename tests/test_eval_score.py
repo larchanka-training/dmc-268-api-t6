@@ -2,11 +2,18 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+from pathlib import Path
 from typing import Any
 
 import pytest
 
+from app.modules.reviews.application.ast_symbols import MAX_SOURCE_BYTES
 from review.scripts.eval_score import ScoringCase, score_cases
+from tests.swapi_fixtures import SWAPI_SUGGESTION_CASES
+
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+_SWAPI_FIXTURES = Path(__file__).parent / "fixtures" / "swapi"
 
 
 def finding(
@@ -35,6 +42,7 @@ def case(
     added_by_path: dict[str, set[int]] | None = None,
     expected_verdict: str = "clean",
     case_id: str = "SEC-01",
+    file_contents: Mapping[str, bytes | str] | None = None,
 ) -> ScoringCase:
     if response_valid:
         assert predictions is None or isinstance(predictions, list)
@@ -48,6 +56,7 @@ def case(
         added_lines=added_by_path or {"src/a.py": added_lines if added_lines is not None else {10}},
         raw_response=response,
         response_valid=response_valid,
+        file_contents=file_contents,
     )
 
 
@@ -646,3 +655,188 @@ def test_rule_constraints_count_the_rule_truths_of_the_valid_arm_only(arm: str) 
     report = score_cases([_arm_case(arm, [_found(6, "correctness")], truths=(malicious_only,))])
 
     assert report["rule_constraints"] == {"found": 0, "total": 0, "expected": 0, "share": None}
+
+
+def test_score_cases_suggestions_metric_empty_when_no_suggestions() -> None:
+    report = score_cases([case(predictions=[finding(line=10)])])
+    assert report["suggestions"] == {"total": 0, "valid": 0, "unchecked": 0, "share": None}
+    assert report["cases"][0]["suggestions"] == {
+        "total": 0,
+        "valid": 0,
+        "unchecked": 0,
+        "share": None,
+    }
+
+
+def test_score_cases_suggestions_metric_valid_multiline_suggestion() -> None:
+    code = "export function add(a: number, b: number): number {\n  return a + b;\n}\n"
+    pred = {
+        "path": "src/math.ts",
+        "line": 3,
+        "start_line": 1,
+        "severity": "low",
+        "category": "readability",
+        "suggestion": (
+            "export function add(a: number, b: number): number {\n"
+            "  const sum = a + b;\n"
+            "  return sum;\n"
+            "}"
+        ),
+    }
+    sc = case(
+        predictions=[pred],
+        file_contents={"src/math.ts": code},
+        added_by_path={"src/math.ts": {1, 2, 3}},
+    )
+    report = score_cases([sc])
+    assert report["suggestions"] == {"total": 1, "valid": 1, "unchecked": 0, "share": 1.0}
+    assert report["cases"][0]["suggestions"] == {
+        "total": 1,
+        "valid": 1,
+        "unchecked": 0,
+        "share": 1.0,
+    }
+
+
+_SWAPI_BROKEN_SUGGESTIONS: tuple[tuple[str, str, int | None, int, str], ...] = tuple(
+    (c.path, c.fixture_name, c.start_line, c.line, c.suggestion)
+    for c in SWAPI_SUGGESTION_CASES
+)
+
+
+@pytest.mark.parametrize(
+    ("path", "fixture_name", "start_line", "line", "suggestion"),
+    _SWAPI_BROKEN_SUGGESTIONS,
+    ids=[item[1].removesuffix(".ts") for item in _SWAPI_BROKEN_SUGGESTIONS],
+)
+def test_score_cases_swapi_real_pr_broken_suggestions_individually(
+    path: str,
+    fixture_name: str,
+    start_line: int | None,
+    line: int,
+    suggestion: str,
+) -> None:
+    """Each authentic SWAPI PR #3 suggestion fails AST validation against its real source file."""
+    source = (_SWAPI_FIXTURES / fixture_name).read_text(encoding="utf-8")
+    sc = case(
+        predictions=[
+            {
+                "path": path,
+                "line": line,
+                "start_line": start_line,
+                "severity": "high",
+                "category": "correctness",
+                "suggestion": suggestion,
+            }
+        ],
+        file_contents={path: source},
+        added_by_path={path: {line}},
+    )
+    report = score_cases([sc])
+    assert report["suggestions"] == {"total": 1, "valid": 0, "unchecked": 0, "share": 0.0}
+
+
+def test_score_cases_swapi_six_suggestions_give_zero_valid() -> None:
+    """All six SWAPI PR #3 broken suggestions yield 0/6 valid across commits 8bc8b5d + 858e1c1."""
+    cases = [
+        case(
+            case_id=f"SWAPI-{idx}",
+            predictions=[
+                {
+                    "path": path,
+                    "line": line,
+                    "start_line": start_line,
+                    "severity": "high",
+                    "category": "correctness",
+                    "suggestion": suggestion,
+                }
+            ],
+            file_contents={path: (_SWAPI_FIXTURES / fixture_name).read_text(encoding="utf-8")},
+            added_by_path={path: {line}},
+        )
+        for idx, (path, fixture_name, start_line, line, suggestion) in enumerate(
+            _SWAPI_BROKEN_SUGGESTIONS, start=1
+        )
+    ]
+    report = score_cases(cases)
+    assert report["suggestions"] == {"total": 6, "valid": 0, "unchecked": 0, "share": 0.0}
+
+
+@pytest.mark.parametrize(
+    ("path", "file_contents"),
+    [
+        ("src/a.ts", None),
+        ("src/missing.ts", {"src/other.ts": "export const x = 1;\n"}),
+        ("README.md", {"README.md": "# Title\n"}),
+        (
+            "src/huge.ts",
+            {"src/huge.ts": "export const x = 1;\n" + ("// x\n" * (MAX_SOURCE_BYTES // 4))},
+        ),
+        ("src/bin.ts", {"src/bin.ts": b"\xff\xfeexport const x = 1;\n"}),
+    ],
+    ids=["none-contents", "missing-path", "unsupported-ext", "oversized", "non-utf8"],
+)
+def test_score_cases_uncheckable_suggestions_count_as_unchecked_outside_denominator(
+    path: str,
+    file_contents: Mapping[str, bytes | str] | None,
+) -> None:
+    pred = {**finding(path=path, line=1), "suggestion": "export const y = 2;"}
+    sc = case(
+        predictions=[pred],
+        file_contents=file_contents,
+        added_by_path={path: {1}},
+    )
+    report = score_cases([sc])
+    assert report["suggestions"] == {"total": 0, "valid": 0, "unchecked": 1, "share": None}
+
+
+@pytest.mark.parametrize(
+    ("prediction", "contents"),
+    [
+        ({"path": "src/a.ts", "line": True, "suggestion": "x = 1;"}, {"src/a.ts": "x = 0;\n"}),
+        ({"path": "src/a.ts", "line": 1.5, "suggestion": "x = 1;"}, {"src/a.ts": "x = 0;\n"}),
+        (
+            {"path": "src/a.ts", "line": 1, "start_line": "1", "suggestion": "x = 1;"},
+            {"src/a.ts": "x = 0;\n"},
+        ),
+        (
+            {"path": "src/a.ts", "line": 1, "start_line": True, "suggestion": "x = 1;"},
+            {"src/a.ts": "x = 0;\n"},
+        ),
+        ({"path": "src/a.ts", "line": 1, "suggestion": "x = 1;"}, {"src/a.ts": "\ud800"}),
+    ],
+    ids=["bool-line", "float-line", "str-start-line", "bool-start-line", "unencodable-surrogate"],
+)
+def test_classify_suggestion_branches(
+    prediction: Mapping[str, Any],
+    contents: Mapping[str, bytes | str],
+) -> None:
+    from review.scripts.eval_score import _classify_suggestion
+
+    assert _classify_suggestion(prediction, contents) == "unchecked"
+
+
+def test_score_cases_suggestion_worker_error_counts_as_unchecked(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import app.modules.reviews.infrastructure.suggestion_ast as sugg_ast
+    from app.modules.reviews.application.ast_symbols import (
+        SuggestionRejectionReason,
+        SuggestionValidationResult,
+    )
+
+    def _boom(*_args: Any, **_kwargs: Any) -> SuggestionValidationResult:
+        return SuggestionValidationResult(
+            is_valid=True,
+            reason=SuggestionRejectionReason.WORKER_ERROR,
+            detail="Worker crashed",
+        )
+
+    monkeypatch.setattr(sugg_ast, "validate_suggestion_tree", _boom)
+    sc = case(
+        predictions=[{**finding(path="src/a.ts", line=1), "suggestion": "export const y = 2;"}],
+        file_contents={"src/a.ts": "export const y = 1;\n"},
+        added_by_path={"src/a.ts": {1}},
+    )
+    report = score_cases([sc])
+    assert report["suggestions"] == {"total": 0, "valid": 0, "unchecked": 1, "share": None}

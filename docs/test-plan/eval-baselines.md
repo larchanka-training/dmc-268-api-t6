@@ -1,4 +1,4 @@
-# TEST_PLAN §3.2.1–3.2.6: зафиксированные raw baselines
+# TEST_PLAN §3.2.1–3.2.7: зафиксированные raw baselines
 
 Вынесено из [TEST_PLAN §3.2.1–3.2.5](../TEST_PLAN.md#321-зафиксированный-raw-baseline-82-2026-10-13) в #380. Правила сопоставления и счётчики — в TEST_PLAN §3.2.
 
@@ -357,3 +357,16 @@ repair/latency/cost saving не измерены. Effective settings полно�
 На v2 → v3 strict вырос, а колонка после нормализации упала. У v5 ответ идёт по контракту ReviewOutput v2 без префикса атрибуции: 31 находка из 34 несёт `service-defaults:<id>`, 3 без правила, поэтому потери нет. Это разные съёмки, а не контролируемый эксперимент.
 
 Воспроизведение исторической строки: `git archive <revision> test-prs-dataset/responses | tar -x -C <dir>`, затем `uv run python review/scripts/eval_replay.py --responses-dir <dir>/test-prs-dataset/responses`. Ревизии: 2026-10-15 — `47f9add7`, 2026-10-20 — `973218054ef2c9a32f1e75a955284323196ffafd`. Такой прогон печатает предупреждения о pinned-входах: байты старше текущего списка.
+
+## 3.2.7. Метрика корректности suggestion и статус SWAPI-кейсов (#446)
+
+В `review/scripts/eval_score.py` и `review/scripts/eval_replay.py` добавлена метрика корректности замен `suggestions: {total, valid, unchecked, share}`:
+- `reconstruct_head_file_contents` восстанавливает файлы головы PR (`base` + применённый `diff.patch`, включая `apply_directory`) и передаёт `file_contents` в `ScoringCase`.
+- Валидность проверяется тем же Tree-sitter-анализатором `validate_suggestion_tree` (#444), что и перед публикацией на GitHub (`total = valid + invalid`, `share = valid / total`).
+- Случаи без файла, с неподдерживаемым языком, превышением `MAX_SOURCE_BYTES`, не-UTF-8 или ошибкой разбора выделяются в `unchecked` вне знаменателя `total`.
+- На текущем зафиксированном 24-кейсном baseline `review.system.v5` (`§3.2.5`, через `eval_replay.py`): строгая колонка — **`10/15` валидных замен (`66.7%`, `unchecked=0`)**, после нормализации шлюза — **`15/23` валидных (`65.2%`, `unchecked=0`)**.
+
+**Статус кейсов SWAPI (`SEC-05` / `SEC-06`) и живого сравнения моделей:**
+- Основной корпус `test-prs-dataset/cases/` сохранён в прежнем составе из **24 кейсов** (`SEC-05` по-прежнему исключён, как указано в [README корпуса](../../test-prs-dataset/README.md#curated-corpus)), без ручных или реконструированных записей в `responses/` и `manifest.json`.
+- Добавление кейсов `larchanka/swapi-mcp-example#3` в корпус заблокировано до получения решения куратора по лицензии исходного репозитория (в `larchanka/swapi-mcp-example` отсутствует файл лицензии) и оформления кейса с `.review/rules.md` через `policy.arms` (`test-prs-dataset/rules/cases/RUL-*`), так как простое добавление файла правил в `diff.patch` не передаёт его как активный документ правил в режиме `--policy-arm none`.
+- Сравнение моделей каталога (`KNOWN_MODELS`: `mistral-small-4` vs `mistral-small-3.2-24b`) через `eval_live.py` и обновление сравнительной таблицы не выполнены в текущем оффлайн-окружении без API-ключей провайдера и выполняются отдельно после согласования кейсов.
