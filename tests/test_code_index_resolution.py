@@ -12,6 +12,8 @@ import time
 from collections.abc import Iterable, Iterator, Mapping
 from dataclasses import dataclass, field
 
+import pytest
+
 from app.modules.code_index.application.index_resolution import (
     INDEX_RESOLVER_VERSION,
     IndexedImport,
@@ -124,7 +126,7 @@ def _unresolved(
 
 
 def test_resolver_version() -> None:
-    assert INDEX_RESOLVER_VERSION == "resolver/v1+index/v1"
+    assert INDEX_RESOLVER_VERSION == "resolver/v1+index/v2"
 
 
 # --- Python ----------------------------------------------------------------------------
@@ -197,7 +199,7 @@ def test_python_module_targets_keep_every_reason() -> None:
     runtime = item("from .lib import x\n", "pkg/lib.py", "pkg/lib.pyi")
     assert runtime.record == _record(_APP, ".lib", RESOLVED, "pkg/lib.py")
     root = "from . import x\n\ndef f():\n    return x\n"
-    assert _one("app.py", root, paths=["__init__.py"]).record == _record(
+    assert _one("app.py", root, sources={"__init__.py": ""}).record == _record(
         "app.py", ".", RESOLVED, "__init__.py"
     )
     assert _one("app.py", root) == _unresolved("app.py", ".", MISSING, "no_candidate")
@@ -266,10 +268,10 @@ def test_python_package_binding_prefers_a_symbol_of_init_then_the_submodule() ->
     )
     assert unreadable[0].edges == (_imports(_APP, init),)
 
-    # Without a single submodule candidate the name is stored as it is; init is not read.
-    no_submodule, provider = _resolve(_APP, _PACKAGE_APP, paths=[init])
+    # Without a single submodule candidate, a parsed init still stores the name.
+    no_submodule, provider = _resolve(_APP, _PACKAGE_APP, sources={init: ""})
     assert no_submodule[0].edges == (_imports(_APP, init), _uses(_APP, init, "helpers"))
-    assert provider.asked == []
+    assert provider.asked == [init]
 
     excluded, _ = _resolve(
         _APP,
@@ -279,6 +281,23 @@ def test_python_package_binding_prefers_a_symbol_of_init_then_the_submodule() ->
         excluded={"pkg/helpers.py": "ignored"},
     )
     assert excluded[0].edges == (_imports(_APP, init),)
+
+
+@pytest.mark.parametrize(
+    "init_source",
+    [
+        "helpers = object()\n\ndef broken(:\n    pass\n",
+        "def broken(:\n    pass\n",
+    ],
+    ids=["partial-symbol", "submodule-fallback"],
+)
+def test_python_package_binding_refuses_broken_init(init_source: str) -> None:
+    init = "pkg/__init__.py"
+    assert _facts(init, init_source).has_errors
+
+    item = _one(_APP, _PACKAGE_APP, paths=["pkg/helpers.py"], sources={init: init_source})
+
+    assert item.edges == (_imports(_APP, init),)
 
 
 def test_python_unused_submodule_binding_still_imports_the_submodule() -> None:
@@ -513,6 +532,32 @@ def test_go_declaration_moving_between_members_moves_the_edge_under_rule_g() -> 
         _uses(_GO, "internal/store/close.go", "Open")
     ]
     assert _affected([old.record], changed=sorted(before)) == frozenset({_GO})
+
+
+@pytest.mark.parametrize(
+    "broken",
+    [
+        "package store\n\nfunc Close( {\n}\n",
+        "package store\n\nvar x = (\nfunc Open() error { return nil }\n",
+    ],
+    ids=["no-duplicate", "hidden-duplicate"],
+)
+def test_go_broken_member_refuses_the_whole_package(broken: str) -> None:
+    path = "internal/store/broken.go"
+    assert _facts(path, broken).has_errors
+    sources = {
+        "internal/store/open.go": "package store\n\nfunc Open() error { return nil }\n",
+        path: broken,
+    }
+    source = (
+        'package main\n\nimport "example.com/m/internal/store"\n\nfunc Run() { store.Open() }\n'
+    )
+
+    item = _one(_GO, source, sources=sources)
+
+    assert item == _unresolved(
+        _GO, "example.com/m/internal/store", UNSUPPORTED, "ast_failed", "internal/store"
+    )
 
 
 def test_go_package_outcomes_keep_every_reason() -> None:
