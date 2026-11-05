@@ -1505,6 +1505,8 @@ def _what_to_check(result: ProcessedReviewOutput) -> list[str]:
         ([_binary_change()], [], False, _NOTHING, "Low"),
         ([_too_large_change()], [], False, _NOTHING, "Medium"),
         ([_text_change()], [finding(path="not/in/diff.py")], False, _INCOMPLETE, "Medium"),
+        ([_text_change(), _text_change("src\\moved.py")], [], False, _INCOMPLETE, "Medium"),
+        ([_text_change(), _unresolved_rename()], [], False, _INCOMPLETE, "Medium"),
     ],
 )
 def test_executive_risk_score_table(
@@ -1520,6 +1522,19 @@ def test_executive_risk_score_table(
         f"## Executive summary\n\n**Verdict:** {verdict} · **Risk Score:** {risk}\n"
     )
     assert result.review_body.count("**Verdict:**") == 1
+
+
+def test_executive_risk_is_medium_when_the_classification_is_unavailable() -> None:
+    result = FindingsPostProcessor.from_default_patterns().process(
+        output(),
+        diff_map=_diff_map_from_vcs(snapshot_vcs_file(_text_change())),
+        checked_paths=frozenset({"app/example.py"}),
+        rule_names=frozenset(),
+    )
+
+    assert result.review_body.startswith(
+        f"## Executive summary\n\n**Verdict:** {_INCOMPLETE} · **Risk Score:** Medium\n"
+    )
 
 
 def test_executive_block_without_a_checklist_opens_the_unchanged_review_summary() -> None:
