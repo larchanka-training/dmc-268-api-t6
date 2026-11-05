@@ -22,7 +22,9 @@
 #                              value in .env (manual run)
 #   BACKUP_DIR                 host dir of the PostgreSQL dumps, default /var/backups/dmc-268/<project>
 #   PROD_BACKUP_DIR            the same for the prod database (with PROD_API_DIR only), default
-#                              /var/backups/dmc-268/<prod project>; never the dir of staging
+#                              /var/backups/dmc-268/<prod project>; never the dir of staging; with
+#                              PROD_API_DIR both paths must be absolute, or the deploy fails before
+#                              the host changes
 #   GRAFANA_ADMIN_PASSWORD     set: the Grafana admin password (GitHub secret; GitHub never shows its
 #                              value, whoever sets it keeps a copy outside GitHub); empty or unset:
 #                              keep the one in .env (generated on a fresh host, or an earlier secret)
@@ -78,11 +80,10 @@ previous_setting() {
 }
 
 # A password of this stack: kept from .env, generated once on a fresh host.
-# A path made absolute and normalised by text alone: no "//", ".", trailing "/", and ".." resolved
-# against the segment before it. No realpath: its -m is GNU only, and the dirs may not exist yet.
+# An absolute path normalised by text alone: no "//", ".", trailing "/", and ".." resolved against
+# the segment before it. No realpath: its -m is GNU only, and the dirs may not exist yet.
 normalize_path() {
   local rest="$1" result="" segment
-  if [[ "${rest}" != /* ]]; then rest="${PWD}/${rest}"; fi
   while [[ -n "${rest}" ]]; do
     segment="${rest%%/*}"
     if [[ "${rest}" == */* ]]; then rest="${rest#*/}"; else rest=""; fi
@@ -352,6 +353,13 @@ fi
 BACKUP_DIR="${BACKUP_DIR:-/var/backups/dmc-268/${API_PROJECT}}"
 if [[ -n "${PROD_API_DIR}" ]]; then
   PROD_BACKUP_DIR="${PROD_BACKUP_DIR:-/var/backups/dmc-268/${PROD_API_PROJECT}}"
+  # Compose resolves a relative bind path from the first compose file, while mkdir, chown and the
+  # check below resolve it from $PWD: one value would name two directories.
+  if [[ "${BACKUP_DIR}" != /* || "${PROD_BACKUP_DIR}" != /* ]]; then
+    echo "BACKUP_DIR and PROD_BACKUP_DIR must be absolute paths with PROD_API_DIR:" \
+      "BACKUP_DIR=${BACKUP_DIR} PROD_BACKUP_DIR=${PROD_BACKUP_DIR}" >&2
+    exit 1
+  fi
   # Each service prunes and counts the dumps of its dir: one dir, or one inside the other, would
   # mix the dumps and the off-host copies of the two databases. Compared normalised, before the
   # host changes.
