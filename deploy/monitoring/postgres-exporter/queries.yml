@@ -101,9 +101,10 @@ dmc_runs_budget_paused_15m:
 # when the review is published, docs/PIPELINE_SPEC.md §3). created_at is the creation of the Run,
 # not the delivery of the webhook: the time before the Run exists is not counted. Failed, skipped
 # and cancelled runs are not reviews. A one-hour window keeps the p95 on more than a handful of
-# runs. The second bound on created_at changes no result (a run does not outlive a day) and lets
-# ix_runs_state_created_id (state, created_at) bound the scan. Both columns, state and engine are
-# already granted to metrics_exporter.
+# runs. There is no bound on created_at: a retry may wait up to a day on Retry-After
+# (docs/PIPELINE_SPEC.md §4.2), and the whole time counts. The window is on finished_at alone, as
+# in dmc_runs_finished_15m and dmc_runs_budget_paused_15m, so this adds no new kind of scan. Both
+# columns, state and engine are already granted to metrics_exporter.
 dmc_review_time_1h:
   query: |
     SELECT
@@ -115,7 +116,6 @@ dmc_review_time_1h:
     FROM runs
     WHERE state = 'succeeded' AND engine = 'fast'
       AND finished_at > now() - interval '1 hour'
-      AND created_at > now() - interval '1 day'
   metrics:
     - runs:
         usage: GAUGE

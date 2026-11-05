@@ -116,8 +116,6 @@ def test_review_time_query_measures_succeeded_fast_runs_from_granted_columns() -
     assert re.findall(r"^\s*(?:FROM|JOIN)\s+(\w+)", sql, re.M) == ["runs"]
     assert "state = 'succeeded' AND engine = 'fast'" in sql
     assert "finished_at > now() - interval '1 hour'" in sql
-    # The second bound lets ix_runs_state_created_id serve the scan.
-    assert "created_at > now() - interval '1 day'" in sql
     # No new grant: the exporter already reads these columns of runs.
     assert read == {"state", "engine", "finished_at", "created_at"}
     assert read <= _grants(_read(MONITORING / "deploy.sh"))[("runs", "metrics_exporter")]

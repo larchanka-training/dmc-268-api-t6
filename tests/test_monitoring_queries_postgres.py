@@ -225,12 +225,19 @@ def test_review_time_counts_succeeded_fast_runs_of_the_last_hour(connection: Con
     _review_run(
         connection, "succeeded", "deep", now - timedelta(hours=1), now - timedelta(minutes=5)
     )
-    # Out: created more than a day ago, so a slow run could not skew the percentile.
-    _review_run(
-        connection, "succeeded", "fast", now - timedelta(days=2), now - timedelta(minutes=5)
-    )
 
     assert _metric(connection, "dmc_review_time_1h") == [{"runs": 5.0, "p95_seconds": 288.0}]
     # The columns deploy.sh already grants to metrics_exporter are enough for the query.
     _as_exporter(connection)
     assert _metric(connection, "dmc_review_time_1h") == [{"runs": 5.0, "p95_seconds": 288.0}]
+
+
+@pytest.mark.integration
+def test_review_time_counts_a_run_created_days_before_it_finished(connection: Connection) -> None:
+    now = connection.execute(text("SELECT now()")).scalar_one()
+    # A retry may wait up to a day on Retry-After (docs/PIPELINE_SPEC.md §4.2): all of it counts.
+    _review_run(
+        connection, "succeeded", "fast", now - timedelta(days=2), now - timedelta(minutes=5)
+    )
+
+    assert _metric(connection, "dmc_review_time_1h") == [{"runs": 1.0, "p95_seconds": 172500.0}]
