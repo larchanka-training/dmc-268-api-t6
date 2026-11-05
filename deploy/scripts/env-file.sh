@@ -56,6 +56,60 @@ read_compose_env_var() {
   ' "${file}"
 }
 
+# True when the file has an uncommented `key=` line, whatever the value (an empty value counts).
+compose_env_var_is_set() {
+  local key="$1" file="$2"
+  [[ -f "${file}" ]] || return 1
+  awk -F= -v k="${key}" '$0 !~ /^[[:space:]]*#/ && $1 == k { found = 1; exit } END { exit !found }' "${file}"
+}
+
+# The worker replica count (compose: deploy.replicas) is checked here, before any host change:
+# Compose accepts 0 (no queue consumers) and rejects other bad values only after the release switch.
+WORKER_REPLICAS_MAX=5
+
+require_worker_replicas() {
+  local value="$1"
+  if [[ ! "${value}" =~ ^[1-9][0-9]{0,2}$ ]] || (( value > WORKER_REPLICAS_MAX )); then
+    echo "WORKER_REPLICAS must be an integer from 1 to ${WORKER_REPLICAS_MAX}, got: ${value}" >&2
+    return 1
+  fi
+}
+
+# Tracing values of the stack (compose: OTEL_EXPORTER_OTLP_ENDPOINT, OTEL_RESOURCE_ATTRIBUTES),
+# like the replica count: the caller's value, else the file's, else today's staging default.
+# An empty endpoint is a value (the exporter is off); the name is checked before any host change.
+OTLP_ENDPOINT_DEFAULT="http://tempo:4318"
+DEPLOY_ENVIRONMENT_DEFAULT="staging"
+
+resolve_tracing_values() {
+  local file="$1"
+  if [[ -z "${OTEL_EXPORTER_OTLP_ENDPOINT+x}" ]]; then
+    if compose_env_var_is_set OTEL_EXPORTER_OTLP_ENDPOINT "${file}"; then
+      OTEL_EXPORTER_OTLP_ENDPOINT="$(read_compose_env_var OTEL_EXPORTER_OTLP_ENDPOINT "${file}")"
+    else
+      OTEL_EXPORTER_OTLP_ENDPOINT="${OTLP_ENDPOINT_DEFAULT}"
+    fi
+  fi
+  if [[ -z "${DEPLOY_ENVIRONMENT:-}" ]]; then
+    DEPLOY_ENVIRONMENT="$(read_compose_env_var DEPLOY_ENVIRONMENT "${file}" || true)"
+  fi
+  DEPLOY_ENVIRONMENT="${DEPLOY_ENVIRONMENT:-${DEPLOY_ENVIRONMENT_DEFAULT}}"
+  if [[ "${DEPLOY_ENVIRONMENT}" != "staging" && "${DEPLOY_ENVIRONMENT}" != "prod" ]]; then
+    echo "DEPLOY_ENVIRONMENT must be staging or prod, got: ${DEPLOY_ENVIRONMENT}" >&2
+    return 1
+  fi
+}
+
+# One log line with the resolved values, so a run shows what the containers will get. Neither is
+# secret: the name is one of two words and the endpoint is an internal address.
+echo_tracing_values() {
+  if [[ -n "${OTEL_EXPORTER_OTLP_ENDPOINT}" ]]; then
+    echo "tracing: environment=${DEPLOY_ENVIRONMENT}, export to ${OTEL_EXPORTER_OTLP_ENDPOINT}"
+  else
+    echo "tracing: environment=${DEPLOY_ENVIRONMENT}, export off"
+  fi
+}
+
 escape_compose_value() {
   local value="$1"
   value="${value//\$/\$\$}"
@@ -65,6 +119,7 @@ escape_compose_value() {
 write_compose_env_file() {
   local file="$1" image="$2" pg_user="$3" pg_password="$4" pg_db="$5" deploy_mode="$6" edge_alias="$7"
   local rabbitmq_user="$8" rabbitmq_password="$9" redis_password="${10}" no_previous="${11:-}"
+  local worker_replicas="${12:-}"
   umask 077
   {
     printf 'IMAGE=%s\n' "$(escape_compose_value "${image}")"
@@ -77,6 +132,13 @@ write_compose_env_file() {
     printf 'RABBITMQ_PASSWORD=%s\n' "$(escape_compose_value "${rabbitmq_password}")"
     printf 'REDIS_PASSWORD=%s\n' "$(escape_compose_value "${redis_password}")"
     printf 'NO_PREVIOUS_RELEASE=%s\n' "$(escape_compose_value "${no_previous}")"
+    printf 'WORKER_REPLICAS=%s\n' "$(escape_compose_value "${worker_replicas}")"
+    # Only a caller that passes them writes the tracing lines: an empty endpoint is a decision
+    # (export off), so a caller from before them must leave it to the compose default.
+    if (( $# >= 14 )); then
+      printf 'OTEL_EXPORTER_OTLP_ENDPOINT=%s\n' "$(escape_compose_value "${13}")"
+      printf 'DEPLOY_ENVIRONMENT=%s\n' "$(escape_compose_value "${14}")"
+    fi
   } > "${file}"
   chmod 600 "${file}"
 }

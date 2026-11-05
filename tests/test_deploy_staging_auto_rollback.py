@@ -5,7 +5,6 @@ from __future__ import annotations
 import os
 import re
 import subprocess
-from collections.abc import Mapping
 from pathlib import Path
 
 import pytest
@@ -19,6 +18,7 @@ from tests.deploy_host_fakes import (
     WORKFLOW,
     Host,
     _bundle,
+    _ci_auto_rollback,
     _mode,
     _read,
     _read_dotenv,
@@ -35,33 +35,6 @@ host = _host_fixture
 STOPPED_BEFORE_SWITCH = (
     "release unchanged: deploy run {} stopped before the release switch; skipping auto rollback\n"
 )
-
-
-def _ci_auto_rollback(
-    host: Host,
-    deploy_run: str,
-    *,
-    deploy_mode: str = "edge",
-    stubs: Mapping[str, str] | None = None,
-) -> subprocess.CompletedProcess[str]:
-    """The CI "Rollback on failed deploy or health check" step of the run `deploy_run`.
-
-    Like ssh-action, only the names in the step's ``envs:`` reach the host.
-    """
-    step = _workflow_step("Rollback on failed deploy or health check")
-    envs = re.search(r"^\s+envs: (\S+)$", step, re.MULTILINE)
-    assert envs is not None
-    assert 'ROLLBACK_MODE=auto "${APP_DIR}/rollback.sh"' in step
-    values = {
-        "GHCR_TOKEN": "test-ghcr-token",
-        "GHCR_USER": "github",
-        "APP_DIR": str(host.app_dir),
-        "DEPLOY_MODE": deploy_mode,
-        "EDGE_ALIAS": "api-staging",
-        "DEPLOY_RUN": deploy_run,
-    }
-    forwarded = {name: values[name] for name in envs.group(1).split(",")}
-    return host.run("rollback.sh", env={**forwarded, "ROLLBACK_MODE": "auto", **(stubs or {})})
 
 
 @pytest.mark.parametrize("unchanged", [False, True], ids=["rolled-back", "release-unchanged"])

@@ -114,6 +114,7 @@ rm jwt.pem jwt.pub
 | `STAGING_HEALTH_URL` | нет | иначе `http://$STAGING_HOST/healthcheck` |
 | `POSTGRES_USER` | нет | иначе `app` |
 | `POSTGRES_DB` | нет | иначе `app` |
+| `WORKER_REPLICAS` | нет | целое `1`..`5`, иначе `1`: число реплик `worker`. Действует со следующего выката; другое значение останавливает выкат до изменений на хосте. Для prod задаётся отдельно в Environment `production` (§1, «Environment `production`»); на уровне repository и organization не задавать |
 | `GH_APP_BOT_LOGIN` | обязателен для GitHub replay; частичный App config закрывает startup | `dmc268-t6-reviewer[bot]` — логин бота App. В контейнере `GITHUB_APP_BOT_LOGIN`, только у `webhook-worker` (`app/webhook_worker.py`). Префикс `GH_`, потому что GitHub не принимает `GITHUB_` и у variables; берётся из `vars.`, а не из `secrets.` |
 | `PORTAL_URL` | для ссылки на Run в staging check-run | `https://staging-ui.dmc268-t6.axyi.ru` — публичный UI-origin. Читается из `vars.PORTAL_URL`, записывается только в `worker.env` → review-worker (`worker`); в `api` и `webhook-worker` не передаётся; [проверка и восстановление](#portal_url) |
 | `BITBUCKET_ACTIVE_KEY_ID` | для Bitbucket Cloud | ID ключа в `BITBUCKET_CREDENTIAL_KEYS`, записывается в `bitbucket.env` трёх процессов; без него новые ciphertext не создаются |
@@ -667,6 +668,7 @@ Prod-выкат (`deploy-prod.yml`, job `deploy-prod`) идёт в Environment `
 | `GH_CLIENT_ID`, `GH_CLIENT_SECRET` | secret | `api` | да |
 | `AUTH_JWT_PRIVATE_KEY`, `AUTH_JWT_PUBLIC_KEY` | secret, новая пара | `api` | да |
 | `PORTAL_URL` | variable, `https://ui.<APP_DOMAIN>` | `worker` | нет; ссылки работают, когда появится prod UI (ui#185) |
+| `WORKER_REPLICAS` | variable, целое 1..5 | `worker` (число реплик) | нет; без неё одна. Только в Environment: на уровне repository или organization её увидел бы и staging |
 | `GITLAB_CREDENTIAL_KEYS`, `GITLAB_ACTIVE_KEY_ID`, `GITLAB_ALLOWED_ORIGINS`, `GITLAB_PRIVATE_ORIGINS`, `GITLAB_WEBHOOK_INTAKE_ENABLED`, `BITBUCKET_CREDENTIAL_KEYS`, `BITBUCKET_ACTIVE_KEY_ID`, `BITBUCKET_WEBHOOK_BASE_URL` | secret и variables | как на staging | нет; на старте выключены. Те же имена, значения свои: значения staging не копировать (`BITBUCKET_WEBHOOK_BASE_URL=https://api.<APP_DOMAIN>`, свои keyring-и) |
 
 Ни одно имя `GH_*`, `AUTH_JWT_*`, `GITLAB_CREDENTIAL_KEYS`, `BITBUCKET_CREDENTIAL_KEYS` не должно существовать на уровне repository или organization: job `deploy-prod` унаследовал бы его.
@@ -741,7 +743,7 @@ Prod-выкат (`deploy-prod.yml`, job `deploy-prod`) идёт в Environment `
 | `PROD_GRAFANA_DB_PASSWORD`, `PROD_PG_EXPORTER_PASSWORD` | генерируются на хосте, только с prod | `.env` стека; роли `grafana_reader` и `metrics_exporter` в БД prod | свои пароли prod, не пароли staging; в `psql` — через stdin |
 | `PROD_REDIS_PASSWORD` | копия из `<PROD_API_DIR>/.env` | `.env` стека, контейнер `redis-exporter-prod` | метрики Redis prod |
 
-Трейсы (#395, [MONITORING.md](MONITORING.md) §11) секретов не требуют: Tempo принимает OTLP только внутри docker-сети приложения. `OTEL_EXPORTER_OTLP_ENDPOINT` (`http://tempo:4318`) и `OTEL_RESOURCE_ATTRIBUTES` — не secret и не variable GitHub, а значения в `environment:` сервисов `api`, `worker` и `webhook-worker` в `deploy/compose/staging.yml`; пустой `OTEL_EXPORTER_OTLP_ENDPOINT` выключает отправку.
+Трейсы (#395, [MONITORING.md](MONITORING.md) §11) секретов не требуют: Tempo принимает OTLP только внутри docker-сети приложения. `OTEL_EXPORTER_OTLP_ENDPOINT` и имя окружения в `OTEL_RESOURCE_ATTRIBUTES` — не secret и не variable GitHub: `deploy.sh` берёт `OTEL_EXPORTER_OTLP_ENDPOINT` и `DEPLOY_ENVIRONMENT` (`staging` или `prod`, иное — отказ до изменений на хосте) из шага выката, иначе из `.env` стека, иначе `http://tempo:4318` и `staging`; Compose подставляет их в `environment:` сервисов `api`, `worker` и `webhook-worker` в `deploy/compose/staging.yml`. Staging их не передаёт. Deploy prod задаёт литералами `prod` и пустой endpoint: пустой `OTEL_EXPORTER_OTLP_ENDPOINT` выключает отправку, а variable GitHub пустой быть не может. Откат их не меняет.
 
 Пароли ролей PostgreSQL передаются в `psql` через stdin, не через argv; вывод этого вызова подавлен, потому что `psql` повторил бы упавший оператор вместе с паролем.
 
@@ -824,6 +826,8 @@ flowchart LR
 6. `GITHUB_TOKEN` нужен лишь для pull. Логин идёт во временный `DOCKER_CONFIG` (`mktemp -d`), а не в `/root/.docker/config.json`: выкаты API и UI под общим root не мешают друг другу. После последнего pull — `docker logout`, при выходе каталог удаляется; `unset GHCR_TOKEN`.
 
 Rollback ничего из GitHub не шлёт повторно: пароли Postgres, RabbitMQ и Redis берёт из лежащего `.env`, а env-файлы секретов не трогает — откатанные контейнеры стартуют с теми же секретами. Секреты не привязаны к образу: откат образа не возвращает предыдущие значения секретов.
+
+Число реплик `worker` привязано к релизу: выкат записывает его в `.deploy-state` вместе с образом, а rollback возвращает число предыдущего релиза и пишет его в `.env` (нет записи — число из `.env`, иначе `1`). Следующий выкат снова берёт значение variable.
 
 Это относится и к `PORTAL_URL`: workflow включает `vars.PORTAL_URL` в массив
 `names` бандла `APP_SECRETS_B64`, а `WORKER_ENV_KEYS` в `env-file.sh` разрешает
@@ -916,24 +920,36 @@ recovery_compose=(docker compose -p "$COMPOSE_PROJECT"
   --env-file "$APP_DIR/.env")
 recovery_python='import json,os,re; print(json.dumps(sorted(k for k in os.environ.keys() if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", k))))'
 recovery_pattern='^\[("[A-Za-z_][A-Za-z0-9_]*"(, "[A-Za-z_][A-Za-z0-9_]*")*)?\]$'
-for recovery_role in api worker webhook-worker; do
+# worker: по одному вызову на реплику (--index), число — WORKER_REPLICAS из .env, без вывода .env.
+recovery_replicas="$(awk -F= '$1 == "WORKER_REPLICAS" { print $2; exit }' "$APP_DIR/.env")"
+recovery_replicas="${recovery_replicas:-1}"
+[[ "$recovery_replicas" =~ ^[1-5]$ ]] || exit 1
+recovery_targets=(api)
+for (( recovery_n = 1; recovery_n <= recovery_replicas; recovery_n++ )); do
+  recovery_targets+=("worker:$recovery_n")
+done
+recovery_targets+=(webhook-worker)
+for recovery_target in "${recovery_targets[@]}"; do
+  recovery_role="${recovery_target%%:*}"
+  recovery_index=()
+  [[ "$recovery_target" != *:* ]] || recovery_index=(--index "${recovery_target#*:}")
   if ! recovery_output="$(
-    "${recovery_compose[@]}" exec -T "$recovery_role" python -c "$recovery_python" 2>/dev/null
+    "${recovery_compose[@]}" exec -T ${recovery_index[@]+"${recovery_index[@]}"} "$recovery_role" python -c "$recovery_python" 2>/dev/null
     recovery_status=$?
     printf '.'
     exit "$recovery_status"
   )"; then
-    printf '%s\n' "$recovery_role environment key diagnostics failed" >&2
+    printf '%s\n' "$recovery_target environment key diagnostics failed" >&2
     exit 1
   fi
   [[ "$recovery_output" == *$'\n.' ]] || {
-    printf '%s\n' "$recovery_role environment key diagnostics failed" >&2; exit 1;
+    printf '%s\n' "$recovery_target environment key diagnostics failed" >&2; exit 1;
   }
   recovery_keys="${recovery_output%$'\n.'}"
   [[ "$recovery_keys" =~ $recovery_pattern ]] || {
-    printf '%s\n' "$recovery_role environment key diagnostics failed" >&2; exit 1;
+    printf '%s\n' "$recovery_target environment key diagnostics failed" >&2; exit 1;
   }
-  printf '%s environment keys: %s\n' "$recovery_role" "$recovery_keys"
+  printf '%s environment keys: %s\n' "$recovery_target" "$recovery_keys"
 done
 ```
 

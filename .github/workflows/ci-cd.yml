@@ -1190,6 +1190,7 @@ jobs:
           POSTGRES_DB: ${{ vars.POSTGRES_DB }}
           APP_SECRETS_B64: ${{ steps.app_secrets.outputs.bundle }}
           DEPLOY_RUN: ${{ github.run_id }}-${{ github.run_attempt }}
+          WORKER_REPLICAS: ${{ vars.WORKER_REPLICAS || '1' }}
         with:
           host: ${{ steps.target.outputs.host }}
           port: ${{ steps.target.outputs.port }}
@@ -1198,7 +1199,7 @@ jobs:
           password: ${{ steps.target.outputs.mode == 'course' && secrets.VPS_DMC268_P || '' }}
           fingerprint: ${{ vars.STAGING_SSH_FINGERPRINT }}
           debug: false
-          envs: GHCR_TOKEN,GHCR_USER,IMAGE,APP_DIR,DEPLOY_MODE,EDGE_ALIAS,POSTGRES_USER,POSTGRES_PASSWORD,POSTGRES_DB,APP_SECRETS_B64,DEPLOY_RUN
+          envs: GHCR_TOKEN,GHCR_USER,IMAGE,APP_DIR,DEPLOY_MODE,EDGE_ALIAS,POSTGRES_USER,POSTGRES_PASSWORD,POSTGRES_DB,APP_SECRETS_B64,DEPLOY_RUN,WORKER_REPLICAS
           script: |
             set -euo pipefail
             set +o xtrace

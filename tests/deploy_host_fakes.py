@@ -244,6 +244,11 @@ case "$1" in
         ;;
       up)
         printf '%s\\n' "${IMAGE:-}" > "${STUB_UP_IMAGE}"
+        # The replica count the scripts hand to Compose; the shell value beats --env-file there.
+        printf '%s\\n' "${WORKER_REPLICAS-}" > "${STUB_UP_REPLICAS}"
+        # Likewise the tracing values: endpoint, then environment name ("unset" when absent).
+        printf '%s\\n%s\\n' "${OTEL_EXPORTER_OTLP_ENDPOINT-unset}" \\
+          "${DEPLOY_ENVIRONMENT-unset}" > "${STUB_UP_TRACING}"
         # Like Compose: env_file paths resolve against the directory of the first compose file.
         # Every file must exist: deploy and rollback keep each role's file in place.
         for name in app.env api.env worker.env webhook-worker.env gitlab.env bitbucket.env; do
@@ -259,15 +264,29 @@ case "$1" in
         fi
         ;;
       exec)
+        # exec -T [--index N] SERVICE python -c SOURCE; the replica defaults to the first.
+        index=1
+        exec_args=()
+        for (( i = 0; i < ${#action_args[@]}; i++ )); do
+          if [[ "${action_args[i]}" == --index ]]; then
+            index="${action_args[i + 1]}"
+            i=$(( i + 1 ))
+          else
+            exec_args+=("${action_args[i]}")
+          fi
+        done
+        action_args=("${exec_args[@]}")
         service="${action_args[1]}"
         cp "${APP_DIR}/.deploy-state" "${STUB_DIAGNOSTIC_STATE}"
         printf '%s\\n' "${service}" >> "${STUB_DIAGNOSTIC_CALLS}"
-        if [[ "${service}" == "${STUB_EXEC_FAILURE_SERVICE:-}" ]]; then
+        failing_index="${STUB_EXEC_FAILURE_INDEX:-${index}}"
+        failing_service="${STUB_EXEC_FAILURE_SERVICE:-}"
+        if [[ "${service}" == "${failing_service}" && "${index}" == "${failing_index}" ]]; then
           printf '%s\\n' "${STUB_EXEC_ERROR-raw-container-secret}"
           exit "${STUB_EXEC_STATUS:-1}"
         fi
         printf '%s\\n' "${STUB_EXEC_STDERR:-}" >&2
-        uv run python "${STUB_EXEC_HELPER}" "${action_args[@]}"
+        STUB_EXEC_INDEX="${index}" uv run python "${STUB_EXEC_HELPER}" "${action_args[@]}"
         ;;
       down) exit "${STUB_DOWN_STATUS:-0}" ;;
       ps)
@@ -288,8 +307,9 @@ from pathlib import Path
 environments = json.loads(Path(os.environ['STUB_DIAGNOSTIC_ENV']).read_text())
 service = sys.argv[2]
 # macOS adds a CoreFoundation key at execve startup; set the fake container environment now.
+index = os.environ['STUB_EXEC_INDEX']
 os.environ.clear()
-os.environ.update(environments[service])
+os.environ.update(environments.get(f'{service}#{index}', environments[service]))
 assert sys.argv[3:5] == ['python', '-c']
 exec(compile(sys.argv[5], '<docker-exec>', 'exec'))
 """
@@ -368,6 +388,8 @@ class Host:
             "STUB_PROBE_BEFORE": str(self.log.parent / "probe-dotenv"),
             "STUB_PROBE_ROLE": str(self.log.parent / "probe-role"),
             "STUB_UP_IMAGE": str(self.log.parent / "up-image"),
+            "STUB_UP_REPLICAS": str(self.log.parent / "up-replicas"),
+            "STUB_UP_TRACING": str(self.log.parent / "up-tracing"),
             "STUB_TAG_MOVED": str(self.log.parent / "tag-moved"),
             "STUB_REF_A": IMAGE_A,
             "STUB_REF_B": IMAGE_B,
@@ -688,3 +710,88 @@ def _run_ci_gitlab_pipeline(
             environment["APP_SECRETS_B64"] = output.read_text().strip().removeprefix("bundle=")
     calls = [json.loads(line) for line in log.read_text().splitlines()] if log.exists() else []
     return result, mutations, calls, temporary
+
+
+def _ci_auto_rollback(
+    host: Host,
+    deploy_run: str,
+    *,
+    deploy_mode: str = "edge",
+    stubs: Mapping[str, str] | None = None,
+) -> subprocess.CompletedProcess[str]:
+    """The CI "Rollback on failed deploy or health check" step of the run `deploy_run`.
+
+    Like ssh-action, only the names in the step's ``envs:`` reach the host.
+    """
+    step = _workflow_step("Rollback on failed deploy or health check")
+    envs = re.search(r"^\s+envs: (\S+)$", step, re.MULTILINE)
+    assert envs is not None
+    assert 'ROLLBACK_MODE=auto "${APP_DIR}/rollback.sh"' in step
+    values = {
+        "GHCR_TOKEN": "test-ghcr-token",
+        "GHCR_USER": "github",
+        "APP_DIR": str(host.app_dir),
+        "DEPLOY_MODE": deploy_mode,
+        "EDGE_ALIAS": "api-staging",
+        "DEPLOY_RUN": deploy_run,
+    }
+    forwarded = {name: values[name] for name in envs.group(1).split(",")}
+    return host.run("rollback.sh", env={**forwarded, "ROLLBACK_MODE": "auto", **(stubs or {})})
+
+
+def _write_compose_env_file(path: Path, *args: str) -> None:
+    subprocess.run(
+        [
+            "bash",
+            "-c",
+            'source "$1"; shift; write_compose_env_file "$@"',
+            "env-file",
+            str(REPO_ROOT / "deploy" / "scripts" / "env-file.sh"),
+            str(path),
+            *args,
+        ],
+        check=True,
+    )
+
+
+# With the file first, the ten arguments of a caller from before NO_PREVIOUS_RELEASE
+# (scripts/verify_rollback.py).
+LEGACY_VALUES = (IMAGE_A, "app", "pg", "app", "edge", "api-prod", "app", "mq", "redis")
+
+
+ROLE_FILES = (
+    "api.env",
+    "app.env",
+    "worker.env",
+    "webhook-worker.env",
+    "gitlab.env",
+    "bitbucket.env",
+)
+REQUIRED = {
+    "IMAGE": "example.test/api:x",
+    "POSTGRES_PASSWORD": "x",
+    "RABBITMQ_PASSWORD": "x",
+    "REDIS_PASSWORD": "x",
+}
+
+
+def _rendered_services(
+    tmp_path: Path, *, dotenv: dict[str, str] | None = None, shell: dict[str, str] | None = None
+) -> dict[str, dict[str, object]]:
+    if shutil.which("docker") is None:
+        pytest.skip("Docker Compose CLI is required for rendering")
+    shutil.copy(STAGING_COMPOSE, tmp_path / "compose.yml")
+    for name in ROLE_FILES:
+        (tmp_path / name).touch()
+    lines = {**REQUIRED, **(dotenv or {})}
+    (tmp_path / ".env").write_text("".join(f"{k}={v}\n" for k, v in lines.items()))
+    result = subprocess.run(
+        ["docker", "compose", "--project-directory", str(tmp_path), "config", "--format", "json"],
+        env={"PATH": os.environ["PATH"], "HOME": os.environ["HOME"], **(shell or {})},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    services: dict[str, dict[str, object]] = json.loads(result.stdout)["services"]
+    return services

@@ -22,9 +22,11 @@ services:
       AUTH_JWT_ISSUER: dmc-268-api
       AUTH_JWT_AUDIENCE: dmc-268-ui
       # Traces to Tempo of the monitoring stack over this network (docs/MONITORING.md §11).
-      # Unreachable Tempo only drops spans; an empty value turns the export off.
-      OTEL_EXPORTER_OTLP_ENDPOINT: http://tempo:4318
-      OTEL_RESOURCE_ATTRIBUTES: deployment.environment.name=staging
+      # Unreachable Tempo only drops spans; an empty value turns the export off, so only an
+      # absent variable gets the default (`-`, not `:-`). The deploy sets both values per stack
+      # and keeps them in .env: prod has no Tempo and sets the endpoint empty.
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT-http://tempo:4318}
+      OTEL_RESOURCE_ATTRIBUTES: deployment.environment.name=${DEPLOY_ENVIRONMENT:-staging}
     # No dependency on RabbitMQ or Redis: the API connects to the broker on the first publication,
     # so a broker or cache outage must not keep a recreated API from starting. up --wait in
     # deploy.sh still waits for every healthcheck.
@@ -62,6 +64,12 @@ services:
     image: ${IMAGE:?IMAGE is required}
     command: ["python", "-m", "app.worker"]
     stop_grace_period: 40s
+    # Replicas from the per-Environment variable WORKER_REPLICAS (empty or absent: one). The
+    # deploy and rollback scripts check it (1..5) and keep it in .env; rollback restores the
+    # count of the release it goes back to. Any number is safe: the background leader loop
+    # holds a PostgreSQL advisory lock, runs and index jobs are claimed by lease.
+    deploy:
+      replicas: ${WORKER_REPLICAS:-1}
     # Also the index.repo consumer (#142). CODE_INDEX_* keep their code defaults here:
     # worker.env is rebuilt from the allowlist in deploy/scripts/env-file.sh, so a value
     # changes only under environment: below (or by adding it to that allowlist).
@@ -83,8 +91,8 @@ services:
       WORKER_HEARTBEAT_FILE: /tmp/worker.heartbeat
       # Traces to Tempo of the monitoring stack over this network (docs/MONITORING.md §11).
       # Unreachable Tempo only drops spans; an empty value turns the export off.
-      OTEL_EXPORTER_OTLP_ENDPOINT: http://tempo:4318
-      OTEL_RESOURCE_ATTRIBUTES: deployment.environment.name=staging
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT-http://tempo:4318}
+      OTEL_RESOURCE_ATTRIBUTES: deployment.environment.name=${DEPLOY_ENVIRONMENT:-staging}
     # Unlike the API, the worker cannot start without the broker: it declares the topology first.
     depends_on:
       bootstrap:
@@ -132,8 +140,8 @@ services:
       WORKER_HEARTBEAT_FILE: /tmp/webhook-worker.heartbeat
       # Traces to Tempo of the monitoring stack over this network (docs/MONITORING.md §11).
       # Unreachable Tempo only drops spans; an empty value turns the export off.
-      OTEL_EXPORTER_OTLP_ENDPOINT: http://tempo:4318
-      OTEL_RESOURCE_ATTRIBUTES: deployment.environment.name=staging
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT-http://tempo:4318}
+      OTEL_RESOURCE_ATTRIBUTES: deployment.environment.name=${DEPLOY_ENVIRONMENT:-staging}
     # The projection creates Runs and publishes them to the review queue (#52).
     depends_on:
       bootstrap:

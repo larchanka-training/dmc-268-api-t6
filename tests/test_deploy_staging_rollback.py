@@ -551,6 +551,7 @@ def test_successful_rollback_prints_only_sorted_running_container_keys(
 
     assert result.returncode == 0, result.stderr
     assert result.stdout.splitlines() == [
+        "tracing: environment=staging, export to http://tempo:4318",
         'api environment keys: ["AUTH_JWT_PRIVATE_KEY", "A_KEY", "LC_CTYPE", "Z_KEY"]',
         'worker environment keys: ["A_KEY", "GITHUB_APP_PRIVATE_KEY", "LC_CTYPE", "Z_KEY", '
         '"lower_key"]',

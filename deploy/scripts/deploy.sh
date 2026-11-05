@@ -55,7 +55,10 @@ cd "${APP_DIR}"
 
 REQUESTED_IMAGE="${IMAGE}"
 
+# The count the host runs today; the CI value (WORKER_REPLICAS) wins over it.
+HOST_WORKER_REPLICAS=""
 if [[ -f "${ENV_FILE}" ]]; then
+  HOST_WORKER_REPLICAS="$(read_compose_env_var WORKER_REPLICAS "${ENV_FILE}")"
   POSTGRES_USER="${POSTGRES_USER:-$(read_compose_env_var POSTGRES_USER "${ENV_FILE}")}"
   POSTGRES_PASSWORD="${POSTGRES_PASSWORD:-$(read_compose_env_var POSTGRES_PASSWORD "${ENV_FILE}")}"
   POSTGRES_DB="${POSTGRES_DB:-$(read_compose_env_var POSTGRES_DB "${ENV_FILE}")}"
@@ -83,6 +86,14 @@ if [[ -n "${NO_PREVIOUS_RELEASE:-}" && "${NO_PREVIOUS_RELEASE}" != "bootstrap" &
   echo "NO_PREVIOUS_RELEASE must be bootstrap or stop, got: ${NO_PREVIOUS_RELEASE}" >&2
   exit 1
 fi
+# Worker replicas: the CI value, else what the host runs today, else one. Not exported: rollback.sh
+# restores the count of the release it goes back to and must not inherit this one.
+WORKER_REPLICAS="${WORKER_REPLICAS:-${HOST_WORKER_REPLICAS:-1}}"
+require_worker_replicas "${WORKER_REPLICAS}" || exit 1
+echo "worker replicas: ${WORKER_REPLICAS}"
+# Tracing values: the CI value, else .env, else the staging default; a bad name stops here.
+resolve_tracing_values "${ENV_FILE}" || exit 1
+echo_tracing_values
 COMPOSE=(docker compose -p "${COMPOSE_PROJECT}" -f "${COMPOSE_FILE}" -f "${APP_DIR}/compose.${DEPLOY_MODE}.yml" --env-file "${ENV_FILE}")
 
 IMAGE="${REQUESTED_IMAGE}"
@@ -174,6 +185,11 @@ for file_name in "${ENV_FILE_NAMES[@]}"; do
 done
 if [[ -f "${STATE_FILE}" ]]; then
   cp "${STATE_FILE}" "${STATE_FILE}.previous"
+  # Rollback restores the count of this release. One recorded before the count was kept in the
+  # state ran with the count .env still holds.
+  if ! grep -q '^worker_replicas=' "${STATE_FILE}.previous"; then
+    echo "worker_replicas=${HOST_WORKER_REPLICAS:-1}" >> "${STATE_FILE}.previous"
+  fi
 fi
 
 # Release switch: from here on the host moves to IMAGE. The CI run id (DEPLOY_RUN) lets the CI
@@ -196,7 +212,10 @@ write_compose_env_file \
   "${RABBITMQ_USER:-app}" \
   "${RABBITMQ_PASSWORD}" \
   "${REDIS_PASSWORD}" \
-  "${NO_PREVIOUS_RELEASE:-}"
+  "${NO_PREVIOUS_RELEASE:-}" \
+  "${WORKER_REPLICAS}" \
+  "${OTEL_EXPORTER_OTLP_ENDPOINT}" \
+  "${DEPLOY_ENVIRONMENT}"
 
 if docker inspect "${BOOTSTRAP_NAME}" >/dev/null 2>&1; then
   docker rm -f "${BOOTSTRAP_NAME}" >/dev/null
@@ -207,7 +226,7 @@ fi
 # in compose.yml.
 "${COMPOSE[@]}" rm -sf bootstrap >/dev/null 2>&1 || true
 
-if ! IMAGE="${TARGET_IMAGE_ID}" "${COMPOSE[@]}" up --pull missing -d --remove-orphans --wait --wait-timeout 180; then
+if ! IMAGE="${TARGET_IMAGE_ID}" WORKER_REPLICAS="${WORKER_REPLICAS}" OTEL_EXPORTER_OTLP_ENDPOINT="${OTEL_EXPORTER_OTLP_ENDPOINT}" DEPLOY_ENVIRONMENT="${DEPLOY_ENVIRONMENT}" "${COMPOSE[@]}" up --pull missing -d --remove-orphans --wait --wait-timeout 180; then
   echo "compose up failed; rolling back" >&2
   ROLLBACK_MODE=auto "${ROLLBACK_SCRIPT}"
   exit 1
@@ -220,6 +239,7 @@ logout_registry
 {
   echo "current_image=${IMAGE}"
   echo "deployed_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  echo "worker_replicas=${WORKER_REPLICAS}"
 } > "${STATE_FILE}"
 
 echo "deployed ${IMAGE}"
