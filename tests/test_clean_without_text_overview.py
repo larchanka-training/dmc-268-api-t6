@@ -153,6 +153,12 @@ def test_author_path_list_never_discloses_ignored_unsupported_or_unknown_scope(
     assert secret not in result.review_body
     assert "private-token" not in result.review_body
     if private_scope != "unsupported":
-        assert "**Checked files:**\n(none)" in result.review_body
+        assert (
+            "**Checked files:**\n(список не показывается: имена файлов в этом ревью скрыты)\n\n"
+            in result.review_body
+        )
+        assert "(none)" not in result.review_body
     else:
         assert "**Checked files:**\n- src/app.py" in result.review_body
+    if private_scope == "ignored":
+        assert "Проанализировано файлов с текстовыми изменениями: 1" in result.review_body
