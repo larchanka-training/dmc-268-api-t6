@@ -110,7 +110,7 @@ def test_ac6_a_declaration_inserted_before_the_target(database: _Database) -> No
         assert _uses("user.py", "lib.py", "target") in after.edges
         lines = {(s.key.qualified_name, s.start_line) for s in after.symbols}
         assert {("first", 1), ("target", 5)} <= lines
-        # HEAD 2, compare 1, archive 2.
+        # HEAD 2, compare 1, policy tree 1, archive 2.
         assert (job.requests, outcome.github_request_count) == (6, 6)
 
     _run(database, scenario)

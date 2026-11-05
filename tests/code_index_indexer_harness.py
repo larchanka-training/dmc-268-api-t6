@@ -49,6 +49,7 @@ from app.modules.code_index.application.vcs import (
     ChangeStatus,
     Comparison,
     IndexLimitExceeded,
+    RepositorySnapshotSource,
     SourceArchive,
 )
 from app.modules.code_index.domain.enums import EdgeKind, PurgeReason
@@ -315,12 +316,18 @@ class Indexer:
             await uow.index.purge(repository_id, PurgeReason.DISABLED)
             await uow.commit()
 
-    async def build(self, repository_id: UUID, generation: int | None = None) -> BuildOutcome:
+    async def build(
+        self,
+        repository_id: UUID,
+        generation: int | None = None,
+        *,
+        source: Callable[[IndexedRepository], RepositorySnapshotSource] | None = None,
+    ) -> BuildOutcome:
         """A job for the current generation, or for `generation` (an old message)."""
         use_case = BuildRepositoryIndex(
             uow=self.uow,
             repositories=SqlAlchemyIndexRepositoryReader(self.database.factory),
-            sources=self._source,
+            sources=self._source if source is None else source,
             archives=TarArchiveReader(self.limits),
             parser=self.parser,
             wakeups=self.wakeups,
