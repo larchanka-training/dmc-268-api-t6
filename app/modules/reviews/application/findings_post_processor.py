@@ -69,6 +69,7 @@ _CHECKLIST_NAME_LIMITS = (5, 3, 1, 0)
 _DISPLAYED_NAME_CHARS = 120
 # CVS §8.2: such a name is unusable or unproven, so only its reason and count are public.
 _COUNT_ONLY_REASONS = frozenset({"unsupported_path", "identity_unresolved"})
+_UNNAMED_FILE_LABEL = "имя файла скрыто"
 _SENSITIVE_FILES = (
     (
         "Изменённые миграции",
@@ -271,13 +272,21 @@ class FindingsPostProcessor:
                 )
             }
         )
-        executive_block = _executive_block(kept, coverage, diff_map, summary_only=summary_only)
+        # A finding reaches such a file by its provider name as well (``resolve_anchor``).
         unnamed_paths = frozenset(
             name
             for file in diff_map.files
             if file.omission_reason is not None
-            for name in (file.new_path, file.old_path)
+            for name in (
+                file.new_path,
+                file.old_path,
+                file.provider_new_path,
+                file.provider_old_path,
+            )
             if name
+        )
+        executive_block = _executive_block(
+            kept, coverage, diff_map, unnamed_paths=unnamed_paths, summary_only=summary_only
         )
         review_body, omitted_body_only_count = _pack_review_body(
             final_output,
@@ -562,17 +571,29 @@ def _unreviewed_file_lines(coverage: RunCoverage, limit: int) -> list[str]:
     ]
 
 
-def _blocking_finding_lines(kept: tuple[ProcessedFinding, ...], limit: int) -> list[str]:
+def _hide_names(text: str, unnamed_paths: frozenset[str]) -> str:
+    """Model text may repeat a name the body never shows. A paraphrase is out of reach."""
+    if not unnamed_paths:
+        return text
+    names = "|".join(re.escape(name) for name in sorted(unnamed_paths, key=len, reverse=True))
+    return re.sub(rf"(?<!\w)(?:{names})(?!\w)", _UNNAMED_FILE_LABEL, text)
+
+
+def _blocking_finding_lines(
+    kept: tuple[ProcessedFinding, ...], limit: int, unnamed_paths: frozenset[str]
+) -> list[str]:
     blocking = sorted(
         (item.finding for item in kept if item.finding.severity in {"critical", "high"}),
         key=lambda finding: (finding.severity, finding.path, finding.line, finding.title),
     )
     if not blocking:
         return []
-    names = [
-        f"**{finding.title}** ({_inline_code(f'{finding.path}:{finding.line}')})"
-        for finding in blocking
-    ]
+    names = []
+    for finding in blocking:
+        location = _inline_code(f"{finding.path}:{finding.line}")
+        if finding.path in unnamed_paths:
+            location = _UNNAMED_FILE_LABEL
+        names.append(f"**{_hide_names(finding.title, unnamed_paths)}** ({location})")
     return [_checklist_line("Подтвердите находки critical/high", len(names), names, limit)]
 
 
@@ -599,6 +620,7 @@ def _executive_block(
     coverage: RunCoverage,
     diff_map: DiffMap,
     *,
+    unnamed_paths: frozenset[str],
     summary_only: bool,
 ) -> str:
     run_verdict = coverage_verdict((item.finding.severity for item in kept), coverage.status)
@@ -616,7 +638,7 @@ def _executive_block(
     for limit in _CHECKLIST_NAME_LIMITS:
         lines = (
             *_unreviewed_file_lines(coverage, limit),
-            *_blocking_finding_lines(kept, limit),
+            *_blocking_finding_lines(kept, limit, unnamed_paths),
             *_sensitive_file_lines(diff_map, coverage, limit),
         )
         block = "\n".join((f"{header}\n\n**What to check:**", *lines)) if lines else header
@@ -760,7 +782,7 @@ def _pack_review_body(
     allowed = frozenset(path for path in checked_paths if is_supported_path(path)) - unnamed_paths
     names_withheld = bool(allowed and _names_withheld(coverage))
     sorted_paths = () if names_withheld else tuple(sorted(allowed))
-    finding_lines = [_render_body_only_finding(item) for item in body_only]
+    finding_lines = [_render_body_only_finding(item, unnamed_paths) for item in body_only]
     path_count = len(sorted_paths)
 
     def assemble(listed_paths: int, finding_count: int) -> str:
@@ -802,8 +824,12 @@ def _pack_review_body(
     return best_body, omitted
 
 
-def _render_body_only_finding(item: ProcessedFinding) -> str:
+def _render_body_only_finding(item: ProcessedFinding, unnamed_paths: frozenset[str]) -> str:
+    finding = item.finding
+    location = (
+        _UNNAMED_FILE_LABEL if finding.path in unnamed_paths else f"`{finding.path}:{finding.line}`"
+    )
     return (
-        f"- **{item.finding.title}** "
-        f"(`{item.finding.path}:{item.finding.line}`): {item.finding.body}"
+        f"- **{_hide_names(finding.title, unnamed_paths)}** "
+        f"({location}): {_hide_names(finding.body, unnamed_paths)}"
     )
