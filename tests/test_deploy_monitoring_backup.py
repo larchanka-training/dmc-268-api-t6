@@ -241,9 +241,9 @@ def test_backup_metrics_carry_the_environment_label(tmp_path: Path, environment:
     assert run.result.returncode == 0, run.result.stderr
     assert len(series) >= 5
     for line in series:
-        assert re.fullmatch(rf'dmc_pg_backup_[a-z_]+\{{environment="{environment}"\}} \d+', line), (
-            line
-        )
+        assert re.fullmatch(
+            rf'dmc_pg_backup_[a-z_]+\{{environment="{environment}"\}}\s+\d+', line
+        ), line
 
 
 @pytest.mark.parametrize("environment", [None, "", "shared", "Prod", "prod "])
