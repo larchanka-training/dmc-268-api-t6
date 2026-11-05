@@ -146,10 +146,13 @@ request first, then the copy in api, both with the same `Refs`.
    that changes behaviour after round 3 has no round left: stop (§5).
 8. Push the ui commit once the human agrees, and update the body of each pull request already open:
    the round count and the `Review` line. Then `cp` again, `diff -r` empty, commit the new copy
-   (Conventional Commits, `Refs`), and run the api gates again.
-9. Open the api pull request: `What` starts `SYNC copy of owner/repo#M (Part K of #N): …`, and the
-   `Refs` line is the same as in the ui pull request (SKILL.md: the pull-request convention). Now
-   SKILL.md step 6 moves the card to On Review.
+   (Conventional Commits, `Refs`), and go back to step 5 for it: the api gates, then the copy's own
+   review. That is its first round if it has not run yet, else a new round, because the last one
+   read an older copy; either way inside the copy's cap of 3. No round left: stop (§5).
+9. When the last copy round had no critical or high finding and the api gates are green, open the
+   api pull request (already open: push the new copy to it): `What` starts
+   `SYNC copy of owner/repo#M (Part K of #N): …`, and the `Refs` line is the same as in the ui pull
+   request (SKILL.md: the pull-request convention). Now SKILL.md step 6 moves the card to On Review.
 
 ## 5. The stop report
 
