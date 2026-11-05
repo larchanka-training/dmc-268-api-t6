@@ -23,8 +23,8 @@ VCS_RATE_LIMITED = "vcs_rate_limited"
 VCS_UNAVAILABLE = "vcs_unavailable"
 VCS_ACCESS_DENIED = "vcs_access_denied"
 ARCHIVE_UNSAFE = "archive_unsafe"
-# The `last_error_code` values a later attempt at the same head can heal: VCS errors and
-# a policy read that failed on the network. Any other code of a released lease is a
+# The `last_error_code` values a later attempt at the same head can heal: transient
+# VCS or policy reads, including GitHub policy HTTP 401. Any other released code is a
 # terminal refusal of that head (ADR 0001 §6.1, leader reconcile).
 HEALABLE_ERROR_CODES = frozenset(
     {

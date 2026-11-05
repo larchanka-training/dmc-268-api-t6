@@ -931,6 +931,11 @@ def test_rules_document_requires_complete_tree_evidence_for_absence(
         (_REVIEW_TREE, _answer(404), "policy_revision_unavailable", 2),
         (_RULES_BLOB, _answer(404), "policy_revision_unavailable", 3),
         (_ROOT_TREE, _answer(503), "policy_fetch_transient", 1),
+        (_ROOT_TREE, _answer(401), "policy_fetch_transient", 1),
+        (_REVIEW_TREE, _answer(401), "policy_fetch_transient", 2),
+        (_RULES_BLOB, _answer(401), "policy_fetch_transient", 3),
+        (_ROOT_TREE, _answer(403), "policy_access_denied", 1),
+        (_REVIEW_TREE, _answer(403), "policy_access_denied", 2),
         (_RULES_BLOB, _answer(403), "policy_access_denied", 3),
         (_RULES_BLOB, _answer(429), "policy_rate_limited", 3),
         (_ROOT_TREE, _answer(200, text="invalid"), "policy_fetch_transient", 1),
@@ -959,6 +964,7 @@ def test_rules_document_failure_never_claims_absence(
 
     assert isinstance(error, PolicyError), repr(error)
     assert error.code.value == code
+    assert error.policy_base_sha == _HEAD
     assert counted == requests
 
 
