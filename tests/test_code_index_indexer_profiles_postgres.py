@@ -23,7 +23,6 @@ from app.modules.code_index.application.build_index import (
     FullBuildReason,
 )
 from app.modules.code_index.application.exclusions import ExclusionClass
-from app.modules.code_index.application.index_resolution import INDEX_RESOLVER_VERSION
 from app.modules.code_index.domain.enums import IndexStatus
 from app.modules.reviews.application.policy_errors import PolicyError, PolicyErrorCode
 from tests.code_index_indexer_support import (
@@ -289,7 +288,7 @@ def test_old_index_resolver_version_forces_same_commit_full_rebuild(database: _D
         assert indexer.jobs[-1].compares == 0
         after = await indexer.state(database.a)
         assert after.profile is not None
-        assert after.profile.resolver_version == INDEX_RESOLVER_VERSION
+        assert after.profile.resolver_version == "resolver/v1+index/v2"
         assert after.published_publication > before.published_publication
 
     _run(database, scenario)
