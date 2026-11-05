@@ -1712,8 +1712,8 @@ def test_executive_finding_on_an_unusable_name_stays_counted_without_the_name(
         finding(
             path=snapshot.filename,
             severity="high",
-            title=f"Leak in {snapshot.filename}",
-            body=f"The token stays in ./{snapshot.filename}.",
+            title="Leak in moved.py",
+            body="The token stays in moved.py.",
         ),
     )
 
@@ -1723,11 +1723,9 @@ def test_executive_finding_on_an_unusable_name_stays_counted_without_the_name(
     )
     assert _what_to_check(result) == [
         f"- Не проверено — {reason} (1)",
-        "- Подтвердите находки critical/high (1): **Leak in имя файла скрыто** (имя файла скрыто)",
+        "- Подтвердите находки critical/high (1): **Находка** (имя файла скрыто)",
     ]
-    assert result.review_body.endswith(
-        "- **Leak in имя файла скрыто** (имя файла скрыто): The token stays in ./имя файла скрыто."
-    )
+    assert result.review_body.endswith("- **Находка** (имя файла скрыто, high)")
     assert [item.finding.path for item in result.body_only] == [snapshot.filename]
     assert "**Risk summary:** critical: 0, high: 1," in result.review_body
 
@@ -1735,7 +1733,11 @@ def test_executive_finding_on_an_unusable_name_stays_counted_without_the_name(
 def test_executive_text_of_another_finding_does_not_repeat_an_unusable_name() -> None:
     result = _process_snapshots(
         [_text_change(), _unresolved_rename()],
-        finding(severity="high", title="Moved from src/moved.py"),
+        finding(
+            severity="high",
+            title="Moved from src/moved.py",
+            body="Compare with ./src/moved.py.",
+        ),
     )
 
     assert "src/moved.py" not in result.review_body
@@ -1743,6 +1745,39 @@ def test_executive_text_of_another_finding_does_not_repeat_an_unusable_name() ->
         "- Подтвердите находки critical/high (1): "
         "**Moved from имя файла скрыто** (`app/example.py:12`)"
     )
+    assert result.review_body.endswith(
+        "- **Moved from имя файла скрыто** (`app/example.py:12`): Compare with ./имя файла скрыто."
+    )
+
+
+def test_executive_store_time_repack_keeps_an_unusable_name_out_of_the_body() -> None:
+    hidden = "src/moved.py"
+    findings = (
+        finding(path=hidden, title="Note on moved.py", confidence=0.4),
+        *(
+            finding(title=f"Note {n} on {hidden}", confidence=0.4, body=f"{hidden} {'x' * 600}")
+            for n in range(9)
+        ),
+    )
+    # Checked files fill the budget, so the footer has no room and the body is packed again.
+    fillers = [_text_change(f"src/file{n:02}.py") for n in range(90)]
+    snapshots = [_text_change(), _unresolved_rename(hidden), *fillers]
+    processed = _process_snapshots(snapshots, *findings)
+    run_url = "https://example.test/runs/1"
+    footer = format_body_only_overflow_footer(processed.omitted_body_only_count, run_url)
+    assert len(processed.review_body) + len(footer) > 4000
+
+    final = finalize_stored_review_body(
+        output(*findings),
+        processed,
+        checked_paths=frozenset(item.filename for item in snapshots),
+        severity_threshold="all",
+        below_threshold=0,
+        run_url=run_url,
+    )
+
+    assert "moved.py" not in final.review_body
+    assert len(final.review_body) <= 4000
 
 
 def test_executive_block_stays_within_its_limit_with_every_kind_of_line() -> None:

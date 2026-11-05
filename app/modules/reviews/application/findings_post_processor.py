@@ -572,7 +572,7 @@ def _unreviewed_file_lines(coverage: RunCoverage, limit: int) -> list[str]:
 
 
 def _hide_names(text: str, unnamed_paths: frozenset[str]) -> str:
-    """Model text may repeat a name the body never shows. A paraphrase is out of reach."""
+    """The text of a finding on another file may repeat the exact name of an unnamed one."""
     if not unnamed_paths:
         return text
     names = "|".join(re.escape(name) for name in sorted(unnamed_paths, key=len, reverse=True))
@@ -588,12 +588,15 @@ def _blocking_finding_lines(
     )
     if not blocking:
         return []
-    names = []
-    for finding in blocking:
-        location = _inline_code(f"{finding.path}:{finding.line}")
-        if finding.path in unnamed_paths:
-            location = _UNNAMED_FILE_LABEL
-        names.append(f"**{_hide_names(finding.title, unnamed_paths)}** ({location})")
+    names = [
+        f"**Находка** ({_UNNAMED_FILE_LABEL})"
+        if finding.path in unnamed_paths
+        else (
+            f"**{_hide_names(finding.title, unnamed_paths)}** "
+            f"({_inline_code(f'{finding.path}:{finding.line}')})"
+        )
+        for finding in blocking
+    ]
     return [_checklist_line("Подтвердите находки critical/high", len(names), names, limit)]
 
 
@@ -826,10 +829,10 @@ def _pack_review_body(
 
 def _render_body_only_finding(item: ProcessedFinding, unnamed_paths: frozenset[str]) -> str:
     finding = item.finding
-    location = (
-        _UNNAMED_FILE_LABEL if finding.path in unnamed_paths else f"`{finding.path}:{finding.line}`"
-    )
+    if finding.path in unnamed_paths:
+        # No model text at all: it would name the file in words an exact match cannot catch.
+        return f"- **Находка** ({_UNNAMED_FILE_LABEL}, {finding.severity})"
     return (
         f"- **{_hide_names(finding.title, unnamed_paths)}** "
-        f"({location}): {_hide_names(finding.body, unnamed_paths)}"
+        f"(`{finding.path}:{finding.line}`): {_hide_names(finding.body, unnamed_paths)}"
     )
