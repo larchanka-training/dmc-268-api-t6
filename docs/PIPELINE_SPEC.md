@@ -571,25 +571,32 @@ Bitbucket review event сейчас не отправляет отдельное
 `.review/rules.md` из полных Git tree и blob той же ревизии, даже если файл есть в
 архиве. `export-ignore` делает отсутствие в архиве недоказательным, `export-subst`
 не меняет применяемые маски. `AGENTS.md` при индексации не читается. Ошибки этого пути
-классифицируются как `policy_*`: 404/409/422, усечённый или неоднозначный листинг дерева (RFS §9) → `policy_revision_unavailable`, 401/403
-без rate-limit признаков → `policy_access_denied`, 429/limited 403 →
-`policy_rate_limited`, 5xx/transport → `policy_fetch_transient`; недопустимый документ
+классифицируются как `policy_*`: 404/409/422, усечённый или неоднозначный листинг дерева (RFS §9) → `policy_revision_unavailable`,
+401 и 5xx/transport → `policy_fetch_transient`, 429/limited 403 →
+`policy_rate_limited`, обычный 403 → `policy_access_denied`; недопустимый документ
 сохраняет код RFS §9. `Retry-After` здесь разбирается, как у run (§4.2): целые секунды
 или HTTP-date, не больше суток; невалидное значение задержки не даёт. 403/429 с
 вторичным лимитом в теле (§5.2) — тоже `policy_rate_limited`. Любая `PolicyError` завершает
 задание RELEASED: lease снят, `last_error_code=policy_*`, метрики записаны, старая
-публикация сохранена, новой нет. Отдельной index retry-политики для `policy_*` нет.
+публикация сохранена, новой нет. Отдельной index retry-политики для `policy_*` нет:
+leader-сверка с HEAD повторяет лечимые `policy_fetch_transient` и `policy_rate_limited`
+на каждом проходе, включая тот же HEAD; терминальные коды ждут новой цели, ветки или
+версии ([SD §11](SYSTEM_DESIGN.md#11-данные-согласование-с-erd-роли-6)). Классификация 401
+при чтении политики ревью не меняется: `policy_access_denied`.
 
 Запросы успешной сборки без retries (API и codeload включены, token exchange исключён):
 
-| Политика на закреплённом commit | Дополнительные запросы | Full, всего | Incremental, всего |
-|---|---|---:|---:|
-| `.review` отсутствует в полном root tree | 1 tree | 5 | 6 |
-| `.review` есть, `rules.md` отсутствует в полном tree | 2 tree | 6 | 7 |
-| Обычный rules blob, в том числе скрытый из архива | 2 tree + 1 blob | 7 | 8 |
+| Политика на закреплённом commit | Дополнительные запросы | Full без compare | Full после compare | Incremental |
+|---|---|---:|---:|---:|
+| `.review` отсутствует в полном root tree | 1 tree | 5 | 6 | 6 |
+| `.review` есть, `rules.md` отсутствует в полном tree | 2 tree | 6 | 7 | 7 |
+| Обычный rules blob, в том числе скрытый из архива | 2 tree + 1 blob | 7 | 8 | 8 |
 
 UNCHANGED — **2** запроса HEAD, без policy read. Неудачные запросы считаются в
 `github_request_count` (историческое имя колонки: считает также Bitbucket HTTP-запросы); ранняя ошибка политики не делает archive/codeload запросы.
+Full, выбранный после compare (`EXCLUSIONS_CHANGED`, `NOT_AHEAD` и др.), стоит как
+incremental: порядок HEAD → compare → политика → archive. Full без compare
+(`NO_INDEX`, `PROFILE_CHANGED`, `BRANCH_CHANGED`) читает политику сразу после HEAD.
 Все чтения идут вне DB-транзакций и внутри общего дедлайна задания.
 `index-exclusions/v2` меняет `limits_profile_version` и требует full для старой v1
 даже на том же commit; изменение digest масок также требует full. Эти +1–3 запроса
