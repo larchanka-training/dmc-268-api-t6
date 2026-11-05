@@ -81,8 +81,9 @@ carry no marker (JSON has no comments); the `diff -r` below covers them.
 Everything else (`rules/frontend.md` / `rules/backend.md`, stack-specific
 skills, `templates/`) is per-repo.
 
-Shared files: edit in `dmc-268-ui-t6`, `cp` to `dmc-268-api-t6`, then
-`diff -r` the two paths to confirm byte-identity before committing either.
+Shared files: change and commit them in `dmc-268-ui-t6` and open its pull request first. When that
+change is final, `cp` to `dmc-268-api-t6`, `diff -r` the two paths to confirm byte-identity, and
+only then commit the copy. The order in full: `skills/implement-issue/references/loop.md` §4.
 
 ## How to add a skill
 
