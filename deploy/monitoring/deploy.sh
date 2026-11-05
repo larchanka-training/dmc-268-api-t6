@@ -79,7 +79,6 @@ previous_setting() {
   if [[ -f "${ENV_FILE}" ]]; then read_compose_env_var "$1" "${ENV_FILE}" || true; fi
 }
 
-# A password of this stack: kept from .env, generated once on a fresh host.
 # An absolute path normalised by text alone: no "//", ".", trailing "/", and ".." resolved against
 # the segment before it. No realpath: its -m is GNU only, and the dirs may not exist yet.
 normalize_path() {
@@ -96,6 +95,7 @@ normalize_path() {
   printf '%s' "${result:-/}"
 }
 
+# A password of this stack: kept from .env, generated once on a fresh host.
 stack_password() {
   local name="$1" value=""
   if [[ -f "${ENV_FILE}" ]]; then
