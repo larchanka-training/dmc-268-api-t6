@@ -19,6 +19,7 @@ pytest.register_assert_rewrite(
     "tests.monitoring_deploy_host",
     "tests.code_index_postgres",
     "tests.portal_postgres",
+    "tests.code_index_indexer_support",
 )
 
 # ``configure_logging`` (the app lifespan, worker mains) changes these process-wide.
