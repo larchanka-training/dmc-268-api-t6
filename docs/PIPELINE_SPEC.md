@@ -961,7 +961,7 @@ public-state gate и trusted recovery описаны один раз в §2. Д�
 | `attention` | Medium |
 | Summary-only | Medium |
 | `clean`: coverage complete, все разрешённые файлы проверены | Low |
-| `verdict = null`, в coverage есть причина неполноты: непроверенный разрешённый файл, `unknown_path` или неполный список файлов | Medium |
+| `verdict = null`, coverage неполна: `status=partial` или любая причина в `coverage.reason_counts`, в том числе непроверенный разрешённый файл, `unsupported_path`, `identity_unresolved`, `classification_unavailable`, `unknown_path` и неполный список файлов | Medium |
 | `verdict = null`, причин нет: только binary и исключённые политикой файлы | Low |
 
 ---
