@@ -72,7 +72,7 @@ class DeviceFlowStore(Protocol):
 
     async def slow_down(self, code_hash: str, interval: int, at: datetime) -> None: ...
 
-    async def complete(self, code_hash: str, at: datetime) -> None: ...
+    async def complete(self, code_hash: str, at: datetime) -> bool: ...
 
 
 class DeviceFlowUnitOfWork(UnitOfWork, Protocol):
@@ -135,8 +135,11 @@ class AgentDeviceAccess:
             return DeviceOutcome("pending", retry_after=interval)
 
         async with self._uow_factory() as uow:
-            await uow.flows_store.complete(code_hash, self._now())
-            await uow.commit()
+            completed = await uow.flows_store.complete(code_hash, self._now())
+            if completed:
+                await uow.commit()
+        if not completed:
+            return DeviceOutcome("expired")
         if result.status in ("denied", "expired"):
             return DeviceOutcome(result.status)
         if result.access_token is None:

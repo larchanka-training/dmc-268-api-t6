@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from datetime import UTC, datetime
 from uuid import uuid4
 
@@ -13,6 +14,7 @@ from app.main import app
 from app.modules.auth.application.agent_device_access import DeviceChallenge, DeviceOutcome
 from app.modules.auth.application.agent_tokens import IssuedAgentToken
 from app.modules.auth.application.scope import AuthScope
+from app.modules.repositories.api.dtos import RepositoryUpdateDto
 
 
 class FakeDeviceAccess:
@@ -42,6 +44,13 @@ def test_public_agent_instructions_describe_complete_sequence() -> None:
         ".review/rules.md",
     ):
         assert operation in response.text
+
+    review_events = re.search(r"`reviewEvent` \(([^)]+)\)", response.text)
+    assert review_events is not None
+    values = re.findall(r"`([^`]+)`", review_events.group(1))
+    assert values
+    for value in values:
+        assert RepositoryUpdateDto.model_validate({"reviewEvent": value}).review_event == value
 
 
 def test_device_endpoints_return_only_agent_token() -> None:

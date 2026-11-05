@@ -65,15 +65,17 @@ class SqlAlchemyDeviceFlowStore:
             row.next_poll_at = at + timedelta(seconds=row.interval)
             await self._session.flush()
 
-    async def complete(self, code_hash: str, at: datetime) -> None:
+    async def complete(self, code_hash: str, at: datetime) -> bool:
         row = await self._session.scalar(
             select(AuthAgentDeviceFlow)
             .where(AuthAgentDeviceFlow.code_hash == code_hash)
             .with_for_update()
         )
-        if row is not None and row.completed_at is None:
-            row.completed_at = at
-            await self._session.flush()
+        if row is None or row.completed_at is not None or row.expires_at <= at:
+            return False
+        row.completed_at = at
+        await self._session.flush()
+        return True
 
 
 class SqlAlchemyDeviceFlowUnitOfWork(SqlAlchemyUnitOfWork):

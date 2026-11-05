@@ -48,8 +48,10 @@ def test_device_flow_reservation_and_completion_are_durable() -> None:
                 assert flow is not None and flow.repository == "octo/a"
                 await uow.commit()
             async with SqlAlchemyDeviceFlowUnitOfWork(factory) as uow:
-                await uow.flows_store.complete(code_hash, now + timedelta(seconds=6))
+                assert await uow.flows_store.complete(code_hash, now + timedelta(seconds=6))
                 await uow.commit()
+            async with SqlAlchemyDeviceFlowUnitOfWork(factory) as uow:
+                assert not await uow.flows_store.complete(code_hash, now + timedelta(seconds=7))
             async with SqlAlchemyDeviceFlowUnitOfWork(factory) as uow:
                 assert await uow.flows_store.reserve(code_hash, now + timedelta(seconds=10)) is None
             async with SqlAlchemyDeviceFlowUnitOfWork(factory) as uow:
