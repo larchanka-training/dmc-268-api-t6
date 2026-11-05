@@ -81,8 +81,10 @@ class FakeDeviceStore:
             flow.completed_at,
         )
 
-    async def complete(self, code_hash: str, at: datetime) -> None:
+    async def complete(self, code_hash: str, at: datetime) -> bool:
         flow = self.flows[code_hash]
+        if flow.completed_at is not None:
+            return False
         self.flows[code_hash] = DeviceFlow(
             flow.code_hash,
             flow.repository,
@@ -91,6 +93,7 @@ class FakeDeviceStore:
             flow.next_poll_at,
             at,
         )
+        return True
 
 
 class FakeGithub:
@@ -187,3 +190,51 @@ def test_github_slow_down_extends_poll_interval_by_at_least_five_seconds() -> No
     with pytest.raises(DevicePollTooSoon):
         clock[0] += timedelta(seconds=6)
         asyncio.run(flow.poll(challenge.device_code))
+
+
+def test_overlapping_authorized_polls_issue_only_one_agent_token() -> None:
+    class OverlappingGithub(FakeGithub):
+        def __init__(self) -> None:
+            super().__init__()
+            self.first_started = asyncio.Event()
+            self.release_first = asyncio.Event()
+
+        async def poll_device(self, code: str) -> DevicePoll:
+            self.polls += 1
+            if self.polls == 1:
+                self.first_started.set()
+                await self.release_first.wait()
+            return DevicePoll("authorized", "ghu_secret")
+
+    class CountingTokens(FakeTokens):
+        def __init__(self) -> None:
+            super().__init__()
+            self.issue_count = 0
+
+        async def issue(self, user_id: int, repository: str) -> IssuedAgentToken:
+            self.issue_count += 1
+            return await super().issue(user_id, repository)
+
+    async def exercise() -> None:
+        clock = [datetime(2026, 11, 5, tzinfo=UTC)]
+        store, github, tokens = FakeDeviceStore(), OverlappingGithub(), CountingTokens()
+        flow = AgentDeviceAccess(
+            github=github,
+            profile=FakeProfile(),
+            linker=FakeLinker(),
+            tokens=tokens,
+            uow_factory=store.uow,
+            now=lambda: clock[0],
+        )
+        challenge = await flow.start("octo/repo")
+        clock[0] += timedelta(seconds=5)
+        first = asyncio.create_task(flow.poll(challenge.device_code))
+        await github.first_started.wait()
+        clock[0] += timedelta(seconds=5)
+        second = await flow.poll(challenge.device_code)
+        github.release_first.set()
+        initial = await first
+        assert {initial.status, second.status} == {"authorized", "expired"}
+        assert tokens.issue_count == 1
+
+    asyncio.run(exercise())
