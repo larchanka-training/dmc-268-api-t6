@@ -1682,6 +1682,54 @@ def test_executive_unusable_names_appear_only_as_a_number(
     assert "moved.py" not in result.review_body
 
 
+@pytest.mark.parametrize(
+    ("snapshot", "reason"),
+    [
+        (_text_change("src\\moved.py"), "неподдерживаемый путь"),
+        (_unresolved_rename(), "не установлена идентичность файла"),
+    ],
+)
+def test_executive_finding_on_an_unusable_name_stays_counted_without_the_name(
+    snapshot: DiffSnapshot, reason: str
+) -> None:
+    result = _process_snapshots(
+        [_text_change(), snapshot],
+        finding(
+            path=snapshot.filename,
+            severity="high",
+            title=f"Leak in {snapshot.filename}",
+            body=f"The token stays in ./{snapshot.filename}.",
+        ),
+    )
+
+    assert "moved.py" not in result.review_body
+    assert result.review_body.startswith(
+        "## Executive summary\n\n**Verdict:** blocking · **Risk Score:** High\n"
+    )
+    assert _what_to_check(result) == [
+        f"- Не проверено — {reason} (1)",
+        "- Подтвердите находки critical/high (1): **Leak in имя файла скрыто** (имя файла скрыто)",
+    ]
+    assert result.review_body.endswith(
+        "- **Leak in имя файла скрыто** (имя файла скрыто): The token stays in ./имя файла скрыто."
+    )
+    assert [item.finding.path for item in result.body_only] == [snapshot.filename]
+    assert "**Risk summary:** critical: 0, high: 1," in result.review_body
+
+
+def test_executive_text_of_another_finding_does_not_repeat_an_unusable_name() -> None:
+    result = _process_snapshots(
+        [_text_change(), _unresolved_rename()],
+        finding(severity="high", title="Moved from src/moved.py"),
+    )
+
+    assert "src/moved.py" not in result.review_body
+    assert _what_to_check(result)[1] == (
+        "- Подтвердите находки critical/high (1): "
+        "**Moved from имя файла скрыто** (`app/example.py:12`)"
+    )
+
+
 def test_executive_block_stays_within_its_limit_with_every_kind_of_line() -> None:
     names = [f"{'d' * 180}{n}" for n in range(6)]
     snapshots = [
