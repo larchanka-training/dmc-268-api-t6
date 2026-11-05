@@ -7,8 +7,6 @@ import functools
 import hashlib
 import hmac
 import json
-import os
-from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any
@@ -48,17 +46,9 @@ from tests.portal_postgres import (
     RUN_DONE,
     WS_A,
     Env,
-    portal_schema,
 )
 
-
-@pytest.fixture
-def reinstall_env() -> Iterator[Env]:
-    database_url = os.environ.get("TEST_DATABASE_URL")
-    if database_url is None:
-        pytest.skip("set TEST_DATABASE_URL to run PostgreSQL integration tests")
-    with portal_schema(database_url, None) as env:
-        yield env
+pytest_plugins = ("tests.portal_postgres",)
 
 
 _SECRET = "issue113-signed-delivery"
@@ -72,8 +62,8 @@ async def read(factory: async_sessionmaker[AsyncSession], sql: str, **values: An
 
 
 @pytest.mark.integration
-def test_rebinding_requests_rules_reads_for_each_moved_repository(reinstall_env: Env) -> None:
-    engine = reinstall_env.engine()
+def test_rebinding_requests_rules_reads_for_each_moved_repository(portal_env: Env) -> None:
+    engine = portal_env.engine()
     factory = async_sessionmaker(engine, expire_on_commit=False)
     target_id = UUID(int=225)
     skipped_id = UUID(int=226)
@@ -283,7 +273,7 @@ def assert_denied(client: TestClient, headers: dict[str, str]) -> None:
 @pytest.mark.integration
 @pytest.mark.parametrize("account_id", [700, 701])
 def test_signed_reinstall_requires_each_users_fresh_oauth_and_preserves_only_same_account(
-    reinstall_env: Env, monkeypatch: pytest.MonkeyPatch, account_id: int
+    portal_env: Env, monkeypatch: pytest.MonkeyPatch, account_id: int
 ) -> None:
     key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
     for name, value in {
@@ -347,7 +337,7 @@ def test_signed_reinstall_requires_each_users_fresh_oauth_and_preserves_only_sam
         assert request.url.path.endswith("/labels")
         return httpx.Response(201, json={})
 
-    engine = reinstall_env.engine()
+    engine = portal_env.engine()
     factory = async_sessionmaker(engine, expire_on_commit=False)
     resources = ReviewsApiResources(engine, factory)
     oauth = httpx.AsyncClient(base_url="https://github.test", transport=httpx.MockTransport(github))

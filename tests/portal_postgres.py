@@ -10,12 +10,14 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import os
 from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import UUID, uuid4
 
+import pytest
 from alembic.config import Config
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, text
@@ -181,7 +183,7 @@ def _seed(connection: Any) -> None:
 def portal_schema(database_url: str, rabbitmq_url: str | None) -> Iterator[Env]:
     """A migrated, seeded schema; the review topology is reset only with a broker URL.
 
-    Each test file's fixture decides what it needs and skips without it.
+    The caller decides whether it needs a broker and skips without its required URL.
     """
     if rabbitmq_url is not None:
         asyncio.run(_reset_topology(rabbitmq_url))
@@ -206,6 +208,15 @@ def portal_schema(database_url: str, rabbitmq_url: str | None) -> Iterator[Env]:
         engine.dispose()
         if rabbitmq_url is not None:
             asyncio.run(_reset_topology(rabbitmq_url))
+
+
+@pytest.fixture
+def portal_env() -> Iterator[Env]:
+    database_url = os.environ.get("TEST_DATABASE_URL")
+    if database_url is None:
+        pytest.skip("set TEST_DATABASE_URL to run PostgreSQL integration tests")
+    with portal_schema(database_url, None) as env:
+        yield env
 
 
 @contextlib.contextmanager
