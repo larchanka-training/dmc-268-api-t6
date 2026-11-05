@@ -18,6 +18,9 @@ PUBLIC_AUTH = {
     ("post", "/api/auth/refresh"),
     ("post", "/api/auth/logout"),
     ("get", "/api/badges/github/{owner}/{repo}.svg"),
+    ("post", "/api/agent/device/start"),
+    ("post", "/api/agent/device/poll"),
+    ("get", "/api/agent/instructions"),
 }
 
 
@@ -51,7 +54,7 @@ def test_runtime_openapi_bearer_scheme(document: dict[str, Any]) -> None:
     bearer = document["components"]["securitySchemes"]["bearerAuth"]
     assert bearer["type"] == "http"
     assert bearer["scheme"] == "bearer"
-    assert bearer["bearerFormat"] == "JWT"
+    assert bearer["bearerFormat"] == "JWT or opaque agent token"
 
 
 @pytest.mark.parametrize(("method", "path"), _protected_operations())

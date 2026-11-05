@@ -21,12 +21,13 @@ info:
     suffix. IDs are UUIDs unless a field says it carries a GitHub numeric ID.
 
     **Authentication.** `auth-api` issues a 15-minute access JWT, sent as
-    `Authorization: Bearer <token>` on every other operation (global `bearerAuth`) except the
-    public badge (`/api/badges/...`, `security: []`), and a
+    `Authorization: Bearer <token>` on protected operations (global `bearerAuth`), and a
     rotating `refresh_token` cookie (30 days, `HttpOnly; Secure; SameSite=Strict;
     Path=/api/auth`). The SSE stream is read with `fetch` so it carries the same header.
-    Issuing the access token and the Bearer check on every other operation are implemented
-    in #11.
+    Agent device authorization (#249) instead issues an opaque 30-day token for one
+    GitHub repository. It is accepted only on repository settings, rules status, pull
+    request and run read operations; live user grants still apply. It cannot access
+    `/api/auth/me`, metrics, Bitbucket administration, run cancellation or SSE.
 
     **Errors.** `HTTPException` errors are `{"detail": "<message>"}` (`ErrorResponse`);
     non-Bitbucket request validation failures use FastAPI's `HTTPValidationError`:
@@ -69,6 +70,8 @@ tags:
     description: Public status badges for a README, read without signing in.
   - name: auth
     description: GitHub App user authorization and session tokens.
+  - name: agent
+    description: Headless GitHub consent and revocable, one-repository agent credentials.
 paths:
   /api/runs:
     get:
@@ -1043,6 +1046,131 @@ paths:
             image/svg+xml:
               schema:
                 type: string
+  /api/agent/instructions:
+    get:
+      operationId: getAgentInstructions
+      tags: [agent]
+      summary: Get the pasteable agent setup procedure
+      description: >-
+        Public Markdown instructions for the device flow, repository settings,
+        Git rules, first review results and revocation. The landing copy points here.
+      x-service: auth-api
+      security: []
+      responses:
+        "200":
+          description: Agent setup procedure.
+          content:
+            text/markdown:
+              schema:
+                type: string
+  /api/agent/device/start:
+    post:
+      operationId: startAgentDeviceAuthorization
+      tags: [agent]
+      summary: Begin GitHub App device authorization for one repository
+      description: >-
+        Public bootstrap. The user must approve the GitHub App in GitHub's device flow.
+        No GitHub OAuth token or App key is returned to the agent. GitHub App device flow
+        must be enabled on the App registration.
+      x-service: auth-api
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [repository]
+              properties:
+                repository:
+                  type: string
+                  maxLength: 512
+                  description: GitHub owner/repository full name.
+      responses:
+        "200":
+          description: Device code and human verification instructions.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AgentDeviceChallenge"
+        "422":
+          $ref: "#/components/responses/ValidationFailed"
+        "502":
+          description: GitHub device authorization is unavailable or disabled.
+        "503":
+          description: Agent authentication is not configured.
+  /api/agent/device/poll:
+    post:
+      operationId: pollAgentDeviceAuthorization
+      tags: [agent]
+      summary: Complete GitHub device authorization and receive an agent token
+      description: >-
+        Poll no more often than the returned interval. On authorization the API uses
+        the GitHub user token server-side to link installation grants, then returns
+        only a repository-scoped agent token. A device code is one-use.
+      x-service: auth-api
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [deviceCode]
+              properties:
+                deviceCode:
+                  type: string
+                  minLength: 1
+      responses:
+        "200":
+          description: Pending, authorized, denied or expired device flow.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AgentDevicePoll"
+        "404":
+          description: The requested repository is not available to the consenting user.
+        "422":
+          $ref: "#/components/responses/ValidationFailed"
+        "429":
+          description: Polled before the interval elapsed.
+          headers:
+            Retry-After:
+              schema:
+                type: string
+        "502":
+          description: GitHub device authorization is unavailable.
+        "503":
+          description: Agent authentication is not configured.
+  /api/agent/tokens/{token_id}:
+    parameters:
+      - name: token_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+    delete:
+      operationId: revokeAgentToken
+      tags: [agent]
+      summary: Revoke an agent token owned by the signed-in user
+      description: A browser JWT is required; an agent token cannot revoke another token.
+      x-service: auth-api
+      responses:
+        "204":
+          description: Token revoked immediately.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          description: An agent token cannot revoke another token.
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "422":
+          $ref: "#/components/responses/ValidationFailed"
+        "503":
+          description: Agent authentication is not configured.
   /api/auth/github/callback:
     post:
       operationId: exchangeGithubCode
@@ -1155,8 +1283,8 @@ components:
     bearerAuth:
       type: http
       scheme: bearer
-      bearerFormat: JWT
-      description: Access JWT issued by auth-api, valid for 15 minutes.
+      bearerFormat: JWT or opaque agent token
+      description: Browser access JWT or repository-scoped agent token, where allowed.
     refreshCookie:
       type: apiKey
       in: cookie
@@ -2306,6 +2434,46 @@ components:
           type: integer
           description: GitHub App installation ID.
       additionalProperties: false
+    AgentDeviceChallenge:
+      type: object
+      additionalProperties: false
+      required: [deviceCode, userCode, verificationUri, expiresIn, interval]
+      properties:
+        deviceCode:
+          type: string
+          description: Secret code the agent sends back only to the poll endpoint.
+        userCode:
+          type: string
+          description: Code the human enters at GitHub.
+        verificationUri:
+          type: string
+          format: uri
+        expiresIn:
+          type: integer
+          minimum: 1
+        interval:
+          type: integer
+          minimum: 1
+    AgentDevicePoll:
+      type: object
+      additionalProperties: false
+      required: [status, retryAfter, token, tokenId, expiresAt]
+      properties:
+        status:
+          type: string
+          enum: [pending, authorized, denied, expired]
+        retryAfter:
+          type: [integer, "null"]
+          minimum: 1
+        token:
+          type: [string, "null"]
+          description: Opaque repository-scoped secret, returned once after authorization.
+        tokenId:
+          type: [string, "null"]
+          format: uuid
+        expiresAt:
+          type: [string, "null"]
+          format: date-time
     Me:
       type: object
       description: >-

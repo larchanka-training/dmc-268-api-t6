@@ -511,6 +511,14 @@ sequenceDiagram
 
 Сроки токенов, cookie, claims и граница Workspace — §12; пути и схемы — `contracts/openapi.yaml`.
 
+Для AI-агента (#249) browser JWT не используется: публичный device flow GitHub
+выдаёт после согласия человека отдельный 30-дневный opaque token для одного
+GitHub Repository ([ADR 0002](adr/0002-agent-access.md)). API хранит только хеш,
+проверяет отзыв на каждом запросе и пересекает Repository ID с текущим личным
+грантом пользователя. Доступны настройки Repository и чтение результатов, но не
+ключ App, OAuth-токен, метрики или административные операции. Правила
+`.review/rules.md` агент меняет в Git, а не через portal API.
+
 ### 6.6 Чтение в UI и SSE
 
 ```mermaid
