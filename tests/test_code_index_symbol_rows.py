@@ -84,6 +84,7 @@ def test_python_names_follow_the_enclosing_chain() -> None:
             "class User:\n    pass\n\ndef broken(:\n    pass\n",
             id="py",
         ),
+        pytest.param("pkg/models.py", "class User(:\n    pass\n", id="py-overlap"),
         *(
             pytest.param(
                 f"src/models{extension}",
@@ -92,6 +93,7 @@ def test_python_names_follow_the_enclosing_chain() -> None:
             )
             for extension in (".ts", ".tsx", ".js", ".jsx")
         ),
+        pytest.param("src/models.ts", "export class User { x = ; }\n", id="ts-overlap"),
     ],
 )
 def test_broken_script_target_has_no_indexed_symbols(path: str, source: str) -> None:
