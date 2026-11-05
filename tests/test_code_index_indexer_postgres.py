@@ -166,6 +166,13 @@ _GO_MOD = b"module example.com/m\n"
             b"class User:\n    pass\n\ndef broken(:\n    pass\n",
             id="py",
         ),
+        pytest.param(
+            "pkg/app.py",
+            "pkg/models.py",
+            b"from .models import User\n\ndef run():\n    return User()\n",
+            b"class User(:\n    pass\n",
+            id="py-overlap",
+        ),
         *(
             pytest.param(
                 f"src/app{extension}",
@@ -175,6 +182,13 @@ _GO_MOD = b"module example.com/m\n"
                 id=extension[1:],
             )
             for extension in (".ts", ".tsx", ".js", ".jsx")
+        ),
+        pytest.param(
+            "src/app.ts",
+            "src/models.ts",
+            b'import { User } from "./models";\nexport function run() { return new User(); }\n',
+            b"export class User { x = ; }\n",
+            id="ts-overlap",
         ),
     ],
 )

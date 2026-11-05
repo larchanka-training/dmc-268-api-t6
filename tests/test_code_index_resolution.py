@@ -535,15 +535,31 @@ def test_go_declaration_moving_between_members_moves_the_edge_under_rule_g() -> 
 
 
 @pytest.mark.parametrize(
-    "broken",
+    ("path", "broken"),
     [
-        "package store\n\nfunc Close( {\n}\n",
-        "package store\n\nvar x = (\nfunc Open() error { return nil }\n",
+        pytest.param(
+            "internal/store/broken.go",
+            "package store\n\nfunc Close( {\n}\n",
+            id="no-duplicate",
+        ),
+        pytest.param(
+            "internal/store/broken.go",
+            "package store\n\nvar x = (\nfunc Open() error { return nil }\n",
+            id="hidden-duplicate",
+        ),
+        pytest.param(
+            "internal/store/broken.go",
+            "packag store\n\nfunc Close() {}\n",
+            id="broken-clause-beside-valid-member",
+        ),
+        pytest.param(
+            "internal/store/open.go",
+            "packag store\n\nfunc Open() error { return nil }\n",
+            id="only-member-with-broken-clause",
+        ),
     ],
-    ids=["no-duplicate", "hidden-duplicate"],
 )
-def test_go_broken_member_refuses_the_whole_package(broken: str) -> None:
-    path = "internal/store/broken.go"
+def test_go_broken_member_refuses_the_whole_package(path: str, broken: str) -> None:
     assert _facts(path, broken).has_errors
     sources = {
         "internal/store/open.go": "package store\n\nfunc Open() error { return nil }\n",
