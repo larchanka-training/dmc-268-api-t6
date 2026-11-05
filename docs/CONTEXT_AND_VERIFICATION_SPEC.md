@@ -241,28 +241,28 @@ tree-sitter, кэши, LLM gateway, persistence и публикацию. Router 
 | Владелец | Ответственность | Результат для других участников |
 | --- | --- | --- |
 | Инженер 3 — **createunix** | Порты чтения VCS и их GitHub-реализация; DiffMap; загрузка `.review/rules.md` и корневого `AGENTS.md`, проверка raw bytes/UTF-8/лимитов, нормализация, разбор только `review-ignore`; таблица `run_policy_snapshots` и все её миграции, связанное хранение закреплённых версий run и staging `run_policy_documents`; AST и отбор контекста | Неизменяемые policy/diff snapshots, полные документы и контекст с provenance |
-| Инженер 4 — [#120](https://github.com/larchanka-training/dmc-268-api-t6/issues/120) | Контракт и значения `prompt_bindings`/`execution_profile` (промпты, модели и профили); безопасный prompt envelope; бюджет после окончательного render; pre-send guard и manifest каждого LLM-вызова; review/verifier и проверка `evidence_refs`/`requirement_refs` | Данные для закрепления версий при создании run; проверенные кандидаты и данные верификации/покрытия для финализации результата |
+| LLM-пайплайн (prompt builder, gateway и `ReflectionPass`) — [#120](https://github.com/larchanka-training/dmc-268-api-t6/issues/120) | Контракт и значения `prompt_bindings`/`execution_profile` (промпты, модели и профили); безопасный prompt envelope; бюджет после окончательного render; pre-send guard и manifest каждого LLM-вызова; review/verifier и проверка `evidence_refs`/`requirement_refs` | Данные для закрепления версий при создании run; проверенные кандидаты и данные верификации/покрытия для финализации результата |
 | Инженер 5 | Адаптеры записи VCS и Publisher: отображение допустимых якорей в API, сохранённый публикационный план, отправка и восстановление после ошибок | Подтверждённые remote identities/receipts и состояние публикации |
 
 Версии промптов, моделей и профилей закрепляются при создании run до обращения
 к VCS. Загрузчик атомарно создаёт полный snapshot, используя уже закреплённые
 значения. Инженер 3 владеет также миграциями полей `prompt_bindings` и
-`execution_profile`; инженер 4 передаёт их контракт и значения, не создаёт
+`execution_profile`; LLM-пайплайн передаёт их контракт и значения, не создаёт
 отдельных миграций этой таблицы и не дополняет готовый snapshot через `UPDATE`.
 
-Передача инженеру 4 содержит `policy_snapshot_id`, `policy_digest`,
+Передача LLM-пайплайну содержит `policy_snapshot_id`, `policy_digest`,
 `policy_base_sha`, версии профилей и обе записи документов с `path`, `presence`,
 `blob_oid`, `raw_sha256`, `text_sha256`, полным нормализованным `text` и координатами
 его строк. Дополнительно передаются разобранные ignore-маски и `ignore_digest`.
 Это проекция закреплённого snapshot из RULES_FORMAT_SPEC §7, а не повторная загрузка
 активных файлов. Backend не извлекает из Markdown семантический список требований:
-инженер 4 использует полные документы, а атрибуцию проверяет по точным строкам,
+LLM-пайплайн использует полные документы, а атрибуцию проверяет по точным строкам,
 реально показанным в manifest соответствующего вызова.
 
 Версия общего профиля лимитов закрепляется при создании run; загрузчик использует
 закреплённую версию, а инженер 3 проверяет ограничения доступных ему исходных данных.
 Проверка итогового policy/token budget и допуска всех источников после render
-принадлежит инженеру 4: успешная загрузка
+принадлежит LLM-пайплайну: успешная загрузка
 документов сама по себе не разрешает LLM-вызов. Общие контракты и порядок передачи
 не меняют runtime-последовательность §2.2.
 
@@ -1389,7 +1389,7 @@ Legacy missing_patch нельзя повышать по одному empty SHA: 
 
 | Данные | Контракт |
 | --- | --- |
-| `run_policy_snapshots` | По RULES_FORMAT_SPEC; один immutable snapshot на run. Инженер 3 владеет таблицей и всеми её миграциями, включая `prompt_bindings`/`execution_profile`, связанным хранением закреплённых версий run и staging `run_policy_documents`; инженер 4 предоставляет контракт и значения без последующего изменения готового snapshot |
+| `run_policy_snapshots` | По RULES_FORMAT_SPEC; один immutable snapshot на run. Инженер 3 владеет таблицей и всеми её миграциями, включая `prompt_bindings`/`execution_profile`, связанным хранением закреплённых версий run и staging `run_policy_documents`; LLM-пайплайн предоставляет контракт и значения без последующего изменения готового snapshot |
 | `run_diff_maps` | `run_id UNIQUE`, идентичности ревизий, provider refs, version, digest, hunks |
 | `context_manifests` | Один manifest на `call_id`, FK run/snapshot и digests |
 | `context_evidence_blobs` | Workspace-scoped dedup по content hash, точные показанные excerpts |
@@ -2153,9 +2153,10 @@ quality gates не объявляются достигнутыми без baseli
    слит первым, чтобы следующие изменения опирались на один принятый контракт.
 2. После его слияния инженер 3 реализует загрузку/снимки правил, ignore, AST и
    контекст; инженер 5 параллельно реализует публикацию и её восстановление.
-   Инженер 4 реализует безопасный envelope, окончательные guard/manifests,
-   атрибуцию и обязательный verifier по контракту передачи из §3.1. Незавершённая
-   часть не подменяется заглушкой в production-пути публикации.
+   LLM-пайплайн (prompt builder, gateway и `ReflectionPass`) реализует безопасный
+   envelope, окончательные guard/manifests, атрибуцию и обязательный verifier по
+   контракту передачи из §3.1. Незавершённая часть не подменяется заглушкой в
+   production-пути публикации.
 3. Интеграция связывает policy snapshots/versions, base-only conventions,
    provenance, контекст, manifests и технические фильтры RIGHT с verifier,
    final result, API/UI coverage и write-back. Новый pipeline включается только
