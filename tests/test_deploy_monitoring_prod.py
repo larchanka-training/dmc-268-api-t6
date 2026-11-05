@@ -632,6 +632,47 @@ def test_a_sibling_directory_is_not_inside_the_other(prod_host: Host) -> None:
     assert result.returncode == 0, result.stderr
 
 
+def _assert_relative_dump_dir_refused(
+    stack: Host, result: subprocess.CompletedProcess[str], named: str
+) -> None:
+    assert result.returncode == 1
+    assert "BACKUP_DIR and PROD_BACKUP_DIR must be absolute paths" in result.stderr
+    assert named in result.stderr
+    # Refused before anything on the host changed.
+    assert not stack.env_file.exists()
+    assert stack.log("psql.log") == ""
+    assert " up " not in stack.log("docker.log")
+    assert not (stack.root / "dumps").exists()
+    assert not (stack.monitoring_dir / "dumps").exists()
+
+
+@pytest.mark.parametrize("variable", ["BACKUP_DIR", "PROD_BACKUP_DIR"])
+def test_a_relative_dump_dir_stops_a_prod_deploy(
+    prod_host: Host, monkeypatch: pytest.MonkeyPatch, variable: str
+) -> None:
+    monkeypatch.chdir(prod_host.root)
+
+    result = _deploy_with_prod(prod_host, **{variable: "./dumps"})
+
+    _assert_relative_dump_dir_refused(prod_host, result, f"{variable}=./dumps")
+
+
+def test_a_relative_dump_dir_cannot_pass_for_another_directory(
+    prod_host: Host, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # From this $PWD the two paths differ, but Compose resolves the relative one from the first
+    # compose file: one directory would be mounted for both services.
+    monkeypatch.chdir(prod_host.root)
+
+    result = _deploy_with_prod(
+        prod_host,
+        BACKUP_DIR="./dumps",
+        PROD_BACKUP_DIR=str(prod_host.monitoring_dir / "dumps"),
+    )
+
+    _assert_relative_dump_dir_refused(prod_host, result, "BACKUP_DIR=./dumps")
+
+
 # BSD realpath has no -m: the check of the dump dirs must not depend on it.
 FAKE_BSD_REALPATH = """\
 #!/bin/sh
