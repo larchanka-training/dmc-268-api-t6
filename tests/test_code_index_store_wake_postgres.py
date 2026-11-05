@@ -326,6 +326,7 @@ def test_reconcile_head_leaves_another_generation_a_purged_and_a_failed_index_al
     ("code", "head", "marked"),
     [
         pytest.param("policy_document_too_large", {}, False, id="policy-same-head"),
+        pytest.param("policy_access_denied", {}, False, id="policy-access-denied-same-head"),
         pytest.param("vcs_access_denied", {}, False, id="access-same-head"),
         pytest.param("internal_error", {}, False, id="internal-same-head"),
         # A cut or ambiguous listing of one SHA lists alike on every pass (#247).

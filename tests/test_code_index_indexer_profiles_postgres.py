@@ -6,8 +6,11 @@ The scenarios use the shared fake VCS and real indexer harness.
 from __future__ import annotations
 
 from dataclasses import replace
+from datetime import datetime
 
+import httpx
 import pytest
+from sqlalchemy import text
 
 from app.modules.code_index.application import build_index
 from app.modules.code_index.application.build_index import (
@@ -17,6 +20,9 @@ from app.modules.code_index.application.build_index import (
 )
 from app.modules.code_index.application.exclusions import ExclusionClass
 from app.modules.code_index.domain.enums import IndexStatus
+from app.modules.code_index.infrastructure.github_snapshot_source import (
+    GitHubRepositorySnapshotSource,
+)
 from app.modules.reviews.application.policy_errors import PolicyError, PolicyErrorCode
 from tests.code_index_indexer_support import (
     _USER,
@@ -192,6 +198,141 @@ def test_hidden_policy_failure_keeps_previous_published_rows(
         assert (state.stats.downloaded_bytes, state.stats.github_request_count) == (0, requests)
         assert await indexer.snapshot(database.a) == before
         assert await _raw_rows(database, database.a) == rows
+
+    _run(database, scenario)
+
+
+async def _wake_marker(database: _Database) -> datetime | None:
+    async with database.factory() as session:
+        marker = await session.scalar(
+            text("SELECT wake_requested_at FROM code_index_states WHERE repository_id = :id"),
+            {"id": database.a},
+        )
+    assert marker is None or isinstance(marker, datetime)
+    return marker
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize(
+    ("status", "target", "expected_code", "requests", "retries"),
+    [
+        (401, "tree", "policy_fetch_transient", 4, True),
+        (401, "blob", "policy_fetch_transient", 6, True),
+        (403, "tree", "policy_access_denied", 4, False),
+        (403, "blob", "policy_access_denied", 6, False),
+    ],
+)
+def test_policy_http_failure_reconciles_only_healable_401_on_same_head(
+    database: _Database, status: int, target: str, expected_code: str, requests: int, retries: bool
+) -> None:
+    class Tokens:
+        async def get_installation_access_token(self, installation_external_id: int) -> str:
+            assert installation_external_id == 17
+            return "token"
+
+    async def scenario(indexer: Indexer) -> None:
+        before = await indexer.start(_hidden_policy_tree())
+        published = await indexer.state(database.a)
+        head = indexer.branch.push(_hidden_policy_tree(target=2))
+        async with indexer.uow() as uow:
+            assert await uow.index.request_build(database.a, target_commit_sha=head)
+            await uow.commit()
+
+        def respond(request: httpx.Request) -> httpx.Response:
+            path = request.url.path
+            if path == "/repos/octo/indexed-a":
+                return httpx.Response(200, json={"default_branch": "main"})
+            if path == "/repos/octo/indexed-a/commits/main":
+                return httpx.Response(200, text=head)
+            if path.endswith(f"/compare/{published.indexed_commit_sha}...{head}"):
+                return httpx.Response(
+                    200,
+                    json={
+                        "status": "ahead",
+                        "files": [{"filename": "lib.py", "status": "modified"}],
+                    },
+                )
+            if path.endswith(f"/git/trees/{head}"):
+                if target == "tree":
+                    return httpx.Response(status)
+                return httpx.Response(
+                    200,
+                    json={
+                        "tree": [
+                            {"path": ".review", "type": "tree", "mode": "040000", "sha": "d" * 40}
+                        ],
+                        "truncated": False,
+                    },
+                )
+            if path.endswith(f"/git/trees/{'d' * 40}"):
+                return httpx.Response(
+                    200,
+                    json={
+                        "tree": [
+                            {"path": "rules.md", "type": "blob", "mode": "100644", "sha": "e" * 40}
+                        ],
+                        "truncated": False,
+                    },
+                )
+            if path.endswith(f"/git/blobs/{'e' * 40}"):
+                return httpx.Response(status)
+            raise AssertionError(f"unexpected GitHub request: {path}")
+
+        async with httpx.AsyncClient(
+            base_url="https://api.github.com", transport=httpx.MockTransport(respond)
+        ) as client:
+            outcome = await indexer.build(
+                database.a,
+                1,
+                source=lambda repository: GitHubRepositorySnapshotSource(
+                    client=client,
+                    token_provider=Tokens(),
+                    installation_external_id=repository.installation_external_id,
+                    repository_full_name=repository.full_name,
+                ),
+            )
+
+        assert (outcome.status, outcome.error_code, outcome.github_request_count) == (
+            BuildStatus.RELEASED,
+            expected_code,
+            requests,
+        )
+        released = await indexer.state(database.a)
+        assert (released.status, released.last_error_code) == (IndexStatus.READY, expected_code)
+        assert (released.indexed_commit_sha, released.published_publication) == (
+            published.indexed_commit_sha,
+            published.published_publication,
+        )
+        assert await indexer.snapshot(database.a) == before
+
+        marker = await _wake_marker(database)
+        assert marker is not None
+        async with indexer.uow() as uow:
+            assert await uow.index.clear_wake_request(database.a, marker)
+            await uow.commit()
+        async with database.factory() as session:
+            read_at = await session.scalar(text("SELECT clock_timestamp()"))
+        assert read_at is not None
+        async with indexer.uow() as uow:
+            marked = await uow.index.reconcile_head(
+                database.a,
+                generation=1,
+                branch="main",
+                commit_sha=head,
+                read_at=read_at,
+                versions_current=lambda profile: True,
+            )
+            await uow.commit()
+        assert marked is retries
+        reconciled = await indexer.state(database.a)
+        assert (await _wake_marker(database) is not None) is retries
+        assert reconciled.last_error_code == expected_code
+
+        if retries:
+            healed = await indexer.build(database.a)
+            assert healed.status is BuildStatus.PUBLISHED
+            healed_state = await indexer.state(database.a)
+            assert (healed_state.indexed_commit_sha, healed_state.last_error_code) == (head, None)
 
     _run(database, scenario)
 
