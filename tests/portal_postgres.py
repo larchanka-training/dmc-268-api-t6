@@ -181,7 +181,7 @@ def _seed(connection: Any) -> None:
 def portal_schema(database_url: str, rabbitmq_url: str | None) -> Iterator[Env]:
     """A migrated, seeded schema; the review topology is reset only with a broker URL.
 
-    Each test file's fixture decides what it needs and skips without it.
+    The caller decides whether it needs a broker and skips without its required URL.
     """
     if rabbitmq_url is not None:
         asyncio.run(_reset_topology(rabbitmq_url))
