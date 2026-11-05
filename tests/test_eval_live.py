@@ -913,19 +913,19 @@ def test_records_exactly_the_twenty_four_active_case_ids(tmp_path: Path) -> None
     case_ids = tuple(
         sorted(path.name for path in (DATASET_ROOT / "cases").iterdir() if path.is_dir())
     )
-    assert len(case_ids) == 24
+    assert len(case_ids) == 26
     root = fixture_root(tmp_path, case_ids)
     transport = FakeTransport([answer("primary-model", VALID) for _ in case_ids])
 
     manifest = record(root, transport)
 
-    assert len(transport.requests) == 24
+    assert len(transport.requests) == 26
     assert set(manifest["responses"]) == set(case_ids)
     assert {path.name for path in (root / "responses").glob("*.json")} == {
         "manifest.json",
         *(f"{case_id}.json" for case_id in case_ids),
     }
-    assert len(manifest["run_metadata"]["cases"]) == 24
+    assert len(manifest["run_metadata"]["cases"]) == 26
     assert list(root.glob(".responses-*")) == []
     assert "review/rules/default-backend.v1.json" in manifest["static_inputs"]
     assert "review/rules/default-frontend.v1.json" in manifest["static_inputs"]
@@ -1006,7 +1006,7 @@ def test_mid_corpus_payment_failure_makes_live_cli_nonpublishable(
     case_ids = tuple(
         sorted(path.name for path in (DATASET_ROOT / "cases").iterdir() if path.is_dir())
     )
-    assert len(case_ids) == 24
+    assert len(case_ids) == 26
     root = fixture_root(tmp_path, case_ids)
     failed_case_id = case_ids[12]
     outcomes: list[ChatResponse | TransportError] = []
@@ -1025,7 +1025,7 @@ def test_mid_corpus_payment_failure_makes_live_cli_nonpublishable(
     exit_code = main(["--root", str(root)], transport=transport, model_settings=settings())
 
     assert exit_code == 1
-    assert len(transport.requests) == 25
+    assert len(transport.requests) == 27
     manifest = json.loads((root / "responses/manifest.json").read_text())
     assert set(manifest["responses"]) == set(case_ids)
     assert manifest["run_metadata"]["cases"][failed_case_id]["gateway_status"] == (
@@ -1036,7 +1036,7 @@ def test_mid_corpus_payment_failure_makes_live_cli_nonpublishable(
     assert response(root, failed_case_id) == b""
     assert response(root, case_ids[13]) == VALID.encode()
     report = replay(root)
-    assert (report["case_count"], report["valid_response_count"]) == (24, 23)
+    assert (report["case_count"], report["valid_response_count"]) == (26, 25)
     assert "not publishable" in report["warnings"][0]
     assert replay_main(["--root", str(root)]) == 1
     captured = capsys.readouterr()
@@ -1537,9 +1537,9 @@ def test_all_active_cases_capture_offline_with_actual_bounded_pr_prefixes(
 
     monkeypatch.setattr(httpx.AsyncClient, "send", forbidden_http)
     case_ids = tuple(sorted(path.name for path in (DATASET_ROOT / "cases").iterdir()))
-    assert len(case_ids) == 24
+    assert len(case_ids) == 26
     root = fixture_root(tmp_path, case_ids)
-    transport = FakeTransport([answer("primary-model", VALID)] * 24)
+    transport = FakeTransport([answer("primary-model", VALID)] * 26)
 
     if capture_mode == "cli":
         assert main(["--root", str(root)], transport=transport, model_settings=settings()) == 0
@@ -1606,8 +1606,8 @@ def test_all_active_cases_capture_offline_with_actual_bounded_pr_prefixes(
         ),
     }
     assert len(expected["LOG-03"]) == 500
-    assert len(transport.requests) == 24
-    assert len(manifest["responses"]) == 24
+    assert len(transport.requests) == 26
+    assert len(manifest["responses"]) == 26
     for case_id, request in zip(case_ids, transport.requests, strict=True):
         if case_id in expected:
             messages = expected[case_id]

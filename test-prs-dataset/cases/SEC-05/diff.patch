@@ -1,0 +1,1313 @@
+diff --git a/README.md b/README.md
+index 86674f3..7c6528c 100644
+--- a/README.md
++++ b/README.md
+@@ -1,19 +1,30 @@
+ # SWAPI MCP Server
+ 
+-A [Model Context Protocol](https://modelcontextprotocol.io) (MCP) server that exposes a subset of the
++A [Model Context Protocol](https://modelcontextprotocol.io) (MCP) server that exposes the
+ [SWAPI — The Star Wars API](https://swapi.dev/) as MCP tools, so an AI agent can answer questions
+-about Star Wars episodes and their characters without knowing anything about REST URLs.
++about Star Wars films, characters, planets, starships, vehicles, and species without knowing anything about REST URLs.
+ 
+ Runs locally over **stdio transport** — no HTTP server of its own.
+ 
+-## Scope: two tools
++## Exposed Tools
+ 
+-Per requirements, the server exposes exactly two tools:
++The server exposes 13 tools across all SWAPI resources:
+ 
+ | MCP tool | Source endpoints | Purpose |
+ |---|---|---|
+ | `list_films` | `GET /films/` | List all episodes (sorted, concise summaries) |
+-| `get_film_characters` | `GET /films/{id}/` → `GET /people/{id}/` (for each link) | Get all characters of an episode, resolved to names and key attributes |
++| `get_film` | `GET /films/{id}/` | Get full film details (opening crawl, director, linked resources) |
++| `get_film_characters` | `GET /films/{id}/` → `GET /people/{id}/` | Get all characters of an episode, resolved to names and key attributes |
++| `get_person` | `GET /people/{id}/` | Get details of a character by id or URL |
++| `search_people` | `GET /people/?search=&page=` | Search characters by name or list characters with pagination |
++| `get_planet` | `GET /planets/{id}/` | Get details of a planet by id or URL |
++| `search_planets` | `GET /planets/?search=&page=` | Search planets by name or list planets with pagination |
++| `get_starship` | `GET /starships/{id}/` | Get details of a starship by id or URL |
++| `search_starships` | `GET /starships/?search=&page=` | Search starships by name/model or list starships with pagination |
++| `get_vehicle` | `GET /vehicles/{id}/` | Get details of a vehicle by id or URL |
++| `search_vehicles` | `GET /vehicles/?search=&page=` | Search vehicles by name/model or list vehicles with pagination |
++| `get_species` | `GET /species/{id}/` | Get details of a species by id or URL |
++| `search_species` | `GET /species/?search=&page=` | Search species by name or list species with pagination |
+ 
+ SWAPI's `characters` field on a film contains only URLs, so `get_film_characters` follows those
+ hypermedia links and resolves each character to `{ id, name, gender, birth_year, height, mass,
+@@ -211,7 +222,14 @@ src/
+   server.ts         McpServer factory + tool registration
+   api-client.ts     SWAPI HTTP client (fetch, timeout, error mapping)
+   config.ts         env parsing & validation
+-  tools/films.ts    list_films, get_film_characters
++  tools/
++    common.ts       shared formatting & error handling
++    films.ts        list_films, get_film, get_film_characters
++    people.ts       get_person, search_people
++    planets.ts      get_planet, search_planets
++    species.ts      get_species, search_species
++    starships.ts    get_starship, search_starships
++    vehicles.ts     get_vehicle, search_vehicles
+   types/swapi.ts    SWAPI response types + URL id parsing
+ test/               vitest unit tests (fetch is stubbed)
+ ```
+diff --git a/package.json b/package.json
+index 0134c51..faf52f7 100644
+--- a/package.json
++++ b/package.json
+@@ -1,7 +1,7 @@
+ {
+   "name": "swapi-mcp",
+   "version": "1.0.0",
+-  "description": "MCP server (stdio) exposing SWAPI: list all film episodes and get characters of an episode",
++  "description": "MCP server (stdio) exposing SWAPI: films, characters, planets, starships, vehicles, and species",
+   "type": "module",
+   "main": "index.js",
+   "license": "MIT",
+diff --git a/src/api-client.ts b/src/api-client.ts
+index c0ead06..8234e80 100644
+--- a/src/api-client.ts
++++ b/src/api-client.ts
+@@ -1,5 +1,13 @@
+ import type { Config } from "./config.js";
+-import type { Film, Paginated, Person } from "./types/swapi.js";
++import type {
++  Film,
++  Paginated,
++  Person,
++  Planet,
++  Species,
++  Starship,
++  Vehicle,
++} from "./types/swapi.js";
+ 
+ /** Error thrown for any failed SWAPI HTTP request (non-2xx, network failure, timeout). */
+ export class ApiError extends Error {
+@@ -35,8 +43,8 @@ export class SwapiClient {
+     return page.results;
+   }
+ 
+-  async getFilm(filmId: number): Promise<Film> {
+-    return this.request<Film>(`films/${filmId}/`);
++  async getFilm(filmIdOrUrl: number | string): Promise<Film> {
++    return this.getResource<Film>("films", filmIdOrUrl);
+   }
+ 
+   /** Finds a film by its episode number (1-6), since film resource ids do not match episode ids. */
+@@ -45,14 +53,95 @@ export class SwapiClient {
+     return films.find((film) => film.episode_id === episodeId);
+   }
+ 
+-  /** Fetches a person by their absolute SWAPI URL (as found in Film.characters). */
+-  async getPerson(personUrl: string): Promise<Person> {
+-    return this.request<Person>(personUrl);
++  /** Fetches a person by id or by their absolute SWAPI URL. */
++  async getPerson(idOrUrl: number | string): Promise<Person> {
++    return this.getResource<Person>("people", idOrUrl);
+   }
+ 
+-  private async request<T>(pathOrUrl: string): Promise<T> {
++  /** Searches people by name or returns paginated list of characters. */
++  async searchPeople(search?: string, page?: number): Promise<Paginated<Person>> {
++    return this.searchResource<Person>("people", search, page);
++  }
++
++  /** Fetches a planet by id or by its absolute SWAPI URL. */
++  async getPlanet(idOrUrl: number | string): Promise<Planet> {
++    return this.getResource<Planet>("planets", idOrUrl);
++  }
++
++  /** Searches planets by name or returns paginated list of planets. */
++  async searchPlanets(search?: string, page?: number): Promise<Paginated<Planet>> {
++    return this.searchResource<Planet>("planets", search, page);
++  }
++
++  /** Fetches a starship by id or by its absolute SWAPI URL. */
++  async getStarship(idOrUrl: number | string): Promise<Starship> {
++    return this.getResource<Starship>("starships", idOrUrl);
++  }
++
++  /** Searches starships by name or model, or returns paginated list of starships. */
++  async searchStarships(search?: string, page?: number): Promise<Paginated<Starship>> {
++    return this.searchResource<Starship>("starships", search, page);
++  }
++
++  /** Fetches a vehicle by id or by its absolute SWAPI URL. */
++  async getVehicle(idOrUrl: number | string): Promise<Vehicle> {
++    return this.getResource<Vehicle>("vehicles", idOrUrl);
++  }
++
++  /** Searches vehicles by name or model, or returns paginated list of vehicles. */
++  async searchVehicles(search?: string, page?: number): Promise<Paginated<Vehicle>> {
++    return this.searchResource<Vehicle>("vehicles", search, page);
++  }
++
++  /** Fetches a species by id or by its absolute SWAPI URL. */
++  async getSpecies(idOrUrl: number | string): Promise<Species> {
++    return this.getResource<Species>("species", idOrUrl);
++  }
++
++  /** Searches species by name or returns paginated list of species. */
++  async searchSpecies(search?: string, page?: number): Promise<Paginated<Species>> {
++    return this.searchResource<Species>("species", search, page);
++  }
++
++  /** Fetches a single resource by its numeric id or absolute URL. */
++  async getResource<T>(resource: string, idOrUrl: number | string): Promise<T> {
++    const raw = String(idOrUrl).trim();
++    if (raw.startsWith("http://") || raw.startsWith("https://")) {
++      return this.request<T>(raw);
++    }
++    const cleanId = raw.replace(/^\/+|\/+$/g, "");
++    return this.request<T>(`${resource}/${cleanId}/`);
++  }
++
++  /** Queries a resource collection with optional search and pagination parameters. */
++  async searchResource<T>(
++    resource: string,
++    search?: string,
++    page?: number,
++  ): Promise<Paginated<T>> {
++    const params: Record<string, string | number | undefined> = {};
++    if (search !== undefined && search.trim() !== "") {
++      params.search = search.trim();
++    }
++    if (page !== undefined) {
++      params.page = page;
++    }
++    return this.request<Paginated<T>>(`${resource}/`, params);
++  }
++
++  private async request<T>(
++    pathOrUrl: string,
++    params?: Record<string, string | number | undefined>,
++  ): Promise<T> {
+     const url = new URL(pathOrUrl, this.baseUrl);
+     url.searchParams.set("format", "json");
++    if (params) {
++      for (const [key, value] of Object.entries(params)) {
++        if (value !== undefined && value !== "") {
++          url.searchParams.set(key, String(value));
++        }
++      }
++    }
+ 
+     let response: Response;
+     try {
+diff --git a/src/server.ts b/src/server.ts
+index fb4b744..83c89a7 100644
+--- a/src/server.ts
++++ b/src/server.ts
+@@ -2,6 +2,11 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+ import { SwapiClient } from "./api-client.js";
+ import { loadConfig, type Config } from "./config.js";
+ import { registerFilmTools } from "./tools/films.js";
++import { registerPeopleTools } from "./tools/people.js";
++import { registerPlanetTools } from "./tools/planets.js";
++import { registerSpeciesTools } from "./tools/species.js";
++import { registerStarshipTools } from "./tools/starships.js";
++import { registerVehicleTools } from "./tools/vehicles.js";
+ 
+ export const SERVER_NAME = "swapi-mcp";
+ export const SERVER_VERSION = "1.0.0";
+@@ -10,5 +15,10 @@ export function createServer(config: Config = loadConfig()): McpServer {
+   const server = new McpServer({ name: SERVER_NAME, version: SERVER_VERSION });
+   const client = new SwapiClient(config);
+   registerFilmTools(server, client);
++  registerPeopleTools(server, client);
++  registerPlanetTools(server, client);
++  registerStarshipTools(server, client);
++  registerVehicleTools(server, client);
++  registerSpeciesTools(server, client);
+   return server;
+ }
+diff --git a/src/tools/common.ts b/src/tools/common.ts
+new file mode 100644
+index 0000000..ce7e571
+--- /dev/null
++++ b/src/tools/common.ts
+@@ -0,0 +1,47 @@
++import { ApiError } from "../api-client.js";
++import { idFromUrl, type Paginated } from "../types/swapi.js";
++
++export function jsonResult(data: unknown) {
++  return {
++    content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }],
++  };
++}
++
++/**
++ * API-level failures (HTTP errors, timeouts, network problems) are returned as a
++ * tool result with isError=true so the agent sees status and API message.
++ * Unexpected internal errors are rethrown and handled by the SDK.
++ */
++export function toErrorResult(error: unknown) {
++  if (!(error instanceof ApiError)) {
++    throw error;
++  }
++  return {
++    isError: true,
++    content: [{ type: "text" as const, text: error.message }],
++  };
++}
++
++/** Enriches a SWAPI entity with a convenient numeric id extracted from its URL. */
++export function enrichWithId<T extends { url: string }>(
++  item: T,
++  resource?: string,
++): T & { id: number | undefined } {
++  return {
++    id: idFromUrl(item.url, resource),
++    ...item,
++  };
++}
++
++/** Enriches all items in a paginated response with numeric ids. */
++export function formatPaginatedResult<T extends { url: string }>(
++  page: Paginated<T>,
++  resource?: string,
++) {
++  return {
++    count: page.count,
++    next: page.next,
++    previous: page.previous,
++    results: page.results.map((item) => enrichWithId(item, resource)),
++  };
++}
+diff --git a/src/tools/films.ts b/src/tools/films.ts
+index 089f922..32ae596 100644
+--- a/src/tools/films.ts
++++ b/src/tools/films.ts
+@@ -3,6 +3,7 @@ import { ErrorCode, McpError } from "@modelcontextprotocol/sdk/types.js";
+ import { z } from "zod";
+ import { ApiError, type SwapiClient } from "../api-client.js";
+ import { idFromUrl, type Film } from "../types/swapi.js";
++import { jsonResult, toErrorResult } from "./common.js";
+ 
+ interface FilmSummary {
+   film_id: number | undefined;
+@@ -42,7 +43,7 @@ export function registerFilmTools(server: McpServer, client: SwapiClient): void
+         "Returns for each episode: film_id (SWAPI resource id), episode_id (episode number), " +
+         "title, release date, director, producer and how many characters appear in it. " +
+         "Use this tool first to discover episodes; then pass film_id or episode_id " +
+-        "to get_film_characters to fetch the characters of a specific episode.",
++        "to get_film_characters to fetch characters, or get_film for full episode details.",
+       inputSchema: {},
+     },
+     async () => {
+@@ -58,6 +59,60 @@ export function registerFilmTools(server: McpServer, client: SwapiClient): void
+     },
+   );
+ 
++  server.registerTool(
++    "get_film",
++    {
++      title: "Get Star Wars film details",
++      description:
++        "Get detailed information about a specific Star Wars film episode, including title, " +
++        "episode number, opening crawl text, director, producer, release date, and links to " +
++        "characters, planets, starships, vehicles, and species. " +
++        "Provide EITHER film_id (SWAPI film resource id, 1-6 — see the film_id field of list_films) " +
++        "OR episode_id (the episode number, 1-6, e.g. 4 for 'A New Hope'); exactly one of them is required. " +
++        "Note: SWAPI film ids do not match episode numbers (film_id 1 is Episode IV).",
++      inputSchema: {
++        film_id: z
++          .number()
++          .int()
++          .positive()
++          .optional()
++          .describe(
++            "SWAPI film resource id (1-6). Film 1 is Episode IV, film 4 is Episode I. " +
++              "Use the film_id returned by list_films.",
++          ),
++        episode_id: z
++          .number()
++          .int()
++          .positive()
++          .optional()
++          .describe(
++            "Episode number (1-6), e.g. 4 for 'A New Hope'. Provide this OR film_id, not both.",
++          ),
++      },
++    },
++    async ({ film_id: filmId, episode_id: episodeId }) => {
++      if ((filmId === undefined) === (episodeId === undefined)) {
++        throw new McpError(
++          ErrorCode.InvalidParams,
++          "Provide exactly one of 'film_id' or 'episode_id' to identify the episode.",
++        );
++      }
++      try {
++        const film =
++          filmId !== undefined
++            ? await client.getFilm(filmId)
++            : await requireFilmByEpisode(client, episodeId as number);
++
++        return jsonResult({
++          film_id: idFromUrl(film.url, "films"),
++          ...film,
++        });
++      } catch (error) {
++        return toErrorResult(error);
++      }
++    },
++  );
++
+   server.registerTool(
+     "get_film_characters",
+     {
+@@ -175,24 +230,3 @@ function toFilmSummary(film: Film): FilmSummary {
+     character_count: film.characters.length,
+   };
+ }
+-
+-function jsonResult(data: unknown) {
+-  return {
+-    content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }],
+-  };
+-}
+-
+-/**
+- * API-level failures (HTTP errors, timeouts, network problems) are returned as a
+- * tool result with isError=true so the agent sees status and API message.
+- * Unexpected internal errors are rethrown and handled by the SDK.
+- */
+-function toErrorResult(error: unknown) {
+-  if (!(error instanceof ApiError)) {
+-    throw error;
+-  }
+-  return {
+-    isError: true,
+-    content: [{ type: "text" as const, text: error.message }],
+-  };
+-}
+diff --git a/src/tools/people.ts b/src/tools/people.ts
+new file mode 100644
+index 0000000..c33c7dc
+--- /dev/null
++++ b/src/tools/people.ts
+@@ -0,0 +1,72 @@
++import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
++import { z } from "zod";
++import type { SwapiClient } from "../api-client.js";
++import {
++  enrichWithId,
++  formatPaginatedResult,
++  jsonResult,
++  toErrorResult,
++} from "./common.js";
++
++export function registerPeopleTools(
++  server: McpServer,
++  client: SwapiClient,
++): void {
++  server.registerTool(
++    "get_person",
++    {
++      title: "Get Star Wars character details",
++      description:
++        "Get detailed information about a specific Star Wars character (person) by ID or URL. " +
++        "Returns attributes such as name, height, mass, hair/skin/eye colors, birth year, gender, " +
++        "homeworld, films, species, vehicles, and starships.",
++      inputSchema: {
++        id: z
++          .union([z.number().int().positive(), z.string()])
++          .describe(
++            "Character resource ID (e.g. 1 for Luke Skywalker) or full SWAPI character URL",
++          ),
++      },
++    },
++    async ({ id }) => {
++      try {
++        const person = await client.getPerson(id);
++        return jsonResult(enrichWithId(person, "people"));
++      } catch (error) {
++        return toErrorResult(error);
++      }
++    },
++  );
++
++  server.registerTool(
++    "search_people",
++    {
++      title: "Search or list Star Wars characters",
++      description:
++        "Search Star Wars characters by name, or list characters page-by-page. " +
++        "SWAPI returns up to 10 results per page.",
++      inputSchema: {
++        search: z
++          .string()
++          .optional()
++          .describe(
++            "Search query to filter characters by name (case-insensitive substring). Leave empty to list all.",
++          ),
++        page: z
++          .number()
++          .int()
++          .positive()
++          .optional()
++          .describe("Page number for pagination (defaults to 1)."),
++      },
++    },
++    async ({ search, page }) => {
++      try {
++        const result = await client.searchPeople(search, page);
++        return jsonResult(formatPaginatedResult(result, "people"));
++      } catch (error) {
++        return toErrorResult(error);
++      }
++    },
++  );
++}
+diff --git a/src/tools/planets.ts b/src/tools/planets.ts
+new file mode 100644
+index 0000000..797f5ef
+--- /dev/null
++++ b/src/tools/planets.ts
+@@ -0,0 +1,72 @@
++import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
++import { z } from "zod";
++import type { SwapiClient } from "../api-client.js";
++import {
++  enrichWithId,
++  formatPaginatedResult,
++  jsonResult,
++  toErrorResult,
++} from "./common.js";
++
++export function registerPlanetTools(
++  server: McpServer,
++  client: SwapiClient,
++): void {
++  server.registerTool(
++    "get_planet",
++    {
++      title: "Get Star Wars planet details",
++      description:
++        "Get detailed information about a specific Star Wars planet by ID or URL. " +
++        "Returns attributes such as climate, terrain, population, gravity, orbital period, " +
++        "residents, and films.",
++      inputSchema: {
++        id: z
++          .union([z.number().int().positive(), z.string()])
++          .describe(
++            "Planet resource ID (e.g. 1 for Tatooine) or full SWAPI planet URL",
++          ),
++      },
++    },
++    async ({ id }) => {
++      try {
++        const planet = await client.getPlanet(id);
++        return jsonResult(enrichWithId(planet, "planets"));
++      } catch (error) {
++        return toErrorResult(error);
++      }
++    },
++  );
++
++  server.registerTool(
++    "search_planets",
++    {
++      title: "Search or list Star Wars planets",
++      description:
++        "Search Star Wars planets by name, or list planets page-by-page. " +
++        "SWAPI returns up to 10 results per page.",
++      inputSchema: {
++        search: z
++          .string()
++          .optional()
++          .describe(
++            "Search query to filter planets by name (case-insensitive substring). Leave empty to list all.",
++          ),
++        page: z
++          .number()
++          .int()
++          .positive()
++          .optional()
++          .describe("Page number for pagination (defaults to 1)."),
++      },
++    },
++    async ({ search, page }) => {
++      try {
++        const result = await client.searchPlanets(search, page);
++        return jsonResult(formatPaginatedResult(result, "planets"));
++      } catch (error) {
++        return toErrorResult(error);
++      }
++    },
++  );
++}
+diff --git a/src/tools/species.ts b/src/tools/species.ts
+new file mode 100644
+index 0000000..a3e8a00
+--- /dev/null
++++ b/src/tools/species.ts
+@@ -0,0 +1,72 @@
++import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
++import { z } from "zod";
++import type { SwapiClient } from "../api-client.js";
++import {
++  enrichWithId,
++  formatPaginatedResult,
++  jsonResult,
++  toErrorResult,
++} from "./common.js";
++
++export function registerSpeciesTools(
++  server: McpServer,
++  client: SwapiClient,
++): void {
++  server.registerTool(
++    "get_species",
++    {
++      title: "Get Star Wars species details",
++      description:
++        "Get detailed information about a specific Star Wars species by ID or URL. " +
++        "Returns attributes such as classification, designation, average height, average lifespan, " +
++        "skin/hair/eye colors, language, homeworld, people, and films.",
++      inputSchema: {
++        id: z
++          .union([z.number().int().positive(), z.string()])
++          .describe(
++            "Species resource ID (e.g. 1 for Human, 3 for Wookiee) or full SWAPI species URL",
++          ),
++      },
++    },
++    async ({ id }) => {
++      try {
++        const item = await client.getSpecies(id);
++        return jsonResult(enrichWithId(item, "species"));
++      } catch (error) {
++        return toErrorResult(error);
++      }
++    },
++  );
++
++  server.registerTool(
++    "search_species",
++    {
++      title: "Search or list Star Wars species",
++      description:
++        "Search Star Wars species by name, or list species page-by-page. " +
++        "SWAPI returns up to 10 results per page.",
++      inputSchema: {
++        search: z
++          .string()
++          .optional()
++          .describe(
++            "Search query to filter species by name (case-insensitive substring). Leave empty to list all.",
++          ),
++        page: z
++          .number()
++          .int()
++          .positive()
++          .optional()
++          .describe("Page number for pagination (defaults to 1)."),
++      },
++    },
++    async ({ search, page }) => {
++      try {
++        const result = await client.searchSpecies(search, page);
++        return jsonResult(formatPaginatedResult(result, "species"));
++      } catch (error) {
++        return toErrorResult(error);
++      }
++    },
++  );
++}
+diff --git a/src/tools/starships.ts b/src/tools/starships.ts
+new file mode 100644
+index 0000000..1915edd
+--- /dev/null
++++ b/src/tools/starships.ts
+@@ -0,0 +1,72 @@
++import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
++import { z } from "zod";
++import type { SwapiClient } from "../api-client.js";
++import {
++  enrichWithId,
++  formatPaginatedResult,
++  jsonResult,
++  toErrorResult,
++} from "./common.js";
++
++export function registerStarshipTools(
++  server: McpServer,
++  client: SwapiClient,
++): void {
++  server.registerTool(
++    "get_starship",
++    {
++      title: "Get Star Wars starship details",
++      description:
++        "Get detailed information about a specific Star Wars starship by ID or URL. " +
++        "Returns attributes such as model, starship class, manufacturer, cost, length, crew, " +
++        "passengers, hyperdrive rating, MGLT, pilots, and films.",
++      inputSchema: {
++        id: z
++          .union([z.number().int().positive(), z.string()])
++          .describe(
++            "Starship resource ID (e.g. 9 for Death Star, 10 for Millennium Falcon) or full SWAPI starship URL",
++          ),
++      },
++    },
++    async ({ id }) => {
++      try {
++        const starship = await client.getStarship(id);
++        return jsonResult(enrichWithId(starship, "starships"));
++      } catch (error) {
++        return toErrorResult(error);
++      }
++    },
++  );
++
++  server.registerTool(
++    "search_starships",
++    {
++      title: "Search or list Star Wars starships",
++      description:
++        "Search Star Wars starships by name or model, or list starships page-by-page. " +
++        "SWAPI returns up to 10 results per page.",
++      inputSchema: {
++        search: z
++          .string()
++          .optional()
++          .describe(
++            "Search query to filter starships by name or model (case-insensitive substring). Leave empty to list all.",
++          ),
++        page: z
++          .number()
++          .int()
++          .positive()
++          .optional()
++          .describe("Page number for pagination (defaults to 1)."),
++      },
++    },
++    async ({ search, page }) => {
++      try {
++        const result = await client.searchStarships(search, page);
++        return jsonResult(formatPaginatedResult(result, "starships"));
++      } catch (error) {
++        return toErrorResult(error);
++      }
++    },
++  );
++}
+diff --git a/src/tools/vehicles.ts b/src/tools/vehicles.ts
+new file mode 100644
+index 0000000..36566ec
+--- /dev/null
++++ b/src/tools/vehicles.ts
+@@ -0,0 +1,72 @@
++import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
++import { z } from "zod";
++import type { SwapiClient } from "../api-client.js";
++import {
++  enrichWithId,
++  formatPaginatedResult,
++  jsonResult,
++  toErrorResult,
++} from "./common.js";
++
++export function registerVehicleTools(
++  server: McpServer,
++  client: SwapiClient,
++): void {
++  server.registerTool(
++    "get_vehicle",
++    {
++      title: "Get Star Wars vehicle details",
++      description:
++        "Get detailed information about a specific Star Wars vehicle by ID or URL. " +
++        "Returns attributes such as model, vehicle class, manufacturer, cost, length, crew, " +
++        "passengers, max speed, pilots, and films.",
++      inputSchema: {
++        id: z
++          .union([z.number().int().positive(), z.string()])
++          .describe(
++            "Vehicle resource ID (e.g. 4 for Sand Crawler) or full SWAPI vehicle URL",
++          ),
++      },
++    },
++    async ({ id }) => {
++      try {
++        const vehicle = await client.getVehicle(id);
++        return jsonResult(enrichWithId(vehicle, "vehicles"));
++      } catch (error) {
++        return toErrorResult(error);
++      }
++    },
++  );
++
++  server.registerTool(
++    "search_vehicles",
++    {
++      title: "Search or list Star Wars vehicles",
++      description:
++        "Search Star Wars vehicles by name or model, or list vehicles page-by-page. " +
++        "SWAPI returns up to 10 results per page.",
++      inputSchema: {
++        search: z
++          .string()
++          .optional()
++          .describe(
++            "Search query to filter vehicles by name or model (case-insensitive substring). Leave empty to list all.",
++          ),
++        page: z
++          .number()
++          .int()
++          .positive()
++          .optional()
++          .describe("Page number for pagination (defaults to 1)."),
++      },
++    },
++    async ({ search, page }) => {
++      try {
++        const result = await client.searchVehicles(search, page);
++        return jsonResult(formatPaginatedResult(result, "vehicles"));
++      } catch (error) {
++        return toErrorResult(error);
++      }
++    },
++  );
++}
+diff --git a/src/types/swapi.ts b/src/types/swapi.ts
+index de191c5..92bba8e 100644
+--- a/src/types/swapi.ts
++++ b/src/types/swapi.ts
+@@ -36,6 +36,85 @@ export interface Person {
+   edited: string;
+ }
+ 
++/** A planet or astronomical object within the Star Wars universe. */
++export interface Planet {
++  name: string;
++  rotation_period: string;
++  orbital_period: string;
++  diameter: string;
++  climate: string;
++  gravity: string;
++  terrain: string;
++  surface_water: string;
++  population: string;
++  residents: string[];
++  films: string[];
++  created: string;
++  edited: string;
++  url: string;
++}
++
++/** A starship or transport spacecraft within the Star Wars universe. */
++export interface Starship {
++  name: string;
++  model: string;
++  manufacturer: string;
++  cost_in_credits: string;
++  length: string;
++  max_atmosphering_speed: string;
++  crew: string;
++  passengers: string;
++  cargo_capacity: string;
++  consumables: string;
++  hyperdrive_rating: string;
++  MGLT: string;
++  starship_class: string;
++  pilots: string[];
++  films: string[];
++  created: string;
++  edited: string;
++  url: string;
++}
++
++/** A vehicle or non-hyperdrive craft within the Star Wars universe. */
++export interface Vehicle {
++  name: string;
++  model: string;
++  manufacturer: string;
++  cost_in_credits: string;
++  length: string;
++  max_atmosphering_speed: string;
++  crew: string;
++  passengers: string;
++  cargo_capacity: string;
++  consumables: string;
++  vehicle_class: string;
++  pilots: string[];
++  films: string[];
++  created: string;
++  edited: string;
++  url: string;
++}
++
++/** A species or type of sentient being within the Star Wars universe. */
++export interface Species {
++  name: string;
++  classification: string;
++  designation: string;
++  average_height: string;
++  skin_colors: string;
++  hair_colors: string;
++  eye_colors: string;
++  average_lifespan: string;
++  homeworld: string | null;
++  language: string;
++  people: string[];
++  films: string[];
++  created: string;
++  edited: string;
++  url: string;
++}
++
+ /** Standard SWAPI paginated list envelope. */
+ export interface Paginated<T> {
+   count: number;
+@@ -48,7 +127,8 @@ export interface Paginated<T> {
+  * Extracts the numeric resource id from a SWAPI hypermedia URL,
+  * e.g. "https://swapi.dev/api/people/1/" -> 1 (resource "people").
+  */
+-export function idFromUrl(url: string, resource: string): number | undefined {
+-  const match = url.match(new RegExp(`/${resource}/(\\d+)/?$`));
++export function idFromUrl(url: string, resource?: string): number | undefined {
++  const pattern = resource ? `/${resource}/(\\d+)/?$` : `/(\\d+)/?$`;
++  const match = url.match(new RegExp(pattern));
+   return match?.[1] === undefined ? undefined : Number(match[1]);
+ }
+diff --git a/test/api-client.test.ts b/test/api-client.test.ts
+index 897baee..34f7ad4 100644
+--- a/test/api-client.test.ts
++++ b/test/api-client.test.ts
+@@ -130,4 +130,38 @@ describe("SwapiClient", () => {
+ 
+     expect(film?.title).toBe("A New Hope");
+   });
++
++  it("fetches resource with numeric id and applies search query parameters", async () => {
++    const calls = stubFetch(() => jsonResponse(paginated([personOne])));
++
++    const client = new SwapiClient(config);
++    const result = await client.searchPeople("Luke", 2);
++
++    expect(result.results).toEqual([personOne]);
++    expect(calls[0]?.href).toBe(
++      "https://swapi.dev/api/people/?format=json&search=Luke&page=2",
++    );
++  });
++
++  it("fetches planet, starship, vehicle, and species by id or url", async () => {
++    const calls = stubFetch((url) => {
++      if (url.pathname.includes("/planets/")) return jsonResponse({ name: "Tatooine" });
++      if (url.pathname.includes("/starships/")) return jsonResponse({ name: "Millennium Falcon" });
++      if (url.pathname.includes("/vehicles/")) return jsonResponse({ name: "Sand Crawler" });
++      if (url.pathname.includes("/species/")) return jsonResponse({ name: "Wookie" });
++      return jsonResponse({ detail: "Not found" }, 404);
++    });
++
++    const client = new SwapiClient(config);
++    const planet = await client.getPlanet(1);
++    const starship = await client.getStarship("https://swapi.dev/api/starships/10/");
++    const vehicle = await client.getVehicle(4);
++    const species = await client.getSpecies(3);
++
++    expect(planet.name).toBe("Tatooine");
++    expect(starship.name).toBe("Millennium Falcon");
++    expect(vehicle.name).toBe("Sand Crawler");
++    expect(species.name).toBe("Wookie");
++    expect(calls.length).toBe(4);
++  });
+ });
+diff --git a/test/fixtures.ts b/test/fixtures.ts
+index 5210889..9991e56 100644
+--- a/test/fixtures.ts
++++ b/test/fixtures.ts
+@@ -1,4 +1,11 @@
+-import type { Film, Person } from "../src/types/swapi.js";
++import type {
++  Film,
++  Person,
++  Planet,
++  Species,
++  Starship,
++  Vehicle,
++} from "../src/types/swapi.js";
+ 
+ export function makeFilm(overrides: Partial<Film> = {}): Film {
+   return {
+@@ -45,6 +52,93 @@ export function makePerson(overrides: Partial<Person> = {}): Person {
+   };
+ }
+ 
++export function makePlanet(overrides: Partial<Planet> = {}): Planet {
++  return {
++    name: "Tatooine",
++    rotation_period: "23",
++    orbital_period: "304",
++    diameter: "10465",
++    climate: "arid",
++    gravity: "1 standard",
++    terrain: "desert",
++    surface_water: "1",
++    population: "200000",
++    residents: ["https://swapi.dev/api/people/1/"],
++    films: ["https://swapi.dev/api/films/1/"],
++    created: "2014-12-09T13:50:49.641000Z",
++    edited: "2014-12-20T20:58:18.411000Z",
++    url: "https://swapi.dev/api/planets/1/",
++    ...overrides,
++  };
++}
++
++export function makeStarship(overrides: Partial<Starship> = {}): Starship {
++  return {
++    name: "Millennium Falcon",
++    model: "YT-1300 light freighter",
++    manufacturer: "Corellian Engineering Corporation",
++    cost_in_credits: "100000",
++    length: "34.37",
++    max_atmosphering_speed: "1050",
++    crew: "4",
++    passengers: "6",
++    cargo_capacity: "100000",
++    consumables: "2 months",
++    hyperdrive_rating: "0.5",
++    MGLT: "75",
++    starship_class: "Light freighter",
++    pilots: ["https://swapi.dev/api/people/13/"],
++    films: ["https://swapi.dev/api/films/1/"],
++    created: "2014-12-10T16:59:45.094000Z",
++    edited: "2014-12-20T21:23:49.880000Z",
++    url: "https://swapi.dev/api/starships/10/",
++    ...overrides,
++  };
++}
++
++export function makeVehicle(overrides: Partial<Vehicle> = {}): Vehicle {
++  return {
++    name: "Sand Crawler",
++    model: "Digger Crawler",
++    manufacturer: "Corellia Mining Corporation",
++    cost_in_credits: "150000",
++    length: "36.8",
++    max_atmosphering_speed: "30",
++    crew: "46",
++    passengers: "30",
++    cargo_capacity: "50000",
++    consumables: "2 months",
++    vehicle_class: "wheeled",
++    pilots: [],
++    films: ["https://swapi.dev/api/films/1/"],
++    created: "2014-12-10T15:36:25.724000Z",
++    edited: "2014-12-20T21:30:21.661000Z",
++    url: "https://swapi.dev/api/vehicles/4/",
++    ...overrides,
++  };
++}
++
++export function makeSpecies(overrides: Partial<Species> = {}): Species {
++  return {
++    name: "Wookie",
++    classification: "mammal",
++    designation: "sentient",
++    average_height: "210",
++    skin_colors: "gray",
++    hair_colors: "black, brown",
++    eye_colors: "blue, green, yellow, brown, golden, red",
++    average_lifespan: "400",
++    homeworld: "https://swapi.dev/api/planets/14/",
++    language: "Shyriiwook",
++    people: ["https://swapi.dev/api/people/13/"],
++    films: ["https://swapi.dev/api/films/1/"],
++    created: "2014-12-10T16:44:31.486000Z",
++    edited: "2014-12-20T21:36:42.142000Z",
++    url: "https://swapi.dev/api/species/3/",
++    ...overrides,
++  };
++}
++
+ export function jsonResponse(body: unknown, status = 200): Response {
+   return new Response(JSON.stringify(body), {
+     status,
+@@ -52,7 +146,9 @@ export function jsonResponse(body: unknown, status = 200): Response {
+   });
+ }
+ 
+-export function paginated<T>(results: T[]): { count: number; next: null; previous: null; results: T[] } {
++export function paginated<T>(
++  results: T[],
++): { count: number; next: null; previous: null; results: T[] } {
+   return { count: results.length, next: null, previous: null, results };
+ }
+ 
+@@ -78,3 +174,8 @@ export const personTwo = makePerson({
+   mass: "75",
+   url: "https://swapi.dev/api/people/2/",
+ });
++
++export const planetOne = makePlanet();
++export const starshipOne = makeStarship();
++export const vehicleOne = makeVehicle();
++export const speciesOne = makeSpecies();
+diff --git a/test/tools.test.ts b/test/tools.test.ts
+index 1d1d71b..449fd8b 100644
+--- a/test/tools.test.ts
++++ b/test/tools.test.ts
+@@ -10,6 +10,10 @@ import {
+   paginated,
+   personOne,
+   personTwo,
++  planetOne,
++  speciesOne,
++  starshipOne,
++  vehicleOne,
+ } from "./fixtures.js";
+ 
+ /** Stubs global fetch with a tiny in-memory SWAPI router. */
+@@ -24,12 +28,42 @@ function stubSwapiApi(): void {
+       if (href === "https://swapi.dev/api/films/1/?format=json") {
+         return jsonResponse(filmOne);
+       }
++      if (href === "https://swapi.dev/api/films/2/?format=json") {
++        return jsonResponse(filmTwo);
++      }
+       if (href === "https://swapi.dev/api/people/1/?format=json") {
+         return jsonResponse(personOne);
+       }
+       if (href === "https://swapi.dev/api/people/2/?format=json") {
+         return jsonResponse(personTwo);
+       }
++      if (href.startsWith("https://swapi.dev/api/people/?")) {
++        return jsonResponse(paginated([personOne, personTwo]));
++      }
++      if (href === "https://swapi.dev/api/planets/1/?format=json") {
++        return jsonResponse(planetOne);
++      }
++      if (href.startsWith("https://swapi.dev/api/planets/?")) {
++        return jsonResponse(paginated([planetOne]));
++      }
++      if (href === "https://swapi.dev/api/starships/10/?format=json") {
++        return jsonResponse(starshipOne);
++      }
++      if (href.startsWith("https://swapi.dev/api/starships/?")) {
++        return jsonResponse(paginated([starshipOne]));
++      }
++      if (href === "https://swapi.dev/api/vehicles/4/?format=json") {
++        return jsonResponse(vehicleOne);
++      }
++      if (href.startsWith("https://swapi.dev/api/vehicles/?")) {
++        return jsonResponse(paginated([vehicleOne]));
++      }
++      if (href === "https://swapi.dev/api/species/3/?format=json") {
++        return jsonResponse(speciesOne);
++      }
++      if (href.startsWith("https://swapi.dev/api/species/?")) {
++        return jsonResponse(paginated([speciesOne]));
++      }
+       return jsonResponse({ detail: "Not found" }, 404);
+     }),
+   );
+@@ -74,6 +108,33 @@ afterEach(() => {
+   vi.unstubAllGlobals();
+ });
+ 
++describe("server tool registration", () => {
++  it("registers all SWAPI tools", async () => {
++    const client = await connectTestClient();
++    const { tools } = await client.listTools();
++    const toolNames = tools.map((t) => t.name);
++
++    expect(toolNames).toEqual(
++      expect.arrayContaining([
++        "list_films",
++        "get_film",
++        "get_film_characters",
++        "get_person",
++        "search_people",
++        "get_planet",
++        "search_planets",
++        "get_starship",
++        "search_starships",
++        "get_vehicle",
++        "search_vehicles",
++        "get_species",
++        "search_species",
++      ]),
++    );
++    expect(toolNames.length).toBe(13);
++  });
++});
++
+ describe("list_films tool", () => {
+   it("lists all episodes sorted by episode number", async () => {
+     const client = await connectTestClient();
+@@ -104,14 +165,39 @@ describe("list_films tool", () => {
+       character_count: 2,
+     });
+   });
++});
+ 
+-  it("is registered with an object input schema", async () => {
++describe("get_film tool", () => {
++  it("returns full film details by film_id", async () => {
+     const client = await connectTestClient();
+-    const tools = await client.listTools();
+-    const listFilms = tools.tools.find((tool) => tool.name === "list_films");
++    const result = await callTool(client, "get_film", { film_id: 1 });
+ 
+-    expect(listFilms).toBeDefined();
+-    expect(listFilms?.inputSchema).toMatchObject({ type: "object" });
++    const data = parseText(result) as {
++      film_id: number;
++      title: string;
++      episode_id: number;
++      opening_crawl: string;
++    };
++
++    expect(data.film_id).toBe(1);
++    expect(data.title).toBe("A New Hope");
++    expect(data.episode_id).toBe(4);
++    expect(data.opening_crawl).toContain("civil war");
++  });
++
++  it("returns full film details by episode_id", async () => {
++    const client = await connectTestClient();
++    const result = await callTool(client, "get_film", { episode_id: 5 });
++
++    const data = parseText(result) as {
++      film_id: number;
++      title: string;
++      episode_id: number;
++    };
++
++    expect(data.film_id).toBe(2);
++    expect(data.title).toBe("The Empire Strikes Back");
++    expect(data.episode_id).toBe(5);
+   });
+ });
+ 
+@@ -158,31 +244,109 @@ describe("get_film_characters tool", () => {
+     expect(result.isError).toBe(true);
+     expect(errorText(result)).toContain("exactly one of 'film_id' or 'episode_id'");
+   });
++});
+ 
+-  it("rejects when both film_id and episode_id are provided", async () => {
++describe("people tools", () => {
++  it("gets person by id", async () => {
+     const client = await connectTestClient();
+-    const result = await callTool(client, "get_film_characters", {
+-      film_id: 1,
+-      episode_id: 4,
+-    });
++    const result = await callTool(client, "get_person", { id: 1 });
+ 
+-    expect(result.isError).toBe(true);
+-    expect(errorText(result)).toContain("exactly one of 'film_id' or 'episode_id'");
++    const data = parseText(result) as { id: number; name: string; eye_color: string };
++    expect(data.id).toBe(1);
++    expect(data.name).toBe("Luke Skywalker");
++    expect(data.eye_color).toBe("Blue");
+   });
+ 
+-  it("returns a clear error result for an unknown film id", async () => {
++  it("searches people", async () => {
+     const client = await connectTestClient();
+-    const result = await callTool(client, "get_film_characters", { film_id: 999 });
++    const result = await callTool(client, "search_people", { search: "Luke" });
+ 
+-    expect(result.isError).toBe(true);
+-    expect(errorText(result)).toContain("HTTP 404");
++    const data = parseText(result) as { count: number; results: Array<{ id: number; name: string }> };
++    expect(data.count).toBe(2);
++    expect(data.results[0]?.name).toBe("Luke Skywalker");
++    expect(data.results[0]?.id).toBe(1);
+   });
++});
+ 
+-  it("returns a clear error result for an unknown episode id", async () => {
++describe("planet tools", () => {
++  it("gets planet by id", async () => {
+     const client = await connectTestClient();
+-    const result = await callTool(client, "get_film_characters", { episode_id: 9 });
++    const result = await callTool(client, "get_planet", { id: 1 });
+ 
+-    expect(result.isError).toBe(true);
+-    expect(errorText(result)).toContain("Episode 9 was not found");
++    const data = parseText(result) as { id: number; name: string; climate: string };
++    expect(data.id).toBe(1);
++    expect(data.name).toBe("Tatooine");
++    expect(data.climate).toBe("arid");
++  });
++
++  it("searches planets", async () => {
++    const client = await connectTestClient();
++    const result = await callTool(client, "search_planets", { search: "Tatooine" });
++
++    const data = parseText(result) as { count: number; results: Array<{ id: number; name: string }> };
++    expect(data.count).toBe(1);
++    expect(data.results[0]?.name).toBe("Tatooine");
++    expect(data.results[0]?.id).toBe(1);
++  });
++});
++
++describe("starship tools", () => {
++  it("gets starship by id", async () => {
++    const client = await connectTestClient();
++    const result = await callTool(client, "get_starship", { id: 10 });
++
++    const data = parseText(result) as { id: number; name: string; model: string };
++    expect(data.id).toBe(10);
++    expect(data.name).toBe("Millennium Falcon");
++  });
++
++  it("searches starships", async () => {
++    const client = await connectTestClient();
++    const result = await callTool(client, "search_starships", { search: "Falcon" });
++
++    const data = parseText(result) as { count: number; results: Array<{ id: number; name: string }> };
++    expect(data.count).toBe(1);
++    expect(data.results[0]?.name).toBe("Millennium Falcon");
++  });
++});
++
++describe("vehicle tools", () => {
++  it("gets vehicle by id", async () => {
++    const client = await connectTestClient();
++    const result = await callTool(client, "get_vehicle", { id: 4 });
++
++    const data = parseText(result) as { id: number; name: string; vehicle_class: string };
++    expect(data.id).toBe(4);
++    expect(data.name).toBe("Sand Crawler");
++  });
++
++  it("searches vehicles", async () => {
++    const client = await connectTestClient();
++    const result = await callTool(client, "search_vehicles", { search: "Crawler" });
++
++    const data = parseText(result) as { count: number; results: Array<{ id: number; name: string }> };
++    expect(data.count).toBe(1);
++    expect(data.results[0]?.name).toBe("Sand Crawler");
++  });
++});
++
++describe("species tools", () => {
++  it("gets species by id", async () => {
++    const client = await connectTestClient();
++    const result = await callTool(client, "get_species", { id: 3 });
++
++    const data = parseText(result) as { id: number; name: string; language: string };
++    expect(data.id).toBe(3);
++    expect(data.name).toBe("Wookie");
++    expect(data.language).toBe("Shyriiwook");
++  });
++
++  it("searches species", async () => {
++    const client = await connectTestClient();
++    const result = await callTool(client, "search_species", { search: "Wookie" });
++
++    const data = parseText(result) as { count: number; results: Array<{ id: number; name: string }> };
++    expect(data.count).toBe(1);
++    expect(data.results[0]?.name).toBe("Wookie");
+   });
+ });

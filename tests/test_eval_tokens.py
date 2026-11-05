@@ -209,7 +209,7 @@ def test_the_gold_corpus_prints_its_24_cases_and_their_sum(
     assert f"eval_tokens: root test-prs-dataset, policy arm {arm}," in stdout
     rows = _rows(stdout)
     total = rows.pop("total")
-    assert len(rows) == 24
+    assert len(rows) == 26
     assert total == [str(sum(int(cells[0]) for cells in rows.values()))]
     assert offline == []
 
