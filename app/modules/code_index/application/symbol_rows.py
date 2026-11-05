@@ -39,8 +39,12 @@ def symbol_rows(path: str, facts: AstFacts) -> tuple[IndexedSymbol, ...]:
     """The keyed declarations of `facts`, in source order.
 
     An unnamed symbol is `default` when it is the default export; otherwise it is dropped
-    together with its descendants. A Go method is `Recv.Name`.
+    together with its descendants. A Go method is `Recv.Name`. A broken Python or
+    TypeScript/JavaScript file gives no symbol rows: its partial names cannot resolve
+    incoming edges when the index is read.
     """
+    if facts.has_errors and facts.language is not AstLanguage.GO:
+        return ()
     by_index = {symbol.index: symbol for symbol in facts.symbols}
     default_exports = {index for name, index in facts.exports if name == DEFAULT_EXPORT_NAME}
     names: dict[int, str | None] = {}

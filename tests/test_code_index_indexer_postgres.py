@@ -390,6 +390,7 @@ class Indexer:
     branch: Branch = field(default_factory=Branch)
     limits: IndexLimits = _LIMITS
     settings: IndexBuildSettings = _SETTINGS
+    source_versions: IndexVersions = _VERSIONS
     jobs: list[Vcs] = field(default_factory=list)
     wakeups: Wakeups = field(default_factory=Wakeups)
 
@@ -426,7 +427,9 @@ class Indexer:
             archives=TarArchiveReader(self.limits),
             parser=self.parser,
             wakeups=self.wakeups,
-            versions=replace(_VERSIONS, limits_profile_version=limits_profile_version(self.limits)),
+            versions=replace(
+                self.source_versions, limits_profile_version=limits_profile_version(self.limits)
+            ),
             limits=self.limits,
             settings=self.settings,
         )
@@ -525,6 +528,50 @@ EXTERNAL = ImportResolution.EXTERNAL
 
 _USER = b"from lib import target\n\n\ndef use():\n    return target()\n"
 _GO_MOD = b"module example.com/m\n"
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize(
+    ("importer", "target", "import_source", "target_source"),
+    [
+        pytest.param(
+            "pkg/app.py",
+            "pkg/models.py",
+            b"from .models import User\n\ndef run():\n    return User()\n",
+            b"class User:\n    pass\n\ndef broken(:\n    pass\n",
+            id="py",
+        ),
+        *(
+            pytest.param(
+                f"src/app{extension}",
+                f"src/models{extension}",
+                b'import { User } from "./models";\nexport function run() { return new User(); }\n',
+                b"export class User {}\nexport function broken( { }\n",
+                id=extension[1:],
+            )
+            for extension in (".ts", ".tsx", ".js", ".jsx")
+        ),
+    ],
+)
+def test_broken_target_symbol_does_not_join_on_index_read(
+    database: _Database,
+    importer: str,
+    target: str,
+    import_source: bytes,
+    target_source: bytes,
+) -> None:
+    async def scenario(indexer: Indexer) -> None:
+        snapshot = await indexer.start({importer: import_source, target: target_source})
+        assert _uses(importer, target, "User") in snapshot.edges
+        assert all(symbol.key.path != target for symbol in snapshot.symbols)
+
+        async with indexer.uow() as uow:
+            outgoing = await uow.index.outgoing_edges(database.a, importer)
+        matched = [item for item in outgoing if item.edge == _uses(importer, target, "User")]
+        assert len(matched) == 1
+        assert matched[0].target_symbols == ()
+
+    _run(database, scenario)
 
 
 @pytest.mark.integration
@@ -1519,6 +1566,33 @@ def test_hidden_policy_failure_keeps_previous_published_rows(
         assert (state.stats.downloaded_bytes, state.stats.github_request_count) == (0, requests)
         assert await indexer.snapshot(database.a) == before
         assert await _raw_rows(database, database.a) == rows
+
+    _run(database, scenario)
+
+
+@pytest.mark.integration
+def test_old_index_resolver_version_forces_same_commit_full_rebuild(database: _Database) -> None:
+    async def scenario(indexer: Indexer) -> None:
+        indexer.source_versions = replace(_VERSIONS, resolver_version="resolver/v1+index/v1")
+        await indexer.start({"lib.py": b"def target():\n    return 1\n", "user.py": _USER})
+        before = await indexer.state(database.a)
+        assert before.profile is not None
+
+        indexer.source_versions = _VERSIONS
+        assert not indexer.source_versions.built(before.profile)
+        outcome = await indexer.build(database.a)
+
+        assert (outcome.status, outcome.mode, outcome.full_reason) == (
+            BuildStatus.PUBLISHED,
+            BuildMode.FULL,
+            FullBuildReason.PROFILE_CHANGED,
+        )
+        assert outcome.commit_sha == before.indexed_commit_sha
+        assert indexer.jobs[-1].compares == 0
+        after = await indexer.state(database.a)
+        assert after.profile is not None
+        assert after.profile.resolver_version == INDEX_RESOLVER_VERSION
+        assert after.published_publication > before.published_publication
 
     _run(database, scenario)
 
