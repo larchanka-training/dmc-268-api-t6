@@ -29,6 +29,12 @@ pytest_plugins = ("tests.monitoring_deploy_host",)
 
 SOURCE_FINGERPRINT = "alembic_version=20261015_0032\nrun_actions=10\nruns=3"
 
+# GNU/busybox `stat -c %Y FILE` on any platform.
+FAKE_STAT = """\
+#!/bin/sh
+python3 -c 'import os, sys; print(int(os.path.getmtime(sys.argv[1])))' "$3"
+"""
+
 FAKE_PG_TOOLS = {
     # Writes the dump unless told to fail; logs every call.
     "pg_dump": """\
@@ -68,11 +74,7 @@ echo "createdb $*" >> "${STUB_PG_LOG}"
 #!/bin/sh
 echo "dropdb $*" >> "${STUB_PG_LOG}"
 """,
-    # GNU/busybox `stat -c %Y FILE` on any platform.
-    "stat": """\
-#!/bin/sh
-python3 -c 'import os, sys; print(int(os.path.getmtime(sys.argv[1])))' "$3"
-""",
+    "stat": FAKE_STAT,
 }
 
 
@@ -468,8 +470,9 @@ def _run_offsite(
 ) -> tuple[subprocess.CompletedProcess[str], list[str], str]:
     tools = tmp_path / "rclonebin"
     tools.mkdir(exist_ok=True)
-    (tools / "rclone").write_text(FAKE_RCLONE, encoding="utf-8")
-    (tools / "rclone").chmod(0o755)
+    for name, source in (("rclone", FAKE_RCLONE), ("stat", FAKE_STAT)):
+        (tools / name).write_text(source, encoding="utf-8")
+        (tools / name).chmod(0o755)
     textfile = tmp_path / "pg_backup_offsite.prom"
     log = tmp_path / "rclone.log"
     environment = {
