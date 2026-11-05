@@ -122,12 +122,8 @@ from tests.code_index_indexer_support import (
 from tests.code_index_indexer_support import (
     _uses as _uses,
 )
-from tests.code_index_indexer_support import (
-    code_index_database as code_index_database,
-)
-from tests.code_index_indexer_support import (
-    database as database,
-)
+
+pytest_plugins = ("tests.code_index_indexer_support",)
 
 
 @pytest.mark.integration
