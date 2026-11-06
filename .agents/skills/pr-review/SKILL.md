@@ -42,7 +42,10 @@ its `Refs` lines name, their acceptance criteria as `AC1..` in the issue's order
 accept-issue's table) with a `key` that names the issue too (`api#N AC1`). When the pull request
 names a part (its title, else the first line of its `## What`: `Part K of #N`), only that part's
 criteria and the common ones are kept. The `Refs` and part rules are implement-issue's: the script loads them from
-`implement-issue/scripts/preflight.py`. The full contract is the script's docstring.
+`implement-issue/scripts/preflight.py`. One rule is its own: a ref outside the pull request's repo and the
+project's two repos (`preflight.ALIASES`) is never read, because the text is the author's and the token the
+reviewer's. It is skipped with a warning, and a pull request whose `Refs` name only such refs stops like one
+with no `Refs`. The full contract is the script's docstring.
 
 `scripts/draft_review.py REF --findings FILE --diff FILE [--apply]` — without `--apply` read-only,
 a preview: the threads, the review body and the proposed verdict. With it, the one write: the
@@ -196,5 +199,7 @@ Not in CI, by decision (as `create-issue`): run them by hand whenever the skill 
 - The criteria are the checkboxes of `## Acceptance Criteria`; the DoD is not checked. A pull
   request with several `Refs` gets the criteria of each issue; it names a part of one issue only
   with `Part K of <ref>`.
+- An issue outside the pull request's repo and the project's two repos is not read, even if the
+  reviewer's token could: its criteria are not checked. Do not fetch it by hand.
 - A merged pull request is reviewed at its final head; a finding there may already be fixed by a
   later pull request.

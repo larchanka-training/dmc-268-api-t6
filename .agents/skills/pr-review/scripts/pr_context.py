@@ -8,8 +8,8 @@ Usage
     REF := api#N | ui#N | OWNER/NAME#N | N        (a pull request; a bare N is api#N)
 
 Read-only: one `gh api repos/OWNER/NAME/pulls/N --jq …` call, then one
-`gh api repos/OWNER/NAME/issues/N --jq …` per issue a `Refs` line names. Nothing is written,
-nothing is checked out.
+`gh api repos/OWNER/NAME/issues/N --jq …` per issue a `Refs` line names in a repo it may read
+(below). Nothing is written, nothing is checked out.
 
 Contract
 --------
@@ -43,13 +43,17 @@ issue — in its title, else in the first mention in the first line of its `## W
 implement-issue reads it — only the criteria of those parts (in the forms of its
 `references/parts.md`, the prefix cut off) and the criteria without a prefix are kept, with
 their ids. `key` is the row of the
-AC table: the issue as `api#N` / `ui#N` (`owner/name#N` for any other repo) and the id, so the
-criteria of two issues never share one.
+AC table: the issue as `api#N` / `ui#N` (`owner/name#N` for the own repo of a pull request in
+neither) and the id, so the criteria of two issues never share one.
 
-`stop` (exit 1): no `Refs` line names an issue; a ref that is a pull request is skipped with a
-warning. Warnings: the pull request is merged or closed; an issue has no acceptance criteria;
-the pull request names no part of an issue whose criteria carry parts (all are kept); it names
-a part that no criterion carries.
+A ref outside the pull request's own repo and the repos of `preflight.ALIASES`, compared in lower
+case, is skipped with a warning that names it, before any request: the text is the author's and
+the token the reviewer's.
+
+`stop` (exit 1): no `Refs` line names an issue; a skipped ref names none, and a ref that is a
+pull request is skipped with a warning too. Warnings: the pull request is merged or closed; an
+issue has no acceptance criteria; the pull request names no part of an issue whose criteria carry
+parts (all are kept); it names a part that no criterion carries.
 
 Exit 0 go; 1 stop; 2 usage or bad REF; 3 gh / API / fixture error. On 2 and 3 stdout is empty
 and stderr holds one line `{"error": "..."}`.
@@ -261,9 +265,16 @@ def collect(repo: str, number: int) -> dict[str, Any]:
     elif pr["state"] == "closed":
         warnings.append(CLOSED)
 
+    # The text is the author's and the token the reviewer's: a ref reads only these repos.
+    readable = {name.lower() for name in (repo, *preflight.ALIASES.values())}
     issues: list[dict[str, Any]] = []
     for ref_repo, ref_number in sorted(preflight.refs_of(title, body, repo)):
         ref = f"{ref_repo}#{ref_number}"
+        if ref_repo not in readable:
+            warnings.append(
+                f"`Refs` names {ref}, neither this pull request's repo nor a project repo: skipped"
+            )
+            continue
         name = f"issue-{ref_repo.replace('/', '_')}-{ref_number}"
         issue = fetch(name, f"repos/{ref_repo}/issues/{ref_number}", ISSUE_FIELDS)
         if field(issue, "pull_request", bool, ref):
