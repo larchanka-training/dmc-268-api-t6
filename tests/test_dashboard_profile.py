@@ -90,6 +90,7 @@ class TinyRun:
     stdout: str
     server_url: URL
     database: str
+    explain: Path
 
     def connect(self) -> psycopg.Connection[tuple[Any, ...]]:
         url = self.server_url.set(drivername="postgresql", database=self.database)
@@ -111,13 +112,16 @@ def _run_profile(profile: ModuleType, server_url: str, *flags: str) -> tuple[int
 
 
 @pytest.fixture(scope="module")
-def tiny_run(profile: ModuleType) -> Iterator[TinyRun]:
+def tiny_run(profile: ModuleType, tmp_path_factory: pytest.TempPathFactory) -> Iterator[TinyRun]:
     """One end-to-end run on a tiny volume, its database kept for the assertions."""
     server_url = os.environ.get("TEST_DATABASE_URL")
     if server_url is None:
         pytest.skip("set TEST_DATABASE_URL to run PostgreSQL integration tests")
-    code, stdout, database = _run_profile(profile, server_url, "--keep")
-    run = TinyRun(code, stdout, make_url(server_url), database)
+    explain = tmp_path_factory.mktemp("dashboard_profile") / "plans.md"
+    code, stdout, database = _run_profile(
+        profile, server_url, "--keep", "--explain-out", str(explain)
+    )
+    run = TinyRun(code, stdout, make_url(server_url), database, explain)
     try:
         yield run
     finally:
@@ -202,3 +206,62 @@ def test_the_same_seed_gives_the_same_rows_and_an_unkept_database_is_dropped(
             "SELECT count(*) FROM pg_database WHERE datname = %s", (database,)
         ).fetchone()
     assert row == (0,)
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize(
+    "scenario", ["summary 30d", "summary 30d repo", "runs first page", "runs by cursor"]
+)
+def test_the_command_prints_p50_and_p95_of_every_scenario(tiny_run: TinyRun, scenario: str) -> None:
+    assert tiny_run.code == 0, tiny_run.stdout
+    number = r"\d+\.\d{2}"
+    line = rf"^{scenario}\s+3\s+(?P<p50>{number})\s+(?P<p95>{number})\s+{number}\s+{number}$"
+    match = re.search(line, tiny_run.stdout, re.MULTILINE)
+    assert match is not None, tiny_run.stdout
+    assert 0 < float(match["p50"]) <= float(match["p95"])
+
+
+@pytest.mark.integration
+def test_a_volume_without_a_full_page_fails_and_still_drops_its_database(
+    profile: ModuleType, tiny_run: TinyRun, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A profile of nearly empty data would lie; the run says so instead of printing numbers."""
+    server_url = tiny_run.server_url.render_as_string(hide_password=False)
+    code, _, database = _run_profile(
+        profile, server_url, "--prs-per-day", "1", "--history-days", "1"
+    )
+    assert code == 1
+    assert "full page" in capsys.readouterr().err
+    admin = tiny_run.server_url.set(drivername="postgresql")
+    with psycopg.connect(admin.render_as_string(hide_password=False)) as connection:
+        row = connection.execute(
+            "SELECT count(*) FROM pg_database WHERE datname = %s", (database,)
+        ).fetchone()
+    assert row == (0,)
+
+
+@pytest.mark.integration
+def test_the_plans_are_of_the_real_statements_with_buffers(tiny_run: TinyRun) -> None:
+    assert tiny_run.code == 0, tiny_run.stdout
+    plans = tiny_run.explain.read_text()
+    for scenario in ("summary 30d", "summary 30d repo", "runs first page", "runs by cursor"):
+        assert f"## {scenario}\n" in plans
+    assert "FROM runs" in plans
+    assert "actual time=" in plans
+    assert "Buffers: shared" in plans
+
+
+@pytest.mark.integration
+def test_the_list_runs_one_statement_at_any_page_size(tiny_run: TinyRun) -> None:
+    """The baseline of the Part 2 N+1 criterion: statements per request at two page sizes."""
+    counts = [
+        re.search(rf"^runs limit={limit}\s+(\d+)\s", tiny_run.stdout, re.MULTILINE)
+        for limit in (10, 100)
+    ]
+    assert all(counts), tiny_run.stdout
+    assert [int(match.group(1)) for match in counts if match] == [1, 1]
+
+
+@pytest.mark.integration
+def test_the_share_of_saved_results_is_printed(tiny_run: TinyRun) -> None:
+    assert 0 < tiny_run.printed("with_saved_result") <= tiny_run.printed("window_succeeded")

@@ -1,33 +1,90 @@
 #!/usr/bin/env python3
-"""Profile of the dashboard endpoints on a declared data volume (#456)."""
+"""Profile of the dashboard endpoints on a declared data volume (#456).
+
+Measures `GET /api/metrics/summary` and `GET /api/runs` on a clean local PostgreSQL, so a later
+change is compared by rerunning this one command:
+
+1. refuses a server that is not loopback, then creates `dashboard_profile_<hex>`: the only
+   database it writes to, dropped at the end, also on failure, unless `--keep`;
+2. migrates it and loads a deterministic history: `--prs-per-day` x `--history-days` PRs with the
+   shares below, into every table the two endpoints read, then `VACUUM (ANALYZE)`; prints the real
+   counts, the 30-day window, how many results the app can read and a digest of the Run rows;
+3. starts `uvicorn app.main:app` as in the Dockerfile on a free loopback port, with no broker, a
+   throwaway RS256 key and no variable of the caller's environment but PATH and HOME;
+4. times `--requests` real HTTP requests per scenario, sequentially and interleaved, after a
+   warm-up, and prints nearest-rank p50, p95, p99 and max: `summary 30d`, the same for the busiest
+   visible repository, the first page of runs, and the page at a cursor in mid-history;
+5. calls the same use cases in-process, prints statements and SQL time per call (the list also at
+   `limit` 10 and 100), and with `--explain-out` writes `EXPLAIN (ANALYZE, BUFFERS)` of the slowest
+   statements, run with their own parameters.
+
+Usage, from the repository root (`python scripts/...` cannot import `app`):
+    uv run python -m scripts.dashboard_profile \\
+        --server-url postgresql+psycopg://postgres:profile@127.0.0.1:55456/postgres \\
+        [--prs-per-day 100] [--history-days 365] [--requests 200] [--seed 456] [--keep] \\
+        [--explain-out plans.md]
+
+Exit codes: 0 the numbers are printed (a p95 over a target is a result, not an error); 1 the
+measurement failed: a non-200 answer, too little data to fill a page, an API that did not start, a
+database error; 2 invalid arguments or a server that is not loopback.
+"""
 
 from __future__ import annotations
 
 import argparse
+import asyncio
 import ipaddress
 import json
 import math
+import os
 import random
+import socket
+import subprocess
 import sys
+import time
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from pathlib import Path
 from typing import Any
 from uuid import UUID, uuid4
 
+import httpx
+import jwt
 import psycopg
 from alembic.config import Config
-from sqlalchemy import create_engine
+from cryptography.hazmat.primitives.asymmetric import rsa
+from cryptography.hazmat.primitives.serialization import (
+    Encoding,
+    NoEncryption,
+    PrivateFormat,
+    PublicFormat,
+)
+from sqlalchemy import create_engine, event
 from sqlalchemy.engine import URL, make_url
 from sqlalchemy.exc import ArgumentError
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+from sqlalchemy.pool import NullPool
 
 from alembic import command
+from app.modules.auth.application.scope import AuthScope
+from app.modules.reviews.application.get_metrics_summary import GetMetricsSummary
+from app.modules.reviews.application.list_runs import ListRuns, RunCursor
 from app.modules.reviews.application.run_coverage import CoverageStatus, RunCoverage
 from app.modules.reviews.application.verdict import coverage_verdict, severity_counts
+from app.modules.reviews.infrastructure.metrics_summary import SqlAlchemyMetricsSummary
+from app.modules.reviews.infrastructure.run_repository import SqlAlchemyRunRepository
 
 _USER_ID = 42
+# RUN_LIST_PAGE_SIZE of the ui: the page the dashboard really asks for, not the API default.
+_PAGE_SIZE = 20
+_WARMUP_REQUESTS = 5
+_EXPLAINED_PER_SCENARIO = 5
+_SERVER_START_SECONDS = 60.0
+_ISSUER = "dashboard-profile"
+_AUDIENCE = "dashboard-profile-ui"
 # Repositories per Workspace and whether the measured user sees them: a real visibility filter.
 _WORKSPACES = ((10, True), (10, True), (5, False))
 # SD §13: five parallel Runs, so at most five are active at the end of the history.
@@ -180,6 +237,10 @@ class Refused(Exception):
     """An argument the run must not start with: exit 2, nothing touched."""
 
 
+class MeasurementFailed(Exception):
+    """The numbers would not describe the endpoints: exit 1, no table."""
+
+
 @dataclass(frozen=True)
 class Volume:
     prs_per_day: int
@@ -188,6 +249,42 @@ class Volume:
     @property
     def prs(self) -> int:
         return self.prs_per_day * self.history_days
+
+
+@dataclass(frozen=True)
+class Scenario:
+    name: str
+    path: str
+    params: dict[str, str]
+
+
+@dataclass(frozen=True)
+class Identity:
+    """The measured user's real grants and a throwaway key: never a key of a stand."""
+
+    workspace_ids: tuple[str, ...]
+    public_key: str
+    token: str
+
+
+@dataclass(frozen=True)
+class Statement:
+    text: str
+    parameters: Any
+    milliseconds: float
+
+
+@dataclass(frozen=True)
+class Captured:
+    """One warm in-process call of the use case an endpoint runs."""
+
+    scenario: Scenario
+    statements: tuple[Statement, ...]
+    total_milliseconds: float
+
+    @property
+    def slowest(self) -> list[Statement]:
+        return sorted(self.statements, key=lambda item: item.milliseconds, reverse=True)
 
 
 @dataclass(frozen=True)
@@ -573,25 +670,296 @@ def print_volume(database_url: URL) -> None:
                 ("code_change_diffs", "code_change_diffs"),
             )
         }
-        window = _scalar(
-            connection, "SELECT count(*) FROM runs WHERE created_at >= now() - interval '30 days'"
+        window = "created_at >= now() - interval '30 days'"
+        window_runs = _scalar(connection, f"SELECT count(*) FROM runs WHERE {window}")
+        window_succeeded = _scalar(
+            connection, f"SELECT count(*) FROM runs WHERE {window} AND state = 'succeeded'"
+        )
+        with_saved_result = _scalar(
+            connection,
+            f"SELECT count(*) FROM runs WHERE {window} AND state = 'succeeded' AND EXISTS "
+            "(SELECT 1 FROM run_actions a WHERE a.run_id = runs.id "
+            "AND a.tool = 'review.postprocess')",
         )
         digest = _scalar(
             connection, "SELECT md5(string_agg(id::text || state::text, ',' ORDER BY id)) FROM runs"
         )
     print("volume: " + " ".join(f"{name}={count}" for name, count in counts.items()))
-    print(f"window_30d: window_runs={window}")
+    print(
+        f"window_30d: window_runs={window_runs} window_succeeded={window_succeeded} "
+        f"with_saved_result={with_saved_result}"
+    )
     print(f"rows digest: {digest}", flush=True)
 
 
+def print_environment(database_url: URL) -> None:
+    with psycopg.connect(_conninfo(database_url)) as connection:
+        settings = {
+            name: _scalar(connection, f"SHOW {name}")
+            for name in ("server_version", "shared_buffers", "work_mem")
+        }
+    load = " ".join(f"{value:.1f}" for value in os.getloadavg())
+    print(
+        "environment: "
+        + " ".join(f"{name}={value}" for name, value in settings.items())
+        + f" cpus={os.cpu_count()} load={load}",
+        flush=True,
+    )
+
+
+def identity(database_url: URL) -> Identity:
+    with psycopg.connect(_conninfo(database_url)) as connection:
+        rows = connection.execute(
+            "SELECT workspace_id::text FROM github_user_workspace_access "
+            "WHERE github_user_id = %s ORDER BY 1",
+            (_USER_ID,),
+        ).fetchall()
+    workspace_ids = tuple(row[0] for row in rows)
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    token = jwt.encode(
+        {
+            "sub": str(_USER_ID),
+            "github_user_id": _USER_ID,
+            "workspaces": list(workspace_ids),
+            "iss": _ISSUER,
+            "aud": _AUDIENCE,
+            "exp": int((datetime.now(UTC) + timedelta(hours=6)).timestamp()),
+        },
+        key.private_bytes(Encoding.PEM, PrivateFormat.PKCS8, NoEncryption()),
+        algorithm="RS256",
+    )
+    public_key = key.public_key().public_bytes(Encoding.PEM, PublicFormat.SubjectPublicKeyInfo)
+    return Identity(workspace_ids, public_key.decode(), token)
+
+
+def scenarios(database_url: URL) -> tuple[Scenario, ...]:
+    """The endpoints as issue #456 names them; the repo and the cursor come from the data."""
+    with psycopg.connect(_conninfo(database_url)) as connection:
+        visible = """
+            FROM runs r
+            JOIN code_changes c ON c.id = r.code_change_id
+            JOIN repositories rep ON rep.id = c.repository_id
+            JOIN github_user_repository_access a
+              ON a.repository_external_id = rep.external_id
+             AND a.provider_installation_id = rep.provider_installation_id
+             AND a.github_user_id = %(user)s
+        """
+        busiest = connection.execute(
+            f"SELECT rep.full_name {visible} GROUP BY rep.full_name "
+            "ORDER BY count(*) DESC, rep.full_name LIMIT 1",
+            {"user": _USER_ID},
+        ).fetchone()
+        middle = connection.execute(
+            f"SELECT r.created_at, r.id {visible} ORDER BY r.created_at DESC, r.id DESC "
+            f"LIMIT 1 OFFSET (SELECT count(*) / 2 {visible})",
+            {"user": _USER_ID},
+        ).fetchone()
+    if busiest is None or middle is None:
+        raise MeasurementFailed("the measured user sees no Run")
+    page = {"limit": str(_PAGE_SIZE)}
+    cursor = RunCursor(created_at=middle[0], id=middle[1]).encode()
+    return (
+        Scenario("summary 30d", "/api/metrics/summary", {"range": "30d"}),
+        Scenario("summary 30d repo", "/api/metrics/summary", {"range": "30d", "repo": busiest[0]}),
+        Scenario("runs first page", "/api/runs", page),
+        Scenario("runs by cursor", "/api/runs", {**page, "cursor": cursor}),
+    )
+
+
+@contextmanager
+def api_server(database_url: URL, public_key: str) -> Iterator[str]:
+    """``uvicorn app.main:app`` as in the Dockerfile; the env holds no secret of the caller."""
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+    process = subprocess.Popen(
+        [
+            sys.executable,
+            "-m",
+            "uvicorn",
+            "app.main:app",
+            "--host",
+            "127.0.0.1",
+            "--port",
+            str(port),
+            "--log-level",
+            "warning",
+        ],
+        env={
+            "PATH": os.environ.get("PATH", ""),
+            "HOME": os.environ.get("HOME", ""),
+            "DATABASE_URL": database_url.render_as_string(hide_password=False),
+            "AUTH_JWT_PUBLIC_KEY": public_key,
+            "AUTH_JWT_ISSUER": _ISSUER,
+            "AUTH_JWT_AUDIENCE": _AUDIENCE,
+        },
+        stdout=subprocess.DEVNULL,
+    )
+    base_url = f"http://127.0.0.1:{port}"
+    try:
+        deadline = time.monotonic() + _SERVER_START_SECONDS
+        while True:
+            if process.poll() is not None:
+                raise MeasurementFailed(f"the API exited with code {process.returncode}")
+            try:
+                httpx.get(f"{base_url}/healthcheck", timeout=2).raise_for_status()
+                break
+            except httpx.HTTPError as error:
+                if time.monotonic() > deadline:
+                    raise MeasurementFailed("the API did not start in time") from error
+                time.sleep(0.2)
+        yield base_url
+    finally:
+        process.terminate()
+        try:
+            process.wait(timeout=15)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait()
+
+
+def _timed_get(client: httpx.Client, scenario: Scenario) -> tuple[float, httpx.Response]:
+    started = time.perf_counter()
+    response = client.get(scenario.path, params=scenario.params)
+    elapsed = (time.perf_counter() - started) * 1000
+    if response.status_code != 200:
+        raise MeasurementFailed(f"{scenario.name} answered {response.status_code}")
+    return elapsed, response
+
+
+def _check_data(client: httpx.Client, chosen: Sequence[Scenario]) -> None:
+    """A page or a summary over nearly empty data would make the numbers lie."""
+    for scenario in chosen:
+        body = _timed_get(client, scenario)[1].json()
+        if "items" in body and len(body["items"]) < _PAGE_SIZE:
+            raise MeasurementFailed(
+                f"{scenario.name} did not return a full page of {_PAGE_SIZE}: raise the volume"
+            )
+        if "items" not in body and not sum(body["totals"]["runsByStatus"].values()):
+            raise MeasurementFailed(f"{scenario.name} counted no Run: raise the volume")
+
+
+def measure(
+    base_url: str, token: str, chosen: Sequence[Scenario], requests: int
+) -> dict[str, list[float]]:
+    """Sequential, warm, interleaved: machine noise reaches every scenario alike."""
+    samples: dict[str, list[float]] = {scenario.name: [] for scenario in chosen}
+    headers = {"Authorization": f"Bearer {token}"}
+    with httpx.Client(base_url=base_url, headers=headers, timeout=60) as client:
+        _check_data(client, chosen)
+        for _ in range(_WARMUP_REQUESTS):
+            for scenario in chosen:
+                _timed_get(client, scenario)
+        for _ in range(requests):
+            for scenario in chosen:
+                samples[scenario.name].append(_timed_get(client, scenario)[0])
+    return samples
+
+
+def print_latency(samples: dict[str, list[float]]) -> None:
+    print(f"{'scenario':<18} {'n':>5} {'p50_ms':>9} {'p95_ms':>9} {'p99_ms':>9} {'max_ms':>9}")
+    for name, values in samples.items():
+        cells = (
+            percentile(values, 50),
+            percentile(values, 95),
+            percentile(values, 99),
+            max(values),
+        )
+        print(f"{name:<18} {len(values):>5} " + " ".join(f"{cell:>9.2f}" for cell in cells))
+    sys.stdout.flush()
+
+
+async def capture_statements(
+    database_url: URL, user: Identity, chosen: Sequence[Scenario]
+) -> list[Captured]:
+    """The SQL the real use cases send: where a request spends its time, and the plans' input."""
+    engine = create_async_engine(database_url, poolclass=NullPool)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    scope = AuthScope(_USER_ID, tuple(UUID(item) for item in user.workspace_ids))
+    summary = GetMetricsSummary(SqlAlchemyMetricsSummary(factory, scope))
+    runs = ListRuns(SqlAlchemyRunRepository(factory, scope=scope))
+    statements: list[Statement] = []
+
+    def before(_c: Any, _cu: Any, _s: Any, _p: Any, context: Any, _m: Any) -> None:
+        context.profile_started = time.perf_counter()
+
+    def after(_c: Any, _cu: Any, statement: str, parameters: Any, context: Any, _m: Any) -> None:
+        elapsed = (time.perf_counter() - context.profile_started) * 1000
+        statements.append(Statement(statement, parameters, elapsed))
+
+    async def call(scenario: Scenario) -> None:
+        if scenario.path.endswith("/summary"):
+            await summary.execute(
+                scope, range=scenario.params["range"], repo=scenario.params.get("repo")
+            )
+        else:
+            await runs.execute(
+                status=None,
+                repository=None,
+                cursor=scenario.params.get("cursor"),
+                limit=int(scenario.params["limit"]),
+            )
+
+    event.listen(engine.sync_engine, "before_cursor_execute", before)
+    event.listen(engine.sync_engine, "after_cursor_execute", after)
+    captured: list[Captured] = []
+    # Two page sizes show whether the statement count grows with the page.
+    pages = tuple(
+        Scenario(f"runs limit={limit}", "/api/runs", {"limit": str(limit)}) for limit in (10, 100)
+    )
+    try:
+        for scenario in (*chosen, *pages):
+            await call(scenario)
+            statements.clear()
+            started = time.perf_counter()
+            await call(scenario)
+            total = (time.perf_counter() - started) * 1000
+            captured.append(Captured(scenario, tuple(statements), total))
+    finally:
+        await engine.dispose()
+    return captured
+
+
+def print_statements(captured: Sequence[Captured]) -> None:
+    print(f"{'in-process call':<18} {'statements':>10} {'sql_ms':>9} {'total_ms':>9}")
+    for item in captured:
+        sql = sum(statement.milliseconds for statement in item.statements)
+        print(
+            f"{item.scenario.name:<18} {len(item.statements):>10} "
+            f"{sql:>9.2f} {item.total_milliseconds:>9.2f}"
+        )
+    sys.stdout.flush()
+
+
+def write_plans(database_url: URL, captured: Sequence[Captured], path: Path) -> None:
+    """EXPLAIN (ANALYZE, BUFFERS) of the statements themselves, with their own parameters."""
+    sections = ["# EXPLAIN (ANALYZE, BUFFERS), slowest statements first"]
+    with psycopg.connect(_conninfo(database_url)) as connection:
+        for item in captured:
+            sections.append(f"## {item.scenario.name}\n")
+            for position, statement in enumerate(item.slowest[:_EXPLAINED_PER_SCENARIO], start=1):
+                rows = connection.execute(
+                    f"EXPLAIN (ANALYZE, BUFFERS) {statement.text}", statement.parameters
+                ).fetchall()
+                plan = "\n".join(row[0] for row in rows)
+                sections.append(
+                    f"### {position}: {statement.milliseconds:.2f} ms\n\n"
+                    f"```sql\n{statement.text}\n```\n\n```text\n{plan}\n```"
+                )
+    path.write_text("\n\n".join(sections) + "\n", encoding="utf-8")
+
+
 def _parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
     parser.add_argument("--server-url", required=True, help="loopback PostgreSQL maintenance URL")
     parser.add_argument("--prs-per-day", type=int, default=100)
     parser.add_argument("--history-days", type=int, default=365)
     parser.add_argument("--requests", type=int, default=200, help="timed requests per scenario")
     parser.add_argument("--seed", type=int, default=456)
     parser.add_argument("--keep", action="store_true", help="do not drop the database at the end")
+    parser.add_argument("--explain-out", type=Path, help="write the query plans to this file")
     return parser
 
 
@@ -606,10 +974,23 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"dashboard_profile: {error}", file=sys.stderr)
         return 2
     volume = Volume(arguments.prs_per_day, arguments.history_days)
-    with own_database(server_url, keep=arguments.keep) as database_url:
-        _migrate(database_url)
-        seed(database_url, volume, arguments.seed, datetime.now(UTC))
-        print_volume(database_url)
+    try:
+        with own_database(server_url, keep=arguments.keep) as database_url:
+            _migrate(database_url)
+            seed(database_url, volume, arguments.seed, datetime.now(UTC))
+            print_volume(database_url)
+            print_environment(database_url)
+            user = identity(database_url)
+            chosen = scenarios(database_url)
+            with api_server(database_url, user.public_key) as base_url:
+                print_latency(measure(base_url, user.token, chosen, arguments.requests))
+            captured = asyncio.run(capture_statements(database_url, user, chosen))
+            print_statements(captured)
+            if arguments.explain_out is not None:
+                write_plans(database_url, captured, arguments.explain_out)
+    except (MeasurementFailed, psycopg.Error, httpx.HTTPError) as error:
+        print(f"dashboard_profile: {error}", file=sys.stderr)
+        return 1
     return 0
 
 
