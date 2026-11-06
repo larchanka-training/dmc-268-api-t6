@@ -362,8 +362,16 @@ def test_run_worker_consumes_index_repo_beside_the_review_queues(
     monkeypatch.setattr(worker, "consume", consume)
     monkeypatch.setattr(worker, "run_as_leader", leader)
     monkeypatch.setattr(worker, "index_consumer", index_consumer)
-    monkeypatch.setattr(worker, "compose_worker_process", lambda **kwargs: process)
-    settings = worker.WorkerSettings.from_environment(_BASE_ENV)
+    process_arguments: dict[str, Any] = {}
+
+    def compose_worker_process(**kwargs: Any) -> SimpleNamespace:
+        process_arguments.update(kwargs)
+        return process
+
+    monkeypatch.setattr(worker, "compose_worker_process", compose_worker_process)
+    settings = worker.WorkerSettings.from_environment(
+        {**_BASE_ENV, "RUN_DATA_RETENTION_DAYS": "45"}
+    )
     delays = RetryDelays(short=timedelta(seconds=1))
     transport = httpx.MockTransport(lambda request: httpx.Response(500))
 
@@ -372,6 +380,7 @@ def test_run_worker_consumes_index_repo_beside_the_review_queues(
 
     assert stopped.group_contains(_IndexStopped)
     assert consumed == ["review.run.fast", "review.publish", "index.repo"]
+    assert process_arguments["run_data_retention"].retention == timedelta(days=45)
     # SD §13: a SQL error of a job logs no bound parameters (paths, symbol names).
     session_factory = composed.pop("session_factory")
     assert isinstance(session_factory, async_sessionmaker)

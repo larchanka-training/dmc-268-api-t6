@@ -44,7 +44,7 @@ from app.bootstrap.gitlab_reviews import (
     build_gitlab_review_worker_resources,
 )
 from app.bootstrap.llm_gateway import build_gateway
-from app.bootstrap.run_data_retention import RunDataRetentionSettings
+from app.bootstrap.run_data_retention import RunDataRetentionSettings, run_data_retention_task
 from app.bootstrap.worker_shutdown import (
     finish_cleanup,
     run_background,
@@ -142,6 +142,7 @@ from app.modules.reviews.application.review_output import (
     ReviewOutputHandler,
     ReviewProvider,
 )
+from app.modules.reviews.application.run_data_retention import PurgeExpiredRunData
 from app.modules.reviews.application.run_delivery import HandleRunDelivery
 from app.modules.reviews.application.run_failures import (
     FAST_ATTEMPT_DEADLINE,
@@ -835,6 +836,7 @@ class WorkerProcess:
     sweep: SweepNoCi | None
     index_tasks: CodeIndexLeaderTasks | None = None
     bitbucket_status_reconciler: BitbucketStatusReconciler | None = None
+    run_data_retention: PurgeExpiredRunData | None = None
 
     async def leader_tick(self) -> None:
         failure: Exception | None = None
@@ -851,6 +853,9 @@ class WorkerProcess:
             await self.index_tasks.tick()
         if self.bitbucket_status_reconciler is not None:
             await self.bitbucket_status_reconciler.tick()
+        # Never raises an `Exception` and has its own deadline, like the index tasks.
+        if self.run_data_retention is not None:
+            await self.run_data_retention.tick()
         if failure is not None:
             raise failure
 
@@ -871,6 +876,7 @@ def compose_worker_process(
     heartbeat_interval: timedelta = HEARTBEAT_INTERVAL,
     now: Callable[[], datetime] = lambda: datetime.now(UTC),
     index_tasks: CodeIndexLeaderTasks | None = None,
+    run_data_retention: PurgeExpiredRunData | None = None,
 ) -> WorkerProcess:
     if gitlab is not None and gitlab_reviews is not None:
         raise ValueError("ambiguous GitLab publication resources")
@@ -1001,6 +1007,7 @@ def compose_worker_process(
         bitbucket_status_reconciler=(
             bitbucket.status_reconciler if bitbucket is not None else None
         ),
+        run_data_retention=run_data_retention,
     )
 
 
@@ -1148,6 +1155,9 @@ async def _run_worker(
                 # Converge, GC and TTL purge touch only the database. Reconcile and
                 # wake-up dispatch use the configured provider consumer.
                 index_tasks=index_leader_tasks(settings.code_index, session_factory, index),
+                run_data_retention=run_data_retention_task(
+                    settings.run_data_retention, session_factory
+                ),
             )
             run_queue = await channels.consumer_queue(run_queue_name("fast"))
             publish_queue = await channels.consumer_queue(PUBLISH_QUEUE)
