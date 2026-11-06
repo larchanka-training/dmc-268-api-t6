@@ -584,6 +584,10 @@ def _hide_names(text: str, unnamed_paths: frozenset[str]) -> str:
     )
 
 
+def _unnamed_finding(finding: ReviewFinding | ReviewFindingV2) -> str:
+    return f"**Находка** ({_UNNAMED_FILE_LABEL}, {finding.severity})"
+
+
 def _blocking_finding_lines(
     kept: tuple[ProcessedFinding, ...], limit: int, unnamed_paths: frozenset[str]
 ) -> list[str]:
@@ -594,7 +598,7 @@ def _blocking_finding_lines(
     if not blocking:
         return []
     names = [
-        f"**Находка** ({_UNNAMED_FILE_LABEL})"
+        _unnamed_finding(finding)
         if finding.path in unnamed_paths
         else (
             f"**{_hide_names(finding.title, unnamed_paths)}** "
@@ -836,7 +840,7 @@ def _render_body_only_finding(item: ProcessedFinding, unnamed_paths: frozenset[s
     finding = item.finding
     if finding.path in unnamed_paths:
         # No model text at all: it would name the file in words an exact match cannot catch.
-        return f"- **Находка** ({_UNNAMED_FILE_LABEL}, {finding.severity})"
+        return f"- {_unnamed_finding(finding)}"
     return (
         f"- **{_hide_names(finding.title, unnamed_paths)}** "
         f"(`{finding.path}:{finding.line}`): {_hide_names(finding.body, unnamed_paths)}"
