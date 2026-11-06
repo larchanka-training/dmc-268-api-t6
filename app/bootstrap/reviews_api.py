@@ -73,6 +73,9 @@ from app.modules.integrations.webhooks.infrastructure.github_webhook_receipts im
 from app.modules.repositories.application.repository_settings import (
     RepositorySettingsUowFactory,
 )
+from app.modules.repositories.application.repository_visibility import (
+    RecordRepositoryVisibility,
+)
 from app.modules.repositories.application.rules_status import (
     GetRulesStatus,
     ProviderRulesDocumentReader,
@@ -84,6 +87,9 @@ from app.modules.repositories.application.rules_status import (
 )
 from app.modules.repositories.infrastructure.repository_settings import (
     SqlAlchemyRepositorySettingsUnitOfWork,
+)
+from app.modules.repositories.infrastructure.repository_visibility import (
+    SqlAlchemyRepositoryVisibilityUnitOfWork,
 )
 from app.modules.repositories.infrastructure.rules_status import (
     SqlAlchemyRulesRefreshUnitOfWork,
@@ -406,6 +412,9 @@ class ReviewsApiResources:
             ),
             index_refresh=RequestIndexRefresh(
                 partial(SqlAlchemyIndexRefreshUnitOfWork, self._session_factory)
+            ),
+            repository_visibility=RecordRepositoryVisibility(
+                partial(SqlAlchemyRepositoryVisibilityUnitOfWork, self._session_factory)
             ),
         )
         return GitHubWebhookDispatchAdapter(dispatcher)

@@ -52,6 +52,30 @@ def _fetch(
     return asyncio.run(run())
 
 
+@pytest.mark.parametrize(
+    ("body", "expected"),
+    [
+        ({"private": False}, False),
+        ({"private": True}, True),
+        ({}, None),
+        ({"private": "false"}, None),
+        ({"private": None}, None),
+    ],
+)
+def test_provider_reads_the_private_flag_and_anything_else_is_unknown(
+    body: dict[str, object], expected: bool | None
+) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={"default_branch": "trunk", "html_url": "https://example.test/o/r", **body},
+        )
+
+    details = _fetch(handler, FakeInstallationTokenProvider())
+
+    assert details.private is expected
+
+
 def test_provider_reads_the_default_branch_and_web_url_with_the_installation_token() -> None:
     tokens = FakeInstallationTokenProvider()
     requests: list[httpx.Request] = []

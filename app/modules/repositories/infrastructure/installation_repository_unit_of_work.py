@@ -138,6 +138,7 @@ class SqlAlchemyInstallationRepositoryStore:
                 full_name=snapshot.full_name,
                 default_branch=snapshot.default_branch,
                 web_url=snapshot.web_url,
+                private=snapshot.private,
             )
             .on_conflict_do_update(
                 index_elements=[Repository.provider_installation_id, Repository.external_id],
@@ -145,6 +146,7 @@ class SqlAlchemyInstallationRepositoryStore:
                     "full_name": snapshot.full_name,
                     "default_branch": snapshot.default_branch,
                     "web_url": snapshot.web_url,
+                    "private": snapshot.private,
                     "installation_available": True,
                 },
             )

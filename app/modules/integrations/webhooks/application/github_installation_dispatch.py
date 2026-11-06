@@ -62,6 +62,7 @@ class InstallationDeliveryDispatchStatus(StrEnum):
     DEFERRED_REPOSITORY_DETAILS = "deferred_repository_details"
     DEFERRED_RUN_TRIGGER = "deferred_run_trigger"
     REQUESTED_RULES_REFRESH = "requested_rules_refresh"
+    UPDATED_REPOSITORY_VISIBILITY = "updated_repository_visibility"
 
 
 @dataclass(frozen=True)
@@ -100,6 +101,15 @@ class PushEvent:
 
 
 @dataclass(frozen=True)
+class RepositoryVisibilityEvent:
+    """``repository.privatized`` or ``repository.publicized`` (#454)."""
+
+    installation_external_id: int
+    repository_external_id: int
+    private: bool
+
+
+@dataclass(frozen=True)
 class GitHubDispatchEvent:
     """Validated application input from a claimed raw webhook receipt."""
 
@@ -110,6 +120,7 @@ class GitHubDispatchEvent:
         | CiTriggerEvent
         | InstallationRepositoriesEvent
         | PushEvent
+        | RepositoryVisibilityEvent
         | UnsupportedGitHubEvent
     )
 
@@ -167,6 +178,20 @@ class CodeIndexRefreshHandler(Protocol):
     ) -> bool: ...
 
 
+class RepositoryVisibilityHandler(Protocol):
+    """One short transaction, no GitHub call (#454)."""
+
+    async def overwrite(
+        self, installation_external_id: int, repository_external_id: int, private: bool
+    ) -> bool:
+        """False when the repository is not connected."""
+        ...
+
+    async def learn(
+        self, installation_external_id: int, repository_external_id: int, private: bool
+    ) -> None: ...
+
+
 class GitHubInstallationDeliveryDispatcher:
     """Safely route supported GitHub installation events to onboarding.
 
@@ -185,6 +210,7 @@ class GitHubInstallationDeliveryDispatcher:
         run_trigger: WebhookRunTriggerHandler | None = None,
         rules_refresh: RulesRefreshOnPushHandler | None = None,
         index_refresh: CodeIndexRefreshHandler | None = None,
+        repository_visibility: RepositoryVisibilityHandler | None = None,
     ) -> None:
         self._resolver = resolver
         self._onboarding = onboarding
@@ -193,6 +219,7 @@ class GitHubInstallationDeliveryDispatcher:
         self._run_trigger = run_trigger
         self._rules_refresh = rules_refresh
         self._index_refresh = index_refresh
+        self._repository_visibility = repository_visibility
 
     async def execute(self, delivery: GitHubDispatchEvent) -> InstallationDeliveryDispatchResult:
         event = delivery.value
@@ -201,7 +228,10 @@ class GitHubInstallationDeliveryDispatcher:
                 status=InstallationDeliveryDispatchStatus.IGNORED_IRRELEVANT_EVENT,
                 detail=_with_action(event.action, None),
             )
+        if isinstance(event, RepositoryVisibilityEvent):
+            return await self._visibility_result(event)
         if isinstance(event, PullRequestLabelEvent):
+            await self._learn_visibility(event.pull_request)
             action = event.pull_request.action
             if event.label_name != "ai-review":
                 return InstallationDeliveryDispatchResult(
@@ -228,6 +258,7 @@ class GitHubInstallationDeliveryDispatcher:
                 return self._trigger_result(outcome, result.status, action)
             return result
         if isinstance(event, PullRequestEvent):
+            await self._learn_visibility(event)
             if event.action in {"review_requested", "review_request_removed"}:
                 return InstallationDeliveryDispatchResult(
                     status=InstallationDeliveryDispatchStatus.IGNORED_IRRELEVANT_EVENT,
@@ -295,6 +326,44 @@ class GitHubInstallationDeliveryDispatcher:
         return InstallationDeliveryDispatchResult(
             status=InstallationDeliveryDispatchStatus.ONBOARDED
         )
+
+    async def _visibility_result(
+        self, event: RepositoryVisibilityEvent
+    ) -> InstallationDeliveryDispatchResult:
+        if self._repository_visibility is None:
+            return InstallationDeliveryDispatchResult(
+                status=InstallationDeliveryDispatchStatus.DEFERRED_KNOWN_EVENT
+            )
+        if not await self._repository_visibility.overwrite(
+            event.installation_external_id, event.repository_external_id, event.private
+        ):
+            # Not deferred: connecting the repository reads its visibility anyway.
+            return InstallationDeliveryDispatchResult(
+                status=InstallationDeliveryDispatchStatus.IGNORED_IRRELEVANT_EVENT,
+                detail="unknown_repository",
+            )
+        return InstallationDeliveryDispatchResult(
+            status=InstallationDeliveryDispatchStatus.UPDATED_REPOSITORY_VISIBILITY
+        )
+
+    async def _learn_visibility(self, event: PullRequestEvent) -> None:
+        """Before any early return: every pull request delivery carries the flag. A failure is
+        logged and never fails the delivery, the next one carries the flag again (#454)."""
+        if self._repository_visibility is None or event.repository_private is None:
+            return
+        # CONTRACT: `Exception` only, so a cancellation still stops the delivery.
+        try:
+            await self._repository_visibility.learn(
+                event.installation_external_id,
+                event.repository_external_id,
+                event.repository_private,
+            )
+        except Exception:
+            _LOGGER.exception(
+                "Failed to record the visibility of repository %s of installation %s",
+                event.repository_external_id,
+                event.installation_external_id,
+            )
 
     async def _refresh_index_on_merge(self, event: PullRequestEvent) -> bool:
         """A merge into the default branch named by the payload requests an index update

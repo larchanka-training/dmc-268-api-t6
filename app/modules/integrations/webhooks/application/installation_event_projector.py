@@ -47,6 +47,7 @@ class RepositoryDetails:
 
     default_branch: str
     web_url: str
+    private: bool | None = None
 
 
 class RepositoryDetailsUnavailableError(Exception):
@@ -331,6 +332,7 @@ class InstallationEventProjector:
                 full_name=reference.full_name,
                 default_branch=reference.default_branch,
                 web_url=reference.web_url,
+                private=reference.private,
             )
         details = await self._details_provider.fetch_repository_details(
             installation_external_id=installation_external_id,
@@ -342,4 +344,6 @@ class InstallationEventProjector:
             full_name=reference.full_name,
             default_branch=details.default_branch,
             web_url=details.web_url,
+            # This read is newer than the event, which a deferred delivery can make very old.
+            private=details.private,
         )

@@ -79,6 +79,8 @@ class Repository(Base):
             "id", "provider_installation_id", "external_id", name="uq_repositories_owner"
         ),
         CheckConstraint("max_comments > 0", name="ck_repositories_max_comments_positive"),
+        # The anonymous badge finds a repository by name, in any case (#454).
+        Index("ix_repositories_lower_full_name", text("lower(full_name)")),
     )
 
     id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
@@ -93,6 +95,8 @@ class Repository(Base):
     installation_available: Mapped[bool] = mapped_column(
         BOOLEAN, nullable=False, server_default=text("true")
     )
+    # GitHub's own flag (#454). NULL until an event tells it, and NULL reads as not public.
+    private: Mapped[bool | None] = mapped_column(BOOLEAN, nullable=True)
     # The RAG toggle (#145): off by default, and onboarding never turns it on.
     rag_enabled: Mapped[bool] = mapped_column(BOOLEAN, nullable=False, server_default=text("false"))
     default_engine: Mapped[Engine] = mapped_column(
