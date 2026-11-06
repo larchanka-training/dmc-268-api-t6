@@ -152,7 +152,8 @@ def test_worker_settings_reject_malformed_nonempty_portal_urls(portal_url: str) 
 @pytest.mark.parametrize(
     "portal_url",
     [
-        "https://alice:do-not-log-this@ui.test:bad",
+        # No @host: the parser reads the password as the port and quotes it in its error.
+        "https://alice:do-not-log-this",
         "https://alice:do-not-log-this@ui.test／x",
     ],
     ids=["bad-port", "nfkc-netloc"],
