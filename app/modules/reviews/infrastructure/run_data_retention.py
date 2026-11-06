@@ -9,7 +9,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.common.infrastructure.db.unit_of_work import SqlAlchemyUnitOfWork
 from app.modules.reviews.application.handle_review_run import TERMINAL_STATES
-from app.modules.reviews.infrastructure.models import CodeChangeDiff, ContextManifest, Run
+from app.modules.reviews.infrastructure.models import (
+    CodeChangeDiff,
+    ContextManifest,
+    ContextPayload,
+    Run,
+)
 
 
 class SqlAlchemyRunDataRetentionStore:
@@ -20,8 +25,10 @@ class SqlAlchemyRunDataRetentionStore:
         """Lock a batch, clear it and mark it; a run another pass holds is skipped.
 
         The diff rows stay without their text: `summaryOnly` and the fallback verdict read
-        them. `updated_at` stays too: it is the id of the run's SSE event and a field of its
-        API answer, and the run's answer does not change.
+        them. A context payload with the status `summary_only` stays: it is the other source
+        of `summaryOnly` and the source of its reason in the check-run, and it holds counts and
+        paths, no code. `updated_at` stays too: it is the id of the run's SSE event, and a
+        cleanup is no event for the clients following the run.
         """
         run_ids = list(
             await self._session.scalars(
@@ -45,6 +52,12 @@ class SqlAlchemyRunDataRetentionStore:
         )
         await self._session.execute(
             delete(ContextManifest).where(ContextManifest.run_id.in_(run_ids))
+        )
+        await self._session.execute(
+            delete(ContextPayload).where(
+                ContextPayload.run_id.in_(run_ids),
+                ContextPayload.summary["status"].astext != "summary_only",
+            )
         )
         await self._session.execute(
             update(Run)

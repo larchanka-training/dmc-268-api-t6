@@ -10,14 +10,23 @@ from typing import Any
 from uuid import UUID, uuid4
 
 import pytest
+from fastapi.testclient import TestClient
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from app.modules.auth.application.scope import AuthScope
 from app.modules.reviews.application.run_data_retention import PurgeExpiredRunData
-from app.modules.reviews.infrastructure.models import CodeChangeDiff, ContextManifest, Run
+from app.modules.reviews.infrastructure.models import (
+    CodeChangeDiff,
+    ContextManifest,
+    ContextPayload,
+    Run,
+    RunAction,
+)
 from app.modules.reviews.infrastructure.run_data_retention import (
     SqlAlchemyRunDataRetentionUnitOfWork,
 )
+from app.modules.reviews.infrastructure.run_lifecycle_store import SqlAlchemyRunLifecycleStore
 from tests.portal_postgres import (
     HEAD,
     PR_CLOSED,
@@ -26,7 +35,9 @@ from tests.portal_postgres import (
     RULE_A,
     RUN_CLOSED,
     RUN_DONE,
+    WS_A,
     Env,
+    api,
 )
 
 pytestmark = pytest.mark.integration
@@ -75,7 +86,9 @@ async def _finish(
         )
 
 
-async def _store_run_data(factory: Factory, run_id: UUID, code_change_id: UUID) -> None:
+async def _store_run_data(
+    factory: Factory, run_id: UUID, code_change_id: UUID, *, marked: bool = True
+) -> None:
     """Two diff rows and a manifest with its policy snapshot."""
     snapshot_id = uuid4()
     async with factory.begin() as session:
@@ -104,7 +117,7 @@ async def _store_run_data(factory: Factory, run_id: UUID, code_change_id: UUID) 
                     additions=9_000,
                     changes=9_000,
                     omission_reason="too_large",
-                    summary_only=True,
+                    summary_only=marked,
                 ),
             ]
         )
@@ -189,6 +202,15 @@ async def _marker(factory: Factory, run_id: UUID) -> datetime | None:
         return await session.scalar(select(Run.data_purged_at).where(Run.id == run_id))
 
 
+async def _updated_at(factory: Factory, run_id: UUID) -> datetime | None:
+    """The id of the run's SSE event."""
+    async with factory() as session:
+        updated_at: datetime | None = await session.scalar(
+            select(Run.updated_at).where(Run.id == run_id)
+        )
+        return updated_at
+
+
 _PURGED_ROWS = [
     ("src/a.py", None, None, "a" * 40, "modified", 1, 1, 2, None, False, HEAD),
     ("vendor/big.js", None, None, None, "added", 9_000, 0, 9_000, "too_large", True, HEAD),
@@ -206,12 +228,14 @@ def test_a_terminal_run_past_the_period_loses_its_diff_text_and_manifests(
     async def body(factory: Factory) -> None:
         await _store_run_data(factory, RUN_DONE, PR_OPEN)
         await _finish(factory, RUN_DONE, state)
+        event_id = await _updated_at(factory, RUN_DONE)
 
         assert await _task(factory).run(30) is False
 
         assert await _diff_rows(factory, RUN_DONE) == _PURGED_ROWS
         assert await _manifests(factory, RUN_DONE) == 0
         assert await _marker(factory, RUN_DONE) == _NOW
+        assert await _updated_at(factory, RUN_DONE) == event_id
 
     _on_database(portal_env, body)
 
@@ -290,3 +314,187 @@ def test_a_pass_skips_a_locked_run_without_waiting_and_takes_it_later(portal_env
         assert await _marker(factory, RUN_DONE) == _NOW + timedelta(hours=1)
 
     _on_database(portal_env, body)
+
+
+_STOP: dict[str, Any] = {
+    "status": "summary_only",
+    "reason": "diff_inventory_incomplete",
+    "blocks": [],
+}
+_BUILDER: dict[str, Any] = {
+    "status": "summary_only",
+    "reason": "no_reviewable_files",
+    "reviewable_lines": 0,
+    "blocks": [],
+}
+_REVIEW: dict[str, Any] = {"status": "review", "reason": None, "reviewable_lines": 3, "blocks": []}
+
+
+async def _store_payload(factory: Factory, run_id: UUID, summary: dict[str, Any]) -> None:
+    async with factory.begin() as session:
+        session.add(ContextPayload(run_id=run_id, schema_version=2, summary=summary))
+
+
+async def _payload(factory: Factory, run_id: UUID) -> Any:
+    async with factory() as session:
+        return await session.scalar(
+            select(ContextPayload.summary).where(ContextPayload.run_id == run_id)
+        )
+
+
+@pytest.mark.parametrize(
+    ("summary", "kept"),
+    [
+        pytest.param(_STOP, _STOP, id="summary-only-stop"),
+        pytest.param(_BUILDER, _BUILDER, id="builder-payload-with-the-same-status"),
+        pytest.param(_REVIEW, None, id="reviewed"),
+    ],
+)
+def test_only_a_summary_only_status_keeps_its_context_payload(
+    portal_env: Env, summary: dict[str, Any], kept: dict[str, Any] | None
+) -> None:
+    async def body(factory: Factory) -> None:
+        await _store_payload(factory, RUN_DONE, summary)
+        await _finish(factory, RUN_DONE, "succeeded")
+
+        assert await _task(factory).run(30) is False
+
+        assert await _payload(factory, RUN_DONE) == kept
+
+    _on_database(portal_env, body)
+
+
+# One published medium finding comes with the seed of RUN_DONE.
+_MEDIUM_ONLY = {"critical": 0, "high": 0, "medium": 1, "low": 0, "info": 0}
+_SAVED_SUMMARY = {
+    "problem": "One finding stays open.",
+    "done_well": "The rest reads well.",
+    "effort": "small",
+}
+_SAVED_RESULT = {
+    "verdict": "attention",
+    "severity_counts": _MEDIUM_ONLY,
+    "summary": _SAVED_SUMMARY,
+    "coverage": {
+        "version": 1,
+        "status": "complete",
+        "head_sha": HEAD,
+        "snapshot_digest": "0" * 64,
+        "diff_digest": "0" * 64,
+        "total_files": 2,
+        "reviewed_files": 2,
+        "file_list_complete": True,
+        "reason_counts": {},
+        "exclusion_counts": {},
+        "reasons": [],
+        "exclusions": [],
+    },
+}
+
+
+async def _store_saved_result(factory: Factory, run_id: UUID) -> None:
+    async with factory.begin() as session:
+        session.add(
+            RunAction(
+                run_id=run_id,
+                index=0,
+                tool="review.postprocess",
+                request={},
+                response=_SAVED_RESULT,
+                started_at=_OLD,
+                duration_ms=0,
+            )
+        )
+
+
+def _run_answers(client: TestClient) -> dict[str, Any]:
+    answers = {
+        "list": client.get("/api/runs"),
+        "detail": client.get(f"/api/runs/{RUN_DONE}"),
+        "pulls": client.get(f"/api/repos/{REPO_A}/pulls", params={"state": "open"}),
+    }
+    assert {name: answer.status_code for name, answer in answers.items()} == {
+        "list": 200,
+        "detail": 200,
+        "pulls": 200,
+    }
+    return {name: answer.json() for name, answer in answers.items()}
+
+
+@pytest.mark.parametrize(
+    ("marked", "summary", "saved", "summary_only", "verdict"),
+    [
+        pytest.param(False, _REVIEW, True, False, "attention", id="saved-result"),
+        pytest.param(False, _REVIEW, False, False, "attention", id="no-saved-result"),
+        pytest.param(True, _REVIEW, False, True, None, id="marked-row"),
+        pytest.param(False, _STOP, False, True, None, id="stage-stop"),
+        pytest.param(False, _BUILDER, False, False, "attention", id="builder-payload"),
+        pytest.param(True, _BUILDER, False, True, None, id="marked-row-with-a-reason"),
+    ],
+)
+def test_the_run_answers_do_not_change_after_the_cleanup(
+    portal_env: Env,
+    marked: bool,
+    summary: dict[str, Any],
+    saved: bool,
+    summary_only: bool,
+    verdict: str | None,
+) -> None:
+    reports: list[Any] = []
+
+    async def prepare(factory: Factory) -> None:
+        await _store_run_data(factory, RUN_DONE, PR_OPEN, marked=marked)
+        await _store_payload(factory, RUN_DONE, summary)
+        if saved:
+            await _store_saved_result(factory, RUN_DONE)
+        await _finish(factory, RUN_DONE, "succeeded")
+
+    async def report(factory: Factory) -> None:
+        async with factory() as session:
+            reports.append(await SqlAlchemyRunLifecycleStore(session).check_run_report(RUN_DONE))
+
+    async def purge(factory: Factory) -> None:
+        assert await _task(factory).run(30) is False
+        assert await _marker(factory, RUN_DONE) == _NOW
+        assert await _diff_rows(factory, RUN_DONE) != []
+
+    _on_database(portal_env, prepare)
+    with api(portal_env, AuthScope(42, (WS_A,))) as (client, _factory):
+        before = _run_answers(client)
+        _on_database(portal_env, report)
+        _on_database(portal_env, purge)
+        after = _run_answers(client)
+        _on_database(portal_env, report)
+
+    assert after == before
+    assert reports[1] == reports[0]
+    assert after["detail"]["summaryOnly"] is summary_only
+    assert after["detail"]["verdict"] == verdict
+    assert after["detail"]["severityCounts"] == _MEDIUM_ONLY
+    if saved:
+        assert after["detail"]["summary"]["problem"] == "One finding stays open."
+    assert reports[1].summary_only is summary_only
+    listed = next(item for item in after["list"]["items"] if item["id"] == str(RUN_DONE))
+    assert listed["summaryOnly"] is summary_only
+    pull = next(item for item in after["pulls"]["items"] if item["number"] == 1)
+    assert pull["latestRun"]["verdict"] == verdict
+
+
+def test_the_diff_of_a_purged_run_answers_with_its_files_without_text(portal_env: Env) -> None:
+    async def prepare(factory: Factory) -> None:
+        await _store_run_data(factory, RUN_DONE, PR_OPEN)
+        await _finish(factory, RUN_DONE, "succeeded")
+
+    async def purge(factory: Factory) -> None:
+        assert await _task(factory).run(30) is False
+
+    _on_database(portal_env, prepare)
+    _on_database(portal_env, purge)
+    with api(portal_env, AuthScope(42, (WS_A,))) as (client, _factory):
+        answer = client.get(f"/api/runs/{RUN_DONE}/diff")
+
+    assert answer.status_code == 200
+    assert answer.json() == [
+        {"filename": "src/a.py", "patch": None},
+        {"filename": "vendor/big.js", "patch": None},
+    ]
