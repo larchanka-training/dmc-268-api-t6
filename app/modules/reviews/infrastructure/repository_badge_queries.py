@@ -6,6 +6,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.common.infrastructure.db.enums import RunState
+from app.modules.repositories.application.repository_visibility import VISIBILITY_MAX_AGE
 from app.modules.repositories.infrastructure.models import ProviderInstallation, Repository
 from app.modules.reviews.application.repository_badge import BadgeRun
 from app.modules.reviews.infrastructure.models import CodeChange, Finding, Run
@@ -23,7 +24,13 @@ class SqlAlchemyRepositoryBadgeQueries:
         async with self._session_factory() as session:
             repositories = (
                 await session.execute(
-                    select(Repository.id, Repository.private)
+                    select(
+                        Repository.id,
+                        Repository.private,
+                        (Repository.private_observed_at > func.now() - VISIBILITY_MAX_AGE).label(
+                            "fresh"
+                        ),
+                    )
                     .join(
                         ProviderInstallation,
                         Repository.provider_installation_id == ProviderInstallation.id,
@@ -40,7 +47,11 @@ class SqlAlchemyRepositoryBadgeQueries:
             ).all()
             # Two live rows mean one holds the old name of a renamed repository, and nothing
             # proves which: neither of them answers.
-            if len(repositories) != 1 or repositories[0].private is not False:
+            if (
+                len(repositories) != 1
+                or repositories[0].private is not False
+                or not repositories[0].fresh
+            ):
                 return None
             run = (
                 await session.execute(
