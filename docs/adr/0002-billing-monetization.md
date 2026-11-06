@@ -12,8 +12,9 @@
 Формат повторяет [ADR 0001](0001-graph-rag-v1.md). Документ проектный: код, миграции
 и зависимости им не меняются. Все значения ниже относятся к Stripe sandbox (D2) и
 моку продавца (D3). Пороги расхода прогона (§8.2) ниже самой низкой цены ревью на
-любом тарифе, поэтому ни один прогон не обходится дороже своей цены; расчёт цен
-во внутреннем документе команды.
+любом тарифе, поэтому успешный прогон без деградации не обходится дороже своей
+цены. Деградация deep → fast, `failed` и `cancelled` могут стоить нам больше
+списанного (§3.4, §8.2). Расчёт цен во внутреннем документе команды.
 
 ## 1. Контекст
 
@@ -155,7 +156,7 @@ P = цена_единицы(тариф, движок) × множитель
 | Схема и поле | Где отдаётся | Решение |
 |---|---|---|
 | `RunUsage.costUsd` | прогон в списке и деталях | заменяется на `chargedUsd` из `credit_ledger` ([#310](https://github.com/larchanka-training/dmc-268-api-t6/issues/310)) |
-| `RunBudget.costUsd`, `RunBudget.costLimitUsd` | детали прогона | убираются из ответа клиенту; расход и порог прогона видит только оператор |
+| `RunBudget.costUsd`, `RunBudget.costLimitUsd`, `RunBudget.tokenLimit` | детали прогона | убираются из ответа клиенту; расход, порог и лимит токенов прогона видит только оператор |
 | `MetricsTotals.costUsd` | `GET /api/metrics/summary` | заменяется на `chargedUsd` за период |
 | `MetricsDay.costUsd` | `GET /api/metrics/summary`, по дням | заменяется на `chargedUsd` за день |
 | `WorkspaceDailyBudget.spentTodayUsd`, `dailyBudgetUsd` | `GET /api/metrics/summary` | считаются по списанному, а не по расходу: дневной лимит workspace ограничивает списания за день (§8.1) |
@@ -691,6 +692,8 @@ P = цена_единицы(тариф, движок) × множитель
 | PIPELINE_SPEC §1 T4/T5 и переход гейта 2, §4.5, §5.3, §6; SD §13 | С #371: `balance_exhausted` на двух гейтах, пороги расхода §8.2 как лимит прогона, цена при деградации, задача досписания §10.6 рядом с реконсилером T13 |
 | SD §11, ERD, `credit_ledger` | С #371 и #372: новые виды, `grant_id`, составные уникальные ключи §5.1, таблица `balance_holds` §5.2, тариф workspace, `daily_budget_usd` по списаниям |
 | PIPELINE_SPEC §6 | С #372: коды `plan_repo_limit`, `plan_graph_rag_unavailable` (§4.4) |
+| PIPELINE_SPEC §7 (check-run) | С #371: у `skipped` с `balance_exhausted` в summary ссылка на пополнение (сейчас у `skipped` ссылки нет); комментарий в PR с той же ссылкой не чаще раза в сутки на PR (§8.1) |
+| `AGENTS.md`, `.agents/rules/backend.md` §3, BACKEND_ARCHITECTURE (исключения короткой транзакции) | С #371: имя единственной точки записи строк списания (класс и метод модуля `billing`) вписывается рядом с `SqlAlchemyUsageLedger.record` |
 | SD §6.5, §8.2, §12, `contracts/openapi.yaml` | С #373: роли, Owner из GitHub, исключения, приглашения, право App `members: read`, проверка роли в БД |
 | `contracts/openapi.yaml`, #310 | С #310 и #371: поля расхода для клиента по таблице §3.5 |
 
