@@ -21,7 +21,8 @@ info:
     suffix. IDs are UUIDs unless a field says it carries a GitHub numeric ID.
 
     **Authentication.** `auth-api` issues a 15-minute access JWT, sent as
-    `Authorization: Bearer <token>` on every other operation (global `bearerAuth`), and a
+    `Authorization: Bearer <token>` on every other operation (global `bearerAuth`) except the
+    public badge (`/api/badges/...`, `security: []`), and a
     rotating `refresh_token` cookie (30 days, `HttpOnly; Secure; SameSite=Strict;
     Path=/api/auth`). The SSE stream is read with `fetch` so it carries the same header.
     Issuing the access token and the Bearer check on every other operation are implemented
@@ -64,6 +65,8 @@ tags:
       replaced (RULES_FORMAT_SPEC §10).
   - name: metrics
     description: Usage totals, a daily series, and workspace daily budgets.
+  - name: badges
+    description: Public status badges for a README, read without signing in.
   - name: auth
     description: GitHub App user authorization and session tokens.
 paths:
@@ -934,6 +937,59 @@ paths:
           $ref: "#/components/responses/ValidationFailed"
         "503":
           description: Authentication is not configured.
+  /api/badges/github/{owner}/{repo}.svg:
+    get:
+      operationId: getGithubRepositoryBadge
+      tags: [badges]
+      summary: The status of a GitHub repository's latest review as an SVG image
+      description: |
+        Public, for a README: GitHub requests the image without a token. It shows only the verdict
+        of the last run that succeeded (by finish time) of a repository connected through the
+        GitHub App and stored as public: `clean` is "passed", `attention` is "attention",
+        `blocking` is "blocking". A repository counts as public only by the visibility saved from
+        GitHub webhooks; nothing saved yet means not public.
+
+        One neutral "no data" answer, with the same status, type, headers and body, covers every
+        other case, so the response does not tell whether a repository exists: an unknown or
+        private repository, an App that lost access, no succeeded run, a latest run without a
+        verdict (summary-only, or clean without complete coverage), and a name GitHub cannot have.
+        There is no fallback to an older run.
+
+        `owner/repo` is matched without regard to case. When several connected repositories hold
+        the name (only the old name of a renamed repository can), no row is proved to be the one
+        asked for and the answer is "no data". A workspace is not part of the address.
+
+        The SVG is made of fixed strings: nothing from the address reaches the markup.
+      x-service: portal-api
+      x-issue: "#454"
+      security: []
+      parameters:
+        - name: owner
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: repo
+          in: path
+          required: true
+          description: The repository name, before the `.svg` suffix of the path.
+          schema:
+            type: string
+      responses:
+        "200":
+          description: The badge, with `<title>` and `aria-label` as its text alternative.
+          headers:
+            Cache-Control:
+              description: >-
+                Nothing is cached on the application side, so a new verdict reaches the badge within
+                this time.
+              schema:
+                type: string
+                const: public, max-age=300
+          content:
+            image/svg+xml:
+              schema:
+                type: string
   /api/auth/github/callback:
     post:
       operationId: exchangeGithubCode
