@@ -2018,6 +2018,8 @@ Zod-схемы фронта (роль 5) и бэкенд описывают од
 
 **Источник истины — [`contracts/openapi.yaml`](../contracts/openapi.yaml)** (OpenAPI 3.1): пути, параметры, схемы, коды ответа и ошибки. `x-service` на операции называет сервис, `x-status: planned` + `x-issue` помечают ещё не реализованное. Совпадение с FastAPI и ответами проверяет `tests/test_openapi_contract*.py`, с Zod — `test_component_schemas_mirror_the_ui_zod_contract` в `tests/test_openapi_contract.py` (общие DTO поле в поле) и `tests/test_ui_zod_contracts.py` (ответы API по JSON Schema Zod). Ниже — только сводка.
 
+**Лимит тела запроса (#530).** На маршрутах, чьё тело разбирает FastAPI, чтение останавливается на 64 KiB (`MAX_REQUEST_BODY_BYTES`, [`request_body_limit.py`](../app/common/request_body_limit.py)): ответ 413 с `detail` приходит до проверки токена и валидации, потому что FastAPI читает тело раньше зависимостей. Новый маршрут с телом попадает под лимит сам. Вебхуки читают поток вручную и считают свои лимиты: GitHub и GitLab 10 MiB (§8.3, §8.1), Bitbucket 256 KiB ([`BITBUCKET_WEBHOOK.md`](BITBUCKET_WEBHOOK.md)).
+
 **Планируемое расширение #107:** RunDetail/RunSession/latestRun получают coverage,
 resultVersion и verificationMode из сохранённого final result. Эти поля ещё нужно
 одновременно добавить в OpenAPI, backend и UI; существующие схемы остаются
