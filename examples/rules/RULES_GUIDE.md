@@ -45,9 +45,11 @@ A repository has one `.review/rules.md`, and that file has at most one `review-i
 templates pasted together as they are fail every run with `policy_ignore_block_duplicate`. To add
 `security-baseline` to a stack template:
 
-1. Paste its sections above the `# Ignore` section of the stack template.
-2. Move its masks into the block of the stack template and delete its own block.
-3. Delete its first line too.
+1. Put its `##` sections under the `# Security` heading of the stack template. `go` has no such
+   heading: add it above `# Ignore`.
+2. Add its masks to the block of the stack template.
+3. Leave out the rest of `security-baseline`: its first line, its `# Security` heading and its whole
+   `# Ignore` section.
 
 ## Size
 
@@ -57,11 +59,11 @@ templates pasted together as they are fail every run with `policy_ignore_block_d
 | `python-fastapi` | 2467 | 1302 |
 | `security-baseline` | 2061 | 1080 |
 | `typescript-react` | 2113 | 1137 |
-| Largest stack + `security-baseline` | 4528 | 2382 |
+| Largest stack + `security-baseline` | 4270 | 2207 |
 
 A file may take up to 64 KiB. Tokens are the service's estimate of the block the model sees, at 3
 characters per token. That block marks up every line, so the number is about 60 % above an estimate
-from the size of the file. The last row is a plain sum, an upper bound of the merged file.
+from the size of the file. The last row is the file the steps above give for the largest stack.
 
 `.review/rules.md` and the root `AGENTS.md` share a budget of 12,000 tokens, and a run over it fails
 with `policy_prompt_budget_exceeded`. Each template stays under 6,000, which leaves at least half of
