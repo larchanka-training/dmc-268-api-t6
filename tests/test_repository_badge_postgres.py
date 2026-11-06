@@ -77,6 +77,13 @@ def test_only_the_stored_public_flag_opens_a_repository(
     assert (run is not None) is visible
 
 
+def test_after_a_rename_only_the_new_name_answers(portal_env: Env) -> None:
+    renamed = f"UPDATE repositories SET full_name = 'octo/new' WHERE id = '{REPO_A}'"
+
+    assert _query(portal_env, "octo/a", PUBLIC_A, renamed) is None
+    assert _query(portal_env, "octo/new") is not None
+
+
 @pytest.mark.parametrize(
     ("stamp", "visible"),
     [

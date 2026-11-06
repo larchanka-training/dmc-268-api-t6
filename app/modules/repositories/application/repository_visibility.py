@@ -21,6 +21,20 @@ class RepositoryVisibilityStore(Protocol):
         """Back to unknown for every repository of the installation; False when it has none."""
         ...
 
+    async def forget_repository(self, repository_external_id: int, observed_at: datetime) -> bool:
+        """Back to unknown wherever a GitHub installation holds it; False when none does."""
+        ...
+
+    async def rename(
+        self,
+        installation_external_id: int,
+        repository_external_id: int,
+        full_name: str,
+        web_url: str | None,
+    ) -> bool:
+        """False when the repository is not connected."""
+        ...
+
     async def overwrite(
         self,
         installation_external_id: int,
@@ -56,6 +70,28 @@ class RecordRepositoryVisibility:
         say a repository went private. A delivery older than the suspension cannot fill it back."""
         async with self._uow_factory() as uow:
             known = await uow.visibility.forget(installation_external_id, observed_at)
+            await uow.commit()
+        return known
+
+    async def forget_repository(self, repository_external_id: int, observed_at: datetime) -> bool:
+        """``repository.transferred``: a row is never moved to the new owner's installation."""
+        async with self._uow_factory() as uow:
+            known = await uow.visibility.forget_repository(repository_external_id, observed_at)
+            await uow.commit()
+        return known
+
+    async def rename(
+        self,
+        installation_external_id: int,
+        repository_external_id: int,
+        full_name: str,
+        web_url: str | None,
+    ) -> bool:
+        """``repository.renamed``: the badge finds a repository by its current name."""
+        async with self._uow_factory() as uow:
+            known = await uow.visibility.rename(
+                installation_external_id, repository_external_id, full_name, web_url
+            )
             await uow.commit()
         return known
 

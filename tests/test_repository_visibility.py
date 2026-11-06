@@ -34,6 +34,22 @@ class _Visibility:
     overwritten: list[tuple[int, int, bool, datetime]] = field(default_factory=list)
     learned: list[tuple[int, int, bool, datetime]] = field(default_factory=list)
     forgotten: list[tuple[int, datetime]] = field(default_factory=list)
+    renamed: list[tuple[int, int, str, str | None]] = field(default_factory=list)
+    transferred: list[tuple[int, datetime]] = field(default_factory=list)
+
+    async def rename(
+        self,
+        installation_external_id: int,
+        repository_external_id: int,
+        full_name: str,
+        web_url: str | None,
+    ) -> bool:
+        self.renamed.append((installation_external_id, repository_external_id, full_name, web_url))
+        return self.known
+
+    async def forget_repository(self, repository_external_id: int, observed_at: datetime) -> bool:
+        self.transferred.append((repository_external_id, observed_at))
+        return self.known
 
     async def forget(self, installation_external_id: int, observed_at: datetime) -> bool:
         self.forgotten.append((installation_external_id, observed_at))
@@ -137,7 +153,7 @@ def test_a_visibility_change_of_a_repository_not_connected_is_final() -> None:
     )
 
 
-@pytest.mark.parametrize("action", ["renamed", "edited", "transferred", "deleted", "archived"])
+@pytest.mark.parametrize("action", ["edited", "deleted", "archived", "created"])
 def test_other_repository_actions_change_nothing(action: str) -> None:
     visibility = _Visibility()
 
@@ -218,6 +234,59 @@ def test_a_malformed_suspension_is_invalid() -> None:
 
     assert visibility.forgotten == []
     assert result.status is InstallationDeliveryDispatchStatus.IGNORED_INVALID_EVENT
+
+
+@pytest.mark.parametrize(
+    ("repository", "web_url"),
+    [
+        pytest.param({"html_url": "https://github.test/octo/new"}, "https://github.test/octo/new"),
+        pytest.param({}, None, id="no-url"),
+        pytest.param({"html_url": 7}, None, id="url-not-a-string"),
+    ],
+)
+def test_a_rename_writes_the_new_name(repository: dict[str, object], web_url: str | None) -> None:
+    visibility = _Visibility()
+    payload = _repository_event("renamed")
+    payload["repository"] = {"id": 101, "full_name": "octo/new", **repository}
+
+    result = _dispatch(visibility, "repository", payload)
+
+    assert visibility.renamed == [(17, 101, "octo/new", web_url)]
+    assert result == InstallationDeliveryDispatchResult(
+        InstallationDeliveryDispatchStatus.UPDATED_REPOSITORY_VISIBILITY
+    )
+
+
+def test_a_rename_to_a_name_github_cannot_have_is_invalid() -> None:
+    visibility = _Visibility()
+    payload = _repository_event("renamed")
+    payload["repository"] = {"id": 101, "full_name": "octo/.."}
+
+    result = _dispatch(visibility, "repository", payload)
+
+    assert visibility.renamed == []
+    assert result.status is InstallationDeliveryDispatchStatus.IGNORED_INVALID_EVENT
+
+
+def test_a_transfer_forgets_the_flag_by_the_repository_id() -> None:
+    visibility = _Visibility()
+
+    result = _dispatch(visibility, "repository", _repository_event("transferred"))
+
+    assert visibility.transferred == [(101, RECEIVED_AT)]
+    assert visibility.renamed == []
+    assert result == InstallationDeliveryDispatchResult(
+        InstallationDeliveryDispatchStatus.UPDATED_REPOSITORY_VISIBILITY
+    )
+
+
+@pytest.mark.parametrize("action", ["renamed", "transferred"])
+def test_a_rename_or_transfer_of_a_repository_not_connected_is_final(action: str) -> None:
+    result = _dispatch(_Visibility(known=False), "repository", _repository_event(action))
+
+    assert result == InstallationDeliveryDispatchResult(
+        InstallationDeliveryDispatchStatus.IGNORED_IRRELEVANT_EVENT, "unknown_repository"
+    )
 
 
 def test_a_visibility_change_without_the_handler_is_deferred() -> None:

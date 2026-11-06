@@ -65,6 +65,38 @@ class SqlAlchemyRepositoryVisibilityStore:
         )
         return bool(forgotten.all())
 
+    async def forget_repository(self, repository_external_id: int, observed_at: datetime) -> bool:
+        forgotten = await self._session.scalars(
+            update(Repository)
+            .where(
+                Repository.external_id == repository_external_id,
+                Repository.provider_installation_id.in_(
+                    select(ProviderInstallation.id).where(ProviderInstallation.provider == "github")
+                ),
+            )
+            .values(_ordered(observed_at, None))
+            .returning(Repository.id)
+        )
+        return bool(forgotten.all())
+
+    async def rename(
+        self,
+        installation_external_id: int,
+        repository_external_id: int,
+        full_name: str,
+        web_url: str | None,
+    ) -> bool:
+        repository_id = await self._session.scalar(
+            update(Repository)
+            .where(_github_repository(installation_external_id, repository_external_id))
+            .values(
+                full_name=full_name,
+                web_url=Repository.web_url if web_url is None else web_url,
+            )
+            .returning(Repository.id)
+        )
+        return repository_id is not None
+
     async def overwrite(
         self,
         installation_external_id: int,

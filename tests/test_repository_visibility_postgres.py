@@ -6,7 +6,7 @@ import asyncio
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
 from typing import cast
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import httpx
 import pytest
@@ -273,6 +273,104 @@ def test_a_suspension_of_no_github_repository_changes_nothing(
 
     assert (flag, observed) == (False, BEFORE)
     assert known is False
+
+
+def _names(env: Env) -> dict[UUID, tuple[str, str]]:
+    async def read() -> dict[UUID, tuple[str, str]]:
+        engine = env.engine()
+        try:
+            async with engine.connect() as connection:
+                rows = await connection.execute(
+                    text("SELECT id, full_name, web_url FROM repositories")
+                )
+                return {row.id: (row.full_name, row.web_url) for row in rows}
+        finally:
+            await engine.dispose()
+
+    return asyncio.run(read())
+
+
+@pytest.mark.parametrize(
+    ("web_url", "expected_url"),
+    [
+        pytest.param("https://github.test/octo/new", "https://github.test/octo/new", id="new-url"),
+        pytest.param(None, "https://github.test/octo/a", id="no-url-keeps-the-old-one"),
+    ],
+)
+def test_a_rename_writes_the_name_of_its_own_repository_only(
+    portal_env: Env, web_url: str | None, expected_url: str
+) -> None:
+    before = _names(portal_env)
+
+    _, _, known = _exercise(
+        portal_env,
+        False,
+        lambda session: _store(session).rename(
+            GITHUB_INSTALLATION, GITHUB_REPOSITORY, "octo/new", web_url
+        ),
+        stamp=T0,
+    )
+
+    names = _names(portal_env)
+    assert known is True
+    assert names[REPO_A] == ("octo/new", expected_url)
+    assert names[REPO_B] == before[REPO_B]
+
+
+def test_a_rename_of_a_repository_not_connected_changes_nothing(portal_env: Env) -> None:
+    before = _names(portal_env)
+
+    _, _, known = _exercise(
+        portal_env,
+        False,
+        lambda session: _store(session).rename(GITHUB_INSTALLATION, 999, "octo/new", None),
+        stamp=T0,
+    )
+
+    assert known is False
+    assert _names(portal_env) == before
+
+
+@pytest.mark.parametrize(
+    ("statements", "stamp", "known", "expected", "expected_stamp"),
+    [
+        pytest.param((), BEFORE, True, None, T0, id="forgets"),
+        pytest.param((), AFTER, True, False, AFTER, id="a-retried-transfer-loses"),
+        pytest.param(
+            (f"UPDATE repositories SET external_id = 777 WHERE id = '{REPO_A}'",),
+            BEFORE,
+            False,
+            False,
+            BEFORE,
+            id="another-repository",
+        ),
+        pytest.param(
+            (f"UPDATE provider_installations SET provider = 'gitlab' WHERE id = '{INSTALL_A}'",),
+            BEFORE,
+            False,
+            False,
+            BEFORE,
+            id="another-provider",
+        ),
+    ],
+)
+def test_a_transfer_forgets_the_flag_by_the_repository_id_across_installations(
+    portal_env: Env,
+    statements: tuple[str, ...],
+    stamp: datetime,
+    known: bool,
+    expected: bool | None,
+    expected_stamp: datetime,
+) -> None:
+    async def step(session: AsyncSession) -> bool:
+        for statement in statements:
+            await session.execute(text(statement))
+        return await _store(session).forget_repository(GITHUB_REPOSITORY, T0)
+
+    flag, observed, result = _exercise(portal_env, False, step, stamp=stamp)
+
+    assert (flag, observed) == (expected, expected_stamp)
+    assert result is known
 
 
 def test_a_retried_delivery_keeps_its_received_at_and_loses_to_a_later_change(
