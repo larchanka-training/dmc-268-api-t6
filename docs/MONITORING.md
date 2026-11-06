@@ -305,7 +305,7 @@ Grafana — на своём хосте `grafana.<APP_DOMAIN>` (A-запись н
 |---|---|---|
 | Период | 24 ч (`BACKUP_INTERVAL_SECONDS`) | `deploy/monitoring/compose.yml` |
 | Хранение | 7 дней (`BACKUP_RETENTION_DAYS`) | там же |
-| Каталог | `/var/backups/dmc-268/<project>/` на хосте, вне каталогов стеков | `BACKUP_DIR` (staging) и `PROD_BACKUP_DIR` (prod) для `deploy.sh`; с prod оба пути только абсолютные, относительный останавливает деплой |
+| Каталог | `/var/backups/dmc-268/<project>/` на хосте, вне каталогов стеков | `BACKUP_DIR` (staging) и `PROD_BACKUP_DIR` (prod) для `deploy.sh`; с prod оба пути только абсолютные, относительный останавливает деплой; каталоги сравниваются по физическому расположению: симлинк между ними тоже останавливает деплой |
 | Размер | ~110 КБ на staging (10.2026); prod ещё не замерен | дашборд (переключатель `Environment`), `dmc_pg_backup_last_size_bytes` |
 
 Бэкап вне расписания: `docker compose -p dmc-268-monitoring exec pg-backup sh /opt/pg-backup/pg-backup.sh once` (prod: сервис `pg-backup-prod`).
