@@ -1389,3 +1389,345 @@ def test_findings_post_processor_v2_preserves_attribution_for_body_only_findings
     assert len(legacy_result.body_only) == 2
     assert legacy_result.body_only[0].finding.rule_name is None
     assert legacy_result.body_only[1].finding.rule_name is None
+
+
+_SWAPI_FIXTURES = Path(__file__).parent / "fixtures" / "swapi"
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("fixture_file", "path", "line", "start_line", "suggestion"),
+    [
+        (
+            "starships.ts",
+            "src/tools/starships.ts",
+            31,
+            None,
+            "      id: z.union([z.number().int().positive(), z.string()])"
+            '.describe("Starship resource ID or full SWAPI starship URL"),',
+        ),
+        (
+            "people.ts",
+            "src/tools/people.ts",
+            31,
+            None,
+            "      id: z.union([z.number().int().positive(), z.string()])"
+            '.describe("Character resource ID or full SWAPI character URL"),',
+        ),
+        (
+            "planets.ts",
+            "src/tools/planets.ts",
+            31,
+            None,
+            "      id: z.union([z.number().int().positive(), z.string()])"
+            '.describe("Planet resource ID or full SWAPI planet URL"),',
+        ),
+        (
+            "common.ts",
+            "src/tools/common.ts",
+            19,
+            None,
+            "  if (!(error instanceof ApiError)) {\n"
+            "    return {\n"
+            "      isError: true,\n"
+            '      content: [{ type: "text" as const, text: `Internal error: ${String(error)}` }],'
+            "\n"
+            "    };\n"
+            "  }",
+        ),
+        (
+            "films_8bc8b5d.ts",
+            "src/tools/films.ts",
+            94,
+            93,
+            "      if (filmId === undefined && episodeId === undefined) {\n"
+            "        throw new McpError(\n"
+            "          ErrorCode.InvalidParams,\n"
+            "          \"Provide exactly one of 'film_id' or \""
+            "'episode_id' to identify the episode.\",\n"
+            "        );\n"
+            "      }",
+        ),
+        (
+            "films_8bc8b5d.ts",
+            "src/tools/films.ts",
+            96,
+            None,
+            'import { McpError, ErrorCode } from "@modelcontextprotocol/sdk/server/mcp.js";',
+        ),
+    ],
+)
+async def test_swapi_all_six_examples_stripped_and_comment_body(
+    fixture_file: str,
+    path: str,
+    line: int,
+    start_line: int | None,
+    suggestion: str,
+) -> None:
+    from app.modules.reviews.application.review_output import comment_body
+    from app.modules.reviews.application.suggestion_validator import validate_review_suggestions
+    from app.modules.reviews.infrastructure.subprocess_source_parser import SubprocessSourceParser
+
+    content = (_SWAPI_FIXTURES / fixture_file).read_bytes()
+    diff_map = _added_file_diff_map(path, 150)
+    parser = SubprocessSourceParser()
+    try:
+        broken_finding = ReviewFinding(
+            path=path,
+            line=line,
+            start_line=start_line,
+            severity="high",
+            category="correctness",
+            title="Finding with broken suggestion",
+            body="Finding description.",
+            suggestion=suggestion,
+            confidence=0.9,
+            rule_name=".review/rules.md",
+        )
+        output = ReviewOutput(
+            findings=[broken_finding],
+            summary=ReviewSummary(problem="Problem.", done_well="Done well.", effort="small"),
+        )
+        validated = await validate_review_suggestions(
+            output,
+            diff_map=diff_map,
+            file_contents={path: content},
+            parser=parser,
+            run_id=UUID("00000000-0000-0000-0000-000000000001"),
+        )
+        assert validated.findings[0].suggestion is None
+
+        processor = FindingsPostProcessor.from_default_patterns()
+        result = processor.process(
+            validated,
+            diff_map=diff_map,
+            checked_paths=_paths_of(diff_map),
+            rule_names=frozenset(),
+            coverage=_trusted_coverage(_paths_of(diff_map)),
+        )
+        assert len(result.inline) == 1
+        processed_finding = result.inline[0].finding
+        assert processed_finding.suggestion is None
+
+        rendered_comment = comment_body(
+            processed_finding.title, processed_finding.body, processed_finding.suggestion
+        )
+        assert "```suggestion" not in rendered_comment
+    finally:
+        await parser.aclose()
+
+
+@pytest.mark.anyio
+async def test_valid_multiline_suggestion_retained_in_comment_body() -> None:
+    from app.modules.reviews.application.review_output import comment_body
+    from app.modules.reviews.application.suggestion_validator import validate_review_suggestions
+    from app.modules.reviews.infrastructure.subprocess_source_parser import SubprocessSourceParser
+
+    path = "src/tools/starships.ts"
+    content = (_SWAPI_FIXTURES / "starships.ts").read_bytes()
+    diff_map = _added_file_diff_map(path, 150)
+    parser = SubprocessSourceParser()
+    try:
+        suggestion_multiline = (
+            "      // Valid comment\n"
+            "      const starship = await client.getStarship(id);\n"
+            '      return jsonResult(enrichWithId(starship, "starships"));'
+        )
+        valid_finding = ReviewFinding(
+            path=path,
+            line=34,
+            start_line=33,
+            severity="medium",
+            category="correctness",
+            title="Refactor starship fetch",
+            body="Add inline documentation.",
+            suggestion=suggestion_multiline,
+            confidence=0.9,
+            rule_name=".review/rules.md",
+        )
+        output = ReviewOutput(
+            findings=[valid_finding],
+            summary=ReviewSummary(problem="Problem.", done_well="Done well.", effort="small"),
+        )
+        validated = await validate_review_suggestions(
+            output,
+            diff_map=diff_map,
+            file_contents={path: content},
+            parser=parser,
+            run_id=UUID("00000000-0000-0000-0000-000000000001"),
+        )
+        assert validated.findings[0].suggestion == suggestion_multiline
+
+        processor = FindingsPostProcessor.from_default_patterns()
+        result = processor.process(
+            validated,
+            diff_map=diff_map,
+            checked_paths=_paths_of(diff_map),
+            rule_names=frozenset(),
+            coverage=_trusted_coverage(_paths_of(diff_map)),
+        )
+        assert len(result.inline) == 1
+        processed_finding = result.inline[0].finding
+        assert processed_finding.suggestion == suggestion_multiline
+
+        rendered_comment = comment_body(
+            processed_finding.title, processed_finding.body, processed_finding.suggestion
+        )
+        assert "```suggestion" in rendered_comment
+        assert suggestion_multiline in rendered_comment
+        # Ensure no unexpected double empty line before closing tag
+        assert "\n\n\n```" not in rendered_comment
+    finally:
+        await parser.aclose()
+
+
+@pytest.mark.anyio
+async def test_caplog_records_stripped_and_retained_reasons(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    import logging
+
+    from app.modules.reviews.application.ast_symbols import SuggestionRejectionReason
+    from app.modules.reviews.application.suggestion_validator import validate_review_suggestions
+    from app.modules.reviews.infrastructure.subprocess_source_parser import SubprocessSourceParser
+
+    caplog.set_level(logging.INFO)
+    run_id = UUID("11111111-2222-3333-4444-555555555555")
+    parser = SubprocessSourceParser()
+    try:
+        f_strip = ReviewFinding(
+            path="src/tools/starships.ts",
+            line=1,
+            start_line=None,
+            severity="high",
+            category="correctness",
+            title="Broken suggestion",
+            body="Body.",
+            suggestion="const invalid = ;",
+            confidence=0.9,
+            rule_name=".review/rules.md",
+        )
+        f_unsupported = ReviewFinding(
+            path="docs/README.md",
+            line=5,
+            start_line=None,
+            severity="low",
+            category="readability",
+            title="Doc suggestion",
+            body="Body.",
+            suggestion="New doc line",
+            confidence=0.9,
+            rule_name=".review/rules.md",
+        )
+        f_unavailable = ReviewFinding(
+            path="src/other.ts",
+            line=10,
+            start_line=None,
+            severity="medium",
+            category="correctness",
+            title="Missing file",
+            body="Body.",
+            suggestion="const a = 1;",
+            confidence=0.9,
+            rule_name=".review/rules.md",
+        )
+        output = ReviewOutput(
+            findings=[f_strip, f_unavailable, f_unsupported],
+            summary=ReviewSummary(problem="Problem.", done_well="Done well.", effort="small"),
+        )
+        await validate_review_suggestions(
+            output,
+            file_contents={"src/tools/starships.ts": b"const valid = 1;\n"},
+            parser=parser,
+            run_id=run_id,
+        )
+
+        logs = caplog.text
+        assert str(run_id) in logs
+        assert f"reason={SuggestionRejectionReason.SYNTAX_ERROR.value}" in logs
+        assert f"reason={SuggestionRejectionReason.UNSUPPORTED_LANGUAGE.value}" in logs
+        assert f"reason={SuggestionRejectionReason.FILE_UNAVAILABLE.value}" in logs
+    finally:
+        await parser.aclose()
+
+
+@pytest.mark.anyio
+async def test_modified_file_without_explicit_file_contents_retains_suggestion_ac5(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    import logging
+
+    from app.modules.reviews.application.ast_symbols import SuggestionRejectionReason
+    from app.modules.reviews.application.suggestion_validator import validate_review_suggestions
+    from app.modules.reviews.infrastructure.subprocess_source_parser import SubprocessSourceParser
+
+    caplog.set_level(logging.INFO)
+    run_id = UUID("33333333-3333-3333-3333-333333333333")
+    parser = SubprocessSourceParser()
+    try:
+        f = ReviewFinding(
+            path="src/tools/films.ts",
+            line=94,
+            start_line=93,
+            severity="high",
+            category="correctness",
+            title="Modified file suggestion",
+            body="Body.",
+            suggestion="const x = 1;",
+            confidence=0.9,
+            rule_name=".review/rules.md",
+        )
+        output = ReviewOutput(
+            findings=[f],
+            summary=ReviewSummary(problem="Problem.", done_well="Done well.", effort="small"),
+        )
+        validated = await validate_review_suggestions(
+            output,
+            file_contents=None,  # No explicit contents provided!
+            parser=parser,
+            run_id=run_id,
+        )
+        # AC5: suggestion is retained without silent loss
+        assert validated.findings[0].suggestion == "const x = 1;"
+        assert f"reason={SuggestionRejectionReason.FILE_UNAVAILABLE.value}" in caplog.text
+    finally:
+        await parser.aclose()
+
+
+@pytest.mark.anyio
+async def test_pre_existing_syntax_errors_do_not_strip_valid_suggestion() -> None:
+    from app.modules.reviews.application.suggestion_validator import validate_review_suggestions
+    from app.modules.reviews.infrastructure.subprocess_source_parser import SubprocessSourceParser
+
+    # File already contains a pre-existing syntax error on line 1
+    content = b"const invalid = ;\nexport function test(): number {\n  return 1;\n}\n"
+    parser = SubprocessSourceParser()
+    try:
+        valid_suggestion = "  return 2;"
+        f = ReviewFinding(
+            path="src/test.ts",
+            line=3,
+            start_line=None,
+            severity="medium",
+            category="correctness",
+            title="Valid edit in file with prior syntax error",
+            body="Body.",
+            suggestion=valid_suggestion,
+            confidence=0.9,
+            rule_name=".review/rules.md",
+        )
+        output = ReviewOutput(
+            findings=[f],
+            summary=ReviewSummary(problem="Problem.", done_well="Done well.", effort="small"),
+        )
+        validated = await validate_review_suggestions(
+            output,
+            file_contents={"src/test.ts": content},
+            parser=parser,
+            run_id=UUID("44444444-4444-4444-4444-444444444444"),
+        )
+        # Because errors_after == errors_before (no new syntax errors introduced),
+        # suggestion is retained!
+        assert validated.findings[0].suggestion == valid_suggestion
+    finally:
+        await parser.aclose()

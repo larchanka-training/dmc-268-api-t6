@@ -12,6 +12,7 @@ from uuid import UUID
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 from app.common.application.unit_of_work import UnitOfWork
+from app.modules.reviews.application.ast_symbols import SuggestionParser
 from app.modules.reviews.application.verdict import SeverityThresholdValue
 
 if TYPE_CHECKING:
@@ -688,9 +689,12 @@ class PublishReviewOutput:
         self,
         uow_factory: ReviewOutputUnitOfWorkFactory,
         provider: ReviewProvider,
+        *,
+        parser: SuggestionParser | None = None,
     ) -> None:
         self._uow_factory = uow_factory
         self._provider = provider
+        self._parser = parser
 
     async def execute(
         self,
@@ -737,6 +741,7 @@ class PublishReviewOutput:
         # hunk lines or valid rule names.
         async with self._uow_factory() as uow:
             context = await uow.reviews.get_post_processing_input(run_id)
+            blob_cache = getattr(uow, "blob_cache", None)
         if context is None:
             return False
         threshold_to_use = (
@@ -745,6 +750,33 @@ class PublishReviewOutput:
         v2_rules_to_use = (
             effective_v2_rules if effective_v2_rules is not None else context.allowed_v2_rules
         )
+
+        parser = self._parser
+        own_parser = False
+        if parser is None:
+            from app.modules.reviews.infrastructure.subprocess_source_parser import (
+                SubprocessSourceParser,
+            )
+
+            parser = SubprocessSourceParser()
+            own_parser = True
+
+        try:
+            from app.modules.reviews.application.suggestion_validator import (
+                validate_review_suggestions,
+            )
+
+            parsed = await validate_review_suggestions(
+                parsed,
+                diff_map=context.diff_map,
+                blob_cache=blob_cache,
+                parser=parser,
+                run_id=run_id,
+            )
+        finally:
+            if own_parser:
+                await parser.aclose()
+
         processed = FindingsPostProcessor.from_default_patterns().process(
             parsed,
             diff_map=context.diff_map,

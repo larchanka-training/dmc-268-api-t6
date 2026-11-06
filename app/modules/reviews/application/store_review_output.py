@@ -11,6 +11,7 @@ from typing import Any, Protocol
 from uuid import UUID
 
 from app.common.application.unit_of_work import UnitOfWork
+from app.modules.reviews.application.ast_symbols import SuggestionParser
 from app.modules.reviews.application.findings_post_processor import (
     FindingsPostProcessor,
     ProcessedFinding,
@@ -18,6 +19,7 @@ from app.modules.reviews.application.findings_post_processor import (
     finalize_stored_review_body,
     summary_from_result,
 )
+from app.modules.reviews.application.get_run_file_lines import BlobCache
 from app.modules.reviews.application.queue_messages import ReviewPublishPointer, ReviewPublishQueue
 from app.modules.reviews.application.review_output import (
     InvalidReviewOutput,
@@ -136,12 +138,14 @@ class StoreReviewOutput:
         worker_id: str,
         run_url: Callable[[UUID], str | None],
         now: Callable[[], datetime] = lambda: datetime.now(UTC),
+        parser: SuggestionParser | None = None,
     ) -> None:
         self._uow_factory = uow_factory
         self._queue = queue
         self._worker_id = worker_id
         self._run_url = run_url
         self._now = now
+        self._parser = parser
 
     async def execute(
         self,
@@ -207,6 +211,36 @@ class StoreReviewOutput:
         v2_rules_to_use = (
             effective_v2_rules if effective_v2_rules is not None else context.allowed_v2_rules
         )
+        parser = self._parser
+        own_parser = False
+        if parser is None:
+            from app.modules.reviews.infrastructure.subprocess_source_parser import (
+                SubprocessSourceParser,
+            )
+
+            parser = SubprocessSourceParser()
+            own_parser = True
+
+        blob_cache: BlobCache | None = None
+        async with self._uow_factory() as uow:
+            blob_cache = getattr(uow, "blob_cache", None)
+
+        try:
+            from app.modules.reviews.application.suggestion_validator import (
+                validate_review_suggestions,
+            )
+
+            parsed = await validate_review_suggestions(
+                parsed,
+                diff_map=context.diff_map,
+                blob_cache=blob_cache,
+                parser=parser,
+                run_id=run_id,
+            )
+        finally:
+            if own_parser:
+                await parser.aclose()
+
         processor = FindingsPostProcessor.from_default_patterns()
         processed = processor.process(
             parsed,

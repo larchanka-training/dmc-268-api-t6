@@ -242,6 +242,24 @@ def test_publish_mapping_preserves_the_raw_object() -> None:
     assert provider.calls[0][0] == "a" * 40
 
 
+def test_publish_review_output_with_custom_parser() -> None:
+    repository = RecordingRepository(_context(), _publication())
+    factory = RecordingFactory(repository)
+    provider = RecordingProvider(units=factory.units)
+    value = valid_output()
+
+    class CustomParser:
+        async def validate_suggestions(self, requests: tuple[Any, ...]) -> dict[str, Any]:
+            return {}
+
+        async def aclose(self) -> None:
+            pass
+
+    publisher = PublishReviewOutput(factory, provider, parser=CustomParser())
+    assert asyncio.run(publisher.execute(RUN_ID, value)) is True
+    assert repository.raw_objects == [value]
+
+
 @pytest.mark.parametrize("raw", ('{"findings":', b'{"findings":'))
 def test_parse_rejects_malformed_json_text(raw: str | bytes) -> None:
     with pytest.raises(InvalidReviewOutput):
