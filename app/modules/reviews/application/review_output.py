@@ -433,8 +433,12 @@ class VerifiedReviewOutput(Mapping[str, object]):
         verify_request: dict[str, Any] | None = None,
         verify_response: dict[str, Any] | None = None,
         incomplete_paths: tuple[str, ...] = (),
+        rule_line_refs: Mapping[int, RuleLineRef] | None = None,
     ) -> None:
         self.incomplete_paths = incomplete_paths
+        # Index in ``findings`` -> the rules lines its decision cites. Kept beside the payload:
+        # the model's answer contract must not let a model name them.
+        self.rule_line_refs: Mapping[int, RuleLineRef] = rule_line_refs or {}
         self._payload: dict[str, object] = dict(payload)
         self.dropped_findings = tuple(dropped_findings)
         self.severity_threshold = severity_threshold

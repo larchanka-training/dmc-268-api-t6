@@ -5,10 +5,13 @@ from __future__ import annotations
 import asyncio
 import re
 from dataclasses import replace
-from typing import Any
+from typing import Any, Literal
+from uuid import UUID
 
 import pytest
 
+from app.modules.reviews.application.conventions import GeneratedConventions
+from app.modules.reviews.application.execute_review import ExecuteReviewRun, ReviewPromptInput
 from app.modules.reviews.application.prompt_builder import (
     ChangedFile,
     DiffLine,
@@ -25,10 +28,19 @@ from app.modules.reviews.application.review_output import (
     EvidenceRef,
     ReviewFindingV2,
     RuleLineRef,
+    VerifiedReviewOutput,
 )
 from app.modules.reviews.application.verdict import HashedFinding, findings_hash
 from tests.policy_snapshot_fakes import make_policy_document_present
-from tests.verifier_pipeline_fakes import MAIN_BLOCK_ID, verifier_snapshot
+from tests.verifier_pipeline_fakes import (
+    MAIN_BLOCK_ID,
+    RUN_ID,
+    FakeModel,
+    FakeProcessor,
+    FakePublisher,
+    FakeRepository,
+    verifier_snapshot,
+)
 
 _LINK = (
     "https://github.com/acme/widgets/blob/"
@@ -180,3 +192,79 @@ def test_the_record_names_the_rules_lines_the_verifier_cited(
     )
 
     assert record.rule_line_refs == ({} if expected is None else {"c-1": expected})
+
+
+class _SnapshotRepository(FakeRepository):
+    def __init__(self, severity_threshold: Literal["all", "warning", "critical"]) -> None:
+        self._severity_threshold = severity_threshold
+
+    async def get_review_prompt_input(
+        self, run_id: UUID, saved: GeneratedConventions
+    ) -> ReviewPromptInput:
+        prompt_input = await super().get_review_prompt_input(run_id, saved)
+        return replace(
+            prompt_input, policy_snapshot=_SNAPSHOT, severity_threshold=self._severity_threshold
+        )
+
+
+def _model_finding(line: int, title: str, severity: str = "critical") -> dict[str, Any]:
+    return {
+        "path": "app/main.py",
+        "line": line,
+        "start_line": None,
+        "severity": severity,
+        "category": "security",
+        "title": title,
+        "body": "Unsanitized input.",
+        "suggestion": None,
+        "confidence": 0.9,
+        "rule_name": ".review/rules.md",
+        "evidence_refs": [{"block_id": MAIN_BLOCK_ID, "start_line": line, "end_line": line}],
+    }
+
+
+def _executed(
+    findings: list[dict[str, Any]],
+    verifier: _Verifier,
+    *,
+    severity_threshold: Literal["all", "warning", "critical"] = "all",
+) -> VerifiedReviewOutput:
+    publisher = FakePublisher()
+    pipeline = ExecuteReviewRun(
+        FakeProcessor(),
+        _SnapshotRepository(severity_threshold),
+        FakeModel(findings),
+        publisher,
+        reflection_pass=ReflectionPass(verifier),
+    )
+    assert asyncio.run(pipeline.execute(RUN_ID)) is True
+    output = publisher.outputs[0]
+    assert isinstance(output, VerifiedReviewOutput)
+    return output
+
+
+def test_the_lines_stay_with_their_finding_when_an_earlier_one_is_rejected() -> None:
+    output = _executed(
+        [_model_finding(10, "Rejected"), _model_finding(11, "Kept")],
+        _Verifier(
+            ("contradicted", [_ref("policy-rules", 1, 1)]),
+            ("supported", [_ref("policy-rules", 2, 3)]),
+        ),
+    )
+
+    assert [item["title"] for item in output["findings"]] == ["Kept"]  # type: ignore[attr-defined]
+    assert output.rule_line_refs == {0: RuleLineRef(_REVISION, 2, 3)}
+
+
+def test_the_lines_stay_with_their_finding_when_the_threshold_drops_an_earlier_one() -> None:
+    output = _executed(
+        [_model_finding(10, "Below threshold", "medium"), _model_finding(11, "Kept")],
+        _Verifier(
+            ("supported", [_ref("policy-rules", 1, 1)]),
+            ("supported", [_ref("policy-rules", 2, 3)]),
+        ),
+        severity_threshold="critical",
+    )
+
+    assert [item["title"] for item in output["findings"]] == ["Kept"]  # type: ignore[attr-defined]
+    assert output.rule_line_refs == {0: RuleLineRef(_REVISION, 2, 3)}
