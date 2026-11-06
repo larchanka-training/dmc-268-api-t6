@@ -7,7 +7,6 @@ import logging
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from typing import Any
-from uuid import UUID
 
 import pytest
 
@@ -18,10 +17,11 @@ from app.modules.integrations.webhooks.application.github_installation_dispatch 
     InstallationDeliveryDispatchResult,
     InstallationDeliveryDispatchStatus,
 )
-from app.modules.repositories.application.installation_repositories import (
-    InstallationRepositoriesEvent,
+from tests.github_dispatch_fakes import (
+    FakeInstallationResolver,
+    FakeOnboarding,
+    github_pull_request_payload,
 )
-from app.modules.repositories.application.onboard_repository import OnboardingResult
 
 _DISPATCH_LOGGER = "app.modules.integrations.webhooks.application.github_installation_dispatch"
 RECEIVED_AT = datetime(2026, 11, 1, 12, tzinfo=UTC)
@@ -84,28 +84,19 @@ class _Visibility:
             raise self.error
 
 
-class _Resolver:
-    async def find_github_installation_id(self, external_id: int) -> UUID | None:
-        raise AssertionError("a visibility event resolves no installation")
-
-
-class _Onboarding:
-    async def execute(
-        self, *, provider_installation_id: UUID, event: InstallationRepositoriesEvent
-    ) -> tuple[OnboardingResult, ...]:
-        raise AssertionError("a visibility event onboards nothing")
-
-
 def _dispatch(
     visibility: _Visibility | None, event_name: str, payload: dict[str, Any]
 ) -> InstallationDeliveryDispatchResult:
+    resolver, onboarding = FakeInstallationResolver(), FakeOnboarding()
     adapter = GitHubWebhookDispatchAdapter(
         GitHubInstallationDeliveryDispatcher(
-            resolver=_Resolver(), onboarding=_Onboarding(), repository_visibility=visibility
+            resolver=resolver, onboarding=onboarding, repository_visibility=visibility
         )
     )
     receipt = VerifiedGitHubDelivery("delivery-1", event_name, payload).to_receipt()
-    return asyncio.run(adapter.execute(replace(receipt, received_at=RECEIVED_AT)))
+    result = asyncio.run(adapter.execute(replace(receipt, received_at=RECEIVED_AT)))
+    assert (resolver.calls, onboarding.calls) == ([], [])
+    return result
 
 
 def _repository_event(action: str) -> dict[str, Any]:
@@ -117,22 +108,9 @@ def _repository_event(action: str) -> dict[str, Any]:
 
 
 def _pull_request_event(action: str, **repository: object) -> dict[str, Any]:
-    return {
-        "action": action,
-        "installation": {"id": 17},
-        "repository": {"id": 101, "full_name": "octo/repo", **repository},
-        "pull_request": {
-            "id": 901,
-            "number": 7,
-            "title": "Review parser",
-            "html_url": "https://github.com/octo/repo/pull/7",
-            "user": {"login": "alice"},
-            "head": {"ref": "feature", "sha": "a" * 40},
-            "base": {"ref": "main", "sha": "b" * 40},
-            "state": "open",
-            "updated_at": "2026-09-28T11:59:00Z",
-        },
-    }
+    return github_pull_request_payload(
+        action, repository={"id": 101, "full_name": "octo/repo", **repository}
+    )
 
 
 @pytest.mark.parametrize(("action", "private"), [("privatized", True), ("publicized", False)])
