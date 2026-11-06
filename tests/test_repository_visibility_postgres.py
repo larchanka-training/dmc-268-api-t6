@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable
+from typing import cast
 from uuid import uuid4
 
 import httpx
@@ -28,7 +29,7 @@ from app.modules.workspaces.application.link_github_installations import (
 from app.modules.workspaces.infrastructure.github_installation_links import (
     SqlAlchemyGitHubInstallationLinkUnitOfWork,
 )
-from tests.portal_postgres import HEAD, INSTALL_A, REPO_A, Env
+from tests.portal_postgres import HEAD, INSTALL_A, REPO_A, REPO_B, Env
 
 pytest_plugins = ("tests.portal_postgres",)
 pytestmark = pytest.mark.integration
@@ -165,8 +166,55 @@ def test_a_lesson_from_another_event_fills_or_closes_but_never_opens(
     assert flag is expected
 
 
+@pytest.mark.parametrize("stored", [False, True, None])
+def test_a_suspension_forgets_the_flag_of_its_installation_only(
+    portal_env: Env, stored: bool | None
+) -> None:
+    other = f"UPDATE repositories SET private = false WHERE id = '{REPO_B}'"
+
+    async def step(session: AsyncSession) -> tuple[bool, object]:
+        await session.execute(text(other))
+        known = await _store(session).forget(GITHUB_INSTALLATION)
+        return known, await session.scalar(
+            text("SELECT private FROM repositories WHERE id = :id"), {"id": REPO_B}
+        )
+
+    flag, (known, other_flag) = cast(
+        tuple[bool | None, tuple[bool, object]], _exercise(portal_env, stored, step)
+    )
+
+    assert flag is None
+    assert known is True
+    assert other_flag is False
+
+
+@pytest.mark.parametrize(
+    "statement",
+    [
+        pytest.param(None, id="unknown-installation"),
+        pytest.param(
+            f"UPDATE provider_installations SET provider = 'gitlab' WHERE id = '{INSTALL_A}'",
+            id="another-provider-with-the-same-id",
+        ),
+    ],
+)
+def test_a_suspension_of_no_github_repository_changes_nothing(
+    portal_env: Env, statement: str | None
+) -> None:
+    async def step(session: AsyncSession) -> bool:
+        if statement is None:
+            return await _store(session).forget(999)
+        await session.execute(text(statement))
+        return await _store(session).forget(GITHUB_INSTALLATION)
+
+    flag, known = _exercise(portal_env, False, step)
+
+    assert flag is False
+    assert known is False
+
+
 def test_the_runtime_dispatcher_records_visibility_from_both_events(portal_env: Env) -> None:
-    async def exercise() -> tuple[bool | None, str, bool | None, str]:
+    async def exercise() -> tuple[bool | None, str, bool | None, str, bool | None, str]:
         engine = portal_env.engine()
         factory = async_sessionmaker(engine, expire_on_commit=False)
         client = httpx.AsyncClient(base_url="https://api.github.com")
@@ -210,15 +258,20 @@ def test_the_runtime_dispatcher_records_visibility_from_both_events(portal_env: 
                 "repository",
                 {"action": "privatized", "installation": installation, "repository": repository},
             )
+            forgotten, forgotten_status = await deliver(
+                "installation", {"action": "suspend", "installation": installation}
+            )
         finally:
             await client.aclose()
             await engine.dispose()
-        return learned, learned_status, closed, closed_status
+        return learned, learned_status, closed, closed_status, forgotten, forgotten_status
 
     assert asyncio.run(exercise()) == (
         False,
         "ignored_irrelevant_event",
         True,
+        "updated_repository_visibility",
+        None,
         "updated_repository_visibility",
     )
 

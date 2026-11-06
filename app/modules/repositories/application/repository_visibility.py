@@ -13,6 +13,10 @@ from app.common.application.unit_of_work import UnitOfWork
 
 
 class RepositoryVisibilityStore(Protocol):
+    async def forget(self, installation_external_id: int) -> bool:
+        """Back to unknown for every repository of the installation; False when it has none."""
+        ...
+
     async def overwrite(
         self, installation_external_id: int, repository_external_id: int, private: bool
     ) -> bool:
@@ -34,6 +38,14 @@ class RepositoryVisibilityUnitOfWork(UnitOfWork, Protocol):
 class RecordRepositoryVisibility:
     def __init__(self, uow_factory: Callable[[], RepositoryVisibilityUnitOfWork]) -> None:
         self._uow_factory = uow_factory
+
+    async def forget(self, installation_external_id: int) -> bool:
+        """``installation.suspend``: no event reaches the service until it ends, so nothing would
+        say a repository went private. The next pull request delivery after it fills the flag."""
+        async with self._uow_factory() as uow:
+            known = await uow.visibility.forget(installation_external_id)
+            await uow.commit()
+        return known
 
     async def overwrite(
         self, installation_external_id: int, repository_external_id: int, private: bool

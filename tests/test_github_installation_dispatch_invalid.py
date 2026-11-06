@@ -239,9 +239,9 @@ def test_unsupported_installation_action_is_not_logged_as_an_invalid_event(
         asyncio.run(
             adapter.execute(
                 VerifiedGitHubDelivery(
-                    "delivery-suspend",
+                    "delivery-unsuspend",
                     "installation",
-                    {"action": "suspend", "installation": {"id": 17}},
+                    {"action": "unsuspend", "installation": {"id": 17}},
                 ).to_receipt()
             )
         )
@@ -297,14 +297,16 @@ def test_unsupported_installation_action_reaches_application_as_event_metadata(
             VerifiedGitHubDelivery(
                 "delivery-installation",
                 event_name,
-                {"action": "suspend", "installation": {"id": 17}},
+                {"action": "unsuspend", "installation": {"id": 17}},
             ).to_receipt()
         )
     )
 
     assert result.status is InstallationDeliveryDispatchStatus.IGNORED_IRRELEVANT_EVENT
     assert dispatcher.events == [
-        GitHubDispatchEvent("delivery-installation", UnsupportedGitHubEvent(event_name, "suspend"))
+        GitHubDispatchEvent(
+            "delivery-installation", UnsupportedGitHubEvent(event_name, "unsuspend")
+        )
     ]
 
 
