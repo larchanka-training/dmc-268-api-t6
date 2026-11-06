@@ -1408,8 +1408,10 @@ Policy documents хранятся отдельно от производных �
 ≤300 начальных строк каждого. Title/body PR, head-tree и head-код в общий вызов
 запрещены; отдельного PR-specific conventions call v1 нет. Как построено: до 100
 изменённых путей PR идут в `<changed_files>` (модель объясняет по ним конвенции),
-но в ключ кэша не входят (CONTEXT_AND_VERIFICATION_SPEC §4.2). Нет
-исходников — `conventions_not_applicable` без вызова; сбой непустого вызова после
+но в ключ кэша не входят (CONTEXT_AND_VERIFICATION_SPEC §4.2). Cache miss вызывает
+LLM без проверки на отсутствие источников (цель #107 — без источников вызова нет,
+`conventions_not_applicable`, CONTEXT_AND_VERIFICATION_SPEC §4.2); при неполном
+дереве `RequiredSourceUnavailable` возникает раньше вызова. Сбой вызова после
 разрешённого recovery даёт failed/retry по классу ошибки, не пустые конвенции (§5).
 
 ### L1 — Diff разрешённых изменений
