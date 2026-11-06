@@ -354,6 +354,8 @@ async def _payload(factory: Factory, run_id: UUID) -> Any:
         pytest.param(_STOP, _STOP, id="summary-only-stop"),
         pytest.param(_BUILDER, _BUILDER, id="builder-payload-with-the-same-status"),
         pytest.param(_REVIEW, None, id="reviewed"),
+        pytest.param({"files": 3}, None, id="no-status"),
+        pytest.param({"status": None, "files": 3}, None, id="null-status"),
     ],
 )
 def test_only_a_summary_only_status_keeps_its_context_payload(

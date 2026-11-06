@@ -57,7 +57,7 @@ class SqlAlchemyRunDataRetentionStore:
         await self._session.execute(
             delete(ContextPayload).where(
                 ContextPayload.run_id.in_(run_ids),
-                ContextPayload.summary["status"].astext != "summary_only",
+                ContextPayload.summary["status"].astext.is_distinct_from("summary_only"),
             )
         )
         await self._session.execute(
