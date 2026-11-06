@@ -411,6 +411,15 @@ class DroppedCandidateRecord:
     position: int
 
 
+@dataclass(frozen=True)
+class RuleLineRef:
+    """The ``.review/rules.md`` lines a verifier decision cites, and the revision they show."""
+
+    revision: str
+    start_line: int
+    end_line: int
+
+
 class VerifiedReviewOutput(Mapping[str, object]):
     """Backend execution metadata; absent verification fields do not certify verification."""
 
