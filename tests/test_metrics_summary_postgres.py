@@ -3,9 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-import os
 import selectors
-from collections.abc import Iterator
 from datetime import UTC, datetime
 from decimal import Decimal
 from uuid import UUID, uuid4
@@ -31,9 +29,9 @@ from tests.portal_postgres import (
     WS_B,
     Env,
     clean_review_result,
-    portal_schema,
 )
 
+pytest_plugins = ("tests.portal_postgres",)
 pytestmark = pytest.mark.integration
 
 _NOW = datetime(2026, 10, 28, 12, tzinfo=UTC)
@@ -43,18 +41,9 @@ _RUN_HIDDEN = UUID("00000000-0000-4000-8000-000000003203")
 _FINDING = UUID("00000000-0000-4000-8000-000000003204")
 
 
-@pytest.fixture
-def metrics_env() -> Iterator[Env]:
-    database_url = os.environ.get("TEST_DATABASE_URL")
-    if database_url is None:
-        pytest.skip("set TEST_DATABASE_URL to run PostgreSQL integration tests")
-    with portal_schema(database_url, None) as env:
-        yield env
-
-
-def test_metrics_summary_counts_visible_runs_and_todays_spend(metrics_env: Env) -> None:
+def test_metrics_summary_counts_visible_runs_and_todays_spend(portal_env: Env) -> None:
     async def exercise() -> None:
-        engine = metrics_env.engine()
+        engine = portal_env.engine()
         factory = async_sessionmaker(engine, expire_on_commit=False)
         scope = AuthScope(42, (WS_A,))
         try:
@@ -212,10 +201,10 @@ def test_metrics_summary_counts_visible_runs_and_todays_spend(metrics_env: Env) 
 
 
 def test_metrics_summary_matches_pull_verdicts_and_published_findings(
-    metrics_env: Env,
+    portal_env: Env,
 ) -> None:
     async def exercise() -> None:
-        engine = metrics_env.engine()
+        engine = portal_env.engine()
         factory = async_sessionmaker(engine, expire_on_commit=False)
         scope = AuthScope(42, (WS_A,))
         old = UUID("00000000-0000-4000-8000-000000003231")
@@ -319,9 +308,9 @@ def test_metrics_summary_matches_pull_verdicts_and_published_findings(
     )
 
 
-def test_metrics_summary_filters_repo_and_pauses_on_the_worker_rule(metrics_env: Env) -> None:
+def test_metrics_summary_filters_repo_and_pauses_on_the_worker_rule(portal_env: Env) -> None:
     async def exercise() -> None:
-        engine = metrics_env.engine()
+        engine = portal_env.engine()
         factory = async_sessionmaker(engine, expire_on_commit=False)
         scope = AuthScope(42, (WS_A,))
         extra_repo = UUID("00000000-0000-4000-8000-000000003241")
