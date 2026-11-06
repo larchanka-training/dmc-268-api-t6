@@ -20,16 +20,19 @@ duplicate is adopted only on a rerun, only open, yours and created since the sta
 from __future__ import annotations
 
 import copy
+import fcntl
 import importlib.util
 import json
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -37,6 +40,7 @@ import pytest
 HERE = Path(__file__).resolve().parent
 SKILL = HERE.parent
 SCRIPT = SKILL / "scripts" / "issue-batch.py"
+BOARD_SCRIPT = SKILL / "scripts" / "issue-board.py"
 EXAMPLES = SKILL / "examples"
 FAKE = HERE / "fake_issue_scripts.py"
 CASES = ["01-single", "02-two-prs", "03-ui-api"]
@@ -75,7 +79,7 @@ def run(
     stubs = tmp_path / "stubs"
     if not stubs.exists():
         stubs.mkdir()
-        for name in ("issue-create.sh", "issue-link.sh"):
+        for name in ("issue-create.sh", "issue-link.sh", "issue-board.py"):
             shutil.copy(FAKE, stubs / name)
             (stubs / name).chmod(0o755)
     log = tmp_path / "calls.jsonl"
@@ -382,7 +386,68 @@ def test_without_xdg_cache_home_the_state_lives_under_home(tmp_path: Path, xdg: 
 def test_the_state_file_leaves_no_temp_file_behind(tmp_path: Path) -> None:
     r, _ = run(tmp_path, batch(item("a"), item("b")))
     assert r.returncode == 0, r.stderr
-    assert sorted(p.name for p in state_path(tmp_path).parent.iterdir()) == ["b1.json"]
+    assert sorted(p.name for p in state_path(tmp_path).parent.iterdir()) == ["b1.json", "b1.lock"]
+
+
+def test_a_second_run_of_the_same_id_stops_before_any_create(tmp_path: Path) -> None:
+    lock_path = state_path(tmp_path).with_suffix(".lock")
+    lock_path.parent.mkdir(parents=True)
+    with lock_path.open("a+") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        r, calls = run(tmp_path, batch(item("a")))
+        assert r.returncode == 2
+        assert "already running" in error(r)
+        assert calls == []
+        assert not state_path(tmp_path).exists()
+    again, calls = run(tmp_path, batch(item("a")))
+    assert again.returncode == 0, again.stderr
+    assert created_keys(calls) == ["a"]
+
+
+def test_a_run_can_resume_after_its_process_crashes(tmp_path: Path) -> None:
+    data = batch(item("a"))
+    preview, _ = run(tmp_path, data, "--dry-run")
+    assert preview.returncode == 0
+    (tmp_path / "cfg.json").write_text(json.dumps(cfg_create(a={"pause": 10})))
+    log = tmp_path / "calls.jsonl"
+    proc = subprocess.Popen(
+        [sys.executable, str(SCRIPT), str(tmp_path / "batch.json")],
+        env={
+            "PATH": "/usr/bin:/bin",
+            "HOME": str(tmp_path / "home"),
+            "XDG_CACHE_HOME": str(tmp_path / "cache"),
+            "ISSUE_BATCH_SCRIPTS_DIR": str(tmp_path / "stubs"),
+            "STUB_CFG": str(tmp_path / "cfg.json"),
+            "STUB_LOG": str(log),
+            "STUB_STATE": str(state_path(tmp_path)),
+        },
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        start_new_session=True,
+    )
+    try:
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            if log.exists() and any(
+                row["script"] == "create" and "--dry-run" not in row["argv"]
+                for row in (json.loads(line) for line in log.read_text().splitlines())
+            ):
+                break
+            time.sleep(0.01)
+        else:
+            pytest.fail("first run did not reach the create seam")
+        concurrent, calls = run(tmp_path, data)
+        assert concurrent.returncode == 2
+        assert "already running" in error(concurrent)
+        assert creates(calls) == []
+    finally:
+        os.killpg(proc.pid, signal.SIGKILL)
+        proc.communicate(timeout=5)
+    assert state(tmp_path)["items"] == {}
+    again, calls = run(tmp_path, data)
+    assert again.returncode == 0, again.stderr
+    assert created_keys(calls) == ["a"]
 
 
 def load_driver() -> Any:
@@ -701,7 +766,7 @@ FIRST_RUN = (
         ),
         (
             {"number": 55, "createdAt": None},
-            "it was created more than 120 s before this batch started",
+            "its creation time is unknown",
             True,
         ),
     ],
@@ -875,10 +940,10 @@ def test_the_state_file_the_first_run_names_resumes_the_batch(tmp_path: Path) ->
     assert said is not None, hint
     folder, path = Path(said[1]), Path(said[2])
     assert path == state_path(tmp_path) and folder == path.parent
-    assert not folder.exists(), "the case the hint is for: no cache directory either"
+    assert sorted(p.name for p in folder.iterdir()) == ["b1.lock"]
     start = hint.index('{"started_at"')
     _, end = json.JSONDecoder().raw_decode(hint, start)
-    folder.mkdir(parents=True)  # the directory the hint names, not one the test knows
+    folder.mkdir(parents=True, exist_ok=True)  # the directory the hint names
     path.write_text(hint[start:end], encoding="utf-8")
 
     r, calls = run(tmp_path, data, cfg={})
@@ -1242,6 +1307,116 @@ def test_a_recorded_board_failure_is_carried_into_exit_6_with_the_repair(tmp_pat
         f"12 --owner larchanka-training --url {url}, then set its Status on the board"
     } in [json.loads(line) for line in r.stderr.splitlines()]
     assert recorded(tmp_path)["a"]["board"] == "failed"
+
+
+def test_a_recorded_board_failure_is_cleared_when_the_issue_is_on_the_board(
+    tmp_path: Path,
+) -> None:
+    url = "https://github.com/acme/api/issues/1"
+    seed(tmp_path, {"a": entry(API, 1, "a", board="failed")})
+    data = batch(item("a", status="In Progress"))
+    r, calls = run(tmp_path, data, cfg={"board": {url: {"found": True}}})
+    assert r.returncode == 0, r.stderr
+    assert creates(calls) == []
+    assert [c["argv"] for c in calls if c["script"] == "board"] == [[url, "In Progress"]]
+    assert out(r)["items"][0]["board"] == "added"
+    assert recorded(tmp_path)["a"]["board"] == "added"
+
+
+def test_a_recorded_board_failure_still_exits_6_when_the_issue_is_missing(
+    tmp_path: Path,
+) -> None:
+    seed(tmp_path, {"a": entry(API, 1, "a", board="failed")})
+    r, calls = run(tmp_path, batch(item("a")))
+    assert r.returncode == 6
+    assert creates(calls) == []
+    assert [c["script"] for c in calls] == ["board"]
+    assert "gh project item-add 12" in r.stderr
+    assert recorded(tmp_path)["a"]["board"] == "failed"
+
+
+def test_board_check_retries_a_status_reset_by_automation(tmp_path: Path) -> None:
+    fix = tmp_path / "fix"
+    fix.mkdir()
+    url = "https://github.com/acme/api/issues/1"
+    for name, status in (
+        ("project_items", "In Progress"),
+        ("project_items.retry", "Todo"),
+        ("project_items.final", "In Progress"),
+    ):
+        (fix / f"{name}.json").write_text(
+            json.dumps({"items": [{"content": {"url": url}, "status": status}]}),
+            encoding="utf-8",
+        )
+    r = subprocess.run(
+        [sys.executable, str(BOARD_SCRIPT), url, "In Progress"],
+        capture_output=True,
+        text=True,
+        env={
+            "PATH": "/usr/bin:/bin",
+            "ISSUE_FIXTURE_DIR": str(fix),
+            "ISSUE_STATUS_RETRY_DELAY": "0",
+        },
+        check=False,
+    )
+    assert r.returncode == 0, r.stderr
+    assert json.loads(r.stdout) == {"board": "added"}
+    assert (fix / "calls.log").read_text().splitlines() == [
+        "project_items",
+        "project_items.retry",
+        "project_edit",
+        "project_items.final",
+    ]
+
+
+def test_board_check_waits_before_retrying_a_wrong_status(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    fix = tmp_path / "fix"
+    fix.mkdir()
+    url = "https://github.com/acme/api/issues/1"
+    for name, status in (
+        ("project_items", "Todo"),
+        ("project_items.confirm", "Todo"),
+        ("project_items.final", "In Progress"),
+    ):
+        (fix / f"{name}.json").write_text(
+            json.dumps({"items": [{"content": {"url": url}, "status": status}]}),
+            encoding="utf-8",
+        )
+    spec = importlib.util.spec_from_file_location("issue_board", BOARD_SCRIPT)
+    assert spec is not None and spec.loader is not None
+    board_module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(board_module)
+    waits: list[float] = []
+    monkeypatch.setattr(board_module, "time", SimpleNamespace(sleep=waits.append))
+    monkeypatch.setenv("ISSUE_FIXTURE_DIR", str(fix))
+    assert board_module.main(["issue-board.py", url, "In Progress"]) == 0
+    assert json.loads(capsys.readouterr().out) == {"board": "added"}
+    assert waits == [3.0]
+    assert (fix / "calls.log").read_text().splitlines() == [
+        "project_items",
+        "project_edit",
+        "project_items.confirm",
+        "project_edit",
+        "project_items.final",
+    ]
+
+
+def test_board_check_reports_a_missing_item_without_a_live_call(tmp_path: Path) -> None:
+    fix = tmp_path / "fix"
+    fix.mkdir()
+    (fix / "project_items.json").write_text('{"items": [], "totalCount": 0}')
+    r = subprocess.run(
+        [sys.executable, str(BOARD_SCRIPT), "https://github.com/acme/api/issues/1", "Todo"],
+        capture_output=True,
+        text=True,
+        env={"PATH": "/usr/bin:/bin", "ISSUE_FIXTURE_DIR": str(fix)},
+        check=False,
+    )
+    assert r.returncode == 6
+    assert json.loads(r.stdout) == {"board": "failed"}
+    assert (fix / "calls.log").read_text().splitlines() == ["project_items"]
 
 
 def test_a_carried_board_failure_loses_to_a_failed_link(tmp_path: Path) -> None:
