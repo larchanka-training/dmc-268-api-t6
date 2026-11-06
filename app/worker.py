@@ -44,6 +44,7 @@ from app.bootstrap.gitlab_reviews import (
     build_gitlab_review_worker_resources,
 )
 from app.bootstrap.llm_gateway import build_gateway
+from app.bootstrap.run_data_retention import RunDataRetentionSettings
 from app.bootstrap.worker_shutdown import (
     finish_cleanup,
     run_background,
@@ -507,6 +508,7 @@ class WorkerSettings:
     llm: LlmSettings | None = None
     redis_url: str | None = None
     code_index: CodeIndexSettings = CodeIndexSettings()
+    run_data_retention: RunDataRetentionSettings = RunDataRetentionSettings()
     gitlab: GitLabRuntimeSettings | None = field(default=None, repr=False)
     bitbucket_cipher: BitbucketCredentialCipher | None = field(default=None, repr=False)
 
@@ -552,6 +554,7 @@ class WorkerSettings:
             # Optional: the cache of AST facts and file trees of the context stage.
             redis_url=env.get("REDIS_URL") or None,
             code_index=CodeIndexSettings.from_environment(env),
+            run_data_retention=RunDataRetentionSettings.from_environment(env),
         )
 
 
