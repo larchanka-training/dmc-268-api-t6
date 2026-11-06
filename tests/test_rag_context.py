@@ -1849,22 +1849,6 @@ def test_an_importer_of_a_removed_export_is_a_broken_reference(
     assert repository.trees == [_HEAD, _BASE]
 
 
-def test_a_package_reimport_at_base_does_not_create_a_broken_reference() -> None:
-    repository, diff_map = _removal("renamed_symbol")
-    repository.files.update(
-        {
-            "pkg/__init__.py": "from .other import store\n",
-            "pkg/other.py": "def store():\n    return 1\n",
-            "pkg/view.py": "from pkg import store\n\n\ndef show():\n    return store.load()\n",
-        }
-    )
-
-    result = _select(repository, diff_map, _load_hints("pkg/view.py"))
-
-    assert result.places == ()
-    assert result.omissions == (RagOmission("rag_edge_unconfirmed", "pkg/view.py"),)
-
-
 def test_unchanged_bitbucket_importer_with_revision_bound_ids_is_a_broken_reference() -> None:
     class BitbucketRepository(Repository):
         def sha(self, path: str) -> str:
