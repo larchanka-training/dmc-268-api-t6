@@ -573,6 +573,8 @@ class PublishedFinding:
     # A deleted-file/old-side Bitbucket anchor. New-side findings use ``line``.
     bitbucket_old_line: int | None = None
     bitbucket_anchor_valid: bool = True
+    # The stored GitHub link to the rules lines; only the GitHub adapter renders it (#465).
+    rule_link: str | None = None
 
 
 def comment_body(title: str, body: str, suggestion: str | None) -> str:
