@@ -632,6 +632,100 @@ def test_a_sibling_directory_is_not_inside_the_other(prod_host: Host) -> None:
     assert result.returncode == 0, result.stderr
 
 
+def _link_dump_dirs(root: Path, layout: str) -> tuple[Path, Path]:
+    """Build the dump dirs of one case on disk; the pair is (BACKUP_DIR, PROD_BACKUP_DIR)."""
+    backups = root / "backups"
+    if layout == "prod_is_a_link_to_staging":
+        backups.mkdir()
+        (root / "prod-link").symlink_to(backups)
+        return backups, root / "prod-link"
+    if layout == "parent_of_prod_is_a_link_to_staging":
+        backups.mkdir()
+        (root / "prod-parent").symlink_to(backups)
+        return backups, root / "prod-parent" / "not-yet" / "prod"
+    if layout == "staging_is_a_link_to_prod":
+        (root / "prod-real").mkdir()
+        (root / "staging-link").symlink_to(root / "prod-real")
+        return root / "staging-link", root / "prod-real"
+    # The text of the path names another directory; the kernel goes through the link before "..".
+    backups.mkdir()
+    (root / "elsewhere" / "deeper").mkdir(parents=True)
+    (root / "elsewhere" / "deeper" / "back").symlink_to(backups)
+    return backups, root / "elsewhere" / "deeper" / "back" / ".." / "backups" / "prod"
+
+
+@pytest.mark.parametrize(
+    "layout",
+    [
+        "prod_is_a_link_to_staging",
+        "parent_of_prod_is_a_link_to_staging",
+        "staging_is_a_link_to_prod",
+        "prod_reaches_staging_through_dotdot_after_a_link",
+    ],
+)
+def test_prod_and_staging_dumps_never_share_a_physical_directory(
+    prod_host: Host, layout: str
+) -> None:
+    backup_dir, prod_backup_dir = _link_dump_dirs(prod_host.root, layout)
+
+    result = _deploy_with_prod(
+        prod_host, BACKUP_DIR=str(backup_dir), PROD_BACKUP_DIR=str(prod_backup_dir)
+    )
+
+    assert result.returncode == 1
+    assert "PROD_BACKUP_DIR must not be BACKUP_DIR nor inside it" in result.stderr
+    # Refused before anything on the host changed.
+    assert not prod_host.env_file.exists()
+    assert prod_host.log("psql.log") == ""
+    assert " up " not in prod_host.log("docker.log")
+    assert not (prod_host.root / "backups" / "prod").exists()
+
+
+@pytest.mark.parametrize("target", ["missing", "file"])
+def test_a_symlink_that_is_not_a_directory_stops_a_prod_deploy(
+    prod_host: Host, target: str
+) -> None:
+    # A dangling link may point at a directory created later: it is not "does not exist yet".
+    (prod_host.root / "file").write_text("", encoding="utf-8")
+    dangling = prod_host.root / "prod-link"
+    dangling.symlink_to(prod_host.root / ("file" if target == "file" else "gone"))
+
+    result = _deploy_with_prod(
+        prod_host,
+        BACKUP_DIR=str(prod_host.root / "backups"),
+        PROD_BACKUP_DIR=str(dangling / "prod"),
+    )
+
+    assert result.returncode == 1
+    assert str(dangling) in result.stderr
+    assert "not a directory" in result.stderr
+    # Refused before anything on the host changed.
+    assert not prod_host.env_file.exists()
+    assert prod_host.log("psql.log") == ""
+    assert " up " not in prod_host.log("docker.log")
+    assert not (prod_host.root / "backups").exists()
+
+
+@pytest.mark.parametrize("layout", ["link_to_a_separate_directory", "nothing_exists_yet"])
+def test_a_link_to_a_separate_directory_passes_the_dump_dir_check(
+    prod_host: Host, layout: str
+) -> None:
+    if layout == "link_to_a_separate_directory":
+        (prod_host.root / "separate").mkdir()
+        (prod_host.root / "prod-link").symlink_to(prod_host.root / "separate")
+        prod_backup_dir = prod_host.root / "prod-link" / "dumps"
+    else:
+        prod_backup_dir = prod_host.root / "new" / "prod"
+
+    result = _deploy_with_prod(
+        prod_host,
+        BACKUP_DIR=str(prod_host.root / "backups"),
+        PROD_BACKUP_DIR=str(prod_backup_dir),
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
 def _assert_relative_dump_dir_refused(
     stack: Host, result: subprocess.CompletedProcess[str], named: str
 ) -> None:

@@ -80,7 +80,8 @@ previous_setting() {
 }
 
 # An absolute path normalised by text alone: no "//", ".", trailing "/", and ".." resolved against
-# the segment before it. No realpath: its -m is GNU only, and the dirs may not exist yet.
+# the segment before it. Symlinks are not followed: physical_path does that for the part of a path
+# that exists. No realpath: its -m is GNU only, and the dirs may not exist yet.
 normalize_path() {
   local rest="$1" result="" segment
   while [[ -n "${rest}" ]]; do
@@ -93,6 +94,28 @@ normalize_path() {
     esac
   done
   printf '%s' "${result:-/}"
+}
+
+# An absolute path by its physical location: the deepest existing directory of it is resolved by
+# the kernel (symlinks and ".." in that part included), the rest, which does not exist yet, is put
+# back and normalised by text. A symlink that is not a directory (dangling, or pointing at a file)
+# could point at a directory created later: it stops the deploy. cd -P and pwd -P are POSIX, unlike
+# realpath.
+physical_path() {
+  local dir="$1" tail="" resolved
+  while [[ ! -d "${dir}" ]]; do
+    if [[ -L "${dir}" ]]; then
+      echo "${dir} is a symbolic link that is not a directory (dangling, or pointing at a file):" \
+        "the dump dirs cannot be compared" >&2
+      return 1
+    fi
+    tail="/${dir##*/}${tail}"
+    dir="${dir%/*}"
+    if [[ -z "${dir}" ]]; then dir="/"; fi
+  done
+  resolved="$(cd -P -- "${dir}" && pwd -P)" || return 1
+  if [[ "${resolved}" == "/" ]]; then resolved=""; fi
+  normalize_path "${resolved}${tail}"
 }
 
 # A password of this stack: kept from .env, generated once on a fresh host.
@@ -361,10 +384,10 @@ if [[ -n "${PROD_API_DIR}" ]]; then
     exit 1
   fi
   # Each service prunes and counts the dumps of its dir: one dir, or one inside the other, would
-  # mix the dumps and the off-host copies of the two databases. Compared normalised, before the
-  # host changes.
-  staging_dumps="$(normalize_path "${BACKUP_DIR}")"
-  prod_dumps="$(normalize_path "${PROD_BACKUP_DIR}")"
+  # mix the dumps and the off-host copies of the two databases. Compared by physical location, so a
+  # symlink between them does not hide the overlap, before the host changes.
+  staging_dumps="$(physical_path "${BACKUP_DIR}")" || exit 1
+  prod_dumps="$(physical_path "${PROD_BACKUP_DIR}")" || exit 1
   if [[ "${prod_dumps}" == "${staging_dumps}" || "${prod_dumps}" == "${staging_dumps%/}"/* \
     || "${staging_dumps}" == "${prod_dumps%/}"/* ]]; then
     echo "PROD_BACKUP_DIR must not be BACKUP_DIR nor inside it (or the other way round):" \
