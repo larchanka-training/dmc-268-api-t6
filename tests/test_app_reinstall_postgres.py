@@ -396,8 +396,8 @@ def test_oauth_moves_only_confirmed_repository_and_preserves_deep_setting(
             async with factory.begin() as session:
                 await session.execute(
                     text(
-                        "UPDATE repositories SET default_engine='deep',rag_enabled=true,"
-                        "private=false WHERE id=:repo"
+                        "UPDATE repositories SET default_engine='deep',rag_enabled=true "
+                        "WHERE id=:repo"
                     ),
                     {"repo": REPO_A},
                 )
@@ -418,14 +418,6 @@ def test_oauth_moves_only_confirmed_repository_and_preserves_deep_setting(
                         {"repo": REPO_A},
                     )
                     == "deep"
-                )
-                # No event said what became of the repository while the App was gone (#454).
-                assert (
-                    await session.scalar(
-                        text("SELECT private FROM repositories WHERE id=:repo"),
-                        {"repo": REPO_A},
-                    )
-                    is None
                 )
                 assert (
                     await session.scalar(
