@@ -65,3 +65,24 @@ Several truths can be matched in arm A by a generic comment inside the +-2 line 
 ## Licence and attribution
 
 All content is synthetic, authored for api#146; no third-party code. Each `case.json` carries the attribution.
+
+## Captures
+
+`responses/` holds the six recorded `eval-live` runs of the gate (`corpus=rag`, `policy_arm=none`, `review_prompt=v5`, `export_raw_responses=true`, model `mistral-small-4`, all `baseline_publishable`): the raw first answers of the 24 cases plus the `manifest.json` that `eval_replay.py` reads, copied unchanged from the `eval-live-raw-rag-…` artifacts.
+
+| Directory | Arm (`rag_arm`) | Run id |
+| --- | --- | --- |
+| `A-run1`, `A-run2`, `A-run3` | A, no retrieved code (`none`) | 41720614606, 41724358586, 41725329228 |
+| `B-run1`, `B-run2`, `B-run3` | B, reverse-edge blocks (`graph`) | 41720730389, 41724449009, 41725470313 |
+
+```sh
+for d in test-prs-dataset/rag/responses/*/; do
+  uv run python review/scripts/eval_replay.py --root test-prs-dataset/rag --responses-dir "$d"
+done
+```
+
+The recorded result and the computed gate verdict are in [the report](../../docs/test-plan/RAG_V1_CONTRIBUTION_REPORT.md); `reports/gate.json` is the gate script's output it quotes.
+
+`oracle/hallucination.json` is the hallucination oracle the gate takes with `--oracle`: the 24 findings the tech lead confirmed by hand on 2026-11-04 among all 76 findings of the valid answers; the decisions are in [the report](../../docs/test-plan/RAG_V1_CONTRIBUTION_REPORT.md#оракул-галлюцинаций).
+
+A replay needs no network and no key; it rebuilds every case from its frozen `index.json` and takes about 40 seconds. The CI step "RAG sub-corpus" runs it for all six and fails on a non-zero exit; `tests/test_rag_captures.py` fails when a capture is missing, mislabelled or from a different model, prompt or corpus.

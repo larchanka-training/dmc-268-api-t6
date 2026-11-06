@@ -1,0 +1,1 @@
+{"findings": [], "summary": {"problem": "No defect was found in this change.", "done_well": "The function `slugify` is now exported only where it is used, reducing the module's surface area.", "effort": "none"}}
