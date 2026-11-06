@@ -646,6 +646,13 @@ def test_checkpointed_provider_checks_before_every_llm_call_only() -> None:
     ("status", "headers", "code", "retry_after"),
     [
         (403, {}, "github_forbidden", None),
+        (403, {"X-RateLimit-Reset": "1793084700"}, "github_forbidden", None),
+        (
+            403,
+            {"X-RateLimit-Remaining": "4999", "X-RateLimit-Reset": "1793084700"},
+            "github_forbidden",
+            None,
+        ),
         (404, {}, "github_forbidden", None),
         (403, {"X-RateLimit-Remaining": "0"}, "diff_fetch_failed", None),
         (429, {"Retry-After": "300"}, "diff_fetch_failed", timedelta(minutes=5)),
@@ -731,7 +738,25 @@ def test_exhausted_match_budget_fails_the_run_naming_the_document_and_the_count(
     )
 
 
-def test_policy_rate_limit_retry_waits_out_a_long_retry_after() -> None:
+@pytest.mark.parametrize(
+    ("headers", "wait"),
+    [
+        ({"Retry-After": "900"}, timedelta(minutes=15)),
+        ({"Retry-After": "9" * 14}, timedelta(days=1)),
+        (
+            {
+                "X-RateLimit-Remaining": "0",
+                "X-RateLimit-Reset": "1793085300",
+                "Date": "Tue, 27 Oct 2026 07:00:00 GMT",
+            },
+            timedelta(minutes=15),
+        ),
+    ],
+    ids=["fifteen-minutes", "oversized", "primary-reset"],
+)
+def test_policy_rate_limit_retry_waits_out_a_long_provider_delay(
+    headers: dict[str, str], wait: timedelta
+) -> None:
     run = FakeRun()
     retry = RetryQueue()
     clock = Clock()
@@ -739,7 +764,7 @@ def test_policy_rate_limit_retry_waits_out_a_long_retry_after() -> None:
     limited = httpx.HTTPStatusError(
         "GitHub",
         request=request,
-        response=httpx.Response(429, headers={"Retry-After": "900"}, request=request),
+        response=httpx.Response(429, headers=headers, request=request),
     )
 
     def pipeline(claimed: ClaimedAttempt) -> bool:
@@ -750,8 +775,7 @@ def test_policy_rate_limit_retry_waits_out_a_long_retry_after() -> None:
     assert first is DeliveryOutcome.ACK
     assert (run.state, run.attempt) == ("queued", 1)
     assert retry.published == [("10m", 2)]
-    # Exactly Retry-After, not the ceiling and not the 10m bucket.
-    assert run.available_at == NOW + timedelta(minutes=15)
+    assert run.available_at == NOW + wait
     # The copy from the 10m queue comes early: RunGuard drops it without an attempt,
     # and T18 republishes the Run once available_at has passed (PIPELINE_SPEC §4.2).
     clock.value = NOW + timedelta(minutes=10)
@@ -973,6 +997,7 @@ def _provider_retry_after_failure(
     commits: bool = False,
     remaining: str | None = None,
     date: str | None = None,
+    reset: str | None = None,
 ) -> RunFailure:
     class Tokens:
         async def get_installation_access_token(self, installation_external_id: int) -> str:
@@ -984,6 +1009,8 @@ def _provider_retry_after_failure(
             headers.append((b"X-RateLimit-Remaining", remaining.encode("ascii")))
         if date is not None:
             headers.append((b"Date", date.encode("ascii")))
+        if reset is not None:
+            headers.append((b"X-RateLimit-Reset", reset.encode("ascii")))
         async with httpx.AsyncClient(
             base_url="https://api.github.test",
             transport=httpx.MockTransport(lambda request: httpx.Response(status, headers=headers)),
@@ -1004,6 +1031,34 @@ def _provider_retry_after_failure(
     with pytest.raises(RunFailure) as caught:
         asyncio.run(read())
     return caught.value
+
+
+@pytest.mark.parametrize("commits", [False, True], ids=["diff", "commit-messages"])
+def test_primary_reset_from_vcs_provider_schedules_the_run(commits: bool) -> None:
+    failure = _provider_retry_after_failure(
+        "",
+        commits=commits,
+        remaining="0",
+        reset="1793085300",
+        date="Tue, 27 Oct 2026 07:00:00 GMT",
+    )
+    assert failure.error_code == (
+        "commit_messages_fetch_failed" if commits else "diff_fetch_failed"
+    )
+    assert failure.retry_after == timedelta(minutes=15)
+    assert RetryDelays().for_failure(1, failure) == ("10m", timedelta(minutes=15))
+
+    run = FakeRun()
+    retry = RetryQueue()
+
+    def pipeline(claimed: ClaimedAttempt) -> bool:
+        raise failure
+
+    outcome = asyncio.run(handler(run, pipeline, retry=retry, clock=Clock()).execute(RUN))
+    assert outcome is DeliveryOutcome.ACK
+    assert (run.state, run.attempt) == ("queued", 1)
+    assert retry.published == [("10m", 2)]
+    assert run.available_at == NOW + timedelta(minutes=15)
 
 
 @pytest.mark.parametrize("commits", [False, True])

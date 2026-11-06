@@ -78,6 +78,9 @@ infrastructure implementations
 `integrations.bitbucket.infrastructure` и проверяет поколение credential/binding перед
 сохранением результата. `integrations.bitbucket.infrastructure.connection_store` вызывает
 `request_rules_refresh` модуля `repositories` в той же короткой транзакции подключения.
+`workspaces.infrastructure.github_repository_rebinding` тоже вызывает
+`request_rules_refresh` в короткой транзакции перепривязки репозитория после
+повторной установки GitHub App.
 Владение таблицами остаётся у соответствующих модулей; внешние HTTP-запросы выполняются
 между транзакциями claim и save. Application использует свои порты и публичные
 application-контракты других модулей (`BoundBitbucketTarget`, `BranchHead`, ошибки VCS),
@@ -414,7 +417,8 @@ autocommit-соединении, [webhook_work_listener.py](../app/bootstrap/web
 уведомление отправляют сохранение новой квитанции, повторная активация отложенных квитанций
 при OAuth и запрос статуса правил (#150), а обход раз в 30 с остаётся резервным
 ([WEBHOOK_WORKER.md](WEBHOOK_WORKER.md#how-the-worker-handles-deliveries)).
-Для статуса правил GitHub запрашивает чтение при подключении и `push` в default branch,
+Для статуса правил GitHub запрашивает чтение при подключении, перепривязке после
+повторной установки App и `push` в default branch,
 Bitbucket — при создании или повторной активации binding. У обоих GET запрашивает чтение,
 если результата ещё нет, он старше 10 минут или пора повторить retryable-сбой. Bitbucket
 `repo:push` пока не запрашивает немедленное чтение правил. `webhook-worker` берёт только
