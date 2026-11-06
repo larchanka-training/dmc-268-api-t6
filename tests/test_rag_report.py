@@ -3,9 +3,9 @@
 ``docs/test-plan/RAG_V1_CONTRIBUTION_REPORT.md`` is the report and
 ``test-prs-dataset/rag/reports/gate.json`` the stdout of ``eval_rag_gate.py`` over the six
 committed captures and the committed hallucination oracle
-(``oracle/hallucination.json``). Each number is looked up in the table row that carries it, so a
-value moved to another row or arm fails. Recomputing the gate takes six replays (minutes) and
-stays with CI's capture replay.
+(``oracle/hallucination.json``). Each number is compared with the cell of its table row and
+column, so a value moved to another row, column or arm fails. Recomputing the gate takes six
+replays (minutes) and stays with CI's capture replay.
 """
 
 from __future__ import annotations
@@ -78,6 +78,28 @@ def _assert_row(prefix: str, cells: list[str]) -> None:
     assert any(all(cell in row for cell in cells) for row in rows), (prefix, cells, rows)
 
 
+def _cells(row: str) -> list[str]:
+    """The cells of a Markdown table row, split on the ``|`` that is not escaped."""
+    return [cell.strip() for cell in re.split(r"(?<!\\)\|", row)[1:-1]]
+
+
+def _table(header: str) -> list[list[str]]:
+    """The body rows (as cells) of the report table whose header row starts with ``header``."""
+    lines = REPORT.read_text(encoding="utf-8").splitlines()
+    start = next(index for index, line in enumerate(lines) if line.startswith(header))
+    body = []
+    for line in lines[start + 2 :]:
+        if not line.startswith("|"):
+            break
+        body.append(_cells(line))
+    return body
+
+
+def _carries(cell: str, value: str) -> bool:
+    """The cell is the value, or the value followed by a parenthesised remark."""
+    return cell == value or cell.startswith(value + " (")
+
+
 def _gated_runs() -> list[dict[str, Any]]:
     return [run for arm in _gate()["arms"].values() for run in arm["runs"]]
 
@@ -94,11 +116,16 @@ def test_the_verdict_line_is_the_gate_verdict() -> None:
 
 @pytest.mark.parametrize("arm_name", ["rag_off", "rag_on"])
 def test_each_run_row_carries_its_own_ratios_and_digest(arm_name: str) -> None:
-    for run in _gate()["arms"][arm_name]["runs"]:
-        prefix = f"| {run['run_id']} |"
+    metrics = {row[0]: row[1:] for row in _table("| Прогон | Recall (10) |")}
+    digests = {row[0]: row[-1] for row in _table("| Прогон | Плечо (`rag_arm`) |")}
 
-        _assert_row(prefix, [_ratio(run[name]) + " (" for name in RUN_METRICS])
-        _assert_row(prefix, [run["responses_digest"]])
+    for run in _gate()["arms"][arm_name]["runs"]:
+        cells = metrics[run["run_id"]]
+
+        assert len(cells) == len(RUN_METRICS), (run["run_id"], cells)
+        for cell, name in zip(cells, RUN_METRICS, strict=True):
+            assert _carries(cell, _ratio(run[name])), (run["run_id"], name, cell)
+        assert digests[run["run_id"]] == f"`{run['responses_digest']}`", run["run_id"]
 
 
 def test_each_arm_row_carries_the_arm_values_in_arm_order() -> None:
@@ -106,19 +133,26 @@ def test_each_arm_row_carries_the_arm_values_in_arm_order() -> None:
 
     for prefix, value in ARM_ROWS.items():
         rows = _rows(prefix)
-        assert any(
-            row.index(value(arms["rag_off"])) < row.rindex(value(arms["rag_on"])) for row in rows
-        ), (prefix, rows)
+        assert len(rows) == 1, (prefix, rows)
+        _, arm_a, arm_b = _cells(rows[0])
+
+        assert _carries(arm_a, value(arms["rag_off"])), (prefix, arm_a)
+        assert _carries(arm_b, value(arms["rag_on"])), (prefix, arm_b)
 
 
 def test_each_condition_row_carries_its_value_arms_and_status() -> None:
     for key, prefix in CONDITION_ROWS.items():
         condition = _gate()["conditions"][key]
-        cells = [str(condition["exact"] if condition["exact"] is not None else "n/a")]
-        cells += [str(condition[name]) for name in ("a", "b") if condition.get(name)]
-        cells.append(f"| {condition['status']} |")
+        rows = _rows(prefix)
+        assert len(rows) == 1, (prefix, rows)
+        _, _, value, arm_a, arm_b, status = _cells(rows[0])
 
-        _assert_row(prefix, cells)
+        if condition["exact"] is None:
+            assert "n/a" in value, (key, value)
+        else:
+            assert _carries(value, condition["exact"]), (key, value)
+        assert (arm_a, arm_b) == (condition.get("a", "-"), condition.get("b", "-")), (key, rows[0])
+        assert status == condition["status"], (key, status)
 
 
 def test_each_reverse_edge_row_carries_its_counts_and_win() -> None:
@@ -135,15 +169,13 @@ def test_each_injection_row_carries_its_finding_and_anchor() -> None:
     events = _gate()["injection"]["executed"]
 
     assert len(events) == 3
+    rows = {(row[0], row[1]): row for row in _table("| Кейс | Прогон | Находка")}
     for event in events:
         finding, anchor = event["finding"], event["anchor"]
-        _assert_row(
-            f"| {event['case_id']} | {event['run_id']} |",
-            [
-                f"#{event['finding_index']}, `{finding['path']}:{finding['line']}`",
-                f"`{anchor['path']}:{anchor['line']}`",
-            ],
-        )
+        _, _, reported, forced, *_ = rows[(event["case_id"], event["run_id"])]
+
+        assert reported == f"#{event['finding_index']}, `{finding['path']}:{finding['line']}`"
+        assert forced == f"`{anchor['path']}:{anchor['line']}`"
 
 
 @pytest.mark.parametrize(
@@ -198,11 +230,13 @@ def test_each_gate_digest_is_the_digest_of_the_valid_answers_of_its_capture() ->
 
 
 def test_the_report_provenance_is_that_of_the_capture_manifests() -> None:
+    provenance = {row[0]: row for row in _table("| Прогон | Плечо (`rag_arm`) |")}
     for run_id, workflow_run in RUN_IDS.items():
         manifest = json.loads((CAPTURES / run_id / "manifest.json").read_text(encoding="utf-8"))
         recorded = manifest["run_metadata"]["recorded_at"][:19].replace("T", " ")
 
-        _assert_row(f"| {run_id} |", [workflow_run, recorded])
+        _, _, listed_run, listed_at, _ = provenance[run_id]
+        assert (listed_run, listed_at) == (workflow_run, recorded), run_id
         _assert_row("| Промпт", [manifest["prompt_sha"]])
         _assert_row("| Корпус", [manifest["corpus_digest"]])
         _assert_row("| Статика", [manifest["static_digest"]])
@@ -231,6 +265,8 @@ def test_each_oracle_entry_is_a_finding_of_a_valid_answer() -> None:
 
     for run_id, entry in oracle["runs"].items():
         valid = _valid_answers(CAPTURES / run_id)
+        confirmed = [(item["case_id"], item["finding_index"]) for item in entry["hallucinations"]]
+        assert len(set(confirmed)) == len(confirmed), (run_id, confirmed)
         for item in entry["hallucinations"]:
             assert f"{item['case_id']}.json" in valid, (run_id, item)
             answer = json.loads(
@@ -250,16 +286,14 @@ def test_the_gate_numerators_are_the_oracle_entry_counts_per_run() -> None:
 def test_the_report_lists_each_confirmed_hallucination_with_its_anchor_and_no_other() -> None:
     confirmed = _confirmed_hallucinations()
 
+    rows = {(row[0], row[1]): row for row in _table("| Прогон | Кейс #индекс |")}
     for run_id, case_id, index, anchor, title in confirmed:
         assert (CASES / case_id).is_dir(), case_id
-        _assert_row(
-            f"| {run_id} | {case_id} #{index} |",
-            [
-                f"`{anchor}`",
-                title.replace("|", "\\|"),
-                f"](../../test-prs-dataset/rag/cases/{case_id}/)",
-            ],
-        )
+        _, _, listed_anchor, _, listed_title, context = rows[(run_id, f"{case_id} #{index}")]
+
+        assert listed_anchor == f"`{anchor}`", (run_id, case_id, index)
+        assert listed_title == title.replace("|", "\\|"), (run_id, case_id, index)
+        assert context == f"[{case_id}](../../test-prs-dataset/rag/cases/{case_id}/)"
     listed = [
         row
         for row in REPORT.read_text(encoding="utf-8").splitlines()
