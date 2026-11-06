@@ -299,11 +299,16 @@ P = цена_единицы(тариф, движок) × множитель
 ### 6.1. Пополнение
 
 - Любая сумма от $10 до $500 в целых долларах, Stripe Checkout `mode=payment`.
-- Карта сохраняется в том же Checkout (`setup_future_usage=off_session`) или
-  отдельным SetupIntent `usage=off_session`. Это нужно уже в первой версии: от
-  привязки карты зависит бонус (§7), а авто-пополнение не потребует повторного
-  ввода карты.
 - Грант `top_up` пишется по `checkout.session.completed` со статусом оплаты `paid`.
+- Карту можно сохранить двумя путями, оба уже в первой версии:
+  - **кнопка «Привязать карту»** на экране «Баланс и тариф»: Checkout `mode=setup`
+    (SetupIntent `usage=off_session`), без списания. Событие `setup_intent.succeeded`.
+    Только этот путь даёт бонус (§7);
+  - **при пополнении**, если клиент отметил «Сохранить карту» на нашей странице до
+    Checkout (§9, п. 4): `payment_intent_data.setup_future_usage=off_session`. Карта
+    сохраняется вместе с оплатой; событие `checkout.session.completed`, карта берётся
+    из `payment_method` его PaymentIntent. Бонуса этот путь не даёт.
+- Сохранённая карта нужна авто-пополнению (§6.2), чтобы не вводить её повторно.
 
 ### 6.2. Авто-пополнение
 
@@ -329,20 +334,21 @@ P = цена_единицы(тариф, движок) × множитель
 
 - **Фича-флаг** `billing_signup_bonus`, по умолчанию выключен. Пока флаг выключен,
   бонус не начисляется и не обещается в ui. Включает команда.
-- **Когда начисляется:** $5 после привязки карты к workspace через SetupIntent
-  (`usage=off_session`, Checkout `mode=setup` или сохранение карты при оплате,
-  §6.1), по `setup_intent.succeeded`. Карта при этом не списывается.
-- **Кому:** GitHub-пользователю, который ставит App (`sender` события
-  `installation.created`) и привязывает карту. Не на установку и не на организацию:
-  организаций можно создать сколько угодно, а id установки меняется при
-  переустановке.
+- **Когда начисляется:** $5 только после привязки карты кнопкой «Привязать карту»
+  (Checkout `mode=setup`, §6.1), по `setup_intent.succeeded`. На этом пути карта не
+  списывается. Карта, сохранённая при пополнении, бонуса не даёт: так у бонуса одно
+  событие и одно место в ui.
+- **Кому:** GitHub-пользователю, который нажал кнопку (роль Owner, Admin или
+  Billing, §11.1). Не на установку и не на организацию: организаций можно создать
+  сколько угодно, а id установки меняется при переустановке.
 - **Ограничения:**
   - один бонус на GitHub user id: повторная установка бонус не даёт;
+  - один бонус на workspace: второй участник со своей картой бонус не получает;
   - один бонус на карту: по `card.fingerprint` из Stripe, та же карта на другом
     аккаунте бонус не даёт;
   - аккаунту GitHub больше 30 дней (`created_at` из GitHub API).
-- Только fast, срок 30 дней. Пишется грантом `promo` на workspace этой установки.
-  Факт выдачи хранится по GitHub user id и по fingerprint карты.
+- Только fast, срок 30 дней. Пишется грантом `promo` на этот workspace. Факт
+  выдачи хранится по GitHub user id, workspace и fingerprint карты.
 - Реализация в #371.
 
 ## 8. Нулевой баланс и лимиты прогона
@@ -459,11 +465,11 @@ P = цена_единицы(тариф, движок) × множитель
 
 | Событие | Действие |
 |---|---|
-| `checkout.session.completed` | `payments.status=paid`, грант `top_up`; для `mode=setup` сохранить карту |
+| `checkout.session.completed` | `mode=payment`: `payments.status=paid`, грант `top_up`, карта сохранена, если был `setup_future_usage` (§6.1); `mode=setup`: карта сохранена, бонус по `setup_intent.succeeded` |
 | `checkout.session.expired` | `payments.status=expired` |
 | `checkout.session.async_payment_succeeded`, `..._failed` | в v1 только карты; событие логируется |
-| `payment_intent.succeeded`, `payment_intent.payment_failed` | авто-пополнение: грант или выключение (§6.2) |
-| `setup_intent.succeeded` | карта сохранена; бонус §7, если флаг включён и условия выполнены |
+| `payment_intent.succeeded`, `payment_intent.payment_failed` | по `metadata.source` нашего PaymentIntent: `auto_recharge`: грант `top_up` или выключение (§6.2); `checkout`: только лог, деньги по `checkout.session.completed`; без нашего `metadata` (PaymentIntent счёта подписки): только лог, гранты по `invoice.paid` |
+| `setup_intent.succeeded` | путь «Привязать карту»: карта сохранена; бонус §7, если флаг включён и условия выполнены |
 | `invoice.paid` | грант `subscription_grant`: полный для `billing_reason` = `subscription_create` или `subscription_cycle`, на оплаченную сумму для доплаты за повышение (§4.3, §4.4); иначе без гранта |
 | `invoice.payment_failed` | отметка в ui, письмо шлёт Stripe |
 | `customer.subscription.created`, `.updated`, `.deleted` | тариф workspace, лимит репозиториев |
