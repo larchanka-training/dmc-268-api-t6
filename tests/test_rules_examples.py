@@ -14,6 +14,7 @@ _CATALOG = Path(__file__).resolve().parents[1] / "examples" / "rules"
 # Literal masks, in the policy's code point order: a relabelled or deleted block parses to an
 # empty policy without an error, so "no PolicyError" alone would not notice it.
 _MASKS = {
+    "go": ("**/*_gen.go", "**/zz_generated.*.go", "vendor/**"),
     "python-fastapi": ("**/*_pb2.py", "**/*_pb2_grpc.py", "clients/generated/**"),
     "typescript-react": ("coverage/**", "src/types/api/**", "storybook-static/**"),
 }
