@@ -851,17 +851,32 @@ class SqlAlchemyReviewOutputRepository:
                     Repository.max_comments,
                     Repository.severity_threshold,
                     Run.head_sha,
+                    Repository.full_name,
+                    ProviderInstallation.provider,
                 )
                 .select_from(Run)
                 .join(RuleVersion, RuleVersion.id == Run.rule_version_id)
                 .join(CodeChange, CodeChange.id == Run.code_change_id)
                 .join(Repository, Repository.id == CodeChange.repository_id)
+                .join(
+                    ProviderInstallation,
+                    ProviderInstallation.id == Repository.provider_installation_id,
+                )
                 .where(Run.id == run_id)
             )
         ).one_or_none()
         if row is None:
             return None
-        rules, max_comments, severity_threshold, live_cap, live_threshold, head_sha = row
+        (
+            rules,
+            max_comments,
+            severity_threshold,
+            live_cap,
+            live_threshold,
+            head_sha,
+            full_name,
+            provider,
+        ) = row
         if max_comments is None and severity_threshold is None:
             max_comments, severity_threshold = live_cap, live_threshold
         durable = [
@@ -939,6 +954,7 @@ class SqlAlchemyReviewOutputRepository:
                 any(item.summary_only for item in durable) or is_summary_only_stop(response_value)
             ),
             summary_reason=summary_only_reason_of(response_value),
+            github_repository_full_name=full_name if provider == "github" else None,
         )
 
     async def store_review_output(
@@ -1122,6 +1138,7 @@ def _to_finding(run_id: UUID, item: ProcessedFinding) -> Finding:
         title=item.finding.title,
         body=item.finding.body,
         rule_name=item.finding.rule_name,
+        rule_link=item.rule_link,
         published=False,
         inline_comment=item.bucket == "inline",
         drop_reason=item.drop_reason,

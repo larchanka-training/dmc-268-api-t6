@@ -426,6 +426,8 @@ class Finding(Base):
     title: Mapped[str] = mapped_column(String(500), nullable=False)
     body: Mapped[str] = mapped_column(TEXT, nullable=False)
     rule_name: Mapped[str | None] = mapped_column(String(255))
+    # The rules lines an inline GitHub comment links to, as posted; NULL means no link (#465).
+    rule_link: Mapped[str | None] = mapped_column(TEXT)
     published: Mapped[bool] = mapped_column(BOOLEAN, nullable=False, server_default=text("false"))
     inline_comment: Mapped[bool] = mapped_column(
         BOOLEAN, nullable=False, server_default=text("false")

@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 import time
 from collections.abc import Callable, Iterator, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from typing import Any, Protocol
 from uuid import UUID
@@ -18,12 +18,14 @@ from app.modules.reviews.application.findings_post_processor import (
     finalize_stored_review_body,
     summary_from_result,
 )
+from app.modules.reviews.application.policy_snapshot import RULES_DOCUMENT_PATH
 from app.modules.reviews.application.queue_messages import ReviewPublishPointer, ReviewPublishQueue
 from app.modules.reviews.application.review_output import (
     InvalidReviewOutput,
     ReviewOutput,
     ReviewOutputRepository,
     ReviewPublication,
+    RuleLineRef,
     VerifiedReviewOutput,
     _as_json_object,
     coerce_dropped_findings,
@@ -122,6 +124,44 @@ def _hashed(item: ProcessedFinding) -> HashedFinding:
         body=finding.body,
         suggestion=finding.suggestion,
         inline=item.bucket == "inline",
+        rule_link=item.rule_link,
+    )
+
+
+def _github_rule_link(repository_full_name: str, lines: RuleLineRef) -> str:
+    """The rules lines on GitHub at the revision they were read from.
+
+    ``?plain=1``: GitHub shows a Markdown blob as a preview, where a ``#L`` anchor does nothing.
+    """
+    return (
+        f"https://github.com/{repository_full_name}/blob/{lines.revision}/{RULES_DOCUMENT_PATH}"
+        f"?plain=1#L{lines.start_line}-L{lines.end_line}"
+    )
+
+
+def _with_rule_links(
+    processed: ProcessedReviewOutput,
+    rule_line_refs: Mapping[int, RuleLineRef],
+    repository_full_name: str | None,
+) -> ProcessedReviewOutput:
+    """Link each inline finding still attributed to the rules file to the lines it cites.
+
+    A position is the finding's index in the parsed answer, as ``rule_line_refs`` counts it. The
+    link is stored, so a redelivery compares the text that was posted (#465).
+    """
+    if repository_full_name is None:
+        return processed
+    return replace(
+        processed,
+        inline=tuple(
+            replace(
+                item,
+                rule_link=_github_rule_link(repository_full_name, rule_line_refs[item.position]),
+            )
+            if item.position in rule_line_refs and item.finding.rule_name == RULES_DOCUMENT_PATH
+            else item
+            for item in processed.inline
+        ),
     )
 
 
@@ -238,6 +278,11 @@ class StoreReviewOutput:
                 1 for item in processed.dropped if item.drop_reason == "severity_threshold"
             ),
             run_url=self._run_url(run_id),
+        )
+        processed = _with_rule_links(
+            processed,
+            raw_output.rule_line_refs if isinstance(raw_output, VerifiedReviewOutput) else {},
+            context.github_repository_full_name,
         )
 
         findings = hashed_findings(processed)

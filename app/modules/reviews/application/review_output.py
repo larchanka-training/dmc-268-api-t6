@@ -633,6 +633,8 @@ class FindingPostProcessingInput:
     summary_only: bool = False
     # ``context.build`` reason for a summary-only run; the saved summary names it.
     summary_reason: str | None = None
+    # Set only for a GitHub repository: the one provider whose comments link to the rules (#465).
+    github_repository_full_name: str | None = None
 
 
 class ReviewOutputRepository(Protocol):
