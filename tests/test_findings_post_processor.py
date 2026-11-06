@@ -1655,6 +1655,9 @@ def test_executive_checklist_only_counts_sensitive_files_when_the_policy_hides_n
     assert _what_to_check(result) == ["- Изменённые миграции (1)"]
     assert migration not in result.review_body
 
+
+def test_executive_checklist_only_counts_sensitive_files_when_the_policy_is_unknown() -> None:
+    migration = "alembic/versions/1.py"
     unknown_policy = FindingsPostProcessor.from_default_patterns().process(
         output(),
         diff_map=_diff_map_from_vcs(snapshot_vcs_file(_text_change(migration))),
@@ -1841,9 +1844,16 @@ def test_executive_block_changes_neither_the_findings_hash_nor_the_publish_messa
     assert publish_message_id(run_id, "c" * 40, plain_hash) == publish_message_id(
         run_id, "c" * 40, findings_hash(hashed_findings(with_checklist))
     )
-    # The stored body is compared on republish, so the same inputs give the same bytes.
-    assert with_checklist.review_body == _process_snapshots(busy, *findings).review_body
+
+
+def test_executive_block_renders_the_same_bytes_for_the_same_files_in_any_order() -> None:
+    # The stored body is compared on republish.
+    findings = (finding(severity="high"),)
+    busy = [_text_change(), _truncated_change(), _text_change("pyproject.toml")]
+    rendered = _process_snapshots(busy, *findings)
+
+    assert rendered.review_body == _process_snapshots(busy, *findings).review_body
     assert (
         _process_snapshots(list(reversed(busy)), *findings).executive_block
-        == with_checklist.executive_block
+        == rendered.executive_block
     )
