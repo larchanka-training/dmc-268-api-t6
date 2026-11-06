@@ -34,6 +34,7 @@ def published_finding_from_row(
         confidence=float(item.confidence),
         rule_name=item.rule_name,
         finding_id=item.id,
+        rule_link=item.rule_link,
     )
     if provider == "bitbucket":
         return enrich_bitbucket_publication_finding(diff_map, finding)

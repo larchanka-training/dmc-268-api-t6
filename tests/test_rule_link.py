@@ -5,11 +5,13 @@ from __future__ import annotations
 import asyncio
 import re
 from dataclasses import replace
+from decimal import Decimal
 from typing import Any, Literal, cast
 from uuid import UUID
 
 import pytest
 
+from app.common.infrastructure.db.enums import FindingCategory, FindingSeverity
 from app.modules.reviews.application.conventions import GeneratedConventions
 from app.modules.reviews.application.execute_review import ExecuteReviewRun, ReviewPromptInput
 from app.modules.reviews.application.findings_post_processor import ProcessedReviewOutput
@@ -39,6 +41,8 @@ from app.modules.reviews.application.store_review_output import (
     StoreReviewOutput,
 )
 from app.modules.reviews.application.verdict import HashedFinding, findings_hash
+from app.modules.reviews.infrastructure.models import Finding
+from app.modules.reviews.infrastructure.publication_findings import published_finding_from_row
 from tests.policy_snapshot_fakes import make_policy_document_present
 from tests.test_findings_post_processor import _added_file_diff_map
 from tests.verifier_pipeline_fakes import (
@@ -282,6 +286,7 @@ def test_the_lines_stay_with_their_finding_when_the_threshold_drops_an_earlier_o
     assert output.rule_line_refs == {0: RuleLineRef(_REVISION, 2, 3)}
 
 
+_FINDING_ID = UUID("00000000-0000-0000-0000-000000046501")
 _RULES = ".review/rules.md"
 _V2_RULES = frozenset({_RULES, "AGENTS.md"})
 _LINES = RuleLineRef(_REVISION, 5, 8)
@@ -412,3 +417,22 @@ def test_the_stored_hash_covers_the_link() -> None:
     without = _stored([_model_finding(10, "Rule")], {})
 
     assert with_link.findings_hash != without.findings_hash
+
+
+def test_the_publication_payload_keeps_the_stored_link() -> None:
+    row = Finding(
+        id=_FINDING_ID,
+        file_path="app/main.py",
+        line_start=10,
+        line_end=None,
+        severity=FindingSeverity.HIGH,
+        confidence=Decimal("0.90"),
+        category=FindingCategory.SECURITY,
+        suggestion=None,
+        title="Rule",
+        body="Unsanitized input.",
+        rule_name=_RULES,
+        rule_link=_LINES_URL,
+    )
+
+    assert published_finding_from_row(row, None, provider="github").rule_link == _LINES_URL
