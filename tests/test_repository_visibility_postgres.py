@@ -685,7 +685,17 @@ class _FreshOAuth:
         )
 
 
-def test_a_rebind_forgets_what_was_saved_before_the_app_was_gone(portal_env: Env) -> None:
+@pytest.mark.parametrize(
+    "stored_stamp",
+    [
+        pytest.param("NULL", id="never-observed"),
+        pytest.param("now() - interval '1 hour'", id="older"),
+        pytest.param("now() + interval '1 day'", id="a-newer-stamp-does-not-move-back"),
+    ],
+)
+def test_a_rebind_forgets_what_was_saved_before_the_app_was_gone(
+    portal_env: Env, stored_stamp: str
+) -> None:
     async def exercise() -> tuple[bool, bool | None, bool]:
         engine = portal_env.engine()
         factory = async_sessionmaker(engine, expire_on_commit=False)
@@ -700,9 +710,13 @@ def test_a_rebind_forgets_what_was_saved_before_the_app_was_gone(portal_env: Env
                 )
                 await session.execute(
                     text(
-                        "UPDATE repositories SET installation_available = false, private = false "
-                        "WHERE id = :id"
+                        "UPDATE repositories SET installation_available = false, private = false, "
+                        f"private_observed_at = {stored_stamp} WHERE id = :id"
                     ),
+                    {"id": REPO_A},
+                )
+                before = await session.scalar(
+                    text("SELECT private_observed_at FROM repositories WHERE id = :id"),
                     {"id": REPO_A},
                 )
                 await session.execute(
@@ -723,14 +737,15 @@ def test_a_rebind_forgets_what_was_saved_before_the_app_was_gone(portal_env: Env
                 row = (
                     await session.execute(
                         text(
-                            "SELECT installation_available, private, "
-                            "private_observed_at IS NOT NULL AS stamped "
+                            "SELECT installation_available, private, private_observed_at "
                             "FROM repositories WHERE id = :id"
                         ),
                         {"id": REPO_A},
                     )
                 ).one()
-            return row.installation_available, row.private, row.stamped
+            stamp = row.private_observed_at
+            kept = stamp is not None and (before is None or stamp >= before)
+            return row.installation_available, row.private, kept
         finally:
             await engine.dispose()
 
