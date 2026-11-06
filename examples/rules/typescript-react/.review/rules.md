@@ -4,10 +4,10 @@ Template for TypeScript/React frontends; adapt to your project: the paths `src/c
 
 ## Data access
 
-Components receive data through hooks from `src/hooks/`, and code under `src/` calls
-the backend only through `apiClient` from `src/api/client.ts`, which adds the auth
-header and the base URL and retries 5xx answers. Report a direct `fetch` call as a
-correctness problem: it skips all three.
+Components receive data through hooks from `src/hooks/`, and code outside
+`src/api/client.ts` calls the backend only through its `apiClient`, which adds the auth
+header and the base URL. Report a direct `fetch` call anywhere else as a correctness
+problem: it skips both.
 
 # Correctness
 
