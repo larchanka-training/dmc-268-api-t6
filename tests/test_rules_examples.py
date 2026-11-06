@@ -29,6 +29,7 @@ _MASKS = {
     "security-baseline": ("**/*.map", "coverage/**"),
     "typescript-react": ("coverage/**", "src/types/api/**", "storybook-static/**"),
 }
+_STACKS = ("go", "python-fastapi", "typescript-react")
 
 
 def _template(name: str) -> bytes:
@@ -49,14 +50,21 @@ def _tokens(raw: bytes) -> int:
     return EstimatedTokenCounter().count(PromptBuilder.render_policy_rules(snapshot))
 
 
-def _largest_merge() -> tuple[int, int]:
-    """Bytes and tokens of the largest stack plus the baseline, an upper bound of their merge."""
-    baseline = _template("security-baseline")
-    stacks = [_template(name) for name in _MASKS if name != "security-baseline"]
-    return (
-        max(len(raw) for raw in stacks) + len(baseline),
-        max(_tokens(raw) for raw in stacks) + _tokens(baseline),
-    )
+def _merged_with_baseline(stack: str) -> bytes:
+    """The steps of the guide's "Combine two templates", applied to the real files."""
+    baseline = _template("security-baseline").decode("utf-8")
+    sections = baseline[baseline.index("## ") : baseline.index("# Ignore\n")]
+    masks = baseline[baseline.index(_OPENING) + len(_OPENING) : baseline.rindex("```")]
+    head, ignore = _template(stack).decode("utf-8").split("# Ignore\n")
+    if "# Security\n\n" in head:
+        head = head.replace("# Security\n\n", f"# Security\n\n{sections}")
+    else:
+        head = f"{head}# Security\n\n{sections}"
+    return f"{head}# Ignore\n{ignore.replace(_OPENING, _OPENING + masks)}".encode()
+
+
+def _largest_merge() -> bytes:
+    return max((_merged_with_baseline(name) for name in _STACKS), key=_tokens)
 
 
 def _replace_last(raw: bytes, old: str, new: str) -> bytes:
@@ -126,8 +134,27 @@ def test_a_template_fits_the_document_and_token_limits(name: str) -> None:
     assert _tokens(raw) <= _MAX_TEMPLATE_TOKENS
 
 
-def test_the_largest_stack_with_the_security_baseline_leaves_half_of_the_budget() -> None:
-    assert _largest_merge()[1] <= _MAX_TEMPLATE_TOKENS
+@pytest.mark.parametrize("stack", _STACKS)
+def test_the_guide_steps_merge_a_stack_with_the_baseline_within_half_of_the_budget(
+    stack: str,
+) -> None:
+    merged = _merged_with_baseline(stack)
+    text = merged.decode("utf-8")
+
+    assert _masks(merged) == tuple(sorted({*_MASKS[stack], *_MASKS["security-baseline"]}))
+    assert text.count("# Security\n") == 1
+    assert text.count("# Ignore\n") == 1
+    assert _tokens(merged) <= _MAX_TEMPLATE_TOKENS
+
+
+@pytest.mark.parametrize("stack", _STACKS)
+def test_two_templates_pasted_as_they_are_fail_on_the_second_block(stack: str) -> None:
+    pasted = _template(stack) + b"\n" + _template("security-baseline")
+
+    with pytest.raises(PolicyError) as error:
+        _masks(pasted)
+
+    assert error.value.code == PolicyErrorCode.IGNORE_BLOCK_DUPLICATE
 
 
 def test_the_guide_states_the_measured_sizes() -> None:
@@ -136,5 +163,5 @@ def test_the_guide_states_the_measured_sizes() -> None:
     for name in _MASKS:
         raw = _template(name)
         assert f"| `{name}` | {len(raw)} | {_tokens(raw)} |" in guide
-    size, tokens = _largest_merge()
-    assert f"| Largest stack + `security-baseline` | {size} | {tokens} |" in guide
+    merged = _largest_merge()
+    assert f"| Largest stack + `security-baseline` | {len(merged)} | {_tokens(merged)} |" in guide
