@@ -328,6 +328,8 @@ P = цена_единицы(тариф, движок) × множитель
 
 - Любая сумма от $10 до $500 в целых долларах, Stripe Checkout `mode=payment`.
 - Грант `top_up` пишется по `checkout.session.completed` со статусом оплаты `paid`.
+  Налог и счёт: §9. В `metadata` сессии и её PaymentIntent
+  (`payment_intent_data.metadata`) пишутся `workspace_id` и `source=checkout`.
 - Карту можно сохранить двумя путями, оба уже в первой версии:
   - **кнопка «Привязать карту»** на экране «Баланс и тариф»: Checkout `mode=setup`
     (SetupIntent `usage=off_session`), без списания. Событие `setup_intent.succeeded`.
@@ -348,7 +350,7 @@ P = цена_единицы(тариф, движок) × множитель
 | Когда срабатывает | пересечение сверху вниз: после списания купленный и бонусный остаток стал ниже порога, а до него был не ниже. Остаток ниже порога без нового пересечения второй платёж не запускает |
 | Сумма | от $10 до $500, как обычное пополнение, и не больше месячного потолка: настройки с суммой больше потолка не сохраняются |
 | Месячный потолок | по умолчанию $200 за календарный месяц UTC; пользователь меняет в пределах $10-$500 |
-| Платёж | PaymentIntent `off_session` с сохранённой картой, ключ идемпотентности на попытку |
+| Платёж | разовый счёт Stripe Invoicing: позиция на сумму, `automatic_tax[enabled]=true`, `collection_method=charge_automatically`, карта авто-пополнения как `default_payment_method`, `metadata.source=auto_recharge`; Stripe списывает её `off_session` при финализации. Ключ идемпотентности на попытку |
 | Отказ карты | авто-пополнение выключается; баннер в ui (ниже) |
 | Требуется 3-D Secure | то же: выключается, баннер; клиент платит вручную через Checkout |
 | Потолок достигнут | попытка не идёт, если сумма больше остатка потолка месяца; до конца месяца не срабатывает, отметка в ui |
@@ -451,7 +453,8 @@ P = цена_единицы(тариф, движок) × множитель
 |---|---|
 | Охват | в эпике оба типа: бизнес с VAT ID и потребитель (D6), на одних тарифах |
 | Тип клиента | бизнес: в Checkout введён VAT ID (`tax_id_collection[enabled]=true`); иначе потребитель |
-| Расчёт налога | Stripe Tax (`automatic_tax[enabled]=true`), регистрации моковой GmbH в sandbox |
+| Расчёт налога | Stripe Tax (`automatic_tax[enabled]=true`), регистрации моковой GmbH в sandbox. Checkout считает налог сам; авто-пополнение идёт разовым счётом Invoicing с тем же `automatic_tax`, поэтому налог и reverse charge те же (§6.2) |
+| Счёт клиенту | пополнение через Checkout: `invoice_creation[enabled]=true`, Stripe выставляет счёт с НДС; авто-пополнение: тот же счёт Invoicing. Счета видны в Customer Portal, Stripe отправляет их на email Customer, введённый в Checkout |
 | Цены | `tax_behavior=inclusive`, одна брутто-цена для всех (решение техлида от 2026-11-06): потребитель платит указанную цену с НДС; бизнес платит ту же сумму |
 | Reverse charge | только трансграничный B2B в ЕС: VAT ID страны ЕС, отличной от Германии (страна моковой GmbH, §12). Сумма та же, НДС 0, в счёте пометка reverse charge |
 | Немецкий VAT ID | продажа внутри страны: Stripe Tax начисляет немецкий НДС, reverse charge не применяется; сумма та же, НДС внутри неё, VAT ID печатается в счёте |
@@ -500,7 +503,8 @@ P = цена_единицы(тариф, движок) × множитель
 | Checkout Session | пополнение (`mode=payment`), подписка (`mode=subscription`), сохранение карты (`mode=setup`) |
 | Product, Price | Starter и Pro: фиксированная месячная цена (licensed), `tax_behavior=inclusive`; пополнение: `price_data` на выбранную сумму |
 | Subscription | один активный тариф на workspace |
-| SetupIntent, PaymentIntent | сохранение карты `off_session`; авто-пополнение |
+| SetupIntent | сохранение карты `off_session` |
+| Invoice (разовый) | авто-пополнение (§6.2); счёт пополнения через Checkout `invoice_creation` |
 | Customer Portal | карта, счета, VAT ID, смена Starter/Pro по §4.4, отмена в конце периода |
 | Stripe Tax | расчёт и reverse charge |
 | Billing Credits, Meters | не используем (§10.2) |
@@ -526,10 +530,10 @@ P = цена_единицы(тариф, движок) × множитель
 | `checkout.session.completed` | `mode=payment`: `payments.status=paid`, грант `top_up`, карта сохранена, если был `setup_future_usage` (§6.1); `mode=setup`: карта сохранена, бонус по `setup_intent.succeeded` |
 | `checkout.session.expired` | `payments.status=expired` |
 | `checkout.session.async_payment_succeeded`, `..._failed` | в v1 только карты; событие логируется |
-| `payment_intent.succeeded`, `payment_intent.payment_failed` | по `metadata.source` нашего PaymentIntent: `auto_recharge`: грант `top_up` или выключение (§6.2); `checkout`: только лог, деньги по `checkout.session.completed`; без нашего `metadata` (PaymentIntent счёта подписки): только лог, гранты по `invoice.paid` |
+| `payment_intent.succeeded`, `payment_intent.payment_failed` | только лог: деньги пополнения по `checkout.session.completed`, авто-пополнения и подписки по событиям счёта |
 | `setup_intent.succeeded` | путь «Привязать карту»: карта сохранена; бонус §7, если флаг включён и условия выполнены |
-| `invoice.paid` | грант `subscription_grant`: полный для `billing_reason` = `subscription_create` или `subscription_cycle`, на оплаченную сумму для доплаты за повышение (§4.3, §4.4); иначе без гранта |
-| `invoice.payment_failed` | отметка в ui, письмо шлёт Stripe |
+| `invoice.paid` | `metadata.source=auto_recharge`: грант `top_up` (§6.2). Иначе грант `subscription_grant`: полный для `billing_reason` = `subscription_create` или `subscription_cycle`, на оплаченную сумму для доплаты за повышение (§4.3, §4.4); иначе без гранта |
+| `invoice.payment_failed`, `invoice.payment_action_required` | `metadata.source=auto_recharge`: авто-пополнение выключается, баннер (§6.2). Подписка: отметка в ui, письмо шлёт Stripe |
 | `customer.subscription.created`, `.updated`, `.deleted` | тариф workspace, лимит репозиториев |
 | `customer.tax_id.created`, `.updated` | статус проверки VAT ID |
 | `charge.refunded` | строка `refund` |
