@@ -789,7 +789,7 @@ deep: 5 цен единицы).
 | [SYSTEM_DESIGN §15](../SYSTEM_DESIGN.md#15-открытые-вопросы-для-команды) | Этот PR: вопрос монетизации закрыт ссылкой на ADR |
 | [BACKEND_ARCHITECTURE](../BACKEND_ARCHITECTURE.md#интерфейсы-и-инфраструктурные-реализации) | Этот PR: `PaymentGateway`, модуль `billing` и второе исключение короткой транзакции сверены с ADR |
 | `AGENTS.md` (What NOT to do), `.agents/rules/backend.md` §3 | Этот PR: второе узкое исключение для строк списания (§3.3) |
-| PIPELINE_SPEC §5.3 (таблица причин деградации и `budget_paused`), `handle_review_run.py` | С #371: остаток дня по списанному и удержаниям сравнивается с ценой единицы fast и deep тарифа, а не с $0.50 и $3 (§8.1) |
+| PIPELINE_SPEC §5.3 (таблица причин деградации и `budget_paused`), `handle_review_run.py` | С #371: остаток дня по списанному и удержаниям сравнивается с ценой единицы тарифа и ценой движка deep, а не с $0.50 и $3, при claim и на гейте 2 (§8.1) |
 | PIPELINE_SPEC §1 T4/T5 и переход гейта 2, §4.5, §5.3, §6; SD §13 | С #371: `balance_exhausted` на двух гейтах, пороги расхода §8.2 как лимит прогона, цена при деградации, задача досписания §10.6 рядом с реконсилером T13 |
 | SD §11, ERD, `credit_ledger` | С #371 и #372: новые виды, `grant_id`, составные уникальные ключи §5.1, таблица `balance_holds` §5.2, тариф workspace, `daily_budget_usd` по списаниям |
 | PIPELINE_SPEC §6 | С #372: коды `plan_repo_limit`, `plan_graph_rag_unavailable` (§4.4) |
