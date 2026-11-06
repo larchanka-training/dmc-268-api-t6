@@ -223,12 +223,12 @@ Push, меняющий дифф PR (новые или исправленные �
 
 ## 7. Что проверяет GitHub, а что держится на договорённости
 
-Ruleset `main` одинаков в обоих репо, кроме обязательных CI-проверок: в api это `Python lint / type / test`, `OpenAPI lint`, `Webhook container smoke` и `Edge Caddyfile validate`, в ui — `Docker image build` и `UI quality`.
+Ruleset `main` одинаков в обоих репо, кроме обязательных CI-проверок: в api это `Python lint / type / test`, `OpenAPI lint`, `Webhook container smoke` и `Edge Caddyfile validate`, в ui — `Docker image build`, `UI quality` и `Production browser smoke`.
 
 | Правило | Как соблюдается |
 |---|---|
 | В `main` попадают только PR: без прямого push, force push и удаления ветки | ruleset |
-| Обязательные CI-проверки зелёные: в api `Python lint / type / test`, `OpenAPI lint`, `Webhook container smoke`, `Edge Caddyfile validate`, в ui `Docker image build`, `UI quality` | ruleset `required_status_checks` |
+| Обязательные CI-проверки зелёные: в api `Python lint / type / test`, `OpenAPI lint`, `Webhook container smoke`, `Edge Caddyfile validate`, в ui `Docker image build`, `UI quality`, `Production browser smoke` | ruleset `required_status_checks` |
 | Ветка на текущем `main` | ruleset `strict_required_status_checks_policy` |
 | Ветка обновлена rebase, а не merge `main` в ветку | договорённость; признак — команда 5б из §2 |
 | Есть минимум один Approve, и не от автора | ruleset `required_approving_review_count: 1` + GitHub |
