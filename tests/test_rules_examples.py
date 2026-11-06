@@ -16,6 +16,7 @@ _CATALOG = Path(__file__).resolve().parents[1] / "examples" / "rules"
 _MASKS = {
     "go": ("**/*_gen.go", "**/zz_generated.*.go", "vendor/**"),
     "python-fastapi": ("**/*_pb2.py", "**/*_pb2_grpc.py", "clients/generated/**"),
+    "security-baseline": ("**/*.map", "coverage/**"),
     "typescript-react": ("coverage/**", "src/types/api/**", "storybook-static/**"),
 }
 
