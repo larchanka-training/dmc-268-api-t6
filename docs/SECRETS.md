@@ -992,7 +992,7 @@ Workflow по умолчанию: `contents: read`. Расширение точ�
 
 | Переменная | Получатели staging | Контракт |
 | --- | --- | --- |
-| `BITBUCKET_CREDENTIAL_KEYS` | API, review worker, webhook worker (`bitbucket.env`) | Защищённый JSON key-ID → canonical base64 32-байтного ключа шифрования. Хранить как Environment secret, не в Git. |
+| `BITBUCKET_CREDENTIAL_KEYS` | API, review worker, webhook worker (`bitbucket.env`) | Защищённый JSON key-ID → canonical base64 32-байтного ключа шифрования. Хранить как Environment secret, не в Git. Оба значения (`BITBUCKET_CREDENTIAL_KEYS`, `BITBUCKET_ACTIVE_KEY_ID`) пустые или отсутствуют — Bitbucket выключен, процессы стартуют; заполнено одно из двух или keyring невалиден — `worker` и `webhook-worker` не стартуют. |
 | `BITBUCKET_ACTIVE_KEY_ID` | те же процессы (`bitbucket.env`) | ID ключа для новых ciphertext; ключ должен присутствовать в keyring. Хранить как Environment variable. |
 | `BITBUCKET_WEBHOOK_BASE_URL` | только API (`api.env`) | Публичный HTTPS origin без path/query; для курсового staging `https://staging-api.<APP_DOMAIN>`, не зарезервированный `staging-webhook` host. Хранить как Environment variable. |
 
