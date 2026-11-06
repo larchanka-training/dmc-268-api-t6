@@ -713,7 +713,8 @@ def test_head_equal_to_the_indexed_commit_with_another_profile_builds_full() -> 
 def test_head_equal_to_the_indexed_commit_built_with_other_versions_builds_full(
     version: str,
 ) -> None:
-    profile = replace(_PROFILE, **{version: "other"})
+    previous = "resolver/v1+index/v1" if version == "resolver_version" else "other"
+    profile = replace(_PROFILE, **{version: previous})
     world = _world(state=_state(indexed_commit_sha=_HEAD, profile=profile))
 
     outcome = world.run()
