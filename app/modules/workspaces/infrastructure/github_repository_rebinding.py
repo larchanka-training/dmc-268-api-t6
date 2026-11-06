@@ -155,7 +155,11 @@ class SqlAlchemyGitHubRepositoryRebinding:
                     installation_available=True,
                     # No event reached the service while the App was gone (#454).
                     private=None,
-                    private_observed_at=func.now(),
+                    # The clock, not now(): this transaction may have started before an event
+                    # stored meanwhile, and a stamp that moved back would let an older one win.
+                    private_observed_at=func.greatest(
+                        func.clock_timestamp(), Repository.private_observed_at
+                    ),
                 )
             )
         await self._session.flush()
