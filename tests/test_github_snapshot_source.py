@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import gzip
+import hashlib
 import logging
 import tracemalloc
 from collections.abc import AsyncIterator, Awaitable, Callable
@@ -819,22 +820,24 @@ def test_unavailable_carries_its_code() -> None:
 
 _ROOT_TREE = f"api.github.com/repos/octo/repo/git/trees/{_HEAD}"
 _REVIEW_TREE = f"api.github.com/repos/octo/repo/git/trees/{'d' * 40}"
-_RULES_BLOB = f"api.github.com/repos/octo/repo/git/blobs/{'e' * 40}"
+_RULES_OID = "de7475d8888cd0da43c60eccee4040c767cd2a80"  # b"rules\n"
+_RULES_BLOB = f"api.github.com/repos/octo/repo/git/blobs/{_RULES_OID}"
 
 
 def _policy_entry(
-    name: str, kind: str = "blob", mode: str = "100644", *, size: int = 10
+    name: str, kind: str = "blob", mode: str = "100644", *, size: int = 10, oid: str = _RULES_OID
 ) -> dict[str, Any]:
     return {
         "path": name,
         "type": kind,
         "mode": mode,
-        "sha": ("d" if kind == "tree" else "e") * 40,
+        "sha": "d" * 40 if kind == "tree" else oid,
         "size": size,
     }
 
 
 def _policy_routes(raw: bytes = b"rules\n") -> dict[str, Callable[[httpx.Request], httpx.Response]]:
+    oid = hashlib.sha1(b"blob %d\0" % len(raw) + raw, usedforsecurity=False).hexdigest()
     return {
         _ROOT_TREE: _answer(
             200,
@@ -844,9 +847,10 @@ def _policy_routes(raw: bytes = b"rules\n") -> dict[str, Callable[[httpx.Request
             },
         ),
         _REVIEW_TREE: _answer(
-            200, json={"tree": [_policy_entry("rules.md", size=len(raw))], "truncated": False}
+            200,
+            json={"tree": [_policy_entry("rules.md", size=len(raw), oid=oid)], "truncated": False},
         ),
-        _RULES_BLOB: _answer(200, content=raw),
+        f"api.github.com/repos/octo/repo/git/blobs/{oid}": _answer(200, content=raw),
     }
 
 
@@ -859,17 +863,47 @@ def test_rules_document_reads_only_the_pinned_rules_blob_and_normalizes_it() -> 
     assert document.presence is DocumentPresence.PRESENT
     assert document.path == ".review/rules.md"
     assert document.text == "hello\nworld\n"
-    assert document.blob_oid == "e" * 40
+    assert document.blob_oid == "e53550adbbca2b6d023c84c0995d09e387490ceb"
     assert requests == 3
     assert [str(request.url).split("?")[0] for request in github.seen] == [
         f"https://api.github.com/repos/octo/repo/git/trees/{_HEAD}",
         f"https://api.github.com/repos/octo/repo/git/trees/{'d' * 40}",
-        f"https://api.github.com/repos/octo/repo/git/blobs/{'e' * 40}",
+        "https://api.github.com/repos/octo/repo/git/blobs/e53550adbbca2b6d023c84c0995d09e387490ceb",
     ]
     assert github.seen[-1].headers["Accept"] == "application/vnd.github.raw+json"
     # The limit counts the bytes of the document, not those of a transfer encoding.
     assert github.seen[-1].headers["Accept-Encoding"] == "identity"
     assert all(not request.url.query for request in github.seen)
+
+
+def test_rules_document_rejects_blob_with_another_git_id() -> None:
+    expected_oid = _RULES_OID
+    routes = _policy_routes()
+    entry = _policy_entry("rules.md")
+    entry["sha"] = expected_oid
+    routes[_REVIEW_TREE] = _answer(200, json={"tree": [entry]})
+    routes[f"api.github.com/repos/octo/repo/git/blobs/{expected_oid}"] = _answer(
+        200, content=b"other\n"
+    )
+
+    error, requests = _run(GitHub(routes), lambda source: source.rules_document(_HEAD))
+
+    assert isinstance(error, PolicyError), repr(error)
+    assert (error.code.value, error.retryable) == ("policy_fetch_transient", True)
+    assert requests == 3
+
+
+def test_rules_document_accepts_sha256_git_blob_id() -> None:
+    oid = "5db39471a18ee90d418349c79ee9bb911e0e48c4db0e4890c183124f31d4fbe2"
+    routes = _policy_routes()
+    routes[_REVIEW_TREE] = _answer(200, json={"tree": [_policy_entry("rules.md", oid=oid)]})
+    routes[f"api.github.com/repos/octo/repo/git/blobs/{oid}"] = _answer(200, content=b"rules\n")
+
+    document, requests = _run(GitHub(routes), lambda source: source.rules_document(_HEAD))
+
+    assert not isinstance(document, Exception), repr(document)
+    assert document.blob_oid == oid
+    assert requests == 3
 
 
 @pytest.mark.parametrize(("missing_parent", "requests"), [(True, 1), (False, 2)])
@@ -940,7 +974,8 @@ def test_rules_document_failure_never_claims_absence(
 def test_rules_document_preserves_review_validation(raw: bytes, code: str) -> None:
     # Missing size metadata must still enforce the streamed byte limit.
     routes = _policy_routes(raw)
-    entry = _policy_entry("rules.md")
+    oid = hashlib.sha1(b"blob %d\0" % len(raw) + raw, usedforsecurity=False).hexdigest()
+    entry = _policy_entry("rules.md", oid=oid)
     del entry["size"]
     routes[_REVIEW_TREE] = _answer(200, json={"tree": [entry]})
 
