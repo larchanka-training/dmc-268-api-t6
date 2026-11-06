@@ -12,7 +12,7 @@ from app.modules.reviews.application.policy_documents import (
     normalize_document,
 )
 from app.modules.reviews.application.policy_errors import PolicyError, PolicyErrorCode
-from app.modules.reviews.application.policy_snapshot import PolicyDocument, RULES_DOCUMENT_PATH
+from app.modules.reviews.application.policy_snapshot import RULES_DOCUMENT_PATH, PolicyDocument
 from app.modules.reviews.application.prompt_budget import EstimatedTokenCounter
 from app.modules.reviews.application.prompt_builder import PromptBuilder
 from app.modules.reviews.application.review_ignore import parse_review_ignore
@@ -128,3 +128,13 @@ def test_a_template_fits_the_document_and_token_limits(name: str) -> None:
 
 def test_the_largest_stack_with_the_security_baseline_leaves_half_of_the_budget() -> None:
     assert _largest_merge()[1] <= _MAX_TEMPLATE_TOKENS
+
+
+def test_the_guide_states_the_measured_sizes() -> None:
+    guide = (_CATALOG / "RULES_GUIDE.md").read_text(encoding="utf-8")
+
+    for name in _MASKS:
+        raw = _template(name)
+        assert f"| `{name}` | {len(raw)} | {_tokens(raw)} |" in guide
+    size, tokens = _largest_merge()
+    assert f"| Largest stack + `security-baseline` | {size} | {tokens} |" in guide
