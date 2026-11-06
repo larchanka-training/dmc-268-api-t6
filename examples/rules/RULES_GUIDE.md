@@ -55,7 +55,7 @@ templates pasted together as they are fail every run with `policy_ignore_block_d
 | `go` | 2112 | 1130 |
 | `python-fastapi` | 2467 | 1302 |
 | `security-baseline` | 2061 | 1080 |
-| `typescript-react` | 2134 | 1144 |
+| `typescript-react` | 2113 | 1137 |
 | Largest stack + `security-baseline` | 4528 | 2382 |
 
 A file may take up to 64 KiB. Tokens are the service's estimate of the block the model sees, at 3
