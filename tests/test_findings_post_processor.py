@@ -1701,20 +1701,20 @@ def test_executive_unusable_names_appear_only_as_a_number(
 
 
 @pytest.mark.parametrize(
-    ("snapshot", "reason"),
+    ("snapshot", "reason", "severity"),
     [
-        (_text_change("src\\moved.py"), "неподдерживаемый путь"),
-        (_unresolved_rename(), "не установлена идентичность файла"),
+        (_text_change("src\\moved.py"), "неподдерживаемый путь", "high"),
+        (_unresolved_rename(), "не установлена идентичность файла", "critical"),
     ],
 )
 def test_executive_finding_on_an_unusable_name_stays_counted_without_the_name(
-    snapshot: DiffSnapshot, reason: str
+    snapshot: DiffSnapshot, reason: str, severity: str
 ) -> None:
     result = _process_snapshots(
         [_text_change(), snapshot],
         finding(
             path=snapshot.filename,
-            severity="high",
+            severity=severity,
             title="Leak in moved.py",
             body="The token stays in moved.py.",
         ),
@@ -1726,11 +1726,11 @@ def test_executive_finding_on_an_unusable_name_stays_counted_without_the_name(
     )
     assert _what_to_check(result) == [
         f"- Не проверено — {reason} (1)",
-        "- Подтвердите находки critical/high (1): **Находка** (имя файла скрыто)",
+        f"- Подтвердите находки critical/high (1): **Находка** (имя файла скрыто, {severity})",
     ]
-    assert result.review_body.endswith("- **Находка** (имя файла скрыто, high)")
+    assert result.review_body.endswith(f"- **Находка** (имя файла скрыто, {severity})")
     assert [item.finding.path for item in result.body_only] == [snapshot.filename]
-    assert "**Risk summary:** critical: 0, high: 1," in result.review_body
+    assert f"{severity}: 1," in result.review_body
 
 
 def test_executive_text_of_another_finding_does_not_repeat_an_unusable_name() -> None:
