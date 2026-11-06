@@ -110,6 +110,13 @@ class RepositoryVisibilityEvent:
 
 
 @dataclass(frozen=True)
+class InstallationSuspendedEvent:
+    """``installation.suspend``: no event of its repositories arrives until it ends (#454)."""
+
+    installation_external_id: int
+
+
+@dataclass(frozen=True)
 class GitHubDispatchEvent:
     """Validated application input from a claimed raw webhook receipt."""
 
@@ -121,6 +128,7 @@ class GitHubDispatchEvent:
         | InstallationRepositoriesEvent
         | PushEvent
         | RepositoryVisibilityEvent
+        | InstallationSuspendedEvent
         | UnsupportedGitHubEvent
     )
 
@@ -181,6 +189,10 @@ class CodeIndexRefreshHandler(Protocol):
 class RepositoryVisibilityHandler(Protocol):
     """One short transaction, no GitHub call (#454)."""
 
+    async def forget(self, installation_external_id: int) -> bool:
+        """False when the installation has no repository."""
+        ...
+
     async def overwrite(
         self, installation_external_id: int, repository_external_id: int, private: bool
     ) -> bool:
@@ -230,6 +242,8 @@ class GitHubInstallationDeliveryDispatcher:
             )
         if isinstance(event, RepositoryVisibilityEvent):
             return await self._visibility_result(event)
+        if isinstance(event, InstallationSuspendedEvent):
+            return await self._suspension_result(event)
         if isinstance(event, PullRequestLabelEvent):
             await self._learn_visibility(event.pull_request)
             action = event.pull_request.action
@@ -341,6 +355,23 @@ class GitHubInstallationDeliveryDispatcher:
             return InstallationDeliveryDispatchResult(
                 status=InstallationDeliveryDispatchStatus.IGNORED_IRRELEVANT_EVENT,
                 detail="unknown_repository",
+            )
+        return InstallationDeliveryDispatchResult(
+            status=InstallationDeliveryDispatchStatus.UPDATED_REPOSITORY_VISIBILITY
+        )
+
+    async def _suspension_result(
+        self, event: InstallationSuspendedEvent
+    ) -> InstallationDeliveryDispatchResult:
+        if self._repository_visibility is None:
+            return InstallationDeliveryDispatchResult(
+                status=InstallationDeliveryDispatchStatus.DEFERRED_KNOWN_EVENT
+            )
+        if not await self._repository_visibility.forget(event.installation_external_id):
+            # Not deferred: a repository connected later reads its visibility anyway.
+            return InstallationDeliveryDispatchResult(
+                status=InstallationDeliveryDispatchStatus.IGNORED_IRRELEVANT_EVENT,
+                detail="unknown_installation",
             )
         return InstallationDeliveryDispatchResult(
             status=InstallationDeliveryDispatchStatus.UPDATED_REPOSITORY_VISIBILITY

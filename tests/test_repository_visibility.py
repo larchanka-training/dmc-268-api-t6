@@ -31,6 +31,11 @@ class _Visibility:
     error: Exception | None = None
     overwritten: list[tuple[int, int, bool]] = field(default_factory=list)
     learned: list[tuple[int, int, bool]] = field(default_factory=list)
+    forgotten: list[int] = field(default_factory=list)
+
+    async def forget(self, installation_external_id: int) -> bool:
+        self.forgotten.append(installation_external_id)
+        return self.known
 
     async def overwrite(
         self, installation_external_id: int, repository_external_id: int, private: bool
@@ -142,6 +147,63 @@ def test_a_malformed_visibility_change_is_invalid(change: dict[str, Any]) -> Non
     result = _dispatch(visibility, "repository", _repository_event("privatized") | change)
 
     assert visibility.overwritten == []
+    assert result.status is InstallationDeliveryDispatchStatus.IGNORED_INVALID_EVENT
+
+
+def test_a_suspended_installation_forgets_the_saved_flags() -> None:
+    visibility = _Visibility()
+
+    result = _dispatch(
+        visibility, "installation", {"action": "suspend", "installation": {"id": 17}}
+    )
+
+    assert visibility.forgotten == [17]
+    assert result == InstallationDeliveryDispatchResult(
+        InstallationDeliveryDispatchStatus.UPDATED_REPOSITORY_VISIBILITY
+    )
+
+
+def test_a_suspended_installation_with_no_repositories_is_final() -> None:
+    result = _dispatch(
+        _Visibility(known=False), "installation", {"action": "suspend", "installation": {"id": 17}}
+    )
+
+    assert result == InstallationDeliveryDispatchResult(
+        InstallationDeliveryDispatchStatus.IGNORED_IRRELEVANT_EVENT, "unknown_installation"
+    )
+
+
+def test_a_suspension_without_the_handler_is_deferred() -> None:
+    result = _dispatch(None, "installation", {"action": "suspend", "installation": {"id": 17}})
+
+    assert result.status is InstallationDeliveryDispatchStatus.DEFERRED_KNOWN_EVENT
+
+
+@pytest.mark.parametrize(
+    ("event_name", "payload"),
+    [
+        pytest.param("installation", {"action": "unsuspend"}, id="unsuspend"),
+        pytest.param("installation", {"action": "new_permissions_accepted"}, id="permissions"),
+        pytest.param("installation_repositories", {"action": "suspend"}, id="another-event"),
+    ],
+)
+def test_nothing_else_forgets_the_saved_flags(event_name: str, payload: dict[str, Any]) -> None:
+    visibility = _Visibility()
+
+    result = _dispatch(visibility, event_name, payload | {"installation": {"id": 17}})
+
+    assert visibility.forgotten == []
+    assert result.status is InstallationDeliveryDispatchStatus.IGNORED_IRRELEVANT_EVENT
+
+
+def test_a_malformed_suspension_is_invalid() -> None:
+    visibility = _Visibility()
+
+    result = _dispatch(
+        visibility, "installation", {"action": "suspend", "installation": {"id": "17"}}
+    )
+
+    assert visibility.forgotten == []
     assert result.status is InstallationDeliveryDispatchStatus.IGNORED_INVALID_EVENT
 
 

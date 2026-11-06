@@ -725,7 +725,7 @@ def test_non_actionable_pr_action_is_ignored() -> None:
         ("pull_request", "ready_for_review", "action=ready_for_review"),
         ("pull_request", "ready_for_review\nFAKE LINE", None),
         ("pull_request", "Ready For Review", None),
-        ("installation", "suspend", "action=suspend"),
+        ("installation", "unsuspend", "action=unsuspend"),
         ("installation", "suspend\nFAKE LINE", None),
         ("installation_repositories", "x" * 41, None),
         ("deployment", "created", "action=created"),

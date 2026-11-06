@@ -9,9 +9,7 @@ from app.common.infrastructure.db.unit_of_work import SqlAlchemyUnitOfWork
 from app.modules.repositories.infrastructure.models import ProviderInstallation, Repository
 
 
-def _github_repository(
-    installation_external_id: int, repository_external_id: int
-) -> ColumnElement[bool]:
+def _of_github_installation(installation_external_id: int) -> ColumnElement[bool]:
     installation = (
         select(ProviderInstallation.id)
         .where(
@@ -20,7 +18,13 @@ def _github_repository(
         )
         .scalar_subquery()
     )
-    return (Repository.provider_installation_id == installation) & (
+    return Repository.provider_installation_id == installation
+
+
+def _github_repository(
+    installation_external_id: int, repository_external_id: int
+) -> ColumnElement[bool]:
+    return _of_github_installation(installation_external_id) & (
         Repository.external_id == repository_external_id
     )
 
@@ -28,6 +32,15 @@ def _github_repository(
 class SqlAlchemyRepositoryVisibilityStore:
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
+
+    async def forget(self, installation_external_id: int) -> bool:
+        forgotten = await self._session.scalars(
+            update(Repository)
+            .where(_of_github_installation(installation_external_id))
+            .values(private=None)
+            .returning(Repository.id)
+        )
+        return bool(forgotten.all())
 
     async def overwrite(
         self, installation_external_id: int, repository_external_id: int, private: bool

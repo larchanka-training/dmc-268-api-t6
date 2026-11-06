@@ -1,4 +1,4 @@
-"""Parse the GitHub ``repository`` webhook at the inbound transport boundary (#454)."""
+"""Parse the GitHub events that change a repository's saved visibility (#454)."""
 
 from __future__ import annotations
 
@@ -8,6 +8,7 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.modules.integrations.webhooks.application.github_installation_dispatch import (
+    InstallationSuspendedEvent,
     RepositoryVisibilityEvent,
 )
 
@@ -24,6 +25,18 @@ class _RepositoryVisibilityDelivery(BaseModel):
     action: Literal["privatized", "publicized"]
     installation: _Id
     repository: _Id
+
+
+class _InstallationSuspendedDelivery(BaseModel):
+    model_config = ConfigDict(extra="ignore", strict=True)
+    installation: _Id
+
+
+def parse_installation_suspended_event(
+    payload: Mapping[str, object],
+) -> InstallationSuspendedEvent:
+    parsed = _InstallationSuspendedDelivery.model_validate(payload)
+    return InstallationSuspendedEvent(installation_external_id=parsed.installation.id)
 
 
 def parse_repository_visibility_event(payload: Mapping[str, object]) -> RepositoryVisibilityEvent:

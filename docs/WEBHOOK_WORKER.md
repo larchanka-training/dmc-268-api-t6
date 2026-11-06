@@ -362,7 +362,10 @@ Repository visibility. The public README badge shows a repository only when
 and `repository.publicized` overwrite the flag in one short transaction with no GitHub call; a
 repository that is not connected ends as `ignored_irrelevant_event` with
 `detail=unknown_repository`, because connecting it reads the flag anyway, and the other
-`repository` actions end as `ignored_irrelevant_event`. Every `pull_request` delivery also passes
+`repository` actions end as `ignored_irrelevant_event`. `installation.suspend` sets the flag of
+every repository of the installation back to `NULL`, because no event arrives until the suspension
+ends; `installation.unsuspend` does nothing, the next `pull_request` delivery fills it again. Every
+`pull_request` delivery also passes
 `repository.private` of its payload before any early return: it fills `NULL` or closes, never
 opens, so a late delivery cannot reopen a repository made private, and a failed write is logged
 and does not fail the delivery. An absent or invalid value teaches nothing and never rejects the

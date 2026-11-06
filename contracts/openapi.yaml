@@ -951,8 +951,9 @@ paths:
 
         One neutral "no data" answer, with the same status, type, headers and body, covers every
         other case, so the response does not tell whether a repository exists: an unknown or
-        private repository, an App that lost access, no succeeded run, a latest run without a
-        verdict (summary-only, or clean without complete coverage), and a name GitHub cannot have.
+        private repository, an App that lost access or is suspended, no succeeded run, a latest run
+        without a verdict (summary-only, or clean without complete coverage), and a name GitHub
+        cannot have.
         There is no fallback to an older run.
 
         `owner/repo` is matched without regard to case. When several connected repositories hold
