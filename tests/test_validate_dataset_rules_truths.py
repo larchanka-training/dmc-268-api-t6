@@ -337,12 +337,12 @@ def test_committed_rules_corpus_passes_its_profile(tmp_path: Path) -> None:
     assert data == {
         "schema_version": 1,
         "profile": "rules",
-        "case_count": 8,
-        "valid_case_count": 8,
-        "class_counts": {"rules": 8},
-        "language_counts": {"python": 4, "typescript": 2, "tsx": 2},
-        "rule_truth_case_count": 5,
-        "exception_case_count": 4,
+        "case_count": 11,
+        "valid_case_count": 11,
+        "class_counts": {"rules": 11},
+        "language_counts": {"python": 5, "typescript": 4, "tsx": 2},
+        "rule_truth_case_count": 7,
+        "exception_case_count": 6,
         "passed": True,
         "errors": [],
     }
