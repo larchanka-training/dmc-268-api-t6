@@ -155,6 +155,7 @@ class SqlAlchemyGitHubRepositoryRebinding:
                     installation_available=True,
                     # No event reached the service while the App was gone (#454).
                     private=None,
+                    private_observed_at=func.now(),
                 )
             )
         await self._session.flush()

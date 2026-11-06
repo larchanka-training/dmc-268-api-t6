@@ -67,7 +67,6 @@ class _RepositoryDto(BaseModel):
     )
     default_branch: str | None = Field(default=None, min_length=1, max_length=255)
     web_url: str | None = Field(default=None, alias="html_url", min_length=1)
-    private: bool | None = None
 
     def to_application(self) -> RepositoryReference:
         return RepositoryReference(
@@ -75,7 +74,6 @@ class _RepositoryDto(BaseModel):
             full_name=self.full_name,
             default_branch=self.default_branch,
             web_url=self.web_url,
-            private=self.private,
         )
 
 

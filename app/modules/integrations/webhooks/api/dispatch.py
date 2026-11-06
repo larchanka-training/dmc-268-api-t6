@@ -168,7 +168,9 @@ class GitHubWebhookDispatchAdapter:
                 )
         else:
             value = UnsupportedGitHubEvent(event_name, action)
-        return await self._dispatcher.execute(GitHubDispatchEvent(delivery.delivery_id, value))
+        return await self._dispatcher.execute(
+            GitHubDispatchEvent(delivery.delivery_id, value, delivery.received_at)
+        )
 
 
 def _invalid_payload(error: ValueError) -> str:

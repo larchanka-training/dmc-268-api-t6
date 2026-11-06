@@ -60,6 +60,7 @@ class SqlAlchemyWebhookReceiptOperations:
                 WebhookEvent.bitbucket_repository_id,
                 WebhookEvent.bitbucket_binding_generation,
                 WebhookEvent.bitbucket_webhook_generation,
+                WebhookEvent.received_at,
             )
         )
         row = (await self._session.execute(statement)).one_or_none()
@@ -74,6 +75,7 @@ class SqlAlchemyWebhookReceiptOperations:
             origin_repository_id=cast(UUID | None, row[4]),
             origin_binding_generation=cast(int | None, row[5]),
             origin_webhook_generation=cast(int | None, row[6]),
+            received_at=cast(datetime, row[7]),
         )
 
     async def mark_projected(self, delivery_id: str, token: UUID, at: datetime) -> None:

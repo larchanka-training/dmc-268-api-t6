@@ -258,8 +258,9 @@ def test_ownership_key_migration_preserves_legacy_rows_keys_and_metadata(
 
     command.upgrade(config, "head")
     at_head = _legacy_rows(connection)
-    # A later revision adds this column (#454); the legacy values stay as they were.
+    # A later revision adds these columns (#454); the legacy values stay as they were.
     assert [row.pop("private") for row in at_head["repositories"]] == [None]
+    assert [row.pop("private_observed_at") for row in at_head["repositories"]] == [None]
     assert at_head == legacy
     context = MigrationContext.configure(
         connection, opts={"compare_type": True, "compare_server_default": True}

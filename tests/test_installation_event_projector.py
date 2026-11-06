@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from itertools import pairwise
 from typing import Literal
 from uuid import UUID, uuid4
@@ -63,6 +64,9 @@ def _reference(*, external_id: int = 101, branch: str = "main") -> RepositoryRef
         default_branch=branch,
         web_url=f"https://github.com/octo/repository-{external_id}",
     )
+
+
+_RECEIVED_AT = datetime(2026, 11, 1, 12, tzinfo=UTC)
 
 
 def _bare_reference(
@@ -353,58 +357,41 @@ def test_provider_failure_is_propagated_before_the_database_sync_begins() -> Non
     assert sync.calls == []
 
 
-@pytest.mark.parametrize("read", [True, False, None])
-def test_the_private_flag_of_the_read_wins_over_the_older_event(read: bool | None) -> None:
-    details = FakeDetailsProvider(
-        details={
-            "example-owner/repo-101": RepositoryDetails(
-                default_branch="trunk",
-                web_url="https://example.test/example-owner/repo-101",
-                private=read,
-            )
-        }
-    )
+@pytest.mark.parametrize(
+    ("branch", "read", "expected"),
+    [
+        (None, True, (True, _RECEIVED_AT)),
+        (None, False, (False, _RECEIVED_AT)),
+        (None, None, (None, _RECEIVED_AT)),
+        ("main", None, (None, None)),
+    ],
+    ids=["private", "public", "read-without-a-flag", "nothing-read"],
+)
+def test_the_private_flag_comes_only_from_a_read_stamped_with_the_delivery(
+    branch: str | None, read: bool | None, expected: tuple[object, object]
+) -> None:
+    name = "example-owner/repo-101"
     sync = FakeSyncInstallationRepositories()
-    reference = replace(_bare_reference(external_id=101), private=not read)
-
+    reference = _bare_reference(external_id=101, branch=branch, url=branch and "https://r.test")
     asyncio.run(
         InstallationEventProjector(
             installation_active=active_installation,
             tree_provider=FakeTreeProvider(trees={101: ()}),
             label_provider=FakeLabelProvider(),
-            details_provider=details,
+            details_provider=FakeDetailsProvider(
+                details={name: RepositoryDetails("trunk", "https://r.test", read)}
+            ),
             sync=sync,
         ).execute(
             provider_installation_id=uuid4(),
-            event=InstallationRepositoriesEvent(17, "added", (reference,), ()),
+            event=InstallationRepositoriesEvent(
+                17, "added", (reference,), (), received_at=_RECEIVED_AT
+            ),
         )
     )
 
-    assert sync.calls[0][1][0].snapshot.private is read
-
-
-def test_the_private_flag_of_the_event_is_kept_when_nothing_was_read() -> None:
-    details = FakeDetailsProvider()
-    sync = FakeSyncInstallationRepositories()
-    reference = replace(
-        _bare_reference(external_id=101, branch="main", url="https://example.test/r"), private=True
-    )
-
-    asyncio.run(
-        InstallationEventProjector(
-            installation_active=active_installation,
-            tree_provider=FakeTreeProvider(trees={101: ()}),
-            label_provider=FakeLabelProvider(),
-            details_provider=details,
-            sync=sync,
-        ).execute(
-            provider_installation_id=uuid4(),
-            event=InstallationRepositoriesEvent(17, "added", (reference,), ()),
-        )
-    )
-
-    assert details.calls == []
-    assert sync.calls[0][1][0].snapshot.private is True
+    snapshot = sync.calls[0][1][0].snapshot
+    assert (snapshot.private, snapshot.private_observed_at) == expected
 
 
 def test_missing_branch_and_url_are_fetched_once_and_feed_tree_label_and_sync() -> None:

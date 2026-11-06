@@ -31,7 +31,9 @@ from tests.portal_postgres import (
 pytest_plugins = ("tests.portal_postgres",)
 pytestmark = pytest.mark.integration
 
-PUBLIC_A = f"UPDATE repositories SET private = false WHERE id = '{REPO_A}'"
+PUBLIC_A = (
+    f"UPDATE repositories SET private = false, private_observed_at = now() WHERE id = '{REPO_A}'"
+)
 DONE_FINISHED_LAST = (
     f"UPDATE runs SET finished_at = '2026-11-02T00:00:00Z' WHERE id = '{RUN_DONE}'",
     f"UPDATE runs SET finished_at = '2026-11-01T00:00:00Z' WHERE id = '{RUN_CLOSED}'",
@@ -113,8 +115,8 @@ def test_a_paused_repository_keeps_its_latest_verdict(portal_env: Env) -> None:
     [
         pytest.param(
             (
-                f"UPDATE repositories SET full_name = 'octo/a', private = false "
-                f"WHERE id = '{REPO_B}'",
+                "UPDATE repositories SET full_name = 'octo/a', private = false, "
+                f"private_observed_at = now() WHERE id = '{REPO_B}'",
             ),
             False,
             id="two-public-rows",
