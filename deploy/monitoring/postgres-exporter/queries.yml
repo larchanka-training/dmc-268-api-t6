@@ -105,7 +105,11 @@ dmc_runs_budget_paused_15m:
 # on created_at: a retry may wait up to a day on Retry-After
 # (docs/PIPELINE_SPEC.md §4.2), and the whole time counts. The window is on finished_at alone, as
 # in dmc_runs_finished_15m and dmc_runs_budget_paused_15m, so this adds no new kind of scan. Both
-# columns, state and engine are already granted to metrics_exporter.
+# columns, state and engine are already granted to metrics_exporter. No index bounds finished_at,
+# so every scrape reads the whole runs table in a parallel sequential scan (about 40 ms per
+# 200 000 rows, about 210 ms per 2 000 000 rows, measured on a developer machine; the same
+# for dmc_runs_finished_15m). At about 100 PR a day that is some 36 500 runs a year; the scrape
+# timeout is 20 s. Once the table grows, add an index on finished_at by a separate migration.
 dmc_review_time_1h:
   query: |
     SELECT
