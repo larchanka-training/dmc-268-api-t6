@@ -112,6 +112,7 @@ from app.modules.reviews.application.project_github_pull_request import ProjectG
 from app.modules.reviews.application.publish_cancellation_signals import (
     PublishCancellationSignals,
 )
+from app.modules.reviews.application.repository_badge import GetRepositoryBadge
 from app.modules.reviews.application.rerun_run import RerunUnitOfWork
 from app.modules.reviews.application.run_events import (
     InMemoryRunUpdateHub,
@@ -139,6 +140,9 @@ from app.modules.reviews.infrastructure.github_pull_request_projection import (
 )
 from app.modules.reviews.infrastructure.metrics_summary import SqlAlchemyMetricsSummary
 from app.modules.reviews.infrastructure.pull_request_queries import SqlAlchemyPullRequestQueries
+from app.modules.reviews.infrastructure.repository_badge_queries import (
+    SqlAlchemyRepositoryBadgeQueries,
+)
 from app.modules.reviews.infrastructure.rerun_store import SqlAlchemyRerunUnitOfWork
 from app.modules.reviews.infrastructure.run_repository import (
     SqlAlchemyCancelRunUnitOfWork,
@@ -505,6 +509,11 @@ def get_pull_requests(
     scope: Annotated[AuthScope, Depends(get_auth_scope)],
 ) -> PullRequestRepository:
     return SqlAlchemyPullRequestQueries(_resources(request).session_factory, scope)
+
+
+def get_repository_badge(request: Request) -> GetRepositoryBadge:
+    """Anonymous on purpose (#454): the query itself answers for public repositories only."""
+    return GetRepositoryBadge(SqlAlchemyRepositoryBadgeQueries(_resources(request).session_factory))
 
 
 def get_run_publisher(request: Request) -> RunMessagePublisher | None:

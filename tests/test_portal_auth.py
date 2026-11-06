@@ -54,7 +54,8 @@ def _portal_routes() -> list[tuple[str, str]]:
     routes: list[tuple[str, str]] = []
     dummy_uuid = "00000000-0000-0000-0000-000000000001"
     # Enumerate the composed app, including auth_router and hidden/direct app routes.
-    # Explicit exceptions: liveness, HMAC webhook, documentation, OAuth/refresh cookie.
+    # Explicit exceptions: liveness, HMAC webhook, documentation, OAuth/refresh cookie, the
+    # README badge.
     public_routes = {
         ("GET", "/healthcheck"),
         ("POST", "/webhooks/github"),
@@ -68,6 +69,7 @@ def _portal_routes() -> list[tuple[str, str]]:
         ("POST", "/api/auth/github/callback"),
         ("POST", "/api/auth/refresh"),
         ("POST", "/api/auth/logout"),
+        ("GET", "/api/badges/github/{owner}/{repo}.svg"),
     }
     for route in iter_route_contexts(app.routes):
         assert route.path is not None, f"Route has no path: {route.original_route!r}"
