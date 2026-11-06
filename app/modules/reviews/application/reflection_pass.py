@@ -1133,8 +1133,12 @@ def filter_verified_candidates(
     *,
     candidates: tuple[CandidateFindingItem, ...],
     decisions: tuple[VerificationDecision, ...],
+    context: ReviewContext | None = None,
+    file_contents: Mapping[str, bytes | str] | None = None,
 ) -> tuple[list[CandidateFindingItem], list[tuple[CandidateFindingItem, VerificationStatus, str]]]:
     """Filter candidates, returning only supported ones for publication."""
+    from app.modules.reviews.application.claim_verifier import audit_candidate_claim
+
     decision_map = {d.candidate_id: d for d in decisions}
     supported: list[CandidateFindingItem] = []
     rejected: list[tuple[CandidateFindingItem, VerificationStatus, str]] = []
@@ -1142,7 +1146,23 @@ def filter_verified_candidates(
     for cand in candidates:
         dec = decision_map.get(cand.candidate_id)
         if dec is not None and dec.status == "supported":
-            supported.append(cand)
+            file_bytes: bytes | None = None
+            if file_contents is not None and cand.finding.path in file_contents:
+                raw_val = file_contents[cand.finding.path]
+                file_bytes = raw_val.encode("utf-8") if isinstance(raw_val, str) else raw_val
+            elif context is not None:
+                cf = next((f for f in context.changed_files if f.path == cand.finding.path), None)
+                if cf is not None and cf.lines:
+                    kept = [line.content for line in cf.lines if line.type != "removed"]
+                    file_bytes = ("\n".join(kept) + "\n").encode("utf-8")
+
+            audit = audit_candidate_claim(cand, file_bytes, cand.finding.path)
+            if not audit.is_valid:
+                rejected.append(
+                    (cand, audit.status, audit.reason or "Candidate claim contradicted")
+                )
+            else:
+                supported.append(cand)
         else:
             status = dec.status if dec is not None else "insufficient_context"
             reason = dec.reason if dec is not None else "Missing verifier decision"

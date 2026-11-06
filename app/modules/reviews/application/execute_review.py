@@ -638,7 +638,7 @@ class ExecuteReviewRun:
         )
         decisions = record.decisions
         supported, rejected = filter_verified_candidates(
-            candidates=tuple(filtered_candidates), decisions=decisions
+            candidates=tuple(filtered_candidates), decisions=decisions, context=context
         )
         for cand, status, _reason in rejected:
             _dropped_findings.append(
