@@ -132,7 +132,7 @@ gh pr view N --json title,commits --jq '[.title, (.commits[] | "\(.messageHeadli
 | Условие | Признак | Чем обеспечено |
 |---|---|---|
 | Ветка на текущем `main` и обновлена rebase, а не merge `main` в ветку (делает автор): локально `git rebase origin/main` и `git push --force-with-lease` или кнопка «Update branch» в режиме «Update with rebase» | команда 5 выводит `0`, команда 5б — пустой вывод | ruleset: Require branches to be up to date before merging (актуальность); отсутствие merge-коммитов — договорённость (команда 5б) |
-| Approve стоит на текущей голове PR | в выводе команды 6 `commit_id` одобряющего ревью равен голове PR; так же выглядит и перенесённый Approve, он считается (§4) | ruleset: Dismiss stale pull request approvals when new commits are pushed — push, меняющий дифф PR (новые или исправленные коммиты, rebase или Update branch с другим патчем), снимает Approve, для мержа нужен новый; rebase или Update branch с тем же патчем его не снимают, GitHub переносит Approve на новую голову (§4) |
+| Approve стоит на текущей голове PR | в выводе команды 6 `commit_id` одобряющего ревью равен голове PR; так же выглядит и перенесённый Approve, он считается (§4) | ruleset: Dismiss stale pull request approvals when new commits are pushed — push, меняющий дифф PR (новые или исправленные коммиты, rebase или Update branch с другим патчем), снимает Approve, для мержа нужен новый; rebase или Update branch с тем же патчем обычно его не снимают: GitHub переносит Approve на новую голову, но решает фактическое состояние PR (§4) |
 | Последний push одобрил не тот, кто его сделал | если ревьюер сам запушил коммит в PR, Approve даёт другой участник | ruleset: Require approval of the most recent reviewable push |
 | Все треды закрыты, CI зелёный | кнопка Merge доступна | ruleset (§7) |
 | Тело PR описывает весь PR | ревьюер сверяет раздел What с `gh pr diff N --name-only`; расхождение — Request changes | договорённость: автор обновляет тело при каждом новом коммите |
@@ -140,7 +140,7 @@ gh pr view N --json title,commits --jq '[.title, (.commits[] | "\(.messageHeadli
 | Пользовательская документация обновлена или не нужна | одно из трёх (§8): PR в ui меняет видимое пользователю поведение — в этом PR есть правка `docs-site/content/docs/` или ссылка на follow-up issue; PR в api меняет видимое поведение — в теле PR есть ссылка на PR или issue в `dmc-268-ui-t6`; видимое поведение не меняется — пункт чек-листа отмечен, ревьюер сверяет это с диффом, как в строке «Тело PR описывает весь PR» | договорённость (§8) |
 | Основная страница документации изменена только с явным ревью | в Submit review техлида или назначенного им участника есть строка «`<page>.mdx` прочитана целиком» для каждой изменённой страницы `index.mdx`, `how-it-works.mdx`, `features.mdx` | договорённость (§8) |
 
-Ветку, отставшую от `main`, ребейзит автор; переодобрить (Re-request review, §4) он просит, только если дифф PR изменился. Техлид в чужие ветки не пушит — ни rebase, ни «Update branch»: любой push, меняющий дифф PR, снимает Approve (`dismiss_stale_reviews_on_push`, §4), а по `require_last_push_approval` Approve техлида, сделавшего этот push, не считается и нужен Approve третьего участника (§7).
+Ветку, отставшую от `main`, ребейзит автор; переодобрить (Re-request review, §4) он просит, только если дифф PR изменился. Если дифф тот же, но `reviewDecision` не `APPROVED`, действует §4. Техлид в чужие ветки не пушит — ни rebase, ни «Update branch»: любой push, меняющий дифф PR, снимает Approve (`dismiss_stale_reviews_on_push`, §4), а по `require_last_push_approval` Approve техлида, сделавшего этот push, не считается и нужен Approve третьего участника (§7).
 
 Шаблон тела PR с чек-листом перед мержем — `.github/pull_request_template.md`.
 
@@ -196,7 +196,7 @@ gh api --paginate 'repos/{owner}/{repo}/issues/N/timeline?per_page=100' \
 
 Push, меняющий дифф PR (новые или исправленные коммиты, rebase или Update branch с другим патчем), снимает Approve: ruleset отклоняет устаревшие одобрения. Автор снова нажимает Re-request review, и для мержа нужен новый Approve.
 
-Ребейз или Update branch с тем же патчем Approve не снимают: GitHub переносит то же ревью на новую голову. Такой Approve считается, новый Approve и Re-request review не нужны (решение техлида 06.11.2026, §7). Он не значит, что ревьюер проверял новую голову: `main` мог измениться так, что патч ломается по смыслу при том же диффе, и от этого страхует только зелёный CI на новой голове. Сохранение Approve не гарантировано: решает фактическое состояние PR, а не расчёт по диффу. Если `gh pr view N --json reviewDecision --jq .reviewDecision` выводит не `APPROVED`, автор нажимает Re-request review.
+Ребейз или Update branch с тем же патчем Approve обычно не снимают: GitHub переносит то же ревью на новую голову. Такой Approve считается, новый Approve и Re-request review не нужны (решение техлида 06.11.2026, §7). Он не значит, что ревьюер проверял новую голову: `main` мог измениться так, что патч ломается по смыслу при том же диффе, и от этого страхует только зелёный CI на новой голове. Сохранение Approve не гарантировано: решает фактическое состояние PR, а не расчёт по диффу. Если `gh pr view N --json reviewDecision --jq .reviewDecision` выводит не `APPROVED`, автор нажимает Re-request review.
 
 ## 5. Кто получает уведомления
 
@@ -232,7 +232,7 @@ Ruleset `main` одинаков в обоих репо, кроме обязат�
 | Ветка на текущем `main` | ruleset `strict_required_status_checks_policy` |
 | Ветка обновлена rebase, а не merge `main` в ветку | договорённость; признак — команда 5б из §2 |
 | Есть минимум один Approve, и не от автора | ruleset `required_approving_review_count: 1` + GitHub |
-| Approve стоит на текущей голове PR: push, меняющий дифф PR (новые или исправленные коммиты, rebase или Update branch с другим патчем), снимает его; при rebase или Update branch с тем же патчем GitHub переносит его на новую голову | ruleset `dismiss_stale_reviews_on_push`; что перенесённый Approve считается — решение техлида 06.11.2026 (ниже) |
+| Approve стоит на текущей голове PR: push, меняющий дифф PR (новые или исправленные коммиты, rebase или Update branch с другим патчем), снимает его; при rebase или Update branch с тем же патчем GitHub обычно переносит его на новую голову, но решает фактическое состояние PR (§4) | ruleset `dismiss_stale_reviews_on_push`; что перенесённый Approve считается — решение техлида 06.11.2026 (ниже) |
 | Последний push одобряет не тот, кто его сделал | ruleset `require_last_push_approval` |
 | Все треды закрыты | ruleset `required_review_thread_resolution` |
 | Request changes блокирует мерж, чужой вердикт снимает только техлид | ruleset `dismissal_restriction` |
