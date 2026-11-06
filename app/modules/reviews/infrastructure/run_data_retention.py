@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.common.infrastructure.db.unit_of_work import SqlAlchemyUnitOfWork
 from app.modules.reviews.application.handle_review_run import TERMINAL_STATES
 from app.modules.reviews.infrastructure.models import (
+    CachedFileBlob,
     CodeChangeDiff,
     ContextManifest,
     ContextPayload,
@@ -65,6 +66,27 @@ class SqlAlchemyRunDataRetentionStore:
             .values(data_purged_at=now, updated_at=Run.updated_at)
         )
         return len(run_ids)
+
+    async def clear_expired_blobs(self, now: datetime, limit: int) -> int:
+        """Drop the text of expired blobs; a later `put` of the same blob brings it back.
+
+        A blob belongs to its repository, not to a run: many runs share one, so its own
+        expiry decides. Past it every reader already gets `EXPIRED` and no content. The row
+        stays because `/files` answers 410 only with it; without it the answer would be 404.
+        """
+        blob_ids = list(
+            await self._session.scalars(
+                select(CachedFileBlob.id)
+                .where(CachedFileBlob.expires_at <= now, CachedFileBlob.content != "")
+                .limit(limit)
+                .with_for_update(skip_locked=True)
+            )
+        )
+        if blob_ids:
+            await self._session.execute(
+                update(CachedFileBlob).where(CachedFileBlob.id.in_(blob_ids)).values(content="")
+            )
+        return len(blob_ids)
 
 
 class SqlAlchemyRunDataRetentionUnitOfWork(SqlAlchemyUnitOfWork):

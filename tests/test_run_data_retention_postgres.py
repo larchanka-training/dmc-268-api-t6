@@ -15,8 +15,14 @@ from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.modules.auth.application.scope import AuthScope
+from app.modules.reviews.application.get_run_file_lines import (
+    BlobCacheKey,
+    BlobCacheStatus,
+)
 from app.modules.reviews.application.run_data_retention import PurgeExpiredRunData
+from app.modules.reviews.infrastructure.blob_cache import SqlAlchemyBlobCache
 from app.modules.reviews.infrastructure.models import (
+    CachedFileBlob,
     CodeChangeDiff,
     ContextManifest,
     ContextPayload,
@@ -498,3 +504,85 @@ def test_the_diff_of_a_purged_run_answers_with_its_files_without_text(portal_env
         {"filename": "src/a.py", "patch": None},
         {"filename": "vendor/big.js", "patch": None},
     ]
+
+
+_SOURCE = "print('client code')\n"
+
+
+async def _store_blob(factory: Factory, blob_sha: str, expires_at: datetime) -> None:
+    async with factory.begin() as session:
+        session.add(
+            CachedFileBlob(
+                repository_id=REPO_A, blob_sha=blob_sha, content=_SOURCE, expires_at=expires_at
+            )
+        )
+
+
+async def _blob(factory: Factory, blob_sha: str) -> tuple[str, datetime] | None:
+    async with factory() as session:
+        row = (
+            await session.execute(
+                select(CachedFileBlob.content, CachedFileBlob.expires_at).where(
+                    CachedFileBlob.blob_sha == blob_sha
+                )
+            )
+        ).one_or_none()
+        return None if row is None else (row[0], row[1])
+
+
+def test_an_expired_blob_loses_its_content_and_keeps_its_row(portal_env: Env) -> None:
+    expired = _NOW - timedelta(seconds=1)
+    at_expiry = _NOW
+    live = _NOW + timedelta(seconds=1)
+
+    async def body(factory: Factory) -> None:
+        await _store_blob(factory, "1" * 40, expired)
+        await _store_blob(factory, "2" * 40, at_expiry)
+        await _store_blob(factory, "3" * 40, live)
+
+        assert await _task(factory).run(30) is False
+
+        assert await _blob(factory, "1" * 40) == ("", expired)
+        assert await _blob(factory, "2" * 40) == ("", at_expiry)
+        assert await _blob(factory, "3" * 40) == (_SOURCE, live)
+
+    _on_database(portal_env, body)
+
+
+def test_a_cleared_blob_comes_back_when_a_later_run_caches_it(portal_env: Env) -> None:
+    key = BlobCacheKey(repository_id=REPO_A, blob_sha="1" * 40)
+    later = _NOW + timedelta(days=1)
+
+    async def body(factory: Factory) -> None:
+        await _store_blob(factory, key.blob_sha, _NOW - timedelta(seconds=1))
+        assert await _task(factory).run(30) is False
+
+        async with factory.begin() as session:
+            await SqlAlchemyBlobCache(session, now=lambda: later).put(key, _SOURCE)
+
+        entry = await SqlAlchemyBlobCache(factory, now=lambda: later).get(key)
+        assert entry.status is BlobCacheStatus.HIT
+        assert entry.content == _SOURCE
+
+    _on_database(portal_env, body)
+
+
+def test_the_file_lines_of_a_cleared_blob_still_answer_as_expired(portal_env: Env) -> None:
+    async def prepare(factory: Factory) -> None:
+        await _store_run_data(factory, RUN_DONE, PR_OPEN)
+        await _finish(factory, RUN_DONE, "succeeded")
+        await _store_blob(factory, "a" * 40, _NOW - timedelta(days=30))
+
+    async def purge(factory: Factory) -> None:
+        assert await _task(factory).run(30) is False
+        assert await _blob(factory, "a" * 40) == ("", _NOW - timedelta(days=30))
+
+    _on_database(portal_env, prepare)
+    with api(portal_env, AuthScope(42, (WS_A,))) as (client, _factory):
+        before = client.get(f"/api/runs/{RUN_DONE}/files", params={"path": "src/a.py"})
+        _on_database(portal_env, purge)
+        after = client.get(f"/api/runs/{RUN_DONE}/files", params={"path": "src/a.py"})
+
+    assert before.status_code == 410
+    assert after.status_code == 410
+    assert after.json() == before.json()
