@@ -409,10 +409,15 @@ async def render_validation_error(request: Request, exc: RequestValidationError)
     if not is_bitbucket_route:
         try:
             return await request_validation_exception_handler(request, exc)
-        except UnicodeEncodeError:
-            # JSONResponse cannot encode a lone surrogate in a rejected value (#149).
+        except (UnicodeEncodeError, UnicodeDecodeError):
+            # JSONResponse cannot encode a lone surrogate in a rejected value (#149), and
+            # jsonable_encoder cannot decode invalid UTF-8 in a rejected raw body (#521).
             # Keep FastAPI's error fields on other providers, with escaped JSON text.
-            content = json.dumps({"detail": jsonable_encoder(exc.errors())}, ensure_ascii=True)
+            errors = jsonable_encoder(
+                exc.errors(),
+                custom_encoder={bytes: lambda body: body.decode("utf-8", "backslashreplace")},
+            )
+            content = json.dumps({"detail": errors}, ensure_ascii=True)
             return Response(content=content, status_code=422, media_type="application/json")
     detail = [
         {
