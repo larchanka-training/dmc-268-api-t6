@@ -494,6 +494,7 @@ paths:
         "400": { $ref: "#/components/responses/BadRequest" }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "404": { $ref: "#/components/responses/NotFound" }
+        "413": { $ref: "#/components/responses/PayloadTooLarge" }
         "422": { $ref: "#/components/responses/BitbucketValidationFailed" }
         "429": { $ref: "#/components/responses/BitbucketRateLimited" }
         "502": { $ref: "#/components/responses/BitbucketProviderFailure" }
@@ -547,6 +548,7 @@ paths:
         "401": { $ref: "#/components/responses/Unauthorized" }
         "404": { $ref: "#/components/responses/NotFound" }
         "409": { $ref: "#/components/responses/BitbucketConflict" }
+        "413": { $ref: "#/components/responses/PayloadTooLarge" }
         "422": { $ref: "#/components/responses/BitbucketValidationFailed" }
         "429": { $ref: "#/components/responses/BitbucketRateLimited" }
         "502": { $ref: "#/components/responses/BitbucketProviderFailure" }
@@ -581,6 +583,7 @@ paths:
         "401": { $ref: "#/components/responses/Unauthorized" }
         "404": { $ref: "#/components/responses/NotFound" }
         "409": { $ref: "#/components/responses/BitbucketConflict" }
+        "413": { $ref: "#/components/responses/PayloadTooLarge" }
         "422": { $ref: "#/components/responses/BitbucketValidationFailed" }
         "429": { $ref: "#/components/responses/BitbucketRateLimited" }
         "502": { $ref: "#/components/responses/BitbucketProviderFailure" }
@@ -695,6 +698,8 @@ paths:
           $ref: "#/components/responses/Unauthorized"
         "404":
           $ref: "#/components/responses/NotFound"
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
         "422":
           description: >-
             Request validation failure. Bitbucket Cloud rejects waitForCi auto/always
@@ -967,6 +972,8 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
         "422":
           $ref: "#/components/responses/ValidationFailed"
         "502":
@@ -1102,6 +1109,11 @@ components:
             $ref: "#/components/schemas/HTTPValidationError"
     BadRequest:
       description: A provider or connection input failed a semantic check.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorResponse" }
+    PayloadTooLarge:
+      description: The request body exceeds 64 KiB. It is refused while being read.
       content:
         application/json:
           schema: { $ref: "#/components/schemas/ErrorResponse" }

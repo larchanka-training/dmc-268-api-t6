@@ -55,6 +55,7 @@ from app.common.infrastructure.telemetry import (
     configure_tracing,
     shutdown_tracing,
 )
+from app.common.request_body_limit import RequestBodyLimitMiddleware
 from app.common.strict_json import StrictJsonRoute
 from app.modules.auth.api.router import auth_router
 from app.modules.auth.application.scope import AuthScope
@@ -233,6 +234,7 @@ REPLAY_OVERLAP_SECONDS = 30.0
 REPLAY_LIMIT = 500
 
 app = FastAPI(title="AI Code Reviewer browser API", lifespan=lifespan)
+app.add_middleware(RequestBodyLimitMiddleware)
 # Outermost: the span covers every other middleware and the handler.
 app.add_middleware(TracingMiddleware)
 app.state.run_update_hub = run_update_hub
@@ -294,6 +296,16 @@ def build_openapi(application: FastAPI) -> dict[str, Any]:
                 operation["responses"]["401"] = {
                     "description": "Missing or invalid Bearer access token"
                 }
+    for route in iter_route_contexts(application.routes):
+        if not isinstance(route.original_route, APIRoute) or route.body_field is None:
+            continue
+        path_item = paths.get(route.path_format, {})
+        for method in route.methods or ():
+            operation = path_item.get(method.lower())
+            if operation is not None:
+                operation.setdefault("responses", {}).setdefault(
+                    "413", {"description": "Request body exceeds the size limit"}
+                )
     return openapi_schema
 
 
