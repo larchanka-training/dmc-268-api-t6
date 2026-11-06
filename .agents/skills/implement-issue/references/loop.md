@@ -23,8 +23,9 @@ severity, the fix commits, the brief file. Medium, low and info are never fixed 
 are listed in the pull request body, for the reviewer and the tech lead to see.
 
 The gates (`AGENTS.md` → Commands) run before round 1 and after every fix. A red gate is not a
-finding: fix it first, then review. A review without a valid `Reviewed:` line (§2) is a **failed
-attempt**, not a round: start a new clean context. Three failed attempts in a row: stop (§5).
+finding: fix it first, then review (an api gate on a shared file: §4). A review without a valid
+`Reviewed:` line (§2) is a **failed attempt**, not a round: start a new clean context. Three failed
+attempts in a row: stop (§5).
 
 ## 2. The review brief
 
@@ -118,8 +119,9 @@ to get out of the loop.
 A part whose files are shared between the repos (`.agents/README.md` § Sync map) is the ui pull
 request first, then the copy in api, both with the same `Refs`.
 
-1. Do steps 1–7 of the loop in the ui clone. The ui pull request is opened as in step 7. The card
-   stays In Progress: step 6 waits until **both** pull requests are open and ready.
+1. Do steps 1–7 of the loop (SKILL.md step 5) in the ui clone. The ui pull request is opened as in
+   its step 7. The card stays In Progress: SKILL.md step 6 waits until **both** pull requests are
+   open and ready.
 2. When the ui change is final (the last round had no critical or high finding, gates green), go
    to the api clone. Ask for its path if you do not know it; its `git status` must be clean — never
    switch or reset a clone that holds other work.
@@ -132,38 +134,68 @@ request first, then the copy in api, both with the same `Refs`.
    lines under §1 (its own cap of 3 rounds), told in the brief which paths are byte-identical to
    the ui pull request. If the copy stops (§5), the ui pull request stays open and the card stays
    In Progress; the stop report says so.
-6. A finding in a shared file is fixed in ui first (a new commit on the ui branch — ask before
-   pushing: a push that changes the diff dismisses its approve), then `cp` again and `diff -r`
-   empty. Never fix a shared file only in api.
-7. Open the api pull request: `What` starts `SYNC copy of owner/repo#M (Part K of #N): …`, and the
-   `Refs` line is the same as in the ui pull request (SKILL.md: the pull-request convention). Now
-   step 6 moves the card to On Review.
+6. A finding in a shared file, or an api gate that fails on one (the two repos gate differently:
+   each `AGENTS.md` → Commands), is fixed in ui first (a new commit on the ui branch — ask before
+   pushing: a push that changes the diff dismisses its approve). Never fix a shared file only in
+   api.
+7. That commit changes reviewed code, so it is reviewed too: a new round of §1 on the ui branch,
+   inside its cap of 3. For this one case that overrides items 3 and 5 of SKILL.md step 5 (a red
+   gate is not reviewed, a new round only for critical or high). Only a fix that changes no
+   behaviour (formatting, a type annotation) skips the round, and the `Review` line of both pull
+   requests names it: `<sha> — <what it changes> — no new round: <why no behaviour changes>`. A fix
+   that changes behaviour after round 3 has no round left: stop (§5).
+8. Push the ui commit once the human agrees, and update the body of each pull request already open:
+   the round count and the `Review` line. Then `cp` again, `diff -r` empty, commit the new copy
+   (Conventional Commits, `Refs`), and go back to step 5 for it: the api gates, then the copy's own
+   review. That is its first round if it has not run yet, else a new round, because the last one
+   read an older copy; either way inside the copy's cap of 3. No round left: stop (§5).
+9. When the last copy round had no critical or high finding and the api gates are green, open the
+   api pull request (already open: push the new copy to it): `What` starts
+   `SYNC copy of owner/repo#M (Part K of #N): …`, and the `Refs` line is the same as in the ui pull
+   request (SKILL.md: the pull-request convention). Now SKILL.md step 6 moves the card to On Review.
 
 ## 5. The stop report
 
-When round 3 still finds critical or high, or a gate cannot be made green, or three review
-attempts in a row fail the `Reviewed:` check, or the human declines a push: do not open the
-pull request, do not push, do not touch the board. Report:
+When round 3 still finds critical or high, or a fix needs a round after round 3 (§4), or a gate
+cannot be made green, or three review attempts in a row fail the `Reviewed:` check, or the human
+declines a push, or a rebase stops on a conflict (§6), or the harness refuses a command (SKILL.md,
+Harness notes): from here on do not open a pull request, do not push, do not touch the board. What
+was done before the stop stays, and the report says so. Report:
 
 ```
-STOPPED — <ref> Part <K>, <reason: round 3 still has critical/high | gates red | no valid review | push declined>
-Branch: <name> — <n> commits ahead of origin/main, not pushed
-Pull requests: <none | SYNC part, the api copy stopped: <ui PR URL> stays open, the card stays In Progress>
+STOPPED — <ref> Part <K>, <reason: round 3 still has critical/high | no round left | gates red | no valid review | push declined | rebase conflict | git write refused | sandbox refused a command>
+Branch: <name> — <n> commits ahead of origin/main, <not pushed | pushed>; or none (refused before the branch was cut)
+Pull requests: <none | open: <URLs> | SYNC part, the api copy stopped: <ui PR URL> stays open, the card stays In Progress>
+Conflict: <only for a rebase conflict: the files, the commit of origin/main it stopped on, `git rebase --abort` done>
+Refused: <only for a refusal: the command, the harness's message verbatim>
 Open findings (round <R>):
   1. [critical] path:line — title — why it matters — suggested fix
 Rounds: 1: <c>/<h>/<m>/<l>/<i> · 2: … · 3: …   (critical/high/medium/low/info)
 Medium, low, info so far: <list>
 Gates: <command: green|red, …>
-Next: the human decides — fix by hand, change the plan, or discard the branch.
+Next: <by reason, below>
 ```
 
-The branch is left as it is. The preflight of the next run sees no pull request and offers the same
-part again; a taken branch name is never reused (SKILL.md step 3).
+Write `none` in a slot with nothing to report (no review or no gate has run yet).
+
+`Next` by reason:
+
+- **rebase conflict:** the human resolves it or says how. The run then goes on on this branch: the
+  gates, then one more round of §1 inside the cap of 3, before any push (§6). No round left: stop
+  again, `no round left`.
+- **git write refused:** re-run with git write access.
+- **sandbox refused a command:** it is not a git write, so that advice does not help. The human
+  allows the command, or runs it and gives the output.
+- **any other reason:** the human decides — fix by hand, change the plan, or discard the branch.
+
+The branch is left as it is. With no pull request open, the preflight of the next run offers the
+same part again; with one open, it stops on it. A taken branch name is never reused (SKILL.md
+step 3).
 
 ## 6. The pull request body
 
 Before it: `git fetch origin && git rebase origin/main`; if that changed anything, run the gates
-again. If the rebase stops on a conflict: `git rebase --abort`, stop and ask the user — never
+again. If the rebase stops on a conflict: `git rebase --abort`, stop and ask the user (§5) — never
 `git rebase --skip`, `-X`, or a push of a resolution nobody reviewed. The work is committed
 already (steps 2 and 5, and the SYNC copy of §4), so the `pull-request` skill commits only what is
 left and then pushes (`git push -u origin HEAD`).
@@ -174,8 +206,9 @@ checklist). In `What`, after the first line (`Part K of owner/repo#N: …`, SKIL
 - **Acceptance criteria of the part** (`acceptance_criteria`; a task without parts:
   `common_acceptance_criteria`), one bullet each, as in the issue. They are not ticked boxes: the
   tech lead accepts them.
-- **Review:** `<n>` round(s), Standards and Spec in clean contexts; no critical or high open.
-  Medium / low / info, not fixed here: the list, one line each (`path:line — title`).
+- **Review:** `<n>` round(s), Standards and Spec in clean contexts; no critical or high open; any
+  fix with no new round (§4). Medium / low / info, not fixed here: the list, one line each
+  (`path:line — title`).
 - Any `warnings` of the preflight, and the findings outside the part's boundary.
 
 `How to verify` has the gate commands that were run and their result. `Refs` has `Refs #N` or

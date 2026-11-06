@@ -229,10 +229,10 @@ MERGED or CLOSED warns). When the `Refs` name several issues, tie the part: `Par
 
 ## Harness notes
 
-- **A refused git write is a stop.** When the harness refuses a git write (a read-only `.git`, a
-  sandbox denial) in step 3 or later, or the sandbox blocks any other command from step 3 on: stop
-  and ask the user to re-run with git write access. Never clone the repo elsewhere or work outside
-  the user's checkout.
+- **A refused command is a stop.** A refused git write (a read-only `.git`, a sandbox denial) in
+  step 3 or later: stop and ask the user to re-run with git write access. Any other command the
+  sandbox blocks from step 3 on: stop and report it (`references/loop.md` §5); that advice does not
+  help there. Never clone the repo elsewhere or work outside the user's checkout.
 - `git push` and `gh pr create` need a human's confirmation in some harnesses: stop and ask, never
   bypass it (no `--no-verify`, no flag or setting that skips the prompt). Do not rely on
   `.agents/agents/*.md`: Codex does not load them. Tests and golden cases: `references/tests.md`.
