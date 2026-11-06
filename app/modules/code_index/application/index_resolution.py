@@ -37,12 +37,12 @@ from app.modules.reviews.application.ast_resolution import (
     ImportResolution,
     ModuleTarget,
     RevisionTree,
-    exported_symbols,
     go_layout,
     go_package_name,
     go_package_target,
     import_watch,
     module_target,
+    python_package_binds,
     python_submodule_files,
 )
 from app.modules.reviews.application.ast_symbols import (
@@ -265,7 +265,7 @@ class IndexImportResolver:
         if isinstance(init, FileUnavailable):
             # A symbol cannot be told from the submodule: neither is guessed.
             return []
-        if exported_symbols(init, name):
+        if python_package_binds(package_init, init, name, submodule[0], self._tree):
             return symbol if _uses(reads, alias) else []
         module = submodule[0]
         if self._path_exclusion(module) is not None:

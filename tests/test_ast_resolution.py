@@ -308,7 +308,7 @@ def test_python_relative_import_resolves_the_used_name_only() -> None:
     symbol = ref.resolved_symbols[0]
     assert (symbol.path, symbol.name, symbol.revision) == ("pkg/models.py", "User", _HEAD)
     assert (symbol.docstring_ranges[0].start_line, symbol.blob_sha) == (2, "b" * 40)
-    assert ref.resolution_profile_version == "resolver/v1"
+    assert ref.resolution_profile_version == "resolver/v2"
 
 
 def test_python_absolute_import_needs_a_single_candidate() -> None:
@@ -337,6 +337,49 @@ def test_python_stub_beside_runtime_is_not_a_rival_and_submodule_is_followed() -
 
     assert ref.resolution is ImportResolution.RESOLVED
     assert (ref.resolved_symbols[0].path, ref.names) == ("pkg/helpers.py", ("load",))
+
+
+@pytest.mark.parametrize(
+    "init",
+    [
+        "from .other import store\n",
+        "from .other import x as store\n",
+        "def store():\n    pass\n",
+        "store = object()\n",
+    ],
+    ids=["reimport", "alias", "definition", "assignment"],
+)
+def test_python_package_binding_does_not_resolve_a_shadowed_submodule(init: str) -> None:
+    sources = {
+        "pkg/app.py": "from pkg import store\n\ndef run():\n    return store.load()\n",
+        "pkg/__init__.py": init,
+        "pkg/store.py": "def load():\n    return 1\n",
+        "pkg/other.py": "def store():\n    pass\n\nx = 1\n",
+    }
+
+    ref = _one(sources, "pkg/app.py", "run")
+
+    assert all(symbol.path != "pkg/store.py" for symbol in ref.resolved_symbols)
+
+
+@pytest.mark.parametrize(
+    "init",
+    ["from . import store\n", "from . import store as store\n", "import pkg.store as store\n"],
+    ids=["relative", "relative-alias", "module-alias"],
+)
+def test_python_package_binding_follows_its_own_submodule(init: str) -> None:
+    sources = {
+        "pkg/app.py": "from pkg import store\n\ndef run():\n    return store.load()\n",
+        "pkg/__init__.py": init,
+        "pkg/store.py": "def load():\n    return 1\n",
+    }
+
+    ref = _one(sources, "pkg/app.py", "run")
+
+    assert ref.resolution is ImportResolution.RESOLVED
+    assert [(symbol.path, symbol.name) for symbol in ref.resolved_symbols] == [
+        ("pkg/store.py", "load")
+    ]
 
 
 def test_python_missing_name_shadowing_and_wildcard_are_not_guessed() -> None:
