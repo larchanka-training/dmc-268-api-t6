@@ -1749,8 +1749,37 @@ def test_executive_text_of_another_finding_does_not_repeat_an_unusable_name() ->
         "**Moved from имя файла скрыто** (`app/example.py:12`)"
     )
     assert result.review_body.endswith(
-        "- **Moved from имя файла скрыто** (`app/example.py:12`): Compare with ./имя файла скрыто."
+        "- **Moved from имя файла скрыто** (`app/example.py:12`): Compare with имя файла скрыто."
     )
+
+
+@pytest.mark.parametrize(
+    ("text", "shown"),
+    [
+        ("Fix utils.py now", "Fix имя файла скрыто now"),
+        ("See `utils.py`.", "See `имя файла скрыто`."),
+        ("See utils.py.", "See имя файла скрыто."),
+        ("See utils.py:3", "See имя файла скрыто:3"),
+        ("See ./utils.py", "See имя файла скрыто"),
+        ("See /utils.py", "See имя файла скрыто"),
+        ("Compare app/utils.py", "Compare app/utils.py"),
+        ("Compare app\\utils.py", "Compare app\\utils.py"),
+        ("Compare old-utils.py", "Compare old-utils.py"),
+        ("Compare old.utils.py", "Compare old.utils.py"),
+        ("Compare utils.py.bak", "Compare utils.py.bak"),
+        ("Compare utils.py-old", "Compare utils.py-old"),
+        ("Compare utils.py/tests", "Compare utils.py/tests"),
+    ],
+)
+def test_executive_text_loses_an_unusable_name_only_where_it_is_a_whole_path(
+    text: str, shown: str
+) -> None:
+    result = _process_snapshots(
+        [_text_change(), _unresolved_rename("utils.py")],
+        finding(severity="high", title="Note", body=text),
+    )
+
+    assert result.review_body.endswith(f"- **Note** (`app/example.py:12`): {shown}")
 
 
 def test_executive_store_time_repack_keeps_an_unusable_name_out_of_the_body() -> None:
