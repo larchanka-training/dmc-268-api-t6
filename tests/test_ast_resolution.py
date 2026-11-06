@@ -344,10 +344,11 @@ def test_python_stub_beside_runtime_is_not_a_rival_and_submodule_is_followed() -
     [
         "from .other import store\n",
         "from .other import x as store\n",
+        "from . import store\nfrom .other import store\n",
         "def store():\n    pass\n",
         "store = object()\n",
     ],
-    ids=["reimport", "alias", "definition", "assignment"],
+    ids=["reimport", "alias", "last-reimport", "definition", "assignment"],
 )
 def test_python_package_binding_does_not_resolve_a_shadowed_submodule(init: str) -> None:
     sources = {
@@ -364,14 +365,21 @@ def test_python_package_binding_does_not_resolve_a_shadowed_submodule(init: str)
 
 @pytest.mark.parametrize(
     "init",
-    ["from . import store\n", "from . import store as store\n", "import pkg.store as store\n"],
-    ids=["relative", "relative-alias", "module-alias"],
+    [
+        "from . import store\n",
+        "from . import store as store\n",
+        "import pkg.store as store\n",
+        "from .other import store\nfrom . import store\n",
+        "store = object()\nfrom . import store\n",
+    ],
+    ids=["relative", "relative-alias", "module-alias", "last-binding", "last-import"],
 )
 def test_python_package_binding_follows_its_own_submodule(init: str) -> None:
     sources = {
         "pkg/app.py": "from pkg import store\n\ndef run():\n    return store.load()\n",
         "pkg/__init__.py": init,
         "pkg/store.py": "def load():\n    return 1\n",
+        "pkg/other.py": "def store():\n    pass\n",
     }
 
     ref = _one(sources, "pkg/app.py", "run")
@@ -379,6 +387,22 @@ def test_python_package_binding_follows_its_own_submodule(init: str) -> None:
     assert ref.resolution is ImportResolution.RESOLVED
     assert [(symbol.path, symbol.name) for symbol in ref.resolved_symbols] == [
         ("pkg/store.py", "load")
+    ]
+
+
+@pytest.mark.parametrize("init", ["from app import routes\n", "import app.routes as routes\n"])
+def test_python_package_own_absolute_import_in_monorepo(init: str) -> None:
+    sources = {
+        "backend/app/view.py": "from . import routes\n\ndef run():\n    return routes.load()\n",
+        "backend/app/__init__.py": init,
+        "backend/app/routes.py": "def load():\n    return 1\n",
+    }
+
+    ref = _one(sources, "backend/app/view.py", "run")
+
+    assert ref.resolution is ImportResolution.RESOLVED
+    assert [(symbol.path, symbol.name) for symbol in ref.resolved_symbols] == [
+        ("backend/app/routes.py", "load")
     ]
 
 

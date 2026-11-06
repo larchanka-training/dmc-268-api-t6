@@ -509,20 +509,46 @@ def python_package_binds(
     package_init: str, facts: AstFacts, name: str, submodule: str, tree: RevisionTree
 ) -> bool:
     """Whether a package binds ``name`` to something other than its own submodule."""
-    if any(item.enclosing is None and item.name == name for item in facts.symbols):
-        return True
+    last_line = max(
+        (
+            item.declaration_range.start_line
+            for item in facts.symbols
+            if item.enclosing is None and item.name == name
+        ),
+        default=-1,
+    )
+    binds_other = last_line != -1
+    package_parts = tuple(posixpath.dirname(package_init).split("/"))
     for item in facts.imports:
-        target = module_target(package_init, item.module, facts.language, tree, None)
+        if item.line < last_line:
+            continue
         for binding in item.names:
             if binding.alias != name:
                 continue
+            target = module_target(package_init, item.module, facts.language, tree, None)
             own_module = target.resolution is ImportResolution.RESOLVED and (
                 (binding.kind is ImportKind.MODULE and submodule in target.files)
                 or binds_python_submodule(binding, target, submodule, tree)
             )
-            if not own_module:
-                return True
-    return False
+            if (
+                target.resolution is ImportResolution.EXTERNAL
+                and binding.kind in {ImportKind.NAMED, ImportKind.MODULE}
+                and not item.module.startswith(".")
+            ):
+                module_parts = tuple(item.module.split("."))
+                parent_parts = (
+                    module_parts if binding.kind is ImportKind.NAMED else module_parts[:-1]
+                )
+                own_name = binding.name if binding.kind is ImportKind.NAMED else module_parts[-1]
+                own_module = own_module or (
+                    bool(parent_parts)
+                    and package_parts[-len(parent_parts) :] == parent_parts
+                    and own_name == name
+                    and python_submodule_files(package_init, name, tree) == [submodule]
+                )
+            last_line = item.line
+            binds_other = not own_module
+    return binds_other
 
 
 def _uses_wildcard(facts: AstFacts, symbol: AstSymbol) -> bool:
@@ -763,7 +789,7 @@ class ImportResolver:
         outcome = await self._lookup(list(target.files), wanted)
         package_init = target.files[0].endswith("__init__.py")
         if (
-            outcome[0] is ImportResolution.MISSING
+            outcome[0] in {ImportResolution.MISSING, ImportResolution.RESOLVED}
             and language is AstLanguage.PYTHON
             and binding.kind is ImportKind.NAMED
             and binding.name is not None
