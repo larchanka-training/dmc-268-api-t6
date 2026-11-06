@@ -3,10 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-import json
-import os
 import selectors
-from collections.abc import Iterator
 from datetime import UTC, datetime
 from decimal import Decimal
 from uuid import UUID, uuid4
@@ -31,9 +28,10 @@ from tests.portal_postgres import (
     WS_A,
     WS_B,
     Env,
-    portal_schema,
+    clean_review_result,
 )
 
+pytest_plugins = ("tests.portal_postgres",)
 pytestmark = pytest.mark.integration
 
 _NOW = datetime(2026, 10, 28, 12, tzinfo=UTC)
@@ -43,18 +41,9 @@ _RUN_HIDDEN = UUID("00000000-0000-4000-8000-000000003203")
 _FINDING = UUID("00000000-0000-4000-8000-000000003204")
 
 
-@pytest.fixture
-def metrics_env() -> Iterator[Env]:
-    database_url = os.environ.get("TEST_DATABASE_URL")
-    if database_url is None:
-        pytest.skip("set TEST_DATABASE_URL to run PostgreSQL integration tests")
-    with portal_schema(database_url, None) as env:
-        yield env
-
-
-def test_metrics_summary_counts_visible_runs_and_todays_spend(metrics_env: Env) -> None:
+def test_metrics_summary_counts_visible_runs_and_todays_spend(portal_env: Env) -> None:
     async def exercise() -> None:
-        engine = metrics_env.engine()
+        engine = portal_env.engine()
         factory = async_sessionmaker(engine, expire_on_commit=False)
         scope = AuthScope(42, (WS_A,))
         try:
@@ -212,10 +201,10 @@ def test_metrics_summary_counts_visible_runs_and_todays_spend(metrics_env: Env) 
 
 
 def test_metrics_summary_matches_pull_verdicts_and_published_findings(
-    metrics_env: Env,
+    portal_env: Env,
 ) -> None:
     async def exercise() -> None:
-        engine = metrics_env.engine()
+        engine = portal_env.engine()
         factory = async_sessionmaker(engine, expire_on_commit=False)
         scope = AuthScope(42, (WS_A,))
         old = UUID("00000000-0000-4000-8000-000000003231")
@@ -281,7 +270,7 @@ def test_metrics_summary_matches_pull_verdicts_and_published_findings(
                     {
                         "id": uuid4(),
                         "run": clean,
-                        "body": _clean_result(HEAD),
+                        "body": clean_review_result(HEAD),
                         "at": datetime(2026, 10, 26, 12, tzinfo=UTC),
                     },
                 )
@@ -319,9 +308,9 @@ def test_metrics_summary_matches_pull_verdicts_and_published_findings(
     )
 
 
-def test_metrics_summary_filters_repo_and_pauses_on_the_worker_rule(metrics_env: Env) -> None:
+def test_metrics_summary_filters_repo_and_pauses_on_the_worker_rule(portal_env: Env) -> None:
     async def exercise() -> None:
-        engine = metrics_env.engine()
+        engine = portal_env.engine()
         factory = async_sessionmaker(engine, expire_on_commit=False)
         scope = AuthScope(42, (WS_A,))
         extra_repo = UUID("00000000-0000-4000-8000-000000003241")
@@ -513,33 +502,4 @@ async def _finding(
             "published": published,
             "drop_reason": drop_reason,
         },
-    )
-
-
-def _clean_result(head: str) -> str:
-    return json.dumps(
-        {
-            "severity_counts": {"critical": 0, "high": 0, "medium": 0, "low": 0, "info": 0},
-            "verdict": "clean",
-            "summary": {
-                "problem": "Подтверждённых замечаний нет.",
-                "done_well": "Проанализировано файлов с текстовыми изменениями: 1; "
-                "исключено файлов: 0.",
-                "effort": "none",
-            },
-            "coverage": {
-                "version": 1,
-                "head_sha": head,
-                "diff_digest": "a" * 64,
-                "snapshot_digest": "b" * 64,
-                "file_list_complete": True,
-                "total_files": 1,
-                "reviewed_files": 1,
-                "status": "complete",
-                "exclusion_counts": {},
-                "reason_counts": {},
-                "exclusions": [],
-                "reasons": [],
-            },
-        }
     )

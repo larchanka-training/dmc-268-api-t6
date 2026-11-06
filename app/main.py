@@ -95,6 +95,7 @@ from app.modules.repositories.application.rules_status import (
     RulesStatus,
     RulesStatusKind,
 )
+from app.modules.reviews.api.badge import badge_router
 from app.modules.reviews.api.dtos import (
     DiffFileDto,
     FileLinesDto,
@@ -1264,6 +1265,7 @@ async def list_repository_pulls(
 
 
 app.include_router(api_router)
+app.include_router(badge_router)
 app.include_router(bitbucket_connections_router)
 app.include_router(bitbucket_webhook_router)
 app.include_router(github_webhook_router)

@@ -1,0 +1,332 @@
+"""Webhook events that keep the saved visibility of a repository current (#454)."""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+from dataclasses import dataclass, field, replace
+from datetime import UTC, datetime
+from typing import Any
+
+import pytest
+
+from app.modules.integrations.webhooks.api.dispatch import GitHubWebhookDispatchAdapter
+from app.modules.integrations.webhooks.api.receipt import VerifiedGitHubDelivery
+from app.modules.integrations.webhooks.application.github_installation_dispatch import (
+    GitHubInstallationDeliveryDispatcher,
+    InstallationDeliveryDispatchResult,
+    InstallationDeliveryDispatchStatus,
+)
+from tests.github_dispatch_fakes import (
+    FakeInstallationResolver,
+    FakeOnboarding,
+    github_pull_request_payload,
+)
+
+_DISPATCH_LOGGER = "app.modules.integrations.webhooks.application.github_installation_dispatch"
+RECEIVED_AT = datetime(2026, 11, 1, 12, tzinfo=UTC)
+
+
+@dataclass
+class _Visibility:
+    known: bool = True
+    error: Exception | None = None
+    overwritten: list[tuple[int, int, bool, datetime]] = field(default_factory=list)
+    learned: list[tuple[int, int, bool, datetime]] = field(default_factory=list)
+    forgotten: list[tuple[int, datetime]] = field(default_factory=list)
+    renamed: list[tuple[int, int, str, str | None, datetime]] = field(default_factory=list)
+    transferred: list[tuple[int, datetime]] = field(default_factory=list)
+
+    async def rename(
+        self,
+        installation_external_id: int,
+        repository_external_id: int,
+        full_name: str,
+        web_url: str | None,
+        observed_at: datetime,
+    ) -> bool:
+        self.renamed.append(
+            (installation_external_id, repository_external_id, full_name, web_url, observed_at)
+        )
+        return self.known
+
+    async def forget_repository(self, repository_external_id: int, observed_at: datetime) -> bool:
+        self.transferred.append((repository_external_id, observed_at))
+        return self.known
+
+    async def forget(self, installation_external_id: int, observed_at: datetime) -> bool:
+        self.forgotten.append((installation_external_id, observed_at))
+        return self.known
+
+    async def overwrite(
+        self,
+        installation_external_id: int,
+        repository_external_id: int,
+        private: bool,
+        observed_at: datetime,
+    ) -> bool:
+        self.overwritten.append(
+            (installation_external_id, repository_external_id, private, observed_at)
+        )
+        return self.known
+
+    async def learn(
+        self,
+        installation_external_id: int,
+        repository_external_id: int,
+        private: bool,
+        observed_at: datetime,
+    ) -> None:
+        self.learned.append(
+            (installation_external_id, repository_external_id, private, observed_at)
+        )
+        if self.error is not None:
+            raise self.error
+
+
+def _dispatch(
+    visibility: _Visibility | None, event_name: str, payload: dict[str, Any]
+) -> InstallationDeliveryDispatchResult:
+    resolver, onboarding = FakeInstallationResolver(), FakeOnboarding()
+    adapter = GitHubWebhookDispatchAdapter(
+        GitHubInstallationDeliveryDispatcher(
+            resolver=resolver, onboarding=onboarding, repository_visibility=visibility
+        )
+    )
+    receipt = VerifiedGitHubDelivery("delivery-1", event_name, payload).to_receipt()
+    result = asyncio.run(adapter.execute(replace(receipt, received_at=RECEIVED_AT)))
+    assert (resolver.calls, onboarding.calls) == ([], [])
+    return result
+
+
+def _repository_event(action: str) -> dict[str, Any]:
+    return {
+        "action": action,
+        "installation": {"id": 17},
+        "repository": {"id": 101, "full_name": "octo/repo"},
+    }
+
+
+def _pull_request_event(action: str, **repository: object) -> dict[str, Any]:
+    return github_pull_request_payload(
+        action, repository={"id": 101, "full_name": "octo/repo", **repository}
+    )
+
+
+@pytest.mark.parametrize(("action", "private"), [("privatized", True), ("publicized", False)])
+def test_a_visibility_change_overwrites_the_saved_flag(action: str, private: bool) -> None:
+    visibility = _Visibility()
+
+    result = _dispatch(visibility, "repository", _repository_event(action))
+
+    assert visibility.overwritten == [(17, 101, private, RECEIVED_AT)]
+    assert visibility.learned == []
+    assert result == InstallationDeliveryDispatchResult(
+        InstallationDeliveryDispatchStatus.UPDATED_REPOSITORY_VISIBILITY
+    )
+
+
+def test_a_visibility_change_of_a_repository_not_connected_is_final() -> None:
+    result = _dispatch(_Visibility(known=False), "repository", _repository_event("privatized"))
+
+    assert result == InstallationDeliveryDispatchResult(
+        InstallationDeliveryDispatchStatus.IGNORED_IRRELEVANT_EVENT, "unknown_repository"
+    )
+
+
+@pytest.mark.parametrize("action", ["edited", "deleted", "archived", "created"])
+def test_other_repository_actions_change_nothing(action: str) -> None:
+    visibility = _Visibility()
+
+    result = _dispatch(visibility, "repository", _repository_event(action))
+
+    assert visibility.overwritten == []
+    assert result.status is InstallationDeliveryDispatchStatus.IGNORED_IRRELEVANT_EVENT
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        pytest.param({"installation": None}, id="no-installation"),
+        pytest.param({"repository": {"id": "101"}}, id="id-not-a-number"),
+    ],
+)
+def test_a_malformed_visibility_change_is_invalid(change: dict[str, Any]) -> None:
+    visibility = _Visibility()
+
+    result = _dispatch(visibility, "repository", _repository_event("privatized") | change)
+
+    assert visibility.overwritten == []
+    assert result.status is InstallationDeliveryDispatchStatus.IGNORED_INVALID_EVENT
+
+
+def test_a_suspended_installation_forgets_the_saved_flags() -> None:
+    visibility = _Visibility()
+
+    result = _dispatch(
+        visibility, "installation", {"action": "suspend", "installation": {"id": 17}}
+    )
+
+    assert visibility.forgotten == [(17, RECEIVED_AT)]
+    assert result == InstallationDeliveryDispatchResult(
+        InstallationDeliveryDispatchStatus.UPDATED_REPOSITORY_VISIBILITY
+    )
+
+
+def test_a_suspended_installation_with_no_repositories_is_final() -> None:
+    result = _dispatch(
+        _Visibility(known=False), "installation", {"action": "suspend", "installation": {"id": 17}}
+    )
+
+    assert result == InstallationDeliveryDispatchResult(
+        InstallationDeliveryDispatchStatus.IGNORED_IRRELEVANT_EVENT, "unknown_installation"
+    )
+
+
+def test_a_suspension_without_the_handler_is_deferred() -> None:
+    result = _dispatch(None, "installation", {"action": "suspend", "installation": {"id": 17}})
+
+    assert result.status is InstallationDeliveryDispatchStatus.DEFERRED_KNOWN_EVENT
+
+
+@pytest.mark.parametrize(
+    ("event_name", "payload"),
+    [
+        pytest.param("installation", {"action": "unsuspend"}, id="unsuspend"),
+        pytest.param("installation", {"action": "new_permissions_accepted"}, id="permissions"),
+        pytest.param("installation_repositories", {"action": "suspend"}, id="another-event"),
+    ],
+)
+def test_nothing_else_forgets_the_saved_flags(event_name: str, payload: dict[str, Any]) -> None:
+    visibility = _Visibility()
+
+    result = _dispatch(visibility, event_name, payload | {"installation": {"id": 17}})
+
+    assert visibility.forgotten == []
+    assert result.status is InstallationDeliveryDispatchStatus.IGNORED_IRRELEVANT_EVENT
+
+
+def test_a_malformed_suspension_is_invalid() -> None:
+    visibility = _Visibility()
+
+    result = _dispatch(
+        visibility, "installation", {"action": "suspend", "installation": {"id": "17"}}
+    )
+
+    assert visibility.forgotten == []
+    assert result.status is InstallationDeliveryDispatchStatus.IGNORED_INVALID_EVENT
+
+
+@pytest.mark.parametrize(
+    ("repository", "web_url"),
+    [
+        pytest.param({"html_url": "https://github.test/octo/new"}, "https://github.test/octo/new"),
+        pytest.param({}, None, id="no-url"),
+        pytest.param({"html_url": 7}, None, id="url-not-a-string"),
+    ],
+)
+def test_a_rename_writes_the_new_name(repository: dict[str, object], web_url: str | None) -> None:
+    visibility = _Visibility()
+    payload = _repository_event("renamed")
+    payload["repository"] = {"id": 101, "full_name": "octo/new", **repository}
+
+    result = _dispatch(visibility, "repository", payload)
+
+    assert visibility.renamed == [(17, 101, "octo/new", web_url, RECEIVED_AT)]
+    assert result == InstallationDeliveryDispatchResult(
+        InstallationDeliveryDispatchStatus.UPDATED_REPOSITORY_VISIBILITY
+    )
+
+
+def test_a_rename_to_a_name_github_cannot_have_is_invalid() -> None:
+    visibility = _Visibility()
+    payload = _repository_event("renamed")
+    payload["repository"] = {"id": 101, "full_name": "octo/.."}
+
+    result = _dispatch(visibility, "repository", payload)
+
+    assert visibility.renamed == []
+    assert result.status is InstallationDeliveryDispatchStatus.IGNORED_INVALID_EVENT
+
+
+def test_a_transfer_forgets_the_flag_by_the_repository_id() -> None:
+    visibility = _Visibility()
+
+    result = _dispatch(visibility, "repository", _repository_event("transferred"))
+
+    assert visibility.transferred == [(101, RECEIVED_AT)]
+    assert visibility.renamed == []
+    assert result == InstallationDeliveryDispatchResult(
+        InstallationDeliveryDispatchStatus.UPDATED_REPOSITORY_VISIBILITY
+    )
+
+
+@pytest.mark.parametrize("action", ["renamed", "transferred"])
+def test_a_rename_or_transfer_of_a_repository_not_connected_is_final(action: str) -> None:
+    result = _dispatch(_Visibility(known=False), "repository", _repository_event(action))
+
+    assert result == InstallationDeliveryDispatchResult(
+        InstallationDeliveryDispatchStatus.IGNORED_IRRELEVANT_EVENT, "unknown_repository"
+    )
+
+
+def test_a_visibility_change_without_the_handler_is_deferred() -> None:
+    result = _dispatch(None, "repository", _repository_event("privatized"))
+
+    assert result.status is InstallationDeliveryDispatchStatus.DEFERRED_KNOWN_EVENT
+
+
+@pytest.mark.parametrize("private", [True, False])
+@pytest.mark.parametrize(
+    "payload_change",
+    [
+        pytest.param({}, id="synchronize"),
+        pytest.param({"action": "review_requested"}, id="ignored-action"),
+        pytest.param(
+            {"action": "labeled", "label": {"name": "bug"}},
+            id="label-that-is-not-ai-review",
+        ),
+    ],
+)
+def test_a_pull_request_event_teaches_the_flag_of_its_payload(
+    private: bool, payload_change: dict[str, Any]
+) -> None:
+    visibility = _Visibility()
+
+    _dispatch(
+        visibility,
+        "pull_request",
+        _pull_request_event("synchronize", private=private) | payload_change,
+    )
+
+    assert visibility.learned == [(17, 101, private, RECEIVED_AT)]
+    assert visibility.overwritten == []
+
+
+@pytest.mark.parametrize(
+    "repository",
+    [
+        pytest.param({}, id="absent"),
+        pytest.param({"private": None}, id="null"),
+        pytest.param({"private": "false"}, id="not-a-boolean"),
+    ],
+)
+def test_a_pull_request_event_without_a_usable_flag_teaches_nothing_and_still_counts(
+    repository: dict[str, object],
+) -> None:
+    visibility = _Visibility()
+
+    result = _dispatch(visibility, "pull_request", _pull_request_event("opened", **repository))
+
+    assert visibility.learned == []
+    assert result.status is InstallationDeliveryDispatchStatus.DEFERRED_KNOWN_EVENT
+
+
+def test_a_failed_lesson_never_fails_the_delivery(caplog: pytest.LogCaptureFixture) -> None:
+    visibility = _Visibility(error=RuntimeError("database is away"))
+
+    with caplog.at_level(logging.ERROR, logger=_DISPATCH_LOGGER):
+        result = _dispatch(visibility, "pull_request", _pull_request_event("opened", private=False))
+
+    assert result.status is InstallationDeliveryDispatchStatus.DEFERRED_KNOWN_EVENT
+    assert "Failed to record the visibility of repository 101 of installation 17" in caplog.text

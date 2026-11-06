@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import os
-from collections.abc import Iterator
 
 import pytest
 from alembic.config import Config
@@ -22,17 +20,10 @@ from app.modules.reviews.infrastructure.run_processing_unit_of_work import (
     SqlAlchemyRunProcessingUnitOfWork,
 )
 from app.modules.reviews.infrastructure.run_repository import SqlAlchemyRunRepository
-from tests.portal_postgres import HEAD, PR_NEW, REPO_A, RUN_ATTEMPTED, Env, portal_schema
+from tests.portal_postgres import HEAD, PR_NEW, REPO_A, RUN_ATTEMPTED, Env
 from tests.vcs_facts import EMPTY_BLOB_SHA as _EMPTY_BLOB
 
-
-@pytest.fixture
-def empty_file_env() -> Iterator[Env]:
-    database_url = os.environ.get("TEST_DATABASE_URL")
-    if database_url is None:
-        pytest.skip("set TEST_DATABASE_URL to run PostgreSQL integration tests")
-    with portal_schema(database_url, None) as env:
-        yield env
+pytest_plugins = ("tests.portal_postgres",)
 
 
 async def store_empty_addition(env: Env) -> None:
@@ -65,11 +56,11 @@ async def store_empty_addition(env: Env) -> None:
 
 @pytest.mark.integration
 def test_empty_file_omission_persists_and_reloads_through_real_repository(
-    empty_file_env: Env,
+    portal_env: Env,
 ) -> None:
     async def scenario() -> None:
-        await store_empty_addition(empty_file_env)
-        engine = empty_file_env.engine()
+        await store_empty_addition(portal_env)
+        engine = portal_env.engine()
         factory = async_sessionmaker(engine, expire_on_commit=False)
         try:
             snapshots = await SqlAlchemyRunRepository(
@@ -93,13 +84,13 @@ def test_empty_file_omission_persists_and_reloads_through_real_repository(
 
 @pytest.mark.integration
 def test_downgrade_rewrites_empty_file_to_missing_patch_before_restoring_old_constraint(
-    empty_file_env: Env,
+    portal_env: Env,
 ) -> None:
-    asyncio.run(store_empty_addition(empty_file_env))
-    engine = create_engine(empty_file_env.database_url)
+    asyncio.run(store_empty_addition(portal_env))
+    engine = create_engine(portal_env.database_url)
     try:
         with engine.connect() as connection:
-            connection.execute(text(f'SET search_path TO "{empty_file_env.schema}"'))
+            connection.execute(text(f'SET search_path TO "{portal_env.schema}"'))
             connection.commit()
             config = Config("alembic.ini")
             config.attributes["connection"] = connection
@@ -186,7 +177,7 @@ def test_downgrade_rewrites_empty_file_to_missing_patch_before_restoring_old_con
             command.upgrade(config, "head")
             assert (
                 connection.scalar(text("SELECT version_num FROM alembic_version"))
-                == "20261027_0052"
+                == "20261106_0053"
             )
             assert tuple(connection.execute(throttle_schema).one()) == (2, 1, 1)
             assert connection.execute(throttle_row, {"repository": REPO_A}).one() == throttle_before

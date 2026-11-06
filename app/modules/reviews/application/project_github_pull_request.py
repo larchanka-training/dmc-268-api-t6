@@ -78,6 +78,8 @@ class PullRequestEvent:
     # From the payload; a merge into the default branch requests an index update (#143).
     merge_commit_sha: str | None = None
     repository_default_branch: str | None = None
+    # From the payload; None when it does not say. Only the public badge reads it (#454).
+    repository_private: bool | None = None
 
 
 @dataclass(frozen=True)

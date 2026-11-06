@@ -67,11 +67,18 @@ from app.modules.integrations.webhooks.infrastructure.github_repository_details 
 from app.modules.integrations.webhooks.infrastructure.github_repository_labels import (
     GitHubRepositoryLabelProvider,
 )
+from app.modules.integrations.webhooks.infrastructure.github_repository_visibility import (
+    GitHubRepositoryVisibilityReader,
+)
 from app.modules.integrations.webhooks.infrastructure.github_webhook_receipts import (
     SqlAlchemyGitHubWebhookReceiptUnitOfWork,
 )
 from app.modules.repositories.application.repository_settings import (
     RepositorySettingsUowFactory,
+)
+from app.modules.repositories.application.repository_visibility import (
+    RecordRepositoryVisibility,
+    RefreshRepositoryVisibility,
 )
 from app.modules.repositories.application.rules_status import (
     GetRulesStatus,
@@ -84,6 +91,9 @@ from app.modules.repositories.application.rules_status import (
 )
 from app.modules.repositories.infrastructure.repository_settings import (
     SqlAlchemyRepositorySettingsUnitOfWork,
+)
+from app.modules.repositories.infrastructure.repository_visibility import (
+    SqlAlchemyRepositoryVisibilityUnitOfWork,
 )
 from app.modules.repositories.infrastructure.rules_status import (
     SqlAlchemyRulesRefreshUnitOfWork,
@@ -106,6 +116,7 @@ from app.modules.reviews.application.project_github_pull_request import ProjectG
 from app.modules.reviews.application.publish_cancellation_signals import (
     PublishCancellationSignals,
 )
+from app.modules.reviews.application.repository_badge import GetRepositoryBadge
 from app.modules.reviews.application.rerun_run import RerunUnitOfWork
 from app.modules.reviews.application.run_events import (
     InMemoryRunUpdateHub,
@@ -133,6 +144,9 @@ from app.modules.reviews.infrastructure.github_pull_request_projection import (
 )
 from app.modules.reviews.infrastructure.metrics_summary import SqlAlchemyMetricsSummary
 from app.modules.reviews.infrastructure.pull_request_queries import SqlAlchemyPullRequestQueries
+from app.modules.reviews.infrastructure.repository_badge_queries import (
+    SqlAlchemyRepositoryBadgeQueries,
+)
 from app.modules.reviews.infrastructure.rerun_store import SqlAlchemyRerunUnitOfWork
 from app.modules.reviews.infrastructure.run_repository import (
     SqlAlchemyCancelRunUnitOfWork,
@@ -232,6 +246,18 @@ class ReviewsApiResources:
             ),
             action_of=action_of,
             classify_failure=classify_failure,
+        )
+
+    def repository_visibility_refresher(
+        self,
+        *,
+        client: httpx.AsyncClient,
+        token_provider: GitHubInstallationAccessTokenProvider,
+    ) -> RefreshRepositoryVisibility:
+        """Compose the ``webhook-worker`` re-read of the flag the public badge trusts (#454)."""
+        return RefreshRepositoryVisibility(
+            uow_factory=partial(SqlAlchemyRepositoryVisibilityUnitOfWork, self._session_factory),
+            reader=GitHubRepositoryVisibilityReader(client=client, token_provider=token_provider),
         )
 
     def rules_status_refresher(
@@ -407,6 +433,9 @@ class ReviewsApiResources:
             index_refresh=RequestIndexRefresh(
                 partial(SqlAlchemyIndexRefreshUnitOfWork, self._session_factory)
             ),
+            repository_visibility=RecordRepositoryVisibility(
+                partial(SqlAlchemyRepositoryVisibilityUnitOfWork, self._session_factory)
+            ),
         )
         return GitHubWebhookDispatchAdapter(dispatcher)
 
@@ -496,6 +525,11 @@ def get_pull_requests(
     scope: Annotated[AuthScope, Depends(get_auth_scope)],
 ) -> PullRequestRepository:
     return SqlAlchemyPullRequestQueries(_resources(request).session_factory, scope)
+
+
+def get_repository_badge(request: Request) -> GetRepositoryBadge:
+    """Anonymous on purpose (#454): the query itself answers for public repositories only."""
+    return GetRepositoryBadge(SqlAlchemyRepositoryBadgeQueries(_resources(request).session_factory))
 
 
 def get_run_publisher(request: Request) -> RunMessagePublisher | None:

@@ -28,6 +28,9 @@ from app.modules.integrations.webhooks.application.receive_github_delivery impor
 from app.modules.integrations.webhooks.application.revive_deferred_installation_deliveries import (
     ReviveDeferredInstallationDeliveries,
 )
+from app.modules.repositories.application.repository_visibility import (
+    RefreshRepositoryVisibility,
+)
 from app.modules.repositories.application.rules_status import (
     RULES_REFRESH_BATCH,
     RefreshRulesStatuses,
@@ -514,6 +517,47 @@ def test_rules_status_requests_are_answered_on_startup_and_on_each_hint() -> Non
             await asyncio.wait_for(wake.waiting.get(), timeout=1)
             wake.set()
             assert await asyncio.wait_for(rules.passes.get(), timeout=1) == 2
+        finally:
+            await cancel(task)
+
+    asyncio.run(scenario())
+
+
+class VisibilityRefresher:
+    def __init__(self, *, fail: bool = False) -> None:
+        self.fail = fail
+        self.passes: asyncio.Queue[int] = asyncio.Queue()
+        self.count = 0
+
+    async def execute(self) -> int:
+        self.count += 1
+        self.passes.put_nowait(self.count)
+        if self.fail:
+            raise RuntimeError("visibility store down")
+        return 0
+
+
+@pytest.mark.parametrize("fail", [False, True], ids=["ok", "a-failed-pass-keeps-the-loop"])
+def test_repository_visibility_is_refreshed_in_maintenance_not_on_each_hint(fail: bool) -> None:
+    async def scenario() -> None:
+        receiver, reviver, wake = Receiver(), Reviver(), Wake()
+        visibility = VisibilityRefresher(fail=fail)
+        task = asyncio.create_task(
+            sweep_forever(
+                cast(ReceiveGitHubDelivery, receiver),
+                cast(ReviveDeferredInstallationDeliveries, reviver),
+                wake,
+                visibility=cast(RefreshRepositoryVisibility, visibility),
+            )
+        )
+        try:
+            assert await asyncio.wait_for(visibility.passes.get(), timeout=1) == 1
+            await asyncio.wait_for(wake.waiting.get(), timeout=1)
+            scans = receiver.count
+            wake.set()
+            await asyncio.wait_for(wake.waiting.get(), timeout=1)
+            assert receiver.count > scans
+            assert visibility.count == 1
         finally:
             await cancel(task)
 

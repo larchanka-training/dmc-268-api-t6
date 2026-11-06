@@ -17,6 +17,7 @@ PUBLIC_AUTH = {
     ("post", "/api/auth/github/callback"),
     ("post", "/api/auth/refresh"),
     ("post", "/api/auth/logout"),
+    ("get", "/api/badges/github/{owner}/{repo}.svg"),
 }
 
 

@@ -5,6 +5,9 @@ contracts/openapi.yaml:
     # Logout is idempotent and succeeds without a cookie; it can fail only with 503 when auth
     # is not configured (app/modules/auth/api/router.py, app/bootstrap/auth_api.py).
     - '#/paths/~1api~1auth~1logout/post/responses'
+    # The badge has no 4xx on purpose: any name gets the same 200 "no data", so that the answer
+    # cannot tell whether a repository exists (app/modules/reviews/api/badge.py, #454).
+    - '#/paths/~1api~1badges~1github~1{owner}~1{repo}.svg/get/responses'
   no-unused-components:
     # Referenced from x-events.run.updated of GET /api/stream, which Redocly does not follow;
     # tests/test_openapi_contract.py validates SSE events against it. Do not delete.

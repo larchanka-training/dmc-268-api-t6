@@ -182,10 +182,11 @@ def test_repository_ownership_tuple_is_a_referenceable_project_key(
             )
 
 
-def _legacy_rows(connection: Connection) -> dict[str, list[tuple[object, ...]]]:
+def _legacy_rows(connection: Connection) -> dict[str, list[dict[str, object]]]:
     return {
         table: [
-            tuple(row) for row in connection.execute(text(f"SELECT * FROM {table} ORDER BY id"))
+            dict(row._mapping)
+            for row in connection.execute(text(f"SELECT * FROM {table} ORDER BY id"))
         ]
         for table in ("workspaces", "provider_installations", "repositories")
     }
@@ -256,7 +257,12 @@ def test_ownership_key_migration_preserves_legacy_rows_keys_and_metadata(
         connection.commit()
 
     command.upgrade(config, "head")
-    assert _legacy_rows(connection) == legacy
+    at_head = _legacy_rows(connection)
+    # A later revision adds these columns (#454); the legacy values stay as they were.
+    assert [row.pop("private") for row in at_head["repositories"]] == [None]
+    assert [row.pop("private_observed_at") for row in at_head["repositories"]] == [None]
+    assert [row.pop("full_name_observed_at") for row in at_head["repositories"]] == [None]
+    assert at_head == legacy
     context = MigrationContext.configure(
         connection, opts={"compare_type": True, "compare_server_default": True}
     )
