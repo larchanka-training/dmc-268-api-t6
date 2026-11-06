@@ -34,6 +34,7 @@ from app.modules.workspaces.application.link_github_installations import (
 from app.modules.workspaces.infrastructure.github_installation_links import (
     SqlAlchemyGitHubInstallationLinkUnitOfWork,
 )
+from tests.github_dispatch_fakes import github_pull_request_payload
 from tests.portal_postgres import HEAD, INSTALL_A, REPO_A, REPO_B, Env
 
 pytest_plugins = ("tests.portal_postgres",)
@@ -634,22 +635,9 @@ def test_the_runtime_dispatcher_records_visibility_from_both_events(portal_env: 
         try:
             learned, learned_status = await deliver(
                 "pull_request",
-                {
-                    "action": "review_requested",
-                    "installation": installation,
-                    "repository": {**repository, "private": False},
-                    "pull_request": {
-                        "id": 901,
-                        "number": 1,
-                        "title": "PR",
-                        "html_url": "https://github.test/octo/a/pull/1",
-                        "user": {"login": "octocat"},
-                        "head": {"ref": "feature", "sha": HEAD},
-                        "base": {"ref": "main", "sha": "b" * 40},
-                        "state": "open",
-                        "updated_at": "2026-11-01T00:00:00Z",
-                    },
-                },
+                github_pull_request_payload(
+                    "review_requested", repository={**repository, "private": False}, head_sha=HEAD
+                ),
             )
             closed, closed_status = await deliver(
                 "repository",
@@ -686,17 +674,17 @@ class _FreshOAuth:
 
 
 @pytest.mark.parametrize(
-    "stored_stamp",
+    ("stored_stamp", "moved_on"),
     [
-        pytest.param("NULL", id="never-observed"),
-        pytest.param("now() - interval '1 hour'", id="older"),
-        pytest.param("now() + interval '1 day'", id="a-newer-stamp-does-not-move-back"),
+        pytest.param("NULL", True, id="never-observed"),
+        pytest.param("now() - interval '1 hour'", True, id="an-older-stamp-advances"),
+        pytest.param("now() + interval '1 day'", False, id="a-newer-stamp-does-not-move-back"),
     ],
 )
 def test_a_rebind_forgets_what_was_saved_before_the_app_was_gone(
-    portal_env: Env, stored_stamp: str
+    portal_env: Env, stored_stamp: str, moved_on: bool
 ) -> None:
-    async def exercise() -> tuple[bool, bool | None, bool]:
+    async def exercise() -> tuple[bool, bool | None, datetime | None, datetime]:
         engine = portal_env.engine()
         factory = async_sessionmaker(engine, expire_on_commit=False)
         try:
@@ -743,10 +731,15 @@ def test_a_rebind_forgets_what_was_saved_before_the_app_was_gone(
                         {"id": REPO_A},
                     )
                 ).one()
-            stamp = row.private_observed_at
-            kept = stamp is not None and (before is None or stamp >= before)
-            return row.installation_available, row.private, kept
+            return row.installation_available, row.private, before, row.private_observed_at
         finally:
             await engine.dispose()
 
-    assert asyncio.run(exercise()) == (True, None, True)
+    available, flag, before, stamp = asyncio.run(exercise())
+
+    assert (available, flag) == (True, None)
+    assert stamp is not None
+    if moved_on:
+        assert before is None or stamp > before
+    else:
+        assert stamp == before
