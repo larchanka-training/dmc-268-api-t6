@@ -25,9 +25,8 @@ from app.modules.integrations.webhooks.api.pull_request_dtos import (
 )
 from app.modules.integrations.webhooks.api.push_event_dtos import parse_push_event
 from app.modules.integrations.webhooks.api.repository_event_dtos import (
-    REPOSITORY_VISIBILITY_ACTIONS,
+    REPOSITORY_EVENT_PARSERS,
     parse_installation_suspended_event,
-    parse_repository_visibility_event,
 )
 from app.modules.integrations.webhooks.application.github_installation_dispatch import (
     GitHubDispatchEvent,
@@ -35,6 +34,8 @@ from app.modules.integrations.webhooks.application.github_installation_dispatch 
     InstallationDeliveryDispatchStatus,
     InstallationSuspendedEvent,
     PushEvent,
+    RepositoryRenamedEvent,
+    RepositoryTransferredEvent,
     RepositoryVisibilityEvent,
     UnsupportedGitHubEvent,
     _with_action,
@@ -104,6 +105,8 @@ class GitHubWebhookDispatchAdapter:
             | InstallationRepositoriesEvent
             | PushEvent
             | RepositoryVisibilityEvent
+            | RepositoryRenamedEvent
+            | RepositoryTransferredEvent
             | InstallationSuspendedEvent
             | UnsupportedGitHubEvent
         )
@@ -138,9 +141,9 @@ class GitHubWebhookDispatchAdapter:
                     InstallationDeliveryDispatchStatus.IGNORED_INVALID_EVENT,
                     _invalid_payload(error),
                 )
-        elif event_name == "repository" and action in REPOSITORY_VISIBILITY_ACTIONS:
+        elif event_name == "repository" and (parse := REPOSITORY_EVENT_PARSERS.get(action or "")):
             try:
-                value = parse_repository_visibility_event(payload)
+                value = parse(payload)
             except (ValueError, ValidationError) as error:
                 return InstallationDeliveryDispatchResult(
                     InstallationDeliveryDispatchStatus.IGNORED_INVALID_EVENT,

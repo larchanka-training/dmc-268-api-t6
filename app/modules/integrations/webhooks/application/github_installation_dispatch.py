@@ -116,6 +116,27 @@ class RepositoryVisibilityEvent:
 
 
 @dataclass(frozen=True)
+class RepositoryRenamedEvent:
+    """``repository.renamed``: the badge finds a repository by its current name (#454)."""
+
+    installation_external_id: int
+    repository_external_id: int
+    full_name: str
+    web_url: str | None
+
+
+@dataclass(frozen=True)
+class RepositoryTransferredEvent:
+    """``repository.transferred``, sent only to the new owner's installation (#454).
+
+    A row belongs to the installation that connected it, so nothing moves here: the flag is
+    forgotten by the repository id, wherever a row holds it.
+    """
+
+    repository_external_id: int
+
+
+@dataclass(frozen=True)
 class InstallationSuspendedEvent:
     """``installation.suspend``: no event of its repositories arrives until it ends (#454)."""
 
@@ -134,6 +155,8 @@ class GitHubDispatchEvent:
         | InstallationRepositoriesEvent
         | PushEvent
         | RepositoryVisibilityEvent
+        | RepositoryRenamedEvent
+        | RepositoryTransferredEvent
         | InstallationSuspendedEvent
         | UnsupportedGitHubEvent
     )
@@ -211,6 +234,20 @@ class RepositoryVisibilityHandler(Protocol):
         """False when the repository is not connected."""
         ...
 
+    async def rename(
+        self,
+        installation_external_id: int,
+        repository_external_id: int,
+        full_name: str,
+        web_url: str | None,
+    ) -> bool:
+        """False when the repository is not connected."""
+        ...
+
+    async def forget_repository(self, repository_external_id: int, observed_at: datetime) -> bool:
+        """False when no installation holds the repository."""
+        ...
+
     async def learn(
         self,
         installation_external_id: int,
@@ -257,10 +294,14 @@ class GitHubInstallationDeliveryDispatcher:
                 detail=_with_action(event.action, None),
             )
         observed_at = delivery.received_at or datetime.now(UTC)
-        if isinstance(event, RepositoryVisibilityEvent):
+        if isinstance(
+            event,
+            RepositoryVisibilityEvent
+            | RepositoryRenamedEvent
+            | RepositoryTransferredEvent
+            | InstallationSuspendedEvent,
+        ):
             return await self._visibility_result(event, observed_at)
-        if isinstance(event, InstallationSuspendedEvent):
-            return await self._suspension_result(event, observed_at)
         if isinstance(event, PullRequestLabelEvent):
             await self._learn_visibility(event.pull_request, observed_at)
             action = event.pull_request.action
@@ -361,41 +402,43 @@ class GitHubInstallationDeliveryDispatcher:
         )
 
     async def _visibility_result(
-        self, event: RepositoryVisibilityEvent, observed_at: datetime
+        self,
+        event: RepositoryVisibilityEvent
+        | RepositoryRenamedEvent
+        | RepositoryTransferredEvent
+        | InstallationSuspendedEvent,
+        observed_at: datetime,
     ) -> InstallationDeliveryDispatchResult:
-        if self._repository_visibility is None:
+        visibility = self._repository_visibility
+        if visibility is None:
             return InstallationDeliveryDispatchResult(
                 status=InstallationDeliveryDispatchStatus.DEFERRED_KNOWN_EVENT
             )
-        if not await self._repository_visibility.overwrite(
-            event.installation_external_id,
-            event.repository_external_id,
-            event.private,
-            observed_at,
-        ):
-            # Not deferred: connecting the repository reads its visibility anyway.
+        unknown = "unknown_repository"
+        if isinstance(event, RepositoryVisibilityEvent):
+            known = await visibility.overwrite(
+                event.installation_external_id,
+                event.repository_external_id,
+                event.private,
+                observed_at,
+            )
+        elif isinstance(event, RepositoryRenamedEvent):
+            known = await visibility.rename(
+                event.installation_external_id,
+                event.repository_external_id,
+                event.full_name,
+                event.web_url,
+            )
+        elif isinstance(event, RepositoryTransferredEvent):
+            known = await visibility.forget_repository(event.repository_external_id, observed_at)
+        else:
+            unknown = "unknown_installation"
+            known = await visibility.forget(event.installation_external_id, observed_at)
+        if not known:
+            # Not deferred: connecting a repository reads its visibility and name anyway.
             return InstallationDeliveryDispatchResult(
                 status=InstallationDeliveryDispatchStatus.IGNORED_IRRELEVANT_EVENT,
-                detail="unknown_repository",
-            )
-        return InstallationDeliveryDispatchResult(
-            status=InstallationDeliveryDispatchStatus.UPDATED_REPOSITORY_VISIBILITY
-        )
-
-    async def _suspension_result(
-        self, event: InstallationSuspendedEvent, observed_at: datetime
-    ) -> InstallationDeliveryDispatchResult:
-        if self._repository_visibility is None:
-            return InstallationDeliveryDispatchResult(
-                status=InstallationDeliveryDispatchStatus.DEFERRED_KNOWN_EVENT
-            )
-        if not await self._repository_visibility.forget(
-            event.installation_external_id, observed_at
-        ):
-            # Not deferred: a repository connected later reads its visibility anyway.
-            return InstallationDeliveryDispatchResult(
-                status=InstallationDeliveryDispatchStatus.IGNORED_IRRELEVANT_EVENT,
-                detail="unknown_installation",
+                detail=unknown,
             )
         return InstallationDeliveryDispatchResult(
             status=InstallationDeliveryDispatchStatus.UPDATED_REPOSITORY_VISIBILITY
