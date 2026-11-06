@@ -31,6 +31,39 @@ def test_keyring_rejects_duplicate_ids_and_noncanonical_base64() -> None:
             )
 
 
+@pytest.mark.parametrize(
+    "env",
+    [
+        {},
+        {"BITBUCKET_CREDENTIAL_KEYS": "", "BITBUCKET_ACTIVE_KEY_ID": ""},
+        {"BITBUCKET_CREDENTIAL_KEYS": ""},
+        {"BITBUCKET_ACTIVE_KEY_ID": ""},
+    ],
+    ids=["both-absent", "both-empty", "keys-empty-id-absent", "id-empty-keys-absent"],
+)
+def test_keyring_with_no_values_is_not_configured(env: dict[str, str]) -> None:
+    assert optional_bitbucket_cipher_from_environment(env) is None
+
+
+KEYRING = json.dumps({"first": base64.b64encode(b"k" * 32).decode("ascii")})
+
+
+@pytest.mark.parametrize(
+    "env",
+    [
+        {"BITBUCKET_CREDENTIAL_KEYS": KEYRING},
+        {"BITBUCKET_CREDENTIAL_KEYS": KEYRING, "BITBUCKET_ACTIVE_KEY_ID": ""},
+        {"BITBUCKET_ACTIVE_KEY_ID": "first"},
+        {"BITBUCKET_CREDENTIAL_KEYS": "", "BITBUCKET_ACTIVE_KEY_ID": "first"},
+        {"BITBUCKET_CREDENTIAL_KEYS": " ", "BITBUCKET_ACTIVE_KEY_ID": " "},
+    ],
+    ids=["id-absent", "id-empty", "keys-absent", "keys-empty", "both-blank"],
+)
+def test_keyring_with_one_value_or_blanks_is_invalid(env: dict[str, str]) -> None:
+    with pytest.raises(ValueError, match="invalid_bitbucket_credential_keys"):
+        optional_bitbucket_cipher_from_environment(env)
+
+
 def test_token_and_webhook_secret_are_bound_to_installation_and_repository() -> None:
     cipher = BitbucketCredentialCipher(active_key_id="first", keys={"first": b"a" * 32})
     context = CredentialContext(uuid4(), uuid4())

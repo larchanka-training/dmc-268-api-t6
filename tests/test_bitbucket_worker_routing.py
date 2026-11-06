@@ -42,6 +42,9 @@ BASE_ENV = {
 
 def test_worker_bitbucket_cipher_opt_in_hides_keys_and_rejects_partial() -> None:
     assert WorkerSettings.from_environment(BASE_ENV).bitbucket_cipher is None
+    # docker-compose.yml passes an unset key as "".
+    empty = {"BITBUCKET_CREDENTIAL_KEYS": "", "BITBUCKET_ACTIVE_KEY_ID": ""}
+    assert WorkerSettings.from_environment({**BASE_ENV, **empty}).bitbucket_cipher is None
     with pytest.raises(RuntimeError, match="Bitbucket review worker configuration is invalid"):
         WorkerSettings.from_environment({**BASE_ENV, "BITBUCKET_ACTIVE_KEY_ID": "test"})
     settings = WorkerSettings.from_environment(

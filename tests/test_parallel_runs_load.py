@@ -767,15 +767,6 @@ def test_override_pins_every_llm_and_github_setting_of_the_worker() -> None:
     assert "      LLM_BASE_URL: http://stub:9999/v1\n" in override
 
 
-@pytest.mark.parametrize("service", ["worker", "webhook-worker"])
-def test_override_unsets_the_bitbucket_keyring_of_each_worker(service: str) -> None:
-    override = _service_env(REPO_ROOT / "deploy/load/compose.parallel-runs.yml", service)
-
-    # A key with no value: "" from the base file stops the worker at start.
-    for key in ("BITBUCKET_CREDENTIAL_KEYS", "BITBUCKET_ACTIVE_KEY_ID"):
-        assert re.search(rf"(?m)^      {key}:$", override), key
-
-
 def test_override_keeps_the_stub_on_loopback_and_points_every_github_client_at_it() -> None:
     text = (REPO_ROOT / "deploy/load/compose.parallel-runs.yml").read_text()
 
