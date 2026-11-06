@@ -84,8 +84,8 @@ def test_context_restore_hashes_durable_snapshots_once_and_rejects_mismatch(
 ) -> None:
     from dataclasses import replace
 
+    from tests.run_coverage_fakes import code_snapshot, coverage
     from tests.test_clean_without_text_coverage_record import diff_for
-    from tests.test_run_coverage import code_snapshot, coverage
 
     snapshots = [code_snapshot()]
     original = coverage(snapshots)
@@ -117,8 +117,8 @@ def test_corrupt_context_warns_with_run_id_while_absent_context_is_quiet(
     import logging
     from uuid import UUID
 
+    from tests.run_coverage_fakes import code_snapshot
     from tests.test_clean_without_text_coverage_record import diff_for
-    from tests.test_run_coverage import code_snapshot
 
     snapshots = [code_snapshot()]
     with caplog.at_level(logging.WARNING):

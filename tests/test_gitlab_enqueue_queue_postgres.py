@@ -36,7 +36,7 @@ from app.modules.reviews.infrastructure.amqp import LazyAmqpPublisher, validate_
 from app.modules.reviews.infrastructure.gitlab_merge_request_projection import (
     SqlAlchemyGitLabMergeRequestProjectionLock,
 )
-from tests import test_gitlab_projection_postgres as projection
+from tests import gitlab_projection_support as projection
 
 queue_database = projection.authority_database
 pytestmark = pytest.mark.integration

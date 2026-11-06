@@ -93,7 +93,8 @@ def test_a_technical_only_v4_run_is_published_without_any_model_call(
         "policy.load",
         "vcs.fetch_diff",
         "context.build",
-        "review.postprocess",
+        "review.finalize",
+        "review.publish_start",
     ]
     assert observed.manifests == []
     assert observed.bodies == []
@@ -106,7 +107,7 @@ def test_a_technical_only_v4_run_is_published_without_any_model_call(
     assert build["coverage"]["reason_counts"] == {"unsupported_path": 1}
     # The attempt's one context.build is also its context_payloads row (schema 2).
     assert observed.payloads == [(2, build)]
-    [(_, postprocess)] = observed.actions["review.postprocess"]
+    [(_, postprocess)] = observed.actions["review.finalize"]
     # Restored from the context.build row, not the classification_unavailable fallback.
     assert postprocess["coverage"] == build["coverage"]
     assert postprocess["verdict"] is None

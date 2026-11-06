@@ -28,26 +28,11 @@ from app.modules.reviews.application.try_enqueue_webhook_run import (
 from app.modules.reviews.infrastructure.models import CodeChange, Run
 from app.modules.reviews.infrastructure.rerun_store import SqlAlchemyRerunUnitOfWork
 from app.modules.reviews.infrastructure.run_repository import SqlAlchemyRunRepository
-from tests import test_gitlab_projection_postgres as projection_fixtures
-from tests.test_gitlab_projection_postgres import NOW, Rig, rig, run_json, seed_run
+from tests.gitlab_projection_support import NOW, Rig, rig, run_json, seed_run
+from tests.gitlab_publication_support import seed_change as seed_change
 
-rerun_database = projection_fixtures.authority_database
+pytest_plugins = ("tests.gitlab_projection_support",)
 pytestmark = pytest.mark.integration
-
-
-async def seed_change(fixture: Rig, repository: UUID) -> UUID:
-    change = uuid4()
-    async with fixture.sessions.begin() as session:
-        await session.execute(
-            text(
-                "INSERT INTO code_changes (id,repository_id,external_id,external_number,title,"
-                "source_branch,target_branch,base_sha,head_sha,state,web_url) VALUES "
-                "(:id,:repo,901,12,'Rerun MR','feature','main',:base,:head,'open',"
-                "'https://gitlab.com/team/project/-/merge_requests/12')"
-            ),
-            {"id": change, "repo": repository, "base": "b" * 40, "head": "d" * 40},
-        )
-    return change
 
 
 @dataclass
@@ -105,10 +90,10 @@ class OriginalReadBarrier:
 
 
 def test_public_rerun_refuses_replacement_committed_after_original_run_read(
-    rerun_database: tuple[str, str, UUID],
+    authority_database: tuple[str, str, UUID],
 ) -> None:
     async def scenario() -> None:
-        async with rig(rerun_database) as fixture, rig(rerun_database) as independent:
+        async with rig(authority_database) as fixture, rig(authority_database) as independent:
             original = await fixture.seed()
             change = await seed_change(fixture, original.repository_id)
             old_run = await seed_run(fixture, original, change, state="succeeded")
@@ -116,7 +101,7 @@ def test_public_rerun_refuses_replacement_committed_after_original_run_read(
             publisher = Publisher()
             task = asyncio.create_task(rerun(barrier.sessions(fixture), publisher).execute(old_run))
             with psycopg.connect(
-                rerun_database[0].replace("postgresql+psycopg://", "postgresql://"),
+                authority_database[0].replace("postgresql+psycopg://", "postgresql://"),
                 autocommit=True,
             ) as observer:
                 observer.execute("LISTEN run_updated")
@@ -255,12 +240,12 @@ async def seed_github(
     ("provider", "rotate"), [("gitlab", False), ("gitlab", True), ("github", False)]
 )
 def test_public_rerun_uses_current_head_original_origin_and_committed_pool_one_publish(
-    rerun_database: tuple[str, str, UUID],
+    authority_database: tuple[str, str, UUID],
     provider: str,
     rotate: bool,
 ) -> None:
     async def scenario() -> None:
-        async with rig(rerun_database) as fixture:
+        async with rig(authority_database) as fixture:
             target = await fixture.seed()
             change = await seed_change(fixture, target.repository_id)
             old = await seed_run(fixture, target, change, state="succeeded")
@@ -293,7 +278,7 @@ def test_public_rerun_uses_current_head_original_origin_and_committed_pool_one_p
                     installation_id=target.origin_provider_installation_id,
                     token="replacement-authority-token",
                 )
-            publisher = CommittedPublisher(fixture, rerun_database[0], origin, provider)
+            publisher = CommittedPublisher(fixture, authority_database[0], origin, provider)
             use_case = RerunRun(
                 lambda: SqlAlchemyRerunUnitOfWork(fixture.sessions, allow_unscoped=True),
                 SqlAlchemyRunRepository(fixture.sessions, allow_unscoped=True),
@@ -301,7 +286,7 @@ def test_public_rerun_uses_current_head_original_origin_and_committed_pool_one_p
                 now=lambda: NOW,
             )
             with psycopg.connect(
-                rerun_database[0].replace("postgresql+psycopg://", "postgresql://"),
+                authority_database[0].replace("postgresql+psycopg://", "postgresql://"),
                 autocommit=True,
             ) as observer:
                 observer.execute("LISTEN run_updated")
@@ -342,13 +327,13 @@ def test_public_rerun_uses_current_head_original_origin_and_committed_pool_one_p
 @pytest.mark.parametrize("replacement_provider", ["gitlab", "github"])
 @pytest.mark.parametrize("other_workspace", [False, True])
 def test_historical_rerun_cannot_adopt_current_provider_or_tenant_with_colliding_ids(
-    rerun_database: tuple[str, str, UUID],
+    authority_database: tuple[str, str, UUID],
     original_provider: str,
     replacement_provider: str,
     other_workspace: bool,
 ) -> None:
     async def scenario() -> None:
-        async with rig(rerun_database) as fixture:
+        async with rig(authority_database) as fixture:
             original = await fixture.seed()
             change = await seed_change(fixture, original.repository_id)
             old = await seed_run(fixture, original, change, state="succeeded")
@@ -405,7 +390,7 @@ def test_historical_rerun_cannot_adopt_current_provider_or_tenant_with_colliding
                 )
             publisher = Publisher()
             with psycopg.connect(
-                rerun_database[0].replace("postgresql+psycopg://", "postgresql://"),
+                authority_database[0].replace("postgresql+psycopg://", "postgresql://"),
                 autocommit=True,
             ) as observer:
                 observer.execute("LISTEN run_updated")
@@ -421,11 +406,11 @@ def test_historical_rerun_cannot_adopt_current_provider_or_tenant_with_colliding
 
 @pytest.mark.parametrize("condition", ["null", "deleted", "revoked", "unbound"])
 def test_original_run_without_active_authority_does_not_rerun(
-    rerun_database: tuple[str, str, UUID],
+    authority_database: tuple[str, str, UUID],
     condition: str,
 ) -> None:
     async def scenario() -> None:
-        async with rig(rerun_database) as fixture:
+        async with rig(authority_database) as fixture:
             target = await fixture.seed()
             change = await seed_change(fixture, target.repository_id)
             old = await seed_run(fixture, target, change, state="succeeded")
@@ -465,12 +450,12 @@ def test_original_run_without_active_authority_does_not_rerun(
     ],
 )
 def test_rerun_authority_precedes_configuration_but_valid_origin_retains_422(
-    rerun_database: tuple[str, str, UUID],
+    authority_database: tuple[str, str, UUID],
     condition: str,
     expected: type[Exception],
 ) -> None:
     async def scenario() -> None:
-        async with rig(rerun_database) as fixture:
+        async with rig(authority_database) as fixture:
             target = await fixture.seed()
             change = await seed_change(fixture, target.repository_id)
             old = await seed_run(fixture, target, change, state="succeeded")
@@ -517,10 +502,10 @@ def test_rerun_authority_precedes_configuration_but_valid_origin_retains_422(
 
 
 def test_scoped_portal_cannot_read_or_rerun_gitlab_even_with_matching_github_grants(
-    rerun_database: tuple[str, str, UUID],
+    authority_database: tuple[str, str, UUID],
 ) -> None:
     async def scenario() -> None:
-        async with rig(rerun_database) as fixture:
+        async with rig(authority_database) as fixture:
             target = await fixture.seed()
             change = await seed_change(fixture, target.repository_id)
             old = await seed_run(fixture, target, change, state="succeeded")
@@ -561,10 +546,10 @@ def test_scoped_portal_cannot_read_or_rerun_gitlab_even_with_matching_github_gra
 
 
 def test_rerun_commit_before_management_retirement_serializes_without_deadlock(
-    rerun_database: tuple[str, str, UUID],
+    authority_database: tuple[str, str, UUID],
 ) -> None:
     async def scenario() -> None:
-        async with rig(rerun_database) as fixture, rig(rerun_database) as independent:
+        async with rig(authority_database) as fixture, rig(authority_database) as independent:
             target = await fixture.seed()
             change = await seed_change(fixture, target.repository_id)
             old = await seed_run(fixture, target, change, state="succeeded")
@@ -604,7 +589,7 @@ def test_rerun_commit_before_management_retirement_serializes_without_deadlock(
                     )
                 )
                 async with await psycopg.AsyncConnection.connect(
-                    rerun_database[0].replace("postgresql+psycopg://", "postgresql://"),
+                    authority_database[0].replace("postgresql+psycopg://", "postgresql://"),
                     autocommit=True,
                 ) as observer:
 
@@ -666,10 +651,10 @@ def test_rerun_commit_before_management_retirement_serializes_without_deadlock(
     ],
 )
 def test_reinstalled_github_rerun_requires_same_account_workspace_and_original_repository(
-    rerun_database: tuple[str, str, UUID], lineage: str
+    authority_database: tuple[str, str, UUID], lineage: str
 ) -> None:
     async def scenario() -> None:
-        async with rig(rerun_database) as fixture, rig(rerun_database) as independent:
+        async with rig(authority_database) as fixture, rig(authority_database) as independent:
             template = await fixture.seed()
             original, repository = await seed_github(
                 fixture, template.repository_id, fixture.workspace, 71

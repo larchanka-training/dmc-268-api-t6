@@ -37,8 +37,8 @@ from app.modules.reviews.infrastructure.gitlab_eligibility_candidates import (
 from app.modules.reviews.infrastructure.webhook_runs import SqlAlchemyWebhookRunUnitOfWork
 
 # Import the existing migrated synthetic fixture by module: pytest owns its lifetime.
-from tests import test_gitlab_projection_postgres as projection_fixtures
-from tests.test_gitlab_projection_postgres import (
+from tests import gitlab_projection_support as projection_fixtures
+from tests.gitlab_projection_support import (
     NOW,
     Rig,
     rig,

@@ -53,6 +53,7 @@ from app.modules.reviews.application.review_path import (
 from app.modules.reviews.application.vcs_diff import PullRequestLocator, VcsPullRequest
 from app.modules.reviews.infrastructure.blob_cache import InMemoryBlobCache
 from app.modules.reviews.infrastructure.llm import answers
+from tests.execute_review_fakes import _AcceptingCheckpointPublisher
 from tests.policy_snapshot_fakes import make_complete_execution_profile
 from tests.test_prepare_policy_snapshot import Source, Store, Uow, _pins
 from tests.test_review_context_stage import (
@@ -720,7 +721,7 @@ _META = PullRequestMeta("PR", None, "octo", "feature", "main", (), 1, 1, 0, Fals
 
 
 @dataclass
-class Pipeline:
+class Pipeline(_AcceptingCheckpointPublisher):
     binding: ReviewBinding | None
     snapshot: PolicySnapshot | None = None
     calls: list[str] = field(default_factory=list)

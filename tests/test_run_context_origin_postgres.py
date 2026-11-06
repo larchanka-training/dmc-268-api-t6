@@ -48,6 +48,7 @@ from app.modules.reviews.infrastructure.run_lifecycle_store import (
     SqlAlchemyRunLifecycleUnitOfWork,
     SqlAlchemyRunTraceUnitOfWork,
 )
+from tests.execute_review_fakes import _AcceptingCheckpointPublisher
 from tests.portal_postgres import INSTALL_A, PROMPT, REPO_A, RUN_ATTEMPTED, Env, portal_schema
 from tests.test_app_reinstall_postgres import FreshGitHub, apply
 from tests.test_llm_gateway import PRIMARY, completion, valid
@@ -95,7 +96,7 @@ class _Meta:
         )
 
 
-class _Output:
+class _Output(_AcceptingCheckpointPublisher):
     async def execute(self, run_id: UUID, raw: object) -> bool:
         return True
 
