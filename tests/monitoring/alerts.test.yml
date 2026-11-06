@@ -1685,12 +1685,14 @@ tests:
         exp_samples: []
 
   # Time to review of the fast engine (target: p95 up to 4 minutes, SD §13). A p95 of 300 s over
-  # the last hour holds for 10 minutes: the alert fires at the 10th minute, not before, and
-  # resolves when the p95 is back under the target. The number of runs is not a condition.
+  # the last hour with 10 runs holds for 10 minutes: the alert fires at the 10th minute, not before,
+  # and resolves when the p95 is back under the target.
   - interval: 1m
     input_series:
       - series: 'dmc_review_time_1h_p95_seconds{environment="prod"}'
         values: "300x40 200x30"
+      - series: 'dmc_review_time_1h_runs{environment="prod"}'
+        values: "10x70"
     alert_rule_test:
       - eval_time: 9m
         alertname: SlaReviewTimeAtRisk
@@ -1703,29 +1705,47 @@ tests:
               environment: prod
             exp_annotations:
               summary: "Time to review: p95 5m 0s over the last hour, the target is 4 minutes"
-              description: "The 95th percentile of the time from the creation of a fast run to its publication, over the runs that succeeded in the last hour, is above 4 minutes (docs/MONITORING.md §12)."
+              description: "The 95th percentile of the time from the creation of a fast run to its publication, over the runs that succeeded in the last hour (at least 5 of them), is above 4 minutes (docs/MONITORING.md §12)."
       - eval_time: 45m
         alertname: SlaReviewTimeAtRisk
         exp_alerts: []
 
-  # Exactly 4 minutes meets the target; the same values in staging are not prod: neither raises
-  # the alert.
+  # Exactly 4 minutes meets the target; 3 runs in the hour are too few for a p95; the same values in
+  # staging are not prod: none of them raises the alert.
   - interval: 1m
     input_series:
       - series: 'dmc_review_time_1h_p95_seconds{environment="prod"}'
         values: "240x40"
+      - series: 'dmc_review_time_1h_runs{environment="prod"}'
+        values: "10x40"
       - series: 'dmc_review_time_1h_p95_seconds{environment="staging"}'
         values: "300x40"
+      - series: 'dmc_review_time_1h_runs{environment="staging"}'
+        values: "10x40"
     alert_rule_test:
       - eval_time: 30m
         alertname: SlaReviewTimeAtRisk
         exp_alerts: []
 
-  # One second above the 4 minutes fires.
+  - interval: 1m
+    input_series:
+      - series: 'dmc_review_time_1h_p95_seconds{environment="prod"}'
+        values: "300x40"
+      - series: 'dmc_review_time_1h_runs{environment="prod"}'
+        values: "3x40"
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: SlaReviewTimeAtRisk
+        exp_alerts: []
+
+  # One second above the 4 minutes fires; below 5 runs in the hour (4) stays silent and 5 is
+  # enough.
   - interval: 1m
     input_series:
       - series: 'dmc_review_time_1h_p95_seconds{environment="prod"}'
         values: "241x40"
+      - series: 'dmc_review_time_1h_runs{environment="prod"}'
+        values: "10x40"
     alert_rule_test:
       - eval_time: 12m
         alertname: SlaReviewTimeAtRisk
@@ -1735,21 +1755,26 @@ tests:
               environment: prod
             exp_annotations:
               summary: "Time to review: p95 4m 1s over the last hour, the target is 4 minutes"
-              description: "The 95th percentile of the time from the creation of a fast run to its publication, over the runs that succeeded in the last hour, is above 4 minutes (docs/MONITORING.md §12)."
+              description: "The 95th percentile of the time from the creation of a fast run to its publication, over the runs that succeeded in the last hour (at least 5 of them), is above 4 minutes (docs/MONITORING.md §12)."
 
-  # A single run in the hour is enough: its p95 of 300 s fires once `for: 10m` has passed (the
-  # series dmc_review_time_1h_runs plays no part in the rule; it tells an operator how many runs
-  # the p95 rests on).
   - interval: 1m
     input_series:
       - series: 'dmc_review_time_1h_p95_seconds{environment="prod"}'
         values: "300x40"
       - series: 'dmc_review_time_1h_runs{environment="prod"}'
-        values: "1x40"
+        values: "4x40"
     alert_rule_test:
-      - eval_time: 9m
+      - eval_time: 30m
         alertname: SlaReviewTimeAtRisk
         exp_alerts: []
+
+  - interval: 1m
+    input_series:
+      - series: 'dmc_review_time_1h_p95_seconds{environment="prod"}'
+        values: "300x40"
+      - series: 'dmc_review_time_1h_runs{environment="prod"}'
+        values: "5x40"
+    alert_rule_test:
       - eval_time: 12m
         alertname: SlaReviewTimeAtRisk
         exp_alerts:
@@ -1758,16 +1783,4 @@ tests:
               environment: prod
             exp_annotations:
               summary: "Time to review: p95 5m 0s over the last hour, the target is 4 minutes"
-              description: "The 95th percentile of the time from the creation of a fast run to its publication, over the runs that succeeded in the last hour, is above 4 minutes (docs/MONITORING.md §12)."
-
-  # No run in the hour: the query returns p95 0 (coalesce), the alert stays silent.
-  - interval: 1m
-    input_series:
-      - series: 'dmc_review_time_1h_p95_seconds{environment="prod"}'
-        values: "0x40"
-      - series: 'dmc_review_time_1h_runs{environment="prod"}'
-        values: "0x40"
-    alert_rule_test:
-      - eval_time: 30m
-        alertname: SlaReviewTimeAtRisk
-        exp_alerts: []
+              description: "The 95th percentile of the time from the creation of a fast run to its publication, over the runs that succeeded in the last hour (at least 5 of them), is above 4 minutes (docs/MONITORING.md §12)."

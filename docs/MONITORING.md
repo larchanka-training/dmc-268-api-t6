@@ -172,7 +172,7 @@ Grafana не входит в `prod-metrics`, Prometheus — в `prod-sql`, и н
 | `ReviewRunsBudgetPaused` | хотя бы один прогон `skipped` с `budget_paused` за 15 мин; событие | warning |
 | `SlaAvailabilityAtRisk` | простой имени prod за месяц больше половины и меньше целого допуска 0,5 % месяца, без ожидания; «SLA под угрозой», §12 | warning |
 | `SlaAvailabilityBreached` | простой имени prod за месяц достиг допуска 0,5 %, без ожидания; «SLA нарушен», §12 | critical |
-| `SlaReviewTimeAtRisk` | p95 времени до ревью `fast` за час больше 4 мин, 10 мин, при любом числе прогонов; «SLA под угрозой», §12 | warning |
+| `SlaReviewTimeAtRisk` | p95 времени до ревью `fast` за час больше 4 мин при ≥ 5 прогонах, 10 мин; «SLA под угрозой», §12 | warning |
 | `HostMemoryLow` / `HostDiskFull` / `HostCpuHigh` | < 10 % памяти 10 мин / < 15 % диска 10 мин / > 90 % CPU 15 мин | critical / critical / warning |
 | `ContainerOomKilled` | OOM-kill в контейнере compose за 10 мин | warning |
 | `PostgresBackupStale` | последнему проверенному дампу больше 26 ч | critical |
@@ -471,7 +471,7 @@ docker compose -p dmc-268-api-staging logs worker --no-log-prefix | jq -c 'selec
 
 - `created_at` — создание Run, а не приход вебхука: время до создания Run не входит;
 - `failed`, `skipped` и `cancelled` — не ревью и не считаются; прогон, который не заканчивается, виден в `ReviewRunsStuckInQueue`, а не здесь;
-- минимума прогонов нет: цель в 4 минуты действует при любой нагрузке. На малом числе прогонов p95 близок к максимуму, поэтому один медленный прогон может зажечь предупреждение, пока не выйдет из часового окна; `dmc_review_time_1h_runs` показывает, на скольких прогонах стоит p95;
+- p95 по часу ненадёжен на малом числе прогонов, поэтому алерт молчит при меньше чем 5 прогонах за час;
 - месячного p95 нет: это не бюджет ошибок, у цели нет «нарушена».
 
 ### Алерты
@@ -480,7 +480,7 @@ docker compose -p dmc-268-api-staging logs worker --no-log-prefix | jq -c 'selec
 |---|---|---|---|
 | `SlaAvailabilityAtRisk` | `sla:downtime_budget_spent:ratio` > 0,5 и < 1 | warning | «SLA под угрозой»: потрачено больше половины допуска |
 | `SlaAvailabilityBreached` | `sla:downtime_budget_spent:ratio` ≥ 1 | critical | «SLA нарушен»: допуск исчерпан |
-| `SlaReviewTimeAtRisk` | p95 > 240 с за час при любом числе прогонов, 10 мин | warning | «SLA под угрозой» по времени до ревью |
+| `SlaReviewTimeAtRisk` | p95 > 240 с и ≥ 5 прогонов за час, 10 мин | warning | «SLA под угрозой» по времени до ревью |
 
 Предупреждение о доступности гаснет на 100 %, когда начинает гореть критический алерт (как `LlmMonthlyBudgetWarning`): вместе они не горят. `SlaAvailabilityBreached` остаётся до конца месяца, Alertmanager повторяет его раз в 4 ч. Алерты несут метки `environment: prod` и `host`; в сообщении — имя и доля допуска, без содержимого ревью. Публичная страница статуса эти алерты не показывает: она о текущем состоянии, а исчерпанный бюджет держал бы строку красной до конца месяца.
 
