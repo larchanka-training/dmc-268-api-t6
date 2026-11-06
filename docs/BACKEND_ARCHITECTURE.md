@@ -376,7 +376,8 @@ docker compose up -d worker        # сервис worker в docker-compose.yml
 значения по умолчанию — в коде (`.env.example`), недопустимое значение не даёт процессу
 стартовать. Их видит worker, запущенный через `uv run --env-file .env`; у `worker` в
 `docker-compose.yml` и `deploy/compose/staging.yml` фиксированный список `environment:`,
-и значение туда нужно добавить.
+и значение туда нужно добавить. Так же устроен `RUN_DATA_RETENTION_DAYS` (#457, SD §10): срок
+хранения текста диффов и контекстов завершённых прогонов, 90 дней по умолчанию, от 1 до 3650.
 
 При старте worker объявляет топологию SD §7.1 целиком — ревью
 ([amqp.py](../app/modules/reviews/infrastructure/amqp.py)) и, на своём confirm-канале,
@@ -388,7 +389,7 @@ docker compose up -d worker        # сервис worker в docker-compose.yml
 | consumer `review.run.fast` (prefetch 1) | RunGuard, claim по lease, попытка под watchdog, retry и DLQ | [HandleReviewRun](../app/modules/reviews/application/handle_review_run.py) |
 | consumer `review.publish` (prefetch 1) | T14–T16: `github.publish_review`, `gitlab.publish_review` или `bitbucket.publish_review` (#333); check-run только для GitHub, Bitbucket commit status обслуживается отдельно | [PublishRunReview](../app/modules/reviews/application/publish_run_review.py) |
 | consumer `index.repo` (prefetch 1, #142) | задание графа RAG: claim lease, HEAD default branch, архив, публикация; retry и DLQ по исходу (SD §7.4). Свой `SubprocessSourceParser` и HTTP-клиент; для GitHub нужен GitHub App, для Bitbucket Cloud — keyring и snapshot source. Consumer запускается, если настроен хотя бы один из этих провайдеров | [BuildRepositoryIndex](../app/modules/code_index/application/build_index.py) |
-| лидер-цикл (`pg_advisory_lock`, 30 с) | sweep «2 мин без CI» и повторная отправка outbox (`message_published_at IS NULL`, сигналы отмены T6); после них leader-задачи индекса графа (#143) — сходимость, рассылка пробуждений, сборка мусора, TTL-очистка и сверка с HEAD — с общим бюджетом около 10 с на тик; сверка и рассылка включены при наличии настроенного GitHub App или Bitbucket keyring и consumer, остальные задачи работают всегда | `SweepNoCi`, `TryEnqueueWebhookRun.replay_pending_publications`, [`CodeIndexLeaderTasks`](../app/modules/code_index/application/leader_tasks.py) |
+| лидер-цикл (`pg_advisory_lock`, 30 с) | sweep «2 мин без CI» и повторная отправка outbox (`message_published_at IS NULL`, сигналы отмены T6); после них leader-задачи индекса графа (#143) — сходимость, рассылка пробуждений, сборка мусора, TTL-очистка и сверка с HEAD — с общим бюджетом около 10 с на тик; сверка и рассылка включены при наличии настроенного GitHub App или Bitbucket keyring и consumer, остальные задачи работают всегда; последней раз в час идёт очистка устаревших данных прогонов (#457, SD §10), около 10 с на тик | `SweepNoCi`, `TryEnqueueWebhookRun.replay_pending_publications`, [`CodeIndexLeaderTasks`](../app/modules/code_index/application/leader_tasks.py), [`PurgeExpiredRunData`](../app/modules/reviews/application/run_data_retention.py) |
 
 Consumer `review.run.deep` не запускается, очередь только объявляется. Реконсилер
 (T12, T13, T17, T18) работает лидер-циклом процесса API (`app/main.py`, раз в 5 минут,

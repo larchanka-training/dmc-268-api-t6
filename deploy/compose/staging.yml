@@ -70,7 +70,8 @@ services:
     # holds a PostgreSQL advisory lock, runs and index jobs are claimed by lease.
     deploy:
       replicas: ${WORKER_REPLICAS:-1}
-    # Also the index.repo consumer (#142). CODE_INDEX_* keep their code defaults here:
+    # Also the index.repo consumer (#142). CODE_INDEX_* and RUN_DATA_RETENTION_DAYS (#457)
+    # keep their code defaults here:
     # worker.env is rebuilt from the allowlist in deploy/scripts/env-file.sh, so a value
     # changes only under environment: below (or by adding it to that allowlist).
     # No mem_limit. An estimate, not a bound: a job holds its archive (<= 100 MiB) and a
