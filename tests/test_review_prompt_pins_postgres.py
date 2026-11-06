@@ -203,7 +203,11 @@ def test_v2_run_and_persisted_snapshot_retain_their_prompt_after_v3_activation(
 @pytest.mark.integration
 @pytest.mark.parametrize(
     ("pinned", "live", "expected"),
-    [("warning", "critical", "warning"), (None, "critical", "critical"), (None, "all", "all")],
+    [
+        ("warning", "critical", "warning"),
+        (None, "critical", "critical"),
+        (None, "warning", "warning"),
+    ],
 )
 def test_prompt_threshold_uses_run_pin_or_historical_live_fallback(
     prompt_env: Env, pinned: str | None, live: str, expected: str
