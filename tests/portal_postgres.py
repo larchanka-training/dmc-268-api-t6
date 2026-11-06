@@ -10,12 +10,14 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import os
 from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import UUID, uuid4
 
+import pytest
 from alembic.config import Config
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, text
@@ -208,6 +210,16 @@ def portal_schema(database_url: str, rabbitmq_url: str | None) -> Iterator[Env]:
             asyncio.run(_reset_topology(rabbitmq_url))
 
 
+@pytest.fixture
+def portal_env() -> Iterator[Env]:
+    """The seeded schema without a broker; skips without ``TEST_DATABASE_URL``."""
+    database_url = os.environ.get("TEST_DATABASE_URL")
+    if database_url is None:
+        pytest.skip("set TEST_DATABASE_URL to run PostgreSQL integration tests")
+    with portal_schema(database_url, None) as env:
+        yield env
+
+
 @contextlib.contextmanager
 def api(env: Env, scope: AuthScope) -> Iterator[tuple[TestClient, async_sessionmaker[Any]]]:
     engine = env.engine()
@@ -249,3 +261,33 @@ def scalar(factory: async_sessionmaker[Any], sql: str, **values: Any) -> Any:
             return (await session.execute(text(sql), values)).one()
 
     return asyncio.run(read())
+
+
+def clean_review_result(head: str) -> str:
+    """The body of a ``review.postprocess`` action of a clean, completely covered run."""
+    return json.dumps(
+        {
+            "severity_counts": {"critical": 0, "high": 0, "medium": 0, "low": 0, "info": 0},
+            "verdict": "clean",
+            "summary": {
+                "problem": "Подтверждённых замечаний нет.",
+                "done_well": "Проанализировано файлов с текстовыми изменениями: 1; "
+                "исключено файлов: 0.",
+                "effort": "none",
+            },
+            "coverage": {
+                "version": 1,
+                "head_sha": head,
+                "diff_digest": "a" * 64,
+                "snapshot_digest": "b" * 64,
+                "file_list_complete": True,
+                "total_files": 1,
+                "reviewed_files": 1,
+                "status": "complete",
+                "exclusion_counts": {},
+                "reason_counts": {},
+                "exclusions": [],
+                "reasons": [],
+            },
+        }
+    )
