@@ -7,6 +7,7 @@ from uuid import UUID
 
 import pytest
 
+from app.common.domain.run_enums import Engine, RunStatus
 from app.main import app, get_cancel_run, get_run_repository
 from app.modules.reviews.application.cancel_run import (
     CancelRequestResult,
@@ -28,7 +29,7 @@ class FakeCancelRunRepository:
         if item is None:
             return CancelRequestResult(found=False, changed=False)
         if item.status == "queued":
-            self._items[run_id] = replace(item, status="cancelled")
+            self._items[run_id] = replace(item, status=RunStatus.CANCELLED)
             return CancelRequestResult(found=True, changed=True)
         elif item.status in {"running", "publishing"}:
             if not item.cancel_requested:
@@ -78,13 +79,13 @@ class FakeCancelRunUow:
         self.rolled_back = True
 
 
-def make_item(value: int, status: str) -> RunListItem:
+def make_item(value: int, status: RunStatus) -> RunListItem:
     created_at = datetime(2026, 9, 25, tzinfo=UTC)
     return RunListItem(
         provider="github",
         id=UUID(f"00000000-0000-0000-0000-{value:012d}"),
         status=status,
-        engine="fast",
+        engine=Engine.FAST,
         attempt=0,
         cancel_requested=False,
         started_at=created_at,
@@ -103,7 +104,7 @@ def make_item(value: int, status: str) -> RunListItem:
 
 
 def test_cancel_run_returns_the_updated_run() -> None:
-    item = make_item(1, "running")
+    item = make_item(1, RunStatus.RUNNING)
     repository = StubCancelRunRepository(item, exists=True)
     uow = FakeCancelRunUow(repository)
 
@@ -119,7 +120,7 @@ def test_cancel_run_rolls_back_and_does_not_commit_on_failure() -> None:
         async def request_cancel(self, run_id: UUID) -> CancelRequestResult:
             raise RuntimeError("db error")
 
-    item = make_item(1, "running")
+    item = make_item(1, RunStatus.RUNNING)
     repository = FailingCancelRunRepository(item, exists=True)
     uow = FakeCancelRunUow(repository)
 
@@ -143,7 +144,7 @@ def test_cancel_run_returns_none_for_a_missing_run() -> None:
 
 
 def test_cancel_queued_run_transitions_to_cancelled() -> None:
-    item = make_item(1, "queued")
+    item = make_item(1, RunStatus.QUEUED)
     repository = FakeCancelRunRepository([item])
     app.dependency_overrides[get_cancel_run] = lambda: CancelRun(
         uow_factory=lambda: FakeCancelRunUow(repository)
@@ -158,10 +159,10 @@ def test_cancel_queued_run_transitions_to_cancelled() -> None:
     assert response.json()["cancelRequested"] is False
 
 
-@pytest.mark.parametrize("status", ["running", "publishing"])
-def test_cancel_active_run_is_idempotent_and_does_not_change_another_run(status: str) -> None:
+@pytest.mark.parametrize("status", [RunStatus.RUNNING, RunStatus.PUBLISHING])
+def test_cancel_active_run_is_idempotent_and_does_not_change_another_run(status: RunStatus) -> None:
     item = make_item(1, status)
-    other = make_item(2, "running")
+    other = make_item(2, RunStatus.RUNNING)
     repository = FakeCancelRunRepository([item, other])
     app.dependency_overrides[get_cancel_run] = lambda: CancelRun(
         uow_factory=lambda: FakeCancelRunUow(repository)
@@ -185,8 +186,11 @@ def test_cancel_active_run_is_idempotent_and_does_not_change_another_run(status:
     assert other_response.json()["cancelRequested"] is False
 
 
-@pytest.mark.parametrize("status", ["succeeded", "failed", "cancelled", "skipped"])
-def test_cancel_terminal_run_is_an_idempotent_noop(status: str) -> None:
+@pytest.mark.parametrize(
+    "status",
+    [RunStatus.SUCCEEDED, RunStatus.FAILED, RunStatus.CANCELLED, RunStatus.SKIPPED],
+)
+def test_cancel_terminal_run_is_an_idempotent_noop(status: RunStatus) -> None:
     item = make_item(1, status)
     repository = FakeCancelRunRepository([item])
     app.dependency_overrides[get_cancel_run] = lambda: CancelRun(

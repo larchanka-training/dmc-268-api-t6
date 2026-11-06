@@ -48,7 +48,7 @@ from app.bootstrap.reviews_api import (
 from app.bootstrap.run_step_listener import run_step_listener
 from app.bootstrap.run_update_listener import run_update_listener
 from app.common.application.github_repository_name import REPOSITORY_FULL_NAME_MAX_LENGTH
-from app.common.domain.run_enums import Engine, RunStatus
+from app.common.domain.run_enums import RunStatus
 from app.common.infrastructure.telemetry import (
     TracingMiddleware,
     configure_logging,
@@ -575,8 +575,8 @@ def to_run_session_dto(item: RunListItem) -> RunSessionDto:
     return RunSessionDto(
         id=item.id,
         provider=item.provider,
-        status=RunStatus(item.status),
-        engine=Engine(item.engine),
+        status=item.status,
+        engine=item.engine,
         attempt=item.attempt,
         cancel_requested=item.cancel_requested,
         trigger=item.trigger,

@@ -13,6 +13,7 @@ from uuid import UUID
 import pytest
 from fastapi.testclient import TestClient
 
+from app.common.domain.run_enums import Engine, RunStatus
 from app.main import app
 from app.modules.reviews.application.cancel_run import CancelRequestResult, CancelRun
 from app.modules.reviews.application.get_run import FindingView, GetRunDetail, RunReview
@@ -44,12 +45,12 @@ OTHER = UUID("22222222-2222-4222-8222-222222222222")
 NOW = datetime(2026, 9, 30, tzinfo=UTC)
 
 
-def run_item(status: str = "succeeded", *, summary_only: bool = False) -> RunListItem:
+def run_item(status: RunStatus = RunStatus.SUCCEEDED, *, summary_only: bool = False) -> RunListItem:
     return RunListItem(
         provider="github",
         id=RUN,
         status=status,
-        engine="fast",
+        engine=Engine.FAST,
         attempt=1,
         cancel_requested=False,
         started_at=NOW,
@@ -154,7 +155,8 @@ def test_findings_are_ordered_by_severity_and_budget_uses_engine_caps() -> None:
 
 
 @pytest.mark.parametrize(
-    "item", [run_item("running"), run_item("failed"), run_item(summary_only=True)]
+    "item",
+    [run_item(RunStatus.RUNNING), run_item(RunStatus.FAILED), run_item(summary_only=True)],
 )
 def test_verdict_is_null_until_success_and_for_summary_only_runs(item: RunListItem) -> None:
     detail = asyncio.run(GetRunDetail(Detail(item, review("high"))).execute(RUN))
@@ -162,14 +164,23 @@ def test_verdict_is_null_until_success_and_for_summary_only_runs(item: RunListIt
 
 
 @pytest.mark.parametrize(
-    "status", ["queued", "running", "publishing", "failed", "cancelled", "skipped", "succeeded"]
+    "status",
+    [
+        RunStatus.QUEUED,
+        RunStatus.RUNNING,
+        RunStatus.PUBLISHING,
+        RunStatus.FAILED,
+        RunStatus.CANCELLED,
+        RunStatus.SKIPPED,
+        RunStatus.SUCCEEDED,
+    ],
 )
 def test_summary_and_saved_result_follow_displayed_status_when_run_finishes_between_reads(
-    status: str,
+    status: RunStatus,
 ) -> None:
     class FinishesBetweenReads(Detail):
         async def get_run_review(self, run_id: UUID) -> RunReview | None:
-            self.item = run_item("succeeded")
+            self.item = run_item(RunStatus.SUCCEEDED)
             return self.stored
 
     summary = {
@@ -200,7 +211,7 @@ def test_summary_and_saved_result_follow_displayed_status_when_run_finishes_betw
 
 def test_budget_is_null_before_the_first_llm_call() -> None:
     detail = asyncio.run(
-        GetRunDetail(Detail(run_item("queued"), review(usage_calls=0))).execute(RUN)
+        GetRunDetail(Detail(run_item(RunStatus.QUEUED), review(usage_calls=0))).execute(RUN)
     )
     assert detail is not None and detail.budget is None
 
@@ -298,7 +309,7 @@ class Reruns:
         self.published.append(run_id)
 
     async def get_run(self, run_id: UUID) -> RunListItem | None:
-        return replace(run_item("queued"), id=run_id)
+        return replace(run_item(RunStatus.QUEUED), id=run_id)
 
 
 @dataclass
@@ -357,7 +368,7 @@ def test_rerun_conflict_missing_run_and_missing_configuration() -> None:
 @dataclass
 class CancelRepository:
     signal: bool
-    item: RunListItem = field(default_factory=lambda: run_item("cancelled"))
+    item: RunListItem = field(default_factory=lambda: run_item(RunStatus.CANCELLED))
 
     @property
     def repository(self) -> CancelRepository:

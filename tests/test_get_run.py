@@ -2,6 +2,7 @@ import asyncio
 from datetime import UTC, datetime
 from uuid import UUID
 
+from app.common.domain.run_enums import Engine, RunStatus
 from app.modules.reviews.application.get_run import GetRun
 from app.modules.reviews.application.list_runs import RunListItem
 
@@ -21,8 +22,8 @@ def test_get_run_returns_the_repository_projection() -> None:
     item = RunListItem(
         provider="github",
         id=run_id,
-        status="succeeded",
-        engine="fast",
+        status=RunStatus.SUCCEEDED,
+        engine=Engine.FAST,
         attempt=0,
         cancel_requested=False,
         started_at=datetime(2026, 9, 24, tzinfo=UTC),

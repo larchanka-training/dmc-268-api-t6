@@ -2,6 +2,7 @@ import asyncio
 from datetime import UTC, datetime
 from uuid import UUID
 
+from app.common.domain.run_enums import Engine, RunStatus
 from app.modules.reviews.application.list_runs import ListRuns, RunCursor, RunListItem
 
 
@@ -36,8 +37,8 @@ def test_list_runs_builds_a_cursor_from_the_last_returned_item() -> None:
     first = RunListItem(
         provider="github",
         id=UUID("00000000-0000-0000-0000-000000000001"),
-        status="succeeded",
-        engine="fast",
+        status=RunStatus.SUCCEEDED,
+        engine=Engine.FAST,
         attempt=0,
         cancel_requested=False,
         started_at=None,
@@ -56,8 +57,8 @@ def test_list_runs_builds_a_cursor_from_the_last_returned_item() -> None:
     second = RunListItem(
         provider="github",
         id=UUID("00000000-0000-0000-0000-000000000002"),
-        status="queued",
-        engine="deep",
+        status=RunStatus.QUEUED,
+        engine=Engine.DEEP,
         attempt=1,
         cancel_requested=False,
         started_at=None,
