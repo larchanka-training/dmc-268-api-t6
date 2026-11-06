@@ -1277,6 +1277,7 @@ def test_public_worker_owns_redis_before_http_startup_and_preserves_primary(
             aclose=Resource("database").aclose,
             github_webhook_receipts=object(),
             rules_status_refresher=lambda **kwargs: object(),
+            repository_visibility_refresher=lambda **kwargs: object(),
         )
         monkeypatch.setattr(webhook_worker, "os", SimpleNamespace(environ=environment))
         monkeypatch.setattr(
