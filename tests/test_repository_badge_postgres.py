@@ -260,6 +260,34 @@ def test_the_migration_indexes_the_name_in_lower_case(portal_env: Env) -> None:
     assert "lower((full_name)::text)" in definition
 
 
+@pytest.mark.parametrize(
+    "statements",
+    [
+        pytest.param(CLOSED_FINISHED_LAST, id="clean-without-a-saved-result"),
+        pytest.param(
+            (
+                *DONE_FINISHED_LAST,
+                "INSERT INTO code_change_diffs (id, run_id, code_change_id, head_sha, filename, "
+                f"patch, summary_only) VALUES ('{uuid4()}', '{RUN_DONE}', '{PR_OPEN}', '{HEAD}', "
+                "'a.py', '@@ -1 +1 @@', true)",
+            ),
+            id="summary-only",
+        ),
+    ],
+)
+def test_the_route_shows_no_verdict_the_real_loader_cannot_prove(
+    portal_env: Env, statements: tuple[str, ...]
+) -> None:
+    assert _query(portal_env, "octo/a", PUBLIC_A, *statements) is not None
+
+    with api(portal_env, AuthScope(42, ())) as (client, _):
+        answer = client.get("/api/badges/github/octo/a.svg")
+        unknown = client.get("/api/badges/github/octo/unknown.svg")
+
+    assert ">no data</text>" in answer.text
+    assert answer.content == unknown.content
+
+
 def test_the_route_serves_a_real_result_and_hides_a_private_repository(portal_env: Env) -> None:
     saved = (
         "INSERT INTO run_actions (id, run_id, index, tool, request, response, started_at, "
