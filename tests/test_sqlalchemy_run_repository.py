@@ -670,7 +670,7 @@ def test_sqlalchemy_run_repository_writes_fail_fast_without_a_unit_of_work_sessi
         "expected_threshold",
     ),
     [
-        (None, None, 10, SeverityThreshold.ALL, 10, "all"),
+        (None, None, 4, SeverityThreshold.WARNING, 4, "warning"),
         (3, SeverityThreshold.WARNING, 7, SeverityThreshold.CRITICAL, 3, "warning"),
         (None, None, 5, SeverityThreshold.WARNING, 5, "warning"),
     ],
