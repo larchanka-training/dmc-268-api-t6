@@ -371,8 +371,9 @@ def test_python_package_binding_does_not_resolve_a_shadowed_submodule(init: str)
         "import pkg.store as store\n",
         "from .other import store\nfrom . import store\n",
         "store = object()\nfrom . import store\n",
+        "store = 1\nstore = 2\nfrom . import store\n",
     ],
-    ids=["relative", "relative-alias", "module-alias", "last-binding", "last-import"],
+    ids=["relative", "relative-alias", "module-alias", "last-binding", "last-import", "duplicates"],
 )
 def test_python_package_binding_follows_its_own_submodule(init: str) -> None:
     sources = {

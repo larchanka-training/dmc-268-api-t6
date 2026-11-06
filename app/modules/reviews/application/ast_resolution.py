@@ -789,7 +789,8 @@ class ImportResolver:
         outcome = await self._lookup(list(target.files), wanted)
         package_init = target.files[0].endswith("__init__.py")
         if (
-            outcome[0] in {ImportResolution.MISSING, ImportResolution.RESOLVED}
+            outcome[0]
+            in {ImportResolution.MISSING, ImportResolution.RESOLVED, ImportResolution.AMBIGUOUS}
             and language is AstLanguage.PYTHON
             and binding.kind is ImportKind.NAMED
             and binding.name is not None
