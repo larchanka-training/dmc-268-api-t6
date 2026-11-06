@@ -113,6 +113,11 @@ class Repository(Base):
     )
     # GitHub's own flag (#454). NULL until an event tells it, and NULL reads as not public.
     private: Mapped[bool | None] = mapped_column(BOOLEAN, nullable=True)
+    # The time ``private`` is known as of: the newest observation wins, so a retried delivery
+    # loses to a later change, and an old one reads as not public.
+    private_observed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     # The RAG toggle (#145): off by default, and onboarding never turns it on.
     rag_enabled: Mapped[bool] = mapped_column(BOOLEAN, nullable=False, server_default=text("false"))
     default_engine: Mapped[Engine] = mapped_column(

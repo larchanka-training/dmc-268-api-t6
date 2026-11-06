@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
+from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID
 
@@ -23,30 +24,43 @@ from app.modules.repositories.application.installation_repositories import (
 from app.modules.repositories.application.onboard_repository import OnboardingResult
 
 _DISPATCH_LOGGER = "app.modules.integrations.webhooks.application.github_installation_dispatch"
+RECEIVED_AT = datetime(2026, 11, 1, 12, tzinfo=UTC)
 
 
 @dataclass
 class _Visibility:
     known: bool = True
     error: Exception | None = None
-    overwritten: list[tuple[int, int, bool]] = field(default_factory=list)
-    learned: list[tuple[int, int, bool]] = field(default_factory=list)
-    forgotten: list[int] = field(default_factory=list)
+    overwritten: list[tuple[int, int, bool, datetime]] = field(default_factory=list)
+    learned: list[tuple[int, int, bool, datetime]] = field(default_factory=list)
+    forgotten: list[tuple[int, datetime]] = field(default_factory=list)
 
-    async def forget(self, installation_external_id: int) -> bool:
-        self.forgotten.append(installation_external_id)
+    async def forget(self, installation_external_id: int, observed_at: datetime) -> bool:
+        self.forgotten.append((installation_external_id, observed_at))
         return self.known
 
     async def overwrite(
-        self, installation_external_id: int, repository_external_id: int, private: bool
+        self,
+        installation_external_id: int,
+        repository_external_id: int,
+        private: bool,
+        observed_at: datetime,
     ) -> bool:
-        self.overwritten.append((installation_external_id, repository_external_id, private))
+        self.overwritten.append(
+            (installation_external_id, repository_external_id, private, observed_at)
+        )
         return self.known
 
     async def learn(
-        self, installation_external_id: int, repository_external_id: int, private: bool
+        self,
+        installation_external_id: int,
+        repository_external_id: int,
+        private: bool,
+        observed_at: datetime,
     ) -> None:
-        self.learned.append((installation_external_id, repository_external_id, private))
+        self.learned.append(
+            (installation_external_id, repository_external_id, private, observed_at)
+        )
         if self.error is not None:
             raise self.error
 
@@ -71,9 +85,8 @@ def _dispatch(
             resolver=_Resolver(), onboarding=_Onboarding(), repository_visibility=visibility
         )
     )
-    return asyncio.run(
-        adapter.execute(VerifiedGitHubDelivery("delivery-1", event_name, payload).to_receipt())
-    )
+    receipt = VerifiedGitHubDelivery("delivery-1", event_name, payload).to_receipt()
+    return asyncio.run(adapter.execute(replace(receipt, received_at=RECEIVED_AT)))
 
 
 def _repository_event(action: str) -> dict[str, Any]:
@@ -109,7 +122,7 @@ def test_a_visibility_change_overwrites_the_saved_flag(action: str, private: boo
 
     result = _dispatch(visibility, "repository", _repository_event(action))
 
-    assert visibility.overwritten == [(17, 101, private)]
+    assert visibility.overwritten == [(17, 101, private, RECEIVED_AT)]
     assert visibility.learned == []
     assert result == InstallationDeliveryDispatchResult(
         InstallationDeliveryDispatchStatus.UPDATED_REPOSITORY_VISIBILITY
@@ -157,7 +170,7 @@ def test_a_suspended_installation_forgets_the_saved_flags() -> None:
         visibility, "installation", {"action": "suspend", "installation": {"id": 17}}
     )
 
-    assert visibility.forgotten == [17]
+    assert visibility.forgotten == [(17, RECEIVED_AT)]
     assert result == InstallationDeliveryDispatchResult(
         InstallationDeliveryDispatchStatus.UPDATED_REPOSITORY_VISIBILITY
     )
@@ -236,7 +249,7 @@ def test_a_pull_request_event_teaches_the_flag_of_its_payload(
         _pull_request_event("synchronize", private=private) | payload_change,
     )
 
-    assert visibility.learned == [(17, 101, private)]
+    assert visibility.learned == [(17, 101, private, RECEIVED_AT)]
     assert visibility.overwritten == []
 
 

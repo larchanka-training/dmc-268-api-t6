@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable
+from datetime import UTC, datetime, timedelta
 from typing import cast
 from uuid import uuid4
 
@@ -14,6 +15,9 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.bootstrap.reviews_api import ReviewsApiResources
 from app.modules.integrations.webhooks.api.receipt import VerifiedGitHubDelivery
+from app.modules.integrations.webhooks.application.receive_github_delivery import (
+    ReceiveGitHubDelivery,
+)
 from app.modules.repositories.application.installation_repositories import RepositorySnapshot
 from app.modules.repositories.infrastructure.installation_repository_unit_of_work import (
     SqlAlchemyInstallationRepositoryStore,
@@ -36,6 +40,9 @@ pytestmark = pytest.mark.integration
 
 GITHUB_INSTALLATION = 17
 GITHUB_REPOSITORY = 101
+T0 = datetime(2026, 11, 1, 12, tzinfo=UTC)
+BEFORE = T0 - timedelta(hours=1)
+AFTER = T0 + timedelta(hours=1)
 
 
 class _NoTokens:
@@ -44,26 +51,38 @@ class _NoTokens:
 
 
 def _exercise(
-    env: Env, stored: bool | None, step: Callable[[AsyncSession], Awaitable[object]]
-) -> tuple[bool | None, object]:
-    """Store ``stored`` for repository A, run ``step`` in a transaction, read the flag back."""
+    env: Env,
+    stored: bool | None,
+    step: Callable[[AsyncSession], Awaitable[object]],
+    *,
+    stamp: datetime | None = None,
+) -> tuple[bool | None, datetime | None, object]:
+    """Store a flag and stamp for repository A, run ``step`` in a transaction, read them back."""
 
-    async def exercise() -> tuple[bool | None, object]:
+    async def exercise() -> tuple[bool | None, datetime | None, object]:
         engine = env.engine()
         factory = async_sessionmaker(engine, expire_on_commit=False)
         try:
             async with factory.begin() as session:
                 await session.execute(
-                    text("UPDATE repositories SET private = :private WHERE id = :id"),
-                    {"private": stored, "id": REPO_A},
+                    text(
+                        "UPDATE repositories SET private = :private, "
+                        "private_observed_at = :stamp WHERE id = :id"
+                    ),
+                    {"private": stored, "stamp": stamp, "id": REPO_A},
                 )
             async with factory.begin() as session:
                 result = await step(session)
             async with factory() as session:
-                flag = await session.scalar(
-                    text("SELECT private FROM repositories WHERE id = :id"), {"id": REPO_A}
-                )
-            return flag, result
+                row = (
+                    await session.execute(
+                        text(
+                            "SELECT private, private_observed_at FROM repositories WHERE id = :id"
+                        ),
+                        {"id": REPO_A},
+                    )
+                ).one()
+            return row.private, row.private_observed_at, result
         finally:
             await engine.dispose()
 
@@ -71,17 +90,24 @@ def _exercise(
 
 
 @pytest.mark.parametrize(
-    ("stored", "incoming", "expected"),
+    ("stored", "stamp", "incoming", "incoming_stamp", "expected", "expected_stamp"),
     [
-        pytest.param(None, False, False, id="unknown-to-public"),
-        pytest.param(None, True, True, id="unknown-to-private"),
-        pytest.param(True, False, False, id="private-to-public"),
-        pytest.param(False, True, True, id="public-to-private"),
-        pytest.param(False, None, None, id="unknown-is-not-kept-as-public"),
+        pytest.param(None, None, False, T0, False, T0, id="never-told"),
+        pytest.param(True, BEFORE, False, T0, False, T0, id="a-newer-read-opens"),
+        pytest.param(False, BEFORE, True, T0, True, T0, id="a-newer-read-closes"),
+        pytest.param(False, BEFORE, None, T0, None, T0, id="a-newer-read-without-a-flag-closes"),
+        pytest.param(True, AFTER, False, T0, True, AFTER, id="an-older-read-loses-to-privatized"),
+        pytest.param(False, BEFORE, None, None, False, BEFORE, id="nothing-was-read"),
     ],
 )
-def test_an_installation_upsert_writes_the_flag_it_knows(
-    portal_env: Env, stored: bool | None, incoming: bool | None, expected: bool | None
+def test_an_installation_upsert_writes_the_flag_only_when_it_knows_more(
+    portal_env: Env,
+    stored: bool | None,
+    stamp: datetime | None,
+    incoming: bool | None,
+    incoming_stamp: datetime | None,
+    expected: bool | None,
+    expected_stamp: datetime | None,
 ) -> None:
     snapshot = RepositorySnapshot(
         external_id=GITHUB_REPOSITORY,
@@ -89,17 +115,19 @@ def test_an_installation_upsert_writes_the_flag_it_knows(
         default_branch="main",
         web_url="https://github.test/octo/a",
         private=incoming,
+        private_observed_at=incoming_stamp,
     )
 
-    flag, _ = _exercise(
+    flag, observed, _ = _exercise(
         portal_env,
         stored,
         lambda session: SqlAlchemyInstallationRepositoryStore(session).upsert_repository(
             INSTALL_A, snapshot
         ),
+        stamp=stamp,
     )
 
-    assert flag is expected
+    assert (flag, observed) == (expected, expected_stamp)
 
 
 def _store(session: AsyncSession) -> SqlAlchemyRepositoryVisibilityStore:
@@ -107,19 +135,35 @@ def _store(session: AsyncSession) -> SqlAlchemyRepositoryVisibilityStore:
 
 
 @pytest.mark.parametrize(
-    ("stored", "incoming"),
-    [(None, True), (None, False), (True, False), (False, True), (True, True)],
+    ("stored", "stamp", "incoming", "expected", "expected_stamp"),
+    [
+        pytest.param(None, None, True, True, T0, id="fills"),
+        pytest.param(True, BEFORE, False, False, T0, id="a-newer-change-opens"),
+        pytest.param(False, BEFORE, True, True, T0, id="a-newer-change-closes"),
+        pytest.param(True, AFTER, False, True, AFTER, id="a-retried-publicized-loses"),
+        pytest.param(False, AFTER, True, False, AFTER, id="a-retried-privatized-loses"),
+        pytest.param(False, T0, True, True, T0, id="a-tie-closes"),
+        pytest.param(True, T0, False, True, T0, id="a-tie-does-not-open"),
+    ],
 )
-def test_a_visibility_event_overwrites_whatever_is_saved(
-    portal_env: Env, stored: bool | None, incoming: bool
+def test_a_visibility_change_wins_only_when_it_is_newer(
+    portal_env: Env,
+    stored: bool | None,
+    stamp: datetime | None,
+    incoming: bool,
+    expected: bool,
+    expected_stamp: datetime,
 ) -> None:
-    flag, known = _exercise(
+    flag, observed, known = _exercise(
         portal_env,
         stored,
-        lambda session: _store(session).overwrite(GITHUB_INSTALLATION, GITHUB_REPOSITORY, incoming),
+        lambda session: _store(session).overwrite(
+            GITHUB_INSTALLATION, GITHUB_REPOSITORY, incoming, T0
+        ),
+        stamp=stamp,
     )
 
-    assert flag is incoming
+    assert (flag, observed) == (expected, expected_stamp)
     assert known is True
 
 
@@ -130,60 +174,78 @@ def test_a_visibility_event_overwrites_whatever_is_saved(
         pytest.param(18, GITHUB_REPOSITORY, id="another-installation"),
     ],
 )
-def test_a_visibility_event_touches_only_its_own_repository(
+def test_a_visibility_change_touches_only_its_own_repository(
     portal_env: Env, installation: int, repository: int
 ) -> None:
-    flag, known = _exercise(
+    flag, observed, known = _exercise(
         portal_env,
         None,
-        lambda session: _store(session).overwrite(installation, repository, True),
+        lambda session: _store(session).overwrite(installation, repository, True, T0),
     )
 
-    assert flag is None
+    assert (flag, observed) == (None, None)
     assert known is False
 
 
 @pytest.mark.parametrize(
-    ("stored", "incoming", "expected"),
+    ("stored", "stamp", "incoming", "expected", "expected_stamp"),
     [
-        pytest.param(None, False, False, id="fills-unknown-as-public"),
-        pytest.param(None, True, True, id="fills-unknown-as-private"),
-        pytest.param(False, True, True, id="closes"),
-        pytest.param(True, False, True, id="never-opens"),
-        pytest.param(False, False, False, id="public-stays"),
-        pytest.param(True, True, True, id="private-stays"),
+        pytest.param(None, None, False, False, T0, id="fills-unknown-as-public"),
+        pytest.param(None, None, True, True, T0, id="fills-unknown-as-private"),
+        pytest.param(False, BEFORE, True, True, T0, id="closes"),
+        pytest.param(True, BEFORE, False, True, BEFORE, id="never-opens"),
+        pytest.param(False, BEFORE, False, False, BEFORE, id="no-write-when-unchanged"),
+        pytest.param(None, AFTER, False, None, AFTER, id="a-retry-cannot-refill-a-suspension"),
+        pytest.param(False, AFTER, True, False, AFTER, id="a-retry-cannot-close-a-newer-read"),
     ],
 )
-def test_a_lesson_from_another_event_fills_or_closes_but_never_opens(
-    portal_env: Env, stored: bool | None, incoming: bool, expected: bool
+def test_a_lesson_from_another_event_fills_or_closes_only_when_newer(
+    portal_env: Env,
+    stored: bool | None,
+    stamp: datetime | None,
+    incoming: bool,
+    expected: bool | None,
+    expected_stamp: datetime,
 ) -> None:
-    flag, _ = _exercise(
+    flag, observed, _ = _exercise(
         portal_env,
         stored,
-        lambda session: _store(session).learn(GITHUB_INSTALLATION, GITHUB_REPOSITORY, incoming),
+        lambda session: _store(session).learn(GITHUB_INSTALLATION, GITHUB_REPOSITORY, incoming, T0),
+        stamp=stamp,
     )
 
-    assert flag is expected
+    assert (flag, observed) == (expected, expected_stamp)
 
 
-@pytest.mark.parametrize("stored", [False, True, None])
+@pytest.mark.parametrize(
+    ("stored", "stamp", "expected", "expected_stamp"),
+    [
+        pytest.param(False, BEFORE, None, T0, id="public"),
+        pytest.param(True, BEFORE, None, T0, id="private"),
+        pytest.param(None, None, None, T0, id="unknown"),
+        pytest.param(False, AFTER, False, AFTER, id="a-retried-suspension-loses-to-a-newer-read"),
+    ],
+)
 def test_a_suspension_forgets_the_flag_of_its_installation_only(
-    portal_env: Env, stored: bool | None
+    portal_env: Env,
+    stored: bool | None,
+    stamp: datetime | None,
+    expected: bool | None,
+    expected_stamp: datetime,
 ) -> None:
-    other = f"UPDATE repositories SET private = false WHERE id = '{REPO_B}'"
-
     async def step(session: AsyncSession) -> tuple[bool, object]:
-        await session.execute(text(other))
-        known = await _store(session).forget(GITHUB_INSTALLATION)
+        await session.execute(
+            text(f"UPDATE repositories SET private = false WHERE id = '{REPO_B}'")
+        )
+        known = await _store(session).forget(GITHUB_INSTALLATION, T0)
         return known, await session.scalar(
             text("SELECT private FROM repositories WHERE id = :id"), {"id": REPO_B}
         )
 
-    flag, (known, other_flag) = cast(
-        tuple[bool | None, tuple[bool, object]], _exercise(portal_env, stored, step)
-    )
+    flag, observed, result = _exercise(portal_env, stored, step, stamp=stamp)
+    known, other_flag = cast(tuple[bool, object], result)
 
-    assert flag is None
+    assert (flag, observed) == (expected, expected_stamp)
     assert known is True
     assert other_flag is False
 
@@ -203,14 +265,92 @@ def test_a_suspension_of_no_github_repository_changes_nothing(
 ) -> None:
     async def step(session: AsyncSession) -> bool:
         if statement is None:
-            return await _store(session).forget(999)
+            return await _store(session).forget(999, T0)
         await session.execute(text(statement))
-        return await _store(session).forget(GITHUB_INSTALLATION)
+        return await _store(session).forget(GITHUB_INSTALLATION, T0)
 
-    flag, known = _exercise(portal_env, False, step)
+    flag, observed, known = _exercise(portal_env, False, step, stamp=BEFORE)
 
-    assert flag is False
+    assert (flag, observed) == (False, BEFORE)
     assert known is False
+
+
+def test_a_retried_delivery_keeps_its_received_at_and_loses_to_a_later_change(
+    portal_env: Env,
+) -> None:
+    """The real receipt path: claimed from the row, stamped with the time it was received."""
+
+    async def exercise() -> tuple[bool | None, datetime | None, datetime | None]:
+        engine = portal_env.engine()
+        factory = async_sessionmaker(engine, expire_on_commit=False)
+        client = httpx.AsyncClient(base_url="https://api.github.com")
+        resources = ReviewsApiResources(engine, factory)
+        receiver = ReceiveGitHubDelivery(
+            uow_factory=resources.github_webhook_receipts,
+            dispatcher=resources.github_installation_delivery_dispatcher(
+                client=client, token_provider=_NoTokens()
+            ),
+        )
+        repository = {"id": GITHUB_REPOSITORY, "full_name": "octo/a"}
+
+        async def deliver(delivery: str, action: str) -> None:
+            await receiver.execute(
+                VerifiedGitHubDelivery(
+                    delivery,
+                    "repository",
+                    {
+                        "action": action,
+                        "installation": {"id": GITHUB_INSTALLATION},
+                        "repository": repository,
+                    },
+                ).to_receipt()
+            )
+            await receiver.replay_pending()
+
+        async def read() -> tuple[bool | None, datetime | None]:
+            async with factory() as session:
+                row = (
+                    await session.execute(
+                        text(
+                            "SELECT private, private_observed_at FROM repositories WHERE id = :id"
+                        ),
+                        {"id": REPO_A},
+                    )
+                ).one()
+            return row.private, row.private_observed_at
+
+        try:
+            await deliver("00000000-0000-4000-8000-000000000454", "publicized")
+            opened, stamp = await read()
+            assert opened is False
+            async with factory.begin() as session:
+                received = await session.scalar(
+                    text("SELECT received_at FROM webhook_events WHERE delivery_id = :id"),
+                    {"id": "00000000-0000-4000-8000-000000000454"},
+                )
+                # A later privatized; then the old delivery runs again, as a retry would.
+                await session.execute(
+                    text(
+                        "UPDATE repositories SET private = true, "
+                        "private_observed_at = :later WHERE id = :id"
+                    ),
+                    {"later": received + timedelta(seconds=1), "id": REPO_A},
+                )
+                await session.execute(
+                    text("UPDATE webhook_events SET projected_at = NULL WHERE delivery_id = :id"),
+                    {"id": "00000000-0000-4000-8000-000000000454"},
+                )
+            await receiver.replay_pending()
+            flag, _ = await read()
+            return flag, stamp, received
+        finally:
+            await client.aclose()
+            await engine.dispose()
+
+    flag, stamp, received = asyncio.run(exercise())
+
+    assert flag is True
+    assert stamp == received
 
 
 def test_the_runtime_dispatcher_records_visibility_from_both_events(portal_env: Env) -> None:
@@ -289,7 +429,7 @@ class _FreshOAuth:
 
 
 def test_a_rebind_forgets_what_was_saved_before_the_app_was_gone(portal_env: Env) -> None:
-    async def exercise() -> tuple[bool, bool | None]:
+    async def exercise() -> tuple[bool, bool | None, bool]:
         engine = portal_env.engine()
         factory = async_sessionmaker(engine, expire_on_commit=False)
         try:
@@ -326,14 +466,15 @@ def test_a_rebind_forgets_what_was_saved_before_the_app_was_gone(portal_env: Env
                 row = (
                     await session.execute(
                         text(
-                            "SELECT installation_available, private FROM repositories "
-                            "WHERE id = :id"
+                            "SELECT installation_available, private, "
+                            "private_observed_at IS NOT NULL AS stamped "
+                            "FROM repositories WHERE id = :id"
                         ),
                         {"id": REPO_A},
                     )
                 ).one()
-            return row.installation_available, row.private
+            return row.installation_available, row.private, row.stamped
         finally:
             await engine.dispose()
 
-    assert asyncio.run(exercise()) == (True, None)
+    assert asyncio.run(exercise()) == (True, None, True)

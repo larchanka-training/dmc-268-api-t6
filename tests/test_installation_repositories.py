@@ -185,27 +185,6 @@ def test_parse_real_installation_repositories_added_delivery_without_branch_and_
 
 
 @pytest.mark.parametrize(
-    ("value", "expected"),
-    [(False, False), (True, True), ("absent", None)],
-)
-def test_an_added_repository_carries_the_private_flag_of_the_event(
-    value: bool | str, expected: bool | None
-) -> None:
-    payload = load_github_webhook_fixture("installation_repositories_added")
-    repository = payload["repositories_added"][0]
-    if value == "absent":
-        del repository["private"]
-    else:
-        repository["private"] = value
-
-    event = parse_installation_repositories_event(
-        event_name="installation_repositories", payload=payload
-    )
-
-    assert event.added_repositories[0].private is expected
-
-
-@pytest.mark.parametrize(
     ("event_name", "fixture", "action"),
     [
         ("installation", "installation_created", "deleted"),

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, replace
+from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Protocol
 from uuid import UUID
@@ -136,6 +137,8 @@ class GitHubDispatchEvent:
         | InstallationSuspendedEvent
         | UnsupportedGitHubEvent
     )
+    # When the service received it; a retried or revived delivery keeps this time.
+    received_at: datetime | None = None
 
 
 class GitHubInstallationResolver(Protocol):
@@ -194,18 +197,26 @@ class CodeIndexRefreshHandler(Protocol):
 class RepositoryVisibilityHandler(Protocol):
     """One short transaction, no GitHub call (#454)."""
 
-    async def forget(self, installation_external_id: int) -> bool:
+    async def forget(self, installation_external_id: int, observed_at: datetime) -> bool:
         """False when the installation has no repository."""
         ...
 
     async def overwrite(
-        self, installation_external_id: int, repository_external_id: int, private: bool
+        self,
+        installation_external_id: int,
+        repository_external_id: int,
+        private: bool,
+        observed_at: datetime,
     ) -> bool:
         """False when the repository is not connected."""
         ...
 
     async def learn(
-        self, installation_external_id: int, repository_external_id: int, private: bool
+        self,
+        installation_external_id: int,
+        repository_external_id: int,
+        private: bool,
+        observed_at: datetime,
     ) -> None: ...
 
 
@@ -245,12 +256,13 @@ class GitHubInstallationDeliveryDispatcher:
                 status=InstallationDeliveryDispatchStatus.IGNORED_IRRELEVANT_EVENT,
                 detail=_with_action(event.action, None),
             )
+        observed_at = delivery.received_at or datetime.now(UTC)
         if isinstance(event, RepositoryVisibilityEvent):
-            return await self._visibility_result(event)
+            return await self._visibility_result(event, observed_at)
         if isinstance(event, InstallationSuspendedEvent):
-            return await self._suspension_result(event)
+            return await self._suspension_result(event, observed_at)
         if isinstance(event, PullRequestLabelEvent):
-            await self._learn_visibility(event.pull_request)
+            await self._learn_visibility(event.pull_request, observed_at)
             action = event.pull_request.action
             if event.label_name != "ai-review":
                 return InstallationDeliveryDispatchResult(
@@ -277,7 +289,7 @@ class GitHubInstallationDeliveryDispatcher:
                 return self._trigger_result(outcome, result.status, action)
             return result
         if isinstance(event, PullRequestEvent):
-            await self._learn_visibility(event)
+            await self._learn_visibility(event, observed_at)
             if event.action in {"review_requested", "review_request_removed"}:
                 return InstallationDeliveryDispatchResult(
                     status=InstallationDeliveryDispatchStatus.IGNORED_IRRELEVANT_EVENT,
@@ -327,7 +339,9 @@ class GitHubInstallationDeliveryDispatcher:
         try:
             await self._onboarding.execute(
                 provider_installation_id=provider_installation_id,
-                event=replace(event, delivery_id=delivery.delivery_id),
+                event=replace(
+                    event, delivery_id=delivery.delivery_id, received_at=delivery.received_at
+                ),
             )
         except (RepositoryDetailsUnavailableError, InstallationAccessTokenError) as error:
             # A token GitHub could not issue is a read it cannot answer either: same deferral.
@@ -347,14 +361,17 @@ class GitHubInstallationDeliveryDispatcher:
         )
 
     async def _visibility_result(
-        self, event: RepositoryVisibilityEvent
+        self, event: RepositoryVisibilityEvent, observed_at: datetime
     ) -> InstallationDeliveryDispatchResult:
         if self._repository_visibility is None:
             return InstallationDeliveryDispatchResult(
                 status=InstallationDeliveryDispatchStatus.DEFERRED_KNOWN_EVENT
             )
         if not await self._repository_visibility.overwrite(
-            event.installation_external_id, event.repository_external_id, event.private
+            event.installation_external_id,
+            event.repository_external_id,
+            event.private,
+            observed_at,
         ):
             # Not deferred: connecting the repository reads its visibility anyway.
             return InstallationDeliveryDispatchResult(
@@ -366,13 +383,15 @@ class GitHubInstallationDeliveryDispatcher:
         )
 
     async def _suspension_result(
-        self, event: InstallationSuspendedEvent
+        self, event: InstallationSuspendedEvent, observed_at: datetime
     ) -> InstallationDeliveryDispatchResult:
         if self._repository_visibility is None:
             return InstallationDeliveryDispatchResult(
                 status=InstallationDeliveryDispatchStatus.DEFERRED_KNOWN_EVENT
             )
-        if not await self._repository_visibility.forget(event.installation_external_id):
+        if not await self._repository_visibility.forget(
+            event.installation_external_id, observed_at
+        ):
             # Not deferred: a repository connected later reads its visibility anyway.
             return InstallationDeliveryDispatchResult(
                 status=InstallationDeliveryDispatchStatus.IGNORED_IRRELEVANT_EVENT,
@@ -382,7 +401,7 @@ class GitHubInstallationDeliveryDispatcher:
             status=InstallationDeliveryDispatchStatus.UPDATED_REPOSITORY_VISIBILITY
         )
 
-    async def _learn_visibility(self, event: PullRequestEvent) -> None:
+    async def _learn_visibility(self, event: PullRequestEvent, observed_at: datetime) -> None:
         """Before any early return: every pull request delivery carries the flag. A failure is
         logged and never fails the delivery, the next one carries the flag again (#454)."""
         if self._repository_visibility is None or event.repository_private is None:
@@ -393,6 +412,7 @@ class GitHubInstallationDeliveryDispatcher:
                 event.installation_external_id,
                 event.repository_external_id,
                 event.repository_private,
+                observed_at,
             )
         except Exception:
             _LOGGER.exception(
