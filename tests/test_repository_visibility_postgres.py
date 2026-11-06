@@ -20,6 +20,14 @@ from app.modules.repositories.infrastructure.installation_repository_unit_of_wor
 from app.modules.repositories.infrastructure.repository_visibility import (
     SqlAlchemyRepositoryVisibilityStore,
 )
+from app.modules.workspaces.application.link_github_installations import (
+    AuthenticatedGitHubInstallations,
+    GitHubInstallation,
+    LinkGitHubInstallations,
+)
+from app.modules.workspaces.infrastructure.github_installation_links import (
+    SqlAlchemyGitHubInstallationLinkUnitOfWork,
+)
 from tests.portal_postgres import HEAD, INSTALL_A, REPO_A, Env
 
 pytest_plugins = ("tests.portal_postgres",)
@@ -213,3 +221,65 @@ def test_the_runtime_dispatcher_records_visibility_from_both_events(portal_env: 
         True,
         "updated_repository_visibility",
     )
+
+
+class _FreshOAuth:
+    """The same account (700) as a new installation, after the old one was deleted."""
+
+    async def identify_user(self, access_token: str) -> int:
+        return 42
+
+    async def list_for_user(self, access_token: str) -> AuthenticatedGitHubInstallations:
+        return AuthenticatedGitHubInstallations(
+            42, (GitHubInstallation(29, "octo", (GITHUB_REPOSITORY,), 700),)
+        )
+
+
+def test_a_rebind_forgets_what_was_saved_before_the_app_was_gone(portal_env: Env) -> None:
+    async def exercise() -> tuple[bool, bool | None]:
+        engine = portal_env.engine()
+        factory = async_sessionmaker(engine, expire_on_commit=False)
+        try:
+            async with factory.begin() as session:
+                await session.execute(
+                    text(
+                        "UPDATE provider_installations SET account_external_id = 700, "
+                        "deleted_at = clock_timestamp() - interval '1 day' WHERE id = :id"
+                    ),
+                    {"id": INSTALL_A},
+                )
+                await session.execute(
+                    text(
+                        "UPDATE repositories SET installation_available = false, private = false "
+                        "WHERE id = :id"
+                    ),
+                    {"id": REPO_A},
+                )
+                await session.execute(
+                    text(
+                        "DELETE FROM github_user_repository_access "
+                        "WHERE provider_installation_id = :id"
+                    ),
+                    {"id": INSTALL_A},
+                )
+                await session.execute(
+                    text("UPDATE runs SET state = 'succeeded' WHERE state = 'queued'")
+                )
+            await LinkGitHubInstallations(
+                github=_FreshOAuth(),
+                uow_factory=lambda: SqlAlchemyGitHubInstallationLinkUnitOfWork(factory),
+            ).execute("fresh-user-token")
+            async with factory() as session:
+                row = (
+                    await session.execute(
+                        text(
+                            "SELECT installation_available, private FROM repositories WHERE id = :id"
+                        ),
+                        {"id": REPO_A},
+                    )
+                ).one()
+            return row.installation_available, row.private
+        finally:
+            await engine.dispose()
+
+    assert asyncio.run(exercise()) == (True, None)
