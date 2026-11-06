@@ -572,11 +572,16 @@ def _unreviewed_file_lines(coverage: RunCoverage, limit: int) -> list[str]:
 
 
 def _hide_names(text: str, unnamed_paths: frozenset[str]) -> str:
-    """The text of a finding on another file may repeat the exact name of an unnamed one."""
+    """The text of a finding on another file may repeat the exact name of an unnamed one.
+
+    Only a whole path counts: ``app/utils.py`` is another file, even when ``utils.py`` is hidden.
+    """
     if not unnamed_paths:
         return text
     names = "|".join(re.escape(name) for name in sorted(unnamed_paths, key=len, reverse=True))
-    return re.sub(rf"(?<!\w)(?:{names})(?!\w)", _UNNAMED_FILE_LABEL, text)
+    return re.sub(
+        rf"(?<![\w./\\-])(?:\.?/)?(?:{names})(?![\w/\\-]|\.\w)", _UNNAMED_FILE_LABEL, text
+    )
 
 
 def _blocking_finding_lines(
