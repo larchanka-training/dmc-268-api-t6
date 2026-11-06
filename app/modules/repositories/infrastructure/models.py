@@ -118,6 +118,10 @@ class Repository(Base):
     private_observed_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+    # The same for ``full_name``, a fact of its own: the badge finds a repository by it.
+    full_name_observed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     # The RAG toggle (#145): off by default, and onboarding never turns it on.
     rag_enabled: Mapped[bool] = mapped_column(BOOLEAN, nullable=False, server_default=text("false"))
     default_engine: Mapped[Engine] = mapped_column(

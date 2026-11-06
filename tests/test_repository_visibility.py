@@ -34,7 +34,7 @@ class _Visibility:
     overwritten: list[tuple[int, int, bool, datetime]] = field(default_factory=list)
     learned: list[tuple[int, int, bool, datetime]] = field(default_factory=list)
     forgotten: list[tuple[int, datetime]] = field(default_factory=list)
-    renamed: list[tuple[int, int, str, str | None]] = field(default_factory=list)
+    renamed: list[tuple[int, int, str, str | None, datetime]] = field(default_factory=list)
     transferred: list[tuple[int, datetime]] = field(default_factory=list)
 
     async def rename(
@@ -43,8 +43,11 @@ class _Visibility:
         repository_external_id: int,
         full_name: str,
         web_url: str | None,
+        observed_at: datetime,
     ) -> bool:
-        self.renamed.append((installation_external_id, repository_external_id, full_name, web_url))
+        self.renamed.append(
+            (installation_external_id, repository_external_id, full_name, web_url, observed_at)
+        )
         return self.known
 
     async def forget_repository(self, repository_external_id: int, observed_at: datetime) -> bool:
@@ -251,7 +254,7 @@ def test_a_rename_writes_the_new_name(repository: dict[str, object], web_url: st
 
     result = _dispatch(visibility, "repository", payload)
 
-    assert visibility.renamed == [(17, 101, "octo/new", web_url)]
+    assert visibility.renamed == [(17, 101, "octo/new", web_url, RECEIVED_AT)]
     assert result == InstallationDeliveryDispatchResult(
         InstallationDeliveryDispatchStatus.UPDATED_REPOSITORY_VISIBILITY
     )

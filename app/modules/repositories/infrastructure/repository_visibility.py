@@ -6,13 +6,18 @@ stored one. So a retried delivery, which keeps the time it was received, loses t
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta
+from typing import cast
 
-from sqlalchemy import ColumnElement, case, literal, select, update
+from sqlalchemy import ColumnElement, case, func, literal, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.types import Boolean
 
 from app.common.infrastructure.db.unit_of_work import SqlAlchemyUnitOfWork
+from app.modules.repositories.application.repository_visibility import (
+    RepositoryVisibilityDue,
+    RepositoryVisibilityTarget,
+)
 from app.modules.repositories.infrastructure.models import ProviderInstallation, Repository
 
 
@@ -56,6 +61,30 @@ class SqlAlchemyRepositoryVisibilityStore:
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
 
+    async def due(self, *, older_than: timedelta, limit: int) -> RepositoryVisibilityDue:
+        # The database clock, as for received_at: a change received after this time wins.
+        observed_at = cast(datetime, await self._session.scalar(select(func.clock_timestamp())))
+        stamp = Repository.private_observed_at
+        rows = await self._session.execute(
+            select(ProviderInstallation.external_id, Repository.external_id)
+            .join(
+                ProviderInstallation,
+                Repository.provider_installation_id == ProviderInstallation.id,
+            )
+            .where(
+                ProviderInstallation.provider == "github",
+                ProviderInstallation.deleted_at.is_(None),
+                Repository.installation_available.is_(True),
+                or_(stamp.is_(None), stamp < observed_at - older_than),
+            )
+            .order_by(stamp.asc().nulls_first(), Repository.id)
+            .limit(limit)
+        )
+        return RepositoryVisibilityDue(
+            observed_at,
+            tuple(RepositoryVisibilityTarget(installation, repo) for installation, repo in rows),
+        )
+
     async def forget(self, installation_external_id: int, observed_at: datetime) -> bool:
         forgotten = await self._session.scalars(
             update(Repository)
@@ -85,13 +114,20 @@ class SqlAlchemyRepositoryVisibilityStore:
         repository_external_id: int,
         full_name: str,
         web_url: str | None,
+        observed_at: datetime,
     ) -> bool:
+        stamp = Repository.full_name_observed_at
+        newer = stamp.is_(None) | (stamp < observed_at)
         repository_id = await self._session.scalar(
             update(Repository)
             .where(_github_repository(installation_external_id, repository_external_id))
             .values(
-                full_name=full_name,
-                web_url=Repository.web_url if web_url is None else web_url,
+                full_name=case((newer, full_name), else_=Repository.full_name),
+                full_name_observed_at=case((newer, observed_at), else_=stamp),
+                web_url=case(
+                    (newer, Repository.web_url if web_url is None else web_url),
+                    else_=Repository.web_url,
+                ),
             )
             .returning(Repository.id)
         )

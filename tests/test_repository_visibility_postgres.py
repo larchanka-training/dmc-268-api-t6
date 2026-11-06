@@ -19,6 +19,7 @@ from app.modules.integrations.webhooks.application.receive_github_delivery impor
     ReceiveGitHubDelivery,
 )
 from app.modules.repositories.application.installation_repositories import RepositorySnapshot
+from app.modules.repositories.application.repository_visibility import RepositoryVisibilityDue
 from app.modules.repositories.infrastructure.installation_repository_unit_of_work import (
     SqlAlchemyInstallationRepositoryStore,
 )
@@ -306,7 +307,7 @@ def test_a_rename_writes_the_name_of_its_own_repository_only(
         portal_env,
         False,
         lambda session: _store(session).rename(
-            GITHUB_INSTALLATION, GITHUB_REPOSITORY, "octo/new", web_url
+            GITHUB_INSTALLATION, GITHUB_REPOSITORY, "octo/new", web_url, T0
         ),
         stamp=T0,
     )
@@ -317,13 +318,89 @@ def test_a_rename_writes_the_name_of_its_own_repository_only(
     assert names[REPO_B] == before[REPO_B]
 
 
+@pytest.mark.parametrize(
+    ("stored_stamp", "expected_name", "expected_stamp"),
+    [
+        pytest.param(None, "octo/new", T0, id="never-observed"),
+        pytest.param(BEFORE, "octo/new", T0, id="a-newer-rename-wins"),
+        pytest.param(AFTER, "octo/later", AFTER, id="a-retried-rename-loses"),
+        pytest.param(T0, "octo/later", T0, id="a-tie-keeps-the-name"),
+    ],
+)
+def test_a_rename_wins_only_when_it_is_newer(
+    portal_env: Env,
+    stored_stamp: datetime | None,
+    expected_name: str,
+    expected_stamp: datetime,
+) -> None:
+    async def step(session: AsyncSession) -> tuple[bool, object]:
+        await session.execute(
+            text(
+                "UPDATE repositories SET full_name = 'octo/later', "
+                "full_name_observed_at = :stamp WHERE id = :id"
+            ),
+            {"stamp": stored_stamp, "id": REPO_A},
+        )
+        known = await _store(session).rename(
+            GITHUB_INSTALLATION, GITHUB_REPOSITORY, "octo/new", None, T0
+        )
+        return known, await session.scalar(
+            text("SELECT full_name_observed_at FROM repositories WHERE id = :id"), {"id": REPO_A}
+        )
+
+    _, _, result = _exercise(portal_env, False, step, stamp=T0)
+    known, stamp = cast(tuple[bool, datetime], result)
+
+    assert known is True, "a losing retry still found its repository"
+    assert stamp == expected_stamp
+    assert _names(portal_env)[REPO_A][0] == expected_name
+
+
+@pytest.mark.parametrize(
+    ("stored_stamp", "incoming_stamp", "expected_name"),
+    [
+        pytest.param(AFTER, T0, "octo/later", id="an-old-delivery-keeps-a-later-rename"),
+        pytest.param(BEFORE, T0, "octo/a", id="a-newer-delivery-writes"),
+        pytest.param(AFTER, None, "octo/a", id="no-stamp-writes-as-before"),
+    ],
+)
+def test_an_installation_upsert_writes_the_name_only_when_it_knows_more(
+    portal_env: Env,
+    stored_stamp: datetime,
+    incoming_stamp: datetime | None,
+    expected_name: str,
+) -> None:
+    async def step(session: AsyncSession) -> None:
+        await session.execute(
+            text(
+                "UPDATE repositories SET full_name = 'octo/later', "
+                "full_name_observed_at = :stamp WHERE id = :id"
+            ),
+            {"stamp": stored_stamp, "id": REPO_A},
+        )
+        await SqlAlchemyInstallationRepositoryStore(session).upsert_repository(
+            INSTALL_A,
+            RepositorySnapshot(
+                external_id=GITHUB_REPOSITORY,
+                full_name="octo/a",
+                default_branch="main",
+                web_url="https://github.test/octo/a",
+                private_observed_at=incoming_stamp,
+            ),
+        )
+
+    _exercise(portal_env, False, step, stamp=T0)
+
+    assert _names(portal_env)[REPO_A][0] == expected_name
+
+
 def test_a_rename_of_a_repository_not_connected_changes_nothing(portal_env: Env) -> None:
     before = _names(portal_env)
 
     _, _, known = _exercise(
         portal_env,
         False,
-        lambda session: _store(session).rename(GITHUB_INSTALLATION, 999, "octo/new", None),
+        lambda session: _store(session).rename(GITHUB_INSTALLATION, 999, "octo/new", None, T0),
         stamp=T0,
     )
 
@@ -371,6 +448,88 @@ def test_a_transfer_forgets_the_flag_by_the_repository_id_across_installations(
 
     assert (flag, observed) == (expected, expected_stamp)
     assert result is known
+
+
+@pytest.mark.parametrize(
+    ("statements", "expected"),
+    [
+        pytest.param((), [(17, 101), (18, 102)], id="never-observed-both"),
+        pytest.param(
+            (f"UPDATE repositories SET private_observed_at = now() WHERE id = '{REPO_A}'",),
+            [(18, 102)],
+            id="a-fresh-row-waits",
+        ),
+        pytest.param(
+            (
+                "UPDATE repositories SET private_observed_at = now() - interval '25 hours' "
+                f"WHERE id = '{REPO_A}'",
+                "UPDATE repositories SET private_observed_at = now() - interval '30 hours' "
+                f"WHERE id = '{REPO_B}'",
+            ),
+            [(18, 102), (17, 101)],
+            id="oldest-first",
+        ),
+        pytest.param(
+            (
+                "UPDATE repositories SET private = true, "
+                "private_observed_at = now() - interval '25 hours' "
+                f"WHERE id = '{REPO_A}'",
+                f"UPDATE repositories SET private_observed_at = now() WHERE id = '{REPO_B}'",
+            ),
+            [(17, 101)],
+            id="a-private-row-is-read-too",
+        ),
+        pytest.param(
+            (f"UPDATE repositories SET installation_available = false WHERE id = '{REPO_A}'",),
+            [(18, 102)],
+            id="access-removed",
+        ),
+        pytest.param(
+            (f"UPDATE provider_installations SET deleted_at = now() WHERE id = '{INSTALL_A}'",),
+            [(18, 102)],
+            id="installation-deleted",
+        ),
+        pytest.param(
+            (f"UPDATE provider_installations SET provider = 'gitlab' WHERE id = '{INSTALL_A}'",),
+            [(18, 102)],
+            id="another-provider",
+        ),
+    ],
+)
+def test_the_rows_due_for_a_read(
+    portal_env: Env, statements: tuple[str, ...], expected: list[tuple[int, int]]
+) -> None:
+    async def step(session: AsyncSession) -> RepositoryVisibilityDue:
+        for statement in statements:
+            await session.execute(text(statement))
+        return await _store(session).due(older_than=timedelta(hours=24), limit=50)
+
+    async def now() -> datetime:
+        engine = portal_env.engine()
+        try:
+            async with engine.connect() as connection:
+                return cast(datetime, await connection.scalar(text("SELECT now()")))
+        finally:
+            await engine.dispose()
+
+    before = asyncio.run(now())
+    flag_stamp: datetime | None = None
+    _, _, result = _exercise(portal_env, None, step, stamp=flag_stamp)
+    due = cast(RepositoryVisibilityDue, result)
+
+    assert [
+        (target.installation_external_id, target.repository_external_id) for target in due.targets
+    ] == expected
+    assert due.observed_at >= before
+
+
+def test_a_batch_of_due_rows_is_limited(portal_env: Env) -> None:
+    async def step(session: AsyncSession) -> RepositoryVisibilityDue:
+        return await _store(session).due(older_than=timedelta(hours=24), limit=1)
+
+    _, _, result = _exercise(portal_env, None, step)
+
+    assert len(cast(RepositoryVisibilityDue, result).targets) == 1
 
 
 def test_a_retried_delivery_keeps_its_received_at_and_loses_to_a_later_change(
