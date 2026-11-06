@@ -75,7 +75,9 @@ Nothing in this file guarantees what a review reports. The two kinds of exceptio
 
 - **A text exception** ("do not report X in Y") is a request to the model, and it may not hold. On
   review prompt v5 the reviewer respected 28 % of them
-  ([#399](https://github.com/larchanka-training/dmc-268-api-t6/issues/399)). The templates have none.
+  ([#399](https://github.com/larchanka-training/dmc-268-api-t6/issues/399)). The templates do not
+  ask the model to skip a report, but the scope of a rule depends on the model too: the `fetch` rule
+  of `typescript-react` does not apply to `src/api/client.ts`, and the model may still flag that file.
 - **A mask in `review-ignore`** keeps the content of matching files away from the model, and the
   service applies it without asking the model. It does not exempt the code that uses those files,
   and it removes the whole file from the review, real defects included. The templates mask only
