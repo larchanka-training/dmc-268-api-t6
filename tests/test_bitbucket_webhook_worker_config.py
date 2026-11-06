@@ -24,6 +24,9 @@ class Receiver:
 def test_bitbucket_worker_config_is_optional_and_rejects_partial_keys() -> None:
     env = {"DATABASE_URL": "postgresql+psycopg://example/db", "RABBITMQ_URL": "amqp://example"}
     assert WorkerConfig.from_environment(env).bitbucket is None
+    # docker-compose.yml passes an unset key as "".
+    empty = {"BITBUCKET_CREDENTIAL_KEYS": "", "BITBUCKET_ACTIVE_KEY_ID": ""}
+    assert WorkerConfig.from_environment({**env, **empty}).bitbucket is None
     keys = json.dumps({"test": base64.b64encode(b"a" * 32).decode()})
     configured = WorkerConfig.from_environment(
         {

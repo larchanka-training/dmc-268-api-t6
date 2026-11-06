@@ -37,7 +37,7 @@ def optional_bitbucket_cipher_from_environment(
 ) -> BitbucketCredentialCipher | None:
     raw = env.get("BITBUCKET_CREDENTIAL_KEYS")
     active = env.get("BITBUCKET_ACTIVE_KEY_ID")
-    if raw is None and active is None:
+    if not raw and not active:
         return None
     try:
         if not raw or not active or len(raw) > 16384:
