@@ -88,7 +88,9 @@ preview, ask again; on **Cancel** or no answer create nothing.
 .agents/skills/create-issue/scripts/issue-batch.py "$BATCH"             # the flags of the preview
 ```
 
-One run of a batch at a time — nothing locks a batch against a second run started beside it.
+Only one real run of an `id` can proceed at a time. A second run stops before any
+GitHub call with `already running`; wait for the first one and rerun the same command.
+The lock is released if the first process crashes, so no manual cleanup is needed.
 
 The run first validates every item not yet created as the preview does
 (`issue-create.sh --dry-run`, local refs left out) and creates nothing if one fails or has a
@@ -113,10 +115,11 @@ lookup:
 
 - an item recorded there is not created again; its links are ensured with `issue-link.sh`,
   which leaves what is in place alone and never replaces a parent (`created: false`), and
-  the entry gets the new links result. A recorded `board: failed` is reported again and the
-  run exits 6 with `gh project item-add 12 --owner larchanka-training --url URL` on stderr
-  (then set the Status on the board by hand). The state cannot see that repair: once the
-  issue is on the board, set that entry's `board` to `added` by hand.
+  the entry gets the new links result. For a recorded `board: failed`, the run checks
+  board 12 and ensures the requested Status. If the issue is there and Status reads
+  back, its state becomes `board: added`; otherwise it remains `failed`, the run exits
+  6 and prints `gh project item-add 12 --owner larchanka-training --url URL` on stderr.
+  After repairing the board, rerun the batch to update its state automatically.
 - an item not recorded may still exist: an earlier run created it and stopped — or crashed —
   before recording it. A rerun passes `--adopt-since <started_at − 120 s>` to
   issue-create.sh, which looks for it in the newest issues of the repo (a plain listing: the
@@ -139,9 +142,11 @@ lookup:
   only when that issue is other work.
 
 The state file is kept outside /tmp so that a reboot cannot erase the record of what was
-created. Never delete it, and never start a new `id` for a batch that created anything: a new
+created. Its adjacent `.lock` file may remain after a run; the operating system releases
+the lock when the process ends. Never delete the state file, and never start a new
+`id` for a batch that created anything: a new
 `id` has no `started_at`, so it adopts nothing and stops at the first issue that exists. Edit
-it by hand only for a repaired board (above), for an issue of this batch a run refused — add
+it by hand only for an issue of this batch a run refused — add
 `items.<key>` with its `url`, `number`, `repo` and `summary` (no state file yet: create its
 directory and write the whole file the stop names), and rerun — and for a recorded issue
 that is gone: one that was **deleted** — remove its entry from `items`, and the rerun files
