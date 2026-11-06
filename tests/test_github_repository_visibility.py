@@ -48,10 +48,12 @@ def _read(
     return asyncio.run(run())
 
 
-def _status_error(status: int) -> httpx.HTTPStatusError:
+def _status_error(status: int, headers: dict[str, str] | None = None) -> httpx.HTTPStatusError:
     request = httpx.Request("POST", "https://api.github.com/app/installations/17/access_tokens")
     return httpx.HTTPStatusError(
-        "failed", request=request, response=httpx.Response(status, request=request)
+        "failed",
+        request=request,
+        response=httpx.Response(status, request=request, headers=headers),
     )
 
 
@@ -95,9 +97,14 @@ def test_a_value_that_cannot_be_used_reads_as_unknown(
     [
         pytest.param(httpx.Response(404, json={}), id="gone-or-no-access"),
         pytest.param(httpx.Response(403, json={}), id="forbidden"),
+        pytest.param(httpx.Response(451, json={}), id="blocked-for-legal-reasons"),
+        pytest.param(httpx.Response(410, json={}), id="gone"),
+        pytest.param(httpx.Response(422, json={}), id="unprocessable"),
+        pytest.param(httpx.Response(301, headers={"location": "/x"}), id="redirect"),
     ],
 )
-def test_github_not_showing_the_repository_reads_as_none(response: httpx.Response) -> None:
+def test_a_final_answer_without_the_repository_reads_as_none(response: httpx.Response) -> None:
+    # Read as unavailable, such a row would stay first in the queue and end every pass.
     assert _read(lambda _: response) is None
 
 
@@ -105,6 +112,7 @@ def test_github_not_showing_the_repository_reads_as_none(response: httpx.Respons
     "response",
     [
         pytest.param(httpx.Response(500, json={}), id="server-error"),
+        pytest.param(httpx.Response(401, json={}), id="token-rejected"),
         pytest.param(httpx.Response(429, json={}), id="too-many-requests"),
         pytest.param(
             httpx.Response(403, json={}, headers={"retry-after": "60"}), id="secondary-rate-limit"
@@ -114,7 +122,6 @@ def test_github_not_showing_the_repository_reads_as_none(response: httpx.Respons
         ),
         pytest.param(httpx.Response(200, text="not json"), id="not-json"),
         pytest.param(httpx.Response(200, json=[]), id="not-an-object"),
-        pytest.param(httpx.Response(301, headers={"location": "/x"}), id="redirect"),
     ],
 )
 def test_a_failed_read_is_unavailable_not_unknown(response: httpx.Response) -> None:
@@ -148,6 +155,9 @@ def test_a_token_github_refuses_for_good_reads_as_none(error: Exception) -> None
     "error",
     [
         pytest.param(_status_error(401), id="app-key-rejected"),
+        pytest.param(_status_error(403, {"retry-after": "60"}), id="secondary-rate-limit"),
+        pytest.param(_status_error(403, {"x-ratelimit-remaining": "0"}), id="rate-limit"),
+        pytest.param(_status_error(429), id="too-many-requests"),
         pytest.param(_status_error(500), id="server-error"),
         pytest.param(httpx.ConnectError("refused"), id="exchange"),
         pytest.param(InstallationAccessTokenError("later", transient=True), id="transient"),
