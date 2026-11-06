@@ -5,6 +5,7 @@ from uuid import UUID
 
 import pytest
 
+from app.common.domain.run_enums import Engine, RunStatus
 from app.main import app, get_run_repository
 from app.modules.reviews.application.get_run import RunReview, RunReviewRepository
 from app.modules.reviews.application.list_runs import RunCursor, RunListItem, RunUsage
@@ -60,8 +61,8 @@ def make_item(value: int, created_at: datetime) -> RunListItem:
     return RunListItem(
         provider="github",
         id=UUID(f"00000000-0000-0000-0000-{value:012d}"),
-        status="succeeded",
-        engine="fast",
+        status=RunStatus.SUCCEEDED,
+        engine=Engine.FAST,
         attempt=0,
         cancel_requested=False,
         started_at=created_at,
@@ -308,7 +309,7 @@ def test_runs_list_and_detail_return_the_stored_trigger_and_creation_time(
     # Queued and never claimed: createdAt is the only timestamp the Run has.
     item = replace(
         make_item(9, datetime(2026, 9, 24, 10, 30, 15, 250000, tzinfo=UTC)),
-        status="queued",
+        status=RunStatus.QUEUED,
         started_at=None,
         trigger=trigger,
     )

@@ -714,8 +714,8 @@ class SqlAlchemyRunRepository:
             raise ValueError("unsupported repository provider")
         return RunListItem(
             id=run.id,
-            status=run.state.value,
-            engine=run.engine.value,
+            status=run.state,
+            engine=run.engine,
             attempt=run.attempt,
             cancel_requested=run.cancel_requested,
             started_at=run.started_at,

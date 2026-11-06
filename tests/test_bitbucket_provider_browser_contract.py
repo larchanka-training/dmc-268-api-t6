@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from uuid import uuid4
 
+from app.common.domain.run_enums import Engine, RunStatus
 from app.main import to_repository_dto, to_run_session_dto
 from app.modules.code_index.domain.enums import RagIndexStatus
 from app.modules.code_index.domain.rag_index import RagIndex
@@ -35,8 +36,8 @@ def test_bitbucket_repository_and_run_expose_provider_identity() -> None:
 
     run = RunListItem(
         id=uuid4(),
-        status="queued",
-        engine="fast",
+        status=RunStatus.QUEUED,
+        engine=Engine.FAST,
         attempt=0,
         cancel_requested=False,
         started_at=None,

@@ -13,6 +13,7 @@ from uuid import UUID
 import pytest
 from jsonschema import Draft202012Validator
 
+from app.common.domain.run_enums import Engine, RunStatus
 from app.main import app, get_run_repository
 from app.modules.reviews.application.get_run import FindingView, RunReview
 from app.modules.reviews.application.get_run_actions import RunAction, RunActionResponse
@@ -30,7 +31,7 @@ RUN_ORIGIN_CASES = [
     pytest.param({"trigger": "webhook"}, id="webhook"),
     pytest.param({"trigger": "rerun"}, id="rerun"),
     pytest.param(
-        {"trigger": "rerun", "status": "queued", "started_at": None, "finished_at": None},
+        {"trigger": "rerun", "status": RunStatus.QUEUED, "started_at": None, "finished_at": None},
         id="not-started",
     ),
     # The same instant as the fixture, as a database session outside UTC returns it.
@@ -57,8 +58,8 @@ class ContractRepository:
         item = RunListItem(
             provider="github",
             id=RUN_ID,
-            status="succeeded",
-            engine="fast",
+            status=RunStatus.SUCCEEDED,
+            engine=Engine.FAST,
             attempt=0,
             cancel_requested=False,
             started_at=datetime(2026, 9, 25, tzinfo=UTC),
