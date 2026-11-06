@@ -120,7 +120,7 @@ def operator(tmp_path: Path) -> Iterator[Operator]:
     schema = f"test_gitlab_admin_{uuid4().hex}"
     workspace, other_workspace = uuid4(), uuid4()
     engine = create_engine(database_url, hide_parameters=True)
-    launcher = tmp_path / "operator.py"
+    launcher = tmp_path / "gitlab_admin_launcher.py"
     launcher.write_text("""import httpx
 from app.gitlab_admin import main
 original = httpx.AsyncClient
