@@ -50,6 +50,36 @@ class ScoringCase:
     usage: tuple[Mapping[str, Any], ...] | None = None
     arm: str | None = None
     must_not_flag: tuple[dict[str, Any], ...] = ()
+    file_contents: Mapping[str, bytes | str] | None = None
+
+
+def _is_suggestion_valid(
+    prediction: dict[str, Any],
+    file_contents: Mapping[str, bytes | str] | None,
+) -> bool:
+    """Validate whether prediction's suggestion can be applied cleanly."""
+    if file_contents is None:
+        return False
+    path = prediction.get("path")
+    if not isinstance(path, str) or path not in file_contents:
+        return False
+    line = prediction.get("line")
+    if not isinstance(line, int):
+        return False
+    start_line = prediction.get("start_line")
+    suggestion = prediction.get("suggestion")
+    if not isinstance(suggestion, str):
+        return False
+    from app.modules.reviews.application.ast_symbols import language_for_path
+    from app.modules.reviews.infrastructure.suggestion_ast import validate_suggestion_tree
+
+    lang = language_for_path(path)
+    if lang is None:
+        return False
+    raw_val = file_contents[path]
+    file_bytes = raw_val.encode("utf-8") if isinstance(raw_val, str) else raw_val
+    result = validate_suggestion_tree(lang, file_bytes, start_line, line, suggestion)
+    return result.is_valid
 
 
 def _in_arm(item: Mapping[str, Any], arm: str | None) -> bool:
@@ -179,6 +209,7 @@ def score_cases(cases: Sequence[ScoringCase]) -> dict[str, Any]:
     valid_count = verdict_agreed = 0
     rule_total = rule_found = rule_expected = 0
     exceptions_total = exceptions_exempt = exceptions_flagged = 0
+    suggestions_total = suggestions_valid = 0
 
     for case in cases:
         # Positions in case.truths, so reported indices stay those of case.json.
@@ -220,12 +251,26 @@ def score_cases(cases: Sequence[ScoringCase]) -> dict[str, Any]:
         case_rule_found = sum(_rule_made(truths[index]) for index in matched_truths) + len(
             _matches(unexpected_rules, unmatched, case.added_lines)
         )
-        rule_total += case_rule_expected + len(unexpected_rules)
+        case_rule_total = case_rule_expected + len(unexpected_rules)
+        rule_total += case_rule_total
         rule_expected += case_rule_expected
         rule_found += case_rule_found
         exceptions_total += len(anchors)
         exceptions_exempt += len(exempt)
         exceptions_flagged += case_flagged
+
+        case_sugg_total = 0
+        case_sugg_valid = 0
+        if valid:
+            assert predictions is not None
+            for p in predictions:
+                sugg = p.get("suggestion")
+                if sugg is not None and isinstance(sugg, str):
+                    case_sugg_total += 1
+                    if _is_suggestion_valid(p, case.file_contents):
+                        case_sugg_valid += 1
+        suggestions_total += case_sugg_total
+        suggestions_valid += case_sugg_valid
 
         for truth_index, truth in enumerate(truths):
             if truth["severity"] == "critical":
@@ -276,6 +321,11 @@ def score_cases(cases: Sequence[ScoringCase]) -> dict[str, Any]:
                 "rule_found": case_rule_found,
                 "exceptions": len(anchors),
                 "exceptions_flagged": case_flagged,
+                "suggestions": {
+                    "total": case_sugg_total,
+                    "valid": case_sugg_valid,
+                    "share": _ratio(case_sugg_valid, case_sugg_total),
+                },
             }
         )
 
@@ -322,6 +372,11 @@ def score_cases(cases: Sequence[ScoringCase]) -> dict[str, Any]:
             "flagged": exceptions_flagged,
             "respected": exceptions_total - exceptions_flagged,
             "share": _ratio(exceptions_total - exceptions_flagged, exceptions_total),
+        },
+        "suggestions": {
+            "total": suggestions_total,
+            "valid": suggestions_valid,
+            "share": _ratio(suggestions_valid, suggestions_total),
         },
         "usage": _usage_totals(cases),
         "cases": case_reports,

@@ -1,0 +1,21 @@
+{
+  "id": "SEC-06",
+  "class": "security",
+  "language": "typescript",
+  "source": {
+    "kind": "synthetic",
+    "attribution": "larchanka/swapi-mcp-example#3 PR fixture with rules by Mikhail Larchanka (commit 8bc8b5d)"
+  },
+  "base_path": "base",
+  "patch_path": "diff.patch",
+  "expected_verdict": "blocking",
+  "expected_findings": [
+    {
+      "path": "src/api-client.ts",
+      "start_line": null,
+      "line": 110,
+      "severity": "critical",
+      "category": "security"
+    }
+  ]
+}

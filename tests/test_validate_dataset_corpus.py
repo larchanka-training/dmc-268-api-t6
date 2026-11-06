@@ -266,9 +266,9 @@ def test_committed_corpus_final_json_report_passes(tmp_path: Path) -> None:
     assert result.returncode == 0, result.stdout + result.stderr
     assert data["passed"] is True
     assert data["errors"] == []
-    assert data["case_count"] == data["valid_case_count"] == 24
+    assert data["case_count"] == data["valid_case_count"] == 26
     assert data["class_counts"] == {
-        "security": 4,
+        "security": 6,
         "resource": 5,
         "logic": 5,
         "syntax": 5,
@@ -276,7 +276,7 @@ def test_committed_corpus_final_json_report_passes(tmp_path: Path) -> None:
     }
     assert data["real_case_count"] == data["distinct_real_source_count"] == 5
     assert all(count == 1 for count in data["real_class_counts"].values())
-    assert data["critical_truth_count"] == 5
+    assert data["critical_truth_count"] == 7
 
 
 def test_rejects_case_directory_symlink_without_reading_external_data(tmp_path: Path) -> None:

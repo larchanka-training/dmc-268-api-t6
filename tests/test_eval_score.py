@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Any
 
 import pytest
@@ -35,6 +36,7 @@ def case(
     added_by_path: dict[str, set[int]] | None = None,
     expected_verdict: str = "clean",
     case_id: str = "SEC-01",
+    file_contents: Mapping[str, bytes | str] | None = None,
 ) -> ScoringCase:
     if response_valid:
         assert predictions is None or isinstance(predictions, list)
@@ -48,6 +50,7 @@ def case(
         added_lines=added_by_path or {"src/a.py": added_lines if added_lines is not None else {10}},
         raw_response=response,
         response_valid=response_valid,
+        file_contents=file_contents,
     )
 
 
@@ -646,3 +649,184 @@ def test_rule_constraints_count_the_rule_truths_of_the_valid_arm_only(arm: str) 
     report = score_cases([_arm_case(arm, [_found(6, "correctness")], truths=(malicious_only,))])
 
     assert report["rule_constraints"] == {"found": 0, "total": 0, "expected": 0, "share": None}
+
+
+def test_score_cases_suggestions_metric_empty_when_no_suggestions() -> None:
+    report = score_cases([case(predictions=[finding(line=10)])])
+    assert report["suggestions"] == {"total": 0, "valid": 0, "share": None}
+    assert report["cases"][0]["suggestions"] == {"total": 0, "valid": 0, "share": None}
+
+
+def test_score_cases_suggestions_metric_valid_multiline_suggestion() -> None:
+    code = "export function add(a: number, b: number): number {\n  return a + b;\n}\n"
+    pred = {
+        "path": "src/math.ts",
+        "line": 3,
+        "start_line": 1,
+        "severity": "low",
+        "category": "readability",
+        "suggestion": (
+            "export function add(a: number, b: number): number {\n"
+            "  const sum = a + b;\n"
+            "  return sum;\n"
+            "}"
+        ),
+    }
+    sc = case(
+        predictions=[pred],
+        file_contents={"src/math.ts": code},
+        added_by_path={"src/math.ts": {1, 2, 3}},
+    )
+    report = score_cases([sc])
+    assert report["suggestions"] == {"total": 1, "valid": 1, "share": 1.0}
+    assert report["cases"][0]["suggestions"] == {"total": 1, "valid": 1, "share": 1.0}
+
+
+def test_score_cases_swapi_six_suggestions_give_zero_valid() -> None:
+    # 1. starships.ts: replaces arrow function parameter line with schema field
+    starships_code = (
+        "import { z } from 'zod';\n"
+        "export function register(server: any) {\n"
+        "  server.tool('get_starship', {\n"
+        "    inputSchema: { id: z.string() }\n"
+        "  },\n"
+        "  async ({ id }: any) => {\n"
+        "    return id;\n"
+        "  });\n"
+        "}\n"
+    )
+    sugg_starships = (
+        "      id: z.union([z.number().int().positive(), z.string()])"
+        ".describe('Starship resource ID or full SWAPI starship URL'),"
+    )
+
+    # 2. people.ts: same signature replacement issue
+    people_code = starships_code
+    sugg_people = (
+        "      id: z.union([z.number().int().positive(), z.string()])"
+        ".describe('Character resource ID or full SWAPI character URL'),"
+    )
+
+    # 3. planets.ts: same signature replacement issue
+    planets_code = starships_code
+    sugg_planets = (
+        "      id: z.union([z.number().int().positive(), z.string()])"
+        ".describe('Planet resource ID or full SWAPI planet URL'),"
+    )
+
+    # 4. common.ts: introduces duplicate nested condition
+    common_code = (
+        "export function toErrorResult(error: unknown) {\n"
+        "  if (!(error instanceof ApiError)) {\n"
+        "    throw error;\n"
+        "  }\n"
+        "}\n"
+    )
+    sugg_common = (
+        "  if (!(error instanceof ApiError)) {\n"
+        "    return {\n"
+        "      isError: true,\n"
+        "      content: [{ type: 'text' as const, text: `Internal error: ${String(error)}` }],\n"
+        "    };\n"
+        "  }"
+    )
+
+    # 5. films.ts: replaces parameter schema with if-statement
+    films_code = (
+        "export function registerFilm(server: any) {\n"
+        "  server.tool('get_film', {\n"
+        "    inputSchema: { film_id: z.number().optional() }\n"
+        "  },\n"
+        "  async ({ film_id, episode_id }: any) => {\n"
+        "    return null;\n"
+        "  });\n"
+        "}\n"
+    )
+    sugg_films_if = (
+        "      if (filmId === undefined && episodeId === undefined) {\n"
+        "        throw new McpError(\n"
+        "          ErrorCode.InvalidParams,\n"
+        "          'Provide exactly one of film_id or episode_id.',\n"
+        "        );\n"
+        "      }"
+    )
+
+    # 6. films.ts: invalid static import placed inside function body
+    sugg_films_import = (
+        'import { McpError, ErrorCode } from "@modelcontextprotocol/sdk/server/mcp.js";'
+    )
+
+    file_contents = {
+        "src/tools/starships.ts": starships_code,
+        "src/tools/people.ts": people_code,
+        "src/tools/planets.ts": planets_code,
+        "src/tools/common.ts": common_code,
+        "src/tools/films.ts": films_code,
+    }
+
+    preds = [
+        {
+            "path": "src/tools/starships.ts",
+            "line": 6,
+            "start_line": None,
+            "severity": "low",
+            "category": "readability",
+            "suggestion": sugg_starships,
+        },
+        {
+            "path": "src/tools/people.ts",
+            "line": 6,
+            "start_line": None,
+            "severity": "low",
+            "category": "readability",
+            "suggestion": sugg_people,
+        },
+        {
+            "path": "src/tools/planets.ts",
+            "line": 6,
+            "start_line": None,
+            "severity": "low",
+            "category": "readability",
+            "suggestion": sugg_planets,
+        },
+        {
+            "path": "src/tools/common.ts",
+            "line": 3,
+            "start_line": None,
+            "severity": "high",
+            "category": "correctness",
+            "suggestion": sugg_common,
+        },
+        {
+            "path": "src/tools/films.ts",
+            "line": 3,
+            "start_line": None,
+            "severity": "high",
+            "category": "correctness",
+            "suggestion": sugg_films_if,
+        },
+        {
+            "path": "src/tools/films.ts",
+            "line": 6,
+            "start_line": None,
+            "severity": "high",
+            "category": "correctness",
+            "suggestion": sugg_films_import,
+        },
+    ]
+
+    sc = case(
+        predictions=preds,
+        file_contents=file_contents,
+        added_by_path={
+            "src/tools/starships.ts": {6},
+            "src/tools/people.ts": {6},
+            "src/tools/planets.ts": {6},
+            "src/tools/common.ts": {3},
+            "src/tools/films.ts": {3, 6},
+        },
+    )
+
+    report = score_cases([sc])
+    assert report["suggestions"] == {"total": 6, "valid": 0, "share": 0.0}
+    assert report["cases"][0]["suggestions"] == {"total": 6, "valid": 0, "share": 0.0}
