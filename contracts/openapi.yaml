@@ -2193,7 +2193,8 @@ components:
     Me:
       type: object
       description: >-
-        User plus the workspaces the user can access through GitHub App installations.
+        User plus the workspaces the user can access through live GitHub App installations:
+        a removed installation is not listed, and a workspace left with none is not either.
         Repeats every User property (tests/test_openapi_contract.py checks that they stay
         identical).
       required: [id, login, name, avatarUrl, workspaces]

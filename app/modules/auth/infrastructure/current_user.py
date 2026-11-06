@@ -38,6 +38,7 @@ class SqlAlchemyCurrentUserRepository:
                         GitHubUserWorkspaceAccess.github_user_id == scope.user_id,
                         Workspace.id.in_(scope.workspace_ids),
                         ProviderInstallation.provider == "github",
+                        ProviderInstallation.deleted_at.is_(None),
                     )
                     .order_by(Workspace.id, ProviderInstallation.external_id)
                 )

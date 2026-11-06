@@ -479,6 +479,86 @@ def test_installation_deleted_revokes_unlisted_grants_without_github_calls(
 
 
 @pytest.mark.integration
+def test_auth_me_lists_a_workspace_only_through_its_live_installation(
+    portal_database: tuple[str, str],
+) -> None:
+    from dataclasses import replace
+    from typing import Any, cast
+
+    from app.modules.integrations.webhooks.api.installation_event_dtos import (
+        parse_installation_repositories_event,
+    )
+    from app.modules.integrations.webhooks.application.installation_event_projector import (
+        InstallationEventProjector,
+    )
+    from app.modules.repositories.application.sync_installation_repositories import (
+        SyncInstallationRepositories,
+    )
+    from app.modules.repositories.infrastructure.installation_repository_unit_of_work import (
+        SqlAlchemyInstallationRepositoriesUnitOfWork,
+    )
+
+    database_url, schema = portal_database
+    engine = create_async_engine(
+        database_url, connect_args={"options": f"-csearch_path={schema}"}, poolclass=NullPool
+    )
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    # Any attempt to call GitHub fails: deleted events need no provider methods.
+    no_github = cast(Any, object())
+    projector = InstallationEventProjector(
+        installation_active=active_installation,
+        tree_provider=no_github,
+        label_provider=no_github,
+        details_provider=no_github,
+        sync=SyncInstallationRepositories(
+            uow_factory=lambda: SqlAlchemyInstallationRepositoriesUnitOfWork(factory), rule_sets={}
+        ),
+    )
+
+    async def retire_earlier_installations_of_workspace_a() -> None:
+        # A reinstall keeps the Workspace UUID, and the old rows stay with deleted_at set.
+        # External ids on both sides of 17 keep the result independent of the sort order.
+        async with factory.begin() as session:
+            for external_id in (15, 19):
+                await session.execute(
+                    text(
+                        "INSERT INTO provider_installations "
+                        "(id, workspace_id, provider, external_id, metadata, deleted_at) "
+                        "VALUES (:id, :workspace, 'github', :external, '{}'::jsonb, now())"
+                    ),
+                    {"id": uuid4(), "workspace": WORKSPACE_A, "external": external_id},
+                )
+
+    async def remove_installation_b() -> None:
+        event = replace(
+            parse_installation_repositories_event(
+                event_name="installation",
+                payload={"action": "deleted", "installation": {"id": 18}},
+            ),
+            delivery_id="deletion-delivery",
+        )
+        await projector.execute(provider_installation_id=INSTALLATION_B, event=event)
+
+    asyncio.run(retire_earlier_installations_of_workspace_a())
+    app.state.reviews_api_resources = ReviewsApiResources(engine, factory)
+    app.dependency_overrides[get_auth_scope] = lambda: AuthScope(42, (WORKSPACE_A, WORKSPACE_B))
+    try:
+        client = TestClient(app)
+        assert client.get("/api/auth/me").json()["workspaces"] == [
+            {"id": str(WORKSPACE_A), "name": "Alpha", "installationId": 17},
+            {"id": str(WORKSPACE_B), "name": "Beta", "installationId": 18},
+        ]
+        asyncio.run(remove_installation_b())
+        assert client.get("/api/auth/me").json()["workspaces"] == [
+            {"id": str(WORKSPACE_A), "name": "Alpha", "installationId": 17}
+        ]
+    finally:
+        app.dependency_overrides.clear()
+        del app.state.reviews_api_resources
+        asyncio.run(engine.dispose())
+
+
+@pytest.mark.integration
 @pytest.mark.parametrize("delete_installation", [False, True])
 @pytest.mark.parametrize("user_id", [42, 43])
 def test_removal_during_oauth_snapshot_cannot_restore_grants(
