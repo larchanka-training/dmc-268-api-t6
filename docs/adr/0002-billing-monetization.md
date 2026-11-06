@@ -177,6 +177,7 @@ P = цена_единицы(тариф, движок) × множитель
 | `RunBudget.costUsd`, `RunBudget.costLimitUsd`, `RunBudget.tokenLimit` | детали прогона | убираются из ответа клиенту; расход, порог и лимит токенов прогона видит только оператор |
 | `MetricsTotals.costUsd` | `GET /api/metrics/summary` | заменяется на `chargedUsd` за период |
 | `MetricsDay.costUsd` | `GET /api/metrics/summary`, по дням | заменяется на `chargedUsd` за день |
+| шаги `llm.call` в трейсе: `usage.cost`, `usage.cost_currency` в ответе шага, `fx` в запросе шага | `GET /api/runs/{run_id}/actions`, `/actions/{index}/response` | вырезаются из ответа клиенту при отдаче шага; в БД и для оператора остаются. Токены в `usage` остаются |
 | `WorkspaceDailyBudget.spentTodayUsd`, `dailyBudgetUsd` | `GET /api/metrics/summary` | считаются по списанному, а не по расходу: дневной лимит workspace ограничивает списания за день (§8.1) |
 
 - Токены (`tokensIn`, `tokensOut`) остаются: это техническая метрика прогона, а не
