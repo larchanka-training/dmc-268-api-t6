@@ -12,9 +12,13 @@ import re
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 from tests.test_eval_live import VALID, FakeTransport, answer, record_arm, rules_fixture_root
 
-CASES = Path(__file__).resolve().parent.parent / "test-prs-dataset" / "rules" / "cases"
+ROOT = Path(__file__).resolve().parent.parent
+CASES = ROOT / "test-prs-dataset" / "rules" / "cases"
+CATALOG = ROOT / "docs" / "test-plan" / "rules-md-scenarios-163.md"
 
 
 def _metadata(case_id: str) -> dict[str, Any]:
@@ -84,3 +88,18 @@ def test_rules_exception_contradicts_agents_and_the_rest_stays() -> None:
     (other_rule,) = [item for item in findings if item.get("origin") == "rule"]
     assert other_rule["path"] == anchor["path"]
     assert other_rule["category"] == "correctness"
+
+
+@pytest.mark.parametrize(
+    ("row", "case_id"),
+    [
+        ("Rules имеет только Style", "RUL-09"),
+        ("Конвенция уровня 4 допускает небезопасный паттерн", "RUL-10"),
+        ("Rules разрешает дублирование test setup", "RUL-11"),
+    ],
+)
+def test_catalog_row_names_its_case(row: str, case_id: str) -> None:
+    lines = CATALOG.read_text("utf-8").splitlines()
+    (found,) = [line for line in lines if line.startswith(f"| {row}")]
+    assert case_id in found
+    assert "не покрыто" not in found
