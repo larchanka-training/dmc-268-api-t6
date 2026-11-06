@@ -7,7 +7,8 @@ seam (`PR_REVIEW_FIXTURE_DIR`) or a test's own fake is an error, never a call.
 Covers: every `examples/*/` case (stdout byte-equal to `expected.json`, exit code from
 the verdict, the invocation read from the case's README); synthetic pull requests for the
 `Refs` rules (none, a bare `Refs #`, a ref that is a pull request, several issues, the other
-repo), the part a pull request names and the criteria it selects, an issue without criteria,
+repo, a repo outside the project, any case), the part a pull request names and the criteria it
+selects, an issue without criteria,
 the state warnings, the data fence of the brief; the REF grammar, exit codes 2 and 3, and the
 argv the script hands to `gh` (read-only REST calls).
 """
@@ -263,31 +264,61 @@ def test_several_refs_each_with_its_own_criteria(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize(
-    ("refs", "issues", "keys"),
+    ("pr_ref", "refs", "issues", "keys"),
     [
         (
+            "ui#5",
             f"Refs #9, {API}#7",
             [(UI, 9), (API, 7)],
             ["api#7 AC1", "api#7 AC2", "ui#9 AC1", "ui#9 AC2"],
         ),
         (
-            "Refs #9, octo/elsewhere#3",
-            [(UI, 9), ("octo/elsewhere", 3)],
+            "octo/elsewhere#5",
+            f"Refs #3, {UI}#9",
+            [("octo/elsewhere", 3), (UI, 9)],
             ["ui#9 AC1", "ui#9 AC2", "octo/elsewhere#3 AC1", "octo/elsewhere#3 AC2"],
         ),
     ],
-    ids=["api-and-ui", "another-owner"],
+    ids=["api-and-ui", "own-repo-of-another-owner"],
 )
 def test_the_key_names_the_issue(
-    tmp_path: Path, refs: str, issues: list[tuple[str, int]], keys: list[str]
+    tmp_path: Path, pr_ref: str, refs: str, issues: list[tuple[str, int]], keys: list[str]
 ) -> None:
     """Every issue numbers its criteria from AC1; the AC table's key tells them apart."""
     body = "## Acceptance Criteria\n\n- [ ] one\n- [ ] two\n"
     fixtures = case(
         tmp_path, pr_json(refs), *(issue_json(body, repo=r, number=n) for r, n in issues)
     )
-    doc = doc_of(run("ui#5", fixtures=fixtures))
+    doc = doc_of(run(pr_ref, fixtures=fixtures))
     assert [c["key"] for i in doc["issues"] for c in i["acceptance_criteria"]] == keys
+
+
+@pytest.mark.parametrize(
+    ("pr_ref", "refs", "repo", "number"),
+    [
+        ("ui#5", f"Refs {API.upper()}#7", API, 7),
+        ("ui#5", f"Refs {UI.title()}#9", UI, 9),
+        (f"{UI.upper()}#5", "Refs #9", UI, 9),
+        ("Octo/Elsewhere#5", "Refs #3", "octo/elsewhere", 3),
+        ("Octo/Elsewhere#5", "Refs OCTO/elsewhere#3", "octo/elsewhere", 3),
+        ("Octo/Elsewhere#5", f"Refs {API}#7", API, 7),
+    ],
+    ids=[
+        "api-upper",
+        "ui-title",
+        "own-repo-upper",
+        "bare-ref-in-a-mixed-case-repo",
+        "full-ref-in-a-mixed-case-repo",
+        "api-from-another-owner",
+    ],
+)
+def test_the_project_repos_are_read_in_any_case(
+    tmp_path: Path, pr_ref: str, refs: str, repo: str, number: int
+) -> None:
+    issue = issue_json("## Acceptance Criteria\n\n- [ ] one\n", repo=repo, number=number)
+    doc = doc_of(run(pr_ref, fixtures=case(tmp_path, pr_json(refs), issue)))
+    assert [i["ref"] for i in doc["issues"]] == [f"{repo}#{number}"]
+    assert doc["warnings"] == []
 
 
 def test_a_ref_to_a_pull_request_is_skipped(tmp_path: Path) -> None:
@@ -305,6 +336,37 @@ def test_refs_that_name_only_pull_requests_stop(tmp_path: Path) -> None:
     assert r.returncode == 1
     assert doc["verdict"] == "stop"
     assert doc["reasons"][0].startswith(f"{UI}#5 has no `Refs` line naming an issue")
+
+
+OUTSIDE = ["evil/private#1", "../..#1", "larchanka-training/other#1"]
+OUTSIDE_IDS = ["another-owner", "dots", "same-owner"]
+
+
+def outside_warning(ref: str) -> str:
+    return f"`Refs` names {ref}, neither this pull request's repo nor a project repo: skipped"
+
+
+@pytest.mark.parametrize("ref", OUTSIDE, ids=OUTSIDE_IDS)
+def test_a_ref_outside_the_project_is_skipped(tmp_path: Path, ref: str) -> None:
+    """It has no fixture, so a read would be exit 3; the live proof is the argv test below."""
+    issue = issue_json("## Acceptance Criteria\n\n- [ ] one\n")
+    doc = doc_of(run("ui#5", fixtures=case(tmp_path, pr_json(f"Refs #9, {ref}"), issue)))
+    assert [i["ref"] for i in doc["issues"]] == [f"{UI}#9"]
+    assert doc["warnings"] == [outside_warning(ref)]
+
+
+@pytest.mark.parametrize("ref", OUTSIDE, ids=OUTSIDE_IDS)
+def test_refs_that_name_only_repos_outside_the_project_stop(tmp_path: Path, ref: str) -> None:
+    """The same reason as a pull request with no `Refs` at all."""
+    (tmp_path / "no-refs").mkdir()
+    no_refs = doc_of(run("ui#5", fixtures=case(tmp_path / "no-refs", pr_json(None))))
+    r = run("ui#5", fixtures=case(tmp_path, pr_json(f"Refs {ref}")))
+    doc = doc_of(r)
+    assert r.returncode == 1
+    assert doc["verdict"] == "stop"
+    assert doc["issues"] == []
+    assert doc["reasons"] == no_refs["reasons"]
+    assert doc["warnings"] == [outside_warning(ref)]
 
 
 @pytest.mark.parametrize(
@@ -513,11 +575,17 @@ def test_a_gh_timeout_is_exit_3(
     assert json.loads(err) == {"error": f"gh api repos/{UI}/pulls/5 timed out after 120 s"}
 
 
-def test_the_argv_handed_to_gh(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Live mode: one read of the pull request, one per issue; nothing else, never a write."""
+@pytest.mark.parametrize(
+    "refs",
+    [f"Refs {API}#7", *(f"Refs {ref}, {API}#7" for ref in OUTSIDE)],
+    ids=["project-only", *OUTSIDE_IDS],
+)
+def test_the_argv_handed_to_gh(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, refs: str) -> None:
+    """Live mode: one read of the pull request, one per issue of the project; nothing else, never
+    a write. A ref outside the project is not requested at all."""
     log = tmp_path / "gh.log"
     responses = {
-        f"repos/{UI}/pulls/5": pr_json(f"Refs {API}#7"),
+        f"repos/{UI}/pulls/5": pr_json(refs),
         f"repos/{API}/issues/7": issue_json(None, repo=API, number=7),
     }
     (tmp_path / "responses.json").write_text(json.dumps(responses), encoding="utf-8")
