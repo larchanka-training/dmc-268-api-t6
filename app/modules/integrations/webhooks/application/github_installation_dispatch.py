@@ -235,6 +235,7 @@ class RepositoryVisibilityHandler(Protocol):
         repository_external_id: int,
         full_name: str,
         web_url: str | None,
+        observed_at: datetime,
     ) -> bool:
         """False when the repository is not connected."""
         ...
@@ -423,6 +424,7 @@ class GitHubInstallationDeliveryDispatcher:
                 event.repository_external_id,
                 event.full_name,
                 event.web_url,
+                observed_at,
             )
         elif isinstance(event, RepositoryTransferredEvent):
             known = await visibility.forget_repository(event.repository_external_id, observed_at)

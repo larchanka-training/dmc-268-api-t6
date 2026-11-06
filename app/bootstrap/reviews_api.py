@@ -67,6 +67,9 @@ from app.modules.integrations.webhooks.infrastructure.github_repository_details 
 from app.modules.integrations.webhooks.infrastructure.github_repository_labels import (
     GitHubRepositoryLabelProvider,
 )
+from app.modules.integrations.webhooks.infrastructure.github_repository_visibility import (
+    GitHubRepositoryVisibilityReader,
+)
 from app.modules.integrations.webhooks.infrastructure.github_webhook_receipts import (
     SqlAlchemyGitHubWebhookReceiptUnitOfWork,
 )
@@ -75,6 +78,7 @@ from app.modules.repositories.application.repository_settings import (
 )
 from app.modules.repositories.application.repository_visibility import (
     RecordRepositoryVisibility,
+    RefreshRepositoryVisibility,
 )
 from app.modules.repositories.application.rules_status import (
     GetRulesStatus,
@@ -242,6 +246,18 @@ class ReviewsApiResources:
             ),
             action_of=action_of,
             classify_failure=classify_failure,
+        )
+
+    def repository_visibility_refresher(
+        self,
+        *,
+        client: httpx.AsyncClient,
+        token_provider: GitHubInstallationAccessTokenProvider,
+    ) -> RefreshRepositoryVisibility:
+        """Compose the ``webhook-worker`` re-read of the flag the public badge trusts (#454)."""
+        return RefreshRepositoryVisibility(
+            uow_factory=partial(SqlAlchemyRepositoryVisibilityUnitOfWork, self._session_factory),
+            reader=GitHubRepositoryVisibilityReader(client=client, token_provider=token_provider),
         )
 
     def rules_status_refresher(

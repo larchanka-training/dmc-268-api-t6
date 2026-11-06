@@ -58,6 +58,9 @@ from app.modules.integrations.webhooks.infrastructure.redis_installation_token_c
     RedisLike,
     installation_token_cache,
 )
+from app.modules.repositories.application.repository_visibility import (
+    RefreshRepositoryVisibility,
+)
 from app.modules.repositories.application.rules_status import (
     RULES_REFRESH_BATCH,
     RefreshRulesStatuses,
@@ -262,6 +265,16 @@ async def refresh_rules_once(refresher: RefreshRulesStatuses) -> int:
             return 0
 
 
+async def refresh_visibility_once(refresher: RefreshRepositoryVisibility) -> None:
+    """Confirm the flags the public badge trusts (#454); a failure waits for the next pass."""
+    with job_span("repository.visibility.refresh") as span:
+        try:
+            await refresher.execute()
+        except Exception as error:
+            mark_error(span, error)
+            _LOGGER.exception("Repository visibility refresh failed")
+
+
 async def hourly_maintenance(
     receiver: WebhookReplayReceiver, reviver: ReviveDeferredInstallationDeliveries
 ) -> None:
@@ -275,6 +288,7 @@ async def sweep_providers_forever(
     *,
     poll_interval: float = 30.0,
     rules: RefreshRulesStatuses | None = None,
+    visibility: RefreshRepositoryVisibility | None = None,
 ) -> NoReturn:
     """One fair bounded round; error cooldowns cannot be bypassed by wake hints."""
     if not math.isfinite(poll_interval) or poll_interval <= 0:
@@ -303,6 +317,8 @@ async def sweep_providers_forever(
                 await purge_once(provider.receiver, provider=provider.provider)
                 if provider.reviver is not None:
                     await revive_once(provider.reviver)
+            if visibility is not None:
+                await refresh_visibility_once(visibility)
             next_maintenance = time.monotonic() + _MAINTENANCE_INTERVAL_SECONDS
         if immediate:
             await asyncio.sleep(0)
@@ -321,6 +337,7 @@ async def sweep_forever(
     *,
     poll_interval: float = 30.0,
     rules: RefreshRulesStatuses | None = None,
+    visibility: RefreshRepositoryVisibility | None = None,
 ) -> NoReturn:
     """Keep the existing GitHub entrypoint on the same provider scheduler."""
     await sweep_providers_forever(
@@ -328,6 +345,7 @@ async def sweep_forever(
         wake,
         poll_interval=poll_interval,
         rules=rules,
+        visibility=visibility,
     )
 
 
@@ -395,6 +413,12 @@ async def run_forever() -> None:
             if client is not None or bitbucket_rules_client is not None
             else None
         )
+        # GitLab-only startup has no GitHub token, and no flag for the badge to refresh.
+        visibility = (
+            resources.repository_visibility_refresher(client=client, token_provider=tokens)
+            if client is not None and tokens is not None
+            else None
+        )
         if config.gitlab is not None:
             gitlab = await stack.enter_async_context(
                 gitlab_webhook_replay_resources(
@@ -414,7 +438,9 @@ async def run_forever() -> None:
         wake = asyncio.Event()
         # TaskGroup exits/awaits listener, scans and heartbeat BEFORE owned resources.
         async with asyncio.TaskGroup() as tasks:
-            tasks.create_task(sweep_providers_forever(providers, wake, rules=rules))
+            tasks.create_task(
+                sweep_providers_forever(providers, wake, rules=rules, visibility=visibility)
+            )
             tasks.create_task(listen_forever(config.database_url, wake))
             if config.heartbeat_file is not None:
                 tasks.create_task(beat(config.heartbeat_file))

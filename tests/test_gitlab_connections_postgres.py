@@ -427,6 +427,7 @@ def test_empty_gitlab_migration_round_trips_preserving_github_receipts_and_setti
             if table == "repositories":
                 assert after.pop("private") is None
                 assert after.pop("private_observed_at") is None
+                assert after.pop("full_name_observed_at") is None
             assert after == before[table]
         # Alembic does not compare CHECK constraints: retain explicit physical and
         # metadata names; the adversarial tests above exercise their SQL semantics.

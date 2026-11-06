@@ -136,6 +136,12 @@ class SqlAlchemyInstallationRepositoryStore:
             Repository.private_observed_at.is_(None)
             | (Repository.private_observed_at < inserted.private_observed_at)
         )
+        # An old delivery of the same repository does not undo a later rename.
+        name_newer = (
+            inserted.full_name_observed_at.is_(None)
+            | Repository.full_name_observed_at.is_(None)
+            | (Repository.full_name_observed_at < inserted.full_name_observed_at)
+        )
         statement = (
             insert(Repository)
             .values(
@@ -146,13 +152,18 @@ class SqlAlchemyInstallationRepositoryStore:
                 web_url=snapshot.web_url,
                 private=snapshot.private,
                 private_observed_at=snapshot.private_observed_at,
+                full_name_observed_at=snapshot.private_observed_at,
             )
             .on_conflict_do_update(
                 index_elements=[Repository.provider_installation_id, Repository.external_id],
                 set_={
-                    "full_name": snapshot.full_name,
+                    "full_name": case((name_newer, inserted.full_name), else_=Repository.full_name),
+                    "full_name_observed_at": case(
+                        (name_newer, inserted.full_name_observed_at),
+                        else_=Repository.full_name_observed_at,
+                    ),
                     "default_branch": snapshot.default_branch,
-                    "web_url": snapshot.web_url,
+                    "web_url": case((name_newer, inserted.web_url), else_=Repository.web_url),
                     "private": case((newer, inserted.private), else_=Repository.private),
                     "private_observed_at": case(
                         (newer, inserted.private_observed_at), else_=Repository.private_observed_at
