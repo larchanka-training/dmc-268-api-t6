@@ -377,9 +377,13 @@ which a retry or a revival keeps, so an old delivery loses to a later change.
   delivery. An absent or invalid value teaches nothing and never rejects the payload.
 - The hourly maintenance pass reads up to 50 connected repositories not confirmed for 24 hours,
   oldest first, by `GET /repositories/{id}`, outside any transaction, with a time taken before the
-  batch. 200 writes the flag and the name; 404, 403 without a rate limit and a token GitHub refuses
-  with 403 or 404 write `NULL`; a failed read writes nothing, and three of them end the pass, so an
-  outage holds the scan for a few timeouts only. A rate limit counts as a failed read.
+  batch. 200 writes the flag and the name; any other final answer, and a token GitHub refuses with
+  403 or 404, write `NULL`, so the row steps back a day. A network error, a 5xx, a 401, a 429 or a
+  rate limit (`Retry-After`, `X-RateLimit-Remaining: 0`) is a failed read: it writes nothing, and
+  three of them end the pass, so an outage holds the scan for a few timeouts only. The known limit:
+  a repository that alone answers 5xx for days stays first in the queue, and three of those would end
+  every pass, so all badges would turn neutral after 72 hours. GitHub's 5xx is not known to be
+  specific to a repository, and the log line of each failed read names it.
 
 The Repository subscription of the GitHub App is a manual step of the App settings (staging, dev
 and sandbox Apps alike; Permissions & events, Subscribe to events, Repository). It needs no new

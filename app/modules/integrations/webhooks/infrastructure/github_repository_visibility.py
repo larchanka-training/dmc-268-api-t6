@@ -56,7 +56,7 @@ class GitHubRepositoryVisibilityReader:
                 return None
             raise RepositoryVisibilityUnavailable("installation token unavailable") from error
         except httpx.HTTPStatusError as error:
-            if error.response.status_code in _TOKEN_REFUSED:
+            if error.response.status_code in _TOKEN_REFUSED and not _rate_limited(error.response):
                 return None
             raise RepositoryVisibilityUnavailable(
                 f"installation token request failed with HTTP {error.response.status_code}"
@@ -78,14 +78,14 @@ class GitHubRepositoryVisibilityReader:
             raise RepositoryVisibilityUnavailable(
                 f"repository request failed: {type(error).__name__}"
             ) from error
-        if response.status_code == 404 or (
-            response.status_code == 403 and not _rate_limited(response)
-        ):
-            return None
-        if response.status_code != 200:
+        if _retryable(response):
             raise RepositoryVisibilityUnavailable(
                 f"repository request failed with HTTP {response.status_code}"
             )
+        if response.status_code != 200:
+            # A final answer. Written as unknown it steps back a day; read as a failure the row
+            # would stay first in the queue, and three such rows would end every pass.
+            return None
         try:
             payload = response.json()
         except ValueError as error:
@@ -93,6 +93,15 @@ class GitHubRepositoryVisibilityReader:
         if not isinstance(payload, dict):
             raise RepositoryVisibilityUnavailable("repository response is not an object")
         return _reading(payload)
+
+
+def _retryable(response: httpx.Response) -> bool:
+    """The answer says nothing about this repository: an outage, a limit or the token itself."""
+    return (
+        response.status_code >= 500
+        or response.status_code in {401, 429}
+        or (response.status_code == 403 and _rate_limited(response))
+    )
 
 
 def _rate_limited(response: httpx.Response) -> bool:
