@@ -112,7 +112,11 @@ modules hold only `infrastructure/` code and `app/entrypoints/` does not exist y
   repositories only `flush()`.
   Narrow exception: `SqlAlchemyUsageLedger.record` writes `usage_events` in its own
   short transaction after the provider call completes, so cost survives rollback of
-  the main run. This exception does not apply to ordinary repositories and does not
+  the main run. Second narrow exception (planned with #371, ADR 0002 §3.3): the
+  billing charge rows in `credit_ledger` (`usage_debit`, `run_settlement`,
+  reversals) are written in their own short transaction right after `usage_events`
+  or after the run's final state is committed, idempotent by `usage_event_id` or
+  `run_id`. These exceptions do not apply to ordinary repositories and do not
   permit network calls inside a DB transaction (.agents/rules/backend.md §3.3).
 - Do not put business logic in a router — decode the transport contract and
   call a use case.
