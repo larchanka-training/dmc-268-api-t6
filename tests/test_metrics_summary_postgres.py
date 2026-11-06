@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import os
 import selectors
 from collections.abc import Iterator
@@ -31,6 +30,7 @@ from tests.portal_postgres import (
     WS_A,
     WS_B,
     Env,
+    clean_review_result,
     portal_schema,
 )
 
@@ -281,7 +281,7 @@ def test_metrics_summary_matches_pull_verdicts_and_published_findings(
                     {
                         "id": uuid4(),
                         "run": clean,
-                        "body": _clean_result(HEAD),
+                        "body": clean_review_result(HEAD),
                         "at": datetime(2026, 10, 26, 12, tzinfo=UTC),
                     },
                 )
@@ -513,33 +513,4 @@ async def _finding(
             "published": published,
             "drop_reason": drop_reason,
         },
-    )
-
-
-def _clean_result(head: str) -> str:
-    return json.dumps(
-        {
-            "severity_counts": {"critical": 0, "high": 0, "medium": 0, "low": 0, "info": 0},
-            "verdict": "clean",
-            "summary": {
-                "problem": "Подтверждённых замечаний нет.",
-                "done_well": "Проанализировано файлов с текстовыми изменениями: 1; "
-                "исключено файлов: 0.",
-                "effort": "none",
-            },
-            "coverage": {
-                "version": 1,
-                "head_sha": head,
-                "diff_digest": "a" * 64,
-                "snapshot_digest": "b" * 64,
-                "file_list_complete": True,
-                "total_files": 1,
-                "reviewed_files": 1,
-                "status": "complete",
-                "exclusion_counts": {},
-                "reason_counts": {},
-                "exclusions": [],
-                "reasons": [],
-            },
-        }
     )
