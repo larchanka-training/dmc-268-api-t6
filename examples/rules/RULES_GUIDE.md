@@ -32,9 +32,10 @@ every line costs tokens and shapes the review.
 - Delete each rule your project does not follow. A rule about a helper or a folder you do not have
   can produce false findings.
 - Write your own rules the way the templates do: what is required, where, why, and
-  `Report … as a security|correctness|performance|readability problem`. Rules in this shape raised
-  the share of project constraints the reviewer found from 40 % to 80 % in the
-  [A/B run](../../docs/test-plan/RULES_MD_TEST_REPORT.md) on review prompt v5.
+  `Report … as a security|correctness|performance|readability problem`. In a small
+  [A/B run](../../docs/test-plan/RULES_MD_TEST_REPORT.md) on review prompt v5 (5 constraint cases,
+  one model), the rules of the eval corpus raised the share of constraints found from 40 % to 80 %.
+  That measures those rules, not these templates, and promises no gain for your project.
 - Leave out what a linter or a type checker enforces: the service
   [drops such findings](../../review/postprocess/lint-filter.md) anyway.
 
