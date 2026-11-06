@@ -9,7 +9,7 @@
 | Входные решения | D1-D6 эпика от 2026-10-29. ADR меняет D1: фиксированная цена за ревью вместо «расход × наценка», изменение принято техлидом в ревью этого PR (§3.2). Остальные решения ADR закрепляет в каноне |
 | Изменяемый канон | [SYSTEM_DESIGN](../SYSTEM_DESIGN.md) Р-7 и §15, [BACKEND_ARCHITECTURE](../BACKEND_ARCHITECTURE.md), правило короткой транзакции в `AGENTS.md` и `.agents/rules/backend.md`; остальное вместе с реализацией, карта изменений в §15 |
 
-Формат повторяет [ADR 0001](0001-graph-rag-v1.md). Документ проектный: код, миграции
+Структура шапки и разделов повторяет [ADR 0001](0001-graph-rag-v1.md). Документ проектный: код, миграции
 и зависимости им не меняются. Все значения ниже относятся к Stripe sandbox (D2) и
 моку продавца (D3). Пороги расхода прогона (§8.2) ниже самой низкой цены ревью с
 НДС на любом тарифе. Выручка без НДС у Pro при высокой ставке НДС может быть ниже
@@ -161,7 +161,7 @@ deep: 5 цен единицы).
 | Итог run | Что списано |
 |---|---|
 | `succeeded` с хотя бы одним вызовом LLM | ровно `P` |
-| `failed` (наша сторона: ошибка LLM, таймаут, баг, verifier) | 0: каждое списание run сторнируется строкой `adjustment` в тот же грант (§5.1) |
+| любой `failed`, с любым `error_code` (ошибка LLM, таймаут, баг, verifier, `github_forbidden`, `pr_base_changed`, `llm_context_overflow` и другие) | 0: каждое списание run сторнируется строкой `adjustment` в тот же грант (§5.1) |
 | `cancelled` (новый `head_sha`, PR закрыт, `POST /api/runs/{id}/cancel`) | уже списанное по §3.3, без доплаты |
 | `skipped` без вызовов LLM (гейт 1, гейт 2, `budget_paused`) | 0 |
 | `skipped` после вызовов LLM на прошлой попытке run | уже списанное, без доплаты, как `cancelled` |
@@ -419,8 +419,9 @@ deep: 5 цен единицы).
 - **Что видит клиент** (GitHub): check-run `completed/skipped` с текстом «Баланс
   исчерпан, ревью не запущено» и ссылкой на пополнение; комментарий в PR с той же
   ссылкой не чаще раза в сутки на PR; причина в ui. Время последнего такого
-  комментария хранится в `code_changes.balance_notice_at` (новое поле, #371). Для GitLab и Bitbucket
-  в ADR пока только причина в ui; их поверхность (§19) решается до #371.
+  комментария хранится в `code_changes.balance_notice_at` (новое поле, #371).
+  Для GitLab и Bitbucket в ADR пока только причина в ui; их поверхность (§19)
+  решается до #371.
 - **Начатые прогоны** доделываются: их цена уже удержана (§5.2). Параллельные
   прогоны не уводят остаток в минус, овердрафт 0.
 - **`daily_budget_usd`** остаётся отдельным дневным лимитом workspace, 0 значит
@@ -540,9 +541,9 @@ deep: 5 цен единицы).
 
 | Объект | Использование |
 |---|---|
-| Customer | один на workspace; `metadata.workspace_id`; создаётся при первой оплате |
+| Customer | один на workspace; `metadata.workspace_id`; создаётся нами до первого Checkout любого вида (`mode=payment`, `subscription` или `setup`) и передаётся в сессию как `customer` |
 | Checkout Session | пополнение (`mode=payment`), подписка (`mode=subscription`), сохранение карты (`mode=setup`) |
-| Product, Price | Starter и Pro: фиксированная месячная цена (licensed), `tax_behavior=inclusive`; пополнение: `price_data` на выбранную сумму |
+| Product, Price | Starter и Pro: фиксированная месячная цена (licensed), `tax_behavior=inclusive`; пополнение: `price_data` на выбранную сумму с `tax_behavior=inclusive` |
 | Subscription | один активный тариф на workspace |
 | SetupIntent | сохранение карты `off_session` |
 | Invoice (разовый) | авто-пополнение (§6.2); счёт пополнения через Checkout `invoice_creation` |
@@ -795,6 +796,9 @@ deep: 5 цен единицы).
 | PIPELINE_SPEC §7 (check-run, только GitHub) | С #371: у `skipped` с `balance_exhausted` в summary ссылка на пополнение (сейчас у `skipped` ссылки нет); комментарий в PR с той же ссылкой не чаще раза в сутки на PR (§8.1) |
 | `AGENTS.md`, `.agents/rules/backend.md` §3, BACKEND_ARCHITECTURE (исключения короткой транзакции) | С #371: имя единственной точки записи строк списания (класс и метод модуля `billing`) вписывается рядом с `SqlAlchemyUsageLedger.record` |
 | SD §6.5, §8.2, §12, `contracts/openapi.yaml` | С #373: роли, Owner из GitHub, исключения, приглашения, право App `members: read`, проверка роли в БД; исключение проверяется на каждом запросе к workspace, включая чтение (`app/modules/auth/application/scope.py`, §11.3); вебхуки `organization` и `membership` (§11.2) |
+| BACKEND_ARCHITECTURE (таблица задач worker, лидер-цикл) | С #371: задачи досписания и истечения (§10.6) и суточная сверка со Stripe (§10.5) в лидер-цикле |
+| `app/modules/reviews/application/get_metrics_summary.py` (флаг `paused` от `FAST_RUN_COST_LIMIT`) | С #371: флаг считается от цены единицы тарифа и остатка дня по списаниям (§8.1) |
+| PIPELINE_SPEC §1 T5 | С #371 и #372: причины `balance_exhausted` и `plan_repo_limit` при claim |
 | `contracts/openapi.yaml`, #310 | С #310 и #371: поля расхода для клиента по таблице §3.5 |
 
 ## 16. Зависимости и порядок внедрения
