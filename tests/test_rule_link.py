@@ -5,13 +5,14 @@ from __future__ import annotations
 import asyncio
 import re
 from dataclasses import replace
-from typing import Any, Literal
+from typing import Any, Literal, cast
 from uuid import UUID
 
 import pytest
 
 from app.modules.reviews.application.conventions import GeneratedConventions
 from app.modules.reviews.application.execute_review import ExecuteReviewRun, ReviewPromptInput
+from app.modules.reviews.application.findings_post_processor import ProcessedReviewOutput
 from app.modules.reviews.application.prompt_builder import (
     ChangedFile,
     DiffLine,
@@ -26,19 +27,30 @@ from app.modules.reviews.application.reflection_pass import (
 )
 from app.modules.reviews.application.review_output import (
     EvidenceRef,
+    FindingPostProcessingInput,
     ReviewFindingV2,
+    ReviewOutput,
+    ReviewPublication,
     RuleLineRef,
     VerifiedReviewOutput,
 )
+from app.modules.reviews.application.store_review_output import (
+    PublishingGuard,
+    StoreReviewOutput,
+)
 from app.modules.reviews.application.verdict import HashedFinding, findings_hash
 from tests.policy_snapshot_fakes import make_policy_document_present
+from tests.test_findings_post_processor import _added_file_diff_map
 from tests.verifier_pipeline_fakes import (
     MAIN_BLOCK_ID,
     RUN_ID,
+    SUMMARY,
     FakeModel,
     FakeProcessor,
     FakePublisher,
+    FakeQueue,
     FakeRepository,
+    FakeUnitOfWork,
     verifier_snapshot,
 )
 
@@ -268,3 +280,135 @@ def test_the_lines_stay_with_their_finding_when_the_threshold_drops_an_earlier_o
 
     assert [item["title"] for item in output["findings"]] == ["Kept"]  # type: ignore[attr-defined]
     assert output.rule_line_refs == {0: RuleLineRef(_REVISION, 2, 3)}
+
+
+_RULES = ".review/rules.md"
+_V2_RULES = frozenset({_RULES, "AGENTS.md"})
+_LINES = RuleLineRef(_REVISION, 5, 8)
+_REPOSITORY = "acme/widgets"
+_LINES_URL = (
+    "https://github.com/acme/widgets/blob/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    "/.review/rules.md?plain=1#L5-L8"
+)
+
+
+class _StoringRepository:
+    def __init__(self, repository: str | None, max_inline: int | None) -> None:
+        self._repository = repository
+        self._max_inline = max_inline
+        self.processed: ProcessedReviewOutput | None = None
+        self.findings_hash: str | None = None
+
+    async def get_post_processing_input(self, run_id: UUID) -> FindingPostProcessingInput:
+        return FindingPostProcessingInput(
+            diff_map=_added_file_diff_map("app/main.py", 20),
+            checked_paths=frozenset({"app/main.py"}),
+            rule_names=frozenset(),
+            repository_max_inline=self._max_inline,
+            github_repository_full_name=self._repository,
+        )
+
+    async def lock_for_publishing(self, run_id: UUID) -> PublishingGuard:
+        return PublishingGuard(
+            state="running",
+            worker_id="test-worker",
+            cancel_requested=False,
+            head_sha="a" * 40,
+            head_current=True,
+            repository_review_event="COMMENT",
+        )
+
+    async def store_review_output(
+        self,
+        run_id: UUID,
+        answer: dict[str, Any],
+        parsed: ReviewOutput,
+        processed: ProcessedReviewOutput,
+    ) -> ReviewPublication:
+        self.processed = processed
+        return ReviewPublication(head_sha="a" * 40, findings=(), review_body="body")
+
+    async def enter_publishing(self, run_id: UUID, **kwargs: Any) -> None:
+        self.findings_hash = kwargs["postprocess_response"]["findings_hash"]
+
+
+def _stored(
+    findings: list[dict[str, Any]],
+    rule_line_refs: dict[int, RuleLineRef],
+    *,
+    repository: str | None = _REPOSITORY,
+    allowed_v2_rules: frozenset[str] = _V2_RULES,
+    max_inline: int | None = None,
+) -> _StoringRepository:
+    reviews = _StoringRepository(repository, max_inline)
+    store = StoreReviewOutput(
+        cast(Any, lambda: FakeUnitOfWork(reviews)),
+        FakeQueue(),
+        worker_id="test-worker",
+        run_url=lambda _: None,
+    )
+    output = VerifiedReviewOutput(
+        {"findings": findings, "summary": SUMMARY},
+        allowed_v2_rules=allowed_v2_rules,
+        severity_threshold="all",
+        rule_line_refs=rule_line_refs,
+    )
+    assert asyncio.run(store.execute(RUN_ID, output)) is True
+    assert reviews.processed is not None
+    return reviews
+
+
+def test_an_inline_finding_on_the_rules_file_gets_the_link_to_its_lines() -> None:
+    reviews = _stored([_model_finding(10, "Rule")], {0: _LINES})
+
+    assert reviews.processed is not None
+    assert [item.rule_link for item in reviews.processed.inline] == [_LINES_URL]
+
+
+@pytest.mark.parametrize(
+    ("rule_name", "rule_line_refs", "kwargs"),
+    [
+        pytest.param(_RULES, {}, {}, id="no-valid-requirement"),
+        pytest.param("AGENTS.md", {0: _LINES}, {}, id="another-source"),
+        pytest.param(None, {0: _LINES}, {}, id="no-attribution"),
+        pytest.param(_RULES, {0: _LINES}, {"repository": None}, id="not-a-github-repository"),
+    ],
+)
+def test_any_other_finding_is_stored_and_published_without_a_link(
+    rule_name: str | None, rule_line_refs: dict[int, RuleLineRef], kwargs: dict[str, Any]
+) -> None:
+    finding = {**_model_finding(10, "Rule"), "rule_name": rule_name}
+
+    reviews = _stored([finding], rule_line_refs, **kwargs)
+
+    assert reviews.processed is not None
+    assert [item.rule_link for item in reviews.processed.inline] == [None]
+
+
+def test_a_removed_attribution_takes_the_link_away() -> None:
+    reviews = _stored([_model_finding(10, "Rule")], {0: _LINES}, allowed_v2_rules=frozenset())
+
+    assert reviews.processed is not None
+    assert [
+        (item.finding.rule_name, item.rule_link)
+        for item in (*reviews.processed.inline, *reviews.processed.body_only)
+    ] == [(None, None)]
+
+
+def test_a_finding_in_the_review_body_has_no_link() -> None:
+    reviews = _stored(
+        [_model_finding(10, "Inline"), _model_finding(11, "In the body")],
+        {0: _LINES, 1: _LINES},
+        max_inline=1,
+    )
+
+    assert reviews.processed is not None
+    assert [item.rule_link for item in reviews.processed.inline] == [_LINES_URL]
+    assert [item.rule_link for item in reviews.processed.body_only] == [None]
+
+
+def test_the_stored_hash_covers_the_link() -> None:
+    with_link = _stored([_model_finding(10, "Rule")], {0: _LINES})
+    without = _stored([_model_finding(10, "Rule")], {})
+
+    assert with_link.findings_hash != without.findings_hash

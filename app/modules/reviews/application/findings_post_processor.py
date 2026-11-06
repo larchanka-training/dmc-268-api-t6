@@ -93,6 +93,8 @@ class ProcessedFinding:
     position: int
     bucket: Bucket
     drop_reason: DropReason | None = None
+    # The GitHub link to the rules lines of an inline finding (#465); set by the store.
+    rule_link: str | None = None
 
 
 @dataclass(frozen=True)
