@@ -358,6 +358,23 @@ included), usually more than the `pull_request` receipts. On staging, with a few
 repositories, that is tens to a few hundred receipts a day. If it grows enough to matter for
 the receipt table, dropping non-default-branch pushes before storing them is a separate change.
 
+Repository visibility. The public README badge shows a repository only when
+`repositories.private` is `false` (#454, `docs/SYSTEM_DESIGN.md` §8.2). `repository.privatized`
+and `repository.publicized` overwrite the flag in one short transaction with no GitHub call; a
+repository that is not connected ends as `ignored_irrelevant_event` with
+`detail=unknown_repository`, because connecting it reads the flag anyway, and the other
+`repository` actions end as `ignored_irrelevant_event`. Every `pull_request` delivery also passes
+`repository.private` of its payload before any early return: it fills `NULL` or closes, never
+opens, so a late delivery cannot reopen a repository made private, and a failed write is logged
+and does not fail the delivery. An absent or invalid value teaches nothing and never rejects the
+payload.
+
+The Repository subscription of the GitHub App is a required manual step of the App settings
+(staging, dev and sandbox Apps alike; Permissions & events, Subscribe to events, Repository). It
+needs no new permission, `metadata: read` is enough. Without it no `repository` event arrives and
+nothing fails: a repository made private leaves the badge only with its next `pull_request`
+delivery, and one made public stays on "no data".
+
 Installation events. GitHub sends each repository of `installation.created`,
 `installation_repositories.added` and the removal events as `id`, `node_id`, `name`,
 `full_name` and `private` only. The parser requires `id` and `full_name` and ignores the
@@ -523,7 +540,8 @@ GitHub webhook delivery <delivery_id> event=<event> status=<status> detail=<deta
 ```
 
 `status` is the dispatch status: `projected_pr`, `processed_ci`, `onboarded`,
-`requested_rules_refresh` (a `push` to the default branch, see "Rules status reads"), the final
+`requested_rules_refresh` (a `push` to the default branch, see "Rules status reads"),
+`updated_repository_visibility` (see "Repository visibility"), the final
 `ignored_irrelevant_event` and `ignored_invalid_event`, or a deferral
 (`ignored_unknown_installation`, `ignored_unknown_repository`, `deferred_known_event`,
 `deferred_repository_details`, retried as described in "Deferred deliveries" below;

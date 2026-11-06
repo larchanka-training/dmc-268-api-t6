@@ -423,6 +423,7 @@ def test_empty_gitlab_migration_round_trips_preserving_github_receipts_and_setti
             after = connection.execute(text(f"SELECT to_jsonb(t) FROM {table} t")).scalar_one()
             if table == "repositories":
                 assert after.pop("workspace_id") is None
+                assert after.pop("private") is None
             if table == "webhook_events":
                 assert after.pop("provider") == "github"
                 assert after.pop("gitlab_connection_id") is None

@@ -94,4 +94,9 @@ def _parse_repository_details(payload: object) -> RepositoryDetails:
         raise GitHubRepositoryDetailsResponseError(
             "GitHub repository response must contain an html_url"
         )
-    return RepositoryDetails(default_branch=default_branch, web_url=web_url)
+    private = payload.get("private")
+    return RepositoryDetails(
+        default_branch=default_branch,
+        web_url=web_url,
+        private=private if isinstance(private, bool) else None,
+    )

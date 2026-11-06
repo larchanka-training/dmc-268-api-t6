@@ -60,11 +60,18 @@ class _GitHubRepositoryDto(_GitHubIdDto):
     # Index only (#143): a merge into it requests an index update. An invalid value reads
     # as absent, so it never rejects a review payload.
     default_branch: str | None = None
+    # Public badge only (#454): an invalid value reads as absent too.
+    private: bool | None = None
 
     @field_validator("default_branch", mode="before")
     @classmethod
     def _branch_or_none(cls, value: object) -> str | None:
         return value if isinstance(value, str) and 0 < len(value) <= 255 else None
+
+    @field_validator("private", mode="before")
+    @classmethod
+    def _private_or_none(cls, value: object) -> bool | None:
+        return value if isinstance(value, bool) else None
 
 
 class _GitHubUserDto(BaseModel):
@@ -177,4 +184,5 @@ def _event_from_payload(parsed: _GitHubPullRequestPayloadDto) -> PullRequestEven
         sender_login=parsed.sender.login if parsed.sender is not None else None,
         merge_commit_sha=item.merge_commit_sha,
         repository_default_branch=parsed.repository.default_branch,
+        repository_private=parsed.repository.private,
     )

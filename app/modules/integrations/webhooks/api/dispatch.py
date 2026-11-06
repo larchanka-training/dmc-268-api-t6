@@ -24,11 +24,16 @@ from app.modules.integrations.webhooks.api.pull_request_dtos import (
     parse_pull_request_label_event,
 )
 from app.modules.integrations.webhooks.api.push_event_dtos import parse_push_event
+from app.modules.integrations.webhooks.api.repository_event_dtos import (
+    REPOSITORY_VISIBILITY_ACTIONS,
+    parse_repository_visibility_event,
+)
 from app.modules.integrations.webhooks.application.github_installation_dispatch import (
     GitHubDispatchEvent,
     InstallationDeliveryDispatchResult,
     InstallationDeliveryDispatchStatus,
     PushEvent,
+    RepositoryVisibilityEvent,
     UnsupportedGitHubEvent,
     _with_action,
 )
@@ -96,6 +101,7 @@ class GitHubWebhookDispatchAdapter:
             | CiTriggerEvent
             | InstallationRepositoriesEvent
             | PushEvent
+            | RepositoryVisibilityEvent
             | UnsupportedGitHubEvent
         )
         if event_name == "pull_request":
@@ -124,6 +130,14 @@ class GitHubWebhookDispatchAdapter:
         elif event_name == "push":
             try:
                 value = parse_push_event(payload)
+            except (ValueError, ValidationError) as error:
+                return InstallationDeliveryDispatchResult(
+                    InstallationDeliveryDispatchStatus.IGNORED_INVALID_EVENT,
+                    _invalid_payload(error),
+                )
+        elif event_name == "repository" and action in REPOSITORY_VISIBILITY_ACTIONS:
+            try:
+                value = parse_repository_visibility_event(payload)
             except (ValueError, ValidationError) as error:
                 return InstallationDeliveryDispatchResult(
                     InstallationDeliveryDispatchStatus.IGNORED_INVALID_EVENT,
