@@ -134,7 +134,7 @@ Application зависит от узких интерфейсов, сгрупп�
 | `CodeIndexEnabler` | `repositories` | запрос полной сборки индекса (создание строки состояния или новое поколение очищенного индекса, с маркером пробуждения) при включении RAG на сессии и в транзакции вызывающего use case; реализация — в `code_index.infrastructure` |
 | `CodeIndexStore`, `CodeIndexUnitOfWork` | `code_index` | индекс графа RAG v1 по `repository_id` (fenced-запись, публикация, чтение, очистка, сборка мусора) и граница транзакции модуля; реализация — в `code_index.infrastructure` |
 | `CodeIndexMaintenance`, `CodeIndexMaintenanceUnitOfWork` | `code_index` | кандидаты leader-задач индекса без `repository_id` (TTL-очистка, сборка мусора, запросы пробуждения, сверка с HEAD, кандидаты повторного включения и очистки для сходимости, #143); каждый шаг по репозиторию идёт через `CodeIndexStore`; реализация — в `code_index.infrastructure` |
-| `PaymentGateway` | `billing` | создание и подтверждение оплаты |
+| `PaymentGateway` | `billing` | Stripe: Checkout пополнения, подписки и сохранения карты, Customer Portal, платёж `off_session` авто-пополнения, проверка и чтение событий вебхука; баланс в `credit_ledger`, а не в Stripe ([ADR 0002 §10](adr/0002-billing-monetization.md#10-stripe)) |
 | `UnitOfWork` | общий контракт; расширение в использующем модуле | граница транзакции и доступ к интерфейсам repositories |
 | `Clock`, `IdGenerator` | `common` | детерминированные тесты и технические значения |
 
@@ -272,7 +272,7 @@ app/
     billing/
       domain/
       application/
-      infrastructure/          # Payment/CreditLedger models, repos, Stripe implementation
+      infrastructure/          # Payment/CreditLedger models, repos, Stripe implementation (ADR 0002)
     analytics/
       domain/
       application/
@@ -326,8 +326,13 @@ Application управляет транзакцией через [UnitOfWork](..
 [`SqlAlchemyUsageLedger.record`](../app/modules/analytics/infrastructure/usage_ledger.py):
 после завершения вызова провайдера он записывает `usage_events` в собственной короткой
 транзакции (`session_factory.begin()`), чтобы оплаченная стоимость сохранилась при
-rollback основного run. Исключение касается только этого ledger, не обычных
-repositories; транзакция по-прежнему не охватывает сетевой вызов.
+rollback основного run. Второе узкое исключение (план, с #371,
+[ADR 0002 §3.3](adr/0002-billing-monetization.md#33-момент-и-формула-списания)):
+запись строк списания `credit_ledger` за ревью (`usage_debit`, `run_settlement`,
+сторно) своей короткой транзакцией сразу после `usage_events` или после commit
+конечного состояния run, идемпотентно по `usage_event_id` или `run_id`. Исключения
+касаются только этих двух записей, не обычных repositories; транзакция
+по-прежнему не охватывает сетевой вызов.
 
 План выполнения worker:
 
@@ -345,6 +350,16 @@ repositories; транзакция по-прежнему не охватывае
 
 Вызовы GitHub и Stripe также не включаются в длительную DB-транзакцию. Их retries,
 idempotency и reconciliation — часть соответствующего use case, не repository.
+
+Модуль `billing` (план, [ADR 0002](adr/0002-billing-monetization.md)): баланс workspace
+считается по `credit_ledger` в USD; списание за ревью пишется после каждой строки
+`usage_events` своей короткой транзакцией (второе исключение выше), по строке на
+грант, идемпотентно по `(usage_event_id, grant_id)`. Гейт баланса проверяется в два
+шага: цена единицы при claim Run рядом с `budget_paused`, полная цена с надбавкой
+за строки после `vcs.fetch_diff` (переход `running → skipped`). Порог расхода
+прогона передаётся шлюзу как лимит этого прогона. Вебхуки Stripe идемпотентны по id события, исходящие вызовы идут с
+`Idempotency-Key`, суточная сверка со Stripe выполняется leader-задачей. Роли
+workspace проверяются в БД на каждом важном действии и в JWT не попадают.
 
 ### Worker и очередь (#34)
 
