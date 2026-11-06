@@ -66,6 +66,7 @@ from app.modules.reviews.application.policy_errors import PolicyError, PolicyErr
 from app.modules.reviews.application.policy_snapshot import RULES_DOCUMENT_PATH, PolicyDocument
 from app.modules.reviews.infrastructure.github_policy_source import (
     OversizedBody,
+    _git_blob_oid,
     capped_body,
     classify_policy_http_error,
     policy_blob_too_large,
@@ -428,4 +429,8 @@ class _SnapshotPolicySource:
             ) from None
         if isinstance(body, OversizedBody):
             raise policy_blob_too_large(body, policy_base_sha=self._sha)
+        if _git_blob_oid(body, like=sha) != sha.casefold():
+            raise self._error(
+                PolicyErrorCode.FETCH_TRANSIENT, "GitHub returned a blob of another id"
+            )
         return body
