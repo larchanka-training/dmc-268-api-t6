@@ -273,7 +273,8 @@ def test_a_rebind_forgets_what_was_saved_before_the_app_was_gone(portal_env: Env
                 row = (
                     await session.execute(
                         text(
-                            "SELECT installation_available, private FROM repositories WHERE id = :id"
+                            "SELECT installation_available, private FROM repositories "
+                            "WHERE id = :id"
                         ),
                         {"id": REPO_A},
                     )
