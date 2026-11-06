@@ -993,7 +993,8 @@ paths:
         of the last run that succeeded (by finish time) of a repository connected through the
         GitHub App and stored as public: `clean` is "passed", `attention` is "attention",
         `blocking` is "blocking". A repository counts as public only by the visibility saved from
-        GitHub webhooks; nothing saved yet means not public.
+        GitHub, confirmed within the last 72 hours; nothing saved, or nothing confirmed for longer,
+        means not public.
 
         One neutral "no data" answer, with the same status, type, headers and body, covers every
         other case, so the response does not tell whether a repository exists: an unknown or

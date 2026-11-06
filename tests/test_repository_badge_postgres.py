@@ -77,6 +77,23 @@ def test_only_the_stored_public_flag_opens_a_repository(
     assert (run is not None) is visible
 
 
+@pytest.mark.parametrize(
+    ("stamp", "visible"),
+    [
+        pytest.param("now() - interval '71 hours'", True, id="confirmed-within-the-limit"),
+        pytest.param("now() - interval '73 hours'", False, id="too-old"),
+        pytest.param("NULL", False, id="never-observed"),
+    ],
+)
+def test_a_public_flag_counts_only_while_it_is_fresh(
+    portal_env: Env, stamp: str, visible: bool
+) -> None:
+    stamped = f"UPDATE repositories SET private_observed_at = {stamp} WHERE id = '{REPO_A}'"
+    run = _query(portal_env, "octo/a", PUBLIC_A, stamped)
+
+    assert (run is not None) is visible
+
+
 def test_the_name_matches_in_any_case(portal_env: Env) -> None:
     assert _query(portal_env, "OCTO/A", PUBLIC_A) is not None
 

@@ -7,10 +7,13 @@ newer observation replaces the stored one; one short transaction, no GitHub call
 from __future__ import annotations
 
 from collections.abc import Callable
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Protocol
 
 from app.common.application.unit_of_work import UnitOfWork
+
+# A flag not confirmed for this long reads as not public, recorded in contracts/openapi.yaml.
+VISIBILITY_MAX_AGE = timedelta(hours=72)
 
 
 class RepositoryVisibilityStore(Protocol):
