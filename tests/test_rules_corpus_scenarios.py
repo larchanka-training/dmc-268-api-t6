@@ -6,10 +6,13 @@ scenario a case stands for, so an edit of a fixture could void the case with the
 
 from __future__ import annotations
 
+import html
 import json
 import re
 from pathlib import Path
 from typing import Any
+
+from tests.test_eval_live import VALID, FakeTransport, answer, record_arm, rules_fixture_root
 
 CASES = Path(__file__).resolve().parent.parent / "test-prs-dataset" / "rules" / "cases"
 
@@ -33,3 +36,29 @@ def test_style_only_rules_leave_the_other_categories_in_every_arm() -> None:
     assert {item["category"] for item in findings if item.get("origin") == "rule"} == {
         "readability"
     }
+
+
+def test_level_four_neighbours_reach_the_prompt_and_no_document_allows_them(
+    tmp_path: Path,
+) -> None:
+    transport = FakeTransport([answer("primary-model", VALID)])
+    record_arm(rules_fixture_root(tmp_path, ("RUL-10",)), transport, "none")
+    (request,) = transport.requests
+    prompt = html.unescape(request.messages[1].content)
+
+    patch = (CASES / "RUL-10" / "diff.patch").read_text("utf-8").splitlines()
+    neighbours = [line for line in patch if line.startswith(" ") and "conn.fetch(f" in line]
+    assert len(neighbours) == 3
+    for neighbour in neighbours:
+        assert neighbour.strip() in prompt
+
+    metadata = _metadata("RUL-10")
+    assert {
+        (item["path"], item["category"])
+        for item in metadata["expected_findings"]
+        if "arms" not in item
+    } == {("app/reports/queries.py", "security"), ("app/reports/queries.py", "correctness")}
+    (anchor,) = metadata["must_not_flag"]
+    assert anchor["path"].startswith("scripts/backfill/")
+    assert "app/" not in _document("RUL-10", ".review/rules.md")
+    assert not re.search(r"SQL|f-string", _document("RUL-10", "AGENTS.md"))

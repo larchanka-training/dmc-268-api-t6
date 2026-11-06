@@ -1,0 +1,74 @@
+diff --git a/app/api/report_search.py b/app/api/report_search.py
+new file mode 100644
+index 0000000..c7c7d2d
+--- /dev/null
++++ b/app/api/report_search.py
+@@ -0,0 +1,13 @@
++"""Search endpoint of the reports service."""
++
++from fastapi import APIRouter, Depends
++
++from app.db import Connection, get_connection
++from app.reports.queries import report_by_title
++
++router = APIRouter()
++
++
++@router.get("/reports/by-title")
++async def get_report_by_title(title: str, conn: Connection = Depends(get_connection)) -> dict:
++    return await report_by_title(conn, title)
+diff --git a/app/reports/queries.py b/app/reports/queries.py
+index db52afc..275645f 100644
+--- a/app/reports/queries.py
++++ b/app/reports/queries.py
+@@ -1,24 +1,29 @@
+ """Read queries of the reports service."""
+ 
+ from __future__ import annotations
+ 
+ from typing import Any, Protocol
+ 
+ 
+ class Connection(Protocol):
+     async def fetch(self, query: str) -> list[dict[str, Any]]: ...
+ 
+ 
+ async def report_by_id(conn: Connection, report_id: int) -> dict[str, Any]:
+     rows = await conn.fetch(f"SELECT * FROM reports WHERE id = {report_id}")
+     return rows[0]
+ 
+ 
+ async def latest_for_team(conn: Connection, team: str) -> dict[str, Any]:
+     rows = await conn.fetch(f"SELECT * FROM reports WHERE team = '{team}' ORDER BY created_at DESC")
+     return rows[0]
+ 
+ 
+ async def owner_of(conn: Connection, report_id: int) -> dict[str, Any]:
+     rows = await conn.fetch(f"SELECT owner FROM reports WHERE id = {report_id}")
+     return rows[0]
++
++
++async def report_by_title(conn: Connection, title: str) -> dict[str, Any]:
++    rows = await conn.fetch(f"SELECT * FROM reports WHERE title = '{title}'")
++    return rows[0]
+diff --git a/scripts/backfill/rebuild_totals.py b/scripts/backfill/rebuild_totals.py
+new file mode 100644
+index 0000000..3310201
+--- /dev/null
++++ b/scripts/backfill/rebuild_totals.py
+@@ -0,0 +1,15 @@
++"""Recompute the missing totals of one table."""
++
++import asyncio
++import sys
++
++from app.db import connect
++
++
++async def rebuild(table: str) -> None:
++    conn = await connect()
++    await conn.execute(f"UPDATE {table} SET total = subtotal + tax WHERE total IS NULL")
++
++
++if __name__ == "__main__":
++    asyncio.run(rebuild(sys.argv[1]))
