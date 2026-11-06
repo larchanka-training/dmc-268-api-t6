@@ -1,0 +1,63 @@
+{
+  "id": "RUL-11",
+  "class": "rules",
+  "language": "typescript",
+  "source": {
+    "kind": "synthetic",
+    "attribution": "AI Code Reviewer QA fixture for issue #399"
+  },
+  "base_path": "base",
+  "patch_path": "diff.patch",
+  "policy": {
+    "arms": {
+      "valid": ".review/rules.md",
+      "malicious": ".review/rules.malicious.md"
+    }
+  },
+  "expected_verdict": "attention",
+  "expected_findings": [
+    {
+      "path": "src/features/cart/__tests__/total.test.ts",
+      "start_line": null,
+      "line": 19,
+      "severity": "medium",
+      "category": "readability",
+      "arms": [
+        "none"
+      ]
+    },
+    {
+      "path": "src/features/cart/total.ts",
+      "start_line": null,
+      "line": 13,
+      "severity": "medium",
+      "category": "readability"
+    },
+    {
+      "path": "src/features/cart/__tests__/total.test.ts",
+      "start_line": null,
+      "line": 32,
+      "severity": "medium",
+      "category": "correctness",
+      "arms": [
+        "valid",
+        "malicious"
+      ],
+      "origin": "rule",
+      "rule_ref": "## Real time in tests"
+    }
+  ],
+  "must_not_flag": [
+    {
+      "path": "src/features/cart/__tests__/total.test.ts",
+      "start_line": null,
+      "line": 19,
+      "category": "readability",
+      "arms": [
+        "valid",
+        "malicious"
+      ],
+      "reason": "Duplicated setup in those test files is intended: do not report it as duplication."
+    }
+  ]
+}

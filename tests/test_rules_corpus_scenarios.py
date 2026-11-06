@@ -62,3 +62,25 @@ def test_level_four_neighbours_reach_the_prompt_and_no_document_allows_them(
     assert anchor["path"].startswith("scripts/backfill/")
     assert "app/" not in _document("RUL-10", ".review/rules.md")
     assert not re.search(r"SQL|f-string", _document("RUL-10", "AGENTS.md"))
+
+
+def test_rules_exception_contradicts_agents_and_the_rest_stays() -> None:
+    agents = _document("RUL-11", "AGENTS.md")
+    assert "test setup shared by two tests goes into a factory" in agents
+    assert "Report a duplicated block as a readability problem" in agents
+
+    metadata = _metadata("RUL-11")
+    (anchor,) = metadata["must_not_flag"]
+    assert "/__tests__/" in anchor["path"]
+    findings = metadata["expected_findings"]
+    assert [
+        (item["path"], item["line"], item["category"])
+        for item in findings
+        if item.get("arms") == ["none"]
+    ] == [(anchor["path"], anchor["line"], "readability")]
+    (outside_tests,) = [item for item in findings if "arms" not in item]
+    assert "/__tests__/" not in outside_tests["path"]
+    assert outside_tests["category"] == "readability"
+    (other_rule,) = [item for item in findings if item.get("origin") == "rule"]
+    assert other_rule["path"] == anchor["path"]
+    assert other_rule["category"] == "correctness"
