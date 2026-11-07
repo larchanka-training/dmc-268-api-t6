@@ -34,6 +34,7 @@ flowchart LR
     pgxp[postgres-exporter-prod]
     rxp[redis-exporter-prod]
     relay["relay-prod (nginx)"]
+    bkp[pg-backup-prod]
   end
   caddy["edge Caddy :9180\n(dmc268-edge)"]
   prom -->|scrape| node & cadv & pgx & rx & mq & caddy & bbx
@@ -47,6 +48,9 @@ flowchart LR
   bk -->|"pg_dump, backup_agent"| pg
   bk -->|textfile| node
   off[backup-offsite] -->|"rclone crypt, S3 API"| r2[("Cloudflare R2")]
+  bkp -->|"pg_dump, backup_agent"| pgp
+  bkp -->|textfile| node
+  offp[backup-offsite-prod] -->|"rclone crypt, S3 API"| r2
   rx --> redis
   graf -->|PromQL| prom
   apps -->|"OTLP/HTTP :4318"| tempo
@@ -75,8 +79,10 @@ flowchart LR
 | `postgres-exporter-prod` | тот же образ и `queries.yml`, что у `postgres-exporter` | 64m | то же для БД prod, под ролью `metrics_exporter` prod (только с `PROD_API_DIR`, §6) |
 | `redis-exporter-prod` | тот же образ, что у `redis-exporter` | 32m | то же для Redis prod |
 | `relay-prod` | `nginx:1.30-alpine` по digest; конфиг `relay/nginx.conf` | 32m | TCP-ретранслятор: `:15692` → `rabbitmq:15692` (метрики для Prometheus) и `:5432` → `postgres:5432` (источник `PostgreSQL prod` в Grafana) |
+| `pg-backup-prod` | тот же образ и тот же скрипт, что у `pg-backup` | 128m | ежедневный `pg_dump` БД prod с проверкой восстановления, под ролью `backup_agent` prod; только в сети prod (только с `PROD_API_DIR`, §9) |
+| `backup-offsite-prod` | тот же образ `rclone`, что у `backup-offsite` | 128m | шифрованная копия дампов prod вне VPS в `store:<bucket>/postgres-prod` (только с prod и пятью `BACKUP_S3_*`, `compose.offsite-prod.yml`, §9) |
 
-Три сервиса `*-prod` описаны в `compose.prod.yml`, который `deploy.sh` подключает только с prod; без него `--remove-orphans` их убирает. Сумма лимитов памяти — около 1,6 GB, с ними — около 1,75 GB.
+Сервисы `*-prod` описаны в `compose.prod.yml`, который `deploy.sh` подключает только с prod; без него `--remove-orphans` их убирает. `backup-offsite-prod` — в `compose.offsite-prod.yml`: он подключается, только когда есть и prod, и все пять `BACKUP_S3_*` (иначе `${PROD_BACKUP_DIR}` в файле остался бы без значения). Лимиты памяти — потолки: сумма около 1,6 GB; с тремя сканерами prod — около 1,75 GB; с `pg-backup-prod` — около 1,9 GB; с обеими копиями вне VPS (`backup-offsite` и `backup-offsite-prod`, по 128m) — около 2,1 GB при 8,3 GB RAM VPS (5,8 GB доступно на 02.11.2026).
 
 Длину очередей отдаёт сам RabbitMQ: плагин `rabbitmq_prometheus` включён в образе `rabbitmq:4.3.6-management-alpine`, порт 15692 внутри сети проекта. RPS и коды ответов отдаёт edge-прокси Caddy (`metrics { per_host }`, порт 9180 только в сети `dmc268-edge`, [CICD.md §8.2](CICD.md#82-edge-прокси)). Очередь ревью — RabbitMQ, не Redis: Redis только кэш (SD §10).
 
@@ -106,19 +112,19 @@ Grafana не входит в `prod-metrics`, Prometheus — в `prod-sql`, и н
 | CPU / RAM серверов и воркеров | `Host CPU`, `Host memory`, `Container CPU`, `Container memory` | node-exporter, cAdvisor (метка `container_label_com_docker_compose_service`) |
 | Доступность публичных имён и срок TLS | строка `External probes`: `Public names: probe` (UP/DOWN по имени), `Certificate expires in` (дни, красный < 3, оранжевый < 14 — пороги алертов) | `probe_success{job="blackbox"}`, `probe_ssl_earliest_cert_expiry` (§5). В режиме ports проб нет, обе панели — «No data» |
 
-**Окружение.** Переменная дашборда `Environment` (`staging` по умолчанию, `prod`) переключает все панели сразу: PromQL-панели фильтруются по метке `environment` выбранного окружения, SQL-панели читают источник PostgreSQL этого окружения (`postgres` или `postgres-prod`; значение переменной — uid источника). Не фильтруются панели хоста (`Host CPU`, `Host memory`, `Root filesystem used`) и `LLM spend this month` (бюджет общий); панели контейнеров показывают выбранное окружение и `shared` (контейнеры мониторинга и edge). Панели бэкапов у prod пусты, пока нет бэкапа prod (§8). Без prod-оверлея (Terraform-хост, §6) вариант `prod` выбрать можно, но источник не подключается и панели пусты.
+**Окружение.** Переменная дашборда `Environment` (`staging` по умолчанию, `prod`) переключает все панели сразу: PromQL-панели фильтруются по метке `environment` выбранного окружения, SQL-панели читают источник PostgreSQL этого окружения (`postgres` или `postgres-prod`; значение переменной — uid источника). Не фильтруются панели хоста (`Host CPU`, `Host memory`, `Root filesystem used`) и `LLM spend this month` (бюджет общий); панели контейнеров показывают выбранное окружение и `shared` (контейнеры мониторинга и edge). Панели бэкапов у prod заполняет бэкап prod (§9); без prod-оверлея они пусты. Без prod-оверлея (Terraform-хост, §6) вариант `prod` выбрать можно, но источник не подключается и панели пусты.
 
 Ещё на дашборде: прогоны по итоговому состоянию, failed по `error_code`, стоимость и токены LLM в час (`usage_events`), расход LLM за месяц и доля бюджета, доля 5xx и p95 ответа по хосту, соединения PostgreSQL, память и hit ratio Redis.
 
 ## 3. Доступ к данным приложения
 
-Задержки шагов уже лежат в трейсе прогона (`run_actions`), поэтому дашборд и алерты читают PostgreSQL напрямую, без изменений в коде. Доступ — три роли, которые `deploy.sh` создаёт и пересобирает при каждом выкате. `grafana_reader` и `metrics_exporter` есть в БД staging и, с `PROD_API_DIR` (§6), в БД prod, с одинаковыми правами и своими паролями у каждой БД (`PROD_GRAFANA_DB_PASSWORD`, `PROD_PG_EXPORTER_PASSWORD` в `.env` стека); `backup_agent` — только в БД staging, роль для бэкапа prod появится вместе с ним:
+Задержки шагов уже лежат в трейсе прогона (`run_actions`), поэтому дашборд и алерты читают PostgreSQL напрямую, без изменений в коде. Доступ — три роли, которые `deploy.sh` создаёт и пересобирает при каждом выкате. `grafana_reader` и `metrics_exporter` есть в БД staging и, с `PROD_API_DIR` (§6), в БД prod, с одинаковыми правами и своими паролями у каждой БД (`PROD_GRAFANA_DB_PASSWORD`, `PROD_PG_EXPORTER_PASSWORD` в `.env` стека); `backup_agent` тоже есть в обеих БД, с теми же правами и своими паролями (`PG_BACKUP_PASSWORD` и `PROD_PG_BACKUP_PASSWORD` в `.env` стека):
 
 | Роль | Кто | Права |
 |---|---|---|
 | `grafana_reader` | источники PostgreSQL в Grafana: `PostgreSQL` (staging, `postgres:5432`) и `PostgreSQL prod` (`relay-prod:5432` через ретранслятор, §1) | `default_transaction_read_only`, `statement_timeout 30s`, `CONNECTION LIMIT 5`; `SELECT` только на колонки ниже |
 | `metrics_exporter` | `postgres-exporter`, `postgres-exporter-prod` | `pg_monitor`, `default_transaction_read_only`, `statement_timeout 15s`, `CONNECTION LIMIT 3`; те же колонки `runs` и `run_actions`, из `usage_events` — только `cost_usd` и `created_at` |
-| `backup_agent` | `pg-backup` (только staging) | `pg_read_all_data` для `pg_dump` и `CREATEDB` для временной БД проверки; без суперпользователя и без записи в данные приложения |
+| `backup_agent` | `pg-backup` (staging), `pg-backup-prod` (prod) | `pg_read_all_data` для `pg_dump` и `CREATEDB` для временной БД проверки; без суперпользователя и без записи в данные приложения |
 
 | Таблица | Открытые колонки |
 |---|---|
@@ -147,7 +153,7 @@ Grafana не входит в `prod-metrics`, Prometheus — в `prod-sql`, и н
 
 Правила — `deploy/monitoring/prometheus/rules/alerts.yml`, unit-тесты — `tests/monitoring/alerts.test.yml`. Сообщение: статус, окружение, severity и по строке на алерт с его именем; только числа и имена — без содержимого ревью и секретов.
 
-**Метка `environment`.** У каждой серии и каждого алерта она есть: `staging`, `prod` или `shared`. Её ставит не Prometheus целиком (`external_labels` нет), а цель или серия: хранилища staging — статическая метка job'а, хранилища prod — файлы `prometheus/targets/{postgres,redis,rabbitmq}-prod.json`, которые пишет `deploy.sh`; пробы — `environment` рядом с `host` в `probes.json`; серии cAdvisor — по compose project (`*-prod` → `prod`, `*-staging`, `dmc-268-api` и `dmc-268-ui` → `staging`, остальные — `shared`); серии Caddy — по `host` (`staging.`/`staging-…` → `staging`; `api.`, `ui.`, `webhook.` → `prod`; Grafana, апекс, `www.`, `_other` — `shared`); node-exporter, Prometheus, Alertmanager, Grafana и сам `up` Caddy — `shared`; textfile-серии `dmc_pg_backup_*` — `staging`, пока бэкап prod не ставит свою метку. Правила агрегируют `by (environment, …)`, поэтому авария в одном окружении не прячется за здоровым другим и приходит с его именем. Алерты бюджета LLM суммируют оба окружения (один ключ провайдера) и несут `environment: shared`. Alertmanager группирует по `alertname` и `environment`, а заголовок Telegram печатает окружение.
+**Метка `environment`.** У каждой серии и каждого алерта она есть: `staging`, `prod` или `shared`. Её ставит не Prometheus целиком (`external_labels` нет), а цель или серия: хранилища staging — статическая метка job'а, хранилища prod — файлы `prometheus/targets/{postgres,redis,rabbitmq}-prod.json`, которые пишет `deploy.sh`; пробы — `environment` рядом с `host` в `probes.json`; серии cAdvisor — по compose project (`*-prod` → `prod`, `*-staging`, `dmc-268-api` и `dmc-268-ui` → `staging`, остальные — `shared`); серии Caddy — по `host` (`staging.`/`staging-…` → `staging`; `api.`, `ui.`, `webhook.` → `prod`; Grafana, апекс, `www.`, `_other` — `shared`); node-exporter, Prometheus, Alertmanager, Grafana и сам `up` Caddy — `shared`; textfile-серии `dmc_pg_backup_*` несут метку (`staging` или `prod`), которую пишет сам скрипт бэкапа (`BACKUP_ENVIRONMENT` сервиса; без неё или с чужим значением он не стартует), а job `node` с `honor_labels: true` её не трогает; серия без метки (старый файл до перезаписи) стала бы `shared`. Правила агрегируют `by (environment, …)`, поэтому авария в одном окружении не прячется за здоровым другим и приходит с его именем. Алерты бюджета LLM суммируют оба окружения (один ключ провайдера) и несут `environment: shared`. Alertmanager группирует по `alertname` и `environment`, а заголовок Telegram печатает окружение.
 
 Два вида алертов. **Состояние** (диск, очередь без консьюмера, цель недоступна): напоминание раз в 4 ч, пока условие держится, и сообщение RESOLVED. **Событие** (метка `kind: event`: упавший прогон, новое сообщение в DLQ): уходит без RESOLVED — оно «закрывается» лишь потому, что выходит из 15-минутного окна (`ReviewRunsBudgetPaused` — через час после этого, ниже); если события идут подряд дольше 4 ч, напоминание приходит, как у состояния. События за 90 с собираются в одно сообщение: прогон, исчерпавший попытки, — это и `failed`, и сообщение в `reviews.dlq` (PIPELINE_SPEC §4.4), и оба приходят вместе.
 
@@ -170,11 +176,11 @@ Grafana не входит в `prod-metrics`, Prometheus — в `prod-sql`, и н
 | `ReviewRunsBudgetPaused` | хотя бы один прогон `skipped` с `budget_paused` за 15 мин; событие | warning |
 | `HostMemoryLow` / `HostDiskFull` / `HostCpuHigh` | < 10 % памяти 10 мин / < 15 % диска 10 мин / > 90 % CPU 15 мин | critical / critical / warning |
 | `ContainerOomKilled` | OOM-kill в контейнере compose за 10 мин | warning |
-| `PostgresBackupStale` | последнему проверенному дампу больше 26 ч | critical |
-| `PostgresBackupMissing` | heartbeat `pg-backup` старше 2 ч или его нет (сервис остановлен, удалён или не может писать). Файл метрик переживает контейнер, поэтому смотрим на возраст heartbeat, а не на отсутствие метрик | critical |
-| `PostgresBackupFailed` | последняя попытка бэкапа упала | warning |
-| `PostgresBackupOffsiteStale` | копия в бакет не обновлялась 3 ч (только при включённой выгрузке) | critical |
-| `PostgresBackupOffsiteFailing` | все проходы выгрузки за час упали | warning |
+| `PostgresBackupStale` | последнему проверенному дампу больше 26 ч, по окружению | critical |
+| `PostgresBackupMissing` | heartbeat `pg-backup` / `pg-backup-prod` старше 2 ч или его нет (сервис остановлен, удалён или не может писать). Файл метрик переживает контейнер, поэтому смотрим на возраст heartbeat. Отсутствие heartbeat staging — всегда алерт; prod — только когда хост мониторит prod (есть цель `postgres` с `environment="prod"`), иначе на хосте без prod (Terraform) алерт горел бы вечно | critical |
+| `PostgresBackupFailed` | последняя попытка бэкапа упала, по окружению | warning |
+| `PostgresBackupOffsiteStale` | копия в бакет не обновлялась 3 ч, по окружению (только при включённой выгрузке) | critical |
+| `PostgresBackupOffsiteFailing` | все проходы выгрузки за час упали, по окружению | warning |
 
 **Пробы.** Раз в минуту Prometheus (job `blackbox`, таймаут 20 с) просит `blackbox-exporter` (модуль `https_2xx`: только IPv4 и HTTPS, таймаут 15 с, редиректы проходятся) открыть `https://staging-api.<APP_DOMAIN>/healthcheck` и `https://staging-ui.<APP_DOMAIN>/health`. Prod-имена `https://api.<APP_DOMAIN>/healthcheck` и `https://ui.<APP_DOMAIN>/health` добавляет variable `PROBE_PROD_HOSTS` (§6), когда имя уже обслуживает prod: до выката оно отвечает заглушкой 503 и держало бы critical. Проба идёт как внешний клиент — публичный DNS, опубликованный порт 443 edge-прокси на том же VPS, сертификат и маршрут Caddy. Метка `host` — имя, как у `ApiHigh5xxRate`, `instance` — URL, `environment` — `staging` или `prod` по списку, из которого `deploy.sh` взял имя.
 
@@ -228,11 +234,12 @@ Job `Deploy monitoring` в `ci-cd.yml` запускается после усп�
    - читает `<APP_DIR>/.env` приложения (пользователь и БД PostgreSQL, пароль Redis, режим edge/ports); проверяет сеть `<project>_default` и контейнер `postgres`;
    - если задан `PROD_API_DIR` (см. ниже) — проверяет prod до любых изменений на хосте: `.env` приложения prod, сеть `<prod project>_default`, ровно один запущенный `postgres`, проект не совпадает со staging, `POSTGRES_USER` и `POSTGRES_DB` — строчные SQL-идентификаторы;
    - проверяет входы: в режиме edge `GRAFANA_ROOT_URL` и `APP_DOMAIN` (базовый домен проб, repository variable), всегда `PROBE_PROD_HOSTS` (variable Environment `staging`, по умолчанию пусто ([SECRETS.md](SECRETS.md)); prod-имена в пробах: `api`, `ui` или `api ui`; задана, даже пустой, — применяется и сохраняется в `.env` стека, не задана при ручном запуске — остаётся прежняя) и настройки Telegram. Неверное значение — выкат падает до изменений на хосте;
-   - генерирует один раз пароли стека (`.env` 0600);
-   - создаёт и пересобирает роли PostgreSQL (§3) в БД staging и, с prod, в БД prod (`grafana_reader` и `metrics_exporter`, свои пароли; без `backup_agent`);
+   - генерирует один раз пароли стека (`.env` 0600; с prod и `PROD_PG_BACKUP_PASSWORD`);
+   - создаёт каталоги дампов `BACKUP_DIR` и, с prod, `PROD_BACKUP_DIR` (`/var/backups/dmc-268/<prod project>`, 0700, владелец пользователь `postgres` образа, 70:70);
+   - создаёт и пересобирает роли PostgreSQL (§3) в БД staging и, с prod, в БД prod (`grafana_reader`, `metrics_exporter` и `backup_agent`, свои пароли у каждой БД);
    - пишет порог бюджета LLM (§5) из `LLM_MONTHLY_BUDGET_USD` в `textfile/llm_budget.prom` (0644). Пусто или `0` (в CI незаданная variable приходит пустой) — файл удаляется; не задана при ручном запуске — остаётся прежний; файла нет — строка в логе job. Не число долларов с не более чем двумя знаками после точки — выкат падает до изменений на хосте;
    - пишет конфиг Alertmanager и файл токена, цели Prometheus: Caddy, пробы и `*-prod.json` (без prod или в режиме ports — пустые списки);
-   - `docker compose -p dmc-268-monitoring up -d --wait`, с `-f compose.prod.yml`, если prod задан. Метка с хешем каталога конфигурации пересоздаёт сервис ровно тогда, когда его конфигурация изменилась;
+   - `docker compose -p dmc-268-monitoring up -d --wait`, с `-f compose.prod.yml`, если prod задан, `-f compose.offsite.yml`, если заданы `BACKUP_S3_*`, и `-f compose.offsite-prod.yml`, если заданы и prod, и `BACKUP_S3_*`. Метка с хешем каталога конфигурации пересоздаёт сервис ровно тогда, когда его конфигурация изменилась;
    - синхронизирует пароль `admin` Grafana с `.env`;
    - с prod запускает `check-isolation.sh <prod project> <staging project>` (рядом со скриптом или в `../scripts`) и печатает его таблицу в лог. Код 1 (нарушение) валит выкат; код 2 или отсутствие скрипта — только предупреждение `isolation not checked`, как в `Deploy prod`.
 
@@ -240,7 +247,7 @@ Job `Deploy monitoring` в `ci-cd.yml` запускается после усп�
 
 При `compose down` (откат prod, остановка) сервисы мониторинга на сети prod остаются подключёнными: compose печатает `Resource is still in use` для сети и завершается с кодом 0 (проверено локально: проект и внешний контейнер на его сети). Так же уже работает staging.
 
-Каталоги `prometheus`, `grafana`, `postgres-exporter`, `backup`, `blackbox`, `relay`, `status` и шаблоны Alertmanager `deploy.sh` отдаёт на чтение nobody (755/644). Файлы на хосте: `.env` (0600; с prod в нём ещё `PROD_API_DIR`, `PROD_API_NETWORK`, `PROD_POSTGRES_DB`, `PROD_REDIS_PASSWORD`, `PROD_GRAFANA_DB_PASSWORD`, `PROD_PG_EXPORTER_PASSWORD`, `RELAY_CONFIG_DIGEST`), `alertmanager/alertmanager.yml`, `alertmanager/secrets/telegram_bot_token` (0400), `prometheus/targets/caddy.json`, `prometheus/targets/probes.json` и `prometheus/targets/{postgres,redis,rabbitmq}-prod.json` (их нет в репозитории: выкат, упавший до `deploy.sh`, оставляет прежние цели), `textfile/` (textfile-метрики node-exporter, пишут `pg-backup` и `backup-offsite`; порог бюджета `llm_budget.prom` — `deploy.sh`), дампы — `/var/backups/dmc-268/<project>/` (0700, §9). Тома: `prometheus-data`, `alertmanager-data`, `grafana-data`, `tempo-data`.
+Каталоги `prometheus`, `grafana`, `postgres-exporter`, `backup`, `blackbox`, `relay`, `status` и шаблоны Alertmanager `deploy.sh` отдаёт на чтение nobody (755/644). Файлы на хосте: `.env` (0600; с prod в нём ещё `PROD_API_DIR`, `PROD_API_NETWORK`, `PROD_POSTGRES_DB`, `PROD_REDIS_PASSWORD`, `PROD_GRAFANA_DB_PASSWORD`, `PROD_PG_EXPORTER_PASSWORD`, `PROD_PG_BACKUP_PASSWORD`, `PROD_BACKUP_DIR`, `RELAY_CONFIG_DIGEST`), `alertmanager/alertmanager.yml`, `alertmanager/secrets/telegram_bot_token` (0400), `prometheus/targets/caddy.json`, `prometheus/targets/probes.json` и `prometheus/targets/{postgres,redis,rabbitmq}-prod.json` (их нет в репозитории: выкат, упавший до `deploy.sh`, оставляет прежние цели), `textfile/` (textfile-метрики node-exporter: `pg_backup.prom`, `pg_backup_heartbeat.prom`, `pg_backup_offsite.prom` пишут `pg-backup` и `backup-offsite`; `pg_backup_prod.prom`, `pg_backup_prod_heartbeat.prom`, `pg_backup_offsite_prod.prom` — их prod-двойники; порог бюджета `llm_budget.prom` — `deploy.sh`), дампы — `/var/backups/dmc-268/<project>/` и `/var/backups/dmc-268/<prod project>/` (0700, §9). Тома: `prometheus-data`, `alertmanager-data`, `grafana-data`, `tempo-data`.
 
 Откат приложения стек не трогает. Откатить сам мониторинг — перезапустить job `Deploy monitoring` на нужном коммите или выполнить `deploy.sh` из его checkout.
 
@@ -260,21 +267,37 @@ Grafana — на своём хосте `grafana.<APP_DOMAIN>` (A-запись н
 | Сквозной трейсинг, трекинг ошибок, JSON-логи с `run_id` | сделано в #395: OpenTelemetry → Grafana Tempo, §11 |
 | Redis | бэкапить нечего: на staging он без тома и без персистентности (`save ""`, `appendonly no`), это кэш (SD §10) |
 | Метрики приложения (`/metrics` FastAPI, `X-RateLimit-Remaining` GitHub) | нужен код и зависимость; пока RPS и коды — с edge-прокси, пайплайн — из `run_actions` |
-| prod | мониторится так же, как staging: хранилища скрейпят сканеры `*-prod` (§1), роли — §3, алерты и дашборд различают окружения (§5, §2). Чего нет: бэкапа БД prod и его метрик (панели и алерты бэкапа относятся к staging, часть 5 задачи #308), SLA и retention (часть 6); апекс и `www.` остаются `shared`, пока нет лендинга prod. Остаточный путь Grafana → `relay-prod:5432` → PostgreSQL prod и то, что `check-isolation.sh` его не видит, — §1 |
+| prod | мониторится так же, как staging: хранилища скрейпят сканеры `*-prod` (§1), роли — §3, алерты и дашборд различают окружения (§5, §2). Бэкап БД prod и его копия вне VPS — §9. Чего нет: SLA и retention (часть 6); апекс и `www.` остаются `shared`, пока нет лендинга prod. Остаточный путь Grafana → `relay-prod:5432` → PostgreSQL prod и то, что `check-isolation.sh` его не видит, — §1 |
 | Страница статуса | сервис выкатывает `Deploy monitoring`, маршрут Caddy — `deploy-staging` и `rollback.yml` (job `Deploy monitoring` edge не трогает, [CICD.md](CICD.md) §8.2): до `Deploy monitoring` `status.*` отвечает 502, откат staging на коммит до #309 убирает маршрут. Prod различим по `environment` серий (§1) и по `host` и compose project; без оверлея prod (`PROD_API_DIR` пуст) его компоненты — «нет данных». |
 | Пробы публичных имён | идут с того же VPS: падение VPS целиком или его сети они не видят — вместе с ними молчит весь стек; нужен внешний пробник |
 | cAdvisor | читает состояние Docker через `/var/run` (сокеты Docker и containerd), что равносильно root на хосте; сетей, кроме сети проекта, и портов у него нет |
 
 ## 9. Бэкапы PostgreSQL
 
-Сервис `pg-backup` (`deploy/monitoring/backup/pg-backup.sh`) раз в 5 минут проверяет возраст последнего дампа и, если он старше суток, делает новый:
+Бэкап есть у каждого окружения: `pg-backup` (БД staging) и `pg-backup-prod` (БД prod, только с `PROD_API_DIR`). Оба запускают один скрипт `deploy/monitoring/backup/pg-backup.sh` и один образ; различает их переменная `BACKUP_ENVIRONMENT` (`staging` или `prod`, без неё или с другим значением скрипт не стартует, код 2): она становится меткой `environment` каждой метрики. Всё остальное у них отдельное:
+
+| | staging | prod |
+|---|---|---|
+| Сервис дампа | `pg-backup` | `pg-backup-prod` |
+| Сеть | сеть приложения staging | только сеть prod: `PGHOST=postgres` — это БД prod |
+| Роль и пароль | `backup_agent`, `PG_BACKUP_PASSWORD` | `backup_agent` БД prod, `PROD_PG_BACKUP_PASSWORD` |
+| Каталог дампов | `/var/backups/dmc-268/dmc-268-api-staging/` (`BACKUP_DIR`) | `/var/backups/dmc-268/dmc-268-api-prod/` (`PROD_BACKUP_DIR`) |
+| Файлы метрик (`textfile/`) | `pg_backup.prom`, `pg_backup_heartbeat.prom`, `pg_backup_offsite.prom` | `pg_backup_prod.prom`, `pg_backup_prod_heartbeat.prom`, `pg_backup_offsite_prod.prom` |
+| Сервис копии вне VPS | `backup-offsite` (`compose.offsite.yml`) | `backup-offsite-prod` (`compose.offsite-prod.yml`) |
+| Путь в бакете | `store:<bucket>/postgres` | `store:<bucket>/postgres-prod` |
+
+Каталоги дампов не должны совпадать и один не должен лежать внутри другого (пути сравниваются после нормализации): иначе сервисы считали и удаляли бы чужие дампы, а копии вне VPS смешались бы; `deploy.sh` в таком случае падает до изменений на хосте.
+
+Файлы метрик у окружений разные: node-exporter читает все `*.prom` каталога, а два файла с одним именем перезаписали бы друг друга. Серии с одним именем из двух файлов он склеивает только при одинаковых `# HELP` и `# TYPE`, поэтому скрипт у обоих один (проверено локально на `prom/node-exporter:v1.12.1`: оба окружения в `/metrics`, `node_textfile_scrape_error 0`).
+
+Сервис раз в 5 минут проверяет возраст последнего дампа и, если он старше суток, делает новый:
 
 1. Проверка места: свободно на диске каталога бэкапов не меньше 2 × `pg_database_size` (дамп и временная БД; на VPS каталог и тома Docker на одном корневом разделе). Иначе попытка падает до записи чего-либо.
 2. Снимок: транзакция `REPEATABLE READ` на исходной БД делает `pg_export_snapshot()` и в нём же снимает отпечаток — ревизию `alembic_version` и число строк каждой таблицы схемы `public`.
 3. `pg_dump --format=custom --snapshot=<снимок>` от роли `backup_agent` во временный `*.partial`: дамп ровно того состояния, по которому снят отпечаток. Дамп сохраняет владельцев и права для настоящего восстановления.
 4. Проверка восстановления: `pg_restore --no-owner --no-privileges` во временную БД `dmc_restore_check`, отпечаток восстановленной БД должен совпасть построчно. Запись или миграция во время дампа ложной ошибки не дают (обе стороны из одного снимка), а потерянная строка или таблица ловится. Проверено под постоянной записью: три бэкапа подряд, до 104 255 строк, все совпали.
 5. Только после проверки — переименование в `<db>-<UTC>.dump` (0600) и удаление дампов старше 7 дней.
-6. Метрики `dmc_pg_backup_*` → `textfile/pg_backup.prom`, heartbeat каждые 5 мин → `textfile/pg_backup_heartbeat.prom` → node-exporter → алерты §5 и строка `PostgreSQL backups` дашборда.
+6. Метрики `dmc_pg_backup_*{environment="…"}` → `textfile/pg_backup.prom` (prod: `pg_backup_prod.prom`), heartbeat каждые 5 мин → `textfile/pg_backup_heartbeat.prom` (prod: `pg_backup_prod_heartbeat.prom`) → node-exporter → алерты §5 и строка `PostgreSQL backups` дашборда (переключатель `Environment`). При старте `pg-backup` и `backup-offsite` ставят свою метку в файле, записанном прежней версией без неё: панели staging не пустеют до следующей попытки, а немеченый файл не лежит рядом с меченым файлом prod (одно семейство метрик с двумя наборами меток).
 
 Упавшая попытка повторяется через час. Дамп, не прошедший проверку, не сохраняется.
 
@@ -282,10 +305,16 @@ Grafana — на своём хосте `grafana.<APP_DOMAIN>` (A-запись н
 |---|---|---|
 | Период | 24 ч (`BACKUP_INTERVAL_SECONDS`) | `deploy/monitoring/compose.yml` |
 | Хранение | 7 дней (`BACKUP_RETENTION_DAYS`) | там же |
-| Каталог | `/var/backups/dmc-268/<project>/` на хосте, вне каталогов стеков | `BACKUP_DIR` для `deploy.sh` |
-| Размер | ~110 КБ на staging (10.2026) | дашборд, `dmc_pg_backup_last_size_bytes` |
+| Каталог | `/var/backups/dmc-268/<project>/` на хосте, вне каталогов стеков | `BACKUP_DIR` (staging) и `PROD_BACKUP_DIR` (prod) для `deploy.sh`; с prod оба пути только абсолютные, относительный останавливает деплой; каталоги сравниваются по физическому расположению: симлинк между ними тоже останавливает деплой |
+| Размер | ~110 КБ на staging (10.2026); prod ещё не замерен | дашборд (переключатель `Environment`), `dmc_pg_backup_last_size_bytes` |
 
-Бэкап вне расписания: `docker compose -p dmc-268-monitoring exec pg-backup sh /opt/pg-backup/pg-backup.sh once`.
+Бэкап вне расписания: `docker compose -p dmc-268-monitoring exec pg-backup sh /opt/pg-backup/pg-backup.sh once` (prod: сервис `pg-backup-prod`).
+
+**Что бэкап prod делает с БД prod.** Роль `backup_agent` prod — те же права, что на staging: `pg_read_all_data`, `CREATEDB`, `CONNECTION LIMIT 3`, без суперпользователя и записи в данные. Проверка восстановления ежедневно создаёт и удаляет временную БД `dmc_restore_check` на самом сервере prod (нагрузка на CPU и диск порядка размера БД, сейчас секунды). Проверять восстановление на другом сервере скрипт не умеет по построению.
+
+**Диск и память.** На хосте 68 из 105 GB свободно (02.11.2026), TSDB Prometheus 505 МБ. Каталоги дампов, тома Docker и TSDB делят один корневой раздел; страхуют проверка 2 × размер БД перед попыткой каждого сервиса, хранение 7 дней и алерт `HostDiskFull` (< 15 % свободно, оба окружения). Проверки сервисов друг о друге не знают: два дампа одновременно теоретически могут оба пройти проверку и не поместиться, раннее предупреждение — панель размера дампа по окружению. Лимиты памяти и суммы — §1.
+
+**Версия `pg_dump`.** `pg-backup-prod` берёт образ из `staging.yml` на `main`, а сервер prod работает на образе последнего `Deploy prod`. После повышения версии PostgreSQL клиент старше сервера не сможет сделать дамп: попытка упадёт заметно (`PostgresBackupFailed` с `environment="prod"`), молча ничего не пропускается; образ `pg-backup` меняют вместе с версией PostgreSQL prod.
 
 **Восстановление** (проверено на дампе staging-схемы: та же ревизия, таблицы и данные, владелец `app`). Перед заменой рабочей БД — правила [CICD.md §5](CICD.md#5-rollback) «Действия при отказе»: окно обслуживания, остановка пишущих процессов, бэкап текущей БД. Остановку дольше 5 мин заранее заглушить в Alertmanager (§5, «Плановая остановка»).
 
@@ -309,17 +338,41 @@ docker compose -p dmc-268-api-staging start api worker webhook-worker
 
 Образ приложения должен соответствовать восстановленной ревизии (CICD.md §5, «Допуск по ревизии БД»). Роли мониторинга и их права после переименования БД пересоздаст следующий `Deploy monitoring`.
 
+**Восстановление prod** — те же шаги и те же правила окна обслуживания, но проект `dmc-268-api-prod`, каталог `/var/backups/dmc-268/dmc-268-api-prod/` и контейнер `postgres` prod (пользователь и база — `POSTGRES_USER` и `POSTGRES_DB` из `/opt/dmc-268-api-prod/.env`, ниже по умолчанию `app`). Заменять БД prod только с явного разрешения техлида, пишущие процессы остановить заранее:
+
+```bash
+cd /opt/dmc-268-api-prod
+pg=$(docker compose -p dmc-268-api-prod ps -q postgres)
+dump=/var/backups/dmc-268/dmc-268-api-prod/<выбранный>.dump
+
+# 1. Проверить дамп в отдельной БД
+docker exec "$pg" createdb -U app -O app restore_drill
+docker exec -i "$pg" pg_restore -U app -d restore_drill --no-owner --role=app \
+  --exit-on-error --single-transaction < "$dump"
+docker exec "$pg" psql -U app -d restore_drill -Atc 'SELECT version_num FROM alembic_version'
+
+# 2. Заменить рабочую БД (writers остановлены)
+docker compose -p dmc-268-api-prod stop api worker webhook-worker
+docker exec "$pg" psql -U app -d postgres -c 'DROP DATABASE app WITH (FORCE)'
+docker exec "$pg" psql -U app -d postgres -c 'ALTER DATABASE restore_drill RENAME TO app'
+docker compose -p dmc-268-api-prod start api worker webhook-worker
+```
+
+Роли мониторинга и бэкапа (`grafana_reader`, `metrics_exporter`, `backup_agent`) и их права в восстановленной БД пересоздаст следующий `Deploy monitoring` (он требует работающий `postgres` prod).
+
 ### Копия вне VPS
 
 Решение техлида от 17.10.2026 (#186): дампы дополнительно уходят в S3-совместимый бакет Cloudflare R2. Это исключение из D1 («объектного хранилища в MVP нет») только для бэкапов; приложение S3 по-прежнему не использует.
 
-Сервис `backup-offsite` (`deploy/monitoring/backup/offsite.sh`, `compose.offsite.yml`, образ `rclone/rclone:1.75.2` по digest) каждые 15 минут:
+Сервис `backup-offsite` (`deploy/monitoring/backup/offsite.sh`, `compose.offsite.yml`, образ `rclone/rclone:1.75.2` по digest) каждые 15 минут; для prod есть двойник `backup-offsite-prod` (`compose.offsite-prod.yml`): тот же образ, бакет, ключи и ключ шифрования (отдельных secret или variable нет), но свой путь `store:<bucket>/postgres-prod`, каталог дампов prod только на чтение и свой файл метрик. Путь prod лежит рядом с `postgres`, а не внутри него: удаление по возрасту одного сервиса не достаёт копий другого, и каждый смонтировал только свой каталог. Шаги ниже — для одного сервиса:
 
 1. `rclone copy` готовых `*.dump` в crypt-remote `secure:` поверх `store:<bucket>/postgres`. Шифрование (rclone crypt: XSalsa20-Poly1305, ключ из `BACKUP_ENCRYPTION_PASSPHRASE`) выполняется на VPS: в бакете только шифротекст `<dump>.bin`, без ключа его не прочитать. `--immutable` запрещает перезапись уже загруженного дампа.
 2. `rclone delete --min-age 30d` — в бакете дампы хранятся 30 дней (на VPS — 7).
-3. Метрики `dmc_pg_backup_offsite_*` → алерты выше и панель `Last off-host copy`.
+3. Метрики `dmc_pg_backup_offsite_*{environment="…"}` → алерты выше и панель `Last off-host copy`. Кроме времени успешного прохода сервис пишет `dmc_pg_backup_offsite_last_copied_dump_timestamp_seconds`: время (mtime) самого нового дампа, который существовал, когда успешный проход начался (его читают до `rclone copy`, а `mv` из `*.partial` сохраняет mtime). Без этого проход, прошедший, пока дамп ещё `*.partial`, ничего не скопировал бы и всё равно считался бы успешным.
 
-Сбой копирования не доходит до удаления. Сервис создаётся, только когда заданы все пять имён ниже; заданы не все — выкат мониторинга падает до изменений на хосте; все пустые — сервис удаляется, дампы остаются только на VPS.
+Сбой копирования не доходит до удаления. Сервисы создаются, только когда заданы все пять имён ниже (копия prod — ещё и только с prod); заданы не все — выкат мониторинга падает до изменений на хосте; все пустые — сервисы удаляются, дампы остаются только на VPS. Тревоги «копия не настроена» нет ни у staging, ни у prod: отсутствие серии не алертит, `deploy.sh` пишет предупреждение, а для prod это показывает запрос 3 ниже.
+
+**Один бакет и один набор ключей на оба окружения** — решение техлида (02.11.2026). Следствие, не смягчённое здесь: утёкший токен Environment `staging` открывает и копии prod, а ключ шифрования расшифровывает оба окружения. Каталог `textfile/` общий для обоих бэкапов и node-exporter (bind mount, не сеть): скомпрометированный контейнер бэкапа prod мог бы подделать метрики staging; доверие то же, что между сервисами staging и этим каталогом сегодня.
 
 | Имя | Environment `staging` | Значение |
 |---|---|---|
@@ -352,9 +405,21 @@ rc lsl secure:                                # дампы по датам
 rc copy secure:<db>-<UTC>.dump /restore       # расшифрованный дамп в текущий каталог
 ```
 
+Для дампа prod в `RCLONE_CONFIG_SECURE_REMOTE` вместо `/postgres` стоит `/postgres-prod`.
+
 Дальше — те же шаги `pg_restore`, что выше, на новом хосте после выката приложения.
 
-Redis не бэкапится: на staging он без тома и без персистентности, это кэш (SD §10). Очереди RabbitMQ лежат в томе `rabbitmq-data`, а топологию при старте объявляет воркер; состояние прогонов восстанавливается из PostgreSQL реконсилером.
+Redis не бэкапится ни на staging, ни на prod: он без тома и без персистентности, это кэш (SD §10). Очереди RabbitMQ лежат в томе `rabbitmq-data`, а топологию при старте объявляет воркер; состояние прогонов восстанавливается из PostgreSQL реконсилером.
+
+### Проверить бэкап prod без SSH
+
+Всё читается в Grafana → Explore → источник Prometheus (только чтение). Первый дамп `pg-backup-prod` делает сразу после старта, первый проход `backup-offsite-prod` может случиться раньше дампа и успешно ничего не скопировать, следующий — через 15 минут: после `Deploy monitoring` подождать около 20 минут.
+
+1. `time() - dmc_pg_backup_last_success_timestamp_seconds{environment="prod"}` меньше `93600` (26 ч).
+2. `dmc_pg_backup_last_run_success{environment="prod"}` равно `1`, `dmc_pg_backup_files{environment="prod"}` не меньше `1`, `dmc_pg_backup_last_size_bytes{environment="prod"}` больше `0`. Скрипт оставляет только дамп, прошедший проверку восстановления, поэтому 1 и 2 вместе означают «проверенный дамп есть».
+3. `dmc_pg_backup_offsite_last_copied_dump_timestamp_seconds{environment="prod"} == dmc_pg_backup_last_success_timestamp_seconds{environment="prod"}` возвращает серию: последний успешный проход выгрузки покрыл именно самый новый проверенный дамп (`rclone copy` `*.dump` либо загружает его, либо проход падает), то есть он лежит в `store:<bucket>/postgres-prod`. Пустой результат при живой серии первого запроса — копия prod не настроена или ещё не прошла. Сам список бакета требует ключей R2 и доказательством не служит.
+4. `dmc_pg_backup_heartbeat_timestamp_seconds{environment="prod"}` — минуты, а `ALERTS{alertname=~"PostgresBackup.*", environment="prod"}` пуст; те же запросы с `environment="staging"` по-прежнему возвращают данные.
+5. Те же панели `PostgreSQL backups` при `Environment = prod`.
 
 ## 10. Проверка
 

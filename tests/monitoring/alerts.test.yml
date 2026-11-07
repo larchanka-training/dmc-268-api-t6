@@ -1069,6 +1069,118 @@ tests:
               summary: "Off-host backup copy fails"
               description: "Every backup-offsite pass of the last hour failed (bucket, keys or network)."
 
+  # Backups per environment: staging stays healthy while only prod is faulty, so each alert fires
+  # for prod alone and its text names the prod service. Healthy series grow with the clock.
+  - interval: 1m
+    input_series:
+      - series: 'dmc_pg_backup_last_success_timestamp_seconds{environment="staging", job="node", instance="node-exporter:9100"}'
+        values: "0+60x1700"
+      - series: 'dmc_pg_backup_last_success_timestamp_seconds{environment="prod", job="node", instance="node-exporter:9100"}'
+        values: "0x1700"
+      - series: 'dmc_pg_backup_last_run_success{environment="staging", job="node", instance="node-exporter:9100"}'
+        values: "1x1700"
+      - series: 'dmc_pg_backup_last_run_success{environment="prod", job="node", instance="node-exporter:9100"}'
+        values: "0x1700"
+      - series: 'dmc_pg_backup_heartbeat_timestamp_seconds{environment="staging", job="node", instance="node-exporter:9100"}'
+        values: "0+60x1700"
+      - series: 'dmc_pg_backup_heartbeat_timestamp_seconds{environment="prod", job="node", instance="node-exporter:9100"}'
+        values: "0+60x30 1800x1670"
+      - series: 'dmc_pg_backup_offsite_last_success_timestamp_seconds{environment="staging", job="node", instance="node-exporter:9100"}'
+        values: "0+60x1700"
+      - series: 'dmc_pg_backup_offsite_last_success_timestamp_seconds{environment="prod", job="node", instance="node-exporter:9100"}'
+        values: "0x1700"
+      - series: 'dmc_pg_backup_offsite_last_run_success{environment="staging", job="node", instance="node-exporter:9100"}'
+        values: "1x1700"
+      - series: 'dmc_pg_backup_offsite_last_run_success{environment="prod", job="node", instance="node-exporter:9100"}'
+        values: "0x1700"
+    alert_rule_test:
+      - eval_time: 27h
+        alertname: PostgresBackupStale
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              environment: prod
+              job: node
+              instance: node-exporter:9100
+            exp_annotations:
+              summary: "Last verified PostgreSQL backup is 1d 3h 0m 0s old"
+              description: "No dump has passed the restore check for more than 26 hours (daily schedule)."
+      - eval_time: 12m
+        alertname: PostgresBackupFailed
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              environment: prod
+              job: node
+              instance: node-exporter:9100
+            exp_annotations:
+              summary: "The last PostgreSQL backup attempt failed"
+              description: "See docker compose -p dmc-268-monitoring logs pg-backup-prod; the next attempt runs within an hour."
+      - eval_time: 2h45m
+        alertname: PostgresBackupMissing
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              environment: prod
+              job: node
+              instance: node-exporter:9100
+            exp_annotations:
+              summary: "The PostgreSQL backup service has not run for 2 hours"
+              description: "pg-backup-prod is stopped, removed or cannot write the textfile dir; see docker compose -p dmc-268-monitoring ps pg-backup-prod."
+      - eval_time: 3h15m
+        alertname: PostgresBackupOffsiteStale
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              environment: prod
+              job: node
+              instance: node-exporter:9100
+            exp_annotations:
+              summary: "Off-host backup copy last succeeded 3h 15m 0s ago"
+              description: "backup-offsite-prod has not reached the bucket for 3 hours; see docker compose -p dmc-268-monitoring logs backup-offsite-prod."
+      - eval_time: 61m
+        alertname: PostgresBackupOffsiteFailing
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              environment: prod
+              job: node
+              instance: node-exporter:9100
+            exp_annotations:
+              summary: "Off-host backup copy fails"
+              description: "Every backup-offsite-prod pass of the last hour failed (bucket, keys or network)."
+
+  # A prod stack whose backup never wrote a heartbeat: the prod postgres target exists (the host
+  # monitors prod) and the staging heartbeat is healthy.
+  - interval: 1m
+    input_series:
+      - series: 'dmc_pg_backup_heartbeat_timestamp_seconds{environment="staging", job="node", instance="node-exporter:9100"}'
+        values: "0+60x100"
+      - series: 'up{environment="prod", job="postgres", instance="postgres-exporter-prod:9187"}'
+        values: "1x100"
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: PostgresBackupMissing
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              environment: prod
+            exp_annotations:
+              summary: "The PostgreSQL backup service has not run for 2 hours"
+              description: "pg-backup-prod is stopped, removed or cannot write the textfile dir; see docker compose -p dmc-268-monitoring ps pg-backup-prod."
+
+  # A host without prod (Terraform mode): no prod target, no prod heartbeat, and no alert for it.
+  - interval: 1m
+    input_series:
+      - series: 'dmc_pg_backup_heartbeat_timestamp_seconds{environment="staging", job="node", instance="node-exporter:9100"}'
+        values: "0+60x100"
+      - series: 'up{environment="staging", job="postgres", instance="postgres-exporter:9187"}'
+        values: "1x100"
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: PostgresBackupMissing
+        exp_alerts: []
+
   # Staging and prod side by side: a fault of one environment fires for it alone. The prod worker
   # leaves its queue at 1m and a prod run fails at 2m while staging stays healthy; summing over
   # the environments would hide both.

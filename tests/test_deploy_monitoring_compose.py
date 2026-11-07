@@ -205,6 +205,14 @@ def test_the_application_sends_traces_to_tempo_inside_the_docker_network() -> No
     assert "    url: http://tempo:3200\n" in datasources
 
 
+def test_backup_services_name_their_environment() -> None:
+    staging = _service_blocks(_read(MONITORING / "compose.yml"))["pg-backup"]
+    offsite = _read(MONITORING / "compose.offsite.yml")
+
+    assert "      BACKUP_ENVIRONMENT: staging\n" in staging
+    assert "      BACKUP_ENVIRONMENT: staging\n" in offsite
+
+
 # --- edge proxy ----------------------------------------------------------------------------
 
 

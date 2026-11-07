@@ -84,6 +84,17 @@ def _grants(sql: str) -> dict[tuple[str, str], set[str]]:
     return grants
 
 
+PASSPHRASE = "test-passphrase-with-enough-entropy-0123456789"
+OFFSITE = {
+    "BACKUP_S3_ENDPOINT": "https://0123456789abcdef.r2.cloudflarestorage.com",
+    "BACKUP_S3_BUCKET": "dmc268-t6-backups",
+    "BACKUP_S3_ACCESS_KEY_ID": "FAKE_TEST_KEY_ID_DO_NOT_USE",
+    "BACKUP_S3_SECRET_ACCESS_KEY": "FAKE_TEST_CREDENTIAL_DO_NOT_USE",
+    "BACKUP_ENCRYPTION_PASSPHRASE": PASSPHRASE,
+}
+NO_OFFSITE = dict.fromkeys(OFFSITE, "")
+
+
 FAKE_DOCKER = """\
 #!/usr/bin/env bash
 # Fake docker CLI: logs every call; psql, grafana and rclone obscure stdin go to their own logs.
@@ -163,6 +174,7 @@ class Host:
             "STUB_PROD_POSTGRES_ID": "pgcontainer-prod",
             "STUB_OBSCURE_STDIN": str(self.stubs / "obscure.log"),
             "BACKUP_DIR": str(self.root / "backups"),
+            "PROD_BACKUP_DIR": str(self.root / "backups-prod"),
             **(extra or {}),
             **overrides,
         }

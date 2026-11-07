@@ -2,9 +2,9 @@
 # shellcheck source-path=SCRIPTDIR
 # Deploy the monitoring stack on the host (docs/MONITORING.md). Run as root after the application
 # deploy: it reads the application's .env and joins its network, and changes neither, except the
-# PostgreSQL roles it keeps in sync: grafana_reader and metrics_exporter (read-only, metadata
-# columns) in the staging and, with PROD_API_DIR, the prod database, and backup_agent
-# (pg_read_all_data for pg_dump of the pg-backup service) in the staging one.
+# PostgreSQL roles it keeps in sync, in the staging and, with PROD_API_DIR, the prod database:
+# grafana_reader and metrics_exporter (read-only, metadata columns) and backup_agent
+# (pg_read_all_data for pg_dump of the pg-backup and pg-backup-prod services).
 #
 # Inputs (environment):
 #   API_DIR                    application dir with .env and env-file.sh (/opt/dmc-268-api-staging)
@@ -21,6 +21,10 @@
 #                              deploy fails before the host changes; empty: no prod; unset: keep the
 #                              value in .env (manual run)
 #   BACKUP_DIR                 host dir of the PostgreSQL dumps, default /var/backups/dmc-268/<project>
+#   PROD_BACKUP_DIR            the same for the prod database (with PROD_API_DIR only), default
+#                              /var/backups/dmc-268/<prod project>; never the dir of staging; with
+#                              PROD_API_DIR both paths must be absolute, or the deploy fails before
+#                              the host changes
 #   GRAFANA_ADMIN_PASSWORD     set: the Grafana admin password (GitHub secret; GitHub never shows its
 #                              value, whoever sets it keeps a copy outside GitHub); empty or unset:
 #                              keep the one in .env (generated on a fresh host, or an earlier secret)
@@ -31,7 +35,8 @@
 #                              the budget alerts are silent; unset: keep the previous one (manual run)
 #   BACKUP_S3_ENDPOINT, BACKUP_S3_BUCKET, BACKUP_S3_ACCESS_KEY_ID, BACKUP_S3_SECRET_ACCESS_KEY,
 #   BACKUP_ENCRYPTION_PASSPHRASE
-#                              all set: encrypted off-host copy of the dumps (compose.offsite.yml);
+#                              all set: encrypted off-host copy of the dumps (compose.offsite.yml, and
+#                              with prod compose.offsite-prod.yml, under its own bucket path);
 #                              all empty: dumps stay on this host; unset: keep the previous setting
 set -euo pipefail
 set +o xtrace
@@ -72,6 +77,45 @@ generate_password() {
 # A setting kept in .env by the previous deploy, empty on a fresh host.
 previous_setting() {
   if [[ -f "${ENV_FILE}" ]]; then read_compose_env_var "$1" "${ENV_FILE}" || true; fi
+}
+
+# An absolute path normalised by text alone: no "//", ".", trailing "/", and ".." resolved against
+# the segment before it. Symlinks are not followed: physical_path does that for the part of a path
+# that exists. No realpath: its -m is GNU only, and the dirs may not exist yet.
+normalize_path() {
+  local rest="$1" result="" segment
+  while [[ -n "${rest}" ]]; do
+    segment="${rest%%/*}"
+    if [[ "${rest}" == */* ]]; then rest="${rest#*/}"; else rest=""; fi
+    case "${segment}" in
+      "" | .) ;;
+      ..) result="${result%/*}" ;;
+      *) result="${result}/${segment}" ;;
+    esac
+  done
+  printf '%s' "${result:-/}"
+}
+
+# An absolute path by its physical location: the deepest existing directory of it is resolved by
+# the kernel (symlinks and ".." in that part included), the rest, which does not exist yet, is put
+# back and normalised by text. A symlink that is not a directory (dangling, or pointing at a file)
+# could point at a directory created later: it stops the deploy. cd -P and pwd -P are POSIX, unlike
+# realpath.
+physical_path() {
+  local dir="$1" tail="" resolved
+  while [[ ! -d "${dir}" ]]; do
+    if [[ -L "${dir}" ]]; then
+      echo "${dir} is a symbolic link that is not a directory (dangling, or pointing at a file):" \
+        "the dump dirs cannot be compared" >&2
+      return 1
+    fi
+    tail="/${dir##*/}${tail}"
+    dir="${dir%/*}"
+    if [[ -z "${dir}" ]]; then dir="/"; fi
+  done
+  resolved="$(cd -P -- "${dir}" && pwd -P)" || return 1
+  if [[ "${resolved}" == "/" ]]; then resolved=""; fi
+  normalize_path "${resolved}${tail}"
 }
 
 # A password of this stack: kept from .env, generated once on a fresh host.
@@ -321,14 +365,36 @@ fi
 GRAFANA_DB_PASSWORD="$(stack_password GRAFANA_DB_PASSWORD)"
 PG_EXPORTER_PASSWORD="$(stack_password PG_EXPORTER_PASSWORD)"
 PG_BACKUP_PASSWORD="$(stack_password PG_BACKUP_PASSWORD)"
-# The prod database has roles and passwords of its own: one leaked value opens one database. The
-# backup role of prod comes with the prod backup.
+# The prod database has roles and passwords of its own: one leaked value opens one database.
 if [[ -n "${PROD_API_DIR}" ]]; then
   PROD_GRAFANA_DB_PASSWORD="$(stack_password PROD_GRAFANA_DB_PASSWORD)"
   PROD_PG_EXPORTER_PASSWORD="$(stack_password PROD_PG_EXPORTER_PASSWORD)"
+  PROD_PG_BACKUP_PASSWORD="$(stack_password PROD_PG_BACKUP_PASSWORD)"
 fi
-# Dumps of the application database, outside every stack dir (docs/MONITORING.md §9).
+# Dumps of the application database, outside every stack dir (docs/MONITORING.md §9). Every
+# environment has a dir of its own, named after its compose project.
 BACKUP_DIR="${BACKUP_DIR:-/var/backups/dmc-268/${API_PROJECT}}"
+if [[ -n "${PROD_API_DIR}" ]]; then
+  PROD_BACKUP_DIR="${PROD_BACKUP_DIR:-/var/backups/dmc-268/${PROD_API_PROJECT}}"
+  # Compose resolves a relative bind path from the first compose file, while mkdir, chown and the
+  # check below resolve it from $PWD: one value would name two directories.
+  if [[ "${BACKUP_DIR}" != /* || "${PROD_BACKUP_DIR}" != /* ]]; then
+    echo "BACKUP_DIR and PROD_BACKUP_DIR must be absolute paths with PROD_API_DIR:" \
+      "BACKUP_DIR=${BACKUP_DIR} PROD_BACKUP_DIR=${PROD_BACKUP_DIR}" >&2
+    exit 1
+  fi
+  # Each service prunes and counts the dumps of its dir: one dir, or one inside the other, would
+  # mix the dumps and the off-host copies of the two databases. Compared by physical location, so a
+  # symlink between them does not hide the overlap, before the host changes.
+  staging_dumps="$(physical_path "${BACKUP_DIR}")" || exit 1
+  prod_dumps="$(physical_path "${PROD_BACKUP_DIR}")" || exit 1
+  if [[ "${prod_dumps}" == "${staging_dumps}" || "${prod_dumps}" == "${staging_dumps%/}"/* \
+    || "${staging_dumps}" == "${prod_dumps%/}"/* ]]; then
+    echo "PROD_BACKUP_DIR must not be BACKUP_DIR nor inside it (or the other way round):" \
+      "${PROD_BACKUP_DIR} and ${BACKUP_DIR}" >&2
+    exit 1
+  fi
+fi
 
 # The crypt remote of rclone takes the passphrase in its obscured form. Obscuring is randomised, so
 # the previous value is reused while the passphrase is the same: a new value would recreate the
@@ -454,7 +520,7 @@ sync_monitoring_roles "${POSTGRES_CONTAINER}" "${POSTGRES_USER}" "${POSTGRES_DB}
 if [[ -n "${PROD_API_DIR}" ]]; then
   # A migration that adds a column the grants name reaches staging first: prod fails until Deploy prod.
   sync_monitoring_roles "${PROD_POSTGRES_CONTAINER}" "${PROD_POSTGRES_USER}" "${PROD_POSTGRES_DB}" \
-    "${PROD_GRAFANA_DB_PASSWORD}" "${PROD_PG_EXPORTER_PASSWORD}" "" prod \
+    "${PROD_GRAFANA_DB_PASSWORD}" "${PROD_PG_EXPORTER_PASSWORD}" "${PROD_PG_BACKUP_PASSWORD}" prod \
     "a grant may name a column that prod has not migrated yet: run Deploy prod, then re-run Deploy monitoring"
 fi
 
@@ -462,12 +528,17 @@ umask 077
 TEXTFILE_DIR="${TEXTFILE_DIR:-${MONITORING_DIR}/textfile}"
 mkdir -p "${MONITORING_DIR}/alertmanager/secrets" "${MONITORING_DIR}/prometheus/targets" \
   "${TEXTFILE_DIR}"
-# pg-backup writes its metrics here; node-exporter (nobody) reads them.
+# pg-backup and pg-backup-prod write their metrics here; node-exporter (nobody) reads them.
 chown "${POSTGRES_IMAGE_UID}:${POSTGRES_IMAGE_UID}" "${TEXTFILE_DIR}"
 chmod 755 "${TEXTFILE_DIR}"
 mkdir -p "${BACKUP_DIR}"
 chown "${POSTGRES_IMAGE_UID}:${POSTGRES_IMAGE_UID}" "${BACKUP_DIR}"
 chmod 700 "${BACKUP_DIR}"
+if [[ -n "${PROD_API_DIR}" ]]; then
+  mkdir -p "${PROD_BACKUP_DIR}"
+  chown "${POSTGRES_IMAGE_UID}:${POSTGRES_IMAGE_UID}" "${PROD_BACKUP_DIR}"
+  chmod 700 "${PROD_BACKUP_DIR}"
+fi
 
 # The threshold of the budget alerts, read by node-exporter: without the file they stay silent.
 # pg-backup writes the textfile dir too, so the file is prepared in this root-owned dir and renamed
@@ -601,6 +672,8 @@ find "${MONITORING_DIR}/prometheus" "${MONITORING_DIR}/grafana" "${MONITORING_DI
     printf 'PROD_POSTGRES_DB=%s\n' "${PROD_POSTGRES_DB}"
     printf 'PROD_GRAFANA_DB_PASSWORD=%s\n' "${PROD_GRAFANA_DB_PASSWORD}"
     printf 'PROD_PG_EXPORTER_PASSWORD=%s\n' "${PROD_PG_EXPORTER_PASSWORD}"
+    printf 'PROD_PG_BACKUP_PASSWORD=%s\n' "${PROD_PG_BACKUP_PASSWORD}"
+    printf 'PROD_BACKUP_DIR=%s\n' "$(escape_compose_value "${PROD_BACKUP_DIR}")"
     printf 'PROD_API_NETWORK=%s\n' "$(escape_compose_value "${PROD_API_NETWORK}")"
     printf 'PROD_REDIS_PASSWORD=%s\n' "$(escape_compose_value "${PROD_REDIS_PASSWORD}")"
     printf 'RELAY_CONFIG_DIGEST=%s\n' "$(config_digest relay)"
@@ -626,6 +699,10 @@ fi
 # Without the off-host settings the service is left out, and --remove-orphans removes a running one.
 if [[ "${OFFSITE_CONFIGURED}" == s3 ]]; then
   COMPOSE+=(-f "${MONITORING_DIR}/compose.offsite.yml")
+  # The prod copy needs the prod dump dir, which exists with prod only.
+  if [[ -n "${PROD_API_DIR}" ]]; then
+    COMPOSE+=(-f "${MONITORING_DIR}/compose.offsite-prod.yml")
+  fi
 fi
 "${COMPOSE[@]}" up -d --remove-orphans --wait --wait-timeout 180
 

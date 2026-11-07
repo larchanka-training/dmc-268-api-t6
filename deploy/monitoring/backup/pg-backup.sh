@@ -1,7 +1,9 @@
 #!/bin/sh
 # Scheduled PostgreSQL backup of the application database (docs/MONITORING.md §9). Runs in the
 # pg-backup service of deploy/monitoring/compose.yml as the role backup_agent (pg_read_all_data,
-# CREATEDB), with the libpq environment PGHOST, PGUSER, PGPASSWORD and PGDATABASE.
+# CREATEDB), with the libpq environment PGHOST, PGUSER, PGPASSWORD and PGDATABASE. The prod
+# database has its own twin of the service; BACKUP_ENVIRONMENT (staging or prod) labels every
+# metric of the two, so the one script serves both.
 #
 #   pg-backup.sh loop   check every BACKUP_POLL_SECONDS, back up when the newest dump is older
 #                       than BACKUP_INTERVAL_SECONDS (a failed attempt is retried after
@@ -31,6 +33,16 @@ POLL="${BACKUP_POLL_SECONDS:-300}"
 RETENTION_DAYS="${BACKUP_RETENTION_DAYS:-7}"
 CHECK_DB="${BACKUP_CHECK_DB:-dmc_restore_check}"
 : "${PGDATABASE:?PGDATABASE is required}"
+# The label of every series: the node job of Prometheus keeps it (honor_labels), so a missing or
+# unknown value must stop the service instead of mislabelling the backups of another environment.
+case "${BACKUP_ENVIRONMENT:-}" in
+  staging | prod) ;;
+  *)
+    echo "pg-backup.sh: BACKUP_ENVIRONMENT must be staging or prod" >&2
+    exit 2
+    ;;
+esac
+LABELS="{environment=\"${BACKUP_ENVIRONMENT}\"}"
 # Server NOTICEs (dropdb --if-exists of a missing database) are noise in the service log.
 export PGOPTIONS="${PGOPTIONS:-} -c client_min_messages=warning"
 
@@ -141,25 +153,25 @@ write_metrics() {
   {
     echo "# HELP dmc_pg_backup_last_run_success 1 if the last backup attempt succeeded."
     echo "# TYPE dmc_pg_backup_last_run_success gauge"
-    echo "dmc_pg_backup_last_run_success ${run_success}"
+    echo "dmc_pg_backup_last_run_success${LABELS} ${run_success}"
     echo "# HELP dmc_pg_backup_last_run_timestamp_seconds Time of the last backup attempt."
     echo "# TYPE dmc_pg_backup_last_run_timestamp_seconds gauge"
-    echo "dmc_pg_backup_last_run_timestamp_seconds $(date +%s)"
+    echo "dmc_pg_backup_last_run_timestamp_seconds${LABELS} $(date +%s)"
     echo "# HELP dmc_pg_backup_files Dumps kept in the backup directory."
     echo "# TYPE dmc_pg_backup_files gauge"
-    echo "dmc_pg_backup_files $(find "${BACKUP_DIR}" -maxdepth 1 -name "${PGDATABASE}-*.dump" | wc -l)"
+    echo "dmc_pg_backup_files${LABELS} $(find "${BACKUP_DIR}" -maxdepth 1 -name "${PGDATABASE}-*.dump" | wc -l)"
     if [ -n "${newest}" ]; then
       echo "# HELP dmc_pg_backup_last_success_timestamp_seconds Time of the newest verified dump."
       echo "# TYPE dmc_pg_backup_last_success_timestamp_seconds gauge"
-      echo "dmc_pg_backup_last_success_timestamp_seconds $(stat -c %Y "${newest}")"
+      echo "dmc_pg_backup_last_success_timestamp_seconds${LABELS} $(stat -c %Y "${newest}")"
       echo "# HELP dmc_pg_backup_last_size_bytes Size of the newest verified dump."
       echo "# TYPE dmc_pg_backup_last_size_bytes gauge"
-      echo "dmc_pg_backup_last_size_bytes $(wc -c < "${newest}")"
+      echo "dmc_pg_backup_last_size_bytes${LABELS} $(wc -c < "${newest}")"
     fi
     if [ -n "${LAST_DURATION:-}" ]; then
       echo "# HELP dmc_pg_backup_last_duration_seconds Duration of the last successful backup."
       echo "# TYPE dmc_pg_backup_last_duration_seconds gauge"
-      echo "dmc_pg_backup_last_duration_seconds ${LAST_DURATION}"
+      echo "dmc_pg_backup_last_duration_seconds${LABELS} ${LAST_DURATION}"
     fi
   } > "${TEXTFILE}.tmp"
   chmod 644 "${TEXTFILE}.tmp"
@@ -198,10 +210,21 @@ write_heartbeat() {
   {
     echo "# HELP dmc_pg_backup_heartbeat_timestamp_seconds Last loop pass of the pg-backup service."
     echo "# TYPE dmc_pg_backup_heartbeat_timestamp_seconds gauge"
-    echo "dmc_pg_backup_heartbeat_timestamp_seconds $(date +%s)"
+    echo "dmc_pg_backup_heartbeat_timestamp_seconds${LABELS} $(date +%s)"
   } > "${HEARTBEAT}.tmp"
   chmod 644 "${HEARTBEAT}.tmp"
   mv "${HEARTBEAT}.tmp" "${HEARTBEAT}"
+}
+
+# A textfile written before the series carried a label (an older version of this script) would
+# be exposed without environment until the next attempt, up to a day. Idempotent: labeled lines
+# do not match.
+label_old_textfile() {
+  [ -f "${TEXTFILE}" ] || return 0
+  grep -q '^dmc_pg_backup_[a-z_]* ' "${TEXTFILE}" || return 0
+  sed -e "s/^\\(dmc_pg_backup_[a-z_]*\\) /\\1${LABELS} /" "${TEXTFILE}" > "${TEXTFILE}.tmp"
+  chmod 644 "${TEXTFILE}.tmp"
+  mv "${TEXTFILE}.tmp" "${TEXTFILE}"
 }
 
 due() {
@@ -220,6 +243,7 @@ case "${1:-loop}" in
     # cut short leaves only a .partial file, removed by the next attempt.
     trap 'log "stopping"; exit 0' TERM INT
     log "every ${INTERVAL} s, keep ${RETENTION_DAYS} days, into ${BACKUP_DIR}"
+    label_old_textfile
     last_failure=0
     while :; do
       write_heartbeat

@@ -14,6 +14,9 @@
 # network. Grafana reaches the relay only, and the relay forwards two fixed upstreams.
 # Nothing on either network is named or aliased postgres, rabbitmq or redis, so those names keep
 # resolving to the staging stores.
+# The backup of the prod database (pg-backup-prod) is the one service that reaches the prod store
+# under its plain name: it sits on the prod network and no other, so PGHOST=postgres means the
+# prod server there, exactly as it means the staging one for pg-backup.
 x-logging: &logging
   driver: json-file
   options:
@@ -87,6 +90,39 @@ services:
       prod-sql: {}
     restart: unless-stopped
     mem_limit: 32m
+    logging: *logging
+
+  # Daily verified dump of the prod database (backup/pg-backup.sh, docs/MONITORING.md §9): the twin
+  # of pg-backup, with the image and script of staging, but its own role password, database, dump
+  # dir and textfiles. It joins no network but the prod one. The dump dir is a host directory
+  # outside the stack dirs, like staging's: deploy.sh creates it and gives it to the postgres user.
+  pg-backup-prod:
+    image: postgres:17.11-alpine@sha256:b0f9560a2de083e2cc7382e75f808c7381a32852a7ec49117deedb300e552b24
+    entrypoint: ["sh", "/opt/pg-backup/pg-backup.sh"]
+    command: ["loop"]
+    user: "70:70"
+    environment:
+      PGHOST: postgres
+      PGPORT: "5432"
+      PGUSER: backup_agent
+      PGPASSWORD: ${PROD_PG_BACKUP_PASSWORD:?PROD_PG_BACKUP_PASSWORD is required}
+      PGDATABASE: ${PROD_POSTGRES_DB:?PROD_POSTGRES_DB is required}
+      BACKUP_ENVIRONMENT: prod
+      # Files of their own next to staging's: node-exporter reads every *.prom of the dir.
+      TEXTFILE: /textfile/pg_backup_prod.prom
+      HEARTBEAT: /textfile/pg_backup_prod_heartbeat.prom
+      BACKUP_INTERVAL_SECONDS: ${BACKUP_INTERVAL_SECONDS:-86400}
+      BACKUP_RETENTION_DAYS: ${BACKUP_RETENTION_DAYS:-7}
+    labels:
+      dmc.config-digest: ${PG_BACKUP_CONFIG_DIGEST:-none}
+    volumes:
+      - ./backup:/opt/pg-backup:ro
+      - ${PROD_BACKUP_DIR:?PROD_BACKUP_DIR is required}:/backups
+      - ${TEXTFILE_DIR:-./textfile}:/textfile
+    networks:
+      api-prod: {}
+    restart: unless-stopped
+    mem_limit: 128m
     logging: *logging
 
 networks:
