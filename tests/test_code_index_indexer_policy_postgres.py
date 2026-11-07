@@ -34,7 +34,7 @@ from tests.code_index_indexer_harness import (
     _uses,
 )
 
-pytest_plugins = ("tests.code_index_indexer_fixtures",)
+pytest_plugins = ("tests.code_index_postgres", "tests.code_index_indexer_fixtures")
 
 # --- authoritative policy excluded from source archives (#207) ----------------------------
 
