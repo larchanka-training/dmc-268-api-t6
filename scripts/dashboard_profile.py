@@ -26,7 +26,8 @@ Usage, from the repository root (`python scripts/...` cannot import `app`):
 
 Exit codes: 0 the numbers are printed (a p95 over a target is a result, not an error); 1 the
 measurement failed: a non-200 answer, too little data to fill a page, an API that did not start, a
-database error; 2 invalid arguments or a server that is not loopback.
+database error, a plans file that could not be written; 2 invalid arguments, among them an
+`--explain-out` in a directory that does not exist, or a server that is not loopback.
 """
 
 from __future__ import annotations
@@ -64,7 +65,7 @@ from cryptography.hazmat.primitives.serialization import (
 )
 from sqlalchemy import create_engine, event
 from sqlalchemy.engine import URL, make_url
-from sqlalchemy.exc import ArgumentError
+from sqlalchemy.exc import ArgumentError, SQLAlchemyError
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from alembic import command
@@ -346,14 +347,24 @@ def own_database(server_url: URL, *, keep: bool) -> Iterator[URL]:
     with psycopg.connect(_conninfo(server_url), autocommit=True) as connection:
         connection.execute(f'CREATE DATABASE "{name}"')
     print(f"database: {name}", flush=True)
+    failed = False
     try:
         yield server_url.set(database=name)
+    except BaseException:
+        failed = True
+        raise
     finally:
         if keep:
             print(f'kept; to remove it: DROP DATABASE "{name}" WITH (FORCE)', flush=True)
         else:
-            with psycopg.connect(_conninfo(server_url), autocommit=True) as connection:
-                connection.execute(f'DROP DATABASE "{name}" WITH (FORCE)')
+            try:
+                with psycopg.connect(_conninfo(server_url), autocommit=True) as connection:
+                    connection.execute(f'DROP DATABASE "{name}" WITH (FORCE)')
+            except psycopg.Error as error:
+                if not failed:
+                    raise
+                # The first error is the one to report; this one only leaves the database behind.
+                print(f"dashboard_profile: could not drop {name}: {error}", file=sys.stderr)
 
 
 def _migrate(database_url: URL) -> None:
@@ -1013,6 +1024,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         for name in ("prs_per_day", "history_days", "requests"):
             if getattr(arguments, name) < 1:
                 raise Refused(f"--{name.replace('_', '-')} must be positive")
+        if arguments.explain_out is not None and not arguments.explain_out.parent.is_dir():
+            raise Refused(f"--explain-out directory {arguments.explain_out.parent} does not exist")
     except Refused as error:
         print(f"dashboard_profile: {error}", file=sys.stderr)
         return 2
@@ -1032,7 +1045,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             print_statements(captured)
             if arguments.explain_out is not None:
                 write_plans(database_url, captured, arguments.explain_out)
-    except (MeasurementFailed, psycopg.Error, httpx.HTTPError) as error:
+    except (MeasurementFailed, psycopg.Error, SQLAlchemyError, httpx.HTTPError, OSError) as error:
         print(f"dashboard_profile: {error}", file=sys.stderr)
         return 1
     return 0

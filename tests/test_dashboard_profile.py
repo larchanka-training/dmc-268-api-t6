@@ -17,6 +17,7 @@ from typing import Any
 import psycopg
 import pytest
 from sqlalchemy.engine import URL, make_url
+from sqlalchemy.exc import OperationalError
 
 from app.modules.reviews.application.saved_review_result import read_saved_review_result
 
@@ -88,6 +89,8 @@ def test_a_server_that_is_not_loopback_is_refused_before_any_connection(
         (["--prs-per-day", "0"], "positive"),
         (["--history-days", "0"], "positive"),
         (["--requests", "0"], "positive"),
+        # Found only after minutes of timing otherwise.
+        (["--explain-out", "/nonexistent-dashboard-profile/plans.md"], "--explain-out"),
     ],
 )
 def test_an_invalid_argument_is_refused_before_any_connection(
@@ -279,6 +282,44 @@ def test_a_volume_without_a_full_page_fails_the_measurement(failed_run: Finished
     """A profile of nearly empty data would lie; the run says so instead of printing numbers."""
     assert failed_run.code == 1
     assert "full page" in failed_run.stderr
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize(
+    "error",
+    [
+        OperationalError("SELECT 1", {}, Exception("server closed the connection")),
+        PermissionError("plans.md"),
+    ],
+)
+def test_a_database_or_file_error_exits_with_1_and_drops_the_database(
+    profile: ModuleType, server_url: str, error: Exception, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A fault the real stack gives on no demand, injected at the first step after the CREATE."""
+
+    def fail(_database_url: URL) -> None:
+        raise error
+
+    monkeypatch.setattr(profile, "_migrate", fail)
+    finished = _run_profile(profile, server_url)
+    assert finished.code == 1
+    assert finished.stderr.startswith("dashboard_profile: ")
+    assert not _database_exists(server_url, finished.database)
+
+
+@pytest.mark.integration
+def test_a_failed_drop_does_not_hide_the_first_error(
+    profile: ModuleType, server_url: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    url = profile.loopback_server_url(server_url)
+    with (
+        pytest.raises(profile.MeasurementFailed, match="first"),
+        profile.own_database(url, keep=False) as database_url,
+    ):
+        # Gone before the command's own DROP, which then fails.
+        _drop_database(server_url, database_url.database)
+        raise profile.MeasurementFailed("first")
+    assert database_url.database in capsys.readouterr().err
 
 
 @pytest.mark.integration
