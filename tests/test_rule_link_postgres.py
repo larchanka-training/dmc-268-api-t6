@@ -99,6 +99,11 @@ def test_the_hash_of_the_store_matches_the_hash_of_the_stored_rows(portal_env: E
             assert [item.rule_link for item in context.findings] == [_LINK]
             # The pointer of T8 carries the first hash, the publisher compares it to the second.
             assert context.findings_hash == findings_hash(hashed_findings(processed))
+            # SHA-256 of the canonical JSON of this one finding with its link, computed outside
+            # the code under test: both paths above could drop the link and still agree.
+            assert context.findings_hash == (
+                "2ccd1990ecb3787a9bad7316ae2c193220f2df841bd29d6d2c90e1e74fd31380"
+            )
         finally:
             await engine.dispose()
 
