@@ -82,6 +82,7 @@ _USER_ID = 42
 _PAGE_SIZE = 20
 _WARMUP_REQUESTS = 5
 _EXPLAINED_PER_SCENARIO = 5
+_MAX_PLAN_LINE = 500
 _SERVER_START_SECONDS = 60.0
 _ISSUER = "dashboard-profile"
 _AUDIENCE = "dashboard-profile-ui"
@@ -696,7 +697,13 @@ def print_environment(database_url: URL) -> None:
     with psycopg.connect(_conninfo(database_url)) as connection:
         settings = {
             name: _scalar(connection, f"SHOW {name}")
-            for name in ("server_version", "shared_buffers", "work_mem")
+            for name in (
+                "server_version",
+                "shared_buffers",
+                "work_mem",
+                "jit",
+                "max_parallel_workers_per_gather",
+            )
         }
     load = " ".join(f"{value:.1f}" for value in os.getloadavg())
     print(
@@ -931,20 +938,38 @@ def print_statements(captured: Sequence[Captured]) -> None:
     sys.stdout.flush()
 
 
+def _readable(text: str) -> str:
+    """A list of bound ids runs to tens of kilobytes per line; keep the head of such a line."""
+    lines = []
+    for line in text.splitlines():
+        excess = len(line) - _MAX_PLAN_LINE
+        lines.append(
+            f"{line[: _MAX_PLAN_LINE - 30]} [{excess + 30} chars cut]" if excess > 0 else line
+        )
+    return "\n".join(lines)
+
+
 def write_plans(database_url: URL, captured: Sequence[Captured], path: Path) -> None:
     """EXPLAIN (ANALYZE, BUFFERS) of the statements themselves, with their own parameters."""
     sections = ["# EXPLAIN (ANALYZE, BUFFERS), slowest statements first"]
     with psycopg.connect(_conninfo(database_url)) as connection:
         for item in captured:
-            sections.append(f"## {item.scenario.name}\n")
+            ranking = "\n".join(
+                f"| {position} | {statement.milliseconds:.2f} | "
+                f"`{' '.join(statement.text.split())[:80]}` |"
+                for position, statement in enumerate(item.slowest, start=1)
+            )
+            sections.append(
+                f"## {item.scenario.name}\n\n| # | ms | statement |\n| --- | --- | --- |\n{ranking}"
+            )
             for position, statement in enumerate(item.slowest[:_EXPLAINED_PER_SCENARIO], start=1):
                 rows = connection.execute(
                     f"EXPLAIN (ANALYZE, BUFFERS) {statement.text}", statement.parameters
                 ).fetchall()
-                plan = "\n".join(row[0] for row in rows)
+                plan = _readable("\n".join(row[0] for row in rows))
                 sections.append(
                     f"### {position}: {statement.milliseconds:.2f} ms\n\n"
-                    f"```sql\n{statement.text}\n```\n\n```text\n{plan}\n```"
+                    f"```sql\n{_readable(statement.text)}\n```\n\n```text\n{plan}\n```"
                 )
     path.write_text("\n\n".join(sections) + "\n", encoding="utf-8")
 
@@ -984,6 +1009,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             chosen = scenarios(database_url)
             with api_server(database_url, user.public_key) as base_url:
                 print_latency(measure(base_url, user.token, chosen, arguments.requests))
+            load = " ".join(f"{value:.1f}" for value in os.getloadavg())
+            print(f"load after timing: {load}", flush=True)
             captured = asyncio.run(capture_statements(database_url, user, chosen))
             print_statements(captured)
             if arguments.explain_out is not None:
