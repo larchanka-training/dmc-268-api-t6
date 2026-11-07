@@ -619,8 +619,10 @@ def _sensitive_file_lines(diff_map: DiffMap, coverage: RunCoverage, limit: int) 
         paths = []
         for file in diff_map.files:
             names = [name for name in (file.new_path, file.old_path) if name]
-            if file.omission_reason is None and any(pattern.search(name) for name in names):
-                paths.append(_inline_code(names[0]))
+            matched = [name for name in names if pattern.search(name)]
+            if file.omission_reason is None and matched:
+                # A rename shows the name that made it a migration, a workflow or a manifest.
+                paths.append(_inline_code(matched[0]))
         if paths:
             shown = 0 if _names_withheld(coverage) else limit
             lines.append(_checklist_line(label, len(paths), sorted(paths), shown))

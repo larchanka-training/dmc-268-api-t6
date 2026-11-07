@@ -254,6 +254,34 @@ def test_executive_checklist_names_changed_migrations_ci_and_manifests() -> None
     ]
 
 
+@pytest.mark.parametrize(
+    ("old_path", "new_path", "line"),
+    [
+        (
+            "alembic/versions/001.py",
+            "README.md",
+            "- Изменённые миграции (1): `alembic/versions/001.py`",
+        ),
+        (
+            ".github/workflows/ci.yml",
+            "docs/ci.yml",
+            "- Изменённые CI-workflows (1): `.github/workflows/ci.yml`",
+        ),
+        (
+            "docs/notes.md",
+            "migrations/0002.sql",
+            "- Изменённые миграции (1): `migrations/0002.sql`",
+        ),
+    ],
+)
+def test_executive_checklist_names_a_renamed_file_by_the_path_that_matched(
+    old_path: str, new_path: str, line: str
+) -> None:
+    renamed = replace(_text_change(new_path), status="renamed", previous_filename=old_path)
+
+    assert _what_to_check(_process_snapshots([_text_change(), renamed])) == [line]
+
+
 def test_executive_checklist_only_counts_sensitive_files_when_the_policy_hides_names() -> None:
     migration = "alembic/versions/1.py"
     result = _process_snapshots(
