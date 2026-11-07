@@ -132,6 +132,18 @@ def test_an_invalid_name_never_reaches_the_query(owner: str, repo: str) -> None:
     assert queries.names == []
 
 
+def test_without_a_database_the_badge_is_the_neutral_one(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A README would show a broken image for a 500; the badge knows no repository instead.
+    monkeypatch.delattr(app.state, "reviews_api_resources", raising=False)
+
+    response = TestClient(app, raise_server_exceptions=False).get(BADGE_URL)
+
+    assert response.status_code == 200
+    assert response.headers["content-type"] == "image/svg+xml"
+    assert response.headers["cache-control"] == CACHE_CONTROL
+    assert "<title>AI review: no data</title>" in response.text
+
+
 def test_the_spec_describes_the_badge_without_bearer(queries: _Queries) -> None:
     spec = yaml.safe_load(SPEC.read_text(encoding="utf-8"))
     operation = spec["paths"][BADGE_PATH]["get"]

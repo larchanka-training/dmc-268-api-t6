@@ -116,7 +116,7 @@ from app.modules.reviews.application.project_github_pull_request import ProjectG
 from app.modules.reviews.application.publish_cancellation_signals import (
     PublishCancellationSignals,
 )
-from app.modules.reviews.application.repository_badge import GetRepositoryBadge
+from app.modules.reviews.application.repository_badge import BadgeRun, GetRepositoryBadge
 from app.modules.reviews.application.rerun_run import RerunUnitOfWork
 from app.modules.reviews.application.run_events import (
     InMemoryRunUpdateHub,
@@ -527,9 +527,20 @@ def get_pull_requests(
     return SqlAlchemyPullRequestQueries(_resources(request).session_factory, scope)
 
 
+class _NoRepositoryBadgeQueries:
+    """Without a database no repository is known: a README gets the neutral badge, not a 500."""
+
+    async def latest_succeeded_run(self, full_name: str) -> BadgeRun | None:
+        return None
+
+
 def get_repository_badge(request: Request) -> GetRepositoryBadge:
     """Anonymous on purpose (#454): the query itself answers for public repositories only."""
-    return GetRepositoryBadge(SqlAlchemyRepositoryBadgeQueries(_resources(request).session_factory))
+    resources = getattr(request.app.state, "reviews_api_resources", None)
+    if resources is None:
+        return GetRepositoryBadge(_NoRepositoryBadgeQueries())
+    session_factory = cast(ReviewsApiResources, resources).session_factory
+    return GetRepositoryBadge(SqlAlchemyRepositoryBadgeQueries(session_factory))
 
 
 def get_run_publisher(request: Request) -> RunMessagePublisher | None:
