@@ -110,6 +110,9 @@ class Uow:
         return None
 
 
+AGENTS_BLOB_OID = "2" * 40
+
+
 @dataclass
 class Source:
     rules: bytes | None = _RULES_TEXT
@@ -132,7 +135,9 @@ class Source:
         if self.rules is not None:
             entries[".review"] = PolicyTreeEntry(PolicyEntryKind.DIRECTORY, "1" * 40, None)
         if self.agents is not None:
-            entries["AGENTS.md"] = PolicyTreeEntry(PolicyEntryKind.FILE, "2" * 40, self.agents_size)
+            entries["AGENTS.md"] = PolicyTreeEntry(
+                PolicyEntryKind.FILE, AGENTS_BLOB_OID, self.agents_size
+            )
         return entries
 
     async def read_blob(self, oid: str) -> bytes:

@@ -67,7 +67,7 @@ from tests.portal_postgres import (
     Env,
     portal_schema,
 )
-from tests.test_prepare_policy_snapshot import Source
+from tests.test_prepare_policy_snapshot import AGENTS_BLOB_OID, Source
 from tests.test_review_context_stage import Parser, Vcs, _checkpoint
 from tests.test_review_context_stage import Repository as SourceTree
 from tests.test_run_publication_settings_postgres import _claim, _insert, _ready
@@ -228,7 +228,7 @@ def test_retry_keeps_the_pinned_defaults_after_a_newer_rule_version_is_activated
                 first = await _prepare(factory, Source(agents=AGENTS)).execute(run_id)
             else:
                 failure = PolicyError(PolicyErrorCode.FETCH_TRANSIENT, "GitHub answered 502")
-                failing = Source(agents=AGENTS, blob_errors={"2" * 40: failure})
+                failing = Source(agents=AGENTS, blob_errors={AGENTS_BLOB_OID: failure})
                 with pytest.raises(PolicyError) as raised:
                     await _prepare(factory, failing).execute(run_id)
                 assert raised.value.code is PolicyErrorCode.FETCH_TRANSIENT
