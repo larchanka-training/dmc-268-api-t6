@@ -10,17 +10,20 @@ from pathlib import Path
 from uuid import UUID
 
 import pytest
-from sqlalchemy import select, text
+from sqlalchemy import select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.bootstrap.seed_prompts import PromptAsset, load_prompt_assets, seed_prompt_versions
+from app.modules.repositories.infrastructure.models import RuleVersion
 from app.modules.reviews.application.conventions import (
     CachedConventions,
     GeneratedConventions,
     conventions_cache_key,
 )
+from app.modules.reviews.application.policy_errors import PolicyError, PolicyErrorCode
 from app.modules.reviews.application.policy_snapshot import (
     ExecutionProfile,
+    PolicySnapshot,
     PromptBindings,
 )
 from app.modules.reviews.application.prepare_policy_snapshot import (
@@ -70,6 +73,9 @@ from tests.test_review_context_stage import Repository as SourceTree
 from tests.test_run_publication_settings_postgres import _claim, _insert, _ready
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+# The checksum portal_schema seeds for RULE_A.
+RULE_A_CHECKSUM = "1" * 64
+AGENTS = b"# Agents\n"
 
 type PromptRow = tuple[str, int, str]
 
@@ -147,6 +153,140 @@ async def _pins(
         run = await session.get(Run, run_id)
         assert run is not None
         return await _row_pins(session, run)
+
+
+async def _activate_newer_defaults(factory: async_sessionmaker[AsyncSession]) -> tuple[UUID, str]:
+    newer = RuleVersion.from_rules(repository_id=REPO_A, version=2, rules=[{"id": "newer"}])
+    async with factory.begin() as session:
+        # uq_rule_versions_active_repository allows one active row: the old one goes first.
+        await session.execute(
+            update(RuleVersion).where(RuleVersion.id == RULE_A).values(is_active=False)
+        )
+        session.add(newer)
+    assert newer.id != RULE_A and newer.checksum != RULE_A_CHECKSUM
+    return newer.id, newer.checksum
+
+
+async def _pinned_rule_version(factory: async_sessionmaker[AsyncSession], run_id: UUID) -> UUID:
+    async with factory() as session:
+        run = await session.get(Run, run_id)
+        assert run is not None
+        return run.rule_version_id
+
+
+def _policy_uow(factory: async_sessionmaker[AsyncSession]) -> SqlAlchemyPolicySnapshotUnitOfWork:
+    # The worker injects its complete profile the same way.
+    return SqlAlchemyPolicySnapshotUnitOfWork(
+        factory, execution_profile=make_complete_execution_profile()
+    )
+
+
+def _prepare(factory: async_sessionmaker[AsyncSession], source: Source) -> PreparePolicySnapshot:
+    return PreparePolicySnapshot(
+        uow_factory=lambda: _policy_uow(factory), source_factory=lambda pins: source
+    )
+
+
+async def _stored_snapshot(
+    factory: async_sessionmaker[AsyncSession], run_id: UUID
+) -> PolicySnapshot | None:
+    async with _policy_uow(factory) as work:
+        return await work.policy.get_snapshot(run_id)
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize(
+    "first_attempt_stores_the_snapshot",
+    [
+        pytest.param(True, id="snapshot-stored"),
+        pytest.param(False, id="failed-before-the-snapshot"),
+    ],
+)
+def test_retry_keeps_the_pinned_defaults_after_a_newer_rule_version_is_activated(
+    env: Env, first_attempt_stores_the_snapshot: bool
+) -> None:
+    async def scenario() -> None:
+        engine = env.engine()
+        factory = async_sessionmaker(engine, expire_on_commit=False)
+        try:
+            await _ready(factory)
+            await _seed(factory, _packaged())
+            async with factory.begin() as session:
+                run_id = await _insert(session)
+            await _claim(factory, run_id, 1)
+            first: PolicySnapshot | None = None
+            if first_attempt_stores_the_snapshot:
+                first = await _prepare(factory, Source(agents=AGENTS)).execute(run_id)
+            else:
+                failure = PolicyError(PolicyErrorCode.FETCH_TRANSIENT, "GitHub answered 502")
+                failing = Source(agents=AGENTS, blob_errors={"2" * 40: failure})
+                with pytest.raises(PolicyError) as raised:
+                    await _prepare(factory, failing).execute(run_id)
+                assert raised.value.code is PolicyErrorCode.FETCH_TRANSIENT
+            # Without this, the failed attempt would silently test the stored snapshot's path.
+            assert await _stored_snapshot(factory, run_id) == first
+
+            await _activate_newer_defaults(factory)
+            async with factory.begin() as session:
+                assert await SqlAlchemyRunLifecycleStore(session).requeue(
+                    run_id, worker_id="worker", available_at=NOW
+                )
+            await _claim(factory, run_id, 2)
+            retried = await _prepare(factory, Source(agents=AGENTS)).execute(run_id)
+
+            assert await _pinned_rule_version(factory, run_id) == RULE_A
+            assert retried.service_defaults_rule_version_id == RULE_A
+            assert retried.defaults_checksum == RULE_A_CHECKSUM
+            if first is not None:
+                assert retried == first
+        finally:
+            await engine.dispose()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.integration
+def test_rerun_pins_a_newer_rule_version_in_its_own_snapshot_and_leaves_the_original(
+    env: Env,
+) -> None:
+    async def scenario() -> None:
+        engine = env.engine()
+        factory = async_sessionmaker(engine, expire_on_commit=False)
+        try:
+            await _ready(factory)
+            await _seed(factory, _packaged())
+            async with factory.begin() as session:
+                original = await _insert(session)
+            await _claim(factory, original, 1)
+            source = Source(agents=AGENTS)
+            original_snapshot = await _prepare(factory, source).execute(original)
+            async with factory.begin() as session:
+                await session.execute(
+                    text("UPDATE runs SET state='succeeded' WHERE id=:run"), {"run": original}
+                )
+
+            newer_id, newer_checksum = await _activate_newer_defaults(factory)
+            async with SqlAlchemyRerunUnitOfWork(factory, allow_unscoped=True) as work:
+                result = await create_rerun(work.runs, original, NOW)
+                assert result.outcome is RerunOutcome.CREATED and result.message is not None
+                await work.commit()
+            rerun = result.message.run_id
+            await _claim(factory, rerun, 1)
+            rerun_snapshot = await _prepare(factory, source).execute(rerun)
+
+            assert await _pinned_rule_version(factory, rerun) == newer_id
+            assert rerun_snapshot.run_id == rerun
+            assert rerun_snapshot.snapshot_id != original_snapshot.snapshot_id
+            assert rerun_snapshot.service_defaults_rule_version_id == newer_id
+            assert rerun_snapshot.defaults_checksum == newer_checksum
+            assert await _pinned_rule_version(factory, original) == RULE_A
+            assert original_snapshot.service_defaults_rule_version_id == RULE_A
+            assert original_snapshot.defaults_checksum == RULE_A_CHECKSUM
+            assert await _stored_snapshot(factory, original) == original_snapshot
+        finally:
+            await engine.dispose()
+
+    asyncio.run(scenario())
 
 
 @pytest.mark.integration
