@@ -73,7 +73,8 @@ from tests.test_review_context_stage import Repository as SourceTree
 from tests.test_run_publication_settings_postgres import _claim, _insert, _ready
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-# The checksum portal_schema seeds for RULE_A.
+# The checksum portal_schema seeds for RULE_A: the last digit of REPO_A's external id
+# (101), repeated.
 RULE_A_CHECKSUM = "1" * 64
 # The newer defaults of REPO_A a test activates; literal, like the seed.
 NEWER_RULE = UUID("00000000-0000-4000-8000-000000000497")
@@ -546,7 +547,7 @@ def test_historical_run_keeps_todays_pins_and_digest(env: Env) -> None:
         repository_id=REPO_A,
         policy_base_sha="b" * 40,
         service_defaults_rule_version_id=RULE_A,
-        defaults_checksum="1" * 64,
+        defaults_checksum=RULE_A_CHECKSUM,
         prompt_bindings=PromptBindings(
             review_system_checksum="c" * 64,
             conventions_checksum="",
