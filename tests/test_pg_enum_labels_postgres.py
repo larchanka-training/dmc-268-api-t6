@@ -25,16 +25,16 @@ def _python_labels() -> dict[str, set[tuple[str, ...]]]:
 
 
 def _postgres_labels(connection: Connection) -> dict[str, tuple[str, ...]]:
-    names = connection.scalars(
+    rows = connection.execute(
         text(
-            "SELECT typname FROM pg_type "
-            "WHERE typtype = 'e' AND typnamespace = current_schema()::regnamespace"
+            "SELECT t.typname, ARRAY("
+            "SELECT e.enumlabel::text FROM pg_enum e "
+            "WHERE e.enumtypid = t.oid ORDER BY e.enumsortorder) "
+            "FROM pg_type t "
+            "WHERE t.typtype = 'e' AND t.typnamespace = current_schema()::regnamespace"
         )
     ).all()
-    return {
-        name: tuple(connection.scalar(text(f"SELECT enum_range(NULL::{name})::text[]")))
-        for name in names
-    }
+    return {name: tuple(labels) for name, labels in rows}
 
 
 @pytest.mark.integration
