@@ -14,18 +14,20 @@ from app.modules.reviews.application.repository_badge import BadgeStatus, GetRep
 BADGE_CACHE_CONTROL = "public, max-age=300"
 
 _LABEL_WIDTH = 62
-_VALUE_STYLES: dict[BadgeStatus, tuple[int, str]] = {
-    BadgeStatus.PASSED: (50, "#1a7f37"),
-    BadgeStatus.ATTENTION: (62, "#9a6700"),
-    BadgeStatus.BLOCKING: (58, "#cf222e"),
-    BadgeStatus.NO_DATA: (56, "#6e7781"),
+# The text READMEs show lives here, not in the enum's values: renaming a value in code must
+# not change the picture in someone's README.
+_VALUE_STYLES: dict[BadgeStatus, tuple[int, str, str]] = {
+    BadgeStatus.PASSED: (50, "#1a7f37", "passed"),
+    BadgeStatus.ATTENTION: (62, "#9a6700", "attention"),
+    BadgeStatus.BLOCKING: (58, "#cf222e", "blocking"),
+    BadgeStatus.NO_DATA: (56, "#6e7781", "no data"),
 }
 
 
 def _svg(status: BadgeStatus) -> bytes:
     """Built only from the constants above: nothing of the request reaches the markup."""
-    width, color = _VALUE_STYLES[status]
-    alternative = f"AI review: {status.value}"
+    width, color, text = _VALUE_STYLES[status]
+    alternative = f"AI review: {text}"
     return (
         f'<svg xmlns="http://www.w3.org/2000/svg" width="{_LABEL_WIDTH + width}" height="20" '
         f'role="img" aria-label="{alternative}"><title>{alternative}</title>'
@@ -34,7 +36,7 @@ def _svg(status: BadgeStatus) -> bytes:
         '<g fill="#ffffff" font-family="Verdana,Geneva,DejaVu Sans,sans-serif" font-size="11" '
         'text-anchor="middle">'
         f'<text x="{_LABEL_WIDTH // 2}" y="14">AI review</text>'
-        f'<text x="{_LABEL_WIDTH + width // 2}" y="14">{status.value}</text>'
+        f'<text x="{_LABEL_WIDTH + width // 2}" y="14">{text}</text>'
         "</g></svg>"
     ).encode()
 
