@@ -35,6 +35,7 @@ from app.modules.integrations.webhooks.application.github_installation_dispatch 
     InstallationDeliveryDispatchStatus,
 )
 from app.modules.integrations.webhooks.application.receive_github_delivery import WebhookReceipt
+from tests.gitlab_webhook_fakes import Acceptor, Authenticator
 
 CONNECTION = UUID("00000000-0000-0000-0000-000000000071")
 SECRET = "synthetic-webhook-secret-canary-0001"
@@ -47,31 +48,6 @@ HEADERS = {
     "X-Gitlab-Event": "Merge Request Hook",
     "webhook-id": "stable-1",
 }
-
-
-class Authenticator:
-    def __init__(
-        self, status: GitLabWebhookAuthStatus = GitLabWebhookAuthStatus.AUTHENTICATED
-    ) -> None:
-        self.status = status
-        self.calls = 0
-
-    async def execute(self, *, connection_id: UUID, secret: str | None) -> GitLabWebhookAuthStatus:
-        self.calls += 1
-        return self.status
-
-
-class Acceptor:
-    def __init__(self) -> None:
-        self.receipts: list[WebhookReceipt] = []
-        self.error: Exception | None = None
-        self.status = InstallationDeliveryDispatchStatus.PENDING
-
-    async def execute(self, delivery: WebhookReceipt) -> InstallationDeliveryDispatchStatus:
-        if self.error is not None:
-            raise self.error
-        self.receipts.append(delivery)
-        return self.status
 
 
 def test_mounted_route_accepts_original_payload_after_acceptance() -> None:

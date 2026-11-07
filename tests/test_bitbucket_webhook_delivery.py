@@ -5,8 +5,6 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import hmac
-from dataclasses import dataclass, field
-from types import SimpleNamespace
 from typing import Any, cast
 from uuid import UUID, uuid4
 
@@ -24,42 +22,11 @@ from app.modules.integrations.bitbucket.infrastructure.credential_cipher import 
 from app.modules.integrations.bitbucket.infrastructure.webhook_auth import (
     SqlAlchemyBitbucketWebhookAuthenticator,
 )
-from app.modules.integrations.webhooks.application.github_installation_dispatch import (
-    InstallationDeliveryDispatchStatus,
-)
+from tests.bitbucket_webhook_fakes import REMOTE, SECRET, WORKSPACE, FakeWebhookResources
 
 INSTALLATION = UUID("00000000-0000-4000-8000-000000000331")
 REPOSITORY = UUID("00000000-0000-4000-8000-000000000332")
-REMOTE = UUID("00000000-0000-4000-8000-000000000333")
-WORKSPACE = UUID("00000000-0000-4000-8000-000000000334")
-SECRET = "a" * 40
 BODY = b'{"repository":{"uuid":"{' + str(REMOTE).encode() + b'}"},"pullrequest":{"id":7}}'
-
-
-@dataclass
-class FakeWebhookResources:
-    secret: str = SECRET
-    authenticated_bodies: list[bytes] = field(default_factory=list)
-    receipts: list[object] = field(default_factory=list)
-
-    async def authenticate(
-        self, *, installation_id: UUID, repository_id: UUID, body: bytes, signature: str | None
-    ) -> object | None:
-        self.authenticated_bodies.append(body)
-        if not verify_bitbucket_signature(body, signature, self.secret):
-            return None
-        return SimpleNamespace(
-            installation_id=installation_id,
-            repository_id=repository_id,
-            workspace_id=WORKSPACE,
-            repository_uuid=REMOTE,
-            binding_generation=1,
-            webhook_generation=1,
-        )
-
-    async def accept(self, receipt: object) -> InstallationDeliveryDispatchStatus:
-        self.receipts.append(receipt)
-        return InstallationDeliveryDispatchStatus.PENDING
 
 
 def _headers(body: bytes, *, signature: str | None = None) -> dict[str, str]:
