@@ -747,8 +747,9 @@ deep: 5 цен единицы).
   повтор отвечает 200 без действий. Порядок событий не гарантирован: обработчик
   читает актуальный объект из Stripe.
 - **Строка `payments` на каждый оплачиваемый объект Stripe.** Новые поля (#371):
-  `source` (`checkout | auto_recharge | subscription`), `provider_invoice_id`
-  (уникальна пара `(provider, provider_invoice_id)`), `workspace_id`. Checkout
+  `source` (`checkout | auto_recharge | subscription`) и `provider_invoice_id`
+  (уникальна пара `(provider, provider_invoice_id)`); `workspace_id` уже есть
+  (`app/modules/billing/infrastructure/models.py`). Checkout
   пишет строку при создании сессии (`provider_checkout_id`, счёт `invoice_creation`
   дописывается в `provider_invoice_id`); авто-пополнение при создании попытки
   (§6.2); счёт подписки при первом событии по нему (`invoice.paid` или
@@ -1046,7 +1047,7 @@ GitHub после принятия приглашения видит workspace �
 | `AGENTS.md` (What NOT to do), `.agents/rules/backend.md` §3 | Этот PR: второе узкое исключение для строк списания (§3.3) |
 | PIPELINE_SPEC §5.3 (таблица причин деградации и `budget_paused`), `handle_review_run.py` | С #371: новая причина деградации deep → fast «баланс только на fast» (§8.1); при `daily_budget_usd > 0` остаток дня по списанному и удержаниям сравнивается с ценой единицы тарифа и ценой движка deep, а не с $0.50 и $3, при claim и на гейте 2 (§8.1) |
 | PIPELINE_SPEC §1 T4/T5 и переход гейта 2, §4.5, §5.3, §6; SD §13 | С #371: `balance_exhausted` на двух гейтах, пороги расхода §8.2 как лимит прогона (после деградации deep → fast лимит = расход до деградации + порог fast, `gateway.py`), цена при деградации, задача досписания §10.6 рядом с реконсилером T13 |
-| SD §11, ERD, `credit_ledger`, `payments` | С #371 и #372: новые виды, `grant_id`, составные уникальные ключи §5.1, `provider_refund_id` и суженный `uq_credit_ledger_payment` (§10.4), таблица `balance_holds` §5.2, поля `payments.source`, `provider_invoice_id`, `workspace_id` и индекс одной попытки авто-пополнения (§6.2, §10.4), таблица `billing_consents` (§9), поле `code_changes.balance_notice_at` (§8.1), тариф и статус подписки workspace (§4.3), `daily_budget_usd` по списаниям |
+| SD §11, ERD, `credit_ledger`, `payments` | С #371 и #372: новые виды, `grant_id`, составные уникальные ключи §5.1, `provider_refund_id` и суженный `uq_credit_ledger_payment` (§10.4), таблица `balance_holds` §5.2, поля `payments.source`, `provider_invoice_id` (`workspace_id` уже есть) и индекс одной попытки авто-пополнения (§6.2, §10.4), таблица `billing_consents` (§9), поле `code_changes.balance_notice_at` (§8.1), тариф и статус подписки workspace (§4.3), `daily_budget_usd` по списаниям. Колонки, которые ADR не перечисляет (`credit_ledger.run_id`, `reversal_of_id`, `hold_run_id`, `offset_of_id`, `repaid_grant_id`, id спора, id Customer, настройки авто-пополнения, квитанции вебхуков Stripe, факты бонуса, `workspace_owner_claims`), задаёт исполнитель задачи в DDL по правилам этого ADR |
 | PIPELINE_SPEC §6 | С #372: коды `plan_repo_limit`, `plan_graph_rag_unavailable` (§4.4) |
 | PIPELINE_SPEC §7 (check-run, только GitHub) | С #371: у `skipped` с `balance_exhausted` в summary ссылка на пополнение (сейчас у `skipped` ссылки нет); комментарий в PR с той же ссылкой не чаще раза в сутки на PR (§8.1) |
 | `AGENTS.md`, `.agents/rules/backend.md` §3, BACKEND_ARCHITECTURE (исключения короткой транзакции) | С #371: имя единственной точки записи строк списания (класс и метод модуля `billing`) вписывается рядом с `SqlAlchemyUsageLedger.record` |
