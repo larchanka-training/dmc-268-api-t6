@@ -194,7 +194,8 @@
 - Больше 80 КБ на 04.11.2026, карты нет, сразу `grep -n '^## '`: [CICD.md](CICD.md),
   [SECRETS.md](SECRETS.md), [RULES_FORMAT_SPEC.md](RULES_FORMAT_SPEC.md),
   [INCREMENTAL_REVIEW_AND_LIMITS_SPEC.md](INCREMENTAL_REVIEW_AND_LIMITS_SPEC.md),
-  [TEST_PLAN.md](TEST_PLAN.md), [RULES_MD_TEST_REPORT.md](test-plan/RULES_MD_TEST_REPORT.md).
+  [TEST_PLAN.md](TEST_PLAN.md), [RULES_MD_TEST_REPORT.md](test-plan/RULES_MD_TEST_REPORT.md),
+  [ADR 0002](adr/0002-billing-monetization.md).
 - Журнал выбора LLM и аудит #178, вынесенные из SD §15:
   [SYSTEM_DESIGN_LLM_LOG.md](SYSTEM_DESIGN_LLM_LOG.md).
 - Каталоги и baselines, вынесенные из TEST_PLAN: [acceptance-107.md](test-plan/acceptance-107.md),
