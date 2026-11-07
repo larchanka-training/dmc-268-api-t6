@@ -21,6 +21,7 @@
 
 | Задача | Что открыть |
 | --- | --- |
+| Как устроен код сейчас: от вебхука до опубликованного ревью | [ARCHITECTURE.md](ARCHITECTURE.md), целевая раскладка — [SD §4](SYSTEM_DESIGN.md#4-c4--уровень-2-контейнеры) |
 | Добавить или изменить `error_code` | [PIPELINE §6](PIPELINE_SPEC.md#6-каталог-error_code), [PIPELINE §5](PIPELINE_SPEC.md#5-сбои-и-деградация) |
 | Новая фаза или `tool` в `run_actions`, правка трейса | [PIPELINE §2](PIPELINE_SPEC.md#2-фазы-внутри-running-и-трейс-run_actions), [SD §6.2](SYSTEM_DESIGN.md#62-прогон-быстрый-путь) |
 | Новое состояние или переход Run | [PIPELINE §1](PIPELINE_SPEC.md#1-состояния-и-переходы), [SD §6.4](SYSTEM_DESIGN.md#64-состояния-run) |
