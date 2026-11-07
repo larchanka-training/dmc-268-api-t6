@@ -1,7 +1,7 @@
 """Persist final review analysis and publication plan before T8 (#435).
 
-Revision ID: 20261103_0054
-Revises: 20261103_0053
+Revision ID: 20261107_0060
+Revises: 20261107_0059
 """
 
 from __future__ import annotations
@@ -11,8 +11,8 @@ from sqlalchemy.dialects import postgresql
 
 from alembic import op
 
-revision = "20261103_0054"
-down_revision = "20261103_0053"
+revision = "20261107_0060"
+down_revision = "20261107_0059"
 branch_labels = None
 depends_on = None
 
