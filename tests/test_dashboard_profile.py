@@ -265,3 +265,19 @@ def test_the_list_runs_one_statement_at_any_page_size(tiny_run: TinyRun) -> None
 @pytest.mark.integration
 def test_the_share_of_saved_results_is_printed(tiny_run: TinyRun) -> None:
     assert 0 < tiny_run.printed("with_saved_result") <= tiny_run.printed("window_succeeded")
+
+
+@pytest.mark.integration
+def test_the_plans_stay_readable_and_list_every_statement(tiny_run: TinyRun) -> None:
+    """A bound list of run ids runs to tens of kilobytes per line; the report has to hold it."""
+    plans = tiny_run.explain.read_text()
+    assert max(len(line) for line in plans.splitlines()) <= 500
+    assert "chars cut]" in plans
+    section = plans.split("## summary 30d\n", 1)[1].split("\n## ", 1)[0]
+    assert len(re.findall(r"^\| \d+ \| \d+\.\d{2} \|", section, re.MULTILINE)) >= 5
+
+
+@pytest.mark.integration
+def test_the_machine_load_is_printed_on_both_sides_of_the_timing(tiny_run: TinyRun) -> None:
+    assert re.search(r"^environment: .* jit=\w+ .*load=[\d. ]+$", tiny_run.stdout, re.MULTILINE)
+    assert re.search(r"^load after timing: [\d. ]+$", tiny_run.stdout, re.MULTILINE)
