@@ -35,7 +35,6 @@ from app.modules.reviews.application.get_run_diff import (
     DiffSnapshot,
     review_files_from_snapshots,
 )
-from app.modules.reviews.application.policy_snapshot import PINNED_PROMPT_CHECKSUMS
 from app.modules.reviews.application.prepare_policy_snapshot import PreparePolicySnapshot
 from app.modules.reviews.application.process_run import (
     ReviewRunProcessor,
@@ -56,7 +55,12 @@ from app.modules.reviews.application.review_context_stage import (
     EstimatedTokenCounter,
     ReviewContextStage,
 )
+from app.modules.reviews.application.review_path import ReviewBinding
 from app.modules.reviews.application.vcs_diff import PullRequestLocator, VcsFile, VcsPullRequest
+from tests.policy_snapshot_fakes import (
+    make_complete_execution_profile,
+    make_complete_prompt_bindings,
+)
 from tests.test_prepare_policy_snapshot import Store, Uow
 from tests.test_review_context_stage import (
     _BASE,
@@ -72,7 +76,6 @@ from tests.test_review_context_stage import (
     Vcs,
     _checkpoint,
 )
-from tests.test_review_path import _PINNED, _binding, _store
 from tests.trigger_uow import processing_uow
 
 _CODE_CHANGE = UUID(int=5)
@@ -107,6 +110,13 @@ _ALIAS_CONTENT = {
     ),
     _ALIAS: f"def alias_helper({_ALIAS_TEXT}):\n    return {_ALIAS_TEXT}\n",
 }
+# A copy keeps its source at the head, a rename does not; only the source holds this token.
+_COPY_SOURCE_BLOB = "9" * 40
+_COPY_SOURCE_TEXT = "copy_source_secret"
+# The stored prompts the run pinned: the review binding and the pinned conventions prompt
+# name the same rows as the pins.
+_REVIEW_PROMPT = UUID(int=41)
+_CONVENTIONS_PROMPT = UUID(int=43)
 
 
 @dataclass
@@ -328,8 +338,10 @@ class PinnedRuns(Runs):
         return RunConventionsInput(
             _REPOSITORY,
             ActiveConventionsPrompt(UUID(int=7), "conventions"),
-            review_binding=_binding("v4"),
-            pinned_conventions_prompt=_PINNED,
+            review_binding=ReviewBinding(_REVIEW_PROMPT, "review.system", "v4", "github"),
+            pinned_conventions_prompt=ActiveConventionsPrompt(
+                _CONVENTIONS_PROMPT, "pinned conventions"
+            ),
         )
 
 
@@ -337,15 +349,17 @@ class PinnedRuns(Runs):
 class AliasRevision:
     """The revision the context build reads: every blob it asks for is recorded."""
 
+    content: Mapping[str, str]
+    blob_shas: Mapping[str, str]
     reads: list[str] = field(default_factory=list)
 
     async def tree(self, revision: str) -> RevisionTree:
-        return RevisionTree(revision, {"src/app.py": _APP_BLOB, _ALIAS: _ALIAS_BLOB}, complete=True)
+        return RevisionTree(revision, self.blob_shas, complete=True)
 
     async def read_blob(self, blob_sha: str) -> bytes:
         self.reads.append(blob_sha)
-        path = _ALIAS if blob_sha == _ALIAS_BLOB else "src/app.py"
-        return _ALIAS_CONTENT[path].encode()
+        [path] = [path for path, sha in self.blob_shas.items() if sha == blob_sha]
+        return self.content[path].encode()
 
 
 @dataclass
@@ -435,14 +449,17 @@ class AliasRun:
 
 
 def _v4_store() -> Store:
-    """The v4 pins, with the checksum of the verifier prompt the pass really reads."""
-    store = _store("v4")
-    assert store.pins is not None
+    """Pins of the v4 review prompt, with the checksums of the prompts the pipeline reads."""
+    pins = Store().pins
+    assert pins is not None
     bindings = replace(
-        store.pins.prompt_bindings,
-        verifier_checksum=PINNED_PROMPT_CHECKSUMS["review.verifier:v2"],
+        make_complete_prompt_bindings(
+            review_system_id=_REVIEW_PROMPT, conventions_id=_CONVENTIONS_PROMPT
+        ),
+        review_system_version="v4",
     )
-    return replace(store, pins=replace(store.pins, prompt_bindings=bindings))
+    profile = make_complete_execution_profile()
+    return Store(pins=replace(pins, prompt_bindings=bindings, execution_profile=profile))
 
 
 def _alias_run(status: FileStatus, old_name: str) -> AliasRun:
@@ -451,10 +468,15 @@ def _alias_run(status: FileStatus, old_name: str) -> AliasRun:
         VcsFile("src/app.py", "modified", _APP_BLOB, None, 1, 0, 1, _IMPORTER_PATCH),
         VcsFile(_ALIAS, status, _ALIAS_BLOB, old_name, 1, 1, 2, _ALIAS_PATCH),
     )
+    head = dict(_ALIAS_CONTENT)
+    blob_shas = {"src/app.py": _APP_BLOB, _ALIAS: _ALIAS_BLOB}
+    if status == "copied":
+        head[old_name] = f"{_COPY_SOURCE_TEXT} = 1\n"
+        blob_shas[old_name] = _COPY_SOURCE_BLOB
     runs = PinnedRuns()
     github = GitHub(files_changed=2, files=files)
     store = _v4_store()
-    revision = AliasRevision()
+    revision = AliasRevision(head, blob_shas)
     parser = RecordingParser()
     stage = ReviewContextStage(
         checkpoint=_checkpoint,
@@ -474,7 +496,7 @@ def _alias_run(status: FileStatus, old_name: str) -> AliasRun:
         runs,
         None,
         conventions=GenerateRepoConventions(
-            PolicyFilteredConventionsSource(Source(_ALIAS_CONTENT), stage.excluded),
+            PolicyFilteredConventionsSource(Source(head), stage.excluded),
             conventions_model,
             ConventionsUow,
         ),
@@ -506,9 +528,14 @@ def _alias_run(status: FileStatus, old_name: str) -> AliasRun:
     )
 
 
-@pytest.mark.parametrize("status", ["renamed", "copied"])
+# ``kept``: the head files besides the change; a copy keeps its source, a rename does not.
+@pytest.mark.parametrize(
+    ("status", "kept"),
+    [("renamed", ()), ("copied", ("src/old_name.py",))],
+    ids=["renamed", "copied"],
+)
 def test_new_alias_of_a_change_with_a_rejected_old_name_reaches_no_model_input(
-    status: FileStatus,
+    status: FileStatus, kept: tuple[str, ...]
 ) -> None:
     withheld = _alias_run(status, _REJECTED_OLD_NAME)
     shown = _alias_run(status, "src/old_name.py")
@@ -532,11 +559,12 @@ def test_new_alias_of_a_change_with_a_rejected_old_name_reaches_no_model_input(
     assert shown.parsed_text(_ALIAS_TEXT)
 
     # Conventions: neither listed nor loaded, and an entry cached while it was allowed is
-    # not reused for the same masks.
+    # not reused for the same masks. The source a copy keeps under the rejected name is not
+    # listed either; under an allowed name it stays a file of its own.
     assert withheld.conventions.repo_tree == ("src/app.py",)
-    assert shown.conventions.repo_tree == ("src/app.py", _ALIAS)
+    assert shown.conventions.repo_tree == ("src/app.py", _ALIAS, *kept)
     assert [file.path for file in withheld.conventions.repo_files] == ["src/app.py"]
-    assert [file.path for file in shown.conventions.repo_files] == [_ALIAS, "src/app.py"]
+    assert [file.path for file in shown.conventions.repo_files] == [_ALIAS, "src/app.py", *kept]
     assert withheld.conventions.changed_files == ("src/app.py",)
     assert shown.conventions.changed_files == ("src/app.py", _ALIAS)
     assert withheld.stage.policy_key != shown.stage.policy_key
@@ -546,16 +574,17 @@ def test_new_alias_of_a_change_with_a_rejected_old_name_reaches_no_model_input(
     assert [file.path for file in shown.context.changed_files] == [_ALIAS, "src/app.py"]
     assert withheld.context.omitted_files == ()
 
-    # Verifier: called in both runs; the candidate on the alias reaches it only when shown.
+    # Verifier: called once in both runs; what reaches it is checked with the prompts below.
     assert len(withheld.verifier_prompts) == len(shown.verifier_prompts) == 1
 
-    # The same three prompts carry the alias when its old name is allowed, so the absence
-    # here is not an empty check.
+    # The same three prompts carry the alias when its old name is allowed, and the conventions
+    # prompt carries the source a copy keeps, so the absence here is not an empty check.
     assert len(withheld.prompts) == len(shown.prompts) == 3
     for prompt in withheld.prompts:
         assert "src/app.py" in prompt
-        for token in (_ALIAS, _ALIAS_TEXT, "old_q9", "name.py"):
+        for token in (_ALIAS, _ALIAS_TEXT, "old_q9", "name.py", _COPY_SOURCE_TEXT):
             assert token not in prompt
     for prompt in shown.prompts:
         assert _ALIAS in prompt
         assert _ALIAS_TEXT in prompt
+    assert sum(_COPY_SOURCE_TEXT in prompt for prompt in shown.prompts) == len(kept)
