@@ -1,19 +1,13 @@
-"""PostgreSQL evidence for the graph indexer (#142).
+"""PostgreSQL AC6 and failure scenarios for the graph indexer (#142).
 
-A fake VCS serves a tarball per commit; the archive reader, the parser, the resolver and
-the store are the real ones. AC6: an incremental build of repository A equals a fresh
-full build of repository B at the same commit, compared as the normalized sets of files,
-symbols, edges and import records. Each scenario also proves that A really built
-incrementally and that the sets changed.
-
-Opt-in: TEST_DATABASE_URL must target a test database whose user can create schemas.
-Each test migrates its own schema to head and drops it afterwards.
+The shared harness serves fake VCS trees to the real archive reader, parser, resolver
+and store. Incremental builds are compared with fresh full builds at the same commit.
 """
 
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from uuid import uuid4
 
@@ -45,85 +39,30 @@ from app.modules.reviews.application.ast_symbols import (
     SourceParser,
 )
 from tests.code_index_indexer_support import (
-    _ADMISSION as _ADMISSION,
-)
-from tests.code_index_indexer_support import (
-    _KIB as _KIB,
-)
-from tests.code_index_indexer_support import (
-    _LIMITS as _LIMITS,
-)
-from tests.code_index_indexer_support import (
-    _MIB as _MIB,
-)
-from tests.code_index_indexer_support import (
-    _SETTINGS as _SETTINGS,
-)
-from tests.code_index_indexer_support import (
-    _USER as _USER,
-)
-from tests.code_index_indexer_support import (
-    _VERSIONS as _VERSIONS,
-)
-from tests.code_index_indexer_support import (
-    EXTERNAL as EXTERNAL,
-)
-from tests.code_index_indexer_support import (
-    RESOLVED as RESOLVED,
-)
-from tests.code_index_indexer_support import (
-    Branch as Branch,
-)
-from tests.code_index_indexer_support import (
-    Indexer as Indexer,
-)
-from tests.code_index_indexer_support import (
-    Link as Link,
-)
-from tests.code_index_indexer_support import (
-    Snapshot as Snapshot,
-)
-from tests.code_index_indexer_support import (
-    Tree as Tree,
-)
-from tests.code_index_indexer_support import (
-    Vcs as Vcs,
-)
-from tests.code_index_indexer_support import (
-    Wakeups as Wakeups,
-)
-from tests.code_index_indexer_support import (
-    _changes as _changes,
-)
-from tests.code_index_indexer_support import (
-    _Database as _Database,
-)
-from tests.code_index_indexer_support import (
-    _imports as _imports,
-)
-from tests.code_index_indexer_support import (
-    _raw_rows as _raw_rows,
-)
-from tests.code_index_indexer_support import (
-    _record as _record,
-)
-from tests.code_index_indexer_support import (
-    _repository as _repository,
-)
-from tests.code_index_indexer_support import (
-    _run as _run,
-)
-from tests.code_index_indexer_support import (
-    _sha as _sha,
-)
-from tests.code_index_indexer_support import (
-    _tarball as _tarball,
-)
-from tests.code_index_indexer_support import (
-    _uses as _uses,
+    _ADMISSION,
+    _KIB,
+    _LIMITS,
+    _MIB,
+    _PACKAGE,
+    _PACKAGE_V2,
+    _SETTINGS,
+    _USER,
+    EXTERNAL,
+    RESOLVED,
+    Indexer,
+    Link,
+    Snapshot,
+    Tree,
+    _ActOnParse,
+    _Database,
+    _imports,
+    _raw_rows,
+    _record,
+    _run,
+    _uses,
 )
 
-pytest_plugins = ("tests.code_index_indexer_support",)
+pytest_plugins = ("tests.code_index_postgres", "tests.code_index_indexer_support")
 
 
 @pytest.mark.integration
@@ -671,19 +610,6 @@ def test_a_job_released_without_a_publication_records_its_metrics(database: _Dat
     _run(database, scenario)
 
 
-_PACKAGE: Tree = {
-    "pkg/__init__.py": b"def one():\n    return 1\n",
-    "pkg/a.py": b"from pkg import one\n\n\ndef a1():\n    return one()\n",
-    "pkg/b.py": b"from pkg.a import a1\n\n\nclass B:\n    def m(self):\n        return a1()\n",
-    "top.py": b"import pkg.a\nfrom pkg import one\n\n\ndef t():\n    return one()\n",
-}
-# Rule I: the changed `__init__.py` re-extracts `pkg/a.py` and `top.py`.
-_PACKAGE_V2: Tree = {
-    **_PACKAGE,
-    "pkg/__init__.py": b"def one():\n    return 1\n\n\ndef extra():\n    return 3\n",
-}
-
-
 @dataclass
 class _CrashOnParse:
     """The parser, raising at its `call`-th file; 0 never raises."""
@@ -802,27 +728,6 @@ def test_a_job_that_resumes_after_its_lease_was_taken_over_writes_nothing(
         assert (await indexer.state(database.a)).indexed_commit_sha == head
 
     _run(database, scenario, parser=gated)
-
-
-@dataclass
-class _ActOnParse:
-    """The parser, running `act` just before its `call`-th file; 0 never runs it."""
-
-    inner: SourceParser
-    act: Callable[[], Awaitable[None]]
-    call: int
-    calls: int = 0
-
-    async def parse_many(
-        self, requests: tuple[ParseRequest, ...]
-    ) -> dict[str, AstFacts | AstFailureReason]:
-        self.calls += 1
-        if self.calls == self.call:
-            await self.act()
-        return await self.inner.parse_many(requests)
-
-    async def aclose(self) -> None:
-        await self.inner.aclose()
 
 
 @pytest.mark.integration

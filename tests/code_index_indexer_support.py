@@ -1,13 +1,6 @@
-"""PostgreSQL evidence for the graph indexer (#142).
+"""Shared fake VCS, indexer harness and repository fixture for PostgreSQL index tests.
 
-A fake VCS serves a tarball per commit; the archive reader, the parser, the resolver and
-the store are the real ones. AC6: an incremental build of repository A equals a fresh
-full build of repository B at the same commit, compared as the normalized sets of files,
-symbols, edges and import records. Each scenario also proves that A really built
-incrementally and that the sets changed.
-
-Opt-in: TEST_DATABASE_URL must target a test database whose user can create schemas.
-Each test migrates its own schema to head and drops it afterwards.
+The schema-migrating ``code_index_database`` fixture lives in ``tests.code_index_postgres``.
 """
 
 from __future__ import annotations
@@ -22,13 +15,10 @@ from dataclasses import dataclass, field, replace
 from uuid import UUID, uuid4
 
 import pytest
-from alembic.config import Config
-from sqlalchemy import Connection, create_engine, text
+from sqlalchemy import Connection, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import NullPool
-from sqlalchemy.schema import CreateSchema, DropSchema
 
-from alembic import command
 from app.modules.code_index.application.build_index import (
     BuildMode,
     BuildOutcome,
@@ -66,7 +56,10 @@ from app.modules.code_index.infrastructure.repository_reader import (
 from app.modules.code_index.infrastructure.tar_archive import TarArchiveReader
 from app.modules.reviews.application.ast_resolution import ImportResolution
 from app.modules.reviews.application.ast_symbols import (
+    AstFacts,
+    AstFailureReason,
     AstLanguage,
+    ParseRequest,
     SourceParser,
 )
 from app.modules.reviews.application.policy_documents import missing_document, normalize_document
@@ -89,32 +82,6 @@ _VERSIONS = IndexVersions(
 )
 _ADMISSION = IndexAdmission(2, 1, 512 * _MIB, 2_048 * _MIB)
 _SETTINGS = IndexBuildSettings(admission=_ADMISSION)
-
-
-@pytest.fixture
-def code_index_database() -> Iterator[Connection]:
-    database_url = os.environ.get("TEST_DATABASE_URL")
-    if database_url is None:
-        pytest.skip("set TEST_DATABASE_URL to run PostgreSQL integration tests")
-    schema = f"test_code_indexer_{uuid4().hex}"
-    engine = create_engine(database_url)
-    try:
-        with engine.connect() as connection:
-            connection.execute(CreateSchema(schema))
-            connection.execute(text(f'SET search_path TO "{schema}"'))
-            connection.commit()
-            try:
-                config = Config("alembic.ini")
-                config.attributes["connection"] = connection
-                command.upgrade(config, "head")
-                yield connection
-            finally:
-                connection.rollback()
-                connection.execute(text("SET search_path TO public"))
-                connection.execute(DropSchema(schema, cascade=True))
-                connection.commit()
-    finally:
-        engine.dispose()
 
 
 def _repository(connection: Connection, installation_external_id: int, full_name: str) -> UUID:
@@ -513,3 +480,37 @@ async def _raw_rows(database: _Database, repository_id: UUID) -> tuple[int, ...]
                 )
             )
         return tuple(counts)
+
+
+_PACKAGE: Tree = {
+    "pkg/__init__.py": b"def one():\n    return 1\n",
+    "pkg/a.py": b"from pkg import one\n\n\ndef a1():\n    return one()\n",
+    "pkg/b.py": b"from pkg.a import a1\n\n\nclass B:\n    def m(self):\n        return a1()\n",
+    "top.py": b"import pkg.a\nfrom pkg import one\n\n\ndef t():\n    return one()\n",
+}
+# Rule I: the changed `__init__.py` re-extracts `pkg/a.py` and `top.py`.
+_PACKAGE_V2: Tree = {
+    **_PACKAGE,
+    "pkg/__init__.py": b"def one():\n    return 1\n\n\ndef extra():\n    return 3\n",
+}
+
+
+@dataclass
+class _ActOnParse:
+    """The parser, running `act` just before its `call`-th file; 0 never runs it."""
+
+    inner: SourceParser
+    act: Callable[[], Awaitable[None]]
+    call: int
+    calls: int = 0
+
+    async def parse_many(
+        self, requests: tuple[ParseRequest, ...]
+    ) -> dict[str, AstFacts | AstFailureReason]:
+        self.calls += 1
+        if self.calls == self.call:
+            await self.act()
+        return await self.inner.parse_many(requests)
+
+    async def aclose(self) -> None:
+        await self.inner.aclose()
