@@ -3,9 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-import os
 import time
-from collections.abc import Iterator
 from uuid import UUID
 
 import httpx
@@ -43,7 +41,9 @@ from app.modules.reviews.infrastructure.run_lifecycle_store import (
     SqlAlchemyRunLifecycleUnitOfWork,
     SqlAlchemyRunTraceUnitOfWork,
 )
-from tests.portal_postgres import HEAD, INSTALL_A, RUN_ATTEMPTED, Env, portal_schema
+from tests.portal_postgres import HEAD, INSTALL_A, RUN_ATTEMPTED, Env
+
+pytest_plugins = ("tests.portal_postgres",)
 
 _LINK = (
     "https://github.com/octo/a/blob/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
@@ -54,17 +54,8 @@ _PLAIN = UUID(int=46502)
 _SUMMARY = ReviewSummary(problem="A bug.", done_well="Small change.", effort="small")
 
 
-@pytest.fixture
-def env() -> Iterator[Env]:
-    database_url = os.environ.get("TEST_DATABASE_URL")
-    if database_url is None:
-        pytest.skip("set TEST_DATABASE_URL to run PostgreSQL integration tests")
-    with portal_schema(database_url, None) as schema:
-        yield schema
-
-
 @pytest.mark.integration
-def test_the_hash_of_the_store_matches_the_hash_of_the_stored_rows(env: Env) -> None:
+def test_the_hash_of_the_store_matches_the_hash_of_the_stored_rows(portal_env: Env) -> None:
     finding = ReviewFinding(
         path="a.py",
         line=3,
@@ -90,7 +81,7 @@ def test_the_hash_of_the_store_matches_the_hash_of_the_stored_rows(env: Env) -> 
     )
 
     async def exercise() -> None:
-        engine = env.engine()
+        engine = portal_env.engine()
         factory = async_sessionmaker(engine, expire_on_commit=False)
         try:
             async with SqlAlchemyReviewOutputUnitOfWork(factory) as uow:
@@ -115,7 +106,9 @@ def test_the_hash_of_the_store_matches_the_hash_of_the_stored_rows(env: Env) -> 
 
 
 @pytest.mark.integration
-def test_a_redelivered_review_keeps_its_findings_inline_with_their_comments(env: Env) -> None:
+def test_a_redelivered_review_keeps_its_findings_inline_with_their_comments(
+    portal_env: Env,
+) -> None:
     """T17: a review found by its marker recognizes both a comment with a link and one without."""
     comments = [
         {
@@ -128,7 +121,7 @@ def test_a_redelivered_review_keeps_its_findings_inline_with_their_comments(env:
     ]
 
     async def exercise() -> None:
-        engine = env.engine()
+        engine = portal_env.engine()
         factory = async_sessionmaker(engine, expire_on_commit=False)
         marker = ""
 
@@ -215,10 +208,10 @@ def test_a_redelivered_review_keeps_its_findings_inline_with_their_comments(env:
     ("provider", "expected"), [("github", "octo/a"), ("gitlab", None), ("bitbucket", None)]
 )
 def test_only_a_github_repository_is_named_for_the_link(
-    env: Env, provider: str, expected: str | None
+    portal_env: Env, provider: str, expected: str | None
 ) -> None:
     async def exercise() -> None:
-        engine = env.engine()
+        engine = portal_env.engine()
         factory = async_sessionmaker(engine, expire_on_commit=False)
         try:
             async with factory.begin() as session:
