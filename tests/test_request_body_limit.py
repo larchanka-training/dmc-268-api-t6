@@ -34,7 +34,7 @@ from app.main import app, get_github_webhook_secret
 from app.modules.auth.application.scope import AuthScope
 from tests.bitbucket_webhook_fakes import FakeWebhookResources
 from tests.gitlab_webhook_fakes import Acceptor, Authenticator
-from tests.openapi_contract import _spec
+from tests.openapi_contract import _spec, _validator_for
 
 REPOSITORY_ID = UUID("00000000-0000-4000-8000-0000000000a2")
 WORKSPACE = UUID("00000000-0000-4000-8000-000000000333")
@@ -339,18 +339,20 @@ def test_webhooks_keep_their_own_limits(
     assert (answer.status, answer.reads) == (status, reads)
 
 
-def _routes_with_a_parsed_body() -> set[tuple[str, str]]:
-    return {
+def _routes_with_a_parsed_body() -> list[tuple[str, str]]:
+    return sorted(
         (method, str(route.path_format))
         for route in iter_route_contexts(app.routes)
         if isinstance(route.original_route, APIRoute) and route.body_field is not None
         for method in route.methods or ()
-    }
+    )
 
 
-def test_every_route_with_a_parsed_body_answers_and_declares_413() -> None:
-    routes = _routes_with_a_parsed_body()
-    assert routes >= {
+ROUTES_WITH_A_PARSED_BODY = _routes_with_a_parsed_body()
+
+
+def test_the_route_walk_finds_the_five_routes_with_a_body() -> None:
+    assert set(ROUTES_WITH_A_PARSED_BODY) >= {
         ("PATCH", "/api/repos/{repo_id}"),
         ("POST", "/api/auth/github/callback"),
         ("POST", "/api/workspaces/{workspace_id}/bitbucket/discovery"),
@@ -361,9 +363,26 @@ def test_every_route_with_a_parsed_body_answers_and_declares_413() -> None:
         ),
     }
 
-    for method, path in sorted(routes):
-        url = re.sub(r"\{[^}]+\}", str(REPOSITORY_ID), path)
-        answer = _call(method, url, [b"x" * 65537, b"x"])
-        assert (answer.status, answer.reads) == (413, 1), (method, path)
-        assert "413" in app.openapi()["paths"][path][method.lower()]["responses"], (method, path)
-        assert "413" in _spec()["paths"][path][method.lower()]["responses"], (method, path)
+
+@pytest.mark.parametrize(("method", "path"), ROUTES_WITH_A_PARSED_BODY)
+def test_every_route_with_a_parsed_body_answers_the_contract_413(method: str, path: str) -> None:
+    url = re.sub(r"\{[^}]+\}", str(REPOSITORY_ID), path)
+
+    answer = _call(method, url, [b"x" * 65537, b"x"])
+
+    assert (answer.status, answer.reads) == (413, 1)
+    _validator_for(method.lower(), path, "413").validate(answer.json())
+
+
+@pytest.mark.parametrize(("method", "path"), ROUTES_WITH_A_PARSED_BODY)
+def test_every_route_with_a_parsed_body_declares_413_in_the_runtime_openapi(
+    method: str, path: str
+) -> None:
+    assert "413" in app.openapi()["paths"][path][method.lower()]["responses"]
+
+
+@pytest.mark.parametrize(("method", "path"), ROUTES_WITH_A_PARSED_BODY)
+def test_every_route_with_a_parsed_body_declares_413_in_the_contract(
+    method: str, path: str
+) -> None:
+    assert "413" in _spec()["paths"][path][method.lower()]["responses"]
